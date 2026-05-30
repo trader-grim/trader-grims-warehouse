@@ -1,0 +1,16 @@
+[Unit]
+Description=TGW Queue Worker Launcher
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/TGW/.venvironments/tgw/bin/tgw-queue-launcher
+Restart=on-failure
+RestartSec=5
+User=tgw
+Group=tgw
+WorkingDirectory=/opt/TGW/runtime/state/queues
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

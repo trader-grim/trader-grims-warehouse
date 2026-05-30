@@ -1,0 +1,15 @@
+[Unit]
+Description=Trader Grims Backup Watcher
+After=network.target
+
+[Service]
+User=tgw
+Group=tgw
+Type=simple
+WorkingDirectory=/opt/TGW
+ExecStart=/opt/TGW/.venvironments/tgw/bin/trader-grims-backup /opt/TGW/config/trader-grims-backup.yaml --log-dir /opt/TGW/var/log/trader_grims_backup
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

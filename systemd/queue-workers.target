@@ -1,0 +1,4 @@
+[Unit]
+Description=TGW Queue Workers
+Wants=queue-launcher.service
+After=queue-launcher.service

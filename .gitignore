@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.venvironments/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# TGW runtime — never commit live data or secrets
+/config/secrets/
+/config/local/
+*.log
+tgwcatalog.json
+search-catalog.json
+searchcatalog.csv
+tgwcatalog.csv
+
+# Large catalog files
+catalog.migrated.json
+catalog.migrated.json.bak

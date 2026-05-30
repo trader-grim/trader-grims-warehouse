@@ -1,0 +1,1 @@
+"""TGW eBay API integration."""

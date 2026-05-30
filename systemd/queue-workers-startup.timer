@@ -1,0 +1,9 @@
+[Unit]
+Description=TGW Queue Worker Startup Timer
+
+[Timer]
+OnBootSec=10
+Unit=queue-workers.target
+
+[Install]
+WantedBy=timers.target
