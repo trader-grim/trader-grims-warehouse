@@ -78,7 +78,7 @@ def scrub_itemdata(data: dict[str, Any], rules: ScrubRules) -> tuple[dict[str, A
 
 
 def derive_item_path(itemdata_root: Path, sku: str) -> Path:
-    return Path(itemdata_root) / f"{sku}.json"
+    return Path(itemdata_root) / sku / f"{sku}.json"
 
 
 def process_queue_job(job_file: Path, rules: ScrubRules, default_root: Path) -> bool:

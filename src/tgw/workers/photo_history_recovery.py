@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import shutil
 from pathlib import Path
@@ -94,7 +95,18 @@ def ensure_copy(src: Path, dst: Path, overwrite: bool = False) -> str:
 
 
 def process_item(itemdata_path: Path, cfg: dict, index: dict[str, list[Path]]) -> list[dict]:
-    itemdata = json.loads(itemdata_path.read_text(encoding='utf-8'))
+    raw = itemdata_path.read_text(encoding='utf-8').strip()
+    if not raw:
+        logging.warning('Skipping empty item file: %s', itemdata_path)
+        return []
+    try:
+        itemdata = json.loads(raw)
+    except json.JSONDecodeError as e:
+        logging.warning('Skipping malformed item file %s: %s', itemdata_path, e)
+        return []
+    if not isinstance(itemdata, dict):
+        logging.warning('Skipping non-dict item file %s: got %s', itemdata_path, type(itemdata).__name__)
+        return []
     refs = extract_photo_refs(itemdata, cfg['photo_reference_keys'])
     item_folder = itemdata_path.parent
     results: list[dict] = []
@@ -121,10 +133,12 @@ def write_report(rows: list[dict], report_path: Path) -> None:
 
 
 def iter_itemdata_files(root: Path) -> Iterable[Path]:
-    for dirpath, _, filenames in os.walk(root):
-        for fn in filenames:
-            if fn.endswith('.json'):
-                yield Path(dirpath) / fn
+    """Yield only canonical SKU JSON files: ItemData/SKU/SKU.json"""
+    for child in sorted(root.iterdir()):
+        if child.is_dir():
+            candidate = child / f'{child.name}.json'
+            if candidate.exists():
+                yield candidate
 
 
 def main() -> int:

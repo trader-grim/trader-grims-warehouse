@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 
 from .config import DEFAULT_CONFIG, load_config
 from .resolver import resolve, iter_all_skus, sku_date_str
+from .health import check_all
 from .items import (
     get_item, update_item, update_items, update_where,
     titleupdate, locationupdate, verifiedupdate, catlocmvall,
@@ -183,6 +184,12 @@ def _build_parser() -> argparse.ArgumentParser:
                        help='build search catalog only if missing')
     p.add_argument('--check-only', action='store_true')
 
+    p = sub.add_parser('health', help='run platform health checks')
+    p.add_argument('--no-ollama', action='store_true',
+                   help='skip Ollama check')
+    p.add_argument('--no-ebay', action='store_true',
+                   help='skip eBay token check')
+
     return parser
 
 
@@ -272,6 +279,11 @@ def main() -> int:
             else:
                 result = build_search_catalog(cfg, source='auto',
                                               check_only=check)
+        elif args.op == 'health':
+            result = check_all(cfg,
+                               include_ollama=not args.no_ollama,
+                               include_ebay=not args.no_ebay)
+
         else:
             result = {'ok': False, 'error': f'unknown op: {args.op!r}'}
 

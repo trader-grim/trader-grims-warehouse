@@ -45,6 +45,8 @@ def api(*args):
         if isinstance(first, dict):
             if first.get('ok') is False:
                 raise RuntimeError(first.get('error') or p.stderr.strip() or 'api failed')
+            if 'items' in first and isinstance(first['items'], list):
+                return first['items']
             if 'rows' in first and isinstance(first['rows'], list):
                 return first['rows']
             return first
@@ -426,6 +428,10 @@ class Browser(App):
             except Exception:
                 pass
 
-if __name__ == '__main__':
+def main():
     startup_search = ' '.join(sys.argv[1:]).strip()
     Browser(startup_search=startup_search).run()
+
+
+if __name__ == '__main__':
+    main()
