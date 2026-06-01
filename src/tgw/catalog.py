@@ -26,7 +26,6 @@ from typing import Any, Dict, List, Optional, Set
 from .config import load_json_strict
 from .resolver import find_item_jsons, load_item_doc
 
-
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------

@@ -6,8 +6,7 @@ import logging
 import tempfile
 from pathlib import Path
 
-from tgw.logging import setup_logging, log_event, get_logger
-
+from tgw.logging import get_logger, log_event, setup_logging
 
 def test_setup_logging_returns_logger():
     with tempfile.TemporaryDirectory() as d:

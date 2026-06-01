@@ -6,9 +6,9 @@ import json
 import tempfile
 from pathlib import Path
 
-import pytest
+# remove: import pytest   (F401)
 
-from tgw.resolver import resolve, iter_all_skus, sku_date_str
+from tgw.resolver import iter_all_skus, resolve, sku_date_str
 
 
 # ---------------------------------------------------------------------------

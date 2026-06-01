@@ -1,13 +1,12 @@
 """Tests for tgw.notify."""
 
-from __future__ import annotations
+ffrom __future__ import annotations
 
 import json
 import tempfile
 from pathlib import Path
 
-from tgw.notify import Notifier, notify, configure
-
+from tgw.notify import Notifier, notify   # remove: configure  (F401)
 
 def test_notifier_log_backend_does_not_raise():
     n = Notifier({'backends': ['log'], 'enabled': True})

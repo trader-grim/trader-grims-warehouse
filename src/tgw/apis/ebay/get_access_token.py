@@ -5,16 +5,19 @@ Generates initial user access/refresh tokens via OAuth flow.
 Dynamic paths from tgw-api-config.json, shares logic with refresh_v1.
 """
 
+from __future__ import annotations
+
 import json
 import logging
-import time
 import os
+import time
 import webbrowser
-import requests
-from urllib.parse import urlparse, parse_qs, urlencode
 from base64 import b64encode
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict
+from urllib.parse import parse_qs, urlencode, urlparse
+
+import requests
 
 def get_tgw_paths(config_path: Path) -> Dict[str, Path]:
     """Load/ensure all *_root paths."""
@@ -116,8 +119,7 @@ def get_access_token(prompt_if_needed: bool = True, is_sandbox: bool = False) ->
             logger.info("Auto-refreshed token - no browser needed.")
             return refreshed
         except Exception as e:
-            logger.warning(f"Refresh failed (%s), falling back to prompt.", e)
-
+            logger.warning("Refresh failed (%s), falling back to prompt.", e)
     # True first-time: browser + consent (once)
     if prompt_if_needed:
         logger.info("Initial OAuth needed (no refresh_token).")

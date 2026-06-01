@@ -13,21 +13,31 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .catalog import (
+    build_all_catalogs,
+    build_full_catalog,
+    build_full_catalog_csv,
+    build_location_tree,
+    build_search_catalog,
+    build_search_catalog_csv,
+    load_full_catalog,
+    load_search_catalog,
+)
 from .config import DEFAULT_CONFIG, load_config
-from .resolver import resolve, iter_all_skus, sku_date_str
 from .health import check_all
 from .items import (
-    get_item, update_item, update_items, update_where,
-    titleupdate, locationupdate, verifiedupdate, catlocmvall,
+    catlocmvall,
+    get_item,
+    locationupdate,
+    titleupdate,
+    update_item,
+    update_where,
+    verifiedupdate,
 )
-from .catalog import (
-    load_search_catalog, load_full_catalog,
-    build_full_catalog, build_search_catalog, build_location_tree,
-    build_full_catalog_csv, build_search_catalog_csv, build_all_catalogs,
+from .resolver import resolve, sku_date_str
 )
 
 
@@ -211,14 +221,22 @@ def main() -> int:
 
         elif args.op == 'resolve':
             sel: Dict[str, Any] = {}
-            if args.sku:          sel['sku']          = args.sku
-            if args.location:     sel['location']     = args.location
-            if args.status:       sel['status']       = args.status
-            if args.date_from:    sel['date_from']    = args.date_from
-            if args.date_to:      sel['date_to']      = args.date_to
-            if args.ebay_item_id: sel['ebay_item_id'] = args.ebay_item_id
-            if args.upc:          sel['upc']          = args.upc
-            if args.search:       sel['search']       = args.search
+            if args.sku:
+                sel['sku'] = args.sku
+            if args.location:
+                sel['location'] = args.location
+            if args.status:
+                sel['status'] = args.status
+            if args.date_from:
+                sel['date_from'] = args.date_from
+            if args.date_to:
+                sel['date_to'] = args.date_to
+            if args.ebay_item_id:
+                sel['ebay_item_id'] = args.ebay_item_id
+            if args.upc:
+                sel['upc'] = args.upc
+            if args.search:
+                sel['search'] = args.search
             skus = resolve(cfg, **sel)
             result = {'ok': True, 'selectors': sel,
                       'count': len(skus), 'skus': sorted(skus)}
@@ -229,11 +247,16 @@ def main() -> int:
 
         elif args.op == 'update-where':
             sel = {}
-            if args.location:  sel['location']  = args.location
-            if args.status:    sel['status']     = args.status
-            if args.date_from: sel['date_from']  = args.date_from
-            if args.date_to:   sel['date_to']    = args.date_to
-            if args.search:    sel['search']     = args.search
+            if args.location:
+                sel['location'] = args.location
+            if args.status:
+                sel['status'] = args.status
+            if args.date_from:
+                sel['date_from'] = args.date_from
+            if args.date_to:
+                sel['date_to'] = args.date_to
+            if args.search:
+                sel['search'] = args.search
             result = update_where(cfg, sel, args.field, args.value,
                                   check_only=check)
 

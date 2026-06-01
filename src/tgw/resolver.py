@@ -21,12 +21,11 @@ Selectors are combined with AND when multiple are given.
 
 from __future__ import annotations
 
-import os
-import re
+import re                    # remove: import os
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Set
 
-from .config import sku_json, location_dir
+from .config import location_dir, sku_json
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +62,6 @@ def find_item_jsons(cfg: Dict[str, Any]) -> List[Path]:
 
 def load_item_doc(json_path: Path) -> Dict[str, Any]:
     """Load one item JSON.  Injects sku from directory name if absent."""
-    import json
     doc = _load_json_strict(json_path)
     if not isinstance(doc, dict):
         raise ValueError(f'{json_path}: top-level JSON is not an object')

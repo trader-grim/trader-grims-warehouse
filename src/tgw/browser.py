@@ -197,11 +197,18 @@ class Browser(App):
         col = self.sort_column
         rev = self.sort_reverse
         def keyfunc(row):
-            if col == 'sku': return str(row.get('sku', '')).lower()
-            if col == 'title': return self.normalize_title(row).lower()
-            if col == 'location': return str(row.get('location', '')).lower()
-            if col == 'status': return self.normalize_status(row).lower()
-            if col == 'category': return self.normalize_category(row).lower()
+            def keyfunc(row):
+            if col == 'sku':
+                return str(row.get('sku', '')).lower()
+            if col == 'title':
+                return self.normalize_title(row).lower()
+            if col == 'location':
+                return str(row.get('location', '')).lower()
+            if col == 'status':
+                return self.normalize_status(row).lower()
+            if col == 'category':
+                return self.normalize_category(row).lower()
+            return str(row).lower()
             return str(row).lower()
         return sorted(rows, key=keyfunc, reverse=rev)
 
@@ -225,8 +232,10 @@ class Browser(App):
             else:
                 for child in node.children:
                     child.collapse()
-                if label == 'Locations': node.expand()
-                else: node.collapse()
+                if label == 'Locations':
+                    node.expand()
+                else:
+                    node.collapse()
         tree.root.expand()
 
     def build_tree_from_rows(self, rows):

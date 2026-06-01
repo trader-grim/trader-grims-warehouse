@@ -157,7 +157,7 @@ def main() -> None:
 
         logger.info("Queue batch sweep finished.")
 
-    except Exception as e:
+    except Exception:
         logger.exception("Fatal error in batch execution sequence")
         sys.exit(1)
 

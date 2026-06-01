@@ -15,9 +15,9 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Set   # remove Optional
 
-from .config import sku_json, sku_dir, location_dir
+from .config import location_dir, sku_dir, sku_json
 from .resolver import load_item_doc, resolve
 
 

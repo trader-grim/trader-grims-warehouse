@@ -6,11 +6,12 @@ import json
 import tempfile
 from pathlib import Path
 
-import pytest
-
 from tgw.items import (
-    update_item, update_items, update_where,
-    titleupdate, locationupdate, verifiedupdate, catlocmvall,
+    catlocmvall,
+    titleupdate,
+    update_item,
+    update_items,
+    verifiedupdate,
 )
 
 
