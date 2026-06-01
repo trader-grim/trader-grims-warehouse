@@ -33,13 +33,6 @@ where = ["src"]
 [tool.setuptools.package-data]
 "tgw.queue" = ["*.sql"]
 
-[tool.ruff]
-line-length = 100
-
-[tool.ruff.lint]
-select = ["E", "F", "W", "I"]
-ignore = ["E501"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
