@@ -197,7 +197,6 @@ class Browser(App):
         col = self.sort_column
         rev = self.sort_reverse
         def keyfunc(row):
-            def keyfunc(row):
             if col == 'sku':
                 return str(row.get('sku', '')).lower()
             if col == 'title':

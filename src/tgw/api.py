@@ -38,7 +38,7 @@ from .items import (
     verifiedupdate,
 )
 from .resolver import resolve, sku_date_str
-)
+
 
 
 # ---------------------------------------------------------------------------

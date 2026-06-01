@@ -37,7 +37,8 @@ where = ["src"]
 testpaths = ["tests"]
 
 [tool.ruff]
-fix = true
+line-length = 200
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
+fix = true
