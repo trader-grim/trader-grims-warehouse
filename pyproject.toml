@@ -38,7 +38,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 200
+fix = true
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
-fix = true
