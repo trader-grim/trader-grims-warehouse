@@ -36,7 +36,7 @@ log = logging.getLogger(__name__)
 QUEUE_NAME    = 'bundle_intake'
 STABLE_AFTER_S = 30
 IMAGE_SUFFIXES = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.JPG', '.JPEG', '.PNG'}
-SKU_RE        = re.compile(r'^tgw\d{17}$', re.IGNORECASE)
+SKU_RE        = re.compile(r'^tgw\d{13,}$', re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -73,11 +73,17 @@ def _enqueue(sku: str, fmt: str, source: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def scan_newitems(newitems_dir: Path) -> None:
-    """Detect stable bundles in newitems/ and enqueue intake jobs."""
+    """Detect stable bundles in newitems/ and enqueue intake jobs.
+
+    All three formats use a <SKU>/ subdirectory as the bundle unit:
+      dir   — newitems/<SKU>/ with <SKU>.json + loose photos
+      zip   — newitems/<SKU>/ with <SKU>.json + a *.zip file
+      multi — newitems/multi/<SKU>/ with <SKU>.json + a *.zip file
+    """
     if not newitems_dir.exists():
         return
 
-    # --- dir format: newitems/<SKU>/ ---
+    # --- dir and zip formats: newitems/<SKU>/ ---
     for entry in newitems_dir.iterdir():
         if not entry.is_dir() or entry.name == 'multi':
             continue
@@ -87,42 +93,46 @@ def scan_newitems(newitems_dir: Path) -> None:
         stub = entry / f'{sku}.json'
         if not stub.exists():
             continue
+
         images = _images_in(entry)
-        if not images:
-            continue
-        all_files = [stub] + images
-        if not _is_stable(all_files):
-            continue
-        jid = _enqueue(sku, 'dir', str(entry))
-        if jid:
-            log.info('enqueued bundle_intake dir job for %s (%d photos, job %s)',
-                     sku, len(images), jid)
-            tgw_logging.log_event('bundle_detected', sku=sku, fmt='dir',
-                                  photos=len(images), job_id=jid)
+        zips   = list(entry.glob('*.zip'))
 
-    # --- zip format: newitems/<SKU>.zip + <SKU>.json ---
-    for zip_path in newitems_dir.glob('*.zip'):
-        sku = zip_path.stem
-        if not SKU_RE.match(sku):
-            continue
-        stub = newitems_dir / f'{sku}.json'
-        if not stub.exists():
-            continue
-        if not _is_stable([zip_path, stub]):
-            continue
-        jid = _enqueue(sku, 'zip', str(zip_path))
-        if jid:
-            log.info('enqueued bundle_intake zip job for %s (job %s)', sku, jid)
-            tgw_logging.log_event('bundle_detected', sku=sku, fmt='zip', job_id=jid)
+        if images:
+            # dir format: loose photos alongside stub
+            all_files = [stub] + images
+            if not _is_stable(all_files):
+                continue
+            jid = _enqueue(sku, 'dir', str(entry))
+            if jid:
+                log.info('enqueued bundle dir %s (%d photos, job %s)',
+                         sku, len(images), jid)
+                tgw_logging.log_event('bundle_detected', sku=sku, fmt='dir',
+                                      photos=len(images), job_id=jid)
+        elif zips:
+            # zip format: single zip inside the SKU dir
+            zip_path = zips[0]
+            if not _is_stable([stub, zip_path]):
+                continue
+            jid = _enqueue(sku, 'zip', str(zip_path))
+            if jid:
+                log.info('enqueued bundle zip %s (%s, job %s)',
+                         sku, zip_path.name, jid)
+                tgw_logging.log_event('bundle_detected', sku=sku, fmt='zip',
+                                      zip_name=zip_path.name, job_id=jid)
 
-    # --- multi format: newitems/multi/*.zip ---
+    # --- multi format: newitems/multi/<SKU>/ ---
     multi_dir = newitems_dir / 'multi'
     if multi_dir.exists():
-        for zip_path in multi_dir.glob('*.zip'):
+        for entry in multi_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            zips = list(entry.glob('*.zip'))
+            if not zips:
+                continue
+            zip_path = zips[0]
             if not _is_stable([zip_path]):
                 continue
-            # Use zip stem as a synthetic key; no SKU until extracted
-            dedupe_key = f'multi_intake:{zip_path.name}'
+            dedupe_key = f'multi_intake:{entry.name}'
             try:
                 jid = state_machine.enqueue_job(
                     queue_name='multi_intake',
@@ -131,9 +141,9 @@ def scan_newitems(newitems_dir: Path) -> None:
                     max_attempts=3,
                 )
                 log.info('enqueued multi_intake job for %s (job %s)',
-                         zip_path.name, jid)
+                         entry.name, jid)
                 tgw_logging.log_event('multi_bundle_detected',
-                                      filename=zip_path.name, job_id=jid)
+                                      bundle_dir=entry.name, job_id=jid)
             except psycopg2.errors.UniqueViolation:
                 pass
 
@@ -227,9 +237,9 @@ class BundleIntakeWorker(QueueWorker):
 
         images = _images_in(dest_dir)
         self._write_item_json(sku, stub, dest_dir, images)
-        zip_path.unlink()
-        if stub_path.exists():
-            stub_path.unlink()
+        # Remove the source SKU dir (contains the zip + stub)
+        source_dir = zip_path.parent
+        shutil.rmtree(source_dir, ignore_errors=True)
 
         self._enqueue_downstream(sku)
         log.info('bundle_intake zip complete: %s (%d photos)', sku, len(images))
