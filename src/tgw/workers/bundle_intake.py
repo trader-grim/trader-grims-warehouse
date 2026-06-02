@@ -83,6 +83,18 @@ def scan_newitems(newitems_dir: Path) -> None:
     if not newitems_dir.exists():
         return
 
+    # --- symlink format: newitems/<SKU> → ItemData/<SKU>/ ---
+    for entry in newitems_dir.iterdir():
+        if not entry.is_symlink():
+            continue
+        sku = entry.name
+        if not SKU_RE.match(sku):
+            continue
+        jid = _enqueue(sku, 'symlink', str(entry))
+        if jid:
+            log.info('enqueued bundle symlink %s (job %s)', sku, jid)
+            tgw_logging.log_event('bundle_detected', sku=sku, fmt='symlink', job_id=jid)
+
     # --- dir and zip formats: newitems/<SKU>/ ---
     for entry in newitems_dir.iterdir():
         if not entry.is_dir() or entry.name == 'multi':
@@ -186,12 +198,28 @@ class BundleIntakeWorker(QueueWorker):
             self._handle_dir(sku, Path(source))
         elif fmt == 'zip':
             self._handle_zip(sku, Path(source))
+        elif fmt == 'symlink':
+            self._handle_symlink(sku, Path(source))
         else:
             raise HardFailure(f'unknown bundle format {fmt!r} for {sku}')
 
     # ------------------------------------------------------------------
     # Format handlers
     # ------------------------------------------------------------------
+
+    def _handle_symlink(self, sku: str, symlink: Path) -> None:
+        """Item already in ItemData — just remove symlink and enqueue downstream."""
+        itemdata_dir = self.config['itemdata_root'] / sku
+        if not itemdata_dir.exists():
+            raise HardFailure(f'symlink target ItemData/{sku} does not exist')
+
+        if symlink.is_symlink():
+            symlink.unlink()
+            log.info('removed symlink for %s', sku)
+
+        self._enqueue_downstream(sku)
+        log.info('bundle_intake symlink complete: %s', sku)
+        tgw_logging.log_event('bundle_intake_complete', sku=sku, fmt='symlink')
 
     def _handle_dir(self, sku: str, source_dir: Path) -> None:
         if not source_dir.exists():
