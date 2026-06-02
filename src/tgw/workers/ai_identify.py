@@ -172,6 +172,14 @@ class AIIdentifyWorker(QueueWorker):
         if not title:
             raise HardFailure(f'ai_identify: empty title in model response for {sku}')
 
+        # Resolve AI category string → eBay categoryId
+        ebay_category_id = ebay_category_name = None
+        try:
+            from tgw.apis.ebay.taxonomy import best_category
+            ebay_category_id, ebay_category_name = best_category(self.config, title, category)
+        except Exception as exc:
+            log.warning('taxonomy lookup failed for %r: %s', category, exc)
+
         # Write results back — only fields that are still empty
         item['title']       = title
         if not item.get('category'):
@@ -180,13 +188,19 @@ class AIIdentifyWorker(QueueWorker):
             item['description'] = description
         if not item.get('condition'):
             item['condition'] = condition
+        if ebay_category_id and not item.get('ebay_category_id'):
+            item['ebay_category_id']   = ebay_category_id
+            item['ebay_category_name'] = ebay_category_name
         item['ai_identified'] = True
 
         atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
 
-        log.info('ai_identify complete for %s: %r', sku, title)
+        log.info('ai_identify complete for %s: %r (eBay cat %s)',
+                 sku, title, ebay_category_id)
         tgw_logging.log_event('ai_identify_complete', sku=sku, title=title,
-                              category=category, condition=condition)
+                              category=category, condition=condition,
+                              ebay_category_id=ebay_category_id,
+                              ebay_category_name=ebay_category_name)
 
         # Enqueue downstream rebuild
         try:
