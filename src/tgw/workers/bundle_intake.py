@@ -136,7 +136,7 @@ def scan_newitems(newitems_dir: Path) -> None:
             try:
                 jid = state_machine.enqueue_job(
                     queue_name='multi_intake',
-                    payload={'source': str(zip_path)},
+                    payload={'source': str(entry)},  # directory, not the zip
                     dedupe_key=dedupe_key,
                     max_attempts=3,
                 )
@@ -224,6 +224,15 @@ class BundleIntakeWorker(QueueWorker):
 
         with zipfile.ZipFile(zip_path, 'r') as zf:
             names = zf.namelist()
+
+            # Detect multi-item zip: has timestamp-named subdirs
+            top_dirs = {Path(n).parts[0] for n in names if '/' in n}
+            if any(d.isdigit() and len(d) == 14 for d in top_dirs):
+                raise HardFailure(
+                    f'zip for {sku} contains timestamp subdirs — '
+                    'place in newitems/multi/ for multi_intake processing'
+                )
+
             image_names = [n for n in names
                            if Path(n).suffix in IMAGE_SUFFIXES and not n.startswith('__')]
             if not image_names:
