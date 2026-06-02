@@ -67,6 +67,8 @@ maintained_by: Opus (planner)
 - Thumbnail cache — 54,310 thumbnails at `catalog_root/thumbnails/`; `tgw build-thumbnails`
 - **Phase 1 COMPLETE** — secrets_root, QueueWorker base + HardFailure pattern, echo worker, systemd `tgw-worker@.service` template, health extended (Postgres + SQLite + thumbnails), old launcher retired
 - **Phase 2a COMPLETE — observation phase** — token_refresh worker live under systemd; OAuth token active (expires ~2h, auto-refreshes); expiry-based self-reschedule; running alongside eBay cron
+- **Phase 2b COMPLETE** — PM-intake worker live under systemd; watches `inbox/`, calls `Qwen2.5:latest` via Ollama, patches Master Plan, archives notes; `tgw/apis/ollama.py` client added
+- **State-machine bug fixed** — `recover_expired_jobs()` now promotes `retry_wait` jobs back to `queued` when `not_before` passes; previously transient failures left jobs stuck indefinitely
 ### Phase 2a observation gate (do not retire cron until cleared)
 - `tgw-worker@token_refresh.service` active; queue self-perpetuating
 - Gate: confirm one full expiry+refresh cycle in journal, then retire `ebay_api_token_refresh` cron
@@ -108,11 +110,12 @@ maintained_by: Opus (planner)
 - Run alongside existing eBay cron; observe across one full expiry cycle before retiring cron
 - Gate: cron retired only after one observed expiry+refresh cycle confirms the worker is reliable
 - Template for everything after: claim → lease → run → succeed/retry/dead_letter → reschedule
-### 2b. PM-intake worker
+### 2b. PM-intake worker ✅ COMPLETE (2026-06-02)
 - Watches `inbox/` — a dropped note enqueues a job
-- Worker reads the note, calls local Ollama (qwen2.5) to classify what changed
-- Updates this Master Plan file, master map, and short-term todo
-- Idempotent; safe to re-run; logs every change
+- Worker reads the note, calls local Ollama (`Qwen2.5:latest`) to classify what changed
+- Updates this Master Plan file; idempotent, safe to re-run, logs every change
+- Notes truncated to 4000 chars; plan sent as headings-only (CPU-only machine — use sparingly)
+- `tgw/apis/ollama.py` — reusable client for all future Ollama workers
 ### 2c. tgw suggest + plan intake
 - `tgw suggest "..."` appends to `suggestions/` for next planning session
 - Folder-drop intake: drop a plan doc → filed into the right plan section
