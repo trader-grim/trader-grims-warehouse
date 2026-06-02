@@ -202,6 +202,17 @@ class AIIdentifyWorker(QueueWorker):
                               ebay_category_id=ebay_category_id,
                               ebay_category_name=ebay_category_name)
 
+        # Enqueue ebay_draft to fill item specifics and write draft listing
+        try:
+            state_machine.enqueue_job(
+                queue_name='ebay_draft',
+                payload={'sku': sku},
+                dedupe_key=f'ebay_draft:{sku}',
+                max_attempts=3,
+            )
+        except psycopg2.errors.UniqueViolation:
+            pass
+
         # Enqueue downstream rebuild
         try:
             state_machine.enqueue_job(
