@@ -94,8 +94,63 @@ def check_location_tree(cfg: Dict[str, Any]) -> Dict[str, Any]:
         return _result('location_tree', False, str(e), (time.time() - t) * 1000)
 
 
+def check_postgres(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """PostgreSQL reachable and queue_jobs table accessible."""
+    t = time.time()
+    try:
+        from tgw.queue.state_machine import init, queue_depths, dead_letter_count
+        dsn = cfg.get('postgres_dsn', 'dbname=state_machine user=tgw')
+        init(dsn)
+        depths = queue_depths()
+        dl = dead_letter_count()
+        depth_str = ', '.join(f'{q}:{n}' for q, n in depths.items()) or 'all queues empty'
+        detail = f'depths=[{depth_str}] dead_letter={dl}'
+        return _result('postgres', True, detail, (time.time() - t) * 1000,
+                       queue_depths=depths, dead_letter=dl)
+    except Exception as e:
+        return _result('postgres', False, f'unreachable: {e}', (time.time() - t) * 1000)
+
+
+def check_sqlite_catalog(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """SQLite catalog exists and reports row count."""
+    t = time.time()
+    try:
+        import sqlite3
+        db_path = cfg['sqlite_catalog_path']
+        if not db_path.exists():
+            return _result('sqlite_catalog', False, f'missing: {db_path}',
+                           (time.time() - t) * 1000)
+        con = sqlite3.connect(db_path)
+        row_count = con.execute('SELECT COUNT(*) FROM catalog').fetchone()[0]
+        con.close()
+        mtime = db_path.stat().st_mtime
+        import datetime
+        age = datetime.datetime.now() - datetime.datetime.fromtimestamp(mtime)
+        return _result('sqlite_catalog', True,
+                       f'{row_count:,} rows — updated {int(age.total_seconds() // 60)}m ago',
+                       (time.time() - t) * 1000, row_count=row_count)
+    except Exception as e:
+        return _result('sqlite_catalog', False, str(e), (time.time() - t) * 1000)
+
+
+def check_thumbnail_cache(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Thumbnail cache directory exists and reports image count."""
+    t = time.time()
+    try:
+        thumb_root = cfg['thumbnail_root']
+        if not thumb_root.exists():
+            return _result('thumbnail_cache', False, f'missing: {thumb_root}',
+                           (time.time() - t) * 1000)
+        count = sum(1 for _ in thumb_root.glob('*.jpg'))
+        return _result('thumbnail_cache', True,
+                       f'{count:,} thumbnails — {thumb_root}',
+                       (time.time() - t) * 1000, thumbnail_count=count)
+    except Exception as e:
+        return _result('thumbnail_cache', False, str(e), (time.time() - t) * 1000)
+
+
 def check_queue_launcher() -> Dict[str, Any]:
-    """Queue launcher systemd service is active."""
+    """Queue launcher systemd service is active (legacy — retiring in TASK 1.5)."""
     t = time.time()
     try:
         r = subprocess.run(
@@ -159,11 +214,12 @@ def check_ollama(model: Optional[str] = None) -> Dict[str, Any]:
 
 
 def check_tgw_api() -> Dict[str, Any]:
-    """tgw console script is on PATH and responds."""
+    """tgw API responds (uses same interpreter, no PATH dependency)."""
     t = time.time()
     try:
+        import sys
         r = subprocess.run(
-            ['tgw', 'ensure-catalog', '--check-only'],
+            [sys.executable, '-m', 'tgw.api', 'ensure-catalog', '--check-only'],
             capture_output=True, text=True, timeout=10
         )
         try:
@@ -187,9 +243,7 @@ def check_ebay_token(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """eBay token file exists and is not obviously expired."""
     t = time.time()
     try:
-        raw = cfg.get('raw', {})
-        token_path = Path(raw.get('ebay_token_path',
-                                  '/opt/TGW/config/secrets/ebay-token.json'))
+        token_path: Path = cfg['ebay_token_path']
         if not token_path.exists():
             return _result('ebay_token', False,
                            f'token file missing: {token_path}',
@@ -237,7 +291,9 @@ def check_all(cfg: Dict[str, Any],
         check_itemdata(cfg),
         check_catalog(cfg),
         check_location_tree(cfg),
-        check_queue_launcher(),
+        check_sqlite_catalog(cfg),
+        check_thumbnail_cache(cfg),
+        check_postgres(cfg),
         check_backup_service(),
     ]
     if include_ollama:

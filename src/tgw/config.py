@@ -51,6 +51,7 @@ def load_config(path: Path) -> Dict[str, Any]:
     def p(key: str, default: str) -> Path:
         return Path(os.path.expanduser(raw.get(key, default)))
 
+    secrets_root   = p('secrets_root',   '/opt/TGW/secrets')
     itemdata_root  = p('itemdata_root',  '/opt/TGW/data/ItemData')
     catalog_root   = p('catalog_root',   '/opt/TGW/data/ItemCatalog')
 
@@ -59,15 +60,27 @@ def load_config(path: Path) -> Dict[str, Any]:
     location_tree_root       = p('location_tree_root',       str(catalog_root / 'by-location'))
     full_catalog_csv_path    = p('full_catalog_csv_path',    str(catalog_root / 'tgwcatalog.csv'))
     search_catalog_csv_path  = p('search_catalog_csv_path',  str(catalog_root / 'searchcatalog.csv'))
+    sqlite_catalog_path      = p('sqlite_catalog_path',      str(catalog_root / 'tgwcatalog.db'))
+    thumbnail_root           = p('thumbnail_root',           str(catalog_root / 'thumbnails'))
 
-    search_fields = raw.get('search_catalog_fields',
-                            ['title', 'location', '#STATUS', 'status'])
-    required      = raw.get('search_catalog_required', ['sku'])
-    pretty        = bool(raw.get('pretty_json', True))
-    skip_missing  = bool(raw.get('skip_missing_files', True))
+    ebay_token_path       = secrets_root / 'ebay-token.json'
+    ebay_credentials_path = secrets_root / 'ebay-credentials.json'
+
+    postgres_dsn = raw.get('postgres_dsn', 'dbname=state_machine user=tgw')
+
+    search_fields    = raw.get('search_catalog_fields',
+                               ['title', 'location', '#STATUS', 'status'])
+    required         = raw.get('search_catalog_required', ['sku'])
+    pretty           = bool(raw.get('pretty_json', True))
+    skip_missing     = bool(raw.get('skip_missing_files', True))
+    thumbnail_size   = raw.get('thumbnail_size', [256, 256])
 
     return {
         'config_path':             path,
+        'secrets_root':            secrets_root,
+        'ebay_token_path':         ebay_token_path,
+        'ebay_credentials_path':   ebay_credentials_path,
+        'postgres_dsn':            postgres_dsn,
         'itemdata_root':           itemdata_root,
         'catalog_root':            catalog_root,
         'full_catalog_path':       full_catalog_path,
@@ -75,6 +88,9 @@ def load_config(path: Path) -> Dict[str, Any]:
         'full_catalog_csv_path':   full_catalog_csv_path,
         'search_catalog_csv_path': search_catalog_csv_path,
         'location_tree_root':      location_tree_root,
+        'sqlite_catalog_path':     sqlite_catalog_path,
+        'thumbnail_root':          thumbnail_root,
+        'thumbnail_size':          thumbnail_size,
         'search_fields':           ['sku', *[f for f in search_fields if f != 'sku']],
         'required':                required,
         'pretty':                  pretty,

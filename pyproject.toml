@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
     "requests>=2.31",
     "textual>=0.59",
+    "psycopg2-binary>=2.9",
 ]
 
 [project.optional-dependencies]
@@ -18,11 +19,16 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.4",
 ]
+thumbnails = [
+    "Pillow>=10.0",
+]
 
 [project.scripts]
-tgw             = "tgw.api:main"
-tgw-browser     = "tgw.browser:main"
+tgw                = "tgw.api:main"
+tgw-browser        = "tgw.browser:main"
 tgw-queue-launcher = "tgw.queue.launcher:main"
+tgw-echo-worker    = "tgw.workers.echo:main"
+tgw-token-worker   = "tgw.workers.token_refresh:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

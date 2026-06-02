@@ -345,13 +345,15 @@ def build_search_catalog_csv(cfg: Dict[str, Any], source: str = 'auto',
 
 def build_all_catalogs(cfg: Dict[str, Any],
                        check_only: bool = False) -> Dict[str, Any]:
-    """Build full catalog, search catalog, and location tree in sequence."""
+    """Build full catalog, search catalog, location tree, and SQLite catalog."""
+    from .sqlite_catalog import build_sqlite_catalog
     started = time.time()
     steps = []
     for result in [
         build_full_catalog(cfg, check_only=check_only),
         build_search_catalog(cfg, source='full_catalog', check_only=check_only),
         build_location_tree(cfg, source='search_catalog', check_only=check_only),
+        build_sqlite_catalog(cfg, check_only=check_only),
     ]:
         steps.append(result)
         if not result.get('ok'):

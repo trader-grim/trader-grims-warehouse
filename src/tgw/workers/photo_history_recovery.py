@@ -14,11 +14,6 @@ def load_config(path: Path) -> dict:
     return json.loads(path.read_text(encoding='utf-8'))
 
 
-def resolve_queue_worker_config(queue_dir: Path) -> Path:
-    link = queue_dir / '.queue_worker'
-    if not link.exists():
-        raise FileNotFoundError(f'missing .queue_worker: {link}')
-    return link.resolve()
 
 
 def normalize_name(name: str) -> str:
@@ -143,20 +138,15 @@ def iter_itemdata_files(root: Path) -> Iterable[Path]:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument('--config')
-    ap.add_argument('--queue-dir')
+    ap.add_argument('--config', required=True)
     ap.add_argument('--itemdata')
     ap.add_argument('--report')
     args = ap.parse_args()
 
-    if not args.config and not args.queue_dir:
-        ap.error('must supply --config or --queue-dir')
+    if not args.config:
+        ap.error('must supply --config')
 
-    if args.queue_dir:
-        queue_dir = Path(args.queue_dir)
-        config_path = resolve_queue_worker_config(queue_dir)
-    else:
-        config_path = Path(args.config)
+    config_path = Path(args.config)
 
     cfg = load_config(config_path)
     index = build_index([Path(p) for p in cfg['default_search_roots']])

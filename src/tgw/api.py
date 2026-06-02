@@ -26,6 +26,8 @@ from .catalog import (
     load_full_catalog,
     load_search_catalog,
 )
+from .sqlite_catalog import build_sqlite_catalog
+from .thumbnail import build_thumbnail_cache
 from .config import DEFAULT_CONFIG, load_config
 from .health import check_all
 from .items import (
@@ -186,8 +188,16 @@ def _build_parser() -> argparse.ArgumentParser:
                    choices=['auto', 'full_catalog', 'itemdata'], default='auto')
     p.add_argument('--check-only', action='store_true')
 
+    p = sub.add_parser('build-sqlite',
+                       help='build SQLite catalog from ItemData')
+    p.add_argument('--check-only', action='store_true')
+
+    p = sub.add_parser('build-thumbnails',
+                       help='generate per-SKU thumbnail cache (requires Pillow)')
+    p.add_argument('--check-only', action='store_true')
+
     p = sub.add_parser('build-all',
-                       help='build full catalog, search catalog, and location tree')
+                       help='build full catalog, search catalog, location tree, and SQLite catalog')
     p.add_argument('--check-only', action='store_true')
 
     p = sub.add_parser('ensure-catalog',
@@ -291,6 +301,12 @@ def main() -> int:
         elif args.op == 'build-search-csv':
             result = build_search_catalog_csv(cfg, source=args.source,
                                               check_only=check)
+
+        elif args.op == 'build-sqlite':
+            result = build_sqlite_catalog(cfg, check_only=check)
+
+        elif args.op == 'build-thumbnails':
+            result = build_thumbnail_cache(cfg, check_only=check)
 
         elif args.op == 'build-all':
             result = build_all_catalogs(cfg, check_only=check)

@@ -19,23 +19,19 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
 
-def get_tgw_paths(config_path: Path) -> Dict[str, Path]:
-    """Load/ensure all *_root paths."""
-    with open(config_path) as f:
-        config = json.load(f)
-    paths = {}
-    for key, value in config.items():
-        if key.endswith('_root'):
-            path = Path(value)
-            path.mkdir(parents=True, exist_ok=True)
-            paths[key] = path
-    return paths
-
-TGW_ROOT = Path(os.getenv('TGW_ROOT', '/opt/TGW'))
+TGW_ROOT   = Path(os.getenv('TGW_ROOT', '/opt/TGW'))
 CONFIG_PATH = TGW_ROOT / 'config' / 'tgw-api-config.json'
-PATHS = get_tgw_paths(CONFIG_PATH)
-STATE_PATH = PATHS['state_root'] / 'ebay_token_state.json'
-LOG_PATH = PATHS['log_root'] / 'ebay_token_manager.log'
+
+def _load_raw_config() -> Dict[str, Any]:
+    with open(CONFIG_PATH) as f:
+        return json.load(f)
+
+def _secrets_root() -> Path:
+    return Path(_load_raw_config().get('secrets_root', '/opt/TGW/secrets'))
+
+TOKEN_PATH = _secrets_root() / 'ebay-token.json'
+LOG_PATH   = Path(_load_raw_config().get('log_root', '/opt/TGW/runtime/logs')) / 'ebay_token_manager.log'
+LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,20 +41,26 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def load_config() -> Dict[str, Any]:
-    with open(CONFIG_PATH) as f:
-        config = json.load(f)
-    return config.get('ebay', {})
+    """Load eBay non-secret config (redirect_uri, scopes) from main config."""
+    raw = _load_raw_config()
+    creds_path = _secrets_root() / 'ebay-credentials.json'
+    if not creds_path.exists():
+        raise FileNotFoundError(f'eBay credentials not found: {creds_path}')
+    creds = json.loads(creds_path.read_text())
+    ebay_cfg = raw.get('ebay', {})
+    return {**creds, **ebay_cfg}
 
 def load_token_state() -> Dict[str, Any]:
-    if STATE_PATH.exists():
-        with open(STATE_PATH) as f:
+    if TOKEN_PATH.exists():
+        with open(TOKEN_PATH) as f:
             return json.load(f)
-    return {"access_token": "", "refresh_token": "", "expiry": 0}
+    return {'access_token': '', 'refresh_token': '', 'expiry': 0}
 
-def save_token_state(state: Dict[str, Any]):
-    with open(STATE_PATH, 'w') as f:
-        json.dump(state, f, indent=2)
-    logger.info(f"State saved: {STATE_PATH}")
+def save_token_state(state: Dict[str, Any]) -> None:
+    TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    TOKEN_PATH.write_text(json.dumps(state, indent=2) + '\n')
+    TOKEN_PATH.chmod(0o600)
+    logger.info(f'State saved: {TOKEN_PATH}')
 
 def is_token_expired(state: Dict[str, Any]) -> bool:
     return time.time() >= state.get('expiry', 0)
@@ -140,7 +142,7 @@ def get_access_token(prompt_if_needed: bool = True, is_sandbox: bool = False) ->
 
 def self_test(is_sandbox: bool = False):
     try:
-        logger.info("Paths OK: config=%s, state=%s", CONFIG_PATH, STATE_PATH)
+        logger.info("Paths OK: config=%s, token=%s", CONFIG_PATH, TOKEN_PATH)
         token = get_access_token(is_sandbox=is_sandbox)
         logger.info("SUCCESS: Got token %s...", token[:20])
     except Exception as e:

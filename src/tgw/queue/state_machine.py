@@ -1,5 +1,37 @@
+from __future__ import annotations
+
+import json
+import time
+import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Dict, Generator, List, Optional
+
+import psycopg2
+import psycopg2.extras
+
+# Module-level DSN — set by init() before any worker starts.
+_DSN: str = 'dbname=state_machine user=tgw'
+
+
+def init(dsn: str) -> None:
+    """Set the PostgreSQL DSN for all state-machine operations."""
+    global _DSN
+    _DSN = dsn
+
+
+@contextmanager
+def _conn() -> Generator:
+    """Open a short-lived autocommit-off connection."""
+    con = psycopg2.connect(_DSN)
+    try:
+        yield con
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
 
 STATES = {
     'queued',
@@ -70,3 +102,210 @@ def validate_transition(old_state: str, new_state: str, worker_id: Optional[str]
 
 def next_failure_state(attempt_count: int, max_attempts: int) -> str:
     return 'failed' if attempt_count >= max_attempts else 'retry_wait'
+
+
+# ---------------------------------------------------------------------------
+# Database operations
+# ---------------------------------------------------------------------------
+
+def enqueue_job(
+    queue_name: str,
+    payload: Dict[str, Any],
+    *,
+    entity_type: str = 'generic',
+    entity_id: str = '',
+    operation: str = 'run',
+    handler_family: str = '',
+    priority: int = 100,
+    not_before: Optional[float] = None,
+    dedupe_key: Optional[str] = None,
+    max_attempts: int = 5,
+) -> str:
+    """Insert a new queued job. Returns the new job_id (UUID string)."""
+    handler_family = handler_family or queue_name
+    entity_id = entity_id or queue_name
+    nb = None
+    if not_before is not None:
+        from datetime import datetime, timezone
+        nb = datetime.fromtimestamp(not_before, tz=timezone.utc)
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO queue_jobs
+                    (queue_name, entity_type, entity_id, operation,
+                     handler_family, priority, payload_json,
+                     not_before, dedupe_key, max_attempts)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING job_id::text
+                """,
+                (queue_name, entity_type, entity_id, operation,
+                 handler_family, priority, json.dumps(payload),
+                 nb, dedupe_key, max_attempts),
+            )
+            return cur.fetchone()[0]
+
+
+def claim_queue_jobs(
+    queue_name: str,
+    lease_owner: str,
+    lease_seconds: int = 300,
+    limit: int = 1,
+) -> List[Dict[str, Any]]:
+    """Lease up to `limit` queued jobs. Returns list of row dicts."""
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                'SELECT * FROM claim_queue_jobs(%s, %s, %s, %s)',
+                (lease_owner, queue_name, limit, lease_seconds),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+
+def mark_running(job_id: str, lease_owner: str) -> None:
+    """Transition leased → running."""
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE queue_jobs
+                   SET state = 'running'
+                 WHERE job_id = %s AND state = 'leased' AND lease_owner = %s
+                """,
+                (job_id, lease_owner),
+            )
+
+
+def mark_succeeded(job_id: str, lease_owner: str, result: Optional[Dict[str, Any]] = None) -> None:
+    """Transition running → succeeded."""
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE queue_jobs
+                   SET state = 'succeeded',
+                       finished_at = NOW(),
+                       lease_owner = NULL,
+                       lease_token = NULL,
+                       lease_expires_at = NULL,
+                       error_code = NULL,
+                       error_detail = NULL
+                 WHERE job_id = %s AND state = 'running' AND lease_owner = %s
+                """,
+                (job_id, lease_owner),
+            )
+
+
+def mark_failed(job_id: str, lease_owner: str, error: str) -> None:
+    """
+    Transition running → retry_wait or failed → dead_letter.
+
+    Respects max_attempts: if attempt_count >= max_attempts, goes straight
+    to dead_letter. Otherwise goes to retry_wait with exponential backoff.
+    """
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                'SELECT attempt_count, max_attempts FROM queue_jobs WHERE job_id = %s',
+                (job_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return
+            attempt = row['attempt_count']
+            max_att = row['max_attempts']
+            new_state = next_failure_state(attempt, max_att)
+
+            if new_state == 'retry_wait':
+                backoff = min(30 * (2 ** (attempt - 1)), 3600)
+                from datetime import datetime, timezone, timedelta
+                nb = datetime.now(tz=timezone.utc) + timedelta(seconds=backoff)
+                cur.execute(
+                    """
+                    UPDATE queue_jobs
+                       SET state = 'retry_wait',
+                           not_before = %s,
+                           error_code = 'WORKER_EXCEPTION',
+                           error_detail = %s,
+                           finished_at = NOW(),
+                           lease_owner = NULL,
+                           lease_token = NULL,
+                           lease_expires_at = NULL
+                     WHERE job_id = %s AND state = 'running' AND lease_owner = %s
+                    """,
+                    (nb, error[:2000], job_id, lease_owner),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE queue_jobs
+                       SET state = 'failed',
+                           error_code = 'WORKER_EXCEPTION',
+                           error_detail = %s,
+                           finished_at = NOW(),
+                           lease_owner = NULL,
+                           lease_token = NULL,
+                           lease_expires_at = NULL
+                     WHERE job_id = %s AND state = 'running' AND lease_owner = %s
+                    """,
+                    (error[:2000], job_id, lease_owner),
+                )
+                # Immediately promote failed → dead_letter
+                cur.execute(
+                    """
+                    UPDATE queue_jobs SET state = 'dead_letter'
+                     WHERE job_id = %s AND state = 'failed'
+                    """,
+                    (job_id,),
+                )
+
+
+def mark_dead_letter(job_id: str, lease_owner: str, error: str) -> None:
+    """Transition running → dead_letter immediately, bypassing retry logic."""
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE queue_jobs
+                   SET state = 'dead_letter',
+                       error_code = 'HARD_FAILURE',
+                       error_detail = %s,
+                       finished_at = NOW(),
+                       lease_owner = NULL,
+                       lease_token = NULL,
+                       lease_expires_at = NULL
+                 WHERE job_id = %s AND state = 'running' AND lease_owner = %s
+                """,
+                (error[:2000], job_id, lease_owner),
+            )
+
+
+def recover_expired_jobs() -> int:
+    """Requeue jobs whose leases have expired. Returns count of recovered jobs."""
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute('SELECT recover_expired_jobs()')
+            return cur.fetchone()[0]
+
+
+def queue_depths() -> Dict[str, int]:
+    """Return count of queued jobs per queue_name."""
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                SELECT queue_name, COUNT(*) as n
+                  FROM queue_jobs
+                 WHERE state = 'queued'
+                 GROUP BY queue_name
+                """
+            )
+            return {row[0]: row[1] for row in cur.fetchall()}
+
+
+def dead_letter_count() -> int:
+    """Return total count of dead_letter jobs."""
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM queue_jobs WHERE state = 'dead_letter'")
+            return cur.fetchone()[0]

@@ -35,6 +35,7 @@ Thumbs.db
 # TGW runtime — never commit live data or secrets
 /config/secrets/
 /config/local/
+secrets/
 *.log
 tgwcatalog.json
 search-catalog.json

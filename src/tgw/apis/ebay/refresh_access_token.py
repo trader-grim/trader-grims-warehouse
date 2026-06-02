@@ -7,26 +7,21 @@ import os
 from pathlib import Path
 from typing import Dict, Any
 
-def get_tgw_paths(config_path: Path) -> Dict[str, Path]:
-    """Load/ensure all *_root paths."""
-    with open(config_path) as f:
-        config = json.load(f)
-    paths = {}
-    for key, value in config.items():
-        if key.endswith('_root'):
-            path = Path(value)
-            path.mkdir(parents=True, exist_ok=True)
-            paths[key] = path
-    return paths
-
 TGW_ROOT = Path(os.getenv('TGW_ROOT', '/opt/TGW'))
-CONFIG_ROOT = TGW_ROOT / 'config'
-TGW_CONFIG_PATH = CONFIG_ROOT / 'tgw-api-config.json'
+TGW_CONFIG_PATH = TGW_ROOT / 'config' / 'tgw-api-config.json'
 
-PATHS = get_tgw_paths(TGW_CONFIG_PATH)
-STATE_PATH = PATHS['state_root'] / 'ebay_token_state.json'
-LOG_PATH = PATHS['log_root'] / 'ebay_token_manager.log'
-# Logging
+def _load_raw_config() -> Dict[str, Any]:
+    with open(TGW_CONFIG_PATH) as f:
+        return json.load(f)
+
+def _secrets_root() -> Path:
+    raw = _load_raw_config()
+    return Path(raw.get('secrets_root', '/opt/TGW/secrets'))
+
+TOKEN_PATH = _secrets_root() / 'ebay-token.json'
+LOG_PATH   = Path(_load_raw_config().get('log_root', '/opt/TGW/runtime/logs')) / 'ebay_token_manager.log'
+LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -37,39 +32,43 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def load_config() -> Dict[str, Any]:
-    with open(TGW_CONFIG_PATH) as f:
-        return json.load(f)
-
-def get_ebay_config(config: Dict[str, Any]) -> Dict[str, Any]:
-    ebay = config.get('ebay', {})
+def get_ebay_config() -> Dict[str, Any]:
+    raw = _load_raw_config()
+    creds_path = Path(raw.get('secrets_root', '/opt/TGW/secrets')) / 'ebay-credentials.json'
+    if not creds_path.exists():
+        raise FileNotFoundError(f'eBay credentials not found: {creds_path}')
+    creds = json.loads(creds_path.read_text())
     env = os.getenv('EBAY_ENV', 'production')
     prefix = 'sandbox_' if env == 'sandbox' else ''
-    app_id = ebay.get(f"{prefix}app_id")
-    cert_id = ebay.get(f"{prefix}cert_id")
-    api_root_ebay = 'https://api.sandbox.ebay.com' if env == 'sandbox' else 'https://api.ebay.com'
-    scopes = ebay.get('scopes', 'https://api.ebay.com/oauth/api_scope')
+    app_id  = creds.get(f'{prefix}app_id')
+    cert_id = creds.get(f'{prefix}cert_id')
     if not app_id or not cert_id:
-        raise ValueError(f"Missing eBay {prefix}app_id/cert_id in config")
-    return {'api_root_ebay': api_root_ebay, 'app_id': app_id, 'cert_id': cert_id, 'scopes': scopes}
+        raise ValueError(f'Missing {prefix}app_id/cert_id in {creds_path}')
+    ebay_cfg = raw.get('ebay', {})
+    return {
+        'api_root_ebay': 'https://api.sandbox.ebay.com' if env == 'sandbox' else 'https://api.ebay.com',
+        'app_id':  app_id,
+        'cert_id': cert_id,
+        'scopes':  ebay_cfg.get('scopes', 'https://api.ebay.com/oauth/api_scope'),
+    }
 
 def load_token_state() -> Dict[str, Any]:
-    if not STATE_PATH.exists():
-        raise ValueError(f"No state at {STATE_PATH}; init via get_access_token")
-    with open(STATE_PATH) as f:
+    if not TOKEN_PATH.exists():
+        raise ValueError(f'No token state at {TOKEN_PATH}; run get_access_token first')
+    with open(TOKEN_PATH) as f:
         return json.load(f)
 
-def save_token_state(state: Dict[str, Any]):
-    with open(STATE_PATH, 'w') as f:
-        json.dump(state, f, indent=2)
+def save_token_state(state: Dict[str, Any]) -> None:
+    TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    TOKEN_PATH.write_text(json.dumps(state, indent=2) + '\n')
+    TOKEN_PATH.chmod(0o600)
 
 def is_token_expired(state: Dict[str, Any]) -> bool:
     expiry = state.get('expiry', 0)
     return time.time() >= expiry - 300  # 5min buffer
 
 def refresh_access_token() -> str:
-    config = load_config()
-    ebay_config = get_ebay_config(config)
+    ebay_config = get_ebay_config()
     state = load_token_state()
 
     if not is_token_expired(state):
@@ -78,7 +77,7 @@ def refresh_access_token() -> str:
 
     logger.info(f"Refreshing via {ebay_config['api_root_ebay']}")
     url = f"{ebay_config['api_root_ebay']}/identity/v1/oauth2/token"
-    auth_b64 = base64.b64encode(f"{ebay_config['app_id']}|{ebay_config['cert_id']}".encode()).decode()
+    auth_b64 = base64.b64encode(f"{ebay_config['app_id']}:{ebay_config['cert_id']}".encode()).decode()
     data = {
         'grant_type': 'refresh_token',
         'refresh_token': state['refresh_token'],
@@ -101,9 +100,8 @@ def refresh_access_token() -> str:
 
 def self_test():
     try:
-        logger.info(f"Paths OK: config={TGW_CONFIG_PATH}, state={STATE_PATH}")
-        config = load_config()
-        ebay_config = get_ebay_config(config)
+        logger.info(f"Paths OK: config={TGW_CONFIG_PATH}, token={TOKEN_PATH}")
+        ebay_config = get_ebay_config()
         logger.info(f"eBay OK: {ebay_config['api_root_ebay'][:21]}...")
         token = refresh_access_token()
         logger.info(f"PASS: token {token[:20]}...")
