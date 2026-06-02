@@ -3,21 +3,19 @@ tgw.workers.multi_intake — Multi-item bundle splitting worker.
 
 Handles zips that contain multiple items, each in a timestamp-named subdir:
   multi/<SKU>/
-    <SKU>.json          ← parent stub (location, template inherited by children)
+    <SKU>.json          ← parent stub (base SKU, location, template)
     data_<ts>.zip       ← zip with subdirs: YYYYMMDDHHMMSS/1.jpg, 2.jpg ...
 
-Each subdir becomes a separate dir-format bundle in newitems/:
-  newitems/<child_SKU>/
-    <child_SKU>.json    ← stub with inherited location/template
-    1.jpg, 2.jpg ...    ← photos
+Child SKUs are derived by incrementing the parent SKU's trailing number:
+  parent tgw202605020017010 → children tgw202605020017010, ...011, ...012
 
-The bundle_intake worker then picks these up through the normal path.
-
-Child SKU format: tgw + YYYYMMDDHHMMSS + 000  (matches tgwYYYYMMDDHHMMSSmmm)
+Each subdir becomes a dir-format bundle in newitems/ that bundle_intake
+picks up through the normal path.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import zipfile
@@ -34,6 +32,8 @@ log = logging.getLogger(__name__)
 QUEUE_NAME     = 'multi_intake'
 IMAGE_SUFFIXES = {'.jpg', '.jpeg', '.png', '.gif', '.webp',
                   '.JPG', '.JPEG', '.PNG'}
+# App-generated artifacts that are not item photos
+_SKIP_NAMES    = {'film.jpg', 'singleShot.jpg', 'exportGif.gif'}
 
 
 def _is_timestamp_dir(name: str) -> bool:
@@ -41,9 +41,16 @@ def _is_timestamp_dir(name: str) -> bool:
     return name.isdigit() and len(name) == 14
 
 
-def _child_sku(ts_dirname: str) -> str:
-    """Convert a YYYYMMDDHHMMSS dirname to a tgwYYYYMMDDHHMMSSmmm SKU."""
-    return f'tgw{ts_dirname}000'
+def _child_skus(base_sku: str, count: int) -> List[str]:
+    """
+    Generate `count` child SKUs by incrementing the numeric suffix of base_sku.
+    tgw202605020017010, count=3 → ['tgw202605020017010', '...011', '...012']
+    """
+    prefix = 'tgw'
+    num_str = base_sku[len(prefix):]
+    base_num = int(num_str)
+    width = len(num_str)
+    return [f'{prefix}{str(base_num + i).zfill(width)}' for i in range(count)]
 
 
 class MultiIntakeWorker(QueueWorker):
@@ -60,44 +67,42 @@ class MultiIntakeWorker(QueueWorker):
                      source_dir)
             return
 
-        # Find stub and zip inside source_dir
         zips = list(source_dir.glob('*.zip'))
         if not zips:
             raise HardFailure(f'no zip found in multi bundle dir: {source_dir}')
         zip_path = zips[0]
 
-        stub_candidates = [f for f in source_dir.glob('*.json')]
         stub_data: Dict[str, Any] = {}
-        if stub_candidates:
-            import json
+        stub_files = list(source_dir.glob('*.json'))
+        if stub_files:
             try:
-                stub_data = json.loads(
-                    stub_candidates[0].read_text(encoding='utf-8')
-                )
+                stub_data = json.loads(stub_files[0].read_text(encoding='utf-8'))
             except Exception:
                 pass
 
+        base_sku = stub_data.get('sku', source_dir.name)
         location = stub_data.get('location', '')
         template = stub_data.get('TEMPLATE', 'default')
         newitems_dir: Path = self.config['newitems_path']
 
-        children = self._extract_items(zip_path, newitems_dir, location, template)
-
+        children = self._extract_items(zip_path, newitems_dir,
+                                       base_sku, location, template)
         shutil.rmtree(source_dir)
 
-        log.info('multi_intake split %s into %d items', zip_path.name, len(children))
+        log.info('multi_intake split %s into %d items: %s',
+                 zip_path.name, len(children), children)
         tgw_logging.log_event('multi_intake_complete',
                               zip_name=zip_path.name,
                               items=len(children),
                               skus=children)
 
     def _extract_items(self, zip_path: Path, newitems_dir: Path,
-                       location: str, template: str) -> List[str]:
-        """Extract each timestamp subdir as a separate newitems bundle."""
-        children: List[str] = []
+                       base_sku: str, location: str,
+                       template: str) -> List[str]:
+        """Extract each timestamp subdir as a separate newitems dir bundle."""
 
         with zipfile.ZipFile(zip_path, 'r') as zf:
-            # Group entries by their top-level subdir
+            # Group members by top-level timestamp subdir, sorted by dir name
             subdirs: Dict[str, List[str]] = {}
             for name in zf.namelist():
                 parts = Path(name).parts
@@ -109,35 +114,32 @@ class MultiIntakeWorker(QueueWorker):
 
             if not subdirs:
                 raise HardFailure(
-                    f'no timestamp subdirs found in {zip_path.name}; '
-                    'cannot split automatically'
+                    f'no timestamp subdirs in {zip_path.name} — cannot auto-split'
                 )
 
-            for ts_dir, members in sorted(subdirs.items()):
-                sku = _child_sku(ts_dir)
-                dest = newitems_dir / sku
-                dest.mkdir(parents=True, exist_ok=True)
+            sorted_dirs = sorted(subdirs.keys())
+            skus = _child_skus(base_sku, len(sorted_dirs))
+            children: List[str] = []
 
-                # Extract images only (skip mp4, gif, singleShot, film)
+            for ts_dir, sku in zip(sorted_dirs, skus):
+                members = subdirs[ts_dir]
                 image_members = [
                     m for m in members
                     if Path(m).suffix.lower() in {s.lower() for s in IMAGE_SUFFIXES}
-                    and Path(m).name not in {'film.jpg', 'singleShot.jpg',
-                                             'exportGif.gif'}
+                    and Path(m).name not in _SKIP_NAMES
                 ]
+                if not image_members:
+                    log.warning('no images in subdir %s — skipping', ts_dir)
+                    continue
+
+                dest = newitems_dir / sku
+                dest.mkdir(parents=True, exist_ok=True)
+
                 for member in image_members:
                     dest_file = dest / Path(member).name
                     with zf.open(member) as src, open(dest_file, 'wb') as dst:
-                        import shutil as _sh
-                        _sh.copyfileobj(src, dst)
+                        shutil.copyfileobj(src, dst)
 
-                if not any(dest.iterdir()):
-                    # No images extracted — remove the empty dir
-                    dest.rmdir()
-                    log.warning('no images in subdir %s, skipping', ts_dir)
-                    continue
-
-                # Write stub JSON for this child
                 stub_path = dest / f'{sku}.json'
                 atomic_write_json(stub_path, {
                     'sku':      sku,
@@ -147,8 +149,8 @@ class MultiIntakeWorker(QueueWorker):
                 }, pretty=self.config.get('pretty', True))
 
                 children.append(sku)
-                log.info('created child bundle %s (%d photos)',
-                         sku, len(image_members))
+                log.info('child bundle %s: %d photos (from zip subdir %s)',
+                         sku, len(image_members), ts_dir)
 
         return children
 
