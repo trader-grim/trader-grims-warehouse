@@ -32,10 +32,10 @@ import tgw.logging as tgw_logging
 log = logging.getLogger(__name__)
 
 QUEUE_NAME   = 'ai_identify'
-VISION_MODEL = 'moondream:latest'
+VISION_MODEL = 'qwen2.5vl:7b'
 
 _IMAGE_SUFFIXES  = {'.jpg', '.jpeg', '.png', '.JPG', '.JPEG', '.PNG'}
-_VISION_MAX_PX   = 256   # moondream is 1.7B — small image keeps it fast on CPU
+_VISION_MAX_PX   = 512   # 56KB resized; model loads in ~10 min cold, ~18s warm
 
 _SYSTEM_PROMPT = """\
 You are an eBay listing assistant. You will be shown a photo of an item for sale.
@@ -43,12 +43,18 @@ Respond with valid JSON only — no prose, no markdown fences.
 """
 
 _USER_PROMPT = """\
-What is this item? Provide an eBay listing in JSON:
+Look at this item photo and provide:
+- A concise, descriptive eBay-style title (under 80 characters)
+- The most likely eBay category name (plain English, e.g. "Board Games", "Action Figures")
+- A 1-2 sentence description of what the item appears to be
+- Your best guess at condition: "New", "Like New", "Very Good", "Good", "Acceptable"
+
+Respond with JSON:
 {
-  "title": "concise eBay title under 80 chars",
-  "category": "eBay category name",
-  "description": "1-2 sentence description",
-  "condition": "New|Like New|Very Good|Good|Acceptable"
+  "title": "...",
+  "category": "...",
+  "description": "...",
+  "condition": "..."
 }
 """
 
@@ -80,6 +86,24 @@ def _encode_resized(img_path: Path, max_px: int = _VISION_MAX_PX) -> tuple[str, 
 
 
 class AIIdentifyWorker(QueueWorker):
+
+    def run(self) -> None:
+        self._warmup()
+        super().run()
+
+    def _warmup(self) -> None:
+        """Pre-load the vision model into Ollama's memory at startup."""
+        import requests as _req
+        log.info('warming up %s (cold load may take several minutes)...', VISION_MODEL)
+        tgw_logging.log_event('ai_identify_warmup_start', model=VISION_MODEL)
+        try:
+            _req.post('http://localhost:11434/api/generate',
+                      json={'model': VISION_MODEL, 'prompt': '', 'stream': False},
+                      timeout=1200)
+            log.info('%s warm-up complete', VISION_MODEL)
+            tgw_logging.log_event('ai_identify_warmup_complete', model=VISION_MODEL)
+        except Exception as exc:
+            log.warning('warm-up failed (will retry on first job): %s', exc)
 
     def handle(self, job: Dict[str, Any]) -> None:
         payload = job.get('payload_json') or {}
