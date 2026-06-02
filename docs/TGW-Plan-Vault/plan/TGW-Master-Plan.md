@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-01
+updated: 2026-06-02
 maintained_by: Opus (planner)
 ---
 
@@ -60,43 +60,46 @@ maintained_by: Opus (planner)
 - Platform layer: config, resolver, items, catalog, logging, notify, health
 - tgw-api split into config/resolver/items/catalog/api modules
 - Output-contract bug fixed (list now wrapped in ok/count/items)
-- State machine schema applied + smoke-tested on the HP box
+- State machine schema applied and wired to live PostgreSQL (`state_machine` db)
 - Backup service running (inotify + rsync hardlink snapshots)
-- eBay OAuth get/refresh working; token kept alive by a cron job (do not remove yet)
 - 19+ unit tests passing; GitHub private repo live
-- SQLite catalog (`tgwcatalog.db`) built alongside JSON artifacts — 55,347 items, queryable by sku/title/location/status/price; `tgw build-sqlite` and included in `tgw build-all`
-- Thumbnail cache module built (`tgw build-thumbnails`); requires Pillow install to activate
-### Running but to be retired
-- queue-launcher spawning filesystem workers that do no useful work
-- old filesystem queue system (worked, but superseded by state-machine design)
-### Built but unwired
-- PostgreSQL state machine (schema.sql + state_machine.py) — connected to nothing yet
+- SQLite catalog (`tgwcatalog.db`) — 55,347 items; `tgw build-sqlite` + `tgw build-all`
+- Thumbnail cache — 54,310 thumbnails at `catalog_root/thumbnails/`; `tgw build-thumbnails`
+- **Phase 1 COMPLETE** — secrets_root, QueueWorker base + HardFailure pattern, echo worker, systemd `tgw-worker@.service` template, health extended (Postgres + SQLite + thumbnails), old launcher retired
+- **Phase 2a COMPLETE — observation phase** — token_refresh worker live under systemd; OAuth token active (expires ~2h, auto-refreshes); expiry-based self-reschedule; running alongside eBay cron
+### Phase 2a observation gate (do not retire cron until cleared)
+- `tgw-worker@token_refresh.service` active; queue self-perpetuating
+- Gate: confirm one full expiry+refresh cycle in journal, then retire `ebay_api_token_refresh` cron
+### Retired this session
+- `queue-launcher.service` disabled; stub in code preserves the console script
+- Filesystem `.queue_worker` / `.queue_worker_config` discovery removed from all code
+- eBay credentials removed from `tgw-api-config.json`; now in `secrets_root`
 
-## Phase 1 — Queue foundation
-### 1.0 secrets_root migration (prerequisite — do first)
+## Phase 1 — Queue foundation ✅ COMPLETE (2026-06-02)
+### 1.0 secrets_root migration ✅
 - Add `secrets_root` key to `tgw-api-config.json`; join existing `get_tgw_paths()` auto-creates
 - Create `/opt/TGW/secrets/` outside repo tree; `chmod 700`, files `chmod 600`, owner `tgw`
 - Move existing secret files in; update token manager and health to resolve from `secrets_root`
 - Fix health path bug: `tgw health` and token manager must read/write the same file
 - Add `secrets/` to `.gitignore` (belt-and-suspenders)
 - Verify: `tgw health` shows token status green; no hardcoded secret paths remain in `src/`
-### 1a. Echo worker (reference implementation)
+### 1a. Echo worker ✅
 - Build `QueueWorker` base class: claim → do → complete/fail loop
 - Build no-op echo worker subclassing it (proves plumbing, zero business risk)
 - Wire to PostgreSQL claim_queue_jobs / mark_succeeded / mark_failed
 - Verify: insert job → worker leases → completes → state correct
 - Verify: kill mid-job → lease expires → recover_expired_jobs requeues
 - systemd templated unit wiring: `tgw-worker@echo.service`
-### 1b. Startup ordering + health
+### 1b. Startup ordering + health ✅
 - systemd: workers depend on postgresql.service being up
 - Extend `tgw health` to check Postgres reachability + queue depth
 - Wire tgw.logging into the worker base (every claim/complete logged)
-### 1c. Retire the old path
+### 1c. Retire the old path ✅
 - Remove filesystem `.job.json` discovery from launcher
 - Retire dead queue symlinks and the old launcher once echo proven
 
 ## Phase 2 — First real workers
-### 2a. Token refresh worker (first state-machine worker)
+### 2a. Token refresh worker ✅ (observation phase — cron still running)
 - Prerequisite: Phase 1.0 secrets_root complete; run initial OAuth once on production machine
 - On claim: check token expiry; if within buffer → refresh; on success → `succeeded` + reschedule
 - Transient failure (network, eBay 5xx) → `retry_wait` with backoff
