@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 _BASE = 'http://localhost:11434'
-_DEFAULT_TIMEOUT = 180  # seconds; generation can be slow on CPU
+_DEFAULT_TIMEOUT = 600  # seconds; CPU-only inference on large prompts can be slow
 
 
 def _post(path: str, payload: Dict[str, Any], timeout: int) -> Dict[str, Any]:

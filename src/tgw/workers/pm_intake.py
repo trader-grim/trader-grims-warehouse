@@ -54,12 +54,12 @@ Rules:
 """
 
 _USER_TEMPLATE = """\
-## Current TGW Master Plan
-{plan}
+## TGW Master Plan — Structure (headings only)
+{plan_headings}
 
 ---
 
-## Inbox Note: {filename}
+## Inbox Note: {filename}{truncation_note}
 {note}
 
 ---
@@ -76,6 +76,19 @@ Respond with JSON:
   "rationale": "<1-2 sentences explaining the decision>"
 }}
 """
+
+_NOTE_MAX_CHARS = 4000
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _archive(note_path: Path, processed_dir: Path) -> None:
+    ts = datetime.now(tz=timezone.utc).strftime('%Y%m%dT%H%M%S')
+    archive_path = processed_dir / f'{ts}-{note_path.name}'
+    shutil.move(str(note_path), archive_path)
+    log.info('archived %s → processed/%s', note_path.name, archive_path.name)
 
 
 # ---------------------------------------------------------------------------
@@ -206,19 +219,36 @@ class PMIntakeWorker(QueueWorker):
             tgw_logging.log_event('pm_intake_note_missing', filename=filename)
             return
 
-        note_text    = note_path.read_text(encoding='utf-8')
+        note_text    = note_path.read_text(encoding='utf-8').strip()
         plan_text    = master_plan_path.read_text(encoding='utf-8')
+
+        # Empty note — nothing to do
+        if not note_text:
+            log.info('note %s is empty — archiving with no_change', filename)
+            tgw_logging.log_event('pm_intake_empty_note', filename=filename)
+            _archive(note_path, processed_dir)
+            return
+
+        # Build a compact prompt: headings-only plan + truncated note
+        plan_headings = '\n'.join(
+            line for line in plan_text.splitlines() if line.startswith('#')
+        )
+        truncated = len(note_text) > _NOTE_MAX_CHARS
+        note_excerpt = note_text[:_NOTE_MAX_CHARS]
+        truncation_note = f' (truncated to {_NOTE_MAX_CHARS} chars of {len(note_text)} total)' if truncated else ''
 
         if not is_available(OLLAMA_MODEL):
             raise RuntimeError(f'Ollama unavailable or model {OLLAMA_MODEL!r} not found')
 
-        log.info('calling Ollama (%s) for %s', OLLAMA_MODEL, filename)
-        tgw_logging.log_event('pm_intake_ollama_call', filename=filename, model=OLLAMA_MODEL)
+        log.info('calling Ollama (%s) for %s (%d chars)', OLLAMA_MODEL, filename, len(note_excerpt))
+        tgw_logging.log_event('pm_intake_ollama_call', filename=filename, model=OLLAMA_MODEL,
+                              note_chars=len(note_excerpt), truncated=truncated)
 
         prompt = _USER_TEMPLATE.format(
-            plan=plan_text,
+            plan_headings=plan_headings,
             filename=filename,
-            note=note_text,
+            truncation_note=truncation_note,
+            note=note_excerpt,
         )
         raw_response = chat(
             model=OLLAMA_MODEL,
@@ -275,13 +305,8 @@ class PMIntakeWorker(QueueWorker):
         else:
             raise HardFailure(f'unknown action {action!r} from Ollama for {filename}')
 
-        # Archive the processed file
-        ts = datetime.now(tz=timezone.utc).strftime('%Y%m%dT%H%M%S')
-        archive_path = processed_dir / f'{ts}-{filename}'
-        shutil.move(str(note_path), archive_path)
-        log.info('archived %s → processed/%s', filename, archive_path.name)
-        tgw_logging.log_event('pm_intake_archived',
-                              filename=filename, archived_as=archive_path.name)
+        _archive(note_path, processed_dir)
+        tgw_logging.log_event('pm_intake_archived', filename=filename)
 
 
 def main() -> int:
