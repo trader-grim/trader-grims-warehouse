@@ -13,6 +13,7 @@ re-run; will not overwrite a title that has already been set by a human.
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
 import time
@@ -33,7 +34,8 @@ log = logging.getLogger(__name__)
 QUEUE_NAME   = 'ai_identify'
 VISION_MODEL = 'qwen2.5vl:7b'
 
-_IMAGE_SUFFIXES = {'.jpg', '.jpeg', '.png', '.JPG', '.JPEG', '.PNG'}
+_IMAGE_SUFFIXES  = {'.jpg', '.jpeg', '.png', '.JPG', '.JPEG', '.PNG'}
+_VISION_MAX_PX   = 512   # longest edge sent to the vision model
 
 _SYSTEM_PROMPT = """\
 You are an eBay listing assistant. You will be shown a photo of an item for sale.
@@ -63,6 +65,24 @@ def _primary_image(sku_dir: Path) -> Optional[Path]:
         if p.is_file() and p.suffix in _IMAGE_SUFFIXES
     )
     return candidates[0] if candidates else None
+
+
+def _encode_resized(img_path: Path, max_px: int = _VISION_MAX_PX) -> tuple[str, int, int]:
+    """Return (base64_str, orig_kb, resized_kb) with image resized to max_px longest edge."""
+    try:
+        from PIL import Image
+    except ImportError:
+        # Pillow not installed — send raw (slow but functional)
+        data = img_path.read_bytes()
+        return base64.b64encode(data).decode(), len(data) // 1024, len(data) // 1024
+
+    orig_kb = img_path.stat().st_size // 1024
+    with Image.open(img_path) as img:
+        img.thumbnail((max_px, max_px), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.convert('RGB').save(buf, format='JPEG', quality=85)
+    data = buf.getvalue()
+    return base64.b64encode(data).decode(), orig_kb, len(data) // 1024
 
 
 class AIIdentifyWorker(QueueWorker):
@@ -97,12 +117,12 @@ class AIIdentifyWorker(QueueWorker):
         if not is_available(VISION_MODEL):
             raise RuntimeError(f'Ollama unavailable or model {VISION_MODEL!r} not found')
 
-        img_b64 = base64.b64encode(img_path.read_bytes()).decode()
+        img_b64, orig_kb, resized_kb = _encode_resized(img_path)
 
-        log.info('calling %s for %s (image: %s, %d KB)',
-                 VISION_MODEL, sku, img_path.name, img_path.stat().st_size // 1024)
+        log.info('calling %s for %s (image: %s, %dKB → %dKB at %dpx)',
+                 VISION_MODEL, sku, img_path.name, orig_kb, resized_kb, _VISION_MAX_PX)
         tgw_logging.log_event('ai_identify_call', sku=sku, model=VISION_MODEL,
-                              image=img_path.name)
+                              image=img_path.name, orig_kb=orig_kb, resized_kb=resized_kb)
 
         import requests
         resp = requests.post(
