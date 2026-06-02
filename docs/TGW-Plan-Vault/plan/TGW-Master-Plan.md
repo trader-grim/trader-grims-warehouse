@@ -117,14 +117,34 @@ maintained_by: Opus (planner)
 - Folder-drop intake: drop a `.md` file in `inbox/` → PM-intake worker files it (Phase 2b)
 
 ## Phase 3 — Camera-intake pipeline
-### Onto a doubly-proven foundation
-- 3a. inotify/Syncthing detect stable camera bundle arrival
-- 3b. Move bundle to `ItemData/<SKU>/`, lock item
-- 3c. Local AI identify (qwen2.5vl:7b) — offline path
-- 3d. Online path: eBay Taxonomy → category, Media API → image refs
-- 3e. AI fills eBay specifics; create/update draft; write back to item JSON
-- 3f. Offline path: write draft CSV for later upload
-- 3g. After item JSON written: enqueue `catalog-rebuild` job (coalesced, `not_before +30s`) + `thumbnail-gen` job for this SKU
+### 3a. Bundle detection + intake ✅ COMPLETE (2026-06-02)
+- `incoming/newitems/<SKU>/` — per-item dir with stub JSON + photos (any camera names)
+- `incoming/newitems/<SKU>.zip` — single-item zip inside SKU dir
+- `incoming/newitems/multi/<SKU>/` — multi-item zip; split by timestamp subdirs
+- Stability gate: all files unmodified for 30s (Syncthing safe)
+- Workers: `bundle_intake`, `multi_intake`
+### 3b. Move to ItemData ✅ COMPLETE (2026-06-02)
+- Photos moved to `ItemData/<SKU>/`; canonical `<SKU>.json` written with stub fields
+- Multi-item split: child SKUs = parent SKU + sequential increment (tgw...010 → ...011, ...012)
+- Downstream: enqueues `catalog_rebuild` (coalesced 30s), `thumbnail_gen`, `ai_identify`
+- Workers: `catalog_rebuild`, `thumbnail_gen`
+### 3c. Local AI identify (qwen2.5vl:7b) ✅ COMPLETE (2026-06-02)
+- Sends resized primary photo (512px, ~56KB) to `qwen2.5vl:7b` via Ollama
+- Returns title, category, description, condition as JSON; writes to item JSON
+- Cold-start: model loads in ~10 min; subsequent calls ~18s — worker pre-warms on startup
+- Skips items with existing non-empty title (human override respected)
+- Worker: `ai_identify`; `ai_identified: true` flag written to JSON
+### 3d. Online path: eBay Taxonomy → category
+- Query eBay Taxonomy API with AI-identified category string → get categoryId
+- Store `ebay_category_id` in item JSON
+### 3e. AI fills eBay specifics; create/update draft
+- Use categoryId to fetch required/recommended item specifics from eBay
+- AI fills specifics from item description + photos; write draft listing to item JSON
+### 3f. Offline path: write draft CSV for later upload
+- If eBay unreachable: write CSV row with known fields for manual upload
+### 3g. Downstream catalog jobs ✅ COMPLETE (2026-06-02)
+- `catalog_rebuild` job (coalesced, `not_before +30s`) enqueued after every write
+- `thumbnail_gen` job (per-SKU) enqueued after intake
 
 ## Phase 4 — eBay pipeline buildout
 - 4a. eBay photo uploader (`src/tgw/ebay/upload.py`) — after upload, enqueue `thumbnail-gen` for the SKU (local photos are source of truth; eBay URLs do not replace them)
