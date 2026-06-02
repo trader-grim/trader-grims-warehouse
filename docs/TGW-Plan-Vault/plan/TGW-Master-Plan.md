@@ -68,6 +68,7 @@ maintained_by: Opus (planner)
 - **Phase 1 COMPLETE** — secrets_root, QueueWorker base + HardFailure pattern, echo worker, systemd `tgw-worker@.service` template, health extended (Postgres + SQLite + thumbnails), old launcher retired
 - **Phase 2a COMPLETE — observation phase** — token_refresh worker live under systemd; OAuth token active (expires ~2h, auto-refreshes); expiry-based self-reschedule; running alongside eBay cron
 - **Phase 2b COMPLETE** — PM-intake worker live under systemd; watches `inbox/`, calls `Qwen2.5:latest` via Ollama, patches Master Plan, archives notes; `tgw/apis/ollama.py` client added
+- **Phase 2c COMPLETE** — `tgw suggest "..."` appends timestamped entries to `suggestions/SUGGESTIONS.md`
 - **State-machine bug fixed** — `recover_expired_jobs()` now promotes `retry_wait` jobs back to `queued` when `not_before` passes; previously transient failures left jobs stuck indefinitely
 ### Phase 2a observation gate (do not retire cron until cleared)
 - `tgw-worker@token_refresh.service` active; queue self-perpetuating
@@ -116,9 +117,9 @@ maintained_by: Opus (planner)
 - Updates this Master Plan file; idempotent, safe to re-run, logs every change
 - Notes truncated to 4000 chars; plan sent as headings-only (CPU-only machine — use sparingly)
 - `tgw/apis/ollama.py` — reusable client for all future Ollama workers
-### 2c. tgw suggest + plan intake
-- `tgw suggest "..."` appends to `suggestions/` for next planning session
-- Folder-drop intake: drop a plan doc → filed into the right plan section
+### 2c. tgw suggest + plan intake ✅ COMPLETE (2026-06-02)
+- `tgw suggest "..."` appends `- [ ] TIMESTAMP :: text` to `suggestions/SUGGESTIONS.md`
+- Folder-drop intake: drop a `.md` file in `inbox/` → PM-intake worker files it (Phase 2b)
 
 ## Phase 3 — Camera-intake pipeline
 ### Onto a doubly-proven foundation

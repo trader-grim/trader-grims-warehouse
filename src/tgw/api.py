@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -210,7 +211,20 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--no-ebay', action='store_true',
                    help='skip eBay token check')
 
+    p = sub.add_parser('suggest', help='append a suggestion for the next planning session')
+    p.add_argument('text', nargs='+', help='suggestion text')
+
     return parser
+
+
+def cmd_suggest(cfg: Dict[str, Any], text: str) -> Dict[str, Any]:
+    suggestions_file = cfg['plan_vault_path'] / 'suggestions' / 'SUGGESTIONS.md'
+    suggestions_file.parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(tz=timezone.utc).strftime('%Y-%m-%dT%H:%M')
+    line = f'- [ ] {ts} :: {text}\n'
+    with suggestions_file.open('a', encoding='utf-8') as f:
+        f.write(line)
+    return {'ok': True, 'written': line.strip(), 'file': str(suggestions_file)}
 
 
 def main() -> int:
@@ -322,6 +336,9 @@ def main() -> int:
             result = check_all(cfg,
                                include_ollama=not args.no_ollama,
                                include_ebay=not args.no_ebay)
+
+        elif args.op == 'suggest':
+            result = cmd_suggest(cfg, ' '.join(args.text))
 
         else:
             result = {'ok': False, 'error': f'unknown op: {args.op!r}'}
