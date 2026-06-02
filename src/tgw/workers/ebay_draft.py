@@ -54,7 +54,11 @@ def _build_prompt(item: Dict[str, Any], aspects: List[Dict[str, Any]]) -> str:
     for a in aspects:
         req = ' (REQUIRED)' if a['required'] else ''
         if a['allowed_values']:
-            vals = ', '.join(a['allowed_values'][:10])
+            av = a['allowed_values']
+            if len(av) <= 30:
+                vals = ', '.join(av)
+            else:
+                vals = ', '.join(av[:30]) + f' ... ({len(av)} total)'
             lines.append(f'  {a["name"]}{req}: choose from [{vals}]')
         else:
             lines.append(f'  {a["name"]}{req}: free text')
