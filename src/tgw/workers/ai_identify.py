@@ -32,10 +32,10 @@ import tgw.logging as tgw_logging
 log = logging.getLogger(__name__)
 
 QUEUE_NAME   = 'ai_identify'
-VISION_MODEL = 'qwen2.5vl:7b'
+VISION_MODEL = 'moondream:latest'
 
 _IMAGE_SUFFIXES  = {'.jpg', '.jpeg', '.png', '.JPG', '.JPEG', '.PNG'}
-_VISION_MAX_PX   = 512   # longest edge sent to the vision model
+_VISION_MAX_PX   = 256   # moondream is 1.7B — small image keeps it fast on CPU
 
 _SYSTEM_PROMPT = """\
 You are an eBay listing assistant. You will be shown a photo of an item for sale.
@@ -43,18 +43,12 @@ Respond with valid JSON only — no prose, no markdown fences.
 """
 
 _USER_PROMPT = """\
-Look at this item photo and provide:
-- A concise, descriptive eBay-style title (under 80 characters)
-- The most likely eBay category name (plain English, e.g. "Board Games", "Action Figures")
-- A 1-2 sentence description of what the item appears to be
-- Your best guess at condition: "New", "Like New", "Very Good", "Good", "Acceptable"
-
-Respond with JSON:
+What is this item? Provide an eBay listing in JSON:
 {
-  "title": "...",
-  "category": "...",
-  "description": "...",
-  "condition": "..."
+  "title": "concise eBay title under 80 chars",
+  "category": "eBay category name",
+  "description": "1-2 sentence description",
+  "condition": "New|Like New|Very Good|Good|Acceptable"
 }
 """
 
