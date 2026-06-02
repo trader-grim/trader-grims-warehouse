@@ -70,9 +70,9 @@ maintained_by: Opus (planner)
 - **Phase 2b COMPLETE** — PM-intake worker live under systemd; watches `inbox/`, calls `Qwen2.5:latest` via Ollama, patches Master Plan, archives notes; `tgw/apis/ollama.py` client added
 - **Phase 2c COMPLETE** — `tgw suggest "..."` appends timestamped entries to `suggestions/SUGGESTIONS.md`
 - **State-machine bug fixed** — `recover_expired_jobs()` now promotes `retry_wait` jobs back to `queued` when `not_before` passes; previously transient failures left jobs stuck indefinitely
-### Phase 2a observation gate (do not retire cron until cleared)
-- `tgw-worker@token_refresh.service` active; queue self-perpetuating
-- Gate: confirm one full expiry+refresh cycle in journal, then retire `ebay_api_token_refresh` cron
+### Phase 2a observation gate ✅ CLEARED 2026-06-02
+- `ebay_token_refreshed` observed at 12:07 — full expiry+refresh cycle confirmed
+- No separate cron existed to retire; worker is sole token manager
 ### Retired this session
 - `queue-launcher.service` disabled; stub in code preserves the console script
 - Filesystem `.queue_worker` / `.queue_worker_config` discovery removed from all code
@@ -102,14 +102,9 @@ maintained_by: Opus (planner)
 - Retire dead queue symlinks and the old launcher once echo proven
 
 ## Phase 2 — First real workers
-### 2a. Token refresh worker ✅ (observation phase — cron still running)
-- Prerequisite: Phase 1.0 secrets_root complete; run initial OAuth once on production machine
-- On claim: check token expiry; if within buffer → refresh; on success → `succeeded` + reschedule
-- Transient failure (network, eBay 5xx) → `retry_wait` with backoff
-- Hard failure (refresh token dead) → `dead_letter` + `notify()` — human re-consent required
-- Self-reschedule on success: enqueue next run at `not_before = now + interval`
-- Run alongside existing eBay cron; observe across one full expiry cycle before retiring cron
-- Gate: cron retired only after one observed expiry+refresh cycle confirms the worker is reliable
+### 2a. Token refresh worker ✅ COMPLETE (gate cleared 2026-06-02)
+- Self-schedules based on token expiry; refreshes when ≤30 min remain
+- Transient failure → `retry_wait`; hard failure (dead refresh token) → `dead_letter` + notify
 - Template for everything after: claim → lease → run → succeed/retry/dead_letter → reschedule
 ### 2b. PM-intake worker ✅ COMPLETE (2026-06-02)
 - Watches `inbox/` — a dropped note enqueues a job
@@ -230,3 +225,21 @@ maintained_by: Opus (planner)
 - Where does the Ollama lock live — in the job manager worker or a Postgres advisory lock? (Phase 5 decision)
 - PP-ADD-001 conflict resolution policy: last-write-wins vs. manual review (decide before Phase 6 dev)
 - Thumbnail cache: install Pillow (`pip install Pillow` or `pip install trader-grims-warehouse[thumbnails]`) then run `tgw build-thumbnails`
+
+- **PP-ADD-001 Satellite / Client Operation --- Disconnected Catalog Support**
+  - **Project Details**
+    - **Project ID**: PP-ADD-001
+    - **Priority**: High
+    - **Estimated Effort**: Large (4--6 weeks)
+    - **Phase / Track**: Infrastructure
+    - **Dependencies**: Master catalog schema, SKU normalization (PP-ADD-005), History module (PP-ADD-003)
+  - **Overview**
+    - Enable satellite/client nodes to operate independently when disconnected or loosely connected from the master system. Includes thumbnail generation for catalog browsing, temporary catalog update handling, and a defined data migration path to promote local changes back to master.
+
+- ## Phase 7 — Vault Synchronization
+- ### Syncthing Configuration
+- #### Why This Matters
+- #### Decision: Syncthing for Vault Sync
+- #### tgw-Specific Conflict Resolution Protocol
+- #### Optional: Git Backing for Version History
+- #### Constraints Carried Forward (New)

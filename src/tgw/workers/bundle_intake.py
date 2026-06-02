@@ -320,6 +320,17 @@ class BundleIntakeWorker(QueueWorker):
         except psycopg2.errors.UniqueViolation:
             pass
 
+        # ai_identify: vision model identification, immediate
+        try:
+            state_machine.enqueue_job(
+                queue_name='ai_identify',
+                payload={'sku': sku},
+                dedupe_key=f'ai_identify:{sku}',
+                max_attempts=3,
+            )
+        except psycopg2.errors.UniqueViolation:
+            pass
+
 
 def main() -> int:
     import argparse
