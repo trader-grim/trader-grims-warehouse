@@ -184,11 +184,12 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Requeue expired leases.
+-- Requeue expired leases and promote mature retry_wait jobs.
 CREATE OR REPLACE FUNCTION recover_expired_jobs()
 RETURNS INTEGER AS $$
 DECLARE
     v_count INTEGER;
+    v_retry INTEGER;
 BEGIN
     UPDATE queue_jobs
        SET state = CASE
@@ -204,12 +205,27 @@ BEGIN
                ELSE NOW()
            END,
            error_code = COALESCE(error_code, 'LEASE_EXPIRED'),
-           error_detail = COALESCE(error_detail, 'Lease expired before completion')
+           error_detail = COALESCE(error_detail, 'Lease expired before completion'),
+           finished_at = CASE
+               WHEN attempt_count >= max_attempts THEN NOW()
+               ELSE finished_at
+           END
      WHERE state IN ('leased', 'running')
        AND lease_expires_at IS NOT NULL
        AND lease_expires_at < NOW();
 
     GET DIAGNOSTICS v_count = ROW_COUNT;
-    RETURN v_count;
+
+    -- Promote retry_wait jobs whose not_before has passed back to queued
+    UPDATE queue_jobs
+       SET state = 'queued'::queue_job_state,
+           not_before = NULL
+     WHERE state = 'retry_wait'
+       AND not_before IS NOT NULL
+       AND not_before <= NOW();
+
+    GET DIAGNOSTICS v_retry = ROW_COUNT;
+
+    RETURN v_count + v_retry;
 END;
 $$ LANGUAGE plpgsql;

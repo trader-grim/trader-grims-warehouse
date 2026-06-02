@@ -272,6 +272,7 @@ CREATE FUNCTION public.recover_expired_jobs() RETURNS integer
     AS $$
 DECLARE
     v_count INTEGER;
+    v_retry INTEGER;
 BEGIN
     UPDATE queue_jobs
        SET state = CASE
@@ -297,7 +298,17 @@ BEGIN
        AND lease_expires_at < NOW();
 
     GET DIAGNOSTICS v_count = ROW_COUNT;
-    RETURN v_count;
+
+    UPDATE queue_jobs
+       SET state = 'queued'::queue_job_state,
+           not_before = NULL
+     WHERE state = 'retry_wait'
+       AND not_before IS NOT NULL
+       AND not_before <= NOW();
+
+    GET DIAGNOSTICS v_retry = ROW_COUNT;
+
+    RETURN v_count + v_retry;
 END;
 $$;
 
