@@ -134,12 +134,14 @@ maintained_by: Opus (planner)
 - Cold-start: model loads in ~10 min; subsequent calls ~18s — worker pre-warms on startup
 - Skips items with existing non-empty title (human override respected)
 - Worker: `ai_identify`; `ai_identified: true` flag written to JSON
-### 3d. Online path: eBay Taxonomy → category
-- Query eBay Taxonomy API with AI-identified category string → get categoryId
-- Store `ebay_category_id` in item JSON
-### 3e. AI fills eBay specifics; create/update draft
-- Use categoryId to fetch required/recommended item specifics from eBay
-- AI fills specifics from item description + photos; write draft listing to item JSON
+### 3d. Online path: eBay Taxonomy → category ✅ COMPLETE (2026-06-02)
+- `apis/ebay/client.py` — shared auth'd GET/POST for all eBay REST calls
+- `apis/ebay/taxonomy.py` — category suggestions; tries title first, falls back to AI category string
+- `ebay_category_id` + `ebay_category_name` written to item JSON
+### 3e. AI fills eBay specifics; create/update draft ✅ COMPLETE (2026-06-02)
+- `apis/ebay/specifics.py` — fetches aspects for a categoryId, filters boilerplate
+- `workers/ebay_draft.py` — Qwen2.5 fills SELECTION_ONLY + FREE_TEXT aspects, validates choices
+- `draft_listing` block written to item JSON: title, categoryId, condition, format, quantity, price=null, item_specifics, description
 ### 3f. Offline path: write draft CSV for later upload
 - If eBay unreachable: write CSV row with known fields for manual upload
 ### 3g. Downstream catalog jobs ✅ COMPLETE (2026-06-02)
