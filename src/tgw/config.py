@@ -54,6 +54,7 @@ def load_config(path: Path) -> Dict[str, Any]:
     secrets_root   = p('secrets_root',   '/opt/TGW/secrets')
     itemdata_root  = p('itemdata_root',  '/opt/TGW/data/ItemData')
     catalog_root   = p('catalog_root',   '/opt/TGW/data/ItemCatalog')
+    plan_vault_path = p('plan_vault_path', '/opt/TGW/src/trader-grims-warehouse/docs/TGW-Plan-Vault')
 
     full_catalog_path        = p('full_catalog_path',        str(catalog_root / 'tgwcatalog.json'))
     search_catalog_path      = p('search_catalog_path',      str(catalog_root / 'search-catalog.json'))
@@ -95,6 +96,9 @@ def load_config(path: Path) -> Dict[str, Any]:
         'required':                required,
         'pretty':                  pretty,
         'skip_missing':            skip_missing,
+        'plan_vault_path':         plan_vault_path,
+        'plan_inbox_path':         plan_vault_path / 'inbox',
+        'plan_master_path':        plan_vault_path / 'plan' / 'TGW-Master-Plan.md',
         'raw':                     raw,
     }
 
