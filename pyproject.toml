@@ -30,6 +30,9 @@ tgw-queue-launcher = "tgw.queue.launcher:main"
 tgw-echo-worker           = "tgw.workers.echo:main"
 tgw-token-worker          = "tgw.workers.token_refresh:main"
 tgw-pm-intake-worker      = "tgw.workers.pm_intake:main"
+tgw-bundle-intake-worker  = "tgw.workers.bundle_intake:main"
+tgw-catalog-rebuild-worker = "tgw.workers.catalog_rebuild:main"
+tgw-thumbnail-gen-worker  = "tgw.workers.thumbnail_gen:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

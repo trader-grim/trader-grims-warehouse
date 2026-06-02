@@ -24,6 +24,31 @@ except ImportError:
 from .resolver import find_item_jsons, load_item_doc
 
 
+def build_thumbnail_for_sku(cfg: Dict[str, Any], sku: str) -> Dict[str, Any]:
+    """Generate the thumbnail for a single SKU. Returns {ok, sku, action}."""
+    if not _PILLOW:
+        return {'ok': False, 'sku': sku, 'error': 'Pillow not installed'}
+    sku_dir: Path = cfg['itemdata_root'] / sku
+    json_path = sku_dir / f'{sku}.json'
+    if not json_path.exists():
+        return {'ok': False, 'sku': sku, 'error': 'item JSON not found'}
+    doc = load_item_doc(json_path)
+    img_path = _primary_image(sku_dir, str(doc.get('image', '')))
+    if img_path is None:
+        return {'ok': True, 'sku': sku, 'action': 'skipped', 'reason': 'no image'}
+    thumb_root: Path = cfg['thumbnail_root']
+    thumb_path = thumb_root / f'{sku}.jpg'
+    if (thumb_path.exists() and
+            thumb_path.stat().st_mtime >= img_path.stat().st_mtime):
+        return {'ok': True, 'sku': sku, 'action': 'skipped', 'reason': 'up to date'}
+    thumb_root.mkdir(parents=True, exist_ok=True)
+    size: Tuple[int, int] = tuple(cfg['thumbnail_size'])
+    with Image.open(img_path) as img:
+        img.thumbnail(size)
+        img.convert('RGB').save(thumb_path, 'JPEG', quality=85)
+    return {'ok': True, 'sku': sku, 'action': 'generated', 'thumb': str(thumb_path)}
+
+
 def _primary_image(sku_dir: Path, image_field: str) -> Optional[Path]:
     if image_field:
         candidate = sku_dir / Path(image_field).name

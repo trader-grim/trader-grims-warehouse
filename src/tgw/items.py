@@ -39,6 +39,23 @@ def atomic_write_json(path: Path, data: Any, pretty: bool = True) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Item creation
+# ---------------------------------------------------------------------------
+
+def create_item(cfg: Dict[str, Any], sku: str, data: Dict[str, Any]) -> Path:
+    """
+    Write a new item JSON. Raises if the item already exists.
+    Returns the path written.
+    """
+    path = sku_json(cfg, sku)
+    if path.exists():
+        raise FileExistsError(f'item already exists: {path}')
+    record = {'sku': sku, **data}
+    atomic_write_json(path, record, pretty=cfg.get('pretty', True))
+    return path
+
+
+# ---------------------------------------------------------------------------
 # Single item read (with media discovery)
 # ---------------------------------------------------------------------------
 
