@@ -45,3 +45,7 @@ tgwcatalog.csv
 # Large catalog files
 catalog.migrated.json
 catalog.migrated.json.bak
+
+# PM-intake runtime dirs
+docs/TGW-Plan-Vault/inbox/processed/
+docs/TGW-Plan-Vault/inbox/queued/
