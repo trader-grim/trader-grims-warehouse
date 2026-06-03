@@ -286,10 +286,53 @@ maintained_by: Opus (planner)
 - Writes `ebay_offer` block: {price, price_source, price_comps {count,min,p25,median,max}, priced_at}
 - Also sets `draft_listing.price` so `ebay_publish` can read it directly
 - Idempotent: skips items already priced in `ebay_offer.price`
-- **Finding API (findCompletedItems) unavailable** — blocked at this app tier (errorId 10001); see PP-HINT-001 for scope application
-- **Sold prices vs asking prices:** current comps are active listing prices, not sold prices; p25 of asking prices is conservative and competitive but not the same as market clearing price
 - **Repricer:** not yet built — periodic re-query + dirty flag + push; see PP-REVISION-001
 - **`ebay_offer` block is now established** — PP-REVISION-001 can proceed with this as the pricing foundation
+
+#### eBay Pricing API Access — Investigation Required
+Current data source is Browse API active listing prices (asking prices, not sold prices).
+Sold prices are significantly more accurate for pricing decisions.  The following APIs
+provide sold/trend data and should be investigated for access expansion:
+
+**1. eBay Finding API — `findCompletedItems`**
+- Would return sold AND unsold completed listings; filter `SoldItemsOnly=true` for sold prices
+- Auth: App ID only (`SECURITY-APPNAME` header) — no user OAuth token required
+- Endpoint: `https://svcs.ebay.com/services/search/FindingService/v1`
+- **Status: BLOCKED** — error 10001 "Service call has exceeded the number of times the operation is allowed to be called"
+- This is an app-tier restriction, not a rate limit.  The Finding API has been deprecated by eBay and access is now restricted to apps that registered before the deprecation or have approved migration status
+- eBay migration guide: https://developer.ebay.com/develop/ebay-api-capabilities/finding-api-migration
+- Developer forum thread on errorId 10001: https://community.ebay.com/t5/Developer-Support/Finding-API-errorId-10001/td-p/
+- **Action:** Contact eBay developer support to request Finding API access or confirm retirement timeline for this app ID
+
+**2. eBay Marketplace Insights API — `item_sales/search`**
+- Returns actual sold item data with sale price, date, quantity
+- REST endpoint: `GET /buy/marketplace_insights/v1/item_sales/search`
+- **Scope required:** `buy.marketplace_insights` — this is a **limited-availability scope**
+- To apply: https://developer.ebay.com/develop/apis/restful-apis/buy-apis#marketplace-insights
+- Application process: submit through eBay developer portal; approval is not guaranteed and may require business justification
+- **Action:** Apply for `buy.marketplace_insights` scope at the link above
+
+**3. eBay Terapeak (via Seller Hub) — not an API**
+- eBay's own sold-price research tool, available to sellers in Seller Hub → Research → Terapeak
+- URL: https://www.ebay.com/sh/research
+- Not accessible via API; would require screen-scraping (ToS violation) or manual lookup
+- Useful for manual pricing research while waiting for API access
+
+**4. eBay Browse API — current implementation**
+- `GET /buy/browse/v1/item_summary/search` — active listings only
+- Works with existing token; no additional scope needed
+- Limitation: active asking prices, not sold prices; p25 is conservative but not market-clearing
+- Docs: https://developer.ebay.com/api-docs/buy/browse/resources/item_summary/methods/search
+
+**Interim strategy:** Browse API p25 (implemented) is a reasonable floor until sold-price access is obtained.
+Operator should review and adjust prices in Seller Hub before publishing, especially for niche items.
+
+### PP-STAGE-001 — eBay draft staging ✅ COMPLETE (2026-06-03)
+- `workers/ebay_stage.py` — creates UNPUBLISHED offer on eBay; visible/editable in Seller Hub immediately
+- `tgw/ebay/sync.py` split: `stage_draft()` (inventory item + offer, no publish) + `publish_offer()` (one API call)
+- `ebay_price` enqueues `ebay_stage` automatically when price is successfully set
+- `ebay_publish` simplified: reads `ebay_offer.offer_id`, calls `publish_offer()`, writes `ebay_listing`
+- Stopgap until PP-REVISION-001 full revision system is built; leverages native Seller Hub editing
 
 ### PP-REVISION-001 — Live listing revision / update draft (design open)
 - Three distinct workflows identified: new listing draft | live listing revision | ended→relist
@@ -297,7 +340,14 @@ maintained_by: Opus (planner)
 - Draft for new listing (`draft_listing`) is a historical record after publish — not the revision staging area
 - Open design question: sparse delta vs full replacement for revision payload; history of applied revisions
 - Relist: inventory item already exists on eBay; need fresh pricing + new offer; structurally re-create not update
-- Do not design the revision schema until PP-PRICE-001 `ebay_offer` block is settled — they share fields
+- `ebay_offer` block now established (PP-PRICE-001) — proceed when ready
+
+### MILESTONE-001 — tgw.source replacement ✅ (2026-06-03)
+- The new TGW system (Phases 1–4 + PP-STAGE-001) constitutes a ~95% functional replacement of the legacy `tgw.source` system, significantly improved
+- Full automated pipeline: photo intake → AI identification → eBay taxonomy → AI specifics → pricing → eBay draft staging → operator review → one-click publish
+- 13 systemd workers running; PostgreSQL state machine; SQLite catalog; 55K+ item catalog
+- Legacy tgw.source is now thin wrappers; new system is the authoritative data path
+- Remaining gap (~5%): live listing revision / repricer / relist workflow (PP-REVISION-001)
 
 - **PP-ADD-001 Satellite / Client Operation --- Disconnected Catalog Support**
   - **Project Details**

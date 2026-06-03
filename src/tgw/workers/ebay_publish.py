@@ -23,7 +23,7 @@ import psycopg2.errors
 import requests
 
 from tgw.config import DEFAULT_CONFIG, load_config
-from tgw.ebay.sync import publish_draft
+from tgw.ebay.sync import publish_offer
 from tgw.items import atomic_write_json
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
@@ -48,50 +48,43 @@ class EbayPublishWorker(QueueWorker):
 
         item = json.loads(json_path.read_text(encoding='utf-8'))
 
-        draft = item.get('draft_listing')
-        if not draft:
-            raise HardFailure(f'{sku}: no draft_listing — run ebay_draft first')
-
-        price = draft.get('price')
-        if price is None:
+        offer_id = item.get('ebay_offer', {}).get('offer_id')
+        if not offer_id:
             raise HardFailure(
-                f'{sku}: draft_listing.price is null — set a price before publishing'
+                f'{sku}: not staged on eBay yet — run ebay_stage first '
+                '(or drop a symlink to re-process)'
             )
 
-        if not item.get('ebay_photos') and not draft.get('imageUrls'):
-            raise HardFailure(f'{sku}: no eBay photos — run ebay_upload first')
-
-        log.info('publishing %s (price=%s)', sku, price)
-        tgw_logging.log_event('ebay_publish_start', sku=sku,
-                              category_id=draft.get('category_id'), price=price)
+        log.info('publishing %s (offerId=%s)', sku, offer_id)
+        tgw_logging.log_event('ebay_publish_start', sku=sku, offer_id=offer_id)
 
         try:
-            result = publish_draft(self.config, sku, item)
-        except ValueError as exc:
-            raise HardFailure(str(exc)) from exc
+            result = publish_offer(self.config, offer_id)
         except requests.exceptions.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else 0
             if status in (400, 422):
                 body = exc.response.text[:500] if exc.response is not None else ''
                 raise HardFailure(
-                    f'{sku}: eBay rejected listing (HTTP {status}): {body}'
+                    f'{sku}: eBay rejected publish (HTTP {status}): {body}'
                 ) from exc
-            raise  # transient (5xx, 401, etc.) — base class will retry
+            raise  # transient — base class retries
 
         item['ebay_listing'] = {
-            'offer_id':     result['offer_id'],
+            'offer_id':     offer_id,
             'listing_id':   result['listing_id'],
             'listing_url':  result['listing_url'],
-            'status':       result['status'],
+            'status':       'PUBLISHED',
             'published_at': datetime.now(timezone.utc).isoformat(),
         }
+        # Update ebay_offer status to match
+        item.setdefault('ebay_offer', {})['status'] = 'PUBLISHED'
 
         atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
 
         log.info('published %s → %s', sku, result['listing_url'])
         tgw_logging.log_event('ebay_listing_published', sku=sku,
                               listing_id=result['listing_id'],
-                              offer_id=result['offer_id'],
+                              offer_id=offer_id,
                               listing_url=result['listing_url'])
 
         try:

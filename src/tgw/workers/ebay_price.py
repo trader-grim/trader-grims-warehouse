@@ -115,6 +115,18 @@ class EbayPriceWorker(QueueWorker):
         except psycopg2.errors.UniqueViolation:
             pass
 
+        # Only stage when we have a price — no point creating an offer with no price
+        if suggested is not None:
+            try:
+                state_machine.enqueue_job(
+                    queue_name='ebay_stage',
+                    payload={'sku': sku},
+                    dedupe_key=f'ebay_stage:{sku}',
+                    max_attempts=5,
+                )
+            except psycopg2.errors.UniqueViolation:
+                pass
+
 
 def main() -> int:
     import argparse

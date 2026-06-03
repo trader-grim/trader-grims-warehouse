@@ -1,9 +1,17 @@
 """
-tgw.ebay.sync — eBay listing publish and status sync.
+tgw.ebay.sync — eBay listing staging, publishing, and status sync.
 
-publish_draft(cfg, sku, item)
-    Create or update an eBay inventory item + offer, then publish it.
-    Returns {offer_id, listing_id, listing_url, status}.
+stage_draft(cfg, sku, item)
+    Upsert inventory item + create/update UNPUBLISHED offer on eBay.
+    Returns {offer_id, status: UNPUBLISHED}.
+    Draft is immediately visible and editable in Seller Hub.
+
+publish_offer(cfg, offer_id)
+    Publish an existing UNPUBLISHED offer.  One API call.
+    Returns {listing_id, listing_url, status: PUBLISHED}.
+
+publish_draft(cfg, sku, item)  [convenience wrapper]
+    stage_draft() + publish_offer() in one shot.
 
 fetch_all_offers(cfg)
     Return every eBay offer (all statuses, paginated).
@@ -136,22 +144,19 @@ def _find_offer(cfg: Dict[str, Any], sku: str) -> Optional[Dict[str, Any]]:
 # Publish
 # ---------------------------------------------------------------------------
 
-def publish_draft(cfg: Dict[str, Any], sku: str,
-                  item: Dict[str, Any]) -> Dict[str, Any]:
+def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
+                        item: Dict[str, Any]) -> tuple:
     """
-    Create or update the eBay inventory item + offer for *sku*, then publish.
-
-    Raises ValueError for missing required fields (price, photos).
-    Raises RuntimeError on unexpected eBay API responses.
-    Raises requests.exceptions.* on network/auth failures (caller retries).
+    Build (inv_body, offer_body) for the eBay Inventory + Offer APIs.
+    Raises ValueError for missing required fields.
     """
     draft = item.get('draft_listing', {})
+    ebay_offer = item.get('ebay_offer', {})
 
-    price = draft.get('price')
+    price = draft.get('price') or ebay_offer.get('price')
     if price is None:
-        raise ValueError(f'{sku}: draft_listing.price is null — set a price before publishing')
+        raise ValueError(f'{sku}: no price set — run ebay_price or set draft_listing.price')
 
-    # Prefer draft imageUrls (written by ebay_upload), fall back to ebay_photos list
     image_urls: List[str] = (
         draft.get('imageUrls')
         or [e['url'] for e in item.get('ebay_photos', [])]
@@ -159,16 +164,14 @@ def publish_draft(cfg: Dict[str, Any], sku: str,
     if not image_urls:
         raise ValueError(f'{sku}: no eBay photo URLs — run ebay_upload first')
 
-    # Inventory API aspects require array values: {"Brand": ["Acme"]}
     aspects: Dict[str, List[str]] = {
         k: [str(v)] for k, v in draft.get('item_specifics', {}).items()
     }
 
     condition_enum = _map_condition(item.get('condition', 'used'))
-    title = draft.get('title') or item.get('title', '')
+    title       = draft.get('title') or item.get('title', '')
     description = draft.get('description') or item.get('description', '')
 
-    # 1. Upsert inventory item (PUT → 204 No Content on success)
     inv_body: Dict[str, Any] = {
         'product': {
             'title':       title,
@@ -183,26 +186,43 @@ def publish_draft(cfg: Dict[str, Any], sku: str,
             },
         },
     }
-    ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{sku}', inv_body)
-    log.info('inventory item upserted for %s (condition=%s)', sku, condition_enum)
 
-    # 2. Find existing offer or create one
     policies     = _get_policies(cfg)
     location_key = _get_merchant_location(cfg)
 
     offer_body: Dict[str, Any] = {
-        'sku':                sku,
-        'marketplaceId':      MARKETPLACE_ID,
-        'format':             'FIXED_PRICE',
-        'availableQuantity':  draft.get('quantity', 1),
-        'categoryId':         str(draft.get('category_id', '')),
-        'listingDescription': description,
-        'listingPolicies':    policies,
+        'sku':                 sku,
+        'marketplaceId':       MARKETPLACE_ID,
+        'format':              'FIXED_PRICE',
+        'availableQuantity':   draft.get('quantity', 1),
+        'categoryId':          str(draft.get('category_id', '')),
+        'listingDescription':  description,
+        'listingPolicies':     policies,
         'merchantLocationKey': location_key,
-        'pricingSummary':     {
+        'pricingSummary':      {
             'price': {'currency': 'USD', 'value': str(price)},
         },
     }
+
+    return inv_body, offer_body
+
+
+def stage_draft(cfg: Dict[str, Any], sku: str,
+                item: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Upsert the eBay inventory item and create/update an UNPUBLISHED offer.
+
+    The offer is immediately visible and editable in Seller Hub as a draft.
+    Does NOT publish — call publish_offer() when ready to go live.
+
+    Returns {offer_id, status: UNPUBLISHED}.
+    Raises ValueError for missing price or photos.
+    Raises requests.exceptions.* on network/auth failures (caller retries).
+    """
+    inv_body, offer_body = _build_offer_bodies(cfg, sku, item)
+
+    ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{sku}', inv_body)
+    log.info('inventory item upserted for %s', sku)
 
     existing = _find_offer(cfg, sku)
     if existing:
@@ -216,17 +236,37 @@ def publish_draft(cfg: Dict[str, Any], sku: str,
             raise RuntimeError(f'create offer returned no offerId for {sku}: {resp}')
         log.info('offer created for %s (offerId=%s)', sku, offer_id)
 
-    # 3. Publish
+    return {'offer_id': offer_id, 'status': 'UNPUBLISHED'}
+
+
+def publish_offer(cfg: Dict[str, Any], offer_id: str) -> Dict[str, Any]:
+    """
+    Publish an existing UNPUBLISHED eBay offer.  One API call.
+
+    Returns {listing_id, listing_url, status: PUBLISHED}.
+    Raises RuntimeError if eBay returns no listingId.
+    """
     resp = ebay_post(cfg, f'/sell/inventory/v1/offer/{offer_id}/publish', {})
     listing_id = resp.get('listingId', '')
     if not listing_id:
-        raise RuntimeError(f'publish returned no listingId for {sku}: {resp}')
-
-    log.info('listing published for %s: listingId=%s', sku, listing_id)
+        raise RuntimeError(f'publish offer {offer_id} returned no listingId: {resp}')
+    log.info('offer %s published → listingId=%s', offer_id, listing_id)
     return {
-        'offer_id':    offer_id,
         'listing_id':  listing_id,
         'listing_url': f'https://www.ebay.com/itm/{listing_id}',
+        'status':      'PUBLISHED',
+    }
+
+
+def publish_draft(cfg: Dict[str, Any], sku: str,
+                  item: Dict[str, Any]) -> Dict[str, Any]:
+    """Convenience wrapper: stage_draft() then publish_offer() in one shot."""
+    staged   = stage_draft(cfg, sku, item)
+    published = publish_offer(cfg, staged['offer_id'])
+    return {
+        'offer_id':    staged['offer_id'],
+        'listing_id':  published['listing_id'],
+        'listing_url': published['listing_url'],
         'status':      'PUBLISHED',
     }
 
