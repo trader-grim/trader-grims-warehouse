@@ -220,6 +220,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--force', action='store_true',
                    help='re-identify even if already ai_identified')
 
+    p = sub.add_parser('resolve-legacy',
+                       help='mark item(s) as having legacy eBay listing cleared, '
+                            'enabling ebay_stage to proceed')
+    p.add_argument('skus', nargs='+', help='one or more SKUs to resolve')
+    p.add_argument('--no-stage', action='store_true',
+                   help='mark resolved but do not enqueue ebay_stage')
+
     return parser
 
 
@@ -264,6 +271,58 @@ def cmd_hint(cfg: Dict[str, Any], sku: str, hint: str, force: bool = False) -> D
         'force':  force or not already,
         'queued': queued,
         'job_id': jid,
+    }
+
+
+def cmd_resolve_legacy(cfg: Dict[str, Any], skus: List[str],
+                       enqueue_stage: bool = True) -> Dict[str, Any]:
+    """
+    Mark one or more items as having their legacy eBay Trading API listing
+    cleared, setting legacy_listing_resolved=True so ebay_stage can proceed.
+    Optionally enqueues ebay_stage for each resolved item.
+    """
+    from tgw.config import sku_json
+    from tgw.items import atomic_write_json
+    from tgw.queue import state_machine
+    import psycopg2.errors
+
+    state_machine.init(cfg.get('postgres_dsn', 'dbname=state_machine user=tgw'))
+
+    resolved, not_found, already_done, staged = [], [], [], []
+
+    for sku in skus:
+        json_path = sku_json(cfg, sku)
+        if not json_path.exists():
+            not_found.append(sku)
+            continue
+
+        item = json.loads(json_path.read_text(encoding='utf-8'))
+
+        if item.get('legacy_listing_resolved'):
+            already_done.append(sku)
+        else:
+            item['legacy_listing_resolved'] = True
+            atomic_write_json(json_path, item, pretty=cfg.get('pretty', True))
+            resolved.append(sku)
+
+        if enqueue_stage and not item.get('ebay_offer', {}).get('offer_id'):
+            try:
+                state_machine.enqueue_job(
+                    queue_name='ebay_stage',
+                    payload={'sku': sku},
+                    dedupe_key=f'ebay_stage:{sku}',
+                    max_attempts=5,
+                )
+                staged.append(sku)
+            except psycopg2.errors.UniqueViolation:
+                pass
+
+    return {
+        'ok':          True,
+        'resolved':    resolved,
+        'already_done': already_done,
+        'not_found':   not_found,
+        'stage_queued': staged,
     }
 
 
@@ -392,6 +451,10 @@ def main() -> int:
 
         elif args.op == 'hint':
             result = cmd_hint(cfg, args.sku, ' '.join(args.text), force=args.force)
+
+        elif args.op == 'resolve-legacy':
+            result = cmd_resolve_legacy(cfg, args.skus,
+                                        enqueue_stage=not args.no_stage)
 
         else:
             result = {'ok': False, 'error': f'unknown op: {args.op!r}'}
