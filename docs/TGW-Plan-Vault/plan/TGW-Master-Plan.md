@@ -629,8 +629,14 @@ can be safely dedicated without losing console access. When ready:
 ```bash
 # 1. Connect the second (normal use) keyboard first.
 
+# NOTE: On Debian the keyd binary is named keyd.rvaiya (naming conflict with
+# an unrelated Debian package). Package and service are still "keyd".
+#   Binary:   /usr/bin/keyd.rvaiya
+#   Service:  keyd.service  (systemctl start/stop/reload keyd)
+#   Config:   /etc/keyd/
+
 # 2. Identify the macroboard's unique device ID:
-keyd list-devices
+keyd.rvaiya list-devices
 # Look for "Dell Dell USB Keyboard" entries. Both show as 413c:2105.
 # The one on the dedicated USB port will have a distinct path/serial hash.
 # Example output line: "413c:2105:a1b2c3d4e5f6  Dell Dell USB Keyboard"
@@ -641,7 +647,7 @@ sudo nano /opt/TGW/src/trader-grims-warehouse/etc/keyd/tgw-macroboard.conf
 
 # 4. Install and reload:
 sudo cp /opt/TGW/src/trader-grims-warehouse/etc/keyd/tgw-macroboard.conf /etc/keyd/
-sudo keyd reload
+sudo systemctl reload keyd
 
 # 5. Test: press Caps Lock on the macroboard → LED behaviour changes.
 #    Highlight a SKU in any window → press g → notification should appear.
