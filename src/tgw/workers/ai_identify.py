@@ -58,6 +58,24 @@ Respond with JSON:
 }
 """
 
+_USER_PROMPT_HINTED = """\
+Look at this item photo. I already know this item is: {hint}
+
+Using that context together with the photo, provide:
+- A concise, descriptive eBay-style title (under 80 characters) that builds on what I told you
+- The most likely eBay category name (plain English, e.g. "Thimbles", "Miniature Bottles")
+- A 1-2 sentence description covering what is visible (quantity, materials, notable markings)
+- Your best guess at condition: "New", "Like New", "Very Good", "Good", "Acceptable"
+
+Respond with JSON:
+{{
+  "title": "...",
+  "category": "...",
+  "description": "...",
+  "condition": "..."
+}}
+"""
+
 
 def _primary_image(sku_dir: Path) -> Optional[Path]:
     candidates = sorted(
@@ -119,14 +137,21 @@ class AIIdentifyWorker(QueueWorker):
 
         item = json.loads(json_path.read_text(encoding='utf-8'))
 
-        # Skip if a human has already set a real title
-        existing_title = str(item.get('title', '')).strip()
-        if existing_title and existing_title != sku:
-            log.info('skipping ai_identify for %s — title already set: %r',
-                     sku, existing_title)
+        already_identified = bool(item.get('ai_identified'))
+        force_reidentify   = bool(item.get('ai_reidentify'))
+
+        # Skip only when already identified and not explicitly asked to redo
+        if already_identified and not force_reidentify:
+            log.info('skipping ai_identify for %s — already identified', sku)
             tgw_logging.log_event('ai_identify_skipped', sku=sku,
-                                  reason='title already set')
+                                  reason='already_identified')
             return
+
+        # Derive hint: explicit ai_hint wins; fall back to a human-set title
+        existing_title = str(item.get('title', '')).strip()
+        hint = (item.get('ai_hint') or '').strip()
+        if not hint and existing_title and existing_title != sku:
+            hint = existing_title
 
         img_path = _primary_image(sku_dir)
         if img_path is None:
@@ -137,17 +162,21 @@ class AIIdentifyWorker(QueueWorker):
 
         img_b64, orig_kb, resized_kb = _encode_resized(img_path)
 
-        log.info('calling %s for %s (image: %s, %dKB → %dKB at %dpx)',
-                 VISION_MODEL, sku, img_path.name, orig_kb, resized_kb, _VISION_MAX_PX)
+        prompt = (_USER_PROMPT_HINTED.format(hint=hint) if hint else _USER_PROMPT)
+
+        log.info('calling %s for %s (image: %s, %dKB→%dKB%s)',
+                 VISION_MODEL, sku, img_path.name, orig_kb, resized_kb,
+                 f', hint={hint!r}' if hint else '')
         tgw_logging.log_event('ai_identify_call', sku=sku, model=VISION_MODEL,
-                              image=img_path.name, orig_kb=orig_kb, resized_kb=resized_kb)
+                              image=img_path.name, orig_kb=orig_kb,
+                              resized_kb=resized_kb, hint=hint or None)
 
         import requests
         resp = requests.post(
             'http://localhost:11434/api/generate',
             json={
                 'model':  VISION_MODEL,
-                'prompt': _USER_PROMPT,
+                'prompt': prompt,
                 'system': _SYSTEM_PROMPT,
                 'images': [img_b64],
                 'stream': False,
@@ -180,18 +209,16 @@ class AIIdentifyWorker(QueueWorker):
         except Exception as exc:
             log.warning('taxonomy lookup failed for %r: %s', category, exc)
 
-        # Write results back — only fields that are still empty
+        # Write results — always overwrite on re-identify, fill gaps on first pass
         item['title']       = title
-        if not item.get('category'):
-            item['category'] = category
-        if not item.get('description'):
-            item['description'] = description
-        if not item.get('condition'):
-            item['condition'] = condition
-        if ebay_category_id and not item.get('ebay_category_id'):
+        item['category']    = category
+        item['description'] = description
+        item['condition']   = condition
+        if ebay_category_id:
             item['ebay_category_id']   = ebay_category_id
             item['ebay_category_name'] = ebay_category_name
         item['ai_identified'] = True
+        item.pop('ai_reidentify', None)   # clear the force flag
 
         atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
 
@@ -199,6 +226,7 @@ class AIIdentifyWorker(QueueWorker):
                  sku, title, ebay_category_id)
         tgw_logging.log_event('ai_identify_complete', sku=sku, title=title,
                               category=category, condition=condition,
+                              hint=hint or None,
                               ebay_category_id=ebay_category_id,
                               ebay_category_name=ebay_category_name)
 

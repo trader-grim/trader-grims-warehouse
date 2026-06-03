@@ -214,7 +214,57 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser('suggest', help='append a suggestion for the next planning session')
     p.add_argument('text', nargs='+', help='suggestion text')
 
+    p = sub.add_parser('hint', help='set an ai_hint on an item and re-queue identification')
+    p.add_argument('sku', help='SKU to hint')
+    p.add_argument('text', nargs='+', help='hint text (e.g. "thimbles" or "mini liquor bottles")')
+    p.add_argument('--force', action='store_true',
+                   help='re-identify even if already ai_identified')
+
     return parser
+
+
+def cmd_hint(cfg: Dict[str, Any], sku: str, hint: str, force: bool = False) -> Dict[str, Any]:
+    """Write ai_hint to an item and enqueue re-identification."""
+    from tgw.config import sku_json
+    from tgw.items import atomic_write_json
+    from tgw.queue import state_machine
+
+    json_path = sku_json(cfg, sku)
+    if not json_path.exists():
+        return {'ok': False, 'error': f'item not found: {sku}'}
+
+    item = json.loads(json_path.read_text(encoding='utf-8'))
+    already = bool(item.get('ai_identified'))
+
+    item['ai_hint'] = hint
+    if force or not already:
+        item['ai_reidentify'] = True
+
+    atomic_write_json(json_path, item, pretty=cfg.get('pretty', True))
+
+    # Enqueue ai_identify — dedupe key means a pending job won't double-enqueue
+    import psycopg2.errors
+    try:
+        state_machine.init(cfg.get('postgres_dsn', 'dbname=state_machine user=tgw'))
+        jid = state_machine.enqueue_job(
+            queue_name='ai_identify',
+            payload={'sku': sku},
+            dedupe_key=f'ai_identify:{sku}',
+            max_attempts=3,
+        )
+        queued = True
+    except psycopg2.errors.UniqueViolation:
+        jid = None
+        queued = False
+
+    return {
+        'ok':     True,
+        'sku':    sku,
+        'hint':   hint,
+        'force':  force or not already,
+        'queued': queued,
+        'job_id': jid,
+    }
 
 
 def cmd_suggest(cfg: Dict[str, Any], text: str) -> Dict[str, Any]:
@@ -339,6 +389,9 @@ def main() -> int:
 
         elif args.op == 'suggest':
             result = cmd_suggest(cfg, ' '.join(args.text))
+
+        elif args.op == 'hint':
+            result = cmd_hint(cfg, args.sku, ' '.join(args.text), force=args.force)
 
         else:
             result = {'ok': False, 'error': f'unknown op: {args.op!r}'}

@@ -1,0 +1,4 @@
+- [ ] 2026-06-03T02:07 :: test suggestion
+- [ ] 2026-06-03T04:25 :: Add tgw requeue command: bulk-enqueue ai_identify for items matching a filter (e.g. has photos but no title, or ai_hint set but not identified) — for catalog maintenance without triggering eBay listing pipeline
+- [ ] 2026-06-03T04:25 :: Get full item history into planning context: session history, hint trail, AI identification rounds per SKU — for audit and tuning visibility
+- [ ] 2026-06-03T04:25 :: eBay Marketplace Insights (sold+trends) scope: apply for buy.marketplace_insights access in eBay developer portal; also investigate Finding API findCompletedItems as interim sold-price source (App ID only, no user token needed)

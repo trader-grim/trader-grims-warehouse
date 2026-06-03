@@ -67,6 +67,7 @@ def load_config(path: Path) -> Dict[str, Any]:
 
     ebay_token_path       = secrets_root / 'ebay-token.json'
     ebay_credentials_path = secrets_root / 'ebay-credentials.json'
+    ebay_draft_csv_path   = p('ebay_draft_csv_path', str(catalog_root / 'ebay-draft-offline.csv'))
 
     postgres_dsn = raw.get('postgres_dsn', 'dbname=state_machine user=tgw')
 
@@ -82,6 +83,7 @@ def load_config(path: Path) -> Dict[str, Any]:
         'secrets_root':            secrets_root,
         'ebay_token_path':         ebay_token_path,
         'ebay_credentials_path':   ebay_credentials_path,
+        'ebay_draft_csv_path':     ebay_draft_csv_path,
         'postgres_dsn':            postgres_dsn,
         'itemdata_root':           itemdata_root,
         'catalog_root':            catalog_root,

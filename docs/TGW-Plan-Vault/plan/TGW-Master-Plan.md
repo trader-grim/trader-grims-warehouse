@@ -132,8 +132,16 @@ maintained_by: Opus (planner)
 - Sends resized primary photo (512px, ~56KB) to `qwen2.5vl:7b` via Ollama
 - Returns title, category, description, condition as JSON; writes to item JSON
 - Cold-start: model loads in ~10 min; subsequent calls ~18s — worker pre-warms on startup
-- Skips items with existing non-empty title (human override respected)
-- Worker: `ai_identify`; `ai_identified: true` flag written to JSON
+- Skip logic: skips only when `ai_identified: true` AND no `ai_reidentify` flag
+- Worker: `ai_identify`; `ai_identified: true` flag written to JSON; `ai_reidentify` cleared after use
+### 3c-ext. AI hint system ✅ COMPLETE (2026-06-03)
+- `ai_hint` field in item JSON: operator-supplied keyword or phrase to guide vision model
+- Hint source priority: explicit `ai_hint` → human-set title (if not SKU and not yet identified)
+- Hinted prompt includes "I know this item is: {hint}" — AI produces full eBay-quality title + description using both the hint and the photo
+- `tgw hint <SKU> "text"` — writes hint, sets `ai_reidentify: true`, enqueues `ai_identify` job
+- `tgw hint <SKU> "text" --force` — same but also forces re-run on already-identified items
+- Previously-identified items are not re-run unless `--force` is given
+- **Revisit (PP-HINT-001):** hint system is first iteration only — see open items below
 ### 3d. Online path: eBay Taxonomy → category ✅ COMPLETE (2026-06-02)
 - `apis/ebay/client.py` — shared auth'd GET/POST for all eBay REST calls
 - `apis/ebay/taxonomy.py` — category suggestions; tries title first, falls back to AI category string
@@ -149,13 +157,24 @@ maintained_by: Opus (planner)
 - `thumbnail_gen` job (per-SKU) enqueued after intake
 
 ## Phase 4 — eBay pipeline buildout
-- 4a. eBay photo uploader (`src/tgw/ebay/upload.py`) — after upload, enqueue `thumbnail-gen` for the SKU (local photos are source of truth; eBay URLs do not replace them)
-- 4b. Listing sync-back (`src/tgw/ebay/sync.py`) — after writing updated fields to item JSON, enqueue `catalog-rebuild` job
-- 4c. Category/aspect client (`src/tgw/ebay/categories.py`)
-- 4d. Category template system (specifics defaults per category)
-- 4e. Retire eBay token cron (gate: Phase 2a fully observed)
-- 4f. Duplicate item/listing check worker (PP-ADD-006): pre-upload gate queries SQLite catalog for dedup + eBay active listing check; configurable block-vs-warn policy
-- 4g. Inventory API migration sweep (PP-ADD-008): periodic scan for unmigrated items; auto-create Inventory API records (dry-run mode); dashboard widget % migrated
+### 4a. eBay photo uploader ✅ COMPLETE (2026-06-02)
+- `tgw/ebay/upload.py` — `upload_photo()` via Trading API `UploadSiteHostedPictures`; returns eBay EPS FullURL
+- `workers/ebay_upload.py` — idempotent; skips already-uploaded photos; writes `ebay_photos` list + `draft_listing.imageUrls`
+- Enqueued automatically by `ebay_draft` after draft is written
+### 4b. Listing publish + sync-back ✅ COMPLETE (2026-06-02)
+- `tgw/ebay/sync.py` — `publish_draft()`: upserts inventory item, finds/creates offer, publishes; `fetch_all_offers()` paginated
+- Condition mapping: AI strings → eBay Inventory API enums (e.g. "Good" → "USED_GOOD")
+- Account policies + merchant location fetched once per process, cached
+- `workers/ebay_publish.py` — manual trigger; gates on price non-null + photos uploaded; writes `ebay_listing` block
+- `workers/ebay_sync.py` — self-scheduling every 6h; syncs eBay offer status back to item JSON
+- eBay returns 400 (not empty list) when no Inventory API offers exist — handled gracefully
+### 4c. Category/aspect client — deferred; existing taxonomy.py + specifics.py cover current needs
+### 4d. Category template system — deferred; see PP-HINT-001 (eBay enrichment) below
+### 4e. Retire eBay token cron ✅ COMPLETE — no separate cron existed; token_refresh worker is sole manager
+### 4f. Duplicate item/listing check worker (PP-ADD-006) — pending
+### 4g. Inventory API migration sweep (PP-ADD-008) — pending
+### 4h. Pricing module — pending; see PP-PRICE-001 below
+### 4i. Live listing revision / update draft — pending; see PP-REVISION-001 below
 
 ## Phase 5 — AI operations layer
 ### Ollama job manager
@@ -247,6 +266,38 @@ maintained_by: Opus (planner)
 - Where does the Ollama lock live — in the job manager worker or a Postgres advisory lock? (Phase 5 decision)
 - PP-ADD-001 conflict resolution policy: last-write-wins vs. manual review (decide before Phase 6 dev)
 - Thumbnail cache: install Pillow (`pip install Pillow` or `pip install trader-grims-warehouse[thumbnails]`) then run `tgw build-thumbnails`
+
+## Pending projects (revisit)
+
+### PP-HINT-001 — AI hint + eBay enrichment (revisit required)
+- First iteration shipped 2026-06-03: `ai_hint` field, `tgw hint` command, hinted vision prompt
+- **Known gaps to address:**
+  - `tgw requeue` bulk command: filter-based batch re-queue (e.g. "all items with photos but no title") for catalog maintenance — without triggering eBay listing pipeline
+  - eBay Browse API enrichment in `ebay_draft`: search similar active listings by title, extract common aspects and category signal to supplement AI-generated specifics
+  - Full item history / hint trail: per-SKU log of identification rounds, hints used, AI vs human changes — feeds audit and tuning visibility
+  - eBay Marketplace Insights scope (`buy.marketplace_insights`): apply in eBay developer portal for sold+trend data; interim: use Finding API `findCompletedItems` (App ID only, no user token)
+  - Revision of already-identified items: `tgw hint --force` works but downstream ebay_draft/ebay_draft re-runs need to be aware of published state (don't auto-push changes to live listings)
+  - Tuning: run difficult items through, observe results, adjust prompt and hint format
+
+### PP-PRICE-001 — Pricing module ✅ INITIAL COMPLETE (2026-06-03)
+- Initial pricing shipped: `tgw/ebay/pricing.py` + `workers/ebay_price.py`
+- `ebay_price` worker enqueued automatically by `ebay_draft` after draft is written
+- Three-stage Browse API fallback: full title → category+short title → category only
+- Writes `ebay_offer` block: {price, price_source, price_comps {count,min,p25,median,max}, priced_at}
+- Also sets `draft_listing.price` so `ebay_publish` can read it directly
+- Idempotent: skips items already priced in `ebay_offer.price`
+- **Finding API (findCompletedItems) unavailable** — blocked at this app tier (errorId 10001); see PP-HINT-001 for scope application
+- **Sold prices vs asking prices:** current comps are active listing prices, not sold prices; p25 of asking prices is conservative and competitive but not the same as market clearing price
+- **Repricer:** not yet built — periodic re-query + dirty flag + push; see PP-REVISION-001
+- **`ebay_offer` block is now established** — PP-REVISION-001 can proceed with this as the pricing foundation
+
+### PP-REVISION-001 — Live listing revision / update draft (design open)
+- Three distinct workflows identified: new listing draft | live listing revision | ended→relist
+- Revision needs: known baseline (live state synced from eBay), proposed delta, drift visibility
+- Draft for new listing (`draft_listing`) is a historical record after publish — not the revision staging area
+- Open design question: sparse delta vs full replacement for revision payload; history of applied revisions
+- Relist: inventory item already exists on eBay; need fresh pricing + new offer; structurally re-create not update
+- Do not design the revision schema until PP-PRICE-001 `ebay_offer` block is settled — they share fields
 
 - **PP-ADD-001 Satellite / Client Operation --- Disconnected Catalog Support**
   - **Project Details**

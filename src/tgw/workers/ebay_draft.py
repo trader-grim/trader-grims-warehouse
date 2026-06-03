@@ -11,6 +11,7 @@ will overwrite draft_listing but never touch title/description/condition.
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import time
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import psycopg2.errors
+import requests
 
 from tgw.apis.ebay.specifics import get_aspects
 from tgw.apis.ollama import chat, extract_json
@@ -40,6 +42,44 @@ For FREE_TEXT aspects, suggest a concise, accurate value.
 If an aspect does not apply, use null.
 Respond with valid JSON only — an object mapping aspect name to suggested value.
 """
+
+
+_OFFLINE_CSV_FIELDS = ['sku', 'title', 'category_id', 'category_name',
+                       'condition', 'format', 'quantity', 'price', 'description']
+
+
+def _is_ebay_offline(exc: Exception) -> bool:
+    """True if exc indicates eBay is unreachable (not an auth or client error)."""
+    if isinstance(exc, (requests.exceptions.ConnectionError,
+                        requests.exceptions.Timeout)):
+        return True
+    if isinstance(exc, requests.exceptions.HTTPError):
+        status = exc.response.status_code if exc.response is not None else 0
+        return status >= 500
+    return False
+
+
+def _write_offline_csv_row(cfg: Dict[str, Any], sku: str,
+                           item: Dict[str, Any]) -> None:
+    """Append a row to the offline draft CSV for later manual upload."""
+    csv_path: Path = cfg['ebay_draft_csv_path']
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not csv_path.exists()
+    with csv_path.open('a', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=_OFFLINE_CSV_FIELDS)
+        if write_header:
+            writer.writeheader()
+        writer.writerow({
+            'sku':           sku,
+            'title':         item.get('title', ''),
+            'category_id':   item.get('ebay_category_id', ''),
+            'category_name': item.get('ebay_category_name', ''),
+            'condition':     item.get('condition', ''),
+            'format':        'FixedPrice',
+            'quantity':      1,
+            'price':         '',
+            'description':   item.get('description', ''),
+        })
 
 
 def _build_prompt(item: Dict[str, Any], aspects: List[Dict[str, Any]]) -> str:
@@ -89,8 +129,19 @@ class EbayDraftWorker(QueueWorker):
         if not title or title == sku:
             raise HardFailure(f'no title on {sku} — run ai_identify first')
 
-        # Fetch aspects for the category
-        aspects = get_aspects(self.config, category_id)
+        # Fetch aspects — fall back to offline CSV if eBay is unreachable
+        try:
+            aspects = get_aspects(self.config, category_id)
+        except Exception as exc:
+            if _is_ebay_offline(exc):
+                _write_offline_csv_row(self.config, sku, item)
+                item['offline_draft'] = True
+                atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
+                log.warning('eBay unreachable for %s (%s) — wrote offline CSV row', sku, exc)
+                tgw_logging.log_event('ebay_draft_offline', sku=sku,
+                                      reason=type(exc).__name__)
+                return
+            raise
         log.info('fetched %d aspects for category %s', len(aspects), category_id)
 
         # Use text model to fill aspect values
@@ -154,6 +205,26 @@ class EbayDraftWorker(QueueWorker):
                 dedupe_key='catalog_rebuild:pending',
                 not_before=time.time() + 30,
                 max_attempts=3,
+            )
+        except psycopg2.errors.UniqueViolation:
+            pass
+
+        try:
+            state_machine.enqueue_job(
+                queue_name='ebay_price',
+                payload={'sku': sku},
+                dedupe_key=f'ebay_price:{sku}',
+                max_attempts=5,
+            )
+        except psycopg2.errors.UniqueViolation:
+            pass
+
+        try:
+            state_machine.enqueue_job(
+                queue_name='ebay_upload',
+                payload={'sku': sku},
+                dedupe_key=f'ebay_upload:{sku}',
+                max_attempts=5,
             )
         except psycopg2.errors.UniqueViolation:
             pass
