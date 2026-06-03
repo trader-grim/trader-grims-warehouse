@@ -121,13 +121,34 @@ class EbayDraftWorker(QueueWorker):
 
         item = json.loads(json_path.read_text(encoding='utf-8'))
 
-        category_id = item.get('ebay_category_id')
-        if not category_id:
-            raise HardFailure(f'no ebay_category_id on {sku} — run ai_identify first')
-
         title = item.get('title', '')
         if not title or title == sku:
             raise HardFailure(f'no title on {sku} — run ai_identify first')
+
+        category_id   = item.get('ebay_category_id')
+        category_name = item.get('ebay_category_name', '')
+
+        # If taxonomy lookup failed during ai_identify, retry it here
+        if not category_id:
+            log.info('no ebay_category_id for %s — retrying taxonomy lookup', sku)
+            try:
+                from tgw.apis.ebay.taxonomy import best_category
+                category_id, category_name = best_category(
+                    self.config, title, item.get('category', ''))
+                if category_id:
+                    item['ebay_category_id']   = category_id
+                    item['ebay_category_name'] = category_name
+                    log.info('taxonomy retry succeeded for %s: %s %s',
+                             sku, category_id, category_name)
+            except Exception as exc:
+                log.warning('taxonomy retry failed for %s: %s', sku, exc)
+
+        if not category_id:
+            # No category at all — use a broad fallback so eBay prompts the
+            # operator to select the correct leaf category when they open the draft
+            category_id   = '99'   # eBay "Everything Else" — non-leaf, eBay will prompt
+            category_name = 'Everything Else'
+            log.warning('%s: no category found — staging with fallback category 99', sku)
 
         # Fetch aspects — fall back to offline CSV if eBay is unreachable
         try:
