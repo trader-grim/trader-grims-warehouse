@@ -56,6 +56,20 @@ class EbayStageWorker(QueueWorker):
 
         item = json.loads(json_path.read_text(encoding='utf-8'))
 
+        # Guard: item is already actively listed on eBay — do not create a
+        # duplicate Inventory API offer over a live listing.
+        existing_listing = item.get('ebay_listing', {})
+        if existing_listing.get('status') == 'Active':
+            listing_id = existing_listing.get('listing_id', '')
+            log.warning(
+                'ebay_stage: %s is already live (listingId=%s, api=%s) — skipping',
+                sku, listing_id, existing_listing.get('api', ''),
+            )
+            tgw_logging.log_event('ebay_stage_skipped', sku=sku,
+                                  reason='already_active_listing',
+                                  listing_id=str(listing_id))
+            return
+
         # Guard: item was previously listed via Trading API — must not create a
         # duplicate Inventory API offer until the legacy listing is resolved.
         legacy_item_number = item.get('Item number') or item.get('item_number')

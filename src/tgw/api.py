@@ -246,6 +246,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--no-stage', action='store_true',
                    help='mark resolved but do not enqueue ebay_stage')
 
+    p = sub.add_parser('serve', help='start tgw-http FastAPI service on port 7373')
+    p.add_argument('--host', default='127.0.0.1', help='bind host (default: 127.0.0.1)')
+    p.add_argument('--port', type=int, default=7373, help='bind port (default: 7373)')
+    p.add_argument('--reload', action='store_true', help='enable auto-reload (dev only)')
+
     return parser
 
 
@@ -599,6 +604,18 @@ def main() -> int:
         elif args.op == 'resolve-legacy':
             result = cmd_resolve_legacy(cfg, args.skus,
                                         enqueue_stage=not args.no_stage)
+
+        elif args.op == 'serve':
+            import uvicorn
+            from .http_server import app
+            uvicorn.run(
+                app,
+                host=args.host,
+                port=args.port,
+                reload=args.reload,
+                log_level='info',
+            )
+            return 0
 
         else:
             result = {'ok': False, 'error': f'unknown op: {args.op!r}'}

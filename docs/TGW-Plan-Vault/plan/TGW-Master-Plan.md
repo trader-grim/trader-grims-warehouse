@@ -234,12 +234,27 @@ maintained_by: Opus (planner)
 
 ## Data cleanup (parallel track)
 ### SKU normalization (PP-ADD-005) — Critical; unblocks PP-ADD-003, 006, 008
-- One-time + ongoing enforcement across three groups: Epoch 0 legacy IDs, 2005–2007 era (202005–202007 prefix format), length standardization
-- SKU audit report: distribution across all three groups + length histogram
-- Canonical SKU format spec document required before any migration code
-- Migration script: dry-run mode → live run with rollback support
-- `sku_history` table: (sku_current, sku_prior, changed_at, change_reason, changed_by)
-- Enforcement: validation at ingestion points — reject or auto-correct non-conforming SKUs
+#### Audit ✅ COMPLETE (2026-06-03) — see `SKU-Audit-Report.md`
+- 55,351 items; 34,737 canonical (62.8%); 20,614 to migrate (37.2%)
+- **7 format classes identified** (see report for full breakdown):
+  - A: Canonical len-20 `tgwYYYYMMDDHHMMSSmmm` — 34,737 ✅
+  - B: Epoch-0 (`tgw1970...`) — 26 items; date lost, no eBay listings
+  - C: Modern-short len-18 (`tgwYYYYMMDDHHMMSSx`) — 20,328; ~11,300 have live eBay offers ⚠️
+  - D: Underscore len-18 (`tgwYYYYMMDD_HHMMSS`) — 33
+  - E: No-day len-18 (`tgwYYYYMMHHMMSSmmm`) — 16; 2005–2007 era
+  - F: No-ms len-17 (`tgwYYYYMMDDHHMMSS`) — 210
+  - G: Anomaly len-19 — 1 item (disposed)
+- **Key constraint:** 11,351 non-canonical items have live eBay offer/listing — eBay SKU rename required as part of migration
+- **Decisions required before migration code:**
+  1. Class C padding confirmed: `HHMMSSx` → `HHMMSSx00`
+  2. Class B/E date proxy for lost dates (file mtime? fixed epoch? counter?)
+  3. eBay Inventory API SKU rename path (in-place PUT vs delete+recreate) — test with 1 item
+  4. Rollback manifest format
+#### Remaining work
+- Canonical SKU spec (one-paragraph normative definition for enforcement code)
+- `sku_history` table in `state_machine` DB: `(sku_current, sku_prior, changed_at, change_reason, changed_by)`
+- Migration script: dry-run → review → live run with rollback manifest
+- Enforcement at intake points (bundle_intake, multi_intake): reject non-canonical on input
 - Post-migration verification report
 ### Data scrub passes
 - Pass 1: itemdata_scrub dry-run → review → --write (merge history keys, drop junk)
@@ -293,20 +308,15 @@ Reads use the local SQLite catalog and ItemData directly — MC works offline on
 - `mc.menu` — F2 menu: `v`=VFS guide, `h`=health, `q`=queue, `s`=services, `l`=catalog, `i`=item summary, `p`=image preview.
 - `install-system-mc.sh` — system-wide installer (ext, menu, extfs scripts).
 
-### Known issues (needs fixing)
-- **Image viewing broken** — chafa renders fine in a terminal but MC's `%view{ascii}` mode may not correctly pass terminal dimensions or handle ANSI codes; needs diagnosis and fix.
-- **tgwitem run for fields** — `cmd_run` for `fields/*.txt` falls through to `less archive` (opens the raw JSON) instead of the field value; a temp-file approach is needed.
-- **tgwcatalog performance** — loads full 55K search-catalog.json on every list call; migrate to SQLite (`tgwcatalog.db`) for instant queries.
-- **tgwservices incomplete** — hardcoded list of 5 services; should enumerate all `tgw-worker@*` units dynamically via `systemctl list-units`.
-- **No copyin on tgwitem** — fields are read-only; `copyin` operation not implemented, so F4 edits can't write back.
-- **System-wide install** — `install-system-mc.sh` exists but full round-trip (install → all VFS working) not yet verified.
-
-### Phase 1 — Fix what's broken (priority)
-- Diagnose and fix image/video rendering in MC viewer (`%view{ascii}` + chafa)
-- Fix `tgwitem cmd_run` for field files (temp file → less, not raw archive)
-- Migrate `tgwcatalog` to read from `tgwcatalog.db` via sqlite3 (same columns: sku, title, location, status, price, image)
-- Expand `tgwservices` to list all `tgw-worker@*` units dynamically
-- Verify full system-wide install round-trip; fix any remaining wiring gaps
+### Phase 1 — Fix what's broken ✅ COMPLETE (2026-06-03)
+- ✅ `tgwitem cmd_run` for fields fixed: temp file → less shows field value (not raw archive JSON)
+- ✅ `tgwcatalog` migrated to SQLite (`tgwcatalog.db`): list call now ~0.8s vs multi-second JSON load; falls back to search-catalog.json if DB absent
+- ✅ `tgwservices` now enumerates all `tgw-worker@*` units dynamically via `systemctl list-units --output=json`; fixed infra list includes `tgw-http`
+- ✅ `tgw-view-image.sh`: TERM/COLORTERM forced for MC viewer context; COLUMNS/LINES detection improved; chafa `--format=symbols` already correct
+- ✅ `tgwitem cmd_run` for photos: added `--format=symbols --colors=full` to force Unicode half-block art (prevents sixel/kitty auto-detect)
+- ✅ `tgwitem` copyout for photos: serves full ItemData JSON (richer than catalog row)
+- Remaining known gap: **No copyin on tgwitem** — fields still read-only; `copyin` not implemented (Phase 2)
+- Note: image viewing in MC's `%view{ascii}` may still need interactive tuning — chafa+MC ANSI rendering is terminal-dependent
 
 ### Phase 2 — Item editing
 - Implement `copyin` in `tgwitem` — save edited field file back to item JSON; enqueue `catalog_rebuild`
@@ -353,19 +363,20 @@ MC console         Flutter app (Linux + Android)
                    Dio http client for writes (online)
 ```
 
-### Phase A — tgw-http FastAPI service (unblocks everything)
-- New `tgw serve` subcommand starts a FastAPI HTTP server on port 7373
-- Simple Bearer token auth (API key stored in `secrets_root/tgw-api-key.json`)
-- Endpoints:
-  - `GET /api/items` — search/filter (text, location, status, date range) from SQLite
-  - `GET /api/items/:sku` — full item JSON + ebay_offer + current queue job states
-  - `PATCH /api/items/:sku` — update any fields except SKU; enqueues catalog_rebuild
-  - `GET /api/items/:sku/thumbnail` — serves thumbnail image from cache
-  - `POST /api/items/:sku/action` — enqueue a pipeline stage (with path/stage selection)
-  - `GET /api/queue/status` — job counts by queue and state
-  - `GET /api/ebay/aspects/:category_id` — aspects list for offer form
+### Phase A — tgw-http FastAPI service ✅ COMPLETE (2026-06-03)
+- `tgw serve` subcommand starts FastAPI HTTP server on port 7373
+- Bearer token auth — API key at `secrets_root/tgw-api-key.json`
+- All 8 endpoints implemented and smoke-tested:
+  - `GET /api/items` — SQLite search (text, location, status, date range, limit/offset)
+  - `GET /api/items/:sku` — full item JSON + _images/_videos + _queue_jobs (last 50)
+  - `PATCH /api/items/:sku` — multi-field atomic update; location tree kept in sync; enqueues catalog_rebuild
+  - `GET /api/items/:sku/thumbnail` — serves thumbnail from cache
+  - `POST /api/items/:sku/action` — enqueues any pipeline stage (ai_identify sets ai_reidentify); handles dedupe gracefully
+  - `GET /api/queue/status` — job counts per queue+state from PostgreSQL
+  - `GET /api/ebay/aspects/:category_id` — delegates to existing specifics.py
   - `GET /api/locations` — distinct locations from SQLite
-- systemd unit: `tgw-http.service`
+- `src/tgw/http_server.py`; `etc/systemd/tgw-http.service` (installed, enabled, running)
+- fastapi + uvicorn[standard] added to pyproject.toml dependencies
 
 ### Phase B — Flutter skeleton
 - Flutter project at `apps/tgw_app/`; Linux + Android build targets confirmed

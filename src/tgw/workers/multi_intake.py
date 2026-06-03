@@ -142,11 +142,33 @@ class MultiIntakeWorker(QueueWorker):
 
                 stub_path = dest / f'{sku}.json'
                 atomic_write_json(stub_path, {
-                    'sku':      sku,
-                    'location': location,
-                    'TEMPLATE': template,
-                    'title':    '',
+                    'sku':        sku,
+                    'location':   location,
+                    'TEMPLATE':   template,
+                    'title':      '',
+                    'source_sku': base_sku,
                 }, pretty=self.config.get('pretty', True))
+
+                # If this child's ItemData JSON already exists (e.g. the item
+                # was previously catalogued as part of a bundle listing), strip
+                # the parent bundle's eBay item number — it belongs to the
+                # package, not the individual item.
+                existing_json = (self.config['itemdata_root']
+                                 / sku / f'{sku}.json')
+                if existing_json.exists():
+                    try:
+                        import json as _json
+                        data = _json.loads(
+                            existing_json.read_text(encoding='utf-8'))
+                        if 'Item number' in data:
+                            del data['Item number']
+                            data.setdefault('source_sku', base_sku)
+                            atomic_write_json(existing_json, data,
+                                             pretty=self.config.get('pretty', True))
+                            log.info('multi_intake: stripped Item number from '
+                                     'existing %s (source_sku=%s)', sku, base_sku)
+                    except Exception:
+                        log.exception('multi_intake: failed to scrub %s', sku)
 
                 children.append(sku)
                 log.info('child bundle %s: %d photos (from zip subdir %s)',

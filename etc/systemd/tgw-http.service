@@ -1,0 +1,20 @@
+[Unit]
+Description=TGW HTTP API service (tgw-http, port 7373)
+After=postgresql.service network-online.target
+Requires=postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tgw
+Group=tgw
+WorkingDirectory=/opt/TGW
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/TGW/.venvironments/tgw/bin/tgw serve --host 127.0.0.1 --port 7373
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
