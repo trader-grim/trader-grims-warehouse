@@ -81,13 +81,17 @@ class EbayStageWorker(QueueWorker):
 
         draft = item.get('draft_listing', {})
         if not draft:
-            raise HardFailure(f'{sku}: no draft_listing — run ebay_draft first')
+            # Retryable — item may still be working through ai_identify/ebay_draft
+            raise RuntimeError(
+                f'{sku}: no draft_listing yet — waiting for pipeline to complete'
+            )
 
         # Price must be set (either by ebay_price or manually)
         price = draft.get('price') or item.get('ebay_offer', {}).get('price')
         if price is None:
-            raise HardFailure(
-                f'{sku}: no price set — run ebay_price or set draft_listing.price manually'
+            # Retryable — ebay_price may still be running
+            raise RuntimeError(
+                f'{sku}: no price yet — waiting for ebay_price or manual price set'
             )
 
         # Photos must be uploaded — retryable if ebay_upload hasn't finished yet

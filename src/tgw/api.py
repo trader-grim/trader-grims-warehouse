@@ -305,7 +305,14 @@ def cmd_resolve_legacy(cfg: Dict[str, Any], skus: List[str],
             atomic_write_json(json_path, item, pretty=cfg.get('pretty', True))
             resolved.append(sku)
 
-        if enqueue_stage and not item.get('ebay_offer', {}).get('offer_id'):
+        # Only queue ebay_stage if the item has already been priced —
+        # otherwise the normal pipeline will handle it after ai_identify/ebay_draft/ebay_price
+        draft = item.get('draft_listing', {})
+        pipeline_ready = (
+            draft.get('price') is not None
+            or item.get('ebay_offer', {}).get('price') is not None
+        )
+        if enqueue_stage and pipeline_ready and not item.get('ebay_offer', {}).get('offer_id'):
             try:
                 state_machine.enqueue_job(
                     queue_name='ebay_stage',
