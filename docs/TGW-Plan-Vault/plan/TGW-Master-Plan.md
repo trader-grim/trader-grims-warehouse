@@ -25,7 +25,7 @@ maintained_by: Opus (planner)
 - Bulk-first — claim a set, operate on the set, return a summary
 - Workers are thin — they ask tgw-api, never construct paths
 - Output contract — every call returns one JSON object with an `ok` key
-- SKU format `tgwYYYYMMDDHHMMSSmmm` — date is a string-comparison selector
+- SKU format `tgwYYYYMMDDHHMMSSs` — **18 chars**: date + time + 1-digit tenths; string-comparison sortable
 ### Queue decision (settled)
 - Pure state-machine model — PostgreSQL is the single work ledger
 - No filesystem `.job.json` path — the old launcher/filesystem queue retires
@@ -234,22 +234,17 @@ maintained_by: Opus (planner)
 
 ## Data cleanup (parallel track)
 ### SKU normalization (PP-ADD-005) — Critical; unblocks PP-ADD-003, 006, 008
-#### Audit ✅ COMPLETE (2026-06-03) — see `SKU-Audit-Report.md`
-- 55,351 items; 34,737 canonical (62.8%); 20,614 to migrate (37.2%)
-- **7 format classes identified** (see report for full breakdown):
-  - A: Canonical len-20 `tgwYYYYMMDDHHMMSSmmm` — 34,737 ✅
-  - B: Epoch-0 (`tgw1970...`) — 26 items; date lost, no eBay listings
-  - C: Modern-short len-18 (`tgwYYYYMMDDHHMMSSx`) — 20,328; ~11,300 have live eBay offers ⚠️
-  - D: Underscore len-18 (`tgwYYYYMMDD_HHMMSS`) — 33
-  - E: No-day len-18 (`tgwYYYYMMHHMMSSmmm`) — 16; 2005–2007 era
-  - F: No-ms len-17 (`tgwYYYYMMDDHHMMSS`) — 210
-  - G: Anomaly len-19 — 1 item (disposed)
-- **Key constraint:** 11,351 non-canonical items have live eBay offer/listing — eBay SKU rename required as part of migration
-- **Decisions required before migration code:**
-  1. Class C padding confirmed: `HHMMSSx` → `HHMMSSx00`
-  2. Class B/E date proxy for lost dates (file mtime? fixed epoch? counter?)
-  3. eBay Inventory API SKU rename path (in-place PUT vs delete+recreate) — test with 1 item
-  4. Rollback manifest format
+#### Audit ✅ COMPLETE + decisions confirmed (2026-06-03) — see `SKU-Audit-Report.md`
+- Canonical format is **18 chars**: `tgwYYYYMMDDHHMMSSs` (tenths, not ms) — chosen for barcode labels
+- 55,351 items; 20,328 already canonical (Class C); 35,023 to migrate
+- **7 format classes, all migration rules confirmed:**
+  - C: len-18 `tgwYYYYMMDDHHMMSSs` — **20,328 ✅ already canonical**
+  - A: len-20 `tgwYYYYMMDDHHMMSSmmm` — 34,737; truncate last 2 digits; collision check first; live listings via slow eBay batch (delist→relist ~50/batch)
+  - B: Epoch-0 `tgw1970...` — 26; new format `tgw201501021970xxx` (last 3 of original); no eBay listings
+  - D: Underscore len-18 — 33; strip `_`, append `0`
+  - E: YYMMDD 2020-era — 16; prepend `20` to expand year, truncate ms to 1 digit
+  - F: No-tenths len-17 — 210; append `0`
+  - G: Anomaly len-19 — 1 item (disposed); manual
 #### Remaining work
 - Canonical SKU spec (one-paragraph normative definition for enforcement code)
 - `sku_history` table in `state_machine` DB: `(sku_current, sku_prior, changed_at, change_reason, changed_by)`
