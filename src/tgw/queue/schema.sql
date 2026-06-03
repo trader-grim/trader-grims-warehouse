@@ -54,9 +54,10 @@ CREATE TABLE IF NOT EXISTS queue_jobs (
     CHECK (run_mode IN ('immediate', 'scheduled', 'repeat'))
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_queue_jobs_dedupe_key
+CREATE UNIQUE INDEX IF NOT EXISTS uq_queue_jobs_dedupe_key_active
     ON queue_jobs(dedupe_key)
-    WHERE dedupe_key IS NOT NULL;
+    WHERE dedupe_key IS NOT NULL
+      AND state NOT IN ('succeeded','failed','dead_letter','cancelled');
 
 CREATE INDEX IF NOT EXISTS idx_queue_jobs_runnable
     ON queue_jobs(queue_name, priority, run_at, created_at)

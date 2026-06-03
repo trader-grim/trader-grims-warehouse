@@ -555,7 +555,7 @@ CREATE INDEX idx_queue_jobs_trace ON public.queue_jobs USING btree (trace_id) WH
 -- Name: uq_queue_jobs_dedupe_key; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE UNIQUE INDEX uq_queue_jobs_dedupe_key ON public.queue_jobs USING btree (dedupe_key) WHERE (dedupe_key IS NOT NULL);
+CREATE UNIQUE INDEX uq_queue_jobs_dedupe_key_active ON public.queue_jobs USING btree (dedupe_key) WHERE (dedupe_key IS NOT NULL AND state NOT IN ('succeeded','failed','dead_letter','cancelled'));
 
 
 --
