@@ -56,6 +56,20 @@ class EbayStageWorker(QueueWorker):
 
         item = json.loads(json_path.read_text(encoding='utf-8'))
 
+        # Guard: item was previously listed via Trading API — must not create a
+        # duplicate Inventory API offer until the legacy listing is resolved.
+        legacy_item_number = item.get('Item number') or item.get('item_number')
+        if legacy_item_number and not item.get('legacy_listing_resolved'):
+            log.warning(
+                'ebay_stage: %s has legacy eBay Item# %s — skipping to avoid '
+                'duplicate listing; resolve via relist workflow first',
+                sku, legacy_item_number,
+            )
+            tgw_logging.log_event('ebay_stage_skipped', sku=sku,
+                                  reason='legacy_trading_api_listing',
+                                  item_number=str(legacy_item_number))
+            return
+
         # Idempotent: already staged
         existing_offer_id = item.get('ebay_offer', {}).get('offer_id')
         if existing_offer_id:
