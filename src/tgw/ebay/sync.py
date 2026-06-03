@@ -25,6 +25,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
+import requests
+
 from tgw.apis.ebay.client import ebay_get, ebay_post, ebay_put
 
 log = logging.getLogger(__name__)
@@ -221,16 +223,38 @@ def stage_draft(cfg: Dict[str, Any], sku: str,
     """
     inv_body, offer_body = _build_offer_bodies(cfg, sku, item)
 
-    ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{sku}', inv_body)
+    try:
+        ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{sku}', inv_body,
+                 extra_headers={'Content-Language': 'en-US'})
+    except requests.exceptions.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 400:
+            body = exc.response.json()
+            errors = body.get('errors', [])
+            if any(e.get('errorId') == 25021 for e in errors):
+                # Category doesn't support this condition granularity — fall back
+                # to USED_EXCELLENT (conditionId 3000 "Used") which is universally
+                # accepted in categories that allow used items.
+                log.warning('%s: condition %r rejected by category — retrying with USED_EXCELLENT',
+                            sku, inv_body['condition'])
+                inv_body['condition'] = 'USED_EXCELLENT'
+                ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{sku}', inv_body,
+                         extra_headers={'Content-Language': 'en-US'})
+            else:
+                raise
+        else:
+            raise
     log.info('inventory item upserted for %s', sku)
 
+    _cl = {'Content-Language': 'en-US'}
     existing = _find_offer(cfg, sku)
     if existing:
         offer_id = existing['offerId']
-        ebay_put(cfg, f'/sell/inventory/v1/offer/{offer_id}', offer_body)
+        ebay_put(cfg, f'/sell/inventory/v1/offer/{offer_id}', offer_body,
+                 extra_headers=_cl)
         log.info('offer updated for %s (offerId=%s)', sku, offer_id)
     else:
-        resp = ebay_post(cfg, '/sell/inventory/v1/offer', offer_body)
+        resp = ebay_post(cfg, '/sell/inventory/v1/offer', offer_body,
+                         extra_headers=_cl)
         offer_id = resp.get('offerId', '')
         if not offer_id:
             raise RuntimeError(f'create offer returned no offerId for {sku}: {resp}')

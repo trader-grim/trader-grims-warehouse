@@ -267,6 +267,140 @@ maintained_by: Opus (planner)
 - PP-ADD-001 conflict resolution policy: last-write-wins vs. manual review (decide before Phase 6 dev)
 - Thumbnail cache: install Pillow (`pip install Pillow` or `pip install trader-grims-warehouse[thumbnails]`) then run `tgw build-thumbnails`
 
+## PP-MC-001 — Midnight Commander Admin Interface
+
+### Vision
+MC is the primary console administration tool for TGW — on the master machine, over SSH,
+and on LTSP/satellite nodes. The half-height layout (catalog/item panes top, Claude Code
+bottom) is the target working environment. MC was chosen for its Norton Commander lineage,
+universal availability, zero-friction install, and suitability as both a primary interface
+and a fallback when graphical tools aren't present. It is the first app installed on any new
+system in this operation.
+
+All writes go through `tgw-http` (the FastAPI service, PP-EDITOR-001) when available.
+Reads use the local SQLite catalog and ItemData directly — MC works offline on any node.
+
+### What exists (as of 2026-06-03)
+**Built and installed (`/opt/TGW/mc/` + `~/.config/mc/`):**
+- `tgwitem` extfs — browse SKU JSON as VFS: `meta.json`, `fields/` (one .txt per field), `photos/` (images/video). Implements list + copyout + run.
+- `tgwcatalog` extfs — 55K+ items organised by location as a navigable VFS. Reads search-catalog.json.
+- `tgwqueue` extfs — live PostgreSQL queue snapshot; subdirs per state, one file per job.
+- `tgwhealth` extfs — platform health checks as named OK_/FAIL_ files.
+- `tgwservices` extfs — systemd TGW service status.
+- `tgw-mc-status.py` — F2 menu viewer: health, queue, services, catalog stats, item summary.
+- `tgw-view-image.sh` — chafa renderer; forces `--format=symbols` for MC's ascii viewer.
+- `mc.ext.ini` — file associations: SKU JSON → tgwitem VFS; sentinels → VFS; images/video → chafa.
+- `mc.menu` — F2 menu: `v`=VFS guide, `h`=health, `q`=queue, `s`=services, `l`=catalog, `i`=item summary, `p`=image preview.
+- `install-system-mc.sh` — system-wide installer (ext, menu, extfs scripts).
+
+### Known issues (needs fixing)
+- **Image viewing broken** — chafa renders fine in a terminal but MC's `%view{ascii}` mode may not correctly pass terminal dimensions or handle ANSI codes; needs diagnosis and fix.
+- **tgwitem run for fields** — `cmd_run` for `fields/*.txt` falls through to `less archive` (opens the raw JSON) instead of the field value; a temp-file approach is needed.
+- **tgwcatalog performance** — loads full 55K search-catalog.json on every list call; migrate to SQLite (`tgwcatalog.db`) for instant queries.
+- **tgwservices incomplete** — hardcoded list of 5 services; should enumerate all `tgw-worker@*` units dynamically via `systemctl list-units`.
+- **No copyin on tgwitem** — fields are read-only; `copyin` operation not implemented, so F4 edits can't write back.
+- **System-wide install** — `install-system-mc.sh` exists but full round-trip (install → all VFS working) not yet verified.
+
+### Phase 1 — Fix what's broken (priority)
+- Diagnose and fix image/video rendering in MC viewer (`%view{ascii}` + chafa)
+- Fix `tgwitem cmd_run` for field files (temp file → less, not raw archive)
+- Migrate `tgwcatalog` to read from `tgwcatalog.db` via sqlite3 (same columns: sku, title, location, status, price, image)
+- Expand `tgwservices` to list all `tgw-worker@*` units dynamically
+- Verify full system-wide install round-trip; fix any remaining wiring gaps
+
+### Phase 2 — Item editing
+- Implement `copyin` in `tgwitem` — save edited field file back to item JSON; enqueue `catalog_rebuild`
+- Add `ebay/` subdir to `tgwitem` VFS — `draft_listing/` and `ebay_offer/` fields; read-only first
+- Add `pipeline/` subdir to `tgwitem` — current job state per queue for this SKU (live PG query)
+- F2 menu actions inside `tgwitem` VFS: re-identify, re-draft, re-price, re-stage, set-hint — enqueues jobs via `tgw-http` API or direct state_machine call
+
+### Phase 3 — eBay form + gallery
+- `ebay/` subdir fields become editable via copyin (price, condition, aspects, title)
+- Image gallery mode: inside `photos/`, F3 renders image with chafa; arrow keys navigate
+- `tgwcatalog` → Enter on item → jump to `tgwitem` VFS for that SKU (via real path)
+- Thumbnail preview in catalog listing (chafa in narrow column — feasibility TBD)
+
+### Phase 4 — Universal admin extensions
+- Queue action menu: from `tgwqueue` VFS, F2 on a dead_letter job → re-queue or cancel
+- Health drill-down: from `tgwhealth` VFS, Enter on FAIL_ → show detail + suggested fix
+- Log viewer: `tgwlogs` VFS — recent journalctl output per worker, filterable
+- SSH-clean: all operations work with no X11 forwarding, no GUI dependencies
+
+### PP-MC-002 — LTSP / satellite console nodes (later)
+- Package MC config + sentinels + extfs scripts for deployment to LTSP fat clients
+- Read-only satellite mode: reads local synced `tgwcatalog.db` + thumbnails; writes queue to master via `tgw-http` when reachable
+- Installation playbook (Ansible or shell) for new node bootstrap
+
+---
+
+## PP-EDITOR-001 — Item Editor / Inventory Management App
+
+### Vision
+Cross-platform graphical app (Linux desktop + Android tablet) for full inventory management.
+The Android tablet is the primary mobile interface for warehouse operations — browsing by
+location, identifying items, setting prices, staging to eBay, and eventually scanning and
+picklist generation. Flutter is the settled technology choice: true cross-platform with
+Android as a first-class target; reads `tgwcatalog.db` directly via sqflite when offline;
+writes go through `tgw-http` when connected to master. Syncthing handles catalog + thumbnail
+sync to the tablet automatically.
+
+### Architecture
+```
+tgw-http (FastAPI)         ← shared API for all write operations
+     ↑                ↑
+MC console         Flutter app (Linux + Android)
+(PP-MC-001)        sqflite reads tgwcatalog.db directly (offline)
+                   Dio http client for writes (online)
+```
+
+### Phase A — tgw-http FastAPI service (unblocks everything)
+- New `tgw serve` subcommand starts a FastAPI HTTP server on port 7373
+- Simple Bearer token auth (API key stored in `secrets_root/tgw-api-key.json`)
+- Endpoints:
+  - `GET /api/items` — search/filter (text, location, status, date range) from SQLite
+  - `GET /api/items/:sku` — full item JSON + ebay_offer + current queue job states
+  - `PATCH /api/items/:sku` — update any fields except SKU; enqueues catalog_rebuild
+  - `GET /api/items/:sku/thumbnail` — serves thumbnail image from cache
+  - `POST /api/items/:sku/action` — enqueue a pipeline stage (with path/stage selection)
+  - `GET /api/queue/status` — job counts by queue and state
+  - `GET /api/ebay/aspects/:category_id` — aspects list for offer form
+  - `GET /api/locations` — distinct locations from SQLite
+- systemd unit: `tgw-http.service`
+
+### Phase B — Flutter skeleton
+- Flutter project at `apps/tgw_app/`; Linux + Android build targets confirmed
+- sqflite reading from `tgwcatalog.db` (same path layout as master, synced by Syncthing)
+- Dio HTTP client wired to `tgw-http`
+- Navigation shell (bottom nav bar)
+- Connection state: online (API available) vs. offline (catalog read-only)
+
+### Phase C — Browse + item view
+- Gallery screen: thumbnail grid, title, location chip, pipeline status badge
+- Filters: location selector, status filter, text search
+- Item detail screen: tabbed — Item fields / eBay draft / Offer status
+
+### Phase D — Edit + pipeline actions
+- Edit screen: title, condition, price, item_specifics (aspect form), hint field
+- Historical title suggestions (pulldown from catalog)
+- AI buttons: "Re-identify", "Set hint + re-identify"
+- Pipeline action dispatch: pick start/end stage, confirm, enqueue via API
+- Save → PATCH /api/items/:sku
+
+### Phase E — eBay offer form
+- Aspect fields from `/api/ebay/aspects/:cat` — SELECTION_ONLY as dropdown, FREE_TEXT as field
+- Price with comp range display (from ebay_offer.price_comps)
+- Stage / Publish actions
+- Mirrors Seller Hub form layout
+
+### Later phases (separate PPs)
+- Scanner input (barcode/SKU lookup → item detail)
+- Picklist generator (PP-ADD-009) as embedded screen
+- Offer management list view
+- Fulfillment workflow
+- Tasker hooks for push notifications from master → tablet
+
+---
+
 ## Pending projects (revisit)
 
 ### PP-HINT-001 — AI hint + eBay enrichment (revisit required)

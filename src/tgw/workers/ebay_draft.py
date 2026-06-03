@@ -150,20 +150,25 @@ class EbayDraftWorker(QueueWorker):
             category_name = 'Everything Else'
             log.warning('%s: no category found — staging with fallback category 99', sku)
 
-        # Fetch aspects — fall back to offline CSV if eBay is unreachable
-        try:
-            aspects = get_aspects(self.config, category_id)
-        except Exception as exc:
-            if _is_ebay_offline(exc):
-                _write_offline_csv_row(self.config, sku, item)
-                item['offline_draft'] = True
-                atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
-                log.warning('eBay unreachable for %s (%s) — wrote offline CSV row', sku, exc)
-                tgw_logging.log_event('ebay_draft_offline', sku=sku,
-                                      reason=type(exc).__name__)
-                return
-            raise
-        log.info('fetched %d aspects for category %s', len(aspects), category_id)
+        # Fetch aspects — category 99 is a non-leaf catch-all; eBay returns 400
+        # for it so skip the call and let the operator set specifics in Seller Hub.
+        if category_id == '99':
+            aspects: List[Dict[str, Any]] = []
+            log.warning('%s: fallback category 99 — skipping aspects (set in Seller Hub)', sku)
+        else:
+            try:
+                aspects = get_aspects(self.config, category_id)
+            except Exception as exc:
+                if _is_ebay_offline(exc):
+                    _write_offline_csv_row(self.config, sku, item)
+                    item['offline_draft'] = True
+                    atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
+                    log.warning('eBay unreachable for %s (%s) — wrote offline CSV row', sku, exc)
+                    tgw_logging.log_event('ebay_draft_offline', sku=sku,
+                                          reason=type(exc).__name__)
+                    return
+                raise
+            log.info('fetched %d aspects for category %s', len(aspects), category_id)
 
         # Use text model to fill aspect values
         prompt  = _build_prompt(item, aspects)
@@ -199,6 +204,23 @@ class EbayDraftWorker(QueueWorker):
                     log.warning('invalid value %r for %r — skipping', val, name)
                     continue
             item_specifics[name] = val
+
+        # Backfill required aspects the AI left blank — eBay rejects at staging
+        # if any required aspect is missing.
+        _UNBRANDED_FALLBACKS = ('Unbranded', 'Does Not Apply', 'N/A')
+        for aspect in aspects:
+            if not aspect['required'] or aspect['name'] in item_specifics:
+                continue
+            av = aspect['allowed_values']
+            fallback: Optional[str] = None
+            for candidate in _UNBRANDED_FALLBACKS:
+                if not av or candidate in av:
+                    fallback = candidate
+                    break
+            if fallback:
+                item_specifics[aspect['name']] = fallback
+                log.info('required aspect %r not filled by AI — defaulting to %r',
+                         aspect['name'], fallback)
 
         # Build draft listing block
         draft: Dict[str, Any] = {

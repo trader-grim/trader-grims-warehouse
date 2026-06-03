@@ -55,9 +55,10 @@ def ebay_get(cfg: Dict[str, Any], path: str,
 
 def ebay_post(cfg: Dict[str, Any], path: str,
               body: Optional[Dict[str, Any]] = None,
+              extra_headers: Optional[Dict[str, str]] = None,
               timeout: int = 30) -> Any:
     """Authenticated POST to the eBay REST API. Returns parsed JSON or {} for 204."""
-    resp = _SESSION.post(f'{_BASE}{path}', headers=_headers(cfg),
+    resp = _SESSION.post(f'{_BASE}{path}', headers=_headers(cfg, extra_headers),
                          json=body or {}, timeout=timeout)
     resp.raise_for_status()
     if resp.status_code == 204 or not resp.content:
@@ -67,9 +68,10 @@ def ebay_post(cfg: Dict[str, Any], path: str,
 
 def ebay_put(cfg: Dict[str, Any], path: str,
              body: Optional[Dict[str, Any]] = None,
+             extra_headers: Optional[Dict[str, str]] = None,
              timeout: int = 30) -> Any:
     """Authenticated PUT to the eBay REST API. Returns parsed JSON or None for 204."""
-    resp = _SESSION.put(f'{_BASE}{path}', headers=_headers(cfg),
+    resp = _SESSION.put(f'{_BASE}{path}', headers=_headers(cfg, extra_headers),
                         json=body or {}, timeout=timeout)
     resp.raise_for_status()
     if resp.status_code == 204 or not resp.content:
