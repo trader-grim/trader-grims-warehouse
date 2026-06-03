@@ -150,11 +150,13 @@ class EbayDraftWorker(QueueWorker):
         tgw_logging.log_event('ebay_draft_aspects_call', sku=sku,
                               category_id=category_id, aspect_count=len(aspects))
 
-        raw = chat(
-            model=TEXT_MODEL,
-            messages=[{'role': 'user', 'content': prompt}],
-            system=_SYSTEM,
-        )
+        from tgw.queue.ollama_lock import acquire_ollama_lock
+        with acquire_ollama_lock(self.config):
+            raw = chat(
+                model=TEXT_MODEL,
+                messages=[{'role': 'user', 'content': prompt}],
+                system=_SYSTEM,
+            )
 
         try:
             suggested = extract_json(raw)

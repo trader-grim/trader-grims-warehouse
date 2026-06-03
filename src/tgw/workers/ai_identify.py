@@ -172,17 +172,19 @@ class AIIdentifyWorker(QueueWorker):
                               resized_kb=resized_kb, hint=hint or None)
 
         import requests
-        resp = requests.post(
-            'http://localhost:11434/api/generate',
-            json={
-                'model':  VISION_MODEL,
-                'prompt': prompt,
-                'system': _SYSTEM_PROMPT,
-                'images': [img_b64],
-                'stream': False,
-            },
-            timeout=600,
-        )
+        from tgw.queue.ollama_lock import acquire_ollama_lock
+        with acquire_ollama_lock(self.config):
+            resp = requests.post(
+                'http://localhost:11434/api/generate',
+                json={
+                    'model':  VISION_MODEL,
+                    'prompt': prompt,
+                    'system': _SYSTEM_PROMPT,
+                    'images': [img_b64],
+                    'stream': False,
+                },
+                timeout=600,
+            )
         resp.raise_for_status()
         raw = resp.json()['response']
 
