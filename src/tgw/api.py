@@ -246,10 +246,37 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--no-stage', action='store_true',
                    help='mark resolved but do not enqueue ebay_stage')
 
+    p = sub.add_parser('staged',
+                       help='list items staged as UNPUBLISHED eBay offers, awaiting review')
+    p.add_argument('--json', action='store_true', dest='as_json',
+                   help='output as JSON instead of a table')
+
+    p = sub.add_parser('publish',
+                       help='approve and publish one or more staged items')
+    p.add_argument('skus', nargs='+', help='one or more SKUs to publish')
+    p.add_argument('--dry-run', action='store_true',
+                   help='show what would be enqueued without actually doing it')
+
     p = sub.add_parser('serve', help='start tgw-http FastAPI service on port 7373')
     p.add_argument('--host', default='127.0.0.1', help='bind host (default: 127.0.0.1)')
     p.add_argument('--port', type=int, default=7373, help='bind port (default: 7373)')
     p.add_argument('--reload', action='store_true', help='enable auto-reload (dev only)')
+
+    p = sub.add_parser('sku-migrate', help='SKU normalization (PP-ADD-005)')
+    p.add_argument('--check-collisions', action='store_true',
+                   help='run collision check only — no changes')
+    p.add_argument('--class', dest='classes', default='A,B,C,D,E,F',
+                   help='comma-separated class list to process (default: all)')
+    p.add_argument('--dry-run', action='store_true', default=True,
+                   help='show planned renames without making changes (default)')
+    p.add_argument('--run', action='store_true',
+                   help='actually execute renames (overrides --dry-run)')
+    p.add_argument('--include-live-ebay', action='store_true',
+                   help='include items with live eBay listings (default: skip)')
+    p.add_argument('--limit', type=int, default=0,
+                   help='max items to process (0 = unlimited)')
+    p.add_argument('--manifest', default='',
+                   help='path for rollback manifest JSON (default: var/log/sku-migrate-<ts>.json)')
 
     return parser
 
@@ -462,6 +489,87 @@ def cmd_resolve_legacy(cfg: Dict[str, Any], skus: List[str],
     }
 
 
+def cmd_staged(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """List all items with UNPUBLISHED eBay offers awaiting operator review."""
+    root: Path = cfg['itemdata_root']
+    items = []
+    for child in sorted(root.iterdir()):
+        jf = child / f'{child.name}.json'
+        if not jf.exists():
+            continue
+        try:
+            doc = json.loads(jf.read_text(encoding='utf-8'))
+        except Exception:
+            continue
+        offer = doc.get('ebay_offer', {})
+        if offer.get('offer_id') and offer.get('status') == 'UNPUBLISHED':
+            items.append({
+                'sku':          child.name,
+                'title':        doc.get('title', ''),
+                'price':        offer.get('price'),
+                'location':     doc.get('location', ''),
+                'category':     doc.get('ebay_category_name', ''),
+                'offer_id':     offer.get('offer_id'),
+                'staged_at':    offer.get('staged_at', ''),
+            })
+    return {'ok': True, 'count': len(items), 'items': items}
+
+
+def cmd_publish(cfg: Dict[str, Any], skus: List[str],
+                dry_run: bool = False) -> Dict[str, Any]:
+    """Enqueue ebay_publish for each SKU that has an UNPUBLISHED offer."""
+    import psycopg2.errors
+    from tgw.queue import state_machine
+
+    enqueued: List[str] = []
+    skipped:  List[str] = []
+    errors:   List[str] = []
+
+    for sku in skus:
+        jf = cfg['itemdata_root'] / sku / f'{sku}.json'
+        if not jf.exists():
+            errors.append(f'{sku}: item not found')
+            continue
+        try:
+            doc = json.loads(jf.read_text(encoding='utf-8'))
+        except Exception as exc:
+            errors.append(f'{sku}: bad JSON — {exc}')
+            continue
+
+        offer = doc.get('ebay_offer', {})
+        if not offer.get('offer_id'):
+            errors.append(f'{sku}: no offer_id — run ebay_stage first')
+            continue
+        if offer.get('status') != 'UNPUBLISHED':
+            skipped.append(f'{sku}: offer status is {offer.get("status")!r} — not UNPUBLISHED')
+            continue
+
+        if dry_run:
+            enqueued.append(sku)
+            continue
+
+        try:
+            state_machine.enqueue_job(
+                queue_name='ebay_publish',
+                payload={'sku': sku},
+                dedupe_key=f'ebay_publish:{sku}',
+                max_attempts=3,
+            )
+            enqueued.append(sku)
+        except psycopg2.errors.UniqueViolation:
+            skipped.append(f'{sku}: already queued')
+        except Exception as exc:
+            errors.append(f'{sku}: {exc}')
+
+    return {
+        'ok':       not errors,
+        'dry_run':  dry_run,
+        'enqueued': enqueued,
+        'skipped':  skipped,
+        'errors':   errors,
+    }
+
+
 def cmd_suggest(cfg: Dict[str, Any], text: str) -> Dict[str, Any]:
     suggestions_file = cfg['plan_vault_path'] / 'suggestions' / 'SUGGESTIONS.md'
     suggestions_file.parent.mkdir(parents=True, exist_ok=True)
@@ -605,6 +713,24 @@ def main() -> int:
             result = cmd_resolve_legacy(cfg, args.skus,
                                         enqueue_stage=not args.no_stage)
 
+        elif args.op == 'staged':
+            result = cmd_staged(cfg)
+            if not getattr(args, 'as_json', False) and result['ok']:
+                items = result['items']
+                if not items:
+                    print('No items staged and awaiting review.')
+                else:
+                    print(f'{"SKU":<24} {"Price":>7}  {"Location":<10} {"Title"}')
+                    print('-' * 80)
+                    for it in items:
+                        price = f'${it["price"]}' if it['price'] else '  N/A'
+                        print(f'{it["sku"]:<24} {price:>7}  {it["location"]:<10} {it["title"][:40]}')
+                    print(f'\n{len(items)} item(s) awaiting review. Use: tgw publish <SKU>')
+                return 0
+
+        elif args.op == 'publish':
+            result = cmd_publish(cfg, args.skus, dry_run=args.dry_run)
+
         elif args.op == 'serve':
             import uvicorn
             from .http_server import app
@@ -616,6 +742,32 @@ def main() -> int:
                 log_level='info',
             )
             return 0
+
+        elif args.op == 'sku-migrate':
+            from .sku_migration import check_collisions, run_migration
+            from .queue import state_machine as _sm
+            _sm.init(cfg['postgres_dsn'])
+
+            if args.check_collisions:
+                result = check_collisions(cfg)
+            else:
+                classes = [c.strip().upper() for c in args.classes.split(',') if c.strip()]
+                dry_run = not args.run
+                manifest_path: Optional[Path] = None
+                if not dry_run:
+                    if args.manifest:
+                        manifest_path = Path(args.manifest)
+                    else:
+                        ts = datetime.now(tz=timezone.utc).strftime('%Y%m%dT%H%M%S')
+                        manifest_path = Path('/opt/TGW/var/log') / f'sku-migrate-{ts}.json'
+                result = run_migration(
+                    cfg,
+                    classes=classes,
+                    dry_run=dry_run,
+                    include_live_ebay=args.include_live_ebay,
+                    limit=args.limit,
+                    manifest_path=manifest_path,
+                )
 
         else:
             result = {'ok': False, 'error': f'unknown op: {args.op!r}'}
