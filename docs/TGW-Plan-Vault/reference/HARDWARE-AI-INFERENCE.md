@@ -50,10 +50,24 @@ Most common card in 2020–2022 gaming rigs. Acceptable floor.
 | RTX 4070 Ti | 12GB | ~$450–550 | Better arch, only worth it over 3090 at a deal |
 | RTX 4080 | 16GB | ~$600–700 | Good but expensive vs 3090 for this use case |
 
-### Avoid
+### 8GB cards — depends on price
 
-- **RTX 3070 / 3070 Ti (8GB)** — works today for 7B models but walls you in quickly;
-  no headroom for 13B+ or larger vision models
+8GB cards (RTX 3070, 3070 Ti, 3060 Ti) **work fine for current 7B models**
+(qwen2.5vl:7b + Qwen2.5:latest both fit with ~3GB to spare).
+The constraint is future headroom, not today's workload.
+
+- **Free or under ~$50: take it.** GPU inference is more efficient per-call than
+  CPU even at 8GB. Use as a bridge; swap when a 3090 comes through.
+  Resale on RTX 3070 is still $80–120, so worst case it's neutral.
+- **$50–100: probably yes** as a bridge if nothing better is available soon.
+- **Market rate ($100+): skip.** A 3060 12GB at $130–160 buys real headroom
+  for only $30–60 more — the jump is worth it at that price point.
+
+The wall hits when you want to run `qwen2.5:14b` (8–9GB in Q4) — an 8GB card
+leaves no margin. Fine indefinitely if the workload stays at 7B.
+
+### Avoid at any price
+
 - **AMD RX 6000/7000 series** — 16GB VRAM is attractive but ROCm support in Ollama
   is less mature than CUDA; only consider if price is exceptional and you can test first
 
