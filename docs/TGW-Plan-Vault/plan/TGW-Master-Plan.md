@@ -245,12 +245,30 @@ maintained_by: Opus (planner)
   - E: YYMMDD 2020-era — 16; prepend `20` to expand year, truncate ms to 1 digit
   - F: No-tenths len-17 — 210; append `0`
   - G: Anomaly len-19 — 1 item (disposed); manual
+#### Migration script ✅ READY TO RUN (2026-06-03) — see `src/tgw/sku_migration.py`
+- `tgw sku-migrate` CLI with --check-collisions, --class, --dry-run/--run,
+  --include-live-ebay, --limit, --manifest
+- `sku_history` table created in `state_machine` DB
+- 7 Class A collision pairs auto-resolved (hundredths digit fallback)
+- 1 Class B collision auto-resolved (alternate suffix window)
+- Single live-item test verified end-to-end (Class B epoch-0)
+- Rollback manifest written to `/opt/TGW/var/log/sku-migrate-<ts>.json` on every run
+
+#### ⚠ PENDING INTEGRATION — coordinate before running
+> *Waiting on plan update from parallel session before executing.
+> Do not run until plan is integrated and pipeline issues are resolved.*
+
+#### Execution sequence (when ready)
+1. `tgw sku-migrate --check-collisions`  — confirm still clean
+2. `tgw sku-migrate --class F,D,E,B --run`  — 229 items, no eBay
+3. `tgw sku-migrate --class A --run`  — ~26,423 Class A without live listings
+4. eBay slow batch (~8,314 Class A live): delist in Seller Hub → `--class A --include-live-ebay --run --limit 50` → relist → repeat
+5. `tgw build-all`  — rebuild all catalogs
+6. Add SKU validation at intake points (bundle_intake, multi_intake)
+
 #### Remaining work
-- Canonical SKU spec (one-paragraph normative definition for enforcement code)
-- `sku_history` table in `state_machine` DB: `(sku_current, sku_prior, changed_at, change_reason, changed_by)`
-- Migration script: dry-run → review → live run with rollback manifest
-- Enforcement at intake points (bundle_intake, multi_intake): reject non-canonical on input
-- Post-migration verification report
+- Intake enforcement: validate 18-char format at bundle_intake / multi_intake ingestion points
+- Post-migration verification report (`tgw sku-migrate --verify` or manual audit)
 ### Data scrub passes (priority elevated 2026-06-03)
 - Pass 1: itemdata_scrub dry-run → review → --write (merge history keys, drop junk)
 - Pass 2: photo_history_recovery dry-run → review → --write

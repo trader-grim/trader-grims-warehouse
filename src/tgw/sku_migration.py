@@ -1,27 +1,99 @@
 """
 tgw.sku_migration — One-time SKU normalization (PP-ADD-005).
 
-Canonical format: tgw + YYYYMMDD + HHMMSS + s  (18 chars, s = tenths digit)
+=============================================================================
+CANONICAL FORMAT
+=============================================================================
+  tgw + YYYYMMDD + HHMMSS + s   (18 chars total)
+  s = tenths-of-second (0–9), chosen for barcode label length.
+  Example: tgw202001291640269
 
-Migration rules by class:
-  A (len=20, non-1970): truncate last 2 digits → sku[:18]
-  B (len=20, tgw1970*): tgw + 20150102 + 1970 + sku[-3:]
-  C (len=18, no _ ): already canonical — no change
-  D (len=18, has _ ): strip _, append 0 → tgw+YYYYMMDD+HHMMSS+0
-  E (len=18, 2005-7 ): YYMMDD era — prepend 20 to year, keep 1 tenths digit
-  F (len=17)         : append 0
-  G (len=19)         : manual — script flags but does not migrate
+=============================================================================
+MIGRATION RULES BY CLASS
+=============================================================================
+  A (len=20, non-1970)  truncate last 2 digits → sku[:18]
+                        Collision resolution: if two Class A items share the
+                        same tenths digit, the "loser" (later in sort order)
+                        uses sku[:17]+sku[18] (hundredths digit instead).
+                        7 such pairs exist in the dataset; all auto-resolved.
 
-Live eBay items (has ebay_offer.offer_id or ebay_listing.listing_id):
-  Skipped by default. Use --include-live-ebay to include.
-  eBay rename requires manual delist → local rename → relist in batches.
+  B (len=20, tgw1970*)  Epoch-0 corruption — real date lost.
+                        New format: tgw + 20150102 + 1970 + 3-char suffix
+                        from original SKU (last 3 digits, with fallback to
+                        alternate windows if collision). 2015 is best-guess
+                        actual year; "1970" in the time field acknowledges
+                        the corrupt source. Example:
+                          tgw19700102105208728 → tgw201501021970728
 
-Usage:
-  tgw sku-migrate --check-collisions          # collision report only, no changes
-  tgw sku-migrate --dry-run                   # show all planned renames, no changes
-  tgw sku-migrate --class F,D,E,B --run       # fast classes (no live eBay)
-  tgw sku-migrate --class A --run             # Class A without live eBay listings
-  tgw sku-migrate --class A --include-live-ebay --run  # FULL Class A (use carefully)
+  C (len=18, no _)      Already canonical — no change.
+
+  D (len=18, has _)     tgw+YYYYMMDD+_+HHMMSS → strip _, append 0.
+                        Example: tgw20200115_113609 → tgw202001151136090
+
+  E (len=18, 2005-7yr)  YYMMDD-era items, actually from 2020.
+                        Prepend 20 to expand 2-digit year; keep tenths only.
+                        Example: tgw200503114925650 → tgw202005031149256
+
+  F (len=17)            Missing tenths digit → append 0.
+                        Example: tgw20180108202128 → tgw201801082021280
+
+  G (len=19, anomaly)   Single item with non-digit in SKU; script reports
+                        but does not migrate. Handle manually.
+
+=============================================================================
+LIVE EBAY ITEMS
+=============================================================================
+  Items with ebay_offer.offer_id or ebay_listing.listing_id are SKIPPED by
+  default to prevent breaking active listings.
+
+  For live items, the eBay rename path is:
+    1. Delist  — POST /sell/inventory/v1/offer/{offer_id}/withdraw
+    2. Local rename  (this script with --include-live-ebay)
+    3. Re-create eBay inventory item at new SKU
+    4. Re-create and publish offer
+  Process in batches of ~50. Confirm each batch in Seller Hub before continuing.
+
+=============================================================================
+EXECUTION SEQUENCE
+=============================================================================
+  Step 1 — Pre-flight (always run first, no changes):
+    tgw sku-migrate --check-collisions
+
+  Step 2 — Fast classes (no live eBay, safe to bulk-run):
+    tgw sku-migrate --class F,D,E,B --dry-run   # review
+    tgw sku-migrate --class F,D,E,B --run        # ~229 items
+
+  Step 3 — Class A without live eBay listings:
+    tgw sku-migrate --class A --dry-run          # review (~26,423 items)
+    tgw sku-migrate --class A --run
+
+  Step 4 — Class A live eBay listings (slow batch, ~8,314 items):
+    # delist batch in Seller Hub first, then:
+    tgw sku-migrate --class A --include-live-ebay --run --limit 50
+    # verify in Seller Hub, relist, then repeat
+
+  Step 5 — Class G (1 item, disposed):
+    # Rename manually or skip — item is in 'disposed' location.
+
+  Step 6 — Rebuild catalogs after all steps:
+    tgw build-all
+
+=============================================================================
+ROLLBACK
+=============================================================================
+  Every --run writes a timestamped manifest to /opt/TGW/var/log/:
+    sku-migrate-<YYYYMMDDTHHMMSS>.json
+  Format: {"renames": [{"old": "...", "new": "...", "class": "..."}, ...]}
+
+  To roll back a batch: swap old/new in each entry and re-run rename_sku()
+  in reverse order. The sku_history table also records every rename:
+    psql -U tgw state_machine -c "SELECT * FROM sku_history ORDER BY changed_at DESC;"
+
+=============================================================================
+AFTER MIGRATION
+=============================================================================
+  Add SKU validation at intake (bundle_intake, multi_intake) to reject
+  non-18-char SKUs at the point of entry. See PP-ADD-005 in the master plan.
 """
 
 from __future__ import annotations
