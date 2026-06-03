@@ -220,6 +220,25 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--force', action='store_true',
                    help='re-identify even if already ai_identified')
 
+    p = sub.add_parser('requeue',
+                       help='bulk-enqueue ai_identify for items matching a filter')
+    p.add_argument('--no-title', action='store_true',
+                   help='items with photos but title still equals SKU (truly unprocessed)')
+    p.add_argument('--unidentified', action='store_true',
+                   help='all items where ai_identified is not True')
+    p.add_argument('--hint-set', action='store_true',
+                   help='items with ai_hint set but not yet ai_identified')
+    p.add_argument('--no-draft', action='store_true',
+                   help='items that are ai_identified but have no draft_listing')
+    p.add_argument('--no-price', action='store_true',
+                   help='items with draft_listing but no price set')
+    p.add_argument('--catalog-only', action='store_true',
+                   help='identify for catalog only — skip ebay_draft cascade')
+    p.add_argument('--limit', type=int, default=100,
+                   help='max items to queue (default: 100; use 0 for unlimited)')
+    p.add_argument('--run', action='store_true',
+                   help='actually queue jobs (default is dry-run)')
+
     p = sub.add_parser('resolve-legacy',
                        help='mark item(s) as having legacy eBay listing cleared, '
                             'enabling ebay_stage to proceed')
@@ -271,6 +290,111 @@ def cmd_hint(cfg: Dict[str, Any], sku: str, hint: str, force: bool = False) -> D
         'force':  force or not already,
         'queued': queued,
         'job_id': jid,
+    }
+
+
+def cmd_requeue(cfg: Dict[str, Any], *,
+                no_title: bool = False,
+                unidentified: bool = False,
+                hint_set: bool = False,
+                no_draft: bool = False,
+                no_price: bool = False,
+                catalog_only: bool = False,
+                limit: int = 100,
+                dry_run: bool = True) -> Dict[str, Any]:
+    """
+    Bulk-enqueue ai_identify (or ebay_draft/ebay_price) for items matching filters.
+    Default is dry-run — pass dry_run=False to actually queue.
+    At least one filter must be specified.
+    """
+    import psycopg2.errors
+    from tgw.queue import state_machine
+
+    _IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.JPG', '.JPEG', '.PNG'}
+
+    if not any([no_title, unidentified, hint_set, no_draft, no_price]):
+        return {'ok': False, 'error': 'specify at least one filter flag'}
+
+    if not dry_run:
+        state_machine.init(cfg.get('postgres_dsn', 'dbname=state_machine user=tgw'))
+
+    matched, queued, skipped_pending, skipped_no_photos = [], [], [], []
+    root: Path = cfg['itemdata_root']
+
+    for sku_dir in root.iterdir():
+        if limit and len(queued) >= limit:
+            break
+        j = sku_dir / f'{sku_dir.name}.json'
+        if not j.exists():
+            continue
+        d = json.loads(j.read_text(encoding='utf-8'))
+        sku   = sku_dir.name
+        title = str(d.get('title', '')).strip()
+        ai_id = d.get('ai_identified')
+        draft = d.get('draft_listing') or {}
+        price = draft.get('price') or d.get('ebay_offer', {}).get('price')
+
+        # Determine which queue this item needs
+        target_queue = 'ai_identify'
+        payload: Dict[str, Any] = {'sku': sku}
+        if catalog_only:
+            payload['catalog_only'] = True
+
+        if no_title:
+            if ai_id or (title and title != sku):
+                continue
+        if unidentified:
+            if ai_id:
+                continue
+        if hint_set:
+            if not d.get('ai_hint') or ai_id:
+                continue
+        if no_draft:
+            if not ai_id or draft:
+                continue
+            target_queue = 'ebay_draft'
+            payload = {'sku': sku}
+        if no_price:
+            if not draft or price is not None:
+                continue
+            target_queue = 'ebay_price'
+            payload = {'sku': sku}
+
+        # ai_identify requires at least one photo
+        if target_queue == 'ai_identify':
+            has_photos = any(
+                p.suffix in _IMAGE_EXTS
+                for p in sku_dir.iterdir() if p.is_file()
+            )
+            if not has_photos:
+                skipped_no_photos.append(sku)
+                continue
+
+        matched.append(sku)
+
+        if not dry_run:
+            dedupe_key = f'{target_queue}:{sku}'
+            try:
+                state_machine.enqueue_job(
+                    queue_name=target_queue,
+                    payload=payload,
+                    dedupe_key=dedupe_key,
+                    max_attempts=3,
+                )
+                queued.append(sku)
+            except psycopg2.errors.UniqueViolation:
+                skipped_pending.append(sku)
+
+    return {
+        'ok':               True,
+        'dry_run':          dry_run,
+        'catalog_only':     catalog_only,
+        'matched':          len(matched),
+        'queued':           len(queued) if not dry_run else 0,
+        'skipped_pending':  len(skipped_pending),
+        'skipped_no_photos': len(skipped_no_photos),
+        'limit':            limit,
+        'sample':           matched[:5],
     }
 
 
@@ -458,6 +582,19 @@ def main() -> int:
 
         elif args.op == 'hint':
             result = cmd_hint(cfg, args.sku, ' '.join(args.text), force=args.force)
+
+        elif args.op == 'requeue':
+            result = cmd_requeue(
+                cfg,
+                no_title=args.no_title,
+                unidentified=args.unidentified,
+                hint_set=args.hint_set,
+                no_draft=args.no_draft,
+                no_price=args.no_price,
+                catalog_only=args.catalog_only,
+                limit=args.limit,
+                dry_run=not args.run,
+            )
 
         elif args.op == 'resolve-legacy':
             result = cmd_resolve_legacy(cfg, args.skus,
