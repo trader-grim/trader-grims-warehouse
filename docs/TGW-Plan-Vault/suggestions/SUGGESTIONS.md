@@ -45,3 +45,4 @@
     - Physical inventory has gaps from the old system — sold items not marked, available items with
     stale status.
 
+- [ ] 2026-06-03T18:37 :: change initial listing pricing to 10% over 100th percentile. This sets list price on ebay page, and sometimes a higher priced sale. Then after a few days start job process lowering the price first 100th until 25th percentile or wherever

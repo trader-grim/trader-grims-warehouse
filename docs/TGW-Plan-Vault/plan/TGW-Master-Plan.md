@@ -251,7 +251,7 @@ maintained_by: Opus (planner)
 - Migration script: dry-run → review → live run with rollback manifest
 - Enforcement at intake points (bundle_intake, multi_intake): reject non-canonical on input
 - Post-migration verification report
-### Data scrub passes
+### Data scrub passes (priority elevated 2026-06-03)
 - Pass 1: itemdata_scrub dry-run → review → --write (merge history keys, drop junk)
 - Pass 2: photo_history_recovery dry-run → review → --write
 - Pass 3: import eBay listings to fill gaps; then freeze the field schema
@@ -481,6 +481,59 @@ Operator should review and adjust prices in Seller Hub before publishing, especi
 - Open design question: sparse delta vs full replacement for revision payload; history of applied revisions
 - Relist: inventory item already exists on eBay; need fresh pricing + new offer; structurally re-create not update
 - `ebay_offer` block now established (PP-PRICE-001) — proceed when ready
+
+### PP-SYNC-001 — eBay data sync, sold reconciliation + local mirror
+
+#### Core principle
+Every durable eBay-side ID and URL must be written back into item JSON immediately
+after the API call succeeds. Guards for sold/active state must be reliable at pipeline
+time without hitting eBay — which requires the local copy to be authoritative.
+
+#### Three reconciliation tiers
+1. **eBay API pull** — `GetMyeBaySelling` (active + sold); `GetOrders` with date ranges
+   for history beyond 90 days. Match `listing_id` directly against `ItemData/*/\*.json`
+   `ebay_listing.listing_id` — never route through the catalog.
+2. **Sold report CSV import** — match eBay item number directly against item JSON
+   `ebay_listing.listing_id`. Set `status: Sold`, record sale price and date.
+3. **Physical inventory sweep** — generate checklist of ambiguous-status SKUs (no
+   `ebay_listing`, or unresolved active/sold) for human review. Item gone from shelf →
+   sold/missing. Item present → available.
+
+#### What "download current eBay data" means
+- Pull all active offers/listings → write back into `ebay_listing` / `ebay_offer` per item JSON
+- Pull sold order history → match by SKU/listing_id → set `status: Sold`, record sale price + date
+- `ebay_legacy_sync` already writes `ebay_listing` from Trading API — extend this, don't rebuild
+- `ebay_sync` exists but writes too little back to item JSONs — extend its write-back
+
+#### Known data quality issues (from audit)
+- Many items have "Item number" from legacy eBay CSV export fields that are the **parent
+  bundle's** item number, not the individual item's — strip on encounter
+- Items with `legacy_listing_resolved: True` may still have active listings — the active
+  listing guard in `ebay_stage` now catches this, but the underlying data needs the sync
+  pass to be authoritative
+- Physical inventory has gaps from the old system: sold items not marked, available items
+  with stale status
+
+#### Implementation plan
+- Phase 1: Extend `ebay_sync` worker to write full `ebay_listing` + `ebay_offer` back to
+  item JSON on every sync cycle (currently writes too little)
+- Phase 2: `tgw ebay-pull` CLI command — pull all active offers + recent sold orders,
+  write back to item JSONs, enqueue `catalog_rebuild`
+- Phase 3: Sold CSV import tool — match by listing_id, update status + sale fields
+- Phase 4: Ambiguous-status sweep report — CLI command outputs checklist for physical review
+- Dependency: PP-ADD-005 SKU normalization should run before Phase 2 to ensure
+  listing_id lookups work reliably across all item JSONs
+
+### PP-PRICE-002 — Repricer strategy (confirmed)
+- **Initial list price:** 110% of p100 (max active listing price) — sets above market to
+  capture opportunistic higher-price sales
+- **Reprice schedule:** After a configurable hold period (e.g. 3–5 days), begin stepping
+  down: p100 → p75 → p50 → p25, one step per period
+- **Floor:** p25 or a configured minimum price — do not go below
+- Repricer worker (`ebay_reprice`) reads `ebay_offer.price_comps`, computes next price,
+  calls eBay Offer PATCH, writes new price back to item JSON
+- Builds on PP-PRICE-001 `ebay_offer` block and `price_comps` already established
+- `ebay_reprice` worker stub registered in `pyproject.toml` — needs implementation
 
 ### MILESTONE-001 — tgw.source replacement ✅ (2026-06-03)
 - The new TGW system (Phases 1–4 + PP-STAGE-001) constitutes a ~95% functional replacement of the legacy `tgw.source` system, significantly improved
