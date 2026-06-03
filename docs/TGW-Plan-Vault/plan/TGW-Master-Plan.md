@@ -70,6 +70,14 @@ maintained_by: Opus (planner)
 - **Phase 2b COMPLETE** — PM-intake worker live under systemd; watches `inbox/`, calls `Qwen2.5:latest` via Ollama, patches Master Plan, archives notes; `tgw/apis/ollama.py` client added
 - **Phase 2c COMPLETE** — `tgw suggest "..."` appends timestamped entries to `suggestions/SUGGESTIONS.md`
 - **State-machine bug fixed** — `recover_expired_jobs()` now promotes `retry_wait` jobs back to `queued` when `not_before` passes; previously transient failures left jobs stuck indefinitely
+### Pipeline fixes applied 2026-06-03
+- `ebay_stage`: Content-Language header added to all Inventory API PUT/POST calls (errorId 25709)
+- `ebay_stage`: Active listing guard — skips items with `ebay_listing.status=Active` before creating duplicate offers
+- `ebay_stage`: Condition retry with USED_EXCELLENT on errorId 25021 (category rejects granular condition)
+- `ebay_publish`: Content-Language fix; condition fallback on 25021; launch price PUT before publish
+- `multi_intake`: strips `Item number` from existing item JSON when child SKU matches parent (prevents bundle eBay item# polluting individual child records); writes `source_sku`
+- `ebay_reprice` worker: self-scheduling, condition policy cache built
+
 ### Phase 2a observation gate ✅ CLEARED 2026-06-02
 - `ebay_token_refreshed` observed at 12:07 — full expiry+refresh cycle confirmed
 - No separate cron existed to retire; worker is sole token manager
@@ -168,12 +176,20 @@ maintained_by: Opus (planner)
 - `workers/ebay_publish.py` — manual trigger; gates on price non-null + photos uploaded; writes `ebay_listing` block
 - `workers/ebay_sync.py` — self-scheduling every 6h; syncs eBay offer status back to item JSON
 - eBay returns 400 (not empty list) when no Inventory API offers exist — handled gracefully
-### 4c. Category/aspect client — deferred; existing taxonomy.py + specifics.py cover current needs
+### 4c. Category condition policy module ✅ COMPLETE (2026-06-03)
+- `apis/ebay/conditions.py` — caches full eBay Metadata API condition policy table (15K categories, 26 unique sets)
+- `best_condition(cfg, category_id, item_condition)` — resolves to best allowed conditionId; NEVER upgrades condition (same-or-worse fallback only); returns None when no valid condition exists
+- `CONDITION_RANK` dict maps all conditionIds to a buyer-quality rank (0=New … 9=For Parts)
+- `CONDITION_ID_TO_ENUM` maps conditionId → Inventory API enum string
+- `draft_listing` now stores `condition_id`, `condition_label`, `condition_enum` — used by stage/publish directly
+- Cache at `catalog_root/ebay-condition-policies.json`; refreshed every 7 days
+- Key insight: conditionId 3000 has 4 different buyer labels across categories ("Used", "Pre-owned", "Pre-owned - Good", "Open Box/Used") — label stored in draft, not just the ID
+- Eliminates the entire class of errorId 25021 (invalid condition for category) errors
 ### 4d. Category template system — deferred; see PP-HINT-001 (eBay enrichment) below
 ### 4e. Retire eBay token cron ✅ COMPLETE — no separate cron existed; token_refresh worker is sole manager
 ### 4f. Duplicate item/listing check worker (PP-ADD-006) — pending
 ### 4g. Inventory API migration sweep (PP-ADD-008) — pending
-### 4h. Pricing module — pending; see PP-PRICE-001 below
+### 4h. Pricing module — see PP-PRICE-001 below
 ### 4i. Live listing revision / update draft — pending; see PP-REVISION-001 below
 
 ## Phase 5 — AI operations layer
@@ -485,6 +501,20 @@ provide sold/trend data and should be investigated for access expansion:
 **Interim strategy:** Browse API p25 (implemented) is a reasonable floor until sold-price access is obtained.
 Operator should review and adjust prices in Seller Hub before publishing, especially for niche items.
 
+### PP-REPRICE-001 — Automatic markdown repricer ✅ INITIAL COMPLETE (2026-06-03)
+- Three-stage publish-price strategy: launch (max→.99) → retail (p75, day 3) → move (p25, day 17)
+- `to_99(price)` — rounds up to next .99 price point (e.g. $15.23 → $15.99, $16.00 → $16.99)
+- `pricing.py` updated: stores `p75` in comps; `suggest_price()` accepts `category_id`, falls back to `cfg['category_price_defaults']` when Browse API comps are thin
+- `ebay_publish.py` — at publish time: computes launch price, PUTs updated price to eBay offer, writes `reprice_schedule` to item JSON
+- `reprice_schedule` format: `[{stage, label, price, due_at, done_at}, ...]` — computed at publish, self-documenting history
+- `workers/ebay_reprice.py` — self-scheduling every 6h; scans ItemData for due entries; applies price via Inventory API PUT; marks done_at
+- Config: `reprice_stages` array and `category_price_defaults` dict in `tgw-api-config.json` — all periods and percentiles adjustable
+- Set `reprice_skip: true` on any item JSON to exclude from repricer
+- Items published manually (no price_comps) skip reprice_schedule — operator adjusts price in Seller Hub
+- `tgw staged` — lists UNPUBLISHED offers awaiting operator review (table format)
+- `tgw publish <sku...>` — human-reviewed approval gate before any item goes live
+- **Open:** category-level price defaults UI; reprice check/repair command for thin-comp items; re-reprice after price_comps refresh
+
 ### PP-STAGE-001 — eBay draft staging ✅ COMPLETE (2026-06-03)
 - `workers/ebay_stage.py` — creates UNPUBLISHED offer on eBay; visible/editable in Seller Hub immediately
 - `tgw/ebay/sync.py` split: `stage_draft()` (inventory item + offer, no publish) + `publish_offer()` (one API call)
@@ -569,6 +599,99 @@ time without hitting eBay — which requires the local copy to be authoritative.
     - **Dependencies**: Master catalog schema, SKU normalization (PP-ADD-005), History module (PP-ADD-003)
   - **Overview**
     - Enable satellite/client nodes to operate independently when disconnected or loosely connected from the master system. Includes thumbnail generation for catalog browsing, temporary catalog update handling, and a defined data migration path to promote local changes back to master.
+
+---
+
+## PP-MACRO-001 — keyd Macroboard
+
+### Vision
+A dedicated keyboard (one of the four identical Dell USB keyboards) acts as a
+single-touch macro board for TGW and eBay operations. Highlight a SKU, location,
+or any identifier anywhere on screen, then press the matching macro key — no
+Ctrl+C, no command typing. If nothing is highlighted, macros fall back to the
+current item (`/opt/TGW/CurrentItem` symlink).
+
+The TGW layer on the macroboard is the **canonical definition** for the eventual
+all-keyboard sub-layer: once wired and proven here, the same `[tgw_layer]` block
+gets added to `default.conf` and bound to a chord on all four keyboards.
+
+### Files (all committed, ready to install)
+| File | Purpose |
+|------|---------|
+| `etc/keyd/tgw-macroboard.conf` | keyd config — device target + layer definition |
+| `/opt/TGW/bin/tgw-macro` | Macro dispatcher — all action logic |
+| `/opt/TGW/bin/tm` | Thin launcher — `runuser -u tgw` + env setup |
+
+### ⚠ Install blocked — waiting for second keyboard
+Cannot install until a second keyboard is connected so the macroboard keyboard
+can be safely dedicated without losing console access. When ready:
+
+```bash
+# 1. Connect the second (normal use) keyboard first.
+
+# 2. Identify the macroboard's unique device ID:
+keyd list-devices
+# Look for "Dell Dell USB Keyboard" entries. Both show as 413c:2105.
+# The one on the dedicated USB port will have a distinct path/serial hash.
+# Example output line: "413c:2105:a1b2c3d4e5f6  Dell Dell USB Keyboard"
+
+# 3. Edit the config to target the correct device:
+sudo nano /opt/TGW/src/trader-grims-warehouse/etc/keyd/tgw-macroboard.conf
+# Replace "413c:2105" in [ids] with the full unique ID from step 2.
+
+# 4. Install and reload:
+sudo cp /opt/TGW/src/trader-grims-warehouse/etc/keyd/tgw-macroboard.conf /etc/keyd/
+sudo keyd reload
+
+# 5. Test: press Caps Lock on the macroboard → LED behaviour changes.
+#    Highlight a SKU in any window → press g → notification should appear.
+```
+
+### Key map — TGW layer (Caps Lock to enter, ESC or Caps Lock to exit)
+
+```
+ITEM INFO & FIELDS          OPEN / VIEW
+  g  Get summary → notify     o  Open folder (Dolphin)
+  t  Title update (prompt)    i  Images (gwenview)
+  l  Location update (prompt) j  JSON edit (konsole)
+  v  Verified (mark In Stock)
+  h  Hint → requeue identify  EBAY BROWSER
+  u  set cUrrent item          e  eBay search by SKU
+                               b  Browse listing (ebay.com/itm)
+PIPELINE (in order)          S-e  Edit/revise listing
+  1  ai_identify               f  Find sold comparables
+  2  ebay_draft              S-s  Seller Hub overview
+  3  ebay_price
+  4  ebay_stage              ADMIN / SYSTEM
+  5  publish                  k  health checK → notify
+  p  Publish (same as 5)      q  Queue depths → notify
+                              c  Catalog rebuild
+PICKLIST                      d  stageD items list
+  a  Add picklist line        w  Weight (USB scale → clipboard)
+S-a  Add question line        y  whisper dictation (15s)
+                              z  short dictation (7s)
+LOCATION BULK                 x  suggest (plan inbox)
+  m  Move all in location      r  Requeue --no-draft count
+S-l  Open location folder
+```
+`S-` = Shift held. Navigation keys (Enter, arrows, F-keys, Backspace) pass through normally.
+
+### Clipboard / fallback behaviour
+- **Highlighted text** → used directly as the item argument (Wayland primary
+  selection via `wl-paste --primary` — no Ctrl+C needed)
+- **X11 fallback** → `xsel -o --primary`
+- **Nothing selected** → `basename $(readlink /opt/TGW/CurrentItem)`
+- Actions that need a value (title, location, hint) open a `kdialog` prompt
+- Actions that produce output use `notify-send` (5s timeout)
+- Actions that open things (Dolphin, browser, konsole) just open them
+
+### Future: all-keyboard sub-layer
+Once the macroboard layer is proven:
+1. Copy the `[tgw_layer]` block from `tgw-macroboard.conf` into `default.conf`
+2. Bind a chord on `[main]` to `swap(tgw_layer)` — e.g. `rightalt+space`
+3. All four keyboards get single-chord TGW access; macroboard stays always-on
+
+---
 
 - ## Phase 7 — Vault Synchronization
 - ### Syncthing Configuration
