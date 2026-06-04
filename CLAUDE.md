@@ -6,6 +6,15 @@ and directs all development. Read this file first, then read the master plan bef
 
 ## Start every session here
 
+**Step 1 — process any pending plan updates before reading the plan:**
+
+1. Check `docs/TGW-Plan-Vault/inbox/` for any `.md` files. If any exist, read them and
+   incorporate their content into the master plan, then delete (or move) each processed file.
+2. Check `docs/TGW-Plan-Vault/suggestions/SUGGESTIONS.md` for any unprocessed suggestions.
+   If new items are present, evaluate and incorporate actionable ones into the master plan.
+
+**Step 2 — read the (now-current) master plan:**
+
 ```
 cat docs/TGW-Plan-Vault/plan/TGW-Master-Plan.md
 ```
