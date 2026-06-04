@@ -43,9 +43,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import psycopg2.errors
 import requests
 
-from tgw.apis.ebay.client import ebay_delete, ebay_put, ebay_post
+from tgw.apis.ebay.client import ebay_delete, ebay_get, ebay_put, ebay_post
 from tgw.apis.ebay.trading import revise_item_sku
-from tgw.ebay.sync import _build_offer_bodies, publish_offer, _find_offer, MARKETPLACE_ID
+from tgw.ebay.sync import _build_offer_bodies, publish_offer, _find_offer, _get_policies, MARKETPLACE_ID
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.items import atomic_write_json, load_item_doc
 from tgw.queue import state_machine
@@ -112,7 +112,7 @@ def _migrate_legacy(cfg: Dict[str, Any],
         return {'ok': False, 'old_sku': old_sku,
                 'error': f'ReviseFixedPriceItem listing {listing_id}: {exc}'}
 
-    result = rename_sku(cfg, old_sku, new_sku, classify(old_sku))
+    result = rename_sku(cfg, old_sku, new_sku, classify(old_sku), dry_run=False)
     if not result.get('ok'):
         # eBay custom label already changed — log clearly for manual fix
         log.error('eBay label revised but local rename failed %s → %s: %s',
@@ -212,7 +212,7 @@ def _migrate_inventory(cfg: Dict[str, Any],
         log.warning('could not delete old inventory_item/%s (non-fatal): %s', old_sku, exc)
 
     # Local rename
-    rename_result = rename_sku(cfg, old_sku, new_sku, classify(old_sku))
+    rename_result = rename_sku(cfg, old_sku, new_sku, classify(old_sku), dry_run=False)
     if not rename_result.get('ok'):
         log.error('eBay migrated but local rename failed %s → %s: %s',
                   old_sku, new_sku, rename_result.get('error'))
@@ -248,6 +248,218 @@ def _migrate_inventory(cfg: Dict[str, Any],
     }
 
 
+def _migrate_inventory_live(cfg: Dict[str, Any],
+                            old_sku: str, new_sku: str,
+                            old_offer: Dict[str, Any],
+                            old_listing_id: str) -> Dict[str, Any]:
+    """
+    Inventory API path using live eBay data (no local draft_listing needed).
+    GET inventory item + offer from eBay → PUT new item → POST new offer →
+    DELETE old offer → PUBLISH new offer → DELETE old item → local rename.
+    """
+    old_offer_id = old_offer['offerId']
+
+    # GET live inventory item body
+    try:
+        inv_body = ebay_get(cfg, f'/sell/inventory/v1/inventory_item/{old_sku}')
+    except requests.exceptions.HTTPError as exc:
+        body = exc.response.text[:200] if exc.response is not None else str(exc)
+        return {'ok': False, 'old_sku': old_sku,
+                'error': f'GET inventory_item/{old_sku}: {body}'}
+
+    # Strip read-only / invalid fields from inventory item before re-PUT
+    inv_body.pop('sku', None)
+    inv_body.pop('locale', None)
+    # weight.value=0 is rejected by eBay
+    pkg = inv_body.get('packageWeightAndSize', {})
+    if pkg.get('weight', {}).get('value', 1) == 0:
+        inv_body.pop('packageWeightAndSize', None)
+    # allocationByFormat is read-only
+    (inv_body.get('availability', {})
+             .get('shipToLocationAvailability', {})
+             .pop('allocationByFormat', None))
+
+    # Build new offer body from live offer, replacing the SKU and injecting policies
+    offer_body = {k: v for k, v in old_offer.items()
+                  if k not in ('offerId', 'status', 'listing')}
+    offer_body['sku'] = new_sku
+    # Live offers often lack explicit policy IDs — inject from account policies
+    policies = _get_policies(cfg)
+    offer_body.setdefault('listingPolicies', {}).update(policies)
+
+    # PUT new inventory item (idempotent)
+    try:
+        ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{new_sku}',
+                 inv_body, extra_headers=_LANG_HEADER)
+    except requests.exceptions.HTTPError as exc:
+        body = exc.response.text[:200] if exc.response is not None else str(exc)
+        return {'ok': False, 'old_sku': old_sku,
+                'error': f'PUT inventory_item/{new_sku}: {body}'}
+
+    # Find or create offer for new_sku
+    try:
+        existing = _find_offer(cfg, new_sku)
+        if existing:
+            new_offer_id = existing['offerId']
+            ebay_put(cfg, f'/sell/inventory/v1/offer/{new_offer_id}',
+                     offer_body, extra_headers=_LANG_HEADER)
+        else:
+            resp = ebay_post(cfg, '/sell/inventory/v1/offer',
+                             offer_body, extra_headers=_LANG_HEADER)
+            new_offer_id = resp.get('offerId', '')
+            if not new_offer_id:
+                return {'ok': False, 'old_sku': old_sku,
+                        'error': f'POST offer returned no offerId: {resp}'}
+    except requests.exceptions.HTTPError as exc:
+        body = exc.response.text[:200] if exc.response is not None else str(exc)
+        return {'ok': False, 'old_sku': old_sku,
+                'error': f'offer create/update: {body}'}
+
+    # DELETE old offer — ends old listing; point of no return
+    try:
+        ebay_delete(cfg, f'/sell/inventory/v1/offer/{old_offer_id}')
+    except requests.exceptions.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else 0
+        if status != 404:
+            body = exc.response.text[:200] if exc.response is not None else str(exc)
+            return {'ok': False, 'old_sku': old_sku,
+                    'error': f'DELETE old offer {old_offer_id}: {body}'}
+
+    # Publish new offer
+    try:
+        pub = publish_offer(cfg, new_offer_id)
+        new_listing_id  = pub['listing_id']
+        new_listing_url = pub['listing_url']
+    except requests.exceptions.HTTPError as exc:
+        body = exc.response.text[:300] if exc.response is not None else str(exc)
+        return {'ok': False, 'old_sku': old_sku,
+                'error': f'publish offer {new_offer_id}: {body}',
+                'ebay_done': True}
+
+    # Delete old inventory item (cleanup; non-fatal)
+    try:
+        ebay_delete(cfg, f'/sell/inventory/v1/inventory_item/{old_sku}')
+    except Exception as exc:
+        log.warning('could not delete old inventory_item/%s (non-fatal): %s', old_sku, exc)
+
+    # Local rename
+    rename_result = rename_sku(cfg, old_sku, new_sku, classify(old_sku), dry_run=False)
+    if not rename_result.get('ok'):
+        log.error('eBay migrated but local rename failed %s → %s: %s',
+                  old_sku, new_sku, rename_result.get('error'))
+        return {'ok': False, 'old_sku': old_sku,
+                'error': f'local rename failed (eBay already done): {rename_result.get("error")}',
+                'ebay_done': True, 'new_offer_id': new_offer_id,
+                'new_listing_id': new_listing_id}
+
+    # Update item JSON at new path
+    new_path = cfg['itemdata_root'] / new_sku / f'{new_sku}.json'
+    item = load_item_doc(new_path)
+    now = datetime.now(timezone.utc).isoformat()
+    item['ebay_listing'] = {
+        'offer_id':     new_offer_id,
+        'listing_id':   new_listing_id,
+        'listing_url':  new_listing_url,
+        'status':       'Active',
+        'api':          'inventory',
+        'published_at': now,
+    }
+    if 'ebay_offer' not in item:
+        item['ebay_offer'] = {}
+    item['ebay_offer']['offer_id']     = new_offer_id
+    item['ebay_offer']['status']       = 'PUBLISHED'
+    item['ebay_offer']['published_at'] = now
+    atomic_write_json(new_path, item, pretty=cfg.get('pretty', True))
+
+    return {
+        'ok':             True,
+        'path':           'inventory_live',
+        'old_sku':        old_sku,
+        'new_sku':        new_sku,
+        'old_listing_id': old_listing_id,
+        'new_listing_id': new_listing_id,
+    }
+
+
+def _recover_partial(cfg: Dict[str, Any],
+                     old_sku: str, new_sku: str,
+                     new_offer: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Recovery path for partial-state items: new_sku offer exists but is unpublished
+    (old offer was already deleted in a previous run).  Inject policies, publish,
+    clean up old inventory item, then do the local rename.
+    """
+    new_offer_id = new_offer['offerId']
+    log.info('ebay_sku_migrate: recovering partial state %s → %s (offer %s)',
+             old_sku, new_sku, new_offer_id)
+
+    # Inject account policies — the offer was likely created without them
+    try:
+        policies = _get_policies(cfg)
+        offer_body = {k: v for k, v in new_offer.items()
+                      if k not in ('offerId', 'status', 'listing')}
+        offer_body.setdefault('listingPolicies', {}).update(policies)
+        ebay_put(cfg, f'/sell/inventory/v1/offer/{new_offer_id}',
+                 offer_body, extra_headers=_LANG_HEADER)
+    except requests.exceptions.HTTPError as exc:
+        body = exc.response.text[:200] if exc.response is not None else str(exc)
+        return {'ok': False, 'old_sku': old_sku,
+                'error': f'PUT offer {new_offer_id} (recovery): {body}'}
+
+    # Publish
+    try:
+        pub = publish_offer(cfg, new_offer_id)
+        new_listing_id  = pub['listing_id']
+        new_listing_url = pub['listing_url']
+    except requests.exceptions.HTTPError as exc:
+        body = exc.response.text[:300] if exc.response is not None else str(exc)
+        return {'ok': False, 'old_sku': old_sku,
+                'error': f'publish offer {new_offer_id} (recovery): {body}',
+                'ebay_done': True}
+
+    # Delete old inventory item (non-fatal)
+    try:
+        ebay_delete(cfg, f'/sell/inventory/v1/inventory_item/{old_sku}')
+    except Exception as exc:
+        log.warning('recovery: could not delete old inventory_item/%s: %s', old_sku, exc)
+
+    # Local rename
+    rename_result = rename_sku(cfg, old_sku, new_sku, classify(old_sku), dry_run=False)
+    if not rename_result.get('ok'):
+        log.error('recovery: publish OK but local rename failed %s → %s: %s',
+                  old_sku, new_sku, rename_result.get('error'))
+        return {'ok': False, 'old_sku': old_sku,
+                'error': f'local rename failed (eBay already done): {rename_result.get("error")}',
+                'ebay_done': True, 'new_offer_id': new_offer_id,
+                'new_listing_id': new_listing_id}
+
+    # Update item JSON at new path
+    new_path = cfg['itemdata_root'] / new_sku / f'{new_sku}.json'
+    item = load_item_doc(new_path)
+    now = datetime.now(timezone.utc).isoformat()
+    item['ebay_listing'] = {
+        'offer_id':     new_offer_id,
+        'listing_id':   new_listing_id,
+        'listing_url':  new_listing_url,
+        'status':       'Active',
+        'api':          'inventory',
+        'published_at': now,
+    }
+    item.setdefault('ebay_offer', {})
+    item['ebay_offer']['offer_id']     = new_offer_id
+    item['ebay_offer']['status']       = 'PUBLISHED'
+    item['ebay_offer']['published_at'] = now
+    atomic_write_json(new_path, item, pretty=cfg.get('pretty', True))
+
+    return {
+        'ok':           True,
+        'path':         'recovery',
+        'old_sku':      old_sku,
+        'new_sku':      new_sku,
+        'new_listing_id': new_listing_id,
+    }
+
+
 def migrate_one(cfg: Dict[str, Any],
                 old_sku: str, new_sku: str) -> Dict[str, Any]:
     """Migrate one live eBay listing to the canonical SKU."""
@@ -264,11 +476,27 @@ def migrate_one(cfg: Dict[str, Any],
         return {'ok': False, 'old_sku': old_sku,
                 'error': f'listing status {listing.get("status")!r} — not active'}
 
+    # Local data may not have offer_id even for Inventory API listings —
+    # look it up live from eBay to determine which path to use.
     offer_id = item.get('ebay_offer', {}).get('offer_id')
+    live_offer: Optional[Dict[str, Any]] = None
+    if not offer_id:
+        live_offer = _find_offer(cfg, old_sku)
+        if live_offer:
+            offer_id = live_offer['offerId']
 
     if offer_id:
-        return _migrate_inventory(cfg, old_sku, new_sku, item, offer_id, listing_id)
+        if live_offer is not None:
+            # Have live offer data already — use it directly
+            return _migrate_inventory_live(cfg, old_sku, new_sku, live_offer, listing_id)
+        else:
+            return _migrate_inventory(cfg, old_sku, new_sku, item, offer_id, listing_id)
     else:
+        # Check for partial state: a previous run may have created new_sku offer
+        # but failed before publishing (old offer already deleted)
+        new_offer = _find_offer(cfg, new_sku)
+        if new_offer:
+            return _recover_partial(cfg, old_sku, new_sku, new_offer)
         return _migrate_legacy(cfg, old_sku, new_sku, listing_id)
 
 
