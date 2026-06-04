@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-03
+updated: 2026-06-04
 maintained_by: Opus (planner)
 ---
 
@@ -82,6 +82,17 @@ maintained_by: Opus (planner)
 - `tgw staged` / `tgw publish` — operator review gate before any item goes live
 - **Open issue**: errorId 25002 `Item.Country` at publish for some categories (34032, 14027, 13916) — offer body is correct, investigating category-specific requirements
 
+### Pipeline additions — 2026-06-04
+- **PP-SOLD-001 Tier 1 DONE** — `ebay_legacy_sync` extended: `_sync_sold()` polls GetOrders,
+  365-day initial lookback in 90-day windows, state file at `runtime/state/ebay-sold-sync-state.json`
+- **PP-SOLD-001 Tier 4 code DONE** — eBay push webhook: `POST /webhooks/ebay/notification` in
+  `http_server.py`; 10-min cached listing index; `_mark_item_sold()` shared between polling and webhook;
+  `apis/ebay/notifications.py`: `set_notification_preferences()`, `parse_sold_notification()`,
+  `verify_notification_signature()`; `tgw setup-ebay-hooks` CLI command; nginx config + cloudflared
+  setup script at `/opt/TGW/config/nginx/`. **Infrastructure deployment deferred — see Operator TODO.**
+- **SKU migrate** — `ebay_sku_migrate` worker running hourly; ~8,350 eBay live listings remain;
+  shipping policy now category-aware (FC4 default, 7 category overrides in config)
+
 ### Phase 2a observation gate ✅ CLEARED 2026-06-02
 - `ebay_token_refreshed` observed at 12:07 — full expiry+refresh cycle confirmed
 - No separate cron existed to retire; worker is sole token manager
@@ -89,6 +100,53 @@ maintained_by: Opus (planner)
 - `queue-launcher.service` disabled; stub in code preserves the console script
 - Filesystem `.queue_worker` / `.queue_worker_config` discovery removed from all code
 - eBay credentials removed from `tgw-api-config.json`; now in `secrets_root`
+
+## Operator TODO — deferred installs and configs
+
+Short-cycle tasks waiting on operator action (not code changes). Check off when done.
+
+### eBay webhook endpoint — PP-SOLD-001 Tier 4 infrastructure (code done 2026-06-04)
+- [ ] **Choose path** — run both commands and compare IPs:
+  `curl -s https://ifconfig.me` vs `ip route get 1.1.1.1 | awk '{print $7; exit}'`
+  — Match → Path A (nginx+certbot). Differ → Path B (Cloudflare Tunnel, works behind NAT).
+- [ ] **Path A — nginx + Let's Encrypt** (static public IP):
+  ```
+  apt install nginx certbot python3-certbot-nginx
+  cp /opt/TGW/config/nginx/ebay-webhook.conf /etc/nginx/sites-available/tgw-webhook
+  # edit server_name to your actual subdomain (e.g. hooks.yourdomain.com)
+  ln -s /etc/nginx/sites-available/tgw-webhook /etc/nginx/sites-enabled/
+  nginx -t && systemctl reload nginx
+  certbot --nginx -d hooks.yourdomain.com
+  ```
+- [ ] **Path B — Cloudflare Tunnel** (behind NAT / dynamic IP, recommended if no static IP):
+  ```
+  sudo bash /opt/TGW/config/nginx/cloudflared-setup.sh
+  # edit /etc/cloudflared/config.yml — replace REPLACE_WITH_YOUR_SUBDOMAIN
+  # add CNAME in ZoneEdit: hooks.yourdomain.com -> <tunnel-id>.cfargotunnel.com
+  systemctl start cloudflared && systemctl enable cloudflared
+  ```
+- [ ] **Add `dev_id` to `/opt/TGW/secrets/ebay-credentials.json`** — from developer.ebay.com →
+  My Account → Application Keys → DevID field. Enables full SOAP signature verification.
+  Add: `"dev_id": "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"`
+- [ ] **Register URL with eBay** (after endpoint is live and TLS works):
+  `tgw setup-ebay-hooks --url https://hooks.yourdomain.com/webhooks/ebay/notification`
+- [ ] **Verify**: `tgw setup-ebay-hooks --check`
+- [ ] **Restart tgw-http** so the new webhook route is live:
+  `systemctl restart tgw-worker@ebay_legacy_sync.service` (and restart tgw-http service)
+
+### Manual Seller Hub fixes — wrong shipping profile on 10 items
+10 items migrated with FRE (eBay Standard Envelope) profile instead of FC4.
+Categories: 7317 (Game Pieces) + 261068 (Action Figures). Correct profile: FC4 (199931446015).
+Seller Hub: Listings → search by Item ID → Edit listing → Shipping → select FC4.
+- [ ] 327195083346  - [ ] 327195083374  - [ ] 327195083408  - [ ] 327195083423
+- [ ] 327195083451  - [ ] 227372145582  - [ ] 327195085940  - [ ] 227372145665
+- [ ] 227372145712
+
+### PP-REMOTE-001 — Tailscale
+- [ ] `curl -fsSL https://tailscale.com/install.sh | sh` then `tailscale up`
+- [ ] Join account network; verify `tgw-http` reachable over Tailscale from remote devices
+- [ ] If using Tailscale Funnel for webhook: `tailscale funnel 7373` + CNAME in ZoneEdit
+  (alternative to Cloudflare Tunnel; requires Tailscale to be running)
 
 ## Phase 1 — Queue foundation ✅ COMPLETE (2026-06-02)
 ### 1.0 secrets_root migration ✅
@@ -337,9 +395,26 @@ succeeds. Makes sold/active guards reliable without hitting eBay API at pipeline
   guard in `ebay_stage` catches new cases; sync pass needed to make data authoritative.
 - Physical inventory gaps from old system — sold items not marked, available items stale.
 
+#### Status (2026-06-04)
+- **Tier 1 DONE**: `ebay_legacy_sync` extended with `_sync_sold()` — GetOrders polling,
+  365-day initial lookback in 90-day windows, state file at `runtime/state/ebay-sold-sync-state.json`.
+  Items matched by `listing_id`, written `status=sold` + `ebay_sale` block, catalog_rebuild enqueued.
+- Tier 2 (sold report CSV import) and Tier 3 (physical sweep checklist) pending.
+
+#### Tier 4 (future) — eBay push notification webhook
+eBay Trading API supports `SetNotificationPreferences` + `FixedPriceTransaction` event for real-time
+sold notification (reduces latency from daily poll → seconds). Requires:
+- A stable **public HTTPS URL** (eBay does TLS validation; bare IP:port not accepted)
+- New endpoint in tgw-api: `POST /webhooks/ebay/notification` — parse XML, verify delivery token,
+  call the same sold-mark logic as `_sync_sold()`
+- Exposure options: nginx reverse proxy + static public IP + DNS, or **Cloudflare Tunnel** (free,
+  zero port-opening, works behind NAT — preferred if no static IP)
+- Deferred until public endpoint question is resolved (see PP-REMOTE-001)
+- Daily GetOrders polling already provides coverage in the meantime
+
 #### Sequencing
 - Depends on PP-ADD-005 (SKU normalization) for reliable listing_id → SKU matching
-- `ebay_legacy_sync` extension (add sold order pull) is first deliverable
+- `ebay_legacy_sync` extension (add sold order pull) is first deliverable ✓ DONE
 - Physical sweep tool after sync is authoritative
 - `status` field freeze after Pass 3 data scrub
 

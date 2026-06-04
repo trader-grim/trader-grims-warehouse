@@ -50,6 +50,34 @@ def _sold_state_path(cfg: Dict[str, Any]) -> Path:
     return Path(cfg['raw'].get('runtime_root', '/opt/TGW/runtime')) / 'state' / 'ebay-sold-sync-state.json'
 
 
+def _mark_item_sold(json_path: Path, order_id: str, buyer: str,
+                    sale_price: Any, quantity: int, sale_date: str,
+                    synced_at: str, cfg: Dict[str, Any]) -> bool:
+    """
+    Mark an item sold in-place.  Idempotent: returns False if already sold.
+    Writes status=sold + ebay_sale block and logs the event.
+    """
+    item = json.loads(json_path.read_text(encoding='utf-8'))
+    if item.get('status') == 'sold':
+        return False
+    sku = json_path.parent.name
+    item['status'] = 'sold'
+    item.setdefault('ebay_listing', {})['status'] = 'Sold'
+    item['ebay_sale'] = {
+        'order_id':   order_id,
+        'buyer':      buyer,
+        'sale_price': sale_price,
+        'quantity':   quantity,
+        'sale_date':  sale_date,
+        'synced_at':  synced_at,
+    }
+    atomic_write_json(json_path, item, pretty=cfg.get('pretty', True))
+    log.info('ebay_legacy_sync: sold %s order=%s price=$%s', sku, order_id, sale_price)
+    tgw_logging.log_event('ebay_item_sold', sku=sku,
+                          order_id=order_id, sale_price=sale_price)
+    return True
+
+
 def _build_listing_index(itemdata_root: Path) -> Dict[str, Path]:
     """Scan ItemData and return {listing_id: json_path} for all items that have one."""
     index: Dict[str, Path] = {}
@@ -257,28 +285,18 @@ class EbayLegacySyncWorker(QueueWorker):
                 if not json_path or not json_path.exists():
                     continue
                 try:
-                    item = json.loads(json_path.read_text(encoding='utf-8'))
-                    if item.get('status') == 'sold':
-                        continue  # idempotent
-                    sku = json_path.parent.name
-                    item['status'] = 'sold'
-                    item.setdefault('ebay_listing', {})['status'] = 'Sold'
-                    item['ebay_sale'] = {
-                        'order_id':   order['order_id'],
-                        'buyer':      order['buyer'],
-                        'sale_price': tx['sale_price'],
-                        'quantity':   tx['quantity'],
-                        'sale_date':  tx['sale_date'],
-                        'synced_at':  synced_at,
-                    }
-                    atomic_write_json(json_path, item,
-                                      pretty=self.config.get('pretty', True))
-                    marked += 1
-                    log.info('ebay_legacy_sync: sold %s order=%s price=$%s',
-                             sku, order['order_id'], tx['sale_price'])
-                    tgw_logging.log_event('ebay_item_sold', sku=sku,
-                                          order_id=order['order_id'],
-                                          sale_price=tx['sale_price'])
+                    did_mark = _mark_item_sold(
+                        json_path,
+                        order_id=order['order_id'],
+                        buyer=order['buyer'],
+                        sale_price=tx['sale_price'],
+                        quantity=tx['quantity'],
+                        sale_date=tx['sale_date'],
+                        synced_at=synced_at,
+                        cfg=self.config,
+                    )
+                    if did_mark:
+                        marked += 1
                 except Exception as exc:
                     log.error('ebay_legacy_sync: sold mark failed listing %s: %s',
                               listing_id, exc)

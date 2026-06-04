@@ -14,12 +14,13 @@ import logging
 import sqlite3
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import psycopg2
 import psycopg2.extras
-from fastapi import Depends, FastAPI, HTTPException, Security, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Security, status
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
@@ -39,6 +40,26 @@ _cfg: Dict[str, Any] = {}
 _api_key: str = ""
 
 _security = HTTPBearer()
+
+# Listing index cache for webhook lookups: {listing_id: json_path}
+_listing_index: Dict[str, Path] = {}
+_listing_index_built_at: float = 0.0
+_LISTING_INDEX_TTL = 600  # rebuild every 10 min
+
+
+def _get_listing_index() -> Dict[str, Path]:
+    global _listing_index, _listing_index_built_at
+    if time.time() - _listing_index_built_at > _LISTING_INDEX_TTL:
+        from .workers.ebay_legacy_sync import _build_listing_index
+        _listing_index = _build_listing_index(_cfg['itemdata_root'])
+        _listing_index_built_at = time.time()
+        log.info('ebay_webhook: listing index rebuilt (%d entries)', len(_listing_index))
+    return _listing_index
+
+
+def _listing_index_built_at_reset() -> None:
+    global _listing_index_built_at
+    _listing_index_built_at = 0.0
 
 PIPELINE_ACTIONS = {
     "ai_identify",
@@ -393,3 +414,75 @@ def list_locations() -> Dict[str, Any]:
         con.close()
 
     return {"ok": True, "locations": [r[0] for r in rows]}
+
+
+# ---------------------------------------------------------------------------
+# POST /webhooks/ebay/notification — eBay push notification (no Bearer auth)
+# ---------------------------------------------------------------------------
+
+@app.post("/webhooks/ebay/notification")
+async def ebay_notification_webhook(request: Request) -> Dict[str, Any]:
+    """
+    Receive eBay FixedPriceTransaction push notifications.
+    No Bearer auth — eBay can't send it. Signature-verified instead.
+    Always returns {"ack": "Success"} to prevent eBay retry storms.
+    """
+    from .apis.ebay.notifications import parse_sold_notification, verify_notification_signature
+    from .workers.ebay_legacy_sync import _mark_item_sold
+
+    body = await request.body()
+    log.debug('ebay_webhook: received %d bytes', len(body))
+
+    if not verify_notification_signature(body, _cfg):
+        log.warning('ebay_webhook: invalid signature — rejected')
+        raise HTTPException(status_code=400, detail='invalid signature')
+
+    event = parse_sold_notification(body)
+    if event is None:
+        # Ping/test notification from eBay — just ack it
+        log.info('ebay_webhook: non-sold notification (ping or unknown type)')
+        return {'ack': 'Success'}
+
+    listing_id = event['listing_id']
+    index = _get_listing_index()
+    json_path = index.get(listing_id)
+
+    # Cache miss — maybe a newly listed item; do a targeted scan
+    if json_path is None or not json_path.exists():
+        log.info('ebay_webhook: listing %s not in index — rebuilding', listing_id)
+        _listing_index_built_at_reset()
+        index = _get_listing_index()
+        json_path = index.get(listing_id)
+
+    if json_path is None or not json_path.exists():
+        log.warning('ebay_webhook: no local item for listing_id=%s — acking anyway', listing_id)
+        return {'ack': 'Success'}
+
+    synced_at = datetime.now(timezone.utc).isoformat()
+    try:
+        did_mark = _mark_item_sold(
+            json_path,
+            order_id=event['order_id'],
+            buyer=event['buyer'],
+            sale_price=event['sale_price'],
+            quantity=event['quantity'],
+            sale_date=event['sale_date'],
+            synced_at=synced_at,
+            cfg=_cfg,
+        )
+        if did_mark:
+            log.info('ebay_webhook: marked sold listing_id=%s', listing_id)
+            try:
+                state_machine.enqueue_job(
+                    queue_name='catalog_rebuild',
+                    payload={'reason': 'ebay_webhook_sold'},
+                    dedupe_key='catalog_rebuild:pending',
+                    not_before=time.time() + 30,
+                    max_attempts=3,
+                )
+            except Exception:
+                pass
+    except Exception as exc:
+        log.error('ebay_webhook: mark failed listing_id=%s: %s', listing_id, exc)
+
+    return {'ack': 'Success'}

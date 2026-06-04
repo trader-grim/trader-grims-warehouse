@@ -257,6 +257,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--dry-run', action='store_true',
                    help='show what would be enqueued without actually doing it')
 
+    p = sub.add_parser('setup-ebay-hooks',
+                       help='register eBay push notification delivery URL (run once)')
+    p.add_argument('--url', required=True,
+                   help='public HTTPS URL eBay will POST to, e.g. https://hooks.example.com/webhooks/ebay/notification')
+    p.add_argument('--check', action='store_true',
+                   help='print currently registered URL without making changes')
+
     p = sub.add_parser('serve', help='start tgw-http FastAPI service on port 7373')
     p.add_argument('--host', default='127.0.0.1', help='bind host (default: 127.0.0.1)')
     p.add_argument('--port', type=int, default=7373, help='bind port (default: 7373)')
@@ -730,6 +737,17 @@ def main() -> int:
 
         elif args.op == 'publish':
             result = cmd_publish(cfg, args.skus, dry_run=args.dry_run)
+
+        elif args.op == 'setup-ebay-hooks':
+            from .apis.ebay.notifications import (
+                get_notification_preferences, set_notification_preferences)
+            if args.check:
+                current = get_notification_preferences(cfg)
+                result = {'ok': True, 'current_url': current or '(not set)'}
+            else:
+                set_notification_preferences(cfg, args.url)
+                result = {'ok': True, 'delivery_url': args.url,
+                          'note': 'eBay will now POST FixedPriceTransaction events to this URL'}
 
         elif args.op == 'serve':
             import uvicorn
