@@ -36,7 +36,7 @@ log = logging.getLogger(__name__)
 QUEUE_NAME    = 'bundle_intake'
 STABLE_AFTER_S = 30
 IMAGE_SUFFIXES = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.JPG', '.JPEG', '.PNG'}
-SKU_RE        = re.compile(r'^tgw\d{13,}$', re.IGNORECASE)
+SKU_RE        = re.compile(r'^tgw\d{15}$', re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------

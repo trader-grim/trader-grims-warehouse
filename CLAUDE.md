@@ -86,6 +86,7 @@ Run as `tgw` user — source files are `rw-------`, secrets are `chmod 600`.
 - Condition granularity: many categories only accept conditionId 3000 ("Used") — `USED_EXCELLENT` maps to this; `USED_GOOD`/`USED_ACCEPTABLE` may be rejected
 - Have scopes: `sell.inventory`, `sell.account`, `sell.marketing`
 - Missing (apply separately): `buy.marketplace_insights` (sold price data)
+- Default fulfillment policy for most categories: **FC4** (override in `tgw-api-config.json` per category if needed)
 
 ## Current phase
 

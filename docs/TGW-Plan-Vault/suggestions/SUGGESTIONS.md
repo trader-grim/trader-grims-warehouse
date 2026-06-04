@@ -11,3 +11,13 @@
 - [x] 2026-06-03T17:28 :: Raise data normalization priority — PP-ADD-005 priority elevated, run after pipeline stable
 - [x] 2026-06-03T17:47 :: Sold reconciliation design — integrated as PP-SOLD-001
 - [x] 2026-06-03T18:37 :: Initial listing price 10% over 100th percentile — implemented in ebay_price.py (to_99(max * 1.10))
+- [x] 2026-06-04T00:28 :: ssh/tailscale/tmux remote full capability mode — added as PP-REMOTE-001
+- [x] 2026-06-04T00:30 :: organize interfaces into a folder. mc, keyd, etc. — added as PP-IFDIR-001
+- [x] 2026-06-04T00:34 :: review tgw.source and pare down deprecated functions to tgw api functions or aliases for short names . Note any useful remaining functions and replace. review tgw-dev.source and pare down deprecated functions migrate rest to tgw.source. Is this the sort of thing that lives in pyproject.toml instead of bash aliases? — added as PP-SHELL-001
+- [x] 2026-06-04T00:41 :: change to search to match sku by just first 18 characters. That will cover most changes. — added to PP-ADD-005 Remaining work
+- [x] 2026-06-04T00:43 :: #VERIFIED key should change to verified. the — added to Data scrub passes (rename field)
+- [x] 2026-06-04T00:46 :: auto update of ebay listing when the offer is changed — added to PP-REVISION-001
+- [x] 2026-06-04T00:50 :: in addition to the offer the should have a globals metadata area where we put things like the condition class that don't generally change between offers? need to analyze. — added as PP-GLOBALS-001 + open question
+- [x] 2026-06-04T01:16 :: record eps links — added to PP-SYNC-001 implementation plan
+- [x] 2026-06-04T01:46 :: store category support needs to be added — added as PP-STORE-001
+- [x] 2026-06-04T01:47 :: default shipping policy for most categories is FC4 at this time — added to CLAUDE.md eBay API notes

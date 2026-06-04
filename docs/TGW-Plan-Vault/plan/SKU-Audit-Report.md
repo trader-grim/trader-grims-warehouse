@@ -1,7 +1,7 @@
 ---
 title: SKU Normalization Audit Report
 updated: 2026-06-03
-status: decisions confirmed — migration script ready to build
+status: audit complete — migration script not yet written
 ---
 
 # SKU Normalization Audit Report
@@ -9,95 +9,91 @@ status: decisions confirmed — migration script ready to build
 ## Summary
 
 55,351 items audited across 7 format classes.
-**20,328 (36.7%) are already in canonical format (Class C).**
-**35,023 (63.3%) require migration** — one-time operation.
-Live eBay listings follow a slower batch path: delist → update SKU → relist.
+**34,737 (62.8%) are already in canonical format.**
+**20,614 (37.2%) require migration** — one-time operation.
+11,351 non-canonical items have live eBay offers; those require eBay custom label updates as part of migration.
 
 ---
 
-## Canonical Format (confirmed)
+## Canonical Format (target)
 
 ```
-tgw + YYYYMMDD + HHMMSS + s
+tgw + YYYYMMDD + HHMMSS + mmm
 ```
 - Prefix: `tgw` (3 chars, always lowercase)
 - Date:   8-digit `YYYYMMDD`
 - Time:   6-digit `HHMMSS`
-- Tenths: 1-digit tenths-of-second (0–9)
-- Total:  **18 characters**
+- Ms:     3-digit milliseconds (zero-padded)
+- Total:  **20 characters**
 - Sortable as a plain string — lexicographic order = chronological order
-- Example: `tgw202001291640269`
-
-Length chosen to fit barcode labels. Class C items are already in this format.
+- Example: `tgw20260603143022417`
 
 ---
 
 ## Format Classes
 
-### Class C — Already Canonical ✅
-| | |
-|---|---|
-| Count | **20,328** (36.7%) |
-| Length | 18 |
-| Pattern | `tgw` + `YYYYMMDD` + `HHMMSSs` |
-| Example | `tgw202001291640269` → 2020-01-29 16:40:26.9 |
-| Years | 2020–2026 |
-| Action | None — this IS the canonical format |
-
----
-
-### Class A — Too Long (truncate ms)
+### Class A — Canonical ✅
 | | |
 |---|---|
 | Count | **34,737** (62.8%) |
 | Length | 20 |
-| Pattern | `tgw` + `YYYYMMDD` + `HHMMSS` + `mmm` (3-digit ms) |
-| Example | `tgw20170607143022417` → 2017-06-07 14:30:22.417 |
+| Pattern | `tgw` + `YYYYMMDD` + `HHMMSS` + `mmm` |
 | Years | 2014–2020 (bulk: 2015–2019) |
-| Live eBay offers | Significant — check per item |
+| Action | None |
 
-**Migration rule:** Drop last 2 ms digits (keep tenths, discard hundredths + thousandths).
-`tgw20170607143022417` → `tgw201706071430224`
-
-**⚠ Collision check required first.** Two items created within the same 100ms window
-(same `HHMMSSs` = same tenths digit) would produce the same 18-char SKU.
-Pre-migration: scan all Class A items, find any pairs where `sku[:18]` collides, resolve
-manually before running bulk migration. Expected to be rare but must be confirmed zero.
-
-**eBay path:** Slow batch — delist, update SKU, relist. Do not attempt to bulk-rename
-live listings inline. Batch in groups of ~50, confirm each batch before continuing.
-
-Year breakdown:
-```
-2014: 326    2015: 3,418    2016: 4,193    2017: 16,023
-2018: 3,712  2019: 5,785    2020: 1,280
-```
+These are correct and require no changes.
 
 ---
 
 ### Class B — Epoch-0 Date Corruption
+|            |                                                                 |
+| ---------- | --------------------------------------------------------------- |
+| Count      | **26** (0.05%)                                                  |
+| Length     | 20                                                              |
+| Pattern    | `tgw1970MMDDHHMMSS` + `mmm`                                     |
+| Example    | `tgw19700102105139553`                                          |
+| Root cause | Timestamp recorded as Unix epoch ≈ 0; original intake date lost |
+
+All 26 share date `19700102` (Jan 2, 1970 UTC = a few hours past Unix epoch 0).
+The real intake date is unknown. Items appear to be legitimate in-stock inventory.
+Items checked: valid location, title, `#STATUS=In Stock`.
+
+**Migration strategy:** Assign new canonical SKUs using current date + sequential suffix,
+or use file `mtime` as a proxy for intake date. Requires manual review to confirm
+none have eBay listings (check: all 26 have `ebay_item_id: null` ✓).
+
+---
+
+### Class C — Modern Short (dominant non-canonical group)
 | | |
 |---|---|
-| Count | **26** (0.05%) |
-| Length | 20 |
-| Pattern | `tgw1970MMDDHHMMSS` + `mmm` |
-| Example | `tgw19700102105139553` |
-| Root cause | Unix epoch ≈ 0 timestamp; original intake date lost |
-| Live eBay offers | None (all confirmed `ebay_item_id: null`) |
+| Count | **20,328** (36.7%) |
+| Length | 18 |
+| Pattern | `tgw` + `YYYYMMDD` + `HHMMSSx` (7-digit time, 1-digit ms) |
+| Example | `tgw202001291640269` → 2020-01-29 16:40:26.9 |
+| Years | 2020–2026 |
+| Live eBay offers | ~11,300 of these items |
 
-All 26 share date `19700102`. Items are legitimate in-stock inventory.
+This is the **largest migration target** and the highest-risk group due to live listings.
+The format is almost canonical — it has the correct date and time, just uses 1 ms digit
+instead of 3 and therefore lands at length 18 instead of 20.
 
-**Migration rule:** New SKU encodes the source and best-guess year.
-Format: `tgw` + `20150102` + `1970` + last 3 digits of original SKU
+**Canonical equivalent:** Pad ms digit to 3: `x` → `x00`
+e.g. `tgw202001291640269` → `tgw20200129164026900`
 
-`tgw19700102105139553` → last 3 = `553` → `tgw201501021970553`
+**Collision risk:** Low — the 1-digit ms suffix already distinguishes rapid bursts;
+padding to 3 digits creates a valid canonical SKU. A pre-migration uniqueness check
+against all existing SKUs is required.
 
-- `20150102` — 2015 is the best-guess actual intake year
-- `1970` — embedded in the time field to acknowledge the corrupt source date
-- Last 3 digits — preserves uniqueness within the group (all have different tails)
-- Total: 3 + 8 + 7 = **18 chars** ✓
+**eBay impact:** Any item with `ebay_offer.offer_id` or `ebay_listing.listing_id` needs
+the eBay inventory item's `sku` custom label updated via Inventory API PUT before the
+local rename, or eBay sync will break after migration.
 
-**eBay path:** No live listings; local rename only.
+Year breakdown:
+```
+2020: 3,127    2021: 5,557    2022: 3,611
+2023: 1,897    2024:   471    2025: 4,879    2026: 786
+```
 
 ---
 
@@ -106,44 +102,41 @@ Format: `tgw` + `20150102` + `1970` + last 3 digits of original SKU
 |---|---|
 | Count | **33** (0.06%) |
 | Length | 18 |
-| Pattern | `tgw` + `YYYYMMDD` + `_` + `HHMMSS` (no tenths) |
+| Pattern | `tgw` + `YYYYMMDD` + `_` + `HHMMSS` (no ms) |
 | Example | `tgw20200115_113609` → 2020-01-15 11:36:09 |
 | Years | 2020 only |
 
-**Migration rule:** Strip underscore, append `0` for tenths.
-`tgw20200115_113609` → `tgw202001151136090`
+A brief period where an underscore separator was used and milliseconds were dropped.
+Almost certainly from the same intake tool as Class F (no-ms) but with the underscore added.
 
-Total: 3 + 8 + 6 + 1 = **18 chars** ✓
-
-**Collision check:** Confirm `tgw202001151136090` does not already exist.
+**Canonical equivalent:** Strip underscore, append `000` for ms.
+e.g. `tgw20200115_113609` → `tgw20200115113609000`
 
 ---
 
-### Class E — YYMMDD Format (actually 2020)
+### Class E — No Day (2005–2007 era)
 | | |
 |---|---|
 | Count | **16** (0.03%) |
 | Length | 18 |
-| Pattern | `tgw` + `YYMMDD` + `HHMMSS` + `mmm` |
-| Example | `tgw200503114925650` → 20-05-03 = 2020-05-03 11:49:25.650 |
-| Actual year | 2020 (confirmed) |
-| Live eBay offers | None found |
+| Pattern | `tgw` + `YYYYMM` + `HHMMSS` + `mmm` |
+| Example | `tgw200503114925650` → 2005-03 (day unknown) |
+| Years | 2005, 2006, 2007 |
 
-The 6-digit date is `YYMMDD` with 2-digit year (20 = 2020), not `YYYYMM`.
-`200503` = year 20 (2020), month 05, day 03.
+The oldest surviving items. Date encoded without a day field; original day is unrecoverable
+from the SKU alone. File `mtime` is not reliable this far back.
 
-**Migration rule:** Prepend `20` to expand 2-digit year to 4-digit; keep tenths only.
-`tgw200503114925650`:
-- Date: `20` + `200503` = `20200503`
-- Time: `114925` (HHMMSS)
-- Tenths: `6` (first digit of `650`)
-- Result: `tgw202005031149256`
+Note: `tgw200516...` has month `16` which is invalid as YYYYMM — these are likely
+`YYMMDD` format (year 20, month 05, day 16) from a different encoding used briefly around
+the same period. Both interpretations land in the same small group.
 
-Total: 3 + 8 + 6 + 1 = **18 chars** ✓
+**Migration strategy:** Assign day = `01` as a conservative placeholder, or use file
+`mtime`. Flag these in `sku_history` with `change_reason=epoch_no_day`.
+Check for live eBay listings before renaming (current scan: none found).
 
 ---
 
-### Class F — No Tenths
+### Class F — No Milliseconds
 | | |
 |---|---|
 | Count | **210** (0.4%) |
@@ -152,13 +145,14 @@ Total: 3 + 8 + 6 + 1 = **18 chars** ✓
 | Example | `tgw20180108202128` → 2018-01-08 20:21:28 |
 | Years | 2018 (32), 2020 (10), 2021 (168) |
 
-**Migration rule:** Append `0` for tenths.
-`tgw20180108202128` → `tgw201801082021280`
+Milliseconds were not recorded. The intake tool likely truncated or dropped them.
 
-Total: 3 + 8 + 6 + 1 = **18 chars** ✓
+**Canonical equivalent:** Append `000`.
+e.g. `tgw20180108202128` → `tgw20180108202128000`
 
-**Collision check:** Confirm appended `0` doesn't collide with an existing Class C SKU
-at the same second.
+**Collision risk:** Low — appending `000` should not collide with existing items since
+no canonical item ends in exactly those digits at the same second. Verify with a
+pre-migration uniqueness scan.
 
 ---
 
@@ -168,81 +162,73 @@ at the same second.
 | Count | **1** |
 | Length | 19 |
 | SKU | `tgw20210421C0939348` |
-| Issue | Non-numeric `C` at position 11 |
-| Status | `disposed` |
+| Issue | Non-numeric character `C` at position 11 |
+| Content | title=Encyclopedia of Combat Aircraft; location=disposed; status=unknown |
 
-**Migration rule:** Strip `C`, keep first 15 digits after `tgw`, truncate to 18.
-`tgw20210421C0939348` → `tgw202104210093934` (treat `C` as `0`, take tenths = `3`... 
-or simply assign `tgw202104210939348`[:18] = `tgw20210421093934`)
+Single item with a non-digit character embedded in the timestamp. The `C` likely
+originated from a typo or a copy-paste of a hex string. Item is in `disposed` location.
 
-Low priority — item is disposed. Handle manually.
+**Migration strategy:** Treat as Class C with `C` → `0`: `tgw20210421C0939348` → `tgw20210421009393480`?
+Or simply assign a new canonical SKU. Low priority given `disposed` status.
 
 ---
 
-## Length Histogram (pre-migration)
+## Length Histogram
 
 ```
 Length  Count    Pct     Class(es)
 ------  -------  ------  ---------
-17      210      0.38%   F — append 0
-18      20,377   36.82%  C (canonical) + D (strip _) + E (prepend 20)
-19      1        0.00%   G — manual
-20      34,763   62.80%  A (truncate) + B (new format)
+17      210      0.38%   F (no-ms)
+18      20,377   36.82%  C (modern-short) + D (underscore) + E (no-day)
+19      1        0.00%   G (anomaly)
+20      34,763   62.80%  A (canonical) + B (epoch-0)
 ```
 
-Post-migration: all 55,351 items at length 18.
+---
+
+## Migration Priority
+
+| Priority | Class | Count | Complexity | eBay Impact |
+|----------|-------|-------|------------|-------------|
+| 1 (highest) | C — Modern Short | 20,328 | Medium | HIGH — ~11,300 live offers |
+| 2 | F — No Milliseconds | 210 | Low | Low — check per item |
+| 3 | D — Underscore | 33 | Low | Low — check per item |
+| 4 | E — No Day | 16 | Medium | None found |
+| 5 | B — Epoch-0 | 26 | High | None found |
+| 6 | G — Anomaly | 1 | Low | None — disposed |
 
 ---
 
-## Migration Priority & eBay Path
+## eBay Migration Constraint
 
-| Priority | Class | Count | eBay live | Path |
-|----------|-------|-------|-----------|------|
-| — | C | 20,328 | ~11,300 | **Already canonical — no change** |
-| 1 | F — No tenths | 210 | check per item | Fast — append `0`, verify collision |
-| 2 | D — Underscore | 33 | check per item | Fast — strip `_`, append `0` |
-| 3 | E — YYMMDD | 16 | none | Fast — prepend `20`, truncate ms |
-| 4 | B — Epoch-0 | 26 | none | Fast — new `tgw201501021970xxx` format |
-| 5 | G — Anomaly | 1 | none | Manual |
-| 6 | A — Too long | 34,737 | significant | **Slow batch** — collision check first, then delist→rename→relist in groups |
+**11,351 non-canonical items have a live eBay offer_id or listing_id.**
+These are almost entirely Class C (2020–2026 items actively in pipeline).
 
-Class A is done last and slowest: collision check must be clean before any live
-listings are touched. eBay batching in groups of ~50 with confirmation between batches.
+For each such item, migration must:
+1. Update the eBay Inventory Item via `PUT /sell/inventory/v1/inventory_item/{new_sku}`
+   with the full item payload, then
+2. Update the Offer via `PUT /sell/inventory/v1/offer/{offer_id}` with `sku=new_sku`,
+   or delete and re-create the offer — TBD based on eBay API behavior for SKU rename.
+3. Rename the local `ItemData/<old_sku>/` directory and JSON file.
+4. Write `sku_history` record.
+5. Enqueue `catalog_rebuild`.
 
----
-
-## eBay Batch Migration Path (Class A live listings)
-
-For each item in Class A with `ebay_offer.offer_id` or `ebay_listing.listing_id`:
-
-1. **Delist** — end the eBay listing (`POST /sell/inventory/v1/offer/{offer_id}/withdraw`)
-2. **Rename locally** — move `ItemData/<old>/` to `ItemData/<new>/`, rewrite JSON `sku` field, write `sku_history` record
-3. **Re-create eBay inventory item** — `PUT /sell/inventory/v1/inventory_item/{new_sku}`
-4. **Re-create offer** — `POST /sell/inventory/v1/offer` with new SKU, same price/condition/policies
-5. **Re-publish** — `POST /sell/inventory/v1/offer/{new_offer_id}/publish`
-6. **Enqueue** `catalog_rebuild`
-
-Process in batches of ~50. Confirm each batch (check Seller Hub) before continuing.
-Items without live listings (no `offer_id`) can be renamed offline in bulk.
+**Confirmed:** This is a one-time operation. After normalization, intake enforcement
+prevents new non-canonical SKUs from entering the system.
 
 ---
 
-## Collision Check Plan (Class A)
+## What Needs to Be Decided Before Writing Migration Code
 
-Before running any Class A migration:
-
-```python
-# Find all Class A SKUs whose 18-char truncation matches an existing SKU
-canonical = set(all_18_char_skus)   # current Class C + D + E + F after their migrations
-collisions = []
-for sku in class_a_skus:
-    candidate = sku[:18]
-    if candidate in canonical or candidate in [s[:18] for s in class_a_skus if s != sku]:
-        collisions.append((sku, candidate))
-```
-
-Expected: zero or near-zero collisions. Any found must be resolved manually
-(keep one, assign a new SKU to the other) before the bulk run proceeds.
+1. **Class C padding rule confirmed:** `HHMMSSx` → `HHMMSSx00` (pad to 3-digit ms)
+2. **Class B/E date proxy:** Use file `mtime`? Use `01` for missing day? Use a fixed
+   "unknown" date range that won't collide? (Suggest: `tgw19991231235959` + counter)
+3. **eBay rename path:** Can eBay Inventory API rename a SKU in-place, or must we
+   delete + recreate? Test with one item before bulk run.
+4. **Collision check scope:** Full ItemData scan + SQLite catalog + `sku_history` table
+   (once created).
+5. **Rollback window:** Migration script must write a rollback manifest (old→new map)
+   before making any changes.
 
 ---
 
@@ -251,21 +237,17 @@ Expected: zero or near-zero collisions. Any found must be resolved manually
 | Path | Purpose |
 |------|---------|
 | `/opt/TGW/data/ItemData/` | 55,351 item directories |
-| `/opt/TGW/data/ItemCatalog/tgwcatalog.db` | SQLite catalog |
+| `/opt/TGW/data/ItemCatalog/tgwcatalog.db` | SQLite catalog (sku, title, location, status, price) |
 | `src/tgw/queue/state_machine.py` | `enqueue_job()` for post-rename catalog_rebuild |
 | `src/tgw/items.py` | `atomic_write_json()` for safe file writes |
-| `src/tgw/apis/ebay/client.py` | eBay API for delist/relist |
+| `src/tgw/apis/ebay/client.py` | eBay API for offer/inventory updates |
 
 ---
 
 ## Next Steps (PP-ADD-005)
 
-1. ✅ Audit complete
-2. ✅ Migration rules confirmed
+1. Review and confirm this audit (especially Class C padding rule and eBay rename path)
+2. Write canonical SKU spec as a one-paragraph normative definition (for enforcement code)
 3. Build `sku_history` table in `state_machine` DB
-4. Run Class A collision check — report results before any migration code runs
-5. Build migration script: dry-run → review → live run with rollback manifest
-6. Execute fast classes first (F, D, E, B, G) — no eBay impact
-7. Execute Class A offline items (no live listing) — bulk
-8. Execute Class A live listings — slow batch via eBay delist/relist
-9. Add SKU validation at intake (bundle_intake, multi_intake) — reject non-18-char on input
+4. Build migration script: dry-run → review → live run with rollback manifest
+5. Add SKU validation at intake points (bundle_intake, multi_intake) to reject non-canonical

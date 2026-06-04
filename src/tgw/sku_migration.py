@@ -371,44 +371,53 @@ def rename_sku(cfg: Dict[str, Any], old_sku: str, new_sku: str,
             'had_ebay': had_ebay, 'location': location,
         }
 
-    # 1. Move directory
-    shutil.move(str(old_dir), str(new_dir))
-
-    # 2. Rename JSON file and update sku field inside it
-    old_json_in_new = new_dir / f'{old_sku}.json'
-    new_json_final  = new_dir / f'{new_sku}.json'
-    old_json_in_new.rename(new_json_final)
-
-    item['sku'] = new_sku
-    atomic_write_json(new_json_final, item, pretty=cfg.get('pretty', True))
-
-    # 3. Update location symlink
-    if location:
-        link_dir  = cfg['location_tree_root'] / location
-        old_link  = link_dir / old_sku
-        new_link  = link_dir / new_sku
-        if old_link.exists() or old_link.is_symlink():
-            old_link.unlink()
-        if link_dir.exists():
-            os.symlink(new_dir, new_link)
-
-    # 4. Record in sku_history
-    with psycopg2.connect(cfg['postgres_dsn']) as con:
-        with con.cursor() as cur:
-            _record_history(cur, old_sku, new_sku, cls, had_ebay)
-        con.commit()
-
-    # 5. Enqueue coalesced catalog_rebuild
     try:
-        state_machine.enqueue_job(
-            queue_name='catalog_rebuild',
-            payload={'reason': f'sku_migrate:{new_sku}'},
-            dedupe_key='catalog_rebuild:pending',
-            not_before=time.time() + 30,
-            max_attempts=3,
-        )
-    except Exception:
-        pass  # already queued
+        # 1. Move directory
+        shutil.move(str(old_dir), str(new_dir))
+
+        # 2. Rename JSON file and update sku field inside it
+        old_json_in_new = new_dir / f'{old_sku}.json'
+        new_json_final  = new_dir / f'{new_sku}.json'
+        old_json_in_new.rename(new_json_final)
+
+        item['sku'] = new_sku
+        atomic_write_json(new_json_final, item, pretty=cfg.get('pretty', True))
+
+        # 3. Update location symlink
+        if location:
+            link_dir  = cfg['location_tree_root'] / location
+            old_link  = link_dir / old_sku
+            new_link  = link_dir / new_sku
+            if old_link.exists() or old_link.is_symlink():
+                old_link.unlink()
+            if link_dir.exists():
+                if new_link.exists() or new_link.is_symlink():
+                    new_link.unlink()
+                os.symlink(new_dir, new_link)
+
+        # 4. Record in sku_history
+        with psycopg2.connect(cfg['postgres_dsn']) as con:
+            with con.cursor() as cur:
+                _record_history(cur, old_sku, new_sku, cls, had_ebay)
+            con.commit()
+
+        # 5. Enqueue coalesced catalog_rebuild
+        try:
+            state_machine.enqueue_job(
+                queue_name='catalog_rebuild',
+                payload={'reason': f'sku_migrate:{new_sku}'},
+                dedupe_key='catalog_rebuild:pending',
+                not_before=time.time() + 30,
+                max_attempts=3,
+            )
+        except Exception:
+            pass  # already queued
+
+    except Exception as e:
+        return {
+            'ok': False, 'sku': old_sku,
+            'error': f'{type(e).__name__}: {e}',
+        }
 
     return {
         'ok': True, 'dry_run': False,
@@ -509,7 +518,10 @@ def run_migration(
     results = []
     errors  = []
     for old_sku, new_sku, cls in planned:
-        r = rename_sku(cfg, old_sku, new_sku, cls, dry_run=dry_run)
+        try:
+            r = rename_sku(cfg, old_sku, new_sku, cls, dry_run=dry_run)
+        except Exception as e:
+            r = {'ok': False, 'sku': old_sku, 'error': f'unhandled: {type(e).__name__}: {e}'}
         if r['ok']:
             results.append(r)
         else:

@@ -1,17 +1,10 @@
 {
   "version": "2.0",
   "layout": [
-    [
-      null,
-      null,
-      null
-    ],
-    [
-      {
-        "type": "pinned",
-        "path": "plan/TGW-Master-Plan.md"
-      }
-    ]
+    null,
+    null,
+    null,
+    null
   ],
   "settings": {
     "splitDirection": "horizontal",

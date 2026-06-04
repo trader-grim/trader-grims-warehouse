@@ -273,17 +273,19 @@ maintained_by: Opus (planner)
 - 1 Class B collision auto-resolved (alternate suffix window)
 - Single live-item test verified end-to-end (Class B epoch-0)
 - Rollback manifest written to `/opt/TGW/var/log/sku-migrate-<ts>.json` on every run
+- **Bug fixed (2026-06-04)**: `rename_sku` now wraps all OS operations in try/except; per-item errors are counted and logged without killing the batch. Also guards against stale `new_link` symlink from a partial prior run.
 
-#### ⚠ ELEVATED PRIORITY (2026-06-03) — run after pipeline is stable
-> Pipeline issues from today's session are largely resolved. SKU normalization should run
-> soon — it unblocks sold reconciliation (PP-SOLD-001), history merge (PP-ADD-003), and
-> inventory sweep. Recommended: run non-eBay classes (F,D,E,B) this week; eBay batch next.
+#### ✅ MIGRATION COMPLETE for non-eBay items (2026-06-04)
+- Steps 1–3, 5, 6 done; ~8,370 eBay live listings remain (step 4 — gradual batch)
+- 228 non-eBay items (classes F,D,E,B) migrated; 26,423 Class A non-live migrated
+- All catalogs rebuilt (`tgw build-all`) — 55,351 items
+- `bundle_intake.SKU_RE` updated to `r'^tgw\d{15}$'` (enforces exact 18-char format)
 
 #### Execution sequence (when ready)
-1. `tgw sku-migrate --check-collisions`  — confirm still clean
-2. `tgw sku-migrate --class F,D,E,B --run`  — 229 items, no eBay listings, safe
-3. `tgw sku-migrate --class A --run`  — ~26,423 Class A without live listings
-4. **eBay live listings (~8,314 Class A) — spread delist/relist over time, not bulk**
+1. ✅ `tgw sku-migrate --check-collisions`  — confirm still clean
+2. ✅ `tgw sku-migrate --class F,D,E,B --run`  — 228 items, no eBay listings, done
+3. ✅ `tgw sku-migrate --class A --run`  — 26,423 Class A without live listings, done
+4. **eBay live listings (~8,370 Class A) — spread delist/relist over time, not bulk**
    - Bulk delist+relist in one shot resets listing age, loses watchers, tanks placement
    - Spreading ~50 relists/day through the day is fine and may actually help the algorithm
      (fresh listings boosted by eBay's new-listing window, spread across the day)
@@ -292,18 +294,20 @@ maintained_by: Opus (planner)
    - Worker approach: `tgw-worker@ebay_sku_migrate.service` — daily batch of N items,
      scheduled across the day (e.g. 5 items/hour), tracks progress in `sku_history` table
    - Rate: configurable; start conservative (10/day), increase if no issues
-5. `tgw build-all`  — rebuild all catalogs
-6. Add SKU validation at intake points (bundle_intake, multi_intake)
+5. ✅ `tgw build-all`  — all catalogs rebuilt (55,351 items)
+6. ✅ Add SKU validation at intake — `bundle_intake.SKU_RE` now enforces exactly 18 chars
 
 #### Remaining work
 - Intake enforcement: validate 18-char format at bundle_intake / multi_intake ingestion points
 - Post-migration verification report (`tgw sku-migrate --verify` or manual audit)
+- Catalog/search SKU matching: tolerate any variant by matching on first 18 characters — covers residual format drift without requiring full normalization first
 ### Data scrub passes (priority elevated 2026-06-03)
 - Pass 1: itemdata_scrub dry-run → review → --write (merge history keys, drop junk)
 - Pass 2: photo_history_recovery dry-run → review → --write
 - Pass 3: import eBay listings to fill gaps; then freeze the field schema
 - Epoch-zero SKU purge (tgw1970*) subsumed by PP-ADD-005 normalization
 - Recovery source: historical-tgw-catalog.json
+- Field rename: `#VERIFIED` → `verified` (legacy field from eBay CSV export; hash prefix was never intentional — fold into Pass 1 or run as a standalone scrub step)
 
 ### PP-SOLD-001 — Sold reconciliation and inventory status sync (design ready)
 
@@ -357,6 +361,39 @@ succeeds. Makes sold/active guards reliable without hitting eBay API at pipeline
 - Where does the Ollama lock live — in the job manager worker or a Postgres advisory lock? (Phase 5 decision)
 - PP-ADD-001 conflict resolution policy: last-write-wins vs. manual review (decide before Phase 6 dev)
 - Thumbnail cache: install Pillow (`pip install Pillow` or `pip install trader-grims-warehouse[thumbnails]`) then run `tgw build-thumbnails`
+- Item JSON globals block: should offer-invariant properties (condition class, preferred category, weight, shipping intent) have a dedicated `globals` block, or stay as top-level fields? Analyze before implementing — see PP-GLOBALS-001
+
+### PP-REMOTE-001 — Remote Full Capability (SSH / Tailscale / tmux)
+- Install and configure Tailscale on master for secure remote access; add to account network
+- tmux: persistent session layout for TGW ops (catalog pane, worker monitor, Claude Code pane)
+- Verify `tgw-http` reachable over Tailscale for Flutter app on remote devices
+- Verify macro dispatcher (`tgw-macro`) works over SSH — clipboard via OSC52 or tmux buffer fallback
+- SSH hardening: key-only auth, `tgw` user access, sudoers scoped to needed ops only
+
+### PP-SHELL-001 — Shell Environment Cleanup (tgw.source / tgw-dev.source)
+- Audit `tgw.source`: replace functions that duplicate `tgw` CLI subcommands with one-line wrappers or remove; keep only short-name convenience aliases worth keeping
+- Audit `tgw-dev.source`: migrate anything useful to `tgw.source`; retire the dev file
+- Rule of thumb: if it's not interactive/session-specific, it belongs as a `pyproject.toml` console script in the package, not a bash alias
+- Outcome: `tgw.source` is a thin convenience layer on the `tgw` CLI; no parallel API surviving alongside it
+
+### PP-IFDIR-001 — Interface File Organization
+- Currently: MC configs live at `/opt/TGW/mc/` (outside repo); keyd at `etc/keyd/`; no unified structure
+- Goal: move all operator interface configs into repo under `etc/interfaces/mc/`, `etc/interfaces/keyd/`, etc.; update install scripts to deploy from there
+- Makes repo the single source of truth for all interface configuration; simplifies new-node bootstrap
+
+### PP-STORE-001 — eBay Store Category Support
+- Add `store_category_id` to `draft_listing`; allow items to be filed into eBay store sections
+- Store category list queried once via Trading API `GetStore` and cached (store categories rarely change)
+- Default store category configurable per eBay category in `tgw-api-config.json`
+- Wired into `ebay_stage` and `ebay_publish` offer bodies
+
+### PP-GLOBALS-001 — Item JSON Globals Metadata (design required)
+- Problem: some item properties don't change between offers — condition class, preferred category, weight, default shipping intent — but are either scattered top-level or duplicated in every offer block
+- Design question: dedicated `globals` block vs. top-level fields vs. derive from existing fields
+- Analyze actual offer-invariant properties before implementing; define the schema before writing any code
+- Depends on: PP-ADD-005 (SKU normalization) + Pass 3 data scrub (field schema freeze)
+
+---
 
 ## PP-MC-001 — Midnight Commander Admin Interface
 
@@ -590,6 +627,7 @@ Operator should review and adjust prices in Seller Hub before publishing, especi
 - Open design question: sparse delta vs full replacement for revision payload; history of applied revisions
 - Relist: inventory item already exists on eBay; need fresh pricing + new offer; structurally re-create not update
 - `ebay_offer` block now established (PP-PRICE-001) — proceed when ready
+- Auto-sync: when offer fields are edited locally (price, condition, aspects), changes should push to eBay without requiring manual Seller Hub edits — design must prevent overwriting live state not yet pulled (depends on PP-SYNC-001 sync pass being authoritative first)
 
 ### PP-SYNC-001 — eBay data sync, sold reconciliation + local mirror
 
@@ -613,6 +651,7 @@ time without hitting eBay — which requires the local copy to be authoritative.
 - Pull sold order history → match by SKU/listing_id → set `status: Sold`, record sale price + date
 - `ebay_legacy_sync` already writes `ebay_listing` from Trading API — extend this, don't rebuild
 - `ebay_sync` exists but writes too little back to item JSONs — extend its write-back
+- Record EPS photo URLs durably: `draft_listing.imageUrls` can be overwritten on draft rebuild; EPS links are permanent after upload and should survive in a stable `ebay_photos_eps` field (or ensure `ebay_photos` list is never wiped on re-draft)
 
 #### Known data quality issues (from audit)
 - Many items have "Item number" from legacy eBay CSV export fields that are the **parent
