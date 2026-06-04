@@ -21,3 +21,6 @@
 - [x] 2026-06-04T01:16 :: record eps links — added to PP-SYNC-001 implementation plan
 - [x] 2026-06-04T01:46 :: store category support needs to be added — added as PP-STORE-001
 - [x] 2026-06-04T01:47 :: default shipping policy for most categories is FC4 at this time — added to CLAUDE.md eBay API notes
+- [x] 2026-06-04T15:58 :: add and integrate upcitemdb api — added as PP-UPC-001
+- [x] 2026-06-04T17:22 :: github has warned I have some linting errors. Can/should we automate that process? — added as PP-CI-001; tracked in ISSUES.md as ISS-007
+- [x] 2026-06-04T17:22 :: add seo integration using the new toolset to the plan — added as PP-SEO-001
