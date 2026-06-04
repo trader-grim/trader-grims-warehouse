@@ -71,6 +71,16 @@ def load_config(path: Path) -> Dict[str, Any]:
 
     postgres_dsn = raw.get('postgres_dsn', 'dbname=state_machine user=tgw')
 
+    reprice_stages = raw.get('reprice_stages', [
+        {'days': 0,  'percentile': 'max', 'label': 'launch'},
+        {'days': 3,  'percentile': 'p75', 'label': 'retail'},
+        {'days': 17, 'percentile': 'p25', 'label': 'move'},
+    ])
+    category_price_defaults: Dict[str, float] = {
+        str(k): float(v)
+        for k, v in raw.get('category_price_defaults', {}).items()
+    }
+
     search_fields    = raw.get('search_catalog_fields',
                                ['title', 'location', '#STATUS', 'status'])
     required         = raw.get('search_catalog_required', ['sku'])
@@ -104,6 +114,8 @@ def load_config(path: Path) -> Dict[str, Any]:
         'plan_vault_path':         plan_vault_path,
         'plan_inbox_path':         plan_vault_path / 'inbox',
         'plan_master_path':        plan_vault_path / 'plan' / 'TGW-Master-Plan.md',
+        'reprice_stages':          reprice_stages,
+        'category_price_defaults': category_price_defaults,
         'raw':                     raw,
     }
 

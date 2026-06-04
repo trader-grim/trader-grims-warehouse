@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-02
+updated: 2026-06-03
 maintained_by: Opus (planner)
 ---
 
@@ -70,13 +70,17 @@ maintained_by: Opus (planner)
 - **Phase 2b COMPLETE** — PM-intake worker live under systemd; watches `inbox/`, calls `Qwen2.5:latest` via Ollama, patches Master Plan, archives notes; `tgw/apis/ollama.py` client added
 - **Phase 2c COMPLETE** — `tgw suggest "..."` appends timestamped entries to `suggestions/SUGGESTIONS.md`
 - **State-machine bug fixed** — `recover_expired_jobs()` now promotes `retry_wait` jobs back to `queued` when `not_before` passes; previously transient failures left jobs stuck indefinitely
-### Pipeline fixes applied 2026-06-03
+### Pipeline fixes and additions — 2026-06-03
 - `ebay_stage`: Content-Language header added to all Inventory API PUT/POST calls (errorId 25709)
 - `ebay_stage`: Active listing guard — skips items with `ebay_listing.status=Active` before creating duplicate offers
 - `ebay_stage`: Condition retry with USED_EXCELLENT on errorId 25021 (category rejects granular condition)
-- `ebay_publish`: Content-Language fix; condition fallback on 25021; launch price PUT before publish
-- `multi_intake`: strips `Item number` from existing item JSON when child SKU matches parent (prevents bundle eBay item# polluting individual child records); writes `source_sku`
-- `ebay_reprice` worker: self-scheduling, condition policy cache built
+- `ebay_publish`: Content-Language fix; condition fallback on 25021; no pre-publish offer PUT (offer PUT is full-replace, strips fields)
+- `ebay_price`: Now sets launch price (110% of max→.99) as the staged/published price; stores `target_price` = p25; `p75` added to comps
+- `ebay_reprice` worker live: self-scheduling every 6h, scans for due reprice_schedule entries
+- `multi_intake`: strips `Item number` from existing item JSON when child SKU matches parent; writes `source_sku`
+- `conditions.py`: full condition policy cache (26 sets / 15K categories); `best_condition()` — same-or-worse fallback; wired into `ebay_draft`
+- `tgw staged` / `tgw publish` — operator review gate before any item goes live
+- **Open issue**: errorId 25002 `Item.Country` at publish for some categories (34032, 14027, 13916) — offer body is correct, investigating category-specific requirements
 
 ### Phase 2a observation gate ✅ CLEARED 2026-06-02
 - `ebay_token_refreshed` observed at 12:07 — full expiry+refresh cycle confirmed
@@ -270,15 +274,24 @@ maintained_by: Opus (planner)
 - Single live-item test verified end-to-end (Class B epoch-0)
 - Rollback manifest written to `/opt/TGW/var/log/sku-migrate-<ts>.json` on every run
 
-#### ⚠ PENDING INTEGRATION — coordinate before running
-> *Waiting on plan update from parallel session before executing.
-> Do not run until plan is integrated and pipeline issues are resolved.*
+#### ⚠ ELEVATED PRIORITY (2026-06-03) — run after pipeline is stable
+> Pipeline issues from today's session are largely resolved. SKU normalization should run
+> soon — it unblocks sold reconciliation (PP-SOLD-001), history merge (PP-ADD-003), and
+> inventory sweep. Recommended: run non-eBay classes (F,D,E,B) this week; eBay batch next.
 
 #### Execution sequence (when ready)
 1. `tgw sku-migrate --check-collisions`  — confirm still clean
-2. `tgw sku-migrate --class F,D,E,B --run`  — 229 items, no eBay
+2. `tgw sku-migrate --class F,D,E,B --run`  — 229 items, no eBay listings, safe
 3. `tgw sku-migrate --class A --run`  — ~26,423 Class A without live listings
-4. eBay slow batch (~8,314 Class A live): delist in Seller Hub → `--class A --include-live-ebay --run --limit 50` → relist → repeat
+4. **eBay live listings (~8,314 Class A) — spread delist/relist over time, not bulk**
+   - Bulk delist+relist in one shot resets listing age, loses watchers, tanks placement
+   - Spreading ~50 relists/day through the day is fine and may actually help the algorithm
+     (fresh listings boosted by eBay's new-listing window, spread across the day)
+   - Physical inventory sweep (PP-SOLD-001) first — sold items don't need renaming at all,
+     reducing the batch by however many have sold
+   - Worker approach: `tgw-worker@ebay_sku_migrate.service` — daily batch of N items,
+     scheduled across the day (e.g. 5 items/hour), tracks progress in `sku_history` table
+   - Rate: configurable; start conservative (10/day), increase if no issues
 5. `tgw build-all`  — rebuild all catalogs
 6. Add SKU validation at intake points (bundle_intake, multi_intake)
 
@@ -291,6 +304,40 @@ maintained_by: Opus (planner)
 - Pass 3: import eBay listings to fill gaps; then freeze the field schema
 - Epoch-zero SKU purge (tgw1970*) subsumed by PP-ADD-005 normalization
 - Recovery source: historical-tgw-catalog.json
+
+### PP-SOLD-001 — Sold reconciliation and inventory status sync (design ready)
+
+#### Problem
+Sold reconciliation fails when routed through the catalog as intermediary — catalog is
+batched and may not have `ebay_listing.listing_id` at sale time. Status fields across the
+55K+ item catalog are stale for many legacy items. Physical inventory has gaps.
+
+#### Three reconciliation tiers
+1. **eBay API** — `GetMyeBaySelling` (active + sold) and `GetOrders` (date ranges); match
+   `listing_id` directly against `ItemData/*/\*.json`. `ebay_legacy_sync` already does the
+   active side — extend it to pull sold orders and mark items status=Sold.
+2. **Sold report CSV** — match eBay item number against `ebay_listing.listing_id` in item
+   JSON directly, never through catalog. CSV download from Seller Hub.
+3. **Physical inventory sweep** — generate checklist of ambiguous-status SKUs (no
+   `ebay_listing`, or active/sold unresolved) for human review. Item gone → sold/missing;
+   item present → available.
+
+#### Local mirror principle (settled 2026-06-03)
+Every durable eBay-side ID and URL written back into item JSON immediately after API call
+succeeds. Makes sold/active guards reliable without hitting eBay API at pipeline time.
+
+#### Known data quality issues to resolve
+- Many items have `Item number` from legacy eBay CSV export — this is the parent bundle's
+  listing ID, not the individual item's. `multi_intake` now strips it on encounter.
+- Items with `legacy_listing_resolved: True` may still have active listings — Active listing
+  guard in `ebay_stage` catches new cases; sync pass needed to make data authoritative.
+- Physical inventory gaps from old system — sold items not marked, available items stale.
+
+#### Sequencing
+- Depends on PP-ADD-005 (SKU normalization) for reliable listing_id → SKU matching
+- `ebay_legacy_sync` extension (add sold order pull) is first deliverable
+- Physical sweep tool after sync is authoritative
+- `status` field freeze after Pass 3 data scrub
 
 ## Shelved
 ### eBay relisting obfuscation (PP-ADD-007) — shelved; ToS review required
@@ -453,15 +500,15 @@ MC console         Flutter app (Linux + Android)
   - Revision of already-identified items: `tgw hint --force` works but downstream ebay_draft/ebay_draft re-runs need to be aware of published state (don't auto-push changes to live listings)
   - Tuning: run difficult items through, observe results, adjust prompt and hint format
 
-### PP-PRICE-001 — Pricing module ✅ INITIAL COMPLETE (2026-06-03)
-- Initial pricing shipped: `tgw/ebay/pricing.py` + `workers/ebay_price.py`
-- `ebay_price` worker enqueued automatically by `ebay_draft` after draft is written
-- Three-stage Browse API fallback: full title → category+short title → category only
-- Writes `ebay_offer` block: {price, price_source, price_comps {count,min,p25,median,max}, priced_at}
-- Also sets `draft_listing.price` so `ebay_publish` can read it directly
-- Idempotent: skips items already priced in `ebay_offer.price`
-- **Repricer:** not yet built — periodic re-query + dirty flag + push; see PP-REVISION-001
-- **`ebay_offer` block is now established** — PP-REVISION-001 can proceed with this as the pricing foundation
+### PP-PRICE-001 — Pricing module ✅ COMPLETE (2026-06-03)
+- `tgw/ebay/pricing.py` + `workers/ebay_price.py`; `ebay_price` enqueued automatically by `ebay_draft`
+- Three-stage Browse API fallback: full title → category+short title → category only → category_price_defaults
+- `price_comps` block: `{count, min, p25, median, p75, max}`; `suggest_price()` accepts `category_id` for defaults fallback
+- Sets `draft_listing.price` = **launch price (110% of max → .99)** — the initial listed price creating a visible eBay discount when lowered
+- Stores `ebay_offer.target_price` = p25 (eventual move price for repricer)
+- Idempotent: skips items already priced
+- `category_price_defaults` in config — fallback when Browse API comps are thin (edit `tgw-api-config.json`)
+- **Sold-price access**: Browse API gives asking prices only. Apply for `buy.marketplace_insights` scope; Finding API blocked at app tier. See API investigation notes below.
 
 #### eBay Pricing API Access — Investigation Required
 Current data source is Browse API active listing prices (asking prices, not sold prices).
@@ -501,19 +548,33 @@ provide sold/trend data and should be investigated for access expansion:
 **Interim strategy:** Browse API p25 (implemented) is a reasonable floor until sold-price access is obtained.
 Operator should review and adjust prices in Seller Hub before publishing, especially for niche items.
 
-### PP-REPRICE-001 — Automatic markdown repricer ✅ INITIAL COMPLETE (2026-06-03)
-- Three-stage publish-price strategy: launch (max→.99) → retail (p75, day 3) → move (p25, day 17)
-- `to_99(price)` — rounds up to next .99 price point (e.g. $15.23 → $15.99, $16.00 → $16.99)
-- `pricing.py` updated: stores `p75` in comps; `suggest_price()` accepts `category_id`, falls back to `cfg['category_price_defaults']` when Browse API comps are thin
-- `ebay_publish.py` — at publish time: computes launch price, PUTs updated price to eBay offer, writes `reprice_schedule` to item JSON
-- `reprice_schedule` format: `[{stage, label, price, due_at, done_at}, ...]` — computed at publish, self-documenting history
-- `workers/ebay_reprice.py` — self-scheduling every 6h; scans ItemData for due entries; applies price via Inventory API PUT; marks done_at
-- Config: `reprice_stages` array and `category_price_defaults` dict in `tgw-api-config.json` — all periods and percentiles adjustable
-- Set `reprice_skip: true` on any item JSON to exclude from repricer
-- Items published manually (no price_comps) skip reprice_schedule — operator adjusts price in Seller Hub
-- `tgw staged` — lists UNPUBLISHED offers awaiting operator review (table format)
-- `tgw publish <sku...>` — human-reviewed approval gate before any item goes live
-- **Open:** category-level price defaults UI; reprice check/repair command for thin-comp items; re-reprice after price_comps refresh
+### PP-REPRICE-001 — Automatic markdown price reducer ✅ INITIAL COMPLETE (2026-06-03)
+- Worker renamed `ebay_price_reducer` — distinct from the future market-aware repricer
+- Three-stage markdown: **launch** (110% of max → .99, day 0) → **retail** (p75, day 3) → **move** (p25, day 17)
+- All periods and percentiles configurable in `tgw-api-config.json` `reprice_stages` array
+- `to_99(price)` — rounds up to next .99 (e.g. $15.23→$15.99, $16.00→$16.99)
+- `reprice_schedule` written to item JSON at publish time: `[{stage, label, price, due_at, done_at}, ...]`
+- `workers/ebay_price_reducer.py` — self-scheduling every 6h; applies due stages via Inventory API offer PUT
+- `tgw staged` — table of UNPUBLISHED offers awaiting review; `tgw publish <sku...>` — approval gate
+- `reprice_skip: true` on item JSON excludes from reducer
+- **Open:** category-level price defaults UI/command; reprice-check command for thin-comp items
+- **Item.Country fix**: `shipToLocations.regionIncluded` must be in offer body — added to `_build_offer_bodies` permanently
+
+### PP-REPRICER-001 — Market-aware dynamic repricer (design pending)
+- Distinct from `ebay_price_reducer` (scheduled markdown): this watches market prices and adjusts dynamically
+- Inputs: sold-price data (needs `buy.marketplace_insights` or Finding API), sell-through rate, days listed, competition count
+- Design deferred until sold-price API access obtained — Browse API asking prices are the wrong signal for dynamic repricing
+- Will consume `reprice_schedule` as floor (never price below the move price)
+
+### PP-LISTING-001 — Description footer and picklist line (pending)
+- Add configurable boilerplate footer to all eBay listing descriptions
+- Current: plain AI-generated description with no seller branding or item identifier
+- Footer components:
+  1. Seller boilerplate (shipping speed, location, return policy) — configurable text in config
+  2. Picklist line: SKU + location in human-readable format for warehouse picking
+  3. Future: QR code image (generate locally, upload to eBay EPS, embed in HTML description)
+- Applied in `ebay_draft` when building `draft_listing.description`
+- Config key: `description_footer` (boilerplate text) + `picklist_line_format` (template string)
 
 ### PP-STAGE-001 — eBay draft staging ✅ COMPLETE (2026-06-03)
 - `workers/ebay_stage.py` — creates UNPUBLISHED offer on eBay; visible/editable in Seller Hub immediately

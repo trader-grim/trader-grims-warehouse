@@ -90,6 +90,10 @@ Run as `tgw` user — source files are `rw-------`, secrets are `chmod 600`.
 ## Current phase
 
 See master plan `## Current state` and `## Phase N` sections for what's done and what's next.
-As of 2026-06-03: Phases 1–4 + PP-STAGE-001 complete. Pipeline: photo intake → AI identify →
-eBay draft → upload → price → stage (UNPUBLISHED in Seller Hub) → operator review → publish.
-Next priorities: PP-MC-001 (fix MC integration), PP-EDITOR-001 Phase A (tgw-http service), PP-HINT-001, PP-REVISION-001.
+As of 2026-06-03: Phases 1–4 + PP-STAGE-001 + PP-REPRICE-001 + PP-LISTING-001 (footer) complete.
+Pipeline: photo intake → AI identify → eBay draft (with footer+picklist line) → upload →
+price (launch=110% max→.99) → stage → `tgw staged` operator review → `tgw publish` → live.
+`ebay_price_reducer` worker handles scheduled markdown (p75 day 3 → p25 day 17).
+Condition policies cached (26 sets); `best_condition()` eliminates 25021 errors.
+Next priorities: PP-ADD-005 (SKU normalization, non-eBay classes first), PP-SOLD-001
+(sold reconciliation), PP-HINT-001 (fail-forward, requeue sweep), PP-REPRICER-001.

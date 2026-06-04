@@ -29,7 +29,7 @@ from typing import Any, Dict
 import psycopg2.errors
 
 from tgw.config import DEFAULT_CONFIG, load_config
-from tgw.ebay.pricing import suggest_price
+from tgw.ebay.pricing import suggest_price, to_99
 from tgw.items import atomic_write_json
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
@@ -86,14 +86,21 @@ class EbayPriceWorker(QueueWorker):
 
         suggested = result['price']
         if suggested is not None:
-            ebay_offer['price'] = suggested
-            draft['price']      = suggested
-            log.info('ebay_price: %s → $%.2f (%d comps, %s)',
-                     sku, suggested, result['comps'].get('count', 0), result['source'])
+            # Launch price: max comp rounded up to next .99 — this is the initial
+            # listed price, creating a visible "discount" when the repricer lowers
+            # it to target (p25) after the configured period.
+            comps = result['comps']
+            launch = to_99(comps['max'] * 1.10) if comps.get('max') else suggested
+            ebay_offer['price']        = launch
+            ebay_offer['target_price'] = suggested   # p25 — the eventual move price
+            draft['price']             = launch      # staged at launch price
+            log.info('ebay_price: %s → launch=$%.2f target=$%.2f (%d comps, %s)',
+                     sku, launch, suggested, comps.get('count', 0), result['source'])
             tgw_logging.log_event('ebay_price_set', sku=sku,
-                                  price=suggested,
+                                  price=launch,
+                                  target_price=suggested,
                                   source=result['source'],
-                                  comps=result['comps'])
+                                  comps=comps)
         else:
             ebay_offer['price'] = None
             log.warning('ebay_price: %s — insufficient comps, price left null', sku)

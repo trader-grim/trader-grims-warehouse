@@ -170,9 +170,15 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
         k: [str(v)] for k, v in draft.get('item_specifics', {}).items()
     }
 
-    condition_enum = _map_condition(item.get('condition', 'used'))
+    # Prefer the pre-resolved condition_enum written by ebay_draft (already
+    # validated against the category's allowed conditions). Fall back to the
+    # legacy enum map for items drafted before condition resolution was added.
+    condition_enum = (draft.get('condition_enum')
+                      or _map_condition(item.get('condition', 'used')))
     title       = draft.get('title') or item.get('title', '')
     description = draft.get('description') or item.get('description', '')
+    # Use the full listing description (AI text + boilerplate + picklist line) if available
+    listing_description = draft.get('listing_description') or description
 
     inv_body: Dict[str, Any] = {
         'product': {
@@ -198,11 +204,16 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
         'format':              'FIXED_PRICE',
         'availableQuantity':   draft.get('quantity', 1),
         'categoryId':          str(draft.get('category_id', '')),
-        'listingDescription':  description,
+        'listingDescription':  listing_description,
         'listingPolicies':     policies,
         'merchantLocationKey': location_key,
         'pricingSummary':      {
             'price': {'currency': 'USD', 'value': str(price)},
+        },
+        # Some categories require explicit shipToLocations for Item.Country resolution.
+        # The fulfillment policy's implicit coverage is not sufficient for all categories.
+        'shipToLocations': {
+            'regionIncluded': [{'regionType': 'COUNTRY', 'regionName': 'US'}],
         },
     }
 
@@ -270,7 +281,8 @@ def publish_offer(cfg: Dict[str, Any], offer_id: str) -> Dict[str, Any]:
     Returns {listing_id, listing_url, status: PUBLISHED}.
     Raises RuntimeError if eBay returns no listingId.
     """
-    resp = ebay_post(cfg, f'/sell/inventory/v1/offer/{offer_id}/publish', {})
+    resp = ebay_post(cfg, f'/sell/inventory/v1/offer/{offer_id}/publish', {},
+                     extra_headers={'Content-Language': 'en-US'})
     listing_id = resp.get('listingId', '')
     if not listing_id:
         raise RuntimeError(f'publish offer {offer_id} returned no listingId: {resp}')

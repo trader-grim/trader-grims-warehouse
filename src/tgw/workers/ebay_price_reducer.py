@@ -1,0 +1,185 @@
+"""
+tgw.workers.ebay_price_reducer — Scheduled markdown price reducer.
+
+Works through a per-item reprice_schedule written at publish time:
+  stage 0 / launch  — published at 110% of max price, rounded to .99
+  stage 1 / retail  — lowered to p75 after N days
+  stage 2 / move    — lowered to p25 after N more days
+
+Distinct from the future repricer (market-aware, dynamic price adjustment).
+This worker executes a pre-computed schedule only — no market queries.
+
+Periods and percentiles are configurable via reprice_stages in config.
+Items without a reprice_schedule are skipped (manual-price listings).
+Items can be excluded by setting reprice_skip: true in the item JSON.
+
+Self-scheduling: runs every few hours. Enqueues a startup job if idle.
+
+Queue name: ebay_price_reducer
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List
+
+import psycopg2.errors
+import requests
+
+from tgw.apis.ebay.client import ebay_put
+from tgw.config import DEFAULT_CONFIG, load_config
+from tgw.items import atomic_write_json
+from tgw.queue import state_machine
+from tgw.queue.worker_base import QueueWorker
+import tgw.logging as tgw_logging
+
+log = logging.getLogger(__name__)
+
+QUEUE_NAME       = 'ebay_price_reducer'
+RUN_INTERVAL_S   = 6 * 3600
+
+
+class EbayPriceReducerWorker(QueueWorker):
+
+    def run(self) -> None:
+        self.install_signal_handlers()
+        tgw_logging.log_event('worker_start', queue=QUEUE_NAME, owner=self.owner)
+        log.info('ebay_price_reducer worker started: owner=%s', self.owner)
+
+        try:
+            depths = state_machine.queue_depths()
+            if depths.get(QUEUE_NAME, 0) == 0:
+                state_machine.enqueue_job(
+                    queue_name=QUEUE_NAME,
+                    payload={'reason': 'startup'},
+                    max_attempts=3,
+                )
+                log.info('ebay_price_reducer: enqueued startup job')
+        except Exception as exc:
+            log.warning('ebay_price_reducer: startup enqueue skipped: %s', exc)
+
+        while not self._stop:
+            self._maybe_recover()
+            job = self._claim_one()
+            if job is None:
+                time.sleep(self.poll_interval)
+                continue
+            self._process(job)
+
+        tgw_logging.log_event('worker_stop', queue=QUEUE_NAME, owner=self.owner)
+
+    def handle(self, job: Dict[str, Any]) -> None:
+        log.info('ebay_price_reducer: scanning for due price reductions')
+        tgw_logging.log_event('ebay_price_reducer_start')
+
+        now = datetime.now(timezone.utc)
+        itemdata_root: Path = self.config['itemdata_root']
+
+        stats = {'scanned': 0, 'reduced': 0, 'skipped': 0, 'errors': 0}
+
+        for child in sorted(itemdata_root.iterdir()):
+            jf = child / f'{child.name}.json'
+            if not jf.exists():
+                continue
+            stats['scanned'] += 1
+            try:
+                self._reduce_item(jf, now, stats)
+            except Exception:
+                log.exception('ebay_price_reducer: unhandled error on %s', child.name)
+                stats['errors'] += 1
+
+        log.info('ebay_price_reducer complete: %s', stats)
+        tgw_logging.log_event('ebay_price_reducer_complete', **stats)
+        self._reschedule()
+
+    def _reduce_item(self, jf: Path, now: datetime,
+                     stats: Dict[str, int]) -> None:
+        item = json.loads(jf.read_text(encoding='utf-8'))
+
+        if item.get('reprice_skip'):
+            return
+        schedule: List[Dict[str, Any]] = item.get('reprice_schedule', [])
+        if not schedule:
+            return
+
+        listing = item.get('ebay_listing', {})
+        offer_id = item.get('ebay_offer', {}).get('offer_id')
+        if not offer_id or listing.get('status') not in ('Active', 'PUBLISHED'):
+            return
+
+        pending = [
+            s for s in schedule
+            if s.get('done_at') is None
+            and s.get('price') is not None
+            and s.get('due_at') is not None
+            and datetime.fromisoformat(s['due_at']) <= now
+        ]
+        if not pending:
+            return
+
+        entry = max(pending, key=lambda s: s['stage'])
+        new_price = entry['price']
+        sku = item.get('sku', jf.parent.name)
+
+        log.info('ebay_price_reducer: %s → stage %d (%s) $%.2f',
+                 sku, entry['stage'], entry['label'], new_price)
+        tgw_logging.log_event('ebay_price_reducer_apply', sku=sku,
+                              stage=entry['stage'], label=entry['label'],
+                              price=new_price)
+
+        try:
+            ebay_put(self.config,
+                     f'/sell/inventory/v1/offer/{offer_id}',
+                     {'pricingSummary': {'price': {'currency': 'USD',
+                                                   'value': str(new_price)}}},
+                     extra_headers={'Content-Language': 'en-US'})
+        except requests.exceptions.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            log.error('ebay_price_reducer: eBay rejected price update for %s (HTTP %s): %s',
+                      sku, status,
+                      exc.response.text[:200] if exc.response is not None else '')
+            stats['errors'] += 1
+            return
+
+        for s in schedule:
+            if s.get('done_at') is None and s.get('due_at') is not None:
+                if datetime.fromisoformat(s['due_at']) <= now:
+                    s['done_at'] = now.isoformat()
+
+        item['ebay_offer']['price'] = new_price
+        item['reprice_schedule']    = schedule
+        atomic_write_json(jf, item, pretty=self.config.get('pretty', True))
+        stats['reduced'] += 1
+
+    def _reschedule(self) -> None:
+        next_run = time.time() + RUN_INTERVAL_S
+        jid = state_machine.enqueue_job(
+            queue_name=QUEUE_NAME,
+            payload={'reason': 'scheduled'},
+            not_before=next_run,
+            max_attempts=3,
+        )
+        log.info('ebay_price_reducer: next run in %dh (job %s)',
+                 RUN_INTERVAL_S // 3600, jid)
+        tgw_logging.log_event('ebay_price_reducer_rescheduled',
+                              next_run_in_hours=RUN_INTERVAL_S // 3600)
+
+
+def main() -> int:
+    import argparse
+    parser = argparse.ArgumentParser(prog='tgw-ebay-price-reducer-worker')
+    parser.add_argument('--config', default=str(DEFAULT_CONFIG))
+    args = parser.parse_args()
+
+    cfg = load_config(Path(args.config))
+    worker = EbayPriceReducerWorker(queue_name=QUEUE_NAME, config=cfg)
+    worker.run()
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

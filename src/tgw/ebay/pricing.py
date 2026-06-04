@@ -17,6 +17,7 @@ Returns None price if fewer than MIN_COMPS results across all stages.
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -25,6 +26,14 @@ from tgw.apis.ebay.client import ebay_get
 log = logging.getLogger(__name__)
 
 MIN_COMPS = 3   # minimum sold comps to set a price; below this we leave price null
+
+
+def to_99(price: float) -> float:
+    """Round price up to the nearest .99 price point (e.g. 15.23 → 15.99, 16.00 → 16.99)."""
+    p = round(price, 2)
+    base = math.floor(p)
+    candidate = round(base + 0.99, 2)
+    return candidate if candidate >= p else round(base + 1.99, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +70,7 @@ def _compute_stats(prices: List[float]) -> Dict[str, Any]:
         'min':    round(s[0], 2),
         'p25':    round(s[max(0, int(n * 0.25))], 2),
         'median': round(s[n // 2], 2),
+        'p75':    round(s[min(n - 1, int(n * 0.75))], 2),
         'max':    round(s[-1], 2),
     }
 
@@ -78,14 +88,18 @@ def _short_keywords(title: str, words: int = 3) -> str:
 # ---------------------------------------------------------------------------
 
 def suggest_price(cfg: Dict[str, Any], title: str,
-                  category_name: str = '') -> Dict[str, Any]:
+                  category_name: str = '',
+                  category_id: str = '') -> Dict[str, Any]:
     """
     Suggest a price for *title* based on Browse API active listing comps.
+
+    Falls back to cfg['category_price_defaults'][category_id] when Browse API
+    returns insufficient comps.
 
     Returns a dict with keys:
         price         float or None (None = insufficient data)
         source        description of how the price was derived
-        comps         {count, min, p25, median, max}
+        comps         {count, min, p25, median, p75, max}
         queried_at    ISO-8601 timestamp
     """
     queried_at = datetime.now(timezone.utc).isoformat()
@@ -115,7 +129,19 @@ def suggest_price(cfg: Dict[str, Any], title: str,
     stats = _compute_stats(all_prices)
 
     if not stats:
-        log.info('pricing: insufficient comps for %r (0 results)', title[:60])
+        # Stage 4 — category price default from config
+        defaults: Dict[str, float] = cfg.get('category_price_defaults', {})
+        default_price = defaults.get(str(category_id))
+        if default_price is not None:
+            log.info('pricing: %r — using category default $%.2f for category %s',
+                     title[:60], default_price, category_id)
+            return {
+                'price':      float(default_price),
+                'source':     f'category_default:{category_id}',
+                'comps':      {},
+                'queried_at': queried_at,
+            }
+        log.info('pricing: insufficient comps for %r', title[:60])
         return {'price': None, 'source': 'insufficient_data',
                 'comps': {}, 'queried_at': queried_at}
 

@@ -21,7 +21,9 @@ from typing import Any, Dict, List, Optional
 import psycopg2.errors
 import requests
 
+from tgw.apis.ebay.conditions import best_condition
 from tgw.apis.ebay.specifics import get_aspects
+from tgw.ebay.description import build_listing_description
 from tgw.apis.ollama import chat, extract_json
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.items import atomic_write_json
@@ -222,18 +224,44 @@ class EbayDraftWorker(QueueWorker):
                 log.info('required aspect %r not filled by AI — defaulting to %r',
                          aspect['name'], fallback)
 
+        # Resolve condition — look up the best allowed conditionId for this category.
+        # Never upgrades condition; falls back same-or-worse. Stores both the
+        # conditionId (what eBay validates) and the buyer-facing label.
+        raw_condition = item.get('condition', '')
+        cond_result = None
+        if category_id != '99':
+            try:
+                cond_result = best_condition(self.config, category_id, raw_condition)
+            except Exception as exc:
+                log.warning('%s: condition lookup failed (%s) — will use enum fallback',
+                            sku, exc)
+        if cond_result:
+            log.info('%s: condition %r → %s (%s)',
+                     sku, raw_condition,
+                     cond_result['condition_id'], cond_result['condition_label'])
+        else:
+            log.warning('%s: no valid condition found for %r in category %s — '
+                        'needs manual review', sku, raw_condition, category_id)
+
         # Build draft listing block
         draft: Dict[str, Any] = {
-            'title':          title,
-            'category_id':    category_id,
-            'category_name':  item.get('ebay_category_name', ''),
-            'condition':      item.get('condition', ''),
-            'format':         'FixedPrice',
-            'quantity':       1,
-            'price':          None,   # human to set before upload
-            'item_specifics': item_specifics,
-            'description':    item.get('description', ''),
+            'title':           title,
+            'category_id':     category_id,
+            'category_name':   item.get('ebay_category_name', ''),
+            'condition':       raw_condition,
+            'condition_id':    cond_result['condition_id']    if cond_result else None,
+            'condition_label': cond_result['condition_label'] if cond_result else None,
+            'condition_enum':  cond_result['condition_enum']  if cond_result else None,
+            'format':          'FixedPrice',
+            'quantity':        1,
+            'price':           None,
+            'item_specifics':  item_specifics,
+            'description':     item.get('description', ''),
         }
+
+        # Build full eBay listing description: AI text + boilerplate footer + picklist line
+        item['draft_listing'] = draft   # temporary — needed by build_listing_description
+        draft['listing_description'] = build_listing_description(item, self.config)
 
         item['draft_listing'] = draft
         atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
