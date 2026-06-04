@@ -77,3 +77,9 @@ def ebay_put(cfg: Dict[str, Any], path: str,
     if resp.status_code == 204 or not resp.content:
         return None
     return resp.json()
+
+
+def ebay_delete(cfg: Dict[str, Any], path: str, timeout: int = 30) -> None:
+    """Authenticated DELETE to the eBay REST API. Raises on non-2xx."""
+    resp = _SESSION.delete(f'{_BASE}{path}', headers=_headers(cfg), timeout=timeout)
+    resp.raise_for_status()

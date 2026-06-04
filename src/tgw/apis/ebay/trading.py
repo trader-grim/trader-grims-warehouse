@@ -1,9 +1,9 @@
 """
 tgw.apis.ebay.trading — eBay Trading API client (XML/IAF-token).
 
-Used for operations not available in the REST Inventory API, primarily:
+Used for operations not available in the REST Inventory API:
   - GetMyeBaySelling: all active listings regardless of how they were created
-  - ReviseItem: update a Trading-API-originated listing (future)
+  - revise_item_sku: update the custom label (SKU) on a live listing in place
 
 Auth: same OAuth access token as the REST API, passed via X-EBAY-API-IAF-TOKEN.
 Response: XML parsed with ElementTree.
@@ -138,3 +138,21 @@ def get_my_ebay_selling(cfg: Dict[str, Any],
             yield _item_from_xml(item_el)
 
         page += 1
+
+
+def revise_item_sku(cfg: Dict[str, Any], listing_id: str, new_sku: str) -> None:
+    """
+    Change the custom label (SKU field) on a live Trading API listing in-place.
+
+    Uses ReviseFixedPriceItem with only ItemID + SKU — every other field is
+    left untouched.  Listing age, watchers, listing_id, and price are preserved.
+    """
+    xml_body = f'''<?xml version="1.0" encoding="utf-8"?>
+<ReviseFixedPriceItemRequest xmlns="{_NS}">
+  <Item>
+    <ItemID>{listing_id}</ItemID>
+    <SKU>{new_sku}</SKU>
+  </Item>
+</ReviseFixedPriceItemRequest>'''
+    trading_call(cfg, 'ReviseFixedPriceItem', xml_body)
+    log.info('ReviseFixedPriceItem: listing %s custom label → %s', listing_id, new_sku)
