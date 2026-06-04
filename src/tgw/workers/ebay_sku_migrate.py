@@ -59,6 +59,33 @@ QUEUE_NAME  = 'ebay_sku_migrate'
 _LANG_HEADER = {'Content-Language': 'en-US'}
 
 
+def _get_listing_policies(cfg: Dict[str, Any],
+                          category_id: Optional[str] = None) -> Dict[str, str]:
+    """
+    Return {fulfillmentPolicyId, paymentPolicyId, returnPolicyId}.
+    Uses explicit IDs from config; picks fulfillment policy by category when
+    a category-specific override exists in fulfillment_policy_by_category.
+    Falls back to account-default lookup only when config has no IDs at all.
+    """
+    fulfillment_id = (
+        (cfg.get('fulfillment_policy_by_category', {}).get(str(category_id))
+         if category_id else None)
+        or cfg.get('fulfillment_policy_id')
+    )
+    explicit = {
+        k: v for k, v in {
+            'fulfillmentPolicyId': fulfillment_id,
+            'paymentPolicyId':     cfg.get('payment_policy_id'),
+            'returnPolicyId':      cfg.get('return_policy_id'),
+        }.items() if v
+    }
+    if len(explicit) == 3:
+        return explicit
+    # Fill any missing IDs from the account lookup
+    account = _get_policies(cfg)
+    return {**account, **explicit}
+
+
 # ---------------------------------------------------------------------------
 # Candidate selection
 # ---------------------------------------------------------------------------
@@ -284,7 +311,8 @@ def _migrate_inventory_live(cfg: Dict[str, Any],
                   if k not in ('offerId', 'status', 'listing')}
     offer_body['sku'] = new_sku
     # Live offers often lack explicit policy IDs — inject from account policies
-    policies = _get_policies(cfg)
+    category_id = old_offer.get('categoryId')
+    policies = _get_listing_policies(cfg, category_id)
     offer_body.setdefault('listingPolicies', {}).update(policies)
 
     # PUT new inventory item (idempotent)
@@ -395,7 +423,8 @@ def _recover_partial(cfg: Dict[str, Any],
 
     # Inject account policies — the offer was likely created without them
     try:
-        policies = _get_policies(cfg)
+        category_id = new_offer.get('categoryId')
+        policies = _get_listing_policies(cfg, category_id)
         offer_body = {k: v for k, v in new_offer.items()
                       if k not in ('offerId', 'status', 'listing')}
         offer_body.setdefault('listingPolicies', {}).update(policies)

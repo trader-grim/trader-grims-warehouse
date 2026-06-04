@@ -80,6 +80,13 @@ def load_config(path: Path) -> Dict[str, Any]:
         str(k): float(v)
         for k, v in raw.get('category_price_defaults', {}).items()
     }
+    fulfillment_policy_id            = raw.get('fulfillment_policy_id')
+    payment_policy_id                = raw.get('payment_policy_id')
+    return_policy_id                 = raw.get('return_policy_id')
+    fulfillment_policy_by_category: Dict[str, str] = {
+        str(k): str(v)
+        for k, v in raw.get('fulfillment_policy_by_category', {}).items()
+    }
 
     search_fields    = raw.get('search_catalog_fields',
                                ['title', 'location', '#STATUS', 'status'])
@@ -114,9 +121,13 @@ def load_config(path: Path) -> Dict[str, Any]:
         'plan_vault_path':         plan_vault_path,
         'plan_inbox_path':         plan_vault_path / 'inbox',
         'plan_master_path':        plan_vault_path / 'plan' / 'TGW-Master-Plan.md',
-        'reprice_stages':          reprice_stages,
-        'category_price_defaults': category_price_defaults,
-        'raw':                     raw,
+        'reprice_stages':                   reprice_stages,
+        'category_price_defaults':          category_price_defaults,
+        'fulfillment_policy_id':            fulfillment_policy_id,
+        'payment_policy_id':                payment_policy_id,
+        'return_policy_id':                 return_policy_id,
+        'fulfillment_policy_by_category':   fulfillment_policy_by_category,
+        'raw':                              raw,
     }
 
 
