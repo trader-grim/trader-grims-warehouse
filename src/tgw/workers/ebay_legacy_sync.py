@@ -1,36 +1,37 @@
 """
-tgw.workers.ebay_legacy_sync — Sync all active eBay listings back to ItemData.
+tgw.workers.ebay_legacy_sync — Sync active eBay listings and sold orders to ItemData.
 
-Uses GetMyeBaySelling (Trading API) to fetch every active listing regardless
-of whether it was created via the Inventory API, Trading API, or manually
-in a browser.  Matches listings to local items by custom label (= SKU).
+Active sync:
+  Uses GetMyeBaySelling (Trading API) to fetch every active listing regardless
+  of whether it was created via Inventory API, Trading API, or manually.
+  Matches by custom label (= SKU).  Writes/updates ebay_listing block.
+  Does NOT overwrite an existing Inventory API listing (api=inventory).
+  Orphaned listings (no local item) are logged.
 
-For each matched item:
-  - Writes/updates ebay_listing block (listing_id, live_price, status, url, api=trading)
-  - Does NOT overwrite an existing Inventory API listing (api=inventory)
+Sold sync (PP-SOLD-001):
+  Uses GetOrders (Trading API, OrderStatus=Completed) to fetch completed sales.
+  Builds a listing_id → item_path index from ItemData, then for each order
+  transaction marks the matched item status=sold and writes ebay_sale block.
+  Tracks last sync timestamp in SOLD_STATE_FILE; initial run looks back
+  SOLD_INITIAL_LOOKBACK_DAYS days in 90-day windows (GetOrders limit).
 
-For unmatched listings (no custom label or unknown SKU):
-  - Logs as orphan — listed on eBay but no local TGW record
-
-Self-scheduling: runs daily. Enqueues a startup job if queue is idle.
-Manual trigger: insert an ebay_legacy_sync job into the queue.
-
-Queue name: ebay_legacy_sync
+Self-scheduling: runs daily. Queue name: ebay_legacy_sync
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import psycopg2.errors
 import requests
 
-from tgw.apis.ebay.trading import get_my_ebay_selling
+from tgw.apis.ebay.trading import get_my_ebay_selling, get_orders
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.items import atomic_write_json
 from tgw.queue import state_machine
@@ -39,8 +40,31 @@ import tgw.logging as tgw_logging
 
 log = logging.getLogger(__name__)
 
-QUEUE_NAME      = 'ebay_legacy_sync'
-SYNC_INTERVAL_S = 24 * 3600   # daily
+QUEUE_NAME                 = 'ebay_legacy_sync'
+SYNC_INTERVAL_S            = 24 * 3600
+SOLD_INITIAL_LOOKBACK_DAYS = 365
+SOLD_ORDERS_WINDOW_DAYS    = 90    # GetOrders API limit per call
+
+
+def _sold_state_path(cfg: Dict[str, Any]) -> Path:
+    return Path(cfg['raw'].get('runtime_root', '/opt/TGW/runtime')) / 'state' / 'ebay-sold-sync-state.json'
+
+
+def _build_listing_index(itemdata_root: Path) -> Dict[str, Path]:
+    """Scan ItemData and return {listing_id: json_path} for all items that have one."""
+    index: Dict[str, Path] = {}
+    for json_path in itemdata_root.glob('*/*.json'):
+        try:
+            text = json_path.read_text(encoding='utf-8')
+            if '"listing_id"' not in text:
+                continue
+            item = json.loads(text)
+            lid = item.get('ebay_listing', {}).get('listing_id', '')
+            if lid:
+                index[str(lid)] = json_path
+        except Exception:
+            pass
+    return index
 
 
 class EbayLegacySyncWorker(QueueWorker):
@@ -103,7 +127,27 @@ class EbayLegacySyncWorker(QueueWorker):
                               listing.get('listing_id'))
                 stats['errors'] += 1
 
-        log.info('ebay_legacy_sync complete: %s', stats)
+        log.info('ebay_legacy_sync active: %s', stats)
+
+        if orphans:
+            log.warning('ebay_legacy_sync: %d orphaned listings (on eBay, no local item):',
+                        len(orphans))
+            for o in orphans:
+                log.warning('  ItemID=%s label=%r title=%s',
+                            o['listing_id'], o['custom_label'], o['title'][:60])
+
+        # --- Sold sync ---
+        try:
+            listing_index = _build_listing_index(itemdata_root)
+            log.info('ebay_legacy_sync: listing index built (%d entries)', len(listing_index))
+            self._sync_sold(listing_index, synced_at, stats)
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as exc:
+            log.warning('ebay_legacy_sync: sold sync skipped (eBay unreachable): %s', exc)
+        except Exception:
+            log.exception('ebay_legacy_sync: sold sync failed')
+
+        log.info('ebay_legacy_sync final stats: %s', stats)
         tgw_logging.log_event('ebay_legacy_sync_complete', **stats,
                               orphan_count=len(orphans))
 
@@ -114,7 +158,7 @@ class EbayLegacySyncWorker(QueueWorker):
                 log.warning('  ItemID=%s label=%r title=%s',
                             o['listing_id'], o['custom_label'], o['title'][:60])
 
-        if stats['updated']:
+        if stats['updated'] or stats.get('sold_marked', 0):
             try:
                 state_machine.enqueue_job(
                     queue_name='catalog_rebuild',
@@ -178,6 +222,77 @@ class EbayLegacySyncWorker(QueueWorker):
         stats['updated'] += 1
         log.debug('ebay_legacy_sync: synced %s ItemID=%s price=$%s',
                   sku, listing['listing_id'], listing['live_price'])
+
+    def _sync_sold(self, listing_index: Dict[str, Path],
+                   synced_at: str, stats: Dict[str, Any]) -> None:
+        """Pull completed orders and mark matched items sold."""
+        state_path = _sold_state_path(self.config)
+        now = datetime.now(timezone.utc)
+
+        if state_path.exists():
+            state = json.loads(state_path.read_text())
+            scan_from = datetime.fromisoformat(state['last_synced_at']) - timedelta(hours=2)
+        else:
+            scan_from = now - timedelta(days=SOLD_INITIAL_LOOKBACK_DAYS)
+            log.info('ebay_legacy_sync: first sold sync — looking back %d days',
+                     SOLD_INITIAL_LOOKBACK_DAYS)
+
+        # GetOrders is limited to 90-day windows; iterate if span is larger
+        orders: List[Dict[str, Any]] = []
+        window_start = scan_from
+        while window_start < now:
+            window_end = min(window_start + timedelta(days=SOLD_ORDERS_WINDOW_DAYS), now)
+            chunk = list(get_orders(self.config, window_start, window_end))
+            log.info('ebay_legacy_sync sold: %s–%s → %d orders',
+                     window_start.strftime('%Y-%m-%d'), window_end.strftime('%Y-%m-%d'),
+                     len(chunk))
+            orders.extend(chunk)
+            window_start = window_end
+
+        marked = 0
+        for order in orders:
+            for tx in order['transactions']:
+                listing_id = tx.get('listing_id', '')
+                json_path = listing_index.get(listing_id)
+                if not json_path or not json_path.exists():
+                    continue
+                try:
+                    item = json.loads(json_path.read_text(encoding='utf-8'))
+                    if item.get('status') == 'sold':
+                        continue  # idempotent
+                    sku = json_path.parent.name
+                    item['status'] = 'sold'
+                    item.setdefault('ebay_listing', {})['status'] = 'Sold'
+                    item['ebay_sale'] = {
+                        'order_id':   order['order_id'],
+                        'buyer':      order['buyer'],
+                        'sale_price': tx['sale_price'],
+                        'quantity':   tx['quantity'],
+                        'sale_date':  tx['sale_date'],
+                        'synced_at':  synced_at,
+                    }
+                    atomic_write_json(json_path, item,
+                                      pretty=self.config.get('pretty', True))
+                    marked += 1
+                    log.info('ebay_legacy_sync: sold %s order=%s price=$%s',
+                             sku, order['order_id'], tx['sale_price'])
+                    tgw_logging.log_event('ebay_item_sold', sku=sku,
+                                          order_id=order['order_id'],
+                                          sale_price=tx['sale_price'])
+                except Exception as exc:
+                    log.error('ebay_legacy_sync: sold mark failed listing %s: %s',
+                              listing_id, exc)
+                    stats['errors'] += 1
+
+        stats['sold_marked'] = marked
+        log.info('ebay_legacy_sync: %d items marked sold', marked)
+        tgw_logging.log_event('ebay_sold_sync_complete', marked=marked,
+                              orders_fetched=len(orders))
+
+        # Save state so next run only scans the new window
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps(
+            {'last_synced_at': now.isoformat()}, indent=2))
 
     def _reschedule(self) -> None:
         next_run = time.time() + SYNC_INTERVAL_S

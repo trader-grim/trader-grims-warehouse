@@ -58,6 +58,87 @@ def trading_call(cfg: Dict[str, Any], call_name: str,
     return root
 
 
+def _order_from_xml(order_el: ET.Element) -> Dict[str, Any]:
+    """Extract order data (order_id, buyer, transactions) from an <Order> element."""
+    def txt(tag: str) -> str:
+        el = order_el.find(_t(tag))
+        return (el.text or '').strip() if el is not None else ''
+
+    transactions = []
+    tx_array = order_el.find(_t('TransactionArray'))
+    if tx_array is not None:
+        for tx in tx_array.findall(_t('Transaction')):
+            item_el = tx.find(_t('Item'))
+            listing_id = ''
+            if item_el is not None:
+                el = item_el.find(_t('ItemID'))
+                listing_id = (el.text or '').strip() if el is not None else ''
+
+            price_el = tx.find(_t('TransactionPrice'))
+            price = float(price_el.text) if price_el is not None and price_el.text else None
+
+            qty_el = tx.find(_t('QuantityPurchased'))
+            qty = int(qty_el.text or '1') if qty_el is not None else 1
+
+            date_el = tx.find(_t('CreatedDate'))
+            sale_date = (date_el.text or '').strip() if date_el is not None else txt('CreatedTime')
+
+            transactions.append({
+                'listing_id': listing_id,
+                'sale_price': price,
+                'quantity':   qty,
+                'sale_date':  sale_date,
+            })
+
+    return {
+        'order_id':    txt('OrderID'),
+        'buyer':       txt('BuyerUserID'),
+        'created_at':  txt('CreatedTime'),
+        'transactions': transactions,
+    }
+
+
+def get_orders(cfg: Dict[str, Any],
+               create_time_from: 'datetime',
+               create_time_to:   'datetime') -> 'Generator[Dict[str, Any], None, None]':
+    """
+    Yield completed orders in the given date window (max 90 days per call).
+    Handles pagination automatically.
+    """
+    from datetime import datetime  # local import to avoid circular at module level
+    page = 1
+    total_pages = 1
+
+    while page <= total_pages:
+        fmt = '%Y-%m-%dT%H:%M:%S.000Z'
+        xml_body = f'''<?xml version="1.0" encoding="utf-8"?>
+<GetOrdersRequest xmlns="{_NS}">
+  <CreateTimeFrom>{create_time_from.strftime(fmt)}</CreateTimeFrom>
+  <CreateTimeTo>{create_time_to.strftime(fmt)}</CreateTimeTo>
+  <OrderStatus>Completed</OrderStatus>
+  <DetailLevel>ReturnAll</DetailLevel>
+  <Pagination>
+    <EntriesPerPage>100</EntriesPerPage>
+    <PageNumber>{page}</PageNumber>
+  </Pagination>
+</GetOrdersRequest>'''
+
+        root = trading_call(cfg, 'GetOrders', xml_body, timeout=120)
+
+        pagination = root.find(_t('PaginationResult'))
+        if pagination is not None:
+            total_pages = int(pagination.findtext(_t('TotalNumberOfPages')) or '1')
+
+        order_array = root.find(_t('OrderArray'))
+        if order_array is None:
+            return
+
+        for order_el in order_array.findall(_t('Order')):
+            yield _order_from_xml(order_el)
+
+        page += 1
+
+
 def _item_from_xml(item_el: ET.Element) -> Dict[str, Any]:
     """Extract a flat dict of useful fields from a <Item> element."""
     def txt(tag: str) -> str:
