@@ -15,7 +15,6 @@ from typing import Any, Dict, List
 
 from .resolver import find_item_jsons, load_item_doc
 
-
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS catalog (
     sku           TEXT PRIMARY KEY,

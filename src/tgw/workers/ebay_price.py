@@ -22,18 +22,17 @@ from __future__ import annotations
 import json
 import logging
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
 import psycopg2.errors
 
+import tgw.logging as tgw_logging
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.ebay.pricing import suggest_price, to_99
 from tgw.items import atomic_write_json
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
-import tgw.logging as tgw_logging
 
 log = logging.getLogger(__name__)
 
@@ -108,6 +107,13 @@ class EbayPriceWorker(QueueWorker):
 
         item['ebay_offer']    = ebay_offer
         item['draft_listing'] = draft
+
+        # Re-score quality now that price_comps are present (comp_pts were 0 at draft time)
+        try:
+            from tgw.listing_quality import score_draft
+            draft['quality'] = score_draft(item).to_dict()
+        except Exception as exc:
+            log.warning('ebay_price: quality rescore failed for %s: %s', sku, exc)
 
         atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
 

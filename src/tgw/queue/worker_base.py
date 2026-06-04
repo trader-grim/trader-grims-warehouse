@@ -17,15 +17,15 @@ STATE TRANSITIONS PER JOB:
 
 from __future__ import annotations
 
+import logging
 import os
 import signal
 import socket
 import time
-import logging
 from typing import Any, Dict, Optional
 
-from tgw.queue import state_machine
 import tgw.logging as tgw_logging
+from tgw.queue import state_machine
 
 log = logging.getLogger(__name__)
 

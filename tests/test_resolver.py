@@ -7,9 +7,7 @@ import tempfile
 from pathlib import Path
 
 # remove: import pytest   (F401)
-
 from tgw.resolver import iter_all_skus, resolve, sku_date_str
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

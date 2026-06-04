@@ -30,12 +30,12 @@ from typing import Any, Dict
 import psycopg2.errors
 import requests
 
+import tgw.logging as tgw_logging
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.ebay.sync import stage_draft
 from tgw.items import atomic_write_json
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
-import tgw.logging as tgw_logging
 
 log = logging.getLogger(__name__)
 

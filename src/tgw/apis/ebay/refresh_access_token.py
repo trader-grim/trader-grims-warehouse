@@ -1,11 +1,12 @@
+import base64
 import json
 import logging
-import time
-import requests
-import base64
 import os
+import time
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict
+
+import requests
 
 TGW_ROOT = Path(os.getenv('TGW_ROOT', '/opt/TGW'))
 TGW_CONFIG_PATH = TGW_ROOT / 'config' / 'tgw-api-config.json'

@@ -16,9 +16,7 @@ Queue name: pm_intake
 
 from __future__ import annotations
 
-import json
 import logging
-import re
 import shutil
 import time
 from datetime import datetime, timezone
@@ -27,11 +25,11 @@ from typing import Any, Dict, Optional
 
 import psycopg2
 
+import tgw.logging as tgw_logging
 from tgw.apis.ollama import chat, extract_json, is_available
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
-import tgw.logging as tgw_logging
 
 log = logging.getLogger(__name__)
 

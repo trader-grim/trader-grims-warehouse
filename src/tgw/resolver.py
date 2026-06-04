@@ -21,12 +21,11 @@ Selectors are combined with AND when multiple are given.
 
 from __future__ import annotations
 
-import re                    # remove: import os
+import re  # remove: import os
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Set
 
 from .config import location_dir, sku_json
-
 
 # ---------------------------------------------------------------------------
 # SKU iteration — filesystem only, no JSON

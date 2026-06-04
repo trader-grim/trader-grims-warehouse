@@ -17,17 +17,17 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 import psycopg2.errors
 import requests
 
+import tgw.logging as tgw_logging
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.ebay.sync import fetch_all_offers
 from tgw.items import atomic_write_json
 from tgw.queue import state_machine
 from tgw.queue.worker_base import QueueWorker
-import tgw.logging as tgw_logging
 
 log = logging.getLogger(__name__)
 
@@ -116,31 +116,66 @@ class EbaySyncWorker(QueueWorker):
             return 0
 
         item = json.loads(json_path.read_text(encoding='utf-8'))
-        ebay_listing = item.get('ebay_listing')
-        if not ebay_listing:
-            return 0  # not published by us — skip
 
-        ebay_status  = offer.get('status', '')
-        listing_info = offer.get('listing', {})
-        listing_id   = listing_info.get('listingId') or ebay_listing.get('listing_id', '')
+        offer_id       = offer.get('offerId', '')
+        ebay_status    = offer.get('status', '')
+        listing_info   = offer.get('listing', {})
+        listing_id     = listing_info.get('listingId', '')
+        listing_status = listing_info.get('listingStatus', '')
+        price_val      = offer.get('pricingSummary', {}).get('price', {}).get('value')
+        category_id    = str(offer.get('categoryId', ''))
+        quantity       = offer.get('availableQuantity')
 
         changed = False
-        if ebay_listing.get('status') != ebay_status and ebay_status:
-            ebay_listing['status'] = ebay_status
-            changed = True
+
+        # --- ebay_listing: write all durable eBay-side identifiers ---
+        ebay_listing = item.get('ebay_listing') or {}
+        listing_updates: Dict[str, Any] = {}
+        if offer_id and ebay_listing.get('offer_id') != offer_id:
+            listing_updates['offer_id'] = offer_id
+        if ebay_status and ebay_listing.get('status') != ebay_status:
+            listing_updates['status'] = ebay_status
         if listing_id and ebay_listing.get('listing_id') != listing_id:
-            ebay_listing['listing_id']  = listing_id
-            ebay_listing['listing_url'] = f'https://www.ebay.com/itm/{listing_id}'
+            listing_updates['listing_id']  = listing_id
+            listing_updates['listing_url'] = f'https://www.ebay.com/itm/{listing_id}'
+        if listing_status and ebay_listing.get('listing_status') != listing_status:
+            listing_updates['listing_status'] = listing_status
+        if listing_updates:
+            ebay_listing.update(listing_updates)
+            item['ebay_listing'] = ebay_listing
+            changed = True
+
+        # --- ebay_offer: write current eBay state; preserve price_comps / staged_at ---
+        ebay_offer = item.get('ebay_offer') or {}
+        offer_updates: Dict[str, Any] = {}
+        if offer_id and ebay_offer.get('offer_id') != offer_id:
+            offer_updates['offer_id'] = offer_id
+        if ebay_status and ebay_offer.get('status') != ebay_status:
+            offer_updates['status'] = ebay_status
+        if price_val is not None:
+            try:
+                price_f = float(price_val)
+                if ebay_offer.get('price') != price_f:
+                    offer_updates['price'] = price_f
+            except (TypeError, ValueError):
+                pass
+        if category_id and ebay_offer.get('category_id') != category_id:
+            offer_updates['category_id'] = category_id
+        if quantity is not None and ebay_offer.get('quantity') != quantity:
+            offer_updates['quantity'] = quantity
+        if offer_updates:
+            ebay_offer.update(offer_updates)
+            item['ebay_offer'] = ebay_offer
             changed = True
 
         if not changed:
             return 0
 
-        item['ebay_listing'] = ebay_listing
         atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
-        log.info('ebay_sync: %s → status=%s', sku, ebay_status)
-        tgw_logging.log_event('ebay_listing_status_updated', sku=sku,
-                              status=ebay_status, listing_id=listing_id)
+        log.info('ebay_sync: %s → status=%s listing_id=%s price=%s',
+                 sku, ebay_status, listing_id, price_val)
+        tgw_logging.log_event('ebay_listing_synced', sku=sku, status=ebay_status,
+                              listing_id=listing_id, offer_id=offer_id, price=price_val)
         return 1
 
     def _reschedule(self) -> None:

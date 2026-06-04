@@ -14,10 +14,10 @@ import logging
 from pathlib import Path
 from typing import Any, Dict
 
+import tgw.logging as tgw_logging
 from tgw.catalog import build_all_catalogs
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.queue.worker_base import QueueWorker
-import tgw.logging as tgw_logging
 
 log = logging.getLogger(__name__)
 

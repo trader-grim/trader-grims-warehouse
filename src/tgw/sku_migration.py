@@ -101,7 +101,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import shutil
 import time
 from datetime import datetime, timezone
@@ -110,10 +109,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
 
-from .config import load_config, DEFAULT_CONFIG, sku_dir, sku_json
+from .config import sku_dir, sku_json
 from .items import atomic_write_json
-from .resolver import iter_all_skus, load_item_doc
 from .queue import state_machine
+from .resolver import iter_all_skus, load_item_doc
 
 log = logging.getLogger(__name__)
 
@@ -353,7 +352,6 @@ def rename_sku(cfg: Dict[str, Any], old_sku: str, new_sku: str,
     old_dir  = sku_dir(cfg, old_sku)
     new_dir  = sku_dir(cfg, new_sku)
     old_json = old_dir / f'{old_sku}.json'
-    new_json = new_dir / f'{new_sku}.json'
 
     if not old_dir.exists():
         return {'ok': False, 'sku': old_sku, 'error': 'source dir not found'}

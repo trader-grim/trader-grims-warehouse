@@ -98,7 +98,7 @@ def check_postgres(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """PostgreSQL reachable and queue_jobs table accessible."""
     t = time.time()
     try:
-        from tgw.queue.state_machine import init, queue_depths, dead_letter_count
+        from tgw.queue.state_machine import dead_letter_count, init, queue_depths
         dsn = cfg.get('postgres_dsn', 'dbname=state_machine user=tgw')
         init(dsn)
         depths = queue_depths()
@@ -251,7 +251,6 @@ def check_ebay_token(cfg: Dict[str, Any]) -> Dict[str, Any]:
         doc = json.loads(token_path.read_text(encoding='utf-8'))
         expires = doc.get('expires_at') or doc.get('expiry') or doc.get('expire_time')
         if expires:
-            import datetime
             try:
                 exp_ts = float(expires)
                 remaining = exp_ts - time.time()

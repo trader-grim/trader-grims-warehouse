@@ -27,15 +27,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
-import psycopg2.errors
 import requests
 
+import tgw.logging as tgw_logging
 from tgw.apis.ebay.client import ebay_put
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.items import atomic_write_json
 from tgw.queue import state_machine
 from tgw.queue.worker_base import QueueWorker
-import tgw.logging as tgw_logging
 
 log = logging.getLogger(__name__)
 

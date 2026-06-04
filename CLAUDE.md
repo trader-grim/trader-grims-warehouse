@@ -37,6 +37,25 @@ Memory index (cross-session context): `/home/tgw/.claude/projects/-opt-TGW-src-t
 | Logs | `/opt/TGW/var/log/` |
 | Plan vault | `docs/TGW-Plan-Vault/` (Syncthing-synced Obsidian) |
 | Plan inbox | `docs/TGW-Plan-Vault/inbox/` (drop .md files here) |
+| **Reference docs** | `docs/TGW-Plan-Vault/reference/` — read before working on relevant areas |
+
+## Reference library
+
+Markmap documents in `docs/TGW-Plan-Vault/reference/` — read the relevant one before working
+in that area. All are plain Markdown; open in Obsidian for interactive mind map view.
+
+| File | Read when working on... |
+|------|------------------------|
+| `eBay-API-Landscape.md` | Any eBay API integration, scopes, new API research |
+| `TGW-HTTP-API.md` | tgw-http endpoints, Flutter app, MC copyin |
+| `TGW-Pipeline-Flow.md` | Worker logic, queue flow, enqueue decisions, debugging |
+| `TGW-Config-Reference.md` | Config keys, secrets, policy IDs, adding new config |
+| `TGW-Ollama-Prompts.md` | ai_identify + ebay_draft prompts, tuning levers |
+| `PP-LOOKUP-001-APIs.md` | Product enrichment, barcode lookup, ai_identify augmentation |
+| `CATEGORY-QUIRKS.md` | Per-category eBay quirks, fulfillment overrides, condition limits |
+| `ISSUES.md` | Active bugs and known gaps — check before diagnosing a known problem |
+| `HARDWARE-AI-INFERENCE.md` | Ollama model sizing, GPU upgrade planning, inference perf |
+| `echo.py` / `worker_base.py` | Starting point when writing a new worker |
 
 ## Settled architecture (do not relitigate)
 
@@ -99,11 +118,12 @@ Run as `tgw` user — source files are `rw-------`, secrets are `chmod 600`.
 
 ## Current phase
 
-See master plan `## Current state` and `## Phase N` sections for what's done and what's next.
-As of 2026-06-03: Phases 1–4 + PP-STAGE-001 + PP-REPRICE-001 + PP-LISTING-001 (footer) complete.
-Pipeline: photo intake → AI identify → eBay draft (with footer+picklist line) → upload →
+See master plan `## Current state`, `## Implementation TODO`, and `## Phase N` sections.
+As of 2026-06-04: Phases 1–4 + PP-STAGE-001 + PP-REPRICE-001 + PP-LISTING-001 + PP-SYNC-001
+(all phases) + PP-SOLD-001 Tier 1 + PP-LOOKUP-001 Tier 1 complete.
+Pipeline: photo intake → AI identify (with barcode product lookup) → eBay draft → upload →
 price (launch=110% max→.99) → stage → `tgw staged` operator review → `tgw publish` → live.
-`ebay_price_reducer` worker handles scheduled markdown (p75 day 3 → p25 day 17).
-Condition policies cached (26 sets); `best_condition()` eliminates 25021 errors.
-Next priorities: PP-ADD-005 (SKU normalization, non-eBay classes first), PP-SOLD-001
-(sold reconciliation), PP-HINT-001 (fail-forward, requeue sweep), PP-REPRICER-001.
+`ebay_price_reducer` handles scheduled markdown (p75 day 3 → p25 day 17).
+`ebay_sku_migrate` running (~8,350 eBay live listings remain; ~70 days at 5/hr).
+Next priorities (see Implementation TODO table in plan):
+  PP-QUALITY-001 (listing quality scorer) → PP-PRICE-003 (comp search) → PP-HINT-001 (bulk requeue).

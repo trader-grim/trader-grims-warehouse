@@ -6,7 +6,8 @@ import json
 import tempfile
 from pathlib import Path
 
-from tgw.notify import Notifier, notify   # remove: configure  (F401)
+from tgw.notify import Notifier, notify  # remove: configure  (F401)
+
 
 def test_notifier_log_backend_does_not_raise():
     n = Notifier({'backends': ['log'], 'enabled': True})

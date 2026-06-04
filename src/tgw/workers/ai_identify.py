@@ -22,12 +22,12 @@ from typing import Any, Dict, Optional
 
 import psycopg2.errors
 
+import tgw.logging as tgw_logging
 from tgw.apis.ollama import extract_json, is_available
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.items import atomic_write_json
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
-import tgw.logging as tgw_logging
 
 log = logging.getLogger(__name__)
 
@@ -66,6 +66,24 @@ Using that context together with the photo, provide:
 - The most likely eBay category name (plain English, e.g. "Thimbles", "Miniature Bottles")
 - A 1-2 sentence description covering what is visible (quantity, materials, notable markings)
 - Your best guess at condition: "New", "Like New", "Very Good", "Good", "Acceptable"
+
+Respond with JSON:
+{{
+  "title": "...",
+  "category": "...",
+  "description": "...",
+  "condition": "..."
+}}
+"""
+
+_USER_PROMPT_ENRICHED = """\
+Look at this item photo. Barcode lookup identified this product: {product_context}
+
+Using that product data together with the photo:
+- Confirm or refine the title to be eBay-ready (under 80 characters, include brand/model)
+- The most likely eBay category name (plain English)
+- A 1-2 sentence description focusing on condition and any notable visible details
+- Condition based on what you see: "New", "Like New", "Very Good", "Good", "Acceptable"
 
 Respond with JSON:
 {{
@@ -147,7 +165,23 @@ class AIIdentifyWorker(QueueWorker):
                                   reason='already_identified')
             return
 
-        # Derive hint: explicit ai_hint wins; fall back to a human-set title
+        # Product lookup — run before Ollama; result cached in item JSON
+        product_context = ''
+        try:
+            from tgw.apis.lookup import lookup_product
+            lookup_result = lookup_product(item, self.config)
+            if lookup_result:
+                item['product_lookup'] = lookup_result.to_dict()
+                product_context = lookup_result.prompt_context()
+                log.info('ai_identify: product lookup hit for %s via %s — %r',
+                         sku, lookup_result.source, product_context[:60])
+                tgw_logging.log_event('ai_identify_lookup_hit', sku=sku,
+                                      source=lookup_result.source,
+                                      title=lookup_result.title[:60])
+        except Exception as exc:
+            log.warning('ai_identify: product lookup failed for %s: %s', sku, exc)
+
+        # Derive hint: explicit ai_hint wins; product lookup context; human-set title
         existing_title = str(item.get('title', '')).strip()
         hint = (item.get('ai_hint') or '').strip()
         if not hint and existing_title and existing_title != sku:
@@ -162,7 +196,12 @@ class AIIdentifyWorker(QueueWorker):
 
         img_b64, orig_kb, resized_kb = _encode_resized(img_path)
 
-        prompt = (_USER_PROMPT_HINTED.format(hint=hint) if hint else _USER_PROMPT)
+        if product_context:
+            prompt = _USER_PROMPT_ENRICHED.format(product_context=product_context)
+        elif hint:
+            prompt = _USER_PROMPT_HINTED.format(hint=hint)
+        else:
+            prompt = _USER_PROMPT
 
         log.info('calling %s for %s (image: %s, %dKB→%dKB%s)',
                  VISION_MODEL, sku, img_path.name, orig_kb, resized_kb,
@@ -172,6 +211,7 @@ class AIIdentifyWorker(QueueWorker):
                               resized_kb=resized_kb, hint=hint or None)
 
         import requests
+
         from tgw.queue.ollama_lock import acquire_ollama_lock
         with acquire_ollama_lock(self.config):
             resp = requests.post(
@@ -221,6 +261,7 @@ class AIIdentifyWorker(QueueWorker):
             item['ebay_category_name'] = ebay_category_name
         item['ai_identified'] = True
         item.pop('ai_reidentify', None)   # clear the force flag
+        # product_lookup already written above if lookup succeeded
 
         atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
 

@@ -11,10 +11,10 @@ import logging
 from pathlib import Path
 from typing import Any, Dict
 
+import tgw.logging as tgw_logging
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.queue.worker_base import HardFailure, QueueWorker
 from tgw.thumbnail import build_thumbnail_for_sku
-import tgw.logging as tgw_logging
 
 log = logging.getLogger(__name__)
 

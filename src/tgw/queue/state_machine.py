@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import time
-import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, Generator, List, Optional
@@ -218,7 +216,7 @@ def mark_failed(job_id: str, lease_owner: str, error: str) -> None:
 
             if new_state == 'retry_wait':
                 backoff = min(30 * (2 ** (attempt - 1)), 3600)
-                from datetime import datetime, timezone, timedelta
+                from datetime import datetime, timedelta, timezone
                 nb = datetime.now(tz=timezone.utc) + timedelta(seconds=backoff)
                 cur.execute(
                     """

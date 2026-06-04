@@ -22,11 +22,11 @@ from typing import Any, Dict
 
 import requests
 
+import tgw.logging as tgw_logging
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.notify import notify
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
-import tgw.logging as tgw_logging
 
 log = logging.getLogger(__name__)
 

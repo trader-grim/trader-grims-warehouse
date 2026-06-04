@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import logging
 import xml.etree.ElementTree as ET
-from typing import Any, Dict, Generator, List, Optional
+from datetime import datetime
+from typing import Any, Dict, Generator
 
 import requests
 
@@ -105,7 +106,6 @@ def get_orders(cfg: Dict[str, Any],
     Yield completed orders in the given date window (max 90 days per call).
     Handles pagination automatically.
     """
-    from datetime import datetime  # local import to avoid circular at module level
     page = 1
     total_pages = 1
 

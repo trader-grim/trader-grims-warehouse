@@ -15,11 +15,10 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Set   # remove Optional
+from typing import Any, Dict, List, Set  # remove Optional
 
 from .config import location_dir, sku_dir, sku_json
 from .resolver import load_item_doc, resolve
-
 
 # ---------------------------------------------------------------------------
 # Atomic write

@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -27,8 +28,6 @@ from .catalog import (
     load_full_catalog,
     load_search_catalog,
 )
-from .sqlite_catalog import build_sqlite_catalog
-from .thumbnail import build_thumbnail_cache
 from .config import DEFAULT_CONFIG, load_config
 from .health import check_all
 from .items import (
@@ -41,8 +40,8 @@ from .items import (
     verifiedupdate,
 )
 from .resolver import resolve, sku_date_str
-
-
+from .sqlite_catalog import build_sqlite_catalog
+from .thumbnail import build_thumbnail_cache
 
 # ---------------------------------------------------------------------------
 # list_items — lives here because it bridges catalog and resolver
@@ -211,6 +210,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--no-ebay', action='store_true',
                    help='skip eBay token check')
 
+    p = sub.add_parser('lookup', help='run product enrichment lookup for one item (PP-LOOKUP-001)')
+    p.add_argument('sku', help='SKU to look up')
+    p.add_argument('--force', action='store_true',
+                   help='ignore cache and re-fetch even if fresh result exists')
+    p.add_argument('--save', action='store_true',
+                   help='write result back to item JSON')
+
     p = sub.add_parser('suggest', help='append a suggestion for the next planning session')
     p.add_argument('text', nargs='+', help='suggestion text')
 
@@ -268,6 +274,35 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--host', default='127.0.0.1', help='bind host (default: 127.0.0.1)')
     p.add_argument('--port', type=int, default=7373, help='bind port (default: 7373)')
     p.add_argument('--reload', action='store_true', help='enable auto-reload (dev only)')
+
+    p = sub.add_parser('ebay-sweep',
+                       help='generate physical inventory checklist for ambiguous-status items')
+    p.add_argument('--groups', default='A',
+                   help='comma-separated groups to include: A=active/unclear, '
+                        'B=out-of-stock/no-listing, C=no-status/no-listing (default: A)')
+    p.add_argument('--location', default=None,
+                   help='filter to a specific shelf location')
+    p.add_argument('--limit', type=int, default=0,
+                   help='max items per group (0 = unlimited)')
+    p.add_argument('--output', default=None,
+                   help='write markdown checklist to this file instead of stdout')
+
+    p = sub.add_parser('import-sold-csv',
+                       help='import eBay Seller Hub sold-orders CSV → mark items sold')
+    p.add_argument('file', help='path to eBay sold-orders CSV file')
+    p.add_argument('--dry-run', action='store_true',
+                   help='show what would be marked without writing')
+    p.add_argument('--show-columns', action='store_true',
+                   help='print CSV column names and exit (for format inspection)')
+
+    p = sub.add_parser('ebay-pull',
+                       help='on-demand eBay data pull: active listings + sold orders → ItemData')
+    p.add_argument('--no-active', action='store_true',
+                   help='skip active listing sync')
+    p.add_argument('--no-sold', action='store_true',
+                   help='skip sold orders sync')
+    p.add_argument('--dry-run', action='store_true',
+                   help='show what would change without writing')
 
     p = sub.add_parser('sku-migrate', help='SKU normalization (PP-ADD-005)')
     p.add_argument('--check-collisions', action='store_true',
@@ -347,6 +382,7 @@ def cmd_requeue(cfg: Dict[str, Any], *,
     At least one filter must be specified.
     """
     import psycopg2.errors
+
     from tgw.queue import state_machine
 
     _IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.JPG', '.JPEG', '.PNG'}
@@ -444,10 +480,11 @@ def cmd_resolve_legacy(cfg: Dict[str, Any], skus: List[str],
     cleared, setting legacy_listing_resolved=True so ebay_stage can proceed.
     Optionally enqueues ebay_stage for each resolved item.
     """
+    import psycopg2.errors
+
     from tgw.config import sku_json
     from tgw.items import atomic_write_json
     from tgw.queue import state_machine
-    import psycopg2.errors
 
     state_machine.init(cfg.get('postgres_dsn', 'dbname=state_machine user=tgw'))
 
@@ -510,6 +547,8 @@ def cmd_staged(cfg: Dict[str, Any]) -> Dict[str, Any]:
             continue
         offer = doc.get('ebay_offer', {})
         if offer.get('offer_id') and offer.get('status') == 'UNPUBLISHED':
+            draft   = doc.get('draft_listing') or {}
+            quality = draft.get('quality') or {}
             items.append({
                 'sku':          child.name,
                 'title':        doc.get('title', ''),
@@ -518,7 +557,11 @@ def cmd_staged(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 'category':     doc.get('ebay_category_name', ''),
                 'offer_id':     offer.get('offer_id'),
                 'staged_at':    offer.get('staged_at', ''),
+                'quality':      quality.get('score'),
+                'quality_flags': quality.get('flags', []),
             })
+    # Sort ascending by quality score so worst items surface first
+    items.sort(key=lambda x: (x['quality'] is None, x['quality'] or 0))
     return {'ok': True, 'count': len(items), 'items': items}
 
 
@@ -526,6 +569,7 @@ def cmd_publish(cfg: Dict[str, Any], skus: List[str],
                 dry_run: bool = False) -> Dict[str, Any]:
     """Enqueue ebay_publish for each SKU that has an UNPUBLISHED offer."""
     import psycopg2.errors
+
     from tgw.queue import state_machine
 
     enqueued: List[str] = []
@@ -575,6 +619,240 @@ def cmd_publish(cfg: Dict[str, Any], skus: List[str],
         'skipped':  skipped,
         'errors':   errors,
     }
+
+
+def cmd_import_sold_csv(cfg: Dict[str, Any], csv_path: Path,
+                        dry_run: bool = False,
+                        show_columns: bool = False) -> Dict[str, Any]:
+    """
+    Import an eBay Seller Hub sold-orders CSV and mark matched items sold.
+
+    Matches rows to item JSONs via Item number → ebay_listing.listing_id.
+    Idempotent: items already marked sold are skipped.
+    """
+    import csv as _csv
+
+    from .ebay.pull import build_listing_index, mark_item_sold
+
+    # eBay Seller Hub column names vary slightly across exports; try each in order.
+    _COL_LISTING_ID = ('Item number', 'Item Number', 'ItemID', 'Item ID')
+    _COL_SALE_DATE  = ('Sale date', 'Sale Date', 'Purchase date', 'Purchase Date', 'Order date')
+    _COL_SALE_PRICE = ('Sale price', 'Sale Price', 'Item price', 'Sold for', 'Unit price')
+    _COL_BUYER      = ('Buyer username', 'Buyer Username', 'Buyer user ID', 'Buyer')
+    _COL_ORDER_ID   = ('Order ID', 'Order number', 'Sales record number', 'Transaction ID')
+    _COL_QUANTITY   = ('Quantity', 'Qty', 'Item quantity')
+
+    def _pick(row: Dict[str, str], candidates: tuple) -> str:
+        for c in candidates:
+            if c in row:
+                return row[c].strip()
+        return ''
+
+    if not csv_path.exists():
+        return {'ok': False, 'error': f'file not found: {csv_path}'}
+
+    with csv_path.open(encoding='utf-8-sig', newline='') as fh:
+        reader = _csv.DictReader(fh)
+        rows = list(reader)
+        columns = reader.fieldnames or []
+
+    if show_columns:
+        return {'ok': True, 'columns': list(columns), 'row_count': len(rows)}
+
+    if not rows:
+        return {'ok': True, 'matched': 0, 'marked': 0, 'skipped': 0,
+                'unmatched': 0, 'errors': 0, 'dry_run': dry_run}
+
+    # Verify we can find the listing_id column
+    sample = rows[0]
+    if not any(c in sample for c in _COL_LISTING_ID):
+        return {
+            'ok': False,
+            'error': f'Cannot find Item number column. Columns found: {list(columns)}. '
+                     f'Use --show-columns to inspect the file.',
+        }
+
+    synced_at     = datetime.now(tz=timezone.utc).isoformat()
+    itemdata_root = cfg['itemdata_root']
+    listing_index = build_listing_index(itemdata_root)
+
+    stats: Dict[str, Any] = {
+        'rows': len(rows), 'matched': 0, 'marked': 0,
+        'already_sold': 0, 'unmatched': 0, 'errors': 0,
+    }
+    unmatched_ids: List[str] = []
+
+    for row in rows:
+        listing_id = _pick(row, _COL_LISTING_ID)
+        if not listing_id:
+            continue
+
+        json_path = listing_index.get(listing_id)
+        if not json_path:
+            stats['unmatched'] += 1
+            unmatched_ids.append(listing_id)
+            continue
+
+        stats['matched'] += 1
+        sale_price_raw = _pick(row, _COL_SALE_PRICE)
+        try:
+            sale_price = float(sale_price_raw.lstrip('$').replace(',', ''))
+        except (ValueError, AttributeError):
+            sale_price = sale_price_raw
+
+        try:
+            did_mark = mark_item_sold(
+                json_path,
+                order_id=_pick(row, _COL_ORDER_ID) or f'csv-import-{listing_id}',
+                buyer=_pick(row, _COL_BUYER),
+                sale_price=sale_price,
+                quantity=int(_pick(row, _COL_QUANTITY) or '1'),
+                sale_date=_pick(row, _COL_SALE_DATE),
+                synced_at=synced_at,
+                cfg=cfg,
+                dry_run=dry_run,
+            )
+            if did_mark:
+                stats['marked'] += 1
+            else:
+                stats['already_sold'] += 1
+        except Exception as exc:
+            stats['errors'] += 1
+            print(f'  ERROR listing {listing_id}: {exc}')
+
+    if unmatched_ids:
+        print(f'  {len(unmatched_ids)} unmatched listing IDs (not in local ItemData):')
+        for lid in unmatched_ids[:20]:
+            print(f'    {lid}')
+        if len(unmatched_ids) > 20:
+            print(f'    ... and {len(unmatched_ids) - 20} more')
+
+    return {'ok': True, 'dry_run': dry_run, **stats}
+
+
+def cmd_ebay_sweep(cfg: Dict[str, Any], *,
+                   groups: str = 'A',
+                   location: Optional[str] = None,
+                   limit: int = 0,
+                   output: Optional[Path] = None) -> Dict[str, Any]:
+    """
+    Scan ItemData for ambiguous-status items and generate a physical inventory checklist.
+
+    Groups:
+      A — Active eBay listing, local status not confirmed (most urgent)
+      B — "out of stock" legacy items with no eBay listing (likely sold, untracked)
+      C — No status and no eBay listing (completely uncategorized)
+
+    Output is a markdown checklist (stdout or --output file) for Obsidian review.
+    """
+
+    selected = {g.strip().upper() for g in groups.split(',')}
+
+    _CLEAR_STATUS = {'sold', 'disposed', 'recalled', 'merged', 'discard',
+                     'disposeddisposed', 'vero'}
+
+    itemdata_root = cfg['itemdata_root']
+    results: Dict[str, List[Dict[str, Any]]] = {'A': [], 'B': [], 'C': []}
+
+    for json_path in itemdata_root.glob('*/*.json'):
+        try:
+            item = json.loads(json_path.read_text(encoding='utf-8'))
+            if not isinstance(item, dict):
+                continue
+        except Exception:
+            continue
+
+        sku        = json_path.parent.name
+        raw_status = str(item.get('status', '')).lower().strip()
+        loc        = str(item.get('location', '')).strip()
+        title      = str(item.get('title', '')).strip()
+        ebay_lst   = item.get('ebay_listing') or {}
+        ebay_status = str(ebay_lst.get('status', '')).lower().strip()
+        listing_id  = ebay_lst.get('listing_id', '')
+        listing_url = ebay_lst.get('listing_url', '')
+        live_price  = ebay_lst.get('live_price') or item.get('ebay_offer', {}).get('price')
+
+        if location and loc.lower() != location.lower():
+            continue
+        if raw_status in _CLEAR_STATUS:
+            continue
+
+        entry: Dict[str, Any] = {
+            'sku': sku, 'title': title, 'location': loc,
+            'status': raw_status or '(empty)',
+            'ebay_status': ebay_status or '(none)',
+            'listing_id': listing_id,
+            'listing_url': listing_url,
+            'price': live_price,
+        }
+
+        if 'A' in selected and ebay_status == 'active' and raw_status not in ('in stock',):
+            results['A'].append(entry)
+        elif 'B' in selected and raw_status == 'out of stock' and not listing_id:
+            results['B'].append(entry)
+        elif 'C' in selected and not raw_status and not listing_id:
+            results['C'].append(entry)
+
+    # Apply per-group limit
+    if limit:
+        for g in results:
+            results[g] = results[g][:limit]
+
+    total = sum(len(v) for v in results.values())
+    ts    = datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+
+    lines: List[str] = [
+        f'# eBay Physical Inventory Sweep — {ts}',
+        f'Groups: {groups}' + (f'  |  Location filter: {location}' if location else ''),
+        f'Total items: {total}',
+        '',
+    ]
+
+    _GROUP_DESC = {
+        'A': ('Active eBay listing — local status unclear',
+              'Check shelf. Present → `tgw update <SKU> status "in stock"` '
+              '| Missing → likely sold; check eBay order history'),
+        'B': ('Legacy "out of stock" — no eBay listing',
+              'Check shelf. Present → `tgw update <SKU> status available` '
+              '| Missing → `tgw update <SKU> status sold` (or use import-sold-csv)'),
+        'C': ('No status, no eBay listing — completely uncategorized',
+              'Assess: still have it? list it? already gone?'),
+    }
+
+    for g in ('A', 'B', 'C'):
+        items = results.get(g, [])
+        if not items:
+            continue
+        title_str, action_str = _GROUP_DESC[g]
+        lines += [
+            f'## Group {g} — {title_str} ({len(items)})',
+            f'*{action_str}*',
+            '',
+            '| Done | SKU | Status | eBay | Loc | Price | Title |',
+            '|------|-----|--------|------|-----|-------|-------|',
+        ]
+        for it in items:
+            price_str = f'${it["price"]}' if it['price'] else ''
+            url_str   = f'[{it["listing_id"]}]({it["listing_url"]})' if it['listing_id'] else ''
+            title_col = it['title'][:45].replace('|', '/') if it['title'] else '—'
+            lines.append(
+                f'| [ ] | {it["sku"]} | {it["status"]} | {url_str or it["ebay_status"]} '
+                f'| {it["location"] or "—"} | {price_str} | {title_col} |'
+            )
+        lines.append('')
+
+    content = '\n'.join(lines)
+
+    if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(content, encoding='utf-8')
+        print(f'Sweep report written to {output}  ({total} items)')
+    else:
+        print(content)
+
+    counts = {g: len(v) for g, v in results.items()}
+    return {'ok': True, 'total': total, 'groups': counts,
+            'output': str(output) if output else None}
 
 
 def cmd_suggest(cfg: Dict[str, Any], text: str) -> Dict[str, Any]:
@@ -697,6 +975,30 @@ def main() -> int:
                                include_ollama=not args.no_ollama,
                                include_ebay=not args.no_ebay)
 
+        elif args.op == 'lookup':
+            from .apis.lookup import lookup_product
+            from .config import sku_json
+            from .items import atomic_write_json
+            json_path = sku_json(cfg, args.sku)
+            if not json_path.exists():
+                result = {'ok': False, 'error': f'item not found: {args.sku}'}
+            else:
+                item = json.loads(json_path.read_text(encoding='utf-8'))
+                if args.force:
+                    item.pop('product_lookup', None)
+                lookup = lookup_product(item, cfg)
+                if lookup is None:
+                    result = {'ok': True, 'sku': args.sku, 'found': False,
+                              'note': 'no barcode field (upc/ean/isbn) in item JSON'}
+                else:
+                    result = {'ok': True, 'sku': args.sku, 'found': True,
+                              'result': lookup.to_dict()}
+                    if args.save:
+                        item['product_lookup'] = lookup.to_dict()
+                        atomic_write_json(json_path, item,
+                                          pretty=cfg.get('pretty', True))
+                        result['saved'] = True
+
         elif args.op == 'suggest':
             result = cmd_suggest(cfg, ' '.join(args.text))
 
@@ -727,20 +1029,25 @@ def main() -> int:
                 if not items:
                     print('No items staged and awaiting review.')
                 else:
-                    print(f'{"SKU":<24} {"Price":>7}  {"Location":<10} {"Title"}')
-                    print('-' * 80)
+                    print(f'{"SKU":<24} {"Q":>3}  {"Price":>7}  {"Location":<10} {"Title"}')
+                    print('-' * 85)
                     for it in items:
-                        price = f'${it["price"]}' if it['price'] else '  N/A'
-                        print(f'{it["sku"]:<24} {price:>7}  {it["location"]:<10} {it["title"][:40]}')
-                    print(f'\n{len(items)} item(s) awaiting review. Use: tgw publish <SKU>')
+                        price   = f'${it["price"]}' if it['price'] else '  N/A'
+                        q       = it.get('quality')
+                        q_str   = f'{q:3d}' if q is not None else '  —'
+                        flags   = it.get('quality_flags') or []
+                        flag_str = f' [{",".join(flags[:3])}]' if flags else ''
+                        print(f'{it["sku"]:<24} {q_str}  {price:>7}  '
+                              f'{it["location"]:<10} {it["title"][:35]}{flag_str}')
+                    print(f'\n{len(items)} item(s) awaiting review. '
+                          f'Q=quality score (0–100, worst first). Use: tgw publish <SKU>')
                 return 0
 
         elif args.op == 'publish':
             result = cmd_publish(cfg, args.skus, dry_run=args.dry_run)
 
         elif args.op == 'setup-ebay-hooks':
-            from .apis.ebay.notifications import (
-                get_notification_preferences, set_notification_preferences)
+            from .apis.ebay.notifications import get_notification_preferences, set_notification_preferences
             if args.check:
                 current = get_notification_preferences(cfg)
                 result = {'ok': True, 'current_url': current or '(not set)'}
@@ -751,6 +1058,7 @@ def main() -> int:
 
         elif args.op == 'serve':
             import uvicorn
+
             from .http_server import app
             uvicorn.run(
                 app,
@@ -762,8 +1070,8 @@ def main() -> int:
             return 0
 
         elif args.op == 'sku-migrate':
-            from .sku_migration import check_collisions, run_migration
             from .queue import state_machine as _sm
+            from .sku_migration import check_collisions, run_migration
             _sm.init(cfg['postgres_dsn'])
 
             if args.check_collisions:
@@ -786,6 +1094,94 @@ def main() -> int:
                     limit=args.limit,
                     manifest_path=manifest_path,
                 )
+
+        elif args.op == 'ebay-sweep':
+            result = cmd_ebay_sweep(
+                cfg,
+                groups=args.groups,
+                location=args.location,
+                limit=args.limit,
+                output=Path(args.output) if args.output else None,
+            )
+            if args.output:
+                print(json.dumps(result, indent=2))
+            return 0 if result['ok'] else 1
+
+        elif args.op == 'import-sold-csv':
+            from .queue import state_machine as _sm
+            _sm.init(cfg['postgres_dsn'])
+            result = cmd_import_sold_csv(cfg, Path(args.file),
+                                         dry_run=args.dry_run,
+                                         show_columns=args.show_columns)
+            if result.get('ok') and not args.show_columns:
+                marked = result.get('marked', 0)
+                if marked and not args.dry_run:
+                    try:
+                        _sm.enqueue_job(
+                            queue_name='catalog_rebuild',
+                            payload={'reason': 'import_sold_csv'},
+                            dedupe_key='catalog_rebuild:pending',
+                            not_before=time.time() + 30,
+                            max_attempts=3,
+                        )
+                        print('catalog_rebuild job enqueued.')
+                    except Exception:
+                        pass
+
+        elif args.op == 'ebay-pull':
+            from .ebay.pull import build_listing_index, sync_active_listings, sync_sold_orders
+            from .queue import state_machine as _sm
+            from .workers.ebay_legacy_sync import _sold_state_path
+            _sm.init(cfg['postgres_dsn'])
+
+            synced_at     = datetime.now(tz=timezone.utc).isoformat()
+            itemdata_root = cfg['itemdata_root']
+            dry_run       = args.dry_run
+            total_changes = 0
+
+            active_stats: Dict[str, Any] = {}
+            if not args.no_active:
+                print('Fetching active listings from eBay...')
+                active_stats = sync_active_listings(cfg, itemdata_root, synced_at,
+                                                    dry_run=dry_run)
+                total_changes += active_stats.get('updated', 0)
+                print(f"  fetched={active_stats['fetched']}  matched={active_stats['matched']}  "
+                      f"updated={active_stats['updated']}  orphaned={active_stats['orphaned']}  "
+                      f"skipped_inventory={active_stats['skipped_inventory']}  "
+                      f"errors={active_stats['errors']}")
+                for o in active_stats.get('orphans', []):
+                    print(f"  ORPHAN: ItemID={o['listing_id']} label={o.get('custom_label','')!r} "
+                          f"title={o.get('title','')[:60]}")
+
+            sold_stats: Dict[str, Any] = {}
+            if not args.no_sold:
+                print('Fetching sold orders from eBay...')
+                listing_index = build_listing_index(itemdata_root)
+                print(f'  listing index: {len(listing_index)} entries')
+                sold_stats = sync_sold_orders(cfg, listing_index, synced_at,
+                                              _sold_state_path(cfg), dry_run=dry_run)
+                total_changes += sold_stats.get('sold_marked', 0)
+                print(f"  orders_fetched={sold_stats['orders_fetched']}  "
+                      f"sold_marked={sold_stats['sold_marked']}  "
+                      f"errors={sold_stats['errors']}")
+
+            if total_changes and not dry_run:
+                try:
+                    _sm.enqueue_job(
+                        queue_name='catalog_rebuild',
+                        payload={'reason': 'ebay_pull'},
+                        dedupe_key='catalog_rebuild:pending',
+                        not_before=time.time() + 30,
+                        max_attempts=3,
+                    )
+                    print('catalog_rebuild job enqueued.')
+                except Exception:
+                    pass
+
+            result = {
+                'ok': True, 'dry_run': dry_run,
+                'active': active_stats, 'sold': sold_stats,
+            }
 
         else:
             result = {'ok': False, 'error': f'unknown op: {args.op!r}'}

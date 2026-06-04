@@ -40,18 +40,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import psycopg2.errors
 import requests
 
-from tgw.apis.ebay.client import ebay_delete, ebay_get, ebay_put, ebay_post
+import tgw.logging as tgw_logging
+from tgw.apis.ebay.client import ebay_delete, ebay_get, ebay_post, ebay_put
 from tgw.apis.ebay.trading import revise_item_sku
-from tgw.ebay.sync import _build_offer_bodies, publish_offer, _find_offer, _get_policies, MARKETPLACE_ID
 from tgw.config import DEFAULT_CONFIG, load_config
+from tgw.ebay.sync import _build_offer_bodies, _find_offer, _get_policies, publish_offer
 from tgw.items import atomic_write_json, load_item_doc
 from tgw.queue import state_machine
 from tgw.queue.worker_base import QueueWorker
 from tgw.sku_migration import build_migration_map, classify, rename_sku
-import tgw.logging as tgw_logging
 
 log = logging.getLogger(__name__)
 

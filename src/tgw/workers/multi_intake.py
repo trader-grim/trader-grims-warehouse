@@ -22,10 +22,10 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, List
 
+import tgw.logging as tgw_logging
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.items import atomic_write_json
 from tgw.queue.worker_base import HardFailure, QueueWorker
-import tgw.logging as tgw_logging
 
 log = logging.getLogger(__name__)
 
