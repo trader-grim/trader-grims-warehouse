@@ -1,0 +1,78 @@
+"""
+tgw.seo.title — eBay title enhancement using product lookup data.
+
+Applies rule-based brand/MPN injection and flags quality issues.
+Called by ebay_draft after the draft title is established.
+"""
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
+
+_MAX_TITLE = 80
+_MIN_TITLE = 40
+
+
+def enhance_title(
+    title: str,
+    product_lookup: Optional[Dict[str, Any]] = None,
+    item_specifics: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """
+    Enhance a draft title using product lookup data.
+
+    Returns dict:
+      title     — enhanced title (may equal original if no changes)
+      title_ai  — original AI title (only present if title was changed)
+      flags     — list of SEO flag strings (title_too_short, title_too_long,
+                  all_caps:<words>, no_brand, no_model)
+    """
+    pl    = product_lookup or {}
+    specs = item_specifics or {}
+
+    enhanced = title.strip()
+    original = enhanced
+    flags: List[str] = []
+
+    brand = (pl.get('brand') or specs.get('Brand') or '').strip()
+    mpn   = (pl.get('mpn')   or specs.get('MPN')   or specs.get('Model') or '').strip()
+
+    # Inject brand if absent
+    if brand and brand.lower() not in enhanced.lower():
+        candidate = f'{brand} {enhanced}'
+        if len(candidate) <= _MAX_TITLE:
+            enhanced = candidate
+        else:
+            available = _MAX_TITLE - len(brand) - 1
+            if available > 15:
+                enhanced = f'{brand} {enhanced[:available].rstrip()}'
+
+    # Append MPN/model if absent and space allows
+    if mpn and mpn.lower() not in enhanced.lower():
+        candidate = f'{enhanced} {mpn}'
+        if len(candidate) <= _MAX_TITLE:
+            enhanced = candidate
+
+    # Length flags
+    if len(enhanced) < _MIN_TITLE:
+        flags.append('title_too_short')
+    if len(enhanced) > _MAX_TITLE:
+        flags.append('title_too_long')
+
+    # ALL CAPS words (eBay penalises these; exclude model numbers with digits/hyphens)
+    caps_words = [
+        w for w in enhanced.split()
+        if len(w) > 2 and w.isupper() and w.isalpha()
+    ]
+    if caps_words:
+        flags.append('all_caps:' + ','.join(caps_words[:3]))
+
+    # Missing brand / model signals (informational, not blocking)
+    if not brand:
+        flags.append('no_brand')
+    if not mpn:
+        flags.append('no_model')
+
+    result: Dict[str, Any] = {'title': enhanced, 'flags': flags}
+    if enhanced != original:
+        result['title_ai'] = original
+    return result

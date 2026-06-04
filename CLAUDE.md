@@ -126,4 +126,4 @@ price (launch=110% max→.99) → stage → `tgw staged` operator review → `tg
 `ebay_price_reducer` handles scheduled markdown (p75 day 3 → p25 day 17).
 `ebay_sku_migrate` running (~8,350 eBay live listings remain; ~70 days at 5/hr).
 Next priorities (see Implementation TODO table in plan):
-  PP-QUALITY-001 (listing quality scorer) → PP-PRICE-003 (comp search) → PP-HINT-001 (bulk requeue).
+  PP-HINT-001 (bulk requeue) → PP-SEO-001 (title enhancement) → PP-SOLD-001 Tier 2 (CSV test).

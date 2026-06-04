@@ -84,27 +84,37 @@ def _write_offline_csv_row(cfg: Dict[str, Any], sku: str,
         })
 
 
-def _build_prompt(item: Dict[str, Any], aspects: List[Dict[str, Any]]) -> str:
+def _build_prompt(item: Dict[str, Any], aspects: List[Dict[str, Any]],
+                  prefilled: Optional[Dict[str, str]] = None) -> str:
+    prefilled = prefilled or {}
     lines = [
         f'Title: {item.get("title", "")}',
         f'Category: {item.get("ebay_category_name", "")}',
         f'Description: {item.get("description", "")}',
         f'Condition: {item.get("condition", "")}',
         '',
-        'Aspects to fill:',
     ]
-    for a in aspects:
-        req = ' (REQUIRED)' if a['required'] else ''
-        if a['allowed_values']:
-            av = a['allowed_values']
-            if len(av) <= 30:
-                vals = ', '.join(av)
+    if prefilled:
+        lines.append('Known values from product database (include these verbatim in your JSON):')
+        for k, v in prefilled.items():
+            lines.append(f'  {k}: {v}')
+        lines.append('')
+
+    remaining = [a for a in aspects if a['name'] not in prefilled]
+    if remaining:
+        lines.append('Aspects to fill:')
+        for a in remaining:
+            req = ' (REQUIRED)' if a['required'] else ''
+            if a['allowed_values']:
+                av = a['allowed_values']
+                if len(av) <= 30:
+                    vals = ', '.join(av)
+                else:
+                    vals = ', '.join(av[:30]) + f' ... ({len(av)} total)'
+                lines.append(f'  {a["name"]}{req}: choose from [{vals}]')
             else:
-                vals = ', '.join(av[:30]) + f' ... ({len(av)} total)'
-            lines.append(f'  {a["name"]}{req}: choose from [{vals}]')
-        else:
-            lines.append(f'  {a["name"]}{req}: free text')
-    lines.append('')
+                lines.append(f'  {a["name"]}{req}: free text')
+        lines.append('')
     lines.append('Respond with JSON: {"Brand": "...", "Theme": "...", ...}')
     return '\n'.join(lines)
 
@@ -172,8 +182,34 @@ class EbayDraftWorker(QueueWorker):
                 raise
             log.info('fetched %d aspects for category %s', len(aspects), category_id)
 
+        # Phase 2 — pre-fill known specifics from product_lookup (authoritative over AI)
+        pl = item.get('product_lookup') or {}
+        aspect_names = {a['name'] for a in aspects}
+        _PL_ASPECT_MAP = [
+            ('brand', 'Brand'), ('mpn', 'MPN'), ('mpn', 'Model'),
+            ('ean', 'EAN'), ('upc', 'UPC'), ('isbn', 'ISBN'),
+        ]
+        prefilled: Dict[str, str] = {}
+        for pl_key, aspect_name in _PL_ASPECT_MAP:
+            val = (pl.get(pl_key) or '').strip()
+            if not val or aspect_name in prefilled:
+                continue
+            if aspect_name not in aspect_names:
+                continue
+            # Validate against SELECTION_ONLY allowed values
+            aspect_def = next((a for a in aspects if a['name'] == aspect_name), None)
+            if aspect_def and aspect_def['mode'] == 'SELECTION_ONLY' and aspect_def['allowed_values']:
+                if val not in aspect_def['allowed_values']:
+                    log.debug('prefill: %r not in allowed values for %r — skipping', val, aspect_name)
+                    continue
+            prefilled[aspect_name] = val
+
+        if prefilled:
+            log.info('%s: pre-filled %d specifics from product_lookup: %s',
+                     sku, len(prefilled), list(prefilled.keys()))
+
         # Use text model to fill aspect values
-        prompt  = _build_prompt(item, aspects)
+        prompt  = _build_prompt(item, aspects, prefilled=prefilled)
         log.info('asking %s to fill %d aspects for %s', TEXT_MODEL, len(aspects), sku)
         tgw_logging.log_event('ebay_draft_aspects_call', sku=sku,
                               category_id=category_id, aspect_count=len(aspects))
@@ -193,7 +229,7 @@ class EbayDraftWorker(QueueWorker):
                 f'ebay_draft: model returned non-JSON for {sku}: {raw[:200]}'
             ) from exc
 
-        # Filter nulls and validate SELECTION_ONLY values
+        # Filter nulls and validate SELECTION_ONLY values; merge prefilled on top
         item_specifics: Dict[str, str] = {}
         for aspect in aspects:
             name = aspect['name']
@@ -206,6 +242,9 @@ class EbayDraftWorker(QueueWorker):
                     log.warning('invalid value %r for %r — skipping', val, name)
                     continue
             item_specifics[name] = val
+
+        # Prefilled values override AI output (product database is authoritative)
+        item_specifics.update(prefilled)
 
         # Backfill required aspects the AI left blank — eBay rejects at staging
         # if any required aspect is missing.
@@ -278,6 +317,17 @@ class EbayDraftWorker(QueueWorker):
         # Build full eBay listing description: AI text + boilerplate footer + picklist line
         item['draft_listing'] = draft   # temporary — needed by build_listing_description
         draft['listing_description'] = build_listing_description(item, self.config)
+
+        # Phase 1 — enhance title using product_lookup (brand/MPN injection + flags)
+        from tgw.seo.title import enhance_title
+        seo = enhance_title(title, pl, item_specifics)
+        draft['title'] = seo['title']
+        if 'title_ai' in seo:
+            draft['title_ai'] = seo['title_ai']
+            log.info('%s: title enhanced: %r → %r', sku, seo['title_ai'], seo['title'])
+        if seo['flags']:
+            draft['title_flags'] = seo['flags']
+            log.info('%s: title flags: %s', sku, seo['flags'])
 
         # Compute listing quality score — stored in draft; re-scored after pricing adds comps
         from tgw.listing_quality import score_draft

@@ -67,16 +67,23 @@ class EbayPriceWorker(QueueWorker):
                                   price=existing['price'])
             return
 
-        title         = draft.get('title') or item.get('title', '')
-        category_name = draft.get('category_name') or item.get('ebay_category_name', '')
+        title          = draft.get('title') or item.get('title', '')
+        category_name  = draft.get('category_name') or item.get('ebay_category_name', '')
+        category_id    = str(draft.get('category_id') or item.get('ebay_category_id', ''))
+        item_condition = str(item.get('condition', '')).strip()
+        product_lookup = item.get('product_lookup') or {}
 
         if not title or title == sku:
             raise HardFailure(f'{sku}: no title — run ai_identify first')
 
-        log.info('ebay_price: querying comps for %r', title[:60])
+        log.info('ebay_price: querying comps for %r (condition=%r)', title[:60], item_condition)
         tgw_logging.log_event('ebay_price_start', sku=sku, title=title[:60])
 
-        result = suggest_price(self.config, title, category_name)
+        result = suggest_price(
+            self.config, title, category_name, category_id,
+            item_condition=item_condition,
+            product_lookup=product_lookup,
+        )
 
         ebay_offer = dict(existing)
         ebay_offer['price_source'] = result['source']
@@ -93,17 +100,22 @@ class EbayPriceWorker(QueueWorker):
             ebay_offer['price']        = launch
             ebay_offer['target_price'] = suggested   # p25 — the eventual move price
             draft['price']             = launch      # staged at launch price
-            log.info('ebay_price: %s → launch=$%.2f target=$%.2f (%d comps, %s)',
-                     sku, launch, suggested, comps.get('count', 0), result['source'])
+            log.info('ebay_price: %s → launch=$%.2f target=$%.2f (%d comps, %s, conf=%s)',
+                     sku, launch, suggested,
+                     comps.get('count', 0), result['source'],
+                     result.get('price_confidence', '?'))
             tgw_logging.log_event('ebay_price_set', sku=sku,
                                   price=launch,
                                   target_price=suggested,
                                   source=result['source'],
+                                  price_confidence=result.get('price_confidence'),
                                   comps=comps)
         else:
             ebay_offer['price'] = None
             log.warning('ebay_price: %s — insufficient comps, price left null', sku)
             tgw_logging.log_event('ebay_price_no_comps', sku=sku, title=title[:60])
+
+        draft['price_confidence'] = result.get('price_confidence', 'low')
 
         item['ebay_offer']    = ebay_offer
         item['draft_listing'] = draft

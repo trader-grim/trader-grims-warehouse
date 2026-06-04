@@ -114,18 +114,19 @@ maintained_by: Opus (planner)
 Ordered by value and readiness. PP-LOOKUP-001 Tier 1 is the key unlock — it feeds
 quality scoring, SEO, and better comp search.
 
-| Priority | Item | Blocking? | Notes |
-|----------|------|-----------|-------|
-| 1 | **PP-QUALITY-001** listing quality scorer | — | PP-LOOKUP-001 ✅ unblocks; score in ebay_draft; display in `tgw staged` |
-| 2 | **PP-PRICE-003** comp search improvement | — | Use product_lookup brand/MPN for better Browse API queries; condition-filtered comps |
-| 3 | **PP-HINT-001** bulk requeue command | — | `tgw requeue` filter-based batch; catalog-only mode (no eBay pipeline trigger) |
-| 4 | **PP-SEO-001** title enhancement pass | PP-QUALITY-001 | Inject brand/MPN from product_lookup into title in ebay_draft |
-| 5 | **PP-SOLD-001 Tier 2** CSV import test | operator action | Dave pulls sold CSV → test `tgw import-sold-csv` against real data |
-| 6 | **PP-SOLD-001 Tier 3** sweep checklist | Tier 2 tested | `tgw ebay-sweep` output → physical review workflow |
-| 7 | **PP-REF-001** item JSON schema doc | — | Sample items at each pipeline stage; document all fields; wire JSON Schema |
-| 8 | **PP-CI-001** linting + GitHub Actions | — | Fix existing ruff/mypy violations; add pre-commit hook + lint workflow |
-| 9 | **PP-REPRICER-001** market-aware repricer | sold-price API | Blocked on `buy.marketplace_insights` scope approval |
-| 10 | **PP-LOOKUP-001 Tier 1 remaining** | — | IGDB, JustTCG, Open Food Facts — add when relevant items appear |
+| Priority | Item | Status | Notes |
+|----------|------|--------|-------|
+| ✅ | **PP-QUALITY-001** listing quality scorer | DONE 2026-06-04 | score_draft; ebay_draft+price integration; tgw staged Q+PC columns |
+| ✅ | **PP-PRICE-003** comp search improvement | DONE 2026-06-04 | lookup_query stage 0; condition-filtered comps; price_confidence H/M/L |
+| ✅ | **PP-HINT-001** bulk requeue command | DONE 2026-06-04 | `tgw requeue` all filters implemented; `--catalog-only` suppresses eBay cascade |
+| 1 | **PP-SEO-001** title enhancement pass | Phases 1–2 DONE 2026-06-04 | `tgw/seo/title.py` + prefilled specifics in ebay_draft; Phases 3–6 pending |
+| 3 | **PP-SOLD-001 Tier 2** CSV import test | operator action | Dave pulls sold CSV → test `tgw import-sold-csv` against real data |
+| 4 | **PP-SOLD-001 Tier 3** sweep checklist | after Tier 2 | `tgw ebay-sweep` output → physical review workflow |
+| 5 | **PP-REF-001** item JSON schema doc | — | Sample items at each pipeline stage; document all fields |
+| 6 | **PP-CI-001** linting + GitHub Actions | — | Fix ruff/mypy violations; pre-commit hook + lint workflow |
+| 7 | **PP-REPRICER-001** market-aware repricer | blocked | Blocked on `buy.marketplace_insights` scope approval |
+| 8 | **PP-LOOKUP-001 Tier 1 remaining** | — | IGDB, JustTCG, Open Food Facts — add when relevant items appear |
+| 9 | **PP-MULTIMODEL-001** multi-AI routing | — | Task routing guide: Haiku/Sonnet/Opus/Gemini Code/Perplexity/Ollama; e-sneaker-net pattern; informs all future work |
 
 **Running in background:**
 - `ebay_sku_migrate` — ~8,350 live listings remaining; ~5/hr; ~70 days to complete
@@ -171,6 +172,16 @@ Seller Hub: Listings → search by Item ID → Edit listing → Shipping → sel
 - [ ] 327195083346  - [ ] 327195083374  - [ ] 327195083408  - [ ] 327195083423
 - [ ] 327195083451  - [ ] 227372145582  - [ ] 327195085940  - [ ] 227372145665
 - [ ] 227372145712
+
+### Tool installs — PP-MULTIMODEL-001 external AI tools
+- [ ] **nvm + npm** (Node.js version manager): `curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash` then `nvm install --lts`
+  — needed for: `markmap-cli` (render reference docs), future JS tooling
+- [ ] **markmap-cli**: `npm install -g markmap-cli` — renders reference `.md` files to HTML: `markmap <file> --no-open -o out.html`
+- [ ] **Gemini CLI / Google Cloud SDK**: install `google-cloud-sdk` or the standalone `gemini` CLI
+  — for PP-MULTIMODEL-001 Gemini Code large-context sessions; use Google account credentials
+  — alternative: use Gemini via https://aistudio.google.com (no install required, e-sneaker-net pattern)
+- [ ] **Perplexity workflow**: no install needed — use https://perplexity.ai directly (e-sneaker-net);
+  save research results as `.md` to `docs/TGW-Plan-Vault/inbox/` for PM-intake to file
 
 ### PP-REMOTE-001 — Tailscale
 - [ ] `curl -fsSL https://tailscale.com/install.sh | sh` then `tailscale up`
@@ -283,6 +294,93 @@ Seller Hub: Listings → search by Item ID → Edit listing → Shipping → sel
 ### 4g. Inventory API migration sweep (PP-ADD-008) — pending
 ### 4h. Pricing module — see PP-PRICE-001 below
 ### 4i. Live listing revision / update draft — pending; see PP-REVISION-001 below
+
+### PP-MULTIMODEL-001 — Multi-AI Strategy and Task Routing
+
+#### Problem
+TGW work spans a wide range of AI tasks with different characteristics: routine transforms,
+complex implementation, large-data analysis, and research. A single model (Claude Sonnet)
+handles all of these today — but we have access to other AI tools better suited for specific
+task types. Without a routing strategy, we default to the most expensive/capable tool for
+every task, leaving efficiency and cost on the table.
+
+#### Available AI tools and their strengths
+
+**Claude Haiku** (fast, cheap — Claude Code)
+- Routine field classification, simple validation logic, boilerplate generation
+- Batch tasks where throughput matters more than depth
+- Quick summarization or lookup with minimal context
+
+**Claude Sonnet** (balanced — current default for Claude Code sessions)
+- Worker implementation, debugging, moderate planning
+- Code generation requiring TGW architecture awareness
+- Default model; upgrade to Opus only when Sonnet falls short
+
+**Claude Opus** (high-capability, expensive — `/fast` mode in Claude Code)
+- Architecture design, PP design, settled architecture decisions
+- Complex cross-system reasoning; reserve for when Sonnet produces inadequate results
+
+**Local Ollama** (free, CPU-bound — already in production)
+- PM-intake: `Qwen2.5:latest` classifies inbox notes + patches master plan
+- `ai_identify`: `qwen2.5vl:7b` identifies items from photos (~18s/call)
+- `ebay_draft`: `Qwen2.5` fills eBay item specifics (structured extraction)
+- Constraint: 32GB CPU-only; model loads ~10 min; ~18s per inference call after warm
+
+**Gemini Code** (large context window, different training corpus)
+- High-token tasks: analyze full 55K item catalog, large eBay sold CSV exports
+- Cross-reference large corpora: all worker source files simultaneously, full item JSON corpus
+- Cases where Google's training data may have better coverage than Anthropic's
+- Token-intensive comparisons that exceed Sonnet's practical context budget
+
+**Perplexity** (live web research with cited sources)
+- eBay API updates, new scope announcements, developer forum research
+- Pricing strategy research with cited market data
+- Competitive analysis: what do other resale automation platforms do?
+- Deep-research tasks where footnoted citations are needed for decisions
+
+#### E-sneaker-net pattern
+No direct API integration planned between these tools — the workflow is manual:
+1. Identify a task suited for a different tool (routing guide below)
+2. Export relevant context (question, data excerpt, file content) from TGW session
+3. Run in the appropriate external AI tool
+4. Import result back: paste answer, or save as `.md` to `docs/TGW-Plan-Vault/inbox/` for PM-intake to file
+
+This is analogous to sneakernet (physically carrying data) but between AI subscriptions.
+
+#### Task routing guide
+
+| Task type | Best tool | Reason |
+|-----------|-----------|--------|
+| PP design, settled architecture | Opus | High-stakes, complex reasoning |
+| Worker implementation | Sonnet | Code quality + architecture awareness |
+| Data analysis < ~80K tokens | Sonnet | Already in context |
+| Data analysis > ~80K tokens | Gemini Code | Context limit avoidance |
+| PM-intake / plan patching | Ollama Qwen2.5 | Free; good enough for classification |
+| Item photo identification | Ollama Qwen2.5VL | Vision model; free per call |
+| eBay aspects fill | Ollama Qwen2.5 | Structured extraction; free |
+| eBay API change research | Perplexity | Live web + citations |
+| Pricing / market research | Perplexity | Cited market data |
+| Simple field transform / boilerplate | Haiku | Fast + cheap |
+| Batch classification jobs | Haiku | Throughput-optimized |
+| Large corpus cross-reference | Gemini Code | Context window advantage |
+
+#### Opportunities identified
+- **ebay_draft aspects improvement**: run a Gemini Code session with all 55K item JSONs + current
+  aspect fill results to find systematic gaps — too much data for a Sonnet session
+- **Perplexity research queue**: maintain a list of open research questions (eBay API scope
+  status, pricing competitors, Cassini algorithm updates) and batch-run them in Perplexity
+  periodically; file results via inbox
+- **Haiku for tgw health summary formatting**: simple string transforms, no architecture needed
+- **Gemini for data scrub passes**: Pass 1–3 (PP-ADD-005 data cleanup) involves processing
+  large item JSON corpora — Gemini's context window makes full-corpus analysis feasible in one shot
+
+#### Implementation
+Primarily a working practice guide — no code changes required initially.
+- When designing a new PP or worker: explicitly choose the model tier as part of the design note
+- Phase 5 usage monitoring will tag each AI job with model name + cost tier when built
+- Perplexity research results → save as `.md` in `docs/TGW-Plan-Vault/inbox/` for PM-intake to file
+
+---
 
 ## Phase 5 — AI operations layer
 ### Ollama job manager
@@ -555,21 +653,23 @@ without touching price.
 
 #### Implementation phases
 
-**Phase 1 — Title enhancement pass (in ebay_draft, after AI generates title)**
-- `tgw/seo/title.py` — `enhance_title(title, product_lookup) -> str`
+**Phase 1 — Title enhancement pass ✅ DONE 2026-06-04**
+- `tgw/seo/title.py` — `enhance_title(title, product_lookup, item_specifics) -> dict`
 - Rules applied in order:
-  1. If brand known and not in title → prepend `"{brand} "` (trim to 80 chars from end)
-  2. If MPN/model known and not in title → append if space allows
-  3. Flag if title < 40 chars (too generic) or > 80 chars (truncated by eBay)
-  4. Flag if title contains only generic nouns (no brand, no model, no descriptor)
-  5. Flag ALL CAPS words (eBay demotes them)
-- Enhanced title written to `draft_listing.title`; original AI title preserved in `draft_listing.title_ai`
+  1. If brand known (product_lookup.brand or item_specifics.Brand) and not in title → prepend
+  2. If MPN/model known and not in title → append if ≤80 chars
+  3. Flag `title_too_short` (< 40), `title_too_long` (> 80), `all_caps:<words>` (alpha-only caps),
+     `no_brand`, `no_model`
+  4. ALL CAPS check excludes model numbers containing digits/hyphens (avoids false positives)
+- `draft_listing.title` = enhanced; `draft_listing.title_ai` = original if changed;
+  `draft_listing.title_flags` = flag list
 
-**Phase 2 — Specifics pre-fill from product lookup (in ebay_draft, before AI aspects call)**
-- Before calling Ollama for aspects, inject product_lookup fields into `item_specifics`:
-  `Brand`, `MPN`, `Model`, `EAN`, `ISBN`, `UPC` — whichever are present
-- Pass pre-filled specifics to `_build_prompt()` so AI sees them and fills around them
-- Avoids AI guessing values that the product record provides authoritatively
+**Phase 2 — Specifics pre-fill from product lookup ✅ DONE 2026-06-04**
+- `ebay_draft` builds `prefilled` dict from `product_lookup`: Brand, MPN, Model, EAN, UPC, ISBN
+- Only injects for aspects that exist in this category's aspect list
+- Validates SELECTION_ONLY aspects against allowed values before injecting
+- `_build_prompt()` now shows prefilled values as "Known values" section; AI fills remaining
+- `prefilled` overrides AI output in merge step (product database is authoritative)
 
 **Phase 3 — EPID association (in ebay_stage, after inventory item upsert)**
 - If `product_lookup` has a barcode → query Commerce Catalog API for EPID
@@ -631,6 +731,40 @@ without touching price.
 - Verify `tgw-http` reachable over Tailscale for Flutter app on remote devices
 - Verify macro dispatcher (`tgw-macro`) works over SSH — clipboard via OSC52 or tmux buffer fallback
 - SSH hardening: key-only auth, `tgw` user access, sudoers scoped to needed ops only
+- **Open question**: should Claude Code have its own dedicated system user (e.g. `claude`) with scoped
+  permissions, separate from the `tgw` worker user? Relevant to sudoers design and audit trail clarity.
+  Decision: make part of the PP-REMOTE-001 hardening pass.
+
+### PP-CAPTURE-001 — Idea and Task Capture Pipeline
+
+#### Problem
+Good ideas and small tasks surface mid-session, mid-work, or on a second device. The current
+path — drop a `.md` file in `inbox/` or run `tgw suggest "..."` — works but isn't ergonomically
+the first thing you reach for. The risk is ideas escaping into conversation chat where they
+don't persist to the next session.
+
+#### Proposal
+Make `tgw suggest` the canonical back-channel for every idea, small task, and BTW thought —
+instead of saying it as a parenthetical in conversation. Advantages:
+- Auto-processed by PM-intake at the start of every session
+- Creates an audit trail (timestamped, in git via plan updates)
+- Survives context resets and context compression
+- Works from the macroboard (`x` key → `tgw suggest`)
+
+#### "Quiet queue" trigger
+When no workers have active jobs (queue depth = 0 across all queues), surface pending
+suggestions or operator TODOs via a `tgw status` or notification. This bridges the gap
+between "workers finished" and "operator knows what to do next."
+
+#### Implementation ideas
+- `tgw suggest` already works — it's about adoption as a habit
+- Consider alias `tgw note "..."` or `tgw btw "..."` for mid-session use (shorter to type)
+- Quiet-queue hook: `ebay_price_reducer`/`ebay_sync` could emit a notification when
+  queue is empty — or a lightweight cron `tgw quiet-check` that fires daily
+- CLAUDE.md session protocol already picks up `tgw suggest` entries via SUGGESTIONS.md scan
+
+#### Status
+Design open — no code changes yet. Adoption is the first step; tooling follows.
 
 ### PP-SHELL-001 — Shell Environment Cleanup (tgw.source / tgw-dev.source)
 - Audit `tgw.source`: replace functions that duplicate `tgw` CLI subcommands with one-line wrappers or remove; keep only short-name convenience aliases worth keeping
@@ -904,36 +1038,26 @@ MC console         Flutter app (Linux + Android)
   - Revision of already-identified items: `tgw hint --force` works but downstream ebay_draft/ebay_draft re-runs need to be aware of published state (don't auto-push changes to live listings)
   - Tuning: run difficult items through, observe results, adjust prompt and hint format
 
-### PP-QUALITY-001 — Listing quality scoring
+### PP-QUALITY-001 — Listing quality scoring ✅ COMPLETE (2026-06-04)
 
-#### Problem
-All items look the same in `tgw staged` — no signal about which drafts need attention before
-publish. Weak listings (generic title, unfilled specifics, too few photos, thin price comps)
-go live silently and underperform without the operator knowing why.
+#### Status
+- `tgw/listing_quality.py` — `score_draft(item, photo_count) -> QualityResult`, 7 signals, 100-point scale
+- `ebay_draft` worker: counts raw image files; stores `aspects_required_total/filled` + `aspects_recommended_total/filled` in draft; calls scorer → `draft_listing.quality`
+- `ebay_price` worker: re-scores quality after writing `price_comps` (comp_pts were 0 at draft time)
+- `tgw staged` table: Q column (worst-first), PC column (price confidence H/M/L), flag display
+- `tgw quality <SKU...> [--save]` — manual inspection / rescore
 
-#### Quality score
-Computed at `ebay_draft` time, stored as `draft_listing.quality` (0–100). Re-computed on
-re-draft. Displayed in `tgw staged` table; items below threshold held for review.
-
-| Signal | Weight | Notes |
-|--------|--------|-------|
-| Title length in 40–80 char sweet spot | medium | <40 = generic; eBay max 80 |
-| Brand and/or model present in title | high | Biggest eBay search ranking factor |
-| REQUIRED specifics filled % | high | Unfilled required aspects hurt placement |
-| RECOMMENDED specifics filled % | medium | Completeness signal |
-| Photo count ≥ 3 | high | eBay recommends 12; <3 is a hard problem |
-| Description ≥ 150 words | low | Thin descriptions hurt mobile display |
-| Price comp count ≥ 5 | medium | <5 = price is a guess; flag for review |
-| Condition consistent with category policy | medium | Cross-check condition policies |
-
-#### Integration
-- `tgw/listing_quality.py` — `score_draft(item_json) -> QualityResult`
-- Called at end of `ebay_draft` worker; result written to `draft_listing.quality`
-- `tgw staged` table: add quality score column, sort ascending by default (worst first)
-- Configurable threshold in `tgw-api-config.json` (`quality_hold_threshold`, default 60) —
-  items below threshold flagged; optional hard hold before stage (operator decides)
-- PP-LOOKUP-001 is an upstream dependency: product lookup data (brand, MPN) significantly
-  improves title score — run lookup before draft quality is computed
+#### Score signals (100 pts total)
+| Signal | Pts | Notes |
+|--------|-----|-------|
+| Title 40–80 chars | 10 | <25=0, 25–39=5, 40–80=10, >80=5 |
+| Brand in title | 25 | Checks product_lookup.brand + item_specifics.Brand |
+| Model/MPN in title | 10 | Checks MPN/Model from specifics or product_lookup |
+| Required specifics fill % | 15 | Stored counts from ebay_draft |
+| Recommended specifics fill % | 5 | Stored counts from ebay_draft |
+| Photo count ≥ 3 | 20 | 1=6, 2=12, ≥3=20 |
+| Description word count | 5 | ≥150=5, ≥75=3, ≥25=1 |
+| Price comp count | 10 | ≥5=10, ≥3=6, ≥1=3 |
 
 #### Dependency chain
 PP-LOOKUP-001 → PP-QUALITY-001 → better `tgw staged` triage → fewer weak listings published
@@ -1003,34 +1127,29 @@ Terapeak in Seller Hub manually for high-value or thin-comp items.
 - Design deferred until sold-price API access obtained — Browse API asking prices are the wrong signal for dynamic repricing
 - Will consume `reprice_schedule` as floor (never price below the move price)
 
-### PP-PRICE-003 — Comp search quality improvement
+### PP-PRICE-003 — Comp search quality improvement ✅ COMPLETE (2026-06-04)
 
-#### Problem
-`ebay_price` searches Browse API using the AI-generated title. A weak or generic title returns
-noisy comps — wrong items, wide price scatter, low count. The price is then unreliable and
-the comp count signal is meaningless.
+#### Status
+All three fixes implemented in `tgw/ebay/pricing.py`:
 
-#### Fix: product-lookup-informed search query
-When PP-LOOKUP-001 data is present in `product_lookup`, use it to build a better search query:
-- Primary: `"{brand} {model_number}"` — tightest match, best comps
-- Fallback 1: `"{brand} {short_title}"` — brand + truncated product title
-- Fallback 2: current behavior (AI title)
-- All fallbacks already exist in `pricing.py`; this adds a pre-pass that prefers structured data
+**Stage 0 — product_lookup query** (`_lookup_query`):
+- If `product_lookup.brand + mpn` → `"{brand} {mpn}"` (tightest)
+- If `product_lookup.brand + title` → `"{brand} {short_product_title}"` (strips brand dedup)
+- Falls through to existing Stage 1–3 (full title, category+short, category only)
+- Source string: `browse:lookup_query` when fired; `+cond` suffix when condition-filtered
 
-#### Fix: condition-filtered comps
-Browse API `itemSummaries` include `condition` field. Filter comp candidates to same-or-worse
-condition before computing percentiles. A Used item compared against New listings sets a
-misleadingly high p25. Condition filtering narrows the relevant market.
+**Condition-filtered comps** (`_prices_condition_filtered`):
+- Parses Browse API `condition.conditionDisplayName`; maps to internal rank (0=New … 5=ForParts)
+- Keeps comps with `browse_rank >= item_rank` (same-or-worse condition)
+- Falls back to unfiltered if filter leaves < MIN_COMPS results
+- 15-entry `_BROWSE_CONDITION_RANK` covers all Browse API condition variants
 
-#### Fix: comp quality flag at staging
-`price_comps.count < 5` → surface warning in `tgw staged` alongside quality score.
-Operator sees "3 comps, $4–$47 range — manual review" rather than a silently-guessed price.
-
-#### Implementation
-- `pricing.py`: add `lookup_query()` that checks `product_lookup` before falling back to title
-- `pricing.py`: add condition filter pass on raw comp results before percentile computation
-- `draft_listing`: add `price_confidence` field (`high` / `medium` / `low`) based on comp count + variance
-- `tgw staged`: display `price_confidence` alongside quality score
+**Price confidence** (`_price_confidence`):
+- `high`: ≥5 comps AND max/min ratio < 3 (tight cluster)
+- `medium`: ≥3 comps OR wide range
+- `low`: <3 comps, category default, or insufficient data
+- Stored in `draft_listing.price_confidence`; displayed as H/M/L in `tgw staged` PC column
+- `ebay_price` passes `item_condition` and `product_lookup` to `suggest_price()`
 
 ### PP-PRICE-004 — Sold velocity analytics and feedback loop
 

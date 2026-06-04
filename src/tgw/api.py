@@ -217,6 +217,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--save', action='store_true',
                    help='write result back to item JSON')
 
+    p = sub.add_parser('quality',
+                       help='show listing quality score for one or more items (PP-QUALITY-001)')
+    p.add_argument('skus', nargs='+', help='SKU(s) to score')
+    p.add_argument('--save', action='store_true',
+                   help='write updated quality score back to draft_listing in item JSON')
+
     p = sub.add_parser('suggest', help='append a suggestion for the next planning session')
     p.add_argument('text', nargs='+', help='suggestion text')
 
@@ -550,15 +556,17 @@ def cmd_staged(cfg: Dict[str, Any]) -> Dict[str, Any]:
             draft   = doc.get('draft_listing') or {}
             quality = draft.get('quality') or {}
             items.append({
-                'sku':          child.name,
-                'title':        doc.get('title', ''),
-                'price':        offer.get('price'),
-                'location':     doc.get('location', ''),
-                'category':     doc.get('ebay_category_name', ''),
-                'offer_id':     offer.get('offer_id'),
-                'staged_at':    offer.get('staged_at', ''),
-                'quality':      quality.get('score'),
-                'quality_flags': quality.get('flags', []),
+                'sku':              child.name,
+                'title':            doc.get('title', ''),
+                'price':            offer.get('price'),
+                'location':         doc.get('location', ''),
+                'category':         doc.get('ebay_category_name', ''),
+                'offer_id':         offer.get('offer_id'),
+                'staged_at':        offer.get('staged_at', ''),
+                'quality':          quality.get('score'),
+                'quality_flags':    quality.get('flags', []),
+                'price_confidence': draft.get('price_confidence'),
+                'comp_count':       (offer.get('price_comps') or {}).get('count'),
             })
     # Sort ascending by quality score so worst items surface first
     items.sort(key=lambda x: (x['quality'] is None, x['quality'] or 0))
@@ -975,6 +983,43 @@ def main() -> int:
                                include_ollama=not args.no_ollama,
                                include_ebay=not args.no_ebay)
 
+        elif args.op == 'quality':
+            from .config import sku_json
+            from .items import atomic_write_json
+            from .listing_quality import score_draft
+            rows = []
+            for sku in args.skus:
+                json_path = sku_json(cfg, sku)
+                if not json_path.exists():
+                    rows.append({'sku': sku, 'ok': False, 'error': 'item not found'})
+                    continue
+                try:
+                    item = json.loads(json_path.read_text(encoding='utf-8'))
+                except Exception as exc:
+                    rows.append({'sku': sku, 'ok': False, 'error': str(exc)})
+                    continue
+                q = score_draft(item)
+                row: Dict[str, Any] = {'sku': sku, 'ok': True, **q.to_dict()}
+                if args.save and item.get('draft_listing') is not None:
+                    item['draft_listing']['quality'] = q.to_dict()
+                    atomic_write_json(json_path, item, pretty=cfg.get('pretty', True))
+                    row['saved'] = True
+                rows.append(row)
+            result = {'ok': True, 'items': rows}
+            if not getattr(args, 'as_json', False):
+                print(f'{"SKU":<24} {"Score":>5}  {"Flags"}')
+                print('-' * 70)
+                for r in rows:
+                    if not r['ok']:
+                        print(f'{r["sku"]:<24}  ERR    {r.get("error","")}')
+                        continue
+                    flags = ','.join(r.get('flags') or []) or '—'
+                    print(f'{r["sku"]:<24} {r["score"]:>5}  {flags}')
+                    bk = r.get('breakdown') or {}
+                    parts = [f'{k}={v}' for k, v in bk.items()]
+                    print(f'  {"  ".join(parts)}')
+                return 0
+
         elif args.op == 'lookup':
             from .apis.lookup import lookup_product
             from .config import sku_json
@@ -1029,18 +1074,21 @@ def main() -> int:
                 if not items:
                     print('No items staged and awaiting review.')
                 else:
-                    print(f'{"SKU":<24} {"Q":>3}  {"Price":>7}  {"Location":<10} {"Title"}')
-                    print('-' * 85)
+                    _PC = {'high': 'H', 'medium': 'M', 'low': 'L', None: '—'}
+                    print(f'{"SKU":<24} {"Q":>3} {"PC"}  {"Price":>7}  {"Location":<10} {"Title"}')
+                    print('-' * 88)
                     for it in items:
-                        price   = f'${it["price"]}' if it['price'] else '  N/A'
-                        q       = it.get('quality')
-                        q_str   = f'{q:3d}' if q is not None else '  —'
-                        flags   = it.get('quality_flags') or []
+                        price    = f'${it["price"]}' if it['price'] else '  N/A'
+                        q        = it.get('quality')
+                        q_str    = f'{q:3d}' if q is not None else '  —'
+                        pc       = _PC.get(it.get('price_confidence'), '?')
+                        flags    = it.get('quality_flags') or []
                         flag_str = f' [{",".join(flags[:3])}]' if flags else ''
-                        print(f'{it["sku"]:<24} {q_str}  {price:>7}  '
-                              f'{it["location"]:<10} {it["title"][:35]}{flag_str}')
+                        print(f'{it["sku"]:<24} {q_str} {pc:>2}  {price:>7}  '
+                              f'{it["location"]:<10} {it["title"][:33]}{flag_str}')
                     print(f'\n{len(items)} item(s) awaiting review. '
-                          f'Q=quality score (0–100, worst first). Use: tgw publish <SKU>')
+                          f'Q=quality 0–100 (worst first)  PC=price confidence H/M/L'
+                          f'\nUse: tgw publish <SKU>')
                 return 0
 
         elif args.op == 'publish':

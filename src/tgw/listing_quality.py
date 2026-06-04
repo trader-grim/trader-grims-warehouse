@@ -9,7 +9,7 @@ score_draft(item, photo_count=None) -> QualityResult
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 _GENERIC_BRANDS = frozenset({
@@ -71,7 +71,8 @@ def score_draft(
     """
     flags: List[str] = []
     draft = item.get('draft_listing') or {}
-    title = str(item.get('title', '')).strip()
+    # Prefer draft title (may be SEO-enhanced) over the raw AI title
+    title = str(draft.get('title') or item.get('title', '')).strip()
     pl    = item.get('product_lookup') or {}
 
     # ── Title length (10 pts) ──────────────────────────────────────────────
