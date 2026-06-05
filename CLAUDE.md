@@ -114,7 +114,7 @@ Run as `tgw` user — source files are `rw-------`, secrets are `chmod 600`.
 - All Inventory API PUT/POST calls require `Content-Language: en-US` header
 - Condition granularity: many categories only accept conditionId 3000 ("Used") — `USED_EXCELLENT` maps to this; `USED_GOOD`/`USED_ACCEPTABLE` may be rejected
 - Have scopes: `sell.inventory`, `sell.account`, `sell.marketing`
-- Missing (apply separately): `buy.marketplace_insights` (sold price data)
+- Missing (apply separately): `buy.marketplace_insights` (sold price data), `commerce.catalog.readonly` (EPID), `sell.analytics.readonly` (impressions)
 - Default fulfillment policy for most categories: **FC4** (override in `tgw-api-config.json` per category if needed)
 
 ## Current phase
@@ -128,5 +128,12 @@ price (launch=110% max→.99) → stage → `tgw staged` operator review → `tg
 `ebay_sku_migrate` running (~8,350 eBay live listings remain; ~70 days at 5/hr).
 `tgw velocity-report` live — 1,540 categories, ~3,083 sold items recorded.
 Archive tombstone pass added to `import-sold-csv`; needs full all-time eBay CSV for archive hits.
-Next priorities (see Implementation TODO table in plan):
-  PP-MULTIMODEL-001 (task routing guide) → PP-REPRICER-001 (blocked on scope).
+`velocity_stats` worker ✅ ENABLED 2026-06-05 — running nightly.
+PP-LISTING-001 (description footer + picklist line) confirmed done in `ebay_draft.py`.
+eBay sold CSV maxes at 2 years — archive tombstone ceiling accepted; no further CSV action.
+Dave is requesting new eBay keyset with all desired scopes (see Work Tracks § Priority 1).
+Work tracks established (session 5): see `## Work Tracks` in master plan.
+  Track 1 (Claude): PP-STORE-001 → PP-REF-002 → PP-CAPTURE-001 → PP-SHELL-001 → ...
+  Track 3 (Perplexity): 4 research briefs in `docs/TGW-Plan-Vault/perplexity/`.
+  Track 4 (Operator): new eBay keyset, IGDB/Discogs creds, Perplexity briefs, sweep, infra.
+  PP-REPRICER-001 blocked on `buy.marketplace_insights` scope.

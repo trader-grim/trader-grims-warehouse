@@ -38,3 +38,4 @@
 - [x] 2026-06-05T02:44 :: note for seo: when running magento external website I noted that my skus are unique on the internet and I get a lot of value from my sku. Make sure it is included in each items seo strategy. — added to PP-SEO-001 SKU-as-search-term note
 - [x] 2026-06-05T03:14 :: tgw todo: similar to picklist, lists todo list. tgw todo prints full todo all agents. todo admin todo claude todo gemini todo db versatile enough to add human/mechanical and ai agents. — added as PP-TODO-001
 - [x] 2026-06-05T04:02 :: PP-PRICE-004 velocity executed 2026-06-05; IGDB credentials reminder remains — add igdb-credentials.json to secrets_root when Twitch dev account is ready; PP-MULTIMODEL-001 is next priority
+- [ ] 2026-06-05T06:18 :: verify I still have strike through pricing access and implement. I was approved many years ago.

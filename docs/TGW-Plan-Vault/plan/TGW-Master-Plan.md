@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-05 (session 4)
+updated: 2026-06-05 (session 5)
 maintained_by: Opus (planner)
 ---
 
@@ -104,7 +104,7 @@ maintained_by: Opus (planner)
   `http_server.py`; 10-min cached listing index; `_mark_item_sold()` shared between polling and webhook;
   `apis/ebay/notifications.py`: `set_notification_preferences()`, `parse_sold_notification()`,
   `verify_notification_signature()`; `tgw setup-ebay-hooks` CLI command; nginx config + cloudflared
-  setup script at `/opt/TGW/config/nginx/`. **Infrastructure deployment deferred — see Operator TODO.**
+  setup script at `/opt/TGW/config/nginx/`. **Infrastructure deployment deferred — see Track 4 § Priority 5.**
 - **PP-LOOKUP-001 ALL TIER 1 DONE (2026-06-05)** — `apis/lookup/` package: upcitemdb (primary),
   go-upc (secondary), open_library (ISBN/books), discogs (music), open_food_facts (food/household),
   igdb (video games, Twitch OAuth), justtcg (trading cards, no auth). `LookupResult` dataclass
@@ -122,277 +122,323 @@ maintained_by: Opus (planner)
 - Filesystem `.queue_worker` / `.queue_worker_config` discovery removed from all code
 - eBay credentials removed from `tgw-api-config.json`; now in `secrets_root`
 
-## Implementation TODO — next build priorities
+## Implementation TODO — next priorities
 
-Ordered by value and readiness. PP-LOOKUP-001 Tier 1 is the key unlock — it feeds
-quality scoring, SEO, and better comp search.
+### Recently completed (sessions 4–5)
+- ✅ **PP-QUALITY-001** listing quality scorer (2026-06-04)
+- ✅ **PP-PRICE-003** comp search improvement (2026-06-04)
+- ✅ **PP-HINT-001** bulk requeue command (2026-06-04)
+- ✅ **PP-SEO-001** title enhancement, all phases (2026-06-04)
+- ✅ **PP-REF-001** item JSON schema doc (2026-06-04)
+- ✅ **PP-CI-001** linting + GitHub Actions (2026-06-04)
+- ✅ **PP-LOOKUP-001** all Tier 1 sources (2026-06-05)
+- ✅ **PP-PRICE-004** velocity analytics (2026-06-05)
+- ✅ **PP-LISTING-001** description footer + picklist line (2026-06-04) — confirmed in `ebay_draft.py`; plan not updated until now
+- ✅ **PP-SOLD-001 Tier 2** CSV import (run 2) — 909 fuzzy + archive tombstone pass; need full all-time CSV for archive hits
 
-| Priority | Item | Status | Notes |
-|----------|------|--------|-------|
-| ✅ | **PP-QUALITY-001** listing quality scorer | DONE 2026-06-04 | score_draft; ebay_draft+price integration; tgw staged Q+PC columns |
-| ✅ | **PP-PRICE-003** comp search improvement | DONE 2026-06-04 | lookup_query stage 0; condition-filtered comps; price_confidence H/M/L |
-| ✅ | **PP-HINT-001** bulk requeue command | DONE 2026-06-04 | `tgw requeue` all filters implemented; `--catalog-only` suppresses eBay cascade |
-| ✅ | **PP-SEO-001** title enhancement pass | ALL PHASES DONE 2026-06-04 | Phases 1–6 complete; EPID needs `commerce.catalog.readonly` scope (silent skip until granted) |
-| 3 | **PP-SOLD-001 Tier 2** CSV import test | DONE — re-run w/ full history | 2-year CSV: 208 listing-ID + 909 fuzzy matches (run 2). Archive tombstone pass built (pull.py `restore_archive_tombstone`). Archive IDs 223–326xxx predate the 2-year window; **need full all-time eBay sold export** to get hits. |
-| 4 | **PP-SOLD-001 Tier 3** sweep checklist | after Tier 2 | `tgw ebay-sweep` output → physical review workflow |
-| 5 | **PP-REF-001** item JSON schema doc | DONE 2026-06-04 | `docs/.../reference/TGW-Item-JSON-Schema.md` — all fields, sub-dicts, writers, pipeline flow diagram |
-| 6 | **PP-CI-001** linting + GitHub Actions | DONE 2026-06-04 | ruff clean; `--no-fix` CI; `.pre-commit-config.yaml` (files: src/tests only); pre-commit installed |
-| 7 | **PP-REPRICER-001** market-aware repricer | blocked | Blocked on `buy.marketplace_insights` scope approval |
-| ✅ | **PP-LOOKUP-001 Tier 1 remaining** | DONE 2026-06-05 | IGDB, JustTCG, Open Food Facts — all implemented; credentials needed for IGDB |
-| ✅ | **PP-PRICE-004** velocity analytics | DONE 2026-06-05 | `tgw velocity-report`; `velocity_stats` nightly worker; `velocity` param in `suggest_price()`; velocity-stats.json in catalog |
-| 10 | **PP-MULTIMODEL-001** multi-AI routing | — | Task routing guide: Haiku/Sonnet/Opus/Gemini Code/Perplexity/Ollama; e-sneaker-net pattern; informs all future work |
+### Active / next build priorities
 
-**Running in background:**
+| Priority | PP | Status | Notes |
+|----------|----|--------|-------|
+| 1 | **PP-STORE-001** eBay store categories | ready | `GetStore` cache + `store_category_id` in draft/stage/publish |
+| 2 | **PP-REF-002** eBay error code reference | planned | Grep workers → markmap doc; surfaces unhandled dead-letters |
+| 3 | **PP-CAPTURE-001** `tgw note` alias | ready | Trivial; `tgw note "..."` = `tgw suggest "..."`; quiet-queue stub |
+| 4 | **PP-SHELL-001** tgw.source cleanup | ready | Audit → pare deprecated → migrate to pyproject.toml console scripts |
+| 5 | **PP-IFDIR-001** interface file org | ready | Move mc/keyd configs into `etc/interfaces/`; update installers |
+| 6 | **Data scrub Pass 1** field rename | ready | `#VERIFIED` → `verified`; history key merge; dry-run first |
+| 7 | SKU search first-18 | ready | Match catalog search on first 18 chars; cover residual format drift |
+| 8 | **PP-TODO-001** multi-agent TODO | design ready | PostgreSQL `todo_items` table + `tgw todo [agent]` CLI |
+| 9 | **PP-MC-001 Phase 2** tgwitem edit | design ready | copyin, ebay/ + pipeline/ subdirs |
+| 10 | **PP-GLOBALS-001** analysis | analysis only | Identify offer-invariant fields; design before coding |
+| 11 | **PP-HINT-001** remaining gaps | ongoing | eBay Browse enrichment in ebay_draft; per-SKU hint trail |
+| 12 | **PP-SOLD-001 Tier 3** sweep | operator gated | Run `tgw ebay-sweep` after full-history CSV import |
+| — | **PP-REPRICER-001** | blocked | Blocked on `buy.marketplace_insights` scope approval |
+
+### Running in background
 - `ebay_sku_migrate` — ~8,350 live listings remaining; ~5/hr; ~70 days to complete
 - PP-SOLD-001 Tier 4 webhook — code done; awaiting operator infra (nginx/cloudflared)
+- `velocity_stats` worker — ✅ **ENABLED 2026-06-05**; running nightly
 
-## Operator TODO — deferred installs and configs
+### Archive tombstone — ceiling confirmed
+eBay Seller Hub sold history export maxes at **2 years** (confirmed 2026-06-05). Archive IDs
+(223–326xxx, ~2018–2023) are permanently outside this window. The archive tombstone pass is
+built and correct but will not fire from CSV import alone. Options for future archive hits:
+- Terapeak in Seller Hub (UI only, no API) — manual spot-checks on high-value archive items
+- Wait: if `ebay_sku_migrate` eventually maps an archived eBay ID to a current SKU, that path
+  may surface additional matches
+- Accept the gap: ~22K archive entries; the business impact of unmarked-sold legacy items is low
 
-Short-cycle tasks waiting on operator action (not code changes). Check off when done.
+## Work Tracks — active delegation (session 5)
 
-### eBay webhook endpoint — PP-SOLD-001 Tier 4 infrastructure (code done 2026-06-04)
-- [ ] **Choose path** — run both commands and compare IPs:
-  `curl -s https://ifconfig.me` vs `ip route get 1.1.1.1 | awk '{print $7; exit}'`
-  — Match → Path A (nginx+certbot). Differ → Path B (Cloudflare Tunnel, works behind NAT).
-- [ ] **Path A — nginx + Let's Encrypt** (static public IP):
+**Strategy test** (2026-06-05): The 4-track structure is an experiment in AI delegation —
+routing tasks to the right model/tool at design time rather than defaulting everything to
+Sonnet. PP-TODO-001 (multi-agent TODO tracker) is partly motivated by making this delegation
+trackable: each track's queue becomes an agent-tagged TODO list that `tgw todo [agent]` can
+surface. This session is the first real run of the pattern; assess after a few sessions whether
+the routing overhead pays off in throughput.
+
+PP-MULTIMODEL-001 is now the working model. Each new task is routed to the right tool at design time.
+
+### Track 1 — Claude Sonnet (minimal intervention)
+One bounded session per item. Ordered by value.
+
+| # | PP | Task | Size |
+|---|----|------|------|
+| 1 | PP-STORE-001 | eBay store category support — `GetStore` cache, `store_category_id` in draft/stage/publish | S |
+| 2 | PP-REF-002 | eBay error code reference — grep all workers, cross-reference eBay docs, markmap | S |
+| 3 | PP-CAPTURE-001 | `tgw note`/`tgw btw` alias + quiet-queue stub | XS |
+| 4 | PP-SHELL-001 | `tgw.source` / `tgw-dev.source` audit + cleanup | M |
+| 5 | PP-IFDIR-001 | Reorganize interface configs into `etc/interfaces/` | S |
+| 6 | Data scrub P1 | `#VERIFIED`→`verified` rename + history key merge (dry-run first) | M |
+| 7 | SKU search | Catalog/search match on first 18 chars | XS |
+| 8 | PP-TODO-001 | PostgreSQL `todo_items` + `tgw todo [agent]` CLI | M |
+| 9 | PP-MC-001 P2 | `tgwitem` copyin + `ebay/` + `pipeline/` subdirs | M |
+| 10 | PP-GLOBALS-001 | Analysis only — identify offer-invariant fields; design doc | S |
+| 11 | PP-HINT-001 | eBay Browse enrichment in `ebay_draft`; per-SKU hint trail | M |
+
+### Track 2 — Claude Haiku (fast, cheap, no arch context needed)
+Use `/model haiku` or spawn as a Haiku session. Hand it a data excerpt + schema + clear task.
+
+| Task | Give Haiku | Expect |
+|------|-----------|--------|
+| Data scrub P1 script | Sample item JSON + field list | Batch Python script for `#VERIFIED` rename + history key merge |
+| Category price defaults | `velocity-stats.json` excerpt (top 20 categories) | Config JSON for `category_price_defaults` |
+| Error code table (PP-REF-002) | Grep output of all `errorId` patterns from workers | Formatted markdown table: code, API, meaning, TGW handling |
+| PP-TODO-001 scaffold | DB schema + CLI spec | `CREATE TABLE` SQL + argparse CLI stub |
+| Health summary formatter | `tgw health` JSON output structure | Pretty-print formatter (no TGW arch needed) |
+
+### Track 3 — Perplexity (live web research, cited sources)
+Research briefs in `docs/TGW-Plan-Vault/perplexity/`. Paste brief into Perplexity → save result as `.md` to `inbox/` for PM-intake.
+
+| Brief | File | Priority | What it unblocks |
+|-------|------|----------|-----------------|
+| eBay API scope expansion | `PERPLEXITY-001-ebay-scopes.md` | HIGH | PP-REPRICER-001, PP-SEO-001 Phase 3+6 |
+| eBay Cassini 2025–2026 | `PERPLEXITY-002-cassini-seo.md` | HIGH | PP-SEO-001 tuning, listing quality strategy |
+| Sold price data alternatives | `PERPLEXITY-003-sold-price-data.md` | HIGH | PP-REPRICER-001 unblock if MI scope stays closed |
+| Third-party integration status | `PERPLEXITY-004-integrations.md` | MEDIUM | IGDB, Whisper.cpp, Discogs, Go-UPC |
+
+### Track 4 — Operator (Dave must act to unblock)
+
+#### ✅ Done
+- [x] `velocity_stats` worker enabled (2026-06-05)
+- [x] 2-year eBay sold CSV confirmed as maximum available — archive tombstone ceiling accepted
+
+---
+
+#### Priority 1 — eBay Developer Account (new keyset + scope requests)
+
+**Strategy:** Request a fresh keyset (new App ID / Cert ID / Dev ID) with all desired scopes
+applied at once. Avoids piecemeal scope expansion later. See complete desired scope list below.
+
+- [ ] Go to https://developer.ebay.com → My Account → Application Keys → **Create new keyset**
+  - App name suggestion: `TGW-Automation-v2` or similar
+  - Note new App ID, Cert ID, Dev ID — replace in `secrets_root/ebay-credentials.json`
+- [ ] On the new keyset, request **all scopes in the desired list** (see below) via the "Get a Token" / OAuth consent flow and the scope editor
+- [ ] For `buy.marketplace_insights` — **this requires a separate contact** (limited release):
+  - Go to https://developer.ebay.com/support → contact Developer Support
+  - Frame: "We are a private resale automation platform (eBay seller: DaveBuko-Webkulap) automating inventory pricing and listing management. We need `buy.marketplace_insights` to power our automated pricing engine using actual sold-item data rather than active-listing prices."
+  - Reference: Marketplace Insights API docs at developer.ebay.com/api-docs/buy/marketplace-insights
+- [ ] Update `secrets_root/ebay-credentials.json` with new keyset values after approval:
+  ```json
+  {
+    "app_id": "...",
+    "cert_id": "...",
+    "dev_id": "...",
+    "ru_name": "..."
+  }
   ```
-  apt install nginx certbot python3-certbot-nginx
-  cp /opt/TGW/config/nginx/ebay-webhook.conf /etc/nginx/sites-available/tgw-webhook
-  # edit server_name to your actual subdomain (e.g. hooks.yourdomain.com)
-  ln -s /etc/nginx/sites-available/tgw-webhook /etc/nginx/sites-enabled/
-  nginx -t && systemctl reload nginx
-  certbot --nginx -d hooks.yourdomain.com
+- [ ] Re-run OAuth flow to get a new user token against the new keyset:
+  `sudo -u tgw tgw health` — confirm token active
+- [ ] Restart all eBay workers after new token is live:
   ```
-- [ ] **Path B — Cloudflare Tunnel** (behind NAT / dynamic IP, recommended if no static IP):
+  sudo systemctl restart tgw-worker@ebay_legacy_sync.service
+  sudo systemctl restart tgw-worker@ebay_sync.service
+  sudo systemctl restart tgw-worker@ebay_price_reducer.service
+  sudo systemctl restart tgw-worker@ebay_sku_migrate.service
   ```
-  sudo bash /opt/TGW/config/nginx/cloudflared-setup.sh
-  # edit /etc/cloudflared/config.yml — replace REPLACE_WITH_YOUR_SUBDOMAIN
-  # add CNAME in ZoneEdit: hooks.yourdomain.com -> <tunnel-id>.cfargotunnel.com
-  systemctl start cloudflared && systemctl enable cloudflared
+
+##### Complete desired scope list for new keyset
+
+| Scope | Have | Priority | What it enables |
+|-------|------|----------|----------------|
+| `sell.inventory` | ✅ | core | Create/update/delete inventory items and offers |
+| `sell.account` | ✅ | core | Fulfillment policies, merchant location, payment policies |
+| `sell.marketing` | ✅ | core | Promotions, campaigns |
+| `buy.marketplace_insights` | ❌ | **HIGH** | Sold price data → PP-REPRICER-001 |
+| `commerce.catalog.readonly` | ❌ | **HIGH** | EPID lookup by UPC/EAN → PP-SEO-001 Phase 3 |
+| `sell.analytics.readonly` | ❌ | **HIGH** | Per-listing impressions/clicks → PP-SEO-001 Phase 6 |
+| `sell.fulfillment.readonly` | ❌ | medium | Read orders via REST (supplements Trading API GetOrders) |
+| `sell.finances.readonly` | ❌ | medium | Payout/financial data for accounting and reconciliation |
+| `sell.stores.readonly` | ❌ | medium | Read eBay store category tree → PP-STORE-001 |
+| `sell.reputation.readonly` | ❌ | low | Feedback score tracking and monitoring |
+| `commerce.notification.subscription` | ❌ | low | REST-based webhook event subscriptions (future alt to Trading API) |
+
+---
+
+#### Priority 2 — API credentials (15–20 min each, each unlocks a lookup source)
+
+- [ ] **IGDB** (video game lookups):
+  1. Go to https://dev.twitch.tv → Log in with Twitch account (create if needed)
+  2. Register new application: Name=`TGW`, OAuth Redirect=`http://localhost`, Category=`Other`
+  3. Copy Client ID + generate Client Secret
+  4. Write: `sudo -u tgw nano /opt/TGW/secrets/igdb-credentials.json`
+     ```json
+     {"client_id": "...", "client_secret": "..."}
+     ```
+  5. `sudo chmod 600 /opt/TGW/secrets/igdb-credentials.json`
+
+- [ ] **Discogs** (music/vinyl lookups):
+  1. Go to https://www.discogs.com/settings/developers
+  2. Click "Generate new token"
+  3. Write: `sudo -u tgw nano /opt/TGW/secrets/discogs-credentials.json`
+     ```json
+     {"personal_access_token": "..."}
+     ```
+  4. `sudo chmod 600 /opt/TGW/secrets/discogs-credentials.json`
+
+- [ ] **Go-UPC** (barcode fallback — better coverage than upcitemdb alone):
+  1. Go to https://go-upc.com/api → sign up for free tier
+  2. Copy API key
+  3. Write: `sudo -u tgw nano /opt/TGW/secrets/go-upc-credentials.json`
+     ```json
+     {"api_key": "Bearer <your-token>"}
+     ```
+  4. `sudo chmod 600 /opt/TGW/secrets/go-upc-credentials.json`
+
+- [ ] **upcitemdb** (optional — increases free rate limit from 100/day):
+  1. Go to https://www.upcitemdb.com/api → sign up
+  2. Write: `sudo -u tgw nano /opt/TGW/secrets/upcitemdb-credentials.json`
+     ```json
+     {"api_key": "..."}
+     ```
+  3. `sudo chmod 600 /opt/TGW/secrets/upcitemdb-credentials.json`
+
+- [ ] After any credential added: `sudo -u tgw tgw health` — confirm no errors
+
+---
+
+#### Priority 3 — Perplexity research (copy-paste, save result to inbox)
+
+Briefs are in `docs/TGW-Plan-Vault/perplexity/`. Open each in Obsidian, paste the prompt into
+https://perplexity.ai, save the result as `PERPLEXITY-001-result.md` etc. into
+`docs/TGW-Plan-Vault/inbox/` — PM-intake will file it automatically.
+
+- [ ] **PERPLEXITY-001** — eBay scope expansion (do this first; informs Priority 1 above)
+- [ ] **PERPLEXITY-002** — Cassini SEO 2025–2026
+- [ ] **PERPLEXITY-003** — Sold price data alternatives
+- [ ] **PERPLEXITY-004** — Third-party integration status (Whisper.cpp, Discogs, IGDB, Go-UPC)
+
+---
+
+#### Priority 4 — Physical inventory and Seller Hub
+
+- [ ] **eBay sweep** — generate ambiguous-status checklist for physical review:
   ```
-- [ ] **Add `dev_id` to `/opt/TGW/secrets/ebay-credentials.json`** — from developer.ebay.com →
-  My Account → Application Keys → DevID field. Enables full SOAP signature verification.
-  Add: `"dev_id": "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"`
-- [ ] **Register URL with eBay** (after endpoint is live and TLS works):
-  `tgw setup-ebay-hooks --url https://hooks.yourdomain.com/webhooks/ebay/notification`
-- [ ] **Verify**: `tgw setup-ebay-hooks --check`
-- [ ] **Restart tgw-http** so the new webhook route is live:
-  `systemctl restart tgw-worker@ebay_legacy_sync.service` (and restart tgw-http service)
+  sudo -u tgw tgw ebay-sweep --output /opt/TGW/var/ebay-sweep.md
+  ```
+  Then open `/opt/TGW/var/ebay-sweep.md` in Obsidian; work through Group A (active eBay / unclear local) first
+  
+- [ ] **Wrong shipping profiles** — 9 listings with FRE instead of FC4.
+  Seller Hub: Listings → search by Item ID → Edit → Shipping → select FC4 (199931446015)
+  - [ ] 327195083346  - [ ] 327195083374  - [ ] 327195083408  - [ ] 327195083423
+  - [ ] 327195083451  - [ ] 227372145582  - [ ] 327195085940  - [ ] 227372145665
+  - [ ] 227372145712
 
-### Manual Seller Hub fixes — wrong shipping profile on 10 items
-10 items migrated with FRE (eBay Standard Envelope) profile instead of FC4.
-Categories: 7317 (Game Pieces) + 261068 (Action Figures). Correct profile: FC4 (199931446015).
-Seller Hub: Listings → search by Item ID → Edit listing → Shipping → select FC4.
-- [ ] 327195083346  - [ ] 327195083374  - [ ] 327195083408  - [ ] 327195083423
-- [ ] 327195083451  - [ ] 227372145582  - [ ] 327195085940  - [ ] 227372145665
-- [ ] 227372145712
+---
 
-### Tool installs — PP-MULTIMODEL-001 external AI tools
-- [ ] **nvm + npm** (Node.js version manager): `curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash` then `nvm install --lts`
-  — needed for: `markmap-cli` (render reference docs), future JS tooling
-- [ ] **markmap-cli**: `npm install -g markmap-cli` — renders reference `.md` files to HTML: `markmap <file> --no-open -o out.html`
-- [ ] **Gemini CLI / Google Cloud SDK**: install `google-cloud-sdk` or the standalone `gemini` CLI
-  — for PP-MULTIMODEL-001 Gemini Code large-context sessions; use Google account credentials
-  — alternative: use Gemini via https://aistudio.google.com (no install required, e-sneaker-net pattern)
-- [ ] **Perplexity workflow**: no install needed — use https://perplexity.ai directly (e-sneaker-net);
-  save research results as `.md` to `docs/TGW-Plan-Vault/inbox/` for PM-intake to file
+#### Priority 5 — Infrastructure
 
-### PP-REMOTE-001 — Tailscale
-- [ ] `curl -fsSL https://tailscale.com/install.sh | sh` then `tailscale up`
-- [ ] Join account network; verify `tgw-http` reachable over Tailscale from remote devices
-- [ ] If using Tailscale Funnel for webhook: `tailscale funnel 7373` + CNAME in ZoneEdit
-  (alternative to Cloudflare Tunnel; requires Tailscale to be running)
+- [ ] **Second keyboard** → connect → install macroboard (PP-MACRO-001):
+  ```
+  keyd.rvaiya list-devices   # find the unique ID for the macroboard keyboard
+  sudo nano /opt/TGW/src/trader-grims-warehouse/etc/keyd/tgw-macroboard.conf
+  # replace "413c:2105" in [ids] with the full unique ID
+  sudo cp .../etc/keyd/tgw-macroboard.conf /etc/keyd/
+  sudo systemctl reload keyd
+  # Test: Caps Lock on macroboard → LED changes
+  ```
 
-## Phase 1 — Queue foundation ✅ COMPLETE (2026-06-02)
-### 1.0 secrets_root migration ✅
-- Add `secrets_root` key to `tgw-api-config.json`; join existing `get_tgw_paths()` auto-creates
-- Create `/opt/TGW/secrets/` outside repo tree; `chmod 700`, files `chmod 600`, owner `tgw`
-- Move existing secret files in; update token manager and health to resolve from `secrets_root`
-- Fix health path bug: `tgw health` and token manager must read/write the same file
-- Add `secrets/` to `.gitignore` (belt-and-suspenders)
-- Verify: `tgw health` shows token status green; no hardcoded secret paths remain in `src/`
-### 1a. Echo worker ✅
-- Build `QueueWorker` base class: claim → do → complete/fail loop
-- Build no-op echo worker subclassing it (proves plumbing, zero business risk)
-- Wire to PostgreSQL claim_queue_jobs / mark_succeeded / mark_failed
-- Verify: insert job → worker leases → completes → state correct
-- Verify: kill mid-job → lease expires → recover_expired_jobs requeues
-- systemd templated unit wiring: `tgw-worker@echo.service`
-### 1b. Startup ordering + health ✅
-- systemd: workers depend on postgresql.service being up
-- Extend `tgw health` to check Postgres reachability + queue depth
-- Wire tgw.logging into the worker base (every claim/complete logged)
-### 1c. Retire the old path ✅
-- Remove filesystem `.job.json` discovery from launcher
-- Retire dead queue symlinks and the old launcher once echo proven
+- [ ] **Tailscale** (remote access, PP-REMOTE-001):
+  ```
+  curl -fsSL https://tailscale.com/install.sh | sh
+  sudo tailscale up
+  # Join your Tailscale account; verify tgw-http reachable from remote device
+  ```
 
-## Phase 2 — First real workers
-### 2a. Token refresh worker ✅ COMPLETE (gate cleared 2026-06-02)
-- Self-schedules based on token expiry; refreshes when ≤30 min remain
-- Transient failure → `retry_wait`; hard failure (dead refresh token) → `dead_letter` + notify
-- Template for everything after: claim → lease → run → succeed/retry/dead_letter → reschedule
-### 2b. PM-intake worker ✅ COMPLETE (2026-06-02)
-- Watches `inbox/` — a dropped note enqueues a job
-- Worker reads the note, calls local Ollama (`Qwen2.5:latest`) to classify what changed
-- Updates this Master Plan file; idempotent, safe to re-run, logs every change
-- Notes truncated to 4000 chars; plan sent as headings-only (CPU-only machine — use sparingly)
-- `tgw/apis/ollama.py` — reusable client for all future Ollama workers
-### 2c. tgw suggest + plan intake ✅ COMPLETE (2026-06-02)
-- `tgw suggest "..."` appends `- [ ] TIMESTAMP :: text` to `suggestions/SUGGESTIONS.md`
-- Folder-drop intake: drop a `.md` file in `inbox/` → PM-intake worker files it (Phase 2b)
+- [ ] **eBay webhook endpoint** (PP-SOLD-001 Tier 4 — reduces sold-detection latency from daily → seconds):
+  First check if you have a static public IP:
+  ```
+  curl -s https://ifconfig.me && ip route get 1.1.1.1 | awk '{print $7; exit}'
+  ```
+  Same → Path A (nginx + certbot). Different → Path B (Cloudflare Tunnel, works behind NAT).
+  - **Path A** (static public IP):
+    ```
+    apt install nginx certbot python3-certbot-nginx
+    cp /opt/TGW/config/nginx/ebay-webhook.conf /etc/nginx/sites-available/tgw-webhook
+    # edit server_name to your actual subdomain (e.g. hooks.yourdomain.com)
+    ln -s /etc/nginx/sites-available/tgw-webhook /etc/nginx/sites-enabled/
+    nginx -t && systemctl reload nginx
+    certbot --nginx -d hooks.yourdomain.com
+    ```
+  - **Path B** (behind NAT / dynamic IP):
+    ```
+    sudo bash /opt/TGW/config/nginx/cloudflared-setup.sh
+    # edit /etc/cloudflared/config.yml — replace REPLACE_WITH_YOUR_SUBDOMAIN
+    # add CNAME in ZoneEdit: hooks.yourdomain.com -> <tunnel-id>.cfargotunnel.com
+    systemctl start cloudflared && systemctl enable cloudflared
+    ```
+  - Add `dev_id` to `/opt/TGW/secrets/ebay-credentials.json` (from developer.ebay.com → My Account → Application Keys → DevID field):
+    `"dev_id": "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"`
+  - Register URL: `tgw setup-ebay-hooks --url https://hooks.yourdomain.com/webhooks/ebay/notification`
+  - Verify: `tgw setup-ebay-hooks --check`
+  - Restart: `systemctl restart tgw-worker@ebay_legacy_sync.service` (and tgw-http)
 
-## Phase 3 — Camera-intake pipeline
-### 3a. Bundle detection + intake ✅ COMPLETE (2026-06-02)
-- `incoming/newitems/<SKU>/` — per-item dir with stub JSON + photos (any camera names)
-- `incoming/newitems/<SKU>.zip` — single-item zip inside SKU dir
-- `incoming/newitems/multi/<SKU>/` — multi-item zip; split by timestamp subdirs
-- Stability gate: all files unmodified for 30s (Syncthing safe)
-- Workers: `bundle_intake`, `multi_intake`
-### 3b. Move to ItemData ✅ COMPLETE (2026-06-02)
-- Photos moved to `ItemData/<SKU>/`; canonical `<SKU>.json` written with stub fields
-- Multi-item split: child SKUs = parent SKU + sequential increment (tgw...010 → ...011, ...012)
-- Downstream: enqueues `catalog_rebuild` (coalesced 30s), `thumbnail_gen`, `ai_identify`
-- Workers: `catalog_rebuild`, `thumbnail_gen`
-### 3c. Local AI identify (qwen2.5vl:7b) ✅ COMPLETE (2026-06-02)
-- Sends resized primary photo (512px, ~56KB) to `qwen2.5vl:7b` via Ollama
-- Returns title, category, description, condition as JSON; writes to item JSON
-- Cold-start: model loads in ~10 min; subsequent calls ~18s — worker pre-warms on startup
-- Skip logic: skips only when `ai_identified: true` AND no `ai_reidentify` flag
-- Worker: `ai_identify`; `ai_identified: true` flag written to JSON; `ai_reidentify` cleared after use
-### 3c-ext. AI hint system ✅ COMPLETE (2026-06-03)
-- `ai_hint` field in item JSON: operator-supplied keyword or phrase to guide vision model
-- Hint source priority: explicit `ai_hint` → human-set title (if not SKU and not yet identified)
-- Hinted prompt includes "I know this item is: {hint}" — AI produces full eBay-quality title + description using both the hint and the photo
-- `tgw hint <SKU> "text"` — writes hint, sets `ai_reidentify: true`, enqueues `ai_identify` job
-- `tgw hint <SKU> "text" --force` — same but also forces re-run on already-identified items
-- Previously-identified items are not re-run unless `--force` is given
-- **Revisit (PP-HINT-001):** hint system is first iteration only — see open items below
-### 3d. Online path: eBay Taxonomy → category ✅ COMPLETE (2026-06-02)
-- `apis/ebay/client.py` — shared auth'd GET/POST for all eBay REST calls
-- `apis/ebay/taxonomy.py` — category suggestions; tries title first, falls back to AI category string
-- `ebay_category_id` + `ebay_category_name` written to item JSON
-### 3e. AI fills eBay specifics; create/update draft ✅ COMPLETE (2026-06-02)
-- `apis/ebay/specifics.py` — fetches aspects for a categoryId, filters boilerplate
-- `workers/ebay_draft.py` — Qwen2.5 fills SELECTION_ONLY + FREE_TEXT aspects, validates choices
-- `draft_listing` block written to item JSON: title, categoryId, condition, format, quantity, price=null, item_specifics, description
-### 3f. Offline path: write draft CSV for later upload
-- If eBay unreachable: write CSV row with known fields for manual upload
-### 3g. Downstream catalog jobs ✅ COMPLETE (2026-06-02)
-- `catalog_rebuild` job (coalesced, `not_before +30s`) enqueued after every write
-- `thumbnail_gen` job (per-SKU) enqueued after intake
+---
 
-## Phase 4 — eBay pipeline buildout
-### 4a. eBay photo uploader ✅ COMPLETE (2026-06-02)
-- `tgw/ebay/upload.py` — `upload_photo()` via Trading API `UploadSiteHostedPictures`; returns eBay EPS FullURL
-- `workers/ebay_upload.py` — idempotent; skips already-uploaded photos; writes `ebay_photos` list + `draft_listing.imageUrls`
-- Enqueued automatically by `ebay_draft` after draft is written
-### 4b. Listing publish + sync-back ✅ COMPLETE (2026-06-02)
-- `tgw/ebay/sync.py` — `publish_draft()`: upserts inventory item, finds/creates offer, publishes; `fetch_all_offers()` paginated
-- Condition mapping: AI strings → eBay Inventory API enums (e.g. "Good" → "USED_GOOD")
-- Account policies + merchant location fetched once per process, cached
-- `workers/ebay_publish.py` — manual trigger; gates on price non-null + photos uploaded; writes `ebay_listing` block
-- `workers/ebay_sync.py` — self-scheduling every 6h; syncs eBay offer status back to item JSON
-- eBay returns 400 (not empty list) when no Inventory API offers exist — handled gracefully
-### 4c. Category condition policy module ✅ COMPLETE (2026-06-03)
-- `apis/ebay/conditions.py` — caches full eBay Metadata API condition policy table (15K categories, 26 unique sets)
-- `best_condition(cfg, category_id, item_condition)` — resolves to best allowed conditionId; NEVER upgrades condition (same-or-worse fallback only); returns None when no valid condition exists
-- `CONDITION_RANK` dict maps all conditionIds to a buyer-quality rank (0=New … 9=For Parts)
-- `CONDITION_ID_TO_ENUM` maps conditionId → Inventory API enum string
-- `draft_listing` now stores `condition_id`, `condition_label`, `condition_enum` — used by stage/publish directly
-- Cache at `catalog_root/ebay-condition-policies.json`; refreshed every 7 days
-- Key insight: conditionId 3000 has 4 different buyer labels across categories ("Used", "Pre-owned", "Pre-owned - Good", "Open Box/Used") — label stored in draft, not just the ID
-- Eliminates the entire class of errorId 25021 (invalid condition for category) errors
-### 4d. Category template system — deferred; see PP-HINT-001 (eBay enrichment) below
-### 4e. Retire eBay token cron ✅ COMPLETE — no separate cron existed; token_refresh worker is sole manager
-### 4f. Duplicate item/listing check worker (PP-ADD-006) — pending
-### 4g. Inventory API migration sweep (PP-ADD-008) — pending
-### 4h. Pricing module — see PP-PRICE-001 below
-### 4i. Live listing revision / update draft — pending; see PP-REVISION-001 below
+#### Priority 6 — External AI tooling (PP-MULTIMODEL-001)
 
-### PP-MULTIMODEL-001 — Multi-AI Strategy and Task Routing
+- [ ] **nvm + npm** (needed for markmap-cli and future JS tooling):
+  ```
+  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+  # restart shell or: source ~/.bashrc
+  nvm install --lts
+  npm install -g markmap-cli
+  # Test: markmap docs/TGW-Plan-Vault/plan/TGW-Master-Plan.md --no-open -o /tmp/plan.html
+  ```
 
-#### Problem
-TGW work spans a wide range of AI tasks with different characteristics: routine transforms,
-complex implementation, large-data analysis, and research. A single model (Claude Sonnet)
-handles all of these today — but we have access to other AI tools better suited for specific
-task types. Without a routing strategy, we default to the most expensive/capable tool for
-every task, leaving efficiency and cost on the table.
+- [ ] **Gemini CLI** (large-context data sessions — 55K item corpus analysis):
+  Option A (no install): use https://aistudio.google.com — paste data, get results, save to inbox/
+  Option B (install): `pip install google-generativeai` or use `google-cloud-sdk`
 
-#### Available AI tools and their strengths
+- [ ] Perplexity: https://perplexity.ai — no install; briefs ready in `perplexity/` folder
 
-**Claude Haiku** (fast, cheap — Claude Code)
-- Routine field classification, simple validation logic, boilerplate generation
-- Batch tasks where throughput matters more than depth
-- Quick summarization or lookup with minimal context
+---
 
-**Claude Sonnet** (balanced — current default for Claude Code sessions)
-- Worker implementation, debugging, moderate planning
-- Code generation requiring TGW architecture awareness
-- Default model; upgrade to Opus only when Sonnet falls short
+## Phases 1–4 ✅ COMPLETE (2026-06-02 → 2026-06-03)
 
-**Claude Opus** (high-capability, expensive — `/fast` mode in Claude Code)
-- Architecture design, PP design, settled architecture decisions
-- Complex cross-system reasoning; reserve for when Sonnet produces inadequate results
+- **Phase 1** — Queue foundation: `secrets_root`, `QueueWorker` base, echo worker, systemd template, health extended, old launcher retired
+- **Phase 2** — First workers: `token_refresh` (OAuth, self-scheduling), `pm_intake` (Ollama inbox processor), `tgw suggest` capture
+- **Phase 3** — Camera-intake pipeline: `bundle_intake`, `multi_intake`, `ai_identify` (qwen2.5vl:7b, ~18s/call), `ai_hint` system, eBay taxonomy + `ebay_draft` (Qwen2.5 specifics fill)
+- **Phase 4** — eBay pipeline: `ebay_upload` (EPS photos), `ebay_publish`, `ebay_sync` (6h), category condition policy (`apis/ebay/conditions.py`, 15K cats, 26 sets, errorId 25021 eliminated)
+- **Pending stubs from Phase 4**: PP-ADD-006 (duplicate check), PP-ADD-008 (Inventory API sweep), PP-REVISION-001 (live listing revision)
 
-**Local Ollama** (free, CPU-bound — already in production)
-- PM-intake: `Qwen2.5:latest` classifies inbox notes + patches master plan
-- `ai_identify`: `qwen2.5vl:7b` identifies items from photos (~18s/call)
-- `ebay_draft`: `Qwen2.5` fills eBay item specifics (structured extraction)
-- Constraint: 32GB CPU-only; model loads ~10 min; ~18s per inference call after warm
+### PP-MULTIMODEL-001 — Multi-AI Task Routing ✅ ADOPTED (session 5)
 
-**Gemini Code** (large context window, different training corpus)
-- High-token tasks: analyze full 55K item catalog, large eBay sold CSV exports
-- Cross-reference large corpora: all worker source files simultaneously, full item JSON corpus
-- Cases where Google's training data may have better coverage than Anthropic's
-- Token-intensive comparisons that exceed Sonnet's practical context budget
+Live as Work Tracks (see `## Work Tracks`). Routing table for reference:
 
-**Perplexity** (live web research with cited sources)
-- eBay API updates, new scope announcements, developer forum research
-- Pricing strategy research with cited market data
-- Competitive analysis: what do other resale automation platforms do?
-- Deep-research tasks where footnoted citations are needed for decisions
+| Task type | Tool | Reason |
+|-----------|------|--------|
+| PP design, arch decisions | Opus | High-stakes reasoning |
+| Worker implementation | Sonnet | Arch awareness |
+| Data analysis > ~80K tokens | Gemini Code | Context window |
+| PM-intake / plan patching | Ollama Qwen2.5 | Free, good enough |
+| Photo identification | Ollama Qwen2.5VL | Vision, free/call |
+| eBay aspects fill | Ollama Qwen2.5 | Structured extraction |
+| eBay API / market research | Perplexity | Live web + citations |
+| Simple transforms / boilerplate | Haiku | Fast + cheap |
+| Large corpus cross-reference | Gemini Code | Context advantage |
 
-#### E-sneaker-net pattern
-No direct API integration planned between these tools — the workflow is manual:
-1. Identify a task suited for a different tool (routing guide below)
-2. Export relevant context (question, data excerpt, file content) from TGW session
-3. Run in the appropriate external AI tool
-4. Import result back: paste answer, or save as `.md` to `docs/TGW-Plan-Vault/inbox/` for PM-intake to file
-
-This is analogous to sneakernet (physically carrying data) but between AI subscriptions.
-
-#### Task routing guide
-
-| Task type | Best tool | Reason |
-|-----------|-----------|--------|
-| PP design, settled architecture | Opus | High-stakes, complex reasoning |
-| Worker implementation | Sonnet | Code quality + architecture awareness |
-| Data analysis < ~80K tokens | Sonnet | Already in context |
-| Data analysis > ~80K tokens | Gemini Code | Context limit avoidance |
-| PM-intake / plan patching | Ollama Qwen2.5 | Free; good enough for classification |
-| Item photo identification | Ollama Qwen2.5VL | Vision model; free per call |
-| eBay aspects fill | Ollama Qwen2.5 | Structured extraction; free |
-| eBay API change research | Perplexity | Live web + citations |
-| Pricing / market research | Perplexity | Cited market data |
-| Simple field transform / boilerplate | Haiku | Fast + cheap |
-| Batch classification jobs | Haiku | Throughput-optimized |
-| Large corpus cross-reference | Gemini Code | Context window advantage |
-
-#### Opportunities identified
-- **ebay_draft aspects improvement**: run a Gemini Code session with all 55K item JSONs + current
-  aspect fill results to find systematic gaps — too much data for a Sonnet session
-- **Perplexity research queue**: maintain a list of open research questions (eBay API scope
-  status, pricing competitors, Cassini algorithm updates) and batch-run them in Perplexity
-  periodically; file results via inbox
-- **Haiku for tgw health summary formatting**: simple string transforms, no architecture needed
-- **Gemini for data scrub passes**: Pass 1–3 (PP-ADD-005 data cleanup) involves processing
-  large item JSON corpora — Gemini's context window makes full-corpus analysis feasible in one shot
-
-#### Implementation
-Primarily a working practice guide — no code changes required initially.
-- When designing a new PP or worker: explicitly choose the model tier as part of the design note
-- Phase 5 usage monitoring will tag each AI job with model name + cost tier when built
-- Perplexity research results → save as `.md` in `docs/TGW-Plan-Vault/inbox/` for PM-intake to file
+E-sneaker-net: export context → run in external AI → save result to `inbox/` for PM-intake.
 
 ---
 
@@ -626,128 +672,20 @@ Rendered HTML snapshots at `/opt/TGW/var/www/`.
 - **Value**: surfaces unhandled errors that should be caught; reduces dead-letter surprises; informs PP-HINT-001 fail-forward work
 - **Effort**: medium — grep is fast but eBay docs cross-reference takes time
 
-### PP-CI-001 — Linting, CI, and code quality automation ✅ DONE 2026-06-04
-- ruff `src/` + `tests/` passes clean
-- CI (`.github/workflows/ci.yml`): `ruff check --no-fix` + `pytest -v --tb=short`; `pip install -e ".[dev]"` installs pytest+ruff+pre-commit
-- `.pre-commit-config.yaml`: local ruff hook scoped to `^(src|tests)/`, `--no-fix` so it catches unfixed issues
-- Pre-commit hook installed in `.git/hooks/pre-commit` (run `pre-commit install` on new clones)
-- mypy skipped — not installed; codebase uses `Dict[str, Any]` heavily, low ROI for now
-- `tools/`, `docs/`, `systemd/` excluded from hook (have pre-existing issues, not production code)
+### PP-CI-001 ✅ DONE 2026-06-04
+ruff clean; GitHub Actions CI (`ruff check --no-fix` + `pytest`); `.pre-commit-config.yaml` scoped to `src/tests/`; pre-commit installed in `.git/hooks/`.
 
-### PP-SEO-001 — eBay listing SEO and search placement optimisation
+### PP-SEO-001 ✅ ALL PHASES DONE 2026-06-04
 
-#### Problem
-AI-generated titles and specifics are functionally correct but not optimised for eBay's
-Cassini search algorithm. Buyers search brand + model + variant; AI often produces generic
-nouns. Better title and specifics completeness → higher placement → faster sell-through
-without touching price.
+All 6 phases implemented in `ebay_draft` + `tgw/seo/title.py` + `apis/ebay/catalog.py`:
+- **P1** title enhancement — brand/MPN inject, flags (`no_brand`, `title_too_short`, etc.); `draft_listing.title_flags`
+- **P2** specifics pre-fill from `product_lookup` (Brand, MPN, Model, EAN); authoritative over AI output
+- **P3** EPID association — `lookup_epid()` in `ebay_stage`; **silent skip until `commerce.catalog.readonly` granted**
+- **P4** category confidence — Jaccard overlap; `draft_listing.category_confidence`; `tgw staged` CC column
+- **P5** description enrichment — 200+ word Ollama-generated prose when `product_lookup.description` ≥ 20 words; SKU baked into body
+- **P6** `tgw seo-audit` CLI; **impression data blocked until `sell.analytics.readonly` granted**
 
-#### eBay Cassini ranking signals (what we can control)
-- **Title** — 80 chars; brand + model number + key attribute; no keyword stuffing or ALL CAPS
-- **Item specifics** — REQUIRED filled = baseline; RECOMMENDED filled = ranking boost; more = better
-- **Category accuracy** — wrong category makes a listing invisible regardless of other quality
-- **EPID association** — associating listing with eBay Catalog EPID auto-fills verified specifics
-  and enables structured product display; biggest single SEO leverage for branded items with UPCs
-- **Condition granularity** — more specific condition = better buyer trust (where category allows)
-- **Photo count** — eBay recommends 12; ≥ 8 is strong; < 3 is a penalty
-- **Description richness** — 200+ words; keyword-rich; HTML structure (headers, bullets) helps mobile
-
-#### How the new toolset enables this
-
-**PP-LOOKUP-001 → title and specifics quality**
-- `product_lookup.brand` + `product_lookup.mpn` → inject into title if not present
-- `product_lookup` fields pre-fill specifics before AI runs: Brand, MPN, Model, EAN
-- `product_lookup.category` cross-checks AI-assigned eBay category — disagreement = flag
-- Pre-filled specifics give AI richer context → better FREE_TEXT values for remaining fields
-
-**eBay Catalog API EPID lookup (Commerce Catalog, scope: commerce.catalog.readonly)**
-- Search eBay product catalog by UPC/EAN → get EPID (eBay Product ID)
-- EPID association at staging time → eBay auto-fills standard specifics from its own product record
-- No AI needed for specifics on known branded items — eBay provides them authoritatively
-- Highest-leverage action for any item with a scannable barcode
-
-**PP-QUALITY-001 quality score → SEO gap visibility**
-- Quality score already measures title length, specifics completeness, photo count
-- Add SEO-specific sub-scores: brand-in-title, MPN-in-title, keyword diversity, category confidence
-- Surface SEO gaps distinctly from general quality issues in `tgw staged`
-
-**PP-PRICE-004 velocity + Analytics API (future) → SEO feedback loop**
-- Low impressions despite competitive price = likely SEO problem (title/category/specifics)
-- Per-listing traffic data from Analytics API (sell.analytics.readonly) enables: identify
-  listings live 14+ days with < 10 views → flag for SEO review before repricing
-- Closes the loop: fix SEO first, reprice only if SEO is solid and item still doesn't move
-
-#### Implementation phases
-
-**Phase 1 — Title enhancement pass ✅ DONE 2026-06-04**
-- `tgw/seo/title.py` — `enhance_title(title, product_lookup, item_specifics) -> dict`
-- Rules applied in order:
-  1. If brand known (product_lookup.brand or item_specifics.Brand) and not in title → prepend
-  2. If MPN/model known and not in title → append if ≤80 chars
-  3. Flag `title_too_short` (< 40), `title_too_long` (> 80), `all_caps:<words>` (alpha-only caps),
-     `no_brand`, `no_model`
-  4. ALL CAPS check excludes model numbers containing digits/hyphens (avoids false positives)
-- `draft_listing.title` = enhanced; `draft_listing.title_ai` = original if changed;
-  `draft_listing.title_flags` = flag list
-
-**Phase 2 — Specifics pre-fill from product lookup ✅ DONE 2026-06-04**
-- `ebay_draft` builds `prefilled` dict from `product_lookup`: Brand, MPN, Model, EAN, UPC, ISBN
-- Only injects for aspects that exist in this category's aspect list
-- Validates SELECTION_ONLY aspects against allowed values before injecting
-- `_build_prompt()` now shows prefilled values as "Known values" section; AI fills remaining
-- `prefilled` overrides AI output in merge step (product database is authoritative)
-
-**Phase 3 — EPID association ✅ DONE 2026-06-04 (code complete; scope pending)**
-- `apis/ebay/catalog.py` — `lookup_epid(cfg, barcode)` via Commerce Catalog API; silent 401/403 skip
-- `ebay_stage.py` — runs EPID lookup before staging if no `epid` in item JSON; caches result
-- `ebay/sync.py` — includes `product.epid` in inventory item PUT body when present
-- **Scope needed**: `commerce.catalog.readonly` — not yet granted; lookups silently return None until approved
-
-**Phase 4 — Category confidence check ✅ DONE 2026-06-04**
-- `_category_confidence(pl_category, ebay_category)` in `ebay_draft.py` — Jaccard keyword overlap
-- `high` ≥ 0.30, `medium` ≥ 0.10, `low` < 0.10 (stopwords excluded)
-- Written to `draft_listing.category_confidence`; surfaced in `tgw staged` CC column (! = low)
-
-**Phase 5 — Description enrichment ✅ DONE 2026-06-04**
-- `ebay_draft.py` — if `product_lookup.description` ≥ 20 words: second Ollama call generates
-  200+ word prose description using product info + condition + title; plain text, no markdown
-- Written to `draft_listing` as `description` (enriched) + `description_source: enriched`; original
-  AI description preserved for items without product lookup data
-
-**Phase 6 — SEO audit CLI ✅ DONE 2026-06-04**
-- `tgw seo-audit` — scans staged/live items; table sorted worst-first by quality score
-- Columns: SKU, Q (quality), PC (price confidence), CC (category confidence), St (L/S), Days, Issues, Title
-- Analytics API (`sell.analytics.readonly`) needed for impression data — not yet applied
-
-#### New config keys needed
-```json
-"seo": {
-  "title_min_chars": 40,
-  "title_max_chars": 80,
-  "title_brand_inject": true,
-  "title_mpn_inject": true,
-  "epid_lookup": true,
-  "description_min_words": 200
-}
-```
-
-#### SKU as search term (SEO note — 2026-06-05)
-TGW SKUs (`tgwYYYYMMDDHHMMSSs`) are unique on the internet — Google indexes them.  This is
-valuable: include the SKU in the listing description and/or item specifics so buyers who find
-the item via Google can verify it is the same one.  Already in PP-SEO-001 Phase 5 (description
-enrichment); ensure SKU is baked into the description body, not just eBay metadata.
-
-#### Dependencies
-- PP-LOOKUP-001 ✅ Tier 1 done — brand/MPN/EAN data flowing
-- PP-QUALITY-001 — quality score framework (Phase 1-2 can run without it; Phase 3+ needs it)
-- Commerce Catalog API scope (`commerce.catalog.readonly`) — apply alongside current scopes
-- Analytics API scope (`sell.analytics.readonly`) — needed for Phase 6 only
-
-#### Effort
-- Phases 1-2: low — rule-based title pass + specifics pre-fill, fits in ebay_draft
-- Phase 3 (EPID): medium — new API scope + catalog query + inventory item field
-- Phases 4-5: low — category check + description enrichment, fits in ebay_draft
-- Phase 6: medium — Analytics API integration, new CLI command
+Config keys in use: `seo.title_min_chars=40`, `title_max_chars=80`, `title_brand_inject`, `title_mpn_inject`, `epid_lookup`, `description_min_words=200`.
 
 ## Open questions
 - Per-queue worker counts (start: 1 each; serialize AI work in Phase 5)
@@ -846,111 +784,25 @@ Design open — no code changes yet. Adoption is the first step; tooling follows
 - Analyze actual offer-invariant properties before implementing; define the schema before writing any code
 - Depends on: PP-ADD-005 (SKU normalization) + Pass 3 data scrub (field schema freeze)
 
-### PP-LOOKUP-001 — Product Data Enrichment (multi-source lookup stack)
+### PP-LOOKUP-001 — Product Data Enrichment ✅ ALL TIER 1 DONE (2026-06-05)
 
-#### Purpose
-Augment AI identification and eBay draft quality by pulling structured product data before the
-vision model runs. When a barcode, ISBN, or item type is known, structured data (title, brand,
-MPN, description, category, retail price) is far more reliable than AI inference alone. Results
-cache in item JSON to avoid repeat API calls.
+`apis/lookup/` package; `lookup_product()` dispatcher; results in `product_lookup` key (30-day cache).
+Integrated into `ai_identify` (runs before Ollama) and `tgw lookup <SKU>` CLI.
 
-#### Integration point
-`ai_identify` worker: before calling the vision model, run `lookup_product(item)` — checks for
-`upc`, `isbn`, or `asin` fields; fetches from the appropriate source; merges result into
-`product_lookup` key in item JSON; passes title/brand/description as hint context to the model.
-Also exposed as `tgw lookup <SKU>` CLI for manual enrichment.
+**Tier 1 sources (all implemented):**
+- `upcitemdb` (primary, 698M barcodes, 100/day free) → `go_upc` fallback (1B items)
+- `open_library` (books/ISBN, no auth) · `discogs` (music, needs credential) · `igdb` (games, Twitch OAuth)
+- `justtcg` (trading cards, no auth) · `open_food_facts` (food/household, no auth)
 
-#### Shared infrastructure
-- `apis/lookup/` package — one module per source, common `LookupResult` dataclass
-- `lookup_product(item_json)` dispatcher: routes by field presence (`upc` → barcode stack, `isbn` → books, `asin` → Amazon path, item category hints → specialty sources)
-- Results stored under `product_lookup: {source, fetched_at, title, brand, description, mpn, ean, msrp, category, raw}` in item JSON
-- All API keys in `secrets_root/` (one JSON file per service); missing key = silent skip for that source
-- Cache: re-fetch only if `product_lookup` absent or `fetched_at` > 30 days ago (configurable)
+**Credentials still needed** (silent-skip until added):
+- `secrets_root/igdb-credentials.json` — `{"client_id":"...","client_secret":"..."}`
+- `secrets_root/discogs-credentials.json` — `{"personal_access_token":"..."}`
+- `secrets_root/go-upc-credentials.json` — `{"api_key":"Bearer <token>"}`
+- `secrets_root/upcitemdb-credentials.json` — optional; increases rate limit
 
----
+**Tier 2 (decide when Tier 1 proves insufficient):** Keepa (€19/mo, Amazon price history); Barcode Lookup (richer fields, subscription). Stubs not implemented yet.
 
-#### Tier 1 — Free, implement now
-
-**General barcode (UPC / EAN / ISBN-13)**
-- **upcitemdb** (primary): 698M+ barcodes. Free tier: 100 requests/day; batch endpoint accepts multiple UPCs per request — effective throughput well above our intake scale. Use batch where available; confirm per-source batch limits at implementation time.
-- **Go-UPC** (secondary / coverage gap): 1B+ items, different database coverage. Worth querying both and merging when upcitemdb returns no result.
-- Routing: upcitemdb first; if result is empty or low-confidence, try Go-UPC; cache merged result. Apply same batch-first approach to all sources that support it.
-
-**Books (ISBN)**
-- **Open Library**: free, no auth, no rate limit advertised. `GET https://openlibrary.org/api/books?bibkeys=ISBN:<isbn>&jscmd=data&format=json`. Returns title, authors, publishers, subjects, cover URL. `apis/lookup/open_library.py`
-- Trigger: `isbn` field present in item JSON, or AI-identified category matches Books
-
-**Music / vinyl / CDs**
-- **Discogs**: free with registered API key (OAuth or token). Returns release title, artists, tracklist, label, year, genre, marketplace price stats. `secrets_root/discogs-credentials.json`. `apis/lookup/discogs.py`
-- Trigger: `discogs_id` or `barcode` on a known music release; or AI category matches Music/Vinyl
-
-**Video games**
-- **IGDB** (via Twitch/IGDB API): free for non-commercial or with Twitch developer account. Returns game title, platforms, genres, cover art, release year. `secrets_root/igdb-credentials.json`. `apis/lookup/igdb.py`
-- Trigger: AI category matches Video Games / Gaming
-
-**Trading cards**
-- **JustTCG**: free tier, no key required. Returns card name, set, rarity, market price. `apis/lookup/justtcg.py`
-- TCGPlayer API: closed to new signups — do not use
-- Trigger: AI category matches Trading Cards / CCG
-
-**Food / beverage / household consumables**
-- **Open Food Facts**: free, no auth, no rate limit. Returns product name, brand, ingredients, allergens, categories, image. `GET https://world.openfoodfacts.org/api/v2/product/<barcode>.json`. `apis/lookup/open_food_facts.py`
-- Trigger: category matches Food/Beverage, or barcode lookup returns food category hint
-
----
-
-#### Tier 2 — Paid / decision required before implementing
-
-**Amazon price history (Keepa)**
-- What: Amazon product data + full price history (ASIN, title, brand, specs, all-time price chart, sales rank)
-- Cost: €19/month minimum (token-based; tokens replenish at rate tied to plan)
-- Decision needed: worth it if you move significant Amazon-originated SKUs (electronics, toys, media); overkill for one-offs
-- `apis/lookup/keepa.py` — implement when/if subscribed; `secrets_root/keepa-credentials.json`
-
-**High-volume barcode (Barcode Lookup)**
-- What: 30+ fields including pricing, product images, full descriptions — richer than upcitemdb
-- Cost: subscription (month-to-month, no long-term commitment); free trial available
-- Decision needed: evaluate if upcitemdb + Go-UPC free tiers prove insufficient at scale
-- `apis/lookup/barcode_lookup.py` — stub, not implemented until subscribed
-
-**eBay sold price data (Marketplace Insights API)**
-- Already tracked under PP-PRICE-001 — `buy.marketplace_insights` scope application pending
-- When approved: integrate as a lookup source for `suggest_price()` in `ebay_price` worker
-- Not duplicated here; cross-reference PP-PRICE-001
-
----
-
-#### Status (2026-06-04)
-
-**Tier 1 — DONE (core stack):**
-- ✅ `apis/lookup/base.py` — `LookupResult` dataclass; `barcode_from_item()` (scans 9 field names + item_specifics); `prompt_context()` compact string for AI injection
-- ✅ `apis/lookup/upcitemdb.py` — primary barcode source (698M+ barcodes); optional key at `secrets_root/upcitemdb-credentials.json`; handles 429
-- ✅ `apis/lookup/go_upc.py` — fallback barcode source; silent skip if no key
-- ✅ `apis/lookup/open_library.py` — books by ISBN; no auth required
-- ✅ `apis/lookup/discogs.py` — music by barcode; requires `secrets_root/discogs-credentials.json`
-- ✅ `apis/lookup/dispatcher.py` — routes by barcode type; music keyword detection; 30-day cache; does NOT write back (caller's responsibility)
-- ✅ `apis/lookup/__init__.py` — `lookup_product`, `LookupResult` exports
-- ✅ `ai_identify` worker integration — runs lookup before Ollama; saves `product_lookup`; `_USER_PROMPT_ENRICHED` template; priority: enriched → hinted → plain
-- ✅ `tgw lookup <SKU> [--force] [--save]` CLI command
-- ✅ Verified live: upcitemdb hit on `tgw202102110216337` (TV Guide Star Trek, UPC 086441182826)
-
-**Tier 1 — DONE (2026-06-05, all sources implemented):**
-- ✅ IGDB — video games (`apis/lookup/igdb.py`); requires `secrets_root/igdb-credentials.json`; title-based search via Twitch OAuth; in-memory token cache
-- ✅ JustTCG — trading cards (`apis/lookup/justtcg.py`); no key required; name-based search
-- ✅ Open Food Facts — household/food (`apis/lookup/open_food_facts.py`); no key required; barcode lookup
-- Dispatcher updated: food-hint → OFF before upcitemdb; game-hint + title → IGDB fallback; TCG-hint + title → JustTCG fallback
-
-**Credentials to add when available:**
-- `secrets_root/discogs-credentials.json` — `{"personal_access_token": "..."}`
-- `secrets_root/go-upc-credentials.json` — `{"api_key": "Bearer <token>"}`
-- `secrets_root/upcitemdb-credentials.json` — `{"api_key": "..."}` (optional; increases rate limit)
-
-#### Avoid / do not implement
-- Amazon PAAPI — sunset April 30, 2026
-- GoodReads API — discontinued Dec 2020; use Open Library
-- TCGPlayer API — closed to new signups
-- CamelCamelCamel — no public API
-- eBay Finding API — deprecated, blocked at app tier (see PP-PRICE-001 notes)
+**Do not implement:** Amazon PAAPI (sunset 2026), GoodReads (discontinued), TCGPlayer (closed), CamelCamelCamel (no API), eBay Finding API (dead 2025).
 
 ---
 
@@ -1139,6 +991,12 @@ description, added_at, source (suggestion / inbox / session note).
 #### Dependencies
 - PP-CAPTURE-001 (idea pipeline design) — aligns on storage back-end choice
 
+#### Connection to Work Tracks strategy test
+The 4-track delegation model (session 5) is the motivating use case. Work Tracks gives each
+agent a queue; PP-TODO-001 makes that queue queryable and persistent across sessions. The
+`tgw todo claude` / `tgw todo gemini` / `tgw todo admin` structure maps directly to Tracks 1,
+2, and 4. Build PP-TODO-001 so Work Tracks items can be seeded into it on first run.
+
 ---
 
 ## Pending projects (revisit)
@@ -1154,88 +1012,21 @@ description, added_at, source (suggestion / inbox / session note).
   - Tuning: run difficult items through, observe results, adjust prompt and hint format
   - **Shipping profile at intake**: operator sets shipping profile during physical processing based on item size; simple `tgw` command or camera app field sets `shipping_profile` on the item JSON at intake time, overriding the per-category default (FC4). Low-touch: one field, one tool adjustment. See PP-DEPLOY-001 for camera app context.
 
-### PP-QUALITY-001 — Listing quality scoring ✅ COMPLETE (2026-06-04)
+### PP-QUALITY-001 ✅ COMPLETE (2026-06-04)
+`tgw/listing_quality.py` — `score_draft()`, 7 signals, 100-pt scale. Signals: title length (10), brand in title (25), MPN in title (10), required specifics % (15), recommended specifics % (5), photo count ≥3 (20), description words (5), comp count (10). Scored in `ebay_draft` + rescored in `ebay_price`; `tgw staged` Q/PC columns; `tgw quality <SKU>` CLI.
 
-#### Status
-- `tgw/listing_quality.py` — `score_draft(item, photo_count) -> QualityResult`, 7 signals, 100-point scale
-- `ebay_draft` worker: counts raw image files; stores `aspects_required_total/filled` + `aspects_recommended_total/filled` in draft; calls scorer → `draft_listing.quality`
-- `ebay_price` worker: re-scores quality after writing `price_comps` (comp_pts were 0 at draft time)
-- `tgw staged` table: Q column (worst-first), PC column (price confidence H/M/L), flag display
-- `tgw quality <SKU...> [--save]` — manual inspection / rescore
+### PP-PRICE-001 ✅ COMPLETE (2026-06-03)
+`tgw/ebay/pricing.py` + `ebay_price` worker (auto-enqueued by `ebay_draft`). Browse API 3-stage fallback → `price_comps {count,min,p25,median,p75,max}`. Launch price = 110% of max→.99; `target_price` = p25. `category_price_defaults` config fallback for thin comps.
 
-#### Score signals (100 pts total)
-| Signal | Pts | Notes |
-|--------|-----|-------|
-| Title 40–80 chars | 10 | <25=0, 25–39=5, 40–80=10, >80=5 |
-| Brand in title | 25 | Checks product_lookup.brand + item_specifics.Brand |
-| Model/MPN in title | 10 | Checks MPN/Model from specifics or product_lookup |
-| Required specifics fill % | 15 | Stored counts from ebay_draft |
-| Recommended specifics fill % | 5 | Stored counts from ebay_draft |
-| Photo count ≥ 3 | 20 | 1=6, 2=12, ≥3=20 |
-| Description word count | 5 | ≥150=5, ≥75=3, ≥25=1 |
-| Price comp count | 10 | ≥5=10, ≥3=6, ≥1=3 |
+#### eBay Sold-Price API Access — status
+- **Finding API `findCompletedItems`** ❌ DEAD (discontinued early 2025; error 10001)
+- **Marketplace Insights API** ⚠ LIMITED RELEASE — `buy.marketplace_insights` scope required; no self-service; contact eBay Developer Support. Endpoint: `GET /buy/marketplace_insights/v1/item_sales/search`. Dave is applying via new keyset request.
+- **Terapeak** — UI-only (Seller Hub → Research → Terapeak); 3 years data; no API; use manually for high-value items
+- **Third-party**: 130Point.com, ZIK Analytics — legal approved partners; evaluate via PERPLEXITY-003
+- **Interim**: Browse API p25 + PP-PRICE-004 velocity data is the current substitute
 
-#### Dependency chain
-PP-LOOKUP-001 → PP-QUALITY-001 → better `tgw staged` triage → fewer weak listings published
-
-### PP-PRICE-001 — Pricing module ✅ COMPLETE (2026-06-03)
-- `tgw/ebay/pricing.py` + `workers/ebay_price.py`; `ebay_price` enqueued automatically by `ebay_draft`
-- Three-stage Browse API fallback: full title → category+short title → category only → category_price_defaults
-- `price_comps` block: `{count, min, p25, median, p75, max}`; `suggest_price()` accepts `category_id` for defaults fallback
-- Sets `draft_listing.price` = **launch price (110% of max → .99)** — the initial listed price creating a visible eBay discount when lowered
-- Stores `ebay_offer.target_price` = p25 (eventual move price for repricer)
-- Idempotent: skips items already priced
-- `category_price_defaults` in config — fallback when Browse API comps are thin (edit `tgw-api-config.json`)
-- **Sold-price access**: Browse API gives asking prices only. Apply for `buy.marketplace_insights` scope; Finding API blocked at app tier. See API investigation notes below.
-
-#### eBay Pricing API Access — Investigation Required
-Current data source is Browse API active listing prices (asking prices, not sold prices).
-Sold prices are significantly more accurate for pricing decisions.  The following APIs
-provide sold/trend data and should be investigated for access expansion:
-
-**1. eBay Finding API — `findCompletedItems`** ❌ DEAD
-- **Discontinued early 2025** — blocked at app tier (error 10001); eBay shut down broad access
-- Do not pursue; no migration path available for new apps
-- Replaced by Marketplace Insights API (see below)
-
-**2. eBay Marketplace Insights API — `item_sales/search`** ⚠ APPLY NOW
-- Returns actual sold item data with sale price, date, quantity
-- REST endpoint: `GET /buy/marketplace_insights/v1/item_sales/search`
-- **Scope required:** `buy.marketplace_insights` — **limited-release, select partners only as of 2026-06**
-- No self-service approval; requires direct contact with eBay Developer Support via the developer portal
-- Application requires a compelling business justification — frame as resale automation platform
-- **Action:** Contact eBay Developer Support directly; do not wait for self-service portal
-- In the meantime: Browse API p25 is the floor; our own sold history (PP-PRICE-004) supplements
-
-**3. eBay Terapeak (via Seller Hub) — UI only, no API**
-- eBay's own sold-price research tool: Seller Hub → Research → Terapeak
-- 3 years of sold data including Best Offer accepted prices — the most complete sold dataset eBay offers
-- **Confirmed no API** — eBay acquired Terapeak and removed its original API; data is UI-only
-- Scraping would be a ToS violation; do not pursue
-- Useful for manual price validation on high-value or unusual items
-- Third-party services with legal eBay sold data access: **130Point.com**, **ZIK Analytics** (approved API partners) — evaluate if Marketplace Insights approval takes too long
-
-**4. eBay Browse API — current implementation**
-- `GET /buy/browse/v1/item_summary/search` — active listings only
-- Works with existing token; no additional scope needed
-- Limitation: active asking prices, not sold prices; p25 is conservative but not market-clearing
-- Docs: https://developer.ebay.com/api-docs/buy/browse/resources/item_summary/methods/search
-
-**Interim strategy:** Browse API p25 (implemented) + our own sold history aggregation (PP-PRICE-004)
-is a reasonable substitute until Marketplace Insights access is obtained. Operator should use
-Terapeak in Seller Hub manually for high-value or thin-comp items.
-
-### PP-REPRICE-001 — Automatic markdown price reducer ✅ INITIAL COMPLETE (2026-06-03)
-- Worker renamed `ebay_price_reducer` — distinct from the future market-aware repricer
-- Three-stage markdown: **launch** (110% of max → .99, day 0) → **retail** (p75, day 3) → **move** (p25, day 17)
-- All periods and percentiles configurable in `tgw-api-config.json` `reprice_stages` array
-- `to_99(price)` — rounds up to next .99 (e.g. $15.23→$15.99, $16.00→$16.99)
-- `reprice_schedule` written to item JSON at publish time: `[{stage, label, price, due_at, done_at}, ...]`
-- `workers/ebay_price_reducer.py` — self-scheduling every 6h; applies due stages via Inventory API offer PUT
-- `tgw staged` — table of UNPUBLISHED offers awaiting review; `tgw publish <sku...>` — approval gate
-- `reprice_skip: true` on item JSON excludes from reducer
-- **Open:** category-level price defaults UI/command; reprice-check command for thin-comp items
-- **Item.Country fix**: `shipToLocations.regionIncluded` must be in offer body — added to `_build_offer_bodies` permanently
+### PP-REPRICE-001 ✅ INITIAL COMPLETE (2026-06-03)
+`ebay_price_reducer` worker: launch (day 0, 110%→.99) → retail (p75, day 3) → move (p25, day 17). `reprice_stages` array configurable; `to_99()` rounding; `reprice_skip: true` to exclude. Self-scheduling every 6h. `reprice_schedule` in item JSON tracks stage history.
 
 ### PP-REPRICER-001 — Market-aware dynamic repricer (design pending)
 - Distinct from `ebay_price_reducer` (scheduled markdown): this watches market prices and adjusts dynamically
@@ -1243,72 +1034,19 @@ Terapeak in Seller Hub manually for high-value or thin-comp items.
 - Design deferred until sold-price API access obtained — Browse API asking prices are the wrong signal for dynamic repricing
 - Will consume `reprice_schedule` as floor (never price below the move price)
 
-### PP-PRICE-003 — Comp search quality improvement ✅ COMPLETE (2026-06-04)
+### PP-PRICE-003 ✅ COMPLETE (2026-06-04)
+`pricing.py`: stage-0 product_lookup query (`brand+mpn` tightest); condition-filtered comps (same-or-worse rank only, 15-entry `_BROWSE_CONDITION_RANK`); price confidence H/M/L (`draft_listing.price_confidence`, `tgw staged` PC column).
 
-#### Status
-All three fixes implemented in `tgw/ebay/pricing.py`:
+### PP-PRICE-004 ✅ COMPLETE (2026-06-05)
+`tgw/velocity.py` + `velocity_stats` nightly worker (✅ enabled 2026-06-05). `tgw velocity-report` CLI. `velocity-stats.json` in catalog_root (1,540 categories). `suggest_price()` gains `velocity_hint: 'hold_launch'` for fast-moving categories. Stage breakdown (launch/retail/move%) populates as new-pipeline items sell.
 
-**Stage 0 — product_lookup query** (`_lookup_query`):
-- If `product_lookup.brand + mpn` → `"{brand} {mpn}"` (tightest)
-- If `product_lookup.brand + title` → `"{brand} {short_product_title}"` (strips brand dedup)
-- Falls through to existing Stage 1–3 (full title, category+short, category only)
-- Source string: `browse:lookup_query` when fired; `+cond` suffix when condition-filtered
+### PP-LISTING-001 — Description footer and picklist line ✅ DONE (2026-06-04)
+- Implemented in `workers/ebay_draft.py` — footer + picklist line built into `draft_listing.description`
+- Seller boilerplate text + SKU/location picklist line; config keys: `description_footer`, `picklist_line_format`
+- Future: QR code image (generate locally, upload to eBay EPS, embed in HTML) — deferred
 
-**Condition-filtered comps** (`_prices_condition_filtered`):
-- Parses Browse API `condition.conditionDisplayName`; maps to internal rank (0=New … 5=ForParts)
-- Keeps comps with `browse_rank >= item_rank` (same-or-worse condition)
-- Falls back to unfiltered if filter leaves < MIN_COMPS results
-- 15-entry `_BROWSE_CONDITION_RANK` covers all Browse API condition variants
-
-**Price confidence** (`_price_confidence`):
-- `high`: ≥5 comps AND max/min ratio < 3 (tight cluster)
-- `medium`: ≥3 comps OR wide range
-- `low`: <3 comps, category default, or insufficient data
-- Stored in `draft_listing.price_confidence`; displayed as H/M/L in `tgw staged` PC column
-- `ebay_price` passes `item_condition` and `product_lookup` to `suggest_price()`
-
-### PP-PRICE-004 — Sold velocity analytics and feedback loop ✅ COMPLETE (2026-06-05)
-
-#### Implemented
-- `tgw/velocity.py` — core aggregation module; scans ItemData; groups sold items by eBay
-  category; computes sold_count, active_count, stale_count, median_days_to_sale,
-  sell_at_launch/retail/move/unknown_pct, never_sold_pct, median_sale_price, p25_sale_price
-- `tgw velocity-report [--refresh] [--category ID] [--min-sold N] [--json] [--output FILE]`
-  — CLI: loads `velocity-stats.json` (or recomputes); renders table or JSON
-- `catalog_root/velocity-stats.json` — aggregated stats; 1540 categories, 55k items on first run
-- `workers/velocity_stats.py` — self-scheduling nightly worker (24h interval)
-- `suggest_price(..., velocity=...)` — `velocity` param added; if category sell_at_launch_pct
-  > 50%, returns `velocity_hint: 'hold_launch'` for future repricer use
-
-#### Stage determination
-Requires `reprice_schedule` with `done_at` timestamps (new-pipeline items only). Legacy sold
-items (2174 total) record stage as 'unknown' and still contribute to price stats. Stage-based
-percentages will populate as new-pipeline items accumulate sold history.
-
-#### To enable velocity_stats worker
-`systemctl enable --now tgw-worker@velocity_stats.service`
-(already registered in pyproject.toml + uses `tgw-worker@.service` template)
-
-#### Next step (PP-REPRICER-001)
-Wire `velocity_hint: 'hold_launch'` into reprice schedule construction to extend stage 0
-hold period for fast-moving categories. Blocked on `buy.marketplace_insights` scope.
-
-### PP-LISTING-001 — Description footer and picklist line (pending)
-- Add configurable boilerplate footer to all eBay listing descriptions
-- Current: plain AI-generated description with no seller branding or item identifier
-- Footer components:
-  1. Seller boilerplate (shipping speed, location, return policy) — configurable text in config
-  2. Picklist line: SKU + location in human-readable format for warehouse picking
-  3. Future: QR code image (generate locally, upload to eBay EPS, embed in HTML description)
-- Applied in `ebay_draft` when building `draft_listing.description`
-- Config key: `description_footer` (boilerplate text) + `picklist_line_format` (template string)
-
-### PP-STAGE-001 — eBay draft staging ✅ COMPLETE (2026-06-03)
-- `workers/ebay_stage.py` — creates UNPUBLISHED offer on eBay; visible/editable in Seller Hub immediately
-- `tgw/ebay/sync.py` split: `stage_draft()` (inventory item + offer, no publish) + `publish_offer()` (one API call)
-- `ebay_price` enqueues `ebay_stage` automatically when price is successfully set
-- `ebay_publish` simplified: reads `ebay_offer.offer_id`, calls `publish_offer()`, writes `ebay_listing`
-- Stopgap until PP-REVISION-001 full revision system is built; leverages native Seller Hub editing
+### PP-STAGE-001 ✅ COMPLETE (2026-06-03)
+`ebay_stage` creates UNPUBLISHED Seller Hub offer; `ebay_price` auto-enqueues it. `stage_draft()` + `publish_offer()` split in `sync.py`. `tgw staged` → operator review → `tgw publish <sku>`.
 
 ### PP-REVISION-001 — Live listing revision / update draft (design open)
 - Three distinct workflows identified: new listing draft | live listing revision | ended→relist
@@ -1319,82 +1057,20 @@ hold period for fast-moving categories. Blocked on `buy.marketplace_insights` sc
 - `ebay_offer` block now established (PP-PRICE-001) — proceed when ready
 - Auto-sync: when offer fields are edited locally (price, condition, aspects), changes should push to eBay without requiring manual Seller Hub edits — design must prevent overwriting live state not yet pulled (depends on PP-SYNC-001 sync pass being authoritative first)
 
-### PP-SYNC-001 — eBay data sync, sold reconciliation + local mirror
+### PP-SYNC-001 ✅ ALL PHASES COMPLETE (2026-06-04)
+Core principle: every eBay-side ID/URL written back to item JSON immediately after API call. All matches by `listing_id` directly — never through catalog. Four phases done: `ebay_sync` write-back (6h) · `tgw ebay-pull` on-demand CLI · `tgw import-sold-csv` (2-year max, archive tombstone pass built) · `tgw ebay-sweep` physical review checklist (3 groups, clickable links, `--output`). Tier 3 (physical sweep) operator-gated; Tier 4 webhook code done, infra pending.
 
-#### Core principle
-Every durable eBay-side ID and URL must be written back into item JSON immediately
-after the API call succeeds. Guards for sold/active state must be reliable at pipeline
-time without hitting eBay — which requires the local copy to be authoritative.
+### PP-PRICE-002 (confirmed strategy — implemented in PP-REPRICE-001)
+Launch 110% max→.99 · retail p75 day 3 · move p25 day 17. `ebay_reprice` stub in pyproject.toml; full market-aware version is PP-REPRICER-001 (blocked on scope).
 
-#### Three reconciliation tiers
-1. **eBay API pull** — `GetMyeBaySelling` (active + sold); `GetOrders` with date ranges
-   for history beyond 90 days. Match `listing_id` directly against `ItemData/*/\*.json`
-   `ebay_listing.listing_id` — never route through the catalog.
-2. **Sold report CSV import** — match eBay item number directly against item JSON
-   `ebay_listing.listing_id`. Set `status: Sold`, record sale price and date.
-3. **Physical inventory sweep** — generate checklist of ambiguous-status SKUs (no
-   `ebay_listing`, or unresolved active/sold) for human review. Item gone from shelf →
-   sold/missing. Item present → available.
-
-#### What "download current eBay data" means
-- Pull all active offers/listings → write back into `ebay_listing` / `ebay_offer` per item JSON
-- Pull sold order history → match by SKU/listing_id → set `status: Sold`, record sale price + date
-- `ebay_legacy_sync` already writes `ebay_listing` from Trading API — extend this, don't rebuild
-- `ebay_sync` exists but writes too little back to item JSONs — extend its write-back
-- Record EPS photo URLs durably: `draft_listing.imageUrls` can be overwritten on draft rebuild; EPS links are permanent after upload and should survive in a stable `ebay_photos_eps` field (or ensure `ebay_photos` list is never wiped on re-draft)
-
-#### Known data quality issues (from audit)
-- Many items have "Item number" from legacy eBay CSV export fields that are the **parent
-  bundle's** item number, not the individual item's — strip on encounter
-- Items with `legacy_listing_resolved: True` may still have active listings — the active
-  listing guard in `ebay_stage` now catches this, but the underlying data needs the sync
-  pass to be authoritative
-- Physical inventory has gaps from the old system: sold items not marked, available items
-  with stale status
-
-#### Implementation plan — ✅ ALL PHASES COMPLETE (2026-06-04)
-- **Phase 1 ✅** — `ebay_sync` extended: now writes `offer_id`, `listing_status`, `price`,
-  `category_id`, `quantity` back to `ebay_listing` + `ebay_offer` on every 6h cycle.
-  Removed `if not ebay_listing: return 0` guard — builds record from scratch for any SKU match.
-- **Phase 2 ✅** — `tgw ebay-pull` CLI: on-demand Trading API pull (active listings + sold orders).
-  Shared logic extracted to `tgw/ebay/pull.py`; `ebay_legacy_sync` worker refactored to use same module.
-  Flags: `--no-active`, `--no-sold`, `--dry-run`. Enqueues `catalog_rebuild` if changed.
-- **Phase 3 ✅** — `tgw import-sold-csv <file>`: imports eBay Seller Hub sold-orders CSV.
-  Matches "Item number" → `ebay_listing.listing_id`; flexible column-name fallbacks;
-  `--show-columns` for format inspection; `--dry-run`. Idempotent (skips already-sold items).
-- **Phase 4 ✅** — `tgw ebay-sweep`: ambiguous-status checklist for physical review.
-  Three groups: A (active eBay / unclear local), B (out-of-stock legacy / no listing),
-  C (no status / no listing). Filters: `--location`, `--limit`, `--groups`. Outputs markdown
-  table with clickable eBay listing links; `--output <file>` for Obsidian review.
-- Dependency: PP-ADD-005 SKU normalization (non-eBay items done; live listings migrating ~5/hr)
-
-### PP-PRICE-002 — Repricer strategy (confirmed)
-- **Initial list price:** 110% of p100 (max active listing price) — sets above market to
-  capture opportunistic higher-price sales
-- **Reprice schedule:** After a configurable hold period (e.g. 3–5 days), begin stepping
-  down: p100 → p75 → p50 → p25, one step per period
-- **Floor:** p25 or a configured minimum price — do not go below
-- Repricer worker (`ebay_reprice`) reads `ebay_offer.price_comps`, computes next price,
-  calls eBay Offer PATCH, writes new price back to item JSON
-- Builds on PP-PRICE-001 `ebay_offer` block and `price_comps` already established
-- `ebay_reprice` worker stub registered in `pyproject.toml` — needs implementation
-
-### MILESTONE-001 — tgw.source replacement ✅ (2026-06-03)
-- The new TGW system (Phases 1–4 + PP-STAGE-001) constitutes a ~95% functional replacement of the legacy `tgw.source` system, significantly improved
+### MILESTONE-001 ✅ (2026-06-03)
+tgw.source replacement ~95% complete. Full pipeline: intake → AI identify → eBay draft → upload → price → stage → operator review → publish → sync. 13+ systemd workers; PostgreSQL state machine; SQLite catalog; 55K+ items.
 - Full automated pipeline: photo intake → AI identification → eBay taxonomy → AI specifics → pricing → eBay draft staging → operator review → one-click publish
 - 13 systemd workers running; PostgreSQL state machine; SQLite catalog; 55K+ item catalog
 - Legacy tgw.source is now thin wrappers; new system is the authoritative data path
 - Remaining gap (~5%): live listing revision / repricer / relist workflow (PP-REVISION-001)
 
-- **PP-ADD-001 Satellite / Client Operation --- Disconnected Catalog Support**
-  - **Project Details**
-    - **Project ID**: PP-ADD-001
-    - **Priority**: High
-    - **Estimated Effort**: Large (4--6 weeks)
-    - **Phase / Track**: Infrastructure
-    - **Dependencies**: Master catalog schema, SKU normalization (PP-ADD-005), History module (PP-ADD-003)
-  - **Overview**
-    - Enable satellite/client nodes to operate independently when disconnected or loosely connected from the master system. Includes thumbnail generation for catalog browsing, temporary catalog update handling, and a defined data migration path to promote local changes back to master.
+- **PP-ADD-001** — Satellite / disconnected catalog support. Full design in Phase 6 § Satellite above. Depends on PP-ADD-005 + PP-ADD-003.
 
 ---
 
@@ -1495,10 +1171,5 @@ Once the macroboard layer is proven:
 
 ---
 
-- ## Phase 7 — Vault Synchronization
-- ### Syncthing Configuration
-- #### Why This Matters
-- #### Decision: Syncthing for Vault Sync
-- #### tgw-Specific Conflict Resolution Protocol
-- #### Optional: Git Backing for Version History
-- #### Constraints Carried Forward (New)
+## Phase 7 — Vault Synchronization
+Syncthing operational. Conflict resolution protocol and git backing details: `OPERATIONS-vault-sync.md`.
