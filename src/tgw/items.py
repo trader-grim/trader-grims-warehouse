@@ -229,8 +229,8 @@ def locationupdate(cfg: Dict[str, Any], sku: str, new_location: str,
 
 def verifiedupdate(cfg: Dict[str, Any], sku: str, value: str,
                    check_only: bool = False) -> Dict[str, Any]:
-    """Update the VERIFIED field on one item."""
-    return update_item(cfg, sku, 'VERIFIED', value, check_only=check_only)
+    """Update the verified field on one item."""
+    return update_item(cfg, sku, 'verified', value, check_only=check_only)
 
 
 def catlocmvall(cfg: Dict[str, Any], from_location: str, to_location: str,

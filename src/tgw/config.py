@@ -86,6 +86,9 @@ def load_config(path: Path) -> Dict[str, Any]:
         str(k): str(v)
         for k, v in raw.get('fulfillment_policy_by_category', {}).items()
     }
+    store_category_by_ebay_category: Dict[str, Any] = raw.get(
+        'store_category_by_ebay_category', {}
+    )
 
     search_fields    = raw.get('search_catalog_fields',
                                ['title', 'location', '#STATUS', 'status'])
@@ -126,6 +129,7 @@ def load_config(path: Path) -> Dict[str, Any]:
         'payment_policy_id':                payment_policy_id,
         'return_policy_id':                 return_policy_id,
         'fulfillment_policy_by_category':   fulfillment_policy_by_category,
+        'store_category_by_ebay_category':  store_category_by_ebay_category,
         'raw':                              raw,
     }
 

@@ -1,0 +1,162 @@
+#!/opt/TGW/.venvironments/tgw/bin/python3
+# MC extfs VFS: TGW catalog organised by location
+# Archive: any .tgwcat sentinel file — content ignored, reads canonical catalog.
+# Enter /opt/TGW/mc/catalog.tgwcat to open.
+import json
+import os
+import re
+import sqlite3
+import sys
+import time
+from pathlib import Path
+
+SQLITE_DB  = Path('/opt/TGW/data/ItemCatalog/tgwcatalog.db')
+CATALOG    = Path('/opt/TGW/data/ItemCatalog/search-catalog.json')
+ITEMDATA   = Path('/opt/TGW/data/ItemData')
+
+
+def _mt(p=None):
+    import datetime
+    ts = p.stat().st_mtime if (p and p.exists()) else time.time()
+    return datetime.datetime.fromtimestamp(ts).strftime('%b %d %H:%M')
+
+
+def _fname(sku: str, status: str, title: str) -> str:
+    """Descriptive filename: sku__status__title.item"""
+    status = re.sub(r'[^\w\s\-]', '_', status[:20]).replace(' ', '_')
+    title  = re.sub(r'[^\w\s\-]', '_', title[:40]).replace(' ', '_')
+    return f'{sku}__{status}__{title}.item'
+
+
+def _load_from_sqlite():
+    """Return (rows, source_label, mtime_path) using SQLite for speed."""
+    if not SQLITE_DB.exists():
+        return None, None, None
+    con = sqlite3.connect(str(SQLITE_DB))
+    con.row_factory = sqlite3.Row
+    try:
+        rows = con.execute(
+            'SELECT sku, title, location, status FROM catalog ORDER BY sku'
+        ).fetchall()
+    finally:
+        con.close()
+    return [dict(r) for r in rows], str(SQLITE_DB), SQLITE_DB
+
+
+def _load_from_json():
+    """Fallback: load from search-catalog.json."""
+    if not CATALOG.exists():
+        return [], str(CATALOG), CATALOG
+    data = json.loads(CATALOG.read_text(encoding='utf-8', errors='replace'))
+    if isinstance(data, list):
+        rows = data
+    elif isinstance(data, dict):
+        rows = [{'sku': k, **v} for k, v in data.items()]
+    else:
+        rows = []
+    simplified = [
+        {
+            'sku':      str(r.get('sku', '')),
+            'title':    str(r.get('title', '')),
+            'location': str(r.get('location', '')),
+            'status':   str(r.get('#STATUS') or r.get('status') or ''),
+        }
+        for r in rows
+    ]
+    return simplified, str(CATALOG), CATALOG
+
+
+def _load_rows():
+    rows, source, mtime_path = _load_from_sqlite()
+    if rows is None:
+        rows, source, mtime_path = _load_from_json()
+    return rows, source, mtime_path
+
+
+def cmd_list(archive: str) -> None:
+    rows, source, mtime_path = _load_rows()
+    mt = _mt(mtime_path)
+    u  = os.environ.get('USER', 'tgw')
+
+    by_loc: dict = {}
+    for r in rows:
+        loc = r.get('location', '').strip() or '_unlisted'
+        by_loc.setdefault(loc, []).append(r)
+
+    summary = (f'Items: {len(rows)}\n'
+               f'Locations: {len(by_loc)}\n'
+               f'Updated: {mt}\n'
+               f'Source: {source}\n')
+    print(f'-rw-r--r-- 1 {u} {u} {len(summary.encode())} {mt} _summary.txt')
+
+    for loc in sorted(by_loc):
+        print(f'drwxr-xr-x 1 {u} {u} 0 {mt} {loc}')
+
+    for loc in sorted(by_loc):
+        for r in sorted(by_loc[loc], key=lambda x: x.get('sku', '')):
+            sku    = r.get('sku', 'unknown')
+            status = r.get('status', '')
+            title  = r.get('title', '')
+            # Size estimate for the full item JSON (real content served via copyout)
+            fname  = _fname(sku, status, title)
+            print(f'-rwxr-xr-x 1 {u} {u} 512 {mt} {loc}/{fname}')
+
+
+def cmd_copyout(archive: str, stored: str, dest: str) -> None:
+    rows, source, mtime_path = _load_rows()
+
+    if stored == '_summary.txt':
+        by_loc: dict = {}
+        for r in rows:
+            loc = r.get('location', '').strip() or '_unlisted'
+            by_loc.setdefault(loc, [])
+        content = (f'Items: {len(rows)}\nLocations: {len(by_loc)}\n'
+                   f'Source: {source}\n')
+        Path(dest).write_text(content, encoding='utf-8')
+        return
+
+    parts = stored.split('/', 1)
+    if len(parts) == 2:
+        _loc, fname = parts
+        sku = fname.split('__')[0]
+        # Try to serve the full ItemData JSON for richer content
+        item_json = ITEMDATA / sku / f'{sku}.json'
+        if item_json.exists():
+            Path(dest).write_bytes(item_json.read_bytes())
+            return
+        # Fallback: serve the catalog row as JSON
+        for r in rows:
+            if r.get('sku', '') == sku:
+                Path(dest).write_text(
+                    json.dumps(r, indent=2, ensure_ascii=False) + '\n',
+                    encoding='utf-8')
+                return
+    Path(dest).write_text('', encoding='utf-8')
+
+
+def cmd_run(archive: str, stored: str) -> None:
+    """Enter on an item: open its full ItemData JSON in less."""
+    parts = stored.split('/', 1)
+    if len(parts) == 2:
+        _loc, fname = parts
+        sku = fname.split('__')[0]
+        item_json = ITEMDATA / sku / f'{sku}.json'
+        if item_json.exists():
+            os.execlp('less', 'less', str(item_json))
+            return
+    os.execlp('less', 'less', str(SQLITE_DB if SQLITE_DB.exists() else CATALOG))
+
+
+if __name__ == '__main__':
+    op  = sys.argv[1]
+    arc = sys.argv[2] if len(sys.argv) > 2 else ''
+    try:
+        if op == 'list':
+            cmd_list(arc)
+        elif op == 'copyout':
+            cmd_copyout(arc, sys.argv[3], sys.argv[4])
+        elif op == 'run':
+            cmd_run(arc, sys.argv[3] if len(sys.argv) > 3 else '_summary.txt')
+    except Exception as e:
+        print(f'tgwcatalog error: {e}', file=sys.stderr)
+        sys.exit(1)

@@ -1,0 +1,177 @@
+#!/opt/TGW/.venvironments/tgw/bin/python3
+# MC extfs VFS: TGW PostgreSQL job queue — live view
+# Archive: any .tgwqueue sentinel file — content ignored.
+# Enter /opt/TGW/mc/queue.tgwqueue to open.
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+DSN = 'dbname=state_machine user=tgw'
+
+# Display order for states
+STATES = ['queued', 'running', 'leased', 'retry_wait',
+          'failed', 'dead_letter', 'cancelled', 'succeeded']
+
+
+def _mt_now():
+    import datetime
+    return datetime.datetime.now().strftime('%b %d %H:%M')
+
+
+def _fetch_jobs():
+    import psycopg2
+    import psycopg2.extras
+    con = psycopg2.connect(DSN)
+    try:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT job_id::text, queue_name, state::text, entity_type, entity_id,
+                       operation, priority, attempt_count, max_attempts,
+                       error_code, error_detail, payload_json::text,
+                       created_at, updated_at, not_before, started_at
+                FROM queue_jobs
+                ORDER BY state, created_at DESC
+            """)
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        con.close()
+
+
+def _serialise(job: dict) -> dict:
+    """Convert non-JSON-serialisable values to strings."""
+    return {k: str(v) if not isinstance(v, (str, int, float, bool, type(None))) else v
+            for k, v in job.items()}
+
+
+def _job_fname(job: dict) -> str:
+    jid = str(job['job_id'])[:8]
+    qn = str(job.get('queue_name', 'unknown')).replace('/', '-')
+    op = str(job.get('operation', '')).replace('/', '-')
+    return f'{qn}__{op}__{jid}.json'
+
+
+def cmd_list(archive: str) -> None:
+    mt = _mt_now()
+    u = os.environ.get('USER', 'tgw')
+    try:
+        jobs = _fetch_jobs()
+    except Exception as e:
+        err = f'DB error: {e}\n'
+        print(f'-rw-r--r-- 1 {u} {u} {len(err.encode())} {mt} _error.txt')
+        return
+
+    by_state: dict = {s: [] for s in STATES}
+    for job in jobs:
+        s = str(job.get('state', 'unknown'))
+        if s in by_state:
+            by_state[s].append(job)
+        else:
+            by_state.setdefault(s, []).append(job)
+
+    active_states = [(s, by_state.get(s, [])) for s in STATES if by_state.get(s)]
+
+    lines = ['Queue state summary', '===================']
+    for s, jlist in active_states:
+        lines.append(f'  {s:12s}: {len(jlist)}')
+    lines.append(f'\nTotal: {len(jobs)}  Snapshot: {mt}')
+    summary = '\n'.join(lines) + '\n'
+    print(f'-rwxr-xr-x 1 {u} {u} {len(summary.encode())} {mt} _summary.txt')
+
+    for state, jlist in active_states:
+        print(f'drwxr-xr-x 1 {u} {u} 0 {mt} {state}')
+        for job in jlist:
+            content = json.dumps(_serialise(job), indent=2)
+            fname = _job_fname(job)
+            print(f'-rwxr-xr-x 1 {u} {u} {len(content.encode())} {mt} {state}/{fname}')
+
+
+def cmd_copyout(archive: str, stored: str, dest: str) -> None:
+    jobs = _fetch_jobs()
+    if stored == '_summary.txt':
+        by_state: dict = {}
+        for job in jobs:
+            s = str(job.get('state', 'unknown'))
+            by_state.setdefault(s, []).append(job)
+        lines = ['state        count', '---          ---']
+        for s in STATES:
+            n = len(by_state.get(s, []))
+            if n:
+                lines.append(f'{s:12s}  {n}')
+        Path(dest).write_text('\n'.join(lines) + f'\n\nTotal: {len(jobs)}\n',
+                               encoding='utf-8')
+        return
+
+    parts = stored.split('/', 1)
+    if len(parts) == 2:
+        state, fname = parts
+        # Extract job_id prefix from filename (last __ segment, before .json)
+        jid_prefix = fname.rsplit('__', 1)[-1].removesuffix('.json')
+        for job in jobs:
+            if (str(job['job_id']).startswith(jid_prefix)
+                    and str(job.get('state')) == state):
+                Path(dest).write_text(
+                    json.dumps(_serialise(job), indent=2) + '\n',
+                    encoding='utf-8')
+                return
+    Path(dest).write_text('', encoding='utf-8')
+
+
+def cmd_run(archive: str, stored: str) -> None:
+    """Enter on any item shows it in less."""
+    jobs = _fetch_jobs()
+    import tempfile
+
+    if stored == '_summary.txt':
+        lines = ['TGW Queue — live snapshot', '=' * 40, '']
+        by_state: dict = {}
+        for job in jobs:
+            s = str(job.get('state', 'unknown'))
+            by_state.setdefault(s, []).append(job)
+        for s in STATES:
+            jlist = by_state.get(s, [])
+            if not jlist:
+                continue
+            lines.append(f'{s.upper()} ({len(jlist)})')
+            lines.append('-' * 30)
+            for j in jlist:
+                err = str(j.get('error_code') or '').strip()
+                err_str = f'  [{err}]' if err else ''
+                lines.append(f'  {j["queue_name"]:20s}  {str(j["job_id"])[:8]}'
+                              f'  att={j.get("attempt_count",0)}{err_str}')
+            lines.append('')
+        content = '\n'.join(lines)
+    else:
+        parts = stored.split('/', 1)
+        content = ''
+        if len(parts) == 2:
+            state, fname = parts
+            jid_prefix = fname.rsplit('__', 1)[-1].removesuffix('.json')
+            for job in jobs:
+                if str(job['job_id']).startswith(jid_prefix):
+                    content = json.dumps(_serialise(job), indent=2)
+                    break
+        if not content:
+            content = f'Job not found: {stored}'
+
+    with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False,
+                                     encoding='utf-8') as f:
+        f.write(content)
+        tmp = f.name
+    os.execlp('less', 'less', tmp)
+
+
+if __name__ == '__main__':
+    op = sys.argv[1]
+    arc = sys.argv[2] if len(sys.argv) > 2 else ''
+    try:
+        if op == 'list':
+            cmd_list(arc)
+        elif op == 'copyout':
+            cmd_copyout(arc, sys.argv[3], sys.argv[4])
+        elif op == 'run':
+            cmd_run(arc, sys.argv[3] if len(sys.argv) > 3 else '_summary.txt')
+    except Exception as e:
+        print(f'tgwqueue error: {e}', file=sys.stderr)
+        sys.exit(1)

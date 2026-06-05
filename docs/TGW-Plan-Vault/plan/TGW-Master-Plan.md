@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-05 (session 5)
+updated: 2026-06-05 (session 6 end-of-session commit)
 maintained_by: Opus (planner)
 ---
 
@@ -124,7 +124,7 @@ maintained_by: Opus (planner)
 
 ## Implementation TODO — next priorities
 
-### Recently completed (sessions 4–5)
+### Recently completed (sessions 4–6)
 - ✅ **PP-QUALITY-001** listing quality scorer (2026-06-04)
 - ✅ **PP-PRICE-003** comp search improvement (2026-06-04)
 - ✅ **PP-HINT-001** bulk requeue command (2026-06-04)
@@ -133,25 +133,32 @@ maintained_by: Opus (planner)
 - ✅ **PP-CI-001** linting + GitHub Actions (2026-06-04)
 - ✅ **PP-LOOKUP-001** all Tier 1 sources (2026-06-05)
 - ✅ **PP-PRICE-004** velocity analytics (2026-06-05)
-- ✅ **PP-LISTING-001** description footer + picklist line (2026-06-04) — confirmed in `ebay_draft.py`; plan not updated until now
+- ✅ **PP-LISTING-001** description footer + picklist line (2026-06-04)
 - ✅ **PP-SOLD-001 Tier 2** CSV import (run 2) — 909 fuzzy + archive tombstone pass; need full all-time CSV for archive hits
+- ✅ **PP-STORE-001** eBay store categories (2026-06-05) — `GetStore` cache in `trading.py`; `_resolve_store_category_names()` + `_get_listing_policies()` in `sync.py`; `storeCategoryNames` injected into offer body; `tgw store-categories` CLI; `store_category_by_ebay_category` config key
+- ✅ **PP-STRIKE-001** strikethrough pricing (2026-06-05) — `original_retail_price` from `product_lookup.msrp` in `ebay_price.py`; `originalRetailPrice` in `pricingSummary` when `ebay.strikethrough_enabled=true`; `tgw strikethrough-check` CLI; **disabled by default** — enable once Dave verifies Seller Hub access
+- ✅ **PP-CAPTURE-001** `tgw note` + `tgw btw` aliases (2026-06-05) — both route to `cmd_suggest()`
+- ✅ **Bug fix** fulfillment policy-by-category now honoured at staging (was always using first-policy from eBay; now reads `fulfillment_policy_by_category` config before API fallback)
+- ✅ **PP-REF-002** eBay error code reference (2026-06-05) — `reference/eBay-Error-Codes.md`; all handlers catalogued; dead-letter diagnosis guide; scope gaps table
+- ✅ **Data Scrub Pass 1** `#VERIFIED`→`verified` rename (2026-06-05) — 55,226 items updated atomically via `tgw data-scrub --pass 1 --write`; bash `verifiedupdate` now routes through `tgw verifiedupdate`; Python `verifiedupdate` writes `verified`; `#STATUS` left as-is (Python code reads it — separate coordinated rename needed); `tgw data-scrub` command added for future passes
+- ✅ **PP-IFDIR-001** interface file org (2026-06-05) — MC VFS scripts added to repo at `etc/interfaces/mc/`; keyd at `etc/interfaces/keyd/`; `/opt/TGW/mc/` symlinked to repo; unified `etc/interfaces/install.sh` created; PP-MACRO-001 install docs updated
+- ✅ **PP-SHELL-001 Tier 1** shell source audit (2026-06-05) — full audit doc at `reference/SHELL-AUDIT.md`; `tgw-dev.source` dead functions replaced with thin `tgw` CLI wrappers (`tgw-rebuild`→`tgw build-all`, `tgw-build-searchcatalog`→`tgw build-search`, `tgw-browser-dev`→`tgw-browser`); `mktgwcats()` fixed (`python3 -m tgw-api` → `tgw build-all`); **Tier 2** = remove deprecated blocks (full list in SHELL-AUDIT.md) + replace ARCH-VIOLATES functions with `tgw` CLI wrappers (coordinate with Data Scrub Pass 1)
+- ✅ **SKU search first-18** (2026-06-05) — `resolve()` in `resolver.py` now does exact-dir-check then prefix-18 fallback for `tgw*` queries ≤18 chars; `getsku()` in `tgw.source` adds same prefix fallback after ebayid lookup fails; covers 47,707×18-char old-format ↔ 7,643×20-char new-format SKU drift
+- ✅ **PP-TODO-001** multi-agent TODO tracker (2026-06-05) — `todo_items` table in `state_machine` DB (id, agent, priority, body, source, added_at, done_at); `tgw todo [agent]` list / `--add` / `--done` / `--seed`; `src/tgw/todo.py`; Work Tracks seeded (18 items across claude/admin/db/gemini agents)
 
 ### Active / next build priorities
 
 | Priority | PP | Status | Notes |
 |----------|----|--------|-------|
-| 1 | **PP-STORE-001** eBay store categories | ready | `GetStore` cache + `store_category_id` in draft/stage/publish |
-| 2 | **PP-REF-002** eBay error code reference | planned | Grep workers → markmap doc; surfaces unhandled dead-letters |
-| 3 | **PP-CAPTURE-001** `tgw note` alias | ready | Trivial; `tgw note "..."` = `tgw suggest "..."`; quiet-queue stub |
-| 4 | **PP-SHELL-001** tgw.source cleanup | ready | Audit → pare deprecated → migrate to pyproject.toml console scripts |
-| 5 | **PP-IFDIR-001** interface file org | ready | Move mc/keyd configs into `etc/interfaces/`; update installers |
-| 6 | **Data scrub Pass 1** field rename | ready | `#VERIFIED` → `verified`; history key merge; dry-run first |
-| 7 | SKU search first-18 | ready | Match catalog search on first 18 chars; cover residual format drift |
-| 8 | **PP-TODO-001** multi-agent TODO | design ready | PostgreSQL `todo_items` table + `tgw todo [agent]` CLI |
-| 9 | **PP-MC-001 Phase 2** tgwitem edit | design ready | copyin, ebay/ + pipeline/ subdirs |
-| 10 | **PP-GLOBALS-001** analysis | analysis only | Identify offer-invariant fields; design before coding |
-| 11 | **PP-HINT-001** remaining gaps | ongoing | eBay Browse enrichment in ebay_draft; per-SKU hint trail |
-| 12 | **PP-SOLD-001 Tier 3** sweep | operator gated | Run `tgw ebay-sweep` after full-history CSV import |
+| 1 | **PP-SHELL-001 Tier 2** tgw.source cleanup | ready | Remove deprecated blocks per SHELL-AUDIT.md; replace ARCH-VIOLATES functions with `tgw` wrappers; coordinate verifiedupdate with Data Scrub Pass 1 |
+| ✅ | **PP-IFDIR-001** interface file org | done | `etc/interfaces/mc/` + `etc/interfaces/keyd/` in repo; `/opt/TGW/mc/` symlinked; unified `etc/interfaces/install.sh`; PP-MACRO-001 refs updated |
+| ✅ | **Data scrub Pass 1** | done | `#VERIFIED` → `verified`; 55,226 items; `tgw data-scrub --pass 1` |
+| ✅ | **SKU search first-18** | done (2026-06-05) | `resolve()` prefix fallback in resolver.py; `getsku()` prefix fallback in tgw.source |
+| ✅ | **PP-TODO-001** multi-agent TODO | done (2026-06-05) | `todo_items` table; `tgw todo [agent/--add/--done/--seed]`; Work Tracks seeded |
+| 7 | **PP-MC-001 Phase 2** tgwitem edit | design ready | copyin, ebay/ + pipeline/ subdirs |
+| 8 | **PP-GLOBALS-001** analysis | analysis only | Identify offer-invariant fields; design before coding |
+| 9 | **PP-HINT-001** remaining gaps | ongoing | eBay Browse enrichment in ebay_draft; per-SKU hint trail |
+| 10 | **PP-SOLD-001 Tier 3** sweep | operator gated | Run `tgw ebay-sweep` after full-history CSV import |
 | — | **PP-REPRICER-001** | blocked | Blocked on `buy.marketplace_insights` scope approval |
 
 ### Running in background
@@ -184,17 +191,21 @@ One bounded session per item. Ordered by value.
 
 | # | PP | Task | Size |
 |---|----|------|------|
-| 1 | PP-STORE-001 | eBay store category support — `GetStore` cache, `store_category_id` in draft/stage/publish | S |
-| 2 | PP-REF-002 | eBay error code reference — grep all workers, cross-reference eBay docs, markmap | S |
-| 3 | PP-CAPTURE-001 | `tgw note`/`tgw btw` alias + quiet-queue stub | XS |
-| 4 | PP-SHELL-001 | `tgw.source` / `tgw-dev.source` audit + cleanup | M |
-| 5 | PP-IFDIR-001 | Reorganize interface configs into `etc/interfaces/` | S |
-| 6 | Data scrub P1 | `#VERIFIED`→`verified` rename + history key merge (dry-run first) | M |
-| 7 | SKU search | Catalog/search match on first 18 chars | XS |
-| 8 | PP-TODO-001 | PostgreSQL `todo_items` + `tgw todo [agent]` CLI | M |
-| 9 | PP-MC-001 P2 | `tgwitem` copyin + `ebay/` + `pipeline/` subdirs | M |
-| 10 | PP-GLOBALS-001 | Analysis only — identify offer-invariant fields; design doc | S |
-| 11 | PP-HINT-001 | eBay Browse enrichment in `ebay_draft`; per-SKU hint trail | M |
+| ✅ | PP-STORE-001 | eBay store category support — done (session 6) | S |
+| ✅ | PP-STRIKE-001 | Strikethrough pricing — done (session 6); enable via config once verified | S |
+| ✅ | PP-CAPTURE-001 | `tgw note`/`tgw btw` aliases — done (session 6) | XS |
+| ✅ | PP-REF-002 | eBay error code reference — done (session 6); `reference/eBay-Error-Codes.md` | S |
+| ✅ | PP-SHELL-001 T1 | Shell audit + targeted fixes — done (session 6); `reference/SHELL-AUDIT.md` | M |
+| ✅ | PP-IFDIR-001 | Interface file org — done (session 6); MC + keyd in `etc/interfaces/`; symlink live | S |
+| ✅ | Data scrub P1 | `#VERIFIED`→`verified` rename — done (session 6); 55,226 items; `tgw data-scrub`; bash + Python verifiedupdate updated | M |
+| 1 | PP-SHELL-001 T2 | Remove deprecated blocks + replace ARCH-VIOLATES with `tgw` wrappers | M |
+| 3 | PP-IFDIR-001 | Reorganize interface configs into `etc/interfaces/` | S |
+| ✅ | Data scrub P1 | `#VERIFIED`→`verified` rename — done (session 6) | M |
+| 5 | SKU search | Catalog/search match on first 18 chars | XS |
+| ✅ | PP-TODO-001 | PostgreSQL `todo_items` + `tgw todo [agent]` CLI — done (session 6) | M |
+| 7 | PP-MC-001 P2 | `tgwitem` copyin + `ebay/` + `pipeline/` subdirs | M |
+| 8 | PP-GLOBALS-001 | Analysis only — identify offer-invariant fields; design doc | S |
+| 9 | PP-HINT-001 | eBay Browse enrichment in `ebay_draft`; per-SKU hint trail | M |
 
 ### Track 2 — Claude Haiku (fast, cheap, no arch context needed)
 Use `/model haiku` or spawn as a Haiku session. Hand it a data excerpt + schema + clear task.
@@ -652,6 +663,7 @@ Rendered HTML snapshots at `/opt/TGW/var/www/`.
 - `CATEGORY-QUIRKS.md` — per-category eBay quirks: fulfillment overrides, condition limits, error patterns
 - `TGW-Item-JSON-Schema.md` — item JSON field reference: all fields, sub-dicts, types, writer workers, pipeline stage flow diagram
 - `ISSUES.md` — active bugs and known gaps (ISS-001 through ISS-008); closed issues log
+- `eBay-Error-Codes.md` — all eBay errorIds + HTTP status handlers; dead-letter diagnosis guide; scope gaps table
 - `HARDWARE-AI-INFERENCE.md` — Ollama model sizing, GPU upgrade planning (pre-existing)
 - `echo.py` / `worker_base.py` — new worker templates (pre-existing)
 
@@ -1025,6 +1037,60 @@ agent a queue; PP-TODO-001 makes that queue queryable and persistent across sess
 - **Third-party**: 130Point.com, ZIK Analytics — legal approved partners; evaluate via PERPLEXITY-003
 - **Interim**: Browse API p25 + PP-PRICE-004 velocity data is the current substitute
 
+### PP-STRIKE-001 — eBay Strikethrough Pricing
+
+#### Background
+Dave was approved for eBay's Strikethrough Pricing program many years ago. This lets sellers
+display an original/retail price with a strikethrough alongside the sale price on eBay listings,
+increasing perceived value and CTR. Approval is at the account level and may persist across
+keyset changes.
+
+#### Verify access
+Before implementing, confirm access is still active:
+- Seller Hub → Marketing → Promotions (or Sales Events) — if strikethrough/sale pricing tools
+  appear, the feature is enabled
+- eBay Help: search "strikethrough pricing" — if your account shows the "Sale Price" section
+  in the Edit Listing form, you're approved
+- Alternatively: attempt to set `originalRetailPrice` in an offer via API and observe the
+  response — a clean 200 confirms access; a 25500-series error indicates the feature is
+  not enabled on this keyset
+
+#### API implementation
+Strikethrough pricing is set via the `originalRetailPrice` field in the eBay Inventory API
+offer body (same call as `ebay_stage`). It is **not** the Promotions API — it is a standard
+offer field that requires account-level approval to use.
+
+Offer body addition (in `ebay_stage.py` `_build_offer_body()`):
+```json
+{
+  "pricingSummary": {
+    "price": {"value": "19.99", "currency": "USD"},
+    "originalRetailPrice": {"value": "34.99", "currency": "USD"}
+  }
+}
+```
+
+#### TGW integration
+- Source field: `draft_listing.original_retail_price` — set from `product_lookup.msrp` if
+  available (e.g. upcitemdb returns `msrp` for many products); operator can override via
+  item JSON edit or future MC / Flutter field
+- Config key: `ebay.strikethrough_enabled: true/false` — global toggle so it can be disabled
+  if access lapses
+- `ebay_price.py`: populate `draft_listing.original_retail_price` from `product_lookup.msrp`
+  when present and > launch price; store alongside `reprice_schedule`
+- `ebay_stage.py`: include `originalRetailPrice` in offer body only when field is present and
+  `ebay.strikethrough_enabled` is true
+- `ebay_draft.py`: may also surface the MSRP in the description footer for items where
+  product_lookup returns it
+
+#### Dependencies
+- `sell.marketing` scope ✅ already held (covers Promotions API; strikethrough is an offer field)
+- Account-level approval — verify before implementing
+- `product_lookup.msrp` field — upcitemdb already returns this in many results
+
+#### Status
+Planned. Verify account access first; implementation is straightforward once confirmed.
+
 ### PP-REPRICE-001 ✅ INITIAL COMPLETE (2026-06-03)
 `ebay_price_reducer` worker: launch (day 0, 110%→.99) → retail (p75, day 3) → move (p25, day 17). `reprice_stages` array configurable; `to_99()` rounding; `reprice_skip: true` to exclude. Self-scheduling every 6h. `reprice_schedule` in item JSON tracks stage history.
 
@@ -1090,7 +1156,7 @@ gets added to `default.conf` and bound to a chord on all four keyboards.
 ### Files (all committed, ready to install)
 | File | Purpose |
 |------|---------|
-| `etc/keyd/tgw-macroboard.conf` | keyd config — device target + layer definition |
+| `etc/interfaces/keyd/tgw-macroboard.conf` | keyd config — device target + layer definition |
 | `/opt/TGW/bin/tgw-macro` | Macro dispatcher — all action logic |
 | `/opt/TGW/bin/tm` | Thin launcher — `runuser -u tgw` + env setup |
 
@@ -1114,12 +1180,14 @@ keyd.rvaiya list-devices
 # Example output line: "413c:2105:a1b2c3d4e5f6  Dell Dell USB Keyboard"
 
 # 3. Edit the config to target the correct device:
-sudo nano /opt/TGW/src/trader-grims-warehouse/etc/keyd/tgw-macroboard.conf
+sudo nano /opt/TGW/src/trader-grims-warehouse/etc/interfaces/keyd/tgw-macroboard.conf
 # Replace "413c:2105" in [ids] with the full unique ID from step 2.
 
 # 4. Install and reload:
-sudo cp /opt/TGW/src/trader-grims-warehouse/etc/keyd/tgw-macroboard.conf /etc/keyd/
+sudo cp /opt/TGW/src/trader-grims-warehouse/etc/interfaces/keyd/tgw-macroboard.conf /etc/keyd/
 sudo systemctl reload keyd
+# OR use the unified installer:
+# sudo bash /opt/TGW/src/trader-grims-warehouse/etc/interfaces/install.sh
 
 # 5. Test: press Caps Lock on the macroboard → LED behaviour changes.
 #    Highlight a SKU in any window → press g → notification should appear.

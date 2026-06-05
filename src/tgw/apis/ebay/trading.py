@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import xml.etree.ElementTree as ET
 from datetime import datetime
-from typing import Any, Dict, Generator
+from typing import Any, Dict, Generator, List
 
 import requests
 
@@ -219,6 +219,44 @@ def get_my_ebay_selling(cfg: Dict[str, Any],
             yield _item_from_xml(item_el)
 
         page += 1
+
+
+def get_store_categories(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Return flat list of eBay store custom categories: [{id, name, path}].
+    Parses up to 3 levels of nesting from GetStore.
+    Returns [] if the seller has no store or no custom categories configured.
+    """
+    xml_body = f'''<?xml version="1.0" encoding="utf-8"?>
+<GetStoreRequest xmlns="{_NS}">
+  <LevelLimit>3</LevelLimit>
+</GetStoreRequest>'''
+
+    try:
+        root = trading_call(cfg, 'GetStore', xml_body, timeout=30)
+    except RuntimeError:
+        return []
+
+    store = root.find(_t('Store'))
+    if store is None:
+        return []
+
+    cat_array = store.find(_t('CustomCategories'))
+    if cat_array is None:
+        return []
+
+    def _parse(parent_el: 'ET.Element', parent_path: str = '') -> 'List[Dict[str, Any]]':
+        result = []
+        for cat in parent_el.findall(_t('CustomCategory')):
+            cid  = (cat.findtext(_t('CategoryID')) or '').strip()
+            name = (cat.findtext(_t('Name'))       or '').strip()
+            path = f'{parent_path} > {name}' if parent_path else name
+            if cid and name:
+                result.append({'id': cid, 'name': name, 'path': path})
+            result.extend(_parse(cat, path))
+        return result
+
+    return _parse(cat_array)
 
 
 def revise_item_sku(cfg: Dict[str, Any], listing_id: str, new_sku: str) -> None:

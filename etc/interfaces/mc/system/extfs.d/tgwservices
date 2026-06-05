@@ -1,0 +1,194 @@
+#!/opt/TGW/.venvironments/tgw/bin/python3
+# MC extfs VFS: TGW systemd services — live status
+# Archive: any .tgwsvc sentinel file — content ignored.
+# Enter /opt/TGW/mc/services.tgwsvc to open.
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+# Fixed services always shown (infra layer)
+_FIXED_SERVICES = [
+    'tgw-http.service',
+    'tgw-watcher.service',
+    'trader-grims-backup.service',
+    'postgresql.service',
+]
+
+
+def _enumerate_units() -> list:
+    """Return sorted list of all tgw-worker@* units plus fixed services."""
+    try:
+        r = subprocess.run(
+            ['systemctl', 'list-units', 'tgw-worker@*',
+             '--all', '--no-legend', '--no-pager',
+             '--output=json'],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            units = [u['unit'] for u in json.loads(r.stdout)]
+        else:
+            # Fallback: plain list-units without json
+            r2 = subprocess.run(
+                ['systemctl', 'list-units', 'tgw-worker@*',
+                 '--all', '--no-legend', '--no-pager'],
+                capture_output=True, text=True, timeout=10,
+            )
+            units = []
+            for line in r2.stdout.splitlines():
+                parts = line.split()
+                if parts and 'tgw-worker@' in parts[0]:
+                    units.append(parts[0])
+    except Exception:
+        units = []
+
+    return sorted(set(units) | set(_FIXED_SERVICES))
+
+
+def _service_info(unit: str) -> dict:
+    try:
+        r = subprocess.run(
+            ['systemctl', 'show', unit,
+             '--property=ActiveState,SubState,LoadState,Description,'
+             'ExecMainPID,MainPID,UnitFileState'],
+            capture_output=True, text=True, timeout=5,
+        )
+        props: dict = {}
+        for line in r.stdout.strip().splitlines():
+            if '=' in line:
+                k, _, v = line.partition('=')
+                props[k] = v
+    except Exception as e:
+        props = {'ActiveState': 'error', 'SubState': str(e)}
+
+    active  = props.get('ActiveState', 'unknown')
+    sub     = props.get('SubState', '')
+    desc    = props.get('Description', unit)
+    pid     = props.get('ExecMainPID') or props.get('MainPID', '0')
+    enabled = props.get('UnitFileState', 'unknown')
+    return {
+        'unit':        unit,
+        'active':      active,
+        'sub':         sub,
+        'description': desc,
+        'pid':         pid,
+        'enabled':     enabled,
+        'ok':          active == 'active',
+    }
+
+
+def _all_info() -> list:
+    return [_service_info(u) for u in _enumerate_units()]
+
+
+def _unit_to_fname(unit: str) -> str:
+    return (unit.removesuffix('.service')
+                .replace('@', '_at_')
+                .replace('/', '-')
+                .replace(' ', '_'))
+
+
+def _fname_to_unit(fname: str) -> str:
+    return fname.removesuffix('.txt').replace('_at_', '@') + '.service'
+
+
+def _mt_now():
+    import datetime
+    return datetime.datetime.now().strftime('%b %d %H:%M')
+
+
+def cmd_list(archive: str) -> None:
+    mt       = _mt_now()
+    u        = os.environ.get('USER', 'tgw')
+    services = _all_info()
+
+    active   = [s for s in services if s['ok']]
+    inactive = [s for s in services if not s['ok']]
+
+    lines = [f'TGW Services  {mt}', '']
+    for s in services:
+        state_str = f'{s["active"]}({s["sub"]})'
+        lines.append(f'  {state_str:24s} {s["unit"]}')
+    summary = '\n'.join(lines) + '\n'
+    print(f'-rwxr-xr-x 1 {u} {u} {len(summary.encode())} {mt} _summary.txt')
+
+    if active:
+        print(f'drwxr-xr-x 1 {u} {u} 0 {mt} active')
+        for s in active:
+            content = (f'{s["active"]}({s["sub"]})\n'
+                       f'{s["description"]}\n'
+                       f'PID: {s["pid"]}  enabled: {s["enabled"]}\n')
+            fname = _unit_to_fname(s['unit'])
+            print(f'-rwxr-xr-x 1 {u} {u} {len(content.encode())} {mt} active/{fname}.txt')
+
+    if inactive:
+        print(f'drwxr-xr-x 1 {u} {u} 0 {mt} inactive')
+        for s in inactive:
+            content = (f'{s["active"]}({s["sub"]})\n'
+                       f'{s["description"]}\n'
+                       f'PID: {s["pid"]}  enabled: {s["enabled"]}\n')
+            fname = _unit_to_fname(s['unit'])
+            print(f'-rwxr-xr-x 1 {u} {u} {len(content.encode())} {mt} inactive/{fname}.txt')
+
+
+def cmd_copyout(archive: str, stored: str, dest: str) -> None:
+    services = _all_info()
+    if stored == '_summary.txt':
+        lines = [f'{s["active"]:10s} {s["sub"]:10s} {s["unit"]}' for s in services]
+        Path(dest).write_text('\n'.join(lines) + '\n', encoding='utf-8')
+        return
+
+    parts = stored.split('/', 1)
+    if len(parts) == 2:
+        _group, fname = parts
+        unit = _fname_to_unit(fname)
+        for s in services:
+            if s['unit'] == unit:
+                Path(dest).write_text(json.dumps(s, indent=2) + '\n',
+                                      encoding='utf-8')
+                return
+    Path(dest).write_text('', encoding='utf-8')
+
+
+def cmd_run(archive: str, stored: str) -> None:
+    """Enter on a service shows systemctl status output in less."""
+    units = _enumerate_units()
+    if stored == '_summary.txt':
+        r = subprocess.run(
+            ['systemctl', 'status', '--no-pager', '--lines=10'] + units,
+            capture_output=True, text=True, timeout=20,
+        )
+        content = r.stdout or r.stderr
+    else:
+        parts = stored.split('/', 1)
+        unit  = units[0] if units else 'tgw-worker@echo.service'
+        if len(parts) == 2:
+            unit = _fname_to_unit(parts[1])
+        r = subprocess.run(
+            ['systemctl', 'status', '--no-pager', '--lines=50', unit],
+            capture_output=True, text=True, timeout=10,
+        )
+        content = r.stdout or r.stderr
+
+    with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False,
+                                     encoding='utf-8') as f:
+        f.write(content)
+        tmp = f.name
+    os.execlp('less', 'less', tmp)
+
+
+if __name__ == '__main__':
+    op  = sys.argv[1]
+    arc = sys.argv[2] if len(sys.argv) > 2 else ''
+    try:
+        if op == 'list':
+            cmd_list(arc)
+        elif op == 'copyout':
+            cmd_copyout(arc, sys.argv[3], sys.argv[4])
+        elif op == 'run':
+            cmd_run(arc, sys.argv[3] if len(sys.argv) > 3 else '_summary.txt')
+    except Exception as e:
+        print(f'tgwservices error: {e}', file=sys.stderr)
+        sys.exit(1)

@@ -1,0 +1,149 @@
+#!/opt/TGW/.venvironments/tgw/bin/python3
+# MC extfs VFS: TGW platform health checks — live snapshot
+# Archive: any .tgwhealth sentinel file — content ignored.
+# Enter /opt/TGW/mc/health.tgwhealth to open.
+# Files named OK___check.txt or FAIL_check.txt; FAIL sorts before OK.
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, '/opt/TGW/src/trader-grims-warehouse/src')
+CONFIG_PATH = Path('/opt/TGW/config/tgw-api-config.json')
+
+
+def _mt_now():
+    import datetime
+    return datetime.datetime.now().strftime('%b %d %H:%M')
+
+
+def _run_checks():
+    from tgw.config import load_config
+    from tgw.health import check_all
+    cfg = load_config(CONFIG_PATH)
+    return check_all(cfg)
+
+
+def _check_fname(check: dict) -> str:
+    name = str(check.get('check', 'unknown'))
+    prefix = 'OK___' if check.get('ok') else 'FAIL_'
+    return f'{prefix}{name}.txt'
+
+
+def _check_content(check: dict) -> str:
+    ok = check.get('ok', False)
+    detail = str(check.get('detail', ''))
+    elapsed = check.get('elapsed_ms', 0)
+    extra = {k: v for k, v in check.items()
+             if k not in ('ok', 'check', 'detail', 'elapsed_ms')}
+    lines = [f'{"OK" if ok else "FAIL"}  {elapsed:.1f}ms', detail]
+    if extra:
+        lines.append('')
+        lines.append(json.dumps(extra, indent=2, default=str))
+    return '\n'.join(lines) + '\n'
+
+
+def cmd_list(archive: str) -> None:
+    mt = _mt_now()
+    u = os.environ.get('USER', 'tgw')
+    try:
+        result = _run_checks()
+    except Exception as e:
+        err = f'Health check failed: {e}\n'
+        print(f'-rw-r--r-- 1 {u} {u} {len(err.encode())} {mt} _error.txt')
+        return
+
+    all_ok = result.get('ok', False)
+    elapsed = result.get('elapsed_ms', 0)
+    failed = result.get('failed', [])
+    status = f'{"OK" if all_ok else "FAIL"}  {elapsed:.0f}ms total'
+    if not all_ok:
+        status += f'\nFailed: {", ".join(failed)}'
+    status += f'\nSnapshot: {mt}\n'
+    print(f'-rwxr-xr-x 1 {u} {u} {len(status.encode())} {mt} _status.txt')
+
+    full_json = json.dumps(result, indent=2, default=str)
+    print(f'-rw-r--r-- 1 {u} {u} {len(full_json.encode())} {mt} _full.json')
+
+    # Individual checks — FAIL_ sorts before OK___ alphabetically
+    for check in result.get('checks', []):
+        content = _check_content(check)
+        fname = _check_fname(check)
+        print(f'-rwxr-xr-x 1 {u} {u} {len(content.encode())} {mt} {fname}')
+
+
+def cmd_copyout(archive: str, stored: str, dest: str) -> None:
+    result = _run_checks()
+    if stored == '_status.txt':
+        ok = result.get('ok', False)
+        elapsed = result.get('elapsed_ms', 0)
+        failed = result.get('failed', [])
+        content = f'{"OK" if ok else "FAIL"}  {elapsed:.0f}ms\n'
+        if not ok:
+            content += 'Failed: ' + ', '.join(failed) + '\n'
+        Path(dest).write_text(content, encoding='utf-8')
+        return
+    if stored == '_full.json':
+        Path(dest).write_text(
+            json.dumps(result, indent=2, default=str) + '\n',
+            encoding='utf-8')
+        return
+
+    # Individual check: strip prefix + suffix to get check name
+    name = stored
+    for pfx in ('OK___', 'FAIL_'):
+        if name.startswith(pfx):
+            name = name[len(pfx):]
+            break
+    name = name.removesuffix('.txt')
+
+    for check in result.get('checks', []):
+        if str(check.get('check')) == name:
+            Path(dest).write_text(_check_content(check), encoding='utf-8')
+            return
+    Path(dest).write_text('', encoding='utf-8')
+
+
+def cmd_run(archive: str, stored: str) -> None:
+    """Enter on a check shows full details; _status shows the whole report."""
+    result = _run_checks()
+    import tempfile
+
+    if stored in ('_status.txt', '_full.json'):
+        content = json.dumps(result, indent=2, default=str)
+    else:
+        name = stored
+        for pfx in ('OK___', 'FAIL_'):
+            if name.startswith(pfx):
+                name = name[len(pfx):]
+                break
+        name = name.removesuffix('.txt')
+        content = ''
+        for check in result.get('checks', []):
+            if str(check.get('check')) == name:
+                content = json.dumps(check, indent=2, default=str)
+                break
+        if not content:
+            content = json.dumps(result, indent=2, default=str)
+
+    with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False,
+                                     encoding='utf-8') as f:
+        f.write(content)
+        tmp = f.name
+    os.execlp('less', 'less', tmp)
+
+
+if __name__ == '__main__':
+    op = sys.argv[1]
+    arc = sys.argv[2] if len(sys.argv) > 2 else ''
+    try:
+        if op == 'list':
+            cmd_list(arc)
+        elif op == 'copyout':
+            cmd_copyout(arc, sys.argv[3], sys.argv[4])
+        elif op == 'run':
+            cmd_run(arc, sys.argv[3] if len(sys.argv) > 3 else '_status.txt')
+    except Exception as e:
+        print(f'tgwhealth error: {e}', file=sys.stderr)
+        sys.exit(1)

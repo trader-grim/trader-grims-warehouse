@@ -162,7 +162,19 @@ def resolve(cfg: Dict[str, Any], **selectors: Any) -> Set[str]:
     # --- fast paths (no JSON) ---
 
     if 'sku' in selectors:
-        narrow({str(selectors['sku'])})
+        q = str(selectors['sku']).strip()
+        # Fast exact match first; if the SKU looks like a TGW prefix that is
+        # shorter than the stored format, fall back to first-18-char prefix
+        # match so 18-char old-format queries find 20-char new-format items.
+        root: Path = cfg['itemdata_root']
+        if (root / q).is_dir():
+            narrow({q})
+        else:
+            prefix18 = q[:18]
+            if len(q) <= 18 and q.lower().startswith('tgw') and len(q) >= 14:
+                narrow({s for s in iter_all_skus(cfg) if s[:18] == prefix18})
+            else:
+                narrow({q})
 
     if 'skus' in selectors:
         narrow({str(s) for s in selectors['skus']})

@@ -1,0 +1,137 @@
+#!/opt/TGW/.venvironments/tgw/bin/python3
+# MC extfs VFS: TGW single item — browse fields and photos
+# Archive: path to a SKU JSON file (e.g. ItemData/tgwXXX/tgwXXX.json)
+# Open with Enter inside any ItemData SKU dir.
+import json
+import os
+import shutil
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+
+def _mt(path):
+    import datetime
+    ts = path.stat().st_mtime if path.exists() else time.time()
+    return datetime.datetime.fromtimestamp(ts).strftime('%b %d %H:%M')
+
+
+def _safe(key: str) -> str:
+    """Sanitise a field key for use as a filename component."""
+    return str(key).replace('/', '-').replace(' ', '_').replace('\\', '-')
+
+
+def _load(archive: str):
+    p = Path(archive)
+    doc = json.loads(p.read_text(encoding='utf-8', errors='replace'))
+    return doc, p
+
+
+def cmd_list(archive: str) -> None:
+    doc, path = _load(archive)
+    mt = _mt(path)
+    u  = os.environ.get('USER', 'tgw')
+
+    # meta.json — full item record
+    meta = json.dumps(doc, indent=2, ensure_ascii=False)
+    print(f'-rw-r--r-- 1 {u} {u} {len(meta.encode())} {mt} meta.json')
+
+    # fields/ — one .txt per field, executable so Enter shows value in pager
+    print(f'drwxr-xr-x 1 {u} {u} 0 {mt} fields')
+    for k, v in sorted(doc.items()):
+        c = (json.dumps(v, ensure_ascii=False)
+             if isinstance(v, (dict, list))
+             else ('' if v is None else str(v)))
+        print(f'-rwxr-xr-x 1 {u} {u} {len(c.encode()) + 1} {mt} fields/{_safe(k)}.txt')
+
+    # photos/ — images and video; executable so Enter renders with chafa
+    media = [
+        p for p in sorted(path.parent.iterdir())
+        if p.suffix.lower() in {'.jpg', '.jpeg', '.png', '.gif', '.webp',
+                                  '.mp4', '.mov', '.mkv', '.webm'}
+        and p.is_file()
+    ]
+    if media:
+        print(f'drwxr-xr-x 1 {u} {u} 0 {mt} photos')
+        for m in media:
+            print(f'-rwxr-xr-x 1 {u} {u} {m.stat().st_size} {_mt(m)} photos/{m.name}')
+
+
+def cmd_copyout(archive: str, stored: str, dest: str) -> None:
+    doc, path = _load(archive)
+    if stored == 'meta.json':
+        Path(dest).write_text(
+            json.dumps(doc, indent=2, ensure_ascii=False) + '\n',
+            encoding='utf-8')
+    elif stored.startswith('fields/'):
+        key_safe = stored[7:].removesuffix('.txt')
+        for k, v in doc.items():
+            if _safe(k) == key_safe:
+                c = (json.dumps(v, indent=2, ensure_ascii=False)
+                     if isinstance(v, (dict, list))
+                     else ('' if v is None else str(v)))
+                Path(dest).write_text(c + '\n', encoding='utf-8')
+                return
+        Path(dest).write_text('\n', encoding='utf-8')
+    elif stored.startswith('photos/'):
+        src = path.parent / stored[7:]
+        if src.exists():
+            shutil.copy2(src, dest)
+
+
+_IMAGE_EXT = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp',
+              '.tif', '.tiff', '.avif', '.heic', '.heif', '.ico'}
+_VIDEO_EXT = {'.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v'}
+
+
+def cmd_run(archive: str, stored: str) -> None:
+    """Enter on a photo renders with chafa; Enter on a field shows value in less."""
+    if stored.startswith('photos/'):
+        _doc, path = _load(archive)
+        src = path.parent / stored[7:]
+        ext = src.suffix.lower()
+        if ext in _IMAGE_EXT or ext in _VIDEO_EXT:
+            # Force symbols+truecolor so extfs terminal (which may not advertise
+            # sixel/kitty support) still gets Unicode half-block art.
+            os.execlp('chafa', 'chafa',
+                      '--format=symbols', '--colors=full', str(src))
+        else:
+            os.execlp('less', 'less', str(src))
+
+    elif stored.startswith('fields/'):
+        # Extract field value to a temp file so less shows the value,
+        # not the raw archive JSON.
+        doc, _path = _load(archive)
+        key_safe = stored[7:].removesuffix('.txt')
+        content = ''
+        for k, v in doc.items():
+            if _safe(k) == key_safe:
+                content = (json.dumps(v, indent=2, ensure_ascii=False)
+                           if isinstance(v, (dict, list))
+                           else ('' if v is None else str(v)))
+                break
+        with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False,
+                                         encoding='utf-8') as f:
+            f.write(content + '\n')
+            tmp = f.name
+        os.execlp('less', 'less', tmp)
+
+    else:
+        # meta.json or anything else — show the archive JSON
+        os.execlp('less', 'less', archive)
+
+
+if __name__ == '__main__':
+    op  = sys.argv[1]
+    arc = sys.argv[2] if len(sys.argv) > 2 else ''
+    try:
+        if op == 'list':
+            cmd_list(arc)
+        elif op == 'copyout':
+            cmd_copyout(arc, sys.argv[3], sys.argv[4])
+        elif op == 'run':
+            cmd_run(arc, sys.argv[3] if len(sys.argv) > 3 else 'meta.json')
+    except Exception as e:
+        print(f'tgwitem error: {e}', file=sys.stderr)
+        sys.exit(1)

@@ -77,6 +77,7 @@ def _map_condition(condition: str) -> str:
 
 _policies_cache: Optional[Dict[str, str]] = None
 _location_cache: Optional[str] = None
+_store_categories_cache: Optional[List[Dict[str, Any]]] = None
 
 
 def _get_policies(cfg: Dict[str, Any]) -> Dict[str, str]:
@@ -124,6 +125,71 @@ def _get_merchant_location(cfg: Dict[str, Any]) -> str:
     _location_cache = chosen[0]['merchantLocationKey']
     log.info('eBay merchant location: %s', _location_cache)
     return _location_cache
+
+
+# ---------------------------------------------------------------------------
+# Listing policy helpers (config-first, API fallback)
+# ---------------------------------------------------------------------------
+
+def _get_listing_policies(cfg: Dict[str, Any], ebay_category_id: str) -> Dict[str, str]:
+    """
+    Return {fulfillmentPolicyId, paymentPolicyId, returnPolicyId} for an offer.
+
+    Prefers explicit config values so per-category fulfillment overrides work.
+    Falls back to eBay account first-policy lookup when config is incomplete.
+    """
+    fulf_id = (
+        cfg.get('fulfillment_policy_by_category', {}).get(str(ebay_category_id))
+        or cfg.get('fulfillment_policy_id')
+    )
+    pay_id = cfg.get('payment_policy_id')
+    ret_id = cfg.get('return_policy_id')
+
+    if fulf_id and pay_id and ret_id:
+        return {
+            'fulfillmentPolicyId': str(fulf_id),
+            'paymentPolicyId':     str(pay_id),
+            'returnPolicyId':      str(ret_id),
+        }
+
+    # Fallback: fetch first policy of each type from eBay account
+    return _get_policies(cfg)
+
+
+# ---------------------------------------------------------------------------
+# Store category helpers (PP-STORE-001)
+# ---------------------------------------------------------------------------
+
+def _get_store_categories_cached(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    global _store_categories_cache
+    if _store_categories_cache is not None:
+        return _store_categories_cache
+    try:
+        from tgw.apis.ebay.trading import get_store_categories
+        _store_categories_cache = get_store_categories(cfg)
+        log.info('store categories loaded: %d', len(_store_categories_cache))
+    except Exception as exc:
+        log.warning('GetStore failed (%s) — store category injection disabled', exc)
+        _store_categories_cache = []
+    return _store_categories_cache
+
+
+def _resolve_store_category_names(cfg: Dict[str, Any],
+                                  ebay_category_id: str) -> Optional[List[str]]:
+    """
+    Return eBay store category name(s) for this eBay taxonomy category, or None.
+    Config key: store_category_by_ebay_category — maps eBay cat ID or 'default' → name.
+    Accepts a string (one category) or list of up to 2 names.
+    """
+    mapping: Dict[str, Any] = cfg.get('raw', {}).get('store_category_by_ebay_category', {})
+    if not mapping:
+        return None
+    name = mapping.get(str(ebay_category_id)) or mapping.get('default')
+    if not name:
+        return None
+    if isinstance(name, list):
+        return [str(n) for n in name[:2]]
+    return [str(name)]
 
 
 # ---------------------------------------------------------------------------
@@ -200,27 +266,47 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
         },
     }
 
-    policies     = _get_policies(cfg)
+    category_id_str = str(draft.get('category_id', ''))
+    policies     = _get_listing_policies(cfg, category_id_str)
     location_key = _get_merchant_location(cfg)
+
+    pricing_summary: Dict[str, Any] = {
+        'price': {'currency': 'USD', 'value': str(price)},
+    }
+
+    # PP-STRIKE-001: add originalRetailPrice when MSRP is available and the
+    # feature is enabled in config (requires eBay account-level approval).
+    original_retail = draft.get('original_retail_price')
+    if original_retail and cfg.get('raw', {}).get('ebay', {}).get('strikethrough_enabled', False):
+        try:
+            pricing_summary['originalRetailPrice'] = {
+                'currency': 'USD',
+                'value': f'{float(original_retail):.2f}',
+            }
+        except (TypeError, ValueError):
+            pass
 
     offer_body: Dict[str, Any] = {
         'sku':                 sku,
         'marketplaceId':       MARKETPLACE_ID,
         'format':              'FIXED_PRICE',
         'availableQuantity':   draft.get('quantity', 1),
-        'categoryId':          str(draft.get('category_id', '')),
+        'categoryId':          category_id_str,
         'listingDescription':  listing_description,
         'listingPolicies':     policies,
         'merchantLocationKey': location_key,
-        'pricingSummary':      {
-            'price': {'currency': 'USD', 'value': str(price)},
-        },
+        'pricingSummary':      pricing_summary,
         # Some categories require explicit shipToLocations for Item.Country resolution.
         # The fulfillment policy's implicit coverage is not sufficient for all categories.
         'shipToLocations': {
             'regionIncluded': [{'regionType': 'COUNTRY', 'regionName': 'US'}],
         },
     }
+
+    # PP-STORE-001: file item into the matching eBay store category when configured.
+    store_names = _resolve_store_category_names(cfg, category_id_str)
+    if store_names:
+        offer_body['storeCategoryNames'] = store_names
 
     return inv_body, offer_body
 

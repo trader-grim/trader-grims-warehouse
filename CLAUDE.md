@@ -55,6 +55,8 @@ in that area. All are plain Markdown; open in Obsidian for interactive mind map 
 | `CATEGORY-QUIRKS.md` | Per-category eBay quirks, fulfillment overrides, condition limits |
 | `TGW-Item-JSON-Schema.md` | Item JSON field reference — all fields, types, which worker writes/reads, pipeline stage |
 | `ISSUES.md` | Active bugs and known gaps — check before diagnosing a known problem |
+| `eBay-Error-Codes.md` | eBay API error codes, HTTP status handling, dead-letter diagnosis |
+| `SHELL-AUDIT.md` | tgw.source / tgw-dev.source function audit — what to keep, wrap, or remove |
 | `HARDWARE-AI-INFERENCE.md` | Ollama model sizing, GPU upgrade planning, inference perf |
 | `echo.py` / `worker_base.py` | Starting point when writing a new worker |
 

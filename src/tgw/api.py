@@ -40,6 +40,7 @@ from .items import (
     verifiedupdate,
 )
 from .resolver import resolve, sku_date_str
+from .scrub import data_scrub_pass1
 from .sqlite_catalog import build_sqlite_catalog
 from .thumbnail import build_thumbnail_cache
 
@@ -226,6 +227,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser('suggest', help='append a suggestion for the next planning session')
     p.add_argument('text', nargs='+', help='suggestion text')
 
+    p = sub.add_parser('note', help='alias for suggest — capture a mid-session note or idea')
+    p.add_argument('text', nargs='+', help='note text')
+
+    p = sub.add_parser('btw', help='alias for suggest — quick back-channel capture')
+    p.add_argument('text', nargs='+', help='note text')
+
     p = sub.add_parser('hint', help='set an ai_hint on an item and re-queue identification')
     p.add_argument('sku', help='SKU to hint')
     p.add_argument('text', nargs='+', help='hint text (e.g. "thimbles" or "mini liquor bottles")')
@@ -356,6 +363,33 @@ def _build_parser() -> argparse.ArgumentParser:
                    help='write report to file instead of stdout')
     p.add_argument('--min-sold', type=int, default=1, metavar='N',
                    help='hide categories with fewer than N sold items (default: 1)')
+
+    sub.add_parser('store-categories',
+                   help='list eBay store custom categories via GetStore (PP-STORE-001)')
+
+    sub.add_parser('strikethrough-check',
+                   help='show strikethrough pricing config state and MSRP coverage (PP-STRIKE-001)')
+
+    p = sub.add_parser('data-scrub',
+                       help='ItemData maintenance passes (dry-run by default)')
+    p.add_argument('--pass', dest='scrub_pass', type=int, default=1, metavar='N',
+                   help='which scrub pass to run (default: 1 = #VERIFIED→verified rename)')
+    p.add_argument('--write', action='store_true',
+                   help='apply changes (default: dry-run only)')
+
+    p = sub.add_parser('todo', help='multi-agent TODO tracker (PP-TODO-001)')
+    p.add_argument('agent', nargs='?', default=None,
+                   help='filter by agent: claude, admin, gemini, db (omit for all)')
+    p.add_argument('--add', metavar='TEXT', help='add a new TODO item')
+    p.add_argument('--done', metavar='ID', type=int, help='mark a TODO item complete')
+    p.add_argument('--priority', type=int, default=50, metavar='N',
+                   help='priority for --add (lower = higher priority; default 50)')
+    p.add_argument('--source', default='session', metavar='SRC',
+                   help='source label for --add (default: session)')
+    p.add_argument('--all', dest='show_all', action='store_true',
+                   help='show completed items too')
+    p.add_argument('--seed', action='store_true',
+                   help='seed Work Tracks items from master plan into the tracker')
 
     return parser
 
@@ -1365,7 +1399,7 @@ def main() -> int:
                                           pretty=cfg.get('pretty', True))
                         result['saved'] = True
 
-        elif args.op == 'suggest':
+        elif args.op in ('suggest', 'note', 'btw'):
             result = cmd_suggest(cfg, ' '.join(args.text))
 
         elif args.op == 'hint':
@@ -1648,6 +1682,83 @@ def main() -> int:
                 'ok': True, 'dry_run': dry_run,
                 'active': active_stats, 'sold': sold_stats,
             }
+
+        elif args.op == 'store-categories':
+            from tgw.apis.ebay.trading import get_store_categories
+            cats = get_store_categories(cfg)
+            if not cats:
+                print('No store custom categories found (or seller has no eBay store).')
+                print('Configure store_category_by_ebay_category in tgw-api-config.json')
+                print('using the names shown here once your store is set up.')
+                result = {'ok': True, 'count': 0, 'categories': []}
+            else:
+                print(f'Found {len(cats)} store categories:\n')
+                for c in cats:
+                    print(f'  [{c["id"]:>8}]  {c["path"]}')
+                print('\nAdd mappings to tgw-api-config.json:')
+                print('  "store_category_by_ebay_category": {')
+                print('    "default": "Name of catch-all store category",')
+                print('    "261": "Video Games",   // eBay cat ID → store category name')
+                print('  }')
+                result = {'ok': True, 'count': len(cats), 'categories': cats}
+
+        elif args.op == 'strikethrough-check':
+            raw_ebay = cfg.get('raw', {}).get('ebay', {})
+            enabled  = raw_ebay.get('strikethrough_enabled', False)
+            # Count items with original_retail_price already set
+            root: Path = cfg['itemdata_root']
+            msrp_count = 0
+            orp_count   = 0
+            for child in root.iterdir():
+                jf = child / f'{child.name}.json'
+                if not jf.exists():
+                    continue
+                try:
+                    d = json.loads(jf.read_text(encoding='utf-8'))
+                except Exception:
+                    continue
+                if d.get('product_lookup', {}).get('msrp'):
+                    msrp_count += 1
+                if d.get('draft_listing', {}).get('original_retail_price'):
+                    orp_count += 1
+            result = {
+                'ok': True,
+                'strikethrough_enabled': enabled,
+                'items_with_msrp': msrp_count,
+                'items_with_original_retail_price': orp_count,
+                'next_steps': (
+                    'ENABLED — originalRetailPrice will be set on new staged offers '
+                    'when product_lookup.msrp > launch price.'
+                    if enabled else
+                    'DISABLED — verify access in Seller Hub (Marketing → Promotions) '
+                    'then set ebay.strikethrough_enabled=true in tgw-api-config.json'
+                ),
+            }
+            print(f'strikethrough_enabled: {enabled}')
+            print(f'Items with product_lookup.msrp: {msrp_count}')
+            print(f'Items with draft_listing.original_retail_price: {orp_count}')
+            print(f'Status: {result["next_steps"]}')
+
+        elif args.op == 'data-scrub':
+            scrub_pass = args.scrub_pass
+            dry_run    = not args.write
+            if scrub_pass == 1:
+                result = data_scrub_pass1(cfg, dry_run=dry_run)
+                mode   = 'DRY RUN' if dry_run else 'WRITTEN'
+                print(f'[{mode}] Pass 1: #VERIFIED → verified')
+                print(f'  Would rename / renamed: {result["renamed"]}')
+                print(f'  Skipped (no field):     {result["skipped"]}')
+                print(f'  Errors:                 {result["errors"]}')
+                if dry_run:
+                    print('  Run with --write to apply.')
+            else:
+                result = {'ok': False, 'error': f'unknown scrub pass: {scrub_pass}'}
+
+        elif args.op == 'todo':
+            from tgw.todo import cmd_todo
+            result = cmd_todo(cfg, args)
+            # cmd_todo handles its own printing; skip the generic JSON dump
+            return 0 if result.get('ok', True) else 1
 
         else:
             result = {'ok': False, 'error': f'unknown op: {args.op!r}'}

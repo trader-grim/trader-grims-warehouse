@@ -100,6 +100,20 @@ class EbayPriceWorker(QueueWorker):
             ebay_offer['price']        = launch
             ebay_offer['target_price'] = suggested   # p25 — the eventual move price
             draft['price']             = launch      # staged at launch price
+
+            # PP-STRIKE-001: record MSRP as originalRetailPrice when it exceeds
+            # the launch price, so the offer body gets a strikethrough display.
+            msrp_raw = product_lookup.get('msrp')
+            if msrp_raw:
+                try:
+                    msrp_float = float(msrp_raw)
+                    if msrp_float > launch:
+                        draft['original_retail_price'] = round(msrp_float, 2)
+                        log.info('%s: original_retail_price=%.2f from product_lookup.msrp',
+                                 sku, msrp_float)
+                except (TypeError, ValueError):
+                    pass
+
             log.info('ebay_price: %s → launch=$%.2f target=$%.2f (%d comps, %s, conf=%s)',
                      sku, launch, suggested,
                      comps.get('count', 0), result['source'],
