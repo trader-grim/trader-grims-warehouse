@@ -145,6 +145,7 @@ maintained_by: Opus (planner)
 - ✅ **PP-SHELL-001 Tier 1** shell source audit (2026-06-05) — full audit doc at `reference/SHELL-AUDIT.md`; `tgw-dev.source` dead functions replaced with thin `tgw` CLI wrappers (`tgw-rebuild`→`tgw build-all`, `tgw-build-searchcatalog`→`tgw build-search`, `tgw-browser-dev`→`tgw-browser`); `mktgwcats()` fixed (`python3 -m tgw-api` → `tgw build-all`); **Tier 2** = remove deprecated blocks (full list in SHELL-AUDIT.md) + replace ARCH-VIOLATES functions with `tgw` CLI wrappers (coordinate with Data Scrub Pass 1)
 - ✅ **SKU search first-18** (2026-06-05) — `resolve()` in `resolver.py` now does exact-dir-check then prefix-18 fallback for `tgw*` queries ≤18 chars; `getsku()` in `tgw.source` adds same prefix fallback after ebayid lookup fails; covers 47,707×18-char old-format ↔ 7,643×20-char new-format SKU drift
 - ✅ **PP-TODO-001** multi-agent TODO tracker (2026-06-05) — `todo_items` table in `state_machine` DB (id, agent, priority, body, source, added_at, done_at); `tgw todo [agent]` list / `--add` / `--done` / `--seed`; `src/tgw/todo.py`; Work Tracks seeded (18 items across claude/admin/db/gemini agents)
+- ✅ **PP-WM-001 Phase 1** Qtile WM base config (2026-06-05) — `etc/interfaces/qtile/config.py` + `tgw_widgets.py`; TGWQueueWidget (REST API), TGWHealthWidget (systemd), TGWSKUWidget (clipboard); Super+T TGW chord mode; F12 scratchpad; 5 named workspaces; `etc/interfaces/qtile/install.sh`; operator install on Track 4 TODO
 
 ### Active / next build priorities
 
@@ -203,6 +204,7 @@ One bounded session per item. Ordered by value.
 | ✅ | Data scrub P1 | `#VERIFIED`→`verified` rename — done (session 6) | M |
 | 5 | SKU search | Catalog/search match on first 18 chars | XS |
 | ✅ | PP-TODO-001 | PostgreSQL `todo_items` + `tgw todo [agent]` CLI — done (session 6) | M |
+| ✅ | PP-WM-001 P1 | Qtile base config + TGW widgets — done (session 7); operator install pending | M |
 | 7 | PP-MC-001 P2 | `tgwitem` copyin + `ebay/` + `pipeline/` subdirs | M |
 | 8 | PP-GLOBALS-001 | Analysis only — identify offer-invariant fields; design doc | S |
 | 9 | PP-HINT-001 | eBay Browse enrichment in `ebay_draft`; per-SKU hint trail | M |
@@ -233,6 +235,22 @@ Research briefs in `docs/TGW-Plan-Vault/perplexity/`. Paste brief into Perplexit
 #### ✅ Done
 - [x] `velocity_stats` worker enabled (2026-06-05)
 - [x] 2-year eBay sold CSV confirmed as maximum available — archive tombstone ceiling accepted
+
+---
+
+#### Priority 0 — Qtile WM install
+
+- [ ] **Install Qtile window manager** (PP-WM-001):
+  ```bash
+  bash /opt/TGW/src/trader-grims-warehouse/etc/interfaces/qtile/install.sh
+  ```
+  Installs: `qtile`, `xclip`, `dmenu` (via apt); symlinks `~/.config/qtile/{config.py,tgw_widgets.py}`
+  from repo; copies tgw-http API key to `~/.config/tgw/api-key` for bar widgets.
+- [ ] Log out → select **Qtile** at SDDM/LightDM session list → log back in
+- [ ] Verify bar shows: workspaces, W:N/N health, Q:✓ queue indicator, clock
+- [ ] Test Super+T → TGW mode (bar shows `[ TGW ]`); press `h` for health, Escape to exit
+- [ ] Test F12 scratchpad terminal toggle
+- [ ] Edit `~/.config/qtile/autostart.sh` if compositor (picom) or notifier (dunst) is desired
 
 ---
 
@@ -876,6 +894,188 @@ Reads use the local SQLite catalog and ItemData directly — MC works offline on
 - Package MC config + sentinels + extfs scripts for deployment to LTSP fat clients
 - Read-only satellite mode: reads local synced `tgwcatalog.db` + thumbnails; writes queue to master via `tgw-http` when reachable
 - Installation playbook (Ansible or shell) for new node bootstrap
+
+---
+
+## PP-WM-001 — Qtile Tiling Window Manager
+
+### Vision
+Qtile as the primary operator workstation shell — a tiling WM where TGW API hooks are
+first-class citizens, not afterthoughts. The WM config is Python, the TGW stack is Python;
+no IPC marshaling, no subprocess overhead for status data. The bar is a live TGW dashboard.
+X11 session (not Wayland) for clipboard tool maturity and overall stability.
+
+Chosen over: AwesomeWM (X11-only, Lua), XMonad (Haskell, steep overhead), Hyprland (great IPC
+but config is declarative — all logic lives outside), Sway (i3-compatible but thin extensibility).
+
+### Files
+| File | Purpose |
+|------|---------|
+| `etc/interfaces/qtile/config.py` | Main Qtile config — layouts, keybindings, bar, hooks |
+| `etc/interfaces/qtile/tgw_widgets.py` | Custom widgets: TGWQueueWidget, TGWHealthWidget, TGWSKUWidget |
+| `etc/interfaces/qtile/install.sh` | User-level installer (run as desktop user, not root) |
+
+### Phase 1 — Base config ✅ DONE (2026-06-05)
+- **TGWQueueWidget** — polls `GET /api/queue/status` via tgw-http REST; shows pending/dead with
+  color coding; click opens health terminal; API key from `~/.config/tgw/api-key`
+- **TGWHealthWidget** — `systemctl list-units` for all `tgw-worker@*` + `tgw-http`; shows
+  active/total ratio; color: green=all up, amber=some down; click opens unit list
+- **TGWSKUWidget** — polls X11 clipboard every 2s; pattern matches `tgw[0-9]{15}`; shows SKU
+  in accent color when detected; click or Super+T→c triggers lookup action
+- **Super+T chord mode** — TGW command layer (bar shows `[ TGW ]`); keys: h=health, q=queue
+  depths, s=staged, t=todo, v=velocity-report, c=clipboard SKU action, o=open ItemData in
+  Dolphin, 1-2=pipeline triggers, F2/F4=workspace jump, Escape=exit mode
+- **F12 scratchpad** — floating konsole (55% height, 85% width); always-available TGW shell
+- **5 named workspaces**: shell / tgw / ebay / agents / media
+- **Layouts**: MonadTall (default, 55% main), MonadWide, Columns(3), Max
+- **autostart hook** — runs `~/.config/qtile/autostart.sh` on first launch (compositor stub)
+- **Install**: `bash etc/interfaces/qtile/install.sh` (as desktop user); symlinks configs from
+  repo; apt installs qtile + xclip + dmenu; copies API key
+
+### Phase 2 — TGW integration depth (future)
+- TGW-mode key `c` + SKU action menu: kdialog for choice (lookup / re-enqueue / open photos)
+- Clipboard SKU watcher: emit `notify-send` on first detection of new SKU
+- `tgw-notify` hook: workers emit `notify-send` on completion → Qtile `net_wm_state` hook
+  catches notification window → updates a notification counter widget in bar
+- Workspace 2 (tgw): auto-launch MC on startup, or a tgw dashboard tmux session
+- Workspace 4 (agents): auto-launch Claude Code on startup
+
+### Phase 3 — Workflow automation (future)
+- Macroboard `[tgw_layer]` integration: once macroboard is live, key chord in config should
+  mirror macroboard layout so both inputs do the same thing
+- Quiet-queue hook: when all workers idle, surface `tgw todo claude` in a notification or
+  dedicated scratchpad (connects PP-CAPTURE-001 quiet-queue concept)
+- Photo intake workspace auto-route: when Gwenview or camera tool opens, auto-assign to ws5
+
+---
+
+## PP-CLIP-001 — TGW-Aware Clipboard Manager
+
+### Status: PLANNING — do not build until design is settled
+
+### Background
+Identified during PP-WM-001 (Qtile) session (2026-06-05). Immediate need is met by
+**Clipster** (flat-file history, long buffer) installed today. PP-CLIP-001 is the
+next-generation replacement: a TGW-specific clipboard daemon that understands SKUs,
+is event-driven, and exposes its history to the rest of the system.
+
+### Problem with existing tools
+- **Polling-based** (xclip, Clipster): 1–2s lag; CPU burn; TGWSKUWidget misses rapid copies
+- **Not TGW-aware**: no concept of SKU vs. random text; history is undifferentiated
+- **No queryable API**: macroboard and chord actions can't reliably ask "what was the last SKU?"
+  — if you've since copied something else, the SKU is gone from live clipboard
+- **No persistence across sessions**: most tools lose history on logout
+
+### Core concept
+An X11 event-driven daemon (`tgw-clipd`) written in Python that:
+1. Receives push notifications from X11 when clipboard ownership changes
+   (XFixes `select_selection_input` — zero polling, instant response)
+2. Fetches the new clipboard content and classifies it
+3. Writes to a local SQLite database with TGW-aware tagging
+4. Exposes a Unix socket so Qtile widgets and CLI tools can subscribe/query
+
+### X11 event mechanism
+```python
+from Xlib import X, display
+from Xlib.ext import fixes
+
+dpy = display.Display()
+screen = dpy.screen()
+fixes.query_version(dpy)
+
+# XFixes sends XFixesSelectionNotifyEvent when clipboard owner changes
+fixes.select_selection_input(
+    dpy, screen.root, dpy.get_atom('CLIPBOARD'),
+    fixes.SetSelectionOwnerNotify
+)
+# Main loop: dpy.next_event() blocks until clipboard changes — no polling
+```
+`python-xlib` package. Similar for PRIMARY selection (highlight-to-copy).
+
+### SQLite schema
+```sql
+CREATE TABLE clip_history (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    captured_at REAL NOT NULL,          -- Unix timestamp
+    content     TEXT NOT NULL,
+    content_len INTEGER NOT NULL,
+    selection   TEXT NOT NULL,          -- 'clipboard' or 'primary'
+    is_sku      BOOLEAN DEFAULT 0,      -- matched tgw\d{15}
+    sku         TEXT,                   -- extracted SKU if is_sku
+    app_name    TEXT,                   -- _NET_WM_NAME of clipboard owner (X11)
+    dismissed   BOOLEAN DEFAULT 0       -- user-dismissed from history
+);
+CREATE INDEX idx_sku      ON clip_history (sku) WHERE is_sku = 1;
+CREATE INDEX idx_captured ON clip_history (captured_at DESC);
+```
+DB path: `~/.local/share/tgw-clip/history.db`
+Retention: configurable max rows (default 10,000); SKU rows never auto-expire.
+
+### CLI surface
+```
+tgw-clip list [--limit N] [--sku-only]   # show history
+tgw-clip last-sku                         # most recent SKU, regardless of current clipboard
+tgw-clip search <pattern>                 # grep history
+tgw-clip wipe                            # clear non-SKU history
+tgw-clip daemon [--foreground]           # start/stop daemon
+```
+
+### Qtile integration (replaces polling in TGWSKUWidget)
+- Daemon exposes a Unix socket at `~/.local/run/tgw-clipd.sock`
+- `TGWSKUWidget` connects to socket on startup; receives push events (JSON lines)
+- No more 2-second poll loop; widget updates instantly on clipboard change
+- Fallback: if daemon not running, widget falls back to xclip polling (current behavior)
+
+### tgw-macro / chord integration
+- Super+T → c: calls `tgw-clip last-sku` instead of reading live clipboard
+  → SKU persists across subsequent copies; chord action is reliable even after clipboard changes
+- macroboard `g` / `h` / `c` keys: same `tgw-clip last-sku` fallback
+- `tgw suggest "$(tgw-clip last-sku)"` pattern: capture SKU to plan inbox
+
+### App-name tagging (Phase 2 idea)
+X11 allows reading `_NET_WM_NAME` of the focused window at copy time. This means:
+- "copied from Gwenview" → likely a file path → tag as `source=media`
+- "copied from terminal" → likely a command or SKU → higher SKU detection priority
+- "copied from Firefox" → likely a URL → tag for future eBay browse integration
+
+### systemd unit
+```ini
+[Unit]
+Description=TGW clipboard daemon
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/tgw-clipd
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+User service: `systemctl --user enable --now tgw-clipd`
+
+### Dependencies
+- `python-xlib` (apt: `python3-xlib`)
+- `python3-sqlite3` (stdlib)
+- PP-WM-001 (Qtile) — the widget integration is Qtile-specific
+
+### Phases
+| Phase | Scope | Prerequisite |
+|-------|-------|-------------|
+| 1 | Daemon: X11 events + SQLite write + SKU tagging + CLI | PP-WM-001 installed |
+| 2 | Qtile widget socket subscription (replace xclip polling) | Phase 1 daemon stable |
+| 3 | App-name tagging; macroboard `last-sku` fallback | Phase 2 |
+| 4 | eBay URL detection → auto-link to item JSON when SKU+eBay URL copied together | Phase 3 |
+
+### Open design questions (decide before Phase 1)
+- PRIMARY vs CLIPBOARD selection: watch both or just CLIPBOARD? Primary = highlight-select,
+  clipboard = explicit Ctrl+C. For SKU capture, PRIMARY is more useful (highlight in terminal).
+  Cost: twice the events to process.
+- DB location: `~/.local/share/tgw-clip/` or alongside the TGW data tree? Lean toward
+  `~/.local` since this is per-user, not per-installation.
+- Daemon restart on config change: reload via SIGHUP or restart unit?
+- Max content length to store: truncate at 10KB? Avoids storing accidental large pastes.
+- Notify on new SKU detection: `notify-send` from daemon, or let Qtile widget handle it?
 
 ---
 

@@ -5,9 +5,12 @@
 # Run as root from any directory:
 #   sudo bash /opt/TGW/src/trader-grims-warehouse/etc/interfaces/install.sh
 #
-# What this installs:
+# What this installs (system-level, run as root):
 #   MC VFS        — /opt/TGW/mc/ symlink → repo; system extfs + menu configs
 #   keyd          — /etc/keyd/tgw-macroboard.conf
+#
+# Qtile WM (user-level — run separately as your desktop user, NOT root):
+#   bash etc/interfaces/qtile/install.sh
 #
 set -euo pipefail
 
