@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-04 (session 2)
+updated: 2026-06-05 (session 4)
 maintained_by: Opus (planner)
 ---
 
@@ -91,13 +91,12 @@ maintained_by: Opus (planner)
   `apis/ebay/notifications.py`: `set_notification_preferences()`, `parse_sold_notification()`,
   `verify_notification_signature()`; `tgw setup-ebay-hooks` CLI command; nginx config + cloudflared
   setup script at `/opt/TGW/config/nginx/`. **Infrastructure deployment deferred — see Operator TODO.**
-- **PP-LOOKUP-001 Tier 1 DONE** — `apis/lookup/` package: upcitemdb (primary), go-upc (secondary),
-  open_library (ISBN/books), discogs (music). `LookupResult` dataclass with `prompt_context()`;
-  `lookup_product()` dispatcher with 30-day cache, music keyword routing, and barcode-field discovery.
-  Integrated into `ai_identify`: runs lookup before Ollama, saves `product_lookup` to item JSON,
-  uses enriched prompt when hit. `tgw lookup <SKU> [--force] [--save]` CLI for manual enrichment.
-  Verified: upcitemdb live (TV Guide Star Trek UPC 086441182826 hit). IGDB, JustTCG,
-  Open Food Facts: stubs in plan (Tier 1 roadmap); not yet implemented.
+- **PP-LOOKUP-001 ALL TIER 1 DONE (2026-06-05)** — `apis/lookup/` package: upcitemdb (primary),
+  go-upc (secondary), open_library (ISBN/books), discogs (music), open_food_facts (food/household),
+  igdb (video games, Twitch OAuth), justtcg (trading cards, no auth). `LookupResult` dataclass
+  with `prompt_context()`; `lookup_product()` dispatcher with 30-day cache, category-keyword routing,
+  barcode-field discovery, and name-based fallback for IGDB/JustTCG. Integrated into `ai_identify`;
+  `tgw lookup <SKU>` CLI. Verified: upcitemdb live. IGDB needs `secrets_root/igdb-credentials.json`.
 - **SKU migrate** — `ebay_sku_migrate` worker running hourly; ~8,350 eBay live listings remain;
   shipping policy now category-aware (FC4 default, 7 category overrides in config)
 
@@ -122,10 +121,10 @@ quality scoring, SEO, and better comp search.
 | ✅ | **PP-SEO-001** title enhancement pass | ALL PHASES DONE 2026-06-04 | Phases 1–6 complete; EPID needs `commerce.catalog.readonly` scope (silent skip until granted) |
 | 3 | **PP-SOLD-001 Tier 2** CSV import test | DONE — re-run later | 2-year CSV tested: 208 listing-ID matches + 937 fuzzy-title matches. Archive index 6,824 entries, 0 matches (only older listings). Re-run after `ebay_sku_migrate` builds archive further. |
 | 4 | **PP-SOLD-001 Tier 3** sweep checklist | after Tier 2 | `tgw ebay-sweep` output → physical review workflow |
-| 5 | **PP-REF-001** item JSON schema doc | — | Sample items at each pipeline stage; document all fields |
-| 6 | **PP-CI-001** linting + GitHub Actions | — | Fix ruff/mypy violations; pre-commit hook + lint workflow |
+| 5 | **PP-REF-001** item JSON schema doc | DONE 2026-06-04 | `docs/.../reference/TGW-Item-JSON-Schema.md` — all fields, sub-dicts, writers, pipeline flow diagram |
+| 6 | **PP-CI-001** linting + GitHub Actions | DONE 2026-06-04 | ruff clean; `--no-fix` CI; `.pre-commit-config.yaml` (files: src/tests only); pre-commit installed |
 | 7 | **PP-REPRICER-001** market-aware repricer | blocked | Blocked on `buy.marketplace_insights` scope approval |
-| 8 | **PP-LOOKUP-001 Tier 1 remaining** | — | IGDB, JustTCG, Open Food Facts — add when relevant items appear |
+| ✅ | **PP-LOOKUP-001 Tier 1 remaining** | DONE 2026-06-05 | IGDB, JustTCG, Open Food Facts — all implemented; credentials needed for IGDB |
 | 9 | **PP-MULTIMODEL-001** multi-AI routing | — | Task routing guide: Haiku/Sonnet/Opus/Gemini Code/Perplexity/Ollama; e-sneaker-net pattern; informs all future work |
 
 **Running in background:**
@@ -495,6 +494,13 @@ Primarily a working practice guide — no code changes required initially.
 - Recovery source: historical-tgw-catalog.json
 - Field rename: `#VERIFIED` → `verified` (legacy field from eBay CSV export; hash prefix was never intentional — fold into Pass 1 or run as a standalone scrub step)
 
+### ItemArchive — legacy sold/ended listing history
+- Path: `/opt/TGW/data/history/ItemArchive/` — zipped legacy item packages from the old system
+- Archive eBay index: `/opt/TGW/var/archive-ebay-index.json` — 6,824 entries built by `tgw import-sold-csv`
+- Content: older eBay listings predating the current ItemData structure; useful for sold reconciliation
+- Integrate: re-run `tgw import-sold-csv` after `ebay_sku_migrate` progresses to build up more archive matches
+- Archive index grows as migrated SKUs accumulate in `sku_history` table
+
 ### PP-SOLD-001 — Sold reconciliation and inventory status sync (design ready)
 
 #### Problem
@@ -579,19 +585,17 @@ Rendered HTML snapshots at `/opt/TGW/var/www/`.
 - `PP-LOOKUP-001-APIs.md` — product enrichment API stack: Tier 1 (free) + Tier 2 (paid/decision)
 - `TGW-Ollama-Prompts.md` — actual prompt templates for ai_identify + ebay_draft; tuning notes
 - `CATEGORY-QUIRKS.md` — per-category eBay quirks: fulfillment overrides, condition limits, error patterns
+- `TGW-Item-JSON-Schema.md` — item JSON field reference: all fields, sub-dicts, types, writer workers, pipeline stage flow diagram
 - `ISSUES.md` — active bugs and known gaps (ISS-001 through ISS-008); closed issues log
 - `HARDWARE-AI-INFERENCE.md` — Ollama model sizing, GPU upgrade planning (pre-existing)
 - `echo.py` / `worker_base.py` — new worker templates (pre-existing)
 
-### PP-REF-001 — TGW Item JSON Schema (planned)
-- **Problem**: field schema is tribal knowledge spread across 6+ workers; no single reference
-- **Approach**
-  - Sample 20–50 items at different pipeline stages (stub / identified / drafted / priced / staged / published / sold)
-  - For each field found: name, type, example value, which worker writes it, which worker reads it, whether it's required or optional at each stage
-  - Cross-reference against all worker source files to catch fields not present in sampled items
-  - Output: `TGW-Item-JSON-Schema.md` markmap + a companion `item-schema.json` (JSON Schema draft-07) for validation
-- **Value**: unblocks PP-GLOBALS-001 design, PP-QUALITY-001 scorer, PP-LOOKUP-001 field mapping; makes onboarding and debugging much faster
-- **Effort**: medium — needs careful sampling + worker code cross-reference; not a quick grep
+### PP-REF-001 — TGW Item JSON Schema ✅ DONE 2026-06-04
+- Reference doc: `docs/TGW-Plan-Vault/reference/TGW-Item-JSON-Schema.md`
+- Covers: all top-level fields, `draft_listing`, `ebay_offer`, `ebay_listing`, `ebay_photos`, `reprice_schedule`, `product_lookup` sub-fields; each with type, pipeline stage set, writer worker
+- ASCII pipeline flow diagram showing field accumulation order
+- Legacy-only fields section for pre-pipeline imported items
+- Notes for PP-GLOBALS-001 design
 
 ### PP-REF-002 — eBay Error Code Reference (planned)
 - **Problem**: error handling scattered across ebay_stage, ebay_publish, ebay_price, ebay_draft; no consolidated view of what errors we handle vs. what we let dead-letter
@@ -603,17 +607,13 @@ Rendered HTML snapshots at `/opt/TGW/var/www/`.
 - **Value**: surfaces unhandled errors that should be caught; reduces dead-letter surprises; informs PP-HINT-001 fail-forward work
 - **Effort**: medium — grep is fast but eBay docs cross-reference takes time
 
-### PP-CI-001 — Linting, CI, and code quality automation
-- **Problem**: GitHub is reporting linting errors; currently no automated check runs locally before push
-- **Approach**
-  - Investigate current linting errors: `cd src && python -m ruff check . && python -m mypy .` (or whatever linter is configured)
-  - Fix existing violations
-  - Add `pre-commit` hook: runs ruff/flake8 + mypy on staged files before every commit — catches issues locally before they reach GitHub
-  - Add GitHub Actions workflow (`.github/workflows/lint.yml`): runs same checks on push/PR
-  - Consider adding `pytest` to the CI workflow (19+ unit tests already exist)
-- **Config**: `pyproject.toml` already has the package — add `[tool.ruff]` and `[tool.mypy]` sections
-- **Value**: stop accumulating lint debt; catch type errors before they become runtime bugs
-- **Effort**: low-medium — investigate first, fix errors, then wire automation
+### PP-CI-001 — Linting, CI, and code quality automation ✅ DONE 2026-06-04
+- ruff `src/` + `tests/` passes clean
+- CI (`.github/workflows/ci.yml`): `ruff check --no-fix` + `pytest -v --tb=short`; `pip install -e ".[dev]"` installs pytest+ruff+pre-commit
+- `.pre-commit-config.yaml`: local ruff hook scoped to `^(src|tests)/`, `--no-fix` so it catches unfixed issues
+- Pre-commit hook installed in `.git/hooks/pre-commit` (run `pre-commit install` on new clones)
+- mypy skipped — not installed; codebase uses `Dict[str, Any]` heavily, low ROI for now
+- `tools/`, `docs/`, `systemd/` excluded from hook (have pre-existing issues, not production code)
 
 ### PP-SEO-001 — eBay listing SEO and search placement optimisation
 
@@ -711,6 +711,12 @@ without touching price.
   "description_min_words": 200
 }
 ```
+
+#### SKU as search term (SEO note — 2026-06-05)
+TGW SKUs (`tgwYYYYMMDDHHMMSSs`) are unique on the internet — Google indexes them.  This is
+valuable: include the SKU in the listing description and/or item specifics so buyers who find
+the item via Google can verify it is the same one.  Already in PP-SEO-001 Phase 5 (description
+enrichment); ensure SKU is baked into the description body, not just eBay metadata.
 
 #### Dependencies
 - PP-LOOKUP-001 ✅ Tier 1 done — brand/MPN/EAN data flowing
@@ -909,10 +915,11 @@ Also exposed as `tgw lookup <SKU>` CLI for manual enrichment.
 - ✅ `tgw lookup <SKU> [--force] [--save]` CLI command
 - ✅ Verified live: upcitemdb hit on `tgw202102110216337` (TV Guide Star Trek, UPC 086441182826)
 
-**Tier 1 — not yet implemented (low urgency; add when relevant items appear):**
-- ☐ IGDB — video games (`apis/lookup/igdb.py`); requires Twitch developer account
-- ☐ JustTCG — trading cards (`apis/lookup/justtcg.py`); no key required
-- ☐ Open Food Facts — household/food (`apis/lookup/open_food_facts.py`); no key required
+**Tier 1 — DONE (2026-06-05, all sources implemented):**
+- ✅ IGDB — video games (`apis/lookup/igdb.py`); requires `secrets_root/igdb-credentials.json`; title-based search via Twitch OAuth; in-memory token cache
+- ✅ JustTCG — trading cards (`apis/lookup/justtcg.py`); no key required; name-based search
+- ✅ Open Food Facts — household/food (`apis/lookup/open_food_facts.py`); no key required; barcode lookup
+- Dispatcher updated: food-hint → OFF before upcitemdb; game-hint + title → IGDB fallback; TCG-hint + title → JustTCG fallback
 
 **Credentials to add when available:**
 - `secrets_root/discogs-credentials.json` — `{"personal_access_token": "..."}`
@@ -1055,6 +1062,63 @@ MC console         Flutter app (Linux + Android)
 - Offer management list view
 - Fulfillment workflow
 - Tasker hooks for push notifications from master → tablet
+
+---
+
+### PP-WHISPER-001 — Audio capture and voice-to-suggest interfaces
+
+#### Problem
+Capturing ideas, item hints, and descriptions mid-workflow is friction-heavy when hands are
+full during physical processing. Text entry via keyboard or Tasker tap is usable but slow.
+Voice capture (Whisper) offers zero-friction idea capture during item photography and sorting.
+
+#### Scope
+- `whispertosuggest`: short audio clip → Whisper transcription → `tgw suggest "..."` append
+  (the audio-native equivalent of typing a suggestion)
+- `whispertoidentify`: whisper a hint or item description → writes `ai_hint` + triggers `ai_identify`
+- Tasker integration: Tasker button/shortcut on Android → POST to `tgw-http` with voice text
+- Deferred capture: record audio during photo session, process later (batch transcription)
+  — avoids Ollama load during active photo runs; audio files dropped to a queue dir
+
+#### Integration ideas (from tgw.source review)
+- Whisper.cpp already installed or planned (see PP-REMOTE-001 AI runtime manager)
+- `tgw suggest` already the canonical capture back-channel — whisper is a voice front-end to it
+- Tasker on Android: press record → transcribe → POST `/api/items/<sku>/action` or `tgw-http`
+  hint endpoint; SKU from barcode scan or CurrentItem symlink
+
+#### Dependencies
+- PP-REMOTE-001 (Tailscale + `tgw-http` reachable from Android)
+- PP-IFDIR-001 (interface configs organized)
+- Whisper.cpp binary installed (PP-ADD-010 AI runtime manager)
+
+---
+
+### PP-TODO-001 — Multi-agent TODO tracker (`tgw todo`)
+
+#### Problem
+Tasks and reminders are captured in `tgw suggest` / SUGGESTIONS.md but there is no structured
+command to list open TODOs by agent or priority — items mix with ideas and require full plan
+review to surface actionable tasks.
+
+#### Concept
+`tgw todo [agent]` — lists open tasks, similar to `tgw picklist` but for action items:
+- `tgw todo` — all open items across all agents
+- `tgw todo admin` — operator physical tasks (shipping, labeling, inventory)
+- `tgw todo claude` — Claude Code implementation queue
+- `tgw todo gemini` — Gemini Code / large-context analysis tasks
+- `tgw todo db` — database / data scrub tasks
+
+Versatile enough to add human and AI agents over time.  Each entry has: agent, priority,
+description, added_at, source (suggestion / inbox / session note).
+
+#### Storage design
+- Back-end: PostgreSQL table `todo_items (id, agent, priority, body, source, added_at, done_at)` in `state_machine` DB
+- Or: flat TOML/Markdown file under `docs/TGW-Plan-Vault/` with front-matter per entry
+- `tgw todo add [agent] "text"` — create entry; `tgw todo done <id>` — mark complete
+- Could feed the "quiet queue" hook in PP-CAPTURE-001 — surface `tgw todo claude` when workers go idle
+
+#### Dependencies
+- PP-CAPTURE-001 (idea pipeline design) — aligns on storage back-end choice
 
 ---
 

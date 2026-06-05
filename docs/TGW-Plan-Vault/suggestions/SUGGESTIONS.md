@@ -31,9 +31,10 @@
 - [x] 2026-06-04T23:21 :: MX Linux / mx-slapshot OS image integration; tgw user UID < 1000; image + /opt/TGW = full system — added as PP-DEPLOY-001
 - [x] 2026-06-05T00:12 :: integrate shipping profile to camera defaults items physically processed by size. Low user interface cost, just need simple tool and small camera app adjust — added to PP-HINT-001 open items
 - [x] 2026-06-05T00:20 :: better more verbose description. Bake seo terms right in. — already in PP-SEO-001 Phase 5 (description enrichment: 200+ words, brand/model/MPN in body)
-- [ ] 2026-06-05T00:47 :: PP-CAPTURE-001 revisit: quiet-queue notification hook (surface tgw suggest backlog when workers go idle) — discuss when appropriate or when Dave brings it up
-- [ ] 2026-06-05T01:54 :: note /opt/TGW/data/history/ItemArchive/ in the project plan for reference
-- [ ] 2026-06-05T02:06 :: note archive index in plan and integrate
-- [ ] 2026-06-05T02:25 :: Add to plan: add whisper interfaces build out to interfaces. See tgw.source for ideas. add whispertosuggest. Add tasker suggest. option to capture audio and process later during photos.
-- [ ] 2026-06-05T02:44 :: note for seo: when running magento external website I noted that my skus are unique on the internet and I get a lot of value from my sku. Make sure it is included in each items seo strategy.
-- [ ] 2026-06-05T03:14 :: tgw todo: similar to picklist, lists todo list. tgw todo prints full todo all agents. todo admin todo claude todo gemini todo db versatile enough to add human/mechanical and ai agents.
+- [x] 2026-06-05T00:47 :: PP-CAPTURE-001 revisit: quiet-queue notification hook (surface tgw suggest backlog when workers go idle) — already in PP-CAPTURE-001 "Quiet queue" trigger section; deferred until adoption is proven
+- [x] 2026-06-05T01:54 :: note /opt/TGW/data/history/ItemArchive/ in the project plan for reference — added to Data cleanup section as ItemArchive note
+- [x] 2026-06-05T02:06 :: note archive index in plan and integrate — archive index path noted in Data cleanup + PP-SOLD-001 Tier 2 status; integrate as `ebay_sku_migrate` progresses
+- [x] 2026-06-05T02:25 :: Add to plan: add whisper interfaces build out to interfaces. See tgw.source for ideas. add whispertosuggest. Add tasker suggest. option to capture audio and process later during photos. — added as PP-WHISPER-001
+- [x] 2026-06-05T02:44 :: note for seo: when running magento external website I noted that my skus are unique on the internet and I get a lot of value from my sku. Make sure it is included in each items seo strategy. — added to PP-SEO-001 SKU-as-search-term note
+- [x] 2026-06-05T03:14 :: tgw todo: similar to picklist, lists todo list. tgw todo prints full todo all agents. todo admin todo claude todo gemini todo db versatile enough to add human/mechanical and ai agents. — added as PP-TODO-001
+- [ ] 2026-06-05T04:02 :: tomorrow 2026-06-06: review PP-LOOKUP-001 Tier 1 complete — add igdb-credentials.json to secrets_root if you have a Twitch dev account; consider next priority from Implementation TODO (PP-MULTIMODEL-001 routing guide or PP-PRICE-004 velocity)
