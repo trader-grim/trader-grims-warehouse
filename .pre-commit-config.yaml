@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-lint
+        name: ruff lint
+        language: system
+        entry: ruff check --no-fix
+        types: [python]
+        files: ^(src|tests)/

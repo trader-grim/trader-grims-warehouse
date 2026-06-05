@@ -82,6 +82,20 @@ maintained_by: Opus (planner)
 - `tgw staged` / `tgw publish` — operator review gate before any item goes live
 - **Open issue**: errorId 25002 `Item.Country` at publish for some categories (34032, 14027, 13916) — offer body is correct, investigating category-specific requirements
 
+### Pipeline additions — 2026-06-05
+- **PP-PRICE-004 DONE** — `tgw/velocity.py` aggregation module; `workers/velocity_stats.py` nightly
+  self-scheduling worker; `tgw velocity-report` CLI (`--refresh`, `--category`, `--min-sold`, `--json`,
+  `--output`); `velocity-stats.json` written to catalog_root (1,540 categories, 55k items on first run);
+  `suggest_price()` gains `velocity` param → returns `velocity_hint: 'hold_launch'` when category
+  sell-through at launch >50%. Stage breakdown (launch/retail/move%) populates as new-pipeline items sell.
+- **PP-SOLD-001 Tier 2 run 2** — re-ran `import-sold-csv` after archive index update (22,124 entries):
+  909 additional fuzzy matches; ~3,083 total sold items now recorded with `ebay_sale` blocks.
+  **Archive tombstone pass added** (`pull.restore_archive_tombstone`): when archive index matches a
+  listing ID but ItemData JSON is absent, the full item JSON is extracted from the archive ZIP and
+  restored as `_archive_tombstone: True`, then marked sold normally. Dry-run peeks without writing.
+  Archive IDs (223–326xxx, ~2018–2023) predate the 2-year CSV window — 0 hits until a full all-time
+  eBay sold export is used (`tgw import-sold-csv <all-time.csv> --fuzzy`).
+
 ### Pipeline additions — 2026-06-04
 - **PP-SYNC-001 ALL PHASES DONE** — `ebay_sync` full write-back; `tgw ebay-pull`; `tgw import-sold-csv`; `tgw ebay-sweep` (markdown checklist, 3 groups, clickable eBay links). Shared sync logic in `tgw/ebay/pull.py`.
 - **PP-SOLD-001 Tier 1 DONE** — `ebay_legacy_sync` extended: `_sync_sold()` polls GetOrders,
@@ -119,13 +133,14 @@ quality scoring, SEO, and better comp search.
 | ✅ | **PP-PRICE-003** comp search improvement | DONE 2026-06-04 | lookup_query stage 0; condition-filtered comps; price_confidence H/M/L |
 | ✅ | **PP-HINT-001** bulk requeue command | DONE 2026-06-04 | `tgw requeue` all filters implemented; `--catalog-only` suppresses eBay cascade |
 | ✅ | **PP-SEO-001** title enhancement pass | ALL PHASES DONE 2026-06-04 | Phases 1–6 complete; EPID needs `commerce.catalog.readonly` scope (silent skip until granted) |
-| 3 | **PP-SOLD-001 Tier 2** CSV import test | DONE — re-run later | 2-year CSV tested: 208 listing-ID matches + 937 fuzzy-title matches. Archive index 6,824 entries, 0 matches (only older listings). Re-run after `ebay_sku_migrate` builds archive further. |
+| 3 | **PP-SOLD-001 Tier 2** CSV import test | DONE — re-run w/ full history | 2-year CSV: 208 listing-ID + 909 fuzzy matches (run 2). Archive tombstone pass built (pull.py `restore_archive_tombstone`). Archive IDs 223–326xxx predate the 2-year window; **need full all-time eBay sold export** to get hits. |
 | 4 | **PP-SOLD-001 Tier 3** sweep checklist | after Tier 2 | `tgw ebay-sweep` output → physical review workflow |
 | 5 | **PP-REF-001** item JSON schema doc | DONE 2026-06-04 | `docs/.../reference/TGW-Item-JSON-Schema.md` — all fields, sub-dicts, writers, pipeline flow diagram |
 | 6 | **PP-CI-001** linting + GitHub Actions | DONE 2026-06-04 | ruff clean; `--no-fix` CI; `.pre-commit-config.yaml` (files: src/tests only); pre-commit installed |
 | 7 | **PP-REPRICER-001** market-aware repricer | blocked | Blocked on `buy.marketplace_insights` scope approval |
 | ✅ | **PP-LOOKUP-001 Tier 1 remaining** | DONE 2026-06-05 | IGDB, JustTCG, Open Food Facts — all implemented; credentials needed for IGDB |
-| 9 | **PP-MULTIMODEL-001** multi-AI routing | — | Task routing guide: Haiku/Sonnet/Opus/Gemini Code/Perplexity/Ollama; e-sneaker-net pattern; informs all future work |
+| ✅ | **PP-PRICE-004** velocity analytics | DONE 2026-06-05 | `tgw velocity-report`; `velocity_stats` nightly worker; `velocity` param in `suggest_price()`; velocity-stats.json in catalog |
+| 10 | **PP-MULTIMODEL-001** multi-AI routing | — | Task routing guide: Haiku/Sonnet/Opus/Gemini Code/Perplexity/Ollama; e-sneaker-net pattern; informs all future work |
 
 **Running in background:**
 - `ebay_sku_migrate` — ~8,350 live listings remaining; ~5/hr; ~70 days to complete
@@ -533,12 +548,16 @@ succeeds. Makes sold/active guards reliable without hitting eBay API at pipeline
 - **Tier 1 DONE**: `ebay_legacy_sync` extended with `_sync_sold()` — GetOrders polling,
   365-day initial lookback in 90-day windows, state file at `runtime/state/ebay-sold-sync-state.json`.
   Items matched by `listing_id`, written `status=sold` + `ebay_sale` block, catalog_rebuild enqueued.
-- **Tier 2 CSV import done** — `tgw import-sold-csv` tested against full 2-year export
-  (`ebay-all-orders-report-2024-06-05-2026-06-04`): 208 listing-ID matches + 937 fuzzy-title matches
-  at 0.80 Jaccard threshold. CSV quirks fixed: UTF-8 BOM + blank leading row, column name variants.
-  Archive index built at `/opt/TGW/var/archive-ebay-index.json` (6,824 entries from 16,937 zips);
-  0 archive matches in this run — archive only covers older legacy listings, more will index as
-  `ebay_sku_migrate` runs. **Re-run `tgw import-sold-csv` in ~30 days** once migrate has progressed.
+- **Tier 2 CSV import done (run 2)** — 2-year CSV (`2024-06-05 → 2026-06-04`): 208 listing-ID
+  matches + 909 fuzzy-title matches (total ~3,083 sold items now recorded).
+  **Archive tombstone pass added** (`pull.restore_archive_tombstone`): when archive index matches
+  a listing ID but ItemData JSON is absent, the item is extracted from the archive ZIP and restored
+  as a tombstone (`_archive_tombstone: True`, `ebay_listing.listing_id` set from `Item number`),
+  then marked sold normally. Idempotent; dry-run peeks without writing.
+  Archive index is 22,124 entries (223–326xxx range, ~2018–2023 era). The 2-year CSV does not
+  overlap this range — **0 archive matches until a full all-time eBay sold export is used**.
+  To get archive hits: download complete sold history from Seller Hub (all years) and re-run
+  `tgw import-sold-csv <full-history.csv> --fuzzy`.
   Flags: `--fuzzy` / `--fuzzy-threshold`; archive pass auto-activates when cache exists.
 - Tier 3 (physical sweep checklist) pending.
 
@@ -1248,36 +1267,31 @@ All three fixes implemented in `tgw/ebay/pricing.py`:
 - Stored in `draft_listing.price_confidence`; displayed as H/M/L in `tgw staged` PC column
 - `ebay_price` passes `item_condition` and `product_lookup` to `suggest_price()`
 
-### PP-PRICE-004 — Sold velocity analytics and feedback loop
+### PP-PRICE-004 — Sold velocity analytics and feedback loop ✅ COMPLETE (2026-06-05)
 
-#### Problem
-We have no feedback on which items sell at which reprice stage, or which categories move
-fast vs. sit. Without this, the reprice schedule is the same for every item regardless of
-category sell-through rate — a toy that sells in 3 days at p50 is treated the same as a
-specialty part that sits for 90 days.
+#### Implemented
+- `tgw/velocity.py` — core aggregation module; scans ItemData; groups sold items by eBay
+  category; computes sold_count, active_count, stale_count, median_days_to_sale,
+  sell_at_launch/retail/move/unknown_pct, never_sold_pct, median_sale_price, p25_sale_price
+- `tgw velocity-report [--refresh] [--category ID] [--min-sold N] [--json] [--output FILE]`
+  — CLI: loads `velocity-stats.json` (or recomputes); renders table or JSON
+- `catalog_root/velocity-stats.json` — aggregated stats; 1540 categories, 55k items on first run
+- `workers/velocity_stats.py` — self-scheduling nightly worker (24h interval)
+- `suggest_price(..., velocity=...)` — `velocity` param added; if category sell_at_launch_pct
+  > 50%, returns `velocity_hint: 'hold_launch'` for future repricer use
 
-#### Data source
-PP-SOLD-001 Tier 1 is live — GetOrders polling writes `ebay_sale` blocks to item JSON.
-Every sold item now records sale price and date. Combined with `reprice_schedule`
-(which records `done_at` per stage), we can reconstruct exactly which stage each item
-sold at and how long it sat.
+#### Stage determination
+Requires `reprice_schedule` with `done_at` timestamps (new-pipeline items only). Legacy sold
+items (2174 total) record stage as 'unknown' and still contribute to price stats. Stage-based
+percentages will populate as new-pipeline items accumulate sold history.
 
-#### Aggregation worker / CLI
-- `tgw velocity-report` — CLI command, reads sold items from catalog, groups by eBay category
-- Per-category output: `{sold_count, median_days_to_sale, sell_at_launch_pct, sell_at_retail_pct,
-  sell_at_move_pct, never_sold_pct, median_sale_price, p25_sale_price}`
-- Store aggregated stats in `catalog_root/velocity-stats.json`; refresh on demand or nightly
-- `workers/velocity_stats.py` — nightly job, enqueued by cron or self-scheduling
+#### To enable velocity_stats worker
+`systemctl enable --now tgw-worker@velocity_stats.service`
+(already registered in pyproject.toml + uses `tgw-worker@.service` template)
 
-#### Feedback into pricing
-- `suggest_price()` in `pricing.py`: accept optional `velocity` param — if category has
-  high sell-through at launch (>50%), hold at launch price longer before stepping down
-- Per-category `reprice_stages` override in config already exists — velocity report informs
-  which categories need custom tuning
-- Feeds PP-REPRICER-001 as foundational input once that is designed
-
-#### Dependency
-PP-SOLD-001 Tier 1 (done) + sufficient sold history (run for a few weeks before data is meaningful)
+#### Next step (PP-REPRICER-001)
+Wire `velocity_hint: 'hold_launch'` into reprice schedule construction to extend stage 0
+hold period for fast-moving categories. Blocked on `buy.marketplace_insights` scope.
 
 ### PP-LISTING-001 — Description footer and picklist line (pending)
 - Add configurable boilerplate footer to all eBay listing descriptions

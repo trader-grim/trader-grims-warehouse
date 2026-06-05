@@ -228,6 +228,7 @@ def suggest_price(
     category_id: str = '',
     item_condition: str = '',
     product_lookup: Optional[Dict[str, Any]] = None,
+    velocity: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Suggest a price for *title* based on Browse API active listing comps.
@@ -239,15 +240,27 @@ def suggest_price(
     Falls back to cfg['category_price_defaults'][category_id] when Browse API
     returns insufficient comps.
 
+    velocity: optional per-category velocity stats dict (from velocity-stats.json
+    categories[category_id]).  If the category has >50% sell-through at launch,
+    a 'velocity_hint' of 'hold_launch' is added to the result to signal that the
+    reprice schedule should hold the launch price longer before stepping down.
+
     Returns a dict with keys:
         price             float or None (None = insufficient data)
         source            description of how the price was derived
         comps             {count, min, p25, median, p75, max}
         price_confidence  'high' | 'medium' | 'low'
+        velocity_hint     'hold_launch' | None
         queried_at        ISO-8601 timestamp
     """
     queried_at = datetime.now(timezone.utc).isoformat()
     pl         = product_lookup or {}
+
+    # Velocity hint: if this category historically sells >50% at launch,
+    # signal that the reprice schedule should hold the launch price longer.
+    vel_hint: Optional[str] = None
+    if velocity and velocity.get('sell_at_launch_pct', 0) > 0.50:
+        vel_hint = 'hold_launch'
 
     # Resolve item condition rank for filtering
     item_rank: Optional[int] = _ITEM_CONDITION_RANK.get(
@@ -314,6 +327,7 @@ def suggest_price(
                 'source':           f'category_default:{category_id}',
                 'comps':            {},
                 'price_confidence': 'low',
+                'velocity_hint':    vel_hint,
                 'queried_at':       queried_at,
             }
         log.info('pricing: insufficient comps for %r', title[:60])
@@ -322,6 +336,7 @@ def suggest_price(
             'source':           'insufficient_data',
             'comps':            {},
             'price_confidence': 'low',
+            'velocity_hint':    vel_hint,
             'queried_at':       queried_at,
         }
 
@@ -335,5 +350,6 @@ def suggest_price(
         'source':           source,
         'comps':            stats,
         'price_confidence': confidence,
+        'velocity_hint':    vel_hint,
         'queried_at':       queried_at,
     }

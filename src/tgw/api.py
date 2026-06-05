@@ -344,6 +344,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--manifest', default='',
                    help='path for rollback manifest JSON (default: var/log/sku-migrate-<ts>.json)')
 
+    p = sub.add_parser('velocity-report',
+                       help='sold velocity analytics by eBay category (PP-PRICE-004)')
+    p.add_argument('--category', default=None, metavar='CAT_ID',
+                   help='show stats for one category ID only')
+    p.add_argument('--refresh', action='store_true',
+                   help='recompute stats from ItemData before displaying')
+    p.add_argument('--json', action='store_true', dest='json_out',
+                   help='output raw JSON instead of formatted table')
+    p.add_argument('--output', '-o', default=None,
+                   help='write report to file instead of stdout')
+    p.add_argument('--min-sold', type=int, default=1, metavar='N',
+                   help='hide categories with fewer than N sold items (default: 1)')
+
     return parser
 
 
@@ -860,10 +873,34 @@ def cmd_import_sold_csv(cfg: Dict[str, Any], csv_path: Path,
         archive_index = build_archive_index(archive_dir, cfg['itemdata_root'],
                                             cache_path=cache_path)
 
-        archive_matched = 0
+        archive_matched    = 0
+        archive_tombstoned = 0
         for row in unmatched_rows:
-            listing_id = _pick(row, _COL_LISTING_ID)
-            json_path  = archive_index.get(listing_id, (None, None))[1] if listing_id else None
+            listing_id  = _pick(row, _COL_LISTING_ID)
+            entry       = archive_index.get(listing_id) if listing_id else None
+            sku_match   = entry[0] if entry else None
+            json_path   = entry[1] if entry else None
+
+            if json_path and not json_path.exists() and sku_match:
+                if dry_run:
+                    # Peek without writing — count if ZIP is present
+                    zip_path = archive_dir / f'{sku_match}.zip'
+                    if zip_path.exists():
+                        stats['matched'] += 1
+                        archive_matched   += 1
+                        archive_tombstoned += 1
+                        stats['marked']   += 1
+                    else:
+                        still_unmatched_rows.append(row)
+                    continue
+                else:
+                    from .ebay.pull import restore_archive_tombstone
+                    json_path = restore_archive_tombstone(
+                        archive_dir, sku_match, itemdata_root, cfg
+                    )
+                    if json_path:
+                        archive_tombstoned += 1
+
             if not json_path or not json_path.exists():
                 still_unmatched_rows.append(row)
                 continue
@@ -896,8 +933,9 @@ def cmd_import_sold_csv(cfg: Dict[str, Any], csv_path: Path,
                 stats['errors'] += 1
                 print(f'  ERROR archive match listing {listing_id}: {exc}')
 
-        stats['archive_matched'] = archive_matched
-        print(f'  Archive pass: {archive_matched} additional matches')
+        stats['archive_matched']    = archive_matched
+        stats['archive_tombstoned'] = archive_tombstoned
+        print(f'  Archive pass: {archive_matched} matches ({archive_tombstoned} tombstones restored)')
     elif unmatched_rows and not cache_path.exists():
         print('  Archive pass skipped — run `tgw build-archive-index` once to enable it')
         still_unmatched_rows = unmatched_rows
@@ -985,6 +1023,40 @@ def cmd_import_sold_csv(cfg: Dict[str, Any], csv_path: Path,
                 print(line)
 
     return {'ok': True, 'dry_run': dry_run, **stats}
+
+
+def cmd_velocity_report(
+    cfg: Dict[str, Any],
+    category: Optional[str] = None,
+    refresh: bool = False,
+    min_sold: int = 1,
+) -> Dict[str, Any]:
+    """Compute or load velocity stats and return a report dict."""
+    from tgw.velocity import aggregate_velocity, load_velocity_stats, save_velocity_stats
+
+    itemdata_root: Path = cfg['itemdata_root']
+    catalog_root:  Path = cfg['catalog_root']
+
+    stats = None
+    if not refresh:
+        stats = load_velocity_stats(catalog_root)
+
+    if stats is None:
+        stats = aggregate_velocity(itemdata_root)
+        save_velocity_stats(catalog_root, stats, pretty=cfg.get('pretty', True))
+
+    cats = stats.get('categories', {})
+    if category:
+        cats = {k: v for k, v in cats.items() if k == category}
+    if min_sold > 1:
+        cats = {k: v for k, v in cats.items() if v.get('sold_count', 0) >= min_sold}
+
+    return {
+        'ok':           True,
+        'generated_at': stats.get('generated_at'),
+        'item_count':   stats.get('item_count', 0),
+        'categories':   cats,
+    }
 
 
 def cmd_ebay_sweep(cfg: Dict[str, Any], *,
@@ -1342,6 +1414,56 @@ def main() -> int:
                           f'CC=cat-conf(!=low) St=L/S Days=days-listed')
                     print(f'Note: {result["note"]}')
                 return 0
+
+        elif args.op == 'velocity-report':
+            result = cmd_velocity_report(
+                cfg,
+                category=args.category,
+                refresh=args.refresh,
+                min_sold=args.min_sold,
+            )
+            if args.json_out or not result['ok']:
+                out_text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+                if args.output:
+                    Path(args.output).write_text(out_text, encoding='utf-8')
+                    print(f'Written to {args.output}')
+                else:
+                    print(out_text)
+            else:
+                cats = result['categories']
+                lines = [
+                    f'Velocity report  generated={result["generated_at"]}  '
+                    f'items={result["item_count"]}  categories={len(cats)}',
+                    '',
+                    f'{"Cat ID":<10} {"Category Name":<30} {"Sold":>5} {"Active":>6} '
+                    f'{"Stale":>5} {"Med$":>6} {"p25$":>6} '
+                    f'{"Med Days":>8}  {"Launch%":>7} {"Retail%":>7} {"Move%":>6} {"?%":>5}',
+                    '-' * 108,
+                ]
+                for cat_id, c in sorted(cats.items(),
+                                        key=lambda x: x[1].get('sold_count', 0),
+                                        reverse=True):
+                    name = (c.get('category_name') or '')[:30]
+                    med_p   = f'${c["median_sale_price"]:.2f}' if c.get('median_sale_price') else '   N/A'
+                    p25_p   = f'${c["p25_sale_price"]:.2f}'   if c.get('p25_sale_price')    else '   N/A'
+                    med_d   = f'{c["median_days_to_sale"]:.1f}' if c.get('median_days_to_sale') is not None else '   N/A'
+                    launch  = f'{c["sell_at_launch_pct"]*100:.0f}%'
+                    retail  = f'{c["sell_at_retail_pct"]*100:.0f}%'
+                    move    = f'{c["sell_at_move_pct"]*100:.0f}%'
+                    unknown = f'{c["sell_at_unknown_pct"]*100:.0f}%'
+                    lines.append(
+                        f'{cat_id:<10} {name:<30} {c["sold_count"]:>5} '
+                        f'{c["active_count"]:>6} {c["stale_count"]:>5} '
+                        f'{med_p:>6} {p25_p:>6} {med_d:>8}  '
+                        f'{launch:>7} {retail:>7} {move:>6} {unknown:>5}'
+                    )
+                out_text = '\n'.join(lines) + '\n'
+                if args.output:
+                    Path(args.output).write_text(out_text, encoding='utf-8')
+                    print(f'Written to {args.output}')
+                else:
+                    print(out_text)
+            return 0
 
         elif args.op == 'staged':
             result = cmd_staged(cfg)

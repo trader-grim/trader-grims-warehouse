@@ -20,6 +20,7 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "ruff>=0.4",
+    "pre-commit>=3.0",
 ]
 thumbnails = [
     "Pillow>=10.0",
@@ -41,6 +42,7 @@ tgw-ebay-stage-worker        = "tgw.workers.ebay_stage:main"
 tgw-ebay-legacy-sync-worker  = "tgw.workers.ebay_legacy_sync:main"
 tgw-ebay-publish-worker   = "tgw.workers.ebay_publish:main"
 tgw-ebay-price-reducer-worker = "tgw.workers.ebay_price_reducer:main"
+tgw-velocity-stats-worker     = "tgw.workers.velocity_stats:main"
 tgw-ebay-sync-worker      = "tgw.workers.ebay_sync:main"
 tgw-ebay-sku-migrate-worker = "tgw.workers.ebay_sku_migrate:main"
 tgw-multi-intake-worker   = "tgw.workers.multi_intake:main"

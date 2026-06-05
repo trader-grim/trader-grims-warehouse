@@ -120,11 +120,13 @@ Run as `tgw` user — source files are `rw-------`, secrets are `chmod 600`.
 ## Current phase
 
 See master plan `## Current state`, `## Implementation TODO`, and `## Phase N` sections.
-As of 2026-06-05: Phases 1–4 + PP-STAGE-001 + PP-REPRICE-001 + PP-LISTING-001 + PP-SYNC-001
-(all phases) + PP-SOLD-001 Tier 1 + PP-LOOKUP-001 ALL Tier 1 complete (IGDB, JustTCG, OFF added).
+As of 2026-06-05 (session 5): Phases 1–4 + PP-STAGE-001 + PP-REPRICE-001 + PP-LISTING-001 +
+PP-SYNC-001 (all phases) + PP-SOLD-001 Tier 1 + PP-LOOKUP-001 ALL Tier 1 + PP-PRICE-004 complete.
 Pipeline: photo intake → AI identify (with barcode product lookup) → eBay draft → upload →
 price (launch=110% max→.99) → stage → `tgw staged` operator review → `tgw publish` → live.
 `ebay_price_reducer` handles scheduled markdown (p75 day 3 → p25 day 17).
 `ebay_sku_migrate` running (~8,350 eBay live listings remain; ~70 days at 5/hr).
+`tgw velocity-report` live — 1,540 categories, ~3,083 sold items recorded.
+Archive tombstone pass added to `import-sold-csv`; needs full all-time eBay CSV for archive hits.
 Next priorities (see Implementation TODO table in plan):
-  PP-MULTIMODEL-001 (task routing guide) → PP-REPRICER-001 (blocked on scope) → PP-PRICE-004 (velocity).
+  PP-MULTIMODEL-001 (task routing guide) → PP-REPRICER-001 (blocked on scope).

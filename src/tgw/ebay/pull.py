@@ -186,6 +186,58 @@ def build_archive_index(archive_dir: Path, itemdata_root: Path,
     return index
 
 
+def restore_archive_tombstone(
+    archive_dir: Path,
+    sku: str,
+    itemdata_root: Path,
+    cfg: Dict[str, Any],
+) -> Optional[Path]:
+    """
+    Extract {sku}.json from an archive ZIP into ItemData so it can be marked sold.
+
+    Creates itemdata_root/{sku}/{sku}.json with:
+      - all original fields from the archive ZIP
+      - ebay_listing.listing_id populated from Item number (if present)
+      - _archive_tombstone: True marker
+
+    Returns the json_path on success, None on failure.
+    Idempotent — if the file already exists it is returned immediately.
+    """
+    import zipfile
+
+    json_path = itemdata_root / sku / f'{sku}.json'
+    if json_path.exists():
+        return json_path
+
+    zip_path = archive_dir / f'{sku}.zip'
+    if not zip_path.exists():
+        log.warning('restore_archive_tombstone: no archive ZIP for %s', sku)
+        return None
+
+    json_name = f'{sku}.json'
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            if json_name not in zf.namelist():
+                log.warning('restore_archive_tombstone: %s not in %s', json_name, zip_path.name)
+                return None
+            item = json.loads(zf.read(json_name).decode('utf-8'))
+    except Exception as exc:
+        log.warning('restore_archive_tombstone: failed reading %s: %s', zip_path.name, exc)
+        return None
+
+    item_number = str(item.get('Item number') or '').strip()
+    if item_number and item_number not in ('0', ''):
+        item.setdefault('ebay_listing', {})['listing_id'] = item_number
+
+    item['_archive_tombstone'] = True
+
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(json_path, item, pretty=cfg.get('pretty', True))
+    log.info('restore_archive_tombstone: restored %s from %s', sku, zip_path.name)
+    tgw_logging.log_event('archive_tombstone_restored', sku=sku)
+    return json_path
+
+
 def find_title_match(
     query_title: str,
     title_index: Dict[str, Tuple[str, Path]],
