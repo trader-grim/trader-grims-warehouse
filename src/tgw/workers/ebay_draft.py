@@ -45,9 +45,30 @@ If an aspect does not apply, use null.
 Respond with valid JSON only — an object mapping aspect name to suggested value.
 """
 
+_SYSTEM_DESC = """\
+You are writing an eBay listing description. Write in natural prose sentences.
+No bullet points, headers, or ALL CAPS. No markdown. Plain text only.
+Target length: 200+ words.
+"""
+
 
 _OFFLINE_CSV_FIELDS = ['sku', 'title', 'category_id', 'category_name',
                        'condition', 'format', 'quantity', 'price', 'description']
+
+
+def _category_confidence(pl_category: str, ebay_category: str) -> str:
+    """Jaccard token overlap between product_lookup category and eBay category name."""
+    _stop = {'a', 'an', 'the', 'and', 'or', 'of', 'in', 'for', 'by', 'to', '&'}
+    a = {w.lower() for w in pl_category.split() if w.lower() not in _stop}
+    b = {w.lower() for w in ebay_category.split() if w.lower() not in _stop}
+    if not a or not b:
+        return 'low'
+    ratio = len(a & b) / len(a | b)
+    if ratio >= 0.30:
+        return 'high'
+    if ratio >= 0.10:
+        return 'medium'
+    return 'low'
 
 
 def _is_ebay_offline(exc: Exception) -> bool:
@@ -214,6 +235,12 @@ class EbayDraftWorker(QueueWorker):
         tgw_logging.log_event('ebay_draft_aspects_call', sku=sku,
                               category_id=category_id, aspect_count=len(aspects))
 
+        # Phase 5 — description enrichment: if product_lookup has a substantive
+        # description, ask the model to produce a 200+ word eBay description that
+        # weaves in the product data, brand/MPN, and the AI's visual observation.
+        pl_description = (pl.get('description') or '').strip()
+        enrich_description = bool(pl_description and len(pl_description.split()) >= 20)
+
         from tgw.queue.ollama_lock import acquire_ollama_lock
         with acquire_ollama_lock(self.config):
             raw = chat(
@@ -221,6 +248,30 @@ class EbayDraftWorker(QueueWorker):
                 messages=[{'role': 'user', 'content': prompt}],
                 system=_SYSTEM,
             )
+
+            if enrich_description:
+                brand = pl.get('brand', '') or prefilled.get('Brand', '')
+                mpn   = pl.get('mpn', '')   or prefilled.get('MPN', '') \
+                                             or prefilled.get('Model', '')
+                desc_prompt = (
+                    f'Item: {title}\n'
+                    f'Condition: {item.get("condition", "used")}\n'
+                    + (f'Brand: {brand}\n' if brand else '')
+                    + (f'Model/MPN: {mpn}\n' if mpn else '')
+                    + f'\nProduct information:\n{pl_description}\n'
+                    + f'\nWhat the photos show:\n{item.get("description", "")}\n'
+                    + '\nWrite the eBay listing description.'
+                )
+                raw_desc = chat(
+                    model=TEXT_MODEL,
+                    messages=[{'role': 'user', 'content': desc_prompt}],
+                    system=_SYSTEM_DESC,
+                )
+                enriched_description = raw_desc.strip()
+                log.info('%s: description enriched to %d words',
+                         sku, len(enriched_description.split()))
+            else:
+                enriched_description = None
 
         try:
             suggested = extract_json(raw)
@@ -294,7 +345,18 @@ class EbayDraftWorker(QueueWorker):
         photo_count = sum(1 for p in sku_dir.iterdir()
                           if p.is_file() and p.suffix in _IMG_SFXS)
 
+        # Phase 4 — category confidence: compare product_lookup category hint
+        # against the eBay taxonomy category we resolved.
+        cat_confidence = None
+        pl_cat = (pl.get('category') or '').strip()
+        if pl_cat and category_name:
+            cat_confidence = _category_confidence(pl_cat, category_name)
+            if cat_confidence == 'low':
+                log.info('%s: category confidence LOW — product_lookup=%r ebay=%r',
+                         sku, pl_cat, category_name)
+
         # Build draft listing block
+        effective_description = enriched_description or item.get('description', '')
         draft: Dict[str, Any] = {
             'title':                      title,
             'category_id':                category_id,
@@ -307,12 +369,16 @@ class EbayDraftWorker(QueueWorker):
             'quantity':                   1,
             'price':                      None,
             'item_specifics':             item_specifics,
-            'description':                item.get('description', ''),
+            'description':                effective_description,
             'aspects_required_total':     len(req_aspects),
             'aspects_required_filled':    req_filled_count,
             'aspects_recommended_total':  len(rec_aspects),
             'aspects_recommended_filled': rec_filled_count,
         }
+        if cat_confidence:
+            draft['category_confidence'] = cat_confidence
+        if enriched_description:
+            draft['description_source'] = 'enriched'
 
         # Build full eBay listing description: AI text + boilerplate footer + picklist line
         item['draft_listing'] = draft   # temporary — needed by build_listing_description

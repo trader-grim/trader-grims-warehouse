@@ -293,6 +293,20 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--output', default=None,
                    help='write markdown checklist to this file instead of stdout')
 
+    p = sub.add_parser('seo-audit',
+                       help='SEO quality report for live and staged listings (PP-SEO-001)')
+    p.add_argument('--limit', type=int, default=50,
+                   help='max items to show (default 50, worst first)')
+    p.add_argument('--live-only', action='store_true',
+                   help='only show items with Active eBay listings')
+
+    p = sub.add_parser('build-archive-index',
+                       help='scan ItemArchive zips → build eBay-ID lookup cache (run once)')
+    p.add_argument('--archive-dir', default='/opt/TGW/data/history/ItemArchive',
+                   help='path to ItemArchive directory')
+    p.add_argument('--cache', default='/opt/TGW/var/archive-ebay-index.json',
+                   help='output cache file path')
+
     p = sub.add_parser('import-sold-csv',
                        help='import eBay Seller Hub sold-orders CSV → mark items sold')
     p.add_argument('file', help='path to eBay sold-orders CSV file')
@@ -300,6 +314,10 @@ def _build_parser() -> argparse.ArgumentParser:
                    help='show what would be marked without writing')
     p.add_argument('--show-columns', action='store_true',
                    help='print CSV column names and exit (for format inspection)')
+    p.add_argument('--fuzzy', action='store_true',
+                   help='second pass: match unresolved rows by title similarity')
+    p.add_argument('--fuzzy-threshold', type=float, default=0.80, metavar='N',
+                   help='Jaccard similarity threshold for title match (default 0.80)')
 
     p = sub.add_parser('ebay-pull',
                        help='on-demand eBay data pull: active listings + sold orders → ItemData')
@@ -539,6 +557,88 @@ def cmd_resolve_legacy(cfg: Dict[str, Any], skus: List[str],
     }
 
 
+def cmd_seo_audit(cfg: Dict[str, Any], limit: int = 50,
+                  live_only: bool = False) -> Dict[str, Any]:
+    """
+    SEO quality report for live and staged listings.
+
+    Surfaces items with weak titles, missing brand/model, low quality scores,
+    category mismatches, and thin descriptions — sorted worst-first.
+    Impression data requires sell.analytics.readonly (not yet applied).
+    """
+    root: Path = cfg['itemdata_root']
+    items = []
+
+    for child in sorted(root.iterdir()):
+        jf = child / f'{child.name}.json'
+        if not jf.exists():
+            continue
+        try:
+            doc = json.loads(jf.read_text(encoding='utf-8'))
+        except Exception:
+            continue
+
+        listing = doc.get('ebay_listing', {})
+        offer   = doc.get('ebay_offer', {})
+        draft   = doc.get('draft_listing') or {}
+
+        is_live   = listing.get('status') == 'Active'
+        is_staged = offer.get('offer_id') and offer.get('status') == 'UNPUBLISHED'
+
+        if not is_live and not is_staged:
+            continue
+        if live_only and not is_live:
+            continue
+
+        quality = draft.get('quality') or {}
+        title   = draft.get('title') or doc.get('title', '')
+        desc    = draft.get('description') or doc.get('description', '')
+        flags   = draft.get('title_flags') or []
+
+        # Compute days listed (live items only)
+        days_listed = None
+        pub_at = listing.get('published_at') or listing.get('synced_at')
+        if is_live and pub_at:
+            try:
+                from datetime import datetime, timezone
+                pub_dt    = datetime.fromisoformat(pub_at.replace('Z', '+00:00'))
+                days_listed = (datetime.now(timezone.utc) - pub_dt).days
+            except Exception:
+                pass
+
+        seo_issues = list(flags)
+        cat_conf = draft.get('category_confidence')
+        if cat_conf == 'low':
+            seo_issues.append('cat_mismatch')
+        desc_words = len(desc.split()) if desc else 0
+        if desc_words < 75:
+            seo_issues.append(f'desc_short({desc_words}w)')
+        if not draft.get('epid') and not doc.get('epid'):
+            pl = doc.get('product_lookup') or {}
+            from tgw.apis.lookup.base import barcode_from_item
+            barcode, _ = barcode_from_item(doc)
+            if barcode and not pl.get('source'):
+                seo_issues.append('no_epid')
+
+        items.append({
+            'sku':              child.name,
+            'title':            title[:50],
+            'status':           'live' if is_live else 'staged',
+            'days_listed':      days_listed,
+            'quality':          quality.get('score'),
+            'price_confidence': draft.get('price_confidence'),
+            'category_confidence': cat_conf,
+            'desc_words':       desc_words,
+            'seo_issues':       seo_issues,
+            'listing_id':       listing.get('listing_id'),
+        })
+
+    items.sort(key=lambda x: (x['quality'] is None, x['quality'] or 0))
+    items = items[:limit]
+    return {'ok': True, 'count': len(items), 'items': items,
+            'note': 'Impression data requires sell.analytics.readonly scope'}
+
+
 def cmd_staged(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """List all items with UNPUBLISHED eBay offers awaiting operator review."""
     root: Path = cfg['itemdata_root']
@@ -563,10 +663,11 @@ def cmd_staged(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 'category':         doc.get('ebay_category_name', ''),
                 'offer_id':         offer.get('offer_id'),
                 'staged_at':        offer.get('staged_at', ''),
-                'quality':          quality.get('score'),
-                'quality_flags':    quality.get('flags', []),
-                'price_confidence': draft.get('price_confidence'),
-                'comp_count':       (offer.get('price_comps') or {}).get('count'),
+                'quality':              quality.get('score'),
+                'quality_flags':        quality.get('flags', []),
+                'price_confidence':     draft.get('price_confidence'),
+                'category_confidence':  draft.get('category_confidence'),
+                'comp_count':           (offer.get('price_comps') or {}).get('count'),
             })
     # Sort ascending by quality score so worst items surface first
     items.sort(key=lambda x: (x['quality'] is None, x['quality'] or 0))
@@ -631,7 +732,9 @@ def cmd_publish(cfg: Dict[str, Any], skus: List[str],
 
 def cmd_import_sold_csv(cfg: Dict[str, Any], csv_path: Path,
                         dry_run: bool = False,
-                        show_columns: bool = False) -> Dict[str, Any]:
+                        show_columns: bool = False,
+                        fuzzy: bool = False,
+                        fuzzy_threshold: float = 0.80) -> Dict[str, Any]:
     """
     Import an eBay Seller Hub sold-orders CSV and mark matched items sold.
 
@@ -645,7 +748,7 @@ def cmd_import_sold_csv(cfg: Dict[str, Any], csv_path: Path,
     # eBay Seller Hub column names vary slightly across exports; try each in order.
     _COL_LISTING_ID = ('Item number', 'Item Number', 'ItemID', 'Item ID')
     _COL_SALE_DATE  = ('Sale date', 'Sale Date', 'Purchase date', 'Purchase Date', 'Order date')
-    _COL_SALE_PRICE = ('Sale price', 'Sale Price', 'Item price', 'Sold for', 'Unit price')
+    _COL_SALE_PRICE = ('Sale price', 'Sale Price', 'Item price', 'Sold for', 'Sold For', 'Unit price')
     _COL_BUYER      = ('Buyer username', 'Buyer Username', 'Buyer user ID', 'Buyer')
     _COL_ORDER_ID   = ('Order ID', 'Order number', 'Sales record number', 'Transaction ID')
     _COL_QUANTITY   = ('Quantity', 'Qty', 'Item quantity')
@@ -653,16 +756,32 @@ def cmd_import_sold_csv(cfg: Dict[str, Any], csv_path: Path,
     def _pick(row: Dict[str, str], candidates: tuple) -> str:
         for c in candidates:
             if c in row:
-                return row[c].strip()
+                return (row[c] or '').strip()
         return ''
 
     if not csv_path.exists():
         return {'ok': False, 'error': f'file not found: {csv_path}'}
 
+    # eBay Seller Hub exports often have one or more blank leading rows before
+    # the real header. Skip any row where every field is empty, then use the
+    # first non-blank row as the header.
+    import io as _io
     with csv_path.open(encoding='utf-8-sig', newline='') as fh:
-        reader = _csv.DictReader(fh)
-        rows = list(reader)
-        columns = reader.fieldnames or []
+        raw_lines = fh.readlines()
+
+    header_idx = None
+    for i, line in enumerate(raw_lines):
+        if any(c.strip().strip('"') for c in line.split(',')):
+            header_idx = i
+            break
+
+    if header_idx is None:
+        return {'ok': False, 'error': 'CSV appears empty — no header row found'}
+
+    content = ''.join(raw_lines[header_idx:])
+    reader = _csv.DictReader(_io.StringIO(content))
+    rows = list(reader)
+    columns = reader.fieldnames or []
 
     if show_columns:
         return {'ok': True, 'columns': list(columns), 'row_count': len(rows)}
@@ -688,7 +807,8 @@ def cmd_import_sold_csv(cfg: Dict[str, Any], csv_path: Path,
         'rows': len(rows), 'matched': 0, 'marked': 0,
         'already_sold': 0, 'unmatched': 0, 'errors': 0,
     }
-    unmatched_ids: List[str] = []
+    unmatched_ids:  List[str]        = []
+    unmatched_rows: List[Dict[str, str]] = []
 
     for row in rows:
         listing_id = _pick(row, _COL_LISTING_ID)
@@ -699,6 +819,7 @@ def cmd_import_sold_csv(cfg: Dict[str, Any], csv_path: Path,
         if not json_path:
             stats['unmatched'] += 1
             unmatched_ids.append(listing_id)
+            unmatched_rows.append(row)
             continue
 
         stats['matched'] += 1
@@ -728,12 +849,140 @@ def cmd_import_sold_csv(cfg: Dict[str, Any], csv_path: Path,
             stats['errors'] += 1
             print(f'  ERROR listing {listing_id}: {exc}')
 
-    if unmatched_ids:
-        print(f'  {len(unmatched_ids)} unmatched listing IDs (not in local ItemData):')
-        for lid in unmatched_ids[:20]:
+    # --- Archive pass (uses pre-built cache; skip if cache absent) -----------
+    archive_dir  = cfg['itemdata_root'].parent / 'history' / 'ItemArchive'
+    cache_path   = cfg['itemdata_root'].parent.parent / 'var' / 'archive-ebay-index.json'
+    still_unmatched_rows: List[Dict[str, str]] = []
+
+    if unmatched_rows and cache_path.exists():
+        from .ebay.pull import build_archive_index
+
+        archive_index = build_archive_index(archive_dir, cfg['itemdata_root'],
+                                            cache_path=cache_path)
+
+        archive_matched = 0
+        for row in unmatched_rows:
+            listing_id = _pick(row, _COL_LISTING_ID)
+            json_path  = archive_index.get(listing_id, (None, None))[1] if listing_id else None
+            if not json_path or not json_path.exists():
+                still_unmatched_rows.append(row)
+                continue
+
+            stats['matched'] += 1
+            sale_price_raw = _pick(row, _COL_SALE_PRICE)
+            try:
+                sale_price = float(sale_price_raw.lstrip('$').replace(',', ''))
+            except (ValueError, AttributeError):
+                sale_price = sale_price_raw
+
+            try:
+                did_mark = mark_item_sold(
+                    json_path,
+                    order_id=_pick(row, _COL_ORDER_ID) or f'csv-archive-{listing_id}',
+                    buyer=_pick(row, _COL_BUYER),
+                    sale_price=sale_price,
+                    quantity=int(_pick(row, _COL_QUANTITY) or '1'),
+                    sale_date=_pick(row, _COL_SALE_DATE),
+                    synced_at=synced_at,
+                    cfg=cfg,
+                    dry_run=dry_run,
+                )
+                if did_mark:
+                    stats['marked'] += 1
+                    archive_matched += 1
+                else:
+                    stats['already_sold'] += 1
+            except Exception as exc:
+                stats['errors'] += 1
+                print(f'  ERROR archive match listing {listing_id}: {exc}')
+
+        stats['archive_matched'] = archive_matched
+        print(f'  Archive pass: {archive_matched} additional matches')
+    elif unmatched_rows and not cache_path.exists():
+        print('  Archive pass skipped — run `tgw build-archive-index` once to enable it')
+        still_unmatched_rows = unmatched_rows
+    else:
+        still_unmatched_rows = unmatched_rows
+
+    remaining_unmatched = still_unmatched_rows
+    unmatched_ids_final = [_pick(r, _COL_LISTING_ID) for r in remaining_unmatched if _pick(r, _COL_LISTING_ID)]
+
+    if unmatched_ids_final:
+        print(f'  {len(unmatched_ids_final)} still unmatched after listing ID + archive passes:')
+        for lid in unmatched_ids_final[:20]:
             print(f'    {lid}')
-        if len(unmatched_ids) > 20:
-            print(f'    ... and {len(unmatched_ids) - 20} more')
+        if len(unmatched_ids_final) > 20:
+            print(f'    ... and {len(unmatched_ids_final) - 20} more')
+
+    # --- Fuzzy title pass (opt-in) -------------------------------------------
+    if fuzzy and remaining_unmatched:
+        from .ebay.pull import build_title_lookup, find_title_match
+
+        catalog_db    = cfg['sqlite_catalog_path']
+        itemdata_root = cfg['itemdata_root']
+        print(f'\n  Building title index for fuzzy pass (threshold={fuzzy_threshold})...')
+        title_index, word_index = build_title_lookup(catalog_db, itemdata_root)
+
+        fuzzy_matched  = 0
+        fuzzy_skipped  = 0   # ambiguous / below threshold
+        fuzzy_details: List[str] = []
+
+        for row in remaining_unmatched:
+            item_title = _pick(row, ('Item Title', 'item_title', 'Item title', 'Title'))
+            if not item_title:
+                fuzzy_skipped += 1
+                continue
+
+            result = find_title_match(item_title, title_index, word_index,
+                                      threshold=fuzzy_threshold)
+            if result is None:
+                fuzzy_skipped += 1
+                continue
+
+            sku, json_path, score = result
+            if not json_path.exists():
+                fuzzy_skipped += 1
+                continue
+
+            listing_id = _pick(row, _COL_LISTING_ID)
+            sale_price_raw = _pick(row, _COL_SALE_PRICE)
+            try:
+                sale_price = float(sale_price_raw.lstrip('$').replace(',', ''))
+            except (ValueError, AttributeError):
+                sale_price = sale_price_raw
+
+            fuzzy_details.append(
+                f'    {sku}  score={score:.2f}  listing={listing_id}'
+                f'  title={item_title[:50]}'
+            )
+
+            try:
+                did_mark = mark_item_sold(
+                    json_path,
+                    order_id=_pick(row, _COL_ORDER_ID) or f'csv-fuzzy-{listing_id}',
+                    buyer=_pick(row, _COL_BUYER),
+                    sale_price=sale_price,
+                    quantity=int(_pick(row, _COL_QUANTITY) or '1'),
+                    sale_date=_pick(row, _COL_SALE_DATE),
+                    synced_at=synced_at,
+                    cfg=cfg,
+                    dry_run=dry_run,
+                )
+                if did_mark:
+                    fuzzy_matched += 1
+                    stats['marked'] += 1
+                else:
+                    stats['already_sold'] += 1
+            except Exception as exc:
+                stats['errors'] += 1
+                print(f'  ERROR fuzzy match {sku}: {exc}')
+
+        stats['fuzzy_matched'] = fuzzy_matched
+        stats['fuzzy_skipped'] = fuzzy_skipped
+        if fuzzy_details:
+            print(f'\n  Fuzzy title matches ({fuzzy_matched} marked, threshold={fuzzy_threshold}):')
+            for line in fuzzy_details:
+                print(line)
 
     return {'ok': True, 'dry_run': dry_run, **stats}
 
@@ -1067,6 +1316,33 @@ def main() -> int:
             result = cmd_resolve_legacy(cfg, args.skus,
                                         enqueue_stage=not args.no_stage)
 
+        elif args.op == 'seo-audit':
+            result = cmd_seo_audit(cfg, limit=args.limit, live_only=args.live_only)
+            if not getattr(args, 'as_json', False) and result['ok']:
+                items = result['items']
+                if not items:
+                    print('No live or staged listings found.')
+                else:
+                    _PC = {'high': 'H', 'medium': 'M', 'low': 'L', None: '—'}
+                    _CC = {'high': 'H', 'medium': 'M', 'low': '!', None: '—'}
+                    print(f'{"SKU":<24} {"Q":>3} {"PC"} {"CC"}  {"St"} {"Days":>4}  '
+                          f'{"Issues":<28} {"Title"}')
+                    print('-' * 100)
+                    for it in items:
+                        q      = it.get('quality')
+                        q_str  = f'{q:3d}' if q is not None else '  —'
+                        pc     = _PC.get(it.get('price_confidence'), '?')
+                        cc     = _CC.get(it.get('category_confidence'), '—')
+                        st     = 'L' if it['status'] == 'live' else 'S'
+                        days   = f'{it["days_listed"]:4d}' if it['days_listed'] is not None else '   —'
+                        issues = ','.join(it['seo_issues'])[:28]
+                        print(f'{it["sku"]:<24} {q_str} {pc:>2} {cc:>2}  {st}  {days}  '
+                              f'{issues:<28} {it["title"][:30]}')
+                    print(f'\n{len(items)} item(s). Q=quality PC=price-conf '
+                          f'CC=cat-conf(!=low) St=L/S Days=days-listed')
+                    print(f'Note: {result["note"]}')
+                return 0
+
         elif args.op == 'staged':
             result = cmd_staged(cfg)
             if not getattr(args, 'as_json', False) and result['ok']:
@@ -1075,19 +1351,21 @@ def main() -> int:
                     print('No items staged and awaiting review.')
                 else:
                     _PC = {'high': 'H', 'medium': 'M', 'low': 'L', None: '—'}
-                    print(f'{"SKU":<24} {"Q":>3} {"PC"}  {"Price":>7}  {"Location":<10} {"Title"}')
-                    print('-' * 88)
+                    _CC = {'high': 'H', 'medium': 'M', 'low': '!', None: '—'}
+                    print(f'{"SKU":<24} {"Q":>3} {"PC"} {"CC"}  {"Price":>7}  {"Location":<10} {"Title"}')
+                    print('-' * 92)
                     for it in items:
                         price    = f'${it["price"]}' if it['price'] else '  N/A'
                         q        = it.get('quality')
                         q_str    = f'{q:3d}' if q is not None else '  —'
                         pc       = _PC.get(it.get('price_confidence'), '?')
+                        cc       = _CC.get(it.get('category_confidence'), '—')
                         flags    = it.get('quality_flags') or []
                         flag_str = f' [{",".join(flags[:3])}]' if flags else ''
-                        print(f'{it["sku"]:<24} {q_str} {pc:>2}  {price:>7}  '
-                              f'{it["location"]:<10} {it["title"][:33]}{flag_str}')
+                        print(f'{it["sku"]:<24} {q_str} {pc:>2} {cc:>2}  {price:>7}  '
+                              f'{it["location"]:<10} {it["title"][:30]}{flag_str}')
                     print(f'\n{len(items)} item(s) awaiting review. '
-                          f'Q=quality 0–100 (worst first)  PC=price confidence H/M/L'
+                          f'Q=quality 0–100  PC=price conf  CC=cat conf(!=low)'
                           f'\nUse: tgw publish <SKU>')
                 return 0
 
@@ -1155,12 +1433,30 @@ def main() -> int:
                 print(json.dumps(result, indent=2))
             return 0 if result['ok'] else 1
 
+        elif args.op == 'build-archive-index':
+            from .ebay.pull import build_archive_index
+            archive_dir = Path(args.archive_dir)
+            cache_path  = Path(args.cache)
+            if not archive_dir.exists():
+                print(f'Archive dir not found: {archive_dir}')
+                return 1
+            # Force a fresh scan by removing cache first
+            if cache_path.exists():
+                cache_path.unlink()
+            idx = build_archive_index(archive_dir, cfg['itemdata_root'],
+                                      cache_path=cache_path)
+            print(json.dumps({'ok': True, 'entries': len(idx),
+                               'cache': str(cache_path)}, indent=2))
+            return 0
+
         elif args.op == 'import-sold-csv':
             from .queue import state_machine as _sm
             _sm.init(cfg['postgres_dsn'])
             result = cmd_import_sold_csv(cfg, Path(args.file),
                                          dry_run=args.dry_run,
-                                         show_columns=args.show_columns)
+                                         show_columns=args.show_columns,
+                                         fuzzy=args.fuzzy,
+                                         fuzzy_threshold=args.fuzzy_threshold)
             if result.get('ok') and not args.show_columns:
                 marked = result.get('marked', 0)
                 if marked and not args.dry_run:

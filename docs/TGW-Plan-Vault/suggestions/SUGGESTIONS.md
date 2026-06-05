@@ -28,3 +28,12 @@
 - [x] 2026-06-04T20:53 :: question: should claude have it's own user? — added as open question in PP-REMOTE-001 / PP-SHELL-001
 - [x] 2026-06-04T21:21 :: add nvm/npm/google code install on my todo list. Add external model todos to my todo list. — added to Operator TODO in plan (nvm/npm, Gemini CLI, Perplexity workflow)
 - [x] 2026-06-04T21:24 :: adopt tgw suggest as main idea and task pipeline and improve small tool set to capture to that. also, is this a better back chanel than btw? Maybe we should also have a handle when quiet queue? — added as PP-CAPTURE-001
+- [x] 2026-06-04T23:21 :: MX Linux / mx-slapshot OS image integration; tgw user UID < 1000; image + /opt/TGW = full system — added as PP-DEPLOY-001
+- [x] 2026-06-05T00:12 :: integrate shipping profile to camera defaults items physically processed by size. Low user interface cost, just need simple tool and small camera app adjust — added to PP-HINT-001 open items
+- [x] 2026-06-05T00:20 :: better more verbose description. Bake seo terms right in. — already in PP-SEO-001 Phase 5 (description enrichment: 200+ words, brand/model/MPN in body)
+- [ ] 2026-06-05T00:47 :: PP-CAPTURE-001 revisit: quiet-queue notification hook (surface tgw suggest backlog when workers go idle) — discuss when appropriate or when Dave brings it up
+- [ ] 2026-06-05T01:54 :: note /opt/TGW/data/history/ItemArchive/ in the project plan for reference
+- [ ] 2026-06-05T02:06 :: note archive index in plan and integrate
+- [ ] 2026-06-05T02:25 :: Add to plan: add whisper interfaces build out to interfaces. See tgw.source for ideas. add whispertosuggest. Add tasker suggest. option to capture audio and process later during photos.
+- [ ] 2026-06-05T02:44 :: note for seo: when running magento external website I noted that my skus are unique on the internet and I get a lot of value from my sku. Make sure it is included in each items seo strategy.
+- [ ] 2026-06-05T03:14 :: tgw todo: similar to picklist, lists todo list. tgw todo prints full todo all agents. todo admin todo claude todo gemini todo db versatile enough to add human/mechanical and ai agents.

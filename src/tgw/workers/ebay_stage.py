@@ -115,6 +115,20 @@ class EbayStageWorker(QueueWorker):
                 f'{sku}: no eBay photo URLs yet — waiting for ebay_upload (will retry)'
             )
 
+        # Phase 3 — EPID association: look up eBay Catalog EPID for barcoded items.
+        # Scope commerce.catalog.readonly required; silently skipped if not granted.
+        if not item.get('epid'):
+            from tgw.apis.ebay.catalog import lookup_epid
+            from tgw.apis.lookup.base import barcode_from_item
+            barcode, _btype = barcode_from_item(item)
+            if barcode:
+                epid = lookup_epid(self.config, barcode)
+                if epid:
+                    item['epid'] = epid
+                    log.info('%s: EPID %s cached (barcode %s)', sku, epid, barcode)
+                    tgw_logging.log_event('ebay_epid_found', sku=sku,
+                                          epid=epid, barcode=barcode)
+
         log.info('ebay_stage: staging %s as UNPUBLISHED offer (price=$%s)', sku, price)
         tgw_logging.log_event('ebay_stage_start', sku=sku, price=price)
 

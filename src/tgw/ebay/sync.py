@@ -180,13 +180,18 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
     # Use the full listing description (AI text + boilerplate + picklist line) if available
     listing_description = draft.get('listing_description') or description
 
+    product_block: Dict[str, Any] = {
+        'title':       title,
+        'description': description,
+        'imageUrls':   image_urls,
+        'aspects':     aspects,
+    }
+    epid = str(item.get('epid') or '').strip()
+    if epid:
+        product_block['epid'] = epid
+
     inv_body: Dict[str, Any] = {
-        'product': {
-            'title':       title,
-            'description': description,
-            'imageUrls':   image_urls,
-            'aspects':     aspects,
-        },
+        'product': product_block,
         'condition':    condition_enum,
         'availability': {
             'shipToLocationAvailability': {

@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-04
+updated: 2026-06-04 (session 2)
 maintained_by: Opus (planner)
 ---
 
@@ -119,8 +119,8 @@ quality scoring, SEO, and better comp search.
 | ✅ | **PP-QUALITY-001** listing quality scorer | DONE 2026-06-04 | score_draft; ebay_draft+price integration; tgw staged Q+PC columns |
 | ✅ | **PP-PRICE-003** comp search improvement | DONE 2026-06-04 | lookup_query stage 0; condition-filtered comps; price_confidence H/M/L |
 | ✅ | **PP-HINT-001** bulk requeue command | DONE 2026-06-04 | `tgw requeue` all filters implemented; `--catalog-only` suppresses eBay cascade |
-| 1 | **PP-SEO-001** title enhancement pass | Phases 1–2 DONE 2026-06-04 | `tgw/seo/title.py` + prefilled specifics in ebay_draft; Phases 3–6 pending |
-| 3 | **PP-SOLD-001 Tier 2** CSV import test | operator action | Dave pulls sold CSV → test `tgw import-sold-csv` against real data |
+| ✅ | **PP-SEO-001** title enhancement pass | ALL PHASES DONE 2026-06-04 | Phases 1–6 complete; EPID needs `commerce.catalog.readonly` scope (silent skip until granted) |
+| 3 | **PP-SOLD-001 Tier 2** CSV import test | DONE — re-run later | 2-year CSV tested: 208 listing-ID matches + 937 fuzzy-title matches. Archive index 6,824 entries, 0 matches (only older listings). Re-run after `ebay_sku_migrate` builds archive further. |
 | 4 | **PP-SOLD-001 Tier 3** sweep checklist | after Tier 2 | `tgw ebay-sweep` output → physical review workflow |
 | 5 | **PP-REF-001** item JSON schema doc | — | Sample items at each pipeline stage; document all fields |
 | 6 | **PP-CI-001** linting + GitHub Actions | — | Fix ruff/mypy violations; pre-commit hook + lint workflow |
@@ -527,7 +527,14 @@ succeeds. Makes sold/active guards reliable without hitting eBay API at pipeline
 - **Tier 1 DONE**: `ebay_legacy_sync` extended with `_sync_sold()` — GetOrders polling,
   365-day initial lookback in 90-day windows, state file at `runtime/state/ebay-sold-sync-state.json`.
   Items matched by `listing_id`, written `status=sold` + `ebay_sale` block, catalog_rebuild enqueued.
-- Tier 2 (sold report CSV import) and Tier 3 (physical sweep checklist) pending.
+- **Tier 2 CSV import done** — `tgw import-sold-csv` tested against full 2-year export
+  (`ebay-all-orders-report-2024-06-05-2026-06-04`): 208 listing-ID matches + 937 fuzzy-title matches
+  at 0.80 Jaccard threshold. CSV quirks fixed: UTF-8 BOM + blank leading row, column name variants.
+  Archive index built at `/opt/TGW/var/archive-ebay-index.json` (6,824 entries from 16,937 zips);
+  0 archive matches in this run — archive only covers older legacy listings, more will index as
+  `ebay_sku_migrate` runs. **Re-run `tgw import-sold-csv` in ~30 days** once migrate has progressed.
+  Flags: `--fuzzy` / `--fuzzy-threshold`; archive pass auto-activates when cache exists.
+- Tier 3 (physical sweep checklist) pending.
 
 #### Tier 4 (future) — eBay push notification webhook
 eBay Trading API supports `SetNotificationPreferences` + `FixedPriceTransaction` event for real-time
@@ -671,28 +678,27 @@ without touching price.
 - `_build_prompt()` now shows prefilled values as "Known values" section; AI fills remaining
 - `prefilled` overrides AI output in merge step (product database is authoritative)
 
-**Phase 3 — EPID association (in ebay_stage, after inventory item upsert)**
-- If `product_lookup` has a barcode → query Commerce Catalog API for EPID
-- If EPID found → include `product.epid` in inventory item PUT body
-- eBay fills in standard specifics automatically; our pre-filled values supplement gaps
-- Cache `epid` in item JSON; only query once
+**Phase 3 — EPID association ✅ DONE 2026-06-04 (code complete; scope pending)**
+- `apis/ebay/catalog.py` — `lookup_epid(cfg, barcode)` via Commerce Catalog API; silent 401/403 skip
+- `ebay_stage.py` — runs EPID lookup before staging if no `epid` in item JSON; caches result
+- `ebay/sync.py` — includes `product.epid` in inventory item PUT body when present
+- **Scope needed**: `commerce.catalog.readonly` — not yet granted; lookups silently return None until approved
 
-**Phase 4 — Category confidence check (in ebay_draft)**
-- If `product_lookup.category` available → compare to AI-assigned `ebay_category_name`
-- Use simple keyword overlap score; flag to `draft_listing.category_confidence`
-- Low confidence → surface in `tgw staged` for operator review before staging
+**Phase 4 — Category confidence check ✅ DONE 2026-06-04**
+- `_category_confidence(pl_category, ebay_category)` in `ebay_draft.py` — Jaccard keyword overlap
+- `high` ≥ 0.30, `medium` ≥ 0.10, `low` < 0.10 (stopwords excluded)
+- Written to `draft_listing.category_confidence`; surfaced in `tgw staged` CC column (! = low)
 
-**Phase 5 — Description enrichment (in ebay_draft)**
-- Current: AI generates 1-2 sentences; footer appended
-- Enhancement: if `product_lookup.description` available → use as base; AI adds condition
-  observation and visible details on top; target 200+ words total
-- Include brand/model/MPN naturally in the description body for keyword coverage
+**Phase 5 — Description enrichment ✅ DONE 2026-06-04**
+- `ebay_draft.py` — if `product_lookup.description` ≥ 20 words: second Ollama call generates
+  200+ word prose description using product info + condition + title; plain text, no markdown
+- Written to `draft_listing` as `description` (enriched) + `description_source: enriched`; original
+  AI description preserved for items without product lookup data
 
-**Phase 6 — SEO feedback loop (future, needs Analytics API)**
-- `tgw seo-audit` CLI: queries Analytics API for all live listings; flags items with
-  low impressions relative to days-listed and category average
-- Output: table of SKUs sorted by impression rate; SEO score; suggested fix
-- Distinguishes SEO problems from pricing problems: low views = SEO; views but no sales = price
+**Phase 6 — SEO audit CLI ✅ DONE 2026-06-04**
+- `tgw seo-audit` — scans staged/live items; table sorted worst-first by quality score
+- Columns: SKU, Q (quality), PC (price confidence), CC (category confidence), St (L/S), Days, Issues, Title
+- Analytics API (`sell.analytics.readonly`) needed for impression data — not yet applied
 
 #### New config keys needed
 ```json
@@ -734,6 +740,32 @@ without touching price.
 - **Open question**: should Claude Code have its own dedicated system user (e.g. `claude`) with scoped
   permissions, separate from the `tgw` worker user? Relevant to sudoers design and audit trail clarity.
   Decision: make part of the PP-REMOTE-001 hardening pass.
+
+### PP-DEPLOY-001 — MX Linux OS Image Integration
+
+#### Context
+The system runs MX Linux. `mx-slapshot` creates bootable, installable OS images; Dave has a
+library of images going back many years. Goal: make TGW a first-class citizen of the OS image
+so that `image + /opt/TGW` = complete, running system with zero manual setup.
+
+#### Design goals
+- TGW fully operational from a fresh image restore — no manual service enables, no path fixes
+- `tgw` user moved to UID < 1000 (system user range); ensures UID survives across image restores
+  and avoids conflicts with future desktop user accounts
+- Long-term: discontinue direct interactive `tgw` user sessions; all operator interaction through
+  `tgw-http`, CLI tools (`tgw ...`), and Claude Code running as a scoped user
+
+#### Work items
+- [ ] Identify all places UID/GID assumptions exist (file ownership in `/opt/TGW/`, secrets
+  permissions, systemd `User=tgw`, crontabs if any)
+- [ ] Plan UID migration: choose target UID (e.g. 999), usermod, chown sweep, test all services
+- [ ] Document image snapshot procedure: what must be in `/opt/TGW/` vs what's in the image
+- [ ] Add TGW service enables to image baseline (systemd preset or post-install hook)
+- [ ] Test: fresh image restore + mount `/opt/TGW` → `tgw health` green with no intervention
+
+#### Dependencies
+- PP-REMOTE-001 (Tailscale) — remote access must survive UID change
+- PP-SHELL-001 — tgw.source cleanup before baking into image
 
 ### PP-CAPTURE-001 — Idea and Task Capture Pipeline
 
@@ -1037,6 +1069,7 @@ MC console         Flutter app (Linux + Android)
   - eBay Marketplace Insights scope (`buy.marketplace_insights`): contact eBay Developer Support directly (limited-release, no self-service); Finding API discontinued 2025 — not an option
   - Revision of already-identified items: `tgw hint --force` works but downstream ebay_draft/ebay_draft re-runs need to be aware of published state (don't auto-push changes to live listings)
   - Tuning: run difficult items through, observe results, adjust prompt and hint format
+  - **Shipping profile at intake**: operator sets shipping profile during physical processing based on item size; simple `tgw` command or camera app field sets `shipping_profile` on the item JSON at intake time, overriding the per-category default (FC4). Low-touch: one field, one tool adjustment. See PP-DEPLOY-001 for camera app context.
 
 ### PP-QUALITY-001 — Listing quality scoring ✅ COMPLETE (2026-06-04)
 

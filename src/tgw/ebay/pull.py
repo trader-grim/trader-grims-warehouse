@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 import tgw.logging as tgw_logging
 from tgw.apis.ebay.trading import get_my_ebay_selling, get_orders
@@ -28,26 +29,210 @@ log = logging.getLogger(__name__)
 SOLD_INITIAL_LOOKBACK_DAYS = 365
 SOLD_ORDERS_WINDOW_DAYS    = 90    # GetOrders API max per call
 
+_TITLE_STOPWORDS = frozenset({
+    'a', 'an', 'the', 'and', 'or', 'of', 'in', 'for',
+    'by', 'to', 'is', 'it', 'at', 'as', 'on', 'be', 'with',
+})
+
+
+def _tokenize(title: str) -> List[str]:
+    return [w for w in re.sub(r'[^\w\s]', ' ', (title or '').lower()).split()
+            if len(w) > 2 and w not in _TITLE_STOPWORDS]
+
 
 # ---------------------------------------------------------------------------
-# Index builder
+# Index builders
 # ---------------------------------------------------------------------------
 
 def build_listing_index(itemdata_root: Path) -> Dict[str, Path]:
-    """Scan ItemData and return {listing_id: json_path} for all items that have one."""
+    """
+    Scan ItemData and return {listing_id: json_path}.
+
+    Indexes both ebay_listing.listing_id (Inventory API pipeline) and
+    the legacy 'Item number' field (Trading API / pre-pipeline items).
+    """
     index: Dict[str, Path] = {}
     for json_path in itemdata_root.glob('*/*.json'):
         try:
             text = json_path.read_text(encoding='utf-8')
-            if '"listing_id"' not in text:
+            if '"listing_id"' not in text and '"Item number"' not in text:
                 continue
             item = json.loads(text)
             lid = item.get('ebay_listing', {}).get('listing_id', '')
             if lid:
                 index[str(lid)] = json_path
+            item_num = str(item.get('Item number') or '').strip()
+            if item_num and item_num not in index:
+                index[item_num] = json_path
         except Exception:
             pass
+    log.info('build_listing_index: %d eBay IDs indexed', len(index))
     return index
+
+
+def build_title_lookup(catalog_db: Path, itemdata_root: Path,
+                       ) -> Tuple[Dict[str, Tuple[str, Path]], Dict[str, List[str]]]:
+    """
+    Build an inverted-word title index from the SQLite catalog.
+
+    Returns:
+      title_index  — {canonical_key: (sku, json_path)}
+      word_index   — {word: [canonical_key, ...]}
+
+    canonical_key is the sorted token list joined by spaces, which makes
+    Jaccard scoring straightforward without a second tokenize pass.
+    """
+    import sqlite3
+
+    title_index: Dict[str, Tuple[str, Path]] = {}
+    word_index:  Dict[str, List[str]]         = {}
+
+    try:
+        conn = sqlite3.connect(str(catalog_db))
+        rows = conn.execute(
+            'SELECT sku, title FROM catalog WHERE title IS NOT NULL'
+        ).fetchall()
+        conn.close()
+    except Exception as exc:
+        log.warning('build_title_lookup: SQLite unavailable (%s)', exc)
+        return {}, {}
+
+    for sku, title in rows:
+        if not title or title == sku:
+            continue
+        tokens = _tokenize(title)
+        if len(tokens) < 2:
+            continue
+        key = ' '.join(sorted(tokens))
+        if key not in title_index:
+            json_path = itemdata_root / sku / f'{sku}.json'
+            title_index[key] = (sku, json_path)
+            for word in tokens:
+                word_index.setdefault(word, []).append(key)
+
+    log.info('build_title_lookup: %d titles indexed', len(title_index))
+    return title_index, word_index
+
+
+def build_archive_index(archive_dir: Path, itemdata_root: Path,
+                        cache_path: Optional[Path] = None,
+                        ) -> Dict[str, Tuple[str, Path]]:
+    """
+    Build (or load from cache) {ebay_id: (sku, live_path)} from ItemArchive zips.
+
+    Scanning 6K+ photo-bearing zips is slow (~minutes on HDD). The result is
+    cached to cache_path (default: archive_dir/../var/archive-ebay-index.json).
+    Re-scan only when cache is absent or older than any zip in the archive.
+
+    Only includes entries where the live ItemData path still exists.
+    """
+    import zipfile
+
+    if cache_path is None:
+        cache_path = archive_dir.parent.parent / 'var' / 'archive-ebay-index.json'
+
+    # Load from cache if it's newer than the newest zip
+    if cache_path.exists():
+        cache_mtime = cache_path.stat().st_mtime
+        newest_zip  = max(
+            (z.stat().st_mtime for z in archive_dir.glob('*.zip')),
+            default=0,
+        )
+        if cache_mtime >= newest_zip:
+            raw = json.loads(cache_path.read_text(encoding='utf-8'))
+            index = {eid: (sku, itemdata_root / sku / f'{sku}.json')
+                     for eid, sku in raw.items()}
+            log.info('build_archive_index: loaded %d entries from cache', len(index))
+            return index
+
+    # Full scan — slow on HDD (one seek per zip); result is cached for all future runs.
+    zip_paths = sorted(archive_dir.glob('*.zip'))
+    total     = len(zip_paths)
+    log.info('build_archive_index: scanning %d zips in %s…', total, archive_dir.name)
+    print(f'  Scanning {total} archive zips (slow first run — subsequent runs use cache)…',
+          flush=True)
+
+    eid_to_sku: Dict[str, str] = {}
+    scanned = 0
+
+    for zip_path in zip_paths:
+        sku       = zip_path.stem
+        json_name = f'{sku}.json'
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                if json_name not in zf.namelist():
+                    continue
+                data = json.loads(zf.read(json_name).decode('utf-8'))
+        except Exception:
+            continue
+
+        scanned += 1
+        if scanned % 500 == 0:
+            print(f'  … {scanned}/{total}', flush=True)
+        if not isinstance(data, dict):
+            continue
+        ebay_id = str(data.get('Item number') or data.get('ebay_id') or '').strip()
+        if ebay_id and ebay_id not in ('0', '') and ebay_id not in eid_to_sku:
+            eid_to_sku[ebay_id] = sku
+
+    # Write cache (sku strings only — Paths are reconstructed on load)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(eid_to_sku, indent=2), encoding='utf-8')
+    log.info('build_archive_index: scanned %d zips → %d eBay IDs; cache written to %s',
+             scanned, len(eid_to_sku), cache_path)
+
+    index = {eid: (sku, itemdata_root / sku / f'{sku}.json')
+             for eid, sku in eid_to_sku.items()}
+    return index
+
+
+def find_title_match(
+    query_title: str,
+    title_index: Dict[str, Tuple[str, Path]],
+    word_index:  Dict[str, List[str]],
+    threshold:   float = 0.80,
+) -> Optional[Tuple[str, Path, float]]:
+    """
+    Find the best title match for a query string using Jaccard similarity.
+
+    Returns (sku, json_path, score) if a unique match >= threshold exists.
+    Returns None if below threshold, no candidates, or ambiguous (tie).
+    """
+    query_tokens = _tokenize(query_title)
+    if not query_tokens:
+        return None
+
+    query_set = set(query_tokens)
+
+    # Gather candidates via inverted index (titles sharing ≥1 word)
+    candidate_hits: Dict[str, int] = {}
+    for word in query_tokens:
+        for key in word_index.get(word, []):
+            candidate_hits[key] = candidate_hits.get(key, 0) + 1
+
+    if not candidate_hits:
+        return None
+
+    # Score top 30 by word-overlap count, then by Jaccard
+    best_score  = 0.0
+    best_key: Optional[str] = None
+    tie_count   = 0
+
+    for key in sorted(candidate_hits, key=lambda k: -candidate_hits[k])[:30]:
+        key_set = set(key.split())
+        score   = len(query_set & key_set) / len(query_set | key_set)
+        if score > best_score:
+            best_score = score
+            best_key   = key
+            tie_count  = 1
+        elif score == best_score:
+            tie_count += 1
+
+    if best_score < threshold or best_key is None or tie_count > 1:
+        return None
+
+    sku, json_path = title_index[best_key]
+    return sku, json_path, best_score
 
 
 # ---------------------------------------------------------------------------

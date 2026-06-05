@@ -1,26 +1,29 @@
 # TGW systemd units
 
-## Deploy these
+## Active units (deploy these)
 
-| File | Action |
-|------|--------|
-| `queue-launcher.service` | Replace existing — path updated to console script |
-| `queue-workers-startup.timer` | Unchanged — redeploy as-is |
-| `queue-workers.target` | Unchanged — redeploy as-is |
-| `trader-grims-backup.service` | Unchanged — redeploy as-is |
+| File | Purpose | Enabled |
+|------|---------|---------|
+| `queue-workers.target` | Wants all 17 worker instances; started by timer | static (via timer) |
+| `queue-workers-startup.timer` | Fires 10s after boot → starts queue-workers.target | yes |
+| `trader-grims-backup.service` | inotify + rsync hardlink snapshot backup | yes |
 
-## Retire these (do not redeploy)
+Units installed separately (not in this directory):
 
-| File | Reason |
-|------|--------|
-| `tgw-worker.service` | Dead — references non-existent module path. Launcher uses Popen, not systemd units. |
-| `tgw-watcher.service` | Deprecated — replaced by the queue system. |
+| Unit | Location | Purpose |
+|------|----------|---------|
+| `tgw-http.service` | `etc/systemd/tgw-http.service` | HTTP API (port 7373) |
+| `tgw-worker@.service` | `/etc/systemd/system/` only | Template for all queue workers |
+| `tgw-worker@token_refresh.service` | `/etc/systemd/system/` only | Individually enabled as belt+suspenders for token worker |
 
 ## Install procedure
 
 ```bash
-# Copy units
-sudo cp systemd/*.service systemd/*.timer systemd/*.target /etc/systemd/system/
+# Copy active units
+sudo cp systemd/queue-workers.target \
+        systemd/queue-workers-startup.timer \
+        systemd/trader-grims-backup.service \
+        /etc/systemd/system/
 
 # Reload and enable
 sudo systemctl daemon-reload
@@ -30,18 +33,22 @@ sudo systemctl enable trader-grims-backup.service
 # Start
 sudo systemctl start queue-workers-startup.timer
 sudo systemctl start trader-grims-backup.service
-
-# Verify
-sudo systemctl status queue-launcher.service
-sudo systemctl status trader-grims-backup.service
 ```
 
-## Notes
+## Boot sequence (fully automatic)
 
-- The launcher manages worker processes directly via Popen — it does not
-  create systemd units at runtime.
-- Workers are configured via `.queue_worker` and `.queue_worker_config`
-  symlinks in each queue directory under `/opt/TGW/runtime/state/queues/`.
-- The eBay token refresh currently runs as a cron job
-  (`ebay_api_token_refresh.py`). Do not remove that cron until the token
-  refresh is moved into the queue system.
+1. `postgresql.service` — DB up (enabled by package install)
+2. `tgw-http.service` — HTTP API up (enabled)
+3. `ollama.service` — AI models available (enabled)
+4. `trader-grims-backup.service` — backup watcher up (enabled)
+5. `tgw-worker@token_refresh.service` — token worker up (individually enabled)
+6. +10s: `queue-workers-startup.timer` fires → `queue-workers.target` → all 17 workers up
+
+## Retired (see history/trader_grims_warehouse/)
+
+| File | Reason retired |
+|------|---------------|
+| `queue-launcher.service` | Old Popen-based launcher; replaced by systemd worker template (Phase 1) |
+| `tgw-worker.service` | References non-existent module path; pre-Phase 1 |
+| `tgw-watcher.service` | inotify pool watcher; replaced by bundle_intake/multi_intake workers |
+| `tgw-manage-newitem-pool.py` | Pool manager script; replaced by queue system |

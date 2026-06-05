@@ -1,0 +1,15 @@
+[Unit]
+Description=TGW Inotify File Watcher
+After=network.target
+
+[Service]
+Type=simple
+User=tgw
+WorkingDirectory=/opt/TGW
+ExecStart=/opt/TGW/src/trader_grims_warehouse/pool-manager/tgw-manage-newitem-pool.py
+Restart=always
+RestartSec=10
+Environment=PATH=/opt/TGW/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,19 @@
+[Unit]
+Description=TGW Queue Worker %i
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tgw
+Group=tgw
+WorkingDirectory=/opt/TGW/src
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/TGW/.venvironments/tgw/bin/python -m trader_grims_warehouse.queue_workers --queue-dir /opt/TGW/runtime/state/queues/%i
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
