@@ -27,7 +27,7 @@ def make_item(root: Path, sku: str, **fields) -> Path:
 def make_cfg(root: Path) -> dict:
     return {
         'itemdata_root':      root,
-        'location_tree_root': root.parent / 'by-location',
+        'location_tree_root': root / 'by-location',
         'skip_missing':       True,
         'pretty':             True,
     }

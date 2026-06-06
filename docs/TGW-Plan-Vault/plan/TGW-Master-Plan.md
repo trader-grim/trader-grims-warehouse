@@ -1652,6 +1652,46 @@ Expect: Python scaffold for the rule checker + output formatter.
 
 ## Pending projects (revisit)
 
+### PP-DEADLETTER-001 — Dead-letter triage: warn+requeue instead of terminate
+
+#### Problem (observed 2026-06-06 session 9)
+Several failure types routinely end up in `dead_letter` when they should instead emit a
+notification and requeue — dead-letter requires manual operator intervention to clear,
+which builds up silently. The current troubleshooting workflow is: `tgw health` → see
+dead_letter count → run SQL to identify → categorize → manually cancel/requeue.
+
+#### Known dead-letter types that should be warn+requeue
+
+| Error pattern | Current behaviour | Better behaviour |
+|---------------|------------------|-----------------|
+| `token is expired` (ebay_sync, ebay_legacy_sync) | dead_letter after 5 attempts | warn + back off 15min + requeue; clear on next successful sync |
+| `section not found in plan` (pm_intake) | dead_letter | warn + log + skip (don't block other inbox items) |
+| `no eBay photo URLs yet` (ebay_stage) | dead_letter | retry with longer backoff (ebay_upload may still be running) |
+| `Directory not empty` (catalog_rebuild) | dead_letter | retry immediately (transient OS race) |
+| `ReadTimeout` / `LEASE_EXPIRED` (ebay_draft) | dead_letter | retry with fresh lease |
+
+#### Dead-letter types that ARE correct
+
+| Error pattern | Reason to keep as dead_letter |
+|---------------|-------------------------------|
+| `HardFailure: no ebay_category_id` | Needs operator/AI intervention to fix item data |
+| `HardFailure: eBay rejected (25002/25021/25709)` | Needs code fix or item data fix |
+| `HardFailure: item specific value too long` | Needs item data fix |
+
+#### Design
+- Add a `classify_dead_letter(error_code, error_detail)` function in `worker_base.py`
+- Returns `('requeue', delay_seconds)` or `('dead_letter', None)` 
+- Workers call it in the `on_hard_failure` / `on_max_attempts` hook instead of always
+  dead-lettering
+- Emit `notify.warning(...)` on warn+requeue path so operator sees it without it blocking
+- `tgw health` shows warn+requeue separately from true dead_letter so dashboard stays clean
+
+#### Implementation note
+`max_attempts` in the queue schema controls retry count. The issue is that some errors
+exhausting retries should flip to a "warn and requeue with longer delay" rather than terminal
+dead_letter. This requires either: (a) increasing `max_attempts` for recoverable errors, or
+(b) detecting the error class after exhaustion and re-enqueuing with a new job.
+
 ### PP-HINT-001 — AI hint + eBay enrichment (revisit required)
 - First iteration shipped 2026-06-03: `ai_hint` field, `tgw hint` command, hinted vision prompt
 - **Known gaps to address:**

@@ -69,3 +69,4 @@
 - [x] 2026-06-06T20:48 :: later projects: custom camera app instead of tasker/camera app. custom android app combo xmouse/vnc/rdp viewer. — added to PP-INTAKE-001 "Camera root intent" / later projects note; custom VNC/RDP Android viewer noted
 - [x] 2026-06-06T20:56 :: tgw email inbox auto-processing tool — added as PP-EMAIL-001
 - [x] 2026-06-06T20:59 :: investigate free outgoing smtp options for gmail Send mail as — added to PP-EMAIL-001 outbound SMTP section
+- [ ] 2026-06-06T22:28 :: change catlocmvall name to mvitems. expand function to be move whatever to location, includes single items lists regex or whatever

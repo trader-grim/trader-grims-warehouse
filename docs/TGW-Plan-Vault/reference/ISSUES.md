@@ -11,10 +11,10 @@ incomplete wiring, and data quality problems that need fixing.
 ### ISS-001 — errorId 25002 Item.Country at publish
 - **Symptom**: eBay rejects offer publish with "Item.Country" error for some categories
 - **Affected categories observed**: 34032, 14027, 13916
-- **Status**: `shipToLocations.regionIncluded` added to `_build_offer_bodies` permanently;
-  still occurring for these categories suggesting additional fields may be needed
-- **Investigation**: check whether these categories require explicit `Item.Country` in the
-  inventory item body (not just the offer body)
+- **Status**: Fix applied (session 9) — added `availabilityDistributions` with `merchantLocationKey`
+  to the inventory item body. This explicitly binds the inventory item to the merchant location
+  record which carries the seller address/country. Three affected SKUs re-staged and re-queued.
+  `shipToLocations` in offer body retained. Outcome pending re-publish result.
 
 ### ISS-002 — 10 legacy items with wrong shipping profile (FRE instead of FC4)
 - **Symptom**: migrated with eBay Standard Envelope profile instead of FC4

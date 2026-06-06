@@ -4,53 +4,11 @@
     "type": "split",
     "children": [
       {
-        "id": "82b6aada126fa70b",
+        "id": "e40ed440173f4efe",
         "type": "tabs",
         "children": [
           {
-            "id": "8e70151bc452f506",
-            "type": "leaf",
-            "state": {
-              "type": "markdown",
-              "state": {
-                "file": "plan/TGW-Master-Plan.md",
-                "mode": "preview",
-                "source": false
-              },
-              "icon": "lucide-file",
-              "title": "TGW-Master-Plan"
-            }
-          },
-          {
-            "id": "5f6af223e824f2a6",
-            "type": "leaf",
-            "state": {
-              "type": "markdown",
-              "state": {
-                "file": "plan/TASKS-phase1-queue.md",
-                "mode": "source",
-                "source": false
-              },
-              "icon": "lucide-file",
-              "title": "TASKS-phase1-queue"
-            }
-          },
-          {
-            "id": "4ecf419d56e0b449",
-            "type": "leaf",
-            "state": {
-              "type": "markdown",
-              "state": {
-                "file": "plan/SKU-Audit-Report.md",
-                "mode": "source",
-                "source": false
-              },
-              "icon": "lucide-file",
-              "title": "SKU-Audit-Report"
-            }
-          },
-          {
-            "id": "5cdbfee2538a241d",
+            "id": "babc512f62193402",
             "type": "leaf",
             "state": {
               "type": "markdown",
@@ -63,8 +21,7 @@
               "title": "TGW-Master-Plan"
             }
           }
-        ],
-        "currentTab": 3
+        ]
       }
     ],
     "direction": "vertical"
@@ -226,9 +183,13 @@
       "bases:Create new base": false
     }
   },
-  "active": "5cdbfee2538a241d",
+  "active": "babc512f62193402",
   "lastOpenFiles": [
+    "plan/TGW-Master-Plan.md",
+    "plan/TASKS-phase1-queue.md",
+    "suggestions/SUGGESTIONS.md",
     "plan/SKU-Audit-Report.md",
+    "perplexity/PERPLEXITY-001-ebay-scopes.md",
     "inbox/README.md",
     "inbox/plan-addition-vault-sync.md",
     "inbox/plan-addition-token-worker.md",
@@ -236,10 +197,8 @@
     "inbox/plan-addition-token-worker.md",
     "inbox/Untitled.base",
     "inbox/Untitled.md",
-    "plan/TGW-Master-Plan.md",
     "suggestions/README.md",
     "README.md",
-    "plan/TASKS-phase1-queue.md",
     "inbox/Untitled 1.md"
   ]
 }

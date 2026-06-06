@@ -256,19 +256,27 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
     if epid:
         product_block['epid'] = epid
 
-    inv_body: Dict[str, Any] = {
-        'product': product_block,
-        'condition':    condition_enum,
-        'availability': {
-            'shipToLocationAvailability': {
-                'quantity': draft.get('quantity', 1),
-            },
-        },
-    }
-
     category_id_str = str(draft.get('category_id', ''))
     policies     = _get_listing_policies(cfg, category_id_str)
     location_key = _get_merchant_location(cfg)
+    qty          = draft.get('quantity', 1)
+
+    # availabilityDistributions links the inventory item to the merchant location,
+    # which carries the country address. Some categories (e.g. 34032, 14027, 13916)
+    # require this explicit binding so eBay can resolve Item.Country at publish time.
+    # Omitting it causes errorId 25002 "No Item.Country exists" for those categories.
+    inv_body: Dict[str, Any] = {
+        'product': product_block,
+        'condition': condition_enum,
+        'availability': {
+            'shipToLocationAvailability': {
+                'availabilityDistributions': [
+                    {'merchantLocationKey': location_key, 'quantity': qty},
+                ],
+                'quantity': qty,
+            },
+        },
+    }
 
     pricing_summary: Dict[str, Any] = {
         'price': {'currency': 'USD', 'value': str(price)},
@@ -290,14 +298,12 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
         'sku':                 sku,
         'marketplaceId':       MARKETPLACE_ID,
         'format':              'FIXED_PRICE',
-        'availableQuantity':   draft.get('quantity', 1),
+        'availableQuantity':   qty,
         'categoryId':          category_id_str,
         'listingDescription':  listing_description,
         'listingPolicies':     policies,
         'merchantLocationKey': location_key,
         'pricingSummary':      pricing_summary,
-        # Some categories require explicit shipToLocations for Item.Country resolution.
-        # The fulfillment policy's implicit coverage is not sufficient for all categories.
         'shipToLocations': {
             'regionIncluded': [{'regionType': 'COUNTRY', 'regionName': 'US'}],
         },
