@@ -125,24 +125,28 @@ def get_access_token(prompt_if_needed: bool = True, is_sandbox: bool = False) ->
     # True first-time: browser + consent (once)
     if prompt_if_needed:
         logger.info("Initial OAuth needed (no refresh_token).")
-        print("\n=== eBay Login Required (one-time) ===")
         auth_url = generate_auth_url(ebay_config, is_sandbox)
-        print(f"Open: {auth_url}")
-        # Try direct Firefox first (avoids xdg-open kfmclient issue on KDE Plasma 6),
-        # fall back to webbrowser module if not available.
         import subprocess as _sp
         try:
             _sp.Popen(['firefox', auth_url],
                       stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
         except FileNotFoundError:
             webbrowser.open(auth_url)
-        full_url = input("Paste FULL redirect URL: ").strip()
+        print()
+        print('=' * 60)
+        print('  eBay OAuth: browser opened. Complete login + consent.')
+        print('  After eBay redirects, COPY the full URL from the browser')
+        print('  address bar and PASTE IT HERE (in THIS terminal window).')
+        print('=' * 60)
+        full_url = input('  Paste full redirect URL here → ').strip()
+        print('=' * 60)
         parsed = urlparse(full_url)
         code = parse_qs(parsed.query).get('code', [None])[0]
         if not code:
-            raise ValueError("No code=... in URL")
+            raise ValueError("No code=... found in URL — did you paste the right URL?")
         tokens = exchange_code_for_tokens(code, ebay_config, is_sandbox)
         save_token_state(tokens)
+        logger.info("Token saved. access_token=%s...", tokens['access_token'][:20])
         return tokens['access_token']
 
     raise RuntimeError("No valid token and prompt disabled.")

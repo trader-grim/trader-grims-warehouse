@@ -229,8 +229,23 @@ def locationupdate(cfg: Dict[str, Any], sku: str, new_location: str,
 
 def verifiedupdate(cfg: Dict[str, Any], sku: str, value: str,
                    check_only: bool = False) -> Dict[str, Any]:
-    """Update the verified field on one item."""
-    return update_item(cfg, sku, 'verified', value, check_only=check_only)
+    """Update verified field and set #STATUS=In Stock atomically."""
+    path = sku_json(cfg, sku)
+    if not path.exists():
+        return {'ok': False, 'error': f'sku not found: {sku!r}'}
+    if check_only:
+        return {'ok': True, 'sku': sku, 'value': value, 'check_only': True}
+    doc = load_item_doc(path)
+    doc['verified'] = value
+    doc['#STATUS'] = 'In Stock'
+    atomic_write_json(path, doc, pretty=True)
+    return {'ok': True, 'sku': sku, 'field': 'verified', 'value': value}
+
+
+def statusupdate(cfg: Dict[str, Any], sku: str, value: str,
+                 check_only: bool = False) -> Dict[str, Any]:
+    """Update the #STATUS field on one item (legacy name; rename pending in data scrub pass 2)."""
+    return update_item(cfg, sku, '#STATUS', value, check_only=check_only)
 
 
 def catlocmvall(cfg: Dict[str, Any], from_location: str, to_location: str,

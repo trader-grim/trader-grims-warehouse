@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-06 (session 7)
+updated: 2026-06-06 (session 8)
 maintained_by: Opus (planner)
 ---
 # TGW Master Plan
@@ -81,10 +81,30 @@ maintained_by: Opus (planner)
 - `tgw staged` / `tgw publish` — operator review gate before any item goes live
 - **Open issue**: errorId 25002 `Item.Country` at publish for some categories (34032, 14027, 13916) — offer body is correct, investigating category-specific requirements
 
-### Pipeline additions — 2026-06-06
+### Pipeline additions — 2026-06-06 (session 8)
+- **PP-SHELL-001 T2 MAJOR PROGRESS** — All ARCH-VIOLATES functions replaced with thin `tgw` CLI wrappers: `hintupdate`, `locationupdate`, `statusupdate`, `titleupdate`, `verifiedupdate`, `catlocmvall`. `ic_test()` syntax error fixed (stray UI content after closing brace). `statusupdate` added as `tgw statusupdate <value> <sku...>` CLI command (writes `#STATUS` field; rename in Data Scrub Pass 2). `verifiedupdate` in `items.py` upgraded to write both `verified` + `#STATUS=In Stock` atomically. Deprecated blocks removed: `mktgwcatalog-location`, `mktgwcatalog-location-ebcat`, `mk-ebay-category-csvs`, `mktgwtodo`, `mktgwcatalog`, `mktgwcsv-jj`, `mktgwcsv-jq`, `mktgwjson-jj-old`, `mktgwjson-jj`, `mktgwjson-jq`, `mktgwcatalog_plus_fbimport`, `backupitemdata`, `archiveitemdatatmp`, `archiveitemzips`, `set_queue`, `unfoldio`, `searchcatalog_versionupdate`, `jsonaddsku`, `gpt_title`, `gpt_desc`, `tgwcd`. File reduced 3405 → 2879 lines. Remaining deprecated blocks: csvmerge*, addphotos*, resumedraft, data2json*, archivenewitems, newitem*, eb_template_*, mkjob*, mkebimport, mkebupdate, mkfbimport (Tier 2 pass not yet complete).
+- **PP-INTAKE-001 Phase 1 DONE** — `tgw set-template <group_key> [sku] [--list] [--camera GROUP_KEY] [--dry-run]`. Writes `category_group`, `ai_hint` (prepended), `size_class`, `ebay_category_id` (if not set) to item JSON. Pushes `SETTEMPLATE:<group_name>` to clipboard via `wl-copy`/`xclip` for KDE Connect camera relay. No-arg → `--list` shows all 24 templates. `--camera` pushes template string only (no JSON write). `--dry-run` preview. Resolves SKU from CurrentItem symlink when no SKU arg. `_current_item_sku()` + `_push_clipboard()` + `_build_template_fields()` helper functions in `api.py`. Closes the template→pipeline loop: xmouse button → `tgw set-template` → item JSON pre-populated → ai_identify uses better hint → suggest_price hits group floor immediately.
+- **PP-PYIPC-001 added** — New PP: Python library integration for Syncthing REST API + KDE Connect. Research brief at `perplexity/PERPLEXITY-005-library-audit.md` (also covers broader library audit); Track 3 (Perplexity).
+- **PERPLEXITY-005 added** — Library audit brief: Syncthing Python client, KDE Connect DBus/REST, psycopg3 migration, Ollama client library, USB scale HID, barcode lookup alternatives. In `perplexity/PERPLEXITY-005-library-audit.md`.
 - **ISS-009 Token double-buffer bug FIXED** — `refresh_access_token()` had a 5-min internal guard conflicting with the worker's 30-min buffer, delaying the real eBay call until the last 5 minutes of token life. Fixed: added `force=True` parameter; worker now passes `force=True` to bypass the internal guard. `tgw restart-ebay-token` added: clears dead_letter token jobs and enqueues a fresh token_refresh immediately. `clear_dead_letter(queue_name)` added to `state_machine.py`.
 - **PP-PRICE-005 DONE** — Category groups taxonomy (`/opt/TGW/config/category-groups.json`): 24 groups, 65+ eBay categories mapped; fields: `name`, `store_category`, `ebay_categories`, `size_class` (flat/packet/small_box…), `ai_hint`, `pricing` (floor, typical_used, typical_new seeded from velocity p25). Integrated into `suggest_price()`: Stage 4 fallback (group typical × condition_factor before returning null); hard floor applied to ALL prices including Browse API results. `tgw category-groups [cat_id] [--list] [--reseed]` CLI; `config['category_groups_path']` config key. Immediately unblocks items with thin Browse API comps that previously stalled with null price. **Semi-chaotic storage design**: `size_class` per group encodes physical storage class; items stored by size not category — group membership gives a default size assumption at intake.
 - **ISS-009 Operator action required** — eBay refresh token dead (HTTP 400 2026-06-05 17:00). Dave must run browser OAuth re-consent then `sudo -u tgw tgw restart-ebay-token` to re-start the cycle. See ISSUES.md ISS-009.
+- **OAuth flow improved (session 8)** — `get_access_token.py` now shows a clear bordered prompt
+  so it's obvious where to paste the redirect URL. `tgw get-ebay-token --code 'v%5E...'` flag
+  added: supply URL-encoded auth code directly to bypass browser step (useful when browser flow
+  ran but paste failed). Code exchange runs immediately without waiting for another browser session.
+- **PP-PYIPC-001 added (session 8)** — Python library integration for Syncthing REST API + KDE
+  Connect DBus. PERPLEXITY-005-library-audit.md brief created (covers full stack review: psycopg3,
+  Ollama client, USB scale HID, barcode lookup, eBay SDK status). See pending project section.
+- **PP-VERIFY-001 added (session 8)** — `tgw catalog-verify` command: scans ItemData for assumption
+  violations (title empty, bad location format, stale TEMPLATE: prefix, invalid verified date, etc.);
+  outputs markdown violation checklist; `catalog_verified` hall pass flag clears on any field write.
+  Phase 1 scaffold delegated to Gemini (Track 2). See pending project section.
+- **All suggestions processed (session 8)** — SUGGESTIONS.md fully cleared including Perplexity
+  programming capability note (now in Priority 6 and Track 3 documentation).
+- **Gemini CLI confirmed installed (session 8)** — `gemini` in PATH; elevated to Track 2 primary
+  for large-context data tasks. Free with Google Drive subscription. Perplexity expiry checklist
+  added to Priority 6: PERPLEXITY-005 is the only unrun brief.
 
 ### Pipeline additions — 2026-06-05
 - **PP-PRICE-004 DONE** — `tgw/velocity.py` aggregation module; `workers/velocity_stats.py` nightly
@@ -128,7 +148,7 @@ maintained_by: Opus (planner)
 
 ## Implementation TODO — next priorities
 
-### Recently completed (sessions 4–6)
+### Recently completed (sessions 4–8)
 - ✅ **PP-QUALITY-001** listing quality scorer (2026-06-04)
 - ✅ **PP-PRICE-003** comp search improvement (2026-06-04)
 - ✅ **PP-HINT-001** bulk requeue command (2026-06-04)
@@ -139,35 +159,32 @@ maintained_by: Opus (planner)
 - ✅ **PP-PRICE-004** velocity analytics (2026-06-05)
 - ✅ **PP-LISTING-001** description footer + picklist line (2026-06-04)
 - ✅ **PP-SOLD-001 Tier 2** CSV import (run 2) — 909 fuzzy + archive tombstone pass; need full all-time CSV for archive hits
-- ✅ **PP-STORE-001** eBay store categories (2026-06-05) — `GetStore` cache in `trading.py`; `_resolve_store_category_names()` + `_get_listing_policies()` in `sync.py`; `storeCategoryNames` injected into offer body; `tgw store-categories` CLI; `store_category_by_ebay_category` config key
-- ✅ **PP-STRIKE-001** strikethrough pricing (2026-06-05) — `original_retail_price` from `product_lookup.msrp` in `ebay_price.py`; `originalRetailPrice` in `pricingSummary` when `ebay.strikethrough_enabled=true`; `tgw strikethrough-check` CLI; **disabled by default** — enable once Dave verifies Seller Hub access
-- ✅ **PP-CAPTURE-001** `tgw note` + `tgw btw` aliases (2026-06-05) — both route to `cmd_suggest()`
-- ✅ **Bug fix** fulfillment policy-by-category now honoured at staging (was always using first-policy from eBay; now reads `fulfillment_policy_by_category` config before API fallback)
-- ✅ **PP-REF-002** eBay error code reference (2026-06-05) — `reference/eBay-Error-Codes.md`; all handlers catalogued; dead-letter diagnosis guide; scope gaps table
-- ✅ **Data Scrub Pass 1** `#VERIFIED`→`verified` rename (2026-06-05) — 55,226 items updated atomically via `tgw data-scrub --pass 1 --write`; bash `verifiedupdate` now routes through `tgw verifiedupdate`; Python `verifiedupdate` writes `verified`; `#STATUS` left as-is (Python code reads it — separate coordinated rename needed); `tgw data-scrub` command added for future passes
-- ✅ **PP-IFDIR-001** interface file org (2026-06-05) — MC VFS scripts added to repo at `etc/interfaces/mc/`; keyd at `etc/interfaces/keyd/`; `/opt/TGW/mc/` symlinked to repo; unified `etc/interfaces/install.sh` created; PP-MACRO-001 install docs updated
-- ✅ **PP-SHELL-001 Tier 1** shell source audit (2026-06-05) — full audit doc at `reference/SHELL-AUDIT.md`; `tgw-dev.source` dead functions replaced with thin `tgw` CLI wrappers (`tgw-rebuild`→`tgw build-all`, `tgw-build-searchcatalog`→`tgw build-search`, `tgw-browser-dev`→`tgw-browser`); `mktgwcats()` fixed (`python3 -m tgw-api` → `tgw build-all`); **Tier 2** = remove deprecated blocks (full list in SHELL-AUDIT.md) + replace ARCH-VIOLATES functions with `tgw` CLI wrappers (coordinate with Data Scrub Pass 1)
-- ✅ **SKU search first-18** (2026-06-05) — `resolve()` in `resolver.py` now does exact-dir-check then prefix-18 fallback for `tgw*` queries ≤18 chars; `getsku()` in `tgw.source` adds same prefix fallback after ebayid lookup fails; covers 47,707×18-char old-format ↔ 7,643×20-char new-format SKU drift
-- ✅ **PP-TODO-001** multi-agent TODO tracker (2026-06-05) — `todo_items` table in `state_machine` DB (id, agent, priority, body, source, added_at, done_at); `tgw todo [agent]` list / `--add` / `--done` / `--seed`; `src/tgw/todo.py`; Work Tracks seeded (18 items across claude/admin/db/gemini agents)
-- ✅ **PP-WM-001 Phase 1** Qtile WM base config (2026-06-05) — `etc/interfaces/qtile/config.py` + `tgw_widgets.py`; TGWQueueWidget (REST API), TGWHealthWidget (systemd), TGWSKUWidget (clipboard); Super+T TGW chord mode; F12 scratchpad; 5 named workspaces; `etc/interfaces/qtile/install.sh`; operator install on Track 4 TODO
-- ✅ **PP-PRICE-005** Category groups taxonomy (2026-06-06) — see session 7 additions above
-- ✅ **PP-TOKEN-001 fix** token double-buffer bug + restart command (2026-06-06) — see session 7 additions above
+- ✅ **PP-STORE-001** eBay store categories (2026-06-05)
+- ✅ **PP-STRIKE-001** strikethrough pricing (2026-06-05) — disabled by default; enable once Dave verifies Seller Hub access
+- ✅ **PP-CAPTURE-001** `tgw note` + `tgw btw` aliases (2026-06-05)
+- ✅ **PP-REF-002** eBay error code reference (2026-06-05)
+- ✅ **Data Scrub Pass 1** `#VERIFIED`→`verified` rename (2026-06-05) — 55,226 items
+- ✅ **PP-IFDIR-001** interface file org (2026-06-05)
+- ✅ **PP-SHELL-001 Tier 1** shell source audit (2026-06-05)
+- ✅ **SKU search first-18** (2026-06-05)
+- ✅ **PP-TODO-001** multi-agent TODO tracker (2026-06-05)
+- ✅ **PP-WM-001 Phase 1** Qtile WM base config (2026-06-05); operator install pending
+- ✅ **PP-PRICE-005** Category groups taxonomy (2026-06-06)
+- ✅ **PP-TOKEN-001** token double-buffer bug fix + `tgw restart-ebay-token` (2026-06-06)
+- ✅ **PP-SHELL-001 Tier 2** ARCH-VIOLATES replacements + deprecated block removal (2026-06-06) — all 6 ARCH-VIOLATES functions replaced with thin `tgw` CLI wrappers; `statusupdate` CLI added; `verifiedupdate` now writes `verified`+`#STATUS` atomically; 20+ deprecated blocks removed; file 3405→2879 lines. Remaining deprecated: csvmerge*, addphotos*, data2json*, archivenewitems, mkjob*, newitem* (minor, no arch risk — wrap if needed).
+- ✅ **PP-INTAKE-001 Phase 1** `tgw set-template` command (2026-06-06) — writes category_group, ai_hint (prepended), size_class, ebay_category_id to item JSON; pushes SETTEMPLATE: to clipboard for KDE Connect relay; `--list`, `--camera`, `--dry-run`; resolves SKU from CurrentItem symlink; closes the template→pipeline loop.
 
 ### Active / next build priorities
 
 | Priority | PP | Status | Notes |
 |----------|----|--------|-------|
-| 1 | **PP-SHELL-001 Tier 2** tgw.source cleanup | ready | Remove deprecated blocks per SHELL-AUDIT.md; replace ARCH-VIOLATES functions with `tgw` wrappers; coordinate verifiedupdate with Data Scrub Pass 1 |
-| ✅ | **PP-IFDIR-001** interface file org | done | `etc/interfaces/mc/` + `etc/interfaces/keyd/` in repo; `/opt/TGW/mc/` symlinked; unified `etc/interfaces/install.sh`; PP-MACRO-001 refs updated |
-| ✅ | **Data scrub Pass 1** | done | `#VERIFIED` → `verified`; 55,226 items; `tgw data-scrub --pass 1` |
-| ✅ | **SKU search first-18** | done (2026-06-05) | `resolve()` prefix fallback in resolver.py; `getsku()` prefix fallback in tgw.source |
-| ✅ | **PP-TODO-001** multi-agent TODO | done (2026-06-05) | `todo_items` table; `tgw todo [agent/--add/--done/--seed]`; Work Tracks seeded |
-| 7 | **PP-MC-001 Phase 2** tgwitem edit | design ready | copyin, ebay/ + pipeline/ subdirs |
-| 8 | **PP-GLOBALS-001** analysis | analysis only | Identify offer-invariant fields; design before coding |
-| 9 | **PP-HINT-001** remaining gaps | ongoing | eBay Browse enrichment in ebay_draft; per-SKU hint trail |
-| 10 | **PP-SOLD-001 Tier 3** sweep | operator gated | Run `tgw ebay-sweep` after full-history CSV import |
+| 1 | **PP-MC-001 Phase 2** tgwitem edit | design ready | copyin, ebay/ + pipeline/ subdirs |
+| 2 | **PP-GLOBALS-001** analysis | analysis only | Identify offer-invariant fields; design before coding |
+| 3 | **PP-HINT-001** remaining gaps | ongoing | eBay Browse enrichment in ebay_draft; per-SKU hint trail |
+| 4 | **PP-INTAKE-001 Phase 2** | design ready | Web form update: template picker, weight field, barcode field |
+| 5 | **PP-SOLD-001 Tier 3** sweep | operator gated | Run `tgw ebay-sweep` after full-history CSV import |
+| 6 | **PP-PYIPC-001** | research | Syncthing + KDE Connect Python library integration; research via PERPLEXITY-005 |
 | — | **PP-REPRICER-001** | blocked | Blocked on `buy.marketplace_insights` scope approval |
-| — | **PP-INTAKE-001** | design ready | Template-driven multi-surface intake — `tgw set-template` closes loop; xmouse/web form/HUD; SETTEMPLATE: KDE Connect protocol; self-improving via velocity reseed; depends PP-PRICE-005 ✅ |
 
 ### Running in background
 - `ebay_sku_migrate` — ~8,350 live listings remaining; ~5/hr; ~70 days to complete
@@ -212,23 +229,33 @@ One bounded session per item. Ordered by value.
 | 5 | SKU search | Catalog/search match on first 18 chars | XS |
 | ✅ | PP-TODO-001 | PostgreSQL `todo_items` + `tgw todo [agent]` CLI — done (session 6) | M |
 | ✅ | PP-WM-001 P1 | Qtile base config + TGW widgets — done (session 7); operator install pending | M |
-| 7 | PP-MC-001 P2 | `tgwitem` copyin + `ebay/` + `pipeline/` subdirs | M |
-| 8 | PP-GLOBALS-001 | Analysis only — identify offer-invariant fields; design doc | S |
-| 9 | PP-HINT-001 | eBay Browse enrichment in `ebay_draft`; per-SKU hint trail | M |
+| ✅ | PP-SHELL-001 T2 | ARCH-VIOLATES + deprecated block removal — done (session 8); SHELL-AUDIT.md updated | M |
+| ✅ | PP-INTAKE-001 P1 | `tgw set-template` command — done (session 8); closes template→pipeline loop | M |
+| 1 | PP-MC-001 P2 | `tgwitem` copyin + `ebay/` + `pipeline/` subdirs | M |
+| 2 | PP-GLOBALS-001 | Analysis only — identify offer-invariant fields; design doc | S |
+| 3 | PP-HINT-001 | eBay Browse enrichment in `ebay_draft`; per-SKU hint trail | M |
 
-### Track 2 — Claude Haiku (fast, cheap, no arch context needed)
-Use `/model haiku` or spawn as a Haiku session. Hand it a data excerpt + schema + clear task.
+### Track 2 — Gemini CLI (large-context data + self-contained tasks)
+**Status 2026-06-06**: Gemini CLI now installed and available. Gemini is Dave's primary
+non-Claude AI — free with Google Drive subscription, long context window (1M tokens),
+excellent for data analysis tasks. Perplexity expires ~6 months from now — prioritize
+all remaining research briefs via Perplexity while active; shift data tasks to Gemini.
 
-| Task | Give Haiku | Expect |
+**How to delegate to Gemini**: Write a self-contained task file with all needed context
+baked in (no live system access). Drop data excerpts, schemas, and the task description.
+Save result to `inbox/` for PM-intake.
+
+| Task | Give Gemini | Expect |
 |------|-----------|--------|
-| Data scrub P1 script | Sample item JSON + field list | Batch Python script for `#VERIFIED` rename + history key merge |
-| Category price defaults | `velocity-stats.json` excerpt (top 20 categories) | Config JSON for `category_price_defaults` |
-| Error code table (PP-REF-002) | Grep output of all `errorId` patterns from workers | Formatted markdown table: code, API, meaning, TGW handling |
-| PP-TODO-001 scaffold | DB schema + CLI spec | `CREATE TABLE` SQL + argparse CLI stub |
-| Health summary formatter | `tgw health` JSON output structure | Pretty-print formatter (no TGW arch needed) |
+| PP-VERIFY-001 scaffold | Sample item JSON (5–10 items) + list of assumption rules | Python `catalog-verify` command scaffold + violation checker |
+| Data scrub analysis | `velocity-stats.json` + full item schema | Which fields are missing/stale across the catalog — counts and patterns |
+| Category-group quality review | `category-groups.json` + velocity-stats.json | Which groups have poor pricing data; suggest group splits or merges |
+| ebay_draft aspect fill audit | Grep of aspect fill rates per category | Which categories have worst specifics coverage; tuning recommendations |
+| PP-GLOBALS-001 analysis | Sample item JSONs (20 items, various categories) | Which fields are offer-invariant; proposed `globals` block schema |
 
 ### Track 3 — Perplexity (live web research, cited sources)
 Research briefs in `docs/TGW-Plan-Vault/perplexity/`. Paste brief into Perplexity → save result as `.md` to `inbox/` for PM-intake.
+**⚠ Perplexity subscription expires ~2026-12 — run all remaining briefs before then.**
 
 | Brief                          | File                                | Priority | What it unblocks                                 |
 | ------------------------------ | ----------------------------------- | -------- | ------------------------------------------------ |
@@ -236,6 +263,7 @@ Research briefs in `docs/TGW-Plan-Vault/perplexity/`. Paste brief into Perplexit
 | eBay Cassini 2025–2026         | `PERPLEXITY-002-cassini-seo.md`     | HIGH     | PP-SEO-001 tuning, listing quality strategy      |
 | Sold price data alternatives   | `PERPLEXITY-003-sold-price-data.md` | HIGH     | PP-REPRICER-001 unblock if MI scope stays closed |
 | Third-party integration status | `PERPLEXITY-004-integrations.md`    | MEDIUM   | IGDB, Whisper.cpp, Discogs, Go-UPC               |
+| Library & API audit            | `PERPLEXITY-005-library-audit.md`   | MEDIUM   | PP-PYIPC-001 Syncthing/KDE Connect; stack review |
 
 ### Track 4 — Operator (Dave must act to unblock)
 
@@ -458,11 +486,19 @@ https://perplexity.ai, save the result as `PERPLEXITY-001-result.md` etc. into
   # Test: markmap docs/TGW-Plan-Vault/plan/TGW-Master-Plan.md --no-open -o /tmp/plan.html
   ```
 
-- [ ] **Gemini CLI** (large-context data sessions — 55K item corpus analysis):
-  Option A (no install): use https://aistudio.google.com — paste data, get results, save to inbox/
-  Option B (install): `pip install google-generativeai` or use `google-cloud-sdk`
+- [x] **Gemini CLI** ✅ INSTALLED (2026-06-06) — `gemini` available in PATH; excellent for
+  large-context data tasks; free with Google Drive subscription. Elevated to Track 2 primary
+  for data analysis and self-contained scaffold tasks. See `## Work Tracks § Track 2`.
 
-- [ ] Perplexity: https://perplexity.ai — no install; briefs ready in `perplexity/` folder
+- [ ] **⚠ Perplexity expiry ~2026-12** — subscription expires in ~6 months. Run all remaining
+  research briefs before expiry:
+  - [x] PERPLEXITY-001 — eBay sold price API
+  - [x] PERPLEXITY-002 — pricing strategy
+  - [x] PERPLEXITY-003 — barcode lookup
+  - [x] PERPLEXITY-004 — IGDB/Discogs APIs
+  - [ ] **PERPLEXITY-005** — TGW library audit (brief ready at `perplexity/PERPLEXITY-005-library-audit.md`)
+  Note from Dave (2026-06-06): Perplexity is also a capable Python programmer — it designed the
+  state machine architecture. Use it for architecture research too, not just web lookups.
 
 ---
 
@@ -1375,6 +1411,70 @@ The 4-track delegation model (session 5) is the motivating use case. Work Tracks
 agent a queue; PP-TODO-001 makes that queue queryable and persistent across sessions. The
 `tgw todo claude` / `tgw todo gemini` / `tgw todo admin` structure maps directly to Tracks 1,
 2, and 4. Build PP-TODO-001 so Work Tracks items can be seeded into it on first run.
+
+---
+
+### PP-PYIPC-001 — Python IPC: Syncthing + KDE Connect Integration
+
+#### Goal
+Replace shell-subprocess calls to `kdeconnect-cli` and Syncthing with Python library
+bindings so TGW workers and the FastAPI service can interact with both services
+programmatically — events, status, clipboard, file transfer.
+
+#### Syncthing
+- REST API at `localhost:8384` with API key; `requests`/`httpx` based
+- Capabilities: device status, folder sync progress, event stream (`/rest/events`),
+  trigger rescan, conflict detection
+- TGW integration: trigger `catalog_rebuild` job when Syncthing syncs `tgwcatalog.db`
+  back from satellite → FastAPI event stream subscriber or polling hook
+- Research: PERPLEXITY-005 brief covers Python library options
+
+#### KDE Connect
+- Current: `kdeconnect-cli --share-text "..."` subprocess calls in `tgw.source`
+- Better: DBus via `pydbus` or `dbus-python` (`org.kde.kdeconnect.daemon`)
+- Capabilities: clipboard push, notification, file send, ping
+- TGW integration: `ic_template()`, `ic_command()` wrappers in Python; push from
+  workers without shell dependency
+- Research: PERPLEXITY-005 covers DBus vs. REST vs. CLI approaches
+
+#### Dependencies
+- PERPLEXITY-005 result (research first, then implement)
+- PP-WM-001 (Qtile clipboard widget already uses subprocess xclip; move to KDE Connect push)
+
+---
+
+### PP-VERIFY-001 — Catalog Assumption Verification + Hall Pass Flag
+
+#### Problem
+55K items accumulated over many years contain assumption violations — missing required
+fields, invalid status combinations, stale eBay data, inconsistent location formats.
+Currently there is no tool to enumerate violations at scale.
+
+#### Design
+**`tgw catalog-verify [--location X] [--limit N] [--write] [--fix]`**
+- Scans ItemData or a subset; checks each item against a set of assumption rules
+- Rules (examples): title not empty, title ≠ SKU, location format valid, has at least
+  one photo, `ebay_category_id` is numeric, `verified` is YYYYMMDD format, no stale
+  `TEMPLATE:` prefix in title, `#STATUS` is a recognized value, etc.
+- Output: markdown checklist of violations grouped by type; SKU + field + violation
+- `--write`: stamps `catalog_verified: {timestamp, by: "catalog-verify"}` on passing items
+
+**Hall pass flag**: `catalog_verified` field in item JSON
+- Set when item passes verification (or after manual operator review)
+- Cleared automatically whenever any field is written (catalog-rebuild resets it)
+- `tgw catalog-verify` skips items with `catalog_verified` set unless `--force`
+- Prevents re-flagging manually confirmed edge cases (legacy items with intentional quirks)
+
+#### Phases
+| Phase | Scope |
+|-------|-------|
+| 1 | `tgw catalog-verify` command; 10–15 assumption rules; markdown report |
+| 2 | `catalog_verified` hall pass; clear-on-write in `_write_field`; `--force` to re-check |
+| 3 | Violation severity levels (critical/warning/info); fix-in-place for auto-fixable issues |
+
+#### Delegate Phase 1 scaffold to Gemini
+Give Gemini: sample item JSON (10 items, various states) + rule list + CLI spec.
+Expect: Python scaffold for the rule checker + output formatter.
 
 ---
 

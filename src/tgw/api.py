@@ -34,6 +34,7 @@ from .items import (
     catlocmvall,
     get_item,
     locationupdate,
+    statusupdate,
     titleupdate,
     update_item,
     update_where,
@@ -159,6 +160,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('sku')
     p.add_argument('value')
     p.add_argument('--check-only', action='store_true')
+
+    p = sub.add_parser('statusupdate',
+                       help='update #STATUS field on one or more items')
+    p.add_argument('value', help='new status value (e.g. "In Stock", "Sold")')
+    p.add_argument('skus', nargs='+', help='one or more SKUs to update')
+    p.add_argument('--check-only', action='store_true', help='validate without writing')
 
     p = sub.add_parser('catlocmvall',
                        help='move all items from one location to another')
@@ -376,6 +383,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser('get-ebay-token',
                        help='browser OAuth re-consent flow — use when refresh token is dead (HTTP 400)')
     p.add_argument('--sandbox', action='store_true', help='use eBay sandbox instead of production')
+    p.add_argument('--code', default=None,
+                   help='skip browser: supply auth code from redirect URL directly (URL-encoded OK)')
 
     p = sub.add_parser('category-groups',
                        help='view/manage category group taxonomy (PP-PRICE-005)')
@@ -385,6 +394,19 @@ def _build_parser() -> argparse.ArgumentParser:
                    help='list all groups with category counts and pricing')
     p.add_argument('--reseed', action='store_true',
                    help='re-seed pricing.typical_used from current velocity-stats.json')
+
+    p = sub.add_parser('set-template',
+                       help='apply category group defaults to an item (PP-INTAKE-001 Phase 1)')
+    p.add_argument('group_key', nargs='?', default=None,
+                   help='category group key (e.g. "electronics", "books"); omit to use current template')
+    p.add_argument('sku', nargs='?', default=None,
+                   help='SKU to update (default: CurrentItem symlink)')
+    p.add_argument('--list', action='store_true', dest='list_groups',
+                   help='list all available template groups')
+    p.add_argument('--camera', metavar='GROUP_KEY', dest='camera_only', default=None,
+                   help='push SETTEMPLATE: to clipboard only (KDE Connect relay) — no JSON update')
+    p.add_argument('--dry-run', action='store_true',
+                   help='show what would be written without making changes')
 
     p = sub.add_parser('data-scrub',
                        help='ItemData maintenance passes (dry-run by default)')
@@ -1244,6 +1266,158 @@ def cmd_suggest(cfg: Dict[str, Any], text: str) -> Dict[str, Any]:
     return {'ok': True, 'written': line.strip(), 'file': str(suggestions_file)}
 
 
+def cmd_set_template(
+    cfg: Dict[str, Any],
+    *,
+    group_key: Optional[str] = None,
+    sku: Optional[str] = None,
+    list_groups: bool = False,
+    camera_only: Optional[str] = None,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Apply category group defaults to an item (PP-INTAKE-001 Phase 1).
+
+    Writes category_group, ai_hint (prepended), size_class, and
+    ebay_category_id (if not already set) to the item JSON.
+    Optionally pushes SETTEMPLATE: to the clipboard for KDE Connect relay.
+    """
+    from .config import sku_json
+    from .ebay.pricing import _load_groups
+    from .items import atomic_write_json
+    from .resolver import load_item_doc
+
+    groups_data = _load_groups(cfg)
+    groups = groups_data.get('groups', {})
+
+    # --list: show all available templates
+    if list_groups:
+        rows = []
+        for key, grp in groups.items():
+            pricing = grp.get('pricing', {})
+            rows.append({
+                'key':        key,
+                'name':       grp['name'],
+                'size_class': grp.get('size_class', ''),
+                'ai_hint':    grp.get('ai_hint', '')[:60],
+                'cats':       len(grp.get('ebay_categories', [])),
+                'typical':    pricing.get('typical_used'),
+            })
+        print(f'{"Key":<35} {"Name":<30} {"Size":<12} {"Cats":>4}  {"Typical":>8}  AI Hint')
+        print('-' * 110)
+        for r in rows:
+            typ = f'${r["typical"]:.2f}' if r['typical'] else '   N/A'
+            print(f'{r["key"]:<35} {r["name"]:<30} {r["size_class"]:<12} '
+                  f'{r["cats"]:>4}  {typ:>8}  {r["ai_hint"]}')
+        print(f'\n{len(rows)} templates  |  file: {cfg["category_groups_path"]}')
+        return {'ok': True, 'count': len(rows)}
+
+    # --camera GROUP_KEY: push SETTEMPLATE: to clipboard only, no JSON update
+    if camera_only:
+        key = camera_only
+        grp = groups.get(key)
+        if not grp:
+            return {'ok': False, 'error': f'unknown group key: {key!r}'}
+        template_str = f'SETTEMPLATE:{grp["name"]}'
+        _push_clipboard(template_str)
+        return {'ok': True, 'clipboard': template_str, 'json_updated': False}
+
+    # Resolve group
+    if not group_key:
+        return {'ok': False, 'error': 'group_key required (or use --list / --camera)'}
+    grp = groups.get(group_key)
+    if not grp:
+        available = ', '.join(sorted(groups.keys()))
+        return {'ok': False, 'error': f'unknown group key: {group_key!r}',
+                'available': available}
+
+    # Resolve SKU
+    if not sku:
+        sku = _current_item_sku()
+        if not sku:
+            return {'ok': False,
+                    'error': 'no SKU provided and CurrentItem symlink not set or not a valid SKU dir'}
+
+    json_path = sku_json(cfg, sku)
+    if not json_path.exists():
+        return {'ok': False, 'error': f'item not found: {sku}'}
+
+    if dry_run:
+        fields = _build_template_fields(cfg, grp, group_key, {})
+        return {'ok': True, 'sku': sku, 'group_key': group_key, 'group_name': grp['name'],
+                'dry_run': True, 'would_write': fields}
+
+    doc = load_item_doc(json_path)
+    fields = _build_template_fields(cfg, grp, group_key, doc)
+    doc.update(fields)
+    atomic_write_json(json_path, doc, pretty=True)
+
+    # Push SETTEMPLATE: to clipboard for KDE Connect camera relay
+    template_str = f'SETTEMPLATE:{grp["name"]}'
+    clipboard_ok = _push_clipboard(template_str)
+
+    return {
+        'ok':           True,
+        'sku':          sku,
+        'group_key':    group_key,
+        'group_name':   grp['name'],
+        'fields':       fields,
+        'clipboard':    template_str if clipboard_ok else None,
+    }
+
+
+def _build_template_fields(
+    cfg: Dict[str, Any], grp: Dict[str, Any], group_key: str,
+    existing: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Build the dict of fields to write for a template application."""
+    fields: Dict[str, Any] = {'category_group': group_key}
+
+    if grp.get('size_class'):
+        fields['size_class'] = grp['size_class']
+
+    # Prepend group ai_hint to any existing hint
+    group_hint = grp.get('ai_hint', '').strip()
+    if group_hint:
+        existing_hint = existing.get('ai_hint', '').strip()
+        if existing_hint and existing_hint != group_hint:
+            fields['ai_hint'] = f'{group_hint}; {existing_hint}'
+        else:
+            fields['ai_hint'] = group_hint
+
+    # Set first category if not already assigned
+    cats = grp.get('ebay_categories', [])
+    if cats and not existing.get('ebay_category_id'):
+        fields['ebay_category_id'] = cats[0]
+
+    return fields
+
+
+def _current_item_sku() -> Optional[str]:
+    """Resolve /opt/TGW/CurrentItem symlink to a SKU name."""
+    current = Path('/opt/TGW/CurrentItem')
+    if current.is_symlink():
+        target = current.resolve()
+        if target.exists() and target.is_dir():
+            name = target.name
+            import re
+            if re.match(r'^tgw\d{15,}', name):
+                return name
+    return None
+
+
+def _push_clipboard(text: str) -> bool:
+    """Push text to the clipboard via wl-copy (Wayland) or xclip (X11)."""
+    import subprocess
+    for cmd in (['wl-copy'], ['xclip', '-selection', 'clipboard']):
+        try:
+            subprocess.run(cmd, input=text, text=True, timeout=3,
+                           capture_output=True)
+            return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+    return False
+
+
 def main() -> int:
     parser = _build_parser()
     args   = parser.parse_args()
@@ -1310,6 +1484,15 @@ def main() -> int:
 
         elif args.op == 'verifiedupdate':
             result = verifiedupdate(cfg, args.sku, args.value, check_only=check)
+
+        elif args.op == 'statusupdate':
+            results = [statusupdate(cfg, sku, args.value, check_only=check)
+                       for sku in args.skus]
+            if len(results) == 1:
+                result = results[0]
+            else:
+                ok = all(r.get('ok') for r in results)
+                result = {'ok': ok, 'count': len(results), 'results': results}
 
         elif args.op == 'catlocmvall':
             result = catlocmvall(cfg, args.from_location, args.to_location,
@@ -1793,11 +1976,26 @@ def main() -> int:
             }
 
         elif args.op == 'get-ebay-token':
-            from .apis.ebay.get_access_token import get_access_token
-            token = get_access_token(prompt_if_needed=True,
-                                     is_sandbox=getattr(args, 'sandbox', False))
+            from urllib.parse import unquote
+
+            from .apis.ebay.get_access_token import exchange_code_for_tokens, get_access_token, save_token_state
+            from .apis.ebay.get_access_token import load_config as _ebay_load_config
+            direct_code = getattr(args, 'code', None)
+            if direct_code:
+                direct_code = unquote(direct_code)
+                ebay_cfg = _ebay_load_config()
+                tokens = exchange_code_for_tokens(direct_code, ebay_cfg,
+                                                  is_sandbox=getattr(args, 'sandbox', False))
+                save_token_state(tokens)
+                token = tokens['access_token']
+                import time as _time
+                exp = int(tokens.get('expiry', 0) - _time.time())
+                print(f'Token exchanged. Expires in {exp}s ({exp//3600}h). Run: tgw restart-ebay-token')
+            else:
+                token = get_access_token(prompt_if_needed=True,
+                                         is_sandbox=getattr(args, 'sandbox', False))
+                print('Token written to secrets. Run: tgw restart-ebay-token')
             result = {'ok': True, 'token_prefix': token[:20] + '...'}
-            print('Token written to secrets. Run: tgw restart-ebay-token')
 
         elif args.op == 'category-groups':
             from .ebay.pricing import _group_for_category, _load_groups
@@ -1876,6 +2074,16 @@ def main() -> int:
                     print(f'\n{len(rows)} groups  |  file: {cfg["category_groups_path"]}')
                     return 0
                 result = {'ok': True, 'count': len(rows), 'groups': rows}
+
+        elif args.op == 'set-template':
+            result = cmd_set_template(
+                cfg,
+                group_key=args.group_key,
+                sku=args.sku,
+                list_groups=args.list_groups,
+                camera_only=args.camera_only,
+                dry_run=args.dry_run,
+            )
 
         else:
             result = {'ok': False, 'error': f'unknown op: {args.op!r}'}
