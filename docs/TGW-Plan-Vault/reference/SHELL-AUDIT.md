@@ -3,7 +3,7 @@ title: TGW Shell Source Audit (PP-SHELL-001)
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-05
+updated: 2026-06-06
 ---
 
 # Shell Source Audit
@@ -188,12 +188,16 @@ These implement the original file-based intake pipeline:
 - `eb_template_default()` / `eb_template_book()` — xdotool form fill
 - `paste_isbn()` / `paste_tgw_title()` / `paste_tgw_sku()` — clipboard paste + keypress
 
-### Old KDE Connect / clipboard intake protocol
-- `ic_mkitem()` — sends "COMMAND:Item Creation - Save Item" to clipboard
-- `ic_data()` — sends "DATA:key=value" to clipboard
-- `ic_template()` — sends "TEMPLATE:name" to clipboard
-- `ic_command()` — sends "COMMAND:..." to clipboard
-- `ic_test()` — syntax error artifact (line 3373 has stray content after closing brace)
+### ~~Old KDE Connect / clipboard intake protocol~~ — RESCUED (still active, PP-INTAKE-001)
+These are NOT deprecated. They are the bidirectional channel between TGW and the camera app
+via KDE Connect clipboard relay. xmouse (tablet SSH macro pad) fires `tgw` commands that call
+these via SSH; the COMMAND:/TEMPLATE: strings are pushed to the clipboard → KDE Connect →
+camera app HUD reads and acts on them. See PP-INTAKE-001 for upgrade plan.
+- `ic_mkitem()` — sends "COMMAND:Item Creation - Save Item" → camera app saves current item
+- `ic_data()` — sends "DATA:key=value" → pushes a field value to camera app
+- `ic_template()` — sends "TEMPLATE:name" → sets active template in camera app
+- `ic_command()` — sends "COMMAND:..." → generic command dispatch to camera app
+- `ic_test()` — syntax error artifact (line 3373 has stray content after closing brace) — FIX: remove stray content
 - `title2isbn()` — xdotool ISBN tab sequence
 
 ### Old GPT-3.5 via sgpt (replaced by Ollama pipeline)

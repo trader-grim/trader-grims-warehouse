@@ -307,3 +307,15 @@ def dead_letter_count() -> int:
         with con.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM queue_jobs WHERE state = 'dead_letter'")
             return cur.fetchone()[0]
+
+
+def clear_dead_letter(queue_name: str) -> int:
+    """Cancel all dead_letter jobs for a given queue. Returns the number of rows affected."""
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """UPDATE queue_jobs SET state = 'cancelled'
+                   WHERE queue_name = %s AND state = 'dead_letter'""",
+                (queue_name,),
+            )
+            return cur.rowcount

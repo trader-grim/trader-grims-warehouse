@@ -31,7 +31,7 @@ from tgw_widgets import TGWHealthWidget, TGWQueueWidget, TGWSKUWidget  # noqa: E
 
 MOD = "mod4"          # Super / Windows key
 TERMINAL = "konsole"  # KDE terminal — matches macroboard and existing tooling
-LAUNCHER = "dmenu_run -fn 'monospace-11' -nb '#1a1a2e' -nf '#e0e0e0' -sb '#e94560' -sf '#1a1a2e'"
+LAUNCHER = "j4-dmenu-desktop --dmenu=\"dmenu -fn 'monospace-11' -nb '#1a1a2e' -nf '#e0e0e0' -sb '#e94560' -sf '#1a1a2e'\""
 TGW_API_URL = "http://localhost:7373"
 TGW_API_KEY_FILE = os.path.expanduser("~/.config/tgw/api-key")
 
@@ -194,7 +194,7 @@ keys = [
 
             Key([], "Escape", lazy.ungrab_all_chords(), desc="exit TGW mode"),
         ],
-        mode=True,
+        mode=False,
         name="TGW",
     ),
 ]

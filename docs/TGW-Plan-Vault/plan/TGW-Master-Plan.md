@@ -3,10 +3,9 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-05 (session 6 end-of-session commit)
+updated: 2026-06-06 (session 7)
 maintained_by: Opus (planner)
 ---
-
 # TGW Master Plan
 
 ## How to read this file
@@ -82,6 +81,11 @@ maintained_by: Opus (planner)
 - `tgw staged` / `tgw publish` — operator review gate before any item goes live
 - **Open issue**: errorId 25002 `Item.Country` at publish for some categories (34032, 14027, 13916) — offer body is correct, investigating category-specific requirements
 
+### Pipeline additions — 2026-06-06
+- **ISS-009 Token double-buffer bug FIXED** — `refresh_access_token()` had a 5-min internal guard conflicting with the worker's 30-min buffer, delaying the real eBay call until the last 5 minutes of token life. Fixed: added `force=True` parameter; worker now passes `force=True` to bypass the internal guard. `tgw restart-ebay-token` added: clears dead_letter token jobs and enqueues a fresh token_refresh immediately. `clear_dead_letter(queue_name)` added to `state_machine.py`.
+- **PP-PRICE-005 DONE** — Category groups taxonomy (`/opt/TGW/config/category-groups.json`): 24 groups, 65+ eBay categories mapped; fields: `name`, `store_category`, `ebay_categories`, `size_class` (flat/packet/small_box…), `ai_hint`, `pricing` (floor, typical_used, typical_new seeded from velocity p25). Integrated into `suggest_price()`: Stage 4 fallback (group typical × condition_factor before returning null); hard floor applied to ALL prices including Browse API results. `tgw category-groups [cat_id] [--list] [--reseed]` CLI; `config['category_groups_path']` config key. Immediately unblocks items with thin Browse API comps that previously stalled with null price. **Semi-chaotic storage design**: `size_class` per group encodes physical storage class; items stored by size not category — group membership gives a default size assumption at intake.
+- **ISS-009 Operator action required** — eBay refresh token dead (HTTP 400 2026-06-05 17:00). Dave must run browser OAuth re-consent then `sudo -u tgw tgw restart-ebay-token` to re-start the cycle. See ISSUES.md ISS-009.
+
 ### Pipeline additions — 2026-06-05
 - **PP-PRICE-004 DONE** — `tgw/velocity.py` aggregation module; `workers/velocity_stats.py` nightly
   self-scheduling worker; `tgw velocity-report` CLI (`--refresh`, `--category`, `--min-sold`, `--json`,
@@ -146,6 +150,8 @@ maintained_by: Opus (planner)
 - ✅ **SKU search first-18** (2026-06-05) — `resolve()` in `resolver.py` now does exact-dir-check then prefix-18 fallback for `tgw*` queries ≤18 chars; `getsku()` in `tgw.source` adds same prefix fallback after ebayid lookup fails; covers 47,707×18-char old-format ↔ 7,643×20-char new-format SKU drift
 - ✅ **PP-TODO-001** multi-agent TODO tracker (2026-06-05) — `todo_items` table in `state_machine` DB (id, agent, priority, body, source, added_at, done_at); `tgw todo [agent]` list / `--add` / `--done` / `--seed`; `src/tgw/todo.py`; Work Tracks seeded (18 items across claude/admin/db/gemini agents)
 - ✅ **PP-WM-001 Phase 1** Qtile WM base config (2026-06-05) — `etc/interfaces/qtile/config.py` + `tgw_widgets.py`; TGWQueueWidget (REST API), TGWHealthWidget (systemd), TGWSKUWidget (clipboard); Super+T TGW chord mode; F12 scratchpad; 5 named workspaces; `etc/interfaces/qtile/install.sh`; operator install on Track 4 TODO
+- ✅ **PP-PRICE-005** Category groups taxonomy (2026-06-06) — see session 7 additions above
+- ✅ **PP-TOKEN-001 fix** token double-buffer bug + restart command (2026-06-06) — see session 7 additions above
 
 ### Active / next build priorities
 
@@ -161,6 +167,7 @@ maintained_by: Opus (planner)
 | 9 | **PP-HINT-001** remaining gaps | ongoing | eBay Browse enrichment in ebay_draft; per-SKU hint trail |
 | 10 | **PP-SOLD-001 Tier 3** sweep | operator gated | Run `tgw ebay-sweep` after full-history CSV import |
 | — | **PP-REPRICER-001** | blocked | Blocked on `buy.marketplace_insights` scope approval |
+| — | **PP-INTAKE-001** | design ready | Template-driven multi-surface intake — `tgw set-template` closes loop; xmouse/web form/HUD; SETTEMPLATE: KDE Connect protocol; self-improving via velocity reseed; depends PP-PRICE-005 ✅ |
 
 ### Running in background
 - `ebay_sku_migrate` — ~8,350 live listings remaining; ~5/hr; ~70 days to complete
@@ -223,12 +230,12 @@ Use `/model haiku` or spawn as a Haiku session. Hand it a data excerpt + schema 
 ### Track 3 — Perplexity (live web research, cited sources)
 Research briefs in `docs/TGW-Plan-Vault/perplexity/`. Paste brief into Perplexity → save result as `.md` to `inbox/` for PM-intake.
 
-| Brief | File | Priority | What it unblocks |
-|-------|------|----------|-----------------|
-| eBay API scope expansion | `PERPLEXITY-001-ebay-scopes.md` | HIGH | PP-REPRICER-001, PP-SEO-001 Phase 3+6 |
-| eBay Cassini 2025–2026 | `PERPLEXITY-002-cassini-seo.md` | HIGH | PP-SEO-001 tuning, listing quality strategy |
-| Sold price data alternatives | `PERPLEXITY-003-sold-price-data.md` | HIGH | PP-REPRICER-001 unblock if MI scope stays closed |
-| Third-party integration status | `PERPLEXITY-004-integrations.md` | MEDIUM | IGDB, Whisper.cpp, Discogs, Go-UPC |
+| Brief                          | File                                | Priority | What it unblocks                                 |
+| ------------------------------ | ----------------------------------- | -------- | ------------------------------------------------ |
+| eBay API scope expansion       | `PERPLEXITY-001-ebay-scopes.md`     | HIGH     | PP-REPRICER-001, PP-SEO-001 Phase 3+6            |
+| eBay Cassini 2025–2026         | `PERPLEXITY-002-cassini-seo.md`     | HIGH     | PP-SEO-001 tuning, listing quality strategy      |
+| Sold price data alternatives   | `PERPLEXITY-003-sold-price-data.md` | HIGH     | PP-REPRICER-001 unblock if MI scope stays closed |
+| Third-party integration status | `PERPLEXITY-004-integrations.md`    | MEDIUM   | IGDB, Whisper.cpp, Discogs, Go-UPC               |
 
 ### Track 4 — Operator (Dave must act to unblock)
 
@@ -240,14 +247,14 @@ Research briefs in `docs/TGW-Plan-Vault/perplexity/`. Paste brief into Perplexit
 
 #### Priority 0 — Qtile WM install
 
-- [ ] **Install Qtile window manager** (PP-WM-001):
+- [x] **Install Qtile window manager** (PP-WM-001):
   ```bash
   bash /opt/TGW/src/trader-grims-warehouse/etc/interfaces/qtile/install.sh
   ```
   Installs: `qtile`, `xclip`, `dmenu` (via apt); symlinks `~/.config/qtile/{config.py,tgw_widgets.py}`
   from repo; copies tgw-http API key to `~/.config/tgw/api-key` for bar widgets.
-- [ ] Log out → select **Qtile** at SDDM/LightDM session list → log back in
-- [ ] Verify bar shows: workspaces, W:N/N health, Q:✓ queue indicator, clock
+- [x] Log out → select **Qtile** at SDDM/LightDM session list → log back in
+- [x] Verify bar shows: workspaces, W:N/N health, Q:✓ queue indicator, clock
 - [ ] Test Super+T → TGW mode (bar shows `[ TGW ]`); press `h` for health, Escape to exit
 - [ ] Test F12 scratchpad terminal toggle
 - [ ] Edit `~/.config/qtile/autostart.sh` if compositor (picom) or notifier (dunst) is desired
@@ -259,11 +266,27 @@ Research briefs in `docs/TGW-Plan-Vault/perplexity/`. Paste brief into Perplexit
 **Strategy:** Request a fresh keyset (new App ID / Cert ID / Dev ID) with all desired scopes
 applied at once. Avoids piecemeal scope expansion later. See complete desired scope list below.
 
-- [ ] Go to https://developer.ebay.com → My Account → Application Keys → **Create new keyset**
+**Status 2026-06-05 ✅:** New keyset requested. All desired scopes requested including
+`buy.marketplace_insights`. Awaiting eBay approval. Portal request flow has changed from
+what's documented below — steps below are reference only; follow current portal UI when
+updating credentials after approval.
+
+⚠ When new keyset arrives: update `secrets_root/ebay-credentials.json`, update
+`tgw-api-config.json` scopes to match approved scopes only, then re-run OAuth.
+
+- [x] New keyset requested via developer.ebay.com (2026-06-05)
+- [x] All desired scopes requested including `buy.marketplace_insights` (2026-06-05)
+- [ ] Receive approval + credentials from eBay
+- [ ] Update `secrets_root/ebay-credentials.json` with new App ID / Cert ID / Dev ID / RU name
+- [ ] Re-run OAuth: `sudo -u tgw BROWSER=/usr/bin/firefox python3 .../get_access_token.py`
+- [ ] Restart all eBay workers after new token is live
+
+**Old instructions (portal UI has changed — reference only):**
+- Go to https://developer.ebay.com → My Account → Application Keys → **Create new keyset**
   - App name suggestion: `TGW-Automation-v2` or similar
   - Note new App ID, Cert ID, Dev ID — replace in `secrets_root/ebay-credentials.json`
-- [ ] On the new keyset, request **all scopes in the desired list** (see below) via the "Get a Token" / OAuth consent flow and the scope editor
-- [ ] For `buy.marketplace_insights` — **this requires a separate contact** (limited release):
+- On the new keyset, request **all scopes in the desired list** (see below) via the "Get a Token" / OAuth consent flow and the scope editor
+- For `buy.marketplace_insights` — **this requires a separate contact** (limited release):
   - Go to https://developer.ebay.com/support → contact Developer Support
   - Frame: "We are a private resale automation platform (eBay seller: DaveBuko-Webkulap) automating inventory pricing and listing management. We need `buy.marketplace_insights` to power our automated pricing engine using actual sold-item data rather than active-listing prices."
   - Reference: Marketplace Insights API docs at developer.ebay.com/api-docs/buy/marketplace-insights
@@ -288,25 +311,25 @@ applied at once. Avoids piecemeal scope expansion later. See complete desired sc
 
 ##### Complete desired scope list for new keyset
 
-| Scope | Have | Priority | What it enables |
-|-------|------|----------|----------------|
-| `sell.inventory` | ✅ | core | Create/update/delete inventory items and offers |
-| `sell.account` | ✅ | core | Fulfillment policies, merchant location, payment policies |
-| `sell.marketing` | ✅ | core | Promotions, campaigns |
-| `buy.marketplace_insights` | ❌ | **HIGH** | Sold price data → PP-REPRICER-001 |
-| `commerce.catalog.readonly` | ❌ | **HIGH** | EPID lookup by UPC/EAN → PP-SEO-001 Phase 3 |
-| `sell.analytics.readonly` | ❌ | **HIGH** | Per-listing impressions/clicks → PP-SEO-001 Phase 6 |
-| `sell.fulfillment.readonly` | ❌ | medium | Read orders via REST (supplements Trading API GetOrders) |
-| `sell.finances.readonly` | ❌ | medium | Payout/financial data for accounting and reconciliation |
-| `sell.stores.readonly` | ❌ | medium | Read eBay store category tree → PP-STORE-001 |
-| `sell.reputation.readonly` | ❌ | low | Feedback score tracking and monitoring |
-| `commerce.notification.subscription` | ❌ | low | REST-based webhook event subscriptions (future alt to Trading API) |
+| Scope                                | Have | Priority | What it enables                                                    |
+| ------------------------------------ | ---- | -------- | ------------------------------------------------------------------ |
+| `sell.inventory`                     | ✅    | core     | Create/update/delete inventory items and offers                    |
+| `sell.account`                       | ✅    | core     | Fulfillment policies, merchant location, payment policies          |
+| `sell.marketing`                     | ✅    | core     | Promotions, campaigns                                              |
+| `buy.marketplace_insights`           | ❌    | **HIGH** | Sold price data → PP-REPRICER-001                                  |
+| `commerce.catalog.readonly`          | ❌    | **HIGH** | EPID lookup by UPC/EAN → PP-SEO-001 Phase 3                        |
+| `sell.analytics.readonly`            | ❌    | **HIGH** | Per-listing impressions/clicks → PP-SEO-001 Phase 6                |
+| `sell.fulfillment.readonly`          | ❌    | medium   | Read orders via REST (supplements Trading API GetOrders)           |
+| `sell.finances.readonly`             | ❌    | medium   | Payout/financial data for accounting and reconciliation            |
+| `sell.stores.readonly`               | ❌    | medium   | Read eBay store category tree → PP-STORE-001                       |
+| `sell.reputation.readonly`           | ❌    | low      | Feedback score tracking and monitoring                             |
+| `commerce.notification.subscription` | ❌    | low      | REST-based webhook event subscriptions (future alt to Trading API) |
 
 ---
 
 #### Priority 2 — API credentials (15–20 min each, each unlocks a lookup source)
 
-- [ ] **IGDB** (video game lookups):
+- [ ] **IGDB** (video game lookups) — ⏳ App registered 2026-06-05; key not appearing in portal yet:
   1. Go to https://dev.twitch.tv → Log in with Twitch account (create if needed)
   2. Register new application: Name=`TGW`, OAuth Redirect=`http://localhost`, Category=`Other`
   3. Copy Client ID + generate Client Secret
@@ -316,7 +339,7 @@ applied at once. Avoids piecemeal scope expansion later. See complete desired sc
      ```
   5. `sudo chmod 600 /opt/TGW/secrets/igdb-credentials.json`
 
-- [ ] **Discogs** (music/vinyl lookups):
+- [x] **Discogs** (music/vinyl lookups) — ✅ Done 2026-06-05:
   1. Go to https://www.discogs.com/settings/developers
   2. Click "Generate new token"
   3. Write: `sudo -u tgw nano /opt/TGW/secrets/discogs-credentials.json`
@@ -325,7 +348,7 @@ applied at once. Avoids piecemeal scope expansion later. See complete desired sc
      ```
   4. `sudo chmod 600 /opt/TGW/secrets/discogs-credentials.json`
 
-- [ ] **Go-UPC** (barcode fallback — better coverage than upcitemdb alone):
+- [x] **Go-UPC** — ❌ No free tier available (2026-06-05); skip for now; upcitemdb + go-upc paid plan if needed later:
   1. Go to https://go-upc.com/api → sign up for free tier
   2. Copy API key
   3. Write: `sudo -u tgw nano /opt/TGW/secrets/go-upc-credentials.json`
@@ -334,7 +357,7 @@ applied at once. Avoids piecemeal scope expansion later. See complete desired sc
      ```
   4. `sudo chmod 600 /opt/TGW/secrets/go-upc-credentials.json`
 
-- [ ] **upcitemdb** (optional — increases free rate limit from 100/day):
+- [x] **upcitemdb** — ✅ Free tier (100/day) works keyless; no credential needed; code already handles this:
   1. Go to https://www.upcitemdb.com/api → sign up
   2. Write: `sudo -u tgw nano /opt/TGW/secrets/upcitemdb-credentials.json`
      ```json
@@ -717,6 +740,32 @@ All 6 phases implemented in `ebay_draft` + `tgw/seo/title.py` + `apis/ebay/catal
 
 Config keys in use: `seo.title_min_chars=40`, `title_max_chars=80`, `title_brand_inject`, `title_mpn_inject`, `epid_lookup`, `description_min_words=200`.
 
+#### Cassini research findings (PERPLEXITY-002, 2026-06-05) — tuning notes
+Cited research from Perplexity (export.ebay.com, Listtune, 3Dsellers, Webinterpret, 2025–2026):
+
+**Ranking priority order (working model 2025–2026):**
+1. Relevance: title keywords + matching item specifics + correct category
+2. Conversion/velocity: sales history, CTR, return rate
+3. Seller metrics: defect rate, late shipment, cancellations, feedback
+4. Listing quality + completeness: photo count/quality, description clarity, specifics coverage
+5. Price + terms: competitive price, fast handling, 30-day+ returns
+
+**Key validated decisions:**
+- Item specifics completeness estimated at ~30% of Cassini score (Listtune/3Dsellers testing)
+- ALL-CAPS words in titles explicitly documented by eBay to hurt rank — TGW title pipeline already strips/warns
+- Brand + MPN should appear in **both** title AND item specifics for double relevance signal
+- EPID association is beneficial for used items when exact model match exists (auto-fills structured data)
+- No official "200-word rule" — focus on completeness/clarity; first 800 chars matter most for mobile
+- Photos expanding from 24 to 40 slots (eBay April 2026 test); 8–12 photos recommended baseline for used
+- Condition granularity matters for filter visibility, not a direct ranking bonus
+- Keyword stuffing (repeated terms, comma-separated lists) documented as penalized
+
+**PP-QUALITY-001 tuning opportunities (future pass):**
+- Photo score threshold: flag listings with < 5 photos (hard fail); soft-warn < 8
+- Title: add ALL-CAPS word detection flag to `title_flags`
+- Description: first-800-chars keyword check (mobile snippet quality)
+- Item specifics: Required/Recommended fill % as primary score signal (already partially done)
+
 ## Open questions
 - Per-queue worker counts (start: 1 each; serialize AI work in Phase 5)
 - Where does the Ollama lock live — in the job manager worker or a Postgres advisory lock? (Phase 5 decision)
@@ -824,13 +873,23 @@ Integrated into `ai_identify` (runs before Ollama) and `tgw lookup <SKU>` CLI.
 - `open_library` (books/ISBN, no auth) · `discogs` (music, needs credential) · `igdb` (games, Twitch OAuth)
 - `justtcg` (trading cards, no auth) · `open_food_facts` (food/household, no auth)
 
-**Credentials still needed** (silent-skip until added):
-- `secrets_root/igdb-credentials.json` — `{"client_id":"...","client_secret":"..."}`
-- `secrets_root/discogs-credentials.json` — `{"personal_access_token":"..."}`
-- `secrets_root/go-upc-credentials.json` — `{"api_key":"Bearer <token>"}`
-- `secrets_root/upcitemdb-credentials.json` — optional; increases rate limit
+**Credential status (2026-06-05):**
+- `secrets_root/igdb-credentials.json` — ⏳ Twitch app registered but key not yet visible in portal; check back
+- `secrets_root/discogs-credentials.json` — ✅ Done
+- `secrets_root/go-upc-credentials.json` — ❌ No free tier available; skip; Go-UPC is paid-only
+- `secrets_root/upcitemdb-credentials.json` — ✅ Not needed; free tier (100/day) works keyless; code already handles this
 
-**Tier 2 (decide when Tier 1 proves insufficient):** Keepa (€19/mo, Amazon price history); Barcode Lookup (richer fields, subscription). Stubs not implemented yet.
+**Integration details (PERPLEXITY-004, 2026-06-05):**
+- **Discogs**: 60 req/min authenticated; personal token for automation; barcode lookup:
+  `GET /database/search?barcode=<UPC>&type=release` (JSON array of releases); must send `User-Agent` header;
+  30-day cache TTL recommended; search endpoint requires auth even for reads
+- **IGDB**: Twitch app registration is instant; 4 req/sec / 8 concurrent max; queries use Apicalypse POST:
+  `POST /v4/games` body: `search "Title"; fields id,name,slug,first_release_date; limit 10;`
+  OAuth token via `POST id.twitch.tv/oauth2/token?grant_type=client_credentials`; 14–30 day cache TTL
+- **Go-UPC**: Dev tier = 5,000 lookups/month, 2 req/sec; bearer token auth;
+  `GET /api/v1/code/<barcode>?key=<key>`; 90–180 day cache; dedupe aggressively; monthly quota is hard stop
+
+**Tier 2 (decide when Tier 1 proves insufficient):** Keepa (€19/mo, Amazon price history); Barcode Lookup (richer fields, subscription); **PriceCharting** (free API, current market values from eBay sold data, good for games/cards/collectibles — add as Tier 2 for those verticals). Stubs not implemented yet.
 
 **Do not implement:** Amazon PAAPI (sunset 2026), GoodReads (discontinued), TCGPlayer (closed), CamelCamelCamel (no API), eBay Finding API (dead 2025).
 
@@ -1141,6 +1200,7 @@ MC console         Flutter app (Linux + Android)
 
 ### Later phases (separate PPs)
 - Scanner input (barcode/SKU lookup → item detail)
+- **PP-INTAKE-001 intake screen** — pre-photo flow: weight, size_class, barcode scan, category group picker, ai_hint; location suggestion (semi-chaotic); Tasker camera trigger → intake form
 - Picklist generator (PP-ADD-009) as embedded screen
 - Offer management list view
 - Fulfillment workflow
@@ -1169,10 +1229,117 @@ Voice capture (Whisper) offers zero-friction idea capture during item photograph
 - Tasker on Android: press record → transcribe → POST `/api/items/<sku>/action` or `tgw-http`
   hint endpoint; SKU from barcode scan or CurrentItem symlink
 
+#### Whisper.cpp implementation details (PERPLEXITY-004, 2026-06-05)
+- **Model**: `base.en` for 5–15s English memos on 32GB CPU-only — 388MB RAM, sub-second to ~3s latency
+- **Build**: CMake (most reliable), Docker `ghcr.io/ggml-org/whisper.cpp:main`, or Conan packages
+- **Gotcha**: expects 16-bit WAV unless built with FFmpeg support; use `ffmpeg -ar 16000 -ac 1 -c:a pcm_s16le`
+- **CLI**: `./build/bin/whisper-cli -m models/ggml-base.en.bin -f memo.wav`
+- **Enable BLAS** on CPU for better throughput: `cmake -DGGML_BLAS=ON`
+- **v1.8.4** released March 2026 — actively maintained
+- Alternatives if needed: `faster-whisper` (Python, heavier), Vosk (lighter, lower accuracy)
+
 #### Dependencies
 - PP-REMOTE-001 (Tailscale + `tgw-http` reachable from Android)
 - PP-IFDIR-001 (interface configs organized)
 - Whisper.cpp binary installed (PP-ADD-010 AI runtime manager)
+
+---
+
+### PP-INTAKE-001 — Photographer Intake: Template-Driven Multi-Surface System
+
+#### Core architectural insight — the Template
+The template is the key. One button press selects a template (a category group) and instantly
+applies the best available assumptions for that item class: `size_class`, `ai_hint`, typical
+price range, store category, fulfillment policy. Everything else is optional fine-tuning.
+
+The system is already partially wired: `category-groups.json` IS the template table (PP-PRICE-005 ✅).
+The `SETTEMPLATE:name` / `COMMAND:...` clipboard protocol IS the push channel to the camera app.
+The photographer already has this tooling. The work is to complete the integration loop.
+
+**Graceful degradation by design** — the system works at every level of photographer participation:
+```
+No photographer input → ai_identify derives group → group defaults apply     (baseline)
+Template selected     → group defaults + better ai_identify hint             (good)
+Template + fine-tune  → all fields correct at intake                         (best)
+```
+The photographer never blocks the pipeline. More input = better result, but absence of input
+is handled automatically. The system self-improves as velocity data refines template pricing.
+
+#### Existing photographer interface — three surfaces
+Already operational; PP-INTAKE-001 extends, does not replace.
+
+| Surface | Technology | Role |
+|---------|-----------|------|
+| **Camera HUD** | Camera app + KDE Connect clipboard relay | Receives SETTEMPLATE:/COMMAND: from TGW; shows current item state during shoot |
+| **Desktop HUD** | Qtile widget (PP-WM-001) + floating overlay | Live queue status, current SKU, pipeline progress |
+| **Web form** | tgw-http (existing, to be updated) | Fine-grained field entry; opens in browser/WebView from any surface |
+| **xmouse macros** | Tablet macro pad → SSH → TGW commands | One-button template selection + quick overrides |
+| **USB scale** | `weight()` / `get_weight()` in tgw.source | Physical weight capture → size_class derivation |
+| **Whisper dictation** | `whisper-hint()` etc. in tgw.source | Voice → ai_hint, voice → title, voice → condition |
+
+#### The template dispatch loop
+```
+xmouse button press
+    → SSH → tgw set-template <group_key>
+        → writes group defaults to CurrentItem JSON
+            (size_class, ai_hint, category_group, fulfillment_policy_id)
+        → pushes "SETTEMPLATE:<group_name>" via KDE Connect clipboard relay
+            → camera app HUD updates to show active template
+        → pushes "COMMAND:DATA:size_class=<val>" etc. if fine-tuning needed
+    → bundle_intake picks up item with pre-populated fields
+    → ai_identify gets group ai_hint as context → better result
+    → suggest_price gets category_id → group floor/typical → priced even with thin comps
+```
+
+#### `tgw set-template` — the new command to build
+```bash
+tgw set-template <group_key> [sku]           # apply group defaults to CurrentItem or given SKU
+tgw set-template --list                      # show all available templates (from category-groups.json)
+tgw set-template --camera <group_key>        # push SETTEMPLATE: to camera via KDE Connect only
+```
+What it writes to item JSON:
+- `category_group`: group key
+- `ai_hint`: group.ai_hint (prepended, preserves existing if any)
+- `size_class`: group.size_class
+- `ebay_category_id`: first category in group.ebay_categories (if not already set)
+- `fulfillment_policy_id`: derived from size_class → config lookup
+
+xmouse maps each group to a dedicated button. 24 groups = 24 one-press intake macros.
+
+#### Template table maintenance (self-improving)
+- `tgw category-groups --reseed` recomputes typical_used/floor from current velocity data ✅
+- As new items sell and velocity grows, template pricing tightens automatically
+- Dave can manually curate ai_hint and size_class per group as item knowledge grows
+- Future: ai_identify confidence → auto-suggest template corrections back into category-groups.json
+
+#### Fine-grained tailoring (when template isn't quite right)
+1. xmouse has additional buttons for common overrides: weight entry, condition override, barcode scan
+2. Web form (tgw-http) shows template-applied defaults; photographer edits only what differs
+3. Voice: `whisper-hint()` appends to the ai_hint that template already pre-filled
+4. Desktop HUD shows the active template; operator can see and correct before pipeline runs
+
+#### Background inference (future — better compute required)
+When Ollama runs faster (GPU upgrade, PP-NIXOS-001 migration):
+- `ai_identify` enqueued immediately when first photo lands in newitems/
+- Preliminary identification returned to camera HUD while photographer is still shooting
+- Result feeds back as suggested template confirmation: "Looks like Kitchen Utensils — correct?"
+- Operator confirms or overrides → no post-session correction pass needed
+- Weight from USB scale + ai_identify result → size_class confirmed automatically
+
+#### Phases
+- **Phase 1** — `tgw set-template` command: writes group defaults to item JSON + KDE Connect push. xmouse macro buttons per group. Closes the template→pipeline loop. `tgw set-template --list` for operator discovery.
+- **Phase 2** — Web form update: add template picker (24 group chips), weight field, barcode field. Pre-fills from current template; photographer only changes what's wrong.
+- **Phase 3** — Camera HUD integration: SETTEMPLATE: response shows group name + ai_hint summary + size_class on camera display; photographer sees confirmation before next shot.
+- **Phase 4** — Background inference: ai_identify enqueued on first photo drop; result shown on HUD; operator confirms/overrides mid-session.
+- **Phase 5** — Template self-update: ai_identify results with high confidence → suggest category_group refinements; velocity data → auto-reseed pricing monthly.
+
+#### Dependencies
+- PP-PRICE-005 `category-groups.json` ✅ DONE — this is the template table
+- PP-WM-001 Qtile desktop HUD ✅ Phase 1 done
+- PP-WHISPER-001 voice capture (Phase 1+ whisper-hint already works)
+- KDE Connect + COMMAND:/SETTEMPLATE: clipboard relay (already in tgw.source — rescued from deprecated in SHELL-AUDIT.md 2026-06-06)
+- PP-REMOTE-001 (tgw-http reachable from tablet for web form)
+- GPU upgrade / PP-NIXOS-001 (Phase 4 background inference)
 
 ---
 
@@ -1300,8 +1467,65 @@ Planned. Verify account access first; implementation is straightforward once con
 - Design deferred until sold-price API access obtained — Browse API asking prices are the wrong signal for dynamic repricing
 - Will consume `reprice_schedule` as floor (never price below the move price)
 
+#### Sold price data landscape (PERPLEXITY-003, 2026-06-05)
+All external options researched; none are clean substitutes for a true sold-data API:
+
+| Source | Status | Verdict |
+|--------|--------|---------|
+| `buy.marketplace_insights` | Official docs: "restricted, not open to new users" — limited release, no roadmap | Effectively unavailable for independent devs; Dave applied via new keyset |
+| Finding API `findCompletedItems` | Dead since early 2025 (error 10001) | Do not use |
+| 130Point.com | Acquired MAGPIE (Mar 2025); shows "recent sales history"; **no documented public API** | Manual/semi-manual only; not suitable for automation |
+| ZIK Analytics ($39–89/mo) | UI + CSV exports; no confirmed developer API | Seller research tool, not a pricing data backend |
+| PriceCharting | Public API exists but **"only current item values — historic prices not supported"** | Good for games/cards/collectibles vertical only; use as supplement |
+| Apify eBay sold scraper | $4/1K results; unofficial extractor layered on eBay search | ToS risk; fragile; not recommended for core pricing |
+| Terapeak | UI only in Seller Hub; 3-year data; no API | Manual spot-checks on high-value items only |
+
+**Decision:** PP-REPRICER-001 remains blocked on `buy.marketplace_insights` scope.
+**Interim strategy:** Browse API p25 + velocity data (PP-PRICE-004) + own sales history as pricing signals.
+**PriceCharting integration:** Worth adding to `apis/lookup/` for game/card/collectibles vertical — has free API tier, returns "current market value" derived from eBay sold data. Add as PP-UPC-001 Tier 2 source.
+
+**Architecture note (from Perplexity):** When `buy.marketplace_insights` eventually arrives, wrap it
+behind a `market_data` provider interface with fallback to Browse API comps + own sales history.
+The `comps` DB table + pluggable provider pattern is the right design (see perplexity folder for full schema).
+
 ### PP-PRICE-003 ✅ COMPLETE (2026-06-04)
 `pricing.py`: stage-0 product_lookup query (`brand+mpn` tightest); condition-filtered comps (same-or-worse rank only, 15-entry `_BROWSE_CONDITION_RANK`); price confidence H/M/L (`draft_listing.price_confidence`, `tgw staged` PC column).
+
+### PP-PRICE-005 ✅ COMPLETE (2026-06-06) — Category Groups Taxonomy
+`/opt/TGW/config/category-groups.json` — 24 groups covering 65+ eBay category IDs from velocity data.
+Each group: `name`, `store_category` (fill in when eBay store configured), `ebay_categories` (all IDs in group),
+`size_class` (flat/packet/small_box — semi-chaotic storage class), `ai_hint` (product description terms for ai_identify),
+`pricing.floor` / `pricing.typical_used` / `pricing.typical_new` (seeded from velocity p25).
+Top-level: `condition_factors` dict (new=1.50 … for_parts=0.30), `global_floor: 0.99`.
+Integration: `suggest_price()` Stage 4 uses group typical × condition_factor when Browse API has insufficient comps.
+Hard floor applied to ALL prices (even Browse API results). `tgw category-groups [--list | cat_id | --reseed]`.
+**Store category**: fill `store_category` in each group after `tgw store-categories` confirms your store layout.
+**Self-updating**: `tgw category-groups --reseed` recomputes typical_used from current velocity-stats.json.
+**Design note**: `size_class` encodes semi-chaotic physical storage class — see PP-STORAGE-001.
+
+### PP-STORAGE-001 — Semi-Chaotic Storage System
+Inspired by Amazon chaotic storage. Items stored by SIZE not category — no two items in a location look the same.
+Size class at intake gives: shipping profile match (flat→FC4/envelope; packet→Priority; small_box→Priority/FRPRI),
+physical location hint (which shelf tier), and a visual distinctiveness constraint.
+**Components:**
+- `size_class` field in item JSON (flat/packet/small_box/medium_box/large_box) — set at intake or derived from weight+category group
+- `category-groups.json` size_class = default for items in that group
+- Weight hint: ~1 oz → flat/packet; 4+ oz → packet/small_box
+- Shipping profile lookup: `size_class` → fulfillment_policy_id override
+- Future: intake UI prompts photographer for size_class when item is unusual for its group
+**Connection to PP-VISION-001**: same photo set used for visual inventory matching.
+
+### PP-VISION-001 — Visual Physical Inventory Matching
+Use item photos to visually match items to their physical location (inventory reconciliation).
+Core idea: photo of shelf/item → vision model → match to SKU in catalog.
+System design:
+- Catalog thumbnails (already built: 54K thumbnails) = visual fingerprint database
+- Vision model (Ollama or cloud) queries a candidate set, ranks by visual similarity
+- Operator reviews ranked matches → confirms → system self-improves (correct matches become training signal)
+- Size class constrains the search space (only look at items with matching size_class for that shelf)
+- Semi-chaotic storage constraint (no two similar items together) naturally improves visual matching uniqueness
+**Status**: design phase. Blocked on: vision embedding model for catalog, search index for embeddings.
+**Dependency**: PP-STORAGE-001 (size_class field), PP-PRICE-005 (category-groups size_class lookup).
 
 ### PP-PRICE-004 ✅ COMPLETE (2026-06-05)
 `tgw/velocity.py` + `velocity_stats` nightly worker (✅ enabled 2026-06-05). `tgw velocity-report` CLI. `velocity-stats.json` in catalog_root (1,540 categories). `suggest_price()` gains `velocity_hint: 'hold_launch'` for fast-moving categories. Stage breakdown (launch/retail/move%) populates as new-pipeline items sell.

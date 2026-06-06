@@ -68,11 +68,20 @@ def is_token_expired(state: Dict[str, Any]) -> bool:
     expiry = state.get('expiry', 0)
     return time.time() >= expiry - 300  # 5min buffer
 
-def refresh_access_token() -> str:
+def refresh_access_token(force: bool = False) -> str:
+    """Refresh the eBay access token.
+
+    When force=True the internal expiry guard is bypassed — the caller is
+    responsible for deciding whether a refresh is needed.  The worker
+    (token_refresh.py) uses force=True because it owns the scheduling
+    decision; using the internal guard there would create a double-buffer
+    bug that delays the actual eBay call until the last 5 minutes of
+    token life instead of the intended 30-minute window.
+    """
     ebay_config = get_ebay_config()
     state = load_token_state()
 
-    if not is_token_expired(state):
+    if not force and not is_token_expired(state):
         logger.info("Token valid")
         return state['access_token']
 

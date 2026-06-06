@@ -40,3 +40,5 @@
 - [x] 2026-06-05T04:02 :: PP-PRICE-004 velocity executed 2026-06-05; IGDB credentials reminder remains — add igdb-credentials.json to secrets_root when Twitch dev account is ready; PP-MULTIMODEL-001 is next priority
 - [x] 2026-06-05T06:18 :: verify I still have strike through pricing access and implement. I was approved many years ago. — added as PP-STRIKE-001
 - [x] 2026-06-05T06:57 :: testing note alias — PP-CAPTURE-001 (test entry; note/btw aliases confirmed working)
+- [x] 2026-06-05T19:49 :: new os environment. Move to nixos. build out a python based user stack. Highly pythonic. Qtile kitty glances bpytop yazi ranger virtualfizh zoxide maybe xonsh etc environment plus firefox glabels and any necessary support tools — added as PP-NIXOS-001
+- [x] 2026-06-06T06:09 :: add tgw restart-ebay-token function — DONE: implemented in api.py + clear_dead_letter in state_machine; also fixed double-buffer bug in refresh_access_token.py (force=True); PP-TOKEN-001 added

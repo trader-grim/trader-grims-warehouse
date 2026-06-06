@@ -79,6 +79,10 @@ def load_config(path: Path) -> Dict[str, Any]:
         str(k): float(v)
         for k, v in raw.get('category_price_defaults', {}).items()
     }
+    category_groups_path = p(
+        'category_groups_path',
+        str(Path(path).parent / 'category-groups.json'),
+    )
     fulfillment_policy_id            = raw.get('fulfillment_policy_id')
     payment_policy_id                = raw.get('payment_policy_id')
     return_policy_id                 = raw.get('return_policy_id')
@@ -125,6 +129,7 @@ def load_config(path: Path) -> Dict[str, Any]:
         'plan_master_path':        plan_vault_path / 'plan' / 'TGW-Master-Plan.md',
         'reprice_stages':                   reprice_stages,
         'category_price_defaults':          category_price_defaults,
+        'category_groups_path':             category_groups_path,
         'fulfillment_policy_id':            fulfillment_policy_id,
         'payment_policy_id':                payment_policy_id,
         'return_policy_id':                 return_policy_id,

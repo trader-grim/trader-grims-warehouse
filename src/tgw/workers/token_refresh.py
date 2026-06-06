@@ -65,7 +65,7 @@ class TokenRefreshWorker(QueueWorker):
                               remaining_minutes=int(remaining // 60))
         try:
             from tgw.apis.ebay.refresh_access_token import refresh_access_token
-            refresh_access_token()
+            refresh_access_token(force=True)  # worker owns timing; bypass internal guard
         except requests.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else 0
             if status in (400, 401):

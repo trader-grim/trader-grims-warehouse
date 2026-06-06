@@ -8,13 +8,17 @@ competitive price point that moves inventory.
 suggest_price(cfg, title, category_name, category_id, item_condition,
               product_lookup) → {price, source, comps, price_confidence, queried_at}
 
-Four-stage fallback if comps are thin:
+Fallback chain when comps are thin:
   0. product_lookup brand+MPN query (if PP-LOOKUP-001 data present)
   1. Full title search
   2. Category name + first 3 title words
   3. Category name only
-  4. Category default from config
-Returns None price if fewer than MIN_COMPS results across all stages.
+  4. Category group typical × condition_factor  (from category-groups.json)
+  5. Category default from config
+Returns None price if all stages exhausted.
+
+Floor enforcement: global_floor and per-group floor from category-groups.json are
+applied to ALL prices regardless of source (Browse API, group assumption, or config).
 
 Condition filtering: Browse API summaries are filtered to same-or-worse condition
 before computing percentiles. Avoids inflated p25 from New listings when pricing
@@ -23,14 +27,73 @@ a Used item. Falls back to unfiltered if filter leaves < MIN_COMPS results.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from tgw.apis.ebay.client import ebay_get
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Category-groups loader
+# ---------------------------------------------------------------------------
+
+_groups_cache: Optional[Dict[str, Any]] = None
+_groups_reverse: Optional[Dict[str, str]] = None  # category_id → group_key
+
+
+def _load_groups(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Load category-groups.json once per process, cache in module globals."""
+    global _groups_cache, _groups_reverse
+    if _groups_cache is not None:
+        return _groups_cache
+
+    path = cfg.get('category_groups_path')
+    if path and Path(path).exists():
+        try:
+            _groups_cache = json.loads(Path(path).read_text(encoding='utf-8'))
+        except Exception as exc:
+            log.warning('category-groups.json load failed: %s', exc)
+            _groups_cache = {}
+    else:
+        _groups_cache = {}
+
+    # Build reverse index: category_id → group_key
+    _groups_reverse = {}
+    for key, grp in _groups_cache.get('groups', {}).items():
+        for cat_id in grp.get('ebay_categories', []):
+            _groups_reverse[str(cat_id)] = key
+
+    return _groups_cache
+
+
+def _group_for_category(cfg: Dict[str, Any], category_id: str) -> Optional[Dict[str, Any]]:
+    """Return the group dict for a category_id, or None."""
+    groups_data = _load_groups(cfg)
+    if not groups_data:
+        return None
+    grp_key = (_groups_reverse or {}).get(str(category_id))
+    if not grp_key:
+        return None
+    return groups_data['groups'].get(grp_key)
+
+
+def _apply_floor(price: float, cfg: Dict[str, Any], category_id: str) -> Tuple[float, bool]:
+    """Return (floored_price, was_floored). Applies per-group floor, then global floor."""
+    groups_data = _load_groups(cfg)
+    global_floor = float(groups_data.get('global_floor', 0.99))
+
+    grp = _group_for_category(cfg, category_id)
+    floor = float(grp['pricing']['floor']) if grp and grp.get('pricing', {}).get('floor') else global_floor
+    floor = max(floor, global_floor)
+
+    if price < floor:
+        return floor, True
+    return price, False
 
 MIN_COMPS = 3   # minimum comps needed to set a price; below this price left null
 
@@ -316,14 +379,43 @@ def suggest_price(
     stats = _compute_stats(all_prices)
 
     if not stats:
-        # Stage 4 — category price default from config
+        # Stage 4 — category group typical × condition factor (category-groups.json)
+        grp = _group_for_category(cfg, str(category_id))
+        if grp:
+            pricing = grp.get('pricing', {})
+            # Pick typical_used vs typical_new based on condition
+            is_new = item_condition.lower().strip() in ('new',)
+            typical_raw = pricing.get('typical_new') if is_new else pricing.get('typical_used')
+            if typical_raw is None:
+                typical_raw = pricing.get('typical_used') or pricing.get('typical_new')
+            if typical_raw is not None:
+                typical = float(typical_raw)
+                # Scale by condition factor
+                cond_factors = _load_groups(cfg).get('condition_factors', {})
+                factor = cond_factors.get(item_condition.lower().strip(), 1.0)
+                assumed = round(typical * factor, 2)
+                assumed, _ = _apply_floor(assumed, cfg, str(category_id))
+                assumed = to_99(assumed)
+                log.info('pricing: %r — group assumption $%.2f (typical=%.2f factor=%.2f group=%s)',
+                         title[:60], assumed, typical, factor, grp['name'])
+                return {
+                    'price':            assumed,
+                    'source':           f'group_assumption:{grp["name"]}',
+                    'comps':            {},
+                    'price_confidence': 'low',
+                    'velocity_hint':    vel_hint,
+                    'queried_at':       queried_at,
+                }
+
+        # Stage 5 — legacy per-category config default
         defaults: Dict[str, float] = cfg.get('category_price_defaults', {})
         default_price = defaults.get(str(category_id))
         if default_price is not None:
-            log.info('pricing: %r — using category default $%.2f for category %s',
-                     title[:60], default_price, category_id)
+            assumed, _ = _apply_floor(float(default_price), cfg, str(category_id))
+            log.info('pricing: %r — using category config default $%.2f for category %s',
+                     title[:60], assumed, category_id)
             return {
-                'price':            float(default_price),
+                'price':            assumed,
                 'source':           f'category_default:{category_id}',
                 'comps':            {},
                 'price_confidence': 'low',
@@ -342,6 +434,12 @@ def suggest_price(
 
     price = stats['p25']
     confidence = _price_confidence(stats, source)
+
+    # Hard floor — apply to Browse API results too
+    price, floored = _apply_floor(price, cfg, str(category_id))
+    if floored:
+        log.info('pricing: %r → floor applied, final $%.2f', title[:60], price)
+
     log.info('pricing: %r → $%.2f (p25 of %d comps, %s, confidence=%s)',
              title[:60], price, stats['count'], source, confidence)
 

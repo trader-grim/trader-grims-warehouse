@@ -128,7 +128,14 @@ def get_access_token(prompt_if_needed: bool = True, is_sandbox: bool = False) ->
         print("\n=== eBay Login Required (one-time) ===")
         auth_url = generate_auth_url(ebay_config, is_sandbox)
         print(f"Open: {auth_url}")
-        webbrowser.open(auth_url)
+        # Try direct Firefox first (avoids xdg-open kfmclient issue on KDE Plasma 6),
+        # fall back to webbrowser module if not available.
+        import subprocess as _sp
+        try:
+            _sp.Popen(['firefox', auth_url],
+                      stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        except FileNotFoundError:
+            webbrowser.open(auth_url)
         full_url = input("Paste FULL redirect URL: ").strip()
         parsed = urlparse(full_url)
         code = parse_qs(parsed.query).get('code', [None])[0]

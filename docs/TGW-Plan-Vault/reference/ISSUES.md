@@ -62,6 +62,15 @@ incomplete wiring, and data quality problems that need fixing.
   - `sku_migration.py`: removed unused `new_json` variable assignment
 - `ruff check src/ tests/` now passes clean
 
+### ISS-009 — eBay refresh token dead (HTTP 400) — operator action required
+- **Symptom**: `token_refresh` worker hits eBay `/identity/v1/oauth2/token` and receives HTTP 400 (invalid_grant)
+- **Root cause**: eBay refresh token invalidated (likely from scope change during session 6). Additionally a double-buffer bug delayed the actual refresh call until the last 5 minutes of token life — fixed 2026-06-06
+- **Current state**: token expired 2026-06-05 17:05; 4 dead_letter jobs in queue; worker process alive but idle
+- **Fix (operator)**:
+  1. `sudo -u tgw python3 /opt/TGW/src/trader-grims-warehouse/src/tgw/apis/ebay/get_access_token.py` — browser OAuth re-consent flow; writes fresh token to `secrets/ebay-token.json`
+  2. `sudo -u tgw tgw restart-ebay-token` — clears dead_letter jobs, enqueues fresh token_refresh immediately
+- **Status**: awaiting operator re-consent
+
 ### ISS-008 — legacy_listing_resolved items may still have active listings
 - **Symptom**: items marked `legacy_listing_resolved: True` may still have active eBay
   listings from before the Inventory API migration

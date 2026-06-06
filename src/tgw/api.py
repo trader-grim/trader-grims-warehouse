@@ -370,6 +370,22 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser('strikethrough-check',
                    help='show strikethrough pricing config state and MSRP coverage (PP-STRIKE-001)')
 
+    sub.add_parser('restart-ebay-token',
+                   help='clear dead-letter token jobs and enqueue a fresh token_refresh immediately')
+
+    p = sub.add_parser('get-ebay-token',
+                       help='browser OAuth re-consent flow — use when refresh token is dead (HTTP 400)')
+    p.add_argument('--sandbox', action='store_true', help='use eBay sandbox instead of production')
+
+    p = sub.add_parser('category-groups',
+                       help='view/manage category group taxonomy (PP-PRICE-005)')
+    p.add_argument('category_id', nargs='?', default=None,
+                   help='look up which group a specific eBay category ID belongs to')
+    p.add_argument('--list', action='store_true',
+                   help='list all groups with category counts and pricing')
+    p.add_argument('--reseed', action='store_true',
+                   help='re-seed pricing.typical_used from current velocity-stats.json')
+
     p = sub.add_parser('data-scrub',
                        help='ItemData maintenance passes (dry-run by default)')
     p.add_argument('--pass', dest='scrub_pass', type=int, default=1, metavar='N',
@@ -1759,6 +1775,107 @@ def main() -> int:
             result = cmd_todo(cfg, args)
             # cmd_todo handles its own printing; skip the generic JSON dump
             return 0 if result.get('ok', True) else 1
+
+        elif args.op == 'restart-ebay-token':
+            from .queue import state_machine as _sm
+            _sm.init(cfg['postgres_dsn'])
+            cleared = _sm.clear_dead_letter(queue_name='token_refresh')
+            jid = _sm.enqueue_job(
+                queue_name='token_refresh',
+                payload={'reason': 'manual_restart'},
+                max_attempts=3,
+            )
+            result = {
+                'ok': True,
+                'dead_letter_cleared': cleared,
+                'new_job_id': jid,
+                'note': 'Token refresh job enqueued. Run tgw get-ebay-token first if refresh token is dead.',
+            }
+
+        elif args.op == 'get-ebay-token':
+            from .apis.ebay.get_access_token import get_access_token
+            token = get_access_token(prompt_if_needed=True,
+                                     is_sandbox=getattr(args, 'sandbox', False))
+            result = {'ok': True, 'token_prefix': token[:20] + '...'}
+            print('Token written to secrets. Run: tgw restart-ebay-token')
+
+        elif args.op == 'category-groups':
+            from .ebay.pricing import _group_for_category, _load_groups
+            _load_groups(cfg)  # warm cache
+
+            if args.reseed:
+                import json as _json
+                vel_path = cfg['catalog_root'] / 'velocity-stats.json'
+                if not vel_path.exists():
+                    result = {'ok': False, 'error': 'velocity-stats.json not found; run tgw velocity-report first'}
+                else:
+                    vel_cats = _json.loads(vel_path.read_text(encoding='utf-8')).get('categories', {})
+                    groups_path = cfg['category_groups_path']
+                    groups_data = _json.loads(Path(groups_path).read_text(encoding='utf-8'))
+                    updated = 0
+                    for grp_key, grp in groups_data.get('groups', {}).items():
+                        cat_ids = grp.get('ebay_categories', [])
+                        total_w, weighted_sum = 0, 0.0
+                        for cid in cat_ids:
+                            vc = vel_cats.get(str(cid), {})
+                            p25 = vc.get('p25_sale_price')
+                            sold = vc.get('sold_count', 0)
+                            if p25 and sold >= 3:
+                                weighted_sum += p25 * sold
+                                total_w += sold
+                        if total_w:
+                            new_typical = round(weighted_sum / total_w, 2)
+                            grp.setdefault('pricing', {})['typical_used'] = new_typical
+                            grp['pricing']['typical_new'] = round(new_typical * 1.50, 2)
+                            grp['pricing']['floor'] = round(max(0.99, new_typical * 0.40), 2)
+                            grp['pricing']['source'] = 'velocity_p25'
+                            updated += 1
+                    groups_data['updated'] = datetime.now(tz=timezone.utc).strftime('%Y-%m-%d')
+                    Path(groups_path).write_text(
+                        _json.dumps(groups_data, indent=2, ensure_ascii=False) + '\n',
+                        encoding='utf-8',
+                    )
+                    # Invalidate module cache so next call re-reads
+                    import tgw.ebay.pricing as _pricing_mod
+                    _pricing_mod._groups_cache = None
+                    _pricing_mod._groups_reverse = None
+                    result = {'ok': True, 'groups_updated': updated}
+
+            elif args.category_id:
+                grp = _group_for_category(cfg, args.category_id)
+                if grp:
+                    result = {'ok': True, 'category_id': args.category_id, 'group': grp}
+                else:
+                    result = {'ok': False, 'category_id': args.category_id,
+                              'error': 'category not mapped to any group'}
+
+            else:
+                # List all groups
+                groups_data = _load_groups(cfg)
+                rows = []
+                for key, grp in groups_data.get('groups', {}).items():
+                    pricing = grp.get('pricing', {})
+                    rows.append({
+                        'key':          key,
+                        'name':         grp['name'],
+                        'category_count': len(grp.get('ebay_categories', [])),
+                        'size_class':   grp.get('size_class', ''),
+                        'store_category': grp.get('store_category', ''),
+                        'floor':        pricing.get('floor'),
+                        'typical_used': pricing.get('typical_used'),
+                    })
+                if not getattr(args, 'as_json', False):
+                    print(f'{"Key":<35} {"Name":<30} {"Cats":>4} {"Size":<12} '
+                          f'{"Floor":>6} {"Typical":>8}  Store Category')
+                    print('-' * 110)
+                    for r in rows:
+                        floor   = f'${r["floor"]:.2f}'   if r["floor"]   else '   N/A'
+                        typical = f'${r["typical_used"]:.2f}' if r["typical_used"] else '   N/A'
+                        print(f'{r["key"]:<35} {r["name"]:<30} {r["category_count"]:>4} '
+                              f'{r["size_class"]:<12} {floor:>6} {typical:>8}  {r["store_category"]}')
+                    print(f'\n{len(rows)} groups  |  file: {cfg["category_groups_path"]}')
+                    return 0
+                result = {'ok': True, 'count': len(rows), 'groups': rows}
 
         else:
             result = {'ok': False, 'error': f'unknown op: {args.op!r}'}
