@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-06 (session 8)
+updated: 2026-06-06 (session 9)
 maintained_by: Opus (planner)
 ---
 # TGW Master Plan
@@ -80,6 +80,18 @@ maintained_by: Opus (planner)
 - `conditions.py`: full condition policy cache (26 sets / 15K categories); `best_condition()` — same-or-worse fallback; wired into `ebay_draft`
 - `tgw staged` / `tgw publish` — operator review gate before any item goes live
 - **Open issue**: errorId 25002 `Item.Country` at publish for some categories (34032, 14027, 13916) — offer body is correct, investigating category-specific requirements
+
+### Pipeline additions — 2026-06-06 (session 9)
+- **21 suggestions processed** — full SUGGESTIONS.md backlog cleared. New pending projects:
+  PP-MCP-001 (tgw MCP server), PP-FULFILLMENT-001 (barcode/label/scale hardware),
+  PP-TASKER-001 (Tasker + Join integration), PP-EMAIL-001 (email auto-processing + SMTP),
+  PP-PERP-AUTO-001 (Perplexity semi-automation via ydotool), PP-CLAUDE-HELP-001 (troubleshoot-
+  mode claude launch). PP-EDITOR-001 expanded with comprehensive admin GUI spec (mobile-first,
+  Ready state, rate-limited listing dole-out). PP-CLIP-001 expanded with full clipboard action
+  surface. PP-TODO-001 updated with unique-ID per task requirement. PP-INTAKE-001 updated with
+  computer-side intake workflow + camera root path. PP-NIXOS-001 expanded with Debian vs NixOS
+  tradeoff analysis. Track 1 additions: bash completion, tgw CLI synonyms, suggestion editor.
+  PP-MC-002 updated with LTSP remoteapps note. Later projects: custom camera app, VNC/RDP combo.
 
 ### Pipeline additions — 2026-06-06 (session 8)
 - **PP-SHELL-001 T2 MAJOR PROGRESS** — All ARCH-VIOLATES functions replaced with thin `tgw` CLI wrappers: `hintupdate`, `locationupdate`, `statusupdate`, `titleupdate`, `verifiedupdate`, `catlocmvall`. `ic_test()` syntax error fixed (stray UI content after closing brace). `statusupdate` added as `tgw statusupdate <value> <sku...>` CLI command (writes `#STATUS` field; rename in Data Scrub Pass 2). `verifiedupdate` in `items.py` upgraded to write both `verified` + `#STATUS=In Stock` atomically. Deprecated blocks removed: `mktgwcatalog-location`, `mktgwcatalog-location-ebcat`, `mk-ebay-category-csvs`, `mktgwtodo`, `mktgwcatalog`, `mktgwcsv-jj`, `mktgwcsv-jq`, `mktgwjson-jj-old`, `mktgwjson-jj`, `mktgwjson-jq`, `mktgwcatalog_plus_fbimport`, `backupitemdata`, `archiveitemdatatmp`, `archiveitemzips`, `set_queue`, `unfoldio`, `searchcatalog_versionupdate`, `jsonaddsku`, `gpt_title`, `gpt_desc`, `tgwcd`. File reduced 3405 → 2879 lines. Remaining deprecated blocks: csvmerge*, addphotos*, resumedraft, data2json*, archivenewitems, newitem*, eb_template_*, mkjob*, mkebimport, mkebupdate, mkfbimport (Tier 2 pass not yet complete).
@@ -234,6 +246,9 @@ One bounded session per item. Ordered by value.
 | 1 | PP-MC-001 P2 | `tgwitem` copyin + `ebay/` + `pipeline/` subdirs | M |
 | 2 | PP-GLOBALS-001 | Analysis only — identify offer-invariant fields; design doc | S |
 | 3 | PP-HINT-001 | eBay Browse enrichment in `ebay_draft`; per-SKU hint trail | M |
+| 4 | tgw synonyms | `health=status`, `--help=-help=help` aliases; lower friction under duress | XS |
+| 5 | bash completion | `tgw` bash/zsh tab completion for subcommands + SKU args | S |
+| 6 | suggestion editor | UI to edit/delete/annotate SUGGESTIONS.md entries before PM-intake processes | XS |
 
 ### Track 2 — Gemini CLI (large-context data + self-contained tasks)
 **Status 2026-06-06**: Gemini CLI now installed and available. Gemini is Dave's primary
@@ -407,6 +422,16 @@ https://perplexity.ai, save the result as `PERPLEXITY-001-result.md` etc. into
 - [ ] **PERPLEXITY-002** — Cassini SEO 2025–2026
 - [ ] **PERPLEXITY-003** — Sold price data alternatives
 - [ ] **PERPLEXITY-004** — Third-party integration status (Whisper.cpp, Discogs, IGDB, Go-UPC)
+- [ ] **PERPLEXITY-005** — Library audit (Syncthing Python client, KDE Connect DBus, USB scale HID)
+
+**PP-PERP-AUTO-001**: when briefs pile up, use ydotool semi-automation to reduce copy-paste overhead.
+See PP-PERP-AUTO-001 section for design.
+
+---
+
+#### Priority 3b — Tasker / Join evaluation (15–30 min)
+- [ ] Compare Join vs KDE Connect for clipboard relay and push notifications; document findings in inbox
+- [ ] Identify 3–5 highest-value Tasker automation opportunities from PP-TASKER-001 — start with barcode scan → tgw-http intake
 
 ---
 
@@ -845,6 +870,53 @@ so that `image + /opt/TGW` = complete, running system with zero manual setup.
 - PP-REMOTE-001 (Tailscale) — remote access must survive UID change
 - PP-SHELL-001 — tgw.source cleanup before baking into image
 
+### PP-NIXOS-001 — NixOS Migration Evaluation
+
+#### Motivation (session 9 analysis)
+Debian's advantage is stability and ubiquity — the system is rock solid and dependencies are
+well-understood. The trade-off is dependency lock-in and an outdated feature set (older kernel,
+older Python, older packages). NixOS offers:
+- **Parallel version deployment**: run the stable system unchanged while testing a newer version
+  of any component (Python, Postgres, Qtile) in a separate Nix derivation — no risk to the
+  running system
+- **Atomic rollback**: if a change breaks something, `nixos-rebuild switch --rollback` restores
+  the last good state in seconds
+- **Disaster recovery**: the entire system configuration is a single file (`/etc/nixos/configuration.nix`);
+  combined with `/opt/TGW` and a repo restore, a full system rebuild is automated
+- **Reproducibility**: any node can be cloned to the exact same state from the config file
+
+#### Python on NixOS — the key challenge
+NixOS does not use a traditional FHS filesystem; Python environment management conflicts with
+`pip install` and `venv` patterns. Solutions:
+- Use `nix-shell` or `devenv` for the TGW dev environment (declarative dependencies)
+- Use a NixOS module that wraps the TGW package as a system service with pinned dependencies
+- Consider `pyproject.nix` for packaging TGW as a proper Nix package
+- **The pip/venv pattern TGW currently uses needs a migration plan before committing to NixOS**
+
+#### Decision framework
+| Factor | Debian | NixOS |
+|--------|--------|-------|
+| Stability | ✅ Excellent | ✅ Excellent (atomic rollback) |
+| Python env mgmt | ✅ Standard pip/venv | ⚠ Non-standard; needs work |
+| Dependency freshness | ⚠ Older packages | ✅ Latest available |
+| Upgrade safety | ⚠ In-place; risky | ✅ Atomic; rollback available |
+| Disaster recovery | ⚠ Manual steps | ✅ Single config file |
+| Parallel versions | ❌ Hard | ✅ First-class |
+| Learning curve | ✅ Familiar | ⚠ Steep (Nix language) |
+| MX Linux image compat | ✅ Natural | ❌ Incompatible with mx-slapshot |
+
+#### Recommendation
+NixOS is architecturally superior for a long-running automation platform. The Python environment
+challenge is solvable but requires a dedicated migration session. **PP-DEPLOY-001 (MX Linux image)
+and PP-NIXOS-001 are mutually exclusive end-states** — choose before investing further in image
+infrastructure. Suggest: research a NixOS flake that packages TGW correctly, then decide.
+
+#### Work items (deferred)
+- [ ] Prototype: NixOS VM with TGW installed as a Nix package; verify all workers run
+- [ ] Python env: evaluate `pyproject.nix`, `mach-nix`, or `dream2nix` for TGW dependencies
+- [ ] Decide: NixOS or MX Linux image as the target OS before either PP gets deep work
+- [ ] If NixOS: write `tgw.nix` module for all systemd units, config paths, user setup
+
 ### PP-CAPTURE-001 — Idea and Task Capture Pipeline
 
 #### Problem
@@ -872,9 +944,13 @@ between "workers finished" and "operator knows what to do next."
 - Quiet-queue hook: `ebay_price_reducer`/`ebay_sync` could emit a notification when
   queue is empty — or a lightweight cron `tgw quiet-check` that fires daily
 - CLAUDE.md session protocol already picks up `tgw suggest` entries via SUGGESTIONS.md scan
+- **Suggestion editor** (session 9 addition): lightweight tool to review, annotate, edit, or delete
+  entries from SUGGESTIONS.md before PM-intake processes them. Use case: catching duplicates or
+  clarifying ambiguous entries before they get embedded in the plan. Implementation: `tgw suggest-edit`
+  opens a filterable list (fzf or TUI); edit → save → marks entry with a status tag.
 
 #### Status
-Design open — no code changes yet. Adoption is the first step; tooling follows.
+`tgw suggest` / `tgw note` / `tgw btw` — ✅ working. Suggestion editor — planned (Track 1 XS).
 
 ### PP-SHELL-001 — Shell Environment Cleanup (tgw.source / tgw-dev.source)
 - Audit `tgw.source`: replace functions that duplicate `tgw` CLI subcommands with one-line wrappers or remove; keep only short-name convenience aliases worth keeping
@@ -989,6 +1065,10 @@ Reads use the local SQLite catalog and ItemData directly — MC works offline on
 - Package MC config + sentinels + extfs scripts for deployment to LTSP fat clients
 - Read-only satellite mode: reads local synced `tgwcatalog.db` + thumbnails; writes queue to master via `tgw-http` when reachable
 - Installation playbook (Ansible or shell) for new node bootstrap
+- **LTSP RemoteApps** (session 9 addition): expose TGW admin tools as LTSP RemoteApp sessions —
+  single-application remote sessions that appear as local apps on thin clients and tablets.
+  Use case: content admin on remote display stations without full Linux install. Evaluate:
+  xrdp's RemoteApp mode, FreeRDP, or X2Go published applications as the transport layer.
 
 ---
 
@@ -1115,6 +1195,27 @@ tgw-clip wipe                            # clear non-SKU history
 tgw-clip daemon [--foreground]           # start/stop daemon
 ```
 
+### Clipboard action surface (session 9 additions)
+Requested actions to expose from clipboard context (via macroboard, Qtile chord, or tgw-clip CLI):
+
+| Action | Description |
+|--------|-------------|
+| edit | Open current clip content in $EDITOR |
+| send-to-suggest | Append current clip as `tgw suggest "..."` entry |
+| sku-actions | If clip matches SKU: lookup, locate, open photos, add to picklist, set-template |
+| location-actions | If clip matches location format: open folder, move all, view items |
+| save-to-research | Tag and save clip to a "research" bucket (PERPLEXITY brief material) |
+| save-to-personal | Save clip to personal notes (outside TGW pipeline) |
+| save-to-sku | Associate clip with current SKU's item JSON (e.g. a URL, note, or reference) |
+| combine-clips | Merge recent N clips into one buffer (for building multi-field entries) |
+| split-clips | Split current clip by delimiter (line, comma, tab) into individual history entries |
+| snippets | Named snippet storage + recall ("shipping boilerplate", "common titles", etc.) |
+| long-history | Full history browser with search; backup to file; restore on login |
+
+Design note: these actions are best exposed as a tgw-clip action menu (dmenu/rofi) triggered
+from the macroboard `C` key or Qtile chord. The daemon provides the history; the action menu
+provides the surface. SKU and location detection gates which actions are shown.
+
 ### Qtile integration (replaces polling in TGWSKUWidget)
 - Daemon exposes a Unix socket at `~/.local/run/tgw-clipd.sock`
 - `TGWSKUWidget` connects to socket on startup; receives push events (JSON lines)
@@ -1233,6 +1334,42 @@ MC console         Flutter app (Linux + Android)
 - Price with comp range display (from ebay_offer.price_comps)
 - Stage / Publish actions
 - Mirrors Seller Hub form layout
+
+### Admin GUI spec (session 9 additions — mobile-first requirements)
+The tablet/phone is the PRIMARY operator interface for warehouse operations. Design must be
+**mostly operable without a keyboard** — checkbox and button interfaces wherever possible.
+
+**Welcome screen (first/home tab)**
+- Welcome message appropriate to system status — if major issue: prominently red/alerting
+  ("eBay token expired — tap to fix", "X jobs dead-lettered" etc.)
+- `tgw health` summary display — clickable chips for each service (tap = more detail)
+- Key metrics: items live, items staged, queue depths, last sync time
+- Operations buttons: most-common actions (publish staged, run sweep, refresh token)
+- Notifications panel: worker completion, dead-letter alerts, new sold items
+- **Audible alert** for critical issues that require immediate operator attention
+
+**Listings management tab**
+- **Ready state**: items fully prepared but not yet listed anywhere — separate from staged
+  - "Set Ready" is the default done-state after staging review
+  - Queue: items in Ready state are doled out at 1/60 of total (rate-limited automatic listing)
+  - "List Now" button bypasses the dole-out rate for urgent items
+  - Rate config: configurable; default = 1/60 of ready items per listing cycle
+- Staged review queue (approve/reject checkboxes + publish button)
+- Live listings browser with filter/search
+- Pricing anomaly review tab: listings at extremes, stale reprice, comp mismatches
+
+**Item editor tab**
+- Browse by location (semi-chaotic location tree)
+- Item detail: all fields editable; no keyboard required for most fields (dropdowns, sliders)
+- Pipeline action buttons: re-identify, re-draft, re-price, stage, publish
+- Photo gallery inline
+
+**Logs tab**
+- Recent worker output; filterable by worker name
+
+**Admin tab**
+- Queue management: dead-letter browser, re-queue/cancel buttons
+- Health drill-down
 
 ### Later phases (separate PPs)
 - Scanner input (barcode/SKU lookup → item detail)
@@ -1369,6 +1506,30 @@ When Ollama runs faster (GPU upgrade, PP-NIXOS-001 migration):
 - **Phase 4** — Background inference: ai_identify enqueued on first photo drop; result shown on HUD; operator confirms/overrides mid-session.
 - **Phase 5** — Template self-update: ai_identify results with high confidence → suggest category_group refinements; velocity data → auto-reseed pricing monthly.
 
+#### Computer-side intake workflow (session 9 addition)
+Current path: camera app creates JSON/photo/folder set on device → Syncthing → bundle_intake.
+**Alternative**: initiate the intake workflow from the computer side, reducing steps on the phone.
+
+Concept:
+1. Computer pre-creates the SKU folder and blank item JSON (with template pre-applied)
+2. Syncthing pushes the folder to camera device
+3. Camera app detects new folder → switches to photo mode for that SKU automatically
+4. Photos taken → Syncthing returns them → bundle_intake picks up
+5. Result: phone is purely a camera; all data entry on computer; faster per-item processing
+
+This is architecturally simpler than the current push-from-camera model and may be faster
+in practice. Design as a Phase 2.5 addition: `tgw create-item [--template GROUP_KEY]` that
+pre-creates the folder + triggers camera app via KDE Connect COMMAND:.
+
+#### Camera root intent (future — session 9 note)
+Goal: root intake cameras to gain file system access during Foldio360 turntable sessions.
+**Problem**: Foldio360 app does not expose photos until after zipping them; the zip step
+doubles total processing time per spin. Root access bypasses the zip, reading photos directly.
+**Path**: target Android devices known to have reliable root methods (Pixel series + Magisk).
+Eventually deploy with custom ROMs to get fine-grained control and remove bloatware.
+**Custom camera app** (later project): replace Tasker + stock camera with a TGW-native Android
+app — barcode scan + template select + camera trigger in one UI; no third-party dependencies.
+
 #### Dependencies
 - PP-PRICE-005 `category-groups.json` ✅ DONE — this is the template table
 - PP-WM-001 Qtile desktop HUD ✅ Phase 1 done
@@ -1402,6 +1563,17 @@ description, added_at, source (suggestion / inbox / session note).
 - Or: flat TOML/Markdown file under `docs/TGW-Plan-Vault/` with front-matter per entry
 - `tgw todo add [agent] "text"` — create entry; `tgw todo done <id>` — mark complete
 - Could feed the "quiet queue" hook in PP-CAPTURE-001 — surface `tgw todo claude` when workers go idle
+
+#### Unique ID per task (session 9 requirement)
+Every todo item must have a **unique numeric ID** to make interaction unambiguous:
+```
+tgw todo task 265 completed
+tgw todo task 832 delegate gemini
+tgw todo task 24 update "waiting on IGDB key"
+```
+IDs are auto-assigned (PostgreSQL `SERIAL`), never reused. This enables precise cross-session
+references, especially in SUGGESTIONS.md entries and voice dictation (no spelling ambiguity).
+`tgw todo` list output must always show the ID prominently as the first column.
 
 #### Dependencies
 - PP-CAPTURE-001 (idea pipeline design) — aligns on storage back-end choice
@@ -1760,6 +1932,201 @@ Once the macroboard layer is proven:
 1. Copy the `[tgw_layer]` block from `tgw-macroboard.conf` into `default.conf`
 2. Bind a chord on `[main]` to `swap(tgw_layer)` — e.g. `rightalt+space`
 3. All four keyboards get single-chord TGW access; macroboard stays always-on
+
+---
+
+## PP-MCP-001 — TGW Model Context Protocol Server
+
+### Vision
+Expose TGW capabilities as an MCP (Model Context Protocol) server so Claude Code (and other
+MCP clients) can query item data, trigger pipeline actions, and inspect system health as
+native tools — without subprocess calls or shell scripts.
+
+### MCP tools to expose (initial set)
+| Tool | Description |
+|------|-------------|
+| `tgw_get_item` | Fetch full item JSON for a SKU |
+| `tgw_search_items` | Search catalog by text, location, or status |
+| `tgw_queue_status` | Return current job counts per queue + state |
+| `tgw_health` | Platform health summary |
+| `tgw_enqueue` | Enqueue a pipeline action for a SKU |
+| `tgw_get_todo` | List open TODO items for a given agent |
+| `tgw_add_suggest` | Append to SUGGESTIONS.md (same as `tgw suggest`) |
+
+### Architecture
+- Python MCP server wrapping `tgw-http` REST endpoints (or calling state_machine/items directly)
+- Registered in `~/.claude/mcp_servers.json` (Claude Code MCP config)
+- Runs as a local process; no external network exposure needed
+- Reuses the same API key / auth as `tgw-http`
+
+### Value
+- Claude Code can query live queue state and item data mid-session without shell escapes
+- Enables Claude-native tooling loops: identify failures, re-enqueue, verify fix — all in one session
+- Sets foundation for other MCP clients (custom dashboard, VS Code extension)
+
+### Dependencies
+- `tgw-http` FastAPI service ✅ running
+- MCP Python SDK (`mcp` package from Anthropic) — add to pyproject.toml
+- Claude Code MCP registration (user-level config)
+
+---
+
+## PP-FULFILLMENT-001 — Fulfillment Hardware Integration
+
+### Problem
+Shipping, labeling, and order packing still require manual steps outside TGW. USB scale and
+barcode printing are natural integration points that reduce fulfillment time.
+
+### Components
+
+#### USB Scale
+- `weight()` / `get_weight()` already in `tgw.source` — reads USB HID device
+- Port to Python: `hid` library or `/dev/usb/hiddev` direct read
+- Use at intake (size_class derivation) + at shipping (label weight verification)
+- See PERPLEXITY-005 for USB HID library options
+
+#### Barcode / SKU label printing
+- Target: thermal printer (Dymo 4XL or Zebra ZPL) connected via USB
+- SKU barcode label: Code128 + human-readable SKU + item title + location
+- CLI: `tgw print-label <sku>` — generates and sends to printer
+- Library: `python-barcode` (Code128) + `cups` or direct ZPL for Zebra
+
+#### Shipping label printing
+- eBay shipping labels via eBay Shipping API or browser fallback (Seller Hub)
+- `tgw print-shipping <order_id>` — fetches label PDF from eBay API, sends to printer
+- Requires `sell.fulfillment.readonly` scope (in desired scope list — not yet approved)
+
+#### Packing list
+- `tgw picklist` already generates a text list — extend with print action
+- Print-ready PDF: location-sorted, grouped by order, checkboxes per item
+- QR code on packing list: encodes SKU or order ID for scan-to-confirm
+
+### Dependencies
+- USB scale: HID library (PERPLEXITY-005 research covers this)
+- Label printing: thermal printer hardware (operator purchase)
+- Shipping labels: `sell.fulfillment.readonly` eBay scope
+- PDF generation: `reportlab` or `weasyprint`
+
+---
+
+## PP-TASKER-001 — Android Tasker + Join Integration
+
+### Goal
+Evaluate and design TGW automation opportunities using Tasker (automation app) and Join
+(Tasker's push-notification sibling, similar to KDE Connect). Dave has a Tasker license
+and a Join license.
+
+### Join evaluation
+- Join is an alternative to KDE Connect for Android↔desktop push/pull
+- Capabilities: push notifications, clipboard sync, SMS forwarding, file transfer, URL open
+- TGW use: push "item staged for review" notifications to phone; receive barcode scans
+- Compare to KDE Connect: Join works via cloud (not LAN); better when phone not on same network
+- Evaluate: which offers better reliability for `SETTEMPLATE:` clipboard relay from tgw.source?
+
+### Tasker opportunities
+- **Barcode scan → intake**: Tasker barcode scan action → POST to tgw-http intake endpoint
+- **Voice → suggest**: Tasker microphone → Whisper → `tgw suggest`; or Tasker built-in voice
+- **Photo trigger**: Tasker camera trigger → sends image to TGW intake folder via Join/KDE Connect
+- **Notification response**: tgw-http push → Tasker task (tap "approve" → POST publish action)
+- **USB scale auto-read**: Tasker OBD plugin or USB serial reader for scale integration on Android
+- **Custom intake flow**: Tasker UI screen with SKU scan + template select + size entry; posts to tgw-http
+
+### Tasker vs KDE Connect architecture decision
+Currently KDE Connect is primary (clipboard relay, file share). Evaluate whether Join can
+replace or supplement it. Key question: does Join support `wl-copy` / `wl-paste` clipboard
+injection the same way KDE Connect does? If not, KDE Connect stays for clipboard relay.
+
+### Dependencies
+- PP-REMOTE-001 (tgw-http reachable from phone)
+- PERPLEXITY-005 (Syncthing + KDE Connect research may cover Join as well)
+
+---
+
+## PP-PERP-AUTO-001 — Perplexity Semi-Automation Interface
+
+### Problem
+Submitting research briefs to Perplexity requires manual copy-paste: open brief → copy prompt
+→ switch to browser → paste → wait → copy result → save to inbox. For 5+ briefs, this is 30+
+minutes of mechanical work. Even Perplexity's API doesn't expose the Pro search quality.
+
+### Approach: ydotool / xdotool automation
+Semi-automate the Perplexity UI interaction using `ydotool` (Wayland) or `xdotool` (X11):
+1. `tgw perp-run PERPLEXITY-001` — reads the brief file, extracts the prompt
+2. Opens Firefox to perplexity.ai (or switches to open tab)
+3. Uses ydotool to focus the input, paste the prompt, submit
+4. Operator monitors and copies the result when ready (automation can't reliably detect completion)
+5. `tgw perp-save PERPLEXITY-001` — operator pastes result, saves to inbox/, marks brief as run
+
+### Limitations
+- Perplexity UI scraping is fragile; ydotool approach is best-effort
+- Result copy-back still manual (complex to automate reliably)
+- This reduces friction, not eliminates it
+
+### Track 4 (Operator) task
+This is an operator tool, not a background worker. Add to Priority 3 in Track 4.
+
+---
+
+## PP-EMAIL-001 — Email Integration
+
+### Problem
+eBay sends automated emails for: buyer messages, order notifications, case alerts, policy
+violations, and payment updates. Currently these require manual Seller Hub monitoring.
+Outgoing communication to buyers is also manual.
+
+### Inbound — auto-processing
+- Monitor eBay buyer message inbox (eBay Messages API or email forward to IMAP inbox)
+- Parse and categorize: order question, tracking request, return request, feedback reminder
+- Route to TGW: match to order → attach to item JSON event log; generate suggested response
+- Alert operator for messages requiring human response; auto-reply for simple FAQ patterns
+- Integration: eBay Messaging API (part of `sell.fulfillment` scope family)
+
+### Outbound — free SMTP
+- Gmail "Send Mail As" feature: use a Gmail account to send from a custom address
+  (e.g. `support@yourdomain.com`) via Gmail SMTP without a paid mail server
+- Investigate: `smtplib` + Gmail SMTP with app password; or `gmail-send` Python wrapper
+- Use case: order confirmation, tracking number follow-up, buyer communication
+
+### Dependencies
+- eBay messaging scope (new keyset request covers this)
+- Gmail account with "Send Mail As" configured
+- IMAP library: `imaplib` (stdlib) or `imapclient` package
+
+---
+
+## PP-CLAUDE-HELP-001 — tgw claude-help Troubleshooting Mode
+
+### Vision
+`tgw claude-help [issue description]` launches Claude Code with a CLAUDE.md specifically
+tuned for fast, accurate issue diagnosis on the TGW platform — narrower context, focused
+on error resolution rather than feature development.
+
+### Design
+A separate `CLAUDE-TROUBLESHOOT.md` lives alongside `CLAUDE.md`. It contains:
+- System architecture in dense summary form (worker → queue → database flow)
+- Common failure modes and their symptoms (ISSUES.md condensed)
+- Diagnostic commands (health, queue check, journal, systemctl status)
+- Decision tree: "if you see X, check Y first, then Z"
+- Zero planning overhead — diagnose, fix, verify, done
+
+The command:
+```bash
+tgw claude-help                    # launch claude with troubleshooting CLAUDE.md
+tgw claude-help "token expired"    # include the issue as initial context
+tgw claude-help --worker ebay_stage # narrow context to a specific worker
+```
+
+Implementation: `CLAUDE-TROUBLESHOOT.md` symlinked or passed as `--context` to claude CLI.
+Alternatively: a dedicated `.claude/` project config directory pointed at a minimal CLAUDE.md.
+
+### Value
+Reduces time-to-diagnosis for operational issues. Operator doesn't need to explain the full
+project history — the troubleshooting CLAUDE.md has a compressed but complete system view.
+Especially useful under duress (down worker, stuck token, dead-letter flood).
+
+### Dependencies
+- Claude Code CLI installed (✅ available)
+- `CLAUDE-TROUBLESHOOT.md` authored (one session of work)
 
 ---
 

@@ -99,7 +99,9 @@ def test_verifiedupdate():
         cfg = make_cfg(root)
         result = verifiedupdate(cfg, 'tgw20260101000000001', 'yes')
         assert result['ok'] is True
-        assert read_item(root, 'tgw20260101000000001')['VERIFIED'] == 'yes'
+        item = read_item(root, 'tgw20260101000000001')
+        assert item['verified'] == 'yes'
+        assert item['#STATUS'] == 'In Stock'
 
 
 def test_catlocmvall_moves_all():
