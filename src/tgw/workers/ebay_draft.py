@@ -22,6 +22,7 @@ import psycopg2.errors
 import requests
 
 import tgw.logging as tgw_logging
+from tgw.apis.ebay.client import ebay_get
 from tgw.apis.ebay.conditions import best_condition
 from tgw.apis.ebay.specifics import get_aspects
 from tgw.apis.ollama import chat, extract_json
@@ -54,6 +55,45 @@ Target length: 200+ words.
 
 _OFFLINE_CSV_FIELDS = ['sku', 'title', 'category_id', 'category_name',
                        'condition', 'format', 'quantity', 'price', 'description']
+
+
+_BROWSE_HINT_SKIP = frozenset({'Does Not Apply', 'Unbranded', 'N/A', 'Unknown', 'Other'})
+
+
+def _fetch_browse_aspect_hints(
+    cfg: Dict[str, Any],
+    title: str,
+    category_id: str,
+) -> Dict[str, str]:
+    """
+    Search Browse API for active listings similar to *title* in *category_id*.
+    Returns the most common aspect value for each aspect from the ASPECT_REFINEMENTS
+    fieldgroup — a lightweight signal about what fields sellers commonly fill in.
+    Returns {} on any failure (best-effort; never blocks drafting).
+    """
+    try:
+        data = ebay_get(cfg, '/buy/browse/v1/item_summary/search', params={
+            'q':            title[:100],
+            'category_ids': category_id,
+            'fieldgroups':  'ASPECT_REFINEMENTS',
+            'limit':        5,
+        })
+    except Exception as exc:
+        log.debug('browse aspect hints unavailable for %r (%s): %s', title, category_id, exc)
+        return {}
+
+    hints: Dict[str, str] = {}
+    for dist in data.get('refinement', {}).get('aspectDistributions', []):
+        field_name = dist.get('fieldName', '').strip()
+        if not field_name:
+            continue
+        for entry in dist.get('aspectValueDistributions', []):
+            val = entry.get('localizedAspectValue', '').strip()
+            if val and val not in _BROWSE_HINT_SKIP:
+                hints[field_name] = val
+                break  # first entry = highest matchCount
+
+    return hints
 
 
 def _category_confidence(pl_category: str, ebay_category: str) -> str:
@@ -106,8 +146,10 @@ def _write_offline_csv_row(cfg: Dict[str, Any], sku: str,
 
 
 def _build_prompt(item: Dict[str, Any], aspects: List[Dict[str, Any]],
-                  prefilled: Optional[Dict[str, str]] = None) -> str:
+                  prefilled: Optional[Dict[str, str]] = None,
+                  browse_hints: Optional[Dict[str, str]] = None) -> str:
     prefilled = prefilled or {}
+    aspect_names = {a['name'] for a in aspects}
     lines = [
         f'Title: {item.get("title", "")}',
         f'Category: {item.get("ebay_category_name", "")}',
@@ -120,6 +162,15 @@ def _build_prompt(item: Dict[str, Any], aspects: List[Dict[str, Any]],
         for k, v in prefilled.items():
             lines.append(f'  {k}: {v}')
         lines.append('')
+
+    if browse_hints:
+        applicable = {k: v for k, v in browse_hints.items()
+                      if k in aspect_names and k not in prefilled}
+        if applicable:
+            lines.append('Common values from similar active eBay listings (use as context):')
+            for k, v in applicable.items():
+                lines.append(f'  {k}: "{v}"')
+            lines.append('')
 
     remaining = [a for a in aspects if a['name'] not in prefilled]
     if remaining:
@@ -203,6 +254,14 @@ class EbayDraftWorker(QueueWorker):
                 raise
             log.info('fetched %d aspects for category %s', len(aspects), category_id)
 
+        # Phase 2a — Browse API aspect hints (best-effort; supplements AI with market signal)
+        browse_hints: Dict[str, str] = {}
+        if category_id != '99' and aspects:
+            browse_hints = _fetch_browse_aspect_hints(self.config, title, category_id)
+            if browse_hints:
+                log.info('%s: browse hints for %d aspects: %s',
+                         sku, len(browse_hints), list(browse_hints.keys()))
+
         # Phase 2 — pre-fill known specifics from product_lookup (authoritative over AI)
         pl = item.get('product_lookup') or {}
         aspect_names = {a['name'] for a in aspects}
@@ -230,7 +289,7 @@ class EbayDraftWorker(QueueWorker):
                      sku, len(prefilled), list(prefilled.keys()))
 
         # Use text model to fill aspect values
-        prompt  = _build_prompt(item, aspects, prefilled=prefilled)
+        prompt  = _build_prompt(item, aspects, prefilled=prefilled, browse_hints=browse_hints)
         log.info('asking %s to fill %d aspects for %s', TEXT_MODEL, len(aspects), sku)
         tgw_logging.log_event('ebay_draft_aspects_call', sku=sku,
                               category_id=category_id, aspect_count=len(aspects))
@@ -379,6 +438,11 @@ class EbayDraftWorker(QueueWorker):
             draft['category_confidence'] = cat_confidence
         if enriched_description:
             draft['description_source'] = 'enriched'
+        if browse_hints:
+            aspect_names_set = {a['name'] for a in aspects}
+            applicable_hints = {k for k in browse_hints
+                                if k in aspect_names_set and k not in prefilled}
+            draft['browse_hint_count'] = len(applicable_hints)
 
         # Build full eBay listing description: AI text + boilerplate footer + picklist line
         item['draft_listing'] = draft   # temporary — needed by build_listing_description

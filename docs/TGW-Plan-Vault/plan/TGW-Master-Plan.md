@@ -90,6 +90,8 @@ maintained_by: Opus (planner)
 - **tgw bash completion** — `etc/completion/tgw-completion.bash`; all subcommands, SKU completion from catalog, location completion from location-tree, per-subcommand flags. Sourced automatically via `tgw.source`. Install system-wide: `sudo cp etc/completion/tgw-completion.bash /etc/bash_completion.d/tgw`.
 - **tgw suggest-edit** — opens `SUGGESTIONS.md` in `$EDITOR`; `--pending-only` extracts unprocessed entries to a temp file for focused review.
 - **28 tests pass** — all existing tests green after all changes.
+- **PP-GLOBALS-001 ANALYSIS DONE** — no `globals` block needed; top-level fields already serve this role. All offer-invariant properties (condition, ebay_category_id, category_group, size_class, upc) are correctly placed at top level. Policy IDs and marketplace constants are account-wide (config), not per-item. Single missing field: `weight_oz` (float, nullable) — add when PP-INTAKE-001 Phase 2 is implemented (the natural write path). No restructuring needed. See pending projects for full audit table.
+- **PP-HINT-001 Browse enrichment DONE** — `_fetch_browse_aspect_hints()` in `ebay_draft.py`: calls Browse API with `fieldgroups=ASPECT_REFINEMENTS` + `category_ids` filter before AI prompt; extracts most common aspect value per field from similar active listings; injects as "Common values from similar active eBay listings" section into Ollama prompt. Falls back to `{}` on failure — never blocks drafting. `draft_listing.browse_hint_count` records how many applicable hints were provided. 28 tests pass.
 
 ### Pipeline additions — 2026-06-06 (session 9)
 - **21 suggestions processed** — full SUGGESTIONS.md backlog cleared. New pending projects:
@@ -200,13 +202,16 @@ maintained_by: Opus (planner)
 - ✅ **tgw mvitems** — expands `catlocmvall` with SKU list / --from / --search / --status selectors (2026-06-07); catlocmvall kept as deprecated alias
 - ✅ **tgw bash completion** — `etc/completion/tgw-completion.bash`; auto-sourced via `tgw.source` (2026-06-07)
 - ✅ **tgw suggest-edit** — opens SUGGESTIONS.md in $EDITOR; `--pending-only` for focused review (2026-06-07)
+- ✅ **PP-GLOBALS-001 analysis** (2026-06-07) — no `globals` block needed; top-level fields already serve this role; add `weight_oz: float | null` in PP-INTAKE-001 Phase 2 (natural write path)
+- ✅ **PP-HINT-001 Browse enrichment** (2026-06-07) — `_fetch_browse_aspect_hints()` in `ebay_draft.py`; ASPECT_REFINEMENTS fieldgroup + category filter; injects common values into Ollama prompt; `browse_hint_count` in draft_listing
 
 ### Active / next build priorities
 
 | Priority | PP | Status | Notes |
 |----------|----|--------|-------|
-| 1 | **PP-GLOBALS-001** analysis | analysis only | Identify offer-invariant fields; design before coding |
-| 2 | **PP-HINT-001** remaining gaps | ongoing | eBay Browse enrichment in ebay_draft; per-SKU hint trail |
+| ✅ | **PP-GLOBALS-001** analysis | **done** | No globals block needed; add `weight_oz` field in PP-INTAKE-001 Phase 2 |
+| ✅ | **PP-HINT-001** Browse enrichment | **done** | `ASPECT_REFINEMENTS` in `ebay_draft`; `browse_hint_count` in draft |
+| 1 | **PP-HINT-001** hint trail | ongoing | Per-SKU history: identification rounds, hints used, AI vs human changes |
 | 3 | **PP-INTAKE-001 Phase 2** | design ready | Web form update: template picker, weight field, barcode field |
 | 4 | **PP-SOLD-001 Tier 3** sweep | operator gated | Run `tgw ebay-sweep` after full-history CSV import |
 | 5 | **PP-PYIPC-001** | research | Syncthing + KDE Connect Python library integration; research via PERPLEXITY-005 |
@@ -261,8 +266,9 @@ One bounded session per item. Ordered by value.
 | ✅ | tgw synonyms | `tgw status` alias for health; `tgw mvitems` expands catlocmvall — done (session 10) | XS |
 | ✅ | bash completion | `tgw` bash/zsh tab completion — `etc/completion/tgw-completion.bash`; sourced via tgw.source — done (session 10) | S |
 | ✅ | suggestion editor | `tgw suggest-edit [--pending-only]` — done (session 10) | XS |
-| 1 | PP-GLOBALS-001 | Analysis only — identify offer-invariant fields; design doc | S |
-| 2 | PP-HINT-001 | eBay Browse enrichment in `ebay_draft`; per-SKU hint trail | M |
+| ✅ | PP-GLOBALS-001 | Analysis done (session 10) — no globals block; add `weight_oz` in PP-INTAKE-001 P2 | S |
+| ✅ | PP-HINT-001 Browse | Browse ASPECT_REFINEMENTS enrichment in `ebay_draft` — done (session 10) | S |
+| 1 | PP-HINT-001 trail | Per-SKU hint trail (identification rounds, hints used, AI vs human) | M |
 
 ### Track 2 — Gemini CLI (large-context data + self-contained tasks)
 **Status 2026-06-06**: Gemini CLI now installed and available. Gemini is Dave's primary
@@ -984,11 +990,35 @@ between "workers finished" and "operator knows what to do next."
 - Default store category configurable per eBay category in `tgw-api-config.json`
 - Wired into `ebay_stage` and `ebay_publish` offer bodies
 
-### PP-GLOBALS-001 — Item JSON Globals Metadata (design required)
-- Problem: some item properties don't change between offers — condition class, preferred category, weight, default shipping intent — but are either scattered top-level or duplicated in every offer block
-- Design question: dedicated `globals` block vs. top-level fields vs. derive from existing fields
-- Analyze actual offer-invariant properties before implementing; define the schema before writing any code
-- Depends on: PP-ADD-005 (SKU normalization) + Pass 3 data scrub (field schema freeze)
+### PP-GLOBALS-001 — Item JSON Globals Metadata ✅ ANALYSIS DONE (2026-06-07)
+
+**Finding: no `globals` block needed.** Top-level fields already are the globals layer.
+
+**Offer-invariant field audit:**
+
+| Property | Current home | Assessment |
+|---|---|---|
+| `condition` (human string) | top-level | ✓ correct; source of truth |
+| `condition_id/enum/label` | `draft_listing.*` | ✓ correct; eBay-derived copies |
+| `ebay_category_id` / `ebay_category_name` | top-level | ✓ correct |
+| `category_group` / `size_class` | top-level (via set-template) | ✓ correct |
+| `upc` | top-level | ✓ correct |
+| `format` (FIXED_PRICE) | TGW-wide constant | not worth storing per-item |
+| `quantity` (always 1) | TGW-wide constant | not worth storing per-item |
+| `marketplaceId` / `shipToLocations` | account-wide constant | not worth storing per-item |
+| Policy IDs (fulfillment/payment/return) | config + category override | correct; never per-item |
+| `merchantLocationKey` | account-wide, from config | correct; never per-item |
+| **`weight_oz`** | **missing entirely** | **⬅ add this** |
+
+**Action — add `weight_oz` (top-level, float, nullable):**
+- Written by: PP-INTAKE-001 Phase 2 web form; PP-FULFILLMENT-001 USB scale; operator
+- Used by: `ebay_draft` (item specifics for shipping weight); `size_class` derivation when not set by template; shipping label generation (PP-FULFILLMENT-001)
+- Additive — safe to add now without waiting for Pass 3 schema freeze
+- Do NOT add until PP-INTAKE-001 Phase 2 (the write path) is designed; schema freeze applies to renames/deletes only
+
+**No schema restructuring needed.** The condition duplication between top-level and `draft_listing` is legitimate (top-level = source of truth; draft_listing = eBay API-formatted copies). Adding `globals` indirection would require every worker to change `doc.get('condition')` → `doc.get('globals', {}).get('condition')` with no benefit.
+
+- Depends on: PP-ADD-005 (SKU normalization) + Pass 3 data scrub (field schema freeze) — for any renames; `weight_oz` addition is exempt (additive)
 
 ### PP-LOOKUP-001 — Product Data Enrichment ✅ ALL TIER 1 DONE (2026-06-05)
 
