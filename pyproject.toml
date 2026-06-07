@@ -14,6 +14,7 @@ dependencies = [
     "psycopg2-binary>=2.9",
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
+    "mcp>=1.0",
 ]
 
 [project.optional-dependencies]
@@ -28,6 +29,7 @@ thumbnails = [
 
 [project.scripts]
 tgw                = "tgw.api:main"
+tgw-mcp-server     = "tgw.mcp_server:main"
 tgw-browser        = "tgw.browser:main"
 tgw-queue-launcher = "tgw.queue.launcher:main"
 tgw-echo-worker           = "tgw.workers.echo:main"

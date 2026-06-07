@@ -17,6 +17,7 @@ _tgw_subcommands=(
     build-search-csv
     build-sqlite
     build-thumbnails
+    catalog-verify
     category-groups
     catlocmvall
     data-scrub
@@ -27,6 +28,7 @@ _tgw_subcommands=(
     get-ebay-token
     health
     hint
+    hint-trail
     import-sold-csv
     list
     locationupdate
@@ -60,7 +62,7 @@ _tgw_subcommands=(
 )
 
 # Subcommands that take a SKU as their first positional arg
-_tgw_sku_cmds=(get hint lookup quality set-template titleupdate verifiedupdate
+_tgw_sku_cmds=(get hint hint-trail lookup quality set-template titleupdate verifiedupdate
                locationupdate statusupdate update publish)
 
 # Subcommands that take multiple SKUs
@@ -120,6 +122,7 @@ _tgw() {
             mvitems)       flags+=" --from --search --status --check-only" ;;
             catlocmvall)   flags+=" --check-only" ;;
             suggest-edit)  flags+=" --pending-only" ;;
+            catalog-verify) flags+=" --location --limit --severity --output --json" ;;
             category-groups) flags+=" --reseed" ;;
             set-template)  flags+=" --list --camera --dry-run" ;;
             todo)          flags+=" --add --done --priority --source --all --seed" ;;

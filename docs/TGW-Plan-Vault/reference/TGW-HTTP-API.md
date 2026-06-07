@@ -84,6 +84,32 @@ updated: 2026-06-04
 - Returns `{ok, locations: ["A1", "B2", ...]}`
 - Excludes empty-string locations
 
+#### GET /api/category-groups — template list for intake form (PP-INTAKE-001 P2)
+- Source: `config/category-groups.json` (`category_groups_path` config key)
+- Returns `{ok, count, groups: [{key, name, size_class, ai_hint, floor, typical_used}]}`
+- 24 groups; drives template picker chips in intake form
+
+#### POST /api/items/{sku}/set-template — apply category-group template (PP-INTAKE-001 P2)
+- Body: `{"template_key": "books"}`
+- Applies same logic as `tgw set-template`: writes `category_group`, `size_class`, `ai_hint` (prepended), `ebay_category_id` (if not set)
+- Enqueues coalesced `catalog_rebuild`
+- Returns `{ok, sku, template_key, applied: {fields written}, group_name}`
+- 400 if unknown template_key
+
+#### GET /api/items/{sku}/hint-trail — identification history (PP-HINT-001 trail)
+- Returns `{ok, sku, count, history: [{ts, event, ...}]}`
+- Events: `ai_identify` (round, model, prompt_type, hint, lookup_source, title, category, condition, ebay_category_id) and `hint_set` (hint, prev_hint, by)
+- Empty list if item has never been through ai_identify since trail was added
+
+### Forms
+
+#### GET /form/intake/{sku} — mobile intake form (PP-INTAKE-001 P2)
+- **No Bearer auth** — intended for internal network / Tailscale use from phone/tablet
+- Mobile-first HTML form: 24 template chips, weight (oz), barcode, ai_hint, condition
+- Pre-fills from current item JSON values
+- On submit: calls `POST /api/items/{sku}/set-template` (if template changed) then `PATCH /api/items/{sku}`
+- Dark theme, large touch targets, no keyboard required for template selection
+
 ### Webhooks
 
 #### POST /webhooks/ebay/notification — eBay push (no Bearer auth)

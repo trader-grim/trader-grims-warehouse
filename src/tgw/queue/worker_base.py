@@ -40,6 +40,31 @@ class HardFailure(Exception):
 
 _RECOVER_INTERVAL_S = 60   # how often to call recover_expired_jobs
 
+# Transient error patterns that warrant automatic requeue rather than dead-letter.
+# (substring match, case-insensitive) → requeue delay in seconds.
+# Order matters: first match wins.
+_TRANSIENT_ERRORS: list[tuple[str, int]] = [
+    ('token is expired',       900),   # eBay token lapsed; wait for token_refresh
+    ('no ebay photo urls yet', 600),   # ebay_upload still running
+    ('directory not empty',     30),   # transient OS race in catalog_rebuild
+    ('readtimeout',            120),   # network hiccup
+    ('lease_expired',          120),   # claim race; will resolve on retry
+    ('connectionerror',        120),   # transient network
+]
+
+
+def classify_dead_letter(error_text: str) -> tuple[str, int]:
+    """Classify a failure as transient-requeue or permanent dead-letter.
+
+    Returns ('requeue', delay_seconds) or ('dead_letter', 0).
+    Called when a job has exhausted normal retries (attempt_count >= max_attempts).
+    """
+    lower = error_text.lower()
+    for pattern, delay in _TRANSIENT_ERRORS:
+        if pattern in lower:
+            return ('requeue', delay)
+    return ('dead_letter', 0)
+
 
 class QueueWorker:
     """Forever loop: claim a leased job, handle it, report the result."""
@@ -134,9 +159,32 @@ class QueueWorker:
             tgw_logging.log_event('job_dead_letter', job_id=job_id,
                                   error=repr(exc))
         except Exception as exc:
-            log.exception('job %s failed: %s', job_id, exc)
-            state_machine.mark_failed(job_id, self.owner, repr(exc))
-            tgw_logging.log_event('job_failed', job_id=job_id, error=repr(exc))
+            error_text = repr(exc)
+            log.exception('job %s failed: %s', job_id, error_text)
+
+            # When the job has exhausted normal retries, classify the error.
+            # Transient errors get rescheduled with a fresh retry window rather
+            # than dying permanently — keeps dead_letter clean.
+            attempt = int(job.get('attempt_count') or 0)
+            max_att = int(job.get('max_attempts') or 5)
+            if attempt >= max_att:
+                action, delay = classify_dead_letter(error_text)
+                if action == 'requeue':
+                    log.warning(
+                        'transient error at retry limit on %s; rescheduling in %ds: %s',
+                        self.queue_name, delay, error_text[:200],
+                    )
+                    state_machine.requeue_with_backoff(
+                        job_id, self.owner, delay, error_text
+                    )
+                    tgw_logging.log_event(
+                        'job_transient_requeue', job_id=job_id,
+                        queue=self.queue_name, delay=delay,
+                    )
+                    return
+
+            state_machine.mark_failed(job_id, self.owner, error_text)
+            tgw_logging.log_event('job_failed', job_id=job_id, error=error_text)
         else:
             state_machine.mark_succeeded(job_id, self.owner)
             tgw_logging.log_event('job_succeeded', job_id=job_id)

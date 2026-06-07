@@ -250,6 +250,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--force', action='store_true',
                    help='re-identify even if already ai_identified')
 
+    p = sub.add_parser('hint-trail', help='show identification history for an item')
+    p.add_argument('sku', help='SKU to inspect')
+
     p = sub.add_parser('requeue',
                        help='bulk-enqueue ai_identify for items matching a filter')
     p.add_argument('--no-title', action='store_true',
@@ -453,7 +456,171 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--pending-only', action='store_true',
                    help='extract only unprocessed ([ ]) entries to a temp file for editing')
 
+    p = sub.add_parser(
+        'catalog-verify',
+        help='scan ItemData for assumption violations and output a checklist (PP-VERIFY-001)',
+    )
+    p.add_argument('--location', default='', metavar='LOC',
+                   help='limit scan to items at this location')
+    p.add_argument('--limit', type=int, default=0, metavar='N',
+                   help='stop after N items (0 = all)')
+    p.add_argument('--severity', default='warning',
+                   choices=['critical', 'warning', 'info'],
+                   help='minimum severity to include (default: warning)')
+    p.add_argument('--output', default='', metavar='PATH',
+                   help='write markdown report to file (default: stdout)')
+    p.add_argument('--json', dest='as_json', action='store_true',
+                   help='output JSON summary instead of markdown report')
+
     return parser
+
+
+_KNOWN_STATUS_VALUES: set[str] = {
+    '', 'In Stock', 'Out of Stock', 'sold', 'Sold', 'archived', 'New',
+    'staging', 'live', 'TEMPLATE', 'No Photos', 'no photos',
+    'Draft', 'draft', 'Listed', 'Ended', 'ended', 'Pending',
+}
+
+_SEV_ORDER: Dict[str, int] = {'critical': 0, 'warning': 1, 'info': 2}
+
+
+def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return list of violation dicts for one item (PP-VERIFY-001)."""
+    import re
+    viols: List[Dict[str, Any]] = []
+
+    def v(rule: str, severity: str, detail: str) -> None:
+        viols.append({'rule': rule, 'sku': sku, 'severity': severity, 'detail': detail})
+
+    title = str(doc.get('title') or '').strip()
+    if not title:
+        v('no_title', 'critical', 'Title is empty or missing')
+    else:
+        if title == sku:
+            v('title_is_sku', 'warning', 'Title equals SKU')
+        if title.upper().startswith('TEMPLATE:'):
+            v('stale_template_prefix', 'critical', f'Title starts with TEMPLATE: {title[:50]!r}')
+        if len(title) < 10:
+            v('title_too_short', 'warning', f'Title only {len(title)} chars: {title!r}')
+
+    location = str(doc.get('location') or '').strip()
+    if not location:
+        v('no_location', 'warning', 'Location field empty or missing')
+
+    photos = [
+        f for f in item_dir.iterdir()
+        if f.suffix.lower() in ('.jpg', '.jpeg', '.png', '.gif', '.webp')
+        and not f.name.startswith('.')
+    ]
+    if not photos:
+        v('no_photo', 'warning', 'No photo files in item folder')
+
+    cat_id = doc.get('ebay_category_id')
+    if cat_id is not None and str(cat_id).strip():
+        try:
+            int(str(cat_id).strip())
+        except ValueError:
+            v('invalid_ebay_category', 'warning',
+              f'ebay_category_id not numeric: {cat_id!r}')
+
+    verified = str(doc.get('verified') or '').strip()
+    if verified and not re.fullmatch(r'\d{8}', verified):
+        v('bad_verified_date', 'info', f'verified field not YYYYMMDD: {verified!r}')
+
+    raw_status = str(doc.get('#STATUS') or doc.get('status') or '').strip()
+    if raw_status and raw_status not in _KNOWN_STATUS_VALUES:
+        v('unknown_status', 'info', f'Unrecognised #STATUS value: {raw_status!r}')
+
+    return viols
+
+
+def cmd_catalog_verify(
+    cfg: Dict[str, Any],
+    *,
+    location: str = '',
+    limit: int = 0,
+    output: Optional[Path] = None,
+    min_severity: str = 'warning',
+) -> Dict[str, Any]:
+    """Scan ItemData for assumption violations and emit a markdown checklist."""
+    root: Path = cfg['itemdata_root']
+    min_sev = _SEV_ORDER.get(min_severity, 1)
+
+    all_violations: List[Dict[str, Any]] = []
+    scanned = 0
+    json_errors = 0
+
+    for item_dir in sorted(root.iterdir()):
+        if not item_dir.is_dir() or not item_dir.name.startswith('tgw'):
+            continue
+        sku = item_dir.name
+        jf = item_dir / f'{sku}.json'
+        if not jf.exists():
+            continue
+
+        try:
+            doc = json.loads(jf.read_text(encoding='utf-8'))
+        except Exception as exc:
+            all_violations.append({
+                'rule': 'json_parse_error', 'sku': sku,
+                'severity': 'critical', 'detail': str(exc),
+            })
+            json_errors += 1
+            scanned += 1
+            if limit and scanned >= limit:
+                break
+            continue
+
+        if location and str(doc.get('location', '')).strip() != location:
+            continue
+
+        scanned += 1
+        for viol in _verify_item(sku, item_dir, doc):
+            if _SEV_ORDER.get(viol['severity'], 99) <= min_sev:
+                all_violations.append(viol)
+
+        if limit and scanned >= limit:
+            break
+
+    by_rule: Dict[str, int] = {}
+    for viol in all_violations:
+        by_rule[viol['rule']] = by_rule.get(viol['rule'], 0) + 1
+
+    now_str = datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+    lines = [
+        '# Catalog Verification Report',
+        f'Generated: {now_str}',
+        f'Scanned: {scanned} items  |  Violations: {len(all_violations)}  |  Severity filter: {min_severity}+',
+        '',
+    ]
+
+    for sev_label in ('critical', 'warning', 'info'):
+        if _SEV_ORDER[sev_label] > min_sev:
+            continue
+        sev_viols = [v for v in all_violations if v['severity'] == sev_label]
+        if not sev_viols:
+            continue
+        lines.append(f'## {sev_label.upper()} ({len(sev_viols)})')
+        lines.append('')
+        for viol in sev_viols:
+            lines.append(f'- [ ] **{viol["rule"]}** — `{viol["sku"]}` — {viol["detail"]}')
+        lines.append('')
+
+    report = '\n'.join(lines)
+
+    if output:
+        output.write_text(report, encoding='utf-8')
+        print(f'Report written to {output}')
+    else:
+        print(report)
+
+    return {
+        'ok': True,
+        'scanned': scanned,
+        'violations': len(all_violations),
+        'by_rule': by_rule,
+        'json_errors': json_errors,
+    }
 
 
 def cmd_hint(cfg: Dict[str, Any], sku: str, hint: str, force: bool = False) -> Dict[str, Any]:
@@ -469,9 +636,18 @@ def cmd_hint(cfg: Dict[str, Any], sku: str, hint: str, force: bool = False) -> D
     item = json.loads(json_path.read_text(encoding='utf-8'))
     already = bool(item.get('ai_identified'))
 
+    prev_hint = item.get('ai_hint') or None
     item['ai_hint'] = hint
     if force or not already:
         item['ai_reidentify'] = True
+
+    from tgw.items import append_history_event
+    append_history_event(item, {
+        'event':     'hint_set',
+        'hint':      hint,
+        'prev_hint': prev_hint,
+        'by':        'operator',
+    })
 
     atomic_write_json(json_path, item, pretty=cfg.get('pretty', True))
 
@@ -498,6 +674,49 @@ def cmd_hint(cfg: Dict[str, Any], sku: str, hint: str, force: bool = False) -> D
         'queued': queued,
         'job_id': jid,
     }
+
+
+def cmd_hint_trail(cfg: Dict[str, Any], sku: str) -> Dict[str, Any]:
+    """Return and print the identification_history trail for an item."""
+    from tgw.config import sku_json
+
+    json_path = sku_json(cfg, sku)
+    if not json_path.exists():
+        return {'ok': False, 'error': f'item not found: {sku}'}
+
+    item = json.loads(json_path.read_text(encoding='utf-8'))
+    history = item.get('identification_history', [])
+
+    if not history:
+        print(f'No identification history for {sku}.')
+        return {'ok': True, 'sku': sku, 'count': 0, 'history': []}
+
+    print(f'Identification history for {sku} ({len(history)} event(s)):\n')
+    for ev in history:
+        ts = ev.get('ts', '?')
+        etype = ev.get('event', '?')
+        if etype == 'ai_identify':
+            rnd = ev.get('round', '?')
+            ptype = ev.get('prompt_type', '?')
+            hint = ev.get('hint') or '—'
+            title = ev.get('title', '?')
+            cat = ev.get('category', '?')
+            cond = ev.get('condition', '?')
+            src = ev.get('lookup_source') or ''
+            src_str = f' [{src}]' if src else ''
+            print(f'  {ts}  ai_identify  round {rnd} | {ptype}{src_str}')
+            print(f'    hint: {hint}')
+            print(f'    → "{title}" | {cat} | {cond}')
+        elif etype == 'hint_set':
+            hint = ev.get('hint', '?')
+            prev = ev.get('prev_hint') or '—'
+            by = ev.get('by', '?')
+            print(f'  {ts}  hint_set     "{hint}" (by {by}, prev: {prev})')
+        else:
+            print(f'  {ts}  {etype}  {ev}')
+        print()
+
+    return {'ok': True, 'sku': sku, 'count': len(history), 'history': history}
 
 
 def cmd_requeue(cfg: Dict[str, Any], *,
@@ -1725,6 +1944,9 @@ def main() -> int:
         elif args.op == 'hint':
             result = cmd_hint(cfg, args.sku, ' '.join(args.text), force=args.force)
 
+        elif args.op == 'hint-trail':
+            result = cmd_hint_trail(cfg, args.sku)
+
         elif args.op == 'requeue':
             result = cmd_requeue(
                 cfg,
@@ -2079,6 +2301,19 @@ def main() -> int:
             result = cmd_todo(cfg, args)
             # cmd_todo handles its own printing; skip the generic JSON dump
             return 0 if result.get('ok', True) else 1
+
+        elif args.op == 'catalog-verify':
+            result = cmd_catalog_verify(
+                cfg,
+                location=args.location,
+                limit=args.limit,
+                output=Path(args.output) if args.output else None,
+                min_severity=args.severity,
+            )
+            if getattr(args, 'as_json', False):
+                print(json.dumps(result, indent=2))
+            # markdown report already printed by cmd_catalog_verify
+            return 0 if result['ok'] else 1
 
         elif args.op == 'restart-ebay-token':
             from .queue import state_machine as _sm

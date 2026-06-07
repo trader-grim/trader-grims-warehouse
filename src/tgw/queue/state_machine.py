@@ -319,3 +319,29 @@ def clear_dead_letter(queue_name: str) -> int:
                 (queue_name,),
             )
             return cur.rowcount
+
+
+def requeue_with_backoff(job_id: str, lease_owner: str, delay_seconds: int, error_detail: str = '') -> None:
+    """Transition running → retry_wait with a custom delay, resetting attempt_count.
+
+    Used for transient errors classified by classify_dead_letter() that should be
+    retried after a longer delay rather than dying permanently.
+    """
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE queue_jobs
+                   SET state = 'retry_wait',
+                       not_before = NOW() + (%s || ' seconds')::interval,
+                       attempt_count = 1,
+                       error_code = 'TRANSIENT',
+                       error_detail = %s,
+                       finished_at = NULL,
+                       lease_owner = NULL,
+                       lease_token = NULL,
+                       lease_expires_at = NULL
+                 WHERE job_id = %s AND state = 'running' AND lease_owner = %s
+                """,
+                (str(delay_seconds), error_detail[:2000], job_id, lease_owner),
+            )

@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-07 (session 10)
+updated: 2026-06-08 (session 13)
 maintained_by: Opus (planner)
 ---
 
@@ -81,6 +81,19 @@ maintained_by: Opus (planner)
 - `conditions.py`: full condition policy cache (26 sets / 15K categories); `best_condition()` — same-or-worse fallback; wired into `ebay_draft`
 - `tgw staged` / `tgw publish` — operator review gate before any item goes live
 - **Open issue**: errorId 25002 `Item.Country` at publish for some categories (34032, 14027, 13916) — offer body is correct, investigating category-specific requirements
+
+### Pipeline additions — 2026-06-08 (session 13)
+- **PP-DEADLETTER-001 DONE** — `classify_dead_letter(error_text)` in `worker_base.py`: returns `('requeue', delay_seconds)` or `('dead_letter', 0)`. `requeue_with_backoff(job_id, owner, delay, error)` in `state_machine.py`: transitions running→retry_wait with reset attempt_count and custom delay. `QueueWorker._process()` now intercepts exhausted-retry exceptions and auto-reschedules transient errors (token expired 900s, no eBay photos 600s, directory not empty 30s, ReadTimeout 120s, LEASE_EXPIRED 120s, ConnectionError 120s). Dead_letter reserved for true hard failures only. 6 new tests.
+- **PP-VERIFY-001 Phase 1 DONE** — `tgw catalog-verify [--location LOC] [--limit N] [--severity critical|warning|info] [--output PATH] [--json]` command in `api.py`. 9 rule checks: `no_title` (critical), `stale_template_prefix` (critical), `json_parse_error` (critical), `title_is_sku` (warning), `title_too_short` (warning), `no_location` (warning), `no_photo` (warning), `invalid_ebay_category` (warning), `bad_verified_date` (info), `unknown_status` (info). Outputs markdown checklist grouped by severity. Phase 2 (hall pass `catalog_verified` field) remains. 10 new tests.
+- **PP-MCP-001 DONE** (code) — `src/tgw/mcp_server.py`: 9 MCP tools exposed via FastMCP: `tgw_get_item`, `tgw_search_items`, `tgw_queue_status`, `tgw_health`, `tgw_enqueue`, `tgw_get_todo`, `tgw_add_suggest`, `tgw_hint_trail`, `tgw_catalog_verify`. `tgw-mcp-server` console script added to pyproject.toml. `mcp>=1.0` added to dependencies. **Registration requires operator action**: add MCP server block to `~/.claude/settings.json` (see Operator Priority 2 below). Cannot self-register; Claude Code settings are operator-controlled.
+- **54 tests pass** (up from 38 at session 11 start).
+
+### Pipeline additions — 2026-06-08 (session 12)
+- **1 suggestion processed** — Track 2 (Gemini) "History consolidation" task split into two distinct tasks: "AI conversation history consolidation" (Dave's AI session history) and "Data/archive history consolidation" (ItemArchive zips, legacy records, archive-ebay-index.json — analogous to the archive index work already done).
+
+### Pipeline additions — 2026-06-08 (session 11)
+- **PP-HINT-001 trail DONE** — `identification_history` list added to item JSON. `append_history_event()` helper in `items.py` (UTC ISO ts injected automatically). Two event types: `ai_identify` (round, model, prompt_type, hint, lookup_source, title, category, condition, ebay_category_id) and `hint_set` (hint, prev_hint, by='operator'). `ai_identify.py` appends on every run; `cmd_hint()` in `api.py` appends on every hint write. `tgw hint-trail <sku>` CLI prints formatted history. `hint-trail` added to bash completion. 10 new tests; 38 total pass.
+- **Track 1 COMPLETE** — all items in the Track 1 table are now done.
 
 ### Pipeline additions — 2026-06-07 (session 10)
 - **8 suggestions processed** — PP-PERP-AUTO-001 expanded with Qtile scraping layout, tmux/ltsp/qtile/ssh stack, simplified paste→download workflow, and iterative markdown loop. Gemini history consolidation task noted in Track 2 (plan before executing). `catlocmvall` → `mvitems` rename with expanded selectors. PP-TASKER-001: barcode scanner confirmed available via Tasker on camera phone; intent audit needed to capture scan output.
@@ -204,6 +217,7 @@ maintained_by: Opus (planner)
 - ✅ **tgw suggest-edit** — opens SUGGESTIONS.md in $EDITOR; `--pending-only` for focused review (2026-06-07)
 - ✅ **PP-GLOBALS-001 analysis** (2026-06-07) — no `globals` block needed; top-level fields already serve this role; add `weight_oz: float | null` in PP-INTAKE-001 Phase 2 (natural write path)
 - ✅ **PP-HINT-001 Browse enrichment** (2026-06-07) — `_fetch_browse_aspect_hints()` in `ebay_draft.py`; ASPECT_REFINEMENTS fieldgroup + category filter; injects common values into Ollama prompt; `browse_hint_count` in draft_listing
+- ✅ **PP-HINT-001 trail** (2026-06-08) — `identification_history` in item JSON; `append_history_event()` in `items.py`; events: `ai_identify` + `hint_set`; `tgw hint-trail <sku>` CLI
 
 ### Active / next build priorities
 
@@ -211,8 +225,12 @@ maintained_by: Opus (planner)
 |----------|----|--------|-------|
 | ✅ | **PP-GLOBALS-001** analysis | **done** | No globals block needed; add `weight_oz` field in PP-INTAKE-001 Phase 2 |
 | ✅ | **PP-HINT-001** Browse enrichment | **done** | `ASPECT_REFINEMENTS` in `ebay_draft`; `browse_hint_count` in draft |
-| 1 | **PP-HINT-001** hint trail | ongoing | Per-SKU history: identification rounds, hints used, AI vs human changes |
-| 3 | **PP-INTAKE-001 Phase 2** | design ready | Web form update: template picker, weight field, barcode field |
+| ✅ | **PP-HINT-001** hint trail | **done** | `identification_history` in item JSON; `tgw hint-trail <sku>` |
+| ✅ | **PP-INTAKE-001 Phase 2** | **done** | Intake form at `/form/intake/<sku>`; chips, weight_oz, barcode, condition, ai_hint |
+| ✅ | **PP-DEADLETTER-001** | **done** | `classify_dead_letter()` + `requeue_with_backoff()`; transient errors auto-reschedule |
+| ✅ | **PP-VERIFY-001 Phase 1** | **done** | `tgw catalog-verify`; 9 rules; markdown checklist; 10 tests |
+| ✅ | **PP-MCP-001** | **code done** | `tgw_mcp_server.py`; 9 tools; needs operator MCP registration in settings.json |
+| 1 | **PP-VERIFY-001 Phase 2** | ready | `catalog_verified` hall pass field; clear-on-write; `--force` flag |
 | 4 | **PP-SOLD-001 Tier 3** sweep | operator gated | Run `tgw ebay-sweep` after full-history CSV import |
 | 5 | **PP-PYIPC-001** | research | Syncthing + KDE Connect Python library integration; research via PERPLEXITY-005 |
 | — | **PP-REPRICER-001** | blocked | Blocked on `buy.marketplace_insights` scope approval |
@@ -268,7 +286,11 @@ One bounded session per item. Ordered by value.
 | ✅ | suggestion editor | `tgw suggest-edit [--pending-only]` — done (session 10) | XS |
 | ✅ | PP-GLOBALS-001 | Analysis done (session 10) — no globals block; add `weight_oz` in PP-INTAKE-001 P2 | S |
 | ✅ | PP-HINT-001 Browse | Browse ASPECT_REFINEMENTS enrichment in `ebay_draft` — done (session 10) | S |
-| 1 | PP-HINT-001 trail | Per-SKU hint trail (identification rounds, hints used, AI vs human) | M |
+| ✅ | PP-HINT-001 trail | `identification_history` in item JSON; `tgw hint-trail <sku>` — done (session 11) | M |
+| ✅ | PP-INTAKE-001 P2 | Intake web form `/form/intake/<sku>`; template chips, weight_oz, barcode, condition, ai_hint — done (session 11) | M |
+| ✅ | PP-DEADLETTER-001 | `classify_dead_letter()` + `requeue_with_backoff()`; auto-reschedule transient failures — done (session 13) | S |
+| ✅ | PP-VERIFY-001 P1 | `tgw catalog-verify`; 9 rules; markdown checklist — done (session 13) | M |
+| ✅ | PP-MCP-001 | `tgw/mcp_server.py`; 9 tools; `tgw-mcp-server` console script; MCP registration = operator task — done (session 13) | M |
 
 ### Track 2 — Gemini CLI (large-context data + self-contained tasks)
 **Status 2026-06-06**: Gemini CLI now installed and available. Gemini is Dave's primary
@@ -287,7 +309,8 @@ Save result to `inbox/` for PM-intake.
 | Category-group quality review | `category-groups.json` + velocity-stats.json | Which groups have poor pricing data; suggest group splits or merges |
 | ebay_draft aspect fill audit | Grep of aspect fill rates per category | Which categories have worst specifics coverage; tuning recommendations |
 | PP-GLOBALS-001 analysis | Sample item JSONs (20 items, various categories) | Which fields are offer-invariant; proposed `globals` block schema |
-| **History consolidation** | Dave's conversation history with AI assistants | Organize + consolidate into structured reference; **plan scope with Dave before executing** (session 10 note) |
+| **AI conversation history consolidation** | Dave's conversation history with AI assistants (Claude, Perplexity sessions) | Organize + consolidate into structured reference; **plan scope with Dave before executing** (session 10 note) |
+| **Data/archive history consolidation** | `/opt/TGW/data/history/` contents, ItemArchive zip inventory, archive-ebay-index.json | Organize and index historical item data (zip archives, legacy records); similar to the archive index work already done; identify gaps and suggest integration points with current pipeline |
 
 ### Track 3 — Perplexity (live web research, cited sources)
 Research briefs in `docs/TGW-Plan-Vault/perplexity/`. Paste brief into Perplexity → save result as `.md` to `inbox/` for PM-intake.
@@ -388,6 +411,33 @@ updating credentials after approval.
 | `sell.stores.readonly`               | ❌    | medium   | Read eBay store category tree → PP-STORE-001                       |
 | `sell.reputation.readonly`           | ❌    | low      | Feedback score tracking and monitoring                             |
 | `commerce.notification.subscription` | ❌    | low      | REST-based webhook event subscriptions (future alt to Trading API) |
+
+---
+
+#### Priority 1b — TGW MCP Server registration (2 min)
+
+PP-MCP-001 code is **done** (`src/tgw/mcp_server.py`, 9 tools). Needs one manual step to activate
+in Claude Code because Claude cannot self-modify its own settings:
+
+1. Open `~/.claude/settings.json` in your editor
+2. Add the `"mcpServers"` block (merge with existing content):
+   ```json
+   {
+     "model": "opusplan",
+     "theme": "dark",
+     "mcpServers": {
+       "tgw": {
+         "command": "sudo",
+         "args": ["-u", "tgw", "/opt/TGW/.venvironments/tgw/bin/python", "-m", "tgw.mcp_server"],
+         "env": {}
+       }
+     }
+   }
+   ```
+3. Restart Claude Code — the `tgw_*` tools will appear in future sessions.
+
+**What this unlocks:** Claude can query live queue state, item data, health, and TODO items
+mid-session without shell escapes. Makes future debugging sessions significantly faster.
 
 ---
 
@@ -1683,15 +1733,19 @@ Currently there is no tool to enumerate violations at scale.
 - Prevents re-flagging manually confirmed edge cases (legacy items with intentional quirks)
 
 #### Phases
-| Phase | Scope |
-|-------|-------|
-| 1 | `tgw catalog-verify` command; 10–15 assumption rules; markdown report |
-| 2 | `catalog_verified` hall pass; clear-on-write in `_write_field`; `--force` to re-check |
-| 3 | Violation severity levels (critical/warning/info); fix-in-place for auto-fixable issues |
+| Phase | Scope | Status |
+|-------|-------|--------|
+| 1 | `tgw catalog-verify` command; 9 assumption rules; markdown report by severity | ✅ **DONE (session 13)** |
+| 2 | `catalog_verified` hall pass; clear-on-write in `_write_field`; `--force` to re-check | Next |
+| 3 | Fix-in-place for auto-fixable issues (stale TEMPLATE: prefix auto-strip, etc.) | Future |
 
-#### Delegate Phase 1 scaffold to Gemini
-Give Gemini: sample item JSON (10 items, various states) + rule list + CLI spec.
-Expect: Python scaffold for the rule checker + output formatter.
+#### Phase 1 implementation (done)
+9 rules implemented in `_verify_item()` + `cmd_catalog_verify()` in `api.py`:
+- **critical**: `no_title`, `stale_template_prefix`, `json_parse_error`
+- **warning**: `title_is_sku`, `title_too_short`, `no_location`, `no_photo`, `invalid_ebay_category`
+- **info**: `bad_verified_date`, `unknown_status`
+
+CLI flags: `--location`, `--limit`, `--severity`, `--output`, `--json`. 10 tests.
 
 ---
 
@@ -1723,26 +1777,39 @@ dead_letter count → run SQL to identify → categorize → manually cancel/req
 | `HardFailure: eBay rejected (25002/25021/25709)` | Needs code fix or item data fix |
 | `HardFailure: item specific value too long` | Needs item data fix |
 
-#### Design
-- Add a `classify_dead_letter(error_code, error_detail)` function in `worker_base.py`
-- Returns `('requeue', delay_seconds)` or `('dead_letter', None)` 
-- Workers call it in the `on_hard_failure` / `on_max_attempts` hook instead of always
-  dead-lettering
-- Emit `notify.warning(...)` on warn+requeue path so operator sees it without it blocking
-- `tgw health` shows warn+requeue separately from true dead_letter so dashboard stays clean
+#### Design — ✅ IMPLEMENTED (session 13)
 
-#### Implementation note
-`max_attempts` in the queue schema controls retry count. The issue is that some errors
-exhausting retries should flip to a "warn and requeue with longer delay" rather than terminal
-dead_letter. This requires either: (a) increasing `max_attempts` for recoverable errors, or
-(b) detecting the error class after exhaustion and re-enqueuing with a new job.
+**`classify_dead_letter(error_text: str) -> tuple[str, int]`** in `worker_base.py`:
+- Pattern matches error text (case-insensitive substring) against `_TRANSIENT_ERRORS` list
+- Returns `('requeue', delay_seconds)` or `('dead_letter', 0)`
+- `requeue_with_backoff(job_id, owner, delay, error)` in `state_machine.py`:
+  transitions running→retry_wait; resets `attempt_count=1`; sets `error_code='TRANSIENT'`
+- `QueueWorker._process()` intercepts exhausted-retry `Exception` path:
+  checks `attempt_count >= max_attempts`, classifies error, reschedules instead of dead-lettering
+
+**Transient patterns implemented:**
+| Pattern (substring, case-insensitive) | Delay |
+|---|---|
+| `token is expired` | 900s (15 min) |
+| `no ebay photo urls yet` | 600s (10 min) |
+| `directory not empty` | 30s |
+| `readtimeout` | 120s |
+| `lease_expired` | 120s |
+| `connectionerror` | 120s |
+
+**HardFailure** (raised explicitly) still goes directly to dead_letter — no change.
+`section not found in plan` (pm_intake) handled separately in pm_intake.py (warn+skip).
+
+**Remaining work:**
+- `tgw health` dead_letter breakdown: show TRANSIENT vs HARD_FAILURE error_code separately
+- `notify.warning()` emit on transient requeue path (currently only logs)
 
 ### PP-HINT-001 — AI hint + eBay enrichment (revisit required)
 - First iteration shipped 2026-06-03: `ai_hint` field, `tgw hint` command, hinted vision prompt
 - **Known gaps to address:**
   - `tgw requeue` bulk command: filter-based batch re-queue (e.g. "all items with photos but no title") for catalog maintenance — without triggering eBay listing pipeline
   - eBay Browse API enrichment in `ebay_draft`: search similar active listings by title, extract common aspects and category signal to supplement AI-generated specifics
-  - Full item history / hint trail: per-SKU log of identification rounds, hints used, AI vs human changes — feeds audit and tuning visibility
+  - ✅ Full item history / hint trail (2026-06-08): `identification_history` list in item JSON; `append_history_event()` in `items.py`; `ai_identify` + `hint_set` event types; `tgw hint-trail <sku>` CLI display
   - eBay Marketplace Insights scope (`buy.marketplace_insights`): contact eBay Developer Support directly (limited-release, no self-service); Finding API discontinued 2025 — not an option
   - Revision of already-identified items: `tgw hint --force` works but downstream ebay_draft/ebay_draft re-runs need to be aware of published state (don't auto-push changes to live listings)
   - Tuning: run difficult items through, observe results, adjust prompt and hint format
@@ -2027,7 +2094,9 @@ Expose TGW capabilities as an MCP (Model Context Protocol) server so Claude Code
 MCP clients) can query item data, trigger pipeline actions, and inspect system health as
 native tools — without subprocess calls or shell scripts.
 
-### MCP tools to expose (initial set)
+### Status: ✅ CODE DONE (session 13) — awaiting operator MCP registration
+
+### MCP tools implemented
 | Tool | Description |
 |------|-------------|
 | `tgw_get_item` | Fetch full item JSON for a SKU |
@@ -2037,22 +2106,37 @@ native tools — without subprocess calls or shell scripts.
 | `tgw_enqueue` | Enqueue a pipeline action for a SKU |
 | `tgw_get_todo` | List open TODO items for a given agent |
 | `tgw_add_suggest` | Append to SUGGESTIONS.md (same as `tgw suggest`) |
+| `tgw_hint_trail` | Return identification history for an item |
+| `tgw_catalog_verify` | Scan ItemData for assumption violations |
 
 ### Architecture
-- Python MCP server wrapping `tgw-http` REST endpoints (or calling state_machine/items directly)
-- Registered in `~/.claude/mcp_servers.json` (Claude Code MCP config)
-- Runs as a local process; no external network exposure needed
-- Reuses the same API key / auth as `tgw-http`
+- `src/tgw/mcp_server.py` — FastMCP server calling TGW internals directly
+- `tgw-mcp-server` console script in pyproject.toml
+- `mcp>=1.0` added to dependencies (installed 2026-06-08)
+- Runs as a local stdio process; no external network exposure
+- Config: import from TGW_CONFIG env (default: `/opt/TGW/config/tgw-api-config.json`)
 
 ### Value
 - Claude Code can query live queue state and item data mid-session without shell escapes
 - Enables Claude-native tooling loops: identify failures, re-enqueue, verify fix — all in one session
 - Sets foundation for other MCP clients (custom dashboard, VS Code extension)
 
+### Registration (operator action — see Track 4 Priority 1b)
+Add to `~/.claude/settings.json`:
+```json
+"mcpServers": {
+  "tgw": {
+    "command": "sudo",
+    "args": ["-u", "tgw", "/opt/TGW/.venvironments/tgw/bin/python", "-m", "tgw.mcp_server"],
+    "env": {}
+  }
+}
+```
+
 ### Dependencies
 - `tgw-http` FastAPI service ✅ running
-- MCP Python SDK (`mcp` package from Anthropic) — add to pyproject.toml
-- Claude Code MCP registration (user-level config)
+- `mcp` Python SDK ✅ installed 2026-06-08
+- Claude Code MCP registration ⬅ **operator action pending**
 
 ---
 

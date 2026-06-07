@@ -131,6 +131,10 @@ class ActionBody(BaseModel):
     options: Optional[Dict[str, Any]] = None
 
 
+class SetTemplateBody(BaseModel):
+    template_key: str
+
+
 # ---------------------------------------------------------------------------
 # GET /api/items — search catalog
 # ---------------------------------------------------------------------------
@@ -414,6 +418,291 @@ def list_locations() -> Dict[str, Any]:
         con.close()
 
     return {"ok": True, "locations": [r[0] for r in rows]}
+
+
+# ---------------------------------------------------------------------------
+# GET /api/category-groups — template list for intake form
+# ---------------------------------------------------------------------------
+
+@app.get("/api/category-groups", dependencies=[AUTH])
+def list_category_groups() -> Dict[str, Any]:
+    groups_path = _cfg.get("category_groups_path")
+    if not groups_path or not Path(groups_path).exists():
+        raise HTTPException(status_code=503, detail="category-groups.json not found")
+    raw = json.loads(Path(groups_path).read_text(encoding="utf-8"))
+    groups = raw.get("groups", {})
+    result = []
+    for key, grp in groups.items():
+        result.append({
+            "key":        key,
+            "name":       grp.get("name", key),
+            "size_class": grp.get("size_class", ""),
+            "ai_hint":    grp.get("ai_hint", ""),
+            "floor":      grp.get("pricing", {}).get("floor"),
+            "typical_used": grp.get("pricing", {}).get("typical_used"),
+        })
+    return {"ok": True, "count": len(result), "groups": result}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/items/{sku}/set-template — apply category-group template
+# ---------------------------------------------------------------------------
+
+@app.post("/api/items/{sku}/set-template", dependencies=[AUTH])
+def set_item_template(sku: str, body: SetTemplateBody) -> Dict[str, Any]:
+    groups_path = _cfg.get("category_groups_path")
+    if not groups_path or not Path(groups_path).exists():
+        raise HTTPException(status_code=503, detail="category-groups.json not found")
+
+    raw = json.loads(Path(groups_path).read_text(encoding="utf-8"))
+    grp = raw.get("groups", {}).get(body.template_key)
+    if grp is None:
+        raise HTTPException(status_code=400, detail=f"unknown template_key: {body.template_key!r}")
+
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+
+    doc = load_item_doc(json_path)
+
+    # Build template fields (same logic as tgw set-template CLI)
+    fields: Dict[str, Any] = {"category_group": body.template_key}
+    if grp.get("size_class"):
+        fields["size_class"] = grp["size_class"]
+    group_hint = grp.get("ai_hint", "").strip()
+    if group_hint:
+        existing_hint = doc.get("ai_hint", "").strip()
+        if existing_hint and existing_hint != group_hint:
+            fields["ai_hint"] = f"{group_hint}; {existing_hint}"
+        else:
+            fields["ai_hint"] = group_hint
+    cats = grp.get("ebay_categories", [])
+    if cats and not doc.get("ebay_category_id"):
+        fields["ebay_category_id"] = cats[0]
+
+    doc.update(fields)
+    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+
+    try:
+        state_machine.enqueue_job(
+            queue_name="catalog_rebuild",
+            payload={"reason": f"set_template:{sku}"},
+            dedupe_key="catalog_rebuild:pending",
+            not_before=time.time() + 30,
+            max_attempts=3,
+        )
+    except Exception:
+        pass
+
+    return {"ok": True, "sku": sku, "template_key": body.template_key,
+            "applied": fields, "group_name": grp.get("name", body.template_key)}
+
+
+# ---------------------------------------------------------------------------
+# GET /api/items/{sku}/hint-trail — identification history
+# ---------------------------------------------------------------------------
+
+@app.get("/api/items/{sku}/hint-trail", dependencies=[AUTH])
+def get_hint_trail(sku: str) -> Dict[str, Any]:
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+    doc = load_item_doc(json_path)
+    history = doc.get("identification_history", [])
+    return {"ok": True, "sku": sku, "count": len(history), "history": history}
+
+
+# ---------------------------------------------------------------------------
+# GET /form/intake/{sku} — mobile intake form (HTML)
+# ---------------------------------------------------------------------------
+
+_INTAKE_FORM_CSS = """
+body{font-family:system-ui,sans-serif;margin:0;padding:8px;background:#111;color:#eee}
+h2{font-size:1.1em;margin:4px 0 10px}
+.sku{font-size:.75em;color:#888;margin-bottom:8px}
+label{display:block;font-size:.85em;color:#aaa;margin:10px 0 3px}
+input,select,textarea{width:100%;box-sizing:border-box;padding:10px;font-size:1em;
+  background:#222;color:#eee;border:1px solid #444;border-radius:6px}
+textarea{height:60px;resize:vertical}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0}
+.chip{padding:8px 12px;border-radius:20px;background:#2a2a2a;border:2px solid #444;
+  font-size:.82em;cursor:pointer;transition:background .15s,border-color .15s}
+.chip:hover{background:#333;border-color:#666}
+.chip.active{background:#1a4a8a;border-color:#4a8ade;color:#fff}
+.btn{display:block;width:100%;padding:14px;margin-top:14px;font-size:1.1em;
+  background:#1a6030;color:#fff;border:none;border-radius:8px;cursor:pointer}
+.btn:active{background:#155028}
+.msg{margin-top:10px;padding:8px;border-radius:6px;font-size:.9em;display:none}
+.msg.ok{background:#1a4a1a;color:#7f7;display:block}
+.msg.err{background:#4a1a1a;color:#f77;display:block}
+.field-row{display:flex;gap:8px}
+.field-row>*{flex:1}
+"""
+
+_INTAKE_FORM_HTML = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Intake: {sku_short}</title>
+<style>{css}</style>
+</head>
+<body>
+<h2>Intake Form</h2>
+<div class="sku">{sku}</div>
+
+<label>Template</label>
+<div class="chips" id="chips">{chips_html}</div>
+<input type="hidden" id="tpl_key" value="{current_template}">
+
+<div class="field-row">
+  <div>
+    <label>Weight (oz)</label>
+    <input type="number" id="weight_oz" step="0.1" min="0" placeholder="e.g. 4.5"
+           value="{weight_oz}">
+  </div>
+  <div>
+    <label>Barcode</label>
+    <input type="text" id="barcode" inputmode="numeric" placeholder="UPC / EAN / ISBN"
+           value="{barcode}">
+  </div>
+</div>
+
+<label>AI Hint</label>
+<input type="text" id="ai_hint" placeholder="brief item description for AI"
+       value="{ai_hint}">
+
+<label>Condition</label>
+<select id="condition">
+  {condition_options}
+</select>
+
+<button class="btn" onclick="submitForm()">Save</button>
+<div class="msg" id="msg"></div>
+
+<script>
+const SKU = {sku_json};
+const API = '/api/items/' + SKU;
+const AUTH = 'Bearer {api_key}';
+
+document.querySelectorAll('.chip').forEach(c => {{
+  c.addEventListener('click', () => {{
+    document.querySelectorAll('.chip').forEach(x => x.classList.remove('active'));
+    c.classList.add('active');
+    document.getElementById('tpl_key').value = c.dataset.key;
+  }});
+}});
+
+async function submitForm() {{
+  const msg = document.getElementById('msg');
+  msg.className = 'msg';
+  msg.textContent = '';
+
+  const tpl = document.getElementById('tpl_key').value;
+  const w   = document.getElementById('weight_oz').value;
+  const bc  = document.getElementById('barcode').value.trim();
+  const hnt = document.getElementById('ai_hint').value.trim();
+  const cnd = document.getElementById('condition').value;
+
+  // Apply template first if changed
+  if (tpl && tpl !== {current_template_json}) {{
+    const r = await fetch('/api/items/' + SKU + '/set-template', {{
+      method: 'POST',
+      headers: {{'Authorization': AUTH, 'Content-Type': 'application/json'}},
+      body: JSON.stringify({{template_key: tpl}})
+    }});
+    if (!r.ok) {{
+      const e = await r.json().catch(() => ({{}}));
+      msg.className = 'msg err';
+      msg.textContent = 'Template error: ' + (e.detail || r.status);
+      return;
+    }}
+  }}
+
+  // Patch remaining fields
+  const fields = {{}};
+  if (w)   fields.weight_oz = parseFloat(w);
+  if (bc)  fields.barcode = bc;
+  if (hnt) fields.ai_hint = hnt;
+  if (cnd) fields.condition = cnd;
+
+  if (Object.keys(fields).length > 0) {{
+    const r = await fetch(API, {{
+      method: 'PATCH',
+      headers: {{'Authorization': AUTH, 'Content-Type': 'application/json'}},
+      body: JSON.stringify({{fields}})
+    }});
+    if (!r.ok) {{
+      const e = await r.json().catch(() => ({{}}));
+      msg.className = 'msg err';
+      msg.textContent = 'Save error: ' + (e.detail || r.status);
+      return;
+    }}
+  }}
+
+  msg.className = 'msg ok';
+  msg.textContent = 'Saved ✔';
+}}
+</script>
+</body>
+</html>
+"""
+
+_CONDITIONS = ["", "New", "Like New", "Very Good", "Good", "Acceptable"]
+
+
+@app.get("/form/intake/{sku}")
+def intake_form(sku: str, request: Request):
+    """Mobile-friendly intake form — no Bearer auth, relies on network trust."""
+    from fastapi.responses import HTMLResponse
+
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        return HTMLResponse(f"<h2>SKU not found: {sku}</h2>", status_code=404)
+
+    doc = load_item_doc(json_path)
+
+    groups_path = _cfg.get("category_groups_path")
+    groups: Dict[str, Any] = {}
+    if groups_path and Path(groups_path).exists():
+        raw = json.loads(Path(groups_path).read_text(encoding="utf-8"))
+        groups = raw.get("groups", {})
+
+    current_template = doc.get("category_group", "")
+
+    chips_html = ""
+    for key, grp in groups.items():
+        active = "active" if key == current_template else ""
+        name = grp.get("name", key)
+        chips_html += f'<button class="chip {active}" data-key="{key}">{name}</button>'
+
+    cond_val = doc.get("condition", "")
+    cond_opts = ""
+    for c in _CONDITIONS:
+        sel = 'selected' if c == cond_val else ''
+        cond_opts += f'<option value="{c}" {sel}>{c if c else "— not set —"}</option>'
+
+    weight = doc.get("weight_oz", "")
+    barcode = doc.get("barcode", doc.get("upc", ""))
+    ai_hint = doc.get("ai_hint", "")
+    sku_short = sku[-9:]
+
+    html = _INTAKE_FORM_HTML.format(
+        sku=sku,
+        sku_short=sku_short,
+        sku_json=json.dumps(sku),
+        css=_INTAKE_FORM_CSS,
+        chips_html=chips_html,
+        current_template=current_template,
+        current_template_json=json.dumps(current_template),
+        weight_oz=weight,
+        barcode=barcode,
+        ai_hint=ai_hint,
+        condition_options=cond_opts,
+        api_key=_api_key,
+    )
+    return HTMLResponse(html)
 
 
 # ---------------------------------------------------------------------------

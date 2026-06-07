@@ -10,6 +10,7 @@ All functions return {'ok': True/False, ...} dicts.
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import tempfile
@@ -35,6 +36,18 @@ def atomic_write_json(path: Path, data: Any, pretty: bool = True) -> None:
         tmp.write('\n')
         tmp_path = Path(tmp.name)
     os.replace(tmp_path, path)
+
+
+# ---------------------------------------------------------------------------
+# Identification history trail
+# ---------------------------------------------------------------------------
+
+def append_history_event(item: Dict[str, Any], event: Dict[str, Any]) -> None:
+    """Append one event to item['identification_history'], adding ISO ts if absent."""
+    if 'ts' not in event:
+        event = {'ts': datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%dT%H:%M:%SZ'), **event}
+    history: List[Dict[str, Any]] = item.setdefault('identification_history', [])
+    history.append(event)
 
 
 # ---------------------------------------------------------------------------

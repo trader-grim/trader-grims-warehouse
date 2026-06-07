@@ -25,7 +25,7 @@ import psycopg2.errors
 import tgw.logging as tgw_logging
 from tgw.apis.ollama import extract_json, is_available
 from tgw.config import DEFAULT_CONFIG, load_config
-from tgw.items import atomic_write_json
+from tgw.items import append_history_event, atomic_write_json
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
@@ -262,6 +262,29 @@ class AIIdentifyWorker(QueueWorker):
         item['ai_identified'] = True
         item.pop('ai_reidentify', None)   # clear the force flag
         # product_lookup already written above if lookup succeeded
+
+        # Record identification round in history trail
+        prior_rounds = sum(
+            1 for e in item.get('identification_history', []) if e.get('event') == 'ai_identify'
+        )
+        if product_context:
+            prompt_type = 'enriched'
+        elif hint:
+            prompt_type = 'hinted'
+        else:
+            prompt_type = 'plain'
+        append_history_event(item, {
+            'event':           'ai_identify',
+            'round':           prior_rounds + 1,
+            'model':           VISION_MODEL,
+            'prompt_type':     prompt_type,
+            'hint':            hint or None,
+            'lookup_source':   item.get('product_lookup', {}).get('source') if product_context else None,
+            'title':           title,
+            'category':        category,
+            'condition':       condition,
+            'ebay_category_id': ebay_category_id,
+        })
 
         atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
 
