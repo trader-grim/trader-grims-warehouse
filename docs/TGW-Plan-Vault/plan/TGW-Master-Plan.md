@@ -367,6 +367,27 @@ offline (pure functions, mocked tests, or local-only data); none require the dea
   (the wired `weight_oz` push, sold-poll Tier 1, webhook registration, strikethrough go-live).
   It does **not** block writing/unit-testing any ready slice. Token restore is operator Track 4.
 
+**Execution status (session 15, 2026-06-07): Tier A + Tier B COMPLETE (ranks 1–6).**
+Suite 77 → **184 passing**, ruff clean. Uncommitted, pending Dave's review:
+- ✅ R1 PP-GLOBALS-001 — `weight_oz` → `packageWeightAndSize` in `sync.py` + 7 tests
+  (`test_ebay_sync.py`). ⚠️ restart `ebay_stage`/`ebay_publish` to pick up on deploy.
+- ✅ R2 PP-SOLD-001 — 20 tests (`test_sold_recon.py`); accept-when-unsigned encoded as deliberate.
+- ✅ R3 PP-MCP-001 — 19 tests (`test_mcp_server.py`) incl. 10-tool drift guard.
+- ✅ R4 PP-INTAKE-001 — 16 tests (`test_set_template.py`) + `fulfillment_policy_id` claim struck above.
+- ✅ R5 PP-EDITOR-001 — 30 tests (`test_http_server.py`, FastAPI TestClient; PATCH/merge/auth/rebuild).
+- ✅ R6 PP-STRIKE-001 — 18 tests (`test_strikethrough.py`); MSRP gate + offer-body gate. Config flag stays off.
+
+**Tier C COMPLETE (ranks 7–14)** — suite **184 → 234 passing**, ruff clean, all CLI parses + bash completion added. Uncommitted, pending review:
+- ✅ R7 PP-FULFILLMENT-001 — real `tgw picklist` (location-sorted) + `_item_ebay_id` + 4 tests (`test_picklist.py`). Plan landmine retired.
+- ✅ R8 PP-HINT-001 — per-item `shipping_profile`: `tgw setshipping` + `_resolve_fulfillment_id` precedence (item > category > size_class > global).
+- ✅ R9 PP-STORAGE-001 — `fulfillment_policy_by_size_class` wired into the same resolver; 11 tests (`test_listing_policies.py`). ⚠️ `ebay_sku_migrate` has its own policy copy — left untouched (actively migrating ~8,350 listings); parity is a follow-up.
+- ✅ R10 PP-LOOKUP-001 — `apis/lookup/pricecharting.py` + dispatcher routing (strictly additive, fires only when Tier-1 missed) + first lookup tests, 9 (`test_lookup.py`). ⚠️ routing is on the `ai_identify` hot path → restart that worker on deploy.
+- ✅ R11 PP-CAPTURE-001 — `tgw quiet-check` + `state_machine.active_depths()`; 5 tests (`test_quiet_check.py`).
+- ✅ R12 PP-PERP-AUTO-001 — `tgw perp-run <BRIEF-ID> [--list]` + `## Prompt` parser; 9 tests (`test_perp_run.py`).
+- ✅ R13 PP-WHISPER-001 — `tgw whispertosuggest <wav>` (ffmpeg→whisper-cli→cmd_suggest), subprocess-mocked; 6 tests. Model file still operator-supplied.
+- ✅ R14 PP-CLAUDE-HELP-001 — `CLAUDE-TROUBLESHOOT.md` + `tgw claude-help [issue] [--worker] [--launch]`; 6 tests.
+Next available: Tier D (ranks 15–18) — infra activation / diagnostics.
+
 #### Tier A — XS, highest value-per-risk (do first)
 | Rank | PP | Slice | Size |
 |------|----|-------|------|
@@ -1691,7 +1712,7 @@ Already operational; PP-INTAKE-001 extends, does not replace.
 xmouse button press
     → SSH → tgw set-template <group_key>
         → writes group defaults to CurrentItem JSON
-            (size_class, ai_hint, category_group, fulfillment_policy_id)
+            (size_class, ai_hint, category_group, ebay_category_id)
         → pushes "SETTEMPLATE:<group_name>" via KDE Connect clipboard relay
             → camera app HUD updates to show active template
         → pushes "COMMAND:DATA:size_class=<val>" etc. if fine-tuning needed
@@ -1700,7 +1721,7 @@ xmouse button press
     → suggest_price gets category_id → group floor/typical → priced even with thin comps
 ```
 
-#### `tgw set-template` — the new command to build
+#### `tgw set-template` — ✅ BUILT (CLI session 8, web form session 11)
 ```bash
 tgw set-template <group_key> [sku]           # apply group defaults to CurrentItem or given SKU
 tgw set-template --list                      # show all available templates (from category-groups.json)
@@ -1711,7 +1732,10 @@ What it writes to item JSON:
 - `ai_hint`: group.ai_hint (prepended, preserves existing if any)
 - `size_class`: group.size_class
 - `ebay_category_id`: first category in group.ebay_categories (if not already set)
-- `fulfillment_policy_id`: derived from size_class → config lookup
+- ~~`fulfillment_policy_id`: derived from size_class → config lookup~~ — **NOT implemented**
+  (session 15 audit): the template never writes a fulfillment policy. The cleaner per-item
+  mechanism is PP-HINT-001 `shipping_profile` (round-2 rank 8) + PP-STORAGE-001
+  `size_class → fulfillment_policy_by_size_class` resolver (round-2 rank 9).
 
 xmouse maps each group to a dedicated button. 24 groups = 24 one-press intake macros.
 

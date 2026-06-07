@@ -131,17 +131,49 @@ def _get_merchant_location(cfg: Dict[str, Any]) -> str:
 # Listing policy helpers (config-first, API fallback)
 # ---------------------------------------------------------------------------
 
-def _get_listing_policies(cfg: Dict[str, Any], ebay_category_id: str) -> Dict[str, str]:
+def _resolve_fulfillment_id(cfg: Dict[str, Any], ebay_category_id: str,
+                            shipping_profile: Optional[str] = None,
+                            size_class: Optional[str] = None) -> Optional[str]:
+    """
+    Resolve the fulfillment (shipping) policy id by precedence:
+
+      1. per-item shipping_profile  (PP-HINT-001) — a name in
+         ``fulfillment_policy_by_profile``, or a raw policy id if not mapped
+      2. per-category override       — ``fulfillment_policy_by_category``
+      3. per-size_class override     (PP-STORAGE-001) — ``fulfillment_policy_by_size_class``
+      4. global default              — ``fulfillment_policy_id``
+
+    Returns None if nothing resolves (caller then falls back to the account API).
+    """
+    if shipping_profile:
+        by_profile = cfg.get('fulfillment_policy_by_profile', {})
+        return by_profile.get(str(shipping_profile), str(shipping_profile))
+
+    by_cat = cfg.get('fulfillment_policy_by_category', {})
+    if str(ebay_category_id) in by_cat:
+        return by_cat[str(ebay_category_id)]
+
+    if size_class:
+        by_size = cfg.get('fulfillment_policy_by_size_class', {})
+        if str(size_class) in by_size:
+            return by_size[str(size_class)]
+
+    return cfg.get('fulfillment_policy_id')
+
+
+def _get_listing_policies(cfg: Dict[str, Any], ebay_category_id: str, *,
+                          shipping_profile: Optional[str] = None,
+                          size_class: Optional[str] = None) -> Dict[str, str]:
     """
     Return {fulfillmentPolicyId, paymentPolicyId, returnPolicyId} for an offer.
 
-    Prefers explicit config values so per-category fulfillment overrides work.
+    Prefers explicit config values so per-item / per-category / per-size_class
+    fulfillment overrides work (see _resolve_fulfillment_id for precedence).
     Falls back to eBay account first-policy lookup when config is incomplete.
     """
-    fulf_id = (
-        cfg.get('fulfillment_policy_by_category', {}).get(str(ebay_category_id))
-        or cfg.get('fulfillment_policy_id')
-    )
+    fulf_id = _resolve_fulfillment_id(cfg, ebay_category_id,
+                                      shipping_profile=shipping_profile,
+                                      size_class=size_class)
     pay_id = cfg.get('payment_policy_id')
     ret_id = cfg.get('return_policy_id')
 
@@ -257,7 +289,13 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
         product_block['epid'] = epid
 
     category_id_str = str(draft.get('category_id', ''))
-    policies     = _get_listing_policies(cfg, category_id_str)
+    # PP-HINT-001 / PP-STORAGE-001: a per-item shipping_profile or the item's
+    # size_class can override the per-category fulfillment policy.
+    policies     = _get_listing_policies(
+        cfg, category_id_str,
+        shipping_profile=item.get('shipping_profile'),
+        size_class=item.get('size_class'),
+    )
     location_key = _get_merchant_location(cfg)
     qty          = draft.get('quantity', 1)
 
@@ -277,6 +315,22 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
             },
         },
     }
+
+    # PP-GLOBALS-001: pass the operator-captured shipping weight through to the
+    # Inventory API so calculated-shipping buyers get accurate rates. The intake
+    # web form captures weight_oz but it was previously dropped on the floor.
+    # eBay rejects weight.value == 0, so guard against zero/None/non-numeric
+    # (mirrors ebay_sku_migrate.py, which pops a zero-weight block before re-PUT).
+    weight_oz = item.get('weight_oz')
+    if weight_oz not in (None, ''):
+        try:
+            weight_val = float(weight_oz)
+        except (TypeError, ValueError):
+            weight_val = 0.0
+        if weight_val > 0:
+            inv_body['packageWeightAndSize'] = {
+                'weight': {'value': weight_val, 'unit': 'OUNCE'},
+            }
 
     pricing_summary: Dict[str, Any] = {
         'price': {'currency': 'USD', 'value': str(price)},

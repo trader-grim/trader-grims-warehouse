@@ -20,6 +20,7 @@ _tgw_subcommands=(
     catalog-verify
     category-groups
     catlocmvall
+    claude-help
     data-scrub
     dead-letter
     ebay-pull
@@ -36,8 +37,11 @@ _tgw_subcommands=(
     lookup
     mvitems
     note
+    perp-run
+    picklist
     publish
     quality
+    quiet-check
     requeue
     resolve
     resolve-legacy
@@ -45,6 +49,7 @@ _tgw_subcommands=(
     seo-audit
     serve
     set-template
+    setshipping
     setup-ebay-hooks
     sku-migrate
     staged
@@ -60,11 +65,12 @@ _tgw_subcommands=(
     update-where
     velocity-report
     verifiedupdate
+    whispertosuggest
 )
 
 # Subcommands that take a SKU as their first positional arg
 _tgw_sku_cmds=(get hint hint-trail lookup quality set-template titleupdate verifiedupdate
-               locationupdate statusupdate update publish)
+               locationupdate statusupdate update publish setshipping)
 
 # Subcommands that take multiple SKUs
 _tgw_multi_sku_cmds=(publish quality statusupdate mvitems)

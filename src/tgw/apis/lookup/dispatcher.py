@@ -11,6 +11,7 @@ Routing:
   upc/ean (default)          → upcitemdb → Go-UPC
   game category + title hint → IGDB (if key present)
   tcg category + title hint  → JustTCG
+  game/tcg, still unresolved → PriceCharting (if key present) — fills msrp/market value
 
 Cache: result stored in item['product_lookup']; re-fetched only if absent or > 30 days old.
 Call site is responsible for writing the result back to item JSON.
@@ -21,7 +22,16 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from . import discogs, go_upc, igdb, justtcg, open_food_facts, open_library, upcitemdb
+from . import (
+    discogs,
+    go_upc,
+    igdb,
+    justtcg,
+    open_food_facts,
+    open_library,
+    pricecharting,
+    upcitemdb,
+)
 from .base import LookupResult, barcode_from_item
 
 log = logging.getLogger(__name__)
@@ -110,6 +120,11 @@ def lookup_product(item: Dict[str, Any], cfg: Dict[str, Any]) -> Optional[Lookup
         result = igdb.lookup(title, cfg)
     if result is None and is_tcg and title:
         result = justtcg.lookup(title, cfg)
+    # PP-LOOKUP-001 Tier 2: PriceCharting fills market value (msrp) for the
+    # games/cards verticals. Strictly additive — only fires when nothing else
+    # resolved and a token is present, so it never regresses Tier 1.
+    if result is None and (is_game or is_tcg) and title:
+        result = pricecharting.lookup(title, cfg)
 
     if result:
         log.info('lookup_product: %s resolved via %s — %r',

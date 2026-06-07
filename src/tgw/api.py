@@ -88,6 +88,51 @@ def list_items(cfg: Dict[str, Any], search: str = '', location: str = '',
     return {'ok': True, 'count': len(out), 'items': out}
 
 
+def _item_ebay_id(item: Dict[str, Any]) -> str:
+    """Best eBay identifier for an item: pipeline listing_id, else legacy Item number."""
+    lid = item.get('ebay_listing', {}).get('listing_id') if isinstance(
+        item.get('ebay_listing'), dict) else None
+    return str(lid or item.get('Item number') or '').strip()
+
+
+def cmd_picklist(cfg: Dict[str, Any], *, status: str = '', location: str = '',
+                 search: str = '') -> Dict[str, Any]:
+    """
+    Location-sorted picking list (PP-FULFILLMENT-001).
+
+    Emits a plain-text list of items grouped and sorted by warehouse location
+    (unlocated items last), each line: SKU, title, eBay id. Reads via the
+    token-free list_items() helper — no eBay API call. This is the data spine
+    later hardware features (PDF, QR scan-to-confirm, label printing) build on.
+    """
+    listed = list_items(cfg, search=search, location=location, status=status)
+    rows: List[Dict[str, str]] = []
+    for item in listed['items']:
+        rows.append({
+            'location': str(item.get('location', '') or '').strip(),
+            'sku':      str(item.get('sku', '')),
+            'title':    str(item.get('title', '') or '').strip(),
+            'ebay_id':  _item_ebay_id(item),
+        })
+    # Sort by location (unlocated last), then SKU.
+    rows.sort(key=lambda r: (r['location'] == '', r['location'], r['sku']))
+
+    lines: List[str] = []
+    current = None
+    for r in rows:
+        loc = r['location'] or '(unlocated)'
+        if loc != current:
+            lines.append('')
+            lines.append(f'== {loc} ==')
+            current = loc
+        eid = f'  [{r["ebay_id"]}]' if r['ebay_id'] else ''
+        lines.append(f'  {r["sku"]}  {r["title"][:60]}{eid}')
+    print('\n'.join(lines).strip())
+
+    n_locs = len({r['location'] for r in rows})
+    return {'ok': True, 'count': len(rows), 'locations': n_locs, 'picklist': rows}
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -166,6 +211,44 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('value', help='new status value (e.g. "In Stock", "Sold")')
     p.add_argument('skus', nargs='+', help='one or more SKUs to update')
     p.add_argument('--check-only', action='store_true', help='validate without writing')
+
+    p = sub.add_parser('setshipping',
+                       help='set per-item shipping_profile override (PP-HINT-001)')
+    p.add_argument('sku')
+    p.add_argument('value', help='profile name (mapped via fulfillment_policy_by_profile) '
+                                 'or a raw fulfillment policy id')
+    p.add_argument('--check-only', action='store_true', help='validate without writing')
+
+    p = sub.add_parser('picklist',
+                       help='location-sorted picking list (PP-FULFILLMENT-001)')
+    p.add_argument('--status', default='', help='filter by status')
+    p.add_argument('--location', default='', help='filter by location')
+    p.add_argument('--search', default='', help='text filter across fields')
+
+    p = sub.add_parser('quiet-check',
+                       help='when the pipeline is idle, surface pending suggestions/TODOs (PP-CAPTURE-001)')
+    p.add_argument('--notify', action='store_true',
+                   help='also send a desktop/webhook notification when idle')
+
+    p = sub.add_parser('perp-run',
+                       help='load a Perplexity research brief prompt to clipboard (PP-PERP-AUTO-001)')
+    p.add_argument('brief_id', nargs='?',
+                   help='brief id or substring (e.g. PERPLEXITY-001); omit to list')
+    p.add_argument('--list', dest='list_briefs', action='store_true',
+                   help='list available briefs')
+
+    p = sub.add_parser('whispertosuggest',
+                       help='transcribe a WAV via whisper-cli and file it as a suggestion (PP-WHISPER-001)')
+    p.add_argument('wavfile', help='path to an audio file')
+    p.add_argument('--model', default=None,
+                   help='path to ggml whisper model (default from config)')
+
+    p = sub.add_parser('claude-help',
+                       help='launch a Claude troubleshooting session with TGW context (PP-CLAUDE-HELP-001)')
+    p.add_argument('issue', nargs='?', default='', help='describe the problem (optional)')
+    p.add_argument('--worker', default='', help='focus on a specific worker')
+    p.add_argument('--launch', action='store_true',
+                   help='exec claude now (default: print the command)')
 
     p = sub.add_parser('catlocmvall',
                        help='(deprecated) move all items from one location to another — use mvitems')
@@ -1677,6 +1760,218 @@ def cmd_suggest_edit(cfg: Dict[str, Any], pending_only: bool = False) -> Dict[st
     return {'ok': True}  # unreachable if execlp succeeds
 
 
+def cmd_quiet_check(cfg: Dict[str, Any], *, notify_on_idle: bool = False) -> Dict[str, Any]:
+    """
+    'Workers finished — what next?' nudge (PP-CAPTURE-001).
+
+    When the pipeline is idle (no active jobs in any queue), surface the count of
+    pending suggestions ([ ] entries in SUGGESTIONS.md) and open operator TODOs so
+    ideas don't escape into ephemeral chat. Read-only over PostgreSQL + the vault.
+    """
+    import re
+
+    from .queue import state_machine
+
+    state_machine.init(cfg['postgres_dsn'])
+    depths = state_machine.active_depths()
+    active_total = sum(depths.values())
+    quiet = active_total == 0
+
+    pending_suggestions = 0
+    sfile = cfg['plan_vault_path'] / 'suggestions' / 'SUGGESTIONS.md'
+    if sfile.exists():
+        pending_suggestions = sum(
+            1 for ln in sfile.read_text(encoding='utf-8').splitlines()
+            if re.match(r'\s*-\s*\[ \]', ln)
+        )
+
+    open_todos = 0
+    try:
+        from . import todo
+        open_todos = len(todo.todo_list())
+    except Exception:
+        open_todos = 0  # DB unavailable — degrade gracefully
+
+    result = {
+        'ok':                  True,
+        'quiet':               quiet,
+        'active_total':        active_total,
+        'active_by_queue':     depths,
+        'pending_suggestions': pending_suggestions,
+        'open_todos':          open_todos,
+    }
+
+    if quiet:
+        msg = (f'Pipeline idle — {pending_suggestions} pending suggestion(s), '
+               f'{open_todos} open TODO(s).')
+        print(msg)
+        result['message'] = msg
+        if notify_on_idle:
+            try:
+                from .notify import notify
+                notify('quiet-check', msg, level='info')
+            except Exception:
+                pass
+    else:
+        print(f'Pipeline busy — {active_total} active job(s) across '
+              f'{len(depths)} queue(s).')
+
+    return result
+
+
+def _parse_prompt_section(text: str) -> str:
+    """Extract the body under a `## Prompt` heading, up to the next `##`/`---`."""
+    import re
+    out: List[str] = []
+    capture = False
+    for ln in text.splitlines():
+        if not capture:
+            if re.match(r'^##\s+Prompt\b', ln, re.IGNORECASE):
+                capture = True
+            continue
+        if re.match(r'^##\s', ln) or re.match(r'^---\s*$', ln):
+            break
+        out.append(ln)
+    return '\n'.join(out).strip()
+
+
+def cmd_perp_run(cfg: Dict[str, Any], brief_id: Optional[str] = None,
+                 list_briefs: bool = False) -> Dict[str, Any]:
+    """
+    Load a Perplexity research brief's prompt to the clipboard (PP-PERP-AUTO-001).
+
+    Cuts the mechanical open-brief / find-prompt / copy step to one command for
+    the existing research briefs under the vault's perplexity/ dir. Pushes the
+    `## Prompt` body to the clipboard (degrades to stdout when no clipboard tool).
+    """
+    perp_dir = cfg['plan_vault_path'] / 'perplexity'
+    if not perp_dir.exists():
+        return {'ok': False, 'error': f'perplexity dir not found: {perp_dir}'}
+
+    briefs = sorted(perp_dir.glob('*.md'))
+
+    if list_briefs or not brief_id:
+        ids = [p.stem for p in briefs]
+        for i in ids:
+            print(i)
+        return {'ok': True, 'count': len(ids), 'briefs': ids}
+
+    needle = brief_id.lower()
+    matches = [p for p in briefs if needle in p.stem.lower()]
+    if not matches:
+        return {'ok': False, 'error': f'no brief matching {brief_id!r}'}
+    if len(matches) > 1:
+        return {'ok': False, 'error': f'ambiguous {brief_id!r}',
+                'matches': [p.stem for p in matches]}
+
+    brief = matches[0]
+    prompt = _parse_prompt_section(brief.read_text(encoding='utf-8'))
+    if not prompt:
+        return {'ok': False, 'error': f'no "## Prompt" section in {brief.name}'}
+
+    clipboard_ok = _push_clipboard(prompt)
+    print(prompt)
+    return {'ok': True, 'brief': brief.stem, 'clipboard': clipboard_ok,
+            'prompt_chars': len(prompt)}
+
+
+def _clean_transcript(raw: str) -> str:
+    """Collapse whisper-cli stdout into a single suggestion line."""
+    import re
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    return re.sub(r'\s+', ' ', ' '.join(lines)).strip()
+
+
+def cmd_whisper_to_suggest(cfg: Dict[str, Any], wavfile: str,
+                           model: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Voice → suggestion (PP-WHISPER-001).
+
+    Normalize an audio file to 16 kHz mono via ffmpeg, transcribe it with
+    whisper-cli, and file the transcript through the existing cmd_suggest sink —
+    zero-friction voice capture during hands-full item processing. Fails
+    gracefully (clear message) if the ggml model is not present on disk.
+    """
+    import subprocess
+    import tempfile
+
+    wav = Path(wavfile)
+    if not wav.exists():
+        return {'ok': False, 'error': f'audio file not found: {wavfile}'}
+
+    whisper_bin = cfg.get('whisper_bin', '/usr/local/bin/whisper-cli')
+    model_path = Path(model or cfg.get('whisper_model',
+                                       '/opt/TGW/models/ggml-base.en.bin'))
+    if not model_path.exists():
+        return {'ok': False,
+                'error': f'whisper model not found: {model_path} — operator must download it'}
+
+    with tempfile.TemporaryDirectory() as td:
+        norm = Path(td) / 'norm.wav'
+        try:
+            subprocess.run(
+                ['ffmpeg', '-y', '-i', str(wav), '-ar', '16000', '-ac', '1', str(norm)],
+                check=True, capture_output=True,
+            )
+        except Exception as exc:
+            return {'ok': False, 'error': f'ffmpeg normalize failed: {exc}'}
+        try:
+            proc = subprocess.run(
+                [whisper_bin, '-m', str(model_path), '-f', str(norm), '-nt'],
+                check=True, capture_output=True, text=True,
+            )
+        except Exception as exc:
+            return {'ok': False, 'error': f'whisper-cli failed: {exc}'}
+
+    transcript = _clean_transcript(proc.stdout or '')
+    if not transcript:
+        return {'ok': False, 'error': 'empty transcript'}
+
+    result = cmd_suggest(cfg, transcript)
+    result['transcript'] = transcript
+    return result
+
+
+def cmd_claude_help(cfg: Dict[str, Any], *, issue: str = '', worker: str = '',
+                    launch: bool = False) -> Dict[str, Any]:
+    """
+    Launch (or print) a Claude troubleshooting session preloaded with TGW context
+    (PP-CLAUDE-HELP-001).
+
+    Builds a `claude --append-system-prompt-file CLAUDE-TROUBLESHOOT.md` invocation
+    with the repo added as context and the operator's issue/worker as initial
+    prompt. Prints the ready-to-run command by default; --launch execs it.
+    """
+    import shlex
+    import shutil
+
+    root = Path(__file__).resolve().parents[2]
+    doc = root / 'CLAUDE-TROUBLESHOOT.md'
+    if not doc.exists():
+        return {'ok': False, 'error': f'troubleshoot doc not found: {doc}'}
+
+    claude_bin = shutil.which('claude') or str(Path.home() / '.local/bin/claude')
+    cmd = [claude_bin, '--append-system-prompt-file', str(doc), '--add-dir', str(root)]
+
+    ctx = []
+    if worker:
+        ctx.append(f'Focus on the {worker} worker.')
+    if issue:
+        ctx.append(issue)
+    initial = ' '.join(ctx).strip()
+    if initial:
+        cmd.append(initial)
+
+    if launch:
+        if not Path(claude_bin).exists() and not shutil.which('claude'):
+            return {'ok': False, 'error': 'claude CLI not found on PATH'}
+        os.execvp(cmd[0], cmd)  # replaces this process — not reached in tests
+
+    print(' '.join(shlex.quote(c) for c in cmd))
+    return {'ok': True, 'doc': str(doc), 'command': cmd,
+            'issue': issue, 'worker': worker}
+
+
 def cmd_mvitems(
     cfg: Dict[str, Any],
     to_location: str,
@@ -1959,6 +2254,28 @@ def main() -> int:
             else:
                 ok = all(r.get('ok') for r in results)
                 result = {'ok': ok, 'count': len(results), 'results': results}
+
+        elif args.op == 'setshipping':
+            result = update_item(cfg, args.sku, 'shipping_profile', args.value,
+                                 check_only=check)
+
+        elif args.op == 'picklist':
+            result = cmd_picklist(cfg, status=args.status,
+                                  location=args.location, search=args.search)
+
+        elif args.op == 'quiet-check':
+            result = cmd_quiet_check(cfg, notify_on_idle=args.notify)
+
+        elif args.op == 'perp-run':
+            result = cmd_perp_run(cfg, brief_id=args.brief_id,
+                                  list_briefs=args.list_briefs)
+
+        elif args.op == 'whispertosuggest':
+            result = cmd_whisper_to_suggest(cfg, args.wavfile, model=args.model)
+
+        elif args.op == 'claude-help':
+            result = cmd_claude_help(cfg, issue=args.issue, worker=args.worker,
+                                     launch=args.launch)
 
         elif args.op == 'catlocmvall':
             result = catlocmvall(cfg, args.from_location, args.to_location,

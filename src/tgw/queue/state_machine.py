@@ -301,6 +301,25 @@ def queue_depths() -> Dict[str, int]:
             return {row[0]: row[1] for row in cur.fetchall()}
 
 
+def active_depths() -> Dict[str, int]:
+    """Count jobs in any active state (queued/running/leased/retry_wait) per queue.
+
+    Used by `tgw quiet-check` (PP-CAPTURE-001) to decide whether the pipeline is
+    genuinely idle — queue_depths() counts only 'queued', missing in-flight work.
+    """
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                SELECT queue_name, COUNT(*) as n
+                  FROM queue_jobs
+                 WHERE state IN ('queued', 'running', 'leased', 'retry_wait')
+                 GROUP BY queue_name
+                """
+            )
+            return {row[0]: row[1] for row in cur.fetchall()}
+
+
 def dead_letter_count() -> int:
     """Return total count of dead_letter jobs."""
     with _conn() as con:

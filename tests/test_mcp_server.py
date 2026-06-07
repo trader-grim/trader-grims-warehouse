@@ -1,0 +1,313 @@
+"""PP-MCP-001 — tests for all 10 TGW MCP tools.
+
+The MCP layer is what Claude itself uses to query live queue/item/health state
+and re-enqueue actions mid-session; the wrapper-to-internal contract drifted
+once (9 vs 10 tools), so it's worth locking down.
+
+FastMCP's @mcp.tool() returns the original function, so each tool is called
+directly. _get_cfg() is short-circuited by setting the module-level _cfg, and
+every internal (api.*, state_machine.*, health.check_all, worker_base.*) is
+monkeypatched so no real PostgreSQL / eBay / Ollama is touched. tgw_health is
+invoked with include_ebay=False inside the tool, so the dead token is off-path.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+import tgw.mcp_server as mcp_server
+from tgw.queue import state_machine as sm
+
+# ---------------------------------------------------------------------------
+# Fakes
+# ---------------------------------------------------------------------------
+
+class _FakeCur:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, *a, **k):
+        return None
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+class _FakeConn:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def cursor(self, *a, **k):
+        return _FakeCur(self._rows)
+
+
+def _install_conn(monkeypatch, rows):
+    monkeypatch.setattr(sm, "init", lambda *a, **k: None)
+    monkeypatch.setattr(sm, "_conn", lambda: _FakeConn(rows))
+
+
+@pytest.fixture
+def cfg(tmp_path, monkeypatch):
+    c = {"itemdata_root": tmp_path, "postgres_dsn": "postgresql://fake/db"}
+    monkeypatch.setattr(mcp_server, "_cfg", c)
+    return c
+
+
+def _write_item(cfg, sku, doc):
+    d = cfg["itemdata_root"] / sku
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{sku}.json").write_text(json.dumps(doc), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Registration / drift guard — all 10 tools present and callable
+# ---------------------------------------------------------------------------
+
+EXPECTED_TOOLS = {
+    "tgw_get_item", "tgw_search_items", "tgw_queue_status", "tgw_health",
+    "tgw_enqueue", "tgw_get_todo", "tgw_add_suggest", "tgw_dead_letter",
+    "tgw_hint_trail", "tgw_catalog_verify",
+}
+
+
+def test_exactly_ten_tools_present():
+    present = {n for n in dir(mcp_server)
+              if n.startswith("tgw_") and callable(getattr(mcp_server, n))}
+    assert present == EXPECTED_TOOLS
+    assert len(present) == 10
+
+
+# ---------------------------------------------------------------------------
+# tgw_get_item
+# ---------------------------------------------------------------------------
+
+def test_get_item_found(cfg):
+    _write_item(cfg, "tgw001", {"sku": "tgw001", "title": "Widget"})
+    out = json.loads(mcp_server.tgw_get_item("tgw001"))
+    assert out["ok"] is True
+    assert out["item"]["title"] == "Widget"
+
+
+def test_get_item_missing(cfg):
+    out = json.loads(mcp_server.tgw_get_item("tgw404"))
+    assert out["ok"] is False
+    assert "not found" in out["error"]
+
+
+# ---------------------------------------------------------------------------
+# tgw_search_items
+# ---------------------------------------------------------------------------
+
+def test_search_items_passes_through_and_clamps_limit(cfg, monkeypatch):
+    calls = {}
+
+    def fake_list_items(cfg, **kwargs):
+        calls.update(kwargs)
+        return {"ok": True, "count": 0, "items": []}
+
+    monkeypatch.setattr("tgw.api.list_items", fake_list_items)
+    out = json.loads(mcp_server.tgw_search_items(search="hat", limit=500))
+    assert out["ok"] is True
+    assert calls["search"] == "hat"
+    assert calls["limit"] == 100  # clamped to max 100
+
+
+def test_search_items_limit_floor(cfg, monkeypatch):
+    calls = {}
+    monkeypatch.setattr("tgw.api.list_items",
+                        lambda cfg, **kw: calls.update(kw) or {"ok": True})
+    mcp_server.tgw_search_items(limit=0)
+    assert calls["limit"] == 1  # clamped to min 1
+
+
+def test_search_items_error_is_caught(cfg, monkeypatch):
+    monkeypatch.setattr("tgw.api.list_items",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    out = json.loads(mcp_server.tgw_search_items(search="x"))
+    assert out["ok"] is False and "boom" in out["error"]
+
+
+# ---------------------------------------------------------------------------
+# tgw_queue_status
+# ---------------------------------------------------------------------------
+
+def test_queue_status_aggregates_dead_letter(cfg, monkeypatch):
+    rows = [
+        ("ebay_draft", "queued", 5),
+        ("ebay_draft", "dead_letter", 2),
+        ("ebay_price", "dead_letter", 1),
+    ]
+    _install_conn(monkeypatch, rows)
+    out = json.loads(mcp_server.tgw_queue_status())
+    assert out["ok"] is True
+    assert out["dead_letter_total"] == 3
+    assert out["dead_letter_by_queue"] == {"ebay_draft": 2, "ebay_price": 1}
+    assert len(out["queues"]) == 3
+
+
+# ---------------------------------------------------------------------------
+# tgw_health
+# ---------------------------------------------------------------------------
+
+def test_health_passes_include_flags_false(cfg, monkeypatch):
+    seen = {}
+
+    def fake_check_all(cfg, **kwargs):
+        seen.update(kwargs)
+        return {"all_ok": True, "checks": []}
+
+    monkeypatch.setattr("tgw.health.check_all", fake_check_all)
+    out = json.loads(mcp_server.tgw_health())
+    assert out["all_ok"] is True
+    assert seen["include_ebay"] is False  # dead token kept off-path
+    assert seen["include_ollama"] is False
+
+
+# ---------------------------------------------------------------------------
+# tgw_enqueue
+# ---------------------------------------------------------------------------
+
+def test_enqueue_invalid_action(cfg):
+    out = json.loads(mcp_server.tgw_enqueue("tgw001", "not_a_stage"))
+    assert out["ok"] is False
+    assert "invalid action" in out["error"]
+
+
+def test_enqueue_item_not_found(cfg):
+    out = json.loads(mcp_server.tgw_enqueue("tgw404", "ai_identify"))
+    assert out["ok"] is False
+    assert "not found" in out["error"]
+
+
+def test_enqueue_success(cfg, monkeypatch):
+    _write_item(cfg, "tgw001", {"sku": "tgw001"})
+    monkeypatch.setattr(sm, "init", lambda *a, **k: None)
+    monkeypatch.setattr(sm, "enqueue_job", lambda **kw: "job-77")
+    out = json.loads(mcp_server.tgw_enqueue("tgw001", "ebay_draft"))
+    assert out["ok"] is True
+    assert out["job_id"] == "job-77"
+    assert out["queue"] == "ebay_draft"
+
+
+def test_enqueue_duplicate_is_ok(cfg, monkeypatch):
+    import psycopg2.errors
+    _write_item(cfg, "tgw001", {"sku": "tgw001"})
+    monkeypatch.setattr(sm, "init", lambda *a, **k: None)
+
+    def _dupe(**kw):
+        raise psycopg2.errors.UniqueViolation("dup")
+
+    monkeypatch.setattr(sm, "enqueue_job", _dupe)
+    out = json.loads(mcp_server.tgw_enqueue("tgw001", "ebay_draft"))
+    assert out["ok"] is True
+    assert "already queued" in out["note"]
+
+
+# ---------------------------------------------------------------------------
+# tgw_get_todo
+# ---------------------------------------------------------------------------
+
+def test_get_todo_all(cfg, monkeypatch):
+    rows = [{"id": 1, "agent": "claude", "priority": 1, "body": "do x",
+             "source": "plan", "added_at": "2026-06-07"}]
+    _install_conn(monkeypatch, rows)
+    out = json.loads(mcp_server.tgw_get_todo())
+    assert out["ok"] is True
+    assert out["agent"] == "all"
+    assert out["items"][0]["body"] == "do x"
+
+
+def test_get_todo_filtered_by_agent(cfg, monkeypatch):
+    _install_conn(monkeypatch, [])
+    out = json.loads(mcp_server.tgw_get_todo(agent="gemini"))
+    assert out["ok"] is True
+    assert out["agent"] == "gemini"
+
+
+# ---------------------------------------------------------------------------
+# tgw_add_suggest
+# ---------------------------------------------------------------------------
+
+def test_add_suggest_delegates_to_cmd_suggest(cfg, monkeypatch):
+    seen = {}
+    monkeypatch.setattr("tgw.api.cmd_suggest",
+                        lambda cfg, text: seen.update(text=text) or {"ok": True, "path": "/x"})
+    out = json.loads(mcp_server.tgw_add_suggest("remember this"))
+    assert out["ok"] is True
+    assert seen["text"] == "remember this"
+
+
+# ---------------------------------------------------------------------------
+# tgw_dead_letter
+# ---------------------------------------------------------------------------
+
+def test_dead_letter_lists_with_verdict(cfg, monkeypatch):
+    jobs = [{
+        "job_id": "j1", "queue_name": "ebay_draft",
+        "payload_json": {"sku": "tgw001"}, "error_detail": "timeout reading",
+        "attempt_count": 3, "finished_at": None,
+    }]
+    monkeypatch.setattr(sm, "init", lambda *a, **k: None)
+    monkeypatch.setattr(sm, "dead_letter_jobs", lambda **kw: jobs)
+    monkeypatch.setattr("tgw.queue.worker_base.classify_dead_letter",
+                        lambda err: ("transient", 60))
+    out = json.loads(mcp_server.tgw_dead_letter())
+    assert out["ok"] is True
+    assert out["count"] == 1
+    j = out["jobs"][0]
+    assert j["sku"] == "tgw001"
+    assert j["verdict"] == "transient"
+    assert j["requeue_delay"] == 60
+
+
+# ---------------------------------------------------------------------------
+# tgw_hint_trail
+# ---------------------------------------------------------------------------
+
+def test_hint_trail_delegates(cfg, monkeypatch):
+    monkeypatch.setattr("tgw.api.cmd_hint_trail",
+                        lambda cfg, sku: {"ok": True, "sku": sku, "events": []})
+    out = json.loads(mcp_server.tgw_hint_trail("tgw001"))
+    assert out["ok"] is True and out["sku"] == "tgw001"
+
+
+# ---------------------------------------------------------------------------
+# tgw_catalog_verify
+# ---------------------------------------------------------------------------
+
+def test_catalog_verify_passes_args_through(cfg, monkeypatch):
+    seen = {}
+
+    def fake_verify(cfg, **kwargs):
+        seen.update(kwargs)
+        return {"ok": True, "scanned": 10, "violations": 0}
+
+    monkeypatch.setattr("tgw.api.cmd_catalog_verify", fake_verify)
+    out = json.loads(mcp_server.tgw_catalog_verify(location="A1", limit=50,
+                                                   severity="critical"))
+    assert out["ok"] is True
+    assert seen["location"] == "A1"
+    assert seen["limit"] == 50
+    assert seen["min_severity"] == "critical"
+    assert seen["output"] is None
+
+
+def test_catalog_verify_error_caught(cfg, monkeypatch):
+    monkeypatch.setattr("tgw.api.cmd_catalog_verify",
+                        lambda *a, **k: (_ for _ in ()).throw(ValueError("bad")))
+    out = json.loads(mcp_server.tgw_catalog_verify())
+    assert out["ok"] is False and "bad" in out["error"]
