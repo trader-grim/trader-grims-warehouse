@@ -175,12 +175,12 @@ keys = [
             # Pipeline triggers (operate on clipboard/CurrentItem SKU)
             Key([], "1", lazy.spawn(_tgw_term(
                 "SKU=$(xclip -o -selection primary 2>/dev/null || basename $(readlink /opt/TGW/CurrentItem 2>/dev/null)); "
-                "echo SKU: $SKU; sudo -u tgw tgw requeue-sku $SKU ai_identify 2>/dev/null || "
+                "echo SKU: $SKU; sudo -u tgw tgw enqueue-sku $SKU ai_identify 2>/dev/null || "
                 "echo 'usage: set SKU in primary selection first'"
             )), desc="queue ai_identify for SKU"),
             Key([], "2", lazy.spawn(_tgw_term(
                 "SKU=$(xclip -o -selection primary 2>/dev/null || basename $(readlink /opt/TGW/CurrentItem 2>/dev/null)); "
-                "echo SKU: $SKU; sudo -u tgw tgw requeue-sku $SKU ebay_draft 2>/dev/null || "
+                "echo SKU: $SKU; sudo -u tgw tgw enqueue-sku $SKU ebay_draft 2>/dev/null || "
                 "echo 'usage: set SKU in primary selection first'"
             )), desc="queue ebay_draft for SKU"),
 

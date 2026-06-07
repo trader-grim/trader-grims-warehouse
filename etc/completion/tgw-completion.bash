@@ -21,10 +21,12 @@ _tgw_subcommands=(
     category-groups
     catlocmvall
     claude-help
+    clip
     data-scrub
     dead-letter
     ebay-pull
     ebay-sweep
+    enqueue-sku
     ensure-catalog
     get
     get-ebay-token
@@ -70,7 +72,7 @@ _tgw_subcommands=(
 
 # Subcommands that take a SKU as their first positional arg
 _tgw_sku_cmds=(get hint hint-trail lookup quality set-template titleupdate verifiedupdate
-               locationupdate statusupdate update publish setshipping)
+               locationupdate statusupdate update publish setshipping enqueue-sku)
 
 # Subcommands that take multiple SKUs
 _tgw_multi_sku_cmds=(publish quality statusupdate mvitems)

@@ -102,6 +102,20 @@ maintained_by: Opus (planner)
 - Top of next batch (best-first): PP-GLOBALS-001 (XS, `weight_oz`) → PP-SOLD-001 / PP-MCP-001 /
   PP-INTAKE-001 / PP-EDITOR-001 / PP-STRIKE-001 (test+reconcile) → PP-FULFILLMENT-001 (`picklist`).
 
+### Execution — 2026-06-07 (session 15, Track 1 round-2 ranks 1–18)
+- **Tiers A+B+C+D DONE** — suite 77 → **263 passing**, ruff clean, `tgw health` fully green.
+  See `## Work Tracks → Track 1 — Round 2` for the per-rank execution status. Commit `9fa38ee` =
+  ranks 1–14; Tier D + permissions = the following commit.
+- **Security fix (surfaced by the new PP-DEPLOY-001 `check_ownership`)**: `discogs-credentials.json`
+  was `0664` (group/world-readable secret) → fixed to `0600`. Reworked `tgw-permissions-reset.sh`
+  (now version-controlled at `scripts/`): added a secrets section, a fast `--check` audit, and a
+  non-root chmod fallback. **Hardened the policy so it never world-exposes** TGW files (app trees
+  `2750`/`0640`, was `2755`/`0644`) — the old script would have loosened the private codebase.
+  Remaining (needs sudo): `config/trader-grims-backup.yaml` is root-owned `0644` — run
+  `sudo tgw-permissions-reset.sh` to fix. Config backup at `tgw-api-config.json.bak-session15`.
+- **Worker restart needed on deploy**: `worker_base.py` (notify), `sync.py` (ebay_stage/publish),
+  `dispatcher.py` (ai_identify).
+
 ### Pipeline additions — 2026-06-09 (session 14, batch 2)
 - **PP-DEADLETTER-001 health integration DONE** — `dead_letter_breakdown()` added to `state_machine.py`: returns per-queue dead_letter counts. `check_postgres()` in `health.py` now shows per-queue breakdown in detail string (e.g. `dead_letter=3 [ebay_draft:2, ebay_price:1]`) and returns `dead_letter_by_queue` dict. `tgw_queue_status` MCP tool also returns `dead_letter_by_queue`. Worker transient requeue now calls `notify()` with level='warning' so it surfaces on desktop/webhook.
 - **tgw todo CRUD DONE** — Three new operations in `todo.py` + CLI: `--update ID text` (rewrite body), `--delegate ID agent` (reassign), `--set-priority ID N` (reprioritize). All idempotent on not-found. 9 new tests in `tests/test_todo.py`.
@@ -386,7 +400,13 @@ Suite 77 → **184 passing**, ruff clean. Uncommitted, pending Dave's review:
 - ✅ R12 PP-PERP-AUTO-001 — `tgw perp-run <BRIEF-ID> [--list]` + `## Prompt` parser; 9 tests (`test_perp_run.py`).
 - ✅ R13 PP-WHISPER-001 — `tgw whispertosuggest <wav>` (ffmpeg→whisper-cli→cmd_suggest), subprocess-mocked; 6 tests. Model file still operator-supplied.
 - ✅ R14 PP-CLAUDE-HELP-001 — `CLAUDE-TROUBLESHOOT.md` + `tgw claude-help [issue] [--worker] [--launch]`; 6 tests.
-Next available: Tier D (ranks 15–18) — infra activation / diagnostics.
+**Tier D COMPLETE (ranks 15–18)** — suite **234 → 263 passing**, ruff clean. Committed 9fa38ee covers 1–14; Tier D uncommitted pending review:
+- ✅ R15 PP-WM-001 — (a) qtile chord bug fixed: chords now call the new `tgw enqueue-sku <sku> <queue>` (CLI sibling of MCP tgw_enqueue) + 4 tests (`test_enqueue_sku.py`); (b) notify activated — `notifications` block added to live config (backends `log,file` — desktop opt-in, behavior-neutral) + `worker_base` calls `notify.configure()` at startup (wrapped so it can't block a worker). ⚠️ restart all workers to pick up the worker_base change.
+- ✅ R16 PP-DEPLOY-001 — read-only `check_ownership()` in `health.py`, wired into `check_all`; 8 tests. **Live finding:** flags `discogs-credentials.json` at mode 0o664 (group/other-readable secret — should be 0o600). UID-below-1000 is informational (doesn't fail). This makes `tgw health` report red on `ownership` until the file is fixed — operator decision (chmod 600).
+- ✅ R17 PP-EMAIL-001 — `smtp`/`email` backend in `notify.py` (stdlib, fail-soft, out of default backends); 7 tests (`test_notify_smtp.py`).
+- ✅ R18 PP-CLIP-001 — `src/tgw/clip.py` SQLite store + `tgw clip {list,last-sku,search,wipe}`; 10 tests (`test_clip.py`). Xlib daemon deferred (desktop-session-blocked).
+Config backup: `/opt/TGW/config/tgw-api-config.json.bak-session15`. eBay scopes untouched.
+Next available: Tier E (ranks 19–25) — bulk-mutation / larger / lower value-per-risk.
 
 #### Tier A — XS, highest value-per-risk (do first)
 | Rank | PP | Slice | Size |

@@ -49,3 +49,7 @@ catalog.migrated.json.bak
 # PM-intake runtime dirs
 docs/TGW-Plan-Vault/inbox/processed/
 docs/TGW-Plan-Vault/inbox/queued/
+
+# Hand-edit backups of live config (never commit)
+*.bak-session*
+*.bak-[0-9]*

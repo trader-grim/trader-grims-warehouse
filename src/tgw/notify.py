@@ -147,11 +147,55 @@ def _backend_webhook(title: str, message: str, level: str,
         log.debug('webhook notify failed: %s', e)
 
 
+def _backend_smtp(title: str, message: str, level: str,
+                  cfg: Dict[str, Any]) -> None:
+    """
+    Send a notification by email via stdlib SMTP (PP-EMAIL-001).
+
+    Credential-free foundation: inert until the operator populates smtp_* keys in
+    the 'notifications' config block (host + an app password). Fails soft so a
+    missing/misconfigured block is a no-op; keep 'smtp' out of the default
+    backends so headless workers don't attempt mail unless explicitly enabled.
+    """
+    host = cfg.get('smtp_host')
+    if not host:
+        return
+    from_addr = cfg.get('smtp_from') or cfg.get('smtp_username') or ''
+    to_addr   = cfg.get('smtp_to') or from_addr
+    if not to_addr:
+        return
+    try:
+        import smtplib
+        from email.message import EmailMessage
+
+        msg = EmailMessage()
+        msg['Subject'] = f'TGW [{level}]: {title}'
+        msg['From']    = from_addr or 'tgw@localhost'
+        msg['To']      = to_addr
+        msg.set_content(message or title)
+
+        port    = int(cfg.get('smtp_port', 587))
+        use_tls = cfg.get('smtp_use_tls', True)
+        timeout = cfg.get('smtp_timeout', 5)
+        with smtplib.SMTP(host, port, timeout=timeout) as smtp:
+            if use_tls:
+                smtp.starttls()
+            user = cfg.get('smtp_username')
+            pw   = cfg.get('smtp_password')
+            if user and pw:
+                smtp.login(user, pw)
+            smtp.send_message(msg)
+    except Exception as e:
+        log.debug('smtp notify failed: %s', e)
+
+
 _BACKENDS = {
     'log':     _backend_log,
     'file':    _backend_file,
     'desktop': _backend_desktop,
     'webhook': _backend_webhook,
+    'smtp':    _backend_smtp,
+    'email':   _backend_smtp,  # alias
 }
 
 

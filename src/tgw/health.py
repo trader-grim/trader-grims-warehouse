@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import json
 import logging
+import pwd
+import stat
 import subprocess
 import time
 from pathlib import Path
@@ -60,6 +62,71 @@ def check_itemdata(cfg: Dict[str, Any]) -> Dict[str, Any]:
                        item_count=count)
     except Exception as e:
         return _result('itemdata', False, str(e), (time.time() - t) * 1000)
+
+
+def check_ownership(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Read-only UID / ownership / permission audit (PP-DEPLOY-001).
+
+    Reports the tgw UID (the migration target is < 1000, the system/user boundary)
+    and spot-checks key roots + secrets for owner/mode drift. Diagnoses only —
+    never mutates, never walks all of ItemData (roots are stat'd, not recursed).
+
+    ok reflects actual ownership/mode drift (operational risk). The UID-below-1000
+    status is an informational migration-planning signal surfaced in detail/extra,
+    not a failure — so health stays green on an operationally-sound pre-migration
+    system while still flagging the UID for the eventual usermod+chown sweep.
+    """
+    t = time.time()
+    try:
+        pw = pwd.getpwnam('tgw')
+    except KeyError:
+        return _result('ownership', False, "user 'tgw' not found",
+                       (time.time() - t) * 1000)
+
+    tgw_uid = pw.pw_uid
+    below_boundary = tgw_uid < 1000
+    drift: list[str] = []
+
+    # Key roots should be owned by tgw (stat the root only — no recursion).
+    for key in ('itemdata_root', 'catalog_root', 'secrets_root', 'data_root'):
+        p = cfg.get(key)
+        if not p:
+            continue
+        root = Path(p)
+        try:
+            if root.exists() and root.stat().st_uid != tgw_uid:
+                drift.append(f'{root} owned by uid {root.stat().st_uid} (expected {tgw_uid})')
+        except Exception as e:
+            drift.append(f'{root}: {e}')
+
+    # Secrets: dir 700, files 600.
+    sroot = cfg.get('secrets_root')
+    if sroot:
+        sroot = Path(sroot)
+        try:
+            if sroot.exists():
+                # Check the real security property — no group/other access —
+                # rather than an exact mode, so a benign setgid bit (0o2700)
+                # or owner-mode nuance doesn't read as drift.
+                dmode = stat.S_IMODE(sroot.stat().st_mode)
+                if dmode & 0o077:
+                    drift.append(f'{sroot} mode {oct(dmode)} is group/other-accessible (expected 0o700)')
+                for f in sroot.iterdir():
+                    if f.is_file():
+                        fmode = stat.S_IMODE(f.stat().st_mode)
+                        if fmode & 0o077:
+                            drift.append(f'{f.name} mode {oct(fmode)} is group/other-accessible (expected 0o600)')
+        except Exception as e:
+            drift.append(f'{sroot}: {e}')
+
+    ok = not drift
+    uid_note = f'tgw uid={tgw_uid}'
+    if not below_boundary:
+        uid_note += ' (>=1000; PP-DEPLOY-001 migration pending)'
+    detail = uid_note if ok else f'{uid_note}; {len(drift)} drift: ' + '; '.join(drift[:5])
+    return _result('ownership', ok, detail, (time.time() - t) * 1000,
+                   uid=tgw_uid, uid_below_1000=below_boundary, drift=drift)
 
 
 def check_catalog(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -300,6 +367,7 @@ def check_all(cfg: Dict[str, Any],
         check_thumbnail_cache(cfg),
         check_postgres(cfg),
         check_backup_service(),
+        check_ownership(cfg),
     ]
     if include_ollama:
         checks.append(check_ollama())

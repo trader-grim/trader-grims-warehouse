@@ -133,6 +133,47 @@ def cmd_picklist(cfg: Dict[str, Any], *, status: str = '', location: str = '',
     return {'ok': True, 'count': len(rows), 'locations': n_locs, 'picklist': rows}
 
 
+_ENQUEUE_QUEUES = {
+    'ai_identify', 'ebay_draft', 'ebay_price', 'ebay_stage', 'ebay_upload',
+    'ebay_publish', 'ebay_sync', 'catalog_rebuild', 'thumbnail_gen',
+}
+
+
+def cmd_enqueue_sku(cfg: Dict[str, Any], sku: str, queue: str) -> Dict[str, Any]:
+    """
+    Enqueue a pipeline action for one SKU (PP-WM-001 — the CLI sibling of the
+    MCP tgw_enqueue tool; the Qtile command chord calls this).
+    """
+    import psycopg2.errors
+
+    from .config import sku_json
+    from .queue import state_machine
+
+    if queue not in _ENQUEUE_QUEUES:
+        return {'ok': False,
+                'error': f'invalid queue {queue!r}; valid: {sorted(_ENQUEUE_QUEUES)}'}
+
+    if not sku_json(cfg, sku).exists():
+        return {'ok': False, 'error': f'item not found: {sku}'}
+
+    state_machine.init(cfg['postgres_dsn'])
+    try:
+        jid = state_machine.enqueue_job(
+            queue_name=queue,
+            payload={'sku': sku},
+            entity_type='item',
+            entity_id=sku,
+            operation='run',
+            dedupe_key=f'{queue}:{sku}',
+            max_attempts=3,
+        )
+        return {'ok': True, 'job_id': jid, 'queue': queue, 'sku': sku}
+    except psycopg2.errors.UniqueViolation:
+        return {'ok': True, 'note': 'job already queued', 'queue': queue, 'sku': sku}
+    except Exception as e:
+        return {'ok': False, 'error': str(e)}
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -225,6 +266,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--location', default='', help='filter by location')
     p.add_argument('--search', default='', help='text filter across fields')
 
+    p = sub.add_parser('enqueue-sku',
+                       help='enqueue a pipeline action for one SKU (PP-WM-001)')
+    p.add_argument('sku')
+    p.add_argument('queue', help='target queue (ai_identify, ebay_draft, ebay_price, ...)')
+
     p = sub.add_parser('quiet-check',
                        help='when the pipeline is idle, surface pending suggestions/TODOs (PP-CAPTURE-001)')
     p.add_argument('--notify', action='store_true',
@@ -249,6 +295,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--worker', default='', help='focus on a specific worker')
     p.add_argument('--launch', action='store_true',
                    help='exec claude now (default: print the command)')
+
+    p = sub.add_parser('clip',
+                       help='TGW clipboard history store/query (PP-CLIP-001)')
+    p.add_argument('clip_action', choices=['list', 'last-sku', 'search', 'wipe'])
+    p.add_argument('pattern', nargs='?', default='', help='search pattern (for search)')
+    p.add_argument('--limit', type=int, default=20, help='max rows (list/search)')
+    p.add_argument('--sku-only', action='store_true', help='list: SKU clips only')
 
     p = sub.add_parser('catlocmvall',
                        help='(deprecated) move all items from one location to another — use mvitems')
@@ -2263,6 +2316,9 @@ def main() -> int:
             result = cmd_picklist(cfg, status=args.status,
                                   location=args.location, search=args.search)
 
+        elif args.op == 'enqueue-sku':
+            result = cmd_enqueue_sku(cfg, args.sku, args.queue)
+
         elif args.op == 'quiet-check':
             result = cmd_quiet_check(cfg, notify_on_idle=args.notify)
 
@@ -2276,6 +2332,11 @@ def main() -> int:
         elif args.op == 'claude-help':
             result = cmd_claude_help(cfg, issue=args.issue, worker=args.worker,
                                      launch=args.launch)
+
+        elif args.op == 'clip':
+            from .clip import cmd_clip
+            result = cmd_clip(args.clip_action, pattern=args.pattern,
+                              limit=args.limit, sku_only=args.sku_only)
 
         elif args.op == 'catlocmvall':
             result = catlocmvall(cfg, args.from_location, args.to_location,

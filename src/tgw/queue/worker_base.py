@@ -84,6 +84,17 @@ class QueueWorker:
         state_machine.init(config.get('postgres_dsn', 'dbname=state_machine user=tgw'))
         tgw_logging.setup_logging(component=f'worker.{queue_name}')
 
+        # PP-WM-001: activate config-driven notifications (desktop/webhook/smtp).
+        # An absent 'notifications' block falls back to log+file backends, so this
+        # is behavior-neutral until the operator opts in. Wrapped so a notify
+        # misconfig can never prevent a (load-bearing) worker from starting.
+        try:
+            from tgw.notify import configure
+            configure(config.get('notifications')
+                      or config.get('raw', {}).get('notifications', {}))
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug('notify configure skipped: %s', exc)
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
