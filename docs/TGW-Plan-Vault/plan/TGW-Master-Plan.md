@@ -3,9 +3,10 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-06 (session 9)
+updated: 2026-06-07 (session 10)
 maintained_by: Opus (planner)
 ---
+
 # TGW Master Plan
 
 ## How to read this file
@@ -80,6 +81,15 @@ maintained_by: Opus (planner)
 - `conditions.py`: full condition policy cache (26 sets / 15K categories); `best_condition()` — same-or-worse fallback; wired into `ebay_draft`
 - `tgw staged` / `tgw publish` — operator review gate before any item goes live
 - **Open issue**: errorId 25002 `Item.Country` at publish for some categories (34032, 14027, 13916) — offer body is correct, investigating category-specific requirements
+
+### Pipeline additions — 2026-06-07 (session 10)
+- **8 suggestions processed** — PP-PERP-AUTO-001 expanded with Qtile scraping layout, tmux/ltsp/qtile/ssh stack, simplified paste→download workflow, and iterative markdown loop. Gemini history consolidation task noted in Track 2 (plan before executing). `catlocmvall` → `mvitems` rename with expanded selectors. PP-TASKER-001: barcode scanner confirmed available via Tasker on camera phone; intent audit needed to capture scan output.
+- **PP-MC-001 Phase 2 DONE** — `tgwitem` extfs: `copyin` for `fields/` (all except `sku.txt`) and `meta.json`; `ebay/` read-only subdir (`draft`, `offer`, `listing`, `reprice`, `lookup`); `pipeline/` live PostgreSQL job states per SKU; `actions/` dir with `re-identify`, `re-draft`, `re-price`, `re-stage`, `re-publish` — press Enter to enqueue. Repo updated; deploy: `sudo bash etc/interfaces/mc/install-system-mc.sh`.
+- **tgw status** — alias for `tgw health`; lower friction under duress.
+- **tgw mvitems** — new command replacing/expanding `catlocmvall`: `tgw mvitems <to_loc> [skus...] [--from loc] [--search q] [--status s] [--check-only]`. Uses `resolve()` for flexible multi-selector targeting. `catlocmvall` kept as deprecated alias.
+- **tgw bash completion** — `etc/completion/tgw-completion.bash`; all subcommands, SKU completion from catalog, location completion from location-tree, per-subcommand flags. Sourced automatically via `tgw.source`. Install system-wide: `sudo cp etc/completion/tgw-completion.bash /etc/bash_completion.d/tgw`.
+- **tgw suggest-edit** — opens `SUGGESTIONS.md` in `$EDITOR`; `--pending-only` extracts unprocessed entries to a temp file for focused review.
+- **28 tests pass** — all existing tests green after all changes.
 
 ### Pipeline additions — 2026-06-06 (session 9)
 - **21 suggestions processed** — full SUGGESTIONS.md backlog cleared. New pending projects:
@@ -160,7 +170,7 @@ maintained_by: Opus (planner)
 
 ## Implementation TODO — next priorities
 
-### Recently completed (sessions 4–8)
+### Recently completed (sessions 4–10)
 - ✅ **PP-QUALITY-001** listing quality scorer (2026-06-04)
 - ✅ **PP-PRICE-003** comp search improvement (2026-06-04)
 - ✅ **PP-HINT-001** bulk requeue command (2026-06-04)
@@ -185,17 +195,21 @@ maintained_by: Opus (planner)
 - ✅ **PP-TOKEN-001** token double-buffer bug fix + `tgw restart-ebay-token` (2026-06-06)
 - ✅ **PP-SHELL-001 Tier 2** ARCH-VIOLATES replacements + deprecated block removal (2026-06-06) — all 6 ARCH-VIOLATES functions replaced with thin `tgw` CLI wrappers; `statusupdate` CLI added; `verifiedupdate` now writes `verified`+`#STATUS` atomically; 20+ deprecated blocks removed; file 3405→2879 lines. Remaining deprecated: csvmerge*, addphotos*, data2json*, archivenewitems, mkjob*, newitem* (minor, no arch risk — wrap if needed).
 - ✅ **PP-INTAKE-001 Phase 1** `tgw set-template` command (2026-06-06) — writes category_group, ai_hint (prepended), size_class, ebay_category_id to item JSON; pushes SETTEMPLATE: to clipboard for KDE Connect relay; `--list`, `--camera`, `--dry-run`; resolves SKU from CurrentItem symlink; closes the template→pipeline loop.
+- ✅ **PP-MC-001 Phase 2** `tgwitem` copyin + ebay/ + pipeline/ + actions/ (2026-06-07) — copyin for fields/ and meta.json; ebay/ read-only subdir; pipeline/ live PG jobs; actions/ pipeline triggers. Deploy: `sudo bash etc/interfaces/mc/install-system-mc.sh`.
+- ✅ **tgw status** alias for `tgw health` (2026-06-07)
+- ✅ **tgw mvitems** — expands `catlocmvall` with SKU list / --from / --search / --status selectors (2026-06-07); catlocmvall kept as deprecated alias
+- ✅ **tgw bash completion** — `etc/completion/tgw-completion.bash`; auto-sourced via `tgw.source` (2026-06-07)
+- ✅ **tgw suggest-edit** — opens SUGGESTIONS.md in $EDITOR; `--pending-only` for focused review (2026-06-07)
 
 ### Active / next build priorities
 
 | Priority | PP | Status | Notes |
 |----------|----|--------|-------|
-| 1 | **PP-MC-001 Phase 2** tgwitem edit | design ready | copyin, ebay/ + pipeline/ subdirs |
-| 2 | **PP-GLOBALS-001** analysis | analysis only | Identify offer-invariant fields; design before coding |
-| 3 | **PP-HINT-001** remaining gaps | ongoing | eBay Browse enrichment in ebay_draft; per-SKU hint trail |
-| 4 | **PP-INTAKE-001 Phase 2** | design ready | Web form update: template picker, weight field, barcode field |
-| 5 | **PP-SOLD-001 Tier 3** sweep | operator gated | Run `tgw ebay-sweep` after full-history CSV import |
-| 6 | **PP-PYIPC-001** | research | Syncthing + KDE Connect Python library integration; research via PERPLEXITY-005 |
+| 1 | **PP-GLOBALS-001** analysis | analysis only | Identify offer-invariant fields; design before coding |
+| 2 | **PP-HINT-001** remaining gaps | ongoing | eBay Browse enrichment in ebay_draft; per-SKU hint trail |
+| 3 | **PP-INTAKE-001 Phase 2** | design ready | Web form update: template picker, weight field, barcode field |
+| 4 | **PP-SOLD-001 Tier 3** sweep | operator gated | Run `tgw ebay-sweep` after full-history CSV import |
+| 5 | **PP-PYIPC-001** | research | Syncthing + KDE Connect Python library integration; research via PERPLEXITY-005 |
 | — | **PP-REPRICER-001** | blocked | Blocked on `buy.marketplace_insights` scope approval |
 
 ### Running in background
@@ -243,12 +257,12 @@ One bounded session per item. Ordered by value.
 | ✅ | PP-WM-001 P1 | Qtile base config + TGW widgets — done (session 7); operator install pending | M |
 | ✅ | PP-SHELL-001 T2 | ARCH-VIOLATES + deprecated block removal — done (session 8); SHELL-AUDIT.md updated | M |
 | ✅ | PP-INTAKE-001 P1 | `tgw set-template` command — done (session 8); closes template→pipeline loop | M |
-| 1 | PP-MC-001 P2 | `tgwitem` copyin + `ebay/` + `pipeline/` subdirs | M |
-| 2 | PP-GLOBALS-001 | Analysis only — identify offer-invariant fields; design doc | S |
-| 3 | PP-HINT-001 | eBay Browse enrichment in `ebay_draft`; per-SKU hint trail | M |
-| 4 | tgw synonyms | `health=status`, `--help=-help=help` aliases; lower friction under duress | XS |
-| 5 | bash completion | `tgw` bash/zsh tab completion for subcommands + SKU args | S |
-| 6 | suggestion editor | UI to edit/delete/annotate SUGGESTIONS.md entries before PM-intake processes | XS |
+| ✅ | PP-MC-001 P2 | `tgwitem` copyin + `ebay/` + `pipeline/` + `actions/` subdirs — done (session 10) | M |
+| ✅ | tgw synonyms | `tgw status` alias for health; `tgw mvitems` expands catlocmvall — done (session 10) | XS |
+| ✅ | bash completion | `tgw` bash/zsh tab completion — `etc/completion/tgw-completion.bash`; sourced via tgw.source — done (session 10) | S |
+| ✅ | suggestion editor | `tgw suggest-edit [--pending-only]` — done (session 10) | XS |
+| 1 | PP-GLOBALS-001 | Analysis only — identify offer-invariant fields; design doc | S |
+| 2 | PP-HINT-001 | eBay Browse enrichment in `ebay_draft`; per-SKU hint trail | M |
 
 ### Track 2 — Gemini CLI (large-context data + self-contained tasks)
 **Status 2026-06-06**: Gemini CLI now installed and available. Gemini is Dave's primary
@@ -267,6 +281,7 @@ Save result to `inbox/` for PM-intake.
 | Category-group quality review | `category-groups.json` + velocity-stats.json | Which groups have poor pricing data; suggest group splits or merges |
 | ebay_draft aspect fill audit | Grep of aspect fill rates per category | Which categories have worst specifics coverage; tuning recommendations |
 | PP-GLOBALS-001 analysis | Sample item JSONs (20 items, various categories) | Which fields are offer-invariant; proposed `globals` block schema |
+| **History consolidation** | Dave's conversation history with AI assistants | Organize + consolidate into structured reference; **plan scope with Dave before executing** (session 10 note) |
 
 ### Track 3 — Perplexity (live web research, cited sources)
 Research briefs in `docs/TGW-Plan-Vault/perplexity/`. Paste brief into Perplexity → save result as `.md` to `inbox/` for PM-intake.
@@ -2063,8 +2078,14 @@ and a Join license.
 - Compare to KDE Connect: Join works via cloud (not LAN); better when phone not on same network
 - Evaluate: which offers better reliability for `SETTEMPLATE:` clipboard relay from tgw.source?
 
+### Barcode scanner — confirmed available
+Dave has a fast commercial barcode scanner app on the camera phone. The existing Tasker app
+can already open it. Need to audit available broadcast/activity intents to capture scan output
+(likely Intent → StartActivity or BroadcastReceiver → Tasker Variable). Actionable first step:
+check what intents the scanner exposes; wire to Tasker → Join/KDE Connect → tgw-http intake.
+
 ### Tasker opportunities
-- **Barcode scan → intake**: Tasker barcode scan action → POST to tgw-http intake endpoint
+- **Barcode scan → intake**: Tasker opens commercial barcode scanner (intent audit needed) → capture result → POST to tgw-http intake endpoint
 - **Voice → suggest**: Tasker microphone → Whisper → `tgw suggest`; or Tasker built-in voice
 - **Photo trigger**: Tasker camera trigger → sends image to TGW intake folder via Join/KDE Connect
 - **Notification response**: tgw-http push → Tasker task (tap "approve" → POST publish action)
@@ -2089,21 +2110,43 @@ Submitting research briefs to Perplexity requires manual copy-paste: open brief 
 → switch to browser → paste → wait → copy result → save to inbox. For 5+ briefs, this is 30+
 minutes of mechanical work. Even Perplexity's API doesn't expose the Pro search quality.
 
-### Approach: ydotool / xdotool automation
-Semi-automate the Perplexity UI interaction using `ydotool` (Wayland) or `xdotool` (X11):
-1. `tgw perp-run PERPLEXITY-001` — reads the brief file, extracts the prompt
-2. Opens Firefox to perplexity.ai (or switches to open tab)
-3. Uses ydotool to focus the input, paste the prompt, submit
-4. Operator monitors and copies the result when ready (automation can't reliably detect completion)
-5. `tgw perp-save PERPLEXITY-001` — operator pastes result, saves to inbox/, marks brief as run
+### Simplified workflow (session 10 — no scraping required)
+Perplexity's three-dot menu → "Download as Markdown" is the key insight. No HTML scraping needed:
+1. Paste prompt → press Enter → wait for completion (watch browser)
+2. Three-dot menu → Download as Markdown
+3. Move `.md` file to `inbox/` → PM-intake processes automatically
+4. For multi-turn: download → read result → ask follow-up → download again
+
+This is already low-friction. ydotool can automate steps 1–2 (paste + submit + trigger download)
+but step 3 (moving the downloaded file) can be handled by a file watcher on `~/Downloads/`.
+
+### Automation approach: ydotool + file watcher
+Semi-automate using `ydotool` (Wayland) or `xdotool` (X11):
+1. `tgw perp-run PERPLEXITY-001` — reads brief, extracts prompt, pastes + submits via ydotool
+2. Operator watches Perplexity complete (automation cannot reliably detect this)
+3. Operator triggers download (three-dot menu or keyboard shortcut)
+4. File watcher (`inotifywait` on `~/Downloads/`) moves `*.md` to `inbox/` automatically
+5. PM-intake picks it up on next session startup
+
+### Infrastructure recommendation (session 10)
+Use the **tmux/ltsp/qtile/ssh stack** for dependability:
+- Run the Perplexity browser tab in a dedicated Qtile workspace (workspace 3 "ebay" or a new "research" workspace)
+- A dedicated Qtile scraping layout can control window focus and viewport for automation
+- SSH + tmux enables remote triggering without being at the physical machine
+- LTSP: remote desktop to the Perplexity workspace from tablet during coffee sessions
+
+### Qtile scraping layout concept (session 10)
+A custom Qtile layout that locks focus to the browser window and exposes automation hooks:
+- Super+T → p: enter "Perplexity mode"; bar shows brief name; chord keys: `r`=run, `d`=download, `n`=next brief
+- Could also handle token renewal automation (paste token, confirm) — same ydotool pattern
 
 ### Limitations
-- Perplexity UI scraping is fragile; ydotool approach is best-effort
-- Result copy-back still manual (complex to automate reliably)
-- This reduces friction, not eliminates it
+- Perplexity completion detection is not automated — operator confirms when done
+- ydotool approach is best-effort; window focus can break if anything else steals focus
+- Iterative research (ask → download → read → ask more → download) is semi-manual but fast
 
 ### Track 4 (Operator) task
-This is an operator tool, not a background worker. Add to Priority 3 in Track 4.
+This is an operator tool, not a background worker. Priority 3 in Track 4.
 
 ---
 

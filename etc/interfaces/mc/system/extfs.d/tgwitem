@@ -1,7 +1,7 @@
 #!/opt/TGW/.venvironments/tgw/bin/python3
-# MC extfs VFS: TGW single item — browse fields and photos
+# MC extfs VFS: TGW single item — browse fields, eBay data, pipeline state, photos
 # Archive: path to a SKU JSON file (e.g. ItemData/tgwXXX/tgwXXX.json)
-# Open with Enter inside any ItemData SKU dir.
+# Phase 2: copyin (field edits), ebay/ subdir, pipeline/ live PG jobs, actions/ triggers
 import json
 import os
 import shutil
@@ -10,11 +10,36 @@ import tempfile
 import time
 from pathlib import Path
 
+DSN = 'dbname=state_machine user=tgw'
 
-def _mt(path):
+# Pipeline action name → queue name
+PIPELINE_ACTIONS = {
+    're-identify': 'ai_identify',
+    're-draft':    'ebay_draft',
+    're-price':    'ebay_price',
+    're-stage':    'ebay_stage',
+    're-publish':  'ebay_publish',
+}
+
+# Top-level item JSON keys that hold eBay sub-dicts, mapped to display subdir names
+EBAY_SUBDIRS = [
+    ('draft_listing',   'draft'),
+    ('ebay_offer',      'offer'),
+    ('ebay_listing',    'listing'),
+    ('reprice_schedule','reprice'),
+    ('product_lookup',  'lookup'),
+]
+
+
+def _mt(path: Path) -> str:
     import datetime
     ts = path.stat().st_mtime if path.exists() else time.time()
     return datetime.datetime.fromtimestamp(ts).strftime('%b %d %H:%M')
+
+
+def _mt_now() -> str:
+    import datetime
+    return datetime.datetime.now().strftime('%b %d %H:%M')
 
 
 def _safe(key: str) -> str:
@@ -28,28 +53,141 @@ def _load(archive: str):
     return doc, p
 
 
+def _write_back(path: Path, doc: dict) -> None:
+    """Atomic JSON write — temp file + rename, same dir for atomic cross-fs move."""
+    with tempfile.NamedTemporaryFile(
+        'w', encoding='utf-8', delete=False, dir=path.parent
+    ) as tmp:
+        json.dump(doc, tmp, ensure_ascii=False, indent=2)
+        tmp.write('\n')
+        tmp_path = Path(tmp.name)
+    os.replace(tmp_path, path)
+
+
+def _enqueue(queue: str, payload: dict, dedupe_key: str,
+             not_before_secs: int = 0) -> str:
+    """Insert a queue_jobs row. Returns 'queued:<job_id>' or 'already_queued'."""
+    import psycopg2
+    nb_expr = f"NOW() + INTERVAL '{not_before_secs} seconds'" if not_before_secs else 'NULL'
+    sql = f"""
+        INSERT INTO queue_jobs
+            (queue_name, entity_type, entity_id, operation,
+             handler_family, payload_json, dedupe_key, not_before, max_attempts)
+        VALUES (%s, 'generic', %s, 'run', %s, %s::jsonb, %s, {nb_expr}, %s)
+        RETURNING job_id::text
+    """
+    con = psycopg2.connect(DSN)
+    try:
+        with con.cursor() as cur:
+            cur.execute(sql, (
+                queue, queue, queue,
+                json.dumps(payload), dedupe_key, 5,
+            ))
+            row = cur.fetchone()
+        con.commit()
+        return f'queued:{row[0]}' if row else 'already_queued'
+    except psycopg2.errors.UniqueViolation:
+        con.rollback()
+        return 'already_queued'
+    finally:
+        con.close()
+
+
+def _fetch_pipeline(sku: str) -> list:
+    """Return recent queue_jobs rows for this SKU."""
+    try:
+        import psycopg2, psycopg2.extras
+        con = psycopg2.connect(DSN)
+        try:
+            with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT queue_name, state::text, attempt_count,
+                           created_at, updated_at, finished_at,
+                           error_code, error_detail
+                      FROM queue_jobs
+                     WHERE payload_json->>'sku' = %s
+                     ORDER BY created_at DESC
+                     LIMIT 30
+                    """,
+                    (sku,),
+                )
+                return [dict(r) for r in cur.fetchall()]
+        finally:
+            con.close()
+    except Exception:
+        return []
+
+
+def _format_job(j: dict) -> str:
+    lines = [
+        f'queue:    {j["queue_name"]}',
+        f'state:    {j["state"]}',
+        f'attempts: {j["attempt_count"]}',
+        f'created:  {j["created_at"]}',
+        f'updated:  {j["updated_at"]}',
+    ]
+    if j.get('finished_at'):
+        lines.append(f'finished: {j["finished_at"]}')
+    if j.get('error_code'):
+        lines.append(f'error:    {j["error_code"]} — {j.get("error_detail", "")}')
+    return '\n'.join(lines) + '\n'
+
+
+def _job_filename(j: dict, seen: dict) -> str:
+    q = j['queue_name'].replace('/', '-')
+    s = j['state']
+    key = f'{q}-{s}'
+    n = seen.get(key, 0)
+    seen[key] = n + 1
+    return f'{key}.txt' if n == 0 else f'{key}-{n}.txt'
+
+
+# ---------------------------------------------------------------------------
+# cmd_list
+# ---------------------------------------------------------------------------
+
 def cmd_list(archive: str) -> None:
     doc, path = _load(archive)
-    mt = _mt(path)
-    u  = os.environ.get('USER', 'tgw')
+    mt  = _mt(path)
+    mtn = _mt_now()
+    u   = os.environ.get('USER', 'tgw')
+    sku = doc.get('sku', path.stem)
 
-    # meta.json — full item record
-    meta = json.dumps(doc, indent=2, ensure_ascii=False)
-    print(f'-rw-r--r-- 1 {u} {u} {len(meta.encode())} {mt} meta.json')
+    # meta.json — full item record (writable)
+    meta_bytes = len(json.dumps(doc, indent=2, ensure_ascii=False).encode())
+    print(f'-rw-r--r-- 1 {u} {u} {meta_bytes} {mt} meta.json')
 
-    # fields/ — one .txt per field, executable so Enter shows value in pager
+    # fields/ — one .txt per top-level field; sku is read-only
     print(f'drwxr-xr-x 1 {u} {u} 0 {mt} fields')
     for k, v in sorted(doc.items()):
+        perm = '-r--r--r--' if k == 'sku' else '-rw-r--r--'
         c = (json.dumps(v, ensure_ascii=False)
              if isinstance(v, (dict, list))
              else ('' if v is None else str(v)))
-        print(f'-rwxr-xr-x 1 {u} {u} {len(c.encode()) + 1} {mt} fields/{_safe(k)}.txt')
+        print(f'{perm} 1 {u} {u} {len(c.encode()) + 1} {mt} fields/{_safe(k)}.txt')
+
+    # ebay/ — read-only eBay sub-dict subdirs
+    has_ebay = any(isinstance(doc.get(f), dict) and doc.get(f)
+                   for f, _ in EBAY_SUBDIRS)
+    if has_ebay:
+        print(f'dr--r--r-- 1 {u} {u} 0 {mt} ebay')
+        for field, subdir in EBAY_SUBDIRS:
+            sub = doc.get(field)
+            if not sub or not isinstance(sub, dict):
+                continue
+            print(f'dr--r--r-- 1 {u} {u} 0 {mt} ebay/{subdir}')
+            for k, v in sorted(sub.items()):
+                c = (json.dumps(v, ensure_ascii=False)
+                     if isinstance(v, (dict, list))
+                     else ('' if v is None else str(v)))
+                print(f'-r--r--r-- 1 {u} {u} {len(c.encode()) + 1} {mt} ebay/{subdir}/{_safe(k)}.txt')
 
     # photos/ — images and video; executable so Enter renders with chafa
     media = [
         p for p in sorted(path.parent.iterdir())
         if p.suffix.lower() in {'.jpg', '.jpeg', '.png', '.gif', '.webp',
-                                  '.mp4', '.mov', '.mkv', '.webm'}
+                                 '.mp4', '.mov', '.mkv', '.webm'}
         and p.is_file()
     ]
     if media:
@@ -57,13 +195,36 @@ def cmd_list(archive: str) -> None:
         for m in media:
             print(f'-rwxr-xr-x 1 {u} {u} {m.stat().st_size} {_mt(m)} photos/{m.name}')
 
+    # pipeline/ — live PostgreSQL job state for this SKU (read-only)
+    jobs = _fetch_pipeline(sku)
+    if jobs:
+        print(f'dr--r--r-- 1 {u} {u} 0 {mtn} pipeline')
+        seen: dict = {}
+        for j in jobs:
+            fname   = _job_filename(j, seen)
+            content = _format_job(j)
+            print(f'-r--r--r-- 1 {u} {u} {len(content.encode())} {mtn} pipeline/{fname}')
+
+    # actions/ — pipeline triggers (executable; Enter enqueues job)
+    print(f'drwxr-xr-x 1 {u} {u} 0 {mtn} actions')
+    for name, queue in PIPELINE_ACTIONS.items():
+        desc = f'Action: {name}\nEnqueues: {queue} for {sku}\nPress Enter to execute.\n'
+        print(f'-rwxr-xr-x 1 {u} {u} {len(desc.encode())} {mtn} actions/{name}')
+
+
+# ---------------------------------------------------------------------------
+# cmd_copyout
+# ---------------------------------------------------------------------------
 
 def cmd_copyout(archive: str, stored: str, dest: str) -> None:
     doc, path = _load(archive)
+    sku = doc.get('sku', path.stem)
+
     if stored == 'meta.json':
         Path(dest).write_text(
             json.dumps(doc, indent=2, ensure_ascii=False) + '\n',
             encoding='utf-8')
+
     elif stored.startswith('fields/'):
         key_safe = stored[7:].removesuffix('.txt')
         for k, v in doc.items():
@@ -74,11 +235,109 @@ def cmd_copyout(archive: str, stored: str, dest: str) -> None:
                 Path(dest).write_text(c + '\n', encoding='utf-8')
                 return
         Path(dest).write_text('\n', encoding='utf-8')
+
+    elif stored.startswith('ebay/'):
+        # ebay/<subdir>/<key>.txt
+        parts = stored[5:].split('/', 1)
+        if len(parts) == 2:
+            subdir, key_file = parts
+            key_safe = key_file.removesuffix('.txt')
+            field = next((f for f, d in EBAY_SUBDIRS if d == subdir), None)
+            if field:
+                sub = doc.get(field) or {}
+                for k, v in sub.items():
+                    if _safe(k) == key_safe:
+                        c = (json.dumps(v, indent=2, ensure_ascii=False)
+                             if isinstance(v, (dict, list))
+                             else ('' if v is None else str(v)))
+                        Path(dest).write_text(c + '\n', encoding='utf-8')
+                        return
+        Path(dest).write_text('\n', encoding='utf-8')
+
     elif stored.startswith('photos/'):
         src = path.parent / stored[7:]
         if src.exists():
             shutil.copy2(src, dest)
 
+    elif stored.startswith('pipeline/'):
+        fname = stored[9:]
+        jobs  = _fetch_pipeline(sku)
+        seen: dict = {}
+        for j in jobs:
+            jf = _job_filename(j, seen)
+            if jf == fname:
+                Path(dest).write_text(_format_job(j), encoding='utf-8')
+                return
+        Path(dest).write_text('(job not found)\n', encoding='utf-8')
+
+    elif stored.startswith('actions/'):
+        name  = stored[8:]
+        queue = PIPELINE_ACTIONS.get(name, '(unknown)')
+        Path(dest).write_text(
+            f'Action: {name}\nEnqueues: {queue} for {sku}\nPress Enter to execute.\n',
+            encoding='utf-8')
+
+
+# ---------------------------------------------------------------------------
+# cmd_copyin  (Phase 2: fields/ and meta.json are writable)
+# ---------------------------------------------------------------------------
+
+def cmd_copyin(archive: str, stored: str, source: str) -> None:
+    doc, path = _load(archive)
+    sku = doc.get('sku', path.stem)
+
+    if stored.startswith(('ebay/', 'photos/', 'pipeline/', 'actions/')):
+        print(f'tgwitem: copyin not supported for {stored!r}', file=sys.stderr)
+        sys.exit(1)
+
+    if stored == 'meta.json':
+        content = Path(source).read_text(encoding='utf-8').strip()
+        try:
+            new_doc = json.loads(content)
+        except json.JSONDecodeError as e:
+            print(f'tgwitem: invalid JSON in meta.json: {e}', file=sys.stderr)
+            sys.exit(1)
+        if new_doc.get('sku') != sku:
+            print(f'tgwitem: sku field is immutable (was {sku!r})', file=sys.stderr)
+            sys.exit(1)
+        _write_back(path, new_doc)
+        _enqueue('catalog_rebuild',
+                 {'reason': f'mc_copyin:{sku}'},
+                 'catalog_rebuild:pending',
+                 not_before_secs=30)
+        return
+
+    if stored.startswith('fields/'):
+        key_safe = stored[7:].removesuffix('.txt')
+        if key_safe == 'sku':
+            print('tgwitem: sku field is immutable', file=sys.stderr)
+            sys.exit(1)
+        content = Path(source).read_text(encoding='utf-8').strip()
+        try:
+            value = json.loads(content)
+        except json.JSONDecodeError:
+            value = content
+        # Find original key (or use key_safe if it's a new field)
+        original_key = key_safe
+        for k in doc:
+            if _safe(k) == key_safe:
+                original_key = k
+                break
+        doc[original_key] = value
+        _write_back(path, doc)
+        _enqueue('catalog_rebuild',
+                 {'reason': f'mc_copyin:{sku}'},
+                 'catalog_rebuild:pending',
+                 not_before_secs=30)
+        return
+
+    print(f'tgwitem: copyin not supported for {stored!r}', file=sys.stderr)
+    sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# cmd_run  (Enter on a file)
+# ---------------------------------------------------------------------------
 
 _IMAGE_EXT = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp',
               '.tif', '.tiff', '.avif', '.heic', '.heif', '.ico'}
@@ -86,22 +345,19 @@ _VIDEO_EXT = {'.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v'}
 
 
 def cmd_run(archive: str, stored: str) -> None:
-    """Enter on a photo renders with chafa; Enter on a field shows value in less."""
+    """Enter on a file: photos → chafa; fields → less; actions → enqueue job."""
+
     if stored.startswith('photos/'):
         _doc, path = _load(archive)
         src = path.parent / stored[7:]
         ext = src.suffix.lower()
         if ext in _IMAGE_EXT or ext in _VIDEO_EXT:
-            # Force symbols+truecolor so extfs terminal (which may not advertise
-            # sixel/kitty support) still gets Unicode half-block art.
             os.execlp('chafa', 'chafa',
                       '--format=symbols', '--colors=full', str(src))
         else:
             os.execlp('less', 'less', str(src))
 
     elif stored.startswith('fields/'):
-        # Extract field value to a temp file so less shows the value,
-        # not the raw archive JSON.
         doc, _path = _load(archive)
         key_safe = stored[7:].removesuffix('.txt')
         content = ''
@@ -117,10 +373,62 @@ def cmd_run(archive: str, stored: str) -> None:
             tmp = f.name
         os.execlp('less', 'less', tmp)
 
+    elif stored.startswith('actions/'):
+        name = stored[8:]
+        queue = PIPELINE_ACTIONS.get(name)
+        if not queue:
+            with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False,
+                                             encoding='utf-8') as f:
+                f.write(f'Unknown action: {name}\n')
+                tmp = f.name
+            os.execlp('less', 'less', tmp)
+            return
+
+        doc, path = _load(archive)
+        sku = doc.get('sku', path.stem)
+
+        # For ai_identify, set ai_reidentify flag first
+        if queue == 'ai_identify':
+            doc['ai_reidentify'] = True
+            _write_back(path, doc)
+
+        status = _enqueue(queue, {'sku': sku}, f'{queue}:{sku}')
+
+        with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False,
+                                         encoding='utf-8') as f:
+            f.write(f'Action:  {name}\n')
+            f.write(f'Queue:   {queue}\n')
+            f.write(f'SKU:     {sku}\n')
+            f.write(f'Result:  {status}\n')
+            tmp = f.name
+        os.execlp('less', 'less', tmp)
+
+    elif stored.startswith('pipeline/'):
+        doc, _path = _load(archive)
+        sku = doc.get('sku', _path.stem)
+        fname = stored[9:]
+        jobs  = _fetch_pipeline(sku)
+        seen: dict = {}
+        content = '(job not found)\n'
+        for j in jobs:
+            jf = _job_filename(j, seen)
+            if jf == fname:
+                content = _format_job(j)
+                break
+        with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False,
+                                         encoding='utf-8') as f:
+            f.write(content)
+            tmp = f.name
+        os.execlp('less', 'less', tmp)
+
     else:
-        # meta.json or anything else — show the archive JSON
+        # meta.json or ebay/ subdirs — show content in less
         os.execlp('less', 'less', archive)
 
+
+# ---------------------------------------------------------------------------
+# entry point
+# ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
     op  = sys.argv[1]
@@ -130,6 +438,8 @@ if __name__ == '__main__':
             cmd_list(arc)
         elif op == 'copyout':
             cmd_copyout(arc, sys.argv[3], sys.argv[4])
+        elif op == 'copyin':
+            cmd_copyin(arc, sys.argv[3], sys.argv[4])
         elif op == 'run':
             cmd_run(arc, sys.argv[3] if len(sys.argv) > 3 else 'meta.json')
     except Exception as e:

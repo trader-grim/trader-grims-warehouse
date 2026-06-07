@@ -16,7 +16,7 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from .catalog import (
     build_all_catalogs,
@@ -168,7 +168,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--check-only', action='store_true', help='validate without writing')
 
     p = sub.add_parser('catlocmvall',
-                       help='move all items from one location to another')
+                       help='(deprecated) move all items from one location to another — use mvitems')
     p.add_argument('from_location')
     p.add_argument('to_location')
     p.add_argument('--check-only', action='store_true')
@@ -217,6 +217,10 @@ def _build_parser() -> argparse.ArgumentParser:
                    help='skip Ollama check')
     p.add_argument('--no-ebay', action='store_true',
                    help='skip eBay token check')
+
+    p = sub.add_parser('status', help='alias for health — run platform health checks')
+    p.add_argument('--no-ollama', action='store_true', help='skip Ollama check')
+    p.add_argument('--no-ebay', action='store_true', help='skip eBay token check')
 
     p = sub.add_parser('lookup', help='run product enrichment lookup for one item (PP-LOOKUP-001)')
     p.add_argument('sku', help='SKU to look up')
@@ -428,6 +432,26 @@ def _build_parser() -> argparse.ArgumentParser:
                    help='show completed items too')
     p.add_argument('--seed', action='store_true',
                    help='seed Work Tracks items from master plan into the tracker')
+
+    p = sub.add_parser(
+        'mvitems',
+        help='move items to a location (expands catlocmvall; PP-SHELL-001)',
+    )
+    p.add_argument('to_location', help='destination location string')
+    p.add_argument('skus', nargs='*', help='specific SKU(s) to move')
+    p.add_argument('--from', dest='from_location', default=None,
+                   help='move all items currently at this location')
+    p.add_argument('--search', default=None,
+                   help='move items matching text search')
+    p.add_argument('--status', default=None,
+                   help='move items with this status value')
+    p.add_argument('--check-only', action='store_true',
+                   help='dry-run: show what would move without writing')
+
+    p = sub.add_parser('suggest-edit',
+                       help='open SUGGESTIONS.md in $EDITOR for review before PM-intake')
+    p.add_argument('--pending-only', action='store_true',
+                   help='extract only unprocessed ([ ]) entries to a temp file for editing')
 
     return parser
 
@@ -1266,6 +1290,89 @@ def cmd_suggest(cfg: Dict[str, Any], text: str) -> Dict[str, Any]:
     return {'ok': True, 'written': line.strip(), 'file': str(suggestions_file)}
 
 
+def cmd_suggest_edit(cfg: Dict[str, Any], pending_only: bool = False) -> Dict[str, Any]:
+    """Open SUGGESTIONS.md (or a temp file of pending entries) in $EDITOR."""
+    suggestions_file = cfg['plan_vault_path'] / 'suggestions' / 'SUGGESTIONS.md'
+    if not suggestions_file.exists():
+        return {'ok': False, 'error': f'suggestions file not found: {suggestions_file}'}
+
+    editor = os.environ.get('EDITOR', os.environ.get('VISUAL', 'nano'))
+
+    if pending_only:
+        import tempfile
+        lines = suggestions_file.read_text(encoding='utf-8').splitlines(keepends=True)
+        pending = [ln for ln in lines if ln.startswith('- [ ]')]
+        if not pending:
+            print('No pending (unprocessed) suggestions found.')
+            return {'ok': True, 'pending_count': 0}
+        with tempfile.NamedTemporaryFile('w', suffix='-suggestions.md',
+                                          delete=False, encoding='utf-8') as f:
+            f.writelines(pending)
+            tmp = f.name
+        print(f'{len(pending)} pending suggestion(s) — editing in {editor}')
+        print(f'(edits saved to temp file; copy back to {suggestions_file} if desired)')
+        os.execlp(editor, editor, tmp)
+
+    print(f'Opening {suggestions_file} in {editor}')
+    os.execlp(editor, editor, str(suggestions_file))
+    return {'ok': True}  # unreachable if execlp succeeds
+
+
+def cmd_mvitems(
+    cfg: Dict[str, Any],
+    to_location: str,
+    skus: List[str],
+    from_location: Optional[str] = None,
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+    check_only: bool = False,
+) -> Dict[str, Any]:
+    """Move items to to_location. Selects by explicit SKUs, --from, --search, or --status."""
+    import time as _time
+    started = _time.time()
+
+    # Build the full target set
+    target: Set[str] = set(skus)
+
+    if from_location:
+        target |= resolve(cfg, location=from_location)
+    if search:
+        target |= resolve(cfg, search=search)
+    if status:
+        target |= resolve(cfg, status=status)
+
+    if not target:
+        return {'ok': True, 'to_location': to_location, 'moved': [],
+                'count': 0, 'elapsed_seconds': 0.0,
+                'note': 'no items matched the given selectors'}
+
+    moved:  List[str] = []
+    failed: List[Dict[str, Any]] = []
+
+    for sku in sorted(target):
+        if check_only:
+            moved.append(sku)
+            continue
+        try:
+            result = locationupdate(cfg, sku, to_location)
+            if result.get('ok'):
+                moved.append(sku)
+            else:
+                failed.append({'sku': sku, 'error': result.get('error', 'unknown')})
+        except Exception as e:
+            failed.append({'sku': sku, 'error': str(e)})
+
+    return {
+        'ok':              len(failed) == 0,
+        'to_location':     to_location,
+        'moved':           moved,
+        'failed':          failed,
+        'count':           len(moved),
+        'elapsed_seconds': round(_time.time() - started, 3),
+        'check_only':      check_only,
+    }
+
+
 def cmd_set_template(
     cfg: Dict[str, Any],
     *,
@@ -1498,6 +1605,20 @@ def main() -> int:
             result = catlocmvall(cfg, args.from_location, args.to_location,
                                  check_only=check)
 
+        elif args.op == 'mvitems':
+            result = cmd_mvitems(
+                cfg,
+                to_location=args.to_location,
+                skus=args.skus or [],
+                from_location=args.from_location,
+                search=args.search,
+                status=args.status,
+                check_only=args.check_only,
+            )
+
+        elif args.op == 'suggest-edit':
+            result = cmd_suggest_edit(cfg, pending_only=args.pending_only)
+
         elif args.op == 'build-full':
             result = build_full_catalog(cfg, check_only=check)
 
@@ -1532,7 +1653,7 @@ def main() -> int:
             else:
                 result = build_search_catalog(cfg, source='auto',
                                               check_only=check)
-        elif args.op == 'health':
+        elif args.op in ('health', 'status'):
             result = check_all(cfg,
                                include_ollama=not args.no_ollama,
                                include_ebay=not args.no_ebay)
