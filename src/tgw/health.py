@@ -98,15 +98,21 @@ def check_postgres(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """PostgreSQL reachable and queue_jobs table accessible."""
     t = time.time()
     try:
-        from tgw.queue.state_machine import dead_letter_count, init, queue_depths
+        from tgw.queue.state_machine import dead_letter_breakdown, dead_letter_count, init, queue_depths
         dsn = cfg.get('postgres_dsn', 'dbname=state_machine user=tgw')
         init(dsn)
         depths = queue_depths()
         dl = dead_letter_count()
+        dl_by_queue = dead_letter_breakdown()
         depth_str = ', '.join(f'{q}:{n}' for q, n in depths.items()) or 'all queues empty'
-        detail = f'depths=[{depth_str}] dead_letter={dl}'
+        if dl_by_queue:
+            dl_str = ', '.join(f'{q}:{n}' for q, n in dl_by_queue.items())
+            detail = f'depths=[{depth_str}] dead_letter={dl} [{dl_str}]'
+        else:
+            detail = f'depths=[{depth_str}] dead_letter=0'
         return _result('postgres', True, detail, (time.time() - t) * 1000,
-                       queue_depths=depths, dead_letter=dl)
+                       queue_depths=depths, dead_letter=dl,
+                       dead_letter_by_queue=dl_by_queue)
     except Exception as e:
         return _result('postgres', False, f'unreachable: {e}', (time.time() - t) * 1000)
 

@@ -21,6 +21,7 @@ _tgw_subcommands=(
     category-groups
     catlocmvall
     data-scrub
+    dead-letter
     ebay-pull
     ebay-sweep
     ensure-catalog
@@ -122,12 +123,13 @@ _tgw() {
             mvitems)       flags+=" --from --search --status --check-only" ;;
             catlocmvall)   flags+=" --check-only" ;;
             suggest-edit)  flags+=" --pending-only" ;;
-            catalog-verify) flags+=" --location --limit --severity --output --json" ;;
+            catalog-verify) flags+=" --location --limit --severity --output --json --mark-verified --force --skip-verified" ;;
             category-groups) flags+=" --reseed" ;;
             set-template)  flags+=" --list --camera --dry-run" ;;
-            todo)          flags+=" --add --done --priority --source --all --seed" ;;
+            todo)          flags+=" --add --done --update --delegate --set-priority --priority --source --all --seed" ;;
             sku-migrate)   flags+=" --class --dry-run --run --limit --manifest --check-collisions --include-live-ebay" ;;
             data-scrub)    flags+=" --pass --write" ;;
+            dead-letter)   flags+=" --queue --limit --requeue --cancel" ;;
             velocity-report) flags+=" --refresh --category --min-sold --json --output" ;;
         esac
         COMPREPLY=( $(compgen -W "$flags" -- "$cur") )
@@ -181,6 +183,18 @@ _tgw() {
         todo)
             if [[ $cword -eq 2 ]]; then
                 COMPREPLY=( $(compgen -W "claude admin gemini db" -- "$cur") )
+                return
+            fi
+            ;;
+        catalog-verify)
+            if [[ "$prev" == "--severity" ]]; then
+                COMPREPLY=( $(compgen -W "critical warning info" -- "$cur") )
+                return
+            fi
+            ;;
+        requeue)
+            if [[ "$prev" == "--status" ]]; then
+                COMPREPLY=( $(compgen -W "In\ Stock sold staged live draft" -- "$cur") )
                 return
             fi
             ;;

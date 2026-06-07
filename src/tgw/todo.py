@@ -107,6 +107,45 @@ def todo_list(agent: Optional[str] = None, show_all: bool = False) -> List[Dict[
             return [dict(r) for r in cur.fetchall()]
 
 
+def todo_update(item_id: int, body: str) -> Dict[str, Any]:
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                "UPDATE todo_items SET body = %s WHERE id = %s AND done_at IS NULL RETURNING id, agent",
+                (body, item_id),
+            )
+            row = cur.fetchone()
+    if row is None:
+        return {'ok': False, 'error': f'item {item_id} not found or already done'}
+    return {'ok': True, 'id': row[0], 'agent': row[1], 'body': body}
+
+
+def todo_delegate(item_id: int, new_agent: str) -> Dict[str, Any]:
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                "UPDATE todo_items SET agent = %s WHERE id = %s AND done_at IS NULL RETURNING id, body",
+                (new_agent, item_id),
+            )
+            row = cur.fetchone()
+    if row is None:
+        return {'ok': False, 'error': f'item {item_id} not found or already done'}
+    return {'ok': True, 'id': row[0], 'agent': new_agent, 'body': row[1]}
+
+
+def todo_set_priority(item_id: int, priority: int) -> Dict[str, Any]:
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                "UPDATE todo_items SET priority = %s WHERE id = %s AND done_at IS NULL RETURNING id, agent, body",
+                (priority, item_id),
+            )
+            row = cur.fetchone()
+    if row is None:
+        return {'ok': False, 'error': f'item {item_id} not found or already done'}
+    return {'ok': True, 'id': row[0], 'agent': row[1], 'priority': priority, 'body': row[2]}
+
+
 def todo_seed() -> Dict[str, Any]:
     """Seed Work Tracks items; skip if body already exists for that agent."""
     added = 0
@@ -149,6 +188,36 @@ def cmd_todo(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
         result = todo_done(args.done)
         if result['ok']:
             print(f"Done: #{result['id']} [{result['agent']}] {result['body'][:60]}")
+        else:
+            print(f"Error: {result['error']}")
+        return result
+
+    if args.update is not None:
+        item_id, body = args.update[0], ' '.join(args.update[1:])
+        if not body:
+            print('Error: --update requires ID and new text')
+            return {'ok': False, 'error': 'missing text'}
+        result = todo_update(int(item_id), body)
+        if result['ok']:
+            print(f"Updated #{result['id']} [{result['agent']}]: {body[:60]}")
+        else:
+            print(f"Error: {result['error']}")
+        return result
+
+    if args.delegate is not None:
+        item_id, new_agent = args.delegate
+        result = todo_delegate(int(item_id), new_agent)
+        if result['ok']:
+            print(f"Delegated #{result['id']} → {new_agent}: {result['body'][:60]}")
+        else:
+            print(f"Error: {result['error']}")
+        return result
+
+    if args.set_priority is not None:
+        item_id, priority = args.set_priority
+        result = todo_set_priority(int(item_id), int(priority))
+        if result['ok']:
+            print(f"Priority #{result['id']} [{result['agent']}] → p{priority}: {result['body'][:50]}")
         else:
             print(f"Error: {result['error']}")
         return result

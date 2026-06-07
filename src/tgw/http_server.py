@@ -263,6 +263,8 @@ def patch_item(sku: str, body: PatchBody) -> Dict[str, Any]:
     # Atomic multi-field update: load → merge → write
     doc = load_item_doc(json_path)
     doc.update(body.fields)
+    if "catalog_verified" not in body.fields:
+        doc.pop("catalog_verified", None)
     atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
 
     if location_value is not None:

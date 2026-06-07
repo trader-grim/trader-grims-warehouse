@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-08 (session 13)
+updated: 2026-06-09 (session 14)
 maintained_by: Opus (planner)
 ---
 
@@ -82,6 +82,35 @@ maintained_by: Opus (planner)
 - `tgw staged` / `tgw publish` — operator review gate before any item goes live
 - **Open issue**: errorId 25002 `Item.Country` at publish for some categories (34032, 14027, 13916) — offer body is correct, investigating category-specific requirements
 
+### Pipeline additions — 2026-06-09 (session 14, batch 3)
+- **`tgw dead-letter` command DONE** — `dead_letter_jobs(queue, limit)` + `requeue_dead_letter_job(job_id)` added to `state_machine.py`. `cmd_dead_letter()` in `api.py`: lists dead_letter jobs grouped by queue with classify_dead_letter verdict ([transient]/[permanent]), error snippet, finished timestamp. `--requeue JOB_ID` re-enqueues from payload (cancels dead_letter entry); `--cancel QUEUE` bulk-cancels. `tgw_dead_letter` MCP tool added (10 tools total). `dead-letter` in bash completion. 3 new tests.
+- **`notify()` on HardFailure DONE** — `worker_base.py` HardFailure path now fires `notify(..., level='error')` symmetrically with the transient requeue path.
+- **`offline_draft_stall` catalog-verify rule DONE** — New warning rule in `_verify_item()`: `offline_draft: true` + file mtime > 2h triggers `offline_draft_stall`. 2 new tests.
+- **77 tests pass** (up from 72).
+
+### Pipeline additions — 2026-06-09 (session 14, batch 2)
+- **PP-DEADLETTER-001 health integration DONE** — `dead_letter_breakdown()` added to `state_machine.py`: returns per-queue dead_letter counts. `check_postgres()` in `health.py` now shows per-queue breakdown in detail string (e.g. `dead_letter=3 [ebay_draft:2, ebay_price:1]`) and returns `dead_letter_by_queue` dict. `tgw_queue_status` MCP tool also returns `dead_letter_by_queue`. Worker transient requeue now calls `notify()` with level='warning' so it surfaces on desktop/webhook.
+- **tgw todo CRUD DONE** — Three new operations in `todo.py` + CLI: `--update ID text` (rewrite body), `--delegate ID agent` (reassign), `--set-priority ID N` (reprioritize). All idempotent on not-found. 9 new tests in `tests/test_todo.py`.
+- **Bash completion improvements** — `tgw todo` flags updated with `--update --delegate --set-priority`; `--severity` completes with `critical warning info`; `tgw requeue --status` completes with known status values.
+- **72 tests pass** (up from 63).
+
+### Pipeline additions — 2026-06-09 (session 14)
+- **GEMINI-001 processed** — Category group quality review. 22/24 groups calibration OK. Two coherence issues resolved:
+  - `electrical_fixtures` split: category 185134 (Circuit Breakers) moved to new `electrical_industrial` group (size_class=small_box, floor $10.19, typical $25.47); `electrical_fixtures` now covers wall plates/switches only (size_class=packet). ai_hints updated.
+  - `tools_hand` coherence issue noted (flashlights vs wrenches 2.57x spread) — logged as Track 2 follow-up; not split yet pending volume data.
+  - `refrigerator_magnets` merge into `collectibles_pins_buttons` declined (different price tiers, distinct ai_hints needed).
+  - ai_hints improved: `books` (+antiquarian/collectible/vintage), `photos_ephemera` (+souvenir/travel memorabilia), `media_records` (+vinyl album).
+  - Category-groups.json updated (now 25 groups). Changes are live; no worker restart needed (loaded at runtime).
+- **GEMINI-002 processed** — Data scrub analysis. Completeness matrix by pipeline stage documented. 4 stall patterns identified (offline_draft, legacy API divergence, in-flight, unmigrated legacy). New catalog-verify rules derived; 3 implemented immediately (see PP-VERIFY-001 Phase 2 below). Key finding: hybrid items (legacy + new pipeline fields) are highest risk — they have two "heads" that can disagree. Offline draft stall is a high-signal indicator for pipeline health.
+- **PP-VERIFY-001 Phase 2 DONE** — `catalog_verified` hall pass field:
+  - `_write_field()` in `items.py`: clears `catalog_verified` on any field write (except when writing `catalog_verified` itself).
+  - HTTP PATCH handler in `http_server.py`: also clears `catalog_verified` on multi-field updates via API.
+  - `cmd_catalog_verify()`: new flags `--mark-verified` (write hall pass to passing items), `--force` (mark even with violations, for operator acknowledgement), `--skip-verified` (skip already-passed items for fast re-scan). Result dict includes `skipped_verified` and `marked_verified` counts.
+  - `tgw_catalog_verify` MCP tool updated with same flags.
+  - 3 new `_verify_item` rules (from GEMINI-002): `negative_price` (warning), `inventory_api_no_offer` (warning), `barcode_lookup_fail` (info).
+  - 9 new tests. 63 total tests pass.
+- **63 tests pass** (up from 54 at session 13).
+
 ### Pipeline additions — 2026-06-08 (session 13)
 - **PP-DEADLETTER-001 DONE** — `classify_dead_letter(error_text)` in `worker_base.py`: returns `('requeue', delay_seconds)` or `('dead_letter', 0)`. `requeue_with_backoff(job_id, owner, delay, error)` in `state_machine.py`: transitions running→retry_wait with reset attempt_count and custom delay. `QueueWorker._process()` now intercepts exhausted-retry exceptions and auto-reschedules transient errors (token expired 900s, no eBay photos 600s, directory not empty 30s, ReadTimeout 120s, LEASE_EXPIRED 120s, ConnectionError 120s). Dead_letter reserved for true hard failures only. 6 new tests.
 - **PP-VERIFY-001 Phase 1 DONE** — `tgw catalog-verify [--location LOC] [--limit N] [--severity critical|warning|info] [--output PATH] [--json]` command in `api.py`. 9 rule checks: `no_title` (critical), `stale_template_prefix` (critical), `json_parse_error` (critical), `title_is_sku` (warning), `title_too_short` (warning), `no_location` (warning), `no_photo` (warning), `invalid_ebay_category` (warning), `bad_verified_date` (info), `unknown_status` (info). Outputs markdown checklist grouped by severity. Phase 2 (hall pass `catalog_verified` field) remains. 10 new tests.
@@ -124,7 +153,7 @@ maintained_by: Opus (planner)
 - **PP-PYIPC-001 added** — New PP: Python library integration for Syncthing REST API + KDE Connect. Research brief at `perplexity/PERPLEXITY-005-library-audit.md` (also covers broader library audit); Track 3 (Perplexity).
 - **PERPLEXITY-005 added** — Library audit brief: Syncthing Python client, KDE Connect DBus/REST, psycopg3 migration, Ollama client library, USB scale HID, barcode lookup alternatives. In `perplexity/PERPLEXITY-005-library-audit.md`.
 - **ISS-009 Token double-buffer bug FIXED** — `refresh_access_token()` had a 5-min internal guard conflicting with the worker's 30-min buffer, delaying the real eBay call until the last 5 minutes of token life. Fixed: added `force=True` parameter; worker now passes `force=True` to bypass the internal guard. `tgw restart-ebay-token` added: clears dead_letter token jobs and enqueues a fresh token_refresh immediately. `clear_dead_letter(queue_name)` added to `state_machine.py`.
-- **PP-PRICE-005 DONE** — Category groups taxonomy (`/opt/TGW/config/category-groups.json`): 24 groups, 65+ eBay categories mapped; fields: `name`, `store_category`, `ebay_categories`, `size_class` (flat/packet/small_box…), `ai_hint`, `pricing` (floor, typical_used, typical_new seeded from velocity p25). Integrated into `suggest_price()`: Stage 4 fallback (group typical × condition_factor before returning null); hard floor applied to ALL prices including Browse API results. `tgw category-groups [cat_id] [--list] [--reseed]` CLI; `config['category_groups_path']` config key. Immediately unblocks items with thin Browse API comps that previously stalled with null price. **Semi-chaotic storage design**: `size_class` per group encodes physical storage class; items stored by size not category — group membership gives a default size assumption at intake.
+- **PP-PRICE-005 DONE** — Category groups taxonomy (`/opt/TGW/config/category-groups.json`): originally 24 groups, expanded to 25 (session 14 — `electrical_industrial` split); 65+ eBay categories mapped; fields: `name`, `store_category`, `ebay_categories`, `size_class` (flat/packet/small_box…), `ai_hint`, `pricing` (floor, typical_used, typical_new seeded from velocity p25). Integrated into `suggest_price()`: Stage 4 fallback (group typical × condition_factor before returning null); hard floor applied to ALL prices including Browse API results. `tgw category-groups [cat_id] [--list] [--reseed]` CLI; `config['category_groups_path']` config key. Immediately unblocks items with thin Browse API comps that previously stalled with null price. **Semi-chaotic storage design**: `size_class` per group encodes physical storage class; items stored by size not category — group membership gives a default size assumption at intake.
 - **ISS-009 Operator action required** — eBay refresh token dead (HTTP 400 2026-06-05 17:00). Dave must run browser OAuth re-consent then `sudo -u tgw tgw restart-ebay-token` to re-start the cycle. See ISSUES.md ISS-009.
 - **OAuth flow improved (session 8)** — `get_access_token.py` now shows a clear bordered prompt
   so it's obvious where to paste the redirect URL. `tgw get-ebay-token --code 'v%5E...'` flag
@@ -230,7 +259,12 @@ maintained_by: Opus (planner)
 | ✅ | **PP-DEADLETTER-001** | **done** | `classify_dead_letter()` + `requeue_with_backoff()`; transient errors auto-reschedule |
 | ✅ | **PP-VERIFY-001 Phase 1** | **done** | `tgw catalog-verify`; 9 rules; markdown checklist; 10 tests |
 | ✅ | **PP-MCP-001** | **code done** | `tgw_mcp_server.py`; 9 tools; needs operator MCP registration in settings.json |
-| 1 | **PP-VERIFY-001 Phase 2** | ready | `catalog_verified` hall pass field; clear-on-write; `--force` flag |
+| ✅ | **PP-VERIFY-001 Phase 2** | **done** | `catalog_verified` hall pass; `--mark-verified`, `--force`, `--skip-verified`; clear-on-write in `_write_field` + HTTP PATCH |
+| ✅ | **PP-DEADLETTER-001 health** | **done** | Per-queue dead_letter breakdown in `tgw health` + `dead_letter_by_queue` in MCP tool; `notify()` on transient requeue |
+| ✅ | **tgw todo CRUD** | **done** | `--update`, `--delegate`, `--set-priority`; 9 new tests |
+| ✅ | **tgw dead-letter** | **done** | List/requeue/cancel dead_letter jobs; classify verdict; MCP tool `tgw_dead_letter` |
+| ✅ | **notify on HardFailure** | **done** | `notify(level='error')` fires on hard failure, symmetric with transient requeue |
+| ✅ | **offline_draft_stall rule** | **done** | catalog-verify warns when `offline_draft=true` + file > 2h old |
 | 4 | **PP-SOLD-001 Tier 3** sweep | operator gated | Run `tgw ebay-sweep` after full-history CSV import |
 | 5 | **PP-PYIPC-001** | research | Syncthing + KDE Connect Python library integration; research via PERPLEXITY-005 |
 | — | **PP-REPRICER-001** | blocked | Blocked on `buy.marketplace_insights` scope approval |
@@ -291,6 +325,11 @@ One bounded session per item. Ordered by value.
 | ✅ | PP-DEADLETTER-001 | `classify_dead_letter()` + `requeue_with_backoff()`; auto-reschedule transient failures — done (session 13) | S |
 | ✅ | PP-VERIFY-001 P1 | `tgw catalog-verify`; 9 rules; markdown checklist — done (session 13) | M |
 | ✅ | PP-MCP-001 | `tgw/mcp_server.py`; 9 tools; `tgw-mcp-server` console script; MCP registration = operator task — done (session 13) | M |
+| ✅ | GEMINI-001/002 | Category group review processed; `electrical_industrial` split; 3 new verify rules; ai_hints improved — done (session 14) | S |
+| ✅ | PP-VERIFY-001 P2 | `catalog_verified` hall pass; `--mark-verified`/`--force`/`--skip-verified`; clear-on-write — done (session 14) | S |
+| ✅ | PP-DEADLETTER-001 health | `dead_letter_breakdown()` per-queue; health detail + MCP tool; `notify()` on requeue — done (session 14) | XS |
+| ✅ | tgw todo CRUD | `--update`/`--delegate`/`--set-priority`; 9 tests — done (session 14) | XS |
+| ✅ | bash completion values | `--severity` → critical/warning/info; `todo --update/--delegate/--set-priority` — done (session 14) | XS |
 
 ### Track 2 — Gemini CLI (large-context data + self-contained tasks)
 **Status 2026-06-06**: Gemini CLI now installed and available. Gemini is Dave's primary
@@ -304,9 +343,9 @@ Save result to `inbox/` for PM-intake.
 
 | Task | Give Gemini | Expect |
 |------|-----------|--------|
-| PP-VERIFY-001 scaffold | Sample item JSON (5–10 items) + list of assumption rules | Python `catalog-verify` command scaffold + violation checker |
-| Data scrub analysis | `velocity-stats.json` + full item schema | Which fields are missing/stale across the catalog — counts and patterns |
-| Category-group quality review | `category-groups.json` + velocity-stats.json | Which groups have poor pricing data; suggest group splits or merges |
+| ✅ PP-VERIFY-001 scaffold | done (session 13) — scaffold superseded by full Phase 1 implementation |
+| ✅ Data scrub analysis | done (GEMINI-002, session 14) — completeness matrix, stall patterns, legacy scrub rules; 3 new verify rules implemented |
+| ✅ Category-group quality review | done (GEMINI-001, session 14) — `electrical_industrial` split; ai_hints improved; `tools_hand` coherence noted |
 | ebay_draft aspect fill audit | Grep of aspect fill rates per category | Which categories have worst specifics coverage; tuning recommendations |
 | PP-GLOBALS-001 analysis | Sample item JSONs (20 items, various categories) | Which fields are offer-invariant; proposed `globals` block schema |
 | **AI conversation history consolidation** | Dave's conversation history with AI assistants (Claude, Perplexity sessions) | Organize + consolidate into structured reference; **plan scope with Dave before executing** (session 10 note) |

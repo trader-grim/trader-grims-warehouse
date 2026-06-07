@@ -387,6 +387,17 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser('restart-ebay-token',
                    help='clear dead-letter token jobs and enqueue a fresh token_refresh immediately')
 
+    p = sub.add_parser('dead-letter',
+                       help='inspect and manage dead_letter queue jobs')
+    p.add_argument('--queue', default='', metavar='QUEUE',
+                   help='filter by queue name (default: all queues)')
+    p.add_argument('--limit', type=int, default=50, metavar='N',
+                   help='max jobs to show (default 50)')
+    p.add_argument('--requeue', default='', metavar='JOB_ID',
+                   help='re-enqueue a specific dead_letter job by ID (cancels the dead_letter entry)')
+    p.add_argument('--cancel', default='', metavar='QUEUE',
+                   help='cancel all dead_letter jobs in a queue')
+
     p = sub.add_parser('get-ebay-token',
                        help='browser OAuth re-consent flow — use when refresh token is dead (HTTP 400)')
     p.add_argument('--sandbox', action='store_true', help='use eBay sandbox instead of production')
@@ -435,6 +446,12 @@ def _build_parser() -> argparse.ArgumentParser:
                    help='show completed items too')
     p.add_argument('--seed', action='store_true',
                    help='seed Work Tracks items from master plan into the tracker')
+    p.add_argument('--update', nargs='+', metavar=('ID', 'TEXT'),
+                   help='update body text of an item: --update ID new text here')
+    p.add_argument('--delegate', nargs=2, metavar=('ID', 'AGENT'),
+                   help='reassign item to a different agent: --delegate ID agent')
+    p.add_argument('--set-priority', nargs=2, metavar=('ID', 'N'), dest='set_priority',
+                   help='change item priority: --set-priority ID N')
 
     p = sub.add_parser(
         'mvitems',
@@ -471,6 +488,12 @@ def _build_parser() -> argparse.ArgumentParser:
                    help='write markdown report to file (default: stdout)')
     p.add_argument('--json', dest='as_json', action='store_true',
                    help='output JSON summary instead of markdown report')
+    p.add_argument('--mark-verified', action='store_true',
+                   help='write catalog_verified hall pass to items that pass with no violations')
+    p.add_argument('--force', action='store_true',
+                   help='with --mark-verified: write hall pass even to items with violations')
+    p.add_argument('--skip-verified', action='store_true',
+                   help='skip items that already have a catalog_verified hall pass (faster re-scan)')
 
     return parser
 
@@ -531,6 +554,43 @@ def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any]) -> List[Dict[str
     if raw_status and raw_status not in _KNOWN_STATUS_VALUES:
         v('unknown_status', 'info', f'Unrecognised #STATUS value: {raw_status!r}')
 
+    # New-pipeline checks
+    offer_price = None
+    ebay_offer = doc.get('ebay_offer') or {}
+    if ebay_offer:
+        try:
+            offer_price = float(ebay_offer.get('price', 0) or 0)
+        except (TypeError, ValueError):
+            pass
+    draft = doc.get('draft_listing') or {}
+    if draft:
+        try:
+            dp = float(draft.get('price', 0) or 0)
+        except (TypeError, ValueError):
+            dp = 0.0
+        if dp and dp <= 0:
+            v('negative_price', 'warning', f'draft_listing.price is non-positive: {dp}')
+    if offer_price is not None and offer_price <= 0:
+        v('negative_price', 'warning', f'ebay_offer.price is non-positive: {offer_price}')
+
+    ebay_listing = doc.get('ebay_listing') or {}
+    if ebay_listing.get('api') == 'inventory' and not ebay_offer:
+        v('inventory_api_no_offer', 'warning',
+          'ebay_listing.api=inventory but ebay_offer block is missing')
+
+    upc = str(doc.get('upc') or '').strip()
+    if upc and not doc.get('product_lookup'):
+        v('barcode_lookup_fail', 'info',
+          f'upc present ({upc!r}) but no product_lookup block')
+
+    if doc.get('offline_draft'):
+        import time as _time
+        jf = item_dir / f'{sku}.json'
+        age_hours = (_time.time() - jf.stat().st_mtime) / 3600
+        if age_hours > 2:
+            v('offline_draft_stall', 'warning',
+              f'offline_draft=true, file unmodified for {age_hours:.1f}h — re-run ebay_draft')
+
     return viols
 
 
@@ -541,13 +601,19 @@ def cmd_catalog_verify(
     limit: int = 0,
     output: Optional[Path] = None,
     min_severity: str = 'warning',
+    mark_verified: bool = False,
+    force: bool = False,
+    skip_verified: bool = False,
 ) -> Dict[str, Any]:
     """Scan ItemData for assumption violations and emit a markdown checklist."""
+    from tgw.items import atomic_write_json
     root: Path = cfg['itemdata_root']
     min_sev = _SEV_ORDER.get(min_severity, 1)
 
     all_violations: List[Dict[str, Any]] = []
     scanned = 0
+    skipped_verified = 0
+    marked = 0
     json_errors = 0
 
     for item_dir in sorted(root.iterdir()):
@@ -574,10 +640,23 @@ def cmd_catalog_verify(
         if location and str(doc.get('location', '')).strip() != location:
             continue
 
+        if skip_verified and doc.get('catalog_verified'):
+            skipped_verified += 1
+            continue
+
         scanned += 1
-        for viol in _verify_item(sku, item_dir, doc):
+        item_viols = _verify_item(sku, item_dir, doc)
+        for viol in item_viols:
             if _SEV_ORDER.get(viol['severity'], 99) <= min_sev:
                 all_violations.append(viol)
+
+        if mark_verified:
+            has_violations = bool(item_viols)
+            if force or not has_violations:
+                ts = datetime.now(tz=timezone.utc).isoformat()
+                doc['catalog_verified'] = {'ts': ts, 'by': 'catalog-verify'}
+                atomic_write_json(jf, doc, pretty=cfg.get('pretty', True))
+                marked += 1
 
         if limit and scanned >= limit:
             break
@@ -587,10 +666,12 @@ def cmd_catalog_verify(
         by_rule[viol['rule']] = by_rule.get(viol['rule'], 0) + 1
 
     now_str = datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+    skip_note = f'  |  Skipped (verified): {skipped_verified}' if skip_verified else ''
+    mark_note = f'  |  Marked verified: {marked}' if mark_verified else ''
     lines = [
         '# Catalog Verification Report',
         f'Generated: {now_str}',
-        f'Scanned: {scanned} items  |  Violations: {len(all_violations)}  |  Severity filter: {min_severity}+',
+        f'Scanned: {scanned} items  |  Violations: {len(all_violations)}  |  Severity filter: {min_severity}+{skip_note}{mark_note}',
         '',
     ]
 
@@ -620,6 +701,8 @@ def cmd_catalog_verify(
         'violations': len(all_violations),
         'by_rule': by_rule,
         'json_errors': json_errors,
+        'skipped_verified': skipped_verified,
+        'marked_verified': marked,
     }
 
 
@@ -717,6 +800,63 @@ def cmd_hint_trail(cfg: Dict[str, Any], sku: str) -> Dict[str, Any]:
         print()
 
     return {'ok': True, 'sku': sku, 'count': len(history), 'history': history}
+
+
+def cmd_dead_letter(
+    cfg: Dict[str, Any],
+    *,
+    queue: str = '',
+    limit: int = 50,
+    requeue_id: str = '',
+    cancel_queue: str = '',
+) -> Dict[str, Any]:
+    """Inspect and manage dead_letter queue jobs."""
+    from tgw.queue import state_machine
+    from tgw.queue.worker_base import classify_dead_letter
+    state_machine.init(cfg['postgres_dsn'])
+
+    if requeue_id:
+        try:
+            new_id = state_machine.requeue_dead_letter_job(requeue_id)
+            print(f'Re-enqueued: {requeue_id[:8]}… → new job {new_id[:8]}…')
+            return {'ok': True, 'action': 'requeue', 'old_job_id': requeue_id, 'new_job_id': new_id}
+        except ValueError as exc:
+            print(f'Error: {exc}')
+            return {'ok': False, 'error': str(exc)}
+
+    if cancel_queue:
+        n = state_machine.clear_dead_letter(cancel_queue)
+        print(f'Cancelled {n} dead_letter job(s) in queue {cancel_queue!r}.')
+        return {'ok': True, 'action': 'cancel', 'queue': cancel_queue, 'cancelled': n}
+
+    jobs = state_machine.dead_letter_jobs(queue_name=queue, limit=limit)
+    if not jobs:
+        label = f' in {queue!r}' if queue else ''
+        print(f'No dead_letter jobs{label}.')
+        return {'ok': True, 'count': 0, 'jobs': []}
+
+    current_q = None
+    for job in jobs:
+        if job['queue_name'] != current_q:
+            current_q = job['queue_name']
+            print(f'\n── {current_q} ──')
+        payload = dict(job['payload_json']) if job['payload_json'] else {}
+        sku = payload.get('sku', payload.get('entity_id', '—'))
+        error = (job['error_detail'] or '').replace('\n', ' ')
+        verdict, _ = classify_dead_letter(error)
+        verdict_tag = '[transient]' if verdict == 'requeue' else '[permanent]'
+        jid_short = str(job['job_id'])[:8]
+        finished = str(job['finished_at'])[:16] if job['finished_at'] else '?'
+        print(f'  {jid_short}  sku={sku:<22} {verdict_tag}  finished={finished}')
+        if error:
+            print(f'           {error[:100]}')
+
+    print(f'\n{len(jobs)} dead_letter job(s). Use --requeue JOB_ID or --cancel QUEUE to act.')
+    return {'ok': True, 'count': len(jobs), 'jobs': [
+        {**j, 'payload_json': dict(j['payload_json'] or {}),
+         'verdict': classify_dead_letter(j.get('error_detail') or '')[0]}
+        for j in jobs
+    ]}
 
 
 def cmd_requeue(cfg: Dict[str, Any], *,
@@ -2309,10 +2449,23 @@ def main() -> int:
                 limit=args.limit,
                 output=Path(args.output) if args.output else None,
                 min_severity=args.severity,
+                mark_verified=getattr(args, 'mark_verified', False),
+                force=getattr(args, 'force', False),
+                skip_verified=getattr(args, 'skip_verified', False),
             )
             if getattr(args, 'as_json', False):
                 print(json.dumps(result, indent=2))
             # markdown report already printed by cmd_catalog_verify
+            return 0 if result['ok'] else 1
+
+        elif args.op == 'dead-letter':
+            result = cmd_dead_letter(
+                cfg,
+                queue=getattr(args, 'queue', ''),
+                limit=getattr(args, 'limit', 50),
+                requeue_id=getattr(args, 'requeue', ''),
+                cancel_queue=getattr(args, 'cancel', ''),
+            )
             return 0 if result['ok'] else 1
 
         elif args.op == 'restart-ebay-token':

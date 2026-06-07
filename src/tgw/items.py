@@ -134,6 +134,8 @@ def _write_field(cfg: Dict[str, Any], sku: str, field: str,
     doc = load_item_doc(path)
     before = doc.get(field)
     doc[field] = value
+    if field != 'catalog_verified':
+        doc.pop('catalog_verified', None)
     atomic_write_json(path, doc, pretty=True)
     return {'sku': sku, 'field': field, 'before': before, 'after': value}
 

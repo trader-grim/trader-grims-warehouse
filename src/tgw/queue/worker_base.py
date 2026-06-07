@@ -158,6 +158,12 @@ class QueueWorker:
             state_machine.mark_dead_letter(job_id, self.owner, repr(exc))
             tgw_logging.log_event('job_dead_letter', job_id=job_id,
                                   error=repr(exc))
+            from tgw.notify import notify
+            notify(
+                f'Dead letter: {self.queue_name}',
+                f'{repr(exc)[:140]}',
+                level='error',
+            )
         except Exception as exc:
             error_text = repr(exc)
             log.exception('job %s failed: %s', job_id, error_text)
@@ -173,6 +179,12 @@ class QueueWorker:
                     log.warning(
                         'transient error at retry limit on %s; rescheduling in %ds: %s',
                         self.queue_name, delay, error_text[:200],
+                    )
+                    from tgw.notify import notify
+                    notify(
+                        f'Transient requeue: {self.queue_name}',
+                        f'Rescheduling in {delay}s — {error_text[:120]}',
+                        level='warning',
                     )
                     state_machine.requeue_with_backoff(
                         job_id, self.owner, delay, error_text

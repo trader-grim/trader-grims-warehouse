@@ -309,6 +309,22 @@ def dead_letter_count() -> int:
             return cur.fetchone()[0]
 
 
+def dead_letter_breakdown() -> Dict[str, int]:
+    """Return per-queue count of dead_letter jobs (excludes queues with 0)."""
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                SELECT queue_name, COUNT(*) as n
+                  FROM queue_jobs
+                 WHERE state = 'dead_letter'
+                 GROUP BY queue_name
+                 ORDER BY n DESC, queue_name
+                """
+            )
+            return {row[0]: row[1] for row in cur.fetchall()}
+
+
 def clear_dead_letter(queue_name: str) -> int:
     """Cancel all dead_letter jobs for a given queue. Returns the number of rows affected."""
     with _conn() as con:
@@ -319,6 +335,88 @@ def clear_dead_letter(queue_name: str) -> int:
                 (queue_name,),
             )
             return cur.rowcount
+
+
+def dead_letter_jobs(queue_name: str = '', limit: int = 100) -> List[Dict[str, Any]]:
+    """Return dead_letter jobs as dicts, optionally filtered by queue_name."""
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if queue_name:
+                cur.execute(
+                    """
+                    SELECT job_id::text, queue_name, payload_json, error_detail,
+                           attempt_count, max_attempts, created_at, finished_at
+                      FROM queue_jobs
+                     WHERE state = 'dead_letter' AND queue_name = %s
+                     ORDER BY finished_at DESC NULLS LAST
+                     LIMIT %s
+                    """,
+                    (queue_name, limit),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT job_id::text, queue_name, payload_json, error_detail,
+                           attempt_count, max_attempts, created_at, finished_at
+                      FROM queue_jobs
+                     WHERE state = 'dead_letter'
+                     ORDER BY queue_name, finished_at DESC NULLS LAST
+                     LIMIT %s
+                    """,
+                    (limit,),
+                )
+            return [dict(r) for r in cur.fetchall()]
+
+
+def requeue_dead_letter_job(job_id: str) -> str:
+    """Re-enqueue a dead_letter job by cloning its payload into a fresh queued job.
+
+    The dead_letter job is cancelled (not deleted). Returns the new job_id.
+    Raises ValueError if the job is not found or not in dead_letter state.
+    """
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT job_id::text, queue_name, payload_json, entity_type,
+                       entity_id, operation, priority, max_attempts
+                  FROM queue_jobs
+                 WHERE job_id = %s AND state = 'dead_letter'
+                """,
+                (job_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise ValueError(f'job {job_id!r} not found or not in dead_letter state')
+
+        with con.cursor() as cur:
+            # Cancel the dead_letter job
+            cur.execute(
+                "UPDATE queue_jobs SET state = 'cancelled' WHERE job_id = %s",
+                (job_id,),
+            )
+            # Insert a fresh queued job — no dedupe_key so it bypasses the unique constraint
+            cur.execute(
+                """
+                INSERT INTO queue_jobs (queue_name, payload_json, entity_type, entity_id,
+                                        operation, handler_family, priority, max_attempts,
+                                        state, error_code, error_detail)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'queued', NULL, NULL)
+                RETURNING job_id::text
+                """,
+                (
+                    row['queue_name'],
+                    json.dumps(dict(row['payload_json'])),
+                    row['entity_type'],
+                    row['entity_id'],
+                    row['operation'],
+                    row['queue_name'],
+                    row['priority'],
+                    row['max_attempts'],
+                ),
+            )
+            new_id = cur.fetchone()[0]
+    return new_id
 
 
 def requeue_with_backoff(job_id: str, lease_owner: str, delay_seconds: int, error_detail: str = '') -> None:

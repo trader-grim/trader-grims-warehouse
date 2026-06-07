@@ -194,3 +194,168 @@ def test_cmd_catalog_verify(tmp_path, capsys):
     captured = capsys.readouterr()
     assert '# Catalog Verification Report' in captured.out
     assert sku_bad in captured.out
+
+
+# ---------------------------------------------------------------------------
+# New rules: negative_price, inventory_api_no_offer, barcode_lookup_fail
+# ---------------------------------------------------------------------------
+
+def test_verify_negative_price_offer(tmp_path):
+    sku = 'tgw202601010000020'
+    doc = {'sku': sku, 'title': 'Valid Title For Testing This', 'location': 'G7',
+           'ebay_offer': {'price': -5.0}}
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'negative_price' in rules
+
+
+def test_verify_inventory_api_no_offer(tmp_path):
+    sku = 'tgw202601010000021'
+    doc = {'sku': sku, 'title': 'Valid Title For Testing Item', 'location': 'H8',
+           'ebay_listing': {'api': 'inventory', 'listing_id': '123'}}
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'inventory_api_no_offer' in rules
+
+
+def test_verify_inventory_api_with_offer_is_clean(tmp_path):
+    sku = 'tgw202601010000022'
+    doc = {'sku': sku, 'title': 'Valid Title For Testing Okay', 'location': 'I9',
+           'ebay_category_id': '12345',
+           'ebay_listing': {'api': 'inventory'},
+           'ebay_offer': {'offer_id': 'abc', 'price': 9.99}}
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'inventory_api_no_offer' not in rules
+
+
+def test_verify_barcode_lookup_fail(tmp_path):
+    sku = 'tgw202601010000023'
+    doc = {'sku': sku, 'title': 'Valid Title For Testing Barcodes', 'location': 'J10',
+           'upc': '012345678901'}
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'barcode_lookup_fail' in rules
+
+
+def test_verify_offline_draft_stall(tmp_path):
+    """offline_draft=True on a stale file triggers offline_draft_stall warning."""
+    import os
+    import time
+    sku = 'tgw202601010000025'
+    doc = {'sku': sku, 'title': 'Valid Title For Testing Offline', 'location': 'L12',
+           'offline_draft': True}
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    # Backdate the JSON file's mtime to 3 hours ago
+    old_time = time.time() - (3 * 3600)
+    os.utime(item_dir / f'{sku}.json', (old_time, old_time))
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'offline_draft_stall' in rules
+
+
+def test_verify_offline_draft_recent_is_clean(tmp_path):
+    """offline_draft=True on a recent file does NOT trigger (draft may still be running)."""
+    sku = 'tgw202601010000026'
+    doc = {'sku': sku, 'title': 'Valid Title For Testing Draft', 'location': 'M13',
+           'offline_draft': True}
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    # File was just written — mtime is now
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'offline_draft_stall' not in rules
+
+
+def test_verify_barcode_with_lookup_is_clean(tmp_path):
+    sku = 'tgw202601010000024'
+    doc = {'sku': sku, 'title': 'Valid Title For Testing Okay', 'location': 'K11',
+           'upc': '012345678901', 'product_lookup': {'source': 'upcitemdb', 'title': 'Test'}}
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'barcode_lookup_fail' not in rules
+
+
+# ---------------------------------------------------------------------------
+# PP-VERIFY-001 Phase 2: mark_verified hall pass + skip_verified
+# ---------------------------------------------------------------------------
+
+def test_mark_verified_writes_hall_pass(tmp_path, capsys):
+    """Items with no violations get catalog_verified written when --mark-verified."""
+    itemdata = tmp_path / 'ItemData'
+    itemdata.mkdir()
+    sku = 'tgw202601010000030'
+    d = itemdata / sku
+    d.mkdir()
+    jf = d / f'{sku}.json'
+    jf.write_text(json.dumps({
+        'sku': sku,
+        'title': 'Clean Item For Verification Test',
+        'location': 'SHELF01',
+        'ebay_category_id': '12345',
+    }), encoding='utf-8')
+    (d / 'photo.jpg').write_bytes(b'')
+
+    cfg = {'itemdata_root': itemdata, 'pretty': True}
+    result = cmd_catalog_verify(cfg, min_severity='warning', mark_verified=True)
+    capsys.readouterr()
+
+    assert result['ok']
+    assert result['marked_verified'] == 1
+    written = json.loads(jf.read_text())
+    assert 'catalog_verified' in written
+    assert written['catalog_verified']['by'] == 'catalog-verify'
+    assert 'ts' in written['catalog_verified']
+
+
+def test_skip_verified_skips_marked_items(tmp_path, capsys):
+    """Items with catalog_verified are skipped when --skip-verified."""
+    itemdata = tmp_path / 'ItemData'
+    itemdata.mkdir()
+    sku = 'tgw202601010000031'
+    d = itemdata / sku
+    d.mkdir()
+    jf = d / f'{sku}.json'
+    jf.write_text(json.dumps({
+        'sku': sku,
+        'title': 'Already Verified Item Test',
+        'location': 'SHELF01',
+        'catalog_verified': {'ts': '2026-01-01T00:00:00Z', 'by': 'catalog-verify'},
+    }), encoding='utf-8')
+
+    cfg = {'itemdata_root': itemdata, 'pretty': True}
+    result = cmd_catalog_verify(cfg, min_severity='warning', skip_verified=True)
+    capsys.readouterr()
+
+    assert result['ok']
+    assert result['scanned'] == 0
+    assert result['skipped_verified'] == 1
+
+
+def test_write_field_clears_catalog_verified(tmp_path):
+    """_write_field clears catalog_verified when any other field is updated."""
+    from tgw.items import _write_field
+    sku = 'tgw202601010000032'
+    d = tmp_path / sku
+    d.mkdir()
+    jf = d / f'{sku}.json'
+    jf.write_text(json.dumps({
+        'sku': sku, 'title': 'Some Title',
+        'catalog_verified': {'ts': '2026-01-01T00:00:00Z', 'by': 'catalog-verify'},
+    }), encoding='utf-8')
+    cfg = {'itemdata_root': tmp_path}
+    _write_field(cfg, sku, 'title', 'New Title')
+    doc = json.loads(jf.read_text())
+    assert 'catalog_verified' not in doc
+
+
+def test_write_field_preserves_catalog_verified_when_writing_it(tmp_path):
+    """_write_field writing catalog_verified itself does not clear it."""
+    from tgw.items import _write_field
+    sku = 'tgw202601010000033'
+    d = tmp_path / sku
+    d.mkdir()
+    jf = d / f'{sku}.json'
+    jf.write_text(json.dumps({'sku': sku, 'title': 'Some Title'}), encoding='utf-8')
+    cfg = {'itemdata_root': tmp_path}
+    hall_pass = {'ts': '2026-01-01T00:00:00Z', 'by': 'catalog-verify'}
+    _write_field(cfg, sku, 'catalog_verified', hall_pass)
+    doc = json.loads(jf.read_text())
+    assert doc['catalog_verified'] == hall_pass

@@ -151,10 +151,14 @@ def tgw_queue_status() -> str:
         dead_letter_total = sum(
             r['count'] for r in rows if r['state'] == 'dead_letter'
         )
+        dead_letter_by_queue = {
+            r['queue']: r['count'] for r in rows if r['state'] == 'dead_letter'
+        }
         return json.dumps({
             'ok': True,
             'queues': rows,
             'dead_letter_total': dead_letter_total,
+            'dead_letter_by_queue': dead_letter_by_queue,
         })
     except Exception as exc:
         return json.dumps({'ok': False, 'error': str(exc)})
@@ -305,6 +309,48 @@ def tgw_add_suggest(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# tgw_dead_letter — inspect dead_letter jobs
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def tgw_dead_letter(
+    queue: str = '',
+    limit: int = 50,
+) -> str:
+    """List dead_letter jobs with their classify verdict (transient vs permanent).
+
+    Args:
+        queue: Filter by queue name (empty = all queues)
+        limit: Max jobs to return (default 50)
+
+    Returns JSON list of dead_letter jobs with queue, sku, error, verdict fields.
+    """
+    cfg = _get_cfg()
+    from tgw.queue import state_machine
+    from tgw.queue.worker_base import classify_dead_letter
+    state_machine.init(cfg['postgres_dsn'])
+    try:
+        jobs = state_machine.dead_letter_jobs(queue_name=queue, limit=limit)
+        result = []
+        for j in jobs:
+            payload = dict(j['payload_json'] or {})
+            verdict, delay = classify_dead_letter(j.get('error_detail') or '')
+            result.append({
+                'job_id': j['job_id'],
+                'queue': j['queue_name'],
+                'sku': payload.get('sku', payload.get('entity_id', '')),
+                'error': (j.get('error_detail') or '')[:200],
+                'verdict': verdict,
+                'requeue_delay': delay,
+                'attempt_count': j['attempt_count'],
+                'finished_at': str(j['finished_at']) if j['finished_at'] else None,
+            })
+        return json.dumps({'ok': True, 'count': len(result), 'jobs': result}, default=str)
+    except Exception as exc:
+        return json.dumps({'ok': False, 'error': str(exc)})
+
+
+# ---------------------------------------------------------------------------
 # tgw_hint_trail — show identification history for an item
 # ---------------------------------------------------------------------------
 
@@ -335,6 +381,9 @@ def tgw_catalog_verify(
     location: str = '',
     limit: int = 100,
     severity: str = 'warning',
+    mark_verified: bool = False,
+    force: bool = False,
+    skip_verified: bool = False,
 ) -> str:
     """Scan ItemData for assumption violations and return a violation summary.
 
@@ -342,6 +391,9 @@ def tgw_catalog_verify(
         location: Limit scan to items at this location (empty = all)
         limit: Maximum items to scan (default 100)
         severity: Minimum severity to include ('critical', 'warning', 'info')
+        mark_verified: Write catalog_verified hall pass to items with no violations
+        force: With mark_verified=True: write hall pass even to items with violations
+        skip_verified: Skip items that already have a catalog_verified hall pass
 
     Returns JSON with scanned count, violation count, and by_rule breakdown.
     """
@@ -354,6 +406,9 @@ def tgw_catalog_verify(
             limit=limit,
             output=None,
             min_severity=severity,
+            mark_verified=mark_verified,
+            force=force,
+            skip_verified=skip_verified,
         )
         return json.dumps(result)
     except Exception as exc:
