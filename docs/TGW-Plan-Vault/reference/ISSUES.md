@@ -46,13 +46,12 @@ incomplete wiring, and data quality problems that need fixing.
   — value from developer.ebay.com → My Account → Application Keys → DevID
 - **Status**: pending operator action (blocked on webhook infra deployment anyway)
 
-### ISS-006 — _USER_PROMPT_ENRICHED exists but not yet wired
-- **Symptom**: `workers/ai_identify.py` has `_USER_PROMPT_ENRICHED` template for
-  product-lookup-augmented prompts, but the wiring to PP-LOOKUP-001 is not yet done
-- **Impact**: product lookup data (when available) doesn't flow into vision model
-- **Fix**: implement PP-LOOKUP-001 dispatcher; wire result into `_USER_PROMPT_ENRICHED`
-  in the hint priority chain
-- **Status**: waiting on PP-LOOKUP-001 implementation
+### ~~ISS-006~~ — _USER_PROMPT_ENRICHED not wired ✅ RESOLVED (verified session 15, 2026-06-07)
+- **Was**: `workers/ai_identify.py` had the `_USER_PROMPT_ENRICHED` template but the wiring to
+  PP-LOOKUP-001 was thought unfinished
+- **Reality**: already fully wired. `ai_identify.py:171–182` calls `lookup_product()`, builds
+  `product_context`, and `:199–204` selects `_USER_PROMPT_ENRICHED.format(product_context=...)`
+  when context is present (`prompt_type='enriched'` recorded at `:271`). Stale issue — closed.
 
 ### ~~ISS-007~~ — GitHub linting errors ✅ FIXED 2026-06-04
 - 70 errors auto-fixed by ruff; 5 manual fixes applied:

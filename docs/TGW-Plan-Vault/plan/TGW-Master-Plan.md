@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-09 (session 14)
+updated: 2026-06-07 (session 15 — Track 1 round-2 planning)
 maintained_by: Opus (planner)
 ---
 
@@ -87,6 +87,20 @@ maintained_by: Opus (planner)
 - **`notify()` on HardFailure DONE** — `worker_base.py` HardFailure path now fires `notify(..., level='error')` symmetrically with the transient requeue path.
 - **`offline_draft_stall` catalog-verify rule DONE** — New warning rule in `_verify_item()`: `offline_draft: true` + file mtime > 2h triggers `offline_draft_stall`. 2 new tests.
 - **77 tests pass** (up from 72).
+
+### Planning — 2026-06-07 (session 15, Track 1 round-2 backlog)
+- **Track 1 round 1 confirmed COMPLETE** (sessions 6–14); stale numbered rows collapsed.
+- **Full code-verified audit** of all 31 open PP-* items + 9 issues (multi-agent, each finding
+  checked against actual source — not plan labels). Produced the ranked, sized round-2 backlog
+  under `## Work Tracks → Track 1 — Round 2`: **25 Claude-ready slices** (Tiers A–E) +
+  blocked-by-blocker groups + recommended sequence. No code executed — planning only.
+- **Stale-done drift corrected**: PP-MCP-001 (9→10 tools), PP-SOLD-001 (Tier 3/4 DONE),
+  PP-VERIFY-001 (Phase 2 DONE, 27 tests), PP-MC-001 (Phase 2 DONE), PP-INTAKE-001 (P1/P2 DONE;
+  `fulfillment_policy_id` template claim struck), PP-CAPTURE-001 / PP-HINT-001 / PP-STRIKE-001
+  (shipped, were "planned"), PP-GLOBALS-001 dependency (satisfied). **ISS-006 closed** (stale).
+- **Landmine fixed inline**: plan line ≈2208 falsely claimed `tgw picklist` exists — corrected.
+- Top of next batch (best-first): PP-GLOBALS-001 (XS, `weight_oz`) → PP-SOLD-001 / PP-MCP-001 /
+  PP-INTAKE-001 / PP-EDITOR-001 / PP-STRIKE-001 (test+reconcile) → PP-FULFILLMENT-001 (`picklist`).
 
 ### Pipeline additions — 2026-06-09 (session 14, batch 2)
 - **PP-DEADLETTER-001 health integration DONE** — `dead_letter_breakdown()` added to `state_machine.py`: returns per-queue dead_letter counts. `check_postgres()` in `health.py` now shows per-queue breakdown in detail string (e.g. `dead_letter=3 [ebay_draft:2, ebay_price:1]`) and returns `dead_letter_by_queue` dict. `tgw_queue_status` MCP tool also returns `dead_letter_by_queue`. Worker transient requeue now calls `notify()` with level='warning' so it surfaces on desktop/webhook.
@@ -306,10 +320,9 @@ One bounded session per item. Ordered by value.
 | ✅ | PP-SHELL-001 T1 | Shell audit + targeted fixes — done (session 6); `reference/SHELL-AUDIT.md` | M |
 | ✅ | PP-IFDIR-001 | Interface file org — done (session 6); MC + keyd in `etc/interfaces/`; symlink live | S |
 | ✅ | Data scrub P1 | `#VERIFIED`→`verified` rename — done (session 6); 55,226 items; `tgw data-scrub`; bash + Python verifiedupdate updated | M |
-| 1 | PP-SHELL-001 T2 | Remove deprecated blocks + replace ARCH-VIOLATES with `tgw` wrappers | M |
-| 3 | PP-IFDIR-001 | Reorganize interface configs into `etc/interfaces/` | S |
-| ✅ | Data scrub P1 | `#VERIFIED`→`verified` rename — done (session 6) | M |
-| 5 | SKU search | Catalog/search match on first 18 chars | XS |
+| ✅ | PP-SHELL-001 T2 | (round-1 #1) ARCH-VIOLATES + deprecated removal — done session 8 (also listed below) | M |
+| ✅ | PP-IFDIR-001 | (round-1 #3) Interface configs in `etc/interfaces/` — done session 6 (also listed above) | S |
+| ✅ | SKU search | (round-1 #5) Catalog/search match on first 18 chars — done session 6 | XS |
 | ✅ | PP-TODO-001 | PostgreSQL `todo_items` + `tgw todo [agent]` CLI — done (session 6) | M |
 | ✅ | PP-WM-001 P1 | Qtile base config + TGW widgets — done (session 7); operator install pending | M |
 | ✅ | PP-SHELL-001 T2 | ARCH-VIOLATES + deprecated block removal — done (session 8); SHELL-AUDIT.md updated | M |
@@ -330,6 +343,95 @@ One bounded session per item. Ordered by value.
 | ✅ | PP-DEADLETTER-001 health | `dead_letter_breakdown()` per-queue; health detail + MCP tool; `notify()` on requeue — done (session 14) | XS |
 | ✅ | tgw todo CRUD | `--update`/`--delegate`/`--set-priority`; 9 tests — done (session 14) | XS |
 | ✅ | bash completion values | `--severity` → critical/warning/info; `todo --update/--delegate/--set-priority` — done (session 14) | XS |
+
+**Track 1 round 1 is COMPLETE** (sessions 6–14). Every numbered item above is done. The
+round-2 backlog below was produced by a full code-verified audit of all open PP-* items and
+issues (session 15, 2026-06-07) — see `### Track 1 — Round 2` immediately below.
+
+### Track 1 — Round 2 — code-verified backlog (session 15, 2026-06-07)
+
+Produced by auditing every open PP-* item + every open issue against the **actual code**, not
+plan labels. Each item below was classified ready / blocked and sized; the audit also caught
+substantial stale-done drift (the plan was crediting several shipped features as "to build" and
+vice-versa — see the reconciliation subsection). **Nothing here is executed yet — this is the
+plan.** Ordering is value-per-risk, best-first. All "ready" slices are buildable + testable
+offline (pure functions, mocked tests, or local-only data); none require the dead eBay token.
+
+**Cross-cutting rules for every round-2 slice:**
+- Do **not** commit until Dave asks (he controls git history).
+- Run `tgw health` after any change touching config or `health.py` (PP-GLOBALS-001,
+  PP-DEPLOY-001, PP-WM-001 notify block).
+- Restart affected `tgw-worker@<queue>` units after editing a worker (e.g. `ai_identify` for
+  the PP-LOOKUP-001 routing change).
+- **ISS-009 (dead eBay OAuth token) blocks LIVE verification** of anything that PUTs/GETs eBay
+  (the wired `weight_oz` push, sold-poll Tier 1, webhook registration, strikethrough go-live).
+  It does **not** block writing/unit-testing any ready slice. Token restore is operator Track 4.
+
+#### Tier A — XS, highest value-per-risk (do first)
+| Rank | PP | Slice | Size |
+|------|----|-------|------|
+| 1 | PP-GLOBALS-001 | Wire `weight_oz` into eBay inventory body (`packageWeightAndSize`) in `_build_offer_bodies()` with a 0-guard mirroring `ebay_sku_migrate.py:299`; unit-test. Operator already captures `weight_oz` at intake but it's dropped — staged offers ship with no calculated-shipping weight. Plan's "wait for PP-INTAKE-001 P2" dependency (≈line 1106) is **satisfied/stale**. | XS |
+
+#### Tier B — test-only / doc-reconcile for already-shipped hot-path code (near-zero regression risk; front-load)
+| Rank | PP | Slice | Size |
+|------|----|-------|------|
+| 2 | PP-SOLD-001 | `tests/test_sold_recon.py` for the token-free path: `pull.find_title_match` (Jaccard/threshold/tie-reject), `mark_item_sold` idempotency, `build_listing_index`, `notifications.parse_sold_notification`/`verify_notification_signature` (encode current accept-when-unsigned as deliberate), `cmd_ebay_sweep` A/B/C. **Also reconcile: Tier 3 ebay-sweep + Tier 4 webhook are DONE, not "pending/future".** | S |
+| 3 | PP-MCP-001 | `tests/test_mcp_server.py` for all **10** tools (mock `_get_cfg`/state_machine; `tgw_health` runs `include_ebay=False`). Fix drift: plan table lists only 9 (omits `tgw_dead_letter`); docstring says `~/.claude/mcp_servers.json` vs plan's `settings.json` block. | S |
+| 4 | PP-INTAKE-001 | Tests for set-template: `_build_template_fields`, `cmd_set_template` (--list/--dry-run/--camera/unknown-key/CurrentItem), `POST /api/items/{sku}/set-template`. **Reconcile: P1 & P2 DONE; STRIKE the §1612 claim that the template writes `fulfillment_policy_id` — the code never does** (PP-HINT-001 shipping_profile is the cleaner per-item mechanism). | S |
+| 5 | PP-EDITOR-001 | `tests/test_http_server.py` via FastAPI `TestClient` against the **untested 28 KB backend** every Flutter phase + MC console depends on: GET/PATCH `/api/items/{sku}` (sku-immutable, empty-field, merge, `catalog_verified` auto-pop, location-tree sync, coalesced rebuild), `/api/items`, `/api/locations`, `/api/category-groups`, bearer-auth 401. Mock PG + `enqueue_job`. Flutter app stays GUI-blocked. | M |
+| 6 | PP-STRIKE-001 | Tests for the existing (untested) strikethrough gating: `ebay_price.py:104` MSRP>launch, `ebay/sync.py:285` `originalRetailPrice` gated on `strikethrough_enabled`. Optional: add MSRP line to `ebay_draft.py` description footer. **Reconcile: core code is DONE (plan says "Planned"); do NOT flip `strikethrough_enabled` — needs account approval + live token.** | S |
+
+#### Tier C — new operator-facing capability, pure/additive code
+| Rank | PP | Slice | Size |
+|------|----|-------|------|
+| 7 | PP-FULFILLMENT-001 | Real `tgw picklist` CLI: location-sorted plain-text list (location/SKU/title/eBay id) over the token-free `list_items()`. **LANDMINE: plan line ≈2208 falsely says this already exists — it does NOT** (only `picklist_line()` in `ebay/description.py`). Hardware sub-features (scale/printer/PDF/QR) stay blocked. | S |
+| 8 | PP-HINT-001 | Per-item `shipping_profile` override: `tgw setshipping <sku> <profile>` writes item JSON; `_get_listing_policies()` honors `item['shipping_profile']` with precedence item > category > global > API. **Reconcile: requeue / Browse enrichment / hint-trail / `hint --force` already DONE; only this remains.** Must not auto-repush published listings. | S |
+| 9 | PP-STORAGE-001 | Wire the (currently write-only) `size_class` field into fulfillment-policy resolution: add `fulfillment_policy_by_size_class` map + extend `_get_listing_policies(..., size_class=None)` with precedence below per-category. Pairs with #8 — same resolver; sequence them together. Defer intake-UI prompt + weight-derivation. | S |
+| 10 | PP-LOOKUP-001 | `apis/lookup/pricecharting.py` (games/cards/collectibles market value; graceful-skip if no key, like `igdb.py`) + dispatcher routing for is_game/is_tcg + **first-ever `tests/test_lookup.py`**. Routing edit is on every `ai_identify` run — keep strictly additive (fires only when result is None and key present); restart `ai_identify`. | S |
+| 11 | PP-CAPTURE-001 | `tgw quiet-check`: read-only over `queue_depths()` + SUGGESTIONS.md/TODOs; surface pending count when queues idle (also confirm no running jobs; stdout default, notify opt-in). **Reconcile: `suggest`/`note`/`btw` + `suggest-edit` already DONE.** Add first tests for the capture commands. | S |
+| 12 | PP-PERP-AUTO-001 | `tgw perp-run <BRIEF-ID> [--list]`: resolve a brief under `perplexity/`, parse the `## Prompt` body, push to clipboard via `_push_clipboard()` + stdout fallback. One parser unit test. GUI automation (ydotool/watcher/Qtile layout) deferred. | S |
+| 13 | PP-WHISPER-001 | `tgw whispertosuggest <wav>`: ffmpeg → `whisper-cli` → parse → existing `cmd_suggest()`. Mock-test the parse + dispatch. whisper-cli + ffmpeg installed; **`ggml-base.en.bin` model absent** → live transcription needs operator download (plumbing is mock-testable now). | S |
+| 14 | PP-CLAUDE-HELP-001 | Author `CLAUDE-TROUBLESHOOT.md` (worker→queue→DB flow, condensed ISSUES.md, diagnostic decision tree) + a `tgw claude-help [issue] [--worker]` launcher calling `claude --append-system-prompt-file`. `claude` CLI + flags confirmed present. | S |
+
+#### Tier D — infra activation / diagnostics
+| Rank | PP | Slice | Size |
+|------|----|-------|------|
+| 15 | PP-WM-001 | Two headless fixes: (a) `qtile/config.py:178,184` chord keys call non-existent `tgw requeue-sku $SKU <queue>` — replace with a real per-SKU enqueue path; (b) the `tgw.notify` desktop backend is fully coded but inert — `configure_from_api_config()` has zero call sites and the `notifications` block is absent from config; add the block + call it at worker startup (keep desktop opt-in, default `['log','file']`). Phase-1 GUI verify stays desktop-blocked. | S |
+| 16 | PP-DEPLOY-001 | Read-only `check_ownership(cfg)` in `health.py` wired into `check_all`: resolve tgw UID via `pwd.getpwnam`, flag UID ≥ 1000 (migration boundary), spot-check key roots + secrets (600/700) for owner/mode drift. Diagnoses only — the actual UID migration/image bake stays operator-gated. Don't walk all of ItemData. | S |
+| 17 | PP-EMAIL-001 | Add an `smtp` backend to `notify.py` `_BACKENDS` (stdlib `smtplib`/`EmailMessage`, fail-soft, keep out of default backends), read from the `notifications` config block; mock-tested. Credential-free foundation; operator drops an app-password later. Inbound eBay-message half stays token/scope-blocked. | S |
+| 18 | PP-CLIP-001 | Non-GUI core only: `src/tgw/clip.py` — SQLite store at `~/.local/share/tgw-clip/history.db`, `record_clip()` SKU classifier, query fns, `tgw clip {list,last-sku,search,wipe}` + tests. **Defer the Xlib daemon / socket / Qtile widget / systemd unit (desktop-session-blocked).** `python3-xlib` is already installed. | S |
+
+#### Tier E — bulk-mutation / larger / lower value-per-risk
+| Rank | PP | Slice | Size |
+|------|----|-------|------|
+| 19 | PP-VERIFY-001 | Phase 3 `--fix`: auto-correct **only** safe mechanical rules (start with stale `TEMPLATE:` title-prefix strip), route through the single-item write path so the hall pass clears, coalesce a rebuild, per-SKU fix log, tests. **Only ranked item that mutates real ItemData in bulk** — explicit flag, default dry-run, conservative. **Reconcile: Phase 2 is DONE (27 tests, ~13 rules), not "Next".** | S |
+| 20 | PP-MC-001 | Phase 4 `tgwlogs` extfs VFS (read-only `journalctl`-per-worker; guard unit-name injection, cap output) + **first headless extfs CLI-contract test**. **Reconcile: Phase 2 is DONE** (448-line `tgwitem` committed) — the §1144 subsection still shows it open. | S |
+| 21 | PP-REPRICER-001 | Read-only foundation only: `market_data` provider interface (`OwnSalesProvider` from velocity-stats.json, `BrowseCompsProvider` from item `ebay_offer.price_comps`, `MarketplaceInsightsProvider` stub) + `recommend_price()` floored by the reprice move price + `tgw reprice-suggest [SKU\|--all]` dry-run + tests. **No eBay write** (live push + insights scope stay blocked). | M |
+| 22 | PP-SHELL-001 | Bring `tgw.source`/`tgw-dev.source` under version control (copy into `etc/interfaces/shell/`) + apply the WRAP tier: replace the 6 ARCH-VIOLATES fns with `tgw <subcmd>` one-liners (all CLI equivalents now exist) + fix the `ic_test()` artifact. **Deliver as reviewable in-repo copy; do NOT mutate the live `/opt/TGW/bin` file** — cutover is operator-controlled. | M |
+| 23 | PP-VISION-001 | Offline visual-fingerprint index over the 54K existing thumbnails (Pillow+numpy phash/histogram, dependency-free) + `tgw locate <image> [--size-class]` ranked-SKU output; index build is a **batch job** (catalog-rebuild-is-a-job rule). Baseline precision — frame as a workflow proof, not a final CLIP matcher. | M |
+| 24 | PP-MC-002 | Satellite-capable extfs refactor: env-driven DSN/paths (`TGW_NODE_ROLE`/`TGW_HTTP_BASE`) + a `role=satellite` branch routing writes to tgw-http instead of psycopg2. Default `role=master` (preserve current behavior), gate behind env vars, test the data-source helper. Real LTSP/hardware rollout stays operator-gated. | M |
+| 25 | PP-NIXOS-001 | Author `flake.nix` + `nix/tgw.nix` from existing `pyproject.toml`/`install.sh`/systemd units. **Cannot be built/verified here (no nix toolchain) — frame strictly as evaluation material, not a commitment** (NixOS vs MX-Linux image are mutually exclusive). Lowest value-per-risk. | M |
+
+#### Blocked — not Claude-ready (grouped by blocker)
+- **Operator / host-level ops** — `PP-REMOTE-001` (Tailscale + tmux + SSH hardening + sudoers + claude-user decision); `PP-DEPLOY-001` full epic (usermod UID<1000, recursive chown, image bake, fresh-restore reboot — only the read-only audit check #16 is ready). *Unblock:* operator does the host work, then Claude can add reviewable config (tmux launcher, OSC52 helper).
+- **Hardware / physical device** — `PP-MACRO-001` install+prove needs a 2nd keyboard, live desktop, and `keyd list-devices` hash (a static drift-validation test is the only code-only slice, and it doesn't advance the goal). *Unblock:* operator wires the dedicated keyboard + captures the `[ids]` hash.
+- **Android device + push creds** — `PP-TASKER-001` (Tasker/Join apps, barcode-intent audit; even a server-side push backend needs an operator ntfy topic / Join key to validate). *Unblock:* operator audits phone intents + supplies a push URL/key.
+- **External research + creds/services** — `PP-PYIPC-001` gated on the **PERPLEXITY-005** library-audit result (only a prompt template exists, no result), plus PP-WM-001, a Syncthing API key (none in config), and a live Syncthing/DBus session. *Unblock:* run PERPLEXITY-005 → inbox; operator supplies `syncthing_api_key` + running daemon.
+- **Design-open / architecture decision** — `PP-REVISION-001` live-listing revision. `ReviseFixedPriceItem` exists (`trading.py:266`) but only for SKU-label changes; `ebay_stage.py:6` calls itself "the stopgap until the full revision system is built." Open question (sparse-delta vs full-replacement) + depends on PP-SYNC-001 being authoritative + live token for any push. *Unblock:* Dave settles the delta-vs-replacement design; then a dry-run delta computer is a buildable first slice.
+
+#### Stale-done reconciliation (doc-only corrections — several bundled into the slices above)
+Audit caught the plan crediting shipped work as open and missing shipped tools. Corrections:
+- **PP-MCP-001** — 10 MCP tools shipped (`tgw_dead_letter` added); plan table (≈L2139) lists 9. Registration-path docstring drift. *(bundled into rank 3)*
+- **PP-SOLD-001** — Tier 3 `ebay-sweep` (`api.py:1517`) + Tier 4 webhook (`notifications.py` + `http_server.py:714` + `tgw setup-ebay-hooks`) are **DONE**; plan calls them "pending/future" (≈L831–842). *(bundled into rank 2)*
+- **PP-VERIFY-001** — Phase 2 **DONE** with 27 passing tests + ~13 rules; plan marks it "Next" and claims 10 tests / 9 rules. "catalog-rebuild resets the hall pass" is moot — `catalog.py` never references `catalog_verified`. *(bundled into rank 19)*
+- **PP-MC-001** — Phase 2 **DONE** (448-line `tgwitem` committed); §1144 subsection still shows it open. *(bundled into rank 20)*
+- **PP-INTAKE-001** — P1 & P2 **DONE** (committed); §1601 says "to build". §1612 claims the template writes `fulfillment_policy_id` — **it never does; strike it.** *(bundled into rank 4)*
+- **PP-CAPTURE-001** — `suggest`/`note`/`btw` + `suggest-edit` **DONE**; plan calls them "planned". *(bundled into rank 11)*
+- **PP-HINT-001** — requeue / Browse enrichment / hint-trail / `hint --force` **DONE**; only `shipping_profile` remains. *(bundled into rank 8)*
+- **PP-FULFILLMENT-001** — plan line ≈2208 falsely states `tgw picklist` exists. **Active landmine — corrected inline** + rank 7 builds the real command.
+- **PP-GLOBALS-001** — "wait for PP-INTAKE-001 P2" (≈L1106) is satisfied/stale; the intake form already captures `weight_oz`. *(bundled into rank 1)*
+- **PP-STRIKE-001** — core code **DONE**; Track-1 table + planning text said "Planned". *(bundled into rank 6)*
+- **ISS-006** — `_USER_PROMPT_ENRICHED` is fully wired (`ai_identify.py:171–204`); issue is stale → **closed in ISSUES.md**.
 
 ### Track 2 — Gemini CLI (large-context data + self-contained tasks)
 **Status 2026-06-06**: Gemini CLI now installed and available. Gemini is Dave's primary
@@ -2205,7 +2307,9 @@ barcode printing are natural integration points that reduce fulfillment time.
 - Requires `sell.fulfillment.readonly` scope (in desired scope list — not yet approved)
 
 #### Packing list
-- `tgw picklist` already generates a text list — extend with print action
+- ⚠️ **CORRECTION (session 15 audit)**: `tgw picklist` does **NOT** exist yet — only
+  `picklist_line()` in `ebay/description.py` (one line per eBay description). Track 1 round-2
+  rank 7 builds the real location-sorted `tgw picklist` CLI; this print action extends it.
 - Print-ready PDF: location-sorted, grouped by order, checkboxes per item
 - QR code on packing list: encodes SKU or order ID for scan-to-confirm
 
