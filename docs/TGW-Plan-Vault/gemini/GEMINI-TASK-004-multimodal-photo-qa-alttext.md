@@ -67,6 +67,11 @@ CPU; small vision models like a quantized LLaVA/Qwen-VL) could use to generate `
 CPU-only and slow, so design for short prompts and batch use. Claude will wire this into a
 `tgw alt-text <sku>` command that writes the result back through the tgw-api fence.
 
+**Naming convention (operator, 2026-06-08):** alt-text derivative/secondary images use
+`<SKU>-alt.jpg` (sidecar to the primary `<SKU>....jpg`). Reflect this in your output schema's
+file-path field. (Intent slightly ambiguous — Claude will confirm with Dave before the writer
+lands; just assume `<SKU>-alt.jpg` for the spec.)
+
 ## Output format (`GEMINI-004-result.md`)
 1. **Method** — how you sampled, how many items, model/vision notes.
 2. **Per-item table** — SKU | photo_quality | title_match | category_plausible | one-line note.

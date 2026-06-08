@@ -655,6 +655,13 @@ Save result to `inbox/` for PM-intake.
 
 Alt-text can feed `draft_listing.description` enrichment and future accessibility features. Track for Track 2 / PP-SEO-001 Phase 5+ when compute allows.
 
+**Alt-text file-naming convention (session 19 — Dave 17:47):** When alt-text generation lands,
+adopt a `<SKU>-alt.jpg` naming convention for the associated/derivative photo (sidecar to the
+primary `<SKU>....jpg`). Wire the convention into the alt-text writer (Claude todo #38 `tgw
+alt-text`) and reflect it in GEMINI-TASK-004's output spec. ⚠ Intent slightly ambiguous — confirm
+with Dave whether `-alt.jpg` is (a) a renamed/secondary image file, or (b) the naming for an
+alt-text-annotated derivative — before implementing the writer.
+
 ### Track 3 — Perplexity (live web research, cited sources)
 Research briefs in `docs/TGW-Plan-Vault/perplexity/`. Paste brief into Perplexity → save result as `.md` to `inbox/` for PM-intake.
 **⚠ Perplexity subscription expires ~2026-12 — run all remaining briefs before then.**
@@ -2250,6 +2257,29 @@ master
 | 1 | `tgw export-catalog <dest>` + Syncthing transport (operator configures Syncthing) | ✅ **DONE (session 18)** — `src/tgw/catalog_export.py`; 8 tests; live verified |
 | 2 | Return path: dirty-flag writes on satellite → sync back → master merge | Future (needs PERPLEXITY-005 + Syncthing API key) |
 | 3 | Conflict resolution, per-row change-log, merge audit trail | Future |
+
+**Sync-conflict resolution worker (open, session 19 — Dave 17:42):** Syncthing emits
+`*.sync-conflict-<ts>-<id>.*` files when two nodes edit the same file (already observed in the
+vault: `.obsidian/community-plugins.sync-conflict-…json`). Proposed: a state worker that scans
+sync roots for `*.sync-conflict-*` artifacts and either (a) auto-resolves by a declared policy
+(e.g. newest-wins for vault config, last-write-wins per PP-ADD-001 decision) or (b) flags them
+for operator review (surface via `tgw health` / notify / the todo dashboard). Pairs with
+PP-PYIPC-001 (Syncthing REST API) for richer conflict metadata; the file-scan version needs no
+API and is buildable now. Scope to vault + portable-catalog sync roots.
+
+**Design principle — zero data loss (Dave, session 19):** A `.sync-conflict-*` file is Syncthing's
+*safety* mechanism, not an error. Syncthing never resolves indiscriminately — it completes the
+sync and says "hey, look at this," which is precisely why it's the right choice. The worker must
+honor that:
+- The conflict copy is **usually redundant** (identical to, or strictly older-with-no-unique-
+  content vs, the canonical file) → safe to discard.
+- But **sometimes** the conflict copy is a local edit made *before* the remote synced — unique
+  content that blind discard would permanently lose.
+- So the worker **must compare** conflict-copy vs canonical and auto-discard *only when provably
+  redundant*; anything with divergent/unique content is **flagged for operator review, never
+  auto-deleted**. The invariant is: no path through this worker can cause data loss.
+- (Live test case left in the vault on purpose: `.obsidian/community-plugins.sync-conflict-…json`
+  — observe how a future worker classifies it before building auto-resolution.)
 
 #### Dependencies
 - `tgwcatalog.db` (already built, 55K rows)
