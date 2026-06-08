@@ -493,6 +493,8 @@ Save result to `inbox/` for PM-intake.
 | PP-GLOBALS-001 analysis | Sample item JSONs (20 items, various categories) | Which fields are offer-invariant; proposed `globals` block schema |
 | **AI conversation history consolidation** | Dave's conversation history with AI assistants (Claude, Perplexity sessions) | Organize + consolidate into structured reference; **plan scope with Dave before executing** (session 10 note) |
 | **Data/archive history consolidation** | `/opt/TGW/data/history/` contents, ItemArchive zip inventory, archive-ebay-index.json | Organize and index historical item data (zip archives, legacy records); similar to the archive index work already done; identify gaps and suggest integration points with current pipeline |
+| **Pricing data analysis** | Velocity stats, comp history, reprice schedule, category groups — full dataset | Identify pricing patterns by category, seasonality, velocity correlation with price tiers; optimize pricing strategy |
+| **Marketing/category insights** | Velocity stats, category groups, ebay_draft quality scores, sell-through by category | Extract marketing signal: which categories have untapped velocity potential, pricing elasticity by category, category-specific buyer behavior signals |
 
 ### Track 3 — Perplexity (live web research, cited sources)
 Research briefs in `docs/TGW-Plan-Vault/perplexity/`. Paste brief into Perplexity → save result as `.md` to `inbox/` for PM-intake.
@@ -1648,6 +1650,20 @@ The tablet/phone is the PRIMARY operator interface for warehouse operations. Des
 - Queue management: dead-letter browser, re-queue/cancel buttons
 - Health drill-down
 
+#### Design enhancement — Model users and role-based layouts (session 16)
+Different operational roles need different UI surfaces:
+- **Admin** — full system control, debug access, config
+- **Item creation** — intake form, barcode scan, hint entry, category group selection
+- **Content admin** — batch title/description edit, photo review, quality scoring
+- **Warehouse** — inventory location lookup, item physical processing, picklist
+- **Operator** — staged listing approval, eBay publishing, repricing, sweeps
+
+Planned: RBAC gates + role-specific default tabs and field visibility. Model users:
+- Photographer (warehouse role)
+- Pricing analyst (content admin)
+- Operator (mixed admin/staging)
+- Supervisor (audit/report focus)
+
 ### Later phases (separate PPs)
 - Scanner input (barcode/SKU lookup → item detail)
 - **PP-INTAKE-001 intake screen** — pre-photo flow: weight, size_class, barcode scan, category group picker, ai_hint; location suggestion (semi-chaotic); Tasker camera trigger → intake form
@@ -1864,6 +1880,14 @@ agent a queue; PP-TODO-001 makes that queue queryable and persistent across sess
 `tgw todo claude` / `tgw todo gemini` / `tgw todo admin` structure maps directly to Tracks 1,
 2, and 4. Build PP-TODO-001 so Work Tracks items can be seeded into it on first run.
 
+#### Design enhancement — Quick-access dashboard (session 16)
+Dave requested immediate access to todo queue without hunting through the master plan:
+- `tgw todo` output must be **quick** (no scrolling, no plan context needed)
+- Links to delegated tasks + supervisory duties **inline** in todo list
+- This becomes the "source of truth" for daily work flow, especially under duress
+- Mobile/tablet-friendly variant planned for future PP-EDITOR-001 admin GUI
+- **Rationale**: "All of those simple little things cause distraction and consume time and lead to errors"
+
 ---
 
 ### PP-PYIPC-001 — Python IPC: Syncthing + KDE Connect Integration
@@ -1935,6 +1959,37 @@ CLI flags: `--location`, `--limit`, `--severity`, `--output`, `--json`. 10 tests
 ---
 
 ## Pending projects (revisit)
+
+### PP-BACKUP-001 — Organized Backup and Disaster Recovery Architecture
+
+#### Problem (session 16)
+`trader-grims-backup` repository is archived but still occupies repository space and mental overhead.
+A custom unified backup/archiving/restoration/disaster-recovery suite is needed to replace it and
+encompass all backup concerns (config, secrets, ItemData, logs, databases, system state).
+
+#### Design goals
+- **Backup repository separation**: Move `trader-grims-backup` to a separate, independently managed
+  repository so TGW platform repository is uncluttered
+- **Unified DR suite**: Replace fragmented backup logic with a single source of truth for:
+  - Regular incremental backups (ItemData, databases, config)
+  - Archival policy (old history, sold items, legacy data)
+  - Restoration (point-in-time recovery, disaster scenario planning)
+  - Verification (backup integrity checks, restore dry-runs)
+- **Integration with PP-NIXOS-001**: The NixOS rebuild strategy enables atomic system restore
+  from config + backup snapshot
+
+#### Scope
+- Phase 1: Extract `trader-grims-backup` to separate repo; audit its current usage
+- Phase 2: Design unified suite (modules: backup, archive, restore, verify)
+- Phase 3: Implement per-module; wire into systemd timer and health checks
+
+#### Dependencies
+- PP-NIXOS-001 (system rebuild context)
+
+#### Status
+Design pending.
+
+---
 
 ### PP-DEADLETTER-001 — Dead-letter triage: warn+requeue instead of terminate
 
