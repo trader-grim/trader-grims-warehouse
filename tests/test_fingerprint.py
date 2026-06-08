@@ -7,9 +7,16 @@ that a near-duplicate query ranks its own SKU first. No numpy, no live catalog.
 import json
 import sqlite3
 
-from PIL import Image
+import pytest
 
-import tgw.fingerprint as fp
+# Pillow is the optional `thumbnails` extra; skip cleanly where it is absent
+# (e.g. a base CI install) — mirrors the importorskip("httpx") guard in
+# tests/test_http_server.py.
+pytest.importorskip("PIL", reason="Pillow (thumbnails extra) required for fingerprint tests")
+
+from PIL import Image  # noqa: E402
+
+import tgw.fingerprint as fp  # noqa: E402
 
 
 def _img(pattern: str, size=(64, 64)) -> Image.Image:

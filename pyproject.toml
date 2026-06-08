@@ -22,6 +22,7 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.4",
     "pre-commit>=3.0",
+    "Pillow>=10.0",   # so CI (.[dev]) runs the PP-VISION-001 fingerprint tests
 ]
 thumbnails = [
     "Pillow>=10.0",

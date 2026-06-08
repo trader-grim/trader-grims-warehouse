@@ -19,7 +19,13 @@ from itertools import zip_longest
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-from PIL import Image
+try:
+    from PIL import Image
+    _PILLOW = True
+except ImportError:  # Pillow ships in the optional `thumbnails` extra
+    _PILLOW = False
+
+_NO_PILLOW = 'Pillow not installed — pip install "trader-grims-warehouse[thumbnails]"'
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS fingerprints (
@@ -131,6 +137,8 @@ def build_fingerprint_index(cfg: Dict[str, Any], *,
     This is an on-demand batch build (same class as `tgw build-thumbnails` /
     `tgw build-sqlite`) — it never runs inline from a worker.
     """
+    if not _PILLOW:
+        return {'ok': False, 'artifact': 'fingerprint_index', 'error': _NO_PILLOW}
     started = time.time()
     thumb_root = Path(cfg["thumbnail_root"])
     db_path = Path(cfg["fingerprint_index_path"])
@@ -188,6 +196,8 @@ def locate_image(cfg: Dict[str, Any], image_path: ImageOrPath, *,
     Combined distance = 0.6 * (dHash hamming / 64) + 0.4 * histogram L1.
     Lower is closer. ``size_class`` restricts the candidate set when given.
     """
+    if not _PILLOW:
+        return {"ok": False, "error": _NO_PILLOW}
     db_path = Path(cfg["fingerprint_index_path"])
     if not db_path.exists():
         return {"ok": False,
