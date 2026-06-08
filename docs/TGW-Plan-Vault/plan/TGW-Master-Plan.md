@@ -1421,6 +1421,7 @@ Decision recommendation: NixOS, pending the Python flake prototype.
 - **Platform flake** (`flake.nix`) — `tgw` user + workers + PostgreSQL + `tgw-http`; already authored
 - **venv / nvm / npm on `/opt/TGW/`** — move tgw user virtualenv (`/opt/TGW/.venvironments/tgw/`) and nvm/npm (`/opt/TGW/.nvm/`) out of `~tgw/` so `/opt/TGW` is a self-contained imageable entity with no home-dir dependencies; update flake `HOME` or env vars accordingly
 - **Personal operator flake** (separate) — Firefox, KDE Plasma, personal apps; composable via NixOS `imports`; not part of the platform flake
+- **Dependency source-of-truth unification (open, session 19)** — `flake.nix` declares `pillow` as a **base** runtime dep (lines 63 + devShell 119), but `pyproject.toml` only carries `Pillow>=10.0` in the **optional** extras (`thumbnails` + `dev`), not base deps. The CI commit (`3be0d85`) added Pillow to the `dev` extra so fingerprint tests run, but did **not** reconcile the base-vs-optional divergence. Before NixOS cutover, make one source authoritative — either promote Pillow to a base `pyproject` dependency (PP-VISION-001 fingerprint is now core, not optional) or drive the flake from `pyproject` extras via `poetry2nix`/lockstep so the two can't drift. Pick the former if fingerprinting is here to stay (recommended); the latter if extras-as-optional is the intended packaging contract.
 
 **DR / bootstrap design (session 18):**
 NixOS install must support two bootstrap modes:
