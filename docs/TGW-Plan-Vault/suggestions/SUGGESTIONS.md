@@ -130,3 +130,52 @@
 - [x] 2026-06-08T17:03 :: PP-NIXOS-001: unify dependency source-of-truth — flake currently has Pillow in base deps, pyproject in the thumbnails extra; resolve via poetry2nix or lockstep before cutover — processed (session 19): added as open requirement under PP-NIXOS-001 "Flake architecture requirements"; CI commit 3be0d85 added Pillow to dev extra but base-vs-optional divergence remains; recommend promoting Pillow to base pyproject dep before cutover
 - [x] 2026-06-08T17:42 :: syncthing sync conflict resolution state worker to resolve the conflict or flag for review — processed (session 19): added as "Sync-conflict resolution worker" under PP-PORTABLE-CATALOG-001 conflict-resolution design; file-scan version buildable now (no Syncthing API), richer version pairs with PP-PYIPC-001; auto-resolve-by-policy or flag-for-review via tgw health/notify/todo dashboard
 - [x] 2026-06-08T17:47 :: when we add alt-text lets rename XXXXX-alt.jpg — processed (session 19): added `<SKU>-alt.jpg` naming convention to PP-DATALEARN-001 alt-text track + flagged for GEMINI-TASK-004 spec + Claude todo #38; ⚠ intent ambiguous (renamed secondary image vs alt-text-annotated derivative) — confirm with Dave before implementing
+- [ ] 2026-06-08T18:36 :: see research notes on syncthing config. What I want to do is let tgw run syncs as service, all other users have syncthing. Want to try to have ltsp fat clients have symlink to local cfg sorted by hostname on /opt/TGW so machines can be temopraily adopted by system for processing and still treat the machines local syncthing config as what syncs on the machine. syncthing wont start if missing, havent tested with ltsp yet but it should be doable.
+- [ ] 2026-06-08T18:38 :: lets set our own port for the tgw syncthing web interface.
+- [ ] 2026-06-08T18:41 :: I havent tried everything available new yet but tgw suggestion needs its own entry box so I can use punctuation without having to troubleshoot my suggestions because bash.
+- [ ] 2026-06-08T19:10 :: note about gemini joining a union. Still a good worker, but keep jobs bitesized to accomplish in session. Buttheads.:                                      
+Updates to your Google One Premium plan 
+
+Hi Dave                                                                                                       We wanted to let you know about changes to your Google One Premium plan. These updates include changes to usage limits included with your subscription and your plan name.                                         Whats changing starting today, ﻿J﻿u﻿n﻿ ﻿8﻿,﻿ ﻿2﻿0﻿2﻿6﻿:    
+Updated plan name: Your new plan is now called Google AI Plus, and youll still enjoy the same 2 TB of storage and other premium benefits.
+Usage limits in the Gemini app: For the Gemini app, were introducing compute-based usage limits that factor in the complexity of your prompt, the features you use, and the length of your chat. Your limit refreshes every 5 hours until you reach your weekly limit. As an AI Plus subscriber, youll enjoy a 2x higher usage limit than non-subscribers.  AI credits: The product-based usage limit model is also rolling out to other products, starting with Flow and Antigravity. While 200 AI credits will no longer be included as a benefit in your base plan each month, the new usage limit model we are introducing should allow you to maintain the same experience you are used to. To learn more about how to use AI credits, please visit our Help Center.
+No action is required from you. To learn more about these changes you can visit our Help Center article for additional details. You can manage or cancel your subscription at any time.
+Thank you for being a Google AI Plus subscriber. -The Google One Team
+- [ ] 2026-06-08T19:17 :: if we are successful self healing syncthing conflicts then we have a pretty solid loosely connected communication channel I have usually turned off global sync but I will ensure it us enabled and configured for the catalog update back channel.
+- [ ] 2026-06-08T20:12 :: tgw restart-workers what if we use something like runas
+- [ ] 2026-06-08T20:25 :: Hello Dave,
+
+
+Thank you for submitting your Application Growth Check request and expressing interest in the Marketplace Insights API.
+
+
+To proceed, we kindly ask you to provide the following information:
+
+1. What are your company/application? Please provide your website URL or mobile app if applicable.
+
+2. Your eBay UserID you either buy and/or sell with.
+
+3. Are you an EPN partner? If so, please provide your publisher ID.
+
+4. What is the completed item information being used for?
+
+5. Are you storing the sales data in any way?
+
+6. Are you sharing the sales data internally or externally?
+
+7. What categories ( list of the eBay categoryIds) do you focus on and need access to?
+
+8. Your contact information
+
+
+Additionally, Other scopes are not restricted and already assigned to your appid.
+
+
+We appreciate your cooperation and look forward to assisting you further.
+
+
+Best Regards,
+
+eBay Developer Support
+- [ ] 2026-06-08T13:31 :: ISS: ebay_sku_migrate stall — silent failure + health gap. Worker exhausted batch capacity on 5 permanently-failing items (Best Offer policy restrictions + errorId 25709 invalid dimensions, from 2014-2016 legacy listings). Each batch: 5 items picked, 5 failed, job marked succeeded, reschedule 1h, repeat. ~176 attempts each, ~20+ hours invisible. Fix applied: _is_permanent_failure() detector + sku_migrate_skip flag written to item JSON on permanent error; find_batch skips flagged items. Immediate unblock: skip flag written on 5 stuck items manually. Root cause of health gap: worker marks queue job succeeded even on 0/5 batch — health sees green. Two patterns to address in planning: (1) worker-level batch success verification — notify() when succeeded==0 for N consecutive batches; (2) broader "success rate monitoring" pattern for any worker that self-reports succeeded but may be doing zero useful work. Dave: good candidate for a critical-path success verification step.
+- [ ] 2026-06-08T20:41 :: note Standard Envelope shipping has very specific categories it applies to. no more than .25 in thick uniform thickness. Apply to shipping template logic
