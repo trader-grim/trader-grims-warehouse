@@ -4,17 +4,17 @@
     "type": "split",
     "children": [
       {
-        "id": "e9a682987bf1ecdf",
+        "id": "b7ca21ccb7fb6f81",
         "type": "tabs",
         "children": [
           {
-            "id": "d7f293b5920cb038",
+            "id": "9ee8b2614b338d9d",
             "type": "leaf",
             "state": {
               "type": "markdown",
               "state": {
                 "file": "plan/TGW-Master-Plan.md",
-                "mode": "source",
+                "mode": "preview",
                 "source": false
               },
               "icon": "lucide-file",
@@ -37,7 +37,7 @@
           "type": "file-explorer",
           "state": {
             "sortOrder": "alphabetical",
-            "autoReveal": false
+            "autoReveal": true
           },
           "icon": "lucide-folder-closed",
           "title": "Files"
@@ -112,7 +112,7 @@
         "state": {
           "type": "backlink",
           "state": {
-            "file": "plan/TGW-Master-Plan.md",
+            "file": "plan/TGW-Master-Plan-mindmap.md",
             "collapseAll": false,
             "extraContext": false,
             "sortOrder": "alphabetical",
@@ -163,13 +163,42 @@
       "daily-notes:Open today's daily note": false,
       "templates:Insert template": false,
       "command-palette:Open command palette": false,
-      "bases:Create new base": false
+      "bases:Create new base": false,
+      "edge-tts:Read note aloud": false
     }
   },
-  "active": "d7f293b5920cb038",
+  "active": "9ee8b2614b338d9d",
   "lastOpenFiles": [
-    "plan/TASKS-phase1-queue.md",
-    "plan/TGW-Master-Plan.md",
+    "reference/TGW-Pipeline-Flow.md",
+    "reference/HARDWARE-AI-INFERENCE.md",
+    "reference/PP-LOOKUP-001-APIs.md",
+    "reference/TGW-Config-Reference.md",
+    "reference/eBay-Error-Codes.md",
+    "suggestions/SUGGESTIONS.md",
+    "reference/TGW-Ollama-Prompts.md",
+    "reference/CATEGORY-QUIRKS.md",
+    "reference/TGW-Item-JSON-Schema.md",
+    "reference/SHELL-AUDIT.md",
+    "reference/eBay-API-Landscape.md",
+    "plan/SKU-Audit-Report.md",
+    "OPERATIONS-vault-sync.md",
+    "reference/ISSUES.md",
+    "reference/TGW-HTTP-API.md",
+    "gemini/GEMINI-TASK-002-data-scrub-analysis.md",
+    "gemini/GEMINI-TASK-001-category-group-review.md",
+    "gemini",
+    "inbox/queued",
+    "inbox/processed/20260605T230857-I'm building a resale inventory automation platfor.md",
+    "inbox/processed/PERPLEXITY-002-cassini-seo.md",
+    "inbox/processed/20260602T165157-plan-addition-vault-sync.md",
+    "inbox/processed/plan-addition-token-worker.md",
+    "inbox/processed/PERPLEXITY-004-integrations.md",
+    "inbox/processed/20260602T164535-project_plan_additions.md",
+    "inbox/processed/GEMINI-002-result.md",
+    "inbox/processed/GEMINI-001-result.md",
+    "inbox/processed/PERPLEXITY-003-sold-price-data.md",
+    "inbox/processed",
+    "perplexity",
     "inbox/Untitled.base"
   ]
 }
