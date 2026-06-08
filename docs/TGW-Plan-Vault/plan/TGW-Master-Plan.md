@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-07 (session 17 — Track 1 Round 3 ALL 8 items DONE; suite 315 green; awaiting /code-review)
+updated: 2026-06-08 (session 18 — 9 suggestions processed; Track 1 Round 4 ALL 7 items DONE; suite 321→346; dead-letter triage 27→23)
 maintained_by: Opus (planner)
 ---
 
@@ -524,6 +524,81 @@ Next available: Tier E (ranks 19–25) — bulk-mutation / larger / lower value-
 
 **Active task list:** ✅ **ALL 8 DONE** (todo IDs 21–28 closed, session 17 — see `### Execution — 2026-06-07 (session 17 …)` above for the per-item summary). The todo tracker is the canonical queue. Next: a `/code-review` pass once the session limit resets, then pick the next batch (blocked items below remain operator/research-gated).
 
+### Track 1 — Round 4 (session 18)
+
+**Guiding principle:** Mix of pipeline hygiene, new operator-facing capability, and NixOS prep. Keep building usable things now; prep the spare machine path.
+
+**Input to this round:**
+- Round 3 all 8 DONE; 321 tests passing; git clean.
+- 27 dead_letter jobs (all from 2026-06-02/03 pre-fix era) — need triage.
+- `tgw todo claude` empty — seeded below.
+- PP-PLASMA-001 + PP-PORTABLE-CATALOG-001 never got formal plan sections (added below).
+
+| # | PP | Task | Size |
+|---|----|------|------|
+| 29 | — | Dead_letter triage: cancel 27 stale pre-fix jobs; add `tgw dead-letter --requeue-transient` flag to batch-requeue all transient-classified entries in one shot; re-enqueue 6 `no ebay_category_id` items through ai_identify | XS |
+| 30 | PP-REF-003 | Author `reference/TGW-Quickstart.md`: all `tgw` CLI subcommands + workers + web forms + MC VFS + Qtile chords organised by workflow (health→intake→pipeline→eBay→admin); stubs for physical processes; replaces hunting through plan for command syntax | M |
+| 31 | PP-VISION-001 P1 | Offline phash/histogram fingerprint index over 54K thumbnails (Pillow+numpy, no external deps); batch build job (`catalog-rebuild` rule); `tgw locate <image> [--size-class S]` CLI returns ranked SKU matches; index stored in SQLite catalog | M |
+| 32 | PP-PORTABLE-CATALOG-001 P1 | Add plan section (design below); `tgw export-catalog <dest>` command: copies `tgwcatalog.db` + thumbnails subset to destination path; no Syncthing API needed for Phase 1 — Syncthing handles transport; lays groundwork for spare machine client setup | S |
+| 33 | PP-PLASMA-001 | Add formal plan section (missing since session 16 suggestion); design notes for Plasma 6 + Qtile dual-desktop; no code this round — design/tracking only | XS |
+| 34 | PP-TODO-001 | `GET /form/todos` in tgw-http: tablet-friendly HTML table of open todos grouped by agent; auth-gated (Bearer or network-trust like `/form/intake`); low-friction daily queue review from tablet/phone | S |
+| 35 | PP-NIXOS-001 | Update `flake.nix` + `nix/README.md`: configure `NVM_DIR=/opt/TGW/.nvm`, `NPM_CONFIG_PREFIX=/opt/TGW/.npm` so nvm/npm install under `/opt/TGW/` when operator runs nvm install; ensures `/opt/TGW` is a fully self-contained imageable entity with no tgw home-dir dependencies | XS |
+
+#### Execution — 2026-06-08 (session 18, Track 1 Round 4 — ALL 7 items DONE)
+Built largely via a parallel build workflow (5 file-isolated agents) + main-loop wiring for the
+shared `api.py`/`config.py`/completion surface. Suite **321 → 346** (+25), ruff clean, `tgw health`
+green. ⚠ Sub-agent **session limit** + transient socket errors killed the adversarial-review workflow
+(same constraint as session 17) — review was done **in the main loop** instead (Opus 4.8), with live
+end-to-end probes. Per item:
+- **#29 `dead-letter --requeue-transient`** — batch re-enqueues every `[transient]`-classified
+  dead_letter job (honours `--queue`), via the existing `requeue_dead_letter_job` + `classify_dead_letter`.
+  5 tests (`test_dead_letter.py`). **Live triage run:** 2 transient requeued; 5 now-fixable
+  "no ebay_category_id" items (categories since populated) re-driven through `ebay_draft` (NOT
+  ai_identify — would overwrite good categories); 2 stale `pm_intake` lease-expired orphans cancelled.
+  Board **27 → 23**. The remaining 23 are **real eBay rejections** (25709×8, 25002 Item.Country×3
+  [tracked known issue], 25738×2, 25021×1) + superseded `ebay_draft` records — left for operator
+  review, deliberately **not** mass-cancelled (would hide real signal). Once the re-driven jobs
+  clear, `tgw dead-letter --cancel ebay_draft` clears the superseded records.
+- **#30 PP-REF-003** — `reference/TGW-Quickstart.md` (9 sections, every `tgw` subcommand cross-checked
+  against `api.py` add_parser names; MC/Qtile/macroboard key maps; worker table; physical-process stubs).
+- **#31 PP-VISION-001 Phase 1** — `src/tgw/fingerprint.py` (Pillow-only dHash + joint-RGB histogram;
+  index in `fingerprints.db`; 64-bit dhash stored as TEXT to dodge SQLite signed-int overflow).
+  `tgw build-fingerprints` (batch build, `build-thumbnails` precedent) + `tgw locate <image>
+  [--size-class --top --json]`. 8 tests. **Full index built: 54,314 rows in 87s**; self-match
+  verified distance 0.0000. ⚠ **`--size-class` filter is a no-op until items carry `size_class`** —
+  0 of 83,520 catalog rows have it (set-template hasn't populated it at scale; enrichment + SKU
+  match verified working). New config key `fingerprint_index_path`.
+- **#32 PP-PORTABLE-CATALOG-001 Phase 1** — `src/tgw/catalog_export.py` `export_catalog()` +
+  `tgw export-catalog <dest> [--no-thumbnails --limit --check-only]`; copies `tgwcatalog.db` +
+  thumbnail subset for Syncthing relay. 8 tests. Live verified (179 MB / 83,520-row db copies clean).
+- **#33 PP-PLASMA-001** — formal plan section added (dual-desktop Qtile+Plasma 6; NixOS declares both).
+- **#34 PP-TODO-001** — `GET /form/todos` in tgw-http: tablet-first HTML todo dashboard grouped by
+  agent, no Bearer (network trust, like `/form/intake`), `html.escape` on all fields, graceful
+  200-on-DB-error. 4 tests (`test_http_server.py`).
+- **#35 PP-NIXOS-001** — `nix/tgw.nix` `commonService.environment` now sets `HOME`/`NVM_DIR`/
+  `NPM_CONFIG_PREFIX` under `/opt/TGW` + tmpfiles for `.nvm`/`.npm`/`.venvironments` (propagates to
+  every worker + tgw-http + backup via the verified `recursiveUpdate` merge); `nix/README.md`
+  home-dir-independent section; `flake.nix` devShell note. No nix toolchain on host → review-only.
+
+⚠ **COMMIT REMINDER** (untracked, will break features if not `git add`ed): `src/tgw/fingerprint.py`,
+`src/tgw/catalog_export.py`, `tests/test_fingerprint.py`, `tests/test_catalog_export.py`,
+`tests/test_dead_letter.py`, `docs/TGW-Plan-Vault/reference/TGW-Quickstart.md` (+ modified
+`src/tgw/api.py`, `src/tgw/config.py`, `src/tgw/http_server.py`, `tests/test_http_server.py`,
+`etc/completion/tgw-completion.bash`, `nix/tgw.nix`, `flake.nix`, `nix/README.md`).
+
+**Follow-ups surfaced this session:**
+- `size_class` is virtually unpopulated (0/83,520) → `tgw locate --size-class` + PP-STORAGE-001
+  resolver are inert until set-template adoption grows or a backfill runs. Candidate: a
+  `size_class` backfill from `category_group` defaults (category-groups.json has per-group size_class).
+- 23 real eBay-rejection dead-letters (25709/25002/25738/25021) need item-data/code fixes —
+  25002 Item.Country is the tracked open issue at `## Current state` line ~83.
+
+**Blocked — not Round 4 (held for later rounds):**
+Same blocker groups as Round 3 plus:
+- PP-PLANDB-001 — design discussion needed before code; currently design-open
+- PP-PORTABLE-CATALOG-001 P2+ — requires Syncthing API key + PERPLEXITY-005 result (PP-PYIPC-001)
+- PP-VISION-001 P2+ — CLIP/embedding model requires GPU upgrade
+
 #### Blocked — not Claude-ready (grouped by blocker)
 - **Operator / host-level ops** — `PP-REMOTE-001` (Tailscale + tmux + SSH hardening + sudoers + claude-user decision); `PP-DEPLOY-001` full epic (usermod UID<1000, recursive chown, image bake, fresh-restore reboot — only the read-only audit check #16 is ready). *Unblock:* operator does the host work, then Claude can add reviewable config (tmux launcher, OSC52 helper).
 - **Hardware / physical device** — `PP-MACRO-001` install+prove needs a 2nd keyboard, live desktop, and `keyd list-devices` hash (a static drift-validation test is the only code-only slice, and it doesn't advance the goal). *Unblock:* operator wires the dedicated keyboard + captures the `[ids]` hash.
@@ -567,6 +642,19 @@ Save result to `inbox/` for PM-intake.
 | **Pricing data analysis** | Velocity stats, comp history, reprice schedule, category groups — full dataset | Identify pricing patterns by category, seasonality, velocity correlation with price tiers; optimize pricing strategy |
 | **Marketing/category insights** | Velocity stats, category groups, ebay_draft quality scores, sell-through by category | Extract marketing signal: which categories have untapped velocity potential, pricing elasticity by category, category-specific buyer behavior signals |
 
+### PP-DATALEARN-001 — Gemini Data Mining + AI-Calculated Fields
+
+**Architecture principle (session 18):** All Gemini data reads/writes must go through the tgw-api fence. Gemini gets a task file with context baked in; it calls tgw-http endpoints or produces structured output for PM-intake. No direct filesystem or DB access from external AI tools. This extends the "tgw-api is the fence" settled architecture to the external AI layer.
+
+**Task queue (Track 2):** See table above — pricing analysis, marketing insights, history consolidation, category quality review.
+
+**Alt-text pipeline research (session 18):** Alt-text for item photos is a future enrichment opportunity (accessibility + SEO in external surfaces). Research links:
+- https://medium.com/@petter.eckerbom/building-an-ai-multilingual-alt-text-pipeline-thats-fast-and-open-source-032982a5170c
+- https://github.com/lukeslp/alt-text-local-llm (local LLM variant — compatible with our Ollama stack)
+- https://surfai.app/blog/best-ai-image-description-generator-tools (survey)
+
+Alt-text can feed `draft_listing.description` enrichment and future accessibility features. Track for Track 2 / PP-SEO-001 Phase 5+ when compute allows.
+
 ### Track 3 — Perplexity (live web research, cited sources)
 Research briefs in `docs/TGW-Plan-Vault/perplexity/`. Paste brief into Perplexity → save result as `.md` to `inbox/` for PM-intake.
 **⚠ Perplexity subscription expires ~2026-12 — run all remaining briefs before then.**
@@ -588,12 +676,24 @@ Research briefs in `docs/TGW-Plan-Vault/perplexity/`. Paste brief into Perplexit
 
 ---
 
-#### Priority 0 — NixOS migration prep (session 16 decision)
+#### Priority 0 — NixOS migration prep (session 16 decision; updated session 18)
 
-NixOS is the **committed target OS**. Migration is not immediate — do when ready. Steps before cutover:
-- [ ] **Final MX restore image**: Use MX Snapshot to bake a bootable ISO of the current working system (full `/opt/TGW` + Postgres + workers + secrets) before any migration work begins. This is the safety net.
-- [ ] **Validate flake.nix in NixOS VM** once Claude produces `flake.nix` + `nix/tgw.nix` (Round 3 item #7)
-- [ ] **Decision**: when ready to migrate, run `nixos-install` on new partition; keep MX as fallback until verified
+NixOS is the **committed target OS**. Migration is not immediate — do when ready. Recommended path:
+
+**Step 1 — Spare machine first (session 18):**
+- [ ] Identify the spare intake support machine
+- [ ] Install NixOS on it using the `flake.nix` already produced; configure as client (portable catalog, services not started)
+- [ ] Use it to build familiarity, discover any tool gaps, and validate the flake without risk to the main production machine
+- [ ] When client setup is solid → promote to tgwOS 2.0 server or full replacement for main machine
+
+**Step 2 — Final MX safety net:**
+- [ ] Use MX Snapshot to bake a bootable ISO of the current working system before any migration touches the main machine. This is the permanent safety net.
+
+**Step 3 — VM validation:**
+- [ ] Validate `flake.nix` + `nix/tgw.nix` in a NixOS VM (watch item: `python3Packages.mcp` in nixos-24.11)
+
+**Step 4 — Main machine cutover (when ready):**
+- [ ] Run `nixos-install` on new partition; keep MX as fallback until `tgw health` fully green on NixOS
 
 ---
 
@@ -1106,6 +1206,12 @@ Rendered HTML snapshots at `/opt/TGW/var/www/`.
 - `SHELL-AUDIT.md` — tgw.source / tgw-dev.source function disposition (KEEP/WRAP/ARCH-VIOLATES/DEPRECATED)
 - `PP-DEPLOY-001-MX-RESTORE-RUNBOOK.md` — operator runbook: bake the final MX Snapshot restore image before NixOS cutover (session 17)
 - `echo.py` / `worker_base.py` — new worker templates (pre-existing)
+- `PP-DEPLOY-001-MX-RESTORE-RUNBOOK.md` — operator runbook: bake final MX Snapshot restore image (session 17)
+
+### 🗒 Planned
+- `TGW-Quickstart.md` — PP-REF-003: all tgw CLI subcommands, workers, MC VFS, Qtile/macroboard keys, per-workflow; stubs for physical processes
+
+---
 
 ### PP-REF-001 — TGW Item JSON Schema ✅ DONE 2026-06-04
 - Reference doc: `docs/TGW-Plan-Vault/reference/TGW-Item-JSON-Schema.md`
@@ -1123,6 +1229,34 @@ Rendered HTML snapshots at `/opt/TGW/var/www/`.
   - Output: `eBay-Error-Codes.md` markmap grouped by API + severity
 - **Value**: surfaces unhandled errors that should be caught; reduces dead-letter surprises; informs PP-HINT-001 fail-forward work
 - **Effort**: medium — grep is fast but eBay docs cross-reference takes time
+
+### PP-REF-003 — TGW Installation Quickstart Reference Guide (planned)
+
+#### Problem
+No single document lists all available TGW tools, commands, and their usage in a format suitable for a new operator or for quick lookup during setup. The CLAUDE.md covers session protocol; the reference docs cover specific subsystems; but there is no "what can I do?" entry-point document.
+
+#### Design
+- **Scope**: all `tgw` CLI subcommands + workers + MC extfs VFS tools + Qtile chords + macroboard keys + tgw.source convenience functions
+- **Format**: Markdown quickstart — organized by workflow (intake → pipeline → eBay → admin), not alphabetically
+- **Physical process hooks**: leave stubs for "associated physical processes" (intake station setup, scale use, camera trigger) — Dave will fill in over time
+- **Target location**: `docs/TGW-Plan-Vault/reference/TGW-Quickstart.md` (plain Markdown; markmap-compatible)
+
+#### Output structure (proposed)
+1. System health and status commands
+2. Item intake workflow (set-template → intake → identify → draft → price → stage → publish)
+3. Bulk operations (bulk-edit, mvitems, catalog-verify)
+4. eBay management (sync, sweep, reprice-suggest, dead-letter)
+5. Admin and diagnostics (todo, health, restart-workers, dead-letter)
+6. MC interface (extfs VFS list, key actions)
+7. Qtile / macroboard quick-reference
+8. Worker reference (queue name → purpose → how to restart)
+
+#### Status
+✅ **DONE (session 18)** — `reference/TGW-Quickstart.md` authored (9 sections; all `tgw`
+subcommands cross-checked against `api.py`; MC/Qtile/macroboard key maps; worker table; physical-
+process stubs left for Dave). Keep it updated as new commands ship.
+
+---
 
 ### PP-CI-001 ✅ DONE 2026-06-04
 ruff clean; GitHub Actions CI (`ruff check --no-fix` + `pytest`); `.pre-commit-config.yaml` scoped to `src/tests/`; pre-commit installed in `.git/hooks/`.
@@ -1271,14 +1405,33 @@ not friction.
 **PP-DEPLOY-001 (MX Linux image) and PP-NIXOS-001 are mutually exclusive end-states.**
 Decision recommendation: NixOS, pending the Python flake prototype.
 
-#### Work items (deferred)
-- [ ] Prototype: NixOS VM with TGW installed as a Nix flake; verify all workers run
-- [ ] Python env: evaluate `poetry2nix` as the first-choice wrapper for TGW's `pyproject.toml`
-- [ ] ⚠ Mitigate WAL recovery gotcha before any production deployment
-- [ ] Decide: NixOS or MX Linux image as the target OS before either PP gets deep work
-- [ ] If NixOS: write `tgw.nix` module for all systemd units, config paths, user setup
-- [ ] Author `flake.nix` + `nix/tgw.nix` from existing `pyproject.toml`/`install.sh`/systemd units
-  (Rank 25 in Track 1 round-2 Tier E; frame as evaluation material, not a commitment)
+#### Work items
+
+**Completed (session 17–18):**
+- [x] `flake.nix` + `nix/tgw.nix` authored (Round 3 #27) — `buildPythonApplication`, per-queue worker services, PostgreSQL, tgw-http, tgw user
+- [x] `PP-DEPLOY-001-MX-RESTORE-RUNBOOK.md` authored (Round 3 #28) — pre-snapshot checklist, ISO verify, full restore steps
+- [x] NixOS committed as target OS (session 16 decision)
+
+**Pending — operator / VM actions:**
+- [ ] **Validate flake.nix in NixOS VM** — Dave builds + tests on a VM; note: `python3Packages.mcp` availability in nixos-24.11 is a watch item
+- [ ] ⚠ Mitigate WAL recovery gotcha: `ExecStartPost` ALTER USER runs while DB is in read-only recovery → service killed. Add recovery-mode guard before production use.
+- [ ] **Spare intake machine as first NixOS target** (session 18 decision): install NixOS on the spare intake support machine; configure as client/portable-catalog (services not started); gain tool familiarity without risk to the main machine. When proven: promote to tgwOS server or full replacement.
+
+**Flake architecture requirements (session 18):**
+- **Platform flake** (`flake.nix`) — `tgw` user + workers + PostgreSQL + `tgw-http`; already authored
+- **venv / nvm / npm on `/opt/TGW/`** — move tgw user virtualenv (`/opt/TGW/.venvironments/tgw/`) and nvm/npm (`/opt/TGW/.nvm/`) out of `~tgw/` so `/opt/TGW` is a self-contained imageable entity with no home-dir dependencies; update flake `HOME` or env vars accordingly
+- **Personal operator flake** (separate) — Firefox, KDE Plasma, personal apps; composable via NixOS `imports`; not part of the platform flake
+
+**DR / bootstrap design (session 18):**
+NixOS install must support two bootstrap modes:
+1. **Fresh warehouse start** — empty `/opt/TGW`; workers spin up; first item intake begins immediately
+2. **Adopt existing data** — `/opt/TGW` restored from backup; config applied; full pipeline resumes from last state
+
+Recovery equation: `NixOS flake + site config GitHub repo + ItemData restore = full system rebuild`
+
+**Site config in GitHub** — `tgw-api-config.json` and non-secret config in a private GitHub repo; NixOS flake fetches at build time; enables any node to self-configure without local copy.
+
+**Google Drive DR** — rebuild kit (NixOS ISO pointer, site config repo URL, rclone restore script for ItemData) lives on Google Drive. Major disaster: boot NixOS ISO → pull config from GitHub → restore ItemData from Drive → `tgw health` green.
 
 ### PP-CAPTURE-001 — Idea and Task Capture Pipeline
 
@@ -2068,6 +2221,109 @@ CLI flags: `--location`, `--limit`, `--severity`, `--output`, `--json`. 10 tests
 
 ## Pending projects (revisit)
 
+### PP-PORTABLE-CATALOG-001 — Portable / Satellite Catalog
+
+#### Problem
+The tablet and spare intake machine need read-access to item catalog + thumbnails to work as intake/browsing stations. Currently `tgwcatalog.db` lives only on the master machine. Syncthing can sync it, but there is no operator-friendly command to prepare a sync-ready bundle, and the catalog needs a stable export shape that works on a machine with no live PostgreSQL.
+
+#### Design (Phase 1 — Syncthing-sync, no conflict resolution)
+- `tgw export-catalog <dest>` command: copies `tgwcatalog.db` (55K rows) + `thumbnails/<SKU>.jpg` subset to `<dest>/`
+- Syncthing watches `<dest>/` on master and syncs to client machines automatically
+- Client machines: read-only browser (tgw-http or MC); writes go back to master via tgw-http when online
+- **Phase 1 scope**: export only (no conflict resolution, no return path); Syncthing handles transport
+- Snapshots the current catalog state; `tgw export-catalog --incremental` could be added later
+
+#### Architecture
+```
+master
+  tgwcatalog.db + thumbnails/  ← tgw export-catalog → export/
+                                                              ↓ Syncthing
+                                                         tablet, spare machine
+                                                          tgw-http (read-only mode)
+                                                          MC extfs tgwcatalog
+```
+
+#### Phases
+| Phase | Scope | Status |
+|-------|-------|--------|
+| 1 | `tgw export-catalog <dest>` + Syncthing transport (operator configures Syncthing) | ✅ **DONE (session 18)** — `src/tgw/catalog_export.py`; 8 tests; live verified |
+| 2 | Return path: dirty-flag writes on satellite → sync back → master merge | Future (needs PERPLEXITY-005 + Syncthing API key) |
+| 3 | Conflict resolution, per-row change-log, merge audit trail | Future |
+
+#### Dependencies
+- `tgwcatalog.db` (already built, 55K rows)
+- Thumbnail cache (already built, 54K thumbnails)
+- Phase 2+: PP-PYIPC-001 (Syncthing REST API), Syncthing API key
+
+#### Status
+Plan section added session 18. Phase 1 in Round 4.
+
+---
+
+### PP-PLASMA-001 — KDE Plasma 6 Dual-Desktop Integration
+
+#### Vision
+TGW runs two desktop environments: Qtile (primary operator workstation — tiling, Python hooks, TGW bar widgets) and KDE Plasma 6 (general purpose — familiar, full-featured, Firefox, GLabels, LibreOffice). Both are first-class citizens. Plasma handles day-to-day use and GUI app launching; Qtile handles warehouse operations, agent sessions, and pipeline monitoring.
+
+#### Motivation (session 16 suggestion)
+The TGW operator workstation will rely heavily on the KDE framework even on Qtile. KDE apps (Dolphin, Gwenview, Konsole, KDialog, KDE Connect, GLabels) are used in the warehouse workflow. Running Plasma 6 in parallel gives a familiar environment for non-TGW tasks without compromising the Qtile operator experience.
+
+#### Integration opportunities
+| Area | Qtile | Plasma 6 |
+|------|-------|----------|
+| File management | F2 menu → Dolphin launch | Dolphin natively |
+| Image viewing | chafa in MC / Gwenview launch | Gwenview natively |
+| Clipboard relay | KDE Connect (tgw.source ic_*) | Plasma clipboard sync |
+| Notifications | notify-send / dunst | Plasma notification daemon |
+| GLabels (barcode) | Launch via keybinding | Plasma app launcher |
+| Terminal | Konsole / scratchpad | Konsole natively |
+| Quick switch | Super+T TGW mode in Qtile | Plasma Activities |
+
+#### NixOS dual-desktop on NixOS
+On NixOS, both WMs are declared in the same flake:
+```nix
+services.xserver.windowManager.qtile.enable = true;  # operator session
+services.desktopManager.plasma6.enable = true;         # general session
+```
+Both available at login; user selects per-session.
+
+#### Phases
+| Phase | Scope | Status |
+|-------|-------|--------|
+| 1 | Shared config: dunst notif theme, Konsole profile, Dolphin TGW bookmarks | Future |
+| 2 | Qtile→Plasma clipboard bridge via KDE Connect (already works via tgw.source) | Future |
+| 3 | NixOS dual-desktop declaration in flake | Depends on spare machine validation |
+
+#### Status
+Plan section added session 18. No code this round. Design/tracking only.
+
+---
+
+### PP-PLANDB-001 — Database-Driven Plan Builder (design discussion needed)
+
+#### Concept (session 18 — discuss before building)
+Instead of a monolithic Markdown plan file, the plan at any point in time is **rebuilt on demand** from a task + relationship database. Each PP-* item, work track, and todo entry lives in the DB with explicit relationships (blocks/depends-on). The plan document becomes a rendered view, not the source of truth.
+
+**Agent delegation extensions:** The DB can generate self-contained `CLAUDE.md` and `gemini.md` files for any delegated task — baked with exactly the context that agent needs, no more. Useful for employees, mechanical turks, or future agent roles. The todo tracker (PP-TODO-001) is the embryonic form of this; PP-PLANDB-001 is the full realization.
+
+**Dave's note:** "tgw plan builder" — discuss the scope and design before implementing. The todo tracker is already moving in this direction; the question is whether to extend it or build a separate plan-reconstruction layer.
+
+#### Design questions (open)
+- Does the DB replace the Markdown file entirely, or generate it from DB state as a rendering step?
+- Are PP-* items rows, or are they grouped sections with sub-item rows?
+- Relationship types: blocks / depends-on / tracked-by / delegates-to — which matter most?
+- Generated CLAUDE.md: full context or minimal? How do we prevent context bloat?
+- How does version history work (plan decisions, rejected directions)?
+
+#### Status
+Design-open. Discuss with Dave in a planning session before committing to a direction. The
+PP-TODO-001 CRUD layer is the natural seed — any DB plan builder should extend it, not replace it.
+
+#### Dependencies
+- PP-TODO-001 (already built — provides task storage; PP-PLANDB-001 extends it)
+
+---
+
 ### PP-BACKUP-001 — Organized Backup and Disaster Recovery Architecture
 
 #### Problem (session 16)
@@ -2296,7 +2552,11 @@ System design:
 - Operator reviews ranked matches → confirms → system self-improves (correct matches become training signal)
 - Size class constrains the search space (only look at items with matching size_class for that shelf)
 - Semi-chaotic storage constraint (no two similar items together) naturally improves visual matching uniqueness
-**Status**: design phase. Blocked on: vision embedding model for catalog, search index for embeddings.
+**Status**: ✅ **Phase 1 DONE (session 18)** — `src/tgw/fingerprint.py` (Pillow-only dHash + RGB
+histogram), `tgw build-fingerprints` (full index = 54,314 rows), `tgw locate <image>`. Baseline
+matcher; self-match distance 0.0000 verified. **Phase 2+ (embedding/CLIP model + ANN index)
+blocked on GPU upgrade.** ⚠ `--size-class` filter inert until `size_class` is populated (0/83,520
+items currently) — see PP-STORAGE-001 backfill follow-up.
 **Dependency**: PP-STORAGE-001 (size_class field), PP-PRICE-005 (category-groups size_class lookup).
 
 ### PP-PRICE-004 ✅ COMPLETE (2026-06-05)

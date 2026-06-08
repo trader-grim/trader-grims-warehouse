@@ -106,6 +106,11 @@
         ];
       };
 
+      # Note: in the deployed system the runtime nvm/npm/venv live UNDER /opt/TGW
+      # (NVM_DIR=/opt/TGW/.nvm, NPM_CONFIG_PREFIX=/opt/TGW/.npm, venv at
+      # /opt/TGW/.venvironments) so the tree is a fully self-contained imageable
+      # entity with no ~tgw dependency — see ./nix/tgw.nix commonService.environment
+      # and ./nix/README.md. This devShell is for interactive dev only.
       devShells = forAllSystems (system:
         let pkgs = pkgsFor system; in {
           default = pkgs.mkShell {

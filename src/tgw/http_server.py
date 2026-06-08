@@ -913,6 +913,89 @@ def bulk_form(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# GET /form/todos — tablet-first open-todo dashboard (PP-TODO-001, Round 4 #34)
+# ---------------------------------------------------------------------------
+
+_TODOS_FORM_CSS = _INTAKE_FORM_CSS + """
+table{width:100%;border-collapse:collapse;margin:2px 0 16px}
+th,td{text-align:left;padding:8px 6px;border-bottom:1px solid #333;font-size:.9em;vertical-align:top}
+th{color:#888;font-size:.72em;text-transform:uppercase;letter-spacing:.04em}
+td.id{color:#4a8ade;font-variant-numeric:tabular-nums;white-space:nowrap}
+td.p{color:#caa;font-variant-numeric:tabular-nums;white-space:nowrap}
+td.src{color:#777;font-size:.8em;white-space:nowrap}
+.agent{display:flex;align-items:baseline;gap:8px;margin:18px 0 2px}
+.agent h3{margin:0;font-size:1em;color:#7fbfff;text-transform:capitalize}
+.agent .count{font-size:.8em;color:#888}
+.allclear{margin-top:24px;padding:16px;border-radius:8px;background:#1a4a1a;color:#7f7;text-align:center;font-size:1.05em}
+.total{font-size:.82em;color:#999;margin-bottom:6px}
+"""
+
+
+def _render_todos_html(rows) -> str:
+    """Build the todos dashboard HTML from open todo rows (grouped by agent)."""
+    import html as _html
+
+    head = (
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<title>TGW Todos</title><style>' + _TODOS_FORM_CSS + '</style></head><body>'
+        '<h2>Open Todos</h2>'
+    )
+    if not rows:
+        return head + '<div class="allclear">✓ All clear — no open todos.</div></body></html>'
+
+    # Preserve todo_list ordering (agent, priority, id); group consecutively.
+    groups: "list[tuple[str, list]]" = []
+    for r in rows:
+        agent = r.get("agent", "?")
+        if not groups or groups[-1][0] != agent:
+            groups.append((agent, []))
+        groups[-1][1].append(r)
+
+    parts = [head, f'<div class="total">{len(rows)} open item(s)</div>']
+    for agent, items in groups:
+        parts.append(
+            f'<div class="agent"><h3>{_html.escape(str(agent))}</h3>'
+            f'<span class="count">{len(items)} open</span></div>'
+        )
+        parts.append('<table><tr><th>ID</th><th>P</th><th>Task</th><th>Src</th></tr>')
+        for it in items:
+            parts.append(
+                '<tr>'
+                f'<td class="id">#{_html.escape(str(it.get("id", "")))}</td>'
+                f'<td class="p">{_html.escape(str(it.get("priority", "")))}</td>'
+                f'<td>{_html.escape(str(it.get("body", "")))}</td>'
+                f'<td class="src">{_html.escape(str(it.get("source", "")))}</td>'
+                '</tr>'
+            )
+        parts.append('</table>')
+    parts.append('</body></html>')
+    return ''.join(parts)
+
+
+@app.get("/form/todos")
+def todos_form(request: Request):
+    """Tablet-first open-todo dashboard — no Bearer auth (network trust), like
+    /form/intake and /form/bulk. Read-only view of `tgw todo` grouped by agent."""
+    from fastapi.responses import HTMLResponse
+
+    from tgw import todo
+    try:
+        rows = todo.todo_list()
+    except Exception as exc:  # DB down → still render a page, don't 500
+        body = (
+            '<!DOCTYPE html><html><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<title>TGW Todos</title><style>' + _TODOS_FORM_CSS + '</style></head><body>'
+            '<h2>Open Todos</h2>'
+            f'<div class="msg err" style="display:block">todo store unavailable: {exc}</div>'
+            '</body></html>'
+        )
+        return HTMLResponse(body, status_code=200)
+    return HTMLResponse(_render_todos_html(rows))
+
+
+# ---------------------------------------------------------------------------
 # POST /webhooks/ebay/notification — eBay push notification (no Bearer auth)
 # ---------------------------------------------------------------------------
 

@@ -637,3 +637,61 @@ def test_bulk_apply_invalid_field(client):
     # bulk_edit returns ok:False for a non-editable field (200 envelope)
     assert r.status_code == 200
     assert r.json()["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# PP-TODO-001 — GET /form/todos (Round 4 #34) — no Bearer auth (network trust)
+# ---------------------------------------------------------------------------
+
+_TODO_ROWS = [
+    {"id": 29, "agent": "claude", "priority": 10, "body": "Dead_letter triage flag",
+     "source": "round4", "added_at": "2026-06-08", "done_at": None},
+    {"id": 31, "agent": "claude", "priority": 30, "body": "Fingerprint index + tgw locate",
+     "source": "round4", "added_at": "2026-06-08", "done_at": None},
+    {"id": 12, "agent": "admin", "priority": 45, "body": "Fix 9 wrong-shipping listings",
+     "source": "plan", "added_at": "2026-06-07", "done_at": None},
+]
+
+
+def test_todos_form_renders_grouped(client, monkeypatch):
+    import tgw.todo as todo
+    monkeypatch.setattr(todo, "todo_list", lambda *a, **k: list(_TODO_ROWS))
+    r = client.get("/form/todos")  # no auth header — network trust
+    assert r.status_code == 200
+    text = r.text
+    assert "Open Todos" in text
+    assert "claude" in text and "admin" in text
+    assert "Fingerprint index" in text          # a task body
+    assert "#29" in text                          # id shown
+    assert "3 open item(s)" in text               # total count
+
+
+def test_todos_form_empty_all_clear(client, monkeypatch):
+    import tgw.todo as todo
+    monkeypatch.setattr(todo, "todo_list", lambda *a, **k: [])
+    r = client.get("/form/todos")
+    assert r.status_code == 200
+    assert "All clear" in r.text
+
+
+def test_todos_form_db_error_still_200(client, monkeypatch):
+    import tgw.todo as todo
+
+    def _boom(*a, **k):
+        raise RuntimeError("pg down")
+
+    monkeypatch.setattr(todo, "todo_list", _boom)
+    r = client.get("/form/todos")
+    assert r.status_code == 200
+    assert "unavailable" in r.text.lower()
+
+
+def test_todos_form_escapes_html(client, monkeypatch):
+    import tgw.todo as todo
+    rows = [{"id": 1, "agent": "claude", "priority": 50,
+             "body": "<script>alert('x')</script>", "source": "s", "done_at": None}]
+    monkeypatch.setattr(todo, "todo_list", lambda *a, **k: rows)
+    r = client.get("/form/todos")
+    assert r.status_code == 200
+    assert "<script>alert" not in r.text          # raw tag must not appear
+    assert "&lt;script&gt;" in r.text             # escaped form present

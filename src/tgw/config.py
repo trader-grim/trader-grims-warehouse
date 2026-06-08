@@ -63,6 +63,7 @@ def load_config(path: Path) -> Dict[str, Any]:
     search_catalog_csv_path  = p('search_catalog_csv_path',  str(catalog_root / 'searchcatalog.csv'))
     sqlite_catalog_path      = p('sqlite_catalog_path',      str(catalog_root / 'tgwcatalog.db'))
     thumbnail_root           = p('thumbnail_root',           str(catalog_root / 'thumbnails'))
+    fingerprint_index_path   = p('fingerprint_index_path',   str(catalog_root / 'fingerprints.db'))
 
     ebay_token_path       = secrets_root / 'ebay-token.json'
     ebay_credentials_path = secrets_root / 'ebay-credentials.json'
@@ -117,6 +118,7 @@ def load_config(path: Path) -> Dict[str, Any]:
         'location_tree_root':      location_tree_root,
         'sqlite_catalog_path':     sqlite_catalog_path,
         'thumbnail_root':          thumbnail_root,
+        'fingerprint_index_path':  fingerprint_index_path,
         'thumbnail_size':          thumbnail_size,
         'search_fields':           ['sku', *[f for f in search_fields if f != 'sku']],
         'required':                required,

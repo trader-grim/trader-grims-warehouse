@@ -54,7 +54,15 @@ let
     after = [ "postgresql.service" "network-online.target" ];
     requires = [ "postgresql.service" ];
     wants = [ "network-online.target" ];
-    environment.PYTHONUNBUFFERED = "1";
+    # /opt/TGW is the whole entity — keep the runtime self-contained and
+    # home-dir-independent so a snapshot/restore of the tree carries everything.
+    # HOME, nvm (NVM_DIR), and npm prefix all live under cfg.dataDir, not ~tgw.
+    environment = {
+      PYTHONUNBUFFERED = "1";
+      HOME = cfg.dataDir;
+      NVM_DIR = "${cfg.dataDir}/.nvm";
+      NPM_CONFIG_PREFIX = "${cfg.dataDir}/.npm";
+    };
     serviceConfig = {
       User = cfg.user;
       Group = cfg.group;
@@ -187,6 +195,11 @@ in
       "d ${cfg.dataDir}/var             0750 ${cfg.user} ${cfg.group} -"
       "d ${cfg.dataDir}/var/log         0750 ${cfg.user} ${cfg.group} -"
       "d ${cfg.dataDir}/incoming        0750 ${cfg.user} ${cfg.group} -"
+      # Home-dir-independent runtime: nvm (NVM_DIR), npm prefix, and the venv all
+      # live under /opt/TGW so a snapshot of the tree carries the whole runtime.
+      "d ${cfg.dataDir}/.nvm            0750 ${cfg.user} ${cfg.group} -"
+      "d ${cfg.dataDir}/.npm            0750 ${cfg.user} ${cfg.group} -"
+      "d ${cfg.dataDir}/.venvironments  0750 ${cfg.user} ${cfg.group} -"
     ];
 
     environment.systemPackages = [ cfg.package ];

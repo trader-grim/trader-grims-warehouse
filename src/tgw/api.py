@@ -638,8 +638,36 @@ def _build_parser() -> argparse.ArgumentParser:
                    help='max jobs to show (default 50)')
     p.add_argument('--requeue', default='', metavar='JOB_ID',
                    help='re-enqueue a specific dead_letter job by ID (cancels the dead_letter entry)')
+    p.add_argument('--requeue-transient', dest='requeue_transient', action='store_true',
+                   help='re-enqueue ALL dead_letter jobs classified [transient] (honors --queue)')
     p.add_argument('--cancel', default='', metavar='QUEUE',
                    help='cancel all dead_letter jobs in a queue')
+
+    p = sub.add_parser('build-fingerprints',
+                       help='build the visual fingerprint index over thumbnails (PP-VISION-001)')
+    p.add_argument('--limit', type=int, default=None, metavar='N',
+                   help='index at most N thumbnails (for a quick partial build)')
+    p.add_argument('--check-only', action='store_true', dest='check_only',
+                   help='report what would be indexed without writing')
+
+    p = sub.add_parser('locate',
+                       help='rank catalog SKUs by visual similarity to an image (PP-VISION-001)')
+    p.add_argument('image', help='path to a query image (jpg/png)')
+    p.add_argument('--size-class', default=None, dest='size_class', metavar='CLASS',
+                   help='restrict to a size_class (flat/packet/small_box/…)')
+    p.add_argument('--top', type=int, default=10, metavar='N', help='show top N matches')
+    p.add_argument('--json', action='store_true', dest='json_out',
+                   help='output raw JSON instead of a formatted list')
+
+    p = sub.add_parser('export-catalog',
+                       help='export SQLite catalog + thumbnails to a dir for Syncthing relay (PP-PORTABLE-CATALOG-001)')
+    p.add_argument('dest', help='destination directory')
+    p.add_argument('--no-thumbnails', action='store_true', dest='no_thumbnails',
+                   help='export the catalog db only (skip thumbnails)')
+    p.add_argument('--limit', type=int, default=None, metavar='N',
+                   help='copy at most N thumbnails')
+    p.add_argument('--check-only', action='store_true', dest='check_only',
+                   help='report what would be exported without writing')
 
     p = sub.add_parser('get-ebay-token',
                        help='browser OAuth re-consent flow — use when refresh token is dead (HTTP 400)')
@@ -1132,6 +1160,7 @@ def cmd_dead_letter(
     queue: str = '',
     limit: int = 50,
     requeue_id: str = '',
+    requeue_transient: bool = False,
     cancel_queue: str = '',
 ) -> Dict[str, Any]:
     """Inspect and manage dead_letter queue jobs."""
@@ -1147,6 +1176,31 @@ def cmd_dead_letter(
         except ValueError as exc:
             print(f'Error: {exc}')
             return {'ok': False, 'error': str(exc)}
+
+    if requeue_transient:
+        # Batch-requeue every dead_letter job whose error classifies as transient.
+        # Scans all dead_letter jobs (limit is intentionally large here), honors --queue.
+        jobs = state_machine.dead_letter_jobs(queue_name=queue, limit=10000)
+        requeued: List[Dict[str, str]] = []
+        skipped_permanent = 0
+        for job in jobs:
+            error = (job.get('error_detail') or '').replace('\n', ' ')
+            verdict, _ = classify_dead_letter(error)
+            if verdict != 'requeue':
+                skipped_permanent += 1
+                continue
+            try:
+                new_id = state_machine.requeue_dead_letter_job(job['job_id'])
+                requeued.append({'old_job_id': job['job_id'], 'new_job_id': new_id,
+                                 'queue': job['queue_name']})
+                print(f'  requeued {str(job["job_id"])[:8]}… ({job["queue_name"]}) → {new_id[:8]}…')
+            except ValueError as exc:
+                print(f'  skip {str(job["job_id"])[:8]}…: {exc}')
+        label = f' in {queue!r}' if queue else ''
+        print(f'Re-enqueued {len(requeued)} transient dead_letter job(s){label}; '
+              f'left {skipped_permanent} permanent job(s) untouched.')
+        return {'ok': True, 'action': 'requeue_transient', 'requeued': requeued,
+                'requeued_count': len(requeued), 'skipped_permanent': skipped_permanent}
 
     if cancel_queue:
         n = state_machine.clear_dead_letter(cancel_queue)
@@ -1181,6 +1235,61 @@ def cmd_dead_letter(
          'verdict': classify_dead_letter(j.get('error_detail') or '')[0]}
         for j in jobs
     ]}
+
+
+def cmd_build_fingerprints(cfg: Dict[str, Any], *,
+                           limit: Optional[int] = None,
+                           check_only: bool = False) -> Dict[str, Any]:
+    """Build/refresh the visual fingerprint index over the thumbnail cache (PP-VISION-001)."""
+    from tgw.fingerprint import build_fingerprint_index
+    result = build_fingerprint_index(cfg, limit=limit, check_only=check_only)
+    if result.get('ok'):
+        verb = 'would index' if check_only else 'indexed'
+        extra = f' ({result["problems"]} unreadable)' if result.get('problems') else ''
+        print(f'{verb} {result["count"]}/{result["source_count"]} thumbnails{extra} '
+              f'in {result["elapsed_seconds"]}s → {result["path"]}')
+    else:
+        print(f'Error: {result.get("error", result)}')
+    return result
+
+
+def cmd_locate(cfg: Dict[str, Any], image_path: str, *,
+               size_class: Optional[str] = None, top: int = 10,
+               json_out: bool = False) -> Dict[str, Any]:
+    """Rank catalog SKUs by visual similarity to an image (PP-VISION-001)."""
+    from tgw.fingerprint import locate_image
+    result = locate_image(cfg, image_path, size_class=size_class, top=top)
+    if json_out:
+        print(json.dumps(result, indent=2))
+        return result
+    if not result.get('ok'):
+        print(f'Error: {result.get("error", result)}')
+        return result
+    sc = f' [size_class={size_class}]' if size_class else ''
+    print(f'Top {result["count"]} matches for {image_path}{sc}:')
+    for m in result['matches']:
+        print(f'  {m["distance"]:.4f}  {m["sku"]:<22} '
+              f'(dhash={m["dhash_distance"]:.3f} hist={m["hist_distance"]:.3f}'
+              f'{" " + m["size_class"] if m["size_class"] else ""})')
+    return result
+
+
+def cmd_export_catalog(cfg: Dict[str, Any], dest: str, *,
+                       no_thumbnails: bool = False,
+                       limit: Optional[int] = None,
+                       check_only: bool = False) -> Dict[str, Any]:
+    """Export the SQLite catalog + thumbnails to a directory for Syncthing relay (PP-PORTABLE-CATALOG-001)."""
+    from tgw.catalog_export import export_catalog
+    result = export_catalog(cfg, dest, with_thumbnails=not no_thumbnails,
+                            limit=limit, check_only=check_only)
+    if result.get('ok'):
+        verb = 'would export' if check_only else 'exported'
+        mb = round(result['bytes_total'] / 1_048_576, 1)
+        print(f'{verb} catalog + {result["thumbnails_copied"]} thumbnails '
+              f'({mb} MB) → {result["dest"]} in {result["elapsed_seconds"]}s')
+    else:
+        print(f'Error: {result.get("error", result)}')
+    return result
 
 
 def cmd_requeue(cfg: Dict[str, Any], *,
@@ -3209,7 +3318,36 @@ def main() -> int:
                 queue=getattr(args, 'queue', ''),
                 limit=getattr(args, 'limit', 50),
                 requeue_id=getattr(args, 'requeue', ''),
+                requeue_transient=getattr(args, 'requeue_transient', False),
                 cancel_queue=getattr(args, 'cancel', ''),
+            )
+            return 0 if result['ok'] else 1
+
+        elif args.op == 'build-fingerprints':
+            result = cmd_build_fingerprints(
+                cfg,
+                limit=getattr(args, 'limit', None),
+                check_only=getattr(args, 'check_only', False),
+            )
+            return 0 if result['ok'] else 1
+
+        elif args.op == 'locate':
+            result = cmd_locate(
+                cfg,
+                args.image,
+                size_class=getattr(args, 'size_class', None),
+                top=getattr(args, 'top', 10),
+                json_out=getattr(args, 'json_out', False),
+            )
+            return 0 if result['ok'] else 1
+
+        elif args.op == 'export-catalog':
+            result = cmd_export_catalog(
+                cfg,
+                args.dest,
+                no_thumbnails=getattr(args, 'no_thumbnails', False),
+                limit=getattr(args, 'limit', None),
+                check_only=getattr(args, 'check_only', False),
             )
             return 0 if result['ok'] else 1
 

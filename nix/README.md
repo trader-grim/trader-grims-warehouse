@@ -43,6 +43,29 @@ MX restore image / backup (see `../docs/TGW-Plan-Vault/reference/PP-DEPLOY-001-M
 Until secrets are restored, `tgw health` will report the eBay/Discogs checks as
 failing; the service stack itself still starts.
 
+## Home-dir-independent layout (`/opt/TGW` is the whole entity)
+
+The `tgw` user has **no home directory** (`createHome = false`) — this is deliberate
+so the entire configured runtime lives under `/opt/TGW` and a snapshot/restore of
+that one tree carries everything with zero `~tgw` dependency. The module sets a
+home-dir-free environment on every long-running tgw unit (`commonService.environment`):
+
+| Var | Value | Why |
+|-----|-------|-----|
+| `HOME` | `/opt/TGW` | tools that probe `$HOME` land inside the tree, not a missing `~tgw` |
+| `NVM_DIR` | `/opt/TGW/.nvm` | nvm installs Node under the tree (markmap-cli etc.) |
+| `NPM_CONFIG_PREFIX` | `/opt/TGW/.npm` | global npm installs stay under the tree |
+
+The Python venv already lives at `/opt/TGW/.venvironments`. `systemd.tmpfiles.rules`
+pre-creates `/opt/TGW/{.nvm,.npm,.venvironments}` owned by the tgw user. When the
+operator installs nvm, do it with `NVM_DIR=/opt/TGW/.nvm` set so Node lands in the
+imageable tree. Net effect: `image(/opt/TGW) + flake + site-config = the running system`
+with no home-directory state to reconstruct.
+
+> A **separate personal flake** (operator desktop preference apps — Firefox, Plasma
+> extras, etc.) is intended to compose via `imports` and is kept out of this platform
+> flake on purpose: platform deps and personal preferences stay decoupled.
+
 ## Knobs (`services.tgw.*`)
 
 `enable`, `package`, `user`/`group`/`uid`, `dataDir` (keep `/opt/TGW`),
