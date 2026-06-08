@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-08 (session 16 — Round 3 planning, NixOS committed, PP-BULKEDIT-001 priority 1)
+updated: 2026-06-07 (session 17 — Track 1 Round 3 ALL 8 items DONE; suite 315 green; awaiting /code-review)
 maintained_by: Opus (planner)
 ---
 
@@ -101,6 +101,61 @@ maintained_by: Opus (planner)
 - **Round 3 locked** — 8 ranked items. PP-BULKEDIT-001 (tablet web UI + CLI) is #1 by Dave's
   direction. Guiding principle: time-saving interfaces usable now, better later.
   See `## Work Tracks → Track 1 — Round 3`.
+
+### Execution — 2026-06-07 (session 17, Track 1 Round 3 — ALL 8 items DONE)
+- **All 8 Round 3 items shipped** (todo IDs 21–28 now closed). Suite **263 → 315 passing**
+  (+52 tests), ruff clean, `tgw health` fully green. Per-item:
+  - **#21 `tgw restart-workers`** — restarts `tgw-worker@<queue>.service` (all or named);
+    uses `sudo -n` when non-root, prints the command if passwordless sudo is unavailable.
+    New canonical `WORKER_QUEUES` tuple in `queue/__init__.py` (single source of truth; 18 queues).
+  - **#22 PP-BULKEDIT-001 Phase 1** — shared `items.bulk_edit` core (filter→preview→apply,
+    fields: title/location/status/ai_hint/shipping_profile; location routes through
+    `locationupdate` for tree sync, ai_hint set without re-queue). CLI `tgw bulk` (dry-run
+    default, `--apply`). Web: `GET /form/bulk` (tablet-first HTML, network-trust like
+    `/form/intake`) + `POST /api/bulk/{preview,apply}` (Bearer). Enqueues catalog_rebuild on apply.
+  - **#23 catalog-verify `--fix`** — dry-run default, `--write` to apply; auto-strips stale
+    `TEMPLATE:` title prefix (conservative; never writes an empty title); per-SKU fix log.
+  - **#24 PP-REPRICER-001 read-only** — `ebay/market_data.py`: `MarketDataProvider` +
+    OwnSalesProvider (velocity), BrowseCompsProvider (Browse GET, reuses `suggest_price`),
+    StubProvider (the `buy.marketplace_insights`-blocked sold-data slot). `tgw reprice-suggest`
+    blends → reduce/hold/raise. **Strictly read-only — no eBay write calls (verified).**
+  - **#25 PP-MC-001 Phase 4** — `tgwlogs` MC extfs VFS: read-only journalctl per worker;
+    WORKER_QUEUES allowlist + argv-list subprocess (no shell injection) + output cap
+    (`TGWLOGS_LINES`, default 500/max 5000). Registered (mc.ext.ini, installer, sentinel, README).
+  - **#26 PP-SHELL-001 T3** — `tgw.source`/`tgw-dev.source` version-controlled at
+    `etc/interfaces/shell/` (sha256-verified verbatim) + README + operator-gated `install.sh`
+    block (backup+idempotent). Audit-correction: all 6 named ARCH-VIOLATES already wrapped
+    (lines 201–1066); remaining direct-jq writes are in DEPRECATED funcs (Tier-2 *removal*, not wrap).
+  - **#27 PP-NIXOS-001** — `flake.nix` (buildPythonApplication, no poetry.lock) + `nix/tgw.nix`
+    (NixOS module: tgw user w/ configurable uid, postgres state_machine, per-queue worker
+    services, tgw-http, opt-in backup) + `nix/README.md` VM-validation steps. Watch-item flagged:
+    `python3Packages.mcp` availability in nixos-24.11. **Dave validates in VM (not built on MX).**
+  - **#28 PP-DEPLOY-001** — `reference/PP-DEPLOY-001-MX-RESTORE-RUNBOOK.md`: pre-snapshot
+    checklist (drain workers, pg_dump, perms `--check`), MX Snapshot include/exclude (exclude
+    bulk ItemData → rclone restore), ISO verify, full restore, post-NixOS retention.
+- **Adversarial review workflow could not run inline** — sub-agents hit the session limit. The
+  operator then ran cloud **`/ultrareview`**, which found 3 real bugs (all now FIXED + regression-
+  tested; suite **315 → 321**):
+  - *bulk_edit partial-success* — `ok=len(failed)==0` conflated partial success with total failure:
+    catalog_rebuild was skipped after partial writes and the CLI's failure summary was dead code.
+    Fixed: gate rebuild on `count` (not `ok`) in `cmd_bulk` + `http_server.bulk_apply`; CLI handler
+    now branches on the `error` key so the partial-success summary is reachable.
+  - *catalog-verify `--fix` stale `item_viols`* — fixed violations were double-reported (open TODO +
+    FIXES) and `--fix --write --mark-verified` skipped the hall pass for fixed-clean items. Fixed:
+    apply fixes then re-run `_verify_item` on the mutated doc BEFORE accumulating violations / the
+    mark gate.
+  - *negative `--limit`* sliced from the end (`skus[:-5]`). Fixed: `if limit > 0` in `bulk_edit` +
+    `cmd_reprice_suggest`; `BulkBody.limit` now `Field(ge=0)`.
+  - One finding was a **false positive**: ultrareview ran on the committed tree and reported
+    `market_data.py` / `etc/interfaces/shell/` / `extfs.d/tgwlogs` as "missing" — they exist locally
+    but are **untracked**. ⚠ **COMMIT REMINDER:** `git add` the new files (`src/tgw/ebay/market_data.py`,
+    `etc/interfaces/shell/`, `etc/interfaces/mc/system/extfs.d/tgwlogs`, `etc/interfaces/mc/logs.tgwlogs`,
+    `flake.nix`, `nix/`, and the 4 new `tests/test_*.py`) or the features break exactly as the review
+    described. install-system-mc.sh would also benefit from the same `[[ -f ]]` guard the shell block has.
+- **4 new operator suggestions arrived mid-session** (SUGGESTIONS.md, 2026-06-08T01:25–01:54):
+  install quickstart guide; NixOS from-scratch/adopt + site-config-in-github DR; client-machine
+  migration path (tgwOS on the spare intake box); "tgw plan builder" (DB-driven plan). Left
+  unprocessed for the next planning pass — new scope, not Round 3.
 
 ### Planning — 2026-06-07 (session 15, Track 1 round-2 backlog)
 - **Track 1 round 1 confirmed COMPLETE** (sessions 6–14); stale numbered rows collapsed.
@@ -467,7 +522,7 @@ Next available: Tier E (ranks 19–25) — bulk-mutation / larger / lower value-
 - PP-BULKEDIT-001 = #1 priority. Tablet-usable: web UI via browser + Termux SSH fallback.
 - ISS-009 downgraded — production keyset active; `tgw restart-ebay-token` if token dead-lettered.
 
-**Active task list:** `tgw todo claude` (IDs 21–28). The todo tracker is the canonical queue — see it for current status. Design specs for each item are in the relevant PP-* section of this plan.
+**Active task list:** ✅ **ALL 8 DONE** (todo IDs 21–28 closed, session 17 — see `### Execution — 2026-06-07 (session 17 …)` above for the per-item summary). The todo tracker is the canonical queue. Next: a `/code-review` pass once the session limit resets, then pick the next batch (blocked items below remain operator/research-gated).
 
 #### Blocked — not Claude-ready (grouped by blocker)
 - **Operator / host-level ops** — `PP-REMOTE-001` (Tailscale + tmux + SSH hardening + sudoers + claude-user decision); `PP-DEPLOY-001` full epic (usermod UID<1000, recursive chown, image bake, fresh-restore reboot — only the read-only audit check #16 is ready). *Unblock:* operator does the host work, then Claude can add reviewable config (tmux launcher, OSC52 helper).
@@ -1048,6 +1103,8 @@ Rendered HTML snapshots at `/opt/TGW/var/www/`.
 - `ISSUES.md` — active bugs and known gaps (ISS-001 through ISS-008); closed issues log
 - `eBay-Error-Codes.md` — all eBay errorIds + HTTP status handlers; dead-letter diagnosis guide; scope gaps table
 - `HARDWARE-AI-INFERENCE.md` — Ollama model sizing, GPU upgrade planning (pre-existing)
+- `SHELL-AUDIT.md` — tgw.source / tgw-dev.source function disposition (KEEP/WRAP/ARCH-VIOLATES/DEPRECATED)
+- `PP-DEPLOY-001-MX-RESTORE-RUNBOOK.md` — operator runbook: bake the final MX Snapshot restore image before NixOS cutover (session 17)
 - `echo.py` / `worker_base.py` — new worker templates (pre-existing)
 
 ### PP-REF-001 — TGW Item JSON Schema ✅ DONE 2026-06-04

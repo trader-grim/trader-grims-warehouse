@@ -174,6 +174,80 @@ def cmd_enqueue_sku(cfg: Dict[str, Any], sku: str, queue: str) -> Dict[str, Any]
         return {'ok': False, 'error': str(e)}
 
 
+def cmd_restart_workers(queues: Optional[List[str]] = None,
+                        dry_run: bool = False) -> Dict[str, Any]:
+    """
+    Restart tgw-worker@<queue>.service systemd units (PP-SHELL-001 convenience).
+
+    With no queues, restarts every worker in the canonical ``WORKER_QUEUES``
+    list.  systemd unit management needs root, so when not running as root this
+    transparently uses non-interactive ``sudo -n``; if passwordless sudo is not
+    available it prints the exact command for the operator instead of hanging on
+    a password prompt.  Always run after editing worker source (see CLAUDE.md).
+    """
+    import subprocess
+
+    from .queue import WORKER_QUEUES
+
+    if queues:
+        unknown = [q for q in queues if q not in WORKER_QUEUES]
+        if unknown:
+            return {'ok': False,
+                    'error': f'unknown queue(s): {unknown}; valid: {list(WORKER_QUEUES)}'}
+        targets = list(queues)
+    else:
+        targets = list(WORKER_QUEUES)
+
+    units = [f'tgw-worker@{q}.service' for q in targets]
+
+    is_root = (os.geteuid() == 0)
+    prefix: List[str] = [] if is_root else ['sudo', '-n']
+    cmd = [*prefix, 'systemctl', 'restart', *units]
+    cmd_str = ' '.join(cmd)
+
+    if dry_run:
+        print(cmd_str)
+        return {'ok': True, 'dry_run': True, 'queues': targets, 'command': cmd_str}
+
+    # Pre-flight: if we need sudo, make sure passwordless sudo works so we don't
+    # block on an interactive password prompt inside an automated session.
+    if not is_root:
+        probe = subprocess.run(['sudo', '-n', 'true'],
+                               capture_output=True, text=True)
+        if probe.returncode != 0:
+            return {
+                'ok': False,
+                'queues': targets,
+                'command': f'sudo systemctl restart {" ".join(units)}',
+                'error': 'not root and passwordless sudo unavailable — '
+                         'run the printed command manually as root',
+            }
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except FileNotFoundError:
+        return {'ok': False, 'error': 'systemctl not found on this host',
+                'command': cmd_str}
+    except subprocess.TimeoutExpired:
+        return {'ok': False, 'error': 'systemctl restart timed out', 'command': cmd_str}
+
+    # Report per-unit liveness regardless of the restart return code.
+    status_cmd = [*prefix, 'systemctl', 'is-active', *units]
+    sproc = subprocess.run(status_cmd, capture_output=True, text=True)
+    states = sproc.stdout.split()
+    restarted = [u for u, s in zip(units, states) if s == 'active']
+    failed = [u for u, s in zip(units, states) if s != 'active']
+
+    return {
+        'ok': proc.returncode == 0 and not failed,
+        'used_sudo': not is_root,
+        'restarted': restarted,
+        'failed': failed,
+        'command': cmd_str,
+        'stderr': proc.stderr.strip() or None,
+    }
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -450,6 +524,32 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--output', default=None,
                    help='write markdown checklist to this file instead of stdout')
 
+    p = sub.add_parser('bulk',
+                       help='bulk-edit one field across matched items (PP-BULKEDIT-001); '
+                            'dry-run unless --apply')
+    p.add_argument('--field', required=True,
+                   choices=['title', 'location', 'status', 'ai_hint', 'shipping_profile'],
+                   help='which field to set on every matched item')
+    p.add_argument('--value', required=True, help='new value for the field')
+    p.add_argument('skus', nargs='*', help='specific SKU(s); or use the filters below')
+    p.add_argument('--location', default='', help='filter to a shelf location')
+    p.add_argument('--status', default='', help='filter by #STATUS value')
+    p.add_argument('--search', default='', help='free-text substring filter')
+    p.add_argument('--limit', type=int, default=0, help='cap matched items (0 = all)')
+    p.add_argument('--apply', action='store_true',
+                   help='actually write changes (default: dry-run preview)')
+
+    p = sub.add_parser('reprice-suggest',
+                       help='read-only price suggestions from market data (PP-REPRICER-001); '
+                            'never writes to eBay')
+    p.add_argument('skus', nargs='*', help='specific SKU(s); omit to use filters')
+    p.add_argument('--location', default='', help='filter to a shelf location')
+    p.add_argument('--status', default='', help='filter by #STATUS value')
+    p.add_argument('--search', default='', help='free-text substring filter')
+    p.add_argument('--limit', type=int, default=0, help='max items (0 = all matched)')
+    p.add_argument('--json', dest='as_json', action='store_true',
+                   help='output full JSON instead of the table')
+
     p = sub.add_parser('seo-audit',
                        help='SEO quality report for live and staged listings (PP-SEO-001)')
     p.add_argument('--limit', type=int, default=50,
@@ -522,6 +622,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser('restart-ebay-token',
                    help='clear dead-letter token jobs and enqueue a fresh token_refresh immediately')
+
+    p = sub.add_parser('restart-workers',
+                       help='restart tgw-worker@<queue>.service systemd units (uses sudo if not root)')
+    p.add_argument('queues', nargs='*',
+                   help='specific queue name(s) to restart (default: all canonical workers)')
+    p.add_argument('--dry-run', action='store_true',
+                   help='print the systemctl command without running it')
 
     p = sub.add_parser('dead-letter',
                        help='inspect and manage dead_letter queue jobs')
@@ -630,6 +737,11 @@ def _build_parser() -> argparse.ArgumentParser:
                    help='with --mark-verified: write hall pass even to items with violations')
     p.add_argument('--skip-verified', action='store_true',
                    help='skip items that already have a catalog_verified hall pass (faster re-scan)')
+    p.add_argument('--fix', action='store_true',
+                   help='report auto-applicable fixes (e.g. strip stale TEMPLATE: title prefix); '
+                        'dry-run unless --write is given')
+    p.add_argument('--write', action='store_true',
+                   help='with --fix: actually apply the fixes (default: dry-run only)')
 
     return parser
 
@@ -730,6 +842,37 @@ def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any]) -> List[Dict[str
     return viols
 
 
+def _strip_template_prefix(title: str) -> Optional[str]:
+    """
+    Return *title* with a leading ``TEMPLATE:`` marker stripped, or None when
+    there is nothing to strip or the result would be empty (an empty title is a
+    different problem — ``no_title`` — and must not be written over the field).
+    """
+    import re
+    m = re.match(r'(?i)^\s*template:\s*', title)
+    if not m:
+        return None
+    stripped = title[m.end():].strip()
+    return stripped or None
+
+
+def _compute_fixes(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Return the list of auto-applicable fixes for one item document.
+
+    Conservative by design — only unambiguous, lossless corrections are
+    auto-fixable (PP-VERIFY-001 Phase 3).  Each fix is
+    ``{rule, field, before, after}``.
+    """
+    fixes: List[Dict[str, Any]] = []
+    title = str(doc.get('title') or '')
+    new_title = _strip_template_prefix(title)
+    if new_title is not None:
+        fixes.append({'rule': 'stale_template_prefix', 'field': 'title',
+                      'before': title, 'after': new_title})
+    return fixes
+
+
 def cmd_catalog_verify(
     cfg: Dict[str, Any],
     *,
@@ -740,17 +883,26 @@ def cmd_catalog_verify(
     mark_verified: bool = False,
     force: bool = False,
     skip_verified: bool = False,
+    fix: bool = False,
+    write: bool = False,
 ) -> Dict[str, Any]:
-    """Scan ItemData for assumption violations and emit a markdown checklist."""
-    from tgw.items import atomic_write_json
+    """Scan ItemData for assumption violations and emit a markdown checklist.
+
+    With ``fix=True`` the scan also reports auto-applicable corrections (dry-run
+    by default); pass ``write=True`` to actually apply them through the item
+    update fence.  A per-SKU fix log is printed and returned under ``fixes``.
+    """
+    from tgw.items import atomic_write_json, update_item
     root: Path = cfg['itemdata_root']
     min_sev = _SEV_ORDER.get(min_severity, 1)
 
     all_violations: List[Dict[str, Any]] = []
+    fix_log: List[Dict[str, Any]] = []
     scanned = 0
     skipped_verified = 0
     marked = 0
     json_errors = 0
+    fixes_applied = 0
 
     for item_dir in sorted(root.iterdir()):
         if not item_dir.is_dir() or not item_dir.name.startswith('tgw'):
@@ -782,6 +934,28 @@ def cmd_catalog_verify(
 
         scanned += 1
         item_viols = _verify_item(sku, item_dir, doc)
+
+        # Apply fixes FIRST (when writing) so the violation list, the report,
+        # the by_rule tally, and the mark_verified gate all reflect post-fix
+        # state — a fixed-on-disk violation must not also appear as an open TODO.
+        if fix:
+            item_fixed = False
+            for f in _compute_fixes(doc):
+                applied = False
+                error = None
+                if write:
+                    res = update_item(cfg, sku, f['field'], f['after'])
+                    applied = bool(res.get('ok'))
+                    if applied:
+                        fixes_applied += 1
+                        doc[f['field']] = f['after']
+                        item_fixed = True
+                    else:
+                        error = res.get('error')
+                fix_log.append({'sku': sku, **f, 'applied': applied, 'error': error})
+            if item_fixed:
+                item_viols = _verify_item(sku, item_dir, doc)  # re-scan mutated doc
+
         for viol in item_viols:
             if _SEV_ORDER.get(viol['severity'], 99) <= min_sev:
                 all_violations.append(viol)
@@ -823,6 +997,17 @@ def cmd_catalog_verify(
             lines.append(f'- [ ] **{viol["rule"]}** — `{viol["sku"]}` — {viol["detail"]}')
         lines.append('')
 
+    if fix and fix_log:
+        verb = 'Applied' if write else 'Proposed (dry-run — pass --write to apply)'
+        lines.append(f'## FIXES — {verb} ({len(fix_log)})')
+        lines.append('')
+        for f in fix_log:
+            mark = 'x' if f['applied'] else ' '
+            err = f'  ⚠ {f["error"]}' if f.get('error') else ''
+            lines.append(f'- [{mark}] **{f["rule"]}** — `{f["sku"]}` — {f["field"]}: '
+                         f'{f["before"]!r} → {f["after"]!r}{err}')
+        lines.append('')
+
     report = '\n'.join(lines)
 
     if output:
@@ -839,6 +1024,9 @@ def cmd_catalog_verify(
         'json_errors': json_errors,
         'skipped_verified': skipped_verified,
         'marked_verified': marked,
+        'fixes': fix_log,
+        'fixes_applied': fixes_applied,
+        'fixes_proposed': len(fix_log),
     }
 
 
@@ -1775,6 +1963,117 @@ def cmd_ebay_sweep(cfg: Dict[str, Any], *,
             'output': str(output) if output else None}
 
 
+def cmd_reprice_suggest(
+    cfg: Dict[str, Any],
+    *,
+    skus: Optional[List[str]] = None,
+    location: str = '',
+    status: str = '',
+    search: str = '',
+    limit: int = 0,
+) -> Dict[str, Any]:
+    """
+    Read-only price suggestions for items (PP-REPRICER-001).
+
+    Blends own-sales velocity + active Browse comps into a suggested price and
+    a reduce/hold/raise recommendation.  NEVER writes to eBay — this is the
+    dry-run foundation; the writing repricer is blocked on the
+    buy.marketplace_insights scope.
+    """
+    from .config import sku_json
+    from .ebay.market_data import reprice_suggest
+    from .resolver import resolve
+
+    if skus:
+        target = sorted(set(skus))
+    else:
+        sel: Dict[str, Any] = {}
+        if location:
+            sel['location'] = location
+        if status:
+            sel['status'] = status
+        if search:
+            sel['search'] = search
+        target = sorted(resolve(cfg, **sel)) if sel else []
+
+    if not target:
+        return {'ok': True, 'count': 0, 'items': [],
+                'note': 'no items matched (give SKU(s) or a --location/--status/--search filter)'}
+
+    if limit > 0:  # negative would slice from the end — treat as "no cap"
+        target = target[:limit]
+
+    rows: List[Dict[str, Any]] = []
+    for sku in target:
+        jf = sku_json(cfg, sku)
+        if not jf.exists():
+            rows.append({'ok': False, 'sku': sku, 'error': 'item not found'})
+            continue
+        try:
+            item = json.loads(jf.read_text(encoding='utf-8'))
+        except Exception as exc:
+            rows.append({'ok': False, 'sku': sku, 'error': str(exc)})
+            continue
+        item.setdefault('sku', sku)
+        rows.append(reprice_suggest(cfg, item))
+
+    return {'ok': True, 'count': len(rows), 'items': rows, 'applied': False}
+
+
+def cmd_bulk(
+    cfg: Dict[str, Any],
+    *,
+    field: str,
+    value: str,
+    skus: Optional[List[str]] = None,
+    location: str = '',
+    status: str = '',
+    search: str = '',
+    limit: int = 0,
+    apply: bool = False,
+) -> Dict[str, Any]:
+    """
+    Bulk-edit one field across matched items (PP-BULKEDIT-001).
+
+    Dry-run (preview) by default; pass apply=True to write.  Mirrors the web
+    /form/bulk flow.  Enqueues a catalog rebuild after a successful apply.
+    """
+    from .items import bulk_edit
+
+    selectors: Dict[str, Any] = {}
+    if skus:
+        selectors['skus'] = list(skus)
+    if location:
+        selectors['location'] = location
+    if status:
+        selectors['status'] = status
+    if search:
+        selectors['search'] = search
+    if not selectors:
+        return {'ok': False, 'error': 'no selector given — pass SKU(s) or '
+                                      '--location/--status/--search'}
+
+    result = bulk_edit(cfg, selectors, field, value, apply=apply, limit=limit)
+
+    # Gate the rebuild on count (writes happened), NOT ok — a partial-success
+    # run (some failed) still changed N item JSONs and must refresh the catalog.
+    if apply and result.get('count'):
+        try:
+            from .queue import state_machine as _sm
+            _sm.init(cfg['postgres_dsn'])
+            _sm.enqueue_job(
+                queue_name='catalog_rebuild',
+                payload={'reason': 'bulk_edit'},
+                dedupe_key='catalog_rebuild:pending',
+                not_before=time.time() + 30,
+                max_attempts=3,
+            )
+        except Exception:
+            pass
+
+    return result
+
+
 def cmd_suggest(cfg: Dict[str, Any], text: str) -> Dict[str, Any]:
     suggestions_file = cfg['plan_vault_path'] / 'suggestions' / 'SUGGESTIONS.md'
     suggestions_file.parent.mkdir(parents=True, exist_ok=True)
@@ -2482,6 +2781,72 @@ def main() -> int:
             result = cmd_resolve_legacy(cfg, args.skus,
                                         enqueue_stage=not args.no_stage)
 
+        elif args.op == 'bulk':
+            result = cmd_bulk(
+                cfg,
+                field=args.field,
+                value=args.value,
+                skus=args.skus,
+                location=args.location,
+                status=args.status,
+                search=args.search,
+                limit=args.limit,
+                apply=args.apply,
+            )
+            # Hard errors (bad selector / non-editable field) carry 'error' and
+            # no 'applied'; a partial-success apply has applied=True + a failed
+            # list and ok=False — show its summary rather than dumping JSON.
+            if result.get('error'):
+                print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+                return 1
+            if result.get('applied'):
+                print(f'Applied {args.field}={args.value!r} to {result["count"]} item(s).')
+                if result.get('failed'):
+                    print(f'Failed: {len(result["failed"])}')
+                    for f in result['failed']:
+                        print(f'  {f["sku"]}: {f.get("error")}')
+            else:
+                rows = result.get('preview', [])
+                print(f'DRY RUN — would set {args.field}={args.value!r} on {len(rows)} item(s):')
+                print(f'{"SKU":<24} {"Current":<28} Title')
+                print('-' * 84)
+                for r in rows:
+                    cur = str(r['current'])[:26]
+                    print(f'{r["sku"]:<24} {cur:<28} {r["title"][:28]}')
+                print('\nRe-run with --apply to write.')
+            return 0 if result['ok'] else 1
+
+        elif args.op == 'reprice-suggest':
+            result = cmd_reprice_suggest(
+                cfg,
+                skus=args.skus,
+                location=args.location,
+                status=args.status,
+                search=args.search,
+                limit=args.limit,
+            )
+            if getattr(args, 'as_json', False) or not result['ok']:
+                print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+                return 0 if result['ok'] else 1
+            items = result['items']
+            if not items:
+                print(result.get('note', 'No items.'))
+                return 0
+            print(f'{"SKU":<24} {"Cur$":>8} {"Sugg$":>8} {"Δ%":>6}  {"Rec":<7} Basis / rationale')
+            print('-' * 96)
+            for r in items:
+                if not r.get('ok'):
+                    print(f'{r.get("sku",""):<24}  ERR    {r.get("error","")}')
+                    continue
+                cur  = f'${r["current_price"]:.2f}' if r['current_price'] is not None else '     —'
+                sug  = f'${r["suggested_price"]:.2f}' if r['suggested_price'] is not None else '     —'
+                dpct = f'{r["delta_pct"]:+.0f}%' if r['delta_pct'] is not None else '    —'
+                print(f'{r["sku"]:<24} {cur:>8} {sug:>8} {dpct:>6}  '
+                      f'{r["recommendation"]:<7} {r["rationale"]}')
+            print(f'\n{len(items)} item(s).  READ-ONLY — no eBay writes. '
+                  'Reduce/raise thresholds: -5% / +10%.')
+            return 0
+
         elif args.op == 'seo-audit':
             result = cmd_seo_audit(cfg, limit=args.limit, live_only=args.live_only)
             if not getattr(args, 'as_json', False) and result['ok']:
@@ -2830,6 +3195,8 @@ def main() -> int:
                 mark_verified=getattr(args, 'mark_verified', False),
                 force=getattr(args, 'force', False),
                 skip_verified=getattr(args, 'skip_verified', False),
+                fix=getattr(args, 'fix', False),
+                write=getattr(args, 'write', False),
             )
             if getattr(args, 'as_json', False):
                 print(json.dumps(result, indent=2))
@@ -2845,6 +3212,11 @@ def main() -> int:
                 cancel_queue=getattr(args, 'cancel', ''),
             )
             return 0 if result['ok'] else 1
+
+        elif args.op == 'restart-workers':
+            result = cmd_restart_workers(queues=args.queues, dry_run=args.dry_run)
+            if args.dry_run:
+                return 0 if result['ok'] else 1
 
         elif args.op == 'restart-ebay-token':
             from .queue import state_machine as _sm

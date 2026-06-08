@@ -303,3 +303,79 @@ def catlocmvall(cfg: Dict[str, Any], from_location: str, to_location: str,
         'elapsed_seconds': round(time.time() - started, 3),
         'check_only':      check_only,
     }
+
+
+# ---------------------------------------------------------------------------
+# PP-BULKEDIT-001 — filter → preview → apply bulk editor (CLI + web share this)
+# ---------------------------------------------------------------------------
+
+# JSON key that each editable field maps to (status uses the legacy #STATUS key).
+BULK_FIELD_KEYS: Dict[str, str] = {
+    'title':            'title',
+    'location':         'location',
+    'status':           '#STATUS',
+    'ai_hint':          'ai_hint',
+    'shipping_profile': 'shipping_profile',
+}
+
+
+def _bulk_write(cfg: Dict[str, Any], field: str, sku: str, value: str) -> Dict[str, Any]:
+    """Route one field write through the correct fence helper."""
+    if field == 'location':
+        # location needs the symlink tree kept in sync
+        return locationupdate(cfg, sku, value)
+    return update_item(cfg, sku, BULK_FIELD_KEYS[field], value)
+
+
+def bulk_edit(cfg: Dict[str, Any], selectors: Dict[str, Any], field: str,
+              value: str, apply: bool = False, limit: int = 0) -> Dict[str, Any]:
+    """
+    Bulk-edit one field across the items matching *selectors*.
+
+    Dry-run by default (``apply=False``) — returns the matched items with their
+    current vs. proposed value and writes nothing.  With ``apply=True`` the
+    change is written through the per-field fence helper (location keeps its
+    symlink tree in sync; ai_hint is set without re-queuing identification so a
+    large batch can't flood the ai_identify queue).
+
+    Editable fields: title, location, status, ai_hint, shipping_profile.
+    """
+    if field not in BULK_FIELD_KEYS:
+        return {'ok': False,
+                'error': f'field not editable: {field!r}; '
+                         f'allowed: {sorted(BULK_FIELD_KEYS)}'}
+
+    skus = sorted(resolve(cfg, **selectors)) if selectors else []
+    if limit > 0:  # negative would slice from the end — treat as "no cap"
+        skus = skus[:limit]
+
+    key = BULK_FIELD_KEYS[field]
+    preview: List[Dict[str, Any]] = []
+    for sku in skus:
+        path = sku_json(cfg, sku)
+        if not path.exists():
+            continue
+        doc = load_item_doc(path)
+        preview.append({
+            'sku':      sku,
+            'title':    str(doc.get('title', '')),
+            'current':  doc.get(key, ''),
+            'proposed': value,
+        })
+
+    if not apply:
+        return {'ok': True, 'field': field, 'value': value,
+                'count': len(preview), 'preview': preview, 'applied': False}
+
+    updated: List[str] = []
+    failed: List[Dict[str, Any]] = []
+    for row in preview:
+        res = _bulk_write(cfg, field, row['sku'], value)
+        if res.get('ok'):
+            updated.append(row['sku'])
+        else:
+            failed.append({'sku': row['sku'], 'error': res.get('error')})
+
+    return {'ok': len(failed) == 0, 'field': field, 'value': value,
+            'count': len(updated), 'updated': updated, 'failed': failed,
+            'applied': True}

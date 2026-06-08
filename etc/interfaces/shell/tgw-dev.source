@@ -1,0 +1,140 @@
+# tgw-dev.source
+#
+# Purpose:
+# Experimental and development-layer shell helpers for the TGW project.
+# This file is intended to be sourced after tgw.source so new or replacement
+# commands can be tested without disturbing the stable command layer.
+#
+# Usage:
+#   source /opt/TGW/bin/tgw.source
+#   source /opt/TGW/bin/tgw-dev.source
+# or let the main tgw wrapper source both in the correct order.
+#
+# Design notes:
+# - tgw remains the defensive bootstrap entry point for cases where .bashrc did
+#   not load or the environment is incomplete.
+# - tgw.source should contain the stable command vocabulary.
+# - tgw-dev.source should contain trial commands, replacement commands under
+#   review, and helper wrappers used during migration.
+# - Once a dev function is proven, migrate it into the stable layer and remove
+#   or slim the dev version.
+
+# Guard against accidental execution instead of sourcing.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    echo "This file must be sourced, not executed: source /opt/TGW/bin/tgw-dev.source" >&2
+    exit 1
+fi
+
+# Project root and venv defaults.
+export TGW_ROOT="${TGW_ROOT:-/opt/TGW}"
+export TGW_VENV="${TGW_VENV:-/opt/TGW/.venvironments/tgw}"
+export TGW_ITEMDATA_ROOT="${TGW_ITEMDATA_ROOT:-$TGW_ROOT/data/ItemData}"
+export TGW_CONFIG="${TGW_CONFIG:-$TGW_ROOT/config/tgw-api-config.json}"
+export TGW_BIN="${TGW_BIN:-$TGW_ROOT/bin}"
+export TGW_PYTHON="${TGW_PYTHON:-python3}"
+
+# Ensure common project bin paths exist in PATH for the current shell.
+case ":$PATH:" in
+    *":$TGW_ROOT/bin:"*) ;;
+    *) export PATH="$TGW_ROOT/bin:$PATH" ;;
+esac
+
+# Activate the TGW venv if present and not already active.
+# Purpose: keep TGW commands running inside the project Python environment.
+tgw-dev-venv() {
+    if [[ -n "${VIRTUAL_ENV:-}" && "$VIRTUAL_ENV" == "$TGW_VENV" ]]; then
+        return 0
+    fi
+    if [[ -f "$TGW_VENV/bin/activate" ]]; then
+        # shellcheck disable=SC1090
+        source "$TGW_VENV/bin/activate"
+        return 0
+    fi
+    echo "TGW venv activate script not found: $TGW_VENV/bin/activate" >&2
+    return 1
+}
+
+# Show the active TGW development environment.
+# Usage: tgw-dev-info
+tgw-dev-info() {
+    echo "TGW_ROOT=$TGW_ROOT"
+    echo "TGW_VENV=$TGW_VENV"
+    echo "TGW_CONFIG=$TGW_CONFIG"
+    echo "TGW_ITEMDATA_ROOT=$TGW_ITEMDATA_ROOT"
+    echo "VIRTUAL_ENV=${VIRTUAL_ENV:-<none>}"
+    command -v python3 >/dev/null 2>&1 && echo "python3=$(command -v python3)"
+}
+
+_tgw_py() {
+    "$TGW_PYTHON" "$@"
+}
+
+_tgw_bin() {
+    printf '%s/%s' "$TGW_BIN" "$1"
+}
+
+
+# Run a Python module or script inside the TGW environment.
+# Usage: tgw-dev-py path/to/script.py [args...]
+tgw-dev-py() {
+    tgw-dev-venv || return $?
+    python3 "$@"
+}
+
+# Rebuild the main catalog from source item JSONs.
+# Usage: tgw-rebuild [--check-only] [--pretty]
+tgw-rebuild() {
+    tgw build-all "$@"
+}
+
+# Rebuild only the search catalog from canonical item JSONs.
+# Usage: tgw-build-searchcatalog
+tgw-build-searchcatalog() {
+    tgw build-search "$@"
+}
+
+# Open the TGW browser.
+# Usage: tgw-browser-dev [searchterm]
+tgw-browser-dev() {
+    tgw-browser "$@"
+}
+
+# Quick jump to the TGW project root.
+# Usage: cdtgw
+cdtgw() {
+    cd "$TGW_ROOT" || return $?
+}
+
+# Quick jump to ItemData root.
+# Usage: cditems
+cditems() {
+    cd "$TGW_ITEMDATA_ROOT" || return $?
+}
+
+# Help summary for this dev layer.
+# Usage: tgw-dev-help
+tgw-dev-help() {
+    cat <<'HELP'
+TGW development commands
+
+Bootstrap
+  tgw-dev-venv             Activate the TGW project virtual environment.
+  tgw-dev-info             Show current TGW environment details.
+  tgw-dev-py <script>      Run a Python script inside the TGW venv.
+
+Catalog
+  tgw-rebuild              Rebuild all catalogs (wraps: tgw build-all).
+  tgw-build-searchcatalog  Rebuild search catalog only (wraps: tgw build-search).
+
+Browser
+  tgw-browser-dev          Launch the TGW browser (wraps: tgw-browser).
+
+Navigation
+  cdtgw                    Change to TGW project root.
+  cditems                  Change to TGW ItemData root.
+
+Notes
+  - Source this file, do not execute it.
+  - These are thin wrappers — see 'tgw --help' for the full CLI.
+HELP
+}

@@ -23,7 +23,7 @@ import psycopg2.extras
 from fastapi import Depends, FastAPI, HTTPException, Request, Security, status
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .config import DEFAULT_CONFIG, load_config
 from .items import atomic_write_json, locationupdate
@@ -133,6 +133,16 @@ class ActionBody(BaseModel):
 
 class SetTemplateBody(BaseModel):
     template_key: str
+
+
+class BulkBody(BaseModel):
+    field: str
+    value: str
+    skus: Optional[List[str]] = None
+    location: Optional[str] = None
+    status: Optional[str] = None
+    search: Optional[str] = None
+    limit: int = Field(0, ge=0)
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +299,57 @@ def patch_item(sku: str, body: PatchBody) -> Dict[str, Any]:
         updated_keys.append("location")
 
     return {"ok": True, "sku": sku, "updated": updated_keys}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/bulk/preview + /api/bulk/apply — bulk field edit (PP-BULKEDIT-001)
+# ---------------------------------------------------------------------------
+
+def _bulk_selectors(body: BulkBody) -> Dict[str, Any]:
+    sel: Dict[str, Any] = {}
+    if body.skus:
+        sel["skus"] = body.skus
+    if body.location:
+        sel["location"] = body.location
+    if body.status:
+        sel["status"] = body.status
+    if body.search:
+        sel["search"] = body.search
+    return sel
+
+
+@app.post("/api/bulk/preview", dependencies=[AUTH])
+def bulk_preview(body: BulkBody) -> Dict[str, Any]:
+    """Dry-run: return matched items with current vs. proposed value. No writes."""
+    from .items import bulk_edit
+    sel = _bulk_selectors(body)
+    if not sel:
+        raise HTTPException(status_code=400, detail="no selector — give skus or a filter")
+    return bulk_edit(_cfg, sel, body.field, body.value, apply=False, limit=body.limit)
+
+
+@app.post("/api/bulk/apply", dependencies=[AUTH])
+def bulk_apply(body: BulkBody) -> Dict[str, Any]:
+    """Apply the bulk edit through the item fence, then enqueue a catalog rebuild."""
+    from .items import bulk_edit
+    sel = _bulk_selectors(body)
+    if not sel:
+        raise HTTPException(status_code=400, detail="no selector — give skus or a filter")
+    result = bulk_edit(_cfg, sel, body.field, body.value, apply=True, limit=body.limit)
+    # Gate on count (writes happened), not ok — partial success still mutated
+    # item JSONs and must refresh the catalog.
+    if result.get("count"):
+        try:
+            state_machine.enqueue_job(
+                queue_name="catalog_rebuild",
+                payload={"reason": "http_bulk"},
+                dedupe_key="catalog_rebuild:pending",
+                not_before=time.time() + 30,
+                max_attempts=3,
+            )
+        except Exception:
+            pass
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -704,6 +765,150 @@ def intake_form(sku: str, request: Request):
         condition_options=cond_opts,
         api_key=_api_key,
     )
+    return HTMLResponse(html)
+
+
+# ---------------------------------------------------------------------------
+# GET /form/bulk — tablet-first bulk editor (HTML, filter → preview → apply)
+# ---------------------------------------------------------------------------
+
+_BULK_FORM_HTML = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TGW Bulk Edit</title>
+<style>{css}</style>
+</head>
+<body>
+<h2>Bulk Edit</h2>
+<div class="sku">filter → preview → apply</div>
+
+<label>Field to set</label>
+<div class="chips" id="fields">
+  <button class="chip active" data-f="title">title</button>
+  <button class="chip" data-f="location">location</button>
+  <button class="chip" data-f="status">status</button>
+  <button class="chip" data-f="ai_hint">ai_hint</button>
+  <button class="chip" data-f="shipping_profile">shipping_profile</button>
+</div>
+<input type="hidden" id="field" value="title">
+
+<label>New value</label>
+<input type="text" id="value" placeholder="value to write to every matched item">
+
+<div class="field-row">
+  <div><label>Filter: location</label><input type="text" id="f_location" placeholder="e.g. SHELF01"></div>
+  <div><label>Filter: status</label><input type="text" id="f_status" placeholder="e.g. In Stock"></div>
+</div>
+<label>Filter: search text</label>
+<input type="text" id="f_search" placeholder="free-text substring (matches any field)">
+<label>Limit (0 = all matched)</label>
+<input type="number" id="f_limit" value="0" min="0">
+
+<button class="btn" onclick="preview()">Preview</button>
+<div class="msg" id="msg"></div>
+<div id="results"></div>
+<button class="btn" id="applyBtn" style="display:none;background:#7a3a10" onclick="apply()">
+  Apply to matched items</button>
+
+<script>
+const AUTH = 'Bearer {api_key}';
+document.querySelectorAll('#fields .chip').forEach(c => {{
+  c.addEventListener('click', () => {{
+    document.querySelectorAll('#fields .chip').forEach(x => x.classList.remove('active'));
+    c.classList.add('active');
+    document.getElementById('field').value = c.dataset.f;
+  }});
+}});
+
+function body() {{
+  const b = {{
+    field: document.getElementById('field').value,
+    value: document.getElementById('value').value,
+    limit: parseInt(document.getElementById('f_limit').value || '0', 10),
+  }};
+  const loc = document.getElementById('f_location').value.trim();
+  const st  = document.getElementById('f_status').value.trim();
+  const sr  = document.getElementById('f_search').value.trim();
+  if (loc) b.location = loc;
+  if (st)  b.status = st;
+  if (sr)  b.search = sr;
+  return b;
+}}
+
+async function post(url) {{
+  return fetch(url, {{
+    method: 'POST',
+    headers: {{'Authorization': AUTH, 'Content-Type': 'application/json'}},
+    body: JSON.stringify(body())
+  }});
+}}
+
+async function preview() {{
+  const msg = document.getElementById('msg');
+  const res = document.getElementById('results');
+  document.getElementById('applyBtn').style.display = 'none';
+  msg.className = 'msg'; msg.textContent = 'Loading…'; msg.style.display = 'block';
+  res.innerHTML = '';
+  const r = await post('/api/bulk/preview');
+  const d = await r.json().catch(() => ({{}}));
+  if (!r.ok || d.ok === false) {{
+    msg.className = 'msg err';
+    msg.textContent = 'Error: ' + (d.detail || d.error || r.status);
+    return;
+  }}
+  msg.style.display = 'none';
+  if (!d.count) {{ res.innerHTML = '<p>No items matched.</p>'; return; }}
+  let html = '<p><b>' + d.count + '</b> item(s) would get <b>' + d.field +
+             '</b> = <b>' + escapeHtml(d.value) + '</b></p><table><tr>' +
+             '<th>SKU</th><th>Current</th><th>Title</th></tr>';
+  d.preview.forEach(p => {{
+    html += '<tr><td>' + p.sku + '</td><td>' + escapeHtml(String(p.current)) +
+            '</td><td>' + escapeHtml(p.title) + '</td></tr>';
+  }});
+  res.innerHTML = html + '</table>';
+  document.getElementById('applyBtn').style.display = 'block';
+}}
+
+async function apply() {{
+  const msg = document.getElementById('msg');
+  msg.className = 'msg'; msg.textContent = 'Applying…'; msg.style.display = 'block';
+  const r = await post('/api/bulk/apply');
+  const d = await r.json().catch(() => ({{}}));
+  if (!r.ok || d.ok === false) {{
+    msg.className = 'msg err';
+    msg.textContent = 'Error: ' + (d.detail || d.error || r.status);
+    return;
+  }}
+  msg.className = 'msg ok';
+  msg.textContent = 'Applied to ' + d.count + ' item(s)' +
+                    (d.failed && d.failed.length ? ' — ' + d.failed.length + ' failed' : '') + ' ✔';
+  document.getElementById('applyBtn').style.display = 'none';
+}}
+
+function escapeHtml(s) {{
+  return s.replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
+}}
+</script>
+</body>
+</html>
+"""
+
+_BULK_FORM_CSS = _INTAKE_FORM_CSS + """
+table{width:100%;border-collapse:collapse;margin-top:10px;font-size:.8em}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid #333}
+th{color:#aaa}
+"""
+
+
+@app.get("/form/bulk")
+def bulk_form(request: Request):
+    """Tablet-first bulk editor — no Bearer auth on the page (network trust);
+    the embedded JS calls the authenticated /api/bulk/* endpoints."""
+    from fastapi.responses import HTMLResponse
+    html = _BULK_FORM_HTML.format(css=_BULK_FORM_CSS, api_key=_api_key)
     return HTMLResponse(html)
 
 

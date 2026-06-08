@@ -1,0 +1,2898 @@
+# Guard against accidental execution instead of sourcing.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    echo "This file must be sourced, not executed: source /opt/TGW/tgw-dev.source" >&2
+    exit 1
+fi
+
+tgwpath="/opt/TGW"
+tgwlogpath="$tgwpath/runtime/logs"
+itemcreationpath="$tgwpath/ItemCreation"
+itemdatapath="$tgwpath/data/ItemData"
+itemdata="$itemdatapath"
+itemarchivepath="$tgwpath/data/ItemArchive"
+itemarchive="$itemarchivepath"
+catalogpath="$tgwpath/data/ItemCatalog"
+itemcatalog=$catalogpath
+currentitempath="$tgwpath/CurrentItem"
+currentitem="$currentitempath"
+new_items="$itemcreationpath/NewItems"
+new_jobs="$itemcreationpath/NewJobs"
+mkjobpath="$tgwpath/runtime/state/queues/newitem-work"
+queuepath="$itemcreationpath/Queue"
+ebay_import_jobs="$itemcreationpath/eBayImportJobs"
+magentoimagepath="$tgwpath/history/magento_photos"
+tgweditor="kate"
+tgwimageviewer="gwenview"
+tgwcsvviewer="libreoffice"
+jsoneditor="jsoneditor"
+loc=${PWD##*/}
+#configpath="/home/db/.config/item-creation"
+tgw_config="$configpath"
+tgw_apps=~/.local/share/item-creation
+qrlloc=$tgwlogpath/qrlabel
+qrlglabel=$tgw_config/location.glabels
+pdfviewer=okular
+tmpdir=/tmp
+mkdir -p $tmpdir $tgwlogpath $qrlloc
+
+current_selection () {
+#this function pulls the current selection, pastes it, then clears the buffer in both wayland and x11
+wl-copy -o;wl-paste -p;wl-copy -cp;xsel -o
+}
+
+searchcatalog () {
+jsoneditor $catalogpath/searchcatalog.json
+}
+
+tgwedit () {
+cp  $tgwpath/bin/tgw.source $tgwpath/bin/tgw.source.`date +%Y%m%d%H%M%S`
+zip -j -m $tgwlogpath/tgw.source.zip $tgwpath/bin/tgw.source.*
+$tgweditor $tgwpath/bin/tgw.source &
+}
+
+alias mcc='env=${@:-warehouse};z $env;claude --enable-auto-mode'
+
+sugg () {
+tgw suggest "$@"
+}
+
+suggedit () {
+kate /opt/TGW/src/trader-grims-warehouse/docs/TGW-Plan-Vault/suggestions/SUGGESTIONS.md
+}
+
+keydedit () {
+sudo nano /etc/keyd/default.conf
+}
+
+click-opencamera () {
+kdeconnect-cli -n $1 --share-text "COMMAND:OpenCameraShutter"
+sleep 0.5
+kdeconnect-cli -n $1 --share-text ""
+sleep 5
+}
+
+click-manualcamera () {
+kdeconnect-cli -n $1 --share-text "COMMAND:ManualCameraShutter"
+sleep 0.5
+kdeconnect-cli -n $1 --share-text ""
+sleep 5
+}
+
+robocam () {
+kdeconnect-cli -n $1 --share-text "COMMAND:RoboCam"
+sleep 6
+kdeconnect-cli -n $1 --share-text ""
+}
+
+nextloc () {
+kdeconnect-cli -n $1 --share-text "COMMAND:NextLocation"
+}
+
+alias setloc=setlocation
+setlocation () {
+kdeconnect-cli -n $1 --share-text "SETLOCATION:$2"
+}
+
+mkclaudezip () {
+zip -ury $tgwpath/data/tgw-claude-dump.zip $tgwpath/docs $tgwpath/src  $tgwpath/bin  $tgwpath/data/ItemCatalog /opt/TGW/runtime/state/queues/ /opt/TGW/config /opt/TGW/tgw-filesystem.txt
+}
+
+
+currenttarget () {
+current_target=${1:-.}
+current_path=`python3 -c "import os; print(os.path.basename (os.path.realpath('$current_target')))"`
+# Convert eBay ID to SKU if necessary
+#if [[ ! -d $itemcreationpath/$current_queue ]] ; then
+#if [[ -z `cat  $catalogpath/searchcatalog.json | jq --arg s "$ebayid" '.[] | select(.sku == $s) ' | jj sku` ]] ; then
+#ebayid="`cat  $catalogpath/searchcatalog.json | jq --arg s "$ebayid" '.[] | select(.ebayid == $s) ' | jj sku`"
+#fi
+#fi
+echo $current_path
+}
+
+whisper () {
+tmpfile=$(mktemp)
+whisper_duration=15
+whisper_duration_units=s
+whisper_timeout=20
+konsole -e countdown $whisper_duration$whisper_duration_units &
+timeout $whisper_timeout arecord -d $whisper_duration -f cd -t wav "$tmpfile" 2>/dev/null || exit 1
+whisper-cli -nt -m /usr/share/whisper/models/ggml-base.bin -f "$tmpfile" --output-txt | wl-copy
+rm "$tmpfile"
+notify-send "Dictation ready in clipboard"
+}
+
+whisper-clip () {
+tmpfile=$(mktemp)
+whisper_duration=7
+whisper_duration_units=s
+whisper_timeout=9
+konsole -e countdown $whisper_duration$whisper_duration_units &
+timeout $whisper_timeout arecord -d $whisper_duration -f cd -t wav "$tmpfile" 2>/dev/null || exit 1
+whisper-cli -nt -m /usr/share/whisper/models/ggml-base.bin -f "$tmpfile" --output-txt | wl-copy
+rm "$tmpfile"
+notify-send "Dictation ready in clipboard"
+}
+
+whisper-title () {
+tmpfile=$(mktemp)
+whisper_duration=16
+whisper_duration_units=s
+whisper_timeout=20
+konsole -e countdown $whisper_duration$whisper_duration_units &
+timeout $whisper_timeout arecord -d $whisper_duration -f cd -t wav "$tmpfile" 2>/dev/null || exit 1
+whisper-cli -nt -m /usr/share/whisper/models/ggml-base.bin -f "$tmpfile" --output-txt | wl-copy
+sleep 0.5
+wl-paste |python3 ~/bin/nopunctTitle.py | wl-copy
+echo DATA:title=`wl-paste`|wl-copy
+rm "$tmpfile"
+notify-send "Title Dictation ready in clipboard"
+}
+
+whisper-cond () {
+tmpfile=$(mktemp)
+whisper_duration=20
+whisper_duration_units=s
+whisper_timeout=30
+konsole -e countdown $whisper_duration$whisper_duration_units &
+timeout $whisper_timeout arecord -d $whisper_duration -f cd -t wav "$tmpfile" 2>/dev/null || exit 1
+whisper-cli -nt -m /usr/share/whisper/models/ggml-base.bin -f "$tmpfile" --output-txt | wl-copy
+sleep 0.5
+echo DATA:condition_description=`wl-paste  | python3 ~/bin/nopunct.py `| wl-copy
+rm "$tmpfile"
+notify-send "`wl-paste`"
+}
+
+
+whisper-hint () {
+while true; do
+    tmpfile=$(mktemp)
+    timeout 10 arecord -d 10 -f cd -t wav "$tmpfile" 2>/dev/null || exit 1
+    whisper-cli -nt -m /usr/share/whisper/models/ggml-base.bin -f "$tmpfile" --output-txt | wl-copy
+    dictation="`wl-paste | tr -s '\n' ' ' `"
+    echo $dictation
+    if [[ "$dictation" != " [BLANK_AUDIO]" ]] ; then
+        echo DATA:hint=`wl-paste`|wl-copy
+    fi
+    rm "$tmpfile"
+    notify-send "Hint Dictation ready in clipboard"
+done
+}
+
+desktopview (){
+rm $tgwpath/DesktopView;ln -s $tgwpath/$1 $tgwpath/DesktopView
+}
+
+imagestodata (){
+# Batch script (~your earlier plan)
+for img in $itemdatapath/CurrentItem/*.jpg; do
+  ollama run llava:7b "Extract: title, desc, OCR specs from $img" >> $itemdatapath/CurrentItem/sku.json
+done
+}
+
+imagestodata (){
+# Batch script (~your earlier plan)
+for img in $itemdatapath/CurrentItem/*.jpg; do
+  ollama run llava:7b "Extract: title, desc, OCR specs from $img" >> $itemdatapath/CurrentItem/sku.json
+done
+}
+
+alias hintup=hintupdate
+hintupdate () { tgw hint "$@"; }
+
+#tgwtemplate () {
+#cp  $configpath/template.json $configpath/template.json.`date +%Y%m%d%H%M%S`
+#zip -j -m $tgwlogpath/template.json.zip $configpath/template.json.*
+#$jsoneditor $configpath/template.json &
+#}
+
+updatelocation () {
+xdotool key Home
+sleep 0.5
+xdotool key Tab Tab Ctrl+Return Ctrl+a Ctrl+s Esc Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab
+tgwloc="`tgw tgw_location`"
+if [ $tgwloc -z ] ;then exit;fi
+xdotool type "$tgwloc"
+}
+
+tgwtoenv () {
+#eval "$(jq -r 'to_entries[] | "export \(.key)=\(.value)"')"
+#eval "$(catsearch $1 | jq -r 'to_entries[] | "export _\(.key)=\"\(.value)\""')"
+sku=""
+eval "$(catsearch $1 | jq -r 'to_entries[] | "if [[ -z $sku ]] ; then $sku=\(.key) ; fi ; echo $sku_\(.key)=\"\(.value)\""')"
+#eval "$(catsearch $1 | jq -r 'to_entries[]')"
+}
+
+jsontoenv() {
+  sku="$1"
+  json_file="$itemdatapath/$sku/$sku.json"
+
+  # Check if the JSON file exists
+  if [ ! -f "$json_file" ]; then
+    echo "Error: JSON file '$json_file' not found."
+    return 1
+  fi
+
+  # Read the JSON file and create bash variables
+  while IFS='=' read -r key value; do
+    # Replace spaces with underscores in the key
+    key="${key// /_}"
+
+    # Replace # with underscores in the key
+    key="${key//#/_}"
+
+    # Remove quotes from the value
+    value="${value%\"}"
+    value="${value#\"}"
+
+    # Create the bash variable
+    export "$key"="$value"
+  done < <(jq -r "to_entries|map(\"\(.key)=\(.value|tostring)\")|.[]" "$json_file")
+}
+
+update_key_keep_old_value () {
+# This function requires variables "key" "value" and "json" to be set in the script before it is executed
+local index=0
+while jq -e ".${key}${index}" $json >/dev/null 2>&1; do
+    index=$((index + 1))
+done
+jq ".${key}${index} = .${key} | .${key} = \"${value}\"" $json > $tmpdir/tmpfile && mv $tmpdir/tmpfile $json
+}
+
+tgwh () {
+clear
+tgw health
+}
+
+tgws () {
+source $tgwpath/bin/tgw.source
+source $tgwpath/bin/tgw-dev.source
+tgw-dev-venv
+}
+
+venv () {
+deactivate
+source ~/.venvironments/${1:-dbpy}/bin/activate
+}
+
+
+get_weight () {
+input=""
+#get weight in oz exact (weight) or rounded up for shipping (roundup)
+#if [[ ! -z "$scale" ]] then
+#scale="\-i $scale"
+#fi
+#echo Scale $scale
+units=""
+input="`usbscale`"
+#echo Input $input
+if [ -z "$input" ] ; then
+#echo No USB scale found on this computer.
+exit
+fi
+#echo Input: $input
+IFS=' ' read -ra parts <<< "$input"
+weight="${parts[0]}"
+#echo Weight: $weight
+units="${parts[1]}"
+if [ "$units" = "lbs" ] ; then
+weight=`echo "$weight * 16" | bc`
+#echo Weight $weight
+elif [ "$units" = "kg" ] ; then
+kilograms="$weight"
+grams="$(kilograms * 1000)"
+#convert to ounces
+weight=`echo "$weight * 35.27396195" | bc`
+fi
+#round up to next ounce
+roundup=$(echo "scale=0; ($weight + 0.9999) / 1" | bc)
+#convert weight in ounces to pounds and ounces
+ounces=${ounces:-$roundup}
+pounds=$((ounces / 16))
+remaining_ounces=$((ounces % 16))
+kilograms=${kilograms:-`echo "$weight * 0.028349523" | bc`}
+grams=${grams:-`echo "$weight * 28.349523" | bc`}
+#grams=$((ounces * 28.349523))
+if [ "$1" = "showall" ] ; then
+echo Weight=$weight
+echo Roundup=$roundup
+echo Pounds=$pounds
+echo Ounces=$ounces
+echo Kilograms=$kilograms
+echo Grams=$grams
+echo "$pounds lbs $remaining_ounces oz"
+fi
+}
+
+weight () {
+get_weight $1
+#echo $weight
+echo "$pounds lbs $remaining_ounces oz"
+}
+
+paste_weight () {
+get_weight
+echo $roundup | xsel -i -b
+echo $roundup | wl-paste
+}
+
+openarchive () {
+sku=${1:-`getsku `xsel -o``}
+#sku=$(getsku `xsel -o`)
+#xdotool key Ctrl+C; ark "$itemarchivepath/$sku.zip"
+ark "$itemarchivepath/$sku.zip"
+#ark $1 &
+}
+
+openlocation () {
+dolphin $catalogpath/$1
+}
+
+alias oi=openitem
+openitem () {
+if [[ $1 == -o ]] ; then
+    openfile=Y
+    shift
+else
+    openfile=N
+fi
+    item=${1:-`getsku`}
+#echo $item
+if [[ -d $itemdatapath/$item ]] ; then
+    if [[ $openfile == Y ]] ; then
+     $jsoneditor $itemdatapath/$item/$item.json &
+    fi
+    dolphin $itemdatapath/$item &
+
+elif [[ -d $catalogpath/$item ]] ; then
+    if [[ $openfile == Y ]] ; then
+     libreoffice --calc $catalogpath/$item/$item.catalog.csv &
+    fi
+dolphin $catalogpath/$item &
+elif [[ ! -d $itemdatapath/$item ]] ; then
+item=`getsku $item`
+if [[ -d $itemdatapath/$item ]] ; then
+dolphin $itemdatapath/$item &
+fi
+else
+echo \"$item\" not found
+fi
+}
+
+increment_alphanumeric() {
+  local var="$1"
+  if [[ $var =~ ^([a-zA-Z]+)([0-9]+)$ ]]; then
+    local prefix="${BASH_REMATCH[1]}"
+    local number="${BASH_REMATCH[2]}"
+    number=$((number + 1))
+    printf "%s%d\n" "$prefix" "$number"
+  else
+    echo "Invalid format"
+  fi
+}
+
+nextloc_old() {
+sku=$1
+#nextloc=`increment_alphanumeric $1`
+#echo "SETLOCATION:$nextloc" | xsel -i -b
+echo "COMMAND:NextLocation" | wl-copy
+}
+
+splitsku() {
+sku=$1
+newsku=`increment_alphanumeric $sku`
+cp -R $itemdatapath/$sku $itemdatapath/$newsku
+#rename json
+mv $itemdatapath/$newsku/$sku.json $itemdatapath/$newsku/$newsku.json
+#change sku in json
+sed -i s/$sku/$newsku/g $itemdatapath/$newsku/$newsku.json
+#open in dolphin split pane
+dolphin --new-window --split $itemdatapath/$sku $itemdatapath/$newsku &
+#link to new items
+mkdraftlink $newsku
+}
+
+showcurrentjson () {
+sku=$(tgw_sku $currentitem)
+jj -p -r -i "$currentitem/$sku.json"
+}
+
+confirm () {
+# Function to display the confirmation prompt
+    while true; do
+        read -p "Do you want to proceed? (YES/NO/CANCEL) " yn
+        case $yn in
+            [Yy]* ) return 0;;
+            [Nn]* ) return 1;;
+            [Cc]* ) exit;;
+            * ) echo "Please answer YES, NO, or CANCEL.";;
+        esac
+    done
+# Example usage of the confirm function
+#if confirm; then
+#    echo "User chose YES. Executing the operation..."
+#    # Place your code here to execute when user confirms
+#else
+#    echo "User chose NO. Aborting the operation..."
+#
+# Place your code here to execute when user denies
+#fi
+}
+
+q2cur () {
+
+if [ "$1" == "-y" ] ; then
+mv $queuepath/*.jpg $currentitempath
+exit
+else
+echo Move photos from Queue to CurrentItem?
+if confirm; then
+    echo "User chose YES. Moving Queue photos to CurrentItem..."
+
+#mv $queuepath/*.jpg $currentitempath
+else
+    echo "User chose NO. No photos moved. Nothing done at all..."
+    exit > /dev/null
+fi
+mv $queuepath/*.jpg $currentitempath
+fi
+}
+
+inv () {
+libreoffice $tgwpath/CurrentLocations/$1/$1.catalog.csv &
+ebd $1 &
+}
+
+getmagentoimages () {
+#echo JQ
+#jq ".additional_images // empty" $itemdatapath/$1/$1.json |  | sed -e "s/\;/ /g"
+#echo jj
+for image in `jj -i $itemdatapath/$1/$1.json "additional_images" | sed -e "s/\;/ /g" ` ; do
+echo Getting image $image for Item $1
+cp $magentoimagepath$image $itemdatapath/$1/
+done
+}
+
+getqueueimages () {
+mv $queuepath/*.jpg $currentitempath/
+}
+
+getimages () {
+#if [[ ! -f $itemdatapath/$1/*.jpg ]] ; then
+if compgen -G "$itemdatapath/$1/*.jpg" > /dev/null ; then
+echo Skipping $1 > /dev/null
+else
+#echo Getting Images for $1
+getmagentoimages $1
+#getqueueimages
+fi
+}
+
+display_image () {
+sku=${1:-`tgw_sku`}
+image=`jj -i  $itemdatapath/$sku/$sku.json  display_image`
+image=`basename "$image"`
+if [ -z $image ];then
+image=`jj -i  $itemdatapath/$sku/$sku.json  image_1`
+fi
+echo $itemdatapath/$sku/$image
+}
+
+tgwimageview () {
+sku="$(getsku `xsel -o`)"
+if [ ! -z $sku ] ; then
+imgpth="$itemdatapath/$sku"
+fi
+imgpth="${imgpth:-$currentitempath}"
+$tgwimageviewer $imgpth
+printf "\n"|xsel -i;
+}
+
+tgwlocationview () {
+sku="`xsel -o`"
+sku=${sku:-$1}
+if [ ! -z $sku ] ; then
+itempth="$catalogpath/$sku"
+fi
+itempth="${itempth:-$catalogpath}"
+$tgwcsvviewer $itempth/$sku.catalog.csv &
+printf "\n"|xsel -i;
+}
+
+
+
+ebayitemview () {
+#sku="`xdotool key Ctrl+Shift+C ; sku=``xsel -o```"
+if [[ ! -z "$1" ]] ; then
+sku="$1""`echo "$ptitle" | tr '[:upper:]' '[:lower:]'`"
+fi
+#xdotool key Ctrl+Shift+C ; sku="`xsel -o`"
+#echo sku=cl $sku
+#fi
+if [[ ! -z "$sku" ]] ; then
+#echo ifthen
+target="$itemdatapath/$sku/$sku.json"
+ebay_item=`jj -i $target 'Item number'`
+ebay_item=${ebay_item:-`jj -i $tagret 'Item Number'`}
+else
+echo else
+target="$itemdatapath/$(currentdir)/$(currentdir).json"
+sku="$(currentdir)"
+ebay_item=`jj -i $target 'Item number'`
+fi
+google-chrome "https://www.ebay.com/itm/$ebay_item"
+}
+
+image_randomize () {
+image=$1
+#Change first pixel to random color and transparent
+convert $image -fill "#`hexdump -vn3 -e'"%06X" 1 "\n"' /dev/urandom`" -draw "fill-opacity 0 color 0,0 point"  $image
+}
+
+#image_change (){
+#uncomment one of the following change methods
+
+#Change first pixel random color transparent
+#randomcolor="`hexdump -vn3 -e'"%06X" 1 "\n"' /dev/urandom`"
+#convert $image -fill "#$randomcolor" -draw "fill-opacity 0 color 0,0 point"  $image
+#Change last pixel
+#width=`identify -format "%w\n" $image | bc -l`
+#width=$((width-1))
+#height=`identify -format "%h\n" $image | bc -l`
+#height=$((height-1))
+#dimension="$height,$width"
+#convert $image -draw "fill-opacity .01 color $dimension point"  $image
+
+#Add one pixel column and change name
+#size="`identify -format "%w" $image`"
+#size=$((size+1))
+#convert $image -gravity west -extent $size `echo "${image%.*}"`_added.jpg
+#}
+
+ebayitemedit () {
+#sku="`xdotool key Ctrl+Shift+C ; sku=``xsel -o```"
+if [[ ! -z "$1" ]] ; then
+sku="$1"
+fi
+#xdotool key Ctrl+Shift+C ; sku="`xsel -o`"
+#echo sku=cl $sku
+#fi
+if [[ ! -z "$sku" ]] ; then
+echo ifthen
+target="$itemdatapath/$sku/$sku.json"
+ebay_item=`jj -i $target 'Item number'`
+else
+echo else
+target="$itemdatapath/$(currentdir)/$(currentdir).json"
+sku="$(currentdir)"
+ebay_item=`jj -i $target 'Item number'`
+fi
+google-chrome "https://www.ebay.com/sl/list?itemId=$ebay_item&mode=ReviseItem"
+}
+
+ebayitemview_selected () {
+#set the selected sku as current
+xdotool keydown Ctrl keydown Shift  key C keyup Shift keyup Ctrl keydown Ctrl key C keyup Ctrl
+sku="`xsel -o`"
+
+if [[ ! -d $itemdatapath/$sku/ ]] ; then
+#echo setting sku from ebay id
+sku=`getsku $sku`
+#echo 2. sku=$sku
+fi
+tgw ebayitemview "$sku"
+#echo "`xsel -o`">$tgwpathxsel.txt
+}
+
+ebayitemedit_selected () {
+#set the selected sku as current
+#xdotool keydown Ctrl keydown Shift  key C keyup Shift keyup Ctrl keydown Ctrl key C keyup Ctrl;tgw ebayitemedit "`xsel -o`"
+sku=`xsel -o`
+sku=$(getsku $sku)
+tgwset $sku
+#ebayitemedit "`xsel -o`"
+ebayitemedit "$sku"
+#echo "`xsel -o`">$tgwpathxsel.txt
+#echo "$sku">$tgwpath/xsel.txt
+}
+
+
+json_remove_empty (){
+if [[ ! -z "$1" ]] ; then
+cp $1 $1.temp
+jq -f ~/bin/filter_empty.jq $1.temp > $1
+rm $1.temp
+else
+No file specified
+fi
+}
+
+loc2csv () {
+file="$1"
+dirItemData=$itemdatapath
+tmpname=`date +%N`
+exec < "$file"
+count=1
+read header
+echo $header,location > $itemdatapath/`basename $file`.locations.csv
+while IFS="," read -r  line
+do
+sku=""
+echo $header > $tmpdir/$tmpname.csv
+echo $line >> $tmpdir/$tmpname.csv
+csv-to-json $tmpdir/$tmpname.csv $tmpdir/$tmpname.json
+sku=`cat $tmpdir/$tmpname.json|jq -r '.[].sku'`
+if [[ "$sku" == "null"||"" ]] ; then
+    sku=""
+    sku=${sku:-`cat $tmpdir/$tmpname.json|jq -r '.[].SKU'`}
+fi
+if [[ "$sku" == "null"||"" ]] ; then
+    sku=""
+    sku=${sku:-`cat $tmpdir/$tmpname.json|jq -r '.[]."Custom Label"'`}
+fi
+if [[ "$sku" == "null"||"" ]] ; then
+    sku=""
+    sku=${sku:-`cat $tmpdir/$tmpname.json|jq -r '.[]."Custom label"'`}
+fi
+if [[ "$sku" == "null"||"" ]] ; then
+    sku=""
+    sku=${sku:-`cat $tmpdir/$tmpname.json|jq -r '.[]."      "'`}
+fi
+if [[ "$sku" == "null"||"" ]] ; then
+    sku=""
+    sku=${sku:-`cat $tmpdir/$tmpname.json|jq -r '.[]."      "'`}
+fi
+echo Got sku $sku
+location="`jj -i $itemdatapath/$sku/$sku.json location`"
+echo $count. $file sku=$sku
+echo $line,$location >> $itemdatapath/`basename $file`.locations.csv
+#mkdir -p $dirItemData/$sku
+#mv $tmpdir/$tmpname.json $dirItemData/$sku/$sku-`basename $file`.json
+#echo "        to $dirItemData/$sku/$sku-`basename $file`.json"
+#echo ""
+count=$((count+1))
+rm $tmpdir/$tmpname.csv
+done
+mv $file $file.done
+}
+
+mktgwcats () {
+tgw build-all "$@"
+}
+
+
+mkebimport () {
+#copied from mkjob
+if [[ -z $1 ]] ; then
+    echo "No location specified"
+    echo "Usage: mkebimport <location>"
+    exit
+else
+    location=$1
+fi
+SECONDS=0
+locfolder=$catalogpath/$1
+#tmpcat=$tmpdir/ItemCatalog
+if [[ ! -d $locfolder ]] ; then
+        echo $locfolder does not exist
+        exit
+fi
+ebcatalog=$locfolder/$location.ebimport.csv
+
+if [[ -z $(ls -A $locfolder/tgw*) ]] ; then
+ls -A $locfolder
+echo No items to process
+else
+#mkjob_settings
+template_path=$tgw_config/Templates
+csvnumber=$(date +%s)
+linenumber=1
+#ebaydraftcsv=$new_items/$csvnumber-ebay_draft_import.csv
+cp $tgw_config/eBay-draft-listing-import.csv $ebcatalog
+printf "\n" >> $ebcatalog
+
+for directory in $(ls -d $locfolder/*/) ; do
+sku="$(basename $directory /)"
+echo sku name check: $sku
+ebaydraftcsv=$ebcatalog
+cd $locfolder #ebay_import_jobs/$csvnumber-import_job
+#for directory in $(ls -d */) ; do
+sku="$(basename $directory /)"
+tgwset $sku
+mkebaydraft
+done
+echo $ebcatalog finished
+fi
+}
+
+mkebupdate () {
+pushd .
+if [[ -z $1 ]] ; then
+    echo "No location specified"
+    echo "Usage: mkebupdate <location>"
+    exit
+else
+#location=$1
+#fi
+SECONDS=0
+ebcatalog=$ebay_import_jobs/`date +%Y%m%d%M`.ebimport.csv
+cp $tgw_config/eBay-revise-listings.csv $ebcatalog
+#item="$@"
+#for locfolder in $location ; do
+#echo Location is $location
+for location in $@ ; do
+locfolder=$catalogpath/$location
+echo Processing locfolder $locfolder
+echo
+#pushd $locfolder
+if [[ ! -d $locfolder ]] ; then
+        echo Location $locfolder does not exist
+#        exit
+fi
+#ebcatalog=$ebay_import_jobs/$location.ebimport.csv
+if [[ -z $(ls -A $locfolder/tgw*) ]] ; then
+ls -A $locfolder
+echo No items to process
+else
+#mkjob_settings
+template_path=$tgw_config/Templates
+csvnumber=$(date +%s)
+linenumber=1
+#ebaydraftcsv=$new_items/$csvnumber-ebay_draft_import.csv
+#printf "\n" >> $ebcatalog
+for directory in $(ls -d $locfolder/*/) ; do
+sku="$(basename $directory)"
+if [[ ! -z "`ebay_id $sku`" ]] ; then
+ebayrevisecsv=$ebcatalog
+cd $locfolder
+#ebay_import_jobs/$csvnumber-import_job
+#for directory in $(ls -d */) ; do
+sku="$(basename $directory)"
+tgwset $sku
+mkebayrevise
+fi
+#popd
+shift
+done
+fi
+#done
+#else
+#    echo $locfolder does not exist
+done
+echo $ebcatalog finished
+fi
+popd
+}
+
+
+mkebupdate_old () {
+#copied from mkjob
+if [[ -z $1 ]] ; then
+    echo "No location specified"
+    echo "Usage: mkebupdate <location>"
+    exit
+else
+    location=$1
+fi
+SECONDS=0
+locfolder=$catalogpath/$1
+#tmpcat=$tmpdir/ItemCatalog
+if [[ ! -d $locfolder ]] ; then
+        echo $locfolder does not exist
+        exit
+fi
+ebcatalog=$ebay_import_jobs/$location.ebimport.csv
+if [[ -z $(ls -A $locfolder/tgw*) ]] ; then
+ls -A $locfolder
+echo No items to process
+else
+#mkjob_settings
+template_path=$tgw_config/Templates
+csvnumber=$(date +%s)
+linenumber=1
+#ebaydraftcsv=$new_items/$csvnumber-ebay_draft_import.csv
+cp $tgw_config/eBay-revise-listings.csv $ebcatalog
+#printf "\n" >> $ebcatalog
+for directory in $(ls -d $locfolder/*/) ; do
+sku="$(basename $directory)"
+if [[ ! -z "`ebay_id $sku`" ]] ; then
+ebayrevisecsv=$ebcatalog
+cd $locfolder #ebay_import_jobs/$csvnumber-import_job
+#for directory in $(ls -d */) ; do
+sku="$(basename $directory)"
+tgwset $sku
+mkebayrevise
+fi
+done
+echo $ebcatalog finished
+fi
+}
+
+
+
+mkfbimport () {
+if [[ -z $1 ]] ; then
+    echo "No location specified"
+    echo "Usage: mkfbimport <location>"
+    exit
+else
+    location=$1
+fi
+SECONDS=0
+locfolder=$catalogpath/$1
+#tmpcat=$tmpdir/ItemCatalog
+if [[ ! -d $locfolder ]] ; then
+        echo $locfolder does not exist
+        exit
+fi
+fbcatalog=$locfolder/$location.fbimport.csv
+echo building new Facebook import file in $locfolder
+echo "TITLE,PRICE,CONDITION,DESCRIPTION,AVAILABLE INVENTORY,AVAILABLE FOR LOCAL PICKUP,SHIPPING WEIGHT,SHIPPING PRICE,OFFER FREE SHIPPING" > $fbcatalog
+#echo "sku,location,ebay_item,title" > $tmpcat/tgwcatalog.csv
+count=80
+for line in $locfolder/tgw* ; do
+    if [ $count == 80 ] ; then
+        printf .
+        count=0
+    fi
+    count=$((count+1))
+    path="`basename $line`"
+    itempath=$locfolder/$path
+    json=$itempath/$path.json
+    title="`jj -i $json title`"
+    title="${title//,/ }"
+    sku="`jj -i $json sku`"
+    price="`jj -i $json price|awk '{print int($1+0.5)}'`"
+    condition="`jj -i $json Condition`"
+    condition=${condition:-USED}
+    description="`ebay_description`"
+    description="${description//,/ }"
+    fbdescription="`fb_desc`"
+    fbdescription="${fbdescription//,/ }"
+    qty="`jj -i $json qty`"
+    ebay_item="`jj -i $json 'Item number'`"
+#    echo "$sku,$location,$ebay_item,$title" >> $tmpcat/tgwcatalog.csv
+#    mkdir -p $tmpcat/$location
+#    if [[ ! -f "$fbcatalog" ]] ; then
+#        echo "TITLE,PRICE,CONDITION,DESCRIPTION,AVAILABLE INVENTORY,AVAILABLE FOR LOCAL PICKUP,SHIPPING WEIGHT,SHIPPING PRICE,OFFER FREE SHIPPING" > $tmpcat/$location/$fbcatalog
+#    fi
+#    image="`jj -i $json image`"
+#    image=`basename "$image"`
+#    ln -s $itempath $tmpcat/$location/
+#    echo "=IMAGE(\"http://i3520.local/ItemData/$sku/$image\")',$location,$sku,$ebay_item,$title" >> $tmpcat/$location/$locationcatalog
+if [[ "$qty" -gt "0" ]] ; then
+    echo "$title,$price,$condition,$description,$qty,Y,1,5,N" >> $fbcatalog
+fi
+done
+printf "\n"
+#csv-to-json $tmpcat/tgwcatalog.csv $tmpcat/tgwcatalog.json
+#mv -t $catalogpath/ $tmpdir/tgwcatalog.csv $tmpdir/tgwcatalog.json
+#mv $tmpcat $catalogpath
+t=$SECONDS
+#printf 'elapsed time: %d minutes\n' "$(( t/86400 ))" "$(( t/60 - 1440*(t/86400) ))"
+printf 'elapsed time: %d minutes\n' "$(( t/60 - 1440*(t/86400) ))"
+printf 'Done!\n'
+}
+
+json_backup () {
+#echo $itemarchivepath/$1.zip
+cp $itemdatapath/$1/$1.json $tmpdir/$1.json.`date +%Y%m%d%H%M%S`
+zip -mjq $itemarchivepath/$1.zip $tmpdir/$1.json.*
+}
+
+itemdatabackup () {
+echo Archiving data for $1
+json_backup $1
+zip -ujq $itemarchivepath/$1.zip $itemdatapath/$1/$1.json $itemdatapath/$1/*.jpg  $itemdatapath/$1/*.gif  $itemdatapath/$1/*.png  $itemdatapath/$1/*.mp4
+}
+
+
+json_fix_format () {
+#Command format: json_fix_format sku json_fileebre
+# if json_file is not specified the the default file for that sku will be used
+#sku="$1"
+#json="$1"
+if [[ -z "$2" ]] ; then
+json="$itemdatapath/$1/$1.json"
+#zip="$itemdatapath/$1/$1.zip"
+elif [[ -w "$2" ]] ; then
+json="$2"
+else
+echo "$2 does not exist or isn't writable"
+exit
+fi
+json_remove_empty $json
+if [[ "[" == "`head -2 $json | tail -1`" ]] ; then
+echo reformatted unnamed array
+cp $json $json.original_format
+head -n -2 $json.original_format | tail -n+3 > $json
+#$cat $json
+elif [[ "[" == "`head -1 $json`" ]] ; then
+#echo reformatted array only
+cp $json $json.original_format
+sed -e '2,$!d' -e '$d' $json.original_format > $json
+#$cat $json
+elif [[ "$1" == "`jj -i $json $1.0.sku`" ]] ; then
+echo reformatted array json file
+cp $json $json.original_format
+jj -i $json -o $json $1.0
+elif [[ -z "`cat $json`" ]] ; then
+printf {\"sku\":\"$1\"}|jj -v $1 -o $json sku
+elif [[ "$1" == "`jj -i $json sku`" ]] ; then
+echo json format is correct
+else
+echo json format for is incorrect and needs fixing. Exiting
+echo "$1 $json" >> $tgwpath/items_with_json_file_errors.txt
+#exit
+fi
+zip="$itemarchivepath/$1.zip"
+zip 2>/dev/null -mjq $zip $json.original_format
+}
+
+json_edit () {
+#uncomment the 2 following lines if using a command line editor
+#sleep 1
+#clear
+#xdotool key Ctrl+C
+sku="`wl-paste`"
+if [[ ! -z "$1" ]] ; then
+sku=$1
+else
+#xdotool key Ctrl+C
+sku="`wl-paste`"
+fi
+sku="${sku:-"`tgw currentdir`"}"
+target="$itemdatapath/$sku/$sku.json"
+echo Opening $target
+#kdialog --msgbox "$jsoneditor $target" &
+#json_fix_format $sku
+#json_backup $sku
+konsole -e "$jsoneditor $target"
+#sku=""
+#printf "\n"|wl-copy
+}
+
+
+json_cleaner () {
+zip -m $itemarchivepath/$1.zip $1/*combined.json
+tgwset $1
+tgw tgw_all>$1/$1.json.tmp;mv $1/$1.jso.`date +%Y%M%d%s`n.tmp $1/$1.json
+tgw tgw_all>>$itemdatapath/ItemData.json
+zip -u $itemarchivepath/$1.zip $1/$1.json
+}
+
+json_combine () {
+#Command Format json_combine sku jsonA (jsonB jsonC ...)
+# wildcards are acceptable
+# All files must reference the same sku
+echo Combining json files
+json_sku=$1
+shift
+for file in $@ ; do
+if [[ -w "$file" ]] ; then
+echo Fixing $file
+#sed -e 's/\\ufeff//g' |
+json_fix_format $json_sku $file
+else
+echo "$file does not exist or isn't writable"
+fi
+#cat  $itemdatapath/$json_sku/combined.json.tmp $file | iconv -c -f utf-8 -t ascii - |  json --merge | jj -p -o $itemdatapath/$json_sku/combined.json.tmp
+for f in $itemdatapath/$json_sku/combined.json.tmp $file; do jq -f ~/bin/filter_empty.jq $f;done | iconv -c -f utf-8 -t ascii - |  json --merge | jj -p -o $itemdatapath/$json_sku/combined.json.tmp
+files_combined="$files_combined$file-"
+#echo Files Combined: $files_combined
+done
+#archivedata $json_sku
+#for file in $@ ; do
+#done
+cp $itemdatapath/$json_sku/$json_sku.json $itemdatapath/$json_sku/$json_sku.json.`date +%Y%m%d%s`-bak
+zip -umj $itemarchivepath/$json_sku.zip $@
+mv $itemdatapath/$json_sku/combined.json.tmp $itemdatapath/$json_sku/$json_sku.json
+cp $itemdatapath/$json_sku/$json_sku.json $itemdatapath/$json_sku/$json_sku.json.`date +%Y%m%d%s`-new
+zip -d $itemarchivepath/$json_sku.zip $json_sku.json
+zip -uj $itemarchivepath/$json_sku.zip $itemdatapath/$json_sku/$json_sku.json
+zip -umj $itemarchivepath/$json_sku.zip $itemdatapath/$json_sku/$json_sku.json.*
+#archivedata $json_sku
+}
+
+restoreitem () {
+for sku in $1  ; do
+    cd $sku
+    unzip -n $itemarchivepath/$sku.zip $sku.json.* *.jpg *.gif *.mp4
+    tgw json_combine $sku $sku.json.*
+    cd ..
+done
+
+}
+
+combine_all_jsons () {
+json_backup $1
+#sed -e 's/\\ufeff//g' |
+#archivedata $1
+for json in $itemdatapath/$1/*.json  ;do
+	jq -c ".[]" "$json" | jq -r values
+done | jq -r -s 'reduce .[] as $item ({}; . * $item)' > $itemdatapath/$1/$1.json
+}
+
+jsonfixer (){
+for sku in $@ ; do
+#sku="$(sku)"
+#json_combine $sku $itemdatapath/$sku/$sku*.json $itemdatapath/$sku/$sku.json
+tgw json_combine $sku $itemdatapath/$sku/$sku-all_skus*.json $itemdatapath/$sku/$sku-winch*.json $itemdatapath/$sku/$sku-eBay-active*.json $itemdatapath/$sku/$sku-2021*.json $itemdatapath/$sku/$sku-eBay-Active*.json $itemdatapath/$sku/$sku.json $itemdatapath/$sku/$sku-eBay-all-active*.json
+done
+}
+
+alias locup=locationupdate
+alias mvitem=locationupdate
+locationupdate () { tgw locationupdate "$@"; }
+
+alias statup=statusupdate
+statusupdate () { tgw statusupdate "$@"; }
+
+alias titup=titleupdate
+titleupdate () { tgw titleupdate "$@"; }
+
+
+alias verup=verifiedupdate
+verifiedupdate () {
+    local value
+    value=$(date +%Y%m%d)
+    for sku in "$@"; do
+        sku=$(echo "$sku" | tr -d '"')
+        tgw verifiedupdate "$sku" "$value"
+    done
+}
+
+alias catmvloc=catlocmvall
+catlocmvall () { tgw catlocmvall "$@"; }
+
+alias mvloc=locmvall
+locmvall () {
+#moves all items in one location to a different location
+#Command usage: moveloc old_location new_location
+old_loc=$1
+new_loc=$2
+for item in "`tgw itemsinlocation $old_loc`" ; do
+    tgw locationupdate $new_loc $item
+done
+}
+#mvloc() {
+#locmvall $@
+#}
+
+alias itemsinlocation=locitems
+locitems () {
+#List items in a location
+loc=$1
+cd $itemdatapath
+for sku in `ls -1d *` ; do
+if [[ "$loc" == "`jj -i $itemdatapath/$sku/$sku.json location`" ]] ; then
+echo $sku
+#jj -i $itemdatapath/$sku/$sku.json location
+#tgwloc $sku
+fi
+done
+}
+#itemsinlocation () {
+#locitems $1
+#}
+
+catloc () {
+# List Items in a location using catalog
+location=$1
+cat  $catalogpath/tgwcatalog.json | jq --arg loc "$location" '.[] | select(.location == $loc) '
+}
+
+catitem () {
+# List Details about Item using catalogjq 'map(select(.field | ascii_downcase | contains("search_string")))'
+sku=$1
+cat  $catalogpath/tgwcatalog.json | jq --arg s "$sku" '.[] | select(.sku == $s) '
+}
+
+
+##### Begin Search Fuctions #####
+
+alias current_item=getsku
+getsku () {
+itemid=${1:-`python3 -c "import os; print(os.path.basename (os.path.realpath('$currentitempath')))"`}
+# Convert eBay ID to SKU if necessary
+if [[ ! -d $itemdatapath/$itemid ]] ; then
+if [[ -z `cat  $catalogpath/searchcatalog.json | jq --arg s "$itemid" '.[] | select(.sku == $s) ' | jj sku` ]] ; then
+itemid="`cat  $catalogpath/searchcatalog.json | jq --arg s "$itemid" '.[] | select(.ebayid == $s) ' | jj sku`"
+fi
+# First-18 prefix fallback: 18-char old-format query matches 20-char new-format SKUs
+if [[ -z "$itemid" ]] && [[ -n "$1" ]] && [[ ${#1} -le 18 ]] && [[ "$1" == tgw* ]]; then
+    itemid="`cat $catalogpath/searchcatalog.json | jq -r --arg p "${1:0:18}" '.[] | select(.sku != null and (.sku | startswith($p))) | .sku' | head -1`"
+fi
+fi
+echo $itemid
+}
+
+alias catsloc=catsearchloc
+catsearchloc () {
+loc="`echo "$1" | tr '[:upper:]' '[:lower:]'`"
+catalog=${catalog:-"$catalogpath/searchcatalog.json"}
+cat $catalog | jq --arg l "$loc" '.[] | select(if (.location != null ) then .location | ascii_downcase | startswith ($l) else . end)'
+}
+
+alias catsebcat=catsearchebaycategory
+catsearchebaycategory () {
+loc="`echo "$1" | sed 's/ebay-//g'`"
+catalog=${catalog:-"$catalogpath/searchcatalog.json"}
+cat $catalog | jq --arg l "$loc" '.[] | select(if (."ebaycat" != null ) then .ebaycat == ($l) else . end)'
+}
+catsearchlocfull () {
+loc="`echo "$1" | tr '[:upper:]' '[:lower:]'`"
+catalog=${catalog:-"$catalogpath/tgwcatalog.json"}
+cat $catalog | jq --arg l "$loc" '.[] | select(if (.location != null ) then .location | ascii_downcase | startswith ($l) else . end)'
+}
+alias catstat=catsearchstatus
+catsearchstatus () {
+sku="`echo "$@" | tr '[:upper:]' '[:lower:]'`"
+catalog=${catalog:-"$catalogpath/searchcatalog.json"}
+cat  $catalog | jq --arg l "$sku" '.[] | select(if (.status != null) then .status | ascii_downcase | startswith ($l) else . end)'
+}
+
+alias catsku=catsearchsku
+catsearchsku () {
+psku="`getsku $1`"
+if [[ ! -z $psku ]] ; then
+catalog=${catalog:-"$catalogpath/searchcatalog.json"}
+cat  $catalog | jq --arg s "$psku" '.[] | select(if (.sku != null )then .sku | startswith ($s) else . end)'
+fi
+}
+
+alias catstit=catsearchtitle
+catsearchtitle () {
+ptitle="`echo "$@" | tr '[:upper:]' '[:lower:]'`"
+#echo $ptitle
+catalog=${catalog:-"$catalogpath/searchcatalog.json"}
+cat  $catalog | jq --arg intitle "$ptitle" '.[] | select(if (.title != null) then .title | ascii_downcase | contains ($intitle) else . end)'
+}
+
+alias cats=tgw-browser
+tgw-browser.old () {
+python3 $tgwpath/bin/tgw-browser.py $@
+}
+
+#catsearch is the bash cats
+catsearch () {
+search="$@"
+#catalog="$catalogpath/tgwcatalog.json"
+catsearchsku "$search"
+catsearchloc "$search"
+catsearchtitle "$search"
+catsearchstatus "$search"
+catsearchebaycategory "$search"
+}
+
+##### End Search Fuctions #####
+
+
+archivedata () {
+#echo " Archiving $1"
+cp $itemdatapath/$1/$1.json $itemdatapath/$1/$1.json.`date +%Y%m%d%H%M%S`
+zip -qqumj $itemarchivepath/$1.zip $itemdatapath/$1/*.json.* $itemdatapath/$1/*.json $itemdatapath/$1/*.data $itemdatapath/$1/.bak $itemdatapath/$1/*data.txt $itemdatapath/$1/desktop.ini $itemdatapath/$1/.picasa.ini $itemdatapath/$1/.st*
+unzip -qq $itemarchivepath/$1.zip $1.json -d $itemdatapath/$1
+#unzip -qq $itemarchivepath/$1.zip $itemdatapath/$1-data_combined.json -d $itemdatapath/$1
+}
+
+
+fixdatacombined () {
+if [[ ! -f $itemdatapath/$1/$1.json ]] ; then
+jq -r  -f ~/bin/filter_empty.jq $itemdatapath/$1/$1-data_combined.json > $itemdatapath/$1/$1.json
+fi
+}
+
+restoredatacombined () {
+#if [[ `jq -r .sku $itemdatapath/$1/$1.json` == tgw202201011538214 ]] ; then
+jq -r  -f ~/bin/filter_empty.jq $itemdatapath/$1/$1-data_combined.json > $itemdatapath/$1/$1.json
+#echo $1 fixed!
+#fi
+}
+
+unarchivedata () {
+#use for redux
+#echo $itemdatapath/$1command
+unzip -qo $itemarchivepath/$1.zip -d $itemdatapath/$1
+}
+
+fixnodata () {
+echo " Checking nodata error:"
+if [[ "`jq -r .sku $itemdatapath/$1/$1.json`" != "$1" ]] ; then
+echo Fixing `jq -r .sku $itemdatapath/$1/$1.json` $1 nodata error
+for process in unarchivedata data2json archivedata ; do
+    tgw $process $1
+done
+fi
+#echo ---command
+}
+
+fixemptytitle () {
+sku=""
+if [[ ! -z $1 ]] ; then
+sku="$1"
+json="$itemdatapath/$1/$1.json"
+else
+sku="`currentdir`"
+json="$currentitempath/`currentdir`.json"
+fi
+if [[ "`jj -i $json title`" == "`jj -i $json sku`" ]] ; then
+if [[ "$sku" == "`jj -i $json title`" ]] ; then
+echo No title available for $sku. Skipping. > /dev/null
+else
+jj -i $json -o $json -v "`tgwtitle $sku`" title && echo $sku title updated to `jj -i $json title`
+fi
+elif [[ -z "`jj -i $json title`" ]] ; then
+if [[ -z "`tgwtitle $sku`" ]] ; then
+echo No title available for $sku. Skipping.  > /dev/null
+else
+jj -i $json -o $json -v "`tgwtitle $sku`" title && echo $sku title updated to `jj -i $json title`
+fi
+fi
+}
+
+fixtitle () {
+#If title is empty or matches sku/upc/isbn then fix
+sku=""
+if [[ ! -z $1 ]] ; then
+sku="$1"
+json="$itemdatapath/$1/$1.json"
+else
+sku="`currentdir`"
+json="$currentitempath/`currentdir`.json"
+fi
+if [[ "`jj -i $json title`" == "`jj -i $json sku`" ]] || [[ "`jj -i $json title`" == "`jj -i $json 'P:ISBN'`" ]] || [[ "`jj -i $json title`" == "`jj -i $json 'P:UPC'`" ]] || [[ "`jj -i $json title`" == "0`jj -i $json 'P:UPC'`" ]] ; then
+jj -i $json -o $json -v "`jj -i $json Title`" title && echo $sku title updated to `jj -i $json title`
+fi
+if [[ "`jj -i $json title`" == "`jj -i $json sku`" ]] ; then
+if [[ "$sku" == "`tgwtitle $sku`" ]] ; then
+echo No title available for $sku. Skipping. > /dev/null
+else
+jj -i $json -o $json -v "`tgwtitle $sku`" title && echo $sku title updated to `jj -i $json title`
+fi
+elif [[ -z "`jj -i $json title`" ]] ; then
+if [[ -z "`tgwtitle $sku`" ]] ; then
+echo No title available for $sku. Skipping.  > /dev/null
+else
+jj -i $json -o $json -v "`tgwtitle $sku`" title && echo $sku title updated to `jj -i $json title`
+fi
+fi
+}
+
+fixemptylocation () {
+sku=""
+if [[ ! -z $1 ]] ; then
+sku=$1
+json="$itemdatapath/$sku/$sku.json"
+else
+sku="`currentdir`"
+json="$currentitempath/$sku.json"
+fi
+if [[ -z "`jj -i $json location`" ]] ; then
+jj -i $json -o $json -v "`tgw_loc $sku`" location
+fi
+if [[ -z "`jj -i $json location`" ]] ; then
+if [[ ! -z "`jj -i $json m2_description`" ]] ; then
+jj -i $json -o $json -v "`cat $json | jj m2_description | sed 's/^[^\::=::]*\::=:://' |  sed 's/:.*$//' | sed 's/.* //'`" location
+echo $sku moved to `jj -i $json location`
+fi
+fi
+echo $sku is in `jj -i $json location`
+}
+
+tgwsource (){
+source $tgwpath/bin/tgw.source
+}
+
+alias currentsku=currentdir
+currentdir () {
+basename `readlink $currentitempath`
+}
+#currentsku () {
+#currentdir
+#}
+
+tgwset () {
+if [ ! -z "$1" ]; then
+sku=$(getsku $1)
+fi
+if [ -d $itemdatapath/$sku ] && [ ! -z $sku ] && [ $itemdatapath/$sku != $itemdatapath ] ||  [ -d $catalogpath/$1 ] ;  then
+echo $catalogpath/$1
+rm $currentitempath 2>/dev/null
+rm $tgwpath/CurrentItem.json 2>/dev/null
+rm $tgwpath/CurrentLocation 2>/dev/null
+if [ -d $catalogpath/$1 ] ; then
+echo $catalogpath/$1
+ln -sf $catalogpath/$1 $currentitempath
+ln -sf $catalogpath/$(tgw_location) $tgwpath/CurrentLocation
+
+else
+ln -sf $itemdatapath/$sku $currentitempath
+ln -sf $itemdatapath/$sku/$sku.json $tgwpath/CurrentItem.json
+ln -sf $catalogpath/$(tgw_location) $tgwpath/CurrentLocation
+fi
+else
+rm $currentitempath 2>/dev/null
+rm $tgwpath/CurrentItem.json 2>/dev/null
+rm $tgwpath/CurrentLocation 2>/dev/null
+ln -sf $queuepath $currentitempath
+ln -sf $catalogpath
+
+#ln -sf $queuepath/*.json $currentitempath/CurrentItem.json
+fi
+
+
+
+#kdialog --msgbox $sku
+#else
+#fi
+#if [[ -d $itemdatapath/$altsku ]] ; then
+#if [[ $sku != $altsku ]] ;then
+#kdialog --msgbox $altsku
+#tgw tgwset $altsku
+#fi
+#fi
+
+}
+
+tgwset_last_new_item () {
+sku=$1
+if [ ! -z $sku ] && [ -d $new_items/$sku ] ;  then
+rm $currentitempath 2>/dev/null
+rm $tgwpath/CurrentItem.json 2>/dev/null
+item="$new_items/$sku"
+json=~"$item/$sku.json"
+ln -sf "$item" "$currentitempath"
+ln -sf "$json" "$tgwpath/CurrentItem.json"
+echo "Current Item is set to `currentdir`"
+fi
+}
+
+tgwset_watch_for_new_items () {
+# Define the directory to monitor
+directory_to_monitor="$new_items"
+
+# Define the script to execute
+script_to_execute="tgwset_last_new_item"
+
+# Monitor the directory for new directories
+echo Watching for new items in $directory_to_monitor:
+inotifywait -q -m -e create --format '%f' "$directory_to_monitor" | while read new_dir
+do
+    # Execute the script when a new directory is created
+    "$script_to_execute" "$new_dir"
+done
+}
+
+alias ic_current_dir=tgwset_selected
+tgwset_selected () {
+#set the selected sku as current
+#xdotool key Ctrl+Shift+C Ctrl+C;tgw tgwset "`xsel -o`"
+tgw tgwset "`xsel -o``wl-paste --primary`"
+}
+#ic_current_dir () {
+#tgwset_selected
+#}
+
+mkjoblink () {
+#shift
+ln -s $itemdatapath/$1 $itemcreationpath/Find/$1
+}
+
+mkdraftlink () {
+#shift
+if [[ -z "$1" ]] ; then
+#xdotool key Ctrl+Shift+C Ctrl+C
+sku="`wl-paste -p``xsel -o`"
+else sku=$1
+fi
+ln -s $itemdatapath/$sku $mkjobpath/$sku
+}
+
+sku () {
+echo "this \"sku\" function has been disabled. If disabling it broke something you need to fix this, either reenable or preferably replace it."
+#this is possibly an old useless function - not sure if it is used anywhere - use tgw_sku?
+#if [[ ! -z "$1" ]] ; then
+#jq -f ~/bin/filter_empty.jq $itemdatapath/$1/$1.json | jq -r --arg s "$1" ' .sku // '$s'.sku // .["        "] // .["       "] // '$s'.["Custom Label (SKU)"] // '$s'.["Custom label (SKU)"]'
+#jq: error: o/0 is not defined at <top-level>
+#$itemdatapath/$1/$1.json
+#jq -r --arg s $1 ".sku // .SKU // .'$s'[0] .sku // .'$s'[0] .SKU // .[Custom label (SKU)] // .[Custom Label (SKU)] // .'$s'[0] .[Custom Label \(SKU\)] // .'$s'[0] .[Custom label \(SKU\)]" $itemdatapath/$1/$1.json
+#else
+#echo item_sku not set
+#echo Usage: sku "item_sku"
+#fi
+}
+
+tgw_sku () {
+if [[ ! -z "$1" ]] ; then
+tgwset `getsku $1`
+fi
+python3 -c "import os; print(os.path.basename (os.path.realpath('$currentitempath')))";
+}
+
+#tgw_sku="`tgw_sku`"
+tgwisbn () {
+sku=`tgw_sku`
+isbn=`jj -i $currentitempath/$sku.json isbn`
+echo $isbn
+}
+
+paste_tgwisbn () {
+tgw tgwisbn | xsel -i -b ; sleep 0.5; xdotool key Ctrl+V
+tgw tgwisbn | wl-copy ; wl-paste
+}
+
+
+tgwsync () {
+tgwbackup
+if  [ -d /media/db/TGW1 ] ; then
+tgwclone
+fi
+tgwgdrive
+}
+
+tgwgdrive () {
+#!/bin/bash
+# Open a new tab in Yakuake
+#qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.addSession
+#TERMINAL_ID_1=$(qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.terminalIdsForSessionId "$SESSION_ID_1")
+#qdbus org.kde.yakuake /yakuake/tabs setTabTitle Shell "gdrivebackup"
+##qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.splitTerminalTopBottom "gdrivebackup"
+#qdbus org.kde.yakuake /yakuake/sessions runCommand "tgwgdrive_commands"
+# Rename the tab
+#qdbus org.kde.yakuake /yakuake/sessions renameTab 1 "ItemData-Gdrive Sync" # 1 is tab index
+#qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.addSession
+#qdbus org.kde.yakuake /yakuake/tabs setTabTitle 1 "tgwgdrive"
+#qdbus org.kde.yakuake /yakuake/sessions runCommand "tgwgdrive_commands"
+#qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.addSession
+tgwgdrive_commands
+}
+
+tgwgdrive_commands () {
+#clear
+#if  [ -d /media/db/BACKUP/TGW/ItemData ] ; then
+echo Begin Google Drive Backup
+echo transfering TGW Data
+rclone sync $itemcatalog dbukove:/TGW/data/ItemCatalog/ -P --tpslimit 3 --drive-stop-on-upload-limit --fast-list
+rclone sync $tgwpath/src dbukove:/TGW/src/ -P --tpslimit 3 --drive-stop-on-upload-limit --fast-list
+rclone sync $tgwpath/bin dbukove:/TGW/bin/ -P --tpslimit 3 --drive-stop-on-upload-limit --fast-list
+rclone sync $tgwpath/config dbukove:/TGW/config/ -P --tpslimit 3 --drive-stop-on-upload-limit --fast-list
+rclone sync $tgwpath/docs dbukove:/TGW/docs/ -P --tpslimit 3 --drive-stop-on-upload-limit --fast-list
+rclone sync $itemdatapath dbukove:/TGW/data/ItemData/ -P --tpslimit 3 --drive-stop-on-upload-limit --fast-list
+#echo transfering ItemArchive
+#rclone sync $itemarchivepath dbukove:/TGW/data/ItemArchive/ -P --tpslimit 3 --drive-stop-on-upload-limit --fast-list
+#echo transfering logs
+#rclone sync $tgwlogpath dbukove:/TGW/logs/ -P --tpslimit 3 --drive-stop-on-upload-limit --fast-list
+echo Google Drive Backup Completed
+#else
+#echo BACKUP device not mounted. Mount BACKUP device and retry.
+#fi
+}
+
+tgwbackup () {
+mount /media/db/Backup
+if  [ -d /media/db/Backup/TGW ] ; then
+echo Begin Backup
+rclone sync $itemarchivepath /media/db/Backup/TGW/ItemArchive -P
+rclone sync $itemdatapath /media/db/Backup/TGW/ItemData -P
+rclone sync $tgwlogpath /media/db/Backup/TGW/logs -P
+rm -r /media/db/Backup/TGW/ItemCatalog
+rsync -ahl $itemcatalogpath /media/db/Backup/TGW/
+echo Backup Completed
+else
+echo No BACKUP drive found. Insert BACKUP device and retry.
+fi
+}
+
+tgwclone () {
+if  [ -d /media/db/TGW1 ] ; then
+echo Begin Cloning TGW Data
+rclone sync /media/db/TGW/ItemData /media/db/TGW1/ItemData -P
+rm -r /media/db/TGW1/ItemCatalog
+rsync -ahl /media/db/TGW/ItemCatalog /media/db/TGW1/
+echo Cloning Completed
+else
+echo Aborted. Mount the TGW device and retry.
+fi
+}
+
+upload () {
+rclone copy $itemdatapath/ --include=/tgw`date +"%Y%m"`*/** dbukove:/TGW/ItemData/ -v
+rclone copy $tgwpath/tgw.source.zip dbukove:/TGW/ -v
+}
+
+scan2clip () {
+google-chrome "http://localhost/scan2clip/clip2draft-pc-3-mini.html"
+}
+
+voice_toggle () {
+#xdotool key Ctrl+Shift+9
+#ydotool key ctrl shift 9
+ydotool key 29:1 42:1 10:1 10:0 42:0 29:0
+}
+
+research () {
+search=$1
+shift
+for word in $@;do shift;search="$search+$word";done
+google-chrome "https://www.google.com/search?q='$search'"
+google-chrome "https://www.amazon.com/s/ref=nav_bb_sb?field-keywords=$search"
+google-chrome "https://www.ebay.com/sch/i.html?_from=R40&_nkw=$search&_sacat=0&rt=nc&LH_Sold=1&LH_Complete=1"
+}
+
+tgwprice () {
+tgwset_selected
+title="`jj -i $itemdatapath/$sku/$sku.json title`"
+echo $title
+research "$title"
+}
+
+alias goog=google
+google () {
+search=`echo $@ | sed 's/ /+/g'`
+google-chrome "https://www.google.com/search?q=$search&oq=salad+tongs&sourceid=chrome&ie=UTF-8"
+}
+
+eb () {
+#Search ebay
+search=`echo $@ | sed 's/ /+/g'`
+google-chrome "https://www.ebay.com/sch/i.html?_from=R40&_trksid=p2380680.m570.l1313&_nkw=$search&_sacat=0"
+}
+
+ebo () {
+google-chrome "https://www.ebay.com/sh/ord"
+}
+
+ebs () {
+#Search ebay sold listings
+search=`echo $@ | sed 's/ /+/g'`
+google-chrome "https://www.ebay.com/sch/i.html?_from=R40&_nkw=$search&_sacat=0&LH_Sold=1&LH_Complete=1&_sop=16"
+}
+
+ebsku () {
+#search my ebay listing by tgw sku
+google-chrome "https://www.ebay.com/sh/lst/active?catType=storeCategories&q_field1=listingSKU&q_op1=EQUAL&q_value1=$1&action=search"
+}
+
+ebd () {
+#search my ebay active listing descriptions
+search=`echo $@ | sed 's/ /+/g'`
+google-chrome "https://www.ebay.com/sh/lst/active?catType=storeCategories&q_field1=description&q_value1=$search&action=search&q_op1=CONTAINS"
+}
+
+ebt () {
+#search my ebay activelisting titles
+search=`echo $@ | sed 's/ /+/g'`
+google-chrome "https://www.ebay.com/sh/lst/active?catType=storeCategories&q_field1=title&q_value1=$search&action=search"
+}
+
+ebi () {
+#search ebay listings by ebay item number
+google-chrome "https://www.ebay.com/itm/$1"
+}
+
+pirateship () {
+#open  pirateship ebay import page
+google-chrome "https://ship.pirateship.com/import"
+}
+
+newitem () {
+if [[ -d $itemdatapath/$1 ]] ; then
+template=default
+sku=$1
+else
+template=$1
+sku=$2
+fi
+if [ ! -z "$1" ] ; then
+sku=$(tgw_sku $1)
+#echo sku is $sku
+tgwset $sku
+jsontoenv $sku
+google-chrome "https://www.ebay.com/lstng?mode=AddItem&templateId=6519364015"
+#echo $(tgw tgw_title $sku)
+#price=`tgw tgw_price $sku`:-"9.99"
+fi
+#eb_template_$template $sku
+}
+
+newitem-old () {
+if [[ -d $itemdatapath/$1 ]] ; then
+template=default
+sku=$1
+else
+template=$1
+sku=$2
+fi
+eb_template_$template $sku
+}
+
+eb_template_default () {
+sku=$(tgw_sku $sku)
+jsontoenv $sku
+sleep 1
+xdotool key Tab
+#xdotool key Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab type "$title"
+#xdotool key Ctrl+l Tab Tab Ctrl+g type "item title"
+#xdotool key Tab Tab Tab Space Tab # type "$title"
+#xdotool key Tab Tab type "$sku"
+#xdotool  key Ctrl+l Tab Tab Tab #
+xdotool key Ctrl+g type "custom label"
+#sleep 0.5
+xdotool key Tab Tab Tab Tab Tab
+sleep 1
+xdotool key Esc Tab Tab type "$sku"
+#xdotool key Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Return
+#xdotool key Ctrl+l Tab Tab  key Ctrl+g type "photos \& video"
+#xdotool key Tab Tab Tab Space Tab Tab Return
+#sleep 2
+#xdotool key Tab j p g Tab Tab Home C Return Shift+End Ctrl+A Return
+}
+
+eb_template_book () {
+if [ ! -z "$1" ] ; then
+sku=$1
+tgwset $sku
+isbn=$(tgw tgw_isbn $sku)
+price="`tgw tgw_price $sku`":-"9.99"
+fi
+waitnext=0
+google-chrome "https://www.ebay.com/lstng?mode=AddItem&templateId=6519366015"
+sleep 9
+xdotool key Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab type "$sku"
+#paste Description and title
+#xdotool key Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab Tab type "`ebay_gpt_desc`"
+#xdotool key Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab type "`tgw_title`"
+xdotool key Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Return
+#xdotool key Ctrl+G "24 photos" Tab Escape Return
+sleep 1
+xdotool key Tab j p g Tab Tab Home C Return Shift+End Ctrl+A Return
+sleep 6
+xdotool key Tab Ctrl+G p r i c e Return Escape Tab type "$price"
+xdotool key Return
+xdotool key Tab Ctrl+G i s b n Return Escape Tab type "$isbn"
+xdotool key Return
+#xdotool key Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab type "`echo $isbn`"
+#xdotool key Return
+#xdotool key Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab Shift+Tab
+#if [[ -z "$(echo `tgw tgw_title $sku`)" ]] ; then
+#tgw_info_popup $sku &
+#json_edit $sku &
+#fi
+}
+
+paste_isbn () {
+isbn=$(tgw tgw_isbn `getsku`)
+wl-paste "`tgw_isbn`"
+ydotool type "`tgw_isbn`"
+#xdotool key Return
+ydotool key enter
+}
+
+tgw_upc () {
+sku=$(getsku $1)
+jq -r --arg s $sku ' .upc // ."P:UPC" //  ."$sku"[0].upc //  ."$sku"[0] ."P:UPC"' $itemdatapath/$sku/$sku.json
+
+}
+
+tgw_isbn () {
+sku=$(getsku $1)
+jq -r --arg s $sku ' ."P:ISBN" // .isbn // ."$sku"[0]."P:ISBN" // ."$sku"[0] .isbn' $itemdatapath/$sku/$sku.json
+}
+
+tgw_location () {
+sku=$(getsku $1)
+jq -r --arg s $sku " .location // .Location // .tgw_location // .m1_location // empty" $itemdatapath/$sku/$sku.json
+}
+
+tgw_loc () {
+if [[ ! -z "$1" ]] ; then
+tgwset $1
+fi
+tgw_location $sku
+}
+
+tgw_location_box () {
+jq -r --arg s `tgw_sku` " .location_box // empty" $itemdatapath/`tgw_sku`/`tgw_sku`.json
+}
+
+tgw_location_shelf () {
+jq -r --arg s `tgw_sku` " .location_shelf // .Location_shelf // empty" $itemdatapath/`tgw_sku`/`tgw_sku`.json
+}
+
+tgw_location_section () {
+jq -r --arg s `tgw_sku` " .location_section // .Location_section // empty" $itemdatapath/`tgw_sku`/`tgw_sku`.json
+}
+
+tgw_location_row () {
+jq -r --arg s `tgw_sku` " .location_row // .Location_row // empty" $itemdatapath/`tgw_sku`/`tgw_sku`.json
+}
+
+tgw_location_building () {
+jq -r --arg s `tgw_sku` " .location_building // .Location_building // empty" $itemdatapath/`tgw_sku`/`tgw_sku`.json
+}
+
+tgw_location_complete () {
+echo "`tgw_location_building` `tgw_location_row` `tgw_location_section` `tgw_location_shelf` `tgw_location_box` `tgw_location`"
+}
+
+tgw_info_popup () {
+if [[ ! -z $1 ]] ; then
+sku="$(getsku $1)"
+echo $sku
+else
+sku="$(getsku `tgw current_selection`)"
+sku="${sku:-`getsku`}"
+fi
+if [[ -z "$sku" ]] ; then
+kdialog --title OpenItemError --msgbox "No sku provided. You must select a sku or an ebay id."
+exit
+fi
+if [[ ! -d $itemdatapath/$sku/ ]] ; then
+sku=`getsku $sku`
+fi
+if [[ ! -d $itemdatapath/$sku/ ]] ; then
+echo no sku or incorrect sku
+exit
+fi
+location="`tgw_location $sku`"
+title="`tgw_title $sku`"
+isbn="`tgw_isbn $sku`"
+upc="`tgw_upc $sku`"
+ebayid="`tgw ebay_id $sku`"
+currentprice="`tgw current_price $sku`"
+ebayprice="`tgw ebay_price $sku`"
+tgwprice="`tgw tgw_price $sku`"
+status=""`jj -i $itemdatapath/$sku/$sku.json "#STATUS"`""
+sort-json $itemdatapath/$sku/$sku.json
+kdialog  --geometry +1200+270 --title "Info -- $sku" "`jq -S "." $itemdatapath/$sku/$sku.json | tail -n +2 |head -n -1`" --yes-label=Ok --no-label=Images --cancel-label=Edit --yesnocancel "$sku
+$title
+
+Status: $status
+Location:  $location
+eBay ID:  $ebayid
+Current Price:  $currentprice
+eBay Price:  $ebayprice
+Price:  $tgwprice
+ISBN:  $isbn
+UPC:  $upc
+"
+case $? in
+0) ;;
+1) tgwimageview $sku ;;
+2) jsonedit $itemdatapath/$sku/$sku.json ;;
+esac
+}
+
+alias catsup=catsearch_result_popup
+alias catsearch_popup=catsearch_result_popup
+catsearch_result_popup () {
+if [[ -z $1 ]] ; then
+search="`xsel -o`"
+else
+search="$@"
+fi
+kdialog 2>/dev/null --geometry +1200+001 --title "Search: $search" --msgbox "Searched Catalog for \"$search\":
+
+`catsearch $search`"
+}
+
+
+tgw_title_old () {
+jq -r --arg s `tgw_sku` " .Title // .title // .`tgw_sku`[0] .Title // .`tgw_sku`[0] .title // .Name // .name // ."`tgw_sku`"[0] .Name // ."`tgw_sku`"[0] .name" $itemdatapath/`tgw_sku`/`tgw_sku`.json
+}
+
+tgw_title () {
+if [[ ! -z "$1" ]] ; then
+tgw_sku="$1"
+else
+tgw_sku="`tgw_sku`"
+fi
+#echo $tgw_sku
+jq -r --arg s "$tgw_sku" " .title // .Title // .Description // .Name // .name // .product_name // .description  // .m2_name // .isbn // .tgw_name " $itemdatapath/$tgw_sku/$tgw_sku.json
+#sleep 1
+}
+
+gpt_title_old () {
+sku=$(getsku $@)
+sgpt "write a good quality product descriotion to sell a `tgw_title $sku`"
+
+}
+
+tgwtitle () {
+echo -e "`tgw_title $1`\n"
+}
+
+paste_tgw_title () {
+if [ XDG_SESSION_TYPE=x11 ] ; then
+tgw tgw_title $1 | xsel -i -b ; sleep 0.5; xdotool key Ctrl+V
+fi
+if [ XDG_SESSION_TYPE=wayland ] ; then
+#wl-copy "`tgw tgw_title $1`";sleep 0.5;ydotool key 29:1 47:1 47:0 29:0
+#wl-copy -p "`tgw tgw_title $1`" ;sleep 0.5; wl-paste -p #ydotool key 29:1 47:1 47:0 29:0
+tgw tgwtitle | wl-paste;ydotool key 29:1 47:1 47:0 29:0
+fi
+}
+
+paste_tgw_sku () {
+tgw getsku $1 | wl-copy ; tgw getsku $1 | xsel -i -b ; sleep 0.5; xdotool key Ctrl+V; wl-paste
+}
+
+tgw_search_terms () {
+jq -r --arg s `tgw_sku` " .search_terms // .`tgw_sku`[0] .search_terms" $itemdatapath/`tgw_sku`/`tgw_sku`.json
+}
+
+picklist_line () {
+#if [[ ! -z "$1" ]] ; then
+#sku="$1"
+sku=$(getsku $1)
+#else
+#sku="`getsku`"
+#fi
+echo tgw-pl::=::`tgw_location $sku`:=:"`tgw_title $sku`":=:$sku:=:"`ebay_id $sku`"
+}
+
+picklist_question () {
+#xdotool key Ctrl+C
+plq="$(getsku `xsel -o`)"
+#plq=${plq:-`getsku $1`}
+todo=`jj -i $itemdatapath/$plq/$plq.json todo`
+printf "`picklist_question_line $plq`:=:$todo" | xsel --clipboard
+}
+
+picklist_question_line () {
+#if [[ ! -z "$1" ]] ; then
+#sku="$1"
+sku=$(getsku $1)
+#else
+#sku="`tgw_sku`"
+#fi
+echo tgw-plq::=::`tgw_location $sku`:=:"`tgw_title $sku`":=:$sku:=:"`ebay_id $sku`"
+}
+
+picklist_add () {
+pll=$(getsku `wl-paste -p`)
+todo=`jj -i $itemdatapath/$pll/$pll.json todo`
+printf "`picklist_line $pll`:=:$todo" | wl-copy
+}
+
+
+ebay_description () {
+echo "Up for sale is `tgw_title`<p>Please see our photos for more information about the item. If you need more information about the item please send a message. Photos are of the exact item you receiving with the occasional exception of items that have multiple quantity. Please make sure you take a look before you buy.</p><p>We ship quickly and securely with same or next day handling wherever possible. If you have questions about the item or special packaging or shipping requirements please contact us before placing your order.</p><p>`picklist_line`</p><br><br>"
+}
+
+ebay_desc () {
+echo -e "Up for sale is `tgw_title`\n\nPlease see our photos for more information about the item. Photos are of the exact item you receiving with the occasional exception of items that have multiple quantity. If you need more information about the item please send a message. Please make sure you take a look before you buy.\n\nWe ship quickly and securely with same or next day handling wherever possible. If you have questions about the item or special packaging or shipping requirements please contact us before placing your order.\n\n\n`picklist_line`\n
+"
+}
+
+ebay_gpt_desc () {
+if [[ ! -z "$1" ]] ; then
+sku="$1"
+sku=$(getsku $1)
+else
+sku="`tgw_sku`"
+fi
+if [[ ! -z `jj -i $itemdatapath/$sku/$sku.json gpt_desc` ]] ; then
+echo -n "`jj -i $itemdatapath/$sku/$sku.json gpt_desc`
+
+See our photos for more information about the item. If you need more information about the item please send a message. Our photos are of the exact item you receiving with the occasional exception of items that have multiple quantity where they will all be substantially the same. Please make sure you take a look before you buy.
+
+We ship quickly and securely with same day handling wherever possible. If you have questions about the item, have special packaging or shipping requirements, or even if you just want to say hello please contact us and we'll get back to you ASAP.
+
+--Winchester Mystery Kitchen
+
+
+`picklist_line $sku`
+"
+else
+ebay_desc $sku
+fi
+}
+
+paste_gpt_desc () {
+ebay_gpt_desc | xsel -i -b ; sleep 0.5; xdotool key Ctrl+V
+ebay_gpt_desc | wl-copy ; wl-paste
+}
+
+add_gpt_desc () {
+if [[ ! -z "$1" ]] ; then
+sku="$1"
+sku=$(getsku $1)
+else
+sku="`tgw_sku`"
+fi
+if [ -z "`jj -i $itemdatapath/$sku/$sku.json gpt_desc`" ] ; then
+update_gpt_desc $sku
+else
+echo Skipping $sku
+fi
+}
+
+update_gpt_desc () {
+if [[ ! -z "$1" ]] ; then
+sku="$1"
+sku=$(getsku $1)
+else
+sku="`tgw_sku`"
+fi
+echo Updating gpt_desc of $sku
+json_backup $sku
+jj  -i $itemdatapath/$sku/$sku.json  -o $itemdatapath/$sku/$sku.json -D gpt_desc
+jj  -i $itemdatapath/$sku/$sku.json  -o $itemdatapath/$sku/$sku.json -v "`tgw gpt_desc $sku`" gpt_desc
+}
+
+
+fb_desc () {
+ebay_description
+}
+
+#ebay_description="`ebay_description`"
+
+paste_ebay_desc () {
+ebay_gpt_desc | xsel -i -b ; sleep 0.5; xdotool key Ctrl+V
+ebay_gpt_desc | wl-copy ; ydotool key 29:1 47:1 47:0 29:0
+}
+
+paste_ebay_desc_html () {
+ebay_description | xsel -i -b ; sleep 0.5; xdotool key Ctrl+V
+ebay_description | wl-copy ; ydotool key 29:1 47:1 47:0 29:0
+}
+
+tgw_description () {
+jq -r --arg s `tgw_sku` " .description // ."`tgw_sku`"[0] .description //  ."Description" // ."`tgw_sku`"[0] ."Description"" $itemdatapath/`tgw_sku`/`tgw_sku`.json
+}
+
+tgw_all () {
+jq -f ~/bin/filter_empty.jq $itemdatapath/`tgw_sku`/`tgw_sku`.json
+}
+
+dump () {
+jq values $itemdatapath/`tgw_sku`/`tgw_sku`.json
+}
+
+ebay_id () {
+sku=$(getsku $1)
+jq -r --arg s $sku ' ."Item number" // ."$sku"[0] ."Item number"' $itemdatapath/$sku/$sku.json
+}
+
+ebay_qty () {
+sku=`tgw_sku`
+#echo sku is $sku
+#jq -r --arg s `tgw_sku` ' .qty // ."Available quantity" // ."`tgw_sku`"[0] ."Available quantity" // ."`tgw_sku`"[0] .qty' $itemdatapath/`tgw_sku`/`tgw_sku`.json
+#jq -r --arg s $sku 'if (.qty // ."Available quantity") < 0 then .qty = 0 else . end'  $itemdatapath/$sku/$sku.json
+#jq -r --arg s $sku 'if (.qty // ."Available quantity" // .Quantity // ."$sku"[0]."Available quantity" // ."$sku"[0].qty) < 0 or (.qty // ."Available quantity" // ."$sku"[0]."Available quantity" // ."$sku"[0].qty) == "" or (.qty // ."Available quantity" // ."$sku"[0]."Available quantity" // ."$sku"[0].qty) == null then 0 else .qty // ."Available quantity" // ."$sku"[0]."Available quantity" // ."$sku"[0].qty end' $itemdatapath/$sku/$sku.json
+#jq -r --arg s tgw202304231634280 'if (.qty // ."Available quantity" // ."tgw202304231634280"[0] ."Available quantity" // ."tgw202304231634280"[0] .qty) < 0 or (.qty // ."Available quantity" // ."tgw202304231634280"[0] ."Available quantity" // ."tgw202304231634280"[0] .qty) == "" or (.qty // ."Available quantity" // ."tgw202304231634280"[0] ."Available quantity" // ."tgw202304231634280"[0] .qty) == null then 0 else .qty // ."Available quantity" // ."tgw202304231634280"[0] ."Available quantity" // ."tgw202304231634280"[0] .qty end' $itemdatapath/tgw202304231634280/tgw202304231634280.json
+jq -r ' .qty // ."Available quantity" // ."$sku"[0] ."Available quantity" // ."$sku"[0] .qty' $itemdatapath/$sku/$sku.json | awk '{if ($1 <= 0 || $1 == "" || $1 == "null") print 0; else print $1}'
+}
+
+tgw_brand () {
+jq -r --arg s `tgw_sku` ' ."C:Brand" // .brand // ."`tgw_sku`"[0] ."C:Brand" // ."`tgw_sku`"[0] .brand' $itemdatapath/`tgw_sku`/`tgw_sku`.json
+}
+
+tgw_model () {
+jq -r --arg s `tgw_sku` ' ."C:Model" // .model_number // ."`tgw_sku`"[0] ."C:Model" // ."`tgw_sku`"[0] .model_number' $itemdatapath/`tgw_sku`/`tgw_sku`.json
+}
+
+tgw_mpn () {
+jq -r --arg s `tgw_sku` ' ."C:MPN" // .part_number // ."`tgw_sku`"[0] ."C:MPN" // ."`tgw_sku`"[0] .part_number' $itemdatapath/`tgw_sku`/`tgw_sku`.json
+}
+
+tgw_price () {
+jq -r --arg s `tgw_sku` ' .price // ."Start price" // ."Current price" // ."Buy It Now price" // ."`tgw_sku`"[0] .price // ."`tgw_sku`"[0]."Buy It Now price" // ."$sku"[0]."Current price"' $itemdatapath/`tgw_sku`/`tgw_sku`.json
+}
+
+current_price () {
+gsku=$(tgw getsku $1)
+jq -r --arg sku $gsku ' ."Current price" // .price // ."Start price" // ."Buy It Now price" // ."$sku"[0]."Buy It Now price" // ."$sku"[0]."Current price" // ."$sku"[0] .price' $itemdatapath/$gsku/$gsku.json
+}
+
+ebay_price () {
+jq -r --arg s `tgw_sku` ' ."Buy It Now price" // ."Current price" // ."Start price" // ."`tgw_sku`"[0] ."Buy It Now price"' $itemdatapath/`tgw_sku`/`tgw_sku`.json
+}
+
+ebay_category_1_name () {
+jq -r --arg s `tgw tgw_sku` " ."eBay category 1 name" // .category // ."`tgw_sku`"[0]."eBay category 1 name" // ."`tgw_sku`"[0].category" $itemdatapath/`tgw_sku`/`tgw_sku`.json
+}
+
+ebay_category_1_number () {
+jq -r --arg s `tgw_sku` ' ."eBay category 1 number" // .category // ."`tgw_sku`"[0]."eBay category 1 number" // ."`tgw_sku`"[0] .category // 156532' $itemdatapath/`tgw_sku`/`tgw_sku`.json
+}
+
+ebay_category_2_name () {
+jq -r --arg s `tgw_sku` ' ."eBay category 2 name" // .category // ."`tgw_sku`"[0]."eBay category 2 name" // ."`tgw_sku`"[0].category' $itemdatapath/`tgw_sku`/`tgw_sku`.json
+}
+
+ebay_category_2_number () {
+jq -r --arg s `tgw_sku` ' ."eBay category 2 number" // .category // ."`tgw tgw_sku`"[0]."eBay category 2 number" // ."`tgw_sku`"[0] .category' $itemdatapath/`tgw tgw_sku`/`tgw tgw_sku`.json
+}
+
+ebay_condition () {
+cat  $itemdatapath/`tgw_sku`/`tgw_sku`.json |jq -r --arg s "$s" " .condition // ."$s"[0].condition //  .Condition // ."$s"[0].Condition // 'GOOD'"
+}
+
+ebay_condition_description () {
+jq -r --arg s `tgw_sku` " .condition_description // ."`tgw_sku`"[0].condition_description" $itemdatapath/`tgw_sku`/`tgw_sku`.json
+}
+
+#ebay_shipping_policy () {
+#echo Not Configured
+#}
+
+#ebay_return_policy () {
+#echo Not Configured
+#}
+
+#ebay_payment_policy () {
+#echo Not Configured
+#}
+
+
+alias loclabel=mkloclabel
+alias mkqrloclabel=mkloclabel
+mkloclabel () {
+qrllabelname=$1
+qrlcsv=$tmpdir/location.csv
+qrllabel=$qrlloc/$qrllabelname.pdf
+echo qr,text > $qrlcsv
+for qrdata in $@ ; do
+    echo tgwlocationview $qrdata,$qrdata >> $qrlcsv
+#    echo DATA:location=$qrdata,$qrdata >> $qrlcsv
+done
+glabels-3-batch -o $qrllabel -i $qrlcsv $qrlglabel
+$pdfviewer $qrllabel
+}
+#loclabel () {
+#mkloclabel $@
+#}
+#mkqrloclabel () {
+#mkloclabel $@
+#}
+
+mkebaydraftimportcsv () {
+# Make Ebay Drafts Import CSV
+tgw_config=~/.config/item-creation
+template_path=$tgw_config/Templates
+csvnumber=$(date +%s)
+ebaydraftcsv=$csvnumber-ebay_draft_import.csv
+if [ -f "$ebaydraftcsv" ] ; then
+mv $ebaydraftcsv $ebaydraftcsv.bak
+fi
+cp $tgw_config/eBay-draft-listing-import.csv $ebaydraftcsv
+printf "\n" >> $ebaydraftcsv
+}
+
+mkebaydraftimportcsvbuilder () {
+echo Begin processing $new_items/$sku
+json=$new_items/$sku/$sku.json
+template=$tgw_config/template.json #`cat $sku/$sku.json|jq -r ".$sku[].TEMPLATE"`.json
+echo json file is $json
+#add_gpt_desc $sku
+#echo TEMPLATE file is $template
+printf Draft, >> $ebaydraftcsv
+printf `tgw_sku`, >> $ebaydraftcsv
+group=`cat $json|jq -r '.TEMPLATE // .$sku[].TEMPLATE // empty'`
+if [[ $group == null ]] ; then group=default;fi
+tgwcat=`cat $new_items/$json|jq -r .$sku[].TEMPLATE`
+if [[ $tgwcat == null ]] ; then tgwcat=default;fi
+ebcat=`ebay_category_1_number`
+ebstorecat="`cat $template|jq -r .$group[].ebay_store_category`"
+ebship="`cat $template|jq -r .$group[].ebay_shipping_policy`"
+cond=`ebay_condition`
+description_blurb="`cat $template|jq -r .$group[].description_blurb`"
+name="`tgw_title`"
+price=`ebay_price`
+qty=`ebay_qty`
+tested=`cat $template|jq -r ".$group[].tested // empty"`
+printf `cat $new_items/$json|jq -r ".$sku[].ebay_category // $ebcat"`, >> $ebaydraftcsv
+#printf "`tgw_title`", >> $ebaydraftcsv
+printf "`cat $new_items/$json|jq -r ".$sku[].title"`", >> $ebaydraftcsv
+#printf `cat $json|jq --arg n "$name" -r ".$sku[].title // $n"`,
+#printf `jq --arg d "$name" -r '.[]$sku.title // $d' $json`,
+printf "`cat $new_items/$json|jq -r ".$sku[].isbn // empty"`", >> $ebaydraftcsv
+printf `cat $new_items/$json|jq -r ".$sku[].price // $price"`, >> $ebaydraftcsv
+printf `cat $new_items/$json|jq -r ".$sku[].qty // $qty"`, >> $ebaydraftcsv
+printf , >> $ebaydraftcsv
+key="`cat $new_items/$json|jq -r .$sku[].condition`"
+default="`cat $template|jq -r .$group[].condition`"
+printf `jq --arg d "$default" -r '.[] | .[] | .condition // $d' $new_items/$json`, >> $ebaydraftcsv
+#printf "`cat $json|jq -r ".$sku[].name // empty"` `cat $json|jq -r ".$sku[].title // empty"` <br> `cat $json|jq -r ".$sku[].description // empty"`<br> `cat $json|jq --arg blurb "$description_blurb" -r ".$sku[].description_blurb" // $blurb` <br> tgw-pl::=::`cat $json|jq -r ".$sku[].location // empty"`:=:`cat $json|jq -r ".$sku[].title // empty"`:=:$sku:=:$ebay_id:=:$sku", >> $ebaydraftcsv
+printf "`ebay_description`", >> $ebaydraftcsv
+printf FixedPrice, >> $ebaydraftcsv
+printf `cat $new_items/$json|jq -r ".$sku[].warehouse_location // 95453"`, >> $ebaydraftcsv
+printf "$ebship", >> $ebaydraftcsv
+printf `cat $new_items/$json|jq -r ".$sku[].ebay_best_offer // empty"`, >> $ebaydraftcsv
+printf "`cat $new_items/$json|jq -r ".$sku[].condition_description // empty"`", >> $ebaydraftcsv
+printf "$ebstorecat", >> $ebaydraftcsv
+printf "$tested", >> $ebaydraftcsv
+printf `cat $$new_items/json|jq -r ".$sku[].location // empty"`, >> $ebaydraftcsv
+linenumber=$((linenumber+1))
+printf $linenumber >> $ebaydraftcsv
+printf "\n" >> $ebaydraftcsv
+echo Processing completed for $new_items/$sku
+echo ""
+}
+
+ebaydraftimport () {
+# Make Ebay Drafts Import CSV
+tgw_config=~/.config/item-creation
+template_path=$tgw_config/Templates
+csvnumber=$(date +%s)
+ebaydraftcsv=$csvnumber-ebay_draft_import.csv
+if [ -f "$ebaydraftcsv" ] ; then
+	mv $ebaydraftcsv $ebaydraftcsv.bak
+fi
+cp $tgw_config/eBay-draft-listing-import.csv $ebaydraftcsv
+printf "\n" >> $ebaydraftcsv
+for directory in $(ls -d */) ; do
+	sku="$(basename $directory /)"
+	tgwset $sku
+	mkebaydraftimportcsvbuilder
+done
+}
+
+tgw_image () {
+basename `tgw_image_1`
+#basename $main_image
+}
+
+tgw_image_1 () {
+jq -r --arg s `tgw_sku` " .image // ."`tgw_sku`"[0] .image // .image_1 // ."`tgw_sku`"[0] .image_1" $itemdatapath/`tgw_sku`/`tgw_sku`.json
+}
+
+tgw_image_1_conky () {
+echo \$\{image $currentitempath/`tgw_image` -s 290x290 -p 0,400\}
+}
+
+tgw_last_item () {
+basename `find $itemdatapath/tgw2022* -type d -prune | tail -n 1`
+}
+
+tgw_count () {
+find /home/db/TGW/ItemData/$1  -maxdepth 1 -type d | wc -l
+}
+
+testfixed () {
+echo $1
+if [[ ! -f $itemdatapath/$1/.fixed ]] ; then
+echo no .fixed
+fi
+if [[ -f $itemdatapath/$1/.fixed ]] ; then
+echo yes .fixed
+fi
+}
+
+fixsku () {
+tmp=$(mktemp)
+working=`sku $1`
+jq --arg s `sku $1` '.sku = $s' $itemdatapath/$1/$1.json > "$tmp" && mv "$tmp" $itemdatapath/$1/$1.json
+#jq -f ~/bin/filter_empty.jq --arg sku `sku $1` '.sku = $sku' $itemdatapath/$1/$1.json #> $itemdatapath/$1/new-$1.json
+#clear
+#tgw_all $1
+}
+
+
+fixmess () {
+if [[ ! -f $itemdatapath/$1/.fixed ]] ; then
+#echo `ls $itemdatapath/$1/.fixed`
+echo  $1
+#if [[ -z $itemdatapath/$1/.fixed ]] ; then
+echo " Restoring data-combined.json:"
+#if [[ "`jq -r .sku $itemdatapath/$1/$1.json`" == "tgw202201011538214" ]] ; then
+for process in archivedata unarchivedata restoredatacombined fixsku archivedata fixnodata archivedata ; do
+    tgw $process $1
+done
+fi
+#fixnodata $1
+#echo `jq -r .sku $itemdatapath/$1/$1.json`
+#echo `jq -r ".title // .Title" $itemdatapath/$1/$1.json`
+touch $itemdatapath/$1/.fixed
+#tgwset $1
+echo done!
+echo ---
+#fi
+}
+
+clearItemnumber () {
+#TODO: redo this function using catalog to find items to clear item number from
+cd $itemdatapath
+echo Clearing eBay \"Item number\" from all items
+echo ""
+for sku in `ls -1d TGW*` `ls -1d tgw*` ; do
+jsonfile=$itemdatapath/$sku/$sku.json
+jj -i  $jsonfile -o $jsonfile  -v "" "Item number"
+done
+}
+
+
+csvmerge () {
+file="$1"
+logfile="$file.log"
+dirItemData=$itemdatapath
+tmpname=`date +%N`
+exec < "$file"
+count=1
+read header
+#clear
+echo Merging $file
+echo ""
+while IFS="," read -r  line
+do
+sku=""
+echo $header > $tmpdir/$tmpname.csv
+echo $line >> $tmpdir/$tmpname.csv
+csv-to-json $tmpdir/$tmpname.csv $tmpdir/$tmpname.json
+sku=`cat $tmpdir/$tmpname.json|jq -r '.[].sku'`
+if [[ "$sku" == "null"||"" ]] ; then
+    sku=""
+    sku=${sku:-`cat $tmpdir/$tmpname.json|jq -r '.[].SKU'`}
+fi
+if [[ "$sku" == "null"||"" ]] ; then
+    sku=""
+    sku=${sku:-`cat $tmpdir/$tmpname.json|jq -r '.[]."Custom Label"'`}
+fi
+if [[ "$sku" == "null"||"" ]] ; then
+    sku=""
+    sku=${sku:-`cat $tmpdir/$tmpname.json|jq -r '.[]."Custom label"'`}
+fi
+if [[ "$sku" == "null"||"" ]] ; then
+    sku=""
+sku=${sku:-`cat $tmpdir/$tmpname.json|jq -r '.[]."Custom Label (SKU)"'`}
+fi
+if [[ "$sku" == "null"||"" ]] ; then
+    sku=""
+    sku=${sku:-`cat $tmpdir/$tmpname.json|jq -r '.[]."Custom label (SKU)"'`}
+fi
+#echo Sku is $sku
+
+json_backup $sku
+newjson="$itemdatapath/$sku/$sku-`basename $file`.json"
+skujson="$itemdatapath/$sku/$sku.json"
+if [[ ! -z "$sku" ]]; then
+echo $count. $sku : Merging $newjson
+mkdir -p $itemdatapath/$sku
+mv $tmpdir/$tmpname.json $newjson
+count=$((count+1))
+rm $tmpdir/$tmpname.csv
+json_fix_format $sku $newjson
+#cat  $skujson $newjson | iconv -c -f utf-8 -t ascii - |  json --merge | jj -p -o $skujson
+for f in $skujson $newjson ; do jq -f ~/bin/filter_empty.jq $f;done | iconv -c -f utf-8 -t ascii - |  json --merge | jj -p -o $skujson
+fixtitle $sku
+if [[ `basename $file` == eBay-paid-and-shipped-report* ]] ; then
+    Quantity="`jj -i $skujson Quantity`"
+    qty="`jj -i $skujson qty`"
+if [[ "$qty" == "1-1" ]] ; then
+qty="1"
+fi
+    qty=${qty:0}
+    qty=$(("$qty"-"$Quantity"))
+    jq --arg qty "$qty" '.qty = $qty' $skujson  > $tmpdir/$sku.json ;mv $tmpdir/$sku.json $skujson
+if [[ "$qty" < "1" ]] ; then
+#    locup sold $sku
+     statup sold $sku
+fi
+fi
+if [[ `basename $newjson` == *eBay-Active-Listings-Item-Specifics-* ]] ; then
+echo update skujson description
+key=Description
+value="`ebay_desc $sku` "
+json=$skujson
+echo $key = $value to $json
+jq --arg desc "$value" '.description = $desc' $skujson  > $tmpdir/$sku.json ;mv $tmpdir/$sku.json $skujson
+#update_key_keep_old_value
+
+echo add location field to skujson
+key=C:Location
+value="`tgw_location $sku`"
+json=$skujson
+echo $key = $value to $json
+jq --arg location "$value" '."C:Location" = $location' $skujson  > $tmpdir/$sku.json ;mv $tmpdir/$sku.json $skujson
+cp $skujson ~/Downloads/$sku.json.check
+#update_key_keep_old_value
+
+#echo convert skujson to csv
+#echo this?
+jsonToCsv $skujson $skujson.csv
+#echo that?
+#is this unnecessary, already csv format?
+
+echo add skujson.csv to ebay import file
+cat $skujson.csv
+echo "`cat $skujson.csv`,`tgw_location $sku`," >>  ~/Downloads/update_location_description_import.csv
+sleep 30
+#exit
+
+fi
+
+zip -mjq $itemarchivepath/$sku.zip $newjson
+fi
+done
+mv $file $tgwlogpath/csvmerge/`basename $file`.done
+}
+
+csvmerge-ebayid () {
+file="$1"
+logfile="$file.log"
+dirItemData=$itemdatapath
+tmpname=`date +%N`
+exec < "$file"
+count=1
+read header
+#clear
+echo Merging $file
+echo ""
+while IFS="," read -r  line
+do
+sku=""
+echo $header > $tmpdir/$tmpname.csv
+echo $line >> $tmpdir/$tmpname.csv
+csv-to-json $tmpdir/$tmpname.csv $tmpdir/$tmpname.json
+itemid=`cat $tmpdir/$tmpname.json|jq -r '.[].ItemID'`
+if [[ "$itemid" == "null"||"" ]] ; then
+    itemid=""
+    itemid=${itemid:-`cat $tmpdir/$tmpname.json|jq -r '.[]."eBay item ID"'`}
+fi
+echo $itemid
+sku=`getsku $itemid`
+echo $sku
+if [[ "$sku" == "null"||"" ]] ; then
+    sku="missing"
+fi
+json_backup $sku
+newjson="$itemdatapath/$sku/$sku-`basename $file`.json"
+skujson="$itemdatapath/$sku/$sku.json"
+if [[ ! -z "$sku" ]]; then
+echo $count. $sku : Merging $newjson
+mkdir -p $itemdatapath/$sku
+mv $tmpdir/$tmpname.json $newjson
+count=$((count+1))
+rm $tmpdir/$tmpname.csv
+json_fix_format $sku $newjson
+#cat  $skujson $newjson | iconv -c -f utf-8 -t ascii - |  json --merge | jj -p -o $skujson
+for f in $skujson $newjson ; do jq -f ~/bin/filter_empty.jq $f;done | iconv -c -f utf-8 -t ascii - |  json --merge | jj -p -o $skujson
+fixtitle $sku
+if [[ `basename $file` == eBay-paid-and-shipped-report* ]] ; then
+    Quantity="`jj -i $skujson Quantity`"
+    qty="`jj -i $skujson qty`"
+if [[ "$qty" == "1-1" ]] ; then
+qty="1"
+fi
+    qty=${qty:0}
+    qty=$(("$qty"-"$Quantity"))
+    jq --arg qty "$qty" '.qty = $qty' $skujson  > $tmpdir/$sku.json ;mv $tmpdir/$sku.json $skujson
+if [[ "$qty" < "1" ]] ; then
+#    locup sold $sku
+     statup sold $sku
+fi
+fi
+zip -mjq $itemarchivepath/$sku.zip $newjson
+fi
+done
+mv $file $tgwlogpath/csvmerge/`basename $file`.done
+}
+
+amtest (){
+if [[ -z ~/Downloads/eBay-all-active-listings-report*.csv ]] ; then
+echo run
+else
+echo "do not run"
+fi
+}
+
+automerge () {
+#This merges any files of the specified type that are in the users Downloads directory
+echo Clear eBay Item Numbers?
+if confirm; then
+    echo "User chose YES. Executing Item Number Delete..."
+clearItemnumber
+else
+    echo "User chose NO. Skipping Item Number Delete..."
+fi
+clear
+for csv in /home/db/Downloads/eBay-all-active-listings-report*.csv /home/db/Downloads/eBay-edit-price-quantity-template*.csv /home/db/Downloads/*tgwup*csv ; do
+if [[ -f $csv ]] ; then
+echo Merging $csv
+csvmerge $csv
+fi
+done
+for isdntekcsv in /home/db/Downloads/feo_*.csv /home/db/Downloads/fer_*.csv ; do
+if [[ -f $isdntekcsv ]] ; then
+echo $isdntekcsv
+csvmerge-ebayid $isdntekcsv
+fi
+done
+if [[ ! -z /home/db/Downloads/eBay-Active-Listings-Item-Specifics*.xlsx ]] ; then
+for xlsx in /home/db/Downloads/eBay-Active-Listings-Item-Specifics*.xlsx ; do
+xlsx2csv -n Listings $xlsx | sed  '/^#/d; /^#/d; /^#/d' > $xlsx.csv
+csvmerge $xlsx.csv
+rm $xlsx
+done
+fi
+#if [[ ! -z ~/Downloads/eBay-edit-price-quantity-template*.csv ]] ; then()
+#for csv in ~/Downloads/eBay-edit-price-quantity-template*.csv ; do
+#csvmerge $csv
+#done
+#fi
+if [[ ! -z ~/Downloads/eBay-paid-and-shipped-report*.csv ]] ; then
+for csv in ~/Downloads/eBay-paid-and-shipped-report*.csv ; do
+sed -i -e '1d;3d' -e '/^,*$/q' $csv
+sed -i '/^,*$/d' $csv
+csvmerge $csv
+done
+fi
+if [ $@ == -all ] ; then
+echo
+echo Updating Catalog and Uploading Files
+mktgwcats
+tgwgdrive
+#tmux -s sync 'tgwsync'
+fi
+}
+
+csv2skus () {
+file="$1"
+dirItemData=~tgw20150221122857307/TGW/ItemData
+tmpname=`date +%N`
+exec < "$file"
+count=1
+read header
+while IFS="," read -r  line
+do
+sku=""
+echo $header > $tmpdir/$tmpname.csv
+echo $line >> $tmpdir/$tmpname.csv
+csv-to-json $tmpdir/$tmpname.csv $tmpdir/$tmpname.json
+sku=`cat $tmpdir/$tmpname.json|jq -r '.[].sku'`
+#echo Gotsku $sku
+if [[ "$sku" == "null"||"" ]] ; then
+    sku=""
+    sku=${sku:-`cat $tmpdir/$tmpname.json|jq -r '.[].SKU'`}
+fi
+
+if [[ "$sku" == "null"||"" ]] ; then
+    sku=""
+    sku=${sku:-`cat $tmpdir/$tmpname.json|jq -r '.[]."Custom Label"'`}
+fi
+if [[ "$sku" == "null"||"" ]] ; then
+    sku=""
+    sku=${sku:-`cat $tmpdir/$tmpname.json|jq -r '.[]."Custom label"'`}
+fi
+if [[ "$sku" == "null"||"" ]] ; then
+    sku=""
+    sku=${sku:-`cat $tmpdir/$tmpname.json|jq -r '.[]."Custom Label (SKU)"'`}
+fi
+if [[ "$sku" == "null"||"" ]] ; then
+    sku=""
+    sku=${sku:-`cat $tmpdir/$tmpname.json|jq -r '.[]."Custom label (SKU)"'`}
+fi
+echo $count. $file sku=$sku
+mkdir -p $dirItemData/$sku
+mv $tmpdir/$tmpname.json $dirItemData/$sku/$sku-`basename $file`.json
+echo "        to $dirItemData/$sku/$sku-`basename $file`.json"
+echo ""
+count=$((count+1))
+rm $tmpdir/$tmpname.csv
+done
+mv $file $file.done
+}
+
+addphotos () {
+ydotool key 29:1 38:1 38:0 33:1 33:0 29:0
+ydotool type "Custom label (SKU)"
+ydotool key 1:1 1:0 15:1 15:0 15:1 15:0 29:1 30:1 30:0 29:0
+sleep 1
+tgwset `wl-paste --primary`
+wl-copy "`wl-paste -p`"
+sleep 1
+ydotool key 29:1 38:1 38:0 33:1 33:0 29:0
+#ydotool type "Complete your listing"
+#ydotool key 15:1 15:0 15:1 15:0 15:1 15:0 28:1 28:0 #29:1 33 29:0
+#sleep 0.5
+#ydotool key 15:1 15:0 15:1 15:0 15:1 15:0 28:1 28:0
+wl-copy --clear
+ydotool type "Upload from computer"
+ydotool key 1:1 1:0 1:1 1:0
+ydotool key 29:1 46:1 46:0 29:0
+uploadtest="`wl-paste --primary`"
+if [[ "$uploadtest" == "Upload from computer" ]]; then
+ydotool key 28:1 28:0
+sleep 1
+ydotool key 15:1 15:0 15:1 15:0 15:1 15:0 46:1 46:0 28:1 28:0 29:1 30:1 30:0 29:0 28:1 28:0
+sleep 2.5
+#ydotool key 29:1 15:1 15:0 29:0
+else
+ydotool key 102:1 102:0
+fi
+ydotool key 29:1 15:1 15:0 29:0
+}
+
+replacephotos () {
+sleep 1
+xdotool key Ctrl+l Ctrl+f
+xdotool type "Complete your listing"
+xdotool key Tab Tab Tab Return Ctrl+f
+xdotool type "Select"
+xdotool key Tab Tab Tab Return Return Ctrl+f
+xdotool type "Delete all"
+xdotool key Tab Tab Tab Return Return
+addphotos
+}
+
+addphotos-next () {
+addphotos
+sleep 0.5
+ydotool key 29:1 15:1 15:0 29:0
+xdotool keydown Ctrl key Tab keyup Ctrl
+}
+
+resumedraft () {
+xdotool key Ctrl+f
+xdotool type "Resume Draft"
+xdotool key Return Return Escape
+#xdotool key Ctrl+Return
+}
+
+
+#mkjob section
+
+# Make Ebay Drafts Import CSV
+mkjob_settings () {
+#echo mkjob_settings
+template_path=$tgw_config/Templates
+csvnumber=$(date +%s)
+linenumber=1
+ebaydraftcsv=$new_items/$csvnumber-ebay_draft_import.csv
+if [ -f "$ebaydraftcsv" ] ; then
+mv $ebaydraftcsv $ebaydraftcsv.bak
+fi
+cp $tgw_config/eBay-draft-listing-import.csv $ebaydraftcsv
+printf "\n" >> $ebaydraftcsv
+#cat $ebaydraftcsv
+}
+
+
+data2json-old () {
+echo "Building $1.json"
+result=""
+#Data files to Json
+paste -sd'\n' $itemdatapath/$1/*.data >$itemdatapath/$1/$1.json.tmp
+#remove leading space in title
+sed -i 's/= /=/' $itemdatapath/$1/$1.json.tmp
+#change TGW format to json
+sed -i 's/TEMPLATE:/TEMPLATE=/' $itemdatapath/$1/$1.json.tmp
+sed -i 's/DATA://' $itemdatapath/$1/$1.json.tmp
+#convert source line format to json
+sed -i -e 's/^/"/' $itemdatapath/$1/$1.json.tmp
+sed -i 's/=/":"/g' $itemdatapath/$1/$1.json.tmp
+sed -e 's/$/",/' -i $itemdatapath/$1/$1.json.tmp
+#Images to Json
+imagenumber=""
+#Images to Json
+find $itemdatapath/$1 -iregex '.*\.\(jpg\|gif\|png\|jpeg\|tiff\)$'  |
+while IFS= read -r  image; do
+imagenumber=$((imagenumber+1))
+printf  "\"image_$imagenumber\": \"$(basename $image )\",\n" >> $itemdatapath/$1/$1.json.tmp
+done
+videonumber=""
+#Videos to Json
+find $itemdatapath/$1 -iregex '.*\.\(mp4\|\wmv\|avi\|webm\)$'  |
+while IFS= read -r  image; do
+imagenumber=$((imagenumber+1))
+printf  "\"image_$imagenumber\": \"$(basename $image )\"\n" >> $itemdatapath/$1/$1.json.tmp
+done
+#remove trailing comma
+sed -i '$ s/.$//' $itemdatapath/$1/$1.json.tmp
+#add beginning and end marks to complete json document
+#sed -i '1s/^/{\n/' $itemdatapath/$1/$1.json.tmp
+#sed -i '1s/^/\"'$itemdatapath/$1'\":[\n /' $itemdatapath/$1/$1.json.tmp
+sed -i '1s/^/{\n/' $itemdatapath/$1/$1.json.tmp
+sed -i -e '$a}' $itemdatapath/$1/$1.json.tmp
+#sed -i -e '$a]' $itemdatapath/$1/$1.json.tmp
+#sed -i -e '$a}' $itemdatapath/$1/$1.json.tmp
+if [[ -f $itemdatapath/$1/$1.json ]] ; then
+    mv $itemdatapath/$1/$1.json $itemdatapath/$1/$1.json.$(date +%s)
+fi
+mv $itemdatapath/$1/$1.json.tmp $itemdatapath/$1/$1.json
+#echo "$1 Json Processing Completed"
+#cat $1/$1.json
+}
+
+
+data2json () {
+#echo data2json
+#echo "Building $sku.json"
+result=""
+#Data files to Json
+paste -sd'\n' $new_items/$sku/*.data >$new_items/$sku/$sku.json.tmp
+#remove leading space in title
+sed -i 's/= /=/' $new_items/$sku/$sku.json.tmp
+#change TGW format to json
+sed -i 's/TEMPLATE:/TEMPLATE=/' $new_items/$sku/$sku.json.tmp
+sed -i 's/DATA://' $new_items/$sku/$sku.json.tmp
+#convert source line format to json
+sed -i -e 's/^/"/' $new_items/$sku/$sku.json.tmp
+sed -i 's/=/":"/g' $new_items/$sku/$sku.json.tmp
+sed -e 's/$/",/' -i $new_items/$sku/$sku.json.tmp
+#Images to Json
+imagenumber=""
+#Images to Json
+find $new_items/$sku -iregex '.*\.\(jpg\|gif\|png\|jpeg\|tiff\)$'  |
+while IFS= read -r  image; do
+imagenumber=$((imagenumber+1))
+printf  "\"image_$imagenumber\": \"$(basename $image )\",\n" >> $new_items/$sku/$sku.json.tmp
+done
+videonumber=""
+#Videos to Json
+find $new_items/$sku -iregex '.*\.\(mp4\|\wmv\|avi\|webm\)$'  |
+while IFS= read -r  image; do
+imagenumber=$((imagenumber+1))
+printf  "\"image_$imagenumber\": \"$(basename $image )\"\n" >> $sku/$sku.json.tmp
+done
+#remove trailing comma
+sed -i '$ s/.$//' $new_items/$sku/$sku.json.tmp
+#add beginning and end marks to complete json document
+#sed -i '1s/^/{\n/' $new_items/$sku/$sku.json.tmp
+#sed -i '1s/^/\"'$sku'\":[\n /' $new_items/$sku/$sku.json.tmp
+sed -i '1s/^/{\n/' $new_items/$sku/$sku.json.tmp
+sed -i -e '$a}' $new_items/$sku/$sku.json.tmp
+#sed -i -e '$a]' $new_items/$sku/$sku.json.tmp
+#sed -i -e '$a}' $new_items/$sku/$sku.json.tmp
+if [[ -f $new_items/$sku/$sku.json ]] ; then
+    mv $new_items/$sku/$sku.json $new_items/$sku/$sku.json.$(date +%s)
+fi
+mv $new_items/$sku/$sku.json.tmp $new_items/$sku/$sku.json
+}
+
+archivenewitems () {
+#echo archivedata
+echo Archiving Data for $new_items/$sku
+zip -qqumj $itemarchivepath/$sku.zip $new_items/$sku/*.json.* $new_items/$sku/*.json $new_items/$sku/*.data $new_items/$sku/.bak $new_items/$sku/*data.txt $new_items/$sku/desktop.ini $new_items/$sku/.picasa.ini $new_items/$sku/.st*
+unzip -qq $itemarchivepath/$sku.zip $sku.json -d $new_items/$sku
+#unzip -qq $new_items/$sku/$sku.zip $sku-data_combined.json -d $new_items/$sku
+}
+
+mv2itemdata () {
+#echo mv2itemdata
+mkdir $ebay_import_jobs/$csvnumber-import_job
+mv $ebaydraftcsv $ebay_import_jobs/$csvnumber-import_job
+for item in  $mkjobpath/tgw*  ; do
+    name=$(basename $item)
+    if [[ ! -d $itemdatapath/$name ]] ; then
+        echo moving $item to $itemdatapath
+        mv $item $itemdatapath/
+        verified="`date +%Y%m%d`"
+        tmp="`jq --arg verified "$verified" -r '."#VERIFIED" = $verified' $itemdatapath/$name/$name.json`"
+        qty="`echo $tmp|jq -r ".qty // 1"`"
+        tmp="`echo $tmp|jq --arg qty "$qty" -r '.qty = $qty'`"
+#        echo $tmp > $itemdatapath/$name/$name.json
+        cat $itemdatapath/$name/$name.json
+    else
+        rm $item
+    fi
+    ln -s $itemdatapath/$name $ebay_import_jobs/$csvnumber-import_job/$name
+done
+}
+
+mkebaydraft () {
+#echo mkebaydraft
+echo Begin processing $sku
+echo Creating $ebaydraftcsv
+json=$sku/$sku.json
+template=$tgw_config/template.json #`cat $sku/$sku.json|jq -r ".$sku[].TEMPLATE"`.json
+echo json file is $json
+echo template file is $template
+#add_gpt_desc $sku
+printf Draft, >> $ebaydraftcsv
+printf `cat $json|jq -r ".sku // empty"`, >> $ebaydraftcsv
+group=`cat $json|jq -r .TEMPLATE`
+echo group $group
+if [[ "$group" == null ]] ; then group=default;fi
+tgwcat=`cat $json|jq -r .TEMPLATE`
+if [[ $tgwcat == null ]] ; then tgwcat=default;fi
+echo tgwcat is $tgwcat
+ebcat=`cat $template|jq -r ".$group[].ebay_category // 156532"`
+echo ebcat $ebcat
+ebstorecat="`cat $template|jq -r .$group[].ebay_store_category`"
+ebship="`cat $template|jq -r .$group[].ebay_shipping_policy`"
+cond=`cat $template|jq -r .$group[].condition`
+description_blurb="`cat $template|jq -r .$group[].description_blurb`"
+name="`cat $json|jq -r .title`"
+price=`cat $template|jq -r .$group[].price`
+qty=`cat $template|jq -r .$group[].qty`
+isbn=`cat $json|jq -r ".isbn // empty"`
+upc=`cat $json|jq -r ".upc // empty"`
+tested=`cat $template|jq -r ".$group[].tested // empty"`
+bundle=`cat $template|jq -r ".$group[].custom_bundle // empty"`
+modified=`cat $template|jq -r ".$group[].modified_item // empty"`
+language=`cat $template|jq -r ".$group[].language // empty"`
+manufacture=`cat $template|jq -r ".$group[].country_of_manufacture // empty"`
+printf `cat $json|jq -r ".ebay_category // $ebcat"`, >> $ebaydraftcsv
+echo title: `tgw_title`
+printf "`tgw_title`", >> $ebaydraftcsv
+#printf "`cat $json|jq -r ".title"`", >> $ebaydraftcsv
+printf "`cat $json|jq -r ".isbn // empty"`", >> $ebaydraftcsv
+printf "`cat $json|jq -r ".upc // empty"`", >> $ebaydraftcsv
+printf `cat $json|jq -r ".price // $price"`, >> $ebaydraftcsv
+printf `cat $json|jq -r ".qty // 1"`, >> $ebaydraftcsv
+printf , >> $ebaydraftcsv
+key="`cat $json|jq -r .condition`"
+default="`cat $template|jq -r .$group[].condition`"
+printf "`jq --arg d "$default" -r '.condition // $d' $json`", >> $ebaydraftcsv
+printf "`ebay_description`", >> $ebaydraftcsv
+printf FixedPrice, >> $ebaydraftcsv
+printf `cat $json|jq -r ".warehouse_location // 95453"`, >> $ebaydraftcsv
+printf "$ebship", >> $ebaydraftcsv
+printf `cat $json|jq -r ".ebay_best_offer // empty"`, >> $ebaydraftcsv
+printf "`cat $json|jq -r ".condition_description // empty"`", >> $ebaydraftcsv
+printf "$ebstorecat", >> $ebaydraftcsv
+printf "$tested", >> $ebaydraftcsv
+printf `cat $json|jq -r ".location // empty"`, >> $ebaydraftcsv
+printf "$modified", >> $ebaydraftcsv
+printf "$bundle", >> $ebaydraftcsv
+printf "$language", >> $ebaydraftcsv
+printf "$manufacture", >> $ebaydraftcsv
+linenumber=$((linenumber+1))
+printf $linenumber >> $ebaydraftcsv
+printf "\n" >> $ebaydraftcsv
+echo Processing completed for $sku
+echo ""
+#cat $ebaydraftcsv
+}
+
+mkebayrevise () {
+echo Begin processing $sku
+#echo Adding data to $ebayrevisecsv
+json=$sku/$sku.json
+template=$tgw_config/template.json #`cat $sku/$sku.json|jq -r ".$sku[].TEMPLATE"`.json
+#echo json file is $json
+printf Revise, >> $ebayrevisecsv
+printf `ebay_id $sku`, >> $ebayrevisecsv
+#printf `cat $json|jq -r ".sku // empty"`, >> $ebayrevisecsv
+#group=`cat $json|jq -r .TEMPLATE`
+#if [[ "$group" == null ]] ; then group=default;fi
+#tgwcat=`cat $json|jq -r .TEMPLATE`
+#if [[ $tgwcat == null ]] ; then tgwcat=default;fi
+#ebcat=`cat $template|jq -r ".$group[].ebay_category // 156532"`
+#ebstorecat="`cat $template|jq -r .$group[].ebay_store_category`"
+#ebship="`cat $template|jq -r .$group[].ebay_shipping_policy`"
+#cond=`cat $template|jq -r .$group[].condition`
+#description_blurb="`cat $template|jq -r .$group[].description_blurb`"
+#name="`cat $json|jq -r .title`"
+#price=`cat $template|jq -r .$group[].Price`
+#qty=`cat $template|jq -r .$group[].Qty`
+#isbn=`cat $json|jq -r ".isbn // empty"`
+#upc=`cat $json|jq -r ".upc // empty"`
+#tested=`cat $template|jq -r ".$group[].tested // empty"`
+#bundle=`cat $template|jq -r ".$group[].custom_bundle // empty"`
+#modified=`cat $template|jq -r ".$group[].modified_item // empty"`
+#language=`cat $template|jq -r ".$group[].language // empty"`
+#manufacture=`cat $template|jq -r ".$group[].country_of_manufacture // empty"`
+#printf `cat $json|jq '."eBay category 1 number" | if . == null or . == "" then "$ebcat" else . end'`, >> $ebayrevisecsv
+echo " `tgw_title $sku`"
+printf "`gpt_title $sku|sed 's/,//g; s/#//g; s/&//g'`", >> $ebayrevisecsv
+#printf "`tgw_isbn | sed 's/null//g'`", >> $ebayrevisecsv
+#printf "`tgw_upc | sed 's/null//g'`", >> $ebayrevisecsv
+#printf "`tgw_price`", >> $ebayrevisecsv
+#printf "`ebay_qty`", >> $ebayrevisecsv
+#printf "`cat $json|jq -r ".Condition // .condition // empty"`", >> $ebayrevisecsv
+printf "`ebay_description |sed 's/,//g; s/#//g; s/&//g'`", >> $ebayrevisecsv
+#printf \"`ebay_gpt_desc`\", >> $ebayrevisecsv
+#printf `cat $json|jq '.Format | if . == null or . == "" then "FIXED_PRICE" else . end'`, >> $ebayrevisecsv
+#printf `cat $json|jq '.Location | if . == null or . == "" then "95453" else . end'`, >> $ebayrevisecsv
+#printf `cat $json|jq -r ".ShippingProfileName // empty"`, >> $ebayrevisecsv
+#printf `cat $json|jq '.BestOfferEnabled | if . == null or . == "" then "Y" else . end'`, >> $ebayrevisecsv
+#printf \""`cat $json|jq -r '.condition_description // empty'`"\", >> $ebayrevisecsv
+#printf `cat $json|jq '."Category ID" | if . == null or . == "" then "" else . end'`, >> $ebayrevisecsv
+#printf `cat $json|jq -r ".location // empty"`, >> $ebayrevisecsv
+printf "\n" >> $ebayrevisecsv
+echo Processing completed for $sku
+echo ""
+}
+
+
+mkdraftfile () {
+echo mkdraftfile sku name: check $sku
+ebaydraftcsv=$csvnumber-ebay_draft_import.csv
+cd $ebay_import_jobs/$csvnumber-import_job
+for directory in $(ls -d */) ; do
+sku="$(basename $directory /)"
+tgwset $sku
+mkebaydraft
+done
+}
+
+mkjob () {
+#echo mkjob
+if [[ -z $(ls -A $newitems) ]] ; then
+ls -A $newitems
+echo No items to process
+else
+mkjob_settings
+for directory in $(ls -d $new_items/*/) ; do
+sku="$(basename $directory /)"
+echo sku name check: $sku
+if [[ ! -f $new_items/$sku/$sku.json ]]; then
+#data2json
+#archivenewitems
+itemdatabackup $sku
+#add_gpt_desc $sku
+fi
+done
+mv2itemdata
+mkdraftfile
+echo
+echo Job $csvnumber finished
+if [[ "$@" == "-all" ]] ; then
+echo
+echo Updating Catalog and Uploading Files
+mktgwcats
+tgwgdrive
+fi
+fi
+}
+
+alias mkitem=ic_mkitem
+ic_mkitem () {
+#sleep 1;xdotool key Ctrl+l Tab Tab Tab Return F5 ; sleep 7 ; echo " " | xsel -i -b;echo "COMMAND:Item Creation - Save Item" | xsel -i -b
+sleep 1; echo " " | wl-copy ;echo "COMMAND:Item Creation - Save Item" | wl-copy
+}
+
+ic_test () {
+    xdotool type "test"
+}
+
+ic_data () {
+echo " " | xsel -i -b ; echo "DATA:$1=$2" | xsel -i -b
+echo " " | wl-copy ; echo "DATA:$1=$2" | wl-copy
+}
+
+ic_template () {
+ echo "TEMPLATE:$1" | wl-copy
+#if [[ -n $XDG_SESSION_TYPE==x11 ]] ; then
+# echo " " | xsel -i -b ; echo "TEMPLATE:$1" | xsel -i -b
+#else
+# echo "TEMPLATE:$1" | wl-copy
+#i
+}
+
+ic_command () {
+echo " " | xsel -i -b ; echo "COMMAND:$1" | xsel -i -b
+echo " " | wl-copy ; echo "COMMAND:$1" | wl-copy
+}
+
+title2isbn () {
+xdotool key Ctrl-l Tab Tab Tab Tab Ctrl+f i t e m Space t i t l e Return Escape Tab Ctrl+x Ctrl+f i s b n Return Escape
+sleep 1
+xdotool key Tab Ctrl+v Return Ctrl+Tab
+}
+
+#These commands make all locations and skus into aliases that open the correct folder
+#cd $catalogpath ; for location in * ; do alias $location="dolphin $catalogpath/$location &" ; done
+#cd $itemdatapath ; for item in tgw* ; do alias $item="tgw_info_popup $item &" ; done
+
+# tgw bash/zsh tab completion
+_TGW_COMPLETION=/opt/TGW/src/trader-grims-warehouse/etc/completion/tgw-completion.bash
+if [[ -f "$_TGW_COMPLETION" ]]; then
+    source "$_TGW_COMPLETION"
+fi
+unset _TGW_COMPLETION

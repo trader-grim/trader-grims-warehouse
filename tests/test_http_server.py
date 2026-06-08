@@ -576,3 +576,64 @@ def test_category_groups_503_when_missing(env, monkeypatch):
 def test_category_groups_requires_auth(client):
     r = client.get("/api/category-groups", headers={"Authorization": "Bearer nope"})
     assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# PP-BULKEDIT-001 — /form/bulk + /api/bulk/preview + /api/bulk/apply
+# ---------------------------------------------------------------------------
+
+def test_bulk_form_html(client):
+    r = client.get("/form/bulk")
+    assert r.status_code == 200
+    assert "Bulk Edit" in r.text
+    assert "/api/bulk/preview" in r.text
+
+
+def test_bulk_preview_requires_auth(client):
+    r = client.post("/api/bulk/preview",
+                    json={"field": "title", "value": "X", "location": "A1"})
+    assert r.status_code in (401, 403)
+
+
+def test_bulk_preview_by_search(client):
+    # The shared fixture has a real (empty) location tree, so filter by search
+    # (JSON scan) which matches only SKU_A's "Red Widget".
+    r = client.post("/api/bulk/preview", headers=AUTH_HEADERS,
+                    json={"field": "title", "value": "Renamed", "search": "Red"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["applied"] is False
+    assert body["count"] == 1
+    assert body["preview"][0]["sku"] == SKU_A
+    assert body["preview"][0]["proposed"] == "Renamed"
+
+
+def test_bulk_preview_no_selector_400(client):
+    r = client.post("/api/bulk/preview", headers=AUTH_HEADERS,
+                    json={"field": "title", "value": "X"})
+    assert r.status_code == 400
+
+
+def test_bulk_apply_writes_and_enqueues(env, enqueue_calls):
+    client = env["client"]
+    r = client.post("/api/bulk/apply", headers=AUTH_HEADERS,
+                    json={"field": "title", "value": "Bulk Renamed", "skus": [SKU_A]})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["applied"] is True
+    assert body["count"] == 1
+    # written to disk
+    doc = json.loads((env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text())
+    assert doc["title"] == "Bulk Renamed"
+    # coalesced catalog_rebuild enqueued
+    assert any(c["kwargs"].get("queue_name") == "catalog_rebuild" for c in enqueue_calls)
+
+
+def test_bulk_apply_invalid_field(client):
+    r = client.post("/api/bulk/apply", headers=AUTH_HEADERS,
+                    json={"field": "price", "value": "9.99", "skus": [SKU_A]})
+    # bulk_edit returns ok:False for a non-editable field (200 envelope)
+    assert r.status_code == 200
+    assert r.json()["ok"] is False

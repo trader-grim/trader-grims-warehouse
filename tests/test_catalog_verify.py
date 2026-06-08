@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 
-from tgw.api import _verify_item, cmd_catalog_verify
+from tgw.api import _compute_fixes, _strip_template_prefix, _verify_item, cmd_catalog_verify
 from tgw.queue.worker_base import classify_dead_letter
 
 # ---------------------------------------------------------------------------
@@ -359,3 +359,115 @@ def test_write_field_preserves_catalog_verified_when_writing_it(tmp_path):
     _write_field(cfg, sku, 'catalog_verified', hall_pass)
     doc = json.loads(jf.read_text())
     assert doc['catalog_verified'] == hall_pass
+
+
+# ---------------------------------------------------------------------------
+# PP-VERIFY-001 Phase 3: --fix auto-strip stale TEMPLATE: prefix
+# ---------------------------------------------------------------------------
+
+def test_strip_template_prefix_basic():
+    assert _strip_template_prefix('TEMPLATE: Real Title Here') == 'Real Title Here'
+    assert _strip_template_prefix('TEMPLATE:Real Title') == 'Real Title'
+
+
+def test_strip_template_prefix_case_insensitive():
+    assert _strip_template_prefix('template: foo bar') == 'foo bar'
+    assert _strip_template_prefix('  TeMpLaTe:  spaced  ') == 'spaced'
+
+
+def test_strip_template_prefix_no_prefix_returns_none():
+    assert _strip_template_prefix('Just A Normal Title') is None
+
+
+def test_strip_template_prefix_empty_result_returns_none():
+    # Stripping leaves nothing — must not write an empty title.
+    assert _strip_template_prefix('TEMPLATE:') is None
+    assert _strip_template_prefix('TEMPLATE:   ') is None
+
+
+def test_compute_fixes_finds_template_title():
+    fixes = _compute_fixes({'title': 'TEMPLATE:electronics widget'})
+    assert len(fixes) == 1
+    assert fixes[0]['rule'] == 'stale_template_prefix'
+    assert fixes[0]['field'] == 'title'
+    assert fixes[0]['after'] == 'electronics widget'
+
+
+def test_compute_fixes_clean_item_no_fixes():
+    assert _compute_fixes({'title': 'A Perfectly Fine Title'}) == []
+
+
+def _fixture_template_item(tmp_path):
+    itemdata = tmp_path / 'ItemData'
+    itemdata.mkdir()
+    sku = 'tgw202601010000040'
+    d = itemdata / sku
+    d.mkdir()
+    jf = d / f'{sku}.json'
+    jf.write_text(json.dumps({
+        'sku': sku,
+        'title': 'TEMPLATE:electronics Cool Gadget 2000',
+        'location': 'SHELF01',
+        'ebay_category_id': '12345',
+    }), encoding='utf-8')
+    (d / 'photo.jpg').write_bytes(b'')
+    return {'itemdata_root': itemdata, 'pretty': True}, jf, sku
+
+
+def test_fix_dry_run_does_not_write(tmp_path, capsys):
+    cfg, jf, sku = _fixture_template_item(tmp_path)
+    result = cmd_catalog_verify(cfg, min_severity='critical', fix=True)  # no write
+    capsys.readouterr()
+    assert result['fixes_proposed'] == 1
+    assert result['fixes_applied'] == 0
+    assert result['fixes'][0]['applied'] is False
+    # File unchanged on disk
+    assert json.loads(jf.read_text())['title'].startswith('TEMPLATE:')
+
+
+def test_fix_write_applies(tmp_path, capsys):
+    cfg, jf, sku = _fixture_template_item(tmp_path)
+    result = cmd_catalog_verify(cfg, min_severity='critical', fix=True, write=True)
+    capsys.readouterr()
+    assert result['fixes_applied'] == 1
+    assert result['fixes'][0]['applied'] is True
+    written = json.loads(jf.read_text())
+    assert written['title'] == 'electronics Cool Gadget 2000'
+    assert not written['title'].upper().startswith('TEMPLATE:')
+
+
+def test_fix_report_mentions_fixes(tmp_path, capsys):
+    cfg, jf, sku = _fixture_template_item(tmp_path)
+    cmd_catalog_verify(cfg, min_severity='critical', fix=True)
+    out = capsys.readouterr().out
+    assert 'FIXES' in out
+    assert 'dry-run' in out
+    assert sku in out
+
+
+def test_fix_write_refreshes_violations_no_double_report(tmp_path, capsys):
+    """After --fix --write, the fixed violation must NOT also appear as open."""
+    cfg, jf, sku = _fixture_template_item(tmp_path)
+    result = cmd_catalog_verify(cfg, min_severity='critical', fix=True, write=True)
+    out = capsys.readouterr().out
+    # violation list + by_rule reflect post-fix state (no stale stale_template_prefix)
+    assert 'stale_template_prefix' not in result['by_rule']
+    assert result['violations'] == 0
+    assert result['fixes_applied'] == 1
+    # report shows the fix, but NOT an open '- [ ] stale_template_prefix' for it
+    assert 'FIXES' in out
+    assert '- [ ] **stale_template_prefix**' not in out
+
+
+def test_fix_write_mark_verified_combo_marks_fixed_item(tmp_path, capsys):
+    """--fix --write --mark-verified: an item whose ONLY problem was auto-fixed
+    must get the hall pass (item_viols refreshed before the mark gate)."""
+    cfg, jf, sku = _fixture_template_item(tmp_path)
+    result = cmd_catalog_verify(cfg, min_severity='critical',
+                                fix=True, write=True, mark_verified=True)
+    capsys.readouterr()
+    assert result['fixes_applied'] == 1
+    assert result['marked_verified'] == 1
+    doc = json.loads(jf.read_text())
+    assert not doc['title'].upper().startswith('TEMPLATE:')
+    assert doc.get('catalog_verified', {}).get('by') == 'catalog-verify'
