@@ -292,24 +292,14 @@ maintained_by: Opus (planner)
 
 ### Active / next build priorities
 
-| Priority | PP | Status | Notes |
-|----------|----|--------|-------|
-| ✅ | **PP-GLOBALS-001** analysis | **done** | No globals block needed; add `weight_oz` field in PP-INTAKE-001 Phase 2 |
-| ✅ | **PP-HINT-001** Browse enrichment | **done** | `ASPECT_REFINEMENTS` in `ebay_draft`; `browse_hint_count` in draft |
-| ✅ | **PP-HINT-001** hint trail | **done** | `identification_history` in item JSON; `tgw hint-trail <sku>` |
-| ✅ | **PP-INTAKE-001 Phase 2** | **done** | Intake form at `/form/intake/<sku>`; chips, weight_oz, barcode, condition, ai_hint |
-| ✅ | **PP-DEADLETTER-001** | **done** | `classify_dead_letter()` + `requeue_with_backoff()`; transient errors auto-reschedule |
-| ✅ | **PP-VERIFY-001 Phase 1** | **done** | `tgw catalog-verify`; 9 rules; markdown checklist; 10 tests |
-| ✅ | **PP-MCP-001** | **code done** | `tgw_mcp_server.py`; 9 tools; needs operator MCP registration in settings.json |
-| ✅ | **PP-VERIFY-001 Phase 2** | **done** | `catalog_verified` hall pass; `--mark-verified`, `--force`, `--skip-verified`; clear-on-write in `_write_field` + HTTP PATCH |
-| ✅ | **PP-DEADLETTER-001 health** | **done** | Per-queue dead_letter breakdown in `tgw health` + `dead_letter_by_queue` in MCP tool; `notify()` on transient requeue |
-| ✅ | **tgw todo CRUD** | **done** | `--update`, `--delegate`, `--set-priority`; 9 new tests |
-| ✅ | **tgw dead-letter** | **done** | List/requeue/cancel dead_letter jobs; classify verdict; MCP tool `tgw_dead_letter` |
-| ✅ | **notify on HardFailure** | **done** | `notify(level='error')` fires on hard failure, symmetric with transient requeue |
-| ✅ | **offline_draft_stall rule** | **done** | catalog-verify warns when `offline_draft=true` + file > 2h old |
-| 4 | **PP-SOLD-001 Tier 3** sweep | operator gated | Run `tgw ebay-sweep` after full-history CSV import |
-| 5 | **PP-PYIPC-001** | research | Syncthing + KDE Connect Python library integration; research via PERPLEXITY-005 |
-| — | **PP-REPRICER-001** | blocked | Blocked on `buy.marketplace_insights` scope approval |
+**See `tgw todo claude` for the live task queue.** The todo tracker is the canonical list — plan tables go stale. Design specs for each item are in the relevant PP-* section below.
+
+Operator-gated items still tracked here:
+| PP | Status | Notes |
+|----|--------|-------|
+| **PP-SOLD-001 Tier 3** sweep | operator gated | Run `tgw ebay-sweep` after full-history CSV import |
+| **PP-PYIPC-001** | research gated | Awaiting PERPLEXITY-005 result |
+| **PP-REPRICER-001** live | blocked | Blocked on `buy.marketplace_insights` scope |
 
 ### Running in background
 - `ebay_sku_migrate` — ~8,350 live listings remaining; ~5/hr; ~70 days to complete
@@ -467,28 +457,17 @@ Next available: Tier E (ranks 19–25) — bulk-mutation / larger / lower value-
 | 24 | PP-MC-002 | Satellite-capable extfs refactor: env-driven DSN/paths (`TGW_NODE_ROLE`/`TGW_HTTP_BASE`) + a `role=satellite` branch routing writes to tgw-http instead of psycopg2. Default `role=master` (preserve current behavior), gate behind env vars, test the data-source helper. Real LTSP/hardware rollout stays operator-gated. | M |
 | 25 | PP-NIXOS-001 | Author `flake.nix` + `nix/tgw.nix` from existing `pyproject.toml`/`install.sh`/systemd units. ⬆ **NixOS now COMMITTED TARGET** (session 16) — active migration prep, not just evaluation. PP-DEPLOY-001 MX image = final safety-net image before cutover. Cannot build/test here (no nix toolchain) — produce files, Dave validates in VM. | M |
 
-### Track 1 — Round 3 (session 16, priority-ordered)
+### Track 1 — Round 3 (session 16)
 
-**Guiding principle (session 16):** Build time-saving interfaces usable **now**, especially on tablet. Maintain stability. Build better later. NixOS is the committed destination — prepare the path, don't block on it.
+**Guiding principle:** Build time-saving interfaces usable now, especially on tablet. Maintain stability. Build better later. NixOS is the committed destination — prepare the path, don't block on it.
 
-**Decision confirmed (session 16):**
+**Decisions confirmed (session 16):**
 - NixOS = committed target. PP-NIXOS-001 promoted from evaluation to active prep.
-- PP-DEPLOY-001 MX image = make one final restore image as a safety net before migrating.
-- PP-BULKEDIT-001 = #1 priority. Must be tablet-usable (web UI via browser; Termux SSH fallback).
-- ISS-009 eBay token downgraded — production keyset active; `tgw restart-ebay-token` if needed.
+- PP-DEPLOY-001 MX image = one final restore image as safety net before migrating.
+- PP-BULKEDIT-001 = #1 priority. Tablet-usable: web UI via browser + Termux SSH fallback.
+- ISS-009 downgraded — production keyset active; `tgw restart-ebay-token` if token dead-lettered.
 
-| # | PP | Task | Size |
-|---|----|------|------|
-| 1 | tgw restart-workers | `tgw restart-workers`: thin CLI wrapper for `sudo systemctl restart 'tgw-worker@*'`; add to `tgw.source` and CLI. XS. | XS |
-| 2 | **PP-BULKEDIT-001 Phase 1** | Web UI at `tgw-http`: `GET /bulk` renders filter form (location/status/search/SKU list) → preview table → `POST /bulk/apply` (field + value). Mobile/tablet-first HTML (no JS framework). Also `tgw bulk set <field> <value> [--from loc] [--search q] [--status s] [--limit N] [--confirm]` CLI for Termux. Start with: title, location, status, ai_hint, shipping_profile as editable fields. | M |
-| 3 | **R19 PP-VERIFY-001 Phase 3** | `tgw catalog-verify --fix`: auto-correct safe mechanical rules only (stale `TEMPLATE:` title-prefix strip first); dry-run default; per-SKU fix log; coalesce rebuild. | S |
-| 4 | **R21 PP-REPRICER-001** | Read-only market_data provider interface: `OwnSalesProvider` (velocity-stats.json) + `BrowseCompsProvider` (item comps) + `MarketplaceInsightsProvider` stub + `tgw reprice-suggest [SKU|--all]` dry-run. No eBay write. | M |
-| 5 | **R20 PP-MC-001 Phase 4** | `tgwlogs` extfs VFS: read-only `journalctl`-per-worker; guard unit-name injection; cap output. | S |
-| 6 | **R22 PP-SHELL-001 T3** | Version-control `tgw.source`/`tgw-dev.source` into `etc/interfaces/shell/`; replace remaining ARCH-VIOLATES fns with `tgw` one-liners. | M |
-| 7 | **PP-NIXOS-001** | `flake.nix` + `nix/tgw.nix` from `pyproject.toml`/`install.sh`/systemd units. Dave validates in VM. | M |
-| 8 | **PP-DEPLOY-001 MX image** | Produce operator runbook for final MX restore image (using MX Snapshot); checklist of what must be captured. Operator executes. | S |
-| — | R23 PP-VISION-001 | Deferred — lower value-per-effort vs. the above | M |
-| — | R24 PP-MC-002 | Deferred — satellite extfs, research-gated | M |
+**Active task list:** `tgw todo claude` (IDs 21–28). The todo tracker is the canonical queue — see it for current status. Design specs for each item are in the relevant PP-* section of this plan.
 
 #### Blocked — not Claude-ready (grouped by blocker)
 - **Operator / host-level ops** — `PP-REMOTE-001` (Tailscale + tmux + SSH hardening + sudoers + claude-user decision); `PP-DEPLOY-001` full epic (usermod UID<1000, recursive chown, image bake, fresh-restore reboot — only the read-only audit check #16 is ready). *Unblock:* operator does the host work, then Claude can add reviewable config (tmux launcher, OSC52 helper).
