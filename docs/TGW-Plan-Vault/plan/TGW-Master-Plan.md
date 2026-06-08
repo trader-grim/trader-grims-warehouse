@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-07 (session 15 — Track 1 round-2 planning)
+updated: 2026-06-08 (session 16 — Round 3 planning, NixOS committed, PP-BULKEDIT-001 priority 1)
 maintained_by: Opus (planner)
 ---
 
@@ -87,6 +87,20 @@ maintained_by: Opus (planner)
 - **`notify()` on HardFailure DONE** — `worker_base.py` HardFailure path now fires `notify(..., level='error')` symmetrically with the transient requeue path.
 - **`offline_draft_stall` catalog-verify rule DONE** — New warning rule in `_verify_item()`: `offline_draft: true` + file mtime > 2h triggers `offline_draft_stall`. 2 new tests.
 - **77 tests pass** (up from 72).
+
+### Planning — 2026-06-08 (session 16, Round 3 + key decisions)
+- **Inbox cleared**: PP-NIXOS-001 Perplexity analysis (MX vs NixOS for PostgreSQL + Python DR)
+  processed. Findings: NixOS architecturally superior; `poetry2nix` for Python; WAL recovery
+  ExecStartPost gotcha documented. Alternatives noted: Guix System, Silverblue.
+- **NixOS COMMITTED** — Dave confirmed NixOS is the target. PP-NIXOS-001 promoted from
+  evaluation to active migration prep. PP-DEPLOY-001 MX image = final safety-net snapshot
+  before cutover. No timeline pressure — migrate when ready.
+- **ISS-009 downgraded** — production keyset active; token not fully blocking live eBay.
+- **SUGGESTIONS.md corruption artifact removed** — session 15 API interruption had left raw
+  response text (lines 112–296) mixed into the file; cleaned up session 16.
+- **Round 3 locked** — 8 ranked items. PP-BULKEDIT-001 (tablet web UI + CLI) is #1 by Dave's
+  direction. Guiding principle: time-saving interfaces usable now, better later.
+  See `## Work Tracks → Track 1 — Round 3`.
 
 ### Planning — 2026-06-07 (session 15, Track 1 round-2 backlog)
 - **Track 1 round 1 confirmed COMPLETE** (sessions 6–14); stale numbered rows collapsed.
@@ -377,9 +391,9 @@ offline (pure functions, mocked tests, or local-only data); none require the dea
   PP-DEPLOY-001, PP-WM-001 notify block).
 - Restart affected `tgw-worker@<queue>` units after editing a worker (e.g. `ai_identify` for
   the PP-LOOKUP-001 routing change).
-- **ISS-009 (dead eBay OAuth token) blocks LIVE verification** of anything that PUTs/GETs eBay
-  (the wired `weight_oz` push, sold-poll Tier 1, webhook registration, strikethrough go-live).
-  It does **not** block writing/unit-testing any ready slice. Token restore is operator Track 4.
+- **ISS-009 (eBay token)** — ⬇ DOWNGRADED (session 16): production keyset is active; token
+  refresh likely resolves it. Does **not** block live eBay work — run `tgw restart-ebay-token`
+  if token jobs are dead-lettered. No longer a hard blocker for Round 3 work.
 
 **Execution status (session 15, 2026-06-07): Tier A + Tier B COMPLETE (ranks 1–6).**
 Suite 77 → **184 passing**, ruff clean. Uncommitted, pending Dave's review:
@@ -451,7 +465,30 @@ Next available: Tier E (ranks 19–25) — bulk-mutation / larger / lower value-
 | 22 | PP-SHELL-001 | Bring `tgw.source`/`tgw-dev.source` under version control (copy into `etc/interfaces/shell/`) + apply the WRAP tier: replace the 6 ARCH-VIOLATES fns with `tgw <subcmd>` one-liners (all CLI equivalents now exist) + fix the `ic_test()` artifact. **Deliver as reviewable in-repo copy; do NOT mutate the live `/opt/TGW/bin` file** — cutover is operator-controlled. | M |
 | 23 | PP-VISION-001 | Offline visual-fingerprint index over the 54K existing thumbnails (Pillow+numpy phash/histogram, dependency-free) + `tgw locate <image> [--size-class]` ranked-SKU output; index build is a **batch job** (catalog-rebuild-is-a-job rule). Baseline precision — frame as a workflow proof, not a final CLIP matcher. | M |
 | 24 | PP-MC-002 | Satellite-capable extfs refactor: env-driven DSN/paths (`TGW_NODE_ROLE`/`TGW_HTTP_BASE`) + a `role=satellite` branch routing writes to tgw-http instead of psycopg2. Default `role=master` (preserve current behavior), gate behind env vars, test the data-source helper. Real LTSP/hardware rollout stays operator-gated. | M |
-| 25 | PP-NIXOS-001 | Author `flake.nix` + `nix/tgw.nix` from existing `pyproject.toml`/`install.sh`/systemd units. **Cannot be built/verified here (no nix toolchain) — frame strictly as evaluation material, not a commitment** (NixOS vs MX-Linux image are mutually exclusive). Lowest value-per-risk. | M |
+| 25 | PP-NIXOS-001 | Author `flake.nix` + `nix/tgw.nix` from existing `pyproject.toml`/`install.sh`/systemd units. ⬆ **NixOS now COMMITTED TARGET** (session 16) — active migration prep, not just evaluation. PP-DEPLOY-001 MX image = final safety-net image before cutover. Cannot build/test here (no nix toolchain) — produce files, Dave validates in VM. | M |
+
+### Track 1 — Round 3 (session 16, priority-ordered)
+
+**Guiding principle (session 16):** Build time-saving interfaces usable **now**, especially on tablet. Maintain stability. Build better later. NixOS is the committed destination — prepare the path, don't block on it.
+
+**Decision confirmed (session 16):**
+- NixOS = committed target. PP-NIXOS-001 promoted from evaluation to active prep.
+- PP-DEPLOY-001 MX image = make one final restore image as a safety net before migrating.
+- PP-BULKEDIT-001 = #1 priority. Must be tablet-usable (web UI via browser; Termux SSH fallback).
+- ISS-009 eBay token downgraded — production keyset active; `tgw restart-ebay-token` if needed.
+
+| # | PP | Task | Size |
+|---|----|------|------|
+| 1 | tgw restart-workers | `tgw restart-workers`: thin CLI wrapper for `sudo systemctl restart 'tgw-worker@*'`; add to `tgw.source` and CLI. XS. | XS |
+| 2 | **PP-BULKEDIT-001 Phase 1** | Web UI at `tgw-http`: `GET /bulk` renders filter form (location/status/search/SKU list) → preview table → `POST /bulk/apply` (field + value). Mobile/tablet-first HTML (no JS framework). Also `tgw bulk set <field> <value> [--from loc] [--search q] [--status s] [--limit N] [--confirm]` CLI for Termux. Start with: title, location, status, ai_hint, shipping_profile as editable fields. | M |
+| 3 | **R19 PP-VERIFY-001 Phase 3** | `tgw catalog-verify --fix`: auto-correct safe mechanical rules only (stale `TEMPLATE:` title-prefix strip first); dry-run default; per-SKU fix log; coalesce rebuild. | S |
+| 4 | **R21 PP-REPRICER-001** | Read-only market_data provider interface: `OwnSalesProvider` (velocity-stats.json) + `BrowseCompsProvider` (item comps) + `MarketplaceInsightsProvider` stub + `tgw reprice-suggest [SKU|--all]` dry-run. No eBay write. | M |
+| 5 | **R20 PP-MC-001 Phase 4** | `tgwlogs` extfs VFS: read-only `journalctl`-per-worker; guard unit-name injection; cap output. | S |
+| 6 | **R22 PP-SHELL-001 T3** | Version-control `tgw.source`/`tgw-dev.source` into `etc/interfaces/shell/`; replace remaining ARCH-VIOLATES fns with `tgw` one-liners. | M |
+| 7 | **PP-NIXOS-001** | `flake.nix` + `nix/tgw.nix` from `pyproject.toml`/`install.sh`/systemd units. Dave validates in VM. | M |
+| 8 | **PP-DEPLOY-001 MX image** | Produce operator runbook for final MX restore image (using MX Snapshot); checklist of what must be captured. Operator executes. | S |
+| — | R23 PP-VISION-001 | Deferred — lower value-per-effort vs. the above | M |
+| — | R24 PP-MC-002 | Deferred — satellite extfs, research-gated | M |
 
 #### Blocked — not Claude-ready (grouped by blocker)
 - **Operator / host-level ops** — `PP-REMOTE-001` (Tailscale + tmux + SSH hardening + sudoers + claude-user decision); `PP-DEPLOY-001` full epic (usermod UID<1000, recursive chown, image bake, fresh-restore reboot — only the read-only audit check #16 is ready). *Unblock:* operator does the host work, then Claude can add reviewable config (tmux launcher, OSC52 helper).
@@ -513,10 +550,20 @@ Research briefs in `docs/TGW-Plan-Vault/perplexity/`. Paste brief into Perplexit
 #### ✅ Done
 - [x] `velocity_stats` worker enabled (2026-06-05)
 - [x] 2-year eBay sold CSV confirmed as maximum available — archive tombstone ceiling accepted
+- [x] **ISS-009 downgraded (session 16)** — production keyset active; `tgw restart-ebay-token` if dead-lettered; no longer a hard blocker
 
 ---
 
-#### Priority 0 — Qtile WM install
+#### Priority 0 — NixOS migration prep (session 16 decision)
+
+NixOS is the **committed target OS**. Migration is not immediate — do when ready. Steps before cutover:
+- [ ] **Final MX restore image**: Use MX Snapshot to bake a bootable ISO of the current working system (full `/opt/TGW` + Postgres + workers + secrets) before any migration work begins. This is the safety net.
+- [ ] **Validate flake.nix in NixOS VM** once Claude produces `flake.nix` + `nix/tgw.nix` (Round 3 item #7)
+- [ ] **Decision**: when ready to migrate, run `nixos-install` on new partition; keep MX as fallback until verified
+
+---
+
+#### Priority 0b — Qtile WM install
 
 - [x] **Install Qtile window manager** (PP-WM-001):
   ```bash
@@ -1140,37 +1187,62 @@ older Python, older packages). NixOS offers:
   combined with `/opt/TGW` and a repo restore, a full system rebuild is automated
 - **Reproducibility**: any node can be cloned to the exact same state from the config file
 
-#### Python on NixOS — the key challenge
-NixOS does not use a traditional FHS filesystem; Python environment management conflicts with
-`pip install` and `venv` patterns. Solutions:
-- Use `nix-shell` or `devenv` for the TGW dev environment (declarative dependencies)
-- Use a NixOS module that wraps the TGW package as a system service with pinned dependencies
-- Consider `pyproject.nix` for packaging TGW as a proper Nix package
-- **The pip/venv pattern TGW currently uses needs a migration plan before committing to NixOS**
+#### Perplexity research findings — PostgreSQL + Python + DR (session 16)
+Comprehensive analysis commissioned from Perplexity (MX Linux vs NixOS for PostgreSQL-backed
+state machine). Key conclusions:
 
-#### Decision framework
-| Factor | Debian | NixOS |
+**DR verdict: NixOS is architecturally superior for DR.**
+- MX Linux: OS-level DR is "Debian + scripting you build yourself." LuckyBackup (rsync-based)
+  and MX Snapshot (bootable ISO) are GUI-centric and not inherently infra-as-code.
+- NixOS: entire OS config is version-controlled Nix files. DR = "restore Postgres base backup
+  + WAL" + "nixos-rebuild from flake." Config is the single source of truth.
+
+**PostgreSQL on NixOS:**
+- First-class module (`services.postgresql`) — version, data path, config, initial DB/users all declared
+- pgBackRest + WAL archiving modules available (some permission/UMask rough edges in defaults — overridable)
+- ⚠ **Known gotcha**: WAL-recovery conflict — `ExecStartPost` hook tries `ALTER USER` while DB is
+  in read-only recovery mode → systemd kills the service. Mitigation: disable the hook or add a
+  recovery-mode guard. Solvable but non-obvious.
+
+**Python on NixOS — updated strategy:**
+- Flake-based devShells with `direnv`/`devenv` for auto-activation on `cd`
+- Packaging: `poetry2nix` or `buildPythonPackage` for deps not in nixpkgs
+- Full pattern: one flake defines devShells (dev) + app package + nixosConfigurations (prod systemd services)
+- TGW's `pyproject.toml` is already flake-compatible — straightforward to wrap
+
+**Given Dave's background (Gentoo 8 years, LFS, custom OSes):**
+Perplexity's explicit recommendation: NixOS is learnable — a small change given the background.
+The Nix language is just a new dialect. The functional/declarative constraints become features,
+not friction.
+
+**Alternatives assessed:**
+- **Guix System** — same design space as NixOS but Guile Scheme syntax; can also overlay on MX
+- **Fedora Silverblue/Kinoite** — immutable rpm-ostree base + containers for app stack; less fully declarative
+- **"MX + Nix overlay"** — keep MX host, add Nix for reproducible devShells without full migration
+
+#### Decision framework (updated)
+| Factor | MX Linux (Debian) | NixOS |
 |--------|--------|-------|
-| Stability | ✅ Excellent | ✅ Excellent (atomic rollback) |
-| Python env mgmt | ✅ Standard pip/venv | ⚠ Non-standard; needs work |
+| OS-level rollback | MX Snapshot ISO (coarse) | Fine-grained generational rollbacks |
+| PostgreSQL integration | Standard Debian; you write all scripts | First-class module; some edge cases |
+| Backup tooling | LuckyBackup/Snapshot; GUI-centric | Define pgBackRest/WAL in Nix; fully automatable |
+| DR automation ceiling | High — you build declarative layer | Very high — OS is infra-as-code |
+| Python env mgmt | Standard pip/venv | ⚠ Needs flake + poetry2nix; solvable |
 | Dependency freshness | ⚠ Older packages | ✅ Latest available |
-| Upgrade safety | ⚠ In-place; risky | ✅ Atomic; rollback available |
-| Disaster recovery | ⚠ Manual steps | ✅ Single config file |
-| Parallel versions | ❌ Hard | ✅ First-class |
-| Learning curve | ✅ Familiar | ⚠ Steep (Nix language) |
-| MX Linux image compat | ✅ Natural | ❌ Incompatible with mx-slapshot |
+| Learning curve | ✅ Familiar | Moderate for Dave (low given background) |
+| MX Linux image compat | ✅ Natural | ❌ Incompatible with mx-slapshot (mutually exclusive) |
 
-#### Recommendation
-NixOS is architecturally superior for a long-running automation platform. The Python environment
-challenge is solvable but requires a dedicated migration session. **PP-DEPLOY-001 (MX Linux image)
-and PP-NIXOS-001 are mutually exclusive end-states** — choose before investing further in image
-infrastructure. Suggest: research a NixOS flake that packages TGW correctly, then decide.
+**PP-DEPLOY-001 (MX Linux image) and PP-NIXOS-001 are mutually exclusive end-states.**
+Decision recommendation: NixOS, pending the Python flake prototype.
 
 #### Work items (deferred)
-- [ ] Prototype: NixOS VM with TGW installed as a Nix package; verify all workers run
-- [ ] Python env: evaluate `pyproject.nix`, `mach-nix`, or `dream2nix` for TGW dependencies
+- [ ] Prototype: NixOS VM with TGW installed as a Nix flake; verify all workers run
+- [ ] Python env: evaluate `poetry2nix` as the first-choice wrapper for TGW's `pyproject.toml`
+- [ ] ⚠ Mitigate WAL recovery gotcha before any production deployment
 - [ ] Decide: NixOS or MX Linux image as the target OS before either PP gets deep work
 - [ ] If NixOS: write `tgw.nix` module for all systemd units, config paths, user setup
+- [ ] Author `flake.nix` + `nix/tgw.nix` from existing `pyproject.toml`/`install.sh`/systemd units
+  (Rank 25 in Track 1 round-2 Tier E; frame as evaluation material, not a commitment)
 
 ### PP-CAPTURE-001 — Idea and Task Capture Pipeline
 
