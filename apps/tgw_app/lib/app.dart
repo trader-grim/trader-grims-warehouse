@@ -35,7 +35,7 @@ class _MainShellState extends ConsumerState<MainShell> {
     final connectionStatus = ref.watch(connectionStatusProvider);
 
     final List<Widget> screens = [
-      const HomeScreen(),
+      HomeScreen(onSkuLookup: _openItem),
       BrowseScreen(onItemTap: _openItem),
       ItemScreen(sku: _selectedSku),
       const SettingsScreen(),

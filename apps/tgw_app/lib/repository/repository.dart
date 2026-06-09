@@ -54,6 +54,37 @@ class TgwRepository {
       final response = await apiClient.getLocations();
       if (response.ok) return response.data ?? [];
     }
+    
     return await offlineDb.getLocations();
+  }
+
+  Future<bool> patchItem(String sku, Map<String, dynamic> fields) async {
+    final response = await apiClient.patchItem(sku, fields);
+    return response.ok;
+  }
+
+  Future<String?> performAction(String sku, String action, {Map<String, dynamic>? options}) async {
+    final response = await apiClient.performAction(sku, action, options: options);
+    return response.data;
+  }
+
+  Future<List<Map<String, dynamic>>> getEbayAspects(String categoryId) async {
+    final response = await apiClient.getEbayAspects(categoryId);
+    return response.data ?? [];
+  }
+
+  Future<bool> setItemTemplate(String sku, String templateKey) async {
+    final response = await apiClient.setItemTemplate(sku, templateKey);
+    return response.ok;
+  }
+
+  Future<List<dynamic>> getHintTrail(String sku) async {
+    final response = await apiClient.getHintTrail(sku);
+    return response.data ?? [];
+  }
+
+  Future<List<Map<String, dynamic>>> getCategoryGroups() async {
+    final response = await apiClient.getCategoryGroups();
+    return response.data ?? [];
   }
 }

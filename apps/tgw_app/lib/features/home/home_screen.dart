@@ -2,11 +2,25 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../providers/providers.dart';
 
-class HomeScreen extends ConsumerWidget {
-  const HomeScreen({super.key});
+class HomeScreen extends ConsumerStatefulWidget {
+  final Function(String) onSkuLookup;
+  const HomeScreen({super.key, required this.onSkuLookup});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends ConsumerState<HomeScreen> {
+  final _skuController = TextEditingController();
+
+  @override
+  void dispose() {
+    _skuController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final queueStatusAsync = ref.watch(queueStatusProvider);
 
     return RefreshIndicator(
@@ -14,6 +28,36 @@ class HomeScreen extends ConsumerWidget {
       child: ListView(
         padding: const EdgeInsets.all(16.0),
         children: [
+          const Text(
+            'Quick Lookup',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _skuController,
+                  decoration: const InputDecoration(
+                    hintText: 'Enter SKU (e.g. tgw...)',
+                    border: OutlineInputBorder(),
+                    contentPadding: EdgeInsets.symmetric(horizontal: 12),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              ElevatedButton(
+                onPressed: () {
+                  if (_skuController.text.isNotEmpty) {
+                    widget.onSkuLookup(_skuController.text.trim());
+                    _skuController.clear();
+                  }
+                },
+                child: const Text('Go'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 32),
           const Text(
             'Queue Status',
             style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),

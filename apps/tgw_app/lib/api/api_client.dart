@@ -118,21 +118,90 @@ class ApiClient {
     }
   }
 
-  Future<ApiResponse<Map<String, CategoryGroup>>> getCategoryGroups() async {
+  Future<ApiResponse<List<Map<String, dynamic>>>> getCategoryGroups() async {
     await ensureInitialized();
     try {
       final response = await _dio.get('/api/category-groups');
       if (response.statusCode == 200) {
-        final Map<String, dynamic> groupsJson = response.data['groups'] ?? {};
-        final groups = groupsJson.map((key, value) => MapEntry(key, CategoryGroup.fromJson(value)));
-        return ApiResponse(ok: true, data: groups);
+        final List<dynamic> groups = response.data['groups'] ?? [];
+        return ApiResponse(ok: true, data: List<Map<String, dynamic>>.from(groups));
       }
       return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
     } catch (e) {
       return ApiResponse(ok: false, error: e.toString());
     }
   }
-  
+
+  Future<ApiResponse<void>> patchItem(String sku, Map<String, dynamic> fields) async {
+    await ensureInitialized();
+    try {
+      final response = await _dio.patch('/api/items/$sku', data: {'fields': fields});
+      if (response.statusCode == 200) {
+        return ApiResponse(ok: true);
+      }
+      return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
+    } catch (e) {
+      return ApiResponse(ok: false, error: e.toString());
+    }
+  }
+
+  Future<ApiResponse<String>> performAction(String sku, String action, {Map<String, dynamic>? options}) async {
+    await ensureInitialized();
+    try {
+      final response = await _dio.post('/api/items/$sku/action', data: {
+        'action': action,
+        if (options != null) 'options': options,
+      });
+      if (response.statusCode == 200) {
+        return ApiResponse(ok: true, data: response.data['job_id']);
+      }
+      return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
+    } catch (e) {
+      return ApiResponse(ok: false, error: e.toString());
+    }
+  }
+
+  Future<ApiResponse<List<Map<String, dynamic>>>> getEbayAspects(String categoryId) async {
+    await ensureInitialized();
+    try {
+      final response = await _dio.get('/api/ebay/aspects/$categoryId');
+      if (response.statusCode == 200) {
+        final List<dynamic> aspects = response.data['aspects'] ?? [];
+        return ApiResponse(ok: true, data: List<Map<String, dynamic>>.from(aspects));
+      }
+      return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
+    } catch (e) {
+      return ApiResponse(ok: false, error: e.toString());
+    }
+  }
+
+  Future<ApiResponse<void>> setItemTemplate(String sku, String templateKey) async {
+    await ensureInitialized();
+    try {
+      final response = await _dio.post('/api/items/$sku/set-template', data: {
+        'template_key': templateKey,
+      });
+      if (response.statusCode == 200) {
+        return ApiResponse(ok: true);
+      }
+      return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
+    } catch (e) {
+      return ApiResponse(ok: false, error: e.toString());
+    }
+  }
+
+  Future<ApiResponse<List<dynamic>>> getHintTrail(String sku) async {
+    await ensureInitialized();
+    try {
+      final response = await _dio.get('/api/items/$sku/hint-trail');
+      if (response.statusCode == 200) {
+        return ApiResponse(ok: true, data: response.data['history'] ?? []);
+      }
+      return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
+    } catch (e) {
+      return ApiResponse(ok: false, error: e.toString());
+    }
+  }
   String getThumbnailUrl(String sku) {
     return '$_baseUrl/api/items/$sku/thumbnail';
   }

@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../../providers/providers.dart';
 import '../../models/models.dart';
+import 'edit_item_screen.dart';
 
 class ItemScreen extends ConsumerWidget {
   final String? sku;
@@ -27,10 +28,6 @@ class ItemScreen extends ConsumerWidget {
     );
   }
 }
-
-final itemDetailProvider = FutureProvider.family<ItemDetail?, String>((ref, sku) async {
-  return await ref.watch(repositoryProvider).getItem(sku);
-});
 
 class _ItemDetailView extends ConsumerWidget {
   final ItemDetail item;
@@ -101,6 +98,14 @@ class _ItemDetailView extends ConsumerWidget {
                       style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                     ),
                   ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              IconButton(
+                icon: const Icon(Icons.edit, color: Colors.blue),
+                onPressed: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => EditItemScreen(item: item)),
                 ),
               ),
               const SizedBox(width: 8),

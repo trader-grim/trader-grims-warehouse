@@ -38,8 +38,12 @@ final queueStatusProvider = FutureProvider<QueueStatus?>((ref) async {
   return response.data;
 });
 
-final categoryGroupsProvider = FutureProvider<Map<String, CategoryGroup>>((ref) async {
+final categoryGroupsProvider = FutureProvider<List<Map<String, dynamic>>>((ref) async {
   final api = ref.watch(apiClientProvider);
   final response = await api.getCategoryGroups();
-  return response.data ?? {};
+  return response.data ?? [];
+});
+
+final itemDetailProvider = FutureProvider.family<ItemDetail?, String>((ref, sku) async {
+  return await ref.watch(repositoryProvider).getItem(sku);
 });
