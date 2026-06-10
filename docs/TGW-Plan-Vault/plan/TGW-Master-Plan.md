@@ -717,6 +717,9 @@ Pipeline hygiene + Flutter backend gap.
 | 43 | PP-FULFILLMENT-001 | Standard Envelope constraint (≤0.25 in thick, uniform): wire into `_resolve_fulfillment_id()` as a size/category gate; add note to CATEGORY-QUIRKS.md | S |
 | 44 | PP-CAPTURE-001 | `GET /form/suggest`: minimal web form endpoint for punctuation-safe suggestion entry (bash quoting workaround for operators) | S |
 | 45 | — | `TGW-Quickstart.md` pipe examples: add `--skus-only` / stdin `-` / multi-SKU patterns; note `tgw enqueue-sku` queue-first path | XS |
+| 46 | — | Ledger ops-query ergonomics (from runbook work 2026-06-10): `queue_job_history` has no `queue_name` (per-queue history needs `JOIN queue_jobs USING (job_id)`) and uses `created_at`; job columns are `payload_json`/`error_code`/`error_detail` (not `payload`/`last_error`). Fix: add SQL views to `queue/schema.sql` (e.g. `v_dead_letters`, `v_job_history` with queue_name) and/or a `tgw queue history` subcommand so operators stop hand-writing joins; `docs/runbooks/` already uses the correct join form | S |
+| 47 | PP-SHELL-001 | `tgw` command-set review (findings session 20, see PP-CONTEXT-001 + notes below): inconsistent arg order (`update SKU FIELD VALUE` vs `statusupdate VALUE SKUS...`); concatenated vs hyphenated naming (`statusupdate`/`locationupdate` vs `dead-letter`/`set-template`); no top-level `search` (only `list --search`/`resolve --search`); no CLI path for nested-field writes (dotted paths like `draft_listing.condition_enum` need HTTP PATCH/MC extfs); `ebay-pull` has no per-SKU/limit scoping. Go over the full ~60-subcommand set, decide canonical names + deprecation aliases, document in quickstart | M |
+| 48 | PP-CONTEXT-001 | Replace legacy `tgwset` current-item mechanism (design with Dave first — see PP-CONTEXT-001) | M |
 
 ### Track 2 — Gemini CLI (large-context data + self-contained tasks)
 **Status 2026-06-10 update**: Google One → **Google AI Plus** with compute-based limits (5-hour
@@ -1666,6 +1669,37 @@ between "workers finished" and "operator knows what to do next."
 - Audit `tgw-dev.source`: migrate anything useful to `tgw.source`; retire the dev file
 - Rule of thumb: if it's not interactive/session-specific, it belongs as a `pyproject.toml` console script in the package, not a bash alias
 - Outcome: `tgw.source` is a thin convenience layer on the `tgw` CLI; no parallel API surviving alongside it
+
+### PP-CONTEXT-001 — Current-item context: `tgwset` replacement (design open, 2026-06-10)
+Dave: the legacy `tgw set` (shell `tgwset` in `tgw.source`) sets an item persistently
+systemwide so multiple operations can target it. It works but is fragile — needs a new
+strategy, likely replaced, and the replacement must be **idempotent**.
+
+**How the legacy mechanism works (audited session 20):**
+- `tgwset()` does `rm` + `ln -sf` of three symlinks: `/opt/TGW/CurrentItem` →
+  `ItemData/<SKU>/`, `/opt/TGW/CurrentItem.json` → the item JSON,
+  `/opt/TGW/CurrentLocation` → catalog location dir
+- `getsku()` resolves the context by `realpath` on the symlink; falls back to legacy
+  `searchcatalog.json` via jq for eBay-ID→SKU and 18-char-prefix matching
+
+**Why it's fragile:** non-atomic remove-then-link (a reader between the `rm` and `ln`
+sees no context); constructs ItemData paths outside the fence; depends on the legacy
+search catalog file; silent fallback to the Queue dir when the SKU doesn't validate;
+no `{ok,...}` output contract; only one global context with no record of who set it.
+
+**Design direction (discuss before building):**
+- Promote to a first-class fence concept: `tgw context set <selector>` / `tgw context get`
+  / `tgw context clear`, full `{ok,...}` contract, selector resolution via `resolve()`
+- Idempotent by construction: setting the already-current SKU is a success no-op;
+  `clear` on empty context is a success no-op; set = single atomic replace
+  (`ln -sfn` via temp+rename, or sidestep symlinks entirely with a small state file
+  `runtime/state/current-item.json` {sku, set_at, set_by})
+- Keep `/opt/TGW/CurrentItem` symlinks as a **derived compatibility view** maintained
+  by the same command (existing MC/shell consumers keep working during transition)
+- Scope question for Dave: one systemwide context (current behavior) vs named/per-surface
+  contexts (e.g. camera station vs desk) — systemwide is the stated requirement
+- Related: PP-SHELL-001 (the shell layer keeps thin wrappers calling `tgw context`),
+  PP-CLIP-001 (clipboard intake reads the context)
 
 ### PP-IFDIR-001 — Interface File Organization
 - Currently: MC configs live at `/opt/TGW/mc/` (outside repo); keyd at `etc/keyd/`; no unified structure
