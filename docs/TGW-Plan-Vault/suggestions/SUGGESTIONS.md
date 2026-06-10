@@ -130,52 +130,23 @@
 - [x] 2026-06-08T17:03 :: PP-NIXOS-001: unify dependency source-of-truth — flake currently has Pillow in base deps, pyproject in the thumbnails extra; resolve via poetry2nix or lockstep before cutover — processed (session 19): added as open requirement under PP-NIXOS-001 "Flake architecture requirements"; CI commit 3be0d85 added Pillow to dev extra but base-vs-optional divergence remains; recommend promoting Pillow to base pyproject dep before cutover
 - [x] 2026-06-08T17:42 :: syncthing sync conflict resolution state worker to resolve the conflict or flag for review — processed (session 19): added as "Sync-conflict resolution worker" under PP-PORTABLE-CATALOG-001 conflict-resolution design; file-scan version buildable now (no Syncthing API), richer version pairs with PP-PYIPC-001; auto-resolve-by-policy or flag-for-review via tgw health/notify/todo dashboard
 - [x] 2026-06-08T17:47 :: when we add alt-text lets rename XXXXX-alt.jpg — processed (session 19): added `<SKU>-alt.jpg` naming convention to PP-DATALEARN-001 alt-text track + flagged for GEMINI-TASK-004 spec + Claude todo #38; ⚠ intent ambiguous (renamed secondary image vs alt-text-annotated derivative) — confirm with Dave before implementing
-- [ ] 2026-06-08T18:36 :: see research notes on syncthing config. What I want to do is let tgw run syncs as service, all other users have syncthing. Want to try to have ltsp fat clients have symlink to local cfg sorted by hostname on /opt/TGW so machines can be temopraily adopted by system for processing and still treat the machines local syncthing config as what syncs on the machine. syncthing wont start if missing, havent tested with ltsp yet but it should be doable.
-- [ ] 2026-06-08T18:38 :: lets set our own port for the tgw syncthing web interface.
-- [ ] 2026-06-08T18:41 :: I havent tried everything available new yet but tgw suggestion needs its own entry box so I can use punctuation without having to troubleshoot my suggestions because bash.
-- [ ] 2026-06-08T19:10 :: note about gemini joining a union. Still a good worker, but keep jobs bitesized to accomplish in session. Buttheads.:                                      
-Updates to your Google One Premium plan 
-
-Hi Dave                                                                                                       We wanted to let you know about changes to your Google One Premium plan. These updates include changes to usage limits included with your subscription and your plan name.                                         Whats changing starting today, ﻿J﻿u﻿n﻿ ﻿8﻿,﻿ ﻿2﻿0﻿2﻿6﻿:    
-Updated plan name: Your new plan is now called Google AI Plus, and youll still enjoy the same 2 TB of storage and other premium benefits.
-Usage limits in the Gemini app: For the Gemini app, were introducing compute-based usage limits that factor in the complexity of your prompt, the features you use, and the length of your chat. Your limit refreshes every 5 hours until you reach your weekly limit. As an AI Plus subscriber, youll enjoy a 2x higher usage limit than non-subscribers.  AI credits: The product-based usage limit model is also rolling out to other products, starting with Flow and Antigravity. While 200 AI credits will no longer be included as a benefit in your base plan each month, the new usage limit model we are introducing should allow you to maintain the same experience you are used to. To learn more about how to use AI credits, please visit our Help Center.
-No action is required from you. To learn more about these changes you can visit our Help Center article for additional details. You can manage or cancel your subscription at any time.
-Thank you for being a Google AI Plus subscriber. -The Google One Team
-- [ ] 2026-06-08T19:17 :: if we are successful self healing syncthing conflicts then we have a pretty solid loosely connected communication channel I have usually turned off global sync but I will ensure it us enabled and configured for the catalog update back channel.
-- [ ] 2026-06-08T20:12 :: tgw restart-workers what if we use something like runas
-- [ ] 2026-06-08T20:25 :: Hello Dave,
-
-
-Thank you for submitting your Application Growth Check request and expressing interest in the Marketplace Insights API.
-
-
-To proceed, we kindly ask you to provide the following information:
-
-1. What are your company/application? Please provide your website URL or mobile app if applicable.
-
-2. Your eBay UserID you either buy and/or sell with.
-
-3. Are you an EPN partner? If so, please provide your publisher ID.
-
-4. What is the completed item information being used for?
-
-5. Are you storing the sales data in any way?
-
-6. Are you sharing the sales data internally or externally?
-
-7. What categories ( list of the eBay categoryIds) do you focus on and need access to?
-
-8. Your contact information
-
-
-Additionally, Other scopes are not restricted and already assigned to your appid.
-
-
-We appreciate your cooperation and look forward to assisting you further.
-
-
-Best Regards,
-
-eBay Developer Support
-- [ ] 2026-06-08T13:31 :: ISS: ebay_sku_migrate stall — silent failure + health gap. Worker exhausted batch capacity on 5 permanently-failing items (Best Offer policy restrictions + errorId 25709 invalid dimensions, from 2014-2016 legacy listings). Each batch: 5 items picked, 5 failed, job marked succeeded, reschedule 1h, repeat. ~176 attempts each, ~20+ hours invisible. Fix applied: _is_permanent_failure() detector + sku_migrate_skip flag written to item JSON on permanent error; find_batch skips flagged items. Immediate unblock: skip flag written on 5 stuck items manually. Root cause of health gap: worker marks queue job succeeded even on 0/5 batch — health sees green. Two patterns to address in planning: (1) worker-level batch success verification — notify() when succeeded==0 for N consecutive batches; (2) broader "success rate monitoring" pattern for any worker that self-reports succeeded but may be doing zero useful work. Dave: good candidate for a critical-path success verification step.
-- [ ] 2026-06-08T20:41 :: note Standard Envelope shipping has very specific categories it applies to. no more than .25 in thick uniform thickness. Apply to shipping template logic
+- [x] 2026-06-08T18:36 :: see research notes on syncthing config. What I want to do is let tgw run syncs as service, all other users have syncthing. Want to try to have ltsp fa [...] — processed (session 19/20): added to PP-NIXOS-001 Syncthing deployment; headless tgw service 8385/22001; LTSP per-hostname config symlink design documented
+- [x] 2026-06-08T18:38 :: lets set our own port for the tgw syncthing web interface. — processed (session 19/20): port 8385 (GUI/REST) and 22001 (sync) documented in PP-NIXOS-001 Syncthing deployment
+- [x] 2026-06-08T18:41 :: I havent tried everything available new yet but tgw suggestion needs its own entry box so I can use punctuation without having to troubleshoot my sugg [...] — processed (session 19/20): added as Round 5 #44 GET /form/suggest web form for punctuation-safe suggestion entry
+- [x] 2026-06-08T19:10 :: note about gemini joining a union. Still a good worker, but keep jobs bitesized to accomplish in session. Buttheads.: — processed (session 19/20): Track 2 updated; Google One renamed to Google AI Plus; compute-based limits + 5hr refresh; keep tasks bite-sized; Antigravity/Flow available
+- [x] 2026-06-08T19:17 :: if we are successful self healing syncthing conflicts then we have a pretty solid loosely connected communication channel I have usually turned off gl [...] — processed (session 19/20): noted in PP-PORTABLE-CATALOG-001; global sync must be enabled for catalog back-channel; conflict worker preserves zero-data-loss invariant
+- [x] 2026-06-08T20:12 :: tgw restart-workers what if we use something like runas — processed (session 19/20): design note added; passwordless sudo scoped to systemctl restart is the runas equivalent; no code change this session
+- [x] 2026-06-08T20:25 :: Hello Dave, — processed (session 19/20): added to Track 4 Priority 1; Dave must respond to 8 eBay DS questions to get buy.marketplace_insights approved
+- [x] 2026-06-08T13:31 :: ISS: ebay_sku_migrate stall — silent failure + health gap. Worker exhausted batch capacity on 5 permanently-failing items (Best Offer policy restricti [...] — processed (session 19/20): fix already applied; batch-success verification and zero-work worker monitoring noted as future patterns in plan
+- [x] 2026-06-08T20:41 :: note Standard Envelope shipping has very specific categories it applies to. no more than .25 in thick uniform thickness. Apply to shipping template lo [...] — processed (session 19/20): added as Round 5 #43; wire <=0.25in thick constraint into _resolve_fulfillment_id() + CATEGORY-QUIRKS.md note
+- [x] 2026-06-09T02:34 :: can we have gemini use itemdata on google drive and also store results there? — processed (session 19/20): PP-DATALEARN-001 architecture requires tgw-api fence; Google Drive intermediary feasible via rclone; no action this session
+- [x] 2026-06-09T02:43 :: research and projects on external models is very worthwhile. Also I was able to use geminis newest model to generate the flutter framework. Both gemin [...] — processed (session 19/20): Track 2 updated with Antigravity/Flow; 4-category delegation model noted; Round 5 includes self-contained items for any agent
+- [x] 2026-06-09T03:55 :: CLI pipe improvements landed: tgw list/resolve now support --skus-only (one SKU per line) and --search-field KEY (restrict --search to a specific JSON [...] — processed (session 19/20): confirmed done; documentation update added as Round 5 #45
+- [x] 2026-06-09T03:59 :: add queue reference tgw. update help to reflect changes and add example multi sku usage patterns. probably a pipe should accept a sku or a result json [...] — processed (session 19/20): added as Round 5 #45 TGW-Quickstart.md pipe examples; JSON-wrapper SKU extraction noted as future improvement
+- [x] 2026-06-09T16:51 :: recently processed skus as sorting option on interfaces — processed (session 19/20): added as PP-EDITOR-001 design note; recently_processed sort option for catalog list / admin UI
+- [x] 2026-06-09T16:53 :: one at a time pipeline mode for itemdata viewer/editor. feeds list of skus to admin on at a time with ability to move foreward and back through the li [...] — processed (session 19/20): added as PP-EDITOR-001 design note; one-at-a-time carousel mode with prev/next navigation
+- [x] 2026-06-09T16:57 :: nixos separate flakes for heavier interfaces for flexibility. portable catalog version flake. So we can use nixos for clients. — processed (session 19/20): added to PP-NIXOS-001 multi-tier flake architecture; bases/portable.nix for clients; separate dev-env/flake.nix
+- [x] 2026-06-09T17:15 :: local model babysitter help ai: troubleshooting, operational assistance, user training, do it for me, for emergency and daily use. Trained as tgw expe [...] — processed (session 19/20): PP-CLAUDE-HELP-001 extends to local AI supervision + training mode; noted as PP-LOCAL-AI-001 future track
+- [x] 2026-06-09T17:45 :: noted google benefit: Have AI check pricing feature in Google Search — processed (session 19/20): informational; Google Search AI pricing not accessible via API; noted as future PP-REPRICER-001 signal
+- [x] 2026-06-09T18:38 :: investigate worktrees for task delegation — processed (session 19/20): worktrees useful for isolated agent coding tasks; note added to PP-MULTIMODEL-001 design
+- [x] 2026-06-10T17:26 :: add re-enqueue dead-letter option. Result of sonnet repair indicating need for tool and better error handling: Summary of both issues: — processed (session 19/20): tgw dead-letter --requeue-transient already exists (Round 4 #29); 744 jobs reset; batch_size config bug fixed in config.py; documented in inbox processing notes

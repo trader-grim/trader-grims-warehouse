@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-08 (session 18 — 9 suggestions processed; Track 1 Round 4 ALL 7 items DONE; suite 321→346; dead-letter triage 27→23)
+updated: 2026-06-10 (session 19/20 — 20 suggestions processed; 8 inbox files processed; GEMINI-003→006 + PERPLEXITY-005/006 + Syncthing NixOS + NixOS flake architecture; Round 5 seeded; suite 346)
 maintained_by: Opus (planner)
 ---
 
@@ -353,7 +353,7 @@ Operator-gated items still tracked here:
 | PP | Status | Notes |
 |----|--------|-------|
 | **PP-SOLD-001 Tier 3** sweep | operator gated | Run `tgw ebay-sweep` after full-history CSV import |
-| **PP-PYIPC-001** | research gated | Awaiting PERPLEXITY-005 result |
+| **PP-PYIPC-001** | ✅ unblocked | Research complete; Syncthing live at 8384; API key in `/opt/TGW/.local/syncthing/config.xml`; Claude-ready |
 | **PP-REPRICER-001** live | blocked | Blocked on `buy.marketplace_insights` scope |
 
 ### Running in background
@@ -593,6 +593,84 @@ end-to-end probes. Per item:
 - 23 real eBay-rejection dead-letters (25709/25002/25738/25021) need item-data/code fixes —
   25002 Item.Country is the tracked open issue at `## Current state` line ~83.
 
+### Inbox processing — 2026-06-10 (session 19/20)
+
+8 queued inbox files processed + 20 SUGGESTIONS.md items marked done. Key findings:
+
+**GEMINI-003** — Flutter app scaffold (Phases B+C+D) delivered by Gemini. Full app at
+`apps/tgw_app/`: Riverpod state, Dio HTTP, sqflite DB, all screens (SKU list, scan, detail,
+edit stubs). `flutter analyze` clean. Build environment needs `libsecret-1-dev` (Linux) and
+Android SDK licences; expected. Phase D edit flows disabled in UI (stubs visible, not wired).
+⚠ **BACKEND-NEEDED**: app polls `/api/queue/status` for connectivity; a proper `/api/health`
+JSON endpoint is the right contract → added as todo #37.
+
+**GEMINI-004** — Multimodal photo QA on 20 items. ⚠ **Critical finding**: boilerplate
+contamination in `description_history` — text from "John F. Rider Perpetual
+Troubleshooter's Manuals" (electronics service manual series) injected into items across
+diverse categories (confirmed on SKUs `tgw201501021970398`, `tgw201501021970498`,
+`tgw201501021970953`; likely more). Probable cause: batch description import or AI prompt
+bleed-through. Data scrub needed → added as Round 5 item. Alt-text pilot: Ollama/Gemini
+vision can generate useful captions and SEO fields from item photos → added as todo #38.
+Alt-text sidecar naming convention: `<SKU>-alt.jpg` (confirm with Dave whether this is a
+renamed secondary image or an annotated derivative before implementing).
+
+**GEMINI-005** — Pricing calibration. 3 concrete `category-groups.json` edits recommended:
+- `electrical_fixtures`: `typical_used` 15.43 → **12.50** (align with market p25)
+- `media_records`: `typical_used` 12.03 → **13.50** (increase to capture value)
+- `collectibles_pins_buttons`: `typical_used` 9.72 → **10.50** (increase to capture value)
+Run `tgw category-groups --reseed` after. Added as Round 5 items #40–41.
+
+**GEMINI-006** — Marketing/category insights. Top zero-inventory high-velocity categories
+(ST=1.00, 0 active): Sewing Buttons, Network Cards, Heavy Equipment Manuals, Lapel Pins,
+Locomotives, Collectible Magazines. Store category mappings: `tools_hand`→"Tools & Workshop
+Equipment", `electronics_adapters_chargers`→"Power Adapters & Chargers",
+`electronics_remotes`→"TV, Video & Home Audio Accessories", `kitchen_utensils`→"Kitchen
+Tools & Gadgets". Priority quality improvements: Headphones, Flashlights, Wrenches.
+
+**PERPLEXITY-005** — Full 36KB result processed (`PERPLEXITY-005-result.md`). PP-PYIPC-001
+is now research-complete. Key decisions: `pyncthing` + custom `httpx` `/rest/events/disk`
+consumer for Syncthing; `pydbus` + `kdeconnect-cli` for KDE Connect; psycopg3 migration
+path clear; `aiosqlite` for FastAPI catalog reads; `discogs_client` deprecated → wrap in
+adapter; EasyPost for shipping rates (PirateShip has no public API); `python-evdev` for
+barcode scanners; `hidapi`/`hid` for USB scales; Go-UPC/Apify for enrichment upgrades.
+See PP-PYIPC-001 section for full findings.
+
+**PERPLEXITY-006** — Flutter offline-first sync pattern (full research). Key design
+decisions for PP-PORTABLE-CATALOG-001 P2:
+- Syncthing + SQLite: safe only with one writer; clients must treat catalog as a closed artifact
+- **Pattern**: snapshot + copy to app-private storage; open the copy, never the synced file directly
+- **Stack**: `sqflite` + `sqflite_common_ffi` (Linux); `sqlite3` package (sqlite3_flutter_libs deprecated)
+- **HTTP**: `dio` + `dio_smart_retry` (successor to abandoned dio_retry)
+- **Offline queue**: roll own outbox SQLite table (states: pending/sent/ack); avoid black-box plugins
+- **Connectivity**: `connectivity_plus` + health-ping check; `workmanager` for Android background flush
+- **Flutter secure storage**: requires `libsecret-1-dev` on Linux
+- **Server-side snapshot**: `sqlite3.Connection.backup()` for atomic export
+See PP-PORTABLE-CATALOG-001 Phase 2 design below.
+
+**syncthing-nixos-nginx-research.md** — Complete NixOS Syncthing deployment design:
+- Isolated headless `tgw` user instance on port 8385/22001; regular users use 8384/22000
+- NixOS declarative `services.syncthing`; per-hostname config via config dir symlink (LTSP fat clients)
+- Nginx reverse proxy with `insecureSkipHostCheck` + WebSocket headers
+- Auto-TLS: systemd oneshot generating self-signed cert before nginx starts
+- GUI access from dev machine: `ssh -L 9000:127.0.0.1:8385 user@server`
+See PP-NIXOS-001 → Syncthing deployment section.
+
+**system-app-config-and-nixos-flake-design.md** — NixOS multi-tier flake architecture:
+`flake-parts` framework; modules: `bases/master.nix` + `bases/portable.nix`, `interfaces/cli.nix`,
+`graphical/tiled.nix` + `plasma.nix` + `thin-client-rdp.nix`, `ai/compute-node.nix`.
+LTSP fat clients share NFS `/nix/store`; Ollama model weights on NFS mount (not in initrd).
+Separate dev flake: `nix develop ./dev-env`. See PP-NIXOS-001 → Flake architecture section.
+
+**Dead-letter triage 2026-06-09 (between sessions 18/19)** — 744 `ai_identify` dead-letters
+from Ollama HTTP 500 crash (~2026-06-08) reset via `tgw dead-letter --requeue-transient`.
+Root cause: `batch_size` config key missing from `TgwConfig` in `config.py` → `ValidationError`
+on load after config update. Fixed: `batch_size: int = 1` added to `TgwConfig`. Worker
+restarted; recovery confirmed.
+
+**eBay Developer Support (Track 4)** — eBay responded to the `buy.marketplace_insights`
+scope request with 8 questions Dave must answer. See Track 4 Priority 1 for the response
+action item.
+
 **Blocked — not Round 4 (held for later rounds):**
 Same blocker groups as Round 3 plus:
 - PP-PLANDB-001 — design discussion needed before code; currently design-open
@@ -603,7 +681,7 @@ Same blocker groups as Round 3 plus:
 - **Operator / host-level ops** — `PP-REMOTE-001` (Tailscale + tmux + SSH hardening + sudoers + claude-user decision); `PP-DEPLOY-001` full epic (usermod UID<1000, recursive chown, image bake, fresh-restore reboot — only the read-only audit check #16 is ready). *Unblock:* operator does the host work, then Claude can add reviewable config (tmux launcher, OSC52 helper).
 - **Hardware / physical device** — `PP-MACRO-001` install+prove needs a 2nd keyboard, live desktop, and `keyd list-devices` hash (a static drift-validation test is the only code-only slice, and it doesn't advance the goal). *Unblock:* operator wires the dedicated keyboard + captures the `[ids]` hash.
 - **Android device + push creds** — `PP-TASKER-001` (Tasker/Join apps, barcode-intent audit; even a server-side push backend needs an operator ntfy topic / Join key to validate). *Unblock:* operator audits phone intents + supplies a push URL/key.
-- **External research + creds/services** — `PP-PYIPC-001` gated on the **PERPLEXITY-005** library-audit result (only a prompt template exists, no result), plus PP-WM-001, a Syncthing API key (none in config), and a live Syncthing/DBus session. *Unblock:* run PERPLEXITY-005 → inbox; operator supplies `syncthing_api_key` + running daemon.
+- ~~**External research + creds/services** — PP-PYIPC-001~~ **✅ UNBLOCKED**: PERPLEXITY-005 research complete; Syncthing is live at `127.0.0.1:8384`; API key in `/opt/TGW/.local/syncthing/config.xml` (in-project). Libraries decided: `pyncthing` + custom `httpx` events consumer; `pydbus` for KDE Connect. No operator action needed — PP-PYIPC-001 is Claude-ready.
 - **Design-open / architecture decision** — `PP-REVISION-001` live-listing revision. `ReviseFixedPriceItem` exists (`trading.py:266`) but only for SKU-label changes; `ebay_stage.py:6` calls itself "the stopgap until the full revision system is built." Open question (sparse-delta vs full-replacement) + depends on PP-SYNC-001 being authoritative + live token for any push. *Unblock:* Dave settles the delta-vs-replacement design; then a dry-run delta computer is a buildable first slice.
 
 #### Stale-done reconciliation (doc-only corrections — several bundled into the slices above)
@@ -620,11 +698,30 @@ Audit caught the plan crediting shipped work as open and missing shipped tools. 
 - **PP-STRIKE-001** — core code **DONE**; Track-1 table + planning text said "Planned". *(bundled into rank 6)*
 - **ISS-006** — `_USER_PROMPT_ENRICHED` is fully wired (`ai_identify.py:171–204`); issue is stale → **closed in ISSUES.md**.
 
+### Track 1 — Round 5 (session 19/20)
+
+**Guiding principle:** Process Gemini inbox findings into code. Address data quality issues.
+Pipeline hygiene + Flutter backend gap.
+
+**Input:** Round 4 all 7 DONE; 346 tests passing; 4 open todos (#36–39); 8 inbox files processed.
+
+| # | PP | Task | Size |
+|---|----|------|------|
+| 36 | PP-STORAGE-001 | `size_class` backfill: populate `size_class` on all items that have a `category_group` using `category-groups.json` group defaults; `tgw data-scrub size-class-backfill`; unblocks `tgw locate --size-class` and the PP-FULFILLMENT-001 size-class policy resolver | S |
+| 37 | PP-EDITOR-001 | `GET /api/health` in tgw-http: returns `check_all()` output as JSON (Flutter connectivity endpoint per GEMINI-003 BACKEND-NEEDED) | S |
+| 38 | — | `tgw alt-text <sku>`: Ollama vision → generate `alt_text` + `seo_caption` fields; sidecar naming `<SKU>-alt.jpg`; confirm with Dave whether this is a renamed secondary image or annotated derivative before implementing | M |
+| 39 | — | Fix 25002 `Item.Country` dead-letter rejections for categories 34032/14027/13916: investigate and add country origin field to eBay offer body | S |
+| 40 | — | `category-groups.json` pricing calibration (GEMINI-005): update `electrical_fixtures`→12.50, `media_records`→13.50, `collectibles_pins_buttons`→10.50; run `tgw category-groups --reseed` | XS |
+| 41 | — | `category-groups.json` store categories (GEMINI-006): populate `store_category` for `tools_hand`, `electronics_adapters_chargers`, `electronics_remotes`, `kitchen_utensils` | XS |
+| 42 | — | Data scrub: scan `description_history` for "John F. Rider" and generic boilerplate contamination (GEMINI-004); report affected SKUs; strip contamination strings | S |
+| 43 | PP-FULFILLMENT-001 | Standard Envelope constraint (≤0.25 in thick, uniform): wire into `_resolve_fulfillment_id()` as a size/category gate; add note to CATEGORY-QUIRKS.md | S |
+| 44 | PP-CAPTURE-001 | `GET /form/suggest`: minimal web form endpoint for punctuation-safe suggestion entry (bash quoting workaround for operators) | S |
+| 45 | — | `TGW-Quickstart.md` pipe examples: add `--skus-only` / stdin `-` / multi-SKU patterns; note `tgw enqueue-sku` queue-first path | XS |
+
 ### Track 2 — Gemini CLI (large-context data + self-contained tasks)
-**Status 2026-06-06**: Gemini CLI now installed and available. Gemini is Dave's primary
-non-Claude AI — free with Google Drive subscription, long context window (1M tokens),
-excellent for data analysis tasks. Perplexity expires ~6 months from now — prioritize
-all remaining research briefs via Perplexity while active; shift data tasks to Gemini.
+**Status 2026-06-10 update**: Google One → **Google AI Plus** with compute-based limits (5-hour
+refresh window). Keep individual Gemini tasks small and self-contained to avoid hitting the
+compute cap. Also available: **Antigravity/Flow** (alternative AI agent with code/tool use).
 
 **How to delegate to Gemini**: Write a self-contained task file with all needed context
 baked in (no live system access). Drop data excerpts, schemas, and the task description.
@@ -635,12 +732,13 @@ Save result to `inbox/` for PM-intake.
 | ✅ PP-VERIFY-001 scaffold | done (session 13) — scaffold superseded by full Phase 1 implementation |
 | ✅ Data scrub analysis | done (GEMINI-002, session 14) — completeness matrix, stall patterns, legacy scrub rules; 3 new verify rules implemented |
 | ✅ Category-group quality review | done (GEMINI-001, session 14) — `electrical_industrial` split; ai_hints improved; `tools_hand` coherence noted |
+| ✅ Flutter app scaffold | done (GEMINI-003, session 19) — Phases B+C+D at `apps/tgw_app/`; analyze clean; libsecret-1 build dep; BACKEND-NEEDED /api/health endpoint (todo #37) |
+| ✅ Photo QA + alt-text pilot | done (GEMINI-004, session 19) — boilerplate contamination finding; alt-text viable via Ollama vision; sidecar naming confirmed |
+| ✅ Pricing data analysis | done (GEMINI-005, session 19) — 3 calibration edits (see Round 5 #40); reseed reminder; tier pattern notes |
+| ✅ Marketing/category insights | done (GEMINI-006, session 19) — store category mappings; zero-inventory high-velocity list; SEO keyword opportunities |
 | ebay_draft aspect fill audit | Grep of aspect fill rates per category | Which categories have worst specifics coverage; tuning recommendations |
-| PP-GLOBALS-001 analysis | Sample item JSONs (20 items, various categories) | Which fields are offer-invariant; proposed `globals` block schema |
 | **AI conversation history consolidation** | Dave's conversation history with AI assistants (Claude, Perplexity sessions) | Organize + consolidate into structured reference; **plan scope with Dave before executing** (session 10 note) |
 | **Data/archive history consolidation** | `/opt/TGW/data/history/` contents, ItemArchive zip inventory, archive-ebay-index.json | Organize and index historical item data (zip archives, legacy records); similar to the archive index work already done; identify gaps and suggest integration points with current pipeline |
-| **Pricing data analysis** | Velocity stats, comp history, reprice schedule, category groups — full dataset | Identify pricing patterns by category, seasonality, velocity correlation with price tiers; optimize pricing strategy |
-| **Marketing/category insights** | Velocity stats, category groups, ebay_draft quality scores, sell-through by category | Extract marketing signal: which categories have untapped velocity potential, pricing elasticity by category, category-specific buyer behavior signals |
 
 ### PP-DATALEARN-001 — Gemini Data Mining + AI-Calculated Fields
 
@@ -672,7 +770,8 @@ Research briefs in `docs/TGW-Plan-Vault/perplexity/`. Paste brief into Perplexit
 | eBay Cassini 2025–2026         | `PERPLEXITY-002-cassini-seo.md`     | HIGH     | PP-SEO-001 tuning, listing quality strategy      |
 | Sold price data alternatives   | `PERPLEXITY-003-sold-price-data.md` | HIGH     | PP-REPRICER-001 unblock if MI scope stays closed |
 | Third-party integration status | `PERPLEXITY-004-integrations.md`    | MEDIUM   | IGDB, Whisper.cpp, Discogs, Go-UPC               |
-| Library & API audit            | `PERPLEXITY-005-library-audit.md`   | MEDIUM   | PP-PYIPC-001 Syncthing/KDE Connect; stack review |
+| ✅ Library & API audit         | `PERPLEXITY-005-result.md`          | DONE         | Full result processed (session 19/20); see PP-PYIPC-001 + PP-LOOKUP-001 + PP-FULFILLMENT-001 updates |
+| ✅ Flutter offline sync        | `PERPLEXITY-006-flutter-offline-sync Result.md` | DONE | PP-PORTABLE-CATALOG-001 P2 — snapshot+copy pattern; sqflite stack; Dio+dio_smart_retry; outbox table design |
 
 ### Track 4 — Operator (Dave must act to unblock)
 
@@ -729,6 +828,13 @@ applied at once. Avoids piecemeal scope expansion later. See complete desired sc
 `buy.marketplace_insights`. Awaiting eBay approval. Portal request flow has changed from
 what's documented below — steps below are reference only; follow current portal UI when
 updating credentials after approval.
+
+**Status 2026-06-10 update:** eBay Developer Support responded to the `buy.marketplace_insights`
+scope request with **8 questions** Dave must answer before the scope can be approved.
+- [ ] **Review and respond to eBay Developer Support message** — answer the 8 questions
+  about the use case for `buy.marketplace_insights` (automated pricing engine, resale
+  platform, no redistribution of sold-price data to third parties). Be specific: automated
+  repricing, TGW internal use only, ~55K items, eBay seller account DaveBuko-Webkulap.
 
 ⚠ When new keyset arrives: update `secrets_root/ebay-credentials.json`, update
 `tgw-api-config.json` scopes to match approved scopes only, then re-run OAuth.
@@ -1441,6 +1547,85 @@ Recovery equation: `NixOS flake + site config GitHub repo + ItemData restore = f
 
 **Google Drive DR** — rebuild kit (NixOS ISO pointer, site config repo URL, rclone restore script for ItemData) lives on Google Drive. Major disaster: boot NixOS ISO → pull config from GitHub → restore ItemData from Drive → `tgw health` green.
 
+#### Syncthing NixOS deployment (session 19/20 — syncthing-nixos-nginx-research.md)
+
+TGW runs a dedicated headless Syncthing instance (separate from personal user instances):
+
+```nix
+# In modules/bases/master.nix
+services.syncthing = {
+  enable = true;
+  user = "tgw";
+  dataDir = "/opt/TGW/sync";
+  configDir = "/opt/TGW/.config/syncthing";
+  guiAddress = "127.0.0.1:8385";
+  settings.options.listenAddresses = [ "tcp://0.0.0.0:22001" ];
+  settings.options.insecureSkipHostCheck = true;
+};
+```
+
+Port allocation:
+- TGW headless: 8385 (GUI/REST), 22001 (sync protocol)
+- Regular user instances: 8384 (default), 22000 (default)
+
+Nginx reverse proxy block (for remote GUI access):
+```nginx
+server {
+  listen 8386;
+  location / {
+    proxy_pass http://127.0.0.1:8385;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+  }
+}
+```
+
+Auto-TLS: systemd oneshot `Before=nginx.service` generates self-signed cert. Replace with
+ACME when the machine has a DNS name.
+
+GUI access from dev workstation: `ssh -L 9000:127.0.0.1:8385 tgw@server`
+
+LTSP fat clients: per-hostname Syncthing config via symlink
+`/opt/TGW/.config/syncthing/config.xml → /opt/TGW/.config/syncthing/config.d/<hostname>.xml`
+(different folder mappings per machine role).
+
+**Operator unblock steps for PP-PYIPC-001:**
+- [ ] Install Syncthing on NixOS target; confirm REST accessible at 8385
+- [ ] Generate API key in Syncthing GUI → save to `secrets_root/syncthing-api-key` (chmod 600)
+- [ ] Add `"syncthing_api_key_path": "/opt/TGW/secrets/syncthing-api-key"` to `tgw-api-config.json`
+
+#### Multi-tier flake architecture (session 19/20 — system-app-config-and-nixos-flake-design.md)
+
+Recommended structure for the full TGW NixOS platform using `flake-parts`:
+
+```
+nix/
+  modules/
+    bases/
+      master.nix        # PostgreSQL, tgw workers, tgw-http, backup, Syncthing
+      portable.nix      # portable catalog client (no workers, read-only tgw-http)
+    interfaces/
+      cli.nix           # terminal tools: tmux, mc, tgw.source, bash completion
+    graphical/
+      tiled.nix         # Qtile (primary intake workstation)
+      plasma.nix        # KDE Plasma 6 (general-purpose desktop)
+      thin-client-rdp.nix  # lightweight RDP thin client session
+    ai/
+      compute-node.nix  # Ollama + GPU drivers; models on /var/lib/ollama/models
+  hosts/
+    production-server.nix   # master + cli + tiled (+ plasma optional)
+    portable-laptop.nix     # portable + cli + plasma
+  dev-env/
+    flake.nix           # separate stacking flake; nix develop ./dev-env
+```
+
+LTSP fat clients: NFS `/nix/store` shared; model weights on NFS mount (not in initrd).
+Thin clients: `thin-client-rdp.nix` module; lightweight sessions connecting to master.
+Dev flake: separate from platform flake; `nix develop ./dev-env` does not require system rebuild.
+
+**Round 5+ tasks:** Refactor `flake.nix` to match this structure; add `portable.nix` base;
+add `ai/compute-node.nix`; wire Syncthing service into `master.nix`.
+
 ### PP-CAPTURE-001 — Idea and Task Capture Pipeline
 
 #### Problem
@@ -1933,6 +2118,22 @@ Planned: RBAC gates + role-specific default tabs and field visibility. Model use
 - Operator (mixed admin/staging)
 - Supervisor (audit/report focus)
 
+### Design notes (session 19/20)
+
+- **Recently-processed SKU sort** — `GET /api/items?sort=recently_processed`: a sort option
+  ordering by the timestamp of the last pipeline action (enqueue, PATCH, or catalog_verify).
+  Useful for reviewing batches just processed through ai_identify or ebay_draft. Add to catalog
+  query options when PP-EDITOR-001 Phase E is in scope.
+
+- **One-at-a-time review mode** — take any search result list and feed items to the editor
+  one at a time with prev/next navigation. Operator can approve/flag/edit each SKU in sequence
+  without returning to the list. Useful for post-pipeline QA, staged review, and photo review.
+  Model: `GET /api/items/review-queue?from=<list_params>` returns a session token; `GET
+  /api/items/review-queue/<token>/next` advances. Can be a simple URL-based state machine.
+
+- **Backend contract for Flutter** (GEMINI-003 finding): app uses `/api/queue/status` for
+  connectivity check. Correct endpoint is `GET /api/health` → JSON (todo #37); swap once done.
+
 ### Later phases (separate PPs)
 - Scanner input (barcode/SKU lookup → item detail)
 - **PP-INTAKE-001 intake screen** — pre-photo flow: weight, size_class, barcode scan, category group picker, ai_hint; location suggestion (semi-chaotic); Tasker camera trigger → intake form
@@ -2166,25 +2367,72 @@ Replace shell-subprocess calls to `kdeconnect-cli` and Syncthing with Python lib
 bindings so TGW workers and the FastAPI service can interact with both services
 programmatically — events, status, clipboard, file transfer.
 
-#### Syncthing
-- REST API at `localhost:8384` with API key; `requests`/`httpx` based
-- Capabilities: device status, folder sync progress, event stream (`/rest/events`),
-  trigger rescan, conflict detection
-- TGW integration: trigger `catalog_rebuild` job when Syncthing syncs `tgwcatalog.db`
-  back from satellite → FastAPI event stream subscriber or polling hook
-- Research: PERPLEXITY-005 brief covers Python library options
+#### Syncthing (PERPLEXITY-005 findings — session 19/20)
+- REST API at `localhost:8384` — Syncthing is **already running** on the production machine
+- Config + API key at `/opt/TGW/.local/syncthing/config.xml` (in-project, `chmod 600`)
+- API key is parsed from the config.xml `<apikey>` element at PP-PYIPC-001 implementation time
+- **Recommended library**: `pyncthing` (PyPI) — requests-based, best-maintained, supports PATCH,
+  modern Syncthing versions. `aiosyncthing` is stale (labeled as such even in its own README).
+- **Async event streaming**: `pyncthing` is synchronous; for long-polling `/rest/events` or
+  `/rest/events/disk`, implement a thin custom `httpx`-based async consumer with `since`/`timeout`
+  params. This is the recommended TGW pattern — keeps the event loop non-blocking.
+- **Relevant endpoints**: `/rest/events/disk` (pre-filtered file/folder events), `/rest/db/status`
+  (folder state + `needBytes`) — use together to confirm sync completion before triggering rebuilds
+- TGW integration: when `tgwcatalog.db` folder goes idle → enqueue `catalog_rebuild` job
+- Config key to add: `syncthing_config_path` → defaults to `/opt/TGW/.local/syncthing/config.xml`
 
-#### KDE Connect
-- Current: `kdeconnect-cli --share-text "..."` subprocess calls in `tgw.source`
-- Better: DBus via `pydbus` or `dbus-python` (`org.kde.kdeconnect.daemon`)
-- Capabilities: clipboard push, notification, file send, ping
-- TGW integration: `ic_template()`, `ic_command()` wrappers in Python; push from
-  workers without shell dependency
-- Research: PERPLEXITY-005 covers DBus vs. REST vs. CLI approaches
+**⚠ PP-PYIPC-001 is now fully unblocked** — Syncthing is live, API key in-project. No operator action needed.
+
+**Multi-user NixOS design (session 19/20):**
+- Current port: 8384; NixOS target port: 8385 (separate from user instances; see PP-NIXOS-001)
+- LTSP fat clients: per-hostname config directory symlink for location-specific folder mappings
+
+#### KDE Connect (PERPLEXITY-005 findings)
+- No mature Python PyPI package; use **`pydbus`** for D-Bus access (`org.kde.kdeconnect.daemon`)
+- `kdeconnect-cli` via subprocess for one-shot operations; `pydbus` for long-running services
+- Clipboard strategy: monitor X11 clipboard locally (`python-xlib`) → push via KDE Connect as
+  transport. Android 10+/14 restricts clipboard access to foreground apps; desktop side is unaffected.
+- TGW integration: `ic_template()`, `ic_command()` wrappers in Python; push from workers
+
+#### Additional findings from PERPLEXITY-005
+
+**DB migration path:**
+- psycopg3 (`psycopg` on PyPI) is the clear psycopg2 successor; start synchronous, add async later
+- `aiosqlite` for FastAPI catalog read paths (prevents blocking event loop); keep sync writes in workers
+
+**`python-xlib` status:** Effectively stale upstream (no PyPI releases in 12+ months); distribution-
+level patches only. Works for X11 clipboard today but not a long-term bet given Wayland migration.
+Consider replacing with a Wayland-aware clipboard solution when moving to NixOS + Wayland.
+
+**Whisper.cpp bindings:** `whispercpp.py` and `pywhispercpp` are newer/better than `whisper-cpp-python`;
+both embed whisper.cpp as a submodule and track newer versions. Wrap behind a TGW audio-to-text
+interface to enable swapping implementations.
+
+**`discogs_client` deprecated:** Discogs officially marked it as "no longer maintained" and now
+recommends using a generic REST client. TGW should wrap Discogs access behind an adapter in
+`apis/lookup/discogs.py` and migrate to direct `httpx` calls (additive, isolates the breakage risk).
+
+**Shipping APIs:** PirateShip has **no stable public API** (reverse-engineered only; fragile).
+**EasyPost** is the recommended alternative: official Python client, rate shopping, label purchase,
+address validation, tracking, insurance. Strong candidate for PP-FULFILLMENT-001 Phase 2.
+
+**Barcode scanner:** `python-evdev` reads `/dev/input/event*` focus-independently — better than
+keyboard-wedge mode for TGW's dedicated workstations. Relevant to PP-FULFILLMENT-001 hardware phase.
+
+**USB scales:** `hidapi`/`hid` (Python `hid` package wrapping libhidapi) or `pyusb` — open by
+vendor/product ID, read raw HID reports, decode weight. Better than shell-based approaches.
+
+**Enrichment upgrades:** Go-UPC and Apify barcode/PriceCharting actors outperform upcitemdb free tier
+significantly. Consider as replacement for PP-LOOKUP-001 upcitemdb primary source.
+
+**eBay SDK:** `ebaysdk-python` last release ~April 2020; classified inactive; no support for modern
+REST Sell APIs. TGW's current direct REST integration is already correct — no change needed.
 
 #### Dependencies
-- PERPLEXITY-005 result (research first, then implement)
-- PP-WM-001 (Qtile clipboard widget already uses subprocess xclip; move to KDE Connect push)
+- Syncthing config at `/opt/TGW/.local/syncthing/config.xml` ✅ present; API key parsed from `<apikey>` element
+- Add `syncthing_config_path` to `tgw-api-config.json` (default: `/opt/TGW/.local/syncthing/config.xml`)
+- Add `syncthing_url` to config (default: `http://127.0.0.1:8384`)
+- PP-WM-001 (Qtile clipboard widget uses subprocess xclip; migrate to pydbus/KDE Connect)
 
 ---
 
@@ -2255,8 +2503,35 @@ master
 | Phase | Scope | Status |
 |-------|-------|--------|
 | 1 | `tgw export-catalog <dest>` + Syncthing transport (operator configures Syncthing) | ✅ **DONE (session 18)** — `src/tgw/catalog_export.py`; 8 tests; live verified |
-| 2 | Return path: dirty-flag writes on satellite → sync back → master merge | Future (needs PERPLEXITY-005 + Syncthing API key) |
+| 2 | Flutter offline-first client: snapshot+copy-to-sandbox; sqflite outbox; connectivity_plus + workmanager Android flush | Future (PERPLEXITY-006 design complete; needs Syncthing API key for API-driven export trigger) |
 | 3 | Conflict resolution, per-row change-log, merge audit trail | Future |
+
+#### Phase 2 design — Flutter offline-first client (PERPLEXITY-006)
+
+**Critical pattern — never open the synced file directly:**
+```
+Syncthing syncs → catalog.db (write-locked or in-use mid-sync → corruption risk)
+                        ↓ app startup
+                 snapshot + copy to app-private storage
+                        ↓
+                 open private copy (sqflite) ← safe to read/write
+                 offline outbox table (pending mutations)
+                        ↓ connectivity restored
+                 flush outbox → POST /api/items/{sku} on master
+                 server returns latest export → replace private copy
+```
+
+**Library stack:**
+- `sqflite` + `sqflite_common_ffi` — SQLite on Android + Linux desktop
+- `sqlite3` package (not sqlite3_flutter_libs, which is deprecated for 3.x)
+- `dio` + `dio_smart_retry` — HTTP client with automatic retry
+- `connectivity_plus` + health ping (`GET /api/health`) — connectivity detection
+- `workmanager` — Android background flush scheduling
+- `flutter_secure_storage` — token/secret storage; requires `libsecret-1-dev` on Linux
+
+**Server-side snapshot export:**
+Use `sqlite3.Connection.backup(dest)` for atomic SQLite copy (avoids mid-write corruption).
+Endpoint: `GET /api/catalog/snapshot` → streams `tgwcatalog.db` snapshot.
 
 **Sync-conflict resolution worker (open, session 19 — Dave 17:42):** Syncthing emits
 `*.sync-conflict-<ts>-<id>.*` files when two nodes edit the same file (already observed in the

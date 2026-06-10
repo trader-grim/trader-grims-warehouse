@@ -51,7 +51,8 @@ from .thumbnail import build_thumbnail_cache
 
 def list_items(cfg: Dict[str, Any], search: str = '', location: str = '',
                status: str = '', limit: Optional[int] = None,
-               date_from: str = '', date_to: str = '') -> Dict[str, Any]:
+               date_from: str = '', date_to: str = '',
+               search_field: Optional[str] = None) -> Dict[str, Any]:
     """List items matching filters.  Always returns {'ok': True, 'items': [...]}."""
     # Load from best available source
     if cfg['search_catalog_path'].exists():
@@ -64,11 +65,16 @@ def list_items(cfg: Dict[str, Any], search: str = '', location: str = '',
 
     out: List[Dict[str, Any]] = []
     for item in rows:
-        if search and search.lower() not in '\n'.join(
-            f'{k}={v}' for k, v in item.items()
-            if isinstance(v, (str, int, float, bool)) or v is None
-        ).lower():
-            continue
+        if search:
+            if search_field:
+                val = item.get(search_field)
+                if val is None or search.lower() not in str(val).lower():
+                    continue
+            elif search.lower() not in '\n'.join(
+                f'{k}={v}' for k, v in item.items()
+                if isinstance(v, (str, int, float, bool)) or v is None
+            ).lower():
+                continue
         if location and str(item.get('location', '')) != location:
             continue
         if status and str(item.get('#STATUS', item.get('status', ''))) != status:
@@ -137,6 +143,21 @@ _ENQUEUE_QUEUES = {
     'ai_identify', 'ebay_draft', 'ebay_price', 'ebay_stage', 'ebay_upload',
     'ebay_publish', 'ebay_sync', 'catalog_rebuild', 'thumbnail_gen',
 }
+
+
+def _expand_skus(skus: List[str]) -> List[str]:
+    """Expand '-' in a SKU list by reading one SKU per line from stdin."""
+    import sys
+    out: List[str] = []
+    for s in skus:
+        if s == '-':
+            for line in sys.stdin:
+                line = line.strip()
+                if line:
+                    out.append(line)
+        else:
+            out.append(s)
+    return out
 
 
 def cmd_enqueue_sku(cfg: Dict[str, Any], sku: str, queue: str) -> Dict[str, Any]:
@@ -267,14 +288,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('sku')
 
     p = sub.add_parser('list', help='list items with optional filters')
-    p.add_argument('--search',    default='')
-    p.add_argument('--location',  default='')
-    p.add_argument('--status',    default='')
-    p.add_argument('--date-from', default='', dest='date_from',
+    p.add_argument('--search',       default='')
+    p.add_argument('--search-field', default=None, dest='search_field', metavar='KEY',
+                   help='restrict --search to this field only (e.g. title, location, #STATUS)')
+    p.add_argument('--location',     default='')
+    p.add_argument('--status',       default='')
+    p.add_argument('--date-from',    default='', dest='date_from',
                    help='YYYYMMDD lower bound on SKU timestamp')
-    p.add_argument('--date-to',   default='', dest='date_to',
+    p.add_argument('--date-to',      default='', dest='date_to',
                    help='YYYYMMDD upper bound on SKU timestamp')
-    p.add_argument('--limit',     type=int, default=None)
+    p.add_argument('--limit',        type=int, default=None)
+    p.add_argument('--skus-only',    action='store_true', dest='skus_only',
+                   help='output one SKU per line (pipe-friendly)')
 
     p = sub.add_parser('resolve', help='resolve identifiers to a set of SKUs')
     p.add_argument('--sku',          default=None)
@@ -285,6 +310,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--ebay-item-id', default=None, dest='ebay_item_id')
     p.add_argument('--upc',          default=None)
     p.add_argument('--search',       default=None)
+    p.add_argument('--skus-only',    action='store_true', dest='skus_only',
+                   help='output one SKU per line (pipe-friendly)')
 
     # --- write ---
     p = sub.add_parser('update', help='update one field on one item')
@@ -341,9 +368,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--search', default='', help='text filter across fields')
 
     p = sub.add_parser('enqueue-sku',
-                       help='enqueue a pipeline action for one SKU (PP-WM-001)')
-    p.add_argument('sku')
+                       help='enqueue a pipeline action for one or more SKUs (PP-WM-001)')
     p.add_argument('queue', help='target queue (ai_identify, ebay_draft, ebay_price, ...)')
+    p.add_argument('skus', nargs='+',
+                   help='one or more SKUs, or - to read from stdin')
 
     p = sub.add_parser('quiet-check',
                        help='when the pipeline is idle, surface pending suggestions/TODOs (PP-CAPTURE-001)')
@@ -2654,7 +2682,12 @@ def main() -> int:
             result = list_items(cfg, search=args.search,
                                 location=args.location, status=args.status,
                                 limit=args.limit, date_from=args.date_from,
-                                date_to=args.date_to)
+                                date_to=args.date_to,
+                                search_field=args.search_field)
+            if args.skus_only:
+                for item in result['items']:
+                    print(item.get('sku', ''))
+                return 0
 
         elif args.op == 'resolve':
             sel: Dict[str, Any] = {}
@@ -2675,6 +2708,10 @@ def main() -> int:
             if args.search:
                 sel['search'] = args.search
             skus = resolve(cfg, **sel)
+            if args.skus_only:
+                for sku in sorted(skus):
+                    print(sku)
+                return 0
             result = {'ok': True, 'selectors': sel,
                       'count': len(skus), 'skus': sorted(skus)}
 
@@ -2709,7 +2746,7 @@ def main() -> int:
 
         elif args.op == 'statusupdate':
             results = [statusupdate(cfg, sku, args.value, check_only=check)
-                       for sku in args.skus]
+                       for sku in _expand_skus(args.skus)]
             if len(results) == 1:
                 result = results[0]
             else:
@@ -2725,7 +2762,16 @@ def main() -> int:
                                   location=args.location, search=args.search)
 
         elif args.op == 'enqueue-sku':
-            result = cmd_enqueue_sku(cfg, args.sku, args.queue)
+            expanded = _expand_skus(args.skus)
+            if not expanded:
+                result = {'ok': False, 'error': 'no SKUs provided'}
+            elif len(expanded) == 1:
+                result = cmd_enqueue_sku(cfg, expanded[0], args.queue)
+            else:
+                results = [cmd_enqueue_sku(cfg, s, args.queue) for s in expanded]
+                ok = all(r.get('ok') for r in results)
+                result = {'ok': ok, 'queue': args.queue,
+                          'count': len(results), 'results': results}
 
         elif args.op == 'quiet-check':
             result = cmd_quiet_check(cfg, notify_on_idle=args.notify)
@@ -2754,7 +2800,7 @@ def main() -> int:
             result = cmd_mvitems(
                 cfg,
                 to_location=args.to_location,
-                skus=args.skus or [],
+                skus=_expand_skus(args.skus) if args.skus else [],
                 from_location=args.from_location,
                 search=args.search,
                 status=args.status,
@@ -2808,7 +2854,7 @@ def main() -> int:
             from .items import atomic_write_json
             from .listing_quality import score_draft
             rows = []
-            for sku in args.skus:
+            for sku in _expand_skus(args.skus):
                 json_path = sku_json(cfg, sku)
                 if not json_path.exists():
                     rows.append({'sku': sku, 'ok': False, 'error': 'item not found'})
@@ -2887,7 +2933,7 @@ def main() -> int:
             )
 
         elif args.op == 'resolve-legacy':
-            result = cmd_resolve_legacy(cfg, args.skus,
+            result = cmd_resolve_legacy(cfg, _expand_skus(args.skus),
                                         enqueue_stage=not args.no_stage)
 
         elif args.op == 'bulk':
@@ -2895,7 +2941,7 @@ def main() -> int:
                 cfg,
                 field=args.field,
                 value=args.value,
-                skus=args.skus,
+                skus=_expand_skus(args.skus) if args.skus else args.skus,
                 location=args.location,
                 status=args.status,
                 search=args.search,
@@ -2928,7 +2974,7 @@ def main() -> int:
         elif args.op == 'reprice-suggest':
             result = cmd_reprice_suggest(
                 cfg,
-                skus=args.skus,
+                skus=_expand_skus(args.skus) if args.skus else args.skus,
                 location=args.location,
                 status=args.status,
                 search=args.search,
@@ -3060,7 +3106,7 @@ def main() -> int:
                 return 0
 
         elif args.op == 'publish':
-            result = cmd_publish(cfg, args.skus, dry_run=args.dry_run)
+            result = cmd_publish(cfg, _expand_skus(args.skus), dry_run=args.dry_run)
 
         elif args.op == 'setup-ebay-hooks':
             from .apis.ebay.notifications import get_notification_preferences, set_notification_preferences

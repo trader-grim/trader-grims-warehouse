@@ -137,6 +137,7 @@ def load_config(path: Path) -> Dict[str, Any]:
         'return_policy_id':                 return_policy_id,
         'fulfillment_policy_by_category':   fulfillment_policy_by_category,
         'store_category_by_ebay_category':  store_category_by_ebay_category,
+        'ebay_sku_migrate':                 raw.get('ebay_sku_migrate', {}),
         'raw':                              raw,
     }
 
