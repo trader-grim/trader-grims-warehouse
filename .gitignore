@@ -53,3 +53,7 @@ docs/TGW-Plan-Vault/inbox/queued/
 # Hand-edit backups of live config (never commit)
 *.bak-session*
 *.bak-[0-9]*
+.aider*
+
+# Vendored Flutter SDK (local toolchain, 2.3GB clone of flutter/flutter @ 3.44.1) — never commit
+flutter/
