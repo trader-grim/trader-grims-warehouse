@@ -253,6 +253,7 @@ def verifiedupdate(cfg: Dict[str, Any], sku: str, value: str,
     doc = load_item_doc(path)
     doc['verified'] = value
     doc['#STATUS'] = 'In Stock'
+    doc.pop('catalog_verified', None)
     atomic_write_json(path, doc, pretty=True)
     return {'ok': True, 'sku': sku, 'field': 'verified', 'value': value}
 

@@ -35,8 +35,6 @@ log = logging.getLogger(__name__)
 
 QUEUE_NAME = 'ebay_publish'
 
-_PERCENTILE_KEYS = ('max', 'p75', 'p75', 'median', 'p25', 'min')
-
 
 def _build_reprice_schedule(stages: List[Dict[str, Any]],
                              comps: Dict[str, Any],
@@ -96,6 +94,17 @@ class EbayPublishWorker(QueueWorker):
             raise HardFailure(f'item JSON not found for {sku}')
 
         item = json.loads(json_path.read_text(encoding='utf-8'))
+
+        # Idempotent: a replayed/directly-enqueued job for a live item must not
+        # re-publish or overwrite the reprice_schedule (markdown clock).
+        existing_listing = item.get('ebay_listing', {})
+        if existing_listing.get('status') == 'Active':
+            log.info('ebay_publish: %s already published (listingId=%s) — skipping',
+                     sku, existing_listing.get('listing_id', ''))
+            tgw_logging.log_event('ebay_publish_skipped', sku=sku,
+                                  reason='already_active',
+                                  listing_id=str(existing_listing.get('listing_id', '')))
+            return
 
         ebay_offer = item.get('ebay_offer', {})
         offer_id = ebay_offer.get('offer_id')
