@@ -71,9 +71,26 @@ The pipeline flow (each stage enqueues the next):
 
 ### Drive / re-drive the pipeline
 
-- `tgw enqueue-sku QUEUE SKU...` — enqueue pipeline action(s). QUEUE first, then one or
-  more SKUs (or `-` to read from stdin). Queues: `ai_identify`, `ebay_draft`, `ebay_price`,
-  `ebay_stage`, `ebay_publish`, `alt_text`, ...
+- `tgw enqueue-sku QUEUE SKU...` — enqueue pipeline action(s). QUEUE is always first
+  (queue-first path), then one or more SKUs. Pass `-` as the SKU argument to read one SKU
+  per line from stdin. Queues: `ai_identify`, `ebay_draft`, `ebay_price`, `ebay_stage`,
+  `ebay_publish`, `alt_text`, ...
+
+  **Pipe patterns** — `--skus-only` on `list`/`search` emits one SKU per line, pipe-safe:
+  ```bash
+  # Re-identify everything at a location
+  tgw list --location BIN-A1 --skus-only | tgw enqueue-sku ai_identify -
+
+  # Re-draft all staged items (e.g. after a template change)
+  tgw list --status staged --skus-only | tgw enqueue-sku ebay_draft -
+
+  # Multi-SKU inline (no pipe needed for a handful)
+  tgw enqueue-sku ebay_price tgw20240101120000001 tgw20240101120000002
+
+  # Search + re-queue (e.g. all "headphones" items needing a new draft)
+  tgw search "headphones" --status ai_identified --skus-only | tgw enqueue-sku ebay_draft -
+  ```
+
 - `tgw hint SKU TEXT...` — set an `ai_hint` and re-queue identification. `--force`
   re-identifies even if already `ai_identified`.
 - `tgw hint-trail SKU` — show the identification history for an item.
