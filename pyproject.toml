@@ -67,7 +67,11 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 200
-fix = true
+# fix-on-check removed 2026-06-11 (session 24): a bare `ruff check` must never
+# mutate the tree — it silently rewrote 8 unrelated files during an agent
+# session. Apply fixes explicitly with `ruff check --fix` when you mean it.
+# systemd/history/ is an archive of dead scripts — not lint-gated.
+exclude = ["systemd/history"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]

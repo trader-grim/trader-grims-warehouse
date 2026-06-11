@@ -419,7 +419,7 @@ def main() -> None:
         filter_ids = set(args.models)
         models = [m for m in models if m['id'] in filter_ids]
         if not models:
-            sys.exit(f'ERROR: none of the requested model IDs matched')
+            sys.exit('ERROR: none of the requested model IDs matched')
 
     print(f'Testing {len(models)} models × {len(skus)} SKUs = {len(models)*len(skus)} calls')
     print(f'SKUs: {", ".join(skus)}')

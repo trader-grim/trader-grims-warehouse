@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 import re
+
 import pyperclip
 
 original_string = pyperclip.paste()

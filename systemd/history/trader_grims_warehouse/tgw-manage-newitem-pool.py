@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 import json
+import os
 import shutil
 import sys
-import os
 import time
 import zipfile
 from pathlib import Path
