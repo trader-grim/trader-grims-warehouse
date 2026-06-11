@@ -1707,6 +1707,15 @@ between "workers finished" and "operator knows what to do next."
 - Rule of thumb: if it's not interactive/session-specific, it belongs as a `pyproject.toml` console script in the package, not a bash alias
 - Outcome: `tgw.source` is a thin convenience layer on the `tgw` CLI; no parallel API surviving alongside it
 
+**Tier 3 open items (2026-06-11):**
+- **Help grouping** — `tgw --help` now lists ~65 subcommands; group them by function category
+  using argparse `parents` or a custom formatter. Suggested groups: Read/Search, Write/Update,
+  Pipeline, eBay, Context, Catalog/Build, Ops/Admin. Reference: argparse `add_argument_group`
+  on the top-level parser or a manually-formatted epilog. Add to Track 1 when PP-SHELL-001
+  Tier 3 work resumes.
+- **`requeue` rename** — currently only re-queues `ai_identify` despite generic name; rename
+  to `requeue-identify` or make it queue-agnostic before Tier 3 closes.
+
 ### PP-CONTEXT-001 ✅ DONE 2026-06-11 — Current-item context: `tgwset` replacement
 Dave: the legacy `tgw set` (shell `tgwset` in `tgw.source`) sets an item persistently
 systemwide so multiple operations can target it. It works but is fragile — needs a new
