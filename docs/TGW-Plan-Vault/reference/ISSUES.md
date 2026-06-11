@@ -8,13 +8,15 @@ incomplete wiring, and data quality problems that need fixing.
 
 ## Open Issues
 
-### ISS-001 — errorId 25002 Item.Country at publish
-- **Symptom**: eBay rejects offer publish with "Item.Country" error for some categories
-- **Affected categories observed**: 34032, 14027, 13916
-- **Status**: Fix applied (session 9) — added `availabilityDistributions` with `merchantLocationKey`
-  to the inventory item body. This explicitly binds the inventory item to the merchant location
-  record which carries the seller address/country. Three affected SKUs re-staged and re-queued.
-  `shipToLocations` in offer body retained. Outcome pending re-publish result.
+### ~~ISS-001~~ — errorId 25002 Item.Country at publish ✅ RESOLVED 2026-06-11
+- **Original symptom**: eBay rejects offer publish with 25002 for some Inventory API items
+- **Fix**: added `availabilityDistributions` with `merchantLocationKey` to inventory item body
+  (session 9). The three originally affected items (cooking/serving utensil categories 20649,
+  137750) are now **live via Inventory API**.
+- **Diagnosis correction**: later 25002 dead-letters (session 23) were mis-filed as ISS-001 but
+  were actually item-specifics validation errors ("Contaminant Removal" value too long, "Model"
+  missing) for an unrelated SKU (Water Filters, category 20684). Those items are already live
+  via Trading API. All 15 stale dead-letters (ebay_stage ×13, ebay_publish ×2) cleared 2026-06-11.
 
 ### ISS-002 — 10 legacy items with wrong shipping profile (FRE instead of FC4)
 - **Symptom**: migrated with eBay Standard Envelope profile instead of FC4

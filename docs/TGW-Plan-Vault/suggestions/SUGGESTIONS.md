@@ -159,3 +159,4 @@
 - [x] 2026-06-11T07:06 :: masterarchive repaired — ✅ hardware alert in Track 4 updated to resolved; tgw history-index work is now unblocked
 - [x] 2026-06-11T07:51 :: lets try Gemini 1.5 Flash for vision tasks. — tested via scripts/alt_text_model_test.py; `google/gemini-1.5-flash` model ID is obsolete. Current best is `google/gemini-2.5-flash` (2.9s avg, 100% pass, excellent quality) — already set as `alt_text_model` default in config.py and OpenRouter worker
 - [ ] 2026-06-11T09:14 :: tailscale installed
+- [ ] 2026-06-11T10:06 :: review zero bandwidth upload strategy antigravity/gdrive/eps doc in inbox
