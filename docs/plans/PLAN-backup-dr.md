@@ -15,7 +15,7 @@ config/worker changes, operator applies all systemd/root-level changes.
 | Layer | State | Verdict |
 |---|---|---|
 | **Local continuous snapshots** | `trader-grims-backup.service` (inotify + rsync hardlink), enabled+active, writes to a **dedicated 699 GB disk** (`/dev/sde1` → `/opt/TGW/var/local/backups/trader_grims_warehouse/`), 201 G used / 490 G free, ~31 timestamped snapshots per subtree, current to within minutes. Covers `bin config data docs src`. Resident cost: **6.2 G RAM** (peak 12.6 G) watching ~1 M+ files. | ✅ healthy (RAM cost noted for Phase B) |
-| **Cloud copy** | rclone remote `dbukove:TGW/` (Google Drive) mirrors the same trees + logs. Last sync **2026-05-14/16 — 27 days stale**. No timer, no cron: manual-only. | 🔴 stale, unscheduled |
+| **Cloud copy** | rclone remote `dbukove:TGW/` (Google Drive) mirrors the same trees + logs. Last sync **2026-05-14/16**. No timer, no cron. **Correction (Dave, 19:53): the staleness is deliberate** — syncing was stopped when a possible-data-manipulation point was reached; the 2026-05-14 copy is a **kept known-good history point**, not neglect. It must be preserved before any new sync runs (A2 pre-step). | 🟡 frozen on purpose; still needs a scheduled current tier |
 | **PostgreSQL ledger** | `state_machine` = 23 MB. **Zero dumps exist anywhere.** File snapshots cannot give a consistent copy (live WAL). `todo_items` (the canonical task queue) is not re-derivable. | 🔴 unprotected |
 | **Secrets** | `/opt/TGW/secrets/` is in **no backup tier at all** — not snapshotted, not on Drive (correct that it's not there *unencrypted*, but there's no encrypted copy either). Disk loss ⇒ eBay OAuth re-consent + re-provision every API key. | 🔴 unprotected |
 | **Cold archive** | MasterArchive (`/dev/sdc5`, ext4, repaired 2026-06-11): ItemData history 584 G, ItemArchive 163 G (54 K zips, 40 % indexed), job_archive 371 G, etc. (GEMINI-007 inventory). GDrive holds old `ItemArchive` (2024) and `Photo Archive` (2020) copies. | 🟡 exists, partially indexed |
@@ -95,7 +95,13 @@ find .../db/ -name '*.dump' -mtime +35 -delete   # both locations
 snapshot disk; A2 carries it to Drive.
 *Done when:* two consecutive timer runs logged; `pg_restore --list` reads the newest dump.
 
-**A2 — Scheduled cloud sync (un-stales the off-machine tier).**
+**A2 — Scheduled cloud sync (brings the off-machine tier current).**
+*PRE-STEP — preserve the frozen history point first (gate, do not skip):* the existing
+`dbukove:TGW/` copy is a deliberate pre-manipulation known-good snapshot (Dave 19:53).
+Before the first sync: `rclone copy dbukove:TGW dbukove:TGW-historypoint-20260514`
+(server-side copy — fast, no local bandwidth, no quota doubled thanks to Drive
+dedup-by-content for identical files; verify with `rclone size` both sides). Only then
+enable the timer.
 *Do:* `tgw-cloud-sync.service` + `.timer` (daily 02:30, before A1 — or after; order is
 cosmetic): `rclone sync` of the existing scope (`bin config data docs logs src`) plus the
 new `var/backups/.../db/`, with
@@ -115,6 +121,17 @@ lives in a pocket/safe, cloud stays the burn-down fallback). Timer monthly **+ r
 manually after any credential change**.
 **Operator decision:** passphrase custody — written down off-machine (safe/wallet);
 without it the backup is useless, with it on this disk the encryption is theater.
+*Refinements (Dave, 19:44 + 19:50):*
+- **At least 2 rotated USB keys** — a single corrupt drive must not be a total restore
+  failure. Rotate on each refresh; both carry the same named partition label so the A7
+  mount-trigger serves either.
+- **Small-file history archive folded into the bundle:** a rolling zip collecting
+  *historical versions* of small high-value files (configs, `tgw.source` lineage —
+  years of csv→json→now migrations live in those diffs, db dumps). The snapshot disk
+  already keeps ~31 versions and git covers the repo, but the keychain/cloud bundle
+  should carry its own self-contained history so a bare restore has the lineage too.
+- **The rebuild keychain (19:44):** the end-state physical artifact — secrets bundle +
+  gpg keys + a ready NixOS install USB, on a keychain, restore-ready. See Phase C §5b.
 *Done when:* a test round-trip (`gpg -d | tar -tz`) lists the expected files, and the
 passphrase exists somewhere that survives the house burning down with the server.
 
@@ -197,6 +214,16 @@ Adopt when Phase A has run clean for a few weeks and the suite design session ha
    provides the instant tier.
 5. **Cold-tier integration:** `tgw history-index` output (A6) becomes the manifest that
    lets MasterArchive contents be selectively pushed to the restic cloud repo.
+6. **btrfs evaluation (Dave, 19:33):** migrate the data filesystems to btrfs — CoW
+   snapshots become the instant-local tier (replacing the 6.2 G-RAM inotify watcher
+   outright), `btrfs send/receive` feeds the A7 offline drives incrementally, and rclone
+   syncs *from a read-only snapshot* (atomic source, no mid-sync mutation). Evaluate
+   against restic and the current rsync-hardlink watcher in the Phase B design session.
+   **Natural adoption moment: the NixOS reinstall** (PLAN-nixos Phase 5 wipes the disk
+   anyway — choosing btrfs then costs nothing; adopting it on MX first would be its own
+   risky migration for a host we're leaving). Decision criteria: RAM cost, restore
+   ergonomics, NixOS declarative support (first-class), interaction with the 295 G
+   `/opt/TGW` partition layout.
 
 ## 5. Phase C — Nix flake integration (required end state)
 
@@ -217,6 +244,15 @@ build) properly instead of by deletion:
 5. **Google Drive rebuild kit** (one folder): pointer to the ISO, flake/site-config repo
    URLs, the secrets bundle, this plan, and the restore runbook. The kit is what a
    bare-metal stranger needs to rebuild the warehouse.
+
+   **5b. The rebuild keychain (Dave, 19:44) — the kit in pocket form:** secrets bundle +
+   gpg keys + small-config history zip + a ready NixOS install USB, on a physical
+   keychain, restore-ready at all times (≥2 rotated copies per A3). **Pre-assurance:**
+   mock restoration to the spare machine proves the keychain works before it's ever
+   needed — and if that goes well, **building the production Nix server from the
+   keychain is the POC**, which is exactly PLAN-nixos Phase 4's dress rehearsal / the
+   spare-promotion cutover path with the keychain as its input. One artifact, drilled
+   on real hardware, that answers "everything burned — now what?" with "this keyring."
 
 ## 6. Risks
 
