@@ -36,6 +36,35 @@ ledger 23 MB, `/opt/TGW` partition 187 G used / 295 G.
 | Host/site loss (both disks) | **27 days and growing** (stale Drive copy); ledger+secrets: total loss |
 | Ledger corruption | total loss (no dump to restore) |
 
+### 1b. Operator-contributed resources (Dave, suggestions 2026-06-11 17:25–17:51)
+
+- **Stack of empty 500 GB HDDs + USB3 drive holster** → rotating offline tier:
+  auto-sync when a named partition is mounted (systemd mount-unit trigger —
+  `tgw-offline-sync@.service` bound to `media-tgw-<name>.mount`). Swap-and-shelve gives
+  air-gapped copies the cloud tier can't. Folded into Phase A as **A7**.
+- **A few attached USB HDDs reassignable to "disaster sentry duty"** — some always-on,
+  some soft-switch (like MasterArchive). Drives/chassis can be swapped for better
+  positioning. Inventory + assignment is part of A7.
+- **USB key, named partition, for secrets** — same mount-trigger mechanism, scoped to
+  the encrypted secrets bundle. Better custody story than cloud-only: the key lives in
+  a pocket/safe. Folded into **A3** as the preferred secrets destination (cloud copy
+  stays as the burn-down fallback).
+- **Google Drive: 2 TB total, ~600 GB free**, and a known problem: Google has written
+  **duplicate same-name files in the same directory**; `rclone dedupe` times out on the
+  full dataset. Fix: run it **chunked per subdirectory** (`rclone dedupe --by-hash
+  dbukove:TGW/data/ItemData/<chunk>`) or delegate to Antigravity as a bounded batch
+  task. Dedupe + merging strays into `data/history` frees the duplicate space entirely.
+  Added as **A8**. Quota risk B3 is softer than feared with 600 G free now and more
+  after dedupe.
+- **GDrive three-role model (Dave)** — matches and sharpens this plan's shape:
+  (1) current copy of ItemData + critical files, atomically updated via rclone (= A2);
+  (2) a couple of **rotating backup-style syncs taken from a snapshot** of `/opt/TGW`
+  (= Phase B restic versioning does this properly; interim: dated `--backup-dir` trash);
+  (3) the complete rebuild kit — "even if everything here burned to ashes" (= Phase C §5).
+- **Possible DLT tape drive + tapes in inventory** — Dave checks for an interface.
+  Curiosity tier: if it works, tapes are a fine annual cold archive; do not plan around
+  it until hardware is confirmed.
+
 ## 2. Protection targets
 
 | Store | Canonical? | Tiers required | RPO target (Phase A) |
@@ -80,7 +109,10 @@ subsequent nightly deltas small.
 *Do:* small script `tgw-secrets-backup`:
 `tar -C /opt/TGW -cz secrets | gpg --symmetric --cipher-algo AES256 -o
 secrets-$(date +%%Y%%m%%d).tar.gz.gpg`, written to the snapshot disk + rclone'd to
-`dbukove:TGW-secrets/`. Timer monthly **+ run manually after any credential change**.
+`dbukove:TGW-secrets/` + **preferred: synced to a named USB-key partition on mount**
+(Dave 17:51 — the A7 mount-trigger mechanism scoped to the secrets bundle; the key
+lives in a pocket/safe, cloud stays the burn-down fallback). Timer monthly **+ run
+manually after any credential change**.
 **Operator decision:** passphrase custody — written down off-machine (safe/wallet);
 without it the backup is useless, with it on this disk the encryption is theater.
 *Done when:* a test round-trip (`gpg -d | tar -tz`) lists the expected files, and the
@@ -109,6 +141,31 @@ stopped for a day (test by date-faking files, not by actually skipping a night).
 - Policy line to adopt: *nothing is deleted from a hot tier until it is indexed in a
   cold tier* — the index is what makes an archive an archive instead of a junk drawer.
 - GDrive `ItemArchive`/`Photo Archive` copies (2024/2020) are cold-tier replicas; leave.
+- **Legacy-format triage (Dave, 17:12 + 17:47):** for `magento/` (129 G), `GarageSale/`
+  (33 G) and similar — confirm once whether the formats are recoverable. General rule:
+  accessible → keep + index; inaccessible-but-maybe → cold storage; useless → **discard
+  and record the decision so no one ever spends time on it again** (the decision log
+  entry is the deliverable). **Magento + GarageSale specifically: KEEP-COLD, known
+  future value** — together they can fill historical gaps, recover lost SKUs, and
+  reunite photos with descriptions. After database recovery is exhausted, a photo-set
+  crawler could reconstruct items from images. Low priority by design: collect info
+  now, act only when worthwhile — most likely when affiliate marketing makes even
+  already-sold items displayable assets.
+
+**A7 — Rotating offline drive tier (Dave's HDD stack + holster).**
+*Do:* label partitions (`TGW-SENTRY-01`…), a `tgw-offline-sync@.service` triggered by
+the corresponding systemd mount unit: rsync of ItemData + db dumps + secrets bundle +
+config to the mounted drive, freshness stamp written, **auto-unmount-safe completion
+notification** so the drive can be pulled and shelved. Inventory the existing attached
+USB drives and assign sentry roles while at it.
+*Done when:* inserting a labeled drive produces a logged, stamped sync with no further
+operator action, twice.
+
+**A8 — GDrive dedupe (precondition for quota headroom).**
+*Do:* chunked `rclone dedupe --by-hash` per subdirectory (timeout-proof), or hand the
+chunk list to Antigravity as a bounded batch task; merge recovered strays into
+`data/history`. *Done when:* `rclone about dbukove:` shows the duplicate space freed and
+a spot-check finds no same-name twins.
 
 ### Phase A result
 

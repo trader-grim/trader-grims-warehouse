@@ -802,7 +802,17 @@ unprocessed SUGGESTIONS.md entries into todo / plan-append / review-flag disposi
 Claude's review. Cross-index todo ↔ filed-doc links.
 
 **Phase 3 (later):** binaries with vision classification; whole-folder submissions as one
-unit; Antigravity batch jobs for large backlogs.
+unit; Antigravity batch jobs for large backlogs; **URL/URI submissions** (Dave 2026-06-11
+18:25 — pm_intake accepts a link, fetches the content, files/classifies it like a doc).
+
+**Admin skills expansion (Dave, 2026-06-11 18:23 — Phase 3+/4 scope):** like a real-life
+admin, the project admin should also handle **presentation and aggregation**: spreadsheets,
+charts, SKU groupings too complicated for the generic tgw filters, topic summaries,
+research consolidations, basic project documentation work — on request ("even you could
+request topic summaries"). Builds on the same dispatcher; routes to large-context
+providers (Gemini/Antigravity) per PP-MULTIMODEL-001. Constraint: outputs are *artifacts
+filed in the vault* (reports, sheets), never direct writes to curated data
+(PP-REVISION-001 governing principle).
 
 **Invariants:** writes only inside the plan vault (pm_intake's existing rule); originals
 never destroyed (move, never rewrite-in-place; `processed/` archive retained);
@@ -2480,6 +2490,12 @@ app — barcode scan + template select + camera trigger in one UI; no third-part
 
 ### PP-TODO-001 — Multi-agent TODO tracker (`tgw todo`)
 
+**Agent rename (Dave, 2026-06-11 18:34):** `db` agent renamed **`sokoban`** (warehouseman)
+— existing item delegated, future physical/warehouse tasks use `tgw todo sokoban`.
+Dave also flagged that many admin tasks live in plan tables but not the tracker — same
+two-surface gap as Round-5 rows (handoff risk 9); seed operator items as todos when
+rounds are created, same rule as Claude items.
+
 #### Problem
 Tasks and reminders are captured in `tgw suggest` / SUGGESTIONS.md but there is no structured
 command to list open TODOs by agent or priority — items mix with ideas and require full plan
@@ -3056,6 +3072,19 @@ items currently) — see PP-STORAGE-001 backfill follow-up.
 `ebay_stage` creates UNPUBLISHED Seller Hub offer; `ebay_price` auto-enqueues it. `stage_draft()` + `publish_offer()` split in `sync.py`. `tgw staged` → operator review → `tgw publish <sku>`.
 
 ### PP-REVISION-001 — Live listing revision / update draft (design open)
+
+**Governing principle (Dave, 2026-06-11 18:12 — candidate for Settled architecture once
+the first implementation proves it):** for any editable record, changes are made to a
+**draft**, never to the curated data directly. Draft → review → queue for application →
+applied after approval. New listings approved this way enter the **Ready queue** and are
+listed at the configured dole-out rate (PP-EDITOR-001). This holds for every surface —
+TGW item data, eBay, Facebook Marketplace, whatever comes: **the current curated data
+never has changes applied without review. Agents may update an assigned draft and pull
+attributes from any source, but never write to the item's data directly.** Possibly
+multiple drafts per record. (Context: the shipping-data recovery process will inform
+shipping pricing for new items/revaluation, but that recovery flow is an exception, not
+the normal processing pattern.)
+
 - Three distinct workflows identified: new listing draft | live listing revision | ended→relist
 - Revision needs: known baseline (live state synced from eBay), proposed delta, drift visibility
 - Draft for new listing (`draft_listing`) is a historical record after publish — not the revision staging area
@@ -3063,6 +3092,9 @@ items currently) — see PP-STORAGE-001 backfill follow-up.
 - Relist: inventory item already exists on eBay; need fresh pricing + new offer; structurally re-create not update
 - `ebay_offer` block now established (PP-PRICE-001) — proceed when ready
 - Auto-sync: when offer fields are edited locally (price, condition, aspects), changes should push to eBay without requiring manual Seller Hub edits — design must prevent overwriting live state not yet pulled (depends on PP-SYNC-001 sync pass being authoritative first)
+- Note (2026-06-11): the draft-review-apply principle above intersects PP-EDITOR-001
+  (Ready state, rate-limited dole-out) and PP-DOCFLOW-001 (agents-write-drafts-only) —
+  whichever is designed first carries the principle into code
 
 ### PP-SYNC-001 ✅ ALL PHASES COMPLETE (2026-06-04)
 Core principle: every eBay-side ID/URL written back to item JSON immediately after API call. All matches by `listing_id` directly — never through catalog. Four phases done: `ebay_sync` write-back (6h) · `tgw ebay-pull` on-demand CLI · `tgw import-sold-csv` (2-year max, archive tombstone pass built) · `tgw ebay-sweep` physical review checklist (3 groups, clickable links, `--output`). Tier 3 (physical sweep) operator-gated; Tier 4 webhook code done, infra pending.
