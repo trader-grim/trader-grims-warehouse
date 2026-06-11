@@ -721,11 +721,67 @@ Pipeline hygiene + Flutter backend gap.
 | 41 | — | `category-groups.json` store categories (GEMINI-006): populate `store_category` for `tools_hand`, `electronics_adapters_chargers`, `electronics_remotes`, `kitchen_utensils` | XS |
 | 42 | — | Data scrub: scan `description_history` for "John F. Rider" and generic boilerplate contamination (GEMINI-004); report affected SKUs; strip contamination strings | S |
 | 43 | PP-FULFILLMENT-001 | Standard Envelope constraint (≤0.25 in thick, uniform): wire into `_resolve_fulfillment_id()` as a size/category gate; add note to CATEGORY-QUIRKS.md | S |
-| 44 | PP-CAPTURE-001 | `GET /form/suggest`: minimal web form endpoint for punctuation-safe suggestion entry (bash quoting workaround for operators) | S |
+| ✅ 44 | PP-CAPTURE-001 | `GET/POST /form/suggest` — punctuation-safe suggestion web form; plain HTML (no JS), network-trust like `/form/intake`; reuses `cmd_suggest()`; whitespace collapsed to keep one checklist line per entry; 5 tests; suite 480 — **DONE session 24 (uncommitted, pending review)** | S |
 | 45 | — | `TGW-Quickstart.md` pipe examples: add `--skus-only` / stdin `-` / multi-SKU patterns; note `tgw enqueue-sku` queue-first path | XS |
 | 46 | — | Ledger ops-query ergonomics (from runbook work 2026-06-10): `queue_job_history` has no `queue_name` (per-queue history needs `JOIN queue_jobs USING (job_id)`) and uses `created_at`; job columns are `payload_json`/`error_code`/`error_detail` (not `payload`/`last_error`). Fix: add SQL views to `queue/schema.sql` (e.g. `v_dead_letters`, `v_job_history` with queue_name) and/or a `tgw queue history` subcommand so operators stop hand-writing joins; `docs/runbooks/` already uses the correct join form | S |
 | ✅ 47 | PP-SHELL-001 | **DONE 2026-06-11 (session 23).** Canonical hyphenated names adopted; deprecated aliases kept. `tgw search TEXT` added. Quickstart updated. Key findings: (1) `statusupdate VALUE SKUS...` — value-first is intentional for multi-SKU; kept as-is, documented. (2) `enqueue-sku QUEUE SKUS...` — queue-first is correct (you target a queue, not an item); quickstart was wrong and is now fixed. (3) `ebay-pull` has no scoping — deferred (needs design). (4) Nested-field CLI writes → HTTP PATCH / MC extfs path (PP-CONTEXT-001, not CLI). (5) `requeue` is ai_identify-only but generically named — leave for PP-SHELL-001 Tier 3. Canonical rename table: `titleupdate`→`update-title`, `locationupdate`→`update-location`, `verifiedupdate`→`update-verified`, `statusupdate`→`update-status`, `setshipping`→`set-shipping`, `whispertosuggest`→`whisper-suggest`. | M |
 | ✅ 48 | PP-CONTEXT-001 | **DONE 2026-06-11 (session 23).** `tgw set-context <sku>` / `tgw get-context [--sku-only]` / `tgw clear-context`. Primary store: `runtime/state/current-item.json` `{sku, set_at, set_by}`. Compat symlinks (`/opt/TGW/CurrentItem`, `CurrentItem.json`) maintained atomically via temp+os.replace. Legacy symlink fallback preserved in `get-context`. `tgw_sku` → `tgw get-context --sku-only`. `tgwset` → `tgw set-context`. `set-template` updated to use `context.current_sku(cfg)`. 20 tests in `test_context.py`. `CurrentLocation` dropped (derive location from SKU via `tgw resolve`). | M |
+
+### Track 1 — Round 6 (session 24)
+
+**Input:** Round 5 fully drained except rows 40–43/45 (seeded as todos session 24). Suite 480.
+Lint-policy incident (session 24): bare `ruff check` mutated 8 files because pyproject set
+`fix = true` — root cause removed; see #49.
+
+| # | PP | Task | Size |
+|---|----|------|------|
+| ✅ 49 | — | Lint policy hardening — **DONE session 24**: `fix = true` removed from pyproject (a bare `ruff check` must never mutate the tree; fixes are explicit via `ruff check --fix`); `systemd/history/` excluded (archived dead scripts, not lint-gated); the 8 pending isort autofixes kept and committed separately from feature work | XS |
+| 50 | — | `tools/migrate_batch.py` is broken as-is (8 F821s: `os`/`requests`/`time` never imported, `BULK_MIGRATE_URL` undefined — looks like a pasted fragment, no `main`): either repair it or, if superseded by the `ebay_sku_migrate` worker, archive it out of the lint path. Decide before fixing | S |
+| 51 | — | `tools/repair_itemdata_json.py`: backslash escape inside f-string is Python-3.12-only syntax (host runs 3.11 — the script cannot even parse today) + unused `nxt` variable; fix both, or archive if the one-shot repair is done | XS |
+| 52 | PP-DOCFLOW-001 | **Design session with Dave** for the unified LLM document/suggestion intake admin (see new `### PP-DOCFLOW-001` section below): scope the MVP, settle pm_intake replace-vs-wrap, pick provider routing + budget, define the review-flag surface | M |
+
+### PP-DOCFLOW-001 — Unified LLM document + suggestion intake ("knowledgeable flexible admin")
+
+**Origin (Dave, 2026-06-11 session 24):** one LLM path for documents AND suggestions — a
+knowledgeable, flexible admin layer. Use the new off-platform compute (OpenRouter / Gemini /
+Antigravity) to offload this work and free local Ollama capacity; keep costs down but take
+advantage of all resources. The LLM should file documents that must retain their formatting
+into the right place, or flag them for Claude's or Dave's review.
+
+**Current state (what this extends/replaces):**
+- `pm_intake` (local Ollama qwen2.5, CPU-only, slow) patches the plan from inbox notes —
+  it treats *everything* as plan-patch material, so formatted research results get
+  summarized into the plan instead of *filed*.
+- Suggestions (`tgw suggest`/`note`/`btw` + `/form/suggest`, new session 24) append to
+  SUGGESTIONS.md and wait for Claude's session-start pass — token cost + latency.
+- The **unified model dispatcher shipped session 23** (Ollama/OpenRouter/Gemini routing for
+  ai_identify/alt_text) — the provider-agnostic plumbing this needs already exists.
+
+**Design sketch (discuss at Round 6 #52 before building):**
+1. **One intake path** — inbox docs and suggestions feed the same classifier stage.
+2. **Classify:** suggestion | plan-note | research-result | reference-doc | unknown.
+3. **Route by class:**
+   - suggestion / plan-note → plan patch (today's pm_intake behavior);
+   - research-result / reference-doc → **file with formatting preserved** to the right
+     vault location (`reference/`, `perplexity/`, `dev-workflow/research/`) + an index
+     line and plan pointer — never reflow the original;
+   - unknown / low-confidence → **flag for review** (Claude todo or Dave), don't guess.
+4. **Provider routing** via the session-23 dispatcher: free/cheap cloud first
+   (`openrouter/free`, Gemini Flash) per the PP-MULTIMODEL-001 LLM-routing principle;
+   local Ollama becomes the fallback — freeing CPU for vision/pipeline work.
+5. **Audit trail:** every action logged (what, filed where, by which model, confidence) —
+   reviewable the way `identification_history` is.
+6. **Cost control:** cloud calls are small classify/route prompts only — never bulk
+   content rewriting; per-run token caps; batch processing.
+
+**Invariants:** writes only inside the plan vault (pm_intake's existing rule); originals
+never destroyed (move + archive to `processed/`, never rewrite-in-place); flag-don't-guess
+on low confidence.
+
+**Open questions for the design session:** replace pm_intake or wrap it? Review-flag
+surface (todo entry? a vault `review/` folder? `/form/todos` integration?)? Should
+suggestions be auto-processed continuously or batched for session start? Which decisions
+stay Claude-only (e.g. plan *structure* changes vs leaf additions)?
 
 ### Track 2 — Gemini CLI (large-context data + self-contained tasks)
 **Status 2026-06-10 update**: Google One → **Google AI Plus** with compute-based limits (5-hour

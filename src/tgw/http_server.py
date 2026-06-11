@@ -1029,6 +1029,64 @@ def todos_form(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# GET/POST /form/suggest — punctuation-safe suggestion entry (PP-CAPTURE-001,
+# Round 5 #44). Plain HTML form: no JS, no shell quoting, no Bearer auth
+# (network trust, like /form/intake and /form/todos).
+# ---------------------------------------------------------------------------
+
+
+def _render_suggest_html(msg: str = "", ok: bool = False) -> str:
+    """Build the suggestion-entry page; optionally show a result banner."""
+    import html as _html
+
+    banner = ""
+    if msg:
+        cls = "ok" if ok else "err"
+        banner = f'<div class="msg {cls}" style="display:block">{_html.escape(msg)}</div>'
+    return (
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<title>TGW Suggest</title><style>' + _INTAKE_FORM_CSS + '</style></head><body>'
+        '<h2>Add Suggestion</h2>'
+        '<form method="post" action="/form/suggest">'
+        '<label>Suggestion — any punctuation is safe here</label>'
+        '<textarea name="text" required autofocus placeholder="idea, task, note ..."></textarea>'
+        '<button class="btn" type="submit">Add to SUGGESTIONS.md</button>'
+        '</form>'
+        + banner +
+        '</body></html>'
+    )
+
+
+@app.get("/form/suggest")
+def suggest_form():
+    """Suggestion-entry form — appends to vault SUGGESTIONS.md via cmd_suggest."""
+    from fastapi.responses import HTMLResponse
+
+    return HTMLResponse(_render_suggest_html())
+
+
+@app.post("/form/suggest")
+async def suggest_submit(request: Request):
+    """Handle the form post. Whitespace (including newlines from the textarea)
+    is collapsed to single spaces so every entry stays one `- [ ]` checklist
+    line — multi-line text would break SUGGESTIONS.md's per-line format."""
+    from fastapi.responses import HTMLResponse
+
+    from .api import cmd_suggest
+
+    form = await request.form()
+    text = " ".join(str(form.get("text", "")).split())
+    if not text:
+        return HTMLResponse(_render_suggest_html("empty suggestion — nothing written"))
+    try:
+        result = cmd_suggest(_cfg, text)
+    except Exception as exc:  # vault path missing/unwritable → report, don't 500
+        return HTMLResponse(_render_suggest_html(f"write failed: {exc}"))
+    return HTMLResponse(_render_suggest_html(f"added: {result['written']}", ok=True))
+
+
+# ---------------------------------------------------------------------------
 # POST /webhooks/ebay/notification — eBay push notification (no Bearer auth)
 # ---------------------------------------------------------------------------
 

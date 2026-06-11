@@ -185,6 +185,7 @@ def env(tmp_path, monkeypatch, queue_rows):
         "location_tree_root": location_tree_root,
         "thumbnail_root": thumbnail_root,
         "category_groups_path": str(groups_path),
+        "plan_vault_path": tmp_path / "vault",
         "postgres_dsn": "postgresql://fake/db",
         "pretty": True,
         "raw": {},
@@ -698,6 +699,58 @@ def test_todos_form_escapes_html(client, monkeypatch):
     assert r.status_code == 200
     assert "<script>alert" not in r.text          # raw tag must not appear
     assert "&lt;script&gt;" in r.text             # escaped form present
+
+
+# ---------------------------------------------------------------------------
+# PP-CAPTURE-001 — GET/POST /form/suggest (Round 5 #44) — no Bearer (network trust)
+# ---------------------------------------------------------------------------
+
+def _suggestions_file(env):
+    return env["cfg"]["plan_vault_path"] / "suggestions" / "SUGGESTIONS.md"
+
+
+def test_suggest_form_html(client):
+    r = client.get("/form/suggest")  # no auth header — network trust
+    assert r.status_code == 200
+    assert 'name="text"' in r.text
+    assert 'action="/form/suggest"' in r.text
+
+
+def test_suggest_post_appends_with_punctuation(env):
+    tricky = 'add "quotes" & $(subshell) `backticks` | pipes; --flags \'single\''
+    r = env["client"].post("/form/suggest", data={"text": tricky})
+    assert r.status_code == 200
+    assert "added:" in r.text
+    content = _suggestions_file(env).read_text(encoding="utf-8")
+    assert tricky in content                       # written verbatim
+    assert content.startswith("- [ ] ")            # checklist format intact
+
+
+def test_suggest_post_collapses_newlines_to_one_line(env):
+    r = env["client"].post(
+        "/form/suggest", data={"text": "line one\r\nline two\n\nline three"}
+    )
+    assert r.status_code == 200
+    content = _suggestions_file(env).read_text(encoding="utf-8")
+    lines = [ln for ln in content.splitlines() if ln.strip()]
+    assert len(lines) == 1                         # one checklist line, not four
+    assert "line one line two line three" in lines[0]
+
+
+def test_suggest_post_empty_writes_nothing(env):
+    r = env["client"].post("/form/suggest", data={"text": "   "})
+    assert r.status_code == 200
+    assert "nothing written" in r.text
+    assert not _suggestions_file(env).exists()
+
+
+def test_suggest_post_escapes_echo_but_writes_raw(env):
+    payload = "<script>alert(1)</script>"
+    r = env["client"].post("/form/suggest", data={"text": payload})
+    assert r.status_code == 200
+    assert payload not in r.text                   # echo is HTML-escaped
+    assert "&lt;script&gt;" in r.text
+    assert payload in _suggestions_file(env).read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
