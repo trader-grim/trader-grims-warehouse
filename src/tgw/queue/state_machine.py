@@ -387,6 +387,59 @@ def dead_letter_jobs(queue_name: str = '', limit: int = 100) -> List[Dict[str, A
             return [dict(r) for r in cur.fetchall()]
 
 
+def job_history(
+    sku: str = '',
+    queue_name: str = '',
+    job_id: str = '',
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    """Return v_job_history rows filtered by SKU, queue, or job_id.
+
+    Exactly one of sku/queue_name/job_id should be supplied.
+    """
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if job_id:
+                cur.execute(
+                    """
+                    SELECT history_id, job_id::text, queue_name, entity_type, entity_id,
+                           operation, current_state, old_state, new_state, transition,
+                           worker_id, message, error_code, error_detail, payload_json, created_at
+                      FROM v_job_history
+                     WHERE job_id = %s::uuid
+                     ORDER BY history_id ASC
+                    """,
+                    (job_id,),
+                )
+            elif sku:
+                cur.execute(
+                    """
+                    SELECT history_id, job_id::text, queue_name, entity_type, entity_id,
+                           operation, current_state, old_state, new_state, transition,
+                           worker_id, message, error_code, error_detail, payload_json, created_at
+                      FROM v_job_history
+                     WHERE entity_id = %s
+                     ORDER BY job_id, history_id ASC
+                     LIMIT %s
+                    """,
+                    (sku, limit),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT history_id, job_id::text, queue_name, entity_type, entity_id,
+                           operation, current_state, old_state, new_state, transition,
+                           worker_id, message, error_code, error_detail, payload_json, created_at
+                      FROM v_job_history
+                     WHERE (%s = '' OR queue_name = %s)
+                     ORDER BY history_id DESC
+                     LIMIT %s
+                    """,
+                    (queue_name, queue_name, limit),
+                )
+            return [dict(r) for r in cur.fetchall()]
+
+
 def requeue_dead_letter_job(job_id: str) -> str:
     """Re-enqueue a dead_letter job by cloning its payload into a fresh queued job.
 

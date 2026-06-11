@@ -560,6 +560,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--requeue-transient", dest="requeue_transient", action="store_true", help="re-enqueue ALL dead_letter jobs classified [transient] (honors --queue)")
     p.add_argument("--cancel", default="", metavar="QUEUE", help="cancel all dead_letter jobs in a queue")
 
+    p = sub.add_parser("queue-history", help="show job state-transition history for a SKU, queue, or job ID (v_job_history)")
+    p.add_argument("sku", nargs="?", default="", help="SKU to look up (shows all pipeline jobs for this item)")
+    p.add_argument("--queue", default="", metavar="QUEUE", help="filter by queue name")
+    p.add_argument("--job-id", default="", dest="job_id", metavar="JOB_ID", help="full job UUID — show all transitions for one job")
+    p.add_argument("--limit", type=int, default=100, metavar="N", help="max history rows to return (default 100)")
+    p.add_argument("--json", action="store_true", dest="json_out", help="output raw JSON")
+
     p = sub.add_parser("build-fingerprints", help="build the visual fingerprint index over thumbnails (PP-VISION-001)")
     p.add_argument("--limit", type=int, default=None, metavar="N", help="index at most N thumbnails (for a quick partial build)")
     p.add_argument("--check-only", action="store_true", dest="check_only", help="report what would be indexed without writing")
@@ -1130,6 +1137,49 @@ def cmd_dead_letter(
 
     print(f"\n{len(jobs)} dead_letter job(s). Use --requeue JOB_ID or --cancel QUEUE to act.")
     return {"ok": True, "count": len(jobs), "jobs": [{**j, "payload_json": dict(j["payload_json"] or {}), "verdict": classify_dead_letter(j.get("error_detail") or "")[0]} for j in jobs]}
+
+
+def cmd_queue_history(
+    cfg: Dict[str, Any],
+    *,
+    sku: str = '',
+    queue: str = '',
+    job_id: str = '',
+    limit: int = 100,
+    json_out: bool = False,
+) -> Dict[str, Any]:
+    """Show job state-transition history from v_job_history."""
+    from tgw.queue import state_machine
+
+    state_machine.init(cfg['postgres_dsn'])
+    rows = state_machine.job_history(sku=sku, queue_name=queue, job_id=job_id, limit=limit)
+
+    if not rows:
+        label = sku or job_id or queue or '(all)'
+        print(f'No history found for {label}.')
+        return {'ok': True, 'count': 0, 'rows': []}
+
+    if json_out:
+        print(json.dumps(rows, indent=2, default=str))
+        return {'ok': True, 'count': len(rows), 'rows': rows}
+
+    # Grouped by job_id for readable output
+    current_job: Optional[str] = None
+    for r in rows:
+        jid = str(r['job_id'])
+        if jid != current_job:
+            current_job = jid
+            ts = str(r['created_at'])[:16]
+            print(f"\n── {r['queue_name']}  {jid[:8]}…  entity={r['entity_id']}  state={r['current_state']}  {ts}")
+        arrow = f"{r['old_state'] or '—'} → {r['new_state']}"
+        ts_short = str(r['created_at'])[11:19]
+        msg = r.get('message') or r.get('error_detail') or ''
+        msg_short = msg.replace('\n', ' ')[:80]
+        suffix = f'  {msg_short}' if msg_short else ''
+        print(f'  {ts_short}  {arrow}{suffix}')
+
+    print(f'\n{len(rows)} transition(s).')
+    return {'ok': True, 'count': len(rows), 'rows': [{**r, 'payload_json': dict(r['payload_json'] or {})} for r in rows]}
 
 
 def cmd_build_fingerprints(cfg: Dict[str, Any], *, limit: Optional[int] = None, check_only: bool = False) -> Dict[str, Any]:
@@ -3260,6 +3310,17 @@ def main() -> int:
                 requeue_id=getattr(args, "requeue", ""),
                 requeue_transient=getattr(args, "requeue_transient", False),
                 cancel_queue=getattr(args, "cancel", ""),
+            )
+            return 0 if result["ok"] else 1
+
+        elif args.op == "queue-history":
+            result = cmd_queue_history(
+                cfg,
+                sku=getattr(args, "sku", ""),
+                queue=getattr(args, "queue", ""),
+                job_id=getattr(args, "job_id", ""),
+                limit=getattr(args, "limit", 100),
+                json_out=getattr(args, "json_out", False),
             )
             return 0 if result["ok"] else 1
 
