@@ -24,6 +24,10 @@ incomplete wiring, and data quality problems that need fixing.
 - **Item IDs**: 327195083346, 327195083374, 327195083408, 327195083423,
   327195083451, 227372145582, 327195085940, 227372145665, 227372145712
 - **Fix**: manual Seller Hub edit per listing (Listings → Edit → Shipping → FC4)
+- **After the edits**: run `sudo -u tgw tgw ebay-pull` to refresh the local mirror, then
+  spot-check one item's `ebay_listing` block to confirm the change is reflected — manual
+  Seller-Hub changes never sync back faster than the 6 h cycle, and this applies to ANY
+  human edit made directly on eBay, not just this issue
 - **Status**: pending operator action
 
 ### ISS-003 — full_catalog_path config mismatch

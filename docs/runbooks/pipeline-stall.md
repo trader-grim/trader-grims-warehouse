@@ -105,6 +105,21 @@ psql -U tgw state_machine -c "
 # Zero-work stall: identify the poison items from the journal, park them
 # (e.g. set a skip flag / fix the data), then restart the worker so the batch refills.
 
+# ebay_sku_migrate interrupted MID-ITEM (delist→rename→relist is non-atomic; a crash
+# between steps can leave an item delisted on eBay and/or half-renamed locally):
+ls -t /opt/TGW/var/log/sku-migrate-*.json | head -1   # manifest written BEFORE the
+                                                       # destructive steps — start here
+# Cross-check all three records for the in-flight SKU:
+#   - manifest entry (original SKU, listing data)
+#   - local state: tgw get <old-sku> and tgw get <new-sku> (which folder exists?)
+#   - eBay state: is the listing ended in Seller Hub?
+psql -U tgw state_machine -c "
+  SELECT * FROM sku_history ORDER BY 1 DESC LIMIT 5;"   # was the rename recorded?
+journalctl -u tgw-worker@ebay_sku_migrate.service --since "-2 hours"
+# Then watch the next hourly run — if it does not pick the item back up, do NOT
+# hand-relist from memory: escalate to a dedicated session with the manifest in hand
+# (it records the original listing data needed for a faithful relist).
+
 # Stage-gap on specific items: re-drive the missing stage
 sudo -u tgw tgw enqueue-sku <queue> <sku>           # one item
 sudo -u tgw tgw requeue --unidentified --run         # bulk: ai_identify

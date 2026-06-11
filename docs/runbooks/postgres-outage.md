@@ -110,6 +110,14 @@ worker code.)
   ledger loss: the ledger is work state, not item state — ItemData JSON is intact, and the
   pipeline can be re-driven (`tgw requeue --unidentified/--no-draft/--no-price --run`)
   to rebuild queue state from item reality.
+  **What re-driving does NOT recover:** `todo_items` (the *canonical task queue* — it
+  lives only in this database), the `queue_job_history` audit trail, and dead-letter
+  forensics. `sku_history` IS reconstructable (rollback manifests at
+  `/opt/TGW/var/log/sku-migrate-*.json` + per-item `source_sku` fields duplicate it).
+  **Prevention (until PP-BACKUP-001 ships):** schedule a daily
+  `pg_dump --format=custom` into the data tree (e.g. `/opt/TGW/var/backups/`) so the file
+  snapshots carry consistent dumps off the live cluster — a one-line cron/systemd timer;
+  see handoff §6.
 - Terminated backends reconnect on their own (workers loop; clients retry).
 
 ## Verification

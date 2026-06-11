@@ -48,7 +48,8 @@ restart affected `tgw-worker@` units after source changes.
   - `pyproject.toml` carries Pillow only in extras while the flake treats it as a base dep.
 - **In-flight constraint:** `ebay_sku_migrate` is mid-migration (~8,350 listings, ~10/h,
   months remaining). It pauses cleanly via config `ebay_sku_migrate.enabled: false`.
-- **Test suite:** 346 passing, ruff clean. eBay token live (scopes locked — never change).
+- **Test suite:** 475 passing as of 2026-06-11 (346 at the original 2026-06-10 verification),
+  ruff clean. eBay token live (scopes locked — never change).
 - **Spare hardware:** one former intake-support machine, already in use as the NixOS
   learning/testing target. **Severe hardware limitation: it cannot run most Ollama
   models** — it validates NixOS structure, configuration, services, and restore mechanics,
@@ -111,8 +112,8 @@ and NixOS familiarity with zero production risk, at the cost of only calendar ti
 
 - **Operator (Dave):** runs everything Nix-related (this dev box has no Nix toolchain);
   bakes/verifies the MX ISO; owns the cutover window; provides spare machine + USB/VM.
-- **Repo state:** suite green at 346 before Phase 0 starts; uncommitted session work
-  committed or stashed at Dave's direction first.
+- **Repo state:** suite fully green before Phase 0 starts (record the count); uncommitted
+  session work committed or stashed at Dave's direction first.
 - **External:** GitHub private repo (site config), Google Drive/rclone remote current,
   eBay token alive (verify before cutover; do **not** request new scopes).
 - **Sequencing:** Phase 1 (MX ISO) before any production change; Phase 5 cutover requires
@@ -308,7 +309,8 @@ ai_identify, catalog_rebuild, thumbnail_gen, velocity_stats`. Recommended: start
 `echo, catalog_rebuild, thumbnail_gen, ai_identify` unmasked.
 *Test coverage:*
 - `tgw health` — everything green except deliberately-masked eBay token checks;
-- `tgw-permissions-reset.sh --check` clean (proves uid 1001 pin);
+- `tgw-permissions-reset.sh --check` clean (proves the uid-900 migration from step 0.6
+  held through the restore — by Phase 4 nothing should be uid 1001 anymore);
 - end-to-end local pipeline **minus inference** (R12: this hardware cannot run the
   models): drop a test photo bundle → intake → catalog_rebuild/thumbnail_gen succeed;
   ai_identify is exercised only as far as job claim + a clean transient requeue on the
@@ -413,7 +415,14 @@ Changes to make (Phase 0.7, small code, normal tests; or noted as post-cutover f
    - worker-fleet check: expected unit list (from `WORKER_QUEUES` + naming pattern of 0.3)
      vs `systemctl list-units` — flags a queue with no live unit (would have caught the
      template/instance rename and catches future drift);
-   - eBay-workers-masked indicator surfaced explicitly, so the R7 rule is observable.
+   - eBay-workers-masked indicator surfaced explicitly, so the R7 rule is observable;
+   - **backup-freshness check**: age of the newest `pg_dump` artifact + last rclone sync
+     timestamp, with a staleness threshold — today *nothing* watches backup age, so a
+     silently-dead backup path is invisible until a restore is needed;
+   - **queue-aging check**: oldest active job per queue + a completions-flatline signal
+     (succeeded-per-hour = 0 while the queue is non-empty) — the generic surfacing of the
+     invariant-D7 zero-work-stall class, currently detectable only by the manual query in
+     `runbooks/pipeline-stall.md`.
 2. **NixOS journald**: ensure persistent journal in the host config
    (`services.journald.extraConfig = "Storage=persistent"`) — worker logs are the primary
    forensic record and must survive reboot.

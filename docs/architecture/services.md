@@ -273,8 +273,9 @@ Conventions used below:
   visible in Seller Hub and `tgw staged`.
 - **External APIs:** eBay Inventory API — PUT inventory_item, POST offer.
 - **Failure modes:** errorId 25021 (condition rejected) → retry with USED_EXCELLENT;
-  25709 prevented by global `Content-Language: en-US`; 25002 Item.Country addressed via
-  `availabilityDistributions` + `merchantLocationKey` (ISS-001 — outcome monitored);
+  25709 prevented by global `Content-Language: en-US`; 25002 Item.Country fixed via
+  `availabilityDistributions` + `merchantLocationKey` (ISS-001 — ✅ resolved 2026-06-11;
+  later 25002-lookalike dead-letters were item-specifics validation errors, see ISSUES.md);
   duplicate-offer risk on items with legacy listings — guarded by skipping
   `ebay_listing.status == Active` (but see ISS-008: legacy resolution data is not
   authoritative).

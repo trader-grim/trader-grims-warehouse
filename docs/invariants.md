@@ -113,6 +113,23 @@ Companion test files added by this review:
 - **How to test:** worker-level tests stub `enqueue_job` and assert it was called with the
   dedupe key (covered incidentally by stage/reducer tests added here).
 
+### A8. Item media files are canonical — mutation requires archive-before-modify ⚠️
+- **Statement:** photos/videos in `ItemData/<SKU>/` are part of the canonical record —
+  EPS re-upload, re-identification, and the visual fingerprint index all depend on the
+  originals. Any operation that renames, overwrites, or derives-in-place a production
+  photo must first copy the original to `data/history/ItemData/<sku>/` (the pattern
+  `tgw alt-text` established 2026-06-11: archive → rename to `<SKU>-alt.jpg`).
+- **Enforced:** per-feature only — the alt-text writer implements archive-then-rename
+  (covered by `tests/test_alt_text.py`); there is **no general fence-level guard** for
+  media writes (A1–A7 cover JSON only).
+- **How it could fail:** a future feature (photo rotation, bulk re-compression, the
+  researched GDrive→EPS pipelines) mutates media directly; a crash between archive and
+  rename leaves a half-renamed photo set.
+- **How to test:** the alt-text tests pin the established pattern. A general guard would
+  require routing media writes through a fence helper — suggestion, not made. Review rule
+  meanwhile: **any diff touching files in a SKU folder other than `<SKU>.json` must show
+  its archive step.**
+
 ---
 
 ## B. Pricing

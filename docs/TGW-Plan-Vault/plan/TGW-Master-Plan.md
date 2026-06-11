@@ -716,7 +716,7 @@ Pipeline hygiene + Flutter backend gap.
 | ✅ 36 | PP-STORAGE-001 | `size_class` backfill — `tgw data-scrub --pass 2 [--write]`; 121 items populated via `ebay_category_id` reverse map; catalog_rebuild enqueued; 13 new tests (`test_scrub.py`); suite 433 — **DONE session 21** | S |
 | ✅ 37 | PP-EDITOR-001 | `GET /api/health` — Bearer-auth; mirrors `check_all()` JSON + `dead_letter_count`; HTTP 503 on failure; 6 new tests; suite 439 — **DONE session 22** | S |
 | ✅ 38 | — | `tgw alt-text <sku> [--model MODEL] [--dry-run]`: Ollama vision → `alt_text` + `seo_caption` in `draft_listing`; original photo archived to `data/history/ItemData/<sku>/` if not there; production photo renamed to `<sku>-alt.jpg`; 16 new tests (`test_alt_text.py`); suite 455 — **DONE session 23** | M |
-| 39 | — | Fix 25002 `Item.Country` dead-letter rejections for categories 34032/14027/13916: investigate and add country origin field to eBay offer body | S |
+| ✅ 39 | — | ~~Fix 25002 `Item.Country` dead-letter rejections~~ — **RESOLVED 2026-06-11 (ISS-001 closed)**: `availabilityDistributions` + `merchantLocationKey` fix (session 9) confirmed working; originally-affected items live via Inventory API. Session-23 25002-lookalikes were item-specifics validation errors on an already-live Trading-API item; all 15 stale dead-letters cleared | S |
 | 40 | — | `category-groups.json` pricing calibration (GEMINI-005): update `electrical_fixtures`→12.50, `media_records`→13.50, `collectibles_pins_buttons`→10.50; run `tgw category-groups --reseed` | XS |
 | 41 | — | `category-groups.json` store categories (GEMINI-006): populate `store_category` for `tools_hand`, `electronics_adapters_chargers`, `electronics_remotes`, `kitchen_utensils` | XS |
 | 42 | — | Data scrub: scan `description_history` for "John F. Rider" and generic boilerplate contamination (GEMINI-004); report affected SKUs; strip contamination strings | S |
@@ -731,6 +731,12 @@ Pipeline hygiene + Flutter backend gap.
 **Status 2026-06-10 update**: Google One → **Google AI Plus** with compute-based limits (5-hour
 refresh window). Keep individual Gemini tasks small and self-contained to avoid hitting the
 compute cap. Also available: **Antigravity/Flow** ✅ CLI configured + v2.0 installed (2026-06-11).
+
+**Antigravity CLI + OpenRouter config (inbox research 2026-06-11):** `agy` reads `~/.gemini/antigravity-cli/settings.json`. Add OpenRouter as a custom provider:
+```json
+{ "llm_providers": { "openrouter": { "base_url": "https://openrouter.ai/api/v1", "api_key": "YOUR_KEY", "default_model": "openrouter/free" } } }
+```
+Google Drive access via: (a) Google Workspace MCP (add to `~/.gemini/config/mcp_config.json`), or (b) rclone mount at a local directory (`cd ~/mnt/gdrive && agy`). The rclone approach is simpler since ItemData is already synced to GDrive. Both methods confirmed working in `agy` CLI.
 
 **How to delegate to Gemini**: Write a self-contained task file with all needed context
 baked in (no live system access). Drop data excerpts, schemas, and the task description.
