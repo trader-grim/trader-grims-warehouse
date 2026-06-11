@@ -2845,8 +2845,9 @@ encompass all backup concerns (config, secrets, ItemData, logs, databases, syste
 - PP-NIXOS-001 (system rebuild context)
 
 #### Status
-**PLAN WRITTEN 2026-06-11 (session 24)** — full plan at `docs/plans/PLAN-backup-dr.md`
-(DRAFT, awaiting Dave's approval). Host audit found: local snapshot tier healthy
+**PLAN APPROVED 2026-06-11 (session 24)** — full plan at `docs/plans/PLAN-backup-dr.md`
+(approved by Dave same day, after amendment through all 13 session-24 suggestions;
+Phase A build unblocked = todo #60). Host audit found: local snapshot tier healthy
 (dedicated 699 G disk, current); cloud tier **27 days stale** (manual rclone only);
 **ledger has zero dumps**; **secrets have no backup at all**. Phase A (MX-now: pg_dump
 timer, scheduled rclone with --backup-dir trash, gpg-encrypted secrets bundle,

@@ -1,9 +1,12 @@
 # PLAN: Backup, archiving, and disaster recovery (PP-BACKUP-001)
 
-**Status:** DRAFT for Dave's review — designed 2026-06-11 (session 24), verified against
-the live host (disks, services, rclone state, dump inventory checked — not assumed from
-docs). Companion to `PLAN-nixos-migration.md`; **Phase C of this plan is a hard
-requirement of that one** (the completed strategy must be declarative in the Nix flake).
+**Status: APPROVED by Dave 2026-06-11 (session 24).** Designed and verified against the
+live host the same day (disks, services, rclone state, dump inventory checked — not
+assumed from docs); amended through all 13 of the day's suggestions before approval.
+Companion to `PLAN-nixos-migration.md`; **Phase C of this plan is a hard requirement of
+that one** (the completed strategy must be declarative in the Nix flake).
+Phase A build = todo #60 (Claude); operator items = todo #61 (approval ✅ done; remaining:
+passphrase custody, history-point preserve gate, timer install after #60, drills).
 
 Executor notes: house rules apply — no commits until Dave asks, `tgw health` after
 config/worker changes, operator applies all systemd/root-level changes.
