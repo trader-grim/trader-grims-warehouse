@@ -738,50 +738,73 @@ Lint-policy incident (session 24): bare `ruff check` mutated 8 files because pyp
 | ✅ 49 | — | Lint policy hardening — **DONE session 24**: `fix = true` removed from pyproject (a bare `ruff check` must never mutate the tree; fixes are explicit via `ruff check --fix`); `systemd/history/` excluded (archived dead scripts, not lint-gated); the 8 pending isort autofixes kept and committed separately from feature work | XS |
 | 50 | — | `tools/migrate_batch.py` is broken as-is (8 F821s: `os`/`requests`/`time` never imported, `BULK_MIGRATE_URL` undefined — looks like a pasted fragment, no `main`): either repair it or, if superseded by the `ebay_sku_migrate` worker, archive it out of the lint path. Decide before fixing | S |
 | 51 | — | `tools/repair_itemdata_json.py`: backslash escape inside f-string is Python-3.12-only syntax (host runs 3.11 — the script cannot even parse today) + unused `nxt` variable; fix both, or archive if the one-shot repair is done | XS |
-| 52 | PP-DOCFLOW-001 | **Design session with Dave** for the unified LLM document/suggestion intake admin (see new `### PP-DOCFLOW-001` section below): scope the MVP, settle pm_intake replace-vs-wrap, pick provider routing + budget, define the review-flag surface | M |
+| ✅ 52 | PP-DOCFLOW-001 | **Design session HELD 2026-06-11 (session 24)** — all four open questions settled by Dave; design recorded below; Phase 1 build seeded as todo | M |
+| 53 | PP-DOCFLOW-001 | **Phase 1 build** (todo #59): port pm_intake to `call_model()` + Gemini routing (Ollama fallback); `file_document` / `flag_for_review` actions; `new_section`→review-flag (append-only); submission-delay gate + `tgw admin-file [--now]`; FILING-LOG.md index; audit trail; offline tests | M |
 
-### PP-DOCFLOW-001 — Unified LLM document + suggestion intake ("knowledgeable flexible admin")
+### PP-DOCFLOW-001 — The TGW Project Admin (LLM document + suggestion intake)
 
-**Origin (Dave, 2026-06-11 session 24):** one LLM path for documents AND suggestions — a
-knowledgeable, flexible admin layer. Use the new off-platform compute (OpenRouter / Gemini /
-Antigravity) to offload this work and free local Ollama capacity; keep costs down but take
-advantage of all resources. The LLM should file documents that must retain their formatting
-into the right place, or flag them for Claude's or Dave's review.
+**Status: DESIGN SETTLED 2026-06-11 (session 24 design session with Dave). Phase 1 ready to build.**
 
-**Current state (what this extends/replaces):**
-- `pm_intake` (local Ollama qwen2.5, CPU-only, slow) patches the plan from inbox notes —
-  it treats *everything* as plan-patch material, so formatted research results get
-  summarized into the plan instead of *filed*.
-- Suggestions (`tgw suggest`/`note`/`btw` + `/form/suggest`, new session 24) append to
-  SUGGESTIONS.md and wait for Claude's session-start pass — token cost + latency.
-- The **unified model dispatcher shipped session 23** (Ollama/OpenRouter/Gemini routing for
-  ai_identify/alt_text) — the provider-agnostic plumbing this needs already exists.
+**Mental model (Dave, session 24):** model this tool as a **real-life project admin** — the
+best ones always have the plan ready to be worked on: all docs filed and readily available,
+**cross-indexed to the appropriate tasks**. Ours will just be better. When we move to
+planning, everything — thoughts, notes, files, binaries — is collected and easily
+accessible. It is an admin function, but a *knowledgeable* admin: it knows where or what a
+doc is.
 
-**Design sketch (discuss at Round 6 #52 before building):**
-1. **One intake path** — inbox docs and suggestions feed the same classifier stage.
-2. **Classify:** suggestion | plan-note | research-result | reference-doc | unknown.
-3. **Route by class:**
-   - suggestion / plan-note → plan patch (today's pm_intake behavior);
-   - research-result / reference-doc → **file with formatting preserved** to the right
-     vault location (`reference/`, `perplexity/`, `dev-workflow/research/`) + an index
-     line and plan pointer — never reflow the original;
-   - unknown / low-confidence → **flag for review** (Claude todo or Dave), don't guess.
-4. **Provider routing** via the session-23 dispatcher: free/cheap cloud first
-   (`openrouter/free`, Gemini Flash) per the PP-MULTIMODEL-001 LLM-routing principle;
-   local Ollama becomes the fallback — freeing CPU for vision/pipeline work.
-5. **Audit trail:** every action logged (what, filed where, by which model, confidence) —
-   reviewable the way `identification_history` is.
-6. **Cost control:** cloud calls are small classify/route prompts only — never bulk
-   content rewriting; per-run token caps; batch processing.
+**Decisions (Dave, 2026-06-11):**
+1. **Evolve pm_intake in place** — same worker/queue/unit, ported to the session-23
+   dispatcher (`tgw.apis.llm.call_model`), action vocabulary extended. Compute is no
+   longer a constraint: route to fast capable Gemini, "go overboard" — well under $1/mo
+   at classification-prompt sizes. (Note: pm_intake is currently **enabled + active** on
+   local Ollama — verified session 24; the remembered disable-to-reserve-compute is not
+   in effect.)
+2. **Review surface = the admin pattern**: filed docs land in the right vault location;
+   anything uncertain goes to `inbox/review/` + a todo pointing at it. Any fall-through
+   is cleaned up in the normal session-start ritual (the existing safety net).
+3. **Trigger model — batched, not continuous:**
+   - **Auto-run as planning prep** (before a planning/Claude session) and
+   - **manually triggerable** (`tgw admin-file`) — e.g. after dumping a stack of research.
+   - **Submission-delay window**: items must age N hours before absorption — gives the
+     human submitter a chance to correct a hasty submission *before group resources are
+     spent on it* (manual trigger can override with `--now`).
+4. **Suggestions: batched at session start** (Phase 2) — the admin pre-classifies;
+   Claude reviews dispositions instead of raw entries.
+5. **Plan writes: append-only.** The cloud model may `append_to_section`; `new_section`
+   and anything structural becomes a review flag. (This *tightens* current pm_intake,
+   which can create sections today.)
+
+**Scope notes from the session:** intake accepts anything — "a one word comment or a
+folder full of docs and binaries." Binaries (photos, PDFs, zips) are in scope: filed by
+type/context (the dispatcher already supports vision for image classification when
+needed — later phase). Cross-indexing means filed docs get index entries linking them to
+the relevant PP-* items / tasks, so planning sessions start with material attached.
+
+**Phase 1 (MVP — build next; seeded as todo):**
+- Port `pm_intake` from direct `ollama.chat()` to `call_model('pm_intake', ...)`;
+  set `tgw-models.json`: `pm_intake → openrouter / google/gemini-2.5-flash`
+  (Ollama stays the automatic fallback — frees CPU for vision/pipeline).
+- Extend actions: `no_change | append_to_section | flag_for_review | file_document`
+  (`new_section` demoted to a review flag per decision 5).
+- `file_document`: move the file **verbatim** (never reflow) to
+  `reference/` / `perplexity/` / `dev-workflow/research/`; append an entry to a filing
+  log/index (`reference/FILING-LOG.md`: date, source, destination, related PP-*, model,
+  confidence); optional one-line plan pointer (append-only).
+- `flag_for_review`: move to `inbox/review/` + create a todo (agent claude or dave).
+- Submission-delay gate (mtime-based, configurable, e.g. 4 h) + `tgw admin-file [--now]`
+  manual trigger.
+- Audit trail on every action (the `identification_history` pattern).
+
+**Phase 2:** suggestions join the path — session-start batch pass pre-classifies
+unprocessed SUGGESTIONS.md entries into todo / plan-append / review-flag dispositions for
+Claude's review. Cross-index todo ↔ filed-doc links.
+
+**Phase 3 (later):** binaries with vision classification; whole-folder submissions as one
+unit; Antigravity batch jobs for large backlogs.
 
 **Invariants:** writes only inside the plan vault (pm_intake's existing rule); originals
-never destroyed (move + archive to `processed/`, never rewrite-in-place); flag-don't-guess
-on low confidence.
-
-**Open questions for the design session:** replace pm_intake or wrap it? Review-flag
-surface (todo entry? a vault `review/` folder? `/form/todos` integration?)? Should
-suggestions be auto-processed continuously or batched for session start? Which decisions
-stay Claude-only (e.g. plan *structure* changes vs leaf additions)?
+never destroyed (move, never rewrite-in-place; `processed/` archive retained);
+flag-don't-guess on low confidence; plan writes append-only.
 
 ### Track 2 — Gemini CLI (large-context data + self-contained tasks)
 **Status 2026-06-10 update**: Google One → **Google AI Plus** with compute-based limits (5-hour
