@@ -1,9 +1,12 @@
 """
-tgw.alt_text — generate alt_text + seo_caption via Ollama vision.
+tgw.alt_text — generate alt_text + seo_caption via vision model.
+
+Provider and model are configured in tgw-models.json under the "alt_text" key.
+Defaults: openrouter / google/gemini-2.5-flash.
 
 Workflow:
   1. Find primary image in ItemData/<sku>/
-  2. Call Ollama vision → parse {alt_text, seo_caption}
+  2. Call vision model → parse {alt_text, seo_caption}
   3. Archive original image to data/history/ItemData/<sku>/ if not already there
   4. Rename production image to <sku>-alt.jpg
   5. Write alt_text + seo_caption to item['draft_listing']
@@ -18,14 +21,12 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-import requests
-
+from tgw.apis.llm import call_model, get_task_model
 from tgw.apis.ollama import extract_json, is_available
-from tgw.queue.ollama_lock import acquire_ollama_lock
 
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
-_VISION_MAX_PX = 512
-_DEFAULT_MODEL = "qwen2.5vl:7b"
+_VISION_MAX_PX = 512  # Ollama (memory-constrained CPU)
+_OR_MAX_PX = 768      # OpenRouter (quality matters more)
 _ALT_STEM_SUFFIX = "-alt"  # final image name: <sku>-alt.jpg
 
 _SYSTEM_PROMPT = "You are an expert in web accessibility and SEO. Respond with valid JSON only — no markdown fences, no commentary."
@@ -39,9 +40,17 @@ _USER_PROMPT = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Image helpers
+# ---------------------------------------------------------------------------
+
+
 def _primary_image(sku_dir: Path) -> Optional[Path]:
     """Return the first non-alt image in the SKU directory, sorted by name."""
-    candidates = sorted(p for p in sku_dir.iterdir() if p.is_file() and p.suffix.lower() in _IMAGE_SUFFIXES and not p.stem.endswith(_ALT_STEM_SUFFIX))
+    candidates = sorted(
+        p for p in sku_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in _IMAGE_SUFFIXES and not p.stem.endswith(_ALT_STEM_SUFFIX)
+    )
     return candidates[0] if candidates else None
 
 
@@ -66,17 +75,25 @@ def _history_sku_dir(cfg: Dict[str, Any], sku: str) -> Path:
     return itemdata_root.parent / "history" / "ItemData" / sku
 
 
+# ---------------------------------------------------------------------------
+# Main command
+# ---------------------------------------------------------------------------
+
+
 def cmd_alt_text(
     cfg: Dict[str, Any],
     sku: str,
     model: Optional[str] = None,
+    provider: Optional[str] = None,
     dry_run: bool = False,
 ) -> Dict[str, Any]:
     """Generate alt_text + seo_caption for one item and rename its primary image."""
     from .items import atomic_write_json
 
-    if not model:
-        model = _DEFAULT_MODEL
+    # Resolve provider/model (CLI overrides → models config → _DEFAULTS)
+    resolved_provider, resolved_model = get_task_model(cfg, 'alt_text')
+    provider = provider or resolved_provider
+    model = model or resolved_model
 
     itemdata_root = Path(cfg["itemdata_root"])
     sku_dir = itemdata_root / sku
@@ -87,7 +104,7 @@ def cmd_alt_text(
 
     item = json.loads(json_path.read_text(encoding="utf-8"))
 
-    # Idempotency: if already processed, skip
+    # Idempotency: skip if already fully processed
     alt_path = sku_dir / f"{sku}{_ALT_STEM_SUFFIX}.jpg"
     if alt_path.exists() and item.get("draft_listing", {}).get("alt_text"):
         return {
@@ -108,6 +125,7 @@ def cmd_alt_text(
             "ok": True,
             "dry_run": True,
             "sku": sku,
+            "provider": provider,
             "model": model,
             "image": img_path.name,
             "alt_path_would_be": str(alt_path),
@@ -115,25 +133,18 @@ def cmd_alt_text(
             "history_path": str(history_path),
         }
 
-    if not is_available(model):
+    # Fail-fast: check Ollama availability before expensive encoding
+    if provider != "openrouter" and not is_available(model):
         return {"ok": False, "error": f"Ollama unavailable or model {model!r} not found"}
 
-    img_b64 = _encode_resized(img_path)
+    max_px = _OR_MAX_PX if provider == "openrouter" else _VISION_MAX_PX
+    img_b64 = _encode_resized(img_path, max_px=max_px)
 
-    with acquire_ollama_lock(cfg):
-        resp = requests.post(
-            "http://localhost:11434/api/generate",
-            json={
-                "model": model,
-                "prompt": _USER_PROMPT,
-                "system": _SYSTEM_PROMPT,
-                "images": [img_b64],
-                "stream": False,
-            },
-            timeout=600,
-        )
-    resp.raise_for_status()
-    raw = resp.json()["response"]
+    try:
+        raw = call_model('alt_text', _SYSTEM_PROMPT, _USER_PROMPT, cfg,
+                         img_b64=img_b64, provider=provider, model=model)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
     try:
         result = extract_json(raw)
@@ -170,10 +181,11 @@ def cmd_alt_text(
     return {
         "ok": True,
         "sku": sku,
+        "provider": provider,
+        "model": model,
         "alt_text": alt_text,
         "seo_caption": seo_caption,
         "image_renamed": f"{img_path.name} → {alt_path.name}",
         "archived_to_history": archived,
         "history_path": str(history_path),
-        "model": model,
     }

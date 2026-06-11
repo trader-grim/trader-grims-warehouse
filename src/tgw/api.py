@@ -596,10 +596,22 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pass", dest="scrub_pass", type=int, default=1, metavar="N", help="which scrub pass to run (1=#VERIFIED→verified; 2=size_class backfill)")
     p.add_argument("--write", action="store_true", help="apply changes (default: dry-run only)")
 
-    p = sub.add_parser("alt-text", help="generate alt_text + seo_caption via Ollama vision; rename primary image to <sku>-alt.jpg and archive original to history")
+    p = sub.add_parser(
+        "alt-text",
+        help="generate alt_text + seo_caption via vision model; rename primary image to <sku>-alt.jpg and archive original to history",
+    )
     p.add_argument("sku", help="SKU to process")
-    p.add_argument("--model", default=None, help="Ollama vision model to use (default: qwen2.5vl:7b)")
-    p.add_argument("--dry-run", action="store_true", help="show what would happen without calling Ollama or writing files")
+    p.add_argument("--model", default=None, help="vision model ID (default: google/gemini-2.5-flash)")
+    p.add_argument("--provider", default=None, choices=["openrouter", "ollama"], help="provider (default: openrouter)")
+    p.add_argument("--dry-run", action="store_true", help="show what would happen without calling the model or writing files")
+
+    p = sub.add_parser(
+        "alt-text-batch",
+        help="bulk-enqueue alt_text jobs for items that need processing (existing catalog)",
+    )
+    p.add_argument("--limit", type=int, default=500, metavar="N", help="max items to enqueue (default: 500; 0 = all eligible)")
+    p.add_argument("--dry-run", action="store_true", help="count eligible items without enqueuing")
+    p.add_argument("--status", default="", metavar="STATUS", help="filter to items with this #STATUS value (e.g. 'live')")
 
     p = sub.add_parser("todo", help="multi-agent TODO tracker (PP-TODO-001)")
     p.add_argument("agent", nargs="?", default=None, help="filter by agent: claude, admin, gemini, db (omit for all)")
@@ -2334,6 +2346,89 @@ def cmd_mvitems(
     }
 
 
+def _cmd_alt_text_batch(cfg: Dict[str, Any], args: Any) -> Dict[str, Any]:
+    """Enqueue alt_text jobs for all eligible items in the catalog."""
+    import psycopg2.errors
+
+    from tgw.queue import state_machine
+
+    limit = args.limit
+    dry_run = args.dry_run
+    filter_status = args.status.strip()
+
+    itemdata_root = Path(cfg["itemdata_root"])
+    enqueued = 0
+    skipped = 0
+    eligible = 0
+
+    for sku_dir in sorted(itemdata_root.iterdir()):
+        if not sku_dir.is_dir():
+            continue
+        sku = sku_dir.name
+        json_path = sku_dir / f"{sku}.json"
+        if not json_path.exists():
+            continue
+
+        try:
+            item = json.loads(json_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+        # Filter by status if requested
+        if filter_status:
+            status = str(item.get("#STATUS") or item.get("status") or "")
+            if status != filter_status:
+                continue
+
+        # Skip if already has alt_text
+        if item.get("draft_listing", {}).get("alt_text"):
+            skipped += 1
+            continue
+
+        # Skip if no photo
+        from tgw.alt_text import _ALT_STEM_SUFFIX, _primary_image
+
+        alt_path = sku_dir / f"{sku}{_ALT_STEM_SUFFIX}.jpg"
+        if alt_path.exists():
+            skipped += 1
+            continue
+        if _primary_image(sku_dir) is None:
+            skipped += 1
+            continue
+
+        eligible += 1
+        if limit and eligible > limit:
+            break
+
+        if not dry_run:
+            try:
+                state_machine.enqueue_job(
+                    queue_name="alt_text",
+                    payload={"sku": sku},
+                    dedupe_key=f"alt_text:{sku}",
+                    max_attempts=3,
+                )
+                enqueued += 1
+            except psycopg2.errors.UniqueViolation:
+                skipped += 1
+
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "eligible": eligible,
+            "skipped_already_done": skipped,
+            "would_enqueue": eligible,
+            "note": "run without --dry-run to enqueue",
+        }
+    return {
+        "ok": True,
+        "enqueued": enqueued,
+        "skipped_already_done": skipped,
+        "eligible_found": eligible,
+    }
+
+
 def cmd_set_template(
     cfg: Dict[str, Any],
     *,
@@ -3125,8 +3220,12 @@ def main() -> int:
                 cfg,
                 sku=args.sku,
                 model=args.model,
+                provider=args.provider,
                 dry_run=args.dry_run,
             )
+
+        elif args.op == "alt-text-batch":
+            result = _cmd_alt_text_batch(cfg, args)
 
         elif args.op == "todo":
             from tgw.todo import cmd_todo

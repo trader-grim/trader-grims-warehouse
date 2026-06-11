@@ -1,11 +1,9 @@
-"""Tests for tgw.alt_text — Ollama vision alt-text generation."""
+"""Tests for tgw.alt_text — vision alt-text generation (OpenRouter + Ollama)."""
 
 from __future__ import annotations
 
 import json
-from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import tgw.alt_text as alt_text_mod
 from tgw.alt_text import cmd_alt_text
@@ -48,25 +46,10 @@ def _add_photo(cfg: dict, sku: str, name: str | None = None) -> Path:
     return p
 
 
-@contextmanager
-def _noop_lock(cfg):
-    yield
-
-
-def _fake_post(response_text: str):
-    """Return a requests.post mock that returns the given JSON text."""
-    mock_resp = MagicMock()
-    mock_resp.raise_for_status = MagicMock()
-    mock_resp.json.return_value = {"response": response_text}
-    mock = MagicMock(return_value=mock_resp)
-    return mock
-
-
-def _patch_vision(monkeypatch):
-    """Apply the three patches needed for every Ollama-calling test."""
-    monkeypatch.setattr(alt_text_mod, "is_available", lambda m: True)
-    monkeypatch.setattr(alt_text_mod, "acquire_ollama_lock", _noop_lock)
+def _patch_vision(monkeypatch, response: str = _GOOD_RESPONSE):
+    """Patch encoding + call_model; pass response to simulate model output."""
     monkeypatch.setattr(alt_text_mod, "_encode_resized", lambda p, max_px=512: "AABB==")
+    monkeypatch.setattr(alt_text_mod, "call_model", lambda *a, **kw: response)
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +71,7 @@ class TestAltText:
         assert result["ok"] is False
         assert "no primary image" in result["error"]
 
-    def test_dry_run_does_not_write(self, tmp_path, monkeypatch):
+    def test_dry_run_does_not_write(self, tmp_path):
         cfg = _make_cfg(tmp_path)
         _make_item(cfg, "tgw001")
         photo = _add_photo(cfg, "tgw001")
@@ -117,7 +100,6 @@ class TestAltText:
         _make_item(cfg, "tgw001")
         _add_photo(cfg, "tgw001")
         _patch_vision(monkeypatch)
-        monkeypatch.setattr(alt_text_mod.requests, "post", _fake_post(_GOOD_RESPONSE))
 
         result = cmd_alt_text(cfg, sku="tgw001", model=_DUMMY_MODEL)
         assert result["ok"] is True
@@ -130,7 +112,6 @@ class TestAltText:
         _make_item(cfg, "tgw001")
         photo = _add_photo(cfg, "tgw001", name="tgw001.jpg")
         _patch_vision(monkeypatch)
-        monkeypatch.setattr(alt_text_mod.requests, "post", _fake_post(_GOOD_RESPONSE))
 
         result = cmd_alt_text(cfg, sku="tgw001", model=_DUMMY_MODEL)
         assert result["ok"] is True
@@ -143,7 +124,6 @@ class TestAltText:
         _make_item(cfg, "tgw001")
         _add_photo(cfg, "tgw001", name="tgw001.jpg")
         _patch_vision(monkeypatch)
-        monkeypatch.setattr(alt_text_mod.requests, "post", _fake_post(_GOOD_RESPONSE))
 
         result = cmd_alt_text(cfg, sku="tgw001", model=_DUMMY_MODEL)
         assert result["archived_to_history"] is True
@@ -159,14 +139,13 @@ class TestAltText:
         hist_dir.mkdir(parents=True)
         (hist_dir / "tgw001.jpg").write_bytes(b"old")
         _patch_vision(monkeypatch)
-        monkeypatch.setattr(alt_text_mod.requests, "post", _fake_post(_GOOD_RESPONSE))
 
         result = cmd_alt_text(cfg, sku="tgw001", model=_DUMMY_MODEL)
         assert result["archived_to_history"] is False
         # Original history file unchanged
         assert (hist_dir / "tgw001.jpg").read_bytes() == b"old"
 
-    def test_idempotent_skip_when_already_processed(self, tmp_path, monkeypatch):
+    def test_idempotent_skip_when_already_processed(self, tmp_path):
         cfg = _make_cfg(tmp_path)
         _make_item(cfg, "tgw001", {"draft_listing": {"alt_text": "already set"}})
         sku_dir = Path(cfg["itemdata_root"]) / "tgw001"
@@ -179,8 +158,7 @@ class TestAltText:
         cfg = _make_cfg(tmp_path)
         _make_item(cfg, "tgw001")
         _add_photo(cfg, "tgw001")
-        _patch_vision(monkeypatch)
-        monkeypatch.setattr(alt_text_mod.requests, "post", _fake_post("Sorry, I cannot describe this."))
+        _patch_vision(monkeypatch, response="Sorry, I cannot describe this.")
 
         result = cmd_alt_text(cfg, sku="tgw001", model=_DUMMY_MODEL)
         assert result["ok"] is False
@@ -190,9 +168,8 @@ class TestAltText:
         cfg = _make_cfg(tmp_path)
         _make_item(cfg, "tgw001")
         _add_photo(cfg, "tgw001")
-        _patch_vision(monkeypatch)
         empty = json.dumps({"alt_text": "", "seo_caption": "something"})
-        monkeypatch.setattr(alt_text_mod.requests, "post", _fake_post(empty))
+        _patch_vision(monkeypatch, response=empty)
 
         result = cmd_alt_text(cfg, sku="tgw001", model=_DUMMY_MODEL)
         assert result["ok"] is False
@@ -202,10 +179,9 @@ class TestAltText:
         cfg = _make_cfg(tmp_path)
         _make_item(cfg, "tgw001")
         _add_photo(cfg, "tgw001")
-        _patch_vision(monkeypatch)
         long_text = "A" * 200
         response = json.dumps({"alt_text": long_text, "seo_caption": "cap"})
-        monkeypatch.setattr(alt_text_mod.requests, "post", _fake_post(response))
+        _patch_vision(monkeypatch, response=response)
 
         result = cmd_alt_text(cfg, sku="tgw001", model=_DUMMY_MODEL)
         assert result["ok"] is True
@@ -217,7 +193,7 @@ class TestAltText:
         _add_photo(cfg, "tgw001")
         monkeypatch.setattr(alt_text_mod, "is_available", lambda m: False)
 
-        result = cmd_alt_text(cfg, sku="tgw001", model=_DUMMY_MODEL)
+        result = cmd_alt_text(cfg, sku="tgw001", model=_DUMMY_MODEL, provider="ollama")
         assert result["ok"] is False
         assert "Ollama unavailable" in result["error"]
 
@@ -237,7 +213,6 @@ class TestAltText:
         _make_item(cfg, "tgw001")
         _add_photo(cfg, "tgw001", name="product-photo-front.jpg")
         _patch_vision(monkeypatch)
-        monkeypatch.setattr(alt_text_mod.requests, "post", _fake_post(_GOOD_RESPONSE))
 
         result = cmd_alt_text(cfg, sku="tgw001", model=_DUMMY_MODEL)
         assert "product-photo-front.jpg" in result["image_renamed"]
