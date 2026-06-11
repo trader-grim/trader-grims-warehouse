@@ -158,5 +158,6 @@
 - [x] 2026-06-11T06:38 :: llm routing — added as design principle to PP-MULTIMODEL-001: route alt-text/enrichment to best available provider (Ollama local, Antigravity, OpenRouter, Gemini) based on load/cost/capability; design as a router layer so workers are provider-agnostic
 - [x] 2026-06-11T07:06 :: masterarchive repaired — ✅ hardware alert in Track 4 updated to resolved; tgw history-index work is now unblocked
 - [x] 2026-06-11T07:51 :: lets try Gemini 1.5 Flash for vision tasks. — tested via scripts/alt_text_model_test.py; `google/gemini-1.5-flash` model ID is obsolete. Current best is `google/gemini-2.5-flash` (2.9s avg, 100% pass, excellent quality) — already set as `alt_text_model` default in config.py and OpenRouter worker
-- [ ] 2026-06-11T09:14 :: tailscale installed
-- [ ] 2026-06-11T10:06 :: review zero bandwidth upload strategy antigravity/gdrive/eps doc in inbox
+- [x] 2026-06-11T09:14 :: tailscale installed — ✅ marked Track 4 Priority 3 Tailscale checkbox done; PP-REMOTE-001 note updated
+- [x] 2026-06-11T10:06 :: review zero bandwidth upload strategy antigravity/gdrive/eps doc in inbox — added to PP-DATALEARN-001 as "zero-bandwidth GDrive→EPS upload strategy" note; UploadSiteHostedPictures + Antigravity CLI approach; flagged for PP-PHOTO-001
+- [ ] 2026-06-11T11:10 :: in tgw help there are a lot of options now. The help is good but grouping the commands by similar functions might make them easier to read through.

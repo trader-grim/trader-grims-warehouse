@@ -724,8 +724,8 @@ Pipeline hygiene + Flutter backend gap.
 | 44 | PP-CAPTURE-001 | `GET /form/suggest`: minimal web form endpoint for punctuation-safe suggestion entry (bash quoting workaround for operators) | S |
 | 45 | — | `TGW-Quickstart.md` pipe examples: add `--skus-only` / stdin `-` / multi-SKU patterns; note `tgw enqueue-sku` queue-first path | XS |
 | 46 | — | Ledger ops-query ergonomics (from runbook work 2026-06-10): `queue_job_history` has no `queue_name` (per-queue history needs `JOIN queue_jobs USING (job_id)`) and uses `created_at`; job columns are `payload_json`/`error_code`/`error_detail` (not `payload`/`last_error`). Fix: add SQL views to `queue/schema.sql` (e.g. `v_dead_letters`, `v_job_history` with queue_name) and/or a `tgw queue history` subcommand so operators stop hand-writing joins; `docs/runbooks/` already uses the correct join form | S |
-| 47 | PP-SHELL-001 | `tgw` command-set review (findings session 20, see PP-CONTEXT-001 + notes below): inconsistent arg order (`update SKU FIELD VALUE` vs `statusupdate VALUE SKUS...`); concatenated vs hyphenated naming (`statusupdate`/`locationupdate` vs `dead-letter`/`set-template`); no top-level `search` (only `list --search`/`resolve --search`); no CLI path for nested-field writes (dotted paths like `draft_listing.condition_enum` need HTTP PATCH/MC extfs); `ebay-pull` has no per-SKU/limit scoping. Go over the full ~60-subcommand set, decide canonical names + deprecation aliases, document in quickstart | M |
-| 48 | PP-CONTEXT-001 | Replace legacy `tgwset` current-item mechanism (design with Dave first — see PP-CONTEXT-001) | M |
+| ✅ 47 | PP-SHELL-001 | **DONE 2026-06-11 (session 23).** Canonical hyphenated names adopted; deprecated aliases kept. `tgw search TEXT` added. Quickstart updated. Key findings: (1) `statusupdate VALUE SKUS...` — value-first is intentional for multi-SKU; kept as-is, documented. (2) `enqueue-sku QUEUE SKUS...` — queue-first is correct (you target a queue, not an item); quickstart was wrong and is now fixed. (3) `ebay-pull` has no scoping — deferred (needs design). (4) Nested-field CLI writes → HTTP PATCH / MC extfs path (PP-CONTEXT-001, not CLI). (5) `requeue` is ai_identify-only but generically named — leave for PP-SHELL-001 Tier 3. Canonical rename table: `titleupdate`→`update-title`, `locationupdate`→`update-location`, `verifiedupdate`→`update-verified`, `statusupdate`→`update-status`, `setshipping`→`set-shipping`, `whispertosuggest`→`whisper-suggest`. | M |
+| ✅ 48 | PP-CONTEXT-001 | **DONE 2026-06-11 (session 23).** `tgw set-context <sku>` / `tgw get-context [--sku-only]` / `tgw clear-context`. Primary store: `runtime/state/current-item.json` `{sku, set_at, set_by}`. Compat symlinks (`/opt/TGW/CurrentItem`, `CurrentItem.json`) maintained atomically via temp+os.replace. Legacy symlink fallback preserved in `get-context`. `tgw_sku` → `tgw get-context --sku-only`. `tgwset` → `tgw set-context`. `set-template` updated to use `context.current_sku(cfg)`. 20 tests in `test_context.py`. `CurrentLocation` dropped (derive location from SKU via `tgw resolve`). | M |
 
 ### Track 2 — Gemini CLI (large-context data + self-contained tasks)
 **Status 2026-06-10 update**: Google One → **Google AI Plus** with compute-based limits (5-hour
@@ -780,6 +780,14 @@ auto-route to the shortest-queue free vision model. Rate limit: ~20 req/min on f
 Prompt template: "Act as an expert in web accessibility and SEO. Analyze this image and
 provide a concise, descriptive alt-text (max 150 characters). Describe the main subject,
 setting, and context accurately without using fluff words like 'image of'..."
+
+**Zero-bandwidth GDrive→EPS upload strategy (inbox research 2026-06-11):** ItemData is rclone-synced
+to Google Drive. Photos can flow directly from Drive to eBay Picture Services without local download:
+eBay's `UploadSiteHostedPictures` (Trading API) accepts image data via API upload; Antigravity CLI
+(`agy`) can be scripted to fetch image bytes from Drive API and POST to EPS in one pass. Requirements:
+eBay Trading API access (currently have `sell.inventory` + Trading credentials), Google Drive API
+scope in OAuth client. Relevant for PP-PHOTO-001 (bulk photo re-upload / migration) — evaluate when
+Planning that phase. Source: `inbox/queued/20260611T093715-antigravity-remote-execution-direct-gdrive-to-eps.md`.
 
 **LLM routing principle (session 21–22):** OpenRouter provides built-in meta-model endpoints:
 `openrouter/auto` (NotDiamond-powered, routes by task complexity; session-sticky for multi-turn),
@@ -1048,12 +1056,9 @@ See PP-PERP-AUTO-001 section for design.
   # Test: Caps Lock on macroboard → LED changes
   ```
 
-- [ ] **Tailscale** (remote access, PP-REMOTE-001):
-  ```
-  curl -fsSL https://tailscale.com/install.sh | sh
-  sudo tailscale up
-  # Join your Tailscale account; verify tgw-http reachable from remote device
-  ```
+- [x] **Tailscale** ✅ installed 2026-06-11 (PP-REMOTE-001):
+  Tailscale installed and configured. Verify `tgw-http` reachable over Tailscale from remote
+  devices; verify `tgw-macro` works over SSH. SSH hardening (key-only, sudoers) still open.
 
 - [ ] **eBay webhook endpoint** (PP-SOLD-001 Tier 4 — reduces sold-detection latency from daily → seconds):
   First check if you have a static public IP:
@@ -1702,7 +1707,7 @@ between "workers finished" and "operator knows what to do next."
 - Rule of thumb: if it's not interactive/session-specific, it belongs as a `pyproject.toml` console script in the package, not a bash alias
 - Outcome: `tgw.source` is a thin convenience layer on the `tgw` CLI; no parallel API surviving alongside it
 
-### PP-CONTEXT-001 — Current-item context: `tgwset` replacement (design open, 2026-06-10)
+### PP-CONTEXT-001 ✅ DONE 2026-06-11 — Current-item context: `tgwset` replacement
 Dave: the legacy `tgw set` (shell `tgwset` in `tgw.source`) sets an item persistently
 systemwide so multiple operations can target it. It works but is fragile — needs a new
 strategy, likely replaced, and the replacement must be **idempotent**.

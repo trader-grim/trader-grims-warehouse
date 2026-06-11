@@ -185,3 +185,9 @@ def queue_dir(cfg: Dict[str, Any], queue_name: str) -> Path:
     """Canonical path for a named queue directory."""
     runtime_root = Path(cfg["raw"].get("runtime_root", "/opt/TGW/runtime"))
     return runtime_root / "state" / "queues" / queue_name
+
+
+def context_state_path(cfg: Dict[str, Any]) -> Path:
+    """Canonical path for the current-item context state file."""
+    runtime_root = Path(cfg["raw"].get("runtime_root", "/opt/TGW/runtime"))
+    return runtime_root / "state" / "current-item.json"

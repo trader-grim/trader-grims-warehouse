@@ -71,8 +71,9 @@ The pipeline flow (each stage enqueues the next):
 
 ### Drive / re-drive the pipeline
 
-- `tgw enqueue-sku SKU QUEUE` — enqueue one pipeline action for one SKU. QUEUE is any
-  pipeline queue (`ai_identify`, `ebay_draft`, `ebay_price`, `ebay_stage`, ...).
+- `tgw enqueue-sku QUEUE SKU...` — enqueue pipeline action(s). QUEUE first, then one or
+  more SKUs (or `-` to read from stdin). Queues: `ai_identify`, `ebay_draft`, `ebay_price`,
+  `ebay_stage`, `ebay_publish`, `alt_text`, ...
 - `tgw hint SKU TEXT...` — set an `ai_hint` and re-queue identification. `--force`
   re-identifies even if already `ai_identified`.
 - `tgw hint-trail SKU` — show the identification history for an item.
@@ -84,15 +85,23 @@ The pipeline flow (each stage enqueues the next):
 ### Inspect / edit one item
 
 - `tgw get SKU` — full item record by SKU.
+- `tgw search TEXT` — text search (shorthand for `list --search TEXT`). `--location`,
+  `--status`, `--limit N` (default 20), `--skus-only`.
 - `tgw update SKU FIELD VALUE` — update one field on one item. `--check-only`.
-- `tgw titleupdate SKU VALUE` — update the title field. `--check-only`.
-- `tgw locationupdate SKU LOCATION` — update location + rebuild tree link. `--check-only`.
-- `tgw verifiedupdate SKU VALUE` — update VERIFIED (writes `verified` + `#STATUS=In Stock`).
-- `tgw statusupdate VALUE SKU...` — set `#STATUS` on one or more items. `--check-only`.
-- `tgw setshipping SKU VALUE` — per-item `shipping_profile` override (PP-HINT-001); VALUE
+- `tgw update-title SKU VALUE` — update the title field. `--check-only`.
+- `tgw update-location SKU LOCATION` — update location + rebuild tree link. `--check-only`.
+- `tgw update-verified SKU VALUE` — update VERIFIED (writes `verified` + `#STATUS=In Stock`).
+- `tgw update-status VALUE SKU...` — set `#STATUS` on one or more items. Note: VALUE
+  comes first so multiple SKUs can follow. `--check-only`.
+- `tgw set-shipping SKU VALUE` — per-item `shipping_profile` override (PP-HINT-001); VALUE
   is a profile name or raw fulfillment policy id. `--check-only`.
 - `tgw quality SKU...` — listing-quality score for one or more items (PP-QUALITY-001).
   `--save` writes the score back to `draft_listing`.
+- `tgw queue-history SKU` — show pipeline state-transition history for an item.
+  `--queue Q`, `--job-id UUID`, `--limit N`, `--json`.
+
+> **Deprecated aliases** (still work; use hyphenated forms above): `titleupdate`,
+> `locationupdate`, `verifiedupdate`, `statusupdate`, `setshipping`, `whispertosuggest`.
 
 ---
 
@@ -173,7 +182,7 @@ The pipeline flow (each stage enqueues the next):
 ### eBay auth notes
 
 - OAuth user token is refreshed by the `token_refresh` worker, stored in `secrets_root`.
-- All Inventory API PUT/POST require the `Content-Language: en-US` header.
+- All Inventory API PUT/POST include `Content-Language: en-US` (set centrally in `client.py`).
 - Approved scopes are **locked** — do not add scopes speculatively (it has broken OAuth).
 - Paste the redirect URL at the Python `→` input() prompt, not in bash.
 
@@ -217,8 +226,8 @@ The pipeline flow (each stage enqueues the next):
 
 - `tgw perp-run [brief_id]` — load a Perplexity research-brief prompt to clipboard
   (PP-PERP-AUTO-001). `--list` to list briefs.
-- `tgw whispertosuggest WAVFILE` — transcribe a WAV via whisper-cli and file it as a
-  suggestion (PP-WHISPER-001). `--model PATH`.
+- `tgw whisper-suggest WAVFILE` — transcribe a WAV via whisper-cli and file it as a
+  suggestion (PP-WHISPER-001). `--model PATH`. (Alias: `whispertosuggest`.)
 
 ---
 

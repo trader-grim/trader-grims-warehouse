@@ -30,6 +30,7 @@ from .catalog import (
     load_search_catalog,
 )
 from .config import DEFAULT_CONFIG, load_config
+from .context import clear_context, get_context, set_context
 from .health import check_all
 from .items import (
     catlocmvall,
@@ -298,6 +299,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--skus-only", action="store_true", dest="skus_only", help="output one SKU per line (pipe-friendly)")
 
+    p = sub.add_parser("search", help="search items by text (shorthand for list --search TEXT)")
+    p.add_argument("text", help="search text")
+    p.add_argument("--location", default="")
+    p.add_argument("--status", default="")
+    p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--skus-only", action="store_true", dest="skus_only")
+
     p = sub.add_parser("resolve", help="resolve identifiers to a set of SKUs")
     p.add_argument("--sku", default=None)
     p.add_argument("--location", default=None)
@@ -326,31 +334,37 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--search", default=None)
     p.add_argument("--check-only", action="store_true")
 
-    # --- tgw.source replacements ---
-    p = sub.add_parser("titleupdate", help="update title field on one item")
-    p.add_argument("sku")
-    p.add_argument("value")
-    p.add_argument("--check-only", action="store_true")
+    # --- tgw.source replacements (canonical hyphenated names; concatenated forms are aliases) ---
+    for _name in ("update-title", "titleupdate"):
+        p = sub.add_parser(_name, help="update title field on one item" + (" (deprecated alias)" if _name == "titleupdate" else ""))
+        p.add_argument("sku")
+        p.add_argument("value")
+        p.add_argument("--check-only", action="store_true")
 
-    p = sub.add_parser("locationupdate", help="update location and rebuild tree link")
-    p.add_argument("sku")
-    p.add_argument("location")
-    p.add_argument("--check-only", action="store_true")
+    for _name in ("update-location", "locationupdate"):
+        p = sub.add_parser(_name, help="update location and rebuild tree link" + (" (deprecated alias)" if _name == "locationupdate" else ""))
+        p.add_argument("sku")
+        p.add_argument("location")
+        p.add_argument("--check-only", action="store_true")
 
-    p = sub.add_parser("verifiedupdate", help="update VERIFIED field")
-    p.add_argument("sku")
-    p.add_argument("value")
-    p.add_argument("--check-only", action="store_true")
+    for _name in ("update-verified", "verifiedupdate"):
+        p = sub.add_parser(_name, help="update VERIFIED field" + (" (deprecated alias)" if _name == "verifiedupdate" else ""))
+        p.add_argument("sku")
+        p.add_argument("value")
+        p.add_argument("--check-only", action="store_true")
 
-    p = sub.add_parser("statusupdate", help="update #STATUS field on one or more items")
-    p.add_argument("value", help='new status value (e.g. "In Stock", "Sold")')
-    p.add_argument("skus", nargs="+", help="one or more SKUs to update")
-    p.add_argument("--check-only", action="store_true", help="validate without writing")
+    # update-status VALUE SKU... — value-first is intentional: "set all these items to this status"
+    for _name in ("update-status", "statusupdate"):
+        p = sub.add_parser(_name, help="update #STATUS field on one or more items" + (" (deprecated alias)" if _name == "statusupdate" else ""))
+        p.add_argument("value", help='new status value (e.g. "In Stock", "Sold")')
+        p.add_argument("skus", nargs="+", help="one or more SKUs to update")
+        p.add_argument("--check-only", action="store_true", help="validate without writing")
 
-    p = sub.add_parser("setshipping", help="set per-item shipping_profile override (PP-HINT-001)")
-    p.add_argument("sku")
-    p.add_argument("value", help="profile name (mapped via fulfillment_policy_by_profile) or a raw fulfillment policy id")
-    p.add_argument("--check-only", action="store_true", help="validate without writing")
+    for _name in ("set-shipping", "setshipping"):
+        p = sub.add_parser(_name, help="set per-item shipping_profile override (PP-HINT-001)" + (" (deprecated alias)" if _name == "setshipping" else ""))
+        p.add_argument("sku")
+        p.add_argument("value", help="profile name (mapped via fulfillment_policy_by_profile) or a raw fulfillment policy id")
+        p.add_argument("--check-only", action="store_true", help="validate without writing")
 
     p = sub.add_parser("picklist", help="location-sorted picking list (PP-FULFILLMENT-001)")
     p.add_argument("--status", default="", help="filter by status")
@@ -368,9 +382,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("brief_id", nargs="?", help="brief id or substring (e.g. PERPLEXITY-001); omit to list")
     p.add_argument("--list", dest="list_briefs", action="store_true", help="list available briefs")
 
-    p = sub.add_parser("whispertosuggest", help="transcribe a WAV via whisper-cli and file it as a suggestion (PP-WHISPER-001)")
-    p.add_argument("wavfile", help="path to an audio file")
-    p.add_argument("--model", default=None, help="path to ggml whisper model (default from config)")
+    for _name in ("whisper-suggest", "whispertosuggest"):
+        p = sub.add_parser(_name, help="transcribe a WAV via whisper-cli and file it as a suggestion (PP-WHISPER-001)" + (" (deprecated alias)" if _name == "whispertosuggest" else ""))
+        p.add_argument("wavfile", help="path to an audio file")
+        p.add_argument("--model", default=None, help="path to ggml whisper model (default from config)")
 
     p = sub.add_parser("claude-help", help="launch a Claude troubleshooting session with TGW context (PP-CLAUDE-HELP-001)")
     p.add_argument("issue", nargs="?", default="", help="describe the problem (optional)")
@@ -591,6 +606,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("category_id", nargs="?", default=None, help="look up which group a specific eBay category ID belongs to")
     p.add_argument("--list", action="store_true", help="list all groups with category counts and pricing")
     p.add_argument("--reseed", action="store_true", help="re-seed pricing.typical_used from current velocity-stats.json")
+
+    # --- current-item context (PP-CONTEXT-001) ---
+    p = sub.add_parser("set-context", help="set current-item context to a SKU (replaces tgwset)")
+    p.add_argument("sku", help="full SKU (tgwYYYYMMDDHHMMSSmmm)")
+
+    p = sub.add_parser("get-context", help="show current-item context (replaces tgw_sku)")
+    p.add_argument("--sku-only", action="store_true", dest="sku_only", help="print bare SKU and exit (pipe-friendly; exits 1 if not set)")
+
+    sub.add_parser("clear-context", help="clear current-item context")
 
     p = sub.add_parser("set-template", help="apply category group defaults to an item (PP-INTAKE-001 Phase 1)")
     p.add_argument("group_key", nargs="?", default=None, help='category group key (e.g. "electronics", "books"); omit to use current template')
@@ -1142,44 +1166,44 @@ def cmd_dead_letter(
 def cmd_queue_history(
     cfg: Dict[str, Any],
     *,
-    sku: str = '',
-    queue: str = '',
-    job_id: str = '',
+    sku: str = "",
+    queue: str = "",
+    job_id: str = "",
     limit: int = 100,
     json_out: bool = False,
 ) -> Dict[str, Any]:
     """Show job state-transition history from v_job_history."""
     from tgw.queue import state_machine
 
-    state_machine.init(cfg['postgres_dsn'])
+    state_machine.init(cfg["postgres_dsn"])
     rows = state_machine.job_history(sku=sku, queue_name=queue, job_id=job_id, limit=limit)
 
     if not rows:
-        label = sku or job_id or queue or '(all)'
-        print(f'No history found for {label}.')
-        return {'ok': True, 'count': 0, 'rows': []}
+        label = sku or job_id or queue or "(all)"
+        print(f"No history found for {label}.")
+        return {"ok": True, "count": 0, "rows": []}
 
     if json_out:
         print(json.dumps(rows, indent=2, default=str))
-        return {'ok': True, 'count': len(rows), 'rows': rows}
+        return {"ok": True, "count": len(rows), "rows": rows}
 
     # Grouped by job_id for readable output
     current_job: Optional[str] = None
     for r in rows:
-        jid = str(r['job_id'])
+        jid = str(r["job_id"])
         if jid != current_job:
             current_job = jid
-            ts = str(r['created_at'])[:16]
+            ts = str(r["created_at"])[:16]
             print(f"\n── {r['queue_name']}  {jid[:8]}…  entity={r['entity_id']}  state={r['current_state']}  {ts}")
         arrow = f"{r['old_state'] or '—'} → {r['new_state']}"
-        ts_short = str(r['created_at'])[11:19]
-        msg = r.get('message') or r.get('error_detail') or ''
-        msg_short = msg.replace('\n', ' ')[:80]
-        suffix = f'  {msg_short}' if msg_short else ''
-        print(f'  {ts_short}  {arrow}{suffix}')
+        ts_short = str(r["created_at"])[11:19]
+        msg = r.get("message") or r.get("error_detail") or ""
+        msg_short = msg.replace("\n", " ")[:80]
+        suffix = f"  {msg_short}" if msg_short else ""
+        print(f"  {ts_short}  {arrow}{suffix}")
 
-    print(f'\n{len(rows)} transition(s).')
-    return {'ok': True, 'count': len(rows), 'rows': [{**r, 'payload_json': dict(r['payload_json'] or {})} for r in rows]}
+    print(f"\n{len(rows)} transition(s).")
+    return {"ok": True, "count": len(rows), "rows": [{**r, "payload_json": dict(r["payload_json"] or {})} for r in rows]}
 
 
 def cmd_build_fingerprints(cfg: Dict[str, Any], *, limit: Optional[int] = None, check_only: bool = False) -> Dict[str, Any]:
@@ -2545,9 +2569,11 @@ def cmd_set_template(
 
     # Resolve SKU
     if not sku:
-        sku = _current_item_sku()
+        from .context import current_sku as _current_sku
+
+        sku = _current_sku(cfg)
         if not sku:
-            return {"ok": False, "error": "no SKU provided and CurrentItem symlink not set or not a valid SKU dir"}
+            return {"ok": False, "error": "no SKU provided and no current-item context set (use tgw set-context <sku>)"}
 
     json_path = sku_json(cfg, sku)
     if not json_path.exists():
@@ -2601,17 +2627,10 @@ def _build_template_fields(cfg: Dict[str, Any], grp: Dict[str, Any], group_key: 
 
 
 def _current_item_sku() -> Optional[str]:
-    """Resolve /opt/TGW/CurrentItem symlink to a SKU name."""
-    current = Path("/opt/TGW/CurrentItem")
-    if current.is_symlink():
-        target = current.resolve()
-        if target.exists() and target.is_dir():
-            name = target.name
-            import re
+    """Legacy shim — reads CurrentItem symlink.  New code should use context.current_sku(cfg)."""
+    from .context import _sku_from_symlink
 
-            if re.match(r"^tgw\d{15,}", name):
-                return name
-    return None
+    return _sku_from_symlink()
 
 
 def _push_clipboard(text: str) -> bool:
@@ -2636,6 +2655,13 @@ def main() -> int:
     try:
         if args.op == "get":
             result = get_item(cfg, args.sku)
+
+        elif args.op == "search":
+            result = list_items(cfg, search=args.text, location=args.location, status=args.status, limit=args.limit)
+            if args.skus_only:
+                for item in result["items"]:
+                    print(item.get("sku", ""))
+                return 0
 
         elif args.op == "list":
             result = list_items(cfg, search=args.search, location=args.location, status=args.status, limit=args.limit, date_from=args.date_from, date_to=args.date_to, search_field=args.search_field)
@@ -2686,16 +2712,16 @@ def main() -> int:
                 sel["search"] = args.search
             result = update_where(cfg, sel, args.field, args.value, check_only=check)
 
-        elif args.op == "titleupdate":
+        elif args.op in ("update-title", "titleupdate"):
             result = titleupdate(cfg, args.sku, args.value, check_only=check)
 
-        elif args.op == "locationupdate":
+        elif args.op in ("update-location", "locationupdate"):
             result = locationupdate(cfg, args.sku, args.location, check_only=check)
 
-        elif args.op == "verifiedupdate":
+        elif args.op in ("update-verified", "verifiedupdate"):
             result = verifiedupdate(cfg, args.sku, args.value, check_only=check)
 
-        elif args.op == "statusupdate":
+        elif args.op in ("update-status", "statusupdate"):
             results = [statusupdate(cfg, sku, args.value, check_only=check) for sku in _expand_skus(args.skus)]
             if len(results) == 1:
                 result = results[0]
@@ -2703,7 +2729,7 @@ def main() -> int:
                 ok = all(r.get("ok") for r in results)
                 result = {"ok": ok, "count": len(results), "results": results}
 
-        elif args.op == "setshipping":
+        elif args.op in ("set-shipping", "setshipping"):
             result = update_item(cfg, args.sku, "shipping_profile", args.value, check_only=check)
 
         elif args.op == "picklist":
@@ -2726,7 +2752,7 @@ def main() -> int:
         elif args.op == "perp-run":
             result = cmd_perp_run(cfg, brief_id=args.brief_id, list_briefs=args.list_briefs)
 
-        elif args.op == "whispertosuggest":
+        elif args.op in ("whisper-suggest", "whispertosuggest"):
             result = cmd_whisper_to_suggest(cfg, args.wavfile, model=args.model)
 
         elif args.op == "claude-help":
@@ -3475,6 +3501,21 @@ def main() -> int:
                     print(f"\n{len(rows)} groups  |  file: {cfg['category_groups_path']}")
                     return 0
                 result = {"ok": True, "count": len(rows), "groups": rows}
+
+        elif args.op == "set-context":
+            result = set_context(cfg, args.sku)
+
+        elif args.op == "get-context":
+            result = get_context(cfg)
+            if args.sku_only:
+                sku = result.get("sku")
+                if sku:
+                    print(sku)
+                    return 0
+                return 1
+
+        elif args.op == "clear-context":
+            result = clear_context(cfg)
 
         elif args.op == "set-template":
             result = cmd_set_template(
