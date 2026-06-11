@@ -33,6 +33,25 @@ under `fulfillment_policy_by_category`.
 7317 (Game Pieces) and 261068 (Action Figures) — manual Seller Hub fix pending.
 See Operator TODO in master plan.
 
+### Standard Envelope gate (PP-FULFILLMENT-001)
+
+eBay Standard Envelope (FRE) requires:
+- **Thickness ≤ 0.25 in** (¼ inch) — the most commonly violated limit
+- **Uniform thickness** — no lumps, bumps, or hard objects (coins in a sleeve = fail)
+- Max size: 6⅛ × 11½ in; weight ≤ 3.5 oz
+
+`_resolve_fulfillment_id()` enforces this as a **size/thickness gate**:
+- Config key `fulfillment_policy_envelope` holds the Standard Envelope policy ID
+- A `flat` size_class item gets the envelope policy **only if** `thickness_in` is set on
+  the item JSON **and** its value is ≤ 0.25
+- Items with unknown thickness (field absent or null) fall through to the regular
+  `fulfillment_policy_by_size_class` or global default — assign envelope explicitly via
+  `shipping_profile` if you've physically verified the item fits
+- Items with `thickness_in > 0.25` never receive the envelope policy automatically
+
+**To enable:** add `"fulfillment_policy_envelope": "<policy_id>"` to `tgw-api-config.json`.
+**To override per-item:** `tgw set-shipping SKU envelope` (uses `shipping_profile`).
+
 ---
 
 ## Condition Quirks
