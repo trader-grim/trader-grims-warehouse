@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-10 (session 21 — task #36 done; 4 suggestions processed; GEMINI-007 processed; suite 433)
+updated: 2026-06-11 (session 22 — task #37 done; 2 inbox files + 1 suggestion processed; suite 439)
 maintained_by: Opus (planner)
 ---
 
@@ -707,10 +707,12 @@ Pipeline hygiene + Flutter backend gap.
 
 **Session 21 progress:** #36 DONE (433 tests passing; 121 items backfilled via `ebay_category_id`; catalog_rebuild enqueued). Todos remaining: #37–39 + #47–49.
 
+**Session 22 progress:** #37 DONE (439 tests passing). Todos remaining: #38–39 + #47–49.
+
 | # | PP | Task | Size |
 |---|----|------|------|
 | ✅ 36 | PP-STORAGE-001 | `size_class` backfill — `tgw data-scrub --pass 2 [--write]`; 121 items populated via `ebay_category_id` reverse map; catalog_rebuild enqueued; 13 new tests (`test_scrub.py`); suite 433 — **DONE session 21** | S |
-| 37 | PP-EDITOR-001 | `GET /api/health` in tgw-http: returns `check_all()` output as JSON (Flutter connectivity endpoint per GEMINI-003 BACKEND-NEEDED) | S |
+| ✅ 37 | PP-EDITOR-001 | `GET /api/health` — Bearer-auth; mirrors `check_all()` JSON + `dead_letter_count`; HTTP 503 on failure; 6 new tests; suite 439 — **DONE session 22** | S |
 | 38 | — | `tgw alt-text <sku>`: Ollama vision → generate `alt_text` + `seo_caption` fields; sidecar naming `<SKU>-alt.jpg`; confirm with Dave whether this is a renamed secondary image or annotated derivative before implementing | M |
 | 39 | — | Fix 25002 `Item.Country` dead-letter rejections for categories 34032/14027/13916: investigate and add country origin field to eBay offer body | S |
 | 40 | — | `category-groups.json` pricing calibration (GEMINI-005): update `electrical_fixtures`→12.50, `media_records`→13.50, `collectibles_pins_buttons`→10.50; run `tgw category-groups --reseed` | XS |
@@ -765,18 +767,26 @@ alt-text`) and reflect it in GEMINI-TASK-004's output spec. ⚠ Intent slightly 
 with Dave whether `-alt.jpg` is (a) a renamed/secondary image file, or (b) the naming for an
 alt-text-annotated derivative — before implementing the writer.
 
-**Alt-text provider strategy (session 21 — Dave 06:35):** Use Antigravity/OpenRouter LLMs for
-alt-text in batches to offload Ollama (which is CPU-only and slow). Google Drive rclone sync
-already set up to sync ItemData to Google Drive — this path is available for providing image
-data to cloud providers. Design the alt-text worker as provider-agnostic (see LLM routing
-note below) so it can route to Ollama, Antigravity, or any OpenRouter model.
+**Alt-text provider strategy (session 21–22):** Use Antigravity/OpenRouter LLMs for
+alt-text in batches to offload Ollama (CPU-only, slow). Google Drive rclone sync in place
+for ItemData — available for cloud provider access. Best free vision models on OpenRouter
+(inbox research 2026-06-11): `google/gemma-4-31b-it:free` (top-rated, spatial awareness),
+`google/gemma-4-26b-a4b-it:free` (MoE, fast), `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`
+(scene description). Ultra-cheap paid: `google/gemini-1.5-flash` (~$0.075/M tokens),
+`meta-llama/llama-3.2-11b-vision-instruct` (~$0.05–0.10/M). Use `openrouter/free` to
+auto-route to the shortest-queue free vision model. Rate limit: ~20 req/min on free tier.
+Prompt template: "Act as an expert in web accessibility and SEO. Analyze this image and
+provide a concise, descriptive alt-text (max 150 characters). Describe the main subject,
+setting, and context accurately without using fluff words like 'image of'..."
 
-**LLM routing principle (session 21 — Dave 06:38):** Add a router layer to PP-MULTIMODEL-001
-so all enrichment workers (alt-text, ai_identify, ebay_draft enrichment) are provider-agnostic.
-Route requests to the best available provider based on load/cost/capability: Ollama local
-(always available, zero cost, slow), Antigravity (configured + v2.0 installed), OpenRouter
-(pay-per-use, broad model selection), Gemini (free tier, large context). This extends the
-multi-model delegation model from manual task routing to automated per-request routing.
+**LLM routing principle (session 21–22):** OpenRouter provides built-in meta-model endpoints:
+`openrouter/auto` (NotDiamond-powered, routes by task complexity; session-sticky for multi-turn),
+`openrouter/free` (rotating free models; vision-aware), `openrouter/fusion` (multi-model
+consensus panel). Open-source self-hosted options: **LiteLLM** (Python proxy, 100+ models,
+fallback/load-balance; drop-in OpenAI-compatible), **RouteLLM** (LMSYS classifier, escalates
+to expensive models only when needed), **Bifrost** (Go, near-zero latency). Recommended path:
+start with `openrouter/free` for alt-text (zero cost, auto-routed); add LiteLLM when mixing
+local Ollama + cloud providers in one pipeline.
 
 ### Track 3 — Perplexity (live web research, cited sources)
 Research briefs in `docs/TGW-Plan-Vault/perplexity/`. Paste brief into Perplexity → save result as `.md` to `inbox/` for PM-intake.
@@ -793,16 +803,9 @@ Research briefs in `docs/TGW-Plan-Vault/perplexity/`. Paste brief into Perplexit
 
 ### Track 4 — Operator (Dave must act to unblock)
 
-#### 🚨 Hardware alert — MasterArchive drive (2026-06-10, GEMINI-007)
-`/dev/sdc5` (`/media/tgw/MasterArchive`) has I/O errors. `ls`/`du` work (cached dir
-entries) but `cat`/`touch`/file reads fail with EIO. **Act before any history indexing:**
-```
-dmesg | grep -i sdc        # check for I/O errors / reallocated sectors
-sudo umount /media/tgw/MasterArchive
-sudo fsck /dev/sdc5        # repair filesystem; run read-only check first if unsure
-```
-Drive contains 584G ItemData history + 163G ItemArchive zips + other cold storage.
-Do not attempt `tgw history-index` until mount is stable and fsck passes clean.
+#### ✅ Hardware alert resolved — MasterArchive drive (2026-06-11)
+`/dev/sdc5` (`/media/tgw/MasterArchive`) had I/O errors (EIO on reads, GEMINI-007).
+**Repaired by Dave 2026-06-11.** `tgw history-index` work is now unblocked.
 
 ---
 

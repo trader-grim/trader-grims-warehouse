@@ -59,6 +59,9 @@ class _FakeCursor:
     def fetchall(self):
         return list(self._rows)
 
+    def fetchone(self):
+        return self._rows[0] if self._rows else (0,)
+
 
 class _FakeConn:
     def __init__(self, rows):
@@ -695,3 +698,74 @@ def test_todos_form_escapes_html(client, monkeypatch):
     assert r.status_code == 200
     assert "<script>alert" not in r.text          # raw tag must not appear
     assert "&lt;script&gt;" in r.text             # escaped form present
+
+
+# ---------------------------------------------------------------------------
+# GET /api/health — platform health check
+# ---------------------------------------------------------------------------
+
+_HEALTH_OK = {
+    "ok": True,
+    "checks": [{"ok": True, "check": "tgw_api", "detail": "ok", "elapsed_ms": 1.0}],
+    "failed": [],
+    "elapsed_ms": 5.0,
+}
+
+_HEALTH_FAIL = {
+    "ok": False,
+    "checks": [{"ok": False, "check": "postgres", "detail": "conn refused", "elapsed_ms": 1.0}],
+    "failed": ["postgres"],
+    "elapsed_ms": 5.0,
+}
+
+
+def test_health_ok_200(client, monkeypatch):
+    import tgw.health as health
+    monkeypatch.setattr(health, "check_all", lambda cfg, **kw: dict(_HEALTH_OK))
+    r = client.get("/api/health", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is True
+    assert "dead_letter_count" in data
+    assert isinstance(data["dead_letter_count"], int)
+
+
+def test_health_fail_503(client, monkeypatch):
+    import tgw.health as health
+    monkeypatch.setattr(health, "check_all", lambda cfg, **kw: dict(_HEALTH_FAIL))
+    r = client.get("/api/health", headers=AUTH_HEADERS)
+    assert r.status_code == 503
+    detail = r.json()["detail"]
+    assert detail["ok"] is False
+    assert "postgres" in detail["failed"]
+
+
+def test_health_dead_letter_count_in_response(client, monkeypatch, queue_rows):
+    import tgw.health as health
+    monkeypatch.setattr(health, "check_all", lambda cfg, **kw: dict(_HEALTH_OK))
+    queue_rows.append((7,))   # fetchone() returns (7,) → dead_letter_count = 7
+    r = client.get("/api/health", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    assert r.json()["dead_letter_count"] == 7
+
+
+def test_health_dead_letter_zero_on_postgres_error(client, monkeypatch):
+    import tgw.health as health
+    monkeypatch.setattr(health, "check_all", lambda cfg, **kw: dict(_HEALTH_OK))
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: (_ for _ in ()).throw(Exception("pg down")),
+    )
+    r = client.get("/api/health", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    assert r.json()["dead_letter_count"] == 0
+
+
+def test_health_requires_auth(client):
+    r = client.get("/api/health")
+    assert r.status_code in (401, 403)
+
+
+def test_health_rejects_bad_token(client):
+    r = client.get("/api/health", headers={"Authorization": "Bearer wrong"})
+    assert r.status_code == 401

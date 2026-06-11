@@ -418,6 +418,39 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/health — platform health check (Flutter home screen, audible alerts)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/health", dependencies=[AUTH])
+def api_health() -> Dict[str, Any]:
+    """Mirror ``tgw health`` output as JSON.
+
+    Returns the full ``check_all()`` result plus a ``dead_letter_count`` field.
+    HTTP 503 when ``ok`` is False so Flutter can detect failures by status code.
+    """
+    from .health import check_all
+
+    result = check_all(_cfg)
+
+    # Append dead_letter_count — quick postgres query, swallowed on error.
+    dead_letter_count = 0
+    try:
+        with psycopg2.connect(_cfg["postgres_dsn"]) as con:
+            with con.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) FROM queue_jobs WHERE state = 'dead_letter'"
+                )
+                dead_letter_count = cur.fetchone()[0]
+    except Exception:
+        pass
+    result["dead_letter_count"] = dead_letter_count
+
+    if not result["ok"]:
+        raise HTTPException(status_code=503, detail=result)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # GET /api/queue/status — job counts
 # ---------------------------------------------------------------------------
 
