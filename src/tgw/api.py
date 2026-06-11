@@ -41,7 +41,7 @@ from .items import (
     verifiedupdate,
 )
 from .resolver import resolve, sku_date_str
-from .scrub import data_scrub_pass1
+from .scrub import data_scrub_pass1, data_scrub_size_class_backfill
 from .sqlite_catalog import build_sqlite_catalog
 from .thumbnail import build_thumbnail_cache
 
@@ -728,7 +728,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser('data-scrub',
                        help='ItemData maintenance passes (dry-run by default)')
     p.add_argument('--pass', dest='scrub_pass', type=int, default=1, metavar='N',
-                   help='which scrub pass to run (default: 1 = #VERIFIED→verified rename)')
+                   help='which scrub pass to run (1=#VERIFIED→verified; 2=size_class backfill)')
     p.add_argument('--write', action='store_true',
                    help='apply changes (default: dry-run only)')
 
@@ -3331,6 +3331,21 @@ def main() -> int:
                 print(f'  Errors:                 {result["errors"]}')
                 if dry_run:
                     print('  Run with --write to apply.')
+            elif scrub_pass == 2:
+                result = data_scrub_size_class_backfill(cfg, dry_run=dry_run)
+                mode   = 'DRY RUN' if dry_run else 'WRITTEN'
+                print(f'[{mode}] Pass 2: size_class backfill')
+                print(f'  Would update / updated: {result["updated"]}')
+                print(f'  Skipped (no basis):     {result["skipped"]}')
+                print(f'  Errors:                 {result["errors"]}')
+                if dry_run and result.get('sample_would_update'):
+                    print('  Sample:')
+                    for entry in result['sample_would_update'][:5]:
+                        print(f'    {entry["sku"]}: {entry["fields"]}')
+                if dry_run:
+                    print('  Run with --write to apply.')
+                elif result['updated']:
+                    print('  catalog_rebuild job enqueued.')
             else:
                 result = {'ok': False, 'error': f'unknown scrub pass: {scrub_pass}'}
 

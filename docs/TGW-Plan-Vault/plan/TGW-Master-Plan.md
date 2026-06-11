@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-10 (session 19/20 — 20 suggestions processed; 8 inbox files processed; GEMINI-003→006 + PERPLEXITY-005/006 + Syncthing NixOS + NixOS flake architecture; Round 5 seeded; suite 346)
+updated: 2026-06-10 (session 21 — task #36 done; 4 suggestions processed; GEMINI-007 processed; suite 433)
 maintained_by: Opus (planner)
 ---
 
@@ -347,7 +347,7 @@ maintained_by: Opus (planner)
 
 ### Active / next build priorities
 
-**See `tgw todo claude` for the live task queue.** The todo tracker is the canonical list — plan tables go stale. Design specs for each item are in the relevant PP-* section below.
+**See `tgw todo claude` for the live task queue.** The plan is the canonical *reference spec*; `tgw todo` is for *assignment of duties* derived from the plan. Use `tgw todo` to find what to work on; use the plan for design context and status history.
 
 Operator-gated items still tracked here:
 | PP | Status | Notes |
@@ -705,9 +705,11 @@ Pipeline hygiene + Flutter backend gap.
 
 **Input:** Round 4 all 7 DONE; 346 tests passing; 4 open todos (#36–39); 8 inbox files processed.
 
+**Session 21 progress:** #36 DONE (433 tests passing; 121 items backfilled via `ebay_category_id`; catalog_rebuild enqueued). Todos remaining: #37–39 + #47–49.
+
 | # | PP | Task | Size |
 |---|----|------|------|
-| 36 | PP-STORAGE-001 | `size_class` backfill: populate `size_class` on all items that have a `category_group` using `category-groups.json` group defaults; `tgw data-scrub size-class-backfill`; unblocks `tgw locate --size-class` and the PP-FULFILLMENT-001 size-class policy resolver | S |
+| ✅ 36 | PP-STORAGE-001 | `size_class` backfill — `tgw data-scrub --pass 2 [--write]`; 121 items populated via `ebay_category_id` reverse map; catalog_rebuild enqueued; 13 new tests (`test_scrub.py`); suite 433 — **DONE session 21** | S |
 | 37 | PP-EDITOR-001 | `GET /api/health` in tgw-http: returns `check_all()` output as JSON (Flutter connectivity endpoint per GEMINI-003 BACKEND-NEEDED) | S |
 | 38 | — | `tgw alt-text <sku>`: Ollama vision → generate `alt_text` + `seo_caption` fields; sidecar naming `<SKU>-alt.jpg`; confirm with Dave whether this is a renamed secondary image or annotated derivative before implementing | M |
 | 39 | — | Fix 25002 `Item.Country` dead-letter rejections for categories 34032/14027/13916: investigate and add country origin field to eBay offer body | S |
@@ -724,7 +726,7 @@ Pipeline hygiene + Flutter backend gap.
 ### Track 2 — Gemini CLI (large-context data + self-contained tasks)
 **Status 2026-06-10 update**: Google One → **Google AI Plus** with compute-based limits (5-hour
 refresh window). Keep individual Gemini tasks small and self-contained to avoid hitting the
-compute cap. Also available: **Antigravity/Flow** (alternative AI agent with code/tool use).
+compute cap. Also available: **Antigravity/Flow** ✅ CLI configured + v2.0 installed (2026-06-11).
 
 **How to delegate to Gemini**: Write a self-contained task file with all needed context
 baked in (no live system access). Drop data excerpts, schemas, and the task description.
@@ -741,7 +743,7 @@ Save result to `inbox/` for PM-intake.
 | ✅ Marketing/category insights | done (GEMINI-006, session 19) — store category mappings; zero-inventory high-velocity list; SEO keyword opportunities |
 | ebay_draft aspect fill audit | Grep of aspect fill rates per category | Which categories have worst specifics coverage; tuning recommendations |
 | **AI conversation history consolidation** | Dave's conversation history with AI assistants (Claude, Perplexity sessions) | Organize + consolidate into structured reference; **plan scope with Dave before executing** (session 10 note) |
-| **Data/archive history consolidation** | `/opt/TGW/data/history/` contents, ItemArchive zip inventory, archive-ebay-index.json | Organize and index historical item data (zip archives, legacy records); similar to the archive index work already done; identify gaps and suggest integration points with current pipeline |
+| ✅ **Data/archive history consolidation** | GEMINI-007 (2026-06-10) — **CRITICAL: MasterArchive I/O errors detected** (`/dev/sdc5`). `ls`/`du` work (cached dir entries), but `cat`/`touch` fail with EIO. **Operator must run `dmesg`, `umount /media/tgw/MasterArchive`, `fsck /dev/sdc5` before any indexing**. Folder inventory: `ItemData/` 584G (1.1M files, KEEP-INDEX), `job_archive/` 371G (KEEP-COLD), `ItemArchive/` 163G 54K zips (KEEP-INDEX, only 40% in archive-ebay-index.json), `magento/` 129G (KEEP-COLD), `eBay/` 60G (KEEP-COLD), `GarageSale/` 33G (KEEP-COLD), `ItemCreation/` 8.8G drafts (MIGRATE). Cleanup order: (1) fix mount, (2) consolidate zips, (3) index loose CSVs, (4) complete ItemArchive index to 100%, (5) offload cold data. `tgw history-index --target <folder>` design sketch included. See GEMINI-007-result.md. | |
 
 ### PP-DATALEARN-001 — Gemini Data Mining + AI-Calculated Fields
 
@@ -763,6 +765,19 @@ alt-text`) and reflect it in GEMINI-TASK-004's output spec. ⚠ Intent slightly 
 with Dave whether `-alt.jpg` is (a) a renamed/secondary image file, or (b) the naming for an
 alt-text-annotated derivative — before implementing the writer.
 
+**Alt-text provider strategy (session 21 — Dave 06:35):** Use Antigravity/OpenRouter LLMs for
+alt-text in batches to offload Ollama (which is CPU-only and slow). Google Drive rclone sync
+already set up to sync ItemData to Google Drive — this path is available for providing image
+data to cloud providers. Design the alt-text worker as provider-agnostic (see LLM routing
+note below) so it can route to Ollama, Antigravity, or any OpenRouter model.
+
+**LLM routing principle (session 21 — Dave 06:38):** Add a router layer to PP-MULTIMODEL-001
+so all enrichment workers (alt-text, ai_identify, ebay_draft enrichment) are provider-agnostic.
+Route requests to the best available provider based on load/cost/capability: Ollama local
+(always available, zero cost, slow), Antigravity (configured + v2.0 installed), OpenRouter
+(pay-per-use, broad model selection), Gemini (free tier, large context). This extends the
+multi-model delegation model from manual task routing to automated per-request routing.
+
 ### Track 3 — Perplexity (live web research, cited sources)
 Research briefs in `docs/TGW-Plan-Vault/perplexity/`. Paste brief into Perplexity → save result as `.md` to `inbox/` for PM-intake.
 **⚠ Perplexity subscription expires ~2026-12 — run all remaining briefs before then.**
@@ -777,6 +792,19 @@ Research briefs in `docs/TGW-Plan-Vault/perplexity/`. Paste brief into Perplexit
 | ✅ Flutter offline sync        | `PERPLEXITY-006-flutter-offline-sync Result.md` | DONE | PP-PORTABLE-CATALOG-001 P2 — snapshot+copy pattern; sqflite stack; Dio+dio_smart_retry; outbox table design |
 
 ### Track 4 — Operator (Dave must act to unblock)
+
+#### 🚨 Hardware alert — MasterArchive drive (2026-06-10, GEMINI-007)
+`/dev/sdc5` (`/media/tgw/MasterArchive`) has I/O errors. `ls`/`du` work (cached dir
+entries) but `cat`/`touch`/file reads fail with EIO. **Act before any history indexing:**
+```
+dmesg | grep -i sdc        # check for I/O errors / reallocated sectors
+sudo umount /media/tgw/MasterArchive
+sudo fsck /dev/sdc5        # repair filesystem; run read-only check first if unsure
+```
+Drive contains 584G ItemData history + 163G ItemArchive zips + other cold storage.
+Do not attempt `tgw history-index` until mount is stable and fsck passes clean.
+
+---
 
 #### ✅ Done
 - [x] `velocity_stats` worker enabled (2026-06-05)
@@ -1054,13 +1082,12 @@ See PP-PERP-AUTO-001 section for design.
 
 #### Priority 6 — External AI tooling (PP-MULTIMODEL-001)
 
-- [ ] **nvm + npm** (needed for markmap-cli and future JS tooling):
+- [x] **markmap-cli** ✅ INSTALLED (2026-06-11) — `markmap-cli` now available. Test: `markmap docs/TGW-Plan-Vault/plan/TGW-Master-Plan.md --no-open -o /tmp/plan.html`
+- [ ] **nvm + npm** (needed for other JS tooling if required later):
   ```
   curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
   # restart shell or: source ~/.bashrc
   nvm install --lts
-  npm install -g markmap-cli
-  # Test: markmap docs/TGW-Plan-Vault/plan/TGW-Master-Plan.md --no-open -o /tmp/plan.html
   ```
 
 - [x] **Gemini CLI** ✅ INSTALLED (2026-06-06) — `gemini` available in PATH; excellent for
@@ -1674,6 +1701,11 @@ between "workers finished" and "operator knows what to do next."
 Dave: the legacy `tgw set` (shell `tgwset` in `tgw.source`) sets an item persistently
 systemwide so multiple operations can target it. It works but is fragile — needs a new
 strategy, likely replaced, and the replacement must be **idempotent**.
+
+**Dave note (2026-06-11):** Keep `tgw set` — most use cases are covered by new development
+(photo display, editing live eBay listings via JSON data, uploading photos to eBay quickly)
+but the feature is simple and useful in certain circumstances. **Do not remove** until the
+replacement is feature-complete and field-tested.
 
 **How the legacy mechanism works (audited session 20):**
 - `tgwset()` does `rm` + `ln -sf` of three symlinks: `/opt/TGW/CurrentItem` →
