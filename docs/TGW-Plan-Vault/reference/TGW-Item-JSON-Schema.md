@@ -110,6 +110,8 @@ Written entirely by `ebay_draft`. `price` and `imageUrls` are filled in later by
 | `aspects_recommended_total` | int | ebay_draft | Count of RECOMMENDED aspects for this category |
 | `aspects_recommended_filled` | int | ebay_draft | How many RECOMMENDED aspects were filled |
 | `quality` | dict | ebay_draft, **ebay_price** (re-score) | Quality score block; see `tgw.listing_quality.DraftScore.to_dict()` |
+| `alt_text` | str | **tgw alt-text** | Accessibility alt text for primary image (max 150 chars); no "image of" prefix |
+| `seo_caption` | str | **tgw alt-text** | 1–2 sentence SEO caption including brand/model/key features |
 
 ---
 

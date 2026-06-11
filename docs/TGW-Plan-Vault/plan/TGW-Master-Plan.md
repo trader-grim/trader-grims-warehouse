@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-11 (session 22 — task #37 done; 2 inbox files + 1 suggestion processed; suite 439)
+updated: 2026-06-11 (session 23 — task #38 done; suite 455)
 maintained_by: Opus (planner)
 ---
 
@@ -709,11 +709,13 @@ Pipeline hygiene + Flutter backend gap.
 
 **Session 22 progress:** #37 DONE (439 tests passing). Todos remaining: #38–39 + #47–49.
 
+**Session 23 progress:** #38 DONE (455 tests passing). Todos remaining: #39 + #47–49.
+
 | # | PP | Task | Size |
 |---|----|------|------|
 | ✅ 36 | PP-STORAGE-001 | `size_class` backfill — `tgw data-scrub --pass 2 [--write]`; 121 items populated via `ebay_category_id` reverse map; catalog_rebuild enqueued; 13 new tests (`test_scrub.py`); suite 433 — **DONE session 21** | S |
 | ✅ 37 | PP-EDITOR-001 | `GET /api/health` — Bearer-auth; mirrors `check_all()` JSON + `dead_letter_count`; HTTP 503 on failure; 6 new tests; suite 439 — **DONE session 22** | S |
-| 38 | — | `tgw alt-text <sku>`: Ollama vision → generate `alt_text` + `seo_caption` fields; sidecar naming `<SKU>-alt.jpg`; confirm with Dave whether this is a renamed secondary image or annotated derivative before implementing | M |
+| ✅ 38 | — | `tgw alt-text <sku> [--model MODEL] [--dry-run]`: Ollama vision → `alt_text` + `seo_caption` in `draft_listing`; original photo archived to `data/history/ItemData/<sku>/` if not there; production photo renamed to `<sku>-alt.jpg`; 16 new tests (`test_alt_text.py`); suite 455 — **DONE session 23** | M |
 | 39 | — | Fix 25002 `Item.Country` dead-letter rejections for categories 34032/14027/13916: investigate and add country origin field to eBay offer body | S |
 | 40 | — | `category-groups.json` pricing calibration (GEMINI-005): update `electrical_fixtures`→12.50, `media_records`→13.50, `collectibles_pins_buttons`→10.50; run `tgw category-groups --reseed` | XS |
 | 41 | — | `category-groups.json` store categories (GEMINI-006): populate `store_category` for `tools_hand`, `electronics_adapters_chargers`, `electronics_remotes`, `kitchen_utensils` | XS |

@@ -157,3 +157,4 @@
 - [x] 2026-06-11T06:35 :: task 38 what about having antigravity or some openrouterllm work on alt-text in batches to take some load off ollama? Most images also on google drive, rclone setup to sync itemdata to gdrive. — added to PP-DATALEARN-001 alt-text section: Antigravity/OpenRouter as batch alt-text providers to offload Ollama; Google Drive rclone sync confirmed available for ItemData
 - [x] 2026-06-11T06:38 :: llm routing — added as design principle to PP-MULTIMODEL-001: route alt-text/enrichment to best available provider (Ollama local, Antigravity, OpenRouter, Gemini) based on load/cost/capability; design as a router layer so workers are provider-agnostic
 - [x] 2026-06-11T07:06 :: masterarchive repaired — ✅ hardware alert in Track 4 updated to resolved; tgw history-index work is now unblocked
+- [ ] 2026-06-11T07:51 :: lets try Gemini 1.5 Flash for vision tasks.
