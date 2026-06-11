@@ -143,6 +143,7 @@ def load_config(path: Path) -> Dict[str, Any]:
         "plan_vault_path": plan_vault_path,
         "plan_inbox_path": plan_vault_path / "inbox",
         "plan_master_path": plan_vault_path / "plan" / "TGW-Master-Plan.md",
+        "pm_intake_delay_hours": float(raw.get("pm_intake_delay_hours", 4.0)),
         "reprice_stages": reprice_stages,
         "category_price_defaults": category_price_defaults,
         "category_groups_path": category_groups_path,

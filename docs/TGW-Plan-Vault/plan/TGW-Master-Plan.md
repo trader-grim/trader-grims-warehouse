@@ -739,13 +739,13 @@ Lint-policy incident (session 24): bare `ruff check` mutated 8 files because pyp
 | 50 | — | `tools/migrate_batch.py` is broken as-is (8 F821s: `os`/`requests`/`time` never imported, `BULK_MIGRATE_URL` undefined — looks like a pasted fragment, no `main`): either repair it or, if superseded by the `ebay_sku_migrate` worker, archive it out of the lint path. Decide before fixing | S |
 | 51 | — | `tools/repair_itemdata_json.py`: backslash escape inside f-string is Python-3.12-only syntax (host runs 3.11 — the script cannot even parse today) + unused `nxt` variable; fix both, or archive if the one-shot repair is done | XS |
 | ✅ 52 | PP-DOCFLOW-001 | **Design session HELD 2026-06-11 (session 24)** — all four open questions settled by Dave; design recorded below; Phase 1 build seeded as todo | M |
-| 53 | PP-DOCFLOW-001 | **Phase 1 build** (todo #59): port pm_intake to `call_model()` + Gemini routing (Ollama fallback); `file_document` / `flag_for_review` actions; `new_section`→review-flag (append-only); submission-delay gate + `tgw admin-file [--now]`; FILING-LOG.md index; audit trail; offline tests | M |
+| ✅ 53 | PP-DOCFLOW-001 | **Phase 1 build DONE 2026-06-11 (session 25)**: pm_intake ported to `call_model()` + `tgw-models.json` → `openrouter/google/gemini-2.5-flash`; actions: `no_change \| append_to_section \| file_document \| flag_for_review`; `new_section` demoted to review-flag; 4h submission-delay gate + `tgw admin-file [--now]`; `reference/FILING-LOG.md` audit trail; `inbox/review/` + `dev-workflow/research/` dirs; `pm_intake_delay_hours` config key; 19 offline tests | M |
 | 54 | PP-BACKUP-001 | **Phase A build** (todo #60, after Dave approves `PLAN-backup-dr.md`): `tgw-db-backup` + `tgw-cloud-sync` + `tgw-secrets-backup` unit/script files in `etc/systemd/` + `bin/` (operator installs); `check_backups()` in health.py + tests (same check the Nix module needs per PLAN-nixos §9.1) | M |
 | 55 | PP-BACKUP-001 | **Phase A operator items** (todo #61): approve plan; gpg passphrase custody decision (off-machine!); install+enable the three timers; first manual cloud sync in an off-hours window (27 days of churn); `rclone about dbukove:` quota check; A5 restore drill + record RTO times | M |
 
 ### PP-DOCFLOW-001 — The TGW Project Admin (LLM document + suggestion intake)
 
-**Status: DESIGN SETTLED 2026-06-11 (session 24 design session with Dave). Phase 1 ready to build.**
+**Status: PHASE 1 COMPLETE 2026-06-11 (session 25). Phase 2 (suggestions batch-classify) next.**
 
 **Mental model (Dave, session 24):** model this tool as a **real-life project admin** — the
 best ones always have the plan ready to be worked on: all docs filed and readily available,

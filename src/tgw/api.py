@@ -670,6 +670,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("suggest-edit", help="open SUGGESTIONS.md in $EDITOR for review before PM-intake")
     p.add_argument("--pending-only", action="store_true", help="extract only unprocessed ([ ]) entries to a temp file for editing")
 
+    p = sub.add_parser("admin-file", help="scan inbox and enqueue eligible notes for PM-intake (PP-DOCFLOW-001)")
+    p.add_argument("--now", action="store_true", help="bypass submission-delay gate (process all files regardless of age)")
+
     p = sub.add_parser(
         "catalog-verify",
         help="scan ItemData for assumption violations and output a checklist (PP-VERIFY-001)",
@@ -2779,6 +2782,11 @@ def main() -> int:
 
         elif args.op == "suggest-edit":
             result = cmd_suggest_edit(cfg, pending_only=args.pending_only)
+
+        elif args.op == "admin-file":
+            from tgw.workers.pm_intake import cmd_admin_file
+            result = cmd_admin_file(cfg, bypass_delay=getattr(args, "now", False))
+            return 0 if result["ok"] else 1
 
         elif args.op == "build-full":
             result = build_full_catalog(cfg, check_only=check)
