@@ -1,0 +1,9 @@
+[Unit]
+Description=TGW daily cloud sync timer (PP-BACKUP-001 A2)
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

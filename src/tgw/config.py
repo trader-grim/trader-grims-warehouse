@@ -78,6 +78,12 @@ def load_config(path: Path) -> Dict[str, Any]:
 
     postgres_dsn = raw.get("postgres_dsn", "dbname=state_machine user=tgw")
 
+    # PP-BACKUP-001 — backup infrastructure paths (not in JSON config; fixed layout)
+    backup_db_dir = Path('/opt/TGW/var/backups/trader_grims_warehouse/db')
+    backup_snapshot_root = Path('/opt/TGW/var/local/backups/trader_grims_warehouse')
+    backup_secrets_dir = backup_snapshot_root / 'secrets'
+    backup_rclone_stamp = Path('/opt/TGW/var/log/rclone-sync-last-success')
+
     reprice_stages = raw.get(
         "reprice_stages",
         [
@@ -153,6 +159,10 @@ def load_config(path: Path) -> Dict[str, Any]:
         "fulfillment_policy_by_category": fulfillment_policy_by_category,
         "store_category_by_ebay_category": store_category_by_ebay_category,
         "ebay_sku_migrate": raw.get("ebay_sku_migrate", {}),
+        "backup_db_dir": backup_db_dir,
+        "backup_snapshot_root": backup_snapshot_root,
+        "backup_secrets_dir": backup_secrets_dir,
+        "backup_rclone_stamp": backup_rclone_stamp,
         "raw": raw,
     }
 

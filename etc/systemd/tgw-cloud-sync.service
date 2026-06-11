@@ -1,0 +1,11 @@
+[Unit]
+Description=TGW daily cloud sync to Google Drive (PP-BACKUP-001 A2)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=tgw
+Group=tgw
+WorkingDirectory=/opt/TGW
+ExecStart=/opt/TGW/src/trader-grims-warehouse/bin/tgw-cloud-sync

@@ -1,0 +1,11 @@
+[Unit]
+Description=TGW daily PostgreSQL ledger dump (PP-BACKUP-001 A1)
+After=postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=oneshot
+User=tgw
+Group=tgw
+WorkingDirectory=/opt/TGW
+ExecStart=/opt/TGW/src/trader-grims-warehouse/bin/tgw-db-backup

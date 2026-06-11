@@ -240,6 +240,93 @@ def check_queue_launcher() -> Dict[str, Any]:
         return _result('queue_launcher', False, str(e), (time.time() - t) * 1000)
 
 
+def check_backups(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    PP-BACKUP-001 A4 — backup freshness check (the watcher for the watchers).
+
+    Red (ok=False): db dump >26 h old, or rclone success stamp >26 h old.
+    Yellow (ok=True, warn=True): snapshot tree newest file >1 h, or secrets bundle >40 d.
+    """
+    t = time.time()
+    now = time.time()
+    issues: list[str] = []
+    warnings: list[str] = []
+
+    def _age_h(path: Path) -> Optional[float]:
+        try:
+            return (now - path.stat().st_mtime) / 3600
+        except Exception:
+            return None
+
+    # 1. DB dump age — red if >26 h or no dump found
+    db_dir: Path = cfg.get('backup_db_dir', Path('/opt/TGW/var/backups/trader_grims_warehouse/db'))
+    dumps = sorted(db_dir.glob('*.dump')) if db_dir.exists() else []
+    if not dumps:
+        issues.append('no db dump found in ' + str(db_dir))
+    else:
+        age_h = _age_h(dumps[-1])
+        if age_h is not None and age_h > 26:
+            issues.append(f'db dump stale: {int(age_h)}h old (limit 26h)')
+
+    # 2. rclone cloud sync stamp — red if >26 h or stamp absent
+    rclone_stamp: Path = cfg.get('backup_rclone_stamp',
+                                  Path('/opt/TGW/var/log/rclone-sync-last-success'))
+    if not rclone_stamp.exists():
+        issues.append('rclone sync never completed (stamp absent): ' + str(rclone_stamp))
+    else:
+        age_h = _age_h(rclone_stamp)
+        if age_h is not None and age_h > 26:
+            issues.append(f'rclone sync stale: {int(age_h)}h old (limit 26h)')
+
+    # 3. Snapshot tree newest entry — yellow if >1 h
+    # Check directory mtimes at depth ≤2 only (snapshot dirs are timestamp-named children
+    # of subtree dirs; scanning files inside would walk 200 G of hardlinks unnecessarily).
+    snap_root: Path = cfg.get('backup_snapshot_root',
+                               Path('/opt/TGW/var/local/backups/trader_grims_warehouse'))
+    if snap_root.exists():
+        try:
+            mtimes = [
+                child.stat().st_mtime
+                for subtree in snap_root.iterdir() if subtree.is_dir()
+                for child in subtree.iterdir()
+            ]
+        except Exception:
+            mtimes = []
+        if not mtimes:
+            warnings.append(f'snapshot tree empty: {snap_root}')
+        else:
+            age_h = (now - max(mtimes)) / 3600
+            if age_h > 1:
+                warnings.append(f'snapshot tree stale: {age_h:.1f}h since last entry (limit 1h)')
+    else:
+        warnings.append(f'snapshot root missing: {snap_root}')
+
+    # 4. Secrets bundle age — yellow if >40 days or no bundle
+    secrets_dir: Path = cfg.get('backup_secrets_dir',
+                                  Path('/opt/TGW/var/local/backups/trader_grims_warehouse/secrets'))
+    bundles = sorted(secrets_dir.glob('secrets-*.tar.gz.gpg')) if secrets_dir.exists() else []
+    if not bundles:
+        warnings.append('no encrypted secrets bundle found in ' + str(secrets_dir))
+    else:
+        age_days = (now - bundles[-1].stat().st_mtime) / 86400
+        if age_days > 40:
+            warnings.append(f'secrets bundle stale: {int(age_days)}d old (limit 40d)')
+
+    ok = not issues
+    parts: list[str] = []
+    if issues:
+        parts.extend(issues)
+    if warnings:
+        parts.extend(f'WARN: {w}' for w in warnings)
+    detail = '; '.join(parts) if parts else 'all backup tiers fresh'
+
+    result = _result('backups', ok, detail, (time.time() - t) * 1000,
+                     issues=issues, warnings=warnings)
+    if warnings:
+        result['warn'] = True
+    return result
+
+
 def check_backup_service() -> Dict[str, Any]:
     """trader-grims-backup systemd service is active."""
     t = time.time()
@@ -367,6 +454,7 @@ def check_all(cfg: Dict[str, Any],
         check_thumbnail_cache(cfg),
         check_postgres(cfg),
         check_backup_service(),
+        check_backups(cfg),
         check_ownership(cfg),
     ]
     if include_ollama:

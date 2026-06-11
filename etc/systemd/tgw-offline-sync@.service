@@ -1,0 +1,24 @@
+[Unit]
+Description=TGW offline sentry sync for drive %i (PP-BACKUP-001 A7)
+# Triggered when a labeled TGW sentry drive mounts. The instance name (%i) is
+# the partition label, e.g. TGW-SENTRY-01.
+#
+# Wire the trigger — for each drive, create a mount-unit drop-in:
+#   ESCAPED=$(systemd-escape --path /media/tgw/TGW-SENTRY-01)
+#   DIR=/etc/systemd/system/${ESCAPED}.mount.d
+#   mkdir -p "$DIR"
+#   cat > "$DIR/tgw-sync.conf" <<EOF
+#   [Unit]
+#   Wants=tgw-offline-sync@TGW-SENTRY-01.service
+#   After=tgw-offline-sync@TGW-SENTRY-01.service
+#   EOF
+#   systemctl daemon-reload
+#
+# The service auto-stops if the mount unit stops (safe to pull drive after sync).
+
+[Service]
+Type=oneshot
+User=tgw
+Group=tgw
+WorkingDirectory=/opt/TGW
+ExecStart=/opt/TGW/src/trader-grims-warehouse/bin/tgw-offline-sync %i
