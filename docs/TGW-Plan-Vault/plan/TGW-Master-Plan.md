@@ -740,6 +740,8 @@ Lint-policy incident (session 24): bare `ruff check` mutated 8 files because pyp
 | 51 | — | `tools/repair_itemdata_json.py`: backslash escape inside f-string is Python-3.12-only syntax (host runs 3.11 — the script cannot even parse today) + unused `nxt` variable; fix both, or archive if the one-shot repair is done | XS |
 | ✅ 52 | PP-DOCFLOW-001 | **Design session HELD 2026-06-11 (session 24)** — all four open questions settled by Dave; design recorded below; Phase 1 build seeded as todo | M |
 | 53 | PP-DOCFLOW-001 | **Phase 1 build** (todo #59): port pm_intake to `call_model()` + Gemini routing (Ollama fallback); `file_document` / `flag_for_review` actions; `new_section`→review-flag (append-only); submission-delay gate + `tgw admin-file [--now]`; FILING-LOG.md index; audit trail; offline tests | M |
+| 54 | PP-BACKUP-001 | **Phase A build** (todo #60, after Dave approves `PLAN-backup-dr.md`): `tgw-db-backup` + `tgw-cloud-sync` + `tgw-secrets-backup` unit/script files in `etc/systemd/` + `bin/` (operator installs); `check_backups()` in health.py + tests (same check the Nix module needs per PLAN-nixos §9.1) | M |
+| 55 | PP-BACKUP-001 | **Phase A operator items** (todo #61): approve plan; gpg passphrase custody decision (off-machine!); install+enable the three timers; first manual cloud sync in an off-hours window (27 days of churn); `rclone about dbukove:` quota check; A5 restore drill + record RTO times | M |
 
 ### PP-DOCFLOW-001 — The TGW Project Admin (LLM document + suggestion intake)
 
@@ -2827,7 +2829,14 @@ encompass all backup concerns (config, secrets, ItemData, logs, databases, syste
 - PP-NIXOS-001 (system rebuild context)
 
 #### Status
-Design pending.
+**PLAN WRITTEN 2026-06-11 (session 24)** — full plan at `docs/plans/PLAN-backup-dr.md`
+(DRAFT, awaiting Dave's approval). Host audit found: local snapshot tier healthy
+(dedicated 699 G disk, current); cloud tier **27 days stale** (manual rclone only);
+**ledger has zero dumps**; **secrets have no backup at all**. Phase A (MX-now: pg_dump
+timer, scheduled rclone with --backup-dir trash, gpg-encrypted secrets bundle,
+backup-freshness health check, restore drills, archive policy) → Phase B (repo split +
+restic engine + `tgw backup` CLI) → Phase C (declarative in the Nix flake — resolves
+NixOS plan R9 properly; recovery equation extended). Round 6 #54/#55; todos #60/#61.
 
 ---
 
