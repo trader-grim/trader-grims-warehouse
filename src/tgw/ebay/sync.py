@@ -386,8 +386,7 @@ def stage_draft(cfg: Dict[str, Any], sku: str,
     inv_body, offer_body = _build_offer_bodies(cfg, sku, item)
 
     try:
-        ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{sku}', inv_body,
-                 extra_headers={'Content-Language': 'en-US'})
+        ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{sku}', inv_body)
     except requests.exceptions.HTTPError as exc:
         if exc.response is not None and exc.response.status_code == 400:
             body = exc.response.json()
@@ -399,24 +398,20 @@ def stage_draft(cfg: Dict[str, Any], sku: str,
                 log.warning('%s: condition %r rejected by category — retrying with USED_EXCELLENT',
                             sku, inv_body['condition'])
                 inv_body['condition'] = 'USED_EXCELLENT'
-                ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{sku}', inv_body,
-                         extra_headers={'Content-Language': 'en-US'})
+                ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{sku}', inv_body)
             else:
                 raise
         else:
             raise
     log.info('inventory item upserted for %s', sku)
 
-    _cl = {'Content-Language': 'en-US'}
     existing = _find_offer(cfg, sku)
     if existing:
         offer_id = existing['offerId']
-        ebay_put(cfg, f'/sell/inventory/v1/offer/{offer_id}', offer_body,
-                 extra_headers=_cl)
+        ebay_put(cfg, f'/sell/inventory/v1/offer/{offer_id}', offer_body)
         log.info('offer updated for %s (offerId=%s)', sku, offer_id)
     else:
-        resp = ebay_post(cfg, '/sell/inventory/v1/offer', offer_body,
-                         extra_headers=_cl)
+        resp = ebay_post(cfg, '/sell/inventory/v1/offer', offer_body)
         offer_id = resp.get('offerId', '')
         if not offer_id:
             raise RuntimeError(f'create offer returned no offerId for {sku}: {resp}')
@@ -432,8 +427,7 @@ def publish_offer(cfg: Dict[str, Any], offer_id: str) -> Dict[str, Any]:
     Returns {listing_id, listing_url, status: PUBLISHED}.
     Raises RuntimeError if eBay returns no listingId.
     """
-    resp = ebay_post(cfg, f'/sell/inventory/v1/offer/{offer_id}/publish', {},
-                     extra_headers={'Content-Language': 'en-US'})
+    resp = ebay_post(cfg, f'/sell/inventory/v1/offer/{offer_id}/publish', {})
     listing_id = resp.get('listingId', '')
     if not listing_id:
         raise RuntimeError(f'publish offer {offer_id} returned no listingId: {resp}')

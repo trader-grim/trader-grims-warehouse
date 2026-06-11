@@ -192,8 +192,7 @@ class EbayPriceReducerWorker(QueueWorker):
         try:
             ebay_put(self.config,
                      f'/sell/inventory/v1/offer/{offer_id}',
-                     offer_body,
-                     extra_headers={'Content-Language': 'en-US'})
+                     offer_body)
         except requests.exceptions.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else 0
             log.error('ebay_price_reducer: eBay rejected price update for %s (HTTP %s): %s',

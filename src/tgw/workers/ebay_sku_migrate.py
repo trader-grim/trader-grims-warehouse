@@ -54,8 +54,7 @@ from tgw.sku_migration import build_migration_map, classify, rename_sku
 
 log = logging.getLogger(__name__)
 
-QUEUE_NAME  = 'ebay_sku_migrate'
-_LANG_HEADER = {'Content-Language': 'en-US'}
+QUEUE_NAME = 'ebay_sku_migrate'
 
 
 def _get_listing_policies(cfg: Dict[str, Any],
@@ -201,7 +200,7 @@ def _migrate_inventory(cfg: Dict[str, Any],
     # PUT new inventory item (idempotent)
     try:
         ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{new_sku}',
-                 inv_body, extra_headers=_LANG_HEADER)
+                 inv_body)
     except requests.exceptions.HTTPError as exc:
         body = exc.response.text[:200] if exc.response is not None else str(exc)
         return {'ok': False, 'old_sku': old_sku,
@@ -213,10 +212,10 @@ def _migrate_inventory(cfg: Dict[str, Any],
         if existing:
             new_offer_id = existing['offerId']
             ebay_put(cfg, f'/sell/inventory/v1/offer/{new_offer_id}',
-                     offer_body, extra_headers=_LANG_HEADER)
+                     offer_body)
         else:
             resp = ebay_post(cfg, '/sell/inventory/v1/offer',
-                             offer_body, extra_headers=_LANG_HEADER)
+                             offer_body)
             new_offer_id = resp.get('offerId', '')
             if not new_offer_id:
                 return {'ok': False, 'old_sku': old_sku,
@@ -333,7 +332,7 @@ def _migrate_inventory_live(cfg: Dict[str, Any],
     # PUT new inventory item (idempotent)
     try:
         ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{new_sku}',
-                 inv_body, extra_headers=_LANG_HEADER)
+                 inv_body)
     except requests.exceptions.HTTPError as exc:
         body = exc.response.text[:200] if exc.response is not None else str(exc)
         return {'ok': False, 'old_sku': old_sku,
@@ -345,10 +344,10 @@ def _migrate_inventory_live(cfg: Dict[str, Any],
         if existing:
             new_offer_id = existing['offerId']
             ebay_put(cfg, f'/sell/inventory/v1/offer/{new_offer_id}',
-                     offer_body, extra_headers=_LANG_HEADER)
+                     offer_body)
         else:
             resp = ebay_post(cfg, '/sell/inventory/v1/offer',
-                             offer_body, extra_headers=_LANG_HEADER)
+                             offer_body)
             new_offer_id = resp.get('offerId', '')
             if not new_offer_id:
                 return {'ok': False, 'old_sku': old_sku,
@@ -444,7 +443,7 @@ def _recover_partial(cfg: Dict[str, Any],
                       if k not in ('offerId', 'status', 'listing')}
         offer_body.setdefault('listingPolicies', {}).update(policies)
         ebay_put(cfg, f'/sell/inventory/v1/offer/{new_offer_id}',
-                 offer_body, extra_headers=_LANG_HEADER)
+                 offer_body)
     except requests.exceptions.HTTPError as exc:
         body = exc.response.text[:200] if exc.response is not None else str(exc)
         return {'ok': False, 'old_sku': old_sku,

@@ -144,8 +144,7 @@ class EbayPublishWorker(QueueWorker):
                                 'retrying with USED_EXCELLENT', sku)
                     ebay_put(self.config,
                              f'/sell/inventory/v1/inventory_item/{sku}',
-                             {'condition': 'USED_EXCELLENT'},
-                             extra_headers={'Content-Language': 'en-US'})
+                             {'condition': 'USED_EXCELLENT'})
                     result = publish_offer(self.config, offer_id)
                 else:
                     raise HardFailure(
