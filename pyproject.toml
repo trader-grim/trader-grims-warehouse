@@ -22,6 +22,7 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.4",
     "pre-commit>=3.0",
+    "Pillow>=10.0",   # so CI (.[dev]) runs the PP-VISION-001 fingerprint tests
 ]
 thumbnails = [
     "Pillow>=10.0",
@@ -50,6 +51,7 @@ tgw-ebay-sku-migrate-worker = "tgw.workers.ebay_sku_migrate:main"
 tgw-multi-intake-worker   = "tgw.workers.multi_intake:main"
 tgw-catalog-rebuild-worker = "tgw.workers.catalog_rebuild:main"
 tgw-thumbnail-gen-worker  = "tgw.workers.thumbnail_gen:main"
+tgw-alt-text-worker       = "tgw.workers.alt_text:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -65,7 +67,11 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 200
-fix = true
+# fix-on-check removed 2026-06-11 (session 24): a bare `ruff check` must never
+# mutate the tree — it silently rewrote 8 unrelated files during an agent
+# session. Apply fixes explicitly with `ruff check --fix` when you mean it.
+# systemd/history/ is an archive of dead scripts — not lint-gated.
+exclude = ["systemd/history"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]

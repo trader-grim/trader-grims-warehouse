@@ -18,6 +18,7 @@ import json
 import pytest
 
 import tgw.api as api
+import tgw.context as ctx_mod
 import tgw.ebay.pricing as pricing
 
 GROUPS = {
@@ -93,6 +94,7 @@ def cfg(tmp_path):
     return {
         "itemdata_root": tmp_path,
         "category_groups_path": str(tmp_path / "category-groups.json"),
+        "raw": {"runtime_root": str(tmp_path / "runtime")},
     }
 
 
@@ -177,14 +179,14 @@ def test_sku_not_found(cfg):
 
 def test_current_item_fallback(cfg, monkeypatch):
     _write_item(cfg, "tgw777", {"sku": "tgw777"})
-    monkeypatch.setattr(api, "_current_item_sku", lambda: "tgw777")
+    monkeypatch.setattr(ctx_mod, "current_sku", lambda c: "tgw777")
     out = api.cmd_set_template(cfg, group_key="books")  # no sku -> fallback
     assert out["ok"] is True
     assert out["sku"] == "tgw777"
 
 
 def test_current_item_fallback_missing(cfg, monkeypatch):
-    monkeypatch.setattr(api, "_current_item_sku", lambda: None)
+    monkeypatch.setattr(ctx_mod, "current_sku", lambda c: None)
     out = api.cmd_set_template(cfg, group_key="books")
     assert out["ok"] is False
-    assert "CurrentItem" in out["error"]
+    assert "set-context" in out["error"]

@@ -59,6 +59,9 @@ class _FakeCursor:
     def fetchall(self):
         return list(self._rows)
 
+    def fetchone(self):
+        return self._rows[0] if self._rows else (0,)
+
 
 class _FakeConn:
     def __init__(self, rows):
@@ -182,6 +185,7 @@ def env(tmp_path, monkeypatch, queue_rows):
         "location_tree_root": location_tree_root,
         "thumbnail_root": thumbnail_root,
         "category_groups_path": str(groups_path),
+        "plan_vault_path": tmp_path / "vault",
         "postgres_dsn": "postgresql://fake/db",
         "pretty": True,
         "raw": {},
@@ -575,4 +579,246 @@ def test_category_groups_503_when_missing(env, monkeypatch):
 
 def test_category_groups_requires_auth(client):
     r = client.get("/api/category-groups", headers={"Authorization": "Bearer nope"})
+    assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# PP-BULKEDIT-001 — /form/bulk + /api/bulk/preview + /api/bulk/apply
+# ---------------------------------------------------------------------------
+
+def test_bulk_form_html(client):
+    r = client.get("/form/bulk")
+    assert r.status_code == 200
+    assert "Bulk Edit" in r.text
+    assert "/api/bulk/preview" in r.text
+
+
+def test_bulk_preview_requires_auth(client):
+    r = client.post("/api/bulk/preview",
+                    json={"field": "title", "value": "X", "location": "A1"})
+    assert r.status_code in (401, 403)
+
+
+def test_bulk_preview_by_search(client):
+    # The shared fixture has a real (empty) location tree, so filter by search
+    # (JSON scan) which matches only SKU_A's "Red Widget".
+    r = client.post("/api/bulk/preview", headers=AUTH_HEADERS,
+                    json={"field": "title", "value": "Renamed", "search": "Red"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["applied"] is False
+    assert body["count"] == 1
+    assert body["preview"][0]["sku"] == SKU_A
+    assert body["preview"][0]["proposed"] == "Renamed"
+
+
+def test_bulk_preview_no_selector_400(client):
+    r = client.post("/api/bulk/preview", headers=AUTH_HEADERS,
+                    json={"field": "title", "value": "X"})
+    assert r.status_code == 400
+
+
+def test_bulk_apply_writes_and_enqueues(env, enqueue_calls):
+    client = env["client"]
+    r = client.post("/api/bulk/apply", headers=AUTH_HEADERS,
+                    json={"field": "title", "value": "Bulk Renamed", "skus": [SKU_A]})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["applied"] is True
+    assert body["count"] == 1
+    # written to disk
+    doc = json.loads((env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text())
+    assert doc["title"] == "Bulk Renamed"
+    # coalesced catalog_rebuild enqueued
+    assert any(c["kwargs"].get("queue_name") == "catalog_rebuild" for c in enqueue_calls)
+
+
+def test_bulk_apply_invalid_field(client):
+    r = client.post("/api/bulk/apply", headers=AUTH_HEADERS,
+                    json={"field": "price", "value": "9.99", "skus": [SKU_A]})
+    # bulk_edit returns ok:False for a non-editable field (200 envelope)
+    assert r.status_code == 200
+    assert r.json()["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# PP-TODO-001 — GET /form/todos (Round 4 #34) — no Bearer auth (network trust)
+# ---------------------------------------------------------------------------
+
+_TODO_ROWS = [
+    {"id": 29, "agent": "claude", "priority": 10, "body": "Dead_letter triage flag",
+     "source": "round4", "added_at": "2026-06-08", "done_at": None},
+    {"id": 31, "agent": "claude", "priority": 30, "body": "Fingerprint index + tgw locate",
+     "source": "round4", "added_at": "2026-06-08", "done_at": None},
+    {"id": 12, "agent": "admin", "priority": 45, "body": "Fix 9 wrong-shipping listings",
+     "source": "plan", "added_at": "2026-06-07", "done_at": None},
+]
+
+
+def test_todos_form_renders_grouped(client, monkeypatch):
+    import tgw.todo as todo
+    monkeypatch.setattr(todo, "todo_list", lambda *a, **k: list(_TODO_ROWS))
+    r = client.get("/form/todos")  # no auth header — network trust
+    assert r.status_code == 200
+    text = r.text
+    assert "Open Todos" in text
+    assert "claude" in text and "admin" in text
+    assert "Fingerprint index" in text          # a task body
+    assert "#29" in text                          # id shown
+    assert "3 open item(s)" in text               # total count
+
+
+def test_todos_form_empty_all_clear(client, monkeypatch):
+    import tgw.todo as todo
+    monkeypatch.setattr(todo, "todo_list", lambda *a, **k: [])
+    r = client.get("/form/todos")
+    assert r.status_code == 200
+    assert "All clear" in r.text
+
+
+def test_todos_form_db_error_still_200(client, monkeypatch):
+    import tgw.todo as todo
+
+    def _boom(*a, **k):
+        raise RuntimeError("pg down")
+
+    monkeypatch.setattr(todo, "todo_list", _boom)
+    r = client.get("/form/todos")
+    assert r.status_code == 200
+    assert "unavailable" in r.text.lower()
+
+
+def test_todos_form_escapes_html(client, monkeypatch):
+    import tgw.todo as todo
+    rows = [{"id": 1, "agent": "claude", "priority": 50,
+             "body": "<script>alert('x')</script>", "source": "s", "done_at": None}]
+    monkeypatch.setattr(todo, "todo_list", lambda *a, **k: rows)
+    r = client.get("/form/todos")
+    assert r.status_code == 200
+    assert "<script>alert" not in r.text          # raw tag must not appear
+    assert "&lt;script&gt;" in r.text             # escaped form present
+
+
+# ---------------------------------------------------------------------------
+# PP-CAPTURE-001 — GET/POST /form/suggest (Round 5 #44) — no Bearer (network trust)
+# ---------------------------------------------------------------------------
+
+def _suggestions_file(env):
+    return env["cfg"]["plan_vault_path"] / "suggestions" / "SUGGESTIONS.md"
+
+
+def test_suggest_form_html(client):
+    r = client.get("/form/suggest")  # no auth header — network trust
+    assert r.status_code == 200
+    assert 'name="text"' in r.text
+    assert 'action="/form/suggest"' in r.text
+
+
+def test_suggest_post_appends_with_punctuation(env):
+    tricky = 'add "quotes" & $(subshell) `backticks` | pipes; --flags \'single\''
+    r = env["client"].post("/form/suggest", data={"text": tricky})
+    assert r.status_code == 200
+    assert "added:" in r.text
+    content = _suggestions_file(env).read_text(encoding="utf-8")
+    assert tricky in content                       # written verbatim
+    assert content.startswith("- [ ] ")            # checklist format intact
+
+
+def test_suggest_post_collapses_newlines_to_one_line(env):
+    r = env["client"].post(
+        "/form/suggest", data={"text": "line one\r\nline two\n\nline three"}
+    )
+    assert r.status_code == 200
+    content = _suggestions_file(env).read_text(encoding="utf-8")
+    lines = [ln for ln in content.splitlines() if ln.strip()]
+    assert len(lines) == 1                         # one checklist line, not four
+    assert "line one line two line three" in lines[0]
+
+
+def test_suggest_post_empty_writes_nothing(env):
+    r = env["client"].post("/form/suggest", data={"text": "   "})
+    assert r.status_code == 200
+    assert "nothing written" in r.text
+    assert not _suggestions_file(env).exists()
+
+
+def test_suggest_post_escapes_echo_but_writes_raw(env):
+    payload = "<script>alert(1)</script>"
+    r = env["client"].post("/form/suggest", data={"text": payload})
+    assert r.status_code == 200
+    assert payload not in r.text                   # echo is HTML-escaped
+    assert "&lt;script&gt;" in r.text
+    assert payload in _suggestions_file(env).read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# GET /api/health — platform health check
+# ---------------------------------------------------------------------------
+
+_HEALTH_OK = {
+    "ok": True,
+    "checks": [{"ok": True, "check": "tgw_api", "detail": "ok", "elapsed_ms": 1.0}],
+    "failed": [],
+    "elapsed_ms": 5.0,
+}
+
+_HEALTH_FAIL = {
+    "ok": False,
+    "checks": [{"ok": False, "check": "postgres", "detail": "conn refused", "elapsed_ms": 1.0}],
+    "failed": ["postgres"],
+    "elapsed_ms": 5.0,
+}
+
+
+def test_health_ok_200(client, monkeypatch):
+    import tgw.health as health
+    monkeypatch.setattr(health, "check_all", lambda cfg, **kw: dict(_HEALTH_OK))
+    r = client.get("/api/health", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is True
+    assert "dead_letter_count" in data
+    assert isinstance(data["dead_letter_count"], int)
+
+
+def test_health_fail_503(client, monkeypatch):
+    import tgw.health as health
+    monkeypatch.setattr(health, "check_all", lambda cfg, **kw: dict(_HEALTH_FAIL))
+    r = client.get("/api/health", headers=AUTH_HEADERS)
+    assert r.status_code == 503
+    detail = r.json()["detail"]
+    assert detail["ok"] is False
+    assert "postgres" in detail["failed"]
+
+
+def test_health_dead_letter_count_in_response(client, monkeypatch, queue_rows):
+    import tgw.health as health
+    monkeypatch.setattr(health, "check_all", lambda cfg, **kw: dict(_HEALTH_OK))
+    queue_rows.append((7,))   # fetchone() returns (7,) → dead_letter_count = 7
+    r = client.get("/api/health", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    assert r.json()["dead_letter_count"] == 7
+
+
+def test_health_dead_letter_zero_on_postgres_error(client, monkeypatch):
+    import tgw.health as health
+    monkeypatch.setattr(health, "check_all", lambda cfg, **kw: dict(_HEALTH_OK))
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: (_ for _ in ()).throw(Exception("pg down")),
+    )
+    r = client.get("/api/health", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    assert r.json()["dead_letter_count"] == 0
+
+
+def test_health_requires_auth(client):
+    r = client.get("/api/health")
+    assert r.status_code in (401, 403)
+
+
+def test_health_rejects_bad_token(client):
+    r = client.get("/api/health", headers={"Authorization": "Bearer wrong"})
     assert r.status_code == 401

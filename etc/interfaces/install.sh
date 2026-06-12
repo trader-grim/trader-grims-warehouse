@@ -8,6 +8,7 @@
 # What this installs (system-level, run as root):
 #   MC VFS        — /opt/TGW/mc/ symlink → repo; system extfs + menu configs
 #   keyd          — /etc/keyd/tgw-macroboard.conf
+#   Shell         — /opt/TGW/bin/tgw.source + tgw-dev.source (backup + cutover)
 #
 # Qtile WM (user-level — run separately as your desktop user, NOT root):
 #   bash etc/interfaces/qtile/install.sh
@@ -68,6 +69,34 @@ if systemctl is-active --quiet keyd 2>/dev/null; then
 else
     echo "  keyd not running — start with: sudo systemctl enable --now keyd"
 fi
+
+# ── Shell interface (tgw.source / tgw-dev.source) ──────────────────────────
+# Operator-gated cutover: the version-controlled copies in etc/interfaces/shell/
+# are deployed to /opt/TGW/bin/.  Existing live files are backed up first and
+# only replaced when they actually differ (idempotent).
+echo
+echo "── Shell interface ───────────────────────────────────────────────────"
+SHELL_SRC="$INTERFACES/shell"
+SHELL_DEST=/opt/TGW/bin
+TGW_OWNER="${TGW_OWNER:-tgw}"
+DATE=$(date +%Y%m%d-%H%M%S)
+mkdir -p "$SHELL_DEST"
+for f in tgw.source tgw-dev.source; do
+    src="$SHELL_SRC/$f"
+    dest="$SHELL_DEST/$f"
+    [[ -f "$src" ]] || { echo "  WARN: missing $src — skipping"; continue; }
+    if [[ -f "$dest" ]] && cmp -s "$src" "$dest"; then
+        echo "  $dest already current. OK."
+        continue
+    fi
+    if [[ -f "$dest" ]]; then
+        cp -p "$dest" "$dest.bak-$DATE"
+        echo "  backed up: $dest.bak-$DATE"
+    fi
+    install -m 644 -o "$TGW_OWNER" -g "$TGW_OWNER" "$src" "$dest"
+    echo "  installed: $dest"
+done
+echo "  (re-source in open shells: 'source $SHELL_DEST/tgw.source')"
 
 echo
 echo "=== Done. ==="

@@ -42,6 +42,7 @@ all fields from stages 0..N-1 plus its own.
 | `ebay_offer` | dict | priced → staged → published → synced | multiple | See `ebay_offer` sub-fields below |
 | `ebay_listing` | dict | published → synced | ebay_publish, ebay_sync | See `ebay_listing` sub-fields below |
 | `reprice_schedule` | list[dict] | published | ebay_publish | See `reprice_schedule` entries below |
+| `price_history` | list[dict] | published → markdown | ebay_price_reducer | See `price_history` entries below; appended per applied reduction |
 | `epid` | str | staged | ebay_stage | eBay Catalog product ID (requires `commerce.catalog.readonly` scope) |
 | `#STATUS` | str | intake → operator | pm_intake, manual | `new` (default), `SOLD`, `MISSING`, etc. |
 | `#VERIFIED` | str | intake | pm_intake | Verification state; `new` at intake |
@@ -109,6 +110,8 @@ Written entirely by `ebay_draft`. `price` and `imageUrls` are filled in later by
 | `aspects_recommended_total` | int | ebay_draft | Count of RECOMMENDED aspects for this category |
 | `aspects_recommended_filled` | int | ebay_draft | How many RECOMMENDED aspects were filled |
 | `quality` | dict | ebay_draft, **ebay_price** (re-score) | Quality score block; see `tgw.listing_quality.DraftScore.to_dict()` |
+| `alt_text` | str | **tgw alt-text** | Accessibility alt text for primary image (max 150 chars); no "image of" prefix |
+| `seo_caption` | str | **tgw alt-text** | 1–2 sentence SEO caption including brand/model/key features |
 
 ---
 
@@ -176,6 +179,23 @@ One entry per configured reprice stage. Stage 0 is always `launch`.
 
 ---
 
+## `price_history` list entries
+
+Written by `ebay_price_reducer` (2026-06-10, docs/invariants.md C4) — one entry per
+price reduction actually applied to eBay. Stages satisfied without an eBay call
+(price already at/below the stage) do **not** append an entry.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `ts` | str (ISO8601) | When the reduction was applied |
+| `price` | float | New price sent to eBay |
+| `previous_price` | float \| null | `ebay_offer.price` before the change |
+| `stage` | int | reprice_schedule stage index that triggered it |
+| `label` | str | Stage label, e.g. `retail`, `move` |
+| `source` | str | Writer identifier; currently always `ebay_price_reducer` |
+
+---
+
 ## Field flow diagram
 
 ```
@@ -215,6 +235,7 @@ ebay_sync (periodic)
 ebay_price_reducer (scheduled, reads reprice_schedule)
   ebay_offer.price (markdown)
   reprice_schedule[i].done_at
+  price_history[] (append per applied reduction)
 ```
 
 ---

@@ -133,15 +133,20 @@ def _get_merchant_location(cfg: Dict[str, Any]) -> str:
 
 def _resolve_fulfillment_id(cfg: Dict[str, Any], ebay_category_id: str,
                             shipping_profile: Optional[str] = None,
-                            size_class: Optional[str] = None) -> Optional[str]:
+                            size_class: Optional[str] = None,
+                            thickness_in: Optional[float] = None) -> Optional[str]:
     """
     Resolve the fulfillment (shipping) policy id by precedence:
 
       1. per-item shipping_profile  (PP-HINT-001) — a name in
          ``fulfillment_policy_by_profile``, or a raw policy id if not mapped
       2. per-category override       — ``fulfillment_policy_by_category``
-      3. per-size_class override     (PP-STORAGE-001) — ``fulfillment_policy_by_size_class``
-      4. global default              — ``fulfillment_policy_id``
+      3. Standard Envelope gate      — ``fulfillment_policy_envelope`` if
+         size_class == 'flat' AND thickness_in is known and <= 0.25 in.
+         Skipped when thickness_in is None (unknown) or > 0.25 in so
+         over-thick flat items fall through to the regular size_class policy.
+      4. per-size_class override     (PP-STORAGE-001) — ``fulfillment_policy_by_size_class``
+      5. global default              — ``fulfillment_policy_id``
 
     Returns None if nothing resolves (caller then falls back to the account API).
     """
@@ -153,6 +158,16 @@ def _resolve_fulfillment_id(cfg: Dict[str, Any], ebay_category_id: str,
     if str(ebay_category_id) in by_cat:
         return by_cat[str(ebay_category_id)]
 
+    # Standard Envelope gate: only flat items with confirmed thickness <= 0.25 in qualify.
+    # Items with unknown thickness (None) are intentionally excluded — assign envelope
+    # explicitly via shipping_profile if you've verified the item fits.
+    envelope_policy = cfg.get('fulfillment_policy_envelope')
+    if (envelope_policy
+            and size_class == 'flat'
+            and thickness_in is not None
+            and thickness_in <= 0.25):
+        return str(envelope_policy)
+
     if size_class:
         by_size = cfg.get('fulfillment_policy_by_size_class', {})
         if str(size_class) in by_size:
@@ -163,7 +178,8 @@ def _resolve_fulfillment_id(cfg: Dict[str, Any], ebay_category_id: str,
 
 def _get_listing_policies(cfg: Dict[str, Any], ebay_category_id: str, *,
                           shipping_profile: Optional[str] = None,
-                          size_class: Optional[str] = None) -> Dict[str, str]:
+                          size_class: Optional[str] = None,
+                          thickness_in: Optional[float] = None) -> Dict[str, str]:
     """
     Return {fulfillmentPolicyId, paymentPolicyId, returnPolicyId} for an offer.
 
@@ -173,7 +189,8 @@ def _get_listing_policies(cfg: Dict[str, Any], ebay_category_id: str, *,
     """
     fulf_id = _resolve_fulfillment_id(cfg, ebay_category_id,
                                       shipping_profile=shipping_profile,
-                                      size_class=size_class)
+                                      size_class=size_class,
+                                      thickness_in=thickness_in)
     pay_id = cfg.get('payment_policy_id')
     ret_id = cfg.get('return_policy_id')
 
@@ -289,12 +306,18 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
         product_block['epid'] = epid
 
     category_id_str = str(draft.get('category_id', ''))
-    # PP-HINT-001 / PP-STORAGE-001: a per-item shipping_profile or the item's
-    # size_class can override the per-category fulfillment policy.
+    # PP-HINT-001 / PP-STORAGE-001 / PP-FULFILLMENT-001: a per-item shipping_profile,
+    # size_class, or confirmed thickness_in drives fulfillment policy selection.
+    _thickness = item.get('thickness_in')
+    try:
+        _thickness = float(_thickness) if _thickness not in (None, '') else None
+    except (TypeError, ValueError):
+        _thickness = None
     policies     = _get_listing_policies(
         cfg, category_id_str,
         shipping_profile=item.get('shipping_profile'),
         size_class=item.get('size_class'),
+        thickness_in=_thickness,
     )
     location_key = _get_merchant_location(cfg)
     qty          = draft.get('quantity', 1)
@@ -386,8 +409,7 @@ def stage_draft(cfg: Dict[str, Any], sku: str,
     inv_body, offer_body = _build_offer_bodies(cfg, sku, item)
 
     try:
-        ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{sku}', inv_body,
-                 extra_headers={'Content-Language': 'en-US'})
+        ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{sku}', inv_body)
     except requests.exceptions.HTTPError as exc:
         if exc.response is not None and exc.response.status_code == 400:
             body = exc.response.json()
@@ -399,24 +421,20 @@ def stage_draft(cfg: Dict[str, Any], sku: str,
                 log.warning('%s: condition %r rejected by category — retrying with USED_EXCELLENT',
                             sku, inv_body['condition'])
                 inv_body['condition'] = 'USED_EXCELLENT'
-                ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{sku}', inv_body,
-                         extra_headers={'Content-Language': 'en-US'})
+                ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{sku}', inv_body)
             else:
                 raise
         else:
             raise
     log.info('inventory item upserted for %s', sku)
 
-    _cl = {'Content-Language': 'en-US'}
     existing = _find_offer(cfg, sku)
     if existing:
         offer_id = existing['offerId']
-        ebay_put(cfg, f'/sell/inventory/v1/offer/{offer_id}', offer_body,
-                 extra_headers=_cl)
+        ebay_put(cfg, f'/sell/inventory/v1/offer/{offer_id}', offer_body)
         log.info('offer updated for %s (offerId=%s)', sku, offer_id)
     else:
-        resp = ebay_post(cfg, '/sell/inventory/v1/offer', offer_body,
-                         extra_headers=_cl)
+        resp = ebay_post(cfg, '/sell/inventory/v1/offer', offer_body)
         offer_id = resp.get('offerId', '')
         if not offer_id:
             raise RuntimeError(f'create offer returned no offerId for {sku}: {resp}')
@@ -432,8 +450,7 @@ def publish_offer(cfg: Dict[str, Any], offer_id: str) -> Dict[str, Any]:
     Returns {listing_id, listing_url, status: PUBLISHED}.
     Raises RuntimeError if eBay returns no listingId.
     """
-    resp = ebay_post(cfg, f'/sell/inventory/v1/offer/{offer_id}/publish', {},
-                     extra_headers={'Content-Language': 'en-US'})
+    resp = ebay_post(cfg, f'/sell/inventory/v1/offer/{offer_id}/publish', {})
     listing_id = resp.get('listingId', '')
     if not listing_id:
         raise RuntimeError(f'publish offer {offer_id} returned no listingId: {resp}')

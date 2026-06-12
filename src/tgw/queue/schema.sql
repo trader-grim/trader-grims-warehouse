@@ -150,6 +150,24 @@ CREATE TRIGGER trg_queue_jobs_history
 AFTER UPDATE ON queue_jobs
 FOR EACH ROW EXECUTE FUNCTION queue_record_history();
 
+-- Ops-query convenience views.
+CREATE OR REPLACE VIEW v_dead_letters AS
+SELECT j.job_id, j.queue_name, j.entity_type, j.entity_id, j.operation,
+       j.error_code, j.error_detail, j.payload_json,
+       j.attempt_count, j.max_attempts, j.created_at, j.finished_at
+  FROM queue_jobs j
+ WHERE j.state = 'dead_letter';
+
+CREATE OR REPLACE VIEW v_job_history AS
+SELECT h.history_id, h.job_id,
+       j.queue_name, j.entity_type, j.entity_id, j.operation,
+       j.state AS current_state,
+       h.old_state, h.new_state, h.transition, h.worker_id, h.message, h.details,
+       j.error_code, j.error_detail, j.payload_json,
+       h.created_at
+  FROM queue_job_history h
+  JOIN queue_jobs j USING (job_id);
+
 -- Claim next runnable jobs using FOR UPDATE SKIP LOCKED.
 CREATE OR REPLACE FUNCTION claim_queue_jobs(
     p_worker_id TEXT,

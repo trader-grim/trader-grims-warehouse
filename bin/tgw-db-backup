@@ -1,0 +1,20 @@
+#!/bin/bash
+# PP-BACKUP-001 A1 — daily PostgreSQL ledger dump
+# Dumps state_machine to nvme, rsyncs to snapshot disk, prunes >35 days.
+set -euo pipefail
+
+DB_DIR=/opt/TGW/var/backups/trader_grims_warehouse/db
+SNAP_DIR=/opt/TGW/var/local/backups/trader_grims_warehouse/db
+LOG=/opt/TGW/var/log/db-backup.log
+STAMP=$(date +%Y%m%d)
+DUMP="$DB_DIR/state_machine-${STAMP}.dump"
+
+mkdir -p "$DB_DIR" "$SNAP_DIR"
+
+pg_dump -U tgw --format=custom state_machine -f "$DUMP"
+
+rsync -a "$DB_DIR/" "$SNAP_DIR/"
+
+find "$DB_DIR" "$SNAP_DIR" -name '*.dump' -mtime +35 -delete
+
+echo "$(date -Iseconds) ok dump=${DUMP}" >> "$LOG"

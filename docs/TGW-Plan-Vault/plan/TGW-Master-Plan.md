@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-07 (session 15 — Track 1 round-2 planning)
+updated: 2026-06-11 (session 23 — task #38 done; suite 455)
 maintained_by: Opus (planner)
 ---
 
@@ -87,6 +87,75 @@ maintained_by: Opus (planner)
 - **`notify()` on HardFailure DONE** — `worker_base.py` HardFailure path now fires `notify(..., level='error')` symmetrically with the transient requeue path.
 - **`offline_draft_stall` catalog-verify rule DONE** — New warning rule in `_verify_item()`: `offline_draft: true` + file mtime > 2h triggers `offline_draft_stall`. 2 new tests.
 - **77 tests pass** (up from 72).
+
+### Planning — 2026-06-08 (session 16, Round 3 + key decisions)
+- **Inbox cleared**: PP-NIXOS-001 Perplexity analysis (MX vs NixOS for PostgreSQL + Python DR)
+  processed. Findings: NixOS architecturally superior; `poetry2nix` for Python; WAL recovery
+  ExecStartPost gotcha documented. Alternatives noted: Guix System, Silverblue.
+- **NixOS COMMITTED** — Dave confirmed NixOS is the target. PP-NIXOS-001 promoted from
+  evaluation to active migration prep. PP-DEPLOY-001 MX image = final safety-net snapshot
+  before cutover. No timeline pressure — migrate when ready.
+- **ISS-009 downgraded** — production keyset active; token not fully blocking live eBay.
+- **SUGGESTIONS.md corruption artifact removed** — session 15 API interruption had left raw
+  response text (lines 112–296) mixed into the file; cleaned up session 16.
+- **Round 3 locked** — 8 ranked items. PP-BULKEDIT-001 (tablet web UI + CLI) is #1 by Dave's
+  direction. Guiding principle: time-saving interfaces usable now, better later.
+  See `## Work Tracks → Track 1 — Round 3`.
+
+### Execution — 2026-06-07 (session 17, Track 1 Round 3 — ALL 8 items DONE)
+- **All 8 Round 3 items shipped** (todo IDs 21–28 now closed). Suite **263 → 315 passing**
+  (+52 tests), ruff clean, `tgw health` fully green. Per-item:
+  - **#21 `tgw restart-workers`** — restarts `tgw-worker@<queue>.service` (all or named);
+    uses `sudo -n` when non-root, prints the command if passwordless sudo is unavailable.
+    New canonical `WORKER_QUEUES` tuple in `queue/__init__.py` (single source of truth; 18 queues).
+  - **#22 PP-BULKEDIT-001 Phase 1** — shared `items.bulk_edit` core (filter→preview→apply,
+    fields: title/location/status/ai_hint/shipping_profile; location routes through
+    `locationupdate` for tree sync, ai_hint set without re-queue). CLI `tgw bulk` (dry-run
+    default, `--apply`). Web: `GET /form/bulk` (tablet-first HTML, network-trust like
+    `/form/intake`) + `POST /api/bulk/{preview,apply}` (Bearer). Enqueues catalog_rebuild on apply.
+  - **#23 catalog-verify `--fix`** — dry-run default, `--write` to apply; auto-strips stale
+    `TEMPLATE:` title prefix (conservative; never writes an empty title); per-SKU fix log.
+  - **#24 PP-REPRICER-001 read-only** — `ebay/market_data.py`: `MarketDataProvider` +
+    OwnSalesProvider (velocity), BrowseCompsProvider (Browse GET, reuses `suggest_price`),
+    StubProvider (the `buy.marketplace_insights`-blocked sold-data slot). `tgw reprice-suggest`
+    blends → reduce/hold/raise. **Strictly read-only — no eBay write calls (verified).**
+  - **#25 PP-MC-001 Phase 4** — `tgwlogs` MC extfs VFS: read-only journalctl per worker;
+    WORKER_QUEUES allowlist + argv-list subprocess (no shell injection) + output cap
+    (`TGWLOGS_LINES`, default 500/max 5000). Registered (mc.ext.ini, installer, sentinel, README).
+  - **#26 PP-SHELL-001 T3** — `tgw.source`/`tgw-dev.source` version-controlled at
+    `etc/interfaces/shell/` (sha256-verified verbatim) + README + operator-gated `install.sh`
+    block (backup+idempotent). Audit-correction: all 6 named ARCH-VIOLATES already wrapped
+    (lines 201–1066); remaining direct-jq writes are in DEPRECATED funcs (Tier-2 *removal*, not wrap).
+  - **#27 PP-NIXOS-001** — `flake.nix` (buildPythonApplication, no poetry.lock) + `nix/tgw.nix`
+    (NixOS module: tgw user w/ configurable uid, postgres state_machine, per-queue worker
+    services, tgw-http, opt-in backup) + `nix/README.md` VM-validation steps. Watch-item flagged:
+    `python3Packages.mcp` availability in nixos-24.11. **Dave validates in VM (not built on MX).**
+  - **#28 PP-DEPLOY-001** — `reference/PP-DEPLOY-001-MX-RESTORE-RUNBOOK.md`: pre-snapshot
+    checklist (drain workers, pg_dump, perms `--check`), MX Snapshot include/exclude (exclude
+    bulk ItemData → rclone restore), ISO verify, full restore, post-NixOS retention.
+- **Adversarial review workflow could not run inline** — sub-agents hit the session limit. The
+  operator then ran cloud **`/ultrareview`**, which found 3 real bugs (all now FIXED + regression-
+  tested; suite **315 → 321**):
+  - *bulk_edit partial-success* — `ok=len(failed)==0` conflated partial success with total failure:
+    catalog_rebuild was skipped after partial writes and the CLI's failure summary was dead code.
+    Fixed: gate rebuild on `count` (not `ok`) in `cmd_bulk` + `http_server.bulk_apply`; CLI handler
+    now branches on the `error` key so the partial-success summary is reachable.
+  - *catalog-verify `--fix` stale `item_viols`* — fixed violations were double-reported (open TODO +
+    FIXES) and `--fix --write --mark-verified` skipped the hall pass for fixed-clean items. Fixed:
+    apply fixes then re-run `_verify_item` on the mutated doc BEFORE accumulating violations / the
+    mark gate.
+  - *negative `--limit`* sliced from the end (`skus[:-5]`). Fixed: `if limit > 0` in `bulk_edit` +
+    `cmd_reprice_suggest`; `BulkBody.limit` now `Field(ge=0)`.
+  - One finding was a **false positive**: ultrareview ran on the committed tree and reported
+    `market_data.py` / `etc/interfaces/shell/` / `extfs.d/tgwlogs` as "missing" — they exist locally
+    but are **untracked**. ⚠ **COMMIT REMINDER:** `git add` the new files (`src/tgw/ebay/market_data.py`,
+    `etc/interfaces/shell/`, `etc/interfaces/mc/system/extfs.d/tgwlogs`, `etc/interfaces/mc/logs.tgwlogs`,
+    `flake.nix`, `nix/`, and the 4 new `tests/test_*.py`) or the features break exactly as the review
+    described. install-system-mc.sh would also benefit from the same `[[ -f ]]` guard the shell block has.
+- **4 new operator suggestions arrived mid-session** (SUGGESTIONS.md, 2026-06-08T01:25–01:54):
+  install quickstart guide; NixOS from-scratch/adopt + site-config-in-github DR; client-machine
+  migration path (tgwOS on the spare intake box); "tgw plan builder" (DB-driven plan). Left
+  unprocessed for the next planning pass — new scope, not Round 3.
 
 ### Planning — 2026-06-07 (session 15, Track 1 round-2 backlog)
 - **Track 1 round 1 confirmed COMPLETE** (sessions 6–14); stale numbered rows collapsed.
@@ -278,24 +347,14 @@ maintained_by: Opus (planner)
 
 ### Active / next build priorities
 
-| Priority | PP | Status | Notes |
-|----------|----|--------|-------|
-| ✅ | **PP-GLOBALS-001** analysis | **done** | No globals block needed; add `weight_oz` field in PP-INTAKE-001 Phase 2 |
-| ✅ | **PP-HINT-001** Browse enrichment | **done** | `ASPECT_REFINEMENTS` in `ebay_draft`; `browse_hint_count` in draft |
-| ✅ | **PP-HINT-001** hint trail | **done** | `identification_history` in item JSON; `tgw hint-trail <sku>` |
-| ✅ | **PP-INTAKE-001 Phase 2** | **done** | Intake form at `/form/intake/<sku>`; chips, weight_oz, barcode, condition, ai_hint |
-| ✅ | **PP-DEADLETTER-001** | **done** | `classify_dead_letter()` + `requeue_with_backoff()`; transient errors auto-reschedule |
-| ✅ | **PP-VERIFY-001 Phase 1** | **done** | `tgw catalog-verify`; 9 rules; markdown checklist; 10 tests |
-| ✅ | **PP-MCP-001** | **code done** | `tgw_mcp_server.py`; 9 tools; needs operator MCP registration in settings.json |
-| ✅ | **PP-VERIFY-001 Phase 2** | **done** | `catalog_verified` hall pass; `--mark-verified`, `--force`, `--skip-verified`; clear-on-write in `_write_field` + HTTP PATCH |
-| ✅ | **PP-DEADLETTER-001 health** | **done** | Per-queue dead_letter breakdown in `tgw health` + `dead_letter_by_queue` in MCP tool; `notify()` on transient requeue |
-| ✅ | **tgw todo CRUD** | **done** | `--update`, `--delegate`, `--set-priority`; 9 new tests |
-| ✅ | **tgw dead-letter** | **done** | List/requeue/cancel dead_letter jobs; classify verdict; MCP tool `tgw_dead_letter` |
-| ✅ | **notify on HardFailure** | **done** | `notify(level='error')` fires on hard failure, symmetric with transient requeue |
-| ✅ | **offline_draft_stall rule** | **done** | catalog-verify warns when `offline_draft=true` + file > 2h old |
-| 4 | **PP-SOLD-001 Tier 3** sweep | operator gated | Run `tgw ebay-sweep` after full-history CSV import |
-| 5 | **PP-PYIPC-001** | research | Syncthing + KDE Connect Python library integration; research via PERPLEXITY-005 |
-| — | **PP-REPRICER-001** | blocked | Blocked on `buy.marketplace_insights` scope approval |
+**See `tgw todo claude` for the live task queue.** The plan is the canonical *reference spec*; `tgw todo` is for *assignment of duties* derived from the plan. Use `tgw todo` to find what to work on; use the plan for design context and status history.
+
+Operator-gated items still tracked here:
+| PP | Status | Notes |
+|----|--------|-------|
+| **PP-SOLD-001 Tier 3** sweep | operator gated | Run `tgw ebay-sweep` after full-history CSV import |
+| **PP-PYIPC-001** | ✅ unblocked | Research complete; Syncthing live at 8384; API key in `/opt/TGW/.local/syncthing/config.xml`; Claude-ready |
+| **PP-REPRICER-001** live | blocked | Blocked on `buy.marketplace_insights` scope |
 
 ### Running in background
 - `ebay_sku_migrate` — ~8,350 live listings remaining; ~5/hr; ~70 days to complete
@@ -377,9 +436,9 @@ offline (pure functions, mocked tests, or local-only data); none require the dea
   PP-DEPLOY-001, PP-WM-001 notify block).
 - Restart affected `tgw-worker@<queue>` units after editing a worker (e.g. `ai_identify` for
   the PP-LOOKUP-001 routing change).
-- **ISS-009 (dead eBay OAuth token) blocks LIVE verification** of anything that PUTs/GETs eBay
-  (the wired `weight_oz` push, sold-poll Tier 1, webhook registration, strikethrough go-live).
-  It does **not** block writing/unit-testing any ready slice. Token restore is operator Track 4.
+- **ISS-009 (eBay token)** — ⬇ DOWNGRADED (session 16): production keyset is active; token
+  refresh likely resolves it. Does **not** block live eBay work — run `tgw restart-ebay-token`
+  if token jobs are dead-lettered. No longer a hard blocker for Round 3 work.
 
 **Execution status (session 15, 2026-06-07): Tier A + Tier B COMPLETE (ranks 1–6).**
 Suite 77 → **184 passing**, ruff clean. Uncommitted, pending Dave's review:
@@ -451,13 +510,178 @@ Next available: Tier E (ranks 19–25) — bulk-mutation / larger / lower value-
 | 22 | PP-SHELL-001 | Bring `tgw.source`/`tgw-dev.source` under version control (copy into `etc/interfaces/shell/`) + apply the WRAP tier: replace the 6 ARCH-VIOLATES fns with `tgw <subcmd>` one-liners (all CLI equivalents now exist) + fix the `ic_test()` artifact. **Deliver as reviewable in-repo copy; do NOT mutate the live `/opt/TGW/bin` file** — cutover is operator-controlled. | M |
 | 23 | PP-VISION-001 | Offline visual-fingerprint index over the 54K existing thumbnails (Pillow+numpy phash/histogram, dependency-free) + `tgw locate <image> [--size-class]` ranked-SKU output; index build is a **batch job** (catalog-rebuild-is-a-job rule). Baseline precision — frame as a workflow proof, not a final CLIP matcher. | M |
 | 24 | PP-MC-002 | Satellite-capable extfs refactor: env-driven DSN/paths (`TGW_NODE_ROLE`/`TGW_HTTP_BASE`) + a `role=satellite` branch routing writes to tgw-http instead of psycopg2. Default `role=master` (preserve current behavior), gate behind env vars, test the data-source helper. Real LTSP/hardware rollout stays operator-gated. | M |
-| 25 | PP-NIXOS-001 | Author `flake.nix` + `nix/tgw.nix` from existing `pyproject.toml`/`install.sh`/systemd units. **Cannot be built/verified here (no nix toolchain) — frame strictly as evaluation material, not a commitment** (NixOS vs MX-Linux image are mutually exclusive). Lowest value-per-risk. | M |
+| 25 | PP-NIXOS-001 | Author `flake.nix` + `nix/tgw.nix` from existing `pyproject.toml`/`install.sh`/systemd units. ⬆ **NixOS now COMMITTED TARGET** (session 16) — active migration prep, not just evaluation. PP-DEPLOY-001 MX image = final safety-net image before cutover. Cannot build/test here (no nix toolchain) — produce files, Dave validates in VM. | M |
+
+### Track 1 — Round 3 (session 16)
+
+**Guiding principle:** Build time-saving interfaces usable now, especially on tablet. Maintain stability. Build better later. NixOS is the committed destination — prepare the path, don't block on it.
+
+**Decisions confirmed (session 16):**
+- NixOS = committed target. PP-NIXOS-001 promoted from evaluation to active prep.
+- PP-DEPLOY-001 MX image = one final restore image as safety net before migrating.
+- PP-BULKEDIT-001 = #1 priority. Tablet-usable: web UI via browser + Termux SSH fallback.
+- ISS-009 downgraded — production keyset active; `tgw restart-ebay-token` if token dead-lettered.
+
+**Active task list:** ✅ **ALL 8 DONE** (todo IDs 21–28 closed, session 17 — see `### Execution — 2026-06-07 (session 17 …)` above for the per-item summary). The todo tracker is the canonical queue. Next: a `/code-review` pass once the session limit resets, then pick the next batch (blocked items below remain operator/research-gated).
+
+### Track 1 — Round 4 (session 18)
+
+**Guiding principle:** Mix of pipeline hygiene, new operator-facing capability, and NixOS prep. Keep building usable things now; prep the spare machine path.
+
+**Input to this round:**
+- Round 3 all 8 DONE; 321 tests passing; git clean.
+- 27 dead_letter jobs (all from 2026-06-02/03 pre-fix era) — need triage.
+- `tgw todo claude` empty — seeded below.
+- PP-PLASMA-001 + PP-PORTABLE-CATALOG-001 never got formal plan sections (added below).
+
+| # | PP | Task | Size |
+|---|----|------|------|
+| 29 | — | Dead_letter triage: cancel 27 stale pre-fix jobs; add `tgw dead-letter --requeue-transient` flag to batch-requeue all transient-classified entries in one shot; re-enqueue 6 `no ebay_category_id` items through ai_identify | XS |
+| 30 | PP-REF-003 | Author `reference/TGW-Quickstart.md`: all `tgw` CLI subcommands + workers + web forms + MC VFS + Qtile chords organised by workflow (health→intake→pipeline→eBay→admin); stubs for physical processes; replaces hunting through plan for command syntax | M |
+| 31 | PP-VISION-001 P1 | Offline phash/histogram fingerprint index over 54K thumbnails (Pillow+numpy, no external deps); batch build job (`catalog-rebuild` rule); `tgw locate <image> [--size-class S]` CLI returns ranked SKU matches; index stored in SQLite catalog | M |
+| 32 | PP-PORTABLE-CATALOG-001 P1 | Add plan section (design below); `tgw export-catalog <dest>` command: copies `tgwcatalog.db` + thumbnails subset to destination path; no Syncthing API needed for Phase 1 — Syncthing handles transport; lays groundwork for spare machine client setup | S |
+| 33 | PP-PLASMA-001 | Add formal plan section (missing since session 16 suggestion); design notes for Plasma 6 + Qtile dual-desktop; no code this round — design/tracking only | XS |
+| 34 | PP-TODO-001 | `GET /form/todos` in tgw-http: tablet-friendly HTML table of open todos grouped by agent; auth-gated (Bearer or network-trust like `/form/intake`); low-friction daily queue review from tablet/phone | S |
+| 35 | PP-NIXOS-001 | Update `flake.nix` + `nix/README.md`: configure `NVM_DIR=/opt/TGW/.nvm`, `NPM_CONFIG_PREFIX=/opt/TGW/.npm` so nvm/npm install under `/opt/TGW/` when operator runs nvm install; ensures `/opt/TGW` is a fully self-contained imageable entity with no tgw home-dir dependencies | XS |
+
+#### Execution — 2026-06-08 (session 18, Track 1 Round 4 — ALL 7 items DONE)
+Built largely via a parallel build workflow (5 file-isolated agents) + main-loop wiring for the
+shared `api.py`/`config.py`/completion surface. Suite **321 → 346** (+25), ruff clean, `tgw health`
+green. ⚠ Sub-agent **session limit** + transient socket errors killed the adversarial-review workflow
+(same constraint as session 17) — review was done **in the main loop** instead (Opus 4.8), with live
+end-to-end probes. Per item:
+- **#29 `dead-letter --requeue-transient`** — batch re-enqueues every `[transient]`-classified
+  dead_letter job (honours `--queue`), via the existing `requeue_dead_letter_job` + `classify_dead_letter`.
+  5 tests (`test_dead_letter.py`). **Live triage run:** 2 transient requeued; 5 now-fixable
+  "no ebay_category_id" items (categories since populated) re-driven through `ebay_draft` (NOT
+  ai_identify — would overwrite good categories); 2 stale `pm_intake` lease-expired orphans cancelled.
+  Board **27 → 23**. The remaining 23 are **real eBay rejections** (25709×8, 25002 Item.Country×3
+  [tracked known issue], 25738×2, 25021×1) + superseded `ebay_draft` records — left for operator
+  review, deliberately **not** mass-cancelled (would hide real signal). Once the re-driven jobs
+  clear, `tgw dead-letter --cancel ebay_draft` clears the superseded records.
+- **#30 PP-REF-003** — `reference/TGW-Quickstart.md` (9 sections, every `tgw` subcommand cross-checked
+  against `api.py` add_parser names; MC/Qtile/macroboard key maps; worker table; physical-process stubs).
+- **#31 PP-VISION-001 Phase 1** — `src/tgw/fingerprint.py` (Pillow-only dHash + joint-RGB histogram;
+  index in `fingerprints.db`; 64-bit dhash stored as TEXT to dodge SQLite signed-int overflow).
+  `tgw build-fingerprints` (batch build, `build-thumbnails` precedent) + `tgw locate <image>
+  [--size-class --top --json]`. 8 tests. **Full index built: 54,314 rows in 87s**; self-match
+  verified distance 0.0000. ⚠ **`--size-class` filter is a no-op until items carry `size_class`** —
+  0 of 83,520 catalog rows have it (set-template hasn't populated it at scale; enrichment + SKU
+  match verified working). New config key `fingerprint_index_path`.
+- **#32 PP-PORTABLE-CATALOG-001 Phase 1** — `src/tgw/catalog_export.py` `export_catalog()` +
+  `tgw export-catalog <dest> [--no-thumbnails --limit --check-only]`; copies `tgwcatalog.db` +
+  thumbnail subset for Syncthing relay. 8 tests. Live verified (179 MB / 83,520-row db copies clean).
+- **#33 PP-PLASMA-001** — formal plan section added (dual-desktop Qtile+Plasma 6; NixOS declares both).
+- **#34 PP-TODO-001** — `GET /form/todos` in tgw-http: tablet-first HTML todo dashboard grouped by
+  agent, no Bearer (network trust, like `/form/intake`), `html.escape` on all fields, graceful
+  200-on-DB-error. 4 tests (`test_http_server.py`).
+- **#35 PP-NIXOS-001** — `nix/tgw.nix` `commonService.environment` now sets `HOME`/`NVM_DIR`/
+  `NPM_CONFIG_PREFIX` under `/opt/TGW` + tmpfiles for `.nvm`/`.npm`/`.venvironments` (propagates to
+  every worker + tgw-http + backup via the verified `recursiveUpdate` merge); `nix/README.md`
+  home-dir-independent section; `flake.nix` devShell note. No nix toolchain on host → review-only.
+
+⚠ **COMMIT REMINDER** (untracked, will break features if not `git add`ed): `src/tgw/fingerprint.py`,
+`src/tgw/catalog_export.py`, `tests/test_fingerprint.py`, `tests/test_catalog_export.py`,
+`tests/test_dead_letter.py`, `docs/TGW-Plan-Vault/reference/TGW-Quickstart.md` (+ modified
+`src/tgw/api.py`, `src/tgw/config.py`, `src/tgw/http_server.py`, `tests/test_http_server.py`,
+`etc/completion/tgw-completion.bash`, `nix/tgw.nix`, `flake.nix`, `nix/README.md`).
+
+**Follow-ups surfaced this session:**
+- `size_class` is virtually unpopulated (0/83,520) → `tgw locate --size-class` + PP-STORAGE-001
+  resolver are inert until set-template adoption grows or a backfill runs. Candidate: a
+  `size_class` backfill from `category_group` defaults (category-groups.json has per-group size_class).
+- 23 real eBay-rejection dead-letters (25709/25002/25738/25021) need item-data/code fixes —
+  25002 Item.Country is the tracked open issue at `## Current state` line ~83.
+
+### Inbox processing — 2026-06-10 (session 19/20)
+
+8 queued inbox files processed + 20 SUGGESTIONS.md items marked done. Key findings:
+
+**GEMINI-003** — Flutter app scaffold (Phases B+C+D) delivered by Gemini. Full app at
+`apps/tgw_app/`: Riverpod state, Dio HTTP, sqflite DB, all screens (SKU list, scan, detail,
+edit stubs). `flutter analyze` clean. Build environment needs `libsecret-1-dev` (Linux) and
+Android SDK licences; expected. Phase D edit flows disabled in UI (stubs visible, not wired).
+⚠ **BACKEND-NEEDED**: app polls `/api/queue/status` for connectivity; a proper `/api/health`
+JSON endpoint is the right contract → added as todo #37.
+
+**GEMINI-004** — Multimodal photo QA on 20 items. ⚠ **Critical finding**: boilerplate
+contamination in `description_history` — text from "John F. Rider Perpetual
+Troubleshooter's Manuals" (electronics service manual series) injected into items across
+diverse categories (confirmed on SKUs `tgw201501021970398`, `tgw201501021970498`,
+`tgw201501021970953`; likely more). Probable cause: batch description import or AI prompt
+bleed-through. Data scrub needed → added as Round 5 item. Alt-text pilot: Ollama/Gemini
+vision can generate useful captions and SEO fields from item photos → added as todo #38.
+Alt-text sidecar naming convention: `<SKU>-alt.jpg` (confirm with Dave whether this is a
+renamed secondary image or an annotated derivative before implementing).
+
+**GEMINI-005** — Pricing calibration. 3 concrete `category-groups.json` edits recommended:
+- `electrical_fixtures`: `typical_used` 15.43 → **12.50** (align with market p25)
+- `media_records`: `typical_used` 12.03 → **13.50** (increase to capture value)
+- `collectibles_pins_buttons`: `typical_used` 9.72 → **10.50** (increase to capture value)
+Run `tgw category-groups --reseed` after. Added as Round 5 items #40–41.
+
+**GEMINI-006** — Marketing/category insights. Top zero-inventory high-velocity categories
+(ST=1.00, 0 active): Sewing Buttons, Network Cards, Heavy Equipment Manuals, Lapel Pins,
+Locomotives, Collectible Magazines. Store category mappings: `tools_hand`→"Tools & Workshop
+Equipment", `electronics_adapters_chargers`→"Power Adapters & Chargers",
+`electronics_remotes`→"TV, Video & Home Audio Accessories", `kitchen_utensils`→"Kitchen
+Tools & Gadgets". Priority quality improvements: Headphones, Flashlights, Wrenches.
+
+**PERPLEXITY-005** — Full 36KB result processed (`PERPLEXITY-005-result.md`). PP-PYIPC-001
+is now research-complete. Key decisions: `pyncthing` + custom `httpx` `/rest/events/disk`
+consumer for Syncthing; `pydbus` + `kdeconnect-cli` for KDE Connect; psycopg3 migration
+path clear; `aiosqlite` for FastAPI catalog reads; `discogs_client` deprecated → wrap in
+adapter; EasyPost for shipping rates (PirateShip has no public API); `python-evdev` for
+barcode scanners; `hidapi`/`hid` for USB scales; Go-UPC/Apify for enrichment upgrades.
+See PP-PYIPC-001 section for full findings.
+
+**PERPLEXITY-006** — Flutter offline-first sync pattern (full research). Key design
+decisions for PP-PORTABLE-CATALOG-001 P2:
+- Syncthing + SQLite: safe only with one writer; clients must treat catalog as a closed artifact
+- **Pattern**: snapshot + copy to app-private storage; open the copy, never the synced file directly
+- **Stack**: `sqflite` + `sqflite_common_ffi` (Linux); `sqlite3` package (sqlite3_flutter_libs deprecated)
+- **HTTP**: `dio` + `dio_smart_retry` (successor to abandoned dio_retry)
+- **Offline queue**: roll own outbox SQLite table (states: pending/sent/ack); avoid black-box plugins
+- **Connectivity**: `connectivity_plus` + health-ping check; `workmanager` for Android background flush
+- **Flutter secure storage**: requires `libsecret-1-dev` on Linux
+- **Server-side snapshot**: `sqlite3.Connection.backup()` for atomic export
+See PP-PORTABLE-CATALOG-001 Phase 2 design below.
+
+**syncthing-nixos-nginx-research.md** — Complete NixOS Syncthing deployment design:
+- Isolated headless `tgw` user instance on port 8385/22001; regular users use 8384/22000
+- NixOS declarative `services.syncthing`; per-hostname config via config dir symlink (LTSP fat clients)
+- Nginx reverse proxy with `insecureSkipHostCheck` + WebSocket headers
+- Auto-TLS: systemd oneshot generating self-signed cert before nginx starts
+- GUI access from dev machine: `ssh -L 9000:127.0.0.1:8385 user@server`
+See PP-NIXOS-001 → Syncthing deployment section.
+
+**system-app-config-and-nixos-flake-design.md** — NixOS multi-tier flake architecture:
+`flake-parts` framework; modules: `bases/master.nix` + `bases/portable.nix`, `interfaces/cli.nix`,
+`graphical/tiled.nix` + `plasma.nix` + `thin-client-rdp.nix`, `ai/compute-node.nix`.
+LTSP fat clients share NFS `/nix/store`; Ollama model weights on NFS mount (not in initrd).
+Separate dev flake: `nix develop ./dev-env`. See PP-NIXOS-001 → Flake architecture section.
+
+**Dead-letter triage 2026-06-09 (between sessions 18/19)** — 744 `ai_identify` dead-letters
+from Ollama HTTP 500 crash (~2026-06-08) reset via `tgw dead-letter --requeue-transient`.
+Root cause: `batch_size` config key missing from `TgwConfig` in `config.py` → `ValidationError`
+on load after config update. Fixed: `batch_size: int = 1` added to `TgwConfig`. Worker
+restarted; recovery confirmed.
+
+**eBay Developer Support (Track 4)** — eBay responded to the `buy.marketplace_insights`
+scope request with 8 questions Dave must answer. See Track 4 Priority 1 for the response
+action item.
+
+**Blocked — not Round 4 (held for later rounds):**
+Same blocker groups as Round 3 plus:
+- PP-PLANDB-001 — design discussion needed before code; currently design-open
+- PP-PORTABLE-CATALOG-001 P2+ — requires Syncthing API key + PERPLEXITY-005 result (PP-PYIPC-001)
+- PP-VISION-001 P2+ — CLIP/embedding model requires GPU upgrade
 
 #### Blocked — not Claude-ready (grouped by blocker)
 - **Operator / host-level ops** — `PP-REMOTE-001` (Tailscale + tmux + SSH hardening + sudoers + claude-user decision); `PP-DEPLOY-001` full epic (usermod UID<1000, recursive chown, image bake, fresh-restore reboot — only the read-only audit check #16 is ready). *Unblock:* operator does the host work, then Claude can add reviewable config (tmux launcher, OSC52 helper).
 - **Hardware / physical device** — `PP-MACRO-001` install+prove needs a 2nd keyboard, live desktop, and `keyd list-devices` hash (a static drift-validation test is the only code-only slice, and it doesn't advance the goal). *Unblock:* operator wires the dedicated keyboard + captures the `[ids]` hash.
 - **Android device + push creds** — `PP-TASKER-001` (Tasker/Join apps, barcode-intent audit; even a server-side push backend needs an operator ntfy topic / Join key to validate). *Unblock:* operator audits phone intents + supplies a push URL/key.
-- **External research + creds/services** — `PP-PYIPC-001` gated on the **PERPLEXITY-005** library-audit result (only a prompt template exists, no result), plus PP-WM-001, a Syncthing API key (none in config), and a live Syncthing/DBus session. *Unblock:* run PERPLEXITY-005 → inbox; operator supplies `syncthing_api_key` + running daemon.
+- ~~**External research + creds/services** — PP-PYIPC-001~~ **✅ UNBLOCKED**: PERPLEXITY-005 research complete; Syncthing is live at `127.0.0.1:8384`; API key in `/opt/TGW/.local/syncthing/config.xml` (in-project). Libraries decided: `pyncthing` + custom `httpx` events consumer; `pydbus` for KDE Connect. No operator action needed — PP-PYIPC-001 is Claude-ready.
 - **Design-open / architecture decision** — `PP-REVISION-001` live-listing revision. `ReviseFixedPriceItem` exists (`trading.py:266`) but only for SKU-label changes; `ebay_stage.py:6` calls itself "the stopgap until the full revision system is built." Open question (sparse-delta vs full-replacement) + depends on PP-SYNC-001 being authoritative + live token for any push. *Unblock:* Dave settles the delta-vs-replacement design; then a dry-run delta computer is a buildable first slice.
 
 #### Stale-done reconciliation (doc-only corrections — several bundled into the slices above)
@@ -474,11 +698,136 @@ Audit caught the plan crediting shipped work as open and missing shipped tools. 
 - **PP-STRIKE-001** — core code **DONE**; Track-1 table + planning text said "Planned". *(bundled into rank 6)*
 - **ISS-006** — `_USER_PROMPT_ENRICHED` is fully wired (`ai_identify.py:171–204`); issue is stale → **closed in ISSUES.md**.
 
+### Track 1 — Round 5 (session 19/20)
+
+**Guiding principle:** Process Gemini inbox findings into code. Address data quality issues.
+Pipeline hygiene + Flutter backend gap.
+
+**Input:** Round 4 all 7 DONE; 346 tests passing; 4 open todos (#36–39); 8 inbox files processed.
+
+**Session 21 progress:** #36 DONE (433 tests passing; 121 items backfilled via `ebay_category_id`; catalog_rebuild enqueued). Todos remaining: #37–39 + #47–49.
+
+**Session 22 progress:** #37 DONE (439 tests passing). Todos remaining: #38–39 + #47–49.
+
+**Session 23 progress:** #38 DONE (455 tests passing). Todos remaining: #39 + #47–49.
+
+| # | PP | Task | Size |
+|---|----|------|------|
+| ✅ 36 | PP-STORAGE-001 | `size_class` backfill — `tgw data-scrub --pass 2 [--write]`; 121 items populated via `ebay_category_id` reverse map; catalog_rebuild enqueued; 13 new tests (`test_scrub.py`); suite 433 — **DONE session 21** | S |
+| ✅ 37 | PP-EDITOR-001 | `GET /api/health` — Bearer-auth; mirrors `check_all()` JSON + `dead_letter_count`; HTTP 503 on failure; 6 new tests; suite 439 — **DONE session 22** | S |
+| ✅ 38 | — | `tgw alt-text <sku> [--model MODEL] [--dry-run]`: Ollama vision → `alt_text` + `seo_caption` in `draft_listing`; original photo archived to `data/history/ItemData/<sku>/` if not there; production photo renamed to `<sku>-alt.jpg`; 16 new tests (`test_alt_text.py`); suite 455 — **DONE session 23** | M |
+| ✅ 39 | — | ~~Fix 25002 `Item.Country` dead-letter rejections~~ — **RESOLVED 2026-06-11 (ISS-001 closed)**: `availabilityDistributions` + `merchantLocationKey` fix (session 9) confirmed working; originally-affected items live via Inventory API. Session-23 25002-lookalikes were item-specifics validation errors on an already-live Trading-API item; all 15 stale dead-letters cleared | S |
+| 40 | — | `category-groups.json` pricing calibration (GEMINI-005): update `electrical_fixtures`→12.50, `media_records`→13.50, `collectibles_pins_buttons`→10.50; run `tgw category-groups --reseed` | XS |
+| 41 | — | `category-groups.json` store categories (GEMINI-006): populate `store_category` for `tools_hand`, `electronics_adapters_chargers`, `electronics_remotes`, `kitchen_utensils` | XS |
+| 42 | — | Data scrub: scan `description_history` for "John F. Rider" and generic boilerplate contamination (GEMINI-004); report affected SKUs; strip contamination strings | S |
+| 43 | PP-FULFILLMENT-001 | Standard Envelope constraint (≤0.25 in thick, uniform): wire into `_resolve_fulfillment_id()` as a size/category gate; add note to CATEGORY-QUIRKS.md | S |
+| ✅ 44 | PP-CAPTURE-001 | `GET/POST /form/suggest` — punctuation-safe suggestion web form; plain HTML (no JS), network-trust like `/form/intake`; reuses `cmd_suggest()`; whitespace collapsed to keep one checklist line per entry; 5 tests; suite 480 — **DONE session 24 (uncommitted, pending review)** | S |
+| 45 | — | `TGW-Quickstart.md` pipe examples: add `--skus-only` / stdin `-` / multi-SKU patterns; note `tgw enqueue-sku` queue-first path | XS |
+| 46 | — | Ledger ops-query ergonomics (from runbook work 2026-06-10): `queue_job_history` has no `queue_name` (per-queue history needs `JOIN queue_jobs USING (job_id)`) and uses `created_at`; job columns are `payload_json`/`error_code`/`error_detail` (not `payload`/`last_error`). Fix: add SQL views to `queue/schema.sql` (e.g. `v_dead_letters`, `v_job_history` with queue_name) and/or a `tgw queue history` subcommand so operators stop hand-writing joins; `docs/runbooks/` already uses the correct join form | S |
+| ✅ 47 | PP-SHELL-001 | **DONE 2026-06-11 (session 23).** Canonical hyphenated names adopted; deprecated aliases kept. `tgw search TEXT` added. Quickstart updated. Key findings: (1) `statusupdate VALUE SKUS...` — value-first is intentional for multi-SKU; kept as-is, documented. (2) `enqueue-sku QUEUE SKUS...` — queue-first is correct (you target a queue, not an item); quickstart was wrong and is now fixed. (3) `ebay-pull` has no scoping — deferred (needs design). (4) Nested-field CLI writes → HTTP PATCH / MC extfs path (PP-CONTEXT-001, not CLI). (5) `requeue` is ai_identify-only but generically named — leave for PP-SHELL-001 Tier 3. Canonical rename table: `titleupdate`→`update-title`, `locationupdate`→`update-location`, `verifiedupdate`→`update-verified`, `statusupdate`→`update-status`, `setshipping`→`set-shipping`, `whispertosuggest`→`whisper-suggest`. | M |
+| ✅ 48 | PP-CONTEXT-001 | **DONE 2026-06-11 (session 23).** `tgw set-context <sku>` / `tgw get-context [--sku-only]` / `tgw clear-context`. Primary store: `runtime/state/current-item.json` `{sku, set_at, set_by}`. Compat symlinks (`/opt/TGW/CurrentItem`, `CurrentItem.json`) maintained atomically via temp+os.replace. Legacy symlink fallback preserved in `get-context`. `tgw_sku` → `tgw get-context --sku-only`. `tgwset` → `tgw set-context`. `set-template` updated to use `context.current_sku(cfg)`. 20 tests in `test_context.py`. `CurrentLocation` dropped (derive location from SKU via `tgw resolve`). | M |
+
+### Track 1 — Round 6 (session 24)
+
+**Input:** Round 5 fully drained except rows 40–43/45 (seeded as todos session 24). Suite 480.
+Lint-policy incident (session 24): bare `ruff check` mutated 8 files because pyproject set
+`fix = true` — root cause removed; see #49.
+
+| # | PP | Task | Size |
+|---|----|------|------|
+| ✅ 49 | — | Lint policy hardening — **DONE session 24**: `fix = true` removed from pyproject (a bare `ruff check` must never mutate the tree; fixes are explicit via `ruff check --fix`); `systemd/history/` excluded (archived dead scripts, not lint-gated); the 8 pending isort autofixes kept and committed separately from feature work | XS |
+| 50 | — | `tools/migrate_batch.py` is broken as-is (8 F821s: `os`/`requests`/`time` never imported, `BULK_MIGRATE_URL` undefined — looks like a pasted fragment, no `main`): either repair it or, if superseded by the `ebay_sku_migrate` worker, archive it out of the lint path. Decide before fixing | S |
+| 51 | — | `tools/repair_itemdata_json.py`: backslash escape inside f-string is Python-3.12-only syntax (host runs 3.11 — the script cannot even parse today) + unused `nxt` variable; fix both, or archive if the one-shot repair is done | XS |
+| ✅ 52 | PP-DOCFLOW-001 | **Design session HELD 2026-06-11 (session 24)** — all four open questions settled by Dave; design recorded below; Phase 1 build seeded as todo | M |
+| ✅ 53 | PP-DOCFLOW-001 | **Phase 1 build DONE 2026-06-11 (session 25)**: pm_intake ported to `call_model()` + `tgw-models.json` → `openrouter/google/gemini-2.5-flash`; actions: `no_change \| append_to_section \| file_document \| flag_for_review`; `new_section` demoted to review-flag; 4h submission-delay gate + `tgw admin-file [--now]`; `reference/FILING-LOG.md` audit trail; `inbox/review/` + `dev-workflow/research/` dirs; `pm_intake_delay_hours` config key; 19 offline tests | M |
+| 54 | PP-BACKUP-001 | **Phase A build** (todo #60, after Dave approves `PLAN-backup-dr.md`): `tgw-db-backup` + `tgw-cloud-sync` + `tgw-secrets-backup` unit/script files in `etc/systemd/` + `bin/` (operator installs); `check_backups()` in health.py + tests (same check the Nix module needs per PLAN-nixos §9.1) | M |
+| 55 | PP-BACKUP-001 | **Phase A operator items** (todo #61): approve plan; gpg passphrase custody decision (off-machine!); install+enable the three timers; first manual cloud sync in an off-hours window (27 days of churn); `rclone about dbukove:` quota check; A5 restore drill + record RTO times | M |
+
+### PP-DOCFLOW-001 — The TGW Project Admin (LLM document + suggestion intake)
+
+**Status: PHASE 1 COMPLETE 2026-06-11 (session 25). Phase 2 (suggestions batch-classify) next.**
+
+**Mental model (Dave, session 24):** model this tool as a **real-life project admin** — the
+best ones always have the plan ready to be worked on: all docs filed and readily available,
+**cross-indexed to the appropriate tasks**. Ours will just be better. When we move to
+planning, everything — thoughts, notes, files, binaries — is collected and easily
+accessible. It is an admin function, but a *knowledgeable* admin: it knows where or what a
+doc is.
+
+**Decisions (Dave, 2026-06-11):**
+1. **Evolve pm_intake in place** — same worker/queue/unit, ported to the session-23
+   dispatcher (`tgw.apis.llm.call_model`), action vocabulary extended. Compute is no
+   longer a constraint: route to fast capable Gemini, "go overboard" — well under $1/mo
+   at classification-prompt sizes. (Note: pm_intake is currently **enabled + active** on
+   local Ollama — verified session 24; the remembered disable-to-reserve-compute is not
+   in effect.)
+2. **Review surface = the admin pattern**: filed docs land in the right vault location;
+   anything uncertain goes to `inbox/review/` + a todo pointing at it. Any fall-through
+   is cleaned up in the normal session-start ritual (the existing safety net).
+3. **Trigger model — batched, not continuous:**
+   - **Auto-run as planning prep** (before a planning/Claude session) and
+   - **manually triggerable** (`tgw admin-file`) — e.g. after dumping a stack of research.
+   - **Submission-delay window**: items must age N hours before absorption — gives the
+     human submitter a chance to correct a hasty submission *before group resources are
+     spent on it* (manual trigger can override with `--now`).
+4. **Suggestions: batched at session start** (Phase 2) — the admin pre-classifies;
+   Claude reviews dispositions instead of raw entries.
+5. **Plan writes: append-only.** The cloud model may `append_to_section`; `new_section`
+   and anything structural becomes a review flag. (This *tightens* current pm_intake,
+   which can create sections today.)
+
+**Scope notes from the session:** intake accepts anything — "a one word comment or a
+folder full of docs and binaries." Binaries (photos, PDFs, zips) are in scope: filed by
+type/context (the dispatcher already supports vision for image classification when
+needed — later phase). Cross-indexing means filed docs get index entries linking them to
+the relevant PP-* items / tasks, so planning sessions start with material attached.
+
+**Phase 1 (MVP — build next; seeded as todo):**
+- Port `pm_intake` from direct `ollama.chat()` to `call_model('pm_intake', ...)`;
+  set `tgw-models.json`: `pm_intake → openrouter / google/gemini-2.5-flash`
+  (Ollama stays the automatic fallback — frees CPU for vision/pipeline).
+- Extend actions: `no_change | append_to_section | flag_for_review | file_document`
+  (`new_section` demoted to a review flag per decision 5).
+- `file_document`: move the file **verbatim** (never reflow) to
+  `reference/` / `perplexity/` / `dev-workflow/research/`; append an entry to a filing
+  log/index (`reference/FILING-LOG.md`: date, source, destination, related PP-*, model,
+  confidence); optional one-line plan pointer (append-only).
+- `flag_for_review`: move to `inbox/review/` + create a todo (agent claude or dave).
+- Submission-delay gate (mtime-based, configurable, e.g. 4 h) + `tgw admin-file [--now]`
+  manual trigger.
+- Audit trail on every action (the `identification_history` pattern).
+
+**Phase 2:** suggestions join the path — session-start batch pass pre-classifies
+unprocessed SUGGESTIONS.md entries into todo / plan-append / review-flag dispositions for
+Claude's review. Cross-index todo ↔ filed-doc links.
+
+**Phase 3 (later):** binaries with vision classification; whole-folder submissions as one
+unit; Antigravity batch jobs for large backlogs; **URL/URI submissions** (Dave 2026-06-11
+18:25 — pm_intake accepts a link, fetches the content, files/classifies it like a doc).
+
+**Admin skills expansion (Dave, 2026-06-11 18:23 — Phase 3+/4 scope):** like a real-life
+admin, the project admin should also handle **presentation and aggregation**: spreadsheets,
+charts, SKU groupings too complicated for the generic tgw filters, topic summaries,
+research consolidations, basic project documentation work — on request ("even you could
+request topic summaries"). Builds on the same dispatcher; routes to large-context
+providers (Gemini/Antigravity) per PP-MULTIMODEL-001. Constraint: outputs are *artifacts
+filed in the vault* (reports, sheets), never direct writes to curated data
+(PP-REVISION-001 governing principle).
+
+**Invariants:** writes only inside the plan vault (pm_intake's existing rule); originals
+never destroyed (move, never rewrite-in-place; `processed/` archive retained);
+flag-don't-guess on low confidence; plan writes append-only.
+
 ### Track 2 — Gemini CLI (large-context data + self-contained tasks)
-**Status 2026-06-06**: Gemini CLI now installed and available. Gemini is Dave's primary
-non-Claude AI — free with Google Drive subscription, long context window (1M tokens),
-excellent for data analysis tasks. Perplexity expires ~6 months from now — prioritize
-all remaining research briefs via Perplexity while active; shift data tasks to Gemini.
+**Status 2026-06-10 update**: Google One → **Google AI Plus** with compute-based limits (5-hour
+refresh window). Keep individual Gemini tasks small and self-contained to avoid hitting the
+compute cap. Also available: **Antigravity/Flow** ✅ CLI configured + v2.0 installed (2026-06-11).
+
+**Antigravity CLI + OpenRouter config (inbox research 2026-06-11):** `agy` reads `~/.gemini/antigravity-cli/settings.json`. Add OpenRouter as a custom provider:
+```json
+{ "llm_providers": { "openrouter": { "base_url": "https://openrouter.ai/api/v1", "api_key": "YOUR_KEY", "default_model": "openrouter/free" } } }
+```
+Google Drive access via: (a) Google Workspace MCP (add to `~/.gemini/config/mcp_config.json`), or (b) rclone mount at a local directory (`cd ~/mnt/gdrive && agy`). The rclone approach is simpler since ItemData is already synced to GDrive. Both methods confirmed working in `agy` CLI.
 
 **How to delegate to Gemini**: Write a self-contained task file with all needed context
 baked in (no live system access). Drop data excerpts, schemas, and the task description.
@@ -489,10 +838,62 @@ Save result to `inbox/` for PM-intake.
 | ✅ PP-VERIFY-001 scaffold | done (session 13) — scaffold superseded by full Phase 1 implementation |
 | ✅ Data scrub analysis | done (GEMINI-002, session 14) — completeness matrix, stall patterns, legacy scrub rules; 3 new verify rules implemented |
 | ✅ Category-group quality review | done (GEMINI-001, session 14) — `electrical_industrial` split; ai_hints improved; `tools_hand` coherence noted |
+| ✅ Flutter app scaffold | done (GEMINI-003, session 19) — Phases B+C+D at `apps/tgw_app/`; analyze clean; libsecret-1 build dep; BACKEND-NEEDED /api/health endpoint (todo #37) |
+| ✅ Photo QA + alt-text pilot | done (GEMINI-004, session 19) — boilerplate contamination finding; alt-text viable via Ollama vision; sidecar naming confirmed |
+| ✅ Pricing data analysis | done (GEMINI-005, session 19) — 3 calibration edits (see Round 5 #40); reseed reminder; tier pattern notes |
+| ✅ Marketing/category insights | done (GEMINI-006, session 19) — store category mappings; zero-inventory high-velocity list; SEO keyword opportunities |
 | ebay_draft aspect fill audit | Grep of aspect fill rates per category | Which categories have worst specifics coverage; tuning recommendations |
-| PP-GLOBALS-001 analysis | Sample item JSONs (20 items, various categories) | Which fields are offer-invariant; proposed `globals` block schema |
 | **AI conversation history consolidation** | Dave's conversation history with AI assistants (Claude, Perplexity sessions) | Organize + consolidate into structured reference; **plan scope with Dave before executing** (session 10 note) |
-| **Data/archive history consolidation** | `/opt/TGW/data/history/` contents, ItemArchive zip inventory, archive-ebay-index.json | Organize and index historical item data (zip archives, legacy records); similar to the archive index work already done; identify gaps and suggest integration points with current pipeline |
+| ✅ **Data/archive history consolidation** | GEMINI-007 (2026-06-10) — **CRITICAL: MasterArchive I/O errors detected** (`/dev/sdc5`). `ls`/`du` work (cached dir entries), but `cat`/`touch` fail with EIO. **Operator must run `dmesg`, `umount /media/tgw/MasterArchive`, `fsck /dev/sdc5` before any indexing**. Folder inventory: `ItemData/` 584G (1.1M files, KEEP-INDEX), `job_archive/` 371G (KEEP-COLD), `ItemArchive/` 163G 54K zips (KEEP-INDEX, only 40% in archive-ebay-index.json), `magento/` 129G (KEEP-COLD), `eBay/` 60G (KEEP-COLD), `GarageSale/` 33G (KEEP-COLD), `ItemCreation/` 8.8G drafts (MIGRATE). Cleanup order: (1) fix mount, (2) consolidate zips, (3) index loose CSVs, (4) complete ItemArchive index to 100%, (5) offload cold data. `tgw history-index --target <folder>` design sketch included. See GEMINI-007-result.md. | |
+
+### PP-DATALEARN-001 — Gemini Data Mining + AI-Calculated Fields
+
+**Architecture principle (session 18):** All Gemini data reads/writes must go through the tgw-api fence. Gemini gets a task file with context baked in; it calls tgw-http endpoints or produces structured output for PM-intake. No direct filesystem or DB access from external AI tools. This extends the "tgw-api is the fence" settled architecture to the external AI layer.
+
+**Task queue (Track 2):** See table above — pricing analysis, marketing insights, history consolidation, category quality review.
+
+**Alt-text pipeline research (session 18):** Alt-text for item photos is a future enrichment opportunity (accessibility + SEO in external surfaces). Research links:
+- https://medium.com/@petter.eckerbom/building-an-ai-multilingual-alt-text-pipeline-thats-fast-and-open-source-032982a5170c
+- https://github.com/lukeslp/alt-text-local-llm (local LLM variant — compatible with our Ollama stack)
+- https://surfai.app/blog/best-ai-image-description-generator-tools (survey)
+
+Alt-text can feed `draft_listing.description` enrichment and future accessibility features. Track for Track 2 / PP-SEO-001 Phase 5+ when compute allows.
+
+**Alt-text file-naming convention (session 19 — Dave 17:47):** When alt-text generation lands,
+adopt a `<SKU>-alt.jpg` naming convention for the associated/derivative photo (sidecar to the
+primary `<SKU>....jpg`). Wire the convention into the alt-text writer (Claude todo #38 `tgw
+alt-text`) and reflect it in GEMINI-TASK-004's output spec. ⚠ Intent slightly ambiguous — confirm
+with Dave whether `-alt.jpg` is (a) a renamed/secondary image file, or (b) the naming for an
+alt-text-annotated derivative — before implementing the writer.
+
+**Alt-text provider strategy (session 21–22):** Use Antigravity/OpenRouter LLMs for
+alt-text in batches to offload Ollama (CPU-only, slow). Google Drive rclone sync in place
+for ItemData — available for cloud provider access. Best free vision models on OpenRouter
+(inbox research 2026-06-11): `google/gemma-4-31b-it:free` (top-rated, spatial awareness),
+`google/gemma-4-26b-a4b-it:free` (MoE, fast), `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`
+(scene description). Ultra-cheap paid: `google/gemini-1.5-flash` (~$0.075/M tokens),
+`meta-llama/llama-3.2-11b-vision-instruct` (~$0.05–0.10/M). Use `openrouter/free` to
+auto-route to the shortest-queue free vision model. Rate limit: ~20 req/min on free tier.
+Prompt template: "Act as an expert in web accessibility and SEO. Analyze this image and
+provide a concise, descriptive alt-text (max 150 characters). Describe the main subject,
+setting, and context accurately without using fluff words like 'image of'..."
+
+**Zero-bandwidth GDrive→EPS upload strategy (inbox research 2026-06-11):** ItemData is rclone-synced
+to Google Drive. Photos can flow directly from Drive to eBay Picture Services without local download:
+eBay's `UploadSiteHostedPictures` (Trading API) accepts image data via API upload; Antigravity CLI
+(`agy`) can be scripted to fetch image bytes from Drive API and POST to EPS in one pass. Requirements:
+eBay Trading API access (currently have `sell.inventory` + Trading credentials), Google Drive API
+scope in OAuth client. Relevant for PP-PHOTO-001 (bulk photo re-upload / migration) — evaluate when
+Planning that phase. Source: `inbox/queued/20260611T093715-antigravity-remote-execution-direct-gdrive-to-eps.md`.
+
+**LLM routing principle (session 21–22):** OpenRouter provides built-in meta-model endpoints:
+`openrouter/auto` (NotDiamond-powered, routes by task complexity; session-sticky for multi-turn),
+`openrouter/free` (rotating free models; vision-aware), `openrouter/fusion` (multi-model
+consensus panel). Open-source self-hosted options: **LiteLLM** (Python proxy, 100+ models,
+fallback/load-balance; drop-in OpenAI-compatible), **RouteLLM** (LMSYS classifier, escalates
+to expensive models only when needed), **Bifrost** (Go, near-zero latency). Recommended path:
+start with `openrouter/free` for alt-text (zero cost, auto-routed); add LiteLLM when mixing
+local Ollama + cloud providers in one pipeline.
 
 ### Track 3 — Perplexity (live web research, cited sources)
 Research briefs in `docs/TGW-Plan-Vault/perplexity/`. Paste brief into Perplexity → save result as `.md` to `inbox/` for PM-intake.
@@ -504,17 +905,46 @@ Research briefs in `docs/TGW-Plan-Vault/perplexity/`. Paste brief into Perplexit
 | eBay Cassini 2025–2026         | `PERPLEXITY-002-cassini-seo.md`     | HIGH     | PP-SEO-001 tuning, listing quality strategy      |
 | Sold price data alternatives   | `PERPLEXITY-003-sold-price-data.md` | HIGH     | PP-REPRICER-001 unblock if MI scope stays closed |
 | Third-party integration status | `PERPLEXITY-004-integrations.md`    | MEDIUM   | IGDB, Whisper.cpp, Discogs, Go-UPC               |
-| Library & API audit            | `PERPLEXITY-005-library-audit.md`   | MEDIUM   | PP-PYIPC-001 Syncthing/KDE Connect; stack review |
+| ✅ Library & API audit         | `PERPLEXITY-005-result.md`          | DONE         | Full result processed (session 19/20); see PP-PYIPC-001 + PP-LOOKUP-001 + PP-FULFILLMENT-001 updates |
+| ✅ Flutter offline sync        | `PERPLEXITY-006-flutter-offline-sync Result.md` | DONE | PP-PORTABLE-CATALOG-001 P2 — snapshot+copy pattern; sqflite stack; Dio+dio_smart_retry; outbox table design |
 
 ### Track 4 — Operator (Dave must act to unblock)
+
+#### ✅ Hardware alert resolved — MasterArchive drive (2026-06-11)
+`/dev/sdc5` (`/media/tgw/MasterArchive`) had I/O errors (EIO on reads, GEMINI-007).
+**Repaired by Dave 2026-06-11.** `tgw history-index` work is now unblocked.
+
+---
 
 #### ✅ Done
 - [x] `velocity_stats` worker enabled (2026-06-05)
 - [x] 2-year eBay sold CSV confirmed as maximum available — archive tombstone ceiling accepted
+- [x] **ISS-009 downgraded (session 16)** — production keyset active; `tgw restart-ebay-token` if dead-lettered; no longer a hard blocker
 
 ---
 
-#### Priority 0 — Qtile WM install
+#### Priority 0 — NixOS migration prep (session 16 decision; updated session 18)
+
+NixOS is the **committed target OS**. Migration is not immediate — do when ready. Recommended path:
+
+**Step 1 — Spare machine first (session 18):**
+- [ ] Identify the spare intake support machine
+- [ ] Install NixOS on it using the `flake.nix` already produced; configure as client (portable catalog, services not started)
+- [ ] Use it to build familiarity, discover any tool gaps, and validate the flake without risk to the main production machine
+- [ ] When client setup is solid → promote to tgwOS 2.0 server or full replacement for main machine
+
+**Step 2 — Final MX safety net:**
+- [ ] Use MX Snapshot to bake a bootable ISO of the current working system before any migration touches the main machine. This is the permanent safety net.
+
+**Step 3 — VM validation:**
+- [ ] Validate `flake.nix` + `nix/tgw.nix` in a NixOS VM (watch item: `python3Packages.mcp` in nixos-24.11)
+
+**Step 4 — Main machine cutover (when ready):**
+- [ ] Run `nixos-install` on new partition; keep MX as fallback until `tgw health` fully green on NixOS
+
+---
+
+#### Priority 0b — Qtile WM install
 
 - [x] **Install Qtile window manager** (PP-WM-001):
   ```bash
@@ -539,6 +969,13 @@ applied at once. Avoids piecemeal scope expansion later. See complete desired sc
 `buy.marketplace_insights`. Awaiting eBay approval. Portal request flow has changed from
 what's documented below — steps below are reference only; follow current portal UI when
 updating credentials after approval.
+
+**Status 2026-06-10 update:** eBay Developer Support responded to the `buy.marketplace_insights`
+scope request with **8 questions** Dave must answer before the scope can be approved.
+- [ ] **Review and respond to eBay Developer Support message** — answer the 8 questions
+  about the use case for `buy.marketplace_insights` (automated pricing engine, resale
+  platform, no redistribution of sold-price data to third parties). Be specific: automated
+  repricing, TGW internal use only, ~55K items, eBay seller account DaveBuko-Webkulap.
 
 ⚠ When new keyset arrives: update `secrets_root/ebay-credentials.json`, update
 `tgw-api-config.json` scopes to match approved scopes only, then re-run OAuth.
@@ -716,12 +1153,9 @@ See PP-PERP-AUTO-001 section for design.
   # Test: Caps Lock on macroboard → LED changes
   ```
 
-- [ ] **Tailscale** (remote access, PP-REMOTE-001):
-  ```
-  curl -fsSL https://tailscale.com/install.sh | sh
-  sudo tailscale up
-  # Join your Tailscale account; verify tgw-http reachable from remote device
-  ```
+- [x] **Tailscale** ✅ installed 2026-06-11 (PP-REMOTE-001):
+  Tailscale installed and configured. Verify `tgw-http` reachable over Tailscale from remote
+  devices; verify `tgw-macro` works over SSH. SSH hardening (key-only, sudoers) still open.
 
 - [ ] **eBay webhook endpoint** (PP-SOLD-001 Tier 4 — reduces sold-detection latency from daily → seconds):
   First check if you have a static public IP:
@@ -755,13 +1189,12 @@ See PP-PERP-AUTO-001 section for design.
 
 #### Priority 6 — External AI tooling (PP-MULTIMODEL-001)
 
-- [ ] **nvm + npm** (needed for markmap-cli and future JS tooling):
+- [x] **markmap-cli** ✅ INSTALLED (2026-06-11) — `markmap-cli` now available. Test: `markmap docs/TGW-Plan-Vault/plan/TGW-Master-Plan.md --no-open -o /tmp/plan.html`
+- [ ] **nvm + npm** (needed for other JS tooling if required later):
   ```
   curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
   # restart shell or: source ~/.bashrc
   nvm install --lts
-  npm install -g markmap-cli
-  # Test: markmap docs/TGW-Plan-Vault/plan/TGW-Master-Plan.md --no-open -o /tmp/plan.html
   ```
 
 - [x] **Gemini CLI** ✅ INSTALLED (2026-06-06) — `gemini` available in PATH; excellent for
@@ -1020,7 +1453,15 @@ Rendered HTML snapshots at `/opt/TGW/var/www/`.
 - `ISSUES.md` — active bugs and known gaps (ISS-001 through ISS-008); closed issues log
 - `eBay-Error-Codes.md` — all eBay errorIds + HTTP status handlers; dead-letter diagnosis guide; scope gaps table
 - `HARDWARE-AI-INFERENCE.md` — Ollama model sizing, GPU upgrade planning (pre-existing)
+- `SHELL-AUDIT.md` — tgw.source / tgw-dev.source function disposition (KEEP/WRAP/ARCH-VIOLATES/DEPRECATED)
+- `PP-DEPLOY-001-MX-RESTORE-RUNBOOK.md` — operator runbook: bake the final MX Snapshot restore image before NixOS cutover (session 17)
 - `echo.py` / `worker_base.py` — new worker templates (pre-existing)
+- `PP-DEPLOY-001-MX-RESTORE-RUNBOOK.md` — operator runbook: bake final MX Snapshot restore image (session 17)
+
+### 🗒 Planned
+- `TGW-Quickstart.md` — PP-REF-003: all tgw CLI subcommands, workers, MC VFS, Qtile/macroboard keys, per-workflow; stubs for physical processes
+
+---
 
 ### PP-REF-001 — TGW Item JSON Schema ✅ DONE 2026-06-04
 - Reference doc: `docs/TGW-Plan-Vault/reference/TGW-Item-JSON-Schema.md`
@@ -1038,6 +1479,34 @@ Rendered HTML snapshots at `/opt/TGW/var/www/`.
   - Output: `eBay-Error-Codes.md` markmap grouped by API + severity
 - **Value**: surfaces unhandled errors that should be caught; reduces dead-letter surprises; informs PP-HINT-001 fail-forward work
 - **Effort**: medium — grep is fast but eBay docs cross-reference takes time
+
+### PP-REF-003 — TGW Installation Quickstart Reference Guide (planned)
+
+#### Problem
+No single document lists all available TGW tools, commands, and their usage in a format suitable for a new operator or for quick lookup during setup. The CLAUDE.md covers session protocol; the reference docs cover specific subsystems; but there is no "what can I do?" entry-point document.
+
+#### Design
+- **Scope**: all `tgw` CLI subcommands + workers + MC extfs VFS tools + Qtile chords + macroboard keys + tgw.source convenience functions
+- **Format**: Markdown quickstart — organized by workflow (intake → pipeline → eBay → admin), not alphabetically
+- **Physical process hooks**: leave stubs for "associated physical processes" (intake station setup, scale use, camera trigger) — Dave will fill in over time
+- **Target location**: `docs/TGW-Plan-Vault/reference/TGW-Quickstart.md` (plain Markdown; markmap-compatible)
+
+#### Output structure (proposed)
+1. System health and status commands
+2. Item intake workflow (set-template → intake → identify → draft → price → stage → publish)
+3. Bulk operations (bulk-edit, mvitems, catalog-verify)
+4. eBay management (sync, sweep, reprice-suggest, dead-letter)
+5. Admin and diagnostics (todo, health, restart-workers, dead-letter)
+6. MC interface (extfs VFS list, key actions)
+7. Qtile / macroboard quick-reference
+8. Worker reference (queue name → purpose → how to restart)
+
+#### Status
+✅ **DONE (session 18)** — `reference/TGW-Quickstart.md` authored (9 sections; all `tgw`
+subcommands cross-checked against `api.py`; MC/Qtile/macroboard key maps; worker table; physical-
+process stubs left for Dave). Keep it updated as new commands ship.
+
+---
 
 ### PP-CI-001 ✅ DONE 2026-06-04
 ruff clean; GitHub Actions CI (`ruff check --no-fix` + `pytest`); `.pre-commit-config.yaml` scoped to `src/tests/`; pre-commit installed in `.git/hooks/`.
@@ -1138,37 +1607,161 @@ older Python, older packages). NixOS offers:
   combined with `/opt/TGW` and a repo restore, a full system rebuild is automated
 - **Reproducibility**: any node can be cloned to the exact same state from the config file
 
-#### Python on NixOS — the key challenge
-NixOS does not use a traditional FHS filesystem; Python environment management conflicts with
-`pip install` and `venv` patterns. Solutions:
-- Use `nix-shell` or `devenv` for the TGW dev environment (declarative dependencies)
-- Use a NixOS module that wraps the TGW package as a system service with pinned dependencies
-- Consider `pyproject.nix` for packaging TGW as a proper Nix package
-- **The pip/venv pattern TGW currently uses needs a migration plan before committing to NixOS**
+#### Perplexity research findings — PostgreSQL + Python + DR (session 16)
+Comprehensive analysis commissioned from Perplexity (MX Linux vs NixOS for PostgreSQL-backed
+state machine). Key conclusions:
 
-#### Decision framework
-| Factor | Debian | NixOS |
+**DR verdict: NixOS is architecturally superior for DR.**
+- MX Linux: OS-level DR is "Debian + scripting you build yourself." LuckyBackup (rsync-based)
+  and MX Snapshot (bootable ISO) are GUI-centric and not inherently infra-as-code.
+- NixOS: entire OS config is version-controlled Nix files. DR = "restore Postgres base backup
+  + WAL" + "nixos-rebuild from flake." Config is the single source of truth.
+
+**PostgreSQL on NixOS:**
+- First-class module (`services.postgresql`) — version, data path, config, initial DB/users all declared
+- pgBackRest + WAL archiving modules available (some permission/UMask rough edges in defaults — overridable)
+- ⚠ **Known gotcha**: WAL-recovery conflict — `ExecStartPost` hook tries `ALTER USER` while DB is
+  in read-only recovery mode → systemd kills the service. Mitigation: disable the hook or add a
+  recovery-mode guard. Solvable but non-obvious.
+
+**Python on NixOS — updated strategy:**
+- Flake-based devShells with `direnv`/`devenv` for auto-activation on `cd`
+- Packaging: `poetry2nix` or `buildPythonPackage` for deps not in nixpkgs
+- Full pattern: one flake defines devShells (dev) + app package + nixosConfigurations (prod systemd services)
+- TGW's `pyproject.toml` is already flake-compatible — straightforward to wrap
+
+**Given Dave's background (Gentoo 8 years, LFS, custom OSes):**
+Perplexity's explicit recommendation: NixOS is learnable — a small change given the background.
+The Nix language is just a new dialect. The functional/declarative constraints become features,
+not friction.
+
+**Alternatives assessed:**
+- **Guix System** — same design space as NixOS but Guile Scheme syntax; can also overlay on MX
+- **Fedora Silverblue/Kinoite** — immutable rpm-ostree base + containers for app stack; less fully declarative
+- **"MX + Nix overlay"** — keep MX host, add Nix for reproducible devShells without full migration
+
+#### Decision framework (updated)
+| Factor | MX Linux (Debian) | NixOS |
 |--------|--------|-------|
-| Stability | ✅ Excellent | ✅ Excellent (atomic rollback) |
-| Python env mgmt | ✅ Standard pip/venv | ⚠ Non-standard; needs work |
+| OS-level rollback | MX Snapshot ISO (coarse) | Fine-grained generational rollbacks |
+| PostgreSQL integration | Standard Debian; you write all scripts | First-class module; some edge cases |
+| Backup tooling | LuckyBackup/Snapshot; GUI-centric | Define pgBackRest/WAL in Nix; fully automatable |
+| DR automation ceiling | High — you build declarative layer | Very high — OS is infra-as-code |
+| Python env mgmt | Standard pip/venv | ⚠ Needs flake + poetry2nix; solvable |
 | Dependency freshness | ⚠ Older packages | ✅ Latest available |
-| Upgrade safety | ⚠ In-place; risky | ✅ Atomic; rollback available |
-| Disaster recovery | ⚠ Manual steps | ✅ Single config file |
-| Parallel versions | ❌ Hard | ✅ First-class |
-| Learning curve | ✅ Familiar | ⚠ Steep (Nix language) |
-| MX Linux image compat | ✅ Natural | ❌ Incompatible with mx-slapshot |
+| Learning curve | ✅ Familiar | Moderate for Dave (low given background) |
+| MX Linux image compat | ✅ Natural | ❌ Incompatible with mx-slapshot (mutually exclusive) |
 
-#### Recommendation
-NixOS is architecturally superior for a long-running automation platform. The Python environment
-challenge is solvable but requires a dedicated migration session. **PP-DEPLOY-001 (MX Linux image)
-and PP-NIXOS-001 are mutually exclusive end-states** — choose before investing further in image
-infrastructure. Suggest: research a NixOS flake that packages TGW correctly, then decide.
+**PP-DEPLOY-001 (MX Linux image) and PP-NIXOS-001 are mutually exclusive end-states.**
+Decision recommendation: NixOS, pending the Python flake prototype.
 
-#### Work items (deferred)
-- [ ] Prototype: NixOS VM with TGW installed as a Nix package; verify all workers run
-- [ ] Python env: evaluate `pyproject.nix`, `mach-nix`, or `dream2nix` for TGW dependencies
-- [ ] Decide: NixOS or MX Linux image as the target OS before either PP gets deep work
-- [ ] If NixOS: write `tgw.nix` module for all systemd units, config paths, user setup
+#### Work items
+
+**Completed (session 17–18):**
+- [x] `flake.nix` + `nix/tgw.nix` authored (Round 3 #27) — `buildPythonApplication`, per-queue worker services, PostgreSQL, tgw-http, tgw user
+- [x] `PP-DEPLOY-001-MX-RESTORE-RUNBOOK.md` authored (Round 3 #28) — pre-snapshot checklist, ISO verify, full restore steps
+- [x] NixOS committed as target OS (session 16 decision)
+
+**Pending — operator / VM actions:**
+- [ ] **Validate flake.nix in NixOS VM** — Dave builds + tests on a VM; note: `python3Packages.mcp` availability in nixos-24.11 is a watch item
+- [ ] ⚠ Mitigate WAL recovery gotcha: `ExecStartPost` ALTER USER runs while DB is in read-only recovery → service killed. Add recovery-mode guard before production use.
+- [ ] **Spare intake machine as first NixOS target** (session 18 decision): install NixOS on the spare intake support machine; configure as client/portable-catalog (services not started); gain tool familiarity without risk to the main machine. When proven: promote to tgwOS server or full replacement.
+
+**Flake architecture requirements (session 18):**
+- **Platform flake** (`flake.nix`) — `tgw` user + workers + PostgreSQL + `tgw-http`; already authored
+- **venv / nvm / npm on `/opt/TGW/`** — move tgw user virtualenv (`/opt/TGW/.venvironments/tgw/`) and nvm/npm (`/opt/TGW/.nvm/`) out of `~tgw/` so `/opt/TGW` is a self-contained imageable entity with no home-dir dependencies; update flake `HOME` or env vars accordingly
+- **Personal operator flake** (separate) — Firefox, KDE Plasma, personal apps; composable via NixOS `imports`; not part of the platform flake
+- **Dependency source-of-truth unification (open, session 19)** — `flake.nix` declares `pillow` as a **base** runtime dep (lines 63 + devShell 119), but `pyproject.toml` only carries `Pillow>=10.0` in the **optional** extras (`thumbnails` + `dev`), not base deps. The CI commit (`3be0d85`) added Pillow to the `dev` extra so fingerprint tests run, but did **not** reconcile the base-vs-optional divergence. Before NixOS cutover, make one source authoritative — either promote Pillow to a base `pyproject` dependency (PP-VISION-001 fingerprint is now core, not optional) or drive the flake from `pyproject` extras via `poetry2nix`/lockstep so the two can't drift. Pick the former if fingerprinting is here to stay (recommended); the latter if extras-as-optional is the intended packaging contract.
+
+**DR / bootstrap design (session 18):**
+NixOS install must support two bootstrap modes:
+1. **Fresh warehouse start** — empty `/opt/TGW`; workers spin up; first item intake begins immediately
+2. **Adopt existing data** — `/opt/TGW` restored from backup; config applied; full pipeline resumes from last state
+
+Recovery equation: `NixOS flake + site config GitHub repo + ItemData restore = full system rebuild`
+
+**Site config in GitHub** — `tgw-api-config.json` and non-secret config in a private GitHub repo; NixOS flake fetches at build time; enables any node to self-configure without local copy.
+
+**Google Drive DR** — rebuild kit (NixOS ISO pointer, site config repo URL, rclone restore script for ItemData) lives on Google Drive. Major disaster: boot NixOS ISO → pull config from GitHub → restore ItemData from Drive → `tgw health` green.
+
+#### Syncthing NixOS deployment (session 19/20 — syncthing-nixos-nginx-research.md)
+
+TGW runs a dedicated headless Syncthing instance (separate from personal user instances):
+
+```nix
+# In modules/bases/master.nix
+services.syncthing = {
+  enable = true;
+  user = "tgw";
+  dataDir = "/opt/TGW/sync";
+  configDir = "/opt/TGW/.config/syncthing";
+  guiAddress = "127.0.0.1:8385";
+  settings.options.listenAddresses = [ "tcp://0.0.0.0:22001" ];
+  settings.options.insecureSkipHostCheck = true;
+};
+```
+
+Port allocation:
+- TGW headless: 8385 (GUI/REST), 22001 (sync protocol)
+- Regular user instances: 8384 (default), 22000 (default)
+
+Nginx reverse proxy block (for remote GUI access):
+```nginx
+server {
+  listen 8386;
+  location / {
+    proxy_pass http://127.0.0.1:8385;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+  }
+}
+```
+
+Auto-TLS: systemd oneshot `Before=nginx.service` generates self-signed cert. Replace with
+ACME when the machine has a DNS name.
+
+GUI access from dev workstation: `ssh -L 9000:127.0.0.1:8385 tgw@server`
+
+LTSP fat clients: per-hostname Syncthing config via symlink
+`/opt/TGW/.config/syncthing/config.xml → /opt/TGW/.config/syncthing/config.d/<hostname>.xml`
+(different folder mappings per machine role).
+
+**Operator unblock steps for PP-PYIPC-001:**
+- [ ] Install Syncthing on NixOS target; confirm REST accessible at 8385
+- [ ] Generate API key in Syncthing GUI → save to `secrets_root/syncthing-api-key` (chmod 600)
+- [ ] Add `"syncthing_api_key_path": "/opt/TGW/secrets/syncthing-api-key"` to `tgw-api-config.json`
+
+#### Multi-tier flake architecture (session 19/20 — system-app-config-and-nixos-flake-design.md)
+
+Recommended structure for the full TGW NixOS platform using `flake-parts`:
+
+```
+nix/
+  modules/
+    bases/
+      master.nix        # PostgreSQL, tgw workers, tgw-http, backup, Syncthing
+      portable.nix      # portable catalog client (no workers, read-only tgw-http)
+    interfaces/
+      cli.nix           # terminal tools: tmux, mc, tgw.source, bash completion
+    graphical/
+      tiled.nix         # Qtile (primary intake workstation)
+      plasma.nix        # KDE Plasma 6 (general-purpose desktop)
+      thin-client-rdp.nix  # lightweight RDP thin client session
+    ai/
+      compute-node.nix  # Ollama + GPU drivers; models on /var/lib/ollama/models
+  hosts/
+    production-server.nix   # master + cli + tiled (+ plasma optional)
+    portable-laptop.nix     # portable + cli + plasma
+  dev-env/
+    flake.nix           # separate stacking flake; nix develop ./dev-env
+```
+
+LTSP fat clients: NFS `/nix/store` shared; model weights on NFS mount (not in initrd).
+Thin clients: `thin-client-rdp.nix` module; lightweight sessions connecting to master.
+Dev flake: separate from platform flake; `nix develop ./dev-env` does not require system rebuild.
+
+**Round 5+ tasks:** Refactor `flake.nix` to match this structure; add `portable.nix` base;
+add `ai/compute-node.nix`; wire Syncthing service into `master.nix`.
 
 ### PP-CAPTURE-001 — Idea and Task Capture Pipeline
 
@@ -1210,6 +1803,51 @@ between "workers finished" and "operator knows what to do next."
 - Audit `tgw-dev.source`: migrate anything useful to `tgw.source`; retire the dev file
 - Rule of thumb: if it's not interactive/session-specific, it belongs as a `pyproject.toml` console script in the package, not a bash alias
 - Outcome: `tgw.source` is a thin convenience layer on the `tgw` CLI; no parallel API surviving alongside it
+
+**Tier 3 open items (2026-06-11):**
+- **Help grouping** — `tgw --help` now lists ~65 subcommands; group them by function category
+  using argparse `parents` or a custom formatter. Suggested groups: Read/Search, Write/Update,
+  Pipeline, eBay, Context, Catalog/Build, Ops/Admin. Reference: argparse `add_argument_group`
+  on the top-level parser or a manually-formatted epilog. Add to Track 1 when PP-SHELL-001
+  Tier 3 work resumes.
+- **`requeue` rename** — currently only re-queues `ai_identify` despite generic name; rename
+  to `requeue-identify` or make it queue-agnostic before Tier 3 closes.
+
+### PP-CONTEXT-001 ✅ DONE 2026-06-11 — Current-item context: `tgwset` replacement
+Dave: the legacy `tgw set` (shell `tgwset` in `tgw.source`) sets an item persistently
+systemwide so multiple operations can target it. It works but is fragile — needs a new
+strategy, likely replaced, and the replacement must be **idempotent**.
+
+**Dave note (2026-06-11):** Keep `tgw set` — most use cases are covered by new development
+(photo display, editing live eBay listings via JSON data, uploading photos to eBay quickly)
+but the feature is simple and useful in certain circumstances. **Do not remove** until the
+replacement is feature-complete and field-tested.
+
+**How the legacy mechanism works (audited session 20):**
+- `tgwset()` does `rm` + `ln -sf` of three symlinks: `/opt/TGW/CurrentItem` →
+  `ItemData/<SKU>/`, `/opt/TGW/CurrentItem.json` → the item JSON,
+  `/opt/TGW/CurrentLocation` → catalog location dir
+- `getsku()` resolves the context by `realpath` on the symlink; falls back to legacy
+  `searchcatalog.json` via jq for eBay-ID→SKU and 18-char-prefix matching
+
+**Why it's fragile:** non-atomic remove-then-link (a reader between the `rm` and `ln`
+sees no context); constructs ItemData paths outside the fence; depends on the legacy
+search catalog file; silent fallback to the Queue dir when the SKU doesn't validate;
+no `{ok,...}` output contract; only one global context with no record of who set it.
+
+**Design direction (discuss before building):**
+- Promote to a first-class fence concept: `tgw context set <selector>` / `tgw context get`
+  / `tgw context clear`, full `{ok,...}` contract, selector resolution via `resolve()`
+- Idempotent by construction: setting the already-current SKU is a success no-op;
+  `clear` on empty context is a success no-op; set = single atomic replace
+  (`ln -sfn` via temp+rename, or sidestep symlinks entirely with a small state file
+  `runtime/state/current-item.json` {sku, set_at, set_by})
+- Keep `/opt/TGW/CurrentItem` symlinks as a **derived compatibility view** maintained
+  by the same command (existing MC/shell consumers keep working during transition)
+- Scope question for Dave: one systemwide context (current behavior) vs named/per-surface
+  contexts (e.g. camera station vs desk) — systemwide is the stated requirement
+- Related: PP-SHELL-001 (the shell layer keeps thin wrappers calling `tgw context`),
+  PP-CLIP-001 (clipboard intake reads the context)
 
 ### PP-IFDIR-001 — Interface File Organization
 - Currently: MC configs live at `/opt/TGW/mc/` (outside repo); keyd at `etc/keyd/`; no unified structure
@@ -1648,6 +2286,36 @@ The tablet/phone is the PRIMARY operator interface for warehouse operations. Des
 - Queue management: dead-letter browser, re-queue/cancel buttons
 - Health drill-down
 
+#### Design enhancement — Model users and role-based layouts (session 16)
+Different operational roles need different UI surfaces:
+- **Admin** — full system control, debug access, config
+- **Item creation** — intake form, barcode scan, hint entry, category group selection
+- **Content admin** — batch title/description edit, photo review, quality scoring
+- **Warehouse** — inventory location lookup, item physical processing, picklist
+- **Operator** — staged listing approval, eBay publishing, repricing, sweeps
+
+Planned: RBAC gates + role-specific default tabs and field visibility. Model users:
+- Photographer (warehouse role)
+- Pricing analyst (content admin)
+- Operator (mixed admin/staging)
+- Supervisor (audit/report focus)
+
+### Design notes (session 19/20)
+
+- **Recently-processed SKU sort** — `GET /api/items?sort=recently_processed`: a sort option
+  ordering by the timestamp of the last pipeline action (enqueue, PATCH, or catalog_verify).
+  Useful for reviewing batches just processed through ai_identify or ebay_draft. Add to catalog
+  query options when PP-EDITOR-001 Phase E is in scope.
+
+- **One-at-a-time review mode** — take any search result list and feed items to the editor
+  one at a time with prev/next navigation. Operator can approve/flag/edit each SKU in sequence
+  without returning to the list. Useful for post-pipeline QA, staged review, and photo review.
+  Model: `GET /api/items/review-queue?from=<list_params>` returns a session token; `GET
+  /api/items/review-queue/<token>/next` advances. Can be a simple URL-based state machine.
+
+- **Backend contract for Flutter** (GEMINI-003 finding): app uses `/api/queue/status` for
+  connectivity check. Correct endpoint is `GET /api/health` → JSON (todo #37); swap once done.
+
 ### Later phases (separate PPs)
 - Scanner input (barcode/SKU lookup → item detail)
 - **PP-INTAKE-001 intake screen** — pre-photo flow: weight, size_class, barcode scan, category group picker, ai_hint; location suggestion (semi-chaotic); Tasker camera trigger → intake form
@@ -1822,6 +2490,12 @@ app — barcode scan + template select + camera trigger in one UI; no third-part
 
 ### PP-TODO-001 — Multi-agent TODO tracker (`tgw todo`)
 
+**Agent rename (Dave, 2026-06-11 18:34):** `db` agent renamed **`sokoban`** (warehouseman)
+— existing item delegated, future physical/warehouse tasks use `tgw todo sokoban`.
+Dave also flagged that many admin tasks live in plan tables but not the tracker — same
+two-surface gap as Round-5 rows (handoff risk 9); seed operator items as todos when
+rounds are created, same rule as Claude items.
+
 #### Problem
 Tasks and reminders are captured in `tgw suggest` / SUGGESTIONS.md but there is no structured
 command to list open TODOs by agent or priority — items mix with ideas and require full plan
@@ -1864,6 +2538,14 @@ agent a queue; PP-TODO-001 makes that queue queryable and persistent across sess
 `tgw todo claude` / `tgw todo gemini` / `tgw todo admin` structure maps directly to Tracks 1,
 2, and 4. Build PP-TODO-001 so Work Tracks items can be seeded into it on first run.
 
+#### Design enhancement — Quick-access dashboard (session 16)
+Dave requested immediate access to todo queue without hunting through the master plan:
+- `tgw todo` output must be **quick** (no scrolling, no plan context needed)
+- Links to delegated tasks + supervisory duties **inline** in todo list
+- This becomes the "source of truth" for daily work flow, especially under duress
+- Mobile/tablet-friendly variant planned for future PP-EDITOR-001 admin GUI
+- **Rationale**: "All of those simple little things cause distraction and consume time and lead to errors"
+
 ---
 
 ### PP-PYIPC-001 — Python IPC: Syncthing + KDE Connect Integration
@@ -1873,25 +2555,72 @@ Replace shell-subprocess calls to `kdeconnect-cli` and Syncthing with Python lib
 bindings so TGW workers and the FastAPI service can interact with both services
 programmatically — events, status, clipboard, file transfer.
 
-#### Syncthing
-- REST API at `localhost:8384` with API key; `requests`/`httpx` based
-- Capabilities: device status, folder sync progress, event stream (`/rest/events`),
-  trigger rescan, conflict detection
-- TGW integration: trigger `catalog_rebuild` job when Syncthing syncs `tgwcatalog.db`
-  back from satellite → FastAPI event stream subscriber or polling hook
-- Research: PERPLEXITY-005 brief covers Python library options
+#### Syncthing (PERPLEXITY-005 findings — session 19/20)
+- REST API at `localhost:8384` — Syncthing is **already running** on the production machine
+- Config + API key at `/opt/TGW/.local/syncthing/config.xml` (in-project, `chmod 600`)
+- API key is parsed from the config.xml `<apikey>` element at PP-PYIPC-001 implementation time
+- **Recommended library**: `pyncthing` (PyPI) — requests-based, best-maintained, supports PATCH,
+  modern Syncthing versions. `aiosyncthing` is stale (labeled as such even in its own README).
+- **Async event streaming**: `pyncthing` is synchronous; for long-polling `/rest/events` or
+  `/rest/events/disk`, implement a thin custom `httpx`-based async consumer with `since`/`timeout`
+  params. This is the recommended TGW pattern — keeps the event loop non-blocking.
+- **Relevant endpoints**: `/rest/events/disk` (pre-filtered file/folder events), `/rest/db/status`
+  (folder state + `needBytes`) — use together to confirm sync completion before triggering rebuilds
+- TGW integration: when `tgwcatalog.db` folder goes idle → enqueue `catalog_rebuild` job
+- Config key to add: `syncthing_config_path` → defaults to `/opt/TGW/.local/syncthing/config.xml`
 
-#### KDE Connect
-- Current: `kdeconnect-cli --share-text "..."` subprocess calls in `tgw.source`
-- Better: DBus via `pydbus` or `dbus-python` (`org.kde.kdeconnect.daemon`)
-- Capabilities: clipboard push, notification, file send, ping
-- TGW integration: `ic_template()`, `ic_command()` wrappers in Python; push from
-  workers without shell dependency
-- Research: PERPLEXITY-005 covers DBus vs. REST vs. CLI approaches
+**⚠ PP-PYIPC-001 is now fully unblocked** — Syncthing is live, API key in-project. No operator action needed.
+
+**Multi-user NixOS design (session 19/20):**
+- Current port: 8384; NixOS target port: 8385 (separate from user instances; see PP-NIXOS-001)
+- LTSP fat clients: per-hostname config directory symlink for location-specific folder mappings
+
+#### KDE Connect (PERPLEXITY-005 findings)
+- No mature Python PyPI package; use **`pydbus`** for D-Bus access (`org.kde.kdeconnect.daemon`)
+- `kdeconnect-cli` via subprocess for one-shot operations; `pydbus` for long-running services
+- Clipboard strategy: monitor X11 clipboard locally (`python-xlib`) → push via KDE Connect as
+  transport. Android 10+/14 restricts clipboard access to foreground apps; desktop side is unaffected.
+- TGW integration: `ic_template()`, `ic_command()` wrappers in Python; push from workers
+
+#### Additional findings from PERPLEXITY-005
+
+**DB migration path:**
+- psycopg3 (`psycopg` on PyPI) is the clear psycopg2 successor; start synchronous, add async later
+- `aiosqlite` for FastAPI catalog read paths (prevents blocking event loop); keep sync writes in workers
+
+**`python-xlib` status:** Effectively stale upstream (no PyPI releases in 12+ months); distribution-
+level patches only. Works for X11 clipboard today but not a long-term bet given Wayland migration.
+Consider replacing with a Wayland-aware clipboard solution when moving to NixOS + Wayland.
+
+**Whisper.cpp bindings:** `whispercpp.py` and `pywhispercpp` are newer/better than `whisper-cpp-python`;
+both embed whisper.cpp as a submodule and track newer versions. Wrap behind a TGW audio-to-text
+interface to enable swapping implementations.
+
+**`discogs_client` deprecated:** Discogs officially marked it as "no longer maintained" and now
+recommends using a generic REST client. TGW should wrap Discogs access behind an adapter in
+`apis/lookup/discogs.py` and migrate to direct `httpx` calls (additive, isolates the breakage risk).
+
+**Shipping APIs:** PirateShip has **no stable public API** (reverse-engineered only; fragile).
+**EasyPost** is the recommended alternative: official Python client, rate shopping, label purchase,
+address validation, tracking, insurance. Strong candidate for PP-FULFILLMENT-001 Phase 2.
+
+**Barcode scanner:** `python-evdev` reads `/dev/input/event*` focus-independently — better than
+keyboard-wedge mode for TGW's dedicated workstations. Relevant to PP-FULFILLMENT-001 hardware phase.
+
+**USB scales:** `hidapi`/`hid` (Python `hid` package wrapping libhidapi) or `pyusb` — open by
+vendor/product ID, read raw HID reports, decode weight. Better than shell-based approaches.
+
+**Enrichment upgrades:** Go-UPC and Apify barcode/PriceCharting actors outperform upcitemdb free tier
+significantly. Consider as replacement for PP-LOOKUP-001 upcitemdb primary source.
+
+**eBay SDK:** `ebaysdk-python` last release ~April 2020; classified inactive; no support for modern
+REST Sell APIs. TGW's current direct REST integration is already correct — no change needed.
 
 #### Dependencies
-- PERPLEXITY-005 result (research first, then implement)
-- PP-WM-001 (Qtile clipboard widget already uses subprocess xclip; move to KDE Connect push)
+- Syncthing config at `/opt/TGW/.local/syncthing/config.xml` ✅ present; API key parsed from `<apikey>` element
+- Add `syncthing_config_path` to `tgw-api-config.json` (default: `/opt/TGW/.local/syncthing/config.xml`)
+- Add `syncthing_url` to config (default: `http://127.0.0.1:8384`)
+- PP-WM-001 (Qtile clipboard widget uses subprocess xclip; migrate to pydbus/KDE Connect)
 
 ---
 
@@ -1935,6 +2664,198 @@ CLI flags: `--location`, `--limit`, `--severity`, `--output`, `--json`. 10 tests
 ---
 
 ## Pending projects (revisit)
+
+### PP-PORTABLE-CATALOG-001 — Portable / Satellite Catalog
+
+#### Problem
+The tablet and spare intake machine need read-access to item catalog + thumbnails to work as intake/browsing stations. Currently `tgwcatalog.db` lives only on the master machine. Syncthing can sync it, but there is no operator-friendly command to prepare a sync-ready bundle, and the catalog needs a stable export shape that works on a machine with no live PostgreSQL.
+
+#### Design (Phase 1 — Syncthing-sync, no conflict resolution)
+- `tgw export-catalog <dest>` command: copies `tgwcatalog.db` (55K rows) + `thumbnails/<SKU>.jpg` subset to `<dest>/`
+- Syncthing watches `<dest>/` on master and syncs to client machines automatically
+- Client machines: read-only browser (tgw-http or MC); writes go back to master via tgw-http when online
+- **Phase 1 scope**: export only (no conflict resolution, no return path); Syncthing handles transport
+- Snapshots the current catalog state; `tgw export-catalog --incremental` could be added later
+
+#### Architecture
+```
+master
+  tgwcatalog.db + thumbnails/  ← tgw export-catalog → export/
+                                                              ↓ Syncthing
+                                                         tablet, spare machine
+                                                          tgw-http (read-only mode)
+                                                          MC extfs tgwcatalog
+```
+
+#### Phases
+| Phase | Scope | Status |
+|-------|-------|--------|
+| 1 | `tgw export-catalog <dest>` + Syncthing transport (operator configures Syncthing) | ✅ **DONE (session 18)** — `src/tgw/catalog_export.py`; 8 tests; live verified |
+| 2 | Flutter offline-first client: snapshot+copy-to-sandbox; sqflite outbox; connectivity_plus + workmanager Android flush | Future (PERPLEXITY-006 design complete; needs Syncthing API key for API-driven export trigger) |
+| 3 | Conflict resolution, per-row change-log, merge audit trail | Future |
+
+#### Phase 2 design — Flutter offline-first client (PERPLEXITY-006)
+
+**Critical pattern — never open the synced file directly:**
+```
+Syncthing syncs → catalog.db (write-locked or in-use mid-sync → corruption risk)
+                        ↓ app startup
+                 snapshot + copy to app-private storage
+                        ↓
+                 open private copy (sqflite) ← safe to read/write
+                 offline outbox table (pending mutations)
+                        ↓ connectivity restored
+                 flush outbox → POST /api/items/{sku} on master
+                 server returns latest export → replace private copy
+```
+
+**Library stack:**
+- `sqflite` + `sqflite_common_ffi` — SQLite on Android + Linux desktop
+- `sqlite3` package (not sqlite3_flutter_libs, which is deprecated for 3.x)
+- `dio` + `dio_smart_retry` — HTTP client with automatic retry
+- `connectivity_plus` + health ping (`GET /api/health`) — connectivity detection
+- `workmanager` — Android background flush scheduling
+- `flutter_secure_storage` — token/secret storage; requires `libsecret-1-dev` on Linux
+
+**Server-side snapshot export:**
+Use `sqlite3.Connection.backup(dest)` for atomic SQLite copy (avoids mid-write corruption).
+Endpoint: `GET /api/catalog/snapshot` → streams `tgwcatalog.db` snapshot.
+
+**Sync-conflict resolution worker (open, session 19 — Dave 17:42):** Syncthing emits
+`*.sync-conflict-<ts>-<id>.*` files when two nodes edit the same file (already observed in the
+vault: `.obsidian/community-plugins.sync-conflict-…json`). Proposed: a state worker that scans
+sync roots for `*.sync-conflict-*` artifacts and either (a) auto-resolves by a declared policy
+(e.g. newest-wins for vault config, last-write-wins per PP-ADD-001 decision) or (b) flags them
+for operator review (surface via `tgw health` / notify / the todo dashboard). Pairs with
+PP-PYIPC-001 (Syncthing REST API) for richer conflict metadata; the file-scan version needs no
+API and is buildable now. Scope to vault + portable-catalog sync roots.
+
+**Design principle — zero data loss (Dave, session 19):** A `.sync-conflict-*` file is Syncthing's
+*safety* mechanism, not an error. Syncthing never resolves indiscriminately — it completes the
+sync and says "hey, look at this," which is precisely why it's the right choice. The worker must
+honor that:
+- The conflict copy is **usually redundant** (identical to, or strictly older-with-no-unique-
+  content vs, the canonical file) → safe to discard.
+- But **sometimes** the conflict copy is a local edit made *before* the remote synced — unique
+  content that blind discard would permanently lose.
+- So the worker **must compare** conflict-copy vs canonical and auto-discard *only when provably
+  redundant*; anything with divergent/unique content is **flagged for operator review, never
+  auto-deleted**. The invariant is: no path through this worker can cause data loss.
+- (Live test case left in the vault on purpose: `.obsidian/community-plugins.sync-conflict-…json`
+  — observe how a future worker classifies it before building auto-resolution.)
+
+#### Dependencies
+- `tgwcatalog.db` (already built, 55K rows)
+- Thumbnail cache (already built, 54K thumbnails)
+- Phase 2+: PP-PYIPC-001 (Syncthing REST API), Syncthing API key
+
+#### Status
+Plan section added session 18. Phase 1 in Round 4.
+
+---
+
+### PP-PLASMA-001 — KDE Plasma 6 Dual-Desktop Integration
+
+#### Vision
+TGW runs two desktop environments: Qtile (primary operator workstation — tiling, Python hooks, TGW bar widgets) and KDE Plasma 6 (general purpose — familiar, full-featured, Firefox, GLabels, LibreOffice). Both are first-class citizens. Plasma handles day-to-day use and GUI app launching; Qtile handles warehouse operations, agent sessions, and pipeline monitoring.
+
+#### Motivation (session 16 suggestion)
+The TGW operator workstation will rely heavily on the KDE framework even on Qtile. KDE apps (Dolphin, Gwenview, Konsole, KDialog, KDE Connect, GLabels) are used in the warehouse workflow. Running Plasma 6 in parallel gives a familiar environment for non-TGW tasks without compromising the Qtile operator experience.
+
+#### Integration opportunities
+| Area | Qtile | Plasma 6 |
+|------|-------|----------|
+| File management | F2 menu → Dolphin launch | Dolphin natively |
+| Image viewing | chafa in MC / Gwenview launch | Gwenview natively |
+| Clipboard relay | KDE Connect (tgw.source ic_*) | Plasma clipboard sync |
+| Notifications | notify-send / dunst | Plasma notification daemon |
+| GLabels (barcode) | Launch via keybinding | Plasma app launcher |
+| Terminal | Konsole / scratchpad | Konsole natively |
+| Quick switch | Super+T TGW mode in Qtile | Plasma Activities |
+
+#### NixOS dual-desktop on NixOS
+On NixOS, both WMs are declared in the same flake:
+```nix
+services.xserver.windowManager.qtile.enable = true;  # operator session
+services.desktopManager.plasma6.enable = true;         # general session
+```
+Both available at login; user selects per-session.
+
+#### Phases
+| Phase | Scope | Status |
+|-------|-------|--------|
+| 1 | Shared config: dunst notif theme, Konsole profile, Dolphin TGW bookmarks | Future |
+| 2 | Qtile→Plasma clipboard bridge via KDE Connect (already works via tgw.source) | Future |
+| 3 | NixOS dual-desktop declaration in flake | Depends on spare machine validation |
+
+#### Status
+Plan section added session 18. No code this round. Design/tracking only.
+
+---
+
+### PP-PLANDB-001 — Database-Driven Plan Builder (design discussion needed)
+
+#### Concept (session 18 — discuss before building)
+Instead of a monolithic Markdown plan file, the plan at any point in time is **rebuilt on demand** from a task + relationship database. Each PP-* item, work track, and todo entry lives in the DB with explicit relationships (blocks/depends-on). The plan document becomes a rendered view, not the source of truth.
+
+**Agent delegation extensions:** The DB can generate self-contained `CLAUDE.md` and `gemini.md` files for any delegated task — baked with exactly the context that agent needs, no more. Useful for employees, mechanical turks, or future agent roles. The todo tracker (PP-TODO-001) is the embryonic form of this; PP-PLANDB-001 is the full realization.
+
+**Dave's note:** "tgw plan builder" — discuss the scope and design before implementing. The todo tracker is already moving in this direction; the question is whether to extend it or build a separate plan-reconstruction layer.
+
+#### Design questions (open)
+- Does the DB replace the Markdown file entirely, or generate it from DB state as a rendering step?
+- Are PP-* items rows, or are they grouped sections with sub-item rows?
+- Relationship types: blocks / depends-on / tracked-by / delegates-to — which matter most?
+- Generated CLAUDE.md: full context or minimal? How do we prevent context bloat?
+- How does version history work (plan decisions, rejected directions)?
+
+#### Status
+Design-open. Discuss with Dave in a planning session before committing to a direction. The
+PP-TODO-001 CRUD layer is the natural seed — any DB plan builder should extend it, not replace it.
+
+#### Dependencies
+- PP-TODO-001 (already built — provides task storage; PP-PLANDB-001 extends it)
+
+---
+
+### PP-BACKUP-001 — Organized Backup and Disaster Recovery Architecture
+
+#### Problem (session 16)
+`trader-grims-backup` repository is archived but still occupies repository space and mental overhead.
+A custom unified backup/archiving/restoration/disaster-recovery suite is needed to replace it and
+encompass all backup concerns (config, secrets, ItemData, logs, databases, system state).
+
+#### Design goals
+- **Backup repository separation**: Move `trader-grims-backup` to a separate, independently managed
+  repository so TGW platform repository is uncluttered
+- **Unified DR suite**: Replace fragmented backup logic with a single source of truth for:
+  - Regular incremental backups (ItemData, databases, config)
+  - Archival policy (old history, sold items, legacy data)
+  - Restoration (point-in-time recovery, disaster scenario planning)
+  - Verification (backup integrity checks, restore dry-runs)
+- **Integration with PP-NIXOS-001**: The NixOS rebuild strategy enables atomic system restore
+  from config + backup snapshot
+
+#### Scope
+- Phase 1: Extract `trader-grims-backup` to separate repo; audit its current usage
+- Phase 2: Design unified suite (modules: backup, archive, restore, verify)
+- Phase 3: Implement per-module; wire into systemd timer and health checks
+
+#### Dependencies
+- PP-NIXOS-001 (system rebuild context)
+
+#### Status
+**PLAN APPROVED 2026-06-11 (session 24)** — full plan at `docs/plans/PLAN-backup-dr.md`
+(approved by Dave same day, after amendment through all 13 session-24 suggestions;
+Phase A build unblocked = todo #60). Host audit found: local snapshot tier healthy
+(dedicated 699 G disk, current); cloud tier **27 days stale** (manual rclone only);
+**ledger has zero dumps**; **secrets have no backup at all**. Phase A (MX-now: pg_dump
+timer, scheduled rclone with --backup-dir trash, gpg-encrypted secrets bundle,
+backup-freshness health check, restore drills, archive policy) → Phase B (repo split +
+restic engine + `tgw backup` CLI) → Phase C (declarative in the Nix flake — resolves
+NixOS plan R9 properly; recovery equation extended). Round 6 #54/#55; todos #60/#61.
+
+---
 
 ### PP-DEADLETTER-001 — Dead-letter triage: warn+requeue instead of terminate
 
@@ -2133,7 +3054,11 @@ System design:
 - Operator reviews ranked matches → confirms → system self-improves (correct matches become training signal)
 - Size class constrains the search space (only look at items with matching size_class for that shelf)
 - Semi-chaotic storage constraint (no two similar items together) naturally improves visual matching uniqueness
-**Status**: design phase. Blocked on: vision embedding model for catalog, search index for embeddings.
+**Status**: ✅ **Phase 1 DONE (session 18)** — `src/tgw/fingerprint.py` (Pillow-only dHash + RGB
+histogram), `tgw build-fingerprints` (full index = 54,314 rows), `tgw locate <image>`. Baseline
+matcher; self-match distance 0.0000 verified. **Phase 2+ (embedding/CLIP model + ANN index)
+blocked on GPU upgrade.** ⚠ `--size-class` filter inert until `size_class` is populated (0/83,520
+items currently) — see PP-STORAGE-001 backfill follow-up.
 **Dependency**: PP-STORAGE-001 (size_class field), PP-PRICE-005 (category-groups size_class lookup).
 
 ### PP-PRICE-004 ✅ COMPLETE (2026-06-05)
@@ -2148,6 +3073,19 @@ System design:
 `ebay_stage` creates UNPUBLISHED Seller Hub offer; `ebay_price` auto-enqueues it. `stage_draft()` + `publish_offer()` split in `sync.py`. `tgw staged` → operator review → `tgw publish <sku>`.
 
 ### PP-REVISION-001 — Live listing revision / update draft (design open)
+
+**Governing principle (Dave, 2026-06-11 18:12 — candidate for Settled architecture once
+the first implementation proves it):** for any editable record, changes are made to a
+**draft**, never to the curated data directly. Draft → review → queue for application →
+applied after approval. New listings approved this way enter the **Ready queue** and are
+listed at the configured dole-out rate (PP-EDITOR-001). This holds for every surface —
+TGW item data, eBay, Facebook Marketplace, whatever comes: **the current curated data
+never has changes applied without review. Agents may update an assigned draft and pull
+attributes from any source, but never write to the item's data directly.** Possibly
+multiple drafts per record. (Context: the shipping-data recovery process will inform
+shipping pricing for new items/revaluation, but that recovery flow is an exception, not
+the normal processing pattern.)
+
 - Three distinct workflows identified: new listing draft | live listing revision | ended→relist
 - Revision needs: known baseline (live state synced from eBay), proposed delta, drift visibility
 - Draft for new listing (`draft_listing`) is a historical record after publish — not the revision staging area
@@ -2155,6 +3093,9 @@ System design:
 - Relist: inventory item already exists on eBay; need fresh pricing + new offer; structurally re-create not update
 - `ebay_offer` block now established (PP-PRICE-001) — proceed when ready
 - Auto-sync: when offer fields are edited locally (price, condition, aspects), changes should push to eBay without requiring manual Seller Hub edits — design must prevent overwriting live state not yet pulled (depends on PP-SYNC-001 sync pass being authoritative first)
+- Note (2026-06-11): the draft-review-apply principle above intersects PP-EDITOR-001
+  (Ready state, rate-limited dole-out) and PP-DOCFLOW-001 (agents-write-drafts-only) —
+  whichever is designed first carries the principle into code
 
 ### PP-SYNC-001 ✅ ALL PHASES COMPLETE (2026-06-04)
 Core principle: every eBay-side ID/URL written back to item JSON immediately after API call. All matches by `listing_id` directly — never through catalog. Four phases done: `ebay_sync` write-back (6h) · `tgw ebay-pull` on-demand CLI · `tgw import-sold-csv` (2-year max, archive tombstone pass built) · `tgw ebay-sweep` physical review checklist (3 groups, clickable links, `--output`). Tier 3 (physical sweep) operator-gated; Tier 4 webhook code done, infra pending.

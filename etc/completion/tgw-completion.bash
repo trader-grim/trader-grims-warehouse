@@ -15,6 +15,7 @@ _tgw_subcommands=(
     build-locations
     build-search
     build-search-csv
+    build-fingerprints
     build-sqlite
     build-thumbnails
     catalog-verify
@@ -28,6 +29,7 @@ _tgw_subcommands=(
     ebay-sweep
     enqueue-sku
     ensure-catalog
+    export-catalog
     get
     get-ebay-token
     health
@@ -35,6 +37,7 @@ _tgw_subcommands=(
     hint-trail
     import-sold-csv
     list
+    locate
     locationupdate
     lookup
     mvitems
@@ -137,7 +140,10 @@ _tgw() {
             todo)          flags+=" --add --done --update --delegate --set-priority --priority --source --all --seed" ;;
             sku-migrate)   flags+=" --class --dry-run --run --limit --manifest --check-collisions --include-live-ebay" ;;
             data-scrub)    flags+=" --pass --write" ;;
-            dead-letter)   flags+=" --queue --limit --requeue --cancel" ;;
+            dead-letter)   flags+=" --queue --limit --requeue --requeue-transient --cancel" ;;
+            build-fingerprints) flags+=" --limit --check-only" ;;
+            locate)        flags+=" --size-class --top --json" ;;
+            export-catalog) flags+=" --no-thumbnails --limit --check-only" ;;
             velocity-report) flags+=" --refresh --category --min-sold --json --output" ;;
         esac
         COMPREPLY=( $(compgen -W "$flags" -- "$cur") )

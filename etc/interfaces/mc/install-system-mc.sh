@@ -21,6 +21,25 @@ fi
 echo "=== TGW MC system-wide install ==="
 echo
 
+# ── Pre-flight: validate ALL inputs before touching /etc/mc ──────────────────
+# Fail fast so a missing/renamed source file can't leave a half-installed state
+# (mc.ext.ini/mc.menu already overwritten but extfs scripts absent).
+WANT_SHEBANG='#!/opt/TGW/.venvironments/tgw/bin/python3'
+EXTFS_SCRIPTS=(tgwitem tgwcatalog tgwqueue tgwhealth tgwservices tgwlogs)
+for required in "$STAGE/mc.ext.ini" "$STAGE/mc.menu"; do
+    [[ -f "$required" ]] || { echo "ERROR: missing $required" >&2; exit 1; }
+done
+for f in "${EXTFS_SCRIPTS[@]}"; do
+    src="$STAGE/extfs.d/$f"
+    [[ -f "$src" ]] || { echo "ERROR: missing extfs script $src" >&2; exit 1; }
+    got=$(head -1 "$src")
+    if [[ "$got" != "$WANT_SHEBANG" ]]; then
+        echo "ERROR: $src has wrong shebang: $got" >&2
+        echo "  Expected: $WANT_SHEBANG" >&2
+        exit 1
+    fi
+done
+
 # ── Backup originals ────────────────────────────────────────────────────────
 echo "Backing up originals..."
 cp -v "$MC_ETC/mc.ext.ini" "$MC_ETC/mc.ext.ini.bak-$DATE"
@@ -35,19 +54,11 @@ install -m 644 -o root -g root "$STAGE/mc.ext.ini" "$MC_ETC/mc.ext.ini"
 echo "Installing mc.menu..."
 install -m 644 -o root -g root "$STAGE/mc.menu" "$MC_ETC/mc.menu"
 
-# ── Install extfs scripts ────────────────────────────────────────────────────
+# ── Install extfs scripts (validated in pre-flight above) ────────────────────
 echo
 echo "Installing extfs scripts..."
-WANT_SHEBANG='#!/opt/TGW/.venvironments/tgw/bin/python3'
-for f in tgwitem tgwcatalog tgwqueue tgwhealth tgwservices; do
-    src="$STAGE/extfs.d/$f"
-    got=$(head -1 "$src")
-    if [[ "$got" != "$WANT_SHEBANG" ]]; then
-        echo "ERROR: $src has wrong shebang: $got" >&2
-        echo "  Expected: $WANT_SHEBANG" >&2
-        exit 1
-    fi
-    install -m 755 -o root -g root "$src" "$MC_EXTFS/$f"
+for f in "${EXTFS_SCRIPTS[@]}"; do
+    install -m 755 -o root -g root "$STAGE/extfs.d/$f" "$MC_EXTFS/$f"
     echo "  installed: $MC_EXTFS/$f"
 done
 

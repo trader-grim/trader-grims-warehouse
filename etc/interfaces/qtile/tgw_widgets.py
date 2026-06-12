@@ -14,11 +14,10 @@ import json
 import os
 import re
 import subprocess
-import urllib.request
 import urllib.error
+import urllib.request
 
 from libqtile.widget import base
-
 
 _SKU_RE = re.compile(r"^(tgw\d{15})$")
 

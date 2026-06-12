@@ -78,7 +78,7 @@
       }
     ],
     "direction": "horizontal",
-    "width": 300
+    "width": 277.5
   },
   "right": {
     "id": "b647af7c5faca65b",
@@ -169,11 +169,12 @@
       }
     ],
     "direction": "horizontal",
-    "width": 300,
+    "width": 200,
     "collapsed": true
   },
   "left-ribbon": {
     "hiddenItems": {
+      "edge-tts:Read note aloud": false,
       "switcher:Open quick switcher": false,
       "graph:Open graph view": false,
       "canvas:Create new canvas": false,
@@ -185,6 +186,9 @@
   },
   "active": "babc512f62193402",
   "lastOpenFiles": [
+    "gemini/GEMINI-TASK-007-data-history-consolidation.md",
+    "gemini/GEMINI-TASK-002-data-scrub-analysis.md",
+    "gemini/GEMINI-TASK-001-category-group-review.md",
     "plan/TGW-Master-Plan.md",
     "plan/TASKS-phase1-queue.md",
     "suggestions/SUGGESTIONS.md",

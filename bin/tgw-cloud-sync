@@ -1,0 +1,32 @@
+#!/bin/bash
+# PP-BACKUP-001 A2 — daily rclone sync to Google Drive
+#
+# PRE-STEP (one-time, operator): preserve the frozen 2026-05-14 history point BEFORE
+# enabling this timer — run manually:
+#   rclone copy dbukove:TGW dbukove:TGW-historypoint-20260514
+# Verify: rclone size dbukove:TGW-historypoint-20260514
+# Only enable the timer after the history point is confirmed. (PLAN-backup-dr.md §3 A2)
+#
+# First live run will be large (weeks of delta); run manually in an off-hours window
+# first, then enable the timer. (PLAN-backup-dr.md §6 risk B1)
+set -euo pipefail
+
+REMOTE=dbukove:TGW
+LOG=/opt/TGW/var/log/rclone-sync.log
+STAMP_FILE=/opt/TGW/var/log/rclone-sync-last-success
+TRASH="dbukove:TGW-trash/$(date +%Y%m%d)"
+
+rclone sync /opt/TGW "$REMOTE" \
+    --filter "+ bin/**" \
+    --filter "+ config/**" \
+    --filter "+ data/**" \
+    --filter "+ docs/**" \
+    --filter "+ var/log/**" \
+    --filter "+ var/backups/trader_grims_warehouse/db/**" \
+    --filter "+ src/**" \
+    --filter "- **" \
+    --backup-dir "$TRASH" \
+    --log-file "$LOG" \
+    --log-level INFO
+
+date -Iseconds > "$STAMP_FILE"

@@ -17,7 +17,15 @@ import sys
 
 from libqtile import bar, hook, layout, widget
 from libqtile.config import (
-    Click, Drag, DropDown, Group, Key, KeyChord, Match, Screen, ScratchPad,
+    Click,
+    Drag,
+    DropDown,
+    Group,
+    Key,
+    KeyChord,
+    Match,
+    ScratchPad,
+    Screen,
 )
 from libqtile.lazy import lazy
 

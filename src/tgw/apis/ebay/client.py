@@ -34,9 +34,10 @@ _load_token = load_token  # backward-compat alias
 
 def _headers(cfg: Dict[str, Any], extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     h = {
-        'Authorization': f'Bearer {_load_token(cfg)}',
-        'Content-Type':  'application/json',
-        'Accept':        'application/json',
+        'Authorization':  f'Bearer {_load_token(cfg)}',
+        'Content-Type':   'application/json',
+        'Accept':         'application/json',
+        'Content-Language': 'en-US',
     }
     if extra:
         h.update(extra)

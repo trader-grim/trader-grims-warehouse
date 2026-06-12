@@ -110,6 +110,14 @@ updated: 2026-06-04
 - On submit: calls `POST /api/items/{sku}/set-template` (if template changed) then `PATCH /api/items/{sku}`
 - Dark theme, large touch targets, no keyboard required for template selection
 
+#### GET/POST /form/suggest — punctuation-safe suggestion entry (PP-CAPTURE-001, Round 5 #44)
+- **No Bearer auth** — network trust, like /form/intake
+- Plain HTML form (no JS): textarea → POST → appends `- [ ] <ts> :: <text>` to vault
+  `suggestions/SUGGESTIONS.md` via the same `cmd_suggest()` path as `tgw suggest`
+- Sidesteps bash quoting entirely — any punctuation is safe
+- Whitespace/newlines collapsed to single spaces (keeps one checklist line per entry)
+- Result echoed back HTML-escaped; write errors reported in-page (never a 500)
+
 ### Webhooks
 
 #### POST /webhooks/ebay/notification — eBay push (no Bearer auth)

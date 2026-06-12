@@ -17,9 +17,9 @@ from __future__ import annotations
 
 import argparse
 
+from tgw import logging as tgw_logging
 from tgw.config import load_config
 from tgw.queue.worker_base import QueueWorker
-from tgw import logging as tgw_logging
 
 log = tgw_logging.get_logger(__name__)
 

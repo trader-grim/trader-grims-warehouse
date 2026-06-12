@@ -1,0 +1,137 @@
+#!/opt/TGW/.venvironments/tgw/bin/python3
+# MC extfs VFS: TGW worker logs — read-only journalctl per worker (PP-MC-001 Phase 4).
+# Archive: any .tgwlogs sentinel file — content ignored.
+# Enter /opt/TGW/mc/logs.tgwlogs to open; each <queue>.log streams that
+# worker's recent journal.  READ-ONLY: no copyin/rm/run-mutation.
+#
+# Safety:
+#   * queue names are validated against the WORKER_QUEUES allowlist — the only
+#     value interpolated into a unit name comes from that fixed set, never raw
+#     VFS input, so there is no shell-injection surface.
+#   * subprocess is always called with an argv list (never shell=True).
+#   * output is capped (TGWLOGS_LINES, default 500, hard max 5000).
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+# Canonical worker list — import the single source of truth, with a static
+# fallback so the VFS still works if MC launches us with an odd sys.path.
+try:
+    from tgw.queue import WORKER_QUEUES
+except Exception:
+    WORKER_QUEUES = (
+        'token_refresh', 'pm_intake', 'bundle_intake', 'multi_intake',
+        'ai_identify', 'catalog_rebuild', 'thumbnail_gen', 'ebay_draft',
+        'ebay_upload', 'ebay_price', 'ebay_price_reducer', 'ebay_stage',
+        'ebay_publish', 'ebay_sync', 'ebay_legacy_sync', 'ebay_sku_migrate',
+        'velocity_stats', 'echo',
+    )
+
+_DEFAULT_LINES = 500
+_MAX_LINES = 5000
+
+
+def _lines_cap() -> int:
+    try:
+        n = int(os.environ.get('TGWLOGS_LINES', _DEFAULT_LINES))
+    except ValueError:
+        n = _DEFAULT_LINES
+    return max(1, min(n, _MAX_LINES))
+
+
+def _unit(queue: str) -> str:
+    return f'tgw-worker@{queue}.service'
+
+
+def _mt_now() -> str:
+    import datetime
+    return datetime.datetime.now().strftime('%b %d %H:%M')
+
+
+def _is_active(queue: str) -> str:
+    """Return systemctl is-active state for a worker (best-effort)."""
+    try:
+        r = subprocess.run(['systemctl', 'is-active', _unit(queue)],
+                           capture_output=True, text=True, timeout=10)
+        return (r.stdout or r.stderr).strip() or 'unknown'
+    except Exception:
+        return 'unknown'
+
+
+def _journal(queue: str) -> str:
+    """Return capped, read-only journal text for one worker."""
+    if queue not in WORKER_QUEUES:
+        return f'unknown worker queue: {queue!r}\n'
+    cmd = ['journalctl', '-u', _unit(queue), '-n', str(_lines_cap()),
+           '--no-pager', '-o', 'short-iso']
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except FileNotFoundError:
+        return 'journalctl not available on this host\n'
+    except subprocess.TimeoutExpired:
+        return 'journalctl timed out\n'
+    if r.returncode != 0:
+        hint = ('\n(if empty/denied: the tgw user may need to be in the '
+                "'systemd-journal' or 'adm' group to read system unit logs)\n")
+        return (r.stdout or '') + (r.stderr or '') + hint
+    return r.stdout or '(no journal entries)\n'
+
+
+def _summary() -> str:
+    lines = ['TGW worker journal portal', '=========================', '']
+    for q in WORKER_QUEUES:
+        lines.append(f'  {q:20s} {_is_active(q)}')
+    lines.append('')
+    lines.append(f'Open <queue>.log to stream the last {_lines_cap()} journal lines '
+                 '(read-only).')
+    return '\n'.join(lines) + '\n'
+
+
+def cmd_list(_archive: str) -> None:
+    mt = _mt_now()
+    u = os.environ.get('USER', 'tgw')
+    summary = _summary()
+    print(f'-rw-r--r-- 1 {u} {u} {len(summary.encode())} {mt} _summary.txt')
+    # Nominal size — real content is produced on copyout. ~120 bytes/line est.
+    nominal = _lines_cap() * 120
+    for q in WORKER_QUEUES:
+        print(f'-rw-r--r-- 1 {u} {u} {nominal} {mt} {q}.log')
+
+
+def _content_for(stored: str) -> str:
+    name = os.path.basename(stored)
+    if name == '_summary.txt':
+        return _summary()
+    queue = name[:-4] if name.endswith('.log') else name
+    return _journal(queue)
+
+
+def cmd_copyout(_archive: str, stored: str, dest: str) -> None:
+    Path(dest).write_text(_content_for(stored), encoding='utf-8')
+
+
+def cmd_run(_archive: str, stored: str) -> None:
+    import tempfile
+    content = _content_for(stored)
+    with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False,
+                                     encoding='utf-8') as f:
+        f.write(content)
+        tmp = f.name
+    os.execlp('less', 'less', tmp)
+
+
+if __name__ == '__main__':
+    op = sys.argv[1] if len(sys.argv) > 1 else ''
+    arc = sys.argv[2] if len(sys.argv) > 2 else ''
+    try:
+        if op == 'list':
+            cmd_list(arc)
+        elif op == 'copyout':
+            cmd_copyout(arc, sys.argv[3], sys.argv[4])
+        elif op == 'run':
+            cmd_run(arc, sys.argv[3] if len(sys.argv) > 3 else '_summary.txt')
+        # copyin / rm intentionally unimplemented — this VFS is read-only.
+    except Exception as e:
+        print(f'tgwlogs error: {e}', file=sys.stderr)
+        sys.exit(1)

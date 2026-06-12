@@ -97,6 +97,10 @@ class EbayPriceWorker(QueueWorker):
             # it to target (p25) after the configured period.
             comps = result['comps']
             launch = to_99(comps['max'] * 1.10) if comps.get('max') else suggested
+            if launch < suggested:
+                # The floor can push the target (p25) above a launch derived from
+                # raw junk comps — never launch below the markdown target.
+                launch = to_99(suggested)
             ebay_offer['price']        = launch
             ebay_offer['target_price'] = suggested   # p25 — the eventual move price
             draft['price']             = launch      # staged at launch price

@@ -13,6 +13,15 @@ Periods and percentiles are configurable via reprice_stages in config.
 Items without a reprice_schedule are skipped (manual-price listings).
 Items can be excluded by setting reprice_skip: true in the item JSON.
 
+Safety rules (docs/invariants.md C4/C5/C6):
+  - never raises a price — a stage at or above the current price is stamped
+    done without an eBay call
+  - offer PUT is full-replace, so the complete offer body is rebuilt via
+    _build_offer_bodies with the new price (a partial body would strip
+    policies/category/description from the live offer)
+  - every applied reduction appends a price_history event to the item JSON
+  - the item JSON is written only after eBay accepts the update
+
 Self-scheduling: runs every few hours. Enqueues a startup job if idle.
 
 Queue name: ebay_price_reducer
@@ -32,6 +41,7 @@ import requests
 import tgw.logging as tgw_logging
 from tgw.apis.ebay.client import ebay_put
 from tgw.config import DEFAULT_CONFIG, load_config
+from tgw.ebay.sync import _build_offer_bodies
 from tgw.items import atomic_write_json
 from tgw.queue import state_machine
 from tgw.queue.worker_base import QueueWorker
@@ -124,18 +134,65 @@ class EbayPriceReducerWorker(QueueWorker):
         new_price = entry['price']
         sku = item.get('sku', jf.parent.name)
 
+        def _stamp_due_stages() -> None:
+            for s in schedule:
+                if s.get('done_at') is None and s.get('due_at') is not None:
+                    if datetime.fromisoformat(s['due_at']) <= now:
+                        s['done_at'] = now.isoformat()
+
+        old_price = item.get('ebay_offer', {}).get('price')
+        try:
+            old_price_f = float(old_price) if old_price is not None else None
+        except (TypeError, ValueError):
+            old_price_f = None
+
+        # Markdown only ever moves a price down. If the current price is already
+        # at or below the scheduled stage (e.g. operator cut it manually), the
+        # stage is satisfied — stamp it done without touching eBay.
+        if old_price_f is not None and float(new_price) >= old_price_f:
+            _stamp_due_stages()
+            item['reprice_schedule'] = schedule
+            atomic_write_json(jf, item, pretty=self.config.get('pretty', True))
+            stats['skipped'] += 1
+            log.info('ebay_price_reducer: %s stage %d (%s) $%.2f >= current $%.2f'
+                     ' — stamped done without applying',
+                     sku, entry['stage'], entry['label'], new_price, old_price_f)
+            tgw_logging.log_event('ebay_price_reducer_stage_satisfied', sku=sku,
+                                  stage=entry['stage'], label=entry['label'],
+                                  price=new_price, current_price=old_price_f)
+            return
+
+        draft = item.get('draft_listing')
+        if not draft:
+            log.error('ebay_price_reducer: %s has a reprice_schedule but no '
+                      'draft_listing — cannot rebuild the full offer body', sku)
+            stats['errors'] += 1
+            return
+
         log.info('ebay_price_reducer: %s → stage %d (%s) $%.2f',
                  sku, entry['stage'], entry['label'], new_price)
         tgw_logging.log_event('ebay_price_reducer_apply', sku=sku,
                               stage=entry['stage'], label=entry['label'],
                               price=new_price)
 
+        # Offer PUT is full-replace: an incomplete body strips live listing
+        # fields. Inject the new price and rebuild the complete offer body.
+        # (Disk is only written after eBay accepts, so a failure discards
+        # these in-memory mutations.)
+        draft['price'] = new_price
+        item['ebay_offer']['price'] = new_price
+        try:
+            _, offer_body = _build_offer_bodies(self.config, sku, item)
+        except ValueError as exc:
+            log.error('ebay_price_reducer: cannot build offer body for %s: %s',
+                      sku, exc)
+            stats['errors'] += 1
+            return
+
         try:
             ebay_put(self.config,
                      f'/sell/inventory/v1/offer/{offer_id}',
-                     {'pricingSummary': {'price': {'currency': 'USD',
-                                                   'value': str(new_price)}}},
-                     extra_headers={'Content-Language': 'en-US'})
+                     offer_body)
         except requests.exceptions.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else 0
             log.error('ebay_price_reducer: eBay rejected price update for %s (HTTP %s): %s',
@@ -144,13 +201,16 @@ class EbayPriceReducerWorker(QueueWorker):
             stats['errors'] += 1
             return
 
-        for s in schedule:
-            if s.get('done_at') is None and s.get('due_at') is not None:
-                if datetime.fromisoformat(s['due_at']) <= now:
-                    s['done_at'] = now.isoformat()
-
-        item['ebay_offer']['price'] = new_price
-        item['reprice_schedule']    = schedule
+        _stamp_due_stages()
+        item.setdefault('price_history', []).append({
+            'ts':             now.isoformat(),
+            'price':          new_price,
+            'previous_price': old_price,
+            'stage':          entry['stage'],
+            'label':          entry['label'],
+            'source':         'ebay_price_reducer',
+        })
+        item['reprice_schedule'] = schedule
         atomic_write_json(jf, item, pretty=self.config.get('pretty', True))
         stats['reduced'] += 1
 

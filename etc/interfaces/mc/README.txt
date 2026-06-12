@@ -7,6 +7,7 @@ Open these sentinel files in MC to enter the corresponding live VFS:
   queue.tgwqueue     — PostgreSQL job queue, live snapshot by state
   health.tgwhealth   — platform health checks (Postgres, Ollama, eBay token…)
   services.tgwsvc    — TGW systemd services: active/ and inactive/
+  logs.tgwlogs       — read-only journalctl per worker (last N lines, capped)
 
 Inside each VFS, pressing Enter (or F3/View) on any file shows its content.
 Files marked executable (x bit) open in less when you press Enter.
@@ -48,6 +49,15 @@ tgwservices VFS
 ---------------
 Enter services.tgwsvc.  active/ and inactive/ subdirs.
 Enter on a service runs  systemctl status <service>  in less.
+
+tgwlogs VFS
+-----------
+Enter logs.tgwlogs.  Files named:
+  _summary.txt       — every worker + its systemctl is-active state
+  {queue}.log        — last N journal lines for tgw-worker@{queue}.service
+Enter opens the journal in less.  Read-only; output is capped at
+TGWLOGS_LINES lines (default 500, max 5000).  If a log is empty/denied the
+tgw user likely needs to be in the 'systemd-journal' or 'adm' group.
 
 Extfs scripts location: ~/.local/share/mc/extfs.d/
 Sentinel files:         /opt/TGW/mc/

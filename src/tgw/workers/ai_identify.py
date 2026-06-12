@@ -1,13 +1,12 @@
 """
 tgw.workers.ai_identify — Vision-model item identification worker.
 
-Sends the primary photo to qwen2.5vl:7b, asks for a structured JSON
-response with title, category, and description, then writes the result
-back into the item JSON and enqueues catalog-rebuild + thumbnail-gen.
+Provider and model are configured in tgw-models.json under the "ai_identify" key.
+Defaults: openrouter / google/gemini-2.5-flash (fast, cheap).
+Ollama fallback: qwen2.5vl:7b (CPU-only, slow).
 
-One photo only (primary image) to keep the prompt lean on CPU-only hardware.
-Results are written only if the item still has an empty title — safe to
-re-run; will not overwrite a title that has already been set by a human.
+Results are written only if the item still has an empty ai_identified flag — safe
+to re-run; will not overwrite unless ai_reidentify is set.
 """
 
 from __future__ import annotations
@@ -23,6 +22,7 @@ from typing import Any, Dict, Optional
 import psycopg2.errors
 
 import tgw.logging as tgw_logging
+from tgw.apis.llm import call_model, get_task_model
 from tgw.apis.ollama import extract_json, is_available
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.items import append_history_event, atomic_write_json
@@ -31,11 +31,11 @@ from tgw.queue.worker_base import HardFailure, QueueWorker
 
 log = logging.getLogger(__name__)
 
-QUEUE_NAME   = 'ai_identify'
-VISION_MODEL = 'qwen2.5vl:7b'
+QUEUE_NAME = "ai_identify"
+_OLLAMA_FALLBACK_MODEL = "qwen2.5vl:7b"
 
-_IMAGE_SUFFIXES  = {'.jpg', '.jpeg', '.png', '.JPG', '.JPEG', '.PNG'}
-_VISION_MAX_PX   = 512   # 56KB resized; model loads in ~10 min cold, ~18s warm
+_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"}
+_VISION_MAX_PX = 512  # 56KB resized; model loads in ~10 min cold, ~18s warm
 
 _SYSTEM_PROMPT = """\
 You are an eBay listing assistant. You will be shown a photo of an item for sale.
@@ -96,10 +96,7 @@ Respond with JSON:
 
 
 def _primary_image(sku_dir: Path) -> Optional[Path]:
-    candidates = sorted(
-        p for p in sku_dir.iterdir()
-        if p.is_file() and p.suffix in _IMAGE_SUFFIXES
-    )
+    candidates = sorted(p for p in sku_dir.iterdir() if p.is_file() and p.suffix in _IMAGE_SUFFIXES)
     return candidates[0] if candidates else None
 
 
@@ -116,85 +113,87 @@ def _encode_resized(img_path: Path, max_px: int = _VISION_MAX_PX) -> tuple[str, 
     with Image.open(img_path) as img:
         img.thumbnail((max_px, max_px), Image.LANCZOS)
         buf = io.BytesIO()
-        img.convert('RGB').save(buf, format='JPEG', quality=85)
+        img.convert("RGB").save(buf, format="JPEG", quality=85)
     data = buf.getvalue()
     return base64.b64encode(data).decode(), orig_kb, len(data) // 1024
 
 
 class AIIdentifyWorker(QueueWorker):
-
     def run(self) -> None:
-        self._warmup()
+        provider, model = get_task_model(self.config, 'ai_identify')
+        if provider == 'ollama':
+            self._warmup(model)
         super().run()
 
-    def _warmup(self) -> None:
-        """Pre-load the vision model into Ollama's memory at startup."""
+    def _warmup(self, model: str) -> None:
+        """Pre-load the Ollama vision model into memory at startup."""
         import requests as _req
-        log.info('warming up %s (cold load may take several minutes)...', VISION_MODEL)
-        tgw_logging.log_event('ai_identify_warmup_start', model=VISION_MODEL)
+
+        log.info("warming up %s (cold load may take several minutes)...", model)
+        tgw_logging.log_event("ai_identify_warmup_start", model=model)
         try:
-            _req.post('http://localhost:11434/api/generate',
-                      json={'model': VISION_MODEL, 'prompt': '', 'stream': False},
-                      timeout=1200)
-            log.info('%s warm-up complete', VISION_MODEL)
-            tgw_logging.log_event('ai_identify_warmup_complete', model=VISION_MODEL)
+            _req.post("http://localhost:11434/api/generate", json={"model": model, "prompt": "", "stream": False}, timeout=1200)
+            log.info("%s warm-up complete", model)
+            tgw_logging.log_event("ai_identify_warmup_complete", model=model)
         except Exception as exc:
-            log.warning('warm-up failed (will retry on first job): %s', exc)
+            log.warning("warm-up failed (will retry on first job): %s", exc)
 
     def handle(self, job: Dict[str, Any]) -> None:
-        payload = job.get('payload_json') or {}
-        sku     = payload.get('sku', '')
+        payload = job.get("payload_json") or {}
+        sku = payload.get("sku", "")
         if not sku:
-            raise HardFailure('ai_identify job missing sku in payload')
+            raise HardFailure("ai_identify job missing sku in payload")
 
-        sku_dir   = self.config['itemdata_root'] / sku
-        json_path = sku_dir / f'{sku}.json'
+        sku_dir = self.config["itemdata_root"] / sku
+        json_path = sku_dir / f"{sku}.json"
 
         if not json_path.exists():
-            raise HardFailure(f'item JSON not found for {sku}')
+            raise HardFailure(f"item JSON not found for {sku}")
 
-        item = json.loads(json_path.read_text(encoding='utf-8'))
+        item = json.loads(json_path.read_text(encoding="utf-8"))
 
-        already_identified = bool(item.get('ai_identified'))
-        force_reidentify   = bool(item.get('ai_reidentify'))
+        already_identified = bool(item.get("ai_identified"))
+        force_reidentify = bool(item.get("ai_reidentify"))
 
         # Skip only when already identified and not explicitly asked to redo
         if already_identified and not force_reidentify:
-            log.info('skipping ai_identify for %s — already identified', sku)
-            tgw_logging.log_event('ai_identify_skipped', sku=sku,
-                                  reason='already_identified')
+            log.info("skipping ai_identify for %s — already identified", sku)
+            tgw_logging.log_event("ai_identify_skipped", sku=sku, reason="already_identified")
             return
 
         # Product lookup — run before Ollama; result cached in item JSON
-        product_context = ''
+        product_context = ""
         try:
             from tgw.apis.lookup import lookup_product
+
             lookup_result = lookup_product(item, self.config)
             if lookup_result:
-                item['product_lookup'] = lookup_result.to_dict()
+                item["product_lookup"] = lookup_result.to_dict()
                 product_context = lookup_result.prompt_context()
-                log.info('ai_identify: product lookup hit for %s via %s — %r',
-                         sku, lookup_result.source, product_context[:60])
-                tgw_logging.log_event('ai_identify_lookup_hit', sku=sku,
-                                      source=lookup_result.source,
-                                      title=lookup_result.title[:60])
+                log.info("ai_identify: product lookup hit for %s via %s — %r", sku, lookup_result.source, product_context[:60])
+                tgw_logging.log_event("ai_identify_lookup_hit", sku=sku, source=lookup_result.source, title=lookup_result.title[:60])
         except Exception as exc:
-            log.warning('ai_identify: product lookup failed for %s: %s', sku, exc)
+            log.warning("ai_identify: product lookup failed for %s: %s", sku, exc)
 
         # Derive hint: explicit ai_hint wins; product lookup context; human-set title
-        existing_title = str(item.get('title', '')).strip()
-        hint = (item.get('ai_hint') or '').strip()
+        existing_title = str(item.get("title", "")).strip()
+        hint = (item.get("ai_hint") or "").strip()
         if not hint and existing_title and existing_title != sku:
             hint = existing_title
 
         img_path = _primary_image(sku_dir)
         if img_path is None:
-            raise HardFailure(f'no images found for {sku}')
+            raise HardFailure(f"no images found for {sku}")
 
-        if not is_available(VISION_MODEL):
-            raise RuntimeError(f'Ollama unavailable or model {VISION_MODEL!r} not found')
+        provider, model = get_task_model(self.config, 'ai_identify')
 
-        img_b64, orig_kb, resized_kb = _encode_resized(img_path)
+        # Fail-fast for Ollama before the slow encoding step
+        if provider == 'ollama' and not is_available(model):
+            raise RuntimeError(f"Ollama unavailable or model {model!r} not found")
+
+        # Use higher resolution for cloud providers; keep low for CPU-bound Ollama
+        max_px = 768 if provider == 'openrouter' else _VISION_MAX_PX
+        img_b64, orig_kb, resized_kb = _encode_resized(img_path, max_px=max_px)
 
         if product_context:
             prompt = _USER_PROMPT_ENRICHED.format(product_context=product_context)
@@ -203,107 +202,93 @@ class AIIdentifyWorker(QueueWorker):
         else:
             prompt = _USER_PROMPT
 
-        log.info('calling %s for %s (image: %s, %dKB→%dKB%s)',
-                 VISION_MODEL, sku, img_path.name, orig_kb, resized_kb,
-                 f', hint={hint!r}' if hint else '')
-        tgw_logging.log_event('ai_identify_call', sku=sku, model=VISION_MODEL,
-                              image=img_path.name, orig_kb=orig_kb,
-                              resized_kb=resized_kb, hint=hint or None)
+        log.info("calling %s/%s for %s (image: %s, %dKB→%dKB%s)", provider, model, sku, img_path.name, orig_kb, resized_kb, f", hint={hint!r}" if hint else "")
+        tgw_logging.log_event("ai_identify_call", sku=sku, provider=provider, model=model, image=img_path.name, orig_kb=orig_kb, resized_kb=resized_kb, hint=hint or None)
 
-        import requests
-
-        from tgw.queue.ollama_lock import acquire_ollama_lock
-        with acquire_ollama_lock(self.config):
-            resp = requests.post(
-                'http://localhost:11434/api/generate',
-                json={
-                    'model':  VISION_MODEL,
-                    'prompt': prompt,
-                    'system': _SYSTEM_PROMPT,
-                    'images': [img_b64],
-                    'stream': False,
-                },
-                timeout=600,
-            )
-        resp.raise_for_status()
-        raw = resp.json()['response']
+        raw = call_model('ai_identify', _SYSTEM_PROMPT, prompt, self.config, img_b64=img_b64)
 
         try:
             result = extract_json(raw)
         except Exception as exc:
-            raise HardFailure(
-                f'ai_identify: model returned non-JSON for {sku}: {raw[:200]}'
-            ) from exc
+            raise HardFailure(f"ai_identify: model returned non-JSON for {sku}: {raw[:200]}") from exc
 
-        title       = str(result.get('title', '')).strip()
-        category    = str(result.get('category', '')).strip()
-        description = str(result.get('description', '')).strip()
-        condition   = str(result.get('condition', '')).strip()
+        title = str(result.get("title", "")).strip()
+        category = str(result.get("category", "")).strip()
+        description = str(result.get("description", "")).strip()
+        condition = str(result.get("condition", "")).strip()
 
         if not title:
-            raise HardFailure(f'ai_identify: empty title in model response for {sku}')
+            raise HardFailure(f"ai_identify: empty title in model response for {sku}")
 
         # Resolve AI category string → eBay categoryId
         ebay_category_id = ebay_category_name = None
         try:
             from tgw.apis.ebay.taxonomy import best_category
+
             ebay_category_id, ebay_category_name = best_category(self.config, title, category)
         except Exception as exc:
-            log.warning('taxonomy lookup failed for %r: %s', category, exc)
+            log.warning("taxonomy lookup failed for %r: %s", category, exc)
 
         # Write results — always overwrite on re-identify, fill gaps on first pass
-        item['title']       = title
-        item['category']    = category
-        item['description'] = description
-        item['condition']   = condition
+        item["title"] = title
+        item["category"] = category
+        item["description"] = description
+        item["condition"] = condition
         if ebay_category_id:
-            item['ebay_category_id']   = ebay_category_id
-            item['ebay_category_name'] = ebay_category_name
-        item['ai_identified'] = True
-        item.pop('ai_reidentify', None)   # clear the force flag
+            item["ebay_category_id"] = ebay_category_id
+            item["ebay_category_name"] = ebay_category_name
+        item["ai_identified"] = True
+        item.pop("ai_reidentify", None)  # clear the force flag
         # product_lookup already written above if lookup succeeded
 
         # Record identification round in history trail
-        prior_rounds = sum(
-            1 for e in item.get('identification_history', []) if e.get('event') == 'ai_identify'
-        )
+        prior_rounds = sum(1 for e in item.get("identification_history", []) if e.get("event") == "ai_identify")
         if product_context:
-            prompt_type = 'enriched'
+            prompt_type = "enriched"
         elif hint:
-            prompt_type = 'hinted'
+            prompt_type = "hinted"
         else:
-            prompt_type = 'plain'
-        append_history_event(item, {
-            'event':           'ai_identify',
-            'round':           prior_rounds + 1,
-            'model':           VISION_MODEL,
-            'prompt_type':     prompt_type,
-            'hint':            hint or None,
-            'lookup_source':   item.get('product_lookup', {}).get('source') if product_context else None,
-            'title':           title,
-            'category':        category,
-            'condition':       condition,
-            'ebay_category_id': ebay_category_id,
-        })
+            prompt_type = "plain"
+        append_history_event(
+            item,
+            {
+                "event": "ai_identify",
+                "round": prior_rounds + 1,
+                "model": f"{provider}/{model}",
+                "prompt_type": prompt_type,
+                "hint": hint or None,
+                "lookup_source": item.get("product_lookup", {}).get("source") if product_context else None,
+                "title": title,
+                "category": category,
+                "condition": condition,
+                "ebay_category_id": ebay_category_id,
+            },
+        )
 
-        atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
+        atomic_write_json(json_path, item, pretty=self.config.get("pretty", True))
 
-        log.info('ai_identify complete for %s: %r (eBay cat %s)',
-                 sku, title, ebay_category_id)
-        tgw_logging.log_event('ai_identify_complete', sku=sku, title=title,
-                              category=category, condition=condition,
-                              hint=hint or None,
-                              ebay_category_id=ebay_category_id,
-                              ebay_category_name=ebay_category_name)
+        log.info("ai_identify complete for %s: %r (eBay cat %s)", sku, title, ebay_category_id)
+        tgw_logging.log_event(
+            "ai_identify_complete", sku=sku, title=title, category=category, condition=condition, hint=hint or None, ebay_category_id=ebay_category_id, ebay_category_name=ebay_category_name
+        )
 
-        # Enqueue ebay_draft unless this was a catalog-only run
-        catalog_only = bool(payload.get('catalog_only'))
+        # Enqueue ebay_draft and alt_text unless this was a catalog-only run
+        catalog_only = bool(payload.get("catalog_only"))
         if not catalog_only:
             try:
                 state_machine.enqueue_job(
-                    queue_name='ebay_draft',
-                    payload={'sku': sku},
-                    dedupe_key=f'ebay_draft:{sku}',
+                    queue_name="ebay_draft",
+                    payload={"sku": sku},
+                    dedupe_key=f"ebay_draft:{sku}",
+                    max_attempts=3,
+                )
+            except psycopg2.errors.UniqueViolation:
+                pass
+            try:
+                state_machine.enqueue_job(
+                    queue_name="alt_text",
+                    payload={"sku": sku},
+                    dedupe_key=f"alt_text:{sku}",
                     max_attempts=3,
                 )
             except psycopg2.errors.UniqueViolation:
@@ -312,9 +297,9 @@ class AIIdentifyWorker(QueueWorker):
         # Enqueue downstream rebuild
         try:
             state_machine.enqueue_job(
-                queue_name='catalog_rebuild',
-                payload={'reason': f'ai_identify:{sku}'},
-                dedupe_key='catalog_rebuild:pending',
+                queue_name="catalog_rebuild",
+                payload={"reason": f"ai_identify:{sku}"},
+                dedupe_key="catalog_rebuild:pending",
                 not_before=time.time() + 30,
                 max_attempts=3,
             )
@@ -324,8 +309,9 @@ class AIIdentifyWorker(QueueWorker):
 
 def main() -> int:
     import argparse
-    parser = argparse.ArgumentParser(prog='tgw-ai-identify-worker')
-    parser.add_argument('--config', default=str(DEFAULT_CONFIG))
+
+    parser = argparse.ArgumentParser(prog="tgw-ai-identify-worker")
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     args = parser.parse_args()
 
     cfg = load_config(Path(args.config))
@@ -334,5 +320,5 @@ def main() -> int:
     return 0
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     raise SystemExit(main())

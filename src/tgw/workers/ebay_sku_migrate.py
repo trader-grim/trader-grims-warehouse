@@ -54,8 +54,7 @@ from tgw.sku_migration import build_migration_map, classify, rename_sku
 
 log = logging.getLogger(__name__)
 
-QUEUE_NAME  = 'ebay_sku_migrate'
-_LANG_HEADER = {'Content-Language': 'en-US'}
+QUEUE_NAME = 'ebay_sku_migrate'
 
 
 def _get_listing_policies(cfg: Dict[str, Any],
@@ -96,11 +95,25 @@ def _is_live(item: Dict[str, Any]) -> bool:
                 and listing.get('status') in ('Active', 'PUBLISHED'))
 
 
+_PERMANENT_ERROR_SIGNALS = (
+    'Best Offer',
+    'Inventory-based listing management is not currently supported',
+    '"errorId":25709',
+    "'errorId': 25709",
+)
+
+
+def _is_permanent_failure(error_text: str) -> bool:
+    """True when the error is not expected to resolve on retry."""
+    return any(sig in error_text for sig in _PERMANENT_ERROR_SIGNALS)
+
+
 def find_batch(cfg: Dict[str, Any],
                batch_size: int) -> List[Tuple[str, str]]:
     """
     Return up to batch_size (old_sku, new_sku) pairs ready for eBay migration.
     Scans the current migration map for non-canonical items with live listings.
+    Skips items marked sku_migrate_skip=true (permanent failures).
     """
     migration_map, _ = build_migration_map(cfg)
     batch: List[Tuple[str, str]] = []
@@ -113,6 +126,8 @@ def find_batch(cfg: Dict[str, Any],
         try:
             item = load_item_doc(json_path)
         except Exception:
+            continue
+        if item.get('sku_migrate_skip'):
             continue
         if _is_live(item):
             batch.append((old_sku, new_sku))
@@ -185,7 +200,7 @@ def _migrate_inventory(cfg: Dict[str, Any],
     # PUT new inventory item (idempotent)
     try:
         ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{new_sku}',
-                 inv_body, extra_headers=_LANG_HEADER)
+                 inv_body)
     except requests.exceptions.HTTPError as exc:
         body = exc.response.text[:200] if exc.response is not None else str(exc)
         return {'ok': False, 'old_sku': old_sku,
@@ -197,10 +212,10 @@ def _migrate_inventory(cfg: Dict[str, Any],
         if existing:
             new_offer_id = existing['offerId']
             ebay_put(cfg, f'/sell/inventory/v1/offer/{new_offer_id}',
-                     offer_body, extra_headers=_LANG_HEADER)
+                     offer_body)
         else:
             resp = ebay_post(cfg, '/sell/inventory/v1/offer',
-                             offer_body, extra_headers=_LANG_HEADER)
+                             offer_body)
             new_offer_id = resp.get('offerId', '')
             if not new_offer_id:
                 return {'ok': False, 'old_sku': old_sku,
@@ -317,7 +332,7 @@ def _migrate_inventory_live(cfg: Dict[str, Any],
     # PUT new inventory item (idempotent)
     try:
         ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{new_sku}',
-                 inv_body, extra_headers=_LANG_HEADER)
+                 inv_body)
     except requests.exceptions.HTTPError as exc:
         body = exc.response.text[:200] if exc.response is not None else str(exc)
         return {'ok': False, 'old_sku': old_sku,
@@ -329,10 +344,10 @@ def _migrate_inventory_live(cfg: Dict[str, Any],
         if existing:
             new_offer_id = existing['offerId']
             ebay_put(cfg, f'/sell/inventory/v1/offer/{new_offer_id}',
-                     offer_body, extra_headers=_LANG_HEADER)
+                     offer_body)
         else:
             resp = ebay_post(cfg, '/sell/inventory/v1/offer',
-                             offer_body, extra_headers=_LANG_HEADER)
+                             offer_body)
             new_offer_id = resp.get('offerId', '')
             if not new_offer_id:
                 return {'ok': False, 'old_sku': old_sku,
@@ -428,7 +443,7 @@ def _recover_partial(cfg: Dict[str, Any],
                       if k not in ('offerId', 'status', 'listing')}
         offer_body.setdefault('listingPolicies', {}).update(policies)
         ebay_put(cfg, f'/sell/inventory/v1/offer/{new_offer_id}',
-                 offer_body, extra_headers=_LANG_HEADER)
+                 offer_body)
     except requests.exceptions.HTTPError as exc:
         body = exc.response.text[:200] if exc.response is not None else str(exc)
         return {'ok': False, 'old_sku': old_sku,
@@ -602,11 +617,25 @@ class EbaySkuMigrateWorker(QueueWorker):
                                                  or result.get('new_listing_id'))
             else:
                 stats['failed'] += 1
+                error_text = result.get('error', '')
                 log.error('ebay_sku_migrate: FAILED %s → %s: %s',
-                          old_sku, new_sku, result.get('error'))
+                          old_sku, new_sku, error_text)
                 if result.get('ebay_done'):
                     log.error('ebay_sku_migrate: eBay already revised/migrated for %s '
                               '— manual local fix required', old_sku)
+                if _is_permanent_failure(error_text):
+                    try:
+                        from tgw.items import _write_field
+                        _write_field(self.config, old_sku, 'sku_migrate_skip', True)
+                        stats.setdefault('skipped_permanent', 0)
+                        stats['skipped_permanent'] += 1
+                        log.warning('ebay_sku_migrate: permanent failure — marked '
+                                    'sku_migrate_skip=true on %s', old_sku)
+                        tgw_logging.log_event('ebay_sku_migrate_skip',
+                                              old_sku=old_sku, reason=error_text[:120])
+                    except Exception as write_exc:
+                        log.error('ebay_sku_migrate: could not write skip flag for %s: %s',
+                                  old_sku, write_exc)
 
         log.info('ebay_sku_migrate batch complete: %s', stats)
         tgw_logging.log_event('ebay_sku_migrate_batch', **stats)
