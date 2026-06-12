@@ -71,7 +71,7 @@ line-length = 200
 # mutate the tree — it silently rewrote 8 unrelated files during an agent
 # session. Apply fixes explicitly with `ruff check --fix` when you mean it.
 # systemd/history/ is an archive of dead scripts — not lint-gated.
-exclude = ["systemd/history"]
+exclude = ["systemd/history", "tools/archive"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
