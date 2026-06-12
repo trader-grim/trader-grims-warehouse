@@ -1,274 +1,161 @@
-# TGW Build-Phase → Operating-Phase Handoff
+# TGW Handoff Packet — Next Process
 
-**Status:** v2, 2026-06-11. Supersedes v1 (2026-06-10) after a full cross-doc consistency
-review of `docs/architecture/*`, `docs/plans/*`, `docs/invariants.md`, `docs/runbooks/*`,
-`docs/dev-workflow/*`, the master plan, ISSUES.md, and the live todo queue. v1's todo table
-and test counts were already stale (sessions 21–23 landed after it was written); §1.1 below
-records what changed.
-
-**Ground rule that governs everything below:** the todo tracker (`tgw todo claude`) is the
-canonical task queue; the master plan is the reference spec; this document is a snapshot —
-when it disagrees with the tracker, the tracker wins.
-
-**Numbering pitfall (caused real drift in v1):** todo-tracker IDs and master-plan Round-table
-row numbers are *different sequences* (tracker #47 = plan row #46, etc.). This document uses
-**plan Round-5 row numbers** for plan-table items and says "todo #N" only for live tracker IDs.
+**Status:** v3, 2026-06-11. Supersedes v2. Written after sessions 24–25 completed Round 5
+residuals + PP-DOCFLOW-001 Phase 1 + PP-BACKUP-001 Phase A. Tracker beats plan when they
+disagree. Branch `round4-vision-export-todos` is 22 commits ahead of origin — unpushed.
 
 ---
 
-## 1. What has been completed
+## 1. Source of Truth (ranked)
 
-### The core platform (Phases 1–4 + Rounds 1–4)
+| Source | What it owns |
+|--------|-------------|
+| `tgw todo claude` / `tgw todo admin` | **Canonical task queue** — if it's not here, it doesn't exist as work |
+| `docs/TGW-Plan-Vault/plan/TGW-Master-Plan.md` | Reference spec, architecture decisions, PP-* design |
+| `docs/architecture/` + `docs/invariants.md` | Verified architecture + 5 invariant contracts (7 test files) |
+| `docs/runbooks/` | 8 incident runbooks + triage INDEX |
+| `docs/plans/PLAN-nixos-migration.md` + `PLAN-backup-dr.md` | Migration/DR plans (approved; phases become todos on Dave's go) |
+| Test suite (480+ passing) | Correctness contract — `pytest` must stay green |
+| `tgw health` | System liveness gate — run before and after any significant change |
 
-- **Platform layer ("the fence")** — installable `tgw` package; all ItemData access through
-  `items.py`/`resolver.py`; `{ok, ...}` output contract on every CLI/API call; ~100 CLI
-  subcommands; `tgw health` with Postgres/catalog/thumbnail/ownership checks.
-- **Queue system** — PostgreSQL `state_machine` ledger, lease-based claiming
-  (`SKIP LOCKED`), dedupe keys, transient-vs-dead-letter classification, idempotent
-  handlers, 18 worker queues under systemd template units (`tgw-worker@<queue>`).
-- **The full listing pipeline, end to end and live:**
-  photo intake → `ai_identify` (vision + 8-source barcode lookup) → `ebay_draft` →
-  `ebay_upload` (EPS) → `ebay_price` (launch = 110% of max → .99, p25 target) →
-  `ebay_stage` (UNPUBLISHED offer) → operator `tgw staged` review → `tgw publish` → live →
-  `ebay_price_reducer` markdown (p75 day 3 → p25 day 17) → `ebay_sync`/`ebay_legacy_sync`
-  sold detection → `velocity_stats` nightly feedback into pricing.
-- **Hard-won eBay correctness encoded:** Content-Language header, full-replace offer PUT
-  rule, condition fallback on 25021, active-listing guard, locked OAuth scopes,
-  `availabilityDistributions`+`merchantLocationKey` for 25002 (ISS-001 ✅ closed 2026-06-11).
-- **Surfaces:** tgw-http (FastAPI :7373) with tablet web forms and bulk edit, `GET
-  /api/health`, Flutter app scaffold, MC extfs (`tgwitem`, `tgwlogs`), MCP server (10
-  tools), version-controlled shell layer.
-- **Operations tooling:** `tgw dead-letter` triage/requeue, `tgw restart-workers`,
-  `v_dead_letters`/`v_job_history` SQL views + `tgw queue-history`, notify subsystem,
-  permissions audit, bash completion.
+**Numbering pitfall:** tracker IDs and plan Round-table row numbers are different sequences.
+Use plan row numbers for plan-table items; "todo #N" only for live tracker IDs.
 
-### The documentation and safety layer (sessions 17–20)
+---
 
-- `docs/architecture/overview.md` + `services.md` — verified architecture reference.
-- `docs/invariants.md` — all five gaps from the review (A5, B4, C3–C5) fixed 2026-06-10
-  with regression tests; 7 dedicated invariant test files.
-- `docs/runbooks/` — 8 incident runbooks + triage INDEX.
-- `docs/dev-workflow/` — AI/operator collaboration process (tool routing, session ritual,
-  Aider/Antigravity tiers). **Still untracked — needs Dave's review and a commit** (so is
-  `docs/roadmap/`).
-- `docs/plans/PLAN-nixos-migration.md` — full PP-NIXOS-001 plan (**DRAFT, still awaiting
-  Dave's approval**; ADR at repo-root `ADR/ADR-nixos-migration.md`).
+## 2. Planned but Not Implemented
 
-### 1.1 Landed since handoff v1 (sessions 21–23, 2026-06-10 → 06-11)
+### Claude-ready — not yet in tracker (seed first)
 
-Everything v1 listed as "open todos" is done or resolved:
+| Plan row | Size | Task |
+|----------|------|------|
+| 40 | XS | `category-groups.json` pricing calibration (GEMINI-005): `electrical_fixtures`→12.50, `media_records`→13.50, `collectibles_pins_buttons`→10.50; run `tgw category-groups --reseed` |
+| 41 | XS | `category-groups.json` store_category mappings (GEMINI-006): `tools_hand`, `electronics_adapters_chargers`, `electronics_remotes`, `kitchen_utensils` |
 
-- ✅ size_class backfill (`tgw data-scrub --pass 2`) — plan row 36
-- ✅ `GET /api/health` Bearer endpoint (Flutter unblocked) — plan row 37
-- ✅ `tgw alt-text <sku>` + unified LLM dispatcher (Ollama/OpenRouter/Gemini routing) — row 38
-- ✅ 25002 Item.Country — **resolved, not coded around**: ISS-001 closed; the session-23
-  dead-letter lookalikes were item-specifics validation errors on an already-live item;
-  all 15 stale dead-letters cleared — row 39
-- ✅ Ledger SQL views + `tgw queue-history` — row 46 (tracker #47)
-- ✅ PP-SHELL-001 canonical command renames + `tgw search` — row 47 (tracker #48)
-- ✅ PP-CONTEXT-001 `tgw set/get/clear-context` (replaces `tgwset`/CurrentItem symlinks) —
-  row 48 (tracker #49)
-- Also: eBay client Content-Language centralization; Tailscale installed; MasterArchive
-  drive repaired (`tgw history-index` unblocked); markmap-cli installed; Antigravity CLI
-  configured + v2.0 installed.
-- **Test suite: 475 passing** (v1 said 346), ruff clean.
+### In tracker, Claude-assigned (todo #56, #57)
 
-## 2. What remains unfinished
+- **#56** Round 6 #50: `tools/migrate_batch.py` — 8 F821s (missing imports, undefined `BULK_MIGRATE_URL`, no `main`). Decide: repair or archive. If `ebay_sku_migrate` supersedes it, archive out of lint path.
+- **#57** Round 6 #51: `tools/repair_itemdata_json.py` — Python 3.12-only f-string backslash syntax (host runs 3.11; script cannot parse today) + unused `nxt`. Fix or archive.
 
-### Claude-ready work (NOT currently in the tracker — seed first, see §6 step 3)
+### Operator-gated (in tracker as admin todos)
 
-`tgw todo claude` is **empty**, but master-plan Round 5 rows 40–45 were never seeded as
-todos and fell out of every tracking surface — the exact failure the
-todo-tracker-is-canonical rule exists to prevent:
+- **#61** PP-BACKUP-001 Phase A operator items: approve plan (done) → gpg passphrase custody → install 3 timers → first manual cloud sync → restore drill (RTO timing). **Scripts exist in `etc/systemd/` — nothing is running yet.**
+- **#7** IGDB credentials (Twitch dev portal)
+- **#11** `tgw ebay-sweep` physical inventory review
+- **#12** Fix 9 wrong-shipping Seller Hub listings (ISS-002)
+- **#16** eBay webhook infra (nginx/cloudflared) — **gate: ISS-005 signature verification first**
+- **#20** Qtile WM install
 
-| Row | Size | Task |
-|-----|------|------|
-| 40 | XS | category-groups.json pricing calibration (GEMINI-005: electrical_fixtures→12.50, media_records→13.50, collectibles_pins_buttons→10.50) + `--reseed` |
-| 41 | XS | category-groups.json store_category mappings (GEMINI-006: 4 groups) |
-| 45 | XS | TGW-Quickstart.md pipe examples (`--skus-only`, stdin `-`, multi-SKU) |
-| 44 | S | `GET /form/suggest` punctuation-safe suggestion web form |
-| 43 | S | Standard Envelope ≤0.25 in constraint in `_resolve_fulfillment_id()` + CATEGORY-QUIRKS note (touches the fulfillment resolver — review-flagged) |
-| 42 | S | `description_history` boilerplate-contamination scrub ("John F. Rider", GEMINI-004) — bulk ItemData mutation: dry-run first |
+### Larger planned work (no todos yet)
 
-Newly unblocked, sized but unscheduled: **`tgw history-index`** (MasterArchive repaired
-2026-06-11; design sketch in GEMINI-007) and **PP-PYIPC-001 implementation** (research
-complete; Syncthing live with API key).
+| Item | Status | Blocker |
+|------|--------|---------|
+| PP-DOCFLOW-001 Phase 2 | Designed | Phase 1 done; seed as next todo |
+| PP-NIXOS-001 execution | Plan written, approved | Dave signals go → Phase 0 becomes todos |
+| PP-REPRICER-001 live | Read-only foundation done | `buy.marketplace_insights` scope (eBay DS 8 questions unanswered) |
+| PP-PYIPC-001 | Research complete | No todos seeded yet |
+| `tgw history-index` | Design sketch (GEMINI-007) | MasterArchive repaired 2026-06-11; unblocked |
+| PP-PORTABLE-CATALOG-001 P2 | Design complete (PERPLEXITY-006) | PP-PYIPC-001 first |
+| PP-SOLD-001 Tier 4 webhook | Code done | Infra + ISS-005 |
+| PP-VISION-001 P2+ | Deferred | GPU upgrade required |
+| `ebay_sku_migrate` | Running | ~8,350 live listings; months |
 
-### Open operator todos (live tracker, 2026-06-11)
+---
 
-#7 IGDB credentials · #11 `tgw ebay-sweep` physical review · #12 fix 9 wrong-shipping
-listings (ISS-002) · #15 macroboard keyboard · #16 webhook infra (nginx/cloudflared —
-**gated on ISS-005 dev_id signature verification first**) · #17 sweep after full-history
-CSV · #20 Qtile install test items. Plus, from the plan: **answer eBay Developer Support's
-8 questions** (gates `buy.marketplace_insights` → PP-REPRICER-001 live).
+## 3. What Fable Changed (post-handoff-v2, commits after `0ba1a9a`)
 
-### Long-running / in-flight
+Seven commits landed in sessions 24–25 after v2 was written:
 
-- **`ebay_sku_migrate`** — ~8,350 legacy listings at ~5–10/hr; months. Pausable via config.
-  Fulfillment-policy reconciliation deliberately frozen until it completes.
-- **PP-NIXOS-001** — plan written, **not approved, nothing executed**. Phase 0 items become
-  todos on Dave's approval.
-- **PP-SOLD-001 Tier 4 webhook** — code done; blocked on operator infra **and** ISS-005.
-- **PP-REPRICER-001 live mode** — blocked on `buy.marketplace_insights` scope.
-- **Aider execution tier** — designed, not adopted; gate unchanged (API key + billing cap +
-  ≥3 Aider-ready todos).
-- **Antigravity validation** — ⏰ **hard deadline 2026-06-18** (Gemini CLI shutoff, 7 days):
-  the 5-step checklist in `dev-workflow/next-process.md` §3 includes a side-by-side brief
-  comparison that is **only possible while both CLIs run**.
+| Commit | What changed | Deploy note |
+|--------|-------------|-------------|
+| `577c356` Round 5 #44 | `GET/POST /form/suggest` in tgw-http: punctuation-safe suggestion web form; network-trust (no Bearer); reuses `cmd_suggest()`; 5 tests | Restart `tgw-http` |
+| `e1bf1bc` lint | `fix = true` removed from `pyproject.toml`; `systemd/history/` excluded; bare `ruff check` no longer mutates | None |
+| `d28172f` PP-DOCFLOW-001 P1 | `pm_intake` ported to `call_model()` + `tgw-models.json` → `openrouter/google/gemini-2.5-flash`; new actions: `no_change\|append_to_section\|file_document\|flag_for_review`; `new_section` demoted to review-flag; 4h submission-delay gate + `tgw admin-file [--now]`; `FILING-LOG.md` audit trail; `inbox/review/` dir; 19 offline tests | Restart `pm_intake` worker; confirm `openrouter` API key in secrets |
+| `282b484` PP-BACKUP-001 Phase A | `tgw-db-backup` + `tgw-cloud-sync` + `tgw-secrets-backup` scripts + systemd units/timers in `etc/systemd/`; `check_backups()` in `health.py`; tests — **scripts exist, operator must install** | Operator todo #61 |
+| `fa6cfe8` Round 5 #45 | `TGW-Quickstart.md` pipe examples: `--skus-only`, stdin `-`, multi-SKU, `enqueue-sku` queue-first path | None |
+| `9d8b8f1` Round 5 #43 | Standard Envelope ≤0.25 in gate in `_resolve_fulfillment_id()`; CATEGORY-QUIRKS note | Restart `ebay_stage`/`ebay_publish` |
+| `35cef9e` Round 5 #42 | `description_history` boilerplate contamination scrub ("John F. Rider" + generic contamination strings); dry-run default; reports affected SKUs + strips on `--write` | Run `tgw data-scrub --pass 3 [--write]` after review |
 
-### Known issues and accepted gaps
+**All 22 branch commits are uncommitted to origin** — `git push` + PR needed before any deploy.
 
-- Open: ISS-002 (9–10 legacy shipping fixes, manual), ISS-003/ISS-004 (config
-  normalization — folded into NixOS Phase 0.4), ISS-005 (webhook signature), ISS-008
-  (legacy-listing resolution not authoritative).
-- Closed since v1: ISS-001 (25002).
-- Archive tombstone ceiling (~22K pre-2023 sold records) — accepted.
-- Untracked tree: `docs/dev-workflow/`, `docs/roadmap/`, master-plan edits, one
-  `.sync-conflict-*` file in `.obsidian/`.
+---
 
-## 3. What should be done next
+## 4. What Remains Risky
 
-Unchanged framing: the build phase is over — **operate, harden, migrate**, in that order of
-emphasis. The concrete order is §6.
+Ordered by urgency:
 
-## 4. Which parts are safe to automate
+1. **No backup running (deadline risk):** PP-BACKUP-001 Phase A scripts exist but timers are not installed. `todo_items` (the canonical task queue) and `queue_job_history` **cannot be re-derived from ItemData** — a disk loss today loses them since the last manual dump. *Mitigation: operator todo #61.*
 
-(Unchanged from v1 except todo references.) Safe = idempotent, reversible,
-derived-data-only, or operator-gated downstream:
+2. **Antigravity validation window (hard deadline 2026-06-18 — 7 days):** Headless/scripted use and skills/hooks carry-over are unverified. The side-by-side Gemini CLI comparison is only possible while both CLIs run. After shutoff, accept reduced confidence permanently.
 
-- Everything already automated and proven: the 18-queue pipeline up to `ebay_stage`,
-  catalog/thumbnail rebuilds, `velocity_stats`, `token_refresh`, `pm_intake`, notify.
-- Derived-store maintenance — rebuild-from-ItemData is always safe by invariant.
-- Read-only operations: `tgw health`, queue views/`queue-history`, `tgw reprice-suggest`,
-  dead-letter listing, `tgwlogs`.
-- XS/S well-specified offline-testable tasks (Round-5 rows 40/41/44/45 qualify; row 42 is
-  bulk-mutation → dry-run gate; row 43 touches the fulfillment resolver → review gate).
-- `tgw dead-letter --requeue-transient` — candidate for scheduled automation after a few
-  weeks of clean manual use.
+3. **eBay DS 8 questions unanswered:** Blocks `buy.marketplace_insights` → PP-REPRICER-001 live. No code workaround — Dave must respond to eBay Developer Support.
 
-## 5. Which parts must remain human-reviewed
+4. **ISS-005 webhook signature gap:** `accept_when_unsigned` is a deliberate interim. If webhook infra (operator todo #16) is deployed before dev_id signature verification is implemented, forged notifications can mark items sold. Gate is documented in three places; don't deploy infra first.
 
-Unchanged from v1 — the standing gates in `dev-workflow/claude-cli.md` §3: every diff
-before commit; publishing (`tgw publish` is the only path to Active); eBay-touching code
-paths; OAuth scopes/keyset (locked); live config + secrets; `state_machine` schema;
-permanent dead-letters; destructive/bulk operations (dry-run first); all NixOS migration
-phases 1–6; behavior flags on live listings (`strikethrough_enabled`).
+5. **22 commits unpushed:** The entire post-v2 work (DOCFLOW, BACKUP, scrubs, fulfillment gate) has no remote safety net and no PR. Disk loss = lost work.
 
-## 6. Consolidated execution order
+6. **`pm_intake` needs OpenRouter key:** PP-DOCFLOW-001 Phase 1 routes `pm_intake` to `openrouter/google/gemini-2.5-flash`. If `openrouter-credentials.json` is absent, `pm_intake` worker will dead-letter on every job. Verify key exists before restarting worker.
 
-This replaces and reconciles: v1 §6, the master-plan Round-5 residue, the NixOS plan
-phases, and the dev-workflow adoption gates. Ordered by dependency, deadline, and risk.
+7. **Inline ItemData path construction (invariant A4):** Several workers duplicate the path formula the fence owns. Becomes a bug when PP-PORTABLE-CATALOG satellites change layout. CI grep gate was designed but not built.
 
-**Now (this week):**
+8. **Two-surface task drift:** Plan rows not seeded as todos vanish (Round 5 rows 40–41 still not seeded). Procedural control only — not enforced.
 
-1. **Commit the build-phase tail** (Dave — carried over from v1, still not done):
-   review + commit `docs/dev-workflow/`, `docs/roadmap/`, master-plan edits; delete the
-   `.obsidian/*.sync-conflict-*` artifact. Until committed, these files have **no safety
-   net at all** — not in git, and outside the backup watcher's data tree.
-2. **Antigravity validation checklist** (operator, deadline **2026-06-18**): the 5 steps in
-   `next-process.md` §3 — especially the side-by-side Gemini brief comparison and the
-   headless-use check, which gate all future delegated-task wiring and are impossible after
-   shutoff. This outranks all discretionary build work.
-3. **Schedule a daily `pg_dump`** (operator one-liner — cron or systemd timer writing
-   `pg_dump --format=custom` into `/opt/TGW/var/backups/`): the ledger holds the *canonical
-   todo queue* (`todo_items`), which — unlike pipeline state — cannot be re-derived from
-   ItemData. Putting the dump inside the data tree means the existing file snapshots carry
-   a consistent copy off the live cluster. Closes the biggest data-loss hole (risk 8)
-   without waiting for PP-BACKUP-001. Details: `runbooks/postgres-outage.md` § Rollback.
-4. **Seed Round-5 residuals as todos** (restores the canonical-queue invariant), then drain:
-   rows 40 → 41 → 45 (XS, ~one short session) → 44 → 43 → 42 (S; 43 review-flagged,
-   42 dry-run-gated). Closes Round 5 completely.
+---
 
-**Next (unblocks the hardening track):**
+## 5. Recommended Next Sequence
 
-5. **Dave approves or amends `PLAN-nixos-migration.md`** → Phase 0 items become todos.
-   This is the single gating decision for everything below it; it has no date.
-6. **NixOS Phase 0** (normal test-gated repo work, no infra risk; interleaves freely):
-   0.1 Pillow promotion · 0.2 Nix module fixes (PG 17 pin, schema bootstrap, backup unit)
-   · 0.3 template-unit form · 0.4 config normalization (**closes ISS-003 + ISS-004**) ·
-   0.5 site-config repo · 0.7 health additions (PG version + ledger-tables + fleet +
-   backup-freshness + queue-aging checks — see plan §9.1).
-7. **Discretionary build lane** (parallel, anytime): `tgw history-index` (newly unblocked),
-   PP-PYIPC-001 implementation, Aider trial when its gate is met.
-8. **Operator parallel lane** (no dependencies): answer eBay DS 8 questions (highest
-   leverage — unblocks PP-REPRICER-001); ISS-002 Seller Hub fixes (#12 — **run
-   `tgw ebay-pull` after the manual edits**, see ISSUES.md); IGDB creds (#7);
-   Qtile test items (#20); ebay-sweep (#11).
+**Immediate (this week, deadline-driven):**
 
-**Then (the migration, at Dave's pace, gates green before each phase):**
+1. **Push the branch + open PR** — 22 commits of work with no remote copy. Do this first.
+2. **Antigravity validation checklist** (deadline 2026-06-18): run the 5-step checklist in `docs/dev-workflow/next-process.md` §3; the side-by-side Gemini comparison is time-limited.
+3. **Operator: PP-BACKUP-001 Phase A** (todo #61): install timers, first cloud sync, restore drill. Closes the biggest data-loss risk. Scripts are ready — this is operator work, ~30 min.
+4. **Verify `pm_intake` OpenRouter key**: check `secrets_root/openrouter-credentials.json` exists + is 600; restart `pm_intake`; confirm no dead-letters after first inbox job.
 
-9. **Phase 1** — MX ISO bake with the **uid-900 migration folded into the same downtime
-   window** (plan step 0.6).
-10. **Phases 2 + 3 (parallel-safe)** — VM validation (incl. pg_restore drill) + spare-machine
-    client tier with headless Syncthing (also feeds PP-PYIPC-001).
-11. **Phase 4** — shadow-server dress rehearsal; **eBay workers masked (hard rule R7)**;
-    record restore timings (they are the DR RTO).
-12. **Phase 5 + 6** — cutover (spare-promotion path is the lower-risk option) → 2-week
-    shakedown → MX ISO retirement decision.
+**Next (code work, pick-up order):**
 
-**Post-cutover queue (unchanged from v1):** webhook go-live only after ISS-005 signature
-verification; `ebay_sku_migrate` completion + fulfillment-policy reconciliation;
-PP-BACKUP-001 DR suite; sync-conflict-resolution worker before any catalog write-back.
+5. **Seed rows 40–41 as todos** (XS, ~10 min) — restores canonical-queue invariant.
+6. **Drain todos #56, #57** — Round 6 cleanup; both are XS/S offline-testable.
+7. **Answer eBay DS 8 questions** (operator) — highest-leverage unblocked action for live pipeline value.
+8. **PP-DOCFLOW-001 Phase 2** — suggestions batch-classify; natural next slice after Phase 1.
+9. **Dave approves/amends `PLAN-nixos-migration.md`** → Phase 0 items become todos.
+10. **PP-PYIPC-001 implementation** (research complete; Syncthing live at 8384 with API key).
+11. **`tgw history-index`** (MasterArchive repaired 2026-06-11; design sketch in GEMINI-007-result.md).
 
-Standing cadence throughout: daily `tgw health` + `tgw dead-letter` (expect empty),
-weekly queue-depth glance, runbook INDEX as the triage entry point.
+---
 
-## 7. If Claude is no longer available
+## 6. Tool Routing
 
-Unchanged from v1 in substance — no AI is load-bearing at runtime; losing Claude affects
-development velocity only. Fallbacks: keep operating via runbooks; the work queue survives
-in `tgw todo` + master plan + `docs/architecture/` + `docs/invariants.md`; re-route dev
-tiers per `dev-workflow/README.md` §2 (Aider on the API, Antigravity for bounded tasks,
-Perplexity for research); human-only mode is protected by the same guardrails (475-test
-suite, ruff, invariant tests, `tgw health`, review-then-commit). The three tool-agnostic
-hard rules: **never alter eBay OAuth scopes, never auto-publish, never commit without
-Dave.**
+| Task type | Tool | Notes |
+|-----------|------|-------|
+| Bounded PP-* slices, new workers, test coverage | **Claude CLI (Sonnet)** | One session per item; round-table format; run `tgw health` + tests after |
+| Architecture decisions, high-stakes design | **Claude CLI (Opus)** | Use for planning sessions, invariant design, risk assessment |
+| Mechanical refactors, adding tests to existing code | **Aider** | Gate not met yet: needs API key + billing cap + ≥3 Aider-ready todos queued |
+| Large-context data analysis, alt-text batch, corpus cross-reference | **Antigravity/OpenRouter** | `agy` configured; OpenRouter key in settings; free vision via `openrouter/free` |
+| Research inbox docs, self-contained structured tasks | **Gemini CLI** | Keep tasks small (compute-based limits, 5h refresh window) |
+| Live web research, cited sources | **Perplexity** | 4 briefs unrun (PERPLEXITY-001–004); subscription ~2026-12 |
+| eBay OAuth, Seller Hub edits, infra deploy, hardware | **Human only (Dave)** | Never automate publish, scopes, live config, or destructive bulk ops |
 
-## 8. Unresolved risks (cross-doc review, 2026-06-11)
+**Standing human-only gates:** never alter eBay OAuth scopes; never auto-publish; never commit without Dave's review; dry-run before any bulk ItemData mutation.
 
-1. **Antigravity window expiry (dated!):** headless/scripted use and the skills/hooks
-   carry-over are *unverified claims*; after 2026-06-18 the Gemini baseline comparison is
-   permanently impossible. If the checklist slips, accept reduced confidence and note it.
-2. **ISS-005 webhook signature gap:** accept-when-unsigned is a deliberate interim, but if
-   webhook infra is ever exposed before dev_id verification, a forged notification can mark
-   items sold. Gate is documented in three places; the risk is someone deploying infra
-   (operator todo #16) without reading them.
-3. **ISS-008:** legacy-listing resolution data is not authoritative — duplicate-listing
-   protection rests entirely on the `ebay_stage` Active-listing guard.
-4. **Zero-work stall class (invariants D7):** transient requeues are unbounded by design;
-   batch-success verification is a noted pattern, not generic. Surfaced only by daily
-   health/notify discipline.
-5. **Transient-error substring coupling (D6):** classification is string matching; the
-   substring list is *duplicated in three docs* (runbooks INDEX, services.md, invariants).
-   Rewording a worker error silently converts wait-states into dead-letters. One cross-check
-   test exists for the stage string; the token-expiry string has none.
-6. **Inline ItemData path construction (invariants A4 ⚠):** several workers duplicate the
-   path formula the fence owns; the proposed CI grep gate was never built. Becomes a real
-   bug when PP-PORTABLE-CATALOG satellites change the layout.
-7. **R12 — Ollama on NixOS cannot be rehearsed** (spare machine can't run the models);
-   first real validation is at cutover step 5.6, on production hardware, mid-window.
-8. **PostgreSQL backup coverage:** file snapshots don't capture live WAL; no routine
-   `pg_dump` is scheduled (only the runbook's pre-snapshot dump). Same-host-only backups
-   until PP-BACKUP-001. A disk loss today loses the ledger since the last manual dump —
-   including **`todo_items`, the canonical task queue, which cannot be re-derived from
-   ItemData** (pipeline state can; the todo queue and job-history audit cannot).
-   *Mitigation queued:* §6 step 3 (daily dump timer) reduces this to ≤24 h exposure.
-9. **Two-surface task tracking (process risk):** plan-table rows that never become todos
-   vanish from view — it happened to Round-5 rows 40–45 within one day of handoff v1.
-   Mitigation is procedural (seed rows as todos at round creation), not enforced.
-10. **NixOS plan approval is undated:** the entire hardening/migration track (steps 5–12
-    above) queues behind a decision with no deadline; meanwhile the MX host's DR posture
-    is the weakest part of the system (risk 8).
-11. **Backup freshness is unmonitored:** nothing watches the age of the newest dump or the
-    last rclone sync — a silently-dead backup path stays invisible until a restore is
-    needed. Check specified in NixOS plan §9.1 (backup-freshness health check); until it
-    lands, verifying backup age is a manual weekly habit.
-12. **Media-mutation safety is per-feature, not systemic (invariant A8 ⚠):** alt-text
-    archives originals before renaming, but no fence-level guard covers photo writes
-    generally. The researched GDrive→EPS photo pipelines are the next exposure; the
-    interim control is the A8 review rule (any diff touching non-JSON files in a SKU
-    folder must show its archive step).
-13. **eBay-side human edits don't round-trip:** manual Seller Hub changes (e.g. the ISS-002
-    fixes) reach the local mirror only via the 6 h sync — and only for mirrored fields.
-    Reconciliation ownership now documented (ISS-002: run `tgw ebay-pull` + spot-check
-    after any direct eBay edit), but it remains a habit, not a mechanism.
+---
+
+## 7. First 5 Commands for the Next Process
+
+```bash
+# 1. Baseline health check
+sudo -u tgw tgw health
+
+# 2. Current task queue
+sudo -u tgw tgw todo
+
+# 3. Any new dead-letters since last session
+sudo -u tgw tgw dead-letter
+
+# 4. Inbox: pending items for pm_intake
+ls -la /opt/TGW/src/trader-grims-warehouse/docs/TGW-Plan-Vault/inbox/
+
+# 5. Confirm what's unpushed
+git log --oneline origin/round4-vision-export-todos..HEAD 2>/dev/null || git log --oneline main..HEAD
+```
+
+Then: read the master plan (`cat docs/TGW-Plan-Vault/plan/TGW-Master-Plan.md`) and check this file's §2 against `tgw todo` to confirm alignment before picking up work.
