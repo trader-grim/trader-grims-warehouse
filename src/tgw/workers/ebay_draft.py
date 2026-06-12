@@ -58,6 +58,28 @@ _OFFLINE_CSV_FIELDS = ['sku', 'title', 'category_id', 'category_name',
 
 
 _BROWSE_HINT_SKIP = frozenset({'Does Not Apply', 'Unbranded', 'N/A', 'Unknown', 'Other'})
+_groups_cache: Dict[str, Any] = {}
+
+
+def _get_store_category_id(item: Dict[str, Any], cfg: Dict[str, Any]) -> Optional[int]:
+    """
+    Return the store_category_id for this item's category group, or None.
+    category-groups.json is cached per path — reloaded only on process restart.
+    """
+    cat_group_key = item.get('category_group', '')
+    if not cat_group_key:
+        return None
+    try:
+        cg_path_str = cfg['category_groups_path']
+        if cg_path_str not in _groups_cache:
+            _groups_cache[cg_path_str] = json.loads(
+                Path(cg_path_str).read_text(encoding='utf-8')
+            )
+        grp_data = _groups_cache[cg_path_str].get('groups', {}).get(cat_group_key, {})
+        sc_id = grp_data.get('store_category_id')
+        return int(sc_id) if sc_id is not None else None
+    except Exception:
+        return None
 
 
 def _fetch_browse_aspect_hints(
@@ -436,6 +458,9 @@ class EbayDraftWorker(QueueWorker):
         }
         if cat_confidence:
             draft['category_confidence'] = cat_confidence
+        sc_id = _get_store_category_id(item, self.config)
+        if sc_id is not None:
+            draft['store_category_id'] = sc_id
         if enriched_description:
             draft['description_source'] = 'enriched'
         if browse_hints:

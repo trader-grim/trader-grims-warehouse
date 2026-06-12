@@ -328,6 +328,27 @@ def dead_letter_count() -> int:
             return cur.fetchone()[0]
 
 
+def queue_state_summary() -> Dict[str, int]:
+    """Return total job counts across all queues by broad state bucket.
+
+    Returns {queued, processing, dead_letter} — one DB round-trip.
+    ``processing`` = running + leased (actively being worked on).
+    """
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*) FILTER (WHERE state = 'queued')                    AS queued,
+                    COUNT(*) FILTER (WHERE state IN ('running', 'leased'))      AS processing,
+                    COUNT(*) FILTER (WHERE state = 'dead_letter')               AS dead_letter
+                  FROM queue_jobs
+                """
+            )
+            row = cur.fetchone()
+            return {'queued': row[0], 'processing': row[1], 'dead_letter': row[2]}
+
+
 def dead_letter_breakdown() -> Dict[str, int]:
     """Return per-queue count of dead_letter jobs (excludes queues with 0)."""
     with _conn() as con:

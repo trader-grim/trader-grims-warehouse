@@ -48,6 +48,17 @@ cheaper executor can handle. Aider + Claude API (with prompt caching and a hard 
 todo queue has ≥3 tasks that meet the "Aider-ready" bar below. Trial it on 2–3 tasks and
 compare review burden against a Claude Code session before making it routine.
 
+**Decision 2026-06-12 (session 28, amended same day): Aider is COMMITTED.** Dave: Aider will be
+used even if Antigravity becomes the primary agent / agent manager. Sequencing stays
+Antigravity-first for the validation week (#78, deadline 2026-06-18; code-task trial = admin
+#114 — now a routing-calibration exercise, not a go/no-go gate), but Aider setup (API key +
+hard billing cap) is unconditional (admin #117; Claude onboarding files = todo #118).
+Division of labor going forward: **Antigravity** = primary agent/agent-manager lane (bite-sized
+self-contained tasks, browser-verified work, large-context analysis); **Aider** = mechanical
+code-edit execution tier (XS/S spec'd tasks, auto-test, task branches); **Claude Code** =
+architecture, cross-cutting, eBay-invariant work, planning + spec writing. `tgw todo brief <id>`
+(todo #109) generates the Aider message files.
+
 ### Division of labor
 
 | Task shape | Tool |

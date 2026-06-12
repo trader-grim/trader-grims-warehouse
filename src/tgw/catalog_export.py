@@ -1,21 +1,45 @@
 """
-tgw.catalog_export — Portable catalog export (PP-PORTABLE-CATALOG-001 Phase 1).
+tgw.catalog_export — Portable catalog export (PP-PORTABLE-CATALOG-001).
 
-Copies the SQLite catalog and a subset of per-SKU thumbnails into a destination
-directory so Syncthing can carry it to a tablet or spare client machine.
+Phase 1: copies the SQLite catalog and thumbnail subset into a destination
+directory for Syncthing transport.
 
-Phase 1 is export-only. Source SQLite db lives at ``cfg['sqlite_catalog_path']``
-and thumbnails at ``cfg['thumbnail_root']``/<SKU>.jpg.
+Phase 2 additions:
+- Atomic backup via ``sqlite3.Connection.backup()`` (safe while catalog is live).
+- Optional Syncthing push: pass ``push_folder_id`` to trigger a folder rescan
+  immediately after export so satellites pick up the new file without waiting
+  for Syncthing's scheduled scan interval.
+- ``/api/catalog/snapshot`` HTTP endpoint (in http_server.py) for Flutter pulls.
 
-Stdlib only.
+Source SQLite db: ``cfg['sqlite_catalog_path']``.
+Thumbnails: ``cfg['thumbnail_root']``/<SKU>.jpg.
 """
 
 from __future__ import annotations
 
 import shutil
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+
+def _atomic_backup(src: Path, dst: Path) -> int:
+    """
+    Copy a live SQLite database atomically using sqlite3.Connection.backup().
+    Returns the size of the destination file in bytes.
+    Safe to run while the source database has open connections or active writes.
+    """
+    src_con = sqlite3.connect(str(src))
+    try:
+        dst_con = sqlite3.connect(str(dst))
+        try:
+            src_con.backup(dst_con)
+        finally:
+            dst_con.close()
+    finally:
+        src_con.close()
+    return dst.stat().st_size
 
 
 def export_catalog(cfg: Dict[str, Any],
@@ -23,7 +47,8 @@ def export_catalog(cfg: Dict[str, Any],
                    *,
                    with_thumbnails: bool = True,
                    limit: Optional[int] = None,
-                   check_only: bool = False) -> Dict[str, Any]:
+                   check_only: bool = False,
+                   push_folder_id: Optional[str] = None) -> Dict[str, Any]:
     """Export the SQLite catalog (+ optional thumbnails) to ``dest``.
 
     Args:
@@ -32,10 +57,15 @@ def export_catalog(cfg: Dict[str, Any],
         with_thumbnails: also copy ``thumbnail_root``/*.jpg into ``dest/thumbnails/``.
         limit: if set and > 0, cap the number of thumbnails copied (sorted by name).
         check_only: compute what WOULD be copied without writing anything.
+        push_folder_id: Syncthing folder ID to rescan after export. When set,
+            calls ``tgw.apis.syncthing.scan_folder()`` so satellites pick up the
+            new file immediately. Errors are captured in ``syncthing_error`` and
+            do not raise (export result is still ``ok: True``).
 
     Returns a dict with the output contract ``ok`` key plus:
-        artifact, dest, db_copied, thumbnails_copied, bytes_total, elapsed_seconds.
-        check_only runs additionally set ``check_only: True``.
+        artifact, dest, db_copied, thumbnails_copied, bytes_total, elapsed_seconds,
+        syncthing_pushed (bool).
+        check_only additionally sets ``check_only: True``.
     """
     started = time.time()
     db_src = Path(cfg['sqlite_catalog_path'])
@@ -64,12 +94,12 @@ def export_catalog(cfg: Dict[str, Any],
                 'thumbnails_copied': len(thumb_srcs),
                 'bytes_total': bytes_total,
                 'elapsed_seconds': round(time.time() - started, 3),
-                'check_only': True}
+                'check_only': True,
+                'syncthing_pushed': False}
 
     dest_dir.mkdir(parents=True, exist_ok=True)
     db_dest = dest_dir / 'tgwcatalog.db'
-    shutil.copy2(db_src, db_dest)
-    bytes_total = db_dest.stat().st_size
+    bytes_total = _atomic_backup(db_src, db_dest)
 
     thumbnails_copied = 0
     if with_thumbnails and thumb_srcs:
@@ -80,8 +110,21 @@ def export_catalog(cfg: Dict[str, Any],
             bytes_total += out.stat().st_size
             thumbnails_copied += 1
 
-    return {'ok': True, 'artifact': 'catalog_export',
-            'dest': str(dest_dir), 'db_copied': True,
-            'thumbnails_copied': thumbnails_copied,
-            'bytes_total': bytes_total,
-            'elapsed_seconds': round(time.time() - started, 3)}
+    result: Dict[str, Any] = {
+        'ok': True, 'artifact': 'catalog_export',
+        'dest': str(dest_dir), 'db_copied': True,
+        'thumbnails_copied': thumbnails_copied,
+        'bytes_total': bytes_total,
+        'elapsed_seconds': round(time.time() - started, 3),
+        'syncthing_pushed': False,
+    }
+
+    if push_folder_id:
+        try:
+            from tgw.apis.syncthing import scan_folder
+            scan_folder(cfg, push_folder_id)
+            result['syncthing_pushed'] = True
+        except Exception as exc:
+            result['syncthing_error'] = str(exc)
+
+    return result

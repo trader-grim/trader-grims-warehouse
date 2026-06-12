@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 
 import psycopg2
 import psycopg2.extras
-from fastapi import Depends, FastAPI, HTTPException, Request, Security, status
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Security, status
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
@@ -514,6 +514,45 @@ def list_locations() -> Dict[str, Any]:
         con.close()
 
     return {"ok": True, "locations": [r[0] for r in rows]}
+
+
+# ---------------------------------------------------------------------------
+# GET /api/catalog/snapshot — atomic SQLite snapshot for Flutter offline sync
+# PP-PORTABLE-CATALOG-001 Phase 2
+# ---------------------------------------------------------------------------
+
+@app.get("/api/catalog/snapshot", dependencies=[AUTH])
+def catalog_snapshot(background_tasks: BackgroundTasks):
+    """
+    Stream an atomic backup of tgwcatalog.db for Flutter offline-first sync.
+    Uses sqlite3.Connection.backup() — safe to call while catalog is live.
+    Returns the db file as application/octet-stream.
+    """
+    import os
+    import tempfile
+
+    db_path = _cfg["sqlite_catalog_path"]
+    if not db_path.exists():
+        raise HTTPException(status_code=503, detail="SQLite catalog not built — run tgw build-sqlite")
+
+    fd, tmp_path = tempfile.mkstemp(suffix='.db', prefix='tgwcatalog_snapshot_')
+    os.close(fd)
+    src_con = sqlite3.connect(str(db_path))
+    try:
+        dst_con = sqlite3.connect(tmp_path)
+        try:
+            src_con.backup(dst_con)
+        finally:
+            dst_con.close()
+    finally:
+        src_con.close()
+
+    background_tasks.add_task(os.unlink, tmp_path)
+    return FileResponse(
+        tmp_path,
+        media_type='application/octet-stream',
+        filename='tgwcatalog.db',
+    )
 
 
 # ---------------------------------------------------------------------------

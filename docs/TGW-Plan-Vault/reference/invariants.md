@@ -290,8 +290,8 @@ Companion test files added by this review:
 - **Enforced:** `ebay/sync.py`, `workers/ebay_legacy_sync.py`; existing coverage in
   `tests/test_ebay_sync.py` and `tests/test_sold_recon.py`.
 - **How it could fail:** a forged/erroneous webhook marks an item sold (mitigated by the
-  listing-id index check; ISS-005 signature gap is a known interim decision).
-- **How to test:** existing tests; revisit when webhook infra is exposed beyond LAN.
+  listing-id index check + enforced signature verification — ISS-005 resolved 2026-06-12).
+- **How to test:** existing tests in `tests/test_sold_recon.py`.
 
 ---
 

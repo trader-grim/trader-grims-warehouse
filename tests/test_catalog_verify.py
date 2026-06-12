@@ -471,3 +471,77 @@ def test_fix_write_mark_verified_combo_marks_fixed_item(tmp_path, capsys):
     doc = json.loads(jf.read_text())
     assert not doc['title'].upper().startswith('TEMPLATE:')
     assert doc.get('catalog_verified', {}).get('by') == 'catalog-verify'
+
+
+# ---------------------------------------------------------------------------
+# New rules: no_price, wrong_condition
+# ---------------------------------------------------------------------------
+
+def test_verify_no_price_draft_zero(tmp_path):
+    sku = 'tgw202601010000050'
+    doc = {'sku': sku, 'title': 'Valid Title For Testing Price', 'location': 'N14',
+           'draft_listing': {'condition_id': 3000, 'price': 0}}
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'no_price' in rules
+
+
+def test_verify_no_price_draft_missing(tmp_path):
+    sku = 'tgw202601010000051'
+    doc = {'sku': sku, 'title': 'Valid Title For Testing Price', 'location': 'N15',
+           'draft_listing': {'condition_id': 3000}}
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'no_price' in rules
+
+
+def test_verify_no_price_draft_with_price_is_clean(tmp_path):
+    sku = 'tgw202601010000052'
+    doc = {'sku': sku, 'title': 'Valid Title For Testing Price', 'location': 'N16',
+           'draft_listing': {'condition_id': 3000, 'price': 12.99}}
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'no_price' not in rules
+
+
+def test_verify_no_price_no_draft_is_clean(tmp_path):
+    sku = 'tgw202601010000053'
+    doc = {'sku': sku, 'title': 'Valid Title For Testing Price', 'location': 'N17'}
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'no_price' not in rules
+
+
+def test_verify_wrong_condition_unknown(tmp_path):
+    sku = 'tgw202601010000054'
+    doc = {'sku': sku, 'title': 'Valid Title For Testing Cond', 'location': 'O18',
+           'condition': 'mint'}
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'wrong_condition' in rules
+
+
+def test_verify_wrong_condition_known_is_clean(tmp_path):
+    sku = 'tgw202601010000055'
+    doc = {'sku': sku, 'title': 'Valid Title For Testing Cond', 'location': 'O19',
+           'condition': 'used: excellent'}
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'wrong_condition' not in rules
+
+
+def test_verify_wrong_condition_case_insensitive(tmp_path):
+    sku = 'tgw202601010000056'
+    doc = {'sku': sku, 'title': 'Valid Title For Testing Cond', 'location': 'O20',
+           'condition': 'New In Box'}
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'wrong_condition' not in rules
+
+
+def test_verify_no_condition_is_clean(tmp_path):
+    sku = 'tgw202601010000057'
+    doc = {'sku': sku, 'title': 'Valid Title For Testing Cond', 'location': 'O21'}
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'wrong_condition' not in rules

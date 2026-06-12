@@ -386,10 +386,19 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
         },
     }
 
-    # PP-STORE-001: file item into the matching eBay store category when configured.
-    store_names = _resolve_store_category_names(cfg, category_id_str)
-    if store_names:
-        offer_body['storeCategoryNames'] = store_names
+    # PP-STORE-001: file item into the matching eBay store category.
+    # Prefer store_category_id from draft (set by ebay_draft via category-groups.json);
+    # fall back to the config-based store_category_by_ebay_category name mapping.
+    store_cat_id = draft.get('store_category_id')
+    if store_cat_id is not None:
+        store_cats = _get_store_categories_cached(cfg)
+        matched = next((c for c in store_cats if c['id'] == str(store_cat_id)), None)
+        if matched:
+            offer_body['storeCategoryNames'] = [matched['name']]
+    if 'storeCategoryNames' not in offer_body:
+        store_names = _resolve_store_category_names(cfg, category_id_str)
+        if store_names:
+            offer_body['storeCategoryNames'] = store_names
 
     return inv_body, offer_body
 

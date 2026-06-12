@@ -746,6 +746,27 @@ Lint-policy incident (session 24): bare `ruff check` mutated 8 files because pyp
 | ✅ 54 | PP-BACKUP-001 | **Phase A build DONE session 25**: `tgw-db-backup` + `tgw-cloud-sync` + `tgw-secrets-backup` scripts + systemd units/timers in `etc/systemd/`; `check_backups()` in health.py + tests — **scripts exist, operator must install** | M |
 | 55 | PP-BACKUP-001 | **Phase A operator items** (todo #61): approve plan ✅ done; remaining: gpg passphrase custody decision (off-machine!); install+enable the three timers; first manual cloud sync in an off-hours window; `rclone about dbukove:` quota check; A5 restore drill + record RTO times | M |
 
+### Track 1 — Round 7 (session 28, 2026-06-12)
+
+**Produced by a full docs-tree gap analysis — see `plan/PLAN-round7-platform-gaps.md`**
+(the reference spec for this round: what was designed-but-unbuilt, noted-but-never-planned,
+and newly proposed). 14 Claude tasks + 2 Gemini/Antigravity tasks + 6 operator items seeded
+into the tracker 2026-06-12 with `--source round7`. Highlights: sync-conflict resolution
+worker (zero-data-loss), Ready state + rate-limited dole-out, AI usage ledger (cost per
+item), alt-text batch via OpenRouter, computer-side intake, picklist/label PDFs, Taxonomy
+category validation, `tgw report sales`, PP-PROMO-001 (new — markdown sale events on the
+held `sell.marketing` scope, design-first). Three tasks are Aider-eligible.
+
+**All four reserved discussions held + decided with Dave 2026-06-12 (session 28):**
+PP-REVISION-001 = **sparse delta + pinned baseline** (drift gate at apply; dry-run delta
+computer first); PP-PLANDB-001 = **Option C generated taskboard** (companion file
+`plan/TGW-Taskboard.md`; DOCFLOW admin is the single write-gateway — Dave submits via
+inbox/suggest only); PP-CLIP-001 = **dual-backend watcher** (X11 stable now, Wayland
+first-class via `wl-paste --watch`; build after Qtile install); Aider = **committed** (amended
+2026-06-12: used even with Antigravity as primary agent/agent manager; Antigravity-first trial
+week stands as routing calibration). Decisions recorded in the respective PP sections +
+next-process.md; follow-on todos #109–#118 seeded.
+
 ### PP-DOCFLOW-001 — The TGW Project Admin (LLM document + suggestion intake)
 
 **Status: PHASE 1 + PHASE 2 COMPLETE 2026-06-11 (sessions 25–26). Phase 3+ (admin skills expansion) is future scope.**
@@ -2044,7 +2065,20 @@ but config is declarative — all logic lives outside), Sway (i3-compatible but 
 
 ## PP-CLIP-001 — TGW-Aware Clipboard Manager
 
-### Status: PLANNING — do not build until design is settled
+### Status: DESIGN SETTLED 2026-06-12 (session 28) — build gated on Qtile install (admin #20)
+
+**Decisions (session 28):**
+- **Dual-backend watcher, both first-class.** Dave: the environment is already mixed and the
+  world is moving toward Wayland — accommodate both as best we can; **X11 is the stable platform
+  for now.** The daemon core (on change → classify → write SQLite → socket push) is
+  backend-agnostic; watcher backends: (a) **X11/XFixes** via python-xlib (default, stable),
+  (b) **Wayland** via `wl-paste --watch` subprocess (wl-clipboard — event-driven, zero protocol
+  code, sidesteps python-xlib staleness entirely). Session-type detection at startup
+  (`$WAYLAND_DISPLAY` / `XDG_SESSION_TYPE`) selects the backend.
+- Phase-1 open questions answered: watch **both PRIMARY and CLIPBOARD** (highlight-capture of
+  SKUs is the stated use case); DB at `~/.local/share/tgw-clip/` (per-user). The SQLite store +
+  `tgw clip` CLI already shipped (session 15 R18) — the daemon feeds the existing store.
+- Build timing: after the Qtile install (admin #20) so the daemon has its consumer. Round 7 todo #113.
 
 ### Background
 Identified during PP-WM-001 (Qtile) session (2026-06-05). Immediate need is met by
@@ -2478,8 +2512,21 @@ Goal: root intake cameras to gain file system access during Foldio360 turntable 
 doubles total processing time per spin. Root access bypasses the zip, reading photos directly.
 **Path**: target Android devices known to have reliable root methods (Pixel series + Magisk).
 Eventually deploy with custom ROMs to get fine-grained control and remove bloatware.
-**Custom camera app** (later project): replace Tasker + stock camera with a TGW-native Android
-app — barcode scan + template select + camera trigger in one UI; no third-party dependencies.
+**Custom camera app** — ⬆ elevated to active design 2026-06-12 (Dave suggestion 17:51): replace
+Tasker + stock camera with a TGW-native Android app that **incorporates the Tasker functions
+directly into the interface** — barcode scan, template select (SETTEMPLATE HUD), camera trigger,
+voice hint, upload via Syncthing folder or tgw-http — no third-party dependencies. Design/scaffold
+brief delegated to Track 2 (gemini todo #115, GEMINI-003 Flutter-scaffold pattern); review the
+returned design with Dave before any build. Long-term ties: Foldio360 zip-bypass (root path),
+custom ROM deployment.
+
+**xmouse replacement app** — ⬆ elevated to active design 2026-06-12 (Dave suggestion 18:20):
+open-source Android app (GitHub-based) replacing the xmouse macro pad, incorporating an
+**RDP/VNC client and a form tool** in one interface — macro grid dispatching via SSH/tgw-http
+(template buttons, pipeline triggers), embedded remote viewer for desktop sessions, and a form
+surface for the `/form/*` tgw-http pages. Survey-and-design brief delegated to Track 2 (gemini
+todo #116): find suitable GPL/Apache bases (macro-pad, aRDP/bVNC-lineage viewers), propose
+architecture + license posture; review with Dave before build.
 
 #### Dependencies
 - PP-PRICE-005 `category-groups.json` ✅ DONE — this is the template table
@@ -2805,16 +2852,38 @@ Instead of a monolithic Markdown plan file, the plan at any point in time is **r
 
 **Dave's note:** "tgw plan builder" — discuss the scope and design before implementing. The todo tracker is already moving in this direction; the question is whether to extend it or build a separate plan-reconstruction layer.
 
-#### Design questions (open)
-- Does the DB replace the Markdown file entirely, or generate it from DB state as a rendering step?
-- Are PP-* items rows, or are they grouped sections with sub-item rows?
-- Relationship types: blocks / depends-on / tracked-by / delegates-to — which matter most?
-- Generated CLAUDE.md: full context or minimal? How do we prevent context bloat?
-- How does version history work (plan decisions, rejected directions)?
+#### ✅ DECIDED 2026-06-12 (session 28) — Option C: DB owns tasks, generated taskboard
 
-#### Status
-Design-open. Discuss with Dave in a planning session before committing to a direction. The
-PP-TODO-001 CRUD layer is the natural seed — any DB plan builder should extend it, not replace it.
+Design questions answered:
+- **DB vs Markdown:** the DB owns *tasks* only; design prose stays hand-authored Markdown in the
+  master plan (the prose was never the drift problem). Task tables leave the plan entirely and are
+  rendered into a **wholly-generated companion file** `plan/TGW-Taskboard.md` (one writer — no
+  Syncthing mixed-edit conflicts; `/form/todos` renders the same DB for tablet).
+- **PP-* items:** stay as plan prose sections; todos link to them via `pp_ref` + `plan_anchor`.
+- **Relationships:** `depends_on`/`blocks` (blocker badges on the taskboard) + `pp_ref`. That's it
+  for now; tracked-by/delegates-to are covered by the existing `agent` column.
+- **Generated agent context:** `tgw todo brief <id>` — self-contained per-agent task spec (the
+  Aider message-file pattern from next-process.md) built from the todo + linked plan-section
+  extract. Minimal context, link out for more — prevents bloat.
+- **Version history:** tasks in PostgreSQL (raises the stakes on PP-BACKUP-001 Phase A #61);
+  rendered taskboard lands in git via vault commits — render history for free.
+
+**Write-gateway architecture (Dave, 2026-06-12):** Dave no longer edits the plan directly — all
+input flows through `inbox/` + `tgw suggest`, i.e. the **PP-DOCFLOW-001 project admin is the
+single write-gateway for both surfaces**: it classifies submissions → creates todos (setting
+`pp_ref`/`depends_on` when confident, review-flag when not) → appends prose to the plan only for
+design/rationale → the render job regenerates the taskboard. The drift channel is structurally
+closed, not discipline-closed. `tgw plan check` (Phase 3) becomes a safety net on the *admin's*
+work, and its mismatch reports feed the long-term improve-the-admin loop (misfile → review flag →
+correction → prompt/rule update). Script what we know; dump the rest into the inbox for the admin.
+
+**Phases (Round 7 todos #109/#110/#112):**
+| Phase | Scope |
+|-------|-------|
+| 1 | `todo_items` schema: `pp_ref`, `depends_on`, `plan_anchor` + CLI flags; `tgw todo brief <id>`; classify-suggestions sets `pp_ref` when confident |
+| 2 | `tgw plan render` → generated `plan/TGW-Taskboard.md`; coalesced `plan_render` job on todo mutations (catalog-rebuild pattern); staleness warning in health |
+| 3 | `tgw plan check` plan↔tracker reconciliation in the session-start ritual |
+| 4 | Only if ever needed: generated PP-status lines inside plan sections |
 
 #### Dependencies
 - PP-TODO-001 (already built — provides task storage; PP-PLANDB-001 extends it)
@@ -3092,7 +3161,14 @@ the normal processing pattern.)
 - Three distinct workflows identified: new listing draft | live listing revision | ended→relist
 - Revision needs: known baseline (live state synced from eBay), proposed delta, drift visibility
 - Draft for new listing (`draft_listing`) is a historical record after publish — not the revision staging area
-- Open design question: sparse delta vs full replacement for revision payload; history of applied revisions
+- ✅ **DECIDED 2026-06-12 (session 28): revision payload = sparse delta + pinned baseline.** The
+  draft stores only the changed fields plus a snapshot/hash of the live-mirror state it was
+  computed against. Apply = drift check (current mirror vs pinned baseline; drift on overlapping
+  fields → review flag, never silent) → compose fresh live state + delta → full eBay PUT
+  (Inventory API PUT is full-replace, so composition happens at apply time, never earlier).
+  The applied-delta list IS the revision history (`revision_history`, the `identification_history`
+  pattern). First buildable slice: **dry-run delta computer** — `tgw revise <sku> --set field=value`
+  writes the draft + shows the diff vs live mirror, applies nothing (Round 7 todo #111)
 - Relist: inventory item already exists on eBay; need fresh pricing + new offer; structurally re-create not update
 - `ebay_offer` block now established (PP-PRICE-001) — proceed when ready
 - Auto-sync: when offer fields are edited locally (price, condition, aspects), changes should push to eBay without requiring manual Seller Hub edits — design must prevent overwriting live state not yet pulled (depends on PP-SYNC-001 sync pass being authoritative first)
