@@ -395,11 +395,7 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
         matched = next((c for c in store_cats if c['id'] == str(store_cat_id)), None)
         if matched:
             offer_body['storeCategoryNames'] = [matched['name']]
-        else:
-            store_names = _resolve_store_category_names(cfg, category_id_str)
-            if store_names:
-                offer_body['storeCategoryNames'] = store_names
-    else:
+    if 'storeCategoryNames' not in offer_body:
         store_names = _resolve_store_category_names(cfg, category_id_str)
         if store_names:
             offer_body['storeCategoryNames'] = store_names

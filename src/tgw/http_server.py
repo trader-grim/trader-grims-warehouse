@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 
 import psycopg2
 import psycopg2.extras
-from fastapi import Depends, FastAPI, HTTPException, Request, Security, status
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Security, status
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
@@ -522,7 +522,7 @@ def list_locations() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 @app.get("/api/catalog/snapshot", dependencies=[AUTH])
-def catalog_snapshot():
+def catalog_snapshot(background_tasks: BackgroundTasks):
     """
     Stream an atomic backup of tgwcatalog.db for Flutter offline-first sync.
     Uses sqlite3.Connection.backup() — safe to call while catalog is live.
@@ -531,33 +531,27 @@ def catalog_snapshot():
     import os
     import tempfile
 
-    from fastapi.responses import Response
-
     db_path = _cfg["sqlite_catalog_path"]
     if not db_path.exists():
         raise HTTPException(status_code=503, detail="SQLite catalog not built — run tgw build-sqlite")
 
     fd, tmp_path = tempfile.mkstemp(suffix='.db', prefix='tgwcatalog_snapshot_')
     os.close(fd)
+    src_con = sqlite3.connect(str(db_path))
     try:
-        src_con = sqlite3.connect(str(db_path))
         dst_con = sqlite3.connect(tmp_path)
         try:
             src_con.backup(dst_con)
         finally:
             dst_con.close()
-            src_con.close()
-        data = Path(tmp_path).read_bytes()
     finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+        src_con.close()
 
-    return Response(
-        content=data,
+    background_tasks.add_task(os.unlink, tmp_path)
+    return FileResponse(
+        tmp_path,
         media_type='application/octet-stream',
-        headers={'Content-Disposition': 'attachment; filename="tgwcatalog.db"'},
+        filename='tgwcatalog.db',
     )
 
 

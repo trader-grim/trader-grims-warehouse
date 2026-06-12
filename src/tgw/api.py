@@ -2752,7 +2752,7 @@ def _push_clipboard(text: str) -> bool:
 
 def main() -> int:
     import sys
-    argv = ['-' + a[1:] if a == '-help' else a for a in sys.argv[1:]]
+    argv = ['--' + a[1:] if a == '-help' else a for a in sys.argv[1:]]
     parser = _build_parser()
     args = parser.parse_args(argv)
     cfg = load_config(Path(os.path.expanduser(args.config)))

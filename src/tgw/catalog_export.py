@@ -31,11 +31,13 @@ def _atomic_backup(src: Path, dst: Path) -> int:
     Safe to run while the source database has open connections or active writes.
     """
     src_con = sqlite3.connect(str(src))
-    dst_con = sqlite3.connect(str(dst))
     try:
-        src_con.backup(dst_con)
+        dst_con = sqlite3.connect(str(dst))
+        try:
+            src_con.backup(dst_con)
+        finally:
+            dst_con.close()
     finally:
-        dst_con.close()
         src_con.close()
     return dst.stat().st_size
 
