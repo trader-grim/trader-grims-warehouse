@@ -377,6 +377,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("quiet-check", help="when the pipeline is idle, surface pending suggestions/TODOs (PP-CAPTURE-001)")
     p.add_argument("--notify", action="store_true", help="also send a desktop/webhook notification when idle")
+    p.add_argument("--kdc", action="store_true", help="push summary to phone via KDE Connect when idle (uses kdeconnect_device_id from config)")
 
     p = sub.add_parser("perp-run", help="load a Perplexity research brief prompt to clipboard (PP-PERP-AUTO-001)")
     p.add_argument("brief_id", nargs="?", help="brief id or substring (e.g. PERPLEXITY-001); omit to list")
@@ -434,13 +435,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("ensure-catalog", help="build search catalog only if missing")
     p.add_argument("--check-only", action="store_true")
 
-    p = sub.add_parser("health", help="run platform health checks")
+    p = sub.add_parser("health", aliases=["status"], help="run platform health checks")
     p.add_argument("--no-ollama", action="store_true", help="skip Ollama check")
     p.add_argument("--no-ebay", action="store_true", help="skip eBay token check")
 
-    p = sub.add_parser("status", help="alias for health — run platform health checks")
-    p.add_argument("--no-ollama", action="store_true", help="skip Ollama check")
-    p.add_argument("--no-ebay", action="store_true", help="skip eBay token check")
+    sub.add_parser("help", help="show this help message and exit")
 
     p = sub.add_parser("lookup", help="run product enrichment lookup for one item (PP-LOOKUP-001)")
     p.add_argument("sku", help="SKU to look up")
@@ -566,6 +565,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("store-categories", help="list eBay store custom categories via GetStore (PP-STORE-001)")
 
+    p = sub.add_parser("store-category",
+                       help="manage store_category_id in category-groups.json (PP-STORE-001)")
+    p.add_argument("action", choices=["list", "set"],
+                   help="list: show eBay store categories with IDs; "
+                        "set: assign an ID to a category group")
+    p.add_argument("group", nargs="?", default=None,
+                   help="category group key (required for 'set')")
+    p.add_argument("store_id", nargs="?", type=int, default=None,
+                   help="eBay store category integer ID (required for 'set')")
+
     sub.add_parser("strikethrough-check", help="show strikethrough pricing config state and MSRP coverage (PP-STRIKE-001)")
 
     sub.add_parser("restart-ebay-token", help="clear dead-letter token jobs and enqueue a fresh token_refresh immediately")
@@ -603,6 +612,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-thumbnails", action="store_true", dest="no_thumbnails", help="export the catalog db only (skip thumbnails)")
     p.add_argument("--limit", type=int, default=None, metavar="N", help="copy at most N thumbnails")
     p.add_argument("--check-only", action="store_true", dest="check_only", help="report what would be exported without writing")
+    p.add_argument("--push", action="store_true", dest="push",
+                   help="trigger Syncthing rescan of catalog_export_folder_id after export (PP-PORTABLE-CATALOG-001 P2)")
 
     p = sub.add_parser("get-ebay-token", help="browser OAuth re-consent flow — use when refresh token is dead (HTTP 400)")
     p.add_argument("--sandbox", action="store_true", help="use eBay sandbox instead of production")
@@ -802,6 +813,20 @@ def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any]) -> List[Dict[str
         age_hours = (_time.time() - jf.stat().st_mtime) / 3600
         if age_hours > 2:
             v("offline_draft_stall", "warning", f"offline_draft=true, file unmodified for {age_hours:.1f}h — re-run ebay_draft")
+
+    if draft:
+        try:
+            dp = float(draft.get("price", 0) or 0)
+        except (TypeError, ValueError):
+            dp = 0.0
+        if dp == 0.0:
+            v("no_price", "warning", "draft_listing exists but price is zero or missing")
+
+    condition = str(doc.get("condition") or "").strip()
+    if condition:
+        from tgw.apis.ebay.conditions import _ITEM_CONDITION_PREFERRED
+        if condition.lower() not in _ITEM_CONDITION_PREFERRED:
+            v("wrong_condition", "warning", f"condition {condition!r} not in known set")
 
     return viols
 
@@ -1251,15 +1276,22 @@ def cmd_locate(cfg: Dict[str, Any], image_path: str, *, size_class: Optional[str
     return result
 
 
-def cmd_export_catalog(cfg: Dict[str, Any], dest: str, *, no_thumbnails: bool = False, limit: Optional[int] = None, check_only: bool = False) -> Dict[str, Any]:
+def cmd_export_catalog(cfg: Dict[str, Any], dest: str, *, no_thumbnails: bool = False, limit: Optional[int] = None, check_only: bool = False, push: bool = False) -> Dict[str, Any]:
     """Export the SQLite catalog + thumbnails to a directory for Syncthing relay (PP-PORTABLE-CATALOG-001)."""
     from tgw.catalog_export import export_catalog
 
-    result = export_catalog(cfg, dest, with_thumbnails=not no_thumbnails, limit=limit, check_only=check_only)
+    push_folder_id = cfg.get('catalog_export_folder_id') or None if push else None
+    if push and not push_folder_id:
+        print("Warning: --push requested but catalog_export_folder_id is not set in config — skipping Syncthing trigger")
+
+    result = export_catalog(cfg, dest, with_thumbnails=not no_thumbnails, limit=limit,
+                            check_only=check_only, push_folder_id=push_folder_id)
     if result.get("ok"):
         verb = "would export" if check_only else "exported"
         mb = round(result["bytes_total"] / 1_048_576, 1)
-        print(f"{verb} catalog + {result['thumbnails_copied']} thumbnails ({mb} MB) → {result['dest']} in {result['elapsed_seconds']}s")
+        pushed = " + Syncthing push triggered" if result.get("syncthing_pushed") else ""
+        err = f" (Syncthing error: {result['syncthing_error']})" if result.get("syncthing_error") else ""
+        print(f"{verb} catalog + {result['thumbnails_copied']} thumbnails ({mb} MB) → {result['dest']} in {result['elapsed_seconds']}s{pushed}{err}")
     else:
         print(f"Error: {result.get('error', result)}")
     return result
@@ -2214,13 +2246,16 @@ def cmd_classify_suggestions(
     return result
 
 
-def cmd_quiet_check(cfg: Dict[str, Any], *, notify_on_idle: bool = False) -> Dict[str, Any]:
+def cmd_quiet_check(cfg: Dict[str, Any], *, notify_on_idle: bool = False, kdc_device: str = "") -> Dict[str, Any]:
     """
     'Workers finished — what next?' nudge (PP-CAPTURE-001).
 
     When the pipeline is idle (no active jobs in any queue), surface the count of
     pending suggestions ([ ] entries in SUGGESTIONS.md) and open operator TODOs so
     ideas don't escape into ephemeral chat. Read-only over PostgreSQL + the vault.
+
+    kdc_device: KDE Connect device id or name; when non-empty and pipeline is idle,
+        pushes the summary to the phone via send_text(). Errors are swallowed.
     """
     import re
 
@@ -2230,6 +2265,8 @@ def cmd_quiet_check(cfg: Dict[str, Any], *, notify_on_idle: bool = False) -> Dic
     depths = state_machine.active_depths()
     active_total = sum(depths.values())
     quiet = active_total == 0
+
+    state_summary = state_machine.queue_state_summary()
 
     pending_suggestions = 0
     sfile = cfg["plan_vault_path"] / "suggestions" / "SUGGESTIONS.md"
@@ -2249,6 +2286,9 @@ def cmd_quiet_check(cfg: Dict[str, Any], *, notify_on_idle: bool = False) -> Dic
         "quiet": quiet,
         "active_total": active_total,
         "active_by_queue": depths,
+        "queued": state_summary["queued"],
+        "processing": state_summary["processing"],
+        "dead_letter": state_summary["dead_letter"],
         "pending_suggestions": pending_suggestions,
         "open_todos": open_todos,
     }
@@ -2264,6 +2304,16 @@ def cmd_quiet_check(cfg: Dict[str, Any], *, notify_on_idle: bool = False) -> Dic
                 notify("quiet-check", msg, level="info")
             except Exception:
                 pass
+        if kdc_device:
+            try:
+                from .apis.kdeconnect import get_device_id, send_text
+
+                device_id = get_device_id(kdc_device) or kdc_device
+                ok = send_text(device_id, msg)
+                result["kdeconnect_pushed"] = ok
+            except Exception as exc:
+                result["kdeconnect_pushed"] = False
+                result["kdeconnect_error"] = str(exc)
     else:
         print(f"Pipeline busy — {active_total} active job(s) across {len(depths)} queue(s).")
 
@@ -2701,8 +2751,10 @@ def _push_clipboard(text: str) -> bool:
 
 
 def main() -> int:
+    import sys
+    argv = ['-' + a[1:] if a == '-help' else a for a in sys.argv[1:]]
     parser = _build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     cfg = load_config(Path(os.path.expanduser(args.config)))
     check = getattr(args, "check_only", False)
 
@@ -2801,7 +2853,8 @@ def main() -> int:
                 result = {"ok": ok, "queue": args.queue, "count": len(results), "results": results}
 
         elif args.op == "quiet-check":
-            result = cmd_quiet_check(cfg, notify_on_idle=args.notify)
+            kdc_dev = cfg.get("kdeconnect_device_id", "") if getattr(args, "kdc", False) else ""
+            result = cmd_quiet_check(cfg, notify_on_idle=args.notify, kdc_device=kdc_dev)
 
         elif args.op == "perp-run":
             result = cmd_perp_run(cfg, brief_id=args.brief_id, list_briefs=args.list_briefs)
@@ -2874,6 +2927,10 @@ def main() -> int:
                 result = build_search_catalog(cfg, source="auto", check_only=check)
         elif args.op in ("health", "status"):
             result = check_all(cfg, include_ollama=not args.no_ollama, include_ebay=not args.no_ebay)
+
+        elif args.op == "help":
+            _build_parser().print_help()
+            return 0
 
         elif args.op == "quality":
             from .config import sku_json
@@ -3321,6 +3378,66 @@ def main() -> int:
                 print("  }")
                 result = {"ok": True, "count": len(cats), "categories": cats}
 
+        elif args.op == "store-category":
+            import json as _json
+            from pathlib import Path as _Path
+            cg_path = _Path(cfg['category_groups_path'])
+
+            if args.action == "list":
+                from tgw.apis.ebay.trading import get_store_categories
+                cats = get_store_categories(cfg)
+                if not cats:
+                    print("No store categories found (or seller has no eBay store).")
+                    result = {"ok": True, "categories": []}
+                else:
+                    print(f"{'ID':>10}  Path")
+                    print("-" * 60)
+                    for c in cats:
+                        print(f"  {c['id']:>8}  {c['path']}")
+                    print("\nUse: tgw ebay store-category set <group_key> <id>")
+                    result = {"ok": True, "categories": cats}
+
+            elif args.action == "set":
+                if not args.group or args.store_id is None:
+                    print("Usage: tgw ebay store-category set <group_key> <store_category_id>")
+                    result = {"ok": False, "error": "missing group or id"}
+                else:
+                    cg_data = _json.loads(cg_path.read_text(encoding='utf-8'))
+                    groups = cg_data.get('groups', {})
+                    if args.group not in groups:
+                        avail = sorted(groups.keys())
+                        print(f"Unknown group key {args.group!r}")
+                        print(f"Available: {', '.join(avail)}")
+                        result = {"ok": False, "error": f"unknown group: {args.group}"}
+                    else:
+                        groups[args.group]['store_category_id'] = args.store_id
+                        # Best-effort: look up name from GetStore and update store_category too
+                        resolved_name = None
+                        try:
+                            from tgw.apis.ebay.trading import get_store_categories
+                            store_cats = get_store_categories(cfg)
+                            match = next(
+                                (c for c in store_cats if c['id'] == str(args.store_id)), None)
+                            if match:
+                                groups[args.group]['store_category'] = match['name']
+                                resolved_name = match['name']
+                        except Exception:
+                            pass
+                        cg_data['updated'] = datetime.now(timezone.utc).date().isoformat()
+                        cg_path.write_text(
+                            _json.dumps(cg_data, indent=2, ensure_ascii=False) + '\n',
+                            encoding='utf-8',
+                        )
+                        if resolved_name:
+                            print(f"Set {args.group}: store_category_id={args.store_id}, "
+                                  f"store_category={resolved_name!r}")
+                        else:
+                            print(f"Set {args.group}: store_category_id={args.store_id}"
+                                  f"  (name not resolved — set store_category manually if needed)")
+                        result = {"ok": True, "group": args.group,
+                                  "store_category_id": args.store_id,
+                                  "store_category": resolved_name}
+
         elif args.op == "strikethrough-check":
             raw_ebay = cfg.get("raw", {}).get("ebay", {})
             enabled = raw_ebay.get("strikethrough_enabled", False)
@@ -3470,6 +3587,7 @@ def main() -> int:
                 no_thumbnails=getattr(args, "no_thumbnails", False),
                 limit=getattr(args, "limit", None),
                 check_only=getattr(args, "check_only", False),
+                push=getattr(args, "push", False),
             )
             return 0 if result["ok"] else 1
 

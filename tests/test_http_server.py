@@ -822,3 +822,29 @@ def test_health_requires_auth(client):
 def test_health_rejects_bad_token(client):
     r = client.get("/api/health", headers={"Authorization": "Bearer wrong"})
     assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# GET /api/catalog/snapshot — PP-PORTABLE-CATALOG-001 Phase 2
+# ---------------------------------------------------------------------------
+
+def test_catalog_snapshot_returns_sqlite_bytes(client):
+    r = client.get("/api/catalog/snapshot", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "application/octet-stream"
+    # SQLite magic bytes
+    assert r.content[:16] == b"SQLite format 3\x00"
+
+
+def test_catalog_snapshot_requires_auth(client):
+    r = client.get("/api/catalog/snapshot")
+    assert r.status_code in (401, 403)
+
+
+def test_catalog_snapshot_503_when_catalog_missing(env, monkeypatch):
+    monkeypatch.setattr(
+        http_server, "_cfg",
+        {**env["cfg"], "sqlite_catalog_path": env["cfg"]["sqlite_catalog_path"].parent / "missing.db"},
+    )
+    r = env["client"].get("/api/catalog/snapshot", headers=AUTH_HEADERS)
+    assert r.status_code == 503

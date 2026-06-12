@@ -60,6 +60,24 @@ _OFFLINE_CSV_FIELDS = ['sku', 'title', 'category_id', 'category_name',
 _BROWSE_HINT_SKIP = frozenset({'Does Not Apply', 'Unbranded', 'N/A', 'Unknown', 'Other'})
 
 
+def _get_store_category_id(item: Dict[str, Any], cfg: Dict[str, Any]) -> Optional[int]:
+    """
+    Return the store_category_id for this item's category group, or None.
+    Reads category-groups.json; returns None on any missing data or error.
+    """
+    cat_group_key = item.get('category_group', '')
+    if not cat_group_key:
+        return None
+    try:
+        cg_path = Path(cfg['category_groups_path'])
+        cg_data = json.loads(cg_path.read_text(encoding='utf-8'))
+        grp_data = cg_data.get('groups', {}).get(cat_group_key, {})
+        sc_id = grp_data.get('store_category_id')
+        return int(sc_id) if sc_id is not None else None
+    except Exception:
+        return None
+
+
 def _fetch_browse_aspect_hints(
     cfg: Dict[str, Any],
     title: str,
@@ -436,6 +454,9 @@ class EbayDraftWorker(QueueWorker):
         }
         if cat_confidence:
             draft['category_confidence'] = cat_confidence
+        sc_id = _get_store_category_id(item, self.config)
+        if sc_id is not None:
+            draft['store_category_id'] = sc_id
         if enriched_description:
             draft['description_source'] = 'enriched'
         if browse_hints:

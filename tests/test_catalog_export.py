@@ -1,8 +1,11 @@
-"""PP-PORTABLE-CATALOG-001 Phase 1 — tests for the portable catalog export.
+"""PP-PORTABLE-CATALOG-001 Phase 1+2 — tests for the portable catalog export.
 
 Pure: a tiny tmp sqlite db + a tmp thumbnails dir are built per test, exported
 to a tmp dest, and assertions run on the returned dict and the filesystem.
 Nothing touches the real catalog or thumbnail store.
+
+Phase 2 additions: Syncthing push trigger + syncthing_pushed/syncthing_error
+fields in the result dict.
 """
 
 import sqlite3
@@ -136,6 +139,58 @@ def test_check_only_respects_limit(tmp_path):
     out = ce.export_catalog(cfg, dest, limit=3, check_only=True)
     assert out["thumbnails_copied"] == 3
     assert not dest.exists()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — Syncthing push trigger
+# ---------------------------------------------------------------------------
+
+def test_syncthing_pushed_false_by_default(tmp_path):
+    cfg, db, thumbs = _cfg(tmp_path)
+    _make_db(db)
+    dest = tmp_path / "dest"
+    out = ce.export_catalog(cfg, dest, with_thumbnails=False)
+    assert out["syncthing_pushed"] is False
+    assert "syncthing_error" not in out
+
+
+def test_syncthing_scan_called_when_push_folder_id_set(tmp_path, monkeypatch):
+    cfg, db, thumbs = _cfg(tmp_path)
+    _make_db(db)
+    dest = tmp_path / "dest"
+
+    calls = []
+    monkeypatch.setattr('tgw.apis.syncthing.scan_folder',
+                        lambda c, fid: calls.append(fid))
+
+    out = ce.export_catalog(cfg, dest, with_thumbnails=False, push_folder_id='catalog-export')
+    assert out["syncthing_pushed"] is True
+    assert calls == ['catalog-export']
+    assert "syncthing_error" not in out
+
+
+def test_syncthing_error_captured_does_not_raise(tmp_path, monkeypatch):
+    cfg, db, thumbs = _cfg(tmp_path)
+    _make_db(db)
+    dest = tmp_path / "dest"
+
+    def _fail(c, fid):
+        raise RuntimeError("Syncthing unreachable")
+
+    monkeypatch.setattr('tgw.apis.syncthing.scan_folder', _fail)
+
+    out = ce.export_catalog(cfg, dest, with_thumbnails=False, push_folder_id='catalog-export')
+    assert out["ok"] is True        # export still succeeded
+    assert out["syncthing_pushed"] is False
+    assert "Syncthing unreachable" in out["syncthing_error"]
+
+
+def test_check_only_includes_syncthing_pushed_false(tmp_path):
+    cfg, db, thumbs = _cfg(tmp_path)
+    _make_db(db)
+    dest = tmp_path / "dest"
+    out = ce.export_catalog(cfg, dest, check_only=True)
+    assert out["syncthing_pushed"] is False
 
 
 def test_negative_limit_does_not_truncate(tmp_path):

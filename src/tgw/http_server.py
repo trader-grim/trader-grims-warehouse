@@ -517,6 +517,51 @@ def list_locations() -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/catalog/snapshot — atomic SQLite snapshot for Flutter offline sync
+# PP-PORTABLE-CATALOG-001 Phase 2
+# ---------------------------------------------------------------------------
+
+@app.get("/api/catalog/snapshot", dependencies=[AUTH])
+def catalog_snapshot():
+    """
+    Stream an atomic backup of tgwcatalog.db for Flutter offline-first sync.
+    Uses sqlite3.Connection.backup() — safe to call while catalog is live.
+    Returns the db file as application/octet-stream.
+    """
+    import os
+    import tempfile
+
+    from fastapi.responses import Response
+
+    db_path = _cfg["sqlite_catalog_path"]
+    if not db_path.exists():
+        raise HTTPException(status_code=503, detail="SQLite catalog not built — run tgw build-sqlite")
+
+    fd, tmp_path = tempfile.mkstemp(suffix='.db', prefix='tgwcatalog_snapshot_')
+    os.close(fd)
+    try:
+        src_con = sqlite3.connect(str(db_path))
+        dst_con = sqlite3.connect(tmp_path)
+        try:
+            src_con.backup(dst_con)
+        finally:
+            dst_con.close()
+            src_con.close()
+        data = Path(tmp_path).read_bytes()
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+    return Response(
+        content=data,
+        media_type='application/octet-stream',
+        headers={'Content-Disposition': 'attachment; filename="tgwcatalog.db"'},
+    )
+
+
+# ---------------------------------------------------------------------------
 # GET /api/category-groups — template list for intake form
 # ---------------------------------------------------------------------------
 

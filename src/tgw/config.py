@@ -74,6 +74,10 @@ def load_config(path: Path) -> Dict[str, Any]:
     # PP-PYIPC-001 — Syncthing integration
     syncthing_config_path = p("syncthing_config_path", "/opt/TGW/.local/syncthing/config.xml")
     syncthing_url = raw.get("syncthing_url", "http://127.0.0.1:8384")
+    # PP-PORTABLE-CATALOG-001 P2 — Syncthing folder ID to rescan after export-catalog --push
+    catalog_export_folder_id: str = raw.get("catalog_export_folder_id", "")
+    # PP-CAPTURE-001 P2 — KDE Connect device ID for quiet-check push notification
+    kdeconnect_device_id: str = raw.get("kdeconnect_device_id", "")
 
     ebay_token_path = secrets_root / "ebay-token.json"
     ebay_credentials_path = secrets_root / "ebay-credentials.json"
@@ -165,6 +169,8 @@ def load_config(path: Path) -> Dict[str, Any]:
         "ebay_sku_migrate": raw.get("ebay_sku_migrate", {}),
         "syncthing_config_path": syncthing_config_path,
         "syncthing_url": syncthing_url,
+        "catalog_export_folder_id": catalog_export_folder_id,
+        "kdeconnect_device_id": kdeconnect_device_id,
         "backup_db_dir": backup_db_dir,
         "backup_snapshot_root": backup_snapshot_root,
         "backup_secrets_dir": backup_secrets_dir,
