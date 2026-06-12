@@ -530,6 +530,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--archive-dir", default="/opt/TGW/data/history/ItemArchive", help="path to ItemArchive directory")
     p.add_argument("--cache", default="/opt/TGW/var/archive-ebay-index.json", help="output cache file path")
 
+    p = sub.add_parser("history-index", help="index ItemArchive zips without eBay IDs + loose CSVs (GEMINI-007 / PP-HISTORY-001)")
+    p.add_argument("--target", choices=["ItemArchive", "loose-csv", "all"], default="all",
+                   help="what to index: ItemArchive (no-eBay zips), loose-csv (eBay order CSVs), or all (default)")
+    p.add_argument("--dry-run", action="store_true", help="count and report without writing output files")
+    p.add_argument("--limit", type=int, default=0, metavar="N", help="stop after N new records (0 = no limit; useful for testing)")
+
     p = sub.add_parser("import-sold-csv", help="import eBay Seller Hub sold-orders CSV → mark items sold")
     p.add_argument("file", help="path to eBay sold-orders CSV file")
     p.add_argument("--dry-run", action="store_true", help="show what would be marked without writing")
@@ -3186,6 +3192,38 @@ def main() -> int:
                 cache_path.unlink()
             idx = build_archive_index(archive_dir, cfg["itemdata_root"], cache_path=cache_path)
             print(json.dumps({"ok": True, "entries": len(idx), "cache": str(cache_path)}, indent=2))
+            return 0
+
+        elif args.op == "history-index":
+            from . import history_index as _hi
+
+            target = args.target
+            dry_run = args.dry_run
+            limit = args.limit
+            results: Dict[str, Any] = {}
+
+            if target in ("ItemArchive", "all"):
+                print("Indexing ItemArchive (no-eBay-ID zips)…", flush=True)
+                stats = _hi.index_archive_unindexed(cfg, limit=limit, dry_run=dry_run)
+                results["ItemArchive"] = stats
+                n = stats["new"]
+                print(f"  total_zips={stats['total_zips']} already_ebay={stats['already_ebay']} "
+                      f"already_indexed={stats['already_indexed']} new={n} "
+                      f"skipped_no_json={stats['skipped_no_json']}"
+                      + (" (dry-run)" if dry_run else ""))
+                if not dry_run and n:
+                    print(f"  Written to: {stats.get('out_path')}")
+
+            if target in ("loose-csv", "all"):
+                print("Indexing loose eBay CSVs in history root…", flush=True)
+                stats = _hi.index_loose_csvs(cfg, dry_run=dry_run)
+                results["loose-csv"] = stats
+                print(f"  files_scanned={stats['files_scanned']} records={stats['records']}"
+                      + (" (dry-run)" if dry_run else ""))
+                if not dry_run and stats.get("out_path"):
+                    print(f"  Written to: {stats['out_path']}")
+
+            print(json.dumps({"ok": True, "dry_run": dry_run, **results}, indent=2))
             return 0
 
         elif args.op == "import-sold-csv":
