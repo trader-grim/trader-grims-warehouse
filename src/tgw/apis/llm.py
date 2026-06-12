@@ -25,10 +25,11 @@ from tgw.queue.ollama_lock import acquire_ollama_lock
 
 # Hardcoded defaults — override via tgw-models.json
 _DEFAULTS: Dict[str, tuple[str, str]] = {
-    'ai_identify': ('openrouter', 'google/gemini-2.5-flash'),
-    'alt_text':    ('openrouter', 'google/gemini-2.5-flash'),
-    'ebay_draft':  ('ollama',     'Qwen2.5:latest'),
-    'pm_intake':   ('ollama',     'Qwen2.5:latest'),
+    'ai_identify':            ('openrouter', 'google/gemini-2.5-flash'),
+    'alt_text':               ('openrouter', 'google/gemini-2.5-flash'),
+    'suggestions_classify':   ('openrouter', 'google/gemini-2.5-flash'),
+    'ebay_draft':             ('ollama',     'Qwen2.5:latest'),
+    'pm_intake':              ('ollama',     'Qwen2.5:latest'),
 }
 
 
