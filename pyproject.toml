@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "requests>=2.31",
+    "pyncthing>=0.1",
     "textual>=0.59",
     "psycopg2-binary>=2.9",
     "fastapi>=0.110",
@@ -71,7 +72,7 @@ line-length = 200
 # mutate the tree — it silently rewrote 8 unrelated files during an agent
 # session. Apply fixes explicitly with `ruff check --fix` when you mean it.
 # systemd/history/ is an archive of dead scripts — not lint-gated.
-exclude = ["systemd/history"]
+exclude = ["systemd/history", "tools/archive"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]

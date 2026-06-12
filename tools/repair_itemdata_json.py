@@ -95,7 +95,10 @@ def replace_single_quoted_keys(text: str) -> Tuple[str, bool]:
     pattern = re.compile(r'(?P<prefix>[\{,]\s*)\'(?P<key>[^\'\\\n\r]+)\'\s*:')
     changed = False
     while True:
-        new_text, count = pattern.subn(lambda m: f'{m.group("prefix")}"{m.group("key").replace(chr(34), r"\"")}":', text)
+        new_text, count = pattern.subn(
+            lambda m: m.group("prefix") + '"' + m.group("key").replace('"', '\\"') + '":',
+            text,
+        )
         if count == 0:
             break
         text = new_text
@@ -148,7 +151,6 @@ def replace_single_quoted_strings(text: str) -> Tuple[str, bool]:
             continue
         if ch == "'":
             prev = text[i - 1] if i > 0 else ''
-            nxt = text[i + 1] if i + 1 < n else ''
             if prev in '{[:,\n\r\t ' or prev == '':
                 out.append('"')
                 in_single = True

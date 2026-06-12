@@ -71,6 +71,10 @@ def load_config(path: Path) -> Dict[str, Any]:
 
     models_config_path = p("models_config_path", "/opt/TGW/config/tgw-models.json")
 
+    # PP-PYIPC-001 — Syncthing integration
+    syncthing_config_path = p("syncthing_config_path", "/opt/TGW/.local/syncthing/config.xml")
+    syncthing_url = raw.get("syncthing_url", "http://127.0.0.1:8384")
+
     ebay_token_path = secrets_root / "ebay-token.json"
     ebay_credentials_path = secrets_root / "ebay-credentials.json"
     openrouter_credentials_path = secrets_root / "openrouter-credentials.json"
@@ -159,6 +163,8 @@ def load_config(path: Path) -> Dict[str, Any]:
         "fulfillment_policy_by_category": fulfillment_policy_by_category,
         "store_category_by_ebay_category": store_category_by_ebay_category,
         "ebay_sku_migrate": raw.get("ebay_sku_migrate", {}),
+        "syncthing_config_path": syncthing_config_path,
+        "syncthing_url": syncthing_url,
         "backup_db_dir": backup_db_dir,
         "backup_snapshot_root": backup_snapshot_root,
         "backup_secrets_dir": backup_secrets_dir,

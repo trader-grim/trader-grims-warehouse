@@ -530,6 +530,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--archive-dir", default="/opt/TGW/data/history/ItemArchive", help="path to ItemArchive directory")
     p.add_argument("--cache", default="/opt/TGW/var/archive-ebay-index.json", help="output cache file path")
 
+    p = sub.add_parser("history-index", help="index ItemArchive zips without eBay IDs + loose CSVs (GEMINI-007 / PP-HISTORY-001)")
+    p.add_argument("--target", choices=["ItemArchive", "loose-csv", "all"], default="all",
+                   help="what to index: ItemArchive (no-eBay zips), loose-csv (eBay order CSVs), or all (default)")
+    p.add_argument("--dry-run", action="store_true", help="count and report without writing output files")
+    p.add_argument("--limit", type=int, default=0, metavar="N", help="stop after N new records (0 = no limit; useful for testing)")
+
     p = sub.add_parser("import-sold-csv", help="import eBay Seller Hub sold-orders CSV → mark items sold")
     p.add_argument("file", help="path to eBay sold-orders CSV file")
     p.add_argument("--dry-run", action="store_true", help="show what would be marked without writing")
@@ -672,6 +678,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("admin-file", help="scan inbox and enqueue eligible notes for PM-intake (PP-DOCFLOW-001)")
     p.add_argument("--now", action="store_true", help="bypass submission-delay gate (process all files regardless of age)")
+
+    p = sub.add_parser("classify-suggestions", help="batch-classify unprocessed SUGGESTIONS.md entries via LLM (PP-DOCFLOW-001 Phase 2)")
+    p.add_argument("--apply", action="store_true", help="mark already-done entries [x] and create todos for new-work entries")
+    p.add_argument("--limit", type=int, default=0, metavar="N", help="only classify first N pending entries (0 = all)")
 
     p = sub.add_parser(
         "catalog-verify",
@@ -2163,6 +2173,47 @@ def cmd_suggest_edit(cfg: Dict[str, Any], pending_only: bool = False) -> Dict[st
     return {"ok": True}  # unreachable if execlp succeeds
 
 
+def cmd_classify_suggestions(
+    cfg: Dict[str, Any],
+    apply: bool = False,
+    limit: int = 0,
+) -> Dict[str, Any]:
+    """Batch-classify unprocessed SUGGESTIONS.md entries via LLM (PP-DOCFLOW-001 Phase 2).
+
+    tgw classify-suggestions [--apply] [--limit N]
+
+    Default (dry-run): prints a classification report without modifying anything.
+    --apply: marks already-done entries [x] in SUGGESTIONS.md and creates todos for
+             new-work entries. plan_append and review_flag are listed in report only.
+    """
+    from tgw import suggestions as sug_mod
+
+    suggestions_path = cfg['plan_vault_path'] / 'suggestions' / 'SUGGESTIONS.md'
+    master_plan_path: Path = cfg['plan_master_path']
+
+    entries = sug_mod.parse_pending(suggestions_path)
+    if not entries:
+        print('No unprocessed suggestions found.')
+        return {'ok': True, 'total': 0}
+
+    if limit and limit > 0:
+        entries = entries[:limit]
+
+    print(f'Classifying {len(entries)} pending suggestion(s)...')
+
+    plan_text = master_plan_path.read_text(encoding='utf-8') if master_plan_path.exists() else ''
+    plan_headings = '\n'.join(ln for ln in plan_text.splitlines() if ln.startswith('#'))
+
+    classified = sug_mod.classify_batch(entries, plan_headings, cfg)
+    if not classified:
+        print('LLM returned no classifications.')
+        return {'ok': False, 'error': 'empty_response', 'total': len(entries)}
+
+    result = sug_mod.apply_classifications(suggestions_path, entries, classified, write=apply)
+    print(sug_mod.format_report(result, applied=apply))
+    return result
+
+
 def cmd_quiet_check(cfg: Dict[str, Any], *, notify_on_idle: bool = False) -> Dict[str, Any]:
     """
     'Workers finished — what next?' nudge (PP-CAPTURE-001).
@@ -2788,6 +2839,10 @@ def main() -> int:
             result = cmd_admin_file(cfg, bypass_delay=getattr(args, "now", False))
             return 0 if result["ok"] else 1
 
+        elif args.op == "classify-suggestions":
+            result = cmd_classify_suggestions(cfg, apply=args.apply, limit=args.limit)
+            return 0 if result.get("ok") else 1
+
         elif args.op == "build-full":
             result = build_full_catalog(cfg, check_only=check)
 
@@ -3137,6 +3192,38 @@ def main() -> int:
                 cache_path.unlink()
             idx = build_archive_index(archive_dir, cfg["itemdata_root"], cache_path=cache_path)
             print(json.dumps({"ok": True, "entries": len(idx), "cache": str(cache_path)}, indent=2))
+            return 0
+
+        elif args.op == "history-index":
+            from . import history_index as _hi
+
+            target = args.target
+            dry_run = args.dry_run
+            limit = args.limit
+            results: Dict[str, Any] = {}
+
+            if target in ("ItemArchive", "all"):
+                print("Indexing ItemArchive (no-eBay-ID zips)…", flush=True)
+                stats = _hi.index_archive_unindexed(cfg, limit=limit, dry_run=dry_run)
+                results["ItemArchive"] = stats
+                n = stats["new"]
+                print(f"  total_zips={stats['total_zips']} already_ebay={stats['already_ebay']} "
+                      f"already_indexed={stats['already_indexed']} new={n} "
+                      f"skipped_no_json={stats['skipped_no_json']}"
+                      + (" (dry-run)" if dry_run else ""))
+                if not dry_run and n:
+                    print(f"  Written to: {stats.get('out_path')}")
+
+            if target in ("loose-csv", "all"):
+                print("Indexing loose eBay CSVs in history root…", flush=True)
+                stats = _hi.index_loose_csvs(cfg, dry_run=dry_run)
+                results["loose-csv"] = stats
+                print(f"  files_scanned={stats['files_scanned']} records={stats['records']}"
+                      + (" (dry-run)" if dry_run else ""))
+                if not dry_run and stats.get("out_path"):
+                    print(f"  Written to: {stats['out_path']}")
+
+            print(json.dumps({"ok": True, "dry_run": dry_run, **results}, indent=2))
             return 0
 
         elif args.op == "import-sold-csv":
