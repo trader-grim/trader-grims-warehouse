@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-11 (session 23 — task #38 done; suite 455)
+updated: 2026-06-11 (session 26 — PP-DOCFLOW-001 P2 + PP-PYIPC-001 + history-index done; suite 563)
 maintained_by: Opus (planner)
 ---
 
@@ -353,7 +353,7 @@ Operator-gated items still tracked here:
 | PP | Status | Notes |
 |----|--------|-------|
 | **PP-SOLD-001 Tier 3** sweep | operator gated | Run `tgw ebay-sweep` after full-history CSV import |
-| **PP-PYIPC-001** | ✅ unblocked | Research complete; Syncthing live at 8384; API key in `/opt/TGW/.local/syncthing/config.xml`; Claude-ready |
+| **PP-PYIPC-001** | ✅ **DONE 2026-06-11** | `tgw.apis.syncthing` + `tgw.apis.kdeconnect`; 25 tests; see row 57 above |
 | **PP-REPRICER-001** live | blocked | Blocked on `buy.marketplace_insights` scope |
 
 ### Running in background
@@ -674,7 +674,7 @@ action item.
 **Blocked — not Round 4 (held for later rounds):**
 Same blocker groups as Round 3 plus:
 - PP-PLANDB-001 — design discussion needed before code; currently design-open
-- PP-PORTABLE-CATALOG-001 P2+ — requires Syncthing API key + PERPLEXITY-005 result (PP-PYIPC-001)
+- PP-PORTABLE-CATALOG-001 P2+ — PP-PYIPC-001 ✅ done; Syncthing API + PERPLEXITY-006 result both available; **unblocked as of 2026-06-11**
 - PP-VISION-001 P2+ — CLIP/embedding model requires GPU upgrade
 
 #### Blocked — not Claude-ready (grouped by blocker)
@@ -736,16 +736,19 @@ Lint-policy incident (session 24): bare `ruff check` mutated 8 files because pyp
 | # | PP | Task | Size |
 |---|----|------|------|
 | ✅ 49 | — | Lint policy hardening — **DONE session 24**: `fix = true` removed from pyproject (a bare `ruff check` must never mutate the tree; fixes are explicit via `ruff check --fix`); `systemd/history/` excluded (archived dead scripts, not lint-gated); the 8 pending isort autofixes kept and committed separately from feature work | XS |
-| 50 | — | `tools/migrate_batch.py` is broken as-is (8 F821s: `os`/`requests`/`time` never imported, `BULK_MIGRATE_URL` undefined — looks like a pasted fragment, no `main`): either repair it or, if superseded by the `ebay_sku_migrate` worker, archive it out of the lint path. Decide before fixing | S |
-| 51 | — | `tools/repair_itemdata_json.py`: backslash escape inside f-string is Python-3.12-only syntax (host runs 3.11 — the script cannot even parse today) + unused `nxt` variable; fix both, or archive if the one-shot repair is done | XS |
+| ✅ 50 | — | `tools/migrate_batch.py` **DONE session 26** — archived to `tools/archive/migrate_batch.py`; superseded by `ebay_sku_migrate` worker; added `tools/archive` to ruff exclude | S |
+| ✅ 51 | — | `tools/repair_itemdata_json.py` **DONE session 26** — fixed Python 3.11 f-string backslash (lambda rewrite); removed unused `nxt`; ruff clean | XS |
 | ✅ 52 | PP-DOCFLOW-001 | **Design session HELD 2026-06-11 (session 24)** — all four open questions settled by Dave; design recorded below; Phase 1 build seeded as todo | M |
 | ✅ 53 | PP-DOCFLOW-001 | **Phase 1 build DONE 2026-06-11 (session 25)**: pm_intake ported to `call_model()` + `tgw-models.json` → `openrouter/google/gemini-2.5-flash`; actions: `no_change \| append_to_section \| file_document \| flag_for_review`; `new_section` demoted to review-flag; 4h submission-delay gate + `tgw admin-file [--now]`; `reference/FILING-LOG.md` audit trail; `inbox/review/` + `dev-workflow/research/` dirs; `pm_intake_delay_hours` config key; 19 offline tests | M |
-| 54 | PP-BACKUP-001 | **Phase A build** (todo #60, after Dave approves `PLAN-backup-dr.md`): `tgw-db-backup` + `tgw-cloud-sync` + `tgw-secrets-backup` unit/script files in `etc/systemd/` + `bin/` (operator installs); `check_backups()` in health.py + tests (same check the Nix module needs per PLAN-nixos §9.1) | M |
-| 55 | PP-BACKUP-001 | **Phase A operator items** (todo #61): approve plan; gpg passphrase custody decision (off-machine!); install+enable the three timers; first manual cloud sync in an off-hours window (27 days of churn); `rclone about dbukove:` quota check; A5 restore drill + record RTO times | M |
+| ✅ 56 | PP-DOCFLOW-001 | **Phase 2 DONE 2026-06-11 (session 26)**: `tgw.suggestions` module — `parse_pending()`, `classify_batch()` (1 LLM call via `suggestions_classify` → openrouter/gemini-2.5-flash), `apply_classifications()`, `format_report()`; `tgw classify-suggestions [--apply] [--limit N]`; dry-run default; `already_done` entries marked `[x]` on `--apply`; `todo` entries create DB todos; `plan_append`/`review_flag` report-only. 16 offline tests. | M |
+| ✅ 57 | PP-PYIPC-001 | **DONE 2026-06-11 (session 26)**: `tgw.apis.syncthing` — `_parse_api_key()` from config.xml, `folder_status()`, `folder_is_idle()`, `list_folders()`, `scan_folder()`, `disk_events()` long-polling generator; `tgw.apis.kdeconnect` — `list_devices()`, `get_device_id()`, `ping()`, `send_text()`, `send_file()`, `push_clipboard()` via kdeconnect-cli; `syncthing_config_path`/`syncthing_url` config keys; `pyncthing>=0.1` in pyproject.toml; 25 tests | M |
+| ✅ 58 | — | **`tgw history-index` DONE 2026-06-11 (session 26)**: `tgw.history_index` module; `index_archive_unindexed()` scans ~32K legacy Magento zips not in `archive-ebay-index.json` → `var/history-itemdata-index.jsonl` (sku/title/location/status/price/condition); `index_loose_csvs()` parses eBay-OrdersReport-*.csv → `var/history-loose-csv-index.jsonl`; `tgw history-index [--target ItemArchive\|loose-csv\|all] [--dry-run] [--limit N]`; smoke-tested production (54,683 zips); 13 tests. Run `tgw history-index --target all` in a screen session to populate | M |
+| ✅ 54 | PP-BACKUP-001 | **Phase A build DONE session 25**: `tgw-db-backup` + `tgw-cloud-sync` + `tgw-secrets-backup` scripts + systemd units/timers in `etc/systemd/`; `check_backups()` in health.py + tests — **scripts exist, operator must install** | M |
+| 55 | PP-BACKUP-001 | **Phase A operator items** (todo #61): approve plan ✅ done; remaining: gpg passphrase custody decision (off-machine!); install+enable the three timers; first manual cloud sync in an off-hours window; `rclone about dbukove:` quota check; A5 restore drill + record RTO times | M |
 
 ### PP-DOCFLOW-001 — The TGW Project Admin (LLM document + suggestion intake)
 
-**Status: PHASE 1 COMPLETE 2026-06-11 (session 25). Phase 2 (suggestions batch-classify) next.**
+**Status: PHASE 1 + PHASE 2 COMPLETE 2026-06-11 (sessions 25–26). Phase 3+ (admin skills expansion) is future scope.**
 
 **Mental model (Dave, session 24):** model this tool as a **real-life project admin** — the
 best ones always have the plan ready to be worked on: all docs filed and readily available,
@@ -912,7 +915,7 @@ Research briefs in `docs/TGW-Plan-Vault/perplexity/`. Paste brief into Perplexit
 
 #### ✅ Hardware alert resolved — MasterArchive drive (2026-06-11)
 `/dev/sdc5` (`/media/tgw/MasterArchive`) had I/O errors (EIO on reads, GEMINI-007).
-**Repaired by Dave 2026-06-11.** `tgw history-index` work is now unblocked.
+**Repaired by Dave 2026-06-11.** `tgw history-index` built and smoke-tested (session 26). Run `sudo -u tgw tgw history-index --target all` in a screen session to populate the index (~hours for 32K zips).
 
 ---
 
