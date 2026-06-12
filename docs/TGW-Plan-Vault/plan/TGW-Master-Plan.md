@@ -2880,9 +2880,9 @@ correction → prompt/rule update). Script what we know; dump the rest into the 
 **Phases (Round 7 todos #109/#110/#112):**
 | Phase | Scope |
 |-------|-------|
-| 1 | `todo_items` schema: `pp_ref`, `depends_on`, `plan_anchor` + CLI flags; `tgw todo brief <id>`; classify-suggestions sets `pp_ref` when confident |
-| 2 | `tgw plan render` → generated `plan/TGW-Taskboard.md`; coalesced `plan_render` job on todo mutations (catalog-rebuild pattern); staleness warning in health |
-| 3 | `tgw plan check` plan↔tracker reconciliation in the session-start ritual |
+| ✅ 1 | **DONE 2026-06-12 (session 29)** — `todo_items` gained `pp_ref TEXT`, `depends_on INT[]`, `plan_anchor TEXT` (migration applied); `tgw todo --pp/--depends/--anchor` on `--add` + `--set-meta ID` for existing items; `tgw todo brief <id>` self-contained task spec (todo body + master-plan section extract + dependency status + constraints, Aider message-file pattern); classify-suggestions LLM sets `pp_ref` when confident (format-validated, hallucinated refs dropped); pp_ref backfilled on 23 existing todos from body text; pp_ref + blocker badges in `tgw todo` listing |
+| ✅ 2 | **DONE 2026-06-12 (session 29)** — `tgw.plan_render` module + `tgw plan render` → generated `plan/TGW-Taskboard.md` (per-agent tables ID/pri/size/task, blocker badges from open `depends_on`, Obsidian links to plan headings via `pp_ref`/`plan_anchor` with auto heading resolution, done-this-week section, atomic write); coalesced `plan_render` queue job on every todo mutation (dedupe `plan_render:pending` + 30s not_before, catalog-rebuild pattern); `plan_render` worker (`tgw-worker@plan_render.service` — **operator must enable, admin todo #119**); `check_taskboard()` staleness warning in `tgw health` (yellow when tracker changed >10 min after last render). 20 new tests; 637 passing |
+| 3 | `tgw plan check` plan↔tracker reconciliation in the session-start ritual (todo #112, depends_on=[110] now cleared) |
 | 4 | Only if ever needed: generated PP-status lines inside plan sections |
 
 #### Dependencies

@@ -327,6 +327,55 @@ def check_backups(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def check_taskboard(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    PP-PLANDB-001 Phase 2 — generated taskboard freshness.
+
+    Yellow (ok=True, warn=True): TGW-Taskboard.md missing, or older than the
+    newest todo mutation by >10 min (the coalesced plan_render job has a 30s
+    delay; 10 min covers worker restarts without flapping).
+    Never red — a stale taskboard is an annoyance, not an outage.
+    """
+    t = time.time()
+    warnings: list[str] = []
+
+    from tgw.plan_render import taskboard_path
+    board = taskboard_path(cfg)
+    if not board.exists():
+        warnings.append(f'taskboard missing: {board} — run `tgw plan render`')
+    else:
+        rendered = board.stat().st_mtime
+        try:
+            import psycopg2
+            con = psycopg2.connect(cfg.get('postgres_dsn', 'dbname=state_machine user=tgw'))
+            try:
+                with con.cursor() as cur:
+                    cur.execute(
+                        'SELECT EXTRACT(EPOCH FROM GREATEST(max(added_at), max(done_at))) '
+                        'FROM todo_items'
+                    )
+                    row = cur.fetchone()
+            finally:
+                con.close()
+            last_mutation = float(row[0]) if row and row[0] is not None else None
+            if last_mutation and last_mutation - rendered > 600:
+                lag_min = int((last_mutation - rendered) / 60)
+                warnings.append(
+                    f'taskboard stale: todo tracker changed {lag_min}min after last render '
+                    f'— check tgw-worker@plan_render.service'
+                )
+        except Exception:
+            pass  # DB down is check_postgres's problem, not the taskboard's
+
+    detail = '; '.join(f'WARN: {w}' for w in warnings) if warnings else (
+        f'taskboard fresh ({board.name})')
+    result = _result('taskboard', True, detail, (time.time() - t) * 1000,
+                     warnings=warnings)
+    if warnings:
+        result['warn'] = True
+    return result
+
+
 def check_backup_service() -> Dict[str, Any]:
     """trader-grims-backup systemd service is active."""
     t = time.time()
@@ -455,6 +504,7 @@ def check_all(cfg: Dict[str, Any],
         check_postgres(cfg),
         check_backup_service(),
         check_backups(cfg),
+        check_taskboard(cfg),
         check_ownership(cfg),
     ]
     if include_ollama:

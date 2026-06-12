@@ -661,8 +661,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="count eligible items without enqueuing")
     p.add_argument("--status", default="", metavar="STATUS", help="filter to items with this #STATUS value (e.g. 'live')")
 
-    p = sub.add_parser("todo", help="multi-agent TODO tracker (PP-TODO-001)")
-    p.add_argument("agent", nargs="?", default=None, help="filter by agent: claude, admin, gemini, db (omit for all)")
+    p = sub.add_parser("todo", help="multi-agent TODO tracker (PP-TODO-001 / PP-PLANDB-001)")
+    p.add_argument("agent", nargs="?", default=None, help="filter by agent: claude, admin, gemini, db (omit for all); or 'brief' to generate a task spec")
+    p.add_argument("brief_id", nargs="?", default=None, help="todo id for 'tgw todo brief <id>'")
     p.add_argument("--add", metavar="TEXT", help="add a new TODO item")
     p.add_argument("--done", metavar="ID", type=int, help="mark a TODO item complete")
     p.add_argument("--priority", type=int, default=50, metavar="N", help="priority for --add (lower = higher priority; default 50)")
@@ -672,6 +673,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--update", nargs="+", metavar=("ID", "TEXT"), help="update body text of an item: --update ID new text here")
     p.add_argument("--delegate", nargs=2, metavar=("ID", "AGENT"), help="reassign item to a different agent: --delegate ID agent")
     p.add_argument("--set-priority", nargs=2, metavar=("ID", "N"), dest="set_priority", help="change item priority: --set-priority ID N")
+    p.add_argument("--pp", default=None, metavar="PP-REF", help="PP-* plan item for --add / --set-meta (e.g. PP-PLANDB-001)")
+    p.add_argument("--depends", default=None, metavar="IDS", help="comma-separated todo ids this item depends on (for --add / --set-meta)")
+    p.add_argument("--anchor", default=None, metavar="HEADING", help="master-plan heading text the item links to (for --add / --set-meta)")
+    p.add_argument("--set-meta", type=int, default=None, metavar="ID", dest="set_meta", help="set --pp/--depends/--anchor on an existing item")
+
+    p = sub.add_parser("plan", help="plan/taskboard operations (PP-PLANDB-001)")
+    p.add_argument("plan_op", choices=["render"], help="render: regenerate plan/TGW-Taskboard.md from the todo tracker")
 
     p = sub.add_parser(
         "mvitems",
@@ -3521,6 +3529,17 @@ def main() -> int:
             result = cmd_todo(cfg, args)
             # cmd_todo handles its own printing; skip the generic JSON dump
             return 0 if result.get("ok", True) else 1
+
+        elif args.op == "plan":
+            from tgw.plan_render import render_taskboard
+
+            result = render_taskboard(cfg)
+            if result["ok"]:
+                print(f"Taskboard rendered: {result['path']} "
+                      f"({result['open']} open, {result['done_week']} done this week)")
+            else:
+                print(f"Error: {result.get('error')}")
+            return 0 if result["ok"] else 1
 
         elif args.op == "catalog-verify":
             result = cmd_catalog_verify(

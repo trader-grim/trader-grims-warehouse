@@ -96,8 +96,8 @@ journalctl -u 'tgw-worker@<queue>.service' -f
 ```
 
 Workers: `token_refresh`, `pm_intake`, `bundle_intake`, `multi_intake`, `ai_identify`,
-`catalog_rebuild`, `thumbnail_gen`, `ebay_draft`, `ebay_upload`, `ebay_price`, `ebay_stage`,
-`ebay_publish`, `ebay_sync`, `ebay_legacy_sync`, `echo`
+`catalog_rebuild`, `plan_render`, `thumbnail_gen`, `ebay_draft`, `ebay_upload`, `ebay_price`,
+`ebay_stage`, `ebay_publish`, `ebay_sync`, `ebay_legacy_sync`, `echo`
 
 ## Checking queue state
 

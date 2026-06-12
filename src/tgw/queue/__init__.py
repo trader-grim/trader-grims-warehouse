@@ -21,6 +21,7 @@ WORKER_QUEUES: tuple[str, ...] = (
     'multi_intake',
     'ai_identify',
     'catalog_rebuild',
+    'plan_render',
     'thumbnail_gen',
     'ebay_draft',
     'ebay_upload',

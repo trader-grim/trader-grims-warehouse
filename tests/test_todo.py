@@ -4,6 +4,15 @@ from __future__ import annotations
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_render_enqueue():
+    """Keep tests hermetic: todo mutations must not enqueue real plan_render jobs."""
+    with patch('tgw.todo._enqueue_plan_render') as m:
+        yield m
+
 # ---------------------------------------------------------------------------
 # Helpers: build a mock connection + cursor that returns canned data
 # ---------------------------------------------------------------------------
@@ -40,6 +49,142 @@ def test_todo_add_returns_new_id():
     assert result['id'] == 42
     assert result['agent'] == 'claude'
     assert result['priority'] == 30
+
+
+def test_todo_add_with_plandb_metadata():
+    from tgw.todo import todo_add
+    ctx, cur = _mock_conn(fetchone_return=(43,))
+    with patch('tgw.todo._conn', ctx):
+        result = todo_add('claude', 'phase 2', pp_ref='PP-PLANDB-001',
+                          depends_on=[109], plan_anchor='PP-PLANDB-001 — Database-Driven Plan Builder')
+    assert result['ok'] is True
+    assert result['pp_ref'] == 'PP-PLANDB-001'
+    assert result['depends_on'] == [109]
+    # the INSERT received all three new columns
+    sql, params = cur.execute.call_args[0]
+    assert 'pp_ref' in sql and 'depends_on' in sql and 'plan_anchor' in sql
+    assert params[4] == 'PP-PLANDB-001'
+    assert params[5] == [109]
+
+
+def test_todo_add_enqueues_plan_render(_no_render_enqueue):
+    from tgw.todo import todo_add
+    ctx, cur = _mock_conn(fetchone_return=(44,))
+    with patch('tgw.todo._conn', ctx):
+        todo_add('claude', 'test task')
+    _no_render_enqueue.assert_called_once_with('todo_add')
+
+
+# ---------------------------------------------------------------------------
+# todo_set_meta
+# ---------------------------------------------------------------------------
+
+def test_todo_set_meta_partial_update():
+    from tgw.todo import todo_set_meta
+    ctx, cur = _mock_conn(fetchone_return=(7, 'claude', 'PP-X-001', [1, 2], None))
+    with patch('tgw.todo._conn', ctx):
+        result = todo_set_meta(7, pp_ref='PP-X-001', depends_on=[1, 2])
+    assert result['ok'] is True
+    sql = cur.execute.call_args[0][0]
+    assert 'pp_ref = %s' in sql and 'depends_on = %s' in sql
+    assert 'plan_anchor = %s' not in sql  # not passed → untouched
+
+
+def test_todo_set_meta_requires_a_field():
+    from tgw.todo import todo_set_meta
+    result = todo_set_meta(7)
+    assert result['ok'] is False
+
+
+def test_todo_set_meta_not_found():
+    from tgw.todo import todo_set_meta
+    ctx, cur = _mock_conn(fetchone_return=None)
+    with patch('tgw.todo._conn', ctx):
+        result = todo_set_meta(999, pp_ref='PP-X-001')
+    assert result['ok'] is False
+    assert 'not found' in result['error']
+
+
+# ---------------------------------------------------------------------------
+# brief + plan-section extraction
+# ---------------------------------------------------------------------------
+
+_PLAN_MD = """\
+# TGW Master Plan
+
+### PP-FOO-001 — The Foo Project
+
+Foo design prose.
+
+#### Phases
+
+Phase table here.
+
+### PP-BAR-001 — The Bar Project
+
+Bar prose.
+"""
+
+
+def test_extract_plan_section(tmp_path):
+    from tgw.todo import extract_plan_section
+    plan = tmp_path / 'plan.md'
+    plan.write_text(_PLAN_MD, encoding='utf-8')
+    text = extract_plan_section(plan, 'PP-FOO-001')
+    assert text.startswith('### PP-FOO-001')
+    assert 'Foo design prose' in text
+    assert 'Phase table here' in text       # deeper heading stays in section
+    assert 'Bar prose' not in text          # next same-level heading ends it
+
+
+def test_extract_plan_section_no_match(tmp_path):
+    from tgw.todo import extract_plan_section
+    plan = tmp_path / 'plan.md'
+    plan.write_text(_PLAN_MD, encoding='utf-8')
+    assert extract_plan_section(plan, 'PP-NOPE-999') == ''
+
+
+def test_todo_brief_includes_plan_extract_and_deps(tmp_path):
+    from tgw import todo as todo_mod
+    plan = tmp_path / 'plan.md'
+    plan.write_text(_PLAN_MD, encoding='utf-8')
+
+    rows = {
+        9: {'id': 9, 'agent': 'claude', 'priority': 16, 'body': 'build the foo',
+            'source': 'round7', 'added_at': None, 'done_at': None,
+            'pp_ref': 'PP-FOO-001', 'depends_on': [8], 'plan_anchor': None},
+        8: {'id': 8, 'agent': 'claude', 'priority': 10, 'body': 'prereq task',
+            'source': 'round7', 'added_at': None, 'done_at': 'sometime',
+            'pp_ref': None, 'depends_on': [], 'plan_anchor': None},
+    }
+    with patch.object(todo_mod, 'todo_get', side_effect=lambda i: rows.get(i)):
+        result = todo_mod.todo_brief(9, plan)
+    assert result['ok'] is True
+    brief = result['brief']
+    assert 'todo #9' in brief
+    assert 'build the foo' in brief
+    assert 'Foo design prose' in brief          # plan extract present
+    assert '#8 [done] prereq task' in brief     # dependency status
+    assert 'CLAUDE.md' in brief                 # constraints block
+
+
+def test_todo_brief_not_found():
+    from tgw import todo as todo_mod
+    with patch.object(todo_mod, 'todo_get', return_value=None):
+        result = todo_mod.todo_brief(999, None)
+    assert result['ok'] is False
+
+
+# ---------------------------------------------------------------------------
+# _parse_depends
+# ---------------------------------------------------------------------------
+
+def test_parse_depends():
+    from tgw.todo import _parse_depends
+    assert _parse_depends(None) is None
+    assert _parse_depends('') == []
+    assert _parse_depends('12,14') == [12, 14]
+    assert _parse_depends('12, 14') == [12, 14]
 
 
 # ---------------------------------------------------------------------------
