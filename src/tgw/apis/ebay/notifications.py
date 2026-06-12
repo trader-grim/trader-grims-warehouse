@@ -5,8 +5,8 @@ SetNotificationPreferences registers a delivery URL for FixedPriceTransaction ev
 eBay POSTs SOAP XML to the URL when an item sells.
 
 Verification: NotificationSignature = MD5(timestamp + dev_id + app_id + cert_id).
-Add dev_id to ebay-credentials.json to enable; omitted → signature check is skipped
-with a warning (still safe — delivery URL is not guessable).
+dev_id must be present in ebay-credentials.json; a signed notification without a
+verifiable dev_id is rejected (no accept-when-unsigned fallback).
 
 Setup: call set_notification_preferences() once, or run `tgw setup-ebay-hooks`.
 """
@@ -72,8 +72,8 @@ def _load_app_credentials(cfg: Dict[str, Any]) -> Dict[str, str]:
 def verify_notification_signature(xml_body: bytes, cfg: Dict[str, Any]) -> bool:
     """
     Verify eBay's NotificationSignature: MD5(timestamp + dev_id + app_id + cert_id).
-    Returns True if valid.  If dev_id is absent from credentials, logs a warning
-    and returns True (accept but note unverified).
+    Returns True if valid. Returns False if a signature is present but dev_id is
+    missing from credentials (cannot verify → reject). No accept-when-unsigned fallback.
     """
     try:
         root = ET.fromstring(xml_body)
@@ -100,8 +100,8 @@ def verify_notification_signature(xml_body: bytes, cfg: Dict[str, Any]) -> bool:
         cert_id = creds.get('cert_id', '')
 
         if not dev_id:
-            log.warning('ebay_webhook: dev_id missing from credentials — signature not verified')
-            return True
+            log.error('ebay_webhook: dev_id missing from credentials — cannot verify signature, rejecting')
+            return False
 
         expected = hashlib.md5(
             (timestamp + dev_id + app_id + cert_id).encode('utf-8')

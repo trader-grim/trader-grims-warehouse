@@ -47,10 +47,13 @@ incomplete wiring, and data quality problems that need fixing.
 
 ### ISS-005 — dev_id missing from ebay-credentials.json
 - **Symptom**: SOAP notification signature verification is incomplete without `dev_id`
-- **Impact**: PP-SOLD-001 Tier 4 webhook cannot fully verify eBay notification signatures
-- **Fix**: add `"dev_id": "..."` to `/opt/TGW/secrets/ebay-credentials.json`
-  — value from developer.ebay.com → My Account → Application Keys → DevID
-- **Status**: pending operator action (blocked on webhook infra deployment anyway)
+- **Impact**: PP-SOLD-001 Tier 4 webhook rejects all signed notifications until dev_id is added
+- **Code fix**: DONE 2026-06-12 — `verify_notification_signature` now rejects (not accepts) when
+  `dev_id` is absent; accept-when-unsigned interim removed; test updated accordingly
+- **Remaining operator action**: add `"dev_id": "..."` to `/opt/TGW/secrets/ebay-credentials.json`
+  — value from developer.ebay.com → My Account → Application Keys → DevID field
+  — required before deploying webhook infra (admin #16)
+- **Status**: code done; pending operator credentials update
 
 ### ~~ISS-006~~ — _USER_PROMPT_ENRICHED not wired ✅ RESOLVED (verified session 15, 2026-06-07)
 - **Was**: `workers/ai_identify.py` had the `_USER_PROMPT_ENRICHED` template but the wiring to

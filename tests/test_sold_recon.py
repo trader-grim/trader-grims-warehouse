@@ -11,10 +11,10 @@ Covered:
   * notifications.parse_sold_notification     — Transaction parse vs ping/test -> None
   * notifications.verify_notification_signature — MD5 check + deliberate accept-when-unverifiable
 
-NOTE on verify_notification_signature: the current code intentionally ACCEPTS
-(returns True) when there is no SOAP header, no signature, or no dev_id in
-credentials — see the module docstring ("omitted -> signature check is skipped").
-The tests below encode that as the deliberate contract, not as a bug.
+NOTE on verify_notification_signature: the code accepts (returns True) when there
+is no SOAP header or no signature element — those are legitimate eBay ping/test
+patterns. When a signature IS present but dev_id is absent from credentials, the
+call REJECTS (returns False) — no accept-when-unsigned fallback (ISS-005 resolved).
 """
 
 from __future__ import annotations
@@ -290,11 +290,11 @@ def test_verify_signature_accepts_when_no_signature(tmp_path):
     ) is True
 
 
-def test_verify_signature_accepts_when_dev_id_missing(tmp_path):
-    # Signature present but no dev_id in creds -> cannot verify -> accepted (warned).
+def test_verify_signature_rejects_when_dev_id_missing(tmp_path):
+    # Signature present but no dev_id in creds -> cannot verify -> rejected.
     assert notifications.verify_notification_signature(
         _soap(header_sig="deadbeef"), _creds_cfg(tmp_path, app_id="A", cert_id="C")
-    ) is True
+    ) is False
 
 
 def test_verify_signature_valid_md5_passes(tmp_path):
