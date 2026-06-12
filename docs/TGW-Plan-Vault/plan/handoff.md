@@ -1,10 +1,8 @@
 # TGW Handoff Packet — Next Process
 
-**Status:** v4, 2026-06-11. Supersedes v3. Incorporates new docs/ tree (invariants,
-services, runbooks, plans, dev-workflow) + session 26 completions (PP-DOCFLOW-001 P2,
-PP-PYIPC-001, tgw history-index). Tracker beats plan when they disagree.
-Branch `round4-vision-export-todos` is **pushed** to origin, ~27 commits ahead of main.
-PR + merge to main still pending.
+**Status:** v5, 2026-06-12. All docs consolidated into vault (single tree). Supersedes v4.
+Tracker beats plan when they disagree.
+Branch `round4-vision-export-todos` merged to main (PR #2, 2026-06-12).
 
 ---
 
@@ -13,12 +11,12 @@ PR + merge to main still pending.
 | Source | What it owns |
 |--------|-------------|
 | `tgw todo claude` / `tgw todo admin` | **Canonical task queue** — if it's not here, it doesn't exist as work |
-| `docs/TGW-Plan-Vault/plan/TGW-Master-Plan.md` | Reference spec, architecture decisions, PP-* design |
-| `docs/invariants.md` | 29 invariants (A1–A8, B1–B5, C1–C8, D1–D7, E1–E4) + resolution log; 7 companion test files |
-| `docs/architecture/services.md` + `overview.md` | Service-by-service responsibility, deps, failure modes, critical invariants |
-| `docs/dev-workflow/next-process.md` | Session handoff protocol + Aider + Antigravity tool routing |
-| `docs/runbooks/INDEX.md` + 8 runbooks | Incident response (dead-letter triage, pipeline stall, token failure, etc.) |
-| `docs/plans/PLAN-nixos-migration.md` + `PLAN-backup-dr.md` | Approved migration/DR plans; phases become todos on Dave's go |
+| `plan/TGW-Master-Plan.md` | Reference spec, architecture decisions, PP-* design |
+| `reference/invariants.md` | 29 invariants (A1–A8, B1–B5, C1–C8, D1–D7, E1–E4) + resolution log; 7 companion test files |
+| `reference/TGW-Architecture-Services.md` + `TGW-Architecture-Overview.md` | Service-by-service responsibility, deps, failure modes, critical invariants |
+| `plan/next-process.md` | Session handoff protocol + Aider + Antigravity tool routing |
+| `reference/runbooks/INDEX.md` + 8 runbooks | Incident response (dead-letter triage, pipeline stall, token failure, etc.) |
+| `plan/PLAN-nixos-migration.md` + `PLAN-backup-dr.md` | Approved migration/DR plans; phases become todos on Dave's go |
 | Test suite (563 passing) | Correctness contract — `pytest` must stay green |
 | `tgw health` | System liveness gate — run before and after any significant change |
 
@@ -76,12 +74,12 @@ Five commits on top of the earlier 22:
 
 | Doc | Content |
 |-----|---------|
-| `docs/invariants.md` | 29 system invariants with enforcement status + 7 test files; gaps B4, C3–C6, A5 fixed 2026-06-10 |
-| `docs/architecture/services.md` + `overview.md` | Full service map: responsibility, deps, failure modes per subsystem |
-| `docs/dev-workflow/next-process.md` | Session handoff SOP; Aider config + task template; Antigravity 2.0 notes + validation checklist |
-| `docs/runbooks/INDEX.md` + 8 runbooks | Dead-letter triage, pipeline stall, token failure, eBay rejections, sold-sync gaps, Ollama stall, catalog stale, Postgres outage |
-| `docs/plans/PLAN-backup-dr.md` | PP-BACKUP-001 full plan (APPROVED 2026-06-11); Phase A scripts in `etc/systemd/` |
-| `docs/plans/PLAN-nixos-migration.md` | PP-NIXOS-001 migration plan; verified against live host |
+| `reference/invariants.md` | 29 system invariants with enforcement status + 7 test files; gaps B4, C3–C6, A5 fixed 2026-06-10 |
+| `reference/TGW-Architecture-Services.md` + `TGW-Architecture-Overview.md` | Full service map: responsibility, deps, failure modes per subsystem |
+| `plan/next-process.md` | Session handoff SOP; Aider config + task template; Antigravity 2.0 notes + validation checklist |
+| `reference/runbooks/INDEX.md` + 8 runbooks | Dead-letter triage, pipeline stall, token failure, eBay rejections, sold-sync gaps, Ollama stall, catalog stale, Postgres outage |
+| `plan/PLAN-backup-dr.md` | PP-BACKUP-001 full plan (APPROVED 2026-06-11); Phase A scripts in `etc/systemd/` |
+| `plan/PLAN-nixos-migration.md` | PP-NIXOS-001 migration plan; verified against live host |
 
 ---
 
@@ -91,7 +89,7 @@ Ordered by urgency:
 
 1. **No backup running (deadline risk):** PP-BACKUP-001 Phase A scripts exist but timers are not installed. `todo_items` (canonical task queue) and `queue_job_history` **cannot be re-derived from ItemData** — a disk loss today loses them since the last manual dump. *Mitigation: operator todo #61.*
 
-2. **Antigravity validation window (hard deadline 2026-06-18 — 7 days):** Headless/scripted use and skills/hooks carry-over are unverified. Side-by-side Gemini CLI comparison is only possible while both CLIs run. Checklist in `docs/dev-workflow/next-process.md` §3. After shutoff, reduced confidence is permanent.
+2. **Antigravity validation window (hard deadline 2026-06-18 — 7 days):** Headless/scripted use and skills/hooks carry-over are unverified. Side-by-side Gemini CLI comparison is only possible while both CLIs run. Checklist in `plan/next-process.md` §3. After shutoff, reduced confidence is permanent.
 
 3. **eBay DS 8 questions unanswered:** Blocks `buy.marketplace_insights` → PP-REPRICER-001 live. Dave must respond to eBay Developer Support.
 
@@ -101,7 +99,7 @@ Ordered by urgency:
 
 6. **`pm_intake` needs OpenRouter key:** PP-DOCFLOW-001 Phase 1 routes `pm_intake` to `openrouter/google/gemini-2.5-flash`. If `openrouter-credentials.json` is absent, `pm_intake` will dead-letter every job. Verify before restarting the worker.
 
-7. **Inline ItemData path construction (invariant A4):** Several workers duplicate `itemdata_root / sku / f'{sku}.json'` inline instead of calling `config.sku_json()`. No CI gate. Becomes a bug when PP-PORTABLE-CATALOG changes layout. See `docs/invariants.md` A4.
+7. **Inline ItemData path construction (invariant A4):** Several workers duplicate `itemdata_root / sku / f'{sku}.json'` inline instead of calling `config.sku_json()`. No CI gate. Becomes a bug when PP-PORTABLE-CATALOG changes layout. See `reference/invariants.md` A4.
 
 8. **Two-surface task drift:** Plan rows not seeded as todos vanish (rows 40–41 still unseeded). Procedural — not enforced.
 
@@ -112,7 +110,7 @@ Ordered by urgency:
 **Immediate (this week, deadline-driven):**
 
 1. **Merge the branch** — open PR for `round4-vision-export-todos` → main; review diff; merge.
-2. **Antigravity validation checklist** (deadline 2026-06-18): run the 5-step checklist in `docs/dev-workflow/next-process.md` §3 while both CLIs still run.
+2. **Antigravity validation checklist** (deadline 2026-06-18): run the 5-step checklist in `plan/next-process.md` §3 while both CLIs still run.
 3. **Operator: PP-BACKUP-001 Phase A** (todo #61): install timers, first cloud sync, restore drill. Closes the biggest data-loss risk. Scripts are ready — ~30 min operator work.
 4. **Verify `pm_intake` OpenRouter key**: confirm `secrets_root/openrouter-credentials.json` exists + is 600; restart `pm_intake`; confirm no dead-letters.
 
@@ -129,7 +127,7 @@ Ordered by urgency:
 
 ## 6. Tool Routing
 
-See `docs/dev-workflow/next-process.md` for the full decision tree + Aider config + Antigravity constraints.
+See `plan/next-process.md` for the full decision tree + Aider config + Antigravity constraints.
 
 | Task type | Tool | Notes |
 |-----------|------|-------|

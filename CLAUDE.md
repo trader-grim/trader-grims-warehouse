@@ -41,8 +41,10 @@ Memory index (cross-session context): `/home/tgw/.claude/projects/-opt-TGW-src-t
 
 ## Reference library
 
-Markmap documents in `docs/TGW-Plan-Vault/reference/` — read the relevant one before working
-in that area. All are plain Markdown; open in Obsidian for interactive mind map view.
+All docs now live in `docs/TGW-Plan-Vault/` (Syncthing-synced Obsidian vault).
+Plain Markdown; open in Obsidian for interactive mind map view where noted.
+
+### `reference/` — technical reference (read before working in that area)
 
 | File | Read when working on... |
 |------|------------------------|
@@ -58,7 +60,22 @@ in that area. All are plain Markdown; open in Obsidian for interactive mind map 
 | `eBay-Error-Codes.md` | eBay API error codes, HTTP status handling, dead-letter diagnosis |
 | `SHELL-AUDIT.md` | tgw.source / tgw-dev.source function audit — what to keep, wrap, or remove |
 | `HARDWARE-AI-INFERENCE.md` | Ollama model sizing, GPU upgrade planning, inference perf |
+| `invariants.md` | 29 system invariants (A1–E4) + enforcement status — check before any structural change |
+| `TGW-Architecture-Services.md` | Service-by-service responsibility, deps, failure modes, critical invariants |
+| `TGW-Architecture-Overview.md` | System topology — how subsystems connect |
+| `runbooks/INDEX.md` | Incident response index — dead-letter triage, pipeline stall, token failure, etc. |
+| `claude-cli.md` | Claude CLI / Antigravity config reference |
 | `echo.py` / `worker_base.py` | Starting point when writing a new worker |
+
+### `plan/` — planning and process docs
+
+| File | Read when... |
+|------|-------------|
+| `TGW-Master-Plan.md` | Every session — architecture decisions, PP-* design, completion status |
+| `handoff.md` | Starting a new session — current risks, recommended next sequence |
+| `next-process.md` | Tool routing decisions (Claude vs Aider vs Antigravity), session handoff SOP |
+| `PLAN-backup-dr.md` | Working on PP-BACKUP-001 or DR planning |
+| `PLAN-nixos-migration.md` | Working on PP-NIXOS-001 or infra migration |
 
 ## Settled architecture (do not relitigate)
 
@@ -121,21 +138,11 @@ Run as `tgw` user — source files are `rw-------`, secrets are `chmod 600`.
 
 ## Current phase
 
-See master plan `## Current state`, `## Implementation TODO`, and `## Phase N` sections.
-As of 2026-06-05 (session 5): Phases 1–4 + PP-STAGE-001 + PP-REPRICE-001 + PP-LISTING-001 +
-PP-SYNC-001 (all phases) + PP-SOLD-001 Tier 1 + PP-LOOKUP-001 ALL Tier 1 + PP-PRICE-004 complete.
-Pipeline: photo intake → AI identify (with barcode product lookup) → eBay draft → upload →
-price (launch=110% max→.99) → stage → `tgw staged` operator review → `tgw publish` → live.
-`ebay_price_reducer` handles scheduled markdown (p75 day 3 → p25 day 17).
-`ebay_sku_migrate` running (~8,350 eBay live listings remain; ~70 days at 5/hr).
-`tgw velocity-report` live — 1,540 categories, ~3,083 sold items recorded.
-Archive tombstone pass added to `import-sold-csv`; needs full all-time eBay CSV for archive hits.
-`velocity_stats` worker ✅ ENABLED 2026-06-05 — running nightly.
-PP-LISTING-001 (description footer + picklist line) confirmed done in `ebay_draft.py`.
-eBay sold CSV maxes at 2 years — archive tombstone ceiling accepted; no further CSV action.
-Dave is requesting new eBay keyset with all desired scopes (see Work Tracks § Priority 1).
-Work tracks established (session 5): see `## Work Tracks` in master plan.
-  Track 1 (Claude): PP-STORE-001 → PP-REF-002 → PP-CAPTURE-001 → PP-SHELL-001 → ...
-  Track 3 (Perplexity): 4 research briefs in `docs/TGW-Plan-Vault/perplexity/`.
-  Track 4 (Operator): new eBay keyset, IGDB/Discogs creds, Perplexity briefs, sweep, infra.
-  PP-REPRICER-001 blocked on `buy.marketplace_insights` scope.
+See `docs/TGW-Plan-Vault/plan/TGW-Master-Plan.md` for the authoritative current state.
+See `docs/TGW-Plan-Vault/plan/handoff.md` for current risks and recommended next sequence.
+
+As of 2026-06-11 (session 26): 563 tests passing. Pipeline fully live.
+PP-DOCFLOW-001 P1+P2, PP-PYIPC-001, PP-BACKUP-001 Phase A, history-index complete.
+`ebay_sku_migrate` running (~8,350 live listings remain). `velocity_stats` nightly.
+PP-REPRICER-001 blocked on `buy.marketplace_insights` scope (eBay DS 8 questions pending).
+PP-PORTABLE-CATALOG-001 P2 unblocked (PP-PYIPC-001 done).
