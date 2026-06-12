@@ -126,7 +126,8 @@ def test_apply_dry_run_does_not_modify_file(suggestions_file):
 
 def test_apply_marks_already_done(suggestions_file):
     entries = parse_pending(suggestions_file)
-    apply_classifications(suggestions_file, entries, CLASSIFIED_MIXED, write=True)
+    with patch("tgw.suggestions.todo_add"):
+        apply_classifications(suggestions_file, entries, CLASSIFIED_MIXED, write=True)
     content = suggestions_file.read_text(encoding="utf-8")
     # index 0 → already_done → should be [x]
     assert "- [x] 2026-06-10T10:00" in content
