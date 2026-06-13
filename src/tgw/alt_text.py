@@ -18,8 +18,9 @@ import base64
 import io
 import json
 import shutil
+import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from tgw.apis.llm import call_model, get_task_model
 from tgw.apis.ollama import extract_json, is_available
@@ -28,6 +29,7 @@ _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 _VISION_MAX_PX = 512  # Ollama (memory-constrained CPU)
 _OR_MAX_PX = 768      # OpenRouter (quality matters more)
 _ALT_STEM_SUFFIX = "-alt"  # final image name: <sku>-alt.jpg
+_OPENROUTER_MIN_INTERVAL_S = 3.0  # 60s / 20 req = 3s; stays under free-tier ceiling
 
 _SYSTEM_PROMPT = "You are an expert in web accessibility and SEO. Respond with valid JSON only — no markdown fences, no commentary."
 _USER_PROMPT = (
@@ -188,4 +190,104 @@ def cmd_alt_text(
         "image_renamed": f"{img_path.name} → {alt_path.name}",
         "archived_to_history": archived,
         "history_path": str(history_path),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Batch command (direct execution with rate-limiting; not queue-based)
+# ---------------------------------------------------------------------------
+
+
+def cmd_alt_text_batch(
+    cfg: Dict[str, Any],
+    *,
+    limit: int = 0,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Run alt-text generation directly on all eligible items.
+
+    Eligible = has a primary image, no existing alt_text in draft_listing, no
+    <sku>-alt.jpg yet.  For OpenRouter provider, enforces ~20 req/min rate
+    limit.  Fail-soft: per-item errors are collected, not raised.  Resumable:
+    idempotency check inside cmd_alt_text skips already-done items.
+    """
+    itemdata_root = Path(cfg["itemdata_root"])
+
+    eligible_skus: List[str] = []
+    for sku_dir in sorted(itemdata_root.iterdir()):
+        if not sku_dir.is_dir():
+            continue
+        sku = sku_dir.name
+        json_path = sku_dir / f"{sku}.json"
+        if not json_path.exists():
+            continue
+
+        try:
+            item = json.loads(json_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+        if item.get("draft_listing", {}).get("alt_text"):
+            continue
+
+        alt_path = sku_dir / f"{sku}{_ALT_STEM_SUFFIX}.jpg"
+        if alt_path.exists():
+            continue
+
+        if _primary_image(sku_dir) is None:
+            continue
+
+        eligible_skus.append(sku)
+        if limit and len(eligible_skus) >= limit:
+            break
+
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "eligible": len(eligible_skus),
+            "skus_preview": eligible_skus[:20],
+            "note": "run without --dry-run to process",
+        }
+
+    resolved_provider, resolved_model = get_task_model(cfg, "alt_text")
+    effective_provider = provider or resolved_provider
+    effective_model = model or resolved_model
+
+    processed = 0
+    skipped_idempotent = 0
+    error_details: List[Dict[str, Any]] = []
+    t_last_call: Optional[float] = None
+
+    for sku in eligible_skus:
+        if effective_provider == "openrouter" and t_last_call is not None:
+            elapsed = time.time() - t_last_call
+            if elapsed < _OPENROUTER_MIN_INTERVAL_S:
+                time.sleep(_OPENROUTER_MIN_INTERVAL_S - elapsed)
+
+        t_last_call = time.time()
+        try:
+            r = cmd_alt_text(cfg, sku=sku, provider=effective_provider, model=effective_model)
+        except Exception as exc:
+            error_details.append({"sku": sku, "error": str(exc)})
+            continue
+
+        if r.get("skipped"):
+            skipped_idempotent += 1
+        elif r.get("ok"):
+            processed += 1
+        else:
+            error_details.append({"sku": sku, "error": r.get("error", "unknown")})
+
+    return {
+        "ok": True,
+        "provider": effective_provider,
+        "model": effective_model,
+        "eligible": len(eligible_skus),
+        "processed": processed,
+        "skipped_idempotent": skipped_idempotent,
+        "errors": len(error_details),
+        "error_details": error_details,
     }

@@ -152,10 +152,23 @@ def test_queue_status_aggregates_dead_letter(cfg, monkeypatch):
         ("ebay_price", "dead_letter", 1),
     ]
     _install_conn(monkeypatch, rows)
+    monkeypatch.setattr(sm, "dead_letter_errors", lambda: [
+        {"queue_name": "ebay_draft", "error_detail": "token is expired"},
+        {"queue_name": "ebay_draft", "error_detail": "HardFailure: rejected"},
+        {"queue_name": "ebay_price", "error_detail": "HardFailure: rejected"},
+    ])
+    monkeypatch.setattr(sm, "zero_work_queues", lambda hours: [])
     out = json.loads(mcp_server.tgw_queue_status())
     assert out["ok"] is True
     assert out["dead_letter_total"] == 3
     assert out["dead_letter_by_queue"] == {"ebay_draft": 2, "ebay_price": 1}
+    assert out["dead_letter_classified"] == {
+        "ebay_draft": {"transient": 1, "hard": 1},
+        "ebay_price": {"transient": 0, "hard": 1},
+    }
+    assert out["dead_letter_transient"] == 1
+    assert out["dead_letter_hard"] == 2
+    assert out["zero_work_stalls"] == []
     assert len(out["queues"]) == 3
 
 

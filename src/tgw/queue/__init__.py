@@ -29,6 +29,7 @@ WORKER_QUEUES: tuple[str, ...] = (
     'ebay_price_reducer',
     'ebay_stage',
     'ebay_publish',
+    'ebay_dole',
     'ebay_sync',
     'ebay_legacy_sync',
     'ebay_sku_migrate',

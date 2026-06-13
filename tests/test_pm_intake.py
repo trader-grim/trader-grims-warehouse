@@ -436,3 +436,263 @@ def test_handle_empty_note(tmp_path):
     mock_llm.assert_not_called()
     processed = list((cfg['plan_inbox_path'] / 'processed').glob('*empty.md'))
     assert processed
+
+
+# ---------------------------------------------------------------------------
+# URL/URI submissions (PP-DOCFLOW-001 Phase 3)
+# ---------------------------------------------------------------------------
+
+def test_is_url_submission_detects_http():
+    from tgw.workers.pm_intake import is_url_submission
+    assert is_url_submission('https://example.com/article') == 'https://example.com/article'
+    assert is_url_submission('  http://foo.bar/baz  ') == 'http://foo.bar/baz'
+
+
+def test_is_url_submission_rejects_non_url():
+    from tgw.workers.pm_intake import is_url_submission
+    assert is_url_submission('# This is a note') is None
+    assert is_url_submission('some plain text') is None
+    assert is_url_submission('') is None
+    assert is_url_submission('ftp://not-http.example.com') is None
+
+
+def test_html_to_text_strips_script_and_nav():
+    from tgw.workers.pm_intake import _html_to_text
+    html = (
+        '<html><head><title>T</title></head><body>'
+        '<nav>Menu</nav>'
+        '<main><h1>Article</h1><p>Content here.</p></main>'
+        '<script>alert("x")</script>'
+        '</body></html>'
+    )
+    text = _html_to_text(html)
+    assert 'Content here.' in text
+    assert 'Article' in text
+    assert 'Menu' not in text
+    assert 'alert' not in text
+
+
+def test_html_to_text_collapses_whitespace():
+    from tgw.workers.pm_intake import _html_to_text
+    html = '<p>  lots   of   spaces  </p>'
+    text = _html_to_text(html)
+    assert '  ' not in text.strip()
+
+
+def _make_mock_response(text, content_type='text/html; charset=utf-8',
+                        status_code=200, url='https://example.com/'):
+    """Build a fake httpx Response-like object."""
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.headers = {'content-type': content_type}
+    resp.text = text
+    resp.url = url
+    return resp
+
+
+def _mock_httpx_ok(html, url='https://example.com/article'):
+    """Context manager that patches httpx.Client to return a successful response."""
+    from unittest.mock import MagicMock, patch
+    mock_resp = _make_mock_response(html, url=url)
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_client.get = MagicMock(return_value=mock_resp)
+    return patch('httpx.Client', return_value=mock_client)
+
+
+def test_fetch_url_success(tmp_path):
+    from tgw.workers.pm_intake import fetch_url
+    html = '<html><head><title>My Article</title></head><body><p>Great content.</p></body></html>'
+    with _mock_httpx_ok(html, url='https://example.com/article'):
+        result = fetch_url('https://example.com/article')
+    assert result['ok'] is True
+    assert result['title'] == 'My Article'
+    assert 'Great content.' in result['text']
+    assert result['url'] == 'https://example.com/article'
+
+
+def test_fetch_url_http_error():
+    from tgw.workers.pm_intake import fetch_url
+    resp = _make_mock_response('', status_code=404)
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_client.get = MagicMock(return_value=resp)
+    with patch('httpx.Client', return_value=mock_client):
+        result = fetch_url('https://example.com/missing')
+    assert result['ok'] is False
+    assert '404' in result['error']
+
+
+def test_fetch_url_unsupported_content_type():
+    from tgw.workers.pm_intake import fetch_url
+    resp = _make_mock_response(b'binary', content_type='application/pdf')
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_client.get = MagicMock(return_value=resp)
+    with patch('httpx.Client', return_value=mock_client):
+        result = fetch_url('https://example.com/file.pdf')
+    assert result['ok'] is False
+    assert 'unsupported' in result['error']
+
+
+def test_fetch_url_network_error():
+    import httpx
+
+    from tgw.workers.pm_intake import fetch_url
+    with patch('httpx.Client') as mock_cls:
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get = MagicMock(side_effect=httpx.RequestError('connection refused'))
+        mock_cls.return_value = mock_client
+        result = fetch_url('https://down.example.com/')
+    assert result['ok'] is False
+    assert 'request error' in result['error']
+
+
+def test_fetch_url_plaintext():
+    from tgw.workers.pm_intake import fetch_url
+    resp = _make_mock_response('plain text content', content_type='text/plain')
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_client.get = MagicMock(return_value=resp)
+    with patch('httpx.Client', return_value=mock_client):
+        result = fetch_url('https://example.com/file.txt')
+    assert result['ok'] is True
+    assert result['text'] == 'plain text content'
+
+
+def test_handle_url_submission_filed(tmp_path):
+    """URL-only note: fetches content, files via LLM file_document action."""
+    cfg = _make_cfg(tmp_path)
+    worker = _make_worker(cfg)
+    _place_queued_note(cfg, 'link.md', 'https://example.com/research')
+
+    html = '<html><head><title>Research Article</title></head><body><p>Key findings.</p></body></html>'
+    llm_response = json.dumps({
+        'action': 'file_document',
+        'destination': 'reference',
+        'destination_filename': 'RESEARCH-URL.md',
+        'related_pp': 'PP-DOCFLOW-001',
+        'confidence': 0.9,
+        'rationale': 'Reference research document.',
+    })
+    job = {'payload_json': {'filename': 'link.md'}}
+
+    with _mock_httpx_ok(html):
+        with patch('tgw.workers.pm_intake.call_model', return_value=llm_response):
+            worker.handle(job)
+
+    # Filed content should be the fetched markdown, not the URL stub
+    dest = cfg['plan_vault_path'] / 'reference' / 'RESEARCH-URL.md'
+    assert dest.exists()
+    filed_text = dest.read_text()
+    assert 'Research Article' in filed_text or 'Key findings.' in filed_text
+    # Must NOT be the bare URL
+    assert filed_text.strip() != 'https://example.com/research'
+
+    # FILING-LOG must record source URL
+    log_path = cfg['plan_vault_path'] / 'reference' / 'FILING-LOG.md'
+    assert log_path.exists()
+    log_text = log_path.read_text()
+    assert 'https://example.com/research' in log_text
+
+    # Original archived
+    processed = list((cfg['plan_inbox_path'] / 'processed').glob('*link.md'))
+    assert processed
+
+
+def test_handle_url_submission_fetch_failure(tmp_path):
+    """Failed URL fetch immediately flags for review without LLM call."""
+    cfg = _make_cfg(tmp_path)
+    worker = _make_worker(cfg)
+    _place_queued_note(cfg, 'bad-link.md', 'https://down.example.com/')
+
+    import httpx
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_client.get = MagicMock(side_effect=httpx.RequestError('connection refused'))
+
+    mock_todo = MagicMock(return_value={'ok': True, 'id': 55})
+    job = {'payload_json': {'filename': 'bad-link.md'}}
+
+    with patch('httpx.Client', return_value=mock_client):
+        with patch('tgw.workers.pm_intake.call_model') as mock_llm:
+            with patch('tgw.workers.pm_intake.todo_add', mock_todo):
+                worker.handle(job)
+
+    # No LLM call — flagged immediately
+    mock_llm.assert_not_called()
+
+    # File moved to review
+    review = cfg['plan_inbox_path'] / 'review' / 'bad-link.md'
+    assert review.exists()
+
+    # Todo created with admin agent + URL in body
+    mock_todo.assert_called_once()
+    call_args = mock_todo.call_args[0]
+    assert call_args[0] == 'admin'
+    assert 'https://down.example.com/' in call_args[1]
+
+    # Original archived
+    processed = list((cfg['plan_inbox_path'] / 'processed').glob('*bad-link.md'))
+    assert processed
+
+
+def test_handle_url_submission_no_change(tmp_path):
+    """LLM returns no_change for URL submission — note archived, nothing filed."""
+    cfg = _make_cfg(tmp_path)
+    worker = _make_worker(cfg)
+    _place_queued_note(cfg, 'old-link.md', 'https://example.com/already-known')
+
+    html = '<html><body><p>Already known content.</p></body></html>'
+    llm_response = json.dumps({'action': 'no_change', 'rationale': 'Already captured.'})
+    job = {'payload_json': {'filename': 'old-link.md'}}
+
+    with _mock_httpx_ok(html):
+        with patch('tgw.workers.pm_intake.call_model', return_value=llm_response):
+            worker.handle(job)
+
+    processed = list((cfg['plan_inbox_path'] / 'processed').glob('*old-link.md'))
+    assert processed
+    # No filing log entry
+    log_path = cfg['plan_vault_path'] / 'reference' / 'FILING-LOG.md'
+    assert not log_path.exists()
+
+
+def test_write_filing_log_records_source_url(tmp_path):
+    """FILING-LOG entry includes Source URL when source_url is given."""
+    from tgw.workers.pm_intake import _write_filing_log
+    vault = tmp_path
+    (vault / 'reference').mkdir()
+
+    _write_filing_log(
+        vault, 'link.md', 'reference', 'FILED.md',
+        'PP-DOCFLOW-001', 'openrouter', 'gemini', 0.9, 'test',
+        source_url='https://example.com/article',
+    )
+    log_text = (vault / 'reference' / 'FILING-LOG.md').read_text()
+    assert 'https://example.com/article' in log_text
+    assert 'Source URL' in log_text
+
+
+def test_non_url_note_unchanged_behavior(tmp_path):
+    """Regular (non-URL) notes are unaffected by the URL detection path."""
+    cfg = _make_cfg(tmp_path)
+    worker = _make_worker(cfg)
+    _place_queued_note(cfg, 'normal.md', '# A regular note\n\nSome content here.')
+
+    llm_response = json.dumps({'action': 'no_change', 'rationale': 'Already covered.'})
+    job = {'payload_json': {'filename': 'normal.md'}}
+
+    with patch('tgw.workers.pm_intake.call_model', return_value=llm_response) as mock_llm:
+        with patch('httpx.Client') as mock_http:
+            worker.handle(job)
+
+    mock_llm.assert_called_once()   # LLM called for normal notes
+    mock_http.assert_not_called()   # httpx NOT used for non-URL notes

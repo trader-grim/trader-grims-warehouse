@@ -43,12 +43,28 @@ def chat(
     timeout: int = _DEFAULT_TIMEOUT,
 ) -> str:
     """Multi-turn chat. messages = [{'role': 'user'|'assistant', 'content': '...'}]."""
+    text, _, _ = chat_full(model, messages, system=system, timeout=timeout)
+    return text
+
+
+def chat_full(
+    model: str,
+    messages: List[Dict[str, str]],
+    system: str = '',
+    timeout: int = _DEFAULT_TIMEOUT,
+) -> tuple:
+    """Like chat() but also returns Ollama token counts.
+
+    Returns ``(text, prompt_eval_count, eval_count)``. Counts are None when the
+    Ollama version does not include them in the response.
+    """
     all_messages = []
     if system:
         all_messages.append({'role': 'system', 'content': system})
     all_messages.extend(messages)
     result = _post('/api/chat', {'model': model, 'messages': all_messages, 'stream': False}, timeout)
-    return result['message']['content']
+    text = result['message']['content']
+    return text, result.get('prompt_eval_count'), result.get('eval_count')
 
 
 def extract_json(text: str) -> Any:

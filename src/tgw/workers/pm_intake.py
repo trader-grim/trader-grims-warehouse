@@ -19,15 +19,23 @@ Action vocabulary:
   flag_for_review — move to inbox/review/ + create a claude/admin todo
   new_section     — DEMOTED: treated as flag_for_review (plan writes append-only)
 
+URL/URI submissions (PP-DOCFLOW-001 Phase 3):
+  A note whose entire content is a single HTTP/HTTPS URL triggers URL fetch mode:
+  the worker fetches the URL, extracts readable text, synthesises a markdown note,
+  and passes it through the same classify/file pipeline. The source URL is recorded
+  in FILING-LOG.md. A fetch failure immediately flags for review.
+
 Queue name: pm_intake
 """
 
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import time
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -103,6 +111,152 @@ Respond with JSON only:
 """
 
 _NOTE_MAX_CHARS = 8000
+_URL_FETCH_MAX_CHARS = 16000  # generous limit; pages can be longer than notes
+
+# Matches a bare HTTP/HTTPS URL as the entire note content
+_URL_ONLY_RE = re.compile(r'^https?://\S+$', re.IGNORECASE)
+
+
+# ---------------------------------------------------------------------------
+# URL fetch helpers (PP-DOCFLOW-001 Phase 3)
+# ---------------------------------------------------------------------------
+
+class _HTMLTextExtractor(HTMLParser):
+    """Minimal HTML-to-text extractor (no third-party deps)."""
+
+    _SKIP = frozenset({'script', 'style', 'head', 'noscript', 'iframe', 'svg', 'nav', 'footer'})
+    _BLOCK = frozenset({
+        'p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+        'li', 'tr', 'blockquote', 'pre', 'br', 'hr',
+        'article', 'section', 'header', 'aside', 'main',
+    })
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._skip_depth = 0
+        self._parts: list = []
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        tag = tag.lower()
+        if tag in self._SKIP:
+            self._skip_depth += 1
+        elif tag in self._BLOCK:
+            self._parts.append('\n')
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in self._SKIP:
+            self._skip_depth = max(0, self._skip_depth - 1)
+        elif tag in self._BLOCK:
+            self._parts.append('\n')
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth == 0:
+            self._parts.append(data)
+
+    def get_text(self) -> str:
+        text = ''.join(self._parts)
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        text = re.sub(r'[ \t]+', ' ', text)
+        return text.strip()
+
+
+def _html_to_text(html: str) -> str:
+    extractor = _HTMLTextExtractor()
+    extractor.feed(html)
+    return extractor.get_text()
+
+
+def is_url_submission(text: str) -> Optional[str]:
+    """Return the URL if text is a URL-only inbox note, else None."""
+    stripped = text.strip()
+    return stripped if _URL_ONLY_RE.match(stripped) else None
+
+
+def fetch_url(url: str, timeout_s: float = 10.0) -> Dict[str, Any]:
+    """Fetch a URL and return extracted text content.
+
+    Returns::
+
+        {
+            'ok': True,
+            'url': original_url,
+            'final_url': url_after_redirects,
+            'content_type': 'text/html',
+            'text': extracted_text,
+            'title': page_title_or_empty,
+        }
+
+    On failure::
+
+        {'ok': False, 'url': url, 'error': 'description'}
+    """
+    try:
+        import httpx
+    except ImportError:
+        return {'ok': False, 'url': url, 'error': 'httpx not installed'}
+
+    try:
+        with httpx.Client(follow_redirects=True, timeout=timeout_s) as client:
+            resp = client.get(url, headers={'User-Agent': 'TGW-pm-intake/1.0'})
+    except httpx.TimeoutException:
+        return {'ok': False, 'url': url, 'error': f'timeout after {timeout_s}s'}
+    except httpx.RequestError as exc:
+        return {'ok': False, 'url': url, 'error': f'request error: {exc}'}
+
+    if resp.status_code >= 400:
+        return {'ok': False, 'url': url,
+                'error': f'HTTP {resp.status_code} from {resp.url}'}
+
+    content_type = resp.headers.get('content-type', '').lower()
+    final_url = str(resp.url)
+
+    if 'html' in content_type:
+        raw_text = _html_to_text(resp.text)
+        title = _extract_title(resp.text)
+    elif content_type.startswith('text/'):
+        raw_text = resp.text.strip()
+        title = ''
+    else:
+        return {
+            'ok': False, 'url': url,
+            'error': f'unsupported content type: {content_type} (use binaries path)',
+        }
+
+    return {
+        'ok': True,
+        'url': url,
+        'final_url': final_url,
+        'content_type': content_type,
+        'text': raw_text,
+        'title': title,
+    }
+
+
+def _extract_title(html: str) -> str:
+    """Extract <title> text from HTML source."""
+    m = re.search(r'<title[^>]*>(.*?)</title>', html, re.IGNORECASE | re.DOTALL)
+    if not m:
+        return ''
+    # Strip tags inside <title> (uncommon but possible) and decode entities
+    extractor = _HTMLTextExtractor()
+    extractor.feed(m.group(1))
+    return extractor.get_text()[:200]
+
+
+def _build_url_note(fetch_result: Dict[str, Any]) -> str:
+    """Synthesise a markdown note from fetched URL content."""
+    title = fetch_result.get('title') or ''
+    url = fetch_result['url']
+    final_url = fetch_result.get('final_url', url)
+    body = fetch_result.get('text', '')[:_URL_FETCH_MAX_CHARS]
+
+    heading = f'# {title}' if title else '# (Fetched URL content)'
+    url_line = f'Source URL: {url}'
+    if final_url != url:
+        url_line += f' → {final_url}'
+
+    return f'{heading}\n\n{url_line}\n\n{body}'
 
 
 # ---------------------------------------------------------------------------
@@ -156,12 +310,15 @@ def _write_filing_log(
     model: str,
     confidence: float,
     rationale: str,
+    source_url: str = '',
 ) -> None:
     """Append an entry to reference/FILING-LOG.md."""
     log_path = vault_path / 'reference' / 'FILING-LOG.md'
     ts = datetime.now(tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    url_line = f'- **Source URL:** {source_url}\n' if source_url else ''
     entry = (
         f'\n## {ts} — {source_filename}\n\n'
+        f'{url_line}'
         f'- **Filed to:** `{destination}/{destination_filename}`\n'
         f'- **Related PP:** {related_pp or "none"}\n'
         f'- **Model:** {provider} / {model}\n'
@@ -310,6 +467,45 @@ class PMIntakeWorker(QueueWorker):
             _archive(note_path, processed_dir)
             return
 
+        # PP-DOCFLOW-001 Phase 3: URL submission — fetch and substitute content
+        _source_url = ''
+        url = is_url_submission(note_text)
+        if url:
+            log.info('URL submission detected in %s: %s', filename, url)
+            tgw_logging.log_event('pm_intake_url_submission', filename=filename, url=url)
+            fetch = fetch_url(url)
+            if not fetch['ok']:
+                error_msg = fetch.get('error', 'unknown fetch error')
+                log.warning('URL fetch failed for %s (%s): %s', filename, url, error_msg)
+                tgw_logging.log_event(
+                    'pm_intake_url_fetch_failed', filename=filename, url=url, error=error_msg
+                )
+                # Immediate flag_for_review — no LLM call needed
+                review_dir = inbox_dir / 'review'
+                review_dir.mkdir(parents=True, exist_ok=True)
+                dest = review_dir / filename
+                shutil.copy2(str(note_path), str(dest))
+                try:
+                    todo_add(
+                        'admin',
+                        f'[pm_intake] URL fetch failed for {url}: {error_msg} → inbox/review/{filename}',
+                        priority=40,
+                        source='pm_intake',
+                    )
+                except Exception:
+                    log.exception('failed to create todo for URL fetch failure — review file still moved')
+                _archive(note_path, processed_dir)
+                tgw_logging.log_event(
+                    'pm_intake_url_flagged', filename=filename, url=url, error=error_msg
+                )
+                return
+            note_text = _build_url_note(fetch)
+            _source_url = url
+            log.info(
+                'URL fetched (%s): %d chars extracted, final_url=%s',
+                url, len(note_text), fetch.get('final_url', url),
+            )
+
         plan_headings = '\n'.join(
             line for line in plan_text.splitlines() if line.startswith('#')
         )
@@ -394,11 +590,15 @@ class PMIntakeWorker(QueueWorker):
                 raise HardFailure(
                     f'invalid destination {destination!r} for file_document in {filename}'
                 )
-            dest_filename = (result.get('destination_filename') or '').strip() or filename
+            dest_filename = Path((result.get('destination_filename') or '').strip() or filename).name
             dest_dir = vault_path / destination
             dest_dir.mkdir(parents=True, exist_ok=True)
             dest_path = dest_dir / dest_filename
-            shutil.copy2(str(note_path), str(dest_path))
+            if _source_url:
+                # URL submission: write the synthesised markdown, not the URL stub
+                dest_path.write_text(note_text, encoding='utf-8')
+            else:
+                shutil.copy2(str(note_path), str(dest_path))
             log.info('filed %s → %s/%s', filename, destination, dest_filename)
             tgw_logging.log_event(
                 'pm_intake_filed',
@@ -410,6 +610,7 @@ class PMIntakeWorker(QueueWorker):
                 _write_filing_log(
                     vault_path, filename, destination, dest_filename,
                     related_pp, provider, model, confidence, rationale,
+                    source_url=_source_url,
                 )
             except Exception:
                 log.exception('failed to write FILING-LOG.md for %s', filename)
