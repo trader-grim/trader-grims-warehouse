@@ -59,8 +59,9 @@ tgw-ebay-sku-migrate-worker = "tgw.workers.ebay_sku_migrate:main"
 tgw-multi-intake-worker   = "tgw.workers.multi_intake:main"
 tgw-catalog-rebuild-worker = "tgw.workers.catalog_rebuild:main"
 tgw-plan-render-worker    = "tgw.workers.plan_render:main"
-tgw-thumbnail-gen-worker  = "tgw.workers.thumbnail_gen:main"
-tgw-alt-text-worker       = "tgw.workers.alt_text:main"
+tgw-thumbnail-gen-worker      = "tgw.workers.thumbnail_gen:main"
+tgw-alt-text-worker           = "tgw.workers.alt_text:main"
+tgw-sync-conflict-worker      = "tgw.workers.sync_conflict:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
