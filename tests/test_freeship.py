@@ -33,7 +33,7 @@ from tgw.ebay.pricing import freeship_price
     (12.99, 5.50, 17.99),
     # Zero shipping — price unchanged except rounding
     (9.99,  0.00, 9.99),
-    (10.00, 0.00, 9.99),   # base=10, midpoint=10.49, 10.00 > 10.49 False → lower=9.99
+    (10.00, 0.00, 10.99),  # 9.99 would be below item_price=10.00 → snaps up to 10.99
     # Small values floored at 0.99
     (0.10, 0.50, 0.99),
 ])
@@ -357,3 +357,93 @@ def test_resolve_ignores_freeship_flag_when_false():
     }
     fid = _resolve_fulfillment_id(cfg, "12345", free_shipping=False)
     assert fid == "NORMAL-POLICY-ID"
+
+
+def test_resolve_shipping_profile_beats_freeship():
+    """Bug #7: per-item shipping_profile must override free_shipping flag."""
+    from tgw.ebay.sync import _resolve_fulfillment_id
+    cfg = {
+        "fulfillment_policy_free_shipping": "FREESHIP-POLICY-ID",
+        "fulfillment_policy_by_profile": {"bulky": "BULKY-POLICY-ID"},
+        "fulfillment_policy_id": "NORMAL-POLICY-ID",
+        "fulfillment_policy_by_category": {},
+        "fulfillment_policy_by_size_class": {},
+    }
+    fid = _resolve_fulfillment_id(cfg, "12345", shipping_profile="bulky", free_shipping=True)
+    assert fid == "BULKY-POLICY-ID"
+
+
+# ---------------------------------------------------------------------------
+# Bug fixes — regression tests
+# ---------------------------------------------------------------------------
+
+def test_freeship_price_floor_prevents_undercut():
+    """Bug #1: freeship_price must never return below item_price."""
+    assert freeship_price(5.00, 0.10) == 5.99   # was 4.99 before fix
+    assert freeship_price(10.00, 0.00) == 10.99  # was 9.99 before fix
+    assert freeship_price(3.00, 0.05) == 3.99    # 3.05 → nearest=2.99 < 3.00 → snap up
+
+
+def test_price_freeship_apply_idempotency(item_dir):
+    """Bug #4: --apply twice must fail on second call rather than stacking shipping."""
+    from tgw.api import cmd_price_freeship
+    tmp_path, sku = item_dir
+    cfg = _cfg(tmp_path)
+    first = cmd_price_freeship(cfg, sku, shipping_cost=5.00, apply=True)
+    assert first["ok"] is True
+    second = cmd_price_freeship(cfg, sku, shipping_cost=5.00, apply=True)
+    assert second["ok"] is False
+    assert "freeship_applied_at" in second["error"]
+    # Price must not have changed from the first apply
+    item = json.loads((tmp_path / sku / f"{sku}.json").read_text())
+    assert item["ebay_offer"]["price"] == first["freeship_price"]
+
+
+def test_worker_target_price_includes_shipping(price_worker, tmp_path, monkeypatch):
+    """Bug #5: target_price must be freeship-adjusted so the repricer doesn't underprice."""
+    comps = {"count": 3, "min": 10.0, "p25": 14.99, "median": 15.0,
+             "p75": 16.0, "max": 16.0}
+    monkeypatch.setattr(ebay_price_mod, "suggest_price",
+                        lambda *a, **k: _suggestion(14.99, comps))
+    sku = "tgw_fs_target"
+    result = _run_worker(price_worker, tmp_path, sku)
+    # target_price must be >= p25 (shipping absorbed), not the bare p25
+    ship_cost = 6.00  # price_worker fixture has default_shipping_cost=6.00
+    assert result["ebay_offer"]["target_price"] == freeship_price(14.99, ship_cost)
+    assert result["ebay_offer"]["target_price"] > 14.99
+
+
+def test_worker_zero_shipping_cost_not_overridden(tmp_path, monkeypatch):
+    """Bug #2: item.shipping_cost=0 must not fall through to config default_shipping_cost."""
+    monkeypatch.setattr(ebay_price_mod.tgw_logging, "log_event", lambda *a, **k: None)
+    enqueued = []
+    monkeypatch.setattr(ebay_price_mod.state_machine, "enqueue_job",
+                        lambda **kw: enqueued.append(kw))
+    import tgw.listing_quality as lq
+
+    class _Q:
+        def to_dict(self):
+            return {"stub": True}
+
+    monkeypatch.setattr(lq, "score_draft", lambda item: _Q())
+    worker = object.__new__(ebay_price_mod.EbayPriceWorker)
+    worker.config = {
+        "itemdata_root": tmp_path,
+        "pretty": False,
+        "free_shipping_enabled": True,
+        "default_shipping_cost": 9.99,  # must NOT be used when item has shipping_cost=0
+    }
+    comps = {"count": 3, "min": 10.0, "p25": 12.99, "median": 14.0,
+             "p75": 15.0, "max": 15.0}
+    monkeypatch.setattr(ebay_price_mod, "suggest_price",
+                        lambda *a, **k: _suggestion(12.99, comps))
+    sku = "tgw_fs_zero"
+    _write_item_for_worker(tmp_path, sku)
+    p = tmp_path / sku / f"{sku}.json"
+    item = json.loads(p.read_text())
+    item["shipping_cost"] = 0   # explicit zero — must be respected
+    p.write_text(json.dumps(item))
+    worker.handle({"payload_json": {"sku": sku}})
+    result = json.loads(p.read_text())
+    # ship_cost=0 → freeship block skips, free_shipping not set
+    assert result.get("free_shipping") is not True

@@ -141,7 +141,7 @@ def freeship_price(item_price: float, shipping_cost: float) -> float:
     to the nearest .99 price point (PP-FREESHIP-001).
 
     e.g. 12.99 + 5.00 = 17.99, 12.99 + 5.51 = 18.99 (tipping at base+0.49)
-    Never returns below 0.99.
+    Never returns below item_price or 0.99 — snaps up if nearest-.99 would undercut.
     """
     combined = max(0.0, round(item_price + shipping_cost, 2))
     base = math.floor(combined)
@@ -150,7 +150,10 @@ def freeship_price(item_price: float, shipping_cost: float) -> float:
     midpoint = round(base + 0.49, 2)
     if combined > midpoint:
         return upper
-    return max(lower, 0.99)
+    lower = max(lower, 0.99)
+    if lower < item_price:
+        return upper
+    return lower
 
 
 # ---------------------------------------------------------------------------

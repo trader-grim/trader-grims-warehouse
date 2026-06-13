@@ -2327,6 +2327,13 @@ def cmd_price_freeship(
     }
 
     if apply:
+        if offer.get("freeship_applied_at"):
+            return {
+                "ok": False,
+                "error": "free_shipping already applied (freeship_applied_at is set); "
+                         "remove ebay_offer.freeship_applied_at to reapply",
+                "sku": sku,
+            }
         offer_block = dict(offer)
         offer_block["price"] = combined
         offer_block["freeship_applied_at"] = datetime.now(timezone.utc).isoformat()
@@ -2336,6 +2343,18 @@ def cmd_price_freeship(
             item["draft_listing"] = draft
         item["free_shipping"] = True
         atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
+        try:
+            from tgw.queue import state_machine as _sm
+            _sm.init(cfg["postgres_dsn"])
+            _sm.enqueue_job(
+                queue_name="catalog_rebuild",
+                payload={"reason": f"price_freeship:{sku}"},
+                dedupe_key="catalog_rebuild:pending",
+                not_before=time.time() + 30,
+                max_attempts=3,
+            )
+        except Exception:
+            pass
         result["applied"] = True
 
     return result
