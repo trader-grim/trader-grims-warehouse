@@ -30,20 +30,17 @@ incomplete wiring, and data quality problems that need fixing.
   human edit made directly on eBay, not just this issue
 - **Status**: pending operator action
 
-### ISS-003 — full_catalog_path config mismatch
-- **Symptom**: `tgw-api-config.json` sets `full_catalog_path` to `master-catalog.json`
-  but `load_config()` defaults to `tgwcatalog.json`; code default wins silently
-- **Risk**: if `full_catalog_path` is ever read from the JSON value, wrong file is used
-- **Fix**: align JSON value to match code default, or remove the key from JSON so the
-  default is clearly canonical
-- **Status**: low urgency; no production impact currently
+### ~~ISS-003~~ — full_catalog_path config mismatch ✅ RESOLVED session 29
+- **Was**: `load_config()` defaulted to `tgwcatalog.json`; JSON config had `master-catalog.json`
+- **Fix**: changed code default to `master-catalog.json` (`config.py:63`); 2 tests in
+  `tests/test_config_hygiene.py` assert default and explicit-override behaviour
 
-### ISS-004 — ebay_sku_migrate config bypasses load_config
-- **Symptom**: `ebay_sku_migrate` block in JSON is read via `cfg['raw']` directly;
-  not surfaced in the normalised config dict like all other keys
-- **Risk**: inconsistent pattern; easy to miss when auditing config
-- **Fix**: add `ebay_sku_migrate` dict to `load_config()` return dict
-- **Status**: low urgency
+### ~~ISS-004~~ — ebay_sku_migrate config bypasses load_config ✅ RESOLVED session 29
+- **Was**: `ebay_sku_migrate` block not surfaced in normalised config dict (pre-a540d9b)
+- **Reality**: already fixed in a540d9b — `load_config()` line 190 returns the block;
+  worker reads `self.config.get('ebay_sku_migrate', {})` (not `cfg['raw']`)
+- **Tests**: 3 tests in `tests/test_config_hygiene.py` cover presence, default, and
+  round-trip read without reaching into `cfg['raw']`
 
 ### ISS-005 — dev_id missing from ebay-credentials.json
 - **Symptom**: SOAP notification signature verification is incomplete without `dev_id`
