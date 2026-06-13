@@ -16,6 +16,7 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "mcp>=1.0",
+    "pyperclip>=1.8",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +28,10 @@ dev = [
 ]
 thumbnails = [
     "Pillow>=10.0",
+]
+printing = [
+    "reportlab>=4.0",
+    "qrcode[pil]>=7.4",
 ]
 
 [project.scripts]
@@ -45,6 +50,7 @@ tgw-ebay-price-worker     = "tgw.workers.ebay_price:main"
 tgw-ebay-stage-worker        = "tgw.workers.ebay_stage:main"
 tgw-ebay-legacy-sync-worker  = "tgw.workers.ebay_legacy_sync:main"
 tgw-ebay-publish-worker   = "tgw.workers.ebay_publish:main"
+tgw-ebay-dole-worker      = "tgw.workers.ebay_dole:main"
 tgw-ebay-price-reducer-worker = "tgw.workers.ebay_price_reducer:main"
 tgw-velocity-stats-worker     = "tgw.workers.velocity_stats:main"
 tgw-ebay-sync-worker      = "tgw.workers.ebay_sync:main"

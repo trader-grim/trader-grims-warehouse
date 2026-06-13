@@ -495,3 +495,26 @@ def test_todo_top_no_tasks_returns_none():
         result = todo_top('claude')
 
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# _push_clipboard — pyperclip wrapper
+# ---------------------------------------------------------------------------
+
+def test_push_clipboard_returns_true_on_success():
+    from tgw.todo import _push_clipboard
+
+    with patch('pyperclip.copy') as mock_copy:
+        result = _push_clipboard('hello')
+
+    mock_copy.assert_called_once_with('hello')
+    assert result is True
+
+
+def test_push_clipboard_returns_false_on_exception():
+    from tgw.todo import _push_clipboard
+
+    with patch('pyperclip.copy', side_effect=Exception('no clipboard')):
+        result = _push_clipboard('hello')
+
+    assert result is False

@@ -37,15 +37,13 @@ _DSN = 'dbname=state_machine user=tgw'
 
 
 def _push_clipboard(text: str) -> bool:
-    """Push text to the clipboard via wl-copy (Wayland) or xclip (X11)."""
-    import subprocess
-    for cmd in (["wl-copy"], ["xclip", "-selection", "clipboard"]):
-        try:
-            subprocess.run(cmd, input=text, text=True, timeout=3, capture_output=True)
-            return True
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            continue
-    return False
+    """Push text to the system clipboard via pyperclip."""
+    try:
+        import pyperclip
+        pyperclip.copy(text)
+        return True
+    except Exception:
+        return False
 
 
 @contextmanager
