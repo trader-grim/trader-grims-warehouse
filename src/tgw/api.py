@@ -400,7 +400,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
         "dead-letter", "queue-history", "todo", "plan", "ai-usage", "report",
         "admin-file", "classify-suggestions", "picklist", "print-label", "mvitems",
         "suggest", "quiet-check", "perp-run", "whisper-suggest",
-        "claude-help", "clip", "suggest-edit",
+        "claude-help", "clip", "suggest-edit", "promo",
     ]),
 ]
 
@@ -792,6 +792,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stale", action="store_true", help="dead-stock section only (skip monthly pivot)")
     p.add_argument("--output", default=None, metavar="DIR", help="output directory (default: vault/dev-workflow/research/)")
     p.add_argument("--no-vault", action="store_true", dest="no_vault", help="return data only, do not write files")
+
+    p = sub.add_parser("promo", help="sale event automation — draft + scope check (PP-PROMO-001 P2)")
+    p.add_argument("promo_sub", choices=["draft", "list"], help="draft: generate markdown draft from dead-stock scan; list: verify sell.marketing scope")
+    p.add_argument("--discount", type=int, default=None, metavar="N", help="discount %% 5–80 (default: promo.discount_pct config or 20)")
+    p.add_argument("--min-days", type=int, default=None, metavar="N", dest="min_days", help="minimum days stale (default: promo.min_days_stale or 30)")
+    p.add_argument("--min-price", type=float, default=None, metavar="X", dest="min_price", help="minimum current price (default: promo.min_price or 2.00)")
+    p.add_argument("--max-items", type=int, default=None, metavar="N", dest="max_items", help="maximum items in draft (default: promo.max_items or 50)")
+    p.add_argument("--duration", type=int, default=None, metavar="DAYS", help="event duration in days (default: promo.duration_days or 30)")
+    p.add_argument("--start-offset", type=int, default=None, metavar="DAYS", dest="start_offset", help="days from today to event start (default: promo.start_offset_days or 2)")
+    p.add_argument("--output", default=None, metavar="DIR", help="output directory for draft (default: vault/inbox/)")
+    p.add_argument("--no-vault", action="store_true", dest="no_vault", help="return data only, do not write draft file")
 
     p = sub.add_parser("category-groups", help="view/manage category group taxonomy (PP-PRICE-005)")
     p.add_argument("category_id", nargs="?", default=None, help="look up which group a specific eBay category ID belongs to")
@@ -4233,6 +4244,26 @@ def main() -> int:
                 )
             else:
                 result = {"ok": False, "error": f"unknown report type: {args.report_type!r}"}
+
+        elif args.op == "promo":
+            from .promo import cmd_promo_draft, cmd_promo_list
+
+            if args.promo_sub == "draft":
+                result = cmd_promo_draft(
+                    cfg,
+                    discount=args.discount,
+                    min_days=args.min_days,
+                    min_price=args.min_price,
+                    max_items=args.max_items,
+                    duration=args.duration,
+                    start_offset=args.start_offset,
+                    output_dir=args.output,
+                    no_vault=args.no_vault,
+                )
+            elif args.promo_sub == "list":
+                result = cmd_promo_list(cfg)
+            else:
+                result = {"ok": False, "error": f"unknown promo sub-command: {args.promo_sub!r}"}
 
         elif args.op == "category-groups":
             from .ebay.pricing import _group_for_category, _load_groups
