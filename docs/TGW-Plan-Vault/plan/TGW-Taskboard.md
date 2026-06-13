@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-06-13 17:14 UTC — 40 open, 100 done in the last 7 days._
+_Rendered 2026-06-13 17:44 UTC — 38 open, 102 done in the last 7 days._
 
 ## admin (16 open)
 
@@ -46,12 +46,10 @@ _Rendered 2026-06-13 17:14 UTC — 40 open, 100 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (14 open)
+## claude (12 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
-| 126 | 48 |  | tgw search --empty FIELD — add --empty FIELD flag to cmd_search returning items where the named field is null/empty-string/missing; 'tgw search --empty location' finds unlocated items; additive filter on resolve_items(); 2 tests. From SUGGESTIONS 2026-06-13 |  |  |
-| 95 | 50 | XS | Round7 p50 XS (Aider-eligible): ISS-003 + ISS-004 config hygiene — align full_catalog_path JSON value with code default; surface ebay_sku_migrate block through load_config() instead of cfg[raw] |  |  |
 | 127 | 50 |  | catalog-verify leading_space_title rule — add warning in _verify_item() for title.startswith(' '); safe auto-fix in --fix pass via str.lstrip(); 1–2 tests; from SUGGESTIONS 2026-06-13. Aider-eligible | [[TGW-Master-Plan#PP-VERIFY-001 — Catalog Assumption Verification + Hall Pass Flag\|PP-VERIFY-001]] |  |
 | 128 | 52 |  | PP-PROMO-001 Phase 1 build — tgw sale-event [create\|list\|end] --input EVENT.md --dry-run: parse markdown sale-event file -> Promotions API createPromotion/updateItemPriceMarkdown; operator-review gate before --apply; no live eBay writes without Dave sign-off; design doc at reference/PP-PROMO-001-sale-event-design.md (session 29) | [[TGW-Master-Plan#PP-PROMO-001 — Sale Event Automation (design complete)\|PP-PROMO-001]] |  |
 | 129 | 55 |  | tgw ai-usage --by-sku SKU — per-SKU cost breakdown in AI usage report (sum calls/tokens/cost where job payload contains SKU); feeds cost-per-item goal (Phase 5 #2). Additive to existing ai_usage ledger (session 29) |  |  |
@@ -71,10 +69,12 @@ _Rendered 2026-06-13 17:14 UTC — 40 open, 100 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — Sold reconciliation and inventory status sync (design ready)\|PP-SOLD-001]] |  |
 
-## Done this week (100)
+## Done this week (102)
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 126 | claude | 2026-06-13 | tgw search --empty FIELD — add --empty FIELD flag to cmd_search returning items where the named field is null/empty-string/missing; 'tgw search --empty location' finds unlocated items; additive filter on resolve_items(); 2 tests. From SUGGESTIONS 2026-06-13 |
+| 95 | claude | 2026-06-13 | Round7 p50 XS (Aider-eligible): ISS-003 + ISS-004 config hygiene — align full_catalog_path JSON value with code default; surface ebay_sku_migrate block through load_config() instead of cfg[raw] |
 | 125 | claude | 2026-06-13 | Apply plan/STORE-CATEGORY-MAPPING.csv store category research (from gemini todo #83) to category-groups.json — update store_category field per group; tgw category-groups --reseed; config edit only, no API writes. Aider-eligible |
 | 148 | admin | 2026-06-13 | PP-BACKUP-001 A7 USB drives: label TGW-SECRETS-A (≥1GB, keychain) + TGW-SECRETS-B (≥1GB, off-site/safe) + TGW-BOOT-01 (≥8GB, NixOS install); SECRETS drives use same tgw-offline-setup script scoped to secrets bundle; BOOT-01 is a bootable NixOS installer USB (Phase C rebuild keychain) |
 | 114 | admin | 2026-06-13 | Round7: Antigravity code-task trial during #78 validation week — run todo #95 (ISS-003/004 config hygiene) via agy as the bite-sized code trial; compare review burden vs a Claude session. Purpose: ROUTING CALIBRATION between Antigravity (primary agent manager) and Aider (committed regardless — see #117). Amended decision 2026-06-12, next-process.md §2 |

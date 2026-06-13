@@ -1,4 +1,4 @@
-"""Tests for tgw.items — write operations."""
+"""Tests for tgw.items — write operations and list_items search filters."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import json
 import tempfile
 from pathlib import Path
 
+from tgw.api import list_items
 from tgw.items import (
     catlocmvall,
     titleupdate,
@@ -26,10 +27,12 @@ def make_item(root: Path, sku: str, **fields) -> Path:
 
 def make_cfg(root: Path) -> dict:
     return {
-        'itemdata_root':      root,
-        'location_tree_root': root / 'by-location',
-        'skip_missing':       True,
-        'pretty':             True,
+        'itemdata_root':       root,
+        'location_tree_root':  root / 'by-location',
+        'search_catalog_path': root / '_no-search-catalog.json',
+        'full_catalog_path':   root / '_no-full-catalog.json',
+        'skip_missing':        True,
+        'pretty':              True,
     }
 
 
@@ -125,3 +128,37 @@ def test_catlocmvall_empty_location():
         result = catlocmvall(cfg, 'EMPTY', 'NEW')
         assert result['ok'] is True
         assert result['count'] == 0
+
+
+# ---------------------------------------------------------------------------
+# list_items --empty FIELD (tgw search --empty FIELD)
+# ---------------------------------------------------------------------------
+
+def test_list_items_empty_field_null_or_missing():
+    """--empty returns items where the field is absent or null; non-empty excluded."""
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        make_item(root, 'tgw20260101000000001')                 # location absent
+        make_item(root, 'tgw20260101000000002', location=None)  # location null
+        make_item(root, 'tgw20260101000000003', location='A1')  # has a location
+        cfg = make_cfg(root)
+        result = list_items(cfg, empty_field='location')
+        skus = {i['sku'] for i in result['items']}
+        assert 'tgw20260101000000001' in skus
+        assert 'tgw20260101000000002' in skus
+        assert 'tgw20260101000000003' not in skus
+
+
+def test_list_items_empty_field_empty_string():
+    """--empty matches empty-string and whitespace-only values; non-empty excluded."""
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        make_item(root, 'tgw20260101000000001', location='')    # empty string
+        make_item(root, 'tgw20260101000000002', location='  ')  # whitespace
+        make_item(root, 'tgw20260101000000003', location='B2')  # non-empty
+        cfg = make_cfg(root)
+        result = list_items(cfg, empty_field='location')
+        skus = {i['sku'] for i in result['items']}
+        assert 'tgw20260101000000001' in skus
+        assert 'tgw20260101000000002' in skus
+        assert 'tgw20260101000000003' not in skus

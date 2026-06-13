@@ -189,3 +189,4 @@
 - [x] 2026-06-13T03:29 :: script to remove leading space from titles — added claude todo #127 (PP-VERIFY-001: catalog-verify leading_space_title warning rule + safe auto-fix in --fix pass via str.lstrip()); Aider-eligible
 - [x] 2026-06-13T04:14 :: tgw search some way to search for empty key, natural way is "" but returns everything — added claude todo #126 (tgw search --empty FIELD flag: returns items where field is null/empty-string/missing; e.g. tgw search --empty location)
 - [x] 2026-06-13T04:44 :: keyd: q stuck — added admin todo #135 (investigate keyd q-key stuck: check /etc/keyd/*.conf remapping, keyd -l active layers, evtest hardware verification)
+- [ ] 2026-06-13T17:38 :: tgw todo --agent claude --next --clip  returns full task list. But lets simplify. tgw todo --next claude instead puts claudes next task in the clipboard and prints to console. Much cleaner, simpler, more intuitive.
