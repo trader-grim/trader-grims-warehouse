@@ -318,3 +318,180 @@ def test_requeue_dead_letter_job_not_found():
             assert False, 'should have raised ValueError'
         except ValueError as exc:
             assert 'not found' in str(exc)
+
+
+# ---------------------------------------------------------------------------
+# --clip and --next flags (PP-TODO-001 extension, todo #122)
+# ---------------------------------------------------------------------------
+
+def _make_brief_args(**overrides):
+    """Build a minimal argparse.Namespace for `tgw todo brief` tests."""
+    import argparse
+    defaults = dict(
+        agent='brief', brief_id=None, seed=False, add=None, done=None,
+        update=None, delegate=None, set_priority=None, set_meta=None,
+        show_all=False, priority=50, source='session',
+        pp=None, depends=None, anchor=None,
+        clip=False, next_task=False, next_agent=None,
+    )
+    defaults.update(overrides)
+    return argparse.Namespace(**defaults)
+
+
+_ROW_9 = {
+    'id': 9, 'agent': 'claude', 'priority': 20, 'body': 'do the work',
+    'source': 'test', 'added_at': None, 'done_at': None,
+    'pp_ref': None, 'depends_on': [], 'plan_anchor': None,
+}
+
+
+def test_brief_clip_calls_push_clipboard(tmp_path):
+    from tgw import todo as todo_mod
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    cfg = {'plan_master_path': plan}
+    args = _make_brief_args(brief_id='9', clip=True)
+
+    with patch.object(todo_mod, 'todo_get', return_value=_ROW_9):
+        with patch.object(todo_mod, '_push_clipboard', return_value=True) as mock_clip:
+            result = todo_mod.cmd_todo(cfg, args)
+
+    assert result['ok'] is True
+    mock_clip.assert_called_once()
+    pushed = mock_clip.call_args[0][0]
+    assert 'do the work' in pushed
+
+
+def test_brief_clip_failure_prints_warning(tmp_path, capsys):
+    from tgw import todo as todo_mod
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    cfg = {'plan_master_path': plan}
+    args = _make_brief_args(brief_id='9', clip=True)
+
+    with patch.object(todo_mod, 'todo_get', return_value=_ROW_9):
+        with patch.object(todo_mod, '_push_clipboard', return_value=False):
+            todo_mod.cmd_todo(cfg, args)
+
+    out = capsys.readouterr().out
+    assert 'clipboard' in out
+
+
+def test_brief_no_clip_does_not_call_push_clipboard(tmp_path):
+    from tgw import todo as todo_mod
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    cfg = {'plan_master_path': plan}
+    args = _make_brief_args(brief_id='9', clip=False)
+
+    with patch.object(todo_mod, 'todo_get', return_value=_ROW_9):
+        with patch.object(todo_mod, '_push_clipboard', return_value=True) as mock_clip:
+            todo_mod.cmd_todo(cfg, args)
+
+    mock_clip.assert_not_called()
+
+
+def test_brief_next_agent_gets_top_task(tmp_path):
+    from tgw import todo as todo_mod
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    cfg = {'plan_master_path': plan}
+    args = _make_brief_args(next_task=True, next_agent='gemini')
+
+    gemini_row = dict(_ROW_9, id=7, agent='gemini', body='gemini top task')
+
+    with patch.object(todo_mod, 'todo_top', return_value=gemini_row) as mock_top:
+        with patch.object(todo_mod, 'todo_get', return_value=gemini_row):
+            result = todo_mod.cmd_todo(cfg, args)
+
+    mock_top.assert_called_once_with('gemini')
+    assert result['ok'] is True
+    assert result['id'] == 7
+
+
+def test_brief_next_default_agent_is_claude(tmp_path):
+    from tgw import todo as todo_mod
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    cfg = {'plan_master_path': plan}
+    args = _make_brief_args(next_task=True, next_agent=None)  # no --agent given
+
+    with patch.object(todo_mod, 'todo_top', return_value=_ROW_9) as mock_top:
+        with patch.object(todo_mod, 'todo_get', return_value=_ROW_9):
+            todo_mod.cmd_todo(cfg, args)
+
+    mock_top.assert_called_once_with('claude')
+
+
+def test_brief_next_no_tasks_returns_error(tmp_path):
+    from tgw import todo as todo_mod
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    cfg = {'plan_master_path': plan}
+    args = _make_brief_args(next_task=True, next_agent='gemini')
+
+    with patch.object(todo_mod, 'todo_top', return_value=None):
+        result = todo_mod.cmd_todo(cfg, args)
+
+    assert result['ok'] is False
+    assert 'gemini' in result['error']
+
+
+def test_todo_top_queries_db():
+    from tgw.todo import todo_top
+    row_data = dict(_ROW_9, agent='gemini')
+    ctx, cur = _mock_conn(fetchone_return=row_data)
+    cur.fetchone.return_value = row_data
+
+    # Use a RealDictCursor-like mock
+    from unittest.mock import MagicMock
+    cur2 = MagicMock()
+    cur2.__enter__ = lambda s: s
+    cur2.__exit__ = MagicMock(return_value=False)
+    cur2.fetchone.return_value = row_data
+
+    con = MagicMock()
+    con.cursor.return_value = cur2
+    con.__enter__ = lambda s: s
+    con.__exit__ = MagicMock(return_value=False)
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def ctx2():
+        yield con
+
+    with patch('tgw.todo._conn', ctx2):
+        result = todo_top('gemini')
+
+    assert result is not None
+    sql = cur2.execute.call_args[0][0]
+    assert 'agent = %s' in sql
+    assert 'done_at IS NULL' in sql
+    assert 'ORDER BY priority, id LIMIT 1' in sql
+
+
+def test_todo_top_no_tasks_returns_none():
+    from contextlib import contextmanager
+    from unittest.mock import MagicMock
+
+    from tgw.todo import todo_top
+
+    cur = MagicMock()
+    cur.__enter__ = lambda s: s
+    cur.__exit__ = MagicMock(return_value=False)
+    cur.fetchone.return_value = None
+
+    con = MagicMock()
+    con.cursor.return_value = cur
+    con.__enter__ = lambda s: s
+    con.__exit__ = MagicMock(return_value=False)
+
+    @contextmanager
+    def ctx():
+        yield con
+
+    with patch('tgw.todo._conn', ctx):
+        result = todo_top('claude')
+
+    assert result is None

@@ -36,6 +36,18 @@ import psycopg2.extras
 _DSN = 'dbname=state_machine user=tgw'
 
 
+def _push_clipboard(text: str) -> bool:
+    """Push text to the clipboard via wl-copy (Wayland) or xclip (X11)."""
+    import subprocess
+    for cmd in (["wl-copy"], ["xclip", "-selection", "clipboard"]):
+        try:
+            subprocess.run(cmd, input=text, text=True, timeout=3, capture_output=True)
+            return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+    return False
+
+
 @contextmanager
 def _conn() -> Generator:
     con = psycopg2.connect(_DSN)
@@ -224,6 +236,21 @@ def todo_set_priority(item_id: int, priority: int) -> Dict[str, Any]:
     return {'ok': True, 'id': row[0], 'agent': row[1], 'priority': priority, 'body': row[2]}
 
 
+def todo_top(agent: str) -> Optional[Dict[str, Any]]:
+    """Return the highest-priority open task for *agent* (lowest priority int,
+    ties broken by id), or None when none exist."""
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                'SELECT id, agent, priority, body, source, added_at, done_at, '
+                'pp_ref, depends_on, plan_anchor FROM todo_items '
+                'WHERE agent = %s AND done_at IS NULL ORDER BY priority, id LIMIT 1',
+                (agent,),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
 def todo_set_meta(
     item_id: int,
     pp_ref: Optional[str] = None,
@@ -392,14 +419,29 @@ def _parse_depends(raw: Optional[str]) -> Optional[List[int]]:
 
 
 def cmd_todo(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
-    # `tgw todo brief <id>` — the positional agent slot doubles as the op name
+    # `tgw todo brief <id> [--clip]`
+    # `tgw todo brief --next --agent <agent> [--clip]`
     if args.agent == 'brief':
-        if args.brief_id is None:
-            print('Usage: tgw todo brief <id>')
-            return {'ok': False, 'error': 'missing id'}
-        result = todo_brief(int(args.brief_id), cfg['plan_master_path'])
+        use_next = getattr(args, 'next_task', False)
+        if use_next:
+            agent_name = getattr(args, 'next_agent', None) or 'claude'
+            top = todo_top(agent_name)
+            if top is None:
+                print(f'No open tasks for agent: {agent_name}')
+                return {'ok': False, 'error': f'no open tasks for {agent_name}'}
+            target_id = top['id']
+        else:
+            if args.brief_id is None:
+                print('Usage: tgw todo brief <id> [--clip]\n'
+                      '       tgw todo brief --next --agent <agent> [--clip]')
+                return {'ok': False, 'error': 'missing id'}
+            target_id = int(args.brief_id)
+        result = todo_brief(target_id, cfg['plan_master_path'])
         if result['ok']:
             print(result['brief'])
+            if getattr(args, 'clip', False):
+                if not _push_clipboard(result['brief']):
+                    print('[clipboard] copy failed — wl-copy and xclip not found')
         else:
             print(f"Error: {result['error']}")
         return result
