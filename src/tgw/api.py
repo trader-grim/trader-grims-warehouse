@@ -347,15 +347,73 @@ def cmd_restart_workers(queues: Optional[List[str]] = None, dry_run: bool = Fals
 # CLI
 # ---------------------------------------------------------------------------
 
+class _GroupedHelpFormatter(argparse.RawDescriptionHelpFormatter):
+    """Suppress the flat {get,list,...} listing; description shows the grouped view."""
+    def _format_action(self, action: argparse.Action) -> str:
+        if isinstance(action, argparse._SubParsersAction):
+            return ""
+        return super()._format_action(action)
+
+
+_HELP_GROUPS: list[tuple[str, list[str]]] = [
+    ("Read / Search", [
+        "get", "list", "search", "resolve", "quality", "hint-trail",
+        "reprice-suggest", "staged", "velocity-report", "seo-audit", "locate",
+    ]),
+    ("Write / Update", [
+        "update", "update-where", "update-title", "update-location", "update-verified",
+        "update-status", "set-shipping", "bulk", "price-freeship", "hint",
+        "data-scrub", "revise", "alt-text",
+    ]),
+    ("Context / Intake", [
+        "set-context", "get-context", "clear-context", "set-template", "create-item",
+    ]),
+    ("Pipeline", [
+        "enqueue-sku", "requeue-identify", "resolve-legacy", "ready", "publish",
+        "alt-text-batch",
+    ]),
+    ("eBay", [
+        "ebay-pull", "ebay-sweep", "import-sold-csv", "sku-migrate",
+        "setup-ebay-hooks", "build-archive-index", "history-index",
+        "strikethrough-check", "store-categories", "store-category", "get-ebay-token",
+    ]),
+    ("Catalog / Build", [
+        "build-full", "build-search", "build-locations", "build-full-csv",
+        "build-search-csv", "build-sqlite", "build-thumbnails", "build-all",
+        "ensure-catalog", "lookup", "build-fingerprints", "export-catalog",
+        "category-groups", "catalog-verify",
+    ]),
+    ("Ops / Admin", [
+        "health", "serve", "restart-workers", "restart-ebay-token",
+        "dead-letter", "queue-history", "todo", "plan", "ai-usage", "report",
+        "admin-file", "classify-suggestions", "picklist", "print-label", "mvitems",
+        "suggest", "quiet-check", "perp-run", "whisper-suggest",
+        "claude-help", "clip", "suggest-edit",
+    ]),
+]
+
+
+def _make_grouped_description(sub: argparse.Action) -> str:
+    help_map: dict[str, str] = {a.dest: (a.help or "") for a in sub._choices_actions}
+    lines: list[str] = ["TGW inventory management — subcommands by group:\n"]
+    for group_name, commands in _HELP_GROUPS:
+        lines.append(f"  {group_name}:")
+        for cmd in commands:
+            h = help_map.get(cmd, "")
+            lines.append(f"    {cmd:<22} {h}")
+        lines.append("")
+    lines.append("Use 'tgw COMMAND --help' for command-specific options.")
+    return "\n".join(lines)
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tgw",
         description="TGW inventory management API",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=_GroupedHelpFormatter,
     )
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Path to config JSON (default: %(default)s)")
-    sub = parser.add_subparsers(dest="op", required=True)
+    sub = parser.add_subparsers(dest="op", required=True, metavar="COMMAND")
 
     # --- read ---
     p = sub.add_parser("get", help="get full item record by SKU")
@@ -545,15 +603,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("hint-trail", help="show identification history for an item")
     p.add_argument("sku", help="SKU to inspect")
 
-    p = sub.add_parser("requeue", help="bulk-enqueue ai_identify for items matching a filter")
-    p.add_argument("--no-title", action="store_true", help="items with photos but title still equals SKU (truly unprocessed)")
-    p.add_argument("--unidentified", action="store_true", help="all items where ai_identified is not True")
-    p.add_argument("--hint-set", action="store_true", help="items with ai_hint set but not yet ai_identified")
-    p.add_argument("--no-draft", action="store_true", help="items that are ai_identified but have no draft_listing")
-    p.add_argument("--no-price", action="store_true", help="items with draft_listing but no price set")
-    p.add_argument("--catalog-only", action="store_true", help="identify for catalog only — skip ebay_draft cascade")
-    p.add_argument("--limit", type=int, default=100, help="max items to queue (default: 100; use 0 for unlimited)")
-    p.add_argument("--run", action="store_true", help="actually queue jobs (default is dry-run)")
+    for _name in ("requeue-identify", "requeue"):
+        p = sub.add_parser(_name, help="bulk-enqueue ai_identify for items matching a filter" + (" (deprecated alias)" if _name == "requeue" else ""))
+        p.add_argument("--no-title", action="store_true", help="items with photos but title still equals SKU (truly unprocessed)")
+        p.add_argument("--unidentified", action="store_true", help="all items where ai_identified is not True")
+        p.add_argument("--hint-set", action="store_true", help="items with ai_hint set but not yet ai_identified")
+        p.add_argument("--no-draft", action="store_true", help="items that are ai_identified but have no draft_listing")
+        p.add_argument("--no-price", action="store_true", help="items with draft_listing but no price set")
+        p.add_argument("--catalog-only", action="store_true", help="identify for catalog only — skip ebay_draft cascade")
+        p.add_argument("--limit", type=int, default=100, help="max items to queue (default: 100; use 0 for unlimited)")
+        p.add_argument("--run", action="store_true", help="actually queue jobs (default is dry-run)")
 
     p = sub.add_parser("resolve-legacy", help="mark item(s) as having legacy eBay listing cleared, enabling ebay_stage to proceed")
     p.add_argument("skus", nargs="+", help="one or more SKUs to resolve")
@@ -845,6 +904,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fix", action="store_true", help="report auto-applicable fixes (e.g. strip stale TEMPLATE: title prefix); dry-run unless --write is given")
     p.add_argument("--write", action="store_true", help="with --fix: actually apply the fixes (default: dry-run only)")
 
+    parser.description = _make_grouped_description(sub)
     return parser
 
 
@@ -3438,7 +3498,7 @@ def main() -> int:
         elif args.op == "hint-trail":
             result = cmd_hint_trail(cfg, args.sku)
 
-        elif args.op == "requeue":
+        elif args.op in ("requeue-identify", "requeue"):
             result = cmd_requeue(
                 cfg,
                 no_title=args.no_title,
