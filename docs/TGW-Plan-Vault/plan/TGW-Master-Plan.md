@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-11 (session 26 — PP-DOCFLOW-001 P2 + PP-PYIPC-001 + history-index done; suite 563)
+updated: 2026-06-12 (session 29 — PP-PLANDB-001 P1+P2 done; inbox: PP-INTAKE-002/003 designs filed; PP-FREESHIP-001/PP-OFFER-001/PP-GIT-001 added; suite 637)
 maintained_by: Opus (planner)
 ---
 
@@ -866,6 +866,8 @@ Save result to `inbox/` for PM-intake.
 | ✅ Photo QA + alt-text pilot | done (GEMINI-004, session 19) — boilerplate contamination finding; alt-text viable via Ollama vision; sidecar naming confirmed |
 | ✅ Pricing data analysis | done (GEMINI-005, session 19) — 3 calibration edits (see Round 5 #40); reseed reminder; tier pattern notes |
 | ✅ Marketing/category insights | done (GEMINI-006, session 19) — store category mappings; zero-inventory high-velocity list; SEO keyword opportunities |
+| ✅ TGW camera app design | done (gemini todo #115, session 29) — full Flutter scaffold proposal at `reference/PP-INTAKE-002-camera-app-design.md`; mobile_scanner + flutter_tts + Riverpod + Foldio360 root bypass + BLE direct control; Dave reviews before build |
+| ✅ xmouse replacement design | done (gemini todo #116, session 29) — Flutter architecture survey at `reference/PP-INTAKE-003-xmouse-replacement-design.md`; flutter_rfb (Apache-2.0 VNC) + dartssh2 + flutter_inappwebview; 3-phase roadmap; Dave reviews before build |
 | ebay_draft aspect fill audit | Grep of aspect fill rates per category | Which categories have worst specifics coverage; tuning recommendations |
 | **AI conversation history consolidation** | Dave's conversation history with AI assistants (Claude, Perplexity sessions) | Organize + consolidate into structured reference; **plan scope with Dave before executing** (session 10 note) |
 | ✅ **Data/archive history consolidation** | GEMINI-007 (2026-06-10) — **CRITICAL: MasterArchive I/O errors detected** (`/dev/sdc5`). `ls`/`du` work (cached dir entries), but `cat`/`touch` fail with EIO. **Operator must run `dmesg`, `umount /media/tgw/MasterArchive`, `fsck /dev/sdc5` before any indexing**. Folder inventory: `ItemData/` 584G (1.1M files, KEEP-INDEX), `job_archive/` 371G (KEEP-COLD), `ItemArchive/` 163G 54K zips (KEEP-INDEX, only 40% in archive-ebay-index.json), `magento/` 129G (KEEP-COLD), `eBay/` 60G (KEEP-COLD), `GarageSale/` 33G (KEEP-COLD), `ItemCreation/` 8.8G drafts (MIGRATE). Cleanup order: (1) fix mount, (2) consolidate zips, (3) index loose CSVs, (4) complete ItemArchive index to 100%, (5) offload cold data. `tgw history-index --target <folder>` design sketch included. See GEMINI-007-result.md. | |
@@ -1262,6 +1264,18 @@ Live as Work Tracks (see `## Work Tracks`). Routing table for reference:
 | Large corpus cross-reference | Gemini Code | Context advantage |
 
 E-sneaker-net: export context → run in external AI → save result to `inbox/` for PM-intake.
+
+**Antigravity (agy) token-limit observations (2026-06-12):**
+- Tasks 82–85 ran to completion; task 86 (Gemini CLI export) ran out of tokens mid-run
+  on the selected model and completed via fallback model. Task 116 (xmouse design) similarly
+  hit token ceiling on `agy --high-reasoning`; Sonnet fallback finished it.
+- **Routing refinement:** keep individual Antigravity tasks small and self-contained (same
+  rule as Gemini CLI per 2026-06-10 note). Avoid `--high-reasoning` for tasks that can be
+  completed by standard Sonnet — reserve it for tasks requiring deep cross-file synthesis.
+- **Quality note:** compare code quality between agy and Claude Sonnet on a test response
+  before committing to agy for code-generation tasks.
+- **Fallback pattern:** design multi-step tasks to be resumable — if a model runs out of
+  tokens mid-task, a second agent with different limits should be able to pick up the output.
 
 ---
 
@@ -2306,6 +2320,18 @@ The tablet/phone is the PRIMARY operator interface for warehouse operations. Des
   - Queue: items in Ready state are doled out at 1/60 of total (rate-limited automatic listing)
   - "List Now" button bypasses the dole-out rate for urgent items
   - Rate config: configurable; default = 1/60 of ready items per listing cycle
+  - ✅ **Backend DONE 2026-06-12 (session 29, todo #88)** — carries the PP-REVISION-001
+    draft→review→apply principle into code. `ebay_offer.ready_at` is the ready marker
+    (offer `status` stays eBay's UNPUBLISHED/PUBLISHED — ebay_sync rewrites it, so the
+    local review verdict has its own field; publish flips status → item leaves the pool
+    automatically). `tgw.ready` module: `ready_pool()` (oldest-first), `set_ready`/
+    `unset_ready` (validated, through the items fence), `tgw ready [list|set|unset <sku…>]`.
+    Self-scheduling `ebay_dole` worker (velocity_stats pattern, queue `ebay_dole`):
+    each cycle publishes `max(1, pool // dole_divisor)` oldest ready items via
+    `cmd_publish`; config `dole_interval_s` (3600) + `dole_divisor` (60). `tgw staged`
+    now excludes ready items (counts them as `ready_count`); `tgw publish` is the
+    List-Now bypass. Unit needs operator enable (admin todo #120). GUI surface still
+    future scope.
 - Staged review queue (approve/reject checkboxes + publish button)
 - Live listings browser with filter/search
 - Pricing anomaly review tab: listings at extremes, stale reprice, comp mismatches
@@ -2512,21 +2538,31 @@ Goal: root intake cameras to gain file system access during Foldio360 turntable 
 doubles total processing time per spin. Root access bypasses the zip, reading photos directly.
 **Path**: target Android devices known to have reliable root methods (Pixel series + Magisk).
 Eventually deploy with custom ROMs to get fine-grained control and remove bloatware.
-**Custom camera app** — ⬆ elevated to active design 2026-06-12 (Dave suggestion 17:51): replace
+**Custom camera app (PP-INTAKE-002)** — ⬆ elevated to active design 2026-06-12 (Dave suggestion 17:51): replace
 Tasker + stock camera with a TGW-native Android app that **incorporates the Tasker functions
 directly into the interface** — barcode scan, template select (SETTEMPLATE HUD), camera trigger,
-voice hint, upload via Syncthing folder or tgw-http — no third-party dependencies. Design/scaffold
-brief delegated to Track 2 (gemini todo #115, GEMINI-003 Flutter-scaffold pattern); review the
-returned design with Dave before any build. Long-term ties: Foldio360 zip-bypass (root path),
-custom ROM deployment.
+voice hint, upload via Syncthing folder or tgw-http — no third-party dependencies.
+**Design RETURNED 2026-06-12** (gemini todo #115 done): full Flutter scaffold proposal at
+`reference/PP-INTAKE-002-camera-app-design.md`. Highlights: `mobile_scanner` (ML Kit) barcode,
+`flutter_tts` voice, Riverpod state, Dio HTTP, `flutter_rfb` VNC, dual upload (Syncthing
+folder + tgw-http POST), Foldio360 zip-bypass via root `su` polling (short-term) + BLE direct
+control via `flutter_blue_plus` (long-term). Dave must review before scaffold build begins.
+Three open questions: root-privilege packaging strategy (app vs shell script), target device
+for root (Pixel/Xiaomi), Syncthing path alignment (`/sdcard/Pictures/TGW_Sync/`).
 
-**xmouse replacement app** — ⬆ elevated to active design 2026-06-12 (Dave suggestion 18:20):
+**xmouse replacement app (PP-INTAKE-003)** — ⬆ elevated to active design 2026-06-12 (Dave suggestion 18:20):
 open-source Android app (GitHub-based) replacing the xmouse macro pad, incorporating an
 **RDP/VNC client and a form tool** in one interface — macro grid dispatching via SSH/tgw-http
 (template buttons, pipeline triggers), embedded remote viewer for desktop sessions, and a form
-surface for the `/form/*` tgw-http pages. Survey-and-design brief delegated to Track 2 (gemini
-todo #116): find suitable GPL/Apache bases (macro-pad, aRDP/bVNC-lineage viewers), propose
-architecture + license posture; review with Dave before build.
+surface for the `/form/*` tgw-http pages.
+**Design RETURNED 2026-06-12** (gemini todo #116 done): full Flutter architecture survey at
+`reference/PP-INTAKE-003-xmouse-replacement-design.md`. Recommendation: Flutter stack with
+`flutter_rfb` (Apache-2.0 VNC, avoids GPLv3 contamination from aRDP/bVNC), `dartssh2` (MIT
+SSH), `flutter_inappwebview` (form surface). 3-phase roadmap: P1 macro grid + SSH/HTTP dispatch,
+P2 form tool integration, P3 embedded VNC. Dave must review before any build.
+**SETTLED (Dave, 2026-06-12):** Flutter + Apache-2.0/MIT path confirmed. GPLv3 native-Android
+path (bVNC/aRDP lineage) rejected. Design doc at `inbox/review/xmouse-replacement-design.md`
+pending review; scaffold task to be seeded as a Claude/Aider todo after review.
 
 #### Dependencies
 - PP-PRICE-005 `category-groups.json` ✅ DONE — this is the template table
@@ -2978,9 +3014,16 @@ dead_letter count → run SQL to identify → categorize → manually cancel/req
 **HardFailure** (raised explicitly) still goes directly to dead_letter — no change.
 `section not found in plan` (pm_intake) handled separately in pm_intake.py (warn+skip).
 
-**Remaining work:**
-- `tgw health` dead_letter breakdown: show TRANSIENT vs HARD_FAILURE error_code separately
-- `notify.warning()` emit on transient requeue path (currently only logs)
+**Remaining work — ✅ DONE 2026-06-12 (session 29, todo #94):**
+- ✅ T/H split: `dead_letter_errors()` in `state_machine.py` + `classify_dead_letter_errors()`
+  in `health.py`; `check_postgres` detail now reads
+  `dead_letter=33 T0/H33 [ai_identify:12(T0/H12), …]` and returns
+  `dead_letter_transient/hard/classified`; `tgw_queue_status` MCP tool returns the same
+- ✅ Zero-work watchdog (the ebay_sku_migrate silent-stall pattern): `zero_work_queues(h)` —
+  worker heartbeat alive + eligible queued jobs (not_before excluded, so self-scheduling
+  workers don't false-positive) waiting > `zero_work_stall_hours` (config, default 4.0) with
+  zero succeeded transitions in the window → yellow WARN in `check_postgres` + MCP
+- `notify.warning()` emit on transient requeue path was already done (session 14)
 
 ### PP-HINT-001 — AI hint + eBay enrichment (revisit required)
 - First iteration shipped 2026-06-03: `ai_hint` field, `tgw hint` command, hinted vision prompt
@@ -3059,6 +3102,29 @@ Offer body addition (in `ebay_stage.py` `_build_offer_body()`):
 
 #### Status
 Planned. Verify account access first; implementation is straightforward once confirmed.
+
+### PP-PROMO-001 — Sale Event Automation (design complete)
+
+**P1 DONE 2026-06-12** — Design doc + operator checklist at `reference/PP-PROMO-001-sale-event-design.md`.
+
+Automates the dead-stock → markdown sale event cycle via the eBay Promotions Management API (`ITEM_PRICE_MARKDOWN`). The `sell.marketing` scope is already held. No PP-STRIKE-001 conflict: strikethrough uses `originalRetailPrice` in the offer body; this uses the Promotions API and is independent.
+
+**Data flow**: `reports._scan_items()` dead_stock list → filter (min_days_stale, min_price, has listing_id) → markdown draft file → operator review → `tgw promo apply` (P3) → creates DRAFT promotion on eBay → operator promotes to RUNNING in Seller Hub.
+
+**Item JSON addition**: `ebay_promo.{promo_id, event_name, discount_pct, start_date, end_date, applied_at}` written via tgw-api fence; cleared on promo end.
+
+**Config keys** (add to `tgw-api-config.json`): `promo.{enabled, min_days_stale, min_price, max_items, discount_pct, duration_days, start_offset_days, marketplace_id}`. Default `enabled: false` until scope verified.
+
+**Risk**: `ebay_price_reducer` must skip items with active `ebay_promo` block (R2 in design doc); wire this in P3 before first production use.
+
+| Phase | Scope |
+|-------|-------|
+| P1 ✅ | Design doc + operator checklist |
+| P2 | `tgw promo draft` CLI (read-only); `tgw promo list` scope check |
+| P3 | `tgw promo apply`: Promotions API write + item JSON writeback; `ebay_price_reducer` promo-skip |
+| P4 | `tgw promo end` / `tgw promo status` lifecycle |
+
+**P2 unblocked.** **P3 blocked** on P2 scope verification (GET Promotions API must return 200 first).
 
 ### PP-REPRICE-001 ✅ INITIAL COMPLETE (2026-06-03)
 `ebay_price_reducer` worker: launch (day 0, 110%→.99) → retail (p75, day 3) → move (p25, day 17). `reprice_stages` array configurable; `to_99()` rounding; `reprice_skip: true` to exclude. Self-scheduling every 6h. `reprice_schedule` in item JSON tracks stage history.
@@ -3175,6 +3241,43 @@ the normal processing pattern.)
 - Note (2026-06-11): the draft-review-apply principle above intersects PP-EDITOR-001
   (Ready state, rate-limited dole-out) and PP-DOCFLOW-001 (agents-write-drafts-only) —
   whichever is designed first carries the principle into code
+
+### PP-FREESHIP-001 — Free Shipping Pricing Mode
+
+**Origin:** Dave suggestion 2026-06-12T19:58. **Status:** todo #123.
+
+**Problem:** Shipping rate increases require manual price edits across all free-shipping offers.
+A dedicated mode absorbs shipping cost into the item price automatically.
+
+**Design:** `tgw price-freeship <sku> [--apply]` — sums `ebay_offer.price` + shipping cost,
+rounds to nearest `.99`, prints result; `--apply` writes combined price + sets `free_shipping: true`.
+Config flag `free_shipping_enabled` (default off): when on, `ebay_stage`/`ebay_price` auto-compute
+the free-shipping price. eBay fulfillment: `shippingCostOverrideType: NONE` in offer body.
+
+---
+
+### PP-OFFER-001 — eBay Best Offer Management
+
+**Origin:** Dave suggestion 2026-06-12T19:59. **Status:** todo #124 (design first).
+
+**Problem:** No tooling to view or respond to incoming Best Offers; they expire silently.
+
+**Design:** `tgw offers [--pending] [--sku SKU]` — `GetBestOffers` list (offer ID, title, SKU,
+buyer price, expiry); `tgw offers respond <id> --accept|--counter <price>|--decline` via
+`RespondToBestOffer`. Auto-accept config (`min_price_pct`, default off — accept only, never
+decline automatically). Responses logged in item JSON `offer_history`.
+
+---
+
+### PP-GIT-001 — Git / GitHub + Python Tutorial Resource
+
+**Origin:** Dave suggestion 2026-06-12T18:50. No urgency — track for a future round.
+
+Platform-first tutorial (TGW repo workflow, PR discipline) → generic Git best practices →
+Python conventions tied to TGW patterns (pyproject/ruff/pytest). Likely a Gemini authoring
+task from a rich context file.
+
+---
 
 ### PP-SYNC-001 ✅ ALL PHASES COMPLETE (2026-06-04)
 Core principle: every eBay-side ID/URL written back to item JSON immediately after API call. All matches by `listing_id` directly — never through catalog. Four phases done: `ebay_sync` write-back (6h) · `tgw ebay-pull` on-demand CLI · `tgw import-sold-csv` (2-year max, archive tombstone pass built) · `tgw ebay-sweep` physical review checklist (3 groups, clickable links, `--output`). Tier 3 (physical sweep) operator-gated; Tier 4 webhook code done, infra pending.

@@ -54,6 +54,7 @@ Plain Markdown; open in Obsidian for interactive mind map view where noted.
 | `TGW-Config-Reference.md` | Config keys, secrets, policy IDs, adding new config |
 | `TGW-Ollama-Prompts.md` | ai_identify + ebay_draft prompts, tuning levers |
 | `PP-LOOKUP-001-APIs.md` | Product enrichment, barcode lookup, ai_identify augmentation |
+| `PP-PROMO-001-sale-event-design.md` | Sale event automation via Promotions API — design, API shape, operator checklist |
 | `CATEGORY-QUIRKS.md` | Per-category eBay quirks, fulfillment overrides, condition limits |
 | `TGW-Item-JSON-Schema.md` | Item JSON field reference — all fields, types, which worker writes/reads, pipeline stage |
 | `ISSUES.md` | Active bugs and known gaps — check before diagnosing a known problem |
@@ -97,7 +98,7 @@ journalctl -u 'tgw-worker@<queue>.service' -f
 
 Workers: `token_refresh`, `pm_intake`, `bundle_intake`, `multi_intake`, `ai_identify`,
 `catalog_rebuild`, `plan_render`, `thumbnail_gen`, `ebay_draft`, `ebay_upload`, `ebay_price`,
-`ebay_stage`, `ebay_publish`, `ebay_sync`, `ebay_legacy_sync`, `echo`
+`ebay_stage`, `ebay_publish`, `ebay_dole`, `ebay_sync`, `ebay_legacy_sync`, `echo`
 
 ## Checking queue state
 

@@ -54,6 +54,7 @@ docs/TGW-Plan-Vault/inbox/queued/
 *.bak-session*
 *.bak-[0-9]*
 .aider*
+!.aider.conf.yml
 
 # Vendored Flutter SDK (local toolchain, 2.3GB clone of flutter/flutter @ 3.44.1) — never commit
 flutter/
