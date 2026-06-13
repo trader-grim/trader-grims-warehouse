@@ -173,13 +173,31 @@ stopped for a day (test by date-faking files, not by actually skipping a night).
   already-sold items displayable assets.
 
 **A7 — Rotating offline drive tier (Dave's HDD stack + holster).**
-*Do:* label partitions (`TGW-SENTRY-01`…), a `tgw-offline-sync@.service` triggered by
-the corresponding systemd mount unit: rsync of ItemData + db dumps + secrets bundle +
-config to the mounted drive, freshness stamp written, **auto-unmount-safe completion
-notification** so the drive can be pulled and shelved. Inventory the existing attached
-USB drives and assign sentry roles while at it.
+*Built 2026-06-13 (session 29 cont.):* `bin/tgw-offline-setup` provisions a drive
+(mkfs.btrfs, @data/@snapshots subvolumes, fstab, systemd drop-in, QR label output);
+`bin/tgw-offline-sync` updated for btrfs snapshot-after-sync (backward-compatible with
+flat layout); drive registry at `reference/DRIVE-REGISTRY.md`.
+
+**Drive assignments (7 × 500 GB HDDs):**
+
+| Label | Role | Rotation |
+|-------|------|----------|
+| `TGW-OFFLINE-A` | Rotating air-gap primary | Weekly: swap A/B/C; ≥2 off-site at all times |
+| `TGW-OFFLINE-B` | Rotating air-gap secondary | Weekly swap |
+| `TGW-OFFLINE-C` | Third rotation slot | Monthly swing |
+| `TGW-SENTRY-01` | Always-on holster (daily sync) | Monthly: swap with 02 |
+| `TGW-SENTRY-02` | Sentry hot-spare / rotation twin | Monthly swap |
+| `TGW-ARCHIVE-01` | Cold archive overflow | Manual write |
+| `TGW-ARCHIVE-02` | Archive redundancy | Manual write |
+
+**USB drives:** `TGW-SECRETS-A` (keychain), `TGW-SECRETS-B` (off-site/safe), `TGW-BOOT-01` (NixOS install USB).
+
+**Existing drives to adopt later:** `MasterArchive` (sdf, 1.8T) stays labeled; `sdg` (WD10EALS 1TB) → `TGW-HISTORY-01` after `tgw history-index` completes.
+
+**Format:** All new drives use btrfs (`compress=zstd`, `noatime`). Each drive gets `@data` + `@snapshots` subvolumes; sync creates a read-only btrfs snapshot after each run (last 8 kept). Existing drives (sdc1 already btrfs; sdf5/sdg1 ext4 — stay until NixOS migration).
+
 *Done when:* inserting a labeled drive produces a logged, stamped sync with no further
-operator action, twice.
+operator action, twice per drive. First drive: `sdd` (currently labeled `Toshiba500`) → `TGW-OFFLINE-A`.
 
 **A8 — GDrive dedupe (precondition for quota headroom).**
 *Do:* chunked `rclone dedupe --by-hash` per subdirectory (timeout-proof), or hand the

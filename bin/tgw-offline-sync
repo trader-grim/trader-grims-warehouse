@@ -1,30 +1,39 @@
 #!/bin/bash
-# PP-BACKUP-001 A7 — offline sentry drive sync
+# PP-BACKUP-001 A7 — offline sentry/archive drive sync
 #
-# Called by tgw-offline-sync@<LABEL>.service when a labeled USB drive mounts.
+# Called by tgw-offline-sync@<LABEL>.service when a labeled drive mounts.
 # Usage: tgw-offline-sync <DRIVE_LABEL>
-#   DRIVE_LABEL: partition label, e.g. TGW-SENTRY-01
+#   DRIVE_LABEL: partition label, e.g. TGW-OFFLINE-A or TGW-SENTRY-01
 #   Mount point:  /media/tgw/<DRIVE_LABEL>
 #
-# Operator setup — for each sentry drive:
-#   1. Format and label:  mkfs.ext4 -L TGW-SENTRY-01 /dev/sdX1
-#   2. Create mount dir:  mkdir -p /media/tgw/TGW-SENTRY-01
-#   3. Add /etc/fstab:    LABEL=TGW-SENTRY-01 /media/tgw/TGW-SENTRY-01 ext4 noauto,user,relatime 0 2
-#   4. Wire the trigger:  see etc/systemd/tgw-offline-sync@.service comments
-#   Done when: inserting a labeled drive produces a logged, stamped sync twice.
+# btrfs layout (new drives via tgw-offline-setup):
+#   @data/       ← live sync target (subvolume)
+#   @snapshots/  ← read-only post-sync snapshots (subvolume, auto-pruned)
+# Legacy flat layout (ext4 or unstructured btrfs) also supported.
+#
+# Drive setup: sudo bin/tgw-offline-setup <LABEL> <DEVICE>
 set -euo pipefail
 
 LABEL="${1:?Usage: tgw-offline-sync <DRIVE_LABEL>}"
 MOUNT="/media/tgw/${LABEL}"
 LOG=/opt/TGW/var/log/offline-sync.log
 STAMP="${MOUNT}/.tgw-sync-stamp"
+SNAPSHOT_KEEP=8  # keep last N snapshots per drive
 
 if ! mountpoint -q "$MOUNT"; then
     echo "$(date -Iseconds) ERROR ${LABEL} not mounted at ${MOUNT}" >> "$LOG"
     exit 1
 fi
 
-DEST="${MOUNT}/TGW"
+# Detect btrfs subvolume layout vs legacy flat layout
+if [ -d "${MOUNT}/@data" ]; then
+    DEST="${MOUNT}/@data/TGW"
+    USE_BTRFS_SNAPSHOTS=1
+else
+    DEST="${MOUNT}/TGW"
+    USE_BTRFS_SNAPSHOTS=0
+fi
+
 mkdir -p "$DEST"
 
 rsync -a --delete \
@@ -33,7 +42,8 @@ rsync -a --delete \
 rsync -a --delete \
     /opt/TGW/var/backups/trader_grims_warehouse/db/ "$DEST/db/"
 
-if ls /opt/TGW/var/local/backups/trader_grims_warehouse/secrets/secrets-*.tar.gz.gpg 2>/dev/null | head -1 | grep -q .; then
+if ls /opt/TGW/var/local/backups/trader_grims_warehouse/secrets/secrets-*.tar.gz.gpg \
+       2>/dev/null | head -1 | grep -q .; then
     rsync -a \
         /opt/TGW/var/local/backups/trader_grims_warehouse/secrets/ "$DEST/secrets/"
 fi
@@ -43,5 +53,18 @@ rsync -a --delete \
 
 date -Iseconds > "$STAMP"
 sync
+
+if [ "$USE_BTRFS_SNAPSHOTS" = "1" ]; then
+    SNAP_DIR="${MOUNT}/@snapshots"
+    SNAP_NAME="$(date +%Y-%m-%dT%H%M)"
+    btrfs subvolume snapshot -r "${MOUNT}/@data" "${SNAP_DIR}/${SNAP_NAME}" \
+        >> "$LOG" 2>&1
+    # Prune: delete oldest snapshots beyond the keep limit
+    ls -1dt "${SNAP_DIR}"/*/ 2>/dev/null \
+        | tail -n "+$((SNAPSHOT_KEEP + 1))" \
+        | while read -r old; do
+            btrfs subvolume delete "$old" >> "$LOG" 2>&1
+        done
+fi
 
 echo "$(date -Iseconds) ok label=${LABEL} dest=${DEST}" >> "$LOG"
