@@ -108,7 +108,7 @@ class EbayPriceWorker(QueueWorker):
             if self.config.get('free_shipping_enabled'):
                 _item_ship = item.get('shipping_cost')
                 ship_cost = float(
-                    _item_ship if _item_ship is not None
+                    _item_ship if _item_ship not in (None, '')
                     else self.config.get('default_shipping_cost', 0.0)
                 )
                 if ship_cost > 0:

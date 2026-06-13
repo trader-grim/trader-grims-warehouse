@@ -139,8 +139,10 @@ def _resolve_fulfillment_id(cfg: Dict[str, Any], ebay_category_id: str,
     """
     Resolve the fulfillment (shipping) policy id by precedence:
 
-      0. per-item shipping_profile  (PP-HINT-001) — explicit per-item override;
-         takes precedence over free_shipping so bulky/oversized profiles are honoured
+      0. per-item shipping_profile  (PP-HINT-001) — a name mapped in
+         ``fulfillment_policy_by_profile``; unmapped names fall through rather than
+         being forwarded to eBay as a raw policy ID.  Takes precedence over
+         free_shipping so bulky/oversized profiles are honoured.
       1. free_shipping flag          — ``fulfillment_policy_free_shipping`` (PP-FREESHIP-001)
          Used when the item's price already includes shipping cost.
       2. per-category override       — ``fulfillment_policy_by_category``
@@ -155,7 +157,10 @@ def _resolve_fulfillment_id(cfg: Dict[str, Any], ebay_category_id: str,
     """
     if shipping_profile:
         by_profile = cfg.get('fulfillment_policy_by_profile', {})
-        return by_profile.get(str(shipping_profile), str(shipping_profile))
+        resolved = by_profile.get(str(shipping_profile))
+        if resolved:
+            return str(resolved)
+        # Unmapped profile — fall through rather than forward the name verbatim as a policy ID
 
     if free_shipping:
         policy = cfg.get('fulfillment_policy_free_shipping')

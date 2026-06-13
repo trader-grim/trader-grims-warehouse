@@ -2283,8 +2283,8 @@ def cmd_price_freeship(
 
     # Resolve base price (offer price takes priority over draft price)
     base_price: Optional[float] = None
-    offer = item.get("ebay_offer", {})
-    draft = item.get("draft_listing", {})
+    offer = item.get("ebay_offer") or {}
+    draft = item.get("draft_listing") or {}
     for src in (offer.get("price"), draft.get("price")):
         if src is not None:
             try:
@@ -2344,6 +2344,8 @@ def cmd_price_freeship(
         item["free_shipping"] = True
         atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
         try:
+            import psycopg2.errors  # noqa: PLC0415
+
             from tgw.queue import state_machine as _sm
             _sm.init(cfg["postgres_dsn"])
             _sm.enqueue_job(
@@ -2353,8 +2355,10 @@ def cmd_price_freeship(
                 not_before=time.time() + 30,
                 max_attempts=3,
             )
-        except Exception:
+        except psycopg2.errors.UniqueViolation:
             pass
+        except Exception as exc:
+            result["warning"] = f"catalog_rebuild enqueue failed: {exc}"
         result["applied"] = True
 
     return result

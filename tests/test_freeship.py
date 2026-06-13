@@ -373,6 +373,22 @@ def test_resolve_shipping_profile_beats_freeship():
     assert fid == "BULKY-POLICY-ID"
 
 
+def test_resolve_unmapped_shipping_profile_falls_through_to_freeship():
+    """Bug (review 2): unmapped shipping_profile must fall through, not return raw string."""
+    from tgw.ebay.sync import _resolve_fulfillment_id
+    cfg = {
+        "fulfillment_policy_free_shipping": "FREESHIP-POLICY-ID",
+        "fulfillment_policy_by_profile": {},   # 'standard' not mapped
+        "fulfillment_policy_id": "NORMAL-POLICY-ID",
+        "fulfillment_policy_by_category": {},
+        "fulfillment_policy_by_size_class": {},
+    }
+    fid = _resolve_fulfillment_id(cfg, "12345", shipping_profile="standard", free_shipping=True)
+    # Must use freeship policy, NOT return the raw string 'standard' as an ID
+    assert fid == "FREESHIP-POLICY-ID"
+    assert fid != "standard"
+
+
 # ---------------------------------------------------------------------------
 # Bug fixes — regression tests
 # ---------------------------------------------------------------------------
@@ -411,6 +427,60 @@ def test_worker_target_price_includes_shipping(price_worker, tmp_path, monkeypat
     ship_cost = 6.00  # price_worker fixture has default_shipping_cost=6.00
     assert result["ebay_offer"]["target_price"] == freeship_price(14.99, ship_cost)
     assert result["ebay_offer"]["target_price"] > 14.99
+
+
+def test_price_freeship_null_ebay_offer(tmp_path):
+    """Bug #1: item JSON with 'ebay_offer': null must not crash (or {}'' is not None)."""
+    from tgw.api import cmd_price_freeship
+    sku = "tgw20260612120000003"
+    d = tmp_path / sku
+    d.mkdir()
+    item = {
+        "title": "Null Offer Item",
+        "ebay_offer": None,  # JSON null — must not AttributeError
+        "draft_listing": {"price": 12.99},
+    }
+    (d / f"{sku}.json").write_text(json.dumps(item), encoding="utf-8")
+    cfg = _cfg(tmp_path)
+    result = cmd_price_freeship(cfg, sku, shipping_cost=5.00)
+    assert result["ok"] is True
+    assert result["base_price"] == 12.99
+
+
+def test_worker_empty_string_shipping_cost_falls_through(tmp_path, monkeypatch):
+    """Bug (review 2): item.shipping_cost='' must fall through to config default, not crash."""
+    monkeypatch.setattr(ebay_price_mod.tgw_logging, "log_event", lambda *a, **k: None)
+    enqueued = []
+    monkeypatch.setattr(ebay_price_mod.state_machine, "enqueue_job",
+                        lambda **kw: enqueued.append(kw))
+    import tgw.listing_quality as lq
+
+    class _Q:
+        def to_dict(self):
+            return {"stub": True}
+
+    monkeypatch.setattr(lq, "score_draft", lambda item: _Q())
+    worker = object.__new__(ebay_price_mod.EbayPriceWorker)
+    worker.config = {
+        "itemdata_root": tmp_path,
+        "pretty": False,
+        "free_shipping_enabled": True,
+        "default_shipping_cost": 5.00,
+    }
+    comps = {"count": 3, "min": 10.0, "p25": 12.99, "median": 14.0,
+             "p75": 15.0, "max": 15.0}
+    monkeypatch.setattr(ebay_price_mod, "suggest_price",
+                        lambda *a, **k: _suggestion(12.99, comps))
+    sku = "tgw_fs_emptystr"
+    _write_item_for_worker(tmp_path, sku)
+    p = tmp_path / sku / f"{sku}.json"
+    item = json.loads(p.read_text())
+    item["shipping_cost"] = ""   # empty string — must use config default, not crash
+    p.write_text(json.dumps(item))
+    worker.handle({"payload_json": {"sku": sku}})   # must not raise
+    result = json.loads(p.read_text())
+    # Empty string treated as missing → config default (5.00) used → freeship applied
+    assert result.get("free_shipping") is True
 
 
 def test_worker_zero_shipping_cost_not_overridden(tmp_path, monkeypatch):

@@ -55,9 +55,11 @@ def test_shipping_profile_mapped_name():
     assert sync._resolve_fulfillment_id(cfg, "12345", shipping_profile="oversize") == "OVERPOL"
 
 
-def test_shipping_profile_raw_id_passthrough():
-    # An unmapped profile string is treated as a raw policy id.
-    assert sync._resolve_fulfillment_id(_cfg(), "12345", shipping_profile="RAW-POL-9") == "RAW-POL-9"
+def test_shipping_profile_unmapped_falls_through():
+    # An unmapped profile name falls through to the global default rather than
+    # being forwarded to eBay verbatim as a policy ID (which would be rejected).
+    cfg = _cfg(fulfillment_policy_id="GLOBAL-POL")
+    assert sync._resolve_fulfillment_id(cfg, "12345", shipping_profile="unmapped-hint") == "GLOBAL-POL"
 
 
 def test_shipping_profile_beats_everything():
