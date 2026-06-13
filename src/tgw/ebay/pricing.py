@@ -135,6 +135,24 @@ def to_99(price: float) -> float:
     return candidate if candidate >= p else round(base + 1.99, 2)
 
 
+def freeship_price(item_price: float, shipping_cost: float) -> float:
+    """
+    Compute a free-shipping listing price: item_price + shipping_cost rounded
+    to the nearest .99 price point (PP-FREESHIP-001).
+
+    e.g. 12.99 + 5.00 = 17.99, 12.99 + 5.51 = 18.99 (tipping at base+0.49)
+    Never returns below 0.99.
+    """
+    combined = max(0.0, round(item_price + shipping_cost, 2))
+    base = math.floor(combined)
+    upper = round(base + 0.99, 2)
+    lower = round(base - 0.01, 2)   # = (base - 1) + 0.99
+    midpoint = round(base + 0.49, 2)
+    if combined > midpoint:
+        return upper
+    return max(lower, 0.99)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -226,7 +227,6 @@ _ENQUEUE_QUEUES = {
 
 def _expand_skus(skus: List[str]) -> List[str]:
     """Expand '-' in a SKU list by reading one SKU per line from stdin."""
-    import sys
 
     out: List[str] = []
     for s in skus:
@@ -602,6 +602,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--search", default="", help="free-text substring filter")
     p.add_argument("--limit", type=int, default=0, help="max items (0 = all matched)")
     p.add_argument("--json", dest="as_json", action="store_true", help="output full JSON instead of the table")
+
+    p = sub.add_parser("price-freeship", help="compute free-shipping price (item_price + shipping_cost → nearest .99); use --apply to write it (PP-FREESHIP-001)")
+    p.add_argument("sku", help="SKU of the item")
+    p.add_argument("--shipping-cost", type=float, default=None, metavar="DOLLARS",
+                   help="shipping cost to absorb (overrides item.shipping_cost and config default_shipping_cost)")
+    p.add_argument("--apply", action="store_true",
+                   help="write the combined price to the item and set free_shipping=true")
 
     p = sub.add_parser("seo-audit", help="SEO quality report for live and staged listings (PP-SEO-001)")
     p.add_argument("--limit", type=int, default=50, help="max items to show (default 50, worst first)")
@@ -2248,6 +2255,92 @@ def cmd_ebay_sweep(cfg: Dict[str, Any], *, groups: str = "A", location: Optional
     return {"ok": True, "total": total, "groups": counts, "output": str(output) if output else None}
 
 
+def cmd_price_freeship(
+    cfg: Dict[str, Any],
+    sku: str,
+    *,
+    shipping_cost: Optional[float] = None,
+    apply: bool = False,
+) -> Dict[str, Any]:
+    """
+    Compute the free-shipping listing price for one item (PP-FREESHIP-001).
+
+    Sums ``ebay_offer.price`` (or ``draft_listing.price``) with the item's
+    shipping cost and rounds to the nearest .99.  With ``--apply``, writes
+    the combined price back and sets ``free_shipping: true`` on the item.
+
+    Shipping cost precedence: --shipping-cost arg > item.shipping_cost > config default_shipping_cost.
+    """
+    from tgw.config import sku_json
+    from tgw.ebay.pricing import freeship_price as _freeship_price
+    from tgw.items import atomic_write_json
+
+    json_path = sku_json(cfg, sku)
+    if not json_path.exists():
+        return {"ok": False, "error": f"SKU not found: {sku}"}
+
+    item = json.loads(json_path.read_text(encoding="utf-8"))
+
+    # Resolve base price (offer price takes priority over draft price)
+    base_price: Optional[float] = None
+    offer = item.get("ebay_offer", {})
+    draft = item.get("draft_listing", {})
+    for src in (offer.get("price"), draft.get("price")):
+        if src is not None:
+            try:
+                base_price = float(src)
+                break
+            except (TypeError, ValueError):
+                pass
+
+    if base_price is None:
+        return {
+            "ok": False,
+            "error": f"{sku}: no price set — run ebay_price or set a price first",
+        }
+
+    # Resolve shipping cost
+    if shipping_cost is not None:
+        ship_cost = float(shipping_cost)
+        ship_source = "arg"
+    elif item.get("shipping_cost") not in (None, ""):
+        try:
+            ship_cost = float(item["shipping_cost"])
+            ship_source = "item"
+        except (TypeError, ValueError):
+            ship_cost = 0.0
+            ship_source = "item_invalid"
+    else:
+        ship_cost = float(cfg.get("default_shipping_cost", 0.0))
+        ship_source = "config_default"
+
+    combined = _freeship_price(base_price, ship_cost)
+
+    result: Dict[str, Any] = {
+        "ok": True,
+        "sku": sku,
+        "base_price": round(base_price, 2),
+        "shipping_cost": round(ship_cost, 2),
+        "shipping_cost_source": ship_source,
+        "freeship_price": combined,
+        "applied": False,
+    }
+
+    if apply:
+        offer_block = dict(offer)
+        offer_block["price"] = combined
+        offer_block["freeship_applied_at"] = datetime.now(timezone.utc).isoformat()
+        item["ebay_offer"] = offer_block
+        if draft:
+            draft["price"] = combined
+            item["draft_listing"] = draft
+        item["free_shipping"] = True
+        atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
+        result["applied"] = True
+
+    return result
+
+
 def cmd_reprice_suggest(
     cfg: Dict[str, Any],
     *,
@@ -2922,8 +3015,8 @@ def _build_template_fields(cfg: Dict[str, Any], grp: Dict[str, Any], group_key: 
 
 
 def _generate_sku(ts: datetime) -> str:
-    """Generate a canonical SKU from a datetime: tgwYYYYMMDDHHMMmmm (no seconds)."""
-    return ts.strftime("tgw%Y%m%d%H%M") + f"{ts.microsecond // 1000:03d}"
+    """Generate a canonical SKU: tgwYYYYMMDDHHMMSSs (18 chars, tenths-of-second)."""
+    return ts.strftime("tgw%Y%m%d%H%M%S") + f"{ts.microsecond // 100000:01d}"
 
 
 def cmd_create_item(
@@ -3052,7 +3145,6 @@ def _push_clipboard(text: str) -> bool:
 
 
 def main() -> int:
-    import sys
     argv = ['--' + a[1:] if a == '-help' else a for a in sys.argv[1:]]
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -3214,6 +3306,8 @@ def main() -> int:
                     print(json.dumps(result, indent=2, default=str))
                 else:
                     _print_ai_usage_table(result["rows"], result["since_days"])
+            else:
+                print(f"error: {result.get('error', 'unknown error')}", file=sys.stderr)
             return 0 if result.get("ok") else 1
 
         elif args.op == "build-full":
@@ -3400,6 +3494,23 @@ def main() -> int:
                 print(f"{r['sku']:<24} {cur:>8} {sug:>8} {dpct:>6}  {r['recommendation']:<7} {r['rationale']}")
             print(f"\n{len(items)} item(s).  READ-ONLY — no eBay writes. Reduce/raise thresholds: -5% / +10%.")
             return 0
+
+        elif args.op == "price-freeship":
+            result = cmd_price_freeship(
+                cfg,
+                args.sku,
+                shipping_cost=args.shipping_cost,
+                apply=args.apply,
+            )
+            if result["ok"]:
+                r = result
+                action = "APPLIED" if r["applied"] else "DRY-RUN"
+                print(
+                    f"{action}: {r['sku']}  "
+                    f"base=${r['base_price']:.2f} + ship=${r['shipping_cost']:.2f} "
+                    f"({r['shipping_cost_source']})  → ${r['freeship_price']:.2f}"
+                )
+            return 0 if result["ok"] else 1
 
         elif args.op == "seo-audit":
             result = cmd_seo_audit(cfg, limit=args.limit, live_only=args.live_only)

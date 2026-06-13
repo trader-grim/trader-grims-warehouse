@@ -79,6 +79,14 @@ def load_config(path: Path) -> Dict[str, Any]:
     # PP-CAPTURE-001 P2 — KDE Connect device ID for quiet-check push notification
     kdeconnect_device_id: str = raw.get("kdeconnect_device_id", "")
 
+    # PP-PORTABLE-CATALOG-001 P3 — sync-conflict scan roots (default: vault + itemdata)
+    _raw_sync_roots = raw.get("sync_conflict_roots")
+    sync_conflict_roots: list = (
+        [Path(os.path.expanduser(r)) for r in _raw_sync_roots]
+        if _raw_sync_roots is not None
+        else [plan_vault_path, itemdata_root]
+    )
+
     ebay_token_path = secrets_root / "ebay-token.json"
     ebay_credentials_path = secrets_root / "ebay-credentials.json"
     openrouter_credentials_path = secrets_root / "openrouter-credentials.json"
@@ -108,6 +116,10 @@ def load_config(path: Path) -> Dict[str, Any]:
     fulfillment_policy_id = raw.get("fulfillment_policy_id")
     payment_policy_id = raw.get("payment_policy_id")
     return_policy_id = raw.get("return_policy_id")
+    # PP-FREESHIP-001 — free shipping mode
+    free_shipping_enabled: bool = bool(raw.get("free_shipping_enabled", False))
+    default_shipping_cost: float = float(raw.get("default_shipping_cost", 0.0))
+    fulfillment_policy_free_shipping = raw.get("fulfillment_policy_free_shipping")
     fulfillment_policy_by_category: Dict[str, str] = {str(k): str(v) for k, v in raw.get("fulfillment_policy_by_category", {}).items()}
     store_category_by_ebay_category: Dict[str, Any] = raw.get("store_category_by_ebay_category", {})
 
@@ -158,15 +170,25 @@ def load_config(path: Path) -> Dict[str, Any]:
         "plan_inbox_path": plan_vault_path / "inbox",
         "plan_master_path": plan_vault_path / "plan" / "TGW-Master-Plan.md",
         "pm_intake_delay_hours": float(raw.get("pm_intake_delay_hours", 4.0)),
+        # PP-EDITOR-001 ready-state dole-out: publish pool/divisor items per cycle
+        "dole_interval_s": int(raw.get("dole_interval_s", 3600)),
+        "dole_divisor": int(raw.get("dole_divisor", 60)),
+        # PP-DEADLETTER-001 zero-work watchdog: warn when a live worker completes
+        # nothing for this long while eligible jobs wait
+        "zero_work_stall_hours": float(raw.get("zero_work_stall_hours", 4.0)),
         "reprice_stages": reprice_stages,
         "category_price_defaults": category_price_defaults,
         "category_groups_path": category_groups_path,
         "fulfillment_policy_id": fulfillment_policy_id,
         "payment_policy_id": payment_policy_id,
         "return_policy_id": return_policy_id,
+        "free_shipping_enabled": free_shipping_enabled,
+        "default_shipping_cost": default_shipping_cost,
+        "fulfillment_policy_free_shipping": fulfillment_policy_free_shipping,
         "fulfillment_policy_by_category": fulfillment_policy_by_category,
         "store_category_by_ebay_category": store_category_by_ebay_category,
         "ebay_sku_migrate": raw.get("ebay_sku_migrate", {}),
+        "sync_conflict_roots": sync_conflict_roots,
         "syncthing_config_path": syncthing_config_path,
         "syncthing_url": syncthing_url,
         "catalog_export_folder_id": catalog_export_folder_id,

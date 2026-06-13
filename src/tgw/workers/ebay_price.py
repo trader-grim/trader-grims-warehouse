@@ -29,7 +29,7 @@ import psycopg2.errors
 
 import tgw.logging as tgw_logging
 from tgw.config import DEFAULT_CONFIG, load_config
-from tgw.ebay.pricing import suggest_price, to_99
+from tgw.ebay.pricing import freeship_price, suggest_price, to_99
 from tgw.items import atomic_write_json
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
@@ -101,6 +101,20 @@ class EbayPriceWorker(QueueWorker):
                 # The floor can push the target (p25) above a launch derived from
                 # raw junk comps — never launch below the markdown target.
                 launch = to_99(suggested)
+
+            # PP-FREESHIP-001: when free_shipping_enabled, absorb shipping cost
+            # into the listing price and mark the item for a free-shipping policy.
+            if self.config.get('free_shipping_enabled'):
+                ship_cost = float(
+                    item.get('shipping_cost')
+                    or self.config.get('default_shipping_cost', 0.0)
+                )
+                if ship_cost > 0:
+                    launch = freeship_price(launch, ship_cost)
+                    item['free_shipping'] = True
+                    log.info('ebay_price: %s freeship → $%.2f (base=$%.2f + ship=$%.2f)',
+                             sku, launch, ebay_offer.get('price', 0), ship_cost)
+
             ebay_offer['price']        = launch
             ebay_offer['target_price'] = suggested   # p25 — the eventual move price
             draft['price']             = launch      # staged at launch price
