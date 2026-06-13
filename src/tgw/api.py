@@ -54,7 +54,15 @@ from .thumbnail import build_thumbnail_cache
 
 
 def list_items(
-    cfg: Dict[str, Any], search: str = "", location: str = "", status: str = "", limit: Optional[int] = None, date_from: str = "", date_to: str = "", search_field: Optional[str] = None
+    cfg: Dict[str, Any],
+    search: str = "",
+    location: str = "",
+    status: str = "",
+    limit: Optional[int] = None,
+    date_from: str = "",
+    date_to: str = "",
+    search_field: Optional[str] = None,
+    empty_field: Optional[str] = None,
 ) -> Dict[str, Any]:
     """List items matching filters.  Always returns {'ok': True, 'items': [...]}."""
     # Load from best available source
@@ -88,6 +96,10 @@ def list_items(
             if date_from and d < date_from:
                 continue
             if date_to and d > date_to:
+                continue
+        if empty_field:
+            val = item.get(empty_field)
+            if not (val is None or (isinstance(val, str) and not val.strip())):
                 continue
         out.append(item)
         if limit not in (None, 0) and len(out) >= int(limit):
@@ -437,11 +449,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--skus-only", action="store_true", dest="skus_only", help="output one SKU per line (pipe-friendly)")
 
     p = sub.add_parser("search", help="search items by text (shorthand for list --search TEXT)")
-    p.add_argument("text", help="search text")
+    p.add_argument("text", nargs="?", default="", help="search text")
     p.add_argument("--location", default="")
     p.add_argument("--status", default="")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--skus-only", action="store_true", dest="skus_only")
+    p.add_argument("--empty", default=None, dest="empty_field", metavar="FIELD", help="return only items where FIELD is missing/null/empty-string")
 
     p = sub.add_parser("resolve", help="resolve identifiers to a set of SKUs")
     p.add_argument("--sku", default=None)
@@ -3246,7 +3259,7 @@ def main() -> int:
             result = get_item(cfg, args.sku)
 
         elif args.op == "search":
-            result = list_items(cfg, search=args.text, location=args.location, status=args.status, limit=args.limit)
+            result = list_items(cfg, search=args.text, location=args.location, status=args.status, limit=args.limit, empty_field=args.empty_field)
             if args.skus_only:
                 for item in result["items"]:
                     print(item.get("sku", ""))

@@ -150,6 +150,7 @@ def resolve(cfg: Dict[str, Any], **selectors: Any) -> Set[str]:
         ebay_item_id str        eBay item number
         upc          str        UPC / barcode value
         search       str        free-text substring (all fields)
+        empty_field  str        field name — match items where it is missing/null/empty-string
 
     Returns an empty set if no items match, never raises on missing data.
     """
@@ -204,12 +205,13 @@ def resolve(cfg: Dict[str, Any], **selectors: Any) -> Set[str]:
 
     # --- slower paths (JSON loading) ---
 
-    needs_json = {'status', 'ebay_item_id', 'upc', 'search'}
+    needs_json = {'status', 'ebay_item_id', 'upc', 'search', 'empty_field'}
     if needs_json & set(selectors):
         status       = str(selectors['status']).strip()       if 'status'       in selectors else ''
         ebay_item_id = str(selectors['ebay_item_id']).strip() if 'ebay_item_id' in selectors else ''
         upc          = str(selectors['upc']).strip()          if 'upc'          in selectors else ''
         search       = str(selectors['search']).lower()       if 'search'       in selectors else ''
+        empty_field  = str(selectors['empty_field']).strip()  if 'empty_field'  in selectors else ''
 
         pool = set(iter_all_skus(cfg)) if candidates is None else set(candidates)
         matched = set()
@@ -234,6 +236,10 @@ def resolve(cfg: Dict[str, Any], **selectors: Any) -> Set[str]:
                     if isinstance(v, (str, int, float, bool)) or v is None
                 ).lower()
                 if search not in haystack:
+                    continue
+            if empty_field:
+                val = doc.get(empty_field)
+                if not (val is None or (isinstance(val, str) and not val.strip())):
                     continue
             matched.add(sku)
         narrow(matched)

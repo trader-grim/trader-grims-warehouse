@@ -127,3 +127,31 @@ def test_resolve_combined_selectors():
         cfg = make_cfg(root)
         result = resolve(cfg, status='ACTIVE', search='A1')
         assert result == {'tgw20260101000000001'}
+
+
+def test_resolve_empty_field_missing_or_null():
+    """Items where the field is absent or None match; items with a value do not."""
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        make_item(root, 'tgw20260101000000001')                  # location absent
+        make_item(root, 'tgw20260101000000002', location=None)   # location null
+        make_item(root, 'tgw20260101000000003', location='A1')   # has a location
+        cfg = make_cfg(root)
+        result = resolve(cfg, empty_field='location')
+        assert 'tgw20260101000000001' in result
+        assert 'tgw20260101000000002' in result
+        assert 'tgw20260101000000003' not in result
+
+
+def test_resolve_empty_field_empty_string():
+    """Items where the field is an empty or whitespace string also match."""
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        make_item(root, 'tgw20260101000000001', location='')    # empty string
+        make_item(root, 'tgw20260101000000002', location='  ')  # whitespace
+        make_item(root, 'tgw20260101000000003', location='B2')  # non-empty
+        cfg = make_cfg(root)
+        result = resolve(cfg, empty_field='location')
+        assert 'tgw20260101000000001' in result
+        assert 'tgw20260101000000002' in result
+        assert 'tgw20260101000000003' not in result
