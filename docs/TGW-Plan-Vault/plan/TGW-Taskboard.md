@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-06-13 17:44 UTC — 38 open, 102 done in the last 7 days._
+_Rendered 2026-06-13 18:29 UTC — 40 open, 103 done in the last 7 days._
 
 ## admin (16 open)
 
@@ -27,7 +27,7 @@ _Rendered 2026-06-13 17:44 UTC — 38 open, 102 done in the last 7 days._
 | 139 | 66 |  | PP-INTAKE-002 camera app design review — read reference/PP-INTAKE-002-camera-app-design.md and answer 3 questions before build: (1) root strategy: su polling inside app vs separate background shell script? (2) target device for rooting — Pixel/Xiaomi/other? (3) confirm Syncthing path /sdcard/Pictures/TGW_Sync/ matches current folder mapping. Signal go to seed flutter scaffold build todo. |  |  |
 | 140 | 67 |  | PP-INTAKE-003 xmouse replacement design review — read reference/PP-INTAKE-003-xmouse-replacement-design.md; Flutter recommended (Apache-2.0, shares tgw_app code, no NDK); 3-phase: (1) macro-pad grid + HTTP/SSH dispatch (2) inline web form panel via flutter_inappwebview (3) embedded VNC via flutter_rfb. Signal go on phase(s) to start to seed build todo. |  |  |
 
-## agy (7 open)
+## agy (9 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
@@ -35,6 +35,8 @@ _Rendered 2026-06-13 17:44 UTC — 38 open, 102 done in the last 7 days._
 | 141 | 25 |  | PP-VERIFY-001 catalog baseline rescan — rerun catalog quality scan (follow CATALOG-BASELINE-SCAN.md pattern) on current ItemData sample; compare fill rates vs prior baseline; identify new gaps; output updated markdown table to inbox/. AGY large-context data task |  |  |
 | 142 | 28 |  | eBay DS ticket follow-up — check Developer Support inbox for responses to the 8 buy.marketplace_insights scope questions (todo #79); summarize any answers or next steps; update plan accordingly. Browser task via Seller Hub / DS portal |  |  |
 | 102 | 30 |  | Round7 p30: GDrive dedupe assist (PLAN-backup-dr A8) — chunked rclone dedupe strategy for same-name-same-dir duplicates that time out on the full dataset; produce chunk plan + exact commands; operator supervises execution |  |  |
+| 150 | 30 |  | PP-PORTABLE-CATALOG-001 P2 offline data layer: add deps (connectivity_plus, dio_smart_retry, workmanager, sqlite3) to pubspec.yaml; snapshot-to-sandbox on startup (copy synced tgwcatalog.db to app-private path_provider dir, open copy read-write); offline outbox table in private db (persist patchItem/performAction mutations when offline); connectivity flush (poll /api/queue/status; on reconnect flush outbox to PATCH /api/items/{sku} + POST /api/items/{sku}/action, then replace local copy from GET /api/catalog/snapshot). See reference/PP-PORTABLE-CATALOG-001-P2-prototype-brief.md for full spec. | [[TGW-Master-Plan#PP-PORTABLE-CATALOG-001\|PP-PORTABLE-CATALOG-001]] |  |
+| 151 | 31 |  | PP-PORTABLE-CATALOG-001 P2 wire offline layer into screens: Browse/Item/Edit operate against the private sqflite copy; edits made offline visibly persist; on flush they sync. Make prototype runnable on flutter run -d linux. Capture a screenshot showing offline-edit-then-flush loop and drop in docs/TGW-Plan-Vault/inbox/. Depends on #150. | [[TGW-Master-Plan#PP-PORTABLE-CATALOG-001\|PP-PORTABLE-CATALOG-001]] | ⛔ #150 |
 | 108 | 55 |  | Round7: Verify eBay strikethrough pricing access in Seller Hub (Sale Price section in Edit Listing form), then enable strikethrough_enabled config flag — code shipped + tested session 15, off pending verification |  |  |
 | 124 | 72 |  | PP-OFFER-001 design: offer management CLI — tgw offers [--pending]: list incoming best-offer requests (GetBestOffers); respond --accept/--counter/--decline; auto-accept config (min_pct of current price); design doc before build |  |  |
 | 143 | 73 |  | PP-OFFER-001 GetBestOffers API research — look up Trading API GetBestOffers call signature, pagination, response fields, and rate limits; verify against TGW's current OAuth scopes; output spec to inbox/ for Claude to code. Feeds todo #133 build |  |  |
@@ -50,7 +52,7 @@ _Rendered 2026-06-13 17:44 UTC — 38 open, 102 done in the last 7 days._
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
-| 127 | 50 |  | catalog-verify leading_space_title rule — add warning in _verify_item() for title.startswith(' '); safe auto-fix in --fix pass via str.lstrip(); 1–2 tests; from SUGGESTIONS 2026-06-13. Aider-eligible | [[TGW-Master-Plan#PP-VERIFY-001 — Catalog Assumption Verification + Hall Pass Flag\|PP-VERIFY-001]] |  |
+| 152 | 50 |  | PP-PORTABLE-CATALOG-001 Phase 3: sync-conflict resolution worker (Python). File-scan variant (no Syncthing API needed). Scans Syncthing sync roots for *.sync-conflict-* files. Zero-data-loss invariant: compare conflict copy vs canonical; auto-discard ONLY when provably redundant (identical or strictly older with no unique content); flag divergent/unique copies for operator review via tgw health / notify. Never auto-delete potential unique content. Test case: .obsidian/community-plugins.sync-conflict-*.json already in vault. See Master-Plan PP-PORTABLE-CATALOG-001 Phase 2 design section. | [[TGW-Master-Plan#PP-PORTABLE-CATALOG-001\|PP-PORTABLE-CATALOG-001]] |  |
 | 128 | 52 |  | PP-PROMO-001 Phase 1 build — tgw sale-event [create\|list\|end] --input EVENT.md --dry-run: parse markdown sale-event file -> Promotions API createPromotion/updateItemPriceMarkdown; operator-review gate before --apply; no live eBay writes without Dave sign-off; design doc at reference/PP-PROMO-001-sale-event-design.md (session 29) | [[TGW-Master-Plan#PP-PROMO-001 — Sale Event Automation (design complete)\|PP-PROMO-001]] |  |
 | 129 | 55 |  | tgw ai-usage --by-sku SKU — per-SKU cost breakdown in AI usage report (sum calls/tokens/cost where job payload contains SKU); feeds cost-per-item goal (Phase 5 #2). Additive to existing ai_usage ledger (session 29) |  |  |
 | 136 | 56 |  | pHash image dedup in alt_text + ai_identify workers — compute perceptual hash (imagehash.phash) before vision API call; check image_hashes table (phash -> sku + result_json); on hit copy cached result, skip API; on miss store hash + result after successful call; prevents redundant calls for duplicate photos within or across SKU folders. From PERPLEXITY-007 batch pipeline research. Aider-eligible |  |  |
@@ -69,10 +71,11 @@ _Rendered 2026-06-13 17:44 UTC — 38 open, 102 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — Sold reconciliation and inventory status sync (design ready)\|PP-SOLD-001]] |  |
 
-## Done this week (102)
+## Done this week (103)
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 127 | claude | 2026-06-13 | catalog-verify leading_space_title rule — add warning in _verify_item() for title.startswith(' '); safe auto-fix in --fix pass via str.lstrip(); 1–2 tests; from SUGGESTIONS 2026-06-13. Aider-eligible |
 | 126 | claude | 2026-06-13 | tgw search --empty FIELD — add --empty FIELD flag to cmd_search returning items where the named field is null/empty-string/missing; 'tgw search --empty location' finds unlocated items; additive filter on resolve_items(); 2 tests. From SUGGESTIONS 2026-06-13 |
 | 95 | claude | 2026-06-13 | Round7 p50 XS (Aider-eligible): ISS-003 + ISS-004 config hygiene — align full_catalog_path JSON value with code default; surface ebay_sku_migrate block through load_config() instead of cfg[raw] |
 | 125 | claude | 2026-06-13 | Apply plan/STORE-CATEGORY-MAPPING.csv store category research (from gemini todo #83) to category-groups.json — update store_category field per group; tgw category-groups --reseed; config edit only, no API writes. Aider-eligible |

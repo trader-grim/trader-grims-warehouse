@@ -961,10 +961,13 @@ def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any]) -> List[Dict[str
     def v(rule: str, severity: str, detail: str) -> None:
         viols.append({"rule": rule, "sku": sku, "severity": severity, "detail": detail})
 
-    title = str(doc.get("title") or "").strip()
+    raw_title = str(doc.get("title") or "")
+    title = raw_title.strip()
     if not title:
         v("no_title", "critical", "Title is empty or missing")
     else:
+        if raw_title.startswith(' '):
+            v("leading_space_title", "warning", f"Title has leading whitespace: {raw_title[:50]!r}")
         if title == sku:
             v("title_is_sku", "warning", "Title equals SKU")
         if title.upper().startswith("TEMPLATE:"):
@@ -1086,6 +1089,8 @@ def _compute_fixes(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
     new_title = _strip_template_prefix(title)
     if new_title is not None:
         fixes.append({"rule": "stale_template_prefix", "field": "title", "before": title, "after": new_title})
+    elif title.startswith(' ') and title.lstrip():
+        fixes.append({"rule": "leading_space_title", "field": "title", "before": title, "after": title.lstrip()})
     return fixes
 
 
