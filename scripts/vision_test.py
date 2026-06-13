@@ -13,8 +13,6 @@ Usage:
 Requires OPENROUTER_API_KEY in environment or /home/tgw/.env
 """
 import argparse
-import base64
-import io
 import json
 import os
 import random
@@ -23,18 +21,21 @@ import time
 from pathlib import Path
 
 try:
-    from PIL import Image
     import httpx
 except ImportError:
-    print("Missing deps: pip install pillow httpx")
+    print("Missing deps: pip install httpx")
     sys.exit(1)
+
+# Import the production encode helper so this script always matches what ai_identify sends.
+# ai_identify uses max_px=768 for OpenRouter providers (vs 512 for Ollama).
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+from tgw.workers.ai_identify import _encode_resized  # noqa: E402
 
 # ── config ─────────────────────────────────────────────────────────────────────
 
 ITEM_DATA = Path("/opt/TGW/data/ItemData")
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
-RESIZE_PX = 512   # longest edge, same as ai_identify
-JPEG_Q   = 85
+_OPENROUTER_MAX_PX = 768  # matches ai_identify's OpenRouter branch
 
 SYSTEM_PROMPT = (
     "You are an eBay listing assistant. You will be shown a photo of an item for sale.\n"
@@ -85,15 +86,9 @@ def get_primary_photos(n: int) -> list[Path]:
 
 
 def encode_image(path: Path) -> str:
-    """Resize to RESIZE_PX longest edge and base64-encode as JPEG."""
-    img = Image.open(path).convert("RGB")
-    w, h = img.size
-    scale = RESIZE_PX / max(w, h)
-    if scale < 1.0:
-        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=JPEG_Q)
-    return base64.b64encode(buf.getvalue()).decode()
+    """Encode image using the same resize/quality settings as ai_identify (OpenRouter path)."""
+    b64, _orig_kb, _resized_kb = _encode_resized(path, max_px=_OPENROUTER_MAX_PX)
+    return b64
 
 
 def query_model(model: str, b64: str, api_key: str) -> dict:
@@ -121,7 +116,8 @@ def query_model(model: str, b64: str, api_key: str) -> dict:
                    headers=headers, json=payload, timeout=30)
     elapsed = time.time() - t0
     r.raise_for_status()
-    content = r.json()["choices"][0]["message"]["content"].strip()
+    data = r.json()
+    content = data["choices"][0]["message"]["content"].strip()
     # strip accidental markdown fences
     if content.startswith("```"):
         content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
@@ -130,7 +126,7 @@ def query_model(model: str, b64: str, api_key: str) -> dict:
     except json.JSONDecodeError:
         result = {"raw": content, "parse_error": True}
     result["_elapsed_s"] = round(elapsed, 2)
-    usage = r.json().get("usage", {})
+    usage = data.get("usage", {})
     result["_tokens_in"]  = usage.get("prompt_tokens", "?")
     result["_tokens_out"] = usage.get("completion_tokens", "?")
     return result

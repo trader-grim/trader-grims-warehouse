@@ -160,7 +160,10 @@ def _resolve_fulfillment_id(cfg: Dict[str, Any], ebay_category_id: str,
         resolved = by_profile.get(str(shipping_profile))
         if resolved:
             return str(resolved)
-        # Unmapped profile — fall through rather than forward the name verbatim as a policy ID
+        # Unmapped profile — fall through rather than forward the name verbatim as a policy ID.
+        # Log so misconfigured/typo'd profile names are visible before eBay rejects the listing.
+        log.warning('sync: shipping_profile %r not in fulfillment_policy_by_profile — falling through',
+                    shipping_profile)
 
     if free_shipping:
         policy = cfg.get('fulfillment_policy_free_shipping')

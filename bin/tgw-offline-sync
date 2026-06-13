@@ -60,7 +60,8 @@ if [ "$USE_BTRFS_SNAPSHOTS" = "1" ]; then
     btrfs subvolume snapshot -r "${MOUNT}/@data" "${SNAP_DIR}/${SNAP_NAME}" \
         >> "$LOG" 2>&1
     # Prune: delete oldest snapshots beyond the keep limit
-    ls -1dt "${SNAP_DIR}"/*/ 2>/dev/null \
+    ls -1dt "${SNAP_DIR}"/*/  2>/dev/null \
+        | sed 's|/$||' \
         | tail -n "+$((SNAPSHOT_KEEP + 1))" \
         | while read -r old; do
             btrfs subvolume delete "$old" >> "$LOG" 2>&1

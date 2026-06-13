@@ -48,11 +48,13 @@ mkfs.btrfs -L "$LABEL" -d single -m dup -f "$DEVICE"
 
 echo "==> Creating @data and @snapshots subvolumes ..."
 TMPMNT=$(mktemp -d)
+trap 'umount "$TMPMNT" 2>/dev/null; rmdir "$TMPMNT" 2>/dev/null' EXIT
 mount -o compress=zstd,noatime "$DEVICE" "$TMPMNT"
 btrfs subvolume create "${TMPMNT}/@data"
 btrfs subvolume create "${TMPMNT}/@snapshots"
 umount "$TMPMNT"
 rmdir "$TMPMNT"
+trap - EXIT
 
 echo "==> Creating mount point $MOUNT ..."
 mkdir -p "$MOUNT"
@@ -76,7 +78,6 @@ mkdir -p "$DROPIN_DIR"
 cat > "${DROPIN_DIR}/tgw-sync.conf" <<EOF
 [Unit]
 Wants=${SERVICE}
-After=${SERVICE}
 EOF
 systemctl daemon-reload
 echo "    Drop-in: ${DROPIN_DIR}/tgw-sync.conf"
