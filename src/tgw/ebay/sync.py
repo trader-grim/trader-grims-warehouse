@@ -169,7 +169,7 @@ def _resolve_fulfillment_id(cfg: Dict[str, Any], ebay_category_id: str,
 
     by_cat = cfg.get('fulfillment_policy_by_category', {})
     if str(ebay_category_id) in by_cat:
-        return by_cat[str(ebay_category_id)]
+        return str(by_cat[str(ebay_category_id)])
 
     # Standard Envelope gate: only flat items with confirmed thickness <= 0.25 in qualify.
     # Items with unknown thickness (None) are intentionally excluded — assign envelope

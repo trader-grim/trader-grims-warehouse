@@ -94,14 +94,40 @@ def test_usage_line_uses_command_metavar():
     assert "COMMAND" in output.split("\n")[0]
 
 
+# Deprecated aliases, meta commands, and shorthand aliases intentionally absent
+# from _HELP_GROUPS (they still work; they just don't appear in the grouped help).
+_UNGROUPED_INTENTIONAL: frozenset[str] = frozenset({
+    "help", "catlocmvall",                                          # meta / deprecated
+    "titleupdate", "locationupdate", "verifiedupdate",              # deprecated aliases
+    "statusupdate", "setshipping", "whispertosuggest", "requeue",   # deprecated aliases
+    "status",                                                       # alias for health
+    "note", "btw",                                                  # shorthands for suggest
+})
+
+
 def test_help_groups_cover_canonical_commands():
-    """Every command in _HELP_GROUPS must be a real subcommand."""
+    """Every command in _HELP_GROUPS must be a real registered subcommand."""
     parser = _build_parser()
-    sub = next(
-        a for a in parser._subparsers._group_actions
-        if hasattr(a, '_choices_actions')
-    )
-    all_names = {a.dest for a in sub._choices_actions}
+    sub = next(a for a in parser._subparsers._group_actions if hasattr(a, 'choices'))
+    # Use the public `choices` dict — maps every registered name to its parser.
+    all_names = set(sub.choices.keys())
     for _group_name, commands in _HELP_GROUPS:
         for cmd in commands:
             assert cmd in all_names, f"{cmd!r} in _HELP_GROUPS but not registered as a subcommand"
+
+
+def test_all_grouped_commands_reachable():
+    """Every registered non-deprecated command must appear in _HELP_GROUPS or the allowlist.
+
+    Catches the case where a new subcommand is added to _build_parser() without
+    also being added to _HELP_GROUPS, which would silently omit it from tgw --help.
+    """
+    parser = _build_parser()
+    sub = next(a for a in parser._subparsers._group_actions if hasattr(a, 'choices'))
+    all_names = set(sub.choices.keys())
+    grouped = {cmd for _, cmds in _HELP_GROUPS for cmd in cmds}
+    unaccounted = all_names - grouped - _UNGROUPED_INTENTIONAL
+    assert not unaccounted, (
+        f"Subcommands registered but missing from _HELP_GROUPS and _UNGROUPED_INTENTIONAL: "
+        f"{sorted(unaccounted)}"
+    )

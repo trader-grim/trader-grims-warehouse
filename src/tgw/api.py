@@ -394,7 +394,14 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
 
 
 def _make_grouped_description(sub: argparse.Action) -> str:
-    help_map: dict[str, str] = {a.dest: (a.help or "") for a in sub._choices_actions}
+    # _choices_actions is a CPython implementation detail of _SubParsersAction that
+    # carries help strings not exposed via the public `sub.choices` dict.  Fall back
+    # to an empty dict if the attribute ever disappears — help text becomes blank but
+    # nothing crashes.
+    help_map: dict[str, str] = {
+        a.dest: (a.help or "")
+        for a in getattr(sub, "_choices_actions", [])
+    }
     lines: list[str] = ["TGW inventory management — subcommands by group:\n"]
     for group_name, commands in _HELP_GROUPS:
         lines.append(f"  {group_name}:")

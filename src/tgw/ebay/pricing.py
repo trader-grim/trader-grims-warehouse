@@ -143,7 +143,9 @@ def freeship_price(item_price: float, shipping_cost: float) -> float:
     e.g. 12.99 + 5.00 = 17.99, 12.99 + 5.51 = 18.99 (tipping at base+0.49)
     Never returns below item_price or 0.99 — snaps up if nearest-.99 would undercut.
     """
-    combined = max(0.0, round(item_price + shipping_cost, 2))
+    # Clamp combined so neither rounding branch can return a value below item_price.
+    # Negative shipping_cost (discount) would otherwise allow upper < item_price.
+    combined = max(item_price, max(0.0, round(item_price + shipping_cost, 2)))
     base = math.floor(combined)
     upper = round(base + 0.99, 2)
     lower = round(base - 0.01, 2)   # = (base - 1) + 0.99
