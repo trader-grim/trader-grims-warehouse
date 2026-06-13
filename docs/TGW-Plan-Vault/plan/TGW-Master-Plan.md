@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-12 (session 29 — PP-PLANDB-001 P1+P2 done; inbox: PP-INTAKE-002/003 designs filed; PP-FREESHIP-001/PP-OFFER-001/PP-GIT-001 added; suite 637)
+updated: 2026-06-13 (session 29 cont. — PP-SHELL-001 T3 done (#96); discogs httpx migration done (#98); PP-FREESHIP-001 done (#123); 4 suggestions processed; 11 new todos seeded #125–#135; suite 964)
 maintained_by: Opus (planner)
 ---
 

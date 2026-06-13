@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional
 TASKBOARD_NAME = 'TGW-Taskboard.md'
 
 _DONE_WINDOW_DAYS = 7
+_DONE_MAX_ROWS = 15  # cap shown in the taskboard done section to avoid noise after big sessions
 
 # size token (XS/S/M/L/XL) as it appears in round-style bodies, e.g.
 # "Round7 p16 S: ..." or "Round7 p72 M (GATED: ...)"
@@ -130,15 +131,22 @@ def build_taskboard(
             )
         lines.append('')
 
-    lines += [f'## Done this week ({len(done_week)})', '']
-    if done_week:
+    shown = done_week[:_DONE_MAX_ROWS]
+    overflow = len(done_week) - len(shown)
+    done_header = f'## Done this week ({len(done_week)})'
+    if overflow:
+        done_header += f'  — showing {_DONE_MAX_ROWS} most recent'
+    lines += [done_header, '']
+    if shown:
         lines += [
             '| ID | Agent | Done | Task |',
             '|---:|-------|------|------|',
         ]
-        for i in done_week:
+        for i in shown:
             done_str = i['done_at'].strftime('%Y-%m-%d')
             lines.append(f'| {i["id"]} | {i["agent"]} | {done_str} | {_md_escape(i["body"])} |')
+        if overflow:
+            lines.append(f'| … | | | _…and {overflow} more — run `tgw todo --all` to see everything_ |')
     else:
         lines.append('_Nothing completed in the window._')
     lines.append('')

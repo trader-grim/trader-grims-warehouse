@@ -154,6 +154,11 @@ keys = [
     Key([], "F12", lazy.group["scratchpad"].dropdown_toggle("tgw-shell"),
         desc="Toggle TGW scratchpad terminal"),
 
+    # ── Cheatsheet ──────────────────────────────────────────────────────────
+    Key([MOD, "mod1", "control"], "h",
+        lazy.spawn(f"{TERMINAL} -e bash -c 'cat ~/.config/qtile/cheatsheet.txt; read -rp \"[enter to close] \"'"),
+        desc="TGW/Qtile cheatsheet"),
+
     # ── TGW command chord: Super+T ──────────────────────────────────────────
     # Press Super+T to enter TGW mode; bar shows [TGW]; press Escape to exit.
     # Keys within TGW mode mirror the macroboard Caps Lock layer semantics.
