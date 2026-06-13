@@ -1,23 +1,49 @@
 """
-tgw.todo — Multi-agent TODO tracker (PP-TODO-001).
+tgw.todo — Multi-agent TODO tracker (PP-TODO-001 + PP-PLANDB-001 Phase 1).
 
 Storage: PostgreSQL table ``todo_items`` in ``state_machine`` DB.
 CLI entry point: ``tgw todo [agent] [--add TEXT] [--done ID] [--seed]``
+                 ``tgw todo brief <id>`` — self-contained per-agent task spec
 
 Agents: claude, admin, gemini, db  (open-ended — any string is valid)
 Priority: integer, lower = higher priority (50 = default, 10 = urgent, 90 = someday)
+
+PP-PLANDB-001 Phase 1 columns (migration, applied 2026-06-12)::
+
+    ALTER TABLE todo_items
+      ADD COLUMN pp_ref TEXT,
+      ADD COLUMN depends_on INTEGER[] NOT NULL DEFAULT '{}',
+      ADD COLUMN plan_anchor TEXT;
+
+``pp_ref``      — PP-* item this todo belongs to (e.g. 'PP-PLANDB-001')
+``depends_on``  — todo ids that must complete first (blocker badges on taskboard)
+``plan_anchor`` — exact master-plan heading text (without leading #'s) for the
+                  linked design section; resolved from pp_ref when omitted
 """
 
 from __future__ import annotations
 
 import argparse
+import re
+import time
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
 import psycopg2
 import psycopg2.extras
 
 _DSN = 'dbname=state_machine user=tgw'
+
+
+def _push_clipboard(text: str) -> bool:
+    """Push text to the system clipboard via pyperclip."""
+    try:
+        import pyperclip
+        pyperclip.copy(text)
+        return True
+    except Exception:
+        return False
 
 
 @contextmanager
@@ -64,15 +90,46 @@ _SEED_ITEMS = [
 # Core operations
 # ---------------------------------------------------------------------------
 
-def todo_add(agent: str, body: str, priority: int = 50, source: str = 'session') -> Dict[str, Any]:
+def _enqueue_plan_render(reason: str) -> None:
+    """Coalesced taskboard re-render on any todo mutation (PP-PLANDB-001 Phase 2).
+
+    Same pattern as catalog_rebuild: dedupe_key + 30s not_before so rapid
+    successive mutations collapse into one render. Never lets a queue problem
+    break the todo operation itself.
+    """
+    try:
+        from tgw.queue import state_machine as _sm
+        _sm.enqueue_job(
+            queue_name='plan_render',
+            payload={'reason': reason},
+            dedupe_key='plan_render:pending',
+            not_before=time.time() + 30,
+            max_attempts=3,
+        )
+    except Exception:
+        pass
+
+
+def todo_add(
+    agent: str,
+    body: str,
+    priority: int = 50,
+    source: str = 'session',
+    pp_ref: Optional[str] = None,
+    depends_on: Optional[List[int]] = None,
+    plan_anchor: Optional[str] = None,
+) -> Dict[str, Any]:
     with _conn() as con:
         with con.cursor() as cur:
             cur.execute(
-                'INSERT INTO todo_items (agent, priority, body, source) VALUES (%s, %s, %s, %s) RETURNING id',
-                (agent, priority, body, source),
+                'INSERT INTO todo_items (agent, priority, body, source, pp_ref, depends_on, plan_anchor) '
+                'VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id',
+                (agent, priority, body, source, pp_ref, depends_on or [], plan_anchor),
             )
             new_id = cur.fetchone()[0]
-    return {'ok': True, 'id': new_id, 'agent': agent, 'priority': priority, 'body': body}
+    _enqueue_plan_render('todo_add')
+    return {'ok': True, 'id': new_id, 'agent': agent, 'priority': priority, 'body': body,
+            'pp_ref': pp_ref, 'depends_on': depends_on or [], 'plan_anchor': plan_anchor}
 
 
 def todo_done(item_id: int) -> Dict[str, Any]:
@@ -85,6 +142,7 @@ def todo_done(item_id: int) -> Dict[str, Any]:
             row = cur.fetchone()
     if row is None:
         return {'ok': False, 'error': f'item {item_id} not found or already done'}
+    _enqueue_plan_render('todo_done')
     return {'ok': True, 'id': row[0], 'agent': row[1], 'body': row[2]}
 
 
@@ -100,11 +158,38 @@ def todo_list(agent: Optional[str] = None, show_all: bool = False) -> List[Dict[
                 parts.append('done_at IS NULL')
             where = ('WHERE ' + ' AND '.join(parts)) if parts else ''
             cur.execute(
-                f'SELECT id, agent, priority, body, source, added_at, done_at '
+                f'SELECT id, agent, priority, body, source, added_at, done_at, '
+                f'pp_ref, depends_on, plan_anchor '
                 f'FROM todo_items {where} ORDER BY agent, priority, id',
                 params,
             )
             return [dict(r) for r in cur.fetchall()]
+
+
+def todo_get(item_id: int) -> Optional[Dict[str, Any]]:
+    """Fetch a single todo row (open or done), or None."""
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                'SELECT id, agent, priority, body, source, added_at, done_at, '
+                'pp_ref, depends_on, plan_anchor FROM todo_items WHERE id = %s',
+                (item_id,),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def open_ids(ids: List[int]) -> set:
+    """Return the subset of `ids` that are still open (not done)."""
+    if not ids:
+        return set()
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                'SELECT id FROM todo_items WHERE id = ANY(%s) AND done_at IS NULL',
+                (ids,),
+            )
+            return {r[0] for r in cur.fetchall()}
 
 
 def todo_update(item_id: int, body: str) -> Dict[str, Any]:
@@ -117,6 +202,7 @@ def todo_update(item_id: int, body: str) -> Dict[str, Any]:
             row = cur.fetchone()
     if row is None:
         return {'ok': False, 'error': f'item {item_id} not found or already done'}
+    _enqueue_plan_render('todo_update')
     return {'ok': True, 'id': row[0], 'agent': row[1], 'body': body}
 
 
@@ -130,6 +216,7 @@ def todo_delegate(item_id: int, new_agent: str) -> Dict[str, Any]:
             row = cur.fetchone()
     if row is None:
         return {'ok': False, 'error': f'item {item_id} not found or already done'}
+    _enqueue_plan_render('todo_delegate')
     return {'ok': True, 'id': row[0], 'agent': new_agent, 'body': row[1]}
 
 
@@ -143,7 +230,154 @@ def todo_set_priority(item_id: int, priority: int) -> Dict[str, Any]:
             row = cur.fetchone()
     if row is None:
         return {'ok': False, 'error': f'item {item_id} not found or already done'}
+    _enqueue_plan_render('todo_set_priority')
     return {'ok': True, 'id': row[0], 'agent': row[1], 'priority': priority, 'body': row[2]}
+
+
+def todo_top(agent: str) -> Optional[Dict[str, Any]]:
+    """Return the highest-priority open task for *agent* (lowest priority int,
+    ties broken by id), or None when none exist."""
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                'SELECT id, agent, priority, body, source, added_at, done_at, '
+                'pp_ref, depends_on, plan_anchor FROM todo_items '
+                'WHERE agent = %s AND done_at IS NULL ORDER BY priority, id LIMIT 1',
+                (agent,),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def todo_set_meta(
+    item_id: int,
+    pp_ref: Optional[str] = None,
+    depends_on: Optional[List[int]] = None,
+    plan_anchor: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Set PP-PLANDB-001 metadata on an existing item. Only passed fields change."""
+    sets, params = [], []
+    if pp_ref is not None:
+        sets.append('pp_ref = %s')
+        params.append(pp_ref or None)          # '--pp ""' clears the field
+    if depends_on is not None:
+        sets.append('depends_on = %s')
+        params.append(depends_on)
+    if plan_anchor is not None:
+        sets.append('plan_anchor = %s')
+        params.append(plan_anchor or None)
+    if not sets:
+        return {'ok': False, 'error': 'no metadata given — pass --pp/--depends/--anchor'}
+    params.append(item_id)
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                f"UPDATE todo_items SET {', '.join(sets)} WHERE id = %s "
+                f"RETURNING id, agent, pp_ref, depends_on, plan_anchor",
+                params,
+            )
+            row = cur.fetchone()
+    if row is None:
+        return {'ok': False, 'error': f'item {item_id} not found'}
+    _enqueue_plan_render('todo_set_meta')
+    return {'ok': True, 'id': row[0], 'agent': row[1], 'pp_ref': row[2],
+            'depends_on': row[3], 'plan_anchor': row[4]}
+
+
+# ---------------------------------------------------------------------------
+# Task brief — self-contained per-agent spec (PP-PLANDB-001 Phase 1)
+# ---------------------------------------------------------------------------
+
+_PLAN_EXTRACT_CAP = 6000
+
+_BRIEF_CONSTRAINTS = """\
+## Constraints
+
+- Read `CLAUDE.md` first; settled-architecture rules apply (tgw-api fence,
+  `{ok, ...}` output contract, secrets from `secrets_root`, workers stay thin,
+  catalog rebuild always a job).
+- Never touch config files, secrets, or eBay OAuth scopes.
+- Acceptance: `pytest -q` must pass offline; new behavior gets tests.
+- If a requirement is impossible as specified, stop and explain instead of
+  improvising."""
+
+
+def extract_plan_section(plan_path: Path, anchor: str) -> str:
+    """Extract one master-plan section: the heading whose text contains `anchor`
+    through to the next heading of the same or higher level. Capped."""
+    if not plan_path.exists():
+        return ''
+    lines = plan_path.read_text(encoding='utf-8').splitlines()
+    start = level = None
+    for i, line in enumerate(lines):
+        m = re.match(r'^(#{1,6})\s+(.*)$', line)
+        if m and anchor.lower() in m.group(2).lower():
+            start, level = i, len(m.group(1))
+            break
+    if start is None:
+        return ''
+    out = [lines[start]]
+    for line in lines[start + 1:]:
+        m = re.match(r'^(#{1,6})\s', line)
+        if m and len(m.group(1)) <= level:
+            break
+        out.append(line)
+    text = '\n'.join(out).strip()
+    if len(text) > _PLAN_EXTRACT_CAP:
+        text = text[:_PLAN_EXTRACT_CAP] + '\n\n[... section truncated — read the master plan for the rest]'
+    return text
+
+
+def todo_brief(item_id: int, plan_path: Path) -> Dict[str, Any]:
+    """Build a self-contained task spec for one todo (Aider message-file
+    pattern, next-process.md): todo body + linked plan-section extract +
+    dependency status + standing constraints. Minimal context, link out for more."""
+    item = todo_get(item_id)
+    if item is None:
+        return {'ok': False, 'error': f'item {item_id} not found'}
+
+    anchor = item.get('plan_anchor') or item.get('pp_ref') or ''
+    extract = extract_plan_section(plan_path, anchor) if anchor else ''
+
+    dep_lines = []
+    for dep_id in item.get('depends_on') or []:
+        dep = todo_get(dep_id)
+        if dep is None:
+            dep_lines.append(f'- #{dep_id} — MISSING (deleted?)')
+        else:
+            state = 'done' if dep['done_at'] else 'OPEN — blocks this task'
+            dep_lines.append(f'- #{dep_id} [{state}] {dep["body"][:100]}')
+
+    status = 'done' if item['done_at'] else 'open'
+    parts = [
+        f'# Task brief — todo #{item["id"]} [{item["agent"]}] '
+        f'(p{item["priority"]}, source: {item["source"]}, {status})',
+        '',
+        'You are working in the Trader Grim\'s Warehouse (TGW) repo at',
+        '`/opt/TGW/src/trader-grims-warehouse`. This brief is self-contained;',
+        'consult the linked plan section before deviating from it.',
+        '',
+        '## Task',
+        '',
+        item['body'],
+        '',
+    ]
+    if item.get('pp_ref'):
+        parts += [f'**Plan item:** {item["pp_ref"]}'
+                  + (f' — see master-plan section "{item["plan_anchor"]}"' if item.get('plan_anchor') else ''),
+                  '']
+    if dep_lines:
+        parts += ['## Dependencies', ''] + dep_lines + ['']
+    if extract:
+        parts += [f'## Linked plan section ({anchor})', '', extract, '']
+    elif anchor:
+        parts += ['## Linked plan section', '',
+                  f'(no master-plan heading matched "{anchor}" — read '
+                  f'`docs/TGW-Plan-Vault/plan/TGW-Master-Plan.md` directly)', '']
+    parts.append(_BRIEF_CONSTRAINTS)
+
+    return {'ok': True, 'id': item['id'], 'agent': item['agent'],
+            'brief': '\n'.join(parts)}
 
 
 def todo_seed() -> Dict[str, Any]:
@@ -172,7 +406,44 @@ def todo_seed() -> Dict[str, Any]:
 # CLI handler
 # ---------------------------------------------------------------------------
 
+def _parse_depends(raw: Optional[str]) -> Optional[List[int]]:
+    """'12,14' → [12, 14]; '' → [] (clears); None → None (untouched)."""
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return []
+    return [int(p) for p in re.split(r'[,\s]+', raw) if p]
+
+
 def cmd_todo(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
+    # `tgw todo brief <id> [--clip]`
+    # `tgw todo brief --next --agent <agent> [--clip]`
+    if args.agent == 'brief':
+        use_next = getattr(args, 'next_task', False)
+        if use_next:
+            agent_name = getattr(args, 'next_agent', None) or 'claude'
+            top = todo_top(agent_name)
+            if top is None:
+                print(f'No open tasks for agent: {agent_name}')
+                return {'ok': False, 'error': f'no open tasks for {agent_name}'}
+            target_id = top['id']
+        else:
+            if args.brief_id is None:
+                print('Usage: tgw todo brief <id> [--clip]\n'
+                      '       tgw todo brief --next --agent <agent> [--clip]')
+                return {'ok': False, 'error': 'missing id'}
+            target_id = int(args.brief_id)
+        result = todo_brief(target_id, cfg['plan_master_path'])
+        if result['ok']:
+            print(result['brief'])
+            if getattr(args, 'clip', False):
+                if not _push_clipboard(result['brief']):
+                    print('[clipboard] copy failed — wl-copy and xclip not found')
+        else:
+            print(f"Error: {result['error']}")
+        return result
+
     if args.seed:
         result = todo_seed()
         print(f"Seeded {result['seeded']} items ({result['skipped']} already existed).")
@@ -180,8 +451,24 @@ def cmd_todo(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
 
     if args.add:
         agent = args.agent or 'claude'
-        result = todo_add(agent, args.add, priority=args.priority, source=args.source)
-        print(f"Added #{result['id']} [{agent} p{args.priority}]: {args.add}")
+        result = todo_add(agent, args.add, priority=args.priority, source=args.source,
+                          pp_ref=args.pp or None,
+                          depends_on=_parse_depends(args.depends),
+                          plan_anchor=args.anchor or None)
+        extras = f" pp_ref={args.pp}" if args.pp else ''
+        print(f"Added #{result['id']} [{agent} p{args.priority}]{extras}: {args.add}")
+        return result
+
+    if args.set_meta is not None:
+        result = todo_set_meta(args.set_meta,
+                               pp_ref=args.pp,
+                               depends_on=_parse_depends(args.depends),
+                               plan_anchor=args.anchor)
+        if result['ok']:
+            print(f"Meta #{result['id']} [{result['agent']}]: pp_ref={result['pp_ref']} "
+                  f"depends_on={result['depends_on']} plan_anchor={result['plan_anchor']}")
+        else:
+            print(f"Error: {result['error']}")
         return result
 
     if args.done is not None:
@@ -230,6 +517,10 @@ def cmd_todo(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
         print(f'No {status} TODO items {label}.')
         return {'ok': True, 'count': 0}
 
+    # blocker badges: which of the referenced dependency ids are still open?
+    all_deps = sorted({d for item in items for d in (item.get('depends_on') or [])})
+    still_open = open_ids(all_deps)
+
     current_agent = None
     for item in items:
         ag = item['agent']
@@ -237,8 +528,14 @@ def cmd_todo(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
             print(f'\n── {ag} ──')
             current_agent = ag
         done_mark = '✓' if item['done_at'] else ' '
+        badges = ''
+        if item.get('pp_ref'):
+            badges += f' [{item["pp_ref"]}]'
+        blockers = [d for d in (item.get('depends_on') or []) if d in still_open]
+        if blockers:
+            badges += ' ⛔' + ','.join(f'#{d}' for d in blockers)
         body_preview = item['body'][:80] + ('…' if len(item['body']) > 80 else '')
-        print(f'  [{done_mark}] #{item["id"]:3d} p{item["priority"]:2d}  {body_preview}')
+        print(f'  [{done_mark}] #{item["id"]:3d} p{item["priority"]:2d} {badges} {body_preview}')
 
     print(f'\n{len(items)} item(s).')
     return {'ok': True, 'count': len(items)}

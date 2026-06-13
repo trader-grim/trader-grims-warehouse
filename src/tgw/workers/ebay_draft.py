@@ -133,6 +133,51 @@ def _category_confidence(pl_category: str, ebay_category: str) -> str:
     return 'low'
 
 
+def _validate_category_suggestion(
+    cfg: Dict[str, Any],
+    title: str,
+    resolved_category_id: str,
+    top_n: int = 5,
+) -> Dict[str, Any]:
+    """Query getCategorySuggestions with the drafted title and compute agreement.
+
+    Fail-soft: any API error returns ``{'category_agreement': 'unavailable'}``.
+
+    Returns::
+
+        {
+            'category_suggestions': [{'category_id': str, 'category_name': str}, ...],
+            'category_agreement': 'agreed' | 'mismatch' | 'unavailable',
+        }
+
+    Agreement is ``'agreed'`` if the resolved category is in the top-3
+    suggestions; ``'mismatch'`` otherwise.  No category_choice change is made.
+    """
+    try:
+        from tgw.apis.ebay.taxonomy import get_category_suggestions
+        raw_suggestions = get_category_suggestions(cfg, title)
+    except Exception as exc:
+        log.debug('category validation unavailable for %r: %s', title, exc)
+        return {'category_suggestions': [], 'category_agreement': 'unavailable'}
+
+    simplified = [
+        {
+            'category_id':   s.get('category', {}).get('categoryId'),
+            'category_name': s.get('category', {}).get('categoryName'),
+        }
+        for s in raw_suggestions[:top_n]
+        if s.get('category', {}).get('categoryId')
+    ]
+
+    top_ids = {s['category_id'] for s in simplified[:3]}
+    agreement = 'agreed' if str(resolved_category_id) in top_ids else 'mismatch'
+
+    return {
+        'category_suggestions': simplified,
+        'category_agreement':   agreement,
+    }
+
+
 def _is_ebay_offline(exc: Exception) -> bool:
     """True if exc indicates eBay is unreachable (not an auth or client error)."""
     if isinstance(exc, (requests.exceptions.ConnectionError,
@@ -483,6 +528,20 @@ class EbayDraftWorker(QueueWorker):
         if seo['flags']:
             draft['title_flags'] = seo['flags']
             log.info('%s: title flags: %s', sku, seo['flags'])
+
+        # Category validation via Taxonomy getCategorySuggestions (PP-VERIFY-001 signal)
+        # Uses the finalised SEO title for the query; never changes category_id.
+        if category_id != '99':
+            cat_val = _validate_category_suggestion(self.config, draft['title'], category_id)
+            draft['category_suggestions'] = cat_val['category_suggestions']
+            draft['category_agreement']   = cat_val['category_agreement']
+            if cat_val['category_agreement'] == 'mismatch':
+                top_name = (
+                    cat_val['category_suggestions'][0]['category_name']
+                    if cat_val['category_suggestions'] else '(none)'
+                )
+                log.info('%s: category agreement MISMATCH — taxonomy top=%r, resolved=%r',
+                         sku, top_name, category_name)
 
         # Compute listing quality score — stored in draft; re-scored after pricing adds comps
         from tgw.listing_quality import score_draft

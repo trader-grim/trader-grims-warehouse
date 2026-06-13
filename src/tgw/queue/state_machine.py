@@ -365,6 +365,70 @@ def dead_letter_breakdown() -> Dict[str, int]:
             return {row[0]: row[1] for row in cur.fetchall()}
 
 
+def dead_letter_errors() -> List[Dict[str, Any]]:
+    """Return (queue_name, error_detail) for every dead_letter job.
+
+    Classification into TRANSIENT vs HARD_FAILURE happens in the caller
+    (worker_base.classify_dead_letter — imported here it would be circular).
+    """
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                SELECT queue_name, COALESCE(error_detail, '')
+                  FROM queue_jobs
+                 WHERE state = 'dead_letter'
+                """
+            )
+            return [{'queue_name': r[0], 'error_detail': r[1]} for r in cur.fetchall()]
+
+
+def zero_work_queues(stall_hours: float) -> List[Dict[str, Any]]:
+    """PP-DEADLETTER-001 zero-work watchdog: queues where a worker is alive and
+    eligible jobs have waited > stall_hours, yet nothing succeeded in that window
+    (the ebay_sku_migrate silent-stall pattern: worker up, queue full, zero output).
+
+    Eligibility excludes future-scheduled jobs (not_before > now) so
+    self-rescheduling workers (velocity_stats, ebay_dole) don't false-positive.
+    """
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                WITH eligible AS (
+                    SELECT queue_name, COUNT(*) AS waiting, MIN(created_at) AS oldest
+                      FROM queue_jobs
+                     WHERE state = 'queued'
+                       AND (not_before IS NULL OR not_before <= NOW())
+                     GROUP BY queue_name
+                ), alive AS (
+                    SELECT DISTINCT jsonb_array_elements_text(queues) AS queue_name
+                      FROM queue_workers
+                     WHERE enabled
+                       AND last_heartbeat_at > NOW() - interval '10 minutes'
+                ), completions AS (
+                    SELECT j.queue_name, MAX(h.created_at) AS last_done
+                      FROM queue_job_history h
+                      JOIN queue_jobs j USING (job_id)
+                     WHERE h.new_state = 'succeeded'
+                     GROUP BY j.queue_name
+                )
+                SELECT e.queue_name,
+                       e.waiting,
+                       ROUND(EXTRACT(EPOCH FROM (NOW() - e.oldest)) / 3600, 1) AS oldest_wait_h,
+                       ROUND(EXTRACT(EPOCH FROM (NOW() - c.last_done)) / 3600, 1) AS hours_since_done
+                  FROM eligible e
+                  JOIN alive a USING (queue_name)
+                  LEFT JOIN completions c USING (queue_name)
+                 WHERE e.oldest < NOW() - (%s * interval '1 hour')
+                   AND (c.last_done IS NULL OR c.last_done < NOW() - (%s * interval '1 hour'))
+                 ORDER BY e.queue_name
+                """,
+                (stall_hours, stall_hours),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+
 def clear_dead_letter(queue_name: str) -> int:
     """Cancel all dead_letter jobs for a given queue. Returns the number of rows affected."""
     with _conn() as con:
@@ -510,6 +574,111 @@ def requeue_dead_letter_job(job_id: str) -> str:
             )
             new_id = cur.fetchone()[0]
     return new_id
+
+
+# ---------------------------------------------------------------------------
+# AI usage ledger (PP-MULTIMODEL-001 / Phase 5 #2)
+# ---------------------------------------------------------------------------
+
+_AI_USAGE_DDL = """
+CREATE TABLE IF NOT EXISTS ai_usage (
+    id                BIGSERIAL PRIMARY KEY,
+    recorded_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    task              TEXT NOT NULL,
+    provider          TEXT NOT NULL,
+    model             TEXT NOT NULL,
+    input_chars       INTEGER,
+    output_chars      INTEGER,
+    prompt_tokens     INTEGER,
+    completion_tokens INTEGER,
+    total_tokens      INTEGER,
+    duration_ms       INTEGER NOT NULL,
+    success           BOOLEAN NOT NULL DEFAULT true,
+    error_msg         TEXT
+)
+"""
+
+_ai_usage_table_ready = False
+
+
+def _ensure_ai_usage_table() -> None:
+    global _ai_usage_table_ready
+    if _ai_usage_table_ready:
+        return
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(_AI_USAGE_DDL)
+    _ai_usage_table_ready = True
+
+
+def record_ai_usage(
+    task: str,
+    provider: str,
+    model: str,
+    duration_ms: int,
+    *,
+    input_chars: int = 0,
+    output_chars: int = 0,
+    prompt_tokens: Optional[int] = None,
+    completion_tokens: Optional[int] = None,
+    total_tokens: Optional[int] = None,
+    success: bool = True,
+    error_msg: Optional[str] = None,
+) -> None:
+    """Record one AI/LLM call. Never raises — fail-soft so callers are never blocked."""
+    try:
+        _ensure_ai_usage_table()
+        with _conn() as con:
+            with con.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO ai_usage
+                        (task, provider, model, input_chars, output_chars,
+                         prompt_tokens, completion_tokens, total_tokens,
+                         duration_ms, success, error_msg)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (task, provider, model, input_chars, output_chars,
+                     prompt_tokens, completion_tokens, total_tokens,
+                     duration_ms, success, error_msg),
+                )
+    except Exception:
+        pass
+
+
+def query_ai_usage(since_days: int = 7) -> List[Dict[str, Any]]:
+    """Aggregate AI usage by day / task / provider / model.
+
+    Returns rows sorted by day desc, calls desc. Each row::
+
+        {day, task, provider, model, calls, total_ms,
+         prompt_tokens, completion_tokens, total_tokens,
+         input_chars, output_chars, errors}
+    """
+    _ensure_ai_usage_table()
+    sql = """
+        SELECT
+            date_trunc('day', recorded_at AT TIME ZONE 'UTC')::date AS day,
+            task,
+            provider,
+            model,
+            COUNT(*)                                  AS calls,
+            SUM(duration_ms)                          AS total_ms,
+            SUM(prompt_tokens)                        AS prompt_tokens,
+            SUM(completion_tokens)                    AS completion_tokens,
+            SUM(total_tokens)                         AS total_tokens,
+            SUM(input_chars)                          AS input_chars,
+            SUM(output_chars)                         AS output_chars,
+            COUNT(*) FILTER (WHERE NOT success)       AS errors
+        FROM ai_usage
+        WHERE recorded_at >= now() - (%s || ' days')::interval
+        GROUP BY day, task, provider, model
+        ORDER BY day DESC, calls DESC
+    """
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, (str(since_days),))
+            return [dict(r) for r in cur.fetchall()]
 
 
 def requeue_with_backoff(job_id: str, lease_owner: str, delay_seconds: int, error_detail: str = '') -> None:

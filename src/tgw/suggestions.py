@@ -23,6 +23,7 @@ from tgw.apis.ollama import extract_json
 from tgw.todo import todo_add
 
 _PENDING_RE = re.compile(r'^- \[ \] (\S+) :: (.+)$')
+_PP_REF_RE = re.compile(r'^PP-[A-Z0-9]+-\d+$')
 
 _SYSTEM_PROMPT = """\
 You are the TGW project manager assistant. TGW is Trader Grim's Warehouse, a \
@@ -38,6 +39,9 @@ Rules:
 - Only mark "already_done" when you are confident it is fully reflected.
 - "todo" agent: "claude" for technical/code work, "admin" for operator/business decisions.
 - Keep todo_body concise and actionable (one line).
+- For todos, set "pp_ref" to the PP-* item id (e.g. "PP-PHOTO-001") ONLY when the
+  suggestion clearly belongs to one PP item visible in the plan headings; omit it
+  when unsure — a wrong link is worse than no link.
 - For plan_append, section_heading must exactly match a heading from the plan structure.
 - Respond with a JSON array only — one object per suggestion, in the same index order.
 """
@@ -62,6 +66,7 @@ Respond with a JSON array, one object per suggestion:
     "rationale": "1-2 sentences",
     "todo_agent": "claude|admin",
     "todo_body": "actionable one-line text (todo action only)",
+    "pp_ref": "PP-XXXX-NNN (todo action only; omit unless confident)",
     "section_heading": "## exact heading (plan_append only)",
     "content": "markdown lines to append (plan_append only)",
     "review_agent": "claude|admin",
@@ -165,7 +170,12 @@ def apply_classifications(
         elif action == 'todo' and write:
             agent = c.get('todo_agent', 'claude')
             body = (c.get('todo_body') or entry['text'])[:200]
-            todo_add(agent, body, source=_TODO_SOURCE)
+            # link to the PP item only when the LLM was confident AND the ref
+            # is well-formed — a hallucinated link is worse than none
+            pp_ref = (c.get('pp_ref') or '').strip().upper()
+            if not _PP_REF_RE.match(pp_ref):
+                pp_ref = ''
+            todo_add(agent, body, source=_TODO_SOURCE, pp_ref=pp_ref or None)
 
     if write and line_patches:
         lines = suggestions_path.read_text(encoding='utf-8').splitlines(keepends=True)
@@ -215,8 +225,9 @@ def format_report(
         for e in details['todo']:
             agent = e.get('todo_agent', 'claude')
             body = e.get('todo_body') or e['text']
+            pp = f' ({e["pp_ref"]})' if e.get('pp_ref') else ''
             lines.append(f'- [ ] `{e["timestamp"]}` :: {e["text"]}')
-            lines.append(f'  → **todo [{agent}]:** {body}')
+            lines.append(f'  → **todo [{agent}]{pp}:** {body}')
         lines.append('')
 
     if details.get('plan_append'):

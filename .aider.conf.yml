@@ -1,0 +1,27 @@
+# Aider configuration for Trader Grim's Warehouse (TGW)
+# See docs/TGW-Plan-Vault/plan/next-process.md §2 for context on the Aider tier.
+#
+# Usage (per-task):
+#   git checkout -b task/<id>-<slug>
+#   aider --message-file aider/spec-<id>.md <files...>
+#
+# Set ANTHROPIC_API_KEY before running. Set a hard billing cap in the Anthropic
+# console (~$40/mo) before first use — see admin todo #117.
+
+model: anthropic/claude-sonnet-4-6
+weak-model: anthropic/claude-haiku-4-5-20251001
+
+architect: true
+auto-accept-architect: false       # review the plan before edits land
+
+cache-prompts: true
+map-tokens: 8000
+
+show-diffs: true
+git: true
+auto-commits: true                 # commits land on the task branch only; never merge yourself
+
+auto-lint: true
+auto-test: true
+lint-cmd: "python: ruff check ."
+test-cmd: "pytest -q"

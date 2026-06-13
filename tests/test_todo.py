@@ -4,6 +4,15 @@ from __future__ import annotations
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_render_enqueue():
+    """Keep tests hermetic: todo mutations must not enqueue real plan_render jobs."""
+    with patch('tgw.todo._enqueue_plan_render') as m:
+        yield m
+
 # ---------------------------------------------------------------------------
 # Helpers: build a mock connection + cursor that returns canned data
 # ---------------------------------------------------------------------------
@@ -40,6 +49,142 @@ def test_todo_add_returns_new_id():
     assert result['id'] == 42
     assert result['agent'] == 'claude'
     assert result['priority'] == 30
+
+
+def test_todo_add_with_plandb_metadata():
+    from tgw.todo import todo_add
+    ctx, cur = _mock_conn(fetchone_return=(43,))
+    with patch('tgw.todo._conn', ctx):
+        result = todo_add('claude', 'phase 2', pp_ref='PP-PLANDB-001',
+                          depends_on=[109], plan_anchor='PP-PLANDB-001 — Database-Driven Plan Builder')
+    assert result['ok'] is True
+    assert result['pp_ref'] == 'PP-PLANDB-001'
+    assert result['depends_on'] == [109]
+    # the INSERT received all three new columns
+    sql, params = cur.execute.call_args[0]
+    assert 'pp_ref' in sql and 'depends_on' in sql and 'plan_anchor' in sql
+    assert params[4] == 'PP-PLANDB-001'
+    assert params[5] == [109]
+
+
+def test_todo_add_enqueues_plan_render(_no_render_enqueue):
+    from tgw.todo import todo_add
+    ctx, cur = _mock_conn(fetchone_return=(44,))
+    with patch('tgw.todo._conn', ctx):
+        todo_add('claude', 'test task')
+    _no_render_enqueue.assert_called_once_with('todo_add')
+
+
+# ---------------------------------------------------------------------------
+# todo_set_meta
+# ---------------------------------------------------------------------------
+
+def test_todo_set_meta_partial_update():
+    from tgw.todo import todo_set_meta
+    ctx, cur = _mock_conn(fetchone_return=(7, 'claude', 'PP-X-001', [1, 2], None))
+    with patch('tgw.todo._conn', ctx):
+        result = todo_set_meta(7, pp_ref='PP-X-001', depends_on=[1, 2])
+    assert result['ok'] is True
+    sql = cur.execute.call_args[0][0]
+    assert 'pp_ref = %s' in sql and 'depends_on = %s' in sql
+    assert 'plan_anchor = %s' not in sql  # not passed → untouched
+
+
+def test_todo_set_meta_requires_a_field():
+    from tgw.todo import todo_set_meta
+    result = todo_set_meta(7)
+    assert result['ok'] is False
+
+
+def test_todo_set_meta_not_found():
+    from tgw.todo import todo_set_meta
+    ctx, cur = _mock_conn(fetchone_return=None)
+    with patch('tgw.todo._conn', ctx):
+        result = todo_set_meta(999, pp_ref='PP-X-001')
+    assert result['ok'] is False
+    assert 'not found' in result['error']
+
+
+# ---------------------------------------------------------------------------
+# brief + plan-section extraction
+# ---------------------------------------------------------------------------
+
+_PLAN_MD = """\
+# TGW Master Plan
+
+### PP-FOO-001 — The Foo Project
+
+Foo design prose.
+
+#### Phases
+
+Phase table here.
+
+### PP-BAR-001 — The Bar Project
+
+Bar prose.
+"""
+
+
+def test_extract_plan_section(tmp_path):
+    from tgw.todo import extract_plan_section
+    plan = tmp_path / 'plan.md'
+    plan.write_text(_PLAN_MD, encoding='utf-8')
+    text = extract_plan_section(plan, 'PP-FOO-001')
+    assert text.startswith('### PP-FOO-001')
+    assert 'Foo design prose' in text
+    assert 'Phase table here' in text       # deeper heading stays in section
+    assert 'Bar prose' not in text          # next same-level heading ends it
+
+
+def test_extract_plan_section_no_match(tmp_path):
+    from tgw.todo import extract_plan_section
+    plan = tmp_path / 'plan.md'
+    plan.write_text(_PLAN_MD, encoding='utf-8')
+    assert extract_plan_section(plan, 'PP-NOPE-999') == ''
+
+
+def test_todo_brief_includes_plan_extract_and_deps(tmp_path):
+    from tgw import todo as todo_mod
+    plan = tmp_path / 'plan.md'
+    plan.write_text(_PLAN_MD, encoding='utf-8')
+
+    rows = {
+        9: {'id': 9, 'agent': 'claude', 'priority': 16, 'body': 'build the foo',
+            'source': 'round7', 'added_at': None, 'done_at': None,
+            'pp_ref': 'PP-FOO-001', 'depends_on': [8], 'plan_anchor': None},
+        8: {'id': 8, 'agent': 'claude', 'priority': 10, 'body': 'prereq task',
+            'source': 'round7', 'added_at': None, 'done_at': 'sometime',
+            'pp_ref': None, 'depends_on': [], 'plan_anchor': None},
+    }
+    with patch.object(todo_mod, 'todo_get', side_effect=lambda i: rows.get(i)):
+        result = todo_mod.todo_brief(9, plan)
+    assert result['ok'] is True
+    brief = result['brief']
+    assert 'todo #9' in brief
+    assert 'build the foo' in brief
+    assert 'Foo design prose' in brief          # plan extract present
+    assert '#8 [done] prereq task' in brief     # dependency status
+    assert 'CLAUDE.md' in brief                 # constraints block
+
+
+def test_todo_brief_not_found():
+    from tgw import todo as todo_mod
+    with patch.object(todo_mod, 'todo_get', return_value=None):
+        result = todo_mod.todo_brief(999, None)
+    assert result['ok'] is False
+
+
+# ---------------------------------------------------------------------------
+# _parse_depends
+# ---------------------------------------------------------------------------
+
+def test_parse_depends():
+    from tgw.todo import _parse_depends
+    assert _parse_depends(None) is None
+    assert _parse_depends('') == []
+    assert _parse_depends('12,14') == [12, 14]
+    assert _parse_depends('12, 14') == [12, 14]
 
 
 # ---------------------------------------------------------------------------
@@ -173,3 +318,203 @@ def test_requeue_dead_letter_job_not_found():
             assert False, 'should have raised ValueError'
         except ValueError as exc:
             assert 'not found' in str(exc)
+
+
+# ---------------------------------------------------------------------------
+# --clip and --next flags (PP-TODO-001 extension, todo #122)
+# ---------------------------------------------------------------------------
+
+def _make_brief_args(**overrides):
+    """Build a minimal argparse.Namespace for `tgw todo brief` tests."""
+    import argparse
+    defaults = dict(
+        agent='brief', brief_id=None, seed=False, add=None, done=None,
+        update=None, delegate=None, set_priority=None, set_meta=None,
+        show_all=False, priority=50, source='session',
+        pp=None, depends=None, anchor=None,
+        clip=False, next_task=False, next_agent=None,
+    )
+    defaults.update(overrides)
+    return argparse.Namespace(**defaults)
+
+
+_ROW_9 = {
+    'id': 9, 'agent': 'claude', 'priority': 20, 'body': 'do the work',
+    'source': 'test', 'added_at': None, 'done_at': None,
+    'pp_ref': None, 'depends_on': [], 'plan_anchor': None,
+}
+
+
+def test_brief_clip_calls_push_clipboard(tmp_path):
+    from tgw import todo as todo_mod
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    cfg = {'plan_master_path': plan}
+    args = _make_brief_args(brief_id='9', clip=True)
+
+    with patch.object(todo_mod, 'todo_get', return_value=_ROW_9):
+        with patch.object(todo_mod, '_push_clipboard', return_value=True) as mock_clip:
+            result = todo_mod.cmd_todo(cfg, args)
+
+    assert result['ok'] is True
+    mock_clip.assert_called_once()
+    pushed = mock_clip.call_args[0][0]
+    assert 'do the work' in pushed
+
+
+def test_brief_clip_failure_prints_warning(tmp_path, capsys):
+    from tgw import todo as todo_mod
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    cfg = {'plan_master_path': plan}
+    args = _make_brief_args(brief_id='9', clip=True)
+
+    with patch.object(todo_mod, 'todo_get', return_value=_ROW_9):
+        with patch.object(todo_mod, '_push_clipboard', return_value=False):
+            todo_mod.cmd_todo(cfg, args)
+
+    out = capsys.readouterr().out
+    assert 'clipboard' in out
+
+
+def test_brief_no_clip_does_not_call_push_clipboard(tmp_path):
+    from tgw import todo as todo_mod
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    cfg = {'plan_master_path': plan}
+    args = _make_brief_args(brief_id='9', clip=False)
+
+    with patch.object(todo_mod, 'todo_get', return_value=_ROW_9):
+        with patch.object(todo_mod, '_push_clipboard', return_value=True) as mock_clip:
+            todo_mod.cmd_todo(cfg, args)
+
+    mock_clip.assert_not_called()
+
+
+def test_brief_next_agent_gets_top_task(tmp_path):
+    from tgw import todo as todo_mod
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    cfg = {'plan_master_path': plan}
+    args = _make_brief_args(next_task=True, next_agent='gemini')
+
+    gemini_row = dict(_ROW_9, id=7, agent='gemini', body='gemini top task')
+
+    with patch.object(todo_mod, 'todo_top', return_value=gemini_row) as mock_top:
+        with patch.object(todo_mod, 'todo_get', return_value=gemini_row):
+            result = todo_mod.cmd_todo(cfg, args)
+
+    mock_top.assert_called_once_with('gemini')
+    assert result['ok'] is True
+    assert result['id'] == 7
+
+
+def test_brief_next_default_agent_is_claude(tmp_path):
+    from tgw import todo as todo_mod
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    cfg = {'plan_master_path': plan}
+    args = _make_brief_args(next_task=True, next_agent=None)  # no --agent given
+
+    with patch.object(todo_mod, 'todo_top', return_value=_ROW_9) as mock_top:
+        with patch.object(todo_mod, 'todo_get', return_value=_ROW_9):
+            todo_mod.cmd_todo(cfg, args)
+
+    mock_top.assert_called_once_with('claude')
+
+
+def test_brief_next_no_tasks_returns_error(tmp_path):
+    from tgw import todo as todo_mod
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    cfg = {'plan_master_path': plan}
+    args = _make_brief_args(next_task=True, next_agent='gemini')
+
+    with patch.object(todo_mod, 'todo_top', return_value=None):
+        result = todo_mod.cmd_todo(cfg, args)
+
+    assert result['ok'] is False
+    assert 'gemini' in result['error']
+
+
+def test_todo_top_queries_db():
+    from tgw.todo import todo_top
+    row_data = dict(_ROW_9, agent='gemini')
+    ctx, cur = _mock_conn(fetchone_return=row_data)
+    cur.fetchone.return_value = row_data
+
+    # Use a RealDictCursor-like mock
+    from unittest.mock import MagicMock
+    cur2 = MagicMock()
+    cur2.__enter__ = lambda s: s
+    cur2.__exit__ = MagicMock(return_value=False)
+    cur2.fetchone.return_value = row_data
+
+    con = MagicMock()
+    con.cursor.return_value = cur2
+    con.__enter__ = lambda s: s
+    con.__exit__ = MagicMock(return_value=False)
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def ctx2():
+        yield con
+
+    with patch('tgw.todo._conn', ctx2):
+        result = todo_top('gemini')
+
+    assert result is not None
+    sql = cur2.execute.call_args[0][0]
+    assert 'agent = %s' in sql
+    assert 'done_at IS NULL' in sql
+    assert 'ORDER BY priority, id LIMIT 1' in sql
+
+
+def test_todo_top_no_tasks_returns_none():
+    from contextlib import contextmanager
+    from unittest.mock import MagicMock
+
+    from tgw.todo import todo_top
+
+    cur = MagicMock()
+    cur.__enter__ = lambda s: s
+    cur.__exit__ = MagicMock(return_value=False)
+    cur.fetchone.return_value = None
+
+    con = MagicMock()
+    con.cursor.return_value = cur
+    con.__enter__ = lambda s: s
+    con.__exit__ = MagicMock(return_value=False)
+
+    @contextmanager
+    def ctx():
+        yield con
+
+    with patch('tgw.todo._conn', ctx):
+        result = todo_top('claude')
+
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# _push_clipboard — pyperclip wrapper
+# ---------------------------------------------------------------------------
+
+def test_push_clipboard_returns_true_on_success():
+    from tgw.todo import _push_clipboard
+
+    with patch('pyperclip.copy') as mock_copy:
+        result = _push_clipboard('hello')
+
+    mock_copy.assert_called_once_with('hello')
+    assert result is True
+
+
+def test_push_clipboard_returns_false_on_exception():
+    from tgw.todo import _push_clipboard
+
+    with patch('pyperclip.copy', side_effect=Exception('no clipboard')):
+        result = _push_clipboard('hello')
+
+    assert result is False

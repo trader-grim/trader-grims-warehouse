@@ -5,8 +5,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 import tgw.context as ctx_mod
 from tgw.context import clear_context, get_context, set_context
+
+
+@pytest.fixture(autouse=True)
+def _patch_compat_links(tmp_path, monkeypatch):
+    monkeypatch.setattr(ctx_mod, "_COMPAT_CURRENT_ITEM", tmp_path / "CurrentItem")
+    monkeypatch.setattr(ctx_mod, "_COMPAT_CURRENT_ITEM_JSON", tmp_path / "CurrentItem.json")
 
 # ---------------------------------------------------------------------------
 # Helpers

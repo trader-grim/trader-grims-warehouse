@@ -161,25 +161,77 @@ def check_location_tree(cfg: Dict[str, Any]) -> Dict[str, Any]:
         return _result('location_tree', False, str(e), (time.time() - t) * 1000)
 
 
+def classify_dead_letter_errors(rows: list) -> Dict[str, Dict[str, int]]:
+    """Split dead-letter rows ({queue_name, error_detail}) into per-queue
+    TRANSIENT vs HARD_FAILURE counts via worker_base.classify_dead_letter."""
+    from tgw.queue.worker_base import classify_dead_letter
+    out: Dict[str, Dict[str, int]] = {}
+    for row in rows:
+        verdict, _ = classify_dead_letter(row.get('error_detail') or '')
+        bucket = 'transient' if verdict == 'requeue' else 'hard'
+        q = out.setdefault(row['queue_name'], {'transient': 0, 'hard': 0})
+        q[bucket] += 1
+    return out
+
+
 def check_postgres(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """PostgreSQL reachable and queue_jobs table accessible."""
+    """PostgreSQL reachable and queue_jobs table accessible.
+
+    Dead-letter counts are split TRANSIENT (requeue-able noise, T) vs
+    HARD_FAILURE (real signal, H). Adds the PP-DEADLETTER-001 zero-work
+    watchdog: a live worker with eligible jobs waiting > zero_work_stall_hours
+    and zero completions in that window is a stalled pipeline, not an idle one.
+    """
     t = time.time()
     try:
-        from tgw.queue.state_machine import dead_letter_breakdown, dead_letter_count, init, queue_depths
+        from tgw.queue.state_machine import (
+            dead_letter_count,
+            dead_letter_errors,
+            init,
+            queue_depths,
+            zero_work_queues,
+        )
         dsn = cfg.get('postgres_dsn', 'dbname=state_machine user=tgw')
         init(dsn)
         depths = queue_depths()
         dl = dead_letter_count()
-        dl_by_queue = dead_letter_breakdown()
+        dl_classified = classify_dead_letter_errors(dead_letter_errors())
+        dl_by_queue = {q: c['transient'] + c['hard'] for q, c in dl_classified.items()}
+        dl_transient = sum(c['transient'] for c in dl_classified.values())
+        dl_hard = sum(c['hard'] for c in dl_classified.values())
+
         depth_str = ', '.join(f'{q}:{n}' for q, n in depths.items()) or 'all queues empty'
-        if dl_by_queue:
-            dl_str = ', '.join(f'{q}:{n}' for q, n in dl_by_queue.items())
-            detail = f'depths=[{depth_str}] dead_letter={dl} [{dl_str}]'
+        if dl_classified:
+            dl_str = ', '.join(
+                f'{q}:{c["transient"] + c["hard"]}(T{c["transient"]}/H{c["hard"]})'
+                for q, c in sorted(dl_classified.items(),
+                                   key=lambda kv: -(kv[1]['transient'] + kv[1]['hard']))
+            )
+            detail = f'depths=[{depth_str}] dead_letter={dl} T{dl_transient}/H{dl_hard} [{dl_str}]'
         else:
             detail = f'depths=[{depth_str}] dead_letter=0'
-        return _result('postgres', True, detail, (time.time() - t) * 1000,
-                       queue_depths=depths, dead_letter=dl,
-                       dead_letter_by_queue=dl_by_queue)
+
+        warnings: list[str] = []
+        stall_hours = float(cfg.get('zero_work_stall_hours', 4.0))
+        for stalled in zero_work_queues(stall_hours):
+            warnings.append(
+                f'zero-work stall: {stalled["queue_name"]} — worker alive, '
+                f'{stalled["waiting"]} job(s) waiting {stalled["oldest_wait_h"]}h, '
+                f'0 completions in {stall_hours:g}h'
+            )
+        if warnings:
+            detail += '; ' + '; '.join(f'WARN: {w}' for w in warnings)
+
+        result = _result('postgres', True, detail, (time.time() - t) * 1000,
+                         queue_depths=depths, dead_letter=dl,
+                         dead_letter_by_queue=dl_by_queue,
+                         dead_letter_transient=dl_transient,
+                         dead_letter_hard=dl_hard,
+                         dead_letter_classified=dl_classified,
+                         warnings=warnings)
+        if warnings:
+            result['warn'] = True
+        return result
     except Exception as e:
         return _result('postgres', False, f'unreachable: {e}', (time.time() - t) * 1000)
 
@@ -327,6 +379,55 @@ def check_backups(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def check_taskboard(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    PP-PLANDB-001 Phase 2 — generated taskboard freshness.
+
+    Yellow (ok=True, warn=True): TGW-Taskboard.md missing, or older than the
+    newest todo mutation by >10 min (the coalesced plan_render job has a 30s
+    delay; 10 min covers worker restarts without flapping).
+    Never red — a stale taskboard is an annoyance, not an outage.
+    """
+    t = time.time()
+    warnings: list[str] = []
+
+    from tgw.plan_render import taskboard_path
+    board = taskboard_path(cfg)
+    if not board.exists():
+        warnings.append(f'taskboard missing: {board} — run `tgw plan render`')
+    else:
+        rendered = board.stat().st_mtime
+        try:
+            import psycopg2
+            con = psycopg2.connect(cfg.get('postgres_dsn', 'dbname=state_machine user=tgw'))
+            try:
+                with con.cursor() as cur:
+                    cur.execute(
+                        'SELECT EXTRACT(EPOCH FROM GREATEST(max(added_at), max(done_at))) '
+                        'FROM todo_items'
+                    )
+                    row = cur.fetchone()
+            finally:
+                con.close()
+            last_mutation = float(row[0]) if row and row[0] is not None else None
+            if last_mutation is not None and last_mutation - rendered > 600:
+                lag_min = int((last_mutation - rendered) / 60)
+                warnings.append(
+                    f'taskboard stale: todo tracker changed {lag_min}min after last render '
+                    f'— check tgw-worker@plan_render.service'
+                )
+        except Exception:
+            pass  # DB down is check_postgres's problem, not the taskboard's
+
+    detail = '; '.join(f'WARN: {w}' for w in warnings) if warnings else (
+        f'taskboard fresh ({board.name})')
+    result = _result('taskboard', True, detail, (time.time() - t) * 1000,
+                     warnings=warnings)
+    if warnings:
+        result['warn'] = True
+    return result
+
+
 def check_backup_service() -> Dict[str, Any]:
     """trader-grims-backup systemd service is active."""
     t = time.time()
@@ -429,6 +530,25 @@ def check_ebay_token(cfg: Dict[str, Any]) -> Dict[str, Any]:
         return _result('ebay_token', False, str(e), (time.time() - t) * 1000)
 
 
+def check_sync_conflicts(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Count unresolved Syncthing sync-conflict files across configured scan roots.
+
+    Surfaces the count without resolving; the sync_conflict worker resolves them.
+    ok=True when no conflicts remain; ok=False signals pending operator attention.
+    """
+    t = time.time()
+    try:
+        from tgw.sync_conflict import count_conflicts
+        roots = cfg.get('sync_conflict_roots') or []
+        n = count_conflicts(roots)
+        detail = 'no conflicts' if n == 0 else f'{n} unresolved conflict file(s) — run sync_conflict worker'
+        return _result('sync_conflicts', True, detail,
+                       (time.time() - t) * 1000, conflict_count=n,
+                       warn=(n > 0), roots=[str(r) for r in roots])
+    except Exception as e:
+        return _result('sync_conflicts', False, str(e), (time.time() - t) * 1000)
+
+
 # ---------------------------------------------------------------------------
 # Combined check
 # ---------------------------------------------------------------------------
@@ -455,7 +575,9 @@ def check_all(cfg: Dict[str, Any],
         check_postgres(cfg),
         check_backup_service(),
         check_backups(cfg),
+        check_taskboard(cfg),
         check_ownership(cfg),
+        check_sync_conflicts(cfg),
     ]
     if include_ollama:
         checks.append(check_ollama())

@@ -13,12 +13,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from .alt_text import cmd_alt_text
+from .alt_text import cmd_alt_text, cmd_alt_text_batch
 from .catalog import (
     build_all_catalogs,
     build_full_catalog,
@@ -100,14 +101,24 @@ def _item_ebay_id(item: Dict[str, Any]) -> str:
     return str(lid or item.get("Item number") or "").strip()
 
 
-def cmd_picklist(cfg: Dict[str, Any], *, status: str = "", location: str = "", search: str = "") -> Dict[str, Any]:
+def cmd_picklist(
+    cfg: Dict[str, Any],
+    *,
+    status: str = "",
+    location: str = "",
+    search: str = "",
+    pdf: bool = False,
+    output: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Location-sorted picking list (PP-FULFILLMENT-001).
 
     Emits a plain-text list of items grouped and sorted by warehouse location
     (unlocated items last), each line: SKU, title, eBay id. Reads via the
-    token-free list_items() helper — no eBay API call. This is the data spine
-    later hardware features (PDF, QR scan-to-confirm, label printing) build on.
+    token-free list_items() helper — no eBay API call.
+
+    With --pdf: generates a PDF (checkboxes + QR per row) at --output path or
+    a temp file, then auto-sends to CUPS if config key ``print_cups_queue`` is set.
     """
     listed = list_items(cfg, search=search, location=location, status=status)
     rows: List[Dict[str, str]] = []
@@ -136,7 +147,69 @@ def cmd_picklist(cfg: Dict[str, Any], *, status: str = "", location: str = "", s
     print("\n".join(lines).strip())
 
     n_locs = len({r["location"] for r in rows})
-    return {"ok": True, "count": len(rows), "locations": n_locs, "picklist": rows}
+    result: Dict[str, Any] = {"ok": True, "count": len(rows), "locations": n_locs, "picklist": rows}
+
+    if pdf:
+        from .printing import _default_picklist_path, build_picklist_pdf, cups_print
+
+        out_path = Path(output) if output else _default_picklist_path()
+        try:
+            build_picklist_pdf(rows, out_path)
+            result["pdf"] = str(out_path)
+            queue = cfg.get("print_cups_queue", "")
+            if queue:
+                ok = cups_print(out_path, queue)
+                result["cups_sent"] = ok
+                result["cups_queue"] = queue
+        except ImportError as exc:
+            result["pdf_error"] = f"printing deps missing: {exc}"
+
+    return result
+
+
+def cmd_print_label(
+    cfg: Dict[str, Any],
+    sku: str,
+    *,
+    output: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Generate a 2.25"×1.25" Code128 SKU label PDF (PP-FULFILLMENT-001 Phase 1).
+
+    Writes to --output path or /tmp/tgw-label-<sku>.pdf.
+    If config key ``print_cups_queue`` is set, also sends to CUPS (stub until
+    hardware arrives).
+    """
+    from .printing import _default_label_path, build_label_pdf, cups_print
+
+    try:
+        item = get_item(cfg, sku)
+    except FileNotFoundError:
+        return {"ok": False, "error": f"SKU not found: {sku}"}
+
+    item_title = str(item.get("title") or "").strip()
+    location = str(item.get("location") or "").strip()
+
+    out_path = Path(output) if output else _default_label_path(sku)
+
+    try:
+        build_label_pdf(sku, item_title, location, out_path)
+    except ImportError as exc:
+        return {"ok": False, "error": f"printing deps missing: {exc}"}
+
+    result: Dict[str, Any] = {
+        "ok": True,
+        "sku": sku,
+        "pdf": str(out_path),
+        "cups_sent": False,
+    }
+
+    queue = cfg.get("print_cups_queue", "")
+    if queue:
+        ok = cups_print(out_path, queue)
+        result["cups_sent"] = ok
+        result["cups_queue"] = queue
+
+    return result
 
 
 _ENQUEUE_QUEUES = {
@@ -154,7 +227,6 @@ _ENQUEUE_QUEUES = {
 
 def _expand_skus(skus: List[str]) -> List[str]:
     """Expand '-' in a SKU list by reading one SKU per line from stdin."""
-    import sys
 
     out: List[str] = []
     for s in skus:
@@ -370,6 +442,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--status", default="", help="filter by status")
     p.add_argument("--location", default="", help="filter by location")
     p.add_argument("--search", default="", help="text filter across fields")
+    p.add_argument("--pdf", action="store_true", help="generate PDF with checkboxes and QR codes (PP-ADD-009)")
+    p.add_argument("--output", default=None, metavar="PATH", help="output PDF path (default: /tmp/tgw-picklist-<ts>.pdf)")
+
+    p = sub.add_parser("print-label", help="generate Code128 SKU label PDF (PP-FULFILLMENT-001 Phase 1)")
+    p.add_argument("sku", help="item SKU")
+    p.add_argument("--output", default=None, metavar="PATH", help="output PDF path (default: /tmp/tgw-label-<sku>.pdf)")
 
     p = sub.add_parser("enqueue-sku", help="enqueue a pipeline action for one or more SKUs (PP-WM-001)")
     p.add_argument("queue", help="target queue (ai_identify, ebay_draft, ebay_price, ...)")
@@ -484,9 +562,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("staged", help="list items staged as UNPUBLISHED eBay offers, awaiting review")
     p.add_argument("--json", action="store_true", dest="as_json", help="output as JSON instead of a table")
 
-    p = sub.add_parser("publish", help="approve and publish one or more staged items")
+    p = sub.add_parser("publish", help="approve and publish one or more staged items now (List-Now bypass of the ready dole-out)")
     p.add_argument("skus", nargs="+", help="one or more SKUs to publish")
     p.add_argument("--dry-run", action="store_true", help="show what would be enqueued without actually doing it")
+
+    p = sub.add_parser("ready", help="ready-state dole-out queue: review done-state, listed at a rate limit by ebay_dole (PP-EDITOR-001)")
+    p.add_argument("ready_op", nargs="?", default="list", choices=["list", "set", "unset"], help="list the ready pool (default), or set/unset ready on SKUs")
+    p.add_argument("skus", nargs="*", help="SKU(s) for set/unset ('-' reads one per line from stdin)")
 
     p = sub.add_parser("setup-ebay-hooks", help="register eBay push notification delivery URL (run once)")
     p.add_argument("--url", required=True, help="public HTTPS URL eBay will POST to, e.g. https://hooks.example.com/webhooks/ebay/notification")
@@ -520,6 +602,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--search", default="", help="free-text substring filter")
     p.add_argument("--limit", type=int, default=0, help="max items (0 = all matched)")
     p.add_argument("--json", dest="as_json", action="store_true", help="output full JSON instead of the table")
+
+    p = sub.add_parser("price-freeship", help="compute free-shipping price (item_price + shipping_cost → nearest .99); use --apply to write it (PP-FREESHIP-001)")
+    p.add_argument("sku", help="SKU of the item")
+    p.add_argument("--shipping-cost", type=float, default=None, metavar="DOLLARS",
+                   help="shipping cost to absorb (overrides item.shipping_cost and config default_shipping_cost)")
+    p.add_argument("--apply", action="store_true",
+                   help="write the combined price to the item and set free_shipping=true")
 
     p = sub.add_parser("seo-audit", help="SEO quality report for live and staged listings (PP-SEO-001)")
     p.add_argument("--limit", type=int, default=50, help="max items to show (default 50, worst first)")
@@ -619,6 +708,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sandbox", action="store_true", help="use eBay sandbox instead of production")
     p.add_argument("--code", default=None, help="skip browser: supply auth code from redirect URL directly (URL-encoded OK)")
 
+    p = sub.add_parser("report", help="generate reports from ItemData (PP-DOCFLOW-001 Phase-3 seed)")
+    p.add_argument("report_type", choices=["sales"], help="sales: monthly units/revenue by category-group + dead-stock ranking")
+    p.add_argument("--stale", action="store_true", help="dead-stock section only (skip monthly pivot)")
+    p.add_argument("--output", default=None, metavar="DIR", help="output directory (default: vault/dev-workflow/research/)")
+    p.add_argument("--no-vault", action="store_true", dest="no_vault", help="return data only, do not write files")
+
     p = sub.add_parser("category-groups", help="view/manage category group taxonomy (PP-PRICE-005)")
     p.add_argument("category_id", nargs="?", default=None, help="look up which group a specific eBay category ID belongs to")
     p.add_argument("--list", action="store_true", help="list all groups with category counts and pricing")
@@ -640,6 +735,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--camera", metavar="GROUP_KEY", dest="camera_only", default=None, help="push SETTEMPLATE: to clipboard only (KDE Connect relay) — no JSON update")
     p.add_argument("--dry-run", action="store_true", help="show what would be written without making changes")
 
+    p = sub.add_parser(
+        "create-item",
+        help="pre-create SKU folder + blank JSON with template applied; push COMMAND:SKU to phone (PP-INTAKE-001 Phase 2.5)",
+    )
+    p.add_argument("--template", default=None, metavar="GROUP", help="category group key to pre-apply (e.g. electronics)")
+    p.add_argument("--count", type=int, default=1, metavar="N", help="number of items to create (default: 1, max: 20)")
+    p.add_argument("--dry-run", action="store_true", help="show what would be created without writing files")
+
     p = sub.add_parser("data-scrub", help="ItemData maintenance passes (dry-run by default)")
     p.add_argument("--pass", dest="scrub_pass", type=int, default=1, metavar="N", help="which scrub pass to run (1=#VERIFIED→verified; 2=size_class backfill)")
     p.add_argument("--write", action="store_true", help="apply changes (default: dry-run only)")
@@ -648,10 +751,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "alt-text",
         help="generate alt_text + seo_caption via vision model; rename primary image to <sku>-alt.jpg and archive original to history",
     )
-    p.add_argument("sku", help="SKU to process")
+    p.add_argument("sku", nargs="?", default=None, help="SKU to process (omit with --batch)")
     p.add_argument("--model", default=None, help="vision model ID (default: google/gemini-2.5-flash)")
     p.add_argument("--provider", default=None, choices=["openrouter", "ollama"], help="provider (default: openrouter)")
     p.add_argument("--dry-run", action="store_true", help="show what would happen without calling the model or writing files")
+    p.add_argument("--batch", action="store_true", help="run all eligible items directly with rate-limiting (OpenRouter free ~20 req/min)")
+    p.add_argument("--limit", type=int, default=0, metavar="N", help="max items to process in --batch mode (0 = all eligible)")
 
     p = sub.add_parser(
         "alt-text-batch",
@@ -661,8 +766,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="count eligible items without enqueuing")
     p.add_argument("--status", default="", metavar="STATUS", help="filter to items with this #STATUS value (e.g. 'live')")
 
-    p = sub.add_parser("todo", help="multi-agent TODO tracker (PP-TODO-001)")
-    p.add_argument("agent", nargs="?", default=None, help="filter by agent: claude, admin, gemini, db (omit for all)")
+    p = sub.add_parser("todo", help="multi-agent TODO tracker (PP-TODO-001 / PP-PLANDB-001)")
+    p.add_argument("agent", nargs="?", default=None, help="filter by agent: claude, admin, gemini, db (omit for all); or 'brief' to generate a task spec")
+    p.add_argument("brief_id", nargs="?", default=None, help="todo id for 'tgw todo brief <id>'")
     p.add_argument("--add", metavar="TEXT", help="add a new TODO item")
     p.add_argument("--done", metavar="ID", type=int, help="mark a TODO item complete")
     p.add_argument("--priority", type=int, default=50, metavar="N", help="priority for --add (lower = higher priority; default 50)")
@@ -672,6 +778,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--update", nargs="+", metavar=("ID", "TEXT"), help="update body text of an item: --update ID new text here")
     p.add_argument("--delegate", nargs=2, metavar=("ID", "AGENT"), help="reassign item to a different agent: --delegate ID agent")
     p.add_argument("--set-priority", nargs=2, metavar=("ID", "N"), dest="set_priority", help="change item priority: --set-priority ID N")
+    p.add_argument("--pp", default=None, metavar="PP-REF", help="PP-* plan item for --add / --set-meta (e.g. PP-PLANDB-001)")
+    p.add_argument("--depends", default=None, metavar="IDS", help="comma-separated todo ids this item depends on (for --add / --set-meta)")
+    p.add_argument("--anchor", default=None, metavar="HEADING", help="master-plan heading text the item links to (for --add / --set-meta)")
+    p.add_argument("--set-meta", type=int, default=None, metavar="ID", dest="set_meta", help="set --pp/--depends/--anchor on an existing item")
+    p.add_argument("--clip", action="store_true", help="copy brief output to clipboard (brief mode only)")
+    p.add_argument("--next", action="store_true", dest="next_task", help="brief mode: generate brief for the top open task for --agent")
+    p.add_argument("--agent", default=None, metavar="AGENT", dest="next_agent", help="agent name for --next (e.g. claude, gemini, admin)")
+
+    p = sub.add_parser("plan", help="plan/taskboard operations (PP-PLANDB-001)")
+    p.add_argument("plan_op", choices=["render"], help="render: regenerate plan/TGW-Taskboard.md from the todo tracker")
 
     p = sub.add_parser(
         "mvitems",
@@ -693,6 +809,26 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("classify-suggestions", help="batch-classify unprocessed SUGGESTIONS.md entries via LLM (PP-DOCFLOW-001 Phase 2)")
     p.add_argument("--apply", action="store_true", help="mark already-done entries [x] and create todos for new-work entries")
     p.add_argument("--limit", type=int, default=0, metavar="N", help="only classify first N pending entries (0 = all)")
+
+    p = sub.add_parser("ai-usage", help="AI/LLM usage report by provider/task/day (Phase 5 #2)")
+    p.add_argument("--since", type=int, default=7, metavar="DAYS", help="report window in days (default: 7)")
+    p.add_argument("--json", dest="as_json", action="store_true", help="output raw JSON instead of formatted table")
+
+    p = sub.add_parser(
+        "revise",
+        help="compute a revision delta for a live listing and write revision_draft (PP-REVISION-001; no eBay writes)",
+    )
+    p.add_argument("sku", help="SKU of the item to revise")
+    p.add_argument(
+        "--set",
+        action="append",
+        metavar="FIELD=VALUE",
+        dest="assignments",
+        default=[],
+        help="field=value pair to add to the delta (repeat for multiple fields; supports dotted paths like draft_listing.price)",
+    )
+    p.add_argument("--show", action="store_true", help="print human-readable diff to stdout before JSON result")
+    p.add_argument("--by", default="claude", metavar="AGENT", help="who is creating this revision draft (default: claude)")
 
     p = sub.add_parser(
         "catalog-verify",
@@ -827,6 +963,17 @@ def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any]) -> List[Dict[str
         from tgw.apis.ebay.conditions import _ITEM_CONDITION_PREFERRED
         if condition.lower() not in _ITEM_CONDITION_PREFERRED:
             v("wrong_condition", "warning", f"condition {condition!r} not in known set")
+
+    # Category suggestion agreement (written by ebay_draft after getCategorySuggestions call)
+    agreement = draft.get("category_agreement")
+    if agreement == "mismatch":
+        suggestions = draft.get("category_suggestions") or []
+        top_name = suggestions[0].get("category_name", "") if suggestions else ""
+        resolved = draft.get("category_name") or draft.get("category_id") or ""
+        detail = (
+            f"Taxonomy top suggestion {top_name!r} differs from drafted category {resolved!r}"
+        )
+        v("category_suggestion_mismatch", "warning", detail)
 
     return viols
 
@@ -1544,9 +1691,14 @@ def cmd_seo_audit(cfg: Dict[str, Any], limit: int = 50, live_only: bool = False)
 
 
 def cmd_staged(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """List all items with UNPUBLISHED eBay offers awaiting operator review."""
+    """List items with UNPUBLISHED eBay offers awaiting operator review.
+
+    Items already marked ready (``ebay_offer.ready_at``) have passed review and
+    sit in the dole-out queue — they are counted but not listed (``tgw ready``).
+    """
     root: Path = cfg["itemdata_root"]
     items = []
+    ready_count = 0
     for child in sorted(root.iterdir()):
         jf = child / f"{child.name}.json"
         if not jf.exists():
@@ -1556,6 +1708,9 @@ def cmd_staged(cfg: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             continue
         offer = doc.get("ebay_offer", {})
+        if offer.get("offer_id") and offer.get("status") == "UNPUBLISHED" and offer.get("ready_at"):
+            ready_count += 1
+            continue
         if offer.get("offer_id") and offer.get("status") == "UNPUBLISHED":
             draft = doc.get("draft_listing") or {}
             quality = draft.get("quality") or {}
@@ -1577,7 +1732,7 @@ def cmd_staged(cfg: Dict[str, Any]) -> Dict[str, Any]:
             )
     # Sort ascending by quality score so worst items surface first
     items.sort(key=lambda x: (x["quality"] is None, x["quality"] or 0))
-    return {"ok": True, "count": len(items), "items": items}
+    return {"ok": True, "count": len(items), "items": items, "ready_count": ready_count}
 
 
 def cmd_publish(cfg: Dict[str, Any], skus: List[str], dry_run: bool = False) -> Dict[str, Any]:
@@ -1910,6 +2065,49 @@ def cmd_import_sold_csv(cfg: Dict[str, Any], csv_path: Path, dry_run: bool = Fal
     return {"ok": True, "dry_run": dry_run, **stats}
 
 
+def cmd_ai_usage(cfg: Dict[str, Any], since_days: int = 7) -> Dict[str, Any]:
+    """Aggregate AI/LLM usage from the ai_usage table.
+
+    Returns ``{'ok': True, 'rows': [...], 'since_days': N}``.
+    Prints a formatted table to stdout when called from the CLI.
+    """
+    from tgw.queue import state_machine as sm
+    sm.init(cfg.get('postgres_dsn', 'dbname=state_machine user=tgw'))
+    try:
+        rows = sm.query_ai_usage(since_days)
+    except Exception as exc:
+        return {'ok': False, 'error': str(exc)}
+    return {'ok': True, 'rows': rows, 'since_days': since_days}
+
+
+def _print_ai_usage_table(rows: List[Dict[str, Any]], since_days: int) -> None:
+    if not rows:
+        print(f'No AI usage recorded in the last {since_days} day(s).')
+        return
+
+    print(f'AI usage — last {since_days} day(s)\n')
+    current_day = None
+    for row in rows:
+        day = str(row.get('day', ''))
+        if day != current_day:
+            print(f'  {day}')
+            current_day = day
+        task     = row.get('task', '')
+        provider = row.get('provider', '')
+        model    = row.get('model', '')
+        calls    = int(row.get('calls') or 0)
+        ms       = int(row.get('total_ms') or 0)
+        tokens   = row.get('total_tokens')
+        errors   = int(row.get('errors') or 0)
+
+        dur = f'{ms // 60000}m {(ms % 60000) // 1000}s' if ms >= 60000 else f'{ms // 1000}s'
+        tok_str = f'{int(tokens):,}' if tokens else 'n/a'
+        err_str = f'  ⚠ {errors} error(s)' if errors else ''
+        model_short = model.split('/')[-1] if '/' in model else model
+        print(f'    {task:<20} {provider:<12} {model_short:<32} {calls:>4} calls  {dur:>8}  {tok_str:>10} tokens{err_str}')
+    print()
+
+
 def cmd_velocity_report(
     cfg: Dict[str, Any],
     category: Optional[str] = None,
@@ -2055,6 +2253,92 @@ def cmd_ebay_sweep(cfg: Dict[str, Any], *, groups: str = "A", location: Optional
 
     counts = {g: len(v) for g, v in results.items()}
     return {"ok": True, "total": total, "groups": counts, "output": str(output) if output else None}
+
+
+def cmd_price_freeship(
+    cfg: Dict[str, Any],
+    sku: str,
+    *,
+    shipping_cost: Optional[float] = None,
+    apply: bool = False,
+) -> Dict[str, Any]:
+    """
+    Compute the free-shipping listing price for one item (PP-FREESHIP-001).
+
+    Sums ``ebay_offer.price`` (or ``draft_listing.price``) with the item's
+    shipping cost and rounds to the nearest .99.  With ``--apply``, writes
+    the combined price back and sets ``free_shipping: true`` on the item.
+
+    Shipping cost precedence: --shipping-cost arg > item.shipping_cost > config default_shipping_cost.
+    """
+    from tgw.config import sku_json
+    from tgw.ebay.pricing import freeship_price as _freeship_price
+    from tgw.items import atomic_write_json
+
+    json_path = sku_json(cfg, sku)
+    if not json_path.exists():
+        return {"ok": False, "error": f"SKU not found: {sku}"}
+
+    item = json.loads(json_path.read_text(encoding="utf-8"))
+
+    # Resolve base price (offer price takes priority over draft price)
+    base_price: Optional[float] = None
+    offer = item.get("ebay_offer", {})
+    draft = item.get("draft_listing", {})
+    for src in (offer.get("price"), draft.get("price")):
+        if src is not None:
+            try:
+                base_price = float(src)
+                break
+            except (TypeError, ValueError):
+                pass
+
+    if base_price is None:
+        return {
+            "ok": False,
+            "error": f"{sku}: no price set — run ebay_price or set a price first",
+        }
+
+    # Resolve shipping cost
+    if shipping_cost is not None:
+        ship_cost = float(shipping_cost)
+        ship_source = "arg"
+    elif item.get("shipping_cost") not in (None, ""):
+        try:
+            ship_cost = float(item["shipping_cost"])
+            ship_source = "item"
+        except (TypeError, ValueError):
+            ship_cost = 0.0
+            ship_source = "item_invalid"
+    else:
+        ship_cost = float(cfg.get("default_shipping_cost", 0.0))
+        ship_source = "config_default"
+
+    combined = _freeship_price(base_price, ship_cost)
+
+    result: Dict[str, Any] = {
+        "ok": True,
+        "sku": sku,
+        "base_price": round(base_price, 2),
+        "shipping_cost": round(ship_cost, 2),
+        "shipping_cost_source": ship_source,
+        "freeship_price": combined,
+        "applied": False,
+    }
+
+    if apply:
+        offer_block = dict(offer)
+        offer_block["price"] = combined
+        offer_block["freeship_applied_at"] = datetime.now(timezone.utc).isoformat()
+        item["ebay_offer"] = offer_block
+        if draft:
+            draft["price"] = combined
+            item["draft_listing"] = draft
+        item["free_shipping"] = True
+        atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
+        result["applied"] = True
+
+    return result
 
 
 def cmd_reprice_suggest(
@@ -2730,6 +3014,119 @@ def _build_template_fields(cfg: Dict[str, Any], grp: Dict[str, Any], group_key: 
     return fields
 
 
+def _generate_sku(ts: datetime) -> str:
+    """Generate a canonical SKU: tgwYYYYMMDDHHMMSSs (18 chars, tenths-of-second)."""
+    return ts.strftime("tgw%Y%m%d%H%M%S") + f"{ts.microsecond // 100000:01d}"
+
+
+def cmd_create_item(
+    cfg: Dict[str, Any],
+    *,
+    template: Optional[str] = None,
+    count: int = 1,
+    dry_run: bool = False,
+    _now_fn=None,
+) -> Dict[str, Any]:
+    """Pre-create SKU folder(s) + blank JSON with template applied; push COMMAND:SKU to phone (PP-INTAKE-001 Phase 2.5)."""
+    import time as _time
+    from datetime import datetime as _dt
+
+    from .ebay.pricing import _load_groups
+    from .items import create_item as _create_item
+
+    if _now_fn is None:
+        _now_fn = _dt.now
+
+    if count < 1 or count > 20:
+        return {"ok": False, "error": f"count must be 1–20, got {count}"}
+
+    # Resolve template group
+    grp: Optional[Dict[str, Any]] = None
+    group_key: Optional[str] = None
+    if template:
+        groups = _load_groups(cfg).get("groups", {})
+        grp = groups.get(template)
+        if not grp:
+            available = ", ".join(sorted(groups.keys()))
+            return {"ok": False, "error": f"unknown template: {template!r}", "available": available}
+        group_key = template
+
+    # Generate N unique SKUs (small sleep between each to guarantee ms differs)
+    seen_skus: set = set()
+    planned: List[Dict[str, Any]] = []
+    for i in range(count):
+        if i > 0:
+            _time.sleep(0.002)
+        while True:
+            ts = _now_fn()
+            sku = _generate_sku(ts)
+            if sku not in seen_skus:
+                seen_skus.add(sku)
+                break
+            _time.sleep(0.001)
+
+        item_data: Dict[str, Any] = {"#STATUS": "New"}
+        if grp and group_key:
+            item_data.update(_build_template_fields(cfg, grp, group_key, {}))
+        planned.append({"sku": sku, "data": item_data})
+
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "would_create": [d["sku"] for d in planned],
+            "count": count,
+            "template": template,
+        }
+
+    # Create items
+    created_skus: List[str] = []
+    errors: List[Dict[str, Any]] = []
+    for d in planned:
+        sku = d["sku"]
+        try:
+            _create_item(cfg, sku, d["data"])
+            created_skus.append(sku)
+        except FileExistsError:
+            errors.append({"sku": sku, "error": "already exists"})
+        except Exception as exc:
+            errors.append({"sku": sku, "error": str(exc)})
+
+    if not created_skus:
+        return {"ok": False, "error": "no items created", "errors": errors}
+
+    # Set context to first created SKU
+    first_sku = created_skus[0]
+    ctx_result = set_context(cfg, first_sku, set_by="create-item")
+
+    # Push COMMAND:SKU to phone via KDE Connect (fail-soft)
+    kdc_result: Dict[str, Any] = {"pushed": False}
+    kdc_device = cfg.get("kdeconnect_device_id", "")
+    if kdc_device:
+        try:
+            from .apis.kdeconnect import get_device_id
+            from .apis.kdeconnect import send_text as _send_text
+
+            device_id = get_device_id(kdc_device) or kdc_device
+            msg = f"COMMAND:SKU:{first_sku}"
+            ok = _send_text(device_id, msg)
+            kdc_result = {"pushed": ok, "device": kdc_device, "text": msg}
+        except Exception as exc:
+            kdc_result = {"pushed": False, "error": str(exc)}
+
+    result: Dict[str, Any] = {
+        "ok": True,
+        "created": created_skus,
+        "count": len(created_skus),
+        "template": template,
+        "context_set": ctx_result.get("ok", False),
+        "kdeconnect": kdc_result,
+    }
+    if errors:
+        result["errors"] = errors
+    return result
+
+
 def _current_item_sku() -> Optional[str]:
     """Legacy shim — reads CurrentItem symlink.  New code should use context.current_sku(cfg)."""
     from .context import _sku_from_symlink
@@ -2738,20 +3135,16 @@ def _current_item_sku() -> Optional[str]:
 
 
 def _push_clipboard(text: str) -> bool:
-    """Push text to the clipboard via wl-copy (Wayland) or xclip (X11)."""
-    import subprocess
-
-    for cmd in (["wl-copy"], ["xclip", "-selection", "clipboard"]):
-        try:
-            subprocess.run(cmd, input=text, text=True, timeout=3, capture_output=True)
-            return True
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            continue
-    return False
+    """Push text to the system clipboard via pyperclip."""
+    try:
+        import pyperclip
+        pyperclip.copy(text)
+        return True
+    except Exception:
+        return False
 
 
 def main() -> int:
-    import sys
     argv = ['--' + a[1:] if a == '-help' else a for a in sys.argv[1:]]
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -2839,7 +3232,17 @@ def main() -> int:
             result = update_item(cfg, args.sku, "shipping_profile", args.value, check_only=check)
 
         elif args.op == "picklist":
-            result = cmd_picklist(cfg, status=args.status, location=args.location, search=args.search)
+            result = cmd_picklist(
+                cfg,
+                status=args.status,
+                location=args.location,
+                search=args.search,
+                pdf=args.pdf,
+                output=args.output,
+            )
+
+        elif args.op == "print-label":
+            result = cmd_print_label(cfg, args.sku, output=args.output)
 
         elif args.op == "enqueue-sku":
             expanded = _expand_skus(args.skus)
@@ -2894,6 +3297,17 @@ def main() -> int:
 
         elif args.op == "classify-suggestions":
             result = cmd_classify_suggestions(cfg, apply=args.apply, limit=args.limit)
+            return 0 if result.get("ok") else 1
+
+        elif args.op == "ai-usage":
+            result = cmd_ai_usage(cfg, since_days=args.since)
+            if result.get("ok"):
+                if getattr(args, "as_json", False):
+                    print(json.dumps(result, indent=2, default=str))
+                else:
+                    _print_ai_usage_table(result["rows"], result["since_days"])
+            else:
+                print(f"error: {result.get('error', 'unknown error')}", file=sys.stderr)
             return 0 if result.get("ok") else 1
 
         elif args.op == "build-full":
@@ -3081,6 +3495,23 @@ def main() -> int:
             print(f"\n{len(items)} item(s).  READ-ONLY — no eBay writes. Reduce/raise thresholds: -5% / +10%.")
             return 0
 
+        elif args.op == "price-freeship":
+            result = cmd_price_freeship(
+                cfg,
+                args.sku,
+                shipping_cost=args.shipping_cost,
+                apply=args.apply,
+            )
+            if result["ok"]:
+                r = result
+                action = "APPLIED" if r["applied"] else "DRY-RUN"
+                print(
+                    f"{action}: {r['sku']}  "
+                    f"base=${r['base_price']:.2f} + ship=${r['shipping_cost']:.2f} "
+                    f"({r['shipping_cost_source']})  → ${r['freeship_price']:.2f}"
+                )
+            return 0 if result["ok"] else 1
+
         elif args.op == "seo-audit":
             result = cmd_seo_audit(cfg, limit=args.limit, live_only=args.live_only)
             if not getattr(args, "as_json", False) and result["ok"]:
@@ -3167,11 +3598,20 @@ def main() -> int:
                         flags = it.get("quality_flags") or []
                         flag_str = f" [{','.join(flags[:3])}]" if flags else ""
                         print(f"{it['sku']:<24} {q_str} {pc:>2} {cc:>2}  {price:>7}  {it['location']:<10} {it['title'][:30]}{flag_str}")
-                    print(f"\n{len(items)} item(s) awaiting review. Q=quality 0–100  PC=price conf  CC=cat conf(!=low)\nUse: tgw publish <SKU>")
+                    ready_note = f" ({result.get('ready_count', 0)} more in the ready queue — tgw ready)" if result.get("ready_count") else ""
+                    print(f"\n{len(items)} item(s) awaiting review{ready_note}. Q=quality 0–100  PC=price conf  CC=cat conf(!=low)")
+                    print("Use: tgw ready set <SKU> (rate-limited dole-out) or tgw publish <SKU> (List Now)")
                 return 0
 
         elif args.op == "publish":
             result = cmd_publish(cfg, _expand_skus(args.skus), dry_run=args.dry_run)
+
+        elif args.op == "ready":
+            from tgw.ready import cmd_ready
+
+            result = cmd_ready(cfg, args.ready_op, _expand_skus(args.skus))
+            # cmd_ready handles its own printing; skip the generic JSON dump
+            return 0 if result.get("ok", True) else 1
 
         elif args.op == "setup-ebay-hooks":
             from .apis.ebay.notifications import get_notification_preferences, set_notification_preferences
@@ -3504,16 +3944,43 @@ def main() -> int:
                 result = {"ok": False, "error": f"unknown scrub pass: {scrub_pass}"}
 
         elif args.op == "alt-text":
-            result = cmd_alt_text(
-                cfg,
-                sku=args.sku,
-                model=args.model,
-                provider=args.provider,
-                dry_run=args.dry_run,
-            )
+            if getattr(args, "batch", False):
+                result = cmd_alt_text_batch(
+                    cfg,
+                    limit=args.limit,
+                    provider=args.provider,
+                    model=args.model,
+                    dry_run=args.dry_run,
+                )
+            else:
+                if not args.sku:
+                    import sys as _sys
+                    print("tgw alt-text: error: sku is required without --batch", file=_sys.stderr)
+                    return 1
+                result = cmd_alt_text(
+                    cfg,
+                    sku=args.sku,
+                    model=args.model,
+                    provider=args.provider,
+                    dry_run=args.dry_run,
+                )
 
         elif args.op == "alt-text-batch":
             result = _cmd_alt_text_batch(cfg, args)
+
+        elif args.op == "revise":
+            from .revision import cmd_revise
+            result = cmd_revise(
+                cfg,
+                sku=args.sku,
+                assignments=args.assignments,
+                show=args.show,
+                by=args.by,
+            )
+            if args.show and result.get("ok"):
+                for line in result.get("diff_lines", []):
+                    print(line)
+                print()
 
         elif args.op == "todo":
             from tgw.todo import cmd_todo
@@ -3521,6 +3988,17 @@ def main() -> int:
             result = cmd_todo(cfg, args)
             # cmd_todo handles its own printing; skip the generic JSON dump
             return 0 if result.get("ok", True) else 1
+
+        elif args.op == "plan":
+            from tgw.plan_render import render_taskboard
+
+            result = render_taskboard(cfg)
+            if result["ok"]:
+                print(f"Taskboard rendered: {result['path']} "
+                      f"({result['open']} open, {result['done_week']} done this week)")
+            else:
+                print(f"Error: {result.get('error')}")
+            return 0 if result["ok"] else 1
 
         elif args.op == "catalog-verify":
             result = cmd_catalog_verify(
@@ -3635,6 +4113,19 @@ def main() -> int:
                 print("Token written to secrets. Run: tgw restart-ebay-token")
             result = {"ok": True, "token_prefix": token[:20] + "..."}
 
+        elif args.op == "report":
+            from .reports import cmd_report_sales
+
+            if args.report_type == "sales":
+                result = cmd_report_sales(
+                    cfg,
+                    stale_only=args.stale,
+                    output_dir=args.output,
+                    no_vault=args.no_vault,
+                )
+            else:
+                result = {"ok": False, "error": f"unknown report type: {args.report_type!r}"}
+
         elif args.op == "category-groups":
             from .ebay.pricing import _group_for_category, _load_groups
 
@@ -3729,6 +4220,14 @@ def main() -> int:
 
         elif args.op == "clear-context":
             result = clear_context(cfg)
+
+        elif args.op == "create-item":
+            result = cmd_create_item(
+                cfg,
+                template=args.template,
+                count=args.count,
+                dry_run=args.dry_run,
+            )
 
         elif args.op == "set-template":
             result = cmd_set_template(

@@ -20,7 +20,6 @@ from typing import Any, Dict, Optional
 
 import requests
 
-from tgw.apis.ollama import chat as ollama_chat
 from tgw.queue.ollama_lock import acquire_ollama_lock
 
 # Hardcoded defaults — override via tgw-models.json
@@ -52,18 +51,65 @@ def call_model(
     """
     Call the model configured for task. Returns raw response text.
     provider/model override cfg['models'] when given explicitly.
+    Usage (timing + token counts) is recorded to the ai_usage table.
     """
     if provider is None or model is None:
         _p, _m = get_task_model(cfg, task)
         provider = provider or _p
         model = model or _m
 
-    if provider == 'openrouter':
-        return _call_openrouter(model, system_prompt, user_prompt, cfg, img_b64=img_b64)
+    input_chars = len(system_prompt) + len(user_prompt)
+    t0 = time.time()
+    text = ''
+    usage: Dict[str, Any] = {}
+    success = True
+    error_msg: Optional[str] = None
 
-    if img_b64:
-        return _call_ollama_vision(model, system_prompt, user_prompt, cfg, img_b64)
-    return _call_ollama_text(model, system_prompt, user_prompt, cfg)
+    try:
+        if provider == 'openrouter':
+            text, usage = _call_openrouter(model, system_prompt, user_prompt, cfg, img_b64=img_b64)
+        elif img_b64:
+            text, usage = _call_ollama_vision(model, system_prompt, user_prompt, cfg, img_b64)
+        else:
+            text, usage = _call_ollama_text(model, system_prompt, user_prompt, cfg)
+    except Exception as exc:
+        success = False
+        error_msg = str(exc)[:500]
+        raise
+    finally:
+        duration_ms = int((time.time() - t0) * 1000)
+        _record_usage(
+            task, provider, model, duration_ms,
+            input_chars=input_chars,
+            output_chars=len(text),
+            usage=usage,
+            success=success,
+            error_msg=error_msg,
+        )
+
+    return text
+
+
+def _record_usage(
+    task: str, provider: str, model: str, duration_ms: int,
+    *, input_chars: int, output_chars: int,
+    usage: Dict[str, Any], success: bool, error_msg: Optional[str],
+) -> None:
+    """Record a call to the ai_usage table. Never raises."""
+    try:
+        from tgw.queue.state_machine import record_ai_usage
+        record_ai_usage(
+            task, provider, model, duration_ms,
+            input_chars=input_chars,
+            output_chars=output_chars,
+            prompt_tokens=usage.get('prompt_tokens'),
+            completion_tokens=usage.get('completion_tokens'),
+            total_tokens=usage.get('total_tokens'),
+            success=success,
+            error_msg=error_msg,
+        )
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -88,8 +134,8 @@ def _call_openrouter(
     cfg: Dict[str, Any],
     img_b64: Optional[str] = None,
     max_retries: int = 3,
-) -> str:
-    """Call OpenRouter chat completions. Supports both text and vision (img_b64)."""
+) -> tuple:
+    """Call OpenRouter chat completions. Returns (text, usage_dict)."""
     api_key = _load_openrouter_key(cfg)
     if not api_key:
         raise RuntimeError('OpenRouter API key not found in secrets or config')
@@ -130,7 +176,15 @@ def _call_openrouter(
         break
 
     resp.raise_for_status()
-    return resp.json()['choices'][0]['message']['content']
+    body = resp.json()
+    text = body['choices'][0]['message']['content']
+    raw_usage = body.get('usage') or {}
+    usage = {
+        'prompt_tokens':     raw_usage.get('prompt_tokens'),
+        'completion_tokens': raw_usage.get('completion_tokens'),
+        'total_tokens':      raw_usage.get('total_tokens'),
+    }
+    return text, usage
 
 
 def _call_ollama_vision(
@@ -139,8 +193,8 @@ def _call_ollama_vision(
     user_prompt: str,
     cfg: Dict[str, Any],
     img_b64: str,
-) -> str:
-    """Call local Ollama vision (generate) endpoint."""
+) -> tuple:
+    """Call local Ollama vision (generate) endpoint. Returns (text, usage_dict)."""
     with acquire_ollama_lock(cfg):
         resp = requests.post(
             'http://localhost:11434/api/generate',
@@ -154,7 +208,16 @@ def _call_ollama_vision(
             timeout=600,
         )
     resp.raise_for_status()
-    return resp.json()['response']
+    body = resp.json()
+    text = body['response']
+    usage = {
+        'prompt_tokens':     body.get('prompt_eval_count'),
+        'completion_tokens': body.get('eval_count'),
+        'total_tokens':      (
+            (body.get('prompt_eval_count') or 0) + (body.get('eval_count') or 0)
+        ) or None,
+    }
+    return text, usage
 
 
 def _call_ollama_text(
@@ -162,11 +225,25 @@ def _call_ollama_text(
     system_prompt: str,
     user_prompt: str,
     cfg: Dict[str, Any],
-) -> str:
-    """Call local Ollama chat endpoint (text only)."""
+) -> tuple:
+    """Call local Ollama chat endpoint (text only). Returns (text, usage_dict)."""
+    from tgw.apis.ollama import chat_full as ollama_chat_full
     with acquire_ollama_lock(cfg):
-        return ollama_chat(
+        text, prompt_tokens, completion_tokens = ollama_chat_full(
             model=model,
             messages=[{'role': 'user', 'content': user_prompt}],
             system=system_prompt,
         )
+    total = None
+    if prompt_tokens is not None and completion_tokens is not None:
+        total = prompt_tokens + completion_tokens
+    elif prompt_tokens is not None:
+        total = prompt_tokens
+    elif completion_tokens is not None:
+        total = completion_tokens
+    usage = {
+        'prompt_tokens':     prompt_tokens,
+        'completion_tokens': completion_tokens,
+        'total_tokens':      total,
+    }
+    return text, usage

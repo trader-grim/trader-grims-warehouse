@@ -126,9 +126,13 @@ def tgw_queue_status() -> str:
     """Return current job counts per queue and state from PostgreSQL.
 
     Returns a JSON object with 'queued', 'running', 'dead_letter' counts per queue.
-    Also returns total dead_letter count for quick health assessment.
+    Dead-letter counts are also split TRANSIENT vs HARD_FAILURE per queue
+    ('dead_letter_classified') so real failures stand out from requeue-able noise,
+    and 'zero_work_stalls' flags queues where a live worker has eligible jobs
+    waiting but completed nothing in the watchdog window (PP-DEADLETTER-001).
     """
     cfg = _get_cfg()
+    from tgw.health import classify_dead_letter_errors
     from tgw.queue import state_machine
     state_machine.init(cfg['postgres_dsn'])
     try:
@@ -154,12 +158,19 @@ def tgw_queue_status() -> str:
         dead_letter_by_queue = {
             r['queue']: r['count'] for r in rows if r['state'] == 'dead_letter'
         }
+        dl_classified = classify_dead_letter_errors(state_machine.dead_letter_errors())
+        stall_hours = float(cfg.get('zero_work_stall_hours', 4.0))
+        stalls = state_machine.zero_work_queues(stall_hours)
         return json.dumps({
             'ok': True,
             'queues': rows,
             'dead_letter_total': dead_letter_total,
             'dead_letter_by_queue': dead_letter_by_queue,
-        })
+            'dead_letter_classified': dl_classified,
+            'dead_letter_transient': sum(c['transient'] for c in dl_classified.values()),
+            'dead_letter_hard': sum(c['hard'] for c in dl_classified.values()),
+            'zero_work_stalls': stalls,
+        }, default=str)
     except Exception as exc:
         return json.dumps({'ok': False, 'error': str(exc)})
 

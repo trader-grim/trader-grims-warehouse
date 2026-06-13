@@ -140,7 +140,35 @@ def test_apply_creates_todo_on_write(suggestions_file):
     entries = parse_pending(suggestions_file)
     with patch("tgw.suggestions.todo_add") as mock_add:
         apply_classifications(suggestions_file, entries, CLASSIFIED_MIXED, write=True)
-    mock_add.assert_called_once_with("claude", "add weight_oz to picklist line", source="suggestions_classify")
+    mock_add.assert_called_once_with("claude", "add weight_oz to picklist line", source="suggestions_classify", pp_ref=None)
+
+
+def test_apply_passes_valid_pp_ref(suggestions_file):
+    entries = parse_pending(suggestions_file)
+    classified = [
+        {"index": 0, "action": "review_flag"},
+        {"index": 1, "action": "todo", "todo_agent": "claude",
+         "todo_body": "do the thing", "pp_ref": "pp-picklist-001"},
+        {"index": 2, "action": "review_flag"},
+    ]
+    with patch("tgw.suggestions.todo_add") as mock_add:
+        apply_classifications(suggestions_file, entries, classified, write=True)
+    mock_add.assert_called_once_with("claude", "do the thing",
+                                     source="suggestions_classify", pp_ref="PP-PICKLIST-001")
+
+
+def test_apply_drops_malformed_pp_ref(suggestions_file):
+    entries = parse_pending(suggestions_file)
+    classified = [
+        {"index": 0, "action": "review_flag"},
+        {"index": 1, "action": "todo", "todo_agent": "claude",
+         "todo_body": "do the thing", "pp_ref": "the picklist project"},
+        {"index": 2, "action": "review_flag"},
+    ]
+    with patch("tgw.suggestions.todo_add") as mock_add:
+        apply_classifications(suggestions_file, entries, classified, write=True)
+    mock_add.assert_called_once_with("claude", "do the thing",
+                                     source="suggestions_classify", pp_ref=None)
 
 
 def test_apply_no_todo_created_on_dry_run(suggestions_file):

@@ -134,10 +134,13 @@ def _get_merchant_location(cfg: Dict[str, Any]) -> str:
 def _resolve_fulfillment_id(cfg: Dict[str, Any], ebay_category_id: str,
                             shipping_profile: Optional[str] = None,
                             size_class: Optional[str] = None,
-                            thickness_in: Optional[float] = None) -> Optional[str]:
+                            thickness_in: Optional[float] = None,
+                            free_shipping: bool = False) -> Optional[str]:
     """
     Resolve the fulfillment (shipping) policy id by precedence:
 
+      0. free_shipping flag          — ``fulfillment_policy_free_shipping`` (PP-FREESHIP-001)
+         Used when the item's price already includes shipping cost.
       1. per-item shipping_profile  (PP-HINT-001) — a name in
          ``fulfillment_policy_by_profile``, or a raw policy id if not mapped
       2. per-category override       — ``fulfillment_policy_by_category``
@@ -150,6 +153,11 @@ def _resolve_fulfillment_id(cfg: Dict[str, Any], ebay_category_id: str,
 
     Returns None if nothing resolves (caller then falls back to the account API).
     """
+    if free_shipping:
+        policy = cfg.get('fulfillment_policy_free_shipping')
+        if policy:
+            return str(policy)
+
     if shipping_profile:
         by_profile = cfg.get('fulfillment_policy_by_profile', {})
         return by_profile.get(str(shipping_profile), str(shipping_profile))
@@ -179,7 +187,8 @@ def _resolve_fulfillment_id(cfg: Dict[str, Any], ebay_category_id: str,
 def _get_listing_policies(cfg: Dict[str, Any], ebay_category_id: str, *,
                           shipping_profile: Optional[str] = None,
                           size_class: Optional[str] = None,
-                          thickness_in: Optional[float] = None) -> Dict[str, str]:
+                          thickness_in: Optional[float] = None,
+                          free_shipping: bool = False) -> Dict[str, str]:
     """
     Return {fulfillmentPolicyId, paymentPolicyId, returnPolicyId} for an offer.
 
@@ -190,7 +199,8 @@ def _get_listing_policies(cfg: Dict[str, Any], ebay_category_id: str, *,
     fulf_id = _resolve_fulfillment_id(cfg, ebay_category_id,
                                       shipping_profile=shipping_profile,
                                       size_class=size_class,
-                                      thickness_in=thickness_in)
+                                      thickness_in=thickness_in,
+                                      free_shipping=free_shipping)
     pay_id = cfg.get('payment_policy_id')
     ret_id = cfg.get('return_policy_id')
 
@@ -318,6 +328,7 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
         shipping_profile=item.get('shipping_profile'),
         size_class=item.get('size_class'),
         thickness_in=_thickness,
+        free_shipping=bool(item.get('free_shipping', False)),
     )
     location_key = _get_merchant_location(cfg)
     qty          = draft.get('quantity', 1)
