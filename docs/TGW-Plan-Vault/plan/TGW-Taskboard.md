@@ -4,7 +4,13 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-06-13 18:29 UTC — 40 open, 103 done in the last 7 days._
+_Rendered 2026-06-13 19:26 UTC — 41 open, 103 done in the last 7 days._
+
+## 137 (1 open)
+
+| ID | Pri | Size | Task | Plan | Blockers |
+|---:|----:|:----:|------|------|----------|
+| 153 | 50 |  | Google API key setup — get key from AI Studio, write to /opt/TGW/secrets/google-credentials.json (chmod 600), wire google_credentials_path into config.py alongside openrouter_credentials_path; gate for todo #137 (Gemini Batch API alt-text sweep) which requires direct google-genai SDK, not OpenRouter | [[TGW-Master-Plan#PP-PLANDB-001\|plan]] |  |
 
 ## admin (16 open)
 
@@ -60,7 +66,7 @@ _Rendered 2026-06-13 18:29 UTC — 40 open, 103 done in the last 7 days._
 | 112 | 58 | S | Round7 p58 S: PP-PLANDB-001 Phase 3 — tgw plan check: reconcile plan<->tracker both directions (pp_ref/plan_anchor vs plan sections; round-tagged todos vs plan round summaries); report orphans + status mismatches; add to session-start ritual in CLAUDE.md; mismatch reports feed the improve-the-admin loop (PP-DOCFLOW) | [[TGW-Master-Plan#PP-PLANDB-001 — Database-Driven Plan Builder (design discussion needed)\|PP-PLANDB-001]] | ✓ deps done |
 | 131 | 59 |  | tgw ebay-pull scoping — add --sku SKU [SKU...] / --location LOC / --status STATUS filters to cmd_ebay_pull so operators can pull-sync a subset of listings without a full sweep; wraps existing pull.sync_item() per-item path; from PP-SHELL-001 Round 5 deferred item |  |  |
 | 132 | 61 |  | PP-PLANDB-001 Phase 4 — tgw plan status [PP-REF]: one-line status summary per PP-* item (open/done/blocked todo counts + latest activity); feed into session-start output in CLAUDE.md. Requires Phase 3 (#112 open) | [[TGW-Master-Plan#PP-PLANDB-001 — Database-Driven Plan Builder (design discussion needed)\|PP-PLANDB-001]] | ⛔ #112 |
-| 137 | 63 |  | Gemini Batch API path for full-catalog alt-text sweep — tgw alt-text --batch --api-mode batch: chunk ~8350 SKUs into 40-image arrays (~5 SKUs each), submit to Gemini Batch API async, poll completion, write results back via existing alt_text ledger; resumable via ai_usage/image_hashes state; replaces serial live-API calls for full-catalog runs; dramatically reduces rate-limit pressure and cost. Reference: PERPLEXITY-007 batch pipeline research + gemini-2.5-flash-lite model |  |  |
+| 137 | 63 |  | Gemini Batch API path for full-catalog alt-text sweep — tgw alt-text --batch --api-mode batch: chunk ~8350 SKUs into 40-image arrays (~5 SKUs each), submit to Gemini Batch API async, poll completion, write results back via existing alt_text ledger; resumable via ai_usage/image_hashes state; replaces serial live-API calls for full-catalog runs; dramatically reduces rate-limit pressure and cost. Reference: PERPLEXITY-007 batch pipeline research + gemini-2.5-flash-lite model |  | ⛔ #153 |
 | 113 | 72 | M | Round7 p72 M (GATED: after admin #20 Qtile install): PP-CLIP-001 daemon — dual-backend watcher per settled design (2026-06-12): backend-agnostic core (on change -> classify -> SQLite -> socket push); X11/XFixes backend (default/stable) + Wayland wl-paste --watch backend; session-type autodetect; PRIMARY+CLIPBOARD; feeds existing tgw clip store; Unix socket for TGWSKUWidget | [[TGW-Master-Plan#PP-CLIP-001 — TGW-Aware Clipboard Manager\|PP-CLIP-001]] | ✓ deps done |
 | 133 | 74 |  | PP-OFFER-001 Phase 1 build — GetBestOffers Trading API polling; tgw offers [--pending] lists incoming offer requests; tgw offers --respond ID --accept/--counter PRICE/--decline; auto_accept_min_pct config flag for batch auto-accept; dry-run default; tests. Build after design in #124 settled | [[TGW-Master-Plan#PP-OFFER-001 — eBay Best Offer Management\|PP-OFFER-001]] | ⛔ #124 |
 | 134 | 76 |  | PP-REVISION-001 apply path — ReviseFixedPriceItem call with pinned-baseline drift-gate (apply only when live mirror matches baseline hash); --dry-run default; NO eBay write until Dave confirms sparse-delta apply design settled. Continuation of #111 dry-run delta | [[TGW-Master-Plan#PP-REVISION-001 — Live listing revision / update draft (design open)\|PP-REVISION-001]] | ✓ deps done |
