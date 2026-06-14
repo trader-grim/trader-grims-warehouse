@@ -965,6 +965,103 @@ def test_item_detail_uses_static_css(env):
 
 
 # ---------------------------------------------------------------------------
+# GET /form/items/{sku} — eBay deep links (PP-EDITOR-001 Phase 3m)
+# ---------------------------------------------------------------------------
+
+def test_item_detail_ebay_deeplinks_active(env):
+    """View on eBay, Seller Hub, and Messages links appear for an active listing."""
+    sku = "tgw20260614110000010"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Deep Link Test Widget",
+        "location": "X9",
+        "ebay_listing": {
+            "listing_id": "987654321",
+            "listing_url": "https://www.ebay.com/itm/987654321",
+            "status": "Active",
+            "live_price": 24.99,
+        },
+    })
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    assert "View on eBay" in r.text
+    assert "https://www.ebay.com/itm/987654321" in r.text
+    assert "Seller Hub" in r.text
+    assert "https://www.ebay.com/sh/lst/active?keyword=987654321" in r.text
+    assert "eBay Messages" in r.text
+    assert "https://messages.ebay.com/" in r.text
+    assert "offer-badge-wrap" in r.text
+    # API key embedded so nav.js + offer script can use it
+    assert API_KEY in r.text
+
+
+def test_item_detail_ebay_deeplinks_sold(env):
+    """Messages link hidden for sold/inactive listing; View on eBay + Seller Hub still shown."""
+    sku = "tgw20260614110000011"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Sold Widget",
+        "location": "X9",
+        "ebay_listing": {
+            "listing_id": "111222333",
+            "listing_url": "https://www.ebay.com/itm/111222333",
+            "status": "Sold",
+            "live_price": 15.00,
+        },
+    })
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    assert "View on eBay" in r.text
+    assert "Seller Hub" in r.text
+    assert "eBay Messages" not in r.text
+
+
+def test_item_detail_no_ebay_listing(env):
+    """No eBay deep link buttons shown when ebay_listing is absent."""
+    r = env["client"].get(f"/form/items/{SKU_A}")
+    assert r.status_code == 200
+    assert "View on eBay" not in r.text
+    assert "Seller Hub" not in r.text
+    assert "eBay Messages" not in r.text
+    assert "offer-badge-wrap" not in r.text
+
+
+def test_item_detail_no_listing_url_only_id(env):
+    """Seller Hub shown when listing_id present but no listing_url."""
+    sku = "tgw20260614110000012"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "ID Only Widget",
+        "location": "X9",
+        "ebay_listing": {
+            "listing_id": "444555666",
+            "status": "Active",
+        },
+    })
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    assert "View on eBay" not in r.text
+    assert "Seller Hub" in r.text
+    assert "eBay Messages" in r.text
+    assert "offer-badge-wrap" in r.text
+
+
+def test_offers_form_sku_filter(env):
+    """/form/offers?sku=X loads and contains SKU filter JS variables."""
+    from unittest.mock import patch
+
+    import tgw.http_server as _hs
+
+    # Stub cmd_offers_list so the offers API call won't hit eBay
+    with patch.object(_hs, "_cfg", env["cfg"]):
+        r = env["client"].get("/form/offers?sku=tgw20260614110000010")
+    assert r.status_code == 200
+    assert "sku-filter-bar" in r.text
+    assert "sku-filter-val" in r.text
+    assert "_skuFilter" in r.text
+
+
+# ---------------------------------------------------------------------------
 # GET /api/dashboard — PP-EDITOR-001 Phase 3b
 # ---------------------------------------------------------------------------
 

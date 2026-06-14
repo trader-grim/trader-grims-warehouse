@@ -1752,6 +1752,17 @@ _ITEMS_EXTRA_CSS = """
 .jtable td{padding:4px 6px;border-bottom:1px solid #1e1e1e;vertical-align:top}
 .js-done{color:#7f7}.js-pending,.js-running{color:#fb7}
 .js-failed,.js-dead-letter{color:#f77}
+.ebay-links{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.ebay-btn{display:inline-block;padding:7px 13px;border-radius:6px;font-size:.82em;
+  font-weight:600;text-decoration:none;border:1px solid}
+.ebay-btn-primary{background:#1a3a5a;color:#7af;border-color:#2a6a9a}
+.ebay-btn-primary:hover{background:#1a4a6a}
+.ebay-btn-sec{background:#1a1a2a;color:#aaa;border-color:#333}
+.ebay-btn-sec:hover{background:#222}
+.offer-badge{display:inline-flex;align-items:center;padding:6px 12px;background:#3a2a00;
+  color:#fb7;border:1px solid #6a4a00;border-radius:6px;font-size:.82em;font-weight:600;
+  text-decoration:none}
+.offer-badge:hover{background:#4a3a00}
 """
 
 _BROWSE_HTML = """\
@@ -1852,6 +1863,7 @@ def _render_item_detail_html(
     images: List[str],
     videos: List[str],
     jobs: List[Dict[str, Any]],
+    api_key: str = "",
 ) -> str:
     import html as _html
 
@@ -1901,10 +1913,31 @@ def _render_item_detail_html(
         price_str = f"${float(price):.2f}" if price is not None else "—"
     except (ValueError, TypeError):
         price_str = "—"
-    url_html = (
-        f'<a href="{h(listing_url)}" target="_blank">{h(listing_url[:60])}…</a>'
-        if listing_url
-        else '<span style="color:#444">—</span>'
+
+    # eBay deep link buttons
+    is_active = (listing_status or "").lower() == "active"
+    ebay_link_parts: List[str] = []
+    if listing_url:
+        ebay_link_parts.append(
+            f'<a class="ebay-btn ebay-btn-primary" href="{h(listing_url)}"'
+            f' target="_blank" rel="noopener noreferrer">View on eBay</a>'
+        )
+    if listing_id:
+        sh_url = f"https://www.ebay.com/sh/lst/active?keyword={h(listing_id)}"
+        ebay_link_parts.append(
+            f'<a class="ebay-btn ebay-btn-sec" href="{sh_url}"'
+            f' target="_blank" rel="noopener noreferrer">Seller Hub</a>'
+        )
+    if is_active:
+        ebay_link_parts.append(
+            '<a class="ebay-btn ebay-btn-sec" href="https://messages.ebay.com/"'
+            ' target="_blank" rel="noopener noreferrer">eBay Messages</a>'
+        )
+    if listing_id:
+        ebay_link_parts.append('<span id="offer-badge-wrap"></span>')
+    ebay_links_html = (
+        f'<div class="ebay-links">{"".join(ebay_link_parts)}</div>'
+        if ebay_link_parts else ""
     )
 
     # Revision draft diff
@@ -1973,9 +2006,9 @@ def _render_item_detail_html(
         + fr("Listing ID", h(listing_id) if listing_id else "")
         + fr("Status", h(listing_status) if listing_status else "")
         + fr("Price", price_str)
-        + fr("URL", url_html)
         + fr("Qty", key="qty")
         + fr("Qty sold", key="quantity_sold")
+        + ebay_links_html
         + "</div>"
         '<div class="dsec"><h3>Physical</h3>'
         + fr("Location", key="location")
@@ -1992,6 +2025,35 @@ def _render_item_detail_html(
         )
         + "</div>"
     )
+
+    # Offer count badge: JS fetches /api/offers (cached), filters to this SKU.
+    offer_script = ""
+    if listing_id and api_key:
+        import json as _json
+        _ak_json = _json.dumps(api_key)
+        _sku_json = _json.dumps(sku)
+        offer_script = (
+            f"<script>\n"
+            f"window.TGW_API_KEY={_ak_json};\n"
+            f"(function(){{\n"
+            f"  var _sku={_sku_json};\n"
+            f"  fetch('/api/offers',{{headers:authHeaders()}})\n"
+            f"    .then(function(r){{return r.json();}})\n"
+            f"    .then(function(d){{\n"
+            f"      if(!d||!d.ok||!d.offers)return;\n"
+            f"      var n=d.offers.filter(function(o){{return o.sku===_sku;}}).length;\n"
+            f"      if(!n)return;\n"
+            f"      var wrap=document.getElementById('offer-badge-wrap');\n"
+            f"      if(!wrap)return;\n"
+            f"      var a=document.createElement('a');\n"
+            f"      a.className='offer-badge';\n"
+            f"      a.href='/form/offers?sku='+encodeURIComponent(_sku);\n"
+            f"      a.textContent=n+(n===1?' pending offer':' pending offers');\n"
+            f"      wrap.appendChild(a);\n"
+            f"    }}).catch(function(){{}});\n"
+            f"}})();\n"
+            f"</script>\n"
+        )
 
     return (
         f"<!DOCTYPE html>\n<html lang='en'>\n<head>\n"
@@ -2011,6 +2073,7 @@ def _render_item_detail_html(
         f"{fields_html}"
         f"</div>\n"
         + _STATIC_FOOT
+        + offer_script
         + "</body></html>"
     )
 
@@ -2076,7 +2139,7 @@ def item_detail_form(sku: str):
     except Exception as exc:
         log.warning("queue job fetch failed for %s: %s", sku, exc)
 
-    return HTMLResponse(_render_item_detail_html(sku, item, images, videos, jobs))
+    return HTMLResponse(_render_item_detail_html(sku, item, images, videos, jobs, _api_key))
 
 
 # ---------------------------------------------------------------------------
@@ -2521,6 +2584,12 @@ _OFFERS_HTML = """\
   <button class="reload-btn" onclick="load()">&#8635; Refresh</button>
 </h2>
 
+<div id="sku-filter-bar" style="display:none;background:#1a2a1a;border:1px solid #2a4a2a;
+  border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:.85em;color:#7f7">
+  Filtered to SKU: <strong id="sku-filter-val"></strong>
+  <a href="/form/offers" style="color:#888;margin-left:10px;font-size:.85em">Clear filter</a>
+</div>
+
 <div class="dry-bar">
   <span class="dry-badge" id="dry-badge">DRY RUN</span>
   <span id="dry-label">Actions are previewed only — no eBay API calls.</span>
@@ -2637,12 +2706,24 @@ function renderOffers(data) {{
   el.innerHTML = html;
 }}
 
+var _skuFilter = new URLSearchParams(window.location.search).get('sku') || '';
+(function() {{
+  if (!_skuFilter) return;
+  var bar = document.getElementById('sku-filter-bar');
+  var val = document.getElementById('sku-filter-val');
+  if (bar) bar.style.display = '';
+  if (val) val.textContent = _skuFilter;
+}})();
+
 async function load() {{
   var el = document.getElementById('offers-list');
   el.innerHTML = '<span style="color:#555">Loading…</span>';
   try {{
     var r = await fetch('/api/offers', {{headers: authHeaders()}});
     var d = await r.json();
+    if (_skuFilter && d && d.ok && d.offers) {{
+      d.offers = d.offers.filter(function(o) {{ return o.sku === _skuFilter; }});
+    }}
     renderOffers(d);
   }} catch(e) {{
     el.innerHTML = '<div class="resp-flash err" style="display:block">Network error: ' + escapeHtml(String(e)) + '</div>';
