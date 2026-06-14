@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 
 import psycopg2
 import psycopg2.extras
+import requests
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Security, status
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -153,6 +154,19 @@ class BulkBody(BaseModel):
     status: Optional[str] = None
     search: Optional[str] = None
     limit: int = Field(0, ge=0)
+
+
+class PMChatBody(BaseModel):
+    message: str
+    history: List[Dict[str, str]] = Field(default_factory=list)
+
+
+class PMActionBody(BaseModel):
+    type: str
+    agent: Optional[str] = None
+    body: Optional[str] = None
+    priority: int = 50
+    text: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -1700,6 +1714,178 @@ def activity(limit: int = 15) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# POST /api/pm/chat — PM chat (PP-EDITOR-001 Phase 3d)
+# POST /api/pm/action — execute a PM-proposed action
+# ---------------------------------------------------------------------------
+
+_PM_SYSTEM_PROMPT = """\
+You are TGW-PM, the operations assistant for Trader Grim's Warehouse — a resale \
+eBay business run by Dave (DaveBuko-Webkulap). TGW is a Python-based inventory \
+and eBay automation platform.
+
+You have access to live system status below. Answer factually from this data. \
+If something isn't in the provided context, say so rather than guessing.
+
+Keep responses under 200 words. Plain text only — no markdown headers.
+
+When appropriate, end your response with an ACTIONS block (required on every reply):
+
+ACTIONS: [{"type": "add_todo", "agent": "claude", "body": "Task description", "priority": 50}]
+ACTIONS: [{"type": "add_suggestion", "text": "text of suggestion"}]
+ACTIONS: [{"type": "none"}]
+
+Valid agents: claude, gemini, sokoban (database tasks), admin, operator.
+Priority: 10 (urgent) to 90 (low). Default 50.
+Always end with ACTIONS — use none when no action is warranted.\
+"""
+
+
+def _build_pm_context() -> str:
+    """Gather live system stats and return a compact text summary for the PM model."""
+    lines: List[str] = []
+
+    # Open todos by agent
+    try:
+        from . import todo as _todo
+        todos = _todo.todo_list()
+        by_agent: Dict[str, int] = {}
+        for t in todos:
+            a = t.get("agent") or "unknown"
+            by_agent[a] = by_agent.get(a, 0) + 1
+        todo_str = ", ".join(f"{a}:{n}" for a, n in sorted(by_agent.items()))
+        lines.append(f"Open todos: {len(todos)} total ({todo_str or 'none'})")
+    except Exception as exc:
+        lines.append(f"Open todos: unavailable ({exc})")
+
+    # Queue depths and dead letters
+    try:
+        with psycopg2.connect(_cfg["postgres_dsn"]) as con:
+            with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT queue_name, state, COUNT(*) AS n FROM queue_jobs"
+                    " GROUP BY queue_name, state ORDER BY queue_name, state"
+                )
+                qrows = [dict(r) for r in cur.fetchall()]
+        active = {
+            r["queue_name"]: r["n"]
+            for r in qrows if r["state"] in ("queued", "claimed")
+        }
+        dead = sum(r["n"] for r in qrows if r["state"] == "dead_letter")
+        lines.append(
+            "Active queues: " + (", ".join(f"{k}={v}" for k, v in active.items()) or "all idle")
+        )
+        lines.append(
+            f"Dead-letter jobs: {dead}" + (" — NEEDS ATTENTION" if dead else "")
+        )
+    except Exception as exc:
+        lines.append(f"Queue/dead-letter: unavailable ({exc})")
+
+    # Inventory summary from SQLite catalog
+    try:
+        db_path = _cfg.get("sqlite_catalog_path")
+        if db_path and Path(db_path).exists():
+            con = _sqlite_conn()
+            row = con.execute(
+                "SELECT COUNT(*),"
+                " COUNT(CASE WHEN LOWER(status) IN ('published','live','listed') THEN 1 END),"
+                " COUNT(CASE WHEN LOWER(status) = 'staged' THEN 1 END)"
+                " FROM catalog"
+            ).fetchone()
+            if row:
+                lines.append(
+                    f"Inventory: {row[0]} total items, {row[1]} live on eBay, {row[2]} staged"
+                )
+    except Exception as exc:
+        lines.append(f"Inventory count: unavailable ({exc})")
+
+    # Pending offers (cached from last dashboard poll)
+    if _pending_offers_cache is not None:
+        lines.append(f"Pending eBay best offers: {_pending_offers_cache}")
+
+    return "\n".join(lines)
+
+
+@app.post("/api/pm/chat", dependencies=[AUTH])
+def pm_chat(body: PMChatBody) -> Dict[str, Any]:
+    """Call the PM chat model with live context and return {message, actions}."""
+    from .apis.llm import _load_openrouter_key, get_task_model
+
+    context = _build_pm_context()
+    system = _PM_SYSTEM_PROMPT + f"\n\nLIVE SYSTEM STATUS:\n{context}"
+
+    messages: List[Dict[str, str]] = [{"role": "system", "content": system}]
+    for h in body.history[-8:]:
+        if h.get("role") in ("user", "assistant") and h.get("content"):
+            messages.append({"role": h["role"], "content": h["content"]})
+    messages.append({"role": "user", "content": body.message})
+
+    provider, model = get_task_model(_cfg, "pm_chat")
+    if provider != "openrouter":
+        raise HTTPException(status_code=503, detail="pm_chat only supports openrouter provider")
+
+    api_key = _load_openrouter_key(_cfg)
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenRouter API key not configured")
+
+    try:
+        resp = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://tgw.local",
+                "X-Title": "TGW-PM",
+            },
+            json={"model": model, "messages": messages, "max_tokens": 500},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        raw = resp.json()["choices"][0]["message"]["content"]
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"PM model unavailable: {exc}")
+
+    # Split on ACTIONS: marker
+    msg_text = raw
+    actions: List[Dict[str, Any]] = [{"type": "none"}]
+    if "ACTIONS:" in raw:
+        head, tail = raw.split("ACTIONS:", 1)
+        msg_text = head.strip()
+        try:
+            actions = json.loads(tail.strip())
+            if not isinstance(actions, list):
+                actions = [{"type": "none"}]
+        except Exception:
+            actions = [{"type": "none"}]
+
+    return {"ok": True, "message": msg_text, "actions": actions}
+
+
+@app.post("/api/pm/action", dependencies=[AUTH])
+def pm_action(body: PMActionBody) -> Dict[str, Any]:
+    """Execute a PM-proposed action confirmed by the operator."""
+    if body.type == "add_todo":
+        if not body.agent or not body.body:
+            raise HTTPException(status_code=400, detail="add_todo requires agent and body")
+        from . import todo as _todo
+        result = _todo.todo_add(
+            agent=body.agent,
+            body=body.body,
+            priority=body.priority,
+            source="pm_chat",
+        )
+        return {"ok": True, "message": f"Todo #{result['id']} added for {body.agent}", **result}
+
+    if body.type == "add_suggestion":
+        if not body.text:
+            raise HTTPException(status_code=400, detail="add_suggestion requires text")
+        from .api import cmd_suggest
+        result = cmd_suggest(_cfg, body.text)
+        return {"ok": True, "message": f"Suggestion added: {result.get('written', '')}", **result}
+
+    raise HTTPException(status_code=400, detail=f"unknown action type: {body.type!r}")
+
+
+# ---------------------------------------------------------------------------
 # GET /form/home — home dashboard (PP-EDITOR-001 Phase 3c)
 # ---------------------------------------------------------------------------
 
@@ -1742,9 +1928,34 @@ _HOME_EXTRA_CSS = (
     ".start-links a{color:#7fbfff;text-decoration:none;font-size:.88em;padding:7px 10px;"
     "  background:#1a1a2a;border-radius:6px;border:1px solid #2a2a3a}"
     ".start-links a:hover{background:#2a2a4a;color:#fff}"
-    ".pm-stub{margin-top:14px;padding:12px;background:#1a1a1a;border:1px dashed #333;"
-    "  border-radius:8px;font-size:.85em;color:#666;text-align:center}"
-    ".pm-stub strong{display:block;color:#888;margin-bottom:4px;font-size:.9em}"
+    ".pm-wrap{margin-top:14px;border:1px solid #2a2a3a;border-radius:8px;overflow:hidden;"
+    "  display:flex;flex-direction:column;height:320px}"
+    ".pm-header{background:#1a1a2a;padding:7px 12px;font-size:.75em;text-transform:uppercase;"
+    "  letter-spacing:.08em;color:#888;border-bottom:1px solid #2a2a3a;flex-shrink:0}"
+    ".pm-messages{flex:1;overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:7px}"
+    ".pm-msg{max-width:92%;padding:7px 10px;border-radius:7px;font-size:.83em;line-height:1.4;"
+    "  white-space:pre-wrap;word-break:break-word}"
+    ".pm-msg.user{align-self:flex-end;background:#1a3a5a;color:#cce}"
+    ".pm-msg.assistant{align-self:flex-start;background:#1a1a2a;color:#ccc;border:1px solid #2a2a3a}"
+    ".pm-typing{padding:7px 12px;font-size:.8em;color:#555;display:none;"
+    "  animation:pmPulse 1.2s ease-in-out infinite;flex-shrink:0}"
+    "@keyframes pmPulse{0%,100%{opacity:.3}50%{opacity:.9}}"
+    ".pm-input-row{display:flex;gap:6px;padding:7px 8px;border-top:1px solid #2a2a3a;"
+    "  background:#111;flex-shrink:0}"
+    ".pm-input-row input{flex:1;margin:0;font-size:.87em}"
+    ".pm-toast{position:fixed;bottom:16px;right:16px;background:#1a2a3a;"
+    "  border:1px solid #2a4a6a;border-radius:8px;padding:12px 14px;"
+    "  font-size:.84em;color:#ccc;max-width:300px;z-index:1000;"
+    "  box-shadow:0 4px 12px rgba(0,0,0,.4);animation:fadeIn .2s ease}"
+    "@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}"
+    ".pm-toast .tlabel{color:#888;font-size:.76em;text-transform:uppercase;letter-spacing:.05em;"
+    "  margin-bottom:5px}"
+    ".pm-toast .tbody{margin-bottom:8px;line-height:1.4;word-break:break-word}"
+    ".pm-toast .tbtns{display:flex;gap:6px}"
+    ".pm-toast .btn-ok{background:#1a4a1a;color:#7f7;border:none;border-radius:4px;"
+    "  padding:5px 10px;cursor:pointer;font-size:.8em}"
+    ".pm-toast .btn-no{background:#2a2a2a;color:#888;border:none;border-radius:4px;"
+    "  padding:5px 10px;cursor:pointer;font-size:.8em}"
 )
 
 _HOME_HTML = """\
@@ -1792,9 +2003,14 @@ _HOME_HTML = """\
       <a href="/form/todos">Open Todos</a>
       <a href="/form/suggest">Add Suggestion</a>
     </div>
-    <div class="pm-stub" id="pm-chat">
-      <strong>PM Chat</strong>
-      Conversation interface — coming soon (todo #849)
+    <div class="pm-wrap" id="pm-chat">
+      <div class="pm-header">PM Chat</div>
+      <div class="pm-messages" id="pm-messages"></div>
+      <div class="pm-typing" id="pm-typing">PM is thinking…</div>
+      <div class="pm-input-row">
+        <input id="pm-input" type="text" placeholder="Ask the PM…" autocomplete="off">
+        <button class="btn-sm" id="pm-send" onclick="pmSend()">Send</button>
+      </div>
     </div>
   </div>
 </div>
@@ -1919,6 +2135,116 @@ Promise.all([
   fetchJ('/api/dashboard').then(renderDashboard),
   fetchJ('/api/activity').then(renderActivity),
 ]);
+
+// ---------------------------------------------------------------------------
+// PM Chat
+// ---------------------------------------------------------------------------
+var PM_HK = 'tgw-pm-h';
+var pmHistory = [];
+
+function pmLoad() {{
+  try {{ var h = sessionStorage.getItem(PM_HK); if (h) pmHistory = JSON.parse(h); }} catch(e) {{}}
+  pmRender();
+}}
+
+function pmSave() {{
+  try {{ sessionStorage.setItem(PM_HK, JSON.stringify(pmHistory.slice(-20))); }} catch(e) {{}}
+}}
+
+function pmRender() {{
+  var el = document.getElementById('pm-messages');
+  if (!pmHistory.length) {{
+    el.innerHTML = '<div style="color:#444;font-size:.82em;text-align:center;padding:18px 6px">'
+      + 'Ask: what needs doing? how many dead letters? how many items staged?</div>';
+    return;
+  }}
+  var html = '';
+  pmHistory.forEach(function(m) {{
+    html += '<div class="pm-msg ' + (m.role==='user'?'user':'assistant') + '">'
+      + escapeHtml(m.content) + '</div>';
+  }});
+  el.innerHTML = html;
+  el.scrollTop = el.scrollHeight;
+}}
+
+async function pmSend() {{
+  var inp = document.getElementById('pm-input');
+  var msg = inp.value.trim();
+  if (!msg) return;
+  inp.value = '';
+  pmHistory.push({{role:'user', content:msg}});
+  pmRender(); pmSave();
+  document.getElementById('pm-typing').style.display = '';
+  var btn = document.getElementById('pm-send');
+  btn.disabled = true;
+  try {{
+    var r = await fetch('/api/pm/chat', {{
+      method: 'POST',
+      headers: Object.assign({{'Content-Type':'application/json'}}, authHeaders()),
+      body: JSON.stringify({{message:msg, history:pmHistory.slice(-9,-1)}}),
+    }});
+    var d = await r.json().catch(function(){{return {{}};}});
+    var txt = d.message || d.detail || '(no response)';
+    pmHistory.push({{role:'assistant', content:txt}});
+    pmRender(); pmSave();
+    if (d.actions) d.actions.forEach(function(a) {{ if (a.type && a.type!=='none') pmToast(a); }});
+  }} catch(e) {{
+    pmHistory.push({{role:'assistant', content:'Error: '+e.message}});
+    pmRender(); pmSave();
+  }} finally {{
+    document.getElementById('pm-typing').style.display = 'none';
+    btn.disabled = false;
+    document.getElementById('pm-messages').scrollTop = 9999;
+  }}
+}}
+
+function pmToast(action) {{
+  var el = document.createElement('div');
+  el.className = 'pm-toast';
+  var label = action.type==='add_todo' ? 'Add Todo' : action.type==='add_suggestion' ? 'Add Suggestion' : 'Action';
+  var body = action.type==='add_todo'
+    ? '['+escapeHtml(action.agent||'?')+' p'+(action.priority||50)+'] '+escapeHtml(action.body||'')
+    : escapeHtml(action.text||'');
+  el.innerHTML = '<div class="tlabel">'+label+'</div>'
+    +'<div class="tbody">'+body+'</div>'
+    +'<div class="tbtns">'
+    +'<button class="btn-ok" onclick="pmConfirm(this)">Confirm</button>'
+    +'<button class="btn-no" onclick="this.closest(\'.pm-toast\').remove()">Dismiss</button>'
+    +'</div>';
+  el.dataset.action = JSON.stringify(action);
+  document.body.appendChild(el);
+  setTimeout(function(){{ if(el.parentNode) el.remove(); }}, 30000);
+}}
+
+async function pmConfirm(btn) {{
+  var toast = btn.closest('.pm-toast');
+  var action;
+  try {{ action = JSON.parse(toast.dataset.action); }} catch(e) {{ toast.remove(); return; }}
+  btn.disabled = true; btn.textContent = '…';
+  try {{
+    var r = await fetch('/api/pm/action', {{
+      method:'POST',
+      headers: Object.assign({{'Content-Type':'application/json'}}, authHeaders()),
+      body: JSON.stringify(action),
+    }});
+    var d = await r.json().catch(function(){{return {{}};}});
+    if (d.ok) {{
+      toast.innerHTML = '<div style="color:#7f7;font-size:.85em">'+(d.message||'Done')+'</div>';
+    }} else {{
+      toast.innerHTML = '<div style="color:#f77;font-size:.85em">Error: '
+        +escapeHtml(d.detail||'failed')+'</div>';
+    }}
+    setTimeout(function(){{ if(toast.parentNode) toast.remove(); }}, 4000);
+  }} catch(e) {{
+    toast.innerHTML = '<div style="color:#f77;font-size:.85em">Network error</div>';
+    setTimeout(function(){{ if(toast.parentNode) toast.remove(); }}, 4000);
+  }}
+}}
+
+document.getElementById('pm-input').addEventListener('keydown', function(e) {{
+  if (e.key==='Enter' && !e.shiftKey) {{ e.preventDefault(); pmSend(); }}
+}});
+pmLoad();
 </script>
 </body>
 </html>

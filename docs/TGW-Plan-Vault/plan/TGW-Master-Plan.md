@@ -1277,6 +1277,13 @@ E-sneaker-net: export context → run in external AI → save result to `inbox/`
 - **Fallback pattern:** design multi-step tasks to be resumable — if a model runs out of
   tokens mid-task, a second agent with different limits should be able to pick up the output.
 
+**Aider configuration notes (2026-06-14, Perplexity research):**
+- Optimal tier: `aider --architect` → OpenRouter Opus for planning, Gemini Flash-Lite for editing (cheap fast fallback); Ollama as dead-fallback.
+- Per-command routing: `architect` uses Opus+Flash-Lite, `edits` uses Flash-Lite only.
+- Enable prompt caching (`--cache-prompts`) for long sessions; `--cache-keepalive-pings N` to keep cache warm.
+- Token usage auditing: log each invocation (model, route, tokens, cost, duration) to `~/.local/share/aider-audit/usage.csv`; analyze with pandas grouped by `command_type`.
+- Aider MCP: wrap Aider in an MCP server to enable orchestration; allows Claude to trigger Aider runs, inspect diffs, read logs. See `reference/aider-mcp-design.md` (future); noted as PP-MULTIMODEL-001 Aider-as-MCP-facility.
+
 ---
 
 ## Phase 5 — AI operations layer
@@ -2434,7 +2441,7 @@ Docs: Runbooks · Known Issues · Architecture · Pipeline Flow · Handoff
 |------|----------------|---------|
 | #847 | `GET /api/dashboard` | Summary counts — needs_review, offers, photos, drafts, dead-letter, ready, workers |
 | #848 | `/form/` home dashboard | Status strip + action cards + PM chat + activity feed + quick intake |
-| #849 | `POST /api/pm/chat` + chat UI | LLM project manager chat window; haiku-4-5 with live TGW context; can add todos/suggestions |
+| #849 ✅ | `POST /api/pm/chat` + chat UI | LLM project manager chat window; haiku-4-5 with live TGW context; can add todos/suggestions — **DONE 2026-06-14** |
 | #850 | `/form/links` | External links hub — eBay, AI/ML services, infrastructure, research |
 | #851 | `/docs/{path}` | Vault markdown renderer — runbooks, ISSUES, architecture, handoff |
 | #852 | `/form/offers` + offers API | Best Offers UI with % of ask, inline Accept/Counter/Decline, dry-run toggle |

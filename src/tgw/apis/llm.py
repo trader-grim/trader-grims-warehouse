@@ -28,6 +28,7 @@ _DEFAULTS: Dict[str, tuple[str, str]] = {
     'alt_text':               ('openrouter', 'google/gemini-2.5-flash-lite'),
     'suggestions_classify':   ('openrouter', 'deepseek/deepseek-v4-flash'),
     'bulk_classify':          ('openrouter', 'google/gemini-2.0-flash-lite'),
+    'pm_chat':                ('openrouter', 'anthropic/claude-haiku-4-5'),
     'ebay_draft':             ('ollama',     'Qwen2.5:latest'),
     'pm_intake':              ('ollama',     'Qwen2.5:latest'),
 }

@@ -1304,3 +1304,229 @@ def test_nav_has_home_link():
         / "src/tgw/static/nav.js"
     ).read_text()
     assert "/form/home" in nav_src
+
+
+# ---------------------------------------------------------------------------
+# POST /api/pm/chat — PM chat (PP-EDITOR-001 Phase 3d)
+# ---------------------------------------------------------------------------
+
+def test_pm_chat_no_auth_rejected(client):
+    r = client.post("/api/pm/chat", json={"message": "hi"})
+    assert r.status_code in (401, 403)
+
+
+def test_pm_chat_openrouter_called(env, monkeypatch):
+    """pm_chat calls OpenRouter and returns {ok, message, actions}."""
+    client = env["client"]
+
+    fake_response_text = (
+        "There are 2 open todos and the queue is idle.\n"
+        "ACTIONS: [{\"type\": \"none\"}]"
+    )
+
+    captured = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured["url"] = url
+        captured["messages"] = json.get("messages", [])
+        captured["model"] = json.get("model")
+
+        class _FakeResp:
+            status_code = 200
+
+            def raise_for_status(self):
+                pass
+
+            def json(self_inner):
+                return {
+                    "choices": [{"message": {"content": fake_response_text}}]
+                }
+
+        return _FakeResp()
+
+    import tgw.http_server as _hs
+    monkeypatch.setattr(_hs, "_build_pm_context", lambda: "todos: 2")
+    monkeypatch.setattr(_hs.requests, "post", fake_post)
+
+    # Also stub get_task_model to return openrouter + a test model
+    from tgw.apis import llm as _llm
+    monkeypatch.setattr(_llm, "get_task_model", lambda cfg, task: ("openrouter", "test/model"))
+
+    # Stub _load_openrouter_key
+    monkeypatch.setattr(_llm, "_load_openrouter_key", lambda cfg: "test-or-key")
+
+    r = client.post(
+        "/api/pm/chat",
+        json={"message": "how many todos?", "history": []},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert "todos" in body["message"].lower()
+    assert isinstance(body["actions"], list)
+    assert body["actions"][0]["type"] == "none"
+
+    # System message includes LIVE SYSTEM STATUS
+    sys_msg = captured["messages"][0]
+    assert sys_msg["role"] == "system"
+    assert "LIVE SYSTEM STATUS" in sys_msg["content"]
+
+    # User message is last
+    user_msg = captured["messages"][-1]
+    assert user_msg["role"] == "user"
+    assert user_msg["content"] == "how many todos?"
+
+
+def test_pm_chat_history_threaded(env, monkeypatch):
+    """History messages are prepended between system and user turn."""
+    client = env["client"]
+
+    import tgw.http_server as _hs
+    monkeypatch.setattr(_hs, "_build_pm_context", lambda: "idle")
+
+    captured_msgs = []
+
+    def fake_post(url, headers, json, timeout):
+        captured_msgs.extend(json.get("messages", []))
+
+        class _R:
+            def raise_for_status(self): pass
+            def json(self_inner):
+                return {"choices": [{"message": {"content": "ok\nACTIONS: [{\"type\":\"none\"}]"}}]}
+
+        return _R()
+
+    monkeypatch.setattr(_hs.requests, "post", fake_post)
+
+    from tgw.apis import llm as _llm
+    monkeypatch.setattr(_llm, "get_task_model", lambda cfg, task: ("openrouter", "m"))
+    monkeypatch.setattr(_llm, "_load_openrouter_key", lambda cfg: "k")
+
+    history = [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+    ]
+    client.post(
+        "/api/pm/chat",
+        json={"message": "second question", "history": history},
+        headers=AUTH_HEADERS,
+    )
+    roles = [m["role"] for m in captured_msgs]
+    assert roles == ["system", "user", "assistant", "user"]
+
+
+def test_pm_chat_actions_parsed(env, monkeypatch):
+    """add_todo action in ACTIONS block is returned in the response."""
+    client = env["client"]
+
+    import tgw.http_server as _hs
+    monkeypatch.setattr(_hs, "_build_pm_context", lambda: "idle")
+
+    action_payload = [{"type": "add_todo", "agent": "claude", "body": "Fix it", "priority": 30}]
+    resp_text = "You have dead letters.\nACTIONS: " + json.dumps(action_payload)
+
+    def fake_post(url, headers, json, timeout):
+        class _R:
+            def raise_for_status(self): pass
+            def json(self_inner):
+                return {"choices": [{"message": {"content": resp_text}}]}
+        return _R()
+
+    monkeypatch.setattr(_hs.requests, "post", fake_post)
+
+    from tgw.apis import llm as _llm
+    monkeypatch.setattr(_llm, "get_task_model", lambda cfg, task: ("openrouter", "m"))
+    monkeypatch.setattr(_llm, "_load_openrouter_key", lambda cfg: "k")
+
+    r = client.post("/api/pm/chat", json={"message": "any issues?"}, headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["actions"][0]["type"] == "add_todo"
+    assert body["actions"][0]["body"] == "Fix it"
+
+
+# ---------------------------------------------------------------------------
+# POST /api/pm/action — execute a PM-proposed action
+# ---------------------------------------------------------------------------
+
+def test_pm_action_add_todo(env, monkeypatch):
+    """add_todo action calls todo_add and returns ok."""
+    client = env["client"]
+
+    added = {}
+
+    def fake_todo_add(agent, body, priority, source):
+        added.update({"agent": agent, "body": body, "priority": priority})
+        return {"ok": True, "id": 999, "agent": agent, "body": body, "priority": priority,
+                "pp_ref": None, "depends_on": [], "plan_anchor": None}
+
+    import tgw.todo as _todo
+    monkeypatch.setattr(_todo, "todo_add", fake_todo_add)
+
+    r = client.post(
+        "/api/pm/action",
+        json={"type": "add_todo", "agent": "claude", "body": "Check dead letters", "priority": 20},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert "999" in body["message"]
+    assert added["agent"] == "claude"
+    assert added["body"] == "Check dead letters"
+
+
+def test_pm_action_add_suggestion(env, monkeypatch):
+    """add_suggestion action calls cmd_suggest and returns ok."""
+    client = env["client"]
+
+    suggested = {}
+
+    def fake_suggest(cfg, text):
+        suggested["text"] = text
+        return {"ok": True, "written": f"- [ ] 2026-06-14T00:00 :: {text}"}
+
+    from tgw import api as _api
+    monkeypatch.setattr(_api, "cmd_suggest", fake_suggest)
+
+    # monkey-patch _cfg to have a plan_vault_path (already set in env)
+    # The pm_action endpoint calls cmd_suggest(_cfg, text) so it goes through the monkeypatch
+    r = client.post(
+        "/api/pm/action",
+        json={"type": "add_suggestion", "text": "Try a new pricing strategy"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert suggested["text"] == "Try a new pricing strategy"
+
+
+def test_pm_action_unknown_type(client):
+    r = client.post(
+        "/api/pm/action",
+        json={"type": "destroy_everything"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 400
+
+
+def test_pm_action_add_todo_missing_body(client):
+    r = client.post(
+        "/api/pm/action",
+        json={"type": "add_todo", "agent": "claude"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 400
+
+
+def test_home_has_pm_chat_widget(client):
+    """Home page includes the PM chat widget, not the old stub."""
+    r = client.get("/form/home")
+    assert "pm-wrap" in r.text
+    assert "pm-messages" in r.text
+    assert "pm-input" in r.text
+    assert "pmSend" in r.text
+    # Old stub should be gone
+    assert "coming soon" not in r.text
