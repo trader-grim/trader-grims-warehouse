@@ -77,6 +77,7 @@ PIPELINE_ACTIONS = {
     "ebay_publish",
     "catalog_rebuild",
     "thumbnail_gen",
+    "approve",
 }
 
 
@@ -280,6 +281,62 @@ def get_pending_revisions() -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/items/review-queue — post-draft items awaiting human approval
+# Must be registered before /api/items/{sku} so the literal path wins.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/items/review-queue", dependencies=[AUTH])
+def get_review_queue() -> Dict[str, Any]:
+    """Items where ebay_draft completed (draft_listing present) but not yet staged.
+
+    Excludes items that already have an ebay_offer.offer_id (staged/ready/listed)
+    or an ebay_listing (published). Returns compact display data for the review UI.
+    """
+    db_path = _cfg.get("sqlite_catalog_path")
+    items: List[Dict[str, Any]] = []
+
+    if db_path and Path(db_path).exists():
+        try:
+            with _sqlite_conn() as con:
+                rows = con.execute(
+                    """
+                    SELECT sku, title, location, status, price, data
+                    FROM catalog
+                    WHERE json_extract(data, '$.draft_listing') IS NOT NULL
+                      AND (json_extract(data, '$.ebay_offer.offer_id') IS NULL
+                           OR json_extract(data, '$.ebay_offer.offer_id') = '')
+                      AND json_extract(data, '$.ebay_listing.listing_id') IS NULL
+                    ORDER BY sku
+                    """
+                ).fetchall()
+        except Exception as exc:
+            log.warning("review-queue: catalog query failed: %s", exc)
+            rows = []
+        for row in rows:
+            doc: Dict[str, Any] = {}
+            try:
+                doc = json.loads(row["data"] or "{}")
+            except Exception:
+                pass
+            draft = doc.get("draft_listing") or {}
+            items.append({
+                "sku": row["sku"],
+                "title": draft.get("title") or row["title"] or "",
+                "location": row["location"] or "",
+                "status": row["status"] or "",
+                "price": draft.get("price") if draft.get("price") is not None else row["price"],
+                "condition": draft.get("condition") or doc.get("condition") or "",
+                "category_id": draft.get("category_id") or doc.get("ebay_category_id") or "",
+                "category_name": draft.get("category_name") or doc.get("ebay_category_name") or "",
+                "quality": draft.get("quality") or {},
+                "aspects_required_total": draft.get("aspects_required_total"),
+                "aspects_required_filled": draft.get("aspects_required_filled"),
+            })
+
+    return {"ok": True, "items": items, "count": len(items)}
+
+
+# ---------------------------------------------------------------------------
 # GET /api/items/{sku} — full item detail
 # ---------------------------------------------------------------------------
 
@@ -465,7 +522,23 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
 
     try:
-        if action == "catalog_rebuild":
+        if action == "approve":
+            # Human approval of AI draft — set status=Ready, no job enqueued
+            doc = load_item_doc(json_path)
+            doc["status"] = "Ready"
+            atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+            try:
+                state_machine.enqueue_job(
+                    queue_name="catalog_rebuild",
+                    payload={"reason": f"approve:{sku}"},
+                    dedupe_key="catalog_rebuild:pending",
+                    not_before=time.time() + 30,
+                    max_attempts=3,
+                )
+            except Exception:
+                pass
+            return {"ok": True, "sku": sku, "action": "approve", "status": "Ready"}
+        elif action == "catalog_rebuild":
             job_id = state_machine.enqueue_job(
                 queue_name="catalog_rebuild",
                 payload={"reason": f"manual:{sku}"},
@@ -2543,6 +2616,269 @@ def revisions_form():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         revisions_css=_REVISIONS_EXTRA_CSS,
+        api_key_json=json.dumps(_api_key),
+    )
+    return HTMLResponse(html)
+
+
+# ---------------------------------------------------------------------------
+# GET /form/review — post-draft review queue (PP-EDITOR-001 Phase 3i)
+# ---------------------------------------------------------------------------
+
+_REVIEW_EXTRA_CSS = (
+    ".rq-card{background:#1a1a1a;border:1px solid #333;border-radius:10px;"
+    "  padding:12px 14px;margin-bottom:10px;display:flex;gap:12px;align-items:flex-start}"
+    ".rq-thumb{width:70px;height:70px;object-fit:cover;border-radius:6px;"
+    "  border:1px solid #333;background:#111;flex-shrink:0}"
+    ".rq-thumb-ph{width:70px;height:70px;border-radius:6px;border:1px solid #333;"
+    "  background:#111;display:flex;align-items:center;justify-content:center;"
+    "  color:#444;font-size:1.4em;flex-shrink:0}"
+    ".rq-body{min-width:0;flex:1}"
+    ".rq-title{font-size:.93em;font-weight:600;color:#ddd;margin-bottom:4px;"
+    "  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}"
+    ".rq-meta{font-size:.76em;color:#777;display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px}"
+    ".rq-chip{background:#1e1e1e;border:1px solid #2a2a2a;border-radius:3px;padding:1px 6px;color:#888}"
+    ".rq-price{color:#bfb;font-weight:600}"
+    ".rq-cond{color:#aaa}"
+    ".rq-cat{color:#7af}"
+    ".rq-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}"
+    ".btn-approve{padding:7px 16px;background:#1a4a1a;color:#7f7;border:1px solid #3a8a3a;"
+    "  border-radius:6px;cursor:pointer;font-size:.83em;font-weight:600}"
+    ".btn-approve:hover{background:#1e5a1e}"
+    ".btn-redraft{padding:7px 14px;background:#2a1a3a;color:#b7f;border:1px solid #5a3a7a;"
+    "  border-radius:6px;cursor:pointer;font-size:.83em;font-weight:600}"
+    ".btn-redraft:hover{background:#3a1a4a}"
+    ".btn-edit{padding:7px 14px;background:#1a1a2a;color:#7af;border:1px solid #3a4a7a;"
+    "  border-radius:6px;text-decoration:none;font-size:.83em;font-weight:600;"
+    "  display:inline-block;line-height:1.4}"
+    ".btn-edit:hover{background:#1a2a3a}"
+    ".rq-flash{padding:5px 9px;border-radius:5px;font-size:.8em;margin-top:5px;display:none}"
+    ".rq-flash.ok{background:#1a3a1a;color:#7f7;display:block}"
+    ".rq-flash.err{background:#3a1a1a;color:#f77;display:block}"
+    ".rq-flash.info{background:#1a2a3a;color:#7af;display:block}"
+    ".empty-state{padding:32px;text-align:center;color:#555;font-size:.95em}"
+    ".approve-all-bar{display:flex;align-items:center;gap:12px;margin-bottom:14px;"
+    "  padding:10px 14px;background:#1a2a1a;border:1px solid #2a4a2a;border-radius:8px}"
+    ".btn-approve-all{padding:8px 20px;background:#1a5a1a;color:#7f7;border:1px solid #4a9a4a;"
+    "  border-radius:6px;cursor:pointer;font-size:.87em;font-weight:600}"
+    ".btn-approve-all:hover{background:#1e6a1e}"
+    ".approve-all-label{font-size:.85em;color:#7a9a7a}"
+    ".reload-btn{background:none;border:none;color:#4a8ade;cursor:pointer;"
+    "  font-size:.82em;padding:0;text-decoration:underline;margin-left:8px}"
+    ".quality-ok{color:#7f7;font-size:.78em}"
+    ".quality-warn{color:#fb7;font-size:.78em}"
+)
+
+_REVIEW_HTML = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TGW — Review Queue</title>
+{static_head}
+<style>{review_css}</style>
+</head>
+<body>
+<h2>Review Queue <span id="rq-count" style="font-size:.65em;color:#666;font-weight:normal"></span>
+  <button class="reload-btn" onclick="load()">&#8635; Refresh</button>
+</h2>
+
+<div id="approve-all-bar" style="display:none" class="approve-all-bar">
+  <button class="btn-approve-all" onclick="approveAll()">&#10003; Approve All</button>
+  <span class="approve-all-label" id="approve-all-label">Approve every item in this queue.</span>
+</div>
+
+<div id="rq-list"><span style="color:#555">Loading…</span></div>
+
+{static_foot}
+<script>
+window.TGW_API_KEY = {api_key_json};
+var _items = [];
+
+function flashId(sku) {{ return 'rqf-' + sku.replace(/[^a-z0-9]/gi,'_'); }}
+
+function fmtPrice(p) {{
+  if (p === null || p === undefined) return '<span style="color:#666">unpriced</span>';
+  return '$' + Number(p).toFixed(2);
+}}
+
+function qualityHtml(q) {{
+  if (!q || typeof q !== 'object') return '';
+  var score = q.score !== undefined ? q.score : null;
+  if (score === null) return '';
+  var cls = score >= 70 ? 'quality-ok' : 'quality-warn';
+  return '<span class="' + cls + '">Q:' + score + '</span>';
+}}
+
+function aspectHtml(item) {{
+  var tot = item.aspects_required_total;
+  var fil = item.aspects_required_filled;
+  if (!tot) return '';
+  var ok = fil >= tot;
+  var cls = ok ? 'quality-ok' : 'quality-warn';
+  return '<span class="' + cls + '">' + fil + '/' + tot + ' aspects</span>';
+}}
+
+function renderQueue(data) {{
+  var el = document.getElementById('rq-list');
+  var countEl = document.getElementById('rq-count');
+  var bar = document.getElementById('approve-all-bar');
+  if (!data || !data.ok) {{
+    el.innerHTML = '<div class="rq-flash err" style="display:block">Failed to load: ' +
+      escapeHtml((data && data.error) || 'unknown error') + '</div>';
+    countEl.textContent = '';
+    bar.style.display = 'none';
+    return;
+  }}
+  _items = data.items || [];
+  if (_items.length === 0) {{
+    el.innerHTML = '<div class="empty-state">No items awaiting review. All caught up!</div>';
+    countEl.textContent = '';
+    bar.style.display = 'none';
+    // Update nav badge to zero
+    var navBadge = document.getElementById('nav-review-count');
+    if (navBadge) navBadge.textContent = '';
+    return;
+  }}
+  countEl.textContent = '(' + _items.length + ' pending)';
+  bar.style.display = _items.length > 1 ? 'flex' : 'none';
+  document.getElementById('approve-all-label').textContent =
+    'Approve all ' + _items.length + ' items in this queue.';
+  // Update nav badge
+  var navBadge = document.getElementById('nav-review-count');
+  if (navBadge) navBadge.textContent = _items.length > 0 ? String(_items.length) : '';
+
+  var html = '';
+  _items.forEach(function(item) {{
+    var sku = item.sku;
+    var thumbUrl = '/thumb/' + encodeURIComponent(sku);
+    var editUrl = '/form/items/' + encodeURIComponent(sku);
+    var thumbHtml = '<img class="rq-thumb" src="' + thumbUrl +
+      '" onerror="this.style.display=\\'none\\';this.nextElementSibling.style.display=\\'flex\\'" loading="lazy">' +
+      '<div class="rq-thumb-ph" style="display:none">&#128247;</div>';
+
+    html += '<div class="rq-card" id="card-' + escapeHtml(sku) + '">';
+    html += thumbHtml;
+    html += '<div class="rq-body">';
+    html += '<div class="rq-title">' + escapeHtml(item.title || sku) + '</div>';
+    html += '<div class="rq-meta">';
+    html += '<span class="rq-chip rq-price">' + fmtPrice(item.price) + '</span>';
+    if (item.condition) html += '<span class="rq-chip rq-cond">' + escapeHtml(item.condition) + '</span>';
+    if (item.category_name || item.category_id) {{
+      var cat = item.category_name || ('Cat ' + item.category_id);
+      html += '<span class="rq-chip rq-cat">' + escapeHtml(cat) + '</span>';
+    }}
+    if (item.location) html += '<span class="rq-chip">' + escapeHtml(item.location) + '</span>';
+    var qh = qualityHtml(item.quality);
+    if (qh) html += qh;
+    var ah = aspectHtml(item);
+    if (ah) html += ah;
+    html += '</div>';
+    html += '<div class="rq-actions">';
+    html += '<button class="btn-approve" onclick="approveOne(' + JSON.stringify(sku) + ')">&#10003; Approve</button>';
+    html += '<button class="btn-redraft" onclick="redraftOne(' + JSON.stringify(sku) + ')">&#8635; Re-draft</button>';
+    html += '<a class="btn-edit" href="' + escapeHtml(editUrl) + '" target="_blank">&#9998; Edit</a>';
+    html += '</div>';
+    html += '<div class="rq-flash" id="' + flashId(sku) + '"></div>';
+    html += '</div></div>';
+  }});
+  el.innerHTML = html;
+}}
+
+async function load() {{
+  var el = document.getElementById('rq-list');
+  el.innerHTML = '<span style="color:#555">Loading…</span>';
+  try {{
+    var r = await fetch('/api/items/review-queue', {{headers: authHeaders()}});
+    var d = await r.json();
+    renderQueue(d);
+  }} catch(e) {{
+    el.innerHTML = '<div class="rq-flash err" style="display:block">Network error: ' + escapeHtml(String(e)) + '</div>';
+  }}
+}}
+
+async function approveOne(sku) {{
+  var flash = document.getElementById(flashId(sku));
+  if (flash) {{ flash.className = 'rq-flash'; flash.textContent = ''; }}
+  try {{
+    var r = await fetch('/api/items/' + encodeURIComponent(sku) + '/action', {{
+      method: 'POST',
+      headers: authHeaders({{'Content-Type': 'application/json'}}),
+      body: JSON.stringify({{action: 'approve'}}),
+    }});
+    var d = await r.json();
+    if (d.ok) {{
+      var card = document.getElementById('card-' + sku);
+      if (card) {{ card.style.opacity = '.4'; card.style.pointerEvents = 'none'; }}
+      if (flash) {{ flash.className = 'rq-flash ok'; flash.textContent = 'Approved — status set to Ready.'; }}
+      setTimeout(load, 900);
+    }} else {{
+      if (flash) {{ flash.className = 'rq-flash err'; flash.textContent = 'Error: ' + escapeHtml(d.error || d.detail || 'unknown'); }}
+    }}
+  }} catch(e) {{
+    if (flash) {{ flash.className = 'rq-flash err'; flash.textContent = 'Network error: ' + escapeHtml(String(e)); }}
+  }}
+}}
+
+async function redraftOne(sku) {{
+  var flash = document.getElementById(flashId(sku));
+  if (flash) {{ flash.className = 'rq-flash'; flash.textContent = ''; }}
+  try {{
+    var r = await fetch('/api/items/' + encodeURIComponent(sku) + '/action', {{
+      method: 'POST',
+      headers: authHeaders({{'Content-Type': 'application/json'}}),
+      body: JSON.stringify({{action: 'ebay_draft'}}),
+    }});
+    var d = await r.json();
+    if (d.ok) {{
+      if (flash) {{ flash.className = 'rq-flash info'; flash.textContent = 'Re-draft queued.'; }}
+    }} else {{
+      if (flash) {{ flash.className = 'rq-flash err'; flash.textContent = 'Error: ' + escapeHtml(d.error || d.detail || 'unknown'); }}
+    }}
+  }} catch(e) {{
+    if (flash) {{ flash.className = 'rq-flash err'; flash.textContent = 'Network error: ' + escapeHtml(String(e)); }}
+  }}
+}}
+
+async function approveAll() {{
+  var label = document.getElementById('approve-all-label');
+  label.textContent = 'Approving…';
+  var skus = _items.map(function(i) {{ return i.sku; }});
+  var done = 0, failed = 0;
+  for (var i = 0; i < skus.length; i++) {{
+    try {{
+      var r = await fetch('/api/items/' + encodeURIComponent(skus[i]) + '/action', {{
+        method: 'POST',
+        headers: authHeaders({{'Content-Type': 'application/json'}}),
+        body: JSON.stringify({{action: 'approve'}}),
+      }});
+      var d = await r.json();
+      if (d.ok) {{ done++; }} else {{ failed++; }}
+    }} catch(e) {{ failed++; }}
+    label.textContent = 'Approved ' + done + '/' + skus.length + (failed ? ' (' + failed + ' errors)' : '') + '…';
+  }}
+  label.textContent = 'Done — approved ' + done + (failed ? ', ' + failed + ' errors' : '') + '.';
+  setTimeout(load, 1200);
+}}
+
+load();
+</script>
+</body>
+</html>
+"""
+
+
+@app.get("/form/review")
+def review_form():
+    """Post-draft review queue — approve/re-draft/edit items awaiting human QA.
+    No Bearer auth (network trust); JS embeds the key for API calls."""
+    from fastapi.responses import HTMLResponse
+
+    html = _REVIEW_HTML.format(
+        static_head=_STATIC_HEAD,
+        static_foot=_STATIC_FOOT,
+        review_css=_REVIEW_EXTRA_CSS,
         api_key_json=json.dumps(_api_key),
     )
     return HTMLResponse(html)

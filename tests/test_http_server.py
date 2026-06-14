@@ -1994,3 +1994,163 @@ def test_nav_includes_revisions_link(client):
     r = client.get("/static/nav.js")
     assert r.status_code == 200
     assert "/form/revisions" in r.text
+
+
+# ---------------------------------------------------------------------------
+# PP-EDITOR-001 Phase 3i — /form/review post-draft review queue
+# ---------------------------------------------------------------------------
+
+_DRAFT_LISTING = {
+    "title": "AI-Enhanced Widget Title",
+    "category_id": "12345",
+    "category_name": "Widgets",
+    "condition": "Used - Good",
+    "condition_id": 3000,
+    "price": 14.99,
+    "aspects_required_total": 3,
+    "aspects_required_filled": 3,
+    "quality": {"score": 82},
+}
+
+
+def _write_item_with_draft(itemdata_root, sku, draft_listing, extra=None):
+    d = itemdata_root / sku
+    d.mkdir(parents=True, exist_ok=True)
+    doc = {"sku": sku, "title": "Widget", "location": "C3", "condition": "Good"}
+    doc["draft_listing"] = draft_listing
+    if extra:
+        doc.update(extra)
+    (d / f"{sku}.json").write_text(json.dumps(doc), encoding="utf-8")
+    return doc
+
+
+def _seed_catalog_with_data(db_path, sku, doc):
+    import sqlite3
+    with sqlite3.connect(str(db_path)) as con:
+        try:
+            con.execute("ALTER TABLE catalog ADD COLUMN data TEXT")
+        except Exception:
+            pass
+        con.execute(
+            "UPDATE catalog SET data = ? WHERE sku = ?",
+            (json.dumps(doc), sku),
+        )
+
+
+def test_review_queue_requires_auth(client):
+    r = client.get("/api/items/review-queue")
+    assert r.status_code in (401, 403)
+
+
+def test_review_queue_empty_when_no_drafts(env):
+    """No items with draft_listing → empty list."""
+    client = env["client"]
+    r = client.get("/api/items/review-queue", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["count"] == 0
+    assert body["items"] == []
+
+
+def test_review_queue_returns_items_with_draft_listing(env):
+    """Items with draft_listing and no offer_id appear in the review queue."""
+    doc = _write_item_with_draft(env["itemdata_root"], SKU_A, _DRAFT_LISTING)
+    _seed_catalog_with_data(env["cfg"]["sqlite_catalog_path"], SKU_A, doc)
+
+    client = env["client"]
+    r = client.get("/api/items/review-queue", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["count"] == 1
+    item = body["items"][0]
+    assert item["sku"] == SKU_A
+    assert item["title"] == "AI-Enhanced Widget Title"
+    assert item["price"] == 14.99
+    assert item["condition"] == "Used - Good"
+    assert item["category_name"] == "Widgets"
+    assert item["location"] == "A1"  # from the catalog row seeded by env fixture
+
+
+def test_review_queue_excludes_staged_items(env):
+    """Items that already have an offer_id are not in the review queue."""
+    doc = _write_item_with_draft(
+        env["itemdata_root"], SKU_A, _DRAFT_LISTING,
+        extra={"ebay_offer": {"offer_id": "offer-abc-123", "status": "UNPUBLISHED"}},
+    )
+    _seed_catalog_with_data(env["cfg"]["sqlite_catalog_path"], SKU_A, doc)
+
+    client = env["client"]
+    r = client.get("/api/items/review-queue", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 0
+
+
+def test_approve_action_sets_status_ready(env, monkeypatch):
+    """POST /api/items/{sku}/action with action=approve sets status=Ready on the item JSON."""
+    monkeypatch.setattr(http_server.state_machine, "enqueue_job", lambda *a, **k: "job-fake")
+
+    _write_item_with_draft(env["itemdata_root"], SKU_A, _DRAFT_LISTING)
+
+    client = env["client"]
+    r = client.post(
+        f"/api/items/{SKU_A}/action",
+        json={"action": "approve"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["status"] == "Ready"
+
+    # Verify the JSON file was updated
+    json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert doc["status"] == "Ready"
+
+
+def test_approve_action_404_on_missing_sku(client):
+    """POST /api/items/{sku}/action approve returns 404 when sku does not exist."""
+    r = client.post(
+        "/api/items/tgw99999999999999999/action",
+        json={"action": "approve"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 404
+
+
+def test_approve_action_requires_auth(client):
+    r = client.post(f"/api/items/{SKU_A}/action", json={"action": "approve"})
+    assert r.status_code in (401, 403)
+
+
+def test_form_review_renders(client):
+    """/form/review returns HTML with expected structure."""
+    r = client.get("/form/review")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert "Review Queue" in r.text
+    assert "/api/items/review-queue" in r.text
+    assert "Approve All" in r.text
+
+
+def test_form_review_no_auth_required(client):
+    """/form/review is accessible without Bearer token."""
+    r = client.get("/form/review")
+    assert r.status_code == 200
+
+
+def test_nav_includes_review_link(client):
+    """nav.js includes a link to /form/review."""
+    r = client.get("/static/nav.js")
+    assert r.status_code == 200
+    assert "/form/review" in r.text
+
+
+def test_nav_review_badge_span_present(client):
+    """nav.js includes the nav-review-count badge span."""
+    r = client.get("/static/nav.js")
+    assert r.status_code == 200
+    assert "nav-review-count" in r.text

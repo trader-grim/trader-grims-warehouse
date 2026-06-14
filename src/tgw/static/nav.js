@@ -5,6 +5,7 @@
     '<a class="brand" href="/form/home">TGW</a>' +
     '<a href="/form/home">Home</a>' +
     '<a href="/form/items">Inventory</a>' +
+    '<a href="/form/review">Review <span id="nav-review-count" class="nav-count"></span></a>' +
     '<a href="/docs">Docs</a>' +
     '<a href="/form/links">Links</a>' +
     '<a href="/form/offers">Offers</a>' +
@@ -42,4 +43,19 @@
       m.classList.remove('open');
     });
   });
+
+  // Async badge: fetch review-queue count if an API key is available on the page.
+  function updateReviewBadge() {
+    var key = window.TGW_API_KEY;
+    if (!key) return;
+    fetch('/api/items/review-queue', {headers: {Authorization: 'Bearer ' + key}})
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        var badge = document.getElementById('nav-review-count');
+        if (badge) badge.textContent = (d && d.count > 0) ? String(d.count) : '';
+      })
+      .catch(function() {});
+  }
+  // Run after the page has set window.TGW_API_KEY (scripts execute sequentially).
+  setTimeout(updateReviewBadge, 0);
 })();
