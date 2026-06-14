@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-06-14 05:33 UTC — 36 open, 798 done in the last 7 days._
+_Rendered 2026-06-14 05:48 UTC — 34 open, 800 done in the last 7 days._
 
 ## 137 (1 open)
 
@@ -54,12 +54,10 @@ _Rendered 2026-06-14 05:33 UTC — 36 open, 798 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (7 open)
+## claude (5 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
-| 131 | 59 |  | tgw ebay-pull scoping — add --sku SKU [SKU...] / --location LOC / --status STATUS filters to cmd_ebay_pull so operators can pull-sync a subset of listings without a full sweep; wraps existing pull.sync_item() per-item path; from PP-SHELL-001 Round 5 deferred item |  |  |
-| 498 | 60 |  | bin/tgw-offline-sync: write .tgw-sync-stamp into @data not mount root — stamp is absent from all btrfs snapshots (found in code-review session-29) | [[TGW-Master-Plan#PP-BACKUP-001\|plan]] |  |
 | 132 | 61 |  | PP-PLANDB-001 Phase 4 — tgw plan status [PP-REF]: one-line status summary per PP-* item (open/done/blocked todo counts + latest activity); feed into session-start output in CLAUDE.md. Requires Phase 3 (#112 open) | [[TGW-Master-Plan#PP-PLANDB-001 — Database-Driven Plan Builder (design discussion needed)\|PP-PLANDB-001]] | ✓ deps done |
 | 137 | 63 |  | Gemini Batch API path for full-catalog alt-text sweep — tgw alt-text --batch --api-mode batch: chunk ~8350 SKUs into 40-image arrays (~5 SKUs each), submit to Gemini Batch API async, poll completion, write results back via existing alt_text ledger; resumable via ai_usage/image_hashes state; replaces serial live-API calls for full-catalog runs; dramatically reduces rate-limit pressure and cost. Reference: PERPLEXITY-007 batch pipeline research + gemini-2.5-flash-lite model |  | ⛔ #153 |
 | 113 | 72 | M | Round7 p72 M (GATED: after admin #20 Qtile install): PP-CLIP-001 daemon — dual-backend watcher per settled design (2026-06-12): backend-agnostic core (on change -> classify -> SQLite -> socket push); X11/XFixes backend (default/stable) + Wayland wl-paste --watch backend; session-type autodetect; PRIMARY+CLIPBOARD; feeds existing tgw clip store; Unix socket for TGWSKUWidget | [[TGW-Master-Plan#PP-CLIP-001 — TGW-Aware Clipboard Manager\|PP-CLIP-001]] | ✓ deps done |
@@ -72,10 +70,12 @@ _Rendered 2026-06-14 05:33 UTC — 36 open, 798 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — Sold reconciliation and inventory status sync (design ready)\|PP-SOLD-001]] |  |
 
-## Done this week (798)
+## Done this week (800)
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 131 | claude | 2026-06-13 | tgw ebay-pull scoping — add --sku SKU [SKU...] / --location LOC / --status STATUS filters to cmd_ebay_pull so operators can pull-sync a subset of listings without a full sweep; wraps existing pull.sync_item() per-item path; from PP-SHELL-001 Round 5 deferred item |
+| 498 | claude | 2026-06-13 | bin/tgw-offline-sync: write .tgw-sync-stamp into @data not mount root — stamp is absent from all btrfs snapshots (found in code-review session-29) |
 | 112 | claude | 2026-06-13 | Round7 p58 S: PP-PLANDB-001 Phase 3 — tgw plan check: reconcile plan<->tracker both directions (pp_ref/plan_anchor vs plan sections; round-tagged todos vs plan round summaries); report orphans + status mismatches; add to session-start ritual in CLAUDE.md; mismatch reports feed the improve-the-admin loop (PP-DOCFLOW) |
 | 136 | claude | 2026-06-13 | pHash image dedup in alt_text + ai_identify workers — compute perceptual hash (imagehash.phash) before vision API call; check image_hashes table (phash -> sku + result_json); on hit copy cached result, skip API; on miss store hash + result after successful call; prevents redundant calls for duplicate photos within or across SKU folders. From PERPLEXITY-007 batch pipeline research. Aider-eligible |
 | 500 | admin | 2026-06-13 | Review sync-conflict: tgw20170504125151078.sync-conflict-20250803-145704-KWJ6FX3.json Moved to: /opt/TGW/src/trader-grims-warehouse/docs/TGW-Plan-Vault/inbox/review/tgw20170504125151078.sync-conflict-20250803-145704-KWJ6FX3-1.json Canonical: None Reason: no_canonical |

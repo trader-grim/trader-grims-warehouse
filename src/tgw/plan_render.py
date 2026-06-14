@@ -386,3 +386,102 @@ def format_plan_check(result: Dict[str, Any]) -> str:
         f"`tgw todo set-meta <id> --pp <correct-ref>`"
     )
     return '\n'.join(lines)
+
+
+# ---------------------------------------------------------------------------
+# plan_status — PP-PLANDB-001 Phase 4
+# ---------------------------------------------------------------------------
+
+def _item_activity_ts(item: Dict[str, Any]) -> Optional[datetime]:
+    """Latest timestamp for a todo: done_at when done, added_at otherwise."""
+    return item.get('done_at') or item.get('added_at')
+
+
+def plan_status(cfg: Dict[str, Any], pp_ref: Optional[str] = None) -> Dict[str, Any]:
+    """
+    One-line status summary per PP-* item from the todo tracker (PP-PLANDB-001 Phase 4).
+
+    For each PP-* item with tracked todos, returns:
+      open count, done count, blocked count (open todos with open deps),
+      and the timestamp + body of the most-recently-active todo.
+
+    pp_ref: if given, restrict output to that single PP-* item.
+    Returns {ok, rows: [{pp_ref, open, done, blocked, latest, latest_body}]}.
+    """
+    from tgw.todo import todo_list
+
+    try:
+        all_items = todo_list(show_all=True)
+    except Exception as exc:
+        return {'ok': False, 'error': f'todo tracker unavailable: {exc}', 'rows': []}
+
+    open_set = {i['id'] for i in all_items if not i.get('done_at')}
+
+    ref_items = [i for i in all_items if i.get('pp_ref')]
+    if pp_ref:
+        ref_items = [i for i in ref_items if i['pp_ref'] == pp_ref]
+
+    by_pp: Dict[str, List[Dict[str, Any]]] = {}
+    for item in ref_items:
+        by_pp.setdefault(item['pp_ref'], []).append(item)
+
+    rows = []
+    for pp in sorted(by_pp):
+        pp_items = by_pp[pp]
+        open_todos = [i for i in pp_items if not i.get('done_at')]
+        done_todos = [i for i in pp_items if i.get('done_at')]
+        blocked = [
+            i for i in open_todos
+            if any(d in open_set for d in (i.get('depends_on') or []))
+        ]
+
+        timestamps = [t for i in pp_items if (t := _item_activity_ts(i))]
+        latest = max(timestamps) if timestamps else None
+
+        ts_pairs = [(i, _item_activity_ts(i)) for i in pp_items]
+        ts_pairs = [(i, t) for i, t in ts_pairs if t is not None]
+        latest_item = max(ts_pairs, key=lambda x: x[1])[0] if ts_pairs else pp_items[0]
+
+        rows.append({
+            'pp_ref': pp,
+            'open': len(open_todos),
+            'done': len(done_todos),
+            'blocked': len(blocked),
+            'latest': latest,
+            'latest_body': latest_item.get('body', ''),
+        })
+
+    return {'ok': True, 'rows': rows}
+
+
+def format_plan_status(result: Dict[str, Any]) -> str:
+    """Format plan_status() result as human-readable text for the CLI."""
+    if not result.get('ok'):
+        return f"Error: {result.get('error', 'unknown error')}"
+
+    rows = result.get('rows', [])
+    if not rows:
+        return 'tgw plan status — no PP-* items with tracked todos'
+
+    lines = [f'tgw plan status — {len(rows)} PP-* item(s) tracked']
+    for row in rows:
+        counts = []
+        if row['open']:
+            blocked_note = f' ({row["blocked"]} blocked)' if row['blocked'] else ''
+            counts.append(f'{row["open"]} open{blocked_note}')
+        if row['done']:
+            counts.append(f'{row["done"]} done')
+        if not counts:
+            counts.append('no open todos')
+
+        latest_str = ''
+        if row['latest']:
+            date = row['latest'].strftime('%Y-%m-%d')
+            body = row['latest_body'][:60].replace('\n', ' ')
+            if len(row['latest_body']) > 60:
+                body += '…'
+            latest_str = f' · {date} ({body})'
+
+        lines.append(f'  {row["pp_ref"]}: {", ".join(counts)}{latest_str}')
+
+    return '\n'.join(lines)

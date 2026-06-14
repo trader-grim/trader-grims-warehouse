@@ -11,7 +11,9 @@ from tgw.plan_render import (
     _plan_heading_map,
     build_taskboard,
     format_plan_check,
+    format_plan_status,
     plan_check,
+    plan_status,
     render_taskboard,
     taskboard_path,
 )
@@ -379,3 +381,148 @@ def test_format_plan_check_with_issues(tmp_path):
     text = format_plan_check(result)
     assert 'PP-X-001' in text
     assert '⚠' in text
+
+
+# ---------------------------------------------------------------------------
+# plan_status — PP-PLANDB-001 Phase 4
+# ---------------------------------------------------------------------------
+
+def _ps_item(id, agent='claude', priority=50, body='task', done_at=None,
+             pp_ref=None, depends_on=None, added_at=NOW):
+    return {
+        'id': id, 'agent': agent, 'priority': priority, 'body': body,
+        'source': 'test', 'added_at': added_at, 'done_at': done_at,
+        'pp_ref': pp_ref, 'depends_on': depends_on or [],
+        'plan_anchor': None,
+    }
+
+
+_PS_CFG = {'plan_master_path': None, 'plan_vault_path': None}
+
+
+def test_plan_status_no_tracked_todos():
+    items = [_ps_item(1, body='no pp_ref')]
+    with patch('tgw.todo.todo_list', return_value=items):
+        result = plan_status(_PS_CFG)
+    assert result['ok'] is True
+    assert result['rows'] == []
+
+
+def test_plan_status_basic_open_and_done_counts():
+    items = [
+        _ps_item(1, pp_ref='PP-FOO-001', body='open A'),
+        _ps_item(2, pp_ref='PP-FOO-001', body='open B'),
+        _ps_item(3, pp_ref='PP-FOO-001', body='done task', done_at=NOW),
+    ]
+    with patch('tgw.todo.todo_list', return_value=items):
+        result = plan_status(_PS_CFG)
+    assert result['ok'] is True
+    assert len(result['rows']) == 1
+    row = result['rows'][0]
+    assert row['pp_ref'] == 'PP-FOO-001'
+    assert row['open'] == 2
+    assert row['done'] == 1
+    assert row['blocked'] == 0
+
+
+def test_plan_status_blocked_detection():
+    items = [
+        _ps_item(1, pp_ref='PP-FOO-001', body='blocker'),
+        _ps_item(2, pp_ref='PP-FOO-001', body='blocked', depends_on=[1]),
+        _ps_item(3, pp_ref='PP-FOO-001', body='unblocked', depends_on=[99]),  # 99 not in open set
+    ]
+    with patch('tgw.todo.todo_list', return_value=items):
+        result = plan_status(_PS_CFG)
+    row = result['rows'][0]
+    assert row['blocked'] == 1  # only #2 is blocked; #99 is not in open set
+
+
+def test_plan_status_groups_multiple_pp_items():
+    items = [
+        _ps_item(1, pp_ref='PP-AAA-001', body='aaa task'),
+        _ps_item(2, pp_ref='PP-BBB-001', body='bbb task'),
+        _ps_item(3, pp_ref='PP-BBB-001', body='bbb done', done_at=NOW),
+    ]
+    with patch('tgw.todo.todo_list', return_value=items):
+        result = plan_status(_PS_CFG)
+    refs = [r['pp_ref'] for r in result['rows']]
+    assert refs == ['PP-AAA-001', 'PP-BBB-001']
+    bbb = next(r for r in result['rows'] if r['pp_ref'] == 'PP-BBB-001')
+    assert bbb['open'] == 1
+    assert bbb['done'] == 1
+
+
+def test_plan_status_filter_by_pp_ref():
+    items = [
+        _ps_item(1, pp_ref='PP-AAA-001', body='aaa task'),
+        _ps_item(2, pp_ref='PP-BBB-001', body='bbb task'),
+    ]
+    with patch('tgw.todo.todo_list', return_value=items):
+        result = plan_status(_PS_CFG, pp_ref='PP-BBB-001')
+    assert len(result['rows']) == 1
+    assert result['rows'][0]['pp_ref'] == 'PP-BBB-001'
+
+
+def test_plan_status_latest_prefers_done_at():
+    earlier = NOW - timedelta(days=5)
+    later = NOW - timedelta(days=1)
+    items = [
+        _ps_item(1, pp_ref='PP-FOO-001', body='old open', added_at=earlier),
+        _ps_item(2, pp_ref='PP-FOO-001', body='recently done', done_at=later, added_at=earlier),
+    ]
+    with patch('tgw.todo.todo_list', return_value=items):
+        result = plan_status(_PS_CFG)
+    row = result['rows'][0]
+    assert row['latest'] == later
+    assert 'recently done' in row['latest_body']
+
+
+def test_plan_status_tracker_failure():
+    with patch('tgw.todo.todo_list', side_effect=RuntimeError('db down')):
+        result = plan_status(_PS_CFG)
+    assert result['ok'] is False
+    assert 'db down' in result['error']
+    assert result['rows'] == []
+
+
+def test_format_plan_status_no_rows():
+    text = format_plan_status({'ok': True, 'rows': []})
+    assert 'no PP-* items' in text
+
+
+def test_format_plan_status_with_rows():
+    rows = [
+        {'pp_ref': 'PP-FOO-001', 'open': 2, 'done': 1, 'blocked': 0,
+         'latest': NOW, 'latest_body': 'fix the thing'},
+    ]
+    text = format_plan_status({'ok': True, 'rows': rows})
+    assert 'PP-FOO-001' in text
+    assert '2 open' in text
+    assert '1 done' in text
+    assert '2026-06-12' in text
+    assert 'fix the thing' in text
+
+
+def test_format_plan_status_blocked_note():
+    rows = [
+        {'pp_ref': 'PP-FOO-001', 'open': 3, 'done': 0, 'blocked': 1,
+         'latest': NOW, 'latest_body': 'blocked task'},
+    ]
+    text = format_plan_status({'ok': True, 'rows': rows})
+    assert '3 open (1 blocked)' in text
+
+
+def test_format_plan_status_error():
+    text = format_plan_status({'ok': False, 'error': 'db down', 'rows': []})
+    assert 'Error' in text
+    assert 'db down' in text
+
+
+def test_format_plan_status_truncates_long_body():
+    long_body = 'x' * 80
+    rows = [
+        {'pp_ref': 'PP-FOO-001', 'open': 1, 'done': 0, 'blocked': 0,
+         'latest': NOW, 'latest_body': long_body},
+    ]
+    text = format_plan_status({'ok': True, 'rows': rows})
+    assert '…' in text

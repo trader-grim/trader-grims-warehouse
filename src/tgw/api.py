@@ -882,12 +882,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("plan", help="plan/taskboard operations (PP-PLANDB-001)")
     p.add_argument(
         "plan_op",
-        choices=["render", "check"],
+        choices=["render", "check", "status"],
         help=(
             "render: regenerate plan/TGW-Taskboard.md from the todo tracker; "
             "check: reconcile tracker ↔ master plan (orphaned pp_refs, "
-            "done mismatches, stale round tags)"
+            "done mismatches, stale round tags); "
+            "status: one-line open/done/blocked summary per PP-* item"
         ),
+    )
+    p.add_argument(
+        "--pp", dest="plan_status_pp", default=None, metavar="PP_REF",
+        help="filter plan status to a specific PP-* item (status op only)",
     )
 
     p = sub.add_parser(
@@ -4226,6 +4231,13 @@ def main() -> int:
 
                 result = plan_check(cfg)
                 print(format_plan_check(result))
+                return 0 if result["ok"] else 1
+
+            elif args.plan_op == "status":
+                from tgw.plan_render import format_plan_status, plan_status
+
+                result = plan_status(cfg, pp_ref=getattr(args, 'plan_status_pp', None))
+                print(format_plan_status(result))
                 return 0 if result["ok"] else 1
 
         elif args.op == "catalog-verify":
