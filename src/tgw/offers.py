@@ -51,8 +51,8 @@ def _find_item_by_listing_id(cfg: Dict[str, Any], listing_id: str) -> Optional[P
                 ).fetchone()
             if row:
                 return sku_json(cfg, row[0])
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("offer_history: catalog lookup failed for listing_id=%s: %s", listing_id, exc)
     return None
 
 
@@ -103,6 +103,7 @@ def cmd_offers_list(
     pending_only: bool = False,
     auto_accept: bool = False,
     dry_run: bool = True,
+    by: str = "claude",
 ) -> Dict[str, Any]:
     """List incoming Best Offers from eBay GetBestOffers.
 
@@ -135,6 +136,7 @@ def cmd_offers_list(
                     listing_id=offer["listing_id"],
                     action="Accept",
                     dry_run=dry_run,
+                    by=by,
                 )
                 if res.get("ok"):
                     auto_accepted.append(offer["offer_id"])

@@ -81,13 +81,14 @@ class _SubscriberRegistry:
     def push(self, event: Dict[str, Any]) -> None:
         """Broadcast event JSON to all subscribers; drop dead connections."""
         msg = (json.dumps(event) + '\n').encode()
-        dead: List[socket.socket] = []
         with self._lock:
-            for s in list(self._subs):
-                try:
-                    s.sendall(msg)
-                except OSError:
-                    dead.append(s)
+            snapshot = list(self._subs)
+        dead: List[socket.socket] = []
+        for s in snapshot:
+            try:
+                s.sendall(msg)
+            except OSError:
+                dead.append(s)
         for s in dead:
             self.remove(s)
 

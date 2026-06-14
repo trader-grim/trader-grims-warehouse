@@ -484,15 +484,15 @@ def cmd_alt_text_gemini_batch(
         cached = lookup_hash(img_hash, "alt_text") if img_hash else None
         if cached is not None:
             skipped_cached += 1
-            # Still apply the cached result
-            _apply_alt_text_result(
-                cfg,
-                entry["sku"],
-                cached.get("alt_text", ""),
-                cached.get("seo_caption", ""),
-                entry["img_path"],
-                img_hash,
-            )
+            if not dry_run:
+                _apply_alt_text_result(
+                    cfg,
+                    entry["sku"],
+                    cached.get("alt_text", ""),
+                    cached.get("seo_caption", ""),
+                    entry["img_path"],
+                    img_hash,
+                )
         else:
             entry["img_hash"] = img_hash
             to_process.append(entry)

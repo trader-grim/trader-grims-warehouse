@@ -375,11 +375,9 @@ def get_best_offers(
             total_pages = int(pagination.findtext(_t('TotalNumberOfPages')) or '1')
 
         offer_array = root.find(_t('BestOfferArray'))
-        if offer_array is None:
-            return
-
-        for offer_el in offer_array.findall(_t('BestOffer')):
-            yield _offer_from_xml(offer_el)
+        if offer_array is not None:
+            for offer_el in offer_array.findall(_t('BestOffer')):
+                yield _offer_from_xml(offer_el)
 
         page += 1
 

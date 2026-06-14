@@ -4236,9 +4236,10 @@ def main() -> int:
                     dry_run=not args.live,
                     by=args.by,
                 )
-                for line in result.get("diff_lines", []):
-                    print(line)
-                print()
+                if result.get("diff_lines"):
+                    for line in result.get("diff_lines", []):
+                        print(line)
+                    print()
             else:
                 from .revision import cmd_revise
                 result = cmd_revise(
@@ -4264,6 +4265,8 @@ def main() -> int:
                     result = {"ok": False, "error": "OFFER_ID positional argument required for respond"}
                 elif not args.listing_id:
                     result = {"ok": False, "error": "--listing-id required for respond"}
+                elif action in ("Accept", "Decline") and args.counter_price is not None:
+                    result = {"ok": False, "error": f"--counter PRICE is incompatible with --{action.lower()}"}
                 elif action is None:
                     result = {"ok": False, "error": "specify --accept, --decline, or --counter PRICE"}
                 else:
@@ -4283,6 +4286,7 @@ def main() -> int:
                     pending_only=args.pending,
                     auto_accept=args.auto_accept,
                     dry_run=not args.live,
+                    by=args.by,
                 )
 
         elif args.op == "todo":
