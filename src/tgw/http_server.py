@@ -3438,6 +3438,545 @@ def cancel_job(job_id: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/system/info — disk, token, sync stamp, job-state counts (Phase 3k)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/system/info", dependencies=[AUTH])
+def system_info() -> Dict[str, Any]:
+    """Infrastructure snapshot: disk usage, eBay token detail, sync stamp, job states."""
+    import shutil
+
+    # Disk usage for key paths
+    disk_paths = {
+        "itemdata": _cfg.get("itemdata_root", Path("/opt/TGW/data/ItemData")),
+        "logs":     Path("/opt/TGW/var/log"),
+        "backup":   Path("/opt/TGW/var/local/backups"),
+    }
+    disk: Dict[str, Any] = {}
+    for label, path in disk_paths.items():
+        try:
+            usage = shutil.disk_usage(str(path))
+            disk[label] = {
+                "path": str(path),
+                "total": usage.total,
+                "used":  usage.used,
+                "free":  usage.free,
+                "pct":   round(usage.used / usage.total * 100, 1) if usage.total else 0,
+            }
+        except Exception as exc:
+            disk[label] = {"path": str(path), "error": str(exc)}
+
+    # eBay token detail
+    token_info: Dict[str, Any] = {"exists": False, "ok": False}
+    try:
+        token_path: Path = _cfg["ebay_token_path"]
+        if token_path.exists():
+            mtime = token_path.stat().st_mtime
+            doc = json.loads(token_path.read_text(encoding="utf-8"))
+            raw_exp = doc.get("expires_at") or doc.get("expiry") or doc.get("expire_time")
+            expires_at: Optional[float] = None
+            remaining: Optional[int] = None
+            if raw_exp:
+                try:
+                    expires_at = float(raw_exp)
+                    remaining = int(expires_at - time.time())
+                except (ValueError, TypeError):
+                    pass
+            token_info = {
+                "exists":           True,
+                "mtime":            mtime,
+                "expires_at":       expires_at,
+                "remaining_seconds": remaining,
+                "ok":               remaining is None or remaining > 300,
+            }
+        else:
+            token_info = {"exists": False, "ok": False, "error": "file not found"}
+    except Exception as exc:
+        token_info = {"exists": False, "ok": False, "error": str(exc)}
+
+    # Last offline-sync stamp (catalog .db mtime is the proxy)
+    sync_info: Dict[str, Any] = {}
+    try:
+        db_path = _cfg.get("sqlite_catalog_path")
+        if db_path and db_path.exists():
+            sync_info = {"catalog_mtime": db_path.stat().st_mtime, "path": str(db_path)}
+        else:
+            sync_info = {"catalog_mtime": None, "path": str(db_path) if db_path else None}
+    except Exception as exc:
+        sync_info = {"error": str(exc)}
+
+    # Postgres job-table row counts by state
+    job_states: Dict[str, int] = {}
+    try:
+        with psycopg2.connect(_cfg["postgres_dsn"]) as con:
+            with con.cursor() as cur:
+                cur.execute(
+                    "SELECT state, COUNT(*) FROM queue_jobs GROUP BY state ORDER BY state"
+                )
+                for row in cur.fetchall():
+                    job_states[str(row[0])] = int(row[1])
+    except Exception as exc:
+        job_states["_error"] = str(exc)
+
+    return {
+        "ok":         True,
+        "disk":       disk,
+        "ebay_token": token_info,
+        "sync":       sync_info,
+        "job_states": job_states,
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /api/system/workers/{unit}/restart — restart a systemd unit (Phase 3k)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/system/workers/{unit}/restart", dependencies=[AUTH])
+def restart_worker(unit: str) -> Dict[str, Any]:
+    """Restart a tgw-worker or tgw-http systemd unit via sudo systemctl."""
+    from .queue import WORKER_QUEUES
+
+    allowed = {f"tgw-worker@{q}.service" for q in WORKER_QUEUES} | {"tgw-http.service"}
+    if unit not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unit {unit!r} is not in the allowed restart set",
+        )
+
+    try:
+        r = subprocess.run(
+            ["sudo", "-n", "systemctl", "restart", unit],
+            capture_output=True, text=True, timeout=20,
+        )
+        if r.returncode != 0:
+            return {
+                "ok":         False,
+                "unit":       unit,
+                "returncode": r.returncode,
+                "stderr":     r.stderr.strip(),
+            }
+        return {"ok": True, "unit": unit, "returncode": r.returncode}
+    except Exception as exc:
+        return {"ok": False, "unit": unit, "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# GET /form/system — full system health page (PP-EDITOR-001 Phase 3k)
+# ---------------------------------------------------------------------------
+
+_SYSTEM_EXTRA_CSS = (
+    ".sy-section{{margin-bottom:24px}}"
+    ".sy-label{{font-size:.75em;text-transform:uppercase;letter-spacing:.08em;color:#666;"
+    "  margin-bottom:8px;display:flex;align-items:center;gap:8px}}"
+    ".sy-table{{width:100%;border-collapse:collapse;font-size:.84em}}"
+    ".sy-table th{{text-align:left;padding:6px 10px;color:#666;font-size:.72em;"
+    "  text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid #2a2a2a}}"
+    ".sy-table td{{padding:6px 10px;border-bottom:1px solid #1e1e1e;vertical-align:middle}}"
+    ".sy-table tr:last-child td{{border-bottom:none}}"
+    ".chip-pass{{display:inline-block;background:#1a3a1a;color:#7f7;border:1px solid #3a6a3a;"
+    "  border-radius:10px;padding:2px 9px;font-size:.72em;font-weight:600;"
+    "  text-transform:uppercase;letter-spacing:.03em}}"
+    ".chip-warn{{display:inline-block;background:#3a2a00;color:#fb7;border:1px solid #6a5000;"
+    "  border-radius:10px;padding:2px 9px;font-size:.72em;font-weight:600;"
+    "  text-transform:uppercase;letter-spacing:.03em}}"
+    ".chip-fail{{display:inline-block;background:#3a1a1a;color:#f77;border:1px solid #7a3a3a;"
+    "  border-radius:10px;padding:2px 9px;font-size:.72em;font-weight:600;"
+    "  text-transform:uppercase;letter-spacing:.03em}}"
+    ".sy-detail{{color:#888;font-size:.82em;margin-top:2px}}"
+    ".token-box{{padding:14px 16px;background:#1a1a1a;border:1px solid #2a2a2a;"
+    "  border-radius:8px;display:flex;align-items:center;gap:14px}}"
+    ".token-countdown{{font-size:1.9em;font-weight:700;font-variant-numeric:tabular-nums;line-height:1}}"
+    ".token-ok{{color:#7f7}}.token-warn{{color:#fb7}}.token-crit{{color:#f77}}"
+    ".token-meta{{font-size:.78em;color:#666;margin-top:4px}}"
+    ".disk-row{{display:flex;flex-direction:column;gap:4px;margin-bottom:10px}}"
+    ".disk-row:last-child{{margin-bottom:0}}"
+    ".disk-label{{font-size:.8em;color:#aaa;display:flex;justify-content:space-between}}"
+    ".disk-bar-bg{{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:4px;height:10px;overflow:hidden}}"
+    ".disk-bar-fill{{height:100%;border-radius:4px;transition:width .3s}}"
+    ".disk-fill-ok{{background:#2a5a2a}}.disk-fill-warn{{background:#5a4a00}}.disk-fill-crit{{background:#5a1a1a}}"
+    ".disk-meta{{font-size:.72em;color:#555}}"
+    ".state-grid{{display:flex;flex-wrap:wrap;gap:8px}}"
+    ".state-chip{{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:6px;"
+    "  padding:7px 12px;font-size:.83em;display:flex;flex-direction:column;align-items:center;gap:2px;"
+    "  min-width:90px;text-align:center}}"
+    ".state-chip .sc-n{{font-size:1.3em;font-weight:700;line-height:1}}"
+    ".state-chip .sc-l{{font-size:.7em;color:#666;text-transform:uppercase;letter-spacing:.04em}}"
+    ".sc-queued .sc-n{{color:#7af}}.sc-running .sc-n{{color:#fb7}}"
+    ".sc-succeeded .sc-n{{color:#7f7}}.sc-dead_letter .sc-n,.sc-failed .sc-n{{color:#f77}}"
+    ".sc-retry_wait .sc-n{{color:#fb7}}.sc-cancelled .sc-n{{color:#555}}"
+    ".sy-sync-row{{display:flex;gap:10px;align-items:center;font-size:.87em}}"
+    ".sy-sync-val{{color:#aaa}}.sy-sync-age{{color:#555;font-size:.85em}}"
+    ".w-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:6px}}"
+    ".wc{{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:6px;"
+    "  padding:7px 10px;display:flex;justify-content:space-between;align-items:center;gap:6px}}"
+    ".wc .wn{{font-family:monospace;color:#999;font-size:.83em;overflow:hidden;"
+    "  text-overflow:ellipsis;white-space:nowrap;flex:1}}"
+    ".wc.wc-active{{border-color:#2a5a2a}}.wc.wc-failed{{border-color:#5a2a2a}}"
+    ".pill-a{{display:inline-block;border-radius:10px;padding:2px 7px;font-size:.7em;"
+    "  font-weight:600;text-transform:uppercase;letter-spacing:.03em}}"
+    ".pill-active{{background:#1a4a1a;color:#7f7;border:1px solid #3a8a3a}}"
+    ".pill-inactive{{background:#2a2a2a;color:#666;border:1px solid #333}}"
+    ".pill-failed{{background:#3a1a1a;color:#f77;border:1px solid #6a3a3a}}"
+    ".pill-unknown{{background:#1a1a2a;color:#77a;border:1px solid #2a2a4a}}"
+    ".btn-restart{{padding:4px 9px;background:#1a2a3a;color:#7af;border:1px solid #2a4a6a;"
+    "  border-radius:4px;cursor:pointer;font-size:.73em;font-weight:600;flex-shrink:0}}"
+    ".btn-restart:hover{{background:#1e3a5a}}"
+    ".restart-flash{{font-size:.75em;margin-left:4px;display:none}}"
+    ".restart-flash.ok{{color:#7f7;display:inline}}.restart-flash.err{{color:#f77;display:inline}}"
+    ".err-box{{padding:10px;border:1px solid #5a2a2a;border-radius:6px;color:#f77;"
+    "  background:#1e1010;font-size:.84em;margin-bottom:12px}}"
+    ".empty-state{{padding:20px;text-align:center;color:#555;font-size:.9em}}"
+    ".reload-btn{{background:none;border:none;color:#4a8ade;cursor:pointer;"
+    "  font-size:.82em;padding:0;text-decoration:underline;margin-left:8px}}"
+)
+
+_SYSTEM_HTML = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TGW — System</title>
+{static_head}
+<style>{system_css}</style>
+</head>
+<body>
+<h2>System Health
+  <button class="reload-btn" onclick="loadAll()">&#8635; Refresh</button>
+</h2>
+
+<div id="err-box" class="err-box" style="display:none"></div>
+
+<!-- Health checks -->
+<div class="sy-section">
+  <div class="sy-label">Platform Health Checks</div>
+  <div id="health-checks"><span style="color:#555">Loading…</span></div>
+</div>
+
+<!-- eBay token -->
+<div class="sy-section">
+  <div class="sy-label">eBay Token</div>
+  <div id="token-box"><span style="color:#555">Loading…</span></div>
+</div>
+
+<!-- Disk usage -->
+<div class="sy-section">
+  <div class="sy-label">Disk Usage</div>
+  <div id="disk-usage"><span style="color:#555">Loading…</span></div>
+</div>
+
+<!-- Job state counts -->
+<div class="sy-section">
+  <div class="sy-label">Job Queue States</div>
+  <div id="job-states"><span style="color:#555">Loading…</span></div>
+</div>
+
+<!-- Last sync stamp -->
+<div class="sy-section">
+  <div class="sy-label">Offline-Sync Stamp</div>
+  <div id="sync-stamp"><span style="color:#555">Loading…</span></div>
+</div>
+
+<!-- Workers -->
+<div class="sy-section">
+  <div class="sy-label">Workers</div>
+  <div id="workers-grid"><span style="color:#555">Loading…</span></div>
+</div>
+
+{static_foot}
+<script>
+window.TGW_API_KEY = {api_key_json};
+
+var _tokenExpiry = null;
+var _tokenTick = null;
+
+function fmtBytes(n) {{
+  if (n === null || n === undefined) return '—';
+  if (n >= 1e12) return (n/1e12).toFixed(1) + ' TB';
+  if (n >= 1e9)  return (n/1e9).toFixed(1) + ' GB';
+  if (n >= 1e6)  return (n/1e6).toFixed(1) + ' MB';
+  return (n/1e3).toFixed(0) + ' KB';
+}}
+
+function fmtAge(epochSec) {{
+  if (!epochSec) return '—';
+  var s = Math.round(Date.now()/1000 - epochSec);
+  if (s < 0) return 'just now';
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.floor(s/60) + 'm ago';
+  if (s < 86400) return Math.floor(s/3600) + 'h ago';
+  return Math.floor(s/86400) + 'd ago';
+}}
+
+function fmtTimestamp(epochSec) {{
+  if (!epochSec) return '—';
+  var d = new Date(epochSec * 1000);
+  return d.toLocaleDateString() + ' ' + d.toLocaleTimeString(undefined, {{hour:'2-digit',minute:'2-digit'}});
+}}
+
+function fmtCountdown(seconds) {{
+  if (seconds === null || seconds === undefined) return '—';
+  if (seconds < 0) return 'EXPIRED';
+  var h = Math.floor(Math.abs(seconds) / 3600);
+  var m = Math.floor((Math.abs(seconds) % 3600) / 60);
+  var s = Math.abs(seconds) % 60;
+  if (h > 0) return h + 'h ' + m + 'm';
+  if (m > 0) return m + 'm ' + s + 's';
+  return s + 's';
+}}
+
+function tokenClass(seconds) {{
+  if (seconds === null || seconds === undefined) return 'token-ok';
+  if (seconds < 0)      return 'token-crit';
+  if (seconds < 7200)   return 'token-crit';
+  if (seconds < 43200)  return 'token-warn';
+  return 'token-ok';
+}}
+
+function renderHealthChecks(data) {{
+  var el = document.getElementById('health-checks');
+  if (!data || !data.checks) {{
+    el.innerHTML = '<div class="err-box">Health data unavailable.</div>';
+    return;
+  }}
+  var html = '<table class="sy-table"><tr>' +
+    '<th>Check</th><th>Status</th><th>Detail</th><th style="text-align:right">ms</th></tr>';
+  data.checks.forEach(function(c) {{
+    var chipCls = c.ok ? (c.warn ? 'chip-warn' : 'chip-pass') : 'chip-fail';
+    var chipTxt = c.ok ? (c.warn ? 'WARN' : 'PASS') : 'FAIL';
+    html += '<tr>' +
+      '<td style="font-family:monospace;color:#aaa;font-size:.85em">' + escapeHtml(c.check) + '</td>' +
+      '<td><span class="' + chipCls + '">' + chipTxt + '</span></td>' +
+      '<td class="sy-detail">' + escapeHtml(c.detail || '') + '</td>' +
+      '<td style="text-align:right;color:#444;font-size:.78em">' + (c.elapsed_ms || '') + '</td>' +
+      '</tr>';
+  }});
+  html += '</table>';
+  el.innerHTML = html;
+}}
+
+function renderTokenBox(info) {{
+  var el = document.getElementById('token-box');
+  if (!info || !info.ok && !info.exists) {{
+    el.innerHTML = '<div class="err-box">Token info unavailable.</div>';
+    return;
+  }}
+  var tok = info.ebay_token || {{}};
+  var rem = tok.remaining_seconds;
+  var cls = tokenClass(rem);
+  var countdown = fmtCountdown(rem);
+  var mtime = tok.mtime ? fmtTimestamp(tok.mtime) : '—';
+  var expAt = tok.expires_at ? fmtTimestamp(tok.expires_at) : '—';
+  _tokenExpiry = tok.expires_at || null;
+
+  var chipCls = tok.ok ? 'chip-pass' : 'chip-fail';
+  var chipTxt = tok.ok ? 'VALID' : (tok.exists ? 'EXPIRED' : 'MISSING');
+  el.innerHTML = '<div class="token-box">' +
+    '<div>' +
+      '<div class="token-countdown ' + cls + '" id="token-countdown">' + escapeHtml(countdown) + '</div>' +
+      '<div class="token-meta">Expires: ' + escapeHtml(expAt) + '</div>' +
+      '<div class="token-meta">File mtime: ' + escapeHtml(mtime) + '</div>' +
+    '</div>' +
+    '<span class="' + chipCls + '" style="align-self:flex-start;margin-top:4px">' + chipTxt + '</span>' +
+    '</div>';
+
+  // Start live countdown tick
+  if (_tokenTick) clearInterval(_tokenTick);
+  if (_tokenExpiry !== null) {{
+    _tokenTick = setInterval(function() {{
+      var nowSec = Date.now() / 1000;
+      var remNow = Math.round(_tokenExpiry - nowSec);
+      var cdEl = document.getElementById('token-countdown');
+      if (cdEl) {{
+        cdEl.textContent = fmtCountdown(remNow);
+        cdEl.className = 'token-countdown ' + tokenClass(remNow);
+      }}
+    }}, 1000);
+  }}
+}}
+
+function renderDiskUsage(info) {{
+  var el = document.getElementById('disk-usage');
+  var disk = (info || {{}}).disk || {{}};
+  var labels = {{itemdata: 'ItemData', logs: 'Logs', backup: 'Backups'}};
+  var html = '';
+  Object.keys(labels).forEach(function(key) {{
+    var d = disk[key] || {{}};
+    if (d.error) {{
+      html += '<div class="disk-row"><div class="disk-label"><span>' + labels[key] + '</span>'
+        + '<span style="color:#f77">' + escapeHtml(d.error) + '</span></div></div>';
+      return;
+    }}
+    var pct = d.pct || 0;
+    var fillCls = pct > 90 ? 'disk-fill-crit' : (pct > 75 ? 'disk-fill-warn' : 'disk-fill-ok');
+    html += '<div class="disk-row">' +
+      '<div class="disk-label">' +
+        '<span>' + labels[key] + ' <span style="color:#555;font-size:.88em">' + escapeHtml(d.path || '') + '</span></span>' +
+        '<span>' + pct + '%</span>' +
+      '</div>' +
+      '<div class="disk-bar-bg"><div class="disk-bar-fill ' + fillCls + '" style="width:' + pct + '%"></div></div>' +
+      '<div class="disk-meta">' + fmtBytes(d.used) + ' used of ' + fmtBytes(d.total) + ' — ' + fmtBytes(d.free) + ' free</div>' +
+      '</div>';
+  }});
+  el.innerHTML = html || '<div class="empty-state">No disk data available.</div>';
+}}
+
+function renderJobStates(info) {{
+  var el = document.getElementById('job-states');
+  var states = (info || {{}}).job_states || {{}};
+  var keys = Object.keys(states).filter(function(k) {{ return k !== '_error'; }});
+  if (!keys.length) {{
+    el.innerHTML = '<div class="empty-state">No job data. ' + (states._error ? escapeHtml(states._error) : '') + '</div>';
+    return;
+  }}
+  var order = ['queued','leased','running','retry_wait','succeeded','failed','dead_letter','cancelled'];
+  keys.sort(function(a,b) {{
+    var ai = order.indexOf(a), bi = order.indexOf(b);
+    if (ai < 0) ai = 99; if (bi < 0) bi = 99;
+    return ai - bi;
+  }});
+  var html = '<div class="state-grid">';
+  keys.forEach(function(k) {{
+    html += '<div class="state-chip sc-' + k + '">' +
+      '<span class="sc-n">' + (states[k] || 0) + '</span>' +
+      '<span class="sc-l">' + escapeHtml(k.replace(/_/g,' ')) + '</span>' +
+      '</div>';
+  }});
+  html += '</div>';
+  el.innerHTML = html;
+}}
+
+function renderSyncStamp(info) {{
+  var el = document.getElementById('sync-stamp');
+  var sync = (info || {{}}).sync || {{}};
+  if (sync.error) {{
+    el.innerHTML = '<div class="err-box">' + escapeHtml(sync.error) + '</div>';
+    return;
+  }}
+  var mtime = sync.catalog_mtime;
+  var html = '<div class="sy-sync-row">' +
+    '<span class="sy-sync-val">' + (mtime ? fmtTimestamp(mtime) : '—') + '</span>' +
+    '<span class="sy-sync-age">' + (mtime ? fmtAge(mtime) : 'catalog not found') + '</span>' +
+    '<span style="color:#444;font-size:.8em">' + escapeHtml(sync.path || '') + '</span>' +
+    '</div>';
+  el.innerHTML = html;
+}}
+
+function renderWorkers(data) {{
+  var el = document.getElementById('workers-grid');
+  if (!data || !data.ok) {{
+    el.innerHTML = '<div class="err-box">Worker data unavailable.</div>';
+    return;
+  }}
+  var workers = data.workers || [];
+  if (!workers.length) {{
+    el.innerHTML = '<div class="empty-state">No worker info.</div>';
+    return;
+  }}
+  var html = '<div style="font-size:.82em;color:#666;margin-bottom:8px">' +
+    data.up + ' / ' + data.total + ' active</div>';
+  html += '<div class="w-grid">';
+  workers.forEach(function(w) {{
+    var cls = w.active === 'active' ? 'active' : (w.active === 'failed' ? 'failed' : 'unknown');
+    var cardCls = 'wc' + (cls === 'active' ? ' wc-active' : (cls === 'failed' ? ' wc-failed' : ''));
+    var pillCls = 'pill-a pill-' + cls;
+    var name = w.unit.replace(/^tgw-worker@/, '').replace(/[.]service$/, '');
+    if (w.unit === 'tgw-http.service') name = 'tgw-http';
+    var fid = 'rf-' + w.unit.replace(/[^a-z0-9]/gi,'').slice(0,16);
+    html += '<div class="' + cardCls + '">' +
+      '<span class="wn" title="' + escapeHtml(w.unit) + '">' + escapeHtml(name) + '</span>' +
+      '<span class="' + pillCls + '">' + escapeHtml(w.active) + '</span>' +
+      '<button class="btn-restart" onclick="restartWorker(' + JSON.stringify(w.unit) + ',' + JSON.stringify(fid) + ')"' +
+        ' title="Restart ' + escapeHtml(w.unit) + '">&#8635;</button>' +
+      '<span class="restart-flash" id="' + fid + '"></span>' +
+      '</div>';
+  }});
+  html += '</div>';
+  el.innerHTML = html;
+}}
+
+async function restartWorker(unit, flashId) {{
+  if (!confirm('Restart ' + unit + '?\\n\\nThe worker will stop and restart. In-progress jobs may be re-queued.')) return;
+  var flash = document.getElementById(flashId);
+  if (flash) {{ flash.className = 'restart-flash'; flash.textContent = ''; }}
+  try {{
+    var r = await fetch('/api/system/workers/' + encodeURIComponent(unit) + '/restart', {{
+      method: 'POST',
+      headers: authHeaders(),
+    }});
+    var d = await r.json().catch(function() {{ return {{}}; }});
+    if (d.ok) {{
+      if (flash) {{ flash.className = 'restart-flash ok'; flash.textContent = 'Restarted'; }}
+      setTimeout(function() {{ loadWorkers(); }}, 2000);
+    }} else {{
+      var msg = d.stderr || d.error || d.detail || 'Error';
+      if (flash) {{ flash.className = 'restart-flash err'; flash.textContent = msg.slice(0, 60); }}
+    }}
+  }} catch(e) {{
+    if (flash) {{ flash.className = 'restart-flash err'; flash.textContent = 'Network error'; }}
+  }}
+}}
+
+async function loadWorkers() {{
+  try {{
+    var r = await fetch('/api/system/workers', {{headers: authHeaders()}});
+    renderWorkers(await r.json());
+  }} catch(e) {{
+    document.getElementById('workers-grid').innerHTML =
+      '<div class="err-box">Network error: ' + escapeHtml(String(e)) + '</div>';
+  }}
+}}
+
+async function loadAll() {{
+  try {{
+    var results = await Promise.all([
+      fetch('/api/health', {{headers: authHeaders()}}).then(function(r) {{ return r.json().catch(function() {{ return {{}}; }}); }}).catch(function() {{ return null; }}),
+      fetch('/api/system/workers', {{headers: authHeaders()}}).then(function(r) {{ return r.json().catch(function() {{ return {{}}; }}); }}).catch(function() {{ return null; }}),
+      fetch('/api/system/info', {{headers: authHeaders()}}).then(function(r) {{ return r.json().catch(function() {{ return {{}}; }}); }}).catch(function() {{ return null; }}),
+    ]);
+    var health = results[0];
+    var workers = results[1];
+    var info = results[2];
+
+    // Health data may come back wrapped in detail when ok=False (503)
+    if (health && !health.checks && health.detail && health.detail.checks) {{
+      health = health.detail;
+    }}
+
+    renderHealthChecks(health);
+    renderTokenBox(info);
+    renderDiskUsage(info);
+    renderJobStates(info);
+    renderSyncStamp(info);
+    renderWorkers(workers);
+  }} catch(e) {{
+    var eb = document.getElementById('err-box');
+    if (eb) {{ eb.style.display = ''; eb.textContent = 'Load failed: ' + String(e); }}
+  }}
+}}
+
+loadAll();
+</script>
+</body>
+</html>
+"""
+
+
+@app.get("/form/system")
+def system_form():
+    """Full system health page. No Bearer auth (network trust)."""
+    from fastapi.responses import HTMLResponse
+
+    html = _SYSTEM_HTML.format(
+        static_head=_STATIC_HEAD,
+        static_foot=_STATIC_FOOT,
+        system_css=_SYSTEM_EXTRA_CSS,
+        api_key_json=json.dumps(_api_key),
+    )
+    return HTMLResponse(html)
+
+
+# ---------------------------------------------------------------------------
 # GET /form/home — home dashboard (PP-EDITOR-001 Phase 3c)
 # ---------------------------------------------------------------------------
 

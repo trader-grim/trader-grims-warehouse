@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-06-14 22:58 UTC — 37 open, 819 done in the last 7 days._
+_Rendered 2026-06-14 23:17 UTC — 36 open, 820 done in the last 7 days._
 
 ## admin (16 open)
 
@@ -48,11 +48,10 @@ _Rendered 2026-06-14 22:58 UTC — 37 open, 819 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (9 open)
+## claude (8 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
-| 855 | 55 |  | PP-EDITOR-001 Phase 3j — /form/pipeline pipeline monitor + dead-letter manager: queue depth table (queue/pending/running/done-today/failed); active jobs (currently running SKUs with elapsed time); GET /api/system/workers (systemd unit states via subprocess for all tgw-worker@ units + tgw-http); POST /api/jobs/{job_id}/requeue (re-enqueue dead-letter with fresh dedupe key); dead-letter list with per-job requeue/cancel; auto-refresh every 30s | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
 | 856 | 56 |  | PP-EDITOR-001 Phase 3k — /form/system full system health page: tgw health output as status table with pass/warn/fail chips; eBay token expiry countdown (from token JSON mtime + expiry field); disk usage (ItemData, logs, backup mounts); postgres job table row counts by state; last offline-sync stamp; worker restart buttons (POST /api/system/workers/{unit}/restart, gated — confirm dialog); complements /form/pipeline (pipeline = jobs, system = infrastructure) | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
 | 857 | 57 |  | PP-EDITOR-001 Phase 3l — intake flow enhancements: /form/intake landing page (SKU entry field + scan hint, recent intakes list with status chips, link to current in-progress items); enhanced /form/intake/{sku}: photo count badge with warning if zero, current pipeline state badge, trigger buttons (Start identify / Re-identify / Re-draft via POST /api/items/{sku}/action), live queue job status poll every 5s while job active, 'View detail' link | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
 | 858 | 58 |  | PP-EDITOR-001 Phase 3m — item detail eBay deep links: add 'View on eBay' button (opens listing_url) and 'Seller Hub' link (ebay.com/sh/lst/active filtered to listing_id) when ebay_listing.listing_id present; add 'Open in eBay Messages' link when listing active; show offer count badge if pending_offers > 0 with link to /form/offers filtered to this SKU; these surface from existing data, no new API work needed | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
@@ -68,10 +67,11 @@ _Rendered 2026-06-14 22:58 UTC — 37 open, 819 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — Sold reconciliation and inventory status sync (design ready)\|PP-SOLD-001]] |  |
 
-## Done this week (819)  — showing 15 most recent
+## Done this week (820)  — showing 15 most recent
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 855 | claude | 2026-06-14 | PP-EDITOR-001 Phase 3j — /form/pipeline pipeline monitor + dead-letter manager: queue depth table (queue/pending/running/done-today/failed); active jobs (currently running SKUs with elapsed time); GET /api/system/workers (systemd unit states via subprocess for all tgw-worker@ units + tgw-http); POST /api/jobs/{job_id}/requeue (re-enqueue dead-letter with fresh dedupe key); dead-letter list with per-job requeue/cancel; auto-refresh every 30s |
 | 854 | claude | 2026-06-14 | PP-EDITOR-001 Phase 3i — /form/review post-draft review queue + API: GET /api/items/review-queue (items where ebay_draft completed, status not Staged/Ready/Listed/Sold — the human approval step); POST /api/items/{sku}/action approve (sets status=Ready via patch); /form/review page: compact rows (thumbnail + AI title + price + condition + category), inline Approve/Edit/Re-draft buttons, batch Approve All button, count badge in nav; primary workflow surface for post-pipeline QA |
 | 853 | claude | 2026-06-14 | PP-EDITOR-001 Phase 3h — /form/revisions revision review UI + API: GET /api/items/pending-revision (items with non-empty revision_draft, via json_extract on sqlite catalog or full-scan fallback); POST /api/items/{sku}/revision/apply (wraps cmd_revise_apply, dry_run param, _APPLY_ENABLED gate); DELETE /api/items/{sku}/revision (discards revision_draft from item JSON); /form/revisions page: list items with pending draft, inline diff table (field/current/proposed red+green), Apply/Discard buttons per item, dry-run default with Go Live toggle |
 | 852 | claude | 2026-06-14 | PP-EDITOR-001 Phase 3g — /form/offers Best Offers UI + API: GET /api/offers (wraps get_best_offers, returns pending list with item context); POST /api/offers/{offer_id}/respond (wraps cmd_offers_respond, dry_run param); /form/offers page: pending offer rows with thumbnail + title + asking price + offer amount + % of ask (large visual) + Accept/Counter/Decline inline; counter price input; dry-run default with Go Live toggle; auto-refreshes on respond; item location shown (findability check) |
@@ -86,5 +86,4 @@ _Rendered 2026-06-14 22:58 UTC — 37 open, 819 done in the last 7 days._
 | 845 | claude | 2026-06-14 | PP-EDITOR-001 Phase 2 — inventory browse + detail web UI: /form/items (card grid, search/location/status filters, thumbnails, pagination), /form/items/{sku} (photo gallery, field sections, revision draft diff table, pipeline jobs); /thumb/{sku} + /media/{sku}/{filename} no-auth routes for browser img src; server-rendered detail, JS-driven list; network trust like other /form/ pages |
 | 133 | claude | 2026-06-14 | PP-OFFER-001 Phase 1 build — GetBestOffers Trading API polling; tgw offers [--pending] lists incoming offer requests; tgw offers --respond ID --accept/--counter PRICE/--decline; auto_accept_min_pct config flag for batch auto-accept; dry-run default; tests. Build after design in #124 settled |
 | 134 | claude | 2026-06-14 | PP-REVISION-001 apply path — ReviseFixedPriceItem call with pinned-baseline drift-gate (apply only when live mirror matches baseline hash); --dry-run default; NO eBay write until Dave confirms sparse-delta apply design settled. Continuation of #111 dry-run delta |
-| 113 | claude | 2026-06-14 | Round7 p72 M (GATED: after admin #20 Qtile install): PP-CLIP-001 daemon — dual-backend watcher per settled design (2026-06-12): backend-agnostic core (on change -> classify -> SQLite -> socket push); X11/XFixes backend (default/stable) + Wayland wl-paste --watch backend; session-type autodetect; PRIMARY+CLIPBOARD; feeds existing tgw clip store; Unix socket for TGWSKUWidget |
-| … | | | _…and 804 more — run `tgw todo --all` to see everything_ |
+| … | | | _…and 805 more — run `tgw todo --all` to see everything_ |

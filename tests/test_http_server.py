@@ -2410,3 +2410,157 @@ def test_nav_includes_pipeline_link(client):
     r = client.get("/static/nav.js")
     assert r.status_code == 200
     assert "/form/pipeline" in r.text
+
+
+# ---------------------------------------------------------------------------
+# PP-EDITOR-001 Phase 3k — /form/system + supporting API endpoints
+# ---------------------------------------------------------------------------
+
+def test_system_info_requires_auth(client):
+    r = client.get("/api/system/info")
+    assert r.status_code in (401, 403)
+
+
+def test_system_info_returns_disk_token_sync_states(env, monkeypatch):
+    """GET /api/system/info returns all four sub-sections."""
+    import shutil
+
+    # Stub shutil.disk_usage to avoid touching real filesystem
+    FakeUsage = type("FakeUsage", (), {"total": 100_000_000_000, "used": 40_000_000_000, "free": 60_000_000_000})()
+    monkeypatch.setattr(shutil, "disk_usage", lambda *a, **k: FakeUsage)
+
+    # Stub psycopg2 for job state counts
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: _FakeConn([("succeeded", 42), ("dead_letter", 3)]),
+    )
+
+    # Put a fake eBay token in the cfg
+    token_path = env["cfg"]["itemdata_root"].parent / "ebay-token.json"
+    token_path.write_text(
+        __import__("json").dumps({"access_token": "tok", "expires_at": str(int(__import__("time").time()) + 7200)}),
+        encoding="utf-8",
+    )
+    env["cfg"]["ebay_token_path"] = token_path
+
+    r = env["client"].get("/api/system/info", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert "disk" in body
+    assert "itemdata" in body["disk"]
+    assert body["disk"]["itemdata"]["pct"] == 40.0
+    assert "ebay_token" in body
+    assert body["ebay_token"]["exists"] is True
+    assert body["ebay_token"]["remaining_seconds"] > 0
+    assert "sync" in body
+    assert body["sync"]["catalog_mtime"] is not None  # catalog db exists via env fixture
+    assert "job_states" in body
+    assert body["job_states"].get("succeeded") == 42
+    assert body["job_states"].get("dead_letter") == 3
+
+
+def test_system_info_token_missing(env, monkeypatch):
+    """system_info handles missing token file gracefully."""
+    import shutil
+    FakeUsage = type("FakeUsage", (), {"total": 1_000_000, "used": 100_000, "free": 900_000})()
+    monkeypatch.setattr(shutil, "disk_usage", lambda *a, **k: FakeUsage)
+    monkeypatch.setattr(http_server.psycopg2, "connect", lambda *a, **k: _FakeConn([]))
+    nonexistent = env["cfg"]["itemdata_root"].parent / "no-such-token.json"
+    env["cfg"]["ebay_token_path"] = nonexistent
+
+    r = env["client"].get("/api/system/info", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["ebay_token"]["exists"] is False
+    assert body["ebay_token"]["ok"] is False
+
+
+def test_restart_worker_requires_auth(client):
+    r = client.post("/api/system/workers/tgw-http.service/restart")
+    assert r.status_code in (401, 403)
+
+
+def test_restart_worker_invalid_unit(env):
+    """Restart refuses units not in the allowed set."""
+    r = env["client"].post(
+        "/api/system/workers/evil-unit.service/restart",
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 400
+    assert "allowed" in r.json()["detail"]
+
+
+def test_restart_worker_success(env, monkeypatch):
+    """Restart calls systemctl and returns ok=True on zero exit."""
+    class _R:
+        returncode = 0
+        stderr = ""
+    monkeypatch.setattr(http_server.subprocess, "run", lambda *a, **k: _R())
+    r = env["client"].post(
+        "/api/system/workers/tgw-http.service/restart",
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["unit"] == "tgw-http.service"
+
+
+def test_restart_worker_failure(env, monkeypatch):
+    """Restart returns ok=False when systemctl exits non-zero."""
+    class _R:
+        returncode = 1
+        stderr = "Access denied"
+    monkeypatch.setattr(http_server.subprocess, "run", lambda *a, **k: _R())
+    r = env["client"].post(
+        "/api/system/workers/tgw-http.service/restart",
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert "Access denied" in body["stderr"]
+
+
+def test_restart_worker_subprocess_error(env, monkeypatch):
+    """Restart returns ok=False when subprocess.run raises."""
+    def _fail(*a, **k):
+        raise OSError("sudo not found")
+    monkeypatch.setattr(http_server.subprocess, "run", _fail)
+    r = env["client"].post(
+        "/api/system/workers/tgw-http.service/restart",
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert "sudo not found" in body["error"]
+
+
+def test_form_system_renders(client):
+    """/form/system returns HTML with all key sections."""
+    r = client.get("/form/system")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert "System Health" in r.text
+    assert "/api/health" in r.text
+    assert "/api/system/workers" in r.text
+    assert "/api/system/info" in r.text
+    assert "eBay Token" in r.text
+    assert "Disk Usage" in r.text
+    assert "Workers" in r.text
+
+
+def test_form_system_no_auth_required(client):
+    """/form/system is accessible without Bearer token."""
+    r = client.get("/form/system")
+    assert r.status_code == 200
+
+
+def test_nav_includes_system_link(client):
+    """nav.js includes a link to /form/system."""
+    r = client.get("/static/nav.js")
+    assert r.status_code == 200
+    assert "/form/system" in r.text

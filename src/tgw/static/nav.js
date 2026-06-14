@@ -7,6 +7,7 @@
     '<a href="/form/items">Inventory</a>' +
     '<a href="/form/review">Review <span id="nav-review-count" class="nav-count"></span></a>' +
     '<a href="/form/pipeline">Pipeline</a>' +
+    '<a href="/form/system">System</a>' +
     '<a href="/docs">Docs</a>' +
     '<a href="/form/links">Links</a>' +
     '<a href="/form/offers">Offers</a>' +
