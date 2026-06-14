@@ -201,3 +201,7 @@
 - [x] 2026-06-14T16:49 :: add feedback to webpages so feedback has better context if associated with current page. — added as claude todo #140 (PP-EDITOR-001 3n: suggest popup injects current page URL + page title as context prefix to suggestion text)
 - [x] 2026-06-14T16:50 :: feedback goes through LLMPM — added to PP-DOCFLOW-001: /form/suggest submissions optionally routed through PM chat for classification/priority before landing in SUGGESTIONS.md; Phase 3 extension
 - [x] 2026-06-14T18:10 :: test PM action endpoint from live test — test entry; removed (endpoint verified working)
+- [ ] 2026-06-14T20:59 :: add inbox upload link to suggest web popup
+- [ ] 2026-06-14T21:01 :: open in popup window for web pm chat
+- [ ] 2026-06-14T21:04 :: heretoforth out llm pm shall be named PAM, Project Administration Manager
+- [ ] 2026-06-14T21:47 :: tgw restart-workers remove sudo and system will prompt for password
