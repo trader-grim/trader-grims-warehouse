@@ -135,23 +135,35 @@ def cmd_alt_text(
             "history_path": str(history_path),
         }
 
-    # Fail-fast: check Ollama availability before expensive encoding
-    if provider != "openrouter" and not is_available(model):
-        return {"ok": False, "error": f"Ollama unavailable or model {model!r} not found"}
+    # pHash cache check — skip API call if we've processed this image before
+    from tgw.image_hash import compute_dhash, lookup_hash, store_hash
 
-    max_px = _OR_MAX_PX if provider == "openrouter" else _VISION_MAX_PX
-    img_b64 = _encode_resized(img_path, max_px=max_px)
+    img_hash = compute_dhash(img_path)
+    cached = lookup_hash(img_hash, "alt_text") if img_hash else None
 
-    try:
-        raw = call_model('alt_text', _SYSTEM_PROMPT, _USER_PROMPT, cfg,
-                         img_b64=img_b64, provider=provider, model=model)
-    except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+    if cached is not None:
+        result = cached
+    else:
+        # Fail-fast: check Ollama availability before expensive encoding
+        if provider != "openrouter" and not is_available(model):
+            return {"ok": False, "error": f"Ollama unavailable or model {model!r} not found"}
 
-    try:
-        result = extract_json(raw)
-    except Exception:
-        return {"ok": False, "error": f"model returned non-JSON: {raw[:200]}"}
+        max_px = _OR_MAX_PX if provider == "openrouter" else _VISION_MAX_PX
+        img_b64 = _encode_resized(img_path, max_px=max_px)
+
+        try:
+            raw = call_model('alt_text', _SYSTEM_PROMPT, _USER_PROMPT, cfg,
+                             img_b64=img_b64, provider=provider, model=model)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+        try:
+            result = extract_json(raw)
+        except Exception:
+            return {"ok": False, "error": f"model returned non-JSON: {raw[:200]}"}
+
+        if img_hash:
+            store_hash(img_hash, sku, "alt_text", result)
 
     alt_text = str(result.get("alt_text", "")).strip()[:150]
     seo_caption = str(result.get("seo_caption", "")).strip()
@@ -185,6 +197,7 @@ def cmd_alt_text(
         "sku": sku,
         "provider": provider,
         "model": model,
+        "cache_hit": cached is not None,
         "alt_text": alt_text,
         "seo_caption": seo_caption,
         "image_renamed": f"{img_path.name} → {alt_path.name}",

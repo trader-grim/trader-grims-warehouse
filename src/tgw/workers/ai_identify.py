@@ -187,14 +187,6 @@ class AIIdentifyWorker(QueueWorker):
 
         provider, model = get_task_model(self.config, 'ai_identify')
 
-        # Fail-fast for Ollama before the slow encoding step
-        if provider == 'ollama' and not is_available(model):
-            raise RuntimeError(f"Ollama unavailable or model {model!r} not found")
-
-        # Use higher resolution for cloud providers; keep low for CPU-bound Ollama
-        max_px = 768 if provider == 'openrouter' else _VISION_MAX_PX
-        img_b64, orig_kb, resized_kb = _encode_resized(img_path, max_px=max_px)
-
         if product_context:
             prompt = _USER_PROMPT_ENRICHED.format(product_context=product_context)
         elif hint:
@@ -202,15 +194,37 @@ class AIIdentifyWorker(QueueWorker):
         else:
             prompt = _USER_PROMPT
 
-        log.info("calling %s/%s for %s (image: %s, %dKB→%dKB%s)", provider, model, sku, img_path.name, orig_kb, resized_kb, f", hint={hint!r}" if hint else "")
-        tgw_logging.log_event("ai_identify_call", sku=sku, provider=provider, model=model, image=img_path.name, orig_kb=orig_kb, resized_kb=resized_kb, hint=hint or None)
+        # pHash cache check — skip API call if we've processed this image before
+        from tgw.image_hash import compute_dhash, lookup_hash, store_hash
 
-        raw = call_model('ai_identify', _SYSTEM_PROMPT, prompt, self.config, img_b64=img_b64)
+        img_hash = compute_dhash(img_path)
+        cached_result = lookup_hash(img_hash, "ai_identify") if img_hash else None
 
-        try:
-            result = extract_json(raw)
-        except Exception as exc:
-            raise HardFailure(f"ai_identify: model returned non-JSON for {sku}: {raw[:200]}") from exc
+        if cached_result is not None:
+            log.info("ai_identify: cache hit for %s (phash %s)", sku, img_hash)
+            tgw_logging.log_event("ai_identify_cache_hit", sku=sku, phash=img_hash)
+            result = cached_result
+        else:
+            # Fail-fast for Ollama before the slow encoding step
+            if provider == 'ollama' and not is_available(model):
+                raise RuntimeError(f"Ollama unavailable or model {model!r} not found")
+
+            # Use higher resolution for cloud providers; keep low for CPU-bound Ollama
+            max_px = 768 if provider == 'openrouter' else _VISION_MAX_PX
+            img_b64, orig_kb, resized_kb = _encode_resized(img_path, max_px=max_px)
+
+            log.info("calling %s/%s for %s (image: %s, %dKB→%dKB%s)", provider, model, sku, img_path.name, orig_kb, resized_kb, f", hint={hint!r}" if hint else "")
+            tgw_logging.log_event("ai_identify_call", sku=sku, provider=provider, model=model, image=img_path.name, orig_kb=orig_kb, resized_kb=resized_kb, hint=hint or None)
+
+            raw = call_model('ai_identify', _SYSTEM_PROMPT, prompt, self.config, img_b64=img_b64)
+
+            try:
+                result = extract_json(raw)
+            except Exception as exc:
+                raise HardFailure(f"ai_identify: model returned non-JSON for {sku}: {raw[:200]}") from exc
+
+            if img_hash:
+                store_hash(img_hash, sku, "ai_identify", result)
 
         title = str(result.get("title", "")).strip()
         category = str(result.get("category", "")).strip()
