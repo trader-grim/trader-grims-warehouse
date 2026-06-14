@@ -4,12 +4,21 @@ tgw.alt_text — generate alt_text + seo_caption via vision model.
 Provider and model are configured in tgw-models.json under the "alt_text" key.
 Defaults: openrouter / google/gemini-2.5-flash-lite.
 
-Workflow:
+Workflow (serial live-API mode):
   1. Find primary image in ItemData/<sku>/
   2. Call vision model → parse {alt_text, seo_caption}
   3. Archive original image to data/history/ItemData/<sku>/ if not already there
   4. Rename production image to <sku>-alt.jpg
   5. Write alt_text + seo_caption to item['draft_listing']
+
+Workflow (Gemini Batch API mode — tgw alt-text --batch --api-mode batch):
+  1. Collect all eligible SKUs (no alt_text yet, has primary image)
+  2. Skip images already in image_hashes cache
+  3. Chunk into BATCH_IMAGES_PER_TASK groups, build Gemini Batch JSONL
+  4. Submit to Gemini Batch API, persist state to runtime/state/alt-text-batch-state.json
+  5. Poll until COMPLETED, download output JSONL
+  6. Parse results, apply via _apply_alt_text_result per SKU
+  7. Store hashes; return summary
 """
 
 from __future__ import annotations
@@ -22,6 +31,15 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from tgw.apis.google_genai import (
+    BATCH_IMAGES_PER_TASK,
+    build_alt_text_task,
+    cleanup_input_file,
+    download_batch_output,
+    parse_batch_results,
+    poll_batch,
+    submit_batch,
+)
 from tgw.apis.llm import call_model, get_task_model
 from tgw.apis.ollama import extract_json, is_available
 
@@ -301,6 +319,358 @@ def cmd_alt_text_batch(
         "eligible": len(eligible_skus),
         "processed": processed,
         "skipped_idempotent": skipped_idempotent,
+        "errors": len(error_details),
+        "error_details": error_details,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Gemini Batch API path (tgw alt-text --batch --api-mode batch)
+# ---------------------------------------------------------------------------
+
+_BATCH_DEFAULT_MODEL = "gemini-2.5-flash-lite"
+_BATCH_POLL_INTERVAL_S = 60
+_BATCH_TIMEOUT_S = 3600 * 4
+
+
+def _batch_state_path(cfg: Dict[str, Any]) -> Path:
+    """Canonical path for the in-flight batch job state file."""
+    raw = cfg.get("raw", {})
+    runtime_root = Path(raw.get("runtime_root", "/opt/TGW/runtime") if isinstance(raw, dict) else "/opt/TGW/runtime")
+    return runtime_root / "state" / "alt-text-batch-state.json"
+
+
+def _apply_alt_text_result(
+    cfg: Dict[str, Any],
+    sku: str,
+    alt_text_str: str,
+    seo_caption: str,
+    img_path: Path,
+    img_hash: str,
+) -> Dict[str, Any]:
+    """Write one batch result back through the alt_text ledger.
+
+    Mirrors cmd_alt_text's write path: archive original, rename to -alt.jpg,
+    write draft_listing fields, store hash.  Idempotent.
+    """
+    from .items import atomic_write_json
+
+    itemdata_root = Path(cfg["itemdata_root"])
+    sku_dir = itemdata_root / sku
+    json_path = sku_dir / f"{sku}.json"
+
+    if not json_path.exists():
+        return {"ok": False, "sku": sku, "error": f"item JSON not found: {json_path}"}
+
+    item = json.loads(json_path.read_text(encoding="utf-8"))
+
+    alt_text_str = alt_text_str.strip()[:150]
+    if not alt_text_str:
+        return {"ok": False, "sku": sku, "error": "batch result has empty alt_text"}
+
+    # Archive original before renaming
+    history_sku_dir = _history_sku_dir(cfg, sku)
+    history_path = history_sku_dir / img_path.name
+    if not history_path.exists():
+        history_sku_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(img_path, history_path)
+        archived = True
+    else:
+        archived = False
+
+    # Rename production image
+    alt_path = sku_dir / f"{sku}{_ALT_STEM_SUFFIX}.jpg"
+    if img_path.exists():
+        img_path.rename(alt_path)
+
+    # Write fields
+    if "draft_listing" not in item:
+        item["draft_listing"] = {}
+    item["draft_listing"]["alt_text"] = alt_text_str
+    item["draft_listing"]["seo_caption"] = seo_caption.strip()
+
+    atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
+
+    # Cache result
+    if img_hash:
+        from tgw.image_hash import store_hash
+        store_hash(img_hash, sku, "alt_text", {"alt_text": alt_text_str, "seo_caption": seo_caption.strip()})
+
+    return {
+        "ok": True,
+        "sku": sku,
+        "alt_text": alt_text_str,
+        "seo_caption": seo_caption.strip(),
+        "archived_to_history": archived,
+    }
+
+
+def cmd_alt_text_gemini_batch(
+    cfg: Dict[str, Any],
+    *,
+    limit: int = 0,
+    dry_run: bool = False,
+    model: Optional[str] = None,
+    poll_interval: int = _BATCH_POLL_INTERVAL_S,
+    timeout_s: int = _BATCH_TIMEOUT_S,
+) -> Dict[str, Any]:
+    """Full-catalog alt-text sweep via Gemini Batch API (async, resumable).
+
+    Chunks eligible SKUs into groups of BATCH_IMAGES_PER_TASK primary images,
+    submits one Gemini Batch job, polls to completion, and writes results back
+    through the existing alt_text ledger.  Resumable: a state file in
+    runtime/state/alt-text-batch-state.json tracks the in-flight job.
+
+    Requires: google-genai SDK + Google API key (todo #153).
+    """
+    from tgw.image_hash import compute_dhash, lookup_hash
+
+    effective_model = model or _BATCH_DEFAULT_MODEL
+    state_path = _batch_state_path(cfg)
+    itemdata_root = Path(cfg["itemdata_root"])
+
+    # ------------------------------------------------------------------
+    # Phase 1 — collect eligible SKUs (same filter as cmd_alt_text_batch)
+    # ------------------------------------------------------------------
+    eligible: List[Dict[str, Any]] = []  # [{sku, img_path}]
+    for sku_dir in sorted(itemdata_root.iterdir()):
+        if not sku_dir.is_dir():
+            continue
+        sku = sku_dir.name
+        json_path = sku_dir / f"{sku}.json"
+        if not json_path.exists():
+            continue
+
+        try:
+            item = json.loads(json_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+        if item.get("draft_listing", {}).get("alt_text"):
+            continue
+
+        alt_path = sku_dir / f"{sku}{_ALT_STEM_SUFFIX}.jpg"
+        if alt_path.exists():
+            continue
+
+        img_path = _primary_image(sku_dir)
+        if img_path is None:
+            continue
+
+        eligible.append({"sku": sku, "img_path": img_path})
+        if limit and len(eligible) >= limit:
+            break
+
+    if not eligible:
+        return {
+            "ok": True,
+            "mode": "gemini_batch",
+            "model": effective_model,
+            "eligible": 0,
+            "submitted": 0,
+            "processed": 0,
+            "skipped_cached": 0,
+            "errors": 0,
+            "note": "no eligible items found",
+        }
+
+    # ------------------------------------------------------------------
+    # Phase 2 — skip images already in the image_hashes cache
+    # ------------------------------------------------------------------
+    to_process: List[Dict[str, Any]] = []
+    skipped_cached = 0
+    for entry in eligible:
+        img_hash = compute_dhash(entry["img_path"])
+        cached = lookup_hash(img_hash, "alt_text") if img_hash else None
+        if cached is not None:
+            skipped_cached += 1
+            # Still apply the cached result
+            _apply_alt_text_result(
+                cfg,
+                entry["sku"],
+                cached.get("alt_text", ""),
+                cached.get("seo_caption", ""),
+                entry["img_path"],
+                img_hash,
+            )
+        else:
+            entry["img_hash"] = img_hash
+            to_process.append(entry)
+
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "mode": "gemini_batch",
+            "model": effective_model,
+            "eligible": len(eligible),
+            "skipped_cached": skipped_cached,
+            "would_submit": len(to_process),
+            "chunk_count": (len(to_process) + BATCH_IMAGES_PER_TASK - 1) // BATCH_IMAGES_PER_TASK,
+            "note": "run without --dry-run to submit batch",
+        }
+
+    if not to_process:
+        return {
+            "ok": True,
+            "mode": "gemini_batch",
+            "model": effective_model,
+            "eligible": len(eligible),
+            "submitted": 0,
+            "processed": 0,
+            "skipped_cached": skipped_cached,
+            "errors": 0,
+            "note": "all eligible items already cached",
+        }
+
+    # ------------------------------------------------------------------
+    # Phase 3 — check for in-flight job (resume path)
+    # ------------------------------------------------------------------
+    chunks: List[List[str]] = []   # chunk_index → [sku, sku, ...]
+    chunk_img_paths: List[List[Path]] = []
+    chunk_img_hashes: List[List[str]] = []
+    job_name: Optional[str] = None
+    input_file_name: Optional[str] = None
+
+    if state_path.exists():
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            if state.get("status") == "PROCESSING" and state.get("job_name"):
+                job_name = state["job_name"]
+                input_file_name = state.get("input_file_name", "")
+                chunks = state.get("chunks", [])
+                # Rebuild img_path + hash lookups from the saved SKU lists
+                sku_to_entry = {e["sku"]: e for e in to_process}
+                chunk_img_paths = [
+                    [sku_to_entry[s]["img_path"] for s in chunk if s in sku_to_entry]
+                    for chunk in chunks
+                ]
+                chunk_img_hashes = [
+                    [sku_to_entry[s].get("img_hash", "") for s in chunk if s in sku_to_entry]
+                    for chunk in chunks
+                ]
+        except Exception:
+            # State file corrupt — start fresh
+            job_name = None
+            state_path.unlink(missing_ok=True)
+
+    # ------------------------------------------------------------------
+    # Phase 4 — build chunks + submit if no in-flight job
+    # ------------------------------------------------------------------
+    if job_name is None:
+        # Build chunks
+        for i in range(0, len(to_process), BATCH_IMAGES_PER_TASK):
+            chunk_entries = to_process[i: i + BATCH_IMAGES_PER_TASK]
+            chunks.append([e["sku"] for e in chunk_entries])
+            chunk_img_paths.append([e["img_path"] for e in chunk_entries])
+            chunk_img_hashes.append([e.get("img_hash", "") for e in chunk_entries])
+
+        # Build JSONL tasks (stream one chunk at a time to avoid memory spike)
+        tasks: List[Dict[str, Any]] = []
+        for img_paths in chunk_img_paths:
+            images_b64 = [_encode_resized(p, max_px=_OR_MAX_PX) for p in img_paths]
+            tasks.append(build_alt_text_task(images_b64, model=effective_model))
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            job_name, input_file_name = submit_batch(tasks, effective_model, cfg, Path(tmpdir))
+
+        # Persist state for resumability
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps({
+                "job_name": job_name,
+                "input_file_name": input_file_name,
+                "model": effective_model,
+                "status": "PROCESSING",
+                "chunks": chunks,
+            }),
+            encoding="utf-8",
+        )
+
+    # ------------------------------------------------------------------
+    # Phase 5 — poll to completion
+    # ------------------------------------------------------------------
+    final_state = poll_batch(
+        job_name, cfg,
+        poll_interval_s=poll_interval,
+        timeout_s=timeout_s,
+    )
+
+    if "COMPLETED" not in final_state:
+        return {
+            "ok": False,
+            "mode": "gemini_batch",
+            "job_name": job_name,
+            "error": f"batch job ended in state {final_state!r}",
+        }
+
+    # ------------------------------------------------------------------
+    # Phase 6 — download and apply results
+    # ------------------------------------------------------------------
+    raw_bytes = download_batch_output(job_name, cfg)
+    task_results = parse_batch_results(raw_bytes)
+
+    processed = 0
+    error_details: List[Dict[str, Any]] = []
+
+    for task_idx, (chunk_skus, img_paths, img_hashes) in enumerate(
+        zip(chunks, chunk_img_paths, chunk_img_hashes)
+    ):
+        items_for_task = task_results[task_idx] if task_idx < len(task_results) else None
+        if items_for_task is None:
+            for sku in chunk_skus:
+                error_details.append({"sku": sku, "error": f"task {task_idx} failed or parse error"})
+            continue
+
+        # Build index → result map (model may not return in strict order)
+        by_index: Dict[int, Dict[str, Any]] = {}
+        for item in items_for_task:
+            if isinstance(item, dict):
+                idx = item.get("index")
+                if isinstance(idx, int):
+                    by_index[idx] = item
+
+        for j, (sku, img_path, img_hash) in enumerate(zip(chunk_skus, img_paths, img_hashes)):
+            result_item = by_index.get(j)
+            if result_item is None:
+                # Fall back to positional order if index key is absent
+                result_item = items_for_task[j] if j < len(items_for_task) else None
+
+            if result_item is None:
+                error_details.append({"sku": sku, "error": f"no result at index {j} in task {task_idx}"})
+                continue
+
+            alt_text_val = str(result_item.get("alt_text", "")).strip()
+            seo_caption_val = str(result_item.get("seo_caption", "")).strip()
+
+            if not alt_text_val:
+                error_details.append({"sku": sku, "error": "model returned empty alt_text"})
+                continue
+
+            write_result = _apply_alt_text_result(cfg, sku, alt_text_val, seo_caption_val, img_path, img_hash)
+            if write_result.get("ok"):
+                processed += 1
+            else:
+                error_details.append({"sku": sku, "error": write_result.get("error", "write failed")})
+
+    # ------------------------------------------------------------------
+    # Phase 7 — cleanup
+    # ------------------------------------------------------------------
+    if input_file_name:
+        cleanup_input_file(input_file_name, cfg)
+
+    state_path.unlink(missing_ok=True)
+
+    return {
+        "ok": True,
+        "mode": "gemini_batch",
+        "model": effective_model,
+        "job_name": job_name,
+        "eligible": len(eligible),
+        "submitted": len(to_process),
+        "processed": processed,
+        "skipped_cached": skipped_cached,
         "errors": len(error_details),
         "error_details": error_details,
     }

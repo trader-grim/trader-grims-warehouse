@@ -30,6 +30,9 @@ dev = [
 thumbnails = [
     "Pillow>=10.0",
 ]
+gemini = [
+    "google-genai>=0.8",
+]
 printing = [
     "reportlab>=4.0",
     "qrcode[pil]>=7.4",

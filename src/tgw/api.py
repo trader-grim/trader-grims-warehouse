@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from .alt_text import cmd_alt_text, cmd_alt_text_batch
+from .alt_text import cmd_alt_text, cmd_alt_text_batch, cmd_alt_text_gemini_batch
 from .catalog import (
     build_all_catalogs,
     build_full_catalog,
@@ -850,6 +850,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="show what would happen without calling the model or writing files")
     p.add_argument("--batch", action="store_true", help="run all eligible items directly with rate-limiting (OpenRouter free ~20 req/min)")
     p.add_argument("--limit", type=int, default=0, metavar="N", help="max items to process in --batch mode (0 = all eligible)")
+    p.add_argument("--api-mode", dest="api_mode", choices=["live", "batch"], default="live",
+                   help="'live': serial live-API calls (default); 'batch': Gemini Batch API async (requires --batch + Google API key)")
+    p.add_argument("--poll-interval", dest="poll_interval", type=int, default=60, metavar="SECS",
+                   help="polling interval in seconds for --api-mode batch (default: 60)")
 
     p = sub.add_parser(
         "alt-text-batch",
@@ -4170,13 +4174,23 @@ def main() -> int:
 
         elif args.op == "alt-text":
             if getattr(args, "batch", False):
-                result = cmd_alt_text_batch(
-                    cfg,
-                    limit=args.limit,
-                    provider=args.provider,
-                    model=args.model,
-                    dry_run=args.dry_run,
-                )
+                api_mode = getattr(args, "api_mode", "live")
+                if api_mode == "batch":
+                    result = cmd_alt_text_gemini_batch(
+                        cfg,
+                        limit=args.limit,
+                        dry_run=args.dry_run,
+                        model=args.model,
+                        poll_interval=getattr(args, "poll_interval", 60),
+                    )
+                else:
+                    result = cmd_alt_text_batch(
+                        cfg,
+                        limit=args.limit,
+                        provider=args.provider,
+                        model=args.model,
+                        dry_run=args.dry_run,
+                    )
             else:
                 if not args.sku:
                     import sys as _sys
