@@ -940,6 +940,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--show", action="store_true", help="print human-readable diff to stdout before JSON result")
     p.add_argument("--by", default="claude", metavar="AGENT", help="who is creating this revision draft (default: claude)")
+    p.add_argument("--apply", action="store_true", help="apply the stored revision_draft (dry-run by default; requires --live for live eBay write)")
+    p.add_argument("--live", action="store_true", help="with --apply: submit live eBay write (gated by _APPLY_ENABLED sentinel in revision.py)")
 
     p = sub.add_parser(
         "catalog-verify",
@@ -4208,18 +4210,30 @@ def main() -> int:
             result = _cmd_alt_text_batch(cfg, args)
 
         elif args.op == "revise":
-            from .revision import cmd_revise
-            result = cmd_revise(
-                cfg,
-                sku=args.sku,
-                assignments=args.assignments,
-                show=args.show,
-                by=args.by,
-            )
-            if args.show and result.get("ok"):
+            if args.apply:
+                from .revision import cmd_revise_apply
+                result = cmd_revise_apply(
+                    cfg,
+                    sku=args.sku,
+                    dry_run=not args.live,
+                    by=args.by,
+                )
                 for line in result.get("diff_lines", []):
                     print(line)
                 print()
+            else:
+                from .revision import cmd_revise
+                result = cmd_revise(
+                    cfg,
+                    sku=args.sku,
+                    assignments=args.assignments,
+                    show=args.show,
+                    by=args.by,
+                )
+                if args.show and result.get("ok"):
+                    for line in result.get("diff_lines", []):
+                        print(line)
+                    print()
 
         elif args.op == "todo":
             from tgw.todo import cmd_todo

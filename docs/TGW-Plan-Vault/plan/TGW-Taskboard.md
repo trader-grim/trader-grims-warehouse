@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-06-14 06:34 UTC — 34 open, 801 done in the last 7 days._
+_Rendered 2026-06-14 12:51 UTC — 29 open, 806 done in the last 7 days._
 
 ## admin (16 open)
 
@@ -48,16 +48,11 @@ _Rendered 2026-06-14 06:34 UTC — 34 open, 801 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (6 open)
+## claude (1 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
-| 844 | 50 |  | pm_intake classify-suggestions: add PP-OPS-001 assignment rule — if task body looks like a credential/setup/hardware/ops gate (no code to write, purely an operator action), auto-assign pp_ref=PP-OPS-001 instead of leaving pp_ref blank or misfiring on an unrelated PP item; update the classify system prompt | [[TGW-Master-Plan#PP-OPS-001\|PP-OPS-001]] |  |
-| 132 | 61 |  | PP-PLANDB-001 Phase 4 — tgw plan status [PP-REF]: one-line status summary per PP-* item (open/done/blocked todo counts + latest activity); feed into session-start output in CLAUDE.md. Requires Phase 3 (#112 open) | [[TGW-Master-Plan#PP-PLANDB-001 — Database-Driven Plan Builder (design discussion needed)\|PP-PLANDB-001]] | ✓ deps done |
-| 137 | 63 |  | Gemini Batch API path for full-catalog alt-text sweep — tgw alt-text --batch --api-mode batch: chunk ~8350 SKUs into 40-image arrays (~5 SKUs each), submit to Gemini Batch API async, poll completion, write results back via existing alt_text ledger; resumable via ai_usage/image_hashes state; replaces serial live-API calls for full-catalog runs; dramatically reduces rate-limit pressure and cost. Reference: PERPLEXITY-007 batch pipeline research + gemini-2.5-flash-lite model |  | ✓ deps done |
-| 113 | 72 | M | Round7 p72 M (GATED: after admin #20 Qtile install): PP-CLIP-001 daemon — dual-backend watcher per settled design (2026-06-12): backend-agnostic core (on change -> classify -> SQLite -> socket push); X11/XFixes backend (default/stable) + Wayland wl-paste --watch backend; session-type autodetect; PRIMARY+CLIPBOARD; feeds existing tgw clip store; Unix socket for TGWSKUWidget | [[TGW-Master-Plan#PP-CLIP-001 — TGW-Aware Clipboard Manager\|PP-CLIP-001]] | ✓ deps done |
 | 133 | 74 |  | PP-OFFER-001 Phase 1 build — GetBestOffers Trading API polling; tgw offers [--pending] lists incoming offer requests; tgw offers --respond ID --accept/--counter PRICE/--decline; auto_accept_min_pct config flag for batch auto-accept; dry-run default; tests. Build after design in #124 settled | [[TGW-Master-Plan#PP-OFFER-001 — eBay Best Offer Management\|PP-OFFER-001]] | ⛔ #124 |
-| 134 | 76 |  | PP-REVISION-001 apply path — ReviseFixedPriceItem call with pinned-baseline drift-gate (apply only when live mirror matches baseline hash); --dry-run default; NO eBay write until Dave confirms sparse-delta apply design settled. Continuation of #111 dry-run delta | [[TGW-Master-Plan#PP-REVISION-001 — Live listing revision / update draft (design open)\|PP-REVISION-001]] | ✓ deps done |
 
 ## sokoban (1 open)
 
@@ -65,10 +60,15 @@ _Rendered 2026-06-14 06:34 UTC — 34 open, 801 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — Sold reconciliation and inventory status sync (design ready)\|PP-SOLD-001]] |  |
 
-## Done this week (801)
+## Done this week (806)
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 134 | claude | 2026-06-14 | PP-REVISION-001 apply path — ReviseFixedPriceItem call with pinned-baseline drift-gate (apply only when live mirror matches baseline hash); --dry-run default; NO eBay write until Dave confirms sparse-delta apply design settled. Continuation of #111 dry-run delta |
+| 113 | claude | 2026-06-14 | Round7 p72 M (GATED: after admin #20 Qtile install): PP-CLIP-001 daemon — dual-backend watcher per settled design (2026-06-12): backend-agnostic core (on change -> classify -> SQLite -> socket push); X11/XFixes backend (default/stable) + Wayland wl-paste --watch backend; session-type autodetect; PRIMARY+CLIPBOARD; feeds existing tgw clip store; Unix socket for TGWSKUWidget |
+| 137 | claude | 2026-06-14 | Gemini Batch API path for full-catalog alt-text sweep — tgw alt-text --batch --api-mode batch: chunk ~8350 SKUs into 40-image arrays (~5 SKUs each), submit to Gemini Batch API async, poll completion, write results back via existing alt_text ledger; resumable via ai_usage/image_hashes state; replaces serial live-API calls for full-catalog runs; dramatically reduces rate-limit pressure and cost. Reference: PERPLEXITY-007 batch pipeline research + gemini-2.5-flash-lite model |
+| 132 | claude | 2026-06-14 | PP-PLANDB-001 Phase 4 — tgw plan status [PP-REF]: one-line status summary per PP-* item (open/done/blocked todo counts + latest activity); feed into session-start output in CLAUDE.md. Requires Phase 3 (#112 open) |
+| 844 | claude | 2026-06-14 | pm_intake classify-suggestions: add PP-OPS-001 assignment rule — if task body looks like a credential/setup/hardware/ops gate (no code to write, purely an operator action), auto-assign pp_ref=PP-OPS-001 instead of leaving pp_ref blank or misfiring on an unrelated PP item; update the classify system prompt |
 | 153 | 137 | 2026-06-13 | Google API key setup — get key from AI Studio, write to /opt/TGW/secrets/google-credentials.json (chmod 600), wire google_credentials_path into config.py alongside openrouter_credentials_path; gate for todo #137 (Gemini Batch API alt-text sweep) which requires direct google-genai SDK, not OpenRouter |
 | 131 | claude | 2026-06-13 | tgw ebay-pull scoping — add --sku SKU [SKU...] / --location LOC / --status STATUS filters to cmd_ebay_pull so operators can pull-sync a subset of listings without a full sweep; wraps existing pull.sync_item() per-item path; from PP-SHELL-001 Round 5 deferred item |
 | 498 | claude | 2026-06-13 | bin/tgw-offline-sync: write .tgw-sync-stamp into @data not mount root — stamp is absent from all btrfs snapshots (found in code-review session-29) |
