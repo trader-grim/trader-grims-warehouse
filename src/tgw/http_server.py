@@ -175,6 +175,14 @@ class PMActionBody(BaseModel):
     text: Optional[str] = None
 
 
+class OfferRespondBody(BaseModel):
+    listing_id: str
+    action: str
+    counter_price: Optional[float] = None
+    dry_run: bool = True
+    by: str = "operator"
+
+
 # ---------------------------------------------------------------------------
 # GET /api/items — search catalog
 # ---------------------------------------------------------------------------
@@ -1881,6 +1889,328 @@ def pm_action(body: PMActionBody) -> Dict[str, Any]:
         return {"ok": True, "message": f"Suggestion added: {result.get('written', '')}", **result}
 
     raise HTTPException(status_code=400, detail=f"unknown action type: {body.type!r}")
+
+
+# ---------------------------------------------------------------------------
+# GET /api/offers — pending Best Offers with item context (PP-EDITOR-001 3g)
+# POST /api/offers/{offer_id}/respond — accept / counter / decline
+# ---------------------------------------------------------------------------
+
+def _offer_location(sku: str) -> str:
+    """Return location from the SQLite catalog for a given SKU, or ''."""
+    if not sku:
+        return ""
+    try:
+        with _sqlite_conn() as con:
+            row = con.execute(
+                "SELECT location FROM catalog WHERE sku = ?", (sku,)
+            ).fetchone()
+        return (row["location"] or "") if row else ""
+    except Exception:
+        return ""
+
+
+@app.get("/api/offers", dependencies=[AUTH])
+def get_offers() -> Dict[str, Any]:
+    """Return pending Best Offers enriched with location and pct_of_ask."""
+    from .offers import cmd_offers_list
+
+    result = cmd_offers_list(_cfg, pending_only=True)
+    if not result.get("ok"):
+        return result
+
+    for offer in result["offers"]:
+        offer["location"] = _offer_location(offer.get("sku", ""))
+        ask = offer.get("listing_price")
+        bid = offer.get("offer_price")
+        offer["pct_of_ask"] = round(bid / ask * 100, 1) if ask and bid else None
+
+    return result
+
+
+@app.post("/api/offers/{offer_id}/respond", dependencies=[AUTH])
+def respond_offer(offer_id: str, body: OfferRespondBody) -> Dict[str, Any]:
+    """Accept, counter, or decline a Best Offer."""
+    from .offers import cmd_offers_respond
+
+    return cmd_offers_respond(
+        _cfg,
+        offer_id=offer_id,
+        listing_id=body.listing_id,
+        action=body.action,
+        counter_price=body.counter_price,
+        dry_run=body.dry_run,
+        by=body.by,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /form/offers — Best Offers management UI (PP-EDITOR-001 Phase 3g)
+# ---------------------------------------------------------------------------
+
+_OFFERS_EXTRA_CSS = (
+    ".offer-card{background:#1a1a1a;border:1px solid #333;border-radius:10px;"
+    "  padding:14px;margin-bottom:14px;display:grid;"
+    "  grid-template-columns:72px 1fr;gap:12px;align-items:start}"
+    "@media(min-width:600px){.offer-card{grid-template-columns:80px 1fr}}"
+    ".offer-thumb{width:72px;height:72px;object-fit:cover;border-radius:6px;"
+    "  border:1px solid #333;background:#111;flex-shrink:0}"
+    ".offer-thumb-placeholder{width:72px;height:72px;border-radius:6px;"
+    "  border:1px solid #333;background:#111;display:flex;align-items:center;"
+    "  justify-content:center;color:#444;font-size:1.4em}"
+    ".offer-body{min-width:0}"
+    ".offer-title{font-size:.92em;font-weight:600;color:#ddd;margin-bottom:5px;"
+    "  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}"
+    ".offer-meta{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px;align-items:center}"
+    ".offer-price{font-size:.85em;color:#aaa}"
+    ".offer-price strong{color:#eee}"
+    ".offer-pct{font-size:1.5em;font-weight:bold;min-width:56px;text-align:right;"
+    "  line-height:1}"
+    ".pct-high{color:#7f7}"
+    ".pct-mid{color:#fb7}"
+    ".pct-low{color:#f77}"
+    ".offer-loc{font-size:.76em;color:#888;background:#1e1e1e;border:1px solid #2a2a2a;"
+    "  border-radius:4px;padding:2px 6px}"
+    ".offer-loc.warn{color:#fb7;border-color:#4a3a00;background:#2a1e00}"
+    ".offer-buyer{font-size:.76em;color:#777}"
+    ".offer-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center}"
+    ".btn-accept{padding:8px 16px;background:#1a4a1a;color:#7f7;border:1px solid #3a8a3a;"
+    "  border-radius:6px;cursor:pointer;font-size:.85em;font-weight:600}"
+    ".btn-accept:hover{background:#1e5a1e}"
+    ".btn-decline{padding:8px 16px;background:#3a1a1a;color:#f77;border:1px solid #7a3a3a;"
+    "  border-radius:6px;cursor:pointer;font-size:.85em;font-weight:600}"
+    ".btn-decline:hover{background:#4a1a1a}"
+    ".btn-counter{padding:8px 16px;background:#1a2a4a;color:#7af;border:1px solid #2a5a8a;"
+    "  border-radius:6px;cursor:pointer;font-size:.85em;font-weight:600}"
+    ".btn-counter:hover{background:#1a3a5a}"
+    ".counter-wrap{display:flex;gap:6px;align-items:center}"
+    ".counter-input{width:90px;flex-shrink:0;padding:8px;margin:0;font-size:.88em}"
+    ".offer-expiry{font-size:.73em;color:#555;margin-top:4px}"
+    ".dry-bar{background:#1a2a3a;border:1px solid #2a4a6a;border-radius:8px;"
+    "  padding:10px 14px;margin-bottom:14px;display:flex;align-items:center;gap:12px;"
+    "  font-size:.87em;color:#aaa}"
+    ".dry-badge{background:#2a4a6a;color:#7af;border-radius:4px;padding:2px 8px;"
+    "  font-size:.78em;font-weight:600;text-transform:uppercase;flex-shrink:0}"
+    ".dry-badge.live{background:#2a4a1a;color:#7f7}"
+    ".toggle-wrap{display:flex;align-items:center;gap:8px;margin-left:auto}"
+    ".toggle{position:relative;display:inline-block;width:40px;height:22px}"
+    ".toggle input{opacity:0;width:0;height:0}"
+    ".slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;"
+    "  background:#2a2a2a;border-radius:22px;transition:.25s}"
+    ".slider:before{position:absolute;content:'';height:16px;width:16px;left:3px;bottom:3px;"
+    "  background:#888;border-radius:50%;transition:.25s}"
+    ".toggle input:checked+.slider{background:#1a4a1a}"
+    ".toggle input:checked+.slider:before{transform:translateX(18px);background:#7f7}"
+    ".empty-state{padding:32px;text-align:center;color:#555;font-size:.95em}"
+    ".resp-flash{padding:6px 10px;border-radius:5px;font-size:.82em;margin-top:6px;"
+    "  display:none}"
+    ".resp-flash.ok{background:#1a3a1a;color:#7f7;display:block}"
+    ".resp-flash.err{background:#3a1a1a;color:#f77;display:block}"
+    ".reload-btn{background:none;border:none;color:#4a8ade;cursor:pointer;"
+    "  font-size:.82em;padding:0;text-decoration:underline;margin-left:8px}"
+)
+
+_OFFERS_HTML = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TGW — Best Offers</title>
+{static_head}
+<style>{offers_css}</style>
+</head>
+<body>
+<h2>Best Offers <span id="offer-count" style="font-size:.65em;color:#666;font-weight:normal"></span>
+  <button class="reload-btn" onclick="load()">&#8635; Refresh</button>
+</h2>
+
+<div class="dry-bar">
+  <span class="dry-badge" id="dry-badge">DRY RUN</span>
+  <span id="dry-label">Actions are previewed only — no eBay API calls.</span>
+  <div class="toggle-wrap">
+    <span style="font-size:.78em">Go Live</span>
+    <label class="toggle" title="Enable live eBay submission">
+      <input type="checkbox" id="live-toggle" onchange="onLiveToggle()">
+      <span class="slider"></span>
+    </label>
+  </div>
+</div>
+
+<div id="offers-list"><span style="color:#555">Loading…</span></div>
+
+{static_foot}
+<script>
+window.TGW_API_KEY = {api_key_json};
+var DRY = true;
+
+function onLiveToggle() {{
+  DRY = !document.getElementById('live-toggle').checked;
+  var badge = document.getElementById('dry-badge');
+  var label = document.getElementById('dry-label');
+  if (DRY) {{
+    badge.textContent = 'DRY RUN'; badge.className = 'dry-badge';
+    label.textContent = 'Actions are previewed only — no eBay API calls.';
+  }} else {{
+    badge.textContent = 'LIVE'; badge.className = 'dry-badge live';
+    label.textContent = 'Actions will be submitted to eBay immediately.';
+  }}
+}}
+
+function pctClass(pct) {{
+  if (pct === null || pct === undefined) return '';
+  if (pct >= 85) return 'pct-high';
+  if (pct >= 70) return 'pct-mid';
+  return 'pct-low';
+}}
+
+function formatPct(pct) {{
+  if (pct === null || pct === undefined) return '?';
+  return pct.toFixed(1) + '%';
+}}
+
+function fmtPrice(p) {{
+  if (p === null || p === undefined) return '—';
+  return '$' + Number(p).toFixed(2);
+}}
+
+function fmtExpiry(s) {{
+  if (!s) return '';
+  try {{
+    var d = new Date(s);
+    return 'Expires ' + d.toLocaleDateString(undefined, {{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}});
+  }} catch(e) {{ return s; }}
+}}
+
+function flashId(offerId) {{ return 'flash-' + offerId.replace(/[^a-z0-9]/gi,'_'); }}
+
+function renderOffers(data) {{
+  var el = document.getElementById('offers-list');
+  var countEl = document.getElementById('offer-count');
+  if (!data || !data.ok) {{
+    el.innerHTML = '<div class="resp-flash err" style="display:block">Failed to load offers: ' +
+      escapeHtml((data && data.error) || 'unknown error') + '</div>';
+    countEl.textContent = '';
+    return;
+  }}
+  if (!data.offers || data.offers.length === 0) {{
+    el.innerHTML = '<div class="empty-state">No pending Best Offers right now.</div>';
+    countEl.textContent = '';
+    return;
+  }}
+  countEl.textContent = '(' + data.offers.length + ' pending)';
+  var html = '';
+  data.offers.forEach(function(o) {{
+    var pct = o.pct_of_ask;
+    var loc = o.location || '';
+    var locCls = loc ? '' : ' warn';
+    var locLabel = loc || 'location unknown';
+    var thumbUrl = o.sku ? '/thumb/' + encodeURIComponent(o.sku) : '';
+    var thumbHtml = thumbUrl
+      ? '<img class="offer-thumb" src="' + thumbUrl + '" onerror="this.style.display=\\'none\\';this.nextElementSibling.style.display=\\'flex\\'" loading="lazy">' +
+        '<div class="offer-thumb-placeholder" style="display:none">&#128247;</div>'
+      : '<div class="offer-thumb-placeholder">&#128247;</div>';
+    html += '<div class="offer-card">';
+    html += '<div style="display:flex;flex-direction:column;align-items:center;gap:6px">' +
+            thumbHtml + '</div>';
+    html += '<div class="offer-body">';
+    html += '<div class="offer-title">' + escapeHtml(o.title || o.sku || 'Unknown item') + '</div>';
+    html += '<div class="offer-meta">';
+    html += '<span class="offer-price">Ask: <strong>' + fmtPrice(o.listing_price) + '</strong></span>';
+    html += '<span class="offer-price">Offer: <strong>' + fmtPrice(o.offer_price) + '</strong></span>';
+    html += '<span class="offer-pct ' + pctClass(pct) + '">' + formatPct(pct) + '</span>';
+    html += '<span class="offer-loc' + locCls + '">' + escapeHtml(locLabel) + '</span>';
+    if (o.buyer) html += '<span class="offer-buyer">from ' + escapeHtml(o.buyer) + '</span>';
+    html += '</div>';
+    if (o.expiry) html += '<div class="offer-expiry">' + escapeHtml(fmtExpiry(o.expiry)) + '</div>';
+    html += '<div class="offer-actions">';
+    html += '<button class="btn-accept" onclick="respond(' +
+      JSON.stringify(o.offer_id) + ',' + JSON.stringify(o.listing_id) + ',\\'Accept\\',null)">Accept</button>';
+    html += '<div class="counter-wrap">' +
+      '<input class="counter-input" id="cp-' + escapeHtml(o.offer_id) + '" type="number" ' +
+      'min="0.01" step="0.01" placeholder="$0.00">' +
+      '<button class="btn-counter" onclick="respondCounter(' +
+      JSON.stringify(o.offer_id) + ',' + JSON.stringify(o.listing_id) + ')">Counter</button>' +
+      '</div>';
+    html += '<button class="btn-decline" onclick="respond(' +
+      JSON.stringify(o.offer_id) + ',' + JSON.stringify(o.listing_id) + ',\\'Decline\\',null)">Decline</button>';
+    html += '</div>';
+    html += '<div class="resp-flash" id="' + flashId(o.offer_id) + '"></div>';
+    html += '</div></div>';
+  }});
+  el.innerHTML = html;
+}}
+
+async function load() {{
+  var el = document.getElementById('offers-list');
+  el.innerHTML = '<span style="color:#555">Loading…</span>';
+  try {{
+    var r = await fetch('/api/offers', {{headers: authHeaders()}});
+    var d = await r.json();
+    renderOffers(d);
+  }} catch(e) {{
+    el.innerHTML = '<div class="resp-flash err" style="display:block">Network error: ' + escapeHtml(String(e)) + '</div>';
+  }}
+}}
+
+async function respond(offerId, listingId, action, counterPrice) {{
+  var flash = document.getElementById(flashId(offerId));
+  if (flash) {{ flash.className = 'resp-flash'; flash.textContent = ''; }}
+  var body = {{listing_id: listingId, action: action, dry_run: DRY, by: 'operator'}};
+  if (counterPrice !== null) body.counter_price = counterPrice;
+  try {{
+    var r = await fetch('/api/offers/' + encodeURIComponent(offerId) + '/respond', {{
+      method: 'POST',
+      headers: authHeaders({{'Content-Type': 'application/json'}}),
+      body: JSON.stringify(body),
+    }});
+    var d = await r.json();
+    if (d.ok) {{
+      var msg = DRY ? '[dry-run] ' : '';
+      msg += action + ' sent';
+      if (d.counter_price !== null && d.counter_price !== undefined)
+        msg += ' @ $' + Number(d.counter_price).toFixed(2);
+      if (flash) {{ flash.className = 'resp-flash ok'; flash.textContent = msg; }}
+      if (!DRY) setTimeout(load, 1200);
+    }} else {{
+      if (flash) {{ flash.className = 'resp-flash err'; flash.textContent = 'Error: ' + escapeHtml(d.error || 'unknown'); }}
+    }}
+  }} catch(e) {{
+    if (flash) {{ flash.className = 'resp-flash err'; flash.textContent = 'Network error: ' + escapeHtml(String(e)); }}
+  }}
+}}
+
+function respondCounter(offerId, listingId) {{
+  var inp = document.getElementById('cp-' + offerId);
+  var val = inp ? parseFloat(inp.value) : NaN;
+  if (isNaN(val) || val <= 0) {{
+    var flash = document.getElementById(flashId(offerId));
+    if (flash) {{ flash.className = 'resp-flash err'; flash.textContent = 'Enter a valid counter price first.'; }}
+    return;
+  }}
+  respond(offerId, listingId, 'Counter', val);
+}}
+
+load();
+</script>
+</body>
+</html>
+"""
+
+
+@app.get("/form/offers")
+def offers_form():
+    """Best Offers management — pending offers with inline Accept/Counter/Decline.
+    No Bearer auth (network trust); JS embeds the key for API calls."""
+    from fastapi.responses import HTMLResponse
+
+    html = _OFFERS_HTML.format(
+        static_head=_STATIC_HEAD,
+        static_foot=_STATIC_FOOT,
+        offers_css=_OFFERS_EXTRA_CSS,
+        api_key_json=json.dumps(_api_key),
+    )
+    return HTMLResponse(html)
 
 
 # ---------------------------------------------------------------------------

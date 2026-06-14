@@ -1659,3 +1659,170 @@ def test_nav_includes_docs_link(client):
     r = client.get("/static/nav.js")
     assert r.status_code == 200
     assert "/docs" in r.text
+
+
+# ---------------------------------------------------------------------------
+# GET /api/offers — Best Offers API (PP-EDITOR-001 Phase 3g)
+# POST /api/offers/{offer_id}/respond
+# GET /form/offers
+# ---------------------------------------------------------------------------
+
+def test_get_offers_requires_auth(client):
+    r = client.get("/api/offers")
+    assert r.status_code in (401, 403)
+
+
+def test_get_offers_returns_pending(env, monkeypatch):
+    """GET /api/offers returns pending offers enriched with location + pct_of_ask."""
+    import tgw.http_server as hmod
+    import tgw.offers as offers_mod
+
+    client = env["client"]
+    fake_offers = [
+        {
+            "offer_id": "99001",
+            "listing_id": "12345678",
+            "title": "Red Widget",
+            "sku": SKU_A,
+            "buyer": "buyer123",
+            "offer_price": 9.0,
+            "listing_price": 10.0,
+            "status": "Pending",
+            "expiry": "2026-06-20T00:00:00.000Z",
+        }
+    ]
+
+    monkeypatch.setattr(hmod, "_offer_location", lambda sku: "A1" if sku == SKU_A else "")
+    monkeypatch.setattr(
+        offers_mod, "cmd_offers_list",
+        lambda cfg, **kw: {"ok": True, "offers": list(fake_offers), "auto_accepted": [], "count": 1},
+    )
+
+    r = client.get("/api/offers", headers=AUTH_HEADERS)
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert len(body["offers"]) == 1
+    o = body["offers"][0]
+    assert o["offer_id"] == "99001"
+    assert o["pct_of_ask"] == pytest.approx(90.0)
+    assert o["location"] == "A1"
+
+
+def test_get_offers_error_propagated(env, monkeypatch):
+    """If cmd_offers_list returns ok=False, the API mirrors it."""
+    import tgw.offers as offers_mod
+
+    monkeypatch.setattr(offers_mod, "cmd_offers_list",
+                        lambda cfg, **kw: {"ok": False, "error": "token expired"})
+
+    client = env["client"]
+    r = client.get("/api/offers", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert "token expired" in body["error"]
+
+
+def test_respond_offer_dry_run(env, monkeypatch):
+    """POST /api/offers/{id}/respond with dry_run=True returns preview without eBay call."""
+    import tgw.offers as offers_mod
+
+    client = env["client"]
+
+    def fake_respond(cfg, offer_id, listing_id, action, counter_price=None, *, dry_run=True, by="claude"):
+        return {
+            "ok": True, "dry_run": dry_run, "offer_id": offer_id,
+            "listing_id": listing_id, "action": action,
+            "counter_price": counter_price, "by": by, "at": "2026-06-14T12:00:00Z",
+            "note": "dry-run: no eBay API call made; add --live to submit",
+        }
+
+    monkeypatch.setattr(offers_mod, "cmd_offers_respond", fake_respond)
+
+    r = client.post(
+        "/api/offers/99001/respond",
+        headers={**AUTH_HEADERS, "Content-Type": "application/json"},
+        json={"listing_id": "12345678", "action": "Accept", "dry_run": True},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["dry_run"] is True
+    assert body["action"] == "Accept"
+    assert body["offer_id"] == "99001"
+
+
+def test_respond_offer_counter_price(env, monkeypatch):
+    """POST respond with Counter action passes counter_price."""
+    import tgw.offers as offers_mod
+
+    received = {}
+
+    def fake_respond(cfg, offer_id, listing_id, action, counter_price=None, *, dry_run=True, by="claude"):
+        received.update(action=action, counter_price=counter_price, dry_run=dry_run)
+        return {"ok": True, "dry_run": dry_run, "offer_id": offer_id,
+                "listing_id": listing_id, "action": action,
+                "counter_price": counter_price, "by": by, "at": "2026-06-14T12:00:00Z"}
+
+    monkeypatch.setattr(offers_mod, "cmd_offers_respond", fake_respond)
+
+    client = env["client"]
+    r = client.post(
+        "/api/offers/99001/respond",
+        headers={**AUTH_HEADERS, "Content-Type": "application/json"},
+        json={"listing_id": "12345678", "action": "Counter", "counter_price": 27.50, "dry_run": True},
+    )
+    assert r.status_code == 200
+    assert received["action"] == "Counter"
+    assert received["counter_price"] == pytest.approx(27.50)
+
+
+def test_respond_offer_requires_auth(client):
+    r = client.post(
+        "/api/offers/99001/respond",
+        json={"listing_id": "12345678", "action": "Accept"},
+    )
+    assert r.status_code in (401, 403)
+
+
+def test_form_offers_renders(client):
+    """/form/offers returns HTML with expected structure."""
+    r = client.get("/form/offers")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert "Best Offers" in r.text
+    assert "dry-badge" in r.text
+    assert "Go Live" in r.text
+    assert "/api/offers" in r.text
+
+
+def test_form_offers_no_auth_required(client):
+    """/form/offers is accessible without Bearer token (network trust)."""
+    r = client.get("/form/offers")
+    assert r.status_code == 200
+
+
+def test_nav_includes_offers_link(client):
+    """nav.js includes a link to /form/offers."""
+    r = client.get("/static/nav.js")
+    assert r.status_code == 200
+    assert "/form/offers" in r.text
+
+
+def test_offers_pct_none_when_prices_missing(env, monkeypatch):
+    """pct_of_ask is None when listing_price is absent."""
+    import tgw.offers as offers_mod
+
+    offers = [{"offer_id": "1", "listing_id": "x", "title": "t", "sku": SKU_A,
+               "buyer": "b", "offer_price": 10.0, "listing_price": None,
+               "status": "Pending", "expiry": ""}]
+
+    monkeypatch.setattr(offers_mod, "cmd_offers_list",
+                        lambda cfg, **kw: {"ok": True, "offers": offers, "auto_accepted": [], "count": 1})
+
+    client = env["client"]
+    r = client.get("/api/offers", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    assert r.json()["offers"][0]["pct_of_ask"] is None

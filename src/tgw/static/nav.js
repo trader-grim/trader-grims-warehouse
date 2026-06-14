@@ -7,6 +7,7 @@
     '<a href="/form/items">Inventory</a>' +
     '<a href="/docs">Docs</a>' +
     '<a href="/form/links">Links</a>' +
+    '<a href="/form/offers">Offers</a>' +
     '<div class="nav-dropdown">' +
       '<button class="nav-dropdown-toggle">Operations &#9662;</button>' +
       '<div class="nav-dropdown-menu">' +

@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-06-14 19:48 UTC — 41 open, 815 done in the last 7 days._
+_Rendered 2026-06-14 19:57 UTC — 39 open, 817 done in the last 7 days._
 
 ## admin (16 open)
 
@@ -48,12 +48,10 @@ _Rendered 2026-06-14 19:48 UTC — 41 open, 815 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (13 open)
+## claude (11 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
-| 865 | 50 |  | tgw todo --next: pipe to less + post-confirm loop — after copying brief to clipboard, pipe output to less (TTY-only, falls back to plain print if not a TTY); on q, prompt 'Task #NNN complete? [Y/n/s]' where Y=mark done, n=leave open exit, s=skip (leave open, show next task); enables rapid iteration through task queue; all prompting guarded by sys.stdin.isatty() so non-interactive use unchanged |  |  |
-| 852 | 52 |  | PP-EDITOR-001 Phase 3g — /form/offers Best Offers UI + API: GET /api/offers (wraps get_best_offers, returns pending list with item context); POST /api/offers/{offer_id}/respond (wraps cmd_offers_respond, dry_run param); /form/offers page: pending offer rows with thumbnail + title + asking price + offer amount + % of ask (large visual) + Accept/Counter/Decline inline; counter price input; dry-run default with Go Live toggle; auto-refreshes on respond; item location shown (findability check) | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
 | 853 | 53 |  | PP-EDITOR-001 Phase 3h — /form/revisions revision review UI + API: GET /api/items/pending-revision (items with non-empty revision_draft, via json_extract on sqlite catalog or full-scan fallback); POST /api/items/{sku}/revision/apply (wraps cmd_revise_apply, dry_run param, _APPLY_ENABLED gate); DELETE /api/items/{sku}/revision (discards revision_draft from item JSON); /form/revisions page: list items with pending draft, inline diff table (field/current/proposed red+green), Apply/Discard buttons per item, dry-run default with Go Live toggle | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
 | 854 | 54 |  | PP-EDITOR-001 Phase 3i — /form/review post-draft review queue + API: GET /api/items/review-queue (items where ebay_draft completed, status not Staged/Ready/Listed/Sold — the human approval step); POST /api/items/{sku}/action approve (sets status=Ready via patch); /form/review page: compact rows (thumbnail + AI title + price + condition + category), inline Approve/Edit/Re-draft buttons, batch Approve All button, count badge in nav; primary workflow surface for post-pipeline QA | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
 | 855 | 55 |  | PP-EDITOR-001 Phase 3j — /form/pipeline pipeline monitor + dead-letter manager: queue depth table (queue/pending/running/done-today/failed); active jobs (currently running SKUs with elapsed time); GET /api/system/workers (systemd unit states via subprocess for all tgw-worker@ units + tgw-http); POST /api/jobs/{job_id}/requeue (re-enqueue dead-letter with fresh dedupe key); dead-letter list with per-job requeue/cancel; auto-refresh every 30s | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
@@ -72,10 +70,12 @@ _Rendered 2026-06-14 19:48 UTC — 41 open, 815 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — Sold reconciliation and inventory status sync (design ready)\|PP-SOLD-001]] |  |
 
-## Done this week (815)
+## Done this week (817)
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 852 | claude | 2026-06-14 | PP-EDITOR-001 Phase 3g — /form/offers Best Offers UI + API: GET /api/offers (wraps get_best_offers, returns pending list with item context); POST /api/offers/{offer_id}/respond (wraps cmd_offers_respond, dry_run param); /form/offers page: pending offer rows with thumbnail + title + asking price + offer amount + % of ask (large visual) + Accept/Counter/Decline inline; counter price input; dry-run default with Go Live toggle; auto-refreshes on respond; item location shown (findability check) |
+| 865 | claude | 2026-06-14 | tgw todo --next: pipe to less + post-confirm loop — after copying brief to clipboard, pipe output to less (TTY-only, falls back to plain print if not a TTY); on q, prompt 'Task #NNN complete? [Y/n/s]' where Y=mark done, n=leave open exit, s=skip (leave open, show next task); enables rapid iteration through task queue; all prompting guarded by sys.stdin.isatty() so non-interactive use unchanged |
 | 851 | claude | 2026-06-14 | PP-EDITOR-001 Phase 3f — /docs/{path} vault markdown renderer: GET /docs/{path} serves files from docs/TGW-Plan-Vault/ rendered as HTML (python-markdown or mistune); covers runbooks/INDEX.md + each runbook, reference/ISSUES.md, reference/TGW-Architecture-Overview.md, reference/TGW-Pipeline-Flow.md, plan/handoff.md, reference/invariants.md; sidebar nav listing all docs; path traversal validated (must stay within vault dir); shared static CSS from #846 |
 | 850 | claude | 2026-06-14 | PP-EDITOR-001 Phase 3e — /form/links external links hub: organized sections — eBay (Seller Hub, Active Listings, Orders, Messages/Offers, Returns, Performance, Promotions, Fees); AI/ML (Google AI Studio, OpenRouter dashboard, Anthropic Console); Infrastructure (Tailscale admin, GitHub repo); Research (eBay sold listings search, Discogs marketplace); static page, no API calls, high value on day one |
 | 860 | claude | 2026-06-14 | tgw todo --next AGENT shorthand: copies top open task to clipboard + prints to console; replaces multi-flag combo. PP-TODO-001 extension. |
