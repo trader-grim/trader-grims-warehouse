@@ -100,7 +100,14 @@ async def lifespan(app: FastAPI):
     log.info("tgw-http shutting down")
 
 
-app = FastAPI(title="tgw-http", version="1.0", lifespan=lifespan)
+app = FastAPI(
+    title="tgw-http",
+    version="1.0",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 _STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
@@ -2394,6 +2401,177 @@ def links_form():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
     ))
+
+
+# ---------------------------------------------------------------------------
+# GET /docs  /docs/{path}  — vault markdown renderer (PP-EDITOR-001 Phase 3f)
+# ---------------------------------------------------------------------------
+
+# Directories shown in sidebar (in display order); values relative to vault root.
+_DOCS_NAV: list[tuple[str, str]] = [
+    ("Runbooks", "reference/runbooks"),
+    ("Reference", "reference"),
+    ("Plan", "plan"),
+]
+
+# Reference sub-dirs excluded from the flat "Reference" section.
+_DOCS_REF_SKIP = {"runbooks", "research"}
+
+_DOCS_EXTRA_CSS = (
+    ".docs-layout{display:grid;grid-template-columns:220px 1fr;gap:0;min-height:calc(100vh - 40px)}"
+    "@media(max-width:640px){.docs-layout{grid-template-columns:1fr}}"
+    ".docs-sidebar{border-right:1px solid #333;padding:10px 10px 20px;overflow-y:auto;"
+    "  max-height:calc(100vh - 40px);position:sticky;top:0}"
+    "@media(max-width:640px){.docs-sidebar{border-right:none;border-bottom:1px solid #333;"
+    "  max-height:none;position:static}}"
+    ".docs-section{margin-bottom:14px}"
+    ".docs-sec-label{font-size:.7em;text-transform:uppercase;letter-spacing:.1em;color:#555;"
+    "  padding:0 4px;margin-bottom:4px}"
+    ".docs-link{display:block;padding:4px 6px;border-radius:4px;font-size:.8em;color:#999;"
+    "  text-decoration:none;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}"
+    ".docs-link:hover{background:#2a2a3a;color:#ccc}"
+    ".docs-link.active{background:#1a3060;color:#9bf;font-weight:600}"
+    ".docs-content{padding:10px 16px;min-width:0}"
+    ".docs-content h1{font-size:1.2em;border-bottom:1px solid #333;padding-bottom:6px;margin-top:4px}"
+    ".docs-content h2{font-size:1.05em;margin-top:20px;color:#9bf}"
+    ".docs-content h3{font-size:.95em;color:#aaa;margin-top:14px}"
+    ".docs-content h4,.docs-content h5{font-size:.88em;color:#888;margin-top:10px}"
+    ".docs-content p{line-height:1.6;margin:8px 0;font-size:.88em}"
+    ".docs-content ul,.docs-content ol{padding-left:18px;font-size:.88em;line-height:1.6}"
+    ".docs-content li{margin:2px 0}"
+    ".docs-content code{font-family:monospace;background:#1e1e1e;border:1px solid #333;"
+    "  border-radius:3px;padding:1px 4px;font-size:.85em;color:#bfb}"
+    ".docs-content pre{background:#111;border:1px solid #333;border-radius:6px;padding:10px;"
+    "  overflow-x:auto;margin:8px 0}"
+    ".docs-content pre code{background:none;border:none;padding:0;font-size:.82em;color:#ccc}"
+    ".docs-content table{border-collapse:collapse;font-size:.82em;width:100%;margin:8px 0}"
+    ".docs-content th,.docs-content td{border:1px solid #333;padding:5px 8px;text-align:left;"
+    "  vertical-align:top}"
+    ".docs-content th{background:#1a1a2a;color:#aaa}"
+    ".docs-content blockquote{border-left:3px solid #444;margin:8px 0 8px 0;padding:4px 12px;"
+    "  color:#888;font-style:italic}"
+    ".docs-content a{color:#4a8ade}"
+    ".docs-content hr{border:none;border-top:1px solid #333;margin:14px 0}"
+    ".docs-404{padding:20px;color:#888;font-size:.9em}"
+)
+
+
+def _vault_root() -> Path:
+    """Return the plan vault root from config, or fall back to repo-relative default."""
+    p = _cfg.get("plan_vault_path")
+    if p:
+        return Path(p)
+    return (Path(__file__).parent.parent.parent / "docs" / "TGW-Plan-Vault").resolve()
+
+
+def _list_docs_sections() -> list[tuple[str, list[tuple[str, str]]]]:
+    """Return [(section_label, [(rel_path, display_name), ...]), ...]."""
+    vault = _vault_root()
+    result = []
+    for label, rel_dir in _DOCS_NAV:
+        d = vault / rel_dir
+        if not d.exists():
+            continue
+        files = []
+        for f in sorted(d.iterdir()):
+            if not f.is_file() or f.suffix.lower() != ".md":
+                continue
+            rel = f.relative_to(vault).as_posix()
+            display = f.stem.replace("-", " ").replace("_", " ")
+            files.append((rel, display))
+        if files:
+            result.append((label, files))
+    return result
+
+
+def _docs_sidebar_html(sections: list[tuple[str, list[tuple[str, str]]]], current: str) -> str:
+    import html as _html
+    parts: list[str] = ['<nav class="docs-sidebar">']
+    for label, files in sections:
+        parts.append(f'<div class="docs-section"><div class="docs-sec-label">{_html.escape(label)}</div>')
+        for rel, display in files:
+            active = " active" if rel == current else ""
+            parts.append(
+                f'<a class="docs-link{active}" href="/docs/{rel}"'
+                f' title="{_html.escape(rel)}">{_html.escape(display)}</a>'
+            )
+        parts.append('</div>')
+    parts.append('</nav>')
+    return "".join(parts)
+
+
+def _docs_page_html(title: str, body_html: str, sidebar_html: str) -> str:
+    import html as _html
+    return (
+        "<!DOCTYPE html><html lang='en'><head>"
+        "<meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        f"<title>{_html.escape(title)} — TGW Docs</title>"
+        + _STATIC_HEAD
+        + f"<style>{_DOCS_EXTRA_CSS}</style>"
+        + "</head><body>"
+        + '<div class="docs-layout">'
+        + sidebar_html
+        + f'<main class="docs-content">{body_html}</main>'
+        + "</div>"
+        + _STATIC_FOOT
+        + "</body></html>"
+    )
+
+
+@app.get("/docs")
+def docs_index_redirect():
+    """Redirect /docs to the runbook index."""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/docs/reference/runbooks/INDEX.md", status_code=302)
+
+
+@app.get("/docs/{path:path}")
+def docs_page(path: str):
+    """Render a vault markdown file as HTML. No Bearer auth (network trust).
+
+    Path traversal: only files within the plan vault root are served.
+    Only .md extensions are accepted.
+    """
+    import mistune
+    from fastapi.responses import HTMLResponse
+
+    # Only .md files
+    if not path.lower().endswith(".md"):
+        raise HTTPException(status_code=404, detail="only .md files are served here")
+
+    vault = _vault_root()
+    # Resolve to absolute path and check it stays within vault
+    try:
+        resolved = (vault / path).resolve()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid path")
+
+    vault_resolved = vault.resolve()
+    try:
+        resolved.relative_to(vault_resolved)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="path outside vault")
+
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail=f"doc not found: {path}")
+
+    try:
+        content = resolved.read_text(encoding="utf-8")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"read error: {exc}")
+
+    md = mistune.create_markdown(
+        escape=False,
+        plugins=["table", "strikethrough"],
+    )
+    body_html = md(content)
+
+    sections = _list_docs_sections()
+    sidebar_html = _docs_sidebar_html(sections, path)
+    title = Path(path).stem.replace("-", " ").replace("_", " ")
+
+    return HTMLResponse(_docs_page_html(title, body_html, sidebar_html))
 
 
 # ---------------------------------------------------------------------------

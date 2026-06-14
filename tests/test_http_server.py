@@ -1526,3 +1526,136 @@ def test_home_has_pm_chat_widget(client):
     assert "pmSend" in r.text
     # Old stub should be gone
     assert "coming soon" not in r.text
+
+
+# ---------------------------------------------------------------------------
+# GET /docs  /docs/{path}  (PP-EDITOR-001 Phase 3f)
+# ---------------------------------------------------------------------------
+
+def _seed_vault(vault_root: Path) -> None:
+    """Write a minimal vault structure for docs tests."""
+    (vault_root / "reference" / "runbooks").mkdir(parents=True)
+    (vault_root / "plan").mkdir(parents=True)
+    (vault_root / "reference" / "runbooks" / "INDEX.md").write_text(
+        "# Runbooks Index\n\nList of runbooks.\n", encoding="utf-8"
+    )
+    (vault_root / "reference" / "runbooks" / "dead-letter-triage.md").write_text(
+        "# Dead Letter Triage\n\nSteps to handle dead letters.\n", encoding="utf-8"
+    )
+    (vault_root / "reference" / "ISSUES.md").write_text(
+        "# Issues\n\nKnown issues go here.\n", encoding="utf-8"
+    )
+    (vault_root / "plan" / "handoff.md").write_text(
+        "# Handoff\n\nSession handoff notes.\n", encoding="utf-8"
+    )
+
+
+def test_docs_redirect(env):
+    """GET /docs redirects to the runbook index."""
+    client = env["client"]
+    vault = Path(env["cfg"]["plan_vault_path"])
+    _seed_vault(vault)
+
+    r = client.get("/docs", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"].startswith("/docs/")
+
+
+def test_docs_renders_markdown(env):
+    """GET /docs/{path} renders a markdown file as HTML."""
+    client = env["client"]
+    vault = Path(env["cfg"]["plan_vault_path"])
+    _seed_vault(vault)
+
+    r = client.get("/docs/reference/runbooks/INDEX.md", follow_redirects=True)
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert "Runbooks Index" in r.text
+    assert "docs-content" in r.text
+    assert "docs-sidebar" in r.text
+
+
+def test_docs_sidebar_lists_docs(env):
+    """Sidebar contains links to other vault docs."""
+    client = env["client"]
+    vault = Path(env["cfg"]["plan_vault_path"])
+    _seed_vault(vault)
+
+    r = client.get("/docs/reference/runbooks/INDEX.md", follow_redirects=True)
+    assert r.status_code == 200
+    assert "dead-letter-triage" in r.text
+    assert "ISSUES" in r.text or "Issues" in r.text
+    assert "handoff" in r.text or "Handoff" in r.text
+
+
+def test_docs_active_link_marked(env):
+    """The current doc's sidebar link has the active class."""
+    client = env["client"]
+    vault = Path(env["cfg"]["plan_vault_path"])
+    _seed_vault(vault)
+
+    r = client.get("/docs/reference/runbooks/INDEX.md", follow_redirects=True)
+    assert r.status_code == 200
+    assert 'class="docs-link active"' in r.text
+
+
+def test_docs_non_md_rejected(env):
+    """Non-.md paths return 404."""
+    client = env["client"]
+    vault = Path(env["cfg"]["plan_vault_path"])
+    _seed_vault(vault)
+
+    r = client.get("/docs/reference/runbooks/INDEX.txt")
+    assert r.status_code == 404
+
+
+def test_docs_path_traversal_rejected(env):
+    """../  traversal outside the vault root returns 403."""
+    client = env["client"]
+    vault = Path(env["cfg"]["plan_vault_path"])
+    _seed_vault(vault)
+    # Write a file outside the vault to confirm it would exist if served.
+    outside = vault.parent / "secret.md"
+    outside.write_text("secret", encoding="utf-8")
+
+    r = client.get("/docs/../secret.md")
+    assert r.status_code in (403, 404)
+
+
+def test_docs_missing_file_404(env):
+    """Missing file returns 404."""
+    client = env["client"]
+    vault = Path(env["cfg"]["plan_vault_path"])
+    _seed_vault(vault)
+
+    r = client.get("/docs/reference/does-not-exist.md")
+    assert r.status_code == 404
+
+
+def test_docs_uses_static_css(env):
+    """Rendered page links the shared tgw.css."""
+    client = env["client"]
+    vault = Path(env["cfg"]["plan_vault_path"])
+    _seed_vault(vault)
+
+    r = client.get("/docs/reference/ISSUES.md", follow_redirects=True)
+    assert r.status_code == 200
+    assert "tgw.css" in r.text
+
+
+def test_docs_plan_handoff(env):
+    """plan/handoff.md can be fetched via /docs/plan/handoff.md."""
+    client = env["client"]
+    vault = Path(env["cfg"]["plan_vault_path"])
+    _seed_vault(vault)
+
+    r = client.get("/docs/plan/handoff.md", follow_redirects=True)
+    assert r.status_code == 200
+    assert "Handoff" in r.text
+
+
+def test_nav_includes_docs_link(client):
+    """nav.js ships a /docs link so every page can reach the doc renderer."""
+    r = client.get("/static/nav.js")
+    assert r.status_code == 200
+    assert "/docs" in r.text

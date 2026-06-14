@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-06-14 19:26 UTC — 42 open, 813 done in the last 7 days._
+_Rendered 2026-06-14 19:36 UTC — 40 open, 815 done in the last 7 days._
 
 ## admin (16 open)
 
@@ -48,12 +48,10 @@ _Rendered 2026-06-14 19:26 UTC — 42 open, 813 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (14 open)
+## claude (12 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
-| 850 | 50 |  | PP-EDITOR-001 Phase 3e — /form/links external links hub: organized sections — eBay (Seller Hub, Active Listings, Orders, Messages/Offers, Returns, Performance, Promotions, Fees); AI/ML (Google AI Studio, OpenRouter dashboard, Anthropic Console); Infrastructure (Tailscale admin, GitHub repo); Research (eBay sold listings search, Discogs marketplace); static page, no API calls, high value on day one | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
-| 851 | 51 |  | PP-EDITOR-001 Phase 3f — /docs/{path} vault markdown renderer: GET /docs/{path} serves files from docs/TGW-Plan-Vault/ rendered as HTML (python-markdown or mistune); covers runbooks/INDEX.md + each runbook, reference/ISSUES.md, reference/TGW-Architecture-Overview.md, reference/TGW-Pipeline-Flow.md, plan/handoff.md, reference/invariants.md; sidebar nav listing all docs; path traversal validated (must stay within vault dir); shared static CSS from #846 | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
 | 852 | 52 |  | PP-EDITOR-001 Phase 3g — /form/offers Best Offers UI + API: GET /api/offers (wraps get_best_offers, returns pending list with item context); POST /api/offers/{offer_id}/respond (wraps cmd_offers_respond, dry_run param); /form/offers page: pending offer rows with thumbnail + title + asking price + offer amount + % of ask (large visual) + Accept/Counter/Decline inline; counter price input; dry-run default with Go Live toggle; auto-refreshes on respond; item location shown (findability check) | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
 | 853 | 53 |  | PP-EDITOR-001 Phase 3h — /form/revisions revision review UI + API: GET /api/items/pending-revision (items with non-empty revision_draft, via json_extract on sqlite catalog or full-scan fallback); POST /api/items/{sku}/revision/apply (wraps cmd_revise_apply, dry_run param, _APPLY_ENABLED gate); DELETE /api/items/{sku}/revision (discards revision_draft from item JSON); /form/revisions page: list items with pending draft, inline diff table (field/current/proposed red+green), Apply/Discard buttons per item, dry-run default with Go Live toggle | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
 | 854 | 54 |  | PP-EDITOR-001 Phase 3i — /form/review post-draft review queue + API: GET /api/items/review-queue (items where ebay_draft completed, status not Staged/Ready/Listed/Sold — the human approval step); POST /api/items/{sku}/action approve (sets status=Ready via patch); /form/review page: compact rows (thumbnail + AI title + price + condition + category), inline Approve/Edit/Re-draft buttons, batch Approve All button, count badge in nav; primary workflow surface for post-pipeline QA | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
@@ -73,10 +71,12 @@ _Rendered 2026-06-14 19:26 UTC — 42 open, 813 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — Sold reconciliation and inventory status sync (design ready)\|PP-SOLD-001]] |  |
 
-## Done this week (813)
+## Done this week (815)
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 851 | claude | 2026-06-14 | PP-EDITOR-001 Phase 3f — /docs/{path} vault markdown renderer: GET /docs/{path} serves files from docs/TGW-Plan-Vault/ rendered as HTML (python-markdown or mistune); covers runbooks/INDEX.md + each runbook, reference/ISSUES.md, reference/TGW-Architecture-Overview.md, reference/TGW-Pipeline-Flow.md, plan/handoff.md, reference/invariants.md; sidebar nav listing all docs; path traversal validated (must stay within vault dir); shared static CSS from #846 |
+| 850 | claude | 2026-06-14 | PP-EDITOR-001 Phase 3e — /form/links external links hub: organized sections — eBay (Seller Hub, Active Listings, Orders, Messages/Offers, Returns, Performance, Promotions, Fees); AI/ML (Google AI Studio, OpenRouter dashboard, Anthropic Console); Infrastructure (Tailscale admin, GitHub repo); Research (eBay sold listings search, Discogs marketplace); static page, no API calls, high value on day one |
 | 860 | claude | 2026-06-14 | tgw todo --next AGENT shorthand: copies top open task to clipboard + prints to console; replaces multi-flag combo. PP-TODO-001 extension. |
 | 848 | claude | 2026-06-14 | PP-EDITOR-001 Phase 3c — /form/ home dashboard: status strip (health chips from /api/health), action cards from /api/dashboard (needs_review/offers/photos/revisions/dead-letter each as clickable card with count badge), quick intake bar (SKU input → /form/intake/{sku}), PM chat window (see #849), recent activity feed (last 15 queue completions); orientation block (system summary + start-here links for first-time users); requires #846 static files + #847 dashboard API |
 | 847 | claude | 2026-06-14 | PP-EDITOR-001 Phase 3b — GET /api/dashboard summary endpoint: single call returning needs_review count (ebay_draft done + not staged/ready), pending_offers count (GetBestOffers Pending), needs_photos count (items with zero images in ItemData), has_revision_draft count, dead_letter_count (from postgres), ready_count, worker_health (all tgw-worker@ units up/total); used by home dashboard action cards |
