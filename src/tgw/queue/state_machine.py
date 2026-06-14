@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, Generator, List, Optional
@@ -8,14 +9,17 @@ from typing import Any, Dict, Generator, List, Optional
 import psycopg2
 import psycopg2.extras
 
+log = logging.getLogger(__name__)
+
 # Module-level DSN — set by init() before any worker starts.
 _DSN: str = 'dbname=state_machine user=tgw'
 
 
 def init(dsn: str) -> None:
     """Set the PostgreSQL DSN for all state-machine operations."""
-    global _DSN
+    global _DSN, _ai_usage_table_ready
     _DSN = dsn
+    _ai_usage_table_ready = False
 
 
 @contextmanager
@@ -649,8 +653,8 @@ def record_ai_usage(
                      prompt_tokens, completion_tokens, total_tokens,
                      duration_ms, success, error_msg, sku or None),
                 )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("record_ai_usage failed: %s", exc)
 
 
 def query_ai_usage(since_days: int = 7) -> List[Dict[str, Any]]:

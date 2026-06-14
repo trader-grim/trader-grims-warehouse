@@ -901,7 +901,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=0, metavar="N", help="only classify first N pending entries (0 = all)")
 
     p = sub.add_parser("ai-usage", help="AI/LLM usage report by provider/task/day (Phase 5 #2)")
-    p.add_argument("--since", type=int, default=7, metavar="DAYS", help="report window in days (default: 7)")
+    p.add_argument("--since", type=int, default=None, metavar="DAYS", help="report window in days (default: 7, or 30 with --by-sku)")
     p.add_argument("--by-sku", metavar="SKU", default="", help="show per-task breakdown for a single SKU")
     p.add_argument("--json", dest="as_json", action="store_true", help="output raw JSON instead of formatted table")
 
@@ -2179,6 +2179,14 @@ def cmd_ai_usage(cfg: Dict[str, Any], since_days: int = 7) -> Dict[str, Any]:
     return {'ok': True, 'rows': rows, 'since_days': since_days}
 
 
+def _fmt_dur(ms: int) -> str:
+    return f'{ms // 60000}m {(ms % 60000) // 1000}s' if ms >= 60000 else f'{ms // 1000}s'
+
+
+def _fmt_tokens(n: Optional[int]) -> str:
+    return f'{n:,}' if n is not None else 'n/a'
+
+
 def _print_ai_usage_table(rows: List[Dict[str, Any]], since_days: int) -> None:
     if not rows:
         print(f'No AI usage recorded in the last {since_days} day(s).')
@@ -2191,19 +2199,16 @@ def _print_ai_usage_table(rows: List[Dict[str, Any]], since_days: int) -> None:
         if day != current_day:
             print(f'  {day}')
             current_day = day
-        task     = row.get('task', '')
-        provider = row.get('provider', '')
-        model    = row.get('model', '')
-        calls    = int(row.get('calls') or 0)
-        ms       = int(row.get('total_ms') or 0)
-        tokens   = row.get('total_tokens')
-        errors   = int(row.get('errors') or 0)
-
-        dur = f'{ms // 60000}m {(ms % 60000) // 1000}s' if ms >= 60000 else f'{ms // 1000}s'
-        tok_str = f'{int(tokens):,}' if tokens else 'n/a'
-        err_str = f'  ⚠ {errors} error(s)' if errors else ''
+        task        = row.get('task', '')
+        provider    = row.get('provider', '')
+        model       = row.get('model', '')
+        calls       = int(row.get('calls') or 0)
+        ms          = int(row.get('total_ms') or 0)
+        tokens      = row.get('total_tokens')
+        errors      = int(row.get('errors') or 0)
         model_short = model.split('/')[-1] if '/' in model else model
-        print(f'    {task:<20} {provider:<12} {model_short:<32} {calls:>4} calls  {dur:>8}  {tok_str:>10} tokens{err_str}')
+        err_str     = f'  ⚠ {errors} error(s)' if errors else ''
+        print(f'    {task:<20} {provider:<12} {model_short:<32} {calls:>4} calls  {_fmt_dur(ms):>8}  {_fmt_tokens(tokens):>10} tokens{err_str}')
     print()
 
 
@@ -2228,30 +2233,29 @@ def _print_ai_usage_by_sku_table(sku: str, rows: List[Dict[str, Any]], since_day
 
     print(f'AI usage for {sku} — last {since_days} day(s)\n')
     total_calls = total_ms = total_tokens = total_errors = 0
+    has_token_data = False
     for row in rows:
-        task     = row.get('task', '')
-        provider = row.get('provider', '')
-        model    = row.get('model', '')
-        calls    = int(row.get('calls') or 0)
-        ms       = int(row.get('total_ms') or 0)
-        tokens   = row.get('total_tokens')
-        errors   = int(row.get('errors') or 0)
-
-        dur = f'{ms // 60000}m {(ms % 60000) // 1000}s' if ms >= 60000 else f'{ms // 1000}s'
-        tok_str = f'{int(tokens):,}' if tokens else 'n/a'
-        err_str = f'  ⚠ {errors} error(s)' if errors else ''
+        task        = row.get('task', '')
+        provider    = row.get('provider', '')
+        model       = row.get('model', '')
+        calls       = int(row.get('calls') or 0)
+        ms          = int(row.get('total_ms') or 0)
+        tokens      = row.get('total_tokens')
+        errors      = int(row.get('errors') or 0)
         model_short = model.split('/')[-1] if '/' in model else model
-        print(f'  {task:<20} {provider:<12} {model_short:<32} {calls:>4} calls  {dur:>8}  {tok_str:>10} tokens{err_str}')
+        err_str     = f'  ⚠ {errors} error(s)' if errors else ''
+        print(f'  {task:<20} {provider:<12} {model_short:<32} {calls:>4} calls  {_fmt_dur(ms):>8}  {_fmt_tokens(tokens):>10} tokens{err_str}')
 
         total_calls  += calls
         total_ms     += ms
-        total_tokens += int(tokens) if tokens else 0
+        if tokens is not None:
+            total_tokens += int(tokens)
+            has_token_data = True
         total_errors += errors
 
-    dur = f'{total_ms // 60000}m {(total_ms % 60000) // 1000}s' if total_ms >= 60000 else f'{total_ms // 1000}s'
-    tok_str = f'{total_tokens:,}' if total_tokens else 'n/a'
+    total_tok = total_tokens if has_token_data else None
     err_str = f'  ⚠ {total_errors} error(s)' if total_errors else ''
-    print(f'\n  {"TOTAL":<20} {"":12} {"":32} {total_calls:>4} calls  {dur:>8}  {tok_str:>10} tokens{err_str}')
+    print(f'\n  {"TOTAL":<20} {"":12} {"":32} {total_calls:>4} calls  {_fmt_dur(total_ms):>8}  {_fmt_tokens(total_tok):>10} tokens{err_str}')
     print()
 
 
@@ -3470,25 +3474,21 @@ def main() -> int:
             return 0 if result.get("ok") else 1
 
         elif args.op == "ai-usage":
-            by_sku = getattr(args, "by_sku", "")
+            by_sku = args.by_sku
+            since = args.since if args.since is not None else (30 if by_sku else 7)
             if by_sku:
-                result = cmd_ai_usage_by_sku(cfg, sku=by_sku, since_days=args.since)
-                if result.get("ok"):
-                    if getattr(args, "as_json", False):
-                        print(json.dumps(result, indent=2, default=str))
-                    else:
-                        _print_ai_usage_by_sku_table(result["sku"], result["rows"], result["since_days"])
-                else:
-                    print(f"error: {result.get('error', 'unknown error')}", file=sys.stderr)
+                result = cmd_ai_usage_by_sku(cfg, sku=by_sku, since_days=since)
             else:
-                result = cmd_ai_usage(cfg, since_days=args.since)
-                if result.get("ok"):
-                    if getattr(args, "as_json", False):
-                        print(json.dumps(result, indent=2, default=str))
-                    else:
-                        _print_ai_usage_table(result["rows"], result["since_days"])
+                result = cmd_ai_usage(cfg, since_days=since)
+            if result.get("ok"):
+                if args.as_json:
+                    print(json.dumps(result, indent=2, default=str))
+                elif by_sku:
+                    _print_ai_usage_by_sku_table(result["sku"], result["rows"], result["since_days"])
                 else:
-                    print(f"error: {result.get('error', 'unknown error')}", file=sys.stderr)
+                    _print_ai_usage_table(result["rows"], result["since_days"])
+            else:
+                print(f"error: {result.get('error', 'unknown error')}", file=sys.stderr)
             return 0 if result.get("ok") else 1
 
         elif args.op == "build-full":

@@ -2,7 +2,7 @@
 tgw.alt_text — generate alt_text + seo_caption via vision model.
 
 Provider and model are configured in tgw-models.json under the "alt_text" key.
-Defaults: openrouter / google/gemini-2.5-flash.
+Defaults: openrouter / google/gemini-2.5-flash-lite.
 
 Workflow:
   1. Find primary image in ItemData/<sku>/

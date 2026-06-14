@@ -2,7 +2,7 @@
 tgw.workers.ai_identify — Vision-model item identification worker.
 
 Provider and model are configured in tgw-models.json under the "ai_identify" key.
-Defaults: openrouter / google/gemini-2.5-flash (fast, cheap).
+Defaults: openrouter / google/gemini-2.5-flash-lite (fast, cheap).
 Ollama fallback: qwen2.5vl:7b (CPU-only, slow).
 
 Results are written only if the item still has an empty ai_identified flag — safe
