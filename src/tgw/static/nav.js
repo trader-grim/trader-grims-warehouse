@@ -5,6 +5,7 @@
     '<a class="brand" href="/form/home">TGW</a>' +
     '<a href="/form/home">Home</a>' +
     '<a href="/form/items">Inventory</a>' +
+    '<a href="/form/links">Links</a>' +
     '<div class="nav-dropdown">' +
       '<button class="nav-dropdown-toggle">Operations &#9662;</button>' +
       '<div class="nav-dropdown-menu">' +

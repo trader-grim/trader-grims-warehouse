@@ -2258,6 +2258,145 @@ def home_form():
 
 
 # ---------------------------------------------------------------------------
+# GET /form/links — external links hub (PP-EDITOR-001 Phase 3e)
+# ---------------------------------------------------------------------------
+
+_LINKS_HTML = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TGW Links</title>
+{static_head}
+<style>
+.links-section{{margin-bottom:22px}}
+.section-label{{font-size:.75em;text-transform:uppercase;letter-spacing:.08em;
+  color:#666;margin-bottom:8px}}
+.links-grid{{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}}
+@media(min-width:500px){{.links-grid{{grid-template-columns:repeat(3,1fr)}}}}
+@media(min-width:760px){{.links-grid{{grid-template-columns:repeat(4,1fr)}}}}
+.lcard{{background:#1a1a1a;border:1px solid #333;border-radius:8px;
+  padding:12px 10px;text-decoration:none;color:inherit;display:block;
+  transition:border-color .15s,background .15s}}
+.lcard:hover{{border-color:#555;background:#222}}
+.lcard-title{{font-size:.9em;font-weight:600;color:#ccc;margin-bottom:3px}}
+.lcard-desc{{font-size:.76em;color:#666;line-height:1.3}}
+.lcard.ebay{{border-color:#2a3a1a}}.lcard.ebay:hover{{border-color:#4a7a3a}}
+.lcard.ebay .lcard-title{{color:#9d9}}
+.lcard.ai{{border-color:#1a2a3a}}.lcard.ai:hover{{border-color:#3a6a9a}}
+.lcard.ai .lcard-title{{color:#9bf}}
+.lcard.infra{{border-color:#2a2a1a}}.lcard.infra:hover{{border-color:#6a6a3a}}
+.lcard.infra .lcard-title{{color:#dd9}}
+.lcard.research{{border-color:#2a1a2a}}.lcard.research:hover{{border-color:#6a3a6a}}
+.lcard.research .lcard-title{{color:#c9c}}
+</style>
+</head>
+<body>
+<h2>External Links</h2>
+
+<div class="links-section">
+  <div class="section-label">eBay</div>
+  <div class="links-grid">
+    <a href="https://www.ebay.com/sh/ovw" target="_blank" rel="noopener noreferrer" class="lcard ebay">
+      <div class="lcard-title">Seller Hub</div>
+      <div class="lcard-desc">Overview &amp; insights</div>
+    </a>
+    <a href="https://www.ebay.com/sh/lst/active" target="_blank" rel="noopener noreferrer" class="lcard ebay">
+      <div class="lcard-title">Active Listings</div>
+      <div class="lcard-desc">Manage live inventory</div>
+    </a>
+    <a href="https://www.ebay.com/sh/ord" target="_blank" rel="noopener noreferrer" class="lcard ebay">
+      <div class="lcard-title">Orders</div>
+      <div class="lcard-desc">Sales &amp; fulfilment</div>
+    </a>
+    <a href="https://messages.ebay.com/" target="_blank" rel="noopener noreferrer" class="lcard ebay">
+      <div class="lcard-title">Messages / Offers</div>
+      <div class="lcard-desc">Buyer messages &amp; best offers</div>
+    </a>
+    <a href="https://www.ebay.com/sh/returns" target="_blank" rel="noopener noreferrer" class="lcard ebay">
+      <div class="lcard-title">Returns</div>
+      <div class="lcard-desc">Open return cases</div>
+    </a>
+    <a href="https://www.ebay.com/sh/perf/listing" target="_blank" rel="noopener noreferrer" class="lcard ebay">
+      <div class="lcard-title">Performance</div>
+      <div class="lcard-desc">Seller level &amp; metrics</div>
+    </a>
+    <a href="https://www.ebay.com/sh/mkt/promotions" target="_blank" rel="noopener noreferrer" class="lcard ebay">
+      <div class="lcard-title">Promotions</div>
+      <div class="lcard-desc">Sale events &amp; offers</div>
+    </a>
+    <a href="https://www.ebay.com/sh/reports/fee-statement" target="_blank" rel="noopener noreferrer" class="lcard ebay">
+      <div class="lcard-title">Fees</div>
+      <div class="lcard-desc">Invoices &amp; fee statements</div>
+    </a>
+  </div>
+</div>
+
+<div class="links-section">
+  <div class="section-label">AI / ML</div>
+  <div class="links-grid">
+    <a href="https://aistudio.google.com/" target="_blank" rel="noopener noreferrer" class="lcard ai">
+      <div class="lcard-title">Google AI Studio</div>
+      <div class="lcard-desc">Gemini prompt playground</div>
+    </a>
+    <a href="https://openrouter.ai/settings/overview" target="_blank" rel="noopener noreferrer" class="lcard ai">
+      <div class="lcard-title">OpenRouter</div>
+      <div class="lcard-desc">Dashboard &amp; usage</div>
+    </a>
+    <a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer" class="lcard ai">
+      <div class="lcard-title">Anthropic Console</div>
+      <div class="lcard-desc">Claude API &amp; usage</div>
+    </a>
+  </div>
+</div>
+
+<div class="links-section">
+  <div class="section-label">Infrastructure</div>
+  <div class="links-grid">
+    <a href="https://login.tailscale.com/admin/" target="_blank" rel="noopener noreferrer" class="lcard infra">
+      <div class="lcard-title">Tailscale</div>
+      <div class="lcard-desc">VPN admin &amp; devices</div>
+    </a>
+    <a href="https://github.com/trader-grim/trader-grims-warehouse" target="_blank" rel="noopener noreferrer" class="lcard infra">
+      <div class="lcard-title">GitHub Repo</div>
+      <div class="lcard-desc">Source code &amp; history</div>
+    </a>
+  </div>
+</div>
+
+<div class="links-section">
+  <div class="section-label">Research</div>
+  <div class="links-grid">
+    <a href="https://www.ebay.com/sch/i.html?LH_Sold=1&LH_Complete=1&_sop=13" target="_blank" rel="noopener noreferrer" class="lcard research">
+      <div class="lcard-title">eBay Sold Listings</div>
+      <div class="lcard-desc">Completed sales search</div>
+    </a>
+    <a href="https://www.discogs.com/sell/list" target="_blank" rel="noopener noreferrer" class="lcard research">
+      <div class="lcard-title">Discogs Marketplace</div>
+      <div class="lcard-desc">Vinyl &amp; media pricing</div>
+    </a>
+  </div>
+</div>
+
+{static_foot}
+</body>
+</html>
+"""
+
+
+@app.get("/form/links")
+def links_form():
+    """External links hub — eBay, AI/ML, infrastructure, research. No auth, no API calls."""
+    from fastapi.responses import HTMLResponse
+
+    return HTMLResponse(_LINKS_HTML.format(
+        static_head=_STATIC_HEAD,
+        static_foot=_STATIC_FOOT,
+    ))
+
+
+# ---------------------------------------------------------------------------
 # POST /webhooks/ebay/notification — eBay push notification (no Bearer auth)
 # ---------------------------------------------------------------------------
 
