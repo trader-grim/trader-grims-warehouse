@@ -629,3 +629,137 @@ def test_push_clipboard_returns_false_on_exception():
         result = _push_clipboard('hello')
 
     assert result is False
+
+
+# ---------------------------------------------------------------------------
+# _next_interactive: less pager + done/skip prompt (todo #865)
+# ---------------------------------------------------------------------------
+
+def _interactive_cfg(tmp_path):
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    return {'plan_master_path': plan}
+
+
+def test_next_interactive_y_marks_done(tmp_path):
+    """Y answer marks the task done and returns action='done'."""
+    from tgw import todo as todo_mod
+    cfg = _interactive_cfg(tmp_path)
+
+    with patch.object(todo_mod, 'todo_top', return_value=_ROW_9):
+        with patch.object(todo_mod, 'todo_get', return_value=_ROW_9):
+            with patch.object(todo_mod, '_push_clipboard', return_value=True):
+                with patch.object(todo_mod, '_tty_prompt', return_value='y') as mock_prompt:
+                    with patch('subprocess.run'):
+                        with patch.object(todo_mod, 'todo_done', return_value={'ok': True, 'id': 9}) as mock_done:
+                            result = todo_mod._next_interactive(cfg, 'claude')
+
+    assert result['ok'] is True
+    assert result['action'] == 'done'
+    assert result['id'] == 9
+    mock_done.assert_called_once_with(9)
+    assert 'complete' in mock_prompt.call_args[0][0].lower()
+
+
+def test_next_interactive_empty_answer_marks_done(tmp_path):
+    """Empty answer (just Enter) is treated as Y — mark done."""
+    from tgw import todo as todo_mod
+    cfg = _interactive_cfg(tmp_path)
+
+    with patch.object(todo_mod, 'todo_top', return_value=_ROW_9):
+        with patch.object(todo_mod, 'todo_get', return_value=_ROW_9):
+            with patch.object(todo_mod, '_push_clipboard', return_value=True):
+                with patch.object(todo_mod, '_tty_prompt', return_value=''):
+                    with patch('subprocess.run'):
+                        with patch.object(todo_mod, 'todo_done', return_value={'ok': True, 'id': 9}):
+                            result = todo_mod._next_interactive(cfg, 'claude')
+
+    assert result['action'] == 'done'
+
+
+def test_next_interactive_n_leaves_open(tmp_path):
+    """n answer leaves the task open and returns action='left_open'."""
+    from tgw import todo as todo_mod
+    cfg = _interactive_cfg(tmp_path)
+
+    with patch.object(todo_mod, 'todo_top', return_value=_ROW_9):
+        with patch.object(todo_mod, 'todo_get', return_value=_ROW_9):
+            with patch.object(todo_mod, '_push_clipboard', return_value=True):
+                with patch.object(todo_mod, '_tty_prompt', return_value='n'):
+                    with patch('subprocess.run'):
+                        with patch.object(todo_mod, 'todo_done') as mock_done:
+                            result = todo_mod._next_interactive(cfg, 'claude')
+
+    assert result['ok'] is True
+    assert result['action'] == 'left_open'
+    mock_done.assert_not_called()
+
+
+def test_next_interactive_s_skips_to_next(tmp_path):
+    """s answer skips the current task and shows the next one (loops once)."""
+    from tgw import todo as todo_mod
+    cfg = _interactive_cfg(tmp_path)
+
+    row_a = dict(_ROW_9, id=9, body='first task')
+    row_b = dict(_ROW_9, id=10, body='second task')
+    top_returns = [row_a, row_b]
+
+    with patch.object(todo_mod, 'todo_top', side_effect=top_returns):
+        with patch.object(todo_mod, 'todo_get', side_effect=[row_a, row_b]):
+            with patch.object(todo_mod, '_push_clipboard', return_value=True):
+                # First call: 's'; second call: 'n' to stop
+                with patch.object(todo_mod, '_tty_prompt', side_effect=['s', 'n']):
+                    with patch('subprocess.run'):
+                        with patch.object(todo_mod, 'todo_done') as mock_done:
+                            result = todo_mod._next_interactive(cfg, 'claude')
+
+    assert result['action'] == 'left_open'
+    assert result['id'] == 10
+    mock_done.assert_not_called()
+
+
+def test_next_interactive_less_not_found_falls_back(tmp_path, capsys):
+    """If less is not installed, falls back to plain print."""
+    from tgw import todo as todo_mod
+    cfg = _interactive_cfg(tmp_path)
+
+    with patch.object(todo_mod, 'todo_top', return_value=_ROW_9):
+        with patch.object(todo_mod, 'todo_get', return_value=_ROW_9):
+            with patch.object(todo_mod, '_push_clipboard', return_value=True):
+                with patch.object(todo_mod, '_tty_prompt', return_value='n'):
+                    with patch('subprocess.run', side_effect=FileNotFoundError):
+                        with patch.object(todo_mod, 'todo_done'):
+                            todo_mod._next_interactive(cfg, 'claude')
+
+    out = capsys.readouterr().out
+    assert 'do the work' in out  # brief printed to console instead
+
+
+def test_next_noninteractive_path_used_when_not_tty(tmp_path):
+    """When stdout is not a TTY, cmd_todo uses the non-interactive path (no less, no prompt)."""
+    from tgw import todo as todo_mod
+    cfg = _interactive_cfg(tmp_path)
+    args = _make_shorthand_args(agent='claude')
+
+    with patch('sys.stdout') as mock_stdout:
+        mock_stdout.isatty.return_value = False
+        with patch('sys.stdin') as mock_stdin:
+            mock_stdin.isatty.return_value = False
+            with patch.object(todo_mod, 'todo_top', return_value=_ROW_9):
+                with patch.object(todo_mod, 'todo_get', return_value=_ROW_9):
+                    with patch.object(todo_mod, '_push_clipboard', return_value=True):
+                        with patch.object(todo_mod, '_next_interactive') as mock_interactive:
+                            result = todo_mod.cmd_todo(cfg, args)
+
+    mock_interactive.assert_not_called()
+    assert result['ok'] is True
+
+
+def test_tty_prompt_returns_empty_on_oserror():
+    """_tty_prompt returns '' if /dev/tty is unavailable."""
+    from tgw.todo import _tty_prompt
+
+    with patch('builtins.open', side_effect=OSError('no tty')):
+        result = _tty_prompt('prompt: ')
+
+    assert result == ''

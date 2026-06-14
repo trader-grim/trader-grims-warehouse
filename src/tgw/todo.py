@@ -416,12 +416,69 @@ def _parse_depends(raw: Optional[str]) -> Optional[List[int]]:
     return [int(p) for p in re.split(r'[,\s]+', raw) if p]
 
 
+def _tty_prompt(prompt: str) -> str:
+    """Write prompt to /dev/tty and read one line. Returns '' on OSError."""
+    try:
+        with open('/dev/tty', 'r+') as tty:
+            tty.write(prompt)
+            tty.flush()
+            return tty.readline().strip().lower()
+    except OSError:
+        return ''
+
+
+def _next_interactive(cfg: Dict[str, Any], agent_name: str) -> Dict[str, Any]:
+    """Interactive --next loop: less pager + done/skip prompt (TTY only)."""
+    import subprocess
+
+    while True:
+        top = todo_top(agent_name)
+        if top is None:
+            print(f'No open tasks for agent: {agent_name}')
+            return {'ok': False, 'error': f'no open tasks for {agent_name}'}
+
+        result = todo_brief(top['id'], cfg['plan_master_path'])
+        if not result['ok']:
+            print(f"Error: {result['error']}")
+            return result
+
+        brief = result['brief']
+
+        # Copy to clipboard first so it's ready before less opens.
+        if not _push_clipboard(brief):
+            print('[clipboard] copy failed — wl-copy and xclip not found')
+
+        # Pipe brief through less. -F quits if output fits on one screen;
+        # -X skips the termcap init/deinit flash.
+        try:
+            subprocess.run(['less', '-FX'], input=brief, text=True)
+        except FileNotFoundError:
+            print(brief)
+
+        answer = _tty_prompt(f'\nTask #{top["id"]} complete? [Y/n/s=skip] ')
+
+        if answer in ('y', 'yes', ''):
+            todo_done(top['id'])
+            print(f'Done: #{top["id"]}')
+            return {'ok': True, 'id': top['id'], 'action': 'done'}
+        elif answer in ('s', 'skip'):
+            print(f'Skipped #{top["id"]} — showing next.')
+            continue
+        else:
+            print(f'Left open: #{top["id"]}')
+            return {'ok': True, 'id': top['id'], 'action': 'left_open'}
+
+
 def cmd_todo(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
     # Shorthand: tgw todo --next [AGENT]
     # Equivalent to: tgw todo brief --next --agent AGENT --clip
     # AGENT comes from the positional, or --agent flag, defaulting to 'claude'.
     if getattr(args, 'next_task', False) and args.agent != 'brief':
+        import sys
         agent_name = getattr(args, 'next_agent', None) or args.agent or 'claude'
+        if sys.stdout.isatty() and sys.stdin.isatty():
+            return _next_interactive(cfg, agent_name)
+        # Non-interactive fallback: plain print + clipboard, no loop.
         top = todo_top(agent_name)
         if top is None:
             print(f'No open tasks for agent: {agent_name}')
