@@ -191,3 +191,4 @@
 - [x] 2026-06-13T04:44 :: keyd: q stuck — added admin todo #135 (investigate keyd q-key stuck: check /etc/keyd/*.conf remapping, keyd -l active layers, evtest hardware verification)
 - [ ] 2026-06-13T17:38 :: tgw todo --agent claude --next --clip  returns full task list. But lets simplify. tgw todo --next claude instead puts claudes next task in the clipboard and prints to console. Much cleaner, simpler, more intuitive.
 - [ ] 2026-06-13T18:18 :: better location for TGW-Plan-Vault/preplexity and gemini. Archive or?
+- [ ] 2026-06-13T21:19 :: note: we are doin so well keeping local resource usage down that the backup rsync is now the heaviest load.
