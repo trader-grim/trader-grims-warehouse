@@ -714,6 +714,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-active", action="store_true", help="skip active listing sync")
     p.add_argument("--no-sold", action="store_true", help="skip sold orders sync")
     p.add_argument("--dry-run", action="store_true", help="show what would change without writing")
+    p.add_argument("--sku", nargs="+", metavar="SKU", help="sync only these SKUs")
+    p.add_argument("--location", default=None, metavar="LOC", help="sync only items at this location")
+    p.add_argument("--status", default=None, metavar="STATUS", help="sync only items with this status")
 
     p = sub.add_parser("sku-migrate", help="SKU normalization (PP-ADD-005)")
     p.add_argument("--check-collisions", action="store_true", help="run collision check only — no changes")
@@ -3944,10 +3947,35 @@ def main() -> int:
             dry_run = args.dry_run
             total_changes = 0
 
+            # Build sku_filter from --sku / --location / --status
+            sku_filter: Optional[Set[str]] = None
+            if args.sku or args.location or args.status:
+                candidate_skus: Optional[Set[str]] = set(args.sku) if args.sku else None
+                if args.location or args.status:
+                    location_filter = args.location
+                    status_filter = args.status
+                    scan_matched: Set[str] = set()
+                    for _jp in itemdata_root.glob("*/*.json"):
+                        try:
+                            _doc = json.loads(_jp.read_text(encoding="utf-8"))
+                        except Exception:
+                            continue
+                        if location_filter and _doc.get("location") != location_filter:
+                            continue
+                        if status_filter and _doc.get("status") != status_filter:
+                            continue
+                        scan_matched.add(_jp.parent.name)
+                    sku_filter = (candidate_skus & scan_matched) if candidate_skus is not None else scan_matched
+                else:
+                    sku_filter = candidate_skus
+                print(f"  Filter active: {len(sku_filter)} SKU(s) selected")
+
             active_stats: Dict[str, Any] = {}
             if not args.no_active:
                 print("Fetching active listings from eBay...")
-                active_stats = sync_active_listings(cfg, itemdata_root, synced_at, dry_run=dry_run)
+                active_stats = sync_active_listings(
+                    cfg, itemdata_root, synced_at, dry_run=dry_run, sku_filter=sku_filter
+                )
                 total_changes += active_stats.get("updated", 0)
                 print(
                     f"  fetched={active_stats['fetched']}  matched={active_stats['matched']}  "
@@ -3962,6 +3990,9 @@ def main() -> int:
             if not args.no_sold:
                 print("Fetching sold orders from eBay...")
                 listing_index = build_listing_index(itemdata_root)
+                if sku_filter is not None:
+                    listing_index = {lid: p for lid, p in listing_index.items()
+                                     if p.parent.name in sku_filter}
                 print(f"  listing index: {len(listing_index)} entries")
                 sold_stats = sync_sold_orders(cfg, listing_index, synced_at, _sold_state_path(cfg), dry_run=dry_run)
                 total_changes += sold_stats.get("sold_marked", 0)
