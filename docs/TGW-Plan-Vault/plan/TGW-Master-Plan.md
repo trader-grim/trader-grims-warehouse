@@ -2807,14 +2807,16 @@ Syncthing syncs → catalog.db (write-locked or in-use mid-sync → corruption r
 Use `sqlite3.Connection.backup(dest)` for atomic SQLite copy (avoids mid-write corruption).
 Endpoint: `GET /api/catalog/snapshot` → streams `tgwcatalog.db` snapshot.
 
-**Sync-conflict resolution worker (open, session 19 — Dave 17:42):** Syncthing emits
-`*.sync-conflict-<ts>-<id>.*` files when two nodes edit the same file (already observed in the
-vault: `.obsidian/community-plugins.sync-conflict-…json`). Proposed: a state worker that scans
-sync roots for `*.sync-conflict-*` artifacts and either (a) auto-resolves by a declared policy
-(e.g. newest-wins for vault config, last-write-wins per PP-ADD-001 decision) or (b) flags them
-for operator review (surface via `tgw health` / notify / the todo dashboard). Pairs with
-PP-PYIPC-001 (Syncthing REST API) for richer conflict metadata; the file-scan version needs no
-API and is buildable now. Scope to vault + portable-catalog sync roots.
+**Sync-conflict resolution worker (DONE 2026-06-13):** `src/tgw/sync_conflict.py` + 47 tests.
+Decision tree (see module docstring):
+
+- `identical` → auto-discard (byte-for-byte match)
+- `divergent_pipeline` → move to `inbox/review/`, priority-15 todo (conflict has unique/different TGW pipeline data: status `sold` vs `In Stock`, unique `ebay_listing`, etc.)
+- `divergent_legacy` → move to `inbox/review/`, priority-65 todo (only obsolete M1/M2/CSV fields differ + stale-default status; low operator urgency)
+- `divergent` → move to `inbox/review/`, priority-30 todo (general divergence)
+- `no_canonical` → move to `inbox/review/`, priority-45 todo (canonical missing)
+
+Zero-data-loss invariant: nothing is auto-deleted except byte-identical copies. "keep-newer" and "keep-larger" are NOT safe auto-resolution rules — mtime/size do not prove content safety. Semantic JSON analysis does.
 
 **Design principle — zero data loss (Dave, session 19):** A `.sync-conflict-*` file is Syncthing's
 *safety* mechanism, not an error. Syncthing never resolves indiscriminately — it completes the
@@ -3103,9 +3105,11 @@ Offer body addition (in `ebay_stage.py` `_build_offer_body()`):
 #### Status
 Planned. Verify account access first; implementation is straightforward once confirmed.
 
-### PP-PROMO-001 — Sale Event Automation (design complete)
+### PP-PROMO-001 — Sale Event Automation (P2 complete)
 
 **P1 DONE 2026-06-12** — Design doc + operator checklist at `reference/PP-PROMO-001-sale-event-design.md`.
+
+**P2 DONE 2026-06-13** — `tgw promo draft` + `tgw promo list` in `src/tgw/promo.py`; 41 tests in `tests/test_promo.py`; CLI wired in `api.py`.
 
 Automates the dead-stock → markdown sale event cycle via the eBay Promotions Management API (`ITEM_PRICE_MARKDOWN`). The `sell.marketing` scope is already held. No PP-STRIKE-001 conflict: strikethrough uses `originalRetailPrice` in the offer body; this uses the Promotions API and is independent.
 
@@ -3120,11 +3124,11 @@ Automates the dead-stock → markdown sale event cycle via the eBay Promotions M
 | Phase | Scope |
 |-------|-------|
 | P1 ✅ | Design doc + operator checklist |
-| P2 | `tgw promo draft` CLI (read-only); `tgw promo list` scope check |
+| P2 ✅ | `tgw promo draft` CLI (read-only); `tgw promo list` scope check |
 | P3 | `tgw promo apply`: Promotions API write + item JSON writeback; `ebay_price_reducer` promo-skip |
 | P4 | `tgw promo end` / `tgw promo status` lifecycle |
 
-**P2 unblocked.** **P3 blocked** on P2 scope verification (GET Promotions API must return 200 first).
+**P3 blocked** on P2 scope verification (run `tgw promo list` in production — 200 → scope confirmed → P3 unblocked).
 
 ### PP-REPRICE-001 ✅ INITIAL COMPLETE (2026-06-03)
 `ebay_price_reducer` worker: launch (day 0, 110%→.99) → retail (p75, day 3) → move (p25, day 17). `reprice_stages` array configurable; `to_99()` rounding; `reprice_skip: true` to exclude. Self-scheduling every 6h. `reprice_schedule` in item JSON tracks stage history.
