@@ -1826,3 +1826,171 @@ def test_offers_pct_none_when_prices_missing(env, monkeypatch):
     r = client.get("/api/offers", headers=AUTH_HEADERS)
     assert r.status_code == 200
     assert r.json()["offers"][0]["pct_of_ask"] is None
+
+
+# ---------------------------------------------------------------------------
+# GET /api/items/pending-revision — revision queue API (PP-EDITOR-001 Phase 3h)
+# POST /api/items/{sku}/revision/apply
+# DELETE /api/items/{sku}/revision
+# GET /form/revisions
+# ---------------------------------------------------------------------------
+
+_REVISION_DRAFT = {
+    "delta": {"title": "New Title"},
+    "baseline": {
+        "hash": "abcd1234abcd1234",
+        "snapshot": {"title": "Old Title"},
+    },
+    "created_at": "2026-06-14T12:00:00Z",
+    "by": "claude",
+}
+
+
+def _write_item_with_revision(itemdata_root, sku, draft=None):
+    d = itemdata_root / sku
+    d.mkdir(parents=True, exist_ok=True)
+    doc = {"sku": sku, "title": "Old Title", "location": "A1"}
+    if draft:
+        doc["revision_draft"] = draft
+    (d / f"{sku}.json").write_text(json.dumps(doc), encoding="utf-8")
+    return doc
+
+
+def _seed_catalog_with_revision(db_path, sku, doc):
+    import sqlite3
+    with sqlite3.connect(str(db_path)) as con:
+        # Ensure catalog table has data column (may differ from http_server fixture)
+        try:
+            con.execute("ALTER TABLE catalog ADD COLUMN data TEXT")
+        except Exception:
+            pass
+        con.execute(
+            "UPDATE catalog SET data = ? WHERE sku = ?",
+            (json.dumps(doc), sku),
+        )
+
+
+def test_pending_revision_requires_auth(client):
+    r = client.get("/api/items/pending-revision")
+    assert r.status_code in (401, 403)
+
+
+def test_pending_revision_empty_when_no_drafts(env):
+    """No items have revision_draft → empty list."""
+    client = env["client"]
+    r = client.get("/api/items/pending-revision", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["count"] == 0
+    assert body["items"] == []
+
+
+def test_pending_revision_returns_items_with_drafts(env):
+    """Items with revision_draft appear in the pending list."""
+    doc = _write_item_with_revision(env["itemdata_root"], SKU_A, _REVISION_DRAFT)
+    _seed_catalog_with_revision(env["cfg"]["sqlite_catalog_path"], SKU_A, doc)
+
+    client = env["client"]
+    r = client.get("/api/items/pending-revision", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert any(i["sku"] == SKU_A for i in body["items"])
+    item = next(i for i in body["items"] if i["sku"] == SKU_A)
+    assert item["draft"]["delta"]["title"] == "New Title"
+    assert item["location"] == "A1"
+
+
+def test_apply_revision_dry_run(env, monkeypatch):
+    """POST /revision/apply with dry_run=True calls cmd_revise_apply."""
+    import tgw.revision as rev_mod
+
+    _write_item_with_revision(env["itemdata_root"], SKU_A, _REVISION_DRAFT)
+
+    def fake_apply(cfg, sku, *, dry_run=True, by="claude"):
+        return {"ok": True, "sku": sku, "dry_run": dry_run, "applied": False,
+                "delta": {}, "diff_lines": ["=== apply diff ==="],
+                "blocking_drift": [], "non_blocking_drift": [],
+                "composed": {}, "baseline_hash": "x", "current_hash": "x", "hash_match": True}
+
+    monkeypatch.setattr(rev_mod, "cmd_revise_apply", fake_apply)
+
+    client = env["client"]
+    r = client.post(
+        f"/api/items/{SKU_A}/revision/apply",
+        headers={**AUTH_HEADERS, "Content-Type": "application/json"},
+        json={"dry_run": True},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["dry_run"] is True
+    assert body["sku"] == SKU_A
+
+
+def test_apply_revision_requires_auth(client):
+    r = client.post(f"/api/items/{SKU_A}/revision/apply",
+                    json={"dry_run": True})
+    assert r.status_code in (401, 403)
+
+
+def test_discard_revision_removes_draft(env):
+    """DELETE /revision removes revision_draft from the item JSON."""
+    _write_item_with_revision(env["itemdata_root"], SKU_A, _REVISION_DRAFT)
+    client = env["client"]
+
+    r = client.delete(f"/api/items/{SKU_A}/revision", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["discarded"] is True
+
+    saved = json.loads((env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text())
+    assert "revision_draft" not in saved
+
+
+def test_discard_revision_noop_when_absent(env):
+    """DELETE /revision on item without a draft returns ok with a note."""
+    _write_item_with_revision(env["itemdata_root"], SKU_A)  # no draft
+    client = env["client"]
+
+    r = client.delete(f"/api/items/{SKU_A}/revision", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert "note" in body
+
+
+def test_discard_revision_404_on_missing_sku(client):
+    r = client.delete("/api/items/tgwNOPE/revision", headers=AUTH_HEADERS)
+    assert r.status_code == 404
+
+
+def test_discard_revision_requires_auth(client):
+    r = client.delete(f"/api/items/{SKU_A}/revision")
+    assert r.status_code in (401, 403)
+
+
+def test_form_revisions_renders(client):
+    """/form/revisions returns HTML with expected structure."""
+    r = client.get("/form/revisions")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert "Revisions" in r.text
+    assert "dry-badge" in r.text
+    assert "Go Live" in r.text
+    assert "/api/items/pending-revision" in r.text
+
+
+def test_form_revisions_no_auth_required(client):
+    """/form/revisions is accessible without Bearer token."""
+    r = client.get("/form/revisions")
+    assert r.status_code == 200
+
+
+def test_nav_includes_revisions_link(client):
+    """nav.js includes a link to /form/revisions."""
+    r = client.get("/static/nav.js")
+    assert r.status_code == 200
+    assert "/form/revisions" in r.text

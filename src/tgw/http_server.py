@@ -183,6 +183,11 @@ class OfferRespondBody(BaseModel):
     by: str = "operator"
 
 
+class RevisionApplyBody(BaseModel):
+    dry_run: bool = True
+    by: str = "operator"
+
+
 # ---------------------------------------------------------------------------
 # GET /api/items — search catalog
 # ---------------------------------------------------------------------------
@@ -232,6 +237,46 @@ def list_items(
         con.close()
 
     return {"ok": True, "count": len(rows), "items": rows}
+
+
+# ---------------------------------------------------------------------------
+# GET /api/items/pending-revision — items with a non-empty revision_draft
+# Must be registered before /api/items/{sku} so the literal path wins.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/items/pending-revision", dependencies=[AUTH])
+def get_pending_revisions() -> Dict[str, Any]:
+    """Return items that have a non-empty revision_draft, with draft details."""
+    db_path = _cfg.get("sqlite_catalog_path")
+    items: List[Dict[str, Any]] = []
+
+    if db_path and Path(db_path).exists():
+        try:
+            with _sqlite_conn() as con:
+                rows = con.execute(
+                    "SELECT sku, title, location, data FROM catalog"
+                    " WHERE json_extract(data, '$.revision_draft') IS NOT NULL"
+                    " ORDER BY sku"
+                ).fetchall()
+            for row in rows:
+                draft: Dict[str, Any] = {}
+                try:
+                    doc = json.loads(row["data"] or "{}")
+                    draft = doc.get("revision_draft") or {}
+                except Exception:
+                    pass
+                if not draft or not draft.get("delta"):
+                    continue
+                items.append({
+                    "sku": row["sku"],
+                    "title": row["title"] or "",
+                    "location": row["location"] or "",
+                    "draft": draft,
+                })
+        except Exception as exc:
+            log.warning("pending-revision: catalog query failed: %s", exc)
+
+    return {"ok": True, "items": items, "count": len(items)}
 
 
 # ---------------------------------------------------------------------------
@@ -2208,6 +2253,296 @@ def offers_form():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         offers_css=_OFFERS_EXTRA_CSS,
+        api_key_json=json.dumps(_api_key),
+    )
+    return HTMLResponse(html)
+
+
+# ---------------------------------------------------------------------------
+# POST /api/items/{sku}/revision/apply — run cmd_revise_apply
+# DELETE /api/items/{sku}/revision — discard revision_draft
+# GET /form/revisions — revision review UI (PP-EDITOR-001 Phase 3h)
+# (GET /api/items/pending-revision registered earlier, before /{sku})
+# ---------------------------------------------------------------------------
+
+@app.post("/api/items/{sku}/revision/apply", dependencies=[AUTH])
+def apply_revision(sku: str, body: RevisionApplyBody) -> Dict[str, Any]:
+    """Apply or preview the stored revision_draft for a SKU."""
+    from .revision import cmd_revise_apply
+
+    return cmd_revise_apply(_cfg, sku, dry_run=body.dry_run, by=body.by)
+
+
+@app.delete("/api/items/{sku}/revision", dependencies=[AUTH])
+def discard_revision(sku: str) -> Dict[str, Any]:
+    """Remove revision_draft from the item JSON without applying it."""
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+    try:
+        doc = json.loads(json_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"read error: {exc}")
+    if "revision_draft" not in doc:
+        return {"ok": True, "sku": sku, "note": "no revision_draft present"}
+    del doc["revision_draft"]
+    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+    try:
+        state_machine.enqueue_job(
+            queue_name="catalog_rebuild",
+            payload={"reason": f"revision_discard:{sku}"},
+            dedupe_key="catalog_rebuild:pending",
+            not_before=time.time() + 30,
+            max_attempts=3,
+        )
+    except Exception:
+        pass
+    return {"ok": True, "sku": sku, "discarded": True}
+
+
+_REVISIONS_EXTRA_CSS = (
+    ".rev-card{background:#1a1a1a;border:1px solid #333;border-radius:10px;"
+    "  padding:14px;margin-bottom:14px}"
+    ".rev-header{display:flex;gap:10px;align-items:flex-start;margin-bottom:10px}"
+    ".rev-thumb{width:60px;height:60px;object-fit:cover;border-radius:5px;"
+    "  border:1px solid #333;background:#111;flex-shrink:0}"
+    ".rev-thumb-ph{width:60px;height:60px;border-radius:5px;border:1px solid #333;"
+    "  background:#111;display:flex;align-items:center;justify-content:center;"
+    "  color:#444;font-size:1.2em;flex-shrink:0}"
+    ".rev-info{min-width:0;flex:1}"
+    ".rev-title{font-size:.92em;font-weight:600;color:#ddd;margin-bottom:3px;"
+    "  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}"
+    ".rev-meta{font-size:.76em;color:#777;display:flex;gap:8px;flex-wrap:wrap}"
+    ".rev-loc{color:#888;background:#1e1e1e;border:1px solid #2a2a2a;"
+    "  border-radius:3px;padding:1px 5px}"
+    ".diff-table{width:100%;border-collapse:collapse;font-size:.82em;margin:8px 0}"
+    ".diff-table th{text-align:left;padding:5px 8px;color:#777;font-size:.72em;"
+    "  text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid #2a2a2a}"
+    ".diff-table td{padding:5px 8px;border-bottom:1px solid #1e1e1e;vertical-align:top}"
+    ".diff-table .dfield{color:#aaa;font-family:monospace;white-space:nowrap}"
+    ".diff-table .dwas{color:#c66;word-break:break-all}"
+    ".diff-table .dnow{color:#6c6;word-break:break-all}"
+    ".rev-actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center}"
+    ".btn-apply{padding:8px 18px;background:#1a4a1a;color:#7f7;border:1px solid #3a8a3a;"
+    "  border-radius:6px;cursor:pointer;font-size:.85em;font-weight:600}"
+    ".btn-apply:hover{background:#1e5a1e}"
+    ".btn-discard{padding:8px 18px;background:#3a1a1a;color:#f77;border:1px solid #7a3a3a;"
+    "  border-radius:6px;cursor:pointer;font-size:.85em;font-weight:600}"
+    ".btn-discard:hover{background:#4a1a1a}"
+    ".rev-flash{padding:6px 10px;border-radius:5px;font-size:.82em;margin-top:6px;display:none}"
+    ".rev-flash.ok{background:#1a3a1a;color:#7f7;display:block}"
+    ".rev-flash.err{background:#3a1a1a;color:#f77;display:block}"
+    ".dry-bar{background:#1a2a3a;border:1px solid #2a4a6a;border-radius:8px;"
+    "  padding:10px 14px;margin-bottom:14px;display:flex;align-items:center;gap:12px;"
+    "  font-size:.87em;color:#aaa}"
+    ".dry-badge{background:#2a4a6a;color:#7af;border-radius:4px;padding:2px 8px;"
+    "  font-size:.78em;font-weight:600;text-transform:uppercase;flex-shrink:0}"
+    ".dry-badge.live{background:#2a4a1a;color:#7f7}"
+    ".toggle-wrap{display:flex;align-items:center;gap:8px;margin-left:auto}"
+    ".toggle{position:relative;display:inline-block;width:40px;height:22px}"
+    ".toggle input{opacity:0;width:0;height:0}"
+    ".slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;"
+    "  background:#2a2a2a;border-radius:22px;transition:.25s}"
+    ".slider:before{position:absolute;content:'';height:16px;width:16px;left:3px;bottom:3px;"
+    "  background:#888;border-radius:50%;transition:.25s}"
+    ".toggle input:checked+.slider{background:#1a4a1a}"
+    ".toggle input:checked+.slider:before{transform:translateX(18px);background:#7f7}"
+    ".empty-state{padding:32px;text-align:center;color:#555;font-size:.95em}"
+    ".blocked-drift{background:#3a1a00;border:1px solid #6a3a00;border-radius:6px;"
+    "  padding:8px 10px;font-size:.8em;color:#fb7;margin-top:6px}"
+    ".reload-btn{background:none;border:none;color:#4a8ade;cursor:pointer;"
+    "  font-size:.82em;padding:0;text-decoration:underline;margin-left:8px}"
+)
+
+_REVISIONS_HTML = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TGW — Revisions</title>
+{static_head}
+<style>{revisions_css}</style>
+</head>
+<body>
+<h2>Pending Revisions <span id="rev-count" style="font-size:.65em;color:#666;font-weight:normal"></span>
+  <button class="reload-btn" onclick="load()">&#8635; Refresh</button>
+</h2>
+
+<div class="dry-bar">
+  <span class="dry-badge" id="dry-badge">DRY RUN</span>
+  <span id="dry-label">Apply is previewed only — no eBay API calls.</span>
+  <div class="toggle-wrap">
+    <span style="font-size:.78em">Go Live</span>
+    <label class="toggle" title="Enable live eBay submission">
+      <input type="checkbox" id="live-toggle" onchange="onLiveToggle()">
+      <span class="slider"></span>
+    </label>
+  </div>
+</div>
+
+<div id="rev-list"><span style="color:#555">Loading…</span></div>
+
+{static_foot}
+<script>
+window.TGW_API_KEY = {api_key_json};
+var DRY = true;
+
+function onLiveToggle() {{
+  DRY = !document.getElementById('live-toggle').checked;
+  var badge = document.getElementById('dry-badge');
+  var label = document.getElementById('dry-label');
+  if (DRY) {{
+    badge.textContent = 'DRY RUN'; badge.className = 'dry-badge';
+    label.textContent = 'Apply is previewed only — no eBay API calls.';
+  }} else {{
+    badge.textContent = 'LIVE'; badge.className = 'dry-badge live';
+    label.textContent = 'Apply will write to eBay immediately.';
+  }}
+}}
+
+function flashId(sku) {{ return 'rf-' + sku.replace(/[^a-z0-9]/gi,'_'); }}
+
+function renderRevisions(data) {{
+  var el = document.getElementById('rev-list');
+  var countEl = document.getElementById('rev-count');
+  if (!data || !data.ok) {{
+    el.innerHTML = '<div class="rev-flash err" style="display:block">Failed to load: ' +
+      escapeHtml((data && data.error) || 'unknown error') + '</div>';
+    countEl.textContent = '';
+    return;
+  }}
+  if (!data.items || data.items.length === 0) {{
+    el.innerHTML = '<div class="empty-state">No pending revision drafts.</div>';
+    countEl.textContent = '';
+    return;
+  }}
+  countEl.textContent = '(' + data.items.length + ' pending)';
+  var html = '';
+  data.items.forEach(function(item) {{
+    var draft = item.draft || {{}};
+    var delta = draft.delta || {{}};
+    var baseline = draft.baseline || {{}};
+    var snap = baseline.snapshot || {{}};
+    var by = escapeHtml(draft.by || '');
+    var at = escapeHtml((draft.created_at || '').slice(0,16));
+    var bh = escapeHtml((baseline.hash || '').slice(0,12));
+    var sku = item.sku;
+    var thumbUrl = '/thumb/' + encodeURIComponent(sku);
+    var thumbHtml = '<img class="rev-thumb" src="' + thumbUrl +
+      '" onerror="this.style.display=\\'none\\';this.nextElementSibling.style.display=\\'flex\\'" loading="lazy">' +
+      '<div class="rev-thumb-ph" style="display:none">&#128247;</div>';
+
+    html += '<div class="rev-card" id="card-' + escapeHtml(sku) + '">';
+    html += '<div class="rev-header">' + thumbHtml;
+    html += '<div class="rev-info">';
+    html += '<div class="rev-title">' + escapeHtml(item.title || sku) + '</div>';
+    html += '<div class="rev-meta">';
+    if (item.location) html += '<span class="rev-loc">' + escapeHtml(item.location) + '</span>';
+    html += '<span>' + escapeHtml(sku) + '</span>';
+    if (by) html += '<span>by ' + by + '</span>';
+    if (at) html += '<span>' + at + '</span>';
+    if (bh) html += '<span>baseline ' + bh + '…</span>';
+    html += '</div></div></div>';
+
+    html += '<table class="diff-table"><tr><th>Field</th><th>Current</th><th>Proposed</th></tr>';
+    Object.keys(delta).forEach(function(field) {{
+      html += '<tr>' +
+        '<td class="dfield">' + escapeHtml(field) + '</td>' +
+        '<td class="dwas">' + escapeHtml(String(snap[field] !== undefined ? snap[field] : '—')) + '</td>' +
+        '<td class="dnow">' + escapeHtml(String(delta[field])) + '</td>' +
+        '</tr>';
+    }});
+    html += '</table>';
+
+    html += '<div class="rev-actions">';
+    html += '<button class="btn-apply" onclick="applyRev(' + JSON.stringify(sku) + ')">Apply</button>';
+    html += '<button class="btn-discard" onclick="discardRev(' + JSON.stringify(sku) + ')">Discard</button>';
+    html += '</div>';
+    html += '<div class="rev-flash" id="' + flashId(sku) + '"></div>';
+    html += '</div>';
+  }});
+  el.innerHTML = html;
+}}
+
+async function load() {{
+  var el = document.getElementById('rev-list');
+  el.innerHTML = '<span style="color:#555">Loading…</span>';
+  try {{
+    var r = await fetch('/api/items/pending-revision', {{headers: authHeaders()}});
+    var d = await r.json();
+    renderRevisions(d);
+  }} catch(e) {{
+    el.innerHTML = '<div class="rev-flash err" style="display:block">Network error: ' + escapeHtml(String(e)) + '</div>';
+  }}
+}}
+
+async function applyRev(sku) {{
+  var flash = document.getElementById(flashId(sku));
+  if (flash) {{ flash.className = 'rev-flash'; flash.textContent = ''; }}
+  try {{
+    var r = await fetch('/api/items/' + encodeURIComponent(sku) + '/revision/apply', {{
+      method: 'POST',
+      headers: authHeaders({{'Content-Type': 'application/json'}}),
+      body: JSON.stringify({{dry_run: DRY, by: 'operator'}}),
+    }});
+    var d = await r.json();
+    if (d.ok) {{
+      var msg = (DRY ? '[dry-run] ' : '') + 'Apply OK';
+      if (d.diff_lines && d.diff_lines.length) msg += ' — ' + d.diff_lines[0];
+      if (flash) {{ flash.className = 'rev-flash ok'; flash.textContent = msg; }}
+      if (!DRY) setTimeout(load, 1200);
+    }} else {{
+      var errMsg = d.error || 'unknown error';
+      if (d.blocking_drift && d.blocking_drift.length) {{
+        errMsg += ' (blocking drift: ' + d.blocking_drift.map(function(bd) {{ return bd.field; }}).join(', ') + ')';
+      }}
+      if (flash) {{ flash.className = 'rev-flash err'; flash.textContent = 'Error: ' + escapeHtml(errMsg); }}
+    }}
+  }} catch(e) {{
+    if (flash) {{ flash.className = 'rev-flash err'; flash.textContent = 'Network error: ' + escapeHtml(String(e)); }}
+  }}
+}}
+
+async function discardRev(sku) {{
+  var flash = document.getElementById(flashId(sku));
+  if (flash) {{ flash.className = 'rev-flash'; flash.textContent = ''; }}
+  try {{
+    var r = await fetch('/api/items/' + encodeURIComponent(sku) + '/revision', {{
+      method: 'DELETE',
+      headers: authHeaders(),
+    }});
+    var d = await r.json();
+    if (d.ok) {{
+      var card = document.getElementById('card-' + sku);
+      if (card) {{ card.style.opacity = '.4'; card.style.pointerEvents = 'none'; }}
+      if (flash) {{ flash.className = 'rev-flash ok'; flash.textContent = 'Discarded.'; }}
+      setTimeout(load, 900);
+    }} else {{
+      if (flash) {{ flash.className = 'rev-flash err'; flash.textContent = 'Error: ' + escapeHtml(d.error || 'unknown'); }}
+    }}
+  }} catch(e) {{
+    if (flash) {{ flash.className = 'rev-flash err'; flash.textContent = 'Network error: ' + escapeHtml(String(e)); }}
+  }}
+}}
+
+load();
+</script>
+</body>
+</html>
+"""
+
+
+@app.get("/form/revisions")
+def revisions_form():
+    """Revision draft review — diff table, Apply/Discard per item, Go Live toggle.
+    No Bearer auth (network trust); JS embeds the key for API calls."""
+    from fastapi.responses import HTMLResponse
+
+    html = _REVISIONS_HTML.format(
+        static_head=_STATIC_HEAD,
+        static_foot=_STATIC_FOOT,
+        revisions_css=_REVISIONS_EXTRA_CSS,
         api_key_json=json.dumps(_api_key),
     )
     return HTMLResponse(html)
