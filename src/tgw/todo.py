@@ -417,6 +417,24 @@ def _parse_depends(raw: Optional[str]) -> Optional[List[int]]:
 
 
 def cmd_todo(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
+    # Shorthand: tgw todo --next [AGENT]
+    # Equivalent to: tgw todo brief --next --agent AGENT --clip
+    # AGENT comes from the positional, or --agent flag, defaulting to 'claude'.
+    if getattr(args, 'next_task', False) and args.agent != 'brief':
+        agent_name = getattr(args, 'next_agent', None) or args.agent or 'claude'
+        top = todo_top(agent_name)
+        if top is None:
+            print(f'No open tasks for agent: {agent_name}')
+            return {'ok': False, 'error': f'no open tasks for {agent_name}'}
+        result = todo_brief(top['id'], cfg['plan_master_path'])
+        if result['ok']:
+            print(result['brief'])
+            if not _push_clipboard(result['brief']):
+                print('[clipboard] copy failed — wl-copy and xclip not found')
+        else:
+            print(f"Error: {result['error']}")
+        return result
+
     # `tgw todo brief <id> [--clip]`
     # `tgw todo brief --next --agent <agent> [--clip]`
     if args.agent == 'brief':

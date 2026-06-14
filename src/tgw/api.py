@@ -865,7 +865,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--status", default="", metavar="STATUS", help="filter to items with this #STATUS value (e.g. 'live')")
 
     p = sub.add_parser("todo", help="multi-agent TODO tracker (PP-TODO-001 / PP-PLANDB-001)")
-    p.add_argument("agent", nargs="?", default=None, help="filter by agent: claude, admin, gemini, db (omit for all); or 'brief' to generate a task spec")
+    p.add_argument("agent", nargs="?", default=None,
+                   help="filter by agent: claude, admin, gemini, db (omit for all); "
+                        "or 'brief' to generate a task spec; combine with --next for top task")
     p.add_argument("brief_id", nargs="?", default=None, help="todo id for 'tgw todo brief <id>'")
     p.add_argument("--add", metavar="TEXT", help="add a new TODO item")
     p.add_argument("--done", metavar="ID", type=int, help="mark a TODO item complete")
@@ -881,7 +883,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--anchor", default=None, metavar="HEADING", help="master-plan heading text the item links to (for --add / --set-meta)")
     p.add_argument("--set-meta", type=int, default=None, metavar="ID", dest="set_meta", help="set --pp/--depends/--anchor on an existing item")
     p.add_argument("--clip", action="store_true", help="copy brief output to clipboard (brief mode only)")
-    p.add_argument("--next", action="store_true", dest="next_task", help="brief mode: generate brief for the top open task for --agent")
+    p.add_argument("--next", action="store_true", dest="next_task",
+                   help="shorthand: top open task for AGENT, print brief + copy to clipboard; "
+                        "replaces 'brief --next --agent AGENT --clip'")
     p.add_argument("--agent", default=None, metavar="AGENT", dest="next_agent", help="agent name for --next (e.g. claude, gemini, admin)")
 
     p = sub.add_parser("plan", help="plan/taskboard operations (PP-PLANDB-001)")

@@ -501,6 +501,117 @@ def test_todo_top_no_tasks_returns_none():
 # _push_clipboard — pyperclip wrapper
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# --next AGENT shorthand (todo #860)
+# Replaces: tgw todo brief --next --agent AGENT --clip
+# New form:  tgw todo --next [AGENT]   (clipboard always on)
+# ---------------------------------------------------------------------------
+
+def _make_shorthand_args(**overrides):
+    """Build args for the --next AGENT shorthand (agent != 'brief')."""
+    import argparse
+    defaults = dict(
+        agent=None, brief_id=None, seed=False, add=None, done=None,
+        update=None, delegate=None, set_priority=None, set_meta=None,
+        show_all=False, priority=50, source='session',
+        pp=None, depends=None, anchor=None,
+        clip=False, next_task=True, next_agent=None,
+    )
+    defaults.update(overrides)
+    return argparse.Namespace(**defaults)
+
+
+def test_shorthand_next_prints_and_clips_top_task(tmp_path):
+    """tgw todo --next claude: prints brief and always copies to clipboard."""
+    from tgw import todo as todo_mod
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    cfg = {'plan_master_path': plan}
+    args = _make_shorthand_args(agent='claude')
+
+    with patch.object(todo_mod, 'todo_top', return_value=_ROW_9) as mock_top:
+        with patch.object(todo_mod, 'todo_get', return_value=_ROW_9):
+            with patch.object(todo_mod, '_push_clipboard', return_value=True) as mock_clip:
+                result = todo_mod.cmd_todo(cfg, args)
+
+    mock_top.assert_called_once_with('claude')
+    assert result['ok'] is True
+    mock_clip.assert_called_once()
+    pushed = mock_clip.call_args[0][0]
+    assert 'do the work' in pushed
+
+
+def test_shorthand_next_default_agent_is_claude(tmp_path):
+    """tgw todo --next (no positional) defaults agent to claude."""
+    from tgw import todo as todo_mod
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    cfg = {'plan_master_path': plan}
+    args = _make_shorthand_args(agent=None)  # no positional, no --agent
+
+    with patch.object(todo_mod, 'todo_top', return_value=_ROW_9) as mock_top:
+        with patch.object(todo_mod, 'todo_get', return_value=_ROW_9):
+            with patch.object(todo_mod, '_push_clipboard', return_value=True):
+                todo_mod.cmd_todo(cfg, args)
+
+    mock_top.assert_called_once_with('claude')
+
+
+def test_shorthand_next_agent_flag_overrides_positional(tmp_path):
+    """tgw todo --next --agent gemini: --agent flag wins over absent positional."""
+    from tgw import todo as todo_mod
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    cfg = {'plan_master_path': plan}
+    # --agent flag fills next_agent; no positional agent
+    args = _make_shorthand_args(agent=None, next_agent='gemini')
+
+    gemini_row = dict(_ROW_9, id=11, agent='gemini', body='gemini top task')
+
+    with patch.object(todo_mod, 'todo_top', return_value=gemini_row) as mock_top:
+        with patch.object(todo_mod, 'todo_get', return_value=gemini_row):
+            with patch.object(todo_mod, '_push_clipboard', return_value=True):
+                result = todo_mod.cmd_todo(cfg, args)
+
+    mock_top.assert_called_once_with('gemini')
+    assert result['id'] == 11
+
+
+def test_shorthand_next_no_tasks_returns_error(tmp_path, capsys):
+    """tgw todo --next admin when admin queue is empty: prints message, returns error."""
+    from tgw import todo as todo_mod
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    cfg = {'plan_master_path': plan}
+    args = _make_shorthand_args(agent='admin')
+
+    with patch.object(todo_mod, 'todo_top', return_value=None):
+        result = todo_mod.cmd_todo(cfg, args)
+
+    assert result['ok'] is False
+    assert 'admin' in result['error']
+    out = capsys.readouterr().out
+    assert 'admin' in out
+
+
+def test_shorthand_next_clipboard_fail_prints_warning(tmp_path, capsys):
+    """tgw todo --next: clipboard failure prints warning but still returns ok."""
+    from tgw import todo as todo_mod
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    cfg = {'plan_master_path': plan}
+    args = _make_shorthand_args(agent='claude')
+
+    with patch.object(todo_mod, 'todo_top', return_value=_ROW_9):
+        with patch.object(todo_mod, 'todo_get', return_value=_ROW_9):
+            with patch.object(todo_mod, '_push_clipboard', return_value=False):
+                result = todo_mod.cmd_todo(cfg, args)
+
+    assert result['ok'] is True
+    out = capsys.readouterr().out
+    assert 'clipboard' in out
+
+
 def test_push_clipboard_returns_true_on_success():
     from tgw.todo import _push_clipboard
 
