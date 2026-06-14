@@ -2408,6 +2408,55 @@ checked for `..`; only known image/video extensions are served.
 
 **Access:** `http://<tgw-host>:7373/form/items` on any Tailscale device, no login required.
 
+### Phase 3 — Full operational console (session 29, in progress — todos #846–#859)
+
+**Guiding principle:** The web UI is the primary graphical workflow. Every physical warehouse stage
+(receive → identify → review → approve → respond → fulfill) has a corresponding page. A first-time
+user can open the browser and know what to do next without prior knowledge of the system.
+
+**Architecture decision: go static (todo #846)**
+`src/tgw/static/` directory with `tgw.css`, `nav.js`, `tgw.js`; FastAPI `StaticFiles` mount at
+`/static`. All existing embedded CSS/JS string constants replaced with `<link>`/`<script>` includes.
+Nav bar becomes one shared component, not 15 embedded copies.
+
+**Navigation structure (persistent top bar on all /form/ pages):**
+```
+TGW | Dashboard | Inventory ▾ | eBay ▾ | System ▾ | Docs ▾ | Links
+```
+Inventory: Browse · Intake · Review Queue · Revisions · Bulk Edit
+eBay: Offers · Pipeline · (Seller Hub link)
+System: Health · Workers · Todos · Dead Letter
+Docs: Runbooks · Known Issues · Architecture · Pipeline Flow · Handoff
+
+**Pages planned (todos #847–#859):**
+
+| Todo | Page / endpoint | Purpose |
+|------|----------------|---------|
+| #847 | `GET /api/dashboard` | Summary counts — needs_review, offers, photos, drafts, dead-letter, ready, workers |
+| #848 | `/form/` home dashboard | Status strip + action cards + PM chat + activity feed + quick intake |
+| #849 | `POST /api/pm/chat` + chat UI | LLM project manager chat window; haiku-4-5 with live TGW context; can add todos/suggestions |
+| #850 | `/form/links` | External links hub — eBay, AI/ML services, infrastructure, research |
+| #851 | `/docs/{path}` | Vault markdown renderer — runbooks, ISSUES, architecture, handoff |
+| #852 | `/form/offers` + offers API | Best Offers UI with % of ask, inline Accept/Counter/Decline, dry-run toggle |
+| #853 | `/form/revisions` + revision API | Pending revision_draft list with inline diff + Apply/Discard |
+| #854 | `/form/review` + review API | Post-AI-draft human approval queue; Approve/Edit/Re-draft inline |
+| #855 | `/form/pipeline` + workers API | Queue depths, active jobs, dead-letter manager, auto-refresh |
+| #856 | `/form/system` | Health table, token expiry, disk, postgres stats, worker restart |
+| #857 | Intake enhancements | Landing page + photo count warning + pipeline trigger buttons + job poll |
+| #858 | Item detail eBay links | View on eBay, Seller Hub deep link, Messages link, offer badge |
+| #859 | Polish pass | Gaps discovered through actual use |
+
+**PM chat (todo #849):**
+Persistent chat window in home dashboard sidebar. `POST /api/pm/chat` builds context from live
+system state (todos, queue depths, health, recent jobs, open offers), calls `claude-haiku-4-5`
+(configurable as `pm_chat_model` in config). Returns `{message, actions: []}` where actions
+can be `add_todo`, `add_suggestion`, or `none`. Chat history in sessionStorage. PM can answer
+"what needs doing?", "how many items in pipeline?", "any dead letters?" and take PM actions.
+
+**Build strategy:** iterative — deploy each round, use it, discover gaps, record in polish pass
+(#859). The UI is also a test harness for the underlying API: every missing filter, slow query,
+or data gap it exposes gets filed as a follow-up.
+
 ### Design notes (session 19/20)
 
 - **Recently-processed SKU sort** — `GET /api/items?sort=recently_processed`: a sort option
