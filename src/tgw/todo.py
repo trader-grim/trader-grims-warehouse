@@ -469,7 +469,61 @@ def _next_interactive(cfg: Dict[str, Any], agent_name: str) -> Dict[str, Any]:
             return {'ok': True, 'id': top['id'], 'action': 'left_open'}
 
 
+def _nextloop_interactive(cfg: Dict[str, Any], agent_name: str) -> Dict[str, Any]:
+    """Loop --next until the user quits or tasks are exhausted."""
+    import subprocess
+
+    done_count = 0
+    skipped_count = 0
+
+    while True:
+        top = todo_top(agent_name)
+        if top is None:
+            print(f'No more open tasks for agent: {agent_name}')
+            break
+
+        result = todo_brief(top['id'], cfg['plan_master_path'])
+        if not result['ok']:
+            print(f"Error: {result['error']}")
+            return result
+
+        brief = result['brief']
+
+        if not _push_clipboard(brief):
+            print('[clipboard] copy failed — wl-copy and xclip not found')
+
+        try:
+            subprocess.run(['less', '-FX'], input=brief, text=True)
+        except FileNotFoundError:
+            print(brief)
+
+        answer = _tty_prompt(f'\nTask #{top["id"]}: [y=done/s=skip/q=quit] ')
+
+        if answer in ('y', 'yes', ''):
+            todo_done(top['id'])
+            done_count += 1
+            print(f'Done: #{top["id"]} — next…')
+        elif answer in ('s', 'skip'):
+            skipped_count += 1
+            print(f'Skipped #{top["id"]} — next…')
+        else:
+            print(f'Left open: #{top["id"]} — exiting loop.')
+            break
+
+    return {'ok': True, 'done_count': done_count, 'skipped_count': skipped_count, 'action': 'loop_exit'}
+
+
 def cmd_todo(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
+    # Shorthand: tgw todo --nextloop [AGENT]
+    # Loops --next until no tasks remain or user quits.
+    if getattr(args, 'nextloop', False) and args.agent != 'brief':
+        import sys
+        agent_name = getattr(args, 'next_agent', None) or args.agent or 'claude'
+        if sys.stdout.isatty() and sys.stdin.isatty():
+            return _nextloop_interactive(cfg, agent_name)
+        print('--nextloop requires an interactive terminal')
+        return {'ok': False, 'error': '--nextloop requires a TTY'}
+
     # Shorthand: tgw todo --next [AGENT]
     # Equivalent to: tgw todo brief --next --agent AGENT --clip
     # AGENT comes from the positional, or --agent flag, defaulting to 'claude'.

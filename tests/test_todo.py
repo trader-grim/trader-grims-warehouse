@@ -763,3 +763,175 @@ def test_tty_prompt_returns_empty_on_oserror():
         result = _tty_prompt('prompt: ')
 
     assert result == ''
+
+
+# ---------------------------------------------------------------------------
+# --nextloop AGENT (loop --next until exhausted or user quits)
+# ---------------------------------------------------------------------------
+
+def _make_nextloop_args(**overrides):
+    import argparse
+    defaults = dict(
+        agent=None, brief_id=None, seed=False, add=None, done=None,
+        update=None, delegate=None, set_priority=None, set_meta=None,
+        show_all=False, priority=50, source='session',
+        pp=None, depends=None, anchor=None,
+        clip=False, next_task=False, nextloop=True, next_agent=None,
+    )
+    defaults.update(overrides)
+    return argparse.Namespace(**defaults)
+
+
+_ROW_A = {'id': 20, 'agent': 'claude', 'body': 'task alpha', 'priority': 50,
+          'source': 'test', 'added_at': None, 'done_at': None,
+          'pp_ref': None, 'depends_on': [], 'plan_anchor': None}
+_ROW_B = {'id': 21, 'agent': 'claude', 'body': 'task beta', 'priority': 50,
+          'source': 'test', 'added_at': None, 'done_at': None,
+          'pp_ref': None, 'depends_on': [], 'plan_anchor': None}
+
+
+def test_nextloop_marks_done_and_continues(tmp_path):
+    """y answer marks task done and fetches the next one."""
+    from tgw import todo as todo_mod
+
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    cfg = {'plan_master_path': plan}
+    args = _make_nextloop_args(agent='claude')
+
+    top_seq = [_ROW_A, _ROW_B, None]
+    top_iter = iter(top_seq)
+
+    with patch('sys.stdout') as mock_stdout:
+        mock_stdout.isatty.return_value = True
+        with patch('sys.stdin') as mock_stdin:
+            mock_stdin.isatty.return_value = True
+            with patch.object(todo_mod, 'todo_top', side_effect=lambda _: next(top_iter)):
+                with patch.object(todo_mod, 'todo_get', side_effect=lambda tid: dict(_ROW_A, id=tid)):
+                    with patch.object(todo_mod, '_push_clipboard', return_value=True):
+                        with patch.object(todo_mod, '_tty_prompt', return_value='y'):
+                            with patch.object(todo_mod, 'todo_done') as mock_done:
+                                with patch('subprocess.run'):
+                                    result = todo_mod.cmd_todo(cfg, args)
+
+    assert result['ok'] is True
+    assert result['done_count'] == 2
+    assert result['skipped_count'] == 0
+    assert mock_done.call_count == 2
+
+
+def test_nextloop_skip_continues_without_marking_done(tmp_path):
+    """s answer skips the task and fetches the next one without marking done."""
+    from tgw import todo as todo_mod
+
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    cfg = {'plan_master_path': plan}
+    args = _make_nextloop_args(agent='claude')
+
+    top_seq = [_ROW_A, None]
+    top_iter = iter(top_seq)
+
+    with patch('sys.stdout') as mock_stdout:
+        mock_stdout.isatty.return_value = True
+        with patch('sys.stdin') as mock_stdin:
+            mock_stdin.isatty.return_value = True
+            with patch.object(todo_mod, 'todo_top', side_effect=lambda _: next(top_iter)):
+                with patch.object(todo_mod, 'todo_get', return_value=_ROW_A):
+                    with patch.object(todo_mod, '_push_clipboard', return_value=True):
+                        with patch.object(todo_mod, '_tty_prompt', return_value='s'):
+                            with patch.object(todo_mod, 'todo_done') as mock_done:
+                                with patch('subprocess.run'):
+                                    result = todo_mod.cmd_todo(cfg, args)
+
+    assert result['ok'] is True
+    assert result['done_count'] == 0
+    assert result['skipped_count'] == 1
+    mock_done.assert_not_called()
+
+
+def test_nextloop_quit_exits_immediately(tmp_path):
+    """q answer leaves task open and exits the loop."""
+    from tgw import todo as todo_mod
+
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    cfg = {'plan_master_path': plan}
+    args = _make_nextloop_args(agent='claude')
+
+    with patch('sys.stdout') as mock_stdout:
+        mock_stdout.isatty.return_value = True
+        with patch('sys.stdin') as mock_stdin:
+            mock_stdin.isatty.return_value = True
+            with patch.object(todo_mod, 'todo_top', return_value=_ROW_A):
+                with patch.object(todo_mod, 'todo_get', return_value=_ROW_A):
+                    with patch.object(todo_mod, '_push_clipboard', return_value=True):
+                        with patch.object(todo_mod, '_tty_prompt', return_value='q'):
+                            with patch.object(todo_mod, 'todo_done') as mock_done:
+                                with patch('subprocess.run'):
+                                    result = todo_mod.cmd_todo(cfg, args)
+
+    assert result['ok'] is True
+    assert result['done_count'] == 0
+    assert result['action'] == 'loop_exit'
+    mock_done.assert_not_called()
+
+
+def test_nextloop_empty_queue_returns_ok(tmp_path):
+    """--nextloop with no tasks returns ok immediately."""
+    from tgw import todo as todo_mod
+
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    cfg = {'plan_master_path': plan}
+    args = _make_nextloop_args(agent='claude')
+
+    with patch('sys.stdout') as mock_stdout:
+        mock_stdout.isatty.return_value = True
+        with patch('sys.stdin') as mock_stdin:
+            mock_stdin.isatty.return_value = True
+            with patch.object(todo_mod, 'todo_top', return_value=None):
+                with patch('subprocess.run'):
+                    result = todo_mod.cmd_todo(cfg, args)
+
+    assert result['ok'] is True
+    assert result['done_count'] == 0
+
+
+def test_nextloop_requires_tty(tmp_path, capsys):
+    """--nextloop in non-interactive context returns error."""
+    from tgw import todo as todo_mod
+
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    cfg = {'plan_master_path': plan}
+    args = _make_nextloop_args(agent='claude')
+
+    with patch('sys.stdout') as mock_stdout:
+        mock_stdout.isatty.return_value = False
+        with patch('sys.stdin') as mock_stdin:
+            mock_stdin.isatty.return_value = False
+            result = todo_mod.cmd_todo(cfg, args)
+
+    assert result['ok'] is False
+    assert 'TTY' in result['error']
+
+
+def test_nextloop_default_agent_is_claude(tmp_path):
+    """--nextloop with no agent arg defaults to claude."""
+    from tgw import todo as todo_mod
+
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    cfg = {'plan_master_path': plan}
+    args = _make_nextloop_args(agent=None, next_agent=None)
+
+    with patch('sys.stdout') as mock_stdout:
+        mock_stdout.isatty.return_value = True
+        with patch('sys.stdin') as mock_stdin:
+            mock_stdin.isatty.return_value = True
+            with patch.object(todo_mod, '_nextloop_interactive') as mock_loop:
+                mock_loop.return_value = {'ok': True, 'done_count': 0, 'skipped_count': 0, 'action': 'loop_exit'}
+                todo_mod.cmd_todo(cfg, args)
+
+    mock_loop.assert_called_once_with(cfg, 'claude')

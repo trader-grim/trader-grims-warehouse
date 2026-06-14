@@ -886,7 +886,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--next", action="store_true", dest="next_task",
                    help="shorthand: top open task for AGENT, print brief + copy to clipboard; "
                         "replaces 'brief --next --agent AGENT --clip'")
-    p.add_argument("--agent", default=None, metavar="AGENT", dest="next_agent", help="agent name for --next (e.g. claude, gemini, admin)")
+    p.add_argument("--nextloop", action="store_true", dest="nextloop",
+                   help="loop --next continuously until tasks are exhausted or user quits (y=done/s=skip/q=quit)")
+    p.add_argument("--agent", default=None, metavar="AGENT", dest="next_agent", help="agent name for --next / --nextloop (e.g. claude, gemini, admin)")
 
     p = sub.add_parser("plan", help="plan/taskboard operations (PP-PLANDB-001)")
     p.add_argument(

@@ -137,7 +137,7 @@ _tgw() {
             catalog-verify) flags+=" --location --limit --severity --output --json --mark-verified --force --skip-verified" ;;
             category-groups) flags+=" --reseed" ;;
             set-template)  flags+=" --list --camera --dry-run" ;;
-            todo)          flags+=" --add --done --update --delegate --set-priority --priority --source --all --seed" ;;
+            todo)          flags+=" --add --done --update --delegate --set-priority --priority --source --all --seed --next --nextloop --agent" ;;
             sku-migrate)   flags+=" --class --dry-run --run --limit --manifest --check-collisions --include-live-ebay" ;;
             data-scrub)    flags+=" --pass --write" ;;
             dead-letter)   flags+=" --queue --limit --requeue --requeue-transient --cancel" ;;
