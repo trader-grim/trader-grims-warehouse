@@ -567,3 +567,14 @@ def test_compute_fixes_leading_space_lstrips_title():
     assert fixes[0]['rule'] == 'leading_space_title'
     assert fixes[0]['field'] == 'title'
     assert fixes[0]['after'] == 'Widget With Leading Space Here'
+
+
+def test_compute_fixes_template_prefix_empty_body_not_fixable():
+    """'  TEMPLATE: ' (prefix + empty body) must not emit a leading_space_title fix.
+
+    _strip_template_prefix returns None for an empty body, but the elif branch
+    must not fire — lstripping would produce 'TEMPLATE: ', which still triggers
+    stale_template_prefix on the next verify pass.
+    """
+    fixes = _compute_fixes({'title': '  TEMPLATE: '})
+    assert fixes == []

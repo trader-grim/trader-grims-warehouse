@@ -1095,12 +1095,14 @@ def _compute_fixes(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
     auto-fixable (PP-VERIFY-001 Phase 3).  Each fix is
     ``{rule, field, before, after}``.
     """
+    import re
     fixes: List[Dict[str, Any]] = []
     title = str(doc.get("title") or "")
     new_title = _strip_template_prefix(title)
     if new_title is not None:
         fixes.append({"rule": "stale_template_prefix", "field": "title", "before": title, "after": new_title})
-    elif title.startswith(' ') and title.lstrip():
+    elif (title.startswith(' ') and title.lstrip()
+          and not re.match(r"(?i)^\s*template:\s*", title)):
         fixes.append({"rule": "leading_space_title", "field": "title", "before": title, "after": title.lstrip()})
     return fixes
 
