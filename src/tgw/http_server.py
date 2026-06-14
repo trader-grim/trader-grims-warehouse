@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import subprocess
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -46,6 +47,11 @@ _security = HTTPBearer()
 _listing_index: Dict[str, Path] = {}
 _listing_index_built_at: float = 0.0
 _LISTING_INDEX_TTL = 600  # rebuild every 10 min
+
+# Dashboard: pending_offers cache (eBay API is slow; 5 min TTL)
+_pending_offers_cache: Optional[int] = None
+_pending_offers_cache_at: float = 0.0
+_PENDING_OFFERS_TTL = 300
 
 
 def _get_listing_index() -> Dict[str, Path]:
@@ -1544,6 +1550,394 @@ def item_detail_form(sku: str):
         log.warning("queue job fetch failed for %s: %s", sku, exc)
 
     return HTMLResponse(_render_item_detail_html(sku, item, images, videos, jobs))
+
+
+# ---------------------------------------------------------------------------
+# GET /api/dashboard — home dashboard summary (PP-EDITOR-001 Phase 3b)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/dashboard", dependencies=[AUTH])
+def dashboard() -> Dict[str, Any]:
+    """Single call returning all action-card counts for the home dashboard.
+
+    Fields:
+      needs_review      items with ebay_draft done (draft_listing) but no offer_id
+      pending_offers    GetBestOffers Pending count; None when eBay API is unavailable
+      needs_photos      items with no image in the catalog
+      has_revision_draft items with a pending revision_draft
+      dead_letter_count dead_letter jobs in Postgres
+      ready_count       items in the ready pool (offer_id + UNPUBLISHED + ready_at)
+      worker_health     {up, total} from systemctl
+    """
+    from .queue import WORKER_QUEUES
+
+    result: Dict[str, Any] = {"ok": True}
+
+    # --- SQLite-backed counts ---
+    db_path = _cfg.get("sqlite_catalog_path")
+    if db_path and Path(db_path).exists():
+        try:
+            con = _sqlite_conn()
+            try:
+                cols = {row[1] for row in con.execute("PRAGMA table_info(catalog)").fetchall()}
+                if "data" in cols:
+                    row = con.execute(
+                        """
+                        SELECT
+                          COUNT(CASE WHEN json_extract(data,'$.draft_listing') IS NOT NULL
+                                      AND (json_extract(data,'$.ebay_offer.offer_id') IS NULL
+                                           OR json_extract(data,'$.ebay_offer.offer_id') = '')
+                                     THEN 1 END),
+                          COUNT(CASE WHEN image IS NULL OR image = '' THEN 1 END),
+                          COUNT(CASE WHEN json_extract(data,'$.revision_draft') IS NOT NULL
+                                     THEN 1 END),
+                          COUNT(CASE WHEN json_extract(data,'$.ebay_offer.ready_at') IS NOT NULL
+                                      AND json_extract(data,'$.ebay_offer.offer_id') IS NOT NULL
+                                      AND json_extract(data,'$.ebay_offer.status') = 'UNPUBLISHED'
+                                     THEN 1 END)
+                        FROM catalog
+                        """
+                    ).fetchone()
+                    result["needs_review"] = row[0]
+                    result["needs_photos"] = row[1]
+                    result["has_revision_draft"] = row[2]
+                    result["ready_count"] = row[3]
+                else:
+                    row = con.execute(
+                        "SELECT COUNT(*) FROM catalog WHERE image IS NULL OR image = ''"
+                    ).fetchone()
+                    result["needs_review"] = None
+                    result["needs_photos"] = row[0]
+                    result["has_revision_draft"] = None
+                    result["ready_count"] = None
+            finally:
+                con.close()
+        except Exception as exc:
+            log.warning("dashboard: SQLite query failed: %s", exc)
+            result.update(needs_review=None, needs_photos=None,
+                          has_revision_draft=None, ready_count=None)
+    else:
+        result.update(needs_review=None, needs_photos=None,
+                      has_revision_draft=None, ready_count=None)
+
+    # --- PostgreSQL: dead_letter_count ---
+    dead_letter_count = 0
+    try:
+        with psycopg2.connect(_cfg["postgres_dsn"]) as con:
+            with con.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM queue_jobs WHERE state = 'dead_letter'")
+                dead_letter_count = cur.fetchone()[0]
+    except Exception as exc:
+        log.warning("dashboard: dead_letter query failed: %s", exc)
+    result["dead_letter_count"] = dead_letter_count
+
+    # --- eBay pending_offers (cached, null on failure) ---
+    global _pending_offers_cache, _pending_offers_cache_at
+    if (
+        _pending_offers_cache is not None
+        and time.time() - _pending_offers_cache_at < _PENDING_OFFERS_TTL
+    ):
+        result["pending_offers"] = _pending_offers_cache
+    else:
+        try:
+            from .apis.ebay.trading import get_best_offers
+            offers = list(get_best_offers(_cfg, status="Pending"))
+            _pending_offers_cache = len(offers)
+            _pending_offers_cache_at = time.time()
+            result["pending_offers"] = _pending_offers_cache
+        except Exception as exc:
+            log.warning("dashboard: GetBestOffers failed: %s", exc)
+            result["pending_offers"] = _pending_offers_cache  # stale or None
+
+    # --- Worker health via systemctl ---
+    total = len(WORKER_QUEUES)
+    try:
+        units = [f"tgw-worker@{q}.service" for q in WORKER_QUEUES]
+        r = subprocess.run(
+            ["systemctl", "is-active", *units],
+            capture_output=True, text=True, timeout=5,
+        )
+        up = sum(1 for line in r.stdout.splitlines() if line.strip() == "active")
+    except Exception as exc:
+        log.warning("dashboard: systemctl query failed: %s", exc)
+        up = -1
+    result["worker_health"] = {"up": up, "total": total}
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# GET /api/activity — recent queue job completions (activity feed)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/activity", dependencies=[AUTH])
+def activity(limit: int = 15) -> Dict[str, Any]:
+    """Last N queue jobs with a finished_at timestamp, newest first."""
+    n = min(max(limit, 1), 50)
+    try:
+        with psycopg2.connect(_cfg["postgres_dsn"]) as con:
+            with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT job_id, queue_name, state,
+                           payload_json->>'sku' AS sku,
+                           finished_at, error_detail
+                      FROM queue_jobs
+                     WHERE finished_at IS NOT NULL
+                     ORDER BY finished_at DESC
+                     LIMIT %s
+                    """,
+                    (n,),
+                )
+                jobs = [dict(r) for r in cur.fetchall()]
+                for j in jobs:
+                    fa = j.get("finished_at")
+                    if fa is not None and hasattr(fa, "isoformat"):
+                        j["finished_at"] = fa.isoformat()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"postgres error: {exc}")
+    return {"ok": True, "count": len(jobs), "jobs": jobs}
+
+
+# ---------------------------------------------------------------------------
+# GET /form/home — home dashboard (PP-EDITOR-001 Phase 3c)
+# ---------------------------------------------------------------------------
+
+_HOME_EXTRA_CSS = (
+    ".section{margin-bottom:18px}"
+    ".section-label{font-size:.75em;text-transform:uppercase;letter-spacing:.08em;color:#666;margin-bottom:6px}"
+    ".ok-chip{background:#1a3a1a;border-color:#4a8a4a;color:#9f9}"
+    ".err-chip{background:#3a1a1a;border-color:#8a4a4a;color:#f99}"
+    ".card-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}"
+    "@media(min-width:560px){.card-grid{grid-template-columns:repeat(3,1fr)}}"
+    ".acard{background:#1a1a1a;border:2px solid #333;border-radius:8px;padding:12px 10px;"
+    "  text-decoration:none;color:inherit;display:block;transition:border-color .15s}"
+    ".acard:hover{border-color:#555}"
+    ".acard.alert{border-color:#6a3a00}.acard.ok{border-color:#1a4a1a}"
+    ".acard.info{border-color:#1a3a5a}.acard.err{border-color:#5a1a1a}"
+    ".acard .count{font-size:1.8em;font-weight:bold;line-height:1;margin-bottom:4px}"
+    ".acard .alabel{font-size:.78em;color:#888}"
+    ".acard.alert .count{color:#fb7}.acard.ok .count{color:#7f7}"
+    ".acard.info .count{color:#7af}.acard.err .count{color:#f77}"
+    ".intake-row{display:flex;gap:6px;margin-top:4px}"
+    ".intake-row input{flex:1;margin:0}"
+    ".btn-sm{padding:10px 16px;background:#1a4a8a;color:#fff;border:none;border-radius:6px;"
+    "  cursor:pointer;font-size:.9em;white-space:nowrap;flex-shrink:0}"
+    ".btn-sm:active{background:#143a6a}"
+    ".two-col{display:grid;grid-template-columns:1fr;gap:14px;margin-top:14px}"
+    "@media(min-width:640px){.two-col{grid-template-columns:3fr 2fr}}"
+    "h3.subsec{font-size:.85em;text-transform:uppercase;letter-spacing:.06em;color:#888;margin:0 0 8px}"
+    ".activity-list{list-style:none;margin:0;padding:0;font-size:.82em}"
+    ".activity-list li{display:flex;gap:6px;padding:5px 0;border-bottom:1px solid #1e1e1e;align-items:center}"
+    ".activity-list li:last-child{border-bottom:none}"
+    ".aj-q{color:#aaa;width:90px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.8em}"
+    ".aj-st{width:64px;flex-shrink:0;text-align:center;font-size:.72em;padding:2px 4px;border-radius:3px}"
+    ".st-succeeded{background:#1a3a1a;color:#9f9}"
+    ".st-dead_letter,.st-failed{background:#3a1a1a;color:#f99}"
+    ".st-retry_wait{background:#3a2a0a;color:#fb7}"
+    ".st-cancelled{background:#2a2a2a;color:#888}"
+    ".aj-sku{color:#4a8ade;font-family:monospace;font-size:.78em;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
+    ".aj-ts{color:#555;white-space:nowrap;font-size:.72em}"
+    ".start-links{display:flex;flex-direction:column;gap:5px}"
+    ".start-links a{color:#7fbfff;text-decoration:none;font-size:.88em;padding:7px 10px;"
+    "  background:#1a1a2a;border-radius:6px;border:1px solid #2a2a3a}"
+    ".start-links a:hover{background:#2a2a4a;color:#fff}"
+    ".pm-stub{margin-top:14px;padding:12px;background:#1a1a1a;border:1px dashed #333;"
+    "  border-radius:8px;font-size:.85em;color:#666;text-align:center}"
+    ".pm-stub strong{display:block;color:#888;margin-bottom:4px;font-size:.9em}"
+)
+
+_HOME_HTML = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TGW Home</title>
+{static_head}
+<style>{home_css}</style>
+</head>
+<body>
+<h2>TGW Dashboard</h2>
+
+<div class="section">
+  <div class="section-label">System Health <span id="worker-chip"></span></div>
+  <div class="chips" id="health-strip"><span style="color:#555">Loading…</span></div>
+</div>
+
+<div class="section">
+  <div class="section-label">Action Queue</div>
+  <div class="card-grid" id="action-cards"><span style="color:#555">Loading…</span></div>
+</div>
+
+<div class="section">
+  <div class="section-label">Quick Intake</div>
+  <div class="intake-row">
+    <input id="intake-sku" type="text" placeholder="Enter SKU (e.g. tgw20260614…)"
+           autocomplete="off" spellcheck="false">
+    <button class="btn-sm" onclick="goIntake()">Open Form</button>
+  </div>
+</div>
+
+<div class="two-col">
+  <div>
+    <h3 class="subsec">Recent Activity</h3>
+    <div id="activity"><span style="color:#555">Loading…</span></div>
+  </div>
+  <div>
+    <h3 class="subsec">Start Here</h3>
+    <div class="start-links">
+      <a href="/form/items">Browse Inventory</a>
+      <a href="/form/bulk">Bulk Edit</a>
+      <a href="/form/todos">Open Todos</a>
+      <a href="/form/suggest">Add Suggestion</a>
+    </div>
+    <div class="pm-stub" id="pm-chat">
+      <strong>PM Chat</strong>
+      Conversation interface — coming soon (todo #849)
+    </div>
+  </div>
+</div>
+
+{static_foot}
+<script>
+window.TGW_API_KEY = {api_key_json};
+
+function timeAgo(iso) {{
+  if (!iso) return '';
+  var s = Math.floor((Date.now() - new Date(iso)) / 1000);
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm';
+  if (s < 86400) return Math.floor(s / 3600) + 'h';
+  return Math.floor(s / 86400) + 'd';
+}}
+
+function showDetail(name, detail) {{
+  alert(name + ': ' + (detail || 'ok'));
+}}
+
+async function fetchJ(url) {{
+  try {{
+    var r = await fetch(url, {{headers: authHeaders()}});
+    var d = await r.json().catch(function() {{ return {{}}; }});
+    return r.ok ? d : (d.detail && typeof d.detail === 'object' ? d.detail : d);
+  }} catch(e) {{ return null; }}
+}}
+
+function renderHealth(data) {{
+  var el = document.getElementById('health-strip');
+  if (!data || !data.checks) {{
+    el.innerHTML = '<span class="chip err-chip">health unavailable</span>';
+    return;
+  }}
+  var html = '';
+  data.checks.forEach(function(c) {{
+    var cls = c.ok ? 'ok-chip' : 'err-chip';
+    var tip = escapeHtml(c.detail || (c.ok ? 'ok' : 'fail'));
+    html += '<button class="chip ' + cls + '" title="' + tip + '"' +
+            ' onclick="showDetail(' + JSON.stringify(c.check) + ',' + JSON.stringify(c.detail || '') + ')">' +
+            escapeHtml(c.check) + '</button>';
+  }});
+  el.innerHTML = html;
+}}
+
+function renderDashboard(data) {{
+  var el = document.getElementById('action-cards');
+  if (!data || !data.ok) {{
+    el.innerHTML = '<span style="color:#f77;font-size:.85em">dashboard unavailable</span>';
+    return;
+  }}
+  var cards = [
+    {{key:'needs_review',      label:'Need Review',    href:'/form/items', cls:function(v){{return v>0?'alert':'';}}}},
+    {{key:'pending_offers',    label:'Pending Offers', href:null,          cls:function(v){{return v>0?'info':'';}}}},
+    {{key:'needs_photos',      label:'Need Photos',    href:'/form/items', cls:function(v){{return v>0?'alert':'';}}}},
+    {{key:'has_revision_draft',label:'Revision Drafts',href:null,          cls:function(v){{return v>0?'info':'';}}}},
+    {{key:'dead_letter_count', label:'Dead Letters',   href:null,          cls:function(v){{return v>0?'err':'';}}}},
+    {{key:'ready_count',       label:'Ready to List',  href:'/form/items', cls:function(v){{return v>0?'ok':'';}}}},
+  ];
+  var html = '';
+  cards.forEach(function(c) {{
+    var v = data[c.key];
+    var disp = (v === null || v === undefined) ? '?' : v;
+    var extra = (v !== null && v !== undefined) ? c.cls(v) : '';
+    var cls = 'acard' + (extra ? ' ' + extra : '');
+    if (c.href) {{
+      html += '<a class="' + cls + '" href="' + c.href + '">' +
+              '<div class="count">' + disp + '</div>' +
+              '<div class="alabel">' + escapeHtml(c.label) + '</div></a>';
+    }} else {{
+      html += '<div class="' + cls + '">' +
+              '<div class="count">' + disp + '</div>' +
+              '<div class="alabel">' + escapeHtml(c.label) + '</div></div>';
+    }}
+  }});
+  el.innerHTML = html;
+
+  var wh = data.worker_health || {{}};
+  if (wh.total !== undefined) {{
+    var allOk = wh.up >= 0 && wh.up === wh.total;
+    var wCls = wh.up < 0 ? 'err-chip' : (allOk ? 'ok-chip' : 'err-chip');
+    var wLabel = wh.up < 0 ? 'Workers ?' : ('Workers ' + wh.up + '/' + wh.total);
+    document.getElementById('worker-chip').innerHTML =
+      '<span class="chip ' + wCls + '" style="font-size:.75em;padding:4px 8px">' + wLabel + '</span>';
+  }}
+}}
+
+function renderActivity(data) {{
+  var el = document.getElementById('activity');
+  if (!data || !data.ok) {{
+    el.innerHTML = '<span style="color:#888;font-size:.85em">activity unavailable</span>';
+    return;
+  }}
+  if (!data.jobs || !data.jobs.length) {{
+    el.innerHTML = '<span style="color:#555;font-size:.85em">No recent activity.</span>';
+    return;
+  }}
+  var html = '<ul class="activity-list">';
+  data.jobs.forEach(function(j) {{
+    var sc = 'st-' + (j.state || '').replace(/_/g, '_');
+    html += '<li>' +
+      '<span class="aj-q" title="' + escapeHtml(j.queue_name) + '">' + escapeHtml(j.queue_name) + '</span>' +
+      '<span class="aj-st ' + sc + '">' + escapeHtml(j.state || '') + '</span>' +
+      '<span class="aj-sku">' + escapeHtml(j.sku || '') + '</span>' +
+      '<span class="aj-ts">' + timeAgo(j.finished_at) + '</span>' +
+      '</li>';
+  }});
+  el.innerHTML = html + '</ul>';
+}}
+
+function goIntake() {{
+  var sku = document.getElementById('intake-sku').value.trim();
+  if (sku) window.location = '/form/intake/' + encodeURIComponent(sku);
+}}
+document.getElementById('intake-sku').addEventListener('keydown', function(e) {{
+  if (e.key === 'Enter') goIntake();
+}});
+
+Promise.all([
+  fetchJ('/api/health').then(renderHealth),
+  fetchJ('/api/dashboard').then(renderDashboard),
+  fetchJ('/api/activity').then(renderActivity),
+]);
+</script>
+</body>
+</html>
+"""
+
+
+@app.get("/form/home")
+def home_form():
+    """Home dashboard — health strip, action cards, quick intake, activity feed.
+    No Bearer auth (network trust); JS embeds the key for API calls."""
+    from fastapi.responses import HTMLResponse
+
+    html = _HOME_HTML.format(
+        static_head=_STATIC_HEAD,
+        static_foot=_STATIC_FOOT,
+        home_css=_HOME_EXTRA_CSS,
+        api_key_json=json.dumps(_api_key),
+    )
+    return HTMLResponse(html)
 
 
 # ---------------------------------------------------------------------------

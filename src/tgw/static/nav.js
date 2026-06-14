@@ -2,7 +2,8 @@
   var nav = document.createElement('nav');
   nav.className = 'tgw-nav';
   nav.innerHTML =
-    '<a class="brand" href="/form/items">TGW</a>' +
+    '<a class="brand" href="/form/home">TGW</a>' +
+    '<a href="/form/home">Home</a>' +
     '<a href="/form/items">Inventory</a>' +
     '<div class="nav-dropdown">' +
       '<button class="nav-dropdown-toggle">Operations &#9662;</button>' +

@@ -962,3 +962,345 @@ def test_item_detail_uses_static_css(env):
     assert '/static/tgw.js' in r.text
     assert '/static/nav.js' in r.text
     assert 'font-family:system-ui' not in r.text
+
+
+# ---------------------------------------------------------------------------
+# GET /api/dashboard — PP-EDITOR-001 Phase 3b
+# ---------------------------------------------------------------------------
+
+def _make_catalog_with_data(db_path: Path, rows_with_data):
+    """Create a SQLite catalog including the full-JSON 'data' column."""
+    con = sqlite3.connect(str(db_path))
+    con.execute(
+        "CREATE TABLE catalog ("
+        "sku TEXT PRIMARY KEY, title TEXT, location TEXT, status TEXT, "
+        "price REAL, qty INTEGER, image TEXT, data TEXT NOT NULL DEFAULT '{}')"
+    )
+    con.executemany(
+        "INSERT INTO catalog (sku, title, location, status, price, qty, image, data) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        rows_with_data,
+    )
+    con.commit()
+    con.close()
+
+
+@pytest.fixture
+def dashboard_env(tmp_path, monkeypatch):
+    """Fixture for dashboard tests: catalog with data column, stubbed Postgres + eBay + systemctl."""
+    itemdata_root = tmp_path / "ItemData"
+    itemdata_root.mkdir()
+    catalog_path = tmp_path / "catalog.sqlite"
+
+    # Items:
+    #   SKU_A — has draft_listing, no offer_id  → needs_review
+    #   SKU_B — has draft_listing + offer_id UNPUBLISHED + ready_at  → ready
+    #   SKU_C — has revision_draft, no image  → has_revision_draft + needs_photos
+    #   SKU_D — plain in-stock, has image  → no special state
+    sku_a = "tgw20260101120000001"
+    sku_b = "tgw20260201120000002"
+    sku_c = "tgw20260301120000003"
+    sku_d = "tgw20260401120000004"
+
+    data_a = json.dumps({"draft_listing": {"title": "Foo"}, "ebay_offer": {}})
+    data_b = json.dumps({
+        "draft_listing": {"title": "Bar"},
+        "ebay_offer": {
+            "offer_id": "OFF1",
+            "status": "UNPUBLISHED",
+            "ready_at": "2026-06-01T00:00:00+00:00",
+        },
+    })
+    data_c = json.dumps({"revision_draft": {"delta": {"title": "New"}}})
+    data_d = json.dumps({})
+
+    _make_catalog_with_data(catalog_path, [
+        (sku_a, "Widget A", "A1", "In Stock", 9.99,  1, "",      data_a),
+        (sku_b, "Gadget B", "B2", "Staged",  19.99,  1, "b.jpg", data_b),
+        (sku_c, "Part C",   "C3", "In Stock",  5.00,  1, "",      data_c),
+        (sku_d, "Box D",    "D4", "In Stock",  7.50,  1, "d.jpg", data_d),
+    ])
+
+    cfg = {
+        "sqlite_catalog_path": catalog_path,
+        "itemdata_root": itemdata_root,
+        "postgres_dsn": "postgresql://fake/db",
+        "thumbnail_root": tmp_path / "thumbs",
+        "pretty": True,
+        "raw": {},
+    }
+
+    monkeypatch.setattr(http_server, "_cfg", cfg)
+    monkeypatch.setattr(http_server, "_api_key", API_KEY)
+    monkeypatch.setattr(http_server, "_pending_offers_cache", None)
+    monkeypatch.setattr(http_server, "_pending_offers_cache_at", 0.0)
+
+    # Postgres stub: fetchone returns (0,) → dead_letter_count = 0
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: _FakeConn([]),
+    )
+
+    client = TestClient(http_server.app)
+    return {
+        "client": client,
+        "skus": (sku_a, sku_b, sku_c, sku_d),
+    }
+
+
+def test_dashboard_returns_counts(dashboard_env, monkeypatch):
+    """Dashboard returns correct counts from SQLite and stubs."""
+    # Mock eBay get_best_offers to return 2 pending offers
+    import tgw.apis.ebay.trading as _trading
+    monkeypatch.setattr(_trading, "get_best_offers", lambda cfg, status="All": [{"offer_id": "1"}, {"offer_id": "2"}])
+
+    # Mock systemctl: 18 of 20 queues active
+    from tgw.queue import WORKER_QUEUES
+    total_q = len(WORKER_QUEUES)
+    active_lines = "\n".join(["active"] * (total_q - 2) + ["inactive", "failed"])
+
+    def _fake_run(cmd, **kwargs):
+        class _R:
+            stdout = active_lines
+            returncode = 1
+        return _R()
+
+    monkeypatch.setattr(http_server.subprocess, "run", _fake_run)
+
+    r = dashboard_env["client"].get("/api/dashboard", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+
+    assert body["ok"] is True
+    assert body["needs_review"] == 1        # only SKU_A (draft_listing + no offer_id)
+    assert body["needs_photos"] == 2        # SKU_A and SKU_C have no image
+    assert body["has_revision_draft"] == 1  # only SKU_C
+    assert body["ready_count"] == 1         # only SKU_B (offer_id + UNPUBLISHED + ready_at)
+    assert body["dead_letter_count"] == 0   # postgres stub returns 0
+    assert body["pending_offers"] == 2
+    assert body["worker_health"]["total"] == total_q
+    assert body["worker_health"]["up"] == total_q - 2
+
+
+def test_dashboard_requires_auth(dashboard_env):
+    r = dashboard_env["client"].get("/api/dashboard")
+    assert r.status_code in (401, 403)
+
+
+def test_dashboard_ebay_failure_returns_none(dashboard_env, monkeypatch):
+    """When eBay API fails, pending_offers is None (not an error)."""
+    import tgw.apis.ebay.trading as _trading
+    monkeypatch.setattr(_trading, "get_best_offers",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("timeout")))
+
+    def _fake_run(cmd, **kwargs):
+        class _R:
+            stdout = ""
+            returncode = 0
+        return _R()
+    monkeypatch.setattr(http_server.subprocess, "run", _fake_run)
+
+    r = dashboard_env["client"].get("/api/dashboard", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    assert r.json()["pending_offers"] is None
+
+
+def test_dashboard_fallback_without_data_column(tmp_path, monkeypatch):
+    """When the catalog has no 'data' column, json_extract counts return None."""
+    catalog_path = tmp_path / "catalog.sqlite"
+    _make_catalog(catalog_path, [
+        (SKU_A, "Widget", "A1", "In Stock", 9.99, 1, ""),
+        (SKU_B, "Gadget", "B2", "Staged",  19.99, 1, "b.jpg"),
+    ])
+
+    cfg = {
+        "sqlite_catalog_path": catalog_path,
+        "itemdata_root": tmp_path / "ItemData",
+        "postgres_dsn": "postgresql://fake/db",
+        "thumbnail_root": tmp_path / "thumbs",
+        "pretty": True,
+        "raw": {},
+    }
+    monkeypatch.setattr(http_server, "_cfg", cfg)
+    monkeypatch.setattr(http_server, "_api_key", API_KEY)
+    monkeypatch.setattr(http_server, "_pending_offers_cache", None)
+    monkeypatch.setattr(http_server, "_pending_offers_cache_at", 0.0)
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: _FakeConn([]),
+    )
+
+    import tgw.apis.ebay.trading as _trading
+    monkeypatch.setattr(_trading, "get_best_offers", lambda *a, **k: [])
+
+    def _fake_run(cmd, **kwargs):
+        class _R:
+            stdout = ""
+            returncode = 0
+        return _R()
+    monkeypatch.setattr(http_server.subprocess, "run", _fake_run)
+
+    client = TestClient(http_server.app)
+    r = client.get("/api/dashboard", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["needs_review"] is None
+    assert body["has_revision_draft"] is None
+    assert body["ready_count"] is None
+    assert body["needs_photos"] == 1   # SKU_A has empty image
+    assert body["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# GET /api/activity — recent queue job completions
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def activity_env(tmp_path, monkeypatch):
+    """Minimal env wired to return canned activity rows from psycopg2 stub."""
+    itemdata_root = tmp_path / "ItemData"
+    itemdata_root.mkdir()
+    catalog_path = tmp_path / "catalog.sqlite"
+    _make_catalog(catalog_path, [])
+
+    cfg = {
+        "sqlite_catalog_path": catalog_path,
+        "itemdata_root": itemdata_root,
+        "postgres_dsn": "postgresql://fake/db",
+        "thumbnail_root": tmp_path / "thumbs",
+        "pretty": True,
+        "raw": {},
+    }
+
+    rows = [
+        {
+            "job_id": 1,
+            "queue_name": "ebay_draft",
+            "state": "succeeded",
+            "sku": "tgw20260614120000001",
+            "finished_at": "2026-06-14T12:00:00+00:00",
+            "error_detail": None,
+        },
+        {
+            "job_id": 2,
+            "queue_name": "ebay_stage",
+            "state": "failed",
+            "sku": "tgw20260614110000002",
+            "finished_at": "2026-06-14T11:00:00+00:00",
+            "error_detail": "boom",
+        },
+        {
+            "job_id": 3,
+            "queue_name": "catalog_rebuild",
+            "state": "succeeded",
+            "sku": None,
+            "finished_at": "2026-06-14T10:00:00+00:00",
+            "error_detail": None,
+        },
+    ]
+
+    monkeypatch.setattr(http_server, "_cfg", cfg)
+    monkeypatch.setattr(http_server, "_api_key", API_KEY)
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: _FakeConn(rows),
+    )
+    return {"client": TestClient(http_server.app), "rows": rows}
+
+
+def test_activity_returns_jobs(activity_env):
+    r = activity_env["client"].get("/api/activity", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["count"] == 3
+    jobs = body["jobs"]
+    assert jobs[0]["queue_name"] == "ebay_draft"
+    assert jobs[0]["state"] == "succeeded"
+    assert jobs[0]["sku"] == "tgw20260614120000001"
+    assert jobs[1]["state"] == "failed"
+    assert jobs[1]["error_detail"] == "boom"
+    assert jobs[2]["sku"] is None  # catalog_rebuild has no sku
+
+
+def test_activity_requires_auth(activity_env):
+    r = activity_env["client"].get("/api/activity")
+    assert r.status_code in (401, 403)
+
+
+def test_activity_empty(tmp_path, monkeypatch):
+    """Empty queue_jobs → ok=True, count=0, jobs=[]."""
+    cfg = {
+        "sqlite_catalog_path": tmp_path / "catalog.sqlite",
+        "itemdata_root": tmp_path / "ItemData",
+        "postgres_dsn": "postgresql://fake/db",
+        "thumbnail_root": tmp_path / "thumbs",
+        "pretty": True,
+        "raw": {},
+    }
+    monkeypatch.setattr(http_server, "_cfg", cfg)
+    monkeypatch.setattr(http_server, "_api_key", API_KEY)
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: _FakeConn([]),
+    )
+    client = TestClient(http_server.app)
+    r = client.get("/api/activity", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["count"] == 0
+    assert body["jobs"] == []
+
+
+# ---------------------------------------------------------------------------
+# GET /form/home — home dashboard page
+# ---------------------------------------------------------------------------
+
+def test_home_form_ok(client):
+    """Home page returns 200 with all section anchors present."""
+    r = client.get("/form/home")
+    assert r.status_code == 200
+    assert "id=\"health-strip\"" in r.text
+    assert "id=\"action-cards\"" in r.text
+    assert "id=\"intake-sku\"" in r.text
+    assert "id=\"activity\"" in r.text
+    assert "id=\"pm-chat\"" in r.text
+
+
+def test_home_form_no_auth_required(client):
+    """Home page is served without Bearer token (network trust)."""
+    r = client.get("/form/home")
+    assert r.status_code == 200
+
+
+def test_home_form_embeds_api_key(client):
+    """The API key is embedded so JS can make authenticated API calls."""
+    r = client.get("/form/home")
+    assert API_KEY in r.text
+
+
+def test_home_form_uses_static_css(client):
+    r = client.get("/form/home")
+    assert "/static/tgw.css" in r.text
+    assert "/static/nav.css" in r.text
+    assert "/static/tgw.js" in r.text
+    assert "/static/nav.js" in r.text
+
+
+def test_home_form_has_start_links(client):
+    """Start-here section links to the key operational pages."""
+    r = client.get("/form/home")
+    assert "/form/items" in r.text
+    assert "/form/bulk" in r.text
+    assert "/form/todos" in r.text
+    assert "/form/suggest" in r.text
+
+
+def test_nav_has_home_link():
+    """nav.js updated to include a Home link."""
+    nav_src = (
+        __import__("pathlib").Path(__file__).parent.parent
+        / "src/tgw/static/nav.js"
+    ).read_text()
+    assert "/form/home" in nav_src
