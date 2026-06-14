@@ -638,6 +638,106 @@ def queue_status() -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/system/workers — systemd unit states (PP-EDITOR-001 Phase 3j)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/system/workers", dependencies=[AUTH])
+def system_workers() -> Dict[str, Any]:
+    """Return systemd active/sub state for all tgw-worker@ units + tgw-http."""
+    from .queue import WORKER_QUEUES
+
+    units = [f"tgw-worker@{q}.service" for q in WORKER_QUEUES] + ["tgw-http.service"]
+    workers: List[Dict[str, Any]] = []
+
+    try:
+        r = subprocess.run(
+            ["systemctl", "show", "--no-pager",
+             "--property=Id,ActiveState,SubState,MainPID",
+             *units],
+            capture_output=True, text=True, timeout=8,
+        )
+        # systemctl show outputs blank-line-separated blocks per unit
+        block: Dict[str, str] = {}
+        for line in r.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                if block.get("Id"):
+                    workers.append({
+                        "unit": block["Id"],
+                        "active": block.get("ActiveState", "unknown"),
+                        "sub": block.get("SubState", "unknown"),
+                        "pid": int(block["MainPID"]) if block.get("MainPID", "0").isdigit() and block["MainPID"] != "0" else None,
+                    })
+                block = {}
+            else:
+                k, _, v = line.partition("=")
+                block[k] = v
+        # flush last block
+        if block.get("Id"):
+            workers.append({
+                "unit": block["Id"],
+                "active": block.get("ActiveState", "unknown"),
+                "sub": block.get("SubState", "unknown"),
+                "pid": int(block["MainPID"]) if block.get("MainPID", "0").isdigit() and block["MainPID"] != "0" else None,
+            })
+    except Exception as exc:
+        log.warning("system_workers: systemctl query failed: %s", exc)
+        # Fall back: return all as unknown
+        workers = [
+            {"unit": u, "active": "unknown", "sub": "unknown", "pid": None}
+            for u in units
+        ]
+
+    up = sum(1 for w in workers if w["active"] == "active")
+    return {"ok": True, "workers": workers, "up": up, "total": len(units)}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/jobs/{job_id}/requeue — re-enqueue a dead-letter job (Phase 3j)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/jobs/{job_id}/requeue", dependencies=[AUTH])
+def requeue_job(job_id: str) -> Dict[str, Any]:
+    """Re-enqueue a dead-letter job with a fresh dedupe key so it can run again."""
+    try:
+        with psycopg2.connect(_cfg["postgres_dsn"]) as con:
+            with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT job_id, queue_name, payload_json, state, max_attempts"
+                    " FROM queue_jobs WHERE job_id = %s",
+                    (job_id,),
+                )
+                row = cur.fetchone()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"postgres error: {exc}")
+
+    if not isinstance(row, dict):
+        raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
+
+    if row["state"] != "dead_letter":
+        raise HTTPException(
+            status_code=400,
+            detail=f"job {job_id} is in state {row['state']!r}, not dead_letter",
+        )
+
+    payload = dict(row["payload_json"]) if row["payload_json"] else {}
+    sku = payload.get("sku") or job_id[:8]
+    new_dedupe = f"{row['queue_name']}:{sku}:requeue:{int(time.time())}"
+
+    try:
+        new_job_id = state_machine.enqueue_job(
+            queue_name=row["queue_name"],
+            payload=payload,
+            dedupe_key=new_dedupe,
+            max_attempts=row.get("max_attempts") or 3,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"enqueue failed: {exc}")
+
+    return {"ok": True, "job_id": job_id, "new_job_id": new_job_id, "queue": row["queue_name"]}
+
+
+# ---------------------------------------------------------------------------
 # GET /api/ebay/aspects/{category_id} — aspect list for offer form
 # ---------------------------------------------------------------------------
 
@@ -2882,6 +2982,459 @@ def review_form():
         api_key_json=json.dumps(_api_key),
     )
     return HTMLResponse(html)
+
+
+# ---------------------------------------------------------------------------
+# GET /form/pipeline — pipeline monitor + dead-letter manager (Phase 3j)
+# ---------------------------------------------------------------------------
+
+_PIPELINE_EXTRA_CSS = (
+    ".pl-section{margin-bottom:22px}"
+    ".pl-label{font-size:.75em;text-transform:uppercase;letter-spacing:.08em;color:#666;"
+    "  margin-bottom:8px;display:flex;align-items:center;gap:8px}"
+    ".pl-label .auto-badge{background:#1a3a1a;color:#7a7;border:1px solid #2a5a2a;"
+    "  border-radius:4px;font-size:.78em;padding:1px 6px;font-weight:normal;"
+    "  text-transform:none;letter-spacing:0}"
+    ".pl-label .countdown{color:#555;font-size:.85em;margin-left:auto}"
+    ".pl-table{width:100%;border-collapse:collapse;font-size:.84em}"
+    ".pl-table th{text-align:left;padding:6px 10px;color:#666;font-size:.72em;"
+    "  text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid #2a2a2a}"
+    ".pl-table td{padding:6px 10px;border-bottom:1px solid #1e1e1e;vertical-align:middle}"
+    ".pl-table tr:last-child td{border-bottom:none}"
+    ".pl-table .qname{font-family:monospace;color:#aaa}"
+    ".pl-table .n-queued{color:#7af;font-weight:600}"
+    ".pl-table .n-run{color:#fb7;font-weight:600}"
+    ".pl-table .n-done{color:#888}"
+    ".pl-table .n-dead{color:#f77;font-weight:600}"
+    ".pl-table .n-zero{color:#333}"
+    ".pl-table .elapsed{color:#aaa;font-size:.9em}"
+    ".pl-table .sku-cell{font-family:monospace;font-size:.82em;color:#bbb}"
+    ".pl-table .act-btns{display:flex;gap:6px;justify-content:flex-end}"
+    ".btn-requeue{padding:5px 12px;background:#1a3a1a;color:#7f7;border:1px solid #3a7a3a;"
+    "  border-radius:5px;cursor:pointer;font-size:.8em;font-weight:600}"
+    ".btn-requeue:hover{background:#1e4a1e}"
+    ".btn-cancel{padding:5px 12px;background:#2a1a1a;color:#f77;border:1px solid #5a2a2a;"
+    "  border-radius:5px;cursor:pointer;font-size:.8em;font-weight:600}"
+    ".btn-cancel:hover{background:#3a1a1a}"
+    ".dl-flash{font-size:.8em;margin-left:8px;display:none}"
+    ".dl-flash.ok{color:#7f7;display:inline}"
+    ".dl-flash.err{color:#f77;display:inline}"
+    ".pill{display:inline-block;border-radius:10px;padding:2px 8px;font-size:.72em;"
+    "  font-weight:600;text-transform:uppercase;letter-spacing:.03em}"
+    ".pill.active{background:#1a4a1a;color:#7f7;border:1px solid #3a8a3a}"
+    ".pill.inactive{background:#2a2a2a;color:#666;border:1px solid #333}"
+    ".pill.failed{background:#3a1a1a;color:#f77;border:1px solid #6a3a3a}"
+    ".pill.unknown{background:#1a1a2a;color:#77a;border:1px solid #2a2a4a}"
+    ".worker-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:6px}"
+    ".w-card{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:6px;"
+    "  padding:7px 10px;display:flex;justify-content:space-between;align-items:center;"
+    "  gap:6px;font-size:.83em}"
+    ".w-card .w-name{font-family:monospace;color:#999;overflow:hidden;text-overflow:ellipsis;"
+    "  white-space:nowrap;font-size:.88em}"
+    ".w-card.active-card{border-color:#2a5a2a}"
+    ".w-card.failed-card{border-color:#5a2a2a}"
+    ".empty-state{padding:24px;text-align:center;color:#555;font-size:.9em}"
+    ".err-box{padding:10px;border:1px solid #5a2a2a;border-radius:6px;color:#f77;"
+    "  background:#1e1010;font-size:.84em;margin-bottom:12px}"
+    ".reload-btn{background:none;border:none;color:#4a8ade;cursor:pointer;"
+    "  font-size:.82em;padding:0;text-decoration:underline;margin-left:8px}"
+    ".error-row{color:#f77;font-size:.8em;padding:3px 10px 6px;font-style:italic}"
+)
+
+_PIPELINE_HTML = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TGW — Pipeline</title>
+{static_head}
+<style>{pipeline_css}</style>
+</head>
+<body>
+<h2>Pipeline Monitor
+  <button class="reload-btn" onclick="loadAll()">&#8635; Refresh</button>
+  <span id="countdown" style="font-size:.6em;color:#555;margin-left:8px"></span>
+</h2>
+
+<div id="err-box" class="err-box" style="display:none"></div>
+
+<!-- Queue depths -->
+<div class="pl-section">
+  <div class="pl-label">Queue Depths</div>
+  <div id="queue-table"><span style="color:#555">Loading…</span></div>
+</div>
+
+<!-- Active jobs -->
+<div class="pl-section">
+  <div class="pl-label">Active Jobs</div>
+  <div id="active-table"><span style="color:#555">Loading…</span></div>
+</div>
+
+<!-- Dead-letter jobs -->
+<div class="pl-section">
+  <div class="pl-label">Dead-Letter Jobs</div>
+  <div id="dead-table"><span style="color:#555">Loading…</span></div>
+</div>
+
+<!-- Workers -->
+<div class="pl-section">
+  <div class="pl-label">Workers</div>
+  <div id="workers-grid"><span style="color:#555">Loading…</span></div>
+</div>
+
+{static_foot}
+<script>
+window.TGW_API_KEY = {api_key_json};
+
+var _refreshInterval = 30;
+var _secondsLeft = _refreshInterval;
+var _timer = null;
+
+function startCountdown() {{
+  _secondsLeft = _refreshInterval;
+  clearInterval(_timer);
+  _timer = setInterval(function() {{
+    _secondsLeft--;
+    var el = document.getElementById('countdown');
+    if (el) el.textContent = '(auto-refresh in ' + _secondsLeft + 's)';
+    if (_secondsLeft <= 0) {{
+      clearInterval(_timer);
+      loadAll();
+    }}
+  }}, 1000);
+}}
+
+function numCell(n, cls) {{
+  if (n === null || n === undefined || n === 0) return '<td class="n-zero">—</td>';
+  return '<td class="' + cls + '">' + n + '</td>';
+}}
+
+function fmtElapsed(started) {{
+  if (!started) return '—';
+  var s = Math.round((Date.now() - new Date(started).getTime()) / 1000);
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s/60) + 'm ' + (s%60) + 's';
+  return Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm';
+}}
+
+function fmtTime(iso) {{
+  if (!iso) return '—';
+  var d = new Date(iso);
+  return d.toLocaleTimeString(undefined, {{hour:'2-digit', minute:'2-digit', second:'2-digit'}});
+}}
+
+function fmtAge(iso) {{
+  if (!iso) return '';
+  var s = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.floor(s/60) + 'm ago';
+  if (s < 86400) return Math.floor(s/3600) + 'h ago';
+  return Math.floor(s/86400) + 'd ago';
+}}
+
+function renderQueues(data) {{
+  var el = document.getElementById('queue-table');
+  if (!data || !data.ok) {{
+    el.innerHTML = '<div class="err-box">Failed to load queue status.</div>';
+    return;
+  }}
+  var queues = data.queues || {{}};
+  var names = Object.keys(queues).sort();
+  if (names.length === 0) {{
+    el.innerHTML = '<div class="empty-state">No queue activity.</div>';
+    return;
+  }}
+  var html = '<table class="pl-table"><tr>' +
+    '<th>Queue</th><th>Pending</th><th>Running</th><th>Done today</th><th>Failed/DL</th></tr>';
+  names.forEach(function(q) {{
+    var s = queues[q] || {{}};
+    var pending = (s.queued || 0) + (s.leased || 0) + (s.retry_wait || 0);
+    var running = s.running || 0;
+    var done = s.succeeded || 0;
+    var dead = (s.dead_letter || 0) + (s.failed || 0);
+    html += '<tr>' +
+      '<td class="qname">' + escapeHtml(q) + '</td>' +
+      numCell(pending || null, 'n-queued') +
+      numCell(running || null, 'n-run') +
+      numCell(done || null, 'n-done') +
+      numCell(dead || null, 'n-dead') +
+      '</tr>';
+  }});
+  html += '</table>';
+  el.innerHTML = html;
+}}
+
+function renderActive(jobs) {{
+  var el = document.getElementById('active-table');
+  var active = (jobs || []).filter(function(j) {{
+    return j.state === 'running' || j.state === 'leased';
+  }});
+  if (active.length === 0) {{
+    el.innerHTML = '<div class="empty-state">No jobs currently running.</div>';
+    return;
+  }}
+  var html = '<table class="pl-table"><tr>' +
+    '<th>Queue</th><th>SKU</th><th>State</th><th>Elapsed</th><th>Started</th></tr>';
+  active.forEach(function(j) {{
+    html += '<tr>' +
+      '<td class="qname">' + escapeHtml(j.queue_name) + '</td>' +
+      '<td class="sku-cell">' + escapeHtml(j.sku || '—') + '</td>' +
+      '<td>' + escapeHtml(j.state) + '</td>' +
+      '<td class="elapsed">' + fmtElapsed(j.started_at) + '</td>' +
+      '<td style="color:#777;font-size:.85em">' + fmtTime(j.started_at) + '</td>' +
+      '</tr>';
+  }});
+  html += '</table>';
+  el.innerHTML = html;
+}}
+
+function renderDead(jobs) {{
+  var el = document.getElementById('dead-table');
+  var dead = (jobs || []).filter(function(j) {{ return j.state === 'dead_letter'; }});
+  if (dead.length === 0) {{
+    el.innerHTML = '<div class="empty-state">No dead-letter jobs. &#10003;</div>';
+    return;
+  }}
+  var html = '<table class="pl-table"><tr>' +
+    '<th>Queue</th><th>SKU</th><th>Error</th><th>Age</th><th style="text-align:right">Actions</th></tr>';
+  dead.forEach(function(j) {{
+    var fid = 'dlf-' + j.job_id.replace(/-/g,'').slice(0,12);
+    html += '<tr id="dlr-' + escapeHtml(j.job_id) + '">' +
+      '<td class="qname">' + escapeHtml(j.queue_name) + '</td>' +
+      '<td class="sku-cell">' + escapeHtml(j.sku || '—') + '</td>' +
+      '<td style="color:#888;font-size:.8em;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
+        escapeHtml((j.error_detail || '').slice(0,80)) + '</td>' +
+      '<td style="color:#777;font-size:.85em;white-space:nowrap">' + fmtAge(j.finished_at) + '</td>' +
+      '<td class="act-btns">' +
+        '<button class="btn-requeue" onclick="requeueJob(' + JSON.stringify(j.job_id) + ',' + JSON.stringify(fid) + ')">Re-queue</button>' +
+        '<button class="btn-cancel" onclick="cancelJob(' + JSON.stringify(j.job_id) + ',' + JSON.stringify(fid) + ')">Cancel</button>' +
+        '<span class="dl-flash" id="' + fid + '"></span>' +
+      '</td>' +
+      '</tr>';
+    if (j.error_detail) {{
+      html += '<tr><td colspan="5" class="error-row">' + escapeHtml(j.error_detail.slice(0,200)) + '</td></tr>';
+    }}
+  }});
+  html += '</table>';
+  el.innerHTML = html;
+}}
+
+function renderWorkers(data) {{
+  var el = document.getElementById('workers-grid');
+  if (!data || !data.ok) {{
+    el.innerHTML = '<div class="err-box">Failed to load worker status.</div>';
+    return;
+  }}
+  var workers = data.workers || [];
+  if (workers.length === 0) {{
+    el.innerHTML = '<div class="empty-state">No worker info available.</div>';
+    return;
+  }}
+  var html = '<div style="font-size:.82em;color:#666;margin-bottom:8px">' +
+    data.up + ' / ' + data.total + ' active</div>';
+  html += '<div class="worker-grid">';
+  workers.forEach(function(w) {{
+    var cls = w.active === 'active' ? 'active' : (w.active === 'failed' ? 'failed' : 'unknown');
+    var cardCls = 'w-card' + (cls === 'active' ? ' active-card' : (cls === 'failed' ? ' failed-card' : ''));
+    var name = w.unit.replace(/^tgw-worker@/, '').replace(/[.]service$/, '');
+    if (name === 'tgw-http') name = 'tgw-http';
+    html += '<div class="' + cardCls + '">' +
+      '<span class="w-name" title="' + escapeHtml(w.unit) + '">' + escapeHtml(name) + '</span>' +
+      '<span class="pill ' + cls + '">' + escapeHtml(w.active) + '</span>' +
+      '</div>';
+  }});
+  html += '</div>';
+  el.innerHTML = html;
+}}
+
+async function requeueJob(jobId, flashId) {{
+  var flash = document.getElementById(flashId);
+  if (flash) {{ flash.className = 'dl-flash'; flash.textContent = ''; }}
+  try {{
+    var r = await fetch('/api/jobs/' + encodeURIComponent(jobId) + '/requeue', {{
+      method: 'POST',
+      headers: authHeaders(),
+    }});
+    var d = await r.json();
+    if (d.ok) {{
+      if (flash) {{ flash.className = 'dl-flash ok'; flash.textContent = 'Re-queued!'; }}
+      setTimeout(loadAll, 1200);
+    }} else {{
+      if (flash) {{ flash.className = 'dl-flash err'; flash.textContent = d.detail || d.error || 'Error'; }}
+    }}
+  }} catch(e) {{
+    if (flash) {{ flash.className = 'dl-flash err'; flash.textContent = 'Network error'; }}
+  }}
+}}
+
+async function cancelJob(jobId, flashId) {{
+  var flash = document.getElementById(flashId);
+  if (flash) {{ flash.className = 'dl-flash'; flash.textContent = ''; }}
+  try {{
+    var r = await fetch('/api/jobs/' + encodeURIComponent(jobId) + '/cancel', {{
+      method: 'POST',
+      headers: authHeaders(),
+    }});
+    var d = await r.json();
+    if (d.ok) {{
+      var row = document.getElementById('dlr-' + jobId);
+      if (row) {{ row.style.opacity = '.4'; row.style.pointerEvents = 'none'; }}
+      if (flash) {{ flash.className = 'dl-flash ok'; flash.textContent = 'Cancelled.'; }}
+      setTimeout(loadAll, 1500);
+    }} else {{
+      if (flash) {{ flash.className = 'dl-flash err'; flash.textContent = d.detail || d.error || 'Error'; }}
+    }}
+  }} catch(e) {{
+    if (flash) {{ flash.className = 'dl-flash err'; flash.textContent = 'Network error'; }}
+  }}
+}}
+
+async function loadAll() {{
+  startCountdown();
+  // Queue depths
+  try {{
+    var r = await fetch('/api/queue/status', {{headers: authHeaders()}});
+    renderQueues(await r.json());
+  }} catch(e) {{
+    document.getElementById('queue-table').innerHTML =
+      '<div class="err-box">Network error: ' + escapeHtml(String(e)) + '</div>';
+  }}
+
+  // Active + dead-letter jobs from a combined query
+  try {{
+    var r2 = await fetch('/api/pipeline/jobs', {{headers: authHeaders()}});
+    var d2 = await r2.json();
+    if (d2.ok) {{
+      renderActive(d2.jobs);
+      renderDead(d2.jobs);
+    }} else {{
+      var msg = '<div class="err-box">Failed to load jobs.</div>';
+      document.getElementById('active-table').innerHTML = msg;
+      document.getElementById('dead-table').innerHTML = msg;
+    }}
+  }} catch(e) {{
+    var msg = '<div class="err-box">Network error: ' + escapeHtml(String(e)) + '</div>';
+    document.getElementById('active-table').innerHTML = msg;
+    document.getElementById('dead-table').innerHTML = msg;
+  }}
+
+  // Workers
+  try {{
+    var r3 = await fetch('/api/system/workers', {{headers: authHeaders()}});
+    renderWorkers(await r3.json());
+  }} catch(e) {{
+    document.getElementById('workers-grid').innerHTML =
+      '<div class="err-box">Network error: ' + escapeHtml(String(e)) + '</div>';
+  }}
+}}
+
+loadAll();
+</script>
+</body>
+</html>
+"""
+
+
+@app.get("/form/pipeline")
+def pipeline_form():
+    """Pipeline monitor + dead-letter manager. No Bearer auth (network trust)."""
+    from fastapi.responses import HTMLResponse
+
+    html = _PIPELINE_HTML.format(
+        static_head=_STATIC_HEAD,
+        static_foot=_STATIC_FOOT,
+        pipeline_css=_PIPELINE_EXTRA_CSS,
+        api_key_json=json.dumps(_api_key),
+    )
+    return HTMLResponse(html)
+
+
+# ---------------------------------------------------------------------------
+# GET /api/pipeline/jobs — active + dead-letter jobs for the pipeline monitor
+# ---------------------------------------------------------------------------
+
+@app.get("/api/pipeline/jobs", dependencies=[AUTH])
+def pipeline_jobs() -> Dict[str, Any]:
+    """Return running/leased and dead_letter jobs for the pipeline monitor.
+
+    Also includes failed/retry_wait so the operator can see what's struggling.
+    """
+    try:
+        with psycopg2.connect(_cfg["postgres_dsn"]) as con:
+            with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT job_id::text, queue_name, state,
+                           payload_json->>'sku' AS sku,
+                           started_at, finished_at, created_at,
+                           error_detail, attempt_count, max_attempts
+                      FROM queue_jobs
+                     WHERE state IN ('running', 'leased', 'dead_letter', 'failed', 'retry_wait')
+                     ORDER BY
+                       CASE state
+                         WHEN 'running'  THEN 0
+                         WHEN 'leased'   THEN 1
+                         WHEN 'retry_wait' THEN 2
+                         WHEN 'failed'   THEN 3
+                         WHEN 'dead_letter' THEN 4
+                       END,
+                       created_at DESC
+                     LIMIT 200
+                    """
+                )
+                jobs = [dict(r) for r in cur.fetchall()]
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"postgres error: {exc}")
+
+    for j in jobs:
+        for ts_field in ("started_at", "finished_at", "created_at"):
+            v = j.get(ts_field)
+            if v is not None and hasattr(v, "isoformat"):
+                j[ts_field] = v.isoformat()
+
+    return {"ok": True, "jobs": jobs, "count": len(jobs)}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/jobs/{job_id}/cancel — cancel a dead-letter or queued job
+# ---------------------------------------------------------------------------
+
+@app.post("/api/jobs/{job_id}/cancel", dependencies=[AUTH])
+def cancel_job(job_id: str) -> Dict[str, Any]:
+    """Cancel a dead-letter (or queued/retry_wait) job."""
+    try:
+        with psycopg2.connect(_cfg["postgres_dsn"]) as con:
+            with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT state FROM queue_jobs WHERE job_id = %s",
+                    (job_id,),
+                )
+                row = cur.fetchone()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"postgres error: {exc}")
+
+    if not isinstance(row, dict):
+        raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
+
+    cancellable = {"dead_letter", "queued", "retry_wait", "failed"}
+    if row["state"] not in cancellable:
+        raise HTTPException(
+            status_code=400,
+            detail=f"job {job_id} is in state {row['state']!r}; can only cancel: {sorted(cancellable)}",
+        )
+
+    try:
+        with psycopg2.connect(_cfg["postgres_dsn"]) as con:
+            with con.cursor() as cur:
+                cur.execute(
+                    "UPDATE queue_jobs SET state = 'cancelled' WHERE job_id = %s",
+                    (job_id,),
+                )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"cancel failed: {exc}")
+
+    return {"ok": True, "job_id": job_id, "cancelled": True}
 
 
 # ---------------------------------------------------------------------------

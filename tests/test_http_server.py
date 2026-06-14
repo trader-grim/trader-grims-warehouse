@@ -2154,3 +2154,259 @@ def test_nav_review_badge_span_present(client):
     r = client.get("/static/nav.js")
     assert r.status_code == 200
     assert "nav-review-count" in r.text
+
+
+# ---------------------------------------------------------------------------
+# PP-EDITOR-001 Phase 3j — pipeline monitor + dead-letter manager
+# ---------------------------------------------------------------------------
+
+def _fake_systemctl_output(units):
+    """Build fake `systemctl show --property=Id,ActiveState,SubState,MainPID` output."""
+    blocks = []
+    for i, u in enumerate(units):
+        active = "active" if i % 3 != 2 else "inactive"
+        sub = "running" if active == "active" else "dead"
+        pid = str(1000 + i) if active == "active" else "0"
+        blocks.append(f"Id={u}\nActiveState={active}\nSubState={sub}\nMainPID={pid}\n")
+    return "\n".join(blocks)
+
+
+def test_system_workers_requires_auth(client):
+    r = client.get("/api/system/workers")
+    assert r.status_code in (401, 403)
+
+
+def test_system_workers_returns_unit_list(env, monkeypatch):
+    """GET /api/system/workers returns a worker list with active/sub state."""
+    from tgw.queue import WORKER_QUEUES
+
+    all_units = [f"tgw-worker@{q}.service" for q in WORKER_QUEUES] + ["tgw-http.service"]
+
+    def _fake_run(cmd, **kwargs):
+        class _R:
+            stdout = _fake_systemctl_output(all_units)
+            returncode = 0
+        return _R()
+
+    monkeypatch.setattr(http_server.subprocess, "run", _fake_run)
+
+    r = env["client"].get("/api/system/workers", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["total"] == len(all_units)
+    assert body["up"] > 0
+    workers = body["workers"]
+    assert len(workers) == len(all_units)
+    # First worker should be active
+    assert workers[0]["active"] in ("active", "inactive", "unknown")
+    assert "unit" in workers[0]
+    assert "sub" in workers[0]
+
+
+def test_system_workers_fallback_on_subprocess_failure(env, monkeypatch):
+    """When systemctl fails, workers are returned as 'unknown'."""
+    def _fail(*a, **k):
+        raise OSError("systemctl not found")
+
+    monkeypatch.setattr(http_server.subprocess, "run", _fail)
+
+    r = env["client"].get("/api/system/workers", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert all(w["active"] == "unknown" for w in body["workers"])
+
+
+def test_pipeline_jobs_requires_auth(client):
+    r = client.get("/api/pipeline/jobs")
+    assert r.status_code in (401, 403)
+
+
+def test_pipeline_jobs_returns_active_and_dead(env, monkeypatch):
+    """GET /api/pipeline/jobs returns running and dead_letter jobs."""
+    import datetime
+
+    rows = [
+        {
+            "job_id": "aaaaaaaa-0000-0000-0000-000000000001",
+            "queue_name": "ebay_draft",
+            "state": "running",
+            "sku": SKU_A,
+            "started_at": datetime.datetime(2026, 6, 14, 12, 0, 0),
+            "finished_at": None,
+            "created_at": datetime.datetime(2026, 6, 14, 11, 59, 0),
+            "error_detail": None,
+            "attempt_count": 1,
+            "max_attempts": 5,
+        },
+        {
+            "job_id": "bbbbbbbb-0000-0000-0000-000000000002",
+            "queue_name": "ebay_stage",
+            "state": "dead_letter",
+            "sku": SKU_B,
+            "started_at": datetime.datetime(2026, 6, 14, 10, 0, 0),
+            "finished_at": datetime.datetime(2026, 6, 14, 10, 1, 0),
+            "created_at": datetime.datetime(2026, 6, 14, 10, 0, 0),
+            "error_detail": "eBay API timeout",
+            "attempt_count": 5,
+            "max_attempts": 5,
+        },
+    ]
+
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: _FakeConn(rows),
+    )
+
+    r = env["client"].get("/api/pipeline/jobs", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["count"] == 2
+    jobs = body["jobs"]
+    assert jobs[0]["state"] == "running"
+    assert jobs[0]["sku"] == SKU_A
+    assert jobs[1]["state"] == "dead_letter"
+    assert jobs[1]["error_detail"] == "eBay API timeout"
+    # Timestamps serialised as ISO strings
+    assert isinstance(jobs[0]["started_at"], str)
+
+
+def test_pipeline_jobs_empty(env, monkeypatch):
+    """No active/dead jobs → ok=True, count=0."""
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: _FakeConn([]),
+    )
+    r = env["client"].get("/api/pipeline/jobs", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["count"] == 0
+    assert body["jobs"] == []
+
+
+def test_requeue_job_requires_auth(client):
+    r = client.post("/api/jobs/some-job-id/requeue")
+    assert r.status_code in (401, 403)
+
+
+def test_requeue_job_not_found(env, monkeypatch):
+    """Requeue returns 404 when job_id does not exist."""
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: _FakeConn([]),
+    )
+    r = env["client"].post("/api/jobs/nonexistent-job/requeue", headers=AUTH_HEADERS)
+    assert r.status_code == 404
+
+
+def test_requeue_job_wrong_state(env, monkeypatch):
+    """Requeue returns 400 when job is not in dead_letter state."""
+    rows = [{
+        "job_id": "aaa",
+        "queue_name": "ebay_draft",
+        "payload_json": {"sku": SKU_A},
+        "state": "succeeded",
+        "max_attempts": 3,
+    }]
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: _FakeConn(rows),
+    )
+    r = env["client"].post("/api/jobs/aaa/requeue", headers=AUTH_HEADERS)
+    assert r.status_code == 400
+    assert "dead_letter" in r.json()["detail"]
+
+
+def test_requeue_job_success(env, monkeypatch):
+    """Requeue enqueues a new job and returns ok=True."""
+    rows = [{
+        "job_id": "dead-job-id-001",
+        "queue_name": "ebay_draft",
+        "payload_json": {"sku": SKU_A},
+        "state": "dead_letter",
+        "max_attempts": 3,
+    }]
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: _FakeConn(rows),
+    )
+    monkeypatch.setattr(http_server.state_machine, "enqueue_job", lambda **k: "new-job-id-999")
+
+    r = env["client"].post("/api/jobs/dead-job-id-001/requeue", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["new_job_id"] == "new-job-id-999"
+    assert body["queue"] == "ebay_draft"
+
+
+def test_cancel_job_requires_auth(client):
+    r = client.post("/api/jobs/some-job/cancel")
+    assert r.status_code in (401, 403)
+
+
+def test_cancel_job_not_found(env, monkeypatch):
+    """Cancel returns 404 when job_id does not exist."""
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: _FakeConn([]),
+    )
+    r = env["client"].post("/api/jobs/nonexistent/cancel", headers=AUTH_HEADERS)
+    assert r.status_code == 404
+
+
+def test_cancel_job_wrong_state(env, monkeypatch):
+    """Cancel returns 400 when job is running (not cancellable via this endpoint)."""
+    rows = [{"state": "running"}]
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: _FakeConn(rows),
+    )
+    r = env["client"].post("/api/jobs/aaa/cancel", headers=AUTH_HEADERS)
+    assert r.status_code == 400
+
+
+def test_cancel_job_success(env, monkeypatch):
+    """Cancel a dead-letter job — returns ok=True."""
+    # First call (SELECT) returns dead_letter row; second call (UPDATE) is a no-op fake.
+    call_count = [0]
+    def _connect(*a, **k):
+        call_count[0] += 1
+        rows = [{"state": "dead_letter"}] if call_count[0] == 1 else []
+        return _FakeConn(rows)
+
+    monkeypatch.setattr(http_server.psycopg2, "connect", _connect)
+
+    r = env["client"].post("/api/jobs/dead-letter-job-123/cancel", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["cancelled"] is True
+
+
+def test_form_pipeline_renders(client):
+    """/form/pipeline returns HTML with pipeline monitor structure."""
+    r = client.get("/form/pipeline")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert "Pipeline Monitor" in r.text
+    assert "/api/queue/status" in r.text
+    assert "/api/pipeline/jobs" in r.text
+    assert "/api/system/workers" in r.text
+    assert "Dead-Letter" in r.text
+
+
+def test_form_pipeline_no_auth_required(client):
+    """/form/pipeline is accessible without Bearer token."""
+    r = client.get("/form/pipeline")
+    assert r.status_code == 200
+
+
+def test_nav_includes_pipeline_link(client):
+    """nav.js includes a link to /form/pipeline."""
+    r = client.get("/static/nav.js")
+    assert r.status_code == 200
+    assert "/form/pipeline" in r.text
