@@ -1126,6 +1126,431 @@ async def suggest_submit(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# GET /media/{sku}/{filename} — serve item media (no auth, network trust)
+# GET /thumb/{sku}           — serve thumbnail  (no auth, for <img src>)
+# ---------------------------------------------------------------------------
+
+@app.get("/media/{sku}/{filename}")
+def get_media(sku: str, filename: str):
+    """Serve a photo/video from ItemData. No Bearer auth — network trust."""
+    if ".." in sku:
+        raise HTTPException(status_code=400, detail="invalid sku")
+    safe = Path(filename).name
+    if safe != filename or not safe or safe.startswith("."):
+        raise HTTPException(status_code=400, detail="invalid filename")
+    if Path(safe).suffix.lower() not in {
+        ".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".mov", ".mkv", ".webm"
+    }:
+        raise HTTPException(status_code=400, detail="unsupported media type")
+    p = _cfg["itemdata_root"] / sku / safe
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="media not found")
+    return FileResponse(str(p))
+
+
+@app.get("/thumb/{sku}")
+def get_thumb_noauth(sku: str):
+    """Serve SKU thumbnail without auth — needed for <img src> in browse UI."""
+    if ".." in sku:
+        raise HTTPException(status_code=400, detail="invalid sku")
+    thumb = _cfg["thumbnail_root"] / f"{sku}.jpg"
+    if thumb.exists():
+        return FileResponse(str(thumb), media_type="image/jpeg")
+    sku_dir = _cfg["itemdata_root"] / sku
+    if sku_dir.exists():
+        for p in sorted(sku_dir.iterdir()):
+            if p.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+                return FileResponse(str(p))
+    raise HTTPException(status_code=404, detail=f"no thumbnail for {sku}")
+
+
+# ---------------------------------------------------------------------------
+# /form/items  — inventory browse + detail (no Bearer auth, network trust)
+# ---------------------------------------------------------------------------
+
+_ITEMS_CSS = _INTAKE_FORM_CSS + """
+.hdr{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:4px 0 12px;
+  border-bottom:1px solid #333;margin-bottom:10px}
+.hdr h2{margin:0;font-size:1.1em;flex-shrink:0}
+.hdr input{flex:1;min-width:130px;padding:8px;font-size:.9em;background:#222;
+  color:#eee;border:1px solid #444;border-radius:6px}
+.summary{font-size:.8em;color:#888;margin-bottom:8px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px}
+.card{display:flex;flex-direction:column;background:#1a1a1a;border:1px solid #333;
+  border-radius:8px;text-decoration:none;color:inherit;overflow:hidden;transition:border-color .15s}
+.card:hover{border-color:#4a8ade}
+.card .thumb{width:100%;aspect-ratio:4/3;object-fit:cover;background:#111}
+.card-body{padding:8px}
+.card-sku{font-size:.7em;color:#888;font-family:monospace}
+.card-title{font-size:.85em;margin:4px 0;color:#ddd;line-height:1.3;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.card-meta{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:4px;font-size:.75em;color:#888}
+.price{color:#7fbfff;font-weight:bold}
+.sbadge{padding:2px 6px;border-radius:10px;font-size:.72em}
+.s-in-stock{background:#1a3a1a;color:#7f7}.s-listed{background:#1a2a4a;color:#7af}
+.s-staged{background:#3a2a0a;color:#fb7}.s-sold{background:#2a1a1a;color:#f77}
+.pager{text-align:center;margin-top:14px;font-size:.9em;color:#888}
+.pager button{padding:6px 14px;background:#222;color:#eee;border:1px solid #444;
+  border-radius:6px;cursor:pointer;margin:0 4px}
+.pager button:hover{background:#333}
+.loading,.no-results{padding:20px;text-align:center;color:#888}
+/* detail */
+.back{display:inline-block;color:#4a8ade;text-decoration:none;margin-bottom:10px;font-size:.9em}
+.sku-hdr{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.sku-hdr .slabel{font-family:monospace;color:#888;font-size:.85em}
+.sku-hdr .stitle{font-size:1.05em;color:#eee}
+.detail-layout{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:680px){.detail-layout{grid-template-columns:1fr}}
+.gallery .main-photo{width:100%;border-radius:6px;background:#111;cursor:pointer;display:block}
+.strip{display:flex;gap:5px;flex-wrap:wrap;margin-top:6px}
+.strip img{width:60px;height:45px;object-fit:cover;border-radius:4px;cursor:pointer;
+  border:2px solid transparent;background:#111}
+.strip img.active{border-color:#4a8ade}
+.dfields{display:flex;flex-direction:column;gap:12px}
+.dsec{background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:10px}
+.dsec h3{margin:0 0 8px;font-size:.78em;text-transform:uppercase;letter-spacing:.06em;color:#888}
+.frow{display:flex;gap:6px;padding:4px 0;border-bottom:1px solid #262626;font-size:.85em}
+.frow:last-child{border-bottom:none}
+.fn{color:#888;width:120px;flex-shrink:0;font-size:.8em}
+.fv{color:#ddd;word-break:break-word}
+.fv a{color:#4a8ade}
+.diff-hdr{font-size:.78em;text-transform:uppercase;letter-spacing:.06em;color:#fb7;margin:0 0 6px}
+.diff-meta{font-family:monospace;font-size:.72em;color:#666;margin-bottom:8px}
+.dtable{width:100%;border-collapse:collapse;font-size:.82em}
+.dtable th{color:#666;text-align:left;padding:4px 8px;border-bottom:1px solid #2a2a2a;
+  font-weight:normal;font-size:.75em;text-transform:uppercase}
+.dtable td{padding:5px 8px;border-bottom:1px solid #1e1e1e;vertical-align:top;word-break:break-word}
+.dfield{color:#888;font-family:monospace;width:110px}
+.dwas{color:#f77}.dnow{color:#7f7}
+.jtable{width:100%;border-collapse:collapse;font-size:.78em}
+.jtable th{color:#666;text-align:left;padding:4px 6px;border-bottom:1px solid #2a2a2a;
+  font-weight:normal;font-size:.75em;text-transform:uppercase}
+.jtable td{padding:4px 6px;border-bottom:1px solid #1e1e1e;vertical-align:top}
+.js-done{color:#7f7}.js-pending,.js-running{color:#fb7}
+.js-failed,.js-dead-letter{color:#f77}
+"""
+
+_BROWSE_HTML = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TGW Inventory</title>
+<style>{css}</style>
+</head>
+<body>
+<div class="hdr">
+  <h2>TGW Inventory</h2>
+  <input id="sq" type="search" placeholder="search title or SKU…" oninput="df()">
+  <input id="loc" type="text" placeholder="location…" oninput="df()">
+</div>
+<div class="chips" style="margin-bottom:10px">
+  <button class="chip active" data-s="">All</button>
+  <button class="chip" data-s="In Stock">In Stock</button>
+  <button class="chip" data-s="Listed">Listed</button>
+  <button class="chip" data-s="Staged">Staged</button>
+  <button class="chip" data-s="Sold">Sold</button>
+</div>
+<div class="summary" id="sum"></div>
+<div class="grid" id="grid"><div class="loading">Loading…</div></div>
+<div class="pager" id="pager"></div>
+<script>
+const AUTH='Bearer {api_key}';
+const LIM=60;
+let off=0;
+const esc=s=>String(s||'').replace(/[&<>"']/g,c=>({{
+  '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+}}[c]));
+const scls=s=>({{
+  'in stock':'s-in-stock','listed':'s-listed','staged':'s-staged','sold':'s-sold'
+}})[(s||'').toLowerCase()]||'';
+async function load(o){{
+  off=o??0;
+  const search=document.getElementById('sq').value;
+  const loc=document.getElementById('loc').value;
+  const status=document.querySelector('.chip.active[data-s]')?.dataset.s??'';
+  const p=new URLSearchParams({{limit:LIM,offset:off}});
+  if(search)p.set('search',search);
+  if(loc)p.set('location',loc);
+  if(status)p.set('status_filter',status);
+  document.getElementById('grid').innerHTML='<div class="loading">Loading…</div>';
+  let r,d;
+  try{{r=await fetch('/api/items?'+p,{{headers:{{Authorization:AUTH}}}});d=await r.json();}}
+  catch(e){{document.getElementById('grid').innerHTML='<div class="loading">Network error</div>';return;}}
+  if(!r.ok||!d.ok){{
+    document.getElementById('grid').innerHTML='<div class="loading">Error: '+esc(d.detail||d.error||r.status)+'</div>';
+    return;
+  }}
+  document.getElementById('sum').textContent=d.count+' item'+(d.count===1?'':'s');
+  if(!d.items.length){{
+    document.getElementById('grid').innerHTML='<div class="no-results">No items found.</div>';
+    document.getElementById('pager').innerHTML='';
+    return;
+  }}
+  let html='';
+  for(const it of d.items){{
+    const price=it.price!=null?'$'+parseFloat(it.price).toFixed(2):'—';
+    html+=`<a href="/form/items/${{it.sku}}" class="card">
+      <img class="thumb" src="/thumb/${{it.sku}}" loading="lazy" alt="" onerror="this.style.visibility='hidden'">
+      <div class="card-body">
+        <div class="card-sku">${{it.sku}}</div>
+        <div class="card-title">${{esc(it.title||'')}}</div>
+        <div class="card-meta">
+          <span class="sbadge ${{scls(it.status)}}">${{esc(it.status||'—')}}</span>
+          <span>${{esc(it.location||'')}}</span>
+          <span class="price">${{price}}</span>
+        </div>
+      </div></a>`;
+  }}
+  document.getElementById('grid').innerHTML=html;
+  const pages=Math.ceil(d.count/LIM);
+  const cur=Math.floor(off/LIM)+1;
+  let pg='';
+  if(off>0)pg+=`<button onclick="load(${{off-LIM}})">← Prev</button>`;
+  if(pages>1)pg+=` Page ${{cur}} of ${{pages}} `;
+  if(off+LIM<d.count)pg+=`<button onclick="load(${{off+LIM}})">Next →</button>`;
+  document.getElementById('pager').innerHTML=pg;
+}}
+let _t;
+function df(){{clearTimeout(_t);_t=setTimeout(()=>load(0),300);}}
+document.querySelectorAll('.chip[data-s]').forEach(c=>{{
+  c.addEventListener('click',()=>{{
+    document.querySelectorAll('.chip[data-s]').forEach(x=>x.classList.remove('active'));
+    c.classList.add('active');load(0);
+  }});
+}});
+load(0);
+</script>
+</body>
+</html>
+"""
+
+
+def _render_item_detail_html(
+    sku: str,
+    item: Dict[str, Any],
+    images: List[str],
+    videos: List[str],
+    jobs: List[Dict[str, Any]],
+) -> str:
+    import html as _html
+
+    h = _html.escape
+
+    def fv(key: str) -> str:
+        v = item.get(key)
+        return h(str(v)) if v is not None else '<span style="color:#444">—</span>'
+
+    def fr(label: str, val: str = "", key: str = "") -> str:
+        display = val if val else fv(key)
+        return (
+            f'<div class="frow">'
+            f'<span class="fn">{label}</span>'
+            f'<span class="fv">{display}</span>'
+            f"</div>"
+        )
+
+    # Gallery
+    if images:
+        main_src = f"/media/{h(sku)}/{h(images[0])}"
+        strip = "".join(
+            f'<img src="/media/{h(sku)}/{h(img)}" class="{"active" if i == 0 else ""}"'
+            f' onclick="sm(this)" loading="lazy" alt="">'
+            for i, img in enumerate(images)
+        )
+        gallery_html = (
+            f'<div class="gallery">'
+            f'<img class="main-photo" id="mp" src="{main_src}" alt="">'
+            f'<div class="strip">{strip}</div>'
+            f"</div>"
+            f"<script>function sm(el){{"
+            f"document.getElementById('mp').src=el.src;"
+            f"document.querySelectorAll('.strip img').forEach(i=>i.classList.remove('active'));"
+            f"el.classList.add('active');}}</script>"
+        )
+    else:
+        gallery_html = '<div style="color:#555;padding:30px;text-align:center">No photos</div>'
+
+    # eBay fields (prefer ebay_listing sub-doc)
+    eb = item.get("ebay_listing") or {}
+    listing_id = eb.get("listing_id") or item.get("listing_id", "")
+    listing_url = eb.get("listing_url") or item.get("listing_url", "")
+    listing_status = eb.get("status") or item.get("status", "")
+    price = eb.get("live_price") if eb.get("live_price") is not None else item.get("price")
+    price_str = f"${float(price):.2f}" if price is not None else "—"
+    url_html = (
+        f'<a href="{h(listing_url)}" target="_blank">{h(listing_url[:60])}…</a>'
+        if listing_url
+        else '<span style="color:#444">—</span>'
+    )
+
+    # Revision draft diff
+    draft_html = ""
+    draft = item.get("revision_draft")
+    if draft:
+        delta = draft.get("delta") or {}
+        baseline = draft.get("baseline") or {}
+        snap = baseline.get("snapshot") or {}
+        by = h(str(draft.get("by", "")))
+        at = h(str(draft.get("at", "")))[:19]
+        bhash = h(str(baseline.get("hash", "")))[:12]
+        if delta:
+            rows = "".join(
+                f'<tr>'
+                f'<td class="dfield">{h(f)}</td>'
+                f'<td class="dwas">{h(str(snap.get(f, "—")))}</td>'
+                f'<td class="dnow">{h(str(v))}</td>'
+                f"</tr>"
+                for f, v in delta.items()
+            )
+            draft_html = (
+                f'<h3 class="diff-hdr">Revision Draft</h3>'
+                f'<div class="diff-meta">by {by} · {at} · baseline {bhash}…</div>'
+                f'<table class="dtable">'
+                f"<tr><th>Field</th><th>Current</th><th>Proposed</th></tr>"
+                f"{rows}"
+                f"</table>"
+            )
+
+    # Pipeline jobs
+    jobs_html = ""
+    if jobs:
+        rows = ""
+        for j in jobs[:10]:
+            state = j.get("state", "")
+            sc = "js-" + state.replace("_", "-").lower()
+            ts = (j.get("updated_at") or j.get("finished_at") or j.get("created_at") or "")[:16]
+            err = h(str(j.get("error_detail") or "")[:60])
+            rows += (
+                f"<tr>"
+                f'<td>{h(j.get("queue_name",""))}</td>'
+                f'<td class="{sc}">{h(state)}</td>'
+                f'<td style="color:#666;font-size:.8em">{h(ts)}</td>'
+                f'<td style="color:#f99;font-size:.8em">{err}</td>'
+                f"</tr>"
+            )
+        jobs_html = (
+            f'<table class="jtable">'
+            f"<tr><th>Queue</th><th>State</th><th>Updated</th><th>Error</th></tr>"
+            f"{rows}</table>"
+        )
+
+    title = item.get("title", "")
+
+    fields_html = (
+        '<div class="dfields">'
+        '<div class="dsec"><h3>Identity</h3>'
+        + fr("Title", key="title")
+        + fr("Category group", key="category_group")
+        + fr("Condition", key="condition")
+        + fr("AI hint", key="ai_hint")
+        + fr("Barcode", key="barcode")
+        + "</div>"
+        '<div class="dsec"><h3>eBay</h3>'
+        + fr("Listing ID", h(listing_id) if listing_id else "")
+        + fr("Status", h(listing_status) if listing_status else "")
+        + fr("Price", price_str)
+        + fr("URL", url_html)
+        + fr("Qty", key="qty")
+        + fr("Qty sold", key="quantity_sold")
+        + "</div>"
+        '<div class="dsec"><h3>Physical</h3>'
+        + fr("Location", key="location")
+        + fr("Weight (oz)", key="weight_oz")
+        + fr("Size class", key="size_class")
+        + "</div>"
+        + (
+            f'<div class="dsec">{draft_html}</div>'
+            if draft_html else ""
+        )
+        + (
+            f'<div class="dsec"><h3>Pipeline Jobs</h3>{jobs_html}</div>'
+            if jobs_html else ""
+        )
+        + "</div>"
+    )
+
+    return (
+        f"<!DOCTYPE html>\n<html lang='en'>\n<head>\n"
+        f"<meta charset='utf-8'>"
+        f"<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        f"<title>{h(sku)} — TGW</title>"
+        f"<style>{_ITEMS_CSS}</style>"
+        f"</head>\n<body>\n"
+        f'<a class="back" href="/form/items">← Inventory</a>\n'
+        f'<div class="sku-hdr">'
+        f'<span class="slabel">{h(sku)}</span>'
+        f'<span class="stitle">{h(title)}</span>'
+        f"</div>\n"
+        f'<div class="detail-layout">'
+        f"{gallery_html}"
+        f"{fields_html}"
+        f"</div>\n"
+        f"</body></html>"
+    )
+
+
+@app.get("/form/items")
+def items_browse_form():
+    """Inventory browse — card grid with search/filter. No Bearer auth (network trust)."""
+    from fastapi.responses import HTMLResponse
+
+    html = _BROWSE_HTML.format(css=_ITEMS_CSS, api_key=_api_key)
+    return HTMLResponse(html)
+
+
+@app.get("/form/items/{sku}")
+def item_detail_form(sku: str):
+    """Item detail page — photos, fields, revision diff. Server-rendered, no auth."""
+    from fastapi.responses import HTMLResponse
+
+    if ".." in sku:
+        return HTMLResponse("<h2>invalid sku</h2>", status_code=400)
+
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        return HTMLResponse(f"<h2>SKU not found: {sku}</h2>", status_code=404)
+
+    item = load_item_doc(json_path)
+
+    images: List[str] = []
+    videos: List[str] = []
+    for p in sorted(json_path.parent.iterdir()):
+        if not p.is_file():
+            continue
+        suf = p.suffix.lower()
+        if suf in {".jpg", ".jpeg", ".png", ".gif", ".webp"}:
+            images.append(p.name)
+        elif suf in {".mp4", ".mov", ".mkv", ".webm"}:
+            videos.append(p.name)
+
+    jobs: List[Dict[str, Any]] = []
+    try:
+        with psycopg2.connect(_cfg["postgres_dsn"]) as con:
+            with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT queue_name, state, created_at, updated_at,
+                           finished_at, error_code, error_detail
+                      FROM queue_jobs
+                     WHERE payload_json->>'sku' = %s
+                     ORDER BY created_at DESC LIMIT 10
+                    """,
+                    (sku,),
+                )
+                jobs = [dict(r) for r in cur.fetchall()]
+                for j in jobs:
+                    for k in ("created_at", "updated_at", "finished_at"):
+                        if j[k] is not None:
+                            j[k] = j[k].isoformat()
+    except Exception as exc:
+        log.warning("queue job fetch failed for %s: %s", sku, exc)
+
+    return HTMLResponse(_render_item_detail_html(sku, item, images, videos, jobs))
+
+
+# ---------------------------------------------------------------------------
 # POST /webhooks/ebay/notification — eBay push notification (no Bearer auth)
 # ---------------------------------------------------------------------------
 

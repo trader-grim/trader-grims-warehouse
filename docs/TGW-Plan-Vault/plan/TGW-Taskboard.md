@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-06-14 13:14 UTC — 28 open, 807 done in the last 7 days._
+_Rendered 2026-06-14 14:46 UTC — 28 open, 808 done in the last 7 days._
 
 ## admin (16 open)
 
@@ -54,10 +54,11 @@ _Rendered 2026-06-14 13:14 UTC — 28 open, 807 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — Sold reconciliation and inventory status sync (design ready)\|PP-SOLD-001]] |  |
 
-## Done this week (807)
+## Done this week (808)
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 845 | claude | 2026-06-14 | PP-EDITOR-001 Phase 2 — inventory browse + detail web UI: /form/items (card grid, search/location/status filters, thumbnails, pagination), /form/items/{sku} (photo gallery, field sections, revision draft diff table, pipeline jobs); /thumb/{sku} + /media/{sku}/{filename} no-auth routes for browser img src; server-rendered detail, JS-driven list; network trust like other /form/ pages |
 | 133 | claude | 2026-06-14 | PP-OFFER-001 Phase 1 build — GetBestOffers Trading API polling; tgw offers [--pending] lists incoming offer requests; tgw offers --respond ID --accept/--counter PRICE/--decline; auto_accept_min_pct config flag for batch auto-accept; dry-run default; tests. Build after design in #124 settled |
 | 134 | claude | 2026-06-14 | PP-REVISION-001 apply path — ReviseFixedPriceItem call with pinned-baseline drift-gate (apply only when live mirror matches baseline hash); --dry-run default; NO eBay write until Dave confirms sparse-delta apply design settled. Continuation of #111 dry-run delta |
 | 113 | claude | 2026-06-14 | Round7 p72 M (GATED: after admin #20 Qtile install): PP-CLIP-001 daemon — dual-backend watcher per settled design (2026-06-12): backend-agnostic core (on change -> classify -> SQLite -> socket push); X11/XFixes backend (default/stable) + Wayland wl-paste --watch backend; session-type autodetect; PRIMARY+CLIPBOARD; feeds existing tgw clip store; Unix socket for TGWSKUWidget |

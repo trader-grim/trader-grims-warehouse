@@ -2363,6 +2363,51 @@ Planned: RBAC gates + role-specific default tabs and field visibility. Model use
 - Operator (mixed admin/staging)
 - Supervisor (audit/report focus)
 
+### Phase 2 — Web-based inventory browse + listing detail ✅ COMPLETE (2026-06-14, session 29, todo #845)
+
+Goal: a browser-accessible UI that works on any device on Tailscale — no TGW install required.
+Solves the gap between the CLI/MC console and the Flutter app (which requires the Flutter toolchain
+and build step). Implemented as additional routes on `tgw-http` using the same inline-HTML pattern
+established by `/form/intake`, `/form/bulk`, `/form/todos`, and `/form/suggest`.
+
+**New routes added to `src/tgw/http_server.py`:**
+
+| Route | Auth | Description |
+|-------|------|-------------|
+| `GET /thumb/{sku}` | none | Thumbnail JPEG — thumbnail_root first, falls back to first ItemData image |
+| `GET /media/{sku}/{filename}` | none | Serve any photo/video from ItemData; path-traversal validated |
+| `GET /form/items` | none | Inventory browse page (see below) |
+| `GET /form/items/{sku}` | none | Item detail page (see below) |
+
+Both media routes use network trust (no Bearer) so `<img src>` tags in the browser work directly.
+Path traversal is blocked: filename is checked with `Path(filename).name == filename`; sku is
+checked for `..`; only known image/video extensions are served.
+
+**`/form/items` — inventory browse:**
+- Card grid: thumbnail, SKU (link to detail), title, status badge (colour-coded), location, price
+- Live JS filtering: free-text search + location input (debounced 300 ms) + status chip bar
+  (All / In Stock / Listed / Staged / Sold)
+- Pagination: 60 per page, Prev/Next buttons, page X of Y display
+- Hits `GET /api/items` (Bearer embedded in page JS, same pattern as `/form/intake`)
+- Dark theme consistent with all other `/form/` pages
+
+**`/form/items/{sku}` — item detail (server-rendered):**
+- Two-column layout: left = photo gallery, right = field sections + diff + jobs
+- **Photo gallery**: main large photo + clickable thumbnail strip; clicking a strip thumb updates
+  the main photo via inline JS; photos served from `/media/{sku}/{filename}` (no auth)
+- **Field sections**: Identity (title, category_group, condition, ai_hint, barcode, description),
+  eBay (listing_id, status, live_price, url, qty), Physical (location, weight_oz, size_class)
+- **Revision draft diff table**: if `revision_draft` is present in item JSON, renders a three-
+  column table: Field | Current (from baseline snapshot) | Proposed (delta) — current in red,
+  proposed in green. Shows metadata: by, at, baseline hash prefix. This is the primary use case
+  for evaluating Claude's proposed revisions before applying them.
+- **Pipeline jobs**: last 10 queue jobs for this SKU — queue name, state (colour-coded), updated
+  timestamp, error detail
+- Fully server-rendered (Python f-strings, `html.escape()` on all values); no client-side
+  auth needed; photos via no-auth `/media/` routes
+
+**Access:** `http://<tgw-host>:7373/form/items` on any Tailscale device, no login required.
+
 ### Design notes (session 19/20)
 
 - **Recently-processed SKU sort** — `GET /api/items?sort=recently_processed`: a sort option
