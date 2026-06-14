@@ -1,0 +1,485 @@
+"""
+tgw.clipd — TGW clipboard daemon (PP-CLIP-001).
+
+Dual-backend clipboard watcher:
+  X11/XFixes (default, stable) — push events via python-xlib xfixes extension
+  Wayland                      — wl-paste --watch subprocess per selection
+
+Session-type autodetect at startup:
+  $WAYLAND_DISPLAY set OR $XDG_SESSION_TYPE == 'wayland' → wayland backend
+  else → x11 backend
+
+Watches both PRIMARY and CLIPBOARD selections.
+Feeds the tgw.clip SQLite store via record_clip().
+
+Unix socket at ~/.local/share/tgw-clip/clipd.sock (newline-delimited JSON):
+  → {"cmd": "ping"}
+  ← {"ok": true, "pong": true}
+  → {"cmd": "last-sku"}
+  ← {"ok": true, "sku": "tgwXXX" | null}
+  → {"cmd": "list", "limit": 20}
+  ← {"ok": true, "rows": [...]}
+  → {"cmd": "subscribe"}
+  ← {"ok": true, "subscribed": true}
+  ← {"event": "clip", "content": "...", "selection": "...", "is_sku": bool, "sku": str|null}
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import socket
+import socketserver
+import subprocess
+import threading
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from tgw.clip import last_sku, list_history, record_clip
+
+log = logging.getLogger(__name__)
+
+_DEFAULT_CLIP_DIR = Path.home() / '.local' / 'share' / 'tgw-clip'
+SOCKET_NAME = 'clipd.sock'
+
+
+# ---------------------------------------------------------------------------
+# Backend detection
+# ---------------------------------------------------------------------------
+
+def detect_backend() -> str:
+    """Return 'wayland' or 'x11' based on the current session environment."""
+    if os.environ.get('WAYLAND_DISPLAY'):
+        return 'wayland'
+    if os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland':
+        return 'wayland'
+    return 'x11'
+
+
+# ---------------------------------------------------------------------------
+# Subscriber registry — thread-safe push to connected sockets
+# ---------------------------------------------------------------------------
+
+class _SubscriberRegistry:
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._subs: List[socket.socket] = []
+
+    def add(self, sock: socket.socket) -> None:
+        with self._lock:
+            self._subs.append(sock)
+
+    def remove(self, sock: socket.socket) -> None:
+        with self._lock:
+            try:
+                self._subs.remove(sock)
+            except ValueError:
+                pass
+
+    def push(self, event: Dict[str, Any]) -> None:
+        """Broadcast event JSON to all subscribers; drop dead connections."""
+        msg = (json.dumps(event) + '\n').encode()
+        dead: List[socket.socket] = []
+        with self._lock:
+            for s in list(self._subs):
+                try:
+                    s.sendall(msg)
+                except OSError:
+                    dead.append(s)
+        for s in dead:
+            self.remove(s)
+
+    def count(self) -> int:
+        with self._lock:
+            return len(self._subs)
+
+
+# ---------------------------------------------------------------------------
+# Core change handler — backend-agnostic
+# ---------------------------------------------------------------------------
+
+def process_change(
+    content: str,
+    selection: str,
+    subscribers: _SubscriberRegistry,
+    db_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Record a clipboard change and push an event to all subscribers."""
+    result = record_clip(content, selection=selection, db_path=db_path)
+    subscribers.push({
+        'event': 'clip',
+        'content': content[:200],
+        'selection': selection,
+        'is_sku': result.get('is_sku', False),
+        'sku': result.get('sku'),
+    })
+    log.debug('clip: selection=%s is_sku=%s', selection, result.get('is_sku'))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Socket command handler
+# ---------------------------------------------------------------------------
+
+def handle_command(cmd: Dict[str, Any], db_path: Optional[Path] = None) -> Dict[str, Any]:
+    """Dispatch a single socket command dict; return response dict."""
+    action = cmd.get('cmd', '')
+    if action == 'ping':
+        return {'ok': True, 'pong': True}
+    if action == 'last-sku':
+        return {'ok': True, 'sku': last_sku(db_path=db_path)}
+    if action == 'list':
+        limit = int(cmd.get('limit', 20))
+        return {'ok': True, 'rows': list_history(limit=limit, db_path=db_path)}
+    return {'ok': False, 'error': f'unknown command: {action!r}'}
+
+
+# ---------------------------------------------------------------------------
+# Unix socket server
+# ---------------------------------------------------------------------------
+
+class _ClipRequestHandler(socketserver.StreamRequestHandler):
+
+    def handle(self) -> None:
+        db_path: Optional[Path] = self.server.db_path  # type: ignore[attr-defined]
+        subs: _SubscriberRegistry = self.server.subscribers  # type: ignore[attr-defined]
+        try:
+            for raw in self.rfile:
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    cmd = json.loads(line)
+                except json.JSONDecodeError:
+                    self._send({'ok': False, 'error': 'invalid JSON'})
+                    continue
+                if cmd.get('cmd') == 'subscribe':
+                    subs.add(self.request)
+                    self._send({'ok': True, 'subscribed': True})
+                    try:
+                        self.rfile.read()  # hold open until client disconnects
+                    except OSError:
+                        pass
+                    finally:
+                        subs.remove(self.request)
+                    return
+                self._send(handle_command(cmd, db_path=db_path))
+        except OSError:
+            pass
+
+    def _send(self, obj: Dict[str, Any]) -> None:
+        try:
+            self.wfile.write((json.dumps(obj) + '\n').encode())
+            self.wfile.flush()
+        except OSError:
+            pass
+
+
+class ClipSocketServer(socketserver.ThreadingUnixStreamServer):
+    """Threaded Unix socket server for tgw-clipd."""
+
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def __init__(
+        self,
+        socket_path: Path,
+        db_path: Optional[Path],
+        subscribers: _SubscriberRegistry,
+    ) -> None:
+        self.db_path = db_path
+        self.subscribers = subscribers
+        socket_path.parent.mkdir(parents=True, exist_ok=True)
+        if socket_path.exists():
+            socket_path.unlink()
+        super().__init__(str(socket_path), _ClipRequestHandler)
+
+    def server_close(self) -> None:
+        super().server_close()
+        try:
+            Path(self.server_address).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# X11/XFixes backend
+# ---------------------------------------------------------------------------
+
+class X11Backend:
+    """
+    X11/XFixes clipboard watcher. Registers for XFixes SelectionOwner events
+    on CLIPBOARD and PRIMARY via python-xlib (python3-xlib system package);
+    reads content via xclip subprocess on each change.
+    """
+
+    def __init__(
+        self,
+        subscribers: _SubscriberRegistry,
+        db_path: Optional[Path] = None,
+        stop_event: Optional[threading.Event] = None,
+    ) -> None:
+        self._subscribers = subscribers
+        self._db_path = db_path
+        self._stop = stop_event or threading.Event()
+
+    def _open_display(self):
+        import sys
+        # python3-xlib is a system package, not in the TGW venv
+        if '/usr/lib/python3/dist-packages' not in sys.path:
+            sys.path.insert(0, '/usr/lib/python3/dist-packages')
+        from Xlib import display as xdisplay
+        return xdisplay.Display()
+
+    def _read_selection_content(self, selection: str) -> Optional[str]:
+        """Read clipboard content for the named selection via xclip subprocess."""
+        sel_arg = 'primary' if selection == 'primary' else 'clipboard'
+        try:
+            r = subprocess.run(
+                ['xclip', '-o', '-selection', sel_arg],
+                capture_output=True, text=True, timeout=2.0,
+            )
+            if r.returncode == 0:
+                return r.stdout
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+        return None
+
+    def run(self) -> None:
+        """Block until stop_event, processing XFixes SelectionOwner events."""
+        import select as _select
+        import sys
+        if '/usr/lib/python3/dist-packages' not in sys.path:
+            sys.path.insert(0, '/usr/lib/python3/dist-packages')
+        from Xlib import Xatom
+        from Xlib.ext.xfixes import XFixesSetSelectionOwnerNotifyMask
+
+        dpy = self._open_display()
+        screen = dpy.screen()
+        root = screen.root
+
+        ext_info = dpy.query_extension('XFIXES')
+        if ext_info is None:
+            log.error('XFixes extension not available — X11 backend disabled')
+            dpy.close()
+            return
+        first_event = ext_info.first_event
+
+        dpy.xfixes_query_version()
+
+        atom_clipboard = dpy.intern_atom('CLIPBOARD')
+        atom_primary = Xatom.PRIMARY
+
+        dpy.xfixes_select_selection_input(root, atom_clipboard, XFixesSetSelectionOwnerNotifyMask)
+        dpy.xfixes_select_selection_input(root, atom_primary, XFixesSetSelectionOwnerNotifyMask)
+        dpy.flush()
+
+        log.info('X11/XFixes backend started (event_base=%d)', first_event)
+        fd = dpy.fileno()
+
+        while not self._stop.is_set():
+            r, _, _ = _select.select([fd], [], [], 0.2)
+            if not r:
+                continue
+            while dpy.pending_events():
+                evt = dpy.next_event()
+                # XFixes SelectionNotify: type = first_event + 0; sub_code 0 = SetOwner
+                if getattr(evt, 'type', None) != first_event:
+                    continue
+                if getattr(evt, 'sub_code', -1) != 0:
+                    continue
+                sel_atom = getattr(evt, 'selection', None)
+                if sel_atom == atom_primary:
+                    selection = 'primary'
+                elif sel_atom == atom_clipboard:
+                    selection = 'clipboard'
+                else:
+                    continue
+                content = self._read_selection_content(selection)
+                if content is not None:
+                    process_change(content, selection, self._subscribers, self._db_path)
+
+        dpy.close()
+        log.info('X11/XFixes backend stopped')
+
+
+# ---------------------------------------------------------------------------
+# Wayland backend
+# ---------------------------------------------------------------------------
+
+class WaylandBackend:
+    """
+    Wayland clipboard watcher. Spawns two wl-paste --watch cat subprocesses,
+    one per selection (CLIPBOARD and PRIMARY). Reads stdout line-by-line;
+    each non-empty line is treated as a new clipboard content snapshot.
+    """
+
+    def __init__(
+        self,
+        subscribers: _SubscriberRegistry,
+        db_path: Optional[Path] = None,
+        stop_event: Optional[threading.Event] = None,
+        restart_delay: float = 1.0,
+    ) -> None:
+        self._subscribers = subscribers
+        self._db_path = db_path
+        self._stop = stop_event or threading.Event()
+        self._restart_delay = restart_delay
+
+    def _spawn(self, args: list, **kwargs) -> subprocess.Popen:
+        return subprocess.Popen(args, **kwargs)
+
+    def _run_watcher(self, selection: str) -> None:
+        """Watch one selection in a loop; restart if the process exits."""
+        args = ['wl-paste']
+        if selection == 'primary':
+            args.append('--primary')
+        args += ['--watch', 'cat']
+
+        while not self._stop.is_set():
+            try:
+                proc = self._spawn(
+                    args,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                )
+            except FileNotFoundError:
+                log.error('wl-paste not found; Wayland backend unavailable')
+                return
+
+            try:
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    if self._stop.is_set():
+                        break
+                    content = line.rstrip('\n')
+                    if content:
+                        process_change(content, selection, self._subscribers, self._db_path)
+            except OSError:
+                pass
+            finally:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+
+            if not self._stop.is_set():
+                log.warning('wl-paste --watch exited; restarting in %.1fs', self._restart_delay)
+                self._stop.wait(self._restart_delay)
+
+    def run(self) -> None:
+        """Start watchers for clipboard and primary; block until stop_event."""
+        threads = [
+            threading.Thread(
+                target=self._run_watcher,
+                args=(sel,),
+                daemon=True,
+                name=f'wl-watch-{sel}',
+            )
+            for sel in ('clipboard', 'primary')
+        ]
+        for t in threads:
+            t.start()
+        self._stop.wait()
+        for t in threads:
+            t.join(timeout=3)
+        log.info('Wayland backend stopped')
+
+
+# ---------------------------------------------------------------------------
+# Daemon orchestrator
+# ---------------------------------------------------------------------------
+
+class ClipDaemon:
+    """Orchestrates the backend watcher and Unix socket server."""
+
+    def __init__(
+        self,
+        backend: str = 'auto',
+        clip_dir: Optional[Path] = None,
+        db_path: Optional[Path] = None,
+    ) -> None:
+        self._clip_dir = Path(clip_dir) if clip_dir else _DEFAULT_CLIP_DIR
+        self._db_path = db_path
+        self._backend_name = backend if backend != 'auto' else detect_backend()
+        self._stop_event = threading.Event()
+        self._subscribers = _SubscriberRegistry()
+        self._socket_server: Optional[ClipSocketServer] = None
+        self._threads: List[threading.Thread] = []
+
+    @property
+    def socket_path(self) -> Path:
+        return self._clip_dir / SOCKET_NAME
+
+    def start(self) -> None:
+        """Start socket server and backend watcher threads (non-blocking)."""
+        server = ClipSocketServer(self.socket_path, self._db_path, self._subscribers)
+        self._socket_server = server
+        st = threading.Thread(target=server.serve_forever, daemon=True, name='clipd-socket')
+        st.start()
+        self._threads.append(st)
+
+        if self._backend_name == 'wayland':
+            bk: Any = WaylandBackend(self._subscribers, self._db_path, self._stop_event)
+        else:
+            bk = X11Backend(self._subscribers, self._db_path, self._stop_event)
+
+        bt = threading.Thread(
+            target=bk.run, daemon=True, name=f'clipd-{self._backend_name}'
+        )
+        bt.start()
+        self._threads.append(bt)
+        log.info('ClipDaemon started: backend=%s socket=%s', self._backend_name, self.socket_path)
+
+    def stop(self) -> None:
+        """Signal all threads to stop and wait."""
+        self._stop_event.set()
+        if self._socket_server:
+            self._socket_server.shutdown()
+            self._socket_server.server_close()
+        for t in self._threads:
+            t.join(timeout=5)
+        log.info('ClipDaemon stopped')
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
+
+def main() -> int:
+    import argparse
+    import signal
+
+    parser = argparse.ArgumentParser(prog='tgw-clipd')
+    parser.add_argument('--backend', choices=['auto', 'x11', 'wayland'], default='auto')
+    parser.add_argument('--verbose', '-v', action='store_true')
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format='%(asctime)s %(name)s %(levelname)s %(message)s',
+    )
+
+    daemon = ClipDaemon(backend=args.backend)
+    daemon.start()
+
+    stop = threading.Event()
+
+    def _sig(_signum, _frame) -> None:
+        log.info('signal received — stopping')
+        stop.set()
+
+    signal.signal(signal.SIGINT, _sig)
+    signal.signal(signal.SIGTERM, _sig)
+
+    stop.wait()
+    daemon.stop()
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

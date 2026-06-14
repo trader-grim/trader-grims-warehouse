@@ -1,0 +1,482 @@
+"""Tests for tgw.clipd — PP-CLIP-001 daemon (offline; no X11 or Wayland required)."""
+
+from __future__ import annotations
+
+import json
+import socket
+import subprocess
+import threading
+import time
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+import tgw.clipd as clipd
+from tgw.clip import list_history, record_clip
+
+# ---------------------------------------------------------------------------
+# detect_backend
+# ---------------------------------------------------------------------------
+
+def test_detect_backend_default_is_x11(monkeypatch):
+    monkeypatch.delenv('WAYLAND_DISPLAY', raising=False)
+    monkeypatch.delenv('XDG_SESSION_TYPE', raising=False)
+    assert clipd.detect_backend() == 'x11'
+
+
+def test_detect_backend_wayland_display(monkeypatch):
+    monkeypatch.setenv('WAYLAND_DISPLAY', 'wayland-0')
+    assert clipd.detect_backend() == 'wayland'
+
+
+def test_detect_backend_xdg_session_type(monkeypatch):
+    monkeypatch.delenv('WAYLAND_DISPLAY', raising=False)
+    monkeypatch.setenv('XDG_SESSION_TYPE', 'wayland')
+    assert clipd.detect_backend() == 'wayland'
+
+
+def test_detect_backend_xdg_session_type_case_insensitive(monkeypatch):
+    monkeypatch.delenv('WAYLAND_DISPLAY', raising=False)
+    monkeypatch.setenv('XDG_SESSION_TYPE', 'WAYLAND')
+    assert clipd.detect_backend() == 'wayland'
+
+
+# ---------------------------------------------------------------------------
+# _SubscriberRegistry
+# ---------------------------------------------------------------------------
+
+def test_subscriber_registry_push_delivers_event():
+    reg = clipd._SubscriberRegistry()
+    a, b = socket.socketpair()
+    try:
+        reg.add(a)
+        assert reg.count() == 1
+        reg.push({'event': 'clip', 'is_sku': True, 'sku': 'tgw202601011200000'})
+        data = b.recv(256)
+        msg = json.loads(data.decode().strip())
+        assert msg['event'] == 'clip'
+        assert msg['is_sku'] is True
+        assert msg['sku'] == 'tgw202601011200000'
+    finally:
+        a.close()
+        b.close()
+
+
+def test_subscriber_registry_removes_dead_socket_on_push():
+    reg = clipd._SubscriberRegistry()
+    a, b = socket.socketpair()
+    reg.add(a)
+    a.close()
+    b.close()
+    reg.push({'event': 'test'})  # must not raise
+    assert reg.count() == 0
+
+
+def test_subscriber_registry_add_remove():
+    reg = clipd._SubscriberRegistry()
+    a, b = socket.socketpair()
+    try:
+        reg.add(a)
+        assert reg.count() == 1
+        reg.remove(a)
+        assert reg.count() == 0
+    finally:
+        a.close()
+        b.close()
+
+
+def test_subscriber_registry_remove_nonexistent_is_noop():
+    reg = clipd._SubscriberRegistry()
+    a, b = socket.socketpair()
+    try:
+        reg.remove(a)  # never added — must not raise
+        assert reg.count() == 0
+    finally:
+        a.close()
+        b.close()
+
+
+# ---------------------------------------------------------------------------
+# process_change
+# ---------------------------------------------------------------------------
+
+def test_process_change_records_sku(tmp_path):
+    db = tmp_path / 'h.db'
+    reg = clipd._SubscriberRegistry()
+    result = clipd.process_change('tgw202601011200000', 'clipboard', reg, db_path=db)
+    assert result['ok'] is True
+    assert result['is_sku'] is True
+    assert result['sku'] == 'tgw202601011200000'
+
+
+def test_process_change_records_nonsku(tmp_path):
+    db = tmp_path / 'h.db'
+    reg = clipd._SubscriberRegistry()
+    result = clipd.process_change('some random text', 'primary', reg, db_path=db)
+    assert result['ok'] is True
+    assert result['is_sku'] is False
+
+
+def test_process_change_pushes_event_to_subscriber(tmp_path):
+    db = tmp_path / 'h.db'
+    reg = clipd._SubscriberRegistry()
+    a, b = socket.socketpair()
+    try:
+        reg.add(a)
+        clipd.process_change('tgw202601011200000', 'clipboard', reg, db_path=db)
+        data = b.recv(512)
+        evt = json.loads(data.decode().strip())
+        assert evt['event'] == 'clip'
+        assert evt['is_sku'] is True
+        assert evt['sku'] == 'tgw202601011200000'
+        assert evt['selection'] == 'clipboard'
+    finally:
+        a.close()
+        b.close()
+
+
+def test_process_change_records_selection(tmp_path):
+    db = tmp_path / 'h.db'
+    reg = clipd._SubscriberRegistry()
+    a, b = socket.socketpair()
+    try:
+        reg.add(a)
+        clipd.process_change('hello', 'primary', reg, db_path=db)
+        evt = json.loads(b.recv(512).decode().strip())
+        assert evt['selection'] == 'primary'
+    finally:
+        a.close()
+        b.close()
+
+
+# ---------------------------------------------------------------------------
+# handle_command
+# ---------------------------------------------------------------------------
+
+def test_handle_command_ping(tmp_path):
+    result = clipd.handle_command({'cmd': 'ping'}, db_path=tmp_path / 'h.db')
+    assert result == {'ok': True, 'pong': True}
+
+
+def test_handle_command_last_sku_empty(tmp_path):
+    db = tmp_path / 'h.db'
+    result = clipd.handle_command({'cmd': 'last-sku'}, db_path=db)
+    assert result['ok'] is True
+    assert result['sku'] is None
+
+
+def test_handle_command_last_sku_after_record(tmp_path):
+    db = tmp_path / 'h.db'
+    record_clip('tgw202601011200000', db_path=db)
+    result = clipd.handle_command({'cmd': 'last-sku'}, db_path=db)
+    assert result['ok'] is True
+    assert result['sku'] == 'tgw202601011200000'
+
+
+def test_handle_command_list(tmp_path):
+    db = tmp_path / 'h.db'
+    record_clip('hello', db_path=db)
+    record_clip('tgw202601011200000', db_path=db)
+    result = clipd.handle_command({'cmd': 'list', 'limit': 10}, db_path=db)
+    assert result['ok'] is True
+    assert len(result['rows']) == 2
+
+
+def test_handle_command_list_default_limit(tmp_path):
+    db = tmp_path / 'h.db'
+    result = clipd.handle_command({'cmd': 'list'}, db_path=db)
+    assert result['ok'] is True
+    assert result['rows'] == []
+
+
+def test_handle_command_unknown(tmp_path):
+    result = clipd.handle_command({'cmd': 'bogus'}, db_path=tmp_path / 'h.db')
+    assert result['ok'] is False
+    assert 'unknown command' in result['error']
+
+
+# ---------------------------------------------------------------------------
+# ClipSocketServer — Unix socket roundtrip
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def running_server(tmp_path):
+    sock_path = tmp_path / 'test.sock'
+    db_path = tmp_path / 'h.db'
+    reg = clipd._SubscriberRegistry()
+    server = clipd.ClipSocketServer(sock_path, db_path, reg)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    yield server, sock_path, db_path, reg
+    server.shutdown()
+    server.server_close()
+    t.join(timeout=2)
+
+
+def _sock_send_recv(sock_path: Path, cmd: dict) -> dict:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.connect(str(sock_path))
+        s.sendall((json.dumps(cmd) + '\n').encode())
+        data = b''
+        while not data.endswith(b'\n'):
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+    return json.loads(data.decode().strip())
+
+
+def test_socket_ping(running_server):
+    _, sock_path, _, _ = running_server
+    assert _sock_send_recv(sock_path, {'cmd': 'ping'}) == {'ok': True, 'pong': True}
+
+
+def test_socket_last_sku(running_server):
+    _, sock_path, db_path, _ = running_server
+    record_clip('tgw202601011200000', db_path=db_path)
+    result = _sock_send_recv(sock_path, {'cmd': 'last-sku'})
+    assert result['ok'] is True
+    assert result['sku'] == 'tgw202601011200000'
+
+
+def test_socket_invalid_json_returns_error(running_server):
+    _, sock_path, _, _ = running_server
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.connect(str(sock_path))
+        s.sendall(b'not valid json\n')
+        data = s.recv(256)
+    resp = json.loads(data.decode().strip())
+    assert resp['ok'] is False
+    assert 'invalid JSON' in resp['error']
+
+
+def test_socket_cleans_up_socket_file_on_server_close(tmp_path):
+    sock_path = tmp_path / 'cleanup.sock'
+    db_path = tmp_path / 'h.db'
+    reg = clipd._SubscriberRegistry()
+    server = clipd.ClipSocketServer(sock_path, db_path, reg)
+    assert sock_path.exists()
+    server.server_close()
+    assert not sock_path.exists()
+
+
+def test_socket_subscribe_receives_push(running_server):
+    """Subscribe client receives process_change events via the socket."""
+    _, sock_path, db_path, reg = running_server
+
+    received = []
+    done = threading.Event()
+
+    def subscriber_thread():
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.connect(str(sock_path))
+            s.sendall(b'{"cmd": "subscribe"}\n')
+            # Drain the subscribe ack
+            ack = b''
+            while not ack.endswith(b'\n'):
+                ack += s.recv(256)
+            # Wait for one event (2 second timeout)
+            s.settimeout(2.0)
+            try:
+                event_data = b''
+                while not event_data.endswith(b'\n'):
+                    chunk = s.recv(256)
+                    if not chunk:
+                        break
+                    event_data += chunk
+                received.append(json.loads(event_data.decode().strip()))
+            except Exception:
+                pass
+            done.set()
+
+    t = threading.Thread(target=subscriber_thread, daemon=True)
+    t.start()
+
+    # Wait for subscriber to register (poll the registry)
+    for _ in range(20):
+        if reg.count() > 0:
+            break
+        time.sleep(0.05)
+
+    clipd.process_change('tgw202601011200000', 'clipboard', reg, db_path=db_path)
+
+    done.wait(timeout=3)
+    t.join(timeout=2)
+
+    assert len(received) == 1
+    assert received[0]['event'] == 'clip'
+    assert received[0]['is_sku'] is True
+    assert received[0]['sku'] == 'tgw202601011200000'
+
+
+# ---------------------------------------------------------------------------
+# WaylandBackend
+# ---------------------------------------------------------------------------
+
+def _make_proc(lines: list) -> MagicMock:
+    proc = MagicMock()
+    proc.stdout.__iter__ = MagicMock(return_value=iter(lines))
+    return proc
+
+
+def test_wayland_backend_processes_clipboard_line(tmp_path):
+    """_run_watcher calls process_change for each non-empty stdout line."""
+    db = tmp_path / 'h.db'
+    reg = clipd._SubscriberRegistry()
+    stop = threading.Event()
+    backend = clipd.WaylandBackend(reg, db_path=db, stop_event=stop, restart_delay=0)
+
+    proc = _make_proc(['tgw202601011200000\n'])
+    changes = []
+
+    def fake_process_change(content, selection, subscribers, db_path=None):
+        changes.append((content, selection))
+        stop.set()  # prevent restart loop
+        return {'ok': True, 'is_sku': True, 'sku': content}
+
+    with patch.object(backend, '_spawn', return_value=proc):
+        with patch.object(clipd, 'process_change', side_effect=fake_process_change):
+            backend._run_watcher('clipboard')
+
+    assert changes == [('tgw202601011200000', 'clipboard')]
+
+
+def test_wayland_backend_uses_primary_flag(tmp_path):
+    """_run_watcher passes --primary in argv for the primary selection."""
+    db = tmp_path / 'h.db'
+    reg = clipd._SubscriberRegistry()
+    stop = threading.Event()
+    backend = clipd.WaylandBackend(reg, db_path=db, stop_event=stop, restart_delay=0)
+
+    spawned_args: list = []
+
+    def fake_spawn(args, **kw):
+        spawned_args.extend(args)
+        stop.set()
+        return _make_proc([])
+
+    with patch.object(backend, '_spawn', side_effect=fake_spawn):
+        backend._run_watcher('primary')
+
+    assert spawned_args[0] == 'wl-paste'
+    assert '--primary' in spawned_args
+    assert '--watch' in spawned_args
+
+
+def test_wayland_backend_clipboard_has_no_primary_flag(tmp_path):
+    """_run_watcher does not pass --primary for the clipboard selection."""
+    db = tmp_path / 'h.db'
+    reg = clipd._SubscriberRegistry()
+    stop = threading.Event()
+    backend = clipd.WaylandBackend(reg, db_path=db, stop_event=stop, restart_delay=0)
+
+    spawned_args: list = []
+
+    def fake_spawn(args, **kw):
+        spawned_args.extend(args)
+        stop.set()
+        return _make_proc([])
+
+    with patch.object(backend, '_spawn', side_effect=fake_spawn):
+        backend._run_watcher('clipboard')
+
+    assert '--primary' not in spawned_args
+
+
+def test_wayland_backend_skips_empty_lines(tmp_path):
+    """_run_watcher does not call process_change for blank/newline-only lines."""
+    db = tmp_path / 'h.db'
+    reg = clipd._SubscriberRegistry()
+    stop = threading.Event()
+    backend = clipd.WaylandBackend(reg, db_path=db, stop_event=stop, restart_delay=0)
+
+    call_count = [0]
+
+    def fake_spawn(args, **kw):
+        call_count[0] += 1
+        if call_count[0] >= 2:
+            stop.set()
+        return _make_proc(['\n', '\n'])
+
+    with patch.object(backend, '_spawn', side_effect=fake_spawn):
+        backend._run_watcher('clipboard')
+
+    # No records should exist in the DB
+    assert list_history(db_path=db) == []
+
+
+def test_wayland_backend_handles_missing_executable(tmp_path):
+    """_run_watcher returns without raising if wl-paste is not found."""
+    db = tmp_path / 'h.db'
+    reg = clipd._SubscriberRegistry()
+    stop = threading.Event()
+    backend = clipd.WaylandBackend(reg, db_path=db, stop_event=stop, restart_delay=0)
+
+    with patch.object(backend, '_spawn', side_effect=FileNotFoundError('wl-paste')):
+        backend._run_watcher('clipboard')  # must return cleanly
+
+
+# ---------------------------------------------------------------------------
+# X11Backend._read_selection_content
+# ---------------------------------------------------------------------------
+
+def test_x11_read_selection_clipboard():
+    reg = clipd._SubscriberRegistry()
+    backend = clipd.X11Backend(reg)
+
+    result = MagicMock()
+    result.returncode = 0
+    result.stdout = 'tgw202601011200000'
+
+    with patch('tgw.clipd.subprocess.run', return_value=result) as mock_run:
+        content = backend._read_selection_content('clipboard')
+
+    assert content == 'tgw202601011200000'
+    args = mock_run.call_args[0][0]
+    assert 'xclip' in args
+    assert 'clipboard' in args
+
+
+def test_x11_read_selection_primary():
+    reg = clipd._SubscriberRegistry()
+    backend = clipd.X11Backend(reg)
+
+    result = MagicMock()
+    result.returncode = 0
+    result.stdout = 'highlighted text'
+
+    with patch('tgw.clipd.subprocess.run', return_value=result) as mock_run:
+        content = backend._read_selection_content('primary')
+
+    assert content == 'highlighted text'
+    args = mock_run.call_args[0][0]
+    assert 'primary' in args
+
+
+def test_x11_read_selection_returns_none_on_file_not_found():
+    reg = clipd._SubscriberRegistry()
+    backend = clipd.X11Backend(reg)
+
+    with patch('tgw.clipd.subprocess.run', side_effect=FileNotFoundError('xclip')):
+        assert backend._read_selection_content('clipboard') is None
+
+
+def test_x11_read_selection_returns_none_on_nonzero_exit():
+    reg = clipd._SubscriberRegistry()
+    backend = clipd.X11Backend(reg)
+
+    result = MagicMock()
+    result.returncode = 1
+    result.stdout = ''
+
+    with patch('tgw.clipd.subprocess.run', return_value=result):
+        assert backend._read_selection_content('clipboard') is None
+
+
+def test_x11_read_selection_returns_none_on_timeout():
+    reg = clipd._SubscriberRegistry()
+    backend = clipd.X11Backend(reg)
+
+    with patch('tgw.clipd.subprocess.run', side_effect=subprocess.TimeoutExpired(['xclip'], 2.0)):
+        assert backend._read_selection_content('clipboard') is None
