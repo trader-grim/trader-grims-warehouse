@@ -42,6 +42,10 @@ Rules:
 - For todos, set "pp_ref" to the PP-* item id (e.g. "PP-PHOTO-001") ONLY when the
   suggestion clearly belongs to one PP item visible in the plan headings; omit it
   when unsure — a wrong link is worse than no link.
+- EXCEPTION: if the suggestion is a purely operator action with no code to write —
+  e.g. obtaining an API key or credential, purchasing hardware, setting up an external
+  account, OS/service installation, or configuring secrets/permissions — set
+  todo_agent="admin" and pp_ref="PP-OPS-001" (the catch-all anchor for operator gates).
 - For plan_append, section_heading must exactly match a heading from the plan structure.
 - Respond with a JSON array only — one object per suggestion, in the same index order.
 """

@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-06-14 06:19 UTC — 33 open, 801 done in the last 7 days._
+_Rendered 2026-06-14 06:34 UTC — 34 open, 801 done in the last 7 days._
 
 ## admin (16 open)
 
@@ -48,10 +48,11 @@ _Rendered 2026-06-14 06:19 UTC — 33 open, 801 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (5 open)
+## claude (6 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
+| 844 | 50 |  | pm_intake classify-suggestions: add PP-OPS-001 assignment rule — if task body looks like a credential/setup/hardware/ops gate (no code to write, purely an operator action), auto-assign pp_ref=PP-OPS-001 instead of leaving pp_ref blank or misfiring on an unrelated PP item; update the classify system prompt | [[TGW-Master-Plan#PP-OPS-001\|PP-OPS-001]] |  |
 | 132 | 61 |  | PP-PLANDB-001 Phase 4 — tgw plan status [PP-REF]: one-line status summary per PP-* item (open/done/blocked todo counts + latest activity); feed into session-start output in CLAUDE.md. Requires Phase 3 (#112 open) | [[TGW-Master-Plan#PP-PLANDB-001 — Database-Driven Plan Builder (design discussion needed)\|PP-PLANDB-001]] | ✓ deps done |
 | 137 | 63 |  | Gemini Batch API path for full-catalog alt-text sweep — tgw alt-text --batch --api-mode batch: chunk ~8350 SKUs into 40-image arrays (~5 SKUs each), submit to Gemini Batch API async, poll completion, write results back via existing alt_text ledger; resumable via ai_usage/image_hashes state; replaces serial live-API calls for full-catalog runs; dramatically reduces rate-limit pressure and cost. Reference: PERPLEXITY-007 batch pipeline research + gemini-2.5-flash-lite model |  | ✓ deps done |
 | 113 | 72 | M | Round7 p72 M (GATED: after admin #20 Qtile install): PP-CLIP-001 daemon — dual-backend watcher per settled design (2026-06-12): backend-agnostic core (on change -> classify -> SQLite -> socket push); X11/XFixes backend (default/stable) + Wayland wl-paste --watch backend; session-type autodetect; PRIMARY+CLIPBOARD; feeds existing tgw clip store; Unix socket for TGWSKUWidget | [[TGW-Master-Plan#PP-CLIP-001 — TGW-Aware Clipboard Manager\|PP-CLIP-001]] | ✓ deps done |
