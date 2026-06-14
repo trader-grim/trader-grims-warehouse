@@ -17,7 +17,6 @@ set -euo pipefail
 LABEL="${1:?Usage: tgw-offline-sync <DRIVE_LABEL>}"
 MOUNT="/media/tgw/${LABEL}"
 LOG=/opt/TGW/var/log/offline-sync.log
-STAMP="${MOUNT}/.tgw-sync-stamp"
 SNAPSHOT_KEEP=8  # keep last N snapshots per drive
 
 if ! mountpoint -q "$MOUNT"; then
@@ -26,11 +25,14 @@ if ! mountpoint -q "$MOUNT"; then
 fi
 
 # Detect btrfs subvolume layout vs legacy flat layout
+# STAMP goes inside @data so it is captured by btrfs snapshots; at mount root otherwise.
 if [ -d "${MOUNT}/@data" ]; then
     DEST="${MOUNT}/@data/TGW"
+    STAMP="${MOUNT}/@data/.tgw-sync-stamp"
     USE_BTRFS_SNAPSHOTS=1
 else
     DEST="${MOUNT}/TGW"
+    STAMP="${MOUNT}/.tgw-sync-stamp"
     USE_BTRFS_SNAPSHOTS=0
 fi
 
