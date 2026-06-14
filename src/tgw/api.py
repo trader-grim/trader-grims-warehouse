@@ -388,6 +388,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
         "ebay-pull", "ebay-sweep", "import-sold-csv", "sku-migrate",
         "setup-ebay-hooks", "build-archive-index", "history-index",
         "strikethrough-check", "store-categories", "store-category", "get-ebay-token",
+        "offers",
     ]),
     ("Catalog / Build", [
         "build-full", "build-search", "build-locations", "build-full-csv",
@@ -942,6 +943,23 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--by", default="claude", metavar="AGENT", help="who is creating this revision draft (default: claude)")
     p.add_argument("--apply", action="store_true", help="apply the stored revision_draft (dry-run by default; requires --live for live eBay write)")
     p.add_argument("--live", action="store_true", help="with --apply: submit live eBay write (gated by _APPLY_ENABLED sentinel in revision.py)")
+
+    p = sub.add_parser("offers", help="list and respond to incoming Best Offers (PP-OFFER-001)")
+    p.add_argument(
+        "offer_op",
+        choices=["list", "respond"],
+        help="list: show incoming offers; respond: accept/decline/counter an offer",
+    )
+    p.add_argument("offer_id", nargs="?", default=None, metavar="OFFER_ID", help="Best Offer ID (required for respond)")
+    p.add_argument("--listing-id", default=None, metavar="LISTING_ID", help="eBay listing/item ID (required for respond)")
+    p.add_argument("--accept", dest="offer_action", action="store_const", const="Accept", help="accept the offer")
+    p.add_argument("--decline", dest="offer_action", action="store_const", const="Decline", help="decline the offer")
+    p.add_argument("--counter", dest="counter_price", type=float, default=None, metavar="PRICE", help="counter with this price (USD)")
+    p.add_argument("--pending", action="store_true", help="list: show only Pending-status offers")
+    p.add_argument("--sku", default="", metavar="SKU", help="list: filter by TGW SKU")
+    p.add_argument("--auto-accept", action="store_true", help="list: auto-accept offers above auto_accept_min_pct config threshold (dry-run unless --live)")
+    p.add_argument("--live", action="store_true", help="submit response to eBay (default: dry-run)")
+    p.add_argument("--by", default="claude", metavar="AGENT", help="who is responding (default: claude)")
 
     p = sub.add_parser(
         "catalog-verify",
@@ -4234,6 +4252,38 @@ def main() -> int:
                     for line in result.get("diff_lines", []):
                         print(line)
                     print()
+
+        elif args.op == "offers":
+            from .offers import cmd_offers_list, cmd_offers_respond
+
+            if args.offer_op == "respond":
+                action = args.offer_action
+                if action is None and args.counter_price is not None:
+                    action = "Counter"
+                if not args.offer_id:
+                    result = {"ok": False, "error": "OFFER_ID positional argument required for respond"}
+                elif not args.listing_id:
+                    result = {"ok": False, "error": "--listing-id required for respond"}
+                elif action is None:
+                    result = {"ok": False, "error": "specify --accept, --decline, or --counter PRICE"}
+                else:
+                    result = cmd_offers_respond(
+                        cfg,
+                        offer_id=args.offer_id,
+                        listing_id=args.listing_id,
+                        action=action,
+                        counter_price=args.counter_price,
+                        dry_run=not args.live,
+                        by=args.by,
+                    )
+            else:
+                result = cmd_offers_list(
+                    cfg,
+                    sku=args.sku,
+                    pending_only=args.pending,
+                    auto_accept=args.auto_accept,
+                    dry_run=not args.live,
+                )
 
         elif args.op == "todo":
             from tgw.todo import cmd_todo
