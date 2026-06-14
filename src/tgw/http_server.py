@@ -916,6 +916,164 @@ _STATIC_FOOT = (
     '<script src="/static/nav.js"></script>'
 )
 
+
+# ---------------------------------------------------------------------------
+# GET /form/intake — intake landing page (HTML)
+# ---------------------------------------------------------------------------
+
+_INTAKE_LANDING_CSS = (
+    ".skuinput-row{display:flex;gap:6px;margin-top:4px}"
+    ".skuinput-row input{flex:1;margin:0}"
+    ".btn-sm{padding:10px 16px;background:#1a4a8a;color:#fff;border:none;border-radius:6px;"
+    " cursor:pointer;font-size:.9em;white-space:nowrap;flex-shrink:0}"
+    ".btn-sm:active{background:#143a6a}"
+    ".scan-hint{font-size:.78em;color:#666;margin:4px 0 0}"
+    ".section{margin-bottom:16px}"
+    ".section-label{font-size:.75em;text-transform:uppercase;letter-spacing:.08em;color:#666;margin-bottom:6px}"
+    ".recent-list{list-style:none;margin:0;padding:0}"
+    ".recent-item{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #1e1e1e}"
+    ".recent-item:last-child{border-bottom:none}"
+    ".ri-sku{font-family:monospace;font-size:.78em;color:#7fbfff;text-decoration:none;flex-shrink:0}"
+    ".ri-sku:hover{color:#bdf}"
+    ".ri-title{font-size:.82em;color:#ccc;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
+    ".ri-status{font-size:.72em;padding:2px 7px;border-radius:10px;white-space:nowrap;flex-shrink:0}"
+    ".st-instock{background:#1e2e1e;color:#9c9;border:1px solid #2a4a2a}"
+    ".st-inprogress{background:#1a2a4a;color:#9af;border:1px solid #2a4a7a}"
+    ".st-ready{background:#1a4a1a;color:#7f7;border:1px solid #2a6a2a}"
+    ".st-staged{background:#1a3a4a;color:#7cf;border:1px solid #2a5a7a}"
+    ".st-listed{background:#2a1a4a;color:#c9f;border:1px solid #4a2a7a}"
+    ".st-other{background:#2a2a2a;color:#888;border:1px solid #444}"
+    ".inprog-link{display:block;margin-top:10px;font-size:.85em;color:#7fbfff;text-decoration:none}"
+    ".inprog-link:hover{color:#bdf}"
+)
+
+_INTAKE_LANDING_HTML = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TGW Intake</title>
+{static_head}
+<style>{landing_css}</style>
+</head>
+<body>
+<h2>Intake</h2>
+
+<div class="section">
+  <label>SKU / Barcode</label>
+  <div class="skuinput-row">
+    <input id="sku-input" type="text" placeholder="Enter SKU or scan barcode…"
+           autocomplete="off" spellcheck="false" inputmode="text">
+    <button class="btn-sm" onclick="goIntake()">Open</button>
+  </div>
+  <div class="scan-hint">Scan the barcode label to jump directly to the intake form.</div>
+</div>
+
+<div class="section">
+  <div class="section-label">Recent Intakes</div>
+  <div id="recent-list"><span style="color:#555;font-size:.85em">Loading…</span></div>
+  <a class="inprog-link" href="/form/items">View all inventory →</a>
+</div>
+
+{static_foot}
+<script>
+window.TGW_API_KEY = {api_key_json};
+
+document.getElementById('sku-input').addEventListener('keydown', function(e) {{
+  if (e.key === 'Enter') goIntake();
+}});
+document.getElementById('sku-input').focus();
+
+function goIntake() {{
+  var sku = document.getElementById('sku-input').value.trim();
+  if (sku) window.location = '/form/intake/' + encodeURIComponent(sku);
+}}
+
+function statusCls(st) {{
+  var m = {{
+    'In Stock': 'st-instock',
+    'In Progress': 'st-inprogress',
+    'Ready': 'st-ready',
+    'Staged': 'st-staged',
+    'Listed': 'st-listed',
+  }};
+  return m[st] || 'st-other';
+}}
+
+async function loadRecent() {{
+  var el = document.getElementById('recent-list');
+  try {{
+    var r = await fetch('/api/items?limit=20', {{headers: authHeaders()}});
+    if (!r.ok) {{ el.innerHTML = '<span style="color:#f77;font-size:.85em">Failed to load.</span>'; return; }}
+    var d = await r.json();
+    var items = d.items || [];
+    if (!items.length) {{
+      el.innerHTML = '<span style="color:#555;font-size:.85em">No items found.</span>';
+      return;
+    }}
+    var html = '<ul class="recent-list">';
+    items.forEach(function(it) {{
+      var st = it.status || '';
+      var cls = statusCls(st);
+      html += '<li class="recent-item">' +
+        '<a class="ri-sku" href="/form/intake/' + encodeURIComponent(it.sku) + '">' +
+        escapeHtml(it.sku.slice(-12)) + '</a>' +
+        '<span class="ri-title">' + escapeHtml(it.title || '(no title)') + '</span>' +
+        '<span class="ri-status ' + cls + '">' + escapeHtml(st || '—') + '</span>' +
+        '</li>';
+    }});
+    el.innerHTML = html + '</ul>';
+  }} catch(e) {{
+    el.innerHTML = '<span style="color:#f77;font-size:.85em">Error: ' + escapeHtml(e.message) + '</span>';
+  }}
+}}
+
+loadRecent();
+</script>
+</body>
+</html>
+"""
+
+
+@app.get("/form/intake")
+def intake_landing():
+    """Intake landing page — SKU/barcode entry, recent intakes list. No Bearer auth."""
+    from fastapi.responses import HTMLResponse
+
+    html = _INTAKE_LANDING_HTML.format(
+        static_head=_STATIC_HEAD,
+        static_foot=_STATIC_FOOT,
+        landing_css=_INTAKE_LANDING_CSS,
+        api_key_json=json.dumps(_api_key),
+    )
+    return HTMLResponse(html)
+
+
+# ---------------------------------------------------------------------------
+# Intake form extra CSS (passed as format arg to avoid escaping CSS braces)
+# ---------------------------------------------------------------------------
+
+_INTAKE_FORM_EXTRA_CSS = (
+    ".item-badges{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap}"
+    ".badge{font-size:.75em;padding:3px 9px;border-radius:10px}"
+    ".badge-photo{background:#1a2a3a;color:#7af;border:1px solid #2a4a6a}"
+    ".badge-photo-warn{background:#3a2a0a;color:#fb7;border:1px solid #6a4a10}"
+    ".badge-status{background:#1e2a1e;color:#9c9;border:1px solid #2a4a2a}"
+    ".badge-job{background:#1a2a4a;color:#aac;border:1px solid #2a3a6a;"
+    " font-family:monospace;font-size:.7em}"
+    ".badge-job.active{background:#2a3a0a;color:#cf7;border-color:#4a6a10}"
+    ".badge-job.err{background:#3a1a1a;color:#f99;border-color:#5a2a2a}"
+    ".action-btns{display:flex;gap:8px;margin-top:6px}"
+    ".btn-action{flex:1;padding:12px 8px;background:#1a3a5a;color:#adf;"
+    " border:2px solid #2a5a8a;border-radius:6px;cursor:pointer;font-size:.9em}"
+    ".btn-action:active{background:#0a2a4a}"
+    ".btn-action:disabled{opacity:.4;cursor:not-allowed}"
+    ".detail-link{color:#7fbfff;font-size:.88em;text-decoration:none}"
+    ".detail-link:hover{color:#bdf}"
+)
+
+
 _INTAKE_FORM_HTML = """\
 <!DOCTYPE html>
 <html lang="en">
@@ -924,10 +1082,17 @@ _INTAKE_FORM_HTML = """\
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Intake: {sku_short}</title>
 {static_head}
+<style>{intake_extra_css}</style>
 </head>
 <body>
 <h2>Intake Form</h2>
 <div class="sku">{sku}</div>
+
+<div class="item-badges">
+  <span id="photo-badge" class="badge {photo_cls}">{n_photos} photo{photo_plural}</span>
+  <span id="status-badge" class="badge badge-status">{item_status_disp}</span>
+  <span id="job-badge" class="badge badge-job" style="display:none"></span>
+</div>
 
 <label>Template</label>
 <div class="chips" id="chips">{chips_html}</div>
@@ -955,7 +1120,17 @@ _INTAKE_FORM_HTML = """\
   {condition_options}
 </select>
 
+<label>Pipeline Actions</label>
+<div class="action-btns">
+  <button class="btn-action" id="btn-identify" onclick="triggerAction('ai_identify')">{identify_label}</button>
+  <button class="btn-action" id="btn-draft" onclick="triggerAction('ebay_draft')">Re-draft</button>
+</div>
+<div class="msg" id="action-msg"></div>
+
 <button class="btn" onclick="submitForm()">Save</button>
+<div style="margin-top:10px;text-align:center">
+  <a class="detail-link" href="/form/items/{sku}">View detail &rarr;</a>
+</div>
 <div class="msg" id="msg"></div>
 
 {static_foot}
@@ -963,8 +1138,93 @@ _INTAKE_FORM_HTML = """\
 const SKU = {sku_json};
 const API = '/api/items/' + SKU;
 const AUTH = 'Bearer {api_key}';
+window.TGW_API_KEY = {api_key_json};
 
 initChips('#chips', c => {{ document.getElementById('tpl_key').value = c.dataset.key; }});
+
+var pollTimer = null;
+var TERMINAL = new Set(['succeeded', 'dead_letter', 'failed', 'cancelled']);
+
+function updateBadges(item) {{
+  if (!item) return null;
+  var jobs = item._queue_jobs || [];
+  var latest = jobs[0] || null;
+  var pb = document.getElementById('photo-badge');
+  var n = (item._images || []).length;
+  pb.textContent = n + (n === 1 ? ' photo' : ' photos');
+  pb.className = 'badge ' + (n === 0 ? 'badge-photo-warn' : 'badge-photo');
+  var sb = document.getElementById('status-badge');
+  sb.textContent = item.status || '—';
+  var jb = document.getElementById('job-badge');
+  if (latest) {{
+    jb.style.display = '';
+    jb.textContent = latest.queue_name + ': ' + latest.state;
+    jb.className = 'badge badge-job';
+    if (!TERMINAL.has(latest.state)) {{ jb.classList.add('active'); }}
+    else if (latest.state === 'dead_letter' || latest.state === 'failed') {{ jb.classList.add('err'); }}
+  }} else {{
+    jb.style.display = 'none';
+  }}
+  return {{jobs: jobs, latest: latest}};
+}}
+
+async function fetchItem() {{
+  try {{
+    var r = await fetch(API, {{headers: authHeaders()}});
+    if (!r.ok) return null;
+    var d = await r.json();
+    return d.ok ? d.item : null;
+  }} catch(e) {{ return null; }}
+}}
+
+function startPolling() {{
+  if (pollTimer) return;
+  pollTimer = setInterval(async function() {{
+    var item = await fetchItem();
+    var result = updateBadges(item);
+    if (!result || !result.latest || TERMINAL.has(result.latest.state)) {{
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }}
+  }}, 5000);
+}}
+
+async function triggerAction(action) {{
+  var msg = document.getElementById('action-msg');
+  msg.className = 'msg';
+  msg.textContent = '';
+  var bi = document.getElementById('btn-identify');
+  var bd = document.getElementById('btn-draft');
+  bi.disabled = true; bd.disabled = true;
+  try {{
+    var r = await fetch(API + '/action', {{
+      method: 'POST',
+      headers: {{'Authorization': AUTH, 'Content-Type': 'application/json'}},
+      body: JSON.stringify({{action: action}})
+    }});
+    var d = await r.json().catch(function() {{ return {{}}; }});
+    if (r.ok && d.ok) {{
+      msg.className = 'msg ok';
+      msg.textContent = action + ' queued ✔';
+      startPolling();
+    }} else {{
+      msg.className = 'msg err';
+      msg.textContent = d.detail || ('action failed: ' + r.status);
+    }}
+  }} catch(e) {{
+    msg.className = 'msg err';
+    msg.textContent = 'Network error: ' + e.message;
+  }} finally {{
+    bi.disabled = false; bd.disabled = false;
+  }}
+}}
+
+fetchItem().then(function(item) {{
+  var result = updateBadges(item);
+  if (result && result.latest && !TERMINAL.has(result.latest.state)) {{
+    startPolling();
+  }}
+}});
 
 async function submitForm() {{
   const msg = document.getElementById('msg');
@@ -977,7 +1237,6 @@ async function submitForm() {{
   const hnt = document.getElementById('ai_hint').value.trim();
   const cnd = document.getElementById('condition').value;
 
-  // Apply template first if changed
   if (tpl && tpl !== {current_template_json}) {{
     const r = await fetch('/api/items/' + SKU + '/set-template', {{
       method: 'POST',
@@ -992,7 +1251,6 @@ async function submitForm() {{
     }}
   }}
 
-  // Patch remaining fields
   const fields = {{}};
   if (w)   fields.weight_oz = parseFloat(w);
   if (bc)  fields.barcode = bc;
@@ -1060,12 +1318,26 @@ def intake_form(sku: str, request: Request):
     ai_hint = doc.get("ai_hint", "")
     sku_short = sku[-9:]
 
+    # Photo count from filesystem (server-side; JS keeps it live via polling)
+    sku_dir = json_path.parent
+    n_photos = sum(
+        1 for p in sku_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+    )
+    photo_cls = "badge-photo-warn" if n_photos == 0 else "badge-photo"
+    photo_plural = "" if n_photos == 1 else "s"
+
+    item_status = doc.get("status", "")
+    item_status_disp = item_status or "Unknown"
+    identify_label = "Re-identify" if doc.get("ai_identified") else "Start Identify"
+
     html = _INTAKE_FORM_HTML.format(
         sku=sku,
         sku_short=sku_short,
         sku_json=json.dumps(sku),
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
+        intake_extra_css=_INTAKE_FORM_EXTRA_CSS,
         chips_html=chips_html,
         current_template=current_template,
         current_template_json=json.dumps(current_template),
@@ -1074,6 +1346,12 @@ def intake_form(sku: str, request: Request):
         ai_hint=ai_hint,
         condition_options=cond_opts,
         api_key=_api_key,
+        api_key_json=json.dumps(_api_key),
+        n_photos=n_photos,
+        photo_cls=photo_cls,
+        photo_plural=photo_plural,
+        item_status_disp=item_status_disp,
+        identify_label=identify_label,
     )
     return HTMLResponse(html)
 

@@ -4,6 +4,7 @@
   nav.innerHTML =
     '<a class="brand" href="/form/home">TGW</a>' +
     '<a href="/form/home">Home</a>' +
+    '<a href="/form/intake">Intake</a>' +
     '<a href="/form/items">Inventory</a>' +
     '<a href="/form/review">Review <span id="nav-review-count" class="nav-count"></span></a>' +
     '<a href="/form/pipeline">Pipeline</a>' +

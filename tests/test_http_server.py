@@ -2564,3 +2564,132 @@ def test_nav_includes_system_link(client):
     r = client.get("/static/nav.js")
     assert r.status_code == 200
     assert "/form/system" in r.text
+
+
+# ---------------------------------------------------------------------------
+# GET /form/intake — intake landing page (PP-EDITOR-001 Phase 3l)
+# ---------------------------------------------------------------------------
+
+def test_intake_landing_returns_200(client):
+    r = client.get("/form/intake")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+
+
+def test_intake_landing_no_auth_required(client):
+    r = client.get("/form/intake")
+    assert r.status_code == 200
+
+
+def test_intake_landing_key_elements(client):
+    """Landing page has SKU input, recent list placeholder, and inventory link."""
+    r = client.get("/form/intake")
+    assert 'id="sku-input"' in r.text
+    assert 'id="recent-list"' in r.text
+    assert "goIntake" in r.text
+    assert "/form/items" in r.text
+    assert "/static/tgw.css" in r.text
+    assert "/static/nav.css" in r.text
+
+
+def test_intake_landing_embeds_api_key(client):
+    """Landing page embeds API key so JS can call /api/items."""
+    r = client.get("/form/intake")
+    assert API_KEY in r.text
+
+
+def test_intake_landing_scan_hint(client):
+    """Landing page shows the barcode scan hint text."""
+    r = client.get("/form/intake")
+    assert "scan" in r.text.lower() or "barcode" in r.text.lower()
+
+
+# ---------------------------------------------------------------------------
+# GET /form/intake/{sku} — enhanced intake form (PP-EDITOR-001 Phase 3l)
+# ---------------------------------------------------------------------------
+
+def test_intake_form_has_photo_badge(env):
+    """Intake form shows photo count badge; 0-photo badge has warning class."""
+    r = env["client"].get(f"/form/intake/{SKU_A}")
+    assert r.status_code == 200
+    assert 'id="photo-badge"' in r.text
+    assert "0 photos" in r.text
+    assert "badge-photo-warn" in r.text
+
+
+def test_intake_form_photo_count_with_images(env):
+    """Intake form shows correct photo count when images exist (SKU_B has 2)."""
+    r = env["client"].get(f"/form/intake/{SKU_B}")
+    assert r.status_code == 200
+    assert "2 photos" in r.text
+    # Badge element should use non-warn class — check the element class attribute directly
+    assert 'class="badge badge-photo">' in r.text
+
+
+def test_intake_form_has_status_badge(env):
+    """Intake form shows an item-status badge."""
+    r = env["client"].get(f"/form/intake/{SKU_A}")
+    assert r.status_code == 200
+    assert 'id="status-badge"' in r.text
+    assert 'badge-status' in r.text
+
+
+def test_intake_form_has_action_buttons(env):
+    """Intake form shows identify and re-draft action buttons."""
+    r = env["client"].get(f"/form/intake/{SKU_A}")
+    assert r.status_code == 200
+    assert "triggerAction" in r.text
+    assert "btn-identify" in r.text
+    assert "Re-draft" in r.text
+
+
+def test_intake_form_start_identify_label(env):
+    """Intake form shows 'Start Identify' when ai_identified is not set."""
+    r = env["client"].get(f"/form/intake/{SKU_A}")
+    assert "Start Identify" in r.text
+
+
+def test_intake_form_reidentify_label(env):
+    """Intake form shows 'Re-identify' when ai_identified is True."""
+    _write_item(env["itemdata_root"], "tgw20260401000000010", {
+        "sku": "tgw20260401000000010",
+        "ai_identified": True,
+    })
+    r = env["client"].get("/form/intake/tgw20260401000000010")
+    assert r.status_code == 200
+    assert "Re-identify" in r.text
+
+
+def test_intake_form_has_polling_js(env):
+    """Intake form includes live polling JS for queue job status."""
+    r = env["client"].get(f"/form/intake/{SKU_A}")
+    assert "startPolling" in r.text
+    assert "pollTimer" in r.text
+    assert "TERMINAL" in r.text
+    assert "setInterval" in r.text
+
+
+def test_intake_form_has_view_detail_link(env):
+    """Intake form has a 'View detail' link to /form/items/{sku}."""
+    r = env["client"].get(f"/form/intake/{SKU_A}")
+    assert f"/form/items/{SKU_A}" in r.text
+    assert "detail-link" in r.text
+
+
+def test_intake_form_embeds_api_key(env):
+    """Intake form embeds API key for authenticated action calls."""
+    r = env["client"].get(f"/form/intake/{SKU_A}")
+    assert API_KEY in r.text
+
+
+def test_intake_form_has_job_badge_placeholder(env):
+    """Intake form includes hidden job-badge element for live updates."""
+    r = env["client"].get(f"/form/intake/{SKU_A}")
+    assert 'id="job-badge"' in r.text
+
+
+def test_nav_includes_intake_link(client):
+    """nav.js includes a link to /form/intake."""
+    r = client.get("/static/nav.js")
+    assert r.status_code == 200
+    assert "/form/intake" in r.text
