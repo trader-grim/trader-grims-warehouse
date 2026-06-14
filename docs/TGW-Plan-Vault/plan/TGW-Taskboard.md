@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-06-14 01:39 UTC — 384 open, 450 done in the last 7 days._
+_Rendered 2026-06-14 05:13 UTC — 382 open, 452 done in the last 7 days._
 
 ## 137 (1 open)
 
@@ -398,13 +398,11 @@ _Rendered 2026-06-14 01:39 UTC — 384 open, 450 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (11 open)
+## claude (9 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
-| 129 | 55 |  | tgw ai-usage --by-sku SKU — per-SKU cost breakdown in AI usage report (sum calls/tokens/cost where job payload contains SKU); feeds cost-per-item goal (Phase 5 #2). Additive to existing ai_usage ledger (session 29) |  |  |
 | 136 | 56 |  | pHash image dedup in alt_text + ai_identify workers — compute perceptual hash (imagehash.phash) before vision API call; check image_hashes table (phash -> sku + result_json); on hit copy cached result, skip API; on miss store hash + result after successful call; prevents redundant calls for duplicate photos within or across SKU folders. From PERPLEXITY-007 batch pipeline research. Aider-eligible |  |  |
-| 130 | 57 |  | PP-MULTIMODEL-001 cheap model routing — add google/gemini-2.5-flash-lite to tgw-models.json for vision tasks (alt-text, ai_identify: /bin/bash.10//bin/bash.40 per 1M, 60% cheaper than 3.1 Flash-Lite); add google/gemini-2.0-flash-lite for bulk classification; add deepseek/deepseek-v4-flash (~/bin/bash.098/1M input via OpenRouter) for text/classification tasks (pm_intake, classify-suggestions); reference PERPLEXITY-007 cost comparison at perplexity/PERPLEXITY-007_LLM-model-comparisons-and-cascading-strategy.md | [[TGW-Master-Plan#Priority 6 — External AI tooling (PP-MULTIMODEL-001)\|PP-MULTIMODEL-001]] |  |
 | 112 | 58 | S | Round7 p58 S: PP-PLANDB-001 Phase 3 — tgw plan check: reconcile plan<->tracker both directions (pp_ref/plan_anchor vs plan sections; round-tagged todos vs plan round summaries); report orphans + status mismatches; add to session-start ritual in CLAUDE.md; mismatch reports feed the improve-the-admin loop (PP-DOCFLOW) | [[TGW-Master-Plan#PP-PLANDB-001 — Database-Driven Plan Builder (design discussion needed)\|PP-PLANDB-001]] | ✓ deps done |
 | 131 | 59 |  | tgw ebay-pull scoping — add --sku SKU [SKU...] / --location LOC / --status STATUS filters to cmd_ebay_pull so operators can pull-sync a subset of listings without a full sweep; wraps existing pull.sync_item() per-item path; from PP-SHELL-001 Round 5 deferred item |  |  |
 | 498 | 60 |  | bin/tgw-offline-sync: write .tgw-sync-stamp into @data not mount root — stamp is absent from all btrfs snapshots (found in code-review session-29) | [[TGW-Master-Plan#PP-BACKUP-001\|plan]] |  |
@@ -420,10 +418,12 @@ _Rendered 2026-06-14 01:39 UTC — 384 open, 450 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — Sold reconciliation and inventory status sync (design ready)\|PP-SOLD-001]] |  |
 
-## Done this week (450)
+## Done this week (452)
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 130 | claude | 2026-06-13 | PP-MULTIMODEL-001 cheap model routing — add google/gemini-2.5-flash-lite to tgw-models.json for vision tasks (alt-text, ai_identify: /bin/bash.10//bin/bash.40 per 1M, 60% cheaper than 3.1 Flash-Lite); add google/gemini-2.0-flash-lite for bulk classification; add deepseek/deepseek-v4-flash (~/bin/bash.098/1M input via OpenRouter) for text/classification tasks (pm_intake, classify-suggestions); reference PERPLEXITY-007 cost comparison at perplexity/PERPLEXITY-007_LLM-model-comparisons-and-cascading-strategy.md |
+| 129 | claude | 2026-06-13 | tgw ai-usage --by-sku SKU — per-SKU cost breakdown in AI usage report (sum calls/tokens/cost where job payload contains SKU); feeds cost-per-item goal (Phase 5 #2). Additive to existing ai_usage ledger (session 29) |
 | 499 | claude | 2026-06-13 | PP-PORTABLE-CATALOG-001: design sync-conflict decision tree — review Syncthing conflict files and define auto-resolution rules for the sync-conflict worker (keep-newer, keep-larger, flag-for-review thresholds) |
 | 128 | claude | 2026-06-13 | PP-PROMO-001 Phase 1 build — tgw sale-event [create\|list\|end] --input EVENT.md --dry-run: parse markdown sale-event file -> Promotions API createPromotion/updateItemPriceMarkdown; operator-review gate before --apply; no live eBay writes without Dave sign-off; design doc at reference/PP-PROMO-001-sale-event-design.md (session 29) |
 | 154 | admin | 2026-06-13 | Review sync-conflict: tgw20170509093557075.sync-conflict-20250803-145705-KWJ6FX3.json Moved to: /opt/TGW/src/trader-grims-warehouse/docs/TGW-Plan-Vault/inbox/review/tgw20170509093557075.sync-conflict-20250803-145705-KWJ6FX3.json Canonical: /opt/TGW/data/ItemData/tgw20170509093557075/tgw20170509093557075.json Reason: divergent |

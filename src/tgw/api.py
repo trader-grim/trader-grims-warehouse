@@ -877,7 +877,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--agent", default=None, metavar="AGENT", dest="next_agent", help="agent name for --next (e.g. claude, gemini, admin)")
 
     p = sub.add_parser("plan", help="plan/taskboard operations (PP-PLANDB-001)")
-    p.add_argument("plan_op", choices=["render"], help="render: regenerate plan/TGW-Taskboard.md from the todo tracker")
+    p.add_argument(
+        "plan_op",
+        choices=["render", "check"],
+        help=(
+            "render: regenerate plan/TGW-Taskboard.md from the todo tracker; "
+            "check: reconcile tracker ↔ master plan (orphaned pp_refs, "
+            "done mismatches, stale round tags)"
+        ),
+    )
 
     p = sub.add_parser(
         "mvitems",
@@ -4171,15 +4179,23 @@ def main() -> int:
             return 0 if result.get("ok", True) else 1
 
         elif args.op == "plan":
-            from tgw.plan_render import render_taskboard
+            if args.plan_op == "render":
+                from tgw.plan_render import render_taskboard
 
-            result = render_taskboard(cfg)
-            if result["ok"]:
-                print(f"Taskboard rendered: {result['path']} "
-                      f"({result['open']} open, {result['done_week']} done this week)")
-            else:
-                print(f"Error: {result.get('error')}")
-            return 0 if result["ok"] else 1
+                result = render_taskboard(cfg)
+                if result["ok"]:
+                    print(f"Taskboard rendered: {result['path']} "
+                          f"({result['open']} open, {result['done_week']} done this week)")
+                else:
+                    print(f"Error: {result.get('error')}")
+                return 0 if result["ok"] else 1
+
+            elif args.plan_op == "check":
+                from tgw.plan_render import format_plan_check, plan_check
+
+                result = plan_check(cfg)
+                print(format_plan_check(result))
+                return 0 if result["ok"] else 1
 
         elif args.op == "catalog-verify":
             result = cmd_catalog_verify(

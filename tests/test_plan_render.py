@@ -1,13 +1,17 @@
-"""Tests for tgw.plan_render — generated taskboard (PP-PLANDB-001 Phase 2)."""
+"""Tests for tgw.plan_render — generated taskboard + plan check (PP-PLANDB-001)."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from tgw.plan_render import (
+    _fmt_ids,
+    _parse_plan_sections,
     _parse_size,
     _plan_heading_map,
     build_taskboard,
+    format_plan_check,
+    plan_check,
     render_taskboard,
     taskboard_path,
 )
@@ -38,12 +42,14 @@ def test_plan_heading_map(tmp_path):
     plan = tmp_path / 'plan.md'
     plan.write_text(
         '# Plan\n### PP-FOO-001 — The Foo Project\nprose PP-IGNORED-001 in body\n'
-        '### PP-BAR-001 — Bar (design)\n',
+        '### PP-BAR-001 — Bar (design)\n'
+        '### PP-COMPOUND-NAME-001 — Multi-word project\n',
         encoding='utf-8',
     )
     m = _plan_heading_map(plan)
     assert m['PP-FOO-001'] == 'PP-FOO-001 — The Foo Project'
     assert m['PP-BAR-001'] == 'PP-BAR-001 — Bar (design)'
+    assert m['PP-COMPOUND-NAME-001'] == 'PP-COMPOUND-NAME-001 — Multi-word project'
     assert 'PP-IGNORED-001' not in m  # body text is not a heading
 
 
@@ -155,3 +161,221 @@ def test_render_reports_tracker_failure(tmp_path):
     assert result['ok'] is False
     assert 'db down' in result['error']
     assert not taskboard_path(cfg).exists()
+
+
+# ---------------------------------------------------------------------------
+# _parse_plan_sections
+# ---------------------------------------------------------------------------
+
+def _plan_with(text: str, tmp_path):
+    p = tmp_path / 'TGW-Master-Plan.md'
+    p.write_text(text, encoding='utf-8')
+    return p
+
+
+def test_parse_plan_sections_extracts_pp_refs(tmp_path):
+    plan = _plan_with(
+        '### PP-FOO-001 — The Foo Project\n'
+        '### PP-BAR-001 ✅ DONE 2026-01-01 — Bar done\n'
+        '### PP-COMPOUND-NAME-001 — Multi-word project\n'
+        'body text mentioning PP-BODY-001 not a heading\n',
+        tmp_path,
+    )
+    pp_map, done_set, headings = _parse_plan_sections(plan)
+    assert 'PP-FOO-001' in pp_map
+    assert 'PP-BAR-001' in pp_map
+    assert 'PP-COMPOUND-NAME-001' in pp_map
+    assert 'PP-BODY-001' not in pp_map  # body mention, not heading
+    assert 'PP-BAR-001' in done_set
+    assert 'PP-FOO-001' not in done_set
+    assert 'PP-BAR-001 ✅ DONE 2026-01-01 — Bar done' in headings
+
+
+def test_parse_plan_sections_missing_file(tmp_path):
+    pp_map, done_set, headings = _parse_plan_sections(tmp_path / 'missing.md')
+    assert pp_map == {}
+    assert done_set == set()
+    assert headings == set()
+
+
+# ---------------------------------------------------------------------------
+# _fmt_ids
+# ---------------------------------------------------------------------------
+
+def test_fmt_ids_short():
+    assert _fmt_ids([1, 2, 3]) == '#1, #2, #3'
+
+
+def test_fmt_ids_capped():
+    result = _fmt_ids([1, 2, 3, 4, 5, 6, 7])
+    assert result.startswith('#1, #2')
+    assert '+2 more' in result
+
+
+# ---------------------------------------------------------------------------
+# plan_check
+# ---------------------------------------------------------------------------
+
+PLAN_TEXT = """\
+# TGW Master Plan
+### PP-FOO-001 — Foo project
+### PP-DONE-001 ✅ DONE 2026-01-01 — Done project
+### PP-BAR-001 — Bar project (design)
+"""
+
+
+def _check_cfg(tmp_path):
+    vault = tmp_path / 'vault'
+    (vault / 'plan').mkdir(parents=True)
+    plan = vault / 'plan' / 'TGW-Master-Plan.md'
+    plan.write_text(PLAN_TEXT, encoding='utf-8')
+    return {
+        'plan_vault_path': vault,
+        'plan_master_path': plan,
+    }
+
+
+def _open_item(id, body='task', pp_ref=None, plan_anchor=None):
+    return {
+        'id': id, 'agent': 'claude', 'priority': 50, 'body': body,
+        'source': 'test', 'added_at': NOW, 'done_at': None,
+        'pp_ref': pp_ref, 'depends_on': [], 'plan_anchor': plan_anchor,
+    }
+
+
+def _done_item(id, body='done task', pp_ref=None):
+    return {
+        'id': id, 'agent': 'claude', 'priority': 50, 'body': body,
+        'source': 'test', 'added_at': NOW,
+        'done_at': NOW,
+        'pp_ref': pp_ref, 'depends_on': [], 'plan_anchor': None,
+    }
+
+
+def test_plan_check_all_clear(tmp_path):
+    cfg = _check_cfg(tmp_path)
+    items = [
+        _open_item(1, pp_ref='PP-FOO-001'),
+        _done_item(2, pp_ref='PP-DONE-001'),
+    ]
+    with patch('tgw.todo.todo_list', return_value=items):
+        result = plan_check(cfg)
+    assert result['ok'] is True
+    assert result['issues'] == []
+    assert result['summary'] == 'all clear'
+
+
+def test_plan_check_orphaned_pp_ref(tmp_path):
+    cfg = _check_cfg(tmp_path)
+    items = [_open_item(1, pp_ref='PP-MISSING-001')]
+    with patch('tgw.todo.todo_list', return_value=items):
+        result = plan_check(cfg)
+    issues = result['issues']
+    assert any(i['kind'] == 'orphaned_pp_ref' and 'PP-MISSING-001' in i['message'] for i in issues)
+    assert result['counts']['warnings'] >= 1
+
+
+def test_plan_check_done_mismatch(tmp_path):
+    cfg = _check_cfg(tmp_path)
+    # PP-DONE-001 is ✅ in plan but todo is still open
+    items = [_open_item(1, pp_ref='PP-DONE-001')]
+    with patch('tgw.todo.todo_list', return_value=items):
+        result = plan_check(cfg)
+    issues = result['issues']
+    assert any(i['kind'] == 'done_mismatch' and 'PP-DONE-001' in i['message'] for i in issues)
+
+
+def test_plan_check_orphaned_plan_anchor(tmp_path):
+    cfg = _check_cfg(tmp_path)
+    items = [_open_item(1, pp_ref='PP-FOO-001', plan_anchor='No Such Heading')]
+    with patch('tgw.todo.todo_list', return_value=items):
+        result = plan_check(cfg)
+    issues = result['issues']
+    assert any(i['kind'] == 'orphaned_plan_anchor' and 'No Such Heading' in i['message'] for i in issues)
+
+
+def test_plan_check_stale_round_tag(tmp_path):
+    cfg = _check_cfg(tmp_path)
+    items = [
+        _open_item(1, body='Round3 p10 S: old task'),
+        _done_item(2, body='Round5 p20 S: new done task'),
+    ]
+    with patch('tgw.todo.todo_list', return_value=items):
+        result = plan_check(cfg)
+    issues = result['issues']
+    assert any(i['kind'] == 'stale_round_tag' and 'Round3' in i['message'] for i in issues)
+    assert result['counts']['infos'] >= 1
+
+
+def test_plan_check_no_stale_flag_for_current_round(tmp_path):
+    cfg = _check_cfg(tmp_path)
+    items = [
+        _open_item(1, body='Round7 p10 S: current round task'),
+        _done_item(2, body='Round7 p20 S: done task same round'),
+    ]
+    with patch('tgw.todo.todo_list', return_value=items):
+        result = plan_check(cfg)
+    stale = [i for i in result['issues'] if i['kind'] == 'stale_round_tag']
+    assert stale == []
+
+
+def test_plan_check_deduplicates_anchor_issues(tmp_path):
+    cfg = _check_cfg(tmp_path)
+    # Two todos with the same bad anchor → only one issue
+    items = [
+        _open_item(1, plan_anchor='Bad Anchor'),
+        _open_item(2, plan_anchor='Bad Anchor'),
+    ]
+    with patch('tgw.todo.todo_list', return_value=items):
+        result = plan_check(cfg)
+    anchor_issues = [i for i in result['issues'] if i['kind'] == 'orphaned_plan_anchor']
+    assert len(anchor_issues) == 1
+
+
+def test_plan_check_groups_orphaned_refs(tmp_path):
+    cfg = _check_cfg(tmp_path)
+    items = [
+        _open_item(1, pp_ref='PP-GHOST-001'),
+        _open_item(2, pp_ref='PP-GHOST-001'),
+        _open_item(3, pp_ref='PP-GHOST-001'),
+    ]
+    with patch('tgw.todo.todo_list', return_value=items):
+        result = plan_check(cfg)
+    orphan_issues = [i for i in result['issues'] if i['kind'] == 'orphaned_pp_ref']
+    assert len(orphan_issues) == 1
+    assert '3 open todo(s)' in orphan_issues[0]['message']
+
+
+def test_plan_check_tracker_failure(tmp_path):
+    cfg = _check_cfg(tmp_path)
+    with patch('tgw.todo.todo_list', side_effect=RuntimeError('db down')):
+        result = plan_check(cfg)
+    assert result['ok'] is False
+    assert 'db down' in result['error']
+
+
+def test_plan_check_missing_plan(tmp_path):
+    cfg = {'plan_master_path': tmp_path / 'nonexistent.md', 'plan_vault_path': tmp_path}
+    result = plan_check(cfg)
+    assert result['ok'] is False
+
+
+def test_format_plan_check_all_clear(tmp_path):
+    result = {'ok': True, 'issues': [], 'counts': {'warnings': 0, 'infos': 0}, 'summary': 'all clear'}
+    text = format_plan_check(result)
+    assert 'all clear' in text
+
+
+def test_format_plan_check_with_issues(tmp_path):
+    result = {
+        'ok': True,
+        'issues': [
+            {'kind': 'orphaned_pp_ref', 'severity': 'warning',
+             'message': "pp_ref 'PP-X-001' has no plan section heading (1 open todo(s): #5)"},
+        ],
+        'counts': {'warnings': 1, 'infos': 0},
+        'summary': '1 warning(s), 0 info(s)',
+    }
+    text = format_plan_check(result)
+    assert 'PP-X-001' in text
+    assert '⚠' in text
