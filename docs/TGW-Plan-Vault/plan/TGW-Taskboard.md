@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-06-14 18:08 UTC — 46 open, 809 done in the last 7 days._
+_Rendered 2026-06-14 19:19 UTC — 45 open, 810 done in the last 7 days._
 
 ## admin (16 open)
 
@@ -48,11 +48,10 @@ _Rendered 2026-06-14 18:08 UTC — 46 open, 809 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (18 open)
+## claude (17 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
-| 846 | 46 |  | PP-EDITOR-001 Phase 3a — go static: create src/tgw/static/ with tgw.css (shared base styles from _INTAKE_FORM_CSS), nav.css, tgw.js (shared escapeHtml/utils), nav.js (shared nav bar component with dropdown menus); mount via FastAPI StaticFiles at /static; refactor all existing /form/ pages to use <link>/<script> includes instead of embedded strings; update tests | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
 | 847 | 47 |  | PP-EDITOR-001 Phase 3b — GET /api/dashboard summary endpoint: single call returning needs_review count (ebay_draft done + not staged/ready), pending_offers count (GetBestOffers Pending), needs_photos count (items with zero images in ItemData), has_revision_draft count, dead_letter_count (from postgres), ready_count, worker_health (all tgw-worker@ units up/total); used by home dashboard action cards | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
 | 848 | 48 |  | PP-EDITOR-001 Phase 3c — /form/ home dashboard: status strip (health chips from /api/health), action cards from /api/dashboard (needs_review/offers/photos/revisions/dead-letter each as clickable card with count badge), quick intake bar (SKU input → /form/intake/{sku}), PM chat window (see #849), recent activity feed (last 15 queue completions); orientation block (system summary + start-here links for first-time users); requires #846 static files + #847 dashboard API | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
 | 850 | 50 |  | PP-EDITOR-001 Phase 3e — /form/links external links hub: organized sections — eBay (Seller Hub, Active Listings, Orders, Messages/Offers, Returns, Performance, Promotions, Fees); AI/ML (Google AI Studio, OpenRouter dashboard, Anthropic Console); Infrastructure (Tailscale admin, GitHub repo); Research (eBay sold listings search, Discogs marketplace); static page, no API calls, high value on day one | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
@@ -77,10 +76,11 @@ _Rendered 2026-06-14 18:08 UTC — 46 open, 809 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — Sold reconciliation and inventory status sync (design ready)\|PP-SOLD-001]] |  |
 
-## Done this week (809)
+## Done this week (810)
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 846 | claude | 2026-06-14 | PP-EDITOR-001 Phase 3a — go static: create src/tgw/static/ with tgw.css (shared base styles from _INTAKE_FORM_CSS), nav.css, tgw.js (shared escapeHtml/utils), nav.js (shared nav bar component with dropdown menus); mount via FastAPI StaticFiles at /static; refactor all existing /form/ pages to use <link>/<script> includes instead of embedded strings; update tests |
 | 849 | claude | 2026-06-14 | PP-EDITOR-001 Phase 3d — PM chat window + POST /api/pm/chat: endpoint builds live context (todo counts, queue depths, health, recent jobs, open offers), calls claude-haiku-4-5 with TGW PM system prompt, returns {message, actions: []} where actions can be add_todo/add_suggestion/none; chat UI on home dashboard with sessionStorage history, typing indicator, action confirmation toasts; PM can answer 'what needs doing?', 'how many items in pipeline?', 'any dead letters?'; model configurable in tgw-api-config.json as pm_chat_model |
 | 845 | claude | 2026-06-14 | PP-EDITOR-001 Phase 2 — inventory browse + detail web UI: /form/items (card grid, search/location/status filters, thumbnails, pagination), /form/items/{sku} (photo gallery, field sections, revision draft diff table, pipeline jobs); /thumb/{sku} + /media/{sku}/{filename} no-auth routes for browser img src; server-rendered detail, JS-driven list; network trust like other /form/ pages |
 | 133 | claude | 2026-06-14 | PP-OFFER-001 Phase 1 build — GetBestOffers Trading API polling; tgw offers [--pending] lists incoming offer requests; tgw offers --respond ID --accept/--counter PRICE/--decline; auto_accept_min_pct config flag for batch auto-accept; dry-run default; tests. Build after design in #124 settled |
