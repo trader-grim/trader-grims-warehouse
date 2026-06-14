@@ -23,6 +23,7 @@ import psycopg2.extras
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Security, status
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .config import DEFAULT_CONFIG, load_config
@@ -94,6 +95,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="tgw-http", version="1.0", lifespan=lifespan)
+
+_STATIC_DIR = Path(__file__).parent / "static"
+app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 
 # ---------------------------------------------------------------------------
@@ -651,28 +655,14 @@ def get_hint_trail(sku: str) -> Dict[str, Any]:
 # GET /form/intake/{sku} — mobile intake form (HTML)
 # ---------------------------------------------------------------------------
 
-_INTAKE_FORM_CSS = """
-body{font-family:system-ui,sans-serif;margin:0;padding:8px;background:#111;color:#eee}
-h2{font-size:1.1em;margin:4px 0 10px}
-.sku{font-size:.75em;color:#888;margin-bottom:8px}
-label{display:block;font-size:.85em;color:#aaa;margin:10px 0 3px}
-input,select,textarea{width:100%;box-sizing:border-box;padding:10px;font-size:1em;
-  background:#222;color:#eee;border:1px solid #444;border-radius:6px}
-textarea{height:60px;resize:vertical}
-.chips{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0}
-.chip{padding:8px 12px;border-radius:20px;background:#2a2a2a;border:2px solid #444;
-  font-size:.82em;cursor:pointer;transition:background .15s,border-color .15s}
-.chip:hover{background:#333;border-color:#666}
-.chip.active{background:#1a4a8a;border-color:#4a8ade;color:#fff}
-.btn{display:block;width:100%;padding:14px;margin-top:14px;font-size:1.1em;
-  background:#1a6030;color:#fff;border:none;border-radius:8px;cursor:pointer}
-.btn:active{background:#155028}
-.msg{margin-top:10px;padding:8px;border-radius:6px;font-size:.9em;display:none}
-.msg.ok{background:#1a4a1a;color:#7f7;display:block}
-.msg.err{background:#4a1a1a;color:#f77;display:block}
-.field-row{display:flex;gap:8px}
-.field-row>*{flex:1}
-"""
+_STATIC_HEAD = (
+    '<link rel="stylesheet" href="/static/tgw.css">'
+    '<link rel="stylesheet" href="/static/nav.css">'
+)
+_STATIC_FOOT = (
+    '<script src="/static/tgw.js"></script>'
+    '<script src="/static/nav.js"></script>'
+)
 
 _INTAKE_FORM_HTML = """\
 <!DOCTYPE html>
@@ -681,7 +671,7 @@ _INTAKE_FORM_HTML = """\
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Intake: {sku_short}</title>
-<style>{css}</style>
+{static_head}
 </head>
 <body>
 <h2>Intake Form</h2>
@@ -716,18 +706,13 @@ _INTAKE_FORM_HTML = """\
 <button class="btn" onclick="submitForm()">Save</button>
 <div class="msg" id="msg"></div>
 
+{static_foot}
 <script>
 const SKU = {sku_json};
 const API = '/api/items/' + SKU;
 const AUTH = 'Bearer {api_key}';
 
-document.querySelectorAll('.chip').forEach(c => {{
-  c.addEventListener('click', () => {{
-    document.querySelectorAll('.chip').forEach(x => x.classList.remove('active'));
-    c.classList.add('active');
-    document.getElementById('tpl_key').value = c.dataset.key;
-  }});
-}});
+initChips('#chips', c => {{ document.getElementById('tpl_key').value = c.dataset.key; }});
 
 async function submitForm() {{
   const msg = document.getElementById('msg');
@@ -827,7 +812,8 @@ def intake_form(sku: str, request: Request):
         sku=sku,
         sku_short=sku_short,
         sku_json=json.dumps(sku),
-        css=_INTAKE_FORM_CSS,
+        static_head=_STATIC_HEAD,
+        static_foot=_STATIC_FOOT,
         chips_html=chips_html,
         current_template=current_template,
         current_template_json=json.dumps(current_template),
@@ -844,6 +830,12 @@ def intake_form(sku: str, request: Request):
 # GET /form/bulk — tablet-first bulk editor (HTML, filter → preview → apply)
 # ---------------------------------------------------------------------------
 
+_BULK_EXTRA_CSS = """
+table{width:100%;border-collapse:collapse;margin-top:10px;font-size:.8em}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid #333}
+th{color:#aaa}
+"""
+
 _BULK_FORM_HTML = """\
 <!DOCTYPE html>
 <html lang="en">
@@ -851,7 +843,8 @@ _BULK_FORM_HTML = """\
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>TGW Bulk Edit</title>
-<style>{css}</style>
+{static_head}
+<style>{extra_css}</style>
 </head>
 <body>
 <h2>Bulk Edit</h2>
@@ -885,15 +878,10 @@ _BULK_FORM_HTML = """\
 <button class="btn" id="applyBtn" style="display:none;background:#7a3a10" onclick="apply()">
   Apply to matched items</button>
 
+{static_foot}
 <script>
 const AUTH = 'Bearer {api_key}';
-document.querySelectorAll('#fields .chip').forEach(c => {{
-  c.addEventListener('click', () => {{
-    document.querySelectorAll('#fields .chip').forEach(x => x.classList.remove('active'));
-    c.classList.add('active');
-    document.getElementById('field').value = c.dataset.f;
-  }});
-}});
+initChips('#fields', c => {{ document.getElementById('field').value = c.dataset.f; }});
 
 function body() {{
   const b = {{
@@ -959,19 +947,9 @@ async function apply() {{
                     (d.failed && d.failed.length ? ' — ' + d.failed.length + ' failed' : '') + ' ✔';
   document.getElementById('applyBtn').style.display = 'none';
 }}
-
-function escapeHtml(s) {{
-  return s.replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
-}}
 </script>
 </body>
 </html>
-"""
-
-_BULK_FORM_CSS = _INTAKE_FORM_CSS + """
-table{width:100%;border-collapse:collapse;margin-top:10px;font-size:.8em}
-th,td{text-align:left;padding:6px 8px;border-bottom:1px solid #333}
-th{color:#aaa}
 """
 
 
@@ -980,7 +958,12 @@ def bulk_form(request: Request):
     """Tablet-first bulk editor — no Bearer auth on the page (network trust);
     the embedded JS calls the authenticated /api/bulk/* endpoints."""
     from fastapi.responses import HTMLResponse
-    html = _BULK_FORM_HTML.format(css=_BULK_FORM_CSS, api_key=_api_key)
+    html = _BULK_FORM_HTML.format(
+        static_head=_STATIC_HEAD,
+        static_foot=_STATIC_FOOT,
+        extra_css=_BULK_EXTRA_CSS,
+        api_key=_api_key,
+    )
     return HTMLResponse(html)
 
 
@@ -988,7 +971,7 @@ def bulk_form(request: Request):
 # GET /form/todos — tablet-first open-todo dashboard (PP-TODO-001, Round 4 #34)
 # ---------------------------------------------------------------------------
 
-_TODOS_FORM_CSS = _INTAKE_FORM_CSS + """
+_TODOS_EXTRA_CSS = """
 table{width:100%;border-collapse:collapse;margin:2px 0 16px}
 th,td{text-align:left;padding:8px 6px;border-bottom:1px solid #333;font-size:.9em;vertical-align:top}
 th{color:#888;font-size:.72em;text-transform:uppercase;letter-spacing:.04em}
@@ -1010,11 +993,14 @@ def _render_todos_html(rows) -> str:
     head = (
         '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        '<title>TGW Todos</title><style>' + _TODOS_FORM_CSS + '</style></head><body>'
+        '<title>TGW Todos</title>'
+        + _STATIC_HEAD
+        + '<style>' + _TODOS_EXTRA_CSS + '</style>'
+        '</head><body>'
         '<h2>Open Todos</h2>'
     )
     if not rows:
-        return head + '<div class="allclear">✓ All clear — no open todos.</div></body></html>'
+        return head + '<div class="allclear">✓ All clear — no open todos.</div>' + _STATIC_FOOT + '</body></html>'
 
     # Preserve todo_list ordering (agent, priority, id); group consecutively.
     groups: "list[tuple[str, list]]" = []
@@ -1041,6 +1027,7 @@ def _render_todos_html(rows) -> str:
                 '</tr>'
             )
         parts.append('</table>')
+    parts.append(_STATIC_FOOT)
     parts.append('</body></html>')
     return ''.join(parts)
 
@@ -1058,10 +1045,14 @@ def todos_form(request: Request):
         body = (
             '<!DOCTYPE html><html><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
-            '<title>TGW Todos</title><style>' + _TODOS_FORM_CSS + '</style></head><body>'
+            '<title>TGW Todos</title>'
+            + _STATIC_HEAD
+            + '<style>' + _TODOS_EXTRA_CSS + '</style>'
+            '</head><body>'
             '<h2>Open Todos</h2>'
             f'<div class="msg err" style="display:block">todo store unavailable: {exc}</div>'
-            '</body></html>'
+            + _STATIC_FOOT
+            + '</body></html>'
         )
         return HTMLResponse(body, status_code=200)
     return HTMLResponse(_render_todos_html(rows))
@@ -1085,15 +1076,18 @@ def _render_suggest_html(msg: str = "", ok: bool = False) -> str:
     return (
         '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        '<title>TGW Suggest</title><style>' + _INTAKE_FORM_CSS + '</style></head><body>'
+        '<title>TGW Suggest</title>'
+        + _STATIC_HEAD
+        + '</head><body>'
         '<h2>Add Suggestion</h2>'
         '<form method="post" action="/form/suggest">'
         '<label>Suggestion — any punctuation is safe here</label>'
         '<textarea name="text" required autofocus placeholder="idea, task, note ..."></textarea>'
         '<button class="btn" type="submit">Add to SUGGESTIONS.md</button>'
         '</form>'
-        + banner +
-        '</body></html>'
+        + banner
+        + _STATIC_FOOT
+        + '</body></html>'
     )
 
 
@@ -1168,7 +1162,7 @@ def get_thumb_noauth(sku: str):
 # /form/items  — inventory browse + detail (no Bearer auth, network trust)
 # ---------------------------------------------------------------------------
 
-_ITEMS_CSS = _INTAKE_FORM_CSS + """
+_ITEMS_EXTRA_CSS = """
 .hdr{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:4px 0 12px;
   border-bottom:1px solid #333;margin-bottom:10px}
 .hdr h2{margin:0;font-size:1.1em;flex-shrink:0}
@@ -1237,7 +1231,8 @@ _BROWSE_HTML = """\
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>TGW Inventory</title>
-<style>{css}</style>
+{static_head}
+<style>{extra_css}</style>
 </head>
 <body>
 <div class="hdr">
@@ -1245,7 +1240,7 @@ _BROWSE_HTML = """\
   <input id="sq" type="search" placeholder="search title or SKU…" oninput="df()">
   <input id="loc" type="text" placeholder="location…" oninput="df()">
 </div>
-<div class="chips" style="margin-bottom:10px">
+<div class="chips" id="status-chips" style="margin-bottom:10px">
   <button class="chip active" data-s="">All</button>
   <button class="chip" data-s="In Stock">In Stock</button>
   <button class="chip" data-s="Listed">Listed</button>
@@ -1255,13 +1250,12 @@ _BROWSE_HTML = """\
 <div class="summary" id="sum"></div>
 <div class="grid" id="grid"><div class="loading">Loading…</div></div>
 <div class="pager" id="pager"></div>
+{static_foot}
 <script>
 const AUTH='Bearer {api_key}';
+const esc=escapeHtml;
 const LIM=60;
 let off=0;
-const esc=s=>String(s||'').replace(/[&<>"']/g,c=>({{
-  '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
-}}[c]));
 const scls=s=>({{
   'in stock':'s-in-stock','listed':'s-listed','staged':'s-staged','sold':'s-sold'
 }})[(s||'').toLowerCase()]||'';
@@ -1269,7 +1263,7 @@ async function load(o){{
   off=o??0;
   const search=document.getElementById('sq').value;
   const loc=document.getElementById('loc').value;
-  const status=document.querySelector('.chip.active[data-s]')?.dataset.s??'';
+  const status=document.querySelector('#status-chips .chip.active')?.dataset.s??'';
   const p=new URLSearchParams({{limit:LIM,offset:off}});
   if(search)p.set('search',search);
   if(loc)p.set('location',loc);
@@ -1314,12 +1308,7 @@ async function load(o){{
 }}
 let _t;
 function df(){{clearTimeout(_t);_t=setTimeout(()=>load(0),300);}}
-document.querySelectorAll('.chip[data-s]').forEach(c=>{{
-  c.addEventListener('click',()=>{{
-    document.querySelectorAll('.chip[data-s]').forEach(x=>x.classList.remove('active'));
-    c.classList.add('active');load(0);
-  }});
-}});
+initChips('#status-chips',()=>load(0));
 load(0);
 </script>
 </body>
@@ -1476,7 +1465,8 @@ def _render_item_detail_html(
         f"<meta charset='utf-8'>"
         f"<meta name='viewport' content='width=device-width,initial-scale=1'>"
         f"<title>{h(sku)} — TGW</title>"
-        f"<style>{_ITEMS_CSS}</style>"
+        + _STATIC_HEAD
+        + f"<style>{_ITEMS_EXTRA_CSS}</style>"
         f"</head>\n<body>\n"
         f'<a class="back" href="/form/items">← Inventory</a>\n'
         f'<div class="sku-hdr">'
@@ -1487,7 +1477,8 @@ def _render_item_detail_html(
         f"{gallery_html}"
         f"{fields_html}"
         f"</div>\n"
-        f"</body></html>"
+        + _STATIC_FOOT
+        + "</body></html>"
     )
 
 
@@ -1496,7 +1487,12 @@ def items_browse_form():
     """Inventory browse — card grid with search/filter. No Bearer auth (network trust)."""
     from fastapi.responses import HTMLResponse
 
-    html = _BROWSE_HTML.format(css=_ITEMS_CSS, api_key=_api_key)
+    html = _BROWSE_HTML.format(
+        static_head=_STATIC_HEAD,
+        static_foot=_STATIC_FOOT,
+        extra_css=_ITEMS_EXTRA_CSS,
+        api_key=_api_key,
+    )
     return HTMLResponse(html)
 
 

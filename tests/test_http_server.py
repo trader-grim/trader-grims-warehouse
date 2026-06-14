@@ -848,3 +848,117 @@ def test_catalog_snapshot_503_when_catalog_missing(env, monkeypatch):
     )
     r = env["client"].get("/api/catalog/snapshot", headers=AUTH_HEADERS)
     assert r.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# PP-EDITOR-001 Phase 3a — static files + refactored /form/ pages
+# ---------------------------------------------------------------------------
+
+def test_static_tgw_css(client):
+    r = client.get("/static/tgw.css")
+    assert r.status_code == 200
+    assert "font-family" in r.text
+    assert "system-ui" in r.text
+
+
+def test_static_nav_css(client):
+    r = client.get("/static/nav.css")
+    assert r.status_code == 200
+    assert "tgw-nav" in r.text
+    assert "nav-dropdown" in r.text
+
+
+def test_static_tgw_js(client):
+    r = client.get("/static/tgw.js")
+    assert r.status_code == 200
+    assert "escapeHtml" in r.text
+    assert "initChips" in r.text
+    assert "authHeaders" in r.text
+
+
+def test_static_nav_js(client):
+    r = client.get("/static/nav.js")
+    assert r.status_code == 200
+    assert "tgw-nav" in r.text
+    assert "nav-dropdown" in r.text
+    assert "/form/items" in r.text
+
+
+def test_intake_form_uses_static_css(env):
+    r = env["client"].get(f"/form/intake/{SKU_A}")
+    assert r.status_code == 200
+    assert '/static/tgw.css' in r.text
+    assert '/static/nav.css' in r.text
+    assert '/static/tgw.js' in r.text
+    assert '/static/nav.js' in r.text
+    # Base CSS must not be embedded inline
+    assert 'font-family:system-ui' not in r.text
+    # Page-specific JS still works (initChips call present)
+    assert 'initChips' in r.text
+
+
+def test_bulk_form_uses_static_css(client):
+    r = client.get("/form/bulk")
+    assert r.status_code == 200
+    assert '/static/tgw.css' in r.text
+    assert '/static/nav.css' in r.text
+    assert '/static/tgw.js' in r.text
+    assert '/static/nav.js' in r.text
+    assert 'font-family:system-ui' not in r.text
+    # escapeHtml no longer defined inline — comes from tgw.js
+    assert 'function escapeHtml' not in r.text
+    # initChips used for field chip selector
+    assert 'initChips' in r.text
+
+
+def test_items_browse_uses_static_css(client):
+    r = client.get("/form/items")
+    assert r.status_code == 200
+    assert '/static/tgw.css' in r.text
+    assert '/static/nav.css' in r.text
+    assert '/static/tgw.js' in r.text
+    assert '/static/nav.js' in r.text
+    assert 'font-family:system-ui' not in r.text
+    # esc is now an alias for the shared escapeHtml
+    assert 'const esc=escapeHtml' in r.text
+
+
+def test_todos_form_uses_static_css(client, monkeypatch):
+    import tgw.todo as todo
+    monkeypatch.setattr(todo, "todo_list", lambda *a, **k: [])
+    r = client.get("/form/todos")
+    assert r.status_code == 200
+    assert '/static/tgw.css' in r.text
+    assert '/static/nav.css' in r.text
+    assert '/static/tgw.js' in r.text
+    assert '/static/nav.js' in r.text
+    assert 'font-family:system-ui' not in r.text
+
+
+def test_todos_form_error_uses_static_css(client, monkeypatch):
+    import tgw.todo as todo
+    monkeypatch.setattr(todo, "todo_list", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+    r = client.get("/form/todos")
+    assert r.status_code == 200
+    assert '/static/tgw.css' in r.text
+    assert 'font-family:system-ui' not in r.text
+
+
+def test_suggest_form_uses_static_css(client):
+    r = client.get("/form/suggest")
+    assert r.status_code == 200
+    assert '/static/tgw.css' in r.text
+    assert '/static/nav.css' in r.text
+    assert '/static/tgw.js' in r.text
+    assert '/static/nav.js' in r.text
+    assert 'font-family:system-ui' not in r.text
+
+
+def test_item_detail_uses_static_css(env):
+    r = env["client"].get(f"/form/items/{SKU_A}")
+    assert r.status_code == 200
+    assert '/static/tgw.css' in r.text
+    assert '/static/nav.css' in r.text
+    assert '/static/tgw.js' in r.text
+    assert '/static/nav.js' in r.text
+    assert 'font-family:system-ui' not in r.text

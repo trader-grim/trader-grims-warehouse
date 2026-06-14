@@ -1,0 +1,16 @@
+.tgw-nav{background:#1a1a2e;border-bottom:1px solid #333;padding:0 8px;display:flex;
+  align-items:center;gap:4px;font-size:.9em;flex-wrap:wrap;margin:-8px -8px 8px}
+.tgw-nav .brand{color:#7fbfff;font-weight:bold;padding:8px 6px;text-decoration:none;flex-shrink:0}
+.tgw-nav a{color:#aaa;text-decoration:none;padding:8px 10px;border-radius:4px;
+  transition:background .15s,color .15s}
+.tgw-nav a:hover,.tgw-nav a.active{background:#2a2a4a;color:#eee}
+.nav-dropdown{position:relative;display:inline-block}
+.nav-dropdown-toggle{color:#aaa;background:none;border:none;font-size:.9em;padding:8px 10px;
+  cursor:pointer;border-radius:4px;transition:background .15s,color .15s}
+.nav-dropdown-toggle:hover{background:#2a2a4a;color:#eee}
+.nav-dropdown-menu{display:none;position:absolute;top:100%;left:0;background:#1e1e3a;
+  border:1px solid #444;border-radius:6px;min-width:140px;z-index:100;padding:4px 0}
+.nav-dropdown-menu.open{display:block}
+.nav-dropdown-menu a{display:block;padding:8px 14px;color:#bbb;text-decoration:none;
+  font-size:.88em;white-space:nowrap}
+.nav-dropdown-menu a:hover{background:#2a2a5a;color:#eee}
