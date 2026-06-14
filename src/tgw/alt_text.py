@@ -153,7 +153,7 @@ def cmd_alt_text(
 
         try:
             raw = call_model('alt_text', _SYSTEM_PROMPT, _USER_PROMPT, cfg,
-                             img_b64=img_b64, provider=provider, model=model)
+                             img_b64=img_b64, provider=provider, model=model, sku=sku)
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 

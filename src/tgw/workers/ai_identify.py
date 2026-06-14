@@ -216,7 +216,7 @@ class AIIdentifyWorker(QueueWorker):
             log.info("calling %s/%s for %s (image: %s, %dKB→%dKB%s)", provider, model, sku, img_path.name, orig_kb, resized_kb, f", hint={hint!r}" if hint else "")
             tgw_logging.log_event("ai_identify_call", sku=sku, provider=provider, model=model, image=img_path.name, orig_kb=orig_kb, resized_kb=resized_kb, hint=hint or None)
 
-            raw = call_model('ai_identify', _SYSTEM_PROMPT, prompt, self.config, img_b64=img_b64)
+            raw = call_model('ai_identify', _SYSTEM_PROMPT, prompt, self.config, img_b64=img_b64, sku=sku)
 
             try:
                 result = extract_json(raw)

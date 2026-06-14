@@ -48,11 +48,13 @@ def call_model(
     img_b64: Optional[str] = None,
     provider: Optional[str] = None,
     model: Optional[str] = None,
+    sku: Optional[str] = None,
 ) -> str:
     """
     Call the model configured for task. Returns raw response text.
     provider/model override cfg['models'] when given explicitly.
     Usage (timing + token counts) is recorded to the ai_usage table.
+    Pass sku to attribute the call to a specific item in the per-SKU report.
     """
     if provider is None or model is None:
         _p, _m = get_task_model(cfg, task)
@@ -86,6 +88,7 @@ def call_model(
             usage=usage,
             success=success,
             error_msg=error_msg,
+            sku=sku,
         )
 
     return text
@@ -95,6 +98,7 @@ def _record_usage(
     task: str, provider: str, model: str, duration_ms: int,
     *, input_chars: int, output_chars: int,
     usage: Dict[str, Any], success: bool, error_msg: Optional[str],
+    sku: Optional[str] = None,
 ) -> None:
     """Record a call to the ai_usage table. Never raises."""
     try:
@@ -108,6 +112,7 @@ def _record_usage(
             total_tokens=usage.get('total_tokens'),
             success=success,
             error_msg=error_msg,
+            sku=sku,
         )
     except Exception:
         pass
