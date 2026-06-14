@@ -5,6 +5,7 @@ function escapeHtml(s) {
 }
 
 function authHeaders(extra) {
+  if (!window.TGW_API_KEY) console.warn('authHeaders: window.TGW_API_KEY not set — API calls will be rejected');
   const h = {Authorization: 'Bearer ' + (window.TGW_API_KEY || '')};
   return extra ? Object.assign(h, extra) : h;
 }

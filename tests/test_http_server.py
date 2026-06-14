@@ -1345,14 +1345,10 @@ def test_pm_chat_openrouter_called(env, monkeypatch):
         return _FakeResp()
 
     import tgw.http_server as _hs
-    monkeypatch.setattr(_hs, "_build_pm_context", lambda: "todos: 2")
-    monkeypatch.setattr(_hs.requests, "post", fake_post)
-
-    # Also stub get_task_model to return openrouter + a test model
     from tgw.apis import llm as _llm
+    monkeypatch.setattr(_hs, "_build_pm_context", lambda: "todos: 2")
+    monkeypatch.setattr(_llm.requests, "post", fake_post)
     monkeypatch.setattr(_llm, "get_task_model", lambda cfg, task: ("openrouter", "test/model"))
-
-    # Stub _load_openrouter_key
     monkeypatch.setattr(_llm, "_load_openrouter_key", lambda cfg: "test-or-key")
 
     r = client.post(
@@ -1383,6 +1379,7 @@ def test_pm_chat_history_threaded(env, monkeypatch):
     client = env["client"]
 
     import tgw.http_server as _hs
+    from tgw.apis import llm as _llm
     monkeypatch.setattr(_hs, "_build_pm_context", lambda: "idle")
 
     captured_msgs = []
@@ -1391,15 +1388,14 @@ def test_pm_chat_history_threaded(env, monkeypatch):
         captured_msgs.extend(json.get("messages", []))
 
         class _R:
+            status_code = 200
             def raise_for_status(self): pass
             def json(self_inner):
                 return {"choices": [{"message": {"content": "ok\nACTIONS: [{\"type\":\"none\"}]"}}]}
 
         return _R()
 
-    monkeypatch.setattr(_hs.requests, "post", fake_post)
-
-    from tgw.apis import llm as _llm
+    monkeypatch.setattr(_llm.requests, "post", fake_post)
     monkeypatch.setattr(_llm, "get_task_model", lambda cfg, task: ("openrouter", "m"))
     monkeypatch.setattr(_llm, "_load_openrouter_key", lambda cfg: "k")
 
@@ -1421,6 +1417,7 @@ def test_pm_chat_actions_parsed(env, monkeypatch):
     client = env["client"]
 
     import tgw.http_server as _hs
+    from tgw.apis import llm as _llm
     monkeypatch.setattr(_hs, "_build_pm_context", lambda: "idle")
 
     action_payload = [{"type": "add_todo", "agent": "claude", "body": "Fix it", "priority": 30}]
@@ -1428,14 +1425,13 @@ def test_pm_chat_actions_parsed(env, monkeypatch):
 
     def fake_post(url, headers, json, timeout):
         class _R:
+            status_code = 200
             def raise_for_status(self): pass
             def json(self_inner):
                 return {"choices": [{"message": {"content": resp_text}}]}
         return _R()
 
-    monkeypatch.setattr(_hs.requests, "post", fake_post)
-
-    from tgw.apis import llm as _llm
+    monkeypatch.setattr(_llm.requests, "post", fake_post)
     monkeypatch.setattr(_llm, "get_task_model", lambda cfg, task: ("openrouter", "m"))
     monkeypatch.setattr(_llm, "_load_openrouter_key", lambda cfg: "k")
 

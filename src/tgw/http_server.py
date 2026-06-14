@@ -21,7 +21,6 @@ from typing import Any, Dict, List, Optional
 
 import psycopg2
 import psycopg2.extras
-import requests
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Security, status
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -1387,7 +1386,10 @@ def _render_item_detail_html(
     listing_url = eb.get("listing_url") or item.get("listing_url", "")
     listing_status = eb.get("status") or item.get("status", "")
     price = eb.get("live_price") if eb.get("live_price") is not None else item.get("price")
-    price_str = f"${float(price):.2f}" if price is not None else "—"
+    try:
+        price_str = f"${float(price):.2f}" if price is not None else "—"
+    except (ValueError, TypeError):
+        price_str = "—"
     url_html = (
         f'<a href="{h(listing_url)}" target="_blank">{h(listing_url[:60])}…</a>'
         if listing_url
@@ -1661,6 +1663,7 @@ def dashboard() -> Dict[str, Any]:
             result["pending_offers"] = _pending_offers_cache
         except Exception as exc:
             log.warning("dashboard: GetBestOffers failed: %s", exc)
+            _pending_offers_cache_at = time.time()  # back-off: don't retry until TTL expires
             result["pending_offers"] = _pending_offers_cache  # stale or None
 
     # --- Worker health via systemctl ---
@@ -1785,16 +1788,19 @@ def _build_pm_context() -> str:
         db_path = _cfg.get("sqlite_catalog_path")
         if db_path and Path(db_path).exists():
             con = _sqlite_conn()
-            row = con.execute(
-                "SELECT COUNT(*),"
-                " COUNT(CASE WHEN LOWER(status) IN ('published','live','listed') THEN 1 END),"
-                " COUNT(CASE WHEN LOWER(status) = 'staged' THEN 1 END)"
-                " FROM catalog"
-            ).fetchone()
-            if row:
-                lines.append(
-                    f"Inventory: {row[0]} total items, {row[1]} live on eBay, {row[2]} staged"
-                )
+            try:
+                row = con.execute(
+                    "SELECT COUNT(*),"
+                    " COUNT(CASE WHEN LOWER(status) IN ('published','live','listed') THEN 1 END),"
+                    " COUNT(CASE WHEN LOWER(status) = 'staged' THEN 1 END)"
+                    " FROM catalog"
+                ).fetchone()
+                if row:
+                    lines.append(
+                        f"Inventory: {row[0]} total items, {row[1]} live on eBay, {row[2]} staged"
+                    )
+            finally:
+                con.close()
     except Exception as exc:
         lines.append(f"Inventory count: unavailable ({exc})")
 
@@ -1808,47 +1814,32 @@ def _build_pm_context() -> str:
 @app.post("/api/pm/chat", dependencies=[AUTH])
 def pm_chat(body: PMChatBody) -> Dict[str, Any]:
     """Call the PM chat model with live context and return {message, actions}."""
-    from .apis.llm import _load_openrouter_key, get_task_model
+    from .apis.llm import call_model, get_task_model
 
     context = _build_pm_context()
     system = _PM_SYSTEM_PROMPT + f"\n\nLIVE SYSTEM STATUS:\n{context}"
 
-    messages: List[Dict[str, str]] = [{"role": "system", "content": system}]
+    msg_list: List[Dict[str, str]] = [{"role": "system", "content": system}]
     for h in body.history[-8:]:
         if h.get("role") in ("user", "assistant") and h.get("content"):
-            messages.append({"role": h["role"], "content": h["content"]})
-    messages.append({"role": "user", "content": body.message})
+            msg_list.append({"role": h["role"], "content": h["content"]})
+    msg_list.append({"role": "user", "content": body.message})
 
     provider, model = get_task_model(_cfg, "pm_chat")
     if provider != "openrouter":
         raise HTTPException(status_code=503, detail="pm_chat only supports openrouter provider")
 
-    api_key = _load_openrouter_key(_cfg)
-    if not api_key:
-        raise HTTPException(status_code=503, detail="OpenRouter API key not configured")
-
     try:
-        resp = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://tgw.local",
-                "X-Title": "TGW-PM",
-            },
-            json={"model": model, "messages": messages, "max_tokens": 500},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        raw = resp.json()["choices"][0]["message"]["content"]
+        raw = call_model("pm_chat", "", "", _cfg, provider=provider, model=model, messages=msg_list)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"PM model unavailable: {exc}")
 
-    # Split on ACTIONS: marker
+    # Split on the LAST ACTIONS: marker so incidental use of the word in the
+    # body doesn't cause the real action block to be discarded.
     msg_text = raw
     actions: List[Dict[str, Any]] = [{"type": "none"}]
     if "ACTIONS:" in raw:
-        head, tail = raw.split("ACTIONS:", 1)
+        head, tail = raw.rsplit("ACTIONS:", 1)
         msg_text = head.strip()
         try:
             actions = json.loads(tail.strip())
