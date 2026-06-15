@@ -102,6 +102,24 @@ incomplete wiring, and data quality problems that need fixing.
 - **Fix**: PP-SYNC-001 sync pass to pull authoritative active listing state from eBay
 - **Status**: blocked on PP-SYNC-001 implementation
 
+### ISS-013 — alt-text rename broke photo display order
+- **Symptom**: After `tgw alt-text <sku>`, the original display photo is renamed to `<sku>-alt.jpg`; the gallery now shows a "random" photo first (often the second photo), with no way to control display order
+- **Root cause**: todo #38 implementation renamed the original photo to `<sku>-alt.jpg` instead of creating a companion file. The intent was `<sku>-alt.jpg` = a new AI-generated derivative; the original should keep its filename
+- **Fix** (todo #874): modify `tgw alt-text` to NOT rename the original; `<sku>-alt.jpg` must be a new/companion file only; scan ItemData for already-renamed originals and repair; photo gallery sort: by mtime, SKU-named files first
+- **Status**: open
+
+### ISS-014 — qty field can be negative (data quality)
+- **Symptom**: at least one item has qty = -1 (e.g. tgw202604041746293); inventory logic assumes qty ≥ 0
+- **Root cause**: no validation guard in item write path for qty field
+- **Fix** (todo #885): add guard in `items._write_field()` refusing qty < 0; `catalog-verify` rule `negative_qty` (critical); `tgw data-scrub --pass 3` repair (set qty=1 for any item with qty < 0)
+- **Status**: open
+
+### ISS-015 — Best Offers API rate limit exceeded
+- **Symptom**: `/form/offers` shows "Trading API GetBestOffers failed: Your application has exceeded usage limit on this call"
+- **Root cause**: Trading API call budget exhausted; no rate limiting or retry in `get_best_offers()`
+- **Fix** (todo #886): call `GetAPIAccessRules` to surface call limits; add per-call rate limiting + exponential backoff; display friendly error with call-budget info in the UI
+- **Status**: open
+
 ---
 
 ## Closed Issues

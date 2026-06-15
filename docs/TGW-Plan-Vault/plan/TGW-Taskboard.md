@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-06-15 05:24 UTC — 20 open, 832 done in the last 7 days._
+_Rendered 2026-06-15 16:39 UTC — 35 open, 831 done in the last 7 days._
 
 ## admin (17 open)
 
@@ -35,13 +35,33 @@ _Rendered 2026-06-15 05:24 UTC — 20 open, 832 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
+## claude (15 open)
+
+| ID | Pri | Size | Task | Plan | Blockers |
+|---:|----:|:----:|------|------|----------|
+| 874 | 5 |  | ISS-013 alt-text photo naming fix — tgw alt-text must NOT rename original photo; <sku>-alt.jpg = companion derivative only; scan ItemData for already-renamed originals and restore; gallery sort mtime-based SKU-named files first. Fix alt_text.py rename logic; add repair function; update tests. Size: S | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
+| 888 | 5 |  | PP-TODO-001: add reasoning level metadata to todos — (1) migrate todo_items: add 'reasoning TEXT' column (values: high\|normal\|low, default normal); (2) expose --reasoning high\|normal\|low on tgw todo --add and --set-meta; (3) show [high] or [low] badge in tgw todo listing when not normal; (4) include reasoning in tgw todo brief output; (5) update classify-suggestions to auto-set reasoning when classifying. Tests: add to test_todo.py. Size: S, Reasoning: low | [[TGW-Master-Plan#PP-TODO-001 — Multi-agent TODO tracker (`tgw todo`)\|PP-TODO-001]] |  |
+| 885 | 6 |  | ISS-014 qty validation — guard in items._write_field() refusing qty < 0; catalog-verify rule negative_qty (critical severity); tgw data-scrub --pass 3 or --fix repair: set qty=1 for any item with qty < 0. Size: S | [[TGW-Master-Plan#PP-VERIFY-001 — Catalog Assumption Verification + Hall Pass Flag\|PP-VERIFY-001]] |  |
+| 886 | 8 |  | ISS-015 Best Offers rate limit — call GetAPIAccessRules to surface call limits; add per-call rate limiting + exponential backoff to get_best_offers(); display friendly error + call-budget info in /form/offers UI. Size: S | [[TGW-Master-Plan#PP-OFFER-001 — eBay Best Offer Management\|PP-OFFER-001]] |  |
+| 875 | 10 |  | Photo gallery UX — item detail page (/form/items/{sku}): (1) lightbox on photo click (modal enlarged view + close); (2) move-to-front / manual reorder button per photo; (3) video items visually separated from photos (different border + VIDEO label). Size: S | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
+| 876 | 12 |  | Item detail page restructure — cleaner section layout; all Inventory fields visible + inline-editable via PATCH; eBay section shows price/shipping policy/categories/store categories; clarify eBay Offer vs buyer-offer vs revision draft with better labels and purpose banners per section. Size: M | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
+| 877 | 14 |  | Pricing History link — replace inline price-source text with expandable Pricing History link: shows price comps (with eBay links where available), category-group floor/typical, operator override record, suggested-vs-accepted history. Price is the canonical inventory field that drives eBay repricing. Size: M | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
+| 878 | 16 |  | eBay draft section fixes — (1) show draft price from ebay_offer.price if present; (2) fix no_brand false-positive: scan title against brand field before flagging; (3) add Does Not Apply / Unknown option to no_model display. Size: S | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
+| 879 | 18 |  | Worker pipeline tooltips — hover tooltip on each worker name in pipeline jobs section of item detail (/form/items/{sku}); text from TGW-Pipeline-Flow.md worker descriptions. Size: XS | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
+| 880 | 20 |  | Inventory browse status at a glance — per-card: price display, eBay status badge (Listed+eBayID as clickable link / Staged / Ready / Needs Review / Not Listed), missing-photo indicator. Size: S | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
+| 881 | 22 |  | Inventory browse bulk selection — checkbox per card; select-all button; sticky bulk-action toolbar: Re-identify / Reprice / Mark Ready / Mark Sold / Delete from eBay / Apply Draft. Search+filter then select-all is the primary bulk workflow. Size: M | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
+| 882 | 24 |  | Pipeline page drill-down — click on failed/dead_letter count chip opens detail panel: job list with queue name, error text, classify verdict (transient/permanent); per-job Re-queue + Report-to-admin buttons; surface stuck active jobs (elapsed > 2x expected). Size: M | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
+| 883 | 26 |  | Intake form purpose + UX — add instructions banner (Review and confirm this item before sending through the pipeline); show pre-populated fields with current values; Pipeline Trigger section (re-identify / re-draft / stage buttons + confirm); clarify this is pre-pipeline review not raw data-entry. Size: S | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
+| 884 | 28 |  | Review Queue upgrade — add shipping policy name, category, condition, condition description to each review card; filter + search bar; checkbox multi-select; bulk-approve + bulk-list-now + bulk-mark-ready actions. Size: M | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
+| 887 | 30 |  | Revisions page clarification — add purpose banner: Proposed changes from AI or operator review appear here before being pushed to eBay; show workflow guide on empty state (step 1: AI proposes changes → step 2: review diff → step 3: apply pushes to eBay); link to PP-REVISION-001. Size: XS | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
+
 ## sokoban (1 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — Sold reconciliation and inventory status sync (design ready)\|PP-SOLD-001]] |  |
 
-## Done this week (832)  — showing 15 most recent
+## Done this week (831)  — showing 15 most recent
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
@@ -60,4 +80,4 @@ _Rendered 2026-06-15 05:24 UTC — 20 open, 832 done in the last 7 days._
 | 102 | agy | 2026-06-14 | Round7 p30: GDrive dedupe assist (PLAN-backup-dr A8) — chunked rclone dedupe strategy for same-name-same-dir duplicates that time out on the full dataset; produce chunk plan + exact commands; operator supervises execution |
 | 142 | agy | 2026-06-14 | eBay DS ticket follow-up — check Developer Support inbox for responses to the 8 buy.marketplace_insights scope questions (todo #79); summarize any answers or next steps; update plan accordingly. Browser task via Seller Hub / DS portal |
 | 141 | agy | 2026-06-14 | PP-VERIFY-001 catalog baseline rescan — rerun catalog quality scan (follow CATALOG-BASELINE-SCAN.md pattern) on current ItemData sample; compare fill rates vs prior baseline; identify new gaps; output updated markdown table to inbox/. AGY large-context data task |
-| … | | | _…and 817 more — run `tgw todo --all` to see everything_ |
+| … | | | _…and 816 more — run `tgw todo --all` to see everything_ |

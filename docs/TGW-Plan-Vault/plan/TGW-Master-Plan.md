@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-15 (session 31 — 8 suggestions processed; ISS-010/011/012 added; PAM naming; todos #866–#872 seeded; rows 40–41 seeded)
+updated: 2026-06-15 (session 32 — 14 web-review suggestions processed; ISS-013/014/015 added; Phase 3p planned; Round 8 seeded todos #874–#887)
 maintained_by: Opus (planner)
 ---
 
@@ -766,6 +766,42 @@ first-class via `wl-paste --watch`; build after Qtile install); Aider = **commit
 2026-06-12: used even with Antigravity as primary agent/agent manager; Antigravity-first trial
 week stands as routing calibration). Decisions recorded in the respective PP sections +
 next-process.md; follow-on todos #109–#118 seeded.
+
+### Track 1 — Round 8 (session 32, 2026-06-15) — Web UI Rework
+
+**Input:** 14 suggestions from Dave's live web interface review session 2026-06-15. Claude todo queue empty (AGY drained 3n/3o). Suite state ~637 tests (session 29 baseline; 3n/3o items completed by AGY).
+
+**Guiding principle:** First real use of the web UI surfaces real gaps. Fix what's broken first (photo naming, ISS-013/014/015), then make each page operationally useful.
+
+**Themes:** A = Photo fixes, B = Item detail overhaul, C = Inventory browse, D = Pipeline drill-down, E = Review Queue, F = Data/API fixes, G = Page clarification
+
+| # | Theme | Task | Size |
+|---|-------|------|------|
+| 874 | A | **ISS-013 alt-text photo naming fix** — `tgw alt-text` must NOT rename the original photo; `<sku>-alt.jpg` = new companion/derivative only; scan ItemData for already-renamed originals and restore original filename; gallery sort: mtime-based, SKU-named files first | S |
+| 875 | A | **Photo gallery UX** — lightbox on click (modal enlarged view); move-to-front / manual reorder button per photo; video items visually separated (different border + "VIDEO" label) in detail gallery | S |
+| 876 | B | **Item detail page restructure** — cleaner section layout; all Inventory fields visible + inline-editable via PATCH; eBay section shows price/shipping policy/categories/store categories; clarify eBay Offer vs buyer-offer vs revision draft with better labels and a purpose banner for each section | M |
+| 877 | B | **Pricing History link** — replace inline "Price source: ..." with expandable "Pricing History" link showing: price comps used (links if available), category-group floor/typical, operator override record, suggested vs accepted price history; price is the canonical inventory field that drives eBay | M |
+| 878 | B | **eBay draft section fixes** — (1) show draft price (from `ebay_offer.price` if present); (2) fix `no_brand` false-positive — scan title against brand field before flagging; (3) add "Does Not Apply" / "Unknown" to `no_model` display | S |
+| 879 | B | **Worker pipeline tooltips** — hover tooltip on each worker name in the pipeline jobs section of item detail; text from `TGW-Pipeline-Flow.md` worker descriptions | XS |
+| 880 | C | **Inventory browse — status at a glance** — per-card additions: price (not just on detail), eBay status badge (Listed + eBayID as clickable link / Staged / Ready / Needs Review / Not Listed), missing-photo indicator | S |
+| 881 | C | **Inventory browse — bulk selection** — checkbox per card; select-all button; sticky bulk-action toolbar: Re-identify / Reprice / Mark Ready / Mark Sold / Delete from eBay / Apply Draft; search+filter then select-all is the primary bulk workflow | M |
+| 882 | D | **Pipeline page drill-down** — click on failed/dead_letter count → slide-out detail panel with job list (queue, error text, classify verdict); per-job Re-queue + Report buttons; also surface stuck active jobs (elapsed > 2× expected) | M |
+| 883 | E | **Intake form purpose + UX** — add instructions banner ("Review and confirm this item before sending through the pipeline"); show pre-populated fields with current values; Pipeline Trigger section (re-identify / re-draft / stage buttons + confirm); clarify this is pre-pipeline review not raw data-entry | S |
+| 884 | E | **Review Queue upgrade** — add shipping policy name, category, condition, condition description to each review card; filter + search bar; checkbox selection; bulk-approve + bulk-list-now + bulk-mark-ready actions | M |
+| 885 | F | **ISS-014 qty validation** — guard in `items._write_field()` refusing qty < 0; `catalog-verify` rule `negative_qty` (critical); `tgw data-scrub --pass 3` (or `--fix`) repair: set qty=1 for any item with qty < 0 | S |
+| 886 | F | **ISS-015 Best Offers rate limit** — call `GetAPIAccessRules` to get call budget; add rate limiting + exponential backoff to `get_best_offers()`; display friendly error + call-budget status in the UI | S |
+| 887 | G | **Revisions page clarification** — add purpose banner: "Proposed changes from AI or operator review appear here before being pushed to eBay"; show example workflow on empty state; link to PP-REVISION-001 docs | XS |
+
+**Block ordering (recommended):**
+1. #874 (photo rename bug fix — ISS-013, breaks display for all alt-text items)
+2. #885 + #886 (data/API fixes — quick wins)
+3. #878 + #879 + #887 (XS/S polish — low risk)
+4. #875 + #880 (gallery + browse status — M/S but high daily-use value)
+5. #876 + #877 (item detail restructure — M, most impactful page)
+6. #881 (bulk selection — M, completes the browse upgrade)
+7. #882 + #883 + #884 (pipeline/review/intake pages — M each)
+
+---
 
 ### PP-DOCFLOW-001 — PAM (Project Administration Manager) — LLM document + suggestion intake
 
@@ -2478,6 +2514,42 @@ can be `add_todo`, `add_suggestion`, or `none`. Chat history in sessionStorage. 
 **Build strategy:** iterative — deploy each round, use it, discover gaps, record in polish pass
 (#859). The UI is also a test harness for the underlying API: every missing filter, slow query,
 or data gap it exposes gets filed as a follow-up.
+
+### Phase 3p — Web UI Rework (session 32, 2026-06-15)
+
+Driven by Dave's live review session. Full Round 8 — see Work Tracks above for the task table.
+
+**Theme A — Photo system fixes (ISS-013)**
+- `tgw alt-text` must preserve the original photo filename; `<sku>-alt.jpg` is a new companion file (AI-annotated derivative), never a rename of the original
+- Photo gallery display order: by mtime, with SKU-named files first (the display photo intent)
+- Gallery UX: lightbox on click; move-to-front / manual reorder; video items visually separated
+
+**Theme B — Item detail page overhaul**
+- All Inventory fields visible and inline-editable (PATCH via `tgw-http` already wired)
+- eBay section: current price, shipping policy name, eBay categories, store categories
+- Section labels clarified: "eBay Offer" = internal draft/listing record (not buyer offer); buyer offers live in `/form/offers`; "Revision Draft" = proposed changes before push
+- "Pricing History" expandable link replaces inline price-source text; shows comps, defaults, operator override trail — this is the record Dave described (yes, the process described is correct: price is the inventory field; repricing pushes a draft eBay update that is reviewed before application)
+- eBay draft section: show draft price; fix false-positive `no_brand` (scan title); add "Does Not Apply" / "Unknown" to `no_model`
+- Pipeline tooltips per worker
+
+**Theme C — Inventory browse (major)**
+- Per-card: price, eBay status badge (Listed + eBayID link / Staged / Ready / Needs Review), missing-photo indicator
+- Checkbox + bulk-action toolbar (Re-identify / Reprice / Mark Ready / Mark Sold / Delete from eBay / Apply Draft)
+
+**Theme D — Pipeline page drill-down**
+- Click failed/dead_letter count → detail panel with job list, error text, re-queue + report buttons
+- Stuck active jobs (elapsed > 2× expected) surfaced
+
+**Theme E — Review Queue + Intake form**
+- Review Queue: add shipping, category, condition, condition description; filter + search + multi-select + bulk-approve/list-now/mark-ready
+- Intake form: add purpose banner + pre-populated field display + pipeline trigger buttons
+
+**Theme F — Data + API fixes**
+- ISS-014: qty < 0 validation + repair
+- ISS-015: Best Offers rate limit + call-budget display
+
+**Theme G — Page clarification**
+- Revisions page: purpose banner + empty-state workflow guide + link to PP-REVISION-001
 
 ### Design notes (session 19/20)
 
