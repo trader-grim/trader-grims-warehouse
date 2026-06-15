@@ -1047,6 +1047,17 @@ def test_items_browse_uses_static_css(client):
     assert 'const esc=escapeHtml' in r.text
 
 
+def test_items_browse_price_handles_empty_and_null():
+    """ISS-011: _cardHtml price must not produce $NaN for null/empty/non-numeric price."""
+    import pathlib
+    src = (pathlib.Path(__file__).parent.parent / "src/tgw/http_server.py").read_text()
+    # isNaN guard replaces null-check so empty strings don't produce NaN
+    assert "isNaN(pf)" in src
+    assert "parseFloat(it.price)" in src
+    # old guard that failed for empty-string price must be gone
+    assert "it.price!=null?'$'" not in src
+
+
 def test_todos_form_uses_static_css(client, monkeypatch):
     import tgw.todo as todo
     monkeypatch.setattr(todo, "todo_list", lambda *a, **k: [])

@@ -1983,7 +1983,7 @@ const scls=s=>({{
   'in stock':'s-in-stock','listed':'s-listed','staged':'s-staged','sold':'s-sold'
 }})[(s||'').toLowerCase()]||'';
 function _cardHtml(it){{
-  const price=it.price!=null?'$'+parseFloat(it.price).toFixed(2):'—';
+  const pf=parseFloat(it.price);const price=isNaN(pf)?'—':'$'+pf.toFixed(2);
   const sku=esc(it.sku);
   return `<div class="card"><a href="/form/items/${{it.sku}}" class="card-inner">
     <img class="thumb" src="/thumb/${{it.sku}}" loading="lazy" alt="" onerror="this.style.visibility='hidden'">

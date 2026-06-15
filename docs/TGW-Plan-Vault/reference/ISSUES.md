@@ -84,9 +84,9 @@ incomplete wiring, and data quality problems that need fixing.
 
 ### ISS-011 — inventory browse prices display as $NaN
 - **Symptom**: `/form/items` inventory browse shows `$NaN` in price column for many/all items
-- **Root cause**: `price` field is null or non-numeric in catalog; `_format_price()` (or equivalent) in items browse doesn't handle null/non-float gracefully
-- **Fix**: add null-guard in the price formatting path in `http_server.py` items handler; emit `—` or `$0.00` instead of `$NaN`
-- **Status**: open
+- **Root cause**: `price` column stores empty string `''` for unpriced items; `parseFloat('').toFixed(2)` is `NaN`; old `!= null` guard doesn't catch empty strings
+- **Fix**: `_cardHtml` JS changed to `parseFloat(it.price)` + `isNaN()` guard → shows `—` for null/empty/non-numeric (`http_server.py:1986`)
+- **Status**: fixed 2026-06-15
 
 ### ISS-012 — web home page health checks and recent activity not displaying
 - **Symptom**: `/form/` home page — health status strip and recent activity section blank or missing
