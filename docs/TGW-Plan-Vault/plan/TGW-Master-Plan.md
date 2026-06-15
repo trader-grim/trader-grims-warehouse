@@ -998,10 +998,23 @@ updating credentials after approval.
 
 **Status 2026-06-10 update:** eBay Developer Support responded to the `buy.marketplace_insights`
 scope request with **8 questions** Dave must answer before the scope can be approved.
-- [ ] **Review and respond to eBay Developer Support message** — answer the 8 questions
-  about the use case for `buy.marketplace_insights` (automated pricing engine, resale
-  platform, no redistribution of sold-price data to third parties). Be specific: automated
-  repricing, TGW internal use only, ~55K items, eBay seller account DaveBuko-Webkulap.
+
+**Status 2026-06-14 update (todo #142):** Follow-up check confirmed no response yet recorded in the repo. Direct DS portal access is restricted to the authenticated operator (Dave). Research indicates `buy.marketplace_insights` remains highly restricted for independent developers.
+
+**Operator Action (todo #79):** Check the eBay DS portal inbox. If unanswered, provide these details (typical eBay questionnaire):
+1.  **App ID:** `DaveBuko-DaveBuko-P-66170566` (Production keyset)
+2.  **Business Overview:** Trader Grim's Warehouse (TGW) — independent resale inventory automation.
+3.  **Business Model:** Internal inventory management and automated repricing (no data redistribution).
+4.  **Target Regions:** eBay US (primary), UK, DE.
+5.  **Website URLs:** Internal-only (Tailscale/VPN); private tool.
+6.  **User Experience:** Automated price adjustments based on sold-price p25/p75; no public data display.
+7.  **Sales Volume:** ~55K active items; aiming for 20% volume growth through market-aware pricing.
+8.  **Integration Details:** Currently using Trading API (photos/orders) and Sell Inventory/Account APIs.
+
+If rejected, pivot to `Browse API` (item_summary/search) as the pricing floor/p25 proxy (noted as PP-PRICE-003).
+
+- [ ] **Review and respond to eBay Developer Support message** — answer the 8 questions about the use case for `buy.marketplace_insights` (automated pricing engine, resale platform, no redistribution of sold-price data to third parties). Be specific: automated repricing, TGW internal use only, ~55K items, eBay seller account DaveBuko-Webkulap.
+
 
 ⚠ When new keyset arrives: update `secrets_root/ebay-credentials.json`, update
 `tgw-api-config.json` scopes to match approved scopes only, then re-run OAuth.
