@@ -135,7 +135,7 @@
     '</div>';
   document.body.appendChild(_pmOverlay);
 
-  var PM_HK = 'tgw-pm-h';
+  var PM_HK = 'tgw-pm-h-nav';
   var _pmHistory = [];
 
   function _pmLoad() {

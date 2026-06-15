@@ -1544,13 +1544,28 @@ def test_nav_has_pm_chat_link():
 
 
 def test_nav_css_has_pm_overlay_styles():
-    """nav.css includes the PM chat overlay and modal styles."""
+    """nav.css includes the PM chat overlay, modal, and toast styles."""
     p = __import__("pathlib").Path(__file__).parent.parent / "src/tgw/static/nav.css"
     css = p.read_text()
     assert ".pm-overlay" in css
     assert ".pm-modal" in css
     assert ".pm-modal-messages" in css
     assert ".pm-modal-input-row" in css
+    assert ".pm-toast" in css
+
+
+def test_nav_pm_storage_key_distinct_from_home():
+    """nav.js uses a different sessionStorage key than the home page widget."""
+    import pathlib
+    root = pathlib.Path(__file__).parent.parent
+    nav_src = (root / "src/tgw/static/nav.js").read_text()
+    home_src = (root / "src/tgw/http_server.py").read_text()
+    # nav.js must use the -nav suffix key
+    assert "tgw-pm-h-nav" in nav_src
+    # home page uses the base key
+    assert "'tgw-pm-h'" in home_src
+    # nav.js must NOT use the bare base key (would collide on /form/home)
+    assert "'tgw-pm-h'" not in nav_src
 
 
 def test_nav_pm_chat_intercepts_link():
