@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 
 import psycopg2
 import psycopg2.extras
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Security, status
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Request, Security, UploadFile, status
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
@@ -1774,6 +1774,48 @@ async def api_suggest(request: Request) -> Dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"write failed: {exc}")
     return {"ok": True, "written": result.get("written", "")}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/inbox/upload — drop a file into the plan inbox (Flutter app)
+# ---------------------------------------------------------------------------
+
+_INBOX_MAX_BYTES = 512 * 1024  # 512 KB; inbox notes are text, not media
+
+
+@app.post("/api/inbox/upload", dependencies=[AUTH])
+async def api_inbox_upload(file: UploadFile = File(...)) -> Dict[str, Any]:
+    """Upload a file to the plan inbox with a timestamp prefix.
+
+    Intended for the Flutter editor app — lets the operator drop a note or
+    document into the pm_intake inbox from the tablet.  Only ``.md`` files
+    are picked up by the pm_intake worker; other extensions land in the inbox
+    directory but require manual action.
+
+    Returns ``{ok, filename}`` on success.
+    """
+    orig_name = file.filename or "upload.md"
+    if "/" in orig_name or "\\" in orig_name or ".." in orig_name:
+        raise HTTPException(status_code=400, detail="invalid filename")
+    raw_name = Path(orig_name).name
+    if not raw_name or raw_name.startswith("."):
+        raise HTTPException(status_code=400, detail="invalid filename")
+
+    content = await file.read()
+    if len(content) > _INBOX_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="file too large (max 512 KB)")
+
+    ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+    dest_name = f"{ts}_{raw_name}"
+
+    inbox_dir: Path = _cfg["plan_inbox_path"]
+    inbox_dir.mkdir(parents=True, exist_ok=True)
+    dest = (inbox_dir / dest_name).resolve()
+    if not dest.is_relative_to(inbox_dir.resolve()):
+        raise HTTPException(status_code=400, detail="invalid filename")
+
+    dest.write_bytes(content)
+    return {"ok": True, "filename": dest_name}
 
 
 # ---------------------------------------------------------------------------

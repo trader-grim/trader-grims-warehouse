@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:dio/dio.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../models/models.dart';
@@ -202,6 +204,22 @@ class ApiClient {
       return ApiResponse(ok: false, error: e.toString());
     }
   }
+  Future<ApiResponse<String>> uploadToInbox(File file) async {
+    await ensureInitialized();
+    try {
+      final formData = FormData.fromMap({
+        'file': await MultipartFile.fromFile(file.path, filename: file.uri.pathSegments.last),
+      });
+      final response = await _dio.post('/api/inbox/upload', data: formData);
+      if (response.statusCode == 200) {
+        return ApiResponse(ok: true, data: response.data['filename'] as String?);
+      }
+      return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
+    } catch (e) {
+      return ApiResponse(ok: false, error: e.toString());
+    }
+  }
+
   String getThumbnailUrl(String sku) {
     return '$_baseUrl/api/items/$sku/thumbnail';
   }

@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../api/api_client.dart';
 import '../db/offline_db.dart';
@@ -86,5 +88,10 @@ class TgwRepository {
   Future<List<Map<String, dynamic>>> getCategoryGroups() async {
     final response = await apiClient.getCategoryGroups();
     return response.data ?? [];
+  }
+
+  Future<String?> uploadToInbox(File file) async {
+    final response = await apiClient.uploadToInbox(file);
+    return response.ok ? response.data : null;
   }
 }

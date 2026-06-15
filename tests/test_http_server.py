@@ -188,6 +188,7 @@ def env(tmp_path, monkeypatch, queue_rows):
         "thumbnail_root": thumbnail_root,
         "category_groups_path": str(groups_path),
         "plan_vault_path": tmp_path / "vault",
+        "plan_inbox_path": tmp_path / "vault" / "inbox",
         "postgres_dsn": "postgresql://fake/db",
         "pretty": True,
         "raw": {},
@@ -2921,3 +2922,89 @@ def test_nav_includes_intake_link(client):
     r = client.get("/static/nav.js")
     assert r.status_code == 200
     assert "/form/intake" in r.text
+
+
+# ---------------------------------------------------------------------------
+# POST /api/inbox/upload — Flutter app inbox file upload (PP-EDITOR-001 3o)
+# ---------------------------------------------------------------------------
+
+def test_inbox_upload_md_file_saved_with_timestamp(env, tmp_path):
+    """Uploading a .md file saves it under plan_inbox_path with a timestamp prefix."""
+    inbox_dir = env["cfg"]["plan_vault_path"] / "inbox"
+    content = b"# Test Note\n\nThis is a test inbox upload."
+    r = env["client"].post(
+        "/api/inbox/upload",
+        files={"file": ("note.md", content, "text/markdown")},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    filename = body["filename"]
+    # Filename must be timestamp-prefixed: YYYYMMDDTHHMMSSoriginal.md
+    assert filename.endswith("_note.md")
+    assert "T" in filename.split("_")[0]
+    saved = inbox_dir / filename
+    assert saved.exists()
+    assert saved.read_bytes() == content
+
+
+def test_inbox_upload_non_md_file_accepted(env):
+    """Non-.md files are accepted — they land in inbox but pm_intake ignores them."""
+    content = b"plain text note"
+    r = env["client"].post(
+        "/api/inbox/upload",
+        files={"file": ("info.txt", content, "text/plain")},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+
+def test_inbox_upload_requires_auth(env):
+    """Endpoint requires Bearer auth — no token → 401."""
+    content = b"# Note"
+    r = env["client"].post(
+        "/api/inbox/upload",
+        files={"file": ("note.md", content, "text/markdown")},
+    )
+    assert r.status_code == 401
+
+
+def test_inbox_upload_rejects_path_traversal(env):
+    """Filename with path traversal component is rejected with 400."""
+    content = b"attack"
+    r = env["client"].post(
+        "/api/inbox/upload",
+        files={"file": ("../evil.md", content, "text/markdown")},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 400
+
+
+def test_inbox_upload_rejects_oversized_file(env):
+    """Files over 512 KB are rejected with 413."""
+    big = b"x" * (512 * 1024 + 1)
+    r = env["client"].post(
+        "/api/inbox/upload",
+        files={"file": ("big.md", big, "text/markdown")},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 413
+
+
+def test_inbox_upload_creates_inbox_dir_if_missing(env, monkeypatch):
+    """Endpoint creates the inbox dir if it doesn't exist yet."""
+    new_inbox = env["cfg"]["plan_vault_path"] / "inbox_new"
+    cfg = dict(env["cfg"])
+    cfg["plan_inbox_path"] = new_inbox
+    monkeypatch.setattr(http_server, "_cfg", cfg)
+    assert not new_inbox.exists()
+    content = b"# Fresh dir test"
+    r = env["client"].post(
+        "/api/inbox/upload",
+        files={"file": ("fresh.md", content, "text/markdown")},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    assert new_inbox.exists()

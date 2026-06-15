@@ -1,3 +1,6 @@
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../providers/providers.dart';
@@ -189,6 +192,24 @@ class _EditItemScreenState extends ConsumerState<EditItemScreen> {
     );
   }
 
+  Future<void> _uploadToInbox() async {
+    final result = await FilePicker.pickFiles(
+      dialogTitle: 'Upload to inbox',
+      allowMultiple: false,
+    );
+    if (result == null || result.files.isEmpty) return;
+    final path = result.files.single.path;
+    if (path == null) return;
+
+    final filename = await ref.read(repositoryProvider).uploadToInbox(File(path));
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(filename != null ? 'Uploaded to inbox: $filename' : 'Upload failed'),
+        backgroundColor: filename != null ? Colors.green[700] : Colors.red[700],
+      ));
+    }
+  }
+
   Future<void> _showTitleHistory() async {
     final search = _titleController.text;
     if (search.isEmpty) return;
@@ -222,6 +243,20 @@ class _EditItemScreenState extends ConsumerState<EditItemScreen> {
                 ),
               ),
             ),
+            actions: [
+              TextButton.icon(
+                icon: const Icon(Icons.upload_file, size: 16),
+                label: const Text('Upload to inbox'),
+                onPressed: () {
+                  Navigator.pop(context);
+                  _uploadToInbox();
+                },
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Close'),
+              ),
+            ],
           ),
         );
       }
