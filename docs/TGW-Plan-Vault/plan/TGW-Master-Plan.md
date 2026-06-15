@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-14 (session 30 — PP-EDITOR-001 Phase 3n polish pass done (#859–#864); suite 1402)
+updated: 2026-06-15 (session 31 — 8 suggestions processed; ISS-010/011/012 added; PAM naming; todos #866–#872 seeded; rows 40–41 seeded)
 maintained_by: Opus (planner)
 ---
 
@@ -767,7 +767,9 @@ first-class via `wl-paste --watch`; build after Qtile install); Aider = **commit
 week stands as routing calibration). Decisions recorded in the respective PP sections +
 next-process.md; follow-on todos #109–#118 seeded.
 
-### PP-DOCFLOW-001 — The TGW Project Admin (LLM document + suggestion intake)
+### PP-DOCFLOW-001 — PAM (Project Administration Manager) — LLM document + suggestion intake
+
+**Naming decision (Dave, 2026-06-14, session 31):** The LLM project admin is officially named **PAM** — Project Administration Manager. Update all UI references (web PM chat, labels) to use "PAM" instead of "PM" or "pm_intake". Code module names unchanged (pm_intake, /api/pm/chat) for backward compat — surface name only.
 
 **Status: PHASE 1 + PHASE 2 COMPLETE 2026-06-11 (sessions 25–26). Phase 3+ (admin skills expansion) is future scope.**
 

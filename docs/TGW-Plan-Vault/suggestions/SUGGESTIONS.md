@@ -201,7 +201,11 @@
 - [x] 2026-06-14T16:49 :: add feedback to webpages so feedback has better context if associated with current page. — added as claude todo #140 (PP-EDITOR-001 3n: suggest popup injects current page URL + page title as context prefix to suggestion text)
 - [x] 2026-06-14T16:50 :: feedback goes through LLMPM — added to PP-DOCFLOW-001: /form/suggest submissions optionally routed through PM chat for classification/priority before landing in SUGGESTIONS.md; Phase 3 extension
 - [x] 2026-06-14T18:10 :: test PM action endpoint from live test — test entry; removed (endpoint verified working)
-- [ ] 2026-06-14T20:59 :: add inbox upload link to suggest web popup
-- [ ] 2026-06-14T21:01 :: open in popup window for web pm chat
-- [ ] 2026-06-14T21:04 :: heretoforth out llm pm shall be named PAM, Project Administration Manager
-- [ ] 2026-06-14T21:47 :: tgw restart-workers remove sudo and system will prompt for password
+- [x] 2026-06-14T20:59 :: add inbox upload link to suggest web popup — added as claude todo #866 (PP-EDITOR-001 3o: file-input button in suggest popup POSTs to /api/inbox/upload; stores in inbox/ with timestamp prefix)
+- [x] 2026-06-14T21:01 :: open in popup window for web pm chat — added as claude todo #867 (PP-EDITOR-001 3o: PM chat opens as modal popup; POST /api/pm/chat unchanged)
+- [x] 2026-06-14T21:04 :: heretoforth out llm pm shall be named PAM, Project Administration Manager — naming decision recorded in plan (PP-DOCFLOW-001): LLM project admin is now named PAM (Project Administration Manager); update references in plan and UI
+- [x] 2026-06-14T21:47 :: tgw restart-workers remove sudo and system will prompt for password — added as claude todo #868 (tgw restart-workers: remove sudo -n silent-fail pattern; use plain sudo so system prompts for password when not in passwordless-sudo context)
+- [x] 2026-06-15T03:11 :: entire apy todo list wiped. — investigated: DB confirms AGY todos #101/102/108/124/141/142/143/150/151 were all marked done on 2026-06-14 by AGY session; claude queue also drained (all PP-EDITOR-001 3n tasks completed); no data lost — DB verified 2026-06-15 session 31
+- [x] 2026-06-15T03:13 :: task 151 received this response. I stopped it for further instructions: The flutter build linux command failed because libsecret-1-dev is missing... connectivity_plus/workmanager missing from pubspec.yaml — added as claude todo #869 (PP-PORTABLE-CATALOG-001 P2 flutter build fix: apt install libsecret-1-dev; add connectivity_plus/workmanager to pubspec.yaml; verify flutter build linux passes; #151 self-marked done but build was failing)
+- [x] 2026-06-15T03:30 :: agy earlier today. I only ran 150, 151 had error — context incorporated into todo #869; confirmed DB state: only #150 ran to completion; #151 was marked done by AGY despite flutter build failure; fix tracked in #869
+- [x] 2026-06-15T04:15 :: webinterface hone page health, recent not displaying — added to ISSUES.md as ISS-012; added as claude todo #870 (investigate /api/health + /api/dashboard auth/shape; fix home page status strip and recent-activity rendering)

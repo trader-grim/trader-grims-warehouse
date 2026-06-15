@@ -76,6 +76,24 @@ incomplete wiring, and data quality problems that need fixing.
   2. `sudo -u tgw tgw restart-ebay-token` — clears dead_letter jobs, enqueues fresh token_refresh immediately
 - **Status**: awaiting operator re-consent
 
+### ISS-010 — needs_photos count inflated on home dashboard
+- **Symptom**: home dashboard shows 33k+ items needing photos; actual un-photographed count is much lower
+- **Root cause**: catalog `image` column is empty for many items that do have thumbnails — `thumbnail_gen` updates the SQLite `image` col but may be stale; catalog rebuild may not be propagating thumbnail presence correctly
+- **Fix**: investigate `catalog_export.py` / `thumbnail_gen` image-col write path; run a full `tgw build-thumbnails` + `tgw build-all` to resync; check `needs_photo` filter in `http_server.py` dashboard endpoint
+- **Status**: open
+
+### ISS-011 — inventory browse prices display as $NaN
+- **Symptom**: `/form/items` inventory browse shows `$NaN` in price column for many/all items
+- **Root cause**: `price` field is null or non-numeric in catalog; `_format_price()` (or equivalent) in items browse doesn't handle null/non-float gracefully
+- **Fix**: add null-guard in the price formatting path in `http_server.py` items handler; emit `—` or `$0.00` instead of `$NaN`
+- **Status**: open
+
+### ISS-012 — web home page health checks and recent activity not displaying
+- **Symptom**: `/form/` home page — health status strip and recent activity section blank or missing
+- **Root cause**: likely `GET /api/health` or `GET /api/dashboard` returning unexpected shape; or frontend JS failing silently
+- **Fix**: check `/api/health` (Bearer-auth required?) and `/api/dashboard` responses from the browser; fix auth or response-shape mismatch in the home-page frontend (todo #870)
+- **Status**: open
+
 ### ISS-008 — legacy_listing_resolved items may still have active listings
 - **Symptom**: items marked `legacy_listing_resolved: True` may still have active eBay
   listings from before the Inventory API migration

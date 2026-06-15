@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-06-15 02:22 UTC — 24 open, 828 done in the last 7 days._
+_Rendered 2026-06-15 04:21 UTC — 26 open, 833 done in the last 7 days._
 
 ## admin (16 open)
 
@@ -27,16 +27,6 @@ _Rendered 2026-06-15 02:22 UTC — 24 open, 828 done in the last 7 days._
 | 139 | 66 |  | PP-INTAKE-002 camera app design review — read reference/PP-INTAKE-002-camera-app-design.md and answer 3 questions before build: (1) root strategy: su polling inside app vs separate background shell script? (2) target device for rooting — Pixel/Xiaomi/other? (3) confirm Syncthing path /sdcard/Pictures/TGW_Sync/ matches current folder mapping. Signal go to seed flutter scaffold build todo. |  |  |
 | 140 | 67 |  | PP-INTAKE-003 xmouse replacement design review — read reference/PP-INTAKE-003-xmouse-replacement-design.md; Flutter recommended (Apache-2.0, shares tgw_app code, no NDK); 3-phase: (1) macro-pad grid + HTTP/SSH dispatch (2) inline web form panel via flutter_inappwebview (3) embedded VNC via flutter_rfb. Signal go on phase(s) to start to seed build todo. |  |  |
 
-## agy (5 open)
-
-| ID | Pri | Size | Task | Plan | Blockers |
-|---:|----:|:----:|------|------|----------|
-| 150 | 30 |  | PP-PORTABLE-CATALOG-001 P2 offline data layer: add deps (connectivity_plus, dio_smart_retry, workmanager, sqlite3) to pubspec.yaml; snapshot-to-sandbox on startup (copy synced tgwcatalog.db to app-private path_provider dir, open copy read-write); offline outbox table in private db (persist patchItem/performAction mutations when offline); connectivity flush (poll /api/queue/status; on reconnect flush outbox to PATCH /api/items/{sku} + POST /api/items/{sku}/action, then replace local copy from GET /api/catalog/snapshot). See reference/PP-PORTABLE-CATALOG-001-P2-prototype-brief.md for full spec. | [[TGW-Master-Plan#PP-PORTABLE-CATALOG-001\|PP-PORTABLE-CATALOG-001]] |  |
-| 151 | 31 |  | PP-PORTABLE-CATALOG-001 P2 wire offline layer into screens: Browse/Item/Edit operate against the private sqflite copy; edits made offline visibly persist; on flush they sync. Make prototype runnable on flutter run -d linux. Capture a screenshot showing offline-edit-then-flush loop and drop in docs/TGW-Plan-Vault/inbox/. Depends on #150. | [[TGW-Master-Plan#PP-PORTABLE-CATALOG-001\|PP-PORTABLE-CATALOG-001]] | ⛔ #150 |
-| 108 | 55 |  | Round7: Verify eBay strikethrough pricing access in Seller Hub (Sale Price section in Edit Listing form), then enable strikethrough_enabled config flag — code shipped + tested session 15, off pending verification |  |  |
-| 124 | 72 |  | PP-OFFER-001 design: offer management CLI — tgw offers [--pending]: list incoming best-offer requests (GetBestOffers); respond --accept/--counter/--decline; auto-accept config (min_pct of current price); design doc before build |  |  |
-| 143 | 73 |  | PP-OFFER-001 GetBestOffers API research — look up Trading API GetBestOffers call signature, pagination, response fields, and rate limits; verify against TGW's current OAuth scopes; output spec to inbox/ for Claude to code. Feeds todo #133 build |  |  |
-
 ## ai_studio (2 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
@@ -44,16 +34,33 @@ _Rendered 2026-06-15 02:22 UTC — 24 open, 828 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
+## claude (7 open)
+
+| ID | Pri | Size | Task | Plan | Blockers |
+|---:|----:|:----:|------|------|----------|
+| 869 | 35 |  | PP-PORTABLE-CATALOG-001 P2 flutter build fix: install libsecret-1-dev (apt); add connectivity_plus, workmanager to apps/tgw_app/pubspec.yaml; verify flutter build linux passes; task #151 was self-marked done but build fails without these deps | [[TGW-Master-Plan#PP-PORTABLE-CATALOG-001 — Portable / Satellite Catalog\|PP-PORTABLE-CATALOG-001]] |  |
+| 868 | 55 |  | tgw restart-workers sudo fix: remove sudo -n (silent fail pattern); use plain sudo so system prompts for password when needed; update cmd_restart_workers() in api.py |  |  |
+| 870 | 60 |  | ISS-012: web home page health checks and recent activity not displaying — investigate /form/ dashboard: check /api/health and /api/dashboard responses; fix frontend rendering of status strip and recent-items section |  |  |
+| 866 | 65 |  | PP-EDITOR-001 3o: suggest popup "Upload to inbox" link — add file-input button that POSTs file to new POST /api/inbox/upload endpoint; stores in inbox/ with timestamp prefix; confirm upload toast | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
+| 867 | 66 |  | PP-EDITOR-001 3o: PM chat open in popup window — web PM chat (/form/pm-chat) opens as modal popup instead of navigating away; POST /api/pm/chat stays same | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
+| 871 | 75 |  | category-groups.json pricing calibration (GEMINI-005): update electrical_fixtures typical_used→12.50, media_records→13.50, collectibles_pins_buttons→10.50; run tgw category-groups --reseed after |  |  |
+| 872 | 76 |  | category-groups.json store_category mappings (GEMINI-006): populate store_category for tools_hand, electronics_adapters_chargers, electronics_remotes, kitchen_utensils |  |  |
+
 ## sokoban (1 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — Sold reconciliation and inventory status sync (design ready)\|PP-SOLD-001]] |  |
 
-## Done this week (828)  — showing 15 most recent
+## Done this week (833)  — showing 15 most recent
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 143 | agy | 2026-06-14 | PP-OFFER-001 GetBestOffers API research — look up Trading API GetBestOffers call signature, pagination, response fields, and rate limits; verify against TGW's current OAuth scopes; output spec to inbox/ for Claude to code. Feeds todo #133 build |
+| 124 | agy | 2026-06-14 | PP-OFFER-001 design: offer management CLI — tgw offers [--pending]: list incoming best-offer requests (GetBestOffers); respond --accept/--counter/--decline; auto-accept config (min_pct of current price); design doc before build |
+| 108 | agy | 2026-06-14 | Round7: Verify eBay strikethrough pricing access in Seller Hub (Sale Price section in Edit Listing form), then enable strikethrough_enabled config flag — code shipped + tested session 15, off pending verification |
+| 151 | agy | 2026-06-14 | PP-PORTABLE-CATALOG-001 P2 wire offline layer into screens: Browse/Item/Edit operate against the private sqflite copy; edits made offline visibly persist; on flush they sync. Make prototype runnable on flutter run -d linux. Capture a screenshot showing offline-edit-then-flush loop and drop in docs/TGW-Plan-Vault/inbox/. Depends on #150. |
+| 150 | agy | 2026-06-14 | PP-PORTABLE-CATALOG-001 P2 offline data layer: add deps (connectivity_plus, dio_smart_retry, workmanager, sqlite3) to pubspec.yaml; snapshot-to-sandbox on startup (copy synced tgwcatalog.db to app-private path_provider dir, open copy read-write); offline outbox table in private db (persist patchItem/performAction mutations when offline); connectivity flush (poll /api/queue/status; on reconnect flush outbox to PATCH /api/items/{sku} + POST /api/items/{sku}/action, then replace local copy from GET /api/catalog/snapshot). See reference/PP-PORTABLE-CATALOG-001-P2-prototype-brief.md for full spec. |
 | 102 | agy | 2026-06-14 | Round7 p30: GDrive dedupe assist (PLAN-backup-dr A8) — chunked rclone dedupe strategy for same-name-same-dir duplicates that time out on the full dataset; produce chunk plan + exact commands; operator supervises execution |
 | 142 | agy | 2026-06-14 | eBay DS ticket follow-up — check Developer Support inbox for responses to the 8 buy.marketplace_insights scope questions (todo #79); summarize any answers or next steps; update plan accordingly. Browser task via Seller Hub / DS portal |
 | 141 | agy | 2026-06-14 | PP-VERIFY-001 catalog baseline rescan — rerun catalog quality scan (follow CATALOG-BASELINE-SCAN.md pattern) on current ItemData sample; compare fill rates vs prior baseline; identify new gaps; output updated markdown table to inbox/. AGY large-context data task |
@@ -64,9 +71,4 @@ _Rendered 2026-06-15 02:22 UTC — 24 open, 828 done in the last 7 days._
 | 862 | claude | 2026-06-14 | PP-EDITOR-001 3n: inventory browse pagination/load-more; action buttons (approve/list/end) per item; increase base font to 15px; small-text contrast #888 -> #aaa. |
 | 861 | claude | 2026-06-14 | PP-EDITOR-001 3n: /form/suggest as inline popup on top nav (POST stays same; inject current page URL as context prefix). PP-CAPTURE-001. |
 | 858 | claude | 2026-06-14 | PP-EDITOR-001 Phase 3m — item detail eBay deep links: add 'View on eBay' button (opens listing_url) and 'Seller Hub' link (ebay.com/sh/lst/active filtered to listing_id) when ebay_listing.listing_id present; add 'Open in eBay Messages' link when listing active; show offer count badge if pending_offers > 0 with link to /form/offers filtered to this SKU; these surface from existing data, no new API work needed |
-| 857 | claude | 2026-06-14 | PP-EDITOR-001 Phase 3l — intake flow enhancements: /form/intake landing page (SKU entry field + scan hint, recent intakes list with status chips, link to current in-progress items); enhanced /form/intake/{sku}: photo count badge with warning if zero, current pipeline state badge, trigger buttons (Start identify / Re-identify / Re-draft via POST /api/items/{sku}/action), live queue job status poll every 5s while job active, 'View detail' link |
-| 856 | claude | 2026-06-14 | PP-EDITOR-001 Phase 3k — /form/system full system health page: tgw health output as status table with pass/warn/fail chips; eBay token expiry countdown (from token JSON mtime + expiry field); disk usage (ItemData, logs, backup mounts); postgres job table row counts by state; last offline-sync stamp; worker restart buttons (POST /api/system/workers/{unit}/restart, gated — confirm dialog); complements /form/pipeline (pipeline = jobs, system = infrastructure) |
-| 855 | claude | 2026-06-14 | PP-EDITOR-001 Phase 3j — /form/pipeline pipeline monitor + dead-letter manager: queue depth table (queue/pending/running/done-today/failed); active jobs (currently running SKUs with elapsed time); GET /api/system/workers (systemd unit states via subprocess for all tgw-worker@ units + tgw-http); POST /api/jobs/{job_id}/requeue (re-enqueue dead-letter with fresh dedupe key); dead-letter list with per-job requeue/cancel; auto-refresh every 30s |
-| 854 | claude | 2026-06-14 | PP-EDITOR-001 Phase 3i — /form/review post-draft review queue + API: GET /api/items/review-queue (items where ebay_draft completed, status not Staged/Ready/Listed/Sold — the human approval step); POST /api/items/{sku}/action approve (sets status=Ready via patch); /form/review page: compact rows (thumbnail + AI title + price + condition + category), inline Approve/Edit/Re-draft buttons, batch Approve All button, count badge in nav; primary workflow surface for post-pipeline QA |
-| 853 | claude | 2026-06-14 | PP-EDITOR-001 Phase 3h — /form/revisions revision review UI + API: GET /api/items/pending-revision (items with non-empty revision_draft, via json_extract on sqlite catalog or full-scan fallback); POST /api/items/{sku}/revision/apply (wraps cmd_revise_apply, dry_run param, _APPLY_ENABLED gate); DELETE /api/items/{sku}/revision (discards revision_draft from item JSON); /form/revisions page: list items with pending draft, inline diff table (field/current/proposed red+green), Apply/Discard buttons per item, dry-run default with Go Live toggle |
-| … | | | _…and 813 more — run `tgw todo --all` to see everything_ |
+| … | | | _…and 818 more — run `tgw todo --all` to see everything_ |
