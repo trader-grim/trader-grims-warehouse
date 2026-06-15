@@ -1504,16 +1504,83 @@ def bulk_form(request: Request):
 _TODOS_EXTRA_CSS = """
 table{width:100%;border-collapse:collapse;margin:2px 0 16px}
 th,td{text-align:left;padding:8px 6px;border-bottom:1px solid #333;font-size:.9em;vertical-align:top}
-th{color:#888;font-size:.72em;text-transform:uppercase;letter-spacing:.04em}
+th{color:#aaa;font-size:.72em;text-transform:uppercase;letter-spacing:.04em}
 td.id{color:#4a8ade;font-variant-numeric:tabular-nums;white-space:nowrap}
 td.p{color:#caa;font-variant-numeric:tabular-nums;white-space:nowrap}
 td.src{color:#777;font-size:.8em;white-space:nowrap}
 .agent{display:flex;align-items:baseline;gap:8px;margin:18px 0 2px}
 .agent h3{margin:0;font-size:1em;color:#7fbfff;text-transform:capitalize}
-.agent .count{font-size:.8em;color:#888}
+.agent .count{font-size:.8em;color:#aaa}
 .allclear{margin-top:24px;padding:16px;border-radius:8px;background:#1a4a1a;color:#7f7;text-align:center;font-size:1.05em}
 .total{font-size:.82em;color:#999;margin-bottom:6px}
+.todos-ctrl{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+.todos-ctrl label{font-size:.85em;color:#aaa;margin:0}
+.todos-ctrl select{width:auto;padding:6px 10px;font-size:.85em}
+.task-body{max-height:2.8em;overflow:hidden;cursor:pointer;line-height:1.4;
+  transition:max-height .15s}
+.task-body.expanded{max-height:none}
+.task-expand{color:#555;font-size:.78em;cursor:pointer;user-select:none;display:none}
+.task-expand.visible{display:inline}
+.copy-btn{background:#1e1e1e;border:1px solid #444;color:#aaa;border-radius:4px;
+  padding:2px 8px;cursor:pointer;font-size:.78em;white-space:nowrap;font-family:inherit}
+.copy-btn:hover{background:#2a2a2a;color:#eee}
+.copy-btn.copied{color:#7f7;border-color:#3a6a3a}
+.pp-badge{display:inline-block;padding:1px 6px;background:#1a2a4a;color:#7af;border-radius:4px;
+  font-size:.72em;text-decoration:none;margin:0 4px 2px 0;white-space:nowrap}
+.pp-badge:hover{background:#1a3a6a}
 """
+
+
+_TODOS_JS = """
+<script>
+(function() {
+  // Agent filter
+  var sel = document.getElementById('agent-sel');
+  if (sel) sel.addEventListener('change', function() {
+    var v = sel.value;
+    document.querySelectorAll('[data-agent]').forEach(function(el) {
+      el.style.display = (v === '' || el.dataset.agent === v) ? '' : 'none';
+    });
+  });
+
+  // Click-to-expand task body; show expand toggle for long bodies
+  document.querySelectorAll('.task-body').forEach(function(el) {
+    var full = el.textContent;
+    // If text is taller than its max-height, show it as truncated with toggle
+    if (el.scrollHeight > el.clientHeight + 4) {
+      var tog = el.nextElementSibling;
+      if (tog && tog.classList.contains('task-expand')) {
+        tog.classList.add('visible');
+        tog.textContent = '▸ more';
+      }
+      el.addEventListener('click', function() {
+        var expanded = el.classList.toggle('expanded');
+        if (tog) tog.textContent = expanded ? '▴ less' : '▸ more';
+      });
+    }
+  });
+
+  // Copy-to-clipboard buttons
+  document.querySelectorAll('.copy-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var text = btn.dataset.body || '';
+      navigator.clipboard.writeText(text).then(function() {
+        btn.textContent = 'Copied!'; btn.classList.add('copied');
+        setTimeout(function() { btn.textContent = '📋'; btn.classList.remove('copied'); }, 1500);
+      }).catch(function() {
+        btn.textContent = '!'; setTimeout(function() { btn.textContent = '📋'; }, 1200);
+      });
+    });
+  });
+})();
+</script>
+"""
+
+
+def _extract_pp_refs(body: str) -> "list[str]":
+    """Extract PP-XXX-NNN references from a todo body string."""
+    import re
+    return list(dict.fromkeys(re.findall(r'PP-[A-Z0-9]+-\d+', body)))
 
 
 def _render_todos_html(rows) -> str:
@@ -1530,7 +1597,7 @@ def _render_todos_html(rows) -> str:
         '<h2>Open Todos</h2>'
     )
     if not rows:
-        return head + '<div class="allclear">✓ All clear — no open todos.</div>' + _STATIC_FOOT + '</body></html>'
+        return head + '<div class="allclear">✓ All clear — no open todos.</div>' + _STATIC_FOOT + _TODOS_JS + '</body></html>'
 
     # Preserve todo_list ordering (agent, priority, id); group consecutively.
     groups: "list[tuple[str, list]]" = []
@@ -1540,24 +1607,57 @@ def _render_todos_html(rows) -> str:
             groups.append((agent, []))
         groups[-1][1].append(r)
 
-    parts = [head, f'<div class="total">{len(rows)} open item(s)</div>']
+    # Build agent filter dropdown
+    agent_counts = {agent: len(items) for agent, items in groups}
+    filter_opts = '<option value="">All agents</option>'
+    for ag, cnt in sorted(agent_counts.items()):
+        filter_opts += f'<option value="{_html.escape(str(ag))}">{_html.escape(str(ag))} ({cnt})</option>'
+
+    parts = [
+        head,
+        '<div class="todos-ctrl">'
+        f'<label for="agent-sel">Agent:</label>'
+        f'<select id="agent-sel">{filter_opts}</select>'
+        '</div>',
+        f'<div class="total">{len(rows)} open item(s)</div>',
+    ]
+
     for agent, items in groups:
+        agent_esc = _html.escape(str(agent))
         parts.append(
-            f'<div class="agent"><h3>{_html.escape(str(agent))}</h3>'
+            f'<div class="agent" data-agent="{agent_esc}">'
+            f'<h3>{agent_esc}</h3>'
             f'<span class="count">{len(items)} open</span></div>'
         )
-        parts.append('<table><tr><th>ID</th><th>P</th><th>Task</th><th>Src</th></tr>')
+        parts.append(
+            f'<table data-agent="{agent_esc}">'
+            '<tr><th>ID</th><th>P</th><th>Task</th><th>Src</th><th></th></tr>'
+        )
         for it in items:
+            body_raw = str(it.get("body", ""))
+            body_esc = _html.escape(body_raw)
+            pp_refs = _extract_pp_refs(body_raw)
+            pp_badges = "".join(
+                f'<a class="pp-badge" href="/docs/plan/TGW-Master-Plan.md" title="{r}">{r}</a>'
+                for r in pp_refs
+            )
+            body_cell = (
+                f'<div class="task-body" data-agent="{agent_esc}">{body_esc}</div>'
+                f'<span class="task-expand"></span>'
+                + (pp_badges if pp_badges else "")
+            )
             parts.append(
-                '<tr>'
+                f'<tr data-agent="{agent_esc}">'
                 f'<td class="id">#{_html.escape(str(it.get("id", "")))}</td>'
                 f'<td class="p">{_html.escape(str(it.get("priority", "")))}</td>'
-                f'<td>{_html.escape(str(it.get("body", "")))}</td>'
+                f'<td>{body_cell}</td>'
                 f'<td class="src">{_html.escape(str(it.get("source", "")))}</td>'
+                f'<td><button class="copy-btn" data-body="{body_esc}" title="Copy task text">📋</button></td>'
                 '</tr>'
             )
         parts.append('</table>')
     parts.append(_STATIC_FOOT)
+    parts.append(_TODOS_JS)
     parts.append('</body></html>')
     return ''.join(parts)
 
@@ -1650,6 +1750,30 @@ async def suggest_submit(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# POST /api/suggest — JSON suggestion endpoint for the nav popup (no Bearer
+# auth, network trust — same policy as /form/suggest and /form/todos).
+# ---------------------------------------------------------------------------
+
+@app.post("/api/suggest")
+async def api_suggest(request: Request) -> Dict[str, Any]:
+    """Network-trust JSON suggest endpoint used by the nav popup overlay.
+    Accepts {text: str}, appends to SUGGESTIONS.md, returns {ok, written}."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+    text = " ".join(str(body.get("text", "")).split())
+    if not text:
+        raise HTTPException(status_code=400, detail="empty suggestion")
+    from .api import cmd_suggest
+    try:
+        result = cmd_suggest(_cfg, text)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"write failed: {exc}")
+    return {"ok": True, "written": result.get("written", "")}
+
+
+# ---------------------------------------------------------------------------
 # GET /media/{sku}/{filename} — serve item media (no auth, network trust)
 # GET /thumb/{sku}           — serve thumbnail  (no auth, for <img src>)
 # ---------------------------------------------------------------------------
@@ -1698,25 +1822,32 @@ _ITEMS_EXTRA_CSS = """
 .hdr h2{margin:0;font-size:1.1em;flex-shrink:0}
 .hdr input{flex:1;min-width:130px;padding:8px;font-size:.9em;background:#222;
   color:#eee;border:1px solid #444;border-radius:6px}
-.summary{font-size:.8em;color:#888;margin-bottom:8px}
+.summary{font-size:.8em;color:#aaa;margin-bottom:8px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px}
 .card{display:flex;flex-direction:column;background:#1a1a1a;border:1px solid #333;
-  border-radius:8px;text-decoration:none;color:inherit;overflow:hidden;transition:border-color .15s}
+  border-radius:8px;overflow:hidden;transition:border-color .15s}
 .card:hover{border-color:#4a8ade}
-.card .thumb{width:100%;aspect-ratio:4/3;object-fit:cover;background:#111}
+.card-inner{display:flex;flex-direction:column;text-decoration:none;color:inherit}
+.card-inner .thumb{width:100%;aspect-ratio:4/3;object-fit:cover;background:#111}
 .card-body{padding:8px}
-.card-sku{font-size:.7em;color:#888;font-family:monospace}
+.card-sku{font-size:.7em;color:#aaa;font-family:monospace}
 .card-title{font-size:.85em;margin:4px 0;color:#ddd;line-height:1.3;
   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.card-meta{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:4px;font-size:.75em;color:#888}
+.card-meta{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:4px;font-size:.75em;color:#aaa}
 .price{color:#7fbfff;font-weight:bold}
 .sbadge{padding:2px 6px;border-radius:10px;font-size:.72em}
 .s-in-stock{background:#1a3a1a;color:#7f7}.s-listed{background:#1a2a4a;color:#7af}
 .s-staged{background:#3a2a0a;color:#fb7}.s-sold{background:#2a1a1a;color:#f77}
-.pager{text-align:center;margin-top:14px;font-size:.9em;color:#888}
-.pager button{padding:6px 14px;background:#222;color:#eee;border:1px solid #444;
-  border-radius:6px;cursor:pointer;margin:0 4px}
-.pager button:hover{background:#333}
+.pager{text-align:center;margin-top:14px;font-size:.9em;color:#aaa}
+.pager button{padding:8px 20px;background:#1a3a5a;color:#7af;border:1px solid #2a5a8a;
+  border-radius:6px;cursor:pointer;font-size:.9em}
+.pager button:hover{background:#1a4a6a}
+.card-btns{display:flex;gap:4px;padding:5px 6px;background:#151515;border-top:1px solid #222}
+.cbtn{flex:1;padding:5px 4px;border:none;border-radius:4px;cursor:pointer;font-size:.74em;
+  font-weight:600;font-family:inherit;white-space:nowrap}
+.cbtn-a{background:#1a3a1a;color:#7f7}.cbtn-a:hover{background:#1e4a1e}
+.cbtn-p{background:#1a2a3a;color:#7af}.cbtn-p:hover{background:#1e3a4e}
+.cbtn:disabled{opacity:.45;cursor:default}
 .loading,.no-results{padding:20px;text-align:center;color:#888}
 /* detail */
 .back{display:inline-block;color:#4a8ade;text-decoration:none;margin-bottom:10px;font-size:.9em}
@@ -1795,58 +1926,87 @@ _BROWSE_HTML = """\
 <script>
 const AUTH='Bearer {api_key}';
 const esc=escapeHtml;
-const LIM=60;
-let off=0;
+const LIM=30;
+let _off=0,_total=0;
 const scls=s=>({{
   'in stock':'s-in-stock','listed':'s-listed','staged':'s-staged','sold':'s-sold'
 }})[(s||'').toLowerCase()]||'';
-async function load(o){{
-  off=o??0;
+function _cardHtml(it){{
+  const price=it.price!=null?'$'+parseFloat(it.price).toFixed(2):'—';
+  const sku=esc(it.sku);
+  return `<div class="card"><a href="/form/items/${{it.sku}}" class="card-inner">
+    <img class="thumb" src="/thumb/${{it.sku}}" loading="lazy" alt="" onerror="this.style.visibility='hidden'">
+    <div class="card-body">
+      <div class="card-sku">${{sku}}</div>
+      <div class="card-title">${{esc(it.title||'')}}</div>
+      <div class="card-meta">
+        <span class="sbadge ${{scls(it.status)}}">${{esc(it.status||'—')}}</span>
+        <span>${{esc(it.location||'')}}</span>
+        <span class="price">${{price}}</span>
+      </div>
+    </div></a>
+    <div class="card-btns">
+      <button class="cbtn cbtn-a" onclick="cact(event,'${{it.sku}}','approve')" title="Approve (set Ready)">✓ Approve</button>
+      <button class="cbtn cbtn-p" onclick="cact(event,'${{it.sku}}','ebay_publish')" title="Publish to eBay">↑ List</button>
+    </div></div>`;
+}}
+async function cact(e,sku,action){{
+  e.preventDefault();e.stopPropagation();
+  const btn=e.currentTarget,orig=btn.textContent;
+  btn.disabled=true;btn.textContent='…';
+  try{{
+    const r=await fetch('/api/items/'+sku+'/action',{{
+      method:'POST',headers:{{Authorization:AUTH,'Content-Type':'application/json'}},
+      body:JSON.stringify({{action}})
+    }});
+    const d=await r.json();
+    btn.textContent=d.ok?'✓':'!';
+  }}catch(err){{btn.textContent='!';}}
+  setTimeout(()=>{{btn.textContent=orig;btn.disabled=false;}},1600);
+}}
+async function _fetchPage(offset,append){{
   const search=document.getElementById('sq').value;
   const loc=document.getElementById('loc').value;
   const status=document.querySelector('#status-chips .chip.active')?.dataset.s??'';
-  const p=new URLSearchParams({{limit:LIM,offset:off}});
+  const p=new URLSearchParams({{limit:LIM,offset:offset}});
   if(search)p.set('search',search);
   if(loc)p.set('location',loc);
   if(status)p.set('status_filter',status);
-  document.getElementById('grid').innerHTML='<div class="loading">Loading…</div>';
+  if(!append)document.getElementById('grid').innerHTML='<div class="loading">Loading…</div>';
   let r,d;
   try{{r=await fetch('/api/items?'+p,{{headers:{{Authorization:AUTH}}}});d=await r.json();}}
-  catch(e){{document.getElementById('grid').innerHTML='<div class="loading">Network error</div>';return;}}
-  if(!r.ok||!d.ok){{
-    document.getElementById('grid').innerHTML='<div class="loading">Error: '+esc(d.detail||d.error||r.status)+'</div>';
+  catch(e){{
+    if(!append)document.getElementById('grid').innerHTML='<div class="loading">Network error</div>';
     return;
   }}
+  if(!r.ok||!d.ok){{
+    if(!append)document.getElementById('grid').innerHTML='<div class="loading">Error: '+esc(d.detail||d.error||r.status)+'</div>';
+    return;
+  }}
+  _total=d.count;
+  _off=offset+d.items.length;
   document.getElementById('sum').textContent=d.count+' item'+(d.count===1?'':'s');
-  if(!d.items.length){{
+  if(!d.items.length&&!append){{
     document.getElementById('grid').innerHTML='<div class="no-results">No items found.</div>';
     document.getElementById('pager').innerHTML='';
     return;
   }}
-  let html='';
-  for(const it of d.items){{
-    const price=it.price!=null?'$'+parseFloat(it.price).toFixed(2):'—';
-    html+=`<a href="/form/items/${{it.sku}}" class="card">
-      <img class="thumb" src="/thumb/${{it.sku}}" loading="lazy" alt="" onerror="this.style.visibility='hidden'">
-      <div class="card-body">
-        <div class="card-sku">${{it.sku}}</div>
-        <div class="card-title">${{esc(it.title||'')}}</div>
-        <div class="card-meta">
-          <span class="sbadge ${{scls(it.status)}}">${{esc(it.status||'—')}}</span>
-          <span>${{esc(it.location||'')}}</span>
-          <span class="price">${{price}}</span>
-        </div>
-      </div></a>`;
+  const html=d.items.map(_cardHtml).join('');
+  if(append){{
+    const grid=document.getElementById('grid');
+    const tmp=document.createElement('div');
+    tmp.innerHTML=html;
+    while(tmp.firstChild)grid.appendChild(tmp.firstChild);
+  }}else{{
+    document.getElementById('grid').innerHTML=html;
   }}
-  document.getElementById('grid').innerHTML=html;
-  const pages=Math.ceil(d.count/LIM);
-  const cur=Math.floor(off/LIM)+1;
-  let pg='';
-  if(off>0)pg+=`<button onclick="load(${{off-LIM}})">← Prev</button>`;
-  if(pages>1)pg+=` Page ${{cur}} of ${{pages}} `;
-  if(off+LIM<d.count)pg+=`<button onclick="load(${{off+LIM}})">Next →</button>`;
-  document.getElementById('pager').innerHTML=pg;
+  const rem=_total-_off;
+  document.getElementById('pager').innerHTML=rem>0
+    ?`<button onclick="loadMore()">Load more (${{rem}} remaining)</button>`
+    :(_off>LIM?'<span style="color:#555;font-size:.85em">All items loaded</span>':'');
 }}
+function load(o){{_off=0;_fetchPage(o??0,false);}}
+function loadMore(){{_fetchPage(_off,true);}}
 let _t;
 function df(){{clearTimeout(_t);_t=setTimeout(()=>load(0),300);}}
 initChips('#status-chips',()=>load(0));
@@ -1915,7 +2075,7 @@ def _render_item_detail_html(
         price_str = "—"
 
     # eBay deep link buttons
-    is_active = (listing_status or "").lower() == "active"
+    is_active = (listing_status or "").lower() in ("active", "published")
     ebay_link_parts: List[str] = []
     if listing_url:
         ebay_link_parts.append(

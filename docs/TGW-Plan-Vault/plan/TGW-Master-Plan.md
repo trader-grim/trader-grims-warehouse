@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-13 (session 29 cont. — PP-SHELL-001 T3 done (#96); discogs httpx migration done (#98); PP-FREESHIP-001 done (#123); 4 suggestions processed; 11 new todos seeded #125–#135; suite 964)
+updated: 2026-06-14 (session 30 — PP-EDITOR-001 Phase 3n polish pass done (#859–#864); suite 1402)
 maintained_by: Opus (planner)
 ---
 
@@ -2415,7 +2415,7 @@ checked for `..`; only known image/video extensions are served.
 
 **Access:** `http://<tgw-host>:7373/form/items` on any Tailscale device, no login required.
 
-### Phase 3 — Full operational console (session 29, in progress — todos #846–#859)
+### Phase 3 — Full operational console ✅ COMPLETE 2026-06-14 (session 30, todos #846–#859)
 
 **Guiding principle:** The web UI is the primary graphical workflow. Every physical warehouse stage
 (receive → identify → review → approve → respond → fulfill) has a corresponding page. A first-time
@@ -2451,7 +2451,7 @@ Docs: Runbooks · Known Issues · Architecture · Pipeline Flow · Handoff
 | #856 | `/form/system` | Health table, token expiry, disk, postgres stats, worker restart |
 | #857 | Intake enhancements | Landing page + photo count warning + pipeline trigger buttons + job poll |
 | #858 | Item detail eBay links | View on eBay, Seller Hub deep link, Messages link, offer badge |
-| #859 | Polish pass | Gaps discovered through actual use |
+| #859 ✅ | Polish pass | Gaps discovered through actual use — **DONE 2026-06-14** |
 
 **PM chat (todo #849):**
 Persistent chat window in home dashboard sidebar. `POST /api/pm/chat` builds context from live

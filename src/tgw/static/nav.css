@@ -18,3 +18,20 @@
   font-size:.72em;font-weight:700;vertical-align:middle;margin-left:3px;
   min-width:1.2em;display:inline-block;text-align:center;line-height:1.5}
 .nav-count:empty{display:none}
+/* Suggest popup */
+.sg-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:9999;
+  align-items:flex-start;justify-content:center;padding-top:60px}
+.sg-overlay.open{display:flex}
+.sg-box{background:#1a1a2e;border:1px solid #555;border-radius:10px;padding:18px;
+  width:min(500px,calc(100vw - 24px));box-shadow:0 8px 32px rgba(0,0,0,.6)}
+.sg-box h3{margin:0 0 10px;font-size:.95em;color:#7fbfff}
+.sg-box textarea{width:100%;box-sizing:border-box;height:100px;resize:vertical;
+  background:#111;color:#eee;border:1px solid #555;border-radius:6px;
+  padding:9px;font-size:.9em;font-family:inherit}
+.sg-btns{display:flex;gap:8px;margin-top:10px;align-items:center}
+.sg-btns button{padding:8px 18px;border:none;border-radius:6px;cursor:pointer;
+  font-size:.88em;font-family:inherit}
+.sg-submit{background:#1a6030;color:#fff}.sg-submit:hover{background:#1e7038}
+.sg-cancel{background:#333;color:#aaa}.sg-cancel:hover{background:#444}
+.sg-msg{flex:1;font-size:.82em;display:none}
+.sg-msg.ok{display:block;color:#7f7}.sg-msg.err{display:block;color:#f77}

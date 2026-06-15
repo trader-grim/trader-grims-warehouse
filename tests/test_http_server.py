@@ -754,6 +754,126 @@ def test_suggest_post_escapes_echo_but_writes_raw(env):
 
 
 # ---------------------------------------------------------------------------
+# POST /api/suggest — JSON suggest endpoint for nav popup (PP-CAPTURE-001 3n)
+# ---------------------------------------------------------------------------
+
+def test_api_suggest_json_writes_suggestion(env):
+    """POST /api/suggest with JSON body appends to SUGGESTIONS.md, returns {ok}."""
+    r = env["client"].post("/api/suggest", json={"text": "json suggest test"})
+    assert r.status_code == 200
+    d = r.json()
+    assert d["ok"] is True
+    assert "written" in d
+    content = _suggestions_file(env).read_text(encoding="utf-8")
+    assert "json suggest test" in content
+
+
+def test_api_suggest_json_collapses_whitespace(env):
+    r = env["client"].post("/api/suggest", json={"text": "line one\nline two"})
+    assert r.status_code == 200
+    content = _suggestions_file(env).read_text(encoding="utf-8")
+    lines = [ln for ln in content.splitlines() if ln.strip()]
+    assert len(lines) == 1
+    assert "line one line two" in lines[0]
+
+
+def test_api_suggest_json_empty_returns_400(env):
+    r = env["client"].post("/api/suggest", json={"text": "   "})
+    assert r.status_code == 400
+
+
+def test_api_suggest_json_invalid_body_returns_400(env):
+    r = env["client"].post("/api/suggest", content=b"not json",
+                           headers={"Content-Type": "application/json"})
+    assert r.status_code == 400
+
+
+def test_api_suggest_no_auth_required(env):
+    """Endpoint is network-trust — no Bearer token needed."""
+    r = env["client"].post("/api/suggest", json={"text": "no auth test"})
+    assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# /form/todos enhancements — filter, expand, copy, PP-ref (PP-EDITOR-001 3n)
+# ---------------------------------------------------------------------------
+
+_TODO_ROWS_WITH_PPREF = [
+    {"id": 55, "agent": "claude", "priority": 10,
+     "body": "[PP-EDITOR-001] Fix the browse page", "source": "session", "done_at": None},
+    {"id": 56, "agent": "claude", "priority": 20,
+     "body": "PP-TODO-001/PP-CAPTURE-001: add filter", "source": "session", "done_at": None},
+    {"id": 57, "agent": "admin", "priority": 30,
+     "body": "Manual warehouse check", "source": "plan", "done_at": None},
+]
+
+
+def test_todos_form_has_agent_filter(client, monkeypatch):
+    """Agent filter dropdown is present with each unique agent as an option."""
+    import tgw.todo as todo
+    monkeypatch.setattr(todo, "todo_list", lambda *a, **k: list(_TODO_ROWS_WITH_PPREF))
+    r = client.get("/form/todos")
+    assert r.status_code == 200
+    assert 'id="agent-sel"' in r.text
+    assert 'value="claude"' in r.text
+    assert 'value="admin"' in r.text
+
+
+def test_todos_form_pp_refs_extracted(client, monkeypatch):
+    """PP-XXX-NNN references in task bodies render as pp-badge links."""
+    import tgw.todo as todo
+    monkeypatch.setattr(todo, "todo_list", lambda *a, **k: list(_TODO_ROWS_WITH_PPREF))
+    r = client.get("/form/todos")
+    assert r.status_code == 200
+    assert "pp-badge" in r.text
+    assert "PP-EDITOR-001" in r.text
+    assert "PP-TODO-001" in r.text
+
+
+def test_todos_form_copy_btn_present(client, monkeypatch):
+    """Each task row has a copy button with data-body attribute."""
+    import tgw.todo as todo
+    monkeypatch.setattr(todo, "todo_list", lambda *a, **k: list(_TODO_ROWS_WITH_PPREF))
+    r = client.get("/form/todos")
+    assert r.status_code == 200
+    assert 'class="copy-btn"' in r.text
+    assert "data-body=" in r.text
+
+
+def test_todos_form_data_agent_attrs(client, monkeypatch):
+    """Rows and groups have data-agent attributes for client-side filtering."""
+    import tgw.todo as todo
+    monkeypatch.setattr(todo, "todo_list", lambda *a, **k: list(_TODO_ROWS_WITH_PPREF))
+    r = client.get("/form/todos")
+    assert r.status_code == 200
+    assert 'data-agent="claude"' in r.text
+    assert 'data-agent="admin"' in r.text
+
+
+# ---------------------------------------------------------------------------
+# /form/items browse — load-more and action buttons (PP-EDITOR-001 3n)
+# ---------------------------------------------------------------------------
+
+def test_browse_has_load_more_js(client):
+    """Browse page includes loadMore() function and card-btns action buttons."""
+    r = client.get("/form/items")
+    assert r.status_code == 200
+    assert "loadMore" in r.text
+    assert "card-btns" in r.text
+    assert "cbtn-a" in r.text  # approve button class
+    assert "cbtn-p" in r.text  # publish button class
+
+
+def test_browse_uses_card_inner_link(client):
+    """Cards use .card-inner anchor for navigation, not the outer .card."""
+    r = client.get("/form/items")
+    assert r.status_code == 200
+    assert "card-inner" in r.text
+    # The old pattern (whole card = link) should not appear
+    assert 'class="card"' not in r.text or 'card-inner' in r.text
+
+
+# ---------------------------------------------------------------------------
 # GET /api/health — platform health check
 # ---------------------------------------------------------------------------
 
