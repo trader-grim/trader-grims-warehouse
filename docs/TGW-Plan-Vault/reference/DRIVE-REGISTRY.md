@@ -27,6 +27,19 @@ Last updated: 2026-06-13.
 | `TGW-SECRETS-B` | Encrypted secrets bundle — off-site / safe | ≥ 1 GB | Rotate with A on each secrets refresh |
 | `TGW-BOOT-01` | NixOS install USB — rebuild keychain | ≥ 8 GB | Re-flash before each major NixOS version |
 
+### Internal HDD partitions (sda — dual-boot disk, do NOT touch sda1–4 Windows)
+
+| Label | Device | Role | Status |
+|-------|--------|------|--------|
+| `TGW-DATA-SNAPSHOT-0` | sda7 (btrfs, 718 GB) | Permanent `/opt/TGW/data` home + Phase A0 migration shuttle | Ready — Phase A0 migration pending |
+| `TGW-PLATFORM-SNAPSHOT-0` | sda5 (btrfs, 80 GB) | Permanent `/opt/TGW/src` codebase home | Ready — Phase A0 migration pending |
+
+### inotify backup disk (sde — to be repurposed)
+
+| Label | Device | Current role | Future role |
+|-------|--------|-------------|-------------|
+| `trader_grims_backup` | sde1 (btrfs, 699 GB) | inotify rsync-hardlink target; mounted at `/opt/TGW/var/local/backups/trader_grims_warehouse` | **TGW-DATA-SNAPSHOT-1** once Phase B retires the inotify watcher — second always-on btrfs mirror of /opt/TGW/data; relabel + wire into btrfs send/receive schedule |
+
 ### Existing drives (adopt later — history cleanup in progress)
 
 | Label | Device | Role | Status |

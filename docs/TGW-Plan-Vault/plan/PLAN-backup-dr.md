@@ -13,6 +13,221 @@ config/worker changes, operator applies all systemd/root-level changes.
 
 ---
 
+## Phase A0 — /opt/TGW btrfs migration (operator, June 2026)
+
+**Status: PLANNED 2026-06-15 (session 31).** Decided because the 500 GB USB HDDs are
+unreliable; the internal HDD (sda) has two ready btrfs partitions that supersede them as
+the primary on-machine tier. This migration is a prerequisite for Phase B btrfs snapshots
+and unlocks `btrfs send/receive` to the offline drive tier.
+
+**Decision: MX keeps mx-snapshot for OS snapshots (no btrfs on nvme0n1p2). NixOS will
+use btrfs for the OS layer when we migrate. This plan covers /opt/TGW only.**
+
+### Partition layout — confirmed 2026-06-15
+
+| Device | Label | FS | Size | Current role | Final role |
+|--------|-------|----|------|-------------|------------|
+| nvme0n1p3 | TGW | ext4 | 295 GB | `/opt/TGW` (live) | `/opt/TGW` root — **reformat to btrfs** |
+| sda7 | TGW-DATA-SNAPSHOT-0 | btrfs | 718 GB | unmounted | `/opt/TGW/data` (permanent) + migration shuttle |
+| sda5 | TGW-PLATFORM-SNAPSHOT-0 | btrfs | 80 GB | unmounted | `/opt/TGW/src` codebase (permanent) |
+| sde1 | trader_grims_backup | btrfs | ~699 GB | `/opt/TGW/var/local/backups/trader_grims_warehouse` (inotify watcher target) | same — survives migration |
+
+**PostgreSQL data directory:** `/var/lib/postgresql/17/main` — on nvme0n1p2 (root OS
+disk), NOT under /opt/TGW. No WAL-corruption risk from rsyncing /opt/TGW. Still run
+`pg_dump` as a safety net before starting.
+
+**sde1 sub-mount note:** sde1 is mounted inside the /opt/TGW tree. It must be unmounted
+before pivoting /opt/TGW to sda7, then remounted under the new /opt/TGW after the pivot.
+
+### Migration sequence
+
+**Pre-flight (before touching anything):**
+```bash
+# 1. Safety dump — always, regardless of migration
+sudo -u tgw pg_dump --format=custom state_machine \
+  -f /opt/TGW/var/backups/state_machine-premigration-$(date +%Y%m%d).dump
+
+# 2. Verify sda7 has room (needs 187 G free)
+df -h /dev/sda7   # mount it first if needed
+du -sh /opt/TGW --exclude=/opt/TGW/var/local/backups
+
+# 3. Prepare subvolumes on sda7 and sda5 if not already created
+mount /dev/sda7 /mnt/sda7
+btrfs subvolume create /mnt/sda7/@shuttle   # full /opt/TGW temp copy
+btrfs subvolume create /mnt/sda7/@data      # permanent data/ home
+btrfs subvolume create /mnt/sda7/@snapshots
+mount /dev/sda5 /mnt/sda5
+btrfs subvolume create /mnt/sda5/@platform  # permanent codebase home
+btrfs subvolume create /mnt/sda5/@snapshots
+```
+
+**Step 1 — Hot copy (services still running):**
+```bash
+# rsync everything to @shuttle — excludes the backup disk sub-mount
+rsync -aHAX --progress \
+  --exclude=/opt/TGW/var/local/backups/ \
+  /opt/TGW/ /mnt/sda7/@shuttle/
+# Takes a while; data/ is ~180 G. sde1 contents stay on sde1, not copied.
+```
+
+**Step 2 — Service window (downtime begins):**
+```bash
+sudo systemctl stop 'tgw-worker@*' tgw-http trader-grims-backup
+# Wait for workers to drain any in-flight jobs (~30 s)
+sudo systemctl stop tgw-worker@token_refresh  # explicit — often last one standing
+
+# Unmount sde1 from its sub-path (required before pivoting /opt/TGW)
+sudo umount /opt/TGW/var/local/backups/trader_grims_warehouse
+```
+
+**Step 3 — Delta rsync (catches changes during hot copy):**
+```bash
+rsync -aHAX --checksum --delete \
+  --exclude=/opt/TGW/var/local/backups/ \
+  /opt/TGW/ /mnt/sda7/@shuttle/
+# Quick — only changed files since Step 1
+```
+
+**Step 4 — Verify before committing:**
+```bash
+du -sh /opt/TGW /mnt/sda7/@shuttle   # sizes should be within a few MB
+pg_restore --list /opt/TGW/var/backups/state_machine-premigration-*.dump | tail -5
+# spot-check 3 random SKUs between source and shuttle
+```
+
+**Step 5 — Reformat nvme0n1p3 as btrfs (point of no return):**
+```bash
+sudo umount /opt/TGW   # unmount the ext4 partition
+sudo mkfs.btrfs -L TGW -f /dev/nvme0n1p3
+# Create subvolume layout
+sudo mount /dev/nvme0n1p3 /mnt/tgw-new
+sudo btrfs subvolume create /mnt/tgw-new/@root
+sudo btrfs subvolume create /mnt/tgw-new/@snapshots
+sudo umount /mnt/tgw-new
+```
+
+**Step 6 — Pivot to sda7 shuttle (services resume on HDD):**
+```bash
+# Mount sda7/@shuttle at /opt/TGW
+sudo mount -o subvol=@shuttle /dev/sda7 /opt/TGW
+
+# Ensure the backup mount point directory exists on sda7 and remount sde1
+sudo mkdir -p /opt/TGW/var/local/backups/trader_grims_warehouse
+sudo mount /dev/sde1 /opt/TGW/var/local/backups/trader_grims_warehouse
+
+# Restart services — TGW is now running from the HDD
+sudo systemctl start tgw-worker@token_refresh tgw-http
+sudo systemctl start 'tgw-worker@*'
+sudo systemctl start trader-grims-backup
+sudo -u tgw tgw health   # confirm green before proceeding
+```
+
+**Step 7 — Populate nvme0n1p3 and sda5 (background, services running on sda7):**
+```bash
+# Mount the new btrfs SSD
+sudo mount -o subvol=@root /dev/nvme0n1p3 /mnt/tgw-new
+
+# Populate @root: everything except data/ and src/ (those go to sda7/@data and sda5/@platform)
+rsync -aHAX --progress \
+  --exclude=data/ --exclude=src/ \
+  /mnt/sda7/@shuttle/ /mnt/tgw-new/
+
+# Populate sda5/@platform with codebase
+sudo mount -o subvol=@platform /dev/sda5 /mnt/sda5-platform
+rsync -aHAX --progress /mnt/sda7/@shuttle/src/ /mnt/sda5-platform/
+
+# Populate sda7/@data with data/ (still on same disk as shuttle — btrfs reflink-copy is fast)
+sudo mount -o subvol=@data /dev/sda7 /mnt/sda7-data
+rsync -aHAX --progress /mnt/sda7/@shuttle/data/ /mnt/sda7-data/
+```
+
+**Step 8 — Final service window (second downtime, shorter):**
+```bash
+sudo systemctl stop 'tgw-worker@*' tgw-http trader-grims-backup
+
+# Final delta — catch any writes that happened during Step 7
+rsync -aHAX --checksum --delete \
+  --exclude=data/ --exclude=src/ \
+  /mnt/sda7/@shuttle/ /mnt/tgw-new/
+rsync -aHAX --checksum --delete /mnt/sda7/@shuttle/src/ /mnt/sda5-platform/
+rsync -aHAX --checksum --delete /mnt/sda7/@shuttle/data/ /mnt/sda7-data/
+
+# Take read-only btrfs snapshots of final state (timestamped)
+TS=$(date +%Y%m%dT%H%M)
+sudo btrfs subvolume snapshot -r /mnt/tgw-new  /mnt/tgw-new/../@snapshots/$TS-root
+sudo btrfs subvolume snapshot -r /mnt/sda7-data /mnt/sda7/@snapshots/$TS-data
+sudo btrfs subvolume snapshot -r /mnt/sda5-platform /mnt/sda5/@snapshots/$TS-platform
+```
+
+**Step 9 — Pivot to final layout:**
+```bash
+# Unmount the backup sub-mount and sda7 shuttle from /opt/TGW
+sudo umount /opt/TGW/var/local/backups/trader_grims_warehouse
+sudo umount /opt/TGW   # unmounts sda7/@shuttle
+
+# Update /etc/fstab — replace the old nvme0n1p3 ext4 entry with three new entries:
+#
+# LABEL=TGW              /opt/TGW        btrfs  subvol=@root,compress=zstd,noatime  0 0
+# LABEL=TGW-DATA-SNAPSHOT-0  /opt/TGW/data   btrfs  subvol=@data,compress=zstd,noatime  0 0
+# LABEL=TGW-PLATFORM-SNAPSHOT-0 /opt/TGW/src  btrfs  subvol=@platform,compress=zstd,noatime 0 0
+# LABEL=trader_grims_backup /opt/TGW/var/local/backups/trader_grims_warehouse btrfs defaults 0 0
+sudo nano /etc/fstab
+
+# Mount everything via fstab
+sudo mkdir -p /opt/TGW/data /opt/TGW/src
+sudo mount /opt/TGW
+sudo mount /opt/TGW/data
+sudo mount /opt/TGW/src
+sudo mount /opt/TGW/var/local/backups/trader_grims_warehouse
+```
+
+**Step 10 — Restart and verify:**
+```bash
+sudo systemctl start tgw-worker@token_refresh tgw-http
+sudo systemctl start 'tgw-worker@*'
+sudo systemctl start trader-grims-backup
+sudo -u tgw tgw health
+# Confirm: itemdata count, catalog, postgres, ebay_token all green
+# Check worker logs for any path errors:
+journalctl -u 'tgw-worker@ai_identify' -n 20
+```
+
+**Step 11 — First btrfs snapshot schedule (post-migration Phase B unlock):**
+
+After services are confirmed healthy, set up native btrfs snapshots as the primary local
+tier (replaces/supplements the rsync hardlink watcher):
+- Hourly: `btrfs subvolume snapshot -r /opt/TGW @snapshots/$(date +%Y%m%dT%H%M)-root` (on nvme0n1p3)
+- Hourly: same for /opt/TGW/data (on sda7) — only catches changes, CoW makes it cheap
+- btrfs send/receive to sde1 (backup disk) for off-nvme redundancy
+- btrfs send/receive to OFFLINE drives when plugged in (A7 tier, now fed by send not rsync)
+
+Detail design for the snapshot schedule is Phase B §4/§6; unblock it in that session.
+
+### Risks and mitigations
+
+| Risk | Mitigation |
+|------|------------|
+| sda is a dual-boot disk (Windows on sda1–4) | Do NOT touch sda1–4. Operate only on sda5/sda7. |
+| sde1 sub-mount hidden during pivot | Explicit unmount/remount sequence in Steps 2 and 6 |
+| Shuttle rsync misses symlinks or ACLs | Use `-aHAX` flags; compare `du -sh` both sides before Step 5 |
+| fstab error leaves system unbootable | Edit fstab in Step 9 only; keep original ext4 line commented out until Step 10 passes |
+| NixOS reinstall wipes sda7/sda5 | These are on the internal HDD (sda), not the nvme. NixOS targets nvme0n1p2/p3. Safe. |
+
+### What this enables after completion
+
+- `/opt/TGW` root, data, and codebase all on btrfs → CoW snapshots, `send/receive`
+- Phase B btrfs adoption can begin immediately (no NixOS needed for this)
+- A7 offline drives receive `btrfs send` instead of rsync (faster, incremental, atomic)
+- 500 GB USB HDDs deprecated as primary tier (unreliable hardware retired)
+- **sde1 (trader_grims_backup, 699 GB) freed once inotify watcher is retired** — repurpose
+  as `TGW-DATA-SNAPSHOT-1`: a second always-on btrfs mirror of /opt/TGW/data (sda7).
+  Gives the data partition two on-machine copies before any offline drive is involved.
+  Relabel with `btrfs filesystem label /dev/sde1 TGW-DATA-SNAPSHOT-1` and wire into
+  the btrfs send/receive schedule alongside sda7. Do after Phase B snapshot design session.
+- NixOS migration inherits clean btrfs layout on nvme0n1p3
+
+---
+
 ## 1. Current state (verified 2026-06-11)
 
 | Layer | State | Verdict |
