@@ -34,7 +34,9 @@ from fastapi.testclient import TestClient  # noqa: E402
 from tgw import http_server  # noqa: E402
 
 API_KEY = "test-key-abc123"
+WEB_KEY = "test-web-key-xyz"  # per-session key injected into form HTML (not the master key)
 AUTH_HEADERS = {"Authorization": f"Bearer {API_KEY}"}
+WEB_AUTH_HEADERS = {"Authorization": f"Bearer {WEB_KEY}"}
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +195,7 @@ def env(tmp_path, monkeypatch, queue_rows):
 
     monkeypatch.setattr(http_server, "_cfg", cfg)
     monkeypatch.setattr(http_server, "_api_key", API_KEY)
+    monkeypatch.setattr(http_server, "_web_key", WEB_KEY)
 
     # No real PostgreSQL: psycopg2.connect returns our fake connection.
     monkeypatch.setattr(
@@ -1111,8 +1114,9 @@ def test_item_detail_ebay_deeplinks_active(env):
     assert "eBay Messages" in r.text
     assert "https://messages.ebay.com/" in r.text
     assert "offer-badge-wrap" in r.text
-    # API key embedded so nav.js + offer script can use it
-    assert API_KEY in r.text
+    # web session key (not master API key) embedded in form pages
+    assert WEB_KEY in r.text
+    assert API_KEY not in r.text
 
 
 def test_item_detail_ebay_deeplinks_sold(env):
@@ -1249,6 +1253,7 @@ def dashboard_env(tmp_path, monkeypatch):
 
     monkeypatch.setattr(http_server, "_cfg", cfg)
     monkeypatch.setattr(http_server, "_api_key", API_KEY)
+    monkeypatch.setattr(http_server, "_web_key", WEB_KEY)
     monkeypatch.setattr(http_server, "_pending_offers_cache", None)
     monkeypatch.setattr(http_server, "_pending_offers_cache_at", 0.0)
 
@@ -1340,6 +1345,7 @@ def test_dashboard_fallback_without_data_column(tmp_path, monkeypatch):
     }
     monkeypatch.setattr(http_server, "_cfg", cfg)
     monkeypatch.setattr(http_server, "_api_key", API_KEY)
+    monkeypatch.setattr(http_server, "_web_key", WEB_KEY)
     monkeypatch.setattr(http_server, "_pending_offers_cache", None)
     monkeypatch.setattr(http_server, "_pending_offers_cache_at", 0.0)
     monkeypatch.setattr(
@@ -1418,6 +1424,7 @@ def activity_env(tmp_path, monkeypatch):
 
     monkeypatch.setattr(http_server, "_cfg", cfg)
     monkeypatch.setattr(http_server, "_api_key", API_KEY)
+    monkeypatch.setattr(http_server, "_web_key", WEB_KEY)
     monkeypatch.setattr(
         http_server.psycopg2, "connect",
         lambda *a, **k: _FakeConn(rows),
@@ -1457,6 +1464,7 @@ def test_activity_empty(tmp_path, monkeypatch):
     }
     monkeypatch.setattr(http_server, "_cfg", cfg)
     monkeypatch.setattr(http_server, "_api_key", API_KEY)
+    monkeypatch.setattr(http_server, "_web_key", WEB_KEY)
     monkeypatch.setattr(
         http_server.psycopg2, "connect",
         lambda *a, **k: _FakeConn([]),
@@ -1491,10 +1499,11 @@ def test_home_form_no_auth_required(client):
     assert r.status_code == 200
 
 
-def test_home_form_embeds_api_key(client):
-    """The API key is embedded so JS can make authenticated API calls."""
+def test_home_form_embeds_web_key(client):
+    """Form pages embed the web session key (not the master API key) for JS API calls."""
     r = client.get("/form/home")
-    assert API_KEY in r.text
+    assert WEB_KEY in r.text
+    assert API_KEY not in r.text
 
 
 def test_home_form_uses_static_css(client):
@@ -2809,10 +2818,11 @@ def test_intake_landing_key_elements(client):
     assert "/static/nav.css" in r.text
 
 
-def test_intake_landing_embeds_api_key(client):
-    """Landing page embeds API key so JS can call /api/items."""
+def test_intake_landing_embeds_web_key(client):
+    """Landing page embeds the web session key (not the master API key) for JS calls."""
     r = client.get("/form/intake")
-    assert API_KEY in r.text
+    assert WEB_KEY in r.text
+    assert API_KEY not in r.text
 
 
 def test_intake_landing_scan_hint(client):
@@ -2893,10 +2903,11 @@ def test_intake_form_has_view_detail_link(env):
     assert "detail-link" in r.text
 
 
-def test_intake_form_embeds_api_key(env):
-    """Intake form embeds API key for authenticated action calls."""
+def test_intake_form_embeds_web_key(env):
+    """Intake form embeds the web session key (not the master API key) for authenticated calls."""
     r = env["client"].get(f"/form/intake/{SKU_A}")
-    assert API_KEY in r.text
+    assert WEB_KEY in r.text
+    assert API_KEY not in r.text
 
 
 def test_intake_form_has_job_badge_placeholder(env):

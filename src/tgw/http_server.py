@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 import sqlite3
 import subprocess
 import time
@@ -40,6 +41,7 @@ log = logging.getLogger(__name__)
 
 _cfg: Dict[str, Any] = {}
 _api_key: str = ""
+_web_key: str = ""  # per-process session key embedded in form-page HTML; rotates on restart
 
 _security = HTTPBearer()
 
@@ -87,7 +89,7 @@ PIPELINE_ACTIONS = {
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _cfg, _api_key
+    global _cfg, _api_key, _web_key
     _cfg = load_config(DEFAULT_CONFIG)
     state_machine.init(_cfg["postgres_dsn"])
 
@@ -95,6 +97,7 @@ async def lifespan(app: FastAPI):
     if not key_path.exists():
         raise RuntimeError(f"API key file not found: {key_path}")
     _api_key = json.loads(key_path.read_text(encoding="utf-8"))["api_key"]
+    _web_key = secrets.token_hex(32)
 
     log.info("tgw-http started on port 7373")
     yield
@@ -119,7 +122,7 @@ app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 # ---------------------------------------------------------------------------
 
 def _require_auth(credentials: HTTPAuthorizationCredentials = Security(_security)) -> None:
-    if credentials.credentials != _api_key:
+    if credentials.credentials not in (_api_key, _web_key):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token")
 
 
@@ -1045,7 +1048,7 @@ def intake_landing():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         landing_css=_INTAKE_LANDING_CSS,
-        api_key_json=json.dumps(_api_key),
+        api_key_json=json.dumps(_web_key),
     )
     return HTMLResponse(html)
 
@@ -1345,8 +1348,8 @@ def intake_form(sku: str, request: Request):
         barcode=barcode,
         ai_hint=ai_hint,
         condition_options=cond_opts,
-        api_key=_api_key,
-        api_key_json=json.dumps(_api_key),
+        api_key=_web_key,
+        api_key_json=json.dumps(_web_key),
         n_photos=n_photos,
         photo_cls=photo_cls,
         photo_plural=photo_plural,
@@ -1492,7 +1495,7 @@ def bulk_form(request: Request):
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         extra_css=_BULK_EXTRA_CSS,
-        api_key=_api_key,
+        api_key=_web_key,
     )
     return HTMLResponse(html)
 
@@ -1790,7 +1793,10 @@ def get_media(sku: str, filename: str):
         ".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".mov", ".mkv", ".webm"
     }:
         raise HTTPException(status_code=400, detail="unsupported media type")
-    p = _cfg["itemdata_root"] / sku / safe
+    itemdata_root = _cfg["itemdata_root"].resolve()
+    p = (itemdata_root / sku / safe).resolve()
+    if not p.is_relative_to(itemdata_root):
+        raise HTTPException(status_code=400, detail="invalid sku")
     if not p.exists():
         raise HTTPException(status_code=404, detail="media not found")
     return FileResponse(str(p))
@@ -1804,7 +1810,10 @@ def get_thumb_noauth(sku: str):
     thumb = _cfg["thumbnail_root"] / f"{sku}.jpg"
     if thumb.exists():
         return FileResponse(str(thumb), media_type="image/jpeg")
-    sku_dir = _cfg["itemdata_root"] / sku
+    itemdata_root = _cfg["itemdata_root"].resolve()
+    sku_dir = (itemdata_root / sku).resolve()
+    if not sku_dir.is_relative_to(itemdata_root):
+        raise HTTPException(status_code=400, detail="invalid sku")
     if sku_dir.exists():
         for p in sorted(sku_dir.iterdir()):
             if p.suffix.lower() in {".jpg", ".jpeg", ".png"}:
@@ -2247,7 +2256,7 @@ def items_browse_form():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         extra_css=_ITEMS_EXTRA_CSS,
-        api_key=_api_key,
+        api_key=_web_key,
     )
     return HTMLResponse(html)
 
@@ -2299,7 +2308,7 @@ def item_detail_form(sku: str):
     except Exception as exc:
         log.warning("queue job fetch failed for %s: %s", sku, exc)
 
-    return HTMLResponse(_render_item_detail_html(sku, item, images, videos, jobs, _api_key))
+    return HTMLResponse(_render_item_detail_html(sku, item, images, videos, jobs, _web_key))
 
 
 # ---------------------------------------------------------------------------
@@ -2945,7 +2954,7 @@ def offers_form():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         offers_css=_OFFERS_EXTRA_CSS,
-        api_key_json=json.dumps(_api_key),
+        api_key_json=json.dumps(_web_key),
     )
     return HTMLResponse(html)
 
@@ -3235,7 +3244,7 @@ def revisions_form():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         revisions_css=_REVISIONS_EXTRA_CSS,
-        api_key_json=json.dumps(_api_key),
+        api_key_json=json.dumps(_web_key),
     )
     return HTMLResponse(html)
 
@@ -3498,7 +3507,7 @@ def review_form():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         review_css=_REVIEW_EXTRA_CSS,
-        api_key_json=json.dumps(_api_key),
+        api_key_json=json.dumps(_web_key),
     )
     return HTMLResponse(html)
 
@@ -3864,7 +3873,7 @@ def pipeline_form():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         pipeline_css=_PIPELINE_EXTRA_CSS,
-        api_key_json=json.dumps(_api_key),
+        api_key_json=json.dumps(_web_key),
     )
     return HTMLResponse(html)
 
@@ -4490,7 +4499,7 @@ def system_form():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         system_css=_SYSTEM_EXTRA_CSS,
-        api_key_json=json.dumps(_api_key),
+        api_key_json=json.dumps(_web_key),
     )
     return HTMLResponse(html)
 
@@ -4871,7 +4880,7 @@ def home_form():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         home_css=_HOME_EXTRA_CSS,
-        api_key_json=json.dumps(_api_key),
+        api_key_json=json.dumps(_web_key),
     )
     return HTMLResponse(html)
 

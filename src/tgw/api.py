@@ -3997,7 +3997,7 @@ def main() -> int:
                             continue
                         if location_filter and _doc.get("location") != location_filter:
                             continue
-                        if status_filter and _doc.get("status") != status_filter:
+                        if status_filter and (_doc.get("#STATUS") or _doc.get("status")) != status_filter:
                             continue
                         scan_matched.add(_jp.parent.name)
                     sku_filter = (candidate_skus & scan_matched) if candidate_skus is not None else scan_matched
