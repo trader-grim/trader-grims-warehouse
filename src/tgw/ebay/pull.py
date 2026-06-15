@@ -18,7 +18,7 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import tgw.logging as tgw_logging
 from tgw.apis.ebay.trading import get_my_ebay_selling, get_orders
@@ -328,12 +328,15 @@ def mark_item_sold(json_path: Path, order_id: str, buyer: str,
 # ---------------------------------------------------------------------------
 
 def sync_active_listings(cfg: Dict[str, Any], itemdata_root: Path,
-                         synced_at: str, dry_run: bool = False) -> Dict[str, Any]:
+                         synced_at: str, dry_run: bool = False,
+                         sku_filter: Optional[Set[str]] = None) -> Dict[str, Any]:
     """
     Pull all active eBay listings via GetMyeBaySelling; write back to item JSONs.
 
     Skips items already managed by the Inventory API (api=inventory) — those are
     handled by the ebay_sync worker.  Returns a stats dict.
+
+    sku_filter: if provided, only process listings whose custom_label is in the set.
     """
     stats: Dict[str, Any] = {
         'fetched': 0, 'matched': 0, 'updated': 0,
@@ -343,10 +346,18 @@ def sync_active_listings(cfg: Dict[str, Any], itemdata_root: Path,
 
     listings = list(get_my_ebay_selling(cfg))
     stats['fetched'] = len(listings)
-    log.info('ebay_pull: %d active listings fetched', len(listings))
+    if sku_filter is not None:
+        log.info('ebay_pull: %d active listings fetched (filter: %d SKUs)',
+                 len(listings), len(sku_filter))
+    else:
+        log.info('ebay_pull: %d active listings fetched', len(listings))
 
     for listing in listings:
         try:
+            if sku_filter is not None:
+                sku = listing.get('custom_label', '').strip()
+                if sku not in sku_filter:
+                    continue
             _apply_active_listing(listing, itemdata_root, synced_at, stats, dry_run, cfg)
         except Exception:
             log.exception('ebay_pull: error on listing %s', listing.get('listing_id'))

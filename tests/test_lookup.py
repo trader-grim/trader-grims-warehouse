@@ -6,6 +6,7 @@ dispatcher routing for all three. All HTTP is mocked; no network or API keys.
 
 import json
 
+import httpx
 import requests.exceptions
 
 import tgw.apis.lookup.discogs as discogs_mod
@@ -267,7 +268,7 @@ def test_discogs_hit(tmp_path, monkeypatch):
         "format": ["Vinyl", "LP"],
         "cover_image": "https://img.discogs.com/cover.jpg",
     }
-    monkeypatch.setattr(discogs_mod.requests, "get",
+    monkeypatch.setattr(discogs_mod.httpx, "get",
                         lambda *a, **k: _Resp({"results": [hit]}))
 
     res = discogs_mod.lookup("012345678901", _discogs_creds(tmp_path))
@@ -282,15 +283,15 @@ def test_discogs_hit(tmp_path, monkeypatch):
 
 
 def test_discogs_miss_returns_none(tmp_path, monkeypatch):
-    monkeypatch.setattr(discogs_mod.requests, "get",
+    monkeypatch.setattr(discogs_mod.httpx, "get",
                         lambda *a, **k: _Resp({"results": []}))
     assert discogs_mod.lookup("000000000000", _discogs_creds(tmp_path)) is None
 
 
 def test_discogs_request_error_returns_none(tmp_path, monkeypatch):
-    monkeypatch.setattr(discogs_mod.requests, "get",
+    monkeypatch.setattr(discogs_mod.httpx, "get",
                         lambda *a, **k: (_ for _ in ()).throw(
-                            requests.exceptions.RequestException("timeout")))
+                            httpx.ConnectError("timeout")))
     assert discogs_mod.lookup("012345678901", _discogs_creds(tmp_path)) is None
 
 

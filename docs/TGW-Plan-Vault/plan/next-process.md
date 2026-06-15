@@ -66,7 +66,8 @@ architecture, cross-cutting, eBay-invariant work, planning + spec writing. `tgw 
 | Ambiguous, cross-cutting, architectural, or eBay-invariant-touching | **Claude Code** |
 | XS/S, named files, clear acceptance test, offline-testable | **Aider** |
 | Planning, task specification, review prep | **Claude Code** (it writes the Aider task specs) |
-| Research / analysis | Perplexity / Gemini (unchanged) |
+| Research / browser / analysis / agy-batched todos | **AGY (Antigravity CLI)** |
+| Large-context one-shot: 1M+ token window, archive triage, batch API | **AI Studio** |
 
 A task is **Aider-ready** when its todo entry (or a small spec block) names: target files,
 the change, the acceptance command (`pytest -q tests/test_x.py`), and constraints. If writing
@@ -139,7 +140,52 @@ Do NOT touch: config files, secrets, anything under src/tgw/ebay/, other command
 If a requirement is impossible as specified, stop and explain instead of improvising.
 ```
 
-## 3. Future: Google Antigravity (replaces the Cline slot)
+## 3. Google Antigravity (AGY) — primary delegation lane
+
+**Status (2026-06-13): Gemini CLI is being retired** (2-week notice given). AGY is the
+successor and primary agent/agent-manager tier. MCP server registered in
+`~/.gemini/config/mcp_config.json`; OAuth and brain already configured; batch session
+strategy below.
+
+### AGY batch session — how to run a todo batch
+
+```
+# 1. In Claude Code: get the list and generate briefs
+tgw todo brief --agent agy          # shows top open agy todos with priority
+tgw todo brief <id>                 # generates a self-contained brief for one todo
+
+# 2. Start an AGY session (terminal or app)
+agy                                 # or: antigravity
+
+# 3. Paste the brief text (or use --message-file if headless mode works)
+# AGY reads context from ~/.gemini/antigravity-cli/brain/ automatically
+
+# 4. AGY output → save to inbox/
+# Drop results as .md files in docs/TGW-Plan-Vault/inbox/
+# pm_intake worker picks them up and updates the plan
+# OR: AGY writes directly to reference/ or plan/ per the brief instruction
+
+# 5. Back in Claude Code: mark todos done, run tgw plan render
+tgw todo --done <id>
+tgw plan render
+```
+
+**Constraints:** compute caps with ~5hr refresh — keep jobs bite-sized; 1–3 todos per
+session; never route eBay-invariant, config/secrets, or production-write work to AGY.
+Branch-per-task + human-merge rule applies — AGY may not merge.
+
+**AGY tool permissions** (settings.json `permissions.allow`):
+- Safe to expand: `git log`, `git diff`, `ruff`, `grep`, `psql`
+- Needs Dave sign-off: `python3`, `sudo -u tgw` (arbitrary execution)
+- To expand: edit `~/.gemini/antigravity-cli/settings.json` manually
+
+**AI Studio** (ai_studio agent): use for todos requiring 1M+ context window (full catalog
+archive, batch API submissions, large-doc triage). Not CLI-automated today — operator
+pastes prompts into studio.google.com/prompts or uses the Batch API endpoint.
+
+---
+
+## 4. Future: Google Antigravity reference (historical notes)
 
 Antigravity (Google's agent-first platform — IDE, desktop, CLI, SDK; see
 `research/claude-aider-antigravity.md`) takes the third-tool slot that was originally
@@ -147,7 +193,7 @@ penciled in for Cline. Same niche — agentic IDE, browser-in-the-loop verificat
 watch-every-step workflows — but at **$0 marginal cost** under the existing Google AI Plus
 subscription, instead of burning metered Claude API tokens. **Cline is now "not planned."**
 
-- **Status: CLI configured + Antigravity 2.0 installed 2026-06-11** (installed 2026-06-10,
+- **Status: ACTIVE — Gemini CLI retiring 2026-06-13 (~); AGY is primary from now. CLI configured + Antigravity 2.0 installed 2026-06-11** (installed 2026-06-10,
   configured the next day). Gemini CLI stops serving AI-plan users on **2026-06-18**;
   Antigravity CLI is its successor (skills/hooks/subagents carry over). Both run until
   then — the overlap window is now the only time the side-by-side baseline comparison

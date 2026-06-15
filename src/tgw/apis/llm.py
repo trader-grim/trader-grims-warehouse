@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -24,9 +24,11 @@ from tgw.queue.ollama_lock import acquire_ollama_lock
 
 # Hardcoded defaults — override via tgw-models.json
 _DEFAULTS: Dict[str, tuple[str, str]] = {
-    'ai_identify':            ('openrouter', 'google/gemini-2.5-flash'),
-    'alt_text':               ('openrouter', 'google/gemini-2.5-flash'),
-    'suggestions_classify':   ('openrouter', 'google/gemini-2.5-flash'),
+    'ai_identify':            ('openrouter', 'google/gemini-2.5-flash-lite'),
+    'alt_text':               ('openrouter', 'google/gemini-2.5-flash-lite'),
+    'suggestions_classify':   ('openrouter', 'deepseek/deepseek-v4-flash'),
+    'bulk_classify':          ('openrouter', 'google/gemini-2.0-flash-lite'),
+    'pm_chat':                ('openrouter', 'anthropic/claude-haiku-4-5'),
     'ebay_draft':             ('ollama',     'Qwen2.5:latest'),
     'pm_intake':              ('ollama',     'Qwen2.5:latest'),
 }
@@ -47,18 +49,29 @@ def call_model(
     img_b64: Optional[str] = None,
     provider: Optional[str] = None,
     model: Optional[str] = None,
+    sku: Optional[str] = None,
+    messages: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """
     Call the model configured for task. Returns raw response text.
     provider/model override cfg['models'] when given explicitly.
     Usage (timing + token counts) is recorded to the ai_usage table.
+    Pass sku to attribute the call to a specific item in the per-SKU report.
+    Pass messages to supply a pre-built multi-turn list (openrouter only);
+    system_prompt/user_prompt are ignored when messages is given.
     """
     if provider is None or model is None:
         _p, _m = get_task_model(cfg, task)
         provider = provider or _p
         model = model or _m
 
-    input_chars = len(system_prompt) + len(user_prompt)
+    if messages is not None:
+        input_chars = sum(
+            len(m.get('content') or '') for m in messages
+            if isinstance(m.get('content'), str)
+        )
+    else:
+        input_chars = len(system_prompt) + len(user_prompt)
     t0 = time.time()
     text = ''
     usage: Dict[str, Any] = {}
@@ -67,7 +80,10 @@ def call_model(
 
     try:
         if provider == 'openrouter':
-            text, usage = _call_openrouter(model, system_prompt, user_prompt, cfg, img_b64=img_b64)
+            text, usage = _call_openrouter(
+                model, system_prompt, user_prompt, cfg,
+                img_b64=img_b64, messages=messages,
+            )
         elif img_b64:
             text, usage = _call_ollama_vision(model, system_prompt, user_prompt, cfg, img_b64)
         else:
@@ -85,6 +101,7 @@ def call_model(
             usage=usage,
             success=success,
             error_msg=error_msg,
+            sku=sku,
         )
 
     return text
@@ -94,6 +111,7 @@ def _record_usage(
     task: str, provider: str, model: str, duration_ms: int,
     *, input_chars: int, output_chars: int,
     usage: Dict[str, Any], success: bool, error_msg: Optional[str],
+    sku: Optional[str] = None,
 ) -> None:
     """Record a call to the ai_usage table. Never raises."""
     try:
@@ -107,6 +125,7 @@ def _record_usage(
             total_tokens=usage.get('total_tokens'),
             success=success,
             error_msg=error_msg,
+            sku=sku,
         )
     except Exception:
         pass
@@ -123,7 +142,10 @@ def _load_openrouter_key(cfg: Dict[str, Any]) -> str:
 
     cred_path = cfg.get('openrouter_credentials_path')
     if cred_path and Path(cred_path).exists():
-        return json.loads(Path(cred_path).read_text())['api_key']
+        try:
+            return json.loads(Path(cred_path).read_text())['api_key']
+        except (KeyError, ValueError, OSError):
+            return ''
     return os.environ.get('OPENROUTER_API_KEY', '')
 
 
@@ -134,27 +156,35 @@ def _call_openrouter(
     cfg: Dict[str, Any],
     img_b64: Optional[str] = None,
     max_retries: int = 3,
+    messages: Optional[List[Dict[str, Any]]] = None,
 ) -> tuple:
-    """Call OpenRouter chat completions. Returns (text, usage_dict)."""
+    """Call OpenRouter chat completions. Returns (text, usage_dict).
+
+    If *messages* is provided it is used as-is; system_prompt/user_prompt are ignored.
+    """
     api_key = _load_openrouter_key(cfg)
     if not api_key:
         raise RuntimeError('OpenRouter API key not found in secrets or config')
 
-    user_content: Any
-    if img_b64:
-        user_content = [
-            {'type': 'text', 'text': user_prompt},
-            {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{img_b64}'}},
-        ]
+    if messages is not None:
+        msg_list: Any = messages
     else:
-        user_content = user_prompt
+        user_content: Any
+        if img_b64:
+            user_content = [
+                {'type': 'text', 'text': user_prompt},
+                {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{img_b64}'}},
+            ]
+        else:
+            user_content = user_prompt
+        msg_list = [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user',   'content': user_content},
+        ]
 
     payload = {
         'model': model,
-        'messages': [
-            {'role': 'system', 'content': system_prompt},
-            {'role': 'user',   'content': user_content},
-        ],
+        'messages': msg_list,
     }
     headers = {
         'Authorization': f'Bearer {api_key}',

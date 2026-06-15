@@ -30,20 +30,17 @@ incomplete wiring, and data quality problems that need fixing.
   human edit made directly on eBay, not just this issue
 - **Status**: pending operator action
 
-### ISS-003 — full_catalog_path config mismatch
-- **Symptom**: `tgw-api-config.json` sets `full_catalog_path` to `master-catalog.json`
-  but `load_config()` defaults to `tgwcatalog.json`; code default wins silently
-- **Risk**: if `full_catalog_path` is ever read from the JSON value, wrong file is used
-- **Fix**: align JSON value to match code default, or remove the key from JSON so the
-  default is clearly canonical
-- **Status**: low urgency; no production impact currently
+### ~~ISS-003~~ — full_catalog_path config mismatch ✅ RESOLVED session 29
+- **Was**: `load_config()` defaulted to `tgwcatalog.json`; JSON config had `master-catalog.json`
+- **Fix**: changed code default to `master-catalog.json` (`config.py:63`); 2 tests in
+  `tests/test_config_hygiene.py` assert default and explicit-override behaviour
 
-### ISS-004 — ebay_sku_migrate config bypasses load_config
-- **Symptom**: `ebay_sku_migrate` block in JSON is read via `cfg['raw']` directly;
-  not surfaced in the normalised config dict like all other keys
-- **Risk**: inconsistent pattern; easy to miss when auditing config
-- **Fix**: add `ebay_sku_migrate` dict to `load_config()` return dict
-- **Status**: low urgency
+### ~~ISS-004~~ — ebay_sku_migrate config bypasses load_config ✅ RESOLVED session 29
+- **Was**: `ebay_sku_migrate` block not surfaced in normalised config dict (pre-a540d9b)
+- **Reality**: already fixed in a540d9b — `load_config()` line 190 returns the block;
+  worker reads `self.config.get('ebay_sku_migrate', {})` (not `cfg['raw']`)
+- **Tests**: 3 tests in `tests/test_config_hygiene.py` cover presence, default, and
+  round-trip read without reaching into `cfg['raw']`
 
 ### ISS-005 — dev_id missing from ebay-credentials.json
 - **Symptom**: SOAP notification signature verification is incomplete without `dev_id`
@@ -78,6 +75,24 @@ incomplete wiring, and data quality problems that need fixing.
   1. `sudo -u tgw python3 /opt/TGW/src/trader-grims-warehouse/src/tgw/apis/ebay/get_access_token.py` — browser OAuth re-consent flow; writes fresh token to `secrets/ebay-token.json`
   2. `sudo -u tgw tgw restart-ebay-token` — clears dead_letter jobs, enqueues fresh token_refresh immediately
 - **Status**: awaiting operator re-consent
+
+### ISS-010 — needs_photos count inflated on home dashboard
+- **Symptom**: home dashboard shows 33k+ items needing photos; actual un-photographed count is much lower
+- **Root cause**: catalog `image` column is empty for many items that do have thumbnails — `thumbnail_gen` updates the SQLite `image` col but may be stale; catalog rebuild may not be propagating thumbnail presence correctly
+- **Fix**: investigate `catalog_export.py` / `thumbnail_gen` image-col write path; run a full `tgw build-thumbnails` + `tgw build-all` to resync; check `needs_photo` filter in `http_server.py` dashboard endpoint
+- **Status**: open
+
+### ISS-011 — inventory browse prices display as $NaN
+- **Symptom**: `/form/items` inventory browse shows `$NaN` in price column for many/all items
+- **Root cause**: `price` field is null or non-numeric in catalog; `_format_price()` (or equivalent) in items browse doesn't handle null/non-float gracefully
+- **Fix**: add null-guard in the price formatting path in `http_server.py` items handler; emit `—` or `$0.00` instead of `$NaN`
+- **Status**: open
+
+### ISS-012 — web home page health checks and recent activity not displaying
+- **Symptom**: `/form/` home page — health status strip and recent activity section blank or missing
+- **Root cause**: likely `GET /api/health` or `GET /api/dashboard` returning unexpected shape; or frontend JS failing silently
+- **Fix**: check `/api/health` (Bearer-auth required?) and `/api/dashboard` responses from the browser; fix auth or response-shape mismatch in the home-page frontend (todo #870)
+- **Status**: open
 
 ### ISS-008 — legacy_listing_resolved items may still have active listings
 - **Symptom**: items marked `legacy_listing_resolved: True` may still have active eBay

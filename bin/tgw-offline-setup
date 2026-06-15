@@ -1,0 +1,115 @@
+#!/bin/bash
+# PP-BACKUP-001 A7 — provision a TGW offline/sentry drive
+#
+# Usage (as root): tgw-offline-setup <LABEL> <DEVICE>
+# Example:  sudo tgw-offline-setup TGW-OFFLINE-A /dev/sdd
+#
+# What this does:
+#   1. Formats <DEVICE> as btrfs with partition label <LABEL>
+#   2. Creates @data and @snapshots subvolumes
+#   3. Adds /etc/fstab entry (noauto — operator mounts manually)
+#   4. Creates /media/tgw/<LABEL> mount point
+#   5. Wires systemd mount-unit drop-in to trigger tgw-offline-sync@<LABEL>
+#   6. Prints QR label content for physical labeling
+#
+# After setup:
+#   mount /media/tgw/<LABEL>                       # triggers auto-sync
+#   journalctl -u tgw-offline-sync@<LABEL> -f     # watch progress
+#   umount /media/tgw/<LABEL>                      # safe to pull drive
+set -euo pipefail
+
+LABEL="${1:?Usage: tgw-offline-setup <LABEL> <DEVICE>}"
+DEVICE="${2:?Usage: tgw-offline-setup <LABEL> <DEVICE>}"
+MOUNT="/media/tgw/${LABEL}"
+SERVICE="tgw-offline-sync@${LABEL}.service"
+
+if [[ $EUID -ne 0 ]]; then
+    echo "ERROR: run as root — sudo tgw-offline-setup $*" >&2
+    exit 1
+fi
+
+# Validate device exists and is a block device
+if [[ ! -b "$DEVICE" ]]; then
+    echo "ERROR: $DEVICE is not a block device" >&2
+    exit 1
+fi
+
+# Warn if filesystem already present
+EXISTING_FS=$(blkid -s TYPE -o value "$DEVICE" 2>/dev/null || true)
+if [[ -n "$EXISTING_FS" ]]; then
+    echo "WARNING: $DEVICE contains a $EXISTING_FS filesystem"
+    echo "         label: $(blkid -s LABEL -o value "$DEVICE" 2>/dev/null || echo '(none)')"
+    read -rp "Destroy ALL data on $DEVICE and reformat as btrfs? [yes/N] " CONFIRM
+    [[ "$CONFIRM" == "yes" ]] || { echo "Aborted."; exit 1; }
+fi
+
+echo "==> Formatting $DEVICE as btrfs, label=$LABEL ..."
+mkfs.btrfs -L "$LABEL" -d single -m dup -f "$DEVICE"
+
+echo "==> Creating @data and @snapshots subvolumes ..."
+TMPMNT=$(mktemp -d)
+trap 'umount "$TMPMNT" 2>/dev/null; rmdir "$TMPMNT" 2>/dev/null' EXIT
+mount -o compress=zstd,noatime "$DEVICE" "$TMPMNT"
+btrfs subvolume create "${TMPMNT}/@data"
+btrfs subvolume create "${TMPMNT}/@snapshots"
+umount "$TMPMNT"
+rmdir "$TMPMNT"
+trap - EXIT
+
+echo "==> Creating mount point $MOUNT ..."
+mkdir -p "$MOUNT"
+chown tgw:tgw "$MOUNT"
+
+echo "==> Adding /etc/fstab entry ..."
+FSTAB_ENTRY="LABEL=${LABEL}  ${MOUNT}  btrfs  noauto,compress=zstd,noatime  0 0"
+if grep -qF "LABEL=${LABEL}" /etc/fstab; then
+    echo "    (fstab entry for $LABEL already exists — skipping)"
+else
+    echo "" >> /etc/fstab
+    echo "# TGW offline drive ${LABEL} (PP-BACKUP-001 A7)" >> /etc/fstab
+    echo "$FSTAB_ENTRY" >> /etc/fstab
+    echo "    Added: $FSTAB_ENTRY"
+fi
+
+echo "==> Wiring systemd mount-unit drop-in ..."
+ESCAPED=$(systemd-escape --path "$MOUNT")
+DROPIN_DIR="/etc/systemd/system/${ESCAPED}.mount.d"
+mkdir -p "$DROPIN_DIR"
+cat > "${DROPIN_DIR}/tgw-sync.conf" <<EOF
+[Unit]
+Wants=${SERVICE}
+EOF
+systemctl daemon-reload
+echo "    Drop-in: ${DROPIN_DIR}/tgw-sync.conf"
+
+SIZE=$(lsblk -dn -o SIZE "$DEVICE" 2>/dev/null || echo "?")
+SETUP_DATE=$(date +%Y-%m-%d)
+
+echo ""
+echo "==> Drive ${LABEL} provisioned on ${DEVICE} (${SIZE})"
+echo ""
+echo "  Test sequence:"
+echo "    mount /media/tgw/${LABEL}"
+echo "    journalctl -u ${SERVICE} -f"
+echo "    umount /media/tgw/${LABEL}"
+echo ""
+echo "══════════════════════════════════════════════"
+echo "  QR LABEL CONTENT  — copy to label maker"
+echo "══════════════════════════════════════════════"
+cat <<QR
+${LABEL}
+$(grep -E "OFFLINE|SENTRY|ARCHIVE|SECRETS|BOOT|HISTORY" <<< "$LABEL" | \
+  sed 's/TGW-OFFLINE-./Rotating offline backup (air-gap)/' | \
+  sed 's/TGW-SENTRY-.*/Always-on disaster sentry/' | \
+  sed 's/TGW-ARCHIVE-.*/Cold archive silo/' | \
+  sed 's/TGW-SECRETS-.*/Encrypted secrets bundle/' | \
+  sed 's/TGW-BOOT-.*/NixOS install + rebuild keychain/' | \
+  sed 's/TGW-HISTORY-.*/History archive drive/')
+Format: btrfs | Size: ${SIZE}
+Mount: ${MOUNT}
+Auto-sync: mount triggers tgw-offline-sync
+Setup: ${SETUP_DATE}
+QR
+echo "══════════════════════════════════════════════"
+echo ""
+echo "Physical label: print QR code + text above, apply to drive and case."

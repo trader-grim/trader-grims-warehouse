@@ -104,19 +104,28 @@ class EbayPriceWorker(QueueWorker):
 
             # PP-FREESHIP-001: when free_shipping_enabled, absorb shipping cost
             # into the listing price and mark the item for a free-shipping policy.
+            _ship_cost_used = 0.0
             if self.config.get('free_shipping_enabled'):
+                _item_ship = item.get('shipping_cost')
                 ship_cost = float(
-                    item.get('shipping_cost')
-                    or self.config.get('default_shipping_cost', 0.0)
+                    _item_ship if _item_ship not in (None, '')
+                    else self.config.get('default_shipping_cost', 0.0)
                 )
                 if ship_cost > 0:
+                    _ship_cost_used = ship_cost
+                    base_launch = launch
                     launch = freeship_price(launch, ship_cost)
                     item['free_shipping'] = True
                     log.info('ebay_price: %s freeship → $%.2f (base=$%.2f + ship=$%.2f)',
-                             sku, launch, ebay_offer.get('price', 0), ship_cost)
+                             sku, launch, base_launch, ship_cost)
 
             ebay_offer['price']        = launch
-            ebay_offer['target_price'] = suggested   # p25 — the eventual move price
+            # target_price (repricer floor) must absorb the same shipping cost so the
+            # repricer never marks down to a price that leaves shipping uncovered.
+            ebay_offer['target_price'] = (
+                freeship_price(suggested, _ship_cost_used) if _ship_cost_used > 0
+                else suggested
+            )
             draft['price']             = launch      # staged at launch price
 
             # PP-STRIKE-001: record MSRP as originalRetailPrice when it exceeds

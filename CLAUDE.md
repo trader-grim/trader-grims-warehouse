@@ -23,6 +23,20 @@ The master plan is the single source of truth: what's done, what's in progress, 
 architecture decisions, and open pending projects (PP-* items). The PM-intake worker keeps it
 current from notes dropped into `docs/TGW-Plan-Vault/inbox/`.
 
+**Step 3 — run plan reconciliation + status check (PP-PLANDB-001 Phase 3+4):**
+
+```
+tgw plan check
+tgw plan status
+```
+
+`tgw plan check` reports orphaned pp_refs (todos referencing PP items not in the plan), mismatched
+plan_anchors, done-in-plan/open-in-tracker mismatches, and stale round tags. Warnings go to the
+admin loop (PP-DOCFLOW-001) for correction — use `tgw todo set-meta <id> --pp <ref>` to fix pp_refs.
+
+`tgw plan status` shows one-line open/done/blocked counts + latest activity date per PP-* item.
+Use `tgw plan status --pp PP-XXX-001` to drill into a single item.
+
 Memory index (cross-session context): `/home/tgw/.claude/projects/-opt-TGW-src-trader-grims-warehouse/memory/MEMORY.md`
 
 ## Key paths

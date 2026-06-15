@@ -223,3 +223,43 @@ def test_format_report_no_pending(tmp_path):
               "plan_append": 0, "review_flag": 0, "unmatched": 0, "details": {}}
     report = format_report(result, applied=False)
     assert "0 pending" in report
+
+
+# ---------------------------------------------------------------------------
+# PP-OPS-001 assignment rule
+# ---------------------------------------------------------------------------
+
+def test_system_prompt_mentions_pp_ops_001():
+    from tgw.suggestions import _SYSTEM_PROMPT
+    assert "PP-OPS-001" in _SYSTEM_PROMPT
+
+
+def test_classify_batch_ops_suggestion_gets_pp_ops_001(cfg):
+    """classify_batch forwards PP-OPS-001 from LLM response for operator-gate todos."""
+    entries = [{"index": 0, "timestamp": "2026-06-10T10:00", "text": "obtain Google Vision API key"}]
+    mock_response = (
+        '[{"index": 0, "action": "todo", "rationale": "operator gate — no code needed",'
+        ' "todo_agent": "admin", "todo_body": "obtain Google Vision API key",'
+        ' "pp_ref": "PP-OPS-001"}]'
+    )
+    with patch("tgw.suggestions.call_model", return_value=mock_response):
+        result = classify_batch(entries, "## Work Tracks", cfg)
+    assert result[0]["pp_ref"] == "PP-OPS-001"
+    assert result[0]["todo_agent"] == "admin"
+
+
+def test_apply_ops_todo_passes_pp_ops_001(suggestions_file):
+    """apply_classifications passes PP-OPS-001 to todo_add for operator-gate todos."""
+    entries = parse_pending(suggestions_file)
+    classified = [
+        {"index": 0, "action": "review_flag"},
+        {"index": 1, "action": "todo", "todo_agent": "admin",
+         "todo_body": "buy a GPU for faster inference", "pp_ref": "PP-OPS-001"},
+        {"index": 2, "action": "review_flag"},
+    ]
+    with patch("tgw.suggestions.todo_add") as mock_add:
+        apply_classifications(suggestions_file, entries, classified, write=True)
+    mock_add.assert_called_once_with(
+        "admin", "buy a GPU for faster inference",
+        source="suggestions_classify", pp_ref="PP-OPS-001",
+    )

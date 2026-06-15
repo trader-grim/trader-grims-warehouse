@@ -9,6 +9,7 @@ description = "Inventory management platform for Trader Grim's Warehouse"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "httpx>=0.25",
     "requests>=2.31",
     "pyncthing>=0.1",
     "textual>=0.59",
@@ -17,6 +18,7 @@ dependencies = [
     "uvicorn[standard]>=0.29",
     "mcp>=1.0",
     "pyperclip>=1.8",
+    "mistune>=3.0",
 ]
 
 [project.optional-dependencies]
@@ -28,6 +30,9 @@ dev = [
 ]
 thumbnails = [
     "Pillow>=10.0",
+]
+gemini = [
+    "google-genai>=0.8",
 ]
 printing = [
     "reportlab>=4.0",
@@ -55,11 +60,13 @@ tgw-ebay-price-reducer-worker = "tgw.workers.ebay_price_reducer:main"
 tgw-velocity-stats-worker     = "tgw.workers.velocity_stats:main"
 tgw-ebay-sync-worker      = "tgw.workers.ebay_sync:main"
 tgw-ebay-sku-migrate-worker = "tgw.workers.ebay_sku_migrate:main"
+tgw-clipd              = "tgw.clipd:main"
 tgw-multi-intake-worker   = "tgw.workers.multi_intake:main"
 tgw-catalog-rebuild-worker = "tgw.workers.catalog_rebuild:main"
 tgw-plan-render-worker    = "tgw.workers.plan_render:main"
-tgw-thumbnail-gen-worker  = "tgw.workers.thumbnail_gen:main"
-tgw-alt-text-worker       = "tgw.workers.alt_text:main"
+tgw-thumbnail-gen-worker      = "tgw.workers.thumbnail_gen:main"
+tgw-alt-text-worker           = "tgw.workers.alt_text:main"
+tgw-sync-conflict-worker      = "tgw.workers.sync_conflict:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

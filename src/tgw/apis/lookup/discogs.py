@@ -10,7 +10,7 @@ import json
 import logging
 from typing import Any, Dict, Optional
 
-import requests
+import httpx
 
 from .base import LookupResult, now_iso
 from .base import secrets_root as _secrets_root
@@ -36,7 +36,7 @@ def lookup(barcode: str, cfg: Dict[str, Any]) -> Optional[LookupResult]:
         return None
 
     try:
-        resp = requests.get(
+        resp = httpx.get(
             _ENDPOINT,
             params={'barcode': barcode, 'per_page': 1},
             headers={'Authorization': f'Discogs token={token}',
@@ -45,7 +45,7 @@ def lookup(barcode: str, cfg: Dict[str, Any]) -> Optional[LookupResult]:
         )
         resp.raise_for_status()
         data = resp.json()
-    except requests.exceptions.RequestException as exc:
+    except httpx.HTTPError as exc:
         log.warning('discogs: request failed for %s: %s', barcode, exc)
         return None
 

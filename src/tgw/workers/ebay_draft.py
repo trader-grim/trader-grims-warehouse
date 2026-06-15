@@ -25,7 +25,8 @@ import tgw.logging as tgw_logging
 from tgw.apis.ebay.client import ebay_get
 from tgw.apis.ebay.conditions import best_condition
 from tgw.apis.ebay.specifics import get_aspects
-from tgw.apis.ollama import chat, extract_json
+from tgw.apis.llm import call_model, get_task_model
+from tgw.apis.ollama import extract_json
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.ebay.description import build_listing_description
 from tgw.items import atomic_write_json
@@ -35,7 +36,6 @@ from tgw.queue.worker_base import HardFailure, QueueWorker
 log = logging.getLogger(__name__)
 
 QUEUE_NAME  = 'ebay_draft'
-TEXT_MODEL  = 'Qwen2.5:latest'
 
 _SYSTEM = """\
 You are an eBay listing assistant. Given item details and a list of eBay item
@@ -357,7 +357,8 @@ class EbayDraftWorker(QueueWorker):
 
         # Use text model to fill aspect values
         prompt  = _build_prompt(item, aspects, prefilled=prefilled, browse_hints=browse_hints)
-        log.info('asking %s to fill %d aspects for %s', TEXT_MODEL, len(aspects), sku)
+        _, _draft_model = get_task_model(self.config, 'ebay_draft')
+        log.info('asking %s to fill %d aspects for %s', _draft_model, len(aspects), sku)
         tgw_logging.log_event('ebay_draft_aspects_call', sku=sku,
                               category_id=category_id, aspect_count=len(aspects))
 
@@ -367,37 +368,27 @@ class EbayDraftWorker(QueueWorker):
         pl_description = (pl.get('description') or '').strip()
         enrich_description = bool(pl_description and len(pl_description.split()) >= 20)
 
-        from tgw.queue.ollama_lock import acquire_ollama_lock
-        with acquire_ollama_lock(self.config):
-            raw = chat(
-                model=TEXT_MODEL,
-                messages=[{'role': 'user', 'content': prompt}],
-                system=_SYSTEM,
-            )
+        raw = call_model('ebay_draft', _SYSTEM, prompt, self.config, sku=sku)
 
-            if enrich_description:
-                brand = pl.get('brand', '') or prefilled.get('Brand', '')
-                mpn   = pl.get('mpn', '')   or prefilled.get('MPN', '') \
-                                             or prefilled.get('Model', '')
-                desc_prompt = (
-                    f'Item: {title}\n'
-                    f'Condition: {item.get("condition", "used")}\n'
-                    + (f'Brand: {brand}\n' if brand else '')
-                    + (f'Model/MPN: {mpn}\n' if mpn else '')
-                    + f'\nProduct information:\n{pl_description}\n'
-                    + f'\nWhat the photos show:\n{item.get("description", "")}\n'
-                    + '\nWrite the eBay listing description.'
-                )
-                raw_desc = chat(
-                    model=TEXT_MODEL,
-                    messages=[{'role': 'user', 'content': desc_prompt}],
-                    system=_SYSTEM_DESC,
-                )
-                enriched_description = raw_desc.strip()
-                log.info('%s: description enriched to %d words',
-                         sku, len(enriched_description.split()))
-            else:
-                enriched_description = None
+        if enrich_description:
+            brand = pl.get('brand', '') or prefilled.get('Brand', '')
+            mpn   = pl.get('mpn', '')   or prefilled.get('MPN', '') \
+                                         or prefilled.get('Model', '')
+            desc_prompt = (
+                f'Item: {title}\n'
+                f'Condition: {item.get("condition", "used")}\n'
+                + (f'Brand: {brand}\n' if brand else '')
+                + (f'Model/MPN: {mpn}\n' if mpn else '')
+                + f'\nProduct information:\n{pl_description}\n'
+                + f'\nWhat the photos show:\n{item.get("description", "")}\n'
+                + '\nWrite the eBay listing description.'
+            )
+            raw_desc = call_model('ebay_draft', _SYSTEM_DESC, desc_prompt, self.config, sku=sku)
+            enriched_description = raw_desc.strip()
+            log.info('%s: description enriched to %d words',
+                     sku, len(enriched_description.split()))
+        else:
+            enriched_description = None
 
         try:
             suggested = extract_json(raw)

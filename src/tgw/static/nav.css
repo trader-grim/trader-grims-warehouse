@@ -1,0 +1,37 @@
+.tgw-nav{background:#1a1a2e;border-bottom:1px solid #333;padding:0 8px;display:flex;
+  align-items:center;gap:4px;font-size:.9em;flex-wrap:wrap;margin:-8px -8px 8px}
+.tgw-nav .brand{color:#7fbfff;font-weight:bold;padding:8px 6px;text-decoration:none;flex-shrink:0}
+.tgw-nav a{color:#aaa;text-decoration:none;padding:8px 10px;border-radius:4px;
+  transition:background .15s,color .15s}
+.tgw-nav a:hover,.tgw-nav a.active{background:#2a2a4a;color:#eee}
+.nav-dropdown{position:relative;display:inline-block}
+.nav-dropdown-toggle{color:#aaa;background:none;border:none;font-size:.9em;padding:8px 10px;
+  cursor:pointer;border-radius:4px;transition:background .15s,color .15s}
+.nav-dropdown-toggle:hover{background:#2a2a4a;color:#eee}
+.nav-dropdown-menu{display:none;position:absolute;top:100%;left:0;background:#1e1e3a;
+  border:1px solid #444;border-radius:6px;min-width:140px;z-index:100;padding:4px 0}
+.nav-dropdown-menu.open{display:block}
+.nav-dropdown-menu a{display:block;padding:8px 14px;color:#bbb;text-decoration:none;
+  font-size:.88em;white-space:nowrap}
+.nav-dropdown-menu a:hover{background:#2a2a5a;color:#eee}
+.nav-count{background:#4a7a2a;color:#bfb;border-radius:10px;padding:1px 6px;
+  font-size:.72em;font-weight:700;vertical-align:middle;margin-left:3px;
+  min-width:1.2em;display:inline-block;text-align:center;line-height:1.5}
+.nav-count:empty{display:none}
+/* Suggest popup */
+.sg-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:9999;
+  align-items:flex-start;justify-content:center;padding-top:60px}
+.sg-overlay.open{display:flex}
+.sg-box{background:#1a1a2e;border:1px solid #555;border-radius:10px;padding:18px;
+  width:min(500px,calc(100vw - 24px));box-shadow:0 8px 32px rgba(0,0,0,.6)}
+.sg-box h3{margin:0 0 10px;font-size:.95em;color:#7fbfff}
+.sg-box textarea{width:100%;box-sizing:border-box;height:100px;resize:vertical;
+  background:#111;color:#eee;border:1px solid #555;border-radius:6px;
+  padding:9px;font-size:.9em;font-family:inherit}
+.sg-btns{display:flex;gap:8px;margin-top:10px;align-items:center}
+.sg-btns button{padding:8px 18px;border:none;border-radius:6px;cursor:pointer;
+  font-size:.88em;font-family:inherit}
+.sg-submit{background:#1a6030;color:#fff}.sg-submit:hover{background:#1e7038}
+.sg-cancel{background:#333;color:#aaa}.sg-cancel:hover{background:#444}
+.sg-msg{flex:1;font-size:.82em;display:none}
+.sg-msg.ok{display:block;color:#7f7}.sg-msg.err{display:block;color:#f77}

@@ -34,7 +34,9 @@ from fastapi.testclient import TestClient  # noqa: E402
 from tgw import http_server  # noqa: E402
 
 API_KEY = "test-key-abc123"
+WEB_KEY = "test-web-key-xyz"  # per-session key injected into form HTML (not the master key)
 AUTH_HEADERS = {"Authorization": f"Bearer {API_KEY}"}
+WEB_AUTH_HEADERS = {"Authorization": f"Bearer {WEB_KEY}"}
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +195,7 @@ def env(tmp_path, monkeypatch, queue_rows):
 
     monkeypatch.setattr(http_server, "_cfg", cfg)
     monkeypatch.setattr(http_server, "_api_key", API_KEY)
+    monkeypatch.setattr(http_server, "_web_key", WEB_KEY)
 
     # No real PostgreSQL: psycopg2.connect returns our fake connection.
     monkeypatch.setattr(
@@ -754,6 +757,126 @@ def test_suggest_post_escapes_echo_but_writes_raw(env):
 
 
 # ---------------------------------------------------------------------------
+# POST /api/suggest — JSON suggest endpoint for nav popup (PP-CAPTURE-001 3n)
+# ---------------------------------------------------------------------------
+
+def test_api_suggest_json_writes_suggestion(env):
+    """POST /api/suggest with JSON body appends to SUGGESTIONS.md, returns {ok}."""
+    r = env["client"].post("/api/suggest", json={"text": "json suggest test"})
+    assert r.status_code == 200
+    d = r.json()
+    assert d["ok"] is True
+    assert "written" in d
+    content = _suggestions_file(env).read_text(encoding="utf-8")
+    assert "json suggest test" in content
+
+
+def test_api_suggest_json_collapses_whitespace(env):
+    r = env["client"].post("/api/suggest", json={"text": "line one\nline two"})
+    assert r.status_code == 200
+    content = _suggestions_file(env).read_text(encoding="utf-8")
+    lines = [ln for ln in content.splitlines() if ln.strip()]
+    assert len(lines) == 1
+    assert "line one line two" in lines[0]
+
+
+def test_api_suggest_json_empty_returns_400(env):
+    r = env["client"].post("/api/suggest", json={"text": "   "})
+    assert r.status_code == 400
+
+
+def test_api_suggest_json_invalid_body_returns_400(env):
+    r = env["client"].post("/api/suggest", content=b"not json",
+                           headers={"Content-Type": "application/json"})
+    assert r.status_code == 400
+
+
+def test_api_suggest_no_auth_required(env):
+    """Endpoint is network-trust — no Bearer token needed."""
+    r = env["client"].post("/api/suggest", json={"text": "no auth test"})
+    assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# /form/todos enhancements — filter, expand, copy, PP-ref (PP-EDITOR-001 3n)
+# ---------------------------------------------------------------------------
+
+_TODO_ROWS_WITH_PPREF = [
+    {"id": 55, "agent": "claude", "priority": 10,
+     "body": "[PP-EDITOR-001] Fix the browse page", "source": "session", "done_at": None},
+    {"id": 56, "agent": "claude", "priority": 20,
+     "body": "PP-TODO-001/PP-CAPTURE-001: add filter", "source": "session", "done_at": None},
+    {"id": 57, "agent": "admin", "priority": 30,
+     "body": "Manual warehouse check", "source": "plan", "done_at": None},
+]
+
+
+def test_todos_form_has_agent_filter(client, monkeypatch):
+    """Agent filter dropdown is present with each unique agent as an option."""
+    import tgw.todo as todo
+    monkeypatch.setattr(todo, "todo_list", lambda *a, **k: list(_TODO_ROWS_WITH_PPREF))
+    r = client.get("/form/todos")
+    assert r.status_code == 200
+    assert 'id="agent-sel"' in r.text
+    assert 'value="claude"' in r.text
+    assert 'value="admin"' in r.text
+
+
+def test_todos_form_pp_refs_extracted(client, monkeypatch):
+    """PP-XXX-NNN references in task bodies render as pp-badge links."""
+    import tgw.todo as todo
+    monkeypatch.setattr(todo, "todo_list", lambda *a, **k: list(_TODO_ROWS_WITH_PPREF))
+    r = client.get("/form/todos")
+    assert r.status_code == 200
+    assert "pp-badge" in r.text
+    assert "PP-EDITOR-001" in r.text
+    assert "PP-TODO-001" in r.text
+
+
+def test_todos_form_copy_btn_present(client, monkeypatch):
+    """Each task row has a copy button with data-body attribute."""
+    import tgw.todo as todo
+    monkeypatch.setattr(todo, "todo_list", lambda *a, **k: list(_TODO_ROWS_WITH_PPREF))
+    r = client.get("/form/todos")
+    assert r.status_code == 200
+    assert 'class="copy-btn"' in r.text
+    assert "data-body=" in r.text
+
+
+def test_todos_form_data_agent_attrs(client, monkeypatch):
+    """Rows and groups have data-agent attributes for client-side filtering."""
+    import tgw.todo as todo
+    monkeypatch.setattr(todo, "todo_list", lambda *a, **k: list(_TODO_ROWS_WITH_PPREF))
+    r = client.get("/form/todos")
+    assert r.status_code == 200
+    assert 'data-agent="claude"' in r.text
+    assert 'data-agent="admin"' in r.text
+
+
+# ---------------------------------------------------------------------------
+# /form/items browse — load-more and action buttons (PP-EDITOR-001 3n)
+# ---------------------------------------------------------------------------
+
+def test_browse_has_load_more_js(client):
+    """Browse page includes loadMore() function and card-btns action buttons."""
+    r = client.get("/form/items")
+    assert r.status_code == 200
+    assert "loadMore" in r.text
+    assert "card-btns" in r.text
+    assert "cbtn-a" in r.text  # approve button class
+    assert "cbtn-p" in r.text  # publish button class
+
+
+def test_browse_uses_card_inner_link(client):
+    """Cards use .card-inner anchor for navigation, not the outer .card."""
+    r = client.get("/form/items")
+    assert r.status_code == 200
+    assert "card-inner" in r.text
+    # The old pattern (whole card = link) should not appear
+    assert 'class="card"' not in r.text or 'card-inner' in r.text
+
+
+# ---------------------------------------------------------------------------
 # GET /api/health — platform health check
 # ---------------------------------------------------------------------------
 
@@ -848,3 +971,1953 @@ def test_catalog_snapshot_503_when_catalog_missing(env, monkeypatch):
     )
     r = env["client"].get("/api/catalog/snapshot", headers=AUTH_HEADERS)
     assert r.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# PP-EDITOR-001 Phase 3a — static files + refactored /form/ pages
+# ---------------------------------------------------------------------------
+
+def test_static_tgw_css(client):
+    r = client.get("/static/tgw.css")
+    assert r.status_code == 200
+    assert "font-family" in r.text
+    assert "system-ui" in r.text
+
+
+def test_static_nav_css(client):
+    r = client.get("/static/nav.css")
+    assert r.status_code == 200
+    assert "tgw-nav" in r.text
+    assert "nav-dropdown" in r.text
+
+
+def test_static_tgw_js(client):
+    r = client.get("/static/tgw.js")
+    assert r.status_code == 200
+    assert "escapeHtml" in r.text
+    assert "initChips" in r.text
+    assert "authHeaders" in r.text
+
+
+def test_static_nav_js(client):
+    r = client.get("/static/nav.js")
+    assert r.status_code == 200
+    assert "tgw-nav" in r.text
+    assert "nav-dropdown" in r.text
+    assert "/form/items" in r.text
+
+
+def test_intake_form_uses_static_css(env):
+    r = env["client"].get(f"/form/intake/{SKU_A}")
+    assert r.status_code == 200
+    assert '/static/tgw.css' in r.text
+    assert '/static/nav.css' in r.text
+    assert '/static/tgw.js' in r.text
+    assert '/static/nav.js' in r.text
+    # Base CSS must not be embedded inline
+    assert 'font-family:system-ui' not in r.text
+    # Page-specific JS still works (initChips call present)
+    assert 'initChips' in r.text
+
+
+def test_bulk_form_uses_static_css(client):
+    r = client.get("/form/bulk")
+    assert r.status_code == 200
+    assert '/static/tgw.css' in r.text
+    assert '/static/nav.css' in r.text
+    assert '/static/tgw.js' in r.text
+    assert '/static/nav.js' in r.text
+    assert 'font-family:system-ui' not in r.text
+    # escapeHtml no longer defined inline — comes from tgw.js
+    assert 'function escapeHtml' not in r.text
+    # initChips used for field chip selector
+    assert 'initChips' in r.text
+
+
+def test_items_browse_uses_static_css(client):
+    r = client.get("/form/items")
+    assert r.status_code == 200
+    assert '/static/tgw.css' in r.text
+    assert '/static/nav.css' in r.text
+    assert '/static/tgw.js' in r.text
+    assert '/static/nav.js' in r.text
+    assert 'font-family:system-ui' not in r.text
+    # esc is now an alias for the shared escapeHtml
+    assert 'const esc=escapeHtml' in r.text
+
+
+def test_todos_form_uses_static_css(client, monkeypatch):
+    import tgw.todo as todo
+    monkeypatch.setattr(todo, "todo_list", lambda *a, **k: [])
+    r = client.get("/form/todos")
+    assert r.status_code == 200
+    assert '/static/tgw.css' in r.text
+    assert '/static/nav.css' in r.text
+    assert '/static/tgw.js' in r.text
+    assert '/static/nav.js' in r.text
+    assert 'font-family:system-ui' not in r.text
+
+
+def test_todos_form_error_uses_static_css(client, monkeypatch):
+    import tgw.todo as todo
+    monkeypatch.setattr(todo, "todo_list", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+    r = client.get("/form/todos")
+    assert r.status_code == 200
+    assert '/static/tgw.css' in r.text
+    assert 'font-family:system-ui' not in r.text
+
+
+def test_suggest_form_uses_static_css(client):
+    r = client.get("/form/suggest")
+    assert r.status_code == 200
+    assert '/static/tgw.css' in r.text
+    assert '/static/nav.css' in r.text
+    assert '/static/tgw.js' in r.text
+    assert '/static/nav.js' in r.text
+    assert 'font-family:system-ui' not in r.text
+
+
+def test_item_detail_uses_static_css(env):
+    r = env["client"].get(f"/form/items/{SKU_A}")
+    assert r.status_code == 200
+    assert '/static/tgw.css' in r.text
+    assert '/static/nav.css' in r.text
+    assert '/static/tgw.js' in r.text
+    assert '/static/nav.js' in r.text
+    assert 'font-family:system-ui' not in r.text
+
+
+# ---------------------------------------------------------------------------
+# GET /form/items/{sku} — eBay deep links (PP-EDITOR-001 Phase 3m)
+# ---------------------------------------------------------------------------
+
+def test_item_detail_ebay_deeplinks_active(env):
+    """View on eBay, Seller Hub, and Messages links appear for an active listing."""
+    sku = "tgw20260614110000010"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Deep Link Test Widget",
+        "location": "X9",
+        "ebay_listing": {
+            "listing_id": "987654321",
+            "listing_url": "https://www.ebay.com/itm/987654321",
+            "status": "Active",
+            "live_price": 24.99,
+        },
+    })
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    assert "View on eBay" in r.text
+    assert "https://www.ebay.com/itm/987654321" in r.text
+    assert "Seller Hub" in r.text
+    assert "https://www.ebay.com/sh/lst/active?keyword=987654321" in r.text
+    assert "eBay Messages" in r.text
+    assert "https://messages.ebay.com/" in r.text
+    assert "offer-badge-wrap" in r.text
+    # web session key (not master API key) embedded in form pages
+    assert WEB_KEY in r.text
+    assert API_KEY not in r.text
+
+
+def test_item_detail_ebay_deeplinks_sold(env):
+    """Messages link hidden for sold/inactive listing; View on eBay + Seller Hub still shown."""
+    sku = "tgw20260614110000011"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Sold Widget",
+        "location": "X9",
+        "ebay_listing": {
+            "listing_id": "111222333",
+            "listing_url": "https://www.ebay.com/itm/111222333",
+            "status": "Sold",
+            "live_price": 15.00,
+        },
+    })
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    assert "View on eBay" in r.text
+    assert "Seller Hub" in r.text
+    assert "eBay Messages" not in r.text
+
+
+def test_item_detail_no_ebay_listing(env):
+    """No eBay deep link buttons shown when ebay_listing is absent."""
+    r = env["client"].get(f"/form/items/{SKU_A}")
+    assert r.status_code == 200
+    assert "View on eBay" not in r.text
+    assert "Seller Hub" not in r.text
+    assert "eBay Messages" not in r.text
+    assert "offer-badge-wrap" not in r.text
+
+
+def test_item_detail_no_listing_url_only_id(env):
+    """Seller Hub shown when listing_id present but no listing_url."""
+    sku = "tgw20260614110000012"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "ID Only Widget",
+        "location": "X9",
+        "ebay_listing": {
+            "listing_id": "444555666",
+            "status": "Active",
+        },
+    })
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    assert "View on eBay" not in r.text
+    assert "Seller Hub" in r.text
+    assert "eBay Messages" in r.text
+    assert "offer-badge-wrap" in r.text
+
+
+def test_offers_form_sku_filter(env):
+    """/form/offers?sku=X loads and contains SKU filter JS variables."""
+    from unittest.mock import patch
+
+    import tgw.http_server as _hs
+
+    # Stub cmd_offers_list so the offers API call won't hit eBay
+    with patch.object(_hs, "_cfg", env["cfg"]):
+        r = env["client"].get("/form/offers?sku=tgw20260614110000010")
+    assert r.status_code == 200
+    assert "sku-filter-bar" in r.text
+    assert "sku-filter-val" in r.text
+    assert "_skuFilter" in r.text
+
+
+# ---------------------------------------------------------------------------
+# GET /api/dashboard — PP-EDITOR-001 Phase 3b
+# ---------------------------------------------------------------------------
+
+def _make_catalog_with_data(db_path: Path, rows_with_data):
+    """Create a SQLite catalog including the full-JSON 'data' column."""
+    con = sqlite3.connect(str(db_path))
+    con.execute(
+        "CREATE TABLE catalog ("
+        "sku TEXT PRIMARY KEY, title TEXT, location TEXT, status TEXT, "
+        "price REAL, qty INTEGER, image TEXT, data TEXT NOT NULL DEFAULT '{}')"
+    )
+    con.executemany(
+        "INSERT INTO catalog (sku, title, location, status, price, qty, image, data) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        rows_with_data,
+    )
+    con.commit()
+    con.close()
+
+
+@pytest.fixture
+def dashboard_env(tmp_path, monkeypatch):
+    """Fixture for dashboard tests: catalog with data column, stubbed Postgres + eBay + systemctl."""
+    itemdata_root = tmp_path / "ItemData"
+    itemdata_root.mkdir()
+    catalog_path = tmp_path / "catalog.sqlite"
+
+    # Items:
+    #   SKU_A — has draft_listing, no offer_id  → needs_review
+    #   SKU_B — has draft_listing + offer_id UNPUBLISHED + ready_at  → ready
+    #   SKU_C — has revision_draft, no image  → has_revision_draft + needs_photos
+    #   SKU_D — plain in-stock, has image  → no special state
+    sku_a = "tgw20260101120000001"
+    sku_b = "tgw20260201120000002"
+    sku_c = "tgw20260301120000003"
+    sku_d = "tgw20260401120000004"
+
+    data_a = json.dumps({"draft_listing": {"title": "Foo"}, "ebay_offer": {}})
+    data_b = json.dumps({
+        "draft_listing": {"title": "Bar"},
+        "ebay_offer": {
+            "offer_id": "OFF1",
+            "status": "UNPUBLISHED",
+            "ready_at": "2026-06-01T00:00:00+00:00",
+        },
+    })
+    data_c = json.dumps({"revision_draft": {"delta": {"title": "New"}}})
+    data_d = json.dumps({})
+
+    _make_catalog_with_data(catalog_path, [
+        (sku_a, "Widget A", "A1", "In Stock", 9.99,  1, "",      data_a),
+        (sku_b, "Gadget B", "B2", "Staged",  19.99,  1, "b.jpg", data_b),
+        (sku_c, "Part C",   "C3", "In Stock",  5.00,  1, "",      data_c),
+        (sku_d, "Box D",    "D4", "In Stock",  7.50,  1, "d.jpg", data_d),
+    ])
+
+    cfg = {
+        "sqlite_catalog_path": catalog_path,
+        "itemdata_root": itemdata_root,
+        "postgres_dsn": "postgresql://fake/db",
+        "thumbnail_root": tmp_path / "thumbs",
+        "pretty": True,
+        "raw": {},
+    }
+
+    monkeypatch.setattr(http_server, "_cfg", cfg)
+    monkeypatch.setattr(http_server, "_api_key", API_KEY)
+    monkeypatch.setattr(http_server, "_web_key", WEB_KEY)
+    monkeypatch.setattr(http_server, "_pending_offers_cache", None)
+    monkeypatch.setattr(http_server, "_pending_offers_cache_at", 0.0)
+
+    # Postgres stub: fetchone returns (0,) → dead_letter_count = 0
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: _FakeConn([]),
+    )
+
+    client = TestClient(http_server.app)
+    return {
+        "client": client,
+        "skus": (sku_a, sku_b, sku_c, sku_d),
+    }
+
+
+def test_dashboard_returns_counts(dashboard_env, monkeypatch):
+    """Dashboard returns correct counts from SQLite and stubs."""
+    # Mock eBay get_best_offers to return 2 pending offers
+    import tgw.apis.ebay.trading as _trading
+    monkeypatch.setattr(_trading, "get_best_offers", lambda cfg, status="All": [{"offer_id": "1"}, {"offer_id": "2"}])
+
+    # Mock systemctl: 18 of 20 queues active
+    from tgw.queue import WORKER_QUEUES
+    total_q = len(WORKER_QUEUES)
+    active_lines = "\n".join(["active"] * (total_q - 2) + ["inactive", "failed"])
+
+    def _fake_run(cmd, **kwargs):
+        class _R:
+            stdout = active_lines
+            returncode = 1
+        return _R()
+
+    monkeypatch.setattr(http_server.subprocess, "run", _fake_run)
+
+    r = dashboard_env["client"].get("/api/dashboard", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+
+    assert body["ok"] is True
+    assert body["needs_review"] == 1        # only SKU_A (draft_listing + no offer_id)
+    assert body["needs_photos"] == 2        # SKU_A and SKU_C have no image
+    assert body["has_revision_draft"] == 1  # only SKU_C
+    assert body["ready_count"] == 1         # only SKU_B (offer_id + UNPUBLISHED + ready_at)
+    assert body["dead_letter_count"] == 0   # postgres stub returns 0
+    assert body["pending_offers"] == 2
+    assert body["worker_health"]["total"] == total_q
+    assert body["worker_health"]["up"] == total_q - 2
+
+
+def test_dashboard_requires_auth(dashboard_env):
+    r = dashboard_env["client"].get("/api/dashboard")
+    assert r.status_code in (401, 403)
+
+
+def test_dashboard_ebay_failure_returns_none(dashboard_env, monkeypatch):
+    """When eBay API fails, pending_offers is None (not an error)."""
+    import tgw.apis.ebay.trading as _trading
+    monkeypatch.setattr(_trading, "get_best_offers",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("timeout")))
+
+    def _fake_run(cmd, **kwargs):
+        class _R:
+            stdout = ""
+            returncode = 0
+        return _R()
+    monkeypatch.setattr(http_server.subprocess, "run", _fake_run)
+
+    r = dashboard_env["client"].get("/api/dashboard", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    assert r.json()["pending_offers"] is None
+
+
+def test_dashboard_fallback_without_data_column(tmp_path, monkeypatch):
+    """When the catalog has no 'data' column, json_extract counts return None."""
+    catalog_path = tmp_path / "catalog.sqlite"
+    _make_catalog(catalog_path, [
+        (SKU_A, "Widget", "A1", "In Stock", 9.99, 1, ""),
+        (SKU_B, "Gadget", "B2", "Staged",  19.99, 1, "b.jpg"),
+    ])
+
+    cfg = {
+        "sqlite_catalog_path": catalog_path,
+        "itemdata_root": tmp_path / "ItemData",
+        "postgres_dsn": "postgresql://fake/db",
+        "thumbnail_root": tmp_path / "thumbs",
+        "pretty": True,
+        "raw": {},
+    }
+    monkeypatch.setattr(http_server, "_cfg", cfg)
+    monkeypatch.setattr(http_server, "_api_key", API_KEY)
+    monkeypatch.setattr(http_server, "_web_key", WEB_KEY)
+    monkeypatch.setattr(http_server, "_pending_offers_cache", None)
+    monkeypatch.setattr(http_server, "_pending_offers_cache_at", 0.0)
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: _FakeConn([]),
+    )
+
+    import tgw.apis.ebay.trading as _trading
+    monkeypatch.setattr(_trading, "get_best_offers", lambda *a, **k: [])
+
+    def _fake_run(cmd, **kwargs):
+        class _R:
+            stdout = ""
+            returncode = 0
+        return _R()
+    monkeypatch.setattr(http_server.subprocess, "run", _fake_run)
+
+    client = TestClient(http_server.app)
+    r = client.get("/api/dashboard", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["needs_review"] is None
+    assert body["has_revision_draft"] is None
+    assert body["ready_count"] is None
+    assert body["needs_photos"] == 1   # SKU_A has empty image
+    assert body["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# GET /api/activity — recent queue job completions
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def activity_env(tmp_path, monkeypatch):
+    """Minimal env wired to return canned activity rows from psycopg2 stub."""
+    itemdata_root = tmp_path / "ItemData"
+    itemdata_root.mkdir()
+    catalog_path = tmp_path / "catalog.sqlite"
+    _make_catalog(catalog_path, [])
+
+    cfg = {
+        "sqlite_catalog_path": catalog_path,
+        "itemdata_root": itemdata_root,
+        "postgres_dsn": "postgresql://fake/db",
+        "thumbnail_root": tmp_path / "thumbs",
+        "pretty": True,
+        "raw": {},
+    }
+
+    rows = [
+        {
+            "job_id": 1,
+            "queue_name": "ebay_draft",
+            "state": "succeeded",
+            "sku": "tgw20260614120000001",
+            "finished_at": "2026-06-14T12:00:00+00:00",
+            "error_detail": None,
+        },
+        {
+            "job_id": 2,
+            "queue_name": "ebay_stage",
+            "state": "failed",
+            "sku": "tgw20260614110000002",
+            "finished_at": "2026-06-14T11:00:00+00:00",
+            "error_detail": "boom",
+        },
+        {
+            "job_id": 3,
+            "queue_name": "catalog_rebuild",
+            "state": "succeeded",
+            "sku": None,
+            "finished_at": "2026-06-14T10:00:00+00:00",
+            "error_detail": None,
+        },
+    ]
+
+    monkeypatch.setattr(http_server, "_cfg", cfg)
+    monkeypatch.setattr(http_server, "_api_key", API_KEY)
+    monkeypatch.setattr(http_server, "_web_key", WEB_KEY)
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: _FakeConn(rows),
+    )
+    return {"client": TestClient(http_server.app), "rows": rows}
+
+
+def test_activity_returns_jobs(activity_env):
+    r = activity_env["client"].get("/api/activity", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["count"] == 3
+    jobs = body["jobs"]
+    assert jobs[0]["queue_name"] == "ebay_draft"
+    assert jobs[0]["state"] == "succeeded"
+    assert jobs[0]["sku"] == "tgw20260614120000001"
+    assert jobs[1]["state"] == "failed"
+    assert jobs[1]["error_detail"] == "boom"
+    assert jobs[2]["sku"] is None  # catalog_rebuild has no sku
+
+
+def test_activity_requires_auth(activity_env):
+    r = activity_env["client"].get("/api/activity")
+    assert r.status_code in (401, 403)
+
+
+def test_activity_empty(tmp_path, monkeypatch):
+    """Empty queue_jobs → ok=True, count=0, jobs=[]."""
+    cfg = {
+        "sqlite_catalog_path": tmp_path / "catalog.sqlite",
+        "itemdata_root": tmp_path / "ItemData",
+        "postgres_dsn": "postgresql://fake/db",
+        "thumbnail_root": tmp_path / "thumbs",
+        "pretty": True,
+        "raw": {},
+    }
+    monkeypatch.setattr(http_server, "_cfg", cfg)
+    monkeypatch.setattr(http_server, "_api_key", API_KEY)
+    monkeypatch.setattr(http_server, "_web_key", WEB_KEY)
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: _FakeConn([]),
+    )
+    client = TestClient(http_server.app)
+    r = client.get("/api/activity", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["count"] == 0
+    assert body["jobs"] == []
+
+
+# ---------------------------------------------------------------------------
+# GET /form/home — home dashboard page
+# ---------------------------------------------------------------------------
+
+def test_home_form_ok(client):
+    """Home page returns 200 with all section anchors present."""
+    r = client.get("/form/home")
+    assert r.status_code == 200
+    assert "id=\"health-strip\"" in r.text
+    assert "id=\"action-cards\"" in r.text
+    assert "id=\"intake-sku\"" in r.text
+    assert "id=\"activity\"" in r.text
+    assert "id=\"pm-chat\"" in r.text
+
+
+def test_home_form_no_auth_required(client):
+    """Home page is served without Bearer token (network trust)."""
+    r = client.get("/form/home")
+    assert r.status_code == 200
+
+
+def test_home_form_embeds_web_key(client):
+    """Form pages embed the web session key (not the master API key) for JS API calls."""
+    r = client.get("/form/home")
+    assert WEB_KEY in r.text
+    assert API_KEY not in r.text
+
+
+def test_home_form_uses_static_css(client):
+    r = client.get("/form/home")
+    assert "/static/tgw.css" in r.text
+    assert "/static/nav.css" in r.text
+    assert "/static/tgw.js" in r.text
+    assert "/static/nav.js" in r.text
+
+
+def test_home_form_has_start_links(client):
+    """Start-here section links to the key operational pages."""
+    r = client.get("/form/home")
+    assert "/form/items" in r.text
+    assert "/form/bulk" in r.text
+    assert "/form/todos" in r.text
+    assert "/form/suggest" in r.text
+
+
+def test_nav_has_home_link():
+    """nav.js updated to include a Home link."""
+    nav_src = (
+        __import__("pathlib").Path(__file__).parent.parent
+        / "src/tgw/static/nav.js"
+    ).read_text()
+    assert "/form/home" in nav_src
+
+
+# ---------------------------------------------------------------------------
+# POST /api/pm/chat — PM chat (PP-EDITOR-001 Phase 3d)
+# ---------------------------------------------------------------------------
+
+def test_pm_chat_no_auth_rejected(client):
+    r = client.post("/api/pm/chat", json={"message": "hi"})
+    assert r.status_code in (401, 403)
+
+
+def test_pm_chat_openrouter_called(env, monkeypatch):
+    """pm_chat calls OpenRouter and returns {ok, message, actions}."""
+    client = env["client"]
+
+    fake_response_text = (
+        "There are 2 open todos and the queue is idle.\n"
+        "ACTIONS: [{\"type\": \"none\"}]"
+    )
+
+    captured = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured["url"] = url
+        captured["messages"] = json.get("messages", [])
+        captured["model"] = json.get("model")
+
+        class _FakeResp:
+            status_code = 200
+
+            def raise_for_status(self):
+                pass
+
+            def json(self_inner):
+                return {
+                    "choices": [{"message": {"content": fake_response_text}}]
+                }
+
+        return _FakeResp()
+
+    import tgw.http_server as _hs
+    from tgw.apis import llm as _llm
+    monkeypatch.setattr(_hs, "_build_pm_context", lambda: "todos: 2")
+    monkeypatch.setattr(_llm.requests, "post", fake_post)
+    monkeypatch.setattr(_llm, "get_task_model", lambda cfg, task: ("openrouter", "test/model"))
+    monkeypatch.setattr(_llm, "_load_openrouter_key", lambda cfg: "test-or-key")
+
+    r = client.post(
+        "/api/pm/chat",
+        json={"message": "how many todos?", "history": []},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert "todos" in body["message"].lower()
+    assert isinstance(body["actions"], list)
+    assert body["actions"][0]["type"] == "none"
+
+    # System message includes LIVE SYSTEM STATUS
+    sys_msg = captured["messages"][0]
+    assert sys_msg["role"] == "system"
+    assert "LIVE SYSTEM STATUS" in sys_msg["content"]
+
+    # User message is last
+    user_msg = captured["messages"][-1]
+    assert user_msg["role"] == "user"
+    assert user_msg["content"] == "how many todos?"
+
+
+def test_pm_chat_history_threaded(env, monkeypatch):
+    """History messages are prepended between system and user turn."""
+    client = env["client"]
+
+    import tgw.http_server as _hs
+    from tgw.apis import llm as _llm
+    monkeypatch.setattr(_hs, "_build_pm_context", lambda: "idle")
+
+    captured_msgs = []
+
+    def fake_post(url, headers, json, timeout):
+        captured_msgs.extend(json.get("messages", []))
+
+        class _R:
+            status_code = 200
+            def raise_for_status(self): pass
+            def json(self_inner):
+                return {"choices": [{"message": {"content": "ok\nACTIONS: [{\"type\":\"none\"}]"}}]}
+
+        return _R()
+
+    monkeypatch.setattr(_llm.requests, "post", fake_post)
+    monkeypatch.setattr(_llm, "get_task_model", lambda cfg, task: ("openrouter", "m"))
+    monkeypatch.setattr(_llm, "_load_openrouter_key", lambda cfg: "k")
+
+    history = [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+    ]
+    client.post(
+        "/api/pm/chat",
+        json={"message": "second question", "history": history},
+        headers=AUTH_HEADERS,
+    )
+    roles = [m["role"] for m in captured_msgs]
+    assert roles == ["system", "user", "assistant", "user"]
+
+
+def test_pm_chat_actions_parsed(env, monkeypatch):
+    """add_todo action in ACTIONS block is returned in the response."""
+    client = env["client"]
+
+    import tgw.http_server as _hs
+    from tgw.apis import llm as _llm
+    monkeypatch.setattr(_hs, "_build_pm_context", lambda: "idle")
+
+    action_payload = [{"type": "add_todo", "agent": "claude", "body": "Fix it", "priority": 30}]
+    resp_text = "You have dead letters.\nACTIONS: " + json.dumps(action_payload)
+
+    def fake_post(url, headers, json, timeout):
+        class _R:
+            status_code = 200
+            def raise_for_status(self): pass
+            def json(self_inner):
+                return {"choices": [{"message": {"content": resp_text}}]}
+        return _R()
+
+    monkeypatch.setattr(_llm.requests, "post", fake_post)
+    monkeypatch.setattr(_llm, "get_task_model", lambda cfg, task: ("openrouter", "m"))
+    monkeypatch.setattr(_llm, "_load_openrouter_key", lambda cfg: "k")
+
+    r = client.post("/api/pm/chat", json={"message": "any issues?"}, headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["actions"][0]["type"] == "add_todo"
+    assert body["actions"][0]["body"] == "Fix it"
+
+
+# ---------------------------------------------------------------------------
+# POST /api/pm/action — execute a PM-proposed action
+# ---------------------------------------------------------------------------
+
+def test_pm_action_add_todo(env, monkeypatch):
+    """add_todo action calls todo_add and returns ok."""
+    client = env["client"]
+
+    added = {}
+
+    def fake_todo_add(agent, body, priority, source):
+        added.update({"agent": agent, "body": body, "priority": priority})
+        return {"ok": True, "id": 999, "agent": agent, "body": body, "priority": priority,
+                "pp_ref": None, "depends_on": [], "plan_anchor": None}
+
+    import tgw.todo as _todo
+    monkeypatch.setattr(_todo, "todo_add", fake_todo_add)
+
+    r = client.post(
+        "/api/pm/action",
+        json={"type": "add_todo", "agent": "claude", "body": "Check dead letters", "priority": 20},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert "999" in body["message"]
+    assert added["agent"] == "claude"
+    assert added["body"] == "Check dead letters"
+
+
+def test_pm_action_add_suggestion(env, monkeypatch):
+    """add_suggestion action calls cmd_suggest and returns ok."""
+    client = env["client"]
+
+    suggested = {}
+
+    def fake_suggest(cfg, text):
+        suggested["text"] = text
+        return {"ok": True, "written": f"- [ ] 2026-06-14T00:00 :: {text}"}
+
+    from tgw import api as _api
+    monkeypatch.setattr(_api, "cmd_suggest", fake_suggest)
+
+    # monkey-patch _cfg to have a plan_vault_path (already set in env)
+    # The pm_action endpoint calls cmd_suggest(_cfg, text) so it goes through the monkeypatch
+    r = client.post(
+        "/api/pm/action",
+        json={"type": "add_suggestion", "text": "Try a new pricing strategy"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert suggested["text"] == "Try a new pricing strategy"
+
+
+def test_pm_action_unknown_type(client):
+    r = client.post(
+        "/api/pm/action",
+        json={"type": "destroy_everything"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 400
+
+
+def test_pm_action_add_todo_missing_body(client):
+    r = client.post(
+        "/api/pm/action",
+        json={"type": "add_todo", "agent": "claude"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 400
+
+
+def test_home_has_pm_chat_widget(client):
+    """Home page includes the PM chat widget, not the old stub."""
+    r = client.get("/form/home")
+    assert "pm-wrap" in r.text
+    assert "pm-messages" in r.text
+    assert "pm-input" in r.text
+    assert "pmSend" in r.text
+    # Old stub should be gone
+    assert "coming soon" not in r.text
+
+
+# ---------------------------------------------------------------------------
+# GET /docs  /docs/{path}  (PP-EDITOR-001 Phase 3f)
+# ---------------------------------------------------------------------------
+
+def _seed_vault(vault_root: Path) -> None:
+    """Write a minimal vault structure for docs tests."""
+    (vault_root / "reference" / "runbooks").mkdir(parents=True)
+    (vault_root / "plan").mkdir(parents=True)
+    (vault_root / "reference" / "runbooks" / "INDEX.md").write_text(
+        "# Runbooks Index\n\nList of runbooks.\n", encoding="utf-8"
+    )
+    (vault_root / "reference" / "runbooks" / "dead-letter-triage.md").write_text(
+        "# Dead Letter Triage\n\nSteps to handle dead letters.\n", encoding="utf-8"
+    )
+    (vault_root / "reference" / "ISSUES.md").write_text(
+        "# Issues\n\nKnown issues go here.\n", encoding="utf-8"
+    )
+    (vault_root / "plan" / "handoff.md").write_text(
+        "# Handoff\n\nSession handoff notes.\n", encoding="utf-8"
+    )
+
+
+def test_docs_redirect(env):
+    """GET /docs redirects to the runbook index."""
+    client = env["client"]
+    vault = Path(env["cfg"]["plan_vault_path"])
+    _seed_vault(vault)
+
+    r = client.get("/docs", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"].startswith("/docs/")
+
+
+def test_docs_renders_markdown(env):
+    """GET /docs/{path} renders a markdown file as HTML."""
+    client = env["client"]
+    vault = Path(env["cfg"]["plan_vault_path"])
+    _seed_vault(vault)
+
+    r = client.get("/docs/reference/runbooks/INDEX.md", follow_redirects=True)
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert "Runbooks Index" in r.text
+    assert "docs-content" in r.text
+    assert "docs-sidebar" in r.text
+
+
+def test_docs_sidebar_lists_docs(env):
+    """Sidebar contains links to other vault docs."""
+    client = env["client"]
+    vault = Path(env["cfg"]["plan_vault_path"])
+    _seed_vault(vault)
+
+    r = client.get("/docs/reference/runbooks/INDEX.md", follow_redirects=True)
+    assert r.status_code == 200
+    assert "dead-letter-triage" in r.text
+    assert "ISSUES" in r.text or "Issues" in r.text
+    assert "handoff" in r.text or "Handoff" in r.text
+
+
+def test_docs_active_link_marked(env):
+    """The current doc's sidebar link has the active class."""
+    client = env["client"]
+    vault = Path(env["cfg"]["plan_vault_path"])
+    _seed_vault(vault)
+
+    r = client.get("/docs/reference/runbooks/INDEX.md", follow_redirects=True)
+    assert r.status_code == 200
+    assert 'class="docs-link active"' in r.text
+
+
+def test_docs_non_md_rejected(env):
+    """Non-.md paths return 404."""
+    client = env["client"]
+    vault = Path(env["cfg"]["plan_vault_path"])
+    _seed_vault(vault)
+
+    r = client.get("/docs/reference/runbooks/INDEX.txt")
+    assert r.status_code == 404
+
+
+def test_docs_path_traversal_rejected(env):
+    """../  traversal outside the vault root returns 403."""
+    client = env["client"]
+    vault = Path(env["cfg"]["plan_vault_path"])
+    _seed_vault(vault)
+    # Write a file outside the vault to confirm it would exist if served.
+    outside = vault.parent / "secret.md"
+    outside.write_text("secret", encoding="utf-8")
+
+    r = client.get("/docs/../secret.md")
+    assert r.status_code in (403, 404)
+
+
+def test_docs_missing_file_404(env):
+    """Missing file returns 404."""
+    client = env["client"]
+    vault = Path(env["cfg"]["plan_vault_path"])
+    _seed_vault(vault)
+
+    r = client.get("/docs/reference/does-not-exist.md")
+    assert r.status_code == 404
+
+
+def test_docs_uses_static_css(env):
+    """Rendered page links the shared tgw.css."""
+    client = env["client"]
+    vault = Path(env["cfg"]["plan_vault_path"])
+    _seed_vault(vault)
+
+    r = client.get("/docs/reference/ISSUES.md", follow_redirects=True)
+    assert r.status_code == 200
+    assert "tgw.css" in r.text
+
+
+def test_docs_plan_handoff(env):
+    """plan/handoff.md can be fetched via /docs/plan/handoff.md."""
+    client = env["client"]
+    vault = Path(env["cfg"]["plan_vault_path"])
+    _seed_vault(vault)
+
+    r = client.get("/docs/plan/handoff.md", follow_redirects=True)
+    assert r.status_code == 200
+    assert "Handoff" in r.text
+
+
+def test_nav_includes_docs_link(client):
+    """nav.js ships a /docs link so every page can reach the doc renderer."""
+    r = client.get("/static/nav.js")
+    assert r.status_code == 200
+    assert "/docs" in r.text
+
+
+# ---------------------------------------------------------------------------
+# GET /api/offers — Best Offers API (PP-EDITOR-001 Phase 3g)
+# POST /api/offers/{offer_id}/respond
+# GET /form/offers
+# ---------------------------------------------------------------------------
+
+def test_get_offers_requires_auth(client):
+    r = client.get("/api/offers")
+    assert r.status_code in (401, 403)
+
+
+def test_get_offers_returns_pending(env, monkeypatch):
+    """GET /api/offers returns pending offers enriched with location + pct_of_ask."""
+    import tgw.http_server as hmod
+    import tgw.offers as offers_mod
+
+    client = env["client"]
+    fake_offers = [
+        {
+            "offer_id": "99001",
+            "listing_id": "12345678",
+            "title": "Red Widget",
+            "sku": SKU_A,
+            "buyer": "buyer123",
+            "offer_price": 9.0,
+            "listing_price": 10.0,
+            "status": "Pending",
+            "expiry": "2026-06-20T00:00:00.000Z",
+        }
+    ]
+
+    monkeypatch.setattr(hmod, "_offer_location", lambda sku: "A1" if sku == SKU_A else "")
+    monkeypatch.setattr(
+        offers_mod, "cmd_offers_list",
+        lambda cfg, **kw: {"ok": True, "offers": list(fake_offers), "auto_accepted": [], "count": 1},
+    )
+
+    r = client.get("/api/offers", headers=AUTH_HEADERS)
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert len(body["offers"]) == 1
+    o = body["offers"][0]
+    assert o["offer_id"] == "99001"
+    assert o["pct_of_ask"] == pytest.approx(90.0)
+    assert o["location"] == "A1"
+
+
+def test_get_offers_error_propagated(env, monkeypatch):
+    """If cmd_offers_list returns ok=False, the API mirrors it."""
+    import tgw.offers as offers_mod
+
+    monkeypatch.setattr(offers_mod, "cmd_offers_list",
+                        lambda cfg, **kw: {"ok": False, "error": "token expired"})
+
+    client = env["client"]
+    r = client.get("/api/offers", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert "token expired" in body["error"]
+
+
+def test_respond_offer_dry_run(env, monkeypatch):
+    """POST /api/offers/{id}/respond with dry_run=True returns preview without eBay call."""
+    import tgw.offers as offers_mod
+
+    client = env["client"]
+
+    def fake_respond(cfg, offer_id, listing_id, action, counter_price=None, *, dry_run=True, by="claude"):
+        return {
+            "ok": True, "dry_run": dry_run, "offer_id": offer_id,
+            "listing_id": listing_id, "action": action,
+            "counter_price": counter_price, "by": by, "at": "2026-06-14T12:00:00Z",
+            "note": "dry-run: no eBay API call made; add --live to submit",
+        }
+
+    monkeypatch.setattr(offers_mod, "cmd_offers_respond", fake_respond)
+
+    r = client.post(
+        "/api/offers/99001/respond",
+        headers={**AUTH_HEADERS, "Content-Type": "application/json"},
+        json={"listing_id": "12345678", "action": "Accept", "dry_run": True},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["dry_run"] is True
+    assert body["action"] == "Accept"
+    assert body["offer_id"] == "99001"
+
+
+def test_respond_offer_counter_price(env, monkeypatch):
+    """POST respond with Counter action passes counter_price."""
+    import tgw.offers as offers_mod
+
+    received = {}
+
+    def fake_respond(cfg, offer_id, listing_id, action, counter_price=None, *, dry_run=True, by="claude"):
+        received.update(action=action, counter_price=counter_price, dry_run=dry_run)
+        return {"ok": True, "dry_run": dry_run, "offer_id": offer_id,
+                "listing_id": listing_id, "action": action,
+                "counter_price": counter_price, "by": by, "at": "2026-06-14T12:00:00Z"}
+
+    monkeypatch.setattr(offers_mod, "cmd_offers_respond", fake_respond)
+
+    client = env["client"]
+    r = client.post(
+        "/api/offers/99001/respond",
+        headers={**AUTH_HEADERS, "Content-Type": "application/json"},
+        json={"listing_id": "12345678", "action": "Counter", "counter_price": 27.50, "dry_run": True},
+    )
+    assert r.status_code == 200
+    assert received["action"] == "Counter"
+    assert received["counter_price"] == pytest.approx(27.50)
+
+
+def test_respond_offer_requires_auth(client):
+    r = client.post(
+        "/api/offers/99001/respond",
+        json={"listing_id": "12345678", "action": "Accept"},
+    )
+    assert r.status_code in (401, 403)
+
+
+def test_form_offers_renders(client):
+    """/form/offers returns HTML with expected structure."""
+    r = client.get("/form/offers")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert "Best Offers" in r.text
+    assert "dry-badge" in r.text
+    assert "Go Live" in r.text
+    assert "/api/offers" in r.text
+
+
+def test_form_offers_no_auth_required(client):
+    """/form/offers is accessible without Bearer token (network trust)."""
+    r = client.get("/form/offers")
+    assert r.status_code == 200
+
+
+def test_nav_includes_offers_link(client):
+    """nav.js includes a link to /form/offers."""
+    r = client.get("/static/nav.js")
+    assert r.status_code == 200
+    assert "/form/offers" in r.text
+
+
+def test_offers_pct_none_when_prices_missing(env, monkeypatch):
+    """pct_of_ask is None when listing_price is absent."""
+    import tgw.offers as offers_mod
+
+    offers = [{"offer_id": "1", "listing_id": "x", "title": "t", "sku": SKU_A,
+               "buyer": "b", "offer_price": 10.0, "listing_price": None,
+               "status": "Pending", "expiry": ""}]
+
+    monkeypatch.setattr(offers_mod, "cmd_offers_list",
+                        lambda cfg, **kw: {"ok": True, "offers": offers, "auto_accepted": [], "count": 1})
+
+    client = env["client"]
+    r = client.get("/api/offers", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    assert r.json()["offers"][0]["pct_of_ask"] is None
+
+
+# ---------------------------------------------------------------------------
+# GET /api/items/pending-revision — revision queue API (PP-EDITOR-001 Phase 3h)
+# POST /api/items/{sku}/revision/apply
+# DELETE /api/items/{sku}/revision
+# GET /form/revisions
+# ---------------------------------------------------------------------------
+
+_REVISION_DRAFT = {
+    "delta": {"title": "New Title"},
+    "baseline": {
+        "hash": "abcd1234abcd1234",
+        "snapshot": {"title": "Old Title"},
+    },
+    "created_at": "2026-06-14T12:00:00Z",
+    "by": "claude",
+}
+
+
+def _write_item_with_revision(itemdata_root, sku, draft=None):
+    d = itemdata_root / sku
+    d.mkdir(parents=True, exist_ok=True)
+    doc = {"sku": sku, "title": "Old Title", "location": "A1"}
+    if draft:
+        doc["revision_draft"] = draft
+    (d / f"{sku}.json").write_text(json.dumps(doc), encoding="utf-8")
+    return doc
+
+
+def _seed_catalog_with_revision(db_path, sku, doc):
+    import sqlite3
+    with sqlite3.connect(str(db_path)) as con:
+        # Ensure catalog table has data column (may differ from http_server fixture)
+        try:
+            con.execute("ALTER TABLE catalog ADD COLUMN data TEXT")
+        except Exception:
+            pass
+        con.execute(
+            "UPDATE catalog SET data = ? WHERE sku = ?",
+            (json.dumps(doc), sku),
+        )
+
+
+def test_pending_revision_requires_auth(client):
+    r = client.get("/api/items/pending-revision")
+    assert r.status_code in (401, 403)
+
+
+def test_pending_revision_empty_when_no_drafts(env):
+    """No items have revision_draft → empty list."""
+    client = env["client"]
+    r = client.get("/api/items/pending-revision", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["count"] == 0
+    assert body["items"] == []
+
+
+def test_pending_revision_returns_items_with_drafts(env):
+    """Items with revision_draft appear in the pending list."""
+    doc = _write_item_with_revision(env["itemdata_root"], SKU_A, _REVISION_DRAFT)
+    _seed_catalog_with_revision(env["cfg"]["sqlite_catalog_path"], SKU_A, doc)
+
+    client = env["client"]
+    r = client.get("/api/items/pending-revision", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert any(i["sku"] == SKU_A for i in body["items"])
+    item = next(i for i in body["items"] if i["sku"] == SKU_A)
+    assert item["draft"]["delta"]["title"] == "New Title"
+    assert item["location"] == "A1"
+
+
+def test_apply_revision_dry_run(env, monkeypatch):
+    """POST /revision/apply with dry_run=True calls cmd_revise_apply."""
+    import tgw.revision as rev_mod
+
+    _write_item_with_revision(env["itemdata_root"], SKU_A, _REVISION_DRAFT)
+
+    def fake_apply(cfg, sku, *, dry_run=True, by="claude"):
+        return {"ok": True, "sku": sku, "dry_run": dry_run, "applied": False,
+                "delta": {}, "diff_lines": ["=== apply diff ==="],
+                "blocking_drift": [], "non_blocking_drift": [],
+                "composed": {}, "baseline_hash": "x", "current_hash": "x", "hash_match": True}
+
+    monkeypatch.setattr(rev_mod, "cmd_revise_apply", fake_apply)
+
+    client = env["client"]
+    r = client.post(
+        f"/api/items/{SKU_A}/revision/apply",
+        headers={**AUTH_HEADERS, "Content-Type": "application/json"},
+        json={"dry_run": True},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["dry_run"] is True
+    assert body["sku"] == SKU_A
+
+
+def test_apply_revision_requires_auth(client):
+    r = client.post(f"/api/items/{SKU_A}/revision/apply",
+                    json={"dry_run": True})
+    assert r.status_code in (401, 403)
+
+
+def test_discard_revision_removes_draft(env):
+    """DELETE /revision removes revision_draft from the item JSON."""
+    _write_item_with_revision(env["itemdata_root"], SKU_A, _REVISION_DRAFT)
+    client = env["client"]
+
+    r = client.delete(f"/api/items/{SKU_A}/revision", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["discarded"] is True
+
+    saved = json.loads((env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text())
+    assert "revision_draft" not in saved
+
+
+def test_discard_revision_noop_when_absent(env):
+    """DELETE /revision on item without a draft returns ok with a note."""
+    _write_item_with_revision(env["itemdata_root"], SKU_A)  # no draft
+    client = env["client"]
+
+    r = client.delete(f"/api/items/{SKU_A}/revision", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert "note" in body
+
+
+def test_discard_revision_404_on_missing_sku(client):
+    r = client.delete("/api/items/tgwNOPE/revision", headers=AUTH_HEADERS)
+    assert r.status_code == 404
+
+
+def test_discard_revision_requires_auth(client):
+    r = client.delete(f"/api/items/{SKU_A}/revision")
+    assert r.status_code in (401, 403)
+
+
+def test_form_revisions_renders(client):
+    """/form/revisions returns HTML with expected structure."""
+    r = client.get("/form/revisions")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert "Revisions" in r.text
+    assert "dry-badge" in r.text
+    assert "Go Live" in r.text
+    assert "/api/items/pending-revision" in r.text
+
+
+def test_form_revisions_no_auth_required(client):
+    """/form/revisions is accessible without Bearer token."""
+    r = client.get("/form/revisions")
+    assert r.status_code == 200
+
+
+def test_nav_includes_revisions_link(client):
+    """nav.js includes a link to /form/revisions."""
+    r = client.get("/static/nav.js")
+    assert r.status_code == 200
+    assert "/form/revisions" in r.text
+
+
+# ---------------------------------------------------------------------------
+# PP-EDITOR-001 Phase 3i — /form/review post-draft review queue
+# ---------------------------------------------------------------------------
+
+_DRAFT_LISTING = {
+    "title": "AI-Enhanced Widget Title",
+    "category_id": "12345",
+    "category_name": "Widgets",
+    "condition": "Used - Good",
+    "condition_id": 3000,
+    "price": 14.99,
+    "aspects_required_total": 3,
+    "aspects_required_filled": 3,
+    "quality": {"score": 82},
+}
+
+
+def _write_item_with_draft(itemdata_root, sku, draft_listing, extra=None):
+    d = itemdata_root / sku
+    d.mkdir(parents=True, exist_ok=True)
+    doc = {"sku": sku, "title": "Widget", "location": "C3", "condition": "Good"}
+    doc["draft_listing"] = draft_listing
+    if extra:
+        doc.update(extra)
+    (d / f"{sku}.json").write_text(json.dumps(doc), encoding="utf-8")
+    return doc
+
+
+def _seed_catalog_with_data(db_path, sku, doc):
+    import sqlite3
+    with sqlite3.connect(str(db_path)) as con:
+        try:
+            con.execute("ALTER TABLE catalog ADD COLUMN data TEXT")
+        except Exception:
+            pass
+        con.execute(
+            "UPDATE catalog SET data = ? WHERE sku = ?",
+            (json.dumps(doc), sku),
+        )
+
+
+def test_review_queue_requires_auth(client):
+    r = client.get("/api/items/review-queue")
+    assert r.status_code in (401, 403)
+
+
+def test_review_queue_empty_when_no_drafts(env):
+    """No items with draft_listing → empty list."""
+    client = env["client"]
+    r = client.get("/api/items/review-queue", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["count"] == 0
+    assert body["items"] == []
+
+
+def test_review_queue_returns_items_with_draft_listing(env):
+    """Items with draft_listing and no offer_id appear in the review queue."""
+    doc = _write_item_with_draft(env["itemdata_root"], SKU_A, _DRAFT_LISTING)
+    _seed_catalog_with_data(env["cfg"]["sqlite_catalog_path"], SKU_A, doc)
+
+    client = env["client"]
+    r = client.get("/api/items/review-queue", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["count"] == 1
+    item = body["items"][0]
+    assert item["sku"] == SKU_A
+    assert item["title"] == "AI-Enhanced Widget Title"
+    assert item["price"] == 14.99
+    assert item["condition"] == "Used - Good"
+    assert item["category_name"] == "Widgets"
+    assert item["location"] == "A1"  # from the catalog row seeded by env fixture
+
+
+def test_review_queue_excludes_staged_items(env):
+    """Items that already have an offer_id are not in the review queue."""
+    doc = _write_item_with_draft(
+        env["itemdata_root"], SKU_A, _DRAFT_LISTING,
+        extra={"ebay_offer": {"offer_id": "offer-abc-123", "status": "UNPUBLISHED"}},
+    )
+    _seed_catalog_with_data(env["cfg"]["sqlite_catalog_path"], SKU_A, doc)
+
+    client = env["client"]
+    r = client.get("/api/items/review-queue", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 0
+
+
+def test_approve_action_sets_status_ready(env, monkeypatch):
+    """POST /api/items/{sku}/action with action=approve sets status=Ready on the item JSON."""
+    monkeypatch.setattr(http_server.state_machine, "enqueue_job", lambda *a, **k: "job-fake")
+
+    _write_item_with_draft(env["itemdata_root"], SKU_A, _DRAFT_LISTING)
+
+    client = env["client"]
+    r = client.post(
+        f"/api/items/{SKU_A}/action",
+        json={"action": "approve"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["status"] == "Ready"
+
+    # Verify the JSON file was updated
+    json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert doc["status"] == "Ready"
+
+
+def test_approve_action_404_on_missing_sku(client):
+    """POST /api/items/{sku}/action approve returns 404 when sku does not exist."""
+    r = client.post(
+        "/api/items/tgw99999999999999999/action",
+        json={"action": "approve"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 404
+
+
+def test_approve_action_requires_auth(client):
+    r = client.post(f"/api/items/{SKU_A}/action", json={"action": "approve"})
+    assert r.status_code in (401, 403)
+
+
+def test_form_review_renders(client):
+    """/form/review returns HTML with expected structure."""
+    r = client.get("/form/review")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert "Review Queue" in r.text
+    assert "/api/items/review-queue" in r.text
+    assert "Approve All" in r.text
+
+
+def test_form_review_no_auth_required(client):
+    """/form/review is accessible without Bearer token."""
+    r = client.get("/form/review")
+    assert r.status_code == 200
+
+
+def test_nav_includes_review_link(client):
+    """nav.js includes a link to /form/review."""
+    r = client.get("/static/nav.js")
+    assert r.status_code == 200
+    assert "/form/review" in r.text
+
+
+def test_nav_review_badge_span_present(client):
+    """nav.js includes the nav-review-count badge span."""
+    r = client.get("/static/nav.js")
+    assert r.status_code == 200
+    assert "nav-review-count" in r.text
+
+
+# ---------------------------------------------------------------------------
+# PP-EDITOR-001 Phase 3j — pipeline monitor + dead-letter manager
+# ---------------------------------------------------------------------------
+
+def _fake_systemctl_output(units):
+    """Build fake `systemctl show --property=Id,ActiveState,SubState,MainPID` output."""
+    blocks = []
+    for i, u in enumerate(units):
+        active = "active" if i % 3 != 2 else "inactive"
+        sub = "running" if active == "active" else "dead"
+        pid = str(1000 + i) if active == "active" else "0"
+        blocks.append(f"Id={u}\nActiveState={active}\nSubState={sub}\nMainPID={pid}\n")
+    return "\n".join(blocks)
+
+
+def test_system_workers_requires_auth(client):
+    r = client.get("/api/system/workers")
+    assert r.status_code in (401, 403)
+
+
+def test_system_workers_returns_unit_list(env, monkeypatch):
+    """GET /api/system/workers returns a worker list with active/sub state."""
+    from tgw.queue import WORKER_QUEUES
+
+    all_units = [f"tgw-worker@{q}.service" for q in WORKER_QUEUES] + ["tgw-http.service"]
+
+    def _fake_run(cmd, **kwargs):
+        class _R:
+            stdout = _fake_systemctl_output(all_units)
+            returncode = 0
+        return _R()
+
+    monkeypatch.setattr(http_server.subprocess, "run", _fake_run)
+
+    r = env["client"].get("/api/system/workers", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["total"] == len(all_units)
+    assert body["up"] > 0
+    workers = body["workers"]
+    assert len(workers) == len(all_units)
+    # First worker should be active
+    assert workers[0]["active"] in ("active", "inactive", "unknown")
+    assert "unit" in workers[0]
+    assert "sub" in workers[0]
+
+
+def test_system_workers_fallback_on_subprocess_failure(env, monkeypatch):
+    """When systemctl fails, workers are returned as 'unknown'."""
+    def _fail(*a, **k):
+        raise OSError("systemctl not found")
+
+    monkeypatch.setattr(http_server.subprocess, "run", _fail)
+
+    r = env["client"].get("/api/system/workers", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert all(w["active"] == "unknown" for w in body["workers"])
+
+
+def test_pipeline_jobs_requires_auth(client):
+    r = client.get("/api/pipeline/jobs")
+    assert r.status_code in (401, 403)
+
+
+def test_pipeline_jobs_returns_active_and_dead(env, monkeypatch):
+    """GET /api/pipeline/jobs returns running and dead_letter jobs."""
+    import datetime
+
+    rows = [
+        {
+            "job_id": "aaaaaaaa-0000-0000-0000-000000000001",
+            "queue_name": "ebay_draft",
+            "state": "running",
+            "sku": SKU_A,
+            "started_at": datetime.datetime(2026, 6, 14, 12, 0, 0),
+            "finished_at": None,
+            "created_at": datetime.datetime(2026, 6, 14, 11, 59, 0),
+            "error_detail": None,
+            "attempt_count": 1,
+            "max_attempts": 5,
+        },
+        {
+            "job_id": "bbbbbbbb-0000-0000-0000-000000000002",
+            "queue_name": "ebay_stage",
+            "state": "dead_letter",
+            "sku": SKU_B,
+            "started_at": datetime.datetime(2026, 6, 14, 10, 0, 0),
+            "finished_at": datetime.datetime(2026, 6, 14, 10, 1, 0),
+            "created_at": datetime.datetime(2026, 6, 14, 10, 0, 0),
+            "error_detail": "eBay API timeout",
+            "attempt_count": 5,
+            "max_attempts": 5,
+        },
+    ]
+
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: _FakeConn(rows),
+    )
+
+    r = env["client"].get("/api/pipeline/jobs", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["count"] == 2
+    jobs = body["jobs"]
+    assert jobs[0]["state"] == "running"
+    assert jobs[0]["sku"] == SKU_A
+    assert jobs[1]["state"] == "dead_letter"
+    assert jobs[1]["error_detail"] == "eBay API timeout"
+    # Timestamps serialised as ISO strings
+    assert isinstance(jobs[0]["started_at"], str)
+
+
+def test_pipeline_jobs_empty(env, monkeypatch):
+    """No active/dead jobs → ok=True, count=0."""
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: _FakeConn([]),
+    )
+    r = env["client"].get("/api/pipeline/jobs", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["count"] == 0
+    assert body["jobs"] == []
+
+
+def test_requeue_job_requires_auth(client):
+    r = client.post("/api/jobs/some-job-id/requeue")
+    assert r.status_code in (401, 403)
+
+
+def test_requeue_job_not_found(env, monkeypatch):
+    """Requeue returns 404 when job_id does not exist."""
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: _FakeConn([]),
+    )
+    r = env["client"].post("/api/jobs/nonexistent-job/requeue", headers=AUTH_HEADERS)
+    assert r.status_code == 404
+
+
+def test_requeue_job_wrong_state(env, monkeypatch):
+    """Requeue returns 400 when job is not in dead_letter state."""
+    rows = [{
+        "job_id": "aaa",
+        "queue_name": "ebay_draft",
+        "payload_json": {"sku": SKU_A},
+        "state": "succeeded",
+        "max_attempts": 3,
+    }]
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: _FakeConn(rows),
+    )
+    r = env["client"].post("/api/jobs/aaa/requeue", headers=AUTH_HEADERS)
+    assert r.status_code == 400
+    assert "dead_letter" in r.json()["detail"]
+
+
+def test_requeue_job_success(env, monkeypatch):
+    """Requeue enqueues a new job and returns ok=True."""
+    rows = [{
+        "job_id": "dead-job-id-001",
+        "queue_name": "ebay_draft",
+        "payload_json": {"sku": SKU_A},
+        "state": "dead_letter",
+        "max_attempts": 3,
+    }]
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: _FakeConn(rows),
+    )
+    monkeypatch.setattr(http_server.state_machine, "enqueue_job", lambda **k: "new-job-id-999")
+
+    r = env["client"].post("/api/jobs/dead-job-id-001/requeue", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["new_job_id"] == "new-job-id-999"
+    assert body["queue"] == "ebay_draft"
+
+
+def test_cancel_job_requires_auth(client):
+    r = client.post("/api/jobs/some-job/cancel")
+    assert r.status_code in (401, 403)
+
+
+def test_cancel_job_not_found(env, monkeypatch):
+    """Cancel returns 404 when job_id does not exist."""
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: _FakeConn([]),
+    )
+    r = env["client"].post("/api/jobs/nonexistent/cancel", headers=AUTH_HEADERS)
+    assert r.status_code == 404
+
+
+def test_cancel_job_wrong_state(env, monkeypatch):
+    """Cancel returns 400 when job is running (not cancellable via this endpoint)."""
+    rows = [{"state": "running"}]
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: _FakeConn(rows),
+    )
+    r = env["client"].post("/api/jobs/aaa/cancel", headers=AUTH_HEADERS)
+    assert r.status_code == 400
+
+
+def test_cancel_job_success(env, monkeypatch):
+    """Cancel a dead-letter job — returns ok=True."""
+    # First call (SELECT) returns dead_letter row; second call (UPDATE) is a no-op fake.
+    call_count = [0]
+    def _connect(*a, **k):
+        call_count[0] += 1
+        rows = [{"state": "dead_letter"}] if call_count[0] == 1 else []
+        return _FakeConn(rows)
+
+    monkeypatch.setattr(http_server.psycopg2, "connect", _connect)
+
+    r = env["client"].post("/api/jobs/dead-letter-job-123/cancel", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["cancelled"] is True
+
+
+def test_form_pipeline_renders(client):
+    """/form/pipeline returns HTML with pipeline monitor structure."""
+    r = client.get("/form/pipeline")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert "Pipeline Monitor" in r.text
+    assert "/api/queue/status" in r.text
+    assert "/api/pipeline/jobs" in r.text
+    assert "/api/system/workers" in r.text
+    assert "Dead-Letter" in r.text
+
+
+def test_form_pipeline_no_auth_required(client):
+    """/form/pipeline is accessible without Bearer token."""
+    r = client.get("/form/pipeline")
+    assert r.status_code == 200
+
+
+def test_nav_includes_pipeline_link(client):
+    """nav.js includes a link to /form/pipeline."""
+    r = client.get("/static/nav.js")
+    assert r.status_code == 200
+    assert "/form/pipeline" in r.text
+
+
+# ---------------------------------------------------------------------------
+# PP-EDITOR-001 Phase 3k — /form/system + supporting API endpoints
+# ---------------------------------------------------------------------------
+
+def test_system_info_requires_auth(client):
+    r = client.get("/api/system/info")
+    assert r.status_code in (401, 403)
+
+
+def test_system_info_returns_disk_token_sync_states(env, monkeypatch):
+    """GET /api/system/info returns all four sub-sections."""
+    import shutil
+
+    # Stub shutil.disk_usage to avoid touching real filesystem
+    FakeUsage = type("FakeUsage", (), {"total": 100_000_000_000, "used": 40_000_000_000, "free": 60_000_000_000})()
+    monkeypatch.setattr(shutil, "disk_usage", lambda *a, **k: FakeUsage)
+
+    # Stub psycopg2 for job state counts
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: _FakeConn([("succeeded", 42), ("dead_letter", 3)]),
+    )
+
+    # Put a fake eBay token in the cfg
+    token_path = env["cfg"]["itemdata_root"].parent / "ebay-token.json"
+    token_path.write_text(
+        __import__("json").dumps({"access_token": "tok", "expires_at": str(int(__import__("time").time()) + 7200)}),
+        encoding="utf-8",
+    )
+    env["cfg"]["ebay_token_path"] = token_path
+
+    r = env["client"].get("/api/system/info", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert "disk" in body
+    assert "itemdata" in body["disk"]
+    assert body["disk"]["itemdata"]["pct"] == 40.0
+    assert "ebay_token" in body
+    assert body["ebay_token"]["exists"] is True
+    assert body["ebay_token"]["remaining_seconds"] > 0
+    assert "sync" in body
+    assert body["sync"]["catalog_mtime"] is not None  # catalog db exists via env fixture
+    assert "job_states" in body
+    assert body["job_states"].get("succeeded") == 42
+    assert body["job_states"].get("dead_letter") == 3
+
+
+def test_system_info_token_missing(env, monkeypatch):
+    """system_info handles missing token file gracefully."""
+    import shutil
+    FakeUsage = type("FakeUsage", (), {"total": 1_000_000, "used": 100_000, "free": 900_000})()
+    monkeypatch.setattr(shutil, "disk_usage", lambda *a, **k: FakeUsage)
+    monkeypatch.setattr(http_server.psycopg2, "connect", lambda *a, **k: _FakeConn([]))
+    nonexistent = env["cfg"]["itemdata_root"].parent / "no-such-token.json"
+    env["cfg"]["ebay_token_path"] = nonexistent
+
+    r = env["client"].get("/api/system/info", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["ebay_token"]["exists"] is False
+    assert body["ebay_token"]["ok"] is False
+
+
+def test_restart_worker_requires_auth(client):
+    r = client.post("/api/system/workers/tgw-http.service/restart")
+    assert r.status_code in (401, 403)
+
+
+def test_restart_worker_invalid_unit(env):
+    """Restart refuses units not in the allowed set."""
+    r = env["client"].post(
+        "/api/system/workers/evil-unit.service/restart",
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 400
+    assert "allowed" in r.json()["detail"]
+
+
+def test_restart_worker_success(env, monkeypatch):
+    """Restart calls systemctl and returns ok=True on zero exit."""
+    class _R:
+        returncode = 0
+        stderr = ""
+    monkeypatch.setattr(http_server.subprocess, "run", lambda *a, **k: _R())
+    r = env["client"].post(
+        "/api/system/workers/tgw-http.service/restart",
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["unit"] == "tgw-http.service"
+
+
+def test_restart_worker_failure(env, monkeypatch):
+    """Restart returns ok=False when systemctl exits non-zero."""
+    class _R:
+        returncode = 1
+        stderr = "Access denied"
+    monkeypatch.setattr(http_server.subprocess, "run", lambda *a, **k: _R())
+    r = env["client"].post(
+        "/api/system/workers/tgw-http.service/restart",
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert "Access denied" in body["stderr"]
+
+
+def test_restart_worker_subprocess_error(env, monkeypatch):
+    """Restart returns ok=False when subprocess.run raises."""
+    def _fail(*a, **k):
+        raise OSError("sudo not found")
+    monkeypatch.setattr(http_server.subprocess, "run", _fail)
+    r = env["client"].post(
+        "/api/system/workers/tgw-http.service/restart",
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert "sudo not found" in body["error"]
+
+
+def test_form_system_renders(client):
+    """/form/system returns HTML with all key sections."""
+    r = client.get("/form/system")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert "System Health" in r.text
+    assert "/api/health" in r.text
+    assert "/api/system/workers" in r.text
+    assert "/api/system/info" in r.text
+    assert "eBay Token" in r.text
+    assert "Disk Usage" in r.text
+    assert "Workers" in r.text
+
+
+def test_form_system_no_auth_required(client):
+    """/form/system is accessible without Bearer token."""
+    r = client.get("/form/system")
+    assert r.status_code == 200
+
+
+def test_nav_includes_system_link(client):
+    """nav.js includes a link to /form/system."""
+    r = client.get("/static/nav.js")
+    assert r.status_code == 200
+    assert "/form/system" in r.text
+
+
+# ---------------------------------------------------------------------------
+# GET /form/intake — intake landing page (PP-EDITOR-001 Phase 3l)
+# ---------------------------------------------------------------------------
+
+def test_intake_landing_returns_200(client):
+    r = client.get("/form/intake")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+
+
+def test_intake_landing_no_auth_required(client):
+    r = client.get("/form/intake")
+    assert r.status_code == 200
+
+
+def test_intake_landing_key_elements(client):
+    """Landing page has SKU input, recent list placeholder, and inventory link."""
+    r = client.get("/form/intake")
+    assert 'id="sku-input"' in r.text
+    assert 'id="recent-list"' in r.text
+    assert "goIntake" in r.text
+    assert "/form/items" in r.text
+    assert "/static/tgw.css" in r.text
+    assert "/static/nav.css" in r.text
+
+
+def test_intake_landing_embeds_web_key(client):
+    """Landing page embeds the web session key (not the master API key) for JS calls."""
+    r = client.get("/form/intake")
+    assert WEB_KEY in r.text
+    assert API_KEY not in r.text
+
+
+def test_intake_landing_scan_hint(client):
+    """Landing page shows the barcode scan hint text."""
+    r = client.get("/form/intake")
+    assert "scan" in r.text.lower() or "barcode" in r.text.lower()
+
+
+# ---------------------------------------------------------------------------
+# GET /form/intake/{sku} — enhanced intake form (PP-EDITOR-001 Phase 3l)
+# ---------------------------------------------------------------------------
+
+def test_intake_form_has_photo_badge(env):
+    """Intake form shows photo count badge; 0-photo badge has warning class."""
+    r = env["client"].get(f"/form/intake/{SKU_A}")
+    assert r.status_code == 200
+    assert 'id="photo-badge"' in r.text
+    assert "0 photos" in r.text
+    assert "badge-photo-warn" in r.text
+
+
+def test_intake_form_photo_count_with_images(env):
+    """Intake form shows correct photo count when images exist (SKU_B has 2)."""
+    r = env["client"].get(f"/form/intake/{SKU_B}")
+    assert r.status_code == 200
+    assert "2 photos" in r.text
+    # Badge element should use non-warn class — check the element class attribute directly
+    assert 'class="badge badge-photo">' in r.text
+
+
+def test_intake_form_has_status_badge(env):
+    """Intake form shows an item-status badge."""
+    r = env["client"].get(f"/form/intake/{SKU_A}")
+    assert r.status_code == 200
+    assert 'id="status-badge"' in r.text
+    assert 'badge-status' in r.text
+
+
+def test_intake_form_has_action_buttons(env):
+    """Intake form shows identify and re-draft action buttons."""
+    r = env["client"].get(f"/form/intake/{SKU_A}")
+    assert r.status_code == 200
+    assert "triggerAction" in r.text
+    assert "btn-identify" in r.text
+    assert "Re-draft" in r.text
+
+
+def test_intake_form_start_identify_label(env):
+    """Intake form shows 'Start Identify' when ai_identified is not set."""
+    r = env["client"].get(f"/form/intake/{SKU_A}")
+    assert "Start Identify" in r.text
+
+
+def test_intake_form_reidentify_label(env):
+    """Intake form shows 'Re-identify' when ai_identified is True."""
+    _write_item(env["itemdata_root"], "tgw20260401000000010", {
+        "sku": "tgw20260401000000010",
+        "ai_identified": True,
+    })
+    r = env["client"].get("/form/intake/tgw20260401000000010")
+    assert r.status_code == 200
+    assert "Re-identify" in r.text
+
+
+def test_intake_form_has_polling_js(env):
+    """Intake form includes live polling JS for queue job status."""
+    r = env["client"].get(f"/form/intake/{SKU_A}")
+    assert "startPolling" in r.text
+    assert "pollTimer" in r.text
+    assert "TERMINAL" in r.text
+    assert "setInterval" in r.text
+
+
+def test_intake_form_has_view_detail_link(env):
+    """Intake form has a 'View detail' link to /form/items/{sku}."""
+    r = env["client"].get(f"/form/intake/{SKU_A}")
+    assert f"/form/items/{SKU_A}" in r.text
+    assert "detail-link" in r.text
+
+
+def test_intake_form_embeds_web_key(env):
+    """Intake form embeds the web session key (not the master API key) for authenticated calls."""
+    r = env["client"].get(f"/form/intake/{SKU_A}")
+    assert WEB_KEY in r.text
+    assert API_KEY not in r.text
+
+
+def test_intake_form_has_job_badge_placeholder(env):
+    """Intake form includes hidden job-badge element for live updates."""
+    r = env["client"].get(f"/form/intake/{SKU_A}")
+    assert 'id="job-badge"' in r.text
+
+
+def test_nav_includes_intake_link(client):
+    """nav.js includes a link to /form/intake."""
+    r = client.get("/static/nav.js")
+    assert r.status_code == 200
+    assert "/form/intake" in r.text

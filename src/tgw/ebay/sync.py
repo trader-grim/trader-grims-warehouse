@@ -139,10 +139,12 @@ def _resolve_fulfillment_id(cfg: Dict[str, Any], ebay_category_id: str,
     """
     Resolve the fulfillment (shipping) policy id by precedence:
 
-      0. free_shipping flag          — ``fulfillment_policy_free_shipping`` (PP-FREESHIP-001)
+      0. per-item shipping_profile  (PP-HINT-001) — a name mapped in
+         ``fulfillment_policy_by_profile``; unmapped names fall through rather than
+         being forwarded to eBay as a raw policy ID.  Takes precedence over
+         free_shipping so bulky/oversized profiles are honoured.
+      1. free_shipping flag          — ``fulfillment_policy_free_shipping`` (PP-FREESHIP-001)
          Used when the item's price already includes shipping cost.
-      1. per-item shipping_profile  (PP-HINT-001) — a name in
-         ``fulfillment_policy_by_profile``, or a raw policy id if not mapped
       2. per-category override       — ``fulfillment_policy_by_category``
       3. Standard Envelope gate      — ``fulfillment_policy_envelope`` if
          size_class == 'flat' AND thickness_in is known and <= 0.25 in.
@@ -153,18 +155,24 @@ def _resolve_fulfillment_id(cfg: Dict[str, Any], ebay_category_id: str,
 
     Returns None if nothing resolves (caller then falls back to the account API).
     """
+    if shipping_profile:
+        by_profile = cfg.get('fulfillment_policy_by_profile', {})
+        resolved = by_profile.get(str(shipping_profile))
+        if resolved:
+            return str(resolved)
+        # Unmapped profile — fall through rather than forward the name verbatim as a policy ID.
+        # Log so misconfigured/typo'd profile names are visible before eBay rejects the listing.
+        log.warning('sync: shipping_profile %r not in fulfillment_policy_by_profile — falling through',
+                    shipping_profile)
+
     if free_shipping:
         policy = cfg.get('fulfillment_policy_free_shipping')
         if policy:
             return str(policy)
 
-    if shipping_profile:
-        by_profile = cfg.get('fulfillment_policy_by_profile', {})
-        return by_profile.get(str(shipping_profile), str(shipping_profile))
-
     by_cat = cfg.get('fulfillment_policy_by_category', {})
     if str(ebay_category_id) in by_cat:
-        return by_cat[str(ebay_category_id)]
+        return str(by_cat[str(ebay_category_id)])
 
     # Standard Envelope gate: only flat items with confirmed thickness <= 0.25 in qualify.
     # Items with unknown thickness (None) are intentionally excluded — assign envelope

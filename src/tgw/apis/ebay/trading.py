@@ -4,6 +4,8 @@ tgw.apis.ebay.trading — eBay Trading API client (XML/IAF-token).
 Used for operations not available in the REST Inventory API:
   - GetMyeBaySelling: all active listings regardless of how they were created
   - revise_item_sku: update the custom label (SKU) on a live listing in place
+  - get_best_offers: poll incoming Best Offer requests
+  - respond_to_best_offer: Accept / Decline / Counter a Best Offer
 
 Auth: same OAuth access token as the REST API, passed via X-EBAY-API-IAF-TOKEN.
 Response: XML parsed with ElementTree.
@@ -14,7 +16,7 @@ from __future__ import annotations
 import logging
 import xml.etree.ElementTree as ET
 from datetime import datetime
-from typing import Any, Dict, Generator, List
+from typing import Any, Dict, Generator, List, Optional
 
 import requests
 
@@ -275,3 +277,138 @@ def revise_item_sku(cfg: Dict[str, Any], listing_id: str, new_sku: str) -> None:
 </ReviseFixedPriceItemRequest>'''
     trading_call(cfg, 'ReviseFixedPriceItem', xml_body)
     log.info('ReviseFixedPriceItem: listing %s custom label → %s', listing_id, new_sku)
+
+
+# ---------------------------------------------------------------------------
+# Best Offer API (PP-OFFER-001)
+# ---------------------------------------------------------------------------
+
+def _offer_from_xml(offer_el: ET.Element) -> Dict[str, Any]:
+    """Extract a flat dict from a <BestOffer> element."""
+    def txt(tag: str) -> str:
+        el = offer_el.find(_t(tag))
+        return (el.text or '').strip() if el is not None else ''
+
+    item_el = offer_el.find(_t('Item'))
+    listing_id = ''
+    title = ''
+    sku = ''
+    listing_price: Optional[float] = None
+    if item_el is not None:
+        id_el = item_el.find(_t('ItemID'))
+        listing_id = (id_el.text or '').strip() if id_el is not None else ''
+        title_el = item_el.find(_t('Title'))
+        title = (title_el.text or '').strip() if title_el is not None else ''
+        sku_el = item_el.find(_t('SKU'))
+        if sku_el is None:
+            sku_el = item_el.find(_t('CustomLabel'))
+        sku = (sku_el.text or '').strip() if sku_el is not None else ''
+        selling = item_el.find(_t('SellingStatus'))
+        if selling is not None:
+            price_el = selling.find(_t('CurrentPrice'))
+            if price_el is not None and price_el.text:
+                try:
+                    listing_price = float(price_el.text)
+                except ValueError:
+                    pass
+
+    buyer_el = offer_el.find(_t('Buyer'))
+    buyer = ''
+    if buyer_el is not None:
+        uid_el = buyer_el.find(_t('UserID'))
+        buyer = (uid_el.text or '').strip() if uid_el is not None else ''
+
+    offer_price: Optional[float] = None
+    price_el = offer_el.find(_t('Price'))
+    if price_el is not None and price_el.text:
+        try:
+            offer_price = float(price_el.text)
+        except ValueError:
+            pass
+
+    return {
+        'offer_id': txt('BestOfferID'),
+        'listing_id': listing_id,
+        'title': title,
+        'sku': sku,
+        'buyer': buyer,
+        'offer_price': offer_price,
+        'listing_price': listing_price,
+        'status': txt('BestOfferStatus'),
+        'expiry': txt('ExpirationTime'),
+    }
+
+
+def get_best_offers(
+    cfg: Dict[str, Any],
+    listing_id: Optional[str] = None,
+    status: str = 'Pending',
+) -> Generator[Dict[str, Any], None, None]:
+    """Yield incoming Best Offers from GetBestOffers.
+
+    listing_id: filter to a specific listing (omit for all items).
+    status: 'Pending' | 'All' | 'Declined' | 'Accepted'.
+    Handles pagination automatically.
+    """
+    page = 1
+    total_pages = 1
+
+    while page <= total_pages:
+        item_id_line = f'  <ItemID>{listing_id}</ItemID>\n' if listing_id else ''
+        xml_body = (
+            f'<?xml version="1.0" encoding="utf-8"?>\n'
+            f'<GetBestOffersRequest xmlns="{_NS}">\n'
+            f'{item_id_line}'
+            f'  <BestOfferStatus>{status}</BestOfferStatus>\n'
+            f'  <DetailLevel>ReturnAll</DetailLevel>\n'
+            f'  <Pagination>\n'
+            f'    <EntriesPerPage>200</EntriesPerPage>\n'
+            f'    <PageNumber>{page}</PageNumber>\n'
+            f'  </Pagination>\n'
+            f'</GetBestOffersRequest>'
+        )
+
+        root = trading_call(cfg, 'GetBestOffers', xml_body, timeout=60)
+
+        pagination = root.find(_t('PaginationResult'))
+        if pagination is not None:
+            total_pages = int(pagination.findtext(_t('TotalNumberOfPages')) or '1')
+
+        offer_array = root.find(_t('BestOfferArray'))
+        if offer_array is not None:
+            for offer_el in offer_array.findall(_t('BestOffer')):
+                yield _offer_from_xml(offer_el)
+
+        page += 1
+
+
+def respond_to_best_offer(
+    cfg: Dict[str, Any],
+    offer_id: str,
+    listing_id: str,
+    action: str,
+    counter_price: Optional[float] = None,
+) -> None:
+    """Submit a response to a Best Offer via RespondToBestOffer.
+
+    action: 'Accept' | 'Decline' | 'Counter'
+    counter_price: required when action='Counter'.
+    Raises RuntimeError on API failure.
+    """
+    counter_block = ''
+    if action == 'Counter' and counter_price is not None:
+        counter_block = (
+            f'  <CounterOfferPrice currencyID="USD">{counter_price:.2f}</CounterOfferPrice>\n'
+            f'  <CounterOfferQuantity>1</CounterOfferQuantity>\n'
+        )
+    xml_body = (
+        f'<?xml version="1.0" encoding="utf-8"?>\n'
+        f'<RespondToBestOfferRequest xmlns="{_NS}">\n'
+        f'  <ItemID>{listing_id}</ItemID>\n'
+        f'  <BestOfferID>{offer_id}</BestOfferID>\n'
+        f'  <Action>{action}</Action>\n'
+        f'{counter_block}'
+        f'</RespondToBestOfferRequest>'
+    )
+    trading_call(cfg, 'RespondToBestOffer', xml_body, timeout=30)
+    log.info('RespondToBestOffer: offer=%s listing=%s action=%s', offer_id, listing_id, action)

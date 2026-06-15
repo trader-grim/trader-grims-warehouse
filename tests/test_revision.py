@@ -1,16 +1,20 @@
-"""Tests for tgw.revision — PP-REVISION-001 first slice (dry-run delta computer)."""
+"""Tests for tgw.revision — PP-REVISION-001 slices 1 and 2."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from tgw.revision import (
     baseline_hash,
     cmd_revise,
+    cmd_revise_apply,
+    compose_revised_state,
     detect_drift,
+    format_apply_diff,
     format_diff,
     live_mirror,
     parse_assignments,
@@ -360,3 +364,237 @@ class TestFormatDiff:
         lines = format_diff(item, delta, {}, [])
         full = "\n".join(lines)
         assert "new field" in full.lower()
+
+
+# ---------------------------------------------------------------------------
+# compose_revised_state
+# ---------------------------------------------------------------------------
+
+class TestComposeRevisedState:
+    def test_delta_overwrites_mirror(self):
+        mirror = {"title": "Old", "price": 20.0, "qty": 1}
+        delta = {"title": "New", "price": 25.0}
+        composed = compose_revised_state(mirror, delta)
+        assert composed["title"] == "New"
+        assert composed["price"] == 25.0
+        assert composed["qty"] == 1  # preserved
+
+    def test_mirror_keys_preserved(self):
+        mirror = {"listing_id": "abc", "status": "Active"}
+        delta = {"price": 9.99}
+        composed = compose_revised_state(mirror, delta)
+        assert composed["listing_id"] == "abc"
+        assert composed["status"] == "Active"
+        assert composed["price"] == 9.99
+
+    def test_empty_delta_returns_mirror_copy(self):
+        mirror = {"listing_id": "abc"}
+        composed = compose_revised_state(mirror, {})
+        assert composed == mirror
+        assert composed is not mirror  # must be a copy
+
+    def test_new_key_in_delta_added(self):
+        mirror = {"listing_id": "abc"}
+        delta = {"brand_new": "value"}
+        composed = compose_revised_state(mirror, delta)
+        assert composed["brand_new"] == "value"
+        assert composed["listing_id"] == "abc"
+
+
+# ---------------------------------------------------------------------------
+# _overlapping_drift (via format_apply_diff indirectly, but also directly)
+# ---------------------------------------------------------------------------
+
+class TestOverlappingDrift:
+    def test_overlapping_field_is_blocking(self):
+        from tgw.revision import _overlapping_drift
+        delta = {"price": 25.0, "title": "New"}
+        drift = [
+            {"field": "price", "baseline": 20.0, "current": 22.0},
+            {"field": "status", "baseline": "Active", "current": "Ended"},
+        ]
+        blocking = _overlapping_drift(delta, drift)
+        assert len(blocking) == 1
+        assert blocking[0]["field"] == "price"
+
+    def test_non_overlapping_is_empty(self):
+        from tgw.revision import _overlapping_drift
+        delta = {"title": "New"}
+        drift = [{"field": "status", "baseline": "Active", "current": "Ended"}]
+        assert _overlapping_drift(delta, drift) == []
+
+    def test_empty_drift_returns_empty(self):
+        from tgw.revision import _overlapping_drift
+        assert _overlapping_drift({"price": 1}, []) == []
+
+
+# ---------------------------------------------------------------------------
+# format_apply_diff
+# ---------------------------------------------------------------------------
+
+class TestFormatApplyDiff:
+    def test_shows_field_change(self):
+        delta = {"price": 25.0}
+        mirror = {"price": 20.0}
+        composed = {"price": 25.0}
+        lines = format_apply_diff(delta, mirror, composed, [], [])
+        full = "\n".join(lines)
+        assert "price" in full
+        assert "20.0" in full
+        assert "25.0" in full
+
+    def test_shows_blocking_drift_section(self):
+        blocking = [{"field": "price", "baseline": 20.0, "current": 22.0}]
+        lines = format_apply_diff({"price": 25.0}, {}, {}, blocking, [])
+        full = "\n".join(lines)
+        assert "BLOCKING" in full
+        assert "price" in full
+
+    def test_shows_non_blocking_drift_section(self):
+        non_blocking = [{"field": "status", "baseline": "Active", "current": "Ended"}]
+        lines = format_apply_diff({"price": 25.0}, {}, {}, [], non_blocking)
+        full = "\n".join(lines)
+        assert "non-blocking" in full.lower()
+        assert "status" in full
+
+    def test_no_change_skipped_in_apply_diff(self):
+        delta = {"price": 20.0}
+        mirror = {"price": 20.0}  # same value — no change
+        lines = format_apply_diff(delta, mirror, {"price": 20.0}, [], [])
+        full = "\n".join(lines)
+        assert "was:" not in full  # no diff line emitted when value is the same
+
+
+# ---------------------------------------------------------------------------
+# cmd_revise_apply
+# ---------------------------------------------------------------------------
+
+def _make_item_with_draft(cfg, sku, delta, mirror=None, extra=None):
+    """Helper: create an item JSON with a pre-written revision_draft."""
+    import json as _json
+
+    from tgw.revision import baseline_hash as _bh
+    mirror = mirror or {}
+    snapshot = dict(mirror)
+    b_hash = _bh(snapshot)
+    doc = {
+        "sku": sku,
+        **(extra or {}),
+        "ebay_listing": mirror,
+        "revision_draft": {
+            "delta": delta,
+            "baseline": {"hash": b_hash, "snapshot": snapshot},
+            "created_at": "2026-06-14T00:00:00Z",
+            "by": "claude",
+        },
+    }
+    sku_dir = Path(cfg["itemdata_root"]) / sku
+    sku_dir.mkdir(parents=True, exist_ok=True)
+    p = sku_dir / f"{sku}.json"
+    p.write_text(_json.dumps(doc), encoding="utf-8")
+    return p
+
+
+class TestCmdReviseApply:
+    def test_missing_item_json_returns_error(self, tmp_path):
+        cfg = _make_cfg(tmp_path)
+        result = cmd_revise_apply(cfg, "tgw999")
+        assert result["ok"] is False
+        assert "not found" in result["error"]
+
+    def test_no_revision_draft_returns_error(self, tmp_path):
+        cfg = _make_cfg(tmp_path)
+        _make_item(cfg, "tgw001")
+        result = cmd_revise_apply(cfg, "tgw001")
+        assert result["ok"] is False
+        assert "revision_draft" in result["error"]
+
+    def test_empty_delta_returns_error(self, tmp_path):
+        cfg = _make_cfg(tmp_path)
+        # Write item with draft that has no delta
+        sku_dir = Path(cfg["itemdata_root"]) / "tgw001"
+        sku_dir.mkdir(parents=True, exist_ok=True)
+        doc = {
+            "sku": "tgw001",
+            "revision_draft": {
+                "delta": {},
+                "baseline": {"hash": "abc", "snapshot": {}},
+                "created_at": "2026-06-14T00:00:00Z",
+                "by": "claude",
+            },
+        }
+        (sku_dir / "tgw001.json").write_text(json.dumps(doc))
+        result = cmd_revise_apply(cfg, "tgw001")
+        assert result["ok"] is False
+        assert "empty" in result["error"]
+
+    def test_dry_run_success_no_drift(self, tmp_path):
+        mirror = {"listing_id": "abc", "status": "Active", "price": 20.0}
+        cfg = _make_cfg(tmp_path)
+        _make_item_with_draft(cfg, "tgw001", delta={"price": 25.0}, mirror=mirror)
+        result = cmd_revise_apply(cfg, "tgw001", dry_run=True)
+        assert result["ok"] is True
+        assert result["dry_run"] is True
+        assert result["applied"] is False
+        assert result["delta"] == {"price": 25.0}
+        assert result["composed"]["price"] == 25.0
+        assert result["composed"]["listing_id"] == "abc"  # mirror preserved
+        assert result["blocking_drift"] == []
+        assert result["hash_match"] is True
+
+    def test_blocking_drift_refuses_apply(self, tmp_path):
+        mirror_v1 = {"listing_id": "abc", "price": 20.0}
+        cfg = _make_cfg(tmp_path)
+        path = _make_item_with_draft(cfg, "tgw001", delta={"price": 25.0}, mirror=mirror_v1)
+
+        # Simulate mirror drift on the same field as delta
+        item = json.loads(path.read_text())
+        item["ebay_listing"]["price"] = 22.0  # drifted!
+        path.write_text(json.dumps(item))
+
+        result = cmd_revise_apply(cfg, "tgw001", dry_run=True)
+        assert result["ok"] is False
+        assert "drifted" in result["error"]
+        assert len(result["blocking_drift"]) == 1
+        assert result["blocking_drift"][0]["field"] == "price"
+
+    def test_non_blocking_drift_allowed(self, tmp_path):
+        mirror_v1 = {"listing_id": "abc", "price": 20.0, "status": "Active"}
+        cfg = _make_cfg(tmp_path)
+        path = _make_item_with_draft(cfg, "tgw001", delta={"price": 25.0}, mirror=mirror_v1)
+
+        # Drift on status (not in delta → non-blocking)
+        item = json.loads(path.read_text())
+        item["ebay_listing"]["status"] = "Ended"
+        path.write_text(json.dumps(item))
+
+        result = cmd_revise_apply(cfg, "tgw001", dry_run=True)
+        assert result["ok"] is True
+        assert result["blocking_drift"] == []
+        assert len(result["non_blocking_drift"]) == 1
+        assert result["non_blocking_drift"][0]["field"] == "status"
+
+    def test_live_write_gated_by_apply_enabled(self, tmp_path):
+        mirror = {"listing_id": "abc", "price": 20.0}
+        cfg = _make_cfg(tmp_path)
+        _make_item_with_draft(cfg, "tgw001", delta={"price": 25.0}, mirror=mirror)
+        with patch("tgw.revision._APPLY_ENABLED", False):
+            result = cmd_revise_apply(cfg, "tgw001", dry_run=False)
+        assert result["ok"] is False
+        assert "not yet enabled" in result["error"].lower() or "not yet enabled" in result["error"]
+
+    def test_returns_diff_lines(self, tmp_path):
+        mirror = {"listing_id": "abc", "price": 20.0}
+        cfg = _make_cfg(tmp_path)
+        _make_item_with_draft(cfg, "tgw001", delta={"price": 25.0}, mirror=mirror)
+        result = cmd_revise_apply(cfg, "tgw001", dry_run=True)
+        assert result["ok"] is True
+        assert isinstance(result["diff_lines"], list)
+        assert len(result["diff_lines"]) > 0
+
+    def test_returns_sku_in_result(self, tmp_path):
+        mirror = {"listing_id": "abc"}
+        cfg = _make_cfg(tmp_path)
+        _make_item_with_draft(cfg, "tgw001", delta={"title": "X"}, mirror=mirror)
+        result = cmd_revise_apply(cfg, "tgw001", dry_run=True)
+        assert result["sku"] == "tgw001"

@@ -545,3 +545,36 @@ def test_verify_no_condition_is_clean(tmp_path):
     item_dir, _ = _make_item(tmp_path, sku, doc)
     rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
     assert 'wrong_condition' not in rules
+
+
+# ---------------------------------------------------------------------------
+# PP-VERIFY-001: leading_space_title rule + auto-fix
+# ---------------------------------------------------------------------------
+
+def test_verify_leading_space_title_warns(tmp_path):
+    """Title with a leading space triggers leading_space_title warning."""
+    sku = 'tgw202601010000060'
+    doc = {'sku': sku, 'title': ' Widget With Leading Space Here', 'location': 'P22'}
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'leading_space_title' in rules
+
+
+def test_compute_fixes_leading_space_lstrips_title():
+    """_compute_fixes proposes lstrip() fix for a leading-space title."""
+    fixes = _compute_fixes({'title': ' Widget With Leading Space Here'})
+    assert len(fixes) == 1
+    assert fixes[0]['rule'] == 'leading_space_title'
+    assert fixes[0]['field'] == 'title'
+    assert fixes[0]['after'] == 'Widget With Leading Space Here'
+
+
+def test_compute_fixes_template_prefix_empty_body_not_fixable():
+    """'  TEMPLATE: ' (prefix + empty body) must not emit a leading_space_title fix.
+
+    _strip_template_prefix returns None for an empty body, but the elif branch
+    must not fire — lstripping would produce 'TEMPLATE: ', which still triggers
+    stale_template_prefix on the next verify pass.
+    """
+    fixes = _compute_fixes({'title': '  TEMPLATE: '})
+    assert fixes == []

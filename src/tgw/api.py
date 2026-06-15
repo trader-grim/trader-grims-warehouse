@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from .alt_text import cmd_alt_text, cmd_alt_text_batch
+from .alt_text import cmd_alt_text, cmd_alt_text_batch, cmd_alt_text_gemini_batch
 from .catalog import (
     build_all_catalogs,
     build_full_catalog,
@@ -54,7 +54,15 @@ from .thumbnail import build_thumbnail_cache
 
 
 def list_items(
-    cfg: Dict[str, Any], search: str = "", location: str = "", status: str = "", limit: Optional[int] = None, date_from: str = "", date_to: str = "", search_field: Optional[str] = None
+    cfg: Dict[str, Any],
+    search: str = "",
+    location: str = "",
+    status: str = "",
+    limit: Optional[int] = None,
+    date_from: str = "",
+    date_to: str = "",
+    search_field: Optional[str] = None,
+    empty_field: Optional[str] = None,
 ) -> Dict[str, Any]:
     """List items matching filters.  Always returns {'ok': True, 'items': [...]}."""
     # Load from best available source
@@ -88,6 +96,10 @@ def list_items(
             if date_from and d < date_from:
                 continue
             if date_to and d > date_to:
+                continue
+        if empty_field:
+            val = item.get(empty_field)
+            if not (val is None or (isinstance(val, str) and not val.strip())):
                 continue
         out.append(item)
         if limit not in (None, 0) and len(out) >= int(limit):
@@ -347,15 +359,81 @@ def cmd_restart_workers(queues: Optional[List[str]] = None, dry_run: bool = Fals
 # CLI
 # ---------------------------------------------------------------------------
 
+class _GroupedHelpFormatter(argparse.RawDescriptionHelpFormatter):
+    """Suppress the flat {get,list,...} listing; description shows the grouped view."""
+    def _format_action(self, action: argparse.Action) -> str:
+        if isinstance(action, argparse._SubParsersAction):
+            return ""
+        return super()._format_action(action)
+
+
+_HELP_GROUPS: list[tuple[str, list[str]]] = [
+    ("Read / Search", [
+        "get", "list", "search", "resolve", "quality", "hint-trail",
+        "reprice-suggest", "staged", "velocity-report", "seo-audit", "locate",
+    ]),
+    ("Write / Update", [
+        "update", "update-where", "update-title", "update-location", "update-verified",
+        "update-status", "set-shipping", "bulk", "price-freeship", "hint",
+        "data-scrub", "revise", "alt-text",
+    ]),
+    ("Context / Intake", [
+        "set-context", "get-context", "clear-context", "set-template", "create-item",
+    ]),
+    ("Pipeline", [
+        "enqueue-sku", "requeue-identify", "resolve-legacy", "ready", "publish",
+        "alt-text-batch",
+    ]),
+    ("eBay", [
+        "ebay-pull", "ebay-sweep", "import-sold-csv", "sku-migrate",
+        "setup-ebay-hooks", "build-archive-index", "history-index",
+        "strikethrough-check", "store-categories", "store-category", "get-ebay-token",
+        "offers",
+    ]),
+    ("Catalog / Build", [
+        "build-full", "build-search", "build-locations", "build-full-csv",
+        "build-search-csv", "build-sqlite", "build-thumbnails", "build-all",
+        "ensure-catalog", "lookup", "build-fingerprints", "export-catalog",
+        "category-groups", "catalog-verify",
+    ]),
+    ("Ops / Admin", [
+        "health", "serve", "restart-workers", "restart-ebay-token",
+        "dead-letter", "queue-history", "todo", "plan", "ai-usage", "report",
+        "admin-file", "classify-suggestions", "picklist", "print-label", "mvitems",
+        "suggest", "quiet-check", "perp-run", "whisper-suggest",
+        "claude-help", "clip", "suggest-edit", "promo",
+    ]),
+]
+
+
+def _make_grouped_description(sub: argparse.Action) -> str:
+    # _choices_actions is a CPython implementation detail of _SubParsersAction that
+    # carries help strings not exposed via the public `sub.choices` dict.  Fall back
+    # to an empty dict if the attribute ever disappears — help text becomes blank but
+    # nothing crashes.
+    help_map: dict[str, str] = {
+        a.dest: (a.help or "")
+        for a in getattr(sub, "_choices_actions", [])
+    }
+    lines: list[str] = ["TGW inventory management — subcommands by group:\n"]
+    for group_name, commands in _HELP_GROUPS:
+        lines.append(f"  {group_name}:")
+        for cmd in commands:
+            h = help_map.get(cmd, "")
+            lines.append(f"    {cmd:<22} {h}")
+        lines.append("")
+    lines.append("Use 'tgw COMMAND --help' for command-specific options.")
+    return "\n".join(lines)
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tgw",
         description="TGW inventory management API",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=_GroupedHelpFormatter,
     )
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Path to config JSON (default: %(default)s)")
-    sub = parser.add_subparsers(dest="op", required=True)
+    sub = parser.add_subparsers(dest="op", required=True, metavar="COMMAND")
 
     # --- read ---
     p = sub.add_parser("get", help="get full item record by SKU")
@@ -372,11 +450,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--skus-only", action="store_true", dest="skus_only", help="output one SKU per line (pipe-friendly)")
 
     p = sub.add_parser("search", help="search items by text (shorthand for list --search TEXT)")
-    p.add_argument("text", help="search text")
+    p.add_argument("text", nargs="?", default="", help="search text")
     p.add_argument("--location", default="")
     p.add_argument("--status", default="")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--skus-only", action="store_true", dest="skus_only")
+    p.add_argument("--empty", default=None, dest="empty_field", metavar="FIELD", help="return only items where FIELD is missing/null/empty-string")
 
     p = sub.add_parser("resolve", help="resolve identifiers to a set of SKUs")
     p.add_argument("--sku", default=None)
@@ -545,15 +624,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("hint-trail", help="show identification history for an item")
     p.add_argument("sku", help="SKU to inspect")
 
-    p = sub.add_parser("requeue", help="bulk-enqueue ai_identify for items matching a filter")
-    p.add_argument("--no-title", action="store_true", help="items with photos but title still equals SKU (truly unprocessed)")
-    p.add_argument("--unidentified", action="store_true", help="all items where ai_identified is not True")
-    p.add_argument("--hint-set", action="store_true", help="items with ai_hint set but not yet ai_identified")
-    p.add_argument("--no-draft", action="store_true", help="items that are ai_identified but have no draft_listing")
-    p.add_argument("--no-price", action="store_true", help="items with draft_listing but no price set")
-    p.add_argument("--catalog-only", action="store_true", help="identify for catalog only — skip ebay_draft cascade")
-    p.add_argument("--limit", type=int, default=100, help="max items to queue (default: 100; use 0 for unlimited)")
-    p.add_argument("--run", action="store_true", help="actually queue jobs (default is dry-run)")
+    for _name in ("requeue-identify", "requeue"):
+        p = sub.add_parser(_name, help="bulk-enqueue ai_identify for items matching a filter" + (" (deprecated alias)" if _name == "requeue" else ""))
+        p.add_argument("--no-title", action="store_true", help="items with photos but title still equals SKU (truly unprocessed)")
+        p.add_argument("--unidentified", action="store_true", help="all items where ai_identified is not True")
+        p.add_argument("--hint-set", action="store_true", help="items with ai_hint set but not yet ai_identified")
+        p.add_argument("--no-draft", action="store_true", help="items that are ai_identified but have no draft_listing")
+        p.add_argument("--no-price", action="store_true", help="items with draft_listing but no price set")
+        p.add_argument("--catalog-only", action="store_true", help="identify for catalog only — skip ebay_draft cascade")
+        p.add_argument("--limit", type=int, default=100, help="max items to queue (default: 100; use 0 for unlimited)")
+        p.add_argument("--run", action="store_true", help="actually queue jobs (default is dry-run)")
 
     p = sub.add_parser("resolve-legacy", help="mark item(s) as having legacy eBay listing cleared, enabling ebay_stage to proceed")
     p.add_argument("skus", nargs="+", help="one or more SKUs to resolve")
@@ -635,6 +715,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-active", action="store_true", help="skip active listing sync")
     p.add_argument("--no-sold", action="store_true", help="skip sold orders sync")
     p.add_argument("--dry-run", action="store_true", help="show what would change without writing")
+    p.add_argument("--sku", nargs="+", metavar="SKU", help="sync only these SKUs")
+    p.add_argument("--location", default=None, metavar="LOC", help="sync only items at this location")
+    p.add_argument("--status", default=None, metavar="STATUS", help="sync only items with this status")
 
     p = sub.add_parser("sku-migrate", help="SKU normalization (PP-ADD-005)")
     p.add_argument("--check-collisions", action="store_true", help="run collision check only — no changes")
@@ -714,6 +797,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output", default=None, metavar="DIR", help="output directory (default: vault/dev-workflow/research/)")
     p.add_argument("--no-vault", action="store_true", dest="no_vault", help="return data only, do not write files")
 
+    p = sub.add_parser("promo", help="sale event automation — draft + scope check (PP-PROMO-001 P2)")
+    p.add_argument("promo_sub", choices=["draft", "list"], help="draft: generate markdown draft from dead-stock scan; list: verify sell.marketing scope")
+    p.add_argument("--discount", type=int, default=None, metavar="N", help="discount %% 5–80 (default: promo.discount_pct config or 20)")
+    p.add_argument("--min-days", type=int, default=None, metavar="N", dest="min_days", help="minimum days stale (default: promo.min_days_stale or 30)")
+    p.add_argument("--min-price", type=float, default=None, metavar="X", dest="min_price", help="minimum current price (default: promo.min_price or 2.00)")
+    p.add_argument("--max-items", type=int, default=None, metavar="N", dest="max_items", help="maximum items in draft (default: promo.max_items or 50)")
+    p.add_argument("--duration", type=int, default=None, metavar="DAYS", help="event duration in days (default: promo.duration_days or 30)")
+    p.add_argument("--start-offset", type=int, default=None, metavar="DAYS", dest="start_offset", help="days from today to event start (default: promo.start_offset_days or 2)")
+    p.add_argument("--output", default=None, metavar="DIR", help="output directory for draft (default: vault/inbox/)")
+    p.add_argument("--no-vault", action="store_true", dest="no_vault", help="return data only, do not write draft file")
+
     p = sub.add_parser("category-groups", help="view/manage category group taxonomy (PP-PRICE-005)")
     p.add_argument("category_id", nargs="?", default=None, help="look up which group a specific eBay category ID belongs to")
     p.add_argument("--list", action="store_true", help="list all groups with category counts and pricing")
@@ -757,6 +851,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="show what would happen without calling the model or writing files")
     p.add_argument("--batch", action="store_true", help="run all eligible items directly with rate-limiting (OpenRouter free ~20 req/min)")
     p.add_argument("--limit", type=int, default=0, metavar="N", help="max items to process in --batch mode (0 = all eligible)")
+    p.add_argument("--api-mode", dest="api_mode", choices=["live", "batch"], default="live",
+                   help="'live': serial live-API calls (default); 'batch': Gemini Batch API async (requires --batch + Google API key)")
+    p.add_argument("--poll-interval", dest="poll_interval", type=int, default=60, metavar="SECS",
+                   help="polling interval in seconds for --api-mode batch (default: 60)")
 
     p = sub.add_parser(
         "alt-text-batch",
@@ -767,7 +865,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--status", default="", metavar="STATUS", help="filter to items with this #STATUS value (e.g. 'live')")
 
     p = sub.add_parser("todo", help="multi-agent TODO tracker (PP-TODO-001 / PP-PLANDB-001)")
-    p.add_argument("agent", nargs="?", default=None, help="filter by agent: claude, admin, gemini, db (omit for all); or 'brief' to generate a task spec")
+    p.add_argument("agent", nargs="?", default=None,
+                   help="filter by agent: claude, admin, gemini, db (omit for all); "
+                        "or 'brief' to generate a task spec; combine with --next for top task")
     p.add_argument("brief_id", nargs="?", default=None, help="todo id for 'tgw todo brief <id>'")
     p.add_argument("--add", metavar="TEXT", help="add a new TODO item")
     p.add_argument("--done", metavar="ID", type=int, help="mark a TODO item complete")
@@ -783,11 +883,28 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--anchor", default=None, metavar="HEADING", help="master-plan heading text the item links to (for --add / --set-meta)")
     p.add_argument("--set-meta", type=int, default=None, metavar="ID", dest="set_meta", help="set --pp/--depends/--anchor on an existing item")
     p.add_argument("--clip", action="store_true", help="copy brief output to clipboard (brief mode only)")
-    p.add_argument("--next", action="store_true", dest="next_task", help="brief mode: generate brief for the top open task for --agent")
-    p.add_argument("--agent", default=None, metavar="AGENT", dest="next_agent", help="agent name for --next (e.g. claude, gemini, admin)")
+    p.add_argument("--next", action="store_true", dest="next_task",
+                   help="shorthand: top open task for AGENT, print brief + copy to clipboard; "
+                        "replaces 'brief --next --agent AGENT --clip'")
+    p.add_argument("--nextloop", action="store_true", dest="nextloop",
+                   help="loop --next continuously until tasks are exhausted or user quits (y=done/s=skip/q=quit)")
+    p.add_argument("--agent", default=None, metavar="AGENT", dest="next_agent", help="agent name for --next / --nextloop (e.g. claude, gemini, admin)")
 
     p = sub.add_parser("plan", help="plan/taskboard operations (PP-PLANDB-001)")
-    p.add_argument("plan_op", choices=["render"], help="render: regenerate plan/TGW-Taskboard.md from the todo tracker")
+    p.add_argument(
+        "plan_op",
+        choices=["render", "check", "status"],
+        help=(
+            "render: regenerate plan/TGW-Taskboard.md from the todo tracker; "
+            "check: reconcile tracker ↔ master plan (orphaned pp_refs, "
+            "done mismatches, stale round tags); "
+            "status: one-line open/done/blocked summary per PP-* item"
+        ),
+    )
+    p.add_argument(
+        "--pp", dest="plan_status_pp", default=None, metavar="PP_REF",
+        help="filter plan status to a specific PP-* item (status op only)",
+    )
 
     p = sub.add_parser(
         "mvitems",
@@ -811,7 +928,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=0, metavar="N", help="only classify first N pending entries (0 = all)")
 
     p = sub.add_parser("ai-usage", help="AI/LLM usage report by provider/task/day (Phase 5 #2)")
-    p.add_argument("--since", type=int, default=7, metavar="DAYS", help="report window in days (default: 7)")
+    p.add_argument("--since", type=int, default=None, metavar="DAYS", help="report window in days (default: 7, or 30 with --by-sku)")
+    p.add_argument("--by-sku", metavar="SKU", default="", help="show per-task breakdown for a single SKU")
     p.add_argument("--json", dest="as_json", action="store_true", help="output raw JSON instead of formatted table")
 
     p = sub.add_parser(
@@ -829,6 +947,25 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--show", action="store_true", help="print human-readable diff to stdout before JSON result")
     p.add_argument("--by", default="claude", metavar="AGENT", help="who is creating this revision draft (default: claude)")
+    p.add_argument("--apply", action="store_true", help="apply the stored revision_draft (dry-run by default; requires --live for live eBay write)")
+    p.add_argument("--live", action="store_true", help="with --apply: submit live eBay write (gated by _APPLY_ENABLED sentinel in revision.py)")
+
+    p = sub.add_parser("offers", help="list and respond to incoming Best Offers (PP-OFFER-001)")
+    p.add_argument(
+        "offer_op",
+        choices=["list", "respond"],
+        help="list: show incoming offers; respond: accept/decline/counter an offer",
+    )
+    p.add_argument("offer_id", nargs="?", default=None, metavar="OFFER_ID", help="Best Offer ID (required for respond)")
+    p.add_argument("--listing-id", default=None, metavar="LISTING_ID", help="eBay listing/item ID (required for respond)")
+    p.add_argument("--accept", dest="offer_action", action="store_const", const="Accept", help="accept the offer")
+    p.add_argument("--decline", dest="offer_action", action="store_const", const="Decline", help="decline the offer")
+    p.add_argument("--counter", dest="counter_price", type=float, default=None, metavar="PRICE", help="counter with this price (USD)")
+    p.add_argument("--pending", action="store_true", help="list: show only Pending-status offers")
+    p.add_argument("--sku", default="", metavar="SKU", help="list: filter by TGW SKU")
+    p.add_argument("--auto-accept", action="store_true", help="list: auto-accept offers above auto_accept_min_pct config threshold (dry-run unless --live)")
+    p.add_argument("--live", action="store_true", help="submit response to eBay (default: dry-run)")
+    p.add_argument("--by", default="claude", metavar="AGENT", help="who is responding (default: claude)")
 
     p = sub.add_parser(
         "catalog-verify",
@@ -845,6 +982,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fix", action="store_true", help="report auto-applicable fixes (e.g. strip stale TEMPLATE: title prefix); dry-run unless --write is given")
     p.add_argument("--write", action="store_true", help="with --fix: actually apply the fixes (default: dry-run only)")
 
+    parser.description = _make_grouped_description(sub)
     return parser
 
 
@@ -881,10 +1019,13 @@ def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any]) -> List[Dict[str
     def v(rule: str, severity: str, detail: str) -> None:
         viols.append({"rule": rule, "sku": sku, "severity": severity, "detail": detail})
 
-    title = str(doc.get("title") or "").strip()
+    raw_title = str(doc.get("title") or "")
+    title = raw_title.strip()
     if not title:
         v("no_title", "critical", "Title is empty or missing")
     else:
+        if raw_title.startswith(' '):
+            v("leading_space_title", "warning", f"Title has leading whitespace: {raw_title[:50]!r}")
         if title == sku:
             v("title_is_sku", "warning", "Title equals SKU")
         if title.upper().startswith("TEMPLATE:"):
@@ -1001,11 +1142,15 @@ def _compute_fixes(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
     auto-fixable (PP-VERIFY-001 Phase 3).  Each fix is
     ``{rule, field, before, after}``.
     """
+    import re
     fixes: List[Dict[str, Any]] = []
     title = str(doc.get("title") or "")
     new_title = _strip_template_prefix(title)
     if new_title is not None:
         fixes.append({"rule": "stale_template_prefix", "field": "title", "before": title, "after": new_title})
+    elif (title.startswith(' ') and title.lstrip()
+          and not re.match(r"(?i)^\s*template:\s*", title)):
+        fixes.append({"rule": "leading_space_title", "field": "title", "before": title, "after": title.lstrip()})
     return fixes
 
 
@@ -2080,6 +2225,14 @@ def cmd_ai_usage(cfg: Dict[str, Any], since_days: int = 7) -> Dict[str, Any]:
     return {'ok': True, 'rows': rows, 'since_days': since_days}
 
 
+def _fmt_dur(ms: int) -> str:
+    return f'{ms // 60000}m {(ms % 60000) // 1000}s' if ms >= 60000 else f'{ms // 1000}s'
+
+
+def _fmt_tokens(n: Optional[int]) -> str:
+    return f'{n:,}' if n is not None else 'n/a'
+
+
 def _print_ai_usage_table(rows: List[Dict[str, Any]], since_days: int) -> None:
     if not rows:
         print(f'No AI usage recorded in the last {since_days} day(s).')
@@ -2092,19 +2245,63 @@ def _print_ai_usage_table(rows: List[Dict[str, Any]], since_days: int) -> None:
         if day != current_day:
             print(f'  {day}')
             current_day = day
-        task     = row.get('task', '')
-        provider = row.get('provider', '')
-        model    = row.get('model', '')
-        calls    = int(row.get('calls') or 0)
-        ms       = int(row.get('total_ms') or 0)
-        tokens   = row.get('total_tokens')
-        errors   = int(row.get('errors') or 0)
-
-        dur = f'{ms // 60000}m {(ms % 60000) // 1000}s' if ms >= 60000 else f'{ms // 1000}s'
-        tok_str = f'{int(tokens):,}' if tokens else 'n/a'
-        err_str = f'  ⚠ {errors} error(s)' if errors else ''
+        task        = row.get('task', '')
+        provider    = row.get('provider', '')
+        model       = row.get('model', '')
+        calls       = int(row.get('calls') or 0)
+        ms          = int(row.get('total_ms') or 0)
+        tokens      = row.get('total_tokens')
+        errors      = int(row.get('errors') or 0)
         model_short = model.split('/')[-1] if '/' in model else model
-        print(f'    {task:<20} {provider:<12} {model_short:<32} {calls:>4} calls  {dur:>8}  {tok_str:>10} tokens{err_str}')
+        err_str     = f'  ⚠ {errors} error(s)' if errors else ''
+        print(f'    {task:<20} {provider:<12} {model_short:<32} {calls:>4} calls  {_fmt_dur(ms):>8}  {_fmt_tokens(tokens):>10} tokens{err_str}')
+    print()
+
+
+def cmd_ai_usage_by_sku(cfg: Dict[str, Any], sku: str, since_days: int = 30) -> Dict[str, Any]:
+    """Aggregate AI/LLM usage for a specific SKU from the ai_usage table.
+
+    Returns ``{'ok': True, 'sku': sku, 'rows': [...], 'since_days': N}``.
+    """
+    from tgw.queue import state_machine as sm
+    sm.init(cfg.get('postgres_dsn', 'dbname=state_machine user=tgw'))
+    try:
+        rows = sm.query_ai_usage_by_sku(sku, since_days)
+    except Exception as exc:
+        return {'ok': False, 'error': str(exc)}
+    return {'ok': True, 'sku': sku, 'rows': rows, 'since_days': since_days}
+
+
+def _print_ai_usage_by_sku_table(sku: str, rows: List[Dict[str, Any]], since_days: int) -> None:
+    if not rows:
+        print(f'No AI usage recorded for {sku} in the last {since_days} day(s).')
+        return
+
+    print(f'AI usage for {sku} — last {since_days} day(s)\n')
+    total_calls = total_ms = total_tokens = total_errors = 0
+    has_token_data = False
+    for row in rows:
+        task        = row.get('task', '')
+        provider    = row.get('provider', '')
+        model       = row.get('model', '')
+        calls       = int(row.get('calls') or 0)
+        ms          = int(row.get('total_ms') or 0)
+        tokens      = row.get('total_tokens')
+        errors      = int(row.get('errors') or 0)
+        model_short = model.split('/')[-1] if '/' in model else model
+        err_str     = f'  ⚠ {errors} error(s)' if errors else ''
+        print(f'  {task:<20} {provider:<12} {model_short:<32} {calls:>4} calls  {_fmt_dur(ms):>8}  {_fmt_tokens(tokens):>10} tokens{err_str}')
+
+        total_calls  += calls
+        total_ms     += ms
+        if tokens is not None:
+            total_tokens += int(tokens)
+            has_token_data = True
+        total_errors += errors
+
+    total_tok = total_tokens if has_token_data else None
+    err_str = f'  ⚠ {total_errors} error(s)' if total_errors else ''
+    print(f'\n  {"TOTAL":<20} {"":12} {"":32} {total_calls:>4} calls  {_fmt_dur(total_ms):>8}  {_fmt_tokens(total_tok):>10} tokens{err_str}')
     print()
 
 
@@ -2283,8 +2480,8 @@ def cmd_price_freeship(
 
     # Resolve base price (offer price takes priority over draft price)
     base_price: Optional[float] = None
-    offer = item.get("ebay_offer", {})
-    draft = item.get("draft_listing", {})
+    offer = item.get("ebay_offer") or {}
+    draft = item.get("draft_listing") or {}
     for src in (offer.get("price"), draft.get("price")):
         if src is not None:
             try:
@@ -2327,6 +2524,13 @@ def cmd_price_freeship(
     }
 
     if apply:
+        if offer.get("freeship_applied_at"):
+            return {
+                "ok": False,
+                "error": "free_shipping already applied (freeship_applied_at is set); "
+                         "remove ebay_offer.freeship_applied_at to reapply",
+                "sku": sku,
+            }
         offer_block = dict(offer)
         offer_block["price"] = combined
         offer_block["freeship_applied_at"] = datetime.now(timezone.utc).isoformat()
@@ -2336,6 +2540,22 @@ def cmd_price_freeship(
             item["draft_listing"] = draft
         item["free_shipping"] = True
         atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
+        try:
+            import psycopg2.errors  # noqa: PLC0415
+
+            from tgw.queue import state_machine as _sm
+            _sm.init(cfg["postgres_dsn"])
+            _sm.enqueue_job(
+                queue_name="catalog_rebuild",
+                payload={"reason": f"price_freeship:{sku}"},
+                dedupe_key="catalog_rebuild:pending",
+                not_before=time.time() + 30,
+                max_attempts=3,
+            )
+        except psycopg2.errors.UniqueViolation:
+            pass
+        except Exception as exc:
+            result["warning"] = f"catalog_rebuild enqueue failed: {exc}"
         result["applied"] = True
 
     return result
@@ -3156,7 +3376,7 @@ def main() -> int:
             result = get_item(cfg, args.sku)
 
         elif args.op == "search":
-            result = list_items(cfg, search=args.text, location=args.location, status=args.status, limit=args.limit)
+            result = list_items(cfg, search=args.text, location=args.location, status=args.status, limit=args.limit, empty_field=args.empty_field)
             if args.skus_only:
                 for item in result["items"]:
                     print(item.get("sku", ""))
@@ -3300,10 +3520,17 @@ def main() -> int:
             return 0 if result.get("ok") else 1
 
         elif args.op == "ai-usage":
-            result = cmd_ai_usage(cfg, since_days=args.since)
+            by_sku = args.by_sku
+            since = args.since if args.since is not None else (30 if by_sku else 7)
+            if by_sku:
+                result = cmd_ai_usage_by_sku(cfg, sku=by_sku, since_days=since)
+            else:
+                result = cmd_ai_usage(cfg, since_days=since)
             if result.get("ok"):
-                if getattr(args, "as_json", False):
+                if args.as_json:
                     print(json.dumps(result, indent=2, default=str))
+                elif by_sku:
+                    _print_ai_usage_by_sku_table(result["sku"], result["rows"], result["since_days"])
                 else:
                     _print_ai_usage_table(result["rows"], result["since_days"])
             else:
@@ -3415,7 +3642,7 @@ def main() -> int:
         elif args.op == "hint-trail":
             result = cmd_hint_trail(cfg, args.sku)
 
-        elif args.op == "requeue":
+        elif args.op in ("requeue-identify", "requeue"):
             result = cmd_requeue(
                 cfg,
                 no_title=args.no_title,
@@ -3755,10 +3982,35 @@ def main() -> int:
             dry_run = args.dry_run
             total_changes = 0
 
+            # Build sku_filter from --sku / --location / --status
+            sku_filter: Optional[Set[str]] = None
+            if args.sku or args.location or args.status:
+                candidate_skus: Optional[Set[str]] = set(args.sku) if args.sku else None
+                if args.location or args.status:
+                    location_filter = args.location
+                    status_filter = args.status
+                    scan_matched: Set[str] = set()
+                    for _jp in itemdata_root.glob("*/*.json"):
+                        try:
+                            _doc = json.loads(_jp.read_text(encoding="utf-8"))
+                        except Exception:
+                            continue
+                        if location_filter and _doc.get("location") != location_filter:
+                            continue
+                        if status_filter and (_doc.get("#STATUS") or _doc.get("status")) != status_filter:
+                            continue
+                        scan_matched.add(_jp.parent.name)
+                    sku_filter = (candidate_skus & scan_matched) if candidate_skus is not None else scan_matched
+                else:
+                    sku_filter = candidate_skus
+                print(f"  Filter active: {len(sku_filter)} SKU(s) selected")
+
             active_stats: Dict[str, Any] = {}
             if not args.no_active:
                 print("Fetching active listings from eBay...")
-                active_stats = sync_active_listings(cfg, itemdata_root, synced_at, dry_run=dry_run)
+                active_stats = sync_active_listings(
+                    cfg, itemdata_root, synced_at, dry_run=dry_run, sku_filter=sku_filter
+                )
                 total_changes += active_stats.get("updated", 0)
                 print(
                     f"  fetched={active_stats['fetched']}  matched={active_stats['matched']}  "
@@ -3773,6 +4025,9 @@ def main() -> int:
             if not args.no_sold:
                 print("Fetching sold orders from eBay...")
                 listing_index = build_listing_index(itemdata_root)
+                if sku_filter is not None:
+                    listing_index = {lid: p for lid, p in listing_index.items()
+                                     if p.parent.name in sku_filter}
                 print(f"  listing index: {len(listing_index)} entries")
                 sold_stats = sync_sold_orders(cfg, listing_index, synced_at, _sold_state_path(cfg), dry_run=dry_run)
                 total_changes += sold_stats.get("sold_marked", 0)
@@ -3945,13 +4200,23 @@ def main() -> int:
 
         elif args.op == "alt-text":
             if getattr(args, "batch", False):
-                result = cmd_alt_text_batch(
-                    cfg,
-                    limit=args.limit,
-                    provider=args.provider,
-                    model=args.model,
-                    dry_run=args.dry_run,
-                )
+                api_mode = getattr(args, "api_mode", "live")
+                if api_mode == "batch":
+                    result = cmd_alt_text_gemini_batch(
+                        cfg,
+                        limit=args.limit,
+                        dry_run=args.dry_run,
+                        model=args.model,
+                        poll_interval=getattr(args, "poll_interval", 60),
+                    )
+                else:
+                    result = cmd_alt_text_batch(
+                        cfg,
+                        limit=args.limit,
+                        provider=args.provider,
+                        model=args.model,
+                        dry_run=args.dry_run,
+                    )
             else:
                 if not args.sku:
                     import sys as _sys
@@ -3969,18 +4234,66 @@ def main() -> int:
             result = _cmd_alt_text_batch(cfg, args)
 
         elif args.op == "revise":
-            from .revision import cmd_revise
-            result = cmd_revise(
-                cfg,
-                sku=args.sku,
-                assignments=args.assignments,
-                show=args.show,
-                by=args.by,
-            )
-            if args.show and result.get("ok"):
-                for line in result.get("diff_lines", []):
-                    print(line)
-                print()
+            if args.apply:
+                from .revision import cmd_revise_apply
+                result = cmd_revise_apply(
+                    cfg,
+                    sku=args.sku,
+                    dry_run=not args.live,
+                    by=args.by,
+                )
+                if result.get("diff_lines"):
+                    for line in result.get("diff_lines", []):
+                        print(line)
+                    print()
+            else:
+                from .revision import cmd_revise
+                result = cmd_revise(
+                    cfg,
+                    sku=args.sku,
+                    assignments=args.assignments,
+                    show=args.show,
+                    by=args.by,
+                )
+                if args.show and result.get("ok"):
+                    for line in result.get("diff_lines", []):
+                        print(line)
+                    print()
+
+        elif args.op == "offers":
+            from .offers import cmd_offers_list, cmd_offers_respond
+
+            if args.offer_op == "respond":
+                action = args.offer_action
+                if action is None and args.counter_price is not None:
+                    action = "Counter"
+                if not args.offer_id:
+                    result = {"ok": False, "error": "OFFER_ID positional argument required for respond"}
+                elif not args.listing_id:
+                    result = {"ok": False, "error": "--listing-id required for respond"}
+                elif action in ("Accept", "Decline") and args.counter_price is not None:
+                    result = {"ok": False, "error": f"--counter PRICE is incompatible with --{action.lower()}"}
+                elif action is None:
+                    result = {"ok": False, "error": "specify --accept, --decline, or --counter PRICE"}
+                else:
+                    result = cmd_offers_respond(
+                        cfg,
+                        offer_id=args.offer_id,
+                        listing_id=args.listing_id,
+                        action=action,
+                        counter_price=args.counter_price,
+                        dry_run=not args.live,
+                        by=args.by,
+                    )
+            else:
+                result = cmd_offers_list(
+                    cfg,
+                    sku=args.sku,
+                    pending_only=args.pending,
+                    auto_accept=args.auto_accept,
+                    dry_run=not args.live,
+                    by=args.by,
+                )
 
         elif args.op == "todo":
             from tgw.todo import cmd_todo
@@ -3990,15 +4303,30 @@ def main() -> int:
             return 0 if result.get("ok", True) else 1
 
         elif args.op == "plan":
-            from tgw.plan_render import render_taskboard
+            if args.plan_op == "render":
+                from tgw.plan_render import render_taskboard
 
-            result = render_taskboard(cfg)
-            if result["ok"]:
-                print(f"Taskboard rendered: {result['path']} "
-                      f"({result['open']} open, {result['done_week']} done this week)")
-            else:
-                print(f"Error: {result.get('error')}")
-            return 0 if result["ok"] else 1
+                result = render_taskboard(cfg)
+                if result["ok"]:
+                    print(f"Taskboard rendered: {result['path']} "
+                          f"({result['open']} open, {result['done_week']} done this week)")
+                else:
+                    print(f"Error: {result.get('error')}")
+                return 0 if result["ok"] else 1
+
+            elif args.plan_op == "check":
+                from tgw.plan_render import format_plan_check, plan_check
+
+                result = plan_check(cfg)
+                print(format_plan_check(result))
+                return 0 if result["ok"] else 1
+
+            elif args.plan_op == "status":
+                from tgw.plan_render import format_plan_status, plan_status
+
+                result = plan_status(cfg, pp_ref=getattr(args, 'plan_status_pp', None))
+                print(format_plan_status(result))
+                return 0 if result["ok"] else 1
 
         elif args.op == "catalog-verify":
             result = cmd_catalog_verify(
@@ -4125,6 +4453,26 @@ def main() -> int:
                 )
             else:
                 result = {"ok": False, "error": f"unknown report type: {args.report_type!r}"}
+
+        elif args.op == "promo":
+            from .promo import cmd_promo_draft, cmd_promo_list
+
+            if args.promo_sub == "draft":
+                result = cmd_promo_draft(
+                    cfg,
+                    discount=args.discount,
+                    min_days=args.min_days,
+                    min_price=args.min_price,
+                    max_items=args.max_items,
+                    duration=args.duration,
+                    start_offset=args.start_offset,
+                    output_dir=args.output,
+                    no_vault=args.no_vault,
+                )
+            elif args.promo_sub == "list":
+                result = cmd_promo_list(cfg)
+            else:
+                result = {"ok": False, "error": f"unknown promo sub-command: {args.promo_sub!r}"}
 
         elif args.op == "category-groups":
             from .ebay.pricing import _group_for_category, _load_groups

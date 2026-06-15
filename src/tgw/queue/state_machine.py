@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, Generator, List, Optional
@@ -8,14 +9,17 @@ from typing import Any, Dict, Generator, List, Optional
 import psycopg2
 import psycopg2.extras
 
+log = logging.getLogger(__name__)
+
 # Module-level DSN — set by init() before any worker starts.
 _DSN: str = 'dbname=state_machine user=tgw'
 
 
 def init(dsn: str) -> None:
     """Set the PostgreSQL DSN for all state-machine operations."""
-    global _DSN
+    global _DSN, _ai_usage_table_ready
     _DSN = dsn
+    _ai_usage_table_ready = False
 
 
 @contextmanager
@@ -594,8 +598,13 @@ CREATE TABLE IF NOT EXISTS ai_usage (
     total_tokens      INTEGER,
     duration_ms       INTEGER NOT NULL,
     success           BOOLEAN NOT NULL DEFAULT true,
-    error_msg         TEXT
+    error_msg         TEXT,
+    sku               TEXT
 )
+"""
+
+_AI_USAGE_SKU_MIGRATION = """
+ALTER TABLE ai_usage ADD COLUMN IF NOT EXISTS sku TEXT
 """
 
 _ai_usage_table_ready = False
@@ -608,6 +617,7 @@ def _ensure_ai_usage_table() -> None:
     with _conn() as con:
         with con.cursor() as cur:
             cur.execute(_AI_USAGE_DDL)
+            cur.execute(_AI_USAGE_SKU_MIGRATION)
     _ai_usage_table_ready = True
 
 
@@ -624,6 +634,7 @@ def record_ai_usage(
     total_tokens: Optional[int] = None,
     success: bool = True,
     error_msg: Optional[str] = None,
+    sku: Optional[str] = None,
 ) -> None:
     """Record one AI/LLM call. Never raises — fail-soft so callers are never blocked."""
     try:
@@ -635,15 +646,15 @@ def record_ai_usage(
                     INSERT INTO ai_usage
                         (task, provider, model, input_chars, output_chars,
                          prompt_tokens, completion_tokens, total_tokens,
-                         duration_ms, success, error_msg)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                         duration_ms, success, error_msg, sku)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """,
                     (task, provider, model, input_chars, output_chars,
                      prompt_tokens, completion_tokens, total_tokens,
-                     duration_ms, success, error_msg),
+                     duration_ms, success, error_msg, sku or None),
                 )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("record_ai_usage failed: %s", exc)
 
 
 def query_ai_usage(since_days: int = 7) -> List[Dict[str, Any]]:
@@ -678,6 +689,42 @@ def query_ai_usage(since_days: int = 7) -> List[Dict[str, Any]]:
     with _conn() as con:
         with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(sql, (str(since_days),))
+            return [dict(r) for r in cur.fetchall()]
+
+
+def query_ai_usage_by_sku(sku: str, since_days: int = 30) -> List[Dict[str, Any]]:
+    """Aggregate AI usage for a single SKU, grouped by task / provider / model.
+
+    Returns rows sorted by calls desc. Each row::
+
+        {sku, task, provider, model, calls, total_ms,
+         prompt_tokens, completion_tokens, total_tokens,
+         input_chars, output_chars, errors}
+    """
+    _ensure_ai_usage_table()
+    sql = """
+        SELECT
+            sku,
+            task,
+            provider,
+            model,
+            COUNT(*)                                  AS calls,
+            SUM(duration_ms)                          AS total_ms,
+            SUM(prompt_tokens)                        AS prompt_tokens,
+            SUM(completion_tokens)                    AS completion_tokens,
+            SUM(total_tokens)                         AS total_tokens,
+            SUM(input_chars)                          AS input_chars,
+            SUM(output_chars)                         AS output_chars,
+            COUNT(*) FILTER (WHERE NOT success)       AS errors
+        FROM ai_usage
+        WHERE sku = %s
+          AND recorded_at >= now() - (%s || ' days')::interval
+        GROUP BY sku, task, provider, model
+        ORDER BY calls DESC
+    """
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, (sku, str(since_days)))
             return [dict(r) for r in cur.fetchall()]
 
 

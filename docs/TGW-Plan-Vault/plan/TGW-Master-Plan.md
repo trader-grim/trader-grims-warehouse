@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-12 (session 29 — PP-PLANDB-001 P1+P2 done; inbox: PP-INTAKE-002/003 designs filed; PP-FREESHIP-001/PP-OFFER-001/PP-GIT-001 added; suite 637)
+updated: 2026-06-15 (session 31 — 8 suggestions processed; ISS-010/011/012 added; PAM naming; todos #866–#872 seeded; rows 40–41 seeded)
 maintained_by: Opus (planner)
 ---
 
@@ -767,7 +767,9 @@ first-class via `wl-paste --watch`; build after Qtile install); Aider = **commit
 week stands as routing calibration). Decisions recorded in the respective PP sections +
 next-process.md; follow-on todos #109–#118 seeded.
 
-### PP-DOCFLOW-001 — The TGW Project Admin (LLM document + suggestion intake)
+### PP-DOCFLOW-001 — PAM (Project Administration Manager) — LLM document + suggestion intake
+
+**Naming decision (Dave, 2026-06-14, session 31):** The LLM project admin is officially named **PAM** — Project Administration Manager. Update all UI references (web PM chat, labels) to use "PAM" instead of "PM" or "pm_intake". Code module names unchanged (pm_intake, /api/pm/chat) for backward compat — surface name only.
 
 **Status: PHASE 1 + PHASE 2 COMPLETE 2026-06-11 (sessions 25–26). Phase 3+ (admin skills expansion) is future scope.**
 
@@ -998,10 +1000,23 @@ updating credentials after approval.
 
 **Status 2026-06-10 update:** eBay Developer Support responded to the `buy.marketplace_insights`
 scope request with **8 questions** Dave must answer before the scope can be approved.
-- [ ] **Review and respond to eBay Developer Support message** — answer the 8 questions
-  about the use case for `buy.marketplace_insights` (automated pricing engine, resale
-  platform, no redistribution of sold-price data to third parties). Be specific: automated
-  repricing, TGW internal use only, ~55K items, eBay seller account DaveBuko-Webkulap.
+
+**Status 2026-06-14 update (todo #142):** Follow-up check confirmed no response yet recorded in the repo. Direct DS portal access is restricted to the authenticated operator (Dave). Research indicates `buy.marketplace_insights` remains highly restricted for independent developers.
+
+**Operator Action (todo #79):** Check the eBay DS portal inbox. If unanswered, provide these details (typical eBay questionnaire):
+1.  **App ID:** `DaveBuko-DaveBuko-P-66170566` (Production keyset)
+2.  **Business Overview:** Trader Grim's Warehouse (TGW) — independent resale inventory automation.
+3.  **Business Model:** Internal inventory management and automated repricing (no data redistribution).
+4.  **Target Regions:** eBay US (primary), UK, DE.
+5.  **Website URLs:** Internal-only (Tailscale/VPN); private tool.
+6.  **User Experience:** Automated price adjustments based on sold-price p25/p75; no public data display.
+7.  **Sales Volume:** ~55K active items; aiming for 20% volume growth through market-aware pricing.
+8.  **Integration Details:** Currently using Trading API (photos/orders) and Sell Inventory/Account APIs.
+
+If rejected, pivot to `Browse API` (item_summary/search) as the pricing floor/p25 proxy (noted as PP-PRICE-003).
+
+- [ ] **Review and respond to eBay Developer Support message** — answer the 8 questions about the use case for `buy.marketplace_insights` (automated pricing engine, resale platform, no redistribution of sold-price data to third parties). Be specific: automated repricing, TGW internal use only, ~55K items, eBay seller account DaveBuko-Webkulap.
+
 
 ⚠ When new keyset arrives: update `secrets_root/ebay-credentials.json`, update
 `tgw-api-config.json` scopes to match approved scopes only, then re-run OAuth.
@@ -1276,6 +1291,13 @@ E-sneaker-net: export context → run in external AI → save result to `inbox/`
   before committing to agy for code-generation tasks.
 - **Fallback pattern:** design multi-step tasks to be resumable — if a model runs out of
   tokens mid-task, a second agent with different limits should be able to pick up the output.
+
+**Aider configuration notes (2026-06-14, Perplexity research):**
+- Optimal tier: `aider --architect` → OpenRouter Opus for planning, Gemini Flash-Lite for editing (cheap fast fallback); Ollama as dead-fallback.
+- Per-command routing: `architect` uses Opus+Flash-Lite, `edits` uses Flash-Lite only.
+- Enable prompt caching (`--cache-prompts`) for long sessions; `--cache-keepalive-pings N` to keep cache warm.
+- Token usage auditing: log each invocation (model, route, tokens, cost, duration) to `~/.local/share/aider-audit/usage.csv`; analyze with pandas grouped by `command_type`.
+- Aider MCP: wrap Aider in an MCP server to enable orchestration; allows Claude to trigger Aider runs, inspect diffs, read logs. See `reference/aider-mcp-design.md` (future); noted as PP-MULTIMODEL-001 Aider-as-MCP-facility.
 
 ---
 
@@ -2363,6 +2385,100 @@ Planned: RBAC gates + role-specific default tabs and field visibility. Model use
 - Operator (mixed admin/staging)
 - Supervisor (audit/report focus)
 
+### Phase 2 — Web-based inventory browse + listing detail ✅ COMPLETE (2026-06-14, session 29, todo #845)
+
+Goal: a browser-accessible UI that works on any device on Tailscale — no TGW install required.
+Solves the gap between the CLI/MC console and the Flutter app (which requires the Flutter toolchain
+and build step). Implemented as additional routes on `tgw-http` using the same inline-HTML pattern
+established by `/form/intake`, `/form/bulk`, `/form/todos`, and `/form/suggest`.
+
+**New routes added to `src/tgw/http_server.py`:**
+
+| Route | Auth | Description |
+|-------|------|-------------|
+| `GET /thumb/{sku}` | none | Thumbnail JPEG — thumbnail_root first, falls back to first ItemData image |
+| `GET /media/{sku}/{filename}` | none | Serve any photo/video from ItemData; path-traversal validated |
+| `GET /form/items` | none | Inventory browse page (see below) |
+| `GET /form/items/{sku}` | none | Item detail page (see below) |
+
+Both media routes use network trust (no Bearer) so `<img src>` tags in the browser work directly.
+Path traversal is blocked: filename is checked with `Path(filename).name == filename`; sku is
+checked for `..`; only known image/video extensions are served.
+
+**`/form/items` — inventory browse:**
+- Card grid: thumbnail, SKU (link to detail), title, status badge (colour-coded), location, price
+- Live JS filtering: free-text search + location input (debounced 300 ms) + status chip bar
+  (All / In Stock / Listed / Staged / Sold)
+- Pagination: 60 per page, Prev/Next buttons, page X of Y display
+- Hits `GET /api/items` (Bearer embedded in page JS, same pattern as `/form/intake`)
+- Dark theme consistent with all other `/form/` pages
+
+**`/form/items/{sku}` — item detail (server-rendered):**
+- Two-column layout: left = photo gallery, right = field sections + diff + jobs
+- **Photo gallery**: main large photo + clickable thumbnail strip; clicking a strip thumb updates
+  the main photo via inline JS; photos served from `/media/{sku}/{filename}` (no auth)
+- **Field sections**: Identity (title, category_group, condition, ai_hint, barcode, description),
+  eBay (listing_id, status, live_price, url, qty), Physical (location, weight_oz, size_class)
+- **Revision draft diff table**: if `revision_draft` is present in item JSON, renders a three-
+  column table: Field | Current (from baseline snapshot) | Proposed (delta) — current in red,
+  proposed in green. Shows metadata: by, at, baseline hash prefix. This is the primary use case
+  for evaluating Claude's proposed revisions before applying them.
+- **Pipeline jobs**: last 10 queue jobs for this SKU — queue name, state (colour-coded), updated
+  timestamp, error detail
+- Fully server-rendered (Python f-strings, `html.escape()` on all values); no client-side
+  auth needed; photos via no-auth `/media/` routes
+
+**Access:** `http://<tgw-host>:7373/form/items` on any Tailscale device, no login required.
+
+### Phase 3 — Full operational console ✅ COMPLETE 2026-06-14 (session 30, todos #846–#859)
+
+**Guiding principle:** The web UI is the primary graphical workflow. Every physical warehouse stage
+(receive → identify → review → approve → respond → fulfill) has a corresponding page. A first-time
+user can open the browser and know what to do next without prior knowledge of the system.
+
+**Architecture decision: go static (todo #846)**
+`src/tgw/static/` directory with `tgw.css`, `nav.js`, `tgw.js`; FastAPI `StaticFiles` mount at
+`/static`. All existing embedded CSS/JS string constants replaced with `<link>`/`<script>` includes.
+Nav bar becomes one shared component, not 15 embedded copies.
+
+**Navigation structure (persistent top bar on all /form/ pages):**
+```
+TGW | Dashboard | Inventory ▾ | eBay ▾ | System ▾ | Docs ▾ | Links
+```
+Inventory: Browse · Intake · Review Queue · Revisions · Bulk Edit
+eBay: Offers · Pipeline · (Seller Hub link)
+System: Health · Workers · Todos · Dead Letter
+Docs: Runbooks · Known Issues · Architecture · Pipeline Flow · Handoff
+
+**Pages planned (todos #847–#859):**
+
+| Todo | Page / endpoint | Purpose |
+|------|----------------|---------|
+| #847 | `GET /api/dashboard` | Summary counts — needs_review, offers, photos, drafts, dead-letter, ready, workers |
+| #848 | `/form/` home dashboard | Status strip + action cards + PM chat + activity feed + quick intake |
+| #849 ✅ | `POST /api/pm/chat` + chat UI | LLM project manager chat window; haiku-4-5 with live TGW context; can add todos/suggestions — **DONE 2026-06-14** |
+| #850 | `/form/links` | External links hub — eBay, AI/ML services, infrastructure, research |
+| #851 | `/docs/{path}` | Vault markdown renderer — runbooks, ISSUES, architecture, handoff |
+| #852 | `/form/offers` + offers API | Best Offers UI with % of ask, inline Accept/Counter/Decline, dry-run toggle |
+| #853 | `/form/revisions` + revision API | Pending revision_draft list with inline diff + Apply/Discard |
+| #854 | `/form/review` + review API | Post-AI-draft human approval queue; Approve/Edit/Re-draft inline |
+| #855 | `/form/pipeline` + workers API | Queue depths, active jobs, dead-letter manager, auto-refresh |
+| #856 | `/form/system` | Health table, token expiry, disk, postgres stats, worker restart |
+| #857 | Intake enhancements | Landing page + photo count warning + pipeline trigger buttons + job poll |
+| #858 | Item detail eBay links | View on eBay, Seller Hub deep link, Messages link, offer badge |
+| #859 ✅ | Polish pass | Gaps discovered through actual use — **DONE 2026-06-14** |
+
+**PM chat (todo #849):**
+Persistent chat window in home dashboard sidebar. `POST /api/pm/chat` builds context from live
+system state (todos, queue depths, health, recent jobs, open offers), calls `claude-haiku-4-5`
+(configurable as `pm_chat_model` in config). Returns `{message, actions: []}` where actions
+can be `add_todo`, `add_suggestion`, or `none`. Chat history in sessionStorage. PM can answer
+"what needs doing?", "how many items in pipeline?", "any dead letters?" and take PM actions.
+
+**Build strategy:** iterative — deploy each round, use it, discover gaps, record in polish pass
+(#859). The UI is also a test harness for the underlying API: every missing filter, slow query,
+or data gap it exposes gets filed as a follow-up.
+
 ### Design notes (session 19/20)
 
 - **Recently-processed SKU sort** — `GET /api/items?sort=recently_processed`: a sort option
@@ -2807,14 +2923,16 @@ Syncthing syncs → catalog.db (write-locked or in-use mid-sync → corruption r
 Use `sqlite3.Connection.backup(dest)` for atomic SQLite copy (avoids mid-write corruption).
 Endpoint: `GET /api/catalog/snapshot` → streams `tgwcatalog.db` snapshot.
 
-**Sync-conflict resolution worker (open, session 19 — Dave 17:42):** Syncthing emits
-`*.sync-conflict-<ts>-<id>.*` files when two nodes edit the same file (already observed in the
-vault: `.obsidian/community-plugins.sync-conflict-…json`). Proposed: a state worker that scans
-sync roots for `*.sync-conflict-*` artifacts and either (a) auto-resolves by a declared policy
-(e.g. newest-wins for vault config, last-write-wins per PP-ADD-001 decision) or (b) flags them
-for operator review (surface via `tgw health` / notify / the todo dashboard). Pairs with
-PP-PYIPC-001 (Syncthing REST API) for richer conflict metadata; the file-scan version needs no
-API and is buildable now. Scope to vault + portable-catalog sync roots.
+**Sync-conflict resolution worker (DONE 2026-06-13):** `src/tgw/sync_conflict.py` + 47 tests.
+Decision tree (see module docstring):
+
+- `identical` → auto-discard (byte-for-byte match)
+- `divergent_pipeline` → move to `inbox/review/`, priority-15 todo (conflict has unique/different TGW pipeline data: status `sold` vs `In Stock`, unique `ebay_listing`, etc.)
+- `divergent_legacy` → move to `inbox/review/`, priority-65 todo (only obsolete M1/M2/CSV fields differ + stale-default status; low operator urgency)
+- `divergent` → move to `inbox/review/`, priority-30 todo (general divergence)
+- `no_canonical` → move to `inbox/review/`, priority-45 todo (canonical missing)
+
+Zero-data-loss invariant: nothing is auto-deleted except byte-identical copies. "keep-newer" and "keep-larger" are NOT safe auto-resolution rules — mtime/size do not prove content safety. Semantic JSON analysis does.
 
 **Design principle — zero data loss (Dave, session 19):** A `.sync-conflict-*` file is Syncthing's
 *safety* mechanism, not an error. Syncthing never resolves indiscriminately — it completes the
@@ -3103,9 +3221,11 @@ Offer body addition (in `ebay_stage.py` `_build_offer_body()`):
 #### Status
 Planned. Verify account access first; implementation is straightforward once confirmed.
 
-### PP-PROMO-001 — Sale Event Automation (design complete)
+### PP-PROMO-001 — Sale Event Automation (P2 complete)
 
 **P1 DONE 2026-06-12** — Design doc + operator checklist at `reference/PP-PROMO-001-sale-event-design.md`.
+
+**P2 DONE 2026-06-13** — `tgw promo draft` + `tgw promo list` in `src/tgw/promo.py`; 41 tests in `tests/test_promo.py`; CLI wired in `api.py`.
 
 Automates the dead-stock → markdown sale event cycle via the eBay Promotions Management API (`ITEM_PRICE_MARKDOWN`). The `sell.marketing` scope is already held. No PP-STRIKE-001 conflict: strikethrough uses `originalRetailPrice` in the offer body; this uses the Promotions API and is independent.
 
@@ -3120,11 +3240,11 @@ Automates the dead-stock → markdown sale event cycle via the eBay Promotions M
 | Phase | Scope |
 |-------|-------|
 | P1 ✅ | Design doc + operator checklist |
-| P2 | `tgw promo draft` CLI (read-only); `tgw promo list` scope check |
+| P2 ✅ | `tgw promo draft` CLI (read-only); `tgw promo list` scope check |
 | P3 | `tgw promo apply`: Promotions API write + item JSON writeback; `ebay_price_reducer` promo-skip |
 | P4 | `tgw promo end` / `tgw promo status` lifecycle |
 
-**P2 unblocked.** **P3 blocked** on P2 scope verification (GET Promotions API must return 200 first).
+**P3 blocked** on P2 scope verification (run `tgw promo list` in production — 200 → scope confirmed → P3 unblocked).
 
 ### PP-REPRICE-001 ✅ INITIAL COMPLETE (2026-06-03)
 `ebay_price_reducer` worker: launch (day 0, 110%→.99) → retail (p75, day 3) → move (p25, day 17). `reprice_stages` array configurable; `to_99()` rounding; `reprice_skip: true` to exclude. Self-scheduling every 6h. `reprice_schedule` in item JSON tracks stage history.
@@ -3634,6 +3754,26 @@ Especially useful under duress (down worker, stuck token, dead-letter flood).
 ### Dependencies
 - Claude Code CLI installed (✅ available)
 - `CLAUDE-TROUBLESHOOT.md` authored (one session of work)
+
+---
+
+## PP-OPS-001 — Operational Prerequisites and Unblocking Tasks
+
+Catch-all anchor for one-off setup, infrastructure, and credential tasks that unblock feature
+work but don't belong to a specific PP-* project. These are not a project with phases — they are
+discrete operator actions required to keep the platform running or to gate a feature todo.
+
+### Scope
+- API key / credential provisioning (eBay, Google, OpenRouter, Discogs, etc.)
+- Secrets-root file setup and permissions
+- System service installs or OS-level configuration
+- Hardware or external-account setup steps
+- Any `[admin]`-agent or operator-only prerequisite that gates a `[claude]` feature todo
+
+### Policy
+Todos linked here have `pp_ref = PP-OPS-001` and `plan_anchor = PP-OPS-001`.  The brief will
+extract this short section — not a multi-page design document — so the operator sees only what
+they need to execute the task.
 
 ---
 

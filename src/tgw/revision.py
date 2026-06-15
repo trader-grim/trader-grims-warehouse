@@ -1,9 +1,12 @@
 """
-tgw.revision — Live listing revision draft (PP-REVISION-001, first slice).
+tgw.revision — Live listing revision (PP-REVISION-001).
 
-Dry-run delta computer: writes a revision_draft to the item JSON and
-shows a diff vs the live-mirror (ebay_listing block).  No eBay API calls
-are made; no fields outside of revision_draft are modified.
+Slice 1 — dry-run delta computer: writes revision_draft to item JSON and shows
+a diff vs the live-mirror (ebay_listing block).  No eBay API calls.
+
+Slice 2 — apply path: reads the stored revision_draft, checks drift against the
+pinned baseline, composes the full revised state, and (when enabled) submits to
+eBay.  Default is dry-run; live writes are gated behind _APPLY_ENABLED.
 
 revision_draft schema:
     {
@@ -236,4 +239,176 @@ def cmd_revise(
         "created_at": now_iso,
         "by": by,
         "had_existing_draft": existing_draft is not None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Apply path (PP-REVISION-001 second slice)
+# ---------------------------------------------------------------------------
+
+# Live eBay writes gated until Dave confirms the sparse-delta apply design.
+# Flip to True only after explicit confirmation; the CLI --live flag is
+# also required so an accidental call never fires.
+_APPLY_ENABLED = False
+
+
+def compose_revised_state(
+    current_mirror: Dict[str, Any],
+    delta: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Merge sparse delta onto current live mirror, returning the composed state.
+
+    Delta keys take precedence; all other mirror keys are preserved.
+    The result is the full state that would be PUT to eBay at apply time.
+    Dotted-path delta keys are applied as flat top-level keys (Inventory API
+    does not support nested partial updates; composition happens at apply time).
+    """
+    composed = dict(current_mirror)
+    composed.update(delta)
+    return composed
+
+
+def _overlapping_drift(
+    delta: Dict[str, Any],
+    drift: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Return drift entries whose field name also appears in delta (blocking)."""
+    delta_fields = set(delta)
+    return [d for d in drift if d["field"] in delta_fields]
+
+
+def format_apply_diff(
+    delta: Dict[str, Any],
+    current_mirror: Dict[str, Any],
+    composed: Dict[str, Any],
+    blocking_drift: List[Dict[str, Any]],
+    non_blocking_drift: List[Dict[str, Any]],
+) -> List[str]:
+    """Return human-readable lines showing the proposed apply diff."""
+    lines: List[str] = ["=== apply diff (current mirror → composed) ==="]
+    for field, new_val in delta.items():
+        old_val = current_mirror.get(field)
+        if old_val != new_val:
+            lines.append(f"  {field}:")
+            lines.append(f"    was:  {old_val!r}")
+            lines.append(f"    now:  {new_val!r}")
+
+    if blocking_drift:
+        lines.append("")
+        lines.append("=== BLOCKING DRIFT — apply refused ===")
+        for d in blocking_drift:
+            lines.append(
+                f"  {d['field']}: baseline={d['baseline']!r}  current={d['current']!r}"
+            )
+
+    if non_blocking_drift:
+        lines.append("")
+        lines.append("=== non-blocking drift (unrelated fields changed on eBay) ===")
+        for d in non_blocking_drift:
+            lines.append(
+                f"  {d['field']}: baseline={d['baseline']!r}  current={d['current']!r}"
+            )
+
+    return lines
+
+
+def cmd_revise_apply(
+    cfg: Dict[str, Any],
+    sku: str,
+    *,
+    dry_run: bool = True,
+    by: str = "claude",
+) -> Dict[str, Any]:
+    """Apply the stored revision_draft to the live eBay listing.
+
+    Drift-gate: if any field in delta has drifted in the live mirror since the
+    baseline was pinned, the apply is refused with details.  Only non-blocking
+    drift (fields not in the delta) is tolerated; a warning is included.
+
+    dry_run=True (default): compose and display; no eBay call.
+    dry_run=False: requires _APPLY_ENABLED = True; otherwise returns an error.
+
+    Always returns {ok, sku, dry_run, ...}.
+    """
+    json_path = sku_json(cfg, sku)
+    if not json_path.exists():
+        return {"ok": False, "error": f"item JSON not found: {json_path}"}
+
+    try:
+        item = json.loads(json_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"ok": False, "error": f"failed to read item JSON: {exc}"}
+
+    draft = item.get("revision_draft")
+    if not draft:
+        return {
+            "ok": False,
+            "error": (
+                f"no revision_draft found for {sku} — "
+                f"run `tgw revise {sku} --set FIELD=VALUE` first"
+            ),
+        }
+
+    delta: Dict[str, Any] = draft.get("delta") or {}
+    if not delta:
+        return {"ok": False, "error": "revision_draft has an empty delta"}
+
+    baseline = draft.get("baseline") or {}
+    pinned_snapshot: Dict[str, Any] = baseline.get("snapshot") or {}
+    pinned_hash: str = baseline.get("hash") or ""
+
+    current_mirror = live_mirror(item)
+    current_hash = baseline_hash(current_mirror)
+
+    # Drift detection
+    all_drift = detect_drift(current_mirror, pinned_snapshot)
+    blocking = _overlapping_drift(delta, all_drift)
+    non_blocking = [d for d in all_drift if d not in blocking]
+
+    if blocking:
+        diff_lines = format_apply_diff(delta, current_mirror, {}, blocking, non_blocking)
+        return {
+            "ok": False,
+            "sku": sku,
+            "error": (
+                f"{len(blocking)} delta field(s) have drifted since baseline was pinned — "
+                "apply refused; re-run `tgw revise` to re-pin baseline after reviewing"
+            ),
+            "blocking_drift": blocking,
+            "non_blocking_drift": non_blocking,
+            "diff_lines": diff_lines,
+            "dry_run": dry_run,
+        }
+
+    composed = compose_revised_state(current_mirror, delta)
+    diff_lines = format_apply_diff(delta, current_mirror, composed, [], non_blocking)
+
+    if not dry_run:
+        if not _APPLY_ENABLED:
+            return {
+                "ok": False,
+                "sku": sku,
+                "error": (
+                    "Live eBay write not yet enabled — "
+                    "sparse-delta apply design is pending Dave's confirmation. "
+                    "Re-run without --live to preview the composed state."
+                ),
+                "dry_run": dry_run,
+            }
+        # Live apply: Inventory API PUT / ReviseFixedPriceItem goes here
+        # (activated when _APPLY_ENABLED = True and design confirmed by Dave)
+
+    return {
+        "ok": True,
+        "sku": sku,
+        "dry_run": dry_run,
+        "applied": not dry_run and _APPLY_ENABLED,
+        "delta": delta,
+        "composed": composed,
+        "baseline_hash": pinned_hash,
+        "current_hash": current_hash,
+        "hash_match": pinned_hash == current_hash,
+        "blocking_drift": blocking,
+        "non_blocking_drift": non_blocking,
+        "diff_lines": diff_lines,
     }
