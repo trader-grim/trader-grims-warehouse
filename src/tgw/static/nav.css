@@ -35,3 +35,30 @@
 .sg-cancel{background:#333;color:#aaa}.sg-cancel:hover{background:#444}
 .sg-msg{flex:1;font-size:.82em;display:none}
 .sg-msg.ok{display:block;color:#7f7}.sg-msg.err{display:block;color:#f77}
+/* PM Chat popup */
+.pm-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:9999;
+  align-items:flex-start;justify-content:center;padding-top:60px}
+.pm-overlay.open{display:flex}
+.pm-modal{background:#1a1a2e;border:1px solid #2a2a4a;border-radius:10px;
+  width:min(560px,calc(100vw - 24px));height:min(520px,calc(100vh - 80px));
+  display:flex;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,.6);overflow:hidden}
+.pm-modal-header{background:#111;padding:9px 12px;display:flex;align-items:center;
+  justify-content:space-between;border-bottom:1px solid #2a2a3a;flex-shrink:0;
+  font-size:.78em;text-transform:uppercase;letter-spacing:.07em;color:#888}
+.pm-modal-close{background:none;border:none;color:#666;cursor:pointer;font-size:1.1em;
+  padding:2px 6px;border-radius:4px;line-height:1}
+.pm-modal-close:hover{background:#2a2a3a;color:#ccc}
+.pm-modal-messages{flex:1;overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:7px}
+.pm-modal-msg{max-width:92%;padding:7px 10px;border-radius:7px;font-size:.83em;line-height:1.4;
+  white-space:pre-wrap;word-break:break-word}
+.pm-modal-msg.user{align-self:flex-end;background:#1a3a5a;color:#cce}
+.pm-modal-msg.assistant{align-self:flex-start;background:#1a1a2a;color:#ccc;border:1px solid #2a2a3a}
+.pm-modal-typing{padding:7px 12px;font-size:.8em;color:#555;display:none;flex-shrink:0;
+  animation:pmPulse 1.2s ease-in-out infinite}
+@keyframes pmPulse{0%,100%{opacity:.3}50%{opacity:.9}}
+.pm-modal-input-row{display:flex;gap:6px;padding:7px 8px;border-top:1px solid #2a2a3a;
+  background:#111;flex-shrink:0}
+.pm-modal-input-row input{flex:1;margin:0;font-size:.87em}
+.pm-modal-send{padding:7px 14px;background:#1a4a8a;color:#fff;border:none;border-radius:6px;
+  cursor:pointer;font-size:.87em;white-space:nowrap;flex-shrink:0}
+.pm-modal-send:hover{background:#1a5aaa}.pm-modal-send:disabled{opacity:.5;cursor:default}

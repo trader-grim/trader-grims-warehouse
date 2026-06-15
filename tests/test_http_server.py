@@ -1533,6 +1533,35 @@ def test_nav_has_home_link():
     assert "/form/home" in nav_src
 
 
+def test_nav_has_pm_chat_link():
+    """nav.js includes PM Chat link that opens the modal overlay."""
+    p = __import__("pathlib").Path(__file__).parent.parent / "src/tgw/static/nav.js"
+    nav_src = p.read_text()
+    assert "/form/pm-chat" in nav_src
+    assert "pm-overlay" in nav_src
+    assert "pm-modal" in nav_src
+    assert "_pmShow" in nav_src
+
+
+def test_nav_css_has_pm_overlay_styles():
+    """nav.css includes the PM chat overlay and modal styles."""
+    p = __import__("pathlib").Path(__file__).parent.parent / "src/tgw/static/nav.css"
+    css = p.read_text()
+    assert ".pm-overlay" in css
+    assert ".pm-modal" in css
+    assert ".pm-modal-messages" in css
+    assert ".pm-modal-input-row" in css
+
+
+def test_nav_pm_chat_intercepts_link():
+    """nav.js intercepts the /form/pm-chat link click to open modal, not navigate."""
+    p = __import__("pathlib").Path(__file__).parent.parent / "src/tgw/static/nav.js"
+    nav_src = p.read_text()
+    # The event listener must preventDefault on the pm-chat link
+    assert "_pmLink" in nav_src
+    assert "preventDefault" in nav_src
+
+
 # ---------------------------------------------------------------------------
 # POST /api/pm/chat — PM chat (PP-EDITOR-001 Phase 3d)
 # ---------------------------------------------------------------------------

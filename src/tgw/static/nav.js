@@ -18,6 +18,7 @@
       '<div class="nav-dropdown-menu">' +
         '<a href="/form/bulk">Bulk Edit</a>' +
         '<a href="/form/suggest">Suggest</a>' +
+        '<a href="/form/pm-chat">PM Chat</a>' +
       '</div>' +
     '</div>' +
     '<div class="nav-dropdown">' +
@@ -103,7 +104,7 @@
     });
   });
 
-  document.addEventListener('keydown', function(e) { if (e.key === 'Escape') _sgHide(); });
+  document.addEventListener('keydown', function(e) { if (e.key === 'Escape') { _sgHide(); _pmHide(); } });
 
   var _sgLink = nav.querySelector('a[href="/form/suggest"]');
   if (_sgLink) {
@@ -111,6 +112,154 @@
       e.preventDefault();
       document.querySelectorAll('.nav-dropdown-menu').forEach(function(m) { m.classList.remove('open'); });
       _sgShow();
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // PM Chat popup — intercept the "PM Chat" nav link, show a modal overlay.
+  // ---------------------------------------------------------------------------
+  var _pmOverlay = document.createElement('div');
+  _pmOverlay.className = 'pm-overlay';
+  _pmOverlay.innerHTML =
+    '<div class="pm-modal">' +
+      '<div class="pm-modal-header">' +
+        '<span>PM Chat</span>' +
+        '<button class="pm-modal-close" id="pm-modal-close" title="Close">&#10005;</button>' +
+      '</div>' +
+      '<div class="pm-modal-messages" id="pm-modal-messages"></div>' +
+      '<div class="pm-modal-typing" id="pm-modal-typing">PM is thinking…</div>' +
+      '<div class="pm-modal-input-row">' +
+        '<input id="pm-modal-input" type="text" placeholder="Ask the PM…" autocomplete="off">' +
+        '<button class="pm-modal-send" id="pm-modal-send">Send</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(_pmOverlay);
+
+  var PM_HK = 'tgw-pm-h';
+  var _pmHistory = [];
+
+  function _pmLoad() {
+    try { var h = sessionStorage.getItem(PM_HK); if (h) _pmHistory = JSON.parse(h); } catch(e) {}
+    _pmRender();
+  }
+  function _pmSave() {
+    try { sessionStorage.setItem(PM_HK, JSON.stringify(_pmHistory.slice(-20))); } catch(e) {}
+  }
+  function _pmRender() {
+    var el = document.getElementById('pm-modal-messages');
+    if (!el) return;
+    if (!_pmHistory.length) {
+      el.innerHTML = '<div style="color:#444;font-size:.82em;text-align:center;padding:18px 6px">' +
+        'Ask: what needs doing? how many dead letters? how many items staged?</div>';
+      return;
+    }
+    var html = '';
+    _pmHistory.forEach(function(m) {
+      html += '<div class="pm-modal-msg ' + (m.role === 'user' ? 'user' : 'assistant') + '">' +
+        escapeHtml(m.content) + '</div>';
+    });
+    el.innerHTML = html;
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function _pmShow() {
+    _pmLoad();
+    _pmOverlay.classList.add('open');
+    setTimeout(function() {
+      var inp = document.getElementById('pm-modal-input');
+      if (inp) inp.focus();
+    }, 0);
+  }
+  function _pmHide() { _pmOverlay.classList.remove('open'); }
+
+  async function _pmSend() {
+    var inp = document.getElementById('pm-modal-input');
+    var msg = (inp.value || '').trim();
+    if (!msg) return;
+    inp.value = '';
+    _pmHistory.push({role: 'user', content: msg});
+    _pmRender(); _pmSave();
+    var typingEl = document.getElementById('pm-modal-typing');
+    var btn = document.getElementById('pm-modal-send');
+    if (typingEl) typingEl.style.display = '';
+    if (btn) btn.disabled = true;
+    try {
+      var r = await fetch('/api/pm/chat', {
+        method: 'POST',
+        headers: Object.assign({'Content-Type': 'application/json'}, authHeaders()),
+        body: JSON.stringify({message: msg, history: _pmHistory.slice(-9, -1)}),
+      });
+      var d = await r.json().catch(function() { return {}; });
+      var txt = d.message || d.detail || '(no response)';
+      _pmHistory.push({role: 'assistant', content: txt});
+      _pmRender(); _pmSave();
+      if (d.actions) d.actions.forEach(function(a) { if (a.type && a.type !== 'none') _pmToast(a); });
+    } catch(e) {
+      _pmHistory.push({role: 'assistant', content: 'Error: ' + e.message});
+      _pmRender(); _pmSave();
+    } finally {
+      if (typingEl) typingEl.style.display = 'none';
+      if (btn) btn.disabled = false;
+      var msgs = document.getElementById('pm-modal-messages');
+      if (msgs) msgs.scrollTop = 9999;
+    }
+  }
+
+  function _pmToast(action) {
+    var el = document.createElement('div');
+    el.className = 'pm-toast';
+    var label = action.type === 'add_todo' ? 'Add Todo' : action.type === 'add_suggestion' ? 'Add Suggestion' : 'Action';
+    var body = action.type === 'add_todo'
+      ? '[' + escapeHtml(action.agent || '?') + ' p' + (action.priority || 50) + '] ' + escapeHtml(action.body || '')
+      : escapeHtml(action.text || '');
+    el.innerHTML = '<div class="tlabel">' + label + '</div>' +
+      '<div class="tbody">' + body + '</div>' +
+      '<div class="tbtns">' +
+      '<button class="btn-ok" onclick="_pmConfirm(this)">Confirm</button>' +
+      '<button class="btn-no" onclick="this.closest(\'.pm-toast\').remove()">Dismiss</button>' +
+      '</div>';
+    el.dataset.action = JSON.stringify(action);
+    document.body.appendChild(el);
+    setTimeout(function() { if (el.parentNode) el.remove(); }, 30000);
+  }
+
+  window._pmConfirm = async function(btn) {
+    var toast = btn.closest('.pm-toast');
+    var action;
+    try { action = JSON.parse(toast.dataset.action); } catch(e) { toast.remove(); return; }
+    btn.disabled = true; btn.textContent = '…';
+    try {
+      var r = await fetch('/api/pm/action', {
+        method: 'POST',
+        headers: Object.assign({'Content-Type': 'application/json'}, authHeaders()),
+        body: JSON.stringify(action),
+      });
+      var d = await r.json().catch(function() { return {}; });
+      if (d.ok) {
+        toast.innerHTML = '<div style="color:#7f7;font-size:.85em">' + (d.message || 'Done') + '</div>';
+      } else {
+        toast.innerHTML = '<div style="color:#f77;font-size:.85em">Error: ' + escapeHtml(d.detail || 'failed') + '</div>';
+      }
+      setTimeout(function() { if (toast.parentNode) toast.remove(); }, 4000);
+    } catch(e) {
+      toast.innerHTML = '<div style="color:#f77;font-size:.85em">Network error</div>';
+      setTimeout(function() { if (toast.parentNode) toast.remove(); }, 4000);
+    }
+  };
+
+  document.getElementById('pm-modal-close').addEventListener('click', _pmHide);
+  _pmOverlay.addEventListener('click', function(e) { if (e.target === _pmOverlay) _pmHide(); });
+  document.getElementById('pm-modal-send').addEventListener('click', _pmSend);
+  document.getElementById('pm-modal-input').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); _pmSend(); }
+  });
+
+  var _pmLink = nav.querySelector('a[href="/form/pm-chat"]');
+  if (_pmLink) {
+    _pmLink.addEventListener('click', function(e) {
+      e.preventDefault();
+      document.querySelectorAll('.nav-dropdown-menu').forEach(function(m) { m.classList.remove('open'); });
+      _pmShow();
     });
   }
 
