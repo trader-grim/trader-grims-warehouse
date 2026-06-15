@@ -2147,6 +2147,99 @@ def test_delete_item_not_found(client):
 
 
 # ---------------------------------------------------------------------------
+# POST /api/items/{sku}/photo-order
+# ---------------------------------------------------------------------------
+
+
+def test_photo_order_saves_to_json(client, env):
+    """POST /api/items/{sku}/photo-order persists order list to item JSON."""
+    order = ["c.jpg", "a.jpg", "b.jpg"]
+    r = client.post(
+        f"/api/items/{SKU_A}/photo-order",
+        json={"order": order},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    d = r.json()
+    assert d["ok"] is True
+    assert d["order"] == order
+
+    import json as _json
+    doc = _json.loads((env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text())
+    assert doc["photo_order"] == order
+
+
+def test_photo_order_requires_auth(client):
+    r = client.post(f"/api/items/{SKU_A}/photo-order", json={"order": ["a.jpg"]})
+    assert r.status_code == 401
+
+
+def test_photo_order_not_found(client):
+    r = client.post(
+        "/api/items/tgw99999999999999999/photo-order",
+        json={"order": ["a.jpg"]},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Browse page — per-page selector and view toggle
+# ---------------------------------------------------------------------------
+
+
+def test_browse_has_page_selector(client):
+    """Inventory browse page includes items-per-page selector."""
+    r = client.get("/form/items")
+    assert r.status_code == 200
+    assert 'id="pg-sel"' in r.text
+    assert "30/page" in r.text
+    assert "60/page" in r.text
+
+
+def test_browse_has_view_toggle(client):
+    """Inventory browse page includes card/list view toggle buttons."""
+    r = client.get("/form/items")
+    assert r.status_code == 200
+    assert "setView('card')" in r.text
+    assert "setView('list')" in r.text
+    assert "_rowHtml" in r.text
+
+
+def test_browse_no_cache_header(client):
+    """Form pages return Cache-Control: no-store so stale API keys don't persist."""
+    r = client.get("/form/items")
+    assert "no-store" in r.headers.get("cache-control", "")
+
+
+def test_home_no_cache_header(client):
+    r = client.get("/form/home")
+    assert "no-store" in r.headers.get("cache-control", "")
+
+
+# ---------------------------------------------------------------------------
+# Item detail — inline editing UI, photo reorder UI
+# ---------------------------------------------------------------------------
+
+
+def test_item_detail_inline_editing_ui(client, env):
+    """Item detail page marks editable fields with data-field attribute."""
+    r = client.get(f"/form/items/{SKU_A}")
+    assert r.status_code == 200
+    assert 'data-field="title"' in r.text
+    assert 'data-field="ai_hint"' in r.text
+    assert 'data-field="price"' in r.text
+    assert 'data-field="location"' in r.text
+    assert "fv-edit" in r.text
+    assert "dblclick" in r.text
+
+
+def test_item_detail_no_cache_header(client, env):
+    r = client.get(f"/form/items/{SKU_A}")
+    assert "no-store" in r.headers.get("cache-control", "")
+
+
+# ---------------------------------------------------------------------------
 # DELETE /api/items/{sku}/revision
 # GET /form/revisions
 # ---------------------------------------------------------------------------

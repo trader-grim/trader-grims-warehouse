@@ -41,6 +41,22 @@ def _scalar(doc: Dict[str, Any], key: str) -> str:
     return str(val)
 
 
+def _price_col(doc: Dict[str, Any]) -> str:
+    """Resolve display price: top-level → ebay_offer → draft_listing."""
+    p = doc.get('price')
+    if p is not None:
+        return str(p)
+    eo = doc.get('ebay_offer') or {}
+    ep = eo.get('price')
+    if ep is not None:
+        return str(ep)
+    dl = doc.get('draft_listing') or {}
+    dp = dl.get('price')
+    if dp is not None:
+        return str(dp)
+    return ''
+
+
 def build_sqlite_catalog(cfg: Dict[str, Any],
                          check_only: bool = False) -> Dict[str, Any]:
     """Build or refresh the SQLite catalog from ItemData."""
@@ -84,7 +100,7 @@ def build_sqlite_catalog(cfg: Dict[str, Any],
                         _scalar(r, 'title'),
                         _scalar(r, 'location'),
                         _scalar(r, '#STATUS') or _scalar(r, 'status'),
-                        _scalar(r, 'price'),
+                        _price_col(r),
                         _scalar(r, 'qty'),
                         _scalar(r, 'image'),
                         _scalar(r, 'attribute_set'),

@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-06-15 05:20 UTC — 23 open, 829 done in the last 7 days._
+_Rendered 2026-06-15 05:24 UTC — 20 open, 832 done in the last 7 days._
 
 ## admin (17 open)
 
@@ -35,24 +35,19 @@ _Rendered 2026-06-15 05:20 UTC — 23 open, 829 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (3 open)
-
-| ID | Pri | Size | Task | Plan | Blockers |
-|---:|----:|:----:|------|------|----------|
-| 867 | 66 |  | PP-EDITOR-001 3o: PM chat open in popup window — web PM chat (/form/pm-chat) opens as modal popup instead of navigating away; POST /api/pm/chat stays same | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
-| 871 | 75 |  | category-groups.json pricing calibration (GEMINI-005): update electrical_fixtures typical_used→12.50, media_records→13.50, collectibles_pins_buttons→10.50; run tgw category-groups --reseed after |  |  |
-| 872 | 76 |  | category-groups.json store_category mappings (GEMINI-006): populate store_category for tools_hand, electronics_adapters_chargers, electronics_remotes, kitchen_utensils |  |  |
-
 ## sokoban (1 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — Sold reconciliation and inventory status sync (design ready)\|PP-SOLD-001]] |  |
 
-## Done this week (829)  — showing 15 most recent
+## Done this week (832)  — showing 15 most recent
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 872 | claude | 2026-06-14 | category-groups.json store_category mappings (GEMINI-006): populate store_category for tools_hand, electronics_adapters_chargers, electronics_remotes, kitchen_utensils |
+| 871 | claude | 2026-06-14 | category-groups.json pricing calibration (GEMINI-005): update electrical_fixtures typical_used→12.50, media_records→13.50, collectibles_pins_buttons→10.50; run tgw category-groups --reseed after |
+| 867 | claude | 2026-06-14 | PP-EDITOR-001 3o: PM chat open in popup window — web PM chat (/form/pm-chat) opens as modal popup instead of navigating away; POST /api/pm/chat stays same |
 | 866 | claude | 2026-06-14 | PP-EDITOR-001 3o: suggest popup "Upload to inbox" link — add file-input button that POSTs file to new POST /api/inbox/upload endpoint; stores in inbox/ with timestamp prefix; confirm upload toast |
 | 870 | claude | 2026-06-14 | ISS-012: web home page health checks and recent activity not displaying — investigate /form/ dashboard: check /api/health and /api/dashboard responses; fix frontend rendering of status strip and recent-items section |
 | 868 | claude | 2026-06-14 | tgw restart-workers sudo fix: remove sudo -n (silent fail pattern); use plain sudo so system prompts for password when needed; update cmd_restart_workers() in api.py |
@@ -65,7 +60,4 @@ _Rendered 2026-06-15 05:20 UTC — 23 open, 829 done in the last 7 days._
 | 102 | agy | 2026-06-14 | Round7 p30: GDrive dedupe assist (PLAN-backup-dr A8) — chunked rclone dedupe strategy for same-name-same-dir duplicates that time out on the full dataset; produce chunk plan + exact commands; operator supervises execution |
 | 142 | agy | 2026-06-14 | eBay DS ticket follow-up — check Developer Support inbox for responses to the 8 buy.marketplace_insights scope questions (todo #79); summarize any answers or next steps; update plan accordingly. Browser task via Seller Hub / DS portal |
 | 141 | agy | 2026-06-14 | PP-VERIFY-001 catalog baseline rescan — rerun catalog quality scan (follow CATALOG-BASELINE-SCAN.md pattern) on current ItemData sample; compare fill rates vs prior baseline; identify new gaps; output updated markdown table to inbox/. AGY large-context data task |
-| 101 | agy | 2026-06-14 | Round7 p20: ebay_draft aspect-fill audit — per-category Required/Recommended specifics fill rates from a draft_listing extract; identify worst-coverage categories + prompt-tuning recommendations; result to inbox/. Self-contained brief; route via Antigravity after 2026-06-18 |
-| 859 | claude | 2026-06-14 | PP-EDITOR-001 Phase 3n — polish pass (build-and-tweak, after rounds 3a-3m deployed and used): capture gaps discovered through actual use; mobile layout issues; missing filters; action confirmation flows; error state handling; empty states; keyboard shortcuts; any API gaps the UI exposes that weren't anticipated in planning |
-| 864 | claude | 2026-06-14 | PP-EDITOR-001 3n: suggest popup injects current page URL + title as context prefix so PM has better context on feedback. PP-DOCFLOW-001. |
-| … | | | _…and 814 more — run `tgw todo --all` to see everything_ |
+| … | | | _…and 817 more — run `tgw todo --all` to see everything_ |
