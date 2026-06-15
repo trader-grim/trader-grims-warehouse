@@ -231,16 +231,17 @@ def list_items(
         params.append(date_to[:8])
 
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    count_sql = f"SELECT COUNT(*) FROM catalog {where}"
     sql = f"SELECT sku, title, location, status, price, qty, image FROM catalog {where} ORDER BY sku DESC LIMIT ? OFFSET ?"
-    params += [limit, offset]
 
     con = _sqlite_conn()
     try:
-        rows = [dict(r) for r in con.execute(sql, params).fetchall()]
+        total = con.execute(count_sql, params).fetchone()[0]
+        rows = [dict(r) for r in con.execute(sql, params + [limit, offset]).fetchall()]
     finally:
         con.close()
 
-    return {"ok": True, "count": len(rows), "items": rows}
+    return {"ok": True, "count": total, "items": rows}
 
 
 # ---------------------------------------------------------------------------
@@ -890,6 +891,41 @@ def set_item_template(sku: str, body: SetTemplateBody) -> Dict[str, Any]:
 
     return {"ok": True, "sku": sku, "template_key": body.template_key,
             "applied": fields, "group_name": grp.get("name", body.template_key)}
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/items/{sku} — soft-delete item (status → deleted)
+# ---------------------------------------------------------------------------
+
+
+@app.delete("/api/items/{sku}", dependencies=[AUTH])
+def delete_item(sku: str) -> Dict[str, Any]:
+    """Soft-delete an item: set status=deleted in JSON, enqueue catalog rebuild.
+
+    Does NOT touch eBay — caller must end active listings separately.
+    Does NOT remove the ItemData folder so the data is recoverable.
+    """
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+
+    doc = load_item_doc(json_path)
+    doc["status"] = "deleted"
+    doc["deleted_at"] = datetime.now().isoformat()
+    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+
+    try:
+        state_machine.enqueue_job(
+            queue_name="catalog_rebuild",
+            payload={"reason": f"delete:{sku}"},
+            dedupe_key="catalog_rebuild:pending",
+            not_before=time.time() + 30,
+            max_attempts=3,
+        )
+    except Exception:
+        pass
+
+    return {"ok": True, "sku": sku, "status": "deleted"}
 
 
 # ---------------------------------------------------------------------------
@@ -1945,6 +1981,13 @@ _ITEMS_EXTRA_CSS = """
   color:#fb7;border:1px solid #6a4a00;border-radius:6px;font-size:.82em;font-weight:600;
   text-decoration:none}
 .offer-badge:hover{background:#4a3a00}
+.danger-zone{margin-top:18px;border-top:1px solid #332}
+.act-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.act-btn{padding:7px 14px;background:#1a2a3a;color:#cce;border:1px solid #2a4a6a;
+  border-radius:6px;cursor:pointer;font-size:.84em}
+.act-btn:hover{background:#1a3a5a}
+.act-delete{background:#2a1a1a;color:#f99;border-color:#5a2a2a}
+.act-delete:hover{background:#3a1a1a}
 """
 
 _BROWSE_HTML = """\
@@ -2237,6 +2280,49 @@ def _render_item_detail_html(
         + "</div>"
     )
 
+    # Actions section (pipeline + delete)
+    import json as _json
+    _ak_json2 = _json.dumps(api_key)
+    _sku_json2 = _json.dumps(sku)
+    actions_html = (
+        f'<div class="dsec danger-zone">'
+        f'<h3>Actions</h3>'
+        f'<div class="act-row">'
+        f'<button class="act-btn" onclick="triggerAction(\'ai_identify\')">Re-identify</button>'
+        f'<button class="act-btn" onclick="triggerAction(\'ebay_draft\')">Re-draft</button>'
+        f'<button class="act-btn" onclick="triggerAction(\'ebay_price\')">Re-price</button>'
+        f'<button class="act-btn" onclick="triggerAction(\'ebay_stage\')">Stage</button>'
+        f'<button class="act-btn" onclick="triggerAction(\'ebay_publish\')">Publish</button>'
+        f'</div>'
+        f'<div class="act-row" style="margin-top:10px">'
+        f'<button class="act-btn act-delete" onclick="deleteItem()">Delete item</button>'
+        f'</div>'
+        f'</div>'
+        f'<script>'
+        f'window.TGW_API_KEY={_ak_json2};'
+        f'var _SKU={_sku_json2};'
+        f'function triggerAction(action){{'
+        f'  fetch(\'/api/items/\'+_SKU+\'/action\',{{'
+        f'    method:\'POST\','
+        f'    headers:authHeaders({{\'Content-Type\':\'application/json\'}}),'
+        f'    body:JSON.stringify({{action:action}})'
+        f'  }}).then(function(r){{return r.json();}}).then(function(d){{'
+        f'    alert(d.ok ? \'Action queued: \'+action : \'Error: \'+(d.detail||\'failed\'));'
+        f'  }}).catch(function(e){{alert(\'Network error: \'+e);}});'
+        f'}}'
+        f'function deleteItem(){{'
+        f'  if(!confirm(\'Delete \'+_SKU+\'?\\nThis marks the item as deleted and removes it from the catalog.\\nThe ItemData folder is preserved.\'))return;'
+        f'  fetch(\'/api/items/\'+_SKU,{{'
+        f'    method:\'DELETE\','
+        f'    headers:authHeaders()'
+        f'  }}).then(function(r){{return r.json();}}).then(function(d){{'
+        f'    if(d.ok){{window.location.href=\'/form/items\';}}'
+        f'    else{{alert(\'Delete failed: \'+(d.detail||\'unknown error\'));}}'
+        f'  }}).catch(function(e){{alert(\'Network error: \'+e);}});'
+        f'}}'
+        f'</script>\n'
+    )
+
     # Offer count badge: JS fetches /api/offers (cached), filters to this SKU.
     offer_script = ""
     if listing_id and api_key:
@@ -2283,6 +2369,7 @@ def _render_item_detail_html(
         f"{gallery_html}"
         f"{fields_html}"
         f"</div>\n"
+        f"{actions_html}"
         + _STATIC_FOOT
         + offer_script
         + "</body></html>"

@@ -311,16 +311,19 @@ def test_list_items_status_filter(client):
 
 
 def test_list_items_limit_and_offset(client):
+    # count is the TOTAL matching rows; items is the page slice.
     r1 = client.get("/api/items", params={"limit": 1}, headers=AUTH_HEADERS)
     b1 = r1.json()
-    assert b1["count"] == 1
+    assert b1["count"] == 3        # 3 catalog rows total
+    assert len(b1["items"]) == 1   # only 1 returned (limit=1)
     first_sku = b1["items"][0]["sku"]
 
     r2 = client.get(
         "/api/items", params={"limit": 1, "offset": 1}, headers=AUTH_HEADERS
     )
     b2 = r2.json()
-    assert b2["count"] == 1
+    assert b2["count"] == 3        # total unchanged
+    assert len(b2["items"]) == 1
     assert b2["items"][0]["sku"] != first_sku
 
 
@@ -2113,6 +2116,37 @@ def test_offers_pct_none_when_prices_missing(env, monkeypatch):
 # ---------------------------------------------------------------------------
 # GET /api/items/pending-revision — revision queue API (PP-EDITOR-001 Phase 3h)
 # POST /api/items/{sku}/revision/apply
+# ---------------------------------------------------------------------------
+# DELETE /api/items/{sku} — soft-delete item
+# ---------------------------------------------------------------------------
+
+
+def test_delete_item_sets_status(client, env):
+    """DELETE /api/items/{sku} sets status=deleted in item JSON."""
+    r = client.delete(f"/api/items/{SKU_A}", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    d = r.json()
+    assert d["ok"] is True
+    assert d["sku"] == SKU_A
+
+    item_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+    import json as _json
+    doc = _json.loads(item_path.read_text())
+    assert doc["status"] == "deleted"
+    assert "deleted_at" in doc
+
+
+def test_delete_item_requires_auth(client):
+    r = client.delete(f"/api/items/{SKU_A}")
+    assert r.status_code == 401
+
+
+def test_delete_item_not_found(client):
+    r = client.delete("/api/items/tgw99999999999999999", headers=AUTH_HEADERS)
+    assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # DELETE /api/items/{sku}/revision
 # GET /form/revisions
 # ---------------------------------------------------------------------------
