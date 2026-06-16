@@ -59,6 +59,20 @@ def test_update_item_missing_sku():
         assert result['ok'] is False
 
 
+def test_write_field_rejects_negative_qty():
+    import pytest
+    from tgw.items import _write_field
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        sku = "tgw001"
+        d_sku = root / sku
+        d_sku.mkdir()
+        (d_sku / f"{sku}.json").write_text(json.dumps({"sku": sku, "qty": 1}), encoding="utf-8")
+        cfg = {"itemdata_root": root}
+        with pytest.raises(ValueError, match="cannot be negative"):
+            _write_field(cfg, sku, "qty", -1)
+
+
 def test_update_item_check_only():
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)

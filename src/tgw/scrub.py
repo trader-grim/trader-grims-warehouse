@@ -85,6 +85,70 @@ def data_scrub_pass1(cfg: Dict[str, Any], dry_run: bool = True) -> Dict[str, Any
     return result
 
 
+def data_scrub_qty_repair(cfg: Dict[str, Any], dry_run: bool = True) -> Dict[str, Any]:
+    """
+    Pass 3: set qty=1 for any item where qty < 0.
+
+    Returns a summary dict. If dry_run=True no files are written.
+    """
+    itemdata_root = Path(cfg['itemdata_root'])
+
+    repaired: List[Dict[str, Any]] = []
+    skipped: int = 0
+    errors: List[Dict[str, Any]] = []
+
+    for sku_dir in sorted(itemdata_root.iterdir()):
+        if not sku_dir.is_dir():
+            continue
+        sku = sku_dir.name
+        path = sku_dir / f'{sku}.json'
+        if not path.exists():
+            continue
+
+        try:
+            doc = load_item_doc(path)
+        except Exception as exc:
+            errors.append({'sku': sku, 'error': str(exc)})
+            continue
+
+        qty = doc.get('qty')
+        if qty is None:
+            skipped += 1
+            continue
+
+        try:
+            qty_val = float(qty)
+        except (TypeError, ValueError):
+            skipped += 1
+            continue
+
+        if qty_val >= 0:
+            skipped += 1
+            continue
+
+        if not dry_run:
+            doc['qty'] = 1
+            atomic_write_json(path, doc)
+            log.debug('%s: qty %r → 1', sku, qty)
+
+        repaired.append({'sku': sku, 'old_qty': qty})
+
+    result: Dict[str, Any] = {
+        'ok':          True,
+        'pass':        3,
+        'description': 'qty < 0 → 1 repair',
+        'dry_run':     dry_run,
+        'repaired':    len(repaired),
+        'skipped':     skipped,
+        'errors':      len(errors),
+    }
+    if errors:
+        result['error_detail'] = errors[:10]
+    if dry_run:
+        result['sample_would_repair'] = repaired[:5]
+    return result
+
+
 def data_scrub_size_class_backfill(cfg: Dict[str, Any], dry_run: bool = True) -> Dict[str, Any]:
     """
     Pass 2: populate ``size_class`` (and ``category_group``) from category-groups.json defaults.

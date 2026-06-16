@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import tgw.ebay.pricing as pricing
-from tgw.scrub import data_scrub_pass1, data_scrub_size_class_backfill
+from tgw.scrub import data_scrub_pass1, data_scrub_qty_repair, data_scrub_size_class_backfill
 
 GROUPS = {
     "groups": {
@@ -176,3 +176,53 @@ class TestPass2:
         assert _read_item(item_root, "tgw002")["size_class"] == "small_box"
         assert _read_item(item_root, "tgw003")["size_class"] == "large_box"  # untouched
         assert "size_class" not in _read_item(item_root, "tgw004")
+
+
+# ---------------------------------------------------------------------------
+# data_scrub_qty_repair (pass 3)
+# ---------------------------------------------------------------------------
+
+class TestPass3:
+    def _cfg(self, item_root):
+        return {"itemdata_root": item_root}
+
+    def test_dry_run_does_not_write(self, item_root):
+        p = _write_item(item_root, "tgw001", {"sku": "tgw001", "qty": -3})
+        result = data_scrub_qty_repair({"itemdata_root": item_root}, dry_run=True)
+        assert result["ok"] is True
+        assert result["dry_run"] is True
+        assert result["repaired"] == 1
+        doc = json.loads(p.read_text())
+        assert doc["qty"] == -3  # untouched
+
+    def test_repairs_negative_qty(self, item_root):
+        _write_item(item_root, "tgw001", {"sku": "tgw001", "qty": -5})
+        result = data_scrub_qty_repair({"itemdata_root": item_root}, dry_run=False)
+        assert result["repaired"] == 1
+        doc = _read_item(item_root, "tgw001")
+        assert doc["qty"] == 1
+
+    def test_skips_item_with_no_qty(self, item_root):
+        _write_item(item_root, "tgw001", {"sku": "tgw001", "title": "X"})
+        result = data_scrub_qty_repair({"itemdata_root": item_root}, dry_run=False)
+        assert result["repaired"] == 0
+        assert result["skipped"] == 1
+
+    def test_skips_item_with_positive_qty(self, item_root):
+        _write_item(item_root, "tgw001", {"sku": "tgw001", "qty": 2})
+        result = data_scrub_qty_repair({"itemdata_root": item_root}, dry_run=False)
+        assert result["repaired"] == 0
+        assert result["skipped"] == 1
+
+    def test_skips_item_with_zero_qty(self, item_root):
+        _write_item(item_root, "tgw001", {"sku": "tgw001", "qty": 0})
+        result = data_scrub_qty_repair({"itemdata_root": item_root}, dry_run=False)
+        assert result["repaired"] == 0
+        assert result["skipped"] == 1
+
+    def test_sample_in_dry_run_output(self, item_root):
+        _write_item(item_root, "tgw001", {"sku": "tgw001", "qty": -1})
+        result = data_scrub_qty_repair({"itemdata_root": item_root}, dry_run=True)
+        assert "sample_would_repair" in result
+        assert result["sample_would_repair"][0]["sku"] == "tgw001"
+        assert result["sample_would_repair"][0]["old_qty"] == -1
