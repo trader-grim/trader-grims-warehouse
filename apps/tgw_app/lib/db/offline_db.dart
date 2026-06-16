@@ -75,17 +75,17 @@ class OfflineDb {
       args.add(statusFilter);
     }
 
-    final results = await _db!.query(
-      'catalog',
-      columns: ['sku', 'title', 'location', 'status', 'price', 'qty', 'image'],
-      where: where,
-      whereArgs: args,
-      orderBy: 'sku DESC',
-      limit: limit,
-      offset: offset,
+    final results = await _db!.rawQuery(
+      '''SELECT sku, title, location, status, price, qty, image,
+         json_extract(data, '\$.ebay_listing.listing_id') AS ebay_listing_id,
+         json_extract(data, '\$.ebay_offer.offer_id') AS ebay_offer_id,
+         json_extract(data, '\$.ebay_offer.ready_at') AS ebay_ready_at,
+         CASE WHEN json_extract(data, '\$.draft_listing') IS NOT NULL THEN 1 ELSE 0 END AS has_draft
+         FROM catalog WHERE $where ORDER BY sku DESC LIMIT ? OFFSET ?''',
+      [...args, limit, offset],
     );
 
-    return results.map((r) => ItemSummary.fromJson(r)).toList();
+    return results.map((r) => ItemSummary.fromJson(Map<String, dynamic>.from(r))).toList();
   }
 
   Future<ItemDetail?> getItem(String sku) async {

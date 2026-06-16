@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../../providers/providers.dart';
 import '../../models/models.dart';
 
@@ -199,11 +200,13 @@ class _ItemCard extends StatelessWidget {
     this.localPath,
   });
 
+  bool get _missingPhoto => item.image == null || item.image!.isEmpty;
+
   @override
   Widget build(BuildContext context) {
-    Widget image;
+    Widget imageWidget;
     if (isOnline) {
-      image = CachedNetworkImage(
+      imageWidget = CachedNetworkImage(
         imageUrl: thumbnailUrl,
         fit: BoxFit.cover,
         width: double.infinity,
@@ -211,15 +214,17 @@ class _ItemCard extends StatelessWidget {
         errorWidget: (context, url, error) => const Icon(Icons.broken_image),
       );
     } else if (localPath != null && File(localPath!).existsSync()) {
-      image = Image.file(
+      imageWidget = Image.file(
         File(localPath!),
         fit: BoxFit.cover,
         width: double.infinity,
         errorBuilder: (context, error, stackTrace) => const Icon(Icons.broken_image),
       );
     } else {
-      image = const Center(child: Icon(Icons.offline_pin, color: Colors.grey));
+      imageWidget = const Center(child: Icon(Icons.offline_pin, color: Colors.grey));
     }
+
+    final String priceText = item.price.isNotEmpty ? '\$${item.price}' : '—';
 
     return Card(
       clipBehavior: Clip.antiAlias,
@@ -228,7 +233,27 @@ class _ItemCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Expanded(child: image),
+            Expanded(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  imageWidget,
+                  if (_missingPhoto)
+                    Positioned(
+                      top: 4,
+                      right: 4,
+                      child: Container(
+                        padding: const EdgeInsets.all(2),
+                        decoration: BoxDecoration(
+                          color: Colors.black54,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: const Icon(Icons.photo_camera_outlined, size: 14, color: Colors.amber),
+                      ),
+                    ),
+                ],
+              ),
+            ),
             Padding(
               padding: const EdgeInsets.all(8.0),
               child: Column(
@@ -244,16 +269,18 @@ class _ItemCard extends StatelessWidget {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Chip(
-                        label: Text(item.location, style: const TextStyle(fontSize: 10)),
-                        padding: EdgeInsets.zero,
-                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      Flexible(
+                        child: Chip(
+                          label: Text(item.location, style: const TextStyle(fontSize: 10)),
+                          padding: EdgeInsets.zero,
+                          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
                       ),
-                      Text('\$${item.price}', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blue)),
+                      Text(priceText, style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blue, fontSize: 12)),
                     ],
                   ),
                   const SizedBox(height: 4),
-                  _StatusBadge(status: item.status),
+                  _EbayStatusBadge(item: item),
                 ],
               ),
             ),
@@ -264,23 +291,49 @@ class _ItemCard extends StatelessWidget {
   }
 }
 
-class _StatusBadge extends StatelessWidget {
-  final String status;
-  const _StatusBadge({required this.status});
+enum _EbayState { listed, ready, staged, needsReview, notListed }
+
+class _EbayStatusBadge extends StatelessWidget {
+  final ItemSummary item;
+  const _EbayStatusBadge({required this.item});
+
+  _EbayState get _state {
+    final lid = item.ebayListingId;
+    if (lid != null && lid.isNotEmpty) return _EbayState.listed;
+    final oid = item.ebayOfferId;
+    if (oid != null && oid.isNotEmpty) {
+      final rat = item.ebayReadyAt;
+      return (rat != null && rat.isNotEmpty) ? _EbayState.ready : _EbayState.staged;
+    }
+    if (item.hasDraft) return _EbayState.needsReview;
+    return _EbayState.notListed;
+  }
 
   @override
   Widget build(BuildContext context) {
-    Color color;
-    switch (status) {
-      case 'In Stock': color = Colors.blue; break;
-      case 'Draft': color = Colors.orange; break;
-      case 'Staged': color = Colors.purple; break;
-      case 'Active': color = Colors.green; break;
-      case 'Sold': color = Colors.grey; break;
-      default: color = Colors.grey;
+    final state = _state;
+    late Color color;
+    late String label;
+
+    switch (state) {
+      case _EbayState.listed:
+        color = Colors.green;
+        label = 'Listed · ${item.ebayListingId!}';
+      case _EbayState.ready:
+        color = Colors.teal;
+        label = 'Ready';
+      case _EbayState.staged:
+        color = Colors.purple;
+        label = 'Staged';
+      case _EbayState.needsReview:
+        color = Colors.orange;
+        label = 'Needs Review';
+      case _EbayState.notListed:
+        color = Colors.grey;
+        label = 'Not Listed';
     }
 
-    return Container(
+    final badge = Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
         color: color.withAlpha(25),
@@ -288,9 +341,22 @@ class _StatusBadge extends StatelessWidget {
         border: Border.all(color: color),
       ),
       child: Text(
-        status,
+        label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
         style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.bold),
       ),
     );
+
+    if (state == _EbayState.listed) {
+      return GestureDetector(
+        onTap: () async {
+          final url = Uri.parse('https://www.ebay.com/itm/${item.ebayListingId}');
+          if (await canLaunchUrl(url)) launchUrl(url, mode: LaunchMode.externalApplication);
+        },
+        child: badge,
+      );
+    }
+    return badge;
   }
 }

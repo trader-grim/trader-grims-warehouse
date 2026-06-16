@@ -260,7 +260,14 @@ def list_items(
 
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     count_sql = f"SELECT COUNT(*) FROM catalog {where}"
-    sql = f"SELECT sku, title, location, status, price, qty, image FROM catalog {where} ORDER BY sku DESC LIMIT ? OFFSET ?"
+    sql = (
+        f"SELECT sku, title, location, status, price, qty, image,"
+        f" json_extract(data, '$.ebay_listing.listing_id') AS ebay_listing_id,"
+        f" json_extract(data, '$.ebay_offer.offer_id') AS ebay_offer_id,"
+        f" json_extract(data, '$.ebay_offer.ready_at') AS ebay_ready_at,"
+        f" CASE WHEN json_extract(data, '$.draft_listing') IS NOT NULL THEN 1 ELSE 0 END AS has_draft"
+        f" FROM catalog {where} ORDER BY sku DESC LIMIT ? OFFSET ?"
+    )
 
     con = _sqlite_conn()
     try:

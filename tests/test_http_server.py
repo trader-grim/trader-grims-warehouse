@@ -80,16 +80,21 @@ class _FakeConn:
 
 
 def _make_catalog(db_path: Path, rows):
-    """Create a SQLite catalog matching http_server's expected columns."""
+    """Create a SQLite catalog matching http_server's expected columns.
+
+    Each row is a 7-tuple: (sku, title, location, status, price, qty, image).
+    A ``data`` column (TEXT, JSON) is required for json_extract in list_items;
+    we seed it with a minimal ``{}`` payload unless the caller passes extra.
+    """
     con = sqlite3.connect(str(db_path))
     con.execute(
         "CREATE TABLE catalog ("
         "sku TEXT, title TEXT, location TEXT, status TEXT, "
-        "price REAL, qty INTEGER, image TEXT)"
+        "price REAL, qty INTEGER, image TEXT, data TEXT)"
     )
     con.executemany(
-        "INSERT INTO catalog (sku, title, location, status, price, qty, image) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO catalog (sku, title, location, status, price, qty, image, data) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, '{}')",
         rows,
     )
     con.commit()
@@ -272,9 +277,10 @@ def test_list_items_all(client):
     # ORDER BY sku DESC — highest SKU first.
     skus = [it["sku"] for it in body["items"]]
     assert skus == sorted(skus, reverse=True)
-    # Column set matches the SELECT in http_server.py:177.
+    # Column set matches the SELECT in http_server.py list_items.
     assert set(body["items"][0]) == {
         "sku", "title", "location", "status", "price", "qty", "image",
+        "ebay_listing_id", "ebay_offer_id", "ebay_ready_at", "has_draft",
     }
 
 
@@ -343,6 +349,76 @@ def test_list_items_503_when_catalog_missing(env, monkeypatch):
     monkeypatch.setattr(http_server, "_cfg", cfg)
     r = env["client"].get("/api/items", headers=AUTH_HEADERS)
     assert r.status_code == 503
+
+
+def test_list_items_ebay_fields(tmp_path, monkeypatch):
+    """list_items returns eBay fields extracted via json_extract from data column."""
+    catalog_path = tmp_path / "catalog.sqlite"
+    itemdata_root = tmp_path / "ItemData"
+    itemdata_root.mkdir()
+
+    sku_listed = "tgw20260101000000001"
+    sku_staged = "tgw20260102000000002"
+    sku_draft = "tgw20260103000000003"
+    sku_plain = "tgw20260104000000004"
+
+    data_listed = json.dumps({
+        "ebay_listing": {"listing_id": "123456789"},
+        "ebay_offer": {"offer_id": "OFF1", "ready_at": None},
+    })
+    data_staged = json.dumps({
+        "ebay_offer": {"offer_id": "OFF2"},
+    })
+    data_draft = json.dumps({
+        "draft_listing": {"category_id": "261186", "title": "Widget"},
+    })
+    data_plain = json.dumps({})
+
+    _make_catalog_with_data(catalog_path, [
+        (sku_listed, "Listed Item", "A1", "Active", 19.99, 1, "a.jpg", data_listed),
+        (sku_staged, "Staged Item", "B2", "Staged", 12.00, 1, "b.jpg", data_staged),
+        (sku_draft, "Draft Item", "C3", "In Stock", 9.99, 1, "", data_draft),
+        (sku_plain, "Plain Item", "D4", "In Stock", 5.00, 1, "d.jpg", data_plain),
+    ])
+
+    cfg = {
+        "sqlite_catalog_path": catalog_path,
+        "itemdata_root": itemdata_root,
+        "location_tree_root": tmp_path / "loctree",
+        "thumbnail_root": tmp_path / "thumbs",
+        "category_groups_path": str(tmp_path / "cg.json"),
+        "plan_vault_path": tmp_path / "vault",
+        "plan_inbox_path": tmp_path / "vault" / "inbox",
+        "postgres_dsn": "postgresql://fake/db",
+        "pretty": True,
+        "raw": {},
+    }
+    monkeypatch.setattr(http_server, "_cfg", cfg)
+    monkeypatch.setattr(http_server, "_api_key", API_KEY)
+    monkeypatch.setattr(http_server, "_web_key", WEB_KEY)
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect",
+        lambda *a, **k: _FakeConn([]),
+    )
+
+    client = TestClient(http_server.app)
+    r = client.get("/api/items", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    items = {it["sku"]: it for it in r.json()["items"]}
+
+    assert items[sku_listed]["ebay_listing_id"] == "123456789"
+    assert items[sku_listed]["has_draft"] == 0
+
+    assert items[sku_staged]["ebay_offer_id"] == "OFF2"
+    assert items[sku_staged]["ebay_listing_id"] is None
+    assert items[sku_staged]["ebay_ready_at"] is None
+
+    assert items[sku_draft]["has_draft"] == 1
+    assert items[sku_draft]["ebay_offer_id"] is None
+
+    assert items[sku_plain]["ebay_listing_id"] is None
+    assert items[sku_plain]["ebay_offer_id"] is None
+    assert items[sku_plain]["has_draft"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1385,10 +1461,23 @@ def test_dashboard_ebay_failure_returns_none(dashboard_env, monkeypatch):
 def test_dashboard_fallback_without_data_column(tmp_path, monkeypatch):
     """When the catalog has no 'data' column, json_extract counts return None."""
     catalog_path = tmp_path / "catalog.sqlite"
-    _make_catalog(catalog_path, [
-        (SKU_A, "Widget", "A1", "In Stock", 9.99, 1, ""),
-        (SKU_B, "Gadget", "B2", "Staged",  19.99, 1, "b.jpg"),
-    ])
+    # Deliberately build a catalog WITHOUT the data column to test dashboard fallback.
+    _con = sqlite3.connect(str(catalog_path))
+    _con.execute(
+        "CREATE TABLE catalog ("
+        "sku TEXT, title TEXT, location TEXT, status TEXT, "
+        "price REAL, qty INTEGER, image TEXT)"
+    )
+    _con.executemany(
+        "INSERT INTO catalog (sku, title, location, status, price, qty, image) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            (SKU_A, "Widget", "A1", "In Stock", 9.99, 1, ""),
+            (SKU_B, "Gadget", "B2", "Staged",  19.99, 1, "b.jpg"),
+        ],
+    )
+    _con.commit()
+    _con.close()
 
     cfg = {
         "sqlite_catalog_path": catalog_path,

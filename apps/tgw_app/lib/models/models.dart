@@ -22,6 +22,10 @@ class ItemSummary {
   final String price;
   final String qty;
   final String? image;
+  final String? ebayListingId;
+  final String? ebayOfferId;
+  final String? ebayReadyAt;
+  final bool hasDraft;
 
   ItemSummary({
     required this.sku,
@@ -31,6 +35,10 @@ class ItemSummary {
     required this.price,
     required this.qty,
     this.image,
+    this.ebayListingId,
+    this.ebayOfferId,
+    this.ebayReadyAt,
+    this.hasDraft = false,
   });
 
   factory ItemSummary.fromJson(Map<String, dynamic> json) {
@@ -39,9 +47,13 @@ class ItemSummary {
       title: json['title'] ?? '',
       location: json['location'] ?? 'Unknown',
       status: json['status'] ?? 'Unknown',
-      price: json['price'] ?? '0.00',
-      qty: json['qty'] ?? '0',
-      image: json['image'],
+      price: json['price']?.toString() ?? '',
+      qty: json['qty']?.toString() ?? '0',
+      image: json['image'] as String?,
+      ebayListingId: json['ebay_listing_id'] as String?,
+      ebayOfferId: json['ebay_offer_id'] as String?,
+      ebayReadyAt: json['ebay_ready_at'] as String?,
+      hasDraft: (json['has_draft'] as int? ?? 0) == 1,
     );
   }
 
@@ -53,6 +65,10 @@ class ItemSummary {
     'price': price,
     'qty': qty,
     'image': image,
+    'ebay_listing_id': ebayListingId,
+    'ebay_offer_id': ebayOfferId,
+    'ebay_ready_at': ebayReadyAt,
+    'has_draft': hasDraft ? 1 : 0,
   };
 }
 
