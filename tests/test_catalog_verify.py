@@ -264,6 +264,25 @@ def test_verify_offline_draft_recent_is_clean(tmp_path):
     assert 'offline_draft_stall' not in rules
 
 
+def test_verify_negative_qty(tmp_path):
+    sku = 'tgw202601010000027'
+    doc = {'sku': sku, 'title': 'Valid Title For Testing Qty', 'location': 'N14', 'qty': -3}
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    viols = _verify_item(sku, item_dir, doc)
+    rules = {v['rule'] for v in viols}
+    assert 'negative_qty' in rules
+    severities = {v['rule']: v['severity'] for v in viols}
+    assert severities['negative_qty'] == 'critical'
+
+
+def test_verify_zero_qty_is_clean(tmp_path):
+    sku = 'tgw202601010000028'
+    doc = {'sku': sku, 'title': 'Valid Title For Testing Qty Zero', 'location': 'O15', 'qty': 0}
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'negative_qty' not in rules
+
+
 def test_verify_barcode_with_lookup_is_clean(tmp_path):
     sku = 'tgw202601010000024'
     doc = {'sku': sku, 'title': 'Valid Title For Testing Okay', 'location': 'K11',
