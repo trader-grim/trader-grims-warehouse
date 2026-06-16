@@ -149,6 +149,7 @@ class _ReviewQueueScreenState extends ConsumerState<ReviewQueueScreen> {
 
     return Column(
       children: [
+        const _PurposeBanner(),
         _buildFilterBar(allVisibleSelected, filtered.length),
         Expanded(
           child: _isLoading
@@ -156,19 +157,21 @@ class _ReviewQueueScreenState extends ConsumerState<ReviewQueueScreen> {
               : _error != null
                   ? Center(child: Text('Error: $_error', style: TextStyle(color: Colors.red[400])))
                   : filtered.isEmpty
-                      ? Center(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(Icons.check_circle_outline, size: 48, color: Colors.green),
-                              const SizedBox(height: 8),
-                              Text(
-                                _allItems.isEmpty ? 'Review queue is empty' : 'No items match filter',
-                                style: Theme.of(context).textTheme.bodyLarge,
+                      ? _allItems.isEmpty
+                          ? const _WorkflowGuideEmptyState()
+                          : Center(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(Icons.search_off, size: 48, color: Colors.grey),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    'No items match filter',
+                                    style: Theme.of(context).textTheme.bodyLarge,
+                                  ),
+                                ],
                               ),
-                            ],
-                          ),
-                        )
+                            )
                       : RefreshIndicator(
                           onRefresh: _load,
                           child: ListView.builder(
@@ -528,6 +531,153 @@ class _FilterChip extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Purpose banner — always shown at top of the Review tab
+// ---------------------------------------------------------------------------
+
+class _PurposeBanner extends StatelessWidget {
+  const _PurposeBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      color: cs.primaryContainer.withAlpha(120),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.rate_review_outlined, size: 16, color: cs.primary),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Proposed changes from AI or operator review appear here before being pushed to eBay. (PP-REVISION-001)',
+              style: TextStyle(fontSize: 12, color: cs.onPrimaryContainer),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Workflow guide — shown on empty state when queue has no items
+// ---------------------------------------------------------------------------
+
+class _WorkflowGuideEmptyState extends StatelessWidget {
+  const _WorkflowGuideEmptyState();
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    return SingleChildScrollView(
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+      child: Column(
+        children: [
+          const Icon(Icons.check_circle_outline, size: 56, color: Colors.green),
+          const SizedBox(height: 12),
+          Text('Review queue is empty', style: textTheme.titleMedium),
+          const SizedBox(height: 24),
+          Text(
+            'How revisions work',
+            style: textTheme.labelLarge?.copyWith(color: cs.onSurface.withAlpha(160)),
+          ),
+          const SizedBox(height: 16),
+          const _WorkflowStep(
+            step: 1,
+            icon: Icons.smart_toy_outlined,
+            title: 'AI proposes changes',
+            description: 'The ai_identify or ebay_draft worker analyses the item and proposes field updates (title, condition, aspects, price).',
+            color: Colors.indigo,
+          ),
+          const SizedBox(height: 12),
+          const _WorkflowStep(
+            step: 2,
+            icon: Icons.difference_outlined,
+            title: 'Review the diff',
+            description: 'Items with pending proposals appear here. Inspect the suggested changes, approve or reject them.',
+            color: Colors.orange,
+          ),
+          const SizedBox(height: 12),
+          const _WorkflowStep(
+            step: 3,
+            icon: Icons.cloud_upload_outlined,
+            title: 'Apply pushes to eBay',
+            description: 'Approved changes are applied to the item record and queued for the ebay_upload / ebay_price workers.',
+            color: Colors.teal,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _WorkflowStep extends StatelessWidget {
+  final int step;
+  final IconData icon;
+  final String title;
+  final String description;
+  final Color color;
+
+  const _WorkflowStep({
+    required this.step,
+    required this.icon,
+    required this.title,
+    required this.description,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: 32,
+          height: 32,
+          decoration: BoxDecoration(
+            color: color.withAlpha(30),
+            shape: BoxShape.circle,
+            border: Border.all(color: color.withAlpha(120)),
+          ),
+          alignment: Alignment.center,
+          child: Text(
+            '$step',
+            style: TextStyle(fontWeight: FontWeight.bold, color: color, fontSize: 14),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(icon, size: 16, color: color),
+                  const SizedBox(width: 6),
+                  Text(
+                    title,
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: cs.onSurface),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                description,
+                style: TextStyle(fontSize: 12, color: cs.onSurface.withAlpha(160)),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }
