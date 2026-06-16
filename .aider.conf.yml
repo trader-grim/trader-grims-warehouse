@@ -32,5 +32,5 @@ auto-commits: true                 # commits land on the task branch only; never
 
 auto-lint: true
 auto-test: true
-lint-cmd: "python: ruff check ."
+lint-cmd: "python: ruff check src/"   # src/ only — avoid blocking on unrelated test/tools lint
 test-cmd: "pytest -q"

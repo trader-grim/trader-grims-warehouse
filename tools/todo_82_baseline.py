@@ -10,6 +10,7 @@ sys.path.append(os.path.abspath("src"))
 
 from tgw.config import DEFAULT_CONFIG, load_config
 
+
 def scan_baseline(limit: int = 500):
     cfg = load_config(DEFAULT_CONFIG)
     root = Path(cfg["itemdata_root"])

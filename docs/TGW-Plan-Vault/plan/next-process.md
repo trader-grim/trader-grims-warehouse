@@ -174,6 +174,11 @@ tgw plan render
 session; never route eBay-invariant, config/secrets, or production-write work to AGY.
 Branch-per-task + human-merge rule applies — AGY may not merge.
 
+**AGY startup boundary (2026-06-15):** AGY must NOT run Claude's session startup
+procedure (inbox processing, SUGGESTIONS review, plan read, `tgw plan check/status`)
+without explicit operator direction. That intake is Claude's domain. If AGY is started
+and finds unprocessed inbox/suggestions items, it should ask before touching them.
+
 **AGY tool permissions** (settings.json `permissions.allow`):
 - Safe to expand: `git log`, `git diff`, `ruff`, `grep`, `psql`
 - Needs Dave sign-off: `python3`, `sudo -u tgw` (arbitrary execution)

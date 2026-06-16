@@ -42,6 +42,7 @@ printing = [
 [project.scripts]
 tgw                = "tgw.api:main"
 tgw-mcp-server     = "tgw.mcp_server:main"
+tgw-aider-mcp-server = "tgw.aider_mcp_server:main"
 tgw-browser        = "tgw.browser:main"
 tgw-queue-launcher = "tgw.queue.launcher:main"
 tgw-echo-worker           = "tgw.workers.echo:main"

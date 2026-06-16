@@ -13,6 +13,7 @@ from typing import Any, Dict
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.resolver import find_item_jsons, load_item_doc
 
+
 def run_audit() -> None:
     # Load configuration
     cfg = load_config(Path(DEFAULT_CONFIG))

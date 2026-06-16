@@ -4,9 +4,9 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-06-15 16:39 UTC — 35 open, 831 done in the last 7 days._
+_Rendered 2026-06-15 20:50 UTC — 35 open, 826 done in the last 7 days._
 
-## admin (17 open)
+## admin (16 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
@@ -14,7 +14,6 @@ _Rendered 2026-06-15 16:39 UTC — 35 open, 831 done in the last 7 days._
 | 79 | 12 |  | WAITING: eBay Developer Support response pending — Answer eBay Developer Support 8 open questions re buy.marketplace_insights scope — unblocks PP-REPRICER-001 live repricing; check DS inbox for ticket | [[TGW-Master-Plan#PP-REPRICER-001 — Market-aware dynamic repricer (design pending)\|PP-REPRICER-001]] |  |
 | 61 | 15 |  | PP-BACKUP-001 A3 secrets + keys — operator checklist: (1) PASSPHRASE: choose strong gpg passphrase, write on paper, store in safe/wallet — off-machine is non-negotiable, without it the bundle is useless; (2) FIRST RUN: sudo -u tgw /opt/TGW/src/trader-grims-warehouse/bin/tgw-secrets-backup — prompts for passphrase; (3) VERIFY ROUND-TRIP: gpg -d /opt/TGW/var/local/backups/trader_grims_warehouse/secrets/secrets-YYYYMMDD.tar.gz.gpg \| tar -tz — must list expected files; (4) PROVISION TGW-SECRETS-A (≥1GB USB key): sudo tgw-offline-setup TGW-SECRETS-A /dev/sdX — then update mount drop-in to use tgw-secrets-usb@TGW-SECRETS-A instead of tgw-offline-sync@; plug in to auto-copy bundle; (5) PROVISION TGW-SECRETS-B: same, store off-site or in safe — rotate both on each secrets refresh; (6) PROVISION TGW-BOOT-01 (≥8GB USB): flash NixOS installer — part of Phase C rebuild keychain; (7) CLOUD: rclone copy dbukove:TGW dbukove:TGW-historypoint-20260514 BEFORE first cloud sync (A2 gate); (8) ENABLE TIMERS (as root): systemctl enable --now tgw-db-backup.timer tgw-cloud-sync.timer — secrets-backup timer runs but requires manual passphrase, disable it and run manually instead; (9) FIRST CLOUD SYNC: sudo -u tgw /opt/TGW/src/trader-grims-warehouse/bin/tgw-cloud-sync (off-hours, first run is large); (10) RESTORE DRILL: createdb scratch && pg_restore -d scratch <newest.dump>, diff 3 random SKUs from snapshot vs live | [[TGW-Master-Plan#PP-BACKUP-001 — Organized Backup and Disaster Recovery Architecture\|PP-BACKUP-001]] |  |
 | 7 | 20 |  | IGDB credentials — Twitch dev account → register app → save client_id/client_secret to secrets_root/igdb-credentials.json |  |  |
-| 105 | 22 |  | Round7: Add dev_id to /opt/TGW/secrets/ebay-credentials.json (developer.ebay.com -> Application Keys -> DevID) — ISS-005 code done; this gates webhook infra todo #16 |  |  |
 | 146 | 25 |  | PP-BACKUP-001 A7 first drive: sudo tgw-offline-setup TGW-OFFLINE-A /dev/sdd (Toshiba500, already connected, will destroy and reformat as btrfs); then: mount /media/tgw/TGW-OFFLINE-A; journalctl -u tgw-offline-sync@TGW-OFFLINE-A -f; confirm sync logs ok; unmount; print QR label from script output |  |  |
 | 80 | 30 |  | Run tgw history-index --target all as tgw user in screen session — hours for 32K zips; output: var/history-itemdata-index.jsonl; command built + smoke-tested [PP-HISTORY-001 done] |  |  |
 | 149 | 30 |  | PP-BACKUP-001 storage migration — agreed plan (execute in order, ask Claude for help at each step): (1) CHECK Toshiba500: sudo mount -o ro /dev/sdd1 /mnt && du -sh /mnt/* \| sort -rh — confirm safe to wipe; (2) REVIEW /media/alt-root — confirm nothing needed from old MX install; (3) FORMAT sdd as btrfs label TGW-HOME, copy home to it, update /etc/fstab, reboot; (4) GPARTED live USB: shrink Windows sda3 to ~40G; delete sda5 alt-root, create TGW-HISTORY btrfs in that slot (~80G); reformat sda7 as btrfs TGW-DATA (home is gone); relabel sda8 as TGW-SNAPSHOT; reboot; (5) MOUNT sda7 at /opt/TGW/data/, rsync data/ from nvme, update fstab — tgw-api path unchanged; (6) MOUNT sda8 at /opt/TGW/var/snapshots/; (7) REPLACE trader-grims-backup inotify watcher with btrfs snapshot timer (ask Claude); (8) UPDATE tgw-offline-sync to btrfs send/receive (ask Claude); (9) COMMISSION 7x 500GB rotation pool: sudo tgw-offline-setup TGW-OFFLINE-A /dev/sdd etc. (scripts ready — see reference/DRIVE-REGISTRY.md); (10) ADOPT history drives: sdg relabel TGW-HISTORY-01 after history-index completes |  |  |
@@ -35,7 +34,7 @@ _Rendered 2026-06-15 16:39 UTC — 35 open, 831 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (15 open)
+## claude (16 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
@@ -54,6 +53,7 @@ _Rendered 2026-06-15 16:39 UTC — 35 open, 831 done in the last 7 days._
 | 883 | 26 |  | Intake form purpose + UX — add instructions banner (Review and confirm this item before sending through the pipeline); show pre-populated fields with current values; Pipeline Trigger section (re-identify / re-draft / stage buttons + confirm); clarify this is pre-pipeline review not raw data-entry. Size: S | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
 | 884 | 28 |  | Review Queue upgrade — add shipping policy name, category, condition, condition description to each review card; filter + search bar; checkbox multi-select; bulk-approve + bulk-list-now + bulk-mark-ready actions. Size: M | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
 | 887 | 30 |  | Revisions page clarification — add purpose banner: Proposed changes from AI or operator review appear here before being pushed to eBay; show workflow guide on empty state (step 1: AI proposes changes → step 2: review diff → step 3: apply pushes to eBay); link to PP-REVISION-001. Size: XS | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
+| 890 | 34 |  | PP-MULTIMODEL-001: Create TGW-specific Claude Code skills — (1) tgw-plan skill: Claude planning pass for a feature/epic → writes mini design doc to docs/ai-plans/<feature>.md with implementation steps, risks, acceptance criteria; (2) tgw-aider-step skill: wrapper that formats a single Aider step as a message-file and logs to ~/.local/share/aider-audit/usage.csv; (3) tgw-pr-review skill: Claude diff review on current branch vs main. Store as .claude/skills/tgw-*.md. Based on Perplexity research doc processed 2026-06-15. | [[TGW-Master-Plan#Priority 6 — External AI tooling (PP-MULTIMODEL-001)\|PP-MULTIMODEL-001]] |  |
 
 ## sokoban (1 open)
 
@@ -61,10 +61,12 @@ _Rendered 2026-06-15 16:39 UTC — 35 open, 831 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — Sold reconciliation and inventory status sync (design ready)\|PP-SOLD-001]] |  |
 
-## Done this week (831)  — showing 15 most recent
+## Done this week (826)  — showing 15 most recent
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 889 | claude | 2026-06-15 | PP-MULTIMODEL-001: Configure Aider with Anthropic key — (1) create ~/.aider.conf.yml: model=claude-sonnet-4-6 (editor), architect model=claude-opus-4-8, cache-prompts=true, gitconfig=true; (2) add ANTHROPIC_API_KEY export to tgw.source sourced from /opt/TGW/secrets/anthropic-credentials.json; (3) similarly export OPENROUTER_API_KEY from openrouter-credentials.json for fallback; (4) test: aider --version + aider --model claude-sonnet-4-6 --check-update. Key file: /opt/TGW/secrets/anthropic-credentials.json {'api_key': ...} |
+| 105 | admin | 2026-06-15 | Round7: Add dev_id to /opt/TGW/secrets/ebay-credentials.json (developer.ebay.com -> Application Keys -> DevID) — ISS-005 code done; this gates webhook infra todo #16 |
 | 872 | claude | 2026-06-14 | category-groups.json store_category mappings (GEMINI-006): populate store_category for tools_hand, electronics_adapters_chargers, electronics_remotes, kitchen_utensils |
 | 871 | claude | 2026-06-14 | category-groups.json pricing calibration (GEMINI-005): update electrical_fixtures typical_used→12.50, media_records→13.50, collectibles_pins_buttons→10.50; run tgw category-groups --reseed after |
 | 867 | claude | 2026-06-14 | PP-EDITOR-001 3o: PM chat open in popup window — web PM chat (/form/pm-chat) opens as modal popup instead of navigating away; POST /api/pm/chat stays same |
@@ -78,6 +80,4 @@ _Rendered 2026-06-15 16:39 UTC — 35 open, 831 done in the last 7 days._
 | 151 | agy | 2026-06-14 | PP-PORTABLE-CATALOG-001 P2 wire offline layer into screens: Browse/Item/Edit operate against the private sqflite copy; edits made offline visibly persist; on flush they sync. Make prototype runnable on flutter run -d linux. Capture a screenshot showing offline-edit-then-flush loop and drop in docs/TGW-Plan-Vault/inbox/. Depends on #150. |
 | 150 | agy | 2026-06-14 | PP-PORTABLE-CATALOG-001 P2 offline data layer: add deps (connectivity_plus, dio_smart_retry, workmanager, sqlite3) to pubspec.yaml; snapshot-to-sandbox on startup (copy synced tgwcatalog.db to app-private path_provider dir, open copy read-write); offline outbox table in private db (persist patchItem/performAction mutations when offline); connectivity flush (poll /api/queue/status; on reconnect flush outbox to PATCH /api/items/{sku} + POST /api/items/{sku}/action, then replace local copy from GET /api/catalog/snapshot). See reference/PP-PORTABLE-CATALOG-001-P2-prototype-brief.md for full spec. |
 | 102 | agy | 2026-06-14 | Round7 p30: GDrive dedupe assist (PLAN-backup-dr A8) — chunked rclone dedupe strategy for same-name-same-dir duplicates that time out on the full dataset; produce chunk plan + exact commands; operator supervises execution |
-| 142 | agy | 2026-06-14 | eBay DS ticket follow-up — check Developer Support inbox for responses to the 8 buy.marketplace_insights scope questions (todo #79); summarize any answers or next steps; update plan accordingly. Browser task via Seller Hub / DS portal |
-| 141 | agy | 2026-06-14 | PP-VERIFY-001 catalog baseline rescan — rerun catalog quality scan (follow CATALOG-BASELINE-SCAN.md pattern) on current ItemData sample; compare fill rates vs prior baseline; identify new gaps; output updated markdown table to inbox/. AGY large-context data task |
-| … | | | _…and 816 more — run `tgw todo --all` to see everything_ |
+| … | | | _…and 811 more — run `tgw todo --all` to see everything_ |

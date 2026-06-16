@@ -81,7 +81,7 @@ def test_todo_add_enqueues_plan_render(_no_render_enqueue):
 
 def test_todo_set_meta_partial_update():
     from tgw.todo import todo_set_meta
-    ctx, cur = _mock_conn(fetchone_return=(7, 'claude', 'PP-X-001', [1, 2], None))
+    ctx, cur = _mock_conn(fetchone_return=(7, 'claude', 'PP-X-001', [1, 2], None, 'normal'))
     with patch('tgw.todo._conn', ctx):
         result = todo_set_meta(7, pp_ref='PP-X-001', depends_on=[1, 2])
     assert result['ok'] is True

@@ -2434,11 +2434,58 @@ def _render_item_detail_html(
         except (ValueError, TypeError):
             return "—"
 
+    # Pricing history expandable section (todo 877)
+    _comps = eo.get("price_comps") or {} if eo else {}
+    _price_source = eo.get("price_source", "") if eo else ""
+    _target_price = eo.get("target_price") if eo else None
+    _priced_at = (eo.get("priced_at") or "")[:19] if eo else ""
+    _category_group_name = item.get("category_group", "")
+    # category-group floor/typical from config (via item fields populated by ebay_price)
+    _floor = None
+    _typical = None
+    try:
+        _cg_raw = _cfg.get("raw", {}).get("category_groups", {}).get(_category_group_name, {}) if _cfg else {}
+        _floor = _cg_raw.get("floor_used") or _cg_raw.get("floor")
+        _typical = _cg_raw.get("typical_used") or _cg_raw.get("typical")
+    except Exception:
+        pass
+    _ph_rows = ""
+    def _cfmt(v: Any) -> str:
+        try:
+            return f"${float(v):.2f}"
+        except (TypeError, ValueError):
+            return "—"
+    if _comps.get("count"):
+        _ph_rows += (
+            f'<div class="frow"><span class="fn">Comp count</span><span class="fv">{h(str(_comps.get("count","—")))}</span></div>'
+            f'<div class="frow"><span class="fn">Range</span><span class="fv">{_cfmt(_comps.get("min"))} – {_cfmt(_comps.get("max"))}</span></div>'
+            f'<div class="frow"><span class="fn">p25 / median</span><span class="fv">{_cfmt(_comps.get("p25"))} / {_cfmt(_comps.get("median"))}</span></div>'
+        )
+    if _floor is not None:
+        _ph_rows += f'<div class="frow"><span class="fn">Category floor</span><span class="fv">${float(_floor):.2f}</span></div>'
+    if _typical is not None:
+        _ph_rows += f'<div class="frow"><span class="fn">Category typical</span><span class="fv">${float(_typical):.2f}</span></div>'
+    if _target_price is not None:
+        _ph_rows += f'<div class="frow"><span class="fn">Repricer floor</span><span class="fv">${float(_target_price):.2f}</span></div>'
+    if _price_source:
+        _ph_rows += f'<div class="frow"><span class="fn">Price source</span><span class="fv">{h(_price_source)}</span></div>'
+    if _priced_at:
+        _ph_rows += f'<div class="frow"><span class="fn">Priced at</span><span class="fv">{h(_priced_at)}</span></div>'
+    _ph_content = _ph_rows if _ph_rows else '<span style="color:#555;font-size:.82em">No pricing data yet</span>'
+    _pricing_history_html = (
+        f'<details style="margin-top:4px">'
+        f'<summary style="cursor:pointer;color:#4a8ade;font-size:.82em;list-style:none">▶ Pricing History</summary>'
+        f'<div style="margin-top:6px;padding:6px;background:#111;border:1px solid #222;border-radius:4px">'
+        f'{_ph_content}'
+        f'</div>'
+        f'</details>'
+    ) if eo else ""
+
     offer_section = (
         fr("Offer ID", h(str(eo.get("offer_id", "") or "")))
         + fr("Offer Status", h(offer_status) if offer_status else "")
         + fr("Offer Price", _fmt_price(offer_price))
-        + fr("Price Source", h(str(eo.get("price_source", "") or "")))
+        + _pricing_history_html
         + fr("Staged At", h(str(eo.get("staged_at", "") or "")[:19]))
     ) if eo else '<div class="frow"><span class="fv" style="color:#555">No offer yet</span></div>'
 
@@ -2453,9 +2500,13 @@ def _render_item_detail_html(
         rec_fill = dl.get("aspects_recommended_filled", "—")
         rec_total = dl.get("aspects_recommended_total", "—")
         title_flags = ", ".join(dl.get("title_flags", [])) or "—"
+        _dl_store_cat = str(dl.get("store_category_name") or dl.get("store_category") or "")
+        _dl_ship = str(dl.get("shipping_profile") or dl.get("fulfillment_policy_id") or "")
         draft_section = (
             fr("Draft Title", h(str(dl.get("title", "") or "")))
             + fr("Category Sent", h(f"{dl.get('category_id','')} · {dl.get('category_name','')}"))
+            + (fr("Store Category", h(_dl_store_cat)) if _dl_store_cat else "")
+            + (fr("Shipping Policy", h(_dl_ship)) if _dl_ship else "")
             + fr("Condition Sent", h(f"{dl.get('condition_label','')} ({dl.get('condition_enum','')})"))
             + fr("Draft Price", dl_price_str)
             + fr("Quality Score", h(str(q_score)))
@@ -2556,10 +2607,13 @@ def _render_item_detail_html(
         # — Inventory record (what we track)
         '<div class="dsec">'
         '<h3>Inventory Record <span style="color:#2a4a6a;font-size:.72em;font-weight:normal">dbl-click to edit</span></h3>'
+        '<div style="font-size:.73em;color:#556;margin-bottom:6px">Your internal record — drives the pipeline</div>'
         + fr("Title", key="title", editable=True)
         + fr("Condition", key="condition", editable=True)
         + fr("AI hint", key="ai_hint", editable=True)
         + fr("Description", key="description", editable=True)
+        + fr("Brand", key="brand", editable=True)
+        + fr("Model", key="model", editable=True)
         + fr("Category group", key="category_group")
         + fr("Barcode", key="barcode")
         + fr("Price", _price_display, key="price", editable=True)
@@ -2567,21 +2621,29 @@ def _render_item_detail_html(
         + fr("Location", key="location", editable=True)
         + fr("Weight (oz)", key="weight_oz", editable=True)
         + fr("Size class", key="size_class")
+        + fr("Verified", key="verified")
+        + fr("Alt text", key="alt_text")
         + "</div>"
-        # — eBay Listing (confirmed by eBay)
+        # — eBay Listing (confirmed by eBay after publish)
         f'<div class="dsec"><h3>eBay Listing{listing_badge}</h3>'
+        '<div style="font-size:.73em;color:#556;margin-bottom:6px">Confirmed eBay data after listing is live</div>'
         + listing_section
         + "</div>"
-        # — eBay Offer (what we submitted)
-        f'<div class="dsec"><h3>eBay Offer{offer_badge}</h3>'
+        # — eBay Submission (what we sent to eBay — not a buyer offer)
+        f'<div class="dsec"><h3>eBay Submission{offer_badge} <span style="font-size:.7em;color:#555;font-weight:normal">our offer to eBay</span></h3>'
+        '<div style="font-size:.73em;color:#556;margin-bottom:6px">The offer record TGW created on eBay — not a buyer offer</div>'
         + offer_section
         + "</div>"
-        # — Draft (what we prepared)
-        '<div class="dsec"><h3>eBay Draft</h3>'
+        # — eBay Draft (what the pipeline prepared, before staging)
+        '<div class="dsec"><h3>eBay Draft <span style="font-size:.7em;color:#555;font-weight:normal">pipeline output</span></h3>'
+        '<div style="font-size:.73em;color:#556;margin-bottom:6px">Output from ebay_draft — staged to eBay when you click Stage</div>'
         + draft_section
         + "</div>"
         + (
-            f'<div class="dsec">{revision_draft_html}</div>'
+            f'<div class="dsec">'
+            f'<h3>Revision Draft <span style="font-size:.7em;color:#555;font-weight:normal">proposed changes</span></h3>'
+            f'<div style="font-size:.73em;color:#556;margin-bottom:6px">AI or operator proposed changes — apply to push to eBay</div>'
+            f'{revision_draft_html}</div>'
             if revision_draft_html else ""
         )
         + (

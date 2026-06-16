@@ -140,7 +140,7 @@ def test_apply_creates_todo_on_write(suggestions_file):
     entries = parse_pending(suggestions_file)
     with patch("tgw.suggestions.todo_add") as mock_add:
         apply_classifications(suggestions_file, entries, CLASSIFIED_MIXED, write=True)
-    mock_add.assert_called_once_with("claude", "add weight_oz to picklist line", source="suggestions_classify", pp_ref=None)
+    mock_add.assert_called_once_with("claude", "add weight_oz to picklist line", source="suggestions_classify", pp_ref=None, reasoning="normal")
 
 
 def test_apply_passes_valid_pp_ref(suggestions_file):
@@ -154,7 +154,7 @@ def test_apply_passes_valid_pp_ref(suggestions_file):
     with patch("tgw.suggestions.todo_add") as mock_add:
         apply_classifications(suggestions_file, entries, classified, write=True)
     mock_add.assert_called_once_with("claude", "do the thing",
-                                     source="suggestions_classify", pp_ref="PP-PICKLIST-001")
+                                     source="suggestions_classify", pp_ref="PP-PICKLIST-001", reasoning="normal")
 
 
 def test_apply_drops_malformed_pp_ref(suggestions_file):
@@ -168,7 +168,7 @@ def test_apply_drops_malformed_pp_ref(suggestions_file):
     with patch("tgw.suggestions.todo_add") as mock_add:
         apply_classifications(suggestions_file, entries, classified, write=True)
     mock_add.assert_called_once_with("claude", "do the thing",
-                                     source="suggestions_classify", pp_ref=None)
+                                     source="suggestions_classify", pp_ref=None, reasoning="normal")
 
 
 def test_apply_no_todo_created_on_dry_run(suggestions_file):
@@ -261,5 +261,5 @@ def test_apply_ops_todo_passes_pp_ops_001(suggestions_file):
         apply_classifications(suggestions_file, entries, classified, write=True)
     mock_add.assert_called_once_with(
         "admin", "buy a GPU for faster inference",
-        source="suggestions_classify", pp_ref="PP-OPS-001",
+        source="suggestions_classify", pp_ref="PP-OPS-001", reasoning="normal",
     )

@@ -60,9 +60,9 @@ def test_update_item_missing_sku():
 
 
 def test_write_field_rejects_negative_qty():
-    from tgw.items import _write_field
-
     import pytest
+
+    from tgw.items import _write_field
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
         sku = "tgw001"
