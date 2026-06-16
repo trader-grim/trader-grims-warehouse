@@ -125,6 +125,21 @@ class _EditItemScreenState extends ConsumerState<EditItemScreen> {
     }
   }
 
+  Future<void> _confirmAndPerformAction(String action, String label, String description) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(label),
+        content: Text(description),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Confirm')),
+        ],
+      ),
+    );
+    if (confirmed == true) await _performAction(action);
+  }
+
   Widget _buildAspectField(Map<String, dynamic> aspect) {
     final name = aspect['localizedAspectName'];
     final controller = _aspectControllers[name]!;
@@ -269,12 +284,12 @@ class _EditItemScreenState extends ConsumerState<EditItemScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text('Edit ${widget.item.sku}'),
+        title: Text('Review: ${widget.item.sku}'),
         actions: [
           if (_isSaving)
             const Center(child: Padding(padding: EdgeInsets.all(16.0), child: CircularProgressIndicator()))
           else
-            IconButton(icon: const Icon(Icons.save), onPressed: _save),
+            IconButton(icon: const Icon(Icons.save), tooltip: 'Save changes', onPressed: _save),
         ],
       ),
       body: SingleChildScrollView(
@@ -282,6 +297,27 @@ class _EditItemScreenState extends ConsumerState<EditItemScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            Card(
+              color: Theme.of(context).colorScheme.primaryContainer,
+              margin: const EdgeInsets.only(bottom: 20),
+              child: Padding(
+                padding: const EdgeInsets.all(12.0),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.info_outline, color: Theme.of(context).colorScheme.onPrimaryContainer),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'Review and confirm this item before sending through the pipeline. '
+                        'Edit fields as needed, save, then use the Pipeline Trigger section below to queue a stage.',
+                        style: TextStyle(color: Theme.of(context).colorScheme.onPrimaryContainer),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
             TextField(
               controller: _titleController,
               decoration: InputDecoration(
@@ -332,49 +368,83 @@ class _EditItemScreenState extends ConsumerState<EditItemScreen> {
             else
               ..._aspects.map((aspect) => _buildAspectField(aspect)),
             const SizedBox(height: 32),
-            const Text('AI & Pipeline Actions', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const Divider(),
+            const SizedBox(height: 8),
+            const Text('Pipeline Trigger', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 4),
+            const Text(
+              'Save any field changes first, then queue a pipeline stage below.',
+              style: TextStyle(fontSize: 13, color: Colors.grey),
+            ),
             const SizedBox(height: 16),
             Wrap(
               spacing: 8,
               runSpacing: 8,
               children: [
                 ElevatedButton.icon(
-                  onPressed: () => _performAction('ai_identify'),
+                  onPressed: () => _confirmAndPerformAction(
+                    'ai_identify',
+                    'Re-identify',
+                    'Queue ai_identify for this item. The AI will re-analyse photos and overwrite the current identification.',
+                  ),
                   icon: const Icon(Icons.psychology),
                   label: const Text('Re-identify'),
                 ),
                 ElevatedButton.icon(
-                  onPressed: () => _performAction('ebay_draft'),
+                  onPressed: () => _confirmAndPerformAction(
+                    'ebay_draft',
+                    'Re-draft',
+                    'Queue ebay_draft to regenerate the eBay listing draft from the current item data.',
+                  ),
                   icon: const Icon(Icons.description),
                   label: const Text('Re-draft'),
                 ),
                 ElevatedButton.icon(
-                  onPressed: () => _performAction('ebay_price'),
+                  onPressed: () => _confirmAndPerformAction(
+                    'ebay_price',
+                    'Re-price',
+                    'Queue ebay_price to recalculate the suggested price using current comps.',
+                  ),
                   icon: const Icon(Icons.sell),
                   label: const Text('Re-price'),
                 ),
                 ElevatedButton.icon(
-                  onPressed: () => _performAction('thumbnail_gen'),
+                  onPressed: () => _confirmAndPerformAction(
+                    'thumbnail_gen',
+                    'Regen Thumbnail',
+                    'Queue thumbnail_gen to rebuild the thumbnail from the current primary photo.',
+                  ),
                   icon: const Icon(Icons.image),
                   label: const Text('Regen Thumb'),
                 ),
               ],
             ),
-            const SizedBox(height: 32),
-            const Text('Advanced Actions', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.orange)),
+            const SizedBox(height: 24),
+            const Text('Listing Actions', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.orange)),
             const SizedBox(height: 8),
-            Row(
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
               children: [
-                ElevatedButton(
-                  onPressed: () => _performAction('ebay_stage'),
+                ElevatedButton.icon(
+                  onPressed: () => _confirmAndPerformAction(
+                    'ebay_stage',
+                    'Stage for eBay',
+                    'Queue ebay_stage to create or update the eBay offer draft. The item will be staged but not yet published.',
+                  ),
+                  icon: const Icon(Icons.upload_outlined),
                   style: ElevatedButton.styleFrom(backgroundColor: Colors.orange[100], foregroundColor: Colors.orange[900]),
-                  child: const Text('Stage for eBay'),
+                  label: const Text('Stage for eBay'),
                 ),
-                const SizedBox(width: 8),
-                ElevatedButton(
-                  onPressed: () => _performAction('ebay_publish'),
+                ElevatedButton.icon(
+                  onPressed: () => _confirmAndPerformAction(
+                    'ebay_publish',
+                    'Publish to eBay',
+                    'Queue ebay_publish to push this item live on eBay immediately, bypassing the ready pool.',
+                  ),
+                  icon: const Icon(Icons.public),
                   style: ElevatedButton.styleFrom(backgroundColor: Colors.green[100], foregroundColor: Colors.green[900]),
-                  child: const Text('Publish to eBay'),
+                  label: const Text('Publish to eBay'),
                 ),
               ],
             ),
