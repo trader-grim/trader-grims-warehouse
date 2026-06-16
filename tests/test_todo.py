@@ -632,6 +632,107 @@ def test_push_clipboard_returns_false_on_exception():
 
 
 # ---------------------------------------------------------------------------
+# reasoning column
+# ---------------------------------------------------------------------------
+
+def test_todo_add_reasoning_high():
+    from tgw.todo import todo_add
+    ctx, cur = _mock_conn(fetchone_return=(50,))
+    with patch('tgw.todo._conn', ctx):
+        result = todo_add('claude', 'hard task', reasoning='high')
+    assert result['ok'] is True
+    assert result['reasoning'] == 'high'
+    sql, params = cur.execute.call_args[0]
+    assert 'reasoning' in sql
+    assert 'high' in params
+
+
+def test_todo_set_meta_reasoning():
+    from tgw.todo import todo_set_meta
+    ctx, cur = _mock_conn(fetchone_return=(7, 'claude', None, [], None, 'low'))
+    with patch('tgw.todo._conn', ctx):
+        result = todo_set_meta(7, reasoning='low')
+    assert result['ok'] is True
+    assert result['reasoning'] == 'low'
+    sql = cur.execute.call_args[0][0]
+    assert 'reasoning = %s' in sql
+
+
+def test_listing_shows_high_badge(tmp_path, capsys):
+    from tgw import todo as todo_mod
+    import argparse
+    args = argparse.Namespace(
+        agent='claude', brief_id=None, seed=False, add=None, done=None,
+        update=None, delegate=None, set_priority=None, set_meta=None,
+        show_all=False, priority=50, source='session',
+        pp=None, depends=None, anchor=None,
+        clip=False, next_task=False, next_agent=None,
+        nextloop=False, reasoning='normal',
+    )
+    items = [{'id': 1, 'agent': 'claude', 'priority': 50, 'body': 'do hard thing',
+              'done_at': None, 'pp_ref': None, 'depends_on': [], 'reasoning': 'high'}]
+    with patch.object(todo_mod, 'todo_list', return_value=items):
+        with patch.object(todo_mod, 'open_ids', return_value=set()):
+            todo_mod.cmd_todo({'plan_master_path': tmp_path / 'plan.md'}, args)
+    out = capsys.readouterr().out
+    assert '[high]' in out
+
+
+def test_listing_no_badge_for_normal(tmp_path, capsys):
+    from tgw import todo as todo_mod
+    import argparse
+    args = argparse.Namespace(
+        agent='claude', brief_id=None, seed=False, add=None, done=None,
+        update=None, delegate=None, set_priority=None, set_meta=None,
+        show_all=False, priority=50, source='session',
+        pp=None, depends=None, anchor=None,
+        clip=False, next_task=False, next_agent=None,
+        nextloop=False, reasoning='normal',
+    )
+    items = [{'id': 2, 'agent': 'claude', 'priority': 50, 'body': 'normal task',
+              'done_at': None, 'pp_ref': None, 'depends_on': [], 'reasoning': 'normal'}]
+    with patch.object(todo_mod, 'todo_list', return_value=items):
+        with patch.object(todo_mod, 'open_ids', return_value=set()):
+            todo_mod.cmd_todo({'plan_master_path': tmp_path / 'plan.md'}, args)
+    out = capsys.readouterr().out
+    assert '[normal]' not in out
+    assert '[high]' not in out
+    assert '[low]' not in out
+
+
+def test_brief_includes_reasoning_when_high(tmp_path):
+    from tgw.todo import todo_brief
+    item = {
+        'id': 5, 'agent': 'claude', 'priority': 20, 'body': 'hard work',
+        'source': 'test', 'added_at': None, 'done_at': None,
+        'pp_ref': None, 'depends_on': [], 'plan_anchor': None,
+        'reasoning': 'high',
+    }
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    with patch('tgw.todo.todo_get', return_value=item):
+        result = todo_brief(5, plan)
+    assert result['ok'] is True
+    assert '**Reasoning:** high' in result['brief']
+
+
+def test_brief_omits_reasoning_when_normal(tmp_path):
+    from tgw.todo import todo_brief
+    item = {
+        'id': 6, 'agent': 'claude', 'priority': 20, 'body': 'easy work',
+        'source': 'test', 'added_at': None, 'done_at': None,
+        'pp_ref': None, 'depends_on': [], 'plan_anchor': None,
+        'reasoning': 'normal',
+    }
+    plan = tmp_path / 'plan.md'
+    plan.write_text('', encoding='utf-8')
+    with patch('tgw.todo.todo_get', return_value=item):
+        result = todo_brief(6, plan)
+    assert result['ok'] is True
+    assert '**Reasoning:**' not in result['brief']
+
+
+# ---------------------------------------------------------------------------
 # _next_interactive: less pager + done/skip prompt (todo #865)
 # ---------------------------------------------------------------------------
 

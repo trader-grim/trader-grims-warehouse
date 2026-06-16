@@ -36,6 +36,26 @@ import psycopg2.extras
 _DSN = 'dbname=state_machine user=tgw'
 
 
+def _ensure_reasoning_column() -> None:
+    """Idempotent migration: add reasoning column to todo_items if absent."""
+    sql = """
+    DO $$ BEGIN
+        ALTER TABLE todo_items
+            ADD COLUMN reasoning TEXT NOT NULL DEFAULT 'normal'
+            CHECK (reasoning IN ('high', 'normal', 'low'));
+    EXCEPTION WHEN duplicate_column THEN NULL;
+    END $$;
+    """
+    try:
+        with _conn() as con:
+            with con.cursor() as cur:
+                cur.execute(sql)
+    except Exception:
+        pass
+
+_ensure_reasoning_column()
+
+
 def _push_clipboard(text: str) -> bool:
     """Push text to the system clipboard via pyperclip."""
     try:
@@ -118,18 +138,20 @@ def todo_add(
     pp_ref: Optional[str] = None,
     depends_on: Optional[List[int]] = None,
     plan_anchor: Optional[str] = None,
+    reasoning: str = 'normal',
 ) -> Dict[str, Any]:
     with _conn() as con:
         with con.cursor() as cur:
             cur.execute(
-                'INSERT INTO todo_items (agent, priority, body, source, pp_ref, depends_on, plan_anchor) '
-                'VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id',
-                (agent, priority, body, source, pp_ref, depends_on or [], plan_anchor),
+                'INSERT INTO todo_items (agent, priority, body, source, pp_ref, depends_on, plan_anchor, reasoning) '
+                'VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id',
+                (agent, priority, body, source, pp_ref, depends_on or [], plan_anchor, reasoning),
             )
             new_id = cur.fetchone()[0]
     _enqueue_plan_render('todo_add')
     return {'ok': True, 'id': new_id, 'agent': agent, 'priority': priority, 'body': body,
-            'pp_ref': pp_ref, 'depends_on': depends_on or [], 'plan_anchor': plan_anchor}
+            'pp_ref': pp_ref, 'depends_on': depends_on or [], 'plan_anchor': plan_anchor,
+            'reasoning': reasoning}
 
 
 def todo_done(item_id: int) -> Dict[str, Any]:
@@ -159,7 +181,7 @@ def todo_list(agent: Optional[str] = None, show_all: bool = False) -> List[Dict[
             where = ('WHERE ' + ' AND '.join(parts)) if parts else ''
             cur.execute(
                 f'SELECT id, agent, priority, body, source, added_at, done_at, '
-                f'pp_ref, depends_on, plan_anchor '
+                f'pp_ref, depends_on, plan_anchor, reasoning '
                 f'FROM todo_items {where} ORDER BY agent, priority, id',
                 params,
             )
@@ -172,7 +194,7 @@ def todo_get(item_id: int) -> Optional[Dict[str, Any]]:
         with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 'SELECT id, agent, priority, body, source, added_at, done_at, '
-                'pp_ref, depends_on, plan_anchor FROM todo_items WHERE id = %s',
+                'pp_ref, depends_on, plan_anchor, reasoning FROM todo_items WHERE id = %s',
                 (item_id,),
             )
             row = cur.fetchone()
@@ -241,7 +263,7 @@ def todo_top(agent: str) -> Optional[Dict[str, Any]]:
         with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 'SELECT id, agent, priority, body, source, added_at, done_at, '
-                'pp_ref, depends_on, plan_anchor FROM todo_items '
+                'pp_ref, depends_on, plan_anchor, reasoning FROM todo_items '
                 'WHERE agent = %s AND done_at IS NULL ORDER BY priority, id LIMIT 1',
                 (agent,),
             )
@@ -254,6 +276,7 @@ def todo_set_meta(
     pp_ref: Optional[str] = None,
     depends_on: Optional[List[int]] = None,
     plan_anchor: Optional[str] = None,
+    reasoning: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Set PP-PLANDB-001 metadata on an existing item. Only passed fields change."""
     sets, params = [], []
@@ -266,14 +289,17 @@ def todo_set_meta(
     if plan_anchor is not None:
         sets.append('plan_anchor = %s')
         params.append(plan_anchor or None)
+    if reasoning is not None:
+        sets.append('reasoning = %s')
+        params.append(reasoning)
     if not sets:
-        return {'ok': False, 'error': 'no metadata given — pass --pp/--depends/--anchor'}
+        return {'ok': False, 'error': 'no metadata given — pass --pp/--depends/--anchor/--reasoning'}
     params.append(item_id)
     with _conn() as con:
         with con.cursor() as cur:
             cur.execute(
                 f"UPDATE todo_items SET {', '.join(sets)} WHERE id = %s "
-                f"RETURNING id, agent, pp_ref, depends_on, plan_anchor",
+                f"RETURNING id, agent, pp_ref, depends_on, plan_anchor, reasoning",
                 params,
             )
             row = cur.fetchone()
@@ -281,7 +307,7 @@ def todo_set_meta(
         return {'ok': False, 'error': f'item {item_id} not found'}
     _enqueue_plan_render('todo_set_meta')
     return {'ok': True, 'id': row[0], 'agent': row[1], 'pp_ref': row[2],
-            'depends_on': row[3], 'plan_anchor': row[4]}
+            'depends_on': row[3], 'plan_anchor': row[4], 'reasoning': row[5]}
 
 
 # ---------------------------------------------------------------------------
@@ -362,6 +388,9 @@ def todo_brief(item_id: int, plan_path: Path) -> Dict[str, Any]:
         item['body'],
         '',
     ]
+    reasoning = item.get('reasoning', 'normal')
+    if reasoning and reasoning != 'normal':
+        parts += [f'**Reasoning:** {reasoning}', '']
     if item.get('pp_ref'):
         parts += [f'**Plan item:** {item["pp_ref"]}'
                   + (f' — see master-plan section "{item["plan_anchor"]}"' if item.get('plan_anchor') else ''),
@@ -583,7 +612,8 @@ def cmd_todo(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
         result = todo_add(agent, args.add, priority=args.priority, source=args.source,
                           pp_ref=args.pp or None,
                           depends_on=_parse_depends(args.depends),
-                          plan_anchor=args.anchor or None)
+                          plan_anchor=args.anchor or None,
+                          reasoning=getattr(args, 'reasoning', 'normal'))
         extras = f" pp_ref={args.pp}" if args.pp else ''
         print(f"Added #{result['id']} [{agent} p{args.priority}]{extras}: {args.add}")
         return result
@@ -592,7 +622,8 @@ def cmd_todo(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
         result = todo_set_meta(args.set_meta,
                                pp_ref=args.pp,
                                depends_on=_parse_depends(args.depends),
-                               plan_anchor=args.anchor)
+                               plan_anchor=args.anchor,
+                               reasoning=getattr(args, 'reasoning', None))
         if result['ok']:
             print(f"Meta #{result['id']} [{result['agent']}]: pp_ref={result['pp_ref']} "
                   f"depends_on={result['depends_on']} plan_anchor={result['plan_anchor']}")
@@ -663,6 +694,9 @@ def cmd_todo(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
         blockers = [d for d in (item.get('depends_on') or []) if d in still_open]
         if blockers:
             badges += ' ⛔' + ','.join(f'#{d}' for d in blockers)
+        r = item.get('reasoning', 'normal')
+        if r and r != 'normal':
+            badges += f' [{r}]'
         body_preview = item['body'][:80] + ('…' if len(item['body']) > 80 else '')
         print(f'  [{done_mark}] #{item["id"]:3d} p{item["priority"]:2d} {badges} {body_preview}')
 

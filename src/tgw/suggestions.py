@@ -47,6 +47,10 @@ Rules:
   account, OS/service installation, or configuring secrets/permissions — set
   todo_agent="admin" and pp_ref="PP-OPS-001" (the catch-all anchor for operator gates).
 - For plan_append, section_heading must exactly match a heading from the plan structure.
+- Set "reasoning" based on task complexity:
+  "high" for architectural decisions, multi-file refactors, novel design;
+  "low" for mechanical edits, renaming, formatting, simple migrations;
+  "normal" for everything else (default — omit if normal).
 - Respond with a JSON array only — one object per suggestion, in the same index order.
 """
 
@@ -71,6 +75,7 @@ Respond with a JSON array, one object per suggestion:
     "todo_agent": "claude|admin",
     "todo_body": "actionable one-line text (todo action only)",
     "pp_ref": "PP-XXXX-NNN (todo action only; omit unless confident)",
+    "reasoning": "high|normal|low (todo action only; omit if normal)",
     "section_heading": "## exact heading (plan_append only)",
     "content": "markdown lines to append (plan_append only)",
     "review_agent": "claude|admin",
@@ -179,7 +184,11 @@ def apply_classifications(
             pp_ref = (c.get('pp_ref') or '').strip().upper()
             if not _PP_REF_RE.match(pp_ref):
                 pp_ref = ''
-            todo_add(agent, body, source=_TODO_SOURCE, pp_ref=pp_ref or None)
+            reasoning = (c.get('reasoning') or 'normal').strip().lower()
+            if reasoning not in ('high', 'normal', 'low'):
+                reasoning = 'normal'
+            todo_add(agent, body, source=_TODO_SOURCE, pp_ref=pp_ref or None,
+                     reasoning=reasoning)
 
     if write and line_patches:
         lines = suggestions_path.read_text(encoding='utf-8').splitlines(keepends=True)
