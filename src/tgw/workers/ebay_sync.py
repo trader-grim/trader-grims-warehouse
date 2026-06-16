@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
@@ -23,6 +24,7 @@ import psycopg2.errors
 import requests
 
 import tgw.logging as tgw_logging
+from tgw.apis.ebay.client import ebay_get
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.ebay.sync import fetch_all_offers
 from tgw.items import atomic_write_json
@@ -168,6 +170,10 @@ class EbaySyncWorker(QueueWorker):
             item['ebay_offer'] = ebay_offer
             changed = True
 
+        # PP-EBAY-SNAPSHOT-001 Phase 3: periodic photo integrity check for active listings.
+        if listing_status == 'ACTIVE' or ebay_listing.get('status') == 'Active':
+            changed |= self._check_photo_integrity(sku, item, ebay_listing)
+
         if not changed:
             return 0
 
@@ -177,6 +183,66 @@ class EbaySyncWorker(QueueWorker):
         tgw_logging.log_event('ebay_listing_synced', sku=sku, status=ebay_status,
                               listing_id=listing_id, offer_id=offer_id, price=price_val)
         return 1
+
+    def _check_photo_integrity(self, sku: str, item: Dict[str, Any],
+                               ebay_listing: Dict[str, Any]) -> bool:
+        """GET inventory_item and enqueue ebay_repush if photo count dropped.
+
+        Returns True if ebay_listing was mutated (so caller writes the file).
+        Only runs when the item is due for a check (every ebay_verify_interval_days).
+        """
+        interval_days = int(self.config.get('ebay_verify_interval_days', 7))
+        last_checked = ebay_listing.get('photo_verify', {}).get('verified_at')
+        if last_checked:
+            try:
+                age_days = (datetime.now(timezone.utc)
+                            - datetime.fromisoformat(last_checked)).days
+                if age_days < interval_days:
+                    return False
+            except (ValueError, TypeError):
+                pass
+
+        try:
+            live = ebay_get(self.config, f'/sell/inventory/v1/inventory_item/{sku}')
+        except Exception as exc:
+            log.warning('ebay_sync: photo check GET failed for %s: %s', sku, exc)
+            return False
+
+        confirmed = live.get('product', {}).get('imageUrls', [])
+        submitted = (
+            item.get('ebay_submitted', {})
+                .get('inventory_item', {})
+                .get('product', {})
+                .get('imageUrls')
+            or item.get('draft_listing', {}).get('imageUrls', [])
+        )
+        now_iso = datetime.now(timezone.utc).isoformat()
+        ebay_listing['photo_verify'] = {
+            'submitted_count': len(submitted),
+            'confirmed_count': len(confirmed),
+            'verified_at':     now_iso,
+        }
+
+        if submitted and len(confirmed) < len(submitted):
+            log.error('ebay_sync: %s photo count dropped — submitted=%d confirmed=%d — enqueueing repush',
+                      sku, len(submitted), len(confirmed))
+            tgw_logging.log_event('ebay_photo_count_dropped', sku=sku,
+                                  submitted=len(submitted), confirmed=len(confirmed))
+            try:
+                state_machine.enqueue_job(
+                    queue_name='ebay_repush',
+                    payload={'sku': sku},
+                    dedupe_key=f'ebay_repush:{sku}',
+                    max_attempts=3,
+                )
+            except psycopg2.errors.UniqueViolation:
+                pass
+        else:
+            log.debug('ebay_sync: %s photo verify OK — %d/%d confirmed',
+                      sku, len(confirmed), len(submitted))
+            tgw_logging.log_event('ebay_photo_verify_ok', sku=sku, confirmed=len(confirmed))
+
+        return True
 
     def _reschedule(self) -> None:
         next_run = time.time() + SYNC_INTERVAL_S

@@ -152,6 +152,13 @@ class EbayStageWorker(QueueWorker):
         ebay_offer['staged_at']  = datetime.now(timezone.utc).isoformat()
 
         item['ebay_offer'] = ebay_offer
+
+        # PP-EBAY-SNAPSHOT-001: snapshot what we PUT so photo verify and repush
+        # have a ground-truth reference for what eBay should be showing.
+        item['ebay_submitted'] = {
+            'inventory_item': result['inventory_item'],
+            'staged_at': ebay_offer['staged_at'],
+        }
         atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
 
         log.info('ebay_stage: %s staged → offerId=%s (visible in Seller Hub)',

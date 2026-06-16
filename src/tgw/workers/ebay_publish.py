@@ -23,7 +23,7 @@ import psycopg2.errors
 import requests
 
 import tgw.logging as tgw_logging
-from tgw.apis.ebay.client import ebay_put
+from tgw.apis.ebay.client import ebay_get, ebay_put
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.ebay.pricing import to_99
 from tgw.ebay.sync import publish_offer
@@ -180,6 +180,34 @@ class EbayPublishWorker(QueueWorker):
         if item.get('draft_listing'):
             item['draft_listing']['listing_description'] = build_listing_description(
                 item, self.config)
+
+        # PP-EBAY-SNAPSHOT-001 Phase 2: verify photos survived publish.
+        # One extra GET; logged but never blocks the publish completing.
+        try:
+            live = ebay_get(self.config, f'/sell/inventory/v1/inventory_item/{sku}')
+            confirmed = live.get('product', {}).get('imageUrls', [])
+            submitted = (
+                item.get('ebay_submitted', {})
+                    .get('inventory_item', {})
+                    .get('product', {})
+                    .get('imageUrls')
+                or item.get('draft_listing', {}).get('imageUrls', [])
+            )
+            item['ebay_listing']['photo_verify'] = {
+                'submitted_count': len(submitted),
+                'confirmed_count': len(confirmed),
+                'verified_at':     now.isoformat(),
+            }
+            if len(confirmed) < len(submitted):
+                log.warning('%s: photo count mismatch after publish — submitted=%d confirmed=%d',
+                            sku, len(submitted), len(confirmed))
+                tgw_logging.log_event('ebay_photo_verify_mismatch', sku=sku,
+                                      submitted=len(submitted), confirmed=len(confirmed))
+            else:
+                log.info('%s: photo verify OK — %d/%d confirmed', sku, len(confirmed), len(submitted))
+                tgw_logging.log_event('ebay_photo_verify_ok', sku=sku, confirmed=len(confirmed))
+        except Exception as exc:
+            log.warning('%s: photo verify GET failed (non-fatal): %s', sku, exc)
 
         atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
 

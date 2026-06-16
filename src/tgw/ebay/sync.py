@@ -468,7 +468,7 @@ def stage_draft(cfg: Dict[str, Any], sku: str,
             raise RuntimeError(f'create offer returned no offerId for {sku}: {resp}')
         log.info('offer created for %s (offerId=%s)', sku, offer_id)
 
-    return {'offer_id': offer_id, 'status': 'UNPUBLISHED'}
+    return {'offer_id': offer_id, 'status': 'UNPUBLISHED', 'inventory_item': inv_body}
 
 
 def publish_offer(cfg: Dict[str, Any], offer_id: str) -> Dict[str, Any]:

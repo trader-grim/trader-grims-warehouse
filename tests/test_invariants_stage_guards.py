@@ -31,7 +31,7 @@ def stage(tmp_path, monkeypatch):
 
     def fake_stage_draft(cfg, sku, item):
         calls.append(sku)
-        return {'offer_id': 'OFF-NEW', 'status': 'UNPUBLISHED'}
+        return {'offer_id': 'OFF-NEW', 'status': 'UNPUBLISHED', 'inventory_item': {}}
 
     monkeypatch.setattr(ebay_stage, 'stage_draft', fake_stage_draft)
 
