@@ -659,8 +659,10 @@ def test_todo_set_meta_reasoning():
 
 
 def test_listing_shows_high_badge(tmp_path, capsys):
-    from tgw import todo as todo_mod
     import argparse
+
+    from tgw import todo as todo_mod
+
     args = argparse.Namespace(
         agent='claude', brief_id=None, seed=False, add=None, done=None,
         update=None, delegate=None, set_priority=None, set_meta=None,
@@ -679,8 +681,10 @@ def test_listing_shows_high_badge(tmp_path, capsys):
 
 
 def test_listing_no_badge_for_normal(tmp_path, capsys):
-    from tgw import todo as todo_mod
     import argparse
+
+    from tgw import todo as todo_mod
+
     args = argparse.Namespace(
         agent='claude', brief_id=None, seed=False, add=None, done=None,
         update=None, delegate=None, set_priority=None, set_meta=None,
