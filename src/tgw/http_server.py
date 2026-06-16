@@ -3229,12 +3229,9 @@ _OFFERS_EXTRA_CSS = (
     ".resp-flash.err{background:#3a1a1a;color:#f77;display:block}"
     ".reload-btn{background:none;border:none;color:#4a8ade;cursor:pointer;"
     "  font-size:.82em;padding:0;text-decoration:underline;margin-left:8px}"
-    ".rate-limit-bar{background:#111;border:1px solid #222;border-radius:6px;"
-    "  padding:7px 12px;margin-bottom:10px;font-size:.78em;color:#555;"
-    "  display:none}"
-    ".rate-limit-bar.visible{display:block}"
-    ".rate-limit-bar strong{color:#777}"
-    ".rl-warn{color:#fb7!important}"
+    ".rate-limit-bar{background:#111;border:1px solid #2a2a2a;border-radius:6px;"
+    "  padding:6px 12px;font-size:.78em;color:#666;margin-bottom:10px;display:none}"
+    ".rate-limit-bar.loaded{display:block}"
 )
 
 _OFFERS_HTML = """\
@@ -3252,7 +3249,7 @@ _OFFERS_HTML = """\
   <button class="reload-btn" onclick="load()">&#8635; Refresh</button>
 </h2>
 
-<div class="rate-limit-bar" id="rate-limit-bar"></div>
+<div class="rate-limit-bar" id="rl-bar"></div>
 
 <div id="sku-filter-bar" style="display:none;background:#1a2a1a;border:1px solid #2a4a2a;
   border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:.85em;color:#7f7">
