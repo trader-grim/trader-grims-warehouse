@@ -14,6 +14,7 @@ Response: XML parsed with ElementTree.
 from __future__ import annotations
 
 import logging
+import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import Any, Dict, Generator, List, Optional
@@ -279,6 +280,45 @@ def revise_item_sku(cfg: Dict[str, Any], listing_id: str, new_sku: str) -> None:
     log.info('ReviseFixedPriceItem: listing %s custom label → %s', listing_id, new_sku)
 
 
+def get_api_access_rules(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Call GetAPIAccessRules and return usage info for GetBestOffers.
+    Returns a list of dicts with keys: call_name, daily_limit, daily_used,
+    hourly_limit, hourly_used.  Returns [] on any error.
+    """
+    xml_body = f'''<?xml version="1.0" encoding="utf-8"?>
+<GetAPIAccessRulesRequest xmlns="{_NS}">
+  <DetailLevel>ReturnAll</DetailLevel>
+</GetAPIAccessRulesRequest>'''
+    try:
+        root = trading_call(cfg, 'GetAPIAccessRules', xml_body, timeout=30)
+    except Exception as exc:
+        log.warning('GetAPIAccessRules failed: %s', exc)
+        return []
+
+    results = []
+    for rule in root.findall(f'.//{_t("AccessRule")}'):
+        name_el = rule.find(_t('CallName'))
+        if name_el is None or (name_el.text or '').strip() != 'GetBestOffers':
+            continue
+
+        def _int(tag: str) -> int:
+            el = rule.find(_t(tag))
+            try:
+                return int(el.text or '0') if el is not None else 0
+            except (ValueError, TypeError):
+                return 0
+
+        results.append({
+            'call_name':    'GetBestOffers',
+            'daily_limit':  _int('DailyLimit'),
+            'daily_used':   _int('DailyUsage'),
+            'hourly_limit': _int('HourlyLimit'),
+            'hourly_used':  _int('HourlyUsage'),
+        })
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Best Offer API (PP-OFFER-001)
 # ---------------------------------------------------------------------------
@@ -368,7 +408,26 @@ def get_best_offers(
             f'</GetBestOffersRequest>'
         )
 
-        root = trading_call(cfg, 'GetBestOffers', xml_body, timeout=60)
+        _delays = [1, 4, 16]
+        _last_exc: Optional[Exception] = None
+        for _attempt, _delay in enumerate([0] + _delays):
+            if _delay:
+                time.sleep(_delay)
+            try:
+                root = trading_call(cfg, 'GetBestOffers', xml_body, timeout=60)
+                _last_exc = None
+                break
+            except Exception as exc:
+                _raw = str(exc)
+                # 429 or eBay call-limit error code 21919188
+                if '429' in _raw or '21919188' in _raw:
+                    log.warning('get_best_offers: rate limited (attempt %d): %s', _attempt + 1, exc)
+                    _last_exc = exc
+                    if _attempt < len(_delays):
+                        continue
+                raise
+        if _last_exc is not None:
+            raise _last_exc
 
         pagination = root.find(_t('PaginationResult'))
         if pagination is not None:

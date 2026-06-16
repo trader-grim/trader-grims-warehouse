@@ -2868,8 +2868,13 @@ def dashboard() -> Dict[str, Any]:
             _pending_offers_cache_at = time.time()
             result["pending_offers"] = _pending_offers_cache
         except Exception as exc:
-            log.warning("dashboard: GetBestOffers failed: %s", exc)
-            _pending_offers_cache_at = time.time()  # back-off: don't retry until TTL expires
+            _raw = str(exc)
+            if '429' in _raw or '21919188' in _raw:
+                log.warning("dashboard: GetBestOffers rate limited — suppressing: %s", exc)
+                _pending_offers_cache = 0
+            else:
+                log.warning("dashboard: GetBestOffers failed: %s", exc)
+            _pending_offers_cache_at = time.time()
             result["pending_offers"] = _pending_offers_cache  # stale or None
 
     # --- Worker health via systemctl ---
@@ -3135,6 +3140,31 @@ def respond_offer(offer_id: str, body: OfferRespondBody) -> Dict[str, Any]:
     )
 
 
+@app.get("/api/offers/limits", dependencies=[AUTH])
+def get_offers_limits() -> Dict[str, Any]:
+    """Return GetBestOffers API call budget from GetAPIAccessRules."""
+    from .apis.ebay.trading import get_api_access_rules
+
+    try:
+        rules = get_api_access_rules(_cfg)
+    except Exception:
+        return {"ok": True, "limits": None}
+
+    if not rules:
+        return {"ok": True, "limits": None}
+
+    r = rules[0]
+    return {
+        "ok": True,
+        "limits": {
+            "daily_limit":  r["daily_limit"],
+            "daily_used":   r["daily_used"],
+            "hourly_limit": r["hourly_limit"],
+            "hourly_used":  r["hourly_used"],
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # GET /form/offers — Best Offers management UI (PP-EDITOR-001 Phase 3g)
 # ---------------------------------------------------------------------------
@@ -3199,6 +3229,12 @@ _OFFERS_EXTRA_CSS = (
     ".resp-flash.err{background:#3a1a1a;color:#f77;display:block}"
     ".reload-btn{background:none;border:none;color:#4a8ade;cursor:pointer;"
     "  font-size:.82em;padding:0;text-decoration:underline;margin-left:8px}"
+    ".rate-limit-bar{background:#111;border:1px solid #222;border-radius:6px;"
+    "  padding:7px 12px;margin-bottom:10px;font-size:.78em;color:#555;"
+    "  display:none}"
+    ".rate-limit-bar.visible{display:block}"
+    ".rate-limit-bar strong{color:#777}"
+    ".rl-warn{color:#fb7!important}"
 )
 
 _OFFERS_HTML = """\
@@ -3215,6 +3251,8 @@ _OFFERS_HTML = """\
 <h2>Best Offers <span id="offer-count" style="font-size:.65em;color:#666;font-weight:normal"></span>
   <button class="reload-btn" onclick="load()">&#8635; Refresh</button>
 </h2>
+
+<div class="rate-limit-bar" id="rate-limit-bar"></div>
 
 <div id="sku-filter-bar" style="display:none;background:#1a2a1a;border:1px solid #2a4a2a;
   border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:.85em;color:#7f7">
@@ -3400,6 +3438,27 @@ function respondCounter(offerId, listingId) {{
   respond(offerId, listingId, 'Counter', val);
 }}
 
+async function loadLimits() {{
+  try {{
+    var r = await fetch('/api/offers/limits', {{headers: authHeaders()}});
+    var d = await r.json();
+    if (!d || !d.ok || !d.limits) return;
+    var l = d.limits;
+    var bar = document.getElementById('rate-limit-bar');
+    if (!bar) return;
+    var dPct = l.daily_limit > 0 ? l.daily_used / l.daily_limit : 0;
+    var hPct = l.hourly_limit > 0 ? l.hourly_used / l.hourly_limit : 0;
+    var warnCls = (dPct > 0.8 || hPct > 0.8) ? ' rl-warn' : '';
+    bar.innerHTML = 'API Budget — GetBestOffers: '
+      + '<strong class="' + warnCls + '">' + l.daily_used + '/' + l.daily_limit + '</strong>'
+      + ' calls today, '
+      + '<strong class="' + warnCls + '">' + l.hourly_used + '/' + l.hourly_limit + '</strong>'
+      + ' this hour';
+    bar.classList.add('visible');
+  }} catch(e) {{ /* hide silently */ }}
+}}
+
+loadLimits();
 load();
 </script>
 </body>
