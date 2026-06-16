@@ -298,6 +298,7 @@ class _EbayStatusBadge extends StatelessWidget {
   const _EbayStatusBadge({required this.item});
 
   _EbayState get _state {
+    if (item.status.toLowerCase() == 'sold') return _EbayState.notListed;
     final lid = item.ebayListingId;
     if (lid != null && lid.isNotEmpty) return _EbayState.listed;
     final oid = item.ebayOfferId;
@@ -350,9 +351,10 @@ class _EbayStatusBadge extends StatelessWidget {
 
     if (state == _EbayState.listed) {
       return GestureDetector(
+        behavior: HitTestBehavior.opaque,
         onTap: () async {
           final url = Uri.parse('https://www.ebay.com/itm/${item.ebayListingId}');
-          if (await canLaunchUrl(url)) launchUrl(url, mode: LaunchMode.externalApplication);
+          if (await canLaunchUrl(url)) await launchUrl(url, mode: LaunchMode.externalApplication);
         },
         child: badge,
       );
