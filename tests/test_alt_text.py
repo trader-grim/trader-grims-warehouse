@@ -109,7 +109,7 @@ class TestAltText:
         assert doc["draft_listing"]["alt_text"] == "Silver pocket watch with chain on white background"
         assert "Elgin" in doc["draft_listing"]["seo_caption"]
 
-    def test_success_renames_production_image(self, tmp_path, monkeypatch):
+    def test_success_copies_to_alt_companion(self, tmp_path, monkeypatch):
         cfg = _make_cfg(tmp_path)
         _make_item(cfg, "tgw001")
         photo = _add_photo(cfg, "tgw001", name="tgw001.jpg")
@@ -117,9 +117,9 @@ class TestAltText:
 
         result = cmd_alt_text(cfg, sku="tgw001", model=_DUMMY_MODEL)
         assert result["ok"] is True
-        assert not photo.exists()  # original gone from production
+        assert photo.exists()  # original MUST still exist
         alt_path = Path(cfg["itemdata_root"]) / "tgw001" / "tgw001-alt.jpg"
-        assert alt_path.exists()
+        assert alt_path.exists()  # companion created
 
     def test_success_archives_original(self, tmp_path, monkeypatch):
         cfg = _make_cfg(tmp_path)
@@ -210,15 +210,14 @@ class TestAltText:
         result = _primary_image(sku_dir)
         assert result is None
 
-    def test_image_renamed_result_field(self, tmp_path, monkeypatch):
+    def test_image_copied_to_result_field(self, tmp_path, monkeypatch):
         cfg = _make_cfg(tmp_path)
         _make_item(cfg, "tgw001")
         _add_photo(cfg, "tgw001", name="product-photo-front.jpg")
         _patch_vision(monkeypatch)
 
         result = cmd_alt_text(cfg, sku="tgw001", model=_DUMMY_MODEL)
-        assert "product-photo-front.jpg" in result["image_renamed"]
-        assert "tgw001-alt.jpg" in result["image_renamed"]
+        assert "tgw001-alt.jpg" in result["image_copied_to"]
 
 
 # ---------------------------------------------------------------------------
@@ -412,3 +411,100 @@ class TestAltTextBatch:
         assert result["ok"] is True
         assert result["eligible"] == 0
         assert result["processed"] == 0
+
+
+# ---------------------------------------------------------------------------
+# repair_renamed_originals tests
+# ---------------------------------------------------------------------------
+
+
+class TestRepairRenamedOriginals:
+    def test_repairs_folder_with_only_alt_image(self, tmp_path):
+        from tgw.alt_text import repair_renamed_originals
+
+        item_root = tmp_path / "ItemData"
+        sku_dir = item_root / "tgw001"
+        sku_dir.mkdir(parents=True)
+        alt_file = sku_dir / "tgw001-alt.jpg"
+        alt_file.write_bytes(b"img")
+
+        repaired = repair_renamed_originals(item_root)
+
+        assert "tgw001" in repaired
+        assert not alt_file.exists()
+        assert (sku_dir / "tgw001.jpg").exists()
+
+    def test_skips_folder_where_original_exists(self, tmp_path):
+        from tgw.alt_text import repair_renamed_originals
+
+        item_root = tmp_path / "ItemData"
+        sku_dir = item_root / "tgw002"
+        sku_dir.mkdir(parents=True)
+        (sku_dir / "tgw002.jpg").write_bytes(b"orig")
+        (sku_dir / "tgw002-alt.jpg").write_bytes(b"alt")
+
+        repaired = repair_renamed_originals(item_root)
+
+        assert "tgw002" not in repaired
+        assert (sku_dir / "tgw002.jpg").exists()
+        assert (sku_dir / "tgw002-alt.jpg").exists()
+
+    def test_skips_folder_with_no_images(self, tmp_path):
+        from tgw.alt_text import repair_renamed_originals
+
+        item_root = tmp_path / "ItemData"
+        sku_dir = item_root / "tgw003"
+        sku_dir.mkdir(parents=True)
+        (sku_dir / "tgw003.json").write_text("{}")
+
+        repaired = repair_renamed_originals(item_root)
+
+        assert repaired == []
+
+    def test_returns_empty_list_for_empty_root(self, tmp_path):
+        from tgw.alt_text import repair_renamed_originals
+
+        item_root = tmp_path / "ItemData"
+        item_root.mkdir()
+
+        assert repair_renamed_originals(item_root) == []
+
+
+# ---------------------------------------------------------------------------
+# sorted_gallery tests
+# ---------------------------------------------------------------------------
+
+
+class TestSortedGallery:
+    def test_sku_named_file_comes_first(self, tmp_path):
+        from tgw.alt_text import sorted_gallery
+
+        sku_dir = tmp_path / "tgw001"
+        sku_dir.mkdir()
+        alt = sku_dir / "tgw001-alt.jpg"
+        orig = sku_dir / "tgw001.jpg"
+        alt.write_bytes(b"a")
+        orig.write_bytes(b"b")
+
+        result = sorted_gallery("tgw001", sku_dir)
+        assert result[0].name == "tgw001.jpg"
+        assert result[1].name == "tgw001-alt.jpg"
+
+    def test_alt_before_other_files(self, tmp_path):
+        from tgw.alt_text import sorted_gallery
+
+        sku_dir = tmp_path / "tgw001"
+        sku_dir.mkdir()
+        (sku_dir / "tgw001-alt.jpg").write_bytes(b"a")
+        (sku_dir / "extra-photo.jpg").write_bytes(b"b")
+
+        result = sorted_gallery("tgw001", sku_dir)
+        names = [p.name for p in result]
+        assert names.index("tgw001-alt.jpg") < names.index("extra-photo.jpg")
+
+    def test_empty_directory_returns_empty(self, tmp_path):
+        from tgw.alt_text import sorted_gallery
+
+        sku_dir = tmp_path / "tgw001"
+        sku_dir.mkdir()
+        assert sorted_gallery("tgw001", sku_dir) == []

@@ -95,6 +95,64 @@ def _history_sku_dir(cfg: Dict[str, Any], sku: str) -> Path:
     return itemdata_root.parent / "history" / "ItemData" / sku
 
 
+def repair_renamed_originals(item_data_root: Path) -> list[str]:
+    """One-time repair: restore originals that were incorrectly renamed to <sku>-alt.*.
+
+    Walks ItemData/<SKU>/ directories. If the only image present is <sku>-alt.*
+    (i.e. the original was renamed and the bare <sku>.* is missing), renames
+    <sku>-alt.* back to <sku>.*.
+
+    Returns a list of SKUs that were repaired.
+    """
+    repaired: list[str] = []
+    for sku_dir in sorted(item_data_root.iterdir()):
+        if not sku_dir.is_dir():
+            continue
+        sku = sku_dir.name
+        images = [
+            p for p in sku_dir.iterdir()
+            if p.is_file() and p.suffix.lower() in _IMAGE_SUFFIXES
+        ]
+        # Check: no bare <sku>.* exists but a <sku>-alt.* does
+        bare = [p for p in images if p.stem == sku]
+        alt_companions = [p for p in images if p.stem == f"{sku}{_ALT_STEM_SUFFIX}"]
+        if bare:
+            continue  # original still present, nothing to repair
+        if not alt_companions:
+            continue  # no images at all, skip
+        # Restore: rename <sku>-alt.<ext> → <sku>.<ext>
+        for alt_file in alt_companions:
+            restored = sku_dir / f"{sku}{alt_file.suffix}"
+            alt_file.rename(restored)
+        repaired.append(sku)
+    return repaired
+
+
+def sorted_gallery(sku: str, sku_dir: Path) -> list[Path]:
+    """Return image paths for *sku* sorted for gallery display.
+
+    Order:
+      1. Files named exactly ``<sku>.<ext>`` (canonical originals), oldest mtime first.
+      2. Files named ``<sku>-alt.<ext>`` (companions), oldest mtime first.
+      3. All other images, oldest mtime first.
+    """
+    images = [
+        p for p in sku_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in _IMAGE_SUFFIXES
+    ]
+
+    def _sort_key(p: Path) -> tuple[int, float]:
+        if p.stem == sku:
+            group = 0
+        elif p.stem == f"{sku}{_ALT_STEM_SUFFIX}":
+            group = 1
+        else:
+            group = 2
+        return (group, p.stat().st_mtime)
+
+    return sorted(images, key=_sort_key)
+
+
 # ---------------------------------------------------------------------------
 # Main command
 # ---------------------------------------------------------------------------
@@ -124,9 +182,13 @@ def cmd_alt_text(
 
     item = json.loads(json_path.read_text(encoding="utf-8"))
 
-    # Idempotency: skip if already fully processed
-    alt_path = sku_dir / f"{sku}{_ALT_STEM_SUFFIX}.jpg"
-    if alt_path.exists() and item.get("draft_listing", {}).get("alt_text"):
+    # Idempotency: check for any existing -alt.* companion
+    alt_path = next(
+        (p for p in sku_dir.iterdir()
+         if p.stem == f"{sku}{_ALT_STEM_SUFFIX}" and p.suffix.lower() in _IMAGE_SUFFIXES),
+        None,
+    )
+    if alt_path is not None and item.get("draft_listing", {}).get("alt_text"):
         return {
             "ok": True,
             "sku": sku,
@@ -148,7 +210,7 @@ def cmd_alt_text(
             "provider": provider,
             "model": model,
             "image": img_path.name,
-            "alt_path_would_be": str(alt_path),
+            "alt_path_would_be": str(sku_dir / f"{sku}{_ALT_STEM_SUFFIX}{img_path.suffix.lower()}"),
             "archive_needed": not history_path.exists(),
             "history_path": str(history_path),
         }
@@ -189,7 +251,7 @@ def cmd_alt_text(
     if not alt_text:
         return {"ok": False, "error": "model returned empty alt_text"}
 
-    # Archive original to history before renaming production copy
+    # Archive original to history before creating companion
     history_sku_dir = _history_sku_dir(cfg, sku)
     history_path = history_sku_dir / img_path.name
     if not history_path.exists():
@@ -199,8 +261,10 @@ def cmd_alt_text(
     else:
         archived = False
 
-    # Rename production image to <sku>-alt.jpg
-    img_path.rename(alt_path)
+    # Write companion derivative <sku>-alt.<ext> — original is NOT moved
+    alt_path = sku_dir / f"{sku}{_ALT_STEM_SUFFIX}{img_path.suffix.lower()}"
+    if not alt_path.exists():
+        shutil.copy2(img_path, alt_path)
 
     # Write fields to draft_listing
     if "draft_listing" not in item:
@@ -218,7 +282,7 @@ def cmd_alt_text(
         "cache_hit": cached is not None,
         "alt_text": alt_text,
         "seo_caption": seo_caption,
-        "image_renamed": f"{img_path.name} → {alt_path.name}",
+        "image_copied_to": alt_path.name,
         "archived_to_history": archived,
         "history_path": str(history_path),
     }
@@ -368,7 +432,7 @@ def _apply_alt_text_result(
     if not alt_text_str:
         return {"ok": False, "sku": sku, "error": "batch result has empty alt_text"}
 
-    # Archive original before renaming
+    # Archive original before creating companion
     history_sku_dir = _history_sku_dir(cfg, sku)
     history_path = history_sku_dir / img_path.name
     if not history_path.exists():
@@ -378,10 +442,10 @@ def _apply_alt_text_result(
     else:
         archived = False
 
-    # Rename production image
-    alt_path = sku_dir / f"{sku}{_ALT_STEM_SUFFIX}.jpg"
-    if img_path.exists():
-        img_path.rename(alt_path)
+    # Write companion derivative — original is NOT moved
+    alt_path = sku_dir / f"{sku}{_ALT_STEM_SUFFIX}{img_path.suffix.lower()}"
+    if img_path.exists() and not alt_path.exists():
+        shutil.copy2(img_path, alt_path)
 
     # Write fields
     if "draft_listing" not in item:
