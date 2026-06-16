@@ -140,6 +140,13 @@ def todo_add(
     plan_anchor: Optional[str] = None,
     reasoning: str = 'normal',
 ) -> Dict[str, Any]:
+    # Angle-bracket placeholders (e.g. <filename>) are misread by aider as
+    # file directives and can create garbage files.  Warn so the author can
+    # rewrite with {curly} or [bracket] syntax before the todo reaches aider.
+    warning = None
+    if re.search(r'<[A-Za-z]', body):
+        warning = 'body contains <angle-bracket> text — aider misreads these as filenames; use {curly} or [bracket] placeholders instead'
+
     with _conn() as con:
         with con.cursor() as cur:
             cur.execute(
@@ -149,9 +156,12 @@ def todo_add(
             )
             new_id = cur.fetchone()[0]
     _enqueue_plan_render('todo_add')
-    return {'ok': True, 'id': new_id, 'agent': agent, 'priority': priority, 'body': body,
-            'pp_ref': pp_ref, 'depends_on': depends_on or [], 'plan_anchor': plan_anchor,
-            'reasoning': reasoning}
+    result: Dict[str, Any] = {'ok': True, 'id': new_id, 'agent': agent, 'priority': priority,
+                               'body': body, 'pp_ref': pp_ref, 'depends_on': depends_on or [],
+                               'plan_anchor': plan_anchor, 'reasoning': reasoning}
+    if warning:
+        result['warning'] = warning
+    return result
 
 
 def todo_done(item_id: int) -> Dict[str, Any]:
@@ -616,6 +626,8 @@ def cmd_todo(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
                           reasoning=getattr(args, 'reasoning', 'normal'))
         extras = f" pp_ref={args.pp}" if args.pp else ''
         print(f"Added #{result['id']} [{agent} p{args.priority}]{extras}: {args.add}")
+        if result.get('warning'):
+            print(f"WARNING: {result['warning']}")
         return result
 
     if args.set_meta is not None:
