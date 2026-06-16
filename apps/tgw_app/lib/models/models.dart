@@ -115,6 +115,117 @@ class QueueStatus {
   }
 }
 
+class PipelineJob {
+  final String jobId;
+  final String queueName;
+  final String state;
+  final String? sku;
+  final String? startedAt;
+  final String? finishedAt;
+  final String? createdAt;
+  final String? errorDetail;
+  final int attemptCount;
+  final int maxAttempts;
+
+  PipelineJob({
+    required this.jobId,
+    required this.queueName,
+    required this.state,
+    this.sku,
+    this.startedAt,
+    this.finishedAt,
+    this.createdAt,
+    this.errorDetail,
+    required this.attemptCount,
+    required this.maxAttempts,
+  });
+
+  factory PipelineJob.fromJson(Map<String, dynamic> json) {
+    return PipelineJob(
+      jobId: json['job_id'] ?? '',
+      queueName: json['queue_name'] ?? '',
+      state: json['state'] ?? '',
+      sku: json['sku'] as String?,
+      startedAt: json['started_at'] as String?,
+      finishedAt: json['finished_at'] as String?,
+      createdAt: json['created_at'] as String?,
+      errorDetail: json['error_detail'] as String?,
+      attemptCount: json['attempt_count'] ?? 0,
+      maxAttempts: json['max_attempts'] ?? 3,
+    );
+  }
+
+  /// 'transient' | 'permanent' | 'unknown'
+  String get errorClass {
+    final e = (errorDetail ?? '').toLowerCase();
+    if (e.isEmpty) return 'unknown';
+    if (e.contains('timeout') ||
+        e.contains('connection') ||
+        e.contains('503') ||
+        e.contains('502') ||
+        e.contains('rate limit') ||
+        e.contains('too many') ||
+        e.contains('temporarily') ||
+        e.contains('econnrefused') ||
+        e.contains('network')) { return 'transient'; }
+    if (e.contains('not found') ||
+        e.contains('invalid') ||
+        e.contains('forbidden') ||
+        e.contains(' 404') ||
+        e.contains(' 403') ||
+        e.contains(' 400') ||
+        e.contains(' 401') ||
+        e.contains('unauthorized') ||
+        e.contains('does not exist') ||
+        e.contains('no such') ||
+        e.contains('missing')) { return 'permanent'; }
+    return 'unknown';
+  }
+
+  static const Map<String, int> _expectedDurationSecs = {
+    'catalog_rebuild': 120,
+    'thumbnail_gen': 60,
+    'ai_identify': 600,
+    'ebay_draft': 120,
+    'ebay_upload': 60,
+    'ebay_price': 120,
+    'ebay_stage': 60,
+    'ebay_publish': 60,
+    'ebay_dole': 30,
+    'ebay_sync': 300,
+    'ebay_legacy_sync': 300,
+    'token_refresh': 60,
+    'pm_intake': 120,
+    'bundle_intake': 60,
+    'multi_intake': 120,
+    'plan_render': 60,
+    'echo': 10,
+  };
+
+  bool get isStuck {
+    if (state != 'running' && state != 'leased') return false;
+    final sa = startedAt;
+    if (sa == null) return false;
+    try {
+      final elapsed = DateTime.now().difference(DateTime.parse(sa)).inSeconds;
+      final expected = _expectedDurationSecs[queueName] ?? 300;
+      return elapsed > expected * 2;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Duration? get elapsed {
+    final ref = startedAt ?? createdAt;
+    if (ref == null) return null;
+    try {
+      return DateTime.now().difference(DateTime.parse(ref));
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
 class CategoryGroup {
   final String name;
   final String? sizeClass;
