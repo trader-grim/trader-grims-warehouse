@@ -220,6 +220,32 @@ class ApiClient {
     }
   }
 
+  Future<ApiResponse<Map<String, dynamic>>> bulkAction(List<String> skus, String action) async {
+    await ensureInitialized();
+    try {
+      final response = await _dio.post('/api/bulk/action', data: {'skus': skus, 'action': action});
+      if (response.statusCode == 200) {
+        return ApiResponse(ok: true, data: Map<String, dynamic>.from(response.data));
+      }
+      return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
+    } catch (e) {
+      return ApiResponse(ok: false, error: e.toString());
+    }
+  }
+
+  Future<ApiResponse<void>> deleteItem(String sku) async {
+    await ensureInitialized();
+    try {
+      final response = await _dio.delete('/api/items/$sku');
+      if (response.statusCode == 200) {
+        return ApiResponse(ok: true);
+      }
+      return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
+    } catch (e) {
+      return ApiResponse(ok: false, error: e.toString());
+    }
+  }
+
   String getThumbnailUrl(String sku) {
     return '$_baseUrl/api/items/$sku/thumbnail';
   }

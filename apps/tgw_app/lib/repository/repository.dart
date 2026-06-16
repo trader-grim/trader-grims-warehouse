@@ -94,4 +94,9 @@ class TgwRepository {
     final response = await apiClient.uploadToInbox(file);
     return response.ok ? response.data : null;
   }
+
+  Future<Map<String, dynamic>?> bulkAction(List<String> skus, String action) async {
+    final response = await apiClient.bulkAction(skus, action);
+    return response.ok ? response.data : null;
+  }
 }

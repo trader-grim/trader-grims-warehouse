@@ -190,6 +190,11 @@ class BulkBody(BaseModel):
     limit: int = Field(0, ge=0)
 
 
+class BulkActionBody(BaseModel):
+    skus: List[str]
+    action: str
+
+
 class PMChatBody(BaseModel):
     message: str
     history: List[Dict[str, str]] = Field(default_factory=list)
@@ -529,6 +534,94 @@ def bulk_apply(body: BulkBody) -> Dict[str, Any]:
         except Exception:
             pass
     return result
+
+
+# ---------------------------------------------------------------------------
+# POST /api/bulk/action — bulk pipeline actions from Flutter browse selection
+# ---------------------------------------------------------------------------
+
+_BULK_PIPELINE_ACTIONS = {"ai_identify", "ebay_price", "ebay_draft", "ebay_stage", "ebay_upload"}
+_BULK_VALID_ACTIONS = _BULK_PIPELINE_ACTIONS | {"set_ready", "mark_sold", "delete"}
+
+
+@app.post("/api/bulk/action", dependencies=[AUTH])
+def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
+    """Fan out an action across a list of SKUs.
+
+    Actions: ai_identify, ebay_price, ebay_draft, ebay_stage, set_ready,
+    mark_sold, delete. Pipeline actions enqueue jobs; set_ready / mark_sold /
+    delete write item JSON and enqueue a catalog rebuild.
+    """
+    if body.action not in _BULK_VALID_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown bulk action {body.action!r}; valid: {sorted(_BULK_VALID_ACTIONS)}",
+        )
+    if not body.skus:
+        raise HTTPException(status_code=400, detail="no skus provided")
+
+    if body.action == "set_ready":
+        from .ready import set_ready
+        return set_ready(_cfg, body.skus)
+
+    if body.action in ("mark_sold", "delete"):
+        new_status = "Sold" if body.action == "mark_sold" else "deleted"
+        done: List[str] = []
+        errors: List[str] = []
+        for sku in body.skus:
+            json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+            if not json_path.exists():
+                errors.append(f"{sku}: not found")
+                continue
+            try:
+                doc = load_item_doc(json_path)
+                doc["status"] = new_status
+                if body.action == "delete":
+                    doc["deleted_at"] = datetime.now().isoformat()
+                atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+                done.append(sku)
+            except Exception as exc:
+                errors.append(f"{sku}: {exc}")
+        try:
+            state_machine.enqueue_job(
+                queue_name="catalog_rebuild",
+                payload={"reason": f"bulk_{body.action}"},
+                dedupe_key="catalog_rebuild:pending",
+                not_before=time.time() + 30,
+                max_attempts=3,
+            )
+        except Exception:
+            pass
+        return {"ok": not errors, "count": len(done), "done": done, "errors": errors}
+
+    # Pipeline actions — enqueue a job per SKU
+    queued: List[str] = []
+    skipped: List[str] = []
+    errors: List[str] = []
+    for sku in body.skus:
+        json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+        if not json_path.exists():
+            errors.append(f"{sku}: not found")
+            continue
+        try:
+            if body.action == "ai_identify":
+                doc = load_item_doc(json_path)
+                doc["ai_reidentify"] = True
+                atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+            state_machine.enqueue_job(
+                queue_name=body.action,
+                payload={"sku": sku},
+                dedupe_key=f"{body.action}:{sku}",
+                max_attempts=5,
+            )
+            queued.append(sku)
+        except Exception as exc:
+            err = str(exc)
+            if "unique" in err.lower() or "duplicate" in err.lower():
+                skipped.append(sku)
+            else:
+                errors.append(f"{sku}: {err}")
+    return {"ok": True, "count": len(queued), "queued": queued, "skipped": skipped, "errors": errors}
 
 
 # ---------------------------------------------------------------------------

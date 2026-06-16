@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-06-16 04:06 UTC — 26 open, 835 done in the last 7 days._
+_Rendered 2026-06-16 04:28 UTC — 25 open, 836 done in the last 7 days._
 
 ## admin (16 open)
 
@@ -34,11 +34,10 @@ _Rendered 2026-06-16 04:06 UTC — 26 open, 835 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (7 open)
+## claude (6 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
-| 880 | 20 |  | Inventory browse status at a glance — per-card: price display, eBay status badge (Listed+eBayID as clickable link / Staged / Ready / Needs Review / Not Listed), missing-photo indicator. Size: S | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
 | 881 | 22 |  | Inventory browse bulk selection — checkbox per card; select-all button; sticky bulk-action toolbar: Re-identify / Reprice / Mark Ready / Mark Sold / Delete from eBay / Apply Draft. Search+filter then select-all is the primary bulk workflow. Size: M | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
 | 882 | 24 |  | Pipeline page drill-down — click on failed/dead_letter count chip opens detail panel: job list with queue name, error text, classify verdict (transient/permanent); per-job Re-queue + Report-to-admin buttons; surface stuck active jobs (elapsed > 2x expected). Size: M | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
 | 883 | 26 |  | Intake form purpose + UX — add instructions banner (Review and confirm this item before sending through the pipeline); show pre-populated fields with current values; Pipeline Trigger section (re-identify / re-draft / stage buttons + confirm); clarify this is pre-pipeline review not raw data-entry. Size: S | [[TGW-Master-Plan#PP-EDITOR-001 — Item Editor / Inventory Management App\|PP-EDITOR-001]] |  |
@@ -52,10 +51,11 @@ _Rendered 2026-06-16 04:06 UTC — 26 open, 835 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — Sold reconciliation and inventory status sync (design ready)\|PP-SOLD-001]] |  |
 
-## Done this week (835)  — showing 15 most recent
+## Done this week (836)  — showing 15 most recent
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 880 | claude | 2026-06-15 | Inventory browse status at a glance — per-card: price display, eBay status badge (Listed+eBayID as clickable link / Staged / Ready / Needs Review / Not Listed), missing-photo indicator. Size: S |
 | 879 | claude | 2026-06-15 | Worker pipeline tooltips — hover tooltip on each worker name in pipeline jobs section of item detail (/form/items/{sku}); text from TGW-Pipeline-Flow.md worker descriptions. Size: XS |
 | 878 | claude | 2026-06-15 | eBay draft section fixes — (1) show draft price from ebay_offer.price if present; (2) fix no_brand false-positive: scan title against brand field before flagging; (3) add Does Not Apply / Unknown option to no_model display. Size: S |
 | 885 | claude | 2026-06-15 | ISS-014 qty validation — guard in items._write_field() refusing qty < 0; catalog-verify rule negative_qty (critical severity); tgw data-scrub --pass 3 or --fix repair: set qty=1 for any item with qty < 0. Size: S |
@@ -70,5 +70,4 @@ _Rendered 2026-06-16 04:06 UTC — 26 open, 835 done in the last 7 days._
 | 872 | claude | 2026-06-14 | category-groups.json store_category mappings (GEMINI-006): populate store_category for tools_hand, electronics_adapters_chargers, electronics_remotes, kitchen_utensils |
 | 871 | claude | 2026-06-14 | category-groups.json pricing calibration (GEMINI-005): update electrical_fixtures typical_used→12.50, media_records→13.50, collectibles_pins_buttons→10.50; run tgw category-groups --reseed after |
 | 867 | claude | 2026-06-14 | PP-EDITOR-001 3o: PM chat open in popup window — web PM chat (/form/pm-chat) opens as modal popup instead of navigating away; POST /api/pm/chat stays same |
-| 866 | claude | 2026-06-14 | PP-EDITOR-001 3o: suggest popup "Upload to inbox" link — add file-input button that POSTs file to new POST /api/inbox/upload endpoint; stores in inbox/ with timestamp prefix; confirm upload toast |
-| … | | | _…and 820 more — run `tgw todo --all` to see everything_ |
+| … | | | _…and 821 more — run `tgw todo --all` to see everything_ |

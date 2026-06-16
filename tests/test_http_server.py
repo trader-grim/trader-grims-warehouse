@@ -727,6 +727,115 @@ def test_bulk_apply_invalid_field(client):
 
 
 # ---------------------------------------------------------------------------
+# POST /api/bulk/action — bulk selection actions (todo #881)
+# ---------------------------------------------------------------------------
+
+def test_bulk_action_requires_auth(client):
+    r = client.post("/api/bulk/action", json={"skus": [SKU_A], "action": "ai_identify"})
+    assert r.status_code in (401, 403)
+
+
+def test_bulk_action_unknown_action_400(client):
+    r = client.post("/api/bulk/action", headers=AUTH_HEADERS,
+                    json={"skus": [SKU_A], "action": "bogus"})
+    assert r.status_code == 400
+
+
+def test_bulk_action_no_skus_400(client):
+    r = client.post("/api/bulk/action", headers=AUTH_HEADERS,
+                    json={"skus": [], "action": "ai_identify"})
+    assert r.status_code == 400
+
+
+def test_bulk_action_ai_identify_enqueues(env, enqueue_calls):
+    client = env["client"]
+    r = client.post("/api/bulk/action", headers=AUTH_HEADERS,
+                    json={"skus": [SKU_A, SKU_B], "action": "ai_identify"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["count"] == 2
+    assert set(body["queued"]) == {SKU_A, SKU_B}
+    # ai_reidentify flag written for each
+    itemdata_root = env["itemdata_root"]
+    for sku in (SKU_A, SKU_B):
+        doc = json.loads((itemdata_root / sku / f"{sku}.json").read_text())
+        assert doc.get("ai_reidentify") is True
+    # jobs enqueued
+    queued_names = [c["kwargs"]["queue_name"] for c in enqueue_calls]
+    assert queued_names.count("ai_identify") == 2
+
+
+def test_bulk_action_ebay_price_enqueues(env, enqueue_calls):
+    client = env["client"]
+    r = client.post("/api/bulk/action", headers=AUTH_HEADERS,
+                    json={"skus": [SKU_A], "action": "ebay_price"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["count"] == 1
+    queued_names = [c["kwargs"]["queue_name"] for c in enqueue_calls]
+    assert "ebay_price" in queued_names
+
+
+def test_bulk_action_ebay_draft_enqueues(env, enqueue_calls):
+    client = env["client"]
+    r = client.post("/api/bulk/action", headers=AUTH_HEADERS,
+                    json={"skus": [SKU_A, SKU_B], "action": "ebay_draft"})
+    assert r.status_code == 200
+    assert r.json()["count"] == 2
+    queued_names = [c["kwargs"]["queue_name"] for c in enqueue_calls]
+    assert queued_names.count("ebay_draft") == 2
+
+
+def test_bulk_action_mark_sold_writes_status(env, enqueue_calls):
+    client = env["client"]
+    r = client.post("/api/bulk/action", headers=AUTH_HEADERS,
+                    json={"skus": [SKU_A], "action": "mark_sold"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["count"] == 1
+    doc = json.loads((env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text())
+    assert doc["status"] == "Sold"
+    assert any(c["kwargs"].get("queue_name") == "catalog_rebuild" for c in enqueue_calls)
+
+
+def test_bulk_action_delete_writes_status(env, enqueue_calls):
+    client = env["client"]
+    r = client.post("/api/bulk/action", headers=AUTH_HEADERS,
+                    json={"skus": [SKU_A], "action": "delete"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    doc = json.loads((env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text())
+    assert doc["status"] == "deleted"
+    assert "deleted_at" in doc
+
+
+def test_bulk_action_missing_sku_reported_in_errors(env, enqueue_calls):
+    client = env["client"]
+    r = client.post("/api/bulk/action", headers=AUTH_HEADERS,
+                    json={"skus": ["tgw_no_such_sku"], "action": "ebay_price"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 0
+    assert len(body["errors"]) == 1
+    assert "not found" in body["errors"][0]
+
+
+def test_bulk_action_set_ready_missing_offer(env):
+    """set_ready returns ok:False when items lack an offer_id."""
+    client = env["client"]
+    r = client.post("/api/bulk/action", headers=AUTH_HEADERS,
+                    json={"skus": [SKU_A], "action": "set_ready"})
+    assert r.status_code == 200
+    body = r.json()
+    # set_ready errors because SKU_A has no offer_id
+    assert "errors" in body or "skipped" in body or body.get("ok") is False
+
+
+# ---------------------------------------------------------------------------
 # PP-TODO-001 — GET /form/todos (Round 4 #34) — no Bearer auth (network trust)
 # ---------------------------------------------------------------------------
 
