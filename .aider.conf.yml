@@ -17,8 +17,12 @@
 
 env-file: /home/tgw/.env
 
-model: anthropic/claude-sonnet-4-6
-weak-model: anthropic/claude-haiku-4-5-20251001
+#model: anthropic/claude-sonnet-4-6
+#weak-model: anthropic/claude-haiku-4-5-20251001
+
+#model: openrouter/deepseek/deepseek-v4-flash
+architecture-model: openrouter/deepseek/deepseek-v4-flash
+editor-model: openrouter/gemini/gemini-2.5-flash
 
 architect: true
 auto-accept-architect: false       # review the plan before edits land
