@@ -3,10 +3,10 @@
 ebay_draft aspect-fill audit
 """
 
-import json
-from pathlib import Path
 from collections import defaultdict
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any, Dict
+import json
 
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.resolver import find_item_jsons, load_item_doc
@@ -50,8 +50,9 @@ def run_audit() -> None:
     # Calculate fill rates and identify coverage gaps
     report = []
     for cat, s in stats.items():
-        if s['total_items'] == 0: continue
-        
+        if s['total_items'] == 0:
+            continue
+
         req_rate = (s['req_filled'] / s['req_total']) if s['req_total'] > 0 else 1.0
         rec_rate = (s['rec_filled'] / s['rec_total']) if s['rec_total'] > 0 else 1.0
         
