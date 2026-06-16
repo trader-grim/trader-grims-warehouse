@@ -17,6 +17,11 @@ _GENERIC_BRANDS = frozenset({
     'does not apply', 'not applicable',
 })
 
+# Model/MPN values that explicitly acknowledge there is no model — suppress no_model flag
+_ACKNOWLEDGED_NO_MODEL = frozenset({
+    'does not apply', 'unknown', 'n/a', 'na', 'none', 'other', 'not applicable',
+})
+
 _SCORE_MAX = 100
 
 
@@ -110,7 +115,10 @@ def score_draft(
         brand_pts = 10
     else:
         brand_pts = 0
-        flags.append('no_brand')
+        # Suppress false-positive when spec_brand value (even a generic like "Unbranded")
+        # already appears in the title — the brand is acknowledged and present
+        if not (spec_brand and spec_brand.lower() in title_lower):
+            flags.append('no_brand')
 
     # ── Model/identifier in title (10 pts) ────────────────────────────────
     mpn        = str(specs.get('MPN') or specs.get('mpn') or pl.get('mpn') or '').strip()
@@ -121,6 +129,10 @@ def score_draft(
         model_pts = 10 if identifier.lower() in title_lower else 5
     else:
         model_pts = 0
+        # Flag no_model when identifier is absent; suppress if explicitly acknowledged
+        # with "Does Not Apply", "Unknown", etc. (set Model aspect to clear this flag)
+        if not identifier or identifier.lower() not in _ACKNOWLEDGED_NO_MODEL:
+            flags.append('no_model')
 
     # ── Specifics completeness (20 pts: required 15, recommended 5) ───────
     req_total  = int(draft.get('aspects_required_total', 0))

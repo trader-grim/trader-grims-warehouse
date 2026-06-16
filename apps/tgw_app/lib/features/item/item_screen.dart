@@ -178,10 +178,18 @@ class _ItemDetailView extends ConsumerWidget {
     if (draft.isEmpty) {
       return const Center(child: Text('No eBay draft yet'));
     }
+    final offerPrice = item.data['ebay_offer']?['price'];
+    final draftPrice = draft['price'];
+    final displayPrice = offerPrice ?? draftPrice;
+    final priceStr = displayPrice != null
+        ? '\$${(displayPrice as num).toStringAsFixed(2)}'
+            '${offerPrice != null ? ' (offer)' : ''}'
+        : '-';
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
         _infoRow('Draft Title', draft['title'] ?? '-'),
+        _infoRow('Price', priceStr),
         const SizedBox(height: 8),
         const Text('Description', style: TextStyle(fontWeight: FontWeight.bold)),
         Text(draft['description'] ?? '-'),
@@ -202,7 +210,7 @@ class _ItemDetailView extends ConsumerWidget {
       children: [
         _infoRow('Offer ID', offer['offer_id'] ?? '-'),
         _infoRow('Listing ID', offer['listing_id'] ?? '-'),
-        _infoRow('Price', '${offer['price']?['value']} ${offer['price']?['currency']}'),
+        _infoRow('Price', offer['price'] != null ? '\$${(offer['price'] as num).toStringAsFixed(2)}' : '-'),
         _infoRow('Available', offer['available_quantity']?.toString() ?? '-'),
         const Divider(),
         const ListTile(

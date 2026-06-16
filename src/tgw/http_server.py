@@ -2491,7 +2491,14 @@ def _render_item_detail_html(
 
     # Draft listing data (what we prepared for eBay)
     if dl:
-        dl_price_str = _fmt_price(dl.get("price"))
+        _dl_raw_price = dl.get("price")
+        if _dl_raw_price is None and offer_price is not None:
+            dl_price_str = (
+                _fmt_price(offer_price)
+                + ' <span style="color:#888;font-size:.78em">(from offer)</span>'
+            )
+        else:
+            dl_price_str = _fmt_price(_dl_raw_price)
         q = dl.get("quality") or {}
         q_score = q.get("score", "—")
         q_flags = ", ".join(q.get("flags", [])) or "—"

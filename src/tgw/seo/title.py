@@ -68,7 +68,11 @@ def enhance_title(
 
     # Missing brand / model signals (informational, not blocking)
     if not brand:
-        flags.append('no_brand')
+        # Suppress false-positive: if the raw Brand spec has a value in the title,
+        # it's already reflected — only flag when Brand field is truly unfilled
+        raw_spec_brand = (specs.get('Brand') or specs.get('brand') or '').strip()
+        if not (raw_spec_brand and raw_spec_brand.lower() in enhanced.lower()):
+            flags.append('no_brand')
     if not mpn:
         flags.append('no_model')
 
