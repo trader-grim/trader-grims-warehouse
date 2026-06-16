@@ -2274,23 +2274,32 @@ def _render_item_detail_html(
         main_src = f"/media/{h(sku)}/{h(images[0])}"
         strip_items = []
         for i, img in enumerate(images):
-            mv = (
-                f'<button class="strip-mv" onclick="mvPhoto({i})" title="Move earlier">↑</button>'
-                if i > 0
-                else ""
-            )
+            mv_buttons = ""
+            if i > 1:
+                mv_buttons += (
+                    f'<button class="strip-mv" onclick="mvFront({i})" title="Move to front">⇑</button>'
+                )
+            if i > 0:
+                mv_buttons += (
+                    f'<button class="strip-mv" style="top:{"1px" if i <= 1 else "22px"}" '
+                    f'onclick="mvPhoto({i})" title="Move earlier">↑</button>'
+                )
             strip_items.append(
                 f'<div class="strip-item">'
                 f'<img src="/media/{h(sku)}/{h(img)}" class="{"active" if i == 0 else ""}"'
                 f' onclick="smP(this,{i})" loading="lazy" alt="" data-name="{h(img)}">'
-                f"{mv}"
+                f"{mv_buttons}"
                 f"</div>"
             )
         strip = "".join(strip_items)
         photos_json = json.dumps(images)
         gallery_html = (
             f'<div class="gallery">'
-            f'<img class="main-photo" id="mp" src="{main_src}" alt="">'
+            f'<div class="lb-overlay" id="lb" onclick="lbClose()">'
+            f'<button class="lb-close" onclick="lbClose();event.stopPropagation()">✕</button>'
+            f'<img class="lb-img" id="lb-img" src="" alt="">'
+            f'</div>'
+            f'<img class="main-photo" id="mp" src="{main_src}" alt="" onclick="lbOpen(this.src)">'
             f'<div class="strip" id="photo-strip">{strip}</div>'
             f"</div>"
             f"<script>"
@@ -2300,9 +2309,18 @@ def _render_item_detail_html(
             f"document.querySelectorAll('.strip img').forEach(i=>i.classList.remove('active'));"
             f"el.classList.add('active');"
             f"}}"
+            f"function lbOpen(src){{var o=document.getElementById('lb');o.classList.add('open');document.getElementById('lb-img').src=src;}}"
+            f"function lbClose(){{document.getElementById('lb').classList.remove('open');}}"
+            f"document.addEventListener('keydown',function(e){{if(e.key==='Escape')lbClose();}});"
             f"function mvPhoto(idx){{"
             f"if(idx<1)return;"
             f"var t=_photos[idx-1];_photos[idx-1]=_photos[idx];_photos[idx]=t;"
+            f"savePhotoOrder();"
+            f"}}"
+            f"function mvFront(idx){{"
+            f"if(idx<1)return;"
+            f"var item=_photos.splice(idx,1)[0];"
+            f"_photos.unshift(item);"
             f"savePhotoOrder();"
             f"}}"
             f"function savePhotoOrder(){{"
@@ -2319,6 +2337,23 @@ def _render_item_detail_html(
         )
     else:
         gallery_html = '<div style="color:#555;padding:30px;text-align:center">No photos</div>'
+
+    # Video strip
+    if videos:
+        video_items = "".join(
+            f'<div class="strip-item video-item">'
+            f'<video src="/media/{h(sku)}/{h(vid)}" class="strip-vid"'
+            f' onclick="window.open(this.src,\'_blank\')" preload="none"></video>'
+            f'</div>'
+            for vid in videos
+        )
+        video_strip = (
+            f'<div class="video-strip">'
+            f'<div class="video-strip-hdr">VIDEO</div>'
+            f'<div class="strip">{video_items}</div>'
+            f'</div>'
+        )
+        gallery_html += video_strip
 
     # eBay sub-docs
     eb = item.get("ebay_listing") or {}
