@@ -2,14 +2,13 @@
 import json
 import os
 import sys
-from pathlib import Path
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Set
+from pathlib import Path
 
 # Add src to path so we can import tgw
 sys.path.append(os.path.abspath("src"))
 
-from tgw.config import load_config, DEFAULT_CONFIG
+from tgw.config import DEFAULT_CONFIG, load_config
 
 def scan_baseline(limit: int = 500):
     cfg = load_config(DEFAULT_CONFIG)
@@ -129,7 +128,10 @@ def scan_baseline(limit: int = 500):
     for group, stats in sorted_groups:
         print(f"| {group} | {stats['count']} | {stats['missing_title']} | {stats['missing_price']} | {stats['missing_photos']} | {stats['missing_location']} | {stats['missing_condition']} |")
     
-    print(f"| **TOTAL** | **{scanned}** | **{total_viols['missing_title']}** | **{total_viols['missing_price']}** | **{total_viols['missing_photos']}** | **{total_viols['missing_location']}** | **{total_viols['missing_condition']}** |")
+    total_line = (f"| **TOTAL** | **{scanned}** | **{total_viols['missing_title']}** | "
+                  f"**{total_viols['missing_price']}** | **{total_viols['missing_photos']}** | "
+                  f"**{total_viols['missing_location']}** | **{total_viols['missing_condition']}** |")
+    print(total_line)
     print("")
     print("## Violation Percentage")
     for k, v in total_viols.items():
