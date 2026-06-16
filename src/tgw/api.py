@@ -388,7 +388,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
         "ebay-pull", "ebay-sweep", "import-sold-csv", "sku-migrate",
         "setup-ebay-hooks", "build-archive-index", "history-index",
         "strikethrough-check", "store-categories", "store-category", "get-ebay-token",
-        "offers",
+        "offers", "ebay-repush",
     ]),
     ("Catalog / Build", [
         "build-full", "build-search", "build-locations", "build-full-csv",
@@ -966,6 +966,24 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--auto-accept", action="store_true", help="list: auto-accept offers above auto_accept_min_pct config threshold (dry-run unless --live)")
     p.add_argument("--live", action="store_true", help="submit response to eBay (default: dry-run)")
     p.add_argument("--by", default="claude", metavar="AGENT", help="who is responding (default: claude)")
+
+    # --- ebay-repush ---
+    p = sub.add_parser(
+        "ebay-repush",
+        help="re-PUT inventory item(s) to eBay from local ebay_submitted snapshot (PP-EBAY-SNAPSHOT-001)",
+    )
+    p.add_argument("skus", nargs="*", help="SKU(s) to re-push; omit with --all-listed")
+    p.add_argument(
+        "--all-listed",
+        dest="all_listed",
+        action="store_true",
+        help="re-push every item with ebay_listing.status=Active",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate eligibility without making any eBay API calls",
+    )
 
     p = sub.add_parser(
         "catalog-verify",
@@ -4315,6 +4333,32 @@ def main() -> int:
                     dry_run=not args.live,
                     by=args.by,
                 )
+
+        elif args.op == "ebay-repush":
+            from .ebay.repush import cmd_ebay_repush
+
+            skus = _expand_skus(args.skus) if args.skus else []
+            if not skus and not args.all_listed:
+                result = {"ok": False, "error": "provide SKU(s) or --all-listed"}
+            else:
+                result = cmd_ebay_repush(
+                    cfg,
+                    skus,
+                    all_listed=args.all_listed,
+                    dry_run=args.dry_run,
+                )
+            if result.get("ok") or result.get("dry_run"):
+                verb = "DRY-RUN" if args.dry_run else "RE-PUSHED"
+                print(
+                    f"{verb}: {result.get('count', 0)} item(s) pushed, "
+                    f"{len(result.get('skipped', []))} skipped, "
+                    f"{len(result.get('errors', []))} error(s)"
+                )
+                for e in result.get("errors", []):
+                    print(f"  ERROR: {e['sku']}: {e['reason']}")
+                for s in result.get("skipped", []):
+                    print(f"  SKIP:  {s['sku']}: {s['reason']}")
+            return 0 if result.get("ok") else 1
 
         elif args.op == "todo":
             from tgw.todo import cmd_todo
