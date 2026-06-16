@@ -5,11 +5,10 @@ ebay_draft aspect-fill audit
 
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
-
-import json
+from typing import Any, Dict
 
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.resolver import find_item_jsons, load_item_doc
