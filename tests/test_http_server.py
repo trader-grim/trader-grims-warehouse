@@ -1185,6 +1185,46 @@ def test_item_detail_no_listing_url_only_id(env):
     assert "offer-badge-wrap" in r.text
 
 
+def test_item_detail_pipeline_tooltips(env, monkeypatch):
+    """Worker queue names in pipeline jobs section carry hover tooltip text."""
+    rows = [
+        {
+            "queue_name": "ai_identify",
+            "state": "succeeded",
+            "created_at": None,
+            "updated_at": None,
+            "finished_at": None,
+            "error_code": None,
+            "error_detail": None,
+        }
+    ]
+    monkeypatch.setattr(http_server.psycopg2, "connect", lambda *a, **k: _FakeConn(rows))
+    r = env["client"].get(f"/form/items/{SKU_A}")
+    assert r.status_code == 200
+    # The ai_identify tooltip text should appear as a title attribute
+    assert "Sends photo to Ollama" in r.text
+    assert 'title="' in r.text
+
+
+def test_item_detail_unknown_worker_no_tooltip(env, monkeypatch):
+    """Unknown queue names render without a title attribute (no crash)."""
+    rows = [
+        {
+            "queue_name": "some_future_worker",
+            "state": "running",
+            "created_at": None,
+            "updated_at": None,
+            "finished_at": None,
+            "error_code": None,
+            "error_detail": None,
+        }
+    ]
+    monkeypatch.setattr(http_server.psycopg2, "connect", lambda *a, **k: _FakeConn(rows))
+    r = env["client"].get(f"/form/items/{SKU_A}")
+    assert r.status_code == 200
+    assert "some_future_worker" in r.text
+
+
 def test_offers_form_sku_filter(env):
     """/form/offers?sku=X loads and contains SKU filter JS variables."""
     from unittest.mock import patch

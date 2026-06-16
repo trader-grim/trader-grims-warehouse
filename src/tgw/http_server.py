@@ -37,6 +37,29 @@ from .resolver import load_item_doc
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Worker pipeline tooltip text — sourced from TGW-Pipeline-Flow.md
+_WORKER_TOOLTIPS: Dict[str, str] = {
+    "token_refresh":     "OAuth token refresh via eBay API; fires when token expires within 30 min",
+    "pm_intake":         "Reads plan-vault inbox notes → Ollama classifies → patches Master Plan",
+    "catalog_rebuild":   "Rebuilds JSON catalog + SQLite + location tree from all ItemData",
+    "thumbnail_gen":     "Generates SKU thumbnail from primary photo (Pillow)",
+    "bundle_intake":     "Polls incoming/newitems/, creates item stubs, enqueues ai_identify",
+    "multi_intake":      "Splits multi-item bundles into individual child SKUs",
+    "ai_identify":       "Sends photo to Ollama vision model → extracts title, category, condition",
+    "ebay_draft":        "Fetches eBay aspects, fills with AI (Qwen2.5), builds draft_listing block",
+    "ebay_upload":       "Uploads photos to eBay EPS via Trading API → permanent picture URLs",
+    "ebay_price":        "Browse API comps search → sets launch price + price_comps on offer",
+    "ebay_stage":        "Inventory API upsert + creates UNPUBLISHED offer; item visible in Seller Hub",
+    "ebay_publish":      "Publishes offer to eBay (manual trigger only); writes listing_id + reprice_schedule",
+    "ebay_price_reducer":"Applies reprice schedule stages (launch → retail → move) via Inventory API",
+    "ebay_sync":         "Fetches all eBay offers → syncs status back to item JSON every 6 h",
+    "ebay_legacy_sync":  "GetMyeBaySelling + GetOrders via Trading API; marks sold items",
+    "ebay_dole":         "Self-scheduling; publishes oldest ready items at configured dole rate",
+    "ebay_sku_migrate":  "Batches Class A live listings: delist → rename SKU → relist (hourly)",
+    "velocity_stats":    "Computes nightly category velocity stats for repricer tuning",
+    "echo":              "No-op test worker — echoes payload and succeeds",
+}
+
 # Module-level state (set during lifespan startup)
 # ---------------------------------------------------------------------------
 
@@ -2562,9 +2585,12 @@ def _render_item_detail_html(
             sc = "js-" + state.replace("_", "-").lower()
             ts = (j.get("updated_at") or j.get("finished_at") or j.get("created_at") or "")[:16]
             err = h(str(j.get("error_detail") or "")[:60])
+            qn = j.get("queue_name", "")
+            tip = _WORKER_TOOLTIPS.get(qn, "")
+            tip_attr = f' title="{h(tip)}"' if tip else ""
             job_rows += (
                 f"<tr>"
-                f'<td>{h(j.get("queue_name",""))}</td>'
+                f'<td{tip_attr}>{h(qn)}</td>'
                 f'<td class="{sc}">{h(state)}</td>'
                 f'<td style="color:#666;font-size:.8em">{h(ts)}</td>'
                 f'<td style="color:#f99;font-size:.8em">{err}</td>'
