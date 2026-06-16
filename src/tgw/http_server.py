@@ -1142,6 +1142,22 @@ _INTAKE_FORM_EXTRA_CSS = (
     ".btn-action:disabled{opacity:.4;cursor:not-allowed}"
     ".detail-link{color:#7fbfff;font-size:.88em;text-decoration:none}"
     ".detail-link:hover{color:#bdf}"
+    ".lb-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:9999;"
+    "  align-items:center;justify-content:center;cursor:zoom-out}"
+    ".lb-overlay.open{display:flex}"
+    ".lb-img{max-width:92vw;max-height:88vh;object-fit:contain;border-radius:6px;"
+    "  box-shadow:0 4px 32px rgba(0,0,0,.8)}"
+    ".lb-close{position:absolute;top:14px;right:18px;background:none;border:none;"
+    "  color:#aaa;font-size:1.8em;cursor:pointer;line-height:1}"
+    ".lb-close:hover{color:#fff}"
+    ".video-strip{margin-top:8px}"
+    ".video-strip-hdr{font-size:.65em;text-transform:uppercase;letter-spacing:.08em;"
+    "  color:#fb7;background:#2a1a00;border:1px solid #5a3a00;border-radius:4px;"
+    "  display:inline-block;padding:1px 6px;margin-bottom:4px}"
+    ".strip-vid{width:60px;height:45px;object-fit:cover;border-radius:4px;cursor:pointer;"
+    "  border:2px solid #5a3a00;background:#111}"
+    ".strip-vid:hover{border-color:#fb7}"
+    ".video-item{display:inline-block;position:relative}"
 )
 
 
