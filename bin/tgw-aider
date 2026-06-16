@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# tgw-aider — Aider wrapper that auto-creates a task branch from the spec file.
+#
+# Usage (mirrors aider's own flags):
+#   tgw-aider [--architect] --message-file aider/spec-<id>-<slug>.md <files...>
+#   tgw-aider [--architect] -m "inline prompt" <files...>
+#
+# Branch behaviour:
+#   - Spec file aider/spec-<id>-<slug>.md  →  branch task/<id>-<slug>
+#   - Inline prompt (-m / --message)        →  branch task/aider-<timestamp>
+#   - Already on a task/* branch            →  no new branch (continues in place)
+#   - main or other branch                  →  creates + checks out new branch
+
+set -euo pipefail
+
+AIDER="${AIDER_BIN:-aider}"
+REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+
+# ── Determine branch name ────────────────────────────────────────────────────
+
+current_branch="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)"
+target_branch=""
+
+# Scan args for --message-file / -f
+spec_file=""
+args=("$@")
+for i in "${!args[@]}"; do
+    case "${args[$i]}" in
+        --message-file|-f)
+            next="${args[$((i+1))]}"
+            basename="${next##*/}"          # strip directory
+            basename="${basename%.md}"      # strip .md
+            # spec-<id>-<slug> → task/<id>-<slug>
+            if [[ "$basename" =~ ^spec-([0-9]+-[a-z0-9_-]+)$ ]]; then
+                target_branch="task/${BASH_REMATCH[1]}"
+            fi
+            spec_file="$next"
+            ;;
+    esac
+done
+
+# Fall back to timestamp branch for inline prompts
+if [[ -z "$target_branch" ]]; then
+    target_branch="task/aider-$(date +%Y%m%d%H%M%S)"
+fi
+
+# ── Branch management ────────────────────────────────────────────────────────
+
+if [[ "$current_branch" == task/* ]]; then
+    echo "tgw-aider: already on branch '$current_branch' — continuing in place"
+elif git -C "$REPO_ROOT" show-ref --quiet "refs/heads/$target_branch"; then
+    echo "tgw-aider: branch '$target_branch' exists — checking out"
+    git -C "$REPO_ROOT" checkout "$target_branch"
+else
+    echo "tgw-aider: creating branch '$target_branch' from '$current_branch'"
+    git -C "$REPO_ROOT" checkout -b "$target_branch"
+fi
+
+# ── Run Aider ────────────────────────────────────────────────────────────────
+
+exec "$AIDER" "$@"
