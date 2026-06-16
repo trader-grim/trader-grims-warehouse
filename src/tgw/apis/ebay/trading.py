@@ -286,10 +286,12 @@ def get_api_access_rules(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     Returns a list of dicts with keys: call_name, daily_limit, daily_used,
     hourly_limit, hourly_used.  Returns [] on any error.
     """
-    xml_body = f'''<?xml version="1.0" encoding="utf-8"?>
-<GetAPIAccessRulesRequest xmlns="{_NS}">
-  <DetailLevel>ReturnAll</DetailLevel>
-</GetAPIAccessRulesRequest>'''
+    xml_body = (
+        f'<?xml version="1.0" encoding="utf-8"?>\n'
+        f'<GetAPIAccessRulesRequest xmlns="{_NS}">\n'
+        f'  <DetailLevel>ReturnAll</DetailLevel>\n'
+        f'</GetAPIAccessRulesRequest>'
+    )
     try:
         root = trading_call(cfg, 'GetAPIAccessRules', xml_body, timeout=30)
     except Exception as exc:
@@ -297,20 +299,24 @@ def get_api_access_rules(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
         return []
 
     results = []
-    for rule in root.findall(f'.//{_t("AccessRule")}'):
-        name_el = rule.find(_t('CallName'))
-        if name_el is None or (name_el.text or '').strip() != 'GetBestOffers':
+    alloc_list = root.find(_t('CallAllocationList'))
+    if alloc_list is None:
+        return []
+
+    for alloc in alloc_list.findall(_t('APICallAllocation')):
+        name_el = alloc.find(_t('CallName'))
+        if name_el is None:
             continue
 
-        def _int(tag: str) -> int:
-            el = rule.find(_t(tag))
+        def _int(tag: str, el: 'ET.Element' = alloc) -> int:
+            child = el.find(_t(tag))
             try:
-                return int(el.text or '0') if el is not None else 0
+                return int(child.text or '0') if child is not None else 0
             except (ValueError, TypeError):
                 return 0
 
         results.append({
-            'call_name':    'GetBestOffers',
+            'call_name':    (name_el.text or '').strip(),
             'daily_limit':  _int('DailyLimit'),
             'daily_used':   _int('DailyUsage'),
             'hourly_limit': _int('HourlyLimit'),

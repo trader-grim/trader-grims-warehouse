@@ -2869,7 +2869,7 @@ def dashboard() -> Dict[str, Any]:
             result["pending_offers"] = _pending_offers_cache
         except Exception as exc:
             _raw = str(exc)
-            if '429' in _raw or '21919188' in _raw:
+            if '429' in _raw or '21919188' in _raw or 'rate' in _raw.lower():
                 log.warning("dashboard: GetBestOffers rate limited — suppressing: %s", exc)
                 _pending_offers_cache = 0
             else:
@@ -3444,17 +3444,11 @@ async function loadLimits() {{
     var d = await r.json();
     if (!d || !d.ok || !d.limits) return;
     var l = d.limits;
-    var bar = document.getElementById('rate-limit-bar');
+    var bar = document.getElementById('rl-bar');
     if (!bar) return;
-    var dPct = l.daily_limit > 0 ? l.daily_used / l.daily_limit : 0;
-    var hPct = l.hourly_limit > 0 ? l.hourly_used / l.hourly_limit : 0;
-    var warnCls = (dPct > 0.8 || hPct > 0.8) ? ' rl-warn' : '';
-    bar.innerHTML = 'API Budget — GetBestOffers: '
-      + '<strong class="' + warnCls + '">' + l.daily_used + '/' + l.daily_limit + '</strong>'
-      + ' calls today, '
-      + '<strong class="' + warnCls + '">' + l.hourly_used + '/' + l.hourly_limit + '</strong>'
-      + ' this hour';
-    bar.classList.add('visible');
+    bar.textContent = 'GetBestOffers: ' + l.daily_used + '/' + l.daily_limit
+      + ' calls today \u00b7 ' + l.hourly_used + '/' + l.hourly_limit + ' this hour';
+    bar.classList.add('loaded');
   }} catch(e) {{ /* hide silently */ }}
 }}
 
