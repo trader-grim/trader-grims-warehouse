@@ -226,6 +226,68 @@ class PipelineJob {
   }
 }
 
+class ReviewQueueItem {
+  final String sku;
+  final String title;
+  final String location;
+  final String status;
+  final double? price;
+  final String condition;
+  final String conditionLabel;
+  final String conditionDescription;
+  final String categoryId;
+  final String categoryName;
+  final String shippingProfile;
+  final Map<String, dynamic> quality;
+  final int? aspectsRequiredTotal;
+  final int? aspectsRequiredFilled;
+
+  ReviewQueueItem({
+    required this.sku,
+    required this.title,
+    required this.location,
+    required this.status,
+    this.price,
+    required this.condition,
+    required this.conditionLabel,
+    required this.conditionDescription,
+    required this.categoryId,
+    required this.categoryName,
+    required this.shippingProfile,
+    required this.quality,
+    this.aspectsRequiredTotal,
+    this.aspectsRequiredFilled,
+  });
+
+  factory ReviewQueueItem.fromJson(Map<String, dynamic> json) {
+    return ReviewQueueItem(
+      sku: json['sku'] ?? '',
+      title: json['title'] ?? '',
+      location: json['location'] ?? '',
+      status: json['status'] ?? '',
+      price: (json['price'] as num?)?.toDouble(),
+      condition: json['condition'] ?? '',
+      conditionLabel: json['condition_label'] ?? '',
+      conditionDescription: json['condition_description'] ?? '',
+      categoryId: json['category_id'] ?? '',
+      categoryName: json['category_name'] ?? '',
+      shippingProfile: json['shipping_profile'] ?? '',
+      quality: (json['quality'] as Map?)?.cast<String, dynamic>() ?? {},
+      aspectsRequiredTotal: json['aspects_required_total'] as int?,
+      aspectsRequiredFilled: json['aspects_required_filled'] as int?,
+    );
+  }
+
+  int? get qualityScore => quality['score'] as int?;
+
+  String get aspectsSummary {
+    final total = aspectsRequiredTotal;
+    final filled = aspectsRequiredFilled;
+    if (total == null || filled == null) return '';
+    return '$filled/$total req.';
+  }
+}
+
 class CategoryGroup {
   final String name;
   final String? sizeClass;

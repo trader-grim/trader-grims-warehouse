@@ -2653,6 +2653,9 @@ _DRAFT_LISTING = {
     "category_name": "Widgets",
     "condition": "Used - Good",
     "condition_id": 3000,
+    "condition_label": "Used",
+    "description": "Minor scuff on the base, otherwise excellent.",
+    "shipping_profile": "standard",
     "price": 14.99,
     "aspects_required_total": 3,
     "aspects_required_filled": 3,
@@ -2801,6 +2804,72 @@ def test_nav_review_badge_span_present(client):
     r = client.get("/static/nav.js")
     assert r.status_code == 200
     assert "nav-review-count" in r.text
+
+
+def test_review_queue_returns_condition_label_and_description(env):
+    """Review-queue items include condition_label, condition_description, shipping_profile."""
+    doc = _write_item_with_draft(env["itemdata_root"], SKU_A, _DRAFT_LISTING)
+    _seed_catalog_with_data(env["cfg"]["sqlite_catalog_path"], SKU_A, doc)
+
+    client = env["client"]
+    r = client.get("/api/items/review-queue", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    item = r.json()["items"][0]
+    assert item["condition_label"] == "Used"
+    assert item["condition_description"] == "Minor scuff on the base, otherwise excellent."
+    assert item["shipping_profile"] == "standard"
+
+
+def test_bulk_approve_sets_status_ready(env, monkeypatch):
+    """POST /api/bulk/action approve sets status=Ready on each SKU."""
+    monkeypatch.setattr(http_server.state_machine, "enqueue_job", lambda *a, **k: "job-fake")
+
+    _write_item_with_draft(env["itemdata_root"], SKU_A, _DRAFT_LISTING)
+    _write_item_with_draft(env["itemdata_root"], SKU_B, _DRAFT_LISTING)
+
+    client = env["client"]
+    r = client.post(
+        "/api/bulk/action",
+        json={"skus": [SKU_A, SKU_B], "action": "approve"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["count"] == 2
+
+    for sku in (SKU_A, SKU_B):
+        json_path = env["itemdata_root"] / sku / f"{sku}.json"
+        doc = json.loads(json_path.read_text(encoding="utf-8"))
+        assert doc["status"] == "Ready"
+
+
+def test_bulk_list_now_sets_ready_and_enqueues_stage(env, monkeypatch):
+    """POST /api/bulk/action list_now sets status=Ready and enqueues ebay_stage."""
+    enqueued = []
+    monkeypatch.setattr(
+        http_server.state_machine,
+        "enqueue_job",
+        lambda queue_name, **kw: enqueued.append(queue_name) or "job-fake",
+    )
+
+    _write_item_with_draft(env["itemdata_root"], SKU_A, _DRAFT_LISTING)
+
+    client = env["client"]
+    r = client.post(
+        "/api/bulk/action",
+        json={"skus": [SKU_A], "action": "list_now"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["count"] == 1
+
+    json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert doc["status"] == "Ready"
+    assert "ebay_stage" in enqueued
 
 
 # ---------------------------------------------------------------------------

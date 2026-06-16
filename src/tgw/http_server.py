@@ -370,8 +370,11 @@ def get_review_queue() -> Dict[str, Any]:
                 "status": row["status"] or "",
                 "price": draft.get("price") if draft.get("price") is not None else row["price"],
                 "condition": draft.get("condition") or doc.get("condition") or "",
+                "condition_label": draft.get("condition_label") or "",
+                "condition_description": draft.get("description") or "",
                 "category_id": draft.get("category_id") or doc.get("ebay_category_id") or "",
                 "category_name": draft.get("category_name") or doc.get("ebay_category_name") or "",
+                "shipping_profile": draft.get("shipping_profile") or doc.get("shipping_profile") or "",
                 "quality": draft.get("quality") or {},
                 "aspects_required_total": draft.get("aspects_required_total"),
                 "aspects_required_filled": draft.get("aspects_required_filled"),
@@ -541,7 +544,7 @@ def bulk_apply(body: BulkBody) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 _BULK_PIPELINE_ACTIONS = {"ai_identify", "ebay_price", "ebay_draft", "ebay_stage", "ebay_upload"}
-_BULK_VALID_ACTIONS = _BULK_PIPELINE_ACTIONS | {"set_ready", "mark_sold", "delete"}
+_BULK_VALID_ACTIONS = _BULK_PIPELINE_ACTIONS | {"set_ready", "mark_sold", "delete", "approve", "list_now"}
 
 
 @app.post("/api/bulk/action", dependencies=[AUTH])
@@ -549,8 +552,9 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
     """Fan out an action across a list of SKUs.
 
     Actions: ai_identify, ebay_price, ebay_draft, ebay_stage, set_ready,
-    mark_sold, delete. Pipeline actions enqueue jobs; set_ready / mark_sold /
-    delete write item JSON and enqueue a catalog rebuild.
+    mark_sold, delete, approve, list_now. Pipeline actions enqueue jobs;
+    set_ready / mark_sold / delete / approve write item JSON and enqueue a
+    catalog rebuild. list_now approves and immediately enqueues ebay_stage.
     """
     if body.action not in _BULK_VALID_ACTIONS:
         raise HTTPException(
@@ -563,6 +567,46 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
     if body.action == "set_ready":
         from .ready import set_ready
         return set_ready(_cfg, body.skus)
+
+    if body.action in ("approve", "list_now"):
+        done: List[str] = []
+        errors: List[str] = []
+        for sku in body.skus:
+            json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+            if not json_path.exists():
+                errors.append(f"{sku}: not found")
+                continue
+            try:
+                doc = load_item_doc(json_path)
+                doc["status"] = "Ready"
+                atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+                done.append(sku)
+            except Exception as exc:
+                errors.append(f"{sku}: {exc}")
+                continue
+            if body.action == "list_now":
+                try:
+                    state_machine.enqueue_job(
+                        queue_name="ebay_stage",
+                        payload={"sku": sku},
+                        dedupe_key=f"ebay_stage:{sku}",
+                        max_attempts=5,
+                    )
+                except Exception as exc:
+                    err = str(exc)
+                    if "unique" not in err.lower() and "duplicate" not in err.lower():
+                        errors.append(f"{sku} (stage): {err}")
+        try:
+            state_machine.enqueue_job(
+                queue_name="catalog_rebuild",
+                payload={"reason": f"bulk_{body.action}"},
+                dedupe_key="catalog_rebuild:pending",
+                not_before=time.time() + 30,
+                max_attempts=3,
+            )
+        except Exception:
+            pass
+        return {"ok": bool(done), "count": len(done), "done": done, "errors": errors}
 
     if body.action in ("mark_sold", "delete"):
         new_status = "Sold" if body.action == "mark_sold" else "deleted"

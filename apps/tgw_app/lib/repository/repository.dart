@@ -95,6 +95,11 @@ class TgwRepository {
     return response.ok ? response.data : null;
   }
 
+  Future<List<ReviewQueueItem>> getReviewQueue() async {
+    final response = await apiClient.getReviewQueue();
+    return response.data ?? [];
+  }
+
   Future<Map<String, dynamic>?> bulkAction(List<String> skus, String action) async {
     final response = await apiClient.bulkAction(skus, action);
     return response.ok ? response.data : null;

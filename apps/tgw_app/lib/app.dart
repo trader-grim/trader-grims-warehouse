@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'features/home/home_screen.dart';
 import 'features/browse/browse_screen.dart';
 import 'features/item/item_screen.dart';
+import 'features/review/review_queue_screen.dart';
 import 'features/settings/settings_screen.dart';
 import 'providers/providers.dart';
 
@@ -26,7 +27,7 @@ class _MainShellState extends ConsumerState<MainShell> {
   void _openItem(String sku) {
     setState(() {
       _selectedSku = sku;
-      _selectedIndex = 2; // Item tab
+      _selectedIndex = 3; // Item tab
     });
   }
 
@@ -37,6 +38,7 @@ class _MainShellState extends ConsumerState<MainShell> {
     final List<Widget> screens = [
       HomeScreen(onSkuLookup: _openItem),
       BrowseScreen(onItemTap: _openItem),
+      ReviewQueueScreen(onItemTap: _openItem),
       ItemScreen(sku: _selectedSku),
       const SettingsScreen(),
     ];
@@ -65,6 +67,7 @@ class _MainShellState extends ConsumerState<MainShell> {
         destinations: const [
           NavigationDestination(icon: Icon(Icons.home), label: 'Home'),
           NavigationDestination(icon: Icon(Icons.grid_view), label: 'Browse'),
+          NavigationDestination(icon: Icon(Icons.rate_review_outlined), label: 'Review'),
           NavigationDestination(icon: Icon(Icons.inventory_2), label: 'Item'),
           NavigationDestination(icon: Icon(Icons.settings), label: 'Settings'),
         ],

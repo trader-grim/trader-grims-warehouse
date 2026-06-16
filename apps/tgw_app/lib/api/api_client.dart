@@ -192,6 +192,23 @@ class ApiClient {
     }
   }
 
+  Future<ApiResponse<List<ReviewQueueItem>>> getReviewQueue() async {
+    await ensureInitialized();
+    try {
+      final response = await _dio.get('/api/items/review-queue');
+      if (response.statusCode == 200) {
+        final List<dynamic> items = response.data['items'] ?? [];
+        return ApiResponse(
+          ok: true,
+          data: items.map((j) => ReviewQueueItem.fromJson(j as Map<String, dynamic>)).toList(),
+        );
+      }
+      return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
+    } catch (e) {
+      return ApiResponse(ok: false, error: e.toString());
+    }
+  }
+
   Future<ApiResponse<List<dynamic>>> getHintTrail(String sku) async {
     await ensureInitialized();
     try {
