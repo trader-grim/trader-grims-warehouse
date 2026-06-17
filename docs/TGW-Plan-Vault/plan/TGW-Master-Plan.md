@@ -4043,6 +4043,79 @@ for backward compatibility.
   - New photos get full vision scan; merge into `vision_results`
   - Estimated cost: ~$0.001/photo on Gemini Flash; 50k items × 5 avg photos = ~$250 one-time
 
+### Provenance weighting and derivation engine
+
+Evidence is collected from multiple sources. The derivation engine assigns weights by source
+authority and picks the winner for each field. Vision data and operator data are fully decoupled:
+scanning can run (or re-run) independently of derivation, and derivation can re-run independently
+of scanning.
+
+**Source weight hierarchy (highest → lowest):**
+
+| Weight | Source | Examples |
+|--------|--------|---------|
+| 100 | Operator direct entry | Editor form save, `tgw update title` |
+| 90 | Operator hint | `SETTEMPLATE:`, `ai_hint` field, `tgw hint` command |
+| 80 | Authoritative product DB | Discogs barcode match, Open Library ISBN, IGDB, UPCItemDB |
+| 60 | Vision scan — enriched | Model saw photo + product DB context |
+| 50 | Vision scan — hinted | Model saw photo + operator hint |
+| 30 | Vision scan — plain | Model saw photo only |
+| 10 | Category default / fallback | ebay_draft assumed value for unfilled required aspect |
+
+**Conflict resolution:** When two sources disagree on a field, the higher-weight source wins.
+A weight-80 Discogs result overrides a weight-30 plain vision result for `brand`. An operator
+direct-entry at weight-100 overrides everything and is never touched by re-derivation.
+
+**Derivation is a separate pass:** After evidence is collected (scans, lookups), the derivation
+engine walks every required field, collects all evidence with weights, picks the winner, and
+writes the derived value along with its provenance:
+
+```json
+"derived": {
+  "title": {
+    "value": "Junior M.A.F.I.A. — Get Money The Remix Cassette Single",
+    "source": "vision/enriched",
+    "weight": 60,
+    "from_scan": "vision_results[1]",
+    "derived_at": "ISO"
+  },
+  "brand": {
+    "value": "Big Beat Records",
+    "source": "product_lookup/discogs",
+    "weight": 80,
+    "derived_at": "ISO"
+  }
+}
+```
+
+**Deficiency detection:** After derivation, the engine checks each required field:
+- Missing → deficiency (no evidence at all)
+- Low-weight winner (≤30) → candidate for improvement
+- Conflicting sources within 10 weight points of each other → flag for review
+
+Detected deficiencies go to a patch queue. Patches are targeted jobs:
+- "no barcode lookup yet" → enqueue product_lookup
+- "only plain vision scan, product found" → re-enqueue ai_identify with enriched prompt
+- "required aspect unfilled" → flag for operator attention in editor
+
+**Parallel execution:** Because scan ≠ derive, all photos can be scanned concurrently while
+derivation waits. When all scans for an item are complete, derivation runs once and produces
+the best possible values from the full evidence set. If a new scan arrives later (operator
+adds a photo), derivation re-runs only on the affected item.
+
+**Improvement loop:**
+```
+photos → [scan workers, parallel] → vision_results[]
+barcodes → [lookup workers] → product_lookup.raw
+operator entries → directly written at weight 100
+all evidence → [derivation engine] → derived{}
+derived{} → [deficiency detector] → patch_queue[]
+patch_queue[] → targeted re-scan or re-lookup
+```
+
+This means the listing quality improves automatically as better evidence arrives, without
+any pipeline re-runs or manual intervention beyond the initial patch queue drain.
+
 ### Research and refinement gate
 
 Existing research in `docs/TGW-Plan-Vault/dev-workflow/research/` covers model selection and
