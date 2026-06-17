@@ -16,6 +16,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List
 
+import tgw.config as config
 from tgw.apis.ebay.client import ebay_put
 
 log = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ def _repush_one(cfg: Dict[str, Any], sku: str, *, dry_run: bool = False) -> Dict
 
     Returns a result dict with keys: sku, ok, skipped (bool), reason (str on skip/error).
     """
-    json_path: Path = cfg['itemdata_root'] / sku / f'{sku}.json'
+    json_path: Path = config.sku_json(cfg, sku)
     if not json_path.exists():
         return {'sku': sku, 'ok': False, 'skipped': False, 'reason': 'item JSON not found'}
 
@@ -83,9 +84,8 @@ def cmd_ebay_repush(
     target_skus: List[str] = []
 
     if all_listed:
-        root: Path = cfg['itemdata_root']
         for sku in iter_all_skus(cfg):
-            jf = root / sku / f'{sku}.json'
+            jf = config.sku_json(cfg, sku)
             try:
                 doc = json.loads(jf.read_text(encoding='utf-8'))
             except Exception:

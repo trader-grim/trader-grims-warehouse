@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
+import tgw.config as config
 import tgw.logging as tgw_logging
 from tgw.apis.ebay.client import ebay_put
 from tgw.config import DEFAULT_CONFIG, load_config
@@ -36,7 +37,7 @@ class EbayRepushWorker(QueueWorker):
         if not sku:
             raise HardFailure('ebay_repush job missing sku in payload')
 
-        json_path = self.config['itemdata_root'] / sku / f'{sku}.json'
+        json_path = config.sku_json(self.config, sku)
         if not json_path.exists():
             raise HardFailure(f'item JSON not found for {sku}')
 
