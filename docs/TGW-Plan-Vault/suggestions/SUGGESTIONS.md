@@ -227,3 +227,5 @@
 - [x] 2026-06-15T17:50 :: add tgw specific skills. see research doc — added as claude todo #890 (PP-MULTIMODEL-001: create TGW-specific Claude Code skills: tgw-plan, tgw-aider-step, tgw-pr-review; see Perplexity research doc moved to processed/ 2026-06-15)
 - [x] 2026-06-15T19:50 :: anthropic key now in secrets/anthropic-credentials.json, task — added as claude todo #889 (PP-MULTIMODEL-001: configure Aider with Anthropic key — ~/.aider.conf.yml + ANTHROPIC_API_KEY export in tgw.source); .aider.conf.yml created + tgw.source updated 2026-06-15 session 33
 - [x] 2026-06-15T19:53 :: task 105 completed — marked todo #105 done (Round7: Add dev_id to ebay-credentials.json)
+- [ ] 2026-06-17T03:54 :: we should add an option to add alt-text to additional photos, or maybe even just put it on all of them. Books benefit a lot from back cover, table of contents, copyright page, even condition revealing photos. We can use all that data to improve our item data. e.g. tgw202605060125081 would havea better description if we looked at the other side which says 50th richmond high school reunion 2010
+
