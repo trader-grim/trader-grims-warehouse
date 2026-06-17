@@ -26,10 +26,14 @@ class LookupResult:
     extra:      Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        """Serialisable dict for storage in item JSON (extra excluded)."""
+        """Serialisable dict for storage in item JSON under product_lookup.
+        extra is stored as product_lookup.raw — full API response preserved."""
         d = asdict(self)
-        d.pop('extra', None)
-        return {k: v for k, v in d.items() if v is not None and v != ''}
+        raw = d.pop('extra', None) or {}
+        result = {k: v for k, v in d.items() if v is not None and v != ''}
+        if raw:
+            result['raw'] = raw
+        return result
 
     def prompt_context(self) -> str:
         """Compact one-line string for injection into AI prompts."""

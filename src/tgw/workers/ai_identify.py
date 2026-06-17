@@ -16,8 +16,9 @@ import io
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import psycopg2.errors
 
@@ -200,6 +201,7 @@ class AIIdentifyWorker(QueueWorker):
         img_hash = compute_dhash(img_path)
         cached_result = lookup_hash(img_hash, "ai_identify") if img_hash else None
 
+        raw: Optional[str] = None
         if cached_result is not None:
             log.info("ai_identify: cache hit for %s (phash %s)", sku, img_hash)
             tgw_logging.log_event("ai_identify_cache_hit", sku=sku, phash=img_hash)
@@ -278,6 +280,29 @@ class AIIdentifyWorker(QueueWorker):
                 "ebay_category_id": ebay_category_id,
             },
         )
+
+        # Append full scan record to vision_results[] — raw response is the permanent asset.
+        # Re-scans append; they never replace prior entries. Derivation reads this list.
+        scanned_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        vision_record: Dict[str, Any] = {
+            "photo":          img_path.name,
+            "photo_hash":     img_hash or "",
+            "model":          f"{provider}/{model}",
+            "prompt_type":    prompt_type,
+            "prompt_context": product_context or hint or "",
+            "scanned_at":     scanned_at,
+            "extracted": {
+                "title":       title,
+                "category":    category,
+                "description": description,
+                "condition":   condition,
+            },
+        }
+        if raw is not None:
+            vision_record["raw_response"] = raw
+        vision_results: List[Dict[str, Any]] = item.get("vision_results") or []
+        vision_results.append(vision_record)
+        item["vision_results"] = vision_results
 
         atomic_write_json(json_path, item, pretty=self.config.get("pretty", True))
 
