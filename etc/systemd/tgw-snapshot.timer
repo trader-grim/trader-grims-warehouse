@@ -1,0 +1,10 @@
+[Unit]
+Description=TGW /opt/TGW hourly snapshot timer (PP-BACKUP-001)
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

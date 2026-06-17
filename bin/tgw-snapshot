@@ -1,0 +1,50 @@
+#!/bin/bash
+# PP-BACKUP-001 — periodic rsync snapshot of /opt/TGW → /home/snapshot/TGW-SNAPSHOT-0
+#
+# Layout on TGW-SNAPSHOT-0 (sda7, btrfs):
+#   @current/          ← mutable rsync target (btrfs subvolume, created on first run)
+#   YYYYMMDDTHHMM/    ← read-only btrfs snapshots, auto-pruned to SNAP_KEEP
+#
+# Runs as root (btrfs subvolume create/snapshot/delete require CAP_SYS_ADMIN).
+# Installed as: tgw-snapshot.service + tgw-snapshot.timer (hourly)
+set -euo pipefail
+
+SNAP_ROOT="/home/snapshot/TGW-SNAPSHOT-0"
+CURRENT="${SNAP_ROOT}/@current"
+SNAP_KEEP=48
+LOG=/opt/TGW/var/log/tgw-snapshot.log
+STAMP="$(date +%Y%m%dT%H%M)"
+
+log() { echo "$(date -Iseconds) $*" >> "$LOG"; }
+
+if ! mountpoint -q "$SNAP_ROOT"; then
+    log "ERROR: ${SNAP_ROOT} is not mounted — aborting"
+    exit 1
+fi
+
+if [ ! -d "$CURRENT" ]; then
+    btrfs subvolume create "$CURRENT" >> "$LOG" 2>&1
+    log "created @current subvolume"
+fi
+
+log "start stamp=${STAMP}"
+
+rsync -aHAX --delete \
+    --exclude=/opt/TGW/var/local/backups/ \
+    --exclude=/opt/TGW/data/history/ \
+    /opt/TGW/ "$CURRENT/"
+
+sync
+
+btrfs subvolume snapshot -r "$CURRENT" "${SNAP_ROOT}/${STAMP}" >> "$LOG" 2>&1
+
+# Prune: keep last SNAP_KEEP read-only snapshots (named YYYYMMDDTHHMM)
+ls -1dt "${SNAP_ROOT}"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9]/ 2>/dev/null \
+    | sed 's|/$||' \
+    | tail -n "+$((SNAP_KEEP + 1))" \
+    | while read -r old; do
+        btrfs subvolume delete "$old" >> "$LOG" 2>&1
+        log "pruned ${old}"
+    done
+
+log "done stamp=${STAMP}"

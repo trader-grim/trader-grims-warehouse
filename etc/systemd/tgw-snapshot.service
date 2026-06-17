@@ -1,0 +1,7 @@
+[Unit]
+Description=TGW /opt/TGW snapshot → /home/snapshot/TGW-SNAPSHOT-0 (PP-BACKUP-001)
+RequiresMountsFor=/home/snapshot/TGW-SNAPSHOT-0
+
+[Service]
+Type=oneshot
+ExecStart=/opt/TGW/src/trader-grims-warehouse/bin/tgw-snapshot
