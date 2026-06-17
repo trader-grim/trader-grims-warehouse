@@ -1,26 +1,32 @@
 """
-tgw.ebay.pull — shared helpers for Trading API active-listing and sold-order sync.
+tgw.ebay.pull — eBay data pull: Trading API active/sold sync + Inventory API full mirror.
 
 Used by both the ebay_legacy_sync worker (scheduled daily) and the `tgw ebay-pull`
 CLI command (on-demand).
 
 Public API:
-    build_listing_index(itemdata_root)              → {listing_id: json_path}
-    mark_item_sold(json_path, ...)                  → bool (True if newly marked)
-    sync_active_listings(cfg, itemdata_root, ...)   → stats dict
-    sync_sold_orders(cfg, listing_index, ...)       → stats dict
+    build_listing_index(itemdata_root)                          → {listing_id: json_path}
+    mark_item_sold(json_path, ...)                              → bool (True if newly marked)
+    sync_active_listings(cfg, itemdata_root, ...)               → stats dict
+    sync_sold_orders(cfg, listing_index, ...)                   → stats dict
+    sync_inventory_api(cfg, itemdata_root, ...)                 → stats dict
+    backfill_draft_from_live(item, cfg)                         → bool (True if draft written)
 """
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Generator, List, Optional, Set, Tuple
 
+import tgw.config as config
 import tgw.logging as tgw_logging
+from tgw.apis.ebay.client import ebay_get
 from tgw.apis.ebay.trading import get_my_ebay_selling, get_orders
 from tgw.items import atomic_write_json
 
@@ -488,4 +494,297 @@ def sync_sold_orders(cfg: Dict[str, Any], listing_index: Dict[str, Path],
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text(json.dumps({'last_synced_at': now.isoformat()}, indent=2))
 
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# Inventory API full mirror
+# ---------------------------------------------------------------------------
+
+_HTML_TAG_RE  = re.compile(r'<[^>]+>')
+_WHITESPACE   = re.compile(r'\s+')
+
+# Inventory API condition enum → conditionId
+_ENUM_TO_CONDITION_ID: Dict[str, str] = {
+    'NEW':                        '1000',
+    'NEW_OTHER':                  '1500',
+    'NEW_WITH_DEFECTS':           '1750',
+    'CERTIFIED_REFURBISHED':      '2000',
+    'EXCELLENT_REFURBISHED':      '2010',
+    'VERY_GOOD_REFURBISHED':      '2020',
+    'GOOD_REFURBISHED':           '2030',
+    'SELLER_REFURBISHED':         '2500',
+    'LIKE_NEW':                   '2750',
+    'USED_EXCELLENT':             '3000',
+    'USED_VERY_GOOD':             '4000',
+    'USED_GOOD':                  '5000',
+    'USED_ACCEPTABLE':            '6000',
+    'FOR_PARTS_OR_NOT_WORKING':   '7000',
+}
+
+
+def _strip_html(raw: str) -> str:
+    """Strip HTML tags and decode entities; collapse whitespace."""
+    text = _HTML_TAG_RE.sub(' ', raw or '')
+    text = html.unescape(text)
+    return _WHITESPACE.sub(' ', text).strip()
+
+
+def iter_inventory_api_items(
+    cfg: Dict[str, Any],
+    limit: int = 100,
+) -> Generator[Dict[str, Any], None, None]:
+    """
+    Paginate through all eBay Inventory API items.
+    Yields raw inventory-item dicts from the eBay response.
+    """
+    offset = 0
+    total: Optional[int] = None
+    while True:
+        resp = ebay_get(cfg, f'/sell/inventory/v1/inventory_item?limit={limit}&offset={offset}')
+        items = resp.get('inventoryItems', [])
+        if total is None:
+            total = resp.get('total', 0)
+            log.info('ebay_pull: Inventory API reports %d items total', total)
+        if not items:
+            break
+        yield from items
+        offset += limit
+        if offset >= (total or 0):
+            break
+
+
+def fetch_offer_for_sku(cfg: Dict[str, Any], sku: str) -> Optional[Dict[str, Any]]:
+    """
+    Fetch the current eBay offer for a single SKU.
+    Returns the first offer dict or None.
+    """
+    try:
+        resp = ebay_get(cfg, f'/sell/inventory/v1/offer?sku={sku}')
+        offers = resp.get('offers', [])
+        return offers[0] if offers else None
+    except Exception as exc:
+        log.debug('ebay_pull: offer fetch failed for %s: %s', sku, exc)
+        return None
+
+
+def apply_ebay_live(
+    item: Dict[str, Any],
+    *,
+    inventory_item: Optional[Dict[str, Any]] = None,
+    offer: Optional[Dict[str, Any]] = None,
+    synced_at: str,
+) -> bool:
+    """
+    Merge Inventory API data into item['ebay_live']. Returns True if anything changed.
+    """
+    ebay_live = item.get('ebay_live') or {}
+    changed = False
+
+    if inventory_item is not None:
+        ebay_live['inventory_item'] = inventory_item
+        changed = True
+
+    if offer is not None:
+        ebay_live['offer'] = offer
+        changed = True
+
+    if changed:
+        ebay_live['pulled_at'] = synced_at
+        item['ebay_live'] = ebay_live
+
+    return changed
+
+
+def backfill_draft_from_live(item: Dict[str, Any], cfg: Dict[str, Any]) -> bool:
+    """
+    Populate item['draft_listing'] from item['ebay_live'] data.
+
+    Rules:
+    - Only creates draft if ebay_live is present.
+    - If draft_listing already exists and source != 'ebay_live', does NOT overwrite
+      (operator may have manually edited it).
+    - Returns True if draft_listing was written.
+    """
+    live = item.get('ebay_live') or {}
+    if not live:
+        return False
+
+    existing_draft = item.get('draft_listing') or {}
+    if existing_draft and existing_draft.get('source') != 'ebay_live':
+        return False
+
+    inv    = live.get('inventory_item') or {}
+    offer  = live.get('offer') or {}
+    product = inv.get('product') or {}
+
+    title           = product.get('title', '')
+    aspects_raw     = product.get('aspects', {})
+    image_urls      = product.get('imageUrls', [])
+    upc             = product.get('upc', [])
+    condition_enum  = inv.get('condition', '')
+    cond_desc       = inv.get('conditionDescription', '')
+    condition_id    = _ENUM_TO_CONDITION_ID.get(condition_enum, '')
+
+    listing_desc_html = offer.get('listingDescription', '')
+    listing_desc_text = _strip_html(listing_desc_html)
+    price_info      = offer.get('pricingSummary', {}).get('price', {})
+    price           = price_info.get('value', '')
+    category_id     = offer.get('categoryId', '')
+    offer_id        = offer.get('offerId', '')
+    policies        = offer.get('listingPolicies', {})
+    fulfillment_id  = policies.get('fulfillmentPolicyId', '')
+    payment_id      = policies.get('paymentPolicyId', '')
+    return_id       = policies.get('returnPolicyId', '')
+    store_cats      = offer.get('storeCategoryNames', [])
+    qty_avail       = (inv.get('availability', {})
+                          .get('shipToLocationAvailability', {})
+                          .get('quantity', 1))
+    listing_info    = offer.get('listing', {})
+    listing_id      = listing_info.get('listingId', '')
+
+    # item_specifics: flatten aspects {name: [val1, val2]} → {name: 'val1'}
+    item_specifics: Dict[str, str] = {
+        k: v[0] if v else '' for k, v in aspects_raw.items()
+    }
+
+    draft: Dict[str, Any] = {
+        'source':           'ebay_live',
+        'title':            title,
+        'category_id':      category_id,
+        'category_name':    item.get('ebay_category_name', ''),
+        'condition':        condition_enum,
+        'condition_id':     condition_id,
+        'condition_description': cond_desc,
+        'format':           'FixedPrice',
+        'quantity':         qty_avail,
+        'price':            price,
+        'item_specifics':   item_specifics,
+        'description':      listing_desc_text,
+        'listing_description': listing_desc_html,
+        'image_urls':       image_urls,
+        'upc':              upc,
+        'fulfillment_policy_id': fulfillment_id,
+        'payment_policy_id':     payment_id,
+        'return_policy_id':      return_id,
+        'store_category_names':  store_cats,
+    }
+    if offer_id:
+        draft['offer_id'] = offer_id
+    if listing_id:
+        draft['listing_id'] = listing_id
+
+    # Preserve aspect counts if they exist in current draft
+    for k in ('aspects_required_total', 'aspects_required_filled',
+              'aspects_recommended_total', 'aspects_recommended_filled'):
+        if existing_draft.get(k) is not None:
+            draft[k] = existing_draft[k]
+
+    item['draft_listing'] = draft
+    return True
+
+
+def sync_inventory_api(
+    cfg: Dict[str, Any],
+    itemdata_root: Path,
+    synced_at: str,
+    *,
+    dry_run: bool = False,
+    sku_filter: Optional[Set[str]] = None,
+    skip_offers: bool = False,
+    skip_draft: bool = False,
+    rate_limit_sleep: float = 0.05,
+) -> Dict[str, Any]:
+    """
+    Full Inventory API mirror: pull every inventory item + its offer,
+    write to ebay_live in item JSON, then backfill draft_listing.
+
+    skip_offers: only pull inventory items (much faster; no price/description)
+    skip_draft:  don't backfill draft_listing
+    rate_limit_sleep: seconds to sleep between offer API calls (default 50ms)
+    """
+    stats: Dict[str, Any] = {
+        'inventory_fetched': 0,
+        'matched': 0,
+        'unmatched': 0,
+        'offers_fetched': 0,
+        'offer_errors': 0,
+        'drafts_written': 0,
+        'errors': 0,
+    }
+
+    for inv_item in iter_inventory_api_items(cfg):
+        sku = inv_item.get('sku', '')
+        if not sku:
+            continue
+
+        stats['inventory_fetched'] += 1
+
+        if sku_filter is not None and sku not in sku_filter:
+            continue
+
+        jf = config.sku_json(cfg, sku)
+        if not jf.exists():
+            log.debug('ebay_pull: no local item for sku=%s (Inventory API)', sku)
+            stats['unmatched'] += 1
+            continue
+
+        stats['matched'] += 1
+
+        if dry_run:
+            log.info('[dry-run] would sync inventory_item for %s', sku)
+            continue
+
+        try:
+            item = json.loads(jf.read_text(encoding='utf-8'))
+        except Exception as exc:
+            log.error('ebay_pull: JSON parse error for %s: %s', sku, exc)
+            stats['errors'] += 1
+            continue
+
+        offer: Optional[Dict[str, Any]] = None
+        if not skip_offers:
+            offer = fetch_offer_for_sku(cfg, sku)
+            if offer is not None:
+                stats['offers_fetched'] += 1
+            else:
+                stats['offer_errors'] += 1
+            if rate_limit_sleep > 0:
+                time.sleep(rate_limit_sleep)
+
+        apply_ebay_live(item, inventory_item=inv_item, offer=offer, synced_at=synced_at)
+
+        if not skip_draft:
+            if backfill_draft_from_live(item, cfg):
+                stats['drafts_written'] += 1
+
+        # Also keep ebay_listing in sync with what we now know
+        if offer:
+            listing_info = offer.get('listing', {})
+            if listing_info.get('listingId'):
+                ebay_listing = item.get('ebay_listing') or {}
+                ebay_listing['listing_id']    = listing_info['listingId']
+                ebay_listing['listing_url']   = (
+                    f'https://www.ebay.com/itm/{listing_info["listingId"]}'
+                )
+                ebay_listing['listing_status'] = listing_info.get('listingStatus', '')
+                ebay_listing['offer_id']       = offer.get('offerId', '')
+                if offer.get('status') == 'PUBLISHED':
+                    ebay_listing['status'] = 'Active'
+                elif offer.get('status') == 'UNPUBLISHED':
+                    ebay_listing.setdefault('status', 'Inactive')
+                ebay_listing['api']       = 'inventory'
+                ebay_listing['synced_at'] = synced_at
+                item['ebay_listing'] = ebay_listing
+
+        atomic_write_json(jf, item, pretty=cfg.get('pretty', True))
+
+        if stats['inventory_fetched'] % 500 == 0:
+            log.info('ebay_pull: progress %d inventory items processed, %d matched, %d drafts',
+                     stats['inventory_fetched'], stats['matched'], stats['drafts_written'])
+
+    log.info('ebay_pull: inventory sync complete — %s', stats)
+    tgw_logging.log_event('ebay_inventory_sync_complete', **{
+        k: v for k, v in stats.items() if isinstance(v, (int, float))
+    })
     return stats

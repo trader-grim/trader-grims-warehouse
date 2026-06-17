@@ -711,9 +711,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fuzzy", action="store_true", help="second pass: match unresolved rows by title similarity")
     p.add_argument("--fuzzy-threshold", type=float, default=0.80, metavar="N", help="Jaccard similarity threshold for title match (default 0.80)")
 
-    p = sub.add_parser("ebay-pull", help="on-demand eBay data pull: active listings + sold orders → ItemData")
-    p.add_argument("--no-active", action="store_true", help="skip active listing sync")
+    p = sub.add_parser("ebay-pull", help="on-demand eBay data pull: full Inventory API mirror + Trading API sync → ItemData")
+    p.add_argument("--no-inventory", action="store_true", help="skip Inventory API full mirror (title/aspects/images/description/price)")
+    p.add_argument("--no-active", action="store_true", help="skip Trading API active listing sync (legacy/non-inventory items)")
     p.add_argument("--no-sold", action="store_true", help="skip sold orders sync")
+    p.add_argument("--no-draft", action="store_true", help="skip draft_listing backfill from pulled data")
+    p.add_argument("--skip-offers", action="store_true", help="Inventory API: skip per-SKU offer fetch (faster but no price/description)")
     p.add_argument("--dry-run", action="store_true", help="show what would change without writing")
     p.add_argument("--sku", nargs="+", metavar="SKU", help="sync only these SKUs")
     p.add_argument("--location", default=None, metavar="LOC", help="sync only items at this location")
@@ -4022,7 +4025,12 @@ def main() -> int:
                         pass
 
         elif args.op == "ebay-pull":
-            from .ebay.pull import build_listing_index, sync_active_listings, sync_sold_orders
+            from .ebay.pull import (
+                build_listing_index,
+                sync_active_listings,
+                sync_inventory_api,
+                sync_sold_orders,
+            )
             from .queue import state_machine as _sm
             from .workers.ebay_legacy_sync import _sold_state_path
 
@@ -4056,9 +4064,38 @@ def main() -> int:
                     sku_filter = candidate_skus
                 print(f"  Filter active: {len(sku_filter)} SKU(s) selected")
 
+            # --- Phase 1: Inventory API full mirror ---
+            inv_stats: Dict[str, Any] = {}
+            if not getattr(args, 'no_inventory', False):
+                skip_offers = getattr(args, 'skip_offers', False)
+                skip_draft  = getattr(args, 'no_draft', False)
+                print(
+                    "Pulling full Inventory API mirror from eBay"
+                    + (" (inventory items only, no offers)" if skip_offers else "")
+                    + " ..."
+                )
+                inv_stats = sync_inventory_api(
+                    cfg, itemdata_root, synced_at,
+                    dry_run=dry_run,
+                    sku_filter=sku_filter,
+                    skip_offers=skip_offers,
+                    skip_draft=skip_draft,
+                )
+                total_changes += inv_stats.get("matched", 0)
+                print(
+                    f"  inventory_fetched={inv_stats['inventory_fetched']}"
+                    f"  matched={inv_stats['matched']}"
+                    f"  unmatched={inv_stats['unmatched']}"
+                    f"  offers_fetched={inv_stats['offers_fetched']}"
+                    f"  offer_errors={inv_stats['offer_errors']}"
+                    f"  drafts_written={inv_stats['drafts_written']}"
+                    f"  errors={inv_stats['errors']}"
+                )
+
+            # --- Phase 2: Trading API active listings (legacy / non-inventory items) ---
             active_stats: Dict[str, Any] = {}
             if not args.no_active:
-                print("Fetching active listings from eBay...")
+                print("Fetching active listings from eBay (Trading API — legacy items)...")
                 active_stats = sync_active_listings(
                     cfg, itemdata_root, synced_at, dry_run=dry_run, sku_filter=sku_filter
                 )
@@ -4072,6 +4109,7 @@ def main() -> int:
                 for o in active_stats.get("orphans", []):
                     print(f"  ORPHAN: ItemID={o['listing_id']} label={o.get('custom_label', '')!r} title={o.get('title', '')[:60]}")
 
+            # --- Phase 3: Sold orders ---
             sold_stats: Dict[str, Any] = {}
             if not args.no_sold:
                 print("Fetching sold orders from eBay...")
@@ -4100,6 +4138,7 @@ def main() -> int:
             result = {
                 "ok": True,
                 "dry_run": dry_run,
+                "inventory": inv_stats,
                 "active": active_stats,
                 "sold": sold_stats,
             }
