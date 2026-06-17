@@ -3895,6 +3895,139 @@ Triage: `tgw todo review`
 
 ---
 
+## PP-DERIVED-001 — Full Capture of Derived and Acquired Data
+
+**Opened:** 2026-06-17 (session 34)
+**Status:** PLANNED — not yet started (blocked on budget)
+**Core principle:** Every API call, every vision scan, every barcode lookup returns richer
+data than we currently store. We are paying for that data with time, compute, and API quota.
+Discarding it is waste. All raw responses should be preserved, all photos should be scanned,
+and the data should be associated with the specific tool and input that produced it.
+
+### Audit findings (2026-06-17)
+
+| Data source | What we capture | What we discard |
+|-------------|-----------------|-----------------|
+| Vision scan (`ai_identify`) | 4 fields: title, category, description, condition | Full model response; which photo was used; model reasoning; all other fields returned |
+| Photos per item | 1 photo scanned (first alphabetically) | Avg 5.5 photos/item unscanned; max 39 photos on one item |
+| Product lookup (upcitemdb, Discogs, etc.) | ~8 distilled fields | `extra` dict explicitly stripped; full API response (images, MSRP, dimensions, offers, tracklists, genres) |
+| `LookupResult.to_dict()` | Excludes `extra` by design | All source-specific fields go to `extra` and are discarded |
+| Alt text (`alt_text` worker) | One alt text string per item | Which photo was analyzed; intermediate descriptions; confidence |
+| eBay aspects (`ebay_draft` worker) | Filled aspect values only | Full aspect list fetched from eBay (required + recommended); browse API hints used to fill them; unfilled aspects with available options |
+| Category suggestions (taxonomy) | Top match only | All suggestions with confidence scores |
+| `identification_history` | 6 summary fields per round | Raw result dict; full prompt used; token usage; response latency |
+
+**Numbers (sample of 5,000 items):**
+- Items with multiple photos: 4,066 / 4,999 (81%)
+- Items with vision raw stored: **0**
+- Items with per-photo results: **0**
+- Items with product lookup raw stored: **0**
+- Newer items (tgw2026*): avg 5.5 photos, max 39 — all scanning photo[0] only
+
+### What we're losing
+
+**From photos:** Each photo may contain information the primary doesn't: barcode on the back,
+model number on a label, serial number sticker, condition damage detail, copyright date,
+manufacturer info, quantity markings. A 39-photo item has 38 unscanned photos.
+
+**From vision raw:** Models return richer text than the 4 fields we extract. The full response
+often includes brand guesses, era clues, condition evidence, related item suggestions, and
+natural-language reasoning that would help the `ebay_draft` worker fill aspects.
+
+**From product lookups:** upcitemdb returns dimensions, weight, category tree, multiple images,
+and competitive pricing offers. Discogs returns full tracklist, all artists, label matrix number,
+pressing country. Open Library returns subject classification, publisher, edition details, cover
+scans. All of this is in `LookupResult.extra` and discarded.
+
+**Impact:** Titles, descriptions, and item specifics are harder to determine and less accurate
+than they should be. The model is making educated guesses from one cropped photo when it could
+be cross-referencing 5+ angles plus a full product database record.
+
+### Design
+
+```
+item JSON after full capture:
+{
+  "vision_results": [
+    {
+      "photo": "filename.jpg",
+      "photo_hash": "<dhash>",
+      "tool": "openrouter/google/gemini-2.5-flash",
+      "prompt_type": "enriched|hinted|plain",
+      "scanned_at": "ISO",
+      "raw_response": "<full model text>",
+      "extracted": { /* the 4 fields we currently keep */ },
+      "token_usage": { "prompt": N, "completion": N }
+    },
+    ...  /* one entry per photo scanned */
+  ],
+  "product_lookup": {
+    /* current distilled fields stay */
+    "raw": { /* full API response from source */ }
+  },
+  "photo_inventory": [
+    {
+      "filename": "...",
+      "hash": "...",
+      "size_kb": N,
+      "width": N, "height": N,
+      "scanned_by": ["ai_identify", "alt_text"],
+      "added_at": "ISO"
+    }
+  ]
+}
+```
+
+The `vision_results` array replaces the single `ai_identified` flag + sparse
+`identification_history`. History events continue for auditability; `vision_results`
+is the queryable per-photo data store.
+
+`product_lookup.raw` replaces the `extra`-stripping behavior in `LookupResult.to_dict()`.
+
+`photo_inventory` tracks what photos exist and which tools have processed each one, enabling
+targeted re-scan when new photos are added or when a better model becomes available.
+
+### Phases
+
+- **Phase 1 — Store full vision result per scan** (small change, high value):
+  - Save `raw_response` alongside `extracted` in each history event
+  - Record `photo` (filename) and `photo_hash` in each history event
+  - No schema change to existing fields; additive only
+  - Files: `workers/ai_identify.py` (2 line change), `image_hash.py`
+
+- **Phase 2 — Scan all photos, not just first** (high value, moderate cost):
+  - `_primary_image()` → `_all_images()` iterator
+  - Run vision on each photo; store result in `vision_results[]`
+  - Merge/rank results: prefer the photo that produced the most complete extraction
+  - Use pHash cache to skip re-scan of unchanged photos
+  - Rate limiting: cloud provider models (OpenRouter/Google) can do 5+ photos in parallel
+  - Files: `workers/ai_identify.py` (significant change), `apis/llm.py`
+
+- **Phase 3 — Store full product lookup raw responses**:
+  - `LookupResult.extra` → keep in `product_lookup.raw` (remove the `pop('extra')` in `to_dict()`)
+  - Each source stores its full API JSON under `product_lookup.raw.<source>`
+  - Files: `apis/lookup/base.py` (1 line), each lookup module
+
+- **Phase 4 — Photo inventory**:
+  - At intake, scan the item directory and write `photo_inventory` block
+  - Track `scanned_by` list per photo; update when each worker processes it
+  - Enable "rescan unscanned photos" as a targeted command
+  - Files: `workers/ai_identify.py`, `api.py`, possibly `multi_intake.py`
+
+- **Phase 5 — Retroactive backfill**:
+  - Re-run ai_identify on ALL photos for items that have been identified
+  - pHash cache makes this cheap for already-scanned photos (cache hit = instant)
+  - New photos get full vision scan; merge into `vision_results`
+  - Estimated cost: ~$0.001/photo on Gemini Flash; 50k items × 5 avg photos = ~$250 one-time
+
+### Dependencies / gates
+
+- Phase 1, 3: no cost, implement anytime — purely additive storage
+- Phase 2: requires Anthropic API key (cloud vision) or upgraded Ollama GPU for speed
+- Phase 5: budget for API calls (~$250 one-time, then incremental)
+
+---
+
 ## PP-DATA-OWN-001 — eBay Data Sovereignty / Full Inventory Mirror
 
 **Opened:** 2026-06-17 (session 34)
