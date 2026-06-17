@@ -262,6 +262,25 @@ def get_store_categories(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     return _parse(cat_array)
 
 
+def end_item(cfg: Dict[str, Any], listing_id: str,
+             reason: str = 'NotAvailable') -> None:
+    """
+    End an active Trading API listing via EndFixedPriceItem.
+
+    reason: 'NotAvailable' (default) | 'LostOrBroken' | 'OtherListingError'
+    Raises RuntimeError on API failure.
+    """
+    xml_body = (
+        f'<?xml version="1.0" encoding="utf-8"?>\n'
+        f'<EndFixedPriceItemRequest xmlns="{_NS}">\n'
+        f'  <ItemID>{listing_id}</ItemID>\n'
+        f'  <EndingReason>{reason}</EndingReason>\n'
+        f'</EndFixedPriceItemRequest>'
+    )
+    trading_call(cfg, 'EndFixedPriceItem', xml_body, timeout=30)
+    log.info('EndFixedPriceItem: listing %s ended (reason=%s)', listing_id, reason)
+
+
 def revise_item_sku(cfg: Dict[str, Any], listing_id: str, new_sku: str) -> None:
     """
     Change the custom label (SKU field) on a live Trading API listing in-place.

@@ -101,9 +101,11 @@ PIPELINE_ACTIONS = {
     "ebay_price",
     "ebay_stage",
     "ebay_publish",
+    "ebay_end_listing",
     "catalog_rebuild",
     "thumbnail_gen",
     "approve",
+    "archive",
 }
 
 
@@ -246,6 +248,10 @@ def list_items(
     clauses: List[str] = []
     params: List[Any] = []
 
+    # Hide archived/deleted unless explicitly filtered for
+    if not status_filter:
+        clauses.append("(status IS NULL OR status NOT IN ('archived', 'deleted'))")
+
     if search:
         clauses.append("(title LIKE ? OR sku LIKE ?)")
         params += [f"%{search}%", f"%{search}%"]
@@ -266,7 +272,7 @@ def list_items(
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     count_sql = f"SELECT COUNT(*) FROM catalog {where}"
     sql = (
-        f"SELECT sku, title, location, status, price, qty, image,"
+        f"SELECT sku, title, location, status, price, qty, image, attribute_set,"
         f" json_extract(data, '$.ebay_listing.listing_id') AS ebay_listing_id,"
         f" json_extract(data, '$.ebay_offer.offer_id') AS ebay_offer_id,"
         f" json_extract(data, '$.ebay_offer.ready_at') AS ebay_ready_at,"
@@ -544,7 +550,7 @@ def bulk_apply(body: BulkBody) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 _BULK_PIPELINE_ACTIONS = {"ai_identify", "ebay_price", "ebay_draft", "ebay_stage", "ebay_upload"}
-_BULK_VALID_ACTIONS = _BULK_PIPELINE_ACTIONS | {"set_ready", "mark_sold", "delete", "approve", "list_now"}
+_BULK_VALID_ACTIONS = _BULK_PIPELINE_ACTIONS | {"set_ready", "mark_sold", "delete", "approve", "list_now", "ebay_end_listing", "archive"}
 
 
 @app.post("/api/bulk/action", dependencies=[AUTH])
@@ -608,8 +614,9 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
             pass
         return {"ok": bool(done), "count": len(done), "done": done, "errors": errors}
 
-    if body.action in ("mark_sold", "delete"):
-        new_status = "Sold" if body.action == "mark_sold" else "deleted"
+    if body.action in ("mark_sold", "delete", "archive"):
+        status_map = {"mark_sold": "Sold", "delete": "deleted", "archive": "archived"}
+        new_status = status_map[body.action]
         done: List[str] = []
         errors: List[str] = []
         for sku in body.skus:
@@ -630,6 +637,47 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
             state_machine.enqueue_job(
                 queue_name="catalog_rebuild",
                 payload={"reason": f"bulk_{body.action}"},
+                dedupe_key="catalog_rebuild:pending",
+                not_before=time.time() + 30,
+                max_attempts=3,
+            )
+        except Exception:
+            pass
+        return {"ok": not errors, "count": len(done), "done": done, "errors": errors}
+
+    if body.action == "ebay_end_listing":
+        done = []
+        errors = []
+        for sku in body.skus:
+            json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+            if not json_path.exists():
+                errors.append(f"{sku}: not found")
+                continue
+            try:
+                doc = load_item_doc(json_path)
+                eb = doc.get("ebay_listing") or {}
+                offer_id = (doc.get("ebay_offer") or {}).get("offer_id")
+                listing_id_val = eb.get("listing_id")
+                if not offer_id and not listing_id_val:
+                    errors.append(f"{sku}: no eBay offer or listing")
+                    continue
+                if offer_id:
+                    from .apis.ebay.client import ebay_post
+                    ebay_post(_cfg, f"/sell/inventory/v1/offer/{offer_id}/withdraw", {})
+                else:
+                    from .apis.ebay.trading import end_item as _end_item
+                    _end_item(_cfg, listing_id_val)
+                eb["status"] = "Ended"
+                eb["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                doc["ebay_listing"] = eb
+                atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+                done.append(sku)
+            except Exception as exc:
+                errors.append(f"{sku}: {exc}")
+        try:
+            state_machine.enqueue_job(
+                queue_name="catalog_rebuild",
+                payload={"reason": "bulk_ebay_end_listing"},
                 dedupe_key="catalog_rebuild:pending",
                 not_before=time.time() + 30,
                 max_attempts=3,
@@ -722,6 +770,58 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                 not_before=time.time() + 5,
                 max_attempts=3,
             )
+        elif action == "archive":
+            doc = load_item_doc(json_path)
+            doc["status"] = "archived"
+            atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+            try:
+                state_machine.enqueue_job(
+                    queue_name="catalog_rebuild",
+                    payload={"reason": f"archive:{sku}"},
+                    dedupe_key="catalog_rebuild:pending",
+                    not_before=time.time() + 30,
+                    max_attempts=3,
+                )
+            except Exception:
+                pass
+            return {"ok": True, "sku": sku, "action": "archive", "status": "archived"}
+
+        elif action == "ebay_end_listing":
+            doc = load_item_doc(json_path)
+            eb = doc.get("ebay_listing") or {}
+            offer_id = (doc.get("ebay_offer") or {}).get("offer_id")
+            listing_id_val = eb.get("listing_id")
+            if not offer_id and not listing_id_val:
+                raise HTTPException(status_code=400, detail="no eBay offer or listing to end")
+            try:
+                if offer_id:
+                    # Inventory API: withdraw the published offer
+                    from .apis.ebay.client import ebay_post
+                    ebay_post(_cfg, f"/sell/inventory/v1/offer/{offer_id}/withdraw", {})
+                else:
+                    # Trading API: end the legacy listing
+                    from .apis.ebay.trading import end_item as _end_item
+                    _end_item(_cfg, listing_id_val)
+                eb["status"] = "Ended"
+                eb["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                doc["ebay_listing"] = eb
+                atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+                try:
+                    state_machine.enqueue_job(
+                        queue_name="catalog_rebuild",
+                        payload={"reason": f"ebay_end:{sku}"},
+                        dedupe_key="catalog_rebuild:pending",
+                        not_before=time.time() + 30,
+                        max_attempts=3,
+                    )
+                except Exception:
+                    pass
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail=f"eBay end listing failed: {exc}")
+            return {"ok": True, "sku": sku, "action": "ebay_end_listing", "status": "Ended"}
+
         elif action == "ai_identify":
             # Clear ai_identified so the worker will run
             doc = load_item_doc(json_path)
@@ -2144,12 +2244,44 @@ _ITEMS_EXTRA_CSS = """
 .pager button{padding:8px 20px;background:#1a3a5a;color:#7af;border:1px solid #2a5a8a;
   border-radius:6px;cursor:pointer;font-size:.9em}
 .pager button:hover{background:#1a4a6a}
+/* card checkbox + selection */
+.card-chk-wrap{position:relative;height:0;z-index:2}
+.card-chk{position:absolute;top:6px;left:6px;width:16px;height:16px;cursor:pointer;accent-color:#4a8ade}
+.card.selected{border-color:#4a8ade;box-shadow:0 0 0 2px rgba(74,138,222,.2)}
+/* selection bar */
+.sel-bar{display:none;position:sticky;top:0;z-index:10;background:#1a2a3a;
+  border:1px solid #2a5a8a;border-radius:6px;padding:6px 12px;margin-bottom:10px;
+  color:#cce;font-size:.85em;align-items:center;gap:8px;flex-wrap:wrap}
+.sel-bar.vis{display:flex}
+.sel-clr{background:none;border:none;color:#f99;cursor:pointer;font-size:.85em;padding:0 2px}
+.bulk-sel{padding:3px 6px;background:#1a1a2a;color:#bbb;border:1px solid #2a3a5a;border-radius:4px;font-size:.8em;font-family:inherit;cursor:pointer}
+.bulk-run{padding:3px 12px;background:#1a3a1a;color:#7f7;border:1px solid #2a6a2a;border-radius:4px;cursor:pointer;font-size:.8em;font-family:inherit;white-space:nowrap}
+.bulk-run:hover:not(:disabled){background:#1e4a1e}
+.bulk-run:disabled{opacity:.35;cursor:default}
+/* eBay state mini-badges */
+.eb{padding:1px 6px;border-radius:9px;font-size:.68em;font-weight:600;text-decoration:none;white-space:nowrap}
+.eb-listed{background:#1a3a1a;color:#7f7;border:1px solid #2a5a2a}
+.eb-listed:hover{background:#1e4a1e}
+.eb-ready{background:#1a3a3a;color:#4ff;border:1px solid #1a6a6a}
+.eb-staged{background:#2a1a3a;color:#d7f;border:1px solid #5a2a8a}
+.eb-draft{background:#3a2a00;color:#fb7;border:1px solid #6a4a00}
+.eb-none{background:#252525;color:#666;border:1px solid #333}
+.eb-sold{background:#2a1a1a;color:#f77;border:1px solid #5a2a2a}
+/* card layout refinements */
+.card-sku{font-size:.67em;color:#777;font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card-loc{color:#aaa;font-family:inherit;font-style:normal}
+.card-status{display:flex;gap:5px;align-items:center;margin-top:4px;flex-wrap:wrap}
+.card-meta{display:flex;gap:8px;align-items:center;margin-top:3px;font-size:.75em;color:#aaa}
+.card-cat{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#888}
+/* action dropdown + run button */
 .card-btns{display:flex;gap:4px;padding:5px 6px;background:#151515;border-top:1px solid #222}
-.cbtn{flex:1;padding:5px 4px;border:none;border-radius:4px;cursor:pointer;font-size:.74em;
-  font-weight:600;font-family:inherit;white-space:nowrap}
-.cbtn-a{background:#1a3a1a;color:#7f7}.cbtn-a:hover{background:#1e4a1e}
-.cbtn-p{background:#1a2a3a;color:#7af}.cbtn-p:hover{background:#1e3a4e}
-.cbtn:disabled{opacity:.45;cursor:default}
+.csel{flex:1;padding:3px 5px;background:#1a1a2a;color:#bbb;border:1px solid #2a2a3a;
+  border-radius:4px;font-size:.72em;font-family:inherit;cursor:pointer;min-width:0}
+.csel:focus{outline:none;border-color:#4a8ade}
+.crun{padding:3px 10px;background:#1a2a3a;color:#7af;border:1px solid #2a5a8a;
+  border-radius:4px;cursor:pointer;font-size:.78em;flex-shrink:0;font-family:inherit}
+.crun:hover:not(:disabled){background:#1a3a5a}
+.crun:disabled{opacity:.35;cursor:default}
 .loading,.no-results{padding:20px;text-align:center;color:#888}
 /* detail */
 .back{display:inline-block;color:#4a8ade;text-decoration:none;margin-bottom:10px;font-size:.9em}
@@ -2179,6 +2311,15 @@ _ITEMS_EXTRA_CSS = """
 .dtable td{padding:5px 8px;border-bottom:1px solid #1e1e1e;vertical-align:top;word-break:break-word}
 .dfield{color:#888;font-family:monospace;width:110px}
 .dwas{color:#f77}.dnow{color:#7f7}
+.spec-tbl{width:100%;border-collapse:collapse;font-size:.82em;margin-top:2px}
+.spec-tbl th{color:#555;text-align:left;padding:2px 6px;border-bottom:1px solid #2a2a2a;font-weight:normal;font-size:.75em;text-transform:uppercase}
+.spec-tbl td{padding:3px 6px;border-bottom:1px solid #1a1a1a;vertical-align:top}
+.spec-k{color:#888;width:40%;font-size:.9em}
+.spec-v{color:#ccc}
+.listing-preview{background:#111;border:1px solid #2a2a2a;border-radius:4px;padding:8px 10px;font-size:.8em;color:#bbb;max-height:180px;overflow-y:auto;line-height:1.5}
+.listing-preview p{margin:0 0 6px}
+.listing-preview p:last-child{margin:0}
+.listing-desc-row{align-items:flex-start}
 .jtable{width:100%;border-collapse:collapse;font-size:.78em}
 .jtable th{color:#666;text-align:left;padding:4px 6px;border-bottom:1px solid #2a2a2a;
   font-weight:normal;font-size:.75em;text-transform:uppercase}
@@ -2228,6 +2369,7 @@ _ITEMS_EXTRA_CSS = """
 .list-table .lt-sku{font-family:monospace;color:#888;font-size:.75em;white-space:nowrap}
 .list-table .lt-title{color:#ddd;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .list-table .lt-price{color:#7fbfff;font-weight:bold;text-align:right;white-space:nowrap}
+.list-table .lt-run{padding:2px 8px;font-size:.75em}
 .list-table a{color:inherit;text-decoration:none;display:contents}
 .list-table .lt-btn{padding:3px 8px;background:#1a2a3a;color:#7af;border:1px solid #2a4a6a;
   border-radius:4px;cursor:pointer;font-size:.75em;white-space:nowrap}
@@ -2284,6 +2426,30 @@ _BROWSE_HTML = """\
   <button class="chip" data-s="Sold">Sold</button>
 </div>
 <div class="summary" id="sum"></div>
+<div class="sel-bar" id="sel-bar">
+  <span id="sel-count"></span>
+  <button class="sel-clr" onclick="_clearSel()">✕</button>
+  <select class="bulk-sel" id="bulk-sel" onchange="document.getElementById('bulk-run').disabled=!this.value">
+    <option value="">Action…</option>
+    <optgroup label="Identify &amp; Draft">
+      <option value="ai_identify">Re-identify</option>
+      <option value="ebay_draft">Re-draft</option>
+      <option value="ebay_price">Re-price</option>
+    </optgroup>
+    <optgroup label="Pipeline">
+      <option value="approve">Set Ready</option>
+      <option value="ebay_stage">Stage</option>
+      <option value="ebay_publish">Publish</option>
+    </optgroup>
+    <optgroup label="⚠ Destructive">
+      <option value="ebay_end_listing">End on eBay</option>
+      <option value="mark_sold">Mark Sold</option>
+      <option value="archive">Archive</option>
+      <option value="delete">Delete</option>
+    </optgroup>
+  </select>
+  <button class="bulk-run" id="bulk-run" disabled onclick="_bulkActSel()">▶ Run</button>
+</div>
 <div id="grid-wrap"><div class="grid" id="grid"><div class="loading">Loading…</div></div></div>
 <div class="pager" id="pager"></div>
 {static_foot}
@@ -2302,24 +2468,119 @@ function setView(v){{
   document.getElementById('vt-list').classList.toggle('active',v==='list');
   load(0);
 }}
+function _ebayBadge(it){{
+  const lid=it.ebay_listing_id,oid=it.ebay_offer_id,rat=it.ebay_ready_at;
+  const sold=(it.status||'').toLowerCase()==='sold';
+  if(sold) return '<span class="eb eb-sold">Sold</span>';
+  if(lid) return `<a class="eb eb-listed" href="https://www.ebay.com/itm/${{esc(lid)}}" target="_blank" onclick="event.stopPropagation()">Listed ↗</a>`;
+  if(oid&&rat) return '<span class="eb eb-ready">Ready</span>';
+  if(oid) return '<span class="eb eb-staged">Staged</span>';
+  if(it.has_draft) return '<span class="eb eb-draft">Needs Review</span>';
+  return '<span class="eb eb-none">Not Listed</span>';
+}}
+const _ALL_ACTIONS=[
+  ['ai_identify','Re-identify'],['ebay_draft','Re-draft'],['ebay_price','Re-price'],
+  ['approve','Set Ready'],['ebay_stage','Stage'],['ebay_publish','Publish'],
+  ['ebay_end_listing','End on eBay'],['mark_sold','Mark Sold'],['archive','Archive'],
+];
+function _cardActions(it){{
+  const lid=it.ebay_listing_id,oid=it.ebay_offer_id,rat=it.ebay_ready_at;
+  const sold=(it.status||'').toLowerCase()==='sold';
+  const acts=[];
+  if(!sold){{
+    acts.push(['ai_identify','Re-identify'],['ebay_draft','Re-draft'],['ebay_price','Re-price']);
+  }}
+  if(!lid&&!sold){{
+    acts.push(['approve','Set Ready']);
+    if(it.has_draft||oid) acts.push(['ebay_stage','Stage']);
+    acts.push(['ebay_publish','Publish']);
+  }}
+  if(lid){{
+    acts.push(['ebay_end_listing','End on eBay'],['mark_sold','Mark Sold']);
+  }}
+  if(sold) acts.push(['ai_identify','Re-identify'],['ebay_draft','Re-draft']);
+  acts.push(['archive','Archive']);
+  return acts;
+}}
+function _cardOpts(it){{
+  const ctx=_cardActions(it);
+  const ctxKeys=new Set(ctx.map(([v])=>v));
+  const ctxHtml=ctx.map(([v,l])=>`<option value="${{v}}">${{l}}</option>`).join('');
+  const rest=_ALL_ACTIONS.filter(([v])=>!ctxKeys.has(v));
+  const restHtml=rest.length?`<optgroup label="─ All ─">${{rest.map(([v,l])=>`<option value="${{v}}">${{l}}</option>`).join('')}}</optgroup>`:'';
+  return ctxHtml+restHtml;
+}}
 function _cardHtml(it){{
   const pf=parseFloat(it.price);const price=isNaN(pf)?'—':'$'+pf.toFixed(2);
-  const sku=esc(it.sku);
-  return `<div class="card"><a href="/form/items/${{it.sku}}" class="card-inner">
+  const loc=it.location?` · <em class="card-loc">${{esc(it.location)}}</em>`:'';
+  const cat=esc(it.attribute_set||'');
+  const sel=_sel.has(it.sku);
+  const opts=_cardOpts(it);
+  return `<div class="card${{sel?' selected':''}}" data-sku="${{esc(it.sku)}}">
+  <div class="card-chk-wrap"><input type="checkbox" class="card-chk"${{sel?' checked':''}} onclick="_togSel(event,'${{esc(it.sku)}}')"></div>
+  <a href="/form/items/${{it.sku}}" class="card-inner">
     <img class="thumb" src="/thumb/${{it.sku}}" loading="lazy" alt="" onerror="this.style.visibility='hidden'">
-    <div class="card-body">
-      <div class="card-sku">${{sku}}</div>
-      <div class="card-title">${{esc(it.title||'')}}</div>
-      <div class="card-meta">
-        <span class="sbadge ${{scls(it.status)}}">${{esc(it.status||'—')}}</span>
-        <span>${{esc(it.location||'')}}</span>
-        <span class="price">${{price}}</span>
-      </div>
-    </div></a>
-    <div class="card-btns">
-      <button class="cbtn cbtn-a" onclick="cact(event,'${{it.sku}}','approve')" title="Approve (set Ready)">✓ Approve</button>
-      <button class="cbtn cbtn-p" onclick="cact(event,'${{it.sku}}','ebay_publish')" title="Publish to eBay">↑ List</button>
-    </div></div>`;
+  </a>
+  <div class="card-body">
+    <div class="card-sku">${{esc(it.sku)}}${{loc}}</div>
+    <div class="card-title"><a href="/form/items/${{it.sku}}" style="color:inherit;text-decoration:none">${{esc(it.title||'')}}</a></div>
+    <div class="card-status">${{_ebayBadge(it)}}<span class="sbadge ${{scls(it.status)}}">${{esc(it.status||'—')}}</span></div>
+    <div class="card-meta"><span class="price">${{price}}</span><span class="card-cat">${{cat}}</span></div>
+  </div>
+  <div class="card-btns">
+    <select class="csel" onchange="this.nextElementSibling.disabled=!this.value"><option value="">Action…</option>${{opts}}</select>
+    <button class="crun" disabled onclick="cact(event,'${{esc(it.sku)}}',this.previousElementSibling.value)">▶</button>
+  </div></div>`;
+}}
+const _sel=new Set();
+function _togSel(e,sku){{
+  e.stopPropagation();
+  _sel.has(sku)?_sel.delete(sku):_sel.add(sku);
+  const card=document.querySelector(`.card[data-sku="${{sku}}"]`);
+  if(card){{card.classList.toggle('selected',_sel.has(sku));const chk=card.querySelector('.card-chk');if(chk)chk.checked=_sel.has(sku);}}
+  _renderSelBar();
+}}
+function _clearSel(){{
+  _sel.clear();
+  document.querySelectorAll('.card.selected').forEach(c=>{{c.classList.remove('selected');const chk=c.querySelector('.card-chk');if(chk)chk.checked=false;}});
+  const bs=document.getElementById('bulk-sel');if(bs)bs.value='';
+  const br=document.getElementById('bulk-run');if(br)br.disabled=true;
+  _renderSelBar();
+}}
+function _renderSelBar(){{
+  const bar=document.getElementById('sel-bar');if(!bar)return;
+  if(!_sel.size){{bar.classList.remove('vis');return;}}
+  bar.classList.add('vis');
+  document.getElementById('sel-count').textContent=_sel.size+' selected';
+}}
+const _BULK_CONFIRM={{
+  mark_sold:'Mark {{n}} item(s) as Sold?',
+  delete:'Delete {{n}} item(s) locally?',
+  ebay_end_listing:'End {{n}} listing(s) on eBay? This cannot be undone.',
+  archive:'Archive {{n}} item(s)? They will be hidden from the catalog.',
+}};
+async function _bulkAct(action){{
+  const skus=[..._sel];if(!skus.length)return;
+  const tmpl=_BULK_CONFIRM[action];
+  if(tmpl&&!confirm(tmpl.replace('{{n}}',skus.length)))return;
+  const btn=document.getElementById('bulk-run');
+  if(btn){{btn.disabled=true;btn.textContent='…';}}
+  try{{
+    const r=await fetch('/api/bulk/action',{{method:'POST',headers:{{Authorization:AUTH,'Content-Type':'application/json'}},body:JSON.stringify({{skus,action}})}});
+    const d=await r.json();
+    const msg=d.ok?`${{action}}: ${{d.count??skus.length}} queued/done`:`${{action}} errors: ${{(d.errors||[]).slice(0,3).join('; ')}}`;
+    alert(msg);
+    const reload=action==='mark_sold'||action==='delete'||action==='archive'||action==='ebay_end_listing';
+    _clearSel();
+    if(reload)load(0);
+  }}catch(err){{alert('Network error: '+err);}}
+  finally{{
+    if(btn){{btn.textContent='▶ Run';btn.disabled=!document.getElementById('bulk-sel')?.value;}}
+  }}
+}}
+function _bulkActSel(){{
+  const action=document.getElementById('bulk-sel')?.value;
+  if(action)_bulkAct(action);
 }}
 function _rowHtml(it){{
   const pf=parseFloat(it.price);const price=isNaN(pf)?'—':'$'+pf.toFixed(2);
@@ -2330,9 +2591,9 @@ function _rowHtml(it){{
     <td><span class="sbadge ${{scls(it.status)}}">${{esc(it.status||'—')}}</span></td>
     <td style="color:#888;font-size:.8em">${{esc(it.location||'')}}</td>
     <td class="lt-price">${{price}}</td>
-    <td>
-      <button class="lt-btn" onclick="cact(event,'${{it.sku}}','approve')">✓</button>
-      <button class="lt-btn" onclick="cact(event,'${{it.sku}}','ebay_publish')">↑</button>
+    <td style="display:flex;gap:4px">
+      <select class="csel" style="font-size:.72em" onchange="this.nextElementSibling.disabled=!this.value"><option value="">Action…</option>${{_cardOpts(it)}}</select>
+      <button class="crun lt-run" disabled onclick="cact(event,'${{esc(it.sku)}}',this.previousElementSibling.value)">▶</button>
     </td></tr>`;
 }}
 async function cact(e,sku,action){{
@@ -2676,6 +2937,31 @@ def _render_item_detail_html(
         title_flags = ", ".join(dl.get("title_flags", [])) or "—"
         _dl_store_cat = str(dl.get("store_category_name") or dl.get("store_category") or "")
         _dl_ship = str(dl.get("shipping_profile") or dl.get("fulfillment_policy_id") or "")
+        # Build item_specifics table
+        _specifics = dl.get("item_specifics") or {}
+        if _specifics:
+            _spec_rows = "".join(
+                f'<tr><td class="spec-k">{h(k)}</td><td class="spec-v">{h(str(v))}</td></tr>'
+                for k, v in sorted(_specifics.items())
+            )
+            _spec_html = (
+                f'<table class="spec-tbl">'
+                f'<tr><th>Aspect</th><th>Value</th></tr>'
+                f'{_spec_rows}</table>'
+            )
+        else:
+            _spec_html = '<span style="color:#555">None filled</span>'
+        _spec_note = (
+            f' <span style="color:#888;font-size:.75em">({req_fill}/{req_total} req, {rec_fill}/{rec_total} rec)</span>'
+        )
+        # Listing description preview — strip the hidden picklist line before display
+        import re as _re
+        _ld_raw = str(dl.get("listing_description") or dl.get("description") or "")
+        _ld_clean = _re.sub(r'<p>[^<]*tgw-pl::[^<]*</p>', '', _ld_raw).strip()
+        _ld_html = (
+            f'<div class="listing-preview">{_ld_clean}</div>'
+            if _ld_clean else '<span style="color:#555">—</span>'
+        )
         draft_section = (
             fr("Draft Title", h(str(dl.get("title", "") or "")))
             + fr("Category Sent", h(f"{dl.get('category_id','')} · {dl.get('category_name','')}"))
@@ -2686,8 +2972,8 @@ def _render_item_detail_html(
             + fr("Quality Score", h(str(q_score)))
             + fr("Quality Flags", h(q_flags))
             + fr("Title Flags", h(title_flags))
-            + fr("Req. Specifics", h(f"{req_fill}/{req_total} filled"))
-            + fr("Rec. Specifics", h(f"{rec_fill}/{rec_total} filled"))
+            + f'<div class="frow"><span class="fn">Item Specifics{_spec_note}</span><span class="fv">{_spec_html}</span></div>'
+            + f'<div class="frow listing-desc-row"><span class="fn">Listing Description</span><span class="fv">{_ld_html}</span></div>'
         )
     else:
         draft_section = '<div class="frow"><span class="fv" style="color:#555">No draft yet — run Re-identify then Re-draft</span></div>'
@@ -2842,7 +3128,7 @@ def _render_item_detail_html(
     stage_disabled = ' disabled title="Already staged/published — use End Listing + relist to update"' if is_staged else ""
     stage_cls = " act-disabled" if is_staged else ""
     end_btn = (
-        '<button class="act-btn act-warn" onclick="triggerAction(\'ebay_end_listing\')">'
+        '<button class="act-btn act-warn" onclick="triggerAction(\'ebay_end_listing\',\'End this listing on eBay? This cannot be undone.\')">'
         "End Listing on eBay</button>"
         if is_active else ""
     )
@@ -2859,6 +3145,7 @@ def _render_item_detail_html(
         f'{end_btn}'
         f'</div>'
         f'<div class="act-row" style="margin-top:10px">'
+        f'<button class="act-btn act-warn" onclick="triggerAction(\'archive\',\'Archive this item? It will be hidden from the catalog.\')">Archive</button>'
         f'<button class="act-btn act-delete" onclick="deleteItem()">Delete item</button>'
         f'</div>'
         f'</div>'
@@ -2867,12 +3154,14 @@ def _render_item_detail_html(
         f'var _SKU={_sku_json2};'
         f'var _LISTING_ID={_listing_id_json};'
         f'var _IS_ACTIVE={_is_active_js};'
-        f'function triggerAction(action){{'
+        f'function triggerAction(action,confirmMsg){{'
+        f'  if(confirmMsg&&!confirm(confirmMsg))return;'
         f'  fetch(\'/api/items/\'+_SKU+\'/action\',{{'
         f'    method:\'POST\','
         f'    headers:authHeaders({{\'Content-Type\':\'application/json\'}}),'
         f'    body:JSON.stringify({{action:action}})'
         f'  }}).then(function(r){{return r.json();}}).then(function(d){{'
+        f'    if(d.ok&&(action===\'archive\'||action===\'ebay_end_listing\')){{window.location.href=\'/form/items\';return;}}'
         f'    alert(d.ok ? \'Action queued: \'+action : \'Error: \'+(d.detail||\'failed\'));'
         f'  }}).catch(function(e){{alert(\'Network error: \'+e);}});'
         f'}}'

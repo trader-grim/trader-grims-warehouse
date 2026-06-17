@@ -90,7 +90,7 @@ def _make_catalog(db_path: Path, rows):
     con.execute(
         "CREATE TABLE catalog ("
         "sku TEXT, title TEXT, location TEXT, status TEXT, "
-        "price REAL, qty INTEGER, image TEXT, data TEXT)"
+        "price REAL, qty INTEGER, image TEXT, attribute_set TEXT, data TEXT)"
     )
     con.executemany(
         "INSERT INTO catalog (sku, title, location, status, price, qty, image, data) "
@@ -279,7 +279,7 @@ def test_list_items_all(client):
     assert skus == sorted(skus, reverse=True)
     # Column set matches the SELECT in http_server.py list_items.
     assert set(body["items"][0]) == {
-        "sku", "title", "location", "status", "price", "qty", "image",
+        "sku", "title", "location", "status", "price", "qty", "image", "attribute_set",
         "ebay_listing_id", "ebay_offer_id", "ebay_ready_at", "has_draft",
     }
 
@@ -1047,13 +1047,13 @@ def test_todos_form_data_agent_attrs(client, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_browse_has_load_more_js(client):
-    """Browse page includes loadMore() function and card-btns action buttons."""
+    """Browse page includes loadMore() function and card action controls."""
     r = client.get("/form/items")
     assert r.status_code == 200
     assert "loadMore" in r.text
     assert "card-btns" in r.text
-    assert "cbtn-a" in r.text  # approve button class
-    assert "cbtn-p" in r.text  # publish button class
+    assert "csel" in r.text   # action dropdown class
+    assert "crun" in r.text   # run button class
 
 
 def test_browse_uses_card_inner_link(client):
@@ -1435,7 +1435,7 @@ def _make_catalog_with_data(db_path: Path, rows_with_data):
     con.execute(
         "CREATE TABLE catalog ("
         "sku TEXT PRIMARY KEY, title TEXT, location TEXT, status TEXT, "
-        "price REAL, qty INTEGER, image TEXT, data TEXT NOT NULL DEFAULT '{}')"
+        "price REAL, qty INTEGER, image TEXT, attribute_set TEXT, data TEXT NOT NULL DEFAULT '{}')"
     )
     con.executemany(
         "INSERT INTO catalog (sku, title, location, status, price, qty, image, data) "

@@ -388,7 +388,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
         "ebay-pull", "ebay-sweep", "import-sold-csv", "sku-migrate",
         "setup-ebay-hooks", "build-archive-index", "history-index",
         "strikethrough-check", "store-categories", "store-category", "get-ebay-token",
-        "offers", "ebay-repush",
+        "offers", "ebay-repush", "ebay-backfill-snapshot",
     ]),
     ("Catalog / Build", [
         "build-full", "build-search", "build-locations", "build-full-csv",
@@ -966,6 +966,31 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--auto-accept", action="store_true", help="list: auto-accept offers above auto_accept_min_pct config threshold (dry-run unless --live)")
     p.add_argument("--live", action="store_true", help="submit response to eBay (default: dry-run)")
     p.add_argument("--by", default="claude", metavar="AGENT", help="who is responding (default: claude)")
+
+    # --- ebay-backfill-snapshot ---
+    p = sub.add_parser(
+        "ebay-backfill-snapshot",
+        help="back-fill ebay_submitted for legacy listed items (PP-EBAY-SNAPSHOT-001 Phase 4, #894)",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="scan and report without making any eBay API calls",
+    )
+    p.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        metavar="N",
+        help="stop after N items (0 = all)",
+    )
+    p.add_argument(
+        "--delay",
+        type=float,
+        default=0.5,
+        metavar="SECONDS",
+        help="seconds to sleep between API calls (default 0.5)",
+    )
 
     # --- ebay-repush ---
     p = sub.add_parser(
@@ -4333,6 +4358,27 @@ def main() -> int:
                     dry_run=not args.live,
                     by=args.by,
                 )
+
+        elif args.op == "ebay-backfill-snapshot":
+            from .ebay.snapshot_backfill import cmd_ebay_backfill_snapshot
+
+            result = cmd_ebay_backfill_snapshot(
+                cfg,
+                dry_run=args.dry_run,
+                limit=args.limit,
+                delay=args.delay,
+            )
+            verb = "DRY-RUN" if args.dry_run else "SAVED"
+            print(
+                f"{verb}: {result.get('saved_count', 0)} saved, "
+                f"{len(result.get('not_in_api', []))} not in Inventory API, "
+                f"{len(result.get('skipped', []))} skipped, "
+                f"{len(result.get('errors', []))} error(s) "
+                f"(of {result.get('total_candidates', 0)} candidates)"
+            )
+            for e in result.get("errors", []):
+                print(f"  ERROR: {e['sku']}: {e['reason']}")
+            return 0 if result.get("ok") else 1
 
         elif args.op == "ebay-repush":
             from .ebay.repush import cmd_ebay_repush
