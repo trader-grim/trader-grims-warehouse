@@ -3943,49 +3943,72 @@ scans. All of this is in `LookupResult.extra` and discarded.
 than they should be. The model is making educated guesses from one cropped photo when it could
 be cross-referencing 5+ angles plus a full product database record.
 
+### Core architectural principle
+
+**The raw scan is the asset. Derived values are disposable.**
+
+`title`, `description`, `category`, `condition`, `item_specifics` — these are derived outputs.
+They should be recomputed from the stored raw scan whenever a better model, a better prompt,
+or additional context (product lookup, barcode data) becomes available. The photo never changes.
+One complete scan stored with its full metadata = permanent raw material that improves in value
+over time as models improve.
+
+The scan record must be fully reproducible: given the stored `photo_hash`, `model`, `prompt`,
+and `prompt_context`, we can confirm that re-running produces equivalent output, or flag drift.
+
+**What this unlocks:** When we upgrade from Gemini Flash to a better model, we don't need to
+re-scan photos. We re-derive from stored raw responses. When we improve the prompt, we can
+identify which items were scanned with the old prompt and re-derive just those. When we add a
+barcode lookup result after the initial scan, we can re-derive aspects without touching eBay.
+
 ### Design
 
 ```
 item JSON after full capture:
-{
-  "vision_results": [
-    {
-      "photo": "filename.jpg",
-      "photo_hash": "<dhash>",
-      "tool": "openrouter/google/gemini-2.5-flash",
-      "prompt_type": "enriched|hinted|plain",
-      "scanned_at": "ISO",
-      "raw_response": "<full model text>",
-      "extracted": { /* the 4 fields we currently keep */ },
-      "token_usage": { "prompt": N, "completion": N }
+
+"vision_results": [
+  {
+    "photo":         "filename.jpg",        // which photo
+    "photo_hash":    "<dhash>",             // content fingerprint
+    "model":         "openrouter/google/gemini-2.5-flash",
+    "prompt_type":   "enriched|hinted|plain",
+    "prompt_context": "brand/product hint injected",  // reproducibility
+    "prompt_version": "v3",               // prompt template version tag
+    "scanned_at":    "ISO",
+    "raw_response":  "<full model text>",  // THE ASSET — never discard
+    "extracted": {                         // distilled fields from raw
+      "title": "...", "category": "...", "description": "...", "condition": "..."
     },
-    ...  /* one entry per photo scanned */
-  ],
-  "product_lookup": {
-    /* current distilled fields stay */
-    "raw": { /* full API response from source */ }
-  },
-  "photo_inventory": [
-    {
-      "filename": "...",
-      "hash": "...",
-      "size_kb": N,
-      "width": N, "height": N,
-      "scanned_by": ["ai_identify", "alt_text"],
-      "added_at": "ISO"
-    }
-  ]
-}
+    "token_usage":   { "prompt": N, "completion": N }
+  }
+  // one entry per photo × per scan (re-scans with new model append, not replace)
+],
+
+"product_lookup": {
+  // current distilled fields stay at top level
+  "source": "...", "title": "...", etc.,
+  "raw": { /* full API response from source — currently discarded */ }
+},
+
+"photo_inventory": [
+  {
+    "filename":   "...",
+    "hash":       "<dhash>",
+    "size_kb":    N,
+    "scanned_by": ["ai_identify", "alt_text"],  // which workers have touched it
+    "added_at":   "ISO"
+  }
+]
 ```
 
-The `vision_results` array replaces the single `ai_identified` flag + sparse
-`identification_history`. History events continue for auditability; `vision_results`
-is the queryable per-photo data store.
+`vision_results[]` grows over time — each scan appends. Old results are never deleted.
+This gives us a training dataset of photo → result pairs as a side effect of normal operation.
 
-`product_lookup.raw` replaces the `extra`-stripping behavior in `LookupResult.to_dict()`.
+`photo_inventory` is the scan scheduler: items where `len(scanned_by) < len(photos)` have
+unscanned photos. A background command can target exactly those.
 
-`photo_inventory` tracks what photos exist and which tools have processed each one, enabling
-targeted re-scan when new photos are added or when a better model becomes available.
+`product_lookup.raw` captures the full API response; derived fields stay at the top level
+for backward compatibility.
 
 ### Phases
 
@@ -4020,11 +4043,19 @@ targeted re-scan when new photos are added or when a better model becomes availa
   - New photos get full vision scan; merge into `vision_results`
   - Estimated cost: ~$0.001/photo on Gemini Flash; 50k items × 5 avg photos = ~$250 one-time
 
+### Research and refinement gate
+
+Existing research in `docs/TGW-Plan-Vault/dev-workflow/research/` covers model selection and
+provider comparison. Before implementing Phase 2+, run through Perplexity deep research to
+refine: optimal model for multi-photo item identification, prompt structure for maximum raw
+data capture, cost per photo at scale, and whether to parallelize per-photo calls or batch.
+The refined research becomes the spec for implementation.
+
 ### Dependencies / gates
 
-- Phase 1, 3: no cost, implement anytime — purely additive storage
-- Phase 2: requires Anthropic API key (cloud vision) or upgraded Ollama GPU for speed
-- Phase 5: budget for API calls (~$250 one-time, then incremental)
+- Phase 1, 3: no cost, implement anytime — purely additive, no new API calls
+- Phase 2: cloud vision API key (Google AI Studio key already available); design after Perplexity research
+- Phase 5: budget for API calls (~$250 one-time at Gemini Flash rates for 50k items × 5 photos)
 
 ---
 
