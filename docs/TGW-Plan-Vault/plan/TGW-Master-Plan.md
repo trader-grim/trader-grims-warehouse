@@ -3895,6 +3895,84 @@ Triage: `tgw todo review`
 
 ---
 
+## PP-DATA-OWN-001 — eBay Data Sovereignty / Full Inventory Mirror
+
+**Opened:** 2026-06-17 (session 34)
+**Status:** Phase 1 RUNNING — initial pull in progress against 19,446 items
+**Core principle:** We own our data. eBay stores nothing we don't also have locally.
+eBay has lost seller data before. All listing data, item specifics, images, prices,
+sold history, policies — everything eBay has about our listings must be mirrored locally
+and kept current. We never rely on eBay as the authoritative source for our own inventory.
+
+### What was wrong
+
+As of 2026-06-17, 0 of 55,351 local items had `ebay_live`, `ebay_submitted`, or `draft_listing`
+populated. The data fields present were legacy flat fields (`title`, `description`, `price`,
+`Condition`) from an old eBay CSV export — not connected to the new pipeline. 19,446 active
+eBay listings held the authoritative data; we couldn't see or edit it through our own UI.
+This blocked listing new items, re-listing sold items, and auditing existing listings.
+
+### Architecture
+
+```
+eBay Inventory API ──► ebay_live.inventory_item  (title, aspects, imageUrls, condition, UPC)
+eBay Inventory API ──► ebay_live.offer            (price, description HTML, category, policies,
+                                                   listing_id, offer_id, status)
+ebay_live ──────────► draft_listing              (editable staging area for the UI editor)
+draft_listing ──────► ebay_submitted             (audit trail — what we last pushed to eBay)
+```
+
+`ebay_live` = raw eBay response, never hand-edited. Refreshed by `ebay-pull`.
+`draft_listing` = what the editor works on. Created from `ebay_live` if source='ebay_live';
+  not overwritten once manually edited (source changes to something else).
+`ebay_submitted` = written by `ebay_stage` when we push. Snapshots what we sent.
+
+### Phases
+
+- **Phase 1 — Initial bulk pull** (2026-06-17, IN PROGRESS):
+  - `tgw ebay-pull --no-active --no-sold` running against all 19,446 Inventory API items
+  - Writes `ebay_live.{inventory_item, offer}` to each item JSON
+  - Backfills `draft_listing` from live data (title, aspects, price, description, images, policies)
+  - Also syncs `ebay_listing.{listing_id, offer_id, status}` from offer response
+  - Runtime: ~30 minutes at 50ms/offer call; catalog_rebuild fires on completion
+
+- **Phase 2 — Ongoing sync** (TODO):
+  - `ebay_sync` worker (Inventory API) already runs daily — extend to write `ebay_live`
+  - `ebay_legacy_sync` worker (Trading API) runs daily for non-Inventory items
+  - Add `--inventory` flag to scheduled sync so `ebay_live` stays current
+
+- **Phase 3 — Sold/transaction history** (TODO):
+  - `GetOrders` already pulls completed orders → `ebay_sale` block
+  - Verify all 976 sold items have `ebay_sale` data; backfill missing
+  - Sold items list UI shows only 2 — fix the status filter in http_server.py
+
+- **Phase 4 — Account policies mirror** (TODO):
+  - Pull fulfillment, payment, return policies via `sell.account` API
+  - Store in `data/ebay-policies.json` + make available in editor dropdowns
+  - Pull store categories; verify against `tgw-api-config.json` mappings
+
+- **Phase 5 — Forward sync** (TODO):
+  - After editing `draft_listing`, pushing to eBay writes `ebay_submitted`
+  - On each push confirm `ebay_live` refreshes from the response
+  - Alert if eBay-side data diverges from `ebay_live` (someone edited on eBay directly)
+
+### Files changed
+
+- `src/tgw/ebay/pull.py` — added `sync_inventory_api()`, `iter_inventory_api_items()`,
+  `fetch_offer_for_sku()`, `apply_ebay_live()`, `backfill_draft_from_live()`
+- `src/tgw/api.py` — `ebay-pull` CLI now runs Inventory API mirror as Phase 1;
+  new flags `--no-inventory`, `--skip-offers`, `--no-draft`
+
+### Next steps (unblock listing)
+
+1. Wait for Phase 1 pull to complete (~30 min from 08:51 PDT 2026-06-17)
+2. Verify editor shows data: `tgw serve` → `/form/items/{sku}` for any active SKU
+3. Fix sold items display (Phase 3 — status filter bug in http_server.py)
+4. Confirm full list → stage → publish flow works on one test item
+5. Schedule `ebay-pull` as a nightly cron to keep `ebay_live` current
+
+---
+
 ## PP-OPS-001 — Operational Prerequisites and Unblocking Tasks
 
 Catch-all anchor for one-off setup, infrastructure, and credential tasks that unblock feature
