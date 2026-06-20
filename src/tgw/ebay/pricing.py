@@ -244,6 +244,27 @@ def _compute_stats(prices: List[float]) -> Dict[str, Any]:
     }
 
 
+def _extract_comp_records(summaries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Extract compact comp records from Browse API itemSummaries for storage."""
+    records = []
+    for item in summaries:
+        try:
+            price = float(item['price']['value'])
+        except (KeyError, ValueError, TypeError):
+            continue
+        cond_raw = item.get('condition') or {}
+        cond = (cond_raw if isinstance(cond_raw, str)
+                else cond_raw.get('conditionDisplayName', ''))
+        records.append({
+            'item_id':   item.get('itemId', ''),
+            'title':     item.get('title', ''),
+            'price':     round(price, 2),
+            'condition': cond,
+            'url':       item.get('itemWebUrl', ''),
+        })
+    return records
+
+
 def _short_keywords(title: str, words: int = 3) -> str:
     """Return the first *words* words of a title, stripped of common filler."""
     _STOP = {'a', 'an', 'the', 'of', 'for', 'with', 'and', 'in', 'on', 'by',
@@ -352,7 +373,8 @@ def suggest_price(
     item_rank: Optional[int] = _ITEM_CONDITION_RANK.get(
         item_condition.lower().strip()) if item_condition else None
 
-    all_prices:  List[float] = []
+    all_prices:     List[float] = []
+    winning_summaries: List[Dict[str, Any]] = []
     source = ''
     was_cond_filtered = False
 
@@ -363,6 +385,7 @@ def suggest_price(
         prices, cfiltered = _best_prices(summaries, item_rank)
         if len(prices) >= MIN_COMPS:
             all_prices = prices
+            winning_summaries = summaries
             was_cond_filtered = cfiltered
             source = 'browse:lookup_query'
             log.debug('pricing stage 0 (lookup): %r → %d comps', lq, len(prices))
@@ -373,6 +396,7 @@ def suggest_price(
         prices, cfiltered = _best_prices(summaries, item_rank)
         if len(prices) >= MIN_COMPS:
             all_prices = prices
+            winning_summaries = summaries
             was_cond_filtered = cfiltered
             source = 'browse:full_title'
 
@@ -384,6 +408,7 @@ def suggest_price(
         prices, cfiltered = _best_prices(summaries, item_rank)
         if len(prices) >= MIN_COMPS:
             all_prices = prices
+            winning_summaries = summaries
             was_cond_filtered = cfiltered
             source = 'browse:category+short'
 
@@ -393,6 +418,7 @@ def suggest_price(
         prices, cfiltered = _best_prices(summaries, item_rank)
         if len(prices) >= MIN_COMPS:
             all_prices = prices
+            winning_summaries = summaries
             was_cond_filtered = cfiltered
             source = 'browse:category_only'
 
@@ -470,6 +496,7 @@ def suggest_price(
         'price':            price,
         'source':           source,
         'comps':            stats,
+        'comp_items':       _extract_comp_records(winning_summaries),
         'price_confidence': confidence,
         'velocity_hint':    vel_hint,
         'queried_at':       queried_at,

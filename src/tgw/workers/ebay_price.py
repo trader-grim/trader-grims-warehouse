@@ -88,6 +88,8 @@ class EbayPriceWorker(QueueWorker):
         ebay_offer = dict(existing)
         ebay_offer['price_source'] = result['source']
         ebay_offer['price_comps']  = result['comps']
+        if result.get('comp_items'):
+            ebay_offer['price_comps']['items'] = result['comp_items']
         ebay_offer['priced_at']    = result['queried_at']
 
         suggested = result['price']
