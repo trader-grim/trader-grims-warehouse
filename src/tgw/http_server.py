@@ -395,6 +395,8 @@ def get_review_queue() -> Dict[str, Any]:
                 "quality": draft.get("quality") or {},
                 "aspects_required_total": draft.get("aspects_required_total"),
                 "aspects_required_filled": draft.get("aspects_required_filled"),
+                "category_confidence": draft.get("category_confidence") or doc.get("category_confidence") or "",
+                "offline_draft": bool(draft.get("offline_draft") or doc.get("offline_draft")),
             })
 
     return {"ok": True, "items": items, "count": len(items)}
@@ -3031,11 +3033,33 @@ def _render_item_detail_html(
     )
 
     # eBay listing confirmed data
+    def _safe_price(v: Any) -> str:
+        try:
+            return f"${float(v):.2f}" if v is not None else "—"
+        except (ValueError, TypeError):
+            return "—"
+
+    _live_price = eb.get("live_price")
+    _live_price_html = ""
+    if _live_price is not None:
+        _lp_str = _safe_price(_live_price)
+        if offer_price is not None:
+            try:
+                _diverged = abs(float(_live_price) - float(offer_price)) > 0.01
+            except (TypeError, ValueError):
+                _diverged = False
+            if _diverged:
+                _lp_str += (
+                    f' <span style="color:#f99;font-size:.79em">⚠ differs from offer'
+                    f' ({_safe_price(offer_price)})</span>'
+                )
+        _live_price_html = fr("Live Price (eBay)", _lp_str)
     listing_section = (
         fr("Listing ID", h(listing_id) if listing_id else "")
         + fr("eBay Status", h(listing_status) if listing_status else "")
         + fr("Published", h(str(eb.get("published_at", "") or "")[:19]))
         + fr("API", h(str(eb.get("api", "") or "")))
+        + _live_price_html
         + ebay_links_html
     )
 
@@ -3071,7 +3095,9 @@ def _render_item_detail_html(
         _ph_rows += (
             f'<div class="frow"><span class="fn">Comp count</span><span class="fv">{h(str(_comps.get("count","—")))}</span></div>'
             f'<div class="frow"><span class="fn">Range</span><span class="fv">{_cfmt(_comps.get("min"))} – {_cfmt(_comps.get("max"))}</span></div>'
-            f'<div class="frow"><span class="fn">p25 / median</span><span class="fv">{_cfmt(_comps.get("p25"))} / {_cfmt(_comps.get("median"))}</span></div>'
+            f'<div class="frow"><span class="fn">p25 / median / p75</span><span class="fv">'
+            f'{_cfmt(_comps.get("p25"))} / {_cfmt(_comps.get("median"))} / {_cfmt(_comps.get("p75"))}'
+            f'</span></div>'
         )
     if _floor is not None:
         _ph_rows += f'<div class="frow"><span class="fn">Category floor</span><span class="fv">${float(_floor):.2f}</span></div>'
@@ -3085,7 +3111,7 @@ def _render_item_detail_html(
         _ph_rows += f'<div class="frow"><span class="fn">Priced at</span><span class="fv">{h(_priced_at)}</span></div>'
     _ph_content = _ph_rows if _ph_rows else '<span style="color:#555;font-size:.82em">No pricing data yet</span>'
     _pricing_history_html = (
-        f'<details style="margin-top:4px">'
+        f'<details open style="margin-top:4px">'
         f'<summary style="cursor:pointer;color:#4a8ade;font-size:.82em;list-style:none">▶ Pricing History</summary>'
         f'<div style="margin-top:6px;padding:6px;background:#111;border:1px solid #222;border-radius:4px">'
         f'{_ph_content}'
@@ -3146,9 +3172,22 @@ def _render_item_detail_html(
             f'<div class="listing-preview">{_ld_clean}</div>'
             if _ld_clean else '<span style="color:#555">—</span>'
         )
+        _offline_warn = (
+            '<div style="background:#2a1a00;border:1px solid #664400;border-radius:6px;'
+            'padding:6px 10px;margin-bottom:6px;color:#fb7;font-size:.82em">'
+            '⚠ Offline draft — created without live eBay data; aspects and category may be incomplete.'
+            '</div>'
+            if dl.get("offline_draft") else ""
+        )
+        _cat_conf = dl.get("category_confidence") or ""
+        _cat_conf_warn = (
+            f'<span style="color:#fb7;font-size:.79em"> ⚠ confidence: {h(_cat_conf)}</span>'
+            if _cat_conf and _cat_conf != "high" else ""
+        )
         draft_section = (
-            fr("Draft Title", h(str(dl.get("title", "") or "")))
-            + fr("Category Sent", h(f"{dl.get('category_id','')} · {dl.get('category_name','')}"))
+            _offline_warn
+            + fr("Draft Title", h(str(dl.get("title", "") or "")))
+            + fr("Category Sent", h(f"{dl.get('category_id','')} · {dl.get('category_name','')}") + _cat_conf_warn)
             + (fr("Store Category", h(_dl_store_cat)) if _dl_store_cat else "")
             + (fr("Shipping Policy", h(_dl_ship)) if _dl_ship else "")
             + fr("Condition Sent", h(f"{dl.get('condition_label','')} ({dl.get('condition_enum','')})"))
@@ -3198,7 +3237,20 @@ def _render_item_detail_html(
             state = j.get("state", "")
             sc = "js-" + state.replace("_", "-").lower()
             ts = (j.get("updated_at") or j.get("finished_at") or j.get("created_at") or "")[:16]
-            err = h(str(j.get("error_detail") or "")[:60])
+            _err_full = str(j.get("error_detail") or "")
+            _err_short = _err_full[:80]
+            if _err_full:
+                err = (
+                    f'<details style="display:inline">'
+                    f'<summary style="cursor:pointer;color:#f99;font-size:.8em;list-style:none">'
+                    f'{h(_err_short)}{"…" if len(_err_full) > 80 else ""}</summary>'
+                    f'<pre style="white-space:pre-wrap;word-break:break-all;font-size:.75em;'
+                    f'color:#f99;margin:4px 0;padding:4px;background:#1a0a0a;border-radius:4px">'
+                    f'{h(_err_full)}</pre>'
+                    f'</details>'
+                )
+            else:
+                err = ""
             qn = j.get("queue_name", "")
             tip = _WORKER_TOOLTIPS.get(qn, "")
             tip_attr = f' title="{h(tip)}"' if tip else ""
@@ -3269,7 +3321,7 @@ def _render_item_detail_html(
         + fr("Weight (oz)", key="weight_oz", editable=True)
         + fr("Size class", key="size_class")
         + fr("Verified", key="verified")
-        + fr("Alt text", key="alt_text")
+        + fr("Alt text", h(str(dl.get("alt_text") or item.get("alt_text") or "")))
         + "</div>"
         # — eBay Listing (confirmed by eBay after publish)
         f'<div class="dsec"><h3>eBay Listing{listing_badge}</h3>'
@@ -3434,6 +3486,31 @@ def _render_item_detail_html(
             f"</script>\n"
         )
 
+    # review_block banner — shown when an item is parked in needs_review (item 5)
+    _rb = item.get("review_block") or {}
+    review_block_html = ""
+    if _rb and not _rb.get("ready"):
+        _rb_stage = h(str(_rb.get("stage") or ""))
+        _rb_code = h(str(_rb.get("reason_code") or ""))
+        _rb_err = h(str(_rb.get("error") or ""))
+        _rb_sugg = h(str(_rb.get("suggestion") or ""))
+        _rb_at = h(str(_rb.get("flagged_at") or "")[:19])
+        _rb_detail = f'<div style="font-size:.82em;color:#f99;margin-top:4px">{_rb_err}</div>' if _rb_err else ""
+        _rb_sugg_html = f'<div style="font-size:.82em;color:#fb7;margin-top:4px">Suggestion: {_rb_sugg}</div>' if _rb_sugg else ""
+        review_block_html = (
+            f'<div style="background:#3a1010;border:1.5px solid #8a2020;border-radius:8px;'
+            f'padding:10px 14px;margin:10px 0;color:#f77;font-size:.9em">'
+            f'<strong>⛔ Blocked in review</strong>'
+            f' — stage: <code>{_rb_stage}</code>'
+            f', reason: <code>{_rb_code}</code>'
+            f'{(" · flagged " + _rb_at) if _rb_at else ""}'
+            f'{_rb_detail}'
+            f'{_rb_sugg_html}'
+            f'<div style="font-size:.79em;color:#884;margin-top:6px">'
+            f'Use <code>tgw migrate-unblock {h(sku)}</code> after resolving to re-queue.</div>'
+            f'</div>'
+        )
+
     return (
         f"<!DOCTYPE html>\n<html lang='en'>\n<head>\n"
         f"<meta charset='utf-8'>"
@@ -3447,6 +3524,7 @@ def _render_item_detail_html(
         f'<span class="slabel">{h(sku)}</span>'
         f'<span class="stitle">{h(title)}</span>'
         f"</div>\n"
+        f"{review_block_html}"
         f'<div class="detail-layout">'
         f"{gallery_html}"
         f"{fields_html}"
@@ -4596,7 +4674,12 @@ function qualityHtml(q) {{
   var score = q.score !== undefined ? q.score : null;
   if (score === null) return '';
   var cls = score >= 70 ? 'quality-ok' : 'quality-warn';
-  return '<span class="' + cls + '">Q:' + score + '</span>';
+  var out = '<span class="' + cls + '">Q:' + score + '</span>';
+  var flags = q.flags || [];
+  if (flags.length) {{
+    out += ' <span class="quality-warn" style="font-size:.76em">⚑ ' + escapeHtml(flags.join(', ')) + '</span>';
+  }}
+  return out;
 }}
 
 function aspectHtml(item) {{
@@ -4662,6 +4745,12 @@ function renderQueue(data) {{
     if (qh) html += qh;
     var ah = aspectHtml(item);
     if (ah) html += ah;
+    if (item.category_confidence === 'low') {{
+      html += '<span class="quality-warn" style="font-size:.76em">⚠ low category confidence</span>';
+    }}
+    if (item.offline_draft) {{
+      html += '<span class="quality-warn" style="font-size:.76em">⚠ offline draft</span>';
+    }}
     html += '</div>';
     html += '<div class="rq-actions">';
     html += '<button class="btn-approve" onclick="approveOne(' + JSON.stringify(sku) + ')">&#10003; Approve</button>';
@@ -5944,10 +6033,10 @@ function renderDashboard(data) {{
   }}
   var cards = [
     {{key:'needs_review',      label:'Need Review',    href:'/form/items', cls:function(v){{return v>0?'alert':'';}}}},
-    {{key:'pending_offers',    label:'Pending Offers', href:null,          cls:function(v){{return v>0?'info':'';}}}},
-    {{key:'needs_photos',      label:'Need Photos',    href:'/form/items', cls:function(v){{return v>0?'alert':'';}}}},
-    {{key:'has_revision_draft',label:'Revision Drafts',href:null,          cls:function(v){{return v>0?'info':'';}}}},
-    {{key:'dead_letter_count', label:'Dead Letters',   href:null,          cls:function(v){{return v>0?'err':'';}}}},
+    {{key:'pending_offers',    label:'Pending Offers', href:'/form/offers',    cls:function(v){{return v>0?'info':'';}}}},
+    {{key:'needs_photos',      label:'Need Photos',    href:'/form/items',     cls:function(v){{return v>0?'alert':'';}}}},
+    {{key:'has_revision_draft',label:'Revision Drafts',href:'/form/revisions', cls:function(v){{return v>0?'info':'';}}}},
+    {{key:'dead_letter_count', label:'Dead Letters',   href:'/form/pipeline',  cls:function(v){{return v>0?'err':'';}}}},
     {{key:'ready_count',       label:'Ready to List',  href:'/form/items', cls:function(v){{return v>0?'ok':'';}}}},
   ];
   var html = '';
