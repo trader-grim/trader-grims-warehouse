@@ -50,6 +50,8 @@ _TRANSIENT_ERRORS: list[tuple[str, int]] = [
     ('readtimeout',            120),   # network hiccup
     ('lease_expired',          120),   # claim race; will resolve on retry
     ('connectionerror',        120),   # transient network
+    ('503 server error',       300),   # eBay / EPS service temporarily unavailable
+    ('service unavailable',    300),   # generic upstream 503
 ]
 
 

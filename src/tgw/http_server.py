@@ -29,6 +29,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .assets import ordered_photos as _ordered_photos
 from .config import DEFAULT_CONFIG, load_config
 from .items import atomic_write_json, locationupdate
 from .queue import state_machine
@@ -401,17 +402,13 @@ def get_item(sku: str) -> Dict[str, Any]:
 
     item = load_item_doc(json_path)
 
-    # Attach media file lists
-    images, videos = [], []
-    for p in sorted(json_path.parent.iterdir()):
-        if not p.is_file():
-            continue
-        suf = p.suffix.lower()
-        if suf in {".jpg", ".jpeg", ".png", ".gif", ".webp"}:
-            images.append(p.name)
-        elif suf in {".mp4", ".mov", ".mkv", ".webm"}:
-            videos.append(p.name)
-    item["_images"] = images
+    # Attach media file lists (images in photo_order order)
+    sku_dir = json_path.parent
+    item["_images"] = [p.name for p in _ordered_photos(item, sku_dir)]
+    videos = [
+        p.name for p in sorted(sku_dir.iterdir())
+        if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}
+    ]
     item["_videos"] = videos
 
     # Attach recent queue job states for this SKU
@@ -1228,6 +1225,52 @@ def set_photo_order(sku: str, body: PhotoOrderBody) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/items/{sku}/assets — ordered photo list (Stage 1 asset fence)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/items/{sku}/assets", dependencies=[AUTH])
+def list_assets(sku: str) -> Dict[str, Any]:
+    """Return photos in photo_order display order with position metadata."""
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+    doc = load_item_doc(json_path)
+    photos = _ordered_photos(doc, json_path.parent)
+    assets = [
+        {"name": p.name, "url": f"/media/{sku}/{p.name}", "position": i}
+        for i, p in enumerate(photos)
+    ]
+    return {"ok": True, "sku": sku, "count": len(assets), "assets": assets}
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/items/{sku}/assets/{filename} — remove a photo
+# ---------------------------------------------------------------------------
+
+@app.delete("/api/items/{sku}/assets/{filename}", dependencies=[AUTH])
+def delete_asset(sku: str, filename: str) -> Dict[str, Any]:
+    """Delete a photo from disk and remove it from photo_order."""
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+    sku_dir = json_path.parent
+    target = sku_dir / filename
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"file not found: {filename}")
+    try:
+        target.resolve().relative_to(sku_dir.resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="path traversal not allowed")
+    target.unlink()
+    doc = load_item_doc(json_path)
+    order = doc.get("photo_order") or []
+    if filename in order:
+        doc["photo_order"] = [n for n in order if n != filename]
+        atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+    return {"ok": True, "sku": sku, "deleted": filename}
+
+
+# ---------------------------------------------------------------------------
 # GET /api/items/{sku}/hint-trail — identification history
 # ---------------------------------------------------------------------------
 
@@ -1933,7 +1976,6 @@ _TODOS_JS = """
 
 def _extract_pp_refs(body: str) -> "list[str]":
     """Extract PP-XXX-NNN references from a todo body string."""
-    import re
     return list(dict.fromkeys(re.findall(r'PP-[A-Z0-9]+-\d+', body)))
 
 
@@ -2756,16 +2798,31 @@ def _render_item_detail_html(
             f"function lbOpen(src){{var o=document.getElementById('lb');o.classList.add('open');document.getElementById('lb-img').src=src;}}"
             f"function lbClose(){{document.getElementById('lb').classList.remove('open');}}"
             f"document.addEventListener('keydown',function(e){{if(e.key==='Escape')lbClose();}});"
+            f"function refreshStrip(){{"
+            f"var strip=document.getElementById('photo-strip');"
+            f"if(!strip)return;"
+            f"var nameToItem={{}};"
+            f"strip.querySelectorAll('.strip-item').forEach(function(el){{"
+            f"var img=el.querySelector('img[data-name]');"
+            f"if(img)nameToItem[img.dataset.name]=el;"
+            f"}});"
+            f"_photos.forEach(function(n){{if(nameToItem[n])strip.appendChild(nameToItem[n]);}});"
+            f"var mp=document.getElementById('mp');"
+            f"if(mp&&_photos.length&&nameToItem[_photos[0]]){{"
+            f"var fi=nameToItem[_photos[0]].querySelector('img');if(fi)mp.src=fi.src;}}"
+            f"strip.querySelectorAll('.strip-item img').forEach(function(i,idx){{"
+            f"i.classList.toggle('active',idx===0);}});"
+            f"}}"
             f"function mvPhoto(idx){{"
             f"if(idx<1)return;"
             f"var t=_photos[idx-1];_photos[idx-1]=_photos[idx];_photos[idx]=t;"
-            f"savePhotoOrder();"
+            f"refreshStrip();savePhotoOrder();"
             f"}}"
             f"function mvFront(idx){{"
             f"if(idx<1)return;"
             f"var item=_photos.splice(idx,1)[0];"
             f"_photos.unshift(item);"
-            f"savePhotoOrder();"
+            f"refreshStrip();savePhotoOrder();"
             f"}}"
             f"function savePhotoOrder(){{"
             f"fetch('/api/items/'+_SKU+'/photo-order',{{"
@@ -3302,28 +3359,12 @@ def item_detail_form(sku: str):
 
     item = load_item_doc(json_path)
 
-    def _nat_key(p: Path) -> List:
-        return [int(c) if c.isdigit() else c.lower() for c in re.split(r"(\d+)", p.name)]
-
-    all_images: List[str] = []
-    videos: List[str] = []
-    for p in sorted(json_path.parent.iterdir(), key=_nat_key):
-        if not p.is_file():
-            continue
-        suf = p.suffix.lower()
-        if suf in {".jpg", ".jpeg", ".png", ".gif", ".webp"}:
-            all_images.append(p.name)
-        elif suf in {".mp4", ".mov", ".mkv", ".webm"}:
-            videos.append(p.name)
-
-    photo_order = item.get("photo_order") or []
-    if photo_order:
-        img_set = set(all_images)
-        ordered = [n for n in photo_order if n in img_set]
-        extras = [n for n in all_images if n not in set(ordered)]
-        images = ordered + extras
-    else:
-        images = all_images
+    sku_dir = json_path.parent
+    images: List[str] = [p.name for p in _ordered_photos(item, sku_dir)]
+    videos: List[str] = [
+        p.name for p in sorted(sku_dir.iterdir())
+        if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}
+    ]
 
     jobs: List[Dict[str, Any]] = []
     try:

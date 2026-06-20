@@ -37,29 +37,40 @@ log "start stamp=${STAMP}"
 
 btrfs subvolume snapshot -r "$SRC" "$LOCAL_SNAP" >> "$LOG" 2>&1
 
-PREV="$(ls -1dt "${SNAP_DIR}"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9] 2>/dev/null \
-    | grep -v "$LOCAL_SNAP" | head -1)"
+PREV="$(ls -1d "${SNAP_DIR}"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9] 2>/dev/null \
+    | sort -r | grep -v "$LOCAL_SNAP" | head -1)"
 
 if [ -n "$PREV" ]; then
     log "incremental send parent=${PREV##*/}"
-    btrfs send -p "$PREV" "$LOCAL_SNAP" | btrfs receive "$SNAP_ROOT/" >> "$LOG" 2>&1
+    if ! btrfs send -p "$PREV" "$LOCAL_SNAP" | btrfs receive "$SNAP_ROOT/" >> "$LOG" 2>&1; then
+        log "incremental send failed — chain broken; falling back to full send"
+        # Clean up all local snapshots except the one we're about to send
+        ls -1d "${SNAP_DIR}"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9] 2>/dev/null \
+            | sort -r | grep -v "$LOCAL_SNAP" \
+            | while read -r old; do
+                btrfs subvolume delete "$old" >> "$LOG" 2>&1
+                log "pruned stale local ${old##*/}"
+            done
+        log "full send (chain reset)"
+        btrfs send "$LOCAL_SNAP" | btrfs receive "$SNAP_ROOT/" >> "$LOG" 2>&1
+    fi
 else
     log "full send (no parent)"
     btrfs send "$LOCAL_SNAP" | btrfs receive "$SNAP_ROOT/" >> "$LOG" 2>&1
 fi
 
-# Prune old snapshots on target
-ls -1dt "${SNAP_ROOT}"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9]/ 2>/dev/null \
-    | sed 's|/$||' \
+# Prune old snapshots on target (sort by name, newest first)
+ls -1d "${SNAP_ROOT}"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9]/ 2>/dev/null \
+    | sort -r | sed 's|/$||' \
     | tail -n "+$((SNAP_KEEP + 1))" \
     | while read -r old; do
         btrfs subvolume delete "$old" >> "$LOG" 2>&1
         log "pruned target ${old##*/}"
     done
 
-# Prune old local snapshots (keep LOCAL_KEEP for incremental parent)
-ls -1dt "${SNAP_DIR}"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9] 2>/dev/null \
-    | tail -n "+$((LOCAL_KEEP + 1))" \
+# Prune old local snapshots (sort by name, newest first; keep LOCAL_KEEP for incremental parent)
+ls -1d "${SNAP_DIR}"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9] 2>/dev/null \
+    | sort -r | tail -n "+$((LOCAL_KEEP + 1))" \
     | while read -r old; do
         btrfs subvolume delete "$old" >> "$LOG" 2>&1
         log "pruned local ${old##*/}"

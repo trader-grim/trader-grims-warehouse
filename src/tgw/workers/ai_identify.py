@@ -25,6 +25,7 @@ import psycopg2.errors
 import tgw.logging as tgw_logging
 from tgw.apis.llm import call_model, get_task_model
 from tgw.apis.ollama import extract_json, is_available
+from tgw.assets import primary_photo as _asset_primary_photo
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.items import append_history_event, atomic_write_json
 from tgw.queue import state_machine
@@ -95,10 +96,6 @@ Respond with JSON:
 }}
 """
 
-
-def _primary_image(sku_dir: Path) -> Optional[Path]:
-    candidates = sorted(p for p in sku_dir.iterdir() if p.is_file() and p.suffix in _IMAGE_SUFFIXES)
-    return candidates[0] if candidates else None
 
 
 def _encode_resized(img_path: Path, max_px: int = _VISION_MAX_PX) -> tuple[str, int, int]:
@@ -182,7 +179,7 @@ class AIIdentifyWorker(QueueWorker):
         if not hint and existing_title and existing_title != sku:
             hint = existing_title
 
-        img_path = _primary_image(sku_dir)
+        img_path = _asset_primary_photo(item, sku_dir)
         if img_path is None:
             raise HardFailure(f"no images found for {sku}")
 

@@ -22,6 +22,7 @@ import psycopg2.errors
 import requests
 
 import tgw.logging as tgw_logging
+from tgw.assets import ordered_photos
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.ebay.upload import upload_photo
 from tgw.items import atomic_write_json
@@ -31,9 +32,6 @@ from tgw.queue.worker_base import HardFailure, QueueWorker
 log = logging.getLogger(__name__)
 
 QUEUE_NAME = 'ebay_upload'
-
-_PHOTO_EXTS: Set[str] = {'.jpg', '.jpeg', '.png', '.gif', '.tif', '.tiff',
-                          '.JPG', '.JPEG', '.PNG'}
 
 
 class EbayUploadWorker(QueueWorker):
@@ -53,12 +51,9 @@ class EbayUploadWorker(QueueWorker):
         # Build set of already-uploaded local paths
         existing: Set[str] = {e['local'] for e in item.get('ebay_photos', [])}
 
-        # Collect photos from the SKU directory
+        # Collect photos in photo_order display order
         sku_dir: Path = self.config['itemdata_root'] / sku
-        photos: List[Path] = sorted(
-            p for p in sku_dir.iterdir()
-            if p.is_file() and p.suffix in _PHOTO_EXTS
-        )
+        photos: List[Path] = ordered_photos(item, sku_dir)
 
         if not photos:
             log.warning('no photos found for %s — skipping upload', sku)
@@ -90,11 +85,24 @@ class EbayUploadWorker(QueueWorker):
         if not uploaded:
             raise RuntimeError(f'all photo uploads failed for {sku}: {errors[0] if errors else "no photos"}')
 
-        item['ebay_photos'] = uploaded
+        # Reorder ebay_photos to match photo_order so imageUrls reflects display order
+        path_to_entry = {e['local']: e for e in uploaded}
+        reordered: List[Dict[str, str]] = []
+        for p in ordered_photos(item, sku_dir):
+            key = str(p)
+            if key in path_to_entry:
+                reordered.append(path_to_entry[key])
+        # Safety: append any entries not reached via ordered_photos
+        seen_keys = {e['local'] for e in reordered}
+        for e in uploaded:
+            if e['local'] not in seen_keys:
+                reordered.append(e)
+
+        item['ebay_photos'] = reordered
 
         # Propagate eBay-hosted URLs into draft_listing if present
         if 'draft_listing' in item:
-            item['draft_listing']['imageUrls'] = [e['url'] for e in uploaded]
+            item['draft_listing']['imageUrls'] = [e['url'] for e in reordered]
 
         atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
 

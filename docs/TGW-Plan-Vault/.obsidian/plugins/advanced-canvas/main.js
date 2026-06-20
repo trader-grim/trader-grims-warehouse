@@ -27,7 +27,7 @@ __export(main_exports, {
   default: () => AdvancedCanvasPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian20 = require("obsidian");
+var import_obsidian21 = require("obsidian");
 
 // src/utils/icons-helper.ts
 var import_obsidian = require("obsidian");
@@ -319,7 +319,7 @@ var _CanvasHelper = class _CanvasHelper {
     if (element.id) (_a = controlGroup.querySelector(`#${element.id}`)) == null ? void 0 : _a.remove();
     controlGroup.appendChild(element);
   }
-  static createCardMenuOption(canvas, menuOption, previewNodeSize, onPlaced) {
+  static createCardMenuOption(canvas, menuOption, previewNodeSize, onPlaced, onRightClick) {
     const menuOptionElement = activeDocument.createElement("div");
     if (menuOption.id) menuOptionElement.id = menuOption.id;
     menuOptionElement.classList.add("canvas-card-menu-button");
@@ -328,6 +328,10 @@ var _CanvasHelper = class _CanvasHelper {
     (0, import_obsidian2.setTooltip)(menuOptionElement, menuOption.label, { placement: "top" });
     menuOptionElement.addEventListener("click", (_e) => {
       onPlaced(canvas, this.getCenterCoordinates(canvas, previewNodeSize()));
+    });
+    if (onRightClick) menuOptionElement.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      onRightClick(e);
     });
     menuOptionElement.addEventListener("pointerdown", (e) => {
       canvas.dragTempNode(e, previewNodeSize(), (pos) => {
@@ -1667,6 +1671,7 @@ var DEFAULT_SETTINGS_VALUES = {
   customNodeStyleAttributes: [],
   defaultTextNodeColor: 0,
   defaultTextNodeStyleAttributes: {},
+  nodeTemplates: [],
   edgesStylingFeatureEnabled: true,
   customEdgeStyleAttributes: [],
   inheritEdgeColorFromNode: false,
@@ -3913,8 +3918,161 @@ var GroupCanvasExtension = class extends CanvasExtension {
   }
 };
 
-// src/canvas-extensions/presentation-canvas-extension.ts
+// src/canvas-extensions/node-templates-canvas-extension.ts
 var import_obsidian13 = require("obsidian");
+var TEMPLATE_NODE_BUTTON_ID_PREFIX = "create-template-node-";
+var NodeTemplatesCanvasExtension = class extends CanvasExtension {
+  isEnabled() {
+    return true;
+  }
+  init() {
+    this.plugin.addCommand({
+      id: "save-node-as-template",
+      name: "Save node as template",
+      checkCallback: CanvasHelper.canvasCommand(
+        this.plugin,
+        (canvas) => canvas.getSelectionData().nodes.length === 1,
+        (canvas) => void this.saveNodeAsTemplate(canvas)
+      )
+    });
+    this.plugin.registerEvent(this.plugin.app.workspace.on(
+      "advanced-canvas:canvas-changed",
+      (canvas) => this.onCardMenuCreated(canvas)
+    ));
+  }
+  onCardMenuCreated(canvas) {
+    var _a;
+    const existingButtons = canvas.cardMenuEl.querySelectorAll(`[id^="${TEMPLATE_NODE_BUTTON_ID_PREFIX}"]`);
+    existingButtons.forEach((button) => button.remove());
+    const templates = this.plugin.settings.getSetting("nodeTemplates");
+    for (let i = 0; i < templates.length; i++) {
+      const template = templates[i];
+      CanvasHelper.addCardMenuOption(
+        canvas,
+        CanvasHelper.createCardMenuOption(
+          canvas,
+          {
+            id: `${TEMPLATE_NODE_BUTTON_ID_PREFIX}${i}`,
+            label: `Drag to add template node ${i + 1}`,
+            icon: (_a = template.icon) != null ? _a : "book-dashed"
+          },
+          () => ({ width: template.width, height: template.height }),
+          (canvas2, pos) => void this.createNodeFromTemplate(canvas2, template, pos),
+          (e) => this.createTemplateContextMenu(e)
+        )
+      );
+    }
+  }
+  async createNodeFromTemplate(canvas, template, pos) {
+    var _a;
+    const creationOptions = {
+      pos,
+      size: {
+        width: template.width,
+        height: template.height
+      }
+    };
+    let node;
+    if (template.type === "text") node = canvas.createTextNode(creationOptions);
+    else if (template.type === "file") {
+      let tfile;
+      if (template.path) {
+        const abstractFile = this.plugin.app.vault.getAbstractFileByPath(template.path);
+        if (abstractFile instanceof import_obsidian13.TFile) tfile = abstractFile;
+      }
+      tfile != null ? tfile : tfile = await new FileSelectModal(this.plugin.app, void 0, true).awaitInput();
+      node = canvas.createFileNode({ ...creationOptions, file: tfile });
+    } else if (template.type === "group") node = canvas.createGroupNode(creationOptions);
+    else if (template.type === "link") node = canvas.createLinkNode({ ...creationOptions, url: template.url });
+    else throw new Error(`Unknown template type: ${template.type}`);
+    const data = node.getData();
+    node.setData(
+      {
+        ...data,
+        color: (_a = template.color) != null ? _a : data.color,
+        styleAttributes: {
+          ...data.styleAttributes,
+          ...template.styleAttributes
+        }
+      },
+      false
+      /* addHistory */
+    );
+  }
+  createTemplateContextMenu(e) {
+    const menu = new import_obsidian13.Menu();
+    menu.addItem(
+      (item) => item.setTitle("Remove").setIcon("trash").onClick(async () => {
+        const buttonEl = e.target;
+        const index = parseInt(buttonEl.id.replace(TEMPLATE_NODE_BUTTON_ID_PREFIX, ""));
+        const templates = this.plugin.settings.getSetting("nodeTemplates");
+        templates.splice(index, 1);
+        await this.plugin.settings.setSetting({ nodeTemplates: templates });
+        const canvas = this.plugin.getCurrentCanvas();
+        if (canvas) this.onCardMenuCreated(canvas);
+      })
+    );
+    menu.showAtMouseEvent(e);
+  }
+  async saveNodeAsTemplate(canvas) {
+    const selectedNodeData = canvas.getSelectionData().nodes[0];
+    const icon = await new IconModal(this.plugin.app).promise;
+    if (!icon) {
+      new import_obsidian13.Notice("No icon selected, template creation cancelled.");
+      return;
+    }
+    await this.plugin.settings.setSetting({
+      nodeTemplates: [
+        ...this.plugin.settings.getSetting("nodeTemplates"),
+        {
+          icon,
+          type: selectedNodeData.type,
+          width: selectedNodeData.width,
+          height: selectedNodeData.height,
+          color: selectedNodeData.color,
+          styleAttributes: selectedNodeData.styleAttributes,
+          path: selectedNodeData.type === "file" ? selectedNodeData.file : void 0,
+          url: selectedNodeData.type === "link" ? selectedNodeData.url : void 0
+        }
+      ]
+    });
+    this.onCardMenuCreated(canvas);
+  }
+};
+var IconModal = class extends import_obsidian13.FuzzySuggestModal {
+  getItems() {
+    return (0, import_obsidian13.getIconIds)();
+  }
+  getItemText(item) {
+    return item;
+  }
+  renderSuggestion(item, el) {
+    el.classList.add("icon-modal-suggestion");
+    el.createEl("span", { cls: "icon-modal-suggestion-icon" }, (iconEl) => {
+      (0, import_obsidian13.setIcon)(iconEl, item.item);
+    });
+    el.createEl("span", {
+      text: item.item.replace("lucide-", ""),
+      cls: "icon-modal-suggestion-id"
+    });
+  }
+  onChooseItem(_item, _evt) {
+  }
+  get promise() {
+    return new Promise((resolve, _reject) => {
+      this.onChooseItem = (item, _evt) => {
+        resolve(item);
+      };
+      this.onClose = () => window.setTimeout(() => {
+        resolve(null);
+      }, 10);
+      this.open();
+    });
+  }
+};
+
+// src/canvas-extensions/presentation-canvas-extension.ts
+var import_obsidian14 = require("obsidian");
 var START_SLIDE_NAME = "Start Slide";
 var DEFAULT_SLIDE_NAME = "New Slide";
 var PresentationCanvasExtension = class extends CanvasExtension {
@@ -4115,7 +4273,7 @@ var PresentationCanvasExtension = class extends CanvasExtension {
     if (!tryContinue || this.visitedNodeIds.length === 0) {
       const startNode2 = canvas.metadata["startNode"] && canvas.nodes.get(canvas.metadata["startNode"]);
       if (!startNode2) {
-        new import_obsidian13.Notice("No start node found. Please mark a node as a start node through the popup menu.");
+        new import_obsidian14.Notice("No start node found. Please mark a node as a start node through the popup menu.");
         return;
       }
       this.visitedNodeIds = [startNode2.getData().id];
@@ -4496,10 +4654,10 @@ var EncapsulateCanvasExtension = class extends CanvasExtension {
 };
 
 // src/canvas-extensions/commands-canvas-extension.ts
-var import_obsidian15 = require("obsidian");
+var import_obsidian16 = require("obsidian");
 
 // src/canvas-extensions/copy-node-reference-canvas-extension.ts
-var import_obsidian14 = require("obsidian");
+var import_obsidian15 = require("obsidian");
 var CopyNodeReferenceCanvasExtension = class _CopyNodeReferenceCanvasExtension extends CanvasExtension {
   isEnabled() {
     return "enableSingleNodePopupReferenceCopy";
@@ -4529,8 +4687,8 @@ var CopyNodeReferenceCanvasExtension = class _CopyNodeReferenceCanvasExtension e
     const nodeTypeString = TextHelper.toTitleCase(nodeData.type);
     const wikilink = `[[${file.path}#${nodeData.id}|${file.name} (${nodeTypeString} node)]]`;
     navigator.clipboard.writeText(wikilink).then(
-      () => new import_obsidian14.Notice("Copied wikilink to node to clipboard.", 2e3)
-    ).catch(() => new import_obsidian14.Notice("Failed to copy wikilink to node to clipboard.", 2e3));
+      () => new import_obsidian15.Notice("Copied wikilink to node to clipboard.", 2e3)
+    ).catch(() => new import_obsidian15.Notice("Failed to copy wikilink to node to clipboard.", 2e3));
   }
 };
 
@@ -4738,7 +4896,7 @@ var CommandsCanvasExtension = class extends CanvasExtension {
             if (!nodeOutgoingLinks) continue;
             for (const nodeOutgoingLink of nodeOutgoingLinks) {
               const resolvedLink = this.plugin.app.metadataCache.getFirstLinkpathDest(nodeOutgoingLink.link, relativeFile.path);
-              if (!(resolvedLink instanceof import_obsidian15.TFile)) continue;
+              if (!(resolvedLink instanceof import_obsidian16.TFile)) continue;
               outgoingLinks.add(resolvedLink);
             }
           }
@@ -4774,7 +4932,7 @@ var CommandsCanvasExtension = class extends CanvasExtension {
               if (!nodeBacklinks) continue;
               for (const nodeBacklink of nodeBacklinks.data.keys()) {
                 const resolvedLink = this.plugin.app.metadataCache.getFirstLinkpathDest(nodeBacklink, file.path);
-                if (!(resolvedLink instanceof import_obsidian15.TFile)) continue;
+                if (!(resolvedLink instanceof import_obsidian16.TFile)) continue;
                 backlinks.add(resolvedLink);
               }
             }
@@ -4783,7 +4941,7 @@ var CommandsCanvasExtension = class extends CanvasExtension {
             if (!canvasBacklinks) return;
             for (const canvasBacklink of canvasBacklinks.data.keys()) {
               const resolvedLink = this.plugin.app.metadataCache.getFirstLinkpathDest(canvasBacklink, canvasFile.path);
-              if (!(resolvedLink instanceof import_obsidian15.TFile)) continue;
+              if (!(resolvedLink instanceof import_obsidian16.TFile)) continue;
               backlinks.add(resolvedLink);
             }
           }
@@ -5059,7 +5217,7 @@ var AutoResizeNodeCanvasExtension = class extends CanvasExtension {
 };
 
 // src/canvas-extensions/portals-canvas-extension.ts
-var import_obsidian16 = require("obsidian");
+var import_obsidian17 = require("obsidian");
 var PORTAL_ID_DELIMITER = "||";
 var PORTAL_ID_PREFIX = `acportal${PORTAL_ID_DELIMITER}`;
 var PORTAL_PADDING = 50;
@@ -5121,7 +5279,7 @@ var PortalsCanvasExtension = class _PortalsCanvasExtension extends CanvasExtensi
           setData(newData);
         }).catch((error) => {
           console.error("Error loading portal data:", error);
-          new import_obsidian16.Notice("An error occurred while loading portal data. Please check console for details.");
+          new import_obsidian17.Notice("An error occurred while loading portal data. Please check console for details.");
         });
       }
     ));
@@ -5201,13 +5359,13 @@ var PortalsCanvasExtension = class _PortalsCanvasExtension extends CanvasExtensi
   onEdgeConnectionTryDraggingBefore(_canvas, edge, _event, cancelRef) {
     if (!_PortalsCanvasExtension.isPortalElement(edge.id)) return;
     cancelRef.value = true;
-    new import_obsidian16.Notice("Updating edges from portals is not supported yet.");
+    new import_obsidian17.Notice("Updating edges from portals is not supported yet.");
   }
   onEdgeConnectionDraggingAfter(canvas, edge, _event, _newEdge, _side, _previousEnds) {
     if (_PortalsCanvasExtension.isPortalElement(edge.id)) return;
     if (!_PortalsCanvasExtension.isPortalElement(edge.from.node.id) || !_PortalsCanvasExtension.isPortalElement(edge.to.node.id)) return;
     canvas.removeEdge(edge);
-    new import_obsidian16.Notice("Creating edges with both ends in portals are not supported yet.");
+    new import_obsidian17.Notice("Creating edges with both ends in portals are not supported yet.");
   }
   onPopupMenu(canvas) {
     if (canvas.readonly) return;
@@ -5294,7 +5452,7 @@ var PortalsCanvasExtension = class _PortalsCanvasExtension extends CanvasExtensi
     if (nestedPortalFiles.has(portalNodeData.file)) return addedData;
     nestedPortalFiles.add(portalNodeData.file);
     const portalFile = this.plugin.app.vault.getAbstractFileByPath(portalNodeData.file);
-    if (!(portalFile instanceof import_obsidian16.TFile) || portalFile.extension !== "canvas") return addedData;
+    if (!(portalFile instanceof import_obsidian17.TFile) || portalFile.extension !== "canvas") return addedData;
     const portalFileDataString = await this.plugin.app.vault.cachedRead(portalFile);
     if (portalFileDataString === "") return addedData;
     const portalFileData = JSON.parse(portalFileDataString);
@@ -5385,7 +5543,7 @@ var PortalsCanvasExtension = class _PortalsCanvasExtension extends CanvasExtensi
 };
 
 // src/canvas-extensions/frontmatter-control-button-canvas-extension.ts
-var import_obsidian17 = require("obsidian");
+var import_obsidian18 = require("obsidian");
 var FrontmatterControlButtonCanvasExtension = class extends CanvasExtension {
   isEnabled() {
     return "canvasMetadataCompatibilityEnabled";
@@ -5411,7 +5569,7 @@ var FrontmatterControlButtonCanvasExtension = class extends CanvasExtension {
           var _a2;
           const propertiesPlugin = this.plugin.app.internalPlugins.plugins["properties"];
           if (!(propertiesPlugin == null ? void 0 : propertiesPlugin._loaded)) {
-            new import_obsidian17.Notice(`Core plugin "Properties view" was not found or isn't enabled. Enable it and restart Obsidian.`);
+            new import_obsidian18.Notice(`Core plugin "Properties view" was not found or isn't enabled. Enable it and restart Obsidian.`);
             return;
           }
           let propertiesLeaf = (_a2 = this.plugin.app.workspace.getLeavesOfType("file-properties").first()) != null ? _a2 : null;
@@ -5658,7 +5816,7 @@ var ColorPaletteCanvasExtension = class extends CanvasExtension {
 };
 
 // src/canvas-extensions/collapsible-groups-canvas-extension.ts
-var import_obsidian18 = require("obsidian");
+var import_obsidian19 = require("obsidian");
 var CollapsibleGroupsCanvasExtension = class extends CanvasExtension {
   isEnabled() {
     return "collapsibleGroupsFeatureEnabled";
@@ -5706,7 +5864,7 @@ var CollapsibleGroupsCanvasExtension = class extends CanvasExtension {
     (_a = groupNode.collapseEl) == null ? void 0 : _a.remove();
     const collapseEl = activeDocument.createElement("div");
     collapseEl.className = "collapse-button";
-    (0, import_obsidian18.setIcon)(collapseEl, groupNodeData.collapsed ? "plus-circle" : "minus-circle");
+    (0, import_obsidian19.setIcon)(collapseEl, groupNodeData.collapsed ? "plus-circle" : "minus-circle");
     collapseEl.onclick = () => this.toggleCollapseGroup(canvas, groupNode);
     groupNode.collapseEl = collapseEl;
     (_b = groupNode.labelEl) == null ? void 0 : _b.insertAdjacentElement("afterend", collapseEl);
@@ -6794,7 +6952,7 @@ async function toPng(node, options = {}) {
 }
 
 // src/canvas-extensions/export-canvas-extension.ts
-var import_obsidian19 = require("obsidian");
+var import_obsidian20 = require("obsidian");
 var MAX_ALLOWED_LOADING_TIME = 1e4;
 var ExportCanvasExtension = class extends CanvasExtension {
   isEnabled() {
@@ -6830,7 +6988,7 @@ var ExportCanvasExtension = class extends CanvasExtension {
     });
   }
   async showExportImageSettingsModal(canvas, nodesToExport) {
-    const modal = new import_obsidian19.Modal(this.plugin.app);
+    const modal = new import_obsidian20.Modal(this.plugin.app);
     modal.setTitle("Export image settings");
     let pixelRatioSetting = null;
     let noFontExportSetting = null;
@@ -6848,7 +7006,7 @@ var ExportCanvasExtension = class extends CanvasExtension {
       }
     };
     let svg = false;
-    new import_obsidian19.Setting(modal.contentEl).setName("Export file format").setDesc("Choose the file format to export the canvas as.").addDropdown(
+    new import_obsidian20.Setting(modal.contentEl).setName("Export file format").setDesc("Choose the file format to export the canvas as.").addDropdown(
       (dropdown) => dropdown.addOptions({
         png: "PNG",
         svg: "SVG"
@@ -6858,33 +7016,33 @@ var ExportCanvasExtension = class extends CanvasExtension {
       })
     );
     let pixelRatioFactor = 1;
-    pixelRatioSetting = new import_obsidian19.Setting(modal.contentEl).setName("Pixel ratio").setDesc("Higher pixel ratios result in higher resolution images but also larger file sizes.").addSlider(
+    pixelRatioSetting = new import_obsidian20.Setting(modal.contentEl).setName("Pixel ratio").setDesc("Higher pixel ratios result in higher resolution images but also larger file sizes.").addSlider(
       (slider) => slider.setDynamicTooltip().setLimits(0.2, 5, 0.1).setValue(pixelRatioFactor).onChange((value) => pixelRatioFactor = value)
     );
     let noFontExport = true;
-    noFontExportSetting = new import_obsidian19.Setting(modal.contentEl).setName("Skip font export").setDesc("This will not include the fonts in the exported SVG. This will make the SVG file smaller.").addToggle(
+    noFontExportSetting = new import_obsidian20.Setting(modal.contentEl).setName("Skip font export").setDesc("This will not include the fonts in the exported SVG. This will make the SVG file smaller.").addToggle(
       (toggle) => toggle.setValue(noFontExport).onChange((value) => noFontExport = value)
     );
     let theme = activeDocument.body.classList.contains("theme-dark") ? "dark" : "light";
-    new import_obsidian19.Setting(modal.contentEl).setName("Theme").setDesc("The theme used for the export.").addDropdown(
+    new import_obsidian20.Setting(modal.contentEl).setName("Theme").setDesc("The theme used for the export.").addDropdown(
       (dropdown) => dropdown.addOptions({
         light: "Light",
         dark: "Dark"
       }).setValue(theme).onChange((value) => theme = value)
     );
     let watermark = false;
-    new import_obsidian19.Setting(modal.contentEl).setName("Show logo").setDesc("This will add an Obsidian + Advanced Canvas logo to the bottom left.").addToggle(
+    new import_obsidian20.Setting(modal.contentEl).setName("Show logo").setDesc("This will add an Obsidian + Advanced Canvas logo to the bottom left.").addToggle(
       (toggle) => toggle.setValue(watermark).onChange((value) => watermark = value)
     );
     let garbledText = false;
-    new import_obsidian19.Setting(modal.contentEl).setName("Privacy mode").setDesc("This will obscure any text on your canvas.").addToggle(
+    new import_obsidian20.Setting(modal.contentEl).setName("Privacy mode").setDesc("This will obscure any text on your canvas.").addToggle(
       (toggle) => toggle.setValue(garbledText).onChange((value) => garbledText = value)
     );
     let transparentBackground = false;
-    transparentBackgroundSetting = new import_obsidian19.Setting(modal.contentEl).setName("Transparent background").setDesc("This will make the background of the image transparent.").addToggle(
+    transparentBackgroundSetting = new import_obsidian20.Setting(modal.contentEl).setName("Transparent background").setDesc("This will make the background of the image transparent.").addToggle(
       (toggle) => toggle.setValue(transparentBackground).onChange((value) => transparentBackground = value)
     );
-    new import_obsidian19.Setting(modal.contentEl).addButton(
+    new import_obsidian20.Setting(modal.contentEl).addButton(
       (button) => button.setButtonText("Save").setCta().onClick(async () => {
         modal.close();
         await this.exportImage(
@@ -6918,7 +7076,7 @@ var ExportCanvasExtension = class extends CanvasExtension {
       return nodesToExportIds.includes(edgeData.fromNode) && nodesToExportIds.includes(edgeData.toNode);
     });
     const backgroundColor = transparentBackground ? void 0 : window.getComputedStyle(canvas.canvasEl).getPropertyValue("--canvas-background");
-    new import_obsidian19.Notice("Exporting the canvas. Please wait...");
+    new import_obsidian20.Notice("Exporting the canvas. Please wait...");
     const interactionBlocker = this.getInteractionBlocker();
     activeDocument.body.appendChild(interactionBlocker);
     canvas.screenshotting = true;
@@ -7019,7 +7177,7 @@ var ExportCanvasExtension = class extends CanvasExtension {
         downloadEl.click();
       } else {
         const ERROR_MESSAGE = "Export cancelled: Nodes did not finish loading in time";
-        new import_obsidian19.Notice(ERROR_MESSAGE);
+        new import_obsidian20.Notice(ERROR_MESSAGE);
         console.error(ERROR_MESSAGE);
       }
     } finally {
@@ -7469,10 +7627,10 @@ var PATCHERS = [
   FileManagerPatcher,
   // Direct metadata dependant patchers
   PropertiesPatcher,
-  !(0, import_obsidian20.requireApiVersion)("1.12.0") && BacklinksPatcher,
+  !(0, import_obsidian21.requireApiVersion)("1.12.0") && BacklinksPatcher,
   OutgoingLinksPatcher,
   // Metadata dependant patchers
-  (0, import_obsidian20.requireApiVersion)("1.9.0") && BasesTableViewPatcher,
+  (0, import_obsidian21.requireApiVersion)("1.9.0") && BasesTableViewPatcher,
   LinkSuggestionsPatcher,
   EmbedPatcher,
   SearchPatcher
@@ -7500,6 +7658,7 @@ var CANVAS_EXTENSIONS = [
   CommandsCanvasExtension,
   BetterReadonlyCanvasExtension,
   GroupCanvasExtension,
+  NodeTemplatesCanvasExtension,
   VariableBreakpointCanvasExtension,
   EdgeHighlightCanvasExtension,
   AutoFileNodeEdgesCanvasExtension,
@@ -7511,7 +7670,7 @@ var CANVAS_EXTENSIONS = [
   EdgeSelectionCanvasExtension,
   CopyNodeReferenceCanvasExtension
 ];
-var AdvancedCanvasPlugin = class extends import_obsidian20.Plugin {
+var AdvancedCanvasPlugin = class extends import_obsidian21.Plugin {
   async onload() {
     IconsHelper.addIcons();
     this.settings = new SettingsManager(this);
@@ -7543,7 +7702,7 @@ var AdvancedCanvasPlugin = class extends import_obsidian20.Plugin {
     }).filter((canvas) => canvas);
   }
   getCurrentCanvasView() {
-    const canvasView = this.app.workspace.getActiveViewOfType(import_obsidian20.ItemView);
+    const canvasView = this.app.workspace.getActiveViewOfType(import_obsidian21.ItemView);
     if ((canvasView == null ? void 0 : canvasView.getViewType()) !== "canvas") return null;
     return canvasView;
   }

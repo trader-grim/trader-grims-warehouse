@@ -102,11 +102,11 @@ incomplete wiring, and data quality problems that need fixing.
 - **Fix**: PP-SYNC-001 sync pass to pull authoritative active listing state from eBay
 - **Status**: blocked on PP-SYNC-001 implementation
 
-### ISS-013 — alt-text rename broke photo display order
+### ISS-013 — alt-text rename broke photo display order ✅ CLOSED 2026-06-19
 - **Symptom**: After `tgw alt-text <sku>`, the original display photo is renamed to `<sku>-alt.jpg`; the gallery now shows a "random" photo first (often the second photo), with no way to control display order
 - **Root cause**: todo #38 implementation renamed the original photo to `<sku>-alt.jpg` instead of creating a companion file. The intent was `<sku>-alt.jpg` = a new AI-generated derivative; the original should keep its filename
-- **Fix** (todo #874): modify `tgw alt-text` to NOT rename the original; `<sku>-alt.jpg` must be a new/companion file only; scan ItemData for already-renamed originals and repair; photo gallery sort: by mtime, SKU-named files first
-- **Status**: open
+- **Fix**: `scripts/photo_repair_iss013.py` renamed all misnamed `<sku>-alt.jpg` files to `<original-photo>-alt.jpg` (rename-only, originals untouched). 618 items repaired 2026-06-19. Code fix already in via commit `9319e5e` (copy not rename). Originals remain alongside companions; archive sweep deferred until transactional base (Stage 2) is in place.
+- **Status**: closed
 
 ### ISS-014 — qty field can be negative (data quality)
 - **Symptom**: at least one item has qty = -1 (e.g. tgw202604041746293); inventory logic assumes qty ≥ 0

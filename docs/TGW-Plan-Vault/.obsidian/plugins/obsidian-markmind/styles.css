@@ -3774,6 +3774,16 @@ span.mm-sline .line {
     align-items: center;
 }
 
+.mm-ppt-page .mm-ppt-resize {
+    position: absolute;
+    right: 6px;
+    display: block;
+
+    bottom: 0px;
+    background: transparent;
+    cursor: pointer;
+}
+
 .mm-node-embed {
     display: none !important;
 }

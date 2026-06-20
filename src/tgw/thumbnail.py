@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 try:
     from PIL import Image
@@ -21,6 +21,7 @@ try:
 except ImportError:
     _PILLOW = False
 
+from .assets import primary_photo as _asset_primary_photo
 from .resolver import find_item_jsons, load_item_doc
 
 
@@ -33,7 +34,7 @@ def build_thumbnail_for_sku(cfg: Dict[str, Any], sku: str) -> Dict[str, Any]:
     if not json_path.exists():
         return {'ok': False, 'sku': sku, 'error': 'item JSON not found'}
     doc = load_item_doc(json_path)
-    img_path = _primary_image(sku_dir, str(doc.get('image', '')))
+    img_path = _asset_primary_photo(doc, sku_dir)
     if img_path is None:
         return {'ok': True, 'sku': sku, 'action': 'skipped', 'reason': 'no image'}
     thumb_root: Path = cfg['thumbnail_root']
@@ -48,14 +49,6 @@ def build_thumbnail_for_sku(cfg: Dict[str, Any], sku: str) -> Dict[str, Any]:
         img.convert('RGB').save(thumb_path, 'JPEG', quality=85)
     return {'ok': True, 'sku': sku, 'action': 'generated', 'thumb': str(thumb_path)}
 
-
-def _primary_image(sku_dir: Path, image_field: str) -> Optional[Path]:
-    if image_field:
-        candidate = sku_dir / Path(image_field).name
-        if candidate.exists():
-            return candidate
-    jpgs = sorted(sku_dir.glob('*.jpg')) + sorted(sku_dir.glob('*.JPG'))
-    return jpgs[0] if jpgs else None
 
 
 def build_thumbnail_cache(cfg: Dict[str, Any],
@@ -80,8 +73,7 @@ def build_thumbnail_cache(cfg: Dict[str, Any],
             if not sku:
                 skipped += 1
                 continue
-            img_path = _primary_image(json_path.parent,
-                                      str(doc.get('image', '')))
+            img_path = _asset_primary_photo(doc, json_path.parent)
             if img_path is None:
                 skipped += 1
                 continue

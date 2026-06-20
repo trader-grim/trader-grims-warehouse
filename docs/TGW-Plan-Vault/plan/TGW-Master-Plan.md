@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-15 (session 32 — 14 web-review suggestions processed; ISS-013/014/015 added; Phase 3p planned; Round 8 seeded todos #874–#887)
+updated: 2026-06-19 (session 36 — PROPOSED-PLAN-2026-06-19 merged; staged foundation plan adopted; ISS-013 closed; PP-AIOPS-001 anchored; PP-DATA-OWN-001 Track C expanded)
 maintained_by: Opus (planner)
 ---
 
@@ -301,6 +301,30 @@ maintained_by: Opus (planner)
 - **SKU migrate** — `ebay_sku_migrate` worker running hourly; ~8,350 eBay live listings remain;
   shipping policy now category-aware (FC4 default, 7 category overrides in config)
 
+### Session 35/36 — 2026-06-19 (foundation replan + ISS-013 close)
+
+- **ISS-013 CLOSED** — `scripts/photo_repair_iss013.py` renamed 618 misnamed `<sku>-alt.jpg`
+  → `<original-photo>-alt.jpg` (rename-only; originals were present). Zero errors. All naming
+  formats handled: `tgwYYYYMMDD_HHMMSS`, `a11bYYYYMMDD_HHMMSS`, `IMG_YYYYMMDD_HHMMSS`,
+  `cropped-*`, and numeric (`1.jpg`→`1-alt.jpg`). Root cause: `alt_text.py` pre-commit
+  `9319e5e` used `rename` instead of `copy`. Archive sweep deferred until Stage 2 CDC.
+- **Foldio naming convention defined** — `<sku>-foldioNN.jpg` (2-digit zero-padded; 01–28).
+  API will reject bare numeric names at ingest and rename to foldio convention. 232 existing
+  items with numeric names deferred until Stage 2 transactional base.
+- **PROPOSED-PLAN-2026-06-19 approved and merged** — staged foundation plan adopted:
+  Stage 0 (ops fixes) → Stage 1 (API fence) → Stage 2 (PP-AIOPS-001) → Stage 3 (PP-BACKUP-001)
+  → Stage 4 (PP-NIXOS-001) → Stage 5 (Phase 5 sandbox) → Stage 6 (PP-DATA-OWN-001 Phases 2–5).
+  Data Tracks A/B/C run in parallel. Full spec in `plan/PROPOSED-PLAN-2026-06-19.md`.
+- **USB boot media designed** — 2 × 16 GB Ventoy drives (`TGW-BOOT-01` / `TGW-BOOT-02`) with
+  400 MB `tgw-kit` ext4 partition (UUID-mounted). Kit: flake, site-config, schema SQL,
+  age-encrypted secrets. Prep procedure in `PLAN-nixos-migration.md` Phase 2.5.
+  Weekend plan 2026-06-21/22: Dave tests on iMac A1131. Ventoy partition label must stay `ventoy`.
+- **PP-DATA-OWN-001 Track C expanded** — category hierarchy (C2a), full aspects per category
+  (C2b), EPS URL→local photo correlation (C2c), full raw metadata capture everywhere (C2d).
+  Details in PP-DATA-OWN-001 section below.
+- **PP-AIOPS-001 anchored** — cat-herding platform (JetStream + audit stream + anomaly detection
+  + litterbox). Full spec in `plan/PP-AIOPS-001-cat-herding-platform.md`. Summary in Phase 5 below.
+
 ### Phase 2a observation gate ✅ CLEARED 2026-06-02
 - `ebay_token_refreshed` observed at 12:07 — full expiry+refresh cycle confirmed
 - No separate cron existed to retire; worker is sole token manager
@@ -345,16 +369,73 @@ maintained_by: Opus (planner)
 - ✅ **PP-HINT-001 Browse enrichment** (2026-06-07) — `_fetch_browse_aspect_hints()` in `ebay_draft.py`; ASPECT_REFINEMENTS fieldgroup + category filter; injects common values into Ollama prompt; `browse_hint_count` in draft_listing
 - ✅ **PP-HINT-001 trail** (2026-06-08) — `identification_history` in item JSON; `append_history_event()` in `items.py`; events: `ai_identify` + `hint_set`; `tgw hint-trail <sku>` CLI
 
-### Active / next build priorities
+### Active / next build priorities — staged foundation plan (adopted 2026-06-19)
 
-**See `tgw todo claude` for the live task queue.** The plan is the canonical *reference spec*; `tgw todo` is for *assignment of duties* derived from the plan. Use `tgw todo` to find what to work on; use the plan for design context and status history.
+**Sequence:** Stage 0 → Stage 1 → Stage 2 → Stage 3 → Stage 4 → Stage 5 → Stage 6.
+Data Tracks A/B/C run in parallel with Stages 1–5. Full rationale: `PROPOSED-PLAN-2026-06-19.md`.
+**See `tgw todo claude` for the live task queue.** Plan = reference spec; `tgw todo` = active duties.
 
-Operator-gated items still tracked here:
+#### Stage 0 — Immediate Operational Fixes (1 session, no new dev)
+| Item | Fix |
+|------|-----|
+| Ghost `tgw-worker@http.service` crash-loop | `systemctl disable --now && mask` |
+| 50 `ebay_upload` dead-letters (Jun 17 outage) | Requeue — outage cleared |
+| `task/aider-20260616145314` stale branch | Diff vs main, merge or abandon |
+| PP-BACKUP-001 Phase A operator todos (#61) | Install db-backup, cloud-sync, secrets-backup timers |
+
+Data Track A Phase 4 (policies pull) can start alongside Stage 0 — read-only, no risk.
+
+#### Stage 1 — API Fence: Asset Management (S, 1 session)
+New endpoints in `tgw-api.py`: `GET/POST/DELETE /api/item/<sku>/asset*` + `POST reorder`.
+Workers that touch photos route through these. Filename convention enforced at the API:
+`<sku>.jpg`, `<sku>-alt.jpg`, `<sku>-thumb.jpg`, `<original>-alt.jpg`, `<sku>-foldioNN.jpg`,
+legacy timestamp formats. Bare numeric names (`1.jpg`) rejected; renamed at ingest to foldioNN.
+Companion name derived from source photo name at the API, never from the caller.
+Full spec in `## PP-DATA-OWN-001 Track C → Asset Management` or standalone PP section below.
+
+#### Stage 2 — PP-AIOPS-001 Phases 1–4 (L–XL, 4–6 sessions)
+JetStream + ItemData audit stream + queue transition outbox + anomaly detection + litterbox.
+Full spec: `plan/PP-AIOPS-001-cat-herding-platform.md`. Summary in `## Phase 5` below.
+
+#### Stage 3 — PP-BACKUP-001 Phases B–E (M, 1–2 sessions)
+DB dump (B) → cloud sync (C) → secrets backup (D) → restore validation (E).
+
+#### Stage 4 — PP-NIXOS-001 (L)
+NixOS migration. Not blocked by Stages 1–3 — those stages run the same on NixOS.
+USB boot media ready: `TGW-BOOT-01/02` (2 × 16 GB Ventoy, 400 MB tgw-kit). Prep: Phase 2.5.
+
+#### Stage 5 — PP-AIOPS-001 Phase 5: AI Session Isolation (L–XL, after PP-NIXOS-001)
+Btrfs CoW snapshot per session + ephemeral nspawn + FIFO pipe + cgroup supervisor.
+Bad agent sessions roll back in one command. Full spec in `plan/PP-AIOPS-001-cat-herding-platform.md`.
+
+#### Stage 6 — PP-DATA-OWN-001 Phases 2–5
+Ongoing eBay sync, sold history backfill, forward sync, repricer (blocked on scope).
+
+#### Data Track A — eBay Data Acquisition (parallel, safe to start)
+- Phase 4 (policies pull): `sell.account` → `data/ebay-policies.json`; fixes ISS-002
+- Phase 2 (ongoing sync): schedule `ebay_sync` to write `ebay_live` on a cycle
+- Phase 3 (sold/transaction history): verify all 976 sold items; fix status filter
+- Phase 5 (forward sync): on push, refresh `ebay_live` from response
+
+#### Data Track B — Photo Recovery ✅ CLOSED 2026-06-19
+618 items repaired by `scripts/photo_repair_iss013.py`. ISS-013 closed.
+Archive sweep (originals → history) deferred until Stage 2 CDC in place.
+
+#### Data Track C — Reference and Relationship Data (parallel, safe to start)
+See `## PP-DATA-OWN-001` section below for full C1–C5 detail.
+- **C1** Shipping policies → `data/ebay-policies.json`
+- **C2a** Category hierarchy (main/secondary/store) → `data/ebay-categories.json`
+- **C2b** Full aspects per category (required/recommended/optional) → `data/ebay-aspects-by-category.json`
+- **C2c** EPS URL → local photo correlation → `data/ebay-image-map.json`
+- **C2d** Full raw metadata capture: store complete eBay API responses; diff vs ItemData; quirks → CATEGORY-QUIRKS.md
+- **C3** Category group enrichment (25 groups); **C4** Location types; **C5** Error code index
+
+#### Operator-gated / blocked
 | PP | Status | Notes |
 |----|--------|-------|
 | **PP-SOLD-001 Tier 3** sweep | operator gated | Run `tgw ebay-sweep` after full-history CSV import |
-| **PP-PYIPC-001** | ✅ **DONE 2026-06-11** | `tgw.apis.syncthing` + `tgw.apis.kdeconnect`; 25 tests; see row 57 above |
-| **PP-REPRICER-001** live | blocked | Blocked on `buy.marketplace_insights` scope |
+| **PP-PYIPC-001** | ✅ **DONE 2026-06-11** | `tgw.apis.syncthing` + `tgw.apis.kdeconnect`; 25 tests |
+| **PP-REPRICER-001** live | blocked | Blocked on `buy.marketplace_insights` scope (eBay DS 8 pending) |
 
 ### Running in background
 - `ebay_sku_migrate` — ~8,350 live listings remaining; ~5/hr; ~70 days to complete
@@ -1339,6 +1420,41 @@ E-sneaker-net: export context → run in external AI → save result to `inbox/`
 
 - Detailed research on aider + MCP multi-model sub-agent architecture (DeepSeek v4 Flash + Gemini 2.5 Flash-Lite routed via Claude Pro) filed in dev-workflow/research — see `RESEARCH-aider-mcp-multimodel-token-optimization.md`
 ## Phase 5 — AI operations layer
+
+### PP-AIOPS-001 — Cat-Herding Platform (adopted 2026-06-19)
+
+**Full spec:** `plan/PP-AIOPS-001-cat-herding-platform.md`
+**Status:** PLANNED — Stages 1–4 execute after Stage 1 (API fence); Stage 5 after PP-NIXOS-001.
+**Core problem:** The platform operated without an audit trail for data changes. Photo renames,
+field regressions, and pipeline failures were discovered by symptoms, not by observing causes.
+
+**Phases 1–4** run on MX Linux (no NixOS dependency):
+
+- **Phase 1 — JetStream + ItemData Audit Stream (M, 1–2 sessions):** Install NATS JetStream
+  (single-node native binary). Wire `items._write_field()` + asset management endpoints to
+  publish to `ITEMDATA_MUTATIONS` stream (`itemdata.{sku}.{field}` / `itemdata.{sku}.asset.{name}`).
+  Every data change has a timestamped, attributed record.
+
+- **Phase 2 — Queue Transition Outbox (S, 1 session):** Wire `QueueWorker` to publish every
+  job state transition to `QUEUE_TRANSITIONS` stream. Add `session_id` so Claude/Aider changes
+  are individually attributable.
+
+- **Phase 3 — Anomaly Detection Worker (M, 1–2 sessions):** Subscribes to both streams; applies
+  rule library. Bad patterns (price→0, primary photo renamed, dead-letter spike, status regressed)
+  detected within seconds. Critical anomalies fire desktop notifications.
+
+- **Phase 4 — Litterbox Worker + MCP Audit Tools (L, 2–3 sessions):** Deploy `itemdata_scrub.py`,
+  `photo_history_recovery.py`, new `litterbox.py` (auto-fix library: 503 requeue, photo rename
+  repair, negative qty, LEASE_EXPIRED requeue, stale template prefix). Extend `tgw-mcp-server`
+  with `tgw_audit_trail`, `tgw_session_diff`, `tgw_anomaly_log`, `tgw_litterbox_log`,
+  `tgw_mutation_rate`. One-time repair: feed remaining photo-rename victims through recovery.
+
+**Phase 5 — AI Session Isolation (L–XL, after PP-NIXOS-001):**
+Each AI task gets a pre-task Btrfs CoW snapshot of `/opt/TGW/src` + `/opt/TGW/data`, runs in
+ephemeral nspawn with `--private-network`, communicates results via FIFO pipe. Host supervisor
+validates change scope, promotes snapshot or discards. cgroup v2 watchdog kills runaway
+containers. After Phase 5: bad agent sessions roll back in one command.
+
 ### Ollama job manager
 - Serializes model jobs (one model loaded at a time, 32GB CPU-only)
 - A queue worker that owns the Ollama lock
@@ -4207,6 +4323,82 @@ draft_listing ──────► ebay_submitted             (audit trail — 
 3. Fix sold items display (Phase 3 — status filter bug in http_server.py)
 4. Confirm full list → stage → publish flow works on one test item
 5. Schedule `ebay-pull` as a nightly cron to keep `ebay_live` current
+
+### Data Track C — Reference and Relationship Data (adopted 2026-06-19)
+
+Captures reference data that powers the decision engine without touching per-item JSON.
+Safe to run in parallel with Stages 1–5 — all writes go to `data/` reference files or
+documentation, not to `ItemData/<SKU>/<SKU>.json`.
+
+**Guiding principle:** Much of what Dave has learned about eBay quirks, category constraints,
+and listing behavior has come from investigating metadata. This track captures that knowledge
+systematically. Unknown fields are where the operational tidbits live — store everything eBay
+returns, not just what we currently consume.
+
+#### C1 — Shipping Policies
+Pull all fulfillment/payment/return policies via `sell.account` API.
+Store in `data/ebay-policies.json` with full policy detail.
+Fixes ISS-002 (wrong shipping profile on 9 items); powers shipping cost calculation and
+repricer accuracy. **Can start immediately after Stage 0.** Read-only pull, no risk.
+
+#### C2 — eBay Category Data (full pull for all categories in use)
+
+**C2a — Category hierarchy (main + secondary + store categories)**
+- Pull full category tree for all primary categories across our listings
+- Pull secondary categories where assigned (sparse but must be captured)
+- Pull eBay Store category structure — main + all secondaries (mostly empty today,
+  but the structure must be captured so the decision engine can assign as inventory grows)
+- Sources: Taxonomy API `getCategoryTree`; store categories via `sell.stores` or Trading API `GetStore`
+- Store as `data/ebay-categories.json`
+
+**C2b — Item aspects: full attribute set per category**
+- For every eBay category ID in use, pull the complete aspect/attribute list:
+  required, recommended, optional; value constraints (free-text vs enum, allowed values)
+- Required aspects are a hard gate — eBay rejects listings missing them; knowing them
+  in advance powers pre-flight validation in `ebay_draft`
+- Source: Taxonomy API `getItemAspectsForCategory` or Trading API `GetCategorySpecifics`
+  (available under existing scopes)
+- Store as `data/ebay-aspects-by-category.json`, keyed by category ID
+- Cross-reference against `category-groups.json` (25 groups → full aspect requirement list)
+
+**C2c — EPS image URLs: map eBay-hosted images to local photos**
+- EPS URLs live in `ebay_live.product.imageUrls[]` from Track A Phase 1 pull
+- Correlate each EPS URL to the local photo it came from (by filename/order)
+- Validates ISS-013 repair: if an item's EPS primary doesn't match repaired local primary,
+  that's a re-upload candidate
+- Store as `data/ebay-image-map.json` (SKU → [{eps_url, local_file, position}])
+- No new API call — derivation pass over existing Track A data after Phase 2 (ongoing sync)
+
+**C2d — Full raw metadata capture**
+The investigation-driven metadata principle applies everywhere, but *especially* to per-item
+eBay data. Store complete eBay API responses, not just consumed fields.
+
+For Track A item data: store the full Inventory API + offer response as `ebay_raw` sub-object
+in `ebay_live` — condition description text, item specifics as-listed, custom label, subtitle,
+secondary category, store category assignment, promoted listing status, compatibility data,
+regional availability, and any fields eBay returns that we haven't mapped yet.
+
+For category-level metadata: store the full Taxonomy/Trading API response per category, not
+just the fields we consume.
+
+Correlation pass: for each item, diff `ebay_live` (what eBay has) against `ItemData/<SKU>.json`
+(what we sent/know locally) — divergences are candidates for `CATEGORY-QUIRKS.md` entries and
+decision-engine rules. Document surprises as they surface; each quirk discovered this way is
+operational knowledge that was previously locked in operator memory.
+
+#### C3 — Category Group Enrichment
+Review `category-groups.json` (25 groups); fill missing `size_class`, floor prices, typical
+prices, eBay category ID mappings. Drive from C2a/C2b findings — aspect requirements and
+category hierarchy inform which group assignments are correct. Powers template intake, pricing
+floors, the decision engine.
+
+#### C4 — Location Types
+Define storage location types and their properties (size class capacity, access method).
+Powers semi-chaotic storage assignment and pick-path optimization.
+
+#### C5 — eBay Error Code Index
+Extend `reference/eBay-Error-Codes.md` with gaps found during dead-letter triage.
+Powers litterbox auto-classification rules.
 
 ---
 

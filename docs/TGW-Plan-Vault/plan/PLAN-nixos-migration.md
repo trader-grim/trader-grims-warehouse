@@ -270,6 +270,124 @@ into the VM; `pg_restore --clean --if-exists -d state_machine` against the NixOS
 crash).
 *Done when (phase gate):* all four steps recorded in a dated note in the plan vault.
 
+### Phase 2.5 — USB Boot Media Preparation (prerequisite for Phase 3; weekend 2026-06-21/22)
+
+**Purpose:** A single USB drive serves as both the NixOS installer and the carrier for the
+TGW flake config. It is also the permanent DR artifact — bare-metal restore starts here.
+
+**Test rig constraint:** iMac A1131 has Apple's 32-bit EFI, which is incompatible with
+Ventoy's standard chainloading. The A1131 boots Linux reliably in BIOS/legacy mode via
+GRUB i386-pc. Production hardware (normal UEFI) is easier — once the iMac validates the
+platform, the USB can be rebuilt as a standard Ventoy drive.
+
+**Hardware:** 2 × 16 GB USB drives, prepared identically. One active kit, one offsite DR spare.
+
+**Drive layout:**
+```
+|-- Ventoy partition 1 (exFAT, ~15.2 GB) --|-- TGW kit (ext4, 400 MB) --|-- Ventoy EFI (~32 MB) --|
+   ISOs live here                              flake, site-config,            Ventoy boot files
+                                               schema SQL, enc. secrets
+```
+
+Ventoy's `-r 400` reserves 400 MB unallocated between its two partitions. Create the
+TGW kit partition there. 400 MB holds the whole kit many times over — the entire
+contents are text and small encrypted blobs.
+
+**Partition naming constraint:** Ventoy requires its main ISO partition to remain labeled
+`ventoy` — do not rename it. The TGW kit partition is referenced by UUID, so the label
+and device path don't matter — each drive's kit partition will have its own UUID and
+can be mounted reliably regardless of what device node it gets assigned.
+
+```bash
+# After mkfs.ext4, record the UUID for each drive
+blkid /dev/sdX3
+# Mount by UUID during install:
+mount UUID=<uuid> /mnt/tgw-kit
+```
+
+**Preparation (run on MX host; repeat for each drive; substitute real device for `/dev/sdX`):**
+
+```bash
+# 1. Confirm target device — verify before any write
+lsblk -o NAME,SIZE,MODEL,TRAN | grep -i usb
+
+# 2. Install Ventoy with 400 MB reserved and legacy BIOS support
+ventoy -i -g -r 400 /dev/sdX
+#    -g       = GPT partition table (Ventoy adds hybrid MBR for legacy boot)
+#    -r 400   = reserve 400 MB unallocated (between Ventoy partitions 1 and 2)
+
+# 3. Unplug and replug the drive — kernel won't see the new partition table until
+#    the device is cycled (ventoy -i rewrites the MBR/GPT in place)
+#    Verify it re-appears: lsblk | grep sd
+
+# 4. Check exact partition boundaries
+fdisk -l /dev/sdX
+
+# 5. Create TGW kit partition in the reserved space
+parted /dev/sdX mkpart primary ext4 -- -432MiB -32MiB
+#    adjust -432MiB if Ventoy EFI partition is a different size per fdisk output
+
+# 6. Format and label
+mkfs.ext4 -L tgw-kit /dev/sdX3
+
+# 7. Populate the kit partition
+mount /dev/sdX3 /mnt/tgw-kit
+mkdir -p /mnt/tgw-kit/{flake,site-config,schema,secrets}
+git clone <tgw-site-config-repo> /mnt/tgw-kit/site-config
+cp flake.nix flake.lock          /mnt/tgw-kit/flake/
+cp -r nix/                       /mnt/tgw-kit/flake/nix/
+cp src/tgw/queue/schema.sql      /mnt/tgw-kit/schema/
+cp src/tgw/queue/sku_history.sql /mnt/tgw-kit/schema/
+# Secrets: age-encrypted blobs only — raw secrets never on the USB
+# cp /path/to/tgw-secrets.age  /mnt/tgw-kit/secrets/
+umount /mnt/tgw-kit
+
+# 7. Drop ISOs onto the Ventoy partition
+mount /dev/sdX1 /mnt/ventoy
+cp nixos-minimal-*.iso           /mnt/ventoy/
+cp mx-linux-restore-*.iso        /mnt/ventoy/   # MX rollback image (Phase 1 artifact)
+umount /mnt/ventoy
+```
+
+**Keeping the kit current:**
+```bash
+mount /dev/sdX3 /mnt/tgw-kit
+cd /mnt/tgw-kit/flake      && git pull   # if tracking a remote
+cd /mnt/tgw-kit/site-config && git pull
+umount /mnt/tgw-kit
+```
+
+**A1131 boot:** Ventoy with `-g` includes hybrid MBR, so legacy BIOS chainloading
+works. If GRUB loads but cannot find the ISO, add `ventoy.json` to the Ventoy partition:
+```json
+{ "control": [{ "VTOY_DEFAULT_SEARCH_ROOT": "/ventoy" }] }
+```
+
+**Install invocation (from the booted NixOS live environment):**
+```bash
+mount /dev/sdX3 /mnt/tgw-kit
+nixos-install --flake /mnt/tgw-kit/flake#tgw-test
+```
+
+**Weekend plan (2026-06-21/22):**
+1. Prepare both drives on MX host using the commands above
+2. Boot iMac A1131 — confirm Ventoy GRUB loads and finds NixOS ISO
+3. If ISO not found, add `ventoy.json` and retry
+4. Install NixOS on A1131 from the kit partition
+5. Run Phase 3 validation steps (see below)
+6. Feed any A1131-specific quirks back into `hosts/tgw-test.nix`
+7. Record what worked — both drives are identical so production uses same procedure
+
+**Manual GRUB fallback (A1131 only, if Ventoy definitively fails):**
+```bash
+grub-install --target=i386-pc --boot-directory=/mnt/sdX1/boot /dev/sdX
+# write grub.cfg pointing to extracted NixOS kernel + initrd
+```
+NixOS x86_64 boots fine on the A1131 in BIOS/legacy mode — CPU is 64-bit, only the
+EFI firmware is 32-bit. `--target=i386-pc` sidesteps the EFI entirely.
+
+---
+
 ### Phase 3 — Spare machine, client mode (familiarity; parallel-safe with 2)
 
 **Scope reality (Dave, 2026-06-10):** this machine is hardware-limited — it cannot run

@@ -200,7 +200,7 @@ def test_scan_and_enqueue_skips_readme(tmp_path):
 def _make_cfg(tmp_path: Path) -> dict:
     vault = tmp_path / 'vault'
     (vault / 'inbox' / 'queued').mkdir(parents=True)
-    (vault / 'inbox' / 'processed').mkdir(parents=True)
+    (vault / 'inbox' / 'archive').mkdir(parents=True)
     (vault / 'inbox' / 'review').mkdir(parents=True)
     (vault / 'reference').mkdir(parents=True)
     (vault / 'perplexity').mkdir(parents=True)
@@ -244,7 +244,7 @@ def test_handle_no_change(tmp_path):
         worker.handle(job)
 
     # File moved to processed/
-    processed = list((cfg['plan_inbox_path'] / 'processed').glob('*test.md'))
+    processed = list((cfg['plan_inbox_path'] / 'archive').glob('*test.md'))
     assert processed
 
 
@@ -300,7 +300,7 @@ def test_handle_file_document(tmp_path):
     assert 'RESEARCH-001.md' in log_path.read_text()
 
     # Original archived to processed/
-    processed = list((cfg['plan_inbox_path'] / 'processed').glob('*research.md'))
+    processed = list((cfg['plan_inbox_path'] / 'archive').glob('*research.md'))
     assert processed
 
 
@@ -378,7 +378,7 @@ def test_handle_flag_for_review(tmp_path):
     assert 'ambiguous.md' in call_args[1]
 
     # Original archived
-    processed = list((cfg['plan_inbox_path'] / 'processed').glob('*ambiguous.md'))
+    processed = list((cfg['plan_inbox_path'] / 'archive').glob('*ambiguous.md'))
     assert processed
 
 
@@ -434,7 +434,7 @@ def test_handle_empty_note(tmp_path):
     with patch('tgw.workers.pm_intake.call_model') as mock_llm:
         worker.handle(job)
     mock_llm.assert_not_called()
-    processed = list((cfg['plan_inbox_path'] / 'processed').glob('*empty.md'))
+    processed = list((cfg['plan_inbox_path'] / 'archive').glob('*empty.md'))
     assert processed
 
 
@@ -602,7 +602,7 @@ def test_handle_url_submission_filed(tmp_path):
     assert 'https://example.com/research' in log_text
 
     # Original archived
-    processed = list((cfg['plan_inbox_path'] / 'processed').glob('*link.md'))
+    processed = list((cfg['plan_inbox_path'] / 'archive').glob('*link.md'))
     assert processed
 
 
@@ -640,7 +640,7 @@ def test_handle_url_submission_fetch_failure(tmp_path):
     assert 'https://down.example.com/' in call_args[1]
 
     # Original archived
-    processed = list((cfg['plan_inbox_path'] / 'processed').glob('*bad-link.md'))
+    processed = list((cfg['plan_inbox_path'] / 'archive').glob('*bad-link.md'))
     assert processed
 
 
@@ -658,7 +658,7 @@ def test_handle_url_submission_no_change(tmp_path):
         with patch('tgw.workers.pm_intake.call_model', return_value=llm_response):
             worker.handle(job)
 
-    processed = list((cfg['plan_inbox_path'] / 'processed').glob('*old-link.md'))
+    processed = list((cfg['plan_inbox_path'] / 'archive').glob('*old-link.md'))
     assert processed
     # No filing log entry
     log_path = cfg['plan_vault_path'] / 'reference' / 'FILING-LOG.md'

@@ -6,7 +6,7 @@ Watches inbox/ for dropped Markdown notes. When a note appears:
     2. Enqueue a pm_intake job referencing the file
     3. On claim: read file, call LLM to classify the change,
        dispatch action (append_to_section | file_document | flag_for_review | no_change)
-    4. Archive to inbox/processed/
+    4. Archive to inbox/archive/ (durable — included in vault sync)
 
 Submission-delay gate: files must age N hours (configurable via pm_intake_delay_hours,
 default 4) before being enqueued. `tgw admin-file --now` bypasses the gate.
@@ -61,21 +61,31 @@ You are the TGW project manager assistant. TGW is Trader Grim's Warehouse, a \
 Python-based inventory and eBay listing management system. Your job is to \
 integrate inbox notes into the living TGW Master Plan.
 
-Rules:
-- Be conservative: only add content genuinely not already captured in the plan.
-- If the note describes something already fully reflected in the plan, respond with action "no_change".
-- Match the existing writing style: concise bullet points, present-tense, no padding.
-- For "append_to_section": section_heading must be the exact text of a heading line in the plan,
-  including the # prefix. Content is appended inside that section before the next sibling heading.
-  Never create new sections — if new section content is needed, use "flag_for_review" instead.
-- For "flag_for_review": use when the note is uncertain, ambiguous, requires human judgement,
-  or would require creating a new plan section. Provide review_todo_agent ("claude" for technical
-  matters, "admin" for operator/business tasks) and a short review_todo_body.
-- For "file_document": the note IS a research/reference document to be filed, not an action item.
-  Choose destination: "reference" (technical reference docs), "perplexity" (Perplexity research
-  outputs), or "dev-workflow/research" (other research and workflow notes).
+PRESERVATION RULE (highest priority):
+If the note contains ANY of the following, you MUST use "file_document" — not "append_to_section":
+  - Code blocks (``` or indented code)
+  - Python, bash, or other executable examples
+  - Step-by-step procedures or runbook content
+  - API call sequences or worked examples
+  - Research findings with citations or URLs
+  - External tool output (Perplexity, Gemini, Antigravity, etc.)
+  - Technical specifications or architecture diagrams
+  - More than ~500 words of substantive content
+The original document is the primary asset. A paragraph summary in the plan is NOT a substitute.
+file_document can ALSO add a plan pointer — choose it first, then add the pointer.
+
+Action rules:
+- "append_to_section": ONLY for brief operational notes, status updates, or one-line observations
+  that are not primarily research documents. section_heading must be the exact heading text
+  including the # prefix. Never create new sections.
+- "no_change": note already fully reflected in plan AND the document has no preservation value.
+- "file_document": the note should be preserved as a document. Choose destination:
+  "reference" (technical reference docs), "perplexity" (Perplexity research outputs),
+  or "dev-workflow/research" (all other research, procedures, and worked examples).
   Provide destination_filename (e.g. "RESEARCH-topic.md") without directory prefix.
-  Optionally provide a one-line plan_pointer (markdown) and plan_pointer_section (exact heading).
+  Optionally add a one-line plan_pointer and plan_pointer_section to also update the plan.
+- "flag_for_review": use when the note is uncertain, ambiguous, or requires human judgement.
+  Provide review_todo_agent ("claude" or "admin") and review_todo_body.
 - Respond with valid JSON only — no prose, no markdown fences.
 """
 
@@ -110,8 +120,8 @@ Respond with JSON only:
 }}
 """
 
-_NOTE_MAX_CHARS = 8000
-_URL_FETCH_MAX_CHARS = 16000  # generous limit; pages can be longer than notes
+_NOTE_MAX_CHARS = 32000
+_URL_FETCH_MAX_CHARS = 32000
 
 # Matches a bare HTTP/HTTPS URL as the entire note content
 _URL_ONLY_RE = re.compile(r'^https?://\S+$', re.IGNORECASE)
@@ -267,7 +277,7 @@ def _archive(note_path: Path, processed_dir: Path) -> None:
     ts = datetime.now(tz=timezone.utc).strftime('%Y%m%dT%H%M%S')
     archive_path = processed_dir / f'{ts}-{note_path.name}'
     shutil.move(str(note_path), archive_path)
-    log.info('archived %s → processed/%s', note_path.name, archive_path.name)
+    log.info('archived %s → archive/%s', note_path.name, archive_path.name)
 
 
 def _patch_plan_append(plan_text: str, section_heading: str, content: str) -> str:
@@ -447,7 +457,7 @@ class PMIntakeWorker(QueueWorker):
 
         inbox_dir: Path = self.config['plan_inbox_path']
         queued_dir = inbox_dir / 'queued'
-        processed_dir = inbox_dir / 'processed'
+        processed_dir = inbox_dir / 'archive'
         vault_path: Path = self.config['plan_vault_path']
         master_plan_path: Path = self.config['plan_master_path']
         processed_dir.mkdir(parents=True, exist_ok=True)
@@ -506,14 +516,23 @@ class PMIntakeWorker(QueueWorker):
                 url, len(note_text), fetch.get('final_url', url),
             )
 
+        # Force file_document for docs that contain code or are truncated — never distil these.
+        _HAS_CODE_RE = re.compile(r'```|\n    \S', re.MULTILINE)
+        has_code = bool(_HAS_CODE_RE.search(note_text))
+        truncated = len(note_text) > _NOTE_MAX_CHARS
+        force_file = has_code or truncated
+
         plan_headings = '\n'.join(
             line for line in plan_text.splitlines() if line.startswith('#')
         )
-        truncated = len(note_text) > _NOTE_MAX_CHARS
         note_excerpt = note_text[:_NOTE_MAX_CHARS]
         truncation_note = (
             f' (truncated to {_NOTE_MAX_CHARS} chars of {len(note_text)} total)'
             if truncated else ''
+        )
+        force_note = (
+            ' NOTE: This document contains code or is truncated — you MUST choose file_document.'
+            if force_file else ''
         )
 
         provider, model = get_task_model(self.config, 'pm_intake')
@@ -527,7 +546,7 @@ class PMIntakeWorker(QueueWorker):
         prompt = _USER_TEMPLATE.format(
             plan_headings=plan_headings,
             filename=filename,
-            truncation_note=truncation_note,
+            truncation_note=truncation_note + force_note,
             note=note_excerpt,
         )
         raw_response = call_model('pm_intake', _SYSTEM_PROMPT, prompt, self.config)
@@ -553,6 +572,23 @@ class PMIntakeWorker(QueueWorker):
                 'review_todo_body',
                 f'Review inbox note for possible new plan section: {filename}',
             )
+
+        # Safety net: if doc has code or was truncated, never reduce it to a plan summary.
+        # Promote append_to_section/no_change → file_document so the original is preserved.
+        if force_file and action in ('append_to_section', 'no_change'):
+            log.info(
+                'promoting %s → file_document for %s (has_code=%s truncated=%s)',
+                action, filename, has_code, truncated,
+            )
+            tgw_logging.log_event(
+                'pm_intake_promoted_to_file', filename=filename,
+                original_action=action, has_code=has_code, truncated=truncated,
+            )
+            action = 'file_document'
+            # Carry forward any plan pointer the LLM suggested; pick a sensible destination.
+            result.setdefault('destination', 'dev-workflow/research')
+            stem = Path(filename).stem
+            result.setdefault('destination_filename', f'RESEARCH-{stem}.md')
 
         log.info(
             'LLM decision for %s: action=%s confidence=%.2f rationale=%s',

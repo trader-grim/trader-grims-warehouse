@@ -42,6 +42,7 @@ from tgw.apis.google_genai import (
 )
 from tgw.apis.llm import call_model, get_task_model
 from tgw.apis.ollama import extract_json, is_available
+from tgw.assets import primary_photo as _asset_primary_photo
 
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 _VISION_MAX_PX = 512  # Ollama (memory-constrained CPU)
@@ -196,7 +197,10 @@ def cmd_alt_text(
             "reason": "alt_text already set and alt image already exists",
         }
 
-    img_path = _primary_image(sku_dir)
+    img_path = _asset_primary_photo(item, sku_dir)
+    # Skip the -alt companion if it ended up first (shouldn't happen in practice)
+    if img_path is not None and img_path.stem.endswith(_ALT_STEM_SUFFIX):
+        img_path = _primary_image(sku_dir)
     if img_path is None:
         return {"ok": False, "error": f"no primary image found in {sku_dir}"}
 

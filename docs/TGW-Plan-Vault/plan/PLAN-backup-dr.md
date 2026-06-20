@@ -405,7 +405,18 @@ flat layout); drive registry at `reference/DRIVE-REGISTRY.md`.
 | `TGW-ARCHIVE-01` | Cold archive overflow | Manual write |
 | `TGW-ARCHIVE-02` | Archive redundancy | Manual write |
 
-**USB drives:** `TGW-SECRETS-A` (keychain), `TGW-SECRETS-B` (off-site/safe), `TGW-BOOT-01` (NixOS install USB).
+**USB drives:** `TGW-SECRETS-A` (keychain), `TGW-SECRETS-B` (off-site/safe), `TGW-BOOT-01` and `TGW-BOOT-02` (NixOS install + TGW kit USBs — see below).
+
+**Boot/kit USB drives (2 × 16 GB, prepared identically — 2026-06-19):**
+- Label: `TGW-BOOT-01` (active, on-site), `TGW-BOOT-02` (DR spare, off-site/safe)
+- Layout: Ventoy (GPT + hybrid MBR, legacy-boot compatible) with 400 MB `tgw-kit`
+  partition at the end
+- Ventoy partition: NixOS minimal ISO + MX Linux restore ISO
+- `tgw-kit` partition (ext4, 400 MB): flake config, site-config clone, schema SQL,
+  age-encrypted secrets
+- Bare-metal restore starts here: boot USB → mount `tgw-kit` → `nixos-install --flake`
+- Preparation procedure: `PLAN-nixos-migration.md` Phase 2.5
+- Keep current: `git pull` on flake + site-config dirs when either repo changes
 
 **Existing drives to adopt later:** `MasterArchive` (sdf, 1.8T) stays labeled; `sdg` (WD10EALS 1TB) → `TGW-HISTORY-01` after `tgw history-index` completes.
 
