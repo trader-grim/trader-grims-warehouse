@@ -164,8 +164,9 @@ class EbayPublishWorker(QueueWorker):
         }
         ebay_offer['status']       = 'PUBLISHED'
         ebay_offer['published_at'] = now.isoformat()
-        if launch_entry and launch_entry['price'] is not None:
-            ebay_offer['price'] = launch_entry['price']
+        launch_price = launch_entry['price'] if launch_entry and launch_entry['price'] is not None else None
+        if launch_price is not None:
+            ebay_offer['price'] = launch_price
         item['ebay_offer'] = ebay_offer
 
         # Stamp launch entry done_at and store full schedule
@@ -174,6 +175,18 @@ class EbayPublishWorker(QueueWorker):
                 s['done_at'] = now.isoformat()
                 s['due_at']  = now.isoformat()
         item['reprice_schedule'] = schedule
+
+        # Record the publish price as the first price_history entry so the full
+        # price trail (launch → markdown steps) is complete and auditable.
+        if launch_price is not None:
+            item.setdefault('price_history', []).append({
+                'ts':             now.isoformat(),
+                'price':          launch_price,
+                'previous_price': item.get('price'),
+                'stage':          'launch',
+                'label':          'Published to eBay',
+                'source':         'ebay_publish',
+            })
 
         # Refresh picklist line in draft description now that listing_id is known
         from tgw.ebay.description import build_listing_description

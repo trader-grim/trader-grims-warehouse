@@ -3123,6 +3123,9 @@ def _render_item_detail_html(
         fr("Offer ID", h(str(eo.get("offer_id", "") or "")))
         + fr("Offer Status", h(offer_status) if offer_status else "")
         + fr("Offer Price", _fmt_price(offer_price))
+        + fr("eBay Category", h(str(eo.get("category_id", "") or "")))
+        + fr("Quantity", h(str(eo.get("quantity", "") or "")))
+        + fr("Published At", h(str(eo.get("published_at", "") or "")[:19]))
         + _pricing_history_html
         + fr("Staged At", h(str(eo.get("staged_at", "") or "")[:19]))
     ) if eo else '<div class="frow"><span class="fv" style="color:#555">No offer yet</span></div>'
@@ -3301,6 +3304,135 @@ def _render_item_detail_html(
     else:
         _price_display = '<span style="color:#444">—</span>'
 
+    # ── Price history section ──────────────────────────────────────────────────
+    _ph_events = item.get("price_history") or []
+    if _ph_events:
+        _phev_rows = ""
+        for _ev in reversed(_ph_events):
+            _ev_ts    = h(str(_ev.get("ts", ""))[:19])
+            _ev_price = h(f"${float(_ev.get('price', 0)):.2f}")
+            _ev_prev  = h(f"${float(_ev.get('previous_price', 0)):.2f}") if _ev.get("previous_price") is not None else "—"
+            _ev_label = h(str(_ev.get("label") or _ev.get("stage") or ""))
+            _ev_src   = h(str(_ev.get("source") or ""))
+            _phev_rows += (
+                f"<tr>"
+                f'<td style="color:#888;font-size:.8em">{_ev_ts}</td>'
+                f'<td style="color:#bfb;font-weight:600">{_ev_price}</td>'
+                f'<td style="color:#888">{_ev_prev}</td>'
+                f'<td style="color:#aaa">{_ev_label}</td>'
+                f'<td style="color:#666;font-size:.78em">{_ev_src}</td>'
+                f"</tr>"
+            )
+        price_history_html = (
+            f'<div class="dsec">'
+            f'<h3>Price History <span style="font-size:.7em;color:#555;font-weight:normal">{len(_ph_events)} events</span></h3>'
+            f'<div style="font-size:.73em;color:#556;margin-bottom:6px">Every price change recorded — launch through markdowns</div>'
+            f'<table class="jtable">'
+            f'<tr><th>When</th><th>Price</th><th>Previous</th><th>Stage</th><th>Source</th></tr>'
+            f'{_phev_rows}'
+            f'</table>'
+            f'</div>'
+        )
+    else:
+        price_history_html = ""
+
+    # ── Reprice schedule section ───────────────────────────────────────────────
+    _rps = item.get("reprice_schedule") or []
+    if _rps:
+        _rps_rows = ""
+        for _st in _rps:
+            _st_label  = h(str(_st.get("label") or _st.get("stage") or ""))
+            _st_price  = h(f"${float(_st.get('price', 0)):.2f}") if _st.get("price") is not None else "—"
+            _st_due    = h(str(_st.get("due_at") or "")[:19])
+            _st_done   = h(str(_st.get("done_at") or "")[:19])
+            _done_cls  = 'color:#888' if _st.get("done_at") else 'color:#fb7'
+            _rps_rows += (
+                f"<tr>"
+                f'<td style="color:#aaa">{_st_label}</td>'
+                f'<td style="color:#bfb">{_st_price}</td>'
+                f'<td style="color:#888;font-size:.8em">{_st_due}</td>'
+                f'<td style="{_done_cls};font-size:.8em">{_st_done or "pending"}</td>'
+                f"</tr>"
+            )
+        reprice_schedule_html = (
+            f'<div class="dsec">'
+            f'<h3>Reprice Schedule <span style="font-size:.7em;color:#555;font-weight:normal">{len(_rps)} stages</span></h3>'
+            f'<div style="font-size:.73em;color:#556;margin-bottom:6px">Automated markdown plan — pending stages fire automatically</div>'
+            f'<table class="jtable">'
+            f'<tr><th>Stage</th><th>Price</th><th>Due</th><th>Done</th></tr>'
+            f'{_rps_rows}'
+            f'</table>'
+            f'</div>'
+        )
+    else:
+        reprice_schedule_html = ""
+
+    # ── Product lookup section ─────────────────────────────────────────────────
+    _pl = item.get("product_lookup") or {}
+    if _pl:
+        _pl_rows = ""
+        for _k, _v in (
+            ("Brand",   _pl.get("brand")),
+            ("MPN",     _pl.get("mpn")),
+            ("MSRP",    f"${float(_pl['msrp']):.2f}" if _pl.get("msrp") else None),
+            ("Source",  _pl.get("source")),
+            ("Title",   _pl.get("title")),
+            ("UPC",     _pl.get("upc")),
+        ):
+            if _v:
+                _pl_rows += (
+                    f'<div class="frow">'
+                    f'<span class="fn">{h(_k)}</span>'
+                    f'<span class="fv">{h(str(_v))}</span>'
+                    f'</div>'
+                )
+        product_lookup_html = (
+            f'<div class="dsec">'
+            f'<h3>Product Lookup <span style="font-size:.7em;color:#555;font-weight:normal">{h(str(_pl.get("source","")))})</span></h3>'
+            f'<div style="font-size:.73em;color:#556;margin-bottom:6px">Structured product data enriching pricing and aspects</div>'
+            f'{_pl_rows}'
+            f'</div>'
+        ) if _pl_rows else ""
+    else:
+        product_lookup_html = ""
+
+    # ── Identification history section ─────────────────────────────────────────
+    _id_hist = item.get("identification_history") or []
+    if _id_hist:
+        _idh_rows = ""
+        for _ev in reversed(_id_hist[-10:]):  # most recent 10
+            _idh_ts    = h(str(_ev.get("ts", ""))[:19])
+            _idh_event = h(str(_ev.get("event") or ""))
+            _idh_title = h(str(_ev.get("title") or ""))
+            _idh_cat   = h(str(_ev.get("category") or ""))
+            _idh_model = h(str(_ev.get("model") or ""))
+            _idh_round = h(str(_ev.get("round") or ""))
+            _idh_rows += (
+                f"<tr>"
+                f'<td style="color:#888;font-size:.79em">{_idh_ts}</td>'
+                f'<td style="color:#7af;font-size:.79em">{_idh_event} r{_idh_round}</td>'
+                f'<td style="color:#ddd;font-size:.79em">{_idh_title[:60]}</td>'
+                f'<td style="color:#aaa;font-size:.79em">{_idh_cat[:30]}</td>'
+                f'<td style="color:#666;font-size:.75em">{_idh_model}</td>'
+                f"</tr>"
+            )
+        identification_history_html = (
+            f'<div class="dsec">'
+            f'<details>'
+            f'<summary style="cursor:pointer;color:#4a8ade;font-weight:600;font-size:.9em">'
+            f'Identification History <span style="color:#555;font-weight:normal">({len(_id_hist)} rounds)</span>'
+            f'</summary>'
+            f'<div style="font-size:.73em;color:#556;margin:4px 0 6px">AI identification rounds — title, category, model used</div>'
+            f'<table class="jtable">'
+            f'<tr><th>When</th><th>Event</th><th>Title</th><th>Category</th><th>Model</th></tr>'
+            f'{_idh_rows}'
+            f'</table>'
+            f'</details>'
+            f'</div>'
+        )
+    else:
+        identification_history_html = ""
+
     fields_html = (
         '<div class="dfields">'
         # — Inventory record (what we track)
@@ -3349,6 +3481,10 @@ def _render_item_detail_html(
             f'<div class="dsec"><h3>Pipeline Jobs</h3>{jobs_html}</div>'
             if jobs_html else ""
         )
+        + price_history_html
+        + reprice_schedule_html
+        + product_lookup_html
+        + identification_history_html
         + "</div>"
     )
 

@@ -159,6 +159,12 @@ class EbaySyncWorker(QueueWorker):
                 price_f = float(price_val)
                 if ebay_offer.get('price') != price_f:
                     offer_updates['price'] = price_f
+                # Mirror live price into ebay_listing so the UI can show divergence
+                # between what we submitted and what eBay currently shows buyers.
+                if ebay_listing.get('live_price') != price_f:
+                    ebay_listing['live_price'] = price_f
+                    item['ebay_listing'] = ebay_listing
+                    changed = True
             except (TypeError, ValueError):
                 pass
         if category_id and ebay_offer.get('category_id') != category_id:
