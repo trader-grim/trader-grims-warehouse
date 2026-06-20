@@ -69,6 +69,42 @@ class EbaySyncWorker(QueueWorker):
         log.info('ebay_sync worker stopped')
 
     def handle(self, job: Dict[str, Any]) -> None:
+        target_sku = (job.get('payload') or {}).get('sku')
+
+        if target_sku:
+            # Per-SKU sync — fetch just this item's offer from eBay
+            log.info('ebay_sync: targeted sync for %s', target_sku)
+            tgw_logging.log_event('ebay_sync_start', sku=target_sku)
+            from tgw.ebay.sync import _find_offer
+            try:
+                offer = _find_offer(self.config, target_sku)
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout) as exc:
+                log.warning('ebay_sync: eBay unreachable for %s (%s)', target_sku, exc)
+                return
+            if offer is None:
+                log.info('ebay_sync: no eBay offer found for %s', target_sku)
+                return
+            try:
+                updated = self._sync_one(offer, target_sku)
+            except Exception:
+                log.exception('ebay_sync: error syncing %s', target_sku)
+                updated = 0
+            if updated:
+                try:
+                    import time as _time
+                    state_machine.enqueue_job(
+                        queue_name='catalog_rebuild',
+                        payload={'reason': 'ebay_sync_targeted'},
+                        dedupe_key='catalog_rebuild:pending',
+                        not_before=_time.time() + 5,
+                        max_attempts=3,
+                    )
+                except Exception:
+                    pass
+            log.info('ebay_sync: targeted sync %s → %s', target_sku, 'updated' if updated else 'no change')
+            return
+
         log.info('ebay_sync: fetching all eBay offers')
         tgw_logging.log_event('ebay_sync_start')
 

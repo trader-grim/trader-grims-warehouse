@@ -109,6 +109,7 @@ PIPELINE_ACTIONS = {
     "archive",
     "migrate_unblock",
     "review_mark_ready",
+    "sync_from_ebay",
 }
 
 
@@ -398,6 +399,8 @@ def get_review_queue() -> Dict[str, Any]:
                 "aspects_required_filled": draft.get("aspects_required_filled"),
                 "category_confidence": draft.get("category_confidence") or doc.get("category_confidence") or "",
                 "offline_draft": bool(draft.get("offline_draft") or doc.get("offline_draft")),
+                "lookup_category_name": (doc.get("product_lookup") or {}).get("category_name") or "",
+                "lookup_category_id": str((doc.get("product_lookup") or {}).get("ebay_category_id") or ""),
             })
 
     return {"ok": True, "items": items, "count": len(items)}
@@ -889,6 +892,14 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
             atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
             return {"ok": True, "sku": sku, "action": "review_mark_ready",
                     "stage": rb.get("stage"), "reason_code": rb.get("reason_code")}
+
+        elif action == "sync_from_ebay":
+            job_id = state_machine.enqueue_job(
+                queue_name="ebay_sync",
+                payload={"sku": sku, "reason": "manual"},
+                max_attempts=2,
+            )
+            return {"ok": True, "sku": sku, "action": "sync_from_ebay", "job_id": job_id}
 
         elif action == "ai_identify":
             # Clear ai_identified so the worker will run
@@ -3125,6 +3136,39 @@ def _render_item_detail_html(
         _ph_rows += f'<div class="frow"><span class="fn">Price source</span><span class="fv">{h(_price_source)}</span></div>'
     if _priced_at:
         _ph_rows += f'<div class="frow"><span class="fn">Priced at</span><span class="fv">{h(_priced_at)}</span></div>'
+    # Comp items table — individual Browse API listings used to compute stats
+    _comp_items = _comps.get("items") or []
+    if _comp_items:
+        _ci_rows = ""
+        for _ci in _comp_items:
+            _ci_price = f"${float(_ci.get('price', 0)):.2f}"
+            _ci_cond  = h(str(_ci.get("condition") or ""))
+            _ci_title = h(str(_ci.get("title") or "")[:70])
+            _ci_url   = _ci.get("url") or ""
+            _ci_title_cell = (
+                f'<a href="{h(_ci_url)}" target="_blank" rel="noopener noreferrer"'
+                f' style="color:#7af;text-decoration:none">{_ci_title}</a>'
+                if _ci_url else _ci_title
+            )
+            _ci_rows += (
+                f"<tr>"
+                f'<td style="color:#bfb;font-size:.8em">{h(_ci_price)}</td>'
+                f'<td style="color:#aaa;font-size:.78em">{_ci_cond}</td>'
+                f'<td style="color:#ccc;font-size:.78em">{_ci_title_cell}</td>'
+                f"</tr>"
+            )
+        _ph_rows += (
+            f'<details style="margin-top:6px">'
+            f'<summary style="cursor:pointer;color:#4a8ade;font-size:.79em;list-style:none">'
+            f'&#9654; {len(_comp_items)} comp listings used</summary>'
+            f'<table style="width:100%;border-collapse:collapse;margin-top:4px">'
+            f'<tr><th style="text-align:left;font-size:.75em;color:#666;padding:2px 6px">Price</th>'
+            f'<th style="text-align:left;font-size:.75em;color:#666;padding:2px 6px">Condition</th>'
+            f'<th style="text-align:left;font-size:.75em;color:#666;padding:2px 6px">Title</th></tr>'
+            f'{_ci_rows}'
+            f'</table>'
+            f'</details>'
+        )
     _ph_content = _ph_rows if _ph_rows else '<span style="color:#555;font-size:.82em">No pricing data yet</span>'
     _pricing_history_html = (
         f'<details open style="margin-top:4px">'
@@ -3199,10 +3243,19 @@ def _render_item_detail_html(
             if dl.get("offline_draft") else ""
         )
         _cat_conf = dl.get("category_confidence") or ""
-        _cat_conf_warn = (
-            f'<span style="color:#fb7;font-size:.79em"> ⚠ confidence: {h(_cat_conf)}</span>'
-            if _cat_conf and _cat_conf != "high" else ""
-        )
+        _pl_cat = (item.get("product_lookup") or {}).get("category_name") or ""
+        _pl_cat_id = (item.get("product_lookup") or {}).get("ebay_category_id") or ""
+        if _cat_conf and _cat_conf not in ("high", ""):
+            _cat_conf_warn = f'<span style="color:#fb7;font-size:.79em"> ⚠ confidence: {h(_cat_conf)}</span>'
+            if _pl_cat and _pl_cat != dl.get("category_name", ""):
+                _cat_conf_warn += (
+                    f'<div style="margin-top:4px;font-size:.79em;color:#aaa">'
+                    f'AI: {h(str(dl.get("category_id","")))} · {h(str(dl.get("category_name","")))} '
+                    f'vs Lookup: {h(_pl_cat_id)} · {h(_pl_cat)}'
+                    f'</div>'
+                )
+        else:
+            _cat_conf_warn = ""
         draft_section = (
             _offline_warn
             + fr("Draft Title", h(str(dl.get("title", "") or "")))
@@ -3531,8 +3584,13 @@ def _render_item_detail_html(
         f'<button class="act-btn{stage_cls}"{stage_disabled} onclick="triggerAction(\'ebay_stage\')">Stage</button>'
         f'<button class="act-btn{publish_cls}"{publish_disabled} onclick="triggerAction(\'ebay_publish\')">Publish</button>'
         f'{end_btn}'
-        f'</div>'
-        f'<div class="act-row" style="margin-top:10px">'
+        + (
+            '<button class="act-btn" onclick="triggerAction(\'sync_from_ebay\')"'
+            ' title="Fetch current price and status from eBay">Sync from eBay</button>'
+            if listing_id else ""
+        )
+        + '</div>'
+        + f'<div class="act-row" style="margin-top:10px">'
         f'<button class="act-btn act-warn" onclick="triggerAction(\'archive\',\'Archive this item? It will be hidden from the catalog.\')">Archive</button>'
         f'<button class="act-btn act-delete" onclick="deleteItem()">Delete item</button>'
         f'</div>'
@@ -4902,8 +4960,16 @@ function renderQueue(data) {{
     if (qh) html += qh;
     var ah = aspectHtml(item);
     if (ah) html += ah;
-    if (item.category_confidence === 'low') {{
-      html += '<span class="quality-warn" style="font-size:.76em">⚠ low category confidence</span>';
+    if (item.category_confidence && item.category_confidence !== 'high') {{
+      var catWarn = '<span class="quality-warn" style="font-size:.76em">⚠ conf: ' +
+                   escapeHtml(item.category_confidence) + '</span>';
+      if (item.lookup_category_name && item.lookup_category_name !== item.category_name) {{
+        catWarn += '<div style="font-size:.73em;color:#aaa;margin-top:2px">' +
+          'AI: ' + escapeHtml(item.category_id || '') + ' · ' + escapeHtml(item.category_name || '') +
+          ' vs Lookup: ' + escapeHtml(item.lookup_category_id || '') + ' · ' + escapeHtml(item.lookup_category_name) +
+          '</div>';
+      }}
+      html += catWarn;
     }}
     if (item.offline_draft) {{
       html += '<span class="quality-warn" style="font-size:.76em">⚠ offline draft</span>';
