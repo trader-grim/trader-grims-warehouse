@@ -69,7 +69,7 @@ class EbaySyncWorker(QueueWorker):
         log.info('ebay_sync worker stopped')
 
     def handle(self, job: Dict[str, Any]) -> None:
-        target_sku = (job.get('payload') or {}).get('sku')
+        target_sku = (job.get('payload_json') or {}).get('sku')
 
         if target_sku:
             # Per-SKU sync — fetch just this item's offer from eBay
@@ -214,6 +214,7 @@ class EbaySyncWorker(QueueWorker):
 
         # PP-EBAY-SNAPSHOT-001 Phase 3: periodic photo integrity check for active listings.
         if listing_status == 'ACTIVE' or ebay_listing.get('status') == 'Active':
+            item['ebay_listing'] = ebay_listing  # anchor before mutation
             changed |= self._check_photo_integrity(sku, item, ebay_listing)
 
         if not changed:

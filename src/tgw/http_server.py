@@ -662,7 +662,7 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
                 doc = load_item_doc(json_path)
                 doc["status"] = new_status
                 if body.action == "delete":
-                    doc["deleted_at"] = datetime.now().isoformat()
+                    doc["deleted_at"] = datetime.now(timezone.utc).isoformat()
                 atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
                 done.append(sku)
             except Exception as exc:

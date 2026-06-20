@@ -274,40 +274,32 @@ crash).
 **Purpose:** A single USB drive serves as both the NixOS installer and the carrier for the
 TGW flake config. It is also the permanent DR artifact — bare-metal restore starts here.
 
-**Status (2026-06-19):** Both drives prepared. Ventoy installed, kit partitions populated
-(flake, schema, site-config clone, age-encrypted secrets bundle). NixOS ISO copying to Ventoy
-partitions. A1131 boot validation pending (morning of 2026-06-20). One drive stays here
-(dev/active kit), one goes to satellite warehouse (offsite DR). Dedicated secrets drives
-(3+) rotate separately — kit + secrets together = full restore capability.
+**Status (2026-06-20):** Both drives prepared. Kit contents moved to a dedicated partition
+labeled `TGW-SECRETS` (see updated layout below). NixOS ISO on Ventoy partition. A1131
+(iMac12,1 — 64-bit Intel, Apple EFI quirks) boot tested: Ventoy menu loads, but EFI
+chainload hangs and GRUB2 can't find the ISO. Resolved by booting NixOS directly from a
+dd'd ISO stick. One drive stays here (dev/active kit), one goes to satellite warehouse
+(offsite DR). Dedicated secrets drives (3+) rotate separately.
 
-**Test rig constraint:** iMac A1131 has Apple's 32-bit EFI, which is incompatible with
-Ventoy's standard chainloading. The A1131 boots Linux reliably in BIOS/legacy mode via
-GRUB i386-pc. Production hardware (normal UEFI) is easier — once the iMac validates the
-platform, the USB can be rebuilt as a standard Ventoy drive.
+**Test rig:** iMac12,1 (2011, 64-bit Intel, Apple EFI). Ventoy EFI chainload unreliable on
+this hardware — direct dd of NixOS ISO to USB is the validated boot path for this machine.
+Production hardware (standard UEFI) should work with Ventoy normally.
 
 **Hardware:** 2 × 16 GB USB drives, prepared identically. One active kit, one offsite DR spare.
 
 **Drive layout:**
 ```
-|-- Ventoy partition 1 (exFAT, ~15.2 GB) --|-- TGW kit (ext4, 400 MB) --|-- Ventoy EFI (~32 MB) --|
-   ISOs live here                              flake, site-config,            Ventoy boot files
+|-- Ventoy partition 1 (exFAT, ~15.2 GB) --|-- TGW-SECRETS (ext4, 400 MB) --|-- Ventoy EFI (~32 MB) --|
+   ISOs live here                              flake, site-config,                 Ventoy boot files
                                                schema SQL, enc. secrets
 ```
 
-Ventoy's `-r 400` reserves 400 MB unallocated between its two partitions. Create the
-TGW kit partition there. 400 MB holds the whole kit many times over — the entire
-contents are text and small encrypted blobs.
-
-**Partition naming constraint:** Ventoy requires its main ISO partition to remain labeled
-`ventoy` — do not rename it. The TGW kit partition is referenced by UUID, so the label
-and device path don't matter — each drive's kit partition will have its own UUID and
-can be mounted reliably regardless of what device node it gets assigned.
+Ventoy's `-r 400` reserves 400 MB unallocated between its two partitions. The TGW kit
+(formerly called `tgw-kit`) lives there, now labeled `TGW-SECRETS`. Mount by label —
+no UUID bookkeeping needed, works regardless of device node assignment:
 
 ```bash
-# After mkfs.ext4, record the UUID for each drive
-blkid /dev/sdX3
-# Mount by UUID during install:
-mount UUID=<uuid> /mnt/tgw-kit
+mount /dev/disk/by-label/TGW-SECRETS /mnt/tgw-secrets
 ```
 
 **Preparation (run on MX host; repeat for each drive; substitute real device for `/dev/sdX`):**
@@ -333,19 +325,19 @@ parted /dev/sdX mkpart primary ext4 -- -432MiB -32MiB
 #    adjust -432MiB if Ventoy EFI partition is a different size per fdisk output
 
 # 6. Format and label
-mkfs.ext4 -L tgw-kit /dev/sdX3
+mkfs.ext4 -L TGW-SECRETS /dev/sdX3
 
 # 7. Populate the kit partition
-mount /dev/sdX3 /mnt/tgw-kit
-mkdir -p /mnt/tgw-kit/{flake,site-config,schema,secrets}
-git clone <tgw-site-config-repo> /mnt/tgw-kit/site-config
-cp flake.nix flake.lock          /mnt/tgw-kit/flake/
-cp -r nix/                       /mnt/tgw-kit/flake/nix/
-cp src/tgw/queue/schema.sql      /mnt/tgw-kit/schema/
-cp src/tgw/queue/sku_history.sql /mnt/tgw-kit/schema/
+mount /dev/disk/by-label/TGW-SECRETS /mnt/tgw-secrets
+mkdir -p /mnt/tgw-secrets/{flake,site-config,schema,secrets}
+git clone <tgw-site-config-repo> /mnt/tgw-secrets/site-config
+cp flake.nix flake.lock          /mnt/tgw-secrets/flake/
+cp -r nix/                       /mnt/tgw-secrets/flake/nix/
+cp src/tgw/queue/schema.sql      /mnt/tgw-secrets/schema/
+cp src/tgw/queue/sku_history.sql /mnt/tgw-secrets/schema/
 # Secrets: age-encrypted blobs only — raw secrets never on the USB
-# cp /path/to/tgw-secrets.age  /mnt/tgw-kit/secrets/
-umount /mnt/tgw-kit
+# cp /path/to/tgw-secrets.age  /mnt/tgw-secrets/secrets/
+umount /mnt/tgw-secrets
 
 # 7. Drop ISOs onto the Ventoy partition
 mount /dev/sdX1 /mnt/ventoy
@@ -356,10 +348,10 @@ umount /mnt/ventoy
 
 **Keeping the kit current:**
 ```bash
-mount /dev/sdX3 /mnt/tgw-kit
-cd /mnt/tgw-kit/flake      && git pull   # if tracking a remote
-cd /mnt/tgw-kit/site-config && git pull
-umount /mnt/tgw-kit
+mount /dev/disk/by-label/TGW-SECRETS /mnt/tgw-secrets
+cd /mnt/tgw-secrets/flake       && git pull   # if tracking a remote
+cd /mnt/tgw-secrets/site-config && git pull
+umount /mnt/tgw-secrets
 ```
 
 **A1131 boot:** Ventoy with `-g` includes hybrid MBR, so legacy BIOS chainloading
@@ -370,8 +362,8 @@ works. If GRUB loads but cannot find the ISO, add `ventoy.json` to the Ventoy pa
 
 **Install invocation (from the booted NixOS live environment):**
 ```bash
-mount /dev/sdX3 /mnt/tgw-kit
-nixos-install --flake /mnt/tgw-kit/flake#tgw-test
+mount /dev/disk/by-label/TGW-SECRETS /mnt/tgw-secrets
+nixos-install --flake /mnt/tgw-secrets/flake#tgw-test
 ```
 
 **Weekend plan (2026-06-21/22):**

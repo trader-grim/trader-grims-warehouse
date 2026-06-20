@@ -662,7 +662,7 @@ def backfill_draft_from_live(item: Dict[str, Any], cfg: Dict[str, Any]) -> bool:
         'item_specifics':   item_specifics,
         'description':      listing_desc_text,
         'listing_description': listing_desc_html,
-        'image_urls':       image_urls,
+        'imageUrls':        image_urls,
         'upc':              upc,
         'fulfillment_policy_id': fulfillment_id,
         'payment_policy_id':     payment_id,

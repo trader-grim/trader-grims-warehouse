@@ -24,6 +24,7 @@ PP-PLANDB-001 Phase 1 columns (migration, applied 2026-06-12)::
 from __future__ import annotations
 
 import argparse
+import logging
 import re
 import time
 from contextlib import contextmanager
@@ -32,6 +33,8 @@ from typing import Any, Dict, Generator, List, Optional
 
 import psycopg2
 import psycopg2.extras
+
+log = logging.getLogger(__name__)
 
 _DSN = 'dbname=state_machine user=tgw'
 
@@ -50,8 +53,8 @@ def _ensure_reasoning_column() -> None:
         with _conn() as con:
             with con.cursor() as cur:
                 cur.execute(sql)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning('_ensure_reasoning_column: migration skipped — %s', exc)
 
 _ensure_reasoning_column()
 

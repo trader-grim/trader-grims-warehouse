@@ -152,11 +152,11 @@ def _write_field(cfg: Dict[str, Any], sku: str, field: str,
         raise FileNotFoundError(f'no item JSON for sku {sku!r}: {path}')
     if field == 'qty':
         try:
-            if float(value) < 0:
-                raise ValueError(f'qty cannot be negative: {value!r}')
-        except (TypeError, ValueError) as exc:
-            if 'cannot be negative' in str(exc):
-                raise
+            qty_f = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f'qty must be numeric: {value!r}')
+        if qty_f < 0:
+            raise ValueError(f'qty cannot be negative: {value!r}')
     doc = load_item_doc(path)
     before = doc.get(field)
     doc[field] = value

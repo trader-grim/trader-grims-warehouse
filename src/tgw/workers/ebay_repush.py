@@ -19,8 +19,8 @@ from typing import Any, Dict
 
 import tgw.config as config
 import tgw.logging as tgw_logging
-from tgw.apis.ebay.client import ebay_put
 from tgw.config import DEFAULT_CONFIG, load_config
+from tgw.ebay.repush import _repush_one
 from tgw.items import atomic_write_json
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
@@ -37,37 +37,30 @@ class EbayRepushWorker(QueueWorker):
         if not sku:
             raise HardFailure('ebay_repush job missing sku in payload')
 
-        json_path = config.sku_json(self.config, sku)
-        if not json_path.exists():
-            raise HardFailure(f'item JSON not found for {sku}')
+        tgw_logging.log_event('ebay_repush_start', sku=sku)
+        result = _repush_one(self.config, sku)
 
-        item = json.loads(json_path.read_text(encoding='utf-8'))
-
-        inv_body = item.get('ebay_submitted', {}).get('inventory_item')
-        if not inv_body:
-            raise HardFailure(
-                f'{sku}: no ebay_submitted.inventory_item — item must be staged '
-                f'after PP-EBAY-SNAPSHOT-001 was deployed'
-            )
-
-        image_urls = inv_body.get('product', {}).get('imageUrls', [])
-        log.info('ebay_repush: re-PUTting inventory_item for %s (%d photo(s))',
-                 sku, len(image_urls))
-        tgw_logging.log_event('ebay_repush_start', sku=sku, photo_count=len(image_urls))
-
-        ebay_put(self.config, f'/sell/inventory/v1/inventory_item/{sku}', inv_body)
+        if result.get('skipped'):
+            raise HardFailure(f'{sku}: {result.get("reason")}')
+        if not result.get('ok'):
+            raise RuntimeError(f'ebay_repush failed for {sku}: {result.get("reason")}')
 
         # Clear photo_verify so ebay_sync re-checks on next cycle
+        json_path = config.sku_json(self.config, sku)
+        item = json.loads(json_path.read_text(encoding='utf-8'))
+        inv_body = (item.get('ebay_submitted') or {}).get('inventory_item') or {}
+        photo_count = len(inv_body.get('product', {}).get('imageUrls', []))
+
         now_iso = datetime.now(timezone.utc).isoformat()
-        ebay_listing = item.get('ebay_listing', {})
+        ebay_listing = item.get('ebay_listing') or {}
         ebay_listing['repush_at'] = now_iso
         ebay_listing.pop('photo_verify', None)
         item['ebay_listing'] = ebay_listing
 
         atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
 
-        log.info('ebay_repush: %s repushed successfully (%d photo(s))', sku, len(image_urls))
-        tgw_logging.log_event('ebay_repush_complete', sku=sku, photo_count=len(image_urls))
+        log.info('ebay_repush: %s repushed successfully (%d photo(s))', sku, photo_count)
+        tgw_logging.log_event('ebay_repush_complete', sku=sku, photo_count=photo_count)
 
 
 def main() -> int:

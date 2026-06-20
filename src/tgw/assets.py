@@ -7,8 +7,9 @@ iterdir()/sorted() logic. This ensures the user's photo_order is
 respected everywhere: catalog, eBay upload, AI vision, thumbnail gen.
 
 Photo order precedence:
-  1. item['photo_order'] list — explicit user ordering
-  2. Natural sort (name-based, numeric segments sorted numerically)
+  1. item['image'] basename — explicit operator-designated primary
+  2. item['photo_order'] list — explicit user ordering
+  3. Natural sort (name-based, numeric segments sorted numerically)
 
 Extras (files on disk not in photo_order) are merged in natural sort
 position but never before index 0 (the user's chosen primary).
@@ -73,6 +74,15 @@ def ordered_photos(item: Dict[str, Any], sku_dir: Path) -> List[Path]:
 
 
 def primary_photo(item: Dict[str, Any], sku_dir: Path) -> Optional[Path]:
-    """Return the first photo in display order, or None if directory is empty."""
+    """Return the primary photo path.
+
+    Checks item['image'] (operator-designated primary) first, falling back
+    to ordered_photos() (photo_order then natural sort).
+    """
+    image_field = item.get('image')
+    if image_field:
+        candidate = sku_dir / Path(image_field).name
+        if candidate.is_file():
+            return candidate
     photos = ordered_photos(item, sku_dir)
     return photos[0] if photos else None

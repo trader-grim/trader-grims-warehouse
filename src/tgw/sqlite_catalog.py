@@ -42,14 +42,14 @@ def _scalar(doc: Dict[str, Any], key: str) -> str:
 
 
 def _price_col(doc: Dict[str, Any]) -> str:
-    """Resolve display price: top-level → ebay_offer → draft_listing."""
-    p = doc.get('price')
-    if p is not None:
-        return str(p)
+    """Resolve display price: ebay_offer → top-level → draft_listing."""
     eo = doc.get('ebay_offer') or {}
     ep = eo.get('price')
     if ep is not None:
         return str(ep)
+    p = doc.get('price')
+    if p is not None:
+        return str(p)
     dl = doc.get('draft_listing') or {}
     dp = dl.get('price')
     if dp is not None:
