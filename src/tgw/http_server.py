@@ -108,6 +108,7 @@ PIPELINE_ACTIONS = {
     "approve",
     "archive",
     "migrate_unblock",
+    "review_mark_ready",
 }
 
 
@@ -873,6 +874,21 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                 pass
             return {"ok": True, "sku": sku, "action": "migrate_unblock",
                     "was_blocked": was_blocked is not None}
+
+        elif action == "review_mark_ready":
+            from datetime import datetime as _dt
+            from datetime import timezone as _tz
+            doc = load_item_doc(json_path)
+            rb = doc.get("review_block") or {}
+            if not rb:
+                return {"ok": True, "sku": sku, "action": "review_mark_ready",
+                        "note": "no review_block present"}
+            rb["ready"] = True
+            rb["retested_at"] = _dt.now(_tz.utc).isoformat()
+            doc["review_block"] = rb
+            atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+            return {"ok": True, "sku": sku, "action": "review_mark_ready",
+                    "stage": rb.get("stage"), "reason_code": rb.get("reason_code")}
 
         elif action == "ai_identify":
             # Clear ai_identified so the worker will run
@@ -3643,7 +3659,8 @@ def _render_item_detail_html(
             f'{_rb_detail}'
             f'{_rb_sugg_html}'
             f'<div style="font-size:.79em;color:#884;margin-top:6px">'
-            f'Use <code>tgw migrate-unblock {h(sku)}</code> after resolving to re-queue.</div>'
+            f'<a href="/form/needs-review" style="color:#aaa">← All blocked items</a>'
+            f' · Use <code>tgw migrate-unblock {h(sku)}</code> or click Mark Ready in the blocked queue after resolving.</div>'
             f'</div>'
         )
 
@@ -3777,6 +3794,9 @@ def dashboard() -> Dict[str, Any]:
                           COUNT(CASE WHEN json_extract(data,'$.ebay_offer.ready_at') IS NOT NULL
                                       AND json_extract(data,'$.ebay_offer.offer_id') IS NOT NULL
                                       AND json_extract(data,'$.ebay_offer.status') = 'UNPUBLISHED'
+                                     THEN 1 END),
+                          COUNT(CASE WHEN json_extract(data,'$.review_block') IS NOT NULL
+                                      AND json_extract(data,'$.review_block.ready') IS NOT 1
                                      THEN 1 END)
                         FROM catalog
                         """
@@ -3785,6 +3805,7 @@ def dashboard() -> Dict[str, Any]:
                     result["needs_photos"] = row[1]
                     result["has_revision_draft"] = row[2]
                     result["ready_count"] = row[3]
+                    result["blocked_count"] = row[4]
                 else:
                     row = con.execute(
                         "SELECT COUNT(*) FROM catalog WHERE image IS NULL OR image = ''"
@@ -3798,10 +3819,10 @@ def dashboard() -> Dict[str, Any]:
         except Exception as exc:
             log.warning("dashboard: SQLite query failed: %s", exc)
             result.update(needs_review=None, needs_photos=None,
-                          has_revision_draft=None, ready_count=None)
+                          has_revision_draft=None, ready_count=None, blocked_count=None)
     else:
         result.update(needs_review=None, needs_photos=None,
-                      has_revision_draft=None, ready_count=None)
+                      has_revision_draft=None, ready_count=None, blocked_count=None)
 
     # --- PostgreSQL: dead_letter_count ---
     dead_letter_count = 0
@@ -4982,8 +5003,8 @@ load();
 """
 
 
-@app.get("/form/review")
-def review_form():
+@app.get("/form/drafts")
+def drafts_form():
     """Post-draft review queue — approve/re-draft/edit items awaiting human QA.
     No Bearer auth (network trust); JS embeds the key for API calls."""
     from fastapi.responses import HTMLResponse
@@ -4992,6 +5013,202 @@ def review_form():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         review_css=_REVIEW_EXTRA_CSS,
+        api_key_json=json.dumps(_web_key),
+    )
+    return HTMLResponse(html)
+
+
+@app.get("/form/review")
+def review_form_redirect():
+    """Backward-compat redirect — /form/review renamed to /form/drafts."""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/form/drafts", status_code=301)
+
+
+# ---------------------------------------------------------------------------
+# GET /form/needs-review — blocked items dashboard (PP-UI-INTEGRITY-001 Phase 3)
+# ---------------------------------------------------------------------------
+
+_NEEDS_REVIEW_HTML = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TGW — Needs Review</title>
+{static_head}
+<style>
+.nr-group{{margin-bottom:22px}}
+.nr-group-hdr{{font-size:.82em;font-weight:700;text-transform:uppercase;letter-spacing:.06em;
+  color:#888;padding:6px 0 4px;border-bottom:1px solid #222;margin-bottom:8px}}
+.nr-card{{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:8px;
+  padding:10px 14px;margin-bottom:6px;display:flex;gap:12px;align-items:flex-start}}
+.nr-card.ready{{opacity:.45;border-color:#1a3a1a}}
+.nr-body{{min-width:0;flex:1}}
+.nr-sku{{font-family:monospace;font-size:.78em;color:#4a8ade}}
+.nr-title{{font-size:.9em;color:#ddd;margin:2px 0 4px;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}}
+.nr-meta{{font-size:.76em;color:#666;display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px}}
+.nr-chip{{background:#111;border:1px solid #222;border-radius:3px;padding:1px 6px}}
+.nr-reason{{color:#f99}}.nr-stage{{color:#7af}}.nr-at{{color:#666}}
+.nr-error{{font-size:.78em;color:#f77;margin-bottom:4px;word-break:break-word}}
+.nr-sugg{{font-size:.78em;color:#fb7;margin-bottom:6px}}
+.nr-actions{{display:flex;gap:8px;flex-wrap:wrap}}
+.btn-nr-ready{{padding:6px 14px;background:#1a4a1a;color:#7f7;border:1px solid #3a8a3a;
+  border-radius:6px;cursor:pointer;font-size:.81em;font-weight:600}}
+.btn-nr-ready:hover{{background:#1e5a1e}}
+.btn-nr-view{{padding:6px 12px;background:#1a1a2a;color:#7af;border:1px solid #3a4a7a;
+  border-radius:6px;text-decoration:none;font-size:.81em;font-weight:600;
+  display:inline-block;line-height:1.4}}
+.btn-nr-view:hover{{background:#1a2a3a}}
+.nr-flash{{padding:4px 8px;border-radius:4px;font-size:.78em;margin-top:4px;display:none}}
+.nr-flash.ok{{background:#1a3a1a;color:#7f7;display:block}}
+.nr-flash.err{{background:#3a1a1a;color:#f77;display:block}}
+.empty-nr{{padding:32px;text-align:center;color:#555;font-size:.95em}}
+.nr-counts{{font-size:.78em;color:#666;margin-bottom:14px}}
+</style>
+</head>
+<body>
+<h2>Needs Review
+  <span id="nr-total" style="font-size:.6em;color:#666;font-weight:normal"></span>
+  <button style="background:none;border:none;color:#4a8ade;cursor:pointer;font-size:.8em;
+    text-decoration:underline;margin-left:8px" onclick="load()">&#8635; Refresh</button>
+</h2>
+<div id="nr-list"><span style="color:#555">Loading…</span></div>
+
+{static_foot}
+<script>
+window.TGW_API_KEY = {api_key_json};
+
+function flashId(sku) {{ return 'nrf-' + sku.replace(/[^a-z0-9]/gi,'_'); }}
+
+function renderNeeds(data) {{
+  var el = document.getElementById('nr-list');
+  var tot = document.getElementById('nr-total');
+  if (!data || !data.ok) {{
+    el.innerHTML = '<div style="color:#f77;padding:16px">Failed to load: ' +
+      escapeHtml((data && data.error) || 'unknown') + '</div>';
+    return;
+  }}
+  var items = data.items || [];
+  tot.textContent = '(' + items.length + ' blocked)';
+  if (!items.length) {{
+    el.innerHTML = '<div class="empty-nr">No items blocked — all clear.</div>';
+    return;
+  }}
+  // Group by stage → reason_code (server sends grouped too, but build locally for live updates)
+  var grouped = {{}};
+  items.forEach(function(it) {{
+    var rb = it.review_block || {{}};
+    var stage = rb.stage || 'unknown';
+    var rc    = rb.reason_code || 'UNKNOWN_ERROR';
+    var gkey  = stage + '/' + rc;
+    if (!grouped[gkey]) grouped[gkey] = {{stage: stage, rc: rc, items: []}};
+    grouped[gkey].items.push(it);
+  }});
+  var html = '';
+  Object.keys(grouped).sort().forEach(function(gkey) {{
+    var g = grouped[gkey];
+    html += '<div class="nr-group">';
+    html += '<div class="nr-group-hdr">' + escapeHtml(g.stage) +
+            ' · ' + escapeHtml(g.rc) +
+            ' <span style="color:#555;font-weight:400">(' + g.items.length + ')</span></div>';
+    g.items.forEach(function(it) {{
+      var rb  = it.review_block || {{}};
+      var sku = it.sku;
+      var fid = flashId(sku);
+      var editUrl = '/form/items/' + encodeURIComponent(sku);
+      html += '<div class="nr-card" id="nr-card-' + escapeHtml(sku) + '">';
+      html += '<div class="nr-body">';
+      html += '<div class="nr-sku">' + escapeHtml(sku) + '</div>';
+      html += '<div class="nr-title">' + escapeHtml(it.title || '—') + '</div>';
+      html += '<div class="nr-meta">';
+      html += '<span class="nr-chip nr-stage">' + escapeHtml(rb.stage || '') + '</span>';
+      html += '<span class="nr-chip nr-reason">' + escapeHtml(rb.reason_code || '') + '</span>';
+      if (rb.flagged_at) {{
+        html += '<span class="nr-chip nr-at">flagged ' +
+                escapeHtml(String(rb.flagged_at).slice(0,10)) + '</span>';
+      }}
+      if (rb.retested_at) {{
+        html += '<span class="nr-chip" style="color:#aaa">retested ' +
+                escapeHtml(String(rb.retested_at).slice(0,10)) + '</span>';
+      }}
+      html += '</div>';
+      if (rb.error) {{
+        html += '<div class="nr-error">' + escapeHtml(rb.error) + '</div>';
+      }}
+      if (rb.suggestion) {{
+        html += '<div class="nr-sugg">&#128161; ' + escapeHtml(rb.suggestion) + '</div>';
+      }}
+      html += '<div class="nr-actions">';
+      html += '<button class="btn-nr-ready" onclick="markReady(' + JSON.stringify(sku) + ')">&#10003; Mark Ready</button>';
+      html += '<a class="btn-nr-view" href="' + escapeHtml(editUrl) + '" target="_blank">&#9654; View Item</a>';
+      html += '</div>';
+      html += '<div class="nr-flash" id="' + fid + '"></div>';
+      html += '</div></div>';
+    }});
+    html += '</div>';
+  }});
+  el.innerHTML = html;
+}}
+
+async function markReady(sku) {{
+  var flash = document.getElementById(flashId(sku));
+  if (flash) {{ flash.className = 'nr-flash'; flash.textContent = ''; }}
+  try {{
+    var r = await fetch('/api/items/' + encodeURIComponent(sku) + '/action', {{
+      method: 'POST',
+      headers: authHeaders({{'Content-Type': 'application/json'}}),
+      body: JSON.stringify({{action: 'review_mark_ready'}}),
+    }});
+    var d = await r.json();
+    if (d.ok) {{
+      var card = document.getElementById('nr-card-' + sku);
+      if (card) {{ card.classList.add('ready'); card.style.pointerEvents = 'none'; }}
+      if (flash) {{ flash.className = 'nr-flash ok';
+                   flash.textContent = 'Marked ready — re-queue from item detail page.'; }}
+      setTimeout(load, 1500);
+    }} else {{
+      if (flash) {{ flash.className = 'nr-flash err';
+                   flash.textContent = 'Error: ' + escapeHtml(d.error || d.detail || 'unknown'); }}
+    }}
+  }} catch(e) {{
+    if (flash) {{ flash.className = 'nr-flash err';
+                 flash.textContent = 'Network error: ' + escapeHtml(String(e)); }}
+  }}
+}}
+
+async function load() {{
+  var el = document.getElementById('nr-list');
+  el.innerHTML = '<span style="color:#555">Loading…</span>';
+  try {{
+    var r = await fetch('/api/review', {{headers: authHeaders()}});
+    var d = await r.json();
+    renderNeeds(d);
+    // update nav badge if present
+    var nb = document.getElementById('nav-blocked-count');
+    if (nb && d.ok) nb.textContent = d.count > 0 ? String(d.count) : '';
+  }} catch(e) {{
+    document.getElementById('nr-list').innerHTML =
+      '<div style="color:#f77;padding:16px">Network error: ' + escapeHtml(String(e)) + '</div>';
+  }}
+}}
+
+load();
+</script>
+</body>
+</html>
+"""
+
+
+@app.get("/form/needs-review")
+def needs_review_form():
+    """Blocked items dashboard — items with review_block.ready=false (PP-UI-INTEGRITY-001 P3)."""
+    from fastapi.responses import HTMLResponse
+
+    html = _NEEDS_REVIEW_HTML.format(
+        static_head=_STATIC_HEAD,
+        static_foot=_STATIC_FOOT,
         api_key_json=json.dumps(_web_key),
     )
     return HTMLResponse(html)
@@ -6168,12 +6385,13 @@ function renderDashboard(data) {{
     return;
   }}
   var cards = [
-    {{key:'needs_review',      label:'Need Review',    href:'/form/items', cls:function(v){{return v>0?'alert':'';}}}},
-    {{key:'pending_offers',    label:'Pending Offers', href:'/form/offers',    cls:function(v){{return v>0?'info':'';}}}},
-    {{key:'needs_photos',      label:'Need Photos',    href:'/form/items',     cls:function(v){{return v>0?'alert':'';}}}},
-    {{key:'has_revision_draft',label:'Revision Drafts',href:'/form/revisions', cls:function(v){{return v>0?'info':'';}}}},
-    {{key:'dead_letter_count', label:'Dead Letters',   href:'/form/pipeline',  cls:function(v){{return v>0?'err':'';}}}},
-    {{key:'ready_count',       label:'Ready to List',  href:'/form/items', cls:function(v){{return v>0?'ok':'';}}}},
+    {{key:'blocked_count',     label:'Blocked',        href:'/form/needs-review', cls:function(v){{return v>0?'err':'';}}}},
+    {{key:'needs_review',      label:'Pending Drafts', href:'/form/drafts',       cls:function(v){{return v>0?'alert':'';}}}},
+    {{key:'pending_offers',    label:'Pending Offers', href:'/form/offers',       cls:function(v){{return v>0?'info':'';}}}},
+    {{key:'needs_photos',      label:'Need Photos',    href:'/form/items',        cls:function(v){{return v>0?'alert':'';}}}},
+    {{key:'has_revision_draft',label:'Revision Drafts',href:'/form/revisions',    cls:function(v){{return v>0?'info':'';}}}},
+    {{key:'dead_letter_count', label:'Dead Letters',   href:'/form/pipeline',     cls:function(v){{return v>0?'err':'';}}}},
+    {{key:'ready_count',       label:'Ready to List',  href:'/form/items',        cls:function(v){{return v>0?'ok':'';}}}},
   ];
   var html = '';
   cards.forEach(function(c) {{

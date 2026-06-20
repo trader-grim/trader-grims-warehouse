@@ -6,7 +6,8 @@
     '<a href="/form/home">Home</a>' +
     '<a href="/form/intake">Intake</a>' +
     '<a href="/form/items">Inventory</a>' +
-    '<a href="/form/review">Review <span id="nav-review-count" class="nav-count"></span></a>' +
+    '<a href="/form/needs-review">Blocked <span id="nav-blocked-count" class="nav-count"></span></a>' +
+    '<a href="/form/drafts">Drafts <span id="nav-review-count" class="nav-count"></span></a>' +
     '<a href="/form/pipeline">Pipeline</a>' +
     '<a href="/form/system">System</a>' +
     '<a href="/docs">Docs</a>' +

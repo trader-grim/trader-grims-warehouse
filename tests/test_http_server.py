@@ -2777,26 +2777,30 @@ def test_approve_action_requires_auth(client):
 
 
 def test_form_review_renders(client):
-    """/form/review returns HTML with expected structure."""
-    r = client.get("/form/review")
+    """/form/drafts returns HTML with expected structure; /form/review redirects."""
+    r = client.get("/form/drafts")
     assert r.status_code == 200
     assert "text/html" in r.headers["content-type"]
     assert "Review Queue" in r.text
     assert "/api/items/review-queue" in r.text
     assert "Approve All" in r.text
+    # Old URL redirects
+    r2 = client.get("/form/review", follow_redirects=False)
+    assert r2.status_code == 301
 
 
 def test_form_review_no_auth_required(client):
-    """/form/review is accessible without Bearer token."""
-    r = client.get("/form/review")
+    """/form/drafts is accessible without Bearer token."""
+    r = client.get("/form/drafts")
     assert r.status_code == 200
 
 
 def test_nav_includes_review_link(client):
-    """nav.js includes a link to /form/review."""
+    """nav.js includes links to /form/drafts and /form/needs-review."""
     r = client.get("/static/nav.js")
     assert r.status_code == 200
-    assert "/form/review" in r.text
+    assert "/form/drafts" in r.text
+    assert "/form/needs-review" in r.text
 
 
 def test_nav_review_badge_span_present(client):
