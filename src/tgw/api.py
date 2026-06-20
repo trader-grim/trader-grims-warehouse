@@ -386,6 +386,8 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ]),
     ("eBay", [
         "ebay-pull", "ebay-sweep", "import-sold-csv", "sku-migrate",
+        "migrate-review", "migrate-unblock", "migrate-restore",
+        "review",
         "setup-ebay-hooks", "build-archive-index", "history-index",
         "strikethrough-check", "store-categories", "store-category", "get-ebay-token",
         "offers", "ebay-repush", "ebay-backfill-snapshot",
@@ -726,6 +728,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sku", nargs="+", metavar="SKU", help="sync only these SKUs")
     p.add_argument("--location", default=None, metavar="LOC", help="sync only items at this location")
     p.add_argument("--status", default=None, metavar="STATUS", help="sync only items with this status")
+
+    p = sub.add_parser("review", help="list all items needing human review across all pipeline stages (PP-REVIEW-001)")
+    p.add_argument("--stage", default=None, help="filter by pipeline stage (e.g. ebay_sku_migrate)")
+    p.add_argument("--reason", default=None, dest="reason_code", help="filter by reason code (e.g. POLICY_VIOLATION)")
+
+    sub.add_parser("migrate-review", help="list items blocked in eBay SKU migration (need human review)")
+
+    p = sub.add_parser("migrate-unblock", help="clear migration block on an item so the worker will retry it")
+    p.add_argument("sku", nargs="+", help="SKU(s) to unblock")
+
+    p = sub.add_parser("migrate-restore", help="restore item JSON from pre-migration archive snapshot")
+    p.add_argument("old_sku", help="original (old-format) SKU — used to locate the archive file")
+    p.add_argument("--dry-run", action="store_true", help="show what would be restored without writing")
 
     p = sub.add_parser("sku-migrate", help="SKU normalization (PP-ADD-005)")
     p.add_argument("--check-collisions", action="store_true", help="run collision check only — no changes")
@@ -3930,6 +3945,159 @@ def main() -> int:
                 reload=args.reload,
                 log_level="info",
             )
+            return 0
+
+        elif args.op == "review":
+            import sqlite3 as _sqlite3
+            db_path = cfg.get("sqlite_catalog_path")
+            if not db_path or not Path(db_path).exists():
+                print("Catalog not built — run: tgw build-sqlite")
+                return 1
+            con = _sqlite3.connect(db_path)
+            try:
+                rows = con.execute(
+                    "SELECT sku, title, json_extract(data, '$.review_block') as rb "
+                    "FROM catalog "
+                    "WHERE json_extract(data, '$.review_block') IS NOT NULL "
+                    "  AND json_extract(data, '$.review_block.ready') IS NOT 1"
+                ).fetchall()
+            finally:
+                con.close()
+
+            items = []
+            for sku, title, rb_json in rows:
+                try:
+                    rb = json.loads(rb_json) if rb_json else {}
+                except Exception:
+                    rb = {}
+                if getattr(args, 'stage', None) and rb.get('stage') != args.stage:
+                    continue
+                if getattr(args, 'reason_code', None) and rb.get('reason_code') != args.reason_code:
+                    continue
+                items.append((sku, title or '', rb))
+
+            if not items:
+                print("No items need review.")
+                return 0
+
+            # Group by stage / reason_code
+            from collections import defaultdict
+            grouped: Dict[str, Any] = defaultdict(lambda: defaultdict(list))
+            for sku, title, rb in items:
+                grouped[rb.get('stage', 'unknown')][rb.get('reason_code', 'UNKNOWN_ERROR')].append(
+                    (sku, title, rb)
+                )
+
+            for stage_name, by_reason in sorted(grouped.items()):
+                for reason, entries in sorted(by_reason.items()):
+                    print(f"\n── {stage_name} / {reason} ({len(entries)} item(s)) ──")
+                    print(f"  {'SKU':<22}  {'Flagged':<20}  {'Title':<40}  Error")
+                    print(f"  {'-'*22}  {'-'*20}  {'-'*40}  {'-'*40}")
+                    for sku, title, rb in entries:
+                        flagged = (rb.get('flagged_at') or '')[:19]
+                        error = (rb.get('error') or '')[:60]
+                        print(f"  {sku:<22}  {flagged:<20}  {title[:40]:<40}  {error}")
+
+            print(f"\n{len(items)} item(s) need review.")
+            print("To re-queue after fixing:  tgw migrate-unblock <sku>   (for ebay_sku_migrate)")
+            return 0
+
+        elif args.op == "migrate-review":
+            registry_path = Path("/opt/TGW/var/migrate-blocked.json")
+            if not registry_path.exists():
+                print("No blocked migration items.")
+                return 0
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            if not registry:
+                print("No blocked migration items.")
+                return 0
+            print(f"{'SKU':<22}  {'Blocked at':<26}  Error")
+            print("-" * 100)
+            for sku, entry in sorted(registry.items()):
+                blocked_at = entry.get("blocked_at", "unknown")[:19]
+                error = entry.get("error", "")[:60]
+                ebay_done = " [eBay done]" if entry.get("ebay_done") else ""
+                print(f"{sku:<22}  {blocked_at:<26}  {error}{ebay_done}")
+            print(f"\n{len(registry)} blocked item(s). Fix data then run: tgw migrate-unblock <sku>")
+            return 0
+
+        elif args.op == "migrate-unblock":
+            registry_path = Path("/opt/TGW/var/migrate-blocked.json")
+            registry: Dict[str, Any] = {}
+            if registry_path.exists():
+                registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            for sku in args.sku:
+                json_path = cfg["itemdata_root"] / sku / f"{sku}.json"
+                if not json_path.exists():
+                    print(f"  {sku}: not found")
+                    continue
+                from .items import atomic_write_json, load_item_doc
+                doc = load_item_doc(json_path)
+                was_blocked = "sku_migrate_blocked" in doc
+                doc.pop("sku_migrate_blocked", None)
+                doc.pop("sku_migrate_skip", None)
+                atomic_write_json(json_path, doc, pretty=cfg.get("pretty", True))
+                registry.pop(sku, None)
+                status = "unblocked" if was_blocked else "skip flag cleared (was not blocked)"
+                print(f"  {sku}: {status}")
+            if registry_path.exists() or registry:
+                tmp = registry_path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(registry, indent=2, ensure_ascii=False),
+                               encoding="utf-8")
+                tmp.replace(registry_path)
+            print("Done. Worker will pick up in next scheduled batch.")
+            return 0
+
+        elif args.op == "migrate-restore":
+            from .queue import state_machine as _sm
+            from .sku_migration import _MIGRATE_ARCHIVE
+            _sm.init(cfg["postgres_dsn"])
+
+            old_sku = args.old_sku
+            archive_path = _MIGRATE_ARCHIVE / f"{old_sku}.json"
+            if not archive_path.exists():
+                print(f"No archive found for {old_sku} at {archive_path}")
+                return 1
+
+            import json as _json
+            snapshot = _json.loads(archive_path.read_text(encoding="utf-8"))
+            print(f"Archive snapshot: {len(snapshot)} fields, sku={snapshot.get('sku')}, "
+                  f"title={snapshot.get('title', '')[:60]!r}")
+
+            # Determine where to write: new SKU path (if rename succeeded) or old path
+            import psycopg2 as _psycopg2
+            with _psycopg2.connect(cfg["postgres_dsn"]) as con:
+                with con.cursor() as cur:
+                    cur.execute(
+                        "SELECT sku_new FROM sku_history WHERE sku_old = %s "
+                        "ORDER BY changed_at DESC LIMIT 1",
+                        (old_sku,),
+                    )
+                    row = cur.fetchone()
+            new_sku = row[0] if row else None
+
+            if new_sku:
+                dest = cfg["itemdata_root"] / new_sku / f"{new_sku}.json"
+                print(f"Rename found in sku_history: {old_sku} → {new_sku}")
+            else:
+                dest = cfg["itemdata_root"] / old_sku / f"{old_sku}.json"
+                print("No rename found — restoring to original path")
+
+            if not dest.parent.exists():
+                print(f"Destination directory does not exist: {dest.parent}")
+                return 1
+
+            print(f"Restore target: {dest}")
+            if args.dry_run:
+                print("Dry run — no changes written.")
+                return 0
+
+            # Update sku field to match destination
+            restore_data = dict(snapshot)
+            restore_data["sku"] = new_sku if new_sku else old_sku
+            from .items import atomic_write_json as _awj
+            _awj(dest, restore_data, pretty=cfg.get("pretty", True))
+            print(f"Restored {len(restore_data)} fields to {dest}")
             return 0
 
         elif args.op == "sku-migrate":

@@ -85,29 +85,33 @@ def build_sqlite_catalog(cfg: Dict[str, Any],
                 'check_only': True}
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    new_rows = [
+        (
+            _scalar(r, 'sku'),
+            _scalar(r, 'title'),
+            _scalar(r, 'location'),
+            _scalar(r, '#STATUS') or _scalar(r, 'status'),
+            _price_col(r),
+            _scalar(r, 'qty'),
+            _scalar(r, 'image'),
+            _scalar(r, 'attribute_set'),
+            json.dumps(r, ensure_ascii=False),
+        )
+        for r in rows
+    ]
     con = sqlite3.connect(db_path)
     try:
         con.executescript(_SCHEMA)
         with con:
+            # Full replace: delete all then insert — removes stale rows for
+            # renamed/deleted SKUs that INSERT OR REPLACE would leave behind.
+            con.execute('DELETE FROM catalog')
             con.executemany(
-                """INSERT OR REPLACE INTO catalog
+                """INSERT INTO catalog
                    (sku, title, location, status, price, qty, image,
                     attribute_set, data, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
-                [
-                    (
-                        _scalar(r, 'sku'),
-                        _scalar(r, 'title'),
-                        _scalar(r, 'location'),
-                        _scalar(r, '#STATUS') or _scalar(r, 'status'),
-                        _price_col(r),
-                        _scalar(r, 'qty'),
-                        _scalar(r, 'image'),
-                        _scalar(r, 'attribute_set'),
-                        json.dumps(r, ensure_ascii=False),
-                    )
-                    for r in rows
-                ],
+                new_rows,
             )
     finally:
         con.close()

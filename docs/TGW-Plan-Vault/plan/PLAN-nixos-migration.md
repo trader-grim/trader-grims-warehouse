@@ -184,15 +184,14 @@ green on the live host after the JSON edit; `ebay_sku_migrate` worker restarted 
 claiming on its next hourly run.
 *Done when:* `TGW-Config-Reference.md` updated; ISSUES.md entries closed with dates.
 
-**0.5 Create the private site-config GitHub repo.**
-*Do:* new private repo `tgw-site-config` containing `tgw-api-config.json` (post-0.4),
-`category-groups.json`, nginx/cloudflared config dir, `trader-grims-backup.yaml`
-(sanitized — verify no credentials inside first; it is root-owned, so Dave inspects),
-plus a README stating "no secrets, ever." Add a sync note to the master plan.
-*Test coverage:* a repo-side CI grep (or pre-commit hook) rejecting patterns
-(`api_key|cert_id|token|password|BEGIN .* KEY`); manual diff of repo copy vs live copy.
-*Done when:* fresh clone + copy into a scratch dir passes `tgw --config <clone>/... health`
-path checks (config-shape validation, paths will differ).
+**0.5 Create the private site-config GitHub repo.** ✅ DONE 2026-06-19
+`trader-grim/tgw-site-config` (private) — contains `config/` (tgw-api-config, category-groups,
+ebay-config, queue-config, tgw-models, trader-grims-backup.yaml, nginx/, queue-workers/, www/,
+local/) and `systemd/` (all live tgw-* and queue-workers* units). Cloned onto both USB kit
+partitions. `hosts/` dir confirmed obsolete and excluded. CI secret-grep pre-commit hook:
+still pending (nice-to-have, not blocking).
+*Test coverage:* manual credential audit passed (no secrets in any included file); cloned
+successfully to /media/tgw/TGW-SECRETS/site-config and TGW-SECRETS1/site-config.
 
 **0.6 Migrate the live `tgw` user to a system uid below 1000** (operator, on MX, **before
 the Phase-1 ISO bake** so the rollback image already carries the final uid):
@@ -274,6 +273,12 @@ crash).
 
 **Purpose:** A single USB drive serves as both the NixOS installer and the carrier for the
 TGW flake config. It is also the permanent DR artifact — bare-metal restore starts here.
+
+**Status (2026-06-19):** Both drives prepared. Ventoy installed, kit partitions populated
+(flake, schema, site-config clone, age-encrypted secrets bundle). NixOS ISO copying to Ventoy
+partitions. A1131 boot validation pending (morning of 2026-06-20). One drive stays here
+(dev/active kit), one goes to satellite warehouse (offsite DR). Dedicated secrets drives
+(3+) rotate separately — kit + secrets together = full restore capability.
 
 **Test rig constraint:** iMac A1131 has Apple's 32-bit EFI, which is incompatible with
 Ventoy's standard chainloading. The A1131 boots Linux reliably in BIOS/legacy mode via
@@ -477,6 +482,17 @@ old or re-baked; rclone backup fresh (`rclone lsd` spot-check); Dave has uninter
 - Then: record MX-ISO retirement decision in the master plan; open follow-ups as todos —
   multi-tier flake split (`bases/`, `interfaces/`, `graphical/`, `ai/`), personal operator
   flake, PP-BACKUP-001 DR suite, Google Drive rebuild kit upload.
+- **Post-NixOS track — cryptographic chain of trust (revisit once stable on NixOS):**
+  NixOS + `systemd-cryptenroll` makes LUKS2 disk encryption + TPM2 auto-unlock a
+  one-command enrollment: the decryption key is sealed against PCR values (measured boot
+  state), so the disk auto-unlocks on every unattended reboot *but* becomes a brick if
+  anyone boots a different kernel or swaps the drive. Custom Secure Boot keys (your own
+  PK/KEK/db, not Microsoft's) close the chain — only your signed kernel can produce the
+  PCR fingerprint the TPM2 expects. The YubiKey touch requirement from Sécurix is
+  dropped entirely; it was the human-auth node and is wrong for a headless server.
+  TGW's age-encrypted USB secrets (PP-BACKUP-001) are complementary — TPM2 protects
+  the running disk, age protects backup material that leaves the machine. Research file:
+  `docs/TGW-Plan-Vault/securix-borgbackup.md`.
 *Test coverage:* the daily checks are the test; retirement requires the shakedown log.
 
 ---

@@ -107,6 +107,7 @@ PIPELINE_ACTIONS = {
     "thumbnail_gen",
     "approve",
     "archive",
+    "migrate_unblock",
 }
 
 
@@ -263,8 +264,8 @@ def list_items(
         clauses.append("(status IS NULL OR status NOT IN ('archived', 'deleted'))")
 
     if search:
-        clauses.append("(title LIKE ? OR sku LIKE ?)")
-        params += [f"%{search}%", f"%{search}%"]
+        clauses.append("(title LIKE ? OR sku LIKE ? OR json_extract(data, '$.sku_old') LIKE ?)")
+        params += [f"%{search}%", f"%{search}%", f"%{search}%"]
     if location:
         clauses.append("location = ?")
         params.append(location)
@@ -407,6 +408,27 @@ def get_review_queue() -> Dict[str, Any]:
 def get_item(sku: str) -> Dict[str, Any]:
     json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
     if not json_path.exists():
+        # Check sku_history — this SKU may have been renamed during migration
+        try:
+            with psycopg2.connect(_cfg["postgres_dsn"]) as con:
+                with con.cursor() as cur:
+                    cur.execute(
+                        "SELECT sku_new FROM sku_history WHERE sku_old = %s"
+                        " ORDER BY changed_at DESC LIMIT 1",
+                        (sku,),
+                    )
+                    row = cur.fetchone()
+        except Exception:
+            row = None
+        if row and isinstance(row[0], str) and row[0]:
+            new_sku = row[0]
+            new_path = _cfg["itemdata_root"] / new_sku / f"{new_sku}.json"
+            if new_path.exists():
+                from fastapi.responses import RedirectResponse
+                return RedirectResponse(
+                    url=f"/api/items/{new_sku}",
+                    status_code=301,
+                )
         raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
 
     item = load_item_doc(json_path)
@@ -828,6 +850,28 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                 raise HTTPException(status_code=502, detail=f"eBay end listing failed: {exc}")
             return {"ok": True, "sku": sku, "action": "ebay_end_listing", "status": "Ended"}
 
+        elif action == "migrate_unblock":
+            import json as _json
+            from pathlib import Path as _Path
+            doc = load_item_doc(json_path)
+            was_blocked = doc.pop("sku_migrate_blocked", None)
+            doc.pop("sku_migrate_skip", None)
+            atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+            # Remove from blocked registry
+            registry_path = _Path("/opt/TGW/var/migrate-blocked.json")
+            try:
+                if registry_path.exists():
+                    registry = _json.loads(registry_path.read_text(encoding="utf-8"))
+                    registry.pop(sku, None)
+                    tmp = registry_path.with_suffix(".tmp")
+                    tmp.write_text(_json.dumps(registry, indent=2, ensure_ascii=False),
+                                   encoding="utf-8")
+                    tmp.replace(registry_path)
+            except Exception:
+                pass
+            return {"ok": True, "sku": sku, "action": "migrate_unblock",
+                    "was_blocked": was_blocked is not None}
+
         elif action == "ai_identify":
             # Clear ai_identified so the worker will run
             doc = load_item_doc(json_path)
@@ -917,6 +961,80 @@ def queue_status() -> Dict[str, Any]:
         by_queue.setdefault(q, {})[s] = row["count"]
 
     return {"ok": True, "queues": by_queue}
+
+
+# ---------------------------------------------------------------------------
+# GET /api/migrate/blocked — items blocked in SKU migration (need human review)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/migrate/blocked", dependencies=[AUTH])
+def get_migrate_blocked() -> Dict[str, Any]:
+    import json as _json
+    from pathlib import Path as _Path
+    registry_path = _Path("/opt/TGW/var/migrate-blocked.json")
+    if not registry_path.exists():
+        return {"ok": True, "count": 0, "items": []}
+    try:
+        registry = _json.loads(registry_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"could not read blocked registry: {exc}")
+    items = [{"sku": sku, **entry} for sku, entry in registry.items()]
+    return {"ok": True, "count": len(items), "items": items}
+
+
+# ---------------------------------------------------------------------------
+# GET /api/review — all items with review_block.ready=false (PP-REVIEW-001 P1)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/review", dependencies=[AUTH])
+def get_review_items(stage: Optional[str] = None,
+                     reason_code: Optional[str] = None) -> Dict[str, Any]:
+    """Return all items that need human review, optionally filtered by stage/reason_code."""
+    import sqlite3 as _sqlite3
+    db_path = _cfg.get("sqlite_catalog_path")
+    if not db_path or not db_path.exists():
+        raise HTTPException(status_code=503, detail="catalog not built")
+    try:
+        con = _sqlite3.connect(db_path)
+        try:
+            rows = con.execute(
+                "SELECT sku, title, json_extract(data, '$.review_block') as rb "
+                "FROM catalog "
+                "WHERE json_extract(data, '$.review_block') IS NOT NULL "
+                "  AND json_extract(data, '$.review_block.ready') IS NOT 1"
+            ).fetchall()
+        finally:
+            con.close()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"catalog query failed: {exc}")
+
+    import json as _json
+    items = []
+    for sku, title, rb_json in rows:
+        try:
+            rb = _json.loads(rb_json) if rb_json else {}
+        except Exception:
+            rb = {}
+        if stage and rb.get("stage") != stage:
+            continue
+        if reason_code and rb.get("reason_code") != reason_code:
+            continue
+        items.append({"sku": sku, "title": title or "", "review_block": rb})
+
+    # Group by stage then reason_code for easy UI rendering
+    grouped: Dict[str, Any] = {}
+    for item in items:
+        rb = item["review_block"]
+        s = rb.get("stage", "unknown")
+        rc = rb.get("reason_code", "UNKNOWN_ERROR")
+        grouped.setdefault(s, {}).setdefault(rc, []).append(item)
+
+    return {
+        "ok": True,
+        "count": len(items),
+        "items": items,
+        "grouped": grouped,
+    }
 
 
 # ---------------------------------------------------------------------------

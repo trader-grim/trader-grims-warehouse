@@ -114,6 +114,8 @@ from .items import atomic_write_json
 from .queue import state_machine
 from .resolver import iter_all_skus, load_item_doc
 
+_MIGRATE_ARCHIVE = Path('/opt/TGW/var/migrate-archive')
+
 log = logging.getLogger(__name__)
 
 
@@ -368,6 +370,14 @@ def rename_sku(cfg: Dict[str, Any], old_sku: str, new_sku: str,
             'old': old_sku, 'new': new_sku, 'class': cls,
             'had_ebay': had_ebay, 'location': location,
         }
+
+    # Archive snapshot before any mutation — recovery baseline
+    try:
+        _MIGRATE_ARCHIVE.mkdir(parents=True, exist_ok=True)
+        archive_path = _MIGRATE_ARCHIVE / f'{old_sku}.json'
+        atomic_write_json(archive_path, item)
+    except Exception as arc_exc:
+        log.warning('rename_sku: could not write migrate-archive for %s: %s', old_sku, arc_exc)
 
     try:
         # 1. Move directory

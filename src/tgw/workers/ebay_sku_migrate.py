@@ -34,6 +34,7 @@ Queue name: ebay_sku_migrate
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -55,6 +56,8 @@ from tgw.sku_migration import build_migration_map, classify, rename_sku
 log = logging.getLogger(__name__)
 
 QUEUE_NAME = 'ebay_sku_migrate'
+_BLOCKED_REGISTRY = Path('/opt/TGW/var/migrate-blocked.json')
+_MAX_ASPECT_LEN = 65  # Inventory API rejects aspect values longer than this
 
 
 def _get_listing_policies(cfg: Dict[str, Any],
@@ -95,17 +98,76 @@ def _is_live(item: Dict[str, Any]) -> bool:
                 and listing.get('status') in ('Active', 'PUBLISHED'))
 
 
+_REASON_CODE_MAP: tuple = (
+    (('25019',),                           'POLICY_VIOLATION'),
+    (('25002', '25004'),                   'DATA_CONSTRAINT'),
+    (('Best Offer',),                      'FEATURE_UNSUPPORTED'),
+    (('not currently supported',),         'FEATURE_UNSUPPORTED'),
+    (('no price',),                        'NO_PRICE'),
+)
+
+
+def _reason_code(error_text: str) -> str:
+    lower = error_text.lower()
+    for signals, code in _REASON_CODE_MAP:
+        if any(s.lower() in lower for s in signals):
+            return code
+    return 'UNKNOWN_ERROR'
+
+
 _PERMANENT_ERROR_SIGNALS = (
     'Best Offer',
     'Inventory-based listing management is not currently supported',
     '"errorId":25709',
     "'errorId': 25709",
+    # Policy violation — listing flagged by eBay; needs human review
+    '"errorId":25019',
+    "'errorId': 25019",
 )
 
 
 def _is_permanent_failure(error_text: str) -> bool:
     """True when the error is not expected to resolve on retry."""
     return any(sig in error_text for sig in _PERMANENT_ERROR_SIGNALS)
+
+
+def _sanitize_inv_aspects(inv_body: Dict[str, Any]) -> None:
+    """
+    Sanitize inventory item body in-place before PUT.
+    Trading API accepted multi-value aspects and long values that the Inventory API
+    rejects at publish time. Collapses to single value and truncates so migration
+    can complete; the operator can refine data later via the editor.
+    """
+    aspects = inv_body.get('product', {}).get('aspects', {})
+    for key, values in aspects.items():
+        if not isinstance(values, list):
+            continue
+        clean = [str(v).strip() for v in values if v and str(v).strip()]
+        if not clean:
+            continue
+        if len(clean) > 1:
+            log.info('ebay_sku_migrate: aspect %r: %d values → 1 (%r dropped)',
+                     key, len(clean), clean[1:])
+        aspects[key] = [clean[0][:_MAX_ASPECT_LEN]]
+
+
+def _update_blocked_registry(sku: str, entry: Optional[Dict[str, Any]]) -> None:
+    """Add or remove a SKU from the blocked-items registry file."""
+    try:
+        registry: Dict[str, Any] = {}
+        if _BLOCKED_REGISTRY.exists():
+            registry = json.loads(_BLOCKED_REGISTRY.read_text(encoding='utf-8'))
+        if entry is None:
+            registry.pop(sku, None)
+        else:
+            registry[sku] = entry
+        _BLOCKED_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _BLOCKED_REGISTRY.with_suffix('.tmp')
+        tmp.write_text(json.dumps(registry, indent=2, ensure_ascii=False),
+                       encoding='utf-8')
+        tmp.replace(_BLOCKED_REGISTRY)
+    except Exception as exc:
+        log.warning('ebay_sku_migrate: could not update blocked registry: %s', exc)
 
 
 def find_batch(cfg: Dict[str, Any],
@@ -128,6 +190,14 @@ def find_batch(cfg: Dict[str, Any],
         except Exception:
             continue
         if item.get('sku_migrate_skip'):
+            continue
+        if item.get('status') == 'sold':
+            # Auto-skip sold items — listing is ended, no migration needed
+            try:
+                from tgw.items import _write_field
+                _write_field(cfg, old_sku, 'sku_migrate_skip', True)
+            except Exception:
+                pass
             continue
         if _is_live(item):
             batch.append((old_sku, new_sku))
@@ -319,6 +389,8 @@ def _migrate_inventory_live(cfg: Dict[str, Any],
     (inv_body.get('availability', {})
              .get('shipToLocationAvailability', {})
              .pop('allocationByFormat', None))
+    # Sanitize aspects: collapse multi-value and truncate (Trading API was more permissive)
+    _sanitize_inv_aspects(inv_body)
 
     # Build new offer body from live offer, replacing the SKU and injecting policies
     offer_body = {k: v for k, v in old_offer.items()
@@ -434,6 +506,28 @@ def _recover_partial(cfg: Dict[str, Any],
     new_offer_id = new_offer['offerId']
     log.info('ebay_sku_migrate: recovering partial state %s → %s (offer %s)',
              old_sku, new_sku, new_offer_id)
+
+    # Re-sanitize the inventory item — previous run may have PUT it before
+    # sanitization was added, or eBay's validation has changed.
+    try:
+        inv_body = ebay_get(cfg, f'/sell/inventory/v1/inventory_item/{new_sku}')
+        inv_body.pop('sku', None)
+        inv_body.pop('locale', None)
+        pkg = inv_body.get('packageWeightAndSize', {})
+        if pkg.get('weight', {}).get('value', 1) == 0:
+            inv_body.pop('packageWeightAndSize', None)
+        (inv_body.get('availability', {})
+                 .get('shipToLocationAvailability', {})
+                 .pop('allocationByFormat', None))
+        _sanitize_inv_aspects(inv_body)
+        ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{new_sku}', inv_body)
+    except requests.exceptions.HTTPError as exc:
+        body = exc.response.text[:200] if exc.response is not None else str(exc)
+        return {'ok': False, 'old_sku': old_sku,
+                'error': f'recovery sanitize PUT inventory_item/{new_sku}: {body}'}
+    except Exception as exc:
+        log.warning('recovery: could not re-sanitize inventory item %s (continuing): %s',
+                    new_sku, exc)
 
     # Inject account policies — the offer was likely created without them
     try:
@@ -626,11 +720,31 @@ class EbaySkuMigrateWorker(QueueWorker):
                 if _is_permanent_failure(error_text):
                     try:
                         from tgw.items import _write_field
+                        now = datetime.now(timezone.utc).isoformat()
+                        blocked_entry = {
+                            'error': error_text[:300],
+                            'blocked_at': now,
+                            'ebay_done': result.get('ebay_done', False),
+                        }
+                        review_block = {
+                            'stage':       'ebay_sku_migrate',
+                            'reason_code': _reason_code(error_text),
+                            'error':       error_text[:300],
+                            'suggestion':  None,
+                            'flagged_at':  now,
+                            'retested_at': None,
+                            'ready':       False,
+                        }
                         _write_field(self.config, old_sku, 'sku_migrate_skip', True)
+                        _write_field(self.config, old_sku, 'sku_migrate_blocked',
+                                     blocked_entry)
+                        _write_field(self.config, old_sku, 'review_block', review_block)
+                        _update_blocked_registry(old_sku, blocked_entry)
                         stats.setdefault('skipped_permanent', 0)
                         stats['skipped_permanent'] += 1
-                        log.warning('ebay_sku_migrate: permanent failure — marked '
-                                    'sku_migrate_skip=true on %s', old_sku)
+                        log.warning('ebay_sku_migrate: permanent failure — blocked %s '
+                                    '(use "tgw migrate-unblock %s" to re-queue)',
+                                    old_sku, old_sku)
                         tgw_logging.log_event('ebay_sku_migrate_skip',
                                               old_sku=old_sku, reason=error_text[:120])
                     except Exception as write_exc:
