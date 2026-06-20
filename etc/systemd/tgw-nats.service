@@ -1,0 +1,16 @@
+[Unit]
+Description=NATS JetStream server for TGW (PP-AIOPS-001)
+After=network.target
+Documentation=https://docs.nats.io
+
+[Service]
+Type=simple
+User=tgw
+ExecStart=/opt/TGW/var/local/bin/nats-server -c /opt/TGW/var/nats/nats-server.conf
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

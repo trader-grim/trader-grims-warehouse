@@ -38,6 +38,9 @@ printing = [
     "reportlab>=4.0",
     "qrcode[pil]>=7.4",
 ]
+nats = [
+    "nats-py>=2.7",
+]
 
 [project.scripts]
 tgw                = "tgw.api:main"

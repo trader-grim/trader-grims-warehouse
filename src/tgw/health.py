@@ -550,6 +550,27 @@ def check_sync_conflicts(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# NATS health check (PP-AIOPS-001 Phase 1)
+# ---------------------------------------------------------------------------
+
+def check_nats(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    t = time.time()
+    url = cfg.get("nats_url", "nats://127.0.0.1:4222")
+    try:
+        from tgw.apis.nats_client import check_nats as _probe
+        result = _probe(url)
+        ok = result.get("ok", False)
+        latency = result.get("latency_ms")
+        streams = result.get("streams", [])
+        detail = f"connected ({latency}ms)" if ok else result.get("error", "unreachable")
+        return _result("nats", ok, detail, (time.time() - t) * 1000,
+                       url=url, latency_ms=latency, streams=streams,
+                       warn=not ok)
+    except Exception as e:
+        return _result("nats", False, str(e), (time.time() - t) * 1000, url=url)
+
+
+# ---------------------------------------------------------------------------
 # Combined check
 # ---------------------------------------------------------------------------
 
@@ -579,6 +600,7 @@ def check_all(cfg: Dict[str, Any],
         check_ownership(cfg),
         check_sync_conflicts(cfg),
     ]
+    checks.append(check_nats(cfg))
     if include_ollama:
         checks.append(check_ollama())
     if include_ebay:

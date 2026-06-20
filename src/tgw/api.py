@@ -369,7 +369,7 @@ class _GroupedHelpFormatter(argparse.RawDescriptionHelpFormatter):
 
 _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("Read / Search", [
-        "get", "list", "search", "resolve", "quality", "hint-trail",
+        "get", "list", "search", "resolve", "quality", "hint-trail", "audit-trail",
         "reprice-suggest", "staged", "velocity-report", "seo-audit", "locate",
     ]),
     ("Write / Update", [
@@ -623,6 +623,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("hint-trail", help="show identification history for an item")
     p.add_argument("sku", help="SKU to inspect")
+
+    p = sub.add_parser("audit-trail", help="show ItemData mutation history for a SKU (PP-AIOPS-001)")
+    p.add_argument("sku", help="SKU to inspect")
+    p.add_argument("--field", help="filter to one field name")
+    p.add_argument("--limit", type=int, default=50, help="max mutations to return (default 50)")
 
     for _name in ("requeue-identify", "requeue"):
         p = sub.add_parser(_name, help="bulk-enqueue ai_identify for items matching a filter" + (" (deprecated alias)" if _name == "requeue" else ""))
@@ -3695,6 +3700,15 @@ def main() -> int:
 
         elif args.op == "hint-trail":
             result = cmd_hint_trail(cfg, args.sku)
+
+        elif args.op == "audit-trail":
+            from .apis.nats_client import query_mutations
+            result = query_mutations(
+                sku=args.sku,
+                field=getattr(args, "field", None),
+                limit=getattr(args, "limit", 50),
+                url=cfg.get("nats_url"),
+            )
 
         elif args.op in ("requeue-identify", "requeue"):
             result = cmd_requeue(

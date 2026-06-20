@@ -10,16 +10,35 @@ All functions return {'ok': True/False, ...} dicts.
 
 from __future__ import annotations
 
+import contextvars
 import datetime
 import json
 import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Set  # remove Optional
+from typing import Any, Dict, List, Optional, Set
 
 from .config import location_dir, sku_dir, sku_json
 from .resolver import load_item_doc, resolve
+
+# ---------------------------------------------------------------------------
+# Mutation source tracking (PP-AIOPS-001)
+# ---------------------------------------------------------------------------
+# Set at worker startup or session entry. Inherited by threads and async tasks.
+_mutation_source: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_mutation_source", default="api:operator"
+)
+_session_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "_session_id", default=None
+)
+
+
+def set_mutation_context(source: str, session_id: Optional[str] = None) -> None:
+    """Set the attribution context for all subsequent mutations in this thread/task."""
+    _mutation_source.set(source)
+    if session_id is not None:
+        _session_id.set(session_id)
 
 # ---------------------------------------------------------------------------
 # Atomic write
@@ -144,6 +163,17 @@ def _write_field(cfg: Dict[str, Any], sku: str, field: str,
     if field != 'catalog_verified':
         doc.pop('catalog_verified', None)
     atomic_write_json(path, doc, pretty=True)
+    # Publish to audit stream (PP-AIOPS-001 Phase 1) — fire-and-forget
+    try:
+        from .apis.nats_client import publish_mutation
+        publish_mutation(
+            sku=sku, field=field,
+            old_value=before, new_value=value,
+            source=_mutation_source.get(),
+            session_id=_session_id.get(),
+        )
+    except Exception:
+        pass
     return {'sku': sku, 'field': field, 'before': before, 'after': value}
 
 

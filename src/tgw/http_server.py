@@ -126,6 +126,15 @@ async def lifespan(app: FastAPI):
     _api_key = json.loads(key_path.read_text(encoding="utf-8"))["api_key"]
     _web_key = secrets.token_hex(32)
 
+    # PP-AIOPS-001: start NATS publisher and set API attribution context
+    try:
+        from .apis.nats_client import init_nats
+        from .items import set_mutation_context
+        init_nats(_cfg)
+        set_mutation_context("api:operator")
+    except Exception as exc:
+        log.debug("nats init skipped: %s", exc)
+
     log.info("tgw-http started on port 7373")
     yield
     log.info("tgw-http shutting down")

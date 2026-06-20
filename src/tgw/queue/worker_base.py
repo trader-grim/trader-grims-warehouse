@@ -86,6 +86,15 @@ class QueueWorker:
         state_machine.init(config.get('postgres_dsn', 'dbname=state_machine user=tgw'))
         tgw_logging.setup_logging(component=f'worker.{queue_name}')
 
+        # PP-AIOPS-001: set mutation attribution context for this worker process
+        try:
+            from tgw.apis.nats_client import init_nats
+            from tgw.items import set_mutation_context
+            set_mutation_context(f'worker:{queue_name}')
+            init_nats(config)
+        except Exception as exc:
+            log.debug('nats init skipped: %s', exc)
+
         # PP-WM-001: activate config-driven notifications (desktop/webhook/smtp).
         # An absent 'notifications' block falls back to log+file backends, so this
         # is behavior-neutral until the operator opts in. Wrapped so a notify

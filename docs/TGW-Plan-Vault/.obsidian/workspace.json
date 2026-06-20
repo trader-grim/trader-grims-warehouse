@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "plan/PROPOSED-PLAN-2026-06-19.md",
+                "file": "plan/TGW-Master-Plan.md",
                 "mode": "preview",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "PROPOSED-PLAN-2026-06-19"
+              "title": "TGW-Master-Plan"
             }
           }
         ]
@@ -186,6 +186,7 @@
   },
   "active": "babc512f62193402",
   "lastOpenFiles": [
+    "plan/PROPOSED-PLAN-2026-06-19.md",
     "plan/TGW-Master-Plan.md",
     "plan/PLAN-backup-dr.md",
     "gemini/GEMINI-TASK-007-data-history-consolidation.md",
