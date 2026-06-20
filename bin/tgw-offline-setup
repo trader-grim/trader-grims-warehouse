@@ -102,7 +102,7 @@ $(grep -E "OFFLINE|SENTRY|ARCHIVE|SECRETS|BOOT|HISTORY" <<< "$LABEL" | \
   sed 's/TGW-OFFLINE-./Rotating offline backup (air-gap)/' | \
   sed 's/TGW-SENTRY-.*/Always-on disaster sentry/' | \
   sed 's/TGW-ARCHIVE-.*/Cold archive silo/' | \
-  sed 's/TGW-SECRETS-.*/Encrypted secrets bundle/' | \
+  sed 's/TGW-SECRETS.*/Encrypted secrets bundle/' | \
   sed 's/TGW-BOOT-.*/NixOS install + rebuild keychain/' | \
   sed 's/TGW-HISTORY-.*/History archive drive/')
 Format: btrfs | Size: ${SIZE}

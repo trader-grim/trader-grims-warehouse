@@ -21,11 +21,38 @@ Last updated: 2026-06-13.
 
 ### USB drives
 
-| Label | Role | Size needed | Notes |
-|-------|------|-------------|-------|
-| `TGW-SECRETS-A` | Encrypted secrets bundle — keychain (primary) | ≥ 1 GB | Same A3 mount-trigger as OFFLINE drives |
-| `TGW-SECRETS-B` | Encrypted secrets bundle — off-site / safe | ≥ 1 GB | Rotate with A on each secrets refresh |
-| `TGW-BOOT-01` | NixOS install USB — rebuild keychain | ≥ 8 GB | Re-flash before each major NixOS version |
+**Secrets rotation pair — both carry `LABEL=TGW-SECRETS` (same label, different UUID).**
+The UUID logged per sync (`/opt/TGW/var/log/secrets-rotation.log`) identifies which physical
+drive was used, so you know which to swap next time.
+
+| Label | Physical drives | Role | Size | Notes |
+|-------|----------------|------|------|-------|
+| `TGW-SECRETS` | 3 × 1 GB USB | Encrypted secrets bundle — rotate monthly | ≥ 1 GB each | UUID-A: keychain; UUID-B: fireproof safe; UUID-C: second off-site/spare |
+| `TGW-SECRETS` (partition) | Ventoy USB ×2 (TGW-BOOT-01/02) | TGW-SECRETS partition at end of each Ventoy drive | ~remaining space | Prep: `tgw-secrets-usb-prep /dev/sdX add-part` per drive |
+| `TGW-BOOT-01` | 1 × Ventoy USB | NixOS install + rebuild keychain (on-site) | ≥ 4 GB | Re-flash when NixOS version changes; carries TGW-SECRETS partition |
+| `TGW-BOOT-02` | 1 × Ventoy USB | DR spare boot USB — off-site / safe | ≥ 4 GB | Identical to TGW-BOOT-01; swap after NixOS updates; carries TGW-SECRETS partition |
+
+**USB secrets carrier format:** ext4, LABEL=TGW-SECRETS, noauto fstab entry.
+Mount triggers `tgw-secrets-usb@TGW-SECRETS.service` automatically via mount-unit drop-in.
+Run `tgw-secrets-usb-prep` once per drive to format + wire the trigger.
+
+**Layout on each TGW-SECRETS partition:**
+```
+/media/tgw/TGW-SECRETS/
+  secrets/
+    secrets-YYYYMMDD.tar.gz.age   ← age-encrypted bundle (3 newest kept)
+  backup-age-identity.age         ← passphrase-locked age identity (for bare-metal restore)
+  .tgw-sync-stamp                 ← timestamp of last sync
+```
+
+**Bare-metal restore sequence:**
+```bash
+mount /media/tgw/TGW-SECRETS
+# Decrypt identity using passphrase from safe/wallet:
+age -d -i /dev/stdin /media/tgw/TGW-SECRETS/backup-age-identity.age > /tmp/identity.txt
+# Decrypt bundle:
+age -d -i /tmp/identity.txt /media/tgw/TGW-SECRETS/secrets/secrets-LATEST.tar.gz.age | tar -xz
+```
 
 ### Internal HDD partitions (sda — dual-boot disk, do NOT touch sda1–4 Windows)
 
@@ -134,11 +161,14 @@ Week 3:  C comes home, B goes off-site, A stays off-site
 - Monthly: swap SENTRY-01 ↔ SENTRY-02 (bring 02 in, 01 goes off-site for the month)
 - The incoming drive auto-syncs on first mount; becomes the new always-on drive
 
-### SECRETS USB drives
+### SECRETS USB drives (both LABEL=TGW-SECRETS)
 
-- Refresh both A + B after any credential change (new eBay token, new API key, etc.)
-- A: keychain / pocket; B: fireproof safe or off-site
-- The A3 tgw-secrets-backup timer runs monthly — rotate both USB keys then
+- After any credential change: run `tgw-secrets-backup`, then plug in each drive in turn
+- UUID-A: keychain / pocket; UUID-B: fireproof safe; UUID-C: second off-site or spare
+- Plug in one drive at a time — automount fires for whichever is present (same label)
+- After any credential change: run `tgw-secrets-backup`, then sync each drive in turn
+- The A3 timer runs monthly automatically; check rotation log: `/opt/TGW/var/log/secrets-rotation.log`
+- With 3 dedicated drives + 2 Ventoy partitions you always have ≥2 copies off-machine
 
 ---
 
@@ -167,6 +197,17 @@ ls /media/tgw/TGW-OFFLINE-A/@snapshots/2026-06-13T1430/TGW/ItemData/
 | TGW-SENTRY-02 | — | — | — | |
 | TGW-ARCHIVE-01 | — | — | — | |
 | TGW-ARCHIVE-02 | — | — | — | |
-| TGW-SECRETS-A | — | — | — | USB key |
-| TGW-SECRETS-B | — | — | — | USB key |
-| TGW-BOOT-01 | — | — | — | USB key ≥8 GB |
+| TGW-SECRETS (keychain) | 2026-06-19 | 2026-06-19 | ✅ | 1 GB USB — uuid: `7160f77b-4465-441f-87d2-9635d540b1a3` |
+| TGW-SECRETS (safe) | 2026-06-19 | 2026-06-19 | ✅ | 1 GB USB — uuid: assign from list below |
+| TGW-SECRETS (spare/off-site) | 2026-06-19 | 2026-06-19 | ✅ | 1 GB USB — uuid: assign from list below |
+| TGW-SECRETS (TGW-BOOT-01 partition) | 2026-06-19 | 2026-06-19 | ✅ | Ventoy USB partition — uuid: assign from list below |
+| TGW-SECRETS (TGW-BOOT-02 partition) | 2026-06-19 | 2026-06-19 | ✅ | Ventoy USB partition — uuid: assign from list below |
+| TGW-BOOT-01 | 2026-06-19 | — | ✅ | Ventoy USB (on-site) |
+| TGW-BOOT-02 | 2026-06-19 | — | ✅ | Ventoy USB (off-site/safe) |
+
+**All 5 UUIDs synced 2026-06-19 — assign to physical drives above:**
+- `7160f77b-4465-441f-87d2-9635d540b1a3`
+- `bac14e6c-2e96-4b39-b425-beb7d428b6f6`
+- `61bab8cf-e317-43aa-9501-2be6b463178c`
+- `457261bc-95a8-46d1-a99f-0c9cc5d95a84`
+- `a319cac6-35f2-4a6c-810c-ccf0ae91a9eb`

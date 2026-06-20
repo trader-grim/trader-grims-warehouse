@@ -330,28 +330,54 @@ subsequent nightly deltas small.
 *Done when:* `rclone lsd dbukove:TGW/data` shows a fresh date two mornings running.
 
 **A3 — Encrypted secrets backup (closes the silent total-loss).**
-*Do:* small script `tgw-secrets-backup`:
-`tar -C /opt/TGW -cz secrets | gpg --symmetric --cipher-algo AES256 -o
-secrets-$(date +%%Y%%m%%d).tar.gz.gpg`, written to the snapshot disk + rclone'd to
-`dbukove:TGW-secrets/` + **preferred: synced to a named USB-key partition on mount**
-(Dave 17:51 — the A7 mount-trigger mechanism scoped to the secrets bundle; the key
-lives in a pocket/safe, cloud stays the burn-down fallback). Timer monthly **+ run
-manually after any credential change**.
-**Operator decision:** passphrase custody — written down off-machine (safe/wallet);
-without it the backup is useless, with it on this disk the encryption is theater.
-*Refinements (Dave, 19:44 + 19:50):*
-- **At least 2 rotated USB keys** — a single corrupt drive must not be a total restore
-  failure. Rotate on each refresh; both carry the same named partition label so the A7
-  mount-trigger serves either.
-- **Small-file history archive folded into the bundle:** a rolling zip collecting
-  *historical versions* of small high-value files (configs, `tgw.source` lineage —
-  years of csv→json→now migrations live in those diffs, db dumps). The snapshot disk
-  already keeps ~31 versions and git covers the repo, but the keychain/cloud bundle
-  should carry its own self-contained history so a bare restore has the lineage too.
-- **The rebuild keychain (19:44):** the end-state physical artifact — secrets bundle +
-  gpg keys + a ready NixOS install USB, on a keychain, restore-ready. See Phase C §5b.
-*Done when:* a test round-trip (`gpg -d | tar -tz`) lists the expected files, and the
-passphrase exists somewhere that survives the house burning down with the server.
+*Implemented 2026-06-19 (session 27). Scripts: `bin/tgw-secrets-backup`,
+`bin/tgw-secrets-usb-sync`, `bin/tgw-secrets-usb-prep`, `bin/tgw-secrets-keygen`.*
+
+**Encryption: age (not gpg).** Public-key encryption — backup runs unattended via
+timer; no passphrase required to ENCRYPT. Only decryption (restore) needs the passphrase.
+
+**Partition label: `TGW-SECRETS` (exact, same on all drives).**
+- Both 1 GB rotation USBs carry this label
+- Each Ventoy boot USB (TGW-BOOT-01/02) also carries a TGW-SECRETS partition at the end
+- The mount-unit drop-in fires for whichever drive is plugged in
+- **UUID differentiates drives** — `/opt/TGW/var/log/secrets-rotation.log` records
+  which UUID was synced on each run, so the operator knows which drive to swap next time
+
+**Bundle contents:** `secrets/` + `config/`. The passphrase-locked identity
+(`backup-age-identity.age`) lives inside `secrets/` and is included automatically.
+
+**USB layout** (mounted at `/media/tgw/TGW-SECRETS`):
+- `secrets/secrets-YYYYMMDD.tar.gz.age` — encrypted bundle
+- `backup-age-identity.age` — passphrase-locked age private key (bare-metal bootstrap)
+- `.tgw-sync-stamp` — timestamp of last sync
+
+**One-time setup (operator):**
+```bash
+sudo apt install age
+sudo -u tgw tgw-secrets-keygen
+# Then create passphrase-locked restore key:
+age -p -o /opt/TGW/secrets/backup-age-identity.age \
+        /opt/TGW/secrets/backup-age-identity.txt
+# Write passphrase on paper — store in safe/wallet.
+# Prep both 1 GB rotation drives:
+sudo tgw-secrets-usb-prep /dev/sdX    # keychain drive
+sudo tgw-secrets-usb-prep /dev/sdY    # safe/off-site drive
+# Add TGW-SECRETS partition to Ventoy USB (sdh):
+sudo tgw-secrets-usb-prep /dev/sdh add-part
+# Enable monthly timer:
+sudo systemctl enable --now tgw-secrets-backup.timer
+```
+
+**Bare-metal restore:**
+```bash
+mount /media/tgw/TGW-SECRETS
+age -d -i /dev/stdin /media/tgw/TGW-SECRETS/backup-age-identity.age > /tmp/id.txt
+age -d -i /tmp/id.txt /media/tgw/TGW-SECRETS/secrets/secrets-LATEST.tar.gz.age | tar -xz -C /opt/TGW
+```
+
+*Done when:* round-trip test passes (`age -d | tar -tz` lists expected files), passphrase
+exists somewhere that survives the house burning down with the server (safe/wallet).
+Hardware: 3 × 1 GB USB drives (dedicated rotation: keychain + safe + spare/off-site) + TGW-SECRETS partition on each of 2 × Ventoy boot USBs (TGW-BOOT-01/02).
 
 **A4 — Backup-freshness health check (the watcher for the watchers).**
 *Do:* `check_backups(cfg)` in `health.py` (pattern: `check_ownership`): age of newest
@@ -405,7 +431,8 @@ flat layout); drive registry at `reference/DRIVE-REGISTRY.md`.
 | `TGW-ARCHIVE-01` | Cold archive overflow | Manual write |
 | `TGW-ARCHIVE-02` | Archive redundancy | Manual write |
 
-**USB drives:** `TGW-SECRETS-A` (keychain), `TGW-SECRETS-B` (off-site/safe), `TGW-BOOT-01` and `TGW-BOOT-02` (NixOS install + TGW kit USBs — see below).
+**USB drives:** `TGW-SECRETS` label (two 1 GB drives — UUID-A keychain, UUID-B off-site/safe),
+`TGW-BOOT-01` and `TGW-BOOT-02` (Ventoy boot USBs, also carry TGW-SECRETS partition at end).
 
 **Boot/kit USB drives (2 × 16 GB, prepared identically — 2026-06-19):**
 - Label: `TGW-BOOT-01` (active, on-site), `TGW-BOOT-02` (DR spare, off-site/safe)

@@ -354,9 +354,15 @@ def check_backups(cfg: Dict[str, Any]) -> Dict[str, Any]:
         warnings.append(f'snapshot root missing: {snap_root}')
 
     # 4. Secrets bundle age — yellow if >40 days or no bundle
+    # Accepts both .age (current) and .gpg (pre-A3 migration) extensions.
     secrets_dir: Path = cfg.get('backup_secrets_dir',
                                   Path('/opt/TGW/var/local/backups/trader_grims_warehouse/secrets'))
-    bundles = sorted(secrets_dir.glob('secrets-*.tar.gz.gpg')) if secrets_dir.exists() else []
+    bundles: list[Path] = []
+    if secrets_dir.exists():
+        bundles = sorted(
+            list(secrets_dir.glob('secrets-*.tar.gz.age')) +
+            list(secrets_dir.glob('secrets-*.tar.gz.gpg'))
+        )
     if not bundles:
         warnings.append('no encrypted secrets bundle found in ' + str(secrets_dir))
     else:
