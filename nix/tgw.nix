@@ -108,11 +108,13 @@ in
 
     uid = lib.mkOption {
       type = lib.types.int;
-      default = 999;
+      default = 900;
       description = ''
-        Numeric uid for the tgw user.  A system uid (<1000) is intended
-        (PP-DEPLOY-001 migration note).  Pin this to the value the restored
-        data was owned by so file ownership lines up after a snapshot restore.
+        Numeric uid for the tgw user.  Must match the uid declared in
+        modules/users.nix (900) and the live system uid after the
+        PLAN-nixos-migration.md step-0.6 usermod/chown migration.
+        Do not change without updating both files and re-running the
+        full-disk ownership audit (tgw-permissions-reset.sh --check).
       '';
     };
 
@@ -162,15 +164,9 @@ in
       message = "services.tgw.workers contains an unknown queue (not in workerScripts).";
     }];
 
-    users.users.${cfg.user} = {
-      isSystemUser = true;
-      uid = cfg.uid;
-      group = cfg.group;
-      home = cfg.dataDir;
-      createHome = false;  # tmpfiles owns the tree
-      description = "Trader Grim's Warehouse service account";
-    };
-    users.groups.${cfg.group} = { gid = lib.mkDefault cfg.uid; };
+    # users.users.tgw and users.groups.tgw are declared in modules/users.nix —
+    # that file is the single source of truth.  This module only references the
+    # user/group by name (cfg.user / cfg.group) for service and tmpfiles ownership.
 
     # PostgreSQL work ledger.  Local peer auth: services run as `tgw`, so the
     # `tgw` role authenticates without a password.  After=postgresql ordering on

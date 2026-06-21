@@ -11,7 +11,17 @@ and directs all development. Read this file first, then read the master plan bef
 1. Check `docs/TGW-Plan-Vault/inbox/` for any `.md` files. If any exist, read them and
    incorporate their content into the master plan, then delete (or move) each processed file.
 2. Check `docs/TGW-Plan-Vault/suggestions/SUGGESTIONS.md` for any unprocessed suggestions.
-   If new items are present, evaluate and incorporate actionable ones into the master plan.
+   Evaluate each unchecked item:
+   - **Actionable now** → incorporate into master plan as a PP-* item; check off with "→ master plan"
+   - **Deferred / not yet ready** → add to `docs/TGW-Plan-Vault/plan/FUTURE-IDEAS.md` with full
+     context, research, and promotion criteria; check off with "→ FUTURE-IDEAS.md (reason)"
+   - **Do NOT** leave items unchecked or skip them because they are marked "deferred" — deferred
+     items still need a home in FUTURE-IDEAS.md so they are never silently lost.
+
+**Future Ideas (`plan/FUTURE-IDEAS.md`):** Do NOT read or process this file at routine session
+start. It contains long-horizon concepts to consider only at dedicated planning sessions or when
+Dave explicitly asks to review future ideas. When an item in FUTURE-IDEAS.md is ready to promote,
+add it to the master plan and remove it from FUTURE-IDEAS.md.
 
 **Step 2 — read the (now-current) master plan:**
 
@@ -91,6 +101,7 @@ Plain Markdown; open in Obsidian for interactive mind map view where noted.
 | `next-process.md` | Tool routing decisions (Claude vs Aider vs Antigravity), session handoff SOP |
 | `PLAN-backup-dr.md` | Working on PP-BACKUP-001 or DR planning |
 | `PLAN-nixos-migration.md` | Working on PP-NIXOS-001 or infra migration |
+| `FUTURE-IDEAS.md` | **Planning sessions only / when Dave asks** — deferred concepts with full context + promotion criteria; not read at routine session start |
 
 ## Settled architecture (do not relitigate)
 

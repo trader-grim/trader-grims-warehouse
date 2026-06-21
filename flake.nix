@@ -3,18 +3,31 @@
   # Trader Grim's Warehouse — Nix flake (PP-NIXOS-001)
   #
   # AUTHORED FOR VM VALIDATION.  NixOS is the committed target OS; this flake +
-  # ./nix/tgw.nix package the Python app and declare the full service stack
+  # nix/tgw.nix package the Python app and declare the full service stack
   # (PostgreSQL state_machine DB, tgw-http, the worker fleet, the backup unit)
-  # so Dave can build/boot it in a NixOS VM before any cutover.  It is NOT built
-  # on the current MX host.
+  # so Dave can build/boot it in a NixOS VM before any cutover.
   #
-  # Design decisions (revisit during VM validation — see ./nix/tgw.nix options):
-  #   * buildPythonApplication (not poetry2nix): there is no poetry.lock and the
-  #     dependency set is small + all in nixpkgs, so an explicit propagated-deps
-  #     build is more stable and reviewable.  Switch to poetry2nix only if a
-  #     lockfile-pinned closure becomes necessary.
-  #   * Paths stay at /opt/TGW (the app hardcodes this via config.py); the module
-  #     manages that tree with tmpfiles rather than relocating it.
+  # Module structure (nix/):
+  #   os/base.nix          — CatioNIX: common OS config (SSH, admin tools, tailscale, syncthing…)
+  #   os/users.nix         — CatioNIX: human accounts (db uid 1000, root)
+  #   os/desktop.nix       — CatioNIX: opt-in GUI layer (X11+Qtile+apps, no TGW config)
+  #   tgw/users.nix        — TGW: service account (tgw uid/gid 900) — SINGLE source of truth
+  #   tgw/platform.nix     — TGW: syncthing tgw-flake folder, tgw-rebuild alias
+  #   tgw/desktop.nix      — TGW: Qtile extraPackages + config files + db's symlinks
+  #   bases/master.nix     — full server platform (os + tgw + inference + keyd + nfs-exports)
+  #   bases/portable.nix   — client tier (os + tgw, no workers/http/inference)
+  #   hosts/{vm,tgw-test,tgw-prod}.nix — per-host composition; host-specific bits only
+  #   hardware/*.nix       — nixos-generate-config output per machine
+  #   tgw.nix              — NixOS module: worker fleet, tgw-http, DB bootstrap, tmpfiles
+  #   inference.nix  keyd.nix  nfs-exports.nix  — single-concern modules
+  #
+  # Design decisions:
+  #   * buildPythonApplication (not poetry2nix): no poetry.lock; dependency set is
+  #     small + all in nixpkgs.  Switch only if a lockfile-pinned closure is needed.
+  #   * Paths stay at /opt/TGW (the app hardcodes this via config.py).
+  #   * No flake-parts: not warranted at 2-system / 3-host / 1-module scale.
+  #   * CatioNIX (nix/os/) is the OS layer; TGW (nix/tgw/) is the application
+  #     layer built on top.  Neither layer knows about the other's internals.
   # ===========================================================================
 
   description = "Trader Grim's Warehouse — inventory + eBay automation platform";
@@ -46,7 +59,7 @@
           #
           # VM-validation watch-item: `python3Packages.mcp` (the Model Context
           # Protocol SDK, pyproject requires mcp>=1.0) is recent — if the pinned
-          # nixos-24.11 channel lacks it or ships <1.0, switch the flake input to
+          # nixos-25.05 channel lacks it or ships <1.0, switch the flake input to
           # `nixos-unstable` or add a small overlay that packages mcp.
           dependencies = with pkgs.python3Packages; [
             httpx
@@ -87,211 +100,38 @@
     {
       packages = forAllSystems (system:
         let pkgs = pkgsFor system; in {
-          tgw = tgwPackage pkgs;
+          tgw     = tgwPackage pkgs;
           default = tgwPackage pkgs;
         });
 
-      # NixOS module: import this and set `services.tgw.enable = true;`.
-      nixosModules.tgw = import ./nix/tgw.nix self;
+      # NixOS module: import this and set `services.tgw.enable = true;`
+      nixosModules.tgw     = import ./nix/tgw.nix self;
       nixosModules.default = self.nixosModules.tgw;
 
-      # A minimal VM host config for `nixos-rebuild build-vm --flake .#vm` so
-      # Dave can boot the whole stack and run `tgw health` (PP-DEPLOY-001 prep).
+      # ---------------------------------------------------------------------------
+      # Host configurations
+      # Each entry is intentionally minimal — all composition lives in nix/hosts/.
+      # ---------------------------------------------------------------------------
+
+      # Throwaway VM for full-stack validation: `nixos-rebuild build-vm --flake .#vm`
       nixosConfigurations.vm = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
-        modules = [
-          self.nixosModules.tgw
-          ./nix/base.nix
-          ({ ... }: {
-            services.tgw.enable = true;
-            # VM convenience only — real deploys keep secrets out of the store.
-            users.users.root.initialPassword = "tgw";
-            system.stateVersion = "24.11";
-            virtualisation.vmVariant.virtualisation = {
-              memorySize = 4096;
-              cores = 4;
-            };
-          })
-        ];
+        modules = [ self.nixosModules.tgw ./nix/hosts/vm.nix ];
       };
 
-      # Spare iMac12,1 (2011) — familiarity + flake validation host (Phase 3).
-      # Client-mode only: no workers, no eBay secrets, no inference.
-      # Boot: EFI via systemd-boot (installed 2026-06-20 from nixos-26.05 ISO).
+      # Spare iMac12,1 — NixOS familiarisation + flake/restore validation
       nixosConfigurations.tgw-test = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
-        modules = [
-          self.nixosModules.tgw
-          ./nix/base.nix
-          ./nix/tgw-test-hardware.nix
-          ({ pkgs, ... }: {
-            services.tgw.enable = true;
-            services.tgw.workers = [];
-            services.tgw.enableHttp = false;
-
-            boot.loader.systemd-boot.enable = true;
-            boot.loader.efi.canTouchEfiVariables = true;
-
-            # iMac12,1: mbpfan reads applesmc sensors for fan speed control
-            services.mbpfan.enable = true;
-
-            networking.hostName = "tgw-test";
-            networking.networkmanager.enable = true;
-
-            # Desktop — X11 + Qtile (TGW config via /etc/qtile/ symlinks)
-            services.xserver = {
-              enable = true;
-              displayManager.sddm.enable = true;
-              windowManager.qtile = {
-                enable = true;
-                # tgw_widgets.py imports httpx + psycopg2 for queue/health bar
-                extraPackages = python3Packages: with python3Packages; [
-                  httpx psycopg2
-                ];
-              };
-            };
-
-            # Qtile config — lives in nix/qtile/ so it travels with the flake
-            environment.etc."qtile/config.py".source = ./nix/qtile/config.py;
-            environment.etc."qtile/tgw_widgets.py".source = ./nix/qtile/tgw_widgets.py;
-
-            systemd.tmpfiles.rules = [
-              "d /home/dave/.config/qtile 0755 dave users -"
-              "L+ /home/dave/.config/qtile/config.py      - - - - /etc/qtile/config.py"
-              "L+ /home/dave/.config/qtile/tgw_widgets.py - - - - /etc/qtile/tgw_widgets.py"
-            ];
-
-            nixpkgs.config.allowUnfree = true;
-
-            # Solaar — Logitech device manager (udev rules via hardware option)
-            hardware.logitech.wireless.enable = true;
-            hardware.logitech.wireless.enableGraphical = true;
-
-            environment.systemPackages = with pkgs; [
-              kdePackages.konsole   # Super+Enter terminal (nixos-25.05: top-level konsole removed)
-              dmenu                 # Super+D launcher
-              xterm                 # fallback terminal
-              firefox
-              google-chrome
-              obsidian
-              vscodium
-              kdePackages.kcalc
-              kdePackages.dolphin
-              kdePackages.gwenview
-              kdePackages.krfb
-              libreoffice
-              tigervnc
-              cloudflared
-            ];
-
-            users.users.root.initialPassword = "tgw";
-
-            users.users.dave = {
-              isNormalUser = true;
-              extraGroups = [ "wheel" "networkmanager" ];
-              initialPassword = "tgw";
-            };
-
-            security.sudo.wheelNeedsPassword = false;
-
-            system.stateVersion = "24.11";
-          })
-        ];
+        modules = [ self.nixosModules.tgw ./nix/hosts/tgw-test.nix ];
       };
 
-      # Production host — full TGW stack + desktop + inference + keyd + NFS
-      # Hardware file generated by nixos-generate-config on first boot.
-      # Hostname must be "tgw-prod" for `tgw-rebuild` alias to resolve correctly.
+      # Production host — full TGW stack + desktop
       nixosConfigurations.tgw-prod = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
-        modules = [
-          self.nixosModules.tgw
-          ./nix/base.nix
-          ./nix/inference.nix
-          ./nix/keyd.nix
-          ./nix/nfs-exports.nix
-          ./nix/tgw-prod-hardware.nix   # generated by nixos-generate-config
-          ({ pkgs, ... }: {
-            services.tgw.enable = true;
-
-            networking.hostName = "tgw-prod";
-            networking.networkmanager.enable = true;
-
-            # Bootloader — set after inspecting hardware (EFI or BIOS)
-            boot.loader.systemd-boot.enable = true;
-            boot.loader.efi.canTouchEfiVariables = true;
-
-            # Desktop — X11 + Qtile (same config as tgw-test)
-            services.xserver = {
-              enable = true;
-              displayManager.sddm.enable = true;
-              windowManager.qtile = {
-                enable = true;
-                extraPackages = python3Packages: with python3Packages; [
-                  httpx psycopg2
-                ];
-              };
-            };
-
-            environment.etc."qtile/config.py".source = ./nix/qtile/config.py;
-            environment.etc."qtile/tgw_widgets.py".source = ./nix/qtile/tgw_widgets.py;
-
-            systemd.tmpfiles.rules = [
-              "d /home/dave/.config/qtile 0755 dave users -"
-              "L+ /home/dave/.config/qtile/config.py      - - - - /etc/qtile/config.py"
-              "L+ /home/dave/.config/qtile/tgw_widgets.py - - - - /etc/qtile/tgw_widgets.py"
-            ];
-
-            nixpkgs.config.allowUnfree = true;
-
-            hardware.logitech.wireless.enable = true;
-            hardware.logitech.wireless.enableGraphical = true;
-
-            environment.systemPackages = with pkgs; [
-              kdePackages.konsole
-              dmenu
-              xterm
-              firefox
-              google-chrome
-              obsidian
-              vscodium
-              kdePackages.kcalc
-              kdePackages.dolphin
-              kdePackages.gwenview
-              kdePackages.krfb
-              libreoffice
-              tigervnc
-              cloudflared
-            ];
-
-            users.users.root.initialPassword = "tgw";
-
-            users.users.dave = {
-              isNormalUser = true;
-              extraGroups = [ "wheel" "networkmanager" ];
-              initialPassword = "tgw";
-            };
-
-            users.users.tgw = {
-              isNormalUser = true;
-              uid = 1001;
-              group = "tgw";
-              extraGroups = [ "keyd" ];
-            };
-            users.groups.tgw.gid = 1001;
-
-            security.sudo.wheelNeedsPassword = false;
-
-            system.stateVersion = "25.05";
-          })
-        ];
+        modules = [ self.nixosModules.tgw ./nix/hosts/tgw-prod.nix ];
       };
 
-      # Note: in the deployed system the runtime nvm/npm/venv live UNDER /opt/TGW
-      # (NVM_DIR=/opt/TGW/.nvm, NPM_CONFIG_PREFIX=/opt/TGW/.npm, venv at
-      # /opt/TGW/.venvironments) so the tree is a fully self-contained imageable
-      # entity with no ~tgw dependency — see ./nix/tgw.nix commonService.environment
-      # and ./nix/README.md. This devShell is for interactive dev only.
+      # Dev shell — interactive development on any machine with Nix
       devShells = forAllSystems (system:
         let pkgs = pkgsFor system; in {
           default = pkgs.mkShell {
