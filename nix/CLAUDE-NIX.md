@@ -79,6 +79,22 @@ happens at cutover on production hardware (or on upgraded hardware if that arriv
 
 ---
 
+## Python app deployment (Option B — current)
+
+The NixOS module manages OS config, systemd units, PostgreSQL, and the `/opt/TGW` tree.
+The Python app is **not** built as a Nix package for the server migration. Instead:
+
+- `services.tgw.venvPath` (default: `/opt/TGW/.venvironments/tgw`) points the ExecStart
+  binaries at a pip-installed venv — same as the MX setup
+- After NixOS install, restore the venv: `pip install -e /opt/TGW/src/trader-grims-warehouse`
+- The git repo lives at `/opt/TGW/src/trader-grims-warehouse/` (same as MX)
+- `flake.nix` still exposes a `packages.tgw` output (the `buildPythonApplication` build)
+  but it is **not wired into the NixOS host configs** until Option A
+
+**Option A (future — after production cutover, applied to tgw-test first):**
+`services.tgw.package` fetched from GitHub replaces `venvPath`. This is the hardened
+install/upgrade path: `nixos-rebuild switch` updates OS + Python app atomically.
+
 ## Locked decisions (do not relitigate)
 
 - **`tgw` uid/gid = 900** — verified free; module guards assert it; MX live user migrates to 900 before cutover (step 0.6 in PLAN-nixos-migration.md)

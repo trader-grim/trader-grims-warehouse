@@ -105,6 +105,9 @@
         });
 
       # NixOS module: import this and set `services.tgw.enable = true;`
+      # Option B (current): module uses services.tgw.venvPath; the package output
+      # below is NOT wired into the NixOS configs.  Option A (future, tgw-test
+      # hardening): wire tgwPackage into the module via services.tgw.package.
       nixosModules.tgw     = import ./nix/tgw.nix self;
       nixosModules.default = self.nixosModules.tgw;
 
