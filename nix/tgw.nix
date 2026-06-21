@@ -175,13 +175,13 @@ in
     # PostgreSQL work ledger.  Local peer auth: services run as `tgw`, so the
     # `tgw` role authenticates without a password.  After=postgresql ordering on
     # every unit avoids the "connect before DB ready" race the analysis flagged.
+    #
+    # Note: ensureDBOwnership requires the database name to match the username,
+    # which conflicts with our `state_machine` name.  Ownership is granted via
+    # a postStart hook instead.
     services.postgresql = {
       enable = true;
-      ensureDatabases = [ "state_machine" ];
-      ensureUsers = [{
-        name = cfg.user;
-        ensureDBOwnership = true;
-      }];
+      ensureUsers = [{ name = cfg.user; }];
     };
 
     # Own the /opt/TGW tree.  Secrets is 0700 (contents restored out-of-band).
@@ -205,6 +205,29 @@ in
     environment.systemPackages = [ cfg.package ];
 
     systemd.services = lib.mkMerge [
+      # DB init — create state_machine and assign ownership (ensureDBOwnership
+      # requires db name == user name in NixOS 24.11+, so we do it ourselves).
+      {
+        tgw-db-init = {
+          description = "Initialize TGW state_machine database";
+          after = [ "postgresql.service" ];
+          requires = [ "postgresql.service" ];
+          wantedBy = [ "multi-user.target" ];
+          serviceConfig = {
+            Type = "oneshot";
+            RemainAfterExit = true;
+            User = "postgres";
+          };
+          script = ''
+            psql=${config.services.postgresql.package}/bin/psql
+            $psql -tAc "SELECT 1 FROM pg_database WHERE datname='state_machine'" \
+              | grep -q 1 \
+              || $psql -c "CREATE DATABASE state_machine OWNER \"${cfg.user}\";"
+            $psql -c "ALTER DATABASE state_machine OWNER TO \"${cfg.user}\";"
+          '';
+        };
+      }
+
       # Worker fleet — one service per enabled queue.
       (lib.mapAttrs' mkWorker enabledWorkers)
 

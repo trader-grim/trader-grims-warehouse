@@ -20,7 +20,7 @@
   description = "Trader Grim's Warehouse — inventory + eBay automation platform";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
   };
 
   outputs = { self, nixpkgs, ... }:
@@ -49,6 +49,7 @@
           # nixos-24.11 channel lacks it or ships <1.0, switch the flake input to
           # `nixos-unstable` or add a small overlay that packages mcp.
           dependencies = with pkgs.python3Packages; [
+            httpx
             requests
             textual
             psycopg2
@@ -60,8 +61,15 @@
             watchfiles
             python-dotenv
             mcp
+            pyperclip
+            mistune
             pillow
           ];
+
+          # psycopg2-binary → psycopg2 (nixpkgs builds against system libpq).
+          # pyncthing may be absent from nixpkgs 25.05; runtime check skipped —
+          # the actual syncthing integration is optional and not used on this host.
+          pythonRemoveDeps = [ "psycopg2-binary" "pyncthing" ];
 
           # The test suite needs PostgreSQL + secrets + network; skip at build
           # time (validation happens in the VM via `tgw health`).
@@ -102,6 +110,43 @@
               memorySize = 4096;
               cores = 4;
             };
+          })
+        ];
+      };
+
+      # Spare iMac12,1 (2011) — familiarity + flake validation host (Phase 3).
+      # Client-mode only: no workers, no eBay secrets, no inference.
+      # Boot: EFI via systemd-boot (installed 2026-06-20 from nixos-26.05 ISO).
+      nixosConfigurations.tgw-test = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = [
+          self.nixosModules.tgw
+          ./nix/tgw-test-hardware.nix
+          ({ ... }: {
+            services.tgw.enable = true;
+            services.tgw.workers = [];
+            services.tgw.enableHttp = false;
+
+            boot.loader.systemd-boot.enable = true;
+            boot.loader.efi.canTouchEfiVariables = true;
+
+            # iMac12,1: mbpfan reads applesmc sensors for fan speed control
+            services.mbpfan.enable = true;
+
+            networking.hostName = "tgw-test";
+            networking.networkmanager.enable = true;
+
+            users.users.root.initialPassword = "tgw";
+
+            users.users.dave = {
+              isNormalUser = true;
+              extraGroups = [ "wheel" "networkmanager" ];
+              initialPassword = "tgw";
+            };
+
+            security.sudo.wheelNeedsPassword = false;
+
+            system.stateVersion = "24.11";
           })
         ];
       };
