@@ -88,12 +88,16 @@ class ItemDetail {
   });
 
   factory ItemDetail.fromJson(Map<String, dynamic> json) {
+    final item = json['item'] as Map<String, dynamic>? ?? {};
+    final sku = item['sku'] as String? ?? '';
+    final rawImages = List<String>.from(item['_images'] ?? []);
+    final rawVideos = List<String>.from(item['_videos'] ?? []);
     return ItemDetail(
-      sku: json['item']?['sku'] ?? '',
-      data: json['item'] ?? {},
-      images: List<String>.from(json['images'] ?? []),
-      videos: List<String>.from(json['videos'] ?? []),
-      queueJobs: json['queue_jobs'] ?? [],
+      sku: sku,
+      data: item,
+      images: rawImages.map((f) => '/media/$sku/$f').toList(),
+      videos: rawVideos.map((f) => '/media/$sku/$f').toList(),
+      queueJobs: item['_queue_jobs'] ?? [],
     );
   }
 }

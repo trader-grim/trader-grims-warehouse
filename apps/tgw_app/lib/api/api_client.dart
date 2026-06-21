@@ -321,6 +321,10 @@ class ApiClient {
     return '$_baseUrl/thumb/$sku';
   }
 
+  String mediaUrl(String path) => '$_baseUrl$path';
+
+  String get baseUrl => _baseUrl;
+
   Future<ApiResponse<void>> downloadSnapshot(String destPath) async {
     await ensureInitialized();
     try {

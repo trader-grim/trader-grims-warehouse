@@ -63,12 +63,13 @@ class _ItemDetailView extends ConsumerWidget {
 
   Widget _buildHeader(BuildContext context, WidgetRef ref) {
     final isOnline = ref.watch(connectionStatusProvider) == ConnectionStatus.online;
+    final api = ref.read(apiClientProvider);
     final localPath = ref.read(offlineDbProvider).getLocalThumbnailPath(item.sku);
 
     Widget image;
     if (isOnline && item.images.isNotEmpty) {
       image = CachedNetworkImage(
-        imageUrl: item.images.first,
+        imageUrl: api.mediaUrl(item.images.first),
         fit: BoxFit.cover,
       );
     } else if (!isOnline && localPath != null && File(localPath).existsSync()) {
@@ -156,15 +157,19 @@ class _ItemDetailView extends ConsumerWidget {
             child: ListView.builder(
               scrollDirection: Axis.horizontal,
               itemCount: item.images.length,
-              itemBuilder: (context, index) => Padding(
-                padding: const EdgeInsets.only(right: 8.0),
-                child: CachedNetworkImage(
-                  imageUrl: item.images[index],
-                  height: 120,
-                  width: 120,
-                  fit: BoxFit.cover,
-                ),
-              ),
+              itemBuilder: (context, index) {
+                final api = ref.read(apiClientProvider);
+                return Padding(
+                  padding: const EdgeInsets.only(right: 8.0),
+                  child: CachedNetworkImage(
+                    imageUrl: api.mediaUrl(item.images[index]),
+                    height: 120,
+                    width: 120,
+                    fit: BoxFit.cover,
+                    errorWidget: (_, __, ___) => const Icon(Icons.broken_image),
+                  ),
+                );
+              },
             ),
           )
         else
