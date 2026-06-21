@@ -318,7 +318,7 @@ class ApiClient {
   }
 
   String getThumbnailUrl(String sku) {
-    return '$_baseUrl/api/items/$sku/thumbnail';
+    return '$_baseUrl/thumb/$sku';
   }
 
   Future<ApiResponse<void>> downloadSnapshot(String destPath) async {
