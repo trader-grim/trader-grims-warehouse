@@ -13,7 +13,14 @@
 # USB distribution (production only) lives in nix/tgw/usb-sync.nix.
 # NFS server + ports live in nix/nfs-exports.nix (production only).
 # =============================================================================
-{ pkgs, ... }:
+{ config, pkgs, ... }:
+let
+  # Derive all Syncthing folder paths from the declared Syncthing user so that
+  # changing the operator username in nix/os/users.nix propagates everywhere
+  # automatically — no /home/<hardcoded-name> anywhere in this file.
+  syncUser = config.services.syncthing.user;
+  syncHome = config.users.users.${syncUser}.home;
+in
 {
   # ---------------------------------------------------------------------------
   # TGW system packages — tools used by TGW workers or the operator for TGW ops
@@ -29,28 +36,32 @@
 
   # ydotool — GUI automation (keyd macroboard actions, intake workflows)
   programs.ydotool.enable = true;
+
   # ---------------------------------------------------------------------------
-  # Syncthing folders — the syncthing daemon is enabled in nix/os/base.nix
-  # (runs as db).  Devices are populated at runtime via the Syncthing UI after
-  # device pairing; the folder paths are pre-declared here.
+  # Syncthing folders — the syncthing daemon is enabled in nix/os/base.nix.
+  # Paths derived from syncHome above; devices populated at runtime after pairing.
   # ---------------------------------------------------------------------------
 
   # tgw-flake — the NixOS flake repo; used by tgw-rebuild on every host
   services.syncthing.settings.folders."tgw-flake" = {
-    path    = "/home/db/tgw-flake";
+    path    = "${syncHome}/tgw-flake";
     devices = [];
   };
 
-  # tgw-install-bundle — the install/recovery kit (encrypted secrets bundle,
-  # installer script, DR instructions).  This is the RECEIVE path on all
-  # non-production hosts.  On production, nix/tgw/usb-sync.nix configures
-  # the authoritative USB-backed path and sends to this folder on other hosts.
+  # tgw-install-bundle — install/recovery kit received from production.
+  # On production, nix/tgw/usb-sync.nix owns the authoritative send path.
   services.syncthing.settings.folders."tgw-install-bundle" = {
-    path    = "/home/db/tgw-install-bundle";
+    path    = "${syncHome}/tgw-install-bundle";
     devices = [];
   };
 
-  # tgw-rebuild — apply the synced flake to this host
+  # tgw-rebuild — apply the synced flake to this host.
+  # path: forces Nix to evaluate raw filesystem state rather than git HEAD —
+  # required when the flake arrives via Syncthing outside of any local git repo.
   environment.shellAliases.tgw-rebuild =
-    "sudo nixos-rebuild switch --flake /home/db/tgw-flake#$(hostname)";
+    "sudo nixos-rebuild switch --flake path:${syncHome}/tgw-flake#$(hostname)";
+
+  # tgw-rebuild-check — validate without applying (safe to run anytime)
+  environment.shellAliases.tgw-rebuild-check =
+    "nix flake check path:${syncHome}/tgw-flake";
 }

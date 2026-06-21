@@ -88,6 +88,7 @@ Plain Markdown; open in Obsidian for interactive mind map view where noted.
 | `invariants.md` | 29 system invariants (A1–E4) + enforcement status — check before any structural change |
 | `TGW-Architecture-Services.md` | Service-by-service responsibility, deps, failure modes, critical invariants |
 | `TGW-Architecture-Overview.md` | System topology — how subsystems connect |
+| `TGW-NixOS-Reference.md` | NixOS bootstrap sequence, Syncthing topology, host inventory, troubleshooting |
 | `runbooks/INDEX.md` | Incident response index — dead-letter triage, pipeline stall, token failure, etc. |
 | `claude-cli.md` | Claude CLI / Antigravity config reference |
 | `echo.py` / `worker_base.py` | Starting point when writing a new worker |
@@ -101,6 +102,7 @@ Plain Markdown; open in Obsidian for interactive mind map view where noted.
 | `next-process.md` | Tool routing decisions (Claude vs Aider vs Antigravity), session handoff SOP |
 | `PLAN-backup-dr.md` | Working on PP-BACKUP-001 or DR planning |
 | `PLAN-nixos-migration.md` | Working on PP-NIXOS-001 or infra migration |
+| `nix/CLAUDE-NIX.md` | **Any Nix work** — file map, locked decisions, user accounts, eval-and-fix workflow |
 | `FUTURE-IDEAS.md` | **Planning sessions only / when Dave asks** — deferred concepts with full context + promotion criteria; not read at routine session start |
 
 ## Settled architecture (do not relitigate)

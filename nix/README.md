@@ -30,10 +30,10 @@ nix/
   tgw/                  ← TGW application layer
     users.nix           — tgw service account (uid/gid 900, isSystemUser).
                           ONLY FILE THAT MAY DECLARE THE TGW SERVICE ACCOUNT.
-    platform.nix        — syncthing tgw-flake folder (/home/db/tgw-flake),
-                          tgw-rebuild shell alias
+    platform.nix        — syncthing tgw-flake folder (~/tgw-flake, derived from
+                          services.syncthing.user), tgw-rebuild shell alias
     desktop.nix         — Qtile extraPackages (httpx+psycopg2 for tgw_widgets.py),
-                          /etc/qtile config files, db's ~/.config/qtile tmpfiles symlinks
+                          /etc/qtile config files, operator ~/.config/qtile tmpfiles symlinks
 
   bases/
     master.nix          — Full server platform: os/{base,users} + tgw/{users,platform}

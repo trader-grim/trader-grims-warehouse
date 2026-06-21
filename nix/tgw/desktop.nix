@@ -10,7 +10,14 @@
 #
 # os/desktop.nix enables Qtile without config; this module supplies it.
 # =============================================================================
-{ ... }:
+{ config, ... }:
+let
+  # Derive operator identity from the declared Syncthing user — the same user
+  # who runs the desktop session.  Changing services.syncthing.user in
+  # nix/os/base.nix propagates here automatically.
+  opUser = config.services.syncthing.user;
+  opHome = config.users.users.${opUser}.home;
+in
 {
   # tgw_widgets.py imports httpx (HTTP API queries) and psycopg2 (queue stats)
   services.xserver.windowManager.qtile.extraPackages =
@@ -21,10 +28,10 @@
   environment.etc."qtile/config.py".source      = ../qtile/config.py;
   environment.etc."qtile/tgw_widgets.py".source = ../qtile/tgw_widgets.py;
 
-  # Symlink /etc/qtile/* into db's config dir so Qtile finds them.
+  # Symlink /etc/qtile/* into the operator's config dir so Qtile finds them.
   systemd.tmpfiles.rules = [
-    "d  /home/db/.config/qtile                       0755 db users -"
-    "L+ /home/db/.config/qtile/config.py       - - - - /etc/qtile/config.py"
-    "L+ /home/db/.config/qtile/tgw_widgets.py  - - - - /etc/qtile/tgw_widgets.py"
+    "d  ${opHome}/.config/qtile                       0755 ${opUser} users -"
+    "L+ ${opHome}/.config/qtile/config.py       - - - - /etc/qtile/config.py"
+    "L+ ${opHome}/.config/qtile/tgw_widgets.py  - - - - /etc/qtile/tgw_widgets.py"
   ];
 }

@@ -366,14 +366,15 @@ mount /dev/disk/by-label/TGW-SECRETS /mnt/tgw-secrets
 nixos-install --flake /mnt/tgw-secrets/flake#tgw-test
 ```
 
-**Weekend plan (2026-06-21/22):**
-1. Prepare both drives on MX host using the commands above
-2. Boot iMac A1131 — confirm Ventoy GRUB loads and finds NixOS ISO
-3. If ISO not found, add `ventoy.json` and retry
-4. Install NixOS on A1131 from the kit partition
-5. Run Phase 3 validation steps (see below)
-6. Feed any A1131-specific quirks back into `hosts/tgw-test.nix`
-7. Record what worked — both drives are identical so production uses same procedure
+**✅ COMPLETED 2026-06-20 (session 37):**
+1. Both drives prepared on MX host ✅
+2. Ventoy EFI chainload unreliable on A1131 — resolved by dd'ing NixOS ISO directly to USB ✅
+3. NixOS 25.05 installed on A1131 from the kit partition (nixos-26.05 live ISO, nixos-25.05 flake) ✅
+4. Hardware config committed as `nix/hardware/tgw-test-hardware.nix` (Btrfs subvols: /, /home, /nix) ✅
+5. A1131 quirks captured in `nix/hosts/tgw-test.nix` (mbpfan, Apple EFI notes) ✅
+6. Bootstrapping pain documented in `docs/TGW-Plan-Vault/reference/TGW-NixOS-Reference.md` ✅
+
+**Remaining from Phase 2.5:** Syncthing pairing between MX and tgw-test (Phase 3.2).
 
 **Manual GRUB fallback (A1131 only, if Ventoy definitively fails):**
 ```bash
@@ -394,12 +395,10 @@ purpose. Its target profile is the **client tier**: portable catalog (satellite 
 subset + thumbnails via Syncthing), not the master architecture — which is exactly what a
 hardware-limited box can carry.
 
-**3.1 Install NixOS on the spare intake machine** from a host config importing the flake
-with `services.tgw.enable = true; services.tgw.workers = []; services.tgw.enableHttp = true;`
-as the interim shape; replace with `bases/portable.nix` once the client profile exists
-(follow-up track — defines the portable-catalog client: SQLite catalog + thumbnails +
-Syncthing delivery, no PostgreSQL, no workers, no eBay secrets; this profile is what every
-future client machine gets, and it must never block the server migration).
+**3.1 Install NixOS on the spare intake machine** ✅ **DONE 2026-06-20** — iMac12,1 (A1131)
+running NixOS 25.05 via `bases/portable.nix` (client tier: no workers, no HTTP, no PostgreSQL).
+Hardware config committed. mbpfan for fan control. Apple EFI notes + Ventoy dd workaround
+documented in `reference/TGW-NixOS-Reference.md`.
 **3.2 Add headless Syncthing** per the master-plan block (GUI :8385, sync :22001), sync the
 plan vault as first folder; generate API key → `secrets_root/syncthing-api-key` (0600) —
 this also unblocks PP-PYIPC-001.
