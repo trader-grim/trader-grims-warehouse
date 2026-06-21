@@ -24,6 +24,7 @@
     htop
     mc
     tmux
+    age
   ];
 
   # zoxide — smart cd; shell integration injected automatically
