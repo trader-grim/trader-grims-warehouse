@@ -133,6 +133,11 @@
             # iMac12,1: mbpfan reads applesmc sensors for fan speed control
             services.mbpfan.enable = true;
 
+            services.openssh = {
+              enable = true;
+              settings.PasswordAuthentication = true;
+            };
+
             networking.hostName = "tgw-test";
             networking.networkmanager.enable = true;
 
