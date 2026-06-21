@@ -150,19 +150,53 @@ NixOS option names are not stable across channels — always verify against the 
 ## Distribution workflow (steady state, after bootstrap)
 
 ```
-Edit .nix files on MX
+Edit .nix files on MX (in the git repo)
   → git commit
-  → bash scripts/tgw-nix-sync.sh       # copies flake.nix + nix/ → ~/tgw-flake/
-  → Syncthing distributes ~/tgw-flake/ to all paired hosts automatically
-  → on each host: tgw-rebuild           # sudo nixos-rebuild switch --flake path:~/tgw-flake#$(hostname)
+  → bash scripts/tgw-push-config.sh <hostname> <tailscale-ip>
+      # expands to: nixos-rebuild switch --flake path:.#<hostname>
+      #             --target-host db@<ip> --use-remote-sudo
 ```
 
-**Uniform paths:** every Syncthing folder lands at the same path on every machine that
-receives it. `~/tgw-flake/` (operator home) is the path on MX (send) and on every NixOS node (recv) — same path regardless of what the operator username is.
-Capability differences live in the Nix config — never in different paths.
+The flake is **evaluated locally on MX** — the Nix store closure is computed here and
+transferred to the remote host.  NixOS hosts do not receive or store the flake source;
+only the built derivations land on them.  No Syncthing folder needed for the flake.
 
-On production (tgw-prod), the Syncthing `tgw-flake` folder + `tgw-usb-bundle` (USB drive,
-send-only) are declared in the flake. Each host's config is self-describing.
+**Emergency / offline:** `scripts/tgw-nix-sync.sh` copies the flake source to
+`~/tgw-flake/` (or any path via `TGW_NIX_FLAKE_DIR`) for USB kits or offline rebuilds.
+This is rarely needed — prefer `tgw-push-config.sh` over Tailscale.
+
+## nixos-anywhere — initial provisioning
+
+For machines that already have SSH access (running any Linux), `nixos-anywhere` can
+replace the entire OS remotely without physical access after the first boot:
+
+```bash
+# One-command full provision from MX (machine must have SSH + enough RAM for kexec):
+nix run github:nix-community/nixos-anywhere -- \
+  --flake path:.#tgw-test \
+  root@<TARGET_IP>
+
+# Inject secrets at provision time (Tailscale auth key, etc.):
+mkdir -p /tmp/secrets/run/secrets
+echo "tskey-auth-..." > /tmp/secrets/run/secrets/tailscale-key
+chmod 600 /tmp/secrets/run/secrets/tailscale-key
+nix run github:nix-community/nixos-anywhere -- \
+  --flake path:.#tgw-test \
+  --extra-files /tmp/secrets \
+  root@<TARGET_IP>
+```
+
+**What nixos-anywhere does:** SSH into the target → kexec into a RAM-based NixOS
+installer (no USB needed) → Disko partitions the disk → NixOS installs from the
+flake config → machine reboots into the new system.
+
+**Requires:** Disko partition config in the host's flake config (see Disko section in
+PLAN-nixos-migration.md).  The A1131 was installed manually; nixos-anywhere will be
+used for the production cutover (MX → tgw-prod).
+
+**Tailscale automation:** `services.tailscale.authKeyFile = "/run/secrets/tailscale-key"`
+in the NixOS config + `--extra-files` at provision time → machine joins the Tailnet on
+first boot, no interactive auth needed.
 
 See `docs/TGW-Plan-Vault/reference/TGW-NixOS-Reference.md` for the full folder map across
 all machine types (MX, tgw-prod, tgw-test, portable).

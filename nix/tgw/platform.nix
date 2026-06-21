@@ -6,9 +6,11 @@
 #
 # Owns:
 #   - TGW-specific system packages (media tools, GitHub CLI, GUI automation)
-#   - syncthing tgw-flake folder (flake repo synced from MX host)
-#   - syncthing tgw-install-bundle folder (install/recovery kit; received here)
-#   - tgw-rebuild shell alias
+#   - syncthing tgw-install-bundle folder (ISO/recovery kit received from prod)
+#
+# Flake distribution: configs are pushed FROM MX via nixos-rebuild --target-host
+# (scripts/tgw-push-config.sh).  NixOS hosts do NOT receive the flake source via
+# Syncthing — the Nix store closure is transferred directly by nixos-rebuild.
 #
 # USB distribution (production only) lives in nix/tgw/usb-sync.nix.
 # NFS server + ports live in nix/nfs-exports.nix (production only).
@@ -38,30 +40,14 @@ in
   programs.ydotool.enable = true;
 
   # ---------------------------------------------------------------------------
-  # Syncthing folders — the syncthing daemon is enabled in nix/os/base.nix.
+  # Syncthing folders — daemon enabled in nix/os/base.nix.
   # Paths derived from syncHome above; devices populated at runtime after pairing.
   # ---------------------------------------------------------------------------
 
-  # tgw-flake — the NixOS flake repo; used by tgw-rebuild on every host
-  services.syncthing.settings.folders."tgw-flake" = {
-    path    = "${syncHome}/tgw-flake";
-    devices = [];
-  };
-
-  # tgw-install-bundle — install/recovery kit received from production.
+  # tgw-install-bundle — ISO and recovery kit received from production.
   # On production, nix/tgw/usb-sync.nix owns the authoritative send path.
   services.syncthing.settings.folders."tgw-install-bundle" = {
     path    = "${syncHome}/tgw-install-bundle";
     devices = [];
   };
-
-  # tgw-rebuild — apply the synced flake to this host.
-  # path: forces Nix to evaluate raw filesystem state rather than git HEAD —
-  # required when the flake arrives via Syncthing outside of any local git repo.
-  environment.shellAliases.tgw-rebuild =
-    "sudo nixos-rebuild switch --flake path:${syncHome}/tgw-flake#$(hostname)";
-
-  # tgw-rebuild-check — validate without applying (safe to run anytime)
-  environment.shellAliases.tgw-rebuild-check =
-    "nix flake check path:${syncHome}/tgw-flake";
 }

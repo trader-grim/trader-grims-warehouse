@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
-# tgw-nix-sync — populate ~/tgw-flake/ from the git repo.
+# tgw-nix-sync — populate a local flake copy for offline/emergency use.
 #
-# Run after any commit that touches flake.nix, flake.lock, or nix/.
-# Syncthing then distributes ~/tgw-flake/ to all paired hosts.
+# NORMAL DISTRIBUTION: use scripts/tgw-push-config.sh (nixos-rebuild --target-host).
+# The flake is evaluated locally on MX and the Nix store closure is pushed directly
+# to the remote host — no copy of the flake source is needed on the remote.
+#
+# This script exists for emergency scenarios: preparing a USB offline kit, or
+# pre-positioning the flake before a machine has network access.
 #
 # Only the files NixOS needs to run nixos-rebuild are copied:
 #   flake.nix, flake.lock, nix/
 #
 # Usage:
-#   bash scripts/tgw-nix-sync.sh           # sync and report
+#   bash scripts/tgw-nix-sync.sh           # sync repo → dest and report
 #   bash scripts/tgw-nix-sync.sh --check   # dry-run, show what would change
+#
+# Override destination: TGW_NIX_FLAKE_DIR=/some/path bash scripts/tgw-nix-sync.sh
 
 set -euo pipefail
 
@@ -45,5 +51,5 @@ rsync "${RSYNC_OPTS[@]}" \
 if ! $DRY_RUN; then
   FILE_COUNT=$(find "$DEST" -type f | wc -l)
   echo "==> tgw-nix-sync: $DEST updated ($FILE_COUNT files, $(date -Iseconds))"
-  echo "    Syncthing will distribute to paired hosts automatically."
+  echo "    For normal updates use: bash scripts/tgw-push-config.sh <hostname> <ip>"
 fi

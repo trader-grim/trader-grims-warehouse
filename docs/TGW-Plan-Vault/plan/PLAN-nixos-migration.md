@@ -136,17 +136,48 @@ with `services.tgw.package` pointing at a Nix-built package fetched from GitHub.
 `nixos-rebuild switch` then updates OS + Python app atomically. `flake.nix` retains the
 `tgwPackage` / `packages.tgw` output as the skeleton for this path.
 
-### Distribution infrastructure (session 37)
+### Distribution infrastructure (session 37 → revised session 38)
 
-| Artifact | Location | Syncthing folder | Notes |
-|----------|----------|-----------------|-------|
-| NixOS flake | `~/tgw-flake/` | `tgw-flake` (Send Only from MX) | populated by `scripts/tgw-nix-sync.sh` |
-| NixOS ISO | `~/tgw-install-bundle/iso/` | `tgw-install-bundle` | out of git repo; distributed to machines that make install sticks |
-| Site config | `~/tgw-install-bundle/site-config/` | `tgw-install-bundle` | cloned from GitHub private repo |
+**Flake distribution: `nixos-rebuild --target-host` (not Syncthing)**
+
+Configs are pushed FROM MX — the flake is evaluated locally and the Nix store closure
+is transferred to the remote host. No copy of the flake source on remote hosts. No
+`tgw-flake` Syncthing folder.
+
+```bash
+# Push a config update to any NixOS host (run on MX, from the git repo):
+bash scripts/tgw-push-config.sh tgw-test 100.x.y.z    # Tailscale IP
+bash scripts/tgw-push-config.sh tgw-prod 100.x.y.z
+```
+
+**Initial provisioning: `nixos-anywhere`**
+
+For machines with SSH access (including existing Linux installs), `nixos-anywhere`
+provisions NixOS remotely without physical access after the first USB boot:
+
+```bash
+nix run github:nix-community/nixos-anywhere -- \
+  --flake path:.#tgw-prod \
+  --extra-files /tmp/secrets \   # injects Tailscale auth key etc.
+  root@<IP>
+```
+
+Requires Disko partition config in the host's flake entry (planned — see Phase 3.3).
+The A1131 was installed manually; nixos-anywhere will be used for production cutover.
+
+**Syncthing folders (Syncthing is NOT used for the flake):**
+
+| Folder | Syncthing folder | Notes |
+|--------|-----------------|-------|
+| NixOS ISO | `tgw-install-bundle` | still distributed for USB boot-stick creation |
+| Site config | via USB or git clone | not Syncthing |
+| plan-vault, ItemData, ItemCatalog | their own folders | unchanged |
 
 Operator username never hardcoded — all Syncthing paths derived from
-`config.services.syncthing.user` in the Nix module. Change the username in one place
-(`nix/os/users.nix`) and it propagates to all path declarations.
+`config.services.syncthing.user` in the Nix module.
+
+**Emergency offline:** `scripts/tgw-nix-sync.sh` copies flake source to a local dir
+(`$HOME/tgw-flake` by default, or any path via `TGW_NIX_FLAKE_DIR`) for USB kits.
 
 Reference: `nix/CLAUDE-NIX.md` (session guide), `reference/TGW-NixOS-Reference.md` (bootstrap + topology).
 
@@ -411,25 +442,42 @@ running NixOS 25.05 via `bases/portable.nix` (client tier: no workers, no HTTP, 
 Hardware config committed. mbpfan for fan control. Apple EFI notes + Ventoy dd workaround
 documented in `reference/TGW-NixOS-Reference.md`.
 
-**3.2 Syncthing pairing + tgw-rebuild validation** — **IN PROGRESS (session 37)**
+**3.2 Config push + first validation** — **IN PROGRESS (session 37→38)**
 
-Session 37 deliverables for this step:
-- `~/tgw-flake/` created on MX (`/home/tgw/tgw-flake/`, 25 files, no ISO)
-- `scripts/tgw-nix-sync.sh` written — syncs flake.nix + nix/ from git repo on demand
-- MX Syncthing `tgw-flake` share configured (Send Only) pointing at `~/tgw-flake/`
-- A1131 accepting the share → sync in progress at session close
-- NixOS ISO moved to `~/tgw-install-bundle/iso/` (out of git repo, distributed via install-bundle folder)
-- `path:` prefix bug fixed in `tgw-rebuild` alias (was silently ignoring Syncthing-pushed changes)
+Session 37 deliverables:
+- NixOS ISO moved to `~/tgw-install-bundle/iso/` (out of git repo, distributed via install-bundle)
 - Operator username no longer hardcoded — all paths derived from `config.services.syncthing.user`
+- Syncthing `tgw-install-bundle` folder wired into `platform.nix`
+
+Session 38 revision (nixos-anywhere replaces Syncthing-for-flake):
+- `tgw-flake` Syncthing folder **removed** from `platform.nix` — not needed
+- `tgw-rebuild` alias removed — configs pushed FROM MX via `tgw-push-config.sh`
+- `scripts/tgw-push-config.sh` added: `nixos-rebuild switch --flake path:.#<host> --target-host db@<ip> --use-remote-sudo`
+- `scripts/tgw-nix-sync.sh` repurposed as emergency offline-kit utility only
 
 Remaining:
-- A1131 runs `tgw-rebuild` → `nix flake check` passes (first real validation of the full module stack)
+- Dave SSHes into A1131, gets Tailscale IP
+- `bash scripts/tgw-push-config.sh tgw-test <a1131-tailscale-ip>` from MX → first real flake validation
+- `nix flake check` passes (first real validation of the full module stack)
 - Confirm `systemctl status 'tgw-worker@echo'` unit naming correct (Phase 0.3 verification)
-- Dave runs `nixos-rebuild switch --rollback` deliberately (learn the motion)
+- Dave runs `nixos-rebuild switch --rollback` deliberately on A1131 (learn the motion)
 - One week stable before proceeding to Phase 4
 
-*Syncthing pairing note:* Syncthing already running on A1131 from first boot. MX `tgw-flake`
-folder shared with A1131 device. `tgw-rebuild` alias: `sudo nixos-rebuild switch --flake path:~/tgw-flake#$(hostname)`
+**3.3 Disko partition config** — **PLANNED (prerequisite for nixos-anywhere on production)**
+
+Disko provides declarative disk partitioning — required by nixos-anywhere for automated
+full-disk provisioning. Add to flake.nix as an input; write host disko configs.
+
+```nix
+# In flake.nix inputs:
+disko.url = "github:nix-community/disko";
+disko.inputs.nixpkgs.follows = "nixpkgs";
+```
+
+- Write `nix/hosts/tgw-test-disko.nix` (Btrfs matching the manually-installed layout) — validates the approach on A1131
+- Write `nix/hosts/tgw-prod-disko.nix` at production cutover time (hardware-specific)
+- Wire `disko.nixosModules.disko` into each host config in `flake.nix`
+- Gate: nixos-anywhere can fully reprovision tgw-test from MX before production cutover
 
 ### Phase 4 — Dress rehearsal: shadow server on the spare machine
 

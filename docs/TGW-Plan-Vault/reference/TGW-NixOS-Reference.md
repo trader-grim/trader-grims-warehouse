@@ -16,7 +16,6 @@ and in which folders Syncthing shares to which devices — never in different pa
 
 | Folder | Path (identical everywhere) | MX dev | tgw-prod | tgw-test | portable |
 |--------|----------------------------|--------|----------|----------|----------|
-| `tgw-flake` | `~/tgw-flake/` | **send** | recv | recv | recv |
 | `tgw-install-bundle` | `~/tgw-install-bundle/` | — | **send** | recv | recv |
 | `plan-vault` | `~/plan-vault/` | **send** | recv | recv | recv |
 | `ItemCatalog` | `/opt/TGW/data/ItemCatalog/` | — | **send** | recv | recv |
@@ -31,36 +30,53 @@ carry instead, via `ItemCatalog`.
 After NixOS production cutover, tgw-prod takes over as the **send** authority for
 `tgw-install-bundle` and `ItemData`. MX either becomes a receiver or is retired.
 
-### tgw-flake source on MX
+### Flake distribution — nixos-rebuild --target-host
 
-The git repo (`/opt/TGW/src/trader-grims-warehouse/`) is the authoritative source, but MX
-shares `~/tgw-flake/` — a clean copy containing only what NixOS needs:
-
-```
-~/tgw-flake/
-  flake.nix
-  flake.lock
-  nix/            (all subdirs)
-```
-
-Keep it current after any nix-touching commit:
+NixOS configs are **not** distributed via Syncthing. Instead, configs are pushed from MX:
 
 ```bash
-bash scripts/tgw-nix-sync.sh          # sync repo → ~/tgw-flake/
-bash scripts/tgw-nix-sync.sh --check  # dry-run: see what would change
+# Push a config update to any NixOS host (run this on MX, from the git repo):
+bash scripts/tgw-push-config.sh tgw-test 100.x.y.z    # Tailscale IP
+bash scripts/tgw-push-config.sh tgw-prod 100.x.y.z
+
+# What it runs:
+nixos-rebuild switch \
+  --flake path:/opt/TGW/src/trader-grims-warehouse#tgw-test \
+  --target-host db@100.x.y.z \
+  --use-remote-sudo
 ```
 
-### Setting up MX Syncthing share (one-time)
+The flake is evaluated **locally on MX**. Only the Nix store closure (compiled
+derivations) is transferred to the remote host — the remote never needs the flake source.
+No `~/tgw-flake/` directory needed on NixOS hosts; no Syncthing folder for the flake.
 
-1. Create `~/tgw-flake/` and populate it: `bash scripts/tgw-nix-sync.sh`
-2. In Syncthing web UI (http://localhost:8384) → **Add Folder**:
-   - Folder ID: `tgw-flake`
-   - Folder Path: `~/tgw-flake`
-   - Folder Type: **Send Only** (MX is always the sender for this folder)
-3. After pairing each NixOS host (see bootstrap sequence): share this folder with it
+**Emergency / offline:** `scripts/tgw-nix-sync.sh` copies the flake source to a local
+directory for USB offline kits. Rarely needed — prefer `tgw-push-config.sh`.
 
-When production cutover happens and tgw-prod is a NixOS machine, `tgw-flake` becomes
-bidirectional between NixOS nodes and MX is retired from the send role (or retired entirely).
+### Initial provisioning — nixos-anywhere
+
+For machines with SSH access (including bare-metal running another OS), `nixos-anywhere`
+provisions NixOS remotely without physical access after the first boot:
+
+```bash
+# Full remote provision — wipes disk and installs from flake config:
+nix run github:nix-community/nixos-anywhere -- \
+  --flake path:.#tgw-prod \
+  root@<IP>
+
+# With secrets injected at provision time (Tailscale auth key, etc.):
+mkdir -p /tmp/secrets/run/secrets
+echo "tskey-auth-..." > /tmp/secrets/run/secrets/tailscale-key
+chmod 600 /tmp/secrets/run/secrets/tailscale-key
+nix run github:nix-community/nixos-anywhere -- \
+  --flake path:.#tgw-prod \
+  --extra-files /tmp/secrets \
+  root@<IP>
+```
+
+nixos-anywhere: SSH → kexec into RAM installer → Disko partitions disk → NixOS
+installs → machine reboots into the new system. Requires Disko config in the host's
+flake entry (planned for production cutover — see PLAN-nixos-migration.md).
 
 ### Device pairing
 
@@ -175,6 +191,9 @@ just the local network. Physical proximity is no longer needed.
 
 ### Phase 4 — Syncthing pairing (from the SSH session)
 
+Syncthing is used for `plan-vault`, `ItemCatalog`, and `ItemData` — not for the flake.
+Pair the new device so those folders sync once the machine is in service.
+
 ```bash
 # On the new machine, via SSH: get the Syncthing device ID
 syncthing cli config system status | jq -r .myID
@@ -182,29 +201,31 @@ syncthing cli config system status | jq -r .myID
 
 # On MX, in the Syncthing web UI (http://localhost:8384):
 #   Add Device → paste the ID → Save
-#   Edit the tgw-flake folder → Sharing tab → enable the new device → Save
+#   Share relevant folders (plan-vault, etc.) with the new device
 ```
 
 The new machine's Syncthing web UI will show a "New Device" notification. Accept it.
-The new machine will then accept the `tgw-flake` folder share and begin syncing.
 
-### Phase 5 — After the flake syncs
+### Phase 5 — Push the full config from MX
+
+Config updates are pushed from MX, not pulled by the host:
 
 ```bash
-# On the new machine (via SSH), once ~/tgw-flake/ has content:
-ls ~/tgw-flake/nix/    # should list all .nix files
-
-tgw-rebuild    # applies the full config
-# If the alias isn't available yet (pre-sync):
-sudo nixos-rebuild switch --flake path:~/tgw-flake#$(hostname)
+# On MX, from the git repo root:
+bash scripts/tgw-push-config.sh tgw-test <tailscale-ip>
+# or for local LAN before Tailscale is paired:
+bash scripts/tgw-push-config.sh tgw-test <hostname>.local
 ```
+
+This evaluates the flake on MX and transfers the built config to the remote host.
+After the first `tgw-push-config.sh` run, the host is on the full declared config.
 
 ### Steady state — no more USB, no more manual typing
 
 ```
 Edit .nix files on MX → git commit
-  → Syncthing distributes ~/tgw-flake/ to all hosts automatically
-  → SSH to each host, run: tgw-rebuild
+  → bash scripts/tgw-push-config.sh <hostname> <tailscale-ip>
+  (repeat for each host that needs the update)
 ```
 
 KDE Connect is available for clipboard sharing between the desktop machines once the
@@ -242,15 +263,16 @@ The `tgw-rebuild` alias runs `sudo nixos-rebuild` (db → root), which is fine s
 
 ## Common operations
 
-### Rebuild this host from the synced flake
+### Push a config update to a remote host (run on MX)
 ```bash
-tgw-rebuild
-# expands to: sudo nixos-rebuild switch --flake path:~/tgw-flake#$(hostname)
+bash scripts/tgw-push-config.sh tgw-test 100.x.y.z
+# expands to: nixos-rebuild switch --flake path:.#tgw-test
+#             --target-host db@100.x.y.z --use-remote-sudo
 ```
 
-### Check the flake without applying
+### Check the flake without applying (run on MX)
 ```bash
-nix flake check path:~/tgw-flake
+nix flake check path:/opt/TGW/src/trader-grims-warehouse
 ```
 
 ### Roll back after a bad switch
