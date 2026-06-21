@@ -56,8 +56,6 @@ def _ensure_reasoning_column() -> None:
     except Exception as exc:
         log.warning('_ensure_reasoning_column: migration skipped — %s', exc)
 
-_ensure_reasoning_column()
-
 
 def _push_clipboard(text: str) -> bool:
     """Push text to the system clipboard via pyperclip."""
@@ -80,6 +78,9 @@ def _conn() -> Generator:
         raise
     finally:
         con.close()
+
+
+_ensure_reasoning_column()
 
 
 # ---------------------------------------------------------------------------

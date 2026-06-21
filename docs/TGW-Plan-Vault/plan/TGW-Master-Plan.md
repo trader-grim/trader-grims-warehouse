@@ -1977,6 +1977,70 @@ Dev flake: separate from platform flake; `nix develop ./dev-env` does not requir
 **Round 5+ tasks:** Refactor `flake.nix` to match this structure; add `portable.nix` base;
 add `ai/compute-node.nix`; wire Syncthing service into `master.nix`.
 
+#### TGW Distribution Design (session 37 — nix-distro.md Google AI research conversation)
+
+**Goal:** Make the NixOS-based TGW platform as simple to distribute as the current MX image,
+without bootable USB sticks yet — just a stable, replicable config bundle.
+
+**Three pillars:**
+
+1. **Git for versioning** — flake repo is the single source of truth; all module changes go
+   through git; GitHub private repo already live.
+
+2. **Syncthing for distribution** — flake bundle lives at `/opt/TGW/sync/flake/` on each
+   node; Syncthing pushes changes automatically. ⚠ **Git evaluation trap**: Nix ignores
+   Syncthing-updated files unless git-tracked. Workaround: use the `path:` prefix:
+   `sudo nixos-rebuild switch --flake path:/opt/TGW/sync/flake#<hostname>`
+   This forces Nix to evaluate the raw directory state, bypassing git strictness.
+   - Declarative device + folder config in Syncthing bootstrap module (see Syncthing NixOS
+     deployment section above); nodes connect to site server immediately on first boot.
+   - **Per-machine host-overlay pattern**: `builtins.pathExists ./host-overlay.nix` in
+     `modules/core/default.nix`; drop a `host-overlay.nix` file to specialize a node without
+     polluting the shared config. File doesn't need to be git-tracked.
+
+3. **nix MCP specialist for maintenance** — Claude Code as orchestrator + Context7 MCP for
+   live nixpkgs docs + `nixai` CLI tool (hardware detection, repo-to-derivation helpers) +
+   **eval-and-fix loop**: AI drafts → `nix flake check` → capture error → rewrite → repeat.
+   Use `flake-parts` to isolate module concerns (packages / devShells / NixOS configs) so
+   the AI reasons about small, bounded modules rather than one giant attribute set.
+   - `jailed-agents` (Bubblewrap sandbox) or `agent-sandbox.nix` for safe agent execution
+   - System prompt guardrails for Nix: pure syntax, no legacy `nix-env`, `flake-parts`,
+     named `systems`, all dev envs in `pkgs.mkShell`, validate with `nix flake check`.
+
+**New tools / decisions from research (investigate for Stage 4):**
+
+| Tool | Purpose | Status |
+|------|---------|--------|
+| **Disko** | Declarative Nix partitioning — Btrfs subvolumes, NoCoW for postgres, parameterized device | Investigate; replaces manual partitioning in installer |
+| **Home Manager** | Manage tgw user + Dave operator dotfiles declaratively (Qtile, Plasma6, Bash/Zsh/Fish) | Plan for Stage 4 |
+| **agenix** | Age secrets via Nix; standalone `.txt` key (NOT SSH-based) at `/var/lib/agenix/key.txt`; `secrets/secrets.nix` matrix maps machine public keys to encrypted files | Plan for Stage 4 |
+| **nixai** | Terminal TUI with hardware detection + derivation helpers; augments nix MCP specialist | Evaluate |
+| **Hardware fingerprinting** | DMI product name + storage class → auto-select flake target; already planned in `tgw-install.sh` | In plan |
+
+**PostgreSQL backup strategy confirmed:** `pg_dumpall` (logical dump, not btrfs block snapshot)
+— database lives with infrastructure; dump goes to separated data store. No NoCoW/btrfs send
+complexity needed. Hourly `pg_dumpall | gzip → /var/lib/state-worker/dumps/` then move to
+data store; cleanup local staging. Matches existing PP-BACKUP-001 design.
+
+**Home Manager layer design (Layer 3: Users):**
+```
+modules/users/
+  tgw/
+    home.nix          # tgw service user — minimal; no interactive shell config
+  operator/
+    home.nix          # Dave: kitty, yazi, fastfetch, fish/bash/zsh config
+    shells.nix        # bash/zsh/fish aliases, tgw.source, completions
+```
+`home-manager.nixosModules.home-manager` inline in `flake.nix` so one
+`nixos-rebuild switch` updates OS + user dotfiles together.
+
+**Stage 4 additions derived from this research:**
+- [ ] Investigate Disko; write `modules/base-os/disko-btrfs.nix` with parameterized device
+- [ ] Add `modules/implementation/secrets.nix` using agenix (standalone key design)
+- [ ] Add `modules/users/` with Home Manager for tgw and operator
+- [ ] Wire declarative Syncthing bootstrap into `modules/bases/master.nix`
+- [ ] Update installer to use `path:` prefix and hardware fingerprint → auto-select host profile
+
 ### PP-CAPTURE-001 — Idea and Task Capture Pipeline
 
 #### Problem
@@ -4399,6 +4463,56 @@ Powers semi-chaotic storage assignment and pick-path optimization.
 #### C5 — eBay Error Code Index
 Extend `reference/eBay-Error-Codes.md` with gaps found during dead-letter triage.
 Powers litterbox auto-classification rules.
+
+---
+
+## PP-EBAY-SNAPSHOT-001 — eBay Submitted Payload Capture & Photo Integrity
+
+**Opened:** 2026-06-16 (session 34)
+**Status:** Phase 1 DONE; Phases 2–4 + backfill pending (todos #891–894)
+**Core principle:** Every payload we push to eBay is saved locally as `ebay_submitted`.
+This gives us a full audit trail and the ability to re-push after eBay data loss.
+
+### What it covers
+
+`ebay_submitted` = snapshot of the exact inventory_item + offer payload sent to eBay by
+`ebay_stage`. Stored in item JSON alongside `ebay_live` (raw eBay mirror) and `draft_listing`
+(editor staging area). Distinct from PP-DATA-OWN-001 (pulling eBay's current view) — this
+captures *what we sent*, enabling photo integrity checks and emergency re-push.
+
+### Phases
+
+- **Phase 1 — Save submitted payload** ✅ DONE (session 34):
+  `ebay_stage` writes `ebay_submitted.{inventory_item, offer}` + `fulfillment_policy_id` to
+  item JSON on each successful stage call.
+
+- **Phase 2 — Verify photos after publish** (todo #891):
+  After `publish_offer()` succeeds in `ebay_publish.py`, GET
+  `/sell/inventory/v1/inventory_item/{sku}` from eBay; compare `imageUrls` against
+  `ebay_submitted.inventory_item.product.imageUrls`; save
+  `ebay_listing.photo_verify = {submitted_count, confirmed_count, verified_at}`;
+  log warning if counts differ. One extra GET per publish, no new scopes needed.
+
+- **Phase 3 — Periodic photo integrity check** (todo #892):
+  In `ebay_sync`: every N days (config: `ebay_verify_interval_days`, default 7), GET
+  inventory_item and compare imageUrls vs `ebay_submitted`. If photo count drops → log
+  error + enqueue `ebay_repush` job that re-PUTs inventory_item from `ebay_submitted`.
+  Automated defense against the eBay photo-deletion incident.
+
+- **Phase 4 — tgw ebay re-push CLI** (todo #893 — DONE 2026-06-16):
+  `tgw ebay re-push <sku>` re-PUTs inventory item using `ebay_submitted.inventory_item` as
+  payload. `--all-listed` re-pushes every item with `ebay_listing.status=Active`. Nuclear
+  option for mass eBay data-loss recovery.
+
+- **Back-fill** (todo #894):
+  ~23K listed items have no `ebay_submitted` block and no `ebay_offer.fulfillment_policy_id`.
+  Back-fill approach: GET inventory_item from eBay per SKU with `ebay_listing.listing_id`,
+  save as `ebay_submitted`; rate-limit to avoid API throttle. Scope: items where
+  `ebay_submitted` is absent and `ebay_listing.listing_id` is present.
+
+### Config key
+
+`ebay_verify_interval_days` (int, default 7) — interval for Phase 3 periodic check.
 
 ---
 
