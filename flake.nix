@@ -122,7 +122,7 @@
         modules = [
           self.nixosModules.tgw
           ./nix/tgw-test-hardware.nix
-          ({ ... }: {
+          ({ pkgs, ... }: {
             services.tgw.enable = true;
             services.tgw.workers = [];
             services.tgw.enableHttp = false;
@@ -135,6 +135,38 @@
 
             networking.hostName = "tgw-test";
             networking.networkmanager.enable = true;
+
+            # Desktop — X11 + Qtile (TGW config via /etc/qtile/ symlinks)
+            services.xserver = {
+              enable = true;
+              displayManager.lightdm.enable = true;
+              windowManager.qtile = {
+                enable = true;
+                # tgw_widgets.py imports httpx + psycopg2 for queue/health bar
+                extraPackages = python3Packages: with python3Packages; [
+                  httpx psycopg2
+                ];
+              };
+            };
+
+            # Qtile config from repo — placed in /etc/qtile/, symlinked into dave's home
+            environment.etc."qtile/config.py".source = ./etc/interfaces/qtile/config.py;
+            environment.etc."qtile/tgw_widgets.py".source = ./etc/interfaces/qtile/tgw_widgets.py;
+
+            systemd.tmpfiles.rules = [
+              "d /home/dave/.config/qtile 0755 dave users -"
+              "L+ /home/dave/.config/qtile/config.py     - - - - /etc/qtile/config.py"
+              "L+ /home/dave/.config/qtile/tgw_widgets.py - - - - /etc/qtile/tgw_widgets.py"
+            ];
+
+            environment.systemPackages = with pkgs; [
+              konsole   # Super+Enter terminal
+              dmenu     # Super+D launcher
+              mc        # Midnight Commander
+              xterm     # fallback terminal
+              git
+              htop
+            ];
 
             users.users.root.initialPassword = "tgw";
 
