@@ -117,9 +117,18 @@ umount /mnt/tgw-secrets
 
 ### Phase 1 — Install NixOS on the new machine (physical access required here)
 
+NixOS ISOs live at `~/tgw-install-bundle/iso/` and sync to all machines via Syncthing's
+`tgw-install-bundle` folder. Create a boot stick from any machine that has the bundle:
+
+```bash
+# On any machine with ~/tgw-install-bundle/iso/:
+lsblk                                # confirm the USB device node first
+sudo dd if=~/tgw-install-bundle/iso/nixos-minimal-*.iso of=/dev/sdX bs=4M status=progress
+```
+
 ```bash
 # On the NEW machine:
-# Boot from NixOS ISO (dd to USB; Ventoy EFI unreliable on some hardware e.g. A1131)
+# Boot from the dd'd USB (Ventoy EFI unreliable on some hardware e.g. A1131 — use dd)
 # Partition + mount target disk at /mnt
 
 # Mount the TGW-SECRETS USB kit (different device from /mnt)

@@ -123,6 +123,33 @@ and NixOS familiarity with zero production risk, at the cost of only calendar ti
 
 ## 6. Step-by-step implementation plan
 
+### Python deployment decision (session 37)
+
+**Option B — current (server migration):** NixOS module manages OS/systemd/PostgreSQL/tree.
+Python app installed out-of-band into `/opt/TGW/.venvironments/tgw` via pip, same as MX.
+`services.tgw.venvPath` (default: `${dataDir}/.venvironments/tgw`) drives all ExecStart.
+No `src = ./.` Nix build at install time — eliminates the "codebase bundled in install"
+pain from the A1131 session. Post-install step: `pip install -e /opt/TGW/src/trader-grims-warehouse`.
+
+**Option A — future (tgw-test hardening after production cutover):** Replace `venvPath`
+with `services.tgw.package` pointing at a Nix-built package fetched from GitHub.
+`nixos-rebuild switch` then updates OS + Python app atomically. `flake.nix` retains the
+`tgwPackage` / `packages.tgw` output as the skeleton for this path.
+
+### Distribution infrastructure (session 37)
+
+| Artifact | Location | Syncthing folder | Notes |
+|----------|----------|-----------------|-------|
+| NixOS flake | `~/tgw-flake/` | `tgw-flake` (Send Only from MX) | populated by `scripts/tgw-nix-sync.sh` |
+| NixOS ISO | `~/tgw-install-bundle/iso/` | `tgw-install-bundle` | out of git repo; distributed to machines that make install sticks |
+| Site config | `~/tgw-install-bundle/site-config/` | `tgw-install-bundle` | cloned from GitHub private repo |
+
+Operator username never hardcoded — all Syncthing paths derived from
+`config.services.syncthing.user` in the Nix module. Change the username in one place
+(`nix/os/users.nix`) and it propagates to all path declarations.
+
+Reference: `nix/CLAUDE-NIX.md` (session guide), `reference/TGW-NixOS-Reference.md` (bootstrap + topology).
+
 ### Phase 0 — Pre-flight repo work (on MX, normal dev flow; no infra change)
 
 **0.1 Unify Python dependency source of truth.**
@@ -135,42 +162,26 @@ without extras; ruff clean.
 *Done when:* one authoritative dep list; flake `dependencies` mirrors `[project.dependencies]`
 1:1 (review diff side-by-side).
 
-**0.2 Fix the Nix module against verified reality** (single PR-sized change to
-`flake.nix`/`nix/tgw.nix`; pure Nix, no Python):
-1. `services.tgw.uid` default → **900** (the step-0.6 target value; document "must match
-   the uid the restored data is owned by — see 0.6").
-2. Pin `services.postgresql.package = pkgs.postgresql_17;`.
-3. Declarative ledger bootstrap: ship `schema.sql` (+ `sku_history.sql`, todo schema) into
-   the package data and apply idempotently — recommended mechanism:
-   `systemd.services.tgw-schema-init` oneshot, `After=postgresql.service`,
-   `Before=` all tgw workers, running `psql -f` (schema is already `IF NOT EXISTS`-safe).
-   Include the **WAL-recovery guard** here: skip/exit-0 when
-   `pg_is_in_recovery()` is true (this is the Perplexity gotcha, R6).
-4. Backup unit: either remove it from this module (PP-BACKUP-001 owns it) or make
-   `enableBackup` assert on a configurable `backupPackage` option — it must not reference
-   `${cfg.package}/bin/trader-grims-backup`, which doesn't exist. Recommended: remove +
-   comment.
-5. `tgw-http` ExecStart confirmed correct (`tgw serve` exists — verified `api.py:538`).
-*Test coverage:* `nix flake check` passes (operator runs it — Phase 2 gate re-checks);
-module assertions cover unknown queue names (exists) **plus a new assertion** that
-`enableBackup` requires `backupPackage`. Schema-init idempotency is exercised in the Phase
-2 VM by rebooting twice and diffing `\dt` output.
-*Done when:* module review shows zero references to unverified binaries/uids/versions.
+**0.2 Fix the Nix module against verified reality** — partial ✅, remainder open:
 
-**0.3 Implement the template-unit form in the Nix module** (**DECIDED by Dave 2026-06-10:
-keep `tgw-worker@<queue>.service`** — no rename, no tooling shim):
-*Do:* rework `nix/tgw.nix` to declare one template unit
-(`systemd.services."tgw-worker@"` with `ExecStart` dispatching the queue name `%i` to its
-console script — e.g. a small wrapper script in the package, since the
-queue→script mapping is not a clean transform) plus a `tgw-workers.target` that `Wants=`
-the enabled instances (`tgw-worker@token_refresh.service`, …), mirroring the live
-`queue-workers.target` shape. `tgw restart-workers`, `tgwlogs`, CLAUDE.md, and all
-runbooks remain valid byte-for-byte.
-*Test coverage:* Phase-2 VM asserts `systemctl status 'tgw-worker@ai_identify'` (template
-instance name, not `tgw-worker-ai_identify`); `tgw restart-workers` exercised inside the
-VM untouched; the existing `WORKER_QUEUES`-driven tests stay green (no Python change
-expected — assert via suite run that none was needed).
-*Done when:* unit names on NixOS are byte-identical to MX.
+✅ Done (session 37):
+- `services.tgw.uid` default → **900** (set in `nix/tgw/users.nix`; assertion guard in `bases/master.nix`)
+- `services.postgresql.package = pkgs.postgresql_17` pinned in `nix/tgw.nix`
+- Backup unit decoupled: `enableBackup` uses `cfg.venvPath` (not a package reference); PP-BACKUP-001 owns the binary
+- Python deployment decoupled: **Option B** (session 37) — `cfg.package` replaced by `cfg.venvPath`; ExecStart points at `/opt/TGW/.venvironments/tgw`; Nix-built package not required at install time (see §Python deployment below)
+
+Still open:
+- Declarative ledger schema bootstrap (`tgw-schema-init` oneshot with WAL-recovery guard, R6) — `tgw-db-init` creates the DB but does not apply schema SQL yet; schema still applied manually post-install
+- WAL-recovery guard: add `pg_is_in_recovery()` exit-0 check to `tgw-db-init` script
+- *Done when:* `nix flake check` passes on A1131 (Phase 3 validation gate)
+
+**0.3 Implement the template-unit form in the Nix module** ✅ **DONE (session 37)**
+
+`nix/tgw.nix` now declares concrete units named `tgw-worker@<queue>.service` (at-sign,
+not dash). `workerScripts` map drives the queue→script mapping (not a clean transform,
+hence explicit). `tgw-workers.target` added, mirroring `queue-workers.target` on MX.
+`tgw restart-workers`, `tgwlogs`, all runbooks, CLAUDE.md — unchanged, work as-is.
+*Verification gate (Phase 3):* `systemctl status 'tgw-worker@echo'` on A1131 after `tgw-rebuild`.
 
 **0.4 Config normalization for the site-config repo** (closes ISS-003 + ISS-004 while we're
 guaranteed to touch config):
@@ -399,14 +410,26 @@ hardware-limited box can carry.
 running NixOS 25.05 via `bases/portable.nix` (client tier: no workers, no HTTP, no PostgreSQL).
 Hardware config committed. mbpfan for fan control. Apple EFI notes + Ventoy dd workaround
 documented in `reference/TGW-NixOS-Reference.md`.
-**3.2 Add headless Syncthing** per the master-plan block (GUI :8385, sync :22001), sync the
-plan vault as first folder; generate API key → `secrets_root/syncthing-api-key` (0600) —
-this also unblocks PP-PYIPC-001.
-*Test coverage:* `nixos-rebuild switch` twice (idempotent); vault edit on the spare machine
-appears on the main host; `curl -H "X-API-Key: ..." 127.0.0.1:8385/rest/system/status` ok;
-reboot survival.
-*Done when:* Dave has done at least one `nixos-rebuild switch --rollback` on real hardware
-(deliberately, to learn the motion) and the machine has run a week without babysitting.
+
+**3.2 Syncthing pairing + tgw-rebuild validation** — **IN PROGRESS (session 37)**
+
+Session 37 deliverables for this step:
+- `~/tgw-flake/` created on MX (`/home/tgw/tgw-flake/`, 25 files, no ISO)
+- `scripts/tgw-nix-sync.sh` written — syncs flake.nix + nix/ from git repo on demand
+- MX Syncthing `tgw-flake` share configured (Send Only) pointing at `~/tgw-flake/`
+- A1131 accepting the share → sync in progress at session close
+- NixOS ISO moved to `~/tgw-install-bundle/iso/` (out of git repo, distributed via install-bundle folder)
+- `path:` prefix bug fixed in `tgw-rebuild` alias (was silently ignoring Syncthing-pushed changes)
+- Operator username no longer hardcoded — all paths derived from `config.services.syncthing.user`
+
+Remaining:
+- A1131 runs `tgw-rebuild` → `nix flake check` passes (first real validation of the full module stack)
+- Confirm `systemctl status 'tgw-worker@echo'` unit naming correct (Phase 0.3 verification)
+- Dave runs `nixos-rebuild switch --rollback` deliberately (learn the motion)
+- One week stable before proceeding to Phase 4
+
+*Syncthing pairing note:* Syncthing already running on A1131 from first boot. MX `tgw-flake`
+folder shared with A1131 device. `tgw-rebuild` alias: `sudo nixos-rebuild switch --flake path:~/tgw-flake#$(hostname)`
 
 ### Phase 4 — Dress rehearsal: shadow server on the spare machine
 
