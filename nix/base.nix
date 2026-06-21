@@ -50,6 +50,38 @@
   # tailscale
   services.tailscale.enable = true;
 
+  # bluetooth
+  hardware.bluetooth.enable = true;
+  services.blueman.enable = true;
+
+  # avahi — mDNS/DNS-SD (required by kdeconnect, network discovery)
+  services.avahi = {
+    enable = true;
+    nssmdns4 = true;
+  };
+
+  # printing
+  services.printing.enable = true;
+
+  # disk health monitoring
+  services.smartd.enable = true;
+
+  # syncthing — runs as dave; data dir default (~/.local/share/syncthing)
+  services.syncthing = {
+    enable = true;
+    user = "dave";
+    group = "users";
+    openDefaultPorts = true;
+  };
+
+  # ydotool — automation daemon
+  programs.ydotool.enable = true;
+
+  # NFS server
+  services.nfs.server.enable = true;
+  networking.firewall.allowedTCPPorts = [ 22 2049 ];
+  networking.firewall.allowedUDPPorts = [ 2049 ];
+
   # Explicit time sync (systemd-timesyncd is the NixOS default but declare it)
   services.timesyncd.enable = true;
 

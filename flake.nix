@@ -141,7 +141,7 @@
             # Desktop — X11 + Qtile (TGW config via /etc/qtile/ symlinks)
             services.xserver = {
               enable = true;
-              displayManager.lightdm.enable = true;
+              displayManager.sddm.enable = true;
               windowManager.qtile = {
                 enable = true;
                 # tgw_widgets.py imports httpx + psycopg2 for queue/health bar
