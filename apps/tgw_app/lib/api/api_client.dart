@@ -321,6 +321,20 @@ class ApiClient {
     return '$_baseUrl/api/items/$sku/thumbnail';
   }
 
+  Future<ApiResponse<void>> downloadSnapshot(String destPath) async {
+    await ensureInitialized();
+    try {
+      await _dio.download(
+        '/api/catalog/snapshot',
+        destPath,
+        options: Options(receiveTimeout: const Duration(minutes: 5)),
+      );
+      return ApiResponse(ok: true);
+    } catch (e) {
+      return ApiResponse(ok: false, error: e.toString());
+    }
+  }
+
   Map<String, String> get authHeaders => {
     if (_token != null && _token!.isNotEmpty) 'Authorization': 'Bearer $_token',
   };

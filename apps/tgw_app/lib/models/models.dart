@@ -313,3 +313,9 @@ class CategoryGroup {
     );
   }
 }
+
+class FlushResult {
+  final int sent;
+  final int failed;
+  const FlushResult({required this.sent, required this.failed});
+}
