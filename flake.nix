@@ -149,15 +149,8 @@
               };
             };
 
-            # Qtile config from repo — placed in /etc/qtile/, symlinked into dave's home
-            environment.etc."qtile/config.py".source = ./etc/interfaces/qtile/config.py;
-            environment.etc."qtile/tgw_widgets.py".source = ./etc/interfaces/qtile/tgw_widgets.py;
-
-            systemd.tmpfiles.rules = [
-              "d /home/dave/.config/qtile 0755 dave users -"
-              "L+ /home/dave/.config/qtile/config.py     - - - - /etc/qtile/config.py"
-              "L+ /home/dave/.config/qtile/tgw_widgets.py - - - - /etc/qtile/tgw_widgets.py"
-            ];
+            # Qtile config is user-managed — run etc/interfaces/qtile/install.sh as dave
+            # after first nixos-rebuild to deploy ~/.config/qtile/{config,tgw_widgets}.py
 
             environment.systemPackages = with pkgs; [
               kdePackages.konsole   # Super+Enter terminal (nixos-25.05: top-level konsole removed)
