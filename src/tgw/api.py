@@ -286,6 +286,84 @@ def cmd_enqueue_sku(cfg: Dict[str, Any], sku: str, queue: str) -> Dict[str, Any]
         return {"ok": False, "error": str(e)}
 
 
+def cmd_nix_bundle_usb(dry_run: bool = False, mount_override: Optional[str] = None) -> Dict[str, Any]:
+    """Copy the NixOS flake repo to the TGW-SECRETS USB partition (PP-NIXOS-001).
+
+    Finds the partition by label (TGW-SECRETS), mounts it if needed, rsyncs the
+    repo to <mount>/tgw-flake/, then unmounts. Raw secrets are never copied —
+    only the flake source tree (nix/, src/, flake.nix, etc.).
+    """
+    import os
+    import subprocess
+    import tempfile
+
+    LABEL = "TGW-SECRETS"
+    REPO_ROOT = Path(__file__).parents[3]  # …/trader-grims-warehouse
+    DEST_SUBDIR = "tgw-flake"
+
+    # Resolve mount point
+    mounted_here: Optional[str] = None
+    if mount_override:
+        mount_point = Path(mount_override)
+        if not mount_point.is_dir():
+            return {"ok": False, "error": f"mount override path not found: {mount_point}"}
+    else:
+        # Check if already mounted by label
+        result = subprocess.run(
+            ["findmnt", "-rn", "-o", "TARGET", f"LABEL={LABEL}"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            mount_point = Path(result.stdout.strip())
+        else:
+            # Find device by label and mount it
+            dev_result = subprocess.run(
+                ["blkid", "-L", LABEL], capture_output=True, text=True,
+            )
+            if dev_result.returncode != 0 or not dev_result.stdout.strip():
+                return {"ok": False, "error": f"partition with label {LABEL!r} not found — is the USB plugged in?"}
+            device = dev_result.stdout.strip()
+            tmp_mount = tempfile.mkdtemp(prefix="tgw-usb-")
+            if not dry_run:
+                mp = subprocess.run(["sudo", "mount", device, tmp_mount], capture_output=True, text=True)
+                if mp.returncode != 0:
+                    return {"ok": False, "error": f"mount failed: {mp.stderr.strip()}"}
+            mount_point = Path(tmp_mount)
+            mounted_here = tmp_mount
+
+    dest = mount_point / DEST_SUBDIR
+
+    # Build rsync command — exclude secrets, .git objects, build artifacts
+    rsync_cmd = [
+        "rsync", "-av", "--delete",
+        "--exclude=.git/objects/",
+        "--exclude=__pycache__/",
+        "--exclude=*.egg-info/",
+        "--exclude=.venv/",
+        "--exclude=build/",
+        "--exclude=dist/",
+        f"{REPO_ROOT}/",
+        f"{dest}/",
+    ]
+
+    if dry_run:
+        if mounted_here:
+            subprocess.run(["sudo", "umount", mounted_here], capture_output=True)
+            os.rmdir(mounted_here)
+        return {"ok": True, "dry_run": True, "would_rsync": " ".join(rsync_cmd), "dest": str(dest)}
+
+    try:
+        rsync = subprocess.run(rsync_cmd, capture_output=True, text=True)
+        if rsync.returncode != 0:
+            return {"ok": False, "error": f"rsync failed: {rsync.stderr.strip()}"}
+        files_copied = len([ln for ln in rsync.stdout.splitlines() if ln and not ln.startswith("sending")])
+        return {"ok": True, "dest": str(dest), "files": files_copied, "mount": str(mount_point)}
+    finally:
+        if mounted_here:
+            subprocess.run(["sudo", "umount", mounted_here], capture_output=True)
+            os.rmdir(mounted_here)
+
+
 def cmd_restart_workers(queues: Optional[List[str]] = None, dry_run: bool = False) -> Dict[str, Any]:
     """
     Restart tgw-worker@<queue>.service systemd units (PP-SHELL-001 convenience).
@@ -403,7 +481,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
         "dead-letter", "queue-history", "todo", "plan", "ai-usage", "report",
         "admin-file", "classify-suggestions", "picklist", "print-label", "mvitems",
         "suggest", "quiet-check", "perp-run", "whisper-suggest",
-        "claude-help", "clip", "suggest-edit", "promo",
+        "claude-help", "clip", "suggest-edit", "promo", "nix-bundle-usb",
     ]),
 ]
 
@@ -1047,6 +1125,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--skip-verified", action="store_true", help="skip items that already have a catalog_verified hall pass (faster re-scan)")
     p.add_argument("--fix", action="store_true", help="report auto-applicable fixes (e.g. strip stale TEMPLATE: title prefix); dry-run unless --write is given")
     p.add_argument("--write", action="store_true", help="with --fix: actually apply the fixes (default: dry-run only)")
+
+    p = sub.add_parser(
+        "nix-bundle-usb",
+        help="bundle the NixOS flake onto the TGW-SECRETS USB partition (PP-NIXOS-001)",
+    )
+    p.add_argument(
+        "--mount", default=None, metavar="PATH",
+        help="override mount point (default: auto-detect by partition label TGW-SECRETS)",
+    )
+    p.add_argument("--dry-run", action="store_true", help="show what would be copied without writing")
 
     parser.description = _make_grouped_description(sub)
     return parser
@@ -4918,6 +5006,9 @@ def main() -> int:
                 camera_only=args.camera_only,
                 dry_run=args.dry_run,
             )
+
+        elif args.op == "nix-bundle-usb":
+            result = cmd_nix_bundle_usb(dry_run=args.dry_run, mount_override=args.mount)
 
         else:
             result = {"ok": False, "error": f"unknown op: {args.op!r}"}
