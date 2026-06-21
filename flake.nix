@@ -160,10 +160,10 @@
             ];
 
             environment.systemPackages = with pkgs; [
-              konsole   # Super+Enter terminal
-              dmenu     # Super+D launcher
-              mc        # Midnight Commander
-              xterm     # fallback terminal
+              kdePackages.konsole   # Super+Enter terminal (nixos-25.05: top-level konsole removed)
+              dmenu                 # Super+D launcher
+              mc                    # Midnight Commander
+              xterm                 # fallback terminal
               git
               htop
             ];
