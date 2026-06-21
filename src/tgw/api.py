@@ -342,6 +342,7 @@ def cmd_nix_bundle_usb(dry_run: bool = False, mount_override: Optional[str] = No
         "--exclude=.venv/",
         "--exclude=build/",
         "--exclude=dist/",
+        "--exclude=nix/*.iso",
         f"{REPO_ROOT}/",
         f"{dest}/",
     ]

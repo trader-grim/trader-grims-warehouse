@@ -58,3 +58,6 @@ docs/TGW-Plan-Vault/inbox/queued/
 
 # Vendored Flutter SDK (local toolchain, 2.3GB clone of flutter/flutter @ 3.44.1) — never commit
 flutter/
+
+# NixOS ISOs — too large for repo or USB secrets bundle; keep on Ventoy USB
+nix/*.iso
