@@ -101,6 +101,7 @@
         system = "x86_64-linux";
         modules = [
           self.nixosModules.tgw
+          ./nix/base.nix
           ({ ... }: {
             services.tgw.enable = true;
             # VM convenience only — real deploys keep secrets out of the store.
@@ -121,6 +122,7 @@
         system = "x86_64-linux";
         modules = [
           self.nixosModules.tgw
+          ./nix/base.nix
           ./nix/tgw-test-hardware.nix
           ({ pkgs, ... }: {
             services.tgw.enable = true;
@@ -132,11 +134,6 @@
 
             # iMac12,1: mbpfan reads applesmc sensors for fan speed control
             services.mbpfan.enable = true;
-
-            services.openssh = {
-              enable = true;
-              settings.PasswordAuthentication = true;
-            };
 
             networking.hostName = "tgw-test";
             networking.networkmanager.enable = true;
@@ -167,10 +164,7 @@
             environment.systemPackages = with pkgs; [
               kdePackages.konsole   # Super+Enter terminal (nixos-25.05: top-level konsole removed)
               dmenu                 # Super+D launcher
-              mc                    # Midnight Commander
               xterm                 # fallback terminal
-              git
-              htop
             ];
 
             users.users.root.initialPassword = "tgw";

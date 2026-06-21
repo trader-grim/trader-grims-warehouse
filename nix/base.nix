@@ -1,0 +1,31 @@
+# =============================================================================
+# TGW base NixOS config — imported by every TGW host (vm, tgw-test, production)
+# =============================================================================
+{ pkgs, ... }:
+{
+  time.timeZone = "America/Los_Angeles";
+
+  i18n.defaultLocale = "en_US.UTF-8";
+
+  # SSH on every machine — primary remote management path
+  services.openssh = {
+    enable = true;
+    settings.PasswordAuthentication = true;
+  };
+  networking.firewall.allowedTCPPorts = [ 22 ];
+
+  # Admin tools available on every host
+  environment.systemPackages = with pkgs; [
+    git
+    curl
+    wget
+    rsync
+    htop
+    mc
+  ];
+
+  # Explicit time sync (systemd-timesyncd is the NixOS default but declare it)
+  services.timesyncd.enable = true;
+
+  nix.settings.experimental-features = [ "nix-command" "flakes" ];
+}
