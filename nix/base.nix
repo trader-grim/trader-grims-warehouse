@@ -66,12 +66,20 @@
   # disk health monitoring
   services.smartd.enable = true;
 
-  # syncthing — runs as dave; data dir default (~/.local/share/syncthing)
+  # syncthing — runs as dave; flake repo lands at ~/tgw-flake
   services.syncthing = {
     enable = true;
     user = "dave";
     group = "users";
     openDefaultPorts = true;
+    settings.folders = {
+      # Folder ID must match the share name on the MX host
+      # Accept the share in the Syncthing UI on first boot; path is pre-declared
+      "tgw-flake" = {
+        path = "/home/dave/tgw-flake";
+        devices = [];  # populated by Syncthing after device pairing
+      };
+    };
   };
 
   # ydotool — automation daemon
@@ -87,4 +95,8 @@
   services.timesyncd.enable = true;
 
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
+
+  # tgw-rebuild — apply the synced flake to this host
+  environment.shellAliases.tgw-rebuild =
+    "sudo nixos-rebuild switch --flake /home/dave/tgw-flake#$(hostname)";
 }
