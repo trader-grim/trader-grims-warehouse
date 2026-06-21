@@ -163,12 +163,20 @@
 
             nixpkgs.config.allowUnfree = true;
 
+            # Solaar — Logitech device manager (udev rules via hardware option)
+            hardware.logitech.wireless.enable = true;
+            hardware.logitech.wireless.enableGraphical = true;
+
             environment.systemPackages = with pkgs; [
               kdePackages.konsole   # Super+Enter terminal (nixos-25.05: top-level konsole removed)
               dmenu                 # Super+D launcher
               xterm                 # fallback terminal
               firefox
               obsidian
+              kdePackages.kcalc
+              kdePackages.dolphin
+              kdePackages.gwenview
+              libreoffice
             ];
 
             users.users.root.initialPassword = "tgw";
