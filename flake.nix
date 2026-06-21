@@ -172,11 +172,16 @@
               dmenu                 # Super+D launcher
               xterm                 # fallback terminal
               firefox
+              google-chrome
               obsidian
+              vscodium
               kdePackages.kcalc
               kdePackages.dolphin
               kdePackages.gwenview
+              kdePackages.krfb
               libreoffice
+              tigervnc
+              cloudflared
             ];
 
             users.users.root.initialPassword = "tgw";
