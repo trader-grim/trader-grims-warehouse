@@ -22,7 +22,14 @@
     rsync
     htop
     mc
+    tmux
   ];
+
+  # zoxide — smart cd; shell integration injected automatically
+  programs.zoxide.enable = true;
+
+  # kdeconnect — phone integration; opens firewall ports 1714-1764
+  programs.kdeconnect.enable = true;
 
   # Explicit time sync (systemd-timesyncd is the NixOS default but declare it)
   services.timesyncd.enable = true;
