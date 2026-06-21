@@ -20,6 +20,7 @@
     curl
     wget
     rsync
+    rclone
     htop
     mc
     tmux

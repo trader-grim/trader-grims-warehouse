@@ -161,10 +161,14 @@
               "L+ /home/dave/.config/qtile/tgw_widgets.py - - - - /etc/qtile/tgw_widgets.py"
             ];
 
+            nixpkgs.config.allowUnfree = true;
+
             environment.systemPackages = with pkgs; [
               kdePackages.konsole   # Super+Enter terminal (nixos-25.05: top-level konsole removed)
               dmenu                 # Super+D launcher
               xterm                 # fallback terminal
+              firefox
+              obsidian
             ];
 
             users.users.root.initialPassword = "tgw";
