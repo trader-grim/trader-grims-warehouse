@@ -77,7 +77,8 @@
   # ydotool — automation daemon
   programs.ydotool.enable = true;
 
-  # NFS server
+  # NFS server — exports defined per-host (production host config)
+  # Minimum: /opt/TGW/incoming/newitems for phone photo drop
   services.nfs.server.enable = true;
   networking.firewall.allowedTCPPorts = [ 22 2049 ];
   networking.firewall.allowedUDPPorts = [ 2049 ];
