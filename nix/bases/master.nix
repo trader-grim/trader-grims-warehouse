@@ -23,6 +23,7 @@
     ../tgw/users.nix
     ../tgw/platform.nix
     ../tgw/usb-sync.nix     # Syncthing-based install bundle → USB distribution
+    ../tgw/usb-vault.nix   # TGW-VAULT USB auto-stamp on insertion
     ../inference.nix
     ../keyd.nix
     ../nfs-exports.nix
