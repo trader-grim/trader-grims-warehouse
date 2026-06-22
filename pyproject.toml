@@ -19,6 +19,7 @@ dependencies = [
     "mcp>=1.0",
     "pyperclip>=1.8",
     "mistune>=3.0",
+    "Pillow>=10.0",
 ]
 
 [project.optional-dependencies]

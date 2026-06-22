@@ -139,6 +139,21 @@
         ];
       };
 
+      # tgw-test in server (master) profile for Phase 4 dress rehearsal.
+      # Push with: bash scripts/tgw-push-config.sh tgw-test-rehearsal <ip>
+      # After rehearsal, push tgw-test to restore the client profile.
+      nixosConfigurations.tgw-test-rehearsal = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = [
+          self.nixosModules.tgw
+          disko.nixosModules.disko
+          home-manager.nixosModules.home-manager
+          ./nix/hosts/tgw-test-rehearsal.nix
+          ./nix/hosts/tgw-test-disko.nix
+          ./nix/home/hm-module.nix
+        ];
+      };
+
       # Production host — full TGW stack + desktop
       nixosConfigurations.tgw-prod = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";

@@ -206,10 +206,18 @@ in
 
     systemd.services = lib.mkMerge [
 
-      # DB init — create state_machine DB and assign ownership.
+      # DB init — create state_machine DB, assign ownership, apply schema.
+      #
+      # Three cases handled:
+      #   1. Fresh install:  DB doesn't exist → create it + apply schema SQL.
+      #   2. Restore (pg_restore already ran): DB + tables exist → skip schema.
+      #   3. PostgreSQL in WAL recovery (replica / restoring): exit 0, do nothing.
+      #
+      # Schema SQL files are idempotent (CREATE IF NOT EXISTS / DO $$...IF NOT EXISTS$$)
+      # so running them on an already-populated DB is always safe.
       {
         tgw-db-init = {
-          description = "Initialize TGW state_machine database";
+          description = "Initialize TGW state_machine database and schema";
           after       = [ "postgresql.service" ];
           requires    = [ "postgresql.service" ];
           wantedBy    = [ "multi-user.target" ];
@@ -220,10 +228,26 @@ in
           };
           script = ''
             psql=${config.services.postgresql.package}/bin/psql
+
+            # WAL-recovery guard: don't touch a standby/recovering instance.
+            if $psql -tAc "SELECT pg_is_in_recovery()" | grep -q t; then
+              echo "tgw-db-init: PostgreSQL is in recovery — skipping init"
+              exit 0
+            fi
+
+            # Create the database if it doesn't exist.
             $psql -tAc "SELECT 1 FROM pg_database WHERE datname='state_machine'" \
               | grep -q 1 \
               || $psql -c "CREATE DATABASE state_machine OWNER \"${cfg.user}\";"
             $psql -c "ALTER DATABASE state_machine OWNER TO \"${cfg.user}\";"
+
+            # Apply schema SQL files.  Each is idempotent — safe to run on a
+            # DB already populated by pg_restore (tables already exist → no-op).
+            tgw_psql() { $psql -v ON_ERROR_STOP=1 -d state_machine "$@"; }
+            tgw_psql -f ${self}/src/tgw/queue/schema.sql
+            tgw_psql -f ${self}/src/tgw/queue/sku_history.sql
+            tgw_psql -f ${self}/src/tgw/queue/image_hashes.sql
+            echo "tgw-db-init: schema ready"
           '';
         };
       }
