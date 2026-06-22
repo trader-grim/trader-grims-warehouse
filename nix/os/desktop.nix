@@ -16,10 +16,11 @@
 
   services.xserver = {
     enable = true;
-    displayManager.sddm.enable = true;
     windowManager.qtile.enable = true;
     # extraPackages: not set here — added by nix/tgw/desktop.nix for TGW widgets
   };
+
+  services.displayManager.sddm.enable = true;
 
   # KDE Connect — phone integration; opens firewall ports 1714-1764
   programs.kdeconnect.enable = true;

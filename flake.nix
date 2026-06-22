@@ -12,7 +12,7 @@
   #   os/users.nix         — CatioNIX: human accounts (db uid 1000, root)
   #   os/desktop.nix       — CatioNIX: opt-in GUI layer (X11+Qtile+apps, no TGW config)
   #   tgw/users.nix        — TGW: service account (tgw uid/gid 900) — SINGLE source of truth
-  #   tgw/platform.nix     — TGW: syncthing tgw-flake folder, tgw-rebuild alias
+  #   tgw/platform.nix     — TGW: system packages (ffmpeg, imagemagick, exiftool, chafa, gh), tgw-install-bundle Syncthing folder
   #   tgw/desktop.nix      — TGW: Qtile extraPackages + config files + db's symlinks
   #   bases/master.nix     — full server platform (os + tgw + inference + keyd + nfs-exports)
   #   bases/portable.nix   — client tier (os + tgw, no workers/http/inference)
@@ -34,9 +34,11 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+    disko.url   = "github:nix-community/disko";
+    disko.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, ... }:
+  outputs = { self, nixpkgs, disko, ... }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system);
@@ -125,7 +127,12 @@
       # Spare iMac12,1 — NixOS familiarisation + flake/restore validation
       nixosConfigurations.tgw-test = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
-        modules = [ self.nixosModules.tgw ./nix/hosts/tgw-test.nix ];
+        modules = [
+          self.nixosModules.tgw
+          disko.nixosModules.disko
+          ./nix/hosts/tgw-test.nix
+          ./nix/hosts/tgw-test-disko.nix
+        ];
       };
 
       # Production host — full TGW stack + desktop

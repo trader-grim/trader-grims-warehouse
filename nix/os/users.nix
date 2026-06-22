@@ -14,6 +14,9 @@
     uid          = 1000;
     extraGroups  = [ "wheel" "networkmanager" ];
     initialPassword = "tgw";   # change on first login
+    openssh.authorizedKeys.keys = [
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOsq96la7RZ0PthMCM9d2ktiG2WZxoePCs+0z978HUKh tgw@mx"
+    ];
   };
 
   users.users.root.initialPassword = "tgw";   # change on first login

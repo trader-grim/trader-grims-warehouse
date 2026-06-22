@@ -245,10 +245,11 @@ def build_location_tree(cfg: Dict[str, Any], source: str = 'auto',
     dest_root = cfg['location_tree_root']
     built, skipped, problems = 0, 0, []
 
-    if not check_only and dest_root.exists():
-        shutil.rmtree(dest_root)
     if not check_only:
-        dest_root.mkdir(parents=True, exist_ok=True)
+        real_root = dest_root.resolve() if dest_root.is_symlink() else dest_root
+        if real_root.exists():
+            shutil.rmtree(real_root)
+        real_root.mkdir(parents=True, exist_ok=True)
 
     for row in rows:
         sku      = str(row.get('sku', '')).strip()

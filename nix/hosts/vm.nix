@@ -9,12 +9,18 @@
 # Users (tgw + db + root) come from tgw/users.nix + os/users.nix via master.
 # Secrets are NOT provisioned — restore from backup before tgw health passes.
 # =============================================================================
-{ ... }:
+{ lib, ... }:
 {
   imports = [
     ../bases/master.nix
     # no os/desktop.nix — headless validation only
   ];
+
+  # Stub filesystem for nix flake check — build-vm uses virtual disks at runtime.
+  fileSystems."/" = lib.mkDefault {
+    device = "/dev/disk/by-label/nixos";
+    fsType = "ext4";
+  };
 
   networking.hostName = "tgw-vm";
 

@@ -31,7 +31,7 @@ in `nix/tgw/`. Violations break the CatioNIX/TGW boundary.
 | `nix/os/users.nix` | Operator account `db` (uid 1000, wheel, networkmanager); root initial password |
 | `nix/os/desktop.nix` | X11, SDDM, Qtile, desktop apps — CatioNIX desktop layer |
 | `nix/tgw/users.nix` | Service account `tgw` (uid/gid 900) — the ONLY file that may declare it |
-| `nix/tgw/platform.nix` | TGW system packages (ffmpeg, imagemagick, exiftool, chafa, gh); Syncthing folders `tgw-flake`/`tgw-install-bundle`; `tgw-rebuild` alias |
+| `nix/tgw/platform.nix` | TGW system packages (ffmpeg, imagemagick, exiftool, chafa, gh); Syncthing folder `tgw-install-bundle`; ydotool |
 | `nix/tgw/desktop.nix` | Qtile config + TGW status widgets; ydotool |
 | `nix/tgw/usb-sync.nix` | USB auto-mount + send-only Syncthing `tgw-usb-bundle` (production only) |
 | `nix/tgw.nix` | NixOS module: `services.tgw.*` options — workers, http, PostgreSQL, schema init |
@@ -70,8 +70,8 @@ happens at cutover on production hardware (or on upgraded hardware if that arriv
 | `root` | 0 | Emergency only; initial password `tgw`, change on first login | — |
 
 **Why these names matter:**
-- Syncthing runs as the operator user → flake lives at `~/tgw-flake` (home of whatever user `services.syncthing.user` is set to)
-- `tgw-rebuild` alias runs `sudo nixos-rebuild` (db → sudo → root)
+- Syncthing runs as the operator user `db` — folder paths derive from `config.services.syncthing.user` so changing the operator name propagates automatically
+- Configs are pushed FROM MX via `scripts/tgw-push-config.sh` — NixOS hosts do not store the flake source
 - Workers, queue jobs, file ownership — all `tgw:tgw` (uid/gid 900)
 - Do NOT confuse `tgw` (service account) with `db` (operator)
 

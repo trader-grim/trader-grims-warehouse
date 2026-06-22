@@ -22,5 +22,5 @@
   # iMac12,1: mbpfan reads applesmc sensors for fan speed control
   services.mbpfan.enable = true;
 
-  system.stateVersion = "24.11";
+  system.stateVersion = "25.05";
 }
