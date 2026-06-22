@@ -7,11 +7,12 @@
 #
 # db is the primary operator: uid 1000, wheel + networkmanager.
 # =============================================================================
-{ ... }:
+{ pkgs, ... }:
 {
   users.users.db = {
     isNormalUser = true;
     uid          = 1000;
+    shell        = pkgs.fish;
     extraGroups  = [ "wheel" "networkmanager" ];
     initialPassword = "tgw";   # change on first login
     openssh.authorizedKeys.keys = [

@@ -155,3 +155,34 @@ photo pipeline is stable and the model routing is settled (PP-MULTIMODEL-001).
 - [ ] PP-MULTIMODEL-001 model router settled
 - [ ] Single-photo pipeline stable on production
 - [ ] Cost-per-item data available to estimate multi-photo pass cost
+
+---
+
+## MC-SYNCTHING-VFS — Midnight Commander Syncthing Virtual File System Plugin
+
+**Origin:** SUGGESTIONS.md 2026-06-21T23:01; research in `perplexity/RESEARCH-syncthing-mc-plugin.md`
+**Related PP:** PP-PYIPC-001
+
+### Concept
+A Midnight Commander `extfs` plugin that exposes a Syncthing share as a browseable
+virtual file system pane — on-demand, no full local sync required. Based on the
+Syncthing-Lite "sync browser" model: fetch directory listings from Syncthing's REST API
+(`/rest/db/browse`) without downloading anything, then stream individual files only when
+the operator copies them out (F5).
+
+### Architecture
+- **Backend**: local Syncthing daemon (Go binary, already installed), REST API on `localhost:8384`
+- **Plugin**: Python `extfs` script at `/usr/share/mc/extfs.d/syncthinglite` (chmod +x)
+- **MC hooks required**: `list` (directory listing), `copyout` (on-demand download), `copyin` (upload)
+- **Folder type**: "Receive Only" + Watch disabled → prevents auto-sync; REST API reads global state
+
+### Why it's interesting for TGW
+MC is already part of the operator workflow. A Syncthing VFS pane would let `db` browse
+any remote Syncthing share (phone photo drops, install bundles, USB kit contents) directly
+in MC without mounting or full sync. Complements the existing Syncthing topology rather
+than replacing it.
+
+### Promotion criteria
+- [ ] PP-PYIPC-001 stable and confirmed in production
+- [ ] Operator workstation (tgw-prod) running NixOS with MC installed
+- [ ] Clear use case identified (phone photos? remote install-bundle browsing?)

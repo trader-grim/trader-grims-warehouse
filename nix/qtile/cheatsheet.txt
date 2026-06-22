@@ -1,0 +1,58 @@
+╔══════════════════════════════════════════════════════════════════╗
+║           TGW / Qtile Keybinding Cheatsheet                     ║
+║           Super = Win/Cmd key    Mod1 = Alt                     ║
+╚══════════════════════════════════════════════════════════════════╝
+
+── Window Focus ──────────────────────────────────────────────────
+  Super+h/j/k/l        Focus left/down/up/right
+  Super+Shift+h/j/k/l  Move window left/down/up/right
+  Super+Ctrl+h/j/k/l   Resize window
+  Super+Ctrl+n          Normalize sizes
+
+── Layouts ───────────────────────────────────────────────────────
+  Super+Tab             Next layout
+  Super+Shift+Tab       Prev layout
+  Super+f               Toggle fullscreen
+  Super+Shift+f         Toggle floating
+
+── Windows ───────────────────────────────────────────────────────
+  Super+w               Close window
+  Super+Ctrl+r          Reload Qtile config
+  Super+Ctrl+q          Quit Qtile
+
+── Launch ────────────────────────────────────────────────────────
+  Super+Enter           Terminal (konsole)
+  Super+d               App launcher (dmenu)
+  Super+r               Run command
+  F12                   Scratchpad terminal toggle
+
+── Workspaces ────────────────────────────────────────────────────
+  Super+1               shell  — general terminal / dev
+  Super+2               tgw    — MC, dashboard, logs
+  Super+3               ebay   — browser (Seller Hub)
+  Super+4               agents — Claude Code, AI tools
+  Super+5               media  — photo intake, Gwenview
+  Super+Shift+1–5       Move window to workspace
+
+── TGW Chord: Super+T ────────────────────────────────────────────
+  (bar shows [ TGW ] while in chord mode)
+  h     tgw health check
+  q     queue depths (psql)
+  s     tgw staged items
+  t     tgw todo
+  v     tgw velocity-report
+  c     clipboard SKU → lookup
+  1     queue ai_identify for clipboard SKU
+  2     queue ebay_draft for clipboard SKU
+  o     open ItemData in Dolphin
+  F2    jump to tgw workspace
+  F4    jump to agents workspace
+  Esc   exit TGW mode
+
+── Bar Widgets ───────────────────────────────────────────────────
+  TGWSKUWidget    clipboard SKU watcher — ⬟ tgwXXX when detected
+  TGWQueueWidget  Q:✓ / Q:3p / Q:2p 1✗ — click opens health term
+  TGWHealthWidget W:18/18 — active/total workers
+
+── This Cheatsheet ───────────────────────────────────────────────
+  Super+Alt+Ctrl+h    Open this cheatsheet

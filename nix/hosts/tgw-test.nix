@@ -8,7 +8,7 @@
 #
 # Hardware: EFI boot via systemd-boot (installed 2026-06-20 from nixos-26.05 ISO).
 # =============================================================================
-{ ... }:
+{ lib, ... }:
 {
   imports = [
     ../bases/portable.nix          # CatioNIX OS + TGW platform (client-shaped)
@@ -21,6 +21,10 @@
 
   # iMac12,1: mbpfan reads applesmc sensors for fan speed control
   services.mbpfan.enable = true;
+
+  # Syncthing disabled on tgw-test: not configured, would crash on every boot.
+  # Enable and configure when testing Syncthing topology on this host.
+  services.syncthing.enable = lib.mkForce false;
 
   system.stateVersion = "25.05";
 }

@@ -33,12 +33,14 @@
   description = "Trader Grim's Warehouse — inventory + eBay automation platform";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
-    disko.url   = "github:nix-community/disko";
+    nixpkgs.url        = "github:NixOS/nixpkgs/nixos-25.05";
+    disko.url          = "github:nix-community/disko";
     disko.inputs.nixpkgs.follows = "nixpkgs";
+    home-manager.url   = "github:nix-community/home-manager/release-25.05";
+    home-manager.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, disko, ... }:
+  outputs = { self, nixpkgs, disko, home-manager, ... }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system);
@@ -130,15 +132,22 @@
         modules = [
           self.nixosModules.tgw
           disko.nixosModules.disko
+          home-manager.nixosModules.home-manager
           ./nix/hosts/tgw-test.nix
           ./nix/hosts/tgw-test-disko.nix
+          ./nix/home/hm-module.nix
         ];
       };
 
       # Production host — full TGW stack + desktop
       nixosConfigurations.tgw-prod = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
-        modules = [ self.nixosModules.tgw ./nix/hosts/tgw-prod.nix ];
+        modules = [
+          self.nixosModules.tgw
+          home-manager.nixosModules.home-manager
+          ./nix/hosts/tgw-prod.nix
+          ./nix/home/hm-module.nix
+        ];
       };
 
       # Dev shell — interactive development on any machine with Nix

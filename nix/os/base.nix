@@ -41,6 +41,7 @@
   ];
 
   programs.zoxide.enable = true;
+  programs.fish.enable   = true;
   programs.zsh.enable    = true;
 
   services.tailscale.enable = true;
@@ -65,4 +66,9 @@
   services.timesyncd.enable = true;
 
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
+
+  # Allow wheel-group users (operator `db`) to push unsigned closures via
+  # `nixos-rebuild --target-host` from the MX build machine.  MX does not
+  # sign its Nix builds, so without this tgw-test refuses incoming paths.
+  nix.settings.trusted-users = [ "root" "@wheel" ];
 }

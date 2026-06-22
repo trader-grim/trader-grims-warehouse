@@ -25,13 +25,10 @@ in
 
   # Qtile config — lives in nix/qtile/ so it travels with the flake.
   # Paths are relative to this file (nix/tgw/desktop.nix → nix/qtile/).
-  environment.etc."qtile/config.py".source      = ../qtile/config.py;
-  environment.etc."qtile/tgw_widgets.py".source = ../qtile/tgw_widgets.py;
+  environment.etc."qtile/config.py".source       = ../qtile/config.py;
+  environment.etc."qtile/tgw_widgets.py".source  = ../qtile/tgw_widgets.py;
+  environment.etc."qtile/cheatsheet.txt".source  = ../qtile/cheatsheet.txt;
 
-  # Symlink /etc/qtile/* into the operator's config dir so Qtile finds them.
-  systemd.tmpfiles.rules = [
-    "d  ${opHome}/.config/qtile                       0755 ${opUser} users -"
-    "L+ ${opHome}/.config/qtile/config.py       - - - - /etc/qtile/config.py"
-    "L+ ${opHome}/.config/qtile/tgw_widgets.py  - - - - /etc/qtile/tgw_widgets.py"
-  ];
+  # ~/.config/qtile/ is now managed by Home Manager (nix/home/db.nix).
+  # The files above are kept in /etc/qtile/ for reference / emergency use.
 }
