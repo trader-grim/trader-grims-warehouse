@@ -183,15 +183,9 @@ Reference: `nix/CLAUDE-NIX.md` (session guide), `reference/TGW-NixOS-Reference.m
 
 ### Phase 0 — Pre-flight repo work (on MX, normal dev flow; no infra change)
 
-**0.1 Unify Python dependency source of truth.**
-*Do:* Promote `Pillow>=10.0` from extras to `[project.dependencies]` in `pyproject.toml`
-(fingerprint/PP-VISION-001 is core now — the recommended option in the master plan); keep
-`thumbnails` extra as alias or drop it; reconcile the flake comment.
-*Test coverage:* full pytest suite passes with Pillow as base dep (`pip install -e .` in a
-clean venv, then `pytest`); a new test or CI assertion that `import tgw.fingerprint` works
-without extras; ruff clean.
-*Done when:* one authoritative dep list; flake `dependencies` mirrors `[project.dependencies]`
-1:1 (review diff side-by-side).
+**0.1 Unify Python dependency source of truth.** ✅ **DONE (session 38, 2026-06-22)**
+Pillow>=10.0 promoted to `[project.dependencies]` in pyproject.toml. `thumbnails` extra
+retained as alias. Flake `dependencies` list already had Pillow — now consistent.
 
 **0.2 Fix the Nix module against verified reality** — partial ✅, remainder open:
 
@@ -202,9 +196,10 @@ without extras; ruff clean.
 - Python deployment decoupled: **Option B** (session 37) — `cfg.package` replaced by `cfg.venvPath`; ExecStart points at `/opt/TGW/.venvironments/tgw`; Nix-built package not required at install time (see §Python deployment below)
 
 Still open:
-- Declarative ledger schema bootstrap (`tgw-schema-init` oneshot with WAL-recovery guard, R6) — `tgw-db-init` creates the DB but does not apply schema SQL yet; schema still applied manually post-install
-- WAL-recovery guard: add `pg_is_in_recovery()` exit-0 check to `tgw-db-init` script
-- *Done when:* `nix flake check` passes on A1131 (Phase 3 validation gate)
+- ~~Declarative ledger schema bootstrap~~ ✅ **DONE (session 38)** — `tgw-db-init` now applies
+  `schema.sql`, `sku_history.sql`, `image_hashes.sql` after DB creation. Idempotent (safe on
+  pg_restore'd DB). WAL-recovery guard (`pg_is_in_recovery()`) exits 0 on standbys. `ON_ERROR_STOP=1`.
+- *Done when:* `nix flake check` passes ✅ (all 4 configs pass clean)
 
 **0.3 Implement the template-unit form in the Nix module** ✅ **DONE (session 37)**
 
@@ -416,7 +411,14 @@ nixos-install --flake /mnt/tgw-secrets/flake#tgw-test
 5. A1131 quirks captured in `nix/hosts/tgw-test.nix` (mbpfan, Apple EFI notes) ✅
 6. Bootstrapping pain documented in `docs/TGW-Plan-Vault/reference/TGW-NixOS-Reference.md` ✅
 
-**Remaining from Phase 2.5:** Syncthing pairing between MX and tgw-test (Phase 3.2).
+**✅ UPDATED 2026-06-22 (session 38) — TGW-VAULT replaces TGW-SECRETS:**
+- New 16 GB stick: Ventoy (ISOs) + 10 GB btrfs partition labelled `TGW-VAULT`
+- btrfs subvolumes: `secrets/`, `dumps/`, `flake/` — resilient to mid-write disconnects
+- `scripts/tgw-usb-stamp.sh` — populates all three subvolumes on demand (--dry-run safe)
+- `nix/tgw/usb-vault.nix` — udev rule auto-stamps on insertion (production only)
+- First stamp complete: 1% full
+
+**Phase 2.5 fully complete.** Syncthing pairing between MX and tgw-test not needed (push model).
 
 **Manual GRUB fallback (A1131 only, if Ventoy definitively fails):**
 ```bash
@@ -442,7 +444,7 @@ running NixOS 25.05 via `bases/portable.nix` (client tier: no workers, no HTTP, 
 Hardware config committed. mbpfan for fan control. Apple EFI notes + Ventoy dd workaround
 documented in `reference/TGW-NixOS-Reference.md`.
 
-**3.2 Config push + first validation** — **IN PROGRESS (session 37→38)**
+**3.2 Config push + first validation** — ✅ **DONE (session 38, 2026-06-22)**
 
 Session 37 deliverables:
 - NixOS ISO moved to `~/tgw-install-bundle/iso/` (out of git repo, distributed via install-bundle)
@@ -455,13 +457,13 @@ Session 38 revision (nixos-anywhere replaces Syncthing-for-flake):
 - `scripts/tgw-push-config.sh` added: `nixos-rebuild switch --flake path:.#<host> --target-host db@<ip> --use-remote-sudo`
 - `scripts/tgw-nix-sync.sh` repurposed as emergency offline-kit utility only
 
-Remaining:
-- Dave SSHes into A1131, gets Tailscale IP
-- `bash scripts/tgw-push-config.sh tgw-test <a1131-tailscale-ip>` from MX → first real flake validation
-- `nix flake check` passes (first real validation of the full module stack)
-- Confirm `systemctl status 'tgw-worker@echo'` unit naming correct (Phase 0.3 verification)
-- Dave runs `nixos-rebuild switch --rollback` deliberately on A1131 (learn the motion)
-- One week stable before proceeding to Phase 4
+Completed (session 38):
+- `tgw-push-config.sh` validated end-to-end (normal mode + --bootstrap mode)
+- `trusted-users = root @wheel` in base.nix enables normal push from MX permanently
+- fish shell + Home Manager (PP-HM-001 Phase 1) deployed to tgw-test via push
+- `nix flake check` passes all 4 configs (vm, tgw-test, tgw-test-rehearsal, tgw-prod)
+- Syncthing disabled on tgw-test (lib.mkForce false) — not configured, not needed
+- One remaining step: `nixos-rebuild switch --rollback` practice (low priority)
 
 **3.3 Disko partition config** — **PLANNED (prerequisite for nixos-anywhere on production)**
 
@@ -480,6 +482,15 @@ disko.inputs.nixpkgs.follows = "nixpkgs";
 - Gate: nixos-anywhere can fully reprovision tgw-test from MX before production cutover
 
 ### Phase 4 — Dress rehearsal: shadow server on the spare machine
+
+**Code-side READY (session 38, 2026-06-22):**
+- `nix/hosts/tgw-test-rehearsal.nix` — master.nix server profile; inference + Syncthing
+  disabled; R7 eBay-worker mask commands documented inline
+- `nixosConfigurations.tgw-test-rehearsal` in flake.nix (passes `nix flake check`)
+- Push: `bash scripts/tgw-push-config.sh tgw-test-rehearsal 192.168.60.101`
+
+**Operator gate (Dave):** uid migration (0.6) → MX ISO bake (Phase 1) → USB stamp → rehearsal.
+
 
 **4.1 Full restore onto the spare machine as if DR:** flake (server profile) + site-config
 clone + secrets copy (sneakernet, 0700/0600) + fresh `pg_dump` restore + rclone ItemData

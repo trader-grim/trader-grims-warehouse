@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-19 (session 36 — PROPOSED-PLAN-2026-06-19 merged; staged foundation plan adopted; ISS-013 closed; PP-AIOPS-001 anchored; PP-DATA-OWN-001 Track C expanded)
+updated: 2026-06-22 (session 38 — PP-HM-001 Phase 1 done; fish shell; tgw-push-config working; TGW-VAULT USB auto-stamp; dress rehearsal config + schema init ready)
 maintained_by: Opus (planner)
 ---
 
@@ -300,6 +300,33 @@ maintained_by: Opus (planner)
   `tgw lookup <SKU>` CLI. Verified: upcitemdb live. IGDB needs `secrets_root/igdb-credentials.json`.
 - **SKU migrate** — `ebay_sku_migrate` worker running hourly; ~8,350 eBay live listings remain;
   shipping policy now category-aware (FC4 default, 7 category overrides in config)
+
+### Session 38 — 2026-06-22 (PP-HM-001 Phase 1 + dress rehearsal readiness)
+
+- **PP-HM-001 Phase 1 DONE** — Home Manager wired into flake (release-25.05); `nix/home/db.nix`
+  manages Qtile config, fish shell (primary), bash (fallback), XDG dirs. systemd.tmpfiles
+  Qtile hack removed. Qtile cheatsheet added to flake (`nix/qtile/cheatsheet.txt`);
+  Super+Alt+Ctrl+H binding already in config.py.
+- **fish shell for `db` operator** — `programs.fish.enable` in base.nix; `shell = pkgs.fish`
+  in users.nix; aliases (`tgwlog`, `tgwps`, `ll`), TGW venv in PATH. bash kept as fallback.
+- **tgw-push-config.sh validated end-to-end** — normal mode (`nixos-rebuild --target-host`) and
+  `--bootstrap` mode (rsync + local rebuild for first push before `trusted-users` lands).
+  `nix.settings.trusted-users = ["root" "@wheel"]` in base.nix enables normal mode permanently.
+- **TGW-VAULT USB cold-start kit** — 16 GB Ventoy + 10 GB btrfs `TGW-VAULT` partition with
+  `secrets/`, `dumps/`, `flake/` subvolumes. `scripts/tgw-usb-stamp.sh` populates on demand;
+  `nix/tgw/usb-vault.nix` auto-stamps via udev on insertion (production only).
+  First stamp: 1% full. Committed `b933b64` + `34e18a8`.
+- **Dress rehearsal code-side READY** (`872585e`):
+  - `nix/hosts/tgw-test-rehearsal.nix` — master.nix server profile on tgw-test hardware;
+    inference + Syncthing disabled; R7 mask commands documented inline.
+  - `tgw-db-init` now applies schema SQL (schema.sql, sku_history.sql, image_hashes.sql)
+    with WAL-recovery guard and idempotent ON_ERROR_STOP=1 execution (Phase 0.2 complete).
+  - Pillow promoted to base dep in pyproject.toml (Phase 0.1 complete).
+- **Remaining before cutover** (operator-gated):
+  1. uid migration: `usermod -u 900 tgw` + chown + audit (Phase 0.6) — fold into Phase 1 window
+  2. MX ISO bake (Phase 1 runbook)
+  3. `sudo bash scripts/tgw-usb-stamp.sh` on fresh USB after ISO bake
+  4. Dress rehearsal: `tgw-push-config.sh tgw-test-rehearsal` → secrets → pg_restore → `tgw health`
 
 ### Session 35/36 — 2026-06-19 (foundation replan + ISS-013 close)
 
@@ -2319,7 +2346,7 @@ but config is declarative — all logic lives outside), Sway (i3-compatible but 
 
 ## PP-HM-001 — Home Manager: Declarative User Environments
 
-### Status: PLANNED (session 38, 2026-06-21)
+### Status: Phase 1 DONE (session 38, 2026-06-22) — Phase 2 open
 
 ### Why
 Fresh NixOS installs create `/home/db/.config` owned by root during system activation.
