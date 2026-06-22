@@ -465,21 +465,32 @@ Completed (session 38):
 - Syncthing disabled on tgw-test (lib.mkForce false) — not configured, not needed
 - One remaining step: `nixos-rebuild switch --rollback` practice (low priority)
 
-**3.3 Disko partition config** — **PLANNED (prerequisite for nixos-anywhere on production)**
+**3.3 Disko partition config** — **PARTIAL (tgw-test done; tgw-prod layout authored 2026-06-22)**
 
 Disko provides declarative disk partitioning — required by nixos-anywhere for automated
-full-disk provisioning. Add to flake.nix as an input; write host disko configs.
+full-disk provisioning.
 
-```nix
-# In flake.nix inputs:
-disko.url = "github:nix-community/disko";
-disko.inputs.nixpkgs.follows = "nixpkgs";
-```
+**Storage architecture decision (2026-06-22):** LVM for base partitions + PostgreSQL +
+future microVM volumes; Btrfs for `/opt/TGW` data (ItemData, catalogs, logs, secrets).
 
-- Write `nix/hosts/tgw-test-disko.nix` (Btrfs matching the manually-installed layout) — validates the approach on A1131
-- Write `nix/hosts/tgw-prod-disko.nix` at production cutover time (hardware-specific)
-- Wire `disko.nixosModules.disko` into each host config in `flake.nix`
-- Gate: nixos-anywhere can fully reprovision tgw-test from MX before production cutover
+| Layer | Filesystem | Mount | Rationale |
+|-------|-----------|-------|-----------|
+| OS root / home / nix | ext4 on LVM LVs | / /home /nix | Online resize; clean LV boundaries |
+| PostgreSQL | XFS on LVM LV | /var/lib/postgresql | Avoids Btrfs CoW WAL amplification; `noatime,nodiratime,allocsize=64m` |
+| microVM volumes | raw LVM LVs (no fs) | passed via microvm.nix | `volumes = [{image="/dev/vg_tgw/lv_microvm_<n>"; type="block";}]`; create with `lvcreate` at provisioning time |
+| TGW data | Btrfs subvol | /opt/TGW | `compress=zstd noatime`; good for large unstructured files |
+
+This replaces the earlier "Btrfs + NoCoW for postgres" design (chattr +C approach dropped).
+
+**Status:**
+- `nix/hosts/tgw-test-disko.nix` ✅ done (Btrfs-only, matches A1131 as manually installed — kept for reinstall parity)
+- `nix/hosts/tgw-prod-disko.nix` ✅ authored 2026-06-22 — LVM+XFS+Btrfs layout; device `/dev/sda` is a placeholder, **override before nixos-anywhere run**
+- `disko.nixosModules.disko` wired into tgw-test, tgw-test-rehearsal, and tgw-prod in `flake.nix` ✅
+
+**Remaining:**
+- Set correct device name in tgw-prod-disko.nix at cutover time (`lsblk` to confirm)
+- Adjust LV and Btrfs partition sizes to match actual production disk capacity
+- Gate: nixos-anywhere can fully reprovision tgw-test from MX before production cutover (validate using `--dry-run` first)
 
 ### Phase 4 — Dress rehearsal: shadow server on the spare machine
 
@@ -517,6 +528,49 @@ ai_identify, catalog_rebuild, thumbnail_gen, velocity_stats`. Recommended: start
   *is* the DR RTO and feeds the cutover window estimate.
 *Done when:* a written rehearsal report (restore timings, deviations, fixes fed back into
 Phase 0 files) lives in the plan vault; any module fix discovered is applied + re-verified.
+
+### Phase 4.5 — Pre-wipe and post-install checklist
+
+**Models and large data:** MX image + Btrfs snapshots + `/opt/TGW` backup cover everything.
+Nothing is lost — the question is where to restore things on the new host.
+
+| Item | Restore from | Post-install action |
+|------|-------------|---------------------|
+| **Ollama models** — `qwen2.5vl:7b` (6 GB) + `Qwen2.5:latest` (4.7 GB) | MX image or HDD copy | `sudo rsync -a <source>/ollama-models/ /var/lib/ollama/ && sudo chown -R ollama:ollama /var/lib/ollama/` — confirm source path: `sudo ls /usr/share/ollama/.ollama/` on MX |
+| **Whisper models** — base/small/medium/tiny in `/usr/share/whisper/models/` | MX image or HDD copy | Copy to `/opt/TGW/models/` (config default); NixOS `whisper-cpp` pkg puts binary in PATH as `whisper-cli` — update `whisper_bin` in config (see Phase 0.4) |
+| **Operator SSH keys** | TGW-VAULT USB (`secrets/db-ssh/`) | `cp -r /mnt/tgw-vault/secrets/db-ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/*` |
+| **tgw rclone config** | `/opt/TGW/.config/rclone/rclone.conf` ✅ Btrfs restore | No action — comes back automatically |
+| **Operator rclone config** | HDD backup of `~db/` | Check `~db/.config/rclone/` if separate from tgw user's |
+| **Tailscale** | Auth key (have one ready) | `sudo tailscale up --authkey <key>` |
+| **Syncthing peers** | Re-pair after install | New device ID — share with all peers; plan-vault/ItemData/ItemCatalog folders re-pair |
+| **Claude Code** | npm post-install | `npm install -g @anthropic-ai/claude-code`; memory files in repo ✅ |
+
+**Post-install one-time steps (after restore, before starting workers):**
+
+```bash
+# 1. Rebuild the Python venv — MX venv paths are broken on NixOS
+python3 -m venv /opt/TGW/.venvironments/tgw --clear
+/opt/TGW/.venvironments/tgw/bin/pip install -e /opt/TGW/src/trader-grims-warehouse
+
+# 2. Restore model files from MX image / HDD copy
+sudo rsync -a <source>/ollama-models/ /var/lib/ollama/
+sudo chown -R ollama:ollama /var/lib/ollama/
+mkdir -p /opt/TGW/models && cp <source>/whisper-models/ggml-*.bin /opt/TGW/models/
+sudo chown -R tgw:tgw /opt/TGW/models/
+
+# 3. Tailscale
+sudo tailscale up --authkey <key>
+
+# 4. Dev tools
+npm install -g @anthropic-ai/claude-code
+
+# 5. Syncthing — get new device ID then share with peers
+syncthing --device-id
+```
+
+**Config update (whisper_bin — part of Phase 0.4):**
+On NixOS, `whisper-cli` is in PATH but not at `/usr/local/bin/whisper-cli` (MX default).
+Update in `tgw-api-config.json`: `"whisper_bin": "whisper-cli"` (no absolute path).
 
 ### Phase 5 — Production cutover (operator window; length = Phase 4 timing + margin)
 

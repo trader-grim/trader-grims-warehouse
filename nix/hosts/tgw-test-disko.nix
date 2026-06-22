@@ -32,6 +32,9 @@
           };
         };
 
+        # WARNING: extraArgs = ["-f"] on both Btrfs partitions means disko will
+        # silently reformat them if nixos-anywhere is re-run. Only run
+        # nixos-anywhere on this machine when a full reinstall is intended.
         nixos = {
           size     = "200G";
           priority = 2;

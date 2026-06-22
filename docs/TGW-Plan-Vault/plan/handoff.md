@@ -59,27 +59,31 @@ Use plan row numbers for plan-table items; "todo #N" only for live tracker IDs.
 
 ---
 
-## 3. What Changed This Session (session 26 — 2026-06-11)
+## 3. What Changed This Session (session 39 — 2026-06-22)
 
-Five commits on top of the earlier 22:
+**Sessions 27–38** covered Home Manager / fish shell (PP-HM-001 Phase 1), dress rehearsal config (`tgw-test-rehearsal.nix`), schema init (`tgw-db-init`), USB vault (`TGW-VAULT` btrfs partition + `tgw-usb-stamp.sh`), `tgw-push-config.sh` validated end-to-end, `nix flake check` passing all 4 configs. See master plan session log for full detail.
 
-| Commit | What changed | Deploy note |
-|--------|-------------|-------------|
-| `ee2f65f` PP-DOCFLOW-001 P2 | `tgw.suggestions` module + `tgw classify-suggestions [--apply] [--limit N]`; batch-classifies SUGGESTIONS.md entries via gemini-2.5-flash; dry-run default; 16 tests | None (no worker; CLI only) |
-| `db188a6` test fix | `test_apply_marks_already_done` missing `todo_add` mock was writing real todos; deleted 3 spurious DB entries; fixed | None |
-| `f57d862` PP-PYIPC-001 | `tgw.apis.syncthing` (pyncthing + httpx disk events); `tgw.apis.kdeconnect` (kdeconnect-cli subprocess); config keys `syncthing_config_path`/`syncthing_url`; `pyncthing` added to pyproject.toml; 25 tests | None (library only; no worker) |
-| `4bfa3c9` history-index | `tgw.history_index` module + `tgw history-index [--target ItemArchive\|loose-csv\|all] [--dry-run] [--limit N]`; indexes ~32K legacy Magento archive zips not in archive-ebay-index.json → `var/history-itemdata-index.jsonl`; indexes loose eBay order CSVs → `var/history-loose-csv-index.jsonl`; smoke-tested on production (54,683 zips); 13 tests | None (run manually when ready) |
+**Session 39 — 2026-06-22 (this session):**
 
-**Sessions 19–25 new docs** (written by Dave / earlier Claude sessions, not captured in v3):
+| Change | Detail |
+|--------|--------|
+| Storage architecture decision | LVM for OS base + PostgreSQL + future microVMs; Btrfs for `/opt/TGW` data. Replaces Btrfs+NoCoW design. |
+| `nix/hosts/tgw-prod-disko.nix` | New file — LVM+XFS+Btrfs layout; device `/dev/sda` placeholder, sizes for ~1 TB drive. |
+| `flake.nix` | Wired `disko.nixosModules.disko` + `tgw-prod-disko.nix` into tgw-prod config. |
+| `PLAN-nixos-migration.md` step 3.3 | Updated with storage architecture decision table + status. |
+| Master plan Disko row | Updated; Stage 4 Disko todo checked off. |
+| Disko files | Warning comments added to both disko files — `extraArgs=["-f"]` danger if nixos-anywhere re-run post-restore. |
+| `inbox/lvm.md` | Archived (Perplexity research on LVM storage architecture). |
 
-| Doc | Content |
-|-----|---------|
-| `reference/invariants.md` | 29 system invariants with enforcement status + 7 test files; gaps B4, C3–C6, A5 fixed 2026-06-10 |
-| `reference/TGW-Architecture-Services.md` + `TGW-Architecture-Overview.md` | Full service map: responsibility, deps, failure modes per subsystem |
-| `plan/next-process.md` | Session handoff SOP; Aider config + task template; Antigravity 2.0 notes + validation checklist |
-| `reference/runbooks/INDEX.md` + 8 runbooks | Dead-letter triage, pipeline stall, token failure, eBay rejections, sold-sync gaps, Ollama stall, catalog stale, Postgres outage |
-| `plan/PLAN-backup-dr.md` | PP-BACKUP-001 full plan (APPROVED 2026-06-11); Phase A scripts in `etc/systemd/` |
-| `plan/PLAN-nixos-migration.md` | PP-NIXOS-001 migration plan; verified against live host |
+**Dave's confirmed execution sequence (in progress 2026-06-22):**
+1. Back up data; confirm storage devices safely offline
+2. Disable all tgw services + Syncthing + rclone
+3. uid migration (`usermod -u 900 tgw`, full-disk audit, permissions check)
+4. Database dump (`pg_dump --format=custom`)
+5. MX snapshot (Phase 1 ISO bake)
+6. Phase 4 dress rehearsal → Phase 5 production cutover
+
+⚠️ **One flag on this sequence:** the plan (Phase 0.6) calls for briefly restarting the pipeline after uid migration and doing a reboot test *before* the pg_dump — to confirm the uid change didn't leave anything broken. If you skip this, you'll have no validation that uid=900 works on MX before the ISO is baked. Low risk since the procedure is well-defined, but worth a quick `tgw health` + `tgw enqueue-sku <any> echo` after the uid change before proceeding to the dump.
 
 ---
 
@@ -107,21 +111,26 @@ Ordered by urgency:
 
 ## 5. Recommended Next Sequence
 
-**Immediate (this week, deadline-driven):**
+**Migration in flight (2026-06-22) — Dave executing:**
 
-1. **Merge the branch** — open PR for `round4-vision-export-todos` → main; review diff; merge.
-2. **Antigravity validation checklist** (deadline 2026-06-18): run the 5-step checklist in `plan/next-process.md` §3 while both CLIs still run.
-3. **Operator: PP-BACKUP-001 Phase A** (todo #61): install timers, first cloud sync, restore drill. Closes the biggest data-loss risk. Scripts are ready — ~30 min operator work.
-4. **Verify `pm_intake` OpenRouter key**: confirm `secrets_root/openrouter-credentials.json` exists + is 600; restart `pm_intake`; confirm no dead-letters.
+1. ✅ Data backed up, storage devices safe
+2. → Disable all tgw + Syncthing + rclone services
+3. → uid migration (0.6) — then `tgw health` + echo round-trip + reboot before pg_dump
+4. → `pg_dump --format=custom` into `/opt/TGW/var/`
+5. → MX snapshot (Phase 1 ISO bake, boot-verify in QEMU)
+6. → Phase 4 dress rehearsal on A1131: push `tgw-test-rehearsal`, restore from backup, run §7 battery, record timings
+7. → Phase 5 production cutover: nixos-anywhere on prod SSD, restore /opt/TGW (from HDD local copy if available — much faster than rclone), unmask/start workers in order
 
-**Next (code work, pick-up order):**
+**Code-side still open (Phase 0.4):**
 
-5. **Seed rows 40–41 as todos** (XS, ~10 min) — restores canonical-queue invariant.
-6. **Answer eBay DS 8 questions** (operator) — highest-leverage unblocked action for live pipeline value.
-7. **PP-PORTABLE-CATALOG-001 P2** — Syncthing API client now done (PP-PYIPC-001); no remaining code blocker.
-8. **Dave approves/amends `PLAN-nixos-migration.md`** → Phase 0 items become todos.
-9. **Run `tgw history-index --target all`** (no code needed; command exists) — will take ~hours for 32K zips; run as `tgw` user in a screen session.
-10. **A4 CI gate** — grep test that `itemdata_root.*\.json` outside `config.py`/`items.py` fails the suite; small, high-value invariant close.
+- Config normalization: clean dead keys from `tgw-api-config.json`, surface `ebay_sku_migrate` through `load_config()` proper. Can be done any time before or after cutover — not a migration gate.
+
+**After cutover stabilises:**
+
+- PP-PORTABLE-CATALOG-001 P2 (no remaining code blocker)
+- PP-BACKUP-001 Phase A timers (scripts exist in `etc/systemd/`; nothing running yet)
+- A4 CI gate (invariant close; small)
+- Code/venv LV in LVM (deferred — not needed for migration)
 
 ---
 

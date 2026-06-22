@@ -2038,16 +2038,16 @@ without bootable USB sticks yet — just a stable, replicable config bundle.
 
 | Tool | Purpose | Status |
 |------|---------|--------|
-| **Disko** | Declarative Nix partitioning — Btrfs subvolumes, NoCoW for postgres, parameterized device | Investigate; replaces manual partitioning in installer |
+| **Disko** | Declarative Nix partitioning — **LVM for base+postgres+microvms, Btrfs for /opt/TGW data** (2026-06-22 decision; replaces Btrfs+NoCoW design); `tgw-prod-disko.nix` authored | tgw-test: done; tgw-prod: layout done, device/sizes set at cutover |
 | **Home Manager** | Manage tgw user + Dave operator dotfiles declaratively (Qtile, Plasma6, Bash/Zsh/Fish) | Plan for Stage 4 |
 | **agenix** | Age secrets via Nix; standalone `.txt` key (NOT SSH-based) at `/var/lib/agenix/key.txt`; `secrets/secrets.nix` matrix maps machine public keys to encrypted files | Plan for Stage 4 |
 | **nixai** | Terminal TUI with hardware detection + derivation helpers; augments nix MCP specialist | Evaluate |
 | **Hardware fingerprinting** | DMI product name + storage class → auto-select flake target; already planned in `tgw-install.sh` | In plan |
 
-**PostgreSQL backup strategy confirmed:** `pg_dumpall` (logical dump, not btrfs block snapshot)
-— database lives with infrastructure; dump goes to separated data store. No NoCoW/btrfs send
-complexity needed. Hourly `pg_dumpall | gzip → /var/lib/state-worker/dumps/` then move to
-data store; cleanup local staging. Matches existing PP-BACKUP-001 design.
+**PostgreSQL backup strategy confirmed:** `pg_dumpall` (logical dump). Database lives on
+LVM+XFS LV (`/var/lib/postgresql`); dump goes to `/opt/TGW` Btrfs volume. No Btrfs send
+or NoCoW complexity needed — the LVM+XFS design eliminates the CoW concern entirely.
+Matches existing PP-BACKUP-001 design.
 
 **Home Manager layer design (Layer 3: Users):**
 ```
@@ -2062,7 +2062,7 @@ modules/users/
 `nixos-rebuild switch` updates OS + user dotfiles together.
 
 **Stage 4 additions derived from this research:**
-- [ ] Investigate Disko; write `modules/base-os/disko-btrfs.nix` with parameterized device
+- [x] Disko: `tgw-test-disko.nix` (Btrfs) + `tgw-prod-disko.nix` (LVM+XFS+Btrfs) authored; wired into flake.nix (2026-06-22)
 - [ ] Add `modules/implementation/secrets.nix` using agenix (standalone key design)
 - [ ] Add `modules/users/` with Home Manager for tgw and operator
 - [ ] Wire declarative Syncthing bootstrap into `modules/bases/master.nix`

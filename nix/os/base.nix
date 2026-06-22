@@ -38,6 +38,7 @@
     ripgrep
     inotify-tools
     nettools
+    python3      # venv creation/rebuild after restore: python3 -m venv + pip install -e
   ];
 
   programs.zoxide.enable = true;

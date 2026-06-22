@@ -47,7 +47,6 @@
     };
 
     # fish_add_path prepends to $fish_user_paths (persists across sessions).
-    # TGW venv exposes the `tgw` CLI without sudo.
     shellInit = ''
       fish_add_path /opt/TGW/.venvironments/tgw/bin
     '';

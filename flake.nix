@@ -160,7 +160,9 @@
         modules = [
           self.nixosModules.tgw
           home-manager.nixosModules.home-manager
+          disko.nixosModules.disko
           ./nix/hosts/tgw-prod.nix
+          ./nix/hosts/tgw-prod-disko.nix
           ./nix/home/hm-module.nix
         ];
       };

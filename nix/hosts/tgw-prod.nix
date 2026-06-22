@@ -19,6 +19,7 @@
   imports = [
     ../bases/master.nix            # full server platform
     ../os/desktop.nix              # CatioNIX desktop: X11 + Qtile + apps
+    ../os/dev.nix                  # dev tool layer: Node.js, Aider, Claude CLI path
     ../tgw/desktop.nix             # TGW layer: Qtile config + widgets
     ../hardware/tgw-prod-hardware.nix
   ];

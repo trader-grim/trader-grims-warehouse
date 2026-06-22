@@ -283,5 +283,8 @@ in
       description = "TGW worker fleet";
       wantedBy    = [ "multi-user.target" ];
     };
+
+    # Open tgw-http port so the Flutter app and tgw CLI can reach the API.
+    networking.firewall.allowedTCPPorts = lib.mkIf cfg.enableHttp [ cfg.httpPort ];
   };
 }

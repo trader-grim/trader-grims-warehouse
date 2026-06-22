@@ -22,6 +22,7 @@
     home         = "/opt/TGW";
     createHome   = false;   # systemd.tmpfiles.rules (in tgw.nix) owns the tree
     description  = "Trader Grim's Warehouse service account";
+    extraGroups  = [ "video" ];   # camera access for intake workflows
   };
 
   users.groups.tgw = {

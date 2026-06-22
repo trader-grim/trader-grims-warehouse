@@ -41,7 +41,7 @@
     firefox
     google-chrome
     obsidian
-    vscodium
+    vscodium               # fallback editor; Cursor added per-user in home/db.nix
     kdePackages.kcalc
     kdePackages.dolphin
     kdePackages.gwenview
@@ -49,5 +49,6 @@
     libreoffice
     tigervnc
     cloudflared
+
   ];
 }
