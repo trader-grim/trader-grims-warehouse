@@ -22,7 +22,7 @@
 
     disk.main = {
       type   = "disk";
-      device = "/dev/sda";   # OVERRIDE: set to actual disk (e.g. /dev/nvme0n1)
+      device = "/dev/nvme0n1";   # production NVMe — confirmed 2026-06-23
       content = {
         type = "gpt";
         partitions = {
@@ -41,7 +41,7 @@
 
           # LVM PV — OS base + PostgreSQL + microVM headroom
           lvm = {
-            size     = "500G";   # leaves ~remaining for Btrfs; adjust per disk size
+            size     = "200G";   # nvme0n1 is ~477G; 200G LVM + rest Btrfs fits cleanly
             priority = 2;
             content  = {
               type = "lvm_pv";

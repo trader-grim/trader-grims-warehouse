@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-22 (session 38 — PP-HM-001 Phase 1 done; fish shell; tgw-push-config working; TGW-VAULT USB auto-stamp; dress rehearsal config + schema init ready)
+updated: 2026-06-23 (session 40 — MX DR failed; proceeding to NixOS cutover; pg_dump done; disko fixed for nvme0n1; install in progress)
 maintained_by: Opus (planner)
 ---
 
@@ -322,11 +322,25 @@ maintained_by: Opus (planner)
   - `tgw-db-init` now applies schema SQL (schema.sql, sku_history.sql, image_hashes.sql)
     with WAL-recovery guard and idempotent ON_ERROR_STOP=1 execution (Phase 0.2 complete).
   - Pillow promoted to base dep in pyproject.toml (Phase 0.1 complete).
-- **Remaining before cutover** (operator-gated):
-  1. uid migration: `usermod -u 900 tgw` + chown + audit (Phase 0.6) — fold into Phase 1 window
-  2. MX ISO bake (Phase 1 runbook)
-  3. `sudo bash scripts/tgw-usb-stamp.sh` on fresh USB after ISO bake
-  4. Dress rehearsal: `tgw-push-config.sh tgw-test-rehearsal` → secrets → pg_restore → `tgw health`
+- **Session 39 — 2026-06-22 (cutover aborted — boot incident)**:
+  - ✅ Phase 0.6 DONE — `tgw` migrated to uid/gid 900; full chown + permissions check clean
+  - ✅ All workers + tgw-http stopped; `pg_dump` complete: `data/dumps/db-backup-PRE-NIXOS-20260622T164601.dump` (6.2M, 84 objects)
+  - ❌ ISO bake (`TGWMX25-FINAL-BEFORE-NIXsnapshot-20260622_1707.iso`) **removed kernel + initrd
+    from live `/boot/` mid-creation**. KDE desktop died (icons/menus gone). Machine became
+    unbootable. pg_dump and ItemData (sde1) are intact. NixOS cutover prerequisites still met.
+  - Repair attempts 1–3 across sessions: GRUB rebuilt; 5 kernel versions restored to /boot/;
+    `update-grub` clean; EFI entry present. Kernel now loads.
+  - Repair attempt 4 applied (2026-06-22 session 39): symlinks `initrd.img`/`vmlinuz.old`
+    restored at MX root; `default.target → multi-user.target`; `ifupdown-wait-online` conflict
+    removed.
+
+- **Session 40 — 2026-06-23 (MX DR abandoned → NixOS cutover)**:
+  - MX booted to text login but root remains read-only; all repair attempts exhausted
+  - **Dave: dd image of nvme0n1p2 (rootMX25) taken as rollback artifact** — NixOS cutover proceeding
+  - `disko` config fixed: `device = "/dev/nvme0n1"`, LVM size 500G → 200G (disk is ~477G)
+  - Inbox notes from sessions 39–40 processed and incorporated
+  - **PP-NIXOS-001 Phase 1 complete** (pg_dump `db-backup-PRE-NIXOS-20260622T164601.dump` done 2026-06-22)
+  - **Active: Phase 5 cutover** — booted from ISO, sda5 (tgw-catio-nix NixOS) used as Nix environment; see PLAN-nixos-migration.md Phase 5
 
 ### Session 35/36 — 2026-06-19 (foundation replan + ISS-013 close)
 
