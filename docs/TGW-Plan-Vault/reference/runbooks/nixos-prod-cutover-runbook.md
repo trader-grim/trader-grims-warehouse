@@ -310,6 +310,16 @@ sudo -u tgw pg_restore \
   /mnt/itemdata/_pre-nixos-backup/db-backup-PRE-NIXOS-20260622T164601.dump
 # (or from TGW-VAULT if available)
 
+# 5b. Verify sequences after pg_restore (sequences can be lost on partial restores)
+#     Symptom: `tgw todo --add ...` fails with "null value in column id"
+sudo -u tgw psql state_machine -c "SELECT last_value FROM todo_items_id_seq;" 2>/dev/null \
+  || sudo -u tgw psql state_machine -c "
+      CREATE SEQUENCE todo_items_id_seq START $(
+        sudo -u tgw psql state_machine -tAc 'SELECT COALESCE(max(id),0)+1 FROM todo_items'
+      );
+      ALTER TABLE todo_items ALTER COLUMN id SET DEFAULT nextval('todo_items_id_seq');
+      ALTER SEQUENCE todo_items_id_seq OWNED BY todo_items.id;"
+
 # 6. Rebuild Python venv
 sudo -u tgw python3 -m venv /opt/TGW/.venvironments/tgw --clear
 sudo -u tgw /opt/TGW/.venvironments/tgw/bin/pip install \

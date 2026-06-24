@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-06-21 03:32 UTC — 167 open, 417 done in the last 7 days._
+_Rendered 2026-06-24 21:11 UTC — 168 open, 1 done in the last 7 days._
 
 ## admin (20 open)
 
@@ -21,7 +21,7 @@ _Rendered 2026-06-21 03:32 UTC — 167 open, 417 done in the last 7 days._
 | 80 | 30 |  | Run tgw history-index --target all as tgw user in screen session — hours for 32K zips; output: var/history-itemdata-index.jsonl; command built + smoke-tested [PP-HISTORY-001 done] |  |  |
 | 149 | 30 |  | PP-BACKUP-001 storage migration — agreed plan (execute in order, ask Claude for help at each step): (1) CHECK Toshiba500: sudo mount -o ro /dev/sdd1 /mnt && du -sh /mnt/* \| sort -rh — confirm safe to wipe; (2) REVIEW /media/alt-root — confirm nothing needed from old MX install; (3) FORMAT sdd as btrfs label TGW-HOME, copy home to it, update /etc/fstab, reboot; (4) GPARTED live USB: shrink Windows sda3 to ~40G; delete sda5 alt-root, create TGW-HISTORY btrfs in that slot (~80G); reformat sda7 as btrfs TGW-DATA (home is gone); relabel sda8 as TGW-SNAPSHOT; reboot; (5) MOUNT sda7 at /opt/TGW/data/, rsync data/ from nvme, update fstab — tgw-api path unchanged; (6) MOUNT sda8 at /opt/TGW/var/snapshots/; (7) REPLACE trader-grims-backup inotify watcher with btrfs snapshot timer (ask Claude); (8) UPDATE tgw-offline-sync to btrfs send/receive (ask Claude); (9) COMMISSION 7x 500GB rotation pool: sudo tgw-offline-setup TGW-OFFLINE-A /dev/sdd etc. (scripts ready — see reference/DRIVE-REGISTRY.md); (10) ADOPT history drives: sdg relabel TGW-HISTORY-01 after history-index completes |  |  |
 | 147 | 35 |  | PP-BACKUP-001 A7 remaining 6 drives: connect each in turn, run sudo tgw-offline-setup <LABEL> <DEVICE> for: TGW-OFFLINE-B, TGW-OFFLINE-C, TGW-SENTRY-01, TGW-SENTRY-02, TGW-ARCHIVE-01, TGW-ARCHIVE-02 — labels and duties in reference/DRIVE-REGISTRY.md; print QR label from each script run; test sync twice per drive before calling it in-service |  |  |
-| 896 | 35 |  | PP-EBAY-SNAPSHOT-001: add to master plan — document the new ebay_submitted block schema, Phase 1-4 implementation status, and the ebay_verify_interval_days config key. New PP item: PP-EBAY-SNAPSHOT-001 eBay Data Capture & Integrity. Phase 1 complete (ebay_stage saves submitted payloads + policy IDs). Phases 2-4 + back-fill pending (todos #891-894). | `PP-EBAY-SNAPSHOT-001` |  |
+| 896 | 35 |  | PP-EBAY-SNAPSHOT-001: add to master plan — document the new ebay_submitted block schema, Phase 1-4 implementation status, and the ebay_verify_interval_days config key. New PP item: PP-EBAY-SNAPSHOT-001 eBay Data Capture & Integrity. Phase 1 complete (ebay_stage saves submitted payloads + policy IDs). Phases 2-4 + back-fill pending (todos #891-894). | [[TGW-Master-Plan#PP-EBAY-SNAPSHOT-001 — eBay Submitted Payload Capture & Photo Integrity\|PP-EBAY-SNAPSHOT-001]] |  |
 | 11 | 40 |  | tgw ebay-sweep → physical inventory review (run after Perplexity brief results arrive) |  |  |
 | 117 | 40 |  | Round7: Aider setup (COMMITTED, amended 2026-06-12) — create Anthropic API key + HARD billing cap (~$40/mo) in console; tell Claude when done so #118 onboarding files get exercised on a first task. Aider = mechanical code-edit tier alongside Antigravity as primary agent manager |  |  |
 | 12 | 45 |  | Fix 9 wrong-shipping Seller Hub listings flagged in sweep |  |  |
@@ -38,12 +38,13 @@ _Rendered 2026-06-21 03:32 UTC — 167 open, 417 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (2 open)
+## claude (3 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
 | 1042 | 3 |  | PP-NIXOS-001: flutter cache binaries lose execute bits after rsync (dartvm, gen_snapshot, tool_backend.sh). Post-sync chmod +x needed on flutter/bin/cache/ — document in NixOS migration runbook |  |  |
 | 1043 | 3 |  | PP-PORTABLE-CATALOG-001 Ph2 follow-up: review item detail Fields tab — currently shows fixed field subset only; consider surfacing more item data fields |  |  |
+| 1044 | 50 |  | PP-DOCLIB-001: Research and docs library system — design a structured library for vault research docs, perplexity outputs, gemini research, inbox archives, and dev-workflow notes. Goals: consistent location taxonomy, easy retrieval, cross-reference between research and PP-* items, tgw CLI surface (tgw docs search/show). Consider markmap integration for browsable index. |  |  |
 
 ## review (142 open)
 
@@ -198,23 +199,8 @@ _Rendered 2026-06-21 03:32 UTC — 167 open, 417 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — Sold reconciliation and inventory status sync (design ready)\|PP-SOLD-001]] |  |
 
-## Done this week (417)  — showing 15 most recent
+## Done this week (1)
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
-| 1040 | admin | 2026-06-20 | Restart workers after Python bug-fix commit (284f3a3): systemctl restart tgw-worker@ebay_sync tgw-worker@ebay_repush tgw-worker@thumbnail_gen tgw-worker@catalog_rebuild tgw-worker@pm_intake tgw-http |
-| 893 | claude | 2026-06-16 | PP-EBAY-SNAPSHOT-001 Phase 4: tgw ebay re-push CLI — implement 'tgw ebay re-push <sku>' command that re-PUTs inventory item to eBay using ebay_submitted.inventory_item as the payload; support '--all-listed' flag to re-push every item with ebay_listing.status=Active. This is the nuclear option for a mass eBay data-loss event — lets us rebuild all listings from local records without manual re-staging. |
-| 894 | claude | 2026-06-16 | PP-EBAY-SNAPSHOT-001 back-fill: existing ~23K listed items have no ebay_submitted block and no ebay_offer.fulfillment_policy_id — design back-fill approach: GET inventory item from eBay for each SKU with ebay_listing.listing_id, save as ebay_submitted; rate-limit to avoid API throttle. Scope: items where ebay_submitted is absent and ebay_listing.listing_id is present. |
-| 890 | claude | 2026-06-16 | PP-MULTIMODEL-001: Create TGW-specific Claude Code skills — (1) tgw-plan skill: Claude planning pass for a feature/epic → writes mini design doc to docs/ai-plans/<feature>.md with implementation steps, risks, acceptance criteria; (2) tgw-aider-step skill: wrapper that formats a single Aider step as a message-file and logs to ~/.local/share/aider-audit/usage.csv; (3) tgw-pr-review skill: Claude diff review on current branch vs main. Store as .claude/skills/tgw-*.md. Based on Perplexity research doc processed 2026-06-15. |
-| 892 | claude | 2026-06-16 | PP-EBAY-SNAPSHOT-001 Phase 3: Periodic photo integrity check in ebay_sync — for each listed item, GET /sell/inventory/v1/inventory_item/{sku} every N days (config: ebay_verify_interval_days default 7); compare returned imageUrls vs ebay_submitted.inventory_item.product.imageUrls; if photo count drops → log error + enqueue ebay_repush job that re-PUTs inventory_item from ebay_submitted. This is the automated defense against the eBay photo-deletion incident. |
-| 891 | claude | 2026-06-16 | PP-EBAY-SNAPSHOT-001 Phase 2: Verify photos after publish — after publish_offer() succeeds in ebay_publish.py, GET /sell/inventory/v1/inventory_item/{sku} from eBay, compare returned imageUrls against ebay_submitted.inventory_item.product.imageUrls; save ebay_listing.photo_verify = {submitted_count, confirmed_count, verified_at}; log warning if counts differ. One extra GET per publish, no new scopes needed. |
-| 887 | claude | 2026-06-15 | Revisions page clarification — add purpose banner: Proposed changes from AI or operator review appear here before being pushed to eBay; show workflow guide on empty state (step 1: AI proposes changes → step 2: review diff → step 3: apply pushes to eBay); link to PP-REVISION-001. Size: XS |
-| 884 | claude | 2026-06-15 | Review Queue upgrade — add shipping policy name, category, condition, condition description to each review card; filter + search bar; checkbox multi-select; bulk-approve + bulk-list-now + bulk-mark-ready actions. Size: M |
-| 883 | claude | 2026-06-15 | Intake form purpose + UX — add instructions banner (Review and confirm this item before sending through the pipeline); show pre-populated fields with current values; Pipeline Trigger section (re-identify / re-draft / stage buttons + confirm); clarify this is pre-pipeline review not raw data-entry. Size: S |
-| 882 | claude | 2026-06-15 | Pipeline page drill-down — click on failed/dead_letter count chip opens detail panel: job list with queue name, error text, classify verdict (transient/permanent); per-job Re-queue + Report-to-admin buttons; surface stuck active jobs (elapsed > 2x expected). Size: M |
-| 881 | claude | 2026-06-15 | Inventory browse bulk selection — checkbox per card; select-all button; sticky bulk-action toolbar: Re-identify / Reprice / Mark Ready / Mark Sold / Delete from eBay / Apply Draft. Search+filter then select-all is the primary bulk workflow. Size: M |
-| 880 | claude | 2026-06-15 | Inventory browse status at a glance — per-card: price display, eBay status badge (Listed+eBayID as clickable link / Staged / Ready / Needs Review / Not Listed), missing-photo indicator. Size: S |
-| 879 | claude | 2026-06-15 | Worker pipeline tooltips — hover tooltip on each worker name in pipeline jobs section of item detail (/form/items/{sku}); text from TGW-Pipeline-Flow.md worker descriptions. Size: XS |
-| 878 | claude | 2026-06-15 | eBay draft section fixes — (1) show draft price from ebay_offer.price if present; (2) fix no_brand false-positive: scan title against brand field before flagging; (3) add Does Not Apply / Unknown option to no_model display. Size: S |
-| 885 | claude | 2026-06-15 | ISS-014 qty validation — guard in items._write_field() refusing qty < 0; catalog-verify rule negative_qty (critical severity); tgw data-scrub --pass 3 or --fix repair: set qty=1 for any item with qty < 0. Size: S |
-| … | | | _…and 402 more — run `tgw todo --all` to see everything_ |
+| 1040 | admin | 2026-06-21 | Restart workers after Python bug-fix commit (284f3a3): systemctl restart tgw-worker@ebay_sync tgw-worker@ebay_repush tgw-worker@thumbnail_gen tgw-worker@catalog_rebuild tgw-worker@pm_intake tgw-http |

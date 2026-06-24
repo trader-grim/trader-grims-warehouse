@@ -1,12 +1,17 @@
-# Skill: tgw-pr-review
+---
+name: tgw-pr-review
+description: Review the current TGW branch before merging to main. Use when the user says /tgw-pr-review or asks to review the branch. Checks correctness, lint, invariants, and produces deployment notes.
+---
 
-## Purpose
+# TGW PR Review
+
 Review the current branch before merging to main. Checks correctness, lint, invariants, and produces deployment notes.
 
 ## Usage
+
 > /tgw-pr-review
 
-## Steps Claude must follow
+## Steps
 
 1. Get the commit list:
    `git log --oneline main..HEAD`

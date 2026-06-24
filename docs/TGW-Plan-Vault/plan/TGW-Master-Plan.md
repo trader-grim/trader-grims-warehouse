@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-23 (session 40 — MX DR failed; proceeding to NixOS cutover; pg_dump done; disko fixed for nvme0n1; install in progress)
+updated: 2026-06-24 (session 41 — NixOS cutover COMPLETE; production on NixOS 25.05; all 19 workers live; todo_items restored from 2026-06-22 dump)
 maintained_by: Opus (planner)
 ---
 
@@ -341,6 +341,14 @@ maintained_by: Opus (planner)
   - Inbox notes from sessions 39–40 processed and incorporated
   - **PP-NIXOS-001 Phase 1 complete** (pg_dump `db-backup-PRE-NIXOS-20260622T164601.dump` done 2026-06-22)
   - **Active: Phase 5 cutover** — booted from ISO, sda5 (tgw-catio-nix NixOS) used as Nix environment; see PLAN-nixos-migration.md Phase 5
+
+- **Session 41 — 2026-06-24 (NixOS cutover confirmed complete)**:
+  - Production server booted cleanly into NixOS 25.05 after accidental reboot during a1131 work
+  - All 19 workers active under systemd; `tgw health` green (backup + NATS are pre-existing warns)
+  - `todo_items` restored from `state_machine-20260622.dump` (1,040 rows — was missing from restore)
+  - PP-NIXOS-001 Phase 5 cutover **COMPLETE** ✅
+  - Cutover friction: LVM block sizing (208+1 blocks in 200G LV), repeated download failures during install
+  - 2 commits unpushed to origin/main (tgw-install.sh update, disko fix)
 
 ### Session 35/36 — 2026-06-19 (foundation replan + ISS-013 close)
 

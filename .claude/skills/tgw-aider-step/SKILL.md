@@ -1,15 +1,20 @@
-# Skill: tgw-aider-step
+---
+name: tgw-aider-step
+description: Format a single Aider coding step for the TGW project. Use when the user says /tgw-aider-step or asks to prepare an Aider task. Writes a message-file and appends a log entry to ~/.local/share/aider-audit/usage.csv.
+---
 
-## Purpose
+# TGW Aider Step
+
 Format a single Aider step as a message-file and append a log entry to `~/.local/share/aider-audit/usage.csv`.
 
 ## Usage
+
 Invoke with the step details:
 > /tgw-aider-step task_id={task-id} model={model} files="{file1} {file2 ...}" step="""
 > {step description}
 > """
 
-## Steps Claude must follow
+## Steps
 
 1. Determine the output message file path:
    `~/.local/share/aider-audit/steps/{task_id}-{YYYYMMDD-HHMMSS}.md`

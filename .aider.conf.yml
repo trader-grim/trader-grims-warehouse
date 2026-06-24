@@ -9,13 +9,13 @@
 #   Requires: ANTHROPIC_API_KEY + hard billing cap in console.anthropic.com (~$40/mo)
 #
 # Flutter/Dart tasks: override with Gemini 3.1 Flash-Lite via OpenRouter (cheap, native Dart)
-#   Requires: OPENROUTER_API_KEY (loaded from /home/tgw/.env via env-file above)
+#   Requires: OPENROUTER_API_KEY (loaded from /home/db/.env via env-file above)
 #   Override flag: --model openrouter/google/gemini-3.1-flash-lite
 #   Pricing: ~$0.10/1M input (confirmed available on OpenRouter 2026-06-13)
 #
 # See aider/spec-<id>.md for the per-task run command including model override.
 
-env-file: /home/tgw/.env
+env-file: /home/db/.env
 
 #model: anthropic/claude-sonnet-4-6
 #weak-model: anthropic/claude-haiku-4-5-20251001

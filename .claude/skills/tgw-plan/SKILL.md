@@ -1,13 +1,18 @@
-# Skill: tgw-plan
+---
+name: tgw-plan
+description: Claude planning pass for a TGW feature or epic. Use when the user says /tgw-plan or asks to plan a feature. Produces a mini design doc written to docs/ai-plans/{feature-slug}.md. Planning only — no source code changes.
+---
 
-## Purpose
-Claude planning pass for a feature or epic. Produces a mini design doc written to `docs/ai-plans/{feature-slug}.md`. Planning only — no source code changes.
+# TGW Plan
+
+Claude planning pass for a feature or epic. Produces a mini design doc at `docs/ai-plans/{feature-slug}.md`. No source code changes.
 
 ## Usage
+
 Invoke with a feature slug and brief description:
 > /tgw-plan {feature-slug} — {one-line description}
 
-## Steps Claude must follow
+## Steps
 
 1. Read `CLAUDE.md` and note all settled-architecture constraints:
    - tgw-api fence: all ItemData reads/writes go through tgw-api

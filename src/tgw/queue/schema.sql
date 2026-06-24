@@ -248,3 +248,36 @@ BEGIN
     RETURN v_count + v_retry;
 END;
 $$ LANGUAGE plpgsql;
+
+-- Multi-agent TODO tracker (PP-TODO-001 / PP-PLANDB-001).
+-- id uses SERIAL so the sequence survives pg_restore and tgw-db-init re-runs.
+CREATE TABLE IF NOT EXISTS todo_items (
+    id          SERIAL PRIMARY KEY,
+    agent       TEXT NOT NULL DEFAULT 'claude',
+    priority    INTEGER NOT NULL DEFAULT 50,
+    body        TEXT NOT NULL,
+    source      TEXT NOT NULL DEFAULT 'session',
+    tags        TEXT[] NOT NULL DEFAULT '{}',
+    added_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    done_at     TIMESTAMPTZ,
+    pp_ref      TEXT,
+    depends_on  INTEGER[] NOT NULL DEFAULT '{}',
+    plan_anchor TEXT,
+    reasoning   TEXT NOT NULL DEFAULT 'normal'
+                CHECK (reasoning IN ('high', 'normal', 'low'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_todo_items_open
+    ON todo_items(agent, priority, id)
+    WHERE done_at IS NULL;
+
+-- AI usage audit log (PP-MULTIMODEL-001).
+CREATE TABLE IF NOT EXISTS ai_usage (
+    id          SERIAL PRIMARY KEY,
+    ts          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    model       TEXT NOT NULL,
+    task        TEXT,
+    prompt_tokens  INTEGER,
+    output_tokens  INTEGER,
+    cost_usd    NUMERIC(10,6)
+);

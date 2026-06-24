@@ -61,3 +61,12 @@ flutter/
 
 # NixOS ISOs — too large for repo or USB secrets bundle; keep on Ventoy USB
 nix/*.iso
+
+# Ventoy USB tool — binary tarball + extracted dir, not part of codebase
+tools/ventoy-*
+
+# One-off export/dump text files at repo root
+/*.txt
+
+# Obsidian local themes (user-specific, large)
+docs/TGW-Plan-Vault/.obsidian/themes/
