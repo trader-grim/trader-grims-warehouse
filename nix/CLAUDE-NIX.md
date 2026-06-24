@@ -53,7 +53,7 @@ in `nix/tgw/`. Violations break the CatioNIX/TGW boundary.
 | Hostname | Hardware | Role | nixpkgs | Status |
 |----------|---------|------|---------|--------|
 | `tgw-test` | iMac12,1 (A1131, 2011, Intel Core i5, CPU-only) | NixOS familiarity + flake validation; portable/client tier | 25.05 | Installed 2026-06-20 |
-| `tgw-prod` | Production machine (MX Linux → NixOS cutover pending) | Full server: workers, PostgreSQL, Ollama, keyd, NFS | 25.05 target | Not yet migrated |
+| `tgw-prod` | Production machine | Full server: workers, PostgreSQL, Ollama, keyd, NFS | 25.05 | COMPLETE ✅ 2026-06-22 (session 41) |
 | `vm` | QEMU throwaway | Full-stack VM validation before cutover | 25.05 | On-demand |
 
 `tgw-test` **cannot run Ollama models** — hardware limitation. Inference validation

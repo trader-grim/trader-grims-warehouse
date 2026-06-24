@@ -127,17 +127,29 @@ def get_access_token(prompt_if_needed: bool = True, is_sandbox: bool = False) ->
         logger.info("Initial OAuth needed (no refresh_token).")
         auth_url = generate_auth_url(ebay_config, is_sandbox)
         import subprocess as _sp
-        try:
-            _sp.Popen(['firefox', auth_url],
-                      stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
-        except FileNotFoundError:
-            webbrowser.open(auth_url)
-        print()
-        print('=' * 60)
-        print('  eBay OAuth: browser opened. Complete login + consent.')
-        print('  After eBay redirects, COPY the full URL from the browser')
-        print('  address bar and PASTE IT HERE (in THIS terminal window).')
-        print('=' * 60)
+        sudo_user = os.environ.get('SUDO_USER')
+        if sudo_user:
+            # Running via sudo — tgw cannot open the calling user's display.
+            # Print the URL; it's clickable in most terminal emulators.
+            print()
+            print('=' * 60)
+            print('  eBay OAuth — open this URL in your browser:')
+            print(f'  {auth_url}')
+            print('  After eBay redirects, COPY the full URL from the browser')
+            print('  address bar and PASTE IT HERE (in THIS terminal window).')
+            print('=' * 60)
+        else:
+            try:
+                _sp.Popen(['firefox', auth_url],
+                          stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+            except FileNotFoundError:
+                webbrowser.open(auth_url)
+            print()
+            print('=' * 60)
+            print('  eBay OAuth: browser opened. Complete login + consent.')
+            print('  After eBay redirects, COPY the full URL from the browser')
+            print('  address bar and PASTE IT HERE (in THIS terminal window).')
+            print('=' * 60)
         full_url = input('  Paste full redirect URL here → ').strip()
         print('=' * 60)
         parsed = urlparse(full_url)

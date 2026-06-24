@@ -6,7 +6,7 @@
 #
 # Layer structure:
 #   CatioNIX OS:  os/base.nix + os/users.nix
-#   TGW platform: tgw/users.nix + tgw/platform.nix
+#   TGW platform: tgw/users.nix + tgw/platform.nix + tgw/backup.nix
 #   Server-only:  inference.nix + keyd.nix + nfs-exports.nix
 #
 # Desktop is NOT included here — import os/desktop.nix + tgw/desktop.nix
@@ -22,8 +22,9 @@
     ../os/users.nix
     ../tgw/users.nix
     ../tgw/platform.nix
-    ../tgw/usb-sync.nix     # Syncthing-based install bundle → USB distribution
-    ../tgw/usb-vault.nix   # TGW-VAULT USB auto-stamp on insertion
+    ../tgw/backup.nix         # PP-BACKUP-001: declarative snapshot + dump timers
+    ../tgw/usb-sync.nix       # Syncthing-based install bundle → USB distribution
+    ../tgw/usb-vault.nix      # TGW-VAULT USB auto-stamp on insertion
     ../inference.nix
     ../keyd.nix
     ../nfs-exports.nix

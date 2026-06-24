@@ -161,15 +161,6 @@ in
       description = "Run the tgw-http API service.";
     };
 
-    enableBackup = lib.mkOption {
-      type    = lib.types.bool;
-      default = false;
-      description = ''
-        Run the trader-grims-backup watcher.  Off by default — requires
-        config/trader-grims-backup.yaml + rclone remotes restored first.
-        PP-BACKUP-001 owns this unit; it is not built into the TGW venv.
-      '';
-    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -265,16 +256,6 @@ in
         };
       })
 
-      # Backup watcher (opt-in; PP-BACKUP-001 owns the binary)
-      (lib.optionalAttrs cfg.enableBackup {
-        "trader-grims-backup" = lib.recursiveUpdate commonService {
-          description = "Trader Grims Backup Watcher";
-          wantedBy    = [ "multi-user.target" ];
-          serviceConfig.ExecStart =
-            "${cfg.venvPath}/bin/trader-grims-backup ${cfg.dataDir}/config/trader-grims-backup.yaml"
-            + " --log-dir ${cfg.dataDir}/var/log/trader_grims_backup";
-        };
-      })
 
     ];
 
