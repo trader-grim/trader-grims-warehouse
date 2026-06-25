@@ -68,6 +68,15 @@
 
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
+  # Auto-GC: delete generations older than 14 days every Sunday at 03:15.
+  # Prevents the nix partition from silently filling up between rebuilds.
+  nix.gc = {
+    automatic = true;
+    dates     = "Sun 03:15";
+    options   = "--delete-older-than 14d";
+  };
+  nix.settings.auto-optimise-store = true;
+
   # /bin/bash compatibility symlink — most scripts use #!/bin/bash; NixOS only
   # provides /bin/sh by default.  This makes the system work like a standard Linux.
   system.activationScripts.binbash = {
