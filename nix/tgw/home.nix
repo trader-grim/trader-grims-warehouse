@@ -30,7 +30,7 @@
           else
               sudo -u tgw tgw $argv
           end
-        ''
+        '';
       };
     };
   };
