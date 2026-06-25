@@ -80,7 +80,7 @@
   Clock           date + time
 
 ── Applications ──────────────────────────────────────────────────
-  Terminals:    konsole (default)  xterm (fallback)  F12=scratchpad
+  Terminals:    kitty (default Super+Enter)  konsole (F12 scratchpad)  xterm (fallback)
   Browsers:     firefox  google-chrome
   Files:        dolphin  gwenview (images)  libreoffice
   System:       blueman (bluetooth)  solaar (logitech)  kcalc

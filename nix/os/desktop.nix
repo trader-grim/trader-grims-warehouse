@@ -34,7 +34,8 @@
   services.printing.enable = true;
 
   environment.systemPackages = with pkgs; [
-    kdePackages.konsole    # Super+Enter terminal
+    kdePackages.konsole    # fallback / scratchpad terminal
+    kitty                  # GPU-accelerated terminal — default Super+Enter
     dmenu                  # Super+D launcher
     j4-dmenu-desktop       # .desktop file wrapper for dmenu
     xterm                  # fallback terminal
