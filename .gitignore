@@ -70,3 +70,6 @@ tools/ventoy-*
 
 # Obsidian local themes (user-specific, large)
 docs/TGW-Plan-Vault/.obsidian/themes/
+
+# Ruff cache (owned by tgw:tgw — not readable by db; breaks nix flake path: eval)
+.ruff_cache/
