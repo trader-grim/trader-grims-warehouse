@@ -99,7 +99,12 @@ def get_item(cfg: Dict[str, Any], sku: str) -> Dict[str, Any]:
     """
     path = sku_json(cfg, sku)
     if not path.exists():
-        raise FileNotFoundError(f'no item JSON for sku {sku!r}: {path}')
+        from .resolver import find_current_sku
+        current = find_current_sku(cfg, sku)
+        if current:
+            path = sku_json(cfg, current)
+        else:
+            raise FileNotFoundError(f'no item JSON for sku {sku!r}: {path}')
     with open(path, 'r', encoding='utf-8', errors='replace') as f:
         data = json.load(f)
     images, videos = [], []

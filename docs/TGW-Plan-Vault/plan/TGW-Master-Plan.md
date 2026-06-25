@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-24 (session 41 — NixOS cutover COMPLETE; production on NixOS 25.05; all 19 workers live; todo_items restored from 2026-06-22 dump)
+updated: 2026-06-24 (session 42 — tgw-catio-nix 0.0.1 alpha begins: CatioNIX/TGW layer split, backup timers declarative, TGW-SNAPSHOT-0 mount, trader-grims-backup retired. PR #8.)
 maintained_by: Opus (planner)
 ---
 
@@ -340,7 +340,8 @@ maintained_by: Opus (planner)
   - `disko` config fixed: `device = "/dev/nvme0n1"`, LVM size 500G → 200G (disk is ~477G)
   - Inbox notes from sessions 39–40 processed and incorporated
   - **PP-NIXOS-001 Phase 1 complete** (pg_dump `db-backup-PRE-NIXOS-20260622T164601.dump` done 2026-06-22)
-  - **Active: Phase 5 cutover** — booted from ISO, sda5 (tgw-catio-nix NixOS) used as Nix environment; see PLAN-nixos-migration.md Phase 5
+  - ✅ **Phase 5 cutover COMPLETE** — NixOS 25.05 live on nvme0n1; all 19 workers running; tgw uid=900, db uid=1000
+  - ✅ **tgw-catio-nix 0.0.1 alpha** (2026-06-24, session 42) — CatioNIX/TGW HM layer split; backup timers declarative in Nix; TGW-SNAPSHOT-0 mount declared; trader-grims-backup retired; PR #8 open
 
 - **Session 41 — 2026-06-24 (NixOS cutover confirmed complete)**:
   - Production server booted cleanly into NixOS 25.05 after accidental reboot during a1131 work

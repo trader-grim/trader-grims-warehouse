@@ -454,3 +454,16 @@ nixos-install \
 - **T0:** Something failed in Phase D or E — nvme0n1 is wiped. Boot April ISO, inspect. sda5 still intact for another attempt.
 - **T1:** nixos-install succeeded but first boot fails — from GRUB, select previous generation (if any) or boot sda5 NixOS for inspection.
 - **T2:** Full retreat — dd image of nvme0n1p2 is the MX restore artifact. Restore using the PP-DEPLOY-001 runbook. ItemData on sde1 is untouched throughout.
+
+## Flutter cache: restore execute bits after rsync
+
+**Symptom:** `flutter build` or `flutter doctor` fails with `permission denied` on `dart`, `dartvm`, or `gen_snapshot`.
+
+**Cause:** `rsync` without `--executability` strips execute bits from flutter cache binaries. Happens after any restore or migration rsync of the `flutter/` tree.
+
+**Fix:**
+```bash
+sudo -u tgw bash /opt/TGW/src/trader-grims-warehouse/bin/flutter-fix-perms
+```
+
+**Prevention:** always rsync flutter/ with `-a` (archive, includes `-p` permissions). Syncthing preserves permissions by default.

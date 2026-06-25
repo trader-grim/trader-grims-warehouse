@@ -1842,7 +1842,13 @@ def intake_form(sku: str, request: Request):
 
     json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
     if not json_path.exists():
-        return HTMLResponse(f"<h2>SKU not found: {sku}</h2>", status_code=404)
+        from .resolver import find_current_sku
+        current = find_current_sku(_cfg, sku)
+        if current:
+            json_path = _cfg["itemdata_root"] / current / f"{current}.json"
+            sku = current
+        else:
+            return HTMLResponse(f"<h2>SKU not found: {sku}</h2>", status_code=404)
 
     doc = load_item_doc(json_path)
 
@@ -3523,6 +3529,14 @@ def _render_item_detail_html(
         + fr("Size class", key="size_class")
         + fr("Verified", key="verified")
         + fr("Alt text", h(str(dl.get("alt_text") or item.get("alt_text") or "")))
+        + fr("Status", key="status", editable=True)
+        + fr("Manufacturer", key="manufacturer", editable=True)
+        + fr("Country of mfr", key="country_of_manufacture", editable=True)
+        + fr("Model number", key="model_number", editable=True)
+        + (fr("SKU (old)", h(str(item.get("sku_old", "") or ""))) if item.get("sku_old") else "")
+        + (fr("UPC", h(str(item.get("upc", "") or ""))) if item.get("upc") else "")
+        + (fr("ISBN", h(str(item.get("isbn", "") or ""))) if item.get("isbn") else "")
+        + (fr("Part number", h(str(item.get("part_number", "") or ""))) if item.get("part_number") else "")
         + "</div>"
         # — eBay Listing (confirmed by eBay after publish)
         f'<div class="dsec"><h3>eBay Listing{listing_badge}</h3>'

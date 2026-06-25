@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# flutter-fix-perms — restore execute bits on flutter cache binaries after rsync/restore.
+#
+# Flutter downloads binaries into bin/cache/ that must be executable.
+# rsync without --executability strips these bits.  Run this after any
+# restore or rsync of the flutter/ tree.
+#
+# Usage: sudo -u tgw bash bin/flutter-fix-perms [flutter-root]
+set -euo pipefail
+
+FLUTTER_ROOT="${1:-/opt/TGW/src/trader-grims-warehouse/flutter}"
+CACHE="$FLUTTER_ROOT/bin/cache"
+
+if [[ ! -d "$CACHE" ]]; then
+  echo "flutter-fix-perms: cache not found at $CACHE" >&2
+  exit 1
+fi
+
+# Shell scripts
+find "$CACHE" -type f -name "*.sh" -exec chmod +x {} +
+
+# Dart SDK binaries (dart, dartvm, dartaotruntime*)
+find "$CACHE/dart-sdk/bin" -type f -exec chmod +x {} + 2>/dev/null || true
+
+# Engine artifacts — everything >1MB is a binary
+find "$CACHE/artifacts" -type f -size +1M -exec chmod +x {} + 2>/dev/null || true
+
+# gen_snapshot anywhere in cache
+find "$CACHE" -type f -name "gen_snapshot" -exec chmod +x {} + 2>/dev/null || true
+
+echo "flutter-fix-perms: done ($CACHE)"

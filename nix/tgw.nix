@@ -70,6 +70,9 @@ let
       HOME              = cfg.dataDir;
       NVM_DIR           = "${cfg.dataDir}/.nvm";
       NPM_CONFIG_PREFIX = "${cfg.dataDir}/.npm";
+      # pip-installed binary wheels (psycopg2, etc.) link against system libs
+      # that NixOS doesn't place in standard paths — expose zlib + libpq.
+      LD_LIBRARY_PATH   = "${pkgs.zlib}/lib:${pkgs.postgresql_17.lib}/lib";
     };
     serviceConfig = {
       User              = cfg.user;

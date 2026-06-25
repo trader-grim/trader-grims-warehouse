@@ -38,7 +38,7 @@
     ripgrep
     inotify-tools
     nettools
-    python3      # venv creation/rebuild after restore: python3 -m venv + pip install -e
+    python312    # pinned: venv must match this version; use python3.12 -m venv on restore
   ];
 
   programs.zoxide.enable = true;

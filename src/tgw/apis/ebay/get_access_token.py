@@ -140,7 +140,7 @@ def get_access_token(prompt_if_needed: bool = True, is_sandbox: bool = False) ->
             print('=' * 60)
         else:
             try:
-                _sp.Popen(['firefox', auth_url],
+                _sp.Popen(['xdg-open', auth_url],
                           stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
             except FileNotFoundError:
                 webbrowser.open(auth_url)

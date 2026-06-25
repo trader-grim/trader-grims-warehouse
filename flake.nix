@@ -49,13 +49,13 @@
       # The Python application + its propagated runtime deps.  Consumed by the
       # NixOS module (default package) and exposed for `nix build`.
       tgwPackage = pkgs:
-        pkgs.python3Packages.buildPythonApplication {
+        pkgs.python312Packages.buildPythonApplication {
           pname = "trader-grims-warehouse";
           version = "0.1.0";
           pyproject = true;
           src = ./.;
 
-          build-system = [ pkgs.python3Packages.setuptools ];
+          build-system = [ pkgs.python312Packages.setuptools ];
 
           # Mirrors [project.dependencies] + the thumbnails extra in pyproject.toml.
           # psycopg2-binary → psycopg2 (nixpkgs builds it against libpq); uvicorn
@@ -65,7 +65,7 @@
           # Protocol SDK, pyproject requires mcp>=1.0) is recent — if the pinned
           # nixos-25.05 channel lacks it or ships <1.0, switch the flake input to
           # `nixos-unstable` or add a small overlay that packages mcp.
-          dependencies = with pkgs.python3Packages; [
+          dependencies = with pkgs.python312Packages; [
             httpx
             requests
             textual

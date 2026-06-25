@@ -50,5 +50,12 @@
     tigervnc
     cloudflared
 
+    # Clipboard + X automation
+    xclip
+    xsel
+    wl-clipboard           # wl-copy / wl-paste for Wayland sessions
+    xdotool
+    xdg-utils              # xdg-open: open URLs/files with default app
+
   ];
 }
