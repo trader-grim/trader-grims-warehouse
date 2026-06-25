@@ -68,6 +68,13 @@
 
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
+  # /bin/bash compatibility symlink — most scripts use #!/bin/bash; NixOS only
+  # provides /bin/sh by default.  This makes the system work like a standard Linux.
+  system.activationScripts.binbash = {
+    deps = [ "binsh" ];
+    text = "ln -sfT ${pkgs.bash}/bin/bash /bin/bash";
+  };
+
   # Allow wheel-group users (operator `db`) to push unsigned closures via
   # `nixos-rebuild --target-host` from the MX build machine.  MX does not
   # sign its Nix builds, so without this tgw-test refuses incoming paths.

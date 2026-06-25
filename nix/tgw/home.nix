@@ -23,7 +23,14 @@
     functions = {
       tgw = {
         description = "Run tgw CLI as the tgw service account";
-        body        = "sudo -u tgw tgw $argv";
+        body        = ''
+          # clip reads the operator's own clipboard DB — run as current user, not tgw
+          if test "$argv[1]" = clip
+              command tgw $argv
+          else
+              sudo -u tgw tgw $argv
+          end
+        ''
       };
     };
   };

@@ -21,6 +21,7 @@
   home.file.".config/qtile/config.py".source      = ../qtile/config.py;
   home.file.".config/qtile/tgw_widgets.py".source = ../qtile/tgw_widgets.py;
   home.file.".config/qtile/cheatsheet.txt".source = ../qtile/cheatsheet.txt;
+  home.file.".config/qtile/autostart.sh".source   = ../qtile/autostart.sh;
 
   # XDG user directories
   xdg.userDirs = {
@@ -34,6 +35,33 @@
     videos            = null;
     templates         = null;
     publicShare       = null;
+  };
+
+  # ---------------------------------------------------------------------------
+  # tgw-clipd — TGW clipboard history daemon (PP-CLIP-001)
+  # Runs as a user service in the graphical session so it inherits DISPLAY and
+  # XAUTHORITY. Uses the TGW venv binary; python-xlib installed in that venv.
+  # ---------------------------------------------------------------------------
+  systemd.user.services.tgw-clipd = {
+    Unit = {
+      Description = "TGW clipboard history daemon";
+      After       = [ "graphical-session.target" ];
+      PartOf      = [ "graphical-session.target" ];
+    };
+    Service = {
+      ExecStart = "/opt/TGW/.venvironments/tgw/bin/tgw-clipd";
+      Restart   = "on-failure";
+      RestartSec = 3;
+      # X11 + Wayland session vars — imported via autostart.sh on each login.
+      # PATH must include system bin so wl-paste and xclip are reachable.
+      PassEnvironment = [ "DISPLAY" "XAUTHORITY" "WAYLAND_DISPLAY" "XDG_RUNTIME_DIR" "XDG_SESSION_TYPE" ];
+      Environment = [
+        "PATH=/run/current-system/sw/bin:/opt/TGW/.venvironments/tgw/bin"
+      ];
+    };
+    Install = {
+      WantedBy = [ "graphical-session.target" ];
+    };
   };
 
   # ---------------------------------------------------------------------------

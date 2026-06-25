@@ -49,10 +49,12 @@ SOCKET_NAME = 'clipd.sock'
 # ---------------------------------------------------------------------------
 
 def detect_backend() -> str:
-    """Return 'wayland' or 'x11' based on the current session environment."""
-    if os.environ.get('WAYLAND_DISPLAY'):
-        return 'wayland'
-    if os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland':
+    """Return 'x11', 'wayland', or 'both' based on the current session environment."""
+    has_wayland = bool(os.environ.get('WAYLAND_DISPLAY'))
+    has_x11 = bool(os.environ.get('DISPLAY'))
+    if has_wayland and has_x11:
+        return 'both'   # XWayland mixed session — watch both clipboards
+    if has_wayland or os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland':
         return 'wayland'
     return 'x11'
 
@@ -101,13 +103,27 @@ class _SubscriberRegistry:
 # Core change handler — backend-agnostic
 # ---------------------------------------------------------------------------
 
+_last_content: Optional[str] = None
+_last_content_lock = threading.Lock()
+
+
 def process_change(
     content: str,
     selection: str,
     subscribers: _SubscriberRegistry,
     db_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Record a clipboard change and push an event to all subscribers."""
+    """Record a clipboard change and push an event to all subscribers.
+
+    Deduplicates: skips if content is identical to the last recorded entry
+    (prevents dual-backend double-writes when both X11 and Wayland fire for the
+    same clipboard event in a mixed XWayland session).
+    """
+    global _last_content
+    with _last_content_lock:
+        if content == _last_content:
+            return {'ok': True, 'skipped': True}
+        _last_content = content
     result = record_clip(content, selection=selection, db_path=db_path)
     subscribers.push({
         'event': 'clip',
@@ -227,15 +243,11 @@ class X11Backend:
         self._stop = stop_event or threading.Event()
 
     def _open_display(self):
-        import sys
-        # python3-xlib is a system package, not in the TGW venv
-        if '/usr/lib/python3/dist-packages' not in sys.path:
-            sys.path.insert(0, '/usr/lib/python3/dist-packages')
         from Xlib import display as xdisplay
         return xdisplay.Display()
 
     def _read_selection_content(self, selection: str) -> Optional[str]:
-        """Read clipboard content for the named selection via xclip subprocess."""
+        """Read X11 clipboard content via xclip (reads X11 selection, not Wayland)."""
         sel_arg = 'primary' if selection == 'primary' else 'clipboard'
         try:
             r = subprocess.run(
@@ -251,9 +263,7 @@ class X11Backend:
     def run(self) -> None:
         """Block until stop_event, processing XFixes SelectionOwner events."""
         import select as _select
-        import sys
-        if '/usr/lib/python3/dist-packages' not in sys.path:
-            sys.path.insert(0, '/usr/lib/python3/dist-packages')
+
         from Xlib import Xatom
         from Xlib.ext.xfixes import XFixesSetSelectionOwnerNotifyMask
 
@@ -337,7 +347,9 @@ class WaylandBackend:
         args = ['wl-paste']
         if selection == 'primary':
             args.append('--primary')
-        args += ['--watch', 'cat']
+        # 'sh -c "cat; printf \\n"' ensures each clipboard event ends with \n
+        # so readline() returns immediately instead of blocking until the next event.
+        args += ['--watch', 'sh', '-c', 'cat; printf "\n"']
 
         while not self._stop.is_set():
             try:
@@ -357,7 +369,8 @@ class WaylandBackend:
                     if self._stop.is_set():
                         break
                     content = line.rstrip('\n')
-                    if content:
+                    # Skip blank lines (wl-paste startup flush, empty clipboard)
+                    if content and content.strip():
                         process_change(content, selection, self._subscribers, self._db_path)
             except OSError:
                 pass
@@ -373,7 +386,12 @@ class WaylandBackend:
                 self._stop.wait(self._restart_delay)
 
     def run(self) -> None:
-        """Start watchers for clipboard and primary; block until stop_event."""
+        """Start watchers for clipboard (and primary if X11 not also active); block until stop_event."""
+        # In a mixed XWayland session ('both' backend), X11/XFixes already watches PRIMARY.
+        # Only watch PRIMARY via wl-paste when there's no X11 backend running alongside.
+        selections = ['clipboard']
+        if not os.environ.get('DISPLAY'):
+            selections.append('primary')
         threads = [
             threading.Thread(
                 target=self._run_watcher,
@@ -381,7 +399,7 @@ class WaylandBackend:
                 daemon=True,
                 name=f'wl-watch-{sel}',
             )
-            for sel in ('clipboard', 'primary')
+            for sel in selections
         ]
         for t in threads:
             t.start()
@@ -424,16 +442,16 @@ class ClipDaemon:
         st.start()
         self._threads.append(st)
 
-        if self._backend_name == 'wayland':
-            bk: Any = WaylandBackend(self._subscribers, self._db_path, self._stop_event)
-        else:
-            bk = X11Backend(self._subscribers, self._db_path, self._stop_event)
+        backends: List[Any] = []
+        if self._backend_name in ('wayland', 'both'):
+            backends.append(('wayland', WaylandBackend(self._subscribers, self._db_path, self._stop_event)))
+        if self._backend_name in ('x11', 'both'):
+            backends.append(('x11', X11Backend(self._subscribers, self._db_path, self._stop_event)))
 
-        bt = threading.Thread(
-            target=bk.run, daemon=True, name=f'clipd-{self._backend_name}'
-        )
-        bt.start()
-        self._threads.append(bt)
+        for name, bk in backends:
+            bt = threading.Thread(target=bk.run, daemon=True, name=f'clipd-{name}')
+            bt.start()
+            self._threads.append(bt)
         log.info('ClipDaemon started: backend=%s socket=%s', self._backend_name, self.socket_path)
 
     def stop(self) -> None:
