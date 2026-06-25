@@ -23,7 +23,8 @@ maintained_by: Opus (planner)
 - Used for **nixos-anywhere** (fresh provisioning) and **day-to-day `nixos-rebuild switch`**
 - The Python source repo (`trader-grims-warehouse`) no longer contains a flake — Python is deployed via venv (Option B)
 - All `.nix` changes go to `~/tgw-flake`, not the Python source repo
-- Outstanding sync: `backup.nix`, `home.nix`, `tgw-clipd`, `autostart.sh`, nix-ld libs, kitty/clipboard tools (see `nix/CLAUDE-NIX.md`)
+- TGW-SNAPSHOT-0 (sda7) mounts automatically at boot via `fileSystems` with `nofail`
+- All outstanding sync items ported as of 2026-06-25 (backup timers, home.nix, tgw-clipd, autostart, nix-ld, kitty/clipboard tools, tgw-rebuild alias)
 
 ### Do not relitigate
 - tgw-api is the fence — all ItemData reads/writes go through it

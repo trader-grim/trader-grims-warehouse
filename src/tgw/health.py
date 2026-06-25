@@ -434,23 +434,6 @@ def check_taskboard(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
-def check_backup_service() -> Dict[str, Any]:
-    """trader-grims-backup systemd service is active."""
-    t = time.time()
-    try:
-        r = subprocess.run(
-            ['systemctl', 'is-active', 'trader-grims-backup.service'],
-            capture_output=True, text=True, timeout=5
-        )
-        active = r.stdout.strip() == 'active'
-        return _result('backup', active,
-                       r.stdout.strip(), (time.time() - t) * 1000)
-    except FileNotFoundError:
-        return _result('backup', False,
-                       'systemctl not available', (time.time() - t) * 1000)
-    except Exception as e:
-        return _result('backup', False, str(e), (time.time() - t) * 1000)
-
 
 def check_ollama(model: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -600,7 +583,6 @@ def check_all(cfg: Dict[str, Any],
         check_sqlite_catalog(cfg),
         check_thumbnail_cache(cfg),
         check_postgres(cfg),
-        check_backup_service(),
         check_backups(cfg),
         check_taskboard(cfg),
         check_ownership(cfg),
