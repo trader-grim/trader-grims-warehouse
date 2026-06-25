@@ -2437,7 +2437,16 @@ inputs.home-manager.inputs.nixpkgs.follows = "nixpkgs";
 
 ## PP-CLIP-001 — TGW-Aware Clipboard Manager
 
-### Status: DESIGN SETTLED 2026-06-12 (session 28) — build gated on Qtile install (admin #20)
+### Status: Phase 1 COMPLETE 2026-06-24 (session 43)
+
+**Phase 1 delivered:**
+- `tgw-clipd` daemon: dual-backend (X11/XFixes + Wayland/wl-paste), mixed-session 'both' mode,
+  SQLite history, `tgw clip {list,last-sku,search,wipe,get}` CLI, systemd user service
+- SKU regex fixed to match 15- and 17-digit SKUs
+- `tgw` fish wrapper bypasses sudo for `clip` subcommand (DB is per-user in /home/db)
+- `nix/qtile/autostart.sh` imports session env on login so service always has DISPLAY/WAYLAND_DISPLAY
+
+**Next: Phase 2 — rofi/dmenu history picker (classic clipboard manager UI)**
 
 **Decisions (session 28):**
 - **Dual-backend watcher, both first-class.** Dave: the environment is already mixed and the
@@ -2580,12 +2589,30 @@ User service: `systemctl --user enable --now tgw-clipd`
 - PP-WM-001 (Qtile) — the widget integration is Qtile-specific
 
 ### Phases
-| Phase | Scope | Prerequisite |
-|-------|-------|-------------|
-| 1 | Daemon: X11 events + SQLite write + SKU tagging + CLI | PP-WM-001 installed |
-| 2 | Qtile widget socket subscription (replace xclip polling) | Phase 1 daemon stable |
-| 3 | App-name tagging; macroboard `last-sku` fallback | Phase 2 |
-| 4 | eBay URL detection → auto-link to item JSON when SKU+eBay URL copied together | Phase 3 |
+| Phase | Scope | Status |
+|-------|-------|--------|
+| 1 | Daemon: X11/XFixes + Wayland backends, SQLite, SKU tagging, CLI, systemd service | ✅ DONE 2026-06-24 |
+| 2 | rofi/dmenu history picker — classic clipboard manager UI (select entry → paste) | **NEXT** |
+| 3 | Qtile widget socket subscription (replace xclip polling) | after Phase 2 |
+| 4 | App-name tagging; macroboard `last-sku` fallback | after Phase 3 |
+| 5 | eBay URL detection → auto-link to item JSON when SKU+eBay URL copied together | after Phase 4 |
+
+### Phase 2 design — rofi history picker
+Keybind (e.g. Super+V or macroboard key) launches a rofi menu showing clipboard history.
+Selecting an entry copies it back to clipboard and optionally pastes immediately.
+
+```bash
+tgw clip rofi   # or: rofi -dmenu fed from tgw clip list output
+```
+
+Options:
+- **rofi** — full fuzzy search, previews, custom theme; most capable
+- **dmenu** — lightweight, no dependencies beyond dmenu; simpler
+
+Entry format in picker: `[SKU] tgw20260624...  |  2026-06-24 18:09` or plain content preview.
+SKU entries pinned to top or visually distinguished.
+On select: `tgw clip get --id N --copy` (already implemented) puts content back in clipboard.
+Optional immediate paste: `xdotool key ctrl+v` or `wl-paste` after copy.
 
 ### Open design questions (decide before Phase 1)
 - PRIMARY vs CLIPBOARD selection: watch both or just CLIPBOARD? Primary = highlight-select,
