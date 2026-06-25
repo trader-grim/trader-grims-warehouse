@@ -15,6 +15,7 @@
 {
   environment.systemPackages = with pkgs; [
     nodejs_22    # npm; Claude CLI installs into ~/.npm/bin
+    ruff         # Python linter; pre-commit hook uses system ruff
   ];
 
   # Per-user dev packages merged into the operator's Home Manager config.

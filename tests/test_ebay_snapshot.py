@@ -8,17 +8,11 @@ All tests are offline: eBay API calls are monkeypatched.
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Dict
-from unittest.mock import MagicMock, patch
-
-import pytest
 
 import tgw.workers.ebay_sync as ebay_sync_mod
 from tgw.workers.ebay_sync import EbaySyncWorker
-
 
 # ---------------------------------------------------------------------------
 # Helpers
