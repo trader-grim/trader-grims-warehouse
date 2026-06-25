@@ -17,6 +17,14 @@ maintained_by: Opus (planner)
 - Vault sync protocol (Syncthing, conflict resolution): see `OPERATIONS-vault-sync.md`
 
 ## Settled architecture
+### Canonical NixOS flake (do not relitigate)
+- **`~/tgw-flake` is the canonical flake** — production-verified Gen 25, 2026-06-25
+- Lives in its **own separate git repo**, independent of the Python source repo
+- Used for **nixos-anywhere** (fresh provisioning) and **day-to-day `nixos-rebuild switch`**
+- The Python source repo (`trader-grims-warehouse`) no longer contains a flake — Python is deployed via venv (Option B)
+- All `.nix` changes go to `~/tgw-flake`, not the Python source repo
+- Outstanding sync: `backup.nix`, `home.nix`, `tgw-clipd`, `autostart.sh`, nix-ld libs, kitty/clipboard tools (see `nix/CLAUDE-NIX.md`)
+
 ### Do not relitigate
 - tgw-api is the fence — all ItemData reads/writes go through it
 - One folder per SKU — `ItemData/<SKU>/<SKU>.json` + media
