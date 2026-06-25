@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 
 # Canonical TGW SKU: tgw + 15 digits (18 chars). Matches the pattern used by
 # the Qtile widgets and api.py clipboard action.
-_SKU_RE = re.compile(r'^tgw\d{15,17}$')  # 15 = legacy (no ms), 17 = current (with ms)
+_SKU_RE = re.compile(r'^tgw(?:\d{15}|\d{17})$')  # 15 = legacy (no ms), 17 = current (with ms)
 
 _RETENTION = 2000  # keep at most this many rows; prune oldest on insert
 
