@@ -29,15 +29,15 @@ _DEFAULTS: Dict[str, tuple[str, str]] = {
     'suggestions_classify':   ('openrouter', 'deepseek/deepseek-v4-flash'),
     'bulk_classify':          ('openrouter', 'google/gemini-2.0-flash-lite'),
     'pm_chat':                ('openrouter', 'anthropic/claude-haiku-4-5'),
-    'ebay_draft':             ('ollama',     'Qwen2.5:latest'),
-    'pm_intake':              ('ollama',     'Qwen2.5:latest'),
+    'ebay_draft':             ('openrouter', 'google/gemini-2.5-flash'),
+    'pm_intake':              ('openrouter', 'deepseek/deepseek-v4-flash'),
 }
 
 
 def get_task_model(cfg: Dict[str, Any], task: str) -> tuple[str, str]:
     """Return (provider, model) for a task from cfg['models'], falling back to _DEFAULTS."""
     entry = cfg.get('models', {}).get(task, {})
-    default_provider, default_model = _DEFAULTS.get(task, ('ollama', 'Qwen2.5:latest'))
+    default_provider, default_model = _DEFAULTS.get(task, ('openrouter', 'google/gemini-2.0-flash-lite'))
     return entry.get('provider', default_provider), entry.get('model', default_model)
 
 

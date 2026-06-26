@@ -1,22 +1,27 @@
-#!/bin/bash
-# PP-BACKUP-001 A2 — daily rclone sync to Google Drive
+#!/usr/bin/env bash
+# PP-BACKUP-001 A2 — daily full rclone sync to Google Drive
 #
 # PRE-STEP (one-time, operator): preserve the frozen 2026-05-14 history point BEFORE
-# enabling this timer — run manually:
-#   rclone copy dbukove:TGW dbukove:TGW-historypoint-20260514
-# Verify: rclone size dbukove:TGW-historypoint-20260514
-# Only enable the timer after the history point is confirmed. (PLAN-backup-dr.md §3 A2)
+# running this for the first time:
+#   rclone --config /opt/TGW/config/rclone.conf copy tgw-gdrive:TGW tgw-gdrive:TGW-historypoint-20260514
+# Verify: rclone --config /opt/TGW/config/rclone.conf size tgw-gdrive:TGW-historypoint-20260514
 #
-# First live run will be large (weeks of delta); run manually in an off-hours window
-# first, then enable the timer. (PLAN-backup-dr.md §6 risk B1)
+# Shares a flock with tgw-itemdata-sync so the two never run concurrently.
 set -euo pipefail
 
-REMOTE=dbukove:TGW
+RCLONE_CONF=/opt/TGW/config/rclone.conf
+REMOTE=tgw-gdrive:TGW
 LOG=/opt/TGW/var/log/rclone-sync.log
 STAMP_FILE=/opt/TGW/var/log/rclone-sync-last-success
-TRASH="dbukove:TGW-trash/$(date +%Y%m%d)"
+TRASH="tgw-gdrive:TGW-trash/$(date +%Y%m%d)"
+LOCK=/run/lock/tgw-rclone-gdrive.lock
+
+# Blocking flock — waits for itemdata-sync to finish its current cycle
+exec 9>"$LOCK"
+flock 9
 
 rclone sync /opt/TGW "$REMOTE" \
+    --config "$RCLONE_CONF" \
     --filter "+ bin/**" \
     --filter "+ config/**" \
     --filter "+ data/**" \
@@ -27,6 +32,9 @@ rclone sync /opt/TGW "$REMOTE" \
     --filter "- **" \
     --backup-dir "$TRASH" \
     --log-file "$LOG" \
-    --log-level INFO
+    --log-level INFO \
+    --fast-list \
+    --transfers 4 \
+    --checkers 8
 
 date -Iseconds > "$STAMP_FILE"

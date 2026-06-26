@@ -97,3 +97,7 @@ exclude = ["systemd/history", "tools/archive"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# http_server.py contains inline minified JS blobs — E501 is not actionable there
+"src/tgw/http_server.py" = ["E501"]

@@ -169,8 +169,8 @@ Run as `tgw` user — source files are `rw-------`, secrets are `chmod 600`.
 See `docs/TGW-Plan-Vault/plan/TGW-Master-Plan.md` for the authoritative current state.
 See `docs/TGW-Plan-Vault/plan/handoff.md` for current risks and recommended next sequence.
 
-As of 2026-06-11 (session 26): 563 tests passing. Pipeline fully live.
+As of 2026-06-26 (session 28): 563 tests passing. Pipeline fully live.
 PP-DOCFLOW-001 P1+P2, PP-PYIPC-001, PP-BACKUP-001 Phase A, history-index complete.
-`ebay_sku_migrate` running (~8,350 live listings remain). `velocity_stats` nightly.
+Ollama retired — all tasks on OpenRouter (`tgw-models.json`). Operator publish gate live.
+PP-PHOTO-001 sync infrastructure live (`tgw-itemdata-sync` service, `gdrive_sync.py`).
 PP-REPRICER-001 blocked on `buy.marketplace_insights` scope (eBay DS 8 questions pending).
-PP-PORTABLE-CATALOG-001 P2 unblocked (PP-PYIPC-001 done).

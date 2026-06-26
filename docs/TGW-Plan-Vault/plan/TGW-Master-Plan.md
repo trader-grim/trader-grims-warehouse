@@ -885,6 +885,7 @@ Lint-policy incident (session 24): bare `ruff check` mutated 8 files because pyp
 | ✅ 58 | — | **`tgw history-index` DONE 2026-06-11 (session 26)**: `tgw.history_index` module; `index_archive_unindexed()` scans ~32K legacy Magento zips not in `archive-ebay-index.json` → `var/history-itemdata-index.jsonl` (sku/title/location/status/price/condition); `index_loose_csvs()` parses eBay-OrdersReport-*.csv → `var/history-loose-csv-index.jsonl`; `tgw history-index [--target ItemArchive\|loose-csv\|all] [--dry-run] [--limit N]`; smoke-tested production (54,683 zips); 13 tests. Run `tgw history-index --target all` in a screen session to populate | M |
 | ✅ 54 | PP-BACKUP-001 | **Phase A build DONE session 25**: `tgw-db-backup` + `tgw-cloud-sync` + `tgw-secrets-backup` scripts + systemd units/timers in `etc/systemd/`; `check_backups()` in health.py + tests — **scripts exist, operator must install** | M |
 | 55 | PP-BACKUP-001 | **Phase A operator items** (todo #61): approve plan ✅ done; remaining: gpg passphrase custody decision (off-machine!); install+enable the three timers; first manual cloud sync in an off-hours window; `rclone about dbukove:` quota check; A5 restore drill + record RTO times | M |
+| ✅ 59 | PP-PHOTO-001 | **Continuous sync infrastructure DONE 2026-06-26 (session 28)**: `bin/tgw-itemdata-sync` loop service (120 s, `--fast-list`, shared flock); `/opt/TGW/config/rclone.conf` TGW-owned remote `tgw-gdrive`; `nix/tgw/backup.nix` declares service + tmpfiles lock; `bin/tgw-cloud-sync` updated to use TGW config; `src/tgw/apis/gdrive_sync.py` sync status helper (`sync_status`, `files_synced_by`); status JSON written atomically each cycle | M |
 
 ### Track 1 — Round 7 (session 28, 2026-06-12)
 
@@ -1089,6 +1090,24 @@ eBay's `UploadSiteHostedPictures` (Trading API) accepts image data via API uploa
 eBay Trading API access (currently have `sell.inventory` + Trading credentials), Google Drive API
 scope in OAuth client. Relevant for PP-PHOTO-001 (bulk photo re-upload / migration) — evaluate when
 Planning that phase. Source: `inbox/queued/20260611T093715-antigravity-remote-execution-direct-gdrive-to-eps.md`.
+
+### PP-PHOTO-001 — GDrive Zero-Bandwidth Photo Pipeline ✅ INFRASTRUCTURE COMPLETE 2026-06-26 (session 28)
+
+**Goal:** Pass all item photos to Gemini in `ebay_draft` via GDrive URLs (no base64 upload) for
+major listing quality jump; use same pattern to replace deprecated EPS upload with zero-bandwidth
+GDrive→eBay flow.
+
+**Infrastructure completed (2026-06-26):**
+- `bin/tgw-itemdata-sync` — continuous rclone service; syncs `ItemData/` + all item JSONs to `tgw-gdrive:TGW/data/ItemData` every 120 s; `--fast-list` for 55k-folder efficiency; shared flock with daily cloud-sync to prevent parallel Drive access
+- `/opt/TGW/config/rclone.conf` — TGW-owned rclone config (tgw:tgw 600); remote `tgw-gdrive` (dbukove account); token auto-refreshes in place
+- `nix/tgw/backup.nix` — `tgw-itemdata-sync.service` declared as persistent systemd service (`Restart=always`); `tmpfiles.d` rule recreates lock file on boot
+- `bin/tgw-cloud-sync` — updated to use TGW config + shared flock
+- `src/tgw/apis/gdrive_sync.py` — `sync_status()`, `last_completed_at()`, `files_synced_by(mtime)` helpers; workers read `/opt/TGW/var/log/rclone-itemdata-sync-status.json` to know when Drive is fresh enough to use GDrive URLs safely
+- Status file schema: `{state, cycle, started_at, completed_at, pid}` — written atomically at each cycle start/end
+
+**Remaining (todos #1064, #1065):**
+- Phase A (#1064, p25): `ebay_draft` multimodal — pass photos as GDrive URLs to `gemini-2.5-flash`; temp-public grant/revoke per photo; needs Google Cloud project + Drive API OAuth creds in `secrets_root/gdrive-token.json`
+- Phase B (#1065, p35): zero-bandwidth EPS upload — GDrive direct URL → `Inventory API imageUrls[]` → eBay CDN fetches; replaces deprecated Trading API upload
 
 **LLM routing principle (session 21–22):** OpenRouter provides built-in meta-model endpoints:
 `openrouter/auto` (NotDiamond-powered, routes by task complexity; session-sticky for multi-turn),
@@ -1447,12 +1466,15 @@ Live as Work Tracks (see `## Work Tracks`). Routing table for reference:
 | PP design, arch decisions | Opus | High-stakes reasoning |
 | Worker implementation | Sonnet | Arch awareness |
 | Data analysis > ~80K tokens | Gemini Code | Context window |
-| PM-intake / plan patching | Ollama Qwen2.5 | Free, good enough |
-| Photo identification | Ollama Qwen2.5VL | Vision, free/call |
-| eBay aspects fill | Ollama Qwen2.5 | Structured extraction |
+| PM-intake / plan patching | openrouter/deepseek-v4-flash | Fast text reasoning, cheap (updated 2026-06-26) |
+| Photo identification | openrouter/gemini-2.5-flash-lite | Vision, OpenRouter; ai_identify + alt_text |
+| eBay aspects fill / draft | openrouter/gemini-2.5-flash | Multimodal; GDrive URL path planned (PP-PHOTO-001) |
 | eBay API / market research | Perplexity | Live web + citations |
 | Simple transforms / boilerplate | Haiku | Fast + cheap |
 | Large corpus cross-reference | Gemini Code | Context advantage |
+| Bulk classify / suggestions | openrouter/gemini-2.0-flash-lite | Cheapest capable text model |
+
+**Note (2026-06-26):** Ollama retired — all pipeline tasks now on OpenRouter. `tgw-models.json` is the authoritative routing config; `llm.py` `_DEFAULTS` are the fallback.
 
 E-sneaker-net: export context → run in external AI → save result to `inbox/` for PM-intake.
 
@@ -2886,6 +2908,49 @@ Driven by Dave's live review session. Full Round 8 — see Work Tracks above for
 
 **Theme G — Page clarification**
 - Revisions page: purpose banner + empty-state workflow guide + link to PP-REVISION-001
+
+### Phase 3r — Ollama Retirement + OpenRouter Migration ✅ COMPLETE 2026-06-26 (session 28)
+
+**Problem**: Ollama/Qwen2.5 was the last locally-run model, used only for `ebay_draft` and
+`pm_intake`. Generator fuel cost + server slowdown outweighed the benefit of free inference.
+
+**Changes:**
+- `tgw-models.json`: `ebay_draft` → `openrouter/google/gemini-2.5-flash`; `pm_intake` → `openrouter/deepseek/deepseek-v4-flash`
+- `src/tgw/apis/llm.py`: `_DEFAULTS` updated to match; fallback default changed from `ollama/Qwen2.5:latest` to `openrouter/google/gemini-2.0-flash-lite`
+- Workers restarted; 2 dead-letter `ebay_draft` jobs re-queued and processed successfully on first attempt (~2s each vs. timeout/404)
+- Ollama is now entirely unused by the pipeline — can be removed from NixOS config
+
+**Result:** `ebay_draft` now uses Gemini 2.5 Flash (multimodal-capable); `pm_intake` uses DeepSeek V4 Flash. Both faster and cheaper than local Qwen2.5. Ollama dependency eliminated.
+
+### Phase 3q — Operator Publish Gate ✅ COMPLETE 2026-06-26 (session 27)
+
+**Problem**: Items were going live on eBay without explicit operator approval from the web UI.
+The `ready_at` gate existed in the backend (`tgw ready set`) but had no web surface.
+
+**Process design** (settled, 2026-06-26):
+```
+ai_identify → ebay_draft → ebay_upload → ebay_price
+                    ★ OPERATOR REVIEWS IN ITEM EDITOR ★
+ebay_stage → UNPUBLISHED offer
+Approve    → set_ready (enters dole pool, lists at next cycle)
+             OR Publish Now → lists immediately
+```
+
+**Changes:**
+- `http_server.py`: item detail page "Publish to eBay" section replaces flat Actions row
+  - Pipeline status bar: `Draft → Staged → Approved → Live` (colour-coded per state)
+  - Context-aware gate: Approve for Listing / Publish Now / End Listing based on current state
+  - `set_ready` / `unset_ready` added to single-item `PIPELINE_ACTIONS`; page reloads on change
+  - Pipeline Tools section separated (Re-identify / Re-draft / Re-upload photos / Re-price)
+  - Re-upload photos added as explicit action (was missing from UI)
+- `workers/ebay_draft.py`: Phase 2b pre-fill aspects from `item_attributes` before LLM call
+  (lower priority than `product_lookup`; validates SELECTION_ONLY against allowed values)
+- CSS: `.act-publish` style (green, distinct from pipeline tool buttons)
+
+**Remaining publish gate scope (future):**
+- Photo management panel (disk vs EPS with checkboxes)    → PP-EDITOR-001 Phase 4
+- Live price from `ebay_offer.price` not stale `ebay_live` → PP-EDITOR-001 Phase 4
+- Pipeline status badges in inventory browse card grid     → PP-EDITOR-001 Phase 4
 
 ### Design notes (session 19/20)
 

@@ -355,6 +355,31 @@ class EbayDraftWorker(QueueWorker):
             log.info('%s: pre-filled %d specifics from product_lookup: %s',
                      sku, len(prefilled), list(prefilled.keys()))
 
+        # Phase 2b — pre-fill from item_attributes (AI-identified attributes, lower
+        # priority than product_lookup so they only fill what's not already set)
+        ia = item.get('item_attributes') or {}
+        ia_filled: List[str] = []
+        for attr_name, attr_val in ia.items():
+            if not attr_val or attr_name in prefilled:
+                continue
+            if attr_name not in aspect_names:
+                continue
+            val = str(attr_val).strip()
+            if not val:
+                continue
+            aspect_def = next((a for a in aspects if a['name'] == attr_name), None)
+            if aspect_def and aspect_def['mode'] == 'SELECTION_ONLY' and aspect_def['allowed_values']:
+                if val not in aspect_def['allowed_values']:
+                    log.debug('item_attr prefill: %r not in allowed values for %r — skipping',
+                              val, attr_name)
+                    continue
+            prefilled[attr_name] = val
+            ia_filled.append(attr_name)
+
+        if ia_filled:
+            log.info('%s: pre-filled %d specifics from item_attributes: %s',
+                     sku, len(ia_filled), ia_filled)
+
         # Use text model to fill aspect values
         prompt  = _build_prompt(item, aspects, prefilled=prefilled, browse_hints=browse_hints)
         _, _draft_model = get_task_model(self.config, 'ebay_draft')
@@ -474,6 +499,7 @@ class EbayDraftWorker(QueueWorker):
 
         # Build draft listing block
         effective_description = enriched_description or item.get('description', '')
+        _prev_dl = item.get('draft_listing') or {}
         draft: Dict[str, Any] = {
             'title':                      title,
             'category_id':                category_id,
@@ -484,9 +510,11 @@ class EbayDraftWorker(QueueWorker):
             'condition_enum':             cond_result['condition_enum']  if cond_result else None,
             'format':                     'FixedPrice',
             'quantity':                   1,
-            'price':                      None,
+            'price':                      _prev_dl.get('price'),
+            'shipping_profile':           _prev_dl.get('shipping_profile'),
             'item_specifics':             item_specifics,
             'description':                effective_description,
+            'aspects_category_id':        category_id,
             'aspects_required_total':     len(req_aspects),
             'aspects_required_filled':    req_filled_count,
             'aspects_recommended_total':  len(rec_aspects),

@@ -241,6 +241,70 @@ def condition_enum(condition_id: str) -> str:
     return CONDITION_ID_TO_ENUM.get(condition_id, 'USED_EXCELLENT')
 
 
+
+def allowed_conditions_for_category(
+    cfg: Dict[str, Any], category_id: str
+) -> List[Dict[str, str]]:
+    """
+    Return all allowed conditions for *category_id* as a list of dicts:
+      [{'condition_id': '1000', 'condition_label': 'Brand New',
+        'condition_enum': 'NEW'}, ...]
+    Returns [] if the category has no policy entry.
+    """
+    policies = _get_policies(cfg)
+    allowed = policies.get(str(category_id), [])
+    return [_make_result(cid, desc) for cid, desc in allowed]
+
+
+def best_condition_for_enum(
+    cfg: Dict[str, Any], category_id: str, current_enum: str
+) -> Optional[Dict[str, str]]:
+    """
+    Given a condition_enum already set on a draft (e.g. "USED_EXCELLENT") and a
+    (possibly new) category_id, return the best valid condition dict for that
+    category, or None if the enum cannot map to any allowed condition.
+
+    Used when category changes: remaps the existing condition to the new
+    category's constraint set without requiring the original human-readable
+    condition string.  Never upgrades condition quality.
+    """
+    # Build enum → [conditionIds] reverse map
+    enum_to_ids: Dict[str, List[str]] = {}
+    for cid, en in CONDITION_ID_TO_ENUM.items():
+        enum_to_ids.setdefault(en, []).append(cid)
+
+    source_ids = enum_to_ids.get(current_enum, [])
+    if not source_ids:
+        return None
+
+    item_rank = min(CONDITION_RANK.get(cid, 7) for cid in source_ids)
+
+    policies = _get_policies(cfg)
+    allowed_list = policies.get(str(category_id), [])
+    allowed_map: Dict[str, str] = {cid: desc for cid, desc in allowed_list}
+
+    # 1. Direct hit: one of the source conditionIds is allowed as-is
+    for src_id in sorted(source_ids, key=lambda c: CONDITION_RANK.get(c, 7)):
+        if src_id in allowed_map:
+            return _make_result(src_id, allowed_map[src_id])
+
+    # 2. Fallback: best allowed condition at same or worse rank
+    candidates = [
+        (CONDITION_RANK.get(cid, 7), cid, desc)
+        for cid, desc in allowed_list
+        if CONDITION_RANK.get(cid, 7) >= item_rank
+    ]
+    if candidates:
+        candidates.sort()
+        _, best_id, best_desc = candidates[0]
+        log.info('condition remap for enum %r in category %s: %s (%s)',
+                 current_enum, category_id, best_id, best_desc)
+        return _make_result(best_id, best_desc)
+
+    log.warning('no valid condition remap for enum %r in category %s (all allowed are better)',
+                current_enum, category_id)
+    return None
+
 def _make_result(condition_id: str, condition_label: str) -> Dict[str, str]:
     return {
         'condition_id':    condition_id,

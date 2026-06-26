@@ -33,6 +33,7 @@ from .assets import ordered_photos as _ordered_photos
 from .config import DEFAULT_CONFIG, load_config
 from .items import atomic_write_json, locationupdate
 from .queue import state_machine
+from .readiness import check_ebay, readiness_html
 from .resolver import load_item_doc
 
 log = logging.getLogger(__name__)
@@ -110,6 +111,8 @@ PIPELINE_ACTIONS = {
     "migrate_unblock",
     "review_mark_ready",
     "sync_from_ebay",
+    "set_ready",
+    "unset_ready",
 }
 
 
@@ -499,6 +502,12 @@ def patch_item(sku: str, body: PatchBody) -> Dict[str, Any]:
 
     # Atomic multi-field update: load → merge → write
     doc = load_item_doc(json_path)
+    # Deep-merge dict-valued keys so callers can update sub-fields without replacing the block
+    for _dmk in ("draft_listing", "item_attributes"):
+        if _dmk in body.fields and isinstance(body.fields.get(_dmk), dict):
+            existing = doc.get(_dmk) or {}
+            existing.update(body.fields.pop(_dmk))
+            doc[_dmk] = existing
     doc.update(body.fields)
     if "catalog_verified" not in body.fields:
         doc.pop("catalog_verified", None)
@@ -901,6 +910,24 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
             )
             return {"ok": True, "sku": sku, "action": "sync_from_ebay", "job_id": job_id}
 
+        elif action == "set_ready":
+            from .ready import set_ready as _set_ready
+            result = _set_ready(_cfg, [sku])
+            if result.get("marked"):
+                return {"ok": True, "sku": sku, "action": "set_ready",
+                        "note": "approved for listing — will publish at next dole cycle"}
+            err = (result.get("errors") or ["unknown error"])[0]
+            return {"ok": False, "sku": sku, "detail": err}
+
+        elif action == "unset_ready":
+            from .ready import unset_ready as _unset_ready
+            result = _unset_ready(_cfg, [sku])
+            if result.get("unmarked"):
+                return {"ok": True, "sku": sku, "action": "unset_ready",
+                        "note": "removed from ready pool"}
+            err = (result.get("errors") or ["unknown error"])[0]
+            return {"ok": False, "sku": sku, "detail": err}
+
         elif action == "ai_identify":
             # Clear ai_identified so the worker will run
             doc = load_item_doc(json_path)
@@ -912,6 +939,26 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                 dedupe_key=f"ai_identify:{sku}",
                 max_attempts=3,
             )
+
+        elif action == "ebay_price":
+            # Clear existing price data so the worker runs fresh (idempotent guard)
+            doc = load_item_doc(json_path)
+            eo = doc.get("ebay_offer") or {}
+            for _k in ("price", "price_comps", "priced_at", "price_source", "target_price"):
+                eo.pop(_k, None)
+            doc["ebay_offer"] = eo
+            dl = doc.get("draft_listing") or {}
+            dl.pop("price", None)
+            dl.pop("price_confidence", None)
+            doc["draft_listing"] = dl
+            atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+            job_id = state_machine.enqueue_job(
+                queue_name="ebay_price",
+                payload={"sku": sku},
+                dedupe_key=f"ebay_price:{sku}",
+                max_attempts=5,
+            )
+
         else:
             job_id = state_machine.enqueue_job(
                 queue_name=action,
@@ -1178,6 +1225,132 @@ def ebay_aspects(category_id: str) -> Dict[str, Any]:
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"eBay aspects error: {e}")
     return {"ok": True, "category_id": category_id, "aspects": aspects}
+
+
+# ---------------------------------------------------------------------------
+# GET /api/ebay/category-context/{category_id}
+# Unified category data: conditions, aspects, store category, pricing hints.
+# Single call used by the editor to drive all category-specific form fields.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/ebay/category-context/{category_id}", dependencies=[AUTH])
+def ebay_category_context(category_id: str) -> Dict[str, Any]:
+    from .ebay.pricing import _groups_reverse, _load_groups
+
+    # ── Conditions from cache ────────────────────────────────────────────
+    conditions: List[Dict[str, str]] = []
+    cache_path = _cfg.get("catalog_root", Path(".")) / "ebay-condition-policies.json"
+    if cache_path.exists():
+        try:
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            cat_policy = (data.get("policies") or {}).get(str(category_id)) or []
+            seen: set = set()
+            for entry in cat_policy:
+                cid = str(entry[0] if isinstance(entry, (list, tuple)) else entry.get("conditionId", ""))
+                for opt in _CONDITION_ID_MAP.get(cid, []):
+                    if opt["enum"] not in seen:
+                        conditions.append(dict(opt))
+                        seen.add(opt["enum"])
+        except Exception as exc:
+            log.warning("category-context: conditions load error: %s", exc)
+
+    # ── Aspects from eBay API ────────────────────────────────────────────
+    aspects: List[Any] = []
+    try:
+        from .apis.ebay.specifics import get_aspects
+        aspects = get_aspects(_cfg, category_id)
+    except Exception as exc:
+        log.warning("category-context: aspects error: %s", exc)
+
+    # ── Group data from category-groups.json ─────────────────────────────
+    _load_groups(_cfg)  # warm cache
+    grp_key = (_groups_reverse or {}).get(str(category_id))
+    grp: Dict[str, Any] = {}
+    if grp_key:
+        from .ebay.pricing import _groups_cache
+        grp = (_groups_cache or {}).get("groups", {}).get(grp_key, {})
+
+    pricing = grp.get("pricing") or {}
+    store_category    = grp.get("store_category") or ""
+    store_category_id = grp.get("store_category_id")
+    size_class        = grp.get("size_class") or ""
+    group_name        = grp.get("name") or ""
+
+    # ── Fulfillment policy for this category ─────────────────────────────
+    fulfillment_id = (
+        (_cfg.get("fulfillment_policy_by_category") or {}).get(str(category_id))
+        or _cfg.get("fulfillment_policy_id")
+        or ""
+    )
+
+    return {
+        "ok":               True,
+        "category_id":      category_id,
+        "conditions":       conditions,
+        "aspects":          aspects,
+        "store_category":   store_category,
+        "store_category_id": store_category_id,
+        "group_name":       group_name,
+        "size_class":       size_class,
+        "pricing":          {
+            "floor":        pricing.get("floor"),
+            "typical_used": pricing.get("typical_used"),
+            "typical_new":  pricing.get("typical_new"),
+        },
+        "fulfillment_policy_id": fulfillment_id,
+    }
+
+
+# GET /api/ebay/category-search?q=...
+# Live eBay category type-ahead — returns up to 15 suggestions with breadcrumb paths.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/ebay/category-search", dependencies=[AUTH])
+def ebay_category_search(q: str = "") -> Dict[str, Any]:
+    if not q or len(q.strip()) < 2:
+        return {"ok": True, "results": []}
+    try:
+        from .apis.ebay.taxonomy import get_category_suggestions
+        raw = get_category_suggestions(_cfg, q.strip())
+        results = []
+        for s in raw[:15]:
+            cat = s.get("category", {})
+            ancestors = s.get("categoryTreeNodeAncestors", [])
+            path_parts = [a.get("categoryName", "") for a in ancestors[-3:]]
+            results.append({
+                "id":   cat.get("categoryId", ""),
+                "name": cat.get("categoryName", ""),
+                "path": " > ".join(p for p in path_parts if p),
+            })
+        return {"ok": True, "results": results}
+    except Exception as exc:
+        log.warning("category-search error: %s", exc)
+        return {"ok": False, "detail": str(exc), "results": []}
+
+
+# GET /api/ebay/store-categories
+# Returns store categories from category-groups.json, sorted by name.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/ebay/store-categories", dependencies=[AUTH])
+def ebay_store_categories() -> Dict[str, Any]:
+    try:
+        from .ebay.pricing import _groups_cache, _load_groups
+        _load_groups(_cfg)
+        groups = (_groups_cache or {}).get("groups", {})
+        seen: Dict[str, Any] = {}
+        for grp in groups.values():
+            name = grp.get("store_category") or grp.get("store_category_name") or ""
+            sid  = grp.get("store_category_id")
+            if name and name not in seen:
+                seen[name] = sid
+        results = sorted([{"id": v, "name": k} for k, v in seen.items()], key=lambda x: x["name"])
+        return {"ok": True, "results": results}
+    except Exception as exc:
+        log.warning("store-categories error: %s", exc)
+        return {"ok": False, "detail": str(exc), "results": []}
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -1453,6 +1626,30 @@ _STATIC_FOOT = (
     '<script src="/static/nav.js"></script>'
 )
 
+# eBay conditionId → Inventory API enum options
+_CONDITION_ID_MAP: Dict[str, List[Dict[str, str]]] = {
+    "1000": [{"enum": "NEW",                      "label": "New"}],
+    "1500": [{"enum": "NEW_OTHER",                "label": "New – other (open box)"}],
+    "1750": [{"enum": "NEW_WITH_DEFECTS",         "label": "New with defects"}],
+    "2000": [{"enum": "MANUFACTURER_REFURBISHED", "label": "Manufacturer refurbished"}],
+    "2010": [{"enum": "CERTIFIED_REFURBISHED",    "label": "Certified refurbished"}],
+    "2500": [{"enum": "SELLER_REFURBISHED",       "label": "Seller refurbished"}],
+    "2750": [{"enum": "LIKE_NEW",                 "label": "Like new"}],
+    "3000": [
+        {"enum": "USED_EXCELLENT",  "label": "Used – excellent"},
+        {"enum": "USED_GOOD",       "label": "Used – good"},
+        {"enum": "USED_ACCEPTABLE", "label": "Used – acceptable"},
+    ],
+    # Media/Books condition IDs — same enums, different buyer-facing labels per category
+    "4000": [{"enum": "USED_EXCELLENT",  "label": "Very Good"}],
+    "5000": [{"enum": "USED_GOOD",       "label": "Good"}],
+    "6000": [{"enum": "USED_ACCEPTABLE", "label": "Acceptable"}],
+    "7000": [{"enum": "FOR_PARTS", "label": "For parts / not working"}],
+}
+
+
+# Module-level constant — avoids nested quote hell in f-string script blocks
+_CATEGORY_CONTEXT_IIFE = 'function loadCatCtx(catId){\n  var prefill=window._DL_PREFILL||{};\n  var loading=document.getElementById(\'aspects-loading\');\n  var form=document.getElementById(\'aspects-form\');\n  if(!catId){if(loading)loading.textContent=\'No category.\';return;}\n  fetch(\'/api/ebay/category-context/\'+encodeURIComponent(catId),{headers:authHeaders()})\n  .then(function(r){return r.json();}).then(function(d){\n    if(!d||!d.ok){if(loading)loading.textContent=\'Context load failed.\';return;}\n    window._CAT_CTX=d;\n    var sel=document.getElementById(\'dl-condition-select\');\n    if(sel&&d.conditions&&d.conditions.length){\n      var allowed={};\n      d.conditions.forEach(function(c){allowed[c.enum]=c.label;});\n      Array.from(sel.options).forEach(function(opt){\n        if(opt.value&&!allowed[opt.value])opt.style.display=\'none\';\n        else if(opt.value&&allowed[opt.value])opt.text=allowed[opt.value];\n      });\n      var cn=document.getElementById(\'condition-policy-note\');\n      var nl=d.conditions.length;\n      if(cn)cn.textContent=nl+(nl===1?\' condition\':\' conditions\')+\' allowed\';\n    }\n    if(d.fulfillment_policy_id){\n      var fsel=document.getElementById(\'dl-ship-input\');\n      var fhint=document.getElementById(\'dl-ship-hint\');\n      if(fsel&&!fsel.value){\n        for(var fi=0;fi<fsel.options.length;fi++){\n          if(fsel.options[fi].value===d.fulfillment_policy_id){fsel.value=d.fulfillment_policy_id;break;}\n        }\n        if(fsel.value){\n          fetch(\'/api/items/\'+window._ITEM_SKU,{method:\'PATCH\',\n            headers:authHeaders({\'Content-Type\':\'application/json\'}),\n            body:JSON.stringify({fields:{draft_listing:{shipping_profile:fsel.value}}})});\n        }\n      }\n      if(fhint&&!fsel.value)fhint.textContent=\'suggested: \'+d.fulfillment_policy_id;\n    }\n    if(d.store_category){\n      var sch=document.getElementById(\'store-cat-hint\');\n      if(sch)sch.textContent=\'suggested: \'+d.store_category;\n    }\n    if(d.group_name){\n      var gh=document.getElementById(\'category-group-hint\');\n      if(gh){\n        var pt=d.pricing&&d.pricing.typical_used?\' · typical $\'+d.pricing.typical_used.toFixed(2):\'\';\n        var pf=d.pricing&&d.pricing.floor?\' · floor $\'+d.pricing.floor.toFixed(2):\'\';\n        gh.textContent=\'group: \'+d.group_name+pf+pt;\n      }\n    }\n    if(loading)loading.style.display=\'none\';\n    if(!form)return;\n    if(!d.aspects||!d.aspects.length){\n      form.innerHTML=\'<span style="color:#556;font-size:.82em">No aspects for this category</span>\';\n      return;\n    }\n    var html=\'\';\n    d.aspects.forEach(function(asp){\n      var badge=asp.required\n        ?\'<span style="font-size:.7em;background:#3a1a1a;color:#c44;border-radius:3px;padding:1px 5px;margin-left:4px">REQ</span>\'\n        :\'<span style="font-size:.7em;background:#2a2a0a;color:#aa0;border-radius:3px;padding:1px 5px;margin-left:4px">REC</span>\';\n      var cur=(prefill[asp.name]||\'\').toString().replace(/"/g,\'&quot;\');\n      var inp;\n      if(asp.allowed_values&&asp.allowed_values.length&&asp.mode===\'SELECTION_ONLY\'){\n        var opts=asp.allowed_values.map(function(v){\n          return \'<option value="\'+v+\'"\'+(v===prefill[asp.name]?\' selected\':\'\')+\'>\'+v+\'</option>\';\n        }).join(\'\');\n        inp=\'<select data-aspect="\'+asp.name+\'" style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:3px;padding:2px 5px;font-size:.85em"><option value="">—</option>\'+opts+\'</select>\';\n      }else{\n        var dlid=\'dl-asp-\'+asp.name.replace(/[^a-zA-Z0-9]/g,\'-\');\n        var dlopts=asp.allowed_values&&asp.allowed_values.length\n          ?\'<datalist id="\'+dlid+\'">\'+asp.allowed_values.map(function(v){return \'<option value="\'+v+\'"></option>\';}).join(\'\')+\'</datalist>\'\n          :\'\';\n        inp=\'<input type="text"\'+(dlopts?\' list="\'+dlid+\'"\':\'\')+\' data-aspect="\'+asp.name+\'" value="\'+cur+\'"\'\n           +\' style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:3px;padding:2px 5px;font-size:.85em;width:200px">\'\n           +dlopts;\n      }\n      html+=\'<div class="frow"><span class="fn" style="font-size:.82em">\'+asp.name+badge+\'</span><span class="fv">\'+inp+\'</span></div>\';\n    });\n    form.innerHTML=html;\n  }).catch(function(){\n    if(loading)loading.textContent=\'Category context load failed.\';\n  });\n}\ndocument.addEventListener(\'DOMContentLoaded\',function(){\n  if(window._DL_CAT_ID)loadCatCtx(window._DL_CAT_ID);\n  if(typeof initCatSearch===\'function\')initCatSearch();\n});\n'
 
 # ---------------------------------------------------------------------------
 # GET /form/intake — intake landing page (HTML)
@@ -2550,6 +2747,8 @@ _ITEMS_EXTRA_CSS = """
 .act-delete:hover:not(:disabled){background:#3a1a1a}
 .act-warn{background:#2a1a00;color:#fb7;border-color:#5a3a00}
 .act-warn:hover:not(:disabled){background:#3a2a00}
+.act-publish{background:#1a3a1a;color:#8e8;border-color:#2a6a2a}
+.act-publish:hover:not(:disabled){background:#1a4a1a}
 .act-disabled,.act-btn:disabled{opacity:.45;cursor:not-allowed}
 .lbadge{display:inline-block;padding:1px 7px;border-radius:9px;font-size:.7em;
   vertical-align:middle;margin-left:5px;font-weight:600}
@@ -2882,6 +3081,29 @@ load(0);
 """
 
 
+def _build_condition_options(current_enum: str) -> str:
+    """Return <option> tags for eBay condition enum dropdown."""
+    _conds = [
+        ("NEW",                  "New"),
+        ("LIKE_NEW",             "Like New"),
+        ("EXCELLENT_REFURBISHED","Excellent – Refurbished"),
+        ("VERY_GOOD_REFURBISHED","Very Good – Refurbished"),
+        ("GOOD_REFURBISHED",     "Good – Refurbished"),
+        ("USED_EXCELLENT",       "Used – Excellent"),
+        ("USED_VERY_GOOD",       "Used – Very Good"),
+        ("USED_GOOD",            "Used – Good"),
+        ("USED_ACCEPTABLE",      "Used – Acceptable"),
+        ("FOR_PARTS_OR_NOT_WORKING", "For Parts / Not Working"),
+    ]
+    opts = []
+    if not current_enum:
+        opts.append('<option value="" selected disabled>— select —</option>')
+    for val, lbl in _conds:
+        sel = ' selected' if val == current_enum else ""
+        opts.append(f'<option value="{val}"{sel}>{lbl}</option>')
+    return "".join(opts)
+
+
 def _render_item_detail_html(
     sku: str,
     item: Dict[str, Any],
@@ -3021,6 +3243,7 @@ def _render_item_detail_html(
     # eBay sub-docs
     eb = item.get("ebay_listing") or {}
     eo = item.get("ebay_offer") or {}
+    _ebay_live_raw = item.get("ebay_live") or {}
     dl = item.get("draft_listing") or {}
 
     listing_id = eb.get("listing_id") or item.get("listing_id", "")
@@ -3030,6 +3253,7 @@ def _render_item_detail_html(
     offer_price = eo.get("price")
     is_active = listing_status.lower() in ("active",) or offer_status.upper() in ("PUBLISHED",)
     is_staged = offer_status.upper() in ("UNPUBLISHED", "PUBLISHED")
+    is_ready = bool(eo.get("ready_at")) and offer_status.upper() == "UNPUBLISHED"
 
     # Resolved display price (offer > internal > draft)
     _price_val = offer_price if offer_price is not None else item.get("price")
@@ -3262,7 +3486,7 @@ def _render_item_detail_html(
                 )
         else:
             _cat_conf_warn = ""
-        draft_section = (
+        _draft_section = (
             _offline_warn
             + fr("Draft Title", h(str(dl.get("title", "") or "")))
             + fr("Category Sent", h(f"{dl.get('category_id','')} · {dl.get('category_name','')}") + _cat_conf_warn)
@@ -3277,7 +3501,7 @@ def _render_item_detail_html(
             + f'<div class="frow listing-desc-row"><span class="fn">Listing Description</span><span class="fv">{_ld_html}</span></div>'
         )
     else:
-        draft_section = '<div class="frow"><span class="fv" style="color:#555">No draft yet — run Re-identify then Re-draft</span></div>'
+        _draft_section = '&'
 
     # Revision draft diff
     revision_draft_html = ""
@@ -3368,14 +3592,18 @@ def _render_item_detail_html(
         else (h(str(dl.get("quantity"))) + ' <span style="color:#555;font-size:.78em">(from draft)</span>'
               if dl.get("quantity") is not None else '<span style="color:#444">—</span>')
     )
-    # Effective price display with source annotation
+    # Effective price display — draft_listing.price is operator-set, show it first
     _price_raw = item.get("price")
-    if _price_raw is not None:
+    _dl_price_raw = dl.get("price")
+    if _dl_price_raw is not None:
+        try:
+            _price_display = '$' + f'{float(_dl_price_raw):.2f}' + ' <span style="color:#555;font-size:.78em">(draft)</span>'
+        except (ValueError, TypeError):
+            _price_display = h(str(_dl_price_raw))
+    elif _price_raw is not None:
         _price_display = h(price_str)
     elif offer_price is not None:
         _price_display = h(price_str) + ' <span style="color:#555;font-size:.78em">(from eBay offer)</span>'
-    elif dl.get("price") is not None:
-        _price_display = h(price_str) + ' <span style="color:#555;font-size:.78em">(from draft)</span>'
     else:
         _price_display = '<span style="color:#444">—</span>'
 
@@ -3508,12 +3736,415 @@ def _render_item_detail_html(
     else:
         identification_history_html = ""
 
+    # ── Phase 1A: EPS photo strip ─────────────────────────────────────────────
+    _inv_item = (_ebay_live_raw.get("inventory_item") or {})
+    _eps_urls = (
+        (_inv_item.get("product") or {}).get("imageUrls") or
+        (dl or {}).get("imageUrls") or []
+    )
+    _local_eps = [e.get("url") for e in (item.get("ebay_photos") or []) if e.get("url")]
+    _display_eps = _eps_urls or _local_eps
+    if _display_eps:
+        _eps_thumbs = "".join(
+            f'<a href="{h(u)}" target="_blank" rel="noopener noreferrer">'
+            f'<img src="{h(u)}" style="height:80px;width:80px;object-fit:cover;'
+            f'border-radius:4px;border:1px solid #333;cursor:pointer">'
+            f'</a>'
+            for u in _display_eps[:12]
+        )
+        _eps_strip_html = (
+            f'<div id="eps-photos" class="dsec">'
+            f'<h3>Photos on eBay'
+            f' <span style="font-size:.7em;color:#555;font-weight:normal">'
+            f'EPS hosted · {len(_display_eps)} photo(s)</span></h3>'
+            f'<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">'
+            f'{_eps_thumbs}</div>'
+            f'</div>'
+        )
+    else:
+        _eps_strip_html = (
+            '<div id="eps-photos" class="dsec">'
+            '<div style="color:#555;font-size:.85em">No photos on eBay yet — '
+            'run ebay_upload to upload photos to EPS</div>'
+            '</div>'
+        )
+
+    # ── Phase 1A: eBay live collapsible panel ──────────────────────────────────
+    _el_synced = eb.get("synced_at") or ""
+    if _ebay_live_raw:
+        _el_prod = (_inv_item.get("product") or {})
+        _el_title = _el_prod.get("title") or "—"
+        _el_aspects = _el_prod.get("aspects") or {}
+        _el_offer = _ebay_live_raw.get("offer") or {}
+        _el_price_v = (_el_offer.get("pricingSummary") or {}).get("price") or {}
+        _el_price_str = (
+            f"${float(_el_price_v['value']):.2f}"
+            if _el_price_v.get("value") else "—"
+        )
+        _el_asp_rows = "".join(
+            f'<tr>'
+            f'<td style="color:#8af;font-size:.8em;padding:2px 8px 2px 0">{h(k)}</td>'
+            f'<td style="color:#ccc;font-size:.8em">'
+            f'{h(", ".join(v) if isinstance(v, list) else str(v))}</td>'
+            f'</tr>'
+            for k, v in sorted(_el_aspects.items())
+        ) if _el_aspects else (
+            '<tr><td colspan="2" style="color:#555;font-size:.8em">none</td></tr>'
+        )
+        _sync_lbl = (
+            f'<span style="font-size:.73em;color:#556;font-weight:normal;margin-left:6px">'
+            f'synced {h(_el_synced[:19])}</span>'
+            if _el_synced else ''
+        )
+        _ebay_live_html = (
+            '<div class="dsec"><details>'
+            f'<summary style="cursor:pointer;color:#4a8ade;font-weight:600;font-size:.9em">'
+            f'eBay Live Data{_sync_lbl}</summary>'
+            '<div style="font-size:.73em;color:#556;margin:4px 0 6px">'
+            'Raw eBay mirror — what eBay currently holds. Not edited here.</div>'
+            + fr("Live title", h(_el_title))
+            + fr("Live price", _el_price_str)
+            + fr("Category", h(str(_el_offer.get("categoryId") or "—")))
+            + '<div style="margin-top:6px;font-size:.8em;color:#778">Aspects on eBay:</div>'
+            + f'<table style="margin-top:4px">{_el_asp_rows}</table>'
+            + '</details></div>'
+        )
+    else:
+        _ebay_live_html = ""
+
+    # ── Readiness checklist ────────────────────────────────────────────────────
+    _item_for_readiness = dict(item)
+    _item_for_readiness['_catalog_root'] = _cfg.get('catalog_root')
+    _readiness_html_str = readiness_html(check_ebay(_item_for_readiness))
+
+    # ── Price comps range bar + detail panel ────────────────────────────────────
+    _st_val = h(str(item.get("search_terms") or ""))
+    _comps = eo.get("price_comps") or {}
+    _price_source = eo.get("price_source") or ""
+    _priced_at    = (eo.get("priced_at") or "")[:10]
+    if _comps and _comps.get("max") and _comps.get("min") is not None:
+        try:
+            _cp_min = float(_comps.get("min", 0))
+            _cp_p25 = float(_comps.get("p25", 0))
+            _cp_med = float(_comps.get("median", 0))
+            _cp_p75 = float(_comps.get("p75", 0))
+            _cp_max = float(_comps.get("max", 0))
+            _cp_cnt = int(_comps.get("count", 0))
+            _cp_rng = max(_cp_max - _cp_min, 0.01)
+            def _pct(v): return max(0, min(100, int((v - _cp_min) / _cp_rng * 100)))
+            # Confidence badge
+            _conf = _comps.get("confidence") or eo.get("price_confidence") or ""
+            _n_out = _comps.get("outlier_count", 0)
+            _n_drop = _comps.get("llm_dropped_count", 0)
+            _conf_col = {"high": "#4a4", "medium": "#aa0", "low": "#c44"}.get(_conf, "#556")
+            _conf_badge = (
+                f'<span style="font-size:.72em;font-weight:600;margin-left:6px;'
+                f'padding:1px 5px;border-radius:3px;background:{_conf_col}22;'
+                f'color:{_conf_col};border:1px solid {_conf_col}44">{_conf}</span>'
+            ) if _conf else ""
+            # Count badge: red <5, yellow 5-9, grey ≥10
+            _cnt_col = "#c44" if _cp_cnt < 5 else ("#aa0" if _cp_cnt < 10 else "#556")
+            _cnt_badge = (
+                f'<span style="font-size:.75em;color:{_cnt_col};'
+                f'font-weight:600;margin-left:4px">{_cp_cnt} comps'
+                + (" ⚠" if _cp_cnt < 5 else "")
+                + (_conf_badge)
+                + (f' <span style="font-size:.85em;color:#556">({_n_out} outlier{"s" if _n_out!=1 else ""} removed)</span>' if _n_out else "")
+                + (f' <span style="font-size:.85em;color:#556">({_n_drop} irrelevant filtered)</span>' if _n_drop else "")
+                + '</span>'
+            )
+            # Source label
+            _src_lbl = (
+                f'<span style="font-size:.72em;color:#445;margin-left:8px">'
+                f'{h(_price_source)}'
+                + (f' · {_priced_at}' if _priced_at else '')
+                + '</span>'
+            ) if _price_source else ""
+            # Range bar
+            _bar = (
+                f'<div style="position:relative;height:14px;background:#1a1a1a;'
+                f'border-radius:3px;border:1px solid #333;margin-bottom:3px">'
+                f'<div style="position:absolute;left:{_pct(_cp_p25)}%;'
+                f'right:{100-_pct(_cp_p75)}%;height:100%;background:#1a3a1a;border-radius:2px"></div>'
+                f'<div style="position:absolute;left:{_pct(_cp_med)}%;width:2px;'
+                f'height:100%;background:#4a4"></div>'
+                f'</div>'
+                f'<div style="display:flex;justify-content:space-between;font-size:.73em;color:#556">'
+                f'<span>min ${_cp_min:.2f}</span>'
+                f'<span style="color:#7a7">p25 ${_cp_p25:.2f}</span>'
+                f'<span style="color:#afa">▲ med ${_cp_med:.2f}</span>'
+                f'<span style="color:#7a7">p75 ${_cp_p75:.2f}</span>'
+                f'<span>max ${_cp_max:.2f}</span>'
+                f'</div>'
+            )
+            # Individual comp rows
+            _comp_items = _comps.get("items") or []
+            if _comp_items:
+                def _ci_row(ci):
+                    _is_out  = ci.get("outlier", False)
+                    _is_drop = ci.get("llm_dropped", False)
+                    _excluded = _is_out or _is_drop
+                    _row_op   = "0.45" if _excluded else "1"
+                    _title_dec = "line-through" if _excluded else "none"
+                    _tag = ""
+                    if _is_out:
+                        _tag = '<span style="font-size:.72em;color:#c44;margin-left:4px" title="Price is statistical outlier (IQR)">outlier</span>'
+                    elif _is_drop:
+                        _reason = h(ci.get("llm_reason",""))
+                        _tag = f'<span style="font-size:.72em;color:#aa0;margin-left:4px" title="{_reason}">filtered ⓘ</span>'
+                    _url = h((ci.get("url","") or "") + ("&mkcid=1&mkrid=711-53200-19255-0&siteid=0&campid=5338722076&toolid=10001&mkevt=1" if ci.get("url") else ""))
+                    return (
+                        f'<tr style="border-bottom:1px solid #1a1a1a;opacity:{_row_op}">'
+                        f'<td style="padding:4px 8px 4px 0;font-size:.8em;color:#ccc;max-width:320px;word-break:break-word">'
+                        f'<a href="{_url}" target="_blank" rel="noopener noreferrer" '
+                        f'style="color:#7af;text-decoration:{_title_dec}">'
+                        f'{h(ci.get("title",""))[:80]}{"…" if len(ci.get("title",""))>80 else ""}</a>'
+                        f'{_tag}</td>'
+                        f'<td style="padding:4px 6px;font-size:.8em;color:#7a7;white-space:nowrap">'
+                        f'{h(str(ci.get("condition",""))[:30])}</td>'
+                        f'<td style="padding:4px 0 4px 6px;font-size:.85em;color:#afa;white-space:nowrap;'
+                        f'font-weight:600">${ci.get("price",0):.2f}</td>'
+                        f'</tr>'
+                    )
+                _comp_rows = "".join(_ci_row(ci) for ci in _comp_items)
+                _n_active = sum(1 for ci in _comp_items if not ci.get("outlier") and not ci.get("llm_dropped"))
+                _comp_detail = (
+                    f'<details style="margin-top:6px">'
+                    f'<summary style="cursor:pointer;font-size:.78em;color:#4a8ade;'
+                    f'list-style:none;user-select:none">▶ Show {len(_comp_items)} comp listings ({_n_active} used for price)</summary>'
+                    f'<table style="width:100%;border-collapse:collapse;margin-top:6px">'
+                    f'<thead><tr>'
+                    f'<th style="font-size:.73em;color:#556;text-align:left;padding:2px 8px 4px 0;'
+                    f'border-bottom:1px solid #333">Title</th>'
+                    f'<th style="font-size:.73em;color:#556;text-align:left;padding:2px 6px;'
+                    f'border-bottom:1px solid #333">Condition</th>'
+                    f'<th style="font-size:.73em;color:#556;text-align:left;padding:2px 0 4px 6px;'
+                    f'border-bottom:1px solid #333">Price</th>'
+                    f'</tr></thead>'
+                    f'<tbody>{_comp_rows}</tbody>'
+                    f'</table>'
+                    f'</details>'
+                )
+            else:
+                _comp_detail = (
+                    '<div style="font-size:.75em;color:#445;margin-top:4px">'
+                    'Individual comp listings not saved — click Re-price to capture them.'
+                    '</div>'
+                )
+            _price_comps_bar = (
+                '<div style="margin:6px 0 2px">'
+                '<span style="font-size:.78em;color:#778">Market comps</span>'
+                + _cnt_badge + _src_lbl +
+                '</div>'
+                + _bar
+                + _comp_detail
+            )
+        except (TypeError, ValueError):
+            _price_comps_bar = ""
+    else:
+        _price_comps_bar = ""
+
+    # ── Aspects editor (pre-filled from item_attributes then item_specifics) ───
+    import json as _json
+    _ia = item.get("item_attributes") or {}
+    _spec = (dl or {}).get("item_specifics") or {}
+    _merged_attrs = {**_spec, **_ia}  # item_attributes wins
+    _cat_id_for_aspects = str(
+        (dl or {}).get("category_id") or item.get("ebay_category_id") or ""
+    )
+    _aspects_prefill_json = _json.dumps(_merged_attrs)
+    _aspects_cat_json = _json.dumps(_cat_id_for_aspects)
+
+    # ── eBay Draft editor section (Phase 1B) ───────────────────────────────────
+    _dl_title_val = h((dl or {}).get("title") or "")
+    _dl_price_val = str((dl or {}).get("price") or "")
+    _dl_cond_val  = h((dl or {}).get("condition_enum") or (dl or {}).get("condition") or "")
+    _dl_cond_lbl  = h((dl or {}).get("condition_label") or (dl or {}).get("condition_description") or "")
+    _dl_desc_val  = h((dl or {}).get("description") or item.get("description") or "")
+    _dl_cat_name  = h(str((dl or {}).get("category_name") or ""))
+    _dl_cat_id_v  = h(str((dl or {}).get("category_id") or ""))
+    _dl_ship_val  = str((dl or {}).get("shipping_profile") or
+                        (dl or {}).get("fulfillment_policy_id") or "")
+    _dl_store_cat_id = str((dl or {}).get("store_category_id") or "")
+    _store_cat_opts_html = '<option value="">— not set —</option>'
+    try:
+        import json as _json_sc
+        _cg_path_sc = _cfg.get("category_groups_path")
+        if _cg_path_sc and _cg_path_sc.exists():
+            _cg_sc = _json_sc.loads(_cg_path_sc.read_text())
+            _seen_sc: set = set()
+            _sc_list = []
+            for _grp_sc in _cg_sc.get("groups", _cg_sc).values():
+                _sn = _grp_sc.get("store_category") or _grp_sc.get("store_category_name") or ""
+                _si = str(_grp_sc.get("store_category_id") or "")
+                if _sn and _si and _si not in _seen_sc:
+                    _seen_sc.add(_si)
+                    _sc_list.append((_sn, _si))
+            _sc_list.sort(key=lambda x: x[0])
+            _store_cat_opts_html += ''.join(
+                f'<option value="{_si}" data-name="{h(_sn)}"'
+                f'{" selected" if _si == _dl_store_cat_id else ""}>{h(_sn)} ({_si})</option>'
+                for _sn, _si in _sc_list
+            )
+    except Exception:
+        pass
+    import json as _json2
+    _pol_cache = _cfg.get('catalog_root') / 'ebay-fulfillment-policies.json'
+    _fulfillment_opts = {}
+    _return_label = 'Free Returns'
+    if _pol_cache.exists():
+        try:
+            _pd = _json2.loads(_pol_cache.read_text())
+            _fulfillment_opts = _pd.get('fulfillment', {})
+            _ret = _pd.get('return', {})
+            _return_label = next(iter(_ret.values()), 'Free Returns') if _ret else 'Free Returns'
+        except Exception:
+            pass
+    _ship_opts_html = ''.join(
+        f'<option value="{pid}"{" selected" if pid == _dl_ship_val else ""}>{h(name)} ({pid[:8]}…)</option>'
+        for pid, name in sorted(_fulfillment_opts.items(), key=lambda kv: kv[1])
+    )
+    _ebay_draft_editor = (
+        '<div id="dl-section" class="dsec">'
+        '<h3>eBay Listing'
+        ' <span style="font-size:.7em;color:#555;font-weight:normal">'
+        'draft · staged to eBay on Stage</span></h3>'
+        '<div style="font-size:.73em;color:#556;margin-bottom:8px">'
+        'eBay-specific listing data. Changes here do not affect the Inventory Record.</div>'
+        + ('<div style="font-size:.8em;background:#2a1a00;color:#aa6;border-radius:4px;'
+           'padding:5px 8px;margin-bottom:8px">⚠ Already staged on eBay — '
+           '\'Save to eBay Draft\' updates TGW only. Re-draft then Re-stage to push changes to eBay.</div>'
+           if is_staged else '')
+        # Title
+        + f'<div class="frow" id="dl-title">'
+        f'<span class="fn">eBay Title</span>'
+        f'<span class="fv" style="flex:1">'
+        f'<input id="dl-title-input" type="text" maxlength="80" value="{_dl_title_val}" '
+        f'style="width:100%;background:#1a1a1a;color:#eee;border:1px solid #444;'
+        f'border-radius:4px;padding:4px 6px;font-size:.9em" '
+        f'oninput="updateCharCount(this,80,\'dl-title-count\')">' 
+        f'<span id="dl-title-count" style="font-size:.75em;color:#556;margin-left:4px">'
+        f'{len((dl or {}).get("title") or "")}/80</span>'
+        f'</span></div>'
+        # Category — search to change
+        f'<div class="frow" id="dl-category">'
+        f'<span class="fn">Category</span>'
+        f'<span class="fv" style="flex:1;position:relative">'
+        f'<div id="dl-cat-breadcrumb" style="font-size:.82em;color:#aaa;margin-bottom:3px">'
+        f'{_dl_cat_id_v}{"&nbsp;·&nbsp;" + _dl_cat_name if _dl_cat_name else ""}'
+        f'</div>'
+        f'<input id="dl-cat-search" type="text" placeholder="Search to change category…" '
+        f'autocomplete="off" '
+        f'style="width:100%;background:#1a1a1a;color:#eee;border:1px solid #444;'
+        f'border-radius:4px;padding:3px 6px;font-size:.88em">'
+        f'<input type="hidden" id="dl-cat-id" value="{_dl_cat_id_v}">'
+        f'<div id="dl-cat-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;'
+        f'background:#1e1e1e;border:1px solid #555;border-radius:4px;z-index:50;'
+        f'max-height:220px;overflow-y:auto"></div>'
+        f'<span id="category-group-hint" style="font-size:.72em;color:#445;display:block;margin-top:2px"></span>'
+        f'</span></div>'
+        # Store category — select from known groups
+        f'<div class="frow" id="dl-store-category">'
+        f'<span class="fn">Store category</span>'
+        f'<span class="fv">'
+        f'<select id="dl-store-cat-select" '
+        f'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px;font-size:.88em">'
+        + _store_cat_opts_html +
+        '</select>'
+        '<span id="store-cat-hint" style="font-size:.72em;color:#445;margin-left:8px"></span>'
+        '</span></div>'
+        # Condition
+        '<div class="frow" id="dl-condition">'
+        '<span class="fn">Condition</span>'
+        '<span class="fv">'
+        '<select id="dl-condition-select" '
+        'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px">'
+        + _build_condition_options((dl or {}).get("condition_enum") or (dl or {}).get("condition") or "") +
+        f'</select>'
+        f'<span id="condition-policy-note" style="font-size:.72em;color:#445;margin-left:8px"></span>'
+        f'</span></div>'
+        # Price with comps bar
+        f'<div class="frow" id="dl-price">'
+        f'<span class="fn">Price</span>'
+        f'<span class="fv" style="flex:1">'
+        f'<input id="dl-price-input" type="number" step="0.01" min="0" value="{h(_dl_price_val)}" '
+        f'style="width:120px;background:#1a1a1a;color:#eee;border:1px solid #444;'
+        f'border-radius:4px;padding:4px 6px;font-size:.9em">'
+        f'{_price_comps_bar}'
+        f'</span></div>'
+        # Search terms — own frow, never nested inside a span
+        f'<div class="frow" id="dl-search-terms">'
+        f'<span class="fn">Search terms</span>'
+        f'<span class="fv" style="flex:1">'
+        f'<input id="search-terms-input" type="text" value="{_st_val}" '
+        f'placeholder="e.g. vintage acetone bottle" '
+        f'style="width:100%;background:#1a1a1a;color:#eee;border:1px solid #444;'
+        f'border-radius:4px;padding:4px 6px;font-size:.88em" '
+        f'onkeydown="if(event.key===\'Enter\')saveAndReprice()">'
+        f'<div style="font-size:.72em;color:#556;margin-top:2px">'
+        f'Buyer search query for stage-0 comp pricing — '
+        f'<a href="#" onclick="saveAndReprice();return false" style="color:#4a8ade">'
+        f'Save &amp; Re-price</a>'
+        f' · <a href="#" onclick="(function(){{'
+        f'  var t=document.getElementById(\'search-terms-input\');'
+        f'  var q=t?t.value.trim():\'\';'
+        f'  if(q)window.open(\'https://www.ebay.com/sch/i.html?_nkw=\'+encodeURIComponent(q)+\'&LH_Complete=1&LH_Sold=1\',\'_blank\');'
+        f'}})();return false" style="color:#4a8ade">eBay sold ↗</a>'
+        f' <span id="reprice-msg" style="color:#4a4"></span>'
+        f'</div>'
+        f'</span></div>'
+        # Description
+        f'<div class="frow" id="dl-description">'
+        f'<span class="fn">Description</span>'
+        f'<span class="fv" style="flex:1">'
+        f'<textarea id="dl-desc-input" rows="3" '
+        f'style="width:100%;background:#1a1a1a;color:#eee;border:1px solid #444;'
+        f'border-radius:4px;padding:4px 6px;font-size:.85em;resize:vertical">'
+        f'{_dl_desc_val}</textarea>'
+        f'</span></div>'
+        # Shipping
+        f'<div class="frow" id="dl-shipping">'
+        f'<span class="fn">Fulfillment</span>'
+        f'<span class="fv">'
+        f'<select id="dl-ship-input" '
+        f'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px;font-size:.85em">'
+        f'<option value="">— auto-resolved —</option>'
+        f'{_ship_opts_html}'
+        f'</select>'
+        f'<span id="dl-ship-hint" style="font-size:.72em;color:#445;margin-left:8px"></span>'
+        f'</span></div>'
+        f'<div class="frow" id="dl-returns">'
+        f'<span class="fn">Returns</span>'
+        f'<span class="fv" style="font-size:.85em;color:#aaa">{h(_return_label)}</span>'
+        f'</div>'
+        # Aspects
+        f'<div id="dl-aspects" style="margin-top:10px">'
+        f'<div style="font-size:.83em;color:#aaa;font-weight:600;margin-bottom:6px">'
+        f'Item Specifics / Aspects</div>'
+        f'<div id="aspects-loading" style="color:#556;font-size:.82em">Loading aspects…</div>'
+        f'<div id="aspects-form"></div>'
+        f'</div>'
+        # Save button
+        f'<div style="margin-top:12px;display:flex;gap:8px;align-items:center">'
+        f'<button class="act-btn" onclick="saveEbayDraft()" '
+        f'style="background:#1a3a5a">Save to eBay Draft</button>'
+        f'<span id="dl-save-msg" style="font-size:.82em;color:#4a4"></span>'
+        f'</div>'
+        f'</div>'
+        # hidden data for JS
+        f'<script>'
+        f'window._DL_CAT_ID = {_aspects_cat_json};'
+        f'window._DL_PREFILL = {_aspects_prefill_json};'
+        f'</script>'
+    )
+
     fields_html = (
         '<div class="dfields">'
+        + _readiness_html_str
         # — Inventory record (what we track)
-        '<div class="dsec">'
-        '<h3>Inventory Record <span style="color:#2a4a6a;font-size:.72em;font-weight:normal">dbl-click to edit</span></h3>'
-        '<div style="font-size:.73em;color:#556;margin-bottom:6px">Your internal record — drives the pipeline</div>'
+        + '<div id="catalog-section" class="dsec">'
+        '<h3>Inventory Record <span style="color:#2a4a6a;font-size:.72em;font-weight:normal">dbl-click to edit · <a href="#" onclick="saveCatalog();return false" style="color:#4a8;font-size:.9em">Save to Catalog</a> <span id="catalog-save-msg" style="font-size:.82em;color:#4a4"></span></span></h3>'
+        '<div style="font-size:.73em;color:#556;margin-bottom:6px">Canonical TGW data — never overwritten by marketplace sync</div>'
         + fr("Title", key="title", editable=True)
         + fr("Condition", key="condition", editable=True)
         + fr("AI hint", key="ai_hint", editable=True)
@@ -3522,8 +4153,10 @@ def _render_item_detail_html(
         + fr("Model", key="model", editable=True)
         + fr("Category group", key="category_group")
         + fr("Barcode", key="barcode")
-        + fr("Price", _price_display, key="price", editable=True)
+        + fr("Price", _price_display + '<span style="font-size:.7em;color:#3a6a3a;margin-left:5px">(set in eBay Draft Editor below)</span>')
         + fr("Qty", _qty_display, key="qty", editable=True)
+        + fr("Floor price", key="floor_price", editable=True)
+        + fr("Cost (what we paid)", key="cost", editable=True)
         + fr("Location", key="location", editable=True)
         + fr("Weight (oz)", key="weight_oz", editable=True)
         + fr("Size class", key="size_class")
@@ -3537,6 +4170,22 @@ def _render_item_detail_html(
         + (fr("UPC", h(str(item.get("upc", "") or ""))) if item.get("upc") else "")
         + (fr("ISBN", h(str(item.get("isbn", "") or ""))) if item.get("isbn") else "")
         + (fr("Part number", h(str(item.get("part_number", "") or ""))) if item.get("part_number") else "")
+        + (lambda ia, isp: (
+            '<div style="margin-top:6px;border-top:1px solid #222;padding-top:6px">'
+            '<div style="font-size:.75em;color:#556;margin-bottom:4px">Item specifics (edit in eBay Draft Editor below)</div>'
+            + "".join(
+                f'<div class="frow"><span class="fn" style="font-size:.82em">{h(k)}</span>'
+                f'<span class="fv" style="font-size:.82em">{h(str(v))}</span></div>'
+                for k, v in sorted({**isp, **ia}.items()) if v
+            ) + '</div>'
+        ) if {**isp, **ia} else (
+            '<div style="margin-top:6px;border-top:1px solid #222;padding-top:6px">'
+            '<span style="font-size:.75em;color:#333">No item specifics yet — fill in eBay Draft Editor below</span>'
+            '</div>'
+        ))(
+            item.get("item_attributes") or {},
+            (dl or {}).get("item_specifics") or {}
+        )
         + "</div>"
         # — eBay Listing (confirmed by eBay after publish)
         f'<div class="dsec"><h3>eBay Listing{listing_badge}</h3>'
@@ -3548,11 +4197,11 @@ def _render_item_detail_html(
         '<div style="font-size:.73em;color:#556;margin-bottom:6px">The offer record TGW created on eBay — not a buyer offer</div>'
         + offer_section
         + "</div>"
-        # — eBay Draft (what the pipeline prepared, before staging)
-        '<div class="dsec"><h3>eBay Draft <span style="font-size:.7em;color:#555;font-weight:normal">pipeline output</span></h3>'
-        '<div style="font-size:.73em;color:#556;margin-bottom:6px">Output from ebay_draft — staged to eBay when you click Stage</div>'
-        + draft_section
-        + "</div>"
+        # — Phase 1A: EPS photos + eBay live
+        + _eps_strip_html
+        + _ebay_live_html
+        # — Phase 1B: eBay Draft editor
+        + _ebay_draft_editor
         + (
             f'<div class="dsec">'
             f'<h3>Revision Draft <span style="font-size:.7em;color:#555;font-weight:normal">proposed changes</span></h3>'
@@ -3578,33 +4227,123 @@ def _render_item_detail_html(
     _listing_id_json = _json.dumps(listing_id)
     _is_active_js = "true" if is_active else "false"
 
-    publish_disabled = ' disabled title="Already active on eBay — End Listing first to relist"' if is_active else ""
-    publish_cls = " act-disabled" if is_active else ""
-    stage_disabled = ' disabled title="Already staged/published — use End Listing + relist to update"' if is_staged else ""
-    stage_cls = " act-disabled" if is_staged else ""
-    end_btn = (
-        '<button class="act-btn act-warn" onclick="triggerAction(\'ebay_end_listing\',\'End this listing on eBay? This cannot be undone.\')">'
-        "End Listing on eBay</button>"
-        if is_active else ""
+    _is_published = offer_status.upper() == "PUBLISHED"
+    _is_unpublished_offer = offer_status.upper() == "UNPUBLISHED"
+    _has_draft = bool(dl.get("title"))
+    _has_offer = bool(eo.get("offer_id"))
+
+    # Pipeline status bar — shows which stages are complete
+    def _pipe_step(label: str, done: bool, active: bool = False) -> str:
+        if done:
+            color, bg, bl = "#4a4", "#1a2a1a", "#4a4"
+        elif active:
+            color, bg, bl = "#aa0", "#2a2a0a", "#aa0"
+        else:
+            color, bg, bl = "#445", "#111", "#333"
+        return (
+            f'<span style="padding:4px 10px;background:{bg};border:1px solid {bl};'
+            f'border-radius:4px;font-size:.78em;color:{color};white-space:nowrap">{label}</span>'
+        )
+    _pipe_arrow = '<span style="color:#334;padding:0 4px;font-size:.8em">→</span>'
+    _pipeline_bar = (
+        '<div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px;'
+        'margin-bottom:12px;padding:8px;background:#0d0d0d;border-radius:4px">'
+        + _pipe_step("Draft", _has_draft, not _has_draft)
+        + _pipe_arrow
+        + _pipe_step("Staged", _has_offer and not is_active, _has_draft and not _has_offer)
+        + _pipe_arrow
+        + _pipe_step("Approved", is_ready, _has_offer and not is_ready and not is_active)
+        + _pipe_arrow
+        + _pipe_step("Live", is_active)
+        + '</div>'
     )
 
+    # Publish gate — actions depend on pipeline state
+    _stage_label = "Re-stage" if _is_unpublished_offer else "Stage"
+    _stage_disabled = ' disabled title="Listing is live — End Listing first to relist"' if _is_published else ""
+    _stage_cls = " act-disabled" if _is_published else ""
+
+    if is_active:
+        # Live: only allow end listing + sync
+        _gate_html = (
+            '<div style="margin-bottom:12px;padding:8px 12px;background:#1a1a0a;'
+            'border:1px solid #554;border-radius:4px;font-size:.82em;color:#aa0">'
+            '⚠ This listing is live on eBay. End Listing before making structural changes.</div>'
+            + '<div class="act-row">'
+            + '<button class="act-btn act-warn" onclick="triggerAction(\'ebay_end_listing\','
+              '\'End this listing on eBay? This cannot be undone.\')">End Listing on eBay</button>'
+            + (
+                '<button class="act-btn" onclick="triggerAction(\'sync_from_ebay\')"'
+                ' title="Fetch current price and status from eBay">Sync from eBay</button>'
+                if listing_id else ""
+            )
+            + '</div>'
+        )
+    elif _is_unpublished_offer:
+        # Staged but not yet approved: show approve + publish now
+        _ready_note = (
+            '<div style="margin-bottom:12px;padding:8px 12px;background:#1a2a1a;'
+            'border:1px solid #4a4;border-radius:4px;font-size:.82em;color:#6c6">'
+            '✓ Staged (UNPUBLISHED). Approve to list at next dole cycle, or Publish Now to go live immediately.</div>'
+            if not is_ready else
+            '<div style="margin-bottom:12px;padding:8px 12px;background:#1a2a1a;'
+            'border:1px solid #4a4;border-radius:4px;font-size:.82em;color:#6c6">'
+            '✓ Approved — will list at next dole cycle. Click Publish Now to go live immediately, '
+            'or Withdraw Approval to hold.</div>'
+        )
+        _approve_btn = (
+            '<button class="act-btn act-publish" onclick="approveForListing()">'
+            'Approve for Listing</button>'
+            if not is_ready else
+            '<button class="act-btn" onclick="triggerAction(\'unset_ready\','
+            '\'Remove this item from the ready queue?\')" style="background:#1a1a2a;border-color:#44a;color:#88c">'
+            'Withdraw Approval</button>'
+        )
+        _gate_html = (
+            _ready_note
+            + '<div class="act-row">'
+            + _approve_btn
+            + '<button class="act-btn act-publish" style="background:#2a1a0a;border-color:#c84" '
+              'onclick="publishNow()">Publish Now</button>'
+            + f'<button class="act-btn{_stage_cls}"{_stage_disabled} '
+              f'onclick="triggerAction(\'ebay_stage\')">{_stage_label}</button>'
+            + '</div>'
+        )
+    else:
+        # Not staged yet
+        _gate_html = (
+            '<div style="margin-bottom:12px;padding:8px 12px;background:#111;'
+            'border:1px solid #333;border-radius:4px;font-size:.82em;color:#667">'
+            + ('Draft ready — Stage to create an eBay offer, then Approve to list.'
+               if _has_draft else
+               'No draft yet — run Re-draft to prepare the eBay listing data.')
+            + '</div>'
+            + '<div class="act-row">'
+            + f'<button class="act-btn{_stage_cls}"{_stage_disabled} '
+              f'onclick="triggerAction(\'ebay_stage\')">{_stage_label}</button>'
+            + '</div>'
+        )
+
     actions_html = (
-        f'<div class="dsec danger-zone">'
-        f'<h3>Actions</h3>'
-        f'<div class="act-row">'
-        f'<button class="act-btn" onclick="triggerAction(\'ai_identify\')">Re-identify</button>'
-        f'<button class="act-btn" onclick="triggerAction(\'ebay_draft\')">Re-draft</button>'
-        f'<button class="act-btn" onclick="triggerAction(\'ebay_price\')">Re-price</button>'
-        f'<button class="act-btn{stage_cls}"{stage_disabled} onclick="triggerAction(\'ebay_stage\')">Stage</button>'
-        f'<button class="act-btn{publish_cls}"{publish_disabled} onclick="triggerAction(\'ebay_publish\')">Publish</button>'
-        f'{end_btn}'
+        '<div class="dsec">'
+        '<h3>Publish to eBay</h3>'
+        + _pipeline_bar
+        + _gate_html
+        + '</div>'
+        '<div class="dsec danger-zone">'
+        '<h3>Pipeline Tools</h3>'
+        '<div class="act-row">'
+        '<button class="act-btn" onclick="triggerAction(\'ai_identify\')">Re-identify</button>'
+        '<button class="act-btn" onclick="triggerAction(\'ebay_draft\')">Re-draft</button>'
+        '<button class="act-btn" onclick="triggerAction(\'ebay_upload\')">Re-upload photos</button>'
+        '<button class="act-btn" onclick="triggerAction(\'ebay_price\')">Re-price</button>'
         + (
             '<button class="act-btn" onclick="triggerAction(\'sync_from_ebay\')"'
             ' title="Fetch current price and status from eBay">Sync from eBay</button>'
             if listing_id else ""
         )
-        + '</div>'
-        + f'<div class="act-row" style="margin-top:10px">'
+        + f'</div>'
+        f'<div class="act-row" style="margin-top:10px">'
         f'<button class="act-btn act-warn" onclick="triggerAction(\'archive\',\'Archive this item? It will be hidden from the catalog.\')">Archive</button>'
         f'<button class="act-btn act-delete" onclick="deleteItem()">Delete item</button>'
         f'</div>'
@@ -3614,6 +4353,7 @@ def _render_item_detail_html(
         f'var _SKU={_sku_json2};'
         f'var _LISTING_ID={_listing_id_json};'
         f'var _IS_ACTIVE={_is_active_js};'
+        f'window._ITEM_SKU={_sku_json2};'
         f'function triggerAction(action,confirmMsg){{'
         f'  if(confirmMsg&&!confirm(confirmMsg))return;'
         f'  fetch(\'/api/items/\'+_SKU+\'/action\',{{'
@@ -3622,8 +4362,17 @@ def _render_item_detail_html(
         f'    body:JSON.stringify({{action:action}})'
         f'  }}).then(function(r){{return r.json();}}).then(function(d){{'
         f'    if(d.ok&&(action===\'archive\'||action===\'ebay_end_listing\')){{window.location.href=\'/form/items\';return;}}'
+        f'    if(d.ok&&(action===\'set_ready\'||action===\'unset_ready\'||action===\'ebay_publish\'||action===\'ebay_stage\')){{location.reload();return;}}'
         f'    alert(d.ok ? \'Action queued: \'+action : \'Error: \'+(d.detail||\'failed\'));'
         f'  }}).catch(function(e){{alert(\'Network error: \'+e);}});'
+        f'}}'
+        f'function approveForListing(){{'
+        f'  if(!confirm(\'Approve this item for listing?\\nIt will go live at the next dole cycle (up to 1 hour).\\nUse Publish Now to list immediately.\'))return;'
+        f'  triggerAction(\'set_ready\');'
+        f'}}'
+        f'function publishNow(){{'
+        f'  if(!confirm(\'Publish this item to eBay NOW?\\nIt will go live immediately at the current offer price.\'))return;'
+        f'  triggerAction(\'ebay_publish\');'
         f'}}'
         f'function deleteItem(){{'
         f'  var msg=\'Delete \'+_SKU+\'?\\nThis marks the item as deleted.\\nThe ItemData folder is preserved.\';'
@@ -3637,7 +4386,6 @@ def _render_item_detail_html(
         f'    else{{alert(\'Delete failed: \'+(d.detail||\'unknown error\'));}}'
         f'  }}).catch(function(e){{alert(\'Network error: \'+e);}});'
         f'}}'
-        f'// Inline field editing — dblclick on .fv.editable to edit in place'
         f'document.querySelectorAll(\'.fv.editable\').forEach(function(span){{'
         f'  span.addEventListener(\'dblclick\',function(){{'
         f'    var field=span.dataset.field;'
@@ -3678,7 +4426,150 @@ def _render_item_detail_html(
         f'    inp.addEventListener(\'blur\',function(){{if(!inp.disabled)commit();}});'
         f'  }});'
         f'}});'
-        f'</script>\n'
+        # ── updateCharCount ───────────────────────────────────────────────────
+        f'function updateCharCount(inp,max,countId){{'
+        f'  var n=inp.value.length;'
+        f'  var el=document.getElementById(countId);'
+        f'  if(!el)return;'
+        f"  el.textContent=n+'/'+max;"
+        f'  el.style.color=n>max?\'#c44\':(n>max*0.9?\'#aa0\':\'#556\');'
+        f'}}'
+        # ── saveCatalog ───────────────────────────────────────────────────────
+        f'function saveCatalog(){{'
+        f'  var fields={{}};'
+        f'  ["title","condition","floor_price","cost","location","ai_hint"].forEach(function(k){{'
+        f'    var span=document.querySelector(\'.fv.editable[data-field="\'+k+\'"]\');'
+        f'    if(span&&span.dataset.raw!==undefined)fields[k]=span.dataset.raw;'
+        f'  }});'
+        f'  if(!Object.keys(fields).length){{alert(\'No catalog fields to save.\');return;}}'
+        f'  var msg=document.getElementById(\'catalog-save-msg\');'
+        f'  if(msg)msg.textContent=\'Saving…\';'
+        f'  fetch(\'/api/items/\'+_SKU,{{'
+        f'    method:\'PATCH\','
+        f'    headers:authHeaders({{\'Content-Type\':\'application/json\'}}),'
+        f'    body:JSON.stringify({{fields:fields}})'
+        f'  }}).then(function(r){{return r.json();}}).then(function(d){{'
+        f'    if(msg){{msg.textContent=d.ok?\'✓ Saved\':\' Error: \'+(d.detail||\'failed\');'
+        f'    msg.style.color=d.ok?\'#4a4\':\'#c44\';'
+        f'    if(d.ok)setTimeout(function(){{msg.textContent=\'\';}},2000);}}'
+        f'  }}).catch(function(e){{if(msg){{msg.textContent=\'Network error\';msg.style.color=\'#c44\';}}}});'
+        f'}}'
+        # ── saveEbayDraft ─────────────────────────────────────────────────────
+        f'function saveEbayDraft(){{'
+        f'  var dl={{}};'
+        f'  var t=document.getElementById(\'dl-title-input\');'
+        f'  if(t)dl.title=t.value;'
+        f'  var p=document.getElementById(\'dl-price-input\');'
+        f'  if(p&&p.value!==\'\')dl.price=parseFloat(p.value)||null;'
+        f'  var c=document.getElementById(\'dl-condition-select\');'
+        f'  if(c&&c.value)dl.condition_enum=c.value;'
+        f'  var desc=document.getElementById(\'dl-desc-input\');'
+        f'  if(desc)dl.description=desc.value;'
+        f'  var ship=document.getElementById(\'dl-ship-input\');'
+        f'  if(ship&&ship.value)dl.shipping_profile=ship.value;'
+        f'  var scat=document.getElementById(\'dl-store-cat-select\');'
+        f'  if(scat&&scat.value){{'
+        f'    dl.store_category_id=scat.value;'
+        f'    var scopt=scat.selectedOptions&&scat.selectedOptions[0];'
+        f'    if(scopt)dl.store_category_name=scopt.dataset.name||scopt.textContent.replace(/\\s*\\(\\d+\\)\\s*$/,"");'
+        f'  }}'
+        f'  var aspInputs=document.querySelectorAll(\'#aspects-form [data-aspect]\');'
+        f'  var attrs={{}};'
+        f'  aspInputs.forEach(function(el){{'
+        f'    var k=el.dataset.aspect;var v=el.value.trim();'
+        f'    if(v)attrs[k]=v;'
+        f'  }});'
+        f'  var patch={{draft_listing:dl}};'
+        f'  if(Object.keys(attrs).length)patch.item_attributes=attrs;'
+        f'  var msg=document.getElementById(\'dl-save-msg\');'
+        f'  if(msg)msg.textContent=\'Saving…\';'
+        f'  fetch(\'/api/items/\'+_SKU,{{'
+        f'    method:\'PATCH\','
+        f'    headers:authHeaders({{\'Content-Type\':\'application/json\'}}),'
+        f'    body:JSON.stringify({{fields:patch}})'
+        f'  }}).then(function(r){{return r.json();}}).then(function(d){{'
+        f'    if(msg){{msg.textContent=d.ok?\'✓ Saved\':\' Error: \'+(d.detail||\'failed\');'
+        f'    msg.style.color=d.ok?\'#4a4\':\'#c44\';'
+        f'    if(d.ok)setTimeout(function(){{msg.textContent=\'\';}},2000);}}'
+        f'  }}).catch(function(e){{if(msg){{msg.textContent=\'Network error\';msg.style.color=\'#c44\';}}}});'
+        f'}}'
+        # ── saveAndReprice ────────────────────────────────────────────────────
+        f'function saveAndReprice(){{'
+        f'  var st=document.getElementById("search-terms-input");'
+        f'  var msg=document.getElementById("reprice-msg");'
+        f'  var terms=st?st.value.trim():"";'
+        f'  if(msg)msg.textContent="Saving…";'
+        f'  fetch("/api/items/"+_SKU,{{'
+        f'    method:"PATCH",'
+        f'    headers:authHeaders({{"Content-Type":"application/json"}}),'
+        f'    body:JSON.stringify({{fields:{{search_terms:terms}}}})'
+        f'  }}).then(function(r){{return r.json();}}).then(function(d){{'
+        f'    if(!d.ok){{if(msg){{msg.textContent="Save failed";msg.style.color="#c44";}}return;}}'
+        f'    if(msg)msg.textContent="Saved — pricing…";'
+        f'    fetch("/api/items/"+_SKU+"/action",{{'
+        f'      method:"POST",'
+        f'      headers:authHeaders({{"Content-Type":"application/json"}}),'
+        f'      body:JSON.stringify({{action:"ebay_price"}})'
+        f'    }}).then(function(r){{return r.json();}}).then(function(d){{'
+        f'      if(msg){{msg.textContent=d.ok?"✓ Re-price queued":"Price queue failed";'
+        f'      msg.style.color=d.ok?"#4a4":"#c44";}}'
+        f'      if(d.ok)setTimeout(function(){{location.reload();}},3500);'
+        f'    }}).catch(function(e){{if(msg){{msg.textContent="Network error";msg.style.color="#c44";}}}});'
+        f'  }}).catch(function(e){{if(msg){{msg.textContent="Network error";msg.style.color="#c44";}}}});'
+        f'}}'
+        # ── initCatSearch — category type-ahead picker ────────────────────────
+        f'function initCatSearch(){{'
+        f'  var inp=document.getElementById("dl-cat-search");'
+        f'  var hid=document.getElementById("dl-cat-id");'
+        f'  var dd=document.getElementById("dl-cat-dropdown");'
+        f'  var bc=document.getElementById("dl-cat-breadcrumb");'
+        f'  if(!inp||!hid||!dd)return;'
+        f'  var _timer=null;'
+        f'  inp.addEventListener("input",function(){{'
+        f'    clearTimeout(_timer);'
+        f'    var q=inp.value.trim();'
+        f'    if(q.length<2){{dd.style.display="none";return;}}'
+        f'    _timer=setTimeout(function(){{'
+        f'      fetch("/api/ebay/category-search?q="+encodeURIComponent(q),{{headers:authHeaders()}})'
+        f'      .then(function(r){{return r.json();}}).then(function(d){{'
+        f'        if(!d.ok||!d.results||!d.results.length){{dd.style.display="none";return;}}'
+        f'        var html="";'
+        f'        d.results.forEach(function(s){{'
+        f'          html+=\'<div class="cat-opt" data-id="\'+s.id+\'" data-name="\'+s.name.replace(/"/g,"&quot;")+\'"\''
+        f'            +\' style="padding:6px 10px;cursor:pointer;border-bottom:1px solid #2a2a2a;font-size:.85em">\''
+        f'            +\'<span style="color:#eee">\'+s.name+\'</span>\''
+        f'            +(s.path?\'<div style="color:#556;font-size:.78em">\'+s.path+\'</div>\':"")'
+        f'            +"</div>";'
+        f'        }});'
+        f'        dd.innerHTML=html;dd.style.display="block";'
+        f'        dd.querySelectorAll(".cat-opt").forEach(function(el){{'
+        f'          el.addEventListener("mouseenter",function(){{el.style.background="#2a2a3a";}});'
+        f'          el.addEventListener("mouseleave",function(){{el.style.background="";}});'
+        f'          el.addEventListener("click",function(){{'
+        f'            var cid=el.dataset.id;var cname=el.dataset.name;'
+        f'            hid.value=cid;'
+        f'            if(bc)bc.textContent=cid+" · "+cname;'
+        f'            inp.value="";dd.style.display="none";'
+        f'            fetch("/api/items/"+window._ITEM_SKU,{{'
+        f'              method:"PATCH",'
+        f'              headers:authHeaders({{"Content-Type":"application/json"}}),'
+        f'              body:JSON.stringify({{fields:{{draft_listing:{{category_id:cid,category_name:cname}}}}}})'
+        f'            }}).then(function(r){{return r.json();}}).then(function(d){{'
+        f'              if(d.ok)loadCatCtx(cid);'
+        f'            }});'
+        f'          }});'
+        f'        }});'
+        f'      }}).catch(function(){{dd.style.display="none";}});'
+        f'    }},350);'
+        f'  }});'
+        f'  document.addEventListener("click",function(e){{'
+        f'    if(!dd.contains(e.target)&&e.target!==inp)dd.style.display="none";'
+        f'  }});'
+        f'}}'
+        # ── category context IIFE (conditions + aspects + store cat + hints) ──────
+        + _CATEGORY_CONTEXT_IIFE
+        +
+        '</script>\n'
     )
 
     # Offer count badge: JS fetches /api/offers (cached), filters to this SKU.

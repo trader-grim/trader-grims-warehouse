@@ -72,17 +72,22 @@ class EbayPriceWorker(QueueWorker):
         category_id    = str(draft.get('category_id') or item.get('ebay_category_id', ''))
         item_condition = str(item.get('condition', '')).strip()
         product_lookup = item.get('product_lookup') or {}
+        search_terms   = str(item.get('search_terms') or '').strip()
 
         if not title or title == sku:
             raise HardFailure(f'{sku}: no title — run ai_identify first')
 
+        if search_terms:
+            log.info('ebay_price: using operator search_terms %r for %s', search_terms, sku)
         log.info('ebay_price: querying comps for %r (condition=%r)', title[:60], item_condition)
-        tgw_logging.log_event('ebay_price_start', sku=sku, title=title[:60])
+        tgw_logging.log_event('ebay_price_start', sku=sku, title=title[:60],
+                               search_terms=search_terms or None)
 
         result = suggest_price(
             self.config, title, category_name, category_id,
             item_condition=item_condition,
             product_lookup=product_lookup,
+            search_terms=search_terms,
         )
 
         ebay_offer = dict(existing)
