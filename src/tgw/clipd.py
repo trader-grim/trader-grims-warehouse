@@ -150,7 +150,53 @@ def handle_command(cmd: Dict[str, Any], db_path: Optional[Path] = None) -> Dict[
     if action == 'list':
         limit = int(cmd.get('limit', 20))
         return {'ok': True, 'rows': list_history(limit=limit, db_path=db_path)}
+    if action == 'pick':
+        return {'ok': True, 'action': 'launch_rofi'}
     return {'ok': False, 'error': f'unknown command: {action!r}'}
+
+def launch_rofi_picker(db_path: Path) -> Optional[str]:
+    """Launch rofi to pick from clipboard history. Returns selected content or None."""
+    import sqlite3
+    
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+        cursor.execute('SELECT content FROM clips ORDER BY ts DESC LIMIT 200')
+        items = [row[0][:120] for row in cursor.fetchall()]
+        conn.close()
+
+        if not items:
+            return None
+
+        proc = subprocess.Popen(
+            ['rofi', '-dmenu', '-p', 'Clip', '-i'],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        assert proc.stdin is not None
+        proc.stdin.write('\n'.join(items))
+        proc.stdin.close()
+        
+        selected = proc.stdout.read().strip() if proc.stdout else None
+        proc.wait()
+        if not selected:
+            return None
+
+        # Look up full content (not truncated) from db
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT content FROM clips WHERE content LIKE ? LIMIT 1',
+            (f'{selected}%',)
+        )
+        full_content = cursor.fetchone()[0] if cursor.fetchone() else selected
+        conn.close()
+        return full_content
+
+    except Exception as e:
+        log.warning('rofi picker failed: %s', e)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -478,9 +524,57 @@ def main() -> int:
     import signal
 
     parser = argparse.ArgumentParser(prog='tgw-clipd')
-    parser.add_argument('--backend', choices=['auto', 'x11', 'wayland'], default='auto')
-    parser.add_argument('--verbose', '-v', action='store_true')
+    subparsers = parser.add_subparsers(dest='command', required=False)
+
+    # Daemon mode (default)
+    daemon_parser = subparsers.add_parser('daemon')
+    daemon_parser.add_argument('--backend', choices=['auto', 'x11', 'wayland'], default='auto')
+    daemon_parser.add_argument('--verbose', '-v', action='store_true')
+
+    # Pick command
+    pick_parser = subparsers.add_parser('pick')
+    pick_parser.add_argument('--db-path', type=Path, default=_DEFAULT_CLIP_DIR / 'clip.db')
+
     args = parser.parse_args()
+
+    if not args.command or args.command == 'daemon':
+        # Original daemon behavior
+        logging.basicConfig(
+            level=logging.DEBUG if args.verbose else logging.INFO,
+            format='%(asctime)s %(name)s %(levelname)s %(message)s',
+        )
+        daemon = ClipDaemon(backend=args.backend)
+        daemon.start()
+        stop = threading.Event()
+        def _sig(_signum, _frame) -> None:
+            log.info('signal received — stopping')
+            stop.set()
+        signal.signal(signal.SIGINT, _sig)
+        signal.signal(signal.SIGTERM, _sig)
+        stop.wait()
+        daemon.stop()
+        return 0
+
+    if args.command == 'pick':
+        selected = launch_rofi_picker(args.db_path)
+        if not selected:
+            return 1
+
+        # Set clipboard using best available method
+        try:
+            if os.environ.get('WAYLAND_DISPLAY'):
+                subprocess.run(['wl-copy'], input=selected, text=True, check=True)
+            else:
+                subprocess.run(
+                    ['xclip', '-selection', 'clipboard'],
+                    input=selected, text=True, check=True
+                )
+        except Exception as e:
+            print(f"Failed to set clipboard: {e}", file=sys.stderr)
+            return 1
+
+        print(selected)
+        return 0
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
