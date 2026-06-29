@@ -220,7 +220,7 @@ if [[ -d "$SRC_ROOT" ]]; then
       \( -name '*.sh' -o -name '*.bash' -o -name '*.py' -o -name '*.pl' \) \
       -exec chmod 0750 {} +
   run find "$SRC_ROOT" -type f -not -path '*/.git/*' \
-      \( -path '*/bin/*' -o -path '*/tools/*' \) \
+      -path '*/bin/*' \
       -exec chmod 0750 {} +
   # Flutter SDK — all scripts/binaries need execute bit preserved.
   FLUTTER_SDK="$SRC_ROOT/trader-grims-warehouse/flutter"
