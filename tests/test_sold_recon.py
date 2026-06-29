@@ -151,9 +151,12 @@ def test_build_title_lookup_then_match(tmp_path):
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
-def _silence_log_event(monkeypatch):
+def _silence_log_event(tmp_path, monkeypatch):
     # log_event may write to a configured sink; isolate it.
     monkeypatch.setattr(pull.tgw_logging, "log_event", lambda *a, **k: None)
+    from tests.conftest import make_fake_fence_write_tmp, make_fake_patch_item_tmp
+    monkeypatch.setattr(pull, 'fence_ebay_write', make_fake_fence_write_tmp(tmp_path))
+    monkeypatch.setattr(pull, 'fence_patch_item', make_fake_patch_item_tmp(tmp_path))
 
 
 def _sold_item(tmp_path, sku="tgw500", **doc):
@@ -172,7 +175,7 @@ _SOLD_ARGS = dict(order_id="O-1", buyer="bob", sale_price=19.99,
 
 def test_mark_item_sold_writes_sale_block(tmp_path):
     p = _sold_item(tmp_path)
-    assert pull.mark_item_sold(p, cfg={}, **_SOLD_ARGS) is True
+    assert pull.mark_item_sold(p, cfg={"api_key": "test-api-key"}, **_SOLD_ARGS) is True
 
     doc = json.loads(p.read_text(encoding="utf-8"))
     assert doc["status"] == "sold"
@@ -186,16 +189,16 @@ def test_mark_item_sold_writes_sale_block(tmp_path):
 
 def test_mark_item_sold_is_idempotent(tmp_path):
     p = _sold_item(tmp_path)
-    assert pull.mark_item_sold(p, cfg={}, **_SOLD_ARGS) is True
+    assert pull.mark_item_sold(p, cfg={"api_key": "test-api-key"}, **_SOLD_ARGS) is True
     # Second call: already sold -> False, no change.
-    assert pull.mark_item_sold(p, cfg={}, **dict(_SOLD_ARGS, order_id="O-2")) is False
+    assert pull.mark_item_sold(p, cfg={"api_key": "test-api-key"}, **dict(_SOLD_ARGS, order_id="O-2")) is False
     doc = json.loads(p.read_text(encoding="utf-8"))
     assert doc["ebay_sale"]["order_id"] == "O-1"  # not overwritten
 
 
 def test_mark_item_sold_dry_run_does_not_write(tmp_path):
     p = _sold_item(tmp_path)
-    assert pull.mark_item_sold(p, cfg={}, dry_run=True, **_SOLD_ARGS) is True
+    assert pull.mark_item_sold(p, cfg={"api_key": "test-api-key"}, dry_run=True, **_SOLD_ARGS) is True
     doc = json.loads(p.read_text(encoding="utf-8"))
     assert doc["status"] == "available"
     assert "ebay_sale" not in doc

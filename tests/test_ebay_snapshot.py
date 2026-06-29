@@ -11,8 +11,14 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict
 
+import pytest
 import tgw.workers.ebay_sync as ebay_sync_mod
 from tgw.workers.ebay_sync import EbaySyncWorker
+
+
+@pytest.fixture(autouse=True)
+def _mock_fence(monkeypatch):
+    monkeypatch.setattr(ebay_sync_mod, 'fence_ebay_write', lambda *a, **k: {'ok': True})
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -25,6 +31,7 @@ def _cfg(**extra: Any) -> Dict[str, Any]:
         'return_policy_id':      'RET1',
         'ebay_verify_interval_days': 7,
         'raw': {},
+        'api_key': 'test-api-key',
     }
     cfg.update(extra)
     return cfg

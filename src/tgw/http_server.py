@@ -4153,10 +4153,11 @@ def _render_item_detail_html(
     except Exception:
         pass
     import json as _json2
-    _pol_cache = _cfg.get('catalog_root') / 'ebay-fulfillment-policies.json'
+    _cat_root = _cfg.get('catalog_root')
+    _pol_cache = (_cat_root / 'ebay-fulfillment-policies.json') if _cat_root else None
     _fulfillment_opts = {}
     _return_label = 'Free Returns'
-    if _pol_cache.exists():
+    if _pol_cache and _pol_cache.exists():
         try:
             _pd = _json2.loads(_pol_cache.read_text())
             _fulfillment_opts = _pd.get('fulfillment', {})

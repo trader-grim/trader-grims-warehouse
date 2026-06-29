@@ -42,7 +42,7 @@ def priced_worker(tmp_path, monkeypatch):
     # suggest_price: return a deterministic result. launch is derived as
     # to_99(comps['max'] * 1.10); with max=100.0 -> to_99(110.0) -> 110.99.
     def fake_suggest_price(cfg, title, category_name, category_id,
-                           item_condition='', product_lookup=None):
+                           item_condition='', product_lookup=None, **kwargs):
         return {
             'price':            50.0,        # p25 target
             'source':           'browse_api',
@@ -71,8 +71,11 @@ def priced_worker(tmp_path, monkeypatch):
 
     monkeypatch.setattr(lq, 'score_draft', lambda item: _FakeQuality())
 
+    from tests.conftest import make_fake_fence_write, make_fake_patch_item
+    monkeypatch.setattr(ebay_price, 'fence_ebay_write', make_fake_fence_write(tmp_path))
+    monkeypatch.setattr(ebay_price, 'fence_patch_item', make_fake_patch_item(tmp_path))
     worker = object.__new__(ebay_price.EbayPriceWorker)
-    worker.config = {'itemdata_root': tmp_path, 'pretty': False}
+    worker.config = {'itemdata_root': tmp_path, 'pretty': False, 'api_key': 'test-api-key'}
     return worker
 
 

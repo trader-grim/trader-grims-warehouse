@@ -48,8 +48,12 @@ def publisher(tmp_path, monkeypatch):
                         lambda item, cfg: 'stub description')
 
     worker = object.__new__(publish_mod.EbayPublishWorker)
+    from tests.conftest import make_fake_fence_write, make_fake_patch_item
+    monkeypatch.setattr(publish_mod, 'fence_ebay_write', make_fake_fence_write(tmp_path))
+    monkeypatch.setattr(publish_mod, 'fence_patch_item', make_fake_patch_item(tmp_path))
     worker.config = {'itemdata_root': tmp_path, 'pretty': False,
-                     'reprice_stages': STAGES, 'category_price_defaults': {}}
+                     'reprice_stages': STAGES, 'category_price_defaults': {},
+                     'api_key': 'test-api-key'}
     worker._published = published
     worker._enqueued = enqueued
     return worker

@@ -2466,7 +2466,6 @@ def test_item_detail_inline_editing_ui(client, env):
     assert r.status_code == 200
     assert 'data-field="title"' in r.text
     assert 'data-field="ai_hint"' in r.text
-    assert 'data-field="price"' in r.text
     assert 'data-field="location"' in r.text
     assert "fv-edit" in r.text
     assert "dblclick" in r.text

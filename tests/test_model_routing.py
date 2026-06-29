@@ -45,16 +45,15 @@ def test_defaults_bulk_classify_gemini_2_0_flash_lite():
     assert m == "google/gemini-2.0-flash-lite"
 
 
-def test_defaults_ebay_draft_ollama():
+def test_defaults_ebay_draft_openrouter():
     p, m = _DEFAULTS["ebay_draft"]
-    assert p == "ollama"
-    assert m == "Qwen2.5:latest"
+    assert p == "openrouter"
+    assert m == "google/gemini-2.5-flash"
 
 
-def test_defaults_pm_intake_ollama():
-    """pm_intake default is Ollama; config overrides to deepseek in production."""
+def test_defaults_pm_intake_openrouter():
     p, m = _DEFAULTS["pm_intake"]
-    assert p == "ollama"
+    assert p == "openrouter"
 
 
 # ---------------------------------------------------------------------------
@@ -110,11 +109,11 @@ def test_get_task_model_falls_back_for_bulk_classify_when_config_empty():
     assert m == "google/gemini-2.0-flash-lite"
 
 
-def test_get_task_model_unknown_task_uses_ollama_fallback():
+def test_get_task_model_unknown_task_uses_openrouter_fallback():
     cfg = _cfg({})
     p, m = get_task_model(cfg, "nonexistent_task")
-    assert p == "ollama"
-    assert m == "Qwen2.5:latest"
+    assert p == "openrouter"
+    assert m == "google/gemini-2.0-flash-lite"
 
 
 def test_get_task_model_partial_config_uses_defaults_for_missing_fields():

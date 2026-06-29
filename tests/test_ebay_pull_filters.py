@@ -43,8 +43,11 @@ def _listing(listing_id: str, custom_label: str, price: str = "9.99") -> Dict[st
 
 
 @pytest.fixture(autouse=True)
-def _silence_log_event(monkeypatch):
+def _silence_log_event(tmp_path, monkeypatch):
     monkeypatch.setattr(pull.tgw_logging, "log_event", lambda *a, **k: None)
+    from tests.conftest import make_fake_fence_write_tmp, make_fake_patch_item_tmp
+    monkeypatch.setattr(pull, 'fence_ebay_write', make_fake_fence_write_tmp(tmp_path))
+    monkeypatch.setattr(pull, 'fence_patch_item', make_fake_patch_item_tmp(tmp_path))
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +64,7 @@ def test_no_filter_syncs_all_listings(tmp_path):
 
     with patch.object(pull, "get_my_ebay_selling", return_value=listings):
         stats = pull.sync_active_listings(
-            {"pretty": False}, tmp_path, synced_at, sku_filter=None
+            {"pretty": False, "api_key": "test-api-key"}, tmp_path, synced_at, sku_filter=None
         )
 
     assert stats["matched"] == 2
@@ -83,7 +86,7 @@ def test_sku_filter_restricts_to_matching_skus(tmp_path):
 
     with patch.object(pull, "get_my_ebay_selling", return_value=listings):
         stats = pull.sync_active_listings(
-            {"pretty": False}, tmp_path, synced_at, sku_filter={"tgw001", "tgw003"}
+            {"pretty": False, "api_key": "test-api-key"}, tmp_path, synced_at, sku_filter={"tgw001", "tgw003"}
         )
 
     assert stats["matched"] == 2
@@ -101,7 +104,7 @@ def test_sku_filter_empty_set_syncs_nothing(tmp_path):
 
     with patch.object(pull, "get_my_ebay_selling", return_value=listings):
         stats = pull.sync_active_listings(
-            {"pretty": False}, tmp_path, synced_at, sku_filter=set()
+            {"pretty": False, "api_key": "test-api-key"}, tmp_path, synced_at, sku_filter=set()
         )
 
     assert stats["matched"] == 0
@@ -121,7 +124,7 @@ def test_sku_filter_listing_with_no_custom_label_skipped(tmp_path):
 
     with patch.object(pull, "get_my_ebay_selling", return_value=listings):
         stats = pull.sync_active_listings(
-            {"pretty": False}, tmp_path, synced_at, sku_filter={"tgw001"}
+            {"pretty": False, "api_key": "test-api-key"}, tmp_path, synced_at, sku_filter={"tgw001"}
         )
 
     assert stats["matched"] == 1
@@ -137,7 +140,7 @@ def test_sku_filter_writes_listing_data_to_json(tmp_path):
     with patch.object(pull, "get_my_ebay_selling",
                       return_value=[_listing("L99", "tgw001", price="29.99")]):
         pull.sync_active_listings(
-            {"pretty": False}, tmp_path, synced_at, sku_filter={"tgw001"}
+            {"pretty": False, "api_key": "test-api-key"}, tmp_path, synced_at, sku_filter={"tgw001"}
         )
 
     doc = json.loads((tmp_path / "tgw001" / "tgw001.json").read_text())

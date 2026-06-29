@@ -177,7 +177,10 @@ class EbayPriceWorker(QueueWorker):
             log.warning('ebay_price: quality rescore failed for %s: %s', sku, exc)
 
         fence_ebay_write(self.config, sku, ebay_offer=ebay_offer)
-        fence_patch_item(self.config, sku, {'draft_listing': draft})
+        top_level_patch = {'draft_listing': draft}
+        if item.get('free_shipping'):
+            top_level_patch['free_shipping'] = True
+        fence_patch_item(self.config, sku, top_level_patch)
 
         try:
             state_machine.enqueue_job(

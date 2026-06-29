@@ -172,7 +172,10 @@ def price_worker(tmp_path, monkeypatch):
     monkeypatch.setattr(lq, 'score_draft', lambda item: _Q())
 
     worker = object.__new__(ebay_price.EbayPriceWorker)
-    worker.config = {'itemdata_root': tmp_path, 'pretty': False}
+    from tests.conftest import make_fake_fence_write, make_fake_patch_item
+    monkeypatch.setattr(ebay_price, 'fence_ebay_write', make_fake_fence_write(tmp_path))
+    monkeypatch.setattr(ebay_price, 'fence_patch_item', make_fake_patch_item(tmp_path))
+    worker.config = {'itemdata_root': tmp_path, 'pretty': False, 'api_key': 'test-api-key'}
     worker._enqueued = enqueued
     return worker
 

@@ -52,7 +52,11 @@ def reducer(tmp_path, monkeypatch):
         'payment_policy_id':     'PAY1',
         'return_policy_id':      'RET1',
         'raw':                   {},
+        'api_key':               'test-api-key',
     }
+    from tests.conftest import make_fake_fence_write, make_fake_patch_item
+    monkeypatch.setattr(reducer_mod, 'fence_ebay_write', make_fake_fence_write(tmp_path))
+    monkeypatch.setattr(reducer_mod, 'fence_patch_item', make_fake_patch_item(tmp_path))
     worker._puts = puts
     return worker
 

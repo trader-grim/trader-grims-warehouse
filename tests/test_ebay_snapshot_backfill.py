@@ -8,7 +8,15 @@ from unittest.mock import MagicMock
 
 import requests
 
+import pytest
 from tgw.ebay.snapshot_backfill import _backfill_one, cmd_ebay_backfill_snapshot
+
+
+@pytest.fixture(autouse=True)
+def _mock_fence(monkeypatch):
+    import tgw.ebay.snapshot_backfill as _smod
+    from tests.conftest import make_fake_patch_item
+    monkeypatch.setattr(_smod, 'fence_patch_item', make_fake_patch_item(None))
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -26,6 +34,7 @@ def _make_cfg(tmp_path: Path) -> dict:
     return {
         "itemdata_root": tmp_path / "ItemData",
         "pretty": False,
+        "api_key": "test-api-key",
     }
 
 
