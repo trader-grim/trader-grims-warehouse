@@ -213,8 +213,8 @@ for path in "$SRC_ROOT" "$BIN_ROOT" "$DOCS_ROOT" "$CONFIG_ROOT" "$VAR_ROOT" "$BA
 done
 
 if [[ -d "$SRC_ROOT" ]]; then
-  run find "$SRC_ROOT" -type d -exec chmod 2770 {} +
-  run find "$SRC_ROOT" -type f -exec chmod 0660 {} +
+  run find "$SRC_ROOT" -type d -not -path '*/.git/*' -exec chmod 2770 {} +
+  run find "$SRC_ROOT" -type f -not -path '*/.git/*' -exec chmod 0660 {} +
   # Flutter SDK — all scripts/binaries need execute bit preserved.
   FLUTTER_SDK="$SRC_ROOT/trader-grims-warehouse/flutter"
   if [[ -d "$FLUTTER_SDK" ]]; then
