@@ -347,9 +347,10 @@ class WaylandBackend:
         args = ['wl-paste']
         if selection == 'primary':
             args.append('--primary')
-        # 'sh -c "cat; printf \\n"' ensures each clipboard event ends with \n
-        # so readline() returns immediately instead of blocking until the next event.
-        args += ['--watch', 'sh', '-c', 'cat; printf "\n"']
+        # printf '\0' after cat writes a null-byte sentinel after each event so we can
+        # recover complete multi-line clipboard content from the concatenated stdout stream.
+        # Reading line-by-line would split multi-paragraph clips at every newline.
+        args += ['--watch', 'sh', '-c', r'cat; printf "\0"']
 
         while not self._stop.is_set():
             try:
@@ -357,7 +358,6 @@ class WaylandBackend:
                     args,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
-                    text=True,
                 )
             except FileNotFoundError:
                 log.error('wl-paste not found; Wayland backend unavailable')
@@ -365,13 +365,17 @@ class WaylandBackend:
 
             try:
                 assert proc.stdout is not None
-                for line in proc.stdout:
-                    if self._stop.is_set():
+                buf = b''
+                while not self._stop.is_set():
+                    chunk = proc.stdout.read(4096)
+                    if not chunk:
                         break
-                    content = line.rstrip('\n')
-                    # Skip blank lines (wl-paste startup flush, empty clipboard)
-                    if content and content.strip():
-                        process_change(content, selection, self._subscribers, self._db_path)
+                    buf += chunk
+                    while b'\x00' in buf:
+                        raw, buf = buf.split(b'\x00', 1)
+                        content = raw.decode('utf-8', errors='replace').rstrip('\n')
+                        if content.strip():
+                            process_change(content, selection, self._subscribers, self._db_path)
             except OSError:
                 pass
             finally:
