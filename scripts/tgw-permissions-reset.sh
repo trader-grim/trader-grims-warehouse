@@ -14,7 +14,7 @@
 #                out of the default run so the everyday repair stays quick.
 #
 # Policy (updated — never world-readable; db user in tgw group needs write on src/bin/docs):
-#   App trees (src, bin, docs): dirs 2770, files 0660; bin scripts 0750
+#   App trees (src, bin, docs): dirs 2770, files 0660; bin/ files 0750 (all executable)
 #   Config (config):           dirs 2750, files 0640   (group read-only; workers don't write)
 #   Writable (var, backups):   dirs 2770, files 0660
 #   Secrets (secrets):         dir  0700, files 0600   <-- security-critical
@@ -215,6 +215,13 @@ done
 if [[ -d "$SRC_ROOT" ]]; then
   run find "$SRC_ROOT" -type d -not -path '*/.git/*' -exec chmod 2770 {} +
   run find "$SRC_ROOT" -type f -not -path '*/.git/*' -exec chmod 0660 {} +
+  # Restore execute bits: named script extensions and all files in bin/tools subdirs.
+  run find "$SRC_ROOT" -type f -not -path '*/.git/*' \
+      \( -name '*.sh' -o -name '*.bash' -o -name '*.py' -o -name '*.pl' \) \
+      -exec chmod 0750 {} +
+  run find "$SRC_ROOT" -type f -not -path '*/.git/*' \
+      \( -path '*/bin/*' -o -path '*/tools/*' \) \
+      -exec chmod 0750 {} +
   # Flutter SDK — all scripts/binaries need execute bit preserved.
   FLUTTER_SDK="$SRC_ROOT/trader-grims-warehouse/flutter"
   if [[ -d "$FLUTTER_SDK" ]]; then
@@ -234,8 +241,7 @@ fi
 
 if [[ -d "$BIN_ROOT" ]]; then
   run find "$BIN_ROOT" -type d -exec chmod 2770 {} +
-  run find "$BIN_ROOT" -type f -exec chmod 0660 {} +
-  run find "$BIN_ROOT" -type f \( -name '*.sh' -o -name '*.bash' -o -name '*.py' -o -name '*.pl' \) -exec chmod 0750 {} +
+  run find "$BIN_ROOT" -type f -exec chmod 0750 {} +
 fi
 
 if [[ -d "$DOCS_ROOT" ]]; then
