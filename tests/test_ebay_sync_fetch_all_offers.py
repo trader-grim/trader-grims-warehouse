@@ -1,6 +1,6 @@
 """Tests for eBay sync.fetch_all_offers() error handling."""
 import json
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 import pytest
 import requests
@@ -39,9 +39,10 @@ def test_400_unparseable_json_raises():
     """400 with invalid JSON → re-raises."""
     mock_resp = requests.Response()
     mock_resp.status_code = 400
-    mock_resp.json = lambda: json.loads('{]')  # Raises ValueError
+    mock_resp.json = Mock(side_effect=ValueError("bad json"))
     
-    with patch('tgw.ebay.sync.ebay_get', side_effect=requests.exceptions.HTTPError(response=mock_resp)):
+    with patch('tgw.ebay.sync.ebay_get', 
+              side_effect=requests.exceptions.HTTPError(response=mock_resp)):
         with pytest.raises(requests.exceptions.HTTPError):
             fetch_all_offers({})
 
@@ -54,8 +55,8 @@ def test_happy_path_returns_offers():
 
 def test_pagination_collects_all():
     """Paginated responses → collect all items."""
-    page1 = {'offers': [1,2], 'total': 3}
-    page2 = {'offers': [3], 'total': 3}
+    page1 = {'offers': [1,2], 'total': 150}  # total > limit to trigger pagination
+    page2 = {'offers': [3], 'total': 150}
     
     with patch('tgw.ebay.sync.ebay_get', side_effect=[page1, page2]):
         assert fetch_all_offers({}) == [1,2,3]
