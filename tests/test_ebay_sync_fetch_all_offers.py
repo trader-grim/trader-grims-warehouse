@@ -1,7 +1,8 @@
 """Tests for eBay sync.fetch_all_offers() error handling."""
+from unittest.mock import Mock, patch
+
 import pytest
 import requests
-from unittest.mock import Mock, patch
 
 from tgw.ebay.sync import fetch_all_offers
 
