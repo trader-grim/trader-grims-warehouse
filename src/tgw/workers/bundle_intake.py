@@ -26,8 +26,8 @@ from typing import Any, Dict, List, Optional
 import psycopg2.errors
 
 import tgw.logging as tgw_logging
+from tgw.apis.fence import create_item as fence_create_item
 from tgw.config import DEFAULT_CONFIG, load_config
-from tgw.items import atomic_write_json
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
@@ -322,7 +322,7 @@ class BundleIntakeWorker(QueueWorker):
         # Set image field to first photo (alphabetical) for thumbnail generation
         first_image = sorted(images, key=lambda p: p.name)[0]
         record['image'] = first_image.name
-        atomic_write_json(json_path, record, pretty=self.config.get('pretty', True))
+        fence_create_item(self.config, sku, record)
 
     def _enqueue_downstream(self, sku: str) -> None:
         # catalog-rebuild: coalesced 30s delay so rapid intakes batch together

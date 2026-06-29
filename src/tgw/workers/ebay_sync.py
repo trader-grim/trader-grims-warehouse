@@ -25,9 +25,9 @@ import requests
 
 import tgw.logging as tgw_logging
 from tgw.apis.ebay.client import ebay_get
+from tgw.apis.fence import ebay_write as fence_ebay_write
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.ebay.sync import fetch_all_offers
-from tgw.items import atomic_write_json
 from tgw.queue import state_machine
 from tgw.queue.worker_base import QueueWorker
 
@@ -212,6 +212,16 @@ class EbaySyncWorker(QueueWorker):
             item['ebay_offer'] = ebay_offer
             changed = True
 
+        # PP-EBAY-MIRROR-001 P2: propagate cached ebay_live imageUrls → ebay_offer.photo_urls
+        live_block = item.get('ebay_live') or {}
+        live_image_urls = (
+            live_block.get('inventory_item', {}).get('product', {}).get('imageUrls')
+        )
+        if live_image_urls and not ebay_offer.get('photo_urls'):
+            ebay_offer['photo_urls'] = live_image_urls
+            item['ebay_offer'] = ebay_offer
+            changed = True
+
         # PP-EBAY-SNAPSHOT-001 Phase 3: periodic photo integrity check for active listings.
         if listing_status == 'ACTIVE' or ebay_listing.get('status') == 'Active':
             item['ebay_listing'] = ebay_listing  # anchor before mutation
@@ -220,7 +230,9 @@ class EbaySyncWorker(QueueWorker):
         if not changed:
             return 0
 
-        atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
+        fence_ebay_write(self.config, sku,
+                         ebay_listing=item.get('ebay_listing'),
+                         ebay_offer=item.get('ebay_offer'))
         log.info('ebay_sync: %s → status=%s listing_id=%s price=%s',
                  sku, ebay_status, listing_id, price_val)
         tgw_logging.log_event('ebay_listing_synced', sku=sku, status=ebay_status,
@@ -252,6 +264,17 @@ class EbaySyncWorker(QueueWorker):
             return False
 
         confirmed = live.get('product', {}).get('imageUrls', [])
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        # PP-EBAY-MIRROR-001 P2: refresh ebay_live + photo_urls from live eBay GET
+        stored_photo_urls = item.get('ebay_offer', {}).get('photo_urls') or []
+        if confirmed and confirmed != stored_photo_urls:
+            fence_ebay_write(
+                self.config, sku,
+                ebay_live={'inventory_item': live, 'pulled_at': now_iso},
+                ebay_offer={'photo_urls': confirmed},
+            )
+
         submitted = (
             item.get('ebay_submitted', {})
                 .get('inventory_item', {})
@@ -259,7 +282,6 @@ class EbaySyncWorker(QueueWorker):
                 .get('imageUrls')
             or item.get('draft_listing', {}).get('imageUrls', [])
         )
-        now_iso = datetime.now(timezone.utc).isoformat()
         ebay_listing['photo_verify'] = {
             'submitted_count': len(submitted),
             'confirmed_count': len(confirmed),

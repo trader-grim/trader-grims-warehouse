@@ -21,8 +21,8 @@ from typing import Any, Dict, List
 import requests
 
 from tgw.apis.ebay.client import ebay_get
+from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.config import sku_json
-from tgw.items import atomic_write_json
 
 log = logging.getLogger(__name__)
 
@@ -68,12 +68,13 @@ def _backfill_one(
         log.warning('ebay_backfill: GET failed for %s: %s', sku, exc)
         return {'sku': sku, 'ok': False, 'skipped': False, 'reason': f'request error: {exc}'}
 
-    item['ebay_submitted'] = {
+    ebay_submitted = {
         'inventory_item': response,
         'fetched_at': datetime.now(timezone.utc).isoformat(),
     }
+    item['ebay_submitted'] = ebay_submitted
     try:
-        atomic_write_json(json_path, item, pretty=cfg.get('pretty', True))
+        fence_patch_item(cfg, sku, {'ebay_submitted': ebay_submitted})
     except Exception as exc:
         return {'sku': sku, 'ok': False, 'skipped': False, 'reason': f'write error: {exc}'}
 

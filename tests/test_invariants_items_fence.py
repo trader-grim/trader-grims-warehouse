@@ -107,3 +107,41 @@ def test_verifiedupdate_clears_catalog_verified(cfg):
     assert 'catalog_verified' not in doc
     assert doc['verified'] == '2026-06-10'
     assert doc['#STATUS'] == 'In Stock'
+
+
+# ---------------------------------------------------------------------------
+# PP-FENCE-001 — grep audit: atomic_write_json banned in workers/ and ebay/
+# ---------------------------------------------------------------------------
+# Known gaps (documented in source with PP-FENCE-001 comment):
+#   multi_intake.py:   newitems_dir stub write + key-deletion write (2 sites)
+#   ebay_sku_migrate.py: dir-rename + write sequence (3 sites)
+#   ebay/pull.py:       restore_archive_tombstone — needs upsert semantics (1 site)
+_FENCE_GAPS = frozenset({
+    "multi_intake.py",
+    "ebay_sku_migrate.py",
+    "pull.py",
+})
+
+
+def test_atomic_write_json_banned_in_workers_and_ebay():
+    """All workers and ebay/ modules must use fence calls, not atomic_write_json directly."""
+    import pathlib
+    repo = pathlib.Path(__file__).parents[1]
+    targets = [repo / "src" / "tgw" / "workers", repo / "src" / "tgw" / "ebay"]
+    violations = []
+    for target in targets:
+        for py in sorted(target.glob("*.py")):
+            if py.name in _FENCE_GAPS:
+                continue
+            text = py.read_text(encoding="utf-8")
+            # Count real atomic_write_json call lines (not comments or import lines)
+            for lineno, line in enumerate(text.splitlines(), 1):
+                stripped = line.lstrip()
+                if "atomic_write_json" in line and not stripped.startswith("#"):
+                    # Allow the import in items.py itself; flag usage in workers/ebay
+                    if "from tgw.items import" not in line and "import atomic_write_json" not in line:
+                        violations.append(f"{py.relative_to(repo)}:{lineno}: {line.strip()}")
+    assert not violations, (
+        "atomic_write_json call(s) found in workers/ or ebay/ — use fence client instead:\n"
+        + "\n".join(violations)
+    )

@@ -19,9 +19,9 @@ from typing import Any, Dict
 
 import tgw.config as config
 import tgw.logging as tgw_logging
+from tgw.apis.fence import ebay_write as fence_ebay_write
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.ebay.repush import _repush_one
-from tgw.items import atomic_write_json
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
 log = logging.getLogger(__name__)
@@ -52,12 +52,7 @@ class EbayRepushWorker(QueueWorker):
         photo_count = len(inv_body.get('product', {}).get('imageUrls', []))
 
         now_iso = datetime.now(timezone.utc).isoformat()
-        ebay_listing = item.get('ebay_listing') or {}
-        ebay_listing['repush_at'] = now_iso
-        ebay_listing.pop('photo_verify', None)
-        item['ebay_listing'] = ebay_listing
-
-        atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
+        fence_ebay_write(self.config, sku, ebay_listing={"repush_at": now_iso, "photo_verify": None})
 
         log.info('ebay_repush: %s repushed successfully (%d photo(s))', sku, photo_count)
         tgw_logging.log_event('ebay_repush_complete', sku=sku, photo_count=photo_count)

@@ -25,11 +25,11 @@ import tgw.logging as tgw_logging
 from tgw.apis.ebay.client import ebay_get
 from tgw.apis.ebay.conditions import best_condition
 from tgw.apis.ebay.specifics import get_aspects
+from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.apis.llm import call_model, get_task_model
 from tgw.apis.ollama import extract_json
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.ebay.description import build_listing_description
-from tgw.items import atomic_write_json
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
@@ -313,7 +313,7 @@ class EbayDraftWorker(QueueWorker):
                 if _is_ebay_offline(exc):
                     _write_offline_csv_row(self.config, sku, item)
                     item['offline_draft'] = True
-                    atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
+                    fence_patch_item(self.config, sku, {'offline_draft': True})
                     log.warning('eBay unreachable for %s (%s) — wrote offline CSV row', sku, exc)
                     tgw_logging.log_event('ebay_draft_offline', sku=sku,
                                           reason=type(exc).__name__)
@@ -567,7 +567,7 @@ class EbayDraftWorker(QueueWorker):
         draft['quality'] = score_draft(item, photo_count=photo_count).to_dict()
 
         item['draft_listing'] = draft
-        atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
+        fence_patch_item(self.config, sku, {'draft_listing': draft})
 
         log.info('ebay_draft complete for %s: %d specifics filled', sku, len(item_specifics))
         tgw_logging.log_event('ebay_draft_complete', sku=sku,

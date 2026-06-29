@@ -46,6 +46,10 @@ import requests
 import tgw.logging as tgw_logging
 from tgw.apis.ebay.client import ebay_delete, ebay_get, ebay_post, ebay_put
 from tgw.apis.ebay.trading import revise_item_sku
+
+# PP-FENCE-001: atomic_write_json kept — all three writes happen after os.rename().
+# Migrate to fence.create_item in Session C when the dir rename is also fenced.
+from tgw.apis.fence import ebay_write as fence_ebay_write
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.ebay.sync import _build_offer_bodies, _find_offer, _get_policies, publish_offer
 from tgw.items import atomic_write_json, load_item_doc
@@ -123,6 +127,25 @@ _PERMANENT_ERROR_SIGNALS = (
     # Policy violation — listing flagged by eBay; needs human review
     '"errorId":25019',
     "'errorId': 25019",
+    # Condition invalid for category even after USED_EXCELLENT retry — needs category fix
+    '"errorId":25021',
+    "'errorId': 25021",
+    # Missing/invalid item specific (e.g. Type, Book Title too long) — needs data fix
+    '"errorId":25002',
+    "'errorId': 25002",
+    # Quantity must be > 0 — item sold/zeroed on eBay; mark sold via ebay_legacy_sync
+    '"errorId":25004',
+    "'errorId': 25004",
+    # Invalid category ID — needs category correction in item JSON
+    '"errorId":25005',
+    "'errorId': 25005",
+    # Availability not found — offer in bad state; needs manual inspection
+    '"errorId":25604',
+    "'errorId': 25604",
+    # Duplicate listing detected by eBay
+    'already have on eBay',
+    # Ended listing can not be revised via Trading API
+    'not allowed to revise ended listings',
 )
 
 
@@ -305,16 +328,37 @@ def _migrate_inventory(cfg: Dict[str, Any],
             return {'ok': False, 'old_sku': old_sku,
                     'error': f'DELETE old offer {old_offer_id}: {body}'}
 
-    # Publish new offer
+    # Publish new offer — retry with USED_EXCELLENT if category rejects condition
     try:
         pub = publish_offer(cfg, new_offer_id)
         new_listing_id  = pub['listing_id']
         new_listing_url = pub['listing_url']
     except requests.exceptions.HTTPError as exc:
-        body = exc.response.text[:300] if exc.response is not None else str(exc)
-        return {'ok': False, 'old_sku': old_sku,
-                'error': f'publish offer {new_offer_id}: {body}',
-                'ebay_done': True}
+        if exc.response is not None and exc.response.status_code == 400:
+            errors = exc.response.json().get('errors', [])
+            if any(e.get('errorId') == 25021 for e in errors):
+                log.warning('condition rejected for %s — retrying with USED_EXCELLENT', new_sku)
+                try:
+                    inv_body['condition'] = 'USED_EXCELLENT'
+                    ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{new_sku}', inv_body)
+                    pub = publish_offer(cfg, new_offer_id)
+                    new_listing_id  = pub['listing_id']
+                    new_listing_url = pub['listing_url']
+                except requests.exceptions.HTTPError as exc2:
+                    body = exc2.response.text[:300] if exc2.response is not None else str(exc2)
+                    return {'ok': False, 'old_sku': old_sku,
+                            'error': f'publish offer {new_offer_id}: {body}',
+                            'ebay_done': True}
+            else:
+                body = exc.response.text[:300]
+                return {'ok': False, 'old_sku': old_sku,
+                        'error': f'publish offer {new_offer_id}: {body}',
+                        'ebay_done': True}
+        else:
+            body = exc.response.text[:300] if exc.response is not None else str(exc)
+            return {'ok': False, 'old_sku': old_sku,
+                    'error': f'publish offer {new_offer_id}: {body}',
+                    'ebay_done': True}
 
     # Delete old inventory item (cleanup; non-fatal)
     try:
@@ -543,16 +587,41 @@ def _recover_partial(cfg: Dict[str, Any],
         return {'ok': False, 'old_sku': old_sku,
                 'error': f'PUT offer {new_offer_id} (recovery): {body}'}
 
-    # Publish
+    # Publish — retry with USED_EXCELLENT if category rejects the stored condition
     try:
         pub = publish_offer(cfg, new_offer_id)
         new_listing_id  = pub['listing_id']
         new_listing_url = pub['listing_url']
     except requests.exceptions.HTTPError as exc:
-        body = exc.response.text[:300] if exc.response is not None else str(exc)
-        return {'ok': False, 'old_sku': old_sku,
-                'error': f'publish offer {new_offer_id} (recovery): {body}',
-                'ebay_done': True}
+        if exc.response is not None and exc.response.status_code == 400:
+            errors = exc.response.json().get('errors', [])
+            if any(e.get('errorId') == 25021 for e in errors):
+                log.warning('recovery: condition rejected for %s — retrying with USED_EXCELLENT',
+                            new_sku)
+                try:
+                    inv_body2 = ebay_get(cfg, f'/sell/inventory/v1/inventory_item/{new_sku}')
+                    inv_body2.pop('sku', None)
+                    inv_body2.pop('locale', None)
+                    inv_body2['condition'] = 'USED_EXCELLENT'
+                    ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{new_sku}', inv_body2)
+                    pub = publish_offer(cfg, new_offer_id)
+                    new_listing_id  = pub['listing_id']
+                    new_listing_url = pub['listing_url']
+                except requests.exceptions.HTTPError as exc2:
+                    body = exc2.response.text[:300] if exc2.response is not None else str(exc2)
+                    return {'ok': False, 'old_sku': old_sku,
+                            'error': f'publish offer {new_offer_id} (recovery+condition): {body}',
+                            'ebay_done': True}
+            else:
+                body = exc.response.text[:300]
+                return {'ok': False, 'old_sku': old_sku,
+                        'error': f'publish offer {new_offer_id} (recovery): {body}',
+                        'ebay_done': True}
+        else:
+            body = exc.response.text[:300] if exc.response is not None else str(exc)
+            return {'ok': False, 'old_sku': old_sku,
+                    'error': f'publish offer {new_offer_id} (recovery): {body}',
+                    'ebay_done': True}
 
     # Delete old inventory item (non-fatal)
     try:
@@ -621,12 +690,38 @@ def migrate_one(cfg: Dict[str, Any],
         live_offer = _find_offer(cfg, old_sku)
         if live_offer:
             offer_id = live_offer['offerId']
+            # Guard: if the offer is sold/ended on eBay but locally still Active,
+            # update local status and skip — do NOT re-list a sold item.
+            live_status = live_offer.get('status', '')
+            if live_status not in ('PUBLISHED', 'UNPUBLISHED', 'ACTIVE', ''):
+                log.warning(
+                    'migrate_one: %s — eBay offer %s is %r (not active); '
+                    'updating local status and skipping',
+                    old_sku, offer_id, live_status,
+                )
+                fence_ebay_write(
+                    cfg, old_sku,
+                    ebay_listing={'status': live_status},
+                )
+                return {'ok': False, 'old_sku': old_sku, 'skip': True,
+                        'error': f'eBay offer status is {live_status!r} — item not active'}
 
     if offer_id:
         if live_offer is not None:
             # Have live offer data already — use it directly
             return _migrate_inventory_live(cfg, old_sku, new_sku, live_offer, listing_id)
         else:
+            # Belt-and-suspenders: if photo_urls missing locally, fall back to live path.
+            if not item.get('ebay_offer', {}).get('photo_urls'):
+                log.warning(
+                    'migrate_one: %s — offer_id known locally but photo_urls missing; '
+                    'falling back to live eBay fetch',
+                    old_sku,
+                )
+                live_offer = _find_offer(cfg, old_sku)
+                if live_offer:
+                    return _migrate_inventory_live(
+                        cfg, old_sku, new_sku, live_offer, listing_id)
             return _migrate_inventory(cfg, old_sku, new_sku, item, offer_id, listing_id)
     else:
         # Check for partial state: a previous run may have created new_sku offer

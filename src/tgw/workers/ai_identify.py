@@ -23,11 +23,12 @@ from typing import Any, Dict, List, Optional
 import psycopg2.errors
 
 import tgw.logging as tgw_logging
+from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.apis.llm import call_model, get_task_model
 from tgw.apis.ollama import extract_json, is_available
 from tgw.assets import primary_photo as _asset_primary_photo
 from tgw.config import DEFAULT_CONFIG, load_config
-from tgw.items import append_history_event, atomic_write_json
+from tgw.items import append_history_event
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
@@ -301,7 +302,24 @@ class AIIdentifyWorker(QueueWorker):
         vision_results.append(vision_record)
         item["vision_results"] = vision_results
 
-        atomic_write_json(json_path, item, pretty=self.config.get("pretty", True))
+        # Push all changes through fence (single atomic write)
+        fence_fields = {
+            "title":                   item["title"],
+            "category":                item["category"],
+            "description":             item["description"],
+            "condition":               item["condition"],
+            "ai_identified":           item["ai_identified"],
+            "vision_results":          item["vision_results"],
+            "identification_history":  item.get("identification_history", []),
+        }
+        if "ebay_category_id" in item:
+            fence_fields["ebay_category_id"]   = item["ebay_category_id"]
+            fence_fields["ebay_category_name"] = item.get("ebay_category_name")
+        if "product_lookup" in item:
+            fence_fields["product_lookup"] = item["product_lookup"]
+        if "free_shipping" in item:
+            fence_fields["free_shipping"] = item["free_shipping"]
+        fence_patch_item(self.config, sku, fence_fields)
 
         log.info("ai_identify complete for %s: %r (eBay cat %s)", sku, title, ebay_category_id)
         tgw_logging.log_event(

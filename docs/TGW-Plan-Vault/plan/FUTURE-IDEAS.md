@@ -16,6 +16,106 @@ review future ideas. Do NOT scan or process this file at routine session start.
 
 ---
 
+## PP-NIXSTORE-001 — Move /nix to HDD + LVM Cache (lvmcache/dm-cache)
+
+**Filed:** 2026-06-26  
+**Source:** tgw suggest + Google AI Mode research (archived: inbox/archive/20260626-lvm-nix-cache-research.md)  
+**Trigger:** OOM event 2026-06-26 — claude.exe exhausted all 30 GB RAM + 8 GB swap. vg_tgw (NVMe) is full (0.09 GB free). Growing NVMe swap requires moving /nix off the NVMe.
+
+### Current disk state
+
+**vg_tgw (NVMe /dev/nvme0n1p2, 200 GB — 0.09 GB free):**
+| LV | Size | Notes |
+|----|------|-------|
+| nix | 71.9 GB | 29 GB used, 39 GB free — candidate to move |
+| root | 50 GB | NixOS root |
+| postgres | 50 GB | state_machine DB |
+| home | 20 GB | /home |
+| swap | 8 GB | NVMe swap (priority -2) |
+
+**sda (1 TB HDD):**
+| Partition | Size | Label | Status |
+|-----------|------|-------|--------|
+| sda1 | 260 MB | SYSTEM (FAT32) | Windows EFI — removable |
+| sda2 | 16 MB | — | MS Reserved — removable |
+| sda3 | 100 GB | Windows NTFS | Windows OS — removable |
+| sda4 | 557 MB | NTFS | Recovery — removable |
+| sda5 | 80 GB | tgw-catio-nix (btrfs) | Old CatioNIX install — decision needed |
+| sda6 | 32 GB | swap | Active HDD swap (fallback, priority -3) |
+| sda7 | 717 GB | TGW-SNAPSHOT-0 (btrfs) | **DO NOT TOUCH** — hourly backup target |
+
+### Architecture decision (from Gemini/community research)
+
+Do NOT merge HDD into vg_tgw. Two valid approaches:
+
+**Option A — Separate VGs (simpler):** Keep /nix on an HDD LV in a new `vg_nix_hdd`. No caching. Slower cold reads but /nix is largely sequential and packages are warm after first use. Freed NVMe space → grow swap.
+
+**Option B — lvmcache (recommended):** Move /nix to HDD LV, then use freed NVMe space as an `lvmcache` pool in front of it. Frequently accessed Nix store paths stay on SSD automatically. Best of both worlds.
+
+### Proposed execution plan
+
+**Phase 1 — Remove sda5 and sda6 only (prerequisite)**
+- sda1–sda4 (Windows): **leave untouched** — only Windows license; future VM use via virt-manager
+- sda5 (tgw-catio-nix, 80 GB btrfs): remove — old CatioNIX install, superseded by NVMe boot
+- sda6 (32 GB swap): `swapoff /dev/sda6`, remove from NixOS config, then delete partition
+- Create one new partition in the freed ~112 GB contiguous space (sda5+sda6 were adjacent)
+- Create LVM PV on the new partition
+
+**Phase 2 — Create HDD LVM**
+```bash
+pvcreate /dev/sdaX          # new partition(s) from freed space
+vgcreate vg_nix_hdd /dev/sdaX
+lvcreate -L 80G -n nix vg_nix_hdd   # size to match /nix usage + headroom
+```
+
+**Phase 3 — Migrate /nix**
+```bash
+# While booted — nix store migration
+mkfs.xfs /dev/vg_nix_hdd/nix
+mount /dev/vg_nix_hdd/nix /mnt/nix-new
+rsync -aHX /nix/ /mnt/nix-new/
+# Update NixOS config: fileSystems."/nix".device = "/dev/vg_nix_hdd/nix"
+# nixos-rebuild switch → reboot → verify → remove old NVMe /nix LV
+```
+
+**Phase 4 — Set up lvmcache (Option B)**
+```bash
+# Freed NVMe space (~72 GB) after removing lv_nix
+lvcreate -L 60G -n nix_cache vg_tgw        # cache data LV on NVMe
+lvcreate -L 1G  -n nix_cache_meta vg_tgw   # cache metadata LV
+lvconvert --type cache-pool   --poolmetadata vg_tgw/nix_cache_meta   vg_tgw/nix_cache
+lvconvert --type cache   --cachepool vg_tgw/nix_cache   vg_nix_hdd/nix
+# Result: /dev/vg_nix_hdd/nix is HDD-backed with NVMe cache
+```
+
+**Phase 5 — Grow NVMe swap**
+```bash
+# Remaining freed NVMe (~10 GB after cache pool)
+lvresize -L 18G vg_tgw/swap
+swapoff /dev/vg_tgw/swap && mkswap /dev/vg_tgw/swap && swapon /dev/vg_tgw/swap
+# Result: 18 GB NVMe swap (primary) + sda6 can be retired or kept as emergency
+```
+
+### After completion
+- vg_tgw free: ~0 GB (cache pool uses freed /nix space)
+- NVMe swap: 18 GB (up from 8 GB)
+- sda6: removed (folded into vg_nix_hdd LVM PV along with sda5 space)
+- sda1–sda4 (Windows): preserved — only available Windows license; future VM candidate
+- Total swap: 18 GB NVMe (primary); HDD swap gone (space repurposed as LVM)
+- /nix: HDD-backed with 60 GB NVMe cache — warm paths hit SSD speeds
+
+### Constraints and risks
+- sda7 (TGW-SNAPSHOT-0) is the only DR backup — must remain intact throughout
+- /nix migration must be done carefully: system is unbootable if /nix is broken mid-migration
+- Consider doing Phase 3 from a live USB or tgw-test VM for safety
+- lvmcache adds kernel complexity — test on tgw-test first if possible
+- sda5 (tgw-catio-nix): **remove** — decision made 2026-06-26; old install, superseded by NVMe
+
+### Promotion criteria
+Ready to promote when: Dave explicitly approves the plan, sda5 decision is made, and a maintenance window is available (requires reboot). Reference: `inbox/archive/20260626-lvm-nix-cache-research.md`.
+
+---
+
 ## PP-CATIONIX-001 — CatioNIX: TGW Platform as Standalone AI Operational Safety Platform
 
 **Also referred to as:** Catio  
@@ -186,3 +286,103 @@ than replacing it.
 - [ ] PP-PYIPC-001 stable and confirmed in production
 - [ ] Operator workstation (tgw-prod) running NixOS with MC installed
 - [ ] Clear use case identified (phone photos? remote install-bundle browsing?)
+
+---
+
+## PP-ANNEX-001: git-annex photo store with tiered GDrive remotes
+
+**Architectural grounding (2026-06-28):** git-annex is a concrete application of the
+**control-plane / data-plane separation** principle settled in the master plan architecture
+section. git is the control plane — it tracks what files exist, their SHA keys, and where they
+are stored, without holding the bytes. The annex special remote system is the data plane —
+it transfers actual content on demand. The same principle governs lan-mouse (focus signals vs.
+input events), Wayland clipboard (ownership notification vs. content transfer), and the TGW
+event server (NATS notification vs. PostgreSQL payload fetch). Where these planes are decoupled,
+failures are isolated; where they are coupled (old Input Leap, X11 clipboard in Qtile), a
+data-plane failure hangs the control channel.
+
+**Concept:** Replace direct filesystem photo copy in intake workers with git-annex
+content-addressed object store. Photos become annex objects (SHA256-keyed), tracked by
+symlinks in git. `git-annex-remote-googledrive` (Lykos153) handles GDrive sync via
+native Drive API — faster than rclone's abstraction layer, truly resumable uploads.
+
+**Tiered remotes:**
+- `gdrive-active` — items listed on eBay, last 12 months
+- `gdrive-archive-YYYY` — sold/delisted items, date-partitioned (one remote per year or
+  per N items to stay under GDrive's 500k-items-per-folder limit)
+- `nas-local` — full local copy (directory special remote)
+- Cold backup tier (B2 or second GDrive account)
+
+`git annex move --to gdrive-archive-YYYY --metadata status=sold` handles migration.
+`numcopies = 2` enforces no single-copy objects.
+
+**Design constraints to carry forward:**
+- Archive remotes must be date/count-partitioned from the start — resharding later is
+  painful. New remote = one config line.
+- Fence API is already SKU-addressed, not path-addressed — scales cleanly regardless of
+  storage tier changes.
+- Intake must be queue-parallelisable: the current one-item ZIP drop model is the
+  throughput ceiling; the fence + annex design should batch from day one.
+
+**Scale context:** Current 55k catalog / 19k active listings is complete stagnation —
+floor, not ceiling. When the pipeline is fully automated, item and photo volume will be
+significantly higher. Every design decision here must hold at 10x current scale.
+
+**Promotion criteria:**
+- PP-FENCE-001 complete (workers can't write ItemData directly)
+- Intake worker redesign underway
+- Dave ready to invest in git-annex learning curve and NixOS annex packaging
+
+---
+
+## PP-SEARCH-001: recoll universal index — all TGW data searchable
+
+**Design principle (2026-06-28):** ALL data in the TGW ecosystem shall be included in
+the index. This is not just a convenience feature — it is a recovery and audit tool.
+Today's investigation (49 missing item JSONs recovered from ItemArchive) took hours of
+manual searching across zip files, CSVs, and catalogs. With recoll it would have been
+one query in seconds.
+
+**Scope — everything goes in:**
+
+- **ItemData/** — item JSONs (title, description, aspects, AI draft, raw LLM
+  prompt/response once PP-FENCE-001 captures them, price history, ebay blocks)
+- **ItemData/ photos** — via Tesseract OCR plugin: serial numbers, labels, model
+  numbers, barcodes visible in photos become searchable
+- **ItemArchive/** — zip contents indexed including historical JSON versions and
+  source-change records; makes archive recovery instant instead of manual
+- **masterarchive/history/** — eBay download CSVs, all_skus_locations.csv,
+  draft-listing-import CSVs, active-inventory reports; cross-reference in one query
+- **ItemCatalog/** — historical-master-catalog.json, historical-tgwcatalog.json,
+  by-location index
+- **docs/TGW-Plan-Vault/** — plan, reference, inbox, suggestions; searchable alongside
+  item data so "what does the plan say about X" and "which items are in location X"
+  are the same search
+- **git-annex metadata tags** — status, category, size_class, listed_at
+
+**Queries this enables that took hours manually today:**
+- "find any record containing SKU tgw202105091454567" → instant across all sources
+- "find all items at location PB1061 across current and archive"
+- "find items where AI identified 'Atari' in raw response"
+- "find items with a visible serial number in any photo"
+- "find all eBay download reports mentioning listing ID 326340608480"
+- "find items where description contains a specific model number or ISBN"
+
+**Integration points:**
+- recoll daemon watches all index roots for changes (inotify)
+- `tgw search` CLI gets a `--full-text` flag hitting recoll's REST/Python API
+- Web UI search bar gains full-text capability alongside existing SKU/title lookup
+- ItemArchive zip contents: recoll has a zip/archive filter that indexes inside zips
+  without extracting — archive stays compressed, content is searchable
+- NixOS: recoll + tesseract in nixpkgs; add to tgw-prod config with index paths
+
+**Designed alongside PP-ANNEX-001** — git-annex is the prerequisite (photos accessible
+as files for OCR; annex metadata becomes recoll field tags). But the index scope is
+independent of git-annex — ItemArchive and masterarchive can be indexed immediately.
+
+**Promotion criteria:**
+- PP-FENCE-001 complete (raw LLM responses captured — makes index much richer)
+- PP-ANNEX-001 underway (git-annex managing photos locally)
+- Dave ready to configure recoll index paths and OCR pipeline on tgw-prod
+- Phase 0 (no git-annex required): index ItemArchive + masterarchive/history + catalogs
+  alone — already useful for recovery and audit without any other PP complete

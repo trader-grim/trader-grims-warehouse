@@ -22,10 +22,10 @@ import psycopg2.errors
 import requests
 
 import tgw.logging as tgw_logging
+from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.assets import ordered_photos
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.ebay.upload import upload_photo
-from tgw.items import atomic_write_json
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
@@ -98,13 +98,11 @@ class EbayUploadWorker(QueueWorker):
             if e['local'] not in seen_keys:
                 reordered.append(e)
 
-        item['ebay_photos'] = reordered
-
-        # Propagate eBay-hosted URLs into draft_listing if present
-        if 'draft_listing' in item:
-            item['draft_listing']['imageUrls'] = [e['url'] for e in reordered]
-
-        atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
+        # Write reordered photos and propagate imageUrls into draft_listing (deep-merged by fence)
+        fence_patch_item(self.config, sku, {
+            'ebay_photos': reordered,
+            'draft_listing': {'imageUrls': [e['url'] for e in reordered]},
+        })
 
         new_count = len(uploaded) - len(existing)
         log.info('ebay_upload complete for %s: %d total (%d new)',

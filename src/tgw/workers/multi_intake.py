@@ -24,6 +24,10 @@ from typing import Any, Dict, List
 
 import tgw.logging as tgw_logging
 from tgw.config import DEFAULT_CONFIG, load_config
+
+# PP-FENCE-001: atomic_write_json kept for two gaps not yet in fence:
+#   1. Stub writes go to newitems_path (not itemdata_root) — outside fence scope.
+#   2. ItemData write below removes a key (Item number) — fence needs delete_fields.
 from tgw.items import atomic_write_json
 from tgw.queue.worker_base import HardFailure, QueueWorker
 

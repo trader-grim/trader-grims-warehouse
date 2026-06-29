@@ -31,9 +31,10 @@ import psycopg2.errors
 import requests
 
 import tgw.logging as tgw_logging
+from tgw.apis.fence import ebay_write as fence_ebay_write
+from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.ebay.sync import stage_draft
-from tgw.items import atomic_write_json
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
@@ -42,11 +43,24 @@ log = logging.getLogger(__name__)
 QUEUE_NAME = 'ebay_stage'
 
 
+def _format_ebay_error(body: str, status: int) -> str:
+    """Extract human-readable messages from eBay error JSON."""
+    try:
+        errs = json.loads(body).get('errors', [])
+        msgs = [e.get('longMessage') or e.get('message', '') for e in errs if e.get('longMessage') or e.get('message')]
+        if msgs:
+            return '; '.join(msgs)
+    except Exception:
+        pass
+    return f'HTTP {status}: {body[:300]}'
+
+
 class EbayStageWorker(QueueWorker):
 
     def handle(self, job: Dict[str, Any]) -> None:
         payload = job.get('payload_json') or {}
         sku = payload.get('sku', '')
+        force = bool(payload.get('force'))  # bypass guards — update a live listing in place
         if not sku:
             raise HardFailure('ebay_stage job missing sku in payload')
 
@@ -56,19 +70,25 @@ class EbayStageWorker(QueueWorker):
 
         item = json.loads(json_path.read_text(encoding='utf-8'))
 
-        # Guard: item is already actively listed on eBay — do not create a
-        # duplicate Inventory API offer over a live listing.
+        # Guard: item is already actively listed on eBay.
+        # Without force=True: skip to avoid duplicate offer.
+        # With force=True: proceed to PUT the inventory item + offer in-place (no relist needed).
         existing_listing = item.get('ebay_listing', {})
         if existing_listing.get('status') == 'Active':
             listing_id = existing_listing.get('listing_id', '')
-            log.warning(
-                'ebay_stage: %s is already live (listingId=%s, api=%s) — skipping',
-                sku, listing_id, existing_listing.get('api', ''),
-            )
-            tgw_logging.log_event('ebay_stage_skipped', sku=sku,
-                                  reason='already_active_listing',
-                                  listing_id=str(listing_id))
-            return
+            if not force:
+                log.warning(
+                    'ebay_stage: %s is already live (listingId=%s) — skipping '
+                    '(use force=True to update in place)',
+                    sku, listing_id,
+                )
+                tgw_logging.log_event('ebay_stage_skipped', sku=sku,
+                                      reason='already_active_listing',
+                                      listing_id=str(listing_id))
+                return
+            log.info('ebay_stage: %s is live (listingId=%s) — updating in place (force)',
+                     sku, listing_id)
+            tgw_logging.log_event('ebay_stage_update', sku=sku, listing_id=str(listing_id))
 
         # Guard: item was previously listed via Trading API — must not create a
         # duplicate Inventory API offer until the legacy listing is resolved.
@@ -84,9 +104,9 @@ class EbayStageWorker(QueueWorker):
                                   item_number=str(legacy_item_number))
             return
 
-        # Idempotent: already staged
+        # Idempotent: already staged — skip unless force (update)
         existing_offer_id = item.get('ebay_offer', {}).get('offer_id')
-        if existing_offer_id:
+        if existing_offer_id and not force:
             log.info('ebay_stage: %s already staged (offerId=%s) — skipping',
                      sku, existing_offer_id)
             tgw_logging.log_event('ebay_stage_skipped', sku=sku,
@@ -125,6 +145,7 @@ class EbayStageWorker(QueueWorker):
                 epid = lookup_epid(self.config, barcode)
                 if epid:
                     item['epid'] = epid
+                    fence_patch_item(self.config, sku, {'epid': epid})
                     log.info('%s: EPID %s cached (barcode %s)', sku, epid, barcode)
                     tgw_logging.log_event('ebay_epid_found', sku=sku,
                                           epid=epid, barcode=barcode)
@@ -139,10 +160,16 @@ class EbayStageWorker(QueueWorker):
         except requests.exceptions.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else 0
             if status in (400, 422):
-                body = exc.response.text[:500] if exc.response is not None else ''
-                raise HardFailure(
-                    f'{sku}: eBay rejected staging (HTTP {status}): {body}'
-                ) from exc
+                raw = exc.response.text if exc.response is not None else ''
+                msg = _format_ebay_error(raw, status)
+                pipeline_error = {
+                    'worker': 'ebay_stage',
+                    'error': msg,
+                    'raw': raw[:800],
+                    'at': datetime.now(timezone.utc).isoformat(),
+                }
+                fence_patch_item(self.config, sku, {'pipeline_error': pipeline_error})
+                raise HardFailure(f'{sku}: eBay rejected staging: {msg}') from exc
             raise  # transient — base class retries
 
         # Merge into ebay_offer block (preserves price_comps etc from ebay_price)
@@ -155,11 +182,12 @@ class EbayStageWorker(QueueWorker):
 
         # PP-EBAY-SNAPSHOT-001: snapshot what we PUT so photo verify and repush
         # have a ground-truth reference for what eBay should be showing.
-        item['ebay_submitted'] = {
+        ebay_submitted = {
             'inventory_item': result['inventory_item'],
             'staged_at': ebay_offer['staged_at'],
         }
-        atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
+        item['ebay_submitted'] = ebay_submitted
+        fence_ebay_write(self.config, sku, ebay_offer=ebay_offer, ebay_submitted=ebay_submitted)
 
         log.info('ebay_stage: %s staged → offerId=%s (visible in Seller Hub)',
                  sku, result['offer_id'])

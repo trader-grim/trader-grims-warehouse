@@ -48,6 +48,7 @@ _CONDITION_MAP: Dict[str, str] = {
     'manufacturer refurbished': 'MANUFACTURER_REFURBISHED',
     'seller refurbished':       'SELLER_REFURBISHED',
     'refurbished':              'SELLER_REFURBISHED',
+    '3000':                     'USED_EXCELLENT',  # Trading API conditionId for generic "Used"
     'used: excellent':          'USED_EXCELLENT',
     'excellent':                'USED_EXCELLENT',
     'used: very good':          'USED_VERY_GOOD',
@@ -525,10 +526,25 @@ def fetch_all_offers(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                                     'limit': limit, 'offset': offset})
         except _requests.exceptions.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else 0
-            if status in (400, 404):
-                # eBay returns 400/404 when the seller has no Inventory API offers
-                log.debug('fetch_all_offers: no offers (HTTP %s) — returning []', status)
+            if status == 404:
+                log.debug('fetch_all_offers: 404 — no Inventory API offers registered')
                 break
+            if status == 400:
+                _NO_OFFERS_IDS = {25702, 25710, 25009}
+                try:
+                    errors = exc.response.json().get('errors', [])
+                    eids = {int(e.get('errorId', 0)) for e in errors}
+                except Exception:
+                    log.warning('fetch_all_offers: 400 with unparseable body — %s',
+                                exc.response.text[:200] if exc.response else '')
+                    raise exc
+                if eids and eids.issubset(_NO_OFFERS_IDS):
+                    log.debug('fetch_all_offers: 400/%s — no offers (graceful empty)', eids)
+                    break
+                for e in errors:
+                    log.warning('fetch_all_offers: eBay error %s: %s',
+                                e.get('errorId'), e.get('message', ''))
+                raise
             raise
         batch = data.get('offers', [])
         results.extend(batch)

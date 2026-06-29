@@ -3,7 +3,7 @@ title: TGW Master Plan
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 2
-updated: 2026-06-24 (session 42 — tgw-catio-nix 0.0.1 alpha begins: CatioNIX/TGW layer split, backup timers declarative, TGW-SNAPSHOT-0 mount, trader-grims-backup retired. PR #8.)
+updated: 2026-06-29 (session 35 — PP-SKU-MIGRATE-001 COMPLETE; permanent-failure signals added; photo push done 539/605; all workers running)
 maintained_by: Opus (planner)
 ---
 
@@ -56,6 +56,30 @@ maintained_by: Opus (planner)
 - Thumbnail cache at `catalog_root/thumbnails/<SKU>.jpg` — same path on master and satellite
 - PP-ADD-001 (Phase 6) sync return path still needs design: dirty-flag / change-log per row, merge strategy
 - Item schema and API fence design should not accidentally preclude a deferred/offline mode
+### Control-plane / data-plane separation (settled principle, 2026-06-28)
+Lightweight ownership/notification signals must never carry or block on data payloads. When
+they are coupled, a data-transfer failure blocks the control channel — hanging the WM, freezing
+the KVM bridge, deadlocking the event bus. When decoupled, failures are isolated to the data
+path; the control path stays live.
+
+This principle recurs across the stack and should be applied by default:
+
+| Domain | Control plane | Data plane |
+|--------|--------------|------------|
+| Clipboard (Wayland) | `zwlr-data-control-v1` ownership notification | Content transfer on request |
+| KVM (lan-mouse) | Focus/edge-crossing signals | Mouse/keyboard event stream, clipboard bytes |
+| clipd.py | Unix socket subscriber push (event: clip changed) | Content pulled via `list`/`get` command |
+| TGW event server | NATS lightweight event notification | Worker fetches payload from PostgreSQL/API |
+| git-annex (future) | Git tree tracks file existence + SHA key (pointer) | Annex transfers actual file bytes on demand |
+
+**git-annex application:** ItemData photos are the bulk of the dataset (tens of GB). git
+tracking the manifest (which SKUs exist, which photos, checksums) without carrying the content
+enables: partial clones on a1131, resumable remote backups, deduplication across archives, and
+offline-capable satellite builds. git-annex sits above Syncthing in reliability because the
+control plane (git) and data plane (annex special remotes) are independently auditable.
+Evaluate as replacement or complement to Syncthing for ItemData/ItemArchive once LVM is expanded
+(PP-LVM-001) — the date-partitioned annex remote design scales naturally to multi-TB.
+
 ### Catalog rebuild (settled pattern)
 - Any worker that writes to ItemData enqueues a `catalog-rebuild` job — never calls `build_all_catalogs()` inline
 - `catalog-rebuild` worker claims the job → calls `build_all_catalogs()` (JSON + SQLite + location tree) → succeeds
@@ -428,11 +452,184 @@ maintained_by: Opus (planner)
 - ✅ **PP-HINT-001 Browse enrichment** (2026-06-07) — `_fetch_browse_aspect_hints()` in `ebay_draft.py`; ASPECT_REFINEMENTS fieldgroup + category filter; injects common values into Ollama prompt; `browse_hint_count` in draft_listing
 - ✅ **PP-HINT-001 trail** (2026-06-08) — `identification_history` in item JSON; `append_history_event()` in `items.py`; events: `ai_identify` + `hint_set`; `tgw hint-trail <sku>` CLI
 
+### Session 35 — 2026-06-29 — Migration complete; permanent-failure signals; photo push; workers restarted
+
+**PP-SKU-MIGRATE-001 COMPLETE** — `ebay_sku_migrate` reached "no live non-canonical items remain"
+at 02:39 UTC. All migratable items are on canonical SKUs. Permanent-failure signal set expanded
+in `_PERMANENT_ERROR_SIGNALS` to include errorId 25021 (condition invalid even after USED_EXCELLENT
+retry), 25002 (invalid/missing item specific), 25004 (qty=0 / sold), 25005 (invalid category),
+25604 (availability not found), duplicate listing, and ended listings. Without this fix the worker
+was looping forever on ~29 items that had `ebay_done=True` but no permanent-failure match.
+
+**Permanent failures (ebay_done=True)** — ~29 items blocked with `sku_migrate_skip=True`:
+categories that reject all used conditions (25021), missing required item specifics (25002),
+zero quantity (25004), stale category IDs (25005). Use `tgw migrate-unblock <sku>` after fixing
+the underlying data to retry each one through normal pipeline (ebay_draft → ebay_publish).
+
+**Photo push complete** — `scripts/ebay_photo_push.py --include-no-eps` ran live: 539 items
+pushed successfully, 66 remain (same items with eBay 400 errors — blocked migration items whose
+Inventory API records are in a bad state). Photos on 539 live listings now match local files.
+
+**All workers restarted** — 14 workers active: catalog_rebuild, thumbnail_gen, pm_intake,
+plan_render, ai_identify, ebay_draft, ebay_upload, ebay_price, ebay_stage, ebay_publish,
+ebay_sync, ebay_legacy_sync (365-day lookback running), ebay_sku_migrate (idle/polling),
+token_refresh. Worker fleet was stopped since session 31; now fully live.
+
+### Session 34 — 2026-06-28 — Migration fixes, photo reconciliation, sold-item detection
+
+**PP-EBAY-MIRROR-001 P1 DONE** — `scripts/ebay_normalize.py` ran: 19,394 items updated
+(photo_urls from ebay_live, listing_url constructed, image_urls→imageUrls rename).
+total=55,419, errors=0. `ebay_sku_migrate` immediately resumed and began succeeding.
+
+**PP-EBAY-MIRROR-001 P1.5 DONE** — `scripts/ebay_photo_push.py` written and
+dry-run verified; ready to run after migration completes (~1,135 items with photo gaps +
+116 with no EPS photos). todo #1073.
+
+**PP-EBAY-MIRROR-001 P2 DONE** — `ebay_sync.py` extended: (1) propagate
+`ebay_live.inventory_item.product.imageUrls` → `ebay_offer.photo_urls` when missing;
+(2) `_check_photo_integrity()` refreshes ebay_live + ebay_offer.photo_urls when confirmed
+URLs differ from stored. Worker restarted.
+
+**ebay_sku_migrate condition-ID fixes** — `_CONDITION_MAP` in `ebay/sync.py` now maps
+`'3000' → 'USED_EXCELLENT'` (root cause: 2017-era items stored Trading API conditionId '3000';
+`_map_condition('3000')` was falling through to default USED_GOOD, rejected by some categories).
+25021 condition retry added to both `_migrate_inventory()` and `_recover_partial()` — PUT
+inventory_item with USED_EXCELLENT and re-publish if first publish rejected.
+13 items were briefly offline (old offer deleted, new offer stuck); 12 recovered automatically
+(one — GATX train car — was sold last week and has been cleaned up).
+
+**Sold-item guard in migrate_one()** — before migrating, if `_find_offer()` returns an
+offer with status not in (PUBLISHED, UNPUBLISHED, ACTIVE), update local `ebay_listing.status`
+and skip — prevents re-listing sold items when `ebay_legacy_sync` is behind. Uses
+`fence_ebay_write` (import added).
+
+**`mark_item_sold()` rewritten** — now decrements `draft_listing.quantity` by sold qty;
+marks `status=sold` / `ebay_listing.status=Sold` ONLY when remaining qty reaches 0.
+Multi-qty items (partial sales) update qty + record ebay_sale but stay active. Idempotent
+on same `order_id`. `ebay_legacy_sync` restarted with 365-day lookback (no prior state file).
+
+**Sway + lan-mouse Nix modules** — `nix/os/sway.nix` and `nix/os/lan-mouse.nix` written;
+`nix/hosts/tgw-prod.nix` updated (sway + lan-mouse, input-leap-server retired by removal);
+`nix/hosts/a1131.nix` updated (lan-mouse, input-leap-client retired by removal).
+`nixos-rebuild switch` not yet run — pending verify.
+
+**Aider MCP fixed** — `/home/tgw/.local/bin/aider` created as symlink →
+`/etc/profiles/per-user/db/bin/aider` (Nix store, world-accessible). MCP bridge now
+finds binary; restart Claude Code to reload. MCP server runs as `tgw` so it can write
+`tgw`-owned source files.
+
+### Session 33 — 2026-06-28 — eBay mirror gap audit + WM/KVM architecture decisions
+
+**PP-EBAY-MIRROR-001 opened** — full audit of eBay data gaps. Root cause: `ebay_live` is
+populated but nothing propagates values to `ebay_offer` canonical fields. `photo_urls` missing
+for 2,137/2,138 listed items despite data sitting in `ebay_live.inventory_item.product.imageUrls`.
+`draft_listing` has `image_urls`/`imageUrls` key mismatch. Phase 1 normalization script unblocks
+`ebay_sku_migrate` (stopped after 319/2,138 successes — remaining items all fail "no photo URLs").
+Marketing data (promotions, markdown, watchers) added to scope: `sell.marketing` scope held.
+Supersedes `scripts/ebay_backfill_offers.py`, `scripts/ebay_audit.py`, PP-EBAY-SNAPSHOT-001 todo #894.
+
+**WM + KVM decisions** — Qtile retired; **Sway** selected (Wayland-native, stable, waybar for
+TGW dashboard). Input Leap retired; **lan-mouse** selected (wlroots peer-to-peer, proper Wayland
+clipboard via `zwlr-data-control-v1`, in nixpkgs 0.10.0). **Wayland primary** decision recorded —
+X11/XWayland compatibility only where it comes for free (reversed from prior X11-primary stance
+after 9 hours clipboard debugging). Hyprland left as reconsideration candidate once mature.
+
+**Flutter/web surface hierarchy** — web UI = universal fallback; Flutter = near-universal primary
+(Linux desktop + Android + iOS + web). Separation between event server and WM means surface swap
+is config not rewrite.
+
+### Session 32 — 2026-06-28 — PP-FENCE-001 Session C + status resolution fix
+
+**PP-FENCE-001 Session C DONE** — http_server write consolidation (see PP-FENCE-001 section above).
+
+**`sqlite_catalog.py` status resolution fix** — catalog builder was reading `#STATUS` first, hiding
+new `status` field values (e.g. `status=archived` invisible when `#STATUS=new` also present).
+Fix: `_resolve_status()` with terminal-state-wins logic — terminal values (`sold`, `archived`,
+`disposed`, `recalled`, `merged`, `discard`, `vero`) win regardless of which field contains them;
+otherwise `status` takes precedence over `#STATUS`. Fixes the long-standing archive invisibility bug.
+353 items had conflicting `In Stock`/`sold` states — now correctly resolved.
+5,103 items have only `#STATUS` (no `status`) — normalization migration pending (todo #1053).
+
+**ebay_sync bug identified (not yet fixed)** — `fetch_all_offers()` in `ebay/sync.py` calls
+`GET /sell/inventory/v1/offer` which returns HTTP 400 / error 25707 on every request. Silent
+failure: catches 400 and returns `[]` with only a `log.debug()`. Worker has been reporting
+"received 0 offers" every 6h cycle. Fix: replace with inventory_item paging + per-SKU offer
+lookup. Tracked separately; does not block worker restart.
+
+**Workers now unblocked** — restart sequence: catalog_rebuild (running) → thumbnail_gen →
+pm_intake → plan_render → ai_identify (verify one job) → ebay_draft → ebay_upload →
+ebay_price → ebay_stage → ebay_publish.
+
+### Session 30 — 2026-06-28 — PostgreSQL recovery + architectural audit
+
+**Incident:** Accidental `nixos-rebuild switch --flake ...#a1131` run on tgw-prod (session 29,
+2026-06-27) re-initialised the PostgreSQL cluster mid-day. WAL corruption confirmed by LSN
+regression (morning checkpoint `0/2D4xxxx`, shutdown record `0/1B46420`). Recovery: `rm -rf
+/var/lib/postgresql/17/`, fresh initdb via pre-start script, `pg_restore` from Jun 27 03:30
+custom-format dump (`/opt/TGW/var/backups/.../state_machine-20260627.dump`). All services
+restored. Btrfs snapshots healthy (no scrub errors; 49 hourly externals on sda7, latest 08:00).
+
+**Workers stopped:** All `tgw-worker@*` services deliberately stopped pending data integrity
+fix. Do not restart until PP-FENCE-001 Sessions A+B complete and eBay backfill done.
+
+**eBay data audit findings (session 30):**
+- 19,366 items confirmed in Inventory API (`/sell/inventory/v1/inventory_item`)
+- **Zero items** have `ebay_offer.offer_id` or `ebay_listing.listing_id` in local JSON — eBay
+  IDs were never written back after migration
+- ~196 listings still in Trading API only (GetMyeBaySelling minus Inventory API SKU set) —
+  not yet identified individually
+- **Acceptance target:** 19,653 live listings visible in local catalog post-recovery (Seller Hub
+  count 2026-06-28), minus items sold during recovery window. Note: 19,366 + ~196 = ~19,562 —
+  gap of ~91 vs Seller Hub total; identification script will resolve. Any remaining gap after
+  full migration = data integrity issue, investigate before restarting workers.
+- Root cause: workers call `atomic_write_json` directly, bypassing the fence; Stage 1 (API
+  fence) was never built; Invariant A4 has been ⚠️ partial since the start
+
+**Immediate sequence (blocks worker restart):**
+1. **eBay audit script** (`scripts/ebay_audit.py`) — produces JSON report with three buckets:
+   - *inventory-only*: in Inventory API, not in Trading API (expected majority)
+   - *trading-only*: in Trading API, not in Inventory API → needs migration
+   - *duplicates*: same SKU active in BOTH APIs simultaneously → end Trading API listing only
+   Also flags orphans (no local item JSON) and SKUs with no offer (Inventory item but not listed).
+   Target: accounts for all 19,653 Seller Hub listings. Any gap = investigate before proceeding.
+2. **Dave reviews audit report** — approves action per bucket before any writes
+3. **Backfill + dedup** — one-off script writes offer_id/listing_id/price/EPS URLs to item JSONs
+   for all inventory-only items; ends duplicate Trading API listings (no relist needed)
+4. **Trading-only migration** — for each trading-only item: submit via `ebay_stage`, publish,
+   end old listing. Dave approves batch policy first — watchers lost in relist gap, cannot undo.
+5. **PP-FENCE-001 Session A** — new fence endpoints + `src/tgw/apis/fence.py` client
+6. **PP-FENCE-001 Session B** — migrate all workers off `atomic_write_json`
+7. **Restart workers**
+
+PP-FENCE-001 OS lockdown (Session C: `tgw-worker` NixOS user) can follow after workers are back.
+
 ### Active / next build priorities — staged foundation plan (adopted 2026-06-19)
 
-**Sequence:** Stage 0 → Stage 1 → Stage 2 → Stage 3 → Stage 4 → Stage 5 → Stage 6.
+**Sequence:** Stage 0 → **PP-FENCE-001** → Stage 1 → Stage 2 → Stage 3 → Stage 4 → Stage 5 → Stage 6.
 Data Tracks A/B/C run in parallel with Stages 1–5. Full rationale: `PROPOSED-PLAN-2026-06-19.md`.
 **See `tgw todo claude` for the live task queue.** Plan = reference spec; `tgw todo` = active duties.
+
+#### PP-FENCE-001: ItemData write fence — Sessions A+B complete (session 31)
+
+Full design: `docs/ai-plans/PP-FENCE-001.md`.
+
+**Session A ✅ (session 30):** New HTTP endpoints + `src/tgw/apis/fence.py` client. 18 tests pass.
+
+**Session B ✅ (session 31):** All 30 `atomic_write_json` call sites in workers + `ebay/` replaced with fence calls. 27 tests pass; grep audit CI test added.
+- Documented gaps (3 files, 6 sites): `multi_intake.py` (newitems_dir + key-delete), `ebay_sku_migrate.py` (dir-rename context), `ebay/pull.py` (restore_archive_tombstone needs upsert). Marked with PP-FENCE-001 comments.
+
+**Next: restart workers** — Sessions A+B+C complete; fence is live for all standard workers. Restart one at a time, verify each before proceeding.
+
+**Session C ✅ (session 32):** http_server write consolidation. All 18 inline `atomic_write_json` call sites in action handlers and photo management replaced with three internal helpers:
+- `_apply_patch(json_path, fields)` — core patch; deep-merges dict fields; `None` value = delete key
+- `_apply_ebay_write(json_path, sku, *, ...)` — eBay block merge with field protection
+- `_enqueue_catalog_rebuild(reason)` — coalesced 30s-delayed rebuild (replaces 18 duplicate try/except enqueue blocks)
+Canonical endpoints (`PATCH`, `append`, `ebay-write`, `create`) delegate internally to same helpers.
+`atomic_write_json` now called only inside these three functions. Smoke tested (archive action live). Workers unblocked.
+
+**Session D (deferred):** NixOS `tgw-worker` user (uid 901) in `~/tgw-flake`; `tgw-worker@.service` runs as new user; physical write lockout enforced by OS permissions. Aligns with PP-AIOPS-001 Stage 5 sandbox model.
+
+**eBay backfill ✅ (session 30):** 2,089 published listings backfilled with offer_id/listing_id/price. Remaining items are draft/unpublished with no offer (expected).
 
 #### Stage 0 — Immediate Operational Fixes (1 session, no new dev)
 | Item | Fix |
@@ -1091,7 +1288,7 @@ eBay Trading API access (currently have `sell.inventory` + Trading credentials),
 scope in OAuth client. Relevant for PP-PHOTO-001 (bulk photo re-upload / migration) — evaluate when
 Planning that phase. Source: `inbox/queued/20260611T093715-antigravity-remote-execution-direct-gdrive-to-eps.md`.
 
-### PP-PHOTO-001 — GDrive Zero-Bandwidth Photo Pipeline ✅ INFRASTRUCTURE COMPLETE 2026-06-26 (session 28)
+### PP-PHOTO-001 — GDrive Zero-Bandwidth Photo Pipeline (Phase 0 complete 2026-06-26; Phases A+B open)
 
 **Goal:** Pass all item photos to Gemini in `ebay_draft` via GDrive URLs (no base64 upload) for
 major listing quality jump; use same pattern to replace deprecated EPS upload with zero-bandwidth
@@ -1640,6 +1837,8 @@ containers. After Phase 5: bad agent sessions roll back in one command.
 - Intake enforcement: validate 18-char format at bundle_intake / multi_intake ingestion points
 - Post-migration verification report (`tgw sku-migrate --verify` or manual audit)
 - Catalog/search SKU matching: tolerate any variant by matching on first 18 characters — covers residual format drift without requiring full normalization first
+
+INPROGRESS-sku-migration-blast.md — eBay SKU migration blast running (3,203 items, ~7-8 hours, 83 skip-flagged)
 ### Data scrub passes (priority elevated 2026-06-03)
 - Pass 1: itemdata_scrub dry-run → review → --write (merge history keys, drop junk)
 - Pass 2: photo_history_recovery dry-run → review → --write
@@ -1802,6 +2001,7 @@ process stubs left for Dave). Keep it updated as new commands ship.
 
 ---
 
+✅ a1131 client desktop setup complete — Plasma 6 + Input Leap + Syncthing deployed to a1131 (session 29, 2026-06-27). See `a1131-client-desktop-setup.md` for details.
 ### PP-CI-001 ✅ DONE 2026-06-04
 ruff clean; GitHub Actions CI (`ruff check --no-fix` + `pytest`); `.pre-commit-config.yaml` scoped to `src/tests/`; pre-commit installed in `.git/hooks/`.
 
@@ -2346,16 +2546,23 @@ Reads use the local SQLite catalog and ItemData directly — MC works offline on
 
 ---
 
-## PP-WM-001 — Qtile Tiling Window Manager
+## PP-WM-001 — Sway Tiling Window Manager
 
 ### Vision
-Qtile as the primary operator workstation shell — a tiling WM where TGW API hooks are
-first-class citizens, not afterthoughts. The WM config is Python, the TGW stack is Python;
-no IPC marshaling, no subprocess overhead for status data. The bar is a live TGW dashboard.
-X11 session (not Wayland) for clipboard tool maturity and overall stability.
+Sway as the primary operator workstation shell — wlroots Wayland compositor, i3-compatible
+config, best stability record of any Wayland compositor. TGW dashboard lives in **waybar** as
+custom JSON modules polling `tgw health` and `tgw queue status` — cleaner separation than
+embedding logic in the WM process. **Wayland primary; X11/XWayland retained where it comes for
+free, not chased** (decision 2026-06-28: nine hours of clipboard debugging made straddling both
+planes clearly not worth it).
 
-Chosen over: AwesomeWM (X11-only, Lua), XMonad (Haskell, steep overhead), Hyprland (great IPC
-but config is declarative — all logic lives outside), Sway (i3-compatible but thin extensibility).
+**lan-mouse** replaces Input Leap as KVM/clipboard bridge — Wayland-native, wlroots peer-to-peer.
+Sway uses the layer-shell + pointer-constraints capture path (no ext-input-capture-v1 yet).
+
+Chosen over: Qtile (retired 2026-06-28 — Wayland clipboard instability, ran in XWayland under
+its own compositor), Hyprland (good IPC, has ext-input-capture-v1 for lan-mouse, but churn risk
+for a production workstation — revisit if it matures before Sway gains ext-capture), AwesomeWM
+(X11-only), XMonad (Haskell overhead).
 
 ### Files
 | File | Purpose |
@@ -2369,8 +2576,8 @@ but config is declarative — all logic lives outside), Sway (i3-compatible but 
   color coding; click opens health terminal; API key from `~/.config/tgw/api-key`
 - **TGWHealthWidget** — `systemctl list-units` for all `tgw-worker@*` + `tgw-http`; shows
   active/total ratio; color: green=all up, amber=some down; click opens unit list
-- **TGWSKUWidget** — polls X11 clipboard every 2s; pattern matches `tgw[0-9]{15}`; shows SKU
-  in accent color when detected; click or Super+T→c triggers lookup action
+- **TGWSKUWidget** — polls clipboard every 2s via `wl-paste` (Wayland primary) or xclip fallback;
+  pattern matches `tgw[0-9]{15}`; shows SKU in accent color when detected; click or Super+T→c triggers lookup action
 - **Super+T chord mode** — TGW command layer (bar shows `[ TGW ]`); keys: h=health, q=queue
   depths, s=staged, t=todo, v=velocity-report, c=clipboard SKU action, o=open ItemData in
   Dolphin, 1-2=pipeline triggers, F2/F4=workspace jump, Escape=exit mode
@@ -2479,14 +2686,16 @@ inputs.home-manager.inputs.nixpkgs.follows = "nixpkgs";
 
 **Next: Phase 2 — rofi/dmenu history picker (classic clipboard manager UI)**
 
-**Decisions (session 28):**
-- **Dual-backend watcher, both first-class.** Dave: the environment is already mixed and the
-  world is moving toward Wayland — accommodate both as best we can; **X11 is the stable platform
-  for now.** The daemon core (on change → classify → write SQLite → socket push) is
-  backend-agnostic; watcher backends: (a) **X11/XFixes** via python-xlib (default, stable),
-  (b) **Wayland** via `wl-paste --watch` subprocess (wl-clipboard — event-driven, zero protocol
-  code, sidesteps python-xlib staleness entirely). Session-type detection at startup
-  (`$WAYLAND_DISPLAY` / `XDG_SESSION_TYPE`) selects the backend.
+**Decisions (session 28, revised 2026-06-28 session 33):**
+- **Wayland primary; X11 compatibility if we are lucky.** Original decision held X11 as the
+  stable platform. Reversed after nine hours of X11/Wayland clipboard debugging — the cost of
+  straddling both planes exceeds any maturity advantage X11 still holds. Wayland-native paths
+  (wl-paste, zwlr-data-control, libei, lan-mouse) are the design target going forward.
+  X11/XFixes backend remains in clipd.py for XWayland fallback but is no longer the default.
+- **Dual-backend watcher architecture retained.** The daemon core (on change → classify → write
+  SQLite → socket push) is backend-agnostic; watcher backends: (a) **Wayland** via `wl-paste
+  --watch` subprocess (primary), (b) **X11/XFixes** via python-xlib (XWayland fallback).
+  Session-type detection at startup (`$WAYLAND_DISPLAY` / `XDG_SESSION_TYPE`) selects backend.
 - Phase-1 open questions answered: watch **both PRIMARY and CLIPBOARD** (highlight-capture of
   SKUs is the stated use case); DB at `~/.local/share/tgw-clip/` (per-user). The SQLite store +
   `tgw clip` CLI already shipped (session 15 R18) — the daemon feeds the existing store.
@@ -2667,6 +2876,11 @@ picklist generation. Flutter is the settled technology choice: true cross-platfo
 Android as a first-class target; reads `tgwcatalog.db` directly via sqflite when offline;
 writes go through `tgw-http` when connected to master. Syncthing handles catalog + thumbnail
 sync to the tablet automatically.
+
+**UI surface hierarchy (2026-06-28):** web UI = universal fallback (any browser, any device);
+Flutter = near-universal primary (Linux desktop, Android, iOS, web via Flutter web) with
+native performance and offline capability. The two are complementary, not competing — web for
+reach, Flutter for depth. The event server / clean API separation means both surfaces stay thin.
 
 ### Architecture
 ```
@@ -3339,6 +3553,76 @@ CLI flags: `--location`, `--limit`, `--severity`, `--output`, `--json`. 10 tests
 ---
 
 ## Pending projects (revisit)
+
+### PP-LISTEDITOR-001 — Listing Editor (item detail page restructure)
+
+Full design in `docs/ai-plans/PP-LISTEDITOR-001.md`. Replaces Seller Hub for listing management.
+
+- **Phase 1A**: EPS photo strip + `ebay_live` panel (live eBay data inline)
+- **Phase 1B**: Editable fields + aspects form (REQUIRED/RECOMMENDED badges, dropdowns for SELECTION_ONLY); price comps inline
+- **Phase 2**: Enable revision apply (`_APPLY_ENABLED=True`); fill eBay PUT stub in `revision.py:399`; extract `build_inventory_body` / `build_offer_body` from `sync.py`
+- **Phase 3**: Verify Publish for 18 staged items; end+relist gate test
+- **Files**: `http_server.py`, `revision.py`, `ebay/sync.py`, `tests/test_revision.py`
+- **Absorbs**: todos #876 #877 #878
+
+**Status**: todo #1062 open (p5, top of claude queue)
+
+---
+
+### PP-RESCUE-001 — TGW Rescue Live ISO
+
+`nixosConfigurations.tgw-rescue` in the canonical flake (`~/tgw-flake`): minimal NixOS live USB with `claude-code`, `btrfs-progs`, `postgresql` client, `age`, `rsync`, and a restore script pre-loaded.
+
+**Design** (processed from suggestions 2026-06-24):
+- `nix build .#tgw-rescue` → write to USB; boots to recovery shell
+- Stays in sync with the platform via the flake — not a separate distro
+- **AI assistance role**: operator consultation tool for unexpected mid-recovery conflicts where a second opinion helps; NOT a guided install for an uninformed user (Dave knows the system)
+- Aider handles the scripted mechanical restore path (known-good sequence: `nixos-anywhere → pg_restore → rsync → tgw health`); Claude handles unexpected failures
+- API keys either baked in via age-encrypted secrets on the USB, or prompted at boot
+- Primary DR target: `nixos-anywhere + flake` builds a usable system; hardware gaps cannot be resolved until better test hardware is available
+
+**Blocker**: PP-NIXOS-001 production stable + better test hardware.
+
+---
+
+### PP-AGENTIC-PRICE-001 — Agentic Comp Search for Auto-Pricing
+
+The platform differentiator: most resale tools price by category average; TGW prices by agentic comp search with operator-tunable search terms and self-improvement from corrections.
+
+**Problem**: Current pricing fallback chain (brand+MPN → full title → category+short → category name) degenerates badly for specific/obscure titles. Good comp search terms are what a *buyer* would type — shorter, focused on object type, brand only when it has search recognition (Microsoft YES, Ladco NO).
+
+**Design (four phases):**
+
+- **Phase 1 — Manual `search_terms` field** (build as PP-LISTEDITOR-001 sub-task):
+  - Operator-editable field on root item (`item.search_terms`)
+  - Stage 0 in `suggest_price()` fallback chain
+  - "Save & Re-price" button in comp panel — fast iteration loop
+  - Every manual entry is a labelled training example
+
+- **Phase 2 — Candidate generation + Browse API scoring**:
+  - Single LLM call (Gemini Flash Lite) generates 4–5 candidate queries ranked specific→general
+  - Run all in parallel against Browse API; score by count × relevance; pick winner
+  - Handles brand recognition automatically
+
+- **Phase 3 — Agentic loop with Browse API as tool**:
+  - Model gets `search_ebay(query)` tool; iterates 3–4 steps: try → read → judge → refine or accept
+  - Relevance judgment: "are these listings comparable to [item description]?" — Claude Sonnet
+
+- **Phase 4 — Learn from corrections**:
+  - Collect Phase 1 `search_terms` as few-shot training examples
+  - Input: title + category + what automatic chain tried + result; Output: operator correction
+  - 50–100 examples → prompt few-shots capturing domain judgment
+  - Price variance as automated relevance signal (high variance = mixed comp set = bad query)
+
+**Technical pieces needed:**
+- Browse API relevance scorer (count + semantic match + price variance)
+- LLM judge prompt: "Are these listings comparable to [item]? Rate 1–5."
+- Parallel Browse API query runner
+- Operator correction log (captured by `search_terms` field)
+
+**Blocker**: Phase 1 requires PP-LISTEDITOR-001 Phase 1B (inline comp panel + Save & Re-price).
+
+---
 
 ### PP-PORTABLE-CATALOG-001 — Portable / Satellite Catalog
 
@@ -4732,6 +5016,102 @@ captures *what we sent*, enabling photo integrity checks and emergency re-push.
 ### Config key
 
 `ebay_verify_interval_days` (int, default 7) — interval for Phase 3 periodic check.
+
+---
+
+## PP-EBAY-MIRROR-001 — Canonical eBay Data Mirror
+
+**Opened:** 2026-06-28 (session 33)
+**Status:** Phase 1 PENDING — unblocks ebay_sku_migrate immediately
+**Driver:** Repeated data gaps (photo URLs, title, condition, aspects, marketing state) traced
+to the same root cause: `ebay_live` is populated correctly by `sync_inventory_api`, but nothing
+propagates those values to canonical per-item fields. Every gap discovered has required a
+one-shot backfill script. This PP owns the fix permanently.
+
+### Problem
+`ebay_live.inventory_item.product.imageUrls` contains EPS photo URLs for all 2,138 listed items.
+`ebay_offer.photo_urls` is `None` for 2,137 of them. Same pattern repeats for title, condition,
+aspects, description. `draft_listing` has a key mismatch (`image_urls` vs `imageUrls`).
+Marketing state (active markdown, promotions) is never pulled at all despite `sell.marketing`
+scope being held.
+
+### Supersedes / retires
+- `scripts/ebay_backfill_offers.py` — one-shot; replaced by Phase 2 steady-state propagation
+- `scripts/ebay_audit.py` — one-shot audit; Phase 2 makes it redundant
+- **PP-EBAY-SNAPSHOT-001 Backfill (todo #894)** — GET inventory_item backfill absorbed here;
+  todo #894 closes when Phase 1 complete
+- The `_migrate_inventory` → photo_urls failure in `ebay_sku_migrate` is fixed by Phase 1
+  (photo_urls populated before migration re-runs; no code change to worker needed)
+
+### Integrates with
+- **PP-SYNC-001 (DONE)** — `sync_inventory_api` + `backfill_draft_from_live` in `pull.py` are
+  the existing infrastructure; Phase 2 adds the propagation step after every pull
+- **PP-EBAY-SNAPSHOT-001 Phase 3** — periodic photo integrity check runs in the same `ebay_sync`
+  extension as Phase 2; coordinate so one GET serves both
+- **PP-PROMO-001 P3** — Phase 3 `ebay_marketing` block feeds the dead-stock scanner directly;
+  P3 unblocks PP-PROMO-001 P3 (`tgw promo apply`) since it can now detect items already
+  under markdown and skip them automatically
+- **PP-REPRICER-001** — watcher count (Phase 3) is a sell-through signal; feeds future repricer
+
+### Canonical `ebay_offer` fields after Phase 1
+After normalization, `ebay_offer` is the single read target for all eBay state:
+```
+ebay_offer.offer_id, listing_id, listing_url, price, category_id  ← already present
+ebay_offer.photo_urls    ← from ebay_live.inventory_item.product.imageUrls
+ebay_offer.title         ← from ebay_live.inventory_item.product.title
+ebay_offer.condition     ← from ebay_live.inventory_item.condition
+ebay_offer.aspects       ← from ebay_live.inventory_item.product.aspects
+ebay_offer.description   ← from ebay_live.offer.listingDescription (HTML)
+```
+`draft_listing.imageUrls` key mismatch (`image_urls` → `imageUrls`) fixed in same pass.
+
+### New `ebay_marketing` block (Phase 3)
+```json
+"ebay_marketing": {
+  "in_markdown": false,
+  "markdown_discount_pct": null,
+  "markdown_sale_price": null,
+  "markdown_ends_at": null,
+  "promotions": [],
+  "watcher_count": null,
+  "watchers_updated_at": null
+}
+```
+
+### Phases
+
+| Phase | Scope | Status |
+|-------|-------|--------|
+| P1 | Normalization pass — copy `ebay_live` → `ebay_offer` fields, fix `image_urls`/`imageUrls` key, construct 49 missing `listing_url`s. Script: `scripts/ebay_normalize.py`. No API calls. Directly unblocks `ebay_sku_migrate`. | ✅ DONE 2026-06-28 (session 34) — 19,394 updated, 0 errors |
+| P1.5 | Photo push reconciliation — upload missing local photos to EPS, PUT full `imageUrls` to live inventory_item. Script: `scripts/ebay_photo_push.py`. Run after migration. ~1,135 items. | ✅ DONE (script written + dry-run verified; run pending migration completion, todo #1073) |
+| P2 | Propagation in `ebay_sync` — after every `apply_ebay_live()` call, run normalization step automatically. Coordinate with PP-EBAY-SNAPSHOT-001 P3 photo integrity check: one `GET inventory_item` serves both. Retires one-shot scripts permanently. | ✅ DONE 2026-06-28 (session 34) — two changes in `_sync_one()` + `_check_photo_integrity()`; worker restarted |
+| P3 | Marketing pull — sweep all active/scheduled promotions via `GET /sell/marketing/v1/promotion` (scope: `sell.marketing` ✅); match to items; write `ebay_marketing` block. Add `watcher_count` from Trading API `GetItem` (batch by listing_id). Schedule in `ebay_sync` weekly. | PENDING |
+
+### Execution sequence
+P1 runs as a standalone script (no workers needed, safe while workers stopped).
+After P1: restart workers + re-run `ebay_sku_migrate` — remaining 2,138 items will now succeed.
+After migration: run P1.5 (photo push) to restore full photo sets on 1,019 + 116 items.
+P2 built into `ebay_sync` in the same session or next.
+P3 is independent — can run after workers are stable.
+
+### P1.5 — Photo push reconciliation (2026-06-28)
+**Context:** 1,019 live listings have fewer photos on eBay than exist locally in ItemData.
+116 items have no EPS photos at all. Root cause: original listings were submitted with 1 photo
+(or few photos); local files were not pushed in full. `ebay_live.inventory_item.product.imageUrls`
+now gives us visibility into the gap for the first time.
+
+**Fix:** Script `scripts/ebay_photo_push.py` — for each item where local photo count > eBay EPS count:
+  1. Upload missing local photos via `upload_photo()` to EPS (idempotent via `ebay_photos` dedupe)
+  2. Collect full EPS URL list from `ebay_photos`
+  3. GET current `inventory_item` body from eBay
+  4. Update `product.imageUrls` with full set, PUT back to `/sell/inventory/v1/inventory_item/{sku}`
+  5. Write updated `ebay_live` + enqueue `catalog_rebuild`
+
+Run AFTER `ebay_sku_migrate` completes — items must be on canonical SKUs first.
+Scope: ~1,135 items. Rate: ~5 API calls/item at 0.5s delay = ~20 min total.
+Status: **PENDING** (todo #1073)
+
+Also update the phase table above to add P1.5 row.
 
 ---
 

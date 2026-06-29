@@ -24,16 +24,29 @@ import requests
 
 import tgw.logging as tgw_logging
 from tgw.apis.ebay.client import ebay_get, ebay_put
+from tgw.apis.fence import ebay_write as fence_ebay_write
+from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.ebay.pricing import to_99
 from tgw.ebay.sync import publish_offer
-from tgw.items import atomic_write_json
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
 log = logging.getLogger(__name__)
 
 QUEUE_NAME = 'ebay_publish'
+
+
+def _format_ebay_error(body: str, status: int) -> str:
+    """Extract human-readable messages from eBay error JSON."""
+    try:
+        errs = json.loads(body).get('errors', [])
+        msgs = [e.get('longMessage') or e.get('message', '') for e in errs if e.get('longMessage') or e.get('message')]
+        if msgs:
+            return '; '.join(msgs)
+    except Exception:
+        pass
+    return f'HTTP {status}: {body[:300]}'
 
 
 def _build_reprice_schedule(stages: List[Dict[str, Any]],
@@ -147,9 +160,15 @@ class EbayPublishWorker(QueueWorker):
                              {'condition': 'USED_EXCELLENT'})
                     result = publish_offer(self.config, offer_id)
                 else:
-                    raise HardFailure(
-                        f'{sku}: eBay rejected publish (HTTP {status}): {body_text[:500]}'
-                    ) from exc
+                    msg = _format_ebay_error(body_text, status)
+                    pipeline_error = {
+                        'worker': 'ebay_publish',
+                        'error': msg,
+                        'raw': body_text[:800],
+                        'at': datetime.now(timezone.utc).isoformat(),
+                    }
+                    fence_patch_item(self.config, sku, {'pipeline_error': pipeline_error})
+                    raise HardFailure(f'{sku}: eBay rejected publish: {msg}') from exc
             else:
                 raise  # transient — base class retries
 
@@ -222,7 +241,14 @@ class EbayPublishWorker(QueueWorker):
         except Exception as exc:
             log.warning('%s: photo verify GET failed (non-fatal): %s', sku, exc)
 
-        atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
+        fence_ebay_write(self.config, sku,
+                         ebay_listing=item.get('ebay_listing'),
+                         ebay_offer=item.get('ebay_offer'))
+        fence_patch_item(self.config, sku, {
+            'reprice_schedule': item.get('reprice_schedule'),
+            'price_history':    item.get('price_history', []),
+            'draft_listing':    item.get('draft_listing'),
+        })
 
         log.info('published %s → %s', sku, result['listing_url'])
         tgw_logging.log_event('ebay_listing_published', sku=sku,

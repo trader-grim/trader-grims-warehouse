@@ -86,6 +86,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+norecursedirs = ["nix", ".git", "__pycache__", "*.egg-info", "systemd"]
 
 [tool.ruff]
 line-length = 200

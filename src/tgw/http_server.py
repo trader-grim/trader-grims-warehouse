@@ -104,6 +104,9 @@ PIPELINE_ACTIONS = {
     "ebay_stage",
     "ebay_publish",
     "ebay_end_listing",
+    "ebay_update",
+    "accept_proposals",
+    "dismiss_proposals",
     "catalog_rebuild",
     "thumbnail_gen",
     "approve",
@@ -241,6 +244,23 @@ class RevisionApplyBody(BaseModel):
 
 class PhotoOrderBody(BaseModel):
     order: List[str]
+
+
+class AppendBody(BaseModel):
+    op: str
+    data: Dict[str, Any]
+
+
+class EbayWriteBody(BaseModel):
+    ebay_offer: Optional[Dict[str, Any]] = None
+    ebay_listing: Optional[Dict[str, Any]] = None
+    ebay_submitted: Optional[Dict[str, Any]] = None
+    ebay_live: Optional[Dict[str, Any]] = None
+
+
+class CreateItemBody(BaseModel):
+    sku: str
+    data: Dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
@@ -500,29 +520,115 @@ def patch_item(sku: str, body: PatchBody) -> Dict[str, Any]:
     if "location" in body.fields:
         location_value = body.fields.pop("location")
 
-    # Atomic multi-field update: load → merge → write
-    doc = load_item_doc(json_path)
-    # Deep-merge dict-valued keys so callers can update sub-fields without replacing the block
-    for _dmk in ("draft_listing", "item_attributes"):
-        if _dmk in body.fields and isinstance(body.fields.get(_dmk), dict):
-            existing = doc.get(_dmk) or {}
-            existing.update(body.fields.pop(_dmk))
-            doc[_dmk] = existing
-    doc.update(body.fields)
-    if "catalog_verified" not in body.fields:
-        doc.pop("catalog_verified", None)
-    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+    updated_keys = _apply_patch(json_path, body.fields)
 
     if location_value is not None:
         result = locationupdate(_cfg, sku, location_value)
         if not result.get("ok"):
             log.warning("location tree update failed for %s: %s", sku, result)
+        updated_keys.append("location")
 
-    # Enqueue coalesced catalog rebuild
+    _enqueue_catalog_rebuild(f"http_patch:{sku}")
+
+    return {"ok": True, "sku": sku, "updated": updated_keys}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/items/{sku}/append — typed list append (PP-FENCE-001 Layer 3)
+# ---------------------------------------------------------------------------
+
+_APPEND_OP_TO_FIELD: Dict[str, Optional[str]] = {
+    "vision_result":     "vision_results",
+    "photo":             "photos",
+    "price_event":       "price_history",
+    "history_event":     None,   # target determined by data["type"]
+}
+_HISTORY_SUBTYPES = {"title", "description", "location"}
+
+
+@app.post("/api/items/{sku}/append", dependencies=[AUTH])
+def append_item(sku: str, body: AppendBody) -> Dict[str, Any]:
+    if body.op not in _APPEND_OP_TO_FIELD:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown op {body.op!r}; valid: {sorted(_APPEND_OP_TO_FIELD)}",
+        )
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+
+    field = _APPEND_OP_TO_FIELD[body.op]
+    if field is None:
+        subtype = body.data.get("type", "")
+        if subtype not in _HISTORY_SUBTYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"history_event requires data.type in {_HISTORY_SUBTYPES}",
+            )
+        field = f"{subtype}_history"
+
+    entry = {**body.data, "appended_at": datetime.now(timezone.utc).isoformat()}
+    doc = load_item_doc(json_path)
+    lst = doc.get(field)
+    if not isinstance(lst, list):
+        lst = []
+    lst.append(entry)
+    _apply_patch(json_path, {field: lst})
+    _enqueue_catalog_rebuild(f"append:{sku}:{body.op}")
+
+    return {"ok": True, "sku": sku, "op": body.op, "field": field}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/items/{sku}/ebay-write — deep-merge eBay blocks (PP-FENCE-001 Layer 3)
+# ---------------------------------------------------------------------------
+
+# Sub-fields workers must NOT clobber when merging eBay blocks
+_EBAY_WRITE_PROTECTED: Dict[str, set] = {
+    "ebay_offer":     {"price_comps", "staged_at"},
+    "ebay_listing":   {"photo_verify"},
+    "ebay_submitted": set(),
+    "ebay_live":      set(),
+}
+
+
+@app.post("/api/items/{sku}/ebay-write", dependencies=[AUTH])
+def ebay_write(sku: str, body: EbayWriteBody) -> Dict[str, Any]:
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+
+    incoming = {
+        "ebay_offer":     body.ebay_offer,
+        "ebay_listing":   body.ebay_listing,
+        "ebay_submitted": body.ebay_submitted,
+        "ebay_live":      body.ebay_live,
+    }
+    if not any(v is not None for v in incoming.values()):
+        raise HTTPException(status_code=400, detail="no eBay blocks provided")
+
+    changed_fields = _apply_ebay_write(
+        json_path, sku,
+        ebay_offer=body.ebay_offer,
+        ebay_listing=body.ebay_listing,
+        ebay_submitted=body.ebay_submitted,
+        ebay_live=body.ebay_live,
+    )
+    _enqueue_catalog_rebuild(f"ebay_write:{sku}")
+    return {"ok": True, "sku": sku, "changed_fields": changed_fields}
+
+
+# ---------------------------------------------------------------------------
+# Internal write helpers — all item data writes route through these
+# (PP-FENCE-001 Session C: UI layer must not call atomic_write_json directly)
+# ---------------------------------------------------------------------------
+
+def _enqueue_catalog_rebuild(reason: str) -> None:
+    """Coalesced catalog rebuild — 30s delay, single dedupe key."""
     try:
         state_machine.enqueue_job(
             queue_name="catalog_rebuild",
-            payload={"reason": f"http_patch:{sku}"},
+            payload={"reason": reason},
             dedupe_key="catalog_rebuild:pending",
             not_before=time.time() + 30,
             max_attempts=3,
@@ -530,11 +636,109 @@ def patch_item(sku: str, body: PatchBody) -> Dict[str, Any]:
     except Exception:
         pass
 
-    updated_keys = list(body.fields.keys())
-    if location_value is not None:
-        updated_keys.append("location")
 
-    return {"ok": True, "sku": sku, "updated": updated_keys}
+def _apply_patch(json_path: "Path", fields: Dict[str, Any]) -> List[str]:
+    """Core item patch: deep-merge dict fields, write atomically, schedule rebuild.
+
+    Fields with value None are deleted from the document.
+    Returns the list of keys that were written or deleted.
+    """
+    fields = dict(fields)
+    doc = load_item_doc(json_path)
+    for dmk in ("draft_listing", "item_attributes"):
+        if dmk in fields and isinstance(fields[dmk], dict):
+            existing = doc.get(dmk) or {}
+            existing.update(fields.pop(dmk))
+            doc[dmk] = existing
+    to_delete = [k for k, v in fields.items() if v is None]
+    for k in to_delete:
+        doc.pop(k, None)
+        fields.pop(k)
+    doc.update(fields)
+    if "catalog_verified" not in fields:
+        doc.pop("catalog_verified", None)
+    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+    return list(fields.keys()) + to_delete
+
+
+def _apply_ebay_write(
+    json_path: "Path",
+    sku: str,
+    *,
+    ebay_offer: Optional[Dict[str, Any]] = None,
+    ebay_listing: Optional[Dict[str, Any]] = None,
+    ebay_submitted: Optional[Dict[str, Any]] = None,
+    ebay_live: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """eBay block deep-merge with field protection — same logic as POST /ebay-write."""
+    incoming = {
+        "ebay_offer":     ebay_offer,
+        "ebay_listing":   ebay_listing,
+        "ebay_submitted": ebay_submitted,
+        "ebay_live":      ebay_live,
+    }
+    doc = load_item_doc(json_path)
+    changed: List[str] = []
+    for block_key, incoming_block in incoming.items():
+        if incoming_block is None:
+            continue
+        protected = _EBAY_WRITE_PROTECTED.get(block_key, set())
+        existing = doc.get(block_key) or {}
+        if not isinstance(existing, dict):
+            existing = {}
+        if block_key == "ebay_offer" and "price" in incoming_block:
+            stored_price = existing.get("price")
+            incoming_price = incoming_block.get("price")
+            if stored_price and incoming_price and str(stored_price) != str(incoming_price):
+                log.warning(
+                    "ebay_write price divergence for %s: stored=%s incoming=%s",
+                    sku, stored_price, incoming_price,
+                )
+        merged = {**existing, **incoming_block}
+        for pf in protected:
+            if pf in existing and pf not in incoming_block:
+                merged[pf] = existing[pf]
+        doc[block_key] = merged
+        changed.append(block_key)
+    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+    return changed
+
+
+# ---------------------------------------------------------------------------
+# POST /api/items — item creation (PP-FENCE-001 Layer 3)
+# ---------------------------------------------------------------------------
+
+_SKU_RE = re.compile(r'^tgw\d{17,20}$')
+
+
+@app.post("/api/items", dependencies=[AUTH])
+def create_item_endpoint(body: CreateItemBody) -> Dict[str, Any]:
+    if not _SKU_RE.match(body.sku):
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid sku format {body.sku!r}; must match tgwYYYYMMDDHHMMSSmmm",
+        )
+    item_dir = _cfg["itemdata_root"] / body.sku
+    json_path = item_dir / f"{body.sku}.json"
+    if json_path.exists():
+        raise HTTPException(status_code=409, detail=f"sku already exists: {body.sku}")
+
+    item_dir.mkdir(parents=True, exist_ok=True)
+    record = {"sku": body.sku, **body.data}
+    atomic_write_json(json_path, record, pretty=_cfg.get("pretty", True))
+
+    try:
+        state_machine.enqueue_job(
+            queue_name="catalog_rebuild",
+            payload={"reason": f"create:{body.sku}"},
+            dedupe_key="catalog_rebuild:pending",
+            not_before=time.time() + 30,
+            max_attempts=3,
+        )
+    except Exception:
+        pass
+
+    return {"ok": True, "sku": body.sku, "path": str(json_path)}
 
 
 # ---------------------------------------------------------------------------
@@ -626,9 +830,7 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
                 errors.append(f"{sku}: not found")
                 continue
             try:
-                doc = load_item_doc(json_path)
-                doc["status"] = "Ready"
-                atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+                _apply_patch(json_path, {"status": "Ready"})
                 done.append(sku)
             except Exception as exc:
                 errors.append(f"{sku}: {exc}")
@@ -645,16 +847,7 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
                     err = str(exc)
                     if "unique" not in err.lower() and "duplicate" not in err.lower():
                         errors.append(f"{sku} (stage): {err}")
-        try:
-            state_machine.enqueue_job(
-                queue_name="catalog_rebuild",
-                payload={"reason": f"bulk_{body.action}"},
-                dedupe_key="catalog_rebuild:pending",
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
-        except Exception:
-            pass
+        _enqueue_catalog_rebuild(f"bulk_{body.action}")
         return {"ok": bool(done), "count": len(done), "done": done, "errors": errors}
 
     if body.action in ("mark_sold", "delete", "archive"):
@@ -668,24 +861,14 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
                 errors.append(f"{sku}: not found")
                 continue
             try:
-                doc = load_item_doc(json_path)
-                doc["status"] = new_status
+                fields: Dict[str, Any] = {"status": new_status}
                 if body.action == "delete":
-                    doc["deleted_at"] = datetime.now(timezone.utc).isoformat()
-                atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+                    fields["deleted_at"] = datetime.now(timezone.utc).isoformat()
+                _apply_patch(json_path, fields)
                 done.append(sku)
             except Exception as exc:
                 errors.append(f"{sku}: {exc}")
-        try:
-            state_machine.enqueue_job(
-                queue_name="catalog_rebuild",
-                payload={"reason": f"bulk_{body.action}"},
-                dedupe_key="catalog_rebuild:pending",
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
-        except Exception:
-            pass
+        _enqueue_catalog_rebuild(f"bulk_{body.action}")
         return {"ok": not errors, "count": len(done), "done": done, "errors": errors}
 
     if body.action == "ebay_end_listing":
@@ -710,23 +893,14 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
                 else:
                     from .apis.ebay.trading import end_item as _end_item
                     _end_item(_cfg, listing_id_val)
-                eb["status"] = "Ended"
-                eb["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                doc["ebay_listing"] = eb
-                atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+                _apply_ebay_write(json_path, sku, ebay_listing={
+                    "status": "Ended",
+                    "ended_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                })
                 done.append(sku)
             except Exception as exc:
                 errors.append(f"{sku}: {exc}")
-        try:
-            state_machine.enqueue_job(
-                queue_name="catalog_rebuild",
-                payload={"reason": "bulk_ebay_end_listing"},
-                dedupe_key="catalog_rebuild:pending",
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
-        except Exception:
-            pass
+        _enqueue_catalog_rebuild("bulk_ebay_end_listing")
         return {"ok": not errors, "count": len(done), "done": done, "errors": errors}
 
     # Pipeline actions — enqueue a job per SKU
@@ -740,9 +914,7 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
             continue
         try:
             if body.action == "ai_identify":
-                doc = load_item_doc(json_path)
-                doc["ai_reidentify"] = True
-                atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+                _apply_patch(json_path, {"ai_reidentify": True})
             state_machine.enqueue_job(
                 queue_name=body.action,
                 payload={"sku": sku},
@@ -791,19 +963,8 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
     try:
         if action == "approve":
             # Human approval of AI draft — set status=Ready, no job enqueued
-            doc = load_item_doc(json_path)
-            doc["status"] = "Ready"
-            atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
-            try:
-                state_machine.enqueue_job(
-                    queue_name="catalog_rebuild",
-                    payload={"reason": f"approve:{sku}"},
-                    dedupe_key="catalog_rebuild:pending",
-                    not_before=time.time() + 30,
-                    max_attempts=3,
-                )
-            except Exception:
-                pass
+            _apply_patch(json_path, {"status": "Ready"})
+            _enqueue_catalog_rebuild(f"approve:{sku}")
             return {"ok": True, "sku": sku, "action": "approve", "status": "Ready"}
         elif action == "catalog_rebuild":
             job_id = state_machine.enqueue_job(
@@ -814,19 +975,8 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                 max_attempts=3,
             )
         elif action == "archive":
-            doc = load_item_doc(json_path)
-            doc["status"] = "archived"
-            atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
-            try:
-                state_machine.enqueue_job(
-                    queue_name="catalog_rebuild",
-                    payload={"reason": f"archive:{sku}"},
-                    dedupe_key="catalog_rebuild:pending",
-                    not_before=time.time() + 30,
-                    max_attempts=3,
-                )
-            except Exception:
-                pass
+            _apply_patch(json_path, {"status": "archived"})
+            _enqueue_catalog_rebuild(f"archive:{sku}")
             return {"ok": True, "sku": sku, "action": "archive", "status": "archived"}
 
         elif action == "ebay_end_listing":
@@ -845,20 +995,11 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                     # Trading API: end the legacy listing
                     from .apis.ebay.trading import end_item as _end_item
                     _end_item(_cfg, listing_id_val)
-                eb["status"] = "Ended"
-                eb["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                doc["ebay_listing"] = eb
-                atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
-                try:
-                    state_machine.enqueue_job(
-                        queue_name="catalog_rebuild",
-                        payload={"reason": f"ebay_end:{sku}"},
-                        dedupe_key="catalog_rebuild:pending",
-                        not_before=time.time() + 30,
-                        max_attempts=3,
-                    )
-                except Exception:
-                    pass
+                _apply_ebay_write(json_path, sku, ebay_listing={
+                    "status": "Ended",
+                    "ended_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                })
+                _enqueue_catalog_rebuild(f"ebay_end:{sku}")
             except HTTPException:
                 raise
             except Exception as exc:
@@ -868,10 +1009,8 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
         elif action == "migrate_unblock":
             import json as _json
             from pathlib import Path as _Path
-            doc = load_item_doc(json_path)
-            was_blocked = doc.pop("sku_migrate_blocked", None)
-            doc.pop("sku_migrate_skip", None)
-            atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+            was_blocked_val = load_item_doc(json_path).get("sku_migrate_blocked")
+            _apply_patch(json_path, {"sku_migrate_blocked": None, "sku_migrate_skip": None})
             # Remove from blocked registry
             registry_path = _Path("/opt/TGW/var/migrate-blocked.json")
             try:
@@ -885,7 +1024,7 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
             except Exception:
                 pass
             return {"ok": True, "sku": sku, "action": "migrate_unblock",
-                    "was_blocked": was_blocked is not None}
+                    "was_blocked": was_blocked_val is not None}
 
         elif action == "review_mark_ready":
             from datetime import datetime as _dt
@@ -897,10 +1036,50 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                         "note": "no review_block present"}
             rb["ready"] = True
             rb["retested_at"] = _dt.now(_tz.utc).isoformat()
-            doc["review_block"] = rb
-            atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+            _apply_patch(json_path, {"review_block": rb})
             return {"ok": True, "sku": sku, "action": "review_mark_ready",
                     "stage": rb.get("stage"), "reason_code": rb.get("reason_code")}
+
+        elif action == "accept_proposals":
+            doc = load_item_doc(json_path)
+            rev = doc.get("revision_draft") or {}
+            delta = rev.get("delta") or {}
+            if not delta:
+                return {"ok": False, "detail": "no revision_draft delta to accept"}
+            ia = doc.get("item_attributes") or {}
+            if "item_specifics" in delta and isinstance(delta["item_specifics"], dict):
+                ia.update(delta["item_specifics"])
+                doc["item_attributes"] = ia
+            dl2 = doc.get("draft_listing") or {}
+            if "title" in delta:
+                dl2["title"] = delta["title"]
+            if "description" in delta:
+                dl2["description"] = delta["description"]
+            proposal_fields: Dict[str, Any] = {"revision_draft": None}
+            if ia is not doc.get("item_attributes"):
+                proposal_fields["item_attributes"] = ia
+            if dl2 is not doc.get("draft_listing"):
+                proposal_fields["draft_listing"] = dl2
+            _apply_patch(json_path, proposal_fields)
+            _enqueue_catalog_rebuild(f"accept_proposals:{sku}")
+            return {"ok": True, "sku": sku, "action": "accept_proposals"}
+
+        elif action == "dismiss_proposals":
+            if "revision_draft" not in load_item_doc(json_path):
+                return {"ok": True, "sku": sku, "note": "no revision_draft present"}
+            _apply_patch(json_path, {"revision_draft": None})
+            return {"ok": True, "sku": sku, "action": "dismiss_proposals"}
+
+        elif action == "ebay_update":
+            # Update a live listing in place — PUT inventory item + offer without ending/relisting.
+            # Preserves listing age, view history, and search ranking.
+            # Reads current draft_listing; run Re-draft first to incorporate aspect edits.
+            job_id = state_machine.enqueue_job(
+                queue_name="ebay_stage",
+                payload={"sku": sku, "force": True},
+                max_attempts=2,
+            )
+            return {"ok": True, "sku": sku, "action": "ebay_update", "job_id": job_id}
 
         elif action == "sync_from_ebay":
             job_id = state_machine.enqueue_job(
@@ -929,10 +1108,7 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
             return {"ok": False, "sku": sku, "detail": err}
 
         elif action == "ai_identify":
-            # Clear ai_identified so the worker will run
-            doc = load_item_doc(json_path)
-            doc["ai_reidentify"] = True
-            atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+            _apply_patch(json_path, {"ai_reidentify": True})
             job_id = state_machine.enqueue_job(
                 queue_name="ai_identify",
                 payload={"sku": sku},
@@ -941,17 +1117,15 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
             )
 
         elif action == "ebay_price":
-            # Clear existing price data so the worker runs fresh (idempotent guard)
-            doc = load_item_doc(json_path)
-            eo = doc.get("ebay_offer") or {}
+            # Clear price sub-fields so the worker runs fresh (load→strip→patch)
+            _doc = load_item_doc(json_path)
+            _eo = dict(_doc.get("ebay_offer") or {})
             for _k in ("price", "price_comps", "priced_at", "price_source", "target_price"):
-                eo.pop(_k, None)
-            doc["ebay_offer"] = eo
-            dl = doc.get("draft_listing") or {}
-            dl.pop("price", None)
-            dl.pop("price_confidence", None)
-            doc["draft_listing"] = dl
-            atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+                _eo.pop(_k, None)
+            _dl = dict(_doc.get("draft_listing") or {})
+            _dl.pop("price", None)
+            _dl.pop("price_confidence", None)
+            _apply_patch(json_path, {"ebay_offer": _eo, "draft_listing": _dl})
             job_id = state_machine.enqueue_job(
                 queue_name="ebay_price",
                 payload={"sku": sku},
@@ -1473,19 +1647,8 @@ def set_item_template(sku: str, body: SetTemplateBody) -> Dict[str, Any]:
     if cats and not doc.get("ebay_category_id"):
         fields["ebay_category_id"] = cats[0]
 
-    doc.update(fields)
-    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
-
-    try:
-        state_machine.enqueue_job(
-            queue_name="catalog_rebuild",
-            payload={"reason": f"set_template:{sku}"},
-            dedupe_key="catalog_rebuild:pending",
-            not_before=time.time() + 30,
-            max_attempts=3,
-        )
-    except Exception:
-        pass
+    _apply_patch(json_path, fields)
+    _enqueue_catalog_rebuild(f"set_template:{sku}")
 
     return {"ok": True, "sku": sku, "template_key": body.template_key,
             "applied": fields, "group_name": grp.get("name", body.template_key)}
@@ -1507,22 +1670,8 @@ def delete_item(sku: str) -> Dict[str, Any]:
     if not json_path.exists():
         raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
 
-    doc = load_item_doc(json_path)
-    doc["status"] = "deleted"
-    doc["deleted_at"] = datetime.now().isoformat()
-    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
-
-    try:
-        state_machine.enqueue_job(
-            queue_name="catalog_rebuild",
-            payload={"reason": f"delete:{sku}"},
-            dedupe_key="catalog_rebuild:pending",
-            not_before=time.time() + 30,
-            max_attempts=3,
-        )
-    except Exception:
-        pass
-
+    _apply_patch(json_path, {"status": "deleted", "deleted_at": datetime.now().isoformat()})
+    _enqueue_catalog_rebuild(f"delete:{sku}")
     return {"ok": True, "sku": sku, "status": "deleted"}
 
 
@@ -1537,9 +1686,7 @@ def set_photo_order(sku: str, body: PhotoOrderBody) -> Dict[str, Any]:
     json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
     if not json_path.exists():
         raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
-    doc = load_item_doc(json_path)
-    doc["photo_order"] = [n for n in body.order if n]
-    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+    _apply_patch(json_path, {"photo_order": [n for n in body.order if n]})
     try:
         state_machine.enqueue_job(
             queue_name="catalog_rebuild",
@@ -1550,7 +1697,7 @@ def set_photo_order(sku: str, body: PhotoOrderBody) -> Dict[str, Any]:
         )
     except Exception:
         pass
-    return {"ok": True, "sku": sku, "order": doc["photo_order"]}
+    return {"ok": True, "sku": sku, "order": [n for n in body.order if n]}
 
 
 # ---------------------------------------------------------------------------
@@ -1594,8 +1741,7 @@ def delete_asset(sku: str, filename: str) -> Dict[str, Any]:
     doc = load_item_doc(json_path)
     order = doc.get("photo_order") or []
     if filename in order:
-        doc["photo_order"] = [n for n in order if n != filename]
-        atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+        _apply_patch(json_path, {"photo_order": [n for n in order if n != filename]})
     return {"ok": True, "sku": sku, "deleted": filename}
 
 
@@ -1649,7 +1795,7 @@ _CONDITION_ID_MAP: Dict[str, List[Dict[str, str]]] = {
 
 
 # Module-level constant — avoids nested quote hell in f-string script blocks
-_CATEGORY_CONTEXT_IIFE = 'function loadCatCtx(catId){\n  var prefill=window._DL_PREFILL||{};\n  var loading=document.getElementById(\'aspects-loading\');\n  var form=document.getElementById(\'aspects-form\');\n  if(!catId){if(loading)loading.textContent=\'No category.\';return;}\n  fetch(\'/api/ebay/category-context/\'+encodeURIComponent(catId),{headers:authHeaders()})\n  .then(function(r){return r.json();}).then(function(d){\n    if(!d||!d.ok){if(loading)loading.textContent=\'Context load failed.\';return;}\n    window._CAT_CTX=d;\n    var sel=document.getElementById(\'dl-condition-select\');\n    if(sel&&d.conditions&&d.conditions.length){\n      var allowed={};\n      d.conditions.forEach(function(c){allowed[c.enum]=c.label;});\n      Array.from(sel.options).forEach(function(opt){\n        if(opt.value&&!allowed[opt.value])opt.style.display=\'none\';\n        else if(opt.value&&allowed[opt.value])opt.text=allowed[opt.value];\n      });\n      var cn=document.getElementById(\'condition-policy-note\');\n      var nl=d.conditions.length;\n      if(cn)cn.textContent=nl+(nl===1?\' condition\':\' conditions\')+\' allowed\';\n    }\n    if(d.fulfillment_policy_id){\n      var fsel=document.getElementById(\'dl-ship-input\');\n      var fhint=document.getElementById(\'dl-ship-hint\');\n      if(fsel&&!fsel.value){\n        for(var fi=0;fi<fsel.options.length;fi++){\n          if(fsel.options[fi].value===d.fulfillment_policy_id){fsel.value=d.fulfillment_policy_id;break;}\n        }\n        if(fsel.value){\n          fetch(\'/api/items/\'+window._ITEM_SKU,{method:\'PATCH\',\n            headers:authHeaders({\'Content-Type\':\'application/json\'}),\n            body:JSON.stringify({fields:{draft_listing:{shipping_profile:fsel.value}}})});\n        }\n      }\n      if(fhint&&!fsel.value)fhint.textContent=\'suggested: \'+d.fulfillment_policy_id;\n    }\n    if(d.store_category){\n      var sch=document.getElementById(\'store-cat-hint\');\n      if(sch)sch.textContent=\'suggested: \'+d.store_category;\n    }\n    if(d.group_name){\n      var gh=document.getElementById(\'category-group-hint\');\n      if(gh){\n        var pt=d.pricing&&d.pricing.typical_used?\' · typical $\'+d.pricing.typical_used.toFixed(2):\'\';\n        var pf=d.pricing&&d.pricing.floor?\' · floor $\'+d.pricing.floor.toFixed(2):\'\';\n        gh.textContent=\'group: \'+d.group_name+pf+pt;\n      }\n    }\n    if(loading)loading.style.display=\'none\';\n    if(!form)return;\n    if(!d.aspects||!d.aspects.length){\n      form.innerHTML=\'<span style="color:#556;font-size:.82em">No aspects for this category</span>\';\n      return;\n    }\n    var html=\'\';\n    d.aspects.forEach(function(asp){\n      var badge=asp.required\n        ?\'<span style="font-size:.7em;background:#3a1a1a;color:#c44;border-radius:3px;padding:1px 5px;margin-left:4px">REQ</span>\'\n        :\'<span style="font-size:.7em;background:#2a2a0a;color:#aa0;border-radius:3px;padding:1px 5px;margin-left:4px">REC</span>\';\n      var cur=(prefill[asp.name]||\'\').toString().replace(/"/g,\'&quot;\');\n      var inp;\n      if(asp.allowed_values&&asp.allowed_values.length&&asp.mode===\'SELECTION_ONLY\'){\n        var opts=asp.allowed_values.map(function(v){\n          return \'<option value="\'+v+\'"\'+(v===prefill[asp.name]?\' selected\':\'\')+\'>\'+v+\'</option>\';\n        }).join(\'\');\n        inp=\'<select data-aspect="\'+asp.name+\'" style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:3px;padding:2px 5px;font-size:.85em"><option value="">—</option>\'+opts+\'</select>\';\n      }else{\n        var dlid=\'dl-asp-\'+asp.name.replace(/[^a-zA-Z0-9]/g,\'-\');\n        var dlopts=asp.allowed_values&&asp.allowed_values.length\n          ?\'<datalist id="\'+dlid+\'">\'+asp.allowed_values.map(function(v){return \'<option value="\'+v+\'"></option>\';}).join(\'\')+\'</datalist>\'\n          :\'\';\n        inp=\'<input type="text"\'+(dlopts?\' list="\'+dlid+\'"\':\'\')+\' data-aspect="\'+asp.name+\'" value="\'+cur+\'"\'\n           +\' style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:3px;padding:2px 5px;font-size:.85em;width:200px">\'\n           +dlopts;\n      }\n      html+=\'<div class="frow"><span class="fn" style="font-size:.82em">\'+asp.name+badge+\'</span><span class="fv">\'+inp+\'</span></div>\';\n    });\n    form.innerHTML=html;\n  }).catch(function(){\n    if(loading)loading.textContent=\'Category context load failed.\';\n  });\n}\ndocument.addEventListener(\'DOMContentLoaded\',function(){\n  if(window._DL_CAT_ID)loadCatCtx(window._DL_CAT_ID);\n  if(typeof initCatSearch===\'function\')initCatSearch();\n});\n'
+_CATEGORY_CONTEXT_IIFE = 'function loadCatCtx(catId){\n  var prefill=window._DL_PREFILL||{};\n  var loading=document.getElementById(\'aspects-loading\');\n  var form=document.getElementById(\'aspects-form\');\n  if(!catId){if(loading)loading.textContent=\'No category.\';return;}\n  fetch(\'/api/ebay/category-context/\'+encodeURIComponent(catId),{headers:authHeaders()})\n  .then(function(r){return r.json();}).then(function(d){\n    if(!d||!d.ok){if(loading)loading.textContent=\'Context load failed.\';return;}\n    window._CAT_CTX=d;\n    var sel=document.getElementById(\'dl-condition-select\');\n    if(sel&&d.conditions&&d.conditions.length){\n      var allowed={};\n      d.conditions.forEach(function(c){allowed[c.enum]=c.label;});\n      Array.from(sel.options).forEach(function(opt){\n        if(opt.value&&!allowed[opt.value])opt.style.display=\'none\';\n        else if(opt.value&&allowed[opt.value])opt.text=allowed[opt.value];\n      });\n      var cn=document.getElementById(\'condition-policy-note\');\n      var nl=d.conditions.length;\n      if(cn)cn.textContent=nl+(nl===1?\' condition\':\' conditions\')+\' allowed\';\n    }\n    if(d.fulfillment_policy_id){\n      var fsel=document.getElementById(\'dl-ship-input\');\n      var fhint=document.getElementById(\'dl-ship-hint\');\n      if(fsel&&!fsel.value){\n        for(var fi=0;fi<fsel.options.length;fi++){\n          if(fsel.options[fi].value===d.fulfillment_policy_id){fsel.value=d.fulfillment_policy_id;break;}\n        }\n        if(fsel.value){\n          fetch(\'/api/items/\'+window._ITEM_SKU,{method:\'PATCH\',\n            headers:authHeaders({\'Content-Type\':\'application/json\'}),\n            body:JSON.stringify({fields:{draft_listing:{shipping_profile:fsel.value}}})});\n        }\n      }\n      if(fhint&&!fsel.value)fhint.textContent=\'suggested: \'+d.fulfillment_policy_id;\n    }\n    if(d.store_category){\n      var sch=document.getElementById(\'store-cat-hint\');\n      if(sch)sch.textContent=\'suggested: \'+d.store_category;\n    }\n    if(d.group_name){\n      var gh=document.getElementById(\'category-group-hint\');\n      if(gh){\n        var pt=d.pricing&&d.pricing.typical_used?\' · typical $\'+d.pricing.typical_used.toFixed(2):\'\';\n        var pf=d.pricing&&d.pricing.floor?\' · floor $\'+d.pricing.floor.toFixed(2):\'\';\n        gh.textContent=\'group: \'+d.group_name+pf+pt;\n      }\n    }\n    if(loading)loading.style.display=\'none\';\n    if(!form)return;\n    if(!d.aspects||!d.aspects.length){\n      form.innerHTML=\'<span style="color:#556;font-size:.82em">No aspects for this category</span>\';\n      return;\n    }\n    var html=\'\';\n    d.aspects.forEach(function(asp){\nd.aspects.forEach(function(asp){\n      var badge=asp.required\n        ?\'<span style="font-size:.7em;background:#3a1a1a;color:#c44;border-radius:3px;padding:1px 5px;margin-left:4px">REQ</span>\'\n        :\'<span style="font-size:.7em;background:#2a2a0a;color:#aa0;border-radius:3px;padding:1px 5px;margin-left:4px">REC</span>\';\n      // Three-layer merge: operator edits (blue) > proposed (yellow) > live (baseline)\n      var liveVal=(window._LIVE_ASPECTS&&window._LIVE_ASPECTS[asp.name]!==undefined?(window._LIVE_ASPECTS[asp.name]||\'\').toString():\'\');\n      var proposedVal=(window._PROPOSED_ASPECTS&&window._PROPOSED_ASPECTS[asp.name]!==undefined?(window._PROPOSED_ASPECTS[asp.name]||\'\').toString():\'\');\n      var editVal=(prefill[asp.name]!==undefined?(prefill[asp.name]||\'\').toString():\'\');\n      var cur,layer;\n      if(editVal){cur=editVal;layer=(editVal!==liveVal)?\'edit\':\'same\';}\n      else if(proposedVal){cur=proposedVal;layer=(proposedVal!==liveVal)?\'proposed\':\'same\';}\n      else{cur=liveVal;layer=liveVal?\'live\':\'empty\';}\n      cur=cur.replace(/"/g,\'&quot;\');\n      var reqEmpty=asp.required&&!cur;\n      // Colours by layer\n      var bord=reqEmpty?\'#c44\':(layer===\'edit\'?\'#44c\':(layer===\'proposed\'?\'#884\':\'#444\'));\n      var bg=reqEmpty?\'#1a0a0a\':(layer===\'edit\'?\'#0a0a1a\':(layer===\'proposed\'?\'#1a1a00\':\'#1a1a1a\'));\n      // Hint: show live value when overridden or proposed differs\n      var liveHint=(layer===\'edit\'||layer===\'proposed\')&&liveVal\n        ?\'<div style="font-size:.7em;color:#445;margin-top:1px">live: \'+liveVal.replace(/</g,\'&lt;\').replace(/>/g,\'&gt;\')+\'</div>\'\n        :\'\';\n      var inp;\n      if(asp.allowed_values&&asp.allowed_values.length&&asp.mode===\'SELECTION_ONLY\'){\n        var opts=asp.allowed_values.map(function(v){\n          return \'<option value="\'+v+\'"\'+(v===cur?\' selected\':\'\')+\'>\'+v+\'</option>\';\n        }).join(\'\');\n        inp=\'<select data-aspect="\'+asp.name+\'" style="background:\'+bg+\';color:#eee;border:1px solid \'+bord+\';border-radius:3px;padding:2px 5px;font-size:.85em"><option value="">—</option>\'+opts+\'</select>\';\n      }else{\n        var dlid=\'dl-asp-\'+asp.name.replace(/[^a-zA-Z0-9]/g,\'-\');\n        var dlopts=asp.allowed_values&&asp.allowed_values.length\n          ?\'<datalist id="\'+dlid+\'">\'+asp.allowed_values.map(function(v){return \'<option value="\'+v+\'"></option>\';}).join(\'\')+\'</datalist>\'\n          :\'\';\n        inp=\'<input type="text"\'+(dlopts?\' list="\'+dlid+\'"\':\'\')+\' data-aspect="\'+asp.name+\'" value="\'+cur+\'"\'\n           +\' style="background:\'+bg+\';color:#eee;border:1px solid \'+bord+\';border-radius:3px;padding:2px 5px;font-size:.85em;width:200px">\'\n           +dlopts;\n      }\n      html+=\'<div class="frow"\'+(reqEmpty?\' style="border-left:2px solid #944;padding-left:4px"\':\'\')+\'>  <span class="fn" style="font-size:.82em">\'+asp.name+badge+\'</span><span class="fv">\'+inp+liveHint+\'</span></div>\';\n    });\n    \n    var missingReq=d.aspects.filter(function(a){return a.required&&!(prefill[a.name]||\'\');}).length;if(missingReq>0){html=\'<div style="margin-bottom:8px;padding:5px 8px;background:#1a0808;border:1px solid #844;border-radius:3px;font-size:.78em;color:#e88">\'+missingReq+\' required aspect\'+(missingReq===1?\'\':\'s\')+\' missing values — fill before staging</div>\'+html;}form.innerHTML=html;\n  }).catch(function(){\n    if(loading)loading.textContent=\'Category context load failed.\';\n  });\n}\ndocument.addEventListener(\'DOMContentLoaded\',function(){\n  if(window._DL_CAT_ID)loadCatCtx(window._DL_CAT_ID);\n  if(typeof initCatSearch===\'function\')initCatSearch();\n});\n'
 
 # ---------------------------------------------------------------------------
 # GET /form/intake — intake landing page (HTML)
@@ -2793,6 +2939,11 @@ _ITEMS_EXTRA_CSS = """
   line-height:1.4;display:none;z-index:2}
 .strip-item:hover .strip-mv{display:block}
 .strip-mv:hover{background:rgba(10,60,130,.85)}
+.dleft{display:flex;flex-direction:column;gap:12px}
+.dleft-log{display:flex;flex-direction:column;gap:12px}
+.gallery{overflow:hidden}
+details.dsec>summary::-webkit-details-marker{display:none}
+details.dsec[open]>summary span:last-child{transform:rotate(90deg)}
 """
 
 _BROWSE_HTML = """\
@@ -3167,7 +3318,7 @@ def _render_item_detail_html(
             f'<div class="gallery">'
             f'<div class="lb-overlay" id="lb" onclick="lbClose()">'
             f'<button class="lb-close" onclick="lbClose();event.stopPropagation()">✕</button>'
-            f'<img class="lb-img" id="lb-img" src="" alt="">'
+            f'<img class="lb-img" id="lb-img" src="data:," alt="">'
             f'</div>'
             f'<img class="main-photo" id="mp" src="{main_src}" alt="" onclick="lbOpen(this.src)">'
             f'<div class="strip" id="photo-strip">{strip}</div>'
@@ -3252,7 +3403,7 @@ def _render_item_detail_html(
     offer_status = (eo.get("status") or "").strip()
     offer_price = eo.get("price")
     is_active = listing_status.lower() in ("active",) or offer_status.upper() in ("PUBLISHED",)
-    is_staged = offer_status.upper() in ("UNPUBLISHED", "PUBLISHED")
+    _is_staged = offer_status.upper() in ("UNPUBLISHED", "PUBLISHED")
     is_ready = bool(eo.get("ready_at")) and offer_status.upper() == "UNPUBLISHED"
 
     # Resolved display price (offer > internal > draft)
@@ -3504,7 +3655,7 @@ def _render_item_detail_html(
         _draft_section = '&'
 
     # Revision draft diff
-    revision_draft_html = ""
+    _revision_draft_html = ""
     revision = item.get("revision_draft")
     if revision:
         delta = revision.get("delta") or {}
@@ -3522,7 +3673,7 @@ def _render_item_detail_html(
                 f"</tr>"
                 for f, v in delta.items()
             )
-            revision_draft_html = (
+            _revision_draft_html = (
                 f'<h3 class="diff-hdr">Revision Draft</h3>'
                 f'<div class="diff-meta">by {by} · {at} · baseline {bhash}…</div>'
                 f'<table class="dtable">'
@@ -3944,16 +4095,29 @@ def _render_item_detail_html(
     else:
         _price_comps_bar = ""
 
-    # ── Aspects editor (pre-filled from item_attributes then item_specifics) ───
+    # ── Three-layer aspect data: live (eBay) / proposed (pipeline) / edits (operator) ──
     import json as _json
-    _ia = item.get("item_attributes") or {}
-    _spec = (dl or {}).get("item_specifics") or {}
-    _merged_attrs = {**_spec, **_ia}  # item_attributes wins
+    _ia   = item.get("item_attributes") or {}        # operator edits — highest priority
+    _spec = (dl or {}).get("item_specifics") or {}   # live on eBay — baseline
+    _rev  = item.get("revision_draft") or {}
+    _rev_delta = _rev.get("delta") or {}
+    _proposed_aspects = _rev_delta.get("item_specifics") or {}
+    _has_proposals = bool(_rev_delta)
+
     _cat_id_for_aspects = str(
         (dl or {}).get("category_id") or item.get("ebay_category_id") or ""
     )
-    _aspects_prefill_json = _json.dumps(_merged_attrs)
-    _aspects_cat_json = _json.dumps(_cat_id_for_aspects)
+    _aspects_prefill_json   = _json.dumps(_ia)                # operator edits only
+    _live_aspects_json      = _json.dumps(_spec)              # live eBay values
+    _proposed_aspects_json  = _json.dumps(_proposed_aspects)  # pipeline proposals
+    _aspects_cat_json       = _json.dumps(_cat_id_for_aspects)
+    _proposals_meta_json    = _json.dumps({
+        "title":       _rev_delta.get("title") or "",
+        "description": _rev_delta.get("description") or "",
+        "by":          _rev.get("by") or "pipeline",
+        "at":          (_rev.get("at") or "")[:19],
+        "count":       len(_rev_delta),
+    })
 
     # ── eBay Draft editor section (Phase 1B) ───────────────────────────────────
     _dl_title_val = h((dl or {}).get("title") or "")
@@ -4004,17 +4168,182 @@ def _render_item_detail_html(
         f'<option value="{pid}"{" selected" if pid == _dl_ship_val else ""}>{h(name)} ({pid[:8]}…)</option>'
         for pid, name in sorted(_fulfillment_opts.items(), key=lambda kv: kv[1])
     )
+    # Build proposals banner if pipeline has proposed changes
+    # Actions section — context-aware based on eBay status
+    import json as _json
+    _ak_json2 = _json.dumps(api_key)
+    _sku_json2 = _json.dumps(sku)
+    _listing_id_json = _json.dumps(listing_id)
+    _is_active_js = "true" if is_active else "false"
+
+    # Pipeline error (written by ebay_stage/ebay_publish on eBay rejection)
+    _pe = item.get('pipeline_error')
+    if _pe and isinstance(_pe, dict) and _pe.get('error'):
+        _pe_when = (_pe.get('at') or '')[:19].replace('T', ' ')
+        _pe_worker = _pe.get('worker', '?')
+        _pe_raw_js = _json.dumps(_pe.get('raw', ''))
+        _pipeline_error_html = (
+            f'<div id="pipeline-error-box" style="margin-bottom:12px;padding:10px 14px;'
+            f'background:#1a0505;border:1px solid #844;border-radius:4px;font-size:.82em;color:#e88">'
+            f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">'
+            f'<strong>eBay rejected {_pe_worker}</strong>'
+            f'<span style="color:#666;font-size:.85em">{_pe_when} UTC</span></div>'
+            f'<div style="color:#f99;margin-bottom:6px">{h(_pe["error"])}</div>'
+            f'<div style="display:flex;gap:8px;flex-wrap:wrap">'
+            f'<button class="act-btn" style="font-size:.78em;padding:2px 8px" '
+            f'onclick="toggleRawError()">Show raw</button>'
+            f'<button class="act-btn act-warn" style="font-size:.78em;padding:2px 8px" '
+            f'onclick="clearPipelineError()">Clear error</button></div>'
+            f'<pre id="pipeline-error-raw" style="display:none;margin-top:8px;font-size:.75em;'
+            f'color:#a77;white-space:pre-wrap;word-break:break-all;max-height:160px;overflow:auto">'
+            f'</pre></div>'
+            f'<script>var _PE_RAW={_pe_raw_js};</script>'
+        )
+    else:
+        _pipeline_error_html = ''
+
+    _is_published = offer_status.upper() == "PUBLISHED"
+    _is_unpublished_offer = offer_status.upper() == "UNPUBLISHED"
+    _has_draft = bool(dl.get("title"))
+    _has_offer = bool(eo.get("offer_id"))
+
+    # Pipeline status bar — shows which stages are complete
+    def _pipe_step(label: str, done: bool, active: bool = False) -> str:
+        if done:
+            color, bg, bl = "#4a4", "#1a2a1a", "#4a4"
+        elif active:
+            color, bg, bl = "#aa0", "#2a2a0a", "#aa0"
+        else:
+            color, bg, bl = "#445", "#111", "#333"
+        return (
+            f'<span style="padding:4px 10px;background:{bg};border:1px solid {bl};'
+            f'border-radius:4px;font-size:.78em;color:{color};white-space:nowrap">{label}</span>'
+        )
+    _pipe_arrow = '<span style="color:#334;padding:0 4px;font-size:.8em">→</span>'
+    _pipeline_bar = (
+        '<div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px;'
+        'margin-bottom:12px;padding:8px;background:#0d0d0d;border-radius:4px">'
+        + _pipe_step("Draft", _has_draft, not _has_draft)
+        + _pipe_arrow
+        + _pipe_step("Staged", _has_offer and not is_active, _has_draft and not _has_offer)
+        + _pipe_arrow
+        + _pipe_step("Approved", is_ready, _has_offer and not is_ready and not is_active)
+        + _pipe_arrow
+        + _pipe_step("Live", is_active)
+        + '</div>'
+    )
+
+    # Publish gate — actions depend on pipeline state
+    _stage_label = "Re-stage" if _is_unpublished_offer else "Stage"
+    _stage_disabled = ' disabled title="Listing is live — End Listing first to relist"' if _is_published else ""
+    _stage_cls = " act-disabled" if _is_published else ""
+
+    if is_active:
+        # Live: update in place (preferred) or end listing
+        _gate_html = (
+            '<div style="margin-bottom:12px;padding:8px 12px;background:#0d1a0d;'
+            'border:1px solid #464;border-radius:4px;font-size:.82em;color:#8c8">'
+            '✓ Listing is live. <strong>Update Listing</strong> pushes draft changes to eBay without '
+            'ending or relisting — preserving listing age and search ranking. '
+            'Edit aspects → Re-draft → Update Listing. '
+            'Only End Listing if you\'re pulling this item entirely.</div>'
+            + '<div class="act-row">'
+            + '<button class="act-btn act-publish" '
+              'onclick="triggerAction(\'ebay_update\',\'Push current draft to the live listing?'
+              '\\nThis updates title, aspects, and description in place without ending the listing.\')"'
+              '>Update Listing</button>'
+            + (
+                '<button class="act-btn" onclick="triggerAction(\'sync_from_ebay\')"'
+                ' title="Fetch current price and status from eBay">Sync from eBay</button>'
+                if listing_id else ""
+            )
+            + '<button class="act-btn act-warn" style="margin-left:auto" '
+              'onclick="triggerAction(\'ebay_end_listing\','
+              '\'End this listing on eBay? This cannot be undone.\')">End Listing</button>'
+            + '</div>'
+        )
+    elif _is_unpublished_offer:
+        # Staged but not yet approved: show approve + publish now
+        _ready_note = (
+            '<div style="margin-bottom:12px;padding:8px 12px;background:#1a2a1a;'
+            'border:1px solid #4a4;border-radius:4px;font-size:.82em;color:#6c6">'
+            '✓ Staged (UNPUBLISHED). Approve to list at next dole cycle, or Publish Now to go live immediately.</div>'
+            if not is_ready else
+            '<div style="margin-bottom:12px;padding:8px 12px;background:#1a2a1a;'
+            'border:1px solid #4a4;border-radius:4px;font-size:.82em;color:#6c6">'
+            '✓ Approved — will list at next dole cycle. Click Publish Now to go live immediately, '
+            'or Withdraw Approval to hold.</div>'
+        )
+        _approve_btn = (
+            '<button class="act-btn act-publish" onclick="approveForListing()">'
+            'Approve for Listing</button>'
+            if not is_ready else
+            '<button class="act-btn" onclick="triggerAction(\'unset_ready\','
+            '\'Remove this item from the ready queue?\')" style="background:#1a1a2a;border-color:#44a;color:#88c">'
+            'Withdraw Approval</button>'
+        )
+        _gate_html = (
+            _ready_note
+            + '<div class="act-row">'
+            + _approve_btn
+            + '<button class="act-btn act-publish" style="background:#2a1a0a;border-color:#c84" '
+              'onclick="publishNow()">Publish Now</button>'
+            + f'<button class="act-btn{_stage_cls}"{_stage_disabled} '
+              f'onclick="triggerAction(\'ebay_stage\')">{_stage_label}</button>'
+            + '</div>'
+        )
+    else:
+        # Not staged yet
+        _gate_html = (
+            '<div style="margin-bottom:12px;padding:8px 12px;background:#111;'
+            'border:1px solid #333;border-radius:4px;font-size:.82em;color:#667">'
+            + ('Draft ready — Stage to create an eBay offer, then Approve to list.'
+               if _has_draft else
+               'No draft yet — run Re-draft to prepare the eBay listing data.')
+            + '</div>'
+            + '<div class="act-row">'
+            + f'<button class="act-btn{_stage_cls}"{_stage_disabled} '
+              f'onclick="triggerAction(\'ebay_stage\')">{_stage_label}</button>'
+            + '</div>'
+        )
+
+    _proposals_banner = ""
+    if _has_proposals:
+        _pr_by  = h(_rev.get("by") or "pipeline")
+        _pr_at  = (_rev.get("at") or "")[:19].replace("T", " ")
+        _pr_cnt = len(_rev_delta)
+        _pr_asp = len(_proposed_aspects)
+        _pr_title = _rev_delta.get("title") or ""
+        _pr_desc  = _rev_delta.get("description") or ""
+        _detail_lines = []
+        if _pr_asp:
+            _detail_lines.append(f"{_pr_asp} aspect{'s' if _pr_asp != 1 else ''}")
+        if _pr_title:
+            _detail_lines.append(f"title → {h(_pr_title[:60])}{'…' if len(_pr_title) > 60 else ''}")
+        if _pr_desc:
+            _detail_lines.append("description")
+        _detail_str = ", ".join(_detail_lines) or f"{_pr_cnt} field{'s' if _pr_cnt != 1 else ''}"
+        _proposals_banner = (
+            f'<div id="proposals-banner" style="margin-bottom:12px;padding:10px 14px;'
+            f'background:#1a1a00;border:1px solid #664;border-radius:4px;font-size:.82em;color:#cc8">'
+            f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">'
+            f'<strong>Pipeline proposed changes</strong>'
+            f'<span style="color:#665;font-size:.85em">{_pr_by} · {_pr_at} UTC</span></div>'
+            f'<div style="color:#aa8;margin-bottom:8px">{_detail_str}</div>'
+            f'<div style="font-size:.75em;color:#665;margin-bottom:8px">'
+            f'Yellow highlights show proposed values. Edit any field to override. '
+            f'Accept copies proposals into your draft — review then Update Listing to push to eBay.</div>'
+            f'<div style="display:flex;gap:8px">'
+            f'<button class="act-btn act-publish" style="font-size:.78em;padding:3px 10px;background:#1a1a00;border-color:#884" '
+            f'onclick="acceptProposals()">Accept All Proposals</button>'
+            f'<button class="act-btn" style="font-size:.78em;padding:3px 10px" '
+            f'onclick="dismissProposals()">Dismiss</button>'
+            f'</div></div>'
+        )
+
     _ebay_draft_editor = (
         '<div id="dl-section" class="dsec">'
-        '<h3>eBay Listing'
-        ' <span style="font-size:.7em;color:#555;font-weight:normal">'
-        'draft · staged to eBay on Stage</span></h3>'
-        '<div style="font-size:.73em;color:#556;margin-bottom:8px">'
-        'eBay-specific listing data. Changes here do not affect the Inventory Record.</div>'
-        + ('<div style="font-size:.8em;background:#2a1a00;color:#aa6;border-radius:4px;'
-           'padding:5px 8px;margin-bottom:8px">⚠ Already staged on eBay — '
-           '\'Save to eBay Draft\' updates TGW only. Re-draft then Re-stage to push changes to eBay.</div>'
-           if is_staged else '')
+        '<h3>Listing</h3>'
         # Title
         + f'<div class="frow" id="dl-title">'
         f'<span class="fn">eBay Title</span>'
@@ -4127,20 +4456,51 @@ def _render_item_detail_html(
         # Save button
         f'<div style="margin-top:12px;display:flex;gap:8px;align-items:center">'
         f'<button class="act-btn" onclick="saveEbayDraft()" '
-        f'style="background:#1a3a5a">Save to eBay Draft</button>'
+        f'style="background:#1a3a5a">Save Draft</button>'
         f'<span id="dl-save-msg" style="font-size:.82em;color:#4a4"></span>'
         f'</div>'
-        f'</div>'
+        # ── Publish to eBay — integrated into the eBay section ──
+        '<hr style="border:none;border-top:1px solid #2a2a2a;margin:14px 0">'
+        + _pipeline_error_html
+        + _pipeline_bar
+        + _gate_html
+        + f'</div>'
         # hidden data for JS
         f'<script>'
         f'window._DL_CAT_ID = {_aspects_cat_json};'
         f'window._DL_PREFILL = {_aspects_prefill_json};'
+        f'window._LIVE_ASPECTS = {_live_aspects_json};'
+        f'window._PROPOSED_ASPECTS = {_proposed_aspects_json};'
+        f'window._DL_PROPOSALS = {_proposals_meta_json};'
         f'</script>'
+    )
+
+    _ebay_status_html = (
+        f'<details class="dsec" style="padding:0">'
+        f'<summary style="padding:8px 10px;cursor:pointer;list-style:none;font-size:.78em;'
+        f'text-transform:uppercase;letter-spacing:.06em;color:#888;display:flex;'
+        f'align-items:center;gap:6px">eBay Status {listing_badge}{offer_badge}'
+        f'<span style="margin-left:auto;color:#444;font-size:.9em">▸</span></summary>'
+        f'<div style="padding:0 10px 10px">'
+        + listing_section
+        + offer_section
+        + '</div></details>'
+    )
+
+    _left_log_html = (
+        '<div class="dleft-log">'
+        + _readiness_html_str
+        + _eps_strip_html
+        + (f'<div class="dsec"><h3>Pipeline Jobs</h3>{jobs_html}</div>' if jobs_html else "")
+        + price_history_html
+        + reprice_schedule_html
+        + product_lookup_html
+        + identification_history_html
+        + '</div>'
     )
 
     fields_html = (
         '<div class="dfields">'
-        + _readiness_html_str
         # — Inventory record (what we track)
         + '<div id="catalog-section" class="dsec">'
         '<h3>Inventory Record <span style="color:#2a4a6a;font-size:.72em;font-weight:normal">dbl-click to edit · <a href="#" onclick="saveCatalog();return false" style="color:#4a8;font-size:.9em">Save to Catalog</a> <span id="catalog-save-msg" style="font-size:.82em;color:#4a4"></span></span></h3>'
@@ -4187,149 +4547,16 @@ def _render_item_detail_html(
             (dl or {}).get("item_specifics") or {}
         )
         + "</div>"
-        # — eBay Listing (confirmed by eBay after publish)
-        f'<div class="dsec"><h3>eBay Listing{listing_badge}</h3>'
-        '<div style="font-size:.73em;color:#556;margin-bottom:6px">Confirmed eBay data after listing is live</div>'
-        + listing_section
-        + "</div>"
-        # — eBay Submission (what we sent to eBay — not a buyer offer)
-        f'<div class="dsec"><h3>eBay Submission{offer_badge} <span style="font-size:.7em;color:#555;font-weight:normal">our offer to eBay</span></h3>'
-        '<div style="font-size:.73em;color:#556;margin-bottom:6px">The offer record TGW created on eBay — not a buyer offer</div>'
-        + offer_section
-        + "</div>"
-        # — Phase 1A: EPS photos + eBay live
-        + _eps_strip_html
-        + _ebay_live_html
+        # — Pipeline proposals banner (between inventory record and eBay sections)
+        + (_proposals_banner if _has_proposals else '')
+        # — Consolidated eBay Status (listing + submission)
+        + _ebay_status_html
         # — Phase 1B: eBay Draft editor
         + _ebay_draft_editor
-        + (
-            f'<div class="dsec">'
-            f'<h3>Revision Draft <span style="font-size:.7em;color:#555;font-weight:normal">proposed changes</span></h3>'
-            f'<div style="font-size:.73em;color:#556;margin-bottom:6px">AI or operator proposed changes — apply to push to eBay</div>'
-            f'{revision_draft_html}</div>'
-            if revision_draft_html else ""
-        )
-        + (
-            f'<div class="dsec"><h3>Pipeline Jobs</h3>{jobs_html}</div>'
-            if jobs_html else ""
-        )
-        + price_history_html
-        + reprice_schedule_html
-        + product_lookup_html
-        + identification_history_html
         + "</div>"
     )
 
-    # Actions section — context-aware based on eBay status
-    import json as _json
-    _ak_json2 = _json.dumps(api_key)
-    _sku_json2 = _json.dumps(sku)
-    _listing_id_json = _json.dumps(listing_id)
-    _is_active_js = "true" if is_active else "false"
-
-    _is_published = offer_status.upper() == "PUBLISHED"
-    _is_unpublished_offer = offer_status.upper() == "UNPUBLISHED"
-    _has_draft = bool(dl.get("title"))
-    _has_offer = bool(eo.get("offer_id"))
-
-    # Pipeline status bar — shows which stages are complete
-    def _pipe_step(label: str, done: bool, active: bool = False) -> str:
-        if done:
-            color, bg, bl = "#4a4", "#1a2a1a", "#4a4"
-        elif active:
-            color, bg, bl = "#aa0", "#2a2a0a", "#aa0"
-        else:
-            color, bg, bl = "#445", "#111", "#333"
-        return (
-            f'<span style="padding:4px 10px;background:{bg};border:1px solid {bl};'
-            f'border-radius:4px;font-size:.78em;color:{color};white-space:nowrap">{label}</span>'
-        )
-    _pipe_arrow = '<span style="color:#334;padding:0 4px;font-size:.8em">→</span>'
-    _pipeline_bar = (
-        '<div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px;'
-        'margin-bottom:12px;padding:8px;background:#0d0d0d;border-radius:4px">'
-        + _pipe_step("Draft", _has_draft, not _has_draft)
-        + _pipe_arrow
-        + _pipe_step("Staged", _has_offer and not is_active, _has_draft and not _has_offer)
-        + _pipe_arrow
-        + _pipe_step("Approved", is_ready, _has_offer and not is_ready and not is_active)
-        + _pipe_arrow
-        + _pipe_step("Live", is_active)
-        + '</div>'
-    )
-
-    # Publish gate — actions depend on pipeline state
-    _stage_label = "Re-stage" if _is_unpublished_offer else "Stage"
-    _stage_disabled = ' disabled title="Listing is live — End Listing first to relist"' if _is_published else ""
-    _stage_cls = " act-disabled" if _is_published else ""
-
-    if is_active:
-        # Live: only allow end listing + sync
-        _gate_html = (
-            '<div style="margin-bottom:12px;padding:8px 12px;background:#1a1a0a;'
-            'border:1px solid #554;border-radius:4px;font-size:.82em;color:#aa0">'
-            '⚠ This listing is live on eBay. End Listing before making structural changes.</div>'
-            + '<div class="act-row">'
-            + '<button class="act-btn act-warn" onclick="triggerAction(\'ebay_end_listing\','
-              '\'End this listing on eBay? This cannot be undone.\')">End Listing on eBay</button>'
-            + (
-                '<button class="act-btn" onclick="triggerAction(\'sync_from_ebay\')"'
-                ' title="Fetch current price and status from eBay">Sync from eBay</button>'
-                if listing_id else ""
-            )
-            + '</div>'
-        )
-    elif _is_unpublished_offer:
-        # Staged but not yet approved: show approve + publish now
-        _ready_note = (
-            '<div style="margin-bottom:12px;padding:8px 12px;background:#1a2a1a;'
-            'border:1px solid #4a4;border-radius:4px;font-size:.82em;color:#6c6">'
-            '✓ Staged (UNPUBLISHED). Approve to list at next dole cycle, or Publish Now to go live immediately.</div>'
-            if not is_ready else
-            '<div style="margin-bottom:12px;padding:8px 12px;background:#1a2a1a;'
-            'border:1px solid #4a4;border-radius:4px;font-size:.82em;color:#6c6">'
-            '✓ Approved — will list at next dole cycle. Click Publish Now to go live immediately, '
-            'or Withdraw Approval to hold.</div>'
-        )
-        _approve_btn = (
-            '<button class="act-btn act-publish" onclick="approveForListing()">'
-            'Approve for Listing</button>'
-            if not is_ready else
-            '<button class="act-btn" onclick="triggerAction(\'unset_ready\','
-            '\'Remove this item from the ready queue?\')" style="background:#1a1a2a;border-color:#44a;color:#88c">'
-            'Withdraw Approval</button>'
-        )
-        _gate_html = (
-            _ready_note
-            + '<div class="act-row">'
-            + _approve_btn
-            + '<button class="act-btn act-publish" style="background:#2a1a0a;border-color:#c84" '
-              'onclick="publishNow()">Publish Now</button>'
-            + f'<button class="act-btn{_stage_cls}"{_stage_disabled} '
-              f'onclick="triggerAction(\'ebay_stage\')">{_stage_label}</button>'
-            + '</div>'
-        )
-    else:
-        # Not staged yet
-        _gate_html = (
-            '<div style="margin-bottom:12px;padding:8px 12px;background:#111;'
-            'border:1px solid #333;border-radius:4px;font-size:.82em;color:#667">'
-            + ('Draft ready — Stage to create an eBay offer, then Approve to list.'
-               if _has_draft else
-               'No draft yet — run Re-draft to prepare the eBay listing data.')
-            + '</div>'
-            + '<div class="act-row">'
-            + f'<button class="act-btn{_stage_cls}"{_stage_disabled} '
-              f'onclick="triggerAction(\'ebay_stage\')">{_stage_label}</button>'
-            + '</div>'
-        )
-
     actions_html = (
-        '<div class="dsec">'
-        '<h3>Publish to eBay</h3>'
-        + _pipeline_bar
-        + _gate_html
-        + '</div>'
         '<div class="dsec danger-zone">'
         '<h3>Pipeline Tools</h3>'
         '<div class="act-row">'
@@ -4362,7 +4589,7 @@ def _render_item_detail_html(
         f'    body:JSON.stringify({{action:action}})'
         f'  }}).then(function(r){{return r.json();}}).then(function(d){{'
         f'    if(d.ok&&(action===\'archive\'||action===\'ebay_end_listing\')){{window.location.href=\'/form/items\';return;}}'
-        f'    if(d.ok&&(action===\'set_ready\'||action===\'unset_ready\'||action===\'ebay_publish\'||action===\'ebay_stage\')){{location.reload();return;}}'
+        f'    if(d.ok&&(action===\'set_ready\'||action===\'unset_ready\'||action===\'ebay_publish\'||action===\'ebay_stage\'||action===\'ebay_update\')){{location.reload();return;}}'
         f'    alert(d.ok ? \'Action queued: \'+action : \'Error: \'+(d.detail||\'failed\'));'
         f'  }}).catch(function(e){{alert(\'Network error: \'+e);}});'
         f'}}'
@@ -4373,6 +4600,38 @@ def _render_item_detail_html(
         f'function publishNow(){{'
         f'  if(!confirm(\'Publish this item to eBay NOW?\\nIt will go live immediately at the current offer price.\'))return;'
         f'  triggerAction(\'ebay_publish\');'
+        f'}}'
+        f'function acceptProposals(){{'
+        f'  if(!confirm(\'Accept all pipeline proposals?\\nThis copies proposed values into your draft.\'+'
+        f'\'\\nReview then click Update Listing to push to eBay.\'))return;'
+        f'  fetch(\'/api/items/\'+_SKU+\'/action\',{{method:\'POST\','
+        f'    headers:authHeaders({{\'Content-Type\':\'application/json\'}}),'
+        f'    body:JSON.stringify({{action:\'accept_proposals\'}})}}'
+        f'  ).then(function(r){{return r.json();}}).then(function(d){{'
+        f'    if(d.ok)location.reload();else alert(\'Accept failed: \'+(d.detail||\'error\'));'
+        f'  }});'
+        f'}}'
+        f'function dismissProposals(){{'
+        f'  fetch(\'/api/items/\'+_SKU+\'/action\',{{method:\'POST\','
+        f'    headers:authHeaders({{\'Content-Type\':\'application/json\'}}),'
+        f'    body:JSON.stringify({{action:\'dismiss_proposals\'}})}}'
+        f'  ).then(function(r){{return r.json();}}).then(function(d){{'
+        f'    if(d.ok)location.reload();else alert(\'Dismiss failed: \'+(d.detail||\'error\'));'
+        f'  }});'
+        f'}}'
+        f'function clearPipelineError(){{'
+        f'  fetch(\'/api/items/\'+_SKU,{{method:\'PATCH\','
+        f'    headers:authHeaders({{\'Content-Type\':\'application/json\'}}),'
+        f'    body:JSON.stringify({{fields:{{pipeline_error:null}}}})}}'
+        f'  ).then(function(r){{return r.json();}}).then(function(d){{'
+        f'    if(d.ok)location.reload();else alert(\'Clear failed: \'+(d.detail||\'error\'));'
+        f'  }});'
+        f'}}'
+        f'function toggleRawError(){{'
+        f'  var el=document.getElementById(\'pipeline-error-raw\');'
+        f'  if(!el)return;'
+        f'  if(el.style.display===\'none\'){{el.textContent=_PE_RAW;el.style.display=\'block\';}}'
+        f'  else{{el.style.display=\'none\';}}'
         f'}}'
         f'function deleteItem(){{'
         f'  var msg=\'Delete \'+_SKU+\'?\\nThis marks the item as deleted.\\nThe ItemData folder is preserved.\';'
@@ -4642,10 +4901,11 @@ def _render_item_detail_html(
         f"</div>\n"
         f"{review_block_html}"
         f'<div class="detail-layout">'
-        f"{gallery_html}"
-        f"{fields_html}"
-        f"</div>\n"
+        f'<div class="dleft">{gallery_html}{_left_log_html}</div>'
+        f"{fields_html[:-6]}"
         f"{actions_html}"
+        f"</div>"
+        f"</div>\n"
         + _STATIC_FOOT
         + offer_script
         + "</body></html>"
@@ -5444,8 +5704,7 @@ def discard_revision(sku: str) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"read error: {exc}")
     if "revision_draft" not in doc:
         return {"ok": True, "sku": sku, "note": "no revision_draft present"}
-    del doc["revision_draft"]
-    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+    _apply_patch(json_path, {"revision_draft": None})
     try:
         state_machine.enqueue_job(
             queue_name="catalog_rebuild",

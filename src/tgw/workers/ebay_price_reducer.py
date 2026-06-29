@@ -40,9 +40,10 @@ import requests
 
 import tgw.logging as tgw_logging
 from tgw.apis.ebay.client import ebay_put
+from tgw.apis.fence import ebay_write as fence_ebay_write
+from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.ebay.sync import _build_offer_bodies
-from tgw.items import atomic_write_json
 from tgw.queue import state_machine
 from tgw.queue.worker_base import QueueWorker
 
@@ -152,7 +153,7 @@ class EbayPriceReducerWorker(QueueWorker):
         if old_price_f is not None and float(new_price) >= old_price_f:
             _stamp_due_stages()
             item['reprice_schedule'] = schedule
-            atomic_write_json(jf, item, pretty=self.config.get('pretty', True))
+            fence_patch_item(self.config, sku, {'reprice_schedule': schedule})
             stats['skipped'] += 1
             log.info('ebay_price_reducer: %s stage %d (%s) $%.2f >= current $%.2f'
                      ' — stamped done without applying',
@@ -202,16 +203,21 @@ class EbayPriceReducerWorker(QueueWorker):
             return
 
         _stamp_due_stages()
-        item.setdefault('price_history', []).append({
+        price_entry = {
             'ts':             now.isoformat(),
             'price':          new_price,
             'previous_price': old_price,
             'stage':          entry['stage'],
             'label':          entry['label'],
             'source':         'ebay_price_reducer',
-        })
+        }
+        item.setdefault('price_history', []).append(price_entry)
         item['reprice_schedule'] = schedule
-        atomic_write_json(jf, item, pretty=self.config.get('pretty', True))
+        fence_ebay_write(self.config, sku, ebay_offer={'price': new_price})
+        fence_patch_item(self.config, sku, {
+            'reprice_schedule': schedule,
+            'price_history':    item['price_history'],
+        })
         stats['reduced'] += 1
 
     def _reschedule(self) -> None:

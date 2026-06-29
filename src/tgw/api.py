@@ -895,6 +895,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("get-ebay-token", help="browser OAuth re-consent flow — use when refresh token is dead (HTTP 400)")
     p.add_argument("--sandbox", action="store_true", help="use eBay sandbox instead of production")
     p.add_argument("--code", default=None, help="skip browser: supply auth code from redirect URL directly (URL-encoded OK)")
+    p.add_argument("--print-url", action="store_true", dest="print_url", help="print the OAuth authorization URL and exit without opening a browser")
 
     p = sub.add_parser("report", help="generate reports from ItemData (PP-DOCFLOW-001 Phase-3 seed)")
     p.add_argument("report_type", choices=["sales"], help="sales: monthly units/revenue by category-group + dead-stock ranking")
@@ -4846,24 +4847,29 @@ def main() -> int:
         elif args.op == "get-ebay-token":
             from urllib.parse import unquote
 
-            from .apis.ebay.get_access_token import exchange_code_for_tokens, get_access_token, save_token_state
+            from .apis.ebay.get_access_token import exchange_code_for_tokens, generate_auth_url, get_access_token, save_token_state
             from .apis.ebay.get_access_token import load_config as _ebay_load_config
 
-            direct_code = getattr(args, "code", None)
-            if direct_code:
-                direct_code = unquote(direct_code)
-                ebay_cfg = _ebay_load_config()
-                tokens = exchange_code_for_tokens(direct_code, ebay_cfg, is_sandbox=getattr(args, "sandbox", False))
-                save_token_state(tokens)
-                token = tokens["access_token"]
-                import time as _time
-
-                exp = int(tokens.get("expiry", 0) - _time.time())
-                print(f"Token exchanged. Expires in {exp}s ({exp // 3600}h). Run: tgw restart-ebay-token")
+            if getattr(args, "print_url", False):
+                url = generate_auth_url(_ebay_load_config(), is_sandbox=getattr(args, "sandbox", False))
+                print(url)
+                result = {"ok": True, "url": url}
             else:
-                token = get_access_token(prompt_if_needed=True, is_sandbox=getattr(args, "sandbox", False))
-                print("Token written to secrets. Run: tgw restart-ebay-token")
-            result = {"ok": True, "token_prefix": token[:20] + "..."}
+                direct_code = getattr(args, "code", None)
+                if direct_code:
+                    direct_code = unquote(direct_code)
+                    ebay_cfg = _ebay_load_config()
+                    tokens = exchange_code_for_tokens(direct_code, ebay_cfg, is_sandbox=getattr(args, "sandbox", False))
+                    save_token_state(tokens)
+                    token = tokens["access_token"]
+                    import time as _time
+
+                    exp = int(tokens.get("expiry", 0) - _time.time())
+                    print(f"Token exchanged. Expires in {exp}s ({exp // 3600}h). Run: tgw restart-ebay-token")
+                else:
+                    token = get_access_token(prompt_if_needed=True, is_sandbox=getattr(args, "sandbox", False))
+                    print("Token written to secrets. Run: tgw restart-ebay-token")
+                result = {"ok": True, "token_prefix": token[:20] + "..."}
 
         elif args.op == "report":
             from .reports import cmd_report_sales

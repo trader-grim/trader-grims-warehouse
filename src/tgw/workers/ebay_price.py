@@ -28,9 +28,10 @@ from typing import Any, Dict
 import psycopg2.errors
 
 import tgw.logging as tgw_logging
+from tgw.apis.fence import ebay_write as fence_ebay_write
+from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.ebay.pricing import freeship_price, suggest_price, to_99
-from tgw.items import atomic_write_json
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
@@ -175,7 +176,8 @@ class EbayPriceWorker(QueueWorker):
         except Exception as exc:
             log.warning('ebay_price: quality rescore failed for %s: %s', sku, exc)
 
-        atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
+        fence_ebay_write(self.config, sku, ebay_offer=ebay_offer)
+        fence_patch_item(self.config, sku, {'draft_listing': draft})
 
         try:
             state_machine.enqueue_job(

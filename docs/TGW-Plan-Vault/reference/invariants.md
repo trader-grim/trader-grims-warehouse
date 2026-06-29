@@ -396,3 +396,43 @@ The former strict-xfail tests were converted to ordinary green tests in the same
 Affected workers need a restart to pick up the changes:
 `systemctl restart tgw-worker@ebay_price tgw-worker@ebay_price_reducer tgw-worker@ebay_publish`
 (`items.py` is also picked up by tgw-http/MCP on their next restart).
+
+---
+
+## E5 — No data is ever deleted without archiving first ❌ (gap — 2026-06-28)
+
+**Rule:** No item JSON, photo, or associated file may be deleted, overwritten, or
+removed from ItemData until the current state has been written to the ItemArchive
+(`/media/db/masterarchive/history/ItemArchive/<sku>.zip`). The archive is the only
+place data may be culled, and only by explicit operator decision.
+
+**Why:** On 2026-06-28, 49 item JSONs (May 2021 paperback books, SKUs
+`tgw202105091454567`–`tgw202105091545326`) were found missing from all live data sources
+— ItemData, btrfs snapshots, Google Drive, and the tgw-claude-dump. They were recovered
+**solely** because the ItemArchive zips existed at
+`/media/db/masterarchive/history/ItemArchive/<sku>.zip`. Without those zips the data
+would have been permanently lost. The archive is the last line of defense.
+
+**Where to enforce:**
+- The fence (`POST /api/items/{sku}` delete or replace path) must zip the current
+  ItemData directory into the ItemArchive before any destructive write.
+- `atomic_write_json` (legacy path, pre-fence) must do the same.
+- `ebay_sku_migrate` must archive the old SKU directory before renaming.
+- No worker, script, or operator command may `rm -rf` an ItemData directory without
+  first calling the archive step.
+
+**How it could fail:**
+- A worker calls `shutil.rmtree` or `os.remove` directly on ItemData paths.
+- A migration script renames without archiving the old state.
+- An operator runs `rm` manually under time pressure.
+
+**How to test:**
+- Add a grep audit to CI: no file in `src/tgw/` may call `shutil.rmtree`,
+  `os.remove`, or `os.unlink` on a path containing `ItemData` without a preceding
+  archive call.
+- `tests/test_invariants_items_fence.py`: mock a delete request to the fence and assert
+  the archive zip is created before the directory is removed.
+
+**Status:** ❌ gap — archive step exists as a manual operator habit (ItemArchive on
+`/media/db/masterarchive`) but is not enforced in any code path. Must be added to
+PP-FENCE-001 Session A as a required fence behaviour before workers restart.

@@ -6,6 +6,14 @@ and directs all development. Read this file first, then read the master plan bef
 
 ## Start every session here
 
+**Step 0 — check thermal status before anything else:**
+
+```
+cat /opt/TGW/var/run/thermal.status 2>/dev/null || echo "NORMAL|0|0"
+```
+
+If the status is HOT, THROTTLE, or SHUTDOWN: **stop all disk-intensive operations** (no recursive grep/find on ItemData/ItemCatalog). At THROTTLE the watchdog has already stopped workers — do not restart them. At HOT, slow down and avoid large scans.
+
 **Step 1 — process any pending plan updates before reading the plan:**
 
 1. Check `docs/TGW-Plan-Vault/inbox/` for any `.md` files. If any exist, read them and
@@ -48,6 +56,19 @@ admin loop (PP-DOCFLOW-001) for correction — use `tgw todo set-meta <id> --pp 
 Use `tgw plan status --pp PP-XXX-001` to drill into a single item.
 
 Memory index (cross-session context): `/home/tgw/.claude/projects/-opt-TGW-src-trader-grims-warehouse/memory/MEMORY.md`
+
+**Step 4 — register planned work before touching any code or config:**
+
+Before making any change this session, do both of these:
+
+1. Check existing todos: `sudo -u tgw tgw todo` — mark any relevant items `in_progress`.
+2. For new work: `sudo -u tgw tgw todo add "what you are about to do"` — then mark it `in_progress`.
+3. Write a recovery breadcrumb to `docs/TGW-Plan-Vault/inbox/INPROGRESS-<slug>.md` — one short
+   paragraph describing what you are working on and where you are. If the session is interrupted,
+   the next session startup sequence will read this and reconstruct your state.
+
+**This is mandatory, not optional.** A session that makes changes without a todo + inbox note
+loses recoverability. Run `/tgw-exit` when done or switching to a1131 — it finalises the note.
 
 ## Key paths
 
@@ -148,12 +169,21 @@ Run as `tgw` user — source files are `rw-------`, secrets are `chmod 600`.
 ## Working rules for Claude
 
 - **Read the master plan first** — it has the full architecture context
+- **Before making any code or config changes** — log the work first:
+  1. Create a todo: `tgw todo add "what you're about to do"` (or `tgw todo` to check existing)
+  2. Drop an inbox note: write a brief `.md` file to `docs/TGW-Plan-Vault/inbox/` describing
+     what you're working on and where you are. Filename: `INPROGRESS-<slug>.md`. This lets
+     the startup sequence reconstruct context if the session is interrupted.
+  3. Mark the todo `in_progress` when you start, `done` when complete.
 - **Run `tgw health` after significant changes** to config, secrets, or workers
 - **Commit only when Dave asks** — he controls git history
 - **All commands as `tgw` user** — use `sudo -u tgw` or note this when suggesting commands
 - **Suggest, don't implement** for exploratory questions until Dave approves direction
 - **Workers need restart after source changes** — `systemctl restart tgw-worker@<queue>.service`
 - **Re-enqueue manually after dead_letter** — dead_letter jobs don't auto-retry; use `state_machine.enqueue_job()` with a fresh dedupe key
+- **Test environment** — use `ssh a1131` for UI/integration testing instead of a VM; it's a
+  NixOS host on the LAN with a partial TGW install and 18 GB free RAM. Run `/tgw-exit` before
+  switching to it so the inbox note captures your current state.
 
 ## eBay API notes
 
@@ -169,8 +199,8 @@ Run as `tgw` user — source files are `rw-------`, secrets are `chmod 600`.
 See `docs/TGW-Plan-Vault/plan/TGW-Master-Plan.md` for the authoritative current state.
 See `docs/TGW-Plan-Vault/plan/handoff.md` for current risks and recommended next sequence.
 
-As of 2026-06-26 (session 28): 563 tests passing. Pipeline fully live.
-PP-DOCFLOW-001 P1+P2, PP-PYIPC-001, PP-BACKUP-001 Phase A, history-index complete.
-Ollama retired — all tasks on OpenRouter (`tgw-models.json`). Operator publish gate live.
+As of 2026-06-28 (session 31): PP-FENCE-001 Sessions A+B COMPLETE. Workers still stopped — restart now unblocked.
+PP-FENCE-001 Session B done: all 30 atomic_write_json sites in workers/ and ebay/ migrated to fence calls; 27 tests pass; CI grep audit added. Gaps documented in source: multi_intake (2 sites), ebay_sku_migrate (3 sites), pull.py restore_archive_tombstone (1 site).
+eBay backfill complete: 2,089 published listings have offer_id/listing_id/price; remaining items are draft/unpublished (expected).
 PP-PHOTO-001 sync infrastructure live (`tgw-itemdata-sync` service, `gdrive_sync.py`).
 PP-REPRICER-001 blocked on `buy.marketplace_insights` scope (eBay DS 8 questions pending).

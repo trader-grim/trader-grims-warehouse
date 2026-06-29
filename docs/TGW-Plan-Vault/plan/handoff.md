@@ -59,31 +59,18 @@ Use plan row numbers for plan-table items; "todo #N" only for live tracker IDs.
 
 ---
 
-## 3. What Changed This Session (session 39 — 2026-06-22)
+## 3. What Changed This Session (session 35 — 2026-06-29)
 
-**Sessions 27–38** covered Home Manager / fish shell (PP-HM-001 Phase 1), dress rehearsal config (`tgw-test-rehearsal.nix`), schema init (`tgw-db-init`), USB vault (`TGW-VAULT` btrfs partition + `tgw-usb-stamp.sh`), `tgw-push-config.sh` validated end-to-end, `nix flake check` passing all 4 configs. See master plan session log for full detail.
+**Sessions 33–34** covered PP-EBAY-MIRROR-001 P1/P1.5/P2, ebay_sku_migrate condition fixes, mark_item_sold qty-decrement, Sway+lan-mouse Nix modules, Aider MCP fix. See master plan session log.
 
-**Session 39 — 2026-06-22 (this session):**
+**Session 35 — 2026-06-29 (this session):**
 
 | Change | Detail |
 |--------|--------|
-| Storage architecture decision | LVM for OS base + PostgreSQL + future microVMs; Btrfs for `/opt/TGW` data. Replaces Btrfs+NoCoW design. |
-| `nix/hosts/tgw-prod-disko.nix` | New file — LVM+XFS+Btrfs layout; device `/dev/sda` placeholder, sizes for ~1 TB drive. |
-| `flake.nix` | Wired `disko.nixosModules.disko` + `tgw-prod-disko.nix` into tgw-prod config. |
-| `PLAN-nixos-migration.md` step 3.3 | Updated with storage architecture decision table + status. |
-| Master plan Disko row | Updated; Stage 4 Disko todo checked off. |
-| Disko files | Warning comments added to both disko files — `extraArgs=["-f"]` danger if nixos-anywhere re-run post-restore. |
-| `inbox/lvm.md` | Archived (Perplexity research on LVM storage architecture). |
-
-**Dave's confirmed execution sequence (in progress 2026-06-22):**
-1. Back up data; confirm storage devices safely offline
-2. Disable all tgw services + Syncthing + rclone
-3. uid migration (`usermod -u 900 tgw`, full-disk audit, permissions check)
-4. Database dump (`pg_dump --format=custom`)
-5. MX snapshot (Phase 1 ISO bake)
-6. Phase 4 dress rehearsal → Phase 5 production cutover
-
-⚠️ **One flag on this sequence:** the plan (Phase 0.6) calls for briefly restarting the pipeline after uid migration and doing a reboot test *before* the pg_dump — to confirm the uid change didn't leave anything broken. If you skip this, you'll have no validation that uid=900 works on MX before the ISO is baked. Low risk since the procedure is well-defined, but worth a quick `tgw health` + `tgw enqueue-sku <any> echo` after the uid change before proceeding to the dump.
+| `_PERMANENT_ERROR_SIGNALS` expanded | Added 25021, 25002, 25004, 25005, 25604, duplicate listing, ended listings. Without this, items with `ebay_done=True` but unrecognised error codes looped forever. |
+| `ebay_sku_migrate` COMPLETE | Reached "no live non-canonical items remain" at 02:39 UTC. ~29 items permanently blocked with `sku_migrate_skip=True`; use `tgw migrate-unblock <sku>` after data fix. |
+| Photo push live | 539 items pushed successfully; 66 remain (eBay 400 — same blocked migration items). |
+| Worker fleet restarted | All 14 workers now active after being stopped since session 31. `ebay_legacy_sync` running 365-day lookback (no prior state file). |
 
 ---
 
@@ -111,26 +98,19 @@ Ordered by urgency:
 
 ## 5. Recommended Next Sequence
 
-**Migration in flight (2026-06-22) — Dave executing:**
+**Worker fleet live as of session 35 (2026-06-29) — pipeline running normally.**
 
-1. ✅ Data backed up, storage devices safe
-2. → Disable all tgw + Syncthing + rclone services
-3. → uid migration (0.6) — then `tgw health` + echo round-trip + reboot before pg_dump
-4. → `pg_dump --format=custom` into `/opt/TGW/var/`
-5. → MX snapshot (Phase 1 ISO bake, boot-verify in QEMU)
-6. → Phase 4 dress rehearsal on A1131: push `tgw-test-rehearsal`, restore from backup, run §7 battery, record timings
-7. → Phase 5 production cutover: nixos-anywhere on prod SSD, restore /opt/TGW (from HDD local copy if available — much faster than rclone), unmask/start workers in order
+1. Monitor ebay_legacy_sync — 365-day lookback running; check for sold items being detected.
+2. Review ~29 permanently-blocked migration items (sku_migrate_skip=True). Items with 25002
+   (missing item specifics) re-queue after ebay_draft regenerates data. Items with 25021
+   (category rejects used condition) need category change in item JSON.
+3. PP-BACKUP-001 Phase A — scripts + timers exist in etc/systemd/; nothing running yet.
+   todo_items and queue_job_history cannot be re-derived from ItemData.
+4. PP-FENCE-001 Session D — 6 unfenced write sites remain (deferred). Run when stable.
+5. nixos-rebuild switch — Sway + lan-mouse Nix modules written session 34; not yet applied.
 
-**Code-side still open (Phase 0.4):**
+**Deferred:**
 
-- Config normalization: clean dead keys from `tgw-api-config.json`, surface `ebay_sku_migrate` through `load_config()` proper. Can be done any time before or after cutover — not a migration gate.
-
-**After cutover stabilises:**
-
-- PP-PORTABLE-CATALOG-001 P2 (no remaining code blocker)
-- PP-BACKUP-001 Phase A timers (scripts exist in `etc/systemd/`; nothing running yet)
-- A4 CI gate (invariant close; small)
-- Code/venv LV in LVM (deferred — not needed for migration)
 
 ---
 
@@ -172,3 +152,83 @@ git log --oneline main..HEAD
 ```
 
 Then: read the master plan and check §2 above against `tgw todo` to confirm alignment.
+
+---
+
+## Session 32 — 2026-06-28
+
+### What changed
+
+- **PP-FENCE-001 Session C DONE** — all 18 inline atomic_write_json call sites in http_server.py consolidated into _apply_patch(), _apply_ebay_write(), _enqueue_catalog_rebuild(). atomic_write_json now called only inside these three functions. Smoke tested live.
+- **Plan Session C renamed to Session D** — OS-level NixOS tgw-worker lockout; still deferred until workers stable.
+- **sqlite_catalog.py status resolution fix** — _resolve_status() with terminal-state-wins logic; fixes archive invisibility bug; 353 conflicted items resolved.
+- **Master plan updated** — Session 32 recorded; PP-FENCE-001 section current.
+- **Inbox cleaned** — two stale INPROGRESS notes archived; clean DONE note written.
+- **Todos closed** — #1068 (Session C), #1057 (exit skill).
+- **Exit skill (/tgw-exit) confirmed working.**
+
+### Still open
+
+- **Workers not yet restarted** — unblocked; restart one at a time, verify each. Sequence in master plan and project-status memory.
+- **ebay_sync broken** — fetch_all_offers() returns 400/25707 silently; fix needed.
+- **#STATUS normalization** — 5,103 items have only #STATUS; todo #1053.
+- **PP-BACKUP-001 warnings** — db dump stale, rclone sync absent.
+- **End+relist gate test** — verify ebay_end_listing through UI once workers running.
+
+### New risks
+
+- Workers stopped since session 30. Catalog drift vs eBay accumulates. Restart promptly.
+- ebay_sync silent failure means no reconciliation loop. Fix is next priority after restart.
+
+## Session 34 — 2026-06-28
+
+### What changed
+
+| Change | Detail |
+|--------|--------|
+| PP-EBAY-MIRROR-001 P1 | `scripts/ebay_normalize.py` ran: 19,394 items updated, 0 errors. Unblocked `ebay_sku_migrate`. |
+| PP-EBAY-MIRROR-001 P1.5 | `scripts/ebay_photo_push.py` written + dry-run OK. Ready to run after migration. todo #1073. |
+| PP-EBAY-MIRROR-001 P2 | `ebay_sync.py` propagation live — photo_urls backfill + integrity refresh. Worker restarted. |
+| `ebay_sku_migrate` condition fix | `_CONDITION_MAP['3000'] = 'USED_EXCELLENT'`; 25021 retry in `_migrate_inventory()` + `_recover_partial()`. 13 briefly-offline items recovered (12 live again; GATX sold — cleaned up). |
+| Sold-item guard | `migrate_one()` checks live offer status before migrating — skips if COMPLETED/ENDED, updates local status. Prevents re-listing sold items. |
+| `mark_item_sold()` rewrite | Decrements `draft_listing.quantity`; marks sold only when qty reaches 0. Multi-qty partial sales stay active. 365-day lookback triggered. |
+| Sway + lan-mouse Nix | `nix/os/sway.nix` + `nix/os/lan-mouse.nix` written; tgw-prod + a1131 host files updated. `nixos-rebuild switch` not yet run. |
+| Aider MCP fix | `/home/tgw/.local/bin/aider` symlink created → Nix store aider. Restart Claude Code to activate. |
+
+### Still open
+
+- **`ebay_sku_migrate` still running** — ~2,000+ items remaining; check progress with `journalctl -u tgw-worker@ebay_sku_migrate.service | grep "no live"` for completion signal.
+- **Run `scripts/ebay_photo_push.py` after migration completes** (todo #1073) — 1,019 + 116 items with photo gaps.
+- **`nixos-rebuild switch`** — Sway + lan-mouse modules not yet applied; pending reboot test.
+- **Other workers still stopped** — restart sequence after migration: catalog_rebuild → thumbnail_gen → pm_intake → plan_render → ai_identify → ebay pipeline.
+- **83 skip-flagged migration items** — permanent failures (Best Offer / qty=0); need operator review.
+- **PP-BACKUP-001** — timers still not installed; db dump stale.
+- **#STATUS normalization** — todo #1053.
+
+### New risks
+
+- `mark_item_sold()` idempotency for multi-qty: only checks last `ebay_sale.order_id`; multiple sales per item could over-decrement if same order retried differently. Acceptable for now (single-qty is the common case).
+- Sway config (`~/.config/sway/config`) not yet written — Nix module is ready but no actual sway config file exists yet for either host.
+
+## Session 33 — 2026-06-28
+
+### What changed
+
+- **Suggestions processed** — 4 unprocessed items filed: PP-RESCUE-001 (tgw-rescue live ISO), PP-AGENTIC-PRICE-001 (agentic comp search, 4-phase design), PP-LISTEDITOR-001 stub added to master plan. All checked off in SUGGESTIONS.md.
+- **Plan check warnings resolved** — PP-PHOTO-001 heading fixed (removed ✅ to stop false done-mismatch); PP-LISTEDITOR-001 section added. `tgw plan check` now all clear.
+- **eBay backfill confirmed complete** — 19,785 items have listing_id, matching eBay's ~19,736 active+sold count.
+- **ebay_sku_migrate blasting** — config cranked to batch_size=100, interval_hours=0.05. Worker started ~13:56. 3,203 non-canonical SKUs to process at ~8s/item via inventory_live path. ETA ~7-8 hours. todo #1069.
+
+### Still open
+
+- **ebay_sku_migrate in flight** — DO NOT restart other workers until it logs `no live non-canonical items remain — done`. Check: `journalctl -u tgw-worker@ebay_sku_migrate.service | grep "no live"`
+- **83 skip-flagged items** — permanent failures (Best Offer / qty=0). Need operator review post-migration.
+- **Worker restart sequence** (after migration): catalog_rebuild → thumbnail_gen → pm_intake → plan_render → ai_identify → ebay pipeline.
+- **ebay_sync returns 0** — legacy listings not in Inventory API; needs fix after workers stable.
+- **#STATUS normalization** — todo #1053.
+- **PP-BACKUP-001** — timers still not installed.
+
+### New risks
+
+- **Don't restart workers while migration runs** — ebay_sku_migrate writes directly to ItemData (6 unfenced sites); concurrent writes from other workers risk collision.
+- ebay_sku_migrate config is batch=100/3min — worker self-stops when done, interval is then moot.

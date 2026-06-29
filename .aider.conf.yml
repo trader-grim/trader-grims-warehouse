@@ -20,21 +20,20 @@ env-file: /home/db/.env
 #model: anthropic/claude-sonnet-4-6
 #weak-model: anthropic/claude-haiku-4-5-20251001
 
-#model: openrouter/deepseek/deepseek-v4-flash
-architecture-model: openrouter/deepseek/deepseek-v4-flash
+model: openrouter/deepseek/deepseek-chat-v3-0324
 editor-model: openrouter/gemini/gemini-2.5-flash
 
-architect: true
-auto-accept-architect: false       # review the plan before edits land
+architect: false
 
 cache-prompts: true
-map-tokens: 8000
+map-tokens: 16000
 
 show-diffs: true
 git: true
 auto-commits: true                 # commits land on the task branch only; never merge yourself
 
 auto-lint: true
-auto-test: true
-lint-cmd: "python: ruff check src/"   # src/ only — avoid blocking on unrelated test/tools lint
+auto-test: false
+lint-cmd: "python: ruff check --select=E,F,W --ignore=E501 {files}"   # src/ only — avoid blocking on unrelated test/tools lint
 test-cmd: "pytest -q"
+cache-keepalive-pings: 2
