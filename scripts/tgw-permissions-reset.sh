@@ -13,9 +13,9 @@
 #   * --data   — opt-in deep sweep of /opt/TGW/data (55K+ item dirs; slow), left
 #                out of the default run so the everyday repair stays quick.
 #
-# Policy (hardened session 15 — never world-readable; original used 2755/0644):
-#   App trees (src, bin, docs): dirs 2750, files 0640; bin scripts 0750
-#   Config (config):           dirs 2750, files 0640
+# Policy (updated — never world-readable; db user in tgw group needs write on src/bin/docs):
+#   App trees (src, bin, docs): dirs 2770, files 0660; bin scripts 0750
+#   Config (config):           dirs 2750, files 0640   (group read-only; workers don't write)
 #   Writable (var, backups):   dirs 2770, files 0660
 #   Secrets (secrets):         dir  0700, files 0600   <-- security-critical
 #   Data (data, with --data):  dirs 2775, files 0644   (public catalog, not secret)
@@ -199,9 +199,9 @@ chown_r() { [[ "$CAN_CHOWN" -eq 1 && -e "$1" ]] && run chown -R "$OWNER:$GROUP" 
 # Directory skeleton (install -d is a no-op if present, but normalizes mode).
 if [[ "$CAN_CHOWN" -eq 1 ]]; then
   run install -d -m 2750 -o "$OWNER" -g "$GROUP" "$TGW_ROOT"
-  run install -d -m 2750 -o "$OWNER" -g "$GROUP" "$SRC_ROOT"
-  run install -d -m 2750 -o "$OWNER" -g "$GROUP" "$BIN_ROOT"
-  run install -d -m 2750 -o "$OWNER" -g "$GROUP" "$DOCS_ROOT"
+  run install -d -m 2770 -o "$OWNER" -g "$GROUP" "$SRC_ROOT"
+  run install -d -m 2770 -o "$OWNER" -g "$GROUP" "$BIN_ROOT"
+  run install -d -m 2770 -o "$OWNER" -g "$GROUP" "$DOCS_ROOT"
   run install -d -m 2750 -o "$OWNER" -g "$GROUP" "$CONFIG_ROOT"
   run install -d -m 2770 -o "$OWNER" -g "$GROUP" "$VAR_ROOT"
   run install -d -m 2770 -o "$OWNER" -g "$GROUP" "$LOG_ROOT"
@@ -213,19 +213,34 @@ for path in "$SRC_ROOT" "$BIN_ROOT" "$DOCS_ROOT" "$CONFIG_ROOT" "$VAR_ROOT" "$BA
 done
 
 if [[ -d "$SRC_ROOT" ]]; then
-  run find "$SRC_ROOT" -type d -exec chmod 2750 {} +
-  run find "$SRC_ROOT" -type f -exec chmod 0640 {} +
+  run find "$SRC_ROOT" -type d -exec chmod 2770 {} +
+  run find "$SRC_ROOT" -type f -exec chmod 0660 {} +
+  # Flutter SDK — all scripts/binaries need execute bit preserved.
+  FLUTTER_SDK="$SRC_ROOT/trader-grims-warehouse/flutter"
+  if [[ -d "$FLUTTER_SDK" ]]; then
+    find "$FLUTTER_SDK/bin" -type f -exec chmod 0750 {} +
+    find "$FLUTTER_SDK" -name "*.sh" -exec chmod 0750 {} +
+  fi
+
+  # Flutter Linux bundle — binary and shared libs need execute bit.
+  FLUTTER_BUNDLE="$SRC_ROOT/trader-grims-warehouse/apps/tgw_app/build/linux/x64/release/bundle"
+  if [[ -d "$FLUTTER_BUNDLE" ]]; then
+    [[ -f "$FLUTTER_BUNDLE/tgw_app" ]] && run chmod 0750 "$FLUTTER_BUNDLE/tgw_app"
+    find "$FLUTTER_BUNDLE/lib" -name "*.so*" 2>/dev/null | while read -r f; do
+      run chmod 0750 "$f"
+    done
+  fi
 fi
 
 if [[ -d "$BIN_ROOT" ]]; then
-  run find "$BIN_ROOT" -type d -exec chmod 2750 {} +
-  run find "$BIN_ROOT" -type f -exec chmod 0640 {} +
+  run find "$BIN_ROOT" -type d -exec chmod 2770 {} +
+  run find "$BIN_ROOT" -type f -exec chmod 0660 {} +
   run find "$BIN_ROOT" -type f \( -name '*.sh' -o -name '*.bash' -o -name '*.py' -o -name '*.pl' \) -exec chmod 0750 {} +
 fi
 
 if [[ -d "$DOCS_ROOT" ]]; then
-  run find "$DOCS_ROOT" -type d -exec chmod 2750 {} +
-  run find "$DOCS_ROOT" -type f -exec chmod 0640 {} +
+  run find "$DOCS_ROOT" -type d -exec chmod 2770 {} +
+  run find "$DOCS_ROOT" -type f -exec chmod 0660 {} +
 fi
 
 if [[ -d "$CONFIG_ROOT" ]]; then
