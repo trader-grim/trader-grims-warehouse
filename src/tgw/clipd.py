@@ -32,7 +32,6 @@ import os
 import socket
 import socketserver
 import subprocess
-import sys
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
