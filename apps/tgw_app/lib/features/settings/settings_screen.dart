@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../providers/providers.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import '../../config/tgw_config.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -15,8 +15,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   final _tokenController = TextEditingController();
   final _dbPathController = TextEditingController();
   final _thumbDirController = TextEditingController();
-  final _storage = const FlutterSecureStorage();
-
   @override
   void initState() {
     super.initState();
@@ -24,10 +22,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   Future<void> _loadSettings() async {
-    _baseUrlController.text = await _storage.read(key: 'base_url') ?? 'http://127.0.0.1:7373';
-    _tokenController.text = await _storage.read(key: 'bearer_token') ?? '';
-    _dbPathController.text = await _storage.read(key: 'db_path') ?? '';
-    _thumbDirController.text = await _storage.read(key: 'thumbnail_dir') ?? '';
+    _baseUrlController.text = await TgwConfig.read('base_url') ?? 'http://127.0.0.1:7373';
+    _tokenController.text = await TgwConfig.read('bearer_token') ?? '';
+    _dbPathController.text = await TgwConfig.read('db_path') ?? '';
+    _thumbDirController.text = await TgwConfig.read('thumbnail_dir') ?? '';
   }
 
   Future<void> _saveSettings() async {

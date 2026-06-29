@@ -59,7 +59,24 @@ Use plan row numbers for plan-table items; "todo #N" only for live tracker IDs.
 
 ---
 
-## 3. What Changed This Session (session 35 — 2026-06-29)
+## 3. What Changed This Session (session 36 — 2026-06-29)
+
+**Session 36 — 2026-06-29 (PP-WM-001: Sway TGW-ify + Flutter startup fix):**
+
+| Change | Detail |
+|--------|--------|
+| `flutter_secure_storage` removed | Replaced with `lib/config/tgw_config.dart` (plain files in `~/.config/tgw/`). Root cause: libsecret → tinysparql caused 1-2 min startup delay. |
+| Flutter app rebuilt | nix-shell: cmake ninja clang libepoxy fontconfig; `CC=clang`; explicit `-lepoxy -lfontconfig` linker flags. Recipe in `DONE-sway-flutter-startup.md`. |
+| `/opt/TGW/bin/tgw-app` wrapper | LD_LIBRARY_PATH caching + `NO_AT_BRIDGE=1 GTK_USE_PORTAL=0 GSETTINGS_BACKEND=memory GIO_USE_VFS=local GTK_MODULES=""` to kill all GTK D-Bus startup delays. |
+| xdg-desktop-portal-gtk fixed | Was failing "cannot open display: :0" — `WAYLAND_DISPLAY` not in systemd user env. Added `exec systemctl --user import-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP DISPLAY` to sway config. |
+| Permissions script updated | Flutter SDK bin/ and *.sh get 0750; bundle .so* symlinks no longer excluded by -type f. |
+| Sway TGW chord working | Super+T: h/q/s/t/v/c/o/F all working. F launches Flutter app. |
+
+**Open from session 36:** a1131 setup (sway + lan-mouse) — in progress next.
+
+---
+
+## 3b. What Changed Session 35 — 2026-06-29
 
 **Sessions 33–34** covered PP-EBAY-MIRROR-001 P1/P1.5/P2, ebay_sku_migrate condition fixes, mark_item_sold qty-decrement, Sway+lan-mouse Nix modules, Aider MCP fix. See master plan session log.
 

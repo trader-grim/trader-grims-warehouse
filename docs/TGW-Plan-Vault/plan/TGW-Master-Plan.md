@@ -475,6 +475,7 @@ plan_render, ai_identify, ebay_draft, ebay_upload, ebay_price, ebay_stage, ebay_
 ebay_sync, ebay_legacy_sync (365-day lookback running), ebay_sku_migrate (idle/polling),
 token_refresh. Worker fleet was stopped since session 31; now fully live.
 
+See `docs/TGW-Plan-Vault/dev-workflow/research/RESEARCH-sku-migration-complete-2026-06-29.md` for full outcome, root cause, and remaining open items.
 ### Session 34 — 2026-06-28 — Migration fixes, photo reconciliation, sold-item detection
 
 **PP-EBAY-MIRROR-001 P1 DONE** — `scripts/ebay_normalize.py` ran: 19,394 items updated

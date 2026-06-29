@@ -1,13 +1,11 @@
 import 'dart:io';
 
 import 'package:dio/dio.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import '../config/tgw_config.dart';
 import '../models/models.dart';
 
 class ApiClient {
   final Dio _dio = Dio();
-  final FlutterSecureStorage _storage = const FlutterSecureStorage();
-  
   String _baseUrl = 'http://127.0.0.1:7373';
   String? _token;
   bool _initialized = false;
@@ -19,8 +17,8 @@ class ApiClient {
 
   Future<void> ensureInitialized() async {
     if (_initialized) return;
-    _baseUrl = await _storage.read(key: 'base_url') ?? 'http://127.0.0.1:7373';
-    _token = await _storage.read(key: 'bearer_token');
+    _baseUrl = await TgwConfig.read('base_url') ?? 'http://127.0.0.1:7373';
+    _token = await TgwConfig.read('bearer_token');
     _updateDioOptions();
     _initialized = true;
   }
@@ -37,8 +35,8 @@ class ApiClient {
   Future<void> setConfig(String baseUrl, String token) async {
     _baseUrl = baseUrl;
     _token = token;
-    await _storage.write(key: 'base_url', value: baseUrl);
-    await _storage.write(key: 'bearer_token', value: token);
+    await TgwConfig.write('base_url', baseUrl);
+    await TgwConfig.write('bearer_token', token);
     _updateDioOptions();
     _initialized = true;
   }

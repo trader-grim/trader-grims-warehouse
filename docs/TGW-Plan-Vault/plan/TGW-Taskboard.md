@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-06-29 02:28 UTC — 179 open, 18 done in the last 7 days._
+_Rendered 2026-06-29 17:39 UTC — 174 open, 24 done in the last 7 days._
 
 ## admin (19 open)
 
@@ -37,15 +37,11 @@ _Rendered 2026-06-29 02:28 UTC — 179 open, 18 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (16 open)
+## claude (11 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
-| 1069 | 1 |  | Blast ebay_sku_migrate: batch=100 interval=3min to clear 3203 non-canonical SKUs before worker restart |  |  |
-| 1070 | 2 |  | PP-EBAY-MIRROR-001 P1: write scripts/ebay_normalize.py — copy ebay_live to ebay_offer canonical fields (photo_urls title condition aspects description), fix image_urls/imageUrls key mismatch, construct 49 missing listing_urls. No API calls. Unblocks ebay_sku_migrate. |  |  |
-| 1071 | 3 |  | PP-EBAY-MIRROR-001: after normalize, restart ebay_sku_migrate — remaining 2138 items will have photo_urls and should complete |  |  |
 | 1062 | 5 |  | PP-LISTEDITOR-001: Listing editor — item detail page restructure + editable aspects + EPS photos + price comps + revision push to eBay. Replaces Seller Hub for listing management. Plan: docs/ai-plans/PP-LISTEDITOR-001.md. Phase 1A: EPS photo strip + ebay_live panel. Phase 1B: editable fields, aspects form (REQUIRED/RECOMMENDED badges, dropdowns for SELECTION_ONLY), price comps inline. Phase 3: verify Publish for 18 staged items. Phase 2: enable revision apply (_APPLY_ENABLED=True, fill eBay PUT stub revision.py:399, extract build_inventory_body/build_offer_body from sync.py). Files: http_server.py, revision.py, ebay/sync.py, tests/test_revision.py. Absorbs todos #876 #877 #878. | [[TGW-Master-Plan#PP-LISTEDITOR-001 — Listing Editor (item detail page restructure)\|PP-LISTEDITOR-001]] |  |
-| 1072 | 10 |  | PP-WM-001: write nix/os/sway.nix + nix/os/lan-mouse.nix; retire input-leap-server.nix + input-leap-client.nix; update tgw-prod.nix + a1131.nix |  |  |
 | 1055 | 15 |  | PP-CLIP-001 Phase 2: rofi clipboard history picker — keybind launches rofi fed from tgw clip list; select entry copies back via tgw clip get --id N --copy; SKUs pinned/highlighted; optional immediate paste via xdotool/wl-paste | [[TGW-Master-Plan#Phase 1 — `db` operator config (unblocks PP-WM-001 Phase 2 + PP-CLIP-001)\|PP-CLIP-001]] |  |
 | 1052 | 18 |  | PP-BACKUP-001: write restore script + README for USB keys — script covers: (1) boot NixOS installer, (2) nixos-anywhere --flake path:.#tgw-prod, (3) pg_restore from dump, (4) rsync /opt/TGW from TGW-SNAPSHOT-0, (5) verify tgw health + echo round-trip. README covers user/password, uid=900 tgw check, secrets chmod. Files go in root of TGW-SECRETS-A and TGW-SECRETS-B. Plain text + shell script, no dependencies. | [[TGW-Master-Plan#Stage 3 — PP-BACKUP-001 Phases B–E (M, 1–2 sessions)\|PP-BACKUP-001]] |  |
 | 1053 | 22 |  | data-scrub: strip legacy Magento fields from item JSONs — fields to remove: 'Item number', '#STATUS', 'attribute_set', 'm2_categories', 'category_ids', 'ebay_condition_number', 'eBay category 1 name', 'eBay category 1 number', 'C:Brand', 'C:Type', 'C:MPN', 'C:Model', 'C:Language', 'C:Movie/TV Title', 'input_voltage', 'description_history', 'title_history', 'location_history'. Historical data preserved in historical-tgwcatalog.json / historical-master-catalog.json. Write a scrub worker or one-shot script; archive before/after per policy. |  |  |
@@ -55,7 +51,6 @@ _Rendered 2026-06-29 02:28 UTC — 179 open, 18 done in the last 7 days._
 | 1066 | 40 |  | PP-SEARCH-001 Phase 0: recoll universal index — ItemArchive + masterarchive/history + catalogs + docs vault |  |  |
 | 1054 | 45 |  | item detail: add History link using sku_old → historical catalog lookup. History uses old-format SKUs (tgw202005031234173 style); current items carry sku_old as the bridge. Need a /form/history/<old_sku> route or link to historical-catalog search. Design first. |  |  |
 | 1044 | 50 |  | PP-DOCLIB-001: Research and docs library system — design a structured library for vault research docs, perplexity outputs, gemini research, inbox archives, and dev-workflow notes. Goals: consistent location taxonomy, easy retrieval, cross-reference between research and PP-* items, tgw CLI surface (tgw docs search/show). Consider markmap integration for browsable index. |  |  |
-| 1073 | 50 |  | Write scripts/ebay_photo_push.py — upload missing local photos to EPS, PUT full imageUrls to live inventory_item for ~1135 items; run after sku_migrate completes (PP-EBAY-MIRROR-001 P1.5) |  |  |
 | 1056 | 60 |  | Audit sdb/sdc contents, free what's unused, extend vg_tgw into HDD space, grow nix LV |  |  |
 
 ## review (141 open)
@@ -210,10 +205,16 @@ _Rendered 2026-06-29 02:28 UTC — 179 open, 18 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — Sold reconciliation and inventory status sync (design ready)\|PP-SOLD-001]] |  |
 
-## Done this week (18)  — showing 15 most recent
+## Done this week (24)  — showing 15 most recent
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 1074 | claude | 2026-06-29 | PP-WM-001 Sway Flutter startup fix |
+| 1073 | claude | 2026-06-29 | Write scripts/ebay_photo_push.py — upload missing local photos to EPS, PUT full imageUrls to live inventory_item for ~1135 items; run after sku_migrate completes (PP-EBAY-MIRROR-001 P1.5) |
+| 1072 | claude | 2026-06-29 | PP-WM-001: write nix/os/sway.nix + nix/os/lan-mouse.nix; retire input-leap-server.nix + input-leap-client.nix; update tgw-prod.nix + a1131.nix |
+| 1071 | claude | 2026-06-29 | PP-EBAY-MIRROR-001: after normalize, restart ebay_sku_migrate — remaining 2138 items will have photo_urls and should complete |
+| 1070 | claude | 2026-06-29 | PP-EBAY-MIRROR-001 P1: write scripts/ebay_normalize.py — copy ebay_live to ebay_offer canonical fields (photo_urls title condition aspects description), fix image_urls/imageUrls key mismatch, construct 49 missing listing_urls. No API calls. Unblocks ebay_sku_migrate. |
+| 1069 | claude | 2026-06-29 | Blast ebay_sku_migrate: batch=100 interval=3min to clear 3203 non-canonical SKUs before worker restart |
 | 1057 | claude | 2026-06-28 | Create /exit skill: on session end, update memory files (project-status, project-clip-001, etc.) with session outcomes — mirror what Claude does manually today |
 | 1068 | claude | 2026-06-28 | PP-FENCE-001 Session C: consolidate http_server.py action handler writes through canonical fence functions - blocks worker restart |
 | 1067 | claude | 2026-06-28 | PP-FENCE-001 Session B DONE: all workers migrated off atomic_write_json to fence calls; 27 tests passing; CI audit test added; gaps: multi_intake (newitems+key-delete), ebay_sku_migrate (rename context), pull.py restore_archive_tombstone (needs upsert) |
@@ -223,10 +224,4 @@ _Rendered 2026-06-29 02:28 UTC — 179 open, 18 done in the last 7 days._
 | 1041 | admin | 2026-06-25 | Fix permissions drift: chmod 600 /opt/TGW/secrets/backup-age-identity.age (currently 0664, flagged by tgw health) |
 | 1061 | claude | 2026-06-25 | PP-NIXOS-001: Master plan updated with canonical flake settled architecture section. CLAUDE-NIX.md in tgw-flake updated: canonical notice, corrected host inventory (tgw-prod LIVE), corrected hardware entry, nixos-anywhere URL. |
 | 1060 | claude | 2026-06-25 | PP-NIXOS-001: USB vault bundle created at /mnt/vault/flake/tgw-flake.bundle — offline DR copy of canonical flake. Refresh after each commit: git -C ~/tgw-flake bundle create /mnt/vault/flake/tgw-flake.bundle --all |
-| 1059 | claude | 2026-06-25 | PP-NIXOS-001: GitHub private repo trader-grim/tgw-flake created and pushed (master branch). Remote: git@github.com:trader-grim/tgw-flake.git |
-| 1058 | claude | 2026-06-25 | PP-NIXOS-001: ~/tgw-flake confirmed canonical production flake — Gen 25 boots, 1920x1080 display, tgw-prod live on NixOS 25.05. flake.nix + flake.lock removed from Python source repo; nix/ left as archive with NIX-FLAKE-MOVED-README.md pointer. |
-| 1046 | admin | 2026-06-25 | tgw-catio-nix 0.0.1 alpha: nixos-rebuild switch on tgw-prod to apply layer split (db.nix/tgw/home.nix), backup timers, and HM merge — run: sudo nixos-rebuild switch --flake path:/opt/TGW/src/trader-grims-warehouse#tgw-prod |
-| 1043 | claude | 2026-06-25 | PP-PORTABLE-CATALOG-001 Ph2 follow-up: review item detail Fields tab — currently shows fixed field subset only; consider surfacing more item data fields |
-| 1042 | claude | 2026-06-25 | PP-NIXOS-001: flutter cache binaries lose execute bits after rsync (dartvm, gen_snapshot, tool_backend.sh). Post-sync chmod +x needed on flutter/bin/cache/ — document in NixOS migration runbook |
-| 938 | review | 2026-06-24 | VERIFY #60 (done 2026-06-11, no commit): Round6 #54: PP-BACKUP-001 Phase A BUILD (after Dave approves PLAN-backup-dr.md) — tgw-db-backup/tgw-cloud-sync/tgw-secrets-backup units+scripts in etc/systemd/+bin/; check_backups() in health.py (4 fr |
-| … | | | _…and 3 more — run `tgw todo --all` to see everything_ |
+| … | | | _…and 9 more — run `tgw todo --all` to see everything_ |
