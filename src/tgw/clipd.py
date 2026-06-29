@@ -32,6 +32,7 @@ import os
 import socket
 import socketserver
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -556,6 +557,7 @@ def main() -> int:
         return 0
 
     if args.command == 'pick':
+        import sys
         selected = launch_rofi_picker(args.db_path)
         if not selected:
             return 1
