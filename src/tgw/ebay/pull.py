@@ -714,6 +714,92 @@ def backfill_draft_from_live(item: Dict[str, Any], cfg: Dict[str, Any]) -> bool:
     return True
 
 
+def backfill_canonical_from_live(item: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Promote eBay live data into top-level canonical inventory fields.
+
+    Only fills fields that are currently empty/missing. Never overwrites
+    existing operator-set values. Returns a dict of field → new_value
+    for every field that was changed.
+
+    Sources in priority order:
+      1. ebay_live.inventory_item (freshest eBay data)
+      2. draft_listing (already normalised from ebay_live)
+      3. Legacy top-level fields with different names (e.g. weight → weight_oz)
+    """
+    changed: Dict[str, str] = {}
+
+    live   = item.get('ebay_live') or {}
+    inv    = live.get('inventory_item') or {}
+    product = inv.get('product') or {}
+    aspects = product.get('aspects') or {}
+    dl     = item.get('draft_listing') or {}
+
+    def _set(field: str, value: Any) -> None:
+        """Set field only if currently empty."""
+        if value and not item.get(field):
+            item[field] = value
+            changed[field] = value
+
+    def _overwrite(field: str, value: Any) -> None:
+        """Set field unconditionally (for cases where current value is known-bad)."""
+        if value and item.get(field) != value:
+            item[field] = value
+            changed[field] = value
+
+    # Title — use eBay title if our title is missing or just repeats the SKU
+    _title = product.get('title') or dl.get('title') or ''
+    if _title and (not item.get('title') or item.get('title') == item.get('sku')):
+        _overwrite('title', _title)
+
+    # Description — promote the real eBay description.
+    # Overwrite if empty OR if it's just a copy of the title (placeholder).
+    _desc = dl.get('description') or ''
+    _current_desc = str(item.get('description') or '').strip()
+    _current_title = str(item.get('title') or _title).strip()
+    if _desc and (not _current_desc or _current_desc == _current_title):
+        _overwrite('description', _desc)
+
+    # Condition — prefer human enum string over legacy raw conditionId integer.
+    _cond_live = inv.get('condition', '')  # e.g. USED_EXCELLENT
+    if _cond_live:
+        _current_cond = str(item.get('condition') or '').strip()
+        if not _current_cond or _current_cond.isdigit():
+            _overwrite('condition', _cond_live)
+
+    # Brand from eBay aspects
+    _brand = (aspects.get('Brand') or aspects.get('brand') or [''])[0]
+    _set('brand', _brand)
+
+    # Model from eBay aspects
+    _model = (aspects.get('Model') or aspects.get('model') or [''])[0]
+    _set('model', _model)
+
+    # MPN / model number
+    _mpn = (aspects.get('MPN') or aspects.get('mpn') or [''])[0]
+    _set('model_number', _mpn)
+
+    # Country of manufacture
+    _coo = (aspects.get('Country of Manufacture') or
+            aspects.get('Country of Origin') or [''])[0]
+    _set('country_of_manufacture', _coo)
+
+    # UPC from product or draft
+    _upc = product.get('upc') or dl.get('upc')
+    if isinstance(_upc, list):
+        _upc = _upc[0] if _upc else ''
+    _set('upc', _upc)
+
+    # weight_oz — promote from legacy 'weight' field (Magento export used oz)
+    if not item.get('weight_oz') and item.get('weight'):
+        try:
+            _set('weight_oz', float(item['weight']))
+        except (TypeError, ValueError):
+            pass
+
+    return changed
+
+
 def sync_inventory_api(
     cfg: Dict[str, Any],
     itemdata_root: Path,

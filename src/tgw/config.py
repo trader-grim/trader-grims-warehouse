@@ -90,6 +90,14 @@ def load_config(path: Path) -> Dict[str, Any]:
     ebay_token_path = secrets_root / "ebay-token.json"
     ebay_credentials_path = secrets_root / "ebay-credentials.json"
     openrouter_credentials_path = secrets_root / "openrouter-credentials.json"
+
+    _api_key_path = secrets_root / "tgw-api-key.json"
+    _api_key = ""
+    if _api_key_path.exists():
+        try:
+            _api_key = json.loads(_api_key_path.read_text(encoding="utf-8"))["api_key"]
+        except Exception:
+            pass
     ebay_draft_csv_path = p("ebay_draft_csv_path", str(catalog_root / "ebay-draft-offline.csv"))
 
     postgres_dsn = raw.get("postgres_dsn", "dbname=state_machine user=tgw")
@@ -146,6 +154,7 @@ def load_config(path: Path) -> Dict[str, Any]:
         "ebay_credentials_path": ebay_credentials_path,
         "openrouter_credentials_path": openrouter_credentials_path,
         "ebay_draft_csv_path": ebay_draft_csv_path,
+        "api_key": _api_key,
         "alt_text_provider": raw.get("alt_text_provider", "openrouter"),
         "alt_text_model": raw.get("alt_text_model", "google/gemini-2.5-flash"),
         "postgres_dsn": postgres_dsn,

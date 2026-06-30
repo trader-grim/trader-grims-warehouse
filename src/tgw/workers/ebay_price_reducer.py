@@ -112,6 +112,13 @@ class EbayPriceReducerWorker(QueueWorker):
 
         if item.get('reprice_skip'):
             return
+        # Skip repricing while item is in an active markdown promotion (R2 risk in PP-PROMO-001)
+        from tgw.promo import has_active_promo
+        if has_active_promo(item):
+            log.debug('ebay_price_reducer: %s in active promo — skipping reprice',
+                      jf.parent.name)
+            stats['skipped'] += 1
+            return
         schedule: List[Dict[str, Any]] = item.get('reprice_schedule', [])
         if not schedule:
             return

@@ -93,9 +93,13 @@ class EbayPriceWorker(QueueWorker):
 
         ebay_offer = dict(existing)
         ebay_offer['price_source'] = result['source']
-        ebay_offer['price_comps']  = result['comps']
-        if result.get('comp_items'):
-            ebay_offer['price_comps']['items'] = result['comp_items']
+        # Only overwrite price_comps when we have real data — preserve existing
+        # comps if the new search returned nothing (avoids wiping on re-price)
+        new_comps = result['comps']
+        if new_comps and (new_comps.get('count') or 0) > 0:
+            if result.get('comp_items'):
+                new_comps['items'] = result['comp_items']
+            ebay_offer['price_comps'] = new_comps
         ebay_offer['priced_at']    = result['queried_at']
 
         suggested = result['price']

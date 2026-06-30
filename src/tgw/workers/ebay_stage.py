@@ -134,6 +134,7 @@ class EbayStageWorker(QueueWorker):
             raise RuntimeError(
                 f'{sku}: no eBay photo URLs yet — waiting for ebay_upload (will retry)'
             )
+        image_urls = image_urls[:24]  # eBay max is 24 images per listing
 
         # Phase 3 — EPID association: look up eBay Catalog EPID for barcoded items.
         # Scope commerce.catalog.readonly required; silently skipped if not granted.

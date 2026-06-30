@@ -53,12 +53,17 @@ class EbayUploadWorker(QueueWorker):
 
         # Collect photos in photo_order display order
         sku_dir: Path = self.config['itemdata_root'] / sku
-        photos: List[Path] = ordered_photos(item, sku_dir)
+        all_photos: List[Path] = ordered_photos(item, sku_dir)
+        photos: List[Path] = all_photos
 
         if not photos:
-            log.warning('no photos found for %s — skipping upload', sku)
+            log.warning('no uploadable photos found for %s — skipping upload', sku)
             tgw_logging.log_event('ebay_upload_no_photos', sku=sku)
             return
+
+        log.info('ebay_upload: %s — %d photos to upload (%d on disk, %d already uploaded)',
+                 sku, len(photos) - len(existing & {str(p) for p in photos}),
+                 len(photos), len(existing))
 
         uploaded: List[Dict[str, str]] = list(item.get('ebay_photos', []))
         errors: List[str] = []
@@ -76,11 +81,32 @@ class EbayUploadWorker(QueueWorker):
                     requests.exceptions.Timeout) as exc:
                 log.warning('network error uploading %s: %s', photo.name, exc)
                 errors.append(str(exc))
-                # Retry the whole job — don't hard-fail on transient network issues
                 raise
             except Exception as exc:
+                err_str = str(exc)
+                # EPS daily quota exhausted — requeue for next day rather than
+                # silently partial-succeeding with whatever photos got through
+                if 'usage limit' in err_str.lower() or 'call usage limit' in err_str.lower():
+                    log.warning('ebay_upload: EPS rate limit hit for %s — saving %d uploaded so far, requeueing remainder',
+                                sku, len(uploaded))
+                    tgw_logging.log_event('ebay_upload_rate_limit', sku=sku,
+                                          uploaded_so_far=len(uploaded))
+                    # Save whatever succeeded before hitting the limit
+                    if uploaded:
+                        fence_patch_item(self.config, sku, {
+                            'ebay_photos': uploaded,
+                            'draft_listing': {'imageUrls': [e['url'] for e in uploaded]},
+                        })
+                    # Requeue for 6 hours from now (EPS resets daily at midnight eBay time)
+                    state_machine.enqueue_job(
+                        queue_name=QUEUE_NAME,
+                        payload={'sku': sku, 'reason': 'rate_limit_retry'},
+                        not_before=time.time() + 6 * 3600,
+                        max_attempts=3,
+                    )
+                    return
                 log.error('failed to upload %s: %s', photo.name, exc)
-                errors.append(str(exc))
+                errors.append(err_str)
 
         if not uploaded:
             raise RuntimeError(f'all photo uploads failed for {sku}: {errors[0] if errors else "no photos"}')
@@ -88,7 +114,7 @@ class EbayUploadWorker(QueueWorker):
         # Reorder ebay_photos to match photo_order so imageUrls reflects display order
         path_to_entry = {e['local']: e for e in uploaded}
         reordered: List[Dict[str, str]] = []
-        for p in ordered_photos(item, sku_dir):
+        for p in photos:
             key = str(p)
             if key in path_to_entry:
                 reordered.append(path_to_entry[key])

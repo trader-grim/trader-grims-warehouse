@@ -41,25 +41,25 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Worker pipeline tooltip text — sourced from TGW-Pipeline-Flow.md
 _WORKER_TOOLTIPS: Dict[str, str] = {
-    "token_refresh":     "OAuth token refresh via eBay API; fires when token expires within 30 min",
-    "pm_intake":         "Reads plan-vault inbox notes → Ollama classifies → patches Master Plan",
-    "catalog_rebuild":   "Rebuilds JSON catalog + SQLite + location tree from all ItemData",
-    "thumbnail_gen":     "Generates SKU thumbnail from primary photo (Pillow)",
-    "bundle_intake":     "Polls incoming/newitems/, creates item stubs, enqueues ai_identify",
-    "multi_intake":      "Splits multi-item bundles into individual child SKUs",
-    "ai_identify":       "Sends photo to Ollama vision model → extracts title, category, condition",
-    "ebay_draft":        "Fetches eBay aspects, fills with AI (Qwen2.5), builds draft_listing block",
-    "ebay_upload":       "Uploads photos to eBay EPS via Trading API → permanent picture URLs",
-    "ebay_price":        "Browse API comps search → sets launch price + price_comps on offer",
-    "ebay_stage":        "Inventory API upsert + creates UNPUBLISHED offer; item visible in Seller Hub",
-    "ebay_publish":      "Publishes offer to eBay (manual trigger only); writes listing_id + reprice_schedule",
-    "ebay_price_reducer":"Applies reprice schedule stages (launch → retail → move) via Inventory API",
-    "ebay_sync":         "Fetches all eBay offers → syncs status back to item JSON every 6 h",
-    "ebay_legacy_sync":  "GetMyeBaySelling + GetOrders via Trading API; marks sold items",
-    "ebay_dole":         "Self-scheduling; publishes oldest ready items at configured dole rate",
-    "ebay_sku_migrate":  "Batches Class A live listings: delist → rename SKU → relist (hourly)",
-    "velocity_stats":    "Computes nightly category velocity stats for repricer tuning",
-    "echo":              "No-op test worker — echoes payload and succeeds",
+    "token_refresh": "OAuth token refresh via eBay API; fires when token expires within 30 min",
+    "pm_intake": "Reads plan-vault inbox notes → Ollama classifies → patches Master Plan",
+    "catalog_rebuild": "Rebuilds JSON catalog + SQLite + location tree from all ItemData",
+    "thumbnail_gen": "Generates SKU thumbnail from primary photo (Pillow)",
+    "bundle_intake": "Polls incoming/newitems/, creates item stubs, enqueues ai_identify",
+    "multi_intake": "Splits multi-item bundles into individual child SKUs",
+    "ai_identify": "Sends photo to Ollama vision model → extracts title, category, condition",
+    "ebay_draft": "Fetches eBay aspects, fills with AI (Qwen2.5), builds draft_listing block",
+    "ebay_upload": "Uploads photos to eBay EPS via Trading API → permanent picture URLs",
+    "ebay_price": "Browse API comps search → sets launch price + price_comps on offer",
+    "ebay_stage": "Inventory API upsert + creates UNPUBLISHED offer; item visible in Seller Hub",
+    "ebay_publish": "Publishes offer to eBay (manual trigger only); writes listing_id + reprice_schedule",
+    "ebay_price_reducer": "Applies reprice schedule stages (launch → retail → move) via Inventory API",
+    "ebay_sync": "Fetches all eBay offers → syncs status back to item JSON every 6 h",
+    "ebay_legacy_sync": "GetMyeBaySelling + GetOrders via Trading API; marks sold items",
+    "ebay_dole": "Self-scheduling; publishes oldest ready items at configured dole rate",
+    "ebay_sku_migrate": "Batches Class A live listings: delist → rename SKU → relist (hourly)",
+    "velocity_stats": "Computes nightly category velocity stats for repricer tuning",
+    "echo": "No-op test worker — echoes payload and succeeds",
 }
 
 # Module-level state (set during lifespan startup)
@@ -86,15 +86,17 @@ def _get_listing_index() -> Dict[str, Path]:
     global _listing_index, _listing_index_built_at
     if time.time() - _listing_index_built_at > _LISTING_INDEX_TTL:
         from .workers.ebay_legacy_sync import _build_listing_index
-        _listing_index = _build_listing_index(_cfg['itemdata_root'])
+
+        _listing_index = _build_listing_index(_cfg["itemdata_root"])
         _listing_index_built_at = time.time()
-        log.info('ebay_webhook: listing index rebuilt (%d entries)', len(_listing_index))
+        log.info("ebay_webhook: listing index rebuilt (%d entries)", len(_listing_index))
     return _listing_index
 
 
 def _listing_index_built_at_reset() -> None:
     global _listing_index_built_at
     _listing_index_built_at = 0.0
+
 
 PIPELINE_ACTIONS = {
     "ai_identify",
@@ -123,6 +125,7 @@ PIPELINE_ACTIONS = {
 # Startup / shutdown
 # ---------------------------------------------------------------------------
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _cfg, _api_key, _web_key
@@ -139,6 +142,7 @@ async def lifespan(app: FastAPI):
     try:
         from .apis.nats_client import init_nats
         from .items import set_mutation_context
+
         init_nats(_cfg)
         set_mutation_context("api:operator")
     except Exception as exc:
@@ -166,6 +170,7 @@ app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 # Auth dependency
 # ---------------------------------------------------------------------------
 
+
 def _require_auth(credentials: HTTPAuthorizationCredentials = Security(_security)) -> None:
     if credentials.credentials not in (_api_key, _web_key):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token")
@@ -178,6 +183,7 @@ AUTH = Depends(_require_auth)
 # SQLite helper
 # ---------------------------------------------------------------------------
 
+
 def _sqlite_conn() -> sqlite3.Connection:
     con = sqlite3.connect(str(_cfg["sqlite_catalog_path"]), check_same_thread=False)
     con.row_factory = sqlite3.Row
@@ -187,6 +193,7 @@ def _sqlite_conn() -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
+
 
 class PatchBody(BaseModel):
     fields: Dict[str, Any]
@@ -267,6 +274,7 @@ class CreateItemBody(BaseModel):
 # GET /api/items — search catalog
 # ---------------------------------------------------------------------------
 
+
 @app.get("/api/items", dependencies=[AUTH])
 def list_items(
     search: str = "",
@@ -331,6 +339,7 @@ def list_items(
 # Must be registered before /api/items/{sku} so the literal path wins.
 # ---------------------------------------------------------------------------
 
+
 @app.get("/api/items/pending-revision", dependencies=[AUTH])
 def get_pending_revisions() -> Dict[str, Any]:
     """Return items that have a non-empty revision_draft, with draft details."""
@@ -340,11 +349,7 @@ def get_pending_revisions() -> Dict[str, Any]:
     if db_path and Path(db_path).exists():
         try:
             with _sqlite_conn() as con:
-                rows = con.execute(
-                    "SELECT sku, title, location, data FROM catalog"
-                    " WHERE json_extract(data, '$.revision_draft') IS NOT NULL"
-                    " ORDER BY sku"
-                ).fetchall()
+                rows = con.execute("SELECT sku, title, location, data FROM catalog WHERE json_extract(data, '$.revision_draft') IS NOT NULL ORDER BY sku").fetchall()
             for row in rows:
                 draft: Dict[str, Any] = {}
                 try:
@@ -354,12 +359,14 @@ def get_pending_revisions() -> Dict[str, Any]:
                     pass
                 if not draft or not draft.get("delta"):
                     continue
-                items.append({
-                    "sku": row["sku"],
-                    "title": row["title"] or "",
-                    "location": row["location"] or "",
-                    "draft": draft,
-                })
+                items.append(
+                    {
+                        "sku": row["sku"],
+                        "title": row["title"] or "",
+                        "location": row["location"] or "",
+                        "draft": draft,
+                    }
+                )
         except Exception as exc:
             log.warning("pending-revision: catalog query failed: %s", exc)
 
@@ -370,6 +377,7 @@ def get_pending_revisions() -> Dict[str, Any]:
 # GET /api/items/review-queue — post-draft items awaiting human approval
 # Must be registered before /api/items/{sku} so the literal path wins.
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/items/review-queue", dependencies=[AUTH])
 def get_review_queue() -> Dict[str, Any]:
@@ -405,26 +413,28 @@ def get_review_queue() -> Dict[str, Any]:
             except Exception:
                 pass
             draft = doc.get("draft_listing") or {}
-            items.append({
-                "sku": row["sku"],
-                "title": draft.get("title") or row["title"] or "",
-                "location": row["location"] or "",
-                "status": row["status"] or "",
-                "price": draft.get("price") if draft.get("price") is not None else row["price"],
-                "condition": draft.get("condition") or doc.get("condition") or "",
-                "condition_label": draft.get("condition_label") or "",
-                "condition_description": draft.get("description") or "",
-                "category_id": draft.get("category_id") or doc.get("ebay_category_id") or "",
-                "category_name": draft.get("category_name") or doc.get("ebay_category_name") or "",
-                "shipping_profile": draft.get("shipping_profile") or doc.get("shipping_profile") or "",
-                "quality": draft.get("quality") or {},
-                "aspects_required_total": draft.get("aspects_required_total"),
-                "aspects_required_filled": draft.get("aspects_required_filled"),
-                "category_confidence": draft.get("category_confidence") or doc.get("category_confidence") or "",
-                "offline_draft": bool(draft.get("offline_draft") or doc.get("offline_draft")),
-                "lookup_category_name": (doc.get("product_lookup") or {}).get("category_name") or "",
-                "lookup_category_id": str((doc.get("product_lookup") or {}).get("ebay_category_id") or ""),
-            })
+            items.append(
+                {
+                    "sku": row["sku"],
+                    "title": draft.get("title") or row["title"] or "",
+                    "location": row["location"] or "",
+                    "status": row["status"] or "",
+                    "price": draft.get("price") if draft.get("price") is not None else row["price"],
+                    "condition": draft.get("condition") or doc.get("condition") or "",
+                    "condition_label": draft.get("condition_label") or "",
+                    "condition_description": draft.get("description") or "",
+                    "category_id": draft.get("category_id") or doc.get("ebay_category_id") or "",
+                    "category_name": draft.get("category_name") or doc.get("ebay_category_name") or "",
+                    "shipping_profile": draft.get("shipping_profile") or doc.get("shipping_profile") or "",
+                    "quality": draft.get("quality") or {},
+                    "aspects_required_total": draft.get("aspects_required_total"),
+                    "aspects_required_filled": draft.get("aspects_required_filled"),
+                    "category_confidence": draft.get("category_confidence") or doc.get("category_confidence") or "",
+                    "offline_draft": bool(draft.get("offline_draft") or doc.get("offline_draft")),
+                    "lookup_category_name": (doc.get("product_lookup") or {}).get("category_name") or "",
+                    "lookup_category_id": str((doc.get("product_lookup") or {}).get("ebay_category_id") or ""),
+                }
+            )
 
     return {"ok": True, "items": items, "count": len(items)}
 
@@ -432,6 +442,7 @@ def get_review_queue() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # GET /api/items/{sku} — full item detail
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/items/{sku}", dependencies=[AUTH])
 def get_item(sku: str) -> Dict[str, Any]:
@@ -442,8 +453,7 @@ def get_item(sku: str) -> Dict[str, Any]:
             with psycopg2.connect(_cfg["postgres_dsn"]) as con:
                 with con.cursor() as cur:
                     cur.execute(
-                        "SELECT sku_new FROM sku_history WHERE sku_old = %s"
-                        " ORDER BY changed_at DESC LIMIT 1",
+                        "SELECT sku_new FROM sku_history WHERE sku_old = %s ORDER BY changed_at DESC LIMIT 1",
                         (sku,),
                     )
                     row = cur.fetchone()
@@ -454,6 +464,7 @@ def get_item(sku: str) -> Dict[str, Any]:
             new_path = _cfg["itemdata_root"] / new_sku / f"{new_sku}.json"
             if new_path.exists():
                 from fastapi.responses import RedirectResponse
+
                 return RedirectResponse(
                     url=f"/api/items/{new_sku}",
                     status_code=301,
@@ -465,10 +476,7 @@ def get_item(sku: str) -> Dict[str, Any]:
     # Attach media file lists (images in photo_order order)
     sku_dir = json_path.parent
     item["_images"] = [p.name for p in _ordered_photos(item, sku_dir)]
-    videos = [
-        p.name for p in sorted(sku_dir.iterdir())
-        if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}
-    ]
+    videos = [p.name for p in sorted(sku_dir.iterdir()) if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}]
     item["_videos"] = videos
 
     # Attach recent queue job states for this SKU
@@ -504,6 +512,7 @@ def get_item(sku: str) -> Dict[str, Any]:
 # PATCH /api/items/{sku} — update fields
 # ---------------------------------------------------------------------------
 
+
 @app.patch("/api/items/{sku}", dependencies=[AUTH])
 def patch_item(sku: str, body: PatchBody) -> Dict[str, Any]:
     if "sku" in body.fields:
@@ -538,10 +547,10 @@ def patch_item(sku: str, body: PatchBody) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 _APPEND_OP_TO_FIELD: Dict[str, Optional[str]] = {
-    "vision_result":     "vision_results",
-    "photo":             "photos",
-    "price_event":       "price_history",
-    "history_event":     None,   # target determined by data["type"]
+    "vision_result": "vision_results",
+    "photo": "photos",
+    "price_event": "price_history",
+    "history_event": None,  # target determined by data["type"]
 }
 _HISTORY_SUBTYPES = {"title", "description", "location"}
 
@@ -585,10 +594,10 @@ def append_item(sku: str, body: AppendBody) -> Dict[str, Any]:
 
 # Sub-fields workers must NOT clobber when merging eBay blocks
 _EBAY_WRITE_PROTECTED: Dict[str, set] = {
-    "ebay_offer":     {"price_comps", "staged_at"},
-    "ebay_listing":   {"photo_verify"},
+    "ebay_offer": {"price_comps", "staged_at"},
+    "ebay_listing": {"photo_verify"},
     "ebay_submitted": set(),
-    "ebay_live":      set(),
+    "ebay_live": set(),
 }
 
 
@@ -599,16 +608,17 @@ def ebay_write(sku: str, body: EbayWriteBody) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
 
     incoming = {
-        "ebay_offer":     body.ebay_offer,
-        "ebay_listing":   body.ebay_listing,
+        "ebay_offer": body.ebay_offer,
+        "ebay_listing": body.ebay_listing,
         "ebay_submitted": body.ebay_submitted,
-        "ebay_live":      body.ebay_live,
+        "ebay_live": body.ebay_live,
     }
     if not any(v is not None for v in incoming.values()):
         raise HTTPException(status_code=400, detail="no eBay blocks provided")
 
     changed_fields = _apply_ebay_write(
-        json_path, sku,
+        json_path,
+        sku,
         ebay_offer=body.ebay_offer,
         ebay_listing=body.ebay_listing,
         ebay_submitted=body.ebay_submitted,
@@ -622,6 +632,7 @@ def ebay_write(sku: str, body: EbayWriteBody) -> Dict[str, Any]:
 # Internal write helpers — all item data writes route through these
 # (PP-FENCE-001 Session C: UI layer must not call atomic_write_json directly)
 # ---------------------------------------------------------------------------
+
 
 def _enqueue_catalog_rebuild(reason: str) -> None:
     """Coalesced catalog rebuild — 30s delay, single dedupe key."""
@@ -672,10 +683,10 @@ def _apply_ebay_write(
 ) -> List[str]:
     """eBay block deep-merge with field protection — same logic as POST /ebay-write."""
     incoming = {
-        "ebay_offer":     ebay_offer,
-        "ebay_listing":   ebay_listing,
+        "ebay_offer": ebay_offer,
+        "ebay_listing": ebay_listing,
         "ebay_submitted": ebay_submitted,
-        "ebay_live":      ebay_live,
+        "ebay_live": ebay_live,
     }
     doc = load_item_doc(json_path)
     changed: List[str] = []
@@ -692,7 +703,9 @@ def _apply_ebay_write(
             if stored_price and incoming_price and str(stored_price) != str(incoming_price):
                 log.warning(
                     "ebay_write price divergence for %s: stored=%s incoming=%s",
-                    sku, stored_price, incoming_price,
+                    sku,
+                    stored_price,
+                    incoming_price,
                 )
         merged = {**existing, **incoming_block}
         for pf in protected:
@@ -708,7 +721,7 @@ def _apply_ebay_write(
 # POST /api/items — item creation (PP-FENCE-001 Layer 3)
 # ---------------------------------------------------------------------------
 
-_SKU_RE = re.compile(r'^tgw\d{17,20}$')
+_SKU_RE = re.compile(r"^tgw\d{17,20}$")
 
 
 @app.post("/api/items", dependencies=[AUTH])
@@ -745,6 +758,7 @@ def create_item_endpoint(body: CreateItemBody) -> Dict[str, Any]:
 # POST /api/bulk/preview + /api/bulk/apply — bulk field edit (PP-BULKEDIT-001)
 # ---------------------------------------------------------------------------
 
+
 def _bulk_selectors(body: BulkBody) -> Dict[str, Any]:
     sel: Dict[str, Any] = {}
     if body.skus:
@@ -762,6 +776,7 @@ def _bulk_selectors(body: BulkBody) -> Dict[str, Any]:
 def bulk_preview(body: BulkBody) -> Dict[str, Any]:
     """Dry-run: return matched items with current vs. proposed value. No writes."""
     from .items import bulk_edit
+
     sel = _bulk_selectors(body)
     if not sel:
         raise HTTPException(status_code=400, detail="no selector — give skus or a filter")
@@ -772,6 +787,7 @@ def bulk_preview(body: BulkBody) -> Dict[str, Any]:
 def bulk_apply(body: BulkBody) -> Dict[str, Any]:
     """Apply the bulk edit through the item fence, then enqueue a catalog rebuild."""
     from .items import bulk_edit
+
     sel = _bulk_selectors(body)
     if not sel:
         raise HTTPException(status_code=400, detail="no selector — give skus or a filter")
@@ -819,6 +835,7 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
 
     if body.action == "set_ready":
         from .ready import set_ready
+
         return set_ready(_cfg, body.skus)
 
     if body.action in ("approve", "list_now"):
@@ -889,14 +906,20 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
                     continue
                 if offer_id:
                     from .apis.ebay.client import ebay_post
+
                     ebay_post(_cfg, f"/sell/inventory/v1/offer/{offer_id}/withdraw", {})
                 else:
                     from .apis.ebay.trading import end_item as _end_item
+
                     _end_item(_cfg, listing_id_val)
-                _apply_ebay_write(json_path, sku, ebay_listing={
-                    "status": "Ended",
-                    "ended_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                })
+                _apply_ebay_write(
+                    json_path,
+                    sku,
+                    ebay_listing={
+                        "status": "Ended",
+                        "ended_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    },
+                )
                 done.append(sku)
             except Exception as exc:
                 errors.append(f"{sku}: {exc}")
@@ -935,6 +958,7 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
 # GET /api/items/{sku}/thumbnail — serve thumbnail
 # ---------------------------------------------------------------------------
 
+
 @app.get("/api/items/{sku}/thumbnail", dependencies=[AUTH])
 def get_thumbnail(sku: str):
     thumb = _cfg["thumbnail_root"] / f"{sku}.jpg"
@@ -946,6 +970,7 @@ def get_thumbnail(sku: str):
 # ---------------------------------------------------------------------------
 # POST /api/items/{sku}/action — enqueue pipeline stage
 # ---------------------------------------------------------------------------
+
 
 @app.post("/api/items/{sku}/action", dependencies=[AUTH])
 def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
@@ -990,15 +1015,21 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                 if offer_id:
                     # Inventory API: withdraw the published offer
                     from .apis.ebay.client import ebay_post
+
                     ebay_post(_cfg, f"/sell/inventory/v1/offer/{offer_id}/withdraw", {})
                 else:
                     # Trading API: end the legacy listing
                     from .apis.ebay.trading import end_item as _end_item
+
                     _end_item(_cfg, listing_id_val)
-                _apply_ebay_write(json_path, sku, ebay_listing={
-                    "status": "Ended",
-                    "ended_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                })
+                _apply_ebay_write(
+                    json_path,
+                    sku,
+                    ebay_listing={
+                        "status": "Ended",
+                        "ended_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    },
+                )
                 _enqueue_catalog_rebuild(f"ebay_end:{sku}")
             except HTTPException:
                 raise
@@ -1009,6 +1040,7 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
         elif action == "migrate_unblock":
             import json as _json
             from pathlib import Path as _Path
+
             was_blocked_val = load_item_doc(json_path).get("sku_migrate_blocked")
             _apply_patch(json_path, {"sku_migrate_blocked": None, "sku_migrate_skip": None})
             # Remove from blocked registry
@@ -1018,27 +1050,24 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                     registry = _json.loads(registry_path.read_text(encoding="utf-8"))
                     registry.pop(sku, None)
                     tmp = registry_path.with_suffix(".tmp")
-                    tmp.write_text(_json.dumps(registry, indent=2, ensure_ascii=False),
-                                   encoding="utf-8")
+                    tmp.write_text(_json.dumps(registry, indent=2, ensure_ascii=False), encoding="utf-8")
                     tmp.replace(registry_path)
             except Exception:
                 pass
-            return {"ok": True, "sku": sku, "action": "migrate_unblock",
-                    "was_blocked": was_blocked_val is not None}
+            return {"ok": True, "sku": sku, "action": "migrate_unblock", "was_blocked": was_blocked_val is not None}
 
         elif action == "review_mark_ready":
             from datetime import datetime as _dt
             from datetime import timezone as _tz
+
             doc = load_item_doc(json_path)
             rb = doc.get("review_block") or {}
             if not rb:
-                return {"ok": True, "sku": sku, "action": "review_mark_ready",
-                        "note": "no review_block present"}
+                return {"ok": True, "sku": sku, "action": "review_mark_ready", "note": "no review_block present"}
             rb["ready"] = True
             rb["retested_at"] = _dt.now(_tz.utc).isoformat()
             _apply_patch(json_path, {"review_block": rb})
-            return {"ok": True, "sku": sku, "action": "review_mark_ready",
-                    "stage": rb.get("stage"), "reason_code": rb.get("reason_code")}
+            return {"ok": True, "sku": sku, "action": "review_mark_ready", "stage": rb.get("stage"), "reason_code": rb.get("reason_code")}
 
         elif action == "accept_proposals":
             doc = load_item_doc(json_path)
@@ -1091,19 +1120,19 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
 
         elif action == "set_ready":
             from .ready import set_ready as _set_ready
+
             result = _set_ready(_cfg, [sku])
             if result.get("marked"):
-                return {"ok": True, "sku": sku, "action": "set_ready",
-                        "note": "approved for listing — will publish at next dole cycle"}
+                return {"ok": True, "sku": sku, "action": "set_ready", "note": "approved for listing — will publish at next dole cycle"}
             err = (result.get("errors") or ["unknown error"])[0]
             return {"ok": False, "sku": sku, "detail": err}
 
         elif action == "unset_ready":
             from .ready import unset_ready as _unset_ready
+
             result = _unset_ready(_cfg, [sku])
             if result.get("unmarked"):
-                return {"ok": True, "sku": sku, "action": "unset_ready",
-                        "note": "removed from ready pool"}
+                return {"ok": True, "sku": sku, "action": "unset_ready", "note": "removed from ready pool"}
             err = (result.get("errors") or ["unknown error"])[0]
             return {"ok": False, "sku": sku, "detail": err}
 
@@ -1153,6 +1182,7 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
 # GET /api/health — platform health check (Flutter home screen, audible alerts)
 # ---------------------------------------------------------------------------
 
+
 @app.get("/api/health", dependencies=[AUTH])
 def api_health() -> Dict[str, Any]:
     """Mirror ``tgw health`` output as JSON.
@@ -1169,9 +1199,7 @@ def api_health() -> Dict[str, Any]:
     try:
         with psycopg2.connect(_cfg["postgres_dsn"]) as con:
             with con.cursor() as cur:
-                cur.execute(
-                    "SELECT COUNT(*) FROM queue_jobs WHERE state = 'dead_letter'"
-                )
+                cur.execute("SELECT COUNT(*) FROM queue_jobs WHERE state = 'dead_letter'")
                 dead_letter_count = cur.fetchone()[0]
     except Exception:
         pass
@@ -1185,6 +1213,7 @@ def api_health() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # GET /api/queue/status — job counts
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/queue/status", dependencies=[AUTH])
 def queue_status() -> Dict[str, Any]:
@@ -1217,10 +1246,12 @@ def queue_status() -> Dict[str, Any]:
 # GET /api/migrate/blocked — items blocked in SKU migration (need human review)
 # ---------------------------------------------------------------------------
 
+
 @app.get("/api/migrate/blocked", dependencies=[AUTH])
 def get_migrate_blocked() -> Dict[str, Any]:
     import json as _json
     from pathlib import Path as _Path
+
     registry_path = _Path("/opt/TGW/var/migrate-blocked.json")
     if not registry_path.exists():
         return {"ok": True, "count": 0, "items": []}
@@ -1236,11 +1267,12 @@ def get_migrate_blocked() -> Dict[str, Any]:
 # GET /api/review — all items with review_block.ready=false (PP-REVIEW-001 P1)
 # ---------------------------------------------------------------------------
 
+
 @app.get("/api/review", dependencies=[AUTH])
-def get_review_items(stage: Optional[str] = None,
-                     reason_code: Optional[str] = None) -> Dict[str, Any]:
+def get_review_items(stage: Optional[str] = None, reason_code: Optional[str] = None) -> Dict[str, Any]:
     """Return all items that need human review, optionally filtered by stage/reason_code."""
     import sqlite3 as _sqlite3
+
     db_path = _cfg.get("sqlite_catalog_path")
     if not db_path or not db_path.exists():
         raise HTTPException(status_code=503, detail="catalog not built")
@@ -1259,6 +1291,7 @@ def get_review_items(stage: Optional[str] = None,
         raise HTTPException(status_code=500, detail=f"catalog query failed: {exc}")
 
     import json as _json
+
     items = []
     for sku, title, rb_json in rows:
         try:
@@ -1291,6 +1324,7 @@ def get_review_items(stage: Optional[str] = None,
 # GET /api/system/workers — systemd unit states (PP-EDITOR-001 Phase 3j)
 # ---------------------------------------------------------------------------
 
+
 @app.get("/api/system/workers", dependencies=[AUTH])
 def system_workers() -> Dict[str, Any]:
     """Return systemd active/sub state for all tgw-worker@ units + tgw-http."""
@@ -1301,10 +1335,10 @@ def system_workers() -> Dict[str, Any]:
 
     try:
         r = subprocess.run(
-            ["systemctl", "show", "--no-pager",
-             "--property=Id,ActiveState,SubState,MainPID",
-             *units],
-            capture_output=True, text=True, timeout=8,
+            ["systemctl", "show", "--no-pager", "--property=Id,ActiveState,SubState,MainPID", *units],
+            capture_output=True,
+            text=True,
+            timeout=8,
         )
         # systemctl show outputs blank-line-separated blocks per unit
         block: Dict[str, str] = {}
@@ -1312,31 +1346,32 @@ def system_workers() -> Dict[str, Any]:
             line = line.strip()
             if not line:
                 if block.get("Id"):
-                    workers.append({
-                        "unit": block["Id"],
-                        "active": block.get("ActiveState", "unknown"),
-                        "sub": block.get("SubState", "unknown"),
-                        "pid": int(block["MainPID"]) if block.get("MainPID", "0").isdigit() and block["MainPID"] != "0" else None,
-                    })
+                    workers.append(
+                        {
+                            "unit": block["Id"],
+                            "active": block.get("ActiveState", "unknown"),
+                            "sub": block.get("SubState", "unknown"),
+                            "pid": int(block["MainPID"]) if block.get("MainPID", "0").isdigit() and block["MainPID"] != "0" else None,
+                        }
+                    )
                 block = {}
             else:
                 k, _, v = line.partition("=")
                 block[k] = v
         # flush last block
         if block.get("Id"):
-            workers.append({
-                "unit": block["Id"],
-                "active": block.get("ActiveState", "unknown"),
-                "sub": block.get("SubState", "unknown"),
-                "pid": int(block["MainPID"]) if block.get("MainPID", "0").isdigit() and block["MainPID"] != "0" else None,
-            })
+            workers.append(
+                {
+                    "unit": block["Id"],
+                    "active": block.get("ActiveState", "unknown"),
+                    "sub": block.get("SubState", "unknown"),
+                    "pid": int(block["MainPID"]) if block.get("MainPID", "0").isdigit() and block["MainPID"] != "0" else None,
+                }
+            )
     except Exception as exc:
         log.warning("system_workers: systemctl query failed: %s", exc)
         # Fall back: return all as unknown
-        workers = [
-            {"unit": u, "active": "unknown", "sub": "unknown", "pid": None}
-            for u in units
-        ]
+        workers = [{"unit": u, "active": "unknown", "sub": "unknown", "pid": None} for u in units]
 
     up = sum(1 for w in workers if w["active"] == "active")
     return {"ok": True, "workers": workers, "up": up, "total": len(units)}
@@ -1346,6 +1381,7 @@ def system_workers() -> Dict[str, Any]:
 # POST /api/jobs/{job_id}/requeue — re-enqueue a dead-letter job (Phase 3j)
 # ---------------------------------------------------------------------------
 
+
 @app.post("/api/jobs/{job_id}/requeue", dependencies=[AUTH])
 def requeue_job(job_id: str) -> Dict[str, Any]:
     """Re-enqueue a dead-letter job with a fresh dedupe key so it can run again."""
@@ -1353,8 +1389,7 @@ def requeue_job(job_id: str) -> Dict[str, Any]:
         with psycopg2.connect(_cfg["postgres_dsn"]) as con:
             with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
-                    "SELECT job_id, queue_name, payload_json, state, max_attempts"
-                    " FROM queue_jobs WHERE job_id = %s",
+                    "SELECT job_id, queue_name, payload_json, state, max_attempts FROM queue_jobs WHERE job_id = %s",
                     (job_id,),
                 )
                 row = cur.fetchone()
@@ -1391,10 +1426,12 @@ def requeue_job(job_id: str) -> Dict[str, Any]:
 # GET /api/ebay/aspects/{category_id} — aspect list for offer form
 # ---------------------------------------------------------------------------
 
+
 @app.get("/api/ebay/aspects/{category_id}", dependencies=[AUTH])
 def ebay_aspects(category_id: str) -> Dict[str, Any]:
     try:
         from .apis.ebay.specifics import get_aspects
+
         aspects = get_aspects(_cfg, category_id)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"eBay aspects error: {e}")
@@ -1406,6 +1443,7 @@ def ebay_aspects(category_id: str) -> Dict[str, Any]:
 # Unified category data: conditions, aspects, store category, pricing hints.
 # Single call used by the editor to drive all category-specific form fields.
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/ebay/category-context/{category_id}", dependencies=[AUTH])
 def ebay_category_context(category_id: str) -> Dict[str, Any]:
@@ -1432,6 +1470,7 @@ def ebay_category_context(category_id: str) -> Dict[str, Any]:
     aspects: List[Any] = []
     try:
         from .apis.ebay.specifics import get_aspects
+
         aspects = get_aspects(_cfg, category_id)
     except Exception as exc:
         log.warning("category-context: aspects error: %s", exc)
@@ -1442,34 +1481,31 @@ def ebay_category_context(category_id: str) -> Dict[str, Any]:
     grp: Dict[str, Any] = {}
     if grp_key:
         from .ebay.pricing import _groups_cache
+
         grp = (_groups_cache or {}).get("groups", {}).get(grp_key, {})
 
     pricing = grp.get("pricing") or {}
-    store_category    = grp.get("store_category") or ""
+    store_category = grp.get("store_category") or ""
     store_category_id = grp.get("store_category_id")
-    size_class        = grp.get("size_class") or ""
-    group_name        = grp.get("name") or ""
+    size_class = grp.get("size_class") or ""
+    group_name = grp.get("name") or ""
 
     # ── Fulfillment policy for this category ─────────────────────────────
-    fulfillment_id = (
-        (_cfg.get("fulfillment_policy_by_category") or {}).get(str(category_id))
-        or _cfg.get("fulfillment_policy_id")
-        or ""
-    )
+    fulfillment_id = (_cfg.get("fulfillment_policy_by_category") or {}).get(str(category_id)) or _cfg.get("fulfillment_policy_id") or ""
 
     return {
-        "ok":               True,
-        "category_id":      category_id,
-        "conditions":       conditions,
-        "aspects":          aspects,
-        "store_category":   store_category,
+        "ok": True,
+        "category_id": category_id,
+        "conditions": conditions,
+        "aspects": aspects,
+        "store_category": store_category,
         "store_category_id": store_category_id,
-        "group_name":       group_name,
-        "size_class":       size_class,
-        "pricing":          {
-            "floor":        pricing.get("floor"),
+        "group_name": group_name,
+        "size_class": size_class,
+        "pricing": {
+            "floor": pricing.get("floor"),
             "typical_used": pricing.get("typical_used"),
-            "typical_new":  pricing.get("typical_new"),
+            "typical_new": pricing.get("typical_new"),
         },
         "fulfillment_policy_id": fulfillment_id,
     }
@@ -1479,23 +1515,27 @@ def ebay_category_context(category_id: str) -> Dict[str, Any]:
 # Live eBay category type-ahead — returns up to 15 suggestions with breadcrumb paths.
 # ---------------------------------------------------------------------------
 
+
 @app.get("/api/ebay/category-search", dependencies=[AUTH])
 def ebay_category_search(q: str = "") -> Dict[str, Any]:
     if not q or len(q.strip()) < 2:
         return {"ok": True, "results": []}
     try:
         from .apis.ebay.taxonomy import get_category_suggestions
+
         raw = get_category_suggestions(_cfg, q.strip())
         results = []
         for s in raw[:15]:
             cat = s.get("category", {})
             ancestors = s.get("categoryTreeNodeAncestors", [])
             path_parts = [a.get("categoryName", "") for a in ancestors[-3:]]
-            results.append({
-                "id":   cat.get("categoryId", ""),
-                "name": cat.get("categoryName", ""),
-                "path": " > ".join(p for p in path_parts if p),
-            })
+            results.append(
+                {
+                    "id": cat.get("categoryId", ""),
+                    "name": cat.get("categoryName", ""),
+                    "path": " > ".join(p for p in path_parts if p),
+                }
+            )
         return {"ok": True, "results": results}
     except Exception as exc:
         log.warning("category-search error: %s", exc)
@@ -1506,16 +1546,18 @@ def ebay_category_search(q: str = "") -> Dict[str, Any]:
 # Returns store categories from category-groups.json, sorted by name.
 # ---------------------------------------------------------------------------
 
+
 @app.get("/api/ebay/store-categories", dependencies=[AUTH])
 def ebay_store_categories() -> Dict[str, Any]:
     try:
         from .ebay.pricing import _groups_cache, _load_groups
+
         _load_groups(_cfg)
         groups = (_groups_cache or {}).get("groups", {})
         seen: Dict[str, Any] = {}
         for grp in groups.values():
             name = grp.get("store_category") or grp.get("store_category_name") or ""
-            sid  = grp.get("store_category_id")
+            sid = grp.get("store_category_id")
             if name and name not in seen:
                 seen[name] = sid
         results = sorted([{"id": v, "name": k} for k, v in seen.items()], key=lambda x: x["name"])
@@ -1525,11 +1567,10 @@ def ebay_store_categories() -> Dict[str, Any]:
         return {"ok": False, "detail": str(exc), "results": []}
 
 
-
-
 # ---------------------------------------------------------------------------
 # GET /api/locations — distinct locations from SQLite
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/locations", dependencies=[AUTH])
 def list_locations() -> Dict[str, Any]:
@@ -1539,9 +1580,7 @@ def list_locations() -> Dict[str, Any]:
 
     con = _sqlite_conn()
     try:
-        rows = con.execute(
-            "SELECT DISTINCT location FROM catalog WHERE location != '' ORDER BY location"
-        ).fetchall()
+        rows = con.execute("SELECT DISTINCT location FROM catalog WHERE location != '' ORDER BY location").fetchall()
     finally:
         con.close()
 
@@ -1552,6 +1591,7 @@ def list_locations() -> Dict[str, Any]:
 # GET /api/catalog/snapshot — atomic SQLite snapshot for Flutter offline sync
 # PP-PORTABLE-CATALOG-001 Phase 2
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/catalog/snapshot", dependencies=[AUTH])
 def catalog_snapshot(background_tasks: BackgroundTasks):
@@ -1567,7 +1607,7 @@ def catalog_snapshot(background_tasks: BackgroundTasks):
     if not db_path.exists():
         raise HTTPException(status_code=503, detail="SQLite catalog not built — run tgw build-sqlite")
 
-    fd, tmp_path = tempfile.mkstemp(suffix='.db', prefix='tgwcatalog_snapshot_')
+    fd, tmp_path = tempfile.mkstemp(suffix=".db", prefix="tgwcatalog_snapshot_")
     os.close(fd)
     src_con = sqlite3.connect(str(db_path))
     try:
@@ -1582,14 +1622,15 @@ def catalog_snapshot(background_tasks: BackgroundTasks):
     background_tasks.add_task(os.unlink, tmp_path)
     return FileResponse(
         tmp_path,
-        media_type='application/octet-stream',
-        filename='tgwcatalog.db',
+        media_type="application/octet-stream",
+        filename="tgwcatalog.db",
     )
 
 
 # ---------------------------------------------------------------------------
 # GET /api/category-groups — template list for intake form
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/category-groups", dependencies=[AUTH])
 def list_category_groups() -> Dict[str, Any]:
@@ -1600,20 +1641,23 @@ def list_category_groups() -> Dict[str, Any]:
     groups = raw.get("groups", {})
     result = []
     for key, grp in groups.items():
-        result.append({
-            "key":        key,
-            "name":       grp.get("name", key),
-            "size_class": grp.get("size_class", ""),
-            "ai_hint":    grp.get("ai_hint", ""),
-            "floor":      grp.get("pricing", {}).get("floor"),
-            "typical_used": grp.get("pricing", {}).get("typical_used"),
-        })
+        result.append(
+            {
+                "key": key,
+                "name": grp.get("name", key),
+                "size_class": grp.get("size_class", ""),
+                "ai_hint": grp.get("ai_hint", ""),
+                "floor": grp.get("pricing", {}).get("floor"),
+                "typical_used": grp.get("pricing", {}).get("typical_used"),
+            }
+        )
     return {"ok": True, "count": len(result), "groups": result}
 
 
 # ---------------------------------------------------------------------------
 # POST /api/items/{sku}/set-template — apply category-group template
 # ---------------------------------------------------------------------------
+
 
 @app.post("/api/items/{sku}/set-template", dependencies=[AUTH])
 def set_item_template(sku: str, body: SetTemplateBody) -> Dict[str, Any]:
@@ -1650,8 +1694,7 @@ def set_item_template(sku: str, body: SetTemplateBody) -> Dict[str, Any]:
     _apply_patch(json_path, fields)
     _enqueue_catalog_rebuild(f"set_template:{sku}")
 
-    return {"ok": True, "sku": sku, "template_key": body.template_key,
-            "applied": fields, "group_name": grp.get("name", body.template_key)}
+    return {"ok": True, "sku": sku, "template_key": body.template_key, "applied": fields, "group_name": grp.get("name", body.template_key)}
 
 
 # ---------------------------------------------------------------------------
@@ -1704,6 +1747,7 @@ def set_photo_order(sku: str, body: PhotoOrderBody) -> Dict[str, Any]:
 # GET /api/items/{sku}/assets — ordered photo list (Stage 1 asset fence)
 # ---------------------------------------------------------------------------
 
+
 @app.get("/api/items/{sku}/assets", dependencies=[AUTH])
 def list_assets(sku: str) -> Dict[str, Any]:
     """Return photos in photo_order display order with position metadata."""
@@ -1712,16 +1756,14 @@ def list_assets(sku: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
     doc = load_item_doc(json_path)
     photos = _ordered_photos(doc, json_path.parent)
-    assets = [
-        {"name": p.name, "url": f"/media/{sku}/{p.name}", "position": i}
-        for i, p in enumerate(photos)
-    ]
+    assets = [{"name": p.name, "url": f"/media/{sku}/{p.name}", "position": i} for i, p in enumerate(photos)]
     return {"ok": True, "sku": sku, "count": len(assets), "assets": assets}
 
 
 # ---------------------------------------------------------------------------
 # DELETE /api/items/{sku}/assets/{filename} — remove a photo
 # ---------------------------------------------------------------------------
+
 
 @app.delete("/api/items/{sku}/assets/{filename}", dependencies=[AUTH])
 def delete_asset(sku: str, filename: str) -> Dict[str, Any]:
@@ -1746,8 +1788,60 @@ def delete_asset(sku: str, filename: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# POST /api/items/{sku}/remove-comp — operator removes a bad comp listing
+# ---------------------------------------------------------------------------
+
+
+class RemoveCompBody(BaseModel):
+    url: str  # comp listing URL to remove (unique key within price_comps.items)
+
+
+@app.post("/api/items/{sku}/remove-comp", dependencies=[AUTH])
+def remove_comp(sku: str, body: RemoveCompBody) -> Dict[str, Any]:
+    """Remove one comp listing from price_comps.items and recalculate stats."""
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+    doc = load_item_doc(json_path)
+    eo = doc.get("ebay_offer") or {}
+    comps = eo.get("price_comps") or {}
+    items = comps.get("items") or []
+    before = len(items)
+    kept = [ci for ci in items if ci.get("url", "").split("&mkcid")[0] != body.url.split("&mkcid")[0]]
+    if len(kept) == before:
+        raise HTTPException(status_code=404, detail="comp not found by url")
+    # Recalculate stats from kept active items (exclude outliers/llm_dropped)
+    active_prices = sorted(ci["price"] for ci in kept if not ci.get("outlier") and not ci.get("llm_dropped") and ci.get("price") is not None)
+    if active_prices:
+        import statistics as _stats
+
+        n = len(active_prices)
+
+        def _pct_val(arr, p):
+            idx = (len(arr) - 1) * p / 100
+            lo, hi = int(idx), min(int(idx) + 1, len(arr) - 1)
+            return round(arr[lo] + (arr[hi] - arr[lo]) * (idx - lo), 2)
+
+        comps["items"] = kept
+        comps["count"] = n
+        comps["min"] = round(active_prices[0], 2)
+        comps["max"] = round(active_prices[-1], 2)
+        comps["p25"] = _pct_val(active_prices, 25)
+        comps["median"] = round(_stats.median(active_prices), 2)
+        comps["p75"] = _pct_val(active_prices, 75)
+    else:
+        comps["items"] = kept
+        comps["count"] = 0
+    eo["price_comps"] = comps
+    doc["ebay_offer"] = eo
+    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+    return {"ok": True, "sku": sku, "removed": body.url, "remaining": len(kept)}
+
+
+# ---------------------------------------------------------------------------
 # GET /api/items/{sku}/hint-trail — identification history
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/items/{sku}/hint-trail", dependencies=[AUTH])
 def get_hint_trail(sku: str) -> Dict[str, Any]:
@@ -1763,39 +1857,33 @@ def get_hint_trail(sku: str) -> Dict[str, Any]:
 # GET /form/intake/{sku} — mobile intake form (HTML)
 # ---------------------------------------------------------------------------
 
-_STATIC_HEAD = (
-    '<link rel="stylesheet" href="/static/tgw.css">'
-    '<link rel="stylesheet" href="/static/nav.css">'
-)
-_STATIC_FOOT = (
-    '<script src="/static/tgw.js"></script>'
-    '<script src="/static/nav.js"></script>'
-)
+_STATIC_HEAD = '<link rel="stylesheet" href="/static/tgw.css"><link rel="stylesheet" href="/static/nav.css">'
+_STATIC_FOOT = '<script src="/static/tgw.js"></script><script src="/static/nav.js"></script>'
 
 # eBay conditionId → Inventory API enum options
 _CONDITION_ID_MAP: Dict[str, List[Dict[str, str]]] = {
-    "1000": [{"enum": "NEW",                      "label": "New"}],
-    "1500": [{"enum": "NEW_OTHER",                "label": "New – other (open box)"}],
-    "1750": [{"enum": "NEW_WITH_DEFECTS",         "label": "New with defects"}],
+    "1000": [{"enum": "NEW", "label": "New"}],
+    "1500": [{"enum": "NEW_OTHER", "label": "New – other (open box)"}],
+    "1750": [{"enum": "NEW_WITH_DEFECTS", "label": "New with defects"}],
     "2000": [{"enum": "MANUFACTURER_REFURBISHED", "label": "Manufacturer refurbished"}],
-    "2010": [{"enum": "CERTIFIED_REFURBISHED",    "label": "Certified refurbished"}],
-    "2500": [{"enum": "SELLER_REFURBISHED",       "label": "Seller refurbished"}],
-    "2750": [{"enum": "LIKE_NEW",                 "label": "Like new"}],
+    "2010": [{"enum": "CERTIFIED_REFURBISHED", "label": "Certified refurbished"}],
+    "2500": [{"enum": "SELLER_REFURBISHED", "label": "Seller refurbished"}],
+    "2750": [{"enum": "LIKE_NEW", "label": "Like new"}],
     "3000": [
-        {"enum": "USED_EXCELLENT",  "label": "Used – excellent"},
-        {"enum": "USED_GOOD",       "label": "Used – good"},
+        {"enum": "USED_EXCELLENT", "label": "Used – excellent"},
+        {"enum": "USED_GOOD", "label": "Used – good"},
         {"enum": "USED_ACCEPTABLE", "label": "Used – acceptable"},
     ],
     # Media/Books condition IDs — same enums, different buyer-facing labels per category
-    "4000": [{"enum": "USED_EXCELLENT",  "label": "Very Good"}],
-    "5000": [{"enum": "USED_GOOD",       "label": "Good"}],
+    "4000": [{"enum": "USED_EXCELLENT", "label": "Very Good"}],
+    "5000": [{"enum": "USED_GOOD", "label": "Good"}],
     "6000": [{"enum": "USED_ACCEPTABLE", "label": "Acceptable"}],
     "7000": [{"enum": "FOR_PARTS", "label": "For parts / not working"}],
 }
 
 
 # Module-level constant — avoids nested quote hell in f-string script blocks
-_CATEGORY_CONTEXT_IIFE = 'function loadCatCtx(catId){\n  var prefill=window._DL_PREFILL||{};\n  var loading=document.getElementById(\'aspects-loading\');\n  var form=document.getElementById(\'aspects-form\');\n  if(!catId){if(loading)loading.textContent=\'No category.\';return;}\n  fetch(\'/api/ebay/category-context/\'+encodeURIComponent(catId),{headers:authHeaders()})\n  .then(function(r){return r.json();}).then(function(d){\n    if(!d||!d.ok){if(loading)loading.textContent=\'Context load failed.\';return;}\n    window._CAT_CTX=d;\n    var sel=document.getElementById(\'dl-condition-select\');\n    if(sel&&d.conditions&&d.conditions.length){\n      var allowed={};\n      d.conditions.forEach(function(c){allowed[c.enum]=c.label;});\n      Array.from(sel.options).forEach(function(opt){\n        if(opt.value&&!allowed[opt.value])opt.style.display=\'none\';\n        else if(opt.value&&allowed[opt.value])opt.text=allowed[opt.value];\n      });\n      var cn=document.getElementById(\'condition-policy-note\');\n      var nl=d.conditions.length;\n      if(cn)cn.textContent=nl+(nl===1?\' condition\':\' conditions\')+\' allowed\';\n    }\n    if(d.fulfillment_policy_id){\n      var fsel=document.getElementById(\'dl-ship-input\');\n      var fhint=document.getElementById(\'dl-ship-hint\');\n      if(fsel&&!fsel.value){\n        for(var fi=0;fi<fsel.options.length;fi++){\n          if(fsel.options[fi].value===d.fulfillment_policy_id){fsel.value=d.fulfillment_policy_id;break;}\n        }\n        if(fsel.value){\n          fetch(\'/api/items/\'+window._ITEM_SKU,{method:\'PATCH\',\n            headers:authHeaders({\'Content-Type\':\'application/json\'}),\n            body:JSON.stringify({fields:{draft_listing:{shipping_profile:fsel.value}}})});\n        }\n      }\n      if(fhint&&!fsel.value)fhint.textContent=\'suggested: \'+d.fulfillment_policy_id;\n    }\n    if(d.store_category){\n      var sch=document.getElementById(\'store-cat-hint\');\n      if(sch)sch.textContent=\'suggested: \'+d.store_category;\n    }\n    if(d.group_name){\n      var gh=document.getElementById(\'category-group-hint\');\n      if(gh){\n        var pt=d.pricing&&d.pricing.typical_used?\' · typical $\'+d.pricing.typical_used.toFixed(2):\'\';\n        var pf=d.pricing&&d.pricing.floor?\' · floor $\'+d.pricing.floor.toFixed(2):\'\';\n        gh.textContent=\'group: \'+d.group_name+pf+pt;\n      }\n    }\n    if(loading)loading.style.display=\'none\';\n    if(!form)return;\n    if(!d.aspects||!d.aspects.length){\n      form.innerHTML=\'<span style="color:#556;font-size:.82em">No aspects for this category</span>\';\n      return;\n    }\n    var html=\'\';\n    d.aspects.forEach(function(asp){\nd.aspects.forEach(function(asp){\n      var badge=asp.required\n        ?\'<span style="font-size:.7em;background:#3a1a1a;color:#c44;border-radius:3px;padding:1px 5px;margin-left:4px">REQ</span>\'\n        :\'<span style="font-size:.7em;background:#2a2a0a;color:#aa0;border-radius:3px;padding:1px 5px;margin-left:4px">REC</span>\';\n      // Three-layer merge: operator edits (blue) > proposed (yellow) > live (baseline)\n      var liveVal=(window._LIVE_ASPECTS&&window._LIVE_ASPECTS[asp.name]!==undefined?(window._LIVE_ASPECTS[asp.name]||\'\').toString():\'\');\n      var proposedVal=(window._PROPOSED_ASPECTS&&window._PROPOSED_ASPECTS[asp.name]!==undefined?(window._PROPOSED_ASPECTS[asp.name]||\'\').toString():\'\');\n      var editVal=(prefill[asp.name]!==undefined?(prefill[asp.name]||\'\').toString():\'\');\n      var cur,layer;\n      if(editVal){cur=editVal;layer=(editVal!==liveVal)?\'edit\':\'same\';}\n      else if(proposedVal){cur=proposedVal;layer=(proposedVal!==liveVal)?\'proposed\':\'same\';}\n      else{cur=liveVal;layer=liveVal?\'live\':\'empty\';}\n      cur=cur.replace(/"/g,\'&quot;\');\n      var reqEmpty=asp.required&&!cur;\n      // Colours by layer\n      var bord=reqEmpty?\'#c44\':(layer===\'edit\'?\'#44c\':(layer===\'proposed\'?\'#884\':\'#444\'));\n      var bg=reqEmpty?\'#1a0a0a\':(layer===\'edit\'?\'#0a0a1a\':(layer===\'proposed\'?\'#1a1a00\':\'#1a1a1a\'));\n      // Hint: show live value when overridden or proposed differs\n      var liveHint=(layer===\'edit\'||layer===\'proposed\')&&liveVal\n        ?\'<div style="font-size:.7em;color:#445;margin-top:1px">live: \'+liveVal.replace(/</g,\'&lt;\').replace(/>/g,\'&gt;\')+\'</div>\'\n        :\'\';\n      var inp;\n      if(asp.allowed_values&&asp.allowed_values.length&&asp.mode===\'SELECTION_ONLY\'){\n        var opts=asp.allowed_values.map(function(v){\n          return \'<option value="\'+v+\'"\'+(v===cur?\' selected\':\'\')+\'>\'+v+\'</option>\';\n        }).join(\'\');\n        inp=\'<select data-aspect="\'+asp.name+\'" style="background:\'+bg+\';color:#eee;border:1px solid \'+bord+\';border-radius:3px;padding:2px 5px;font-size:.85em"><option value="">—</option>\'+opts+\'</select>\';\n      }else{\n        var dlid=\'dl-asp-\'+asp.name.replace(/[^a-zA-Z0-9]/g,\'-\');\n        var dlopts=asp.allowed_values&&asp.allowed_values.length\n          ?\'<datalist id="\'+dlid+\'">\'+asp.allowed_values.map(function(v){return \'<option value="\'+v+\'"></option>\';}).join(\'\')+\'</datalist>\'\n          :\'\';\n        inp=\'<input type="text"\'+(dlopts?\' list="\'+dlid+\'"\':\'\')+\' data-aspect="\'+asp.name+\'" value="\'+cur+\'"\'\n           +\' style="background:\'+bg+\';color:#eee;border:1px solid \'+bord+\';border-radius:3px;padding:2px 5px;font-size:.85em;width:200px">\'\n           +dlopts;\n      }\n      html+=\'<div class="frow"\'+(reqEmpty?\' style="border-left:2px solid #944;padding-left:4px"\':\'\')+\'>  <span class="fn" style="font-size:.82em">\'+asp.name+badge+\'</span><span class="fv">\'+inp+liveHint+\'</span></div>\';\n    });\n    \n    var missingReq=d.aspects.filter(function(a){return a.required&&!(prefill[a.name]||\'\');}).length;if(missingReq>0){html=\'<div style="margin-bottom:8px;padding:5px 8px;background:#1a0808;border:1px solid #844;border-radius:3px;font-size:.78em;color:#e88">\'+missingReq+\' required aspect\'+(missingReq===1?\'\':\'s\')+\' missing values — fill before staging</div>\'+html;}form.innerHTML=html;\n  }).catch(function(){\n    if(loading)loading.textContent=\'Category context load failed.\';\n  });\n}\ndocument.addEventListener(\'DOMContentLoaded\',function(){\n  if(window._DL_CAT_ID)loadCatCtx(window._DL_CAT_ID);\n  if(typeof initCatSearch===\'function\')initCatSearch();\n});\n'
+_CATEGORY_CONTEXT_IIFE = "function loadCatCtx(catId){\n  var prefill=window._DL_PREFILL||{};\n  var loading=document.getElementById('aspects-loading');\n  var form=document.getElementById('aspects-form');\n  if(!catId){if(loading)loading.textContent='No category.';return;}\n  fetch('/api/ebay/category-context/'+encodeURIComponent(catId),{headers:authHeaders()})\n  .then(function(r){return r.json();}).then(function(d){\n    if(!d||!d.ok){if(loading)loading.textContent='Context load failed.';return;}\n    window._CAT_CTX=d;\n    var sel=document.getElementById('dl-condition-select');\n    if(sel&&d.conditions&&d.conditions.length){\n      var allowed={};\n      d.conditions.forEach(function(c){allowed[c.enum]=c.label;});\n      Array.from(sel.options).forEach(function(opt){\n        if(opt.value&&!allowed[opt.value])opt.style.display='none';\n        else if(opt.value&&allowed[opt.value])opt.text=allowed[opt.value];\n      });\n      var cn=document.getElementById('condition-policy-note');\n      var nl=d.conditions.length;\n      if(cn)cn.textContent=nl+(nl===1?' condition':' conditions')+' allowed';\n    }\n    if(d.fulfillment_policy_id){\n      var fsel=document.getElementById('dl-ship-input');\n      var fhint=document.getElementById('dl-ship-hint');\n      if(fsel&&!fsel.value){\n        for(var fi=0;fi<fsel.options.length;fi++){\n          if(fsel.options[fi].value===d.fulfillment_policy_id){fsel.value=d.fulfillment_policy_id;break;}\n        }\n        if(fsel.value){\n          fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',\n            headers:authHeaders({'Content-Type':'application/json'}),\n            body:JSON.stringify({fields:{draft_listing:{shipping_profile:fsel.value}}})});\n        }\n      }\n      if(fhint&&!fsel.value)fhint.textContent='suggested: '+d.fulfillment_policy_id;\n    }\n    if(d.store_category){\n      var sch=document.getElementById('store-cat-hint');\n      if(sch)sch.textContent='suggested: '+d.store_category;\n    }\n    if(d.group_name){\n      var gh=document.getElementById('category-group-hint');\n      if(gh){\n        var pt=d.pricing&&d.pricing.typical_used?' · typical $'+d.pricing.typical_used.toFixed(2):'';\n        var pf=d.pricing&&d.pricing.floor?' · floor $'+d.pricing.floor.toFixed(2):'';\n        gh.textContent='group: '+d.group_name+pf+pt;\n      }\n    }\n    if(loading)loading.style.display='none';\n    if(!form)return;\n    if(!d.aspects||!d.aspects.length){\n      form.innerHTML='<span style=\"color:#556;font-size:.82em\">No aspects for this category</span>';\n      return;\n    }\n    var html='';\n    d.aspects.forEach(function(asp){\n      var badge=asp.required\n        ?'<span style=\"font-size:.7em;background:#3a1a1a;color:#c44;border-radius:3px;padding:1px 5px;margin-left:4px\">REQ</span>'\n        :'<span style=\"font-size:.7em;background:#2a2a0a;color:#aa0;border-radius:3px;padding:1px 5px;margin-left:4px\">REC</span>';\n      // Three-layer merge: operator edits (blue) > proposed (yellow) > live (baseline)\n      var liveVal=(window._LIVE_ASPECTS&&window._LIVE_ASPECTS[asp.name]!==undefined?(window._LIVE_ASPECTS[asp.name]||'').toString():'');\n      var proposedVal=(window._PROPOSED_ASPECTS&&window._PROPOSED_ASPECTS[asp.name]!==undefined?(window._PROPOSED_ASPECTS[asp.name]||'').toString():'');\n      var editVal=(prefill[asp.name]!==undefined?(prefill[asp.name]||'').toString():'');\n      var cur,layer;\n      if(editVal){cur=editVal;layer=(editVal!==liveVal)?'edit':'same';}\n      else if(proposedVal){cur=proposedVal;layer=(proposedVal!==liveVal)?'proposed':'same';}\n      else{cur=liveVal;layer=liveVal?'live':'empty';}\n      cur=cur.replace(/\"/g,'&quot;');\n      var reqEmpty=asp.required&&!cur;\n      // Colours by layer\n      var bord=reqEmpty?'#c44':(layer==='edit'?'#44c':(layer==='proposed'?'#884':'#444'));\n      var bg=reqEmpty?'#1a0a0a':(layer==='edit'?'#0a0a1a':(layer==='proposed'?'#1a1a00':'#1a1a1a'));\n      // Hint: show live value when overridden or proposed differs\n      var liveHint=(layer==='edit'||layer==='proposed')&&liveVal\n        ?'<div style=\"font-size:.7em;color:#445;margin-top:1px\">live: '+liveVal.replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>'\n        :'';\n      var inp;\n      if(asp.allowed_values&&asp.allowed_values.length&&asp.mode==='SELECTION_ONLY'){\n        var opts=asp.allowed_values.map(function(v){\n          return '<option value=\"'+v+'\"'+(v===cur?' selected':'')+'>'+v+'</option>';\n        }).join('');\n        inp='<select data-aspect=\"'+asp.name+'\" style=\"background:'+bg+';color:#eee;border:1px solid '+bord+';border-radius:3px;padding:2px 5px;font-size:.85em\"><option value=\"\">—</option>'+opts+'</select>';\n      }else{\n        var dlid='dl-asp-'+asp.name.replace(/[^a-zA-Z0-9]/g,'-');\n        var dlopts=asp.allowed_values&&asp.allowed_values.length\n          ?'<datalist id=\"'+dlid+'\">'+asp.allowed_values.map(function(v){return '<option value=\"'+v+'\"></option>';}).join('')+'</datalist>'\n          :'';\n        inp='<input type=\"text\"'+(dlopts?' list=\"'+dlid+'\"':'')+' data-aspect=\"'+asp.name+'\" value=\"'+cur+'\"'\n           +' style=\"background:'+bg+';color:#eee;border:1px solid '+bord+';border-radius:3px;padding:2px 5px;font-size:.85em;width:200px\">'\n           +dlopts;\n      }\n      html+='<div class=\"frow\"'+(reqEmpty?' style=\"border-left:2px solid #944;padding-left:4px\"':'')+'>  <span class=\"fn\" style=\"font-size:.82em\">'+asp.name+badge+'</span><span class=\"fv\">'+inp+liveHint+'</span></div>';\n    });\n    \n    var missingReq=d.aspects.filter(function(a){return a.required&&!(prefill[a.name]||'');}).length;if(missingReq>0){html='<div style=\"margin-bottom:8px;padding:5px 8px;background:#1a0808;border:1px solid #844;border-radius:3px;font-size:.78em;color:#e88\">'+missingReq+' required aspect'+(missingReq===1?'':'s')+' missing values — fill before staging</div>'+html;}form.innerHTML=html;\n  }).catch(function(){\n    if(loading)loading.textContent='Category context load failed.';\n  });\n}\ndocument.addEventListener('DOMContentLoaded',function(){\n  if(window._DL_CAT_ID)loadCatCtx(window._DL_CAT_ID);\n  if(typeof initCatSearch==='function')initCatSearch();\n  if(typeof initCatSearch2==='function')initCatSearch2();\n});\n"
 
 # ---------------------------------------------------------------------------
 # GET /form/intake — intake landing page (HTML)
@@ -2186,6 +2274,7 @@ def intake_form(sku: str, request: Request):
     json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
     if not json_path.exists():
         from .resolver import find_current_sku
+
         current = find_current_sku(_cfg, sku)
         if current:
             json_path = _cfg["itemdata_root"] / current / f"{current}.json"
@@ -2212,7 +2301,7 @@ def intake_form(sku: str, request: Request):
     cond_val = doc.get("condition", "")
     cond_opts = ""
     for c in _CONDITIONS:
-        sel = 'selected' if c == cond_val else ''
+        sel = "selected" if c == cond_val else ""
         cond_opts += f'<option value="{c}" {sel}>{c if c else "— not set —"}</option>'
 
     weight = doc.get("weight_oz", "")
@@ -2222,10 +2311,7 @@ def intake_form(sku: str, request: Request):
 
     # Photo count from filesystem (server-side; JS keeps it live via polling)
     sku_dir = json_path.parent
-    n_photos = sum(
-        1 for p in sku_dir.iterdir()
-        if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png", ".gif", ".webp"}
-    )
+    n_photos = sum(1 for p in sku_dir.iterdir() if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png", ".gif", ".webp"})
     photo_cls = "badge-photo-warn" if n_photos == 0 else "badge-photo"
     photo_plural = "" if n_photos == 1 else "s"
 
@@ -2390,6 +2476,7 @@ def bulk_form(request: Request):
     """Tablet-first bulk editor — no Bearer auth on the page (network trust);
     the embedded JS calls the authenticated /api/bulk/* endpoints."""
     from fastapi.responses import HTMLResponse
+
     html = _BULK_FORM_HTML.format(
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
@@ -2481,7 +2568,7 @@ _TODOS_JS = """
 
 def _extract_pp_refs(body: str) -> "list[str]":
     """Extract PP-XXX-NNN references from a todo body string."""
-    return list(dict.fromkeys(re.findall(r'PP-[A-Z0-9]+-\d+', body)))
+    return list(dict.fromkeys(re.findall(r"PP-[A-Z0-9]+-\d+", body)))
 
 
 def _render_todos_html(rows) -> str:
@@ -2491,14 +2578,12 @@ def _render_todos_html(rows) -> str:
     head = (
         '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        '<title>TGW Todos</title>'
-        + _STATIC_HEAD
-        + '<style>' + _TODOS_EXTRA_CSS + '</style>'
-        '</head><body>'
-        '<h2>Open Todos</h2>'
+        "<title>TGW Todos</title>" + _STATIC_HEAD + "<style>" + _TODOS_EXTRA_CSS + "</style>"
+        "</head><body>"
+        "<h2>Open Todos</h2>"
     )
     if not rows:
-        return head + '<div class="allclear">✓ All clear — no open todos.</div>' + _STATIC_FOOT + _TODOS_JS + '</body></html>'
+        return head + '<div class="allclear">✓ All clear — no open todos.</div>' + _STATIC_FOOT + _TODOS_JS + "</body></html>"
 
     # Preserve todo_list ordering (agent, priority, id); group consecutively.
     groups: "list[tuple[str, list]]" = []
@@ -2516,51 +2601,34 @@ def _render_todos_html(rows) -> str:
 
     parts = [
         head,
-        '<div class="todos-ctrl">'
-        f'<label for="agent-sel">Agent:</label>'
-        f'<select id="agent-sel">{filter_opts}</select>'
-        '</div>',
+        f'<div class="todos-ctrl"><label for="agent-sel">Agent:</label><select id="agent-sel">{filter_opts}</select></div>',
         f'<div class="total">{len(rows)} open item(s)</div>',
     ]
 
     for agent, items in groups:
         agent_esc = _html.escape(str(agent))
-        parts.append(
-            f'<div class="agent" data-agent="{agent_esc}">'
-            f'<h3>{agent_esc}</h3>'
-            f'<span class="count">{len(items)} open</span></div>'
-        )
-        parts.append(
-            f'<table data-agent="{agent_esc}">'
-            '<tr><th>ID</th><th>P</th><th>Task</th><th>Src</th><th></th></tr>'
-        )
+        parts.append(f'<div class="agent" data-agent="{agent_esc}"><h3>{agent_esc}</h3><span class="count">{len(items)} open</span></div>')
+        parts.append(f'<table data-agent="{agent_esc}"><tr><th>ID</th><th>P</th><th>Task</th><th>Src</th><th></th></tr>')
         for it in items:
             body_raw = str(it.get("body", ""))
             body_esc = _html.escape(body_raw)
             pp_refs = _extract_pp_refs(body_raw)
-            pp_badges = "".join(
-                f'<a class="pp-badge" href="/docs/plan/TGW-Master-Plan.md" title="{r}">{r}</a>'
-                for r in pp_refs
-            )
-            body_cell = (
-                f'<div class="task-body" data-agent="{agent_esc}">{body_esc}</div>'
-                f'<span class="task-expand"></span>'
-                + (pp_badges if pp_badges else "")
-            )
+            pp_badges = "".join(f'<a class="pp-badge" href="/docs/plan/TGW-Master-Plan.md" title="{r}">{r}</a>' for r in pp_refs)
+            body_cell = f'<div class="task-body" data-agent="{agent_esc}">{body_esc}</div><span class="task-expand"></span>' + (pp_badges if pp_badges else "")
             parts.append(
                 f'<tr data-agent="{agent_esc}">'
                 f'<td class="id">#{_html.escape(str(it.get("id", "")))}</td>'
                 f'<td class="p">{_html.escape(str(it.get("priority", "")))}</td>'
-                f'<td>{body_cell}</td>'
+                f"<td>{body_cell}</td>"
                 f'<td class="src">{_html.escape(str(it.get("source", "")))}</td>'
                 f'<td><button class="copy-btn" data-body="{body_esc}" title="Copy task text">📋</button></td>'
-                '</tr>'
+                "</tr>"
             )
-        parts.append('</table>')
+        parts.append("</table>")
     parts.append(_STATIC_FOOT)
     parts.append(_TODOS_JS)
-    parts.append('</body></html>')
-    return ''.join(parts)
+    parts.append("</body></html>")
+    return "".join(parts)
 
 
 @app.get("/form/todos")
@@ -2570,20 +2638,17 @@ def todos_form(request: Request):
     from fastapi.responses import HTMLResponse
 
     from tgw import todo
+
     try:
         rows = todo.todo_list()
     except Exception as exc:  # DB down → still render a page, don't 500
         body = (
             '<!DOCTYPE html><html><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
-            '<title>TGW Todos</title>'
-            + _STATIC_HEAD
-            + '<style>' + _TODOS_EXTRA_CSS + '</style>'
-            '</head><body>'
-            '<h2>Open Todos</h2>'
-            f'<div class="msg err" style="display:block">todo store unavailable: {exc}</div>'
-            + _STATIC_FOOT
-            + '</body></html>'
+            "<title>TGW Todos</title>" + _STATIC_HEAD + "<style>" + _TODOS_EXTRA_CSS + "</style>"
+            "</head><body>"
+            "<h2>Open Todos</h2>"
+            f'<div class="msg err" style="display:block">todo store unavailable: {exc}</div>' + _STATIC_FOOT + "</body></html>"
         )
         return HTMLResponse(body, status_code=200)
     return HTMLResponse(_render_todos_html(rows))
@@ -2607,18 +2672,13 @@ def _render_suggest_html(msg: str = "", ok: bool = False) -> str:
     return (
         '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        '<title>TGW Suggest</title>'
-        + _STATIC_HEAD
-        + '</head><body>'
-        '<h2>Add Suggestion</h2>'
+        "<title>TGW Suggest</title>" + _STATIC_HEAD + "</head><body>"
+        "<h2>Add Suggestion</h2>"
         '<form method="post" action="/form/suggest">'
-        '<label>Suggestion — any punctuation is safe here</label>'
+        "<label>Suggestion — any punctuation is safe here</label>"
         '<textarea name="text" required autofocus placeholder="idea, task, note ..."></textarea>'
         '<button class="btn" type="submit">Add to SUGGESTIONS.md</button>'
-        '</form>'
-        + banner
-        + _STATIC_FOOT
-        + '</body></html>'
+        "</form>" + banner + _STATIC_FOOT + "</body></html>"
     )
 
 
@@ -2655,6 +2715,7 @@ async def suggest_submit(request: Request):
 # auth, network trust — same policy as /form/suggest and /form/todos).
 # ---------------------------------------------------------------------------
 
+
 @app.post("/api/suggest")
 async def api_suggest(request: Request) -> Dict[str, Any]:
     """Network-trust JSON suggest endpoint used by the nav popup overlay.
@@ -2667,6 +2728,7 @@ async def api_suggest(request: Request) -> Dict[str, Any]:
     if not text:
         raise HTTPException(status_code=400, detail="empty suggestion")
     from .api import cmd_suggest
+
     try:
         result = cmd_suggest(_cfg, text)
     except Exception as exc:
@@ -2721,6 +2783,7 @@ async def api_inbox_upload(file: UploadFile = File(...)) -> Dict[str, Any]:
 # GET /thumb/{sku}           — serve thumbnail  (no auth, for <img src>)
 # ---------------------------------------------------------------------------
 
+
 @app.get("/media/{sku}/{filename}")
 def get_media(sku: str, filename: str):
     """Serve a photo/video from ItemData. No Bearer auth — network trust."""
@@ -2729,9 +2792,7 @@ def get_media(sku: str, filename: str):
     safe = Path(filename).name
     if safe != filename or not safe or safe.startswith("."):
         raise HTTPException(status_code=400, detail="invalid filename")
-    if Path(safe).suffix.lower() not in {
-        ".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".mov", ".mkv", ".webm"
-    }:
+    if Path(safe).suffix.lower() not in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".mov", ".mkv", ".webm"}:
         raise HTTPException(status_code=400, detail="unsupported media type")
     itemdata_root = _cfg["itemdata_root"].resolve()
     p = (itemdata_root / sku / safe).resolve()
@@ -3235,22 +3296,22 @@ load(0);
 def _build_condition_options(current_enum: str) -> str:
     """Return <option> tags for eBay condition enum dropdown."""
     _conds = [
-        ("NEW",                  "New"),
-        ("LIKE_NEW",             "Like New"),
-        ("EXCELLENT_REFURBISHED","Excellent – Refurbished"),
-        ("VERY_GOOD_REFURBISHED","Very Good – Refurbished"),
-        ("GOOD_REFURBISHED",     "Good – Refurbished"),
-        ("USED_EXCELLENT",       "Used – Excellent"),
-        ("USED_VERY_GOOD",       "Used – Very Good"),
-        ("USED_GOOD",            "Used – Good"),
-        ("USED_ACCEPTABLE",      "Used – Acceptable"),
+        ("NEW", "New"),
+        ("LIKE_NEW", "Like New"),
+        ("EXCELLENT_REFURBISHED", "Excellent – Refurbished"),
+        ("VERY_GOOD_REFURBISHED", "Very Good – Refurbished"),
+        ("GOOD_REFURBISHED", "Good – Refurbished"),
+        ("USED_EXCELLENT", "Used – Excellent"),
+        ("USED_VERY_GOOD", "Used – Very Good"),
+        ("USED_GOOD", "Used – Good"),
+        ("USED_ACCEPTABLE", "Used – Acceptable"),
         ("FOR_PARTS_OR_NOT_WORKING", "For Parts / Not Working"),
     ]
     opts = []
     if not current_enum:
         opts.append('<option value="" selected disabled>— select —</option>')
     for val, lbl in _conds:
-        sel = ' selected' if val == current_enum else ""
+        sel = " selected" if val == current_enum else ""
         opts.append(f'<option value="{val}"{sel}>{lbl}</option>')
     return "".join(opts)
 
@@ -3276,19 +3337,8 @@ def _render_item_detail_html(
         if editable and key:
             raw = item.get(key)
             raw_str = h(str(raw)) if raw is not None else ""
-            return (
-                f'<div class="frow">'
-                f'<span class="fn">{label}</span>'
-                f'<span class="fv editable" data-field="{h(key)}" data-raw="{raw_str}"'
-                f' title="Double-click to edit">{display}</span>'
-                f"</div>"
-            )
-        return (
-            f'<div class="frow">'
-            f'<span class="fn">{label}</span>'
-            f'<span class="fv">{display}</span>'
-            f"</div>"
-        )
+            return f'<div class="frow"><span class="fn">{label}</span><span class="fv editable" data-field="{h(key)}" data-raw="{raw_str}" title="Double-click to edit">{display}</span></div>'
+        return f'<div class="frow"><span class="fn">{label}</span><span class="fv">{display}</span></div>'
 
     # Gallery
     if images:
@@ -3297,14 +3347,9 @@ def _render_item_detail_html(
         for i, img in enumerate(images):
             mv_buttons = ""
             if i > 1:
-                mv_buttons += (
-                    f'<button class="strip-mv" onclick="mvFront({i})" title="Move to front">⇑</button>'
-                )
+                mv_buttons += f'<button class="strip-mv" onclick="mvFront({i})" title="Move to front">⇑</button>'
             if i > 0:
-                mv_buttons += (
-                    f'<button class="strip-mv" style="top:{"1px" if i <= 1 else "22px"}" '
-                    f'onclick="mvPhoto({i})" title="Move earlier">↑</button>'
-                )
+                mv_buttons += f'<button class="strip-mv" style="top:{"1px" if i <= 1 else "22px"}" onclick="mvPhoto({i})" title="Move earlier">↑</button>'
             strip_items.append(
                 f'<div class="strip-item">'
                 f'<img src="/media/{h(sku)}/{h(img)}" class="{"active" if i == 0 else ""}"'
@@ -3319,7 +3364,7 @@ def _render_item_detail_html(
             f'<div class="lb-overlay" id="lb" onclick="lbClose()">'
             f'<button class="lb-close" onclick="lbClose();event.stopPropagation()">✕</button>'
             f'<img class="lb-img" id="lb-img" src="data:," alt="">'
-            f'</div>'
+            f"</div>"
             f'<img class="main-photo" id="mp" src="{main_src}" alt="" onclick="lbOpen(this.src)">'
             f'<div class="strip" id="photo-strip">{strip}</div>'
             f"</div>"
@@ -3377,18 +3422,9 @@ def _render_item_detail_html(
     # Video strip
     if videos:
         video_items = "".join(
-            f'<div class="strip-item video-item">'
-            f'<video src="/media/{h(sku)}/{h(vid)}" class="strip-vid"'
-            f' onclick="window.open(this.src,\'_blank\')" preload="none"></video>'
-            f'</div>'
-            for vid in videos
+            f'<div class="strip-item video-item"><video src="/media/{h(sku)}/{h(vid)}" class="strip-vid" onclick="window.open(this.src,\'_blank\')" preload="none"></video></div>' for vid in videos
         )
-        video_strip = (
-            f'<div class="video-strip">'
-            f'<div class="video-strip-hdr">VIDEO</div>'
-            f'<div class="strip">{video_items}</div>'
-            f'</div>'
-        )
+        video_strip = f'<div class="video-strip"><div class="video-strip-hdr">VIDEO</div><div class="strip">{video_items}</div></div>'
         gallery_html += video_strip
 
     # eBay sub-docs
@@ -3418,27 +3454,15 @@ def _render_item_detail_html(
     # eBay listing section HTML
     ebay_link_parts: List[str] = []
     if listing_url:
-        ebay_link_parts.append(
-            f'<a class="ebay-btn ebay-btn-primary" href="{h(listing_url)}"'
-            f' target="_blank" rel="noopener noreferrer">View on eBay ↗</a>'
-        )
+        ebay_link_parts.append(f'<a class="ebay-btn ebay-btn-primary" href="{h(listing_url)}" target="_blank" rel="noopener noreferrer">View on eBay ↗</a>')
     if listing_id:
         sh_url = f"https://www.ebay.com/sh/lst/active?keyword={h(listing_id)}"
-        ebay_link_parts.append(
-            f'<a class="ebay-btn ebay-btn-sec" href="{sh_url}"'
-            f' target="_blank" rel="noopener noreferrer">Seller Hub ↗</a>'
-        )
+        ebay_link_parts.append(f'<a class="ebay-btn ebay-btn-sec" href="{sh_url}" target="_blank" rel="noopener noreferrer">Seller Hub ↗</a>')
     if is_active:
-        ebay_link_parts.append(
-            '<a class="ebay-btn ebay-btn-sec" href="https://messages.ebay.com/"'
-            ' target="_blank" rel="noopener noreferrer">eBay Messages ↗</a>'
-        )
+        ebay_link_parts.append('<a class="ebay-btn ebay-btn-sec" href="https://messages.ebay.com/" target="_blank" rel="noopener noreferrer">eBay Messages ↗</a>')
     if listing_id:
         ebay_link_parts.append('<span id="offer-badge-wrap"></span>')
-    ebay_links_html = (
-        f'<div class="ebay-links">{"".join(ebay_link_parts)}</div>'
-        if ebay_link_parts else ""
-    )
+    ebay_links_html = f'<div class="ebay-links">{"".join(ebay_link_parts)}</div>' if ebay_link_parts else ""
 
     # eBay listing confirmed data
     def _safe_price(v: Any) -> str:
@@ -3457,10 +3481,7 @@ def _render_item_detail_html(
             except (TypeError, ValueError):
                 _diverged = False
             if _diverged:
-                _lp_str += (
-                    f' <span style="color:#f99;font-size:.79em">⚠ differs from offer'
-                    f' ({_safe_price(offer_price)})</span>'
-                )
+                _lp_str += f' <span style="color:#f99;font-size:.79em">⚠ differs from offer ({_safe_price(offer_price)})</span>'
         _live_price_html = fr("Live Price (eBay)", _lp_str)
     listing_section = (
         fr("Listing ID", h(listing_id) if listing_id else "")
@@ -3494,18 +3515,20 @@ def _render_item_detail_html(
     except Exception:
         pass
     _ph_rows = ""
+
     def _cfmt(v: Any) -> str:
         try:
             return f"${float(v):.2f}"
         except (TypeError, ValueError):
             return "—"
+
     if _comps.get("count"):
         _ph_rows += (
-            f'<div class="frow"><span class="fn">Comp count</span><span class="fv">{h(str(_comps.get("count","—")))}</span></div>'
+            f'<div class="frow"><span class="fn">Comp count</span><span class="fv">{h(str(_comps.get("count", "—")))}</span></div>'
             f'<div class="frow"><span class="fn">Range</span><span class="fv">{_cfmt(_comps.get("min"))} – {_cfmt(_comps.get("max"))}</span></div>'
             f'<div class="frow"><span class="fn">p25 / median / p75</span><span class="fv">'
-            f'{_cfmt(_comps.get("p25"))} / {_cfmt(_comps.get("median"))} / {_cfmt(_comps.get("p75"))}'
-            f'</span></div>'
+            f"{_cfmt(_comps.get('p25'))} / {_cfmt(_comps.get('median'))} / {_cfmt(_comps.get('p75'))}"
+            f"</span></div>"
         )
     if _floor is not None:
         _ph_rows += f'<div class="frow"><span class="fn">Category floor</span><span class="fv">${float(_floor):.2f}</span></div>'
@@ -3523,62 +3546,59 @@ def _render_item_detail_html(
         _ci_rows = ""
         for _ci in _comp_items:
             _ci_price = f"${float(_ci.get('price', 0)):.2f}"
-            _ci_cond  = h(str(_ci.get("condition") or ""))
+            _ci_cond = h(str(_ci.get("condition") or ""))
             _ci_title = h(str(_ci.get("title") or "")[:70])
-            _ci_url   = _ci.get("url") or ""
-            _ci_title_cell = (
-                f'<a href="{h(_ci_url)}" target="_blank" rel="noopener noreferrer"'
-                f' style="color:#7af;text-decoration:none">{_ci_title}</a>'
-                if _ci_url else _ci_title
-            )
+            _ci_url = _ci.get("url") or ""
+            _ci_title_cell = f'<a href="{h(_ci_url)}" target="_blank" rel="noopener noreferrer" style="color:#7af;text-decoration:none">{_ci_title}</a>' if _ci_url else _ci_title
             _ci_rows += (
-                f"<tr>"
-                f'<td style="color:#bfb;font-size:.8em">{h(_ci_price)}</td>'
-                f'<td style="color:#aaa;font-size:.78em">{_ci_cond}</td>'
-                f'<td style="color:#ccc;font-size:.78em">{_ci_title_cell}</td>'
-                f"</tr>"
+                f'<tr><td style="color:#bfb;font-size:.8em">{h(_ci_price)}</td><td style="color:#aaa;font-size:.78em">{_ci_cond}</td><td style="color:#ccc;font-size:.78em">{_ci_title_cell}</td></tr>'
             )
         _ph_rows += (
             f'<details style="margin-top:6px">'
             f'<summary style="cursor:pointer;color:#4a8ade;font-size:.79em;list-style:none">'
-            f'&#9654; {len(_comp_items)} comp listings used</summary>'
+            f"&#9654; {len(_comp_items)} comp listings used</summary>"
             f'<table style="width:100%;border-collapse:collapse;margin-top:4px">'
             f'<tr><th style="text-align:left;font-size:.75em;color:#666;padding:2px 6px">Price</th>'
             f'<th style="text-align:left;font-size:.75em;color:#666;padding:2px 6px">Condition</th>'
             f'<th style="text-align:left;font-size:.75em;color:#666;padding:2px 6px">Title</th></tr>'
-            f'{_ci_rows}'
-            f'</table>'
-            f'</details>'
+            f"{_ci_rows}"
+            f"</table>"
+            f"</details>"
         )
     _ph_content = _ph_rows if _ph_rows else '<span style="color:#555;font-size:.82em">No pricing data yet</span>'
     _pricing_history_html = (
-        f'<details open style="margin-top:4px">'
-        f'<summary style="cursor:pointer;color:#4a8ade;font-size:.82em;list-style:none">▶ Pricing History</summary>'
-        f'<div style="margin-top:6px;padding:6px;background:#111;border:1px solid #222;border-radius:4px">'
-        f'{_ph_content}'
-        f'</div>'
-        f'</details>'
-    ) if eo else ""
+        (
+            f'<details open style="margin-top:4px">'
+            f'<summary style="cursor:pointer;color:#4a8ade;font-size:.82em;list-style:none">▶ Pricing History</summary>'
+            f'<div style="margin-top:6px;padding:6px;background:#111;border:1px solid #222;border-radius:4px">'
+            f"{_ph_content}"
+            f"</div>"
+            f"</details>"
+        )
+        if eo
+        else ""
+    )
 
     offer_section = (
-        fr("Offer ID", h(str(eo.get("offer_id", "") or "")))
-        + fr("Offer Status", h(offer_status) if offer_status else "")
-        + fr("Offer Price", _fmt_price(offer_price))
-        + fr("eBay Category", h(str(eo.get("category_id", "") or "")))
-        + fr("Quantity", h(str(eo.get("quantity", "") or "")))
-        + fr("Published At", h(str(eo.get("published_at", "") or "")[:19]))
-        + _pricing_history_html
-        + fr("Staged At", h(str(eo.get("staged_at", "") or "")[:19]))
-    ) if eo else '<div class="frow"><span class="fv" style="color:#555">No offer yet</span></div>'
+        (
+            fr("Offer ID", h(str(eo.get("offer_id", "") or "")))
+            + fr("Offer Status", h(offer_status) if offer_status else "")
+            + fr("Offer Price", _fmt_price(offer_price))
+            + fr("eBay Category", h(str(eo.get("category_id", "") or "")))
+            + fr("Quantity", h(str(eo.get("quantity", "") or "")))
+            + fr("Published At", h(str(eo.get("published_at", "") or "")[:19]))
+            + _pricing_history_html
+            + fr("Staged At", h(str(eo.get("staged_at", "") or "")[:19]))
+        )
+        if eo
+        else '<div class="frow"><span class="fv" style="color:#555">No offer yet</span></div>'
+    )
 
     # Draft listing data (what we prepared for eBay)
     if dl:
         _dl_raw_price = dl.get("price")
         if _dl_raw_price is None and offer_price is not None:
-            dl_price_str = (
-                _fmt_price(offer_price)
-                + ' <span style="color:#888;font-size:.78em">(from offer)</span>'
-            )
+            dl_price_str = _fmt_price(offer_price) + ' <span style="color:#888;font-size:.78em">(from offer)</span>'
         else:
             dl_price_str = _fmt_price(_dl_raw_price)
         q = dl.get("quality") or {}
@@ -3594,34 +3614,24 @@ def _render_item_detail_html(
         # Build item_specifics table
         _specifics = dl.get("item_specifics") or {}
         if _specifics:
-            _spec_rows = "".join(
-                f'<tr><td class="spec-k">{h(k)}</td><td class="spec-v">{h(str(v))}</td></tr>'
-                for k, v in sorted(_specifics.items())
-            )
-            _spec_html = (
-                f'<table class="spec-tbl">'
-                f'<tr><th>Aspect</th><th>Value</th></tr>'
-                f'{_spec_rows}</table>'
-            )
+            _spec_rows = "".join(f'<tr><td class="spec-k">{h(k)}</td><td class="spec-v">{h(str(v))}</td></tr>' for k, v in sorted(_specifics.items()))
+            _spec_html = f'<table class="spec-tbl"><tr><th>Aspect</th><th>Value</th></tr>{_spec_rows}</table>'
         else:
             _spec_html = '<span style="color:#555">None filled</span>'
-        _spec_note = (
-            f' <span style="color:#888;font-size:.75em">({req_fill}/{req_total} req, {rec_fill}/{rec_total} rec)</span>'
-        )
+        _spec_note = f' <span style="color:#888;font-size:.75em">({req_fill}/{req_total} req, {rec_fill}/{rec_total} rec)</span>'
         # Listing description preview — strip the hidden picklist line before display
         import re as _re
+
         _ld_raw = str(dl.get("listing_description") or dl.get("description") or "")
-        _ld_clean = _re.sub(r'<p>[^<]*tgw-pl::[^<]*</p>', '', _ld_raw).strip()
-        _ld_html = (
-            f'<div class="listing-preview">{_ld_clean}</div>'
-            if _ld_clean else '<span style="color:#555">—</span>'
-        )
+        _ld_clean = _re.sub(r"<p>[^<]*tgw-pl::[^<]*</p>", "", _ld_raw).strip()
+        _ld_html = f'<div class="listing-preview">{_ld_clean}</div>' if _ld_clean else '<span style="color:#555">—</span>'
         _offline_warn = (
             '<div style="background:#2a1a00;border:1px solid #664400;border-radius:6px;'
             'padding:6px 10px;margin-bottom:6px;color:#fb7;font-size:.82em">'
-            '⚠ Offline draft — created without live eBay data; aspects and category may be incomplete.'
-            '</div>'
-            if dl.get("offline_draft") else ""
+            "⚠ Offline draft — created without live eBay data; aspects and category may be incomplete."
+            "</div>"
+            if dl.get("offline_draft")
+            else ""
         )
         _cat_conf = dl.get("category_confidence") or ""
         _pl_cat = (item.get("product_lookup") or {}).get("category_name") or ""
@@ -3631,19 +3641,19 @@ def _render_item_detail_html(
             if _pl_cat and _pl_cat != dl.get("category_name", ""):
                 _cat_conf_warn += (
                     f'<div style="margin-top:4px;font-size:.79em;color:#aaa">'
-                    f'AI: {h(str(dl.get("category_id","")))} · {h(str(dl.get("category_name","")))} '
-                    f'vs Lookup: {h(_pl_cat_id)} · {h(_pl_cat)}'
-                    f'</div>'
+                    f"AI: {h(str(dl.get('category_id', '')))} · {h(str(dl.get('category_name', '')))} "
+                    f"vs Lookup: {h(_pl_cat_id)} · {h(_pl_cat)}"
+                    f"</div>"
                 )
         else:
             _cat_conf_warn = ""
         _draft_section = (
             _offline_warn
             + fr("Draft Title", h(str(dl.get("title", "") or "")))
-            + fr("Category Sent", h(f"{dl.get('category_id','')} · {dl.get('category_name','')}") + _cat_conf_warn)
+            + fr("Category Sent", h(f"{dl.get('category_id', '')} · {dl.get('category_name', '')}") + _cat_conf_warn)
             + (fr("Store Category", h(_dl_store_cat)) if _dl_store_cat else "")
             + (fr("Shipping Policy", h(_dl_ship)) if _dl_ship else "")
-            + fr("Condition Sent", h(f"{dl.get('condition_label','')} ({dl.get('condition_enum','')})"))
+            + fr("Condition Sent", h(f"{dl.get('condition_label', '')} ({dl.get('condition_enum', '')})"))
             + fr("Draft Price", dl_price_str)
             + fr("Quality Score", h(str(q_score)))
             + fr("Quality Flags", h(q_flags))
@@ -3652,7 +3662,7 @@ def _render_item_detail_html(
             + f'<div class="frow listing-desc-row"><span class="fn">Listing Description</span><span class="fv">{_ld_html}</span></div>'
         )
     else:
-        _draft_section = '&'
+        _draft_section = "&"
 
     # Revision draft diff
     _revision_draft_html = ""
@@ -3665,14 +3675,7 @@ def _render_item_detail_html(
         at = h(str(revision.get("at", "")))[:19]
         bhash = h(str(baseline.get("hash", "")))[:12]
         if delta:
-            rev_rows = "".join(
-                f'<tr>'
-                f'<td class="dfield">{h(f)}</td>'
-                f'<td class="dwas">{h(str(snap.get(f, "—")))}</td>'
-                f'<td class="dnow">{h(str(v))}</td>'
-                f"</tr>"
-                for f, v in delta.items()
-            )
+            rev_rows = "".join(f'<tr><td class="dfield">{h(f)}</td><td class="dwas">{h(str(snap.get(f, "—")))}</td><td class="dnow">{h(str(v))}</td></tr>' for f, v in delta.items())
             _revision_draft_html = (
                 f'<h3 class="diff-hdr">Revision Draft</h3>'
                 f'<div class="diff-meta">by {by} · {at} · baseline {bhash}…</div>'
@@ -3696,30 +3699,19 @@ def _render_item_detail_html(
                 err = (
                     f'<details style="display:inline">'
                     f'<summary style="cursor:pointer;color:#f99;font-size:.8em;list-style:none">'
-                    f'{h(_err_short)}{"…" if len(_err_full) > 80 else ""}</summary>'
+                    f"{h(_err_short)}{'…' if len(_err_full) > 80 else ''}</summary>"
                     f'<pre style="white-space:pre-wrap;word-break:break-all;font-size:.75em;'
                     f'color:#f99;margin:4px 0;padding:4px;background:#1a0a0a;border-radius:4px">'
-                    f'{h(_err_full)}</pre>'
-                    f'</details>'
+                    f"{h(_err_full)}</pre>"
+                    f"</details>"
                 )
             else:
                 err = ""
             qn = j.get("queue_name", "")
             tip = _WORKER_TOOLTIPS.get(qn, "")
             tip_attr = f' title="{h(tip)}"' if tip else ""
-            job_rows += (
-                f"<tr>"
-                f'<td{tip_attr}>{h(qn)}</td>'
-                f'<td class="{sc}">{h(state)}</td>'
-                f'<td style="color:#666;font-size:.8em">{h(ts)}</td>'
-                f'<td style="color:#f99;font-size:.8em">{err}</td>'
-                f"</tr>"
-            )
-        jobs_html = (
-            f'<table class="jtable">'
-            f"<tr><th>Queue</th><th>State</th><th>Updated</th><th>Error</th></tr>"
-            f"{job_rows}</table>"
-        )
+            job_rows += f'<tr><td{tip_attr}>{h(qn)}</td><td class="{sc}">{h(state)}</td><td style="color:#666;font-size:.8em">{h(ts)}</td><td style="color:#f99;font-size:.8em">{err}</td></tr>'
+        jobs_html = f'<table class="jtable"><tr><th>Queue</th><th>State</th><th>Updated</th><th>Error</th></tr>{job_rows}</table>'
 
     title = item.get("title", "")
 
@@ -3739,16 +3731,16 @@ def _render_item_detail_html(
     # Effective qty: top-level → draft_listing.quantity
     _qty_raw = item.get("qty")
     _qty_display = (
-        h(str(_qty_raw)) if _qty_raw is not None
-        else (h(str(dl.get("quantity"))) + ' <span style="color:#555;font-size:.78em">(from draft)</span>'
-              if dl.get("quantity") is not None else '<span style="color:#444">—</span>')
+        h(str(_qty_raw))
+        if _qty_raw is not None
+        else (h(str(dl.get("quantity"))) + ' <span style="color:#555;font-size:.78em">(from draft)</span>' if dl.get("quantity") is not None else '<span style="color:#444">—</span>')
     )
     # Effective price display — draft_listing.price is operator-set, show it first
     _price_raw = item.get("price")
     _dl_price_raw = dl.get("price")
     if _dl_price_raw is not None:
         try:
-            _price_display = '$' + f'{float(_dl_price_raw):.2f}' + ' <span style="color:#555;font-size:.78em">(draft)</span>'
+            _price_display = "$" + f"{float(_dl_price_raw):.2f}" + ' <span style="color:#555;font-size:.78em">(draft)</span>'
         except (ValueError, TypeError):
             _price_display = h(str(_dl_price_raw))
     elif _price_raw is not None:
@@ -3763,11 +3755,11 @@ def _render_item_detail_html(
     if _ph_events:
         _phev_rows = ""
         for _ev in reversed(_ph_events):
-            _ev_ts    = h(str(_ev.get("ts", ""))[:19])
+            _ev_ts = h(str(_ev.get("ts", ""))[:19])
             _ev_price = h(f"${float(_ev.get('price', 0)):.2f}")
-            _ev_prev  = h(f"${float(_ev.get('previous_price', 0)):.2f}") if _ev.get("previous_price") is not None else "—"
+            _ev_prev = h(f"${float(_ev.get('previous_price', 0)):.2f}") if _ev.get("previous_price") is not None else "—"
             _ev_label = h(str(_ev.get("label") or _ev.get("stage") or ""))
-            _ev_src   = h(str(_ev.get("source") or ""))
+            _ev_src = h(str(_ev.get("source") or ""))
             _phev_rows += (
                 f"<tr>"
                 f'<td style="color:#888;font-size:.8em">{_ev_ts}</td>'
@@ -3782,10 +3774,10 @@ def _render_item_detail_html(
             f'<h3>Price History <span style="font-size:.7em;color:#555;font-weight:normal">{len(_ph_events)} events</span></h3>'
             f'<div style="font-size:.73em;color:#556;margin-bottom:6px">Every price change recorded — launch through markdowns</div>'
             f'<table class="jtable">'
-            f'<tr><th>When</th><th>Price</th><th>Previous</th><th>Stage</th><th>Source</th></tr>'
-            f'{_phev_rows}'
-            f'</table>'
-            f'</div>'
+            f"<tr><th>When</th><th>Price</th><th>Previous</th><th>Stage</th><th>Source</th></tr>"
+            f"{_phev_rows}"
+            f"</table>"
+            f"</div>"
         )
     else:
         price_history_html = ""
@@ -3795,11 +3787,11 @@ def _render_item_detail_html(
     if _rps:
         _rps_rows = ""
         for _st in _rps:
-            _st_label  = h(str(_st.get("label") or _st.get("stage") or ""))
-            _st_price  = h(f"${float(_st.get('price', 0)):.2f}") if _st.get("price") is not None else "—"
-            _st_due    = h(str(_st.get("due_at") or "")[:19])
-            _st_done   = h(str(_st.get("done_at") or "")[:19])
-            _done_cls  = 'color:#888' if _st.get("done_at") else 'color:#fb7'
+            _st_label = h(str(_st.get("label") or _st.get("stage") or ""))
+            _st_price = h(f"${float(_st.get('price', 0)):.2f}") if _st.get("price") is not None else "—"
+            _st_due = h(str(_st.get("due_at") or "")[:19])
+            _st_done = h(str(_st.get("done_at") or "")[:19])
+            _done_cls = "color:#888" if _st.get("done_at") else "color:#fb7"
             _rps_rows += (
                 f"<tr>"
                 f'<td style="color:#aaa">{_st_label}</td>'
@@ -3813,10 +3805,10 @@ def _render_item_detail_html(
             f'<h3>Reprice Schedule <span style="font-size:.7em;color:#555;font-weight:normal">{len(_rps)} stages</span></h3>'
             f'<div style="font-size:.73em;color:#556;margin-bottom:6px">Automated markdown plan — pending stages fire automatically</div>'
             f'<table class="jtable">'
-            f'<tr><th>Stage</th><th>Price</th><th>Due</th><th>Done</th></tr>'
-            f'{_rps_rows}'
-            f'</table>'
-            f'</div>'
+            f"<tr><th>Stage</th><th>Price</th><th>Due</th><th>Done</th></tr>"
+            f"{_rps_rows}"
+            f"</table>"
+            f"</div>"
         )
     else:
         reprice_schedule_html = ""
@@ -3826,27 +3818,26 @@ def _render_item_detail_html(
     if _pl:
         _pl_rows = ""
         for _k, _v in (
-            ("Brand",   _pl.get("brand")),
-            ("MPN",     _pl.get("mpn")),
-            ("MSRP",    f"${float(_pl['msrp']):.2f}" if _pl.get("msrp") else None),
-            ("Source",  _pl.get("source")),
-            ("Title",   _pl.get("title")),
-            ("UPC",     _pl.get("upc")),
+            ("Brand", _pl.get("brand")),
+            ("MPN", _pl.get("mpn")),
+            ("MSRP", f"${float(_pl['msrp']):.2f}" if _pl.get("msrp") else None),
+            ("Source", _pl.get("source")),
+            ("Title", _pl.get("title")),
+            ("UPC", _pl.get("upc")),
         ):
             if _v:
-                _pl_rows += (
-                    f'<div class="frow">'
-                    f'<span class="fn">{h(_k)}</span>'
-                    f'<span class="fv">{h(str(_v))}</span>'
-                    f'</div>'
-                )
+                _pl_rows += f'<div class="frow"><span class="fn">{h(_k)}</span><span class="fv">{h(str(_v))}</span></div>'
         product_lookup_html = (
-            f'<div class="dsec">'
-            f'<h3>Product Lookup <span style="font-size:.7em;color:#555;font-weight:normal">{h(str(_pl.get("source","")))})</span></h3>'
-            f'<div style="font-size:.73em;color:#556;margin-bottom:6px">Structured product data enriching pricing and aspects</div>'
-            f'{_pl_rows}'
-            f'</div>'
-        ) if _pl_rows else ""
+            (
+                f'<div class="dsec">'
+                f'<h3>Product Lookup <span style="font-size:.7em;color:#555;font-weight:normal">{h(str(_pl.get("source", "")))})</span></h3>'
+                f'<div style="font-size:.73em;color:#556;margin-bottom:6px">Structured product data enriching pricing and aspects</div>'
+                f"{_pl_rows}"
+                f"</div>"
+            )
+            if _pl_rows
+            else ""
+        )
     else:
         product_lookup_html = ""
 
@@ -3855,10 +3846,10 @@ def _render_item_detail_html(
     if _id_hist:
         _idh_rows = ""
         for _ev in reversed(_id_hist[-10:]):  # most recent 10
-            _idh_ts    = h(str(_ev.get("ts", ""))[:19])
+            _idh_ts = h(str(_ev.get("ts", ""))[:19])
             _idh_event = h(str(_ev.get("event") or ""))
             _idh_title = h(str(_ev.get("title") or ""))
-            _idh_cat   = h(str(_ev.get("category") or ""))
+            _idh_cat = h(str(_ev.get("category") or ""))
             _idh_model = h(str(_ev.get("model") or ""))
             _idh_round = h(str(_ev.get("round") or ""))
             _idh_rows += (
@@ -3872,107 +3863,87 @@ def _render_item_detail_html(
             )
         identification_history_html = (
             f'<div class="dsec">'
-            f'<details>'
+            f"<details>"
             f'<summary style="cursor:pointer;color:#4a8ade;font-weight:600;font-size:.9em">'
             f'Identification History <span style="color:#555;font-weight:normal">({len(_id_hist)} rounds)</span>'
-            f'</summary>'
+            f"</summary>"
             f'<div style="font-size:.73em;color:#556;margin:4px 0 6px">AI identification rounds — title, category, model used</div>'
             f'<table class="jtable">'
-            f'<tr><th>When</th><th>Event</th><th>Title</th><th>Category</th><th>Model</th></tr>'
-            f'{_idh_rows}'
-            f'</table>'
-            f'</details>'
-            f'</div>'
+            f"<tr><th>When</th><th>Event</th><th>Title</th><th>Category</th><th>Model</th></tr>"
+            f"{_idh_rows}"
+            f"</table>"
+            f"</details>"
+            f"</div>"
         )
     else:
         identification_history_html = ""
 
     # ── Phase 1A: EPS photo strip ─────────────────────────────────────────────
-    _inv_item = (_ebay_live_raw.get("inventory_item") or {})
-    _eps_urls = (
-        (_inv_item.get("product") or {}).get("imageUrls") or
-        (dl or {}).get("imageUrls") or []
-    )
+    _inv_item = _ebay_live_raw.get("inventory_item") or {}
+    _eps_urls = (_inv_item.get("product") or {}).get("imageUrls") or (dl or {}).get("imageUrls") or []
     _local_eps = [e.get("url") for e in (item.get("ebay_photos") or []) if e.get("url")]
     _display_eps = _eps_urls or _local_eps
     if _display_eps:
         _eps_thumbs = "".join(
-            f'<a href="{h(u)}" target="_blank" rel="noopener noreferrer">'
-            f'<img src="{h(u)}" style="height:80px;width:80px;object-fit:cover;'
-            f'border-radius:4px;border:1px solid #333;cursor:pointer">'
-            f'</a>'
+            f'<a href="{h(u)}" target="_blank" rel="noopener noreferrer"><img src="{h(u)}" style="height:80px;width:80px;object-fit:cover;border-radius:4px;border:1px solid #333;cursor:pointer"></a>'
             for u in _display_eps[:12]
         )
         _eps_strip_html = (
             f'<div id="eps-photos" class="dsec">'
-            f'<h3>Photos on eBay'
+            f"<h3>Photos on eBay"
             f' <span style="font-size:.7em;color:#555;font-weight:normal">'
-            f'EPS hosted · {len(_display_eps)} photo(s)</span></h3>'
+            f"EPS hosted · {len(_display_eps)} photo(s)</span></h3>"
             f'<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">'
-            f'{_eps_thumbs}</div>'
-            f'</div>'
+            f"{_eps_thumbs}</div>"
+            f"</div>"
         )
     else:
-        _eps_strip_html = (
-            '<div id="eps-photos" class="dsec">'
-            '<div style="color:#555;font-size:.85em">No photos on eBay yet — '
-            'run ebay_upload to upload photos to EPS</div>'
-            '</div>'
-        )
+        _eps_strip_html = '<div id="eps-photos" class="dsec"><div style="color:#555;font-size:.85em">No photos on eBay yet — run ebay_upload to upload photos to EPS</div></div>'
 
     # ── Phase 1A: eBay live collapsible panel ──────────────────────────────────
     _el_synced = eb.get("synced_at") or ""
     if _ebay_live_raw:
-        _el_prod = (_inv_item.get("product") or {})
+        _el_prod = _inv_item.get("product") or {}
         _el_title = _el_prod.get("title") or "—"
         _el_aspects = _el_prod.get("aspects") or {}
         _el_offer = _ebay_live_raw.get("offer") or {}
         _el_price_v = (_el_offer.get("pricingSummary") or {}).get("price") or {}
-        _el_price_str = (
-            f"${float(_el_price_v['value']):.2f}"
-            if _el_price_v.get("value") else "—"
+        _el_price_str = f"${float(_el_price_v['value']):.2f}" if _el_price_v.get("value") else "—"
+        _el_asp_rows = (
+            "".join(
+                f'<tr><td style="color:#8af;font-size:.8em;padding:2px 8px 2px 0">{h(k)}</td><td style="color:#ccc;font-size:.8em">{h(", ".join(v) if isinstance(v, list) else str(v))}</td></tr>'
+                for k, v in sorted(_el_aspects.items())
+            )
+            if _el_aspects
+            else ('<tr><td colspan="2" style="color:#555;font-size:.8em">none</td></tr>')
         )
-        _el_asp_rows = "".join(
-            f'<tr>'
-            f'<td style="color:#8af;font-size:.8em;padding:2px 8px 2px 0">{h(k)}</td>'
-            f'<td style="color:#ccc;font-size:.8em">'
-            f'{h(", ".join(v) if isinstance(v, list) else str(v))}</td>'
-            f'</tr>'
-            for k, v in sorted(_el_aspects.items())
-        ) if _el_aspects else (
-            '<tr><td colspan="2" style="color:#555;font-size:.8em">none</td></tr>'
-        )
-        _sync_lbl = (
-            f'<span style="font-size:.73em;color:#556;font-weight:normal;margin-left:6px">'
-            f'synced {h(_el_synced[:19])}</span>'
-            if _el_synced else ''
-        )
+        _sync_lbl = f'<span style="font-size:.73em;color:#556;font-weight:normal;margin-left:6px">synced {h(_el_synced[:19])}</span>' if _el_synced else ""
         _ebay_live_html = (
-            '<div class="dsec"><details>'
+            '<div class="dsec"><details open>'
             f'<summary style="cursor:pointer;color:#4a8ade;font-weight:600;font-size:.9em">'
-            f'eBay Live Data{_sync_lbl}</summary>'
+            f"eBay Live Data{_sync_lbl}</summary>"
             '<div style="font-size:.73em;color:#556;margin:4px 0 6px">'
-            'Raw eBay mirror — what eBay currently holds. Not edited here.</div>'
+            "Raw eBay mirror — what eBay currently holds. Not edited here.</div>"
             + fr("Live title", h(_el_title))
             + fr("Live price", _el_price_str)
             + fr("Category", h(str(_el_offer.get("categoryId") or "—")))
             + '<div style="margin-top:6px;font-size:.8em;color:#778">Aspects on eBay:</div>'
             + f'<table style="margin-top:4px">{_el_asp_rows}</table>'
-            + '</details></div>'
+            + "</details></div>"
         )
     else:
         _ebay_live_html = ""
 
     # ── Readiness checklist ────────────────────────────────────────────────────
     _item_for_readiness = dict(item)
-    _item_for_readiness['_catalog_root'] = _cfg.get('catalog_root')
+    _item_for_readiness["_catalog_root"] = _cfg.get("catalog_root")
     _readiness_html_str = readiness_html(check_ebay(_item_for_readiness))
 
     # ── Price comps range bar + detail panel ────────────────────────────────────
     _st_val = h(str(item.get("search_terms") or ""))
     _comps = eo.get("price_comps") or {}
     _price_source = eo.get("price_source") or ""
-    _priced_at    = (eo.get("priced_at") or "")[:10]
+    _priced_at = (eo.get("priced_at") or "")[:10]
     if _comps and _comps.get("max") and _comps.get("min") is not None:
         try:
             _cp_min = float(_comps.get("min", 0))
@@ -3982,17 +3953,24 @@ def _render_item_detail_html(
             _cp_max = float(_comps.get("max", 0))
             _cp_cnt = int(_comps.get("count", 0))
             _cp_rng = max(_cp_max - _cp_min, 0.01)
-            def _pct(v): return max(0, min(100, int((v - _cp_min) / _cp_rng * 100)))
+
+            def _pct(v):
+                return max(0, min(100, int((v - _cp_min) / _cp_rng * 100)))
+
             # Confidence badge
             _conf = _comps.get("confidence") or eo.get("price_confidence") or ""
             _n_out = _comps.get("outlier_count", 0)
             _n_drop = _comps.get("llm_dropped_count", 0)
             _conf_col = {"high": "#4a4", "medium": "#aa0", "low": "#c44"}.get(_conf, "#556")
             _conf_badge = (
-                f'<span style="font-size:.72em;font-weight:600;margin-left:6px;'
-                f'padding:1px 5px;border-radius:3px;background:{_conf_col}22;'
-                f'color:{_conf_col};border:1px solid {_conf_col}44">{_conf}</span>'
-            ) if _conf else ""
+                (
+                    f'<span style="font-size:.72em;font-weight:600;margin-left:6px;'
+                    f"padding:1px 5px;border-radius:3px;background:{_conf_col}22;"
+                    f'color:{_conf_col};border:1px solid {_conf_col}44">{_conf}</span>'
+                )
+                if _conf
+                else ""
+            )
             # Count badge: red <5, yellow 5-9, grey ≥10
             _cnt_col = "#c44" if _cp_cnt < 5 else ("#aa0" if _cp_cnt < 10 else "#556")
             _cnt_badge = (
@@ -4000,63 +3978,70 @@ def _render_item_detail_html(
                 f'font-weight:600;margin-left:4px">{_cp_cnt} comps'
                 + (" ⚠" if _cp_cnt < 5 else "")
                 + (_conf_badge)
-                + (f' <span style="font-size:.85em;color:#556">({_n_out} outlier{"s" if _n_out!=1 else ""} removed)</span>' if _n_out else "")
+                + (f' <span style="font-size:.85em;color:#556">({_n_out} outlier{"s" if _n_out != 1 else ""} removed)</span>' if _n_out else "")
                 + (f' <span style="font-size:.85em;color:#556">({_n_drop} irrelevant filtered)</span>' if _n_drop else "")
-                + '</span>'
+                + "</span>"
             )
             # Source label
-            _src_lbl = (
-                f'<span style="font-size:.72em;color:#445;margin-left:8px">'
-                f'{h(_price_source)}'
-                + (f' · {_priced_at}' if _priced_at else '')
-                + '</span>'
-            ) if _price_source else ""
+            _src_lbl = (f'<span style="font-size:.72em;color:#445;margin-left:8px">{h(_price_source)}' + (f" · {_priced_at}" if _priced_at else "") + "</span>") if _price_source else ""
             # Range bar
             _bar = (
                 f'<div style="position:relative;height:14px;background:#1a1a1a;'
                 f'border-radius:3px;border:1px solid #333;margin-bottom:3px">'
                 f'<div style="position:absolute;left:{_pct(_cp_p25)}%;'
-                f'right:{100-_pct(_cp_p75)}%;height:100%;background:#1a3a1a;border-radius:2px"></div>'
+                f'right:{100 - _pct(_cp_p75)}%;height:100%;background:#1a3a1a;border-radius:2px"></div>'
                 f'<div style="position:absolute;left:{_pct(_cp_med)}%;width:2px;'
                 f'height:100%;background:#4a4"></div>'
-                f'</div>'
+                f"</div>"
                 f'<div style="display:flex;justify-content:space-between;font-size:.73em;color:#556">'
-                f'<span>min ${_cp_min:.2f}</span>'
+                f"<span>min ${_cp_min:.2f}</span>"
                 f'<span style="color:#7a7">p25 ${_cp_p25:.2f}</span>'
                 f'<span style="color:#afa">▲ med ${_cp_med:.2f}</span>'
                 f'<span style="color:#7a7">p75 ${_cp_p75:.2f}</span>'
-                f'<span>max ${_cp_max:.2f}</span>'
-                f'</div>'
+                f"<span>max ${_cp_max:.2f}</span>"
+                f"</div>"
             )
             # Individual comp rows
             _comp_items = _comps.get("items") or []
             if _comp_items:
+
                 def _ci_row(ci):
-                    _is_out  = ci.get("outlier", False)
+                    _is_out = ci.get("outlier", False)
                     _is_drop = ci.get("llm_dropped", False)
                     _excluded = _is_out or _is_drop
-                    _row_op   = "0.45" if _excluded else "1"
+                    _row_op = "0.45" if _excluded else "1"
                     _title_dec = "line-through" if _excluded else "none"
                     _tag = ""
                     if _is_out:
                         _tag = '<span style="font-size:.72em;color:#c44;margin-left:4px" title="Price is statistical outlier (IQR)">outlier</span>'
                     elif _is_drop:
-                        _reason = h(ci.get("llm_reason",""))
+                        _reason = h(ci.get("llm_reason", ""))
                         _tag = f'<span style="font-size:.72em;color:#aa0;margin-left:4px" title="{_reason}">filtered ⓘ</span>'
-                    _url = h((ci.get("url","") or "") + ("&mkcid=1&mkrid=711-53200-19255-0&siteid=0&campid=5338722076&toolid=10001&mkevt=1" if ci.get("url") else ""))
+                    _raw_url = ci.get("url", "") or ""
+                    _url = h(_raw_url + ("&mkcid=1&mkrid=711-53200-19255-0&siteid=0&campid=5338722076&toolid=10001&mkevt=1" if _raw_url else ""))
+                    _url_js = _raw_url.replace("'", "\\'")
+                    _rm_btn = (
+                        f"<button onclick=\"removeComp('{_url_js}')\" "
+                        f'title="Remove this comp from pricing data" '
+                        f'style="background:none;border:none;color:#c44;cursor:pointer;'
+                        f'font-size:.9em;padding:0 4px;line-height:1;opacity:.7" '
+                        f">✕</button>"
+                    )
                     return (
                         f'<tr style="border-bottom:1px solid #1a1a1a;opacity:{_row_op}">'
-                        f'<td style="padding:4px 8px 4px 0;font-size:.8em;color:#ccc;max-width:320px;word-break:break-word">'
+                        f'<td style="padding:4px 8px 4px 0;font-size:.8em;color:#ccc;max-width:300px;word-break:break-word">'
+                        f"{_rm_btn}"
                         f'<a href="{_url}" target="_blank" rel="noopener noreferrer" '
                         f'style="color:#7af;text-decoration:{_title_dec}">'
-                        f'{h(ci.get("title",""))[:80]}{"…" if len(ci.get("title",""))>80 else ""}</a>'
-                        f'{_tag}</td>'
+                        f"{h(ci.get('title', ''))[:80]}{'…' if len(ci.get('title', '')) > 80 else ''}</a>"
+                        f"{_tag}</td>"
                         f'<td style="padding:4px 6px;font-size:.8em;color:#7a7;white-space:nowrap">'
-                        f'{h(str(ci.get("condition",""))[:30])}</td>'
+                        f"{h(str(ci.get('condition', ''))[:30])}</td>"
                         f'<td style="padding:4px 0 4px 6px;font-size:.85em;color:#afa;white-space:nowrap;'
-                        f'font-weight:600">${ci.get("price",0):.2f}</td>'
-                        f'</tr>'
+                        f'font-weight:600">${ci.get("price", 0):.2f}</td>'
+                        f"</tr>"
                     )
+
                 _comp_rows = "".join(_ci_row(ci) for ci in _comp_items)
                 _n_active = sum(1 for ci in _comp_items if not ci.get("outlier") and not ci.get("llm_dropped"))
                 _comp_detail = (
@@ -4064,32 +4049,30 @@ def _render_item_detail_html(
                     f'<summary style="cursor:pointer;font-size:.78em;color:#4a8ade;'
                     f'list-style:none;user-select:none">▶ Show {len(_comp_items)} comp listings ({_n_active} used for price)</summary>'
                     f'<table style="width:100%;border-collapse:collapse;margin-top:6px">'
-                    f'<thead><tr>'
+                    f"<thead><tr>"
                     f'<th style="font-size:.73em;color:#556;text-align:left;padding:2px 8px 4px 0;'
                     f'border-bottom:1px solid #333">Title</th>'
                     f'<th style="font-size:.73em;color:#556;text-align:left;padding:2px 6px;'
                     f'border-bottom:1px solid #333">Condition</th>'
                     f'<th style="font-size:.73em;color:#556;text-align:left;padding:2px 0 4px 6px;'
                     f'border-bottom:1px solid #333">Price</th>'
-                    f'</tr></thead>'
-                    f'<tbody>{_comp_rows}</tbody>'
-                    f'</table>'
-                    f'</details>'
+                    f"</tr></thead>"
+                    f"<tbody>{_comp_rows}</tbody>"
+                    f"</table>"
+                    f"<script>"
+                    f"function removeComp(url){{"
+                    f'  if(!confirm("Remove this comp from pricing data?"))return;'
+                    f'  fetch("/api/items/{sku}/remove-comp",{{method:"POST",'
+                    f'    headers:{{"Content-Type":"application/json","Authorization":"Bearer "+window._apiKey}},'
+                    f"    body:JSON.stringify({{url:url}})}}"
+                    f'  ).then(r=>r.json()).then(d=>{{if(d.ok)location.reload();else alert("Error: "+JSON.stringify(d));}});'
+                    f"}}"
+                    f"</script>"
+                    f"</details>"
                 )
             else:
-                _comp_detail = (
-                    '<div style="font-size:.75em;color:#445;margin-top:4px">'
-                    'Individual comp listings not saved — click Re-price to capture them.'
-                    '</div>'
-                )
-            _price_comps_bar = (
-                '<div style="margin:6px 0 2px">'
-                '<span style="font-size:.78em;color:#778">Market comps</span>'
-                + _cnt_badge + _src_lbl +
-                '</div>'
-                + _bar
-                + _comp_detail
-            )
+                _comp_detail = '<div style="font-size:.75em;color:#445;margin-top:4px">Individual comp listings not saved — click Re-price to capture them.</div>'
+            _price_comps_bar = '<div style="margin:6px 0 2px"><span style="font-size:.78em;color:#778">Market comps</span>' + _cnt_badge + _src_lbl + "</div>" + _bar + _comp_detail
         except (TypeError, ValueError):
             _price_comps_bar = ""
     else:
@@ -4097,42 +4080,46 @@ def _render_item_detail_html(
 
     # ── Three-layer aspect data: live (eBay) / proposed (pipeline) / edits (operator) ──
     import json as _json
-    _ia   = item.get("item_attributes") or {}        # operator edits — highest priority
-    _spec = (dl or {}).get("item_specifics") or {}   # live on eBay — baseline
-    _rev  = item.get("revision_draft") or {}
+
+    _ia = item.get("item_attributes") or {}  # operator edits — highest priority
+    _spec = (dl or {}).get("item_specifics") or {}  # live on eBay — baseline
+    _rev = item.get("revision_draft") or {}
     _rev_delta = _rev.get("delta") or {}
     _proposed_aspects = _rev_delta.get("item_specifics") or {}
     _has_proposals = bool(_rev_delta)
 
-    _cat_id_for_aspects = str(
-        (dl or {}).get("category_id") or item.get("ebay_category_id") or ""
+    _cat_id_for_aspects = str((dl or {}).get("category_id") or item.get("ebay_category_id") or "")
+    _aspects_prefill_json = _json.dumps(_ia)  # operator edits only
+    _live_aspects_json = _json.dumps(_spec)  # live eBay values
+    _proposed_aspects_json = _json.dumps(_proposed_aspects)  # pipeline proposals
+    _aspects_cat_json = _json.dumps(_cat_id_for_aspects)
+    _proposals_meta_json = _json.dumps(
+        {
+            "title": _rev_delta.get("title") or "",
+            "description": _rev_delta.get("description") or "",
+            "by": _rev.get("by") or "pipeline",
+            "at": (_rev.get("at") or "")[:19],
+            "count": len(_rev_delta),
+        }
     )
-    _aspects_prefill_json   = _json.dumps(_ia)                # operator edits only
-    _live_aspects_json      = _json.dumps(_spec)              # live eBay values
-    _proposed_aspects_json  = _json.dumps(_proposed_aspects)  # pipeline proposals
-    _aspects_cat_json       = _json.dumps(_cat_id_for_aspects)
-    _proposals_meta_json    = _json.dumps({
-        "title":       _rev_delta.get("title") or "",
-        "description": _rev_delta.get("description") or "",
-        "by":          _rev.get("by") or "pipeline",
-        "at":          (_rev.get("at") or "")[:19],
-        "count":       len(_rev_delta),
-    })
 
     # ── eBay Draft editor section (Phase 1B) ───────────────────────────────────
     _dl_title_val = h((dl or {}).get("title") or "")
     _dl_price_val = str((dl or {}).get("price") or "")
-    _dl_cond_val  = h((dl or {}).get("condition_enum") or (dl or {}).get("condition") or "")
-    _dl_cond_lbl  = h((dl or {}).get("condition_label") or (dl or {}).get("condition_description") or "")
-    _dl_desc_val  = h((dl or {}).get("description") or item.get("description") or "")
-    _dl_cat_name  = h(str((dl or {}).get("category_name") or ""))
-    _dl_cat_id_v  = h(str((dl or {}).get("category_id") or ""))
-    _dl_ship_val  = str((dl or {}).get("shipping_profile") or
-                        (dl or {}).get("fulfillment_policy_id") or "")
+    _dl_cond_val = h((dl or {}).get("condition_enum") or (dl or {}).get("condition") or "")
+    _dl_cond_lbl = h((dl or {}).get("condition_label") or (dl or {}).get("condition_description") or "")
+    _dl_desc_val = h((dl or {}).get("description") or item.get("description") or "")
+    _dl_cat_name = h(str((dl or {}).get("category_name") or ""))
+    _dl_cat_id_v = h(str((dl or {}).get("category_id") or ""))
+    _dl_ship_val = str((dl or {}).get("shipping_profile") or (dl or {}).get("fulfillment_policy_id") or "")
     _dl_store_cat_id = str((dl or {}).get("store_category_id") or "")
+    _dl_store_cat2_id = str((dl or {}).get("secondary_store_category_id") or "")
+    _dl_cat2_id_v = h(str((dl or {}).get("secondary_category_id") or ""))
+    _dl_cat2_name = h(str((dl or {}).get("secondary_category_name") or ""))
     _store_cat_opts_html = '<option value="">— not set —</option>'
     try:
         import json as _json_sc
+
         _cg_path_sc = _cfg.get("category_groups_path")
         if _cg_path_sc and _cg_path_sc.exists():
             _cg_sc = _json_sc.loads(_cg_path_sc.read_text())
@@ -4145,49 +4132,57 @@ def _render_item_detail_html(
                     _seen_sc.add(_si)
                     _sc_list.append((_sn, _si))
             _sc_list.sort(key=lambda x: x[0])
-            _store_cat_opts_html += ''.join(
-                f'<option value="{_si}" data-name="{h(_sn)}"'
-                f'{" selected" if _si == _dl_store_cat_id else ""}>{h(_sn)} ({_si})</option>'
-                for _sn, _si in _sc_list
-            )
+            _store_cat_opts_html += "".join(f'<option value="{_si}" data-name="{h(_sn)}"{" selected" if _si == _dl_store_cat_id else ""}>{h(_sn)} ({_si})</option>' for _sn, _si in _sc_list)
+    except Exception:
+        pass
+    # Build second store cat options (same list, different selected value)
+    _store_cat2_opts_html = _store_cat_opts_html.replace(
+        f'value="{_dl_store_cat_id}" data-name=',
+        f'value="{_dl_store_cat_id}" data-name=',  # no-op placeholder
+    )
+    # Rebuild with secondary selection
+    _store_cat2_opts_html = '<option value="">— not set —</option>'
+    try:
+        _store_cat2_opts_html += "".join(f'<option value="{_si}" data-name="{h(_sn)}"{" selected" if _si == _dl_store_cat2_id else ""}>{h(_sn)} ({_si})</option>' for _sn, _si in _sc_list)
     except Exception:
         pass
     import json as _json2
-    _cat_root = _cfg.get('catalog_root')
-    _pol_cache = (_cat_root / 'ebay-fulfillment-policies.json') if _cat_root else None
+
+    _cat_root = _cfg.get("catalog_root")
+    _pol_cache = (_cat_root / "ebay-fulfillment-policies.json") if _cat_root else None
     _fulfillment_opts = {}
-    _return_label = 'Free Returns'
+    _return_label = "Free Returns"
     if _pol_cache and _pol_cache.exists():
         try:
             _pd = _json2.loads(_pol_cache.read_text())
-            _fulfillment_opts = _pd.get('fulfillment', {})
-            _ret = _pd.get('return', {})
-            _return_label = next(iter(_ret.values()), 'Free Returns') if _ret else 'Free Returns'
+            _fulfillment_opts = _pd.get("fulfillment", {})
+            _ret = _pd.get("return", {})
+            _return_label = next(iter(_ret.values()), "Free Returns") if _ret else "Free Returns"
         except Exception:
             pass
-    _ship_opts_html = ''.join(
-        f'<option value="{pid}"{" selected" if pid == _dl_ship_val else ""}>{h(name)} ({pid[:8]}…)</option>'
-        for pid, name in sorted(_fulfillment_opts.items(), key=lambda kv: kv[1])
+    _ship_opts_html = "".join(
+        f'<option value="{pid}"{" selected" if pid == _dl_ship_val else ""}>{h(name)} ({pid[:8]}…)</option>' for pid, name in sorted(_fulfillment_opts.items(), key=lambda kv: kv[1])
     )
     # Build proposals banner if pipeline has proposed changes
     # Actions section — context-aware based on eBay status
     import json as _json
+
     _ak_json2 = _json.dumps(api_key)
     _sku_json2 = _json.dumps(sku)
     _listing_id_json = _json.dumps(listing_id)
     _is_active_js = "true" if is_active else "false"
 
     # Pipeline error (written by ebay_stage/ebay_publish on eBay rejection)
-    _pe = item.get('pipeline_error')
-    if _pe and isinstance(_pe, dict) and _pe.get('error'):
-        _pe_when = (_pe.get('at') or '')[:19].replace('T', ' ')
-        _pe_worker = _pe.get('worker', '?')
-        _pe_raw_js = _json.dumps(_pe.get('raw', ''))
+    _pe = item.get("pipeline_error")
+    if _pe and isinstance(_pe, dict) and _pe.get("error"):
+        _pe_when = (_pe.get("at") or "")[:19].replace("T", " ")
+        _pe_worker = _pe.get("worker", "?")
+        _pe_raw_js = _json.dumps(_pe.get("raw", ""))
         _pipeline_error_html = (
             f'<div id="pipeline-error-box" style="margin-bottom:12px;padding:10px 14px;'
             f'background:#1a0505;border:1px solid #844;border-radius:4px;font-size:.82em;color:#e88">'
             f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">'
-            f'<strong>eBay rejected {_pe_worker}</strong>'
+            f"<strong>eBay rejected {_pe_worker}</strong>"
             f'<span style="color:#666;font-size:.85em">{_pe_when} UTC</span></div>'
             f'<div style="color:#f99;margin-bottom:6px">{h(_pe["error"])}</div>'
             f'<div style="display:flex;gap:8px;flex-wrap:wrap">'
@@ -4197,11 +4192,11 @@ def _render_item_detail_html(
             f'onclick="clearPipelineError()">Clear error</button></div>'
             f'<pre id="pipeline-error-raw" style="display:none;margin-top:8px;font-size:.75em;'
             f'color:#a77;white-space:pre-wrap;word-break:break-all;max-height:160px;overflow:auto">'
-            f'</pre></div>'
-            f'<script>var _PE_RAW={_pe_raw_js};</script>'
+            f"</pre></div>"
+            f"<script>var _PE_RAW={_pe_raw_js};</script>"
         )
     else:
-        _pipeline_error_html = ''
+        _pipeline_error_html = ""
 
     _is_published = offer_status.upper() == "PUBLISHED"
     _is_unpublished_offer = offer_status.upper() == "UNPUBLISHED"
@@ -4216,10 +4211,8 @@ def _render_item_detail_html(
             color, bg, bl = "#aa0", "#2a2a0a", "#aa0"
         else:
             color, bg, bl = "#445", "#111", "#333"
-        return (
-            f'<span style="padding:4px 10px;background:{bg};border:1px solid {bl};'
-            f'border-radius:4px;font-size:.78em;color:{color};white-space:nowrap">{label}</span>'
-        )
+        return f'<span style="padding:4px 10px;background:{bg};border:1px solid {bl};border-radius:4px;font-size:.78em;color:{color};white-space:nowrap">{label}</span>'
+
     _pipe_arrow = '<span style="color:#334;padding:0 4px;font-size:.8em">→</span>'
     _pipeline_bar = (
         '<div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px;'
@@ -4231,7 +4224,7 @@ def _render_item_detail_html(
         + _pipe_step("Approved", is_ready, _has_offer and not is_ready and not is_active)
         + _pipe_arrow
         + _pipe_step("Live", is_active)
-        + '</div>'
+        + "</div>"
     )
 
     # Publish gate — actions depend on pipeline state
@@ -4244,78 +4237,62 @@ def _render_item_detail_html(
         _gate_html = (
             '<div style="margin-bottom:12px;padding:8px 12px;background:#0d1a0d;'
             'border:1px solid #464;border-radius:4px;font-size:.82em;color:#8c8">'
-            '✓ Listing is live. <strong>Update Listing</strong> pushes draft changes to eBay without '
-            'ending or relisting — preserving listing age and search ranking. '
-            'Edit aspects → Re-draft → Update Listing. '
-            'Only End Listing if you\'re pulling this item entirely.</div>'
-            + '<div class="act-row">'
-            + '<button class="act-btn act-publish" '
-              'onclick="triggerAction(\'ebay_update\',\'Push current draft to the live listing?'
-              '\\nThis updates title, aspects, and description in place without ending the listing.\')"'
-              '>Update Listing</button>'
-            + (
-                '<button class="act-btn" onclick="triggerAction(\'sync_from_ebay\')"'
-                ' title="Fetch current price and status from eBay">Sync from eBay</button>'
-                if listing_id else ""
-            )
+            "✓ Listing is live. <strong>Update Listing</strong> pushes draft changes to eBay without "
+            "ending or relisting — preserving listing age and search ranking. "
+            "Edit aspects → Re-draft → Update Listing. "
+            "Only End Listing if you're pulling this item entirely.</div>" + '<div class="act-row">' + '<button class="act-btn act-publish" '
+            "onclick=\"triggerAction('ebay_update','Push current draft to the live listing?"
+            "\\nThis updates title, aspects, and description in place without ending the listing.')\""
+            ">Update Listing</button>"
+            + ('<button class="act-btn" onclick="triggerAction(\'sync_from_ebay\')" title="Fetch current price and status from eBay">Sync from eBay</button>' if listing_id else "")
             + '<button class="act-btn act-warn" style="margin-left:auto" '
-              'onclick="triggerAction(\'ebay_end_listing\','
-              '\'End this listing on eBay? This cannot be undone.\')">End Listing</button>'
-            + '</div>'
+            "onclick=\"triggerAction('ebay_end_listing',"
+            "'End this listing on eBay? This cannot be undone.')\">End Listing</button>" + "</div>"
         )
     elif _is_unpublished_offer:
         # Staged but not yet approved: show approve + publish now
         _ready_note = (
             '<div style="margin-bottom:12px;padding:8px 12px;background:#1a2a1a;'
             'border:1px solid #4a4;border-radius:4px;font-size:.82em;color:#6c6">'
-            '✓ Staged (UNPUBLISHED). Approve to list at next dole cycle, or Publish Now to go live immediately.</div>'
-            if not is_ready else
-            '<div style="margin-bottom:12px;padding:8px 12px;background:#1a2a1a;'
+            "✓ Staged (UNPUBLISHED). Approve to list at next dole cycle, or Publish Now to go live immediately.</div>"
+            if not is_ready
+            else '<div style="margin-bottom:12px;padding:8px 12px;background:#1a2a1a;'
             'border:1px solid #4a4;border-radius:4px;font-size:.82em;color:#6c6">'
-            '✓ Approved — will list at next dole cycle. Click Publish Now to go live immediately, '
-            'or Withdraw Approval to hold.</div>'
+            "✓ Approved — will list at next dole cycle. Click Publish Now to go live immediately, "
+            "or Withdraw Approval to hold.</div>"
         )
         _approve_btn = (
-            '<button class="act-btn act-publish" onclick="approveForListing()">'
-            'Approve for Listing</button>'
-            if not is_ready else
-            '<button class="act-btn" onclick="triggerAction(\'unset_ready\','
+            '<button class="act-btn act-publish" onclick="approveForListing()">Approve for Listing</button>'
+            if not is_ready
+            else '<button class="act-btn" onclick="triggerAction(\'unset_ready\','
             '\'Remove this item from the ready queue?\')" style="background:#1a1a2a;border-color:#44a;color:#88c">'
-            'Withdraw Approval</button>'
+            "Withdraw Approval</button>"
         )
         _gate_html = (
-            _ready_note
-            + '<div class="act-row">'
-            + _approve_btn
-            + '<button class="act-btn act-publish" style="background:#2a1a0a;border-color:#c84" '
-              'onclick="publishNow()">Publish Now</button>'
-            + f'<button class="act-btn{_stage_cls}"{_stage_disabled} '
-              f'onclick="triggerAction(\'ebay_stage\')">{_stage_label}</button>'
-            + '</div>'
+            _ready_note + '<div class="act-row">' + _approve_btn + '<button class="act-btn act-publish" style="background:#2a1a0a;border-color:#c84" '
+            'onclick="publishNow()">Publish Now</button>' + f'<button class="act-btn{_stage_cls}"{_stage_disabled} '
+            f"onclick=\"triggerAction('ebay_stage')\">{_stage_label}</button>" + "</div>"
         )
     else:
         # Not staged yet
         _gate_html = (
             '<div style="margin-bottom:12px;padding:8px 12px;background:#111;'
             'border:1px solid #333;border-radius:4px;font-size:.82em;color:#667">'
-            + ('Draft ready — Stage to create an eBay offer, then Approve to list.'
-               if _has_draft else
-               'No draft yet — run Re-draft to prepare the eBay listing data.')
-            + '</div>'
+            + ("Draft ready — Stage to create an eBay offer, then Approve to list." if _has_draft else "No draft yet — run Re-draft to prepare the eBay listing data.")
+            + "</div>"
             + '<div class="act-row">'
             + f'<button class="act-btn{_stage_cls}"{_stage_disabled} '
-              f'onclick="triggerAction(\'ebay_stage\')">{_stage_label}</button>'
-            + '</div>'
+            f"onclick=\"triggerAction('ebay_stage')\">{_stage_label}</button>" + "</div>"
         )
 
     _proposals_banner = ""
     if _has_proposals:
-        _pr_by  = h(_rev.get("by") or "pipeline")
-        _pr_at  = (_rev.get("at") or "")[:19].replace("T", " ")
+        _pr_by = h(_rev.get("by") or "pipeline")
+        _pr_at = (_rev.get("at") or "")[:19].replace("T", " ")
         _pr_cnt = len(_rev_delta)
         _pr_asp = len(_proposed_aspects)
         _pr_title = _rev_delta.get("title") or ""
-        _pr_desc  = _rev_delta.get("description") or ""
+        _pr_desc = _rev_delta.get("description") or ""
         _detail_lines = []
         if _pr_asp:
             _detail_lines.append(f"{_pr_asp} aspect{'s' if _pr_asp != 1 else ''}")
@@ -4328,71 +4305,91 @@ def _render_item_detail_html(
             f'<div id="proposals-banner" style="margin-bottom:12px;padding:10px 14px;'
             f'background:#1a1a00;border:1px solid #664;border-radius:4px;font-size:.82em;color:#cc8">'
             f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">'
-            f'<strong>Pipeline proposed changes</strong>'
+            f"<strong>Pipeline proposed changes</strong>"
             f'<span style="color:#665;font-size:.85em">{_pr_by} · {_pr_at} UTC</span></div>'
             f'<div style="color:#aa8;margin-bottom:8px">{_detail_str}</div>'
             f'<div style="font-size:.75em;color:#665;margin-bottom:8px">'
-            f'Yellow highlights show proposed values. Edit any field to override. '
-            f'Accept copies proposals into your draft — review then Update Listing to push to eBay.</div>'
+            f"Yellow highlights show proposed values. Edit any field to override. "
+            f"Accept copies proposals into your draft — review then Update Listing to push to eBay.</div>"
             f'<div style="display:flex;gap:8px">'
             f'<button class="act-btn act-publish" style="font-size:.78em;padding:3px 10px;background:#1a1a00;border-color:#884" '
             f'onclick="acceptProposals()">Accept All Proposals</button>'
             f'<button class="act-btn" style="font-size:.78em;padding:3px 10px" '
             f'onclick="dismissProposals()">Dismiss</button>'
-            f'</div></div>'
+            f"</div></div>"
         )
 
     _ebay_draft_editor = (
         '<div id="dl-section" class="dsec">'
-        '<h3>Listing</h3>'
+        "<h3>Listing</h3>" + f'<div class="frow" id="dl-title">'
         # Title
-        + f'<div class="frow" id="dl-title">'
         f'<span class="fn">eBay Title</span>'
         f'<span class="fv" style="flex:1">'
         f'<input id="dl-title-input" type="text" maxlength="80" value="{_dl_title_val}" '
         f'style="width:100%;background:#1a1a1a;color:#eee;border:1px solid #444;'
         f'border-radius:4px;padding:4px 6px;font-size:.9em" '
-        f'oninput="updateCharCount(this,80,\'dl-title-count\')">' 
+        f"oninput=\"updateCharCount(this,80,'dl-title-count')\">"
         f'<span id="dl-title-count" style="font-size:.75em;color:#556;margin-left:4px">'
-        f'{len((dl or {}).get("title") or "")}/80</span>'
-        f'</span></div>'
+        f"{len((dl or {}).get('title') or '')}/80</span>"
+        f"</span></div>"
         # Category — search to change
         f'<div class="frow" id="dl-category">'
         f'<span class="fn">Category</span>'
         f'<span class="fv" style="flex:1;position:relative">'
         f'<div id="dl-cat-breadcrumb" style="font-size:.82em;color:#aaa;margin-bottom:3px">'
-        f'{_dl_cat_id_v}{"&nbsp;·&nbsp;" + _dl_cat_name if _dl_cat_name else ""}'
-        f'</div>'
+        f"{_dl_cat_id_v}{'&nbsp;·&nbsp;' + _dl_cat_name if _dl_cat_name else ''}"
+        f"</div>"
         f'<input id="dl-cat-search" type="text" placeholder="Search to change category…" '
         f'autocomplete="off" '
         f'style="width:100%;background:#1a1a1a;color:#eee;border:1px solid #444;'
         f'border-radius:4px;padding:3px 6px;font-size:.88em">'
         f'<input type="hidden" id="dl-cat-id" value="{_dl_cat_id_v}">'
         f'<div id="dl-cat-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;'
-        f'background:#1e1e1e;border:1px solid #555;border-radius:4px;z-index:50;'
+        f"background:#1e1e1e;border:1px solid #555;border-radius:4px;z-index:50;"
         f'max-height:220px;overflow-y:auto"></div>'
         f'<span id="category-group-hint" style="font-size:.72em;color:#445;display:block;margin-top:2px"></span>'
-        f'</span></div>'
+        f"</span></div>"
+        # Secondary eBay category
+        f'<div class="frow" id="dl-category2">'
+        f'<span class="fn">2nd Category</span>'
+        f'<span class="fv" style="flex:1;position:relative">'
+        f'<div id="dl-cat2-breadcrumb" style="font-size:.82em;color:#aaa;margin-bottom:3px">'
+        f"{_dl_cat2_id_v}{'&nbsp;·&nbsp;' + _dl_cat2_name if _dl_cat2_name else ''}"
+        f"</div>"
+        f'<input id="dl-cat2-search" type="text" placeholder="Search to set 2nd eBay category…" '
+        f'autocomplete="off" '
+        f'style="width:100%;background:#1a1a1a;color:#eee;border:1px solid #444;'
+        f'border-radius:4px;padding:3px 6px;font-size:.88em">'
+        f'<input type="hidden" id="dl-cat2-id" value="{_dl_cat2_id_v}">'
+        f'<div id="dl-cat2-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;'
+        f"background:#1e1e1e;border:1px solid #555;border-radius:4px;z-index:50;"
+        f'max-height:220px;overflow-y:auto"></div>'
+        f"</span></div>"
         # Store category — select from known groups
         f'<div class="frow" id="dl-store-category">'
-        f'<span class="fn">Store category</span>'
+        f'<span class="fn">Store cat 1</span>'
         f'<span class="fv">'
         f'<select id="dl-store-cat-select" '
-        f'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px;font-size:.88em">'
-        + _store_cat_opts_html +
-        '</select>'
+        f'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px;font-size:.88em">' + _store_cat_opts_html + "</select>"
         '<span id="store-cat-hint" style="font-size:.72em;color:#445;margin-left:8px"></span>'
-        '</span></div>'
+        "</span></div>"
+        # Secondary store category
+        '<div class="frow" id="dl-store-category2">'
+        '<span class="fn">Store cat 2</span>'
+        '<span class="fv">'
+        '<select id="dl-store-cat2-select" '
+        'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px;font-size:.88em">' + _store_cat2_opts_html + "</select>"
+        "</span></div>"
         # Condition
         '<div class="frow" id="dl-condition">'
         '<span class="fn">Condition</span>'
         '<span class="fv">'
         '<select id="dl-condition-select" '
         'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px">'
-        + _build_condition_options((dl or {}).get("condition_enum") or (dl or {}).get("condition") or "") +
-        f'</select>'
+        + _build_condition_options((dl or {}).get("condition_enum") or (dl or {}).get("condition") or "")
+        + f"</select>"
         f'<span id="condition-policy-note" style="font-size:.72em;color:#445;margin-left:8px"></span>'
-        f'</span></div>'
+        f"</span></div>"
         # Price with comps bar
         f'<div class="frow" id="dl-price">'
         f'<span class="fn">Price</span>'
@@ -4400,8 +4397,8 @@ def _render_item_detail_html(
         f'<input id="dl-price-input" type="number" step="0.01" min="0" value="{h(_dl_price_val)}" '
         f'style="width:120px;background:#1a1a1a;color:#eee;border:1px solid #444;'
         f'border-radius:4px;padding:4px 6px;font-size:.9em">'
-        f'{_price_comps_bar}'
-        f'</span></div>'
+        f"{_price_comps_bar}"
+        f"</span></div>"
         # Search terms — own frow, never nested inside a span
         f'<div class="frow" id="dl-search-terms">'
         f'<span class="fn">Search terms</span>'
@@ -4410,19 +4407,43 @@ def _render_item_detail_html(
         f'placeholder="e.g. vintage acetone bottle" '
         f'style="width:100%;background:#1a1a1a;color:#eee;border:1px solid #444;'
         f'border-radius:4px;padding:4px 6px;font-size:.88em" '
-        f'onkeydown="if(event.key===\'Enter\')saveAndReprice()">'
-        f'<div style="font-size:.72em;color:#556;margin-top:2px">'
-        f'Buyer search query for stage-0 comp pricing — '
-        f'<a href="#" onclick="saveAndReprice();return false" style="color:#4a8ade">'
-        f'Save &amp; Re-price</a>'
-        f' · <a href="#" onclick="(function(){{'
-        f'  var t=document.getElementById(\'search-terms-input\');'
-        f'  var q=t?t.value.trim():\'\';'
-        f'  if(q)window.open(\'https://www.ebay.com/sch/i.html?_nkw=\'+encodeURIComponent(q)+\'&LH_Complete=1&LH_Sold=1\',\'_blank\');'
-        f'}})();return false" style="color:#4a8ade">eBay sold ↗</a>'
-        f' <span id="reprice-msg" style="color:#4a4"></span>'
-        f'</div>'
-        f'</span></div>'
+        f"onkeydown=\"if(event.key==='Enter')saveAndReprice()\">"
+        f'<div style="margin-top:5px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">'
+        f'<a href="#" onclick="saveAndReprice();return false" '
+        f'style="display:inline-block;padding:3px 10px;border-radius:4px;font-size:.8em;'
+        f"font-weight:600;background:#1e3a5f;color:#7af;border:1px solid #2a5080;"
+        f'text-decoration:none">'
+        f"Save &amp; Re-price</a>"
+        f'<a href="#" onclick="(function(){{'
+        f"  var t=document.getElementById('search-terms-input');"
+        f"  var q=t?t.value.trim():'';"
+        f"  if(q)window.open('https://www.ebay.com/sch/i.html?_nkw='+encodeURIComponent(q)+'&LH_Complete=1&LH_Sold=1','_blank');"
+        f'}})();return false" '
+        f'style="display:inline-block;padding:3px 10px;border-radius:4px;font-size:.8em;'
+        f"font-weight:600;background:#1a3a1a;color:#4d4;border:1px solid #2a5a2a;"
+        f'text-decoration:none">'
+        f"eBay Sold ↗</a>"
+        f'<a href="#" onclick="(function(){{'
+        f"  var t=document.getElementById('search-terms-input');"
+        f"  var q=t?t.value.trim():'';"
+        f"  if(q)window.open('https://www.ebay.com/sch/i.html?_nkw='+encodeURIComponent(q),'_blank');"
+        f'}})();return false" '
+        f'style="display:inline-block;padding:3px 10px;border-radius:4px;font-size:.8em;'
+        f"font-weight:600;background:#1a1a2a;color:#88c;border:1px solid #2a2a4a;"
+        f'text-decoration:none">'
+        f"eBay Active ↗</a>"
+        f'<a href="#" onclick="(function(){{'
+        f"  var t=document.getElementById('search-terms-input');"
+        f"  var q=t?t.value.trim():'';"
+        f"  if(q)window.open('https://www.ebay.com/sh/research?marketplace=EBAY-US&keywords='+encodeURIComponent(q),'_blank');"
+        f'}})();return false" '
+        f'style="display:inline-block;padding:3px 10px;border-radius:4px;font-size:.8em;'
+        f"font-weight:600;background:#2a1a0a;color:#c84;border:1px solid #4a2a0a;"
+        f'text-decoration:none">'
+        f"Terapeak ↗</a>"
+        f'<span id="reprice-msg" style="color:#4a4;font-size:.8em"></span>'
+        f"</div>"
+        f"</span></div>"
         # Description
         f'<div class="frow" id="dl-description">'
         f'<span class="fn">Description</span>'
@@ -4430,8 +4451,8 @@ def _render_item_detail_html(
         f'<textarea id="dl-desc-input" rows="3" '
         f'style="width:100%;background:#1a1a1a;color:#eee;border:1px solid #444;'
         f'border-radius:4px;padding:4px 6px;font-size:.85em;resize:vertical">'
-        f'{_dl_desc_val}</textarea>'
-        f'</span></div>'
+        f"{_dl_desc_val}</textarea>"
+        f"</span></div>"
         # Shipping
         f'<div class="frow" id="dl-shipping">'
         f'<span class="fn">Fulfillment</span>'
@@ -4439,53 +4460,46 @@ def _render_item_detail_html(
         f'<select id="dl-ship-input" '
         f'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px;font-size:.85em">'
         f'<option value="">— auto-resolved —</option>'
-        f'{_ship_opts_html}'
-        f'</select>'
+        f"{_ship_opts_html}"
+        f"</select>"
         f'<span id="dl-ship-hint" style="font-size:.72em;color:#445;margin-left:8px"></span>'
-        f'</span></div>'
+        f"</span></div>"
         f'<div class="frow" id="dl-returns">'
         f'<span class="fn">Returns</span>'
         f'<span class="fv" style="font-size:.85em;color:#aaa">{h(_return_label)}</span>'
-        f'</div>'
+        f"</div>"
         # Aspects
         f'<div id="dl-aspects" style="margin-top:10px">'
         f'<div style="font-size:.83em;color:#aaa;font-weight:600;margin-bottom:6px">'
-        f'Item Specifics / Aspects</div>'
+        f"Item Specifics / Aspects</div>"
         f'<div id="aspects-loading" style="color:#556;font-size:.82em">Loading aspects…</div>'
         f'<div id="aspects-form"></div>'
-        f'</div>'
+        f"</div>"
         # Save button
         f'<div style="margin-top:12px;display:flex;gap:8px;align-items:center">'
         f'<button class="act-btn" onclick="saveEbayDraft()" '
         f'style="background:#1a3a5a">Save Draft</button>'
         f'<span id="dl-save-msg" style="font-size:.82em;color:#4a4"></span>'
-        f'</div>'
+        f"</div>"
         # ── Publish to eBay — integrated into the eBay section ──
-        '<hr style="border:none;border-top:1px solid #2a2a2a;margin:14px 0">'
-        + _pipeline_error_html
-        + _pipeline_bar
-        + _gate_html
-        + f'</div>'
+        '<hr style="border:none;border-top:1px solid #2a2a2a;margin:14px 0">' + _pipeline_error_html + _pipeline_bar + _gate_html + f"</div>"
         # hidden data for JS
-        f'<script>'
-        f'window._DL_CAT_ID = {_aspects_cat_json};'
-        f'window._DL_PREFILL = {_aspects_prefill_json};'
-        f'window._LIVE_ASPECTS = {_live_aspects_json};'
-        f'window._PROPOSED_ASPECTS = {_proposed_aspects_json};'
-        f'window._DL_PROPOSALS = {_proposals_meta_json};'
-        f'</script>'
+        f"<script>"
+        f"window._DL_CAT_ID = {_aspects_cat_json};"
+        f"window._DL_PREFILL = {_aspects_prefill_json};"
+        f"window._LIVE_ASPECTS = {_live_aspects_json};"
+        f"window._PROPOSED_ASPECTS = {_proposed_aspects_json};"
+        f"window._DL_PROPOSALS = {_proposals_meta_json};"
+        f"</script>"
     )
 
     _ebay_status_html = (
         f'<details class="dsec" style="padding:0">'
         f'<summary style="padding:8px 10px;cursor:pointer;list-style:none;font-size:.78em;'
-        f'text-transform:uppercase;letter-spacing:.06em;color:#888;display:flex;'
+        f"text-transform:uppercase;letter-spacing:.06em;color:#888;display:flex;"
         f'align-items:center;gap:6px">eBay Status {listing_badge}{offer_badge}'
         f'<span style="margin-left:auto;color:#444;font-size:.9em">▸</span></summary>'
-        f'<div style="padding:0 10px 10px">'
-        + listing_section
-        + offer_section
-        + '</div></details>'
+        f'<div style="padding:0 10px 10px">' + listing_section + offer_section + "</div></details>"
     )
 
     _left_log_html = (
@@ -4497,7 +4511,7 @@ def _render_item_detail_html(
         + reprice_schedule_html
         + product_lookup_html
         + identification_history_html
-        + '</div>'
+        + "</div>"
     )
 
     fields_html = (
@@ -4531,25 +4545,29 @@ def _render_item_detail_html(
         + (fr("UPC", h(str(item.get("upc", "") or ""))) if item.get("upc") else "")
         + (fr("ISBN", h(str(item.get("isbn", "") or ""))) if item.get("isbn") else "")
         + (fr("Part number", h(str(item.get("part_number", "") or ""))) if item.get("part_number") else "")
-        + (lambda ia, isp: (
-            '<div style="margin-top:6px;border-top:1px solid #222;padding-top:6px">'
-            '<div style="font-size:.75em;color:#556;margin-bottom:4px">Item specifics (edit in eBay Draft Editor below)</div>'
-            + "".join(
-                f'<div class="frow"><span class="fn" style="font-size:.82em">{h(k)}</span>'
-                f'<span class="fv" style="font-size:.82em">{h(str(v))}</span></div>'
-                for k, v in sorted({**isp, **ia}.items()) if v
-            ) + '</div>'
-        ) if {**isp, **ia} else (
-            '<div style="margin-top:6px;border-top:1px solid #222;padding-top:6px">'
-            '<span style="font-size:.75em;color:#333">No item specifics yet — fill in eBay Draft Editor below</span>'
-            '</div>'
-        ))(
-            item.get("item_attributes") or {},
-            (dl or {}).get("item_specifics") or {}
-        )
+        + (
+            lambda ia, isp: (
+                (
+                    '<div style="margin-top:6px;border-top:1px solid #222;padding-top:6px">'
+                    '<div style="font-size:.75em;color:#556;margin-bottom:4px">Item specifics (edit in eBay Draft Editor below)</div>'
+                    + "".join(
+                        f'<div class="frow"><span class="fn" style="font-size:.82em">{h(k)}</span><span class="fv" style="font-size:.82em">{h(str(v))}</span></div>'
+                        for k, v in sorted({**isp, **ia}.items())
+                        if v
+                    )
+                    + "</div>"
+                )
+                if {**isp, **ia}
+                else (
+                    '<div style="margin-top:6px;border-top:1px solid #222;padding-top:6px">'
+                    '<span style="font-size:.75em;color:#333">No item specifics yet — fill in eBay Draft Editor below</span>'
+                    "</div>"
+                )
+            )
+        )(item.get("item_attributes") or {}, (dl or {}).get("item_specifics") or {})
         + "</div>"
         # — Pipeline proposals banner (between inventory record and eBay sections)
-        + (_proposals_banner if _has_proposals else '')
+        + (_proposals_banner if _has_proposals else "")
         # — Consolidated eBay Status (listing + submission)
         + _ebay_status_html
         # — Phase 1B: eBay Draft editor
@@ -4559,202 +4577,202 @@ def _render_item_detail_html(
 
     actions_html = (
         '<div class="dsec danger-zone">'
-        '<h3>Pipeline Tools</h3>'
+        "<h3>Pipeline Tools</h3>"
         '<div class="act-row">'
         '<button class="act-btn" onclick="triggerAction(\'ai_identify\')">Re-identify</button>'
         '<button class="act-btn" onclick="triggerAction(\'ebay_draft\')">Re-draft</button>'
         '<button class="act-btn" onclick="triggerAction(\'ebay_upload\')">Re-upload photos</button>'
         '<button class="act-btn" onclick="triggerAction(\'ebay_price\')">Re-price</button>'
-        + (
-            '<button class="act-btn" onclick="triggerAction(\'sync_from_ebay\')"'
-            ' title="Fetch current price and status from eBay">Sync from eBay</button>'
-            if listing_id else ""
-        )
-        + f'</div>'
+        + ('<button class="act-btn" onclick="triggerAction(\'sync_from_ebay\')" title="Fetch current price and status from eBay">Sync from eBay</button>' if listing_id else "")
+        + f"</div>"
         f'<div class="act-row" style="margin-top:10px">'
-        f'<button class="act-btn act-warn" onclick="triggerAction(\'archive\',\'Archive this item? It will be hidden from the catalog.\')">Archive</button>'
+        f"<button class=\"act-btn act-warn\" onclick=\"triggerAction('archive','Archive this item? It will be hidden from the catalog.')\">Archive</button>"
         f'<button class="act-btn act-delete" onclick="deleteItem()">Delete item</button>'
-        f'</div>'
-        f'</div>'
-        f'<script>'
-        f'window.TGW_API_KEY={_ak_json2};'
-        f'var _SKU={_sku_json2};'
-        f'var _LISTING_ID={_listing_id_json};'
-        f'var _IS_ACTIVE={_is_active_js};'
-        f'window._ITEM_SKU={_sku_json2};'
-        f'function triggerAction(action,confirmMsg){{'
-        f'  if(confirmMsg&&!confirm(confirmMsg))return;'
-        f'  fetch(\'/api/items/\'+_SKU+\'/action\',{{'
-        f'    method:\'POST\','
-        f'    headers:authHeaders({{\'Content-Type\':\'application/json\'}}),'
-        f'    body:JSON.stringify({{action:action}})'
-        f'  }}).then(function(r){{return r.json();}}).then(function(d){{'
-        f'    if(d.ok&&(action===\'archive\'||action===\'ebay_end_listing\')){{window.location.href=\'/form/items\';return;}}'
-        f'    if(d.ok&&(action===\'set_ready\'||action===\'unset_ready\'||action===\'ebay_publish\'||action===\'ebay_stage\'||action===\'ebay_update\')){{location.reload();return;}}'
-        f'    alert(d.ok ? \'Action queued: \'+action : \'Error: \'+(d.detail||\'failed\'));'
-        f'  }}).catch(function(e){{alert(\'Network error: \'+e);}});'
-        f'}}'
-        f'function approveForListing(){{'
-        f'  if(!confirm(\'Approve this item for listing?\\nIt will go live at the next dole cycle (up to 1 hour).\\nUse Publish Now to list immediately.\'))return;'
-        f'  triggerAction(\'set_ready\');'
-        f'}}'
-        f'function publishNow(){{'
-        f'  if(!confirm(\'Publish this item to eBay NOW?\\nIt will go live immediately at the current offer price.\'))return;'
-        f'  triggerAction(\'ebay_publish\');'
-        f'}}'
-        f'function acceptProposals(){{'
-        f'  if(!confirm(\'Accept all pipeline proposals?\\nThis copies proposed values into your draft.\'+'
-        f'\'\\nReview then click Update Listing to push to eBay.\'))return;'
-        f'  fetch(\'/api/items/\'+_SKU+\'/action\',{{method:\'POST\','
-        f'    headers:authHeaders({{\'Content-Type\':\'application/json\'}}),'
-        f'    body:JSON.stringify({{action:\'accept_proposals\'}})}}'
-        f'  ).then(function(r){{return r.json();}}).then(function(d){{'
-        f'    if(d.ok)location.reload();else alert(\'Accept failed: \'+(d.detail||\'error\'));'
-        f'  }});'
-        f'}}'
-        f'function dismissProposals(){{'
-        f'  fetch(\'/api/items/\'+_SKU+\'/action\',{{method:\'POST\','
-        f'    headers:authHeaders({{\'Content-Type\':\'application/json\'}}),'
-        f'    body:JSON.stringify({{action:\'dismiss_proposals\'}})}}'
-        f'  ).then(function(r){{return r.json();}}).then(function(d){{'
-        f'    if(d.ok)location.reload();else alert(\'Dismiss failed: \'+(d.detail||\'error\'));'
-        f'  }});'
-        f'}}'
-        f'function clearPipelineError(){{'
-        f'  fetch(\'/api/items/\'+_SKU,{{method:\'PATCH\','
-        f'    headers:authHeaders({{\'Content-Type\':\'application/json\'}}),'
-        f'    body:JSON.stringify({{fields:{{pipeline_error:null}}}})}}'
-        f'  ).then(function(r){{return r.json();}}).then(function(d){{'
-        f'    if(d.ok)location.reload();else alert(\'Clear failed: \'+(d.detail||\'error\'));'
-        f'  }});'
-        f'}}'
-        f'function toggleRawError(){{'
-        f'  var el=document.getElementById(\'pipeline-error-raw\');'
-        f'  if(!el)return;'
-        f'  if(el.style.display===\'none\'){{el.textContent=_PE_RAW;el.style.display=\'block\';}}'
-        f'  else{{el.style.display=\'none\';}}'
-        f'}}'
-        f'function deleteItem(){{'
-        f'  var msg=\'Delete \'+_SKU+\'?\\nThis marks the item as deleted.\\nThe ItemData folder is preserved.\';'
-        f'  if(_IS_ACTIVE){{msg+=\'\\n\\n⚠️ Active eBay listing (ID: \'+_LISTING_ID+\').\\nEnd Listing first, or use the End Listing button.\';}} '
-        f'  if(!confirm(msg))return;'
-        f'  fetch(\'/api/items/\'+_SKU,{{'
-        f'    method:\'DELETE\','
-        f'    headers:authHeaders()'
-        f'  }}).then(function(r){{return r.json();}}).then(function(d){{'
-        f'    if(d.ok){{window.location.href=\'/form/items\';}}'
-        f'    else{{alert(\'Delete failed: \'+(d.detail||\'unknown error\'));}}'
-        f'  }}).catch(function(e){{alert(\'Network error: \'+e);}});'
-        f'}}'
-        f'document.querySelectorAll(\'.fv.editable\').forEach(function(span){{'
-        f'  span.addEventListener(\'dblclick\',function(){{'
-        f'    var field=span.dataset.field;'
-        f'    var oldVal=span.dataset.raw!==undefined?span.dataset.raw:span.textContent;'
-        f'    if(oldVal===\'—\')oldVal=\'\';'
-        f'    var inp=document.createElement(\'input\');'
-        f'    inp.type=\'text\';inp.value=oldVal;inp.className=\'fv fv-edit\';'
-        f'    span.parentNode.replaceChild(inp,span);'
-        f'    inp.focus();inp.select();'
-        f'    function commit(){{'
-        f'      var newVal=inp.value;'
-        f'      inp.disabled=true;'
-        f'      fetch(\'/api/items/\'+_SKU,{{'
-        f'        method:\'PATCH\','
-        f'        headers:authHeaders({{\'Content-Type\':\'application/json\'}}),'
-        f'        body:JSON.stringify({{fields:{{[field]:newVal}}}})'
-        f'      }}).then(function(r){{return r.json();}}).then(function(d){{'
-        f'        if(d.ok){{'
-        f'          span.textContent=newVal||\'—\';'
-        f'          span.dataset.raw=newVal;'
-        f'          inp.parentNode.replaceChild(span,inp);'
-        f'          span.classList.add(\'fv-saved\');'
-        f'          setTimeout(function(){{span.classList.remove(\'fv-saved\');}},800);'
-        f'        }}else{{'
-        f'          alert(\'Save failed: \'+(d.detail||\'error\'));'
-        f'          inp.parentNode.replaceChild(span,inp);'
-        f'        }}'
-        f'      }}).catch(function(e){{'
-        f'        alert(\'Network error: \'+e);'
-        f'        inp.parentNode.replaceChild(span,inp);'
-        f'      }});'
-        f'    }}'
-        f'    function cancel(){{inp.parentNode.replaceChild(span,inp);}}'
-        f'    inp.addEventListener(\'keydown\',function(e){{'
-        f'      if(e.key===\'Enter\'){{e.preventDefault();commit();}}'
-        f'      if(e.key===\'Escape\')cancel();'
-        f'    }});'
-        f'    inp.addEventListener(\'blur\',function(){{if(!inp.disabled)commit();}});'
-        f'  }});'
-        f'}});'
+        f"</div>"
+        f"</div>"
+        f"<script>"
+        f"window.TGW_API_KEY={_ak_json2};"
+        f"var _SKU={_sku_json2};"
+        f"var _LISTING_ID={_listing_id_json};"
+        f"var _IS_ACTIVE={_is_active_js};"
+        f"window._ITEM_SKU={_sku_json2};"
+        f"function triggerAction(action,confirmMsg){{"
+        f"  if(confirmMsg&&!confirm(confirmMsg))return;"
+        f"  fetch('/api/items/'+_SKU+'/action',{{"
+        f"    method:'POST',"
+        f"    headers:authHeaders({{'Content-Type':'application/json'}}),"
+        f"    body:JSON.stringify({{action:action}})"
+        f"  }}).then(function(r){{return r.json();}}).then(function(d){{"
+        f"    if(d.ok&&(action==='archive'||action==='ebay_end_listing')){{window.location.href='/form/items';return;}}"
+        f"    if(d.ok&&(action==='set_ready'||action==='unset_ready'||action==='ebay_publish'||action==='ebay_stage'||action==='ebay_update')){{location.reload();return;}}"
+        f"    alert(d.ok ? 'Action queued: '+action : 'Error: '+(d.detail||'failed'));"
+        f"  }}).catch(function(e){{alert('Network error: '+e);}});"
+        f"}}"
+        f"function approveForListing(){{"
+        f"  if(!confirm('Approve this item for listing?\\nIt will go live at the next dole cycle (up to 1 hour).\\nUse Publish Now to list immediately.'))return;"
+        f"  triggerAction('set_ready');"
+        f"}}"
+        f"function publishNow(){{"
+        f"  if(!confirm('Publish this item to eBay NOW?\\nIt will go live immediately at the current offer price.'))return;"
+        f"  triggerAction('ebay_publish');"
+        f"}}"
+        f"function acceptProposals(){{"
+        f"  if(!confirm('Accept all pipeline proposals?\\nThis copies proposed values into your draft.'+"
+        f"'\\nReview then click Update Listing to push to eBay.'))return;"
+        f"  fetch('/api/items/'+_SKU+'/action',{{method:'POST',"
+        f"    headers:authHeaders({{'Content-Type':'application/json'}}),"
+        f"    body:JSON.stringify({{action:'accept_proposals'}})}}"
+        f"  ).then(function(r){{return r.json();}}).then(function(d){{"
+        f"    if(d.ok)location.reload();else alert('Accept failed: '+(d.detail||'error'));"
+        f"  }});"
+        f"}}"
+        f"function dismissProposals(){{"
+        f"  fetch('/api/items/'+_SKU+'/action',{{method:'POST',"
+        f"    headers:authHeaders({{'Content-Type':'application/json'}}),"
+        f"    body:JSON.stringify({{action:'dismiss_proposals'}})}}"
+        f"  ).then(function(r){{return r.json();}}).then(function(d){{"
+        f"    if(d.ok)location.reload();else alert('Dismiss failed: '+(d.detail||'error'));"
+        f"  }});"
+        f"}}"
+        f"function clearPipelineError(){{"
+        f"  fetch('/api/items/'+_SKU,{{method:'PATCH',"
+        f"    headers:authHeaders({{'Content-Type':'application/json'}}),"
+        f"    body:JSON.stringify({{fields:{{pipeline_error:null}}}})}}"
+        f"  ).then(function(r){{return r.json();}}).then(function(d){{"
+        f"    if(d.ok)location.reload();else alert('Clear failed: '+(d.detail||'error'));"
+        f"  }});"
+        f"}}"
+        f"function toggleRawError(){{"
+        f"  var el=document.getElementById('pipeline-error-raw');"
+        f"  if(!el)return;"
+        f"  if(el.style.display==='none'){{el.textContent=_PE_RAW;el.style.display='block';}}"
+        f"  else{{el.style.display='none';}}"
+        f"}}"
+        f"function deleteItem(){{"
+        f"  var msg='Delete '+_SKU+'?\\nThis marks the item as deleted.\\nThe ItemData folder is preserved.';"
+        f"  if(_IS_ACTIVE){{msg+='\\n\\n⚠️ Active eBay listing (ID: '+_LISTING_ID+').\\nEnd Listing first, or use the End Listing button.';}} "
+        f"  if(!confirm(msg))return;"
+        f"  fetch('/api/items/'+_SKU,{{"
+        f"    method:'DELETE',"
+        f"    headers:authHeaders()"
+        f"  }}).then(function(r){{return r.json();}}).then(function(d){{"
+        f"    if(d.ok){{window.location.href='/form/items';}}"
+        f"    else{{alert('Delete failed: '+(d.detail||'unknown error'));}}"
+        f"  }}).catch(function(e){{alert('Network error: '+e);}});"
+        f"}}"
+        f"document.querySelectorAll('.fv.editable').forEach(function(span){{"
+        f"  span.addEventListener('dblclick',function(){{"
+        f"    var field=span.dataset.field;"
+        f"    var oldVal=span.dataset.raw!==undefined?span.dataset.raw:span.textContent;"
+        f"    if(oldVal==='—')oldVal='';"
+        f"    var inp=document.createElement('input');"
+        f"    inp.type='text';inp.value=oldVal;inp.className='fv fv-edit';"
+        f"    span.parentNode.replaceChild(inp,span);"
+        f"    inp.focus();inp.select();"
+        f"    function commit(){{"
+        f"      var newVal=inp.value;"
+        f"      inp.disabled=true;"
+        f"      fetch('/api/items/'+_SKU,{{"
+        f"        method:'PATCH',"
+        f"        headers:authHeaders({{'Content-Type':'application/json'}}),"
+        f"        body:JSON.stringify({{fields:{{[field]:newVal}}}})"
+        f"      }}).then(function(r){{return r.json();}}).then(function(d){{"
+        f"        if(d.ok){{"
+        f"          span.textContent=newVal||'—';"
+        f"          span.dataset.raw=newVal;"
+        f"          inp.parentNode.replaceChild(span,inp);"
+        f"          span.classList.add('fv-saved');"
+        f"          setTimeout(function(){{span.classList.remove('fv-saved');}},800);"
+        f"        }}else{{"
+        f"          alert('Save failed: '+(d.detail||'error'));"
+        f"          inp.parentNode.replaceChild(span,inp);"
+        f"        }}"
+        f"      }}).catch(function(e){{"
+        f"        alert('Network error: '+e);"
+        f"        inp.parentNode.replaceChild(span,inp);"
+        f"      }});"
+        f"    }}"
+        f"    function cancel(){{inp.parentNode.replaceChild(span,inp);}}"
+        f"    inp.addEventListener('keydown',function(e){{"
+        f"      if(e.key==='Enter'){{e.preventDefault();commit();}}"
+        f"      if(e.key==='Escape')cancel();"
+        f"    }});"
+        f"    inp.addEventListener('blur',function(){{if(!inp.disabled)commit();}});"
+        f"  }});"
+        f"}});"
         # ── updateCharCount ───────────────────────────────────────────────────
-        f'function updateCharCount(inp,max,countId){{'
-        f'  var n=inp.value.length;'
-        f'  var el=document.getElementById(countId);'
-        f'  if(!el)return;'
+        f"function updateCharCount(inp,max,countId){{"
+        f"  var n=inp.value.length;"
+        f"  var el=document.getElementById(countId);"
+        f"  if(!el)return;"
         f"  el.textContent=n+'/'+max;"
-        f'  el.style.color=n>max?\'#c44\':(n>max*0.9?\'#aa0\':\'#556\');'
-        f'}}'
+        f"  el.style.color=n>max?'#c44':(n>max*0.9?'#aa0':'#556');"
+        f"}}"
         # ── saveCatalog ───────────────────────────────────────────────────────
-        f'function saveCatalog(){{'
-        f'  var fields={{}};'
+        f"function saveCatalog(){{"
+        f"  var fields={{}};"
         f'  ["title","condition","floor_price","cost","location","ai_hint"].forEach(function(k){{'
-        f'    var span=document.querySelector(\'.fv.editable[data-field="\'+k+\'"]\');'
-        f'    if(span&&span.dataset.raw!==undefined)fields[k]=span.dataset.raw;'
-        f'  }});'
-        f'  if(!Object.keys(fields).length){{alert(\'No catalog fields to save.\');return;}}'
-        f'  var msg=document.getElementById(\'catalog-save-msg\');'
-        f'  if(msg)msg.textContent=\'Saving…\';'
-        f'  fetch(\'/api/items/\'+_SKU,{{'
-        f'    method:\'PATCH\','
-        f'    headers:authHeaders({{\'Content-Type\':\'application/json\'}}),'
-        f'    body:JSON.stringify({{fields:fields}})'
-        f'  }}).then(function(r){{return r.json();}}).then(function(d){{'
-        f'    if(msg){{msg.textContent=d.ok?\'✓ Saved\':\' Error: \'+(d.detail||\'failed\');'
-        f'    msg.style.color=d.ok?\'#4a4\':\'#c44\';'
-        f'    if(d.ok)setTimeout(function(){{msg.textContent=\'\';}},2000);}}'
-        f'  }}).catch(function(e){{if(msg){{msg.textContent=\'Network error\';msg.style.color=\'#c44\';}}}});'
-        f'}}'
+        f"    var span=document.querySelector('.fv.editable[data-field=\"'+k+'\"]');"
+        f"    if(span&&span.dataset.raw!==undefined)fields[k]=span.dataset.raw;"
+        f"  }});"
+        f"  if(!Object.keys(fields).length){{alert('No catalog fields to save.');return;}}"
+        f"  var msg=document.getElementById('catalog-save-msg');"
+        f"  if(msg)msg.textContent='Saving…';"
+        f"  fetch('/api/items/'+_SKU,{{"
+        f"    method:'PATCH',"
+        f"    headers:authHeaders({{'Content-Type':'application/json'}}),"
+        f"    body:JSON.stringify({{fields:fields}})"
+        f"  }}).then(function(r){{return r.json();}}).then(function(d){{"
+        f"    if(msg){{msg.textContent=d.ok?'✓ Saved':' Error: '+(d.detail||'failed');"
+        f"    msg.style.color=d.ok?'#4a4':'#c44';"
+        f"    if(d.ok)setTimeout(function(){{msg.textContent='';}},2000);}}"
+        f"  }}).catch(function(e){{if(msg){{msg.textContent='Network error';msg.style.color='#c44';}}}});"
+        f"}}"
         # ── saveEbayDraft ─────────────────────────────────────────────────────
-        f'function saveEbayDraft(){{'
-        f'  var dl={{}};'
-        f'  var t=document.getElementById(\'dl-title-input\');'
-        f'  if(t)dl.title=t.value;'
-        f'  var p=document.getElementById(\'dl-price-input\');'
-        f'  if(p&&p.value!==\'\')dl.price=parseFloat(p.value)||null;'
-        f'  var c=document.getElementById(\'dl-condition-select\');'
-        f'  if(c&&c.value)dl.condition_enum=c.value;'
-        f'  var desc=document.getElementById(\'dl-desc-input\');'
-        f'  if(desc)dl.description=desc.value;'
-        f'  var ship=document.getElementById(\'dl-ship-input\');'
-        f'  if(ship&&ship.value)dl.shipping_profile=ship.value;'
-        f'  var scat=document.getElementById(\'dl-store-cat-select\');'
-        f'  if(scat&&scat.value){{'
-        f'    dl.store_category_id=scat.value;'
-        f'    var scopt=scat.selectedOptions&&scat.selectedOptions[0];'
+        f"function saveEbayDraft(){{"
+        f"  var dl={{}};"
+        f"  var t=document.getElementById('dl-title-input');"
+        f"  if(t)dl.title=t.value;"
+        f"  var p=document.getElementById('dl-price-input');"
+        f"  if(p&&p.value!=='')dl.price=parseFloat(p.value)||null;"
+        f"  var c=document.getElementById('dl-condition-select');"
+        f"  if(c&&c.value)dl.condition_enum=c.value;"
+        f"  var desc=document.getElementById('dl-desc-input');"
+        f"  if(desc)dl.description=desc.value;"
+        f"  var ship=document.getElementById('dl-ship-input');"
+        f"  if(ship&&ship.value)dl.shipping_profile=ship.value;"
+        f"  var scat=document.getElementById('dl-store-cat-select');"
+        f"  if(scat&&scat.value){{"
+        f"    dl.store_category_id=scat.value;"
+        f"    var scopt=scat.selectedOptions&&scat.selectedOptions[0];"
         f'    if(scopt)dl.store_category_name=scopt.dataset.name||scopt.textContent.replace(/\\s*\\(\\d+\\)\\s*$/,"");'
-        f'  }}'
-        f'  var aspInputs=document.querySelectorAll(\'#aspects-form [data-aspect]\');'
-        f'  var attrs={{}};'
-        f'  aspInputs.forEach(function(el){{'
-        f'    var k=el.dataset.aspect;var v=el.value.trim();'
-        f'    if(v)attrs[k]=v;'
-        f'  }});'
-        f'  var patch={{draft_listing:dl}};'
-        f'  if(Object.keys(attrs).length)patch.item_attributes=attrs;'
-        f'  var msg=document.getElementById(\'dl-save-msg\');'
-        f'  if(msg)msg.textContent=\'Saving…\';'
-        f'  fetch(\'/api/items/\'+_SKU,{{'
-        f'    method:\'PATCH\','
-        f'    headers:authHeaders({{\'Content-Type\':\'application/json\'}}),'
-        f'    body:JSON.stringify({{fields:patch}})'
-        f'  }}).then(function(r){{return r.json();}}).then(function(d){{'
-        f'    if(msg){{msg.textContent=d.ok?\'✓ Saved\':\' Error: \'+(d.detail||\'failed\');'
-        f'    msg.style.color=d.ok?\'#4a4\':\'#c44\';'
-        f'    if(d.ok)setTimeout(function(){{msg.textContent=\'\';}},2000);}}'
-        f'  }}).catch(function(e){{if(msg){{msg.textContent=\'Network error\';msg.style.color=\'#c44\';}}}});'
-        f'}}'
+        f"  }}"
+        f"  var scat2=document.getElementById('dl-store-cat2-select');"
+        f"  if(scat2)dl.secondary_store_category_id=scat2.value||null;"
+        f"  var cat2id=document.getElementById('dl-cat2-id');"
+        f"  if(cat2id)dl.secondary_category_id=cat2id.value||null;"
+        f"  var aspInputs=document.querySelectorAll('#aspects-form [data-aspect]');"
+        f"  var attrs={{}};"
+        f"  aspInputs.forEach(function(el){{"
+        f"    var k=el.dataset.aspect;var v=el.value.trim();"
+        f"    if(v)attrs[k]=v;"
+        f"  }});"
+        f"  var patch={{draft_listing:dl}};"
+        f"  if(Object.keys(attrs).length)patch.item_attributes=attrs;"
+        f"  var msg=document.getElementById('dl-save-msg');"
+        f"  if(msg)msg.textContent='Saving…';"
+        f"  fetch('/api/items/'+_SKU,{{"
+        f"    method:'PATCH',"
+        f"    headers:authHeaders({{'Content-Type':'application/json'}}),"
+        f"    body:JSON.stringify({{fields:patch}})"
+        f"  }}).then(function(r){{return r.json();}}).then(function(d){{"
+        f"    if(msg){{msg.textContent=d.ok?'✓ Saved':' Error: '+(d.detail||'failed');"
+        f"    msg.style.color=d.ok?'#4a4':'#c44';"
+        f"    if(d.ok)setTimeout(function(){{msg.textContent='';}},2000);}}"
+        f"  }}).catch(function(e){{if(msg){{msg.textContent='Network error';msg.style.color='#c44';}}}});"
+        f"}}"
         # ── saveAndReprice ────────────────────────────────────────────────────
-        f'function saveAndReprice(){{'
+        f"function saveAndReprice(){{"
         f'  var st=document.getElementById("search-terms-input");'
         f'  var msg=document.getElementById("reprice-msg");'
         f'  var terms=st?st.value.trim():"";'
@@ -4762,80 +4780,126 @@ def _render_item_detail_html(
         f'  fetch("/api/items/"+_SKU,{{'
         f'    method:"PATCH",'
         f'    headers:authHeaders({{"Content-Type":"application/json"}}),'
-        f'    body:JSON.stringify({{fields:{{search_terms:terms}}}})'
-        f'  }}).then(function(r){{return r.json();}}).then(function(d){{'
+        f"    body:JSON.stringify({{fields:{{search_terms:terms}}}})"
+        f"  }}).then(function(r){{return r.json();}}).then(function(d){{"
         f'    if(!d.ok){{if(msg){{msg.textContent="Save failed";msg.style.color="#c44";}}return;}}'
         f'    if(msg)msg.textContent="Saved — pricing…";'
         f'    fetch("/api/items/"+_SKU+"/action",{{'
         f'      method:"POST",'
         f'      headers:authHeaders({{"Content-Type":"application/json"}}),'
         f'      body:JSON.stringify({{action:"ebay_price"}})'
-        f'    }}).then(function(r){{return r.json();}}).then(function(d){{'
+        f"    }}).then(function(r){{return r.json();}}).then(function(d){{"
         f'      if(msg){{msg.textContent=d.ok?"✓ Re-price queued":"Price queue failed";'
         f'      msg.style.color=d.ok?"#4a4":"#c44";}}'
-        f'      if(d.ok)setTimeout(function(){{location.reload();}},3500);'
+        f"      if(d.ok)setTimeout(function(){{location.reload();}},3500);"
         f'    }}).catch(function(e){{if(msg){{msg.textContent="Network error";msg.style.color="#c44";}}}});'
         f'  }}).catch(function(e){{if(msg){{msg.textContent="Network error";msg.style.color="#c44";}}}});'
-        f'}}'
+        f"}}"
         # ── initCatSearch — category type-ahead picker ────────────────────────
-        f'function initCatSearch(){{'
+        f"function initCatSearch(){{"
         f'  var inp=document.getElementById("dl-cat-search");'
         f'  var hid=document.getElementById("dl-cat-id");'
         f'  var dd=document.getElementById("dl-cat-dropdown");'
         f'  var bc=document.getElementById("dl-cat-breadcrumb");'
-        f'  if(!inp||!hid||!dd)return;'
-        f'  var _timer=null;'
+        f"  if(!inp||!hid||!dd)return;"
+        f"  var _timer=null;"
         f'  inp.addEventListener("input",function(){{'
-        f'    clearTimeout(_timer);'
-        f'    var q=inp.value.trim();'
+        f"    clearTimeout(_timer);"
+        f"    var q=inp.value.trim();"
         f'    if(q.length<2){{dd.style.display="none";return;}}'
-        f'    _timer=setTimeout(function(){{'
+        f"    _timer=setTimeout(function(){{"
         f'      fetch("/api/ebay/category-search?q="+encodeURIComponent(q),{{headers:authHeaders()}})'
-        f'      .then(function(r){{return r.json();}}).then(function(d){{'
+        f"      .then(function(r){{return r.json();}}).then(function(d){{"
         f'        if(!d.ok||!d.results||!d.results.length){{dd.style.display="none";return;}}'
         f'        var html="";'
-        f'        d.results.forEach(function(s){{'
+        f"        d.results.forEach(function(s){{"
         f'          html+=\'<div class="cat-opt" data-id="\'+s.id+\'" data-name="\'+s.name.replace(/"/g,"&quot;")+\'"\''
-        f'            +\' style="padding:6px 10px;cursor:pointer;border-bottom:1px solid #2a2a2a;font-size:.85em">\''
-        f'            +\'<span style="color:#eee">\'+s.name+\'</span>\''
-        f'            +(s.path?\'<div style="color:#556;font-size:.78em">\'+s.path+\'</div>\':"")'
+        f"            +' style=\"padding:6px 10px;cursor:pointer;border-bottom:1px solid #2a2a2a;font-size:.85em\">'"
+        f"            +'<span style=\"color:#eee\">'+s.name+'</span>'"
+        f"            +(s.path?'<div style=\"color:#556;font-size:.78em\">'+s.path+'</div>':\"\")"
         f'            +"</div>";'
-        f'        }});'
+        f"        }});"
         f'        dd.innerHTML=html;dd.style.display="block";'
         f'        dd.querySelectorAll(".cat-opt").forEach(function(el){{'
         f'          el.addEventListener("mouseenter",function(){{el.style.background="#2a2a3a";}});'
         f'          el.addEventListener("mouseleave",function(){{el.style.background="";}});'
         f'          el.addEventListener("click",function(){{'
-        f'            var cid=el.dataset.id;var cname=el.dataset.name;'
-        f'            hid.value=cid;'
+        f"            var cid=el.dataset.id;var cname=el.dataset.name;"
+        f"            hid.value=cid;"
         f'            if(bc)bc.textContent=cid+" · "+cname;'
         f'            inp.value="";dd.style.display="none";'
         f'            fetch("/api/items/"+window._ITEM_SKU,{{'
         f'              method:"PATCH",'
         f'              headers:authHeaders({{"Content-Type":"application/json"}}),'
-        f'              body:JSON.stringify({{fields:{{draft_listing:{{category_id:cid,category_name:cname}}}}}})'
-        f'            }}).then(function(r){{return r.json();}}).then(function(d){{'
-        f'              if(d.ok)loadCatCtx(cid);'
-        f'            }});'
-        f'          }});'
-        f'        }});'
+        f"              body:JSON.stringify({{fields:{{draft_listing:{{category_id:cid,category_name:cname}}}}}})"
+        f"            }}).then(function(r){{return r.json();}}).then(function(d){{"
+        f"              if(d.ok)loadCatCtx(cid);"
+        f"            }});"
+        f"          }});"
+        f"        }});"
         f'      }}).catch(function(){{dd.style.display="none";}});'
-        f'    }},350);'
-        f'  }});'
+        f"    }},350);"
+        f"  }});"
         f'  document.addEventListener("click",function(e){{'
         f'    if(!dd.contains(e.target)&&e.target!==inp)dd.style.display="none";'
-        f'  }});'
-        f'}}'
+        f"  }});"
+        f"}}"
+        # ── initCatSearch2 — secondary category type-ahead picker ─────────────
+        f"function initCatSearch2(){{"
+        f'  var inp=document.getElementById("dl-cat2-search");'
+        f'  var hid=document.getElementById("dl-cat2-id");'
+        f'  var dd=document.getElementById("dl-cat2-dropdown");'
+        f'  var bc=document.getElementById("dl-cat2-breadcrumb");'
+        f"  if(!inp||!hid||!dd)return;"
+        f"  var _timer=null;"
+        f'  inp.addEventListener("input",function(){{'
+        f"    clearTimeout(_timer);"
+        f"    var q=inp.value.trim();"
+        f'    if(q.length<2){{dd.style.display="none";return;}}'
+        f"    _timer=setTimeout(function(){{"
+        f'      fetch("/api/ebay/category-search?q="+encodeURIComponent(q),{{headers:authHeaders()}})'
+        f"      .then(function(r){{return r.json();}}).then(function(d){{"
+        f'        if(!d.ok||!d.results||!d.results.length){{dd.style.display="none";return;}}'
+        f'        var html="";'
+        f"        d.results.forEach(function(s){{"
+        f'          html+=\'<div class="cat-opt" data-id="\'+s.id+\'" data-name="\'+s.name.replace(/"/g,"&quot;")+\'"\''
+        f"            +' style=\"padding:6px 10px;cursor:pointer;border-bottom:1px solid #2a2a2a;font-size:.85em\">'"
+        f"            +'<span style=\"color:#eee\">'+s.name+'</span>'"
+        f"            +(s.path?'<div style=\"color:#556;font-size:.78em\">'+s.path+'</div>':\"\")"
+        f'            +"</div>";'
+        f"        }});"
+        f'        dd.innerHTML=html;dd.style.display="block";'
+        f'        dd.querySelectorAll(".cat-opt").forEach(function(el){{'
+        f'          el.addEventListener("mouseenter",function(){{el.style.background="#2a2a3a";}});'
+        f'          el.addEventListener("mouseleave",function(){{el.style.background="";}});'
+        f'          el.addEventListener("click",function(){{'
+        f"            var cid=el.dataset.id;var cname=el.dataset.name;"
+        f"            hid.value=cid;"
+        f'            if(bc)bc.textContent=cid+" · "+cname;'
+        f'            inp.value="";dd.style.display="none";'
+        f'            fetch("/api/items/"+window._ITEM_SKU,{{'
+        f'              method:"PATCH",'
+        f'              headers:authHeaders({{"Content-Type":"application/json"}}),'
+        f"              body:JSON.stringify({{fields:{{draft_listing:{{secondary_category_id:cid,secondary_category_name:cname}}}}}})"
+        f"            }});"
+        f"          }});"
+        f"        }});"
+        f'      }}).catch(function(){{dd.style.display="none";}});'
+        f"    }},350);"
+        f"  }});"
+        f'  document.addEventListener("click",function(e){{'
+        f'    if(!dd.contains(e.target)&&e.target!==inp)dd.style.display="none";'
+        f"  }});"
+        f"}}"
         # ── category context IIFE (conditions + aspects + store cat + hints) ──────
-        + _CATEGORY_CONTEXT_IIFE
-        +
-        '</script>\n'
+         + _CATEGORY_CONTEXT_IIFE + "</script>\n"
     )
 
     # Offer count badge: JS fetches /api/offers (cached), filters to this SKU.
     offer_script = ""
     if listing_id and api_key:
         import json as _json
+
         _ak_json = _json.dumps(api_key)
         _sku_json = _json.dumps(sku)
         offer_script = (
@@ -4875,25 +4939,23 @@ def _render_item_detail_html(
         review_block_html = (
             f'<div style="background:#3a1010;border:1.5px solid #8a2020;border-radius:8px;'
             f'padding:10px 14px;margin:10px 0;color:#f77;font-size:.9em">'
-            f'<strong>⛔ Blocked in review</strong>'
-            f' — stage: <code>{_rb_stage}</code>'
-            f', reason: <code>{_rb_code}</code>'
-            f'{(" · flagged " + _rb_at) if _rb_at else ""}'
-            f'{_rb_detail}'
-            f'{_rb_sugg_html}'
+            f"<strong>⛔ Blocked in review</strong>"
+            f" — stage: <code>{_rb_stage}</code>"
+            f", reason: <code>{_rb_code}</code>"
+            f"{(' · flagged ' + _rb_at) if _rb_at else ''}"
+            f"{_rb_detail}"
+            f"{_rb_sugg_html}"
             f'<div style="font-size:.79em;color:#884;margin-top:6px">'
             f'<a href="/form/needs-review" style="color:#aaa">← All blocked items</a>'
-            f' · Use <code>tgw migrate-unblock {h(sku)}</code> or click Mark Ready in the blocked queue after resolving.</div>'
-            f'</div>'
+            f" · Use <code>tgw migrate-unblock {h(sku)}</code> or click Mark Ready in the blocked queue after resolving.</div>"
+            f"</div>"
         )
 
     return (
         f"<!DOCTYPE html>\n<html lang='en'>\n<head>\n"
         f"<meta charset='utf-8'>"
         f"<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        f"<title>{h(sku)} — TGW</title>"
-        + _STATIC_HEAD
-        + f"<style>{_ITEMS_EXTRA_CSS}</style>"
+        f"<title>{h(sku)} — TGW</title>" + _STATIC_HEAD + f"<style>{_ITEMS_EXTRA_CSS}</style>"
         f"</head>\n<body>\n"
         f'<a class="back" href="/form/items">← Inventory</a>\n'
         f'<div class="sku-hdr">'
@@ -4906,10 +4968,7 @@ def _render_item_detail_html(
         f"{fields_html[:-6]}"
         f"{actions_html}"
         f"</div>"
-        f"</div>\n"
-        + _STATIC_FOOT
-        + offer_script
-        + "</body></html>"
+        f"</div>\n" + _STATIC_FOOT + offer_script + "</body></html>"
     )
 
 
@@ -4943,10 +5002,7 @@ def item_detail_form(sku: str):
 
     sku_dir = json_path.parent
     images: List[str] = [p.name for p in _ordered_photos(item, sku_dir)]
-    videos: List[str] = [
-        p.name for p in sorted(sku_dir.iterdir())
-        if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}
-    ]
+    videos: List[str] = [p.name for p in sorted(sku_dir.iterdir()) if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}]
 
     jobs: List[Dict[str, Any]] = []
     try:
@@ -4979,6 +5035,7 @@ def item_detail_form(sku: str):
 # ---------------------------------------------------------------------------
 # GET /api/dashboard — home dashboard summary (PP-EDITOR-001 Phase 3b)
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/dashboard", dependencies=[AUTH])
 def dashboard() -> Dict[str, Any]:
@@ -5031,9 +5088,7 @@ def dashboard() -> Dict[str, Any]:
                     result["ready_count"] = row[3]
                     result["blocked_count"] = row[4]
                 else:
-                    row = con.execute(
-                        "SELECT COUNT(*) FROM catalog WHERE image IS NULL OR image = ''"
-                    ).fetchone()
+                    row = con.execute("SELECT COUNT(*) FROM catalog WHERE image IS NULL OR image = ''").fetchone()
                     result["needs_review"] = None
                     result["needs_photos"] = row[0]
                     result["has_revision_draft"] = None
@@ -5042,11 +5097,9 @@ def dashboard() -> Dict[str, Any]:
                 con.close()
         except Exception as exc:
             log.warning("dashboard: SQLite query failed: %s", exc)
-            result.update(needs_review=None, needs_photos=None,
-                          has_revision_draft=None, ready_count=None, blocked_count=None)
+            result.update(needs_review=None, needs_photos=None, has_revision_draft=None, ready_count=None, blocked_count=None)
     else:
-        result.update(needs_review=None, needs_photos=None,
-                      has_revision_draft=None, ready_count=None, blocked_count=None)
+        result.update(needs_review=None, needs_photos=None, has_revision_draft=None, ready_count=None, blocked_count=None)
 
     # --- PostgreSQL: dead_letter_count ---
     dead_letter_count = 0
@@ -5061,21 +5114,19 @@ def dashboard() -> Dict[str, Any]:
 
     # --- eBay pending_offers (cached, null on failure) ---
     global _pending_offers_cache, _pending_offers_cache_at
-    if (
-        _pending_offers_cache is not None
-        and time.time() - _pending_offers_cache_at < _PENDING_OFFERS_TTL
-    ):
+    if _pending_offers_cache is not None and time.time() - _pending_offers_cache_at < _PENDING_OFFERS_TTL:
         result["pending_offers"] = _pending_offers_cache
     else:
         try:
             from .apis.ebay.trading import get_best_offers
+
             offers = list(get_best_offers(_cfg, status="Pending"))
             _pending_offers_cache = len(offers)
             _pending_offers_cache_at = time.time()
             result["pending_offers"] = _pending_offers_cache
         except Exception as exc:
             _raw = str(exc)
-            if '429' in _raw or '21919188' in _raw or 'rate' in _raw.lower():
+            if "429" in _raw or "21919188" in _raw or "rate" in _raw.lower():
                 log.warning("dashboard: GetBestOffers rate limited — suppressing: %s", exc)
                 _pending_offers_cache = 0
             else:
@@ -5089,7 +5140,9 @@ def dashboard() -> Dict[str, Any]:
         units = [f"tgw-worker@{q}.service" for q in WORKER_QUEUES]
         r = subprocess.run(
             ["systemctl", "is-active", *units],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         up = sum(1 for line in r.stdout.splitlines() if line.strip() == "active")
     except Exception as exc:
@@ -5103,6 +5156,7 @@ def dashboard() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # GET /api/activity — recent queue job completions (activity feed)
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/activity", dependencies=[AUTH])
 def activity(limit: int = 15) -> Dict[str, Any]:
@@ -5167,6 +5221,7 @@ def _build_pm_context() -> str:
     # Open todos by agent
     try:
         from . import todo as _todo
+
         todos = _todo.todo_list()
         by_agent: Dict[str, int] = {}
         for t in todos:
@@ -5181,22 +5236,12 @@ def _build_pm_context() -> str:
     try:
         with psycopg2.connect(_cfg["postgres_dsn"]) as con:
             with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    "SELECT queue_name, state, COUNT(*) AS n FROM queue_jobs"
-                    " GROUP BY queue_name, state ORDER BY queue_name, state"
-                )
+                cur.execute("SELECT queue_name, state, COUNT(*) AS n FROM queue_jobs GROUP BY queue_name, state ORDER BY queue_name, state")
                 qrows = [dict(r) for r in cur.fetchall()]
-        active = {
-            r["queue_name"]: r["n"]
-            for r in qrows if r["state"] in ("queued", "claimed")
-        }
+        active = {r["queue_name"]: r["n"] for r in qrows if r["state"] in ("queued", "claimed")}
         dead = sum(r["n"] for r in qrows if r["state"] == "dead_letter")
-        lines.append(
-            "Active queues: " + (", ".join(f"{k}={v}" for k, v in active.items()) or "all idle")
-        )
-        lines.append(
-            f"Dead-letter jobs: {dead}" + (" — NEEDS ATTENTION" if dead else "")
-        )
+        lines.append("Active queues: " + (", ".join(f"{k}={v}" for k, v in active.items()) or "all idle"))
+        lines.append(f"Dead-letter jobs: {dead}" + (" — NEEDS ATTENTION" if dead else ""))
     except Exception as exc:
         lines.append(f"Queue/dead-letter: unavailable ({exc})")
 
@@ -5207,15 +5252,10 @@ def _build_pm_context() -> str:
             con = _sqlite_conn()
             try:
                 row = con.execute(
-                    "SELECT COUNT(*),"
-                    " COUNT(CASE WHEN LOWER(status) IN ('published','live','listed') THEN 1 END),"
-                    " COUNT(CASE WHEN LOWER(status) = 'staged' THEN 1 END)"
-                    " FROM catalog"
+                    "SELECT COUNT(*), COUNT(CASE WHEN LOWER(status) IN ('published','live','listed') THEN 1 END), COUNT(CASE WHEN LOWER(status) = 'staged' THEN 1 END) FROM catalog"
                 ).fetchone()
                 if row:
-                    lines.append(
-                        f"Inventory: {row[0]} total items, {row[1]} live on eBay, {row[2]} staged"
-                    )
+                    lines.append(f"Inventory: {row[0]} total items, {row[1]} live on eBay, {row[2]} staged")
             finally:
                 con.close()
     except Exception as exc:
@@ -5275,6 +5315,7 @@ def pm_action(body: PMActionBody) -> Dict[str, Any]:
         if not body.agent or not body.body:
             raise HTTPException(status_code=400, detail="add_todo requires agent and body")
         from . import todo as _todo
+
         result = _todo.todo_add(
             agent=body.agent,
             body=body.body,
@@ -5287,6 +5328,7 @@ def pm_action(body: PMActionBody) -> Dict[str, Any]:
         if not body.text:
             raise HTTPException(status_code=400, detail="add_suggestion requires text")
         from .api import cmd_suggest
+
         result = cmd_suggest(_cfg, body.text)
         return {"ok": True, "message": f"Suggestion added: {result.get('written', '')}", **result}
 
@@ -5298,15 +5340,14 @@ def pm_action(body: PMActionBody) -> Dict[str, Any]:
 # POST /api/offers/{offer_id}/respond — accept / counter / decline
 # ---------------------------------------------------------------------------
 
+
 def _offer_location(sku: str) -> str:
     """Return location from the SQLite catalog for a given SKU, or ''."""
     if not sku:
         return ""
     try:
         with _sqlite_conn() as con:
-            row = con.execute(
-                "SELECT location FROM catalog WHERE sku = ?", (sku,)
-            ).fetchone()
+            row = con.execute("SELECT location FROM catalog WHERE sku = ?", (sku,)).fetchone()
         return (row["location"] or "") if row else ""
     except Exception:
         return ""
@@ -5363,10 +5404,10 @@ def get_offers_limits() -> Dict[str, Any]:
     return {
         "ok": True,
         "limits": {
-            "daily_limit":  r["daily_limit"],
-            "daily_used":   r["daily_used"],
+            "daily_limit": r["daily_limit"],
+            "daily_used": r["daily_used"],
             "hourly_limit": r["hourly_limit"],
-            "hourly_used":  r["hourly_used"],
+            "hourly_used": r["hourly_used"],
         },
     }
 
@@ -5684,6 +5725,7 @@ def offers_form():
 # GET /form/revisions — revision review UI (PP-EDITOR-001 Phase 3h)
 # (GET /api/items/pending-revision registered earlier, before /{sku})
 # ---------------------------------------------------------------------------
+
 
 @app.post("/api/items/{sku}/revision/apply", dependencies=[AUTH])
 def apply_revision(sku: str, body: RevisionApplyBody) -> Dict[str, Any]:
@@ -6253,6 +6295,7 @@ def drafts_form():
 def review_form_redirect():
     """Backward-compat redirect — /form/review renamed to /form/drafts."""
     from fastapi.responses import RedirectResponse
+
     return RedirectResponse(url="/form/drafts", status_code=301)
 
 
@@ -6815,6 +6858,7 @@ def pipeline_form():
 # GET /api/pipeline/jobs — active + dead-letter jobs for the pipeline monitor
 # ---------------------------------------------------------------------------
 
+
 @app.get("/api/pipeline/jobs", dependencies=[AUTH])
 def pipeline_jobs() -> Dict[str, Any]:
     """Return running/leased and dead_letter jobs for the pipeline monitor.
@@ -6861,6 +6905,7 @@ def pipeline_jobs() -> Dict[str, Any]:
 # POST /api/jobs/{job_id}/cancel — cancel a dead-letter or queued job
 # ---------------------------------------------------------------------------
 
+
 @app.post("/api/jobs/{job_id}/cancel", dependencies=[AUTH])
 def cancel_job(job_id: str) -> Dict[str, Any]:
     """Cancel a dead-letter (or queued/retry_wait) job."""
@@ -6902,6 +6947,7 @@ def cancel_job(job_id: str) -> Dict[str, Any]:
 # GET /api/system/info — disk, token, sync stamp, job-state counts (Phase 3k)
 # ---------------------------------------------------------------------------
 
+
 @app.get("/api/system/info", dependencies=[AUTH])
 def system_info() -> Dict[str, Any]:
     """Infrastructure snapshot: disk usage, eBay token detail, sync stamp, job states."""
@@ -6910,8 +6956,8 @@ def system_info() -> Dict[str, Any]:
     # Disk usage for key paths
     disk_paths = {
         "itemdata": _cfg.get("itemdata_root", Path("/opt/TGW/data/ItemData")),
-        "logs":     Path("/opt/TGW/var/log"),
-        "backup":   Path("/opt/TGW/var/local/backups"),
+        "logs": Path("/opt/TGW/var/log"),
+        "backup": Path("/opt/TGW/var/local/backups"),
     }
     disk: Dict[str, Any] = {}
     for label, path in disk_paths.items():
@@ -6920,9 +6966,9 @@ def system_info() -> Dict[str, Any]:
             disk[label] = {
                 "path": str(path),
                 "total": usage.total,
-                "used":  usage.used,
-                "free":  usage.free,
-                "pct":   round(usage.used / usage.total * 100, 1) if usage.total else 0,
+                "used": usage.used,
+                "free": usage.free,
+                "pct": round(usage.used / usage.total * 100, 1) if usage.total else 0,
             }
         except Exception as exc:
             disk[label] = {"path": str(path), "error": str(exc)}
@@ -6944,11 +6990,11 @@ def system_info() -> Dict[str, Any]:
                 except (ValueError, TypeError):
                     pass
             token_info = {
-                "exists":           True,
-                "mtime":            mtime,
-                "expires_at":       expires_at,
+                "exists": True,
+                "mtime": mtime,
+                "expires_at": expires_at,
                 "remaining_seconds": remaining,
-                "ok":               remaining is None or remaining > 300,
+                "ok": remaining is None or remaining > 300,
             }
         else:
             token_info = {"exists": False, "ok": False, "error": "file not found"}
@@ -6971,19 +7017,17 @@ def system_info() -> Dict[str, Any]:
     try:
         with psycopg2.connect(_cfg["postgres_dsn"]) as con:
             with con.cursor() as cur:
-                cur.execute(
-                    "SELECT state, COUNT(*) FROM queue_jobs GROUP BY state ORDER BY state"
-                )
+                cur.execute("SELECT state, COUNT(*) FROM queue_jobs GROUP BY state ORDER BY state")
                 for row in cur.fetchall():
                     job_states[str(row[0])] = int(row[1])
     except Exception as exc:
         job_states["_error"] = str(exc)
 
     return {
-        "ok":         True,
-        "disk":       disk,
+        "ok": True,
+        "disk": disk,
         "ebay_token": token_info,
-        "sync":       sync_info,
+        "sync": sync_info,
         "job_states": job_states,
     }
 
@@ -6991,6 +7035,7 @@ def system_info() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # POST /api/system/workers/{unit}/restart — restart a systemd unit (Phase 3k)
 # ---------------------------------------------------------------------------
+
 
 @app.post("/api/system/workers/{unit}/restart", dependencies=[AUTH])
 def restart_worker(unit: str) -> Dict[str, Any]:
@@ -7007,14 +7052,16 @@ def restart_worker(unit: str) -> Dict[str, Any]:
     try:
         r = subprocess.run(
             ["sudo", "-n", "systemctl", "restart", unit],
-            capture_output=True, text=True, timeout=20,
+            capture_output=True,
+            text=True,
+            timeout=20,
         )
         if r.returncode != 0:
             return {
-                "ok":         False,
-                "unit":       unit,
+                "ok": False,
+                "unit": unit,
                 "returncode": r.returncode,
-                "stderr":     r.stderr.strip(),
+                "stderr": r.stderr.strip(),
             }
         return {"ok": True, "unit": unit, "returncode": r.returncode}
     except Exception as exc:
@@ -7953,10 +8000,12 @@ def links_form():
     """External links hub — eBay, AI/ML, infrastructure, research. No auth, no API calls."""
     from fastapi.responses import HTMLResponse
 
-    return HTMLResponse(_LINKS_HTML.format(
-        static_head=_STATIC_HEAD,
-        static_foot=_STATIC_FOOT,
-    ))
+    return HTMLResponse(
+        _LINKS_HTML.format(
+            static_head=_STATIC_HEAD,
+            static_foot=_STATIC_FOOT,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -8042,22 +8091,21 @@ def _list_docs_sections() -> list[tuple[str, list[tuple[str, str]]]]:
 
 def _docs_sidebar_html(sections: list[tuple[str, list[tuple[str, str]]]], current: str) -> str:
     import html as _html
+
     parts: list[str] = ['<nav class="docs-sidebar">']
     for label, files in sections:
         parts.append(f'<div class="docs-section"><div class="docs-sec-label">{_html.escape(label)}</div>')
         for rel, display in files:
             active = " active" if rel == current else ""
-            parts.append(
-                f'<a class="docs-link{active}" href="/docs/{rel}"'
-                f' title="{_html.escape(rel)}">{_html.escape(display)}</a>'
-            )
-        parts.append('</div>')
-    parts.append('</nav>')
+            parts.append(f'<a class="docs-link{active}" href="/docs/{rel}" title="{_html.escape(rel)}">{_html.escape(display)}</a>')
+        parts.append("</div>")
+    parts.append("</nav>")
     return "".join(parts)
 
 
 def _docs_page_html(title: str, body_html: str, sidebar_html: str) -> str:
     import html as _html
+
     return (
         "<!DOCTYPE html><html lang='en'><head>"
         "<meta charset='utf-8'>"
@@ -8079,6 +8127,7 @@ def _docs_page_html(title: str, body_html: str, sidebar_html: str) -> str:
 def docs_index_redirect():
     """Redirect /docs to the runbook index."""
     from fastapi.responses import RedirectResponse
+
     return RedirectResponse(url="/docs/reference/runbooks/INDEX.md", status_code=302)
 
 
@@ -8134,6 +8183,7 @@ def docs_page(path: str):
 # POST /webhooks/ebay/notification — eBay push notification (no Bearer auth)
 # ---------------------------------------------------------------------------
 
+
 @app.post("/webhooks/ebay/notification")
 async def ebay_notification_webhook(request: Request) -> Dict[str, Any]:
     """
@@ -8145,58 +8195,58 @@ async def ebay_notification_webhook(request: Request) -> Dict[str, Any]:
     from .workers.ebay_legacy_sync import _mark_item_sold
 
     body = await request.body()
-    log.debug('ebay_webhook: received %d bytes', len(body))
+    log.debug("ebay_webhook: received %d bytes", len(body))
 
     if not verify_notification_signature(body, _cfg):
-        log.warning('ebay_webhook: invalid signature — rejected')
-        raise HTTPException(status_code=400, detail='invalid signature')
+        log.warning("ebay_webhook: invalid signature — rejected")
+        raise HTTPException(status_code=400, detail="invalid signature")
 
     event = parse_sold_notification(body)
     if event is None:
         # Ping/test notification from eBay — just ack it
-        log.info('ebay_webhook: non-sold notification (ping or unknown type)')
-        return {'ack': 'Success'}
+        log.info("ebay_webhook: non-sold notification (ping or unknown type)")
+        return {"ack": "Success"}
 
-    listing_id = event['listing_id']
+    listing_id = event["listing_id"]
     index = _get_listing_index()
     json_path = index.get(listing_id)
 
     # Cache miss — maybe a newly listed item; do a targeted scan
     if json_path is None or not json_path.exists():
-        log.info('ebay_webhook: listing %s not in index — rebuilding', listing_id)
+        log.info("ebay_webhook: listing %s not in index — rebuilding", listing_id)
         _listing_index_built_at_reset()
         index = _get_listing_index()
         json_path = index.get(listing_id)
 
     if json_path is None or not json_path.exists():
-        log.warning('ebay_webhook: no local item for listing_id=%s — acking anyway', listing_id)
-        return {'ack': 'Success'}
+        log.warning("ebay_webhook: no local item for listing_id=%s — acking anyway", listing_id)
+        return {"ack": "Success"}
 
     synced_at = datetime.now(timezone.utc).isoformat()
     try:
         did_mark = _mark_item_sold(
             json_path,
-            order_id=event['order_id'],
-            buyer=event['buyer'],
-            sale_price=event['sale_price'],
-            quantity=event['quantity'],
-            sale_date=event['sale_date'],
+            order_id=event["order_id"],
+            buyer=event["buyer"],
+            sale_price=event["sale_price"],
+            quantity=event["quantity"],
+            sale_date=event["sale_date"],
             synced_at=synced_at,
             cfg=_cfg,
         )
         if did_mark:
-            log.info('ebay_webhook: marked sold listing_id=%s', listing_id)
+            log.info("ebay_webhook: marked sold listing_id=%s", listing_id)
             try:
                 state_machine.enqueue_job(
-                    queue_name='catalog_rebuild',
-                    payload={'reason': 'ebay_webhook_sold'},
-                    dedupe_key='catalog_rebuild:pending',
+                    queue_name="catalog_rebuild",
+                    payload={"reason": "ebay_webhook_sold"},
+                    dedupe_key="catalog_rebuild:pending",
                     not_before=time.time() + 30,
                     max_attempts=3,
                 )
             except Exception:
                 pass
     except Exception as exc:
-        log.error('ebay_webhook: mark failed listing_id=%s: %s', listing_id, exc)
+        log.error("ebay_webhook: mark failed listing_id=%s: %s", listing_id, exc)
 
-    return {'ack': 'Success'}
+    return {"ack": "Success"}

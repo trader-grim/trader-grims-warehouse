@@ -47,6 +47,7 @@ def call_model(
     user_prompt: str,
     cfg: Dict[str, Any],
     img_b64: Optional[str] = None,
+    img_b64_list: Optional[List[str]] = None,
     provider: Optional[str] = None,
     model: Optional[str] = None,
     sku: Optional[str] = None,
@@ -59,11 +60,16 @@ def call_model(
     Pass sku to attribute the call to a specific item in the per-SKU report.
     Pass messages to supply a pre-built multi-turn list (openrouter only);
     system_prompt/user_prompt are ignored when messages is given.
+    Pass img_b64_list for multi-image calls (OpenRouter only); img_b64 used
+    as single-image fallback for Ollama or when list has one entry.
     """
     if provider is None or model is None:
         _p, _m = get_task_model(cfg, task)
         provider = provider or _p
         model = model or _m
+
+    # Normalise: img_b64_list takes precedence; single img_b64 becomes a list
+    _images: List[str] = img_b64_list or ([img_b64] if img_b64 else [])
 
     if messages is not None:
         input_chars = sum(
@@ -82,10 +88,11 @@ def call_model(
         if provider == 'openrouter':
             text, usage = _call_openrouter(
                 model, system_prompt, user_prompt, cfg,
-                img_b64=img_b64, messages=messages,
+                img_b64_list=_images, messages=messages,
             )
-        elif img_b64:
-            text, usage = _call_ollama_vision(model, system_prompt, user_prompt, cfg, img_b64)
+        elif _images:
+            # Ollama only supports single image; use the first
+            text, usage = _call_ollama_vision(model, system_prompt, user_prompt, cfg, _images[0])
         else:
             text, usage = _call_ollama_text(model, system_prompt, user_prompt, cfg)
     except Exception as exc:
@@ -155,26 +162,32 @@ def _call_openrouter(
     user_prompt: str,
     cfg: Dict[str, Any],
     img_b64: Optional[str] = None,
+    img_b64_list: Optional[List[str]] = None,
     max_retries: int = 3,
     messages: Optional[List[Dict[str, Any]]] = None,
 ) -> tuple:
     """Call OpenRouter chat completions. Returns (text, usage_dict).
 
     If *messages* is provided it is used as-is; system_prompt/user_prompt are ignored.
+    img_b64_list sends multiple images; img_b64 is a single-image fallback.
     """
     api_key = _load_openrouter_key(cfg)
     if not api_key:
         raise RuntimeError('OpenRouter API key not found in secrets or config')
 
+    # Resolve image list — prefer img_b64_list, fall back to single img_b64
+    images = img_b64_list or ([img_b64] if img_b64 else [])
+
     if messages is not None:
         msg_list: Any = messages
     else:
         user_content: Any
-        if img_b64:
-            user_content = [
-                {'type': 'text', 'text': user_prompt},
-                {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{img_b64}'}},
-            ]
+        if images:
+            user_content = [{'type': 'text', 'text': user_prompt}]
+            for _b64 in images:
+                user_content.append(
+                    {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{_b64}'}}
+                )
         else:
             user_content = user_prompt
         msg_list = [

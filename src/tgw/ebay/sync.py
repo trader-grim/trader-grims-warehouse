@@ -296,7 +296,7 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
     image_urls: List[str] = (
         draft.get('imageUrls')
         or [e['url'] for e in item.get('ebay_photos', [])]
-    )
+    )[:24]  # eBay max is 24 images per listing
     if not image_urls:
         raise ValueError(f'{sku}: no eBay photo URLs — run ebay_upload first')
 
@@ -406,19 +406,33 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
         },
     }
 
-    # PP-STORE-001: file item into the matching eBay store category.
+    # Secondary eBay marketplace category (optional — costs extra on eBay)
+    secondary_cat_id = str(draft.get('secondary_category_id') or '').strip()
+    if secondary_cat_id:
+        offer_body['secondaryCategoryId'] = secondary_cat_id
+
+    # PP-STORE-001: file item into matching eBay store categories (primary + optional secondary).
     # Prefer store_category_id from draft (set by ebay_draft via category-groups.json);
     # fall back to the config-based store_category_by_ebay_category name mapping.
-    store_cat_id = draft.get('store_category_id')
-    if store_cat_id is not None:
-        store_cats = _get_store_categories_cached(cfg)
-        matched = next((c for c in store_cats if c['id'] == str(store_cat_id)), None)
-        if matched:
-            offer_body['storeCategoryNames'] = [matched['name']]
-    if 'storeCategoryNames' not in offer_body:
+    store_cats = _get_store_categories_cached(cfg)
+    store_cat_id  = str(draft.get('store_category_id') or '').strip()
+    store_cat2_id = str(draft.get('secondary_store_category_id') or '').strip()
+
+    store_names: List[str] = []
+    if store_cat_id:
+        m = next((c for c in store_cats if c['id'] == store_cat_id), None)
+        if m:
+            store_names.append(m['name'])
+    if store_cat2_id:
+        m2 = next((c for c in store_cats if c['id'] == store_cat2_id), None)
+        if m2:
+            store_names.append(m2['name'])
+
+    if not store_names:
         store_names = _resolve_store_category_names(cfg, category_id_str)
-        if store_names:
-            offer_body['storeCategoryNames'] = store_names
+
+    if store_names:
+        offer_body['storeCategoryNames'] = store_names[:2]  # eBay max 2
 
     return inv_body, offer_body
 

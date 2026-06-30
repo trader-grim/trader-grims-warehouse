@@ -346,13 +346,51 @@ The discounted price (offer price × (1 − pct/100)) must remain above the cate
 | Phase | Scope | Status |
 |-------|-------|--------|
 | **P1** | Design doc + operator checklist (this file) + master plan section | ✅ DONE |
-| **P2** | `tgw promo draft` CLI: scan dead_stock with listing_id, apply filters, write markdown draft; `tgw promo list` read-only scope check | Planned |
-| **P3** | `tgw promo apply <DRAFT_FILE>`: parse markdown, validate listing IDs, POST to Promotions API, write `ebay_promo` block to item JSONs; `ebay_price_reducer` promo-skip gate | Planned (blocked on P2 scope verification) |
-| **P4** | `tgw promo end <promo_id>`: DELETE/pause promotion, clear `ebay_promo` from item JSONs; `tgw promo status` summary | Future |
+| **P2** | `tgw promo draft` + `tgw promo list` read-only scope check | ✅ DONE (2026-06-29) |
+| **P3** | `tgw promo apply <DRAFT_FILE>` + `tgw promo start/end/sync`; `ebay_price_reducer` promo-skip gate (R2 fix) | ✅ DONE (2026-06-29) |
+| **P4** | Web UI and Flutter surfaces; `tgw promo status` summary with impressions from analytics | Future |
 
-**P2 prerequisite**: none — read-only scope check + draft generation have no eBay write risk.
-**P3 prerequisite**: P2 `tgw promo list` returns 200 (scope confirmed active).
+**P2 prerequisite**: none.
+**P3 prerequisite**: P2 `tgw promo list` returns 200 (scope confirmed active) — run before first `apply`.
 **P4 prerequisite**: P3 shipped and at least one full promo cycle completed.
+
+---
+
+## Seller Hub Conflict Risk — Why to Stop Using Seller Hub for Operations
+
+### Safe to do in Seller Hub (read-only or isolated APIs)
+- **Viewing anything** — always safe
+- **Messages / Buyer messages** — separate messaging API; no impact on listing data
+- **Offer responses** — safe, but TGW's `/form/offers` + `tgw offers` should be used instead
+- **Performance metrics / analytics** — read-only views
+
+### Risky in Seller Hub (can break TGW's Inventory API control)
+- **Editing listing price in Seller Hub** — Seller Hub may use Trading API `ReviseFixedPriceItem`
+  instead of the Inventory API. This detaches the listing from TGW's `offer_id`. TGW's next
+  offer PUT may then reject (offer mismatch) or create a NEW listing — a duplicate.
+- **Editing title / description / aspects / category in Seller Hub** — same detachment risk.
+  TGW's next `ebay_draft`+`ebay_upload` cycle may create a duplicate or get a 404 on the offer.
+- **Ending a listing via Seller Hub** — listing ends; `ebay_sync` eventually catches it but
+  there's a window where item JSON shows `status: listed` on a dead listing.
+- **Bulk edit in Seller Hub** — batch Trading API calls; same detachment risk at scale.
+- **Relisting in Seller Hub** — creates a new listing independent of TGW's offer_id.
+
+### Promotions — safe to move to TGW immediately
+The Marketing API (`sell.marketing`) is entirely separate from the Inventory API. Creating,
+editing, pausing, or ending a promotion does NOT modify listing data and carries no duplicate
+risk. The one internal risk (R2) — price reducer repricing an item mid-promo — is now gated
+by the `has_active_promo()` check added to `ebay_price_reducer.py`.
+
+### Migration plan to stop using Seller Hub
+1. **Promotions** (immediate): run `tgw promo sync` to import existing Seller Hub promos →
+   TGW now has `ebay_promo` blocks for all active promos → price reducer promo-skip is live →
+   all future promos created via `tgw promo draft → apply → start`. Stop using Seller Hub
+   Marketing page.
+2. **Offers / Buyer offers** (already done): use `/form/offers` + `tgw offers` exclusively.
+3. **Pricing** (already done): `ebay_price_reducer` is the only repricer; never change price in Seller Hub.
+4. **Listing details** (already done): all edits go through `tgw edit` / `/form/items/{sku}` → `ebay_draft` → operator review → `ebay_stage` → `ebay_publish`.
+5. **Ending listings** (already done): `tgw action archive` or `tgw action ebay_end_listing` — never end from Seller Hub.
+6. Orders / fulfillment: still requires Seller Hub until `sell.fulfillment` scope is approved (PP-EDITOR-001 F15).
 
 ---
 

@@ -2606,6 +2606,7 @@ for a production workstation — revisit if it matures before Sway gains ext-cap
 
 ---
 
+- Phase 2 (TGW integration depth) — Sway TGW-ify: env imports, permissions, a1131 setup. Flutter app startup fix (portal bypass). Full details in `dev-workflow/research/RESEARCH-sway-flutter-startup.md`.
 ## PP-HM-001 — Home Manager: Declarative User Environments
 
 ### Status: Phase 1 DONE (session 38, 2026-06-22) — Phase 2 open
@@ -2671,6 +2672,39 @@ inputs.home-manager.inputs.nixpkgs.follows = "nixpkgs";
 - tgw-test runs one full session with HM-managed Qtile config, no manual fixups
 - `nixos-rebuild switch` from MX pushes HM user config cleanly
 - No orphaned tmpfiles rules remaining in `nix/tgw/desktop.nix`
+
+---
+
+## PP-EVENTD-001 — TGW Event Server
+
+**Status:** Design research complete 2026-06-29. Future item — do not implement until
+PP-CLIP-001 Phase 3 (simple hook sync) is running and the truncation bug is resolved.
+
+Full design: `reference/PP-EVENTD-001-design.md`
+
+**What this is:** The long-horizon replacement for the simple Phase 3 hook approach.
+Once we have working cross-machine clipboard sync and understand the real bottlenecks,
+PP-EVENTD-001 evolves tgw-clipd into a proper event server. The Phase 3 hook informs
+whether a compiled hook binary (Go/Rust) is actually needed or if shell is fast enough.
+
+**Core concept:** lan-mouse is a trigger, not the platform. A central event router
+receives events from any producer (lan-mouse hooks, barcode scanners, pipeline workers,
+eBay webhooks) and distributes to any consumer (Flutter HUD, Android/Tasker, pm_intake).
+
+**Key architectural decisions settled in research (sessions 37+38):**
+- PostgreSQL (`state_machine` db) for event queue — not SQLite; LISTEN/NOTIFY for workers
+- Unix socket IPC: hook CLI → daemon (< 2ms, never blocks mouse tracking)
+- Implementation language for hook binary: Go or Rust (Python too slow for hook CLI cold-start)
+- Daemon itself can stay Python (long-running, startup cost paid once) or move to Go/Rust
+- git-annex + Google Drive data plane for large payloads; events carry hashes only
+- Near-serverless: GitHub (control plane) + Google Drive (data plane) + NixOS flake
+
+**Key capabilities when eventually built:**
+- Barcode reader shared across all platforms at zero hardware cost
+- Android/Tasker clipboard via HTTP (replaces KDE Connect; store-and-forward for offline)
+- Flutter HUD via WebSocket
+- pm_intake as fsnotify subscriber (event-driven, not queue-polling)
+- Google Drive direct API in Go — potential 3x photo upload speed vs current gdrive_sync.py
 
 ---
 
@@ -2829,14 +2863,63 @@ User service: `systemctl --user enable --now tgw-clipd`
 - `python3-sqlite3` (stdlib)
 - PP-WM-001 (Qtile) — the widget integration is Qtile-specific
 
+### Settled architecture decisions (updated 2026-06-29 sessions 37+38)
+
+**WM/KVM stack: Sway + lan-mouse (migration COMPLETE session 36)**
+- Qtile → Sway (DONE). Input Leap → lan-mouse (DONE).
+- Input Leap nix modules removed from flake (session 38); orphan process killed.
+- lan-mouse is **true peer-to-peer** — no master/server node. Both machines can use either
+  keyboard or mouse freely. Both machines have config files listing the other as a client.
+- Clipboard is intentionally excluded from lan-mouse's core (keeps it lean/fast).
+- Clipboard sync via **lan-mouse hooks** — `enter_hook` fires on the machine the cursor just
+  left, so `wl-paste` gets the right clipboard.
+
+**Clipboard truncation bug — FIXED 2026-06-29 session 38**
+- Root cause: Firefox running under XWayland; XWayland clipboard bridge truncates
+  multi-paragraph content at double newlines.
+- Fix: `MOZ_ENABLE_WAYLAND=1` in `environment.sessionVariables` in `sway.nix`.
+  Confirmed working on a1131. tgw-prod rebuild still pending.
+- Secondary cause found during investigation: Input Leap orphan process (zombie from
+  prior activation) was also intercepting clipboard. Removed from flake; process killed.
+
+**Cross-machine clipboard sync approach (Phase 3)**
+- Simple shell hook → extend tgw-clipd as daemon. No new language required for the hook.
+- Hook fires on boundary cross: `wl-paste -n | socat - UNIX-CONNECT:/run/user/$(id -u)/tgw-clipd.sock`
+- tgw-clipd daemon receives payload via Unix socket, classifies it, fans out via HTTP:
+  - Peer machine: SSH → `wl-copy`
+  - Android/Tasker: HTTP POST → Set Clipboard
+- If hook needs real logic (hashing, routing decisions) before hitting the socket, a compiled
+  binary (Go or Rust) is appropriate for that CLI; Python is fine for the long-running daemon.
+- KDE Connect remains for Android file transfer and notifications; clipboard relay replaced.
+
+**Barcode reader as shared peripheral (insight 2026-06-29)**
+- Barcode readers are USB HID keyboard devices physically on tgw-prod.
+- Via the event endpoint in tgw-clipd: scan → classify as SKU → push to all endpoints.
+- Tasker receives SKU → triggers lookup workflow without manual copy/paste.
+- Effectively makes the physical reader a shared cross-platform peripheral at zero hardware cost.
+
+**Future: tgw-eventd (PP-EVENTD-001)**
+- Full event server with PostgreSQL state machine, typed event schema, git-annex data plane,
+  WebSocket Flutter HUD, pm_intake event subscriber. Design in `reference/PP-EVENTD-001-design.md`.
+- Not planned for immediate implementation. Phase 3 (simple hook) comes first and informs design.
+
+**lan-mouse hook config (both machines, symmetric):**
+```toml
+[[clients]]
+hostname = "<other-machine>"
+enter_hook = "~/.config/lan-mouse/hooks/push-clipboard.sh"
+```
+
 ### Phases
 | Phase | Scope | Status |
 |-------|-------|--------|
-| 1 | Daemon: X11/XFixes + Wayland backends, SQLite, SKU tagging, CLI, systemd service | ✅ DONE 2026-06-24 |
-| 2 | rofi/dmenu history picker — classic clipboard manager UI (select entry → paste) | **NEXT** |
-| 3 | Qtile widget socket subscription (replace xclip polling) | after Phase 2 |
-| 4 | App-name tagging; macroboard `last-sku` fallback | after Phase 3 |
-| 5 | eBay URL detection → auto-link to item JSON when SKU+eBay URL copied together | after Phase 4 |
+| 1 | Daemon: dual-backend, SQLite, SKU tagging, CLI, systemd service | ✅ DONE 2026-06-24 |
+| 2 | rofi/dmenu history picker | **NEXT** (todo #1055) |
+| 2.5 | Diagnose + fix multi-paragraph clipboard truncation on Sway | ✅ DONE 2026-06-29 (MOZ_ENABLE_WAYLAND; Input Leap removed) |
+| 3 | Unix socket endpoint in tgw-clipd + lan-mouse hook scripts for cross-machine sync | after Phase 2.5 |
+| 4 | Tasker Android integration — HTTP POST on clipboard change | after Phase 3 |
+| 5 | App-name tagging; macroboard `last-sku` fallback | after Phase 4 |
+| 6 | eBay URL detection → auto-link to item JSON | after Phase 5 |
 
 ### Phase 2 design — rofi history picker
 Keybind (e.g. Super+V or macroboard key) launches a rofi menu showing clipboard history.
@@ -4171,6 +4254,159 @@ tgw.source replacement ~95% complete. Full pipeline: intake → AI identify → 
 - Remaining gap (~5%): live listing revision / repricer / relist workflow (PP-REVISION-001)
 
 - **PP-ADD-001** — Satellite / disconnected catalog support. Full design in Phase 6 § Satellite above. Depends on PP-ADD-005 + PP-ADD-003.
+
+---
+
+### Phase 4 — Flutter as Primary Cadillac UI: Seller Hub Parity + Beyond (2026-06-29)
+
+**Design mandate:** "Everything Seller Hub can do — and more and better." Flutter is the primary
+operator interface (tgw-prod desktop + Android tablet). Web UI is the secondary console (any
+Tailscale browser). Both share the same API; features built on the API are available on both.
+Features that exist nowhere yet are also captured here — this section is the definitive gap list.
+
+#### Flutter navigation (replacing web UI's flat URL structure)
+
+```
+Tab 1: Home        — dashboard counts, alerts, activity feed, PM chat, quick actions
+Tab 2: Inventory   — browse → item detail → full edit → photo management
+Tab 3: Work        — drafts, review queue, revisions, bulk ops
+Tab 4: eBay        — offers, pipeline / dead letter, categories, store
+Tab 5: System      — workers, health, todos, links, settings
+```
+
+Android tablet / desktop: persistent left rail with labels. Phone: bottom tab bar.
+
+#### Seller Hub coverage audit
+
+| Feature | Seller Hub | Web UI | Flutter | Gap phase |
+|---------|-----------|--------|---------|-----------|
+| Inventory browse + filter + sort | ✅ | ✅ | ⚠️ basic | F1 |
+| Item full edit (all fields) | ✅ | ✅ | ⚠️ basic | F2 |
+| Category context + 3-layer aspects | ❌ | ✅ | ❌ | F2 |
+| Readiness score per-field breakdown | ❌ | ✅ | ❌ | F2 |
+| Price comps + remove comp | ❌ | ✅ | ❌ | F2 |
+| Hint / barcode intake | ❌ | ✅ /form/intake | ❌ | F3 |
+| Photo gallery + reorder + delete | ⚠️ | ✅ | ❌ | F4 |
+| EPS upload trigger | ❌ | ✅ | ❌ | F4 |
+| Bulk edit / bulk action | ✅ | ✅ /form/bulk | ❌ | F5 |
+| Staged drafts approval + publish | ✅ | ✅ /form/drafts | ❌ | F6 |
+| Revision diff + apply | ❌ | ✅ /form/revisions | ❌ | F7 |
+| Buyer offers (view + respond) | ✅ | ✅ /form/offers | ❌ | F8 |
+| Pipeline jobs + dead letter | ❌ | ✅ /form/pipeline | ⚠️ partial | F9 |
+| Worker restart + system health | ❌ | ✅ /form/system | ⚠️ basic | F10 |
+| Dashboard counts + activity alerts | ✅ | ✅ /form/ | ⚠️ basic | F11 |
+| PM chat | ❌ | ✅ | ❌ | F11 |
+| eBay category search (in edit) | ✅ | ✅ | ❌ | F12 |
+| Store category assignment | ✅ | ✅ | ❌ | F12 |
+| Todos + suggest (in-app) | ❌ | ✅ | ❌ | F13 |
+| External links hub | ❌ | ✅ /form/links | ❌ | F14 |
+| **Orders (view, mark shipped, label)** | ✅ | ❌ ext. link only | ❌ | **F15** |
+| **Returns management** | ✅ | ❌ ext. link only | ❌ | **F16** |
+| **Promotions / Sale events (PP-PROMO-001)** | ✅ | ❌ pending | ❌ | **F17** |
+| **Performance metrics (defect rate, etc.)** | ✅ | ❌ | ❌ | F18 deferred |
+| **Advertising (Promoted Listings)** | ✅ | ❌ | ❌ | F19 deferred |
+
+**TGW capabilities that exceed Seller Hub (already built):**
+AI identification · AI-drafted titles/descriptions/specifics · multi-source barcode lookup ·
+category-aware condition filtering · 3-layer aspect form (operator > proposed > live merge) ·
+readiness scoring per field · hint trail · location-based inventory (semi-chaotic, size_class) ·
+pipeline visibility · revision draft with drift detection · comp source tracking + remove.
+
+#### Flutter phase breakdown
+
+**F1 — Inventory browse completeness**
+State filter chips (All / In Stock / Staged / Listed / Sold / Blocked) · free-text search ·
+location filter · sort (newest, price ↑↓, readiness). API: `/api/items` already supports all.
+
+**F2 — Item detail + full edit (biggest gap)**
+- Category context panel: condition selector (category-filtered), 3-layer aspect form, fulfillment suggestion (`/api/ebay/category-context/{id}`)
+- Readiness score breakdown (per-field traffic-light chips)
+- Price comps panel + `POST /api/items/{sku}/remove-comp`
+- Hint input + hint trail viewer (`/api/items/{sku}/hint-trail`)
+- Pipeline action buttons: identify, draft, price, stage, publish, archive
+- eBay section: listing_id, live_price, status badge, Seller Hub deep link, offers link
+
+**F3 — Intake form**
+Hint / barcode entry · location + size_class selector · category group one-button template ·
+camera trigger. API: existing `/api/items/{sku}/set-template` + `POST /api/items`.
+
+**F4 — Photo management**
+Photo gallery with tap-to-fullscreen · drag-to-reorder (touch-native, `POST /api/items/{sku}/photo-order`) ·
+swipe-to-delete (`DELETE /api/items/{sku}/assets/{filename}`) · upload trigger button.
+
+**F5 — Bulk operations**
+Multi-select (long-press) from browse · bulk actions: set template, reprice, stage, archive ·
+preview diff before apply. API: `/api/bulk/preview` + `/api/bulk/apply` + `/api/bulk/action`.
+
+**F6 — Drafts + staged approval**
+Staged items list (ready_at not null, unpublished) · approve / publish individual or batch ·
+"List Now" bypass. API: `/api/items` with status=staged filter + `/api/items/{sku}/action`.
+
+**F7 — Revision management**
+Pending revision_draft list · diff table (field | current | proposed, red/green) ·
+Apply / Discard. API: `/api/items/pending-revision` + `/api/items/{sku}/revision/apply`.
+
+**F8 — Buyer offers**
+Pending offers list: title, buyer price, % of ask, expiry countdown · inline Accept / Counter
+(price entry) / Decline · offer history per item. API: `/api/offers` + `/api/offers/{id}/respond`.
+
+**F9 — Pipeline + dead letter**
+Job list with state chips · dead letter browser with error detail · Requeue / Cancel per job ·
+worker queue depth display. API: `/api/pipeline/jobs` + `/api/jobs/{id}/requeue` + cancel.
+
+**F10 — System / admin**
+Health table (worker status, token expiry, disk %, postgres) · worker restart buttons ·
+system info. API: `/api/health` + `/api/system/workers` + `/api/system/workers/{unit}/restart`.
+
+**F11 — Dashboard + activity**
+Status alert strips (counts, badges) · audible/vibrate alert for critical issues ·
+activity feed · PM chat panel. API: `/api/dashboard` + `/api/activity` + `/api/pm/chat`.
+
+**F12 — eBay category tools**
+Type-to-search category picker (in edit screen) · store category assignment chip selector.
+API: `/api/ebay/category-search` + `/api/ebay/store-categories`.
+
+**F13 — Todos + suggest**
+Todo list (open / in_progress / done) · state change inline · quick suggest tap-to-add.
+API: existing `tgw todo` MCP tools / direct API.
+
+**F14 — External links hub**
+Curated tiles: eBay Seller Hub · Orders · Messages · Returns · Promotions · Performance · Fees ·
+Gemini · Claude · Tailscale · GitHub. Flutter: in-app WebView or external launch.
+
+**F15 — Orders / Fulfillment** ⚠️ requires `sell.fulfillment.readonly` scope (not yet held)
+View open orders: buyer, item list, total, payment status · mark shipped (tracking + carrier →
+Fulfillment API `POST /fulfillment/v1/order/{orderId}/shipping_fulfillment`) · label generation.
+API side: new `/api/orders` endpoints. Scope request: block on eBay DS approval.
+
+**F16 — Returns** ⚠️ scope TBD
+Open return cases · accept / partial refund / escalate. Design first, then scope request.
+
+**F17 — Promotions / Sale events** (PP-PROMO-001 — `sell.marketing` scope held ✅)
+Create sale event (% off, eligible items by category/price range) · active promotions list ·
+enroll / remove items. Design exists: `reference/PP-PROMO-001-sale-event-design.md`.
+API side: new `/api/promotions` endpoints. This is the highest-ROI missing feature.
+
+**F18 — Performance metrics** — deferred (requires `sell.analytics.readonly`, not held)
+
+**F19 — Promoted Listings advertising** — deferred (separate scope + cost model; research first)
+
+#### Implementation sequence
+
+Priority order based on operational impact:
+1. F2 (item edit completeness) — biggest daily friction point
+2. F8 (offers) — revenue impact, offers expire silently  
+3. F17 (promotions/PP-PROMO-001) — `sell.marketing` scope already held; design done
+4. F1 (browse completeness) — QOL for all workflows
+5. F6 (staged approval) — pipeline throughput
+6. F4 (photos) — frequent warehouse operation
+7. F9 (pipeline/dead letter) — ops visibility
+8. F3, F5, F7 — intake, bulk, revisions
+9. F10–F14 — admin, system, links
+10. F15 (orders) — unblock with scope request first
+11. F16 — after F15 scope pathway clear
+
+Web UI nav also needs **Fulfillment** and **Marketing** menus once F15/F17 API is built.
 
 ---
 

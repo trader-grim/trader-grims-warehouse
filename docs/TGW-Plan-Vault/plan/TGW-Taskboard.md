@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-06-29 17:39 UTC — 174 open, 24 done in the last 7 days._
+_Rendered 2026-06-30 02:53 UTC — 175 open, 25 done in the last 7 days._
 
 ## admin (19 open)
 
@@ -37,7 +37,7 @@ _Rendered 2026-06-29 17:39 UTC — 174 open, 24 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (11 open)
+## claude (12 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
@@ -51,6 +51,7 @@ _Rendered 2026-06-29 17:39 UTC — 174 open, 24 done in the last 7 days._
 | 1066 | 40 |  | PP-SEARCH-001 Phase 0: recoll universal index — ItemArchive + masterarchive/history + catalogs + docs vault |  |  |
 | 1054 | 45 |  | item detail: add History link using sku_old → historical catalog lookup. History uses old-format SKUs (tgw202005031234173 style); current items carry sku_old as the bridge. Need a /form/history/<old_sku> route or link to historical-catalog search. Design first. |  |  |
 | 1044 | 50 |  | PP-DOCLIB-001: Research and docs library system — design a structured library for vault research docs, perplexity outputs, gemini research, inbox archives, and dev-workflow notes. Goals: consistent location taxonomy, easy retrieval, cross-reference between research and PP-* items, tgw CLI surface (tgw docs search/show). Consider markmap integration for browsable index. |  |  |
+| 1076 | 50 |  | Request higher EPS call limit from eBay Developer Support — current ~5k/day insufficient; request 25k-50k/day; bundle with buy.marketplace_insights followup |  |  |
 | 1056 | 60 |  | Audit sdb/sdc contents, free what's unused, extend vg_tgw into HDD space, grow nix LV |  |  |
 
 ## review (141 open)
@@ -205,10 +206,11 @@ _Rendered 2026-06-29 17:39 UTC — 174 open, 24 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — Sold reconciliation and inventory status sync (design ready)\|PP-SOLD-001]] |  |
 
-## Done this week (24)  — showing 15 most recent
+## Done this week (25)  — showing 15 most recent
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 1075 | claude | 2026-06-29 | session 37: fix pytest RAM explosion + 44 test failures + codebase group permissions |
 | 1074 | claude | 2026-06-29 | PP-WM-001 Sway Flutter startup fix |
 | 1073 | claude | 2026-06-29 | Write scripts/ebay_photo_push.py — upload missing local photos to EPS, PUT full imageUrls to live inventory_item for ~1135 items; run after sku_migrate completes (PP-EBAY-MIRROR-001 P1.5) |
 | 1072 | claude | 2026-06-29 | PP-WM-001: write nix/os/sway.nix + nix/os/lan-mouse.nix; retire input-leap-server.nix + input-leap-client.nix; update tgw-prod.nix + a1131.nix |
@@ -223,5 +225,4 @@ _Rendered 2026-06-29 17:39 UTC — 174 open, 24 done in the last 7 days._
 | 1045 | admin | 2026-06-25 | tgw-catio-nix 0.0.1 alpha: npm install -g @tolsi/claude-auto-retry — one-time bootstrap for db user to activate the claude fish wrapper |
 | 1041 | admin | 2026-06-25 | Fix permissions drift: chmod 600 /opt/TGW/secrets/backup-age-identity.age (currently 0664, flagged by tgw health) |
 | 1061 | claude | 2026-06-25 | PP-NIXOS-001: Master plan updated with canonical flake settled architecture section. CLAUDE-NIX.md in tgw-flake updated: canonical notice, corrected host inventory (tgw-prod LIVE), corrected hardware entry, nixos-anywhere URL. |
-| 1060 | claude | 2026-06-25 | PP-NIXOS-001: USB vault bundle created at /mnt/vault/flake/tgw-flake.bundle — offline DR copy of canonical flake. Refresh after each commit: git -C ~/tgw-flake bundle create /mnt/vault/flake/tgw-flake.bundle --all |
-| … | | | _…and 9 more — run `tgw todo --all` to see everything_ |
+| … | | | _…and 10 more — run `tgw todo --all` to see everything_ |
