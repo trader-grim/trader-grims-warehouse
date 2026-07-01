@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-07-01 05:23 UTC — 176 open, 25 done in the last 7 days._
+_Rendered 2026-07-01 18:27 UTC — 177 open, 27 done in the last 7 days._
 
 ## admin (19 open)
 
@@ -37,13 +37,14 @@ _Rendered 2026-07-01 05:23 UTC — 176 open, 25 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (13 open)
+## claude (14 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
 | 1062 | 5 |  | PP-LISTEDITOR-001: Listing editor — item detail page restructure + editable aspects + EPS photos + price comps + revision push to eBay. Replaces Seller Hub for listing management. Plan: docs/ai-plans/PP-LISTEDITOR-001.md. Phase 1A: EPS photo strip + ebay_live panel. Phase 1B: editable fields, aspects form (REQUIRED/RECOMMENDED badges, dropdowns for SELECTION_ONLY), price comps inline. Phase 3: verify Publish for 18 staged items. Phase 2: enable revision apply (_APPLY_ENABLED=True, fill eBay PUT stub revision.py:399, extract build_inventory_body/build_offer_body from sync.py). Files: http_server.py, revision.py, ebay/sync.py, tests/test_revision.py. Absorbs todos #876 #877 #878. | [[TGW-Master-Plan#PP-LISTEDITOR-001 — Listing Editor (item detail page restructure)\|PP-LISTEDITOR-001]] |  |
 | 1055 | 15 |  | PP-CLIP-001 Phase 2: rofi clipboard history picker — keybind launches rofi fed from tgw clip list; select entry copies back via tgw clip get --id N --copy; SKUs pinned/highlighted; optional immediate paste via xdotool/wl-paste | [[TGW-Master-Plan#Phase 1 — `db` operator config (unblocks PP-WM-001 Phase 2 + PP-CLIP-001)\|PP-CLIP-001]] |  |
 | 1052 | 18 |  | PP-BACKUP-001: write restore script + README for USB keys — script covers: (1) boot NixOS installer, (2) nixos-anywhere --flake path:.#tgw-prod, (3) pg_restore from dump, (4) rsync /opt/TGW from TGW-SNAPSHOT-0, (5) verify tgw health + echo round-trip. README covers user/password, uid=900 tgw check, secrets chmod. Files go in root of TGW-SECRETS-A and TGW-SECRETS-B. Plain text + shell script, no dependencies. | [[TGW-Master-Plan#Stage 3 — PP-BACKUP-001 Phases B–E (M, 1–2 sessions)\|PP-BACKUP-001]] |  |
+| 1079 | 20 |  | PP-CATPICK-001 Phase 1: backfill category_candidates (name+path from tree cache) for all 25 category-groups.json groups | [[TGW-Master-Plan#PP-CATPICK-001 — Smart Category Assignment (group-shortlist-first, self-improving)\|PP-CATPICK-001]] |  |
 | 1053 | 22 |  | data-scrub: strip legacy Magento fields from item JSONs — fields to remove: 'Item number', '#STATUS', 'attribute_set', 'm2_categories', 'category_ids', 'ebay_condition_number', 'eBay category 1 name', 'eBay category 1 number', 'C:Brand', 'C:Type', 'C:MPN', 'C:Model', 'C:Language', 'C:Movie/TV Title', 'input_voltage', 'description_history', 'title_history', 'location_history'. Historical data preserved in historical-tgwcatalog.json / historical-master-catalog.json. Write a scrub worker or one-shot script; archive before/after per policy. |  |  |
 | 1049 | 25 |  | get-ebay-token browser UX: add --print-url flag to Python CLI + upgrade tgw fish wrapper in nix/tgw/home.nix to call xdg-open as db user (currently prints URL; this makes it auto-open) | [[TGW-Master-Plan#Stage 4 — PP-NIXOS-001 (L)\|PP-NIXOS-001]] |  |
 | 1064 | 25 |  | PP-PHOTO-001 Phase A: GDrive → Gemini multimodal ebay_draft — pass all item photos to gemini-2.5-flash via GDrive HTTPS URLs instead of base64 encoding. Expected: major listing quality jump (all 8+ photos analyzed; Gemini extracts condition details, labels, markings, color, wear from every angle). Design: (1) store gdrive_file_ids map in item JSON (populated by rclone sync hook or one-time scan); (2) in ebay_draft worker, temporarily grant anyone-reader on each photo, build image_url array with drive.google.com/uc?export=download&id= URLs, pass to gemini-2.5-flash alongside text prompt, revoke after call; (3) add gdrive_api helper in tgw/apis/; (4) OAuth token in secrets_root/gdrive-token.json (drive.file scope preferred). Prereqs: Google Cloud project with Drive API enabled, OAuth creds in secrets_root. Research: docs/TGW-Plan-Vault/dev-workflow/research/RESEARCH-gdrive-zero-bandwidth-ebay-image-upload.md | [[TGW-Master-Plan#PP-PHOTO-001 — GDrive Zero-Bandwidth Photo Pipeline (Phase 0 complete 2026-06-26; Phases A+B open)\|PP-PHOTO-001]] |  |
@@ -207,10 +208,12 @@ _Rendered 2026-07-01 05:23 UTC — 176 open, 25 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — Sold reconciliation and inventory status sync (design ready)\|PP-SOLD-001]] |  |
 
-## Done this week (25)  — showing 15 most recent
+## Done this week (27)  — showing 15 most recent
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 1080 | claude | 2026-07-01 | Aspects cache opportunistic warm-up: ebay_sync now fills missing/stale category aspects from categories seen each sync pass, self-throttling on first failure (Dave's idea, session 39) |
+| 1078 | claude | 2026-07-01 | Session 39 part 3 (button consolidation discussion): opened PP-ACTIONCONSOLE-001 in master plan capturing Dave's full design discussion (Save Draft = existing notepad mechanism not a new action + new operator-notes-field idea; Approve=dole-queue vs Publish Now=skip-the-line-and-do-everything, confirmed as distinct not duplicative; troubleshooting buttons should ideally be contextual next to pipeline log entries -- not yet designed; Archive/Delete/End-Listing confirmed to STAY as first-class always-visible actions, not folded into consolidation; status indicators need a deeper rethink -- drop Staged from operator view, Approved subsumed once Live, long-term direction is stateful/smart buttons replacing separate indicators, draft-vs-live view toggle flagged as a separate not-yet-designed problem). Implemented only the safe, confirmed-scope pieces this session: pipeline status bar restyled from button-like chips to a flat text breadcrumb, and 'Staged' dropped from the operator-visible bar (now just Draft — Approved — Live). Archive/Delete/End Listing untouched. Full 3-button consolidation, contextual log actions, stateful buttons, and notes field all deferred pending further design -- see PP-ACTIONCONSOLE-001 in the plan for the complete discussion and open items. |
 | 1075 | claude | 2026-06-29 | session 37: fix pytest RAM explosion + 44 test failures + codebase group permissions |
 | 1074 | claude | 2026-06-29 | PP-WM-001 Sway Flutter startup fix |
 | 1073 | claude | 2026-06-29 | Write scripts/ebay_photo_push.py — upload missing local photos to EPS, PUT full imageUrls to live inventory_item for ~1135 items; run after sku_migrate completes (PP-EBAY-MIRROR-001 P1.5) |
@@ -224,6 +227,4 @@ _Rendered 2026-07-01 05:23 UTC — 176 open, 25 done in the last 7 days._
 | 1063 | claude | 2026-06-26 | PP-LISTEDITOR-001: category-change condition/aspect staleness — best_condition_for_category() utility; readiness live-validates condition vs policy cache and aspects vs category-context; ebay_draft remaps/clears condition on category change |
 | 1048 | claude | 2026-06-25 | claude-auto-retry: configure retry on connection/timeout errors for intermittent cell link — @tolsi fork supports custom retry config; research retry_on settings, add to ~/.claude-auto-retry config or wrapper invocation in db.nix claude function |
 | 1045 | admin | 2026-06-25 | tgw-catio-nix 0.0.1 alpha: npm install -g @tolsi/claude-auto-retry — one-time bootstrap for db user to activate the claude fish wrapper |
-| 1041 | admin | 2026-06-25 | Fix permissions drift: chmod 600 /opt/TGW/secrets/backup-age-identity.age (currently 0664, flagged by tgw health) |
-| 1061 | claude | 2026-06-25 | PP-NIXOS-001: Master plan updated with canonical flake settled architecture section. CLAUDE-NIX.md in tgw-flake updated: canonical notice, corrected host inventory (tgw-prod LIVE), corrected hardware entry, nixos-anywhere URL. |
-| … | | | _…and 10 more — run `tgw todo --all` to see everything_ |
+| … | | | _…and 12 more — run `tgw todo --all` to see everything_ |

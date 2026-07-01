@@ -560,6 +560,44 @@ def check_nats(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# ebay_sync per-SKU fallback check (session-39 API audit finding #2)
+# ---------------------------------------------------------------------------
+
+def check_ebay_sync_fallback(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Warn if ebay_sync has fallen back to per-SKU offer lookups (eBay error 25707 —
+    an orphaned offer with a non-alphanumeric SKU breaks the bulk offer list).
+
+    Green (ok=True): never fell back, or fell back once (transient — the bulk path
+    may just have had a one-off hiccup).
+    Red (ok=False, warn=True): fell back 2+ consecutive runs — the per-SKU path is
+    ~N-fold more expensive in API calls than the bulk list and this is now the
+    steady state, not a blip. See todo #1077 (clear the orphaned offer).
+    """
+    t = time.time()
+    root = cfg.get("catalog_root")
+    path = Path(root) / "ebay-sync-fallback-state.json" if root else None
+    if not path or not path.exists():
+        return _result("ebay_sync_fallback", True, "no fallback recorded", (time.time() - t) * 1000)
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return _result("ebay_sync_fallback", True, f"state unreadable: {exc}", (time.time() - t) * 1000)
+
+    consecutive = int(state.get("consecutive_fallback_runs", 0))
+    if consecutive >= 2:
+        return _result(
+            "ebay_sync_fallback", False,
+            f"{consecutive} consecutive per-SKU fallback runs — clear orphaned offer (todo #1077)",
+            (time.time() - t) * 1000, warn=True, consecutive=consecutive,
+        )
+    if consecutive == 1:
+        return _result("ebay_sync_fallback", True, "1 fallback run (transient)",
+                       (time.time() - t) * 1000, warn=True, consecutive=consecutive)
+    return _result("ebay_sync_fallback", True, "bulk offer list OK", (time.time() - t) * 1000)
+
+
+# ---------------------------------------------------------------------------
 # Combined check
 # ---------------------------------------------------------------------------
 
@@ -589,6 +627,7 @@ def check_all(cfg: Dict[str, Any],
         check_sync_conflicts(cfg),
     ]
     checks.append(check_nats(cfg))
+    checks.append(check_ebay_sync_fallback(cfg))
     if include_ollama:
         checks.append(check_ollama())
     if include_ebay:

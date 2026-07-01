@@ -127,6 +127,32 @@ Use plan row numbers for plan-table items; "todo #N" only for live tracker IDs.
 - **`ebay_stage` "ImageLinks cannot exceed"** for same item — eBay rejecting image URLs.
 - **15 stale `catalog_rebuild` dead-letters** from 2026-06-28/29 — likely old path errors; may need cleanup.
 
+## 3d. What Changed This Session (session 39 — 2026-07-01)
+
+**Session 39 — category picker rebuild, eBay API quota audit, condition-policy fix, action-console design (todo #1078, done; #1079 + PP-ACTIONCONSOLE-001 open):**
+
+| Change | Detail |
+|--------|--------|
+| Category field rebuilt | Was broken (429 from per-keystroke live Taxonomy calls). New multi-mode picker: local-cached-tree search / type-ID / Browse. `apis/ebay/taxonomy.py`: `search_categories_local`, `get_category_node`, `get_category_children`; tree cached to `ebay-category-tree.json` (30-day TTL). New `/api/ebay/category-{search,node,children}` endpoints. |
+| Aspects cached | `get_aspects()` was live-per-page-view, zero caching — the real Taxonomy quota killer. Now cached per category_id, `ebay-aspects-cache.json`, 14-day TTL. |
+| `ebay_sync.py` quota fixes | (1) Unconditional `inventory_item` GET on every offer every sync pass (~8k calls/day) now gated by `ebay_verify_interval_days`, reuses photo-integrity check's fetch instead of double-calling. (2) Per-SKU 25707 fallback now tracked in `ebay-sync-fallback-state.json`; new `tgw health` check `ebay_sync_fallback` goes red after 2+ consecutive runs. |
+| Condition policy fabrication fixed | `http_server.py` had a hand-rolled `_CONDITION_ID_MAP` that invented 3 grades (Used-Excellent/Good/Acceptable) under eBay's single real "Used" conditionId 3000. Removed; condition dropdown now sourced from the real cached per-category Metadata API policy (`apis/ebay/conditions.py`, already correct, just wasn't wired up). |
+| Prop 65 un-hidden | Removed `'California Prop 65 Warning'` from `specifics.py`'s aspect skip-list — it's a real, near-universal aspect, was wrongly treated as boilerplate. |
+| `get_category_tree_id` resilience | Was in-memory-only with no fallback — stacked a 2nd live-call failure atop every aspects/search call during quota exhaustion. Now disk-cached (effectively permanent) with documented EBAY_US default `'0'` as last resort. |
+| `aspects_error` field added | Empty aspects list used to render as "no specifics for this category" (false — no real category has zero). API now distinguishes lookup-failed from genuinely-empty; UI shows "lookup failed, retry" instead. |
+| Condition remap wired up | `best_condition_for_enum()` (never-upgrade condition remap) existed but was never called anywhere. Now wired into `/api/ebay/category-context?current_condition=` + JS auto-selects the remapped value with a visible note + auto-PATCH — fixes "switching category jumped condition to Like New" (confirmed via live data: 3000/"Used" and the 4000/5000/6000/"Very Good/Good/Acceptable" set are ~mutually exclusive per category; books/media use 5000 not 3000, as Dave suspected). |
+| Pipeline status bar restyled | Flat text breadcrumb instead of button-like chips; dropped "Staged" from operator view (not actionable, implementation detail). |
+| ~130 new tests | Across ~10 new/extended test files, all passing. |
+
+**PP-ACTIONCONSOLE-001 opened (design only, nothing else built):** item detail page has ~12 action buttons + a status bar; Dave wants day-to-day listing focused with no clutter. Settled so far: Archive/Delete/End Listing stay as first-class actions; troubleshooting buttons (Re-identify, Re-upload photos, Sync from eBay, manual Stage) should relocate to a *separate ops/admin surface* entirely, not stay on this page even collapsed; stateful/smart buttons should extend the already-existing Publish-Now→Update-Listing/End-Listing pattern to every action slot, replacing separate status indicators; troubleshooting collapses conceptually to "this AI result sucks, try again." Still undesigned: draft-vs-live view toggle, operator notes field, exact button-slot transition logic. See plan section for full discussion — do not build the 3-button consolidation until the contextual-log-action design is settled.
+
+### Open from session 39
+
+- **PP-ACTIONCONSOLE-001** — design conversation, continue next session before building anything beyond what's already done (pipeline bar restyle).
+- **todo #1079** — PP-CATPICK-001 Phase 1 (backfill category_candidates names/paths from tree cache, zero API calls) — planned, not started.
+- **Taxonomy API per-category aspects endpoint** may still be quota-exhausted for categories never previously viewed (separate from tree-ID resolution, which is now fixed) — expected to self-clear; no action needed unless it persists unusually long.
+- **todo #1077** carries forward from session 38 — still open, still the root cause of the `ebay_sync` fallback path.
+
 ---
 
 ## 4. What Remains Risky

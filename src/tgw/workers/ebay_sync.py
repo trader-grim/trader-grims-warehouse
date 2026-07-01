@@ -18,7 +18,7 @@ import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import psycopg2.errors
 import requests
@@ -112,6 +112,7 @@ class EbaySyncWorker(QueueWorker):
 
         try:
             offers = fetch_all_offers(self.config)
+            self._record_fallback_state(used_fallback=False)
         except requests.exceptions.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else 0
             if status == 400:
@@ -124,10 +125,21 @@ class EbaySyncWorker(QueueWorker):
                 except Exception:
                     eids = set()
                 if 25707 in eids:
-                    log.warning(
-                        "ebay_sync: bulk offer list blocked by bad SKU (eBay 25707) — "
-                        "falling back to per-SKU individual lookups"
-                    )
+                    consecutive = self._record_fallback_state(used_fallback=True)
+                    if consecutive >= 2:
+                        log.error(
+                            "ebay_sync: bulk offer list blocked by bad SKU (eBay 25707) for "
+                            "%d consecutive runs — falling back to per-SKU lookups "
+                            "(this multiplies call volume ~N-fold; the underlying orphaned "
+                            "offer needs clearing, see todo #1077)",
+                            consecutive,
+                        )
+                        tgw_logging.log_event("ebay_sync_fallback_persistent", consecutive=consecutive)
+                    else:
+                        log.warning(
+                            "ebay_sync: bulk offer list blocked by bad SKU (eBay 25707) — "
+                            "falling back to per-SKU individual lookups"
+                        )
                     offers = self._fetch_offers_by_local_skus()
                 else:
                     raise
@@ -141,11 +153,15 @@ class EbaySyncWorker(QueueWorker):
 
         log.info("ebay_sync: received %d offer(s) from eBay", len(offers))
         updated = 0
+        seen_category_ids: List[str] = []
 
         for offer in offers:
             sku = offer.get("sku", "")
             if not sku:
                 continue
+            cat_id = offer.get("categoryId")
+            if cat_id:
+                seen_category_ids.append(str(cat_id))
             try:
                 updated += self._sync_one(offer, sku)
             except Exception:
@@ -153,6 +169,20 @@ class EbaySyncWorker(QueueWorker):
 
         log.info("ebay_sync: updated %d item(s)", updated)
         tgw_logging.log_event("ebay_sync_complete", offers_fetched=len(offers), items_updated=updated)
+
+        # Opportunistic aspects-cache warm-up (session 39, Dave's idea): use whatever
+        # Taxonomy API quota is left today to fill in categories we actually sell in
+        # but haven't cached aspects for yet. Self-throttling — stops at the first
+        # failure rather than retrying — so this never risks the sync run itself.
+        if seen_category_ids:
+            try:
+                from tgw.apis.ebay.specifics import warm_missing_aspects
+
+                warmed = warm_missing_aspects(self.config, seen_category_ids)
+                if warmed:
+                    log.info("ebay_sync: warmed aspects cache for %d category(ies)", warmed)
+            except Exception as exc:
+                log.warning("ebay_sync: aspects warm-up skipped: %s", exc)
 
         if updated:
             try:
@@ -167,6 +197,46 @@ class EbaySyncWorker(QueueWorker):
                 pass
 
         self._reschedule()
+
+    def _fallback_state_path(self) -> Optional[Path]:
+        root = self.config.get("catalog_root")
+        return Path(root) / "ebay-sync-fallback-state.json" if root else None
+
+    def _record_fallback_state(self, used_fallback: bool) -> int:
+        """Track consecutive per-SKU fallback runs so a recurring eBay 25707 error
+        (session-39 API audit finding #2) surfaces as a visible health warning instead
+        of silently running the ~N-fold-more-expensive per-SKU path forever.
+
+        Returns the current consecutive-fallback-run count (0 if this run used the
+        normal bulk path).
+        """
+        path = self._fallback_state_path()
+        if not path:
+            return 1 if used_fallback else 0
+
+        state: Dict[str, Any] = {}
+        if path.exists():
+            try:
+                state = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                state = {}
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        consecutive = int(state.get("consecutive_fallback_runs", 0))
+        if used_fallback:
+            consecutive += 1
+            state["consecutive_fallback_runs"] = consecutive
+            state["last_fallback_at"] = now_iso
+        else:
+            consecutive = 0
+            state["consecutive_fallback_runs"] = 0
+            state["last_bulk_ok_at"] = now_iso
+
+        try:
+            path.write_text(json.dumps(state), encoding="utf-8")
+        except OSError as exc:
+            log.warning("ebay_sync: could not write fallback state: %s", exc)
+        return consecutive
 
     def _fetch_offers_by_local_skus(self) -> List[Dict[str, Any]]:
         """Fallback: fetch offers one SKU at a time from local items with offer_ids.
@@ -273,9 +343,13 @@ class EbaySyncWorker(QueueWorker):
             changed = True
 
         # PP-EBAY-SNAPSHOT-001 Phase 3: periodic photo integrity check for active listings.
+        # Returns the freshly-fetched inventory_item payload (if it made a live call this
+        # cycle) so the refresh block below can reuse it instead of GETting it twice.
+        photo_live: Optional[Dict[str, Any]] = None
         if listing_status == "ACTIVE" or ebay_listing.get("status") == "Active":
             item["ebay_listing"] = ebay_listing  # anchor before mutation
-            changed |= self._check_photo_integrity(sku, item, ebay_listing)
+            changed_pi, photo_live = self._check_photo_integrity(sku, item, ebay_listing)
+            changed |= changed_pi
 
         # Refresh ebay_live with current offer + inventory item snapshot
         from datetime import datetime, timezone
@@ -285,13 +359,33 @@ class EbaySyncWorker(QueueWorker):
         new_live = dict(existing_live)
         new_live["offer"] = dict(offer)
         new_live["synced_at"] = _now_iso
-        # Also refresh inventory_item (photos, aspects, title) from eBay
-        try:
-            live_inv = ebay_get(self.config, f"/sell/inventory/v1/inventory_item/{sku}")
-            new_live["inventory_item"] = live_inv
+        # Refresh inventory_item (photos, aspects, title) from eBay — but only when due.
+        # This used to be an unconditional live call every sync pass for every item
+        # (~2,000+ items x 4x/day), which was the single biggest Sell Inventory API
+        # quota drain on the platform (session 39 API audit). Reuse the photo-integrity
+        # check's fetch when it already ran this cycle; otherwise gate by the same
+        # ebay_verify_interval_days interval used there, keeping the prior snapshot
+        # until it's actually due for a refresh.
+        if photo_live is not None:
+            new_live["inventory_item"] = photo_live
             new_live["pulled_at"] = _now_iso
-        except Exception as _exc:
-            log.warning("ebay_sync: inventory_item GET failed for %s: %s", sku, _exc)
+        else:
+            interval_days = int(self.config.get("ebay_verify_interval_days", 7))
+            last_pulled = existing_live.get("pulled_at")
+            due = True
+            if last_pulled:
+                try:
+                    age_days = (datetime.now(timezone.utc) - datetime.fromisoformat(last_pulled)).days
+                    due = age_days >= interval_days
+                except (ValueError, TypeError):
+                    due = True
+            if due:
+                try:
+                    live_inv = ebay_get(self.config, f"/sell/inventory/v1/inventory_item/{sku}")
+                    new_live["inventory_item"] = live_inv
+                    new_live["pulled_at"] = _now_iso
+                except Exception as _exc:
+                    log.warning("ebay_sync: inventory_item GET failed for %s: %s", sku, _exc)
         item["ebay_live"] = new_live
         changed = True
 
@@ -309,10 +403,15 @@ class EbaySyncWorker(QueueWorker):
         tgw_logging.log_event("ebay_listing_synced", sku=sku, status=ebay_status, listing_id=listing_id, offer_id=offer_id, price=price_val)
         return 1
 
-    def _check_photo_integrity(self, sku: str, item: Dict[str, Any], ebay_listing: Dict[str, Any]) -> bool:
+    def _check_photo_integrity(
+        self, sku: str, item: Dict[str, Any], ebay_listing: Dict[str, Any]
+    ) -> "tuple[bool, Optional[Dict[str, Any]]]":
         """GET inventory_item and enqueue ebay_repush if photo count dropped.
 
-        Returns True if ebay_listing was mutated (so caller writes the file).
+        Returns (changed, live_payload). changed is True if ebay_listing was mutated
+        (so caller writes the file). live_payload is the fetched inventory_item dict
+        when a live call was made this cycle, else None — the caller reuses it to
+        avoid a second GET of the same endpoint in the same sync pass.
         Only runs when the item is due for a check (every ebay_verify_interval_days).
         """
         interval_days = int(self.config.get("ebay_verify_interval_days", 7))
@@ -321,7 +420,7 @@ class EbaySyncWorker(QueueWorker):
             try:
                 age_days = (datetime.now(timezone.utc) - datetime.fromisoformat(last_checked)).days
                 if age_days < interval_days:
-                    return False
+                    return False, None
             except (ValueError, TypeError):
                 pass
 
@@ -329,7 +428,7 @@ class EbaySyncWorker(QueueWorker):
             live = ebay_get(self.config, f"/sell/inventory/v1/inventory_item/{sku}")
         except Exception as exc:
             log.warning("ebay_sync: photo check GET failed for %s: %s", sku, exc)
-            return False
+            return False, None
 
         confirmed = live.get("product", {}).get("imageUrls", [])
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -367,7 +466,7 @@ class EbaySyncWorker(QueueWorker):
             log.debug("ebay_sync: %s photo verify OK — %d/%d confirmed", sku, len(confirmed), len(submitted))
             tgw_logging.log_event("ebay_photo_verify_ok", sku=sku, confirmed=len(confirmed))
 
-        return True
+        return True, live
 
     def _reschedule(self) -> None:
         next_run = time.time() + SYNC_INTERVAL_S

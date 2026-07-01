@@ -19,7 +19,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
 import psycopg2.extras
@@ -1635,34 +1635,56 @@ def ebay_aspects(category_id: str) -> Dict[str, Any]:
 
 
 @app.get("/api/ebay/category-context/{category_id}", dependencies=[AUTH])
-def ebay_category_context(category_id: str) -> Dict[str, Any]:
+def ebay_category_context(category_id: str, current_condition: str = "") -> Dict[str, Any]:
     from .ebay.pricing import _groups_reverse, _load_groups
 
-    # ── Conditions from cache ────────────────────────────────────────────
+    # ── Conditions — real per-category eBay policy, not a fabricated superset ──
+    # (session 39: the old _CONDITION_ID_MAP fanned one real conditionId like 3000
+    # "Used" out into three invented grades — USED_EXCELLENT/GOOD/ACCEPTABLE — none
+    # of which eBay actually allows for categories with only a single "Used" bucket)
     conditions: List[Dict[str, str]] = []
-    cache_path = _cfg.get("catalog_root", Path(".")) / "ebay-condition-policies.json"
-    if cache_path.exists():
+    try:
+        from .apis.ebay.conditions import allowed_conditions_for_category
+
+        seen: set = set()
+        for c in allowed_conditions_for_category(_cfg, category_id):
+            if c["condition_enum"] not in seen:
+                conditions.append({"enum": c["condition_enum"], "label": c["condition_label"]})
+                seen.add(c["condition_enum"])
+    except Exception as exc:
+        log.warning("category-context: conditions load error: %s", exc)
+
+    # ── Condition remap — never upgrade condition when category changes ────────
+    # (session 39: switching category could otherwise leave a stale/invalid enum
+    # in place, or — per Dave — silently jump to a better grade like "Like New".
+    # best_condition_for_enum() already implements the correct same-or-worse-only
+    # remap; it just wasn't wired into the live category-change UI path.)
+    condition_remap: Optional[Dict[str, str]] = None
+    if current_condition and current_condition not in {c["enum"] for c in conditions}:
         try:
-            data = json.loads(cache_path.read_text(encoding="utf-8"))
-            cat_policy = (data.get("policies") or {}).get(str(category_id)) or []
-            seen: set = set()
-            for entry in cat_policy:
-                cid = str(entry[0] if isinstance(entry, (list, tuple)) else entry.get("conditionId", ""))
-                for opt in _CONDITION_ID_MAP.get(cid, []):
-                    if opt["enum"] not in seen:
-                        conditions.append(dict(opt))
-                        seen.add(opt["enum"])
+            from .apis.ebay.conditions import best_condition_for_enum
+
+            remap = best_condition_for_enum(_cfg, category_id, current_condition)
+            if remap:
+                condition_remap = {"enum": remap["condition_enum"], "label": remap["condition_label"]}
         except Exception as exc:
-            log.warning("category-context: conditions load error: %s", exc)
+            log.warning("category-context: condition remap error: %s", exc)
 
     # ── Aspects from eBay API ────────────────────────────────────────────
+    # No real eBay category has zero item specifics (at minimum: Country/Region
+    # of Manufacture, and most also carry California Prop 65 Warning) — an empty
+    # list here means the lookup FAILED (e.g. Taxonomy API rate-limited), not that
+    # the category genuinely has none. aspects_error carries that distinction to
+    # the UI so it can say "lookup failed, retry" instead of "no specifics".
     aspects: List[Any] = []
+    aspects_error: Optional[str] = None
     try:
         from .apis.ebay.specifics import get_aspects
 
         aspects = get_aspects(_cfg, category_id)
     except Exception as exc:
         log.warning("category-context: aspects error: %s", exc)
+        aspects_error = str(exc)
 
     # ── Group data from category-groups.json ─────────────────────────────
     _load_groups(_cfg)  # warm cache
@@ -1699,7 +1721,9 @@ def ebay_category_context(category_id: str) -> Dict[str, Any]:
         "ok": True,
         "category_id": category_id,
         "conditions": conditions,
+        "condition_remap": condition_remap,
         "aspects": aspects,
+        "aspects_error": aspects_error,
         "store_category": store_category,
         "store_category_id": store_category_id,
         "group_name": group_name,
@@ -1723,25 +1747,48 @@ def ebay_category_search(q: str = "") -> Dict[str, Any]:
     if not q or len(q.strip()) < 2:
         return {"ok": True, "results": []}
     try:
-        from .apis.ebay.taxonomy import get_category_suggestions
+        from .apis.ebay.taxonomy import search_categories_local
 
-        raw = get_category_suggestions(_cfg, q.strip())
-        results = []
-        for s in raw[:15]:
-            cat = s.get("category", {})
-            ancestors = s.get("categoryTreeNodeAncestors", [])
-            path_parts = [a.get("categoryName", "") for a in ancestors[-3:]]
-            results.append(
-                {
-                    "id": cat.get("categoryId", ""),
-                    "name": cat.get("categoryName", ""),
-                    "path": " > ".join(p for p in path_parts if p),
-                }
-            )
+        results = search_categories_local(_cfg, q.strip(), limit=20)
         return {"ok": True, "results": results}
     except Exception as exc:
         log.warning("category-search error: %s", exc)
         return {"ok": False, "detail": str(exc), "results": []}
+
+
+# GET /api/ebay/category-node/{category_id} — resolve a raw operator-typed ID
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/ebay/category-node/{category_id}", dependencies=[AUTH])
+def ebay_category_node(category_id: str) -> Dict[str, Any]:
+    try:
+        from .apis.ebay.taxonomy import get_category_node
+
+        node = get_category_node(_cfg, category_id)
+        if not node:
+            return {"ok": False, "detail": "unknown category id"}
+        return {"ok": True, **node}
+    except Exception as exc:
+        log.warning("category-node error: %s", exc)
+        return {"ok": False, "detail": str(exc)}
+
+
+# GET /api/ebay/category-children?parent_id=... — tree-browse navigation
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/ebay/category-children", dependencies=[AUTH])
+def ebay_category_children(parent_id: str = "") -> Dict[str, Any]:
+    try:
+        from .apis.ebay.taxonomy import get_category_children, get_category_node
+
+        children = get_category_children(_cfg, parent_id or None)
+        parent = get_category_node(_cfg, parent_id) if parent_id else None
+        return {"ok": True, "parent": parent, "children": children}
+    except Exception as exc:
+        log.warning("category-children error: %s", exc)
+        return {"ok": False, "detail": str(exc), "children": []}
 
 
 # GET /api/ebay/store-categories
@@ -2062,30 +2109,209 @@ def get_hint_trail(sku: str) -> Dict[str, Any]:
 _STATIC_HEAD = '<link rel="stylesheet" href="/static/tgw.css"><link rel="stylesheet" href="/static/nav.css">'
 _STATIC_FOOT = '<script src="/static/tgw.js"></script><script src="/static/nav.js"></script>'
 
-# eBay conditionId → Inventory API enum options
-_CONDITION_ID_MAP: Dict[str, List[Dict[str, str]]] = {
-    "1000": [{"enum": "NEW", "label": "New"}],
-    "1500": [{"enum": "NEW_OTHER", "label": "New – other (open box)"}],
-    "1750": [{"enum": "NEW_WITH_DEFECTS", "label": "New with defects"}],
-    "2000": [{"enum": "MANUFACTURER_REFURBISHED", "label": "Manufacturer refurbished"}],
-    "2010": [{"enum": "CERTIFIED_REFURBISHED", "label": "Certified refurbished"}],
-    "2500": [{"enum": "SELLER_REFURBISHED", "label": "Seller refurbished"}],
-    "2750": [{"enum": "LIKE_NEW", "label": "Like new"}],
-    "3000": [
-        {"enum": "USED_EXCELLENT", "label": "Used – excellent"},
-        {"enum": "USED_GOOD", "label": "Used – good"},
-        {"enum": "USED_ACCEPTABLE", "label": "Used – acceptable"},
-    ],
-    # Media/Books condition IDs — same enums, different buyer-facing labels per category
-    "4000": [{"enum": "USED_EXCELLENT", "label": "Very Good"}],
-    "5000": [{"enum": "USED_GOOD", "label": "Good"}],
-    "6000": [{"enum": "USED_ACCEPTABLE", "label": "Acceptable"}],
-    "7000": [{"enum": "FOR_PARTS", "label": "For parts / not working"}],
-}
 
+
+# Shared multi-mode category picker: type-to-search (local cached tree, no
+# live eBay quota), type digits to resolve a raw category ID, or Browse the
+# tree by drilling into branches. Used for both the primary and 2nd category.
+_CATEGORY_PICKER_JS = """
+function initCatPicker(cfg){
+  var inp=document.getElementById(cfg.searchId);
+  var hid=document.getElementById(cfg.catIdFieldId);
+  var dd=document.getElementById(cfg.ddId);
+  var bc=document.getElementById(cfg.bcId);
+  var browseBtn=document.getElementById(cfg.browseBtnId);
+  var browsePanel=document.getElementById(cfg.browsePanelId);
+  if(!inp||!hid||!dd)return;
+  var _timer=null, _idx=-1, _items=[], _pendingId=null;
+
+  function selectCategory(cid,cname){
+    hid.value=cid;
+    if(bc)bc.textContent=cid+' \\u00b7 '+cname;
+    inp.value='';
+    dd.style.display='none';dd.innerHTML='';
+    _idx=-1;_items=[];_pendingId=null;
+    if(browsePanel)browsePanel.style.display='none';
+    var patch={};
+    patch[cfg.idField]=cid;
+    patch[cfg.nameField]=cname;
+    fetch('/api/items/'+window._ITEM_SKU,{
+      method:'PATCH',
+      headers:authHeaders({'Content-Type':'application/json'}),
+      body:JSON.stringify({fields:{draft_listing:patch}})
+    }).then(function(r){return r.json();}).then(function(d){
+      if(d.ok&&cfg.primary&&typeof loadCatCtx==='function')loadCatCtx(cid);
+    });
+  }
+
+  function highlight(){
+    Array.from(dd.querySelectorAll('.cat-opt')).forEach(function(el,i){
+      el.style.background=(i===_idx)?'#2a2a3a':'';
+    });
+  }
+
+  function renderResults(results){
+    _items=results;_idx=-1;
+    if(!results.length){dd.style.display='none';dd.innerHTML='';return;}
+    var html='';
+    results.forEach(function(s,i){
+      html+='<div class="cat-opt" data-i="'+i+'" style="padding:6px 10px;cursor:pointer;'
+        +'border-bottom:1px solid #2a2a2a;font-size:.85em">'
+        +'<span style="color:#eee">'+s.name+'</span>'
+        +(s.path?'<div style="color:#556;font-size:.78em">'+s.path+'</div>':'')
+        +'</div>';
+    });
+    dd.innerHTML=html;dd.style.display='block';
+    Array.from(dd.querySelectorAll('.cat-opt')).forEach(function(el){
+      el.addEventListener('mouseenter',function(){_idx=parseInt(el.dataset.i,10);highlight();});
+      el.addEventListener('click',function(){
+        var s=_items[parseInt(el.dataset.i,10)];
+        selectCategory(s.id,s.name);
+      });
+    });
+  }
+
+  function showError(msg){
+    _items=[];_idx=-1;_pendingId=null;
+    dd.innerHTML='<div style="padding:6px 10px;font-size:.82em;color:#e88">'+msg+'</div>';
+    dd.style.display='block';
+  }
+
+  function renderIdConfirm(node){
+    _pendingId=node;
+    dd.innerHTML='<div class="cat-opt" data-idconfirm="1" style="padding:6px 10px;'
+      +'cursor:pointer;font-size:.85em;background:#132213">'
+      +'<span style="color:#8e8">Use category '+node.id+' \\u2014 press Enter</span>'
+      +'<div style="color:#556;font-size:.78em">'+node.path
+      +(node.leaf?'':' (branch, not a leaf \\u2014 eBay requires a leaf category)')+'</div>'
+      +'</div>';
+    dd.style.display='block';
+    var el=dd.querySelector('[data-idconfirm]');
+    if(el)el.addEventListener('click',function(){selectCategory(node.id,node.name);});
+  }
+
+  inp.addEventListener('input',function(){
+    clearTimeout(_timer);
+    var q=inp.value.trim();
+    _pendingId=null;
+    if(!q){dd.style.display='none';return;}
+    var isId=/^[0-9]+$/.test(q);
+    _timer=setTimeout(function(){
+      if(isId){
+        fetch('/api/ebay/category-node/'+encodeURIComponent(q),{headers:authHeaders()})
+          .then(function(r){return r.json();})
+          .then(function(d){
+            if(d.ok)renderIdConfirm(d);
+            else showError(d.detail&&d.detail.indexOf('429')>=0
+              ?'eBay category lookup is rate-limited right now \\u2014 try again later'
+              :(d.detail||'unknown category id'));
+          })
+          .catch(function(){showError('Network error');});
+        return;
+      }
+      if(q.length<2){dd.style.display='none';return;}
+      fetch('/api/ebay/category-search?q='+encodeURIComponent(q),{headers:authHeaders()})
+        .then(function(r){return r.json();})
+        .then(function(d){
+          if(!d.ok){
+            showError(d.detail&&d.detail.indexOf('429')>=0
+              ?'eBay category search is rate-limited right now \\u2014 try again later'
+              :'Category search failed');
+            return;
+          }
+          renderResults(d.results||[]);
+        })
+        .catch(function(){showError('Network error');});
+    },150);
+  });
+
+  inp.addEventListener('keydown',function(e){
+    if(e.key==='ArrowDown'){
+      if(!_items.length)return;
+      e.preventDefault();_idx=(_idx+1)%_items.length;highlight();
+    }else if(e.key==='ArrowUp'){
+      if(!_items.length)return;
+      e.preventDefault();_idx=(_idx-1+_items.length)%_items.length;highlight();
+    }else if(e.key==='Enter'){
+      e.preventDefault();
+      if(_pendingId){selectCategory(_pendingId.id,_pendingId.name);return;}
+      if(_idx>=0&&_items[_idx]){selectCategory(_items[_idx].id,_items[_idx].name);return;}
+      if(_items.length===1)selectCategory(_items[0].id,_items[0].name);
+    }else if(e.key==='Escape'){
+      dd.style.display='none';
+    }
+  });
+
+  document.addEventListener('click',function(e){
+    if(!dd.contains(e.target)&&e.target!==inp)dd.style.display='none';
+  });
+
+  if(browseBtn&&browsePanel){
+    var _stack=[];
+    function renderBrowse(parentId){
+      fetch('/api/ebay/category-children?parent_id='+encodeURIComponent(parentId||''),{headers:authHeaders()})
+        .then(function(r){return r.json();})
+        .then(function(d){
+          if(!d.ok){
+            browsePanel.innerHTML='<div style="padding:6px 10px;font-size:.82em;color:#e88">'
+              +(d.detail&&d.detail.indexOf('429')>=0
+                ?'eBay category tree is rate-limited right now \\u2014 try again later'
+                :'Category browse failed')+'</div>';
+            return;
+          }
+          var crumb='<span data-crumb-i="-1" style="cursor:pointer;text-decoration:underline;color:#8ac">Top</span>'
+            +_stack.map(function(s,i){
+              return ' \\u00bb <span data-crumb-i="'+i+'" style="cursor:pointer;text-decoration:underline;color:#8ac">'+s.name+'</span>';
+            }).join('');
+          var list=d.children.map(function(c){
+            return '<div class="cat-browse-opt" data-id="'+c.id+'" data-name="'+c.name.replace(/"/g,'&quot;')+'" '
+              +'data-leaf="'+(c.leaf?1:0)+'" style="padding:5px 8px;cursor:pointer;border-bottom:1px solid #2a2a2a;'
+              +'font-size:.85em;display:flex;justify-content:space-between">'
+              +'<span>'+c.name+'</span>'+(c.leaf?'':'<span style="color:#556">\\u203a</span>')+'</div>';
+          }).join('');
+          browsePanel.innerHTML='<div style="font-size:.78em;margin-bottom:4px">'+crumb+'</div>'
+            +'<div style="max-height:220px;overflow-y:auto">'+(list||'<span style="color:#556;font-size:.8em">No subcategories</span>')+'</div>';
+          browsePanel.querySelectorAll('[data-crumb-i]').forEach(function(el){
+            el.addEventListener('click',function(){
+              var i=parseInt(el.dataset.crumbI,10);
+              if(i===-1){_stack=[];renderBrowse(null);}
+              else{_stack=_stack.slice(0,i+1);renderBrowse(_stack[i].id);}
+            });
+          });
+          browsePanel.querySelectorAll('.cat-browse-opt').forEach(function(el){
+            el.addEventListener('click',function(){
+              var cid=el.dataset.id,cname=el.dataset.name,leaf=el.dataset.leaf==='1';
+              if(leaf)selectCategory(cid,cname);
+              else{_stack.push({id:cid,name:cname});renderBrowse(cid);}
+            });
+          });
+        });
+    }
+    browseBtn.addEventListener('click',function(){
+      var isOpen=browsePanel.style.display==='block';
+      if(isOpen){browsePanel.style.display='none';return;}
+      dd.style.display='none';
+      _stack=[];renderBrowse(null);browsePanel.style.display='block';
+    });
+    document.addEventListener('click',function(e){
+      if(!browsePanel.contains(e.target)&&e.target!==browseBtn)browsePanel.style.display='none';
+    });
+  }
+}
+function initCatSearch(){
+  initCatPicker({searchId:'dl-cat-search',catIdFieldId:'dl-cat-id',ddId:'dl-cat-dropdown',
+    bcId:'dl-cat-breadcrumb',browseBtnId:'dl-cat-browse-btn',browsePanelId:'dl-cat-browse-panel',
+    idField:'category_id',nameField:'category_name',primary:true});
+}
+function initCatSearch2(){
+  initCatPicker({searchId:'dl-cat2-search',catIdFieldId:'dl-cat2-id',ddId:'dl-cat2-dropdown',
+    bcId:'dl-cat2-breadcrumb',browseBtnId:'dl-cat2-browse-btn',browsePanelId:'dl-cat2-browse-panel',
+    idField:'secondary_category_id',nameField:'secondary_category_name',primary:false});
+}
+"""
 
 # Module-level constant — avoids nested quote hell in f-string script blocks
-_CATEGORY_CONTEXT_IIFE = "function loadCatCtx(catId){\n  var prefill=window._DL_PREFILL||{};\n  var loading=document.getElementById('aspects-loading');\n  var form=document.getElementById('aspects-form');\n  if(!catId){if(loading)loading.textContent='No category.';return;}\n  fetch('/api/ebay/category-context/'+encodeURIComponent(catId),{headers:authHeaders()})\n  .then(function(r){return r.json();}).then(function(d){\n    if(!d||!d.ok){if(loading)loading.textContent='Context load failed.';return;}\n    window._CAT_CTX=d;\n    var sel=document.getElementById('dl-condition-select');\n    if(sel&&d.conditions&&d.conditions.length){\n      var allowed={};\n      d.conditions.forEach(function(c){allowed[c.enum]=c.label;});\n      Array.from(sel.options).forEach(function(opt){\n        if(opt.value&&!allowed[opt.value])opt.style.display='none';\n        else if(opt.value&&allowed[opt.value])opt.text=allowed[opt.value];\n      });\n      var cn=document.getElementById('condition-policy-note');\n      var nl=d.conditions.length;\n      if(cn)cn.textContent=nl+(nl===1?' condition':' conditions')+' allowed';\n    }\n    if(d.fulfillment_policy_id){\n      var fsel=document.getElementById('dl-ship-input');\n      var fhint=document.getElementById('dl-ship-hint');\n      if(fsel&&!fsel.value){\n        for(var fi=0;fi<fsel.options.length;fi++){\n          if(fsel.options[fi].value===d.fulfillment_policy_id){fsel.value=d.fulfillment_policy_id;break;}\n        }\n        if(fsel.value){\n          fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',\n            headers:authHeaders({'Content-Type':'application/json'}),\n            body:JSON.stringify({fields:{draft_listing:{shipping_profile:fsel.value}}})});\n        }\n      }\n      if(fhint&&!fsel.value)fhint.textContent='suggested: '+d.fulfillment_policy_id;\n    }\n    if(d.store_category){\n      var sch=document.getElementById('store-cat-hint');\n      if(sch)sch.textContent='suggested: '+d.store_category;\n    }\n    if(d.group_name){\n      var gh=document.getElementById('category-group-hint');\n      if(gh){\n        var pt=d.pricing&&d.pricing.typical_used?' · typical $'+d.pricing.typical_used.toFixed(2):'';\n        var pf=d.pricing&&d.pricing.floor?' · floor $'+d.pricing.floor.toFixed(2):'';\n        gh.textContent='group: '+d.group_name+pf+pt;\n      }\n    }\n    if(loading)loading.style.display='none';\n    if(!form)return;\n    if(!d.aspects||!d.aspects.length){\n      form.innerHTML='<span style=\"color:#556;font-size:.82em\">No aspects for this category</span>';\n      return;\n    }\n    var html='';\n    d.aspects.forEach(function(asp){\n      var badge=asp.required\n        ?'<span style=\"font-size:.7em;background:#3a1a1a;color:#c44;border-radius:3px;padding:1px 5px;margin-left:4px\">REQ</span>'\n        :'<span style=\"font-size:.7em;background:#2a2a0a;color:#aa0;border-radius:3px;padding:1px 5px;margin-left:4px\">REC</span>';\n      // Three-layer merge: operator edits (blue) > proposed (yellow) > live (baseline)\n      var liveVal=(window._LIVE_ASPECTS&&window._LIVE_ASPECTS[asp.name]!==undefined?(window._LIVE_ASPECTS[asp.name]||'').toString():'');\n      var proposedVal=(window._PROPOSED_ASPECTS&&window._PROPOSED_ASPECTS[asp.name]!==undefined?(window._PROPOSED_ASPECTS[asp.name]||'').toString():'');\n      var editVal=(prefill[asp.name]!==undefined?(prefill[asp.name]||'').toString():'');\n      var cur,layer;\n      if(editVal){cur=editVal;layer=(editVal!==liveVal)?'edit':'same';}\n      else if(proposedVal){cur=proposedVal;layer=(proposedVal!==liveVal)?'proposed':'same';}\n      else{cur=liveVal;layer=liveVal?'live':'empty';}\n      cur=cur.replace(/\"/g,'&quot;');\n      var reqEmpty=asp.required&&!cur;\n      // Colours by layer\n      var bord=reqEmpty?'#c44':(layer==='edit'?'#44c':(layer==='proposed'?'#884':'#444'));\n      var bg=reqEmpty?'#1a0a0a':(layer==='edit'?'#0a0a1a':(layer==='proposed'?'#1a1a00':'#1a1a1a'));\n      // Hint: show live value when overridden or proposed differs\n      var liveHint=(layer==='edit'||layer==='proposed')&&liveVal\n        ?'<div style=\"font-size:.7em;color:#445;margin-top:1px\">live: '+liveVal.replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>'\n        :'';\n      var inp;\n      if(asp.allowed_values&&asp.allowed_values.length&&asp.mode==='SELECTION_ONLY'){\n        var opts=asp.allowed_values.map(function(v){\n          return '<option value=\"'+v+'\"'+(v===cur?' selected':'')+'>'+v+'</option>';\n        }).join('');\n        inp='<select data-aspect=\"'+asp.name+'\" style=\"background:'+bg+';color:#eee;border:1px solid '+bord+';border-radius:3px;padding:2px 5px;font-size:.85em\"><option value=\"\">—</option>'+opts+'</select>';\n      }else{\n        var dlid='dl-asp-'+asp.name.replace(/[^a-zA-Z0-9]/g,'-');\n        var dlopts=asp.allowed_values&&asp.allowed_values.length\n          ?'<datalist id=\"'+dlid+'\">'+asp.allowed_values.map(function(v){return '<option value=\"'+v+'\"></option>';}).join('')+'</datalist>'\n          :'';\n        inp='<input type=\"text\"'+(dlopts?' list=\"'+dlid+'\"':'')+' data-aspect=\"'+asp.name+'\" value=\"'+cur+'\"'\n           +' style=\"background:'+bg+';color:#eee;border:1px solid '+bord+';border-radius:3px;padding:2px 5px;font-size:.85em;width:200px\">'\n           +dlopts;\n      }\n      html+='<div class=\"frow\"'+(reqEmpty?' style=\"border-left:2px solid #944;padding-left:4px\"':'')+'>  <span class=\"fn\" style=\"font-size:.82em\">'+asp.name+badge+'</span><span class=\"fv\">'+inp+liveHint+'</span></div>';\n    });\n    \n    var missingReq=d.aspects.filter(function(a){return a.required&&!(prefill[a.name]||'');}).length;if(missingReq>0){html='<div style=\"margin-bottom:8px;padding:5px 8px;background:#1a0808;border:1px solid #844;border-radius:3px;font-size:.78em;color:#e88\">'+missingReq+' required aspect'+(missingReq===1?'':'s')+' missing values — fill before staging</div>'+html;}form.innerHTML=html;\n  }).catch(function(){\n    if(loading)loading.textContent='Category context load failed.';\n  });\n}\ndocument.addEventListener('DOMContentLoaded',function(){\n  if(window._DL_CAT_ID)loadCatCtx(window._DL_CAT_ID);\n  if(typeof initCatSearch==='function')initCatSearch();\n  if(typeof initCatSearch2==='function')initCatSearch2();\n});\n"
+_CATEGORY_CONTEXT_IIFE = "function loadCatCtx(catId){\n  var prefill=window._DL_PREFILL||{};\n  var loading=document.getElementById('aspects-loading');\n  var form=document.getElementById('aspects-form');\n  if(!catId){if(loading)loading.textContent='No category.';return;}\n  var curCondSel=document.getElementById('dl-condition-select');\n  var curCondQ=curCondSel&&curCondSel.value?'?current_condition='+encodeURIComponent(curCondSel.value):'';\n  fetch('/api/ebay/category-context/'+encodeURIComponent(catId)+curCondQ,{headers:authHeaders()})\n  .then(function(r){return r.json();}).then(function(d){\n    if(!d||!d.ok){if(loading)loading.textContent='Context load failed.';return;}\n    window._CAT_CTX=d;\n    var sel=document.getElementById('dl-condition-select');\n    if(sel&&d.conditions&&d.conditions.length){\n      var curVal=sel.value;\n      var stillValid=d.conditions.some(function(c){return c.enum===curVal;});\n      var html='';\n      if(!curVal)html+='<option value=\"\" selected disabled>\\u2014 select \\u2014</option>';\n      d.conditions.forEach(function(c){\n        html+='<option value=\"'+c.enum+'\"'+(c.enum===curVal?' selected':'')+'>'+c.label+'</option>';\n      });\n      if(curVal&&!stillValid){\n        if(d.condition_remap){\n          curVal=d.condition_remap.enum;\n          html=html.replace('<option value=\"'+curVal+'\"','<option value=\"'+curVal+'\" selected');\n        }else{\n          html+='<option value=\"'+curVal+'\" selected>'+curVal+' \\u2014 not valid for this category, please fix</option>';\n        }\n      }\n      sel.innerHTML=html;\n      if(d.condition_remap&&curVal===d.condition_remap.enum){\n        fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',\n          headers:authHeaders({'Content-Type':'application/json'}),\n          body:JSON.stringify({fields:{draft_listing:{condition_enum:curVal}}})});\n      }\n      var cn=document.getElementById('condition-policy-note');\n      var nl=d.conditions.length;\n      if(cn)cn.textContent=nl+(nl===1?' condition':' conditions')+' allowed'+(d.condition_remap?' \\u2014 category changed, condition auto-matched to nearest same-or-worse: '+d.condition_remap.label:'')+((curVal&&!stillValid&&!d.condition_remap)?' \\u2014 current value invalid, please re-select':'');\n    }\n    if(d.fulfillment_policy_id){\n      var fsel=document.getElementById('dl-ship-input');\n      var fhint=document.getElementById('dl-ship-hint');\n      if(fsel&&!fsel.value){\n        for(var fi=0;fi<fsel.options.length;fi++){\n          if(fsel.options[fi].value===d.fulfillment_policy_id){fsel.value=d.fulfillment_policy_id;break;}\n        }\n        if(fsel.value){\n          fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',\n            headers:authHeaders({'Content-Type':'application/json'}),\n            body:JSON.stringify({fields:{draft_listing:{shipping_profile:fsel.value}}})});\n        }\n      }\n      if(fhint&&!fsel.value)fhint.textContent='suggested: '+d.fulfillment_policy_id;\n    }\n    if(d.store_category){\n      var sch=document.getElementById('store-cat-hint');\n      if(sch)sch.textContent='suggested: '+d.store_category;\n    }\n    if(d.group_name){\n      var gh=document.getElementById('category-group-hint');\n      if(gh){\n        var pt=d.pricing&&d.pricing.typical_used?' · typical $'+d.pricing.typical_used.toFixed(2):'';\n        var pf=d.pricing&&d.pricing.floor?' · floor $'+d.pricing.floor.toFixed(2):'';\n        gh.textContent='group: '+d.group_name+pf+pt;\n      }\n    }\n    if(loading)loading.style.display='none';\n    if(!form)return;\n    if(!d.aspects||!d.aspects.length){\n      form.innerHTML=d.aspects_error\n        ?'<span style=\"color:#e88;font-size:.82em\">Item specifics lookup failed (\\u2018'+d.aspects_error+'\\u2019) \\u2014 every eBay category has specifics; this is a lookup error, not an empty category. <a href=\"#\" onclick=\"loadCatCtx(\\''+catId+'\\');return false\" style=\"color:#8ac\">Retry</a></span>'\n        :'<span style=\"color:#556;font-size:.82em\">No specifics returned for this category \\u2014 unexpected, please verify manually</span>';\n      return;\n    }\n    var html='';\n    d.aspects.forEach(function(asp){\n      var badge=asp.required\n        ?'<span style=\"font-size:.7em;background:#3a1a1a;color:#c44;border-radius:3px;padding:1px 5px;margin-left:4px\">REQ</span>'\n        :'<span style=\"font-size:.7em;background:#2a2a0a;color:#aa0;border-radius:3px;padding:1px 5px;margin-left:4px\">REC</span>';\n      // Three-layer merge: operator edits (blue) > proposed (yellow) > live (baseline)\n      var liveVal=(window._LIVE_ASPECTS&&window._LIVE_ASPECTS[asp.name]!==undefined?(window._LIVE_ASPECTS[asp.name]||'').toString():'');\n      var proposedVal=(window._PROPOSED_ASPECTS&&window._PROPOSED_ASPECTS[asp.name]!==undefined?(window._PROPOSED_ASPECTS[asp.name]||'').toString():'');\n      var editVal=(prefill[asp.name]!==undefined?(prefill[asp.name]||'').toString():'');\n      var cur,layer;\n      if(editVal){cur=editVal;layer=(editVal!==liveVal)?'edit':'same';}\n      else if(proposedVal){cur=proposedVal;layer=(proposedVal!==liveVal)?'proposed':'same';}\n      else{cur=liveVal;layer=liveVal?'live':'empty';}\n      cur=cur.replace(/\"/g,'&quot;');\n      var reqEmpty=asp.required&&!cur;\n      // Colours by layer\n      var bord=reqEmpty?'#c44':(layer==='edit'?'#44c':(layer==='proposed'?'#884':'#444'));\n      var bg=reqEmpty?'#1a0a0a':(layer==='edit'?'#0a0a1a':(layer==='proposed'?'#1a1a00':'#1a1a1a'));\n      // Hint: show live value when overridden or proposed differs\n      var liveHint=(layer==='edit'||layer==='proposed')&&liveVal\n        ?'<div style=\"font-size:.7em;color:#445;margin-top:1px\">live: '+liveVal.replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>'\n        :'';\n      var inp;\n      if(asp.allowed_values&&asp.allowed_values.length&&asp.mode==='SELECTION_ONLY'){\n        var opts=asp.allowed_values.map(function(v){\n          return '<option value=\"'+v+'\"'+(v===cur?' selected':'')+'>'+v+'</option>';\n        }).join('');\n        inp='<select data-aspect=\"'+asp.name+'\" style=\"background:'+bg+';color:#eee;border:1px solid '+bord+';border-radius:3px;padding:2px 5px;font-size:.85em\"><option value=\"\">—</option>'+opts+'</select>';\n      }else{\n        var dlid='dl-asp-'+asp.name.replace(/[^a-zA-Z0-9]/g,'-');\n        var dlopts=asp.allowed_values&&asp.allowed_values.length\n          ?'<datalist id=\"'+dlid+'\">'+asp.allowed_values.map(function(v){return '<option value=\"'+v+'\"></option>';}).join('')+'</datalist>'\n          :'';\n        inp='<input type=\"text\"'+(dlopts?' list=\"'+dlid+'\"':'')+' data-aspect=\"'+asp.name+'\" value=\"'+cur+'\"'\n           +' style=\"background:'+bg+';color:#eee;border:1px solid '+bord+';border-radius:3px;padding:2px 5px;font-size:.85em;width:200px\">'\n           +dlopts;\n      }\n      html+='<div class=\"frow\"'+(reqEmpty?' style=\"border-left:2px solid #944;padding-left:4px\"':'')+'>  <span class=\"fn\" style=\"font-size:.82em\">'+asp.name+badge+'</span><span class=\"fv\">'+inp+liveHint+'</span></div>';\n    });\n    \n    var missingReq=d.aspects.filter(function(a){return a.required&&!(prefill[a.name]||'');}).length;if(missingReq>0){html='<div style=\"margin-bottom:8px;padding:5px 8px;background:#1a0808;border:1px solid #844;border-radius:3px;font-size:.78em;color:#e88\">'+missingReq+' required aspect'+(missingReq===1?'':'s')+' missing values — fill before staging</div>'+html;}form.innerHTML=html;\n  }).catch(function(){\n    if(loading)loading.textContent='Category context load failed.';\n  });\n}\ndocument.addEventListener('DOMContentLoaded',function(){\n  if(window._DL_CAT_ID)loadCatCtx(window._DL_CAT_ID);\n  if(typeof initCatSearch==='function')initCatSearch();\n  if(typeof initCatSearch2==='function')initCatSearch2();\n});\n"
 
 # Custom context menu for gallery images — fetches bytes locally then POSTs to
 # Google Lens upload so the LAN-only URL is never sent to Google directly.
@@ -3553,24 +3779,62 @@ load(0);
 """
 
 
-def _build_condition_options(current_enum: str) -> str:
-    """Return <option> tags for eBay condition enum dropdown."""
-    _conds = [
-        ("NEW", "New"),
-        ("LIKE_NEW", "Like New"),
-        ("EXCELLENT_REFURBISHED", "Excellent – Refurbished"),
-        ("VERY_GOOD_REFURBISHED", "Very Good – Refurbished"),
-        ("GOOD_REFURBISHED", "Good – Refurbished"),
-        ("USED_EXCELLENT", "Used – Excellent"),
-        ("USED_VERY_GOOD", "Used – Very Good"),
-        ("USED_GOOD", "Used – Good"),
-        ("USED_ACCEPTABLE", "Used – Acceptable"),
-        ("FOR_PARTS_OR_NOT_WORKING", "For Parts / Not Working"),
-    ]
+_GENERIC_CONDITION_FALLBACK: List[Tuple[str, str]] = [
+    ("NEW", "New"),
+    ("LIKE_NEW", "Like New"),
+    ("EXCELLENT_REFURBISHED", "Excellent – Refurbished"),
+    ("VERY_GOOD_REFURBISHED", "Very Good – Refurbished"),
+    ("GOOD_REFURBISHED", "Good – Refurbished"),
+    ("USED_EXCELLENT", "Used – Excellent"),
+    ("USED_VERY_GOOD", "Used – Very Good"),
+    ("USED_GOOD", "Used – Good"),
+    ("USED_ACCEPTABLE", "Used – Acceptable"),
+    ("FOR_PARTS_OR_NOT_WORKING", "For Parts / Not Working"),
+]
+
+
+def _build_condition_options(current_enum: str, category_id: str = "") -> str:
+    """Return <option> tags for eBay condition enum dropdown.
+
+    Sourced from the item's real per-category eBay condition policy (Metadata API
+    get_item_condition_policies, cached in tgw.apis.ebay.conditions) — eBay groups
+    all categories into ~26 condition sets and most categories allow only 1-2 of
+    the 10 generic Inventory API condition enums, not all of them. Previously this
+    always rendered the full generic list regardless of category, which both
+    over-offered choices eBay would reject at publish time and under-labeled the
+    ones it does allow (e.g. conditionId 3000 is simply "Used" for many categories,
+    not "Used – Excellent/Good/Acceptable" as separate grades).
+
+    Falls back to the generic list only when no cached policy exists for this
+    category (e.g. not yet in the Metadata API cache).
+    """
+    conds: List[Tuple[str, str]] = []
+    if category_id:
+        try:
+            from .apis.ebay.conditions import allowed_conditions_for_category
+
+            seen: set = set()
+            for c in allowed_conditions_for_category(_cfg, category_id):
+                pair = (c["condition_enum"], c["condition_label"])
+                if pair[0] not in seen:
+                    conds.append(pair)
+                    seen.add(pair[0])
+        except Exception as exc:
+            log.warning("condition options: policy lookup failed for category %s: %s", category_id, exc)
+
+    if not conds:
+        conds = list(_GENERIC_CONDITION_FALLBACK)
+
+    # If the currently-saved enum isn't in the allowed set (e.g. a stale value from
+    # before this fix, or the category changed since it was set), surface it anyway
+    # so the operator sees and corrects it rather than have it silently vanish.
+    if current_enum and current_enum not in {v for v, _ in conds}:
+        conds = [(current_enum, f"{current_enum} — not valid for this category, please fix")] + conds
+
     opts = []
     if not current_enum:
         opts.append('<option value="" selected disabled>— select —</option>')
-    for val, lbl in _conds:
+    for val, lbl in conds:
         sel = " selected" if val == current_enum else ""
         opts.append(f'<option value="{val}"{sel}>{lbl}</option>')
     return "".join(opts)
@@ -4477,27 +4741,27 @@ def _render_item_detail_html(
     _is_published = offer_status.upper() == "PUBLISHED"
     _is_unpublished_offer = offer_status.upper() == "UNPUBLISHED"
     _has_draft = bool(dl.get("title"))
-    _has_offer = bool(eo.get("offer_id"))
 
-    # Pipeline status bar — shows which stages are complete
+    # Pipeline status breadcrumb — plain text, not button-styled: this is status,
+    # not a control (session 39: Dave flagged the old chip styling as reading like
+    # clickable buttons). "Staged" dropped from operator view — it's an eBay
+    # Inventory API implementation detail the operator can't see or act on;
+    # "Approved" is considered satisfied once live (Publish Now supersedes it).
     def _pipe_step(label: str, done: bool, active: bool = False) -> str:
         if done:
-            color, bg, bl = "#4a4", "#1a2a1a", "#4a4"
+            style = "color:#4a4;font-weight:600"
         elif active:
-            color, bg, bl = "#aa0", "#2a2a0a", "#aa0"
+            style = "color:#aa0;font-weight:600"
         else:
-            color, bg, bl = "#445", "#111", "#333"
-        return f'<span style="padding:4px 10px;background:{bg};border:1px solid {bl};border-radius:4px;font-size:.78em;color:{color};white-space:nowrap">{label}</span>'
+            style = "color:#445;font-weight:400"
+        return f'<span style="{style};font-size:.82em;white-space:nowrap">{label}</span>'
 
-    _pipe_arrow = '<span style="color:#334;padding:0 4px;font-size:.8em">→</span>'
+    _pipe_arrow = '<span style="color:#334;padding:0 6px;font-size:.8em">—</span>'
     _pipeline_bar = (
-        '<div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px;'
-        'margin-bottom:12px;padding:8px;background:#0d0d0d;border-radius:4px">'
+        '<div style="margin-bottom:12px;font-size:.82em">'
         + _pipe_step("Draft", _has_draft, not _has_draft)
         + _pipe_arrow
-        + _pipe_step("Staged", _has_offer and not is_active, _has_draft and not _has_offer)
-        + _pipe_arrow
-        + _pipe_step("Approved", is_ready, _has_offer and not is_ready and not is_active)
+        + _pipe_step("Approved", is_ready or is_active, _has_draft and not is_ready and not is_active)
         + _pipe_arrow
         + _pipe_step("Live", is_active)
         + "</div>"
@@ -4615,14 +4879,22 @@ def _render_item_detail_html(
         f'<div id="dl-cat-breadcrumb" style="font-size:.82em;color:#aaa;margin-bottom:3px">'
         f"{_dl_cat_id_v}{'&nbsp;·&nbsp;' + _dl_cat_name if _dl_cat_name else ''}"
         f"</div>"
-        f'<input id="dl-cat-search" type="text" placeholder="Search to change category…" '
+        f'<div style="display:flex;gap:4px;align-items:flex-start">'
+        f'<input id="dl-cat-search" type="text" placeholder="Search name, type an ID, or Browse…" '
         f'autocomplete="off" '
-        f'style="width:100%;background:#1a1a1a;color:#eee;border:1px solid #444;'
+        f'style="flex:1;background:#1a1a1a;color:#eee;border:1px solid #444;'
         f'border-radius:4px;padding:3px 6px;font-size:.88em">'
+        f'<a href="#" id="dl-cat-browse-btn" onclick="return false" '
+        f'style="display:inline-block;padding:3px 8px;border-radius:4px;font-size:.8em;'
+        f'background:#2a2a2a;color:#9ab;border:1px solid #444;white-space:nowrap">Browse</a>'
+        f"</div>"
         f'<input type="hidden" id="dl-cat-id" value="{_dl_cat_id_v}">'
         f'<div id="dl-cat-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;'
         f"background:#1e1e1e;border:1px solid #555;border-radius:4px;z-index:50;"
         f'max-height:220px;overflow-y:auto"></div>'
+        f'<div id="dl-cat-browse-panel" style="display:none;position:absolute;top:100%;left:0;right:0;'
+        f"background:#1e1e1e;border:1px solid #555;border-radius:4px;z-index:49;"
+        f'padding:6px;margin-top:2px"></div>'
         f'<span id="category-group-hint" style="font-size:.72em;color:#445;display:block;margin-top:2px"></span>'
         f"</span></div>"
         # Secondary eBay category
@@ -4632,14 +4904,22 @@ def _render_item_detail_html(
         f'<div id="dl-cat2-breadcrumb" style="font-size:.82em;color:#aaa;margin-bottom:3px">'
         f"{_dl_cat2_id_v}{'&nbsp;·&nbsp;' + _dl_cat2_name if _dl_cat2_name else ''}"
         f"</div>"
-        f'<input id="dl-cat2-search" type="text" placeholder="Search to set 2nd eBay category…" '
+        f'<div style="display:flex;gap:4px;align-items:flex-start">'
+        f'<input id="dl-cat2-search" type="text" placeholder="Search name, type an ID, or Browse…" '
         f'autocomplete="off" '
-        f'style="width:100%;background:#1a1a1a;color:#eee;border:1px solid #444;'
+        f'style="flex:1;background:#1a1a1a;color:#eee;border:1px solid #444;'
         f'border-radius:4px;padding:3px 6px;font-size:.88em">'
+        f'<a href="#" id="dl-cat2-browse-btn" onclick="return false" '
+        f'style="display:inline-block;padding:3px 8px;border-radius:4px;font-size:.8em;'
+        f'background:#2a2a2a;color:#9ab;border:1px solid #444;white-space:nowrap">Browse</a>'
+        f"</div>"
         f'<input type="hidden" id="dl-cat2-id" value="{_dl_cat2_id_v}">'
         f'<div id="dl-cat2-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;'
         f"background:#1e1e1e;border:1px solid #555;border-radius:4px;z-index:50;"
         f'max-height:220px;overflow-y:auto"></div>'
+        f'<div id="dl-cat2-browse-panel" style="display:none;position:absolute;top:100%;left:0;right:0;'
+        f"background:#1e1e1e;border:1px solid #555;border-radius:4px;z-index:49;"
+        f'padding:6px;margin-top:2px"></div>'
         f"</span></div>"
         # Store category — select from known groups
         f'<div class="frow" id="dl-store-category">'
@@ -4662,7 +4942,7 @@ def _render_item_detail_html(
         '<span class="fv">'
         '<select id="dl-condition-select" '
         'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px">'
-        + _build_condition_options((dl or {}).get("condition_enum") or (dl or {}).get("condition") or "")
+        + _build_condition_options((dl or {}).get("condition_enum") or (dl or {}).get("condition") or "", _cat_id_for_aspects)
         + f"</select>"
         f'<span id="condition-policy-note" style="font-size:.72em;color:#445;margin-left:8px"></span>'
         f"</span></div>"
@@ -5088,104 +5368,10 @@ def _render_item_detail_html(
         f'    }}).catch(function(e){{if(msg){{msg.textContent="Network error";msg.style.color="#c44";}}}});'
         f'  }}).catch(function(e){{if(msg){{msg.textContent="Network error";msg.style.color="#c44";}}}});'
         f"}}"
-        # ── initCatSearch — category type-ahead picker ────────────────────────
-        f"function initCatSearch(){{"
-        f'  var inp=document.getElementById("dl-cat-search");'
-        f'  var hid=document.getElementById("dl-cat-id");'
-        f'  var dd=document.getElementById("dl-cat-dropdown");'
-        f'  var bc=document.getElementById("dl-cat-breadcrumb");'
-        f"  if(!inp||!hid||!dd)return;"
-        f"  var _timer=null;"
-        f'  inp.addEventListener("input",function(){{'
-        f"    clearTimeout(_timer);"
-        f"    var q=inp.value.trim();"
-        f'    if(q.length<2){{dd.style.display="none";return;}}'
-        f"    _timer=setTimeout(function(){{"
-        f'      fetch("/api/ebay/category-search?q="+encodeURIComponent(q),{{headers:authHeaders()}})'
-        f"      .then(function(r){{return r.json();}}).then(function(d){{"
-        f'        if(!d.ok||!d.results||!d.results.length){{dd.style.display="none";return;}}'
-        f'        var html="";'
-        f"        d.results.forEach(function(s){{"
-        f'          html+=\'<div class="cat-opt" data-id="\'+s.id+\'" data-name="\'+s.name.replace(/"/g,"&quot;")+\'"\''
-        f"            +' style=\"padding:6px 10px;cursor:pointer;border-bottom:1px solid #2a2a2a;font-size:.85em\">'"
-        f"            +'<span style=\"color:#eee\">'+s.name+'</span>'"
-        f"            +(s.path?'<div style=\"color:#556;font-size:.78em\">'+s.path+'</div>':\"\")"
-        f'            +"</div>";'
-        f"        }});"
-        f'        dd.innerHTML=html;dd.style.display="block";'
-        f'        dd.querySelectorAll(".cat-opt").forEach(function(el){{'
-        f'          el.addEventListener("mouseenter",function(){{el.style.background="#2a2a3a";}});'
-        f'          el.addEventListener("mouseleave",function(){{el.style.background="";}});'
-        f'          el.addEventListener("click",function(){{'
-        f"            var cid=el.dataset.id;var cname=el.dataset.name;"
-        f"            hid.value=cid;"
-        f'            if(bc)bc.textContent=cid+" · "+cname;'
-        f'            inp.value="";dd.style.display="none";'
-        f'            fetch("/api/items/"+window._ITEM_SKU,{{'
-        f'              method:"PATCH",'
-        f'              headers:authHeaders({{"Content-Type":"application/json"}}),'
-        f"              body:JSON.stringify({{fields:{{draft_listing:{{category_id:cid,category_name:cname}}}}}})"
-        f"            }}).then(function(r){{return r.json();}}).then(function(d){{"
-        f"              if(d.ok)loadCatCtx(cid);"
-        f"            }});"
-        f"          }});"
-        f"        }});"
-        f'      }}).catch(function(){{dd.style.display="none";}});'
-        f"    }},350);"
-        f"  }});"
-        f'  document.addEventListener("click",function(e){{'
-        f'    if(!dd.contains(e.target)&&e.target!==inp)dd.style.display="none";'
-        f"  }});"
-        f"}}"
-        # ── initCatSearch2 — secondary category type-ahead picker ─────────────
-        f"function initCatSearch2(){{"
-        f'  var inp=document.getElementById("dl-cat2-search");'
-        f'  var hid=document.getElementById("dl-cat2-id");'
-        f'  var dd=document.getElementById("dl-cat2-dropdown");'
-        f'  var bc=document.getElementById("dl-cat2-breadcrumb");'
-        f"  if(!inp||!hid||!dd)return;"
-        f"  var _timer=null;"
-        f'  inp.addEventListener("input",function(){{'
-        f"    clearTimeout(_timer);"
-        f"    var q=inp.value.trim();"
-        f'    if(q.length<2){{dd.style.display="none";return;}}'
-        f"    _timer=setTimeout(function(){{"
-        f'      fetch("/api/ebay/category-search?q="+encodeURIComponent(q),{{headers:authHeaders()}})'
-        f"      .then(function(r){{return r.json();}}).then(function(d){{"
-        f'        if(!d.ok||!d.results||!d.results.length){{dd.style.display="none";return;}}'
-        f'        var html="";'
-        f"        d.results.forEach(function(s){{"
-        f'          html+=\'<div class="cat-opt" data-id="\'+s.id+\'" data-name="\'+s.name.replace(/"/g,"&quot;")+\'"\''
-        f"            +' style=\"padding:6px 10px;cursor:pointer;border-bottom:1px solid #2a2a2a;font-size:.85em\">'"
-        f"            +'<span style=\"color:#eee\">'+s.name+'</span>'"
-        f"            +(s.path?'<div style=\"color:#556;font-size:.78em\">'+s.path+'</div>':\"\")"
-        f'            +"</div>";'
-        f"        }});"
-        f'        dd.innerHTML=html;dd.style.display="block";'
-        f'        dd.querySelectorAll(".cat-opt").forEach(function(el){{'
-        f'          el.addEventListener("mouseenter",function(){{el.style.background="#2a2a3a";}});'
-        f'          el.addEventListener("mouseleave",function(){{el.style.background="";}});'
-        f'          el.addEventListener("click",function(){{'
-        f"            var cid=el.dataset.id;var cname=el.dataset.name;"
-        f"            hid.value=cid;"
-        f'            if(bc)bc.textContent=cid+" · "+cname;'
-        f'            inp.value="";dd.style.display="none";'
-        f'            fetch("/api/items/"+window._ITEM_SKU,{{'
-        f'              method:"PATCH",'
-        f'              headers:authHeaders({{"Content-Type":"application/json"}}),'
-        f"              body:JSON.stringify({{fields:{{draft_listing:{{secondary_category_id:cid,secondary_category_name:cname}}}}}})"
-        f"            }});"
-        f"          }});"
-        f"        }});"
-        f'      }}).catch(function(){{dd.style.display="none";}});'
-        f"    }},350);"
-        f"  }});"
-        f'  document.addEventListener("click",function(e){{'
-        f'    if(!dd.contains(e.target)&&e.target!==inp)dd.style.display="none";'
-        f"  }});"
-        f"}}"
+        # ── category picker (search / ID entry / tree browse, shared) ─────────
+        + _CATEGORY_PICKER_JS +
         # ── category context IIFE (conditions + aspects + store cat + hints) ──────
-         + _CATEGORY_CONTEXT_IIFE + "</script>\n"
+        _CATEGORY_CONTEXT_IIFE + "</script>\n"
     )
 
     # Offer count badge: JS fetches /api/offers (cached), filters to this SKU.

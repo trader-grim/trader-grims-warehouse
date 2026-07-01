@@ -73,9 +73,10 @@ def test_photo_check_skipped_when_recently_verified(monkeypatch):
         "confirmed_count": 2,
     }
     worker = _worker(_cfg())
-    result = worker._check_photo_integrity("tgwSKU", item, item["ebay_listing"])
+    result, live = worker._check_photo_integrity("tgwSKU", item, item["ebay_listing"])
 
     assert result is False
+    assert live is None
     assert called == []
 
 
@@ -92,9 +93,10 @@ def test_photo_check_runs_when_overdue(monkeypatch):
     monkeypatch.setattr(ebay_sync_mod, "ebay_get", lambda *a, **k: {"product": {"imageUrls": ["u1", "u2"]}})
 
     worker = _worker(_cfg())
-    result = worker._check_photo_integrity("tgwSKU", item, item["ebay_listing"])
+    result, live = worker._check_photo_integrity("tgwSKU", item, item["ebay_listing"])
 
     assert result is True
+    assert live == {"product": {"imageUrls": ["u1", "u2"]}}
     assert item["ebay_listing"]["photo_verify"]["confirmed_count"] == 2
 
 
@@ -105,9 +107,10 @@ def test_photo_check_runs_when_never_verified(monkeypatch):
     monkeypatch.setattr(ebay_sync_mod, "ebay_get", lambda *a, **k: {"product": {"imageUrls": ["u1"]}})
 
     worker = _worker(_cfg())
-    result = worker._check_photo_integrity("tgwSKU", item, item["ebay_listing"])
+    result, live = worker._check_photo_integrity("tgwSKU", item, item["ebay_listing"])
 
     assert result is True
+    assert live == {"product": {"imageUrls": ["u1"]}}
     assert item["ebay_listing"]["photo_verify"]["submitted_count"] == 1
     assert item["ebay_listing"]["photo_verify"]["confirmed_count"] == 1
 
@@ -131,9 +134,10 @@ def test_repush_enqueued_when_photo_count_drops(monkeypatch):
     monkeypatch.setattr(ebay_sync_mod.state_machine, "enqueue_job", fake_enqueue)
 
     worker = _worker(_cfg())
-    result = worker._check_photo_integrity("tgwSKU", item, item["ebay_listing"])
+    result, live = worker._check_photo_integrity("tgwSKU", item, item["ebay_listing"])
 
     assert result is True
+    assert live == {"product": {"imageUrls": ["u1"]}}
     assert item["ebay_listing"]["photo_verify"]["confirmed_count"] == 1
     assert len(enqueued) == 1
     assert enqueued[0]["queue_name"] == "ebay_repush"
@@ -176,6 +180,7 @@ def test_photo_check_survives_get_failure(monkeypatch):
     monkeypatch.setattr(ebay_sync_mod, "ebay_get", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("timeout")))
 
     worker = _worker(_cfg())
-    result = worker._check_photo_integrity("tgwSKU", item, item["ebay_listing"])
+    result, live = worker._check_photo_integrity("tgwSKU", item, item["ebay_listing"])
 
     assert result is False
+    assert live is None

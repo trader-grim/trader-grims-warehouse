@@ -103,6 +103,8 @@ Evaluate as replacement or complement to Syncthing for ItemData/ItemArchive once
 - **Phase 2b COMPLETE** — PM-intake worker live under systemd; watches `inbox/`, calls `Qwen2.5:latest` via Ollama, patches Master Plan, archives notes; `tgw/apis/ollama.py` client added
 - **Phase 2c COMPLETE** — `tgw suggest "..."` appends timestamped entries to `suggestions/SUGGESTIONS.md`
 - **State-machine bug fixed** — `recover_expired_jobs()` now promotes `retry_wait` jobs back to `queued` when `not_before` passes; previously transient failures left jobs stuck indefinitely
+
+Session 38 (2026-06-30) — Dead-letter triage, ebay_sync 25707 fix, SEO title filler demotion — see dev-workflow/research/SESSION38-done-deadletter-ebay-sync-seo.md
 ### Pipeline fixes and additions — 2026-06-03
 - `ebay_stage`: Content-Language header added to all Inventory API PUT/POST calls (errorId 25709)
 - `ebay_stage`: Active listing guard — skips items with `ebay_listing.status=Active` before creating duplicate offers
@@ -3654,6 +3656,203 @@ Full design in `docs/ai-plans/PP-LISTEDITOR-001.md`. Replaces Seller Hub for lis
 - **Absorbs**: todos #876 #877 #878
 
 **Status**: todo #1062 open (p5, top of claude queue)
+
+---
+
+### PP-CATPICK-001 — Smart Category Assignment (group-shortlist-first, self-improving)
+
+**Opened:** 2026-07-01 (session 39). **Status:** PLANNED — design settled, not yet built.
+
+**Problem:** Choosing an eBay category today means picking from the full ~20k-node live
+taxonomy, then separately picking a store category — slow, and a leaf category name alone
+often loses the tree context that disambiguates it (e.g. "Books" appears under several
+unrelated branches). `category-groups.json` (PP-PRICE-005) already has the raw ingredients
+to fix this: each of the 25 groups carries a curated `ebay_categories` shortlist (3–6 IDs)
+and a single `store_category_id` — but nothing in the UI or pipeline uses that shortlist to
+narrow category choice today; `ai_identify`/`ebay_draft` still resolve categories via an
+open-ended live Taxonomy search per item.
+
+**Design (session 39, Dave's answers in full):**
+
+1. **Two-step cascade, not a blended picker.** Operator confirms/changes the item's
+   category **Group** first (~25 groups — same list `tgw set-template` already uses), then
+   picks from that group's short `ebay_categories` list. Store category follows the group
+   (1:1 today) and updates automatically with the group choice.
+2. **Self-improving shortlist — this is the core of the feature, not a side effect.**
+   Mistakes happen; groupings evolve. If the operator picks a category outside the current
+   shortlist (via the fallback full-tree picker — reuses the Browse/Search/ID-entry
+   picker built earlier this session for PP-LISTEDITOR-001), that candidate **grows** the
+   group's list. If the operator explicitly removes a candidate that doesn't belong, it
+   **shrinks** the list. Sometimes the right answer is an entirely new group — the picker
+   is the fine-grained fallback; the grouping is the fast path that should keep getting
+   faster as it absorbs real corrections. Target: 85%+ correct on the first suggested
+   candidate.
+3. **Candidate display needs full tree context, not just a bare name.** Each candidate in
+   a group's shortlist gets a friendly name (backfilled from the category-tree cache built
+   this session — zero extra API calls) **and its full ancestor branch shown from the
+   first level down** (not just the immediate parent), since a bare leaf name is exactly
+   the ambiguity problem this feature exists to solve. Optional short operator-authored
+   disambiguation hint per candidate (e.g. "1105 — Fiction & literature" vs "29223 —
+   Nonfiction"); hints are opt-in, blank where the name+path is already clear.
+4. **AI assignment becomes group-shortlist-first by construction.** `ai_identify` picks
+   `category_group` from `ai_hint` keyword match (as it already can via `set-template`),
+   then the top candidate from that group's shortlist — no live Taxonomy call needed for
+   the common case. Live search remains the fallback only when the group's shortlist
+   doesn't fit. This makes `ebay_draft._validate_category_suggestion()`'s live
+   `get_category_suggestions` call (found in the session-39 API audit — fires on **every**
+   drafted item purely to log an "agreement" QA metric that already duplicates
+   `ai_identify`'s call moments earlier) unnecessary: a category chosen from a curated,
+   operator-maintained shortlist is trustworthy by construction, so the separate live
+   validation ping can be removed as part of this work.
+
+**Data model change:** `category-groups.json` group schema gains a `category_candidates`
+array (superseding the bare `ebay_categories` ID list): `[{id, name, path, hint?}]`. `path`
+= full ancestor breadcrumb from the tree cache (session 39). Group's `store_category_id`
+stays 1:1 for now — no evidence yet that a group needs multiple store categories; revisit
+if operator corrections show otherwise.
+
+**New endpoints needed (build phase, not yet written):**
+- `PATCH /api/category-groups/{group_key}/candidates` — add/remove a candidate (id, name,
+  path resolved server-side from the cached tree); every change appended to an audit log
+  (mirrors the `identification_history` pattern — never silently overwrite).
+- Reuse existing `/api/ebay/category-node/{id}`, `/api/ebay/category-children`,
+  `/api/ebay/category-search` (session 39, PP-LISTEDITOR-001) for the fallback full-tree
+  picker and for resolving names/paths when backfilling candidates.
+
+**Build phases (not yet started):**
+- **Phase 1** — Backfill `category_candidates` (name + path) for all 25 existing groups
+  from the tree cache; no live API calls needed (tree already cached).
+- **Phase 2** — Item-detail UI: replace the current category field with the two-step
+  Group → shortlist cascade; fallback picker triggers a grow/shrink action on the group.
+- **Phase 3** — `ai_identify` / `ebay_draft`: group-shortlist-first resolution; remove
+  `_validate_category_suggestion()`'s redundant live call once the shortlist-first path is
+  confirmed accurate in practice (don't remove the safety net before the replacement is
+  proven — run both for a trial period, compare agreement rate, then cut over).
+- **Phase 4** — Operator hint authoring UI (optional per-candidate disambiguation text).
+
+**Cross-references:** PP-PRICE-005 (category-groups.json origin), PP-INTAKE-001 Phase 5
+("template self-update" — already anticipated this exact direction), PP-LISTEDITOR-001
+(shares the category-tree cache + Browse/Search/ID picker built session 39).
+
+---
+
+### PP-ACTIONCONSOLE-001 — Item Detail Action Console Redesign
+
+**Opened:** 2026-07-01 (session 39). **Status:** PLANNED — design in progress, not built.
+
+**Problem:** The item detail page currently exposes ~12 separate action buttons across
+two sections (Pipeline Tools: Re-identify, Re-draft, Re-upload photos, Re-price, Sync
+from eBay; Publish gate: Stage/Re-stage, Approve for Listing, Withdraw Approval, Publish
+Now, Update Listing, End Listing) plus a pipeline status bar (Draft → Staged → Approved →
+Live) styled as button-like chips that read as clickable when they're purely
+informational. Dave: "the operator really should only need 3 [buttons]... Whatever
+pipeline steps are necessary to perform an action we do that part. The operator clicks a
+button." The pipeline is supposed to be automated — most of these buttons exist "only
+because we don't program this correctly."
+
+**Guiding principle (Dave, session 39):** this is a workflow-clarity redesign, not just a
+button count reduction. "Put all of the relevant information and tools right where they
+are needed... for all day to day tasks without a bunch of clutter and scrolling. The
+detailed pipeline controls may exist elsewhere, but when listing the operator needs to
+concentrate on getting items listed correctly." The item detail page's job during normal
+listing work is singular: help the operator get this item listed correctly, fast, with
+nothing competing for attention. Granular/troubleshooting pipeline controls are legitimate
+tools but belong on a **separate surface** (an ops/admin page), not on the primary
+per-item listing page — this settles the earlier open question about where the
+troubleshooting buttons (Re-identify, Re-upload photos, Sync from eBay, manual Stage) end
+up: relocate them off this page entirely, they don't need to live here even collapsed.
+
+**Design discussion so far (Dave, session 39 — iterative, not fully settled):**
+
+1. **"Save Draft" isn't a new action** — draft_listing already functions as a notepad
+   that the operator and AI workers both write into incrementally (item specifics,
+   fields) ahead of an eventual update/publish. Manual field edits (title, price,
+   category, condition, aspects) already auto-save immediately via PATCH as edited today
+   — that mechanism is correct and doesn't need a separate "Save" step.
+   **New idea surfaced**: add a genuine free-text **operator notes field** — a plain
+   notepad separate from anything eBay-facing. Not yet scoped; flag as a small follow-on.
+2. **Approve vs Publish Now — confirmed, not "almost duplicates" to collapse away:**
+   - **Approve** = mark ready for the existing rate-limited dole-lister worker to pick up
+     in its own time (today's `set_ready` action) — no live eBay call yet.
+   - **Publish Now** = skip the line, perform every necessary step (stage if needed,
+     etc.) and go live on eBay immediately (today's `ebay_publish`, already backed by the
+     session-38 auto-chain retry-until-staged logic — the backend automation Dave wants
+     mostly already exists; this is primarily a UI consolidation, not new plumbing).
+3. **Troubleshooting/pipeline-mechanic actions (Re-identify, Re-upload photos, Sync from
+   eBay, manual Stage/Re-stage)** — Dave's preferred direction: rather than a static
+   always-visible toolbar, surface these as **contextual buttons attached to the specific
+   pipeline log entry that needs them** ("If there is some action that needs to be taken
+   for something why not put the button next to the log entry if we are hesitant to
+   automate it?"). Alternative he also floated: a collapsed picklist-with-trigger at the
+   bottom with fuller descriptions. **Neither fully designed yet** — the contextual-log
+   idea in particular requires the pipeline log renderer to know which action(s) apply to
+   which log line/state, which is a real design task of its own before implementation.
+4. **Archive / Delete item / End Listing (once live) — CONFIRMED to stay as first-class,
+   always-visible actions** (Dave's follow-up correction after initially lumping them in
+   with the buttons to trim: "I was a little harsh on the buttons we still need
+   delete/archive/ and once listed end on eBay"). These are irreversible operator
+   decisions, not automatable pipeline mechanics — do not fold into the 3-button
+   consolidation or the contextual-log-action idea.
+5. **Status indicators — bigger rethink than a restyle:**
+   - There are really **two distinct "what am I looking at" states** that need surfacing
+     clearly: viewing the **draft** (unpublished `draft_listing`) vs. viewing what's
+     **actually live on eBay** (`ebay_live`/`ebay_listing`). Dave: "We need a way to see
+     both, but that is another issue" — flagged as a separate, not-yet-designed problem.
+   - **"Staged" should not be an operator-visible concept at all** — it's an eBay
+     Inventory API implementation detail the operator can't see or act on. Drop it from
+     the operator-facing pipeline bar.
+   - **"Approved" should just toggle based on whether Publish Now was pressed** — once
+     live, Approved is subsumed by Live and doesn't need its own indicator state.
+   - **Preferred long-term direction — eliminate separate status badges entirely; make
+     the action buttons themselves the indicators** (stateful/smart buttons): e.g. press
+     "Publish", and once published that same button slot becomes "End on eBay" and the
+     live listing data section appears inline. Same pattern per function. This is the
+     "smart interface as the indicator" — not yet designed in detail (which button-slots,
+     what each transition looks like) — a real design pass needed before building.
+
+**Immediate safe changes made this session (low-risk, no workflow change):**
+- Pipeline status bar restyled to a flat breadcrumb (no button-like border/background
+  box) so it reads as status, not as clickable controls.
+- Dropped "Staged" from the operator-visible pipeline bar per Dave's explicit direction
+  (point 5 above).
+- Archive / Delete / End Listing left untouched — confirmed to stay as-is.
+
+**Explicitly NOT done yet (needs a dedicated design pass before building):**
+- The 3-button (Save Draft / Approve / Publish) consolidation itself — "Save Draft"
+  turned out not to need a new mechanism, and the troubleshooting-button relocation
+  (contextual-log vs. picklist) isn't settled, so no button removal/relocation was done
+  this session beyond the status-bar restyle.
+- Stateful/smart buttons replacing status indicators.
+- Draft-vs-live view toggle.
+- Operator notes field.
+
+**Next step when picked back up:** settle the contextual-log-action design (what
+triggers what, where per-log-line action metadata comes from) before touching the
+Pipeline Tools button set; the status-indicator stateful-button rework should probably
+follow the draft-vs-live toggle design since they're related (both about "what state is
+this listing in, and what am I looking at").
+
+**Refinement (Dave, same session, follow-up):** the stateful-button direction is not a
+new pattern to invent — it's an **extension of behavior that already exists**: today,
+once an item is live, "Publish Now" already becomes "Update Listing" and "End Listing"
+appears. The redesign is just applying that same state-driven transformation
+consistently to every action slot, not building something new from scratch.
+
+- **Indicators disappear as separate elements** — they become **color and function
+  changes on the buttons themselves**, driven by item status. Functions and indicators
+  consolidate into one surface (fewer elements on screen, not two parallel systems
+  saying the same thing).
+- **Dave's stated tolerance for iteration**: "we have to work out the logic correctly, on
+  a day to day operational basis there is less noise for the operator and it is clear
+  what is going on. If it becomes confusing from operator perspective, we adjust a little
+  either process or indicators." — i.e. ship a reasonable first pass, watch real daily
+  use, adjust the transition logic or the visual language as needed. This isn't expected
+  to be perfectly speced up front.
+- **The troubleshooting/pipeline-mechanic button set collapses conceptually to one
+  operator-facing idea**: *"this AI result sucks, try again."* Whatever specific pipeline
+  stage actually needs to be re-run (re-identify, re-draft, re-price, etc.) is an
+  implementation detail the button figures out and executes — the operator doesn't pick
+  a stage, they just say "this isn't right, redo it."
 
 ---
 
