@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-07-01 18:27 UTC — 177 open, 27 done in the last 7 days._
+_Rendered 2026-07-01 20:16 UTC — 177 open, 29 done in the last 7 days._
 
 ## admin (19 open)
 
@@ -208,10 +208,12 @@ _Rendered 2026-07-01 18:27 UTC — 177 open, 27 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — Sold reconciliation and inventory status sync (design ready)\|PP-SOLD-001]] |  |
 
-## Done this week (27)  — showing 15 most recent
+## Done this week (29)  — showing 15 most recent
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 1081 | claude | 2026-07-01 | Investigate other instances of Dave's changes being lost — likely same root cause: nixos-rebuild test/switch drift + path: trap on tgw-flake |
+| 1082 | claude | 2026-07-01 | Fix a1131 GitHub host-key + reconcile stale tgw-flake local checkout (uncommitted diff behind origin, live system itself is fine/gen38/correct) |
 | 1080 | claude | 2026-07-01 | Aspects cache opportunistic warm-up: ebay_sync now fills missing/stale category aspects from categories seen each sync pass, self-throttling on first failure (Dave's idea, session 39) |
 | 1078 | claude | 2026-07-01 | Session 39 part 3 (button consolidation discussion): opened PP-ACTIONCONSOLE-001 in master plan capturing Dave's full design discussion (Save Draft = existing notepad mechanism not a new action + new operator-notes-field idea; Approve=dole-queue vs Publish Now=skip-the-line-and-do-everything, confirmed as distinct not duplicative; troubleshooting buttons should ideally be contextual next to pipeline log entries -- not yet designed; Archive/Delete/End-Listing confirmed to STAY as first-class always-visible actions, not folded into consolidation; status indicators need a deeper rethink -- drop Staged from operator view, Approved subsumed once Live, long-term direction is stateful/smart buttons replacing separate indicators, draft-vs-live view toggle flagged as a separate not-yet-designed problem). Implemented only the safe, confirmed-scope pieces this session: pipeline status bar restyled from button-like chips to a flat text breadcrumb, and 'Staged' dropped from the operator-visible bar (now just Draft — Approved — Live). Archive/Delete/End Listing untouched. Full 3-button consolidation, contextual log actions, stateful buttons, and notes field all deferred pending further design -- see PP-ACTIONCONSOLE-001 in the plan for the complete discussion and open items. |
 | 1075 | claude | 2026-06-29 | session 37: fix pytest RAM explosion + 44 test failures + codebase group permissions |
@@ -225,6 +227,4 @@ _Rendered 2026-07-01 18:27 UTC — 177 open, 27 done in the last 7 days._
 | 1068 | claude | 2026-06-28 | PP-FENCE-001 Session C: consolidate http_server.py action handler writes through canonical fence functions - blocks worker restart |
 | 1067 | claude | 2026-06-28 | PP-FENCE-001 Session B DONE: all workers migrated off atomic_write_json to fence calls; 27 tests passing; CI audit test added; gaps: multi_intake (newitems+key-delete), ebay_sku_migrate (rename context), pull.py restore_archive_tombstone (needs upsert) |
 | 1063 | claude | 2026-06-26 | PP-LISTEDITOR-001: category-change condition/aspect staleness — best_condition_for_category() utility; readiness live-validates condition vs policy cache and aspects vs category-context; ebay_draft remaps/clears condition on category change |
-| 1048 | claude | 2026-06-25 | claude-auto-retry: configure retry on connection/timeout errors for intermittent cell link — @tolsi fork supports custom retry config; research retry_on settings, add to ~/.claude-auto-retry config or wrapper invocation in db.nix claude function |
-| 1045 | admin | 2026-06-25 | tgw-catio-nix 0.0.1 alpha: npm install -g @tolsi/claude-auto-retry — one-time bootstrap for db user to activate the claude fish wrapper |
-| … | | | _…and 12 more — run `tgw todo --all` to see everything_ |
+| … | | | _…and 14 more — run `tgw todo --all` to see everything_ |
