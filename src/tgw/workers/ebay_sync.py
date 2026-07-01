@@ -18,7 +18,7 @@ import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import psycopg2.errors
 import requests
@@ -112,6 +112,27 @@ class EbaySyncWorker(QueueWorker):
 
         try:
             offers = fetch_all_offers(self.config)
+        except requests.exceptions.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            if status == 400:
+                # eBay error 25707: an orphaned offer in our account has a non-alphanumeric
+                # SKU that causes the bulk list to fail globally.  Fall back to individual
+                # per-SKU lookups for all locally-tracked items with offer_ids.
+                try:
+                    errs = exc.response.json().get('errors', [])
+                    eids = {int(e.get('errorId', 0)) for e in errs}
+                except Exception:
+                    eids = set()
+                if 25707 in eids:
+                    log.warning(
+                        "ebay_sync: bulk offer list blocked by bad SKU (eBay 25707) — "
+                        "falling back to per-SKU individual lookups"
+                    )
+                    offers = self._fetch_offers_by_local_skus()
+                else:
+                    raise
+            else:
+                raise
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
             log.warning("ebay_sync: eBay unreachable (%s) — will retry next cycle", exc)
             tgw_logging.log_event("ebay_sync_offline", reason=type(exc).__name__)
@@ -146,6 +167,37 @@ class EbaySyncWorker(QueueWorker):
                 pass
 
         self._reschedule()
+
+    def _fetch_offers_by_local_skus(self) -> List[Dict[str, Any]]:
+        """Fallback: fetch offers one SKU at a time from local items with offer_ids.
+
+        Used when the bulk GET /offer list is broken by a phantom offer with a
+        non-alphanumeric SKU on eBay's side (error 25707).  Slower but always works.
+        """
+        import time as _time
+        itemdata = self.config["itemdata_root"]
+        offers: List[Dict[str, Any]] = []
+        skus_checked = 0
+        for jf in sorted(itemdata.glob("*/tgw*.json")):
+            try:
+                item = json.loads(jf.read_text(encoding="utf-8"))
+                if not item.get("ebay_offer", {}).get("offer_id"):
+                    continue
+                sku = jf.parent.name
+                data = ebay_get(self.config, "/sell/inventory/v1/offer",
+                                params={"sku": sku})
+                offers.extend(data.get("offers", []))
+                skus_checked += 1
+                if skus_checked % 100 == 0:
+                    log.info("ebay_sync fallback: checked %d SKUs, %d offers so far",
+                             skus_checked, len(offers))
+                _time.sleep(0.05)
+            except Exception as exc:
+                log.warning("ebay_sync fallback: error fetching offer for %s: %s",
+                            jf.parent.name, exc)
+        log.info("ebay_sync fallback: fetched %d offers from %d local SKUs",
+                 len(offers), skus_checked)
+        return offers
 
     def _sync_one(self, offer: Dict[str, Any], sku: str) -> int:
         """Update local item JSON from one eBay offer. Returns 1 if item was changed."""

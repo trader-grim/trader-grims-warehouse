@@ -107,6 +107,28 @@ Use plan row numbers for plan-table items; "todo #N" only for live tracker IDs.
 
 ---
 
+## 3c. What Changed This Session (session 38 — 2026-06-30)
+
+**Session 38 — 2026-06-30 (dead-letter triage, ebay_sync 25707 fix, SEO title filler demotion):**
+
+| Change | Detail |
+|--------|--------|
+| SEO title filler demotion | `_demote_leading_filler()` in `seo/title.py`: Case A (pure filler lead → append to end), Case B (year+filler cluster → insert at positions 4-5) |
+| `ebay_offer.status` stale fix | `ebay_stage.py`: force-update of live listing now preserves `PUBLISHED` status instead of unconditionally writing `UNPUBLISHED` |
+| `ebay_offer.price` accuracy fix | `ebay_publish.py`: uses `staged_price` (what eBay was told) not reprice schedule's launch_price |
+| `ai_identify` dead-letter fix | `_USER_PROMPT_HINTED` built by string concat with JSON `{}`; `.format()` treated braces as placeholders. Switched to `.replace()`. |
+| `ebay_sync` 25707 workaround | `fetch_all_offers()` falls back to per-SKU individual lookups when bulk GET /offer fails with 25707. Root cause: orphaned eBay offer with book-title SKU (see below). |
+| Orphaned eBay offer identified | `tgw201607172015419` had `sku_old = "Murder on the Middle Fork by Don Ian Smith and Naida West"` — this SKU exists on eBay as a draft offer (no backing inventory_item, not visible in Seller Hub). eBay Inventory API refuses DELETE/GET with 25707. **todo #1077: contact eBay support to purge.** |
+
+### Open from session 38
+
+- **todo #1077** — Contact eBay support to delete orphaned draft offer with book-title SKU. Until removed, `ebay_sync` uses per-SKU fallback (slower but correct).
+- **`ebay_stage`/`ebay_upload` KeyError('api_key') for tgw202605051933258** — separate config issue, not yet investigated.
+- **`ebay_stage` "ImageLinks cannot exceed"** for same item — eBay rejecting image URLs.
+- **15 stale `catalog_rebuild` dead-letters** from 2026-06-28/29 — likely old path errors; may need cleanup.
+
+---
+
 ## 4. What Remains Risky
 
 Ordered by urgency:

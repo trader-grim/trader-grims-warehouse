@@ -185,9 +185,10 @@ class AIIdentifyWorker(QueueWorker):
         provider, model = get_task_model(self.config, "ai_identify")
 
         if product_context:
-            prompt = _USER_PROMPT_ENRICHED.format(product_context=product_context)
+            # Use replace() not format() — the schema contains literal {} JSON braces
+            prompt = _USER_PROMPT_ENRICHED.replace('{product_context}', product_context)
         elif hint:
-            prompt = _USER_PROMPT_HINTED.format(hint=hint)
+            prompt = _USER_PROMPT_HINTED.replace('{hint}', hint)
         else:
             prompt = _USER_PROMPT
 

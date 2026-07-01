@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-06-30 02:53 UTC — 175 open, 25 done in the last 7 days._
+_Rendered 2026-07-01 05:23 UTC — 176 open, 25 done in the last 7 days._
 
 ## admin (19 open)
 
@@ -37,7 +37,7 @@ _Rendered 2026-06-30 02:53 UTC — 175 open, 25 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (12 open)
+## claude (13 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
@@ -50,6 +50,7 @@ _Rendered 2026-06-30 02:53 UTC — 175 open, 25 done in the last 7 days._
 | 1065 | 35 |  | PP-PHOTO-001 Phase B: GDrive → eBay zero-bandwidth image upload — replace deprecated UploadSiteHostedPictures (Trading API) in ebay_upload worker with GDrive direct-URL pattern. Flow: (1) make each SKU photo temporarily public (anyone-reader), (2) pass GDrive direct download URL to Inventory API imageUrls[], (3) eBay CDN fetches from Google directly — TGW server sends zero image bytes, (4) revoke public access after staging confirms imageUrls populated in ebay_live. Eliminates all local upload bandwidth from photo pipeline. Same GDrive OAuth helper from Phase A. NOTE: Phase A (multimodal draft) is higher priority and should be built first since it shares the GDrive API helper. Research: docs/TGW-Plan-Vault/dev-workflow/research/RESEARCH-gdrive-zero-bandwidth-ebay-image-upload.md | [[TGW-Master-Plan#PP-PHOTO-001 — GDrive Zero-Bandwidth Photo Pipeline (Phase 0 complete 2026-06-26; Phases A+B open)\|PP-PHOTO-001]] |  |
 | 1066 | 40 |  | PP-SEARCH-001 Phase 0: recoll universal index — ItemArchive + masterarchive/history + catalogs + docs vault |  |  |
 | 1054 | 45 |  | item detail: add History link using sku_old → historical catalog lookup. History uses old-format SKUs (tgw202005031234173 style); current items carry sku_old as the bridge. Need a /form/history/<old_sku> route or link to historical-catalog search. Design first. |  |  |
+| 1077 | 45 |  | Contact eBay support to purge orphaned draft offer with non-alphanumeric SKU 'Murder on the Middle Fork by Don Ian Smith and Naida West' — blocks GET /sell/inventory/v1/offer (error 25707 global pre-flight). No listing ID (never published). Local item tgw201607172015419. ebay_sync per-SKU fallback workaround active until resolved. |  |  |
 | 1044 | 50 |  | PP-DOCLIB-001: Research and docs library system — design a structured library for vault research docs, perplexity outputs, gemini research, inbox archives, and dev-workflow notes. Goals: consistent location taxonomy, easy retrieval, cross-reference between research and PP-* items, tgw CLI surface (tgw docs search/show). Consider markmap integration for browsable index. |  |  |
 | 1076 | 50 |  | Request higher EPS call limit from eBay Developer Support — current ~5k/day insufficient; request 25k-50k/day; bundle with buy.marketplace_insights followup |  |  |
 | 1056 | 60 |  | Audit sdb/sdc contents, free what's unused, extend vg_tgw into HDD space, grow nix LV |  |  |
