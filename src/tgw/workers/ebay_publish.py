@@ -122,9 +122,23 @@ class EbayPublishWorker(QueueWorker):
         ebay_offer = item.get('ebay_offer', {})
         offer_id = ebay_offer.get('offer_id')
         if not offer_id:
-            raise HardFailure(
-                f'{sku}: not staged on eBay yet — run ebay_stage first'
+            # Retryable — ebay_stage may still be in flight when publish was
+            # queued as part of the automated chain (upload → stage → publish).
+            raise RuntimeError(
+                f'{sku}: not staged on eBay yet — waiting for ebay_stage'
             )
+
+        # Guard: if the operator set a manual price in draft_listing that hasn't
+        # been staged yet, publishing would go live at the old offer price.
+        # Wait for ebay_stage to run with the current price first.
+        draft_price = (item.get('draft_listing') or {}).get('price')
+        staged_price = ebay_offer.get('staged_price')
+        if draft_price is not None and staged_price is not None:
+            if abs(float(draft_price) - float(staged_price)) > 0.001:
+                raise RuntimeError(
+                    f'{sku}: draft price ${draft_price} != staged price ${staged_price} '
+                    f'— waiting for ebay_stage to sync current price before publishing'
+                )
 
         # Build reprice schedule from comps — price is already correct on the offer.
         # ebay_price now sets draft_listing.price = launch_price (max→.99), so
@@ -183,9 +197,13 @@ class EbayPublishWorker(QueueWorker):
         }
         ebay_offer['status']       = 'PUBLISHED'
         ebay_offer['published_at'] = now.isoformat()
+        # ebay_offer.price = what is actually live on eBay = what ebay_stage PUT there.
+        # The reprice schedule has its own per-stage price fields; don't overwrite the
+        # live price with schedule data here.
+        actual_price = ebay_offer.get('staged_price')
+        if actual_price is not None:
+            ebay_offer['price'] = float(actual_price)
         launch_price = launch_entry['price'] if launch_entry and launch_entry['price'] is not None else None
-        if launch_price is not None:
-            ebay_offer['price'] = launch_price
         item['ebay_offer'] = ebay_offer
 
         # Stamp launch entry done_at and store full schedule

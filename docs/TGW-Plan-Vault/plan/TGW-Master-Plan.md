@@ -416,6 +416,7 @@ Evaluate as replacement or complement to Syncthing for ItemData/ItemArchive once
 - Filesystem `.queue_worker` / `.queue_worker_config` discovery removed from all code
 - eBay credentials removed from `tgw-api-config.json`; now in `secrets_root`
 
+Session 32 — CatioNIX dual-desktop wiring complete: lan-mouse, Wayland tools, Syncthing dual-instance, KDE Connect, Firefox clipboard fix (see DONE-cationix-desktop-wiring-session32.md)
 ## Implementation TODO — next priorities
 
 ### Recently completed (sessions 4–10)
@@ -1083,6 +1084,9 @@ Lint-policy incident (session 24): bare `ruff check` mutated 8 files because pyp
 | ✅ 58 | — | **`tgw history-index` DONE 2026-06-11 (session 26)**: `tgw.history_index` module; `index_archive_unindexed()` scans ~32K legacy Magento zips not in `archive-ebay-index.json` → `var/history-itemdata-index.jsonl` (sku/title/location/status/price/condition); `index_loose_csvs()` parses eBay-OrdersReport-*.csv → `var/history-loose-csv-index.jsonl`; `tgw history-index [--target ItemArchive\|loose-csv\|all] [--dry-run] [--limit N]`; smoke-tested production (54,683 zips); 13 tests. Run `tgw history-index --target all` in a screen session to populate | M |
 | ✅ 54 | PP-BACKUP-001 | **Phase A build DONE session 25**: `tgw-db-backup` + `tgw-cloud-sync` + `tgw-secrets-backup` scripts + systemd units/timers in `etc/systemd/`; `check_backups()` in health.py + tests — **scripts exist, operator must install** | M |
 | 55 | PP-BACKUP-001 | **Phase A operator items** (todo #61): approve plan ✅ done; remaining: gpg passphrase custody decision (off-machine!); install+enable the three timers; first manual cloud sync in an off-hours window; `rclone about dbukove:` quota check; A5 restore drill + record RTO times | M |
+| 56 | PP-PRICING-001 | **Phase 1 (title-based)**: after `ai_identify` vision step, fire SerpApi `engine=google_shopping` with AI title → write `price_comps.shopping_search` (prices, p25, p50, count) to item JSON; feeds `suggest_price()` Stage 1.5. **Phase 2 (image-based)**: Bing Visual Search API multipart upload (no public URL needed) → visual product matches + prices → `price_comps.visual_search` + optional `ai_identify_result.lens_title` confidence override. Both phases run async after Ollama, graceful-skip if keys absent. Keys: `serpapi-credentials.json` + `bing-search-credentials.json`. Interim substitute while `buy.marketplace_insights` blocked. | M |
+| 57 | PP-WEBAUTH-001 | `tgw set-web-password` CLI: prompt for new password (or `--password` flag), write `web_password` to `secrets_root/tgw-api-key.json` (preserve chmod 600), restart `tgw-http.service`. Add `tgw web-password-status` (shows whether custom password is set or falling back to API key, without revealing value). Document in `TGW-HTTP-API.md`. **Context:** web UI session auth added this session — password currently hardcoded via one-liner; this makes it self-service. | XS |
+| 58 | PP-CANONICALIZE-001 | **Canonical inventory record promotion.** Two trust flows feed top-level canonical fields (`title`, `description`, `item_attributes`, `category`): (1) AI-confident path — `ai_identify` auto-promotes when confidence ≥ threshold; (2) operator-approval path — listing editor prompts "Update canonical inventory record?" on save; first approval defaults Yes (no approved record yet), subsequent saves default No (eBay tweaks assumed eBay-specific). Gate tracked by `content_approved_at` timestamp. After promotion, canonical fields are source of truth and editable directly; workers update their own blocks (`draft_listing`, `ebay_offer`) but do not overwrite locked canonical fields. | M |
 | ✅ 59 | PP-PHOTO-001 | **Continuous sync infrastructure DONE 2026-06-26 (session 28)**: `bin/tgw-itemdata-sync` loop service (120 s, `--fast-list`, shared flock); `/opt/TGW/config/rclone.conf` TGW-owned remote `tgw-gdrive`; `nix/tgw/backup.nix` declares service + tmpfiles lock; `bin/tgw-cloud-sync` updated to use TGW config; `src/tgw/apis/gdrive_sync.py` sync status helper (`sync_status`, `files_synced_by`); status JSON written atomically each cycle | M |
 
 ### Track 1 — Round 7 (session 28, 2026-06-12)
@@ -4116,6 +4120,135 @@ All external options researched; none are clean substitutes for a true sold-data
 **Architecture note (from Perplexity):** When `buy.marketplace_insights` eventually arrives, wrap it
 behind a `market_data` provider interface with fallback to Browse API comps + own sales history.
 The `comps` DB table + pluggable provider pattern is the right design (see perplexity folder for full schema).
+
+### PP-PRICING-001 — Image + title price comps via Google Shopping / Bing Visual Search
+
+Interim substitute for `buy.marketplace_insights`. Not sold prices, but active listing prices
+across multiple marketplaces (eBay, Amazon, Walmart, etc.) give a strong pricing floor signal
+and significantly improve identification accuracy for unknown items.
+
+#### Phase 1 — Title-based Shopping SERP (runs in `ai_identify` after Ollama step)
+
+- Module: `apis/lookup/shopping_search.py` → `search_by_title(title, api_key) -> ShoppingResult`
+- API: SerpApi `engine=google_shopping` with the AI-identified title
+- Returns: prices across Google Shopping (eBay, Amazon, Walmart, etc.)
+- Output written to item JSON:
+  ```json
+  "price_comps": {
+    "shopping_search": {
+      "source": "google_shopping", "query": "...", "fetched_at": "...",
+      "prices": [29.99, 34.99, 45.00], "p25": 29.99, "p50": 34.99, "count": 12
+    }
+  }
+  ```
+- Integration: `suggest_price()` Stage 1.5 — use `shopping_search.p25` alongside Browse API p25
+- Key: `secrets_root/serpapi-credentials.json` → `{"api_key": "..."}`
+- Cost: ~$0.001/item (SerpApi pro plan); free tier 100 searches/month
+- Graceful skip if key absent (same pattern as `igdb.py`, `discogs.py`)
+
+#### Phase 2 — Image-based Visual Search (concurrent with Phase 1 in `ai_identify`)
+
+- Module: `apis/lookup/visual_search.py` → `search_by_image(image_bytes, api_key) -> VisualResult`
+- API: **Bing Visual Search API** — accepts multipart image upload, no public URL required
+  - Endpoint: `https://api.bing.microsoft.com/v7.0/images/visualsearch`
+  - Auth: `Ocp-Apim-Subscription-Key` header
+  - Cost: $1.50/1000 queries; free tier 1,000/month (Azure Cognitive Services)
+- Returns: `visualSearchTags` (product ID) + `ShoppingSource` actions (merchant prices)
+- Output written to item JSON:
+  ```json
+  "price_comps": {
+    "visual_search": {
+      "source": "bing_visual", "fetched_at": "...",
+      "identified_title": "Sony WH-1000XM4 Wireless Headphones",
+      "prices": [34.99, 39.99], "p25": 34.99, "count": 8
+    }
+  }
+  ```
+- If Bing's identified title confidence exceeds Ollama's: write to `ai_identify_result.lens_title`
+  (stored alongside `ai_identify_result.title`; operator sees both in review queue)
+- Key: `secrets_root/bing-search-credentials.json` → `{"subscription_key": "..."}`
+- Graceful skip if key absent
+
+#### Integration in `ai_identify` worker
+
+```
+1. Ollama vision → title, category, condition  (existing)
+2. Barcode lookup → product_context            (PP-LOOKUP-001, existing)
+3. Phase 1 + Phase 2 fire concurrently as asyncio tasks after step 1
+4. Results merged into item JSON via fence call before job completes
+```
+
+- Both phases are additive — they never overwrite Ollama's title/category output
+- `identification_history` event type `image_search` added (source, query, identified_title)
+
+#### Feeds into PP-REPRICER-001
+
+- `ShoppingSearchProvider` added as a fourth `MarketDataProvider` in `market_data.py`
+- Plugs into `recommend_price()` blend alongside `BrowseCompsProvider` and own sales
+- When `buy.marketplace_insights` arrives it slots in as the authoritative sold-price signal
+  and `ShoppingSearchProvider` drops to a supplementary role
+
+#### Operator checklist
+
+- [ ] Sign up for SerpApi (serpapi.com) — free tier is enough for evaluation
+- [ ] Create Azure Cognitive Services resource → get Bing Search V7 subscription key
+- [ ] Write keys to `secrets_root/` (chmod 600)
+- [ ] Restart `ai_identify` worker after keys land
+
+### PP-CANONICALIZE-001 — Canonical Inventory Record Promotion
+
+The item JSON's top-level fields (`title`, `description`, `item_attributes`, `category`) are the
+eventual source of truth for the inventory record. Until an item clears a trust gate, these fields
+hold intake-time guesses only. Two flows promote working copies into canonical fields:
+
+#### Trust gate
+
+A `content_approved_at` ISO timestamp on the item signals the gate has cleared. Before it is set,
+workers freely write to their own blocks (`draft_listing`, `item_attributes`, `ai_identify_result`).
+After it is set, canonical top-level fields are locked against worker overwrites — workers update
+their own blocks only.
+
+#### Flow 1 — AI-confident path
+
+`ai_identify` auto-promotes when its confidence score meets or exceeds a configurable threshold
+(e.g. `ai_identify_confidence_threshold` in `tgw-api-config.json`, default 0.85). On promotion:
+- `title` ← `ai_identify_result.title`
+- `item_attributes` ← merged from `ai_identify_result.aspects`
+- `content_approved_at` ← now (ISO UTC)
+- `content_approved_by` ← `"ai_identify"`
+
+#### Flow 2 — Operator-approval path (listing editor)
+
+When the operator saves in the listing editor (PATCH `/api/items/{sku}` with `draft_listing` fields),
+a dialog asks: **"Update canonical inventory record with these changes?"**
+
+- If `content_approved_at` is **not yet set**: dialog defaults **Yes** (no canonical record exists)
+- If `content_approved_at` **is set**: dialog defaults **No** (eBay tweaks assumed eBay-specific)
+
+On Yes:
+- `title` ← `draft_listing.title`
+- `description` ← `draft_listing.description`
+- `item_attributes` ← merge from `draft_listing` aspects
+- `category` ← eBay category name (human-readable, not ID)
+- `content_approved_at` ← now (ISO UTC)
+- `content_approved_by` ← `"operator"`
+
+#### Editability after promotion
+
+The PATCH endpoint already supports direct top-level field edits. After promotion the operator
+edits canonical fields directly from the item detail page — no special flow needed.
+
+#### Implementation checklist
+
+- [ ] `content_approved_at` + `content_approved_by` added to item JSON schema doc
+- [ ] `ai_identify` worker: promote on high-confidence result; skip if already approved by operator
+- [ ] Listing editor JS: after save, if `draft_listing` fields changed, show confirm dialog;
+      include `promote_to_canonical: true/false` in PATCH body
+- [ ] PATCH handler: if `promote_to_canonical` is true, derive canonical fields from `draft_listing`
+      and write them alongside `content_approved_at` / `content_approved_by`
+- [ ] Workers: before writing `title`/`description`/`item_attributes` top-level, check
+      `content_approved_at`; skip overwrite if set (update worker-owned blocks only)
+- [ ] Config key: `ai_identify_confidence_threshold` (default 0.85)
 
 ### PP-PRICE-003 ✅ COMPLETE (2026-06-04)
 `pricing.py`: stage-0 product_lookup query (`brand+mpn` tightest); condition-filtered comps (same-or-worse rank only, 15-entry `_BROWSE_CONDITION_RANK`); price confidence H/M/L (`draft_listing.price_confidence`, `tgw staged` PC column).

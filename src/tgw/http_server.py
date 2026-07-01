@@ -23,8 +23,8 @@ from typing import Any, Dict, List, Optional
 
 import psycopg2
 import psycopg2.extras
-from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Request, Security, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request, Security, UploadFile, status
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -67,9 +67,10 @@ _WORKER_TOOLTIPS: Dict[str, str] = {
 
 _cfg: Dict[str, Any] = {}
 _api_key: str = ""
-_web_key: str = ""  # per-process session key embedded in form-page HTML; rotates on restart
+_web_password: str = ""  # human-memorable login password; falls back to _api_key if unset
+_sessions: Dict[str, float] = {}  # token → expiry timestamp (epoch seconds)
 
-_security = HTTPBearer()
+_security = HTTPBearer(auto_error=False)
 
 # Listing index cache for webhook lookups: {listing_id: json_path}
 _listing_index: Dict[str, Path] = {}
@@ -128,15 +129,16 @@ PIPELINE_ACTIONS = {
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _cfg, _api_key, _web_key
+    global _cfg, _api_key, _web_password
     _cfg = load_config(DEFAULT_CONFIG)
     state_machine.init(_cfg["postgres_dsn"])
 
     key_path: Path = _cfg["secrets_root"] / "tgw-api-key.json"
     if not key_path.exists():
         raise RuntimeError(f"API key file not found: {key_path}")
-    _api_key = json.loads(key_path.read_text(encoding="utf-8"))["api_key"]
-    _web_key = secrets.token_hex(32)
+    key_data = json.loads(key_path.read_text(encoding="utf-8"))
+    _api_key = key_data["api_key"]
+    _web_password = key_data.get("web_password") or _api_key
 
     # PP-AIOPS-001: start NATS publisher and set API attribution context
     try:
@@ -167,16 +169,106 @@ app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 
 # ---------------------------------------------------------------------------
-# Auth dependency
+# Auth — Bearer token (CLI/Flutter) or browser session cookie
 # ---------------------------------------------------------------------------
 
+_SESSION_COOKIE = "tgw_session"
+_SESSION_MAX_AGE = 365 * 86400  # 1 year — expires only when user clears browser data
 
-def _require_auth(credentials: HTTPAuthorizationCredentials = Security(_security)) -> None:
-    if credentials.credentials not in (_api_key, _web_key):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token")
+_LOGIN_HTML = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TGW — Sign in</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:#0d0d0d;color:#ccc;font-family:system-ui,sans-serif;
+     display:flex;align-items:center;justify-content:center;min-height:100vh}}
+.box{{background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:32px 28px;width:320px}}
+h1{{font-size:1.1em;color:#9bf;margin-bottom:20px}}
+label{{font-size:.8em;color:#888;display:block;margin-bottom:6px}}
+input[type=password]{{width:100%;background:#111;border:1px solid #444;border-radius:4px;
+  color:#eee;padding:8px 10px;font-size:.95em;margin-bottom:14px}}
+input[type=password]:focus{{outline:none;border-color:#4a8ade}}
+button{{width:100%;background:#1a4a8a;color:#fff;border:none;border-radius:4px;
+  padding:10px;font-size:.95em;cursor:pointer}}
+button:hover{{background:#2a5a9a}}
+.err{{color:#f77;font-size:.82em;margin-top:10px}}
+</style>
+</head>
+<body>
+<div class="box">
+  <h1>TGW</h1>
+  <form method="post" action="/login">
+    <input type="hidden" name="next" value="{next}">
+    <label for="key">Password</label>
+    <input type="password" id="key" name="key" autofocus autocomplete="current-password">
+    <button type="submit">Sign in</button>
+    {error}
+  </form>
+</div>
+</body>
+</html>"""
+
+
+def _require_auth(
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(_security),
+    request: Request = None,
+) -> None:
+    if credentials and credentials.credentials == _api_key:
+        return
+    tok = request.cookies.get(_SESSION_COOKIE) if request else None
+    if tok and _sessions.get(tok, 0) > time.time():
+        return
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token")
 
 
 AUTH = Depends(_require_auth)
+
+
+@app.middleware("http")
+async def _session_guard(request: Request, call_next):
+    """Redirect unauthenticated /form/* requests to the login page."""
+    if request.url.path.startswith("/form/"):
+        tok = request.cookies.get(_SESSION_COOKIE)
+        if not (tok and _sessions.get(tok, 0) > time.time()):
+            from urllib.parse import quote
+            dest = request.url.path
+            if request.url.query:
+                dest += "?" + request.url.query
+            return RedirectResponse(f"/login?next={quote(dest)}", status_code=303)
+    return await call_next(request)
+
+
+@app.get("/login")
+def login_get(next: str = "/form/home"):
+    return HTMLResponse(_LOGIN_HTML.format(next=next, error=""))
+
+
+@app.post("/login")
+async def login_post(
+    next: str = Form(default="/form/home"),
+    key: str = Form(default=""),
+):
+    if _web_password and secrets.compare_digest(key.encode(), _web_password.encode()):
+        # Prune expired sessions before adding a new one
+        now = time.time()
+        expired = [t for t, exp in _sessions.items() if exp <= now]
+        for t in expired:
+            del _sessions[t]
+        tok = secrets.token_hex(32)
+        _sessions[tok] = now + _SESSION_MAX_AGE
+        dest = next if next.startswith("/") else "/form/home"
+        resp = RedirectResponse(dest, status_code=303)
+        resp.set_cookie(
+            _SESSION_COOKIE, tok,
+            httponly=True, samesite="strict", max_age=_SESSION_MAX_AGE,
+        )
+        return resp
+    html = _LOGIN_HTML.format(next=next, error='<p class="err">Invalid key.</p>')
+    return HTMLResponse(html, status_code=401)
 
 
 # ---------------------------------------------------------------------------
@@ -529,6 +621,7 @@ def patch_item(sku: str, body: PatchBody) -> Dict[str, Any]:
     if "location" in body.fields:
         location_value = body.fields.pop("location")
 
+    doc_before = load_item_doc(json_path)
     updated_keys = _apply_patch(json_path, body.fields)
 
     if location_value is not None:
@@ -538,6 +631,24 @@ def patch_item(sku: str, body: PatchBody) -> Dict[str, Any]:
         updated_keys.append("location")
 
     _enqueue_catalog_rebuild(f"http_patch:{sku}")
+
+    # If draft_listing content changed and the item is already on eBay, push the
+    # update automatically — the operator should never have to remember to Re-draft.
+    _DRAFT_LISTING_FIELDS = {"draft_listing", "title", "description", "item_attributes"}
+    if _DRAFT_LISTING_FIELDS.intersection(body.fields):
+        offer_id = (doc_before.get("ebay_offer") or {}).get("offer_id")
+        if offer_id:
+            try:
+                state_machine.enqueue_job(
+                    queue_name="ebay_draft",
+                    payload={"sku": sku},
+                    dedupe_key=f"ebay_draft:{sku}",
+                    max_attempts=3,
+                )
+                log.info("auto-queued ebay_draft for %s (draft_listing changed, offer_id present)", sku)
+            except Exception as _eq:
+                if "unique" not in str(_eq).lower() and "duplicate" not in str(_eq).lower():
+                    log.warning("failed to auto-enqueue ebay_draft for %s: %s", sku, _eq)
 
     return {"ok": True, "sku": sku, "updated": updated_keys}
 
@@ -855,6 +966,15 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
             if body.action == "list_now":
                 try:
                     state_machine.enqueue_job(
+                        queue_name="ebay_upload",
+                        payload={"sku": sku},
+                        dedupe_key=f"ebay_upload:{sku}",
+                        max_attempts=5,
+                    )
+                except Exception:
+                    pass
+                try:
+                    state_machine.enqueue_job(
                         queue_name="ebay_stage",
                         payload={"sku": sku},
                         dedupe_key=f"ebay_stage:{sku}",
@@ -1123,6 +1243,16 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
 
             result = _set_ready(_cfg, [sku])
             if result.get("marked"):
+                # Proactively start photo upload so it's ready when the dole cycle stages the item.
+                try:
+                    state_machine.enqueue_job(
+                        queue_name="ebay_upload",
+                        payload={"sku": sku},
+                        dedupe_key=f"ebay_upload:{sku}",
+                        max_attempts=5,
+                    )
+                except Exception:
+                    pass
                 return {"ok": True, "sku": sku, "action": "set_ready", "note": "approved for listing — will publish at next dole cycle"}
             err = (result.get("errors") or ["unknown error"])[0]
             return {"ok": False, "sku": sku, "detail": err}
@@ -1160,6 +1290,65 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                 payload={"sku": sku},
                 dedupe_key=f"ebay_price:{sku}",
                 max_attempts=5,
+            )
+
+        elif action == "ebay_stage":
+            _doc = load_item_doc(json_path)
+            _has_photos = bool(
+                (_doc.get("draft_listing") or {}).get("imageUrls")
+                or _doc.get("ebay_photos")
+            )
+            if not _has_photos:
+                try:
+                    state_machine.enqueue_job(
+                        queue_name="ebay_upload",
+                        payload={"sku": sku},
+                        dedupe_key=f"ebay_upload:{sku}",
+                        max_attempts=5,
+                    )
+                except Exception:
+                    pass
+            job_id = state_machine.enqueue_job(
+                queue_name="ebay_stage",
+                payload={"sku": sku},
+                dedupe_key=f"ebay_stage:{sku}",
+                max_attempts=5,
+            )
+
+        elif action == "ebay_publish":
+            _doc = load_item_doc(json_path)
+            _offer_id = (_doc.get("ebay_offer") or {}).get("offer_id")
+            _has_photos = bool(
+                (_doc.get("draft_listing") or {}).get("imageUrls")
+                or _doc.get("ebay_photos")
+            )
+            if not _offer_id:
+                # Not yet staged — queue the full chain; each worker retries until
+                # its prerequisite completes (upload → stage → publish).
+                if not _has_photos:
+                    try:
+                        state_machine.enqueue_job(
+                            queue_name="ebay_upload",
+                            payload={"sku": sku},
+                            dedupe_key=f"ebay_upload:{sku}",
+                            max_attempts=5,
+                        )
+                    except Exception:
+                        pass
+                try:
+                    state_machine.enqueue_job(
+                        queue_name="ebay_stage",
+                        payload={"sku": sku},
+                        dedupe_key=f"ebay_stage:{sku}",
+                        max_attempts=5,
+                    )
+                except Exception:
+                    pass
+            job_id = state_machine.enqueue_job(
+                queue_name="ebay_publish",
+                payload={"sku": sku},
+                dedupe_key=f"ebay_publish:{sku}",
+                max_attempts=10,
             )
 
         else:
@@ -1492,6 +1681,19 @@ def ebay_category_context(category_id: str) -> Dict[str, Any]:
 
     # ── Fulfillment policy for this category ─────────────────────────────
     fulfillment_id = (_cfg.get("fulfillment_policy_by_category") or {}).get(str(category_id)) or _cfg.get("fulfillment_policy_id") or ""
+    if not fulfillment_id:
+        _pol_path = _cfg.get("catalog_root")
+        if _pol_path:
+            _pol_file = _pol_path / "ebay-fulfillment-policies.json"
+            if _pol_file.exists():
+                try:
+                    import json as _pj
+                    _pdata = _pj.loads(_pol_file.read_text())
+                    _fids = _pdata.get("fulfillment", {})
+                    # prefer FC4 by name, else first entry
+                    fulfillment_id = next((pid for pid, name in _fids.items() if name == "FC4"), next(iter(_fids), ""))
+                except Exception:
+                    pass
 
     return {
         "ok": True,
@@ -1885,6 +2087,64 @@ _CONDITION_ID_MAP: Dict[str, List[Dict[str, str]]] = {
 # Module-level constant — avoids nested quote hell in f-string script blocks
 _CATEGORY_CONTEXT_IIFE = "function loadCatCtx(catId){\n  var prefill=window._DL_PREFILL||{};\n  var loading=document.getElementById('aspects-loading');\n  var form=document.getElementById('aspects-form');\n  if(!catId){if(loading)loading.textContent='No category.';return;}\n  fetch('/api/ebay/category-context/'+encodeURIComponent(catId),{headers:authHeaders()})\n  .then(function(r){return r.json();}).then(function(d){\n    if(!d||!d.ok){if(loading)loading.textContent='Context load failed.';return;}\n    window._CAT_CTX=d;\n    var sel=document.getElementById('dl-condition-select');\n    if(sel&&d.conditions&&d.conditions.length){\n      var allowed={};\n      d.conditions.forEach(function(c){allowed[c.enum]=c.label;});\n      Array.from(sel.options).forEach(function(opt){\n        if(opt.value&&!allowed[opt.value])opt.style.display='none';\n        else if(opt.value&&allowed[opt.value])opt.text=allowed[opt.value];\n      });\n      var cn=document.getElementById('condition-policy-note');\n      var nl=d.conditions.length;\n      if(cn)cn.textContent=nl+(nl===1?' condition':' conditions')+' allowed';\n    }\n    if(d.fulfillment_policy_id){\n      var fsel=document.getElementById('dl-ship-input');\n      var fhint=document.getElementById('dl-ship-hint');\n      if(fsel&&!fsel.value){\n        for(var fi=0;fi<fsel.options.length;fi++){\n          if(fsel.options[fi].value===d.fulfillment_policy_id){fsel.value=d.fulfillment_policy_id;break;}\n        }\n        if(fsel.value){\n          fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',\n            headers:authHeaders({'Content-Type':'application/json'}),\n            body:JSON.stringify({fields:{draft_listing:{shipping_profile:fsel.value}}})});\n        }\n      }\n      if(fhint&&!fsel.value)fhint.textContent='suggested: '+d.fulfillment_policy_id;\n    }\n    if(d.store_category){\n      var sch=document.getElementById('store-cat-hint');\n      if(sch)sch.textContent='suggested: '+d.store_category;\n    }\n    if(d.group_name){\n      var gh=document.getElementById('category-group-hint');\n      if(gh){\n        var pt=d.pricing&&d.pricing.typical_used?' · typical $'+d.pricing.typical_used.toFixed(2):'';\n        var pf=d.pricing&&d.pricing.floor?' · floor $'+d.pricing.floor.toFixed(2):'';\n        gh.textContent='group: '+d.group_name+pf+pt;\n      }\n    }\n    if(loading)loading.style.display='none';\n    if(!form)return;\n    if(!d.aspects||!d.aspects.length){\n      form.innerHTML='<span style=\"color:#556;font-size:.82em\">No aspects for this category</span>';\n      return;\n    }\n    var html='';\n    d.aspects.forEach(function(asp){\n      var badge=asp.required\n        ?'<span style=\"font-size:.7em;background:#3a1a1a;color:#c44;border-radius:3px;padding:1px 5px;margin-left:4px\">REQ</span>'\n        :'<span style=\"font-size:.7em;background:#2a2a0a;color:#aa0;border-radius:3px;padding:1px 5px;margin-left:4px\">REC</span>';\n      // Three-layer merge: operator edits (blue) > proposed (yellow) > live (baseline)\n      var liveVal=(window._LIVE_ASPECTS&&window._LIVE_ASPECTS[asp.name]!==undefined?(window._LIVE_ASPECTS[asp.name]||'').toString():'');\n      var proposedVal=(window._PROPOSED_ASPECTS&&window._PROPOSED_ASPECTS[asp.name]!==undefined?(window._PROPOSED_ASPECTS[asp.name]||'').toString():'');\n      var editVal=(prefill[asp.name]!==undefined?(prefill[asp.name]||'').toString():'');\n      var cur,layer;\n      if(editVal){cur=editVal;layer=(editVal!==liveVal)?'edit':'same';}\n      else if(proposedVal){cur=proposedVal;layer=(proposedVal!==liveVal)?'proposed':'same';}\n      else{cur=liveVal;layer=liveVal?'live':'empty';}\n      cur=cur.replace(/\"/g,'&quot;');\n      var reqEmpty=asp.required&&!cur;\n      // Colours by layer\n      var bord=reqEmpty?'#c44':(layer==='edit'?'#44c':(layer==='proposed'?'#884':'#444'));\n      var bg=reqEmpty?'#1a0a0a':(layer==='edit'?'#0a0a1a':(layer==='proposed'?'#1a1a00':'#1a1a1a'));\n      // Hint: show live value when overridden or proposed differs\n      var liveHint=(layer==='edit'||layer==='proposed')&&liveVal\n        ?'<div style=\"font-size:.7em;color:#445;margin-top:1px\">live: '+liveVal.replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>'\n        :'';\n      var inp;\n      if(asp.allowed_values&&asp.allowed_values.length&&asp.mode==='SELECTION_ONLY'){\n        var opts=asp.allowed_values.map(function(v){\n          return '<option value=\"'+v+'\"'+(v===cur?' selected':'')+'>'+v+'</option>';\n        }).join('');\n        inp='<select data-aspect=\"'+asp.name+'\" style=\"background:'+bg+';color:#eee;border:1px solid '+bord+';border-radius:3px;padding:2px 5px;font-size:.85em\"><option value=\"\">—</option>'+opts+'</select>';\n      }else{\n        var dlid='dl-asp-'+asp.name.replace(/[^a-zA-Z0-9]/g,'-');\n        var dlopts=asp.allowed_values&&asp.allowed_values.length\n          ?'<datalist id=\"'+dlid+'\">'+asp.allowed_values.map(function(v){return '<option value=\"'+v+'\"></option>';}).join('')+'</datalist>'\n          :'';\n        inp='<input type=\"text\"'+(dlopts?' list=\"'+dlid+'\"':'')+' data-aspect=\"'+asp.name+'\" value=\"'+cur+'\"'\n           +' style=\"background:'+bg+';color:#eee;border:1px solid '+bord+';border-radius:3px;padding:2px 5px;font-size:.85em;width:200px\">'\n           +dlopts;\n      }\n      html+='<div class=\"frow\"'+(reqEmpty?' style=\"border-left:2px solid #944;padding-left:4px\"':'')+'>  <span class=\"fn\" style=\"font-size:.82em\">'+asp.name+badge+'</span><span class=\"fv\">'+inp+liveHint+'</span></div>';\n    });\n    \n    var missingReq=d.aspects.filter(function(a){return a.required&&!(prefill[a.name]||'');}).length;if(missingReq>0){html='<div style=\"margin-bottom:8px;padding:5px 8px;background:#1a0808;border:1px solid #844;border-radius:3px;font-size:.78em;color:#e88\">'+missingReq+' required aspect'+(missingReq===1?'':'s')+' missing values — fill before staging</div>'+html;}form.innerHTML=html;\n  }).catch(function(){\n    if(loading)loading.textContent='Category context load failed.';\n  });\n}\ndocument.addEventListener('DOMContentLoaded',function(){\n  if(window._DL_CAT_ID)loadCatCtx(window._DL_CAT_ID);\n  if(typeof initCatSearch==='function')initCatSearch();\n  if(typeof initCatSearch2==='function')initCatSearch2();\n});\n"
 
+# Custom context menu for gallery images — fetches bytes locally then POSTs to
+# Google Lens upload so the LAN-only URL is never sent to Google directly.
+_LENS_CTX_MENU_JS = """\
+(function(){
+  var menu=document.createElement('div');
+  menu.id='img-ctx-menu';
+  menu.style.cssText='display:none;position:fixed;z-index:9999;background:#1e1e1e;border:1px solid #444;border-radius:4px;padding:4px 0;min-width:200px;box-shadow:0 2px 8px rgba(0,0,0,.6);font-size:13px;';
+  function addItem(label,fn){
+    var d=document.createElement('div');
+    d.textContent=label;
+    d.style.cssText='padding:6px 14px;cursor:pointer;color:#ddd;';
+    d.onmouseenter=function(){this.style.background='#333';};
+    d.onmouseleave=function(){this.style.background='';};
+    d.onclick=function(){hide();fn();};
+    menu.appendChild(d);
+  }
+  var _src='';
+  function hide(){menu.style.display='none';}
+  async function lensSearch(){
+    try{
+      var resp=await fetch(_src);
+      var blob=await resp.blob();
+      var file=new File([blob],'photo.jpg',{type:blob.type||'image/jpeg'});
+      var form=document.createElement('form');
+      form.method='POST';
+      form.action='https://lens.google.com/upload';
+      form.enctype='multipart/form-data';
+      form.target='_blank';
+      var inp=document.createElement('input');
+      inp.type='file';
+      inp.name='encoded_image';
+      var dt=new DataTransfer();
+      dt.items.add(file);
+      inp.files=dt.files;
+      form.appendChild(inp);
+      document.body.appendChild(form);
+      form.submit();
+      document.body.removeChild(form);
+    }catch(e){alert('Lens search failed: '+e);}
+  }
+  addItem('Search with Google Lens',lensSearch);
+  document.body.appendChild(menu);
+  document.addEventListener('contextmenu',function(e){
+    var img=e.target.closest('img.main-photo,#lb-img,.strip img');
+    if(!img){hide();return;}
+    var src=img.src;
+    if(!src||src==='data:,'||src.startsWith('data:'))return;
+    e.preventDefault();
+    _src=src;
+    menu.style.left=Math.min(e.clientX,window.innerWidth-220)+'px';
+    menu.style.top=Math.min(e.clientY,window.innerHeight-60)+'px';
+    menu.style.display='block';
+  });
+  document.addEventListener('click',hide);
+  document.addEventListener('scroll',hide,{passive:true});
+})();
+"""
+
 # ---------------------------------------------------------------------------
 # GET /form/intake — intake landing page (HTML)
 # ---------------------------------------------------------------------------
@@ -2013,7 +2273,7 @@ def intake_landing():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         landing_css=_INTAKE_LANDING_CSS,
-        api_key_json=json.dumps(_web_key),
+        api_key_json=json.dumps(""),
     )
     return HTMLResponse(html)
 
@@ -2333,8 +2593,8 @@ def intake_form(sku: str, request: Request):
         barcode=barcode,
         ai_hint=ai_hint,
         condition_options=cond_opts,
-        api_key=_web_key,
-        api_key_json=json.dumps(_web_key),
+        api_key="",
+        api_key_json=json.dumps(""),
         n_photos=n_photos,
         photo_cls=photo_cls,
         photo_plural=photo_plural,
@@ -2481,7 +2741,7 @@ def bulk_form(request: Request):
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         extra_css=_BULK_EXTRA_CSS,
-        api_key=_web_key,
+        api_key="",
     )
     return HTMLResponse(html)
 
@@ -3416,6 +3676,7 @@ def _render_item_detail_html(
             f"}}"
             f"</script>"
         )
+        gallery_html += "<script>" + _LENS_CTX_MENU_JS + "</script>"
     else:
         gallery_html = '<div style="color:#555;padding:30px;text-align:center">No photos</div>'
 
@@ -4112,7 +4373,18 @@ def _render_item_detail_html(
     _dl_cat_name = h(str((dl or {}).get("category_name") or ""))
     _dl_cat_id_v = h(str((dl or {}).get("category_id") or ""))
     _dl_ship_val = str((dl or {}).get("shipping_profile") or (dl or {}).get("fulfillment_policy_id") or "")
+    _dl_return_val = str((dl or {}).get("return_policy_id") or "")
     _dl_store_cat_id = str((dl or {}).get("store_category_id") or "")
+    if not _dl_store_cat_id:
+        _cg_key = item.get("category_group", "")
+        if _cg_key:
+            try:
+                import json as _jsc2
+                _cg2 = _jsc2.loads(Path(_cfg["category_groups_path"]).read_text())
+                _grp2 = _cg2.get("groups", _cg2).get(_cg_key, {})
+                _dl_store_cat_id = str(_grp2.get("store_category_id") or "")
+            except Exception:
+                pass
     _dl_store_cat2_id = str((dl or {}).get("secondary_store_category_id") or "")
     _dl_cat2_id_v = h(str((dl or {}).get("secondary_category_id") or ""))
     _dl_cat2_name = h(str((dl or {}).get("secondary_category_name") or ""))
@@ -4150,18 +4422,22 @@ def _render_item_detail_html(
 
     _cat_root = _cfg.get("catalog_root")
     _pol_cache = (_cat_root / "ebay-fulfillment-policies.json") if _cat_root else None
-    _fulfillment_opts = {}
-    _return_label = "Free Returns"
+    _fulfillment_opts: dict = {}
+    _return_opts: dict = {}
     if _pol_cache and _pol_cache.exists():
         try:
             _pd = _json2.loads(_pol_cache.read_text())
             _fulfillment_opts = _pd.get("fulfillment", {})
-            _ret = _pd.get("return", {})
-            _return_label = next(iter(_ret.values()), "Free Returns") if _ret else "Free Returns"
+            _return_opts = _pd.get("return", {})
+            if not _dl_return_val and _return_opts:
+                _dl_return_val = next(iter(_return_opts))
         except Exception:
             pass
     _ship_opts_html = "".join(
         f'<option value="{pid}"{" selected" if pid == _dl_ship_val else ""}>{h(name)} ({pid[:8]}…)</option>' for pid, name in sorted(_fulfillment_opts.items(), key=lambda kv: kv[1])
+    )
+    _return_opts_html = "".join(
+        f'<option value="{pid}"{" selected" if pid == _dl_return_val else ""}>{h(name)} ({pid[:8]}…)</option>' for pid, name in sorted(_return_opts.items(), key=lambda kv: kv[1])
     )
     # Build proposals banner if pipeline has proposed changes
     # Actions section — context-aware based on eBay status
@@ -4390,6 +4666,15 @@ def _render_item_detail_html(
         + f"</select>"
         f'<span id="condition-policy-note" style="font-size:.72em;color:#445;margin-left:8px"></span>'
         f"</span></div>"
+        f'<div class="frow" id="dl-condition-desc">'
+        f'<span class="fn">Cond. notes</span>'
+        f'<span class="fv" style="flex:1">'
+        f'<input id="dl-cond-desc-input" type="text" '
+        f'value="{h((dl or {{}}).get("condition_description") or "")}" '
+        f'placeholder="e.g. minor wear on corners, no missing pieces" '
+        f'style="width:100%;background:#1a1a1a;color:#eee;border:1px solid #444;'
+        f'border-radius:4px;padding:4px 6px;font-size:.85em">'
+        f"</span></div>"
         # Price with comps bar
         f'<div class="frow" id="dl-price">'
         f'<span class="fn">Price</span>'
@@ -4466,8 +4751,12 @@ def _render_item_detail_html(
         f"</span></div>"
         f'<div class="frow" id="dl-returns">'
         f'<span class="fn">Returns</span>'
-        f'<span class="fv" style="font-size:.85em;color:#aaa">{h(_return_label)}</span>'
-        f"</div>"
+        f'<span class="fv">'
+        f'<select id="dl-return-select" '
+        f'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px;font-size:.85em">'
+        f"{_return_opts_html}"
+        f"</select>"
+        f"</span></div>"
         # Aspects
         f'<div id="dl-aspects" style="margin-top:10px">'
         f'<div style="font-size:.83em;color:#aaa;font-weight:600;margin-bottom:6px">'
@@ -4737,10 +5026,14 @@ def _render_item_detail_html(
         f"  if(p&&p.value!=='')dl.price=parseFloat(p.value)||null;"
         f"  var c=document.getElementById('dl-condition-select');"
         f"  if(c&&c.value)dl.condition_enum=c.value;"
+        f"  var cd=document.getElementById('dl-cond-desc-input');"
+        f"  if(cd)dl.condition_description=cd.value;"
         f"  var desc=document.getElementById('dl-desc-input');"
         f"  if(desc)dl.description=desc.value;"
         f"  var ship=document.getElementById('dl-ship-input');"
         f"  if(ship&&ship.value)dl.shipping_profile=ship.value;"
+        f"  var ret=document.getElementById('dl-return-select');"
+        f"  if(ret&&ret.value)dl.return_policy_id=ret.value;"
         f"  var scat=document.getElementById('dl-store-cat-select');"
         f"  if(scat&&scat.value){{"
         f"    dl.store_category_id=scat.value;"
@@ -4981,7 +5274,7 @@ def items_browse_form():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         extra_css=_ITEMS_EXTRA_CSS,
-        api_key=_web_key,
+        api_key="",
     )
     return HTMLResponse(html, headers={"Cache-Control": "no-store, no-cache"})
 
@@ -5027,7 +5320,7 @@ def item_detail_form(sku: str):
         log.warning("queue job fetch failed for %s: %s", sku, exc)
 
     return HTMLResponse(
-        _render_item_detail_html(sku, item, images, videos, jobs, _web_key),
+        _render_item_detail_html(sku, item, images, videos, jobs, ""),
         headers={"Cache-Control": "no-store, no-cache"},
     )
 
@@ -5714,7 +6007,7 @@ def offers_form():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         offers_css=_OFFERS_EXTRA_CSS,
-        api_key_json=json.dumps(_web_key),
+        api_key_json=json.dumps(""),
     )
     return HTMLResponse(html)
 
@@ -6004,7 +6297,7 @@ def revisions_form():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         revisions_css=_REVISIONS_EXTRA_CSS,
-        api_key_json=json.dumps(_web_key),
+        api_key_json=json.dumps(""),
     )
     return HTMLResponse(html)
 
@@ -6286,7 +6579,7 @@ def drafts_form():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         review_css=_REVIEW_EXTRA_CSS,
-        api_key_json=json.dumps(_web_key),
+        api_key_json=json.dumps(""),
     )
     return HTMLResponse(html)
 
@@ -6483,7 +6776,7 @@ def needs_review_form():
     html = _NEEDS_REVIEW_HTML.format(
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
-        api_key_json=json.dumps(_web_key),
+        api_key_json=json.dumps(""),
     )
     return HTMLResponse(html)
 
@@ -6849,7 +7142,7 @@ def pipeline_form():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         pipeline_css=_PIPELINE_EXTRA_CSS,
-        api_key_json=json.dumps(_web_key),
+        api_key_json=json.dumps(""),
     )
     return HTMLResponse(html)
 
@@ -7479,7 +7772,7 @@ def system_form():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         system_css=_SYSTEM_EXTRA_CSS,
-        api_key_json=json.dumps(_web_key),
+        api_key_json=json.dumps(""),
     )
     return HTMLResponse(html)
 
@@ -7862,7 +8155,7 @@ def home_form():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         home_css=_HOME_EXTRA_CSS,
-        api_key_json=json.dumps(_web_key),
+        api_key_json=json.dumps(""),
     )
     return HTMLResponse(html, headers={"Cache-Control": "no-store, no-cache"})
 

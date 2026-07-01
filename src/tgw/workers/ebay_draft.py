@@ -605,6 +605,22 @@ class EbayDraftWorker(QueueWorker):
         except psycopg2.errors.UniqueViolation:
             pass
 
+        # If the item is already staged on eBay, push the updated content back.
+        # Delayed 90 s so ebay_price and ebay_upload have time to complete first.
+        # force=True bypasses the idempotency guard that would otherwise skip it.
+        if item.get('ebay_offer', {}).get('offer_id'):
+            try:
+                state_machine.enqueue_job(
+                    queue_name='ebay_stage',
+                    payload={'sku': sku, 'force': True},
+                    dedupe_key=f'ebay_stage:{sku}',
+                    not_before=time.time() + 90,
+                    max_attempts=3,
+                )
+                log.info('%s: already staged — queued ebay_stage(force) to push updated content', sku)
+            except psycopg2.errors.UniqueViolation:
+                pass
+
 
 def main() -> int:
     import argparse

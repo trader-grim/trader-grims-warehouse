@@ -175,9 +175,15 @@ class EbayStageWorker(QueueWorker):
 
         # Merge into ebay_offer block (preserves price_comps etc from ebay_price)
         ebay_offer = dict(item.get('ebay_offer', {}))
-        ebay_offer['offer_id']   = result['offer_id']
-        ebay_offer['status']     = 'UNPUBLISHED'
-        ebay_offer['staged_at']  = datetime.now(timezone.utc).isoformat()
+        ebay_offer['offer_id']    = result['offer_id']
+        # Preserve PUBLISHED status on force-updates of live listings — the offer
+        # remains live on eBay; only our content changed.
+        if item.get('ebay_listing', {}).get('status') == 'Active':
+            ebay_offer['status'] = 'PUBLISHED'
+        else:
+            ebay_offer['status'] = 'UNPUBLISHED'
+        ebay_offer['staged_at']   = datetime.now(timezone.utc).isoformat()
+        ebay_offer['staged_price'] = float(price)  # what was actually submitted to eBay
 
         item['ebay_offer'] = ebay_offer
 
@@ -205,6 +211,21 @@ class EbayStageWorker(QueueWorker):
             )
         except psycopg2.errors.UniqueViolation:
             pass
+
+        # If the item was previously published, republish after staging.
+        # eBay sets the offer back to UNPUBLISHED on any updateOffer call
+        # (including category changes), so we must re-publish to restore live status.
+        if item.get('ebay_listing', {}).get('listing_id'):
+            try:
+                state_machine.enqueue_job(
+                    queue_name='ebay_publish',
+                    payload={'sku': sku},
+                    dedupe_key=f'ebay_publish:{sku}',
+                    max_attempts=3,
+                )
+                log.info('%s: was published — queued ebay_publish to restore live status', sku)
+            except psycopg2.errors.UniqueViolation:
+                pass
 
 
 def main() -> int:

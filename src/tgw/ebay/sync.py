@@ -334,11 +334,14 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
         _thickness = None
     policies     = _get_listing_policies(
         cfg, category_id_str,
-        shipping_profile=item.get('shipping_profile'),
+        shipping_profile=draft.get('shipping_profile') or item.get('shipping_profile'),
         size_class=item.get('size_class'),
         thickness_in=_thickness,
         free_shipping=bool(item.get('free_shipping', False)),
     )
+    if draft.get('return_policy_id'):
+        policies = dict(policies)
+        policies['returnPolicyId'] = str(draft['return_policy_id'])
     location_key = _get_merchant_location(cfg)
     qty          = draft.get('quantity', 1)
 
@@ -358,6 +361,9 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
             },
         },
     }
+    cond_desc = draft.get('condition_description', '').strip()
+    if cond_desc:
+        inv_body['conditionDescription'] = cond_desc
 
     # PP-GLOBALS-001: pass the operator-captured shipping weight through to the
     # Inventory API so calculated-shipping buyers get accurate rates. The intake

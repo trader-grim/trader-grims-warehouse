@@ -59,6 +59,22 @@ Use plan row numbers for plan-table items; "todo #N" only for live tracker IDs.
 
 ---
 
+## 3. What Changed This Session (session 37 — 2026-06-30)
+
+**Session 37 — 2026-06-30 (Sway graphical-session.target fix + reboot test):**
+
+| Change | Detail |
+|--------|--------|
+| Root cause found | `~/.config/sway/config` had no `include ~/.config/sway/conf.d/*.conf` — flake-managed session init was silently ignored on every login |
+| Wrong target fixed | Flake `db.nix` was calling `systemctl --user start graphical-session.target` which has `RefuseManualStart=yes`; fixed to `sway-session.target` (NixOS's `BindsTo` pulls in graphical-session transitively) |
+| kdeconnectd added to flake | Now a proper HM `systemd.user.services` entry; D-Bus activation alone never broadcast to LAN |
+| `nixos-rebuild switch` clean | All three services (lan-mouse, kdeconnectd, tgw-clipd) auto-start on login |
+| Reboot test passed | lan-mouse active; tgw-prod visible in KDE Connect on a1131 |
+
+**Open from session 37:** Nothing new — no TGW workers or eBay API touched.
+
+---
+
 ## 3. What Changed This Session (session 36 — 2026-06-29)
 
 **Session 36 — 2026-06-29 (PP-WM-001: Sway TGW-ify + Flutter startup fix):**
@@ -249,3 +265,28 @@ Then: read the master plan and check §2 above against `tgw todo` to confirm ali
 
 - **Don't restart workers while migration runs** — ebay_sku_migrate writes directly to ItemData (6 unfenced sites); concurrent writes from other workers risk collision.
 - ebay_sku_migrate config is batch=100/3min — worker self-stops when done, interval is then moot.
+
+---
+
+## Session 32 — 2026-06-30
+
+### What changed
+
+- **CatioNIX dual-desktop fully wired** — a1131 + tgw-prod committed as known-good (flake `4c5b014`). Rebooted and confirmed stable.
+- **lan-mouse bidirectional** — root cause of DTLS failure found in source: `authorized_fingerprints` TOML had key/value reversed. Fingerprint must be the TOML key. Both directions now working.
+- **Clipboard fixed on a1131** — `dom.events.clipboardevents.enabled=false` in Firefox about:config + `firefox-wayland` package. CopyQ replaces klipper.
+- **Syncthing dual-instance correct** — db=8384/22000/21027, tgw=8385/22001/21028. Both GUIs on 0.0.0.0. NixOS `guiAddress` option (not `settings.gui.address`) controls the CLI flag.
+- **KDE Connect** — kdeconnectd running as systemd user service on tgw-prod (Sway); tgw-prod visible on a1131.
+- **Wayland-only toolset** — ydotool, wl-clipboard, firefox-wayland committed; X11 tools removed.
+
+### Still open
+
+- **KDE Connect device pairing** — accept request on both sides (manual step in KDE Connect GUI).
+- **KDE Connect clipboard** — will work after pairing; untested.
+- **Syncthing tgw instances need pairing** — http://192.168.60.100:8385 ↔ http://192.168.60.101:8385 (add as devices in each other's GUI).
+- **a1131 Plasma on tty7** — cosmetic; both Sway + Plasma sessions registered by SDDM. Works fine.
+- All previous open items (worker restart sequence, ebay_sku_migrate, PP-BACKUP-001, etc.) unchanged.
+
+### New risks
+
+- None from this session. No TGW workers or eBay API touched.
