@@ -20,6 +20,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import psycopg2
 import psycopg2.extras
@@ -37,6 +38,36 @@ from .readiness import check_ebay, readiness_html
 from .resolver import load_item_doc
 
 log = logging.getLogger(__name__)
+
+_DISPLAY_TZ = ZoneInfo("America/Los_Angeles")
+
+
+def _local_ts(raw: Any, fmt: str = "%Y-%m-%d %H:%M") -> str:
+    """Format a timestamp (datetime, or ISO string with/without offset) in the
+    operator's local timezone for display.
+
+    Session 41: postgres's session timezone is GMT, so every queue_jobs
+    timestamp comes back as UTC. Every display site in this file truncated
+    the raw ISO string (e.g. `str(ts)[:16]`) to shorten it for the table —
+    which strips the `+00:00` offset entirely, leaving a bare value that
+    looks like local time but is actually UTC (off by the PST/PDT offset —
+    confirmed live: an operator read a dead-lettered job's timestamp as
+    "7 hours in the future"). Always convert through this helper instead of
+    slicing the raw string directly.
+    """
+    if not raw:
+        return ""
+    if isinstance(raw, datetime):
+        dt = raw
+    else:
+        try:
+            dt = datetime.fromisoformat(str(raw))
+        except ValueError:
+            return str(raw)[:16]
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_DISPLAY_TZ).strftime(fmt)
+
 
 # ---------------------------------------------------------------------------
 # Worker pipeline tooltip text — sourced from TGW-Pipeline-Flow.md
@@ -4057,7 +4088,7 @@ def _render_item_detail_html(
     listing_section = (
         fr("Listing ID", h(listing_id) if listing_id else "")
         + fr("eBay Status", h(listing_status) if listing_status else "")
-        + fr("Published", h(str(eb.get("published_at", "") or "")[:19]))
+        + fr("Published", h(_local_ts(eb.get("published_at"))))
         + fr("API", h(str(eb.get("api", "") or "")))
         + _live_price_html
         + ebay_links_html
@@ -4074,7 +4105,7 @@ def _render_item_detail_html(
     _comps = eo.get("price_comps") or {} if eo else {}
     _price_source = eo.get("price_source", "") if eo else ""
     _target_price = eo.get("target_price") if eo else None
-    _priced_at = (eo.get("priced_at") or "")[:19] if eo else ""
+    _priced_at = _local_ts(eo.get("priced_at")) if eo else ""
     _category_group_name = item.get("category_group", "")
     # category-group floor/typical from config (via item fields populated by ebay_price)
     _floor = None
@@ -4116,8 +4147,8 @@ def _render_item_detail_html(
             + fr("Offer Price", _fmt_price(offer_price))
             + fr("eBay Category", h(str(eo.get("category_id", "") or "")))
             + fr("Quantity", h(str(eo.get("quantity", "") or "")))
-            + fr("Published At", h(str(eo.get("published_at", "") or "")[:19]))
-            + fr("Staged At", h(str(eo.get("staged_at", "") or "")[:19]))
+            + fr("Published At", h(_local_ts(eo.get("published_at"))))
+            + fr("Staged At", h(_local_ts(eo.get("staged_at"))))
         )
         if eo
         else '<div class="frow"><span class="fv" style="color:#555">No offer yet</span></div>'
@@ -4221,7 +4252,7 @@ def _render_item_detail_html(
         for j in jobs[:10]:
             state = j.get("state", "")
             sc = "js-" + state.replace("_", "-").lower()
-            ts = (j.get("updated_at") or j.get("finished_at") or j.get("created_at") or "")[:16]
+            ts = _local_ts(j.get("updated_at") or j.get("finished_at") or j.get("created_at"))
             _err_full = str(j.get("error_detail") or "")
             _err_short = _err_full[:80]
             if _err_full:
@@ -4296,7 +4327,7 @@ def _render_item_detail_html(
     if _ph_events:
         _phev_rows = ""
         for _ev in reversed(_ph_events):
-            _ev_ts = h(str(_ev.get("ts", ""))[:19])
+            _ev_ts = h(_local_ts(_ev.get("ts")))
             _ev_price = h(f"${float(_ev.get('price', 0)):.2f}")
             _ev_prev = h(f"${float(_ev.get('previous_price', 0)):.2f}") if _ev.get("previous_price") is not None else "—"
             _ev_label = h(str(_ev.get("label") or _ev.get("stage") or ""))
@@ -4337,8 +4368,8 @@ def _render_item_detail_html(
         for _st in _rps:
             _st_label = h(str(_st.get("label") or _st.get("stage") or ""))
             _st_price = h(f"${float(_st.get('price', 0)):.2f}") if _st.get("price") is not None else "—"
-            _st_due = h(str(_st.get("due_at") or "")[:19])
-            _st_done = h(str(_st.get("done_at") or "")[:19])
+            _st_due = h(_local_ts(_st.get("due_at")))
+            _st_done = h(_local_ts(_st.get("done_at")))
             _done_cls = "color:#888" if _st.get("done_at") else "color:#fb7"
             _rps_rows += (
                 f"<tr>"
@@ -4394,7 +4425,7 @@ def _render_item_detail_html(
     if _id_hist:
         _idh_rows = ""
         for _ev in reversed(_id_hist[-10:]):  # most recent 10
-            _idh_ts = h(str(_ev.get("ts", ""))[:19])
+            _idh_ts = h(_local_ts(_ev.get("ts")))
             _idh_event = h(str(_ev.get("event") or ""))
             _idh_title = h(str(_ev.get("title") or ""))
             _idh_cat = h(str(_ev.get("category") or ""))
@@ -4646,7 +4677,7 @@ def _render_item_detail_html(
             "title": _rev_delta.get("title") or "",
             "description": _rev_delta.get("description") or "",
             "by": _rev.get("by") or "pipeline",
-            "at": (_rev.get("at") or "")[:19],
+            "at": _local_ts(_rev.get("at")),
             "count": len(_rev_delta),
         }
     )
@@ -4738,7 +4769,7 @@ def _render_item_detail_html(
     # Pipeline error (written by ebay_stage/ebay_publish on eBay rejection)
     _pe = item.get("pipeline_error")
     if _pe and isinstance(_pe, dict) and _pe.get("error"):
-        _pe_when = (_pe.get("at") or "")[:19].replace("T", " ")
+        _pe_when = _local_ts(_pe.get("at"))
         _pe_worker = _pe.get("worker", "?")
         _pe_raw_js = _json.dumps(_pe.get("raw", ""))
         _pipeline_error_html = (
@@ -4875,7 +4906,7 @@ def _render_item_detail_html(
     _proposals_banner = ""
     if _has_proposals:
         _pr_by = h(_rev.get("by") or "pipeline")
-        _pr_at = (_rev.get("at") or "")[:19].replace("T", " ")
+        _pr_at = _local_ts(_rev.get("at"))
         _pr_cnt = len(_rev_delta)
         _pr_asp = len(_proposed_aspects)
         _pr_title = _rev_delta.get("title") or ""
@@ -5556,7 +5587,7 @@ def _render_item_detail_html(
         _rb_code = h(str(_rb.get("reason_code") or ""))
         _rb_err = h(str(_rb.get("error") or ""))
         _rb_sugg = h(str(_rb.get("suggestion") or ""))
-        _rb_at = h(str(_rb.get("flagged_at") or "")[:19])
+        _rb_at = h(_local_ts(_rb.get("flagged_at")))
         _rb_detail = f'<div style="font-size:.82em;color:#f99;margin-top:4px">{_rb_err}</div>' if _rb_err else ""
         _rb_sugg_html = f'<div style="font-size:.82em;color:#fb7;margin-top:4px">Suggestion: {_rb_sugg}</div>' if _rb_sugg else ""
         review_block_html = (
