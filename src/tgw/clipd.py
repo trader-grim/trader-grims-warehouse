@@ -524,6 +524,12 @@ def main() -> int:
     import signal
 
     parser = argparse.ArgumentParser(prog='tgw-clipd')
+    # Bare invocation (no subcommand) is the real-world case — the systemd
+    # unit calls `tgw-clipd` with no args — so --backend/--verbose must exist
+    # on the top-level parser too, not just the 'daemon' subparser, or the
+    # no-subcommand path below crashes on args.verbose/args.backend every run.
+    parser.add_argument('--backend', choices=['auto', 'x11', 'wayland'], default='auto')
+    parser.add_argument('--verbose', '-v', action='store_true')
     subparsers = parser.add_subparsers(dest='command', required=False)
 
     # Daemon mode (default)
