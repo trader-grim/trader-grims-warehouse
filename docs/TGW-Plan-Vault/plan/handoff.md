@@ -377,3 +377,51 @@ Then: read the master plan and check §2 above against `tgw todo` to confirm ali
 ### New risks
 
 - None from this session. No TGW workers or eBay API touched.
+
+---
+
+## Session 41 — 2026-07-02
+
+**Full detail:** `dev-workflow/research/SESSION41-wrapup.md` — extremely long session,
+this is a summary only.
+
+### What changed (all committed: `a7e7439`, `f511f2d`, `d1cad9a`)
+
+- eBay/OpenRouter quota drains fixed (ebay_draft QA-telemetry call removed, ebay_sync
+  25707 fallback capped to once/24h, category-tree cache auto-expiry removed, aspects
+  warm-up gated to pre-reset PST window instead of every 6h).
+- `google_direct` provider added (`apis/llm.py`) — ai_identify/alt_text/ebay_draft/
+  bulk_classify now route through the configured Google key (free tier, verified live),
+  auto-fallback to OpenRouter on failure.
+- `ebay_draft`'s aspect-fill is now vision-based (up to 10 photos), not text-only.
+- **Data-preservation bugs found and fixed**: `ebay_price_reducer` never persisted
+  `draft_listing.price` (silent revert risk on any later re-stage);
+  `atomic_write_json` (items.py + catalog.py) silently reverted shared files to
+  owner-only on every write (NamedTemporaryFile creates at 0600 regardless of ACL).
+- `docs/TGW-Plan-Vault` permission drift root-caused and fixed: stale deployed
+  permissions script + the atomic_write_json bug above. Default ACLs extended to
+  src/bin/config/var/backups; `--check` now logs to `permissions-audit.log`.
+- `tgw-clipd` crash loop fixed (15,769+ restarts — bare-invocation argparse bug).
+- Dead-letter/pipeline timestamp display bug fixed — was showing bare UTC as if local
+  (Dave saw a job timestamped "7 hours in the future"); new `_local_ts()` helper.
+
+### Still open
+
+- **3,134 `ebay_draft` dead-letters (old OpenRouter-402 pile) ready to bulk-requeue**
+  — that path is now on `google_direct`, validated working, just needs Dave's
+  go-ahead on the bulk operation.
+- Gated until 00:00 PST reset: 12 `ebay_draft`/`ebay_sync` Taxonomy-429 dead-letters.
+- `ebay_legacy_sync` hit a separate Trading API (`GetMyeBaySelling`) quota wall — reset
+  schedule not yet confirmed.
+- 93 old `ebay_draft` "model returned non-JSON" dead-letters (2016-2018 SKUs,
+  pre-session-41 code path) — not urgent, error message truncated at 200 chars so root
+  cause (real truncation vs. logging truncation) unconfirmed.
+- `tgw202605051933258` (vintage bottle) — Dave was going to correct its price manually
+  once he understood the reducer bug; check whether that's done.
+- Todo #1077 (orphaned bad-SKU offer) reassigned to `admin` — needs Dave to contact
+  eBay support directly.
+
+### New risks
+
+- None beyond what's listed above. No destructive changes; all fixes are additive
+  (new gates/caches/ACLs) or corrections to silently-losing writes.
