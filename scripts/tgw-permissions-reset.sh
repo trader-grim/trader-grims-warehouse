@@ -12,6 +12,21 @@
 #     (a file going group/world-readable) is fixed by a plain `tgw` run.
 #   * --data   — opt-in deep sweep of /opt/TGW/data (55K+ item dirs; slow), left
 #                out of the default run so the everyday repair stays quick.
+#   * Session 41 — a periodic chmod sweep can't win against a writer that
+#     recreates a file: NamedTemporaryFile-based atomic writes (items.py/
+#     catalog.py atomic_write_json, used everywhere) create the temp file at
+#     0600 regardless of the parent directory's ACL or umask, silently
+#     reverting shared files to owner-only on every write. Two changes:
+#       - Default ACLs (--use-acl) now belong on src/bin/docs/var/backups too
+#         (not just log/backup), so new files inherit group-write regardless
+#         of the creating process's umask for the common (non-atomic-write)
+#         case; the atomic-write helpers themselves were separately patched
+#         to chmod their temp file before the rename.
+#       - --check now also audits the OPPOSITE drift direction (files gone
+#         too CLOSED, not just too open) on the shared-write trees, and
+#         --audit-log appends every --check result (with timestamp) to
+#         <log-root>/permissions-audit.log so recurring drift is visible
+#         over time instead of only at the moment someone happens to look.
 #
 # Policy (updated — never world-readable; db user in tgw group needs write on src/bin/docs):
 #   App trees (src, bin, docs): dirs 2770, files 0660; bin/ files 0750 (all executable)
@@ -28,6 +43,7 @@ GROUP="tgw"
 SECRETS_DIR=""
 BACKUP_ROOT="/var/backups/trader_grims_warehouse"
 LOG_ROOT="/opt/TGW/var/log"
+AUDIT_LOG=""
 USE_ACL=0
 RESET_ACL=0
 DRY_RUN=0
@@ -52,6 +68,7 @@ Options:
   --secrets-dir PATH    Secrets dir, default: <root>/secrets
   --backup-root PATH    Backup root, default: /var/backups/trader_grims_warehouse
   --log-root PATH       Log root, default: /opt/TGW/var/log
+  --audit-log PATH      Where --check appends its result, default: <log-root>/permissions-audit.log
   --data                Also deep-sweep <root>/data (slow; 55K+ item dirs)
   --use-acl             Apply default ACLs on writable trees
   --reset-acl           Remove existing ACLs before applying new defaults
@@ -79,7 +96,33 @@ need_cmd() {
 }
 
 DRIFT=0
-report_drift() { echo "DRIFT: $*" >&2; DRIFT=1; }
+audit_log_line() {
+  [[ -n "$AUDIT_LOG" ]] || return 0
+  mkdir -p "$(dirname "$AUDIT_LOG")" 2>/dev/null || return 0
+  printf '%s %s\n' "$(date -Is)" "$*" >> "$AUDIT_LOG" 2>/dev/null || true
+}
+report_drift() { echo "DRIFT: $*" >&2; audit_log_line "DRIFT: $*"; DRIFT=1; }
+
+# True if a file mode denies group write (the "silently reverted to
+# owner-only" failure mode — session 41: NamedTemporaryFile-based atomic
+# writes create at 0600 regardless of the parent's ACL, so a shared-write
+# tree can drift closed even with the policy correctly applied at rest).
+group_write_missing() {
+  local m="$1"
+  ! (( (8#$m) & 8#020 ))
+}
+
+# Flag files that are TOO CLOSED relative to the shared-write policy —
+# the opposite failure mode from audit_world_writable below.
+audit_too_closed() { # <dir> <label>
+  [[ -d "$1" ]] || return 0
+  local n
+  n="$(find "$1" -type f -not -path '*/.git/*' ! -perm -020 2>/dev/null | wc -l)"
+  if [[ "$n" -gt 0 ]]; then
+    report_drift "$1: $n file(s) missing group-write ($2) — an atomic write likely reverted them; see items.py/catalog.py atomic_write_json"
+  fi
+  return 0
+}
 
 # Octal mode of a path, no leading zeros (e.g. "700", "2700", "664").
 modeof() { stat -c '%a' "$1"; }
@@ -98,6 +141,7 @@ while [[ $# -gt 0 ]]; do
     --secrets-dir) SECRETS_DIR="$2"; shift 2 ;;
     --backup-root) BACKUP_ROOT="$2"; shift 2 ;;
     --log-root) LOG_ROOT="$2"; shift 2 ;;
+    --audit-log) AUDIT_LOG="$2"; shift 2 ;;
     --data) DEEP_DATA=1; shift ;;
     --use-acl) USE_ACL=1; shift ;;
     --reset-acl) RESET_ACL=1; shift ;;
@@ -132,12 +176,15 @@ CONFIG_ROOT="$TGW_ROOT/config"
 VAR_ROOT="$TGW_ROOT/var"
 DATA_ROOT="$TGW_ROOT/data"
 SECRETS_DIR="${SECRETS_DIR:-$TGW_ROOT/secrets}"
+AUDIT_LOG="${AUDIT_LOG:-$LOG_ROOT/permissions-audit.log}"
+PLAN_VAULT_ROOT="$SRC_ROOT/trader-grims-warehouse/docs/TGW-Plan-Vault"
 
 # ---------------------------------------------------------------------------
 # CHECK mode — audit only, no changes
 # ---------------------------------------------------------------------------
 if [[ "$CHECK" -eq 1 ]]; then
   echo "Auditing TGW permissions under $TGW_ROOT ..."
+  audit_log_line "=== audit start (host: $(hostname 2>/dev/null || echo '?'), user: $(id -un)) ==="
 
   # Secrets are the security-critical surface: dir must deny group/other,
   # files must be owner-only (no group/other access at all).
@@ -183,11 +230,28 @@ if [[ "$CHECK" -eq 1 ]]; then
     fi
   fi
 
+  # Shared read-write trees (src/bin/docs/var/backups, per the 2770/0660
+  # policy) can drift the OTHER way — silently CLOSED, not opened. This is
+  # the session-41 failure mode: a tempfile-based atomic write recreates a
+  # file at 0600 regardless of the directory's ACL, discarding group-write.
+  # Always audited (cheap: only checks the group-write bit, no deep stat
+  # comparisons) so drift shows up on every run, not just --data sweeps.
+  # bin/ and src/'s executable scripts are deliberately excluded — those are
+  # 0750 (owner-write, group-execute only) by policy, not the 0660
+  # shared-write pattern; a script sitting at 0750 is correct, not drift.
+  audit_too_closed "$PLAN_VAULT_ROOT" "shared plan vault"
+  if [[ "$DEEP_DATA" -eq 1 ]]; then
+    audit_too_closed "$VAR_ROOT" "shared var"
+    audit_too_closed "$BACKUP_ROOT" "shared backups"
+  fi
+
   if [[ "$DRIFT" -eq 0 ]]; then
     echo "OK — no permission drift found."
+    audit_log_line "OK — no permission drift found."
     exit 0
   fi
   echo "Permission drift found (run without --check to repair)." >&2
+  audit_log_line "=== audit end: DRIFT FOUND ==="
   exit 1
 fi
 

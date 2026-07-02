@@ -22,15 +22,18 @@ def _cfg(models: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def test_defaults_ai_identify_vision_lite():
+    # Session 41: moved to google_direct — verified live against the configured
+    # key that gemini-2.5-flash-lite is free-tier on this project (see llm.py
+    # _DEFAULTS comment). Falls back to OpenRouter automatically on failure.
     p, m = _DEFAULTS["ai_identify"]
-    assert p == "openrouter"
-    assert m == "google/gemini-2.5-flash-lite"
+    assert p == "google_direct"
+    assert m == "gemini-2.5-flash-lite"
 
 
 def test_defaults_alt_text_vision_lite():
     p, m = _DEFAULTS["alt_text"]
-    assert p == "openrouter"
-    assert m == "google/gemini-2.5-flash-lite"
+    assert p == "google_direct"
+    assert m == "gemini-2.5-flash-lite"
 
 
 def test_defaults_suggestions_classify_deepseek():
@@ -39,16 +42,19 @@ def test_defaults_suggestions_classify_deepseek():
     assert m == "deepseek/deepseek-v4-flash"
 
 
-def test_defaults_bulk_classify_gemini_2_0_flash_lite():
+def test_defaults_bulk_classify_gemini_2_5_flash_lite():
+    # Session 41: moved off gemini-2.0-flash-lite (deprecated, 0 free quota on our
+    # project) to gemini-2.5-flash-lite via google_direct — free, current, at
+    # least as capable.
     p, m = _DEFAULTS["bulk_classify"]
-    assert p == "openrouter"
-    assert m == "google/gemini-2.0-flash-lite"
+    assert p == "google_direct"
+    assert m == "gemini-2.5-flash-lite"
 
 
 def test_defaults_ebay_draft_openrouter():
     p, m = _DEFAULTS["ebay_draft"]
-    assert p == "openrouter"
-    assert m == "google/gemini-2.5-flash"
+    assert p == "google_direct"
+    assert m == "gemini-2.5-flash"
 
 
 def test_defaults_pm_intake_openrouter():
@@ -98,15 +104,15 @@ def test_get_task_model_config_overrides_bulk_classify():
 def test_get_task_model_falls_back_to_defaults_when_config_empty():
     cfg = _cfg({})
     p, m = get_task_model(cfg, "ai_identify")
-    assert p == "openrouter"
-    assert m == "google/gemini-2.5-flash-lite"
+    assert p == "google_direct"
+    assert m == "gemini-2.5-flash-lite"
 
 
 def test_get_task_model_falls_back_for_bulk_classify_when_config_empty():
     cfg = _cfg({})
     p, m = get_task_model(cfg, "bulk_classify")
-    assert p == "openrouter"
-    assert m == "google/gemini-2.0-flash-lite"
+    assert p == "google_direct"
+    assert m == "gemini-2.5-flash-lite"
 
 
 def test_get_task_model_unknown_task_uses_openrouter_fallback():
@@ -120,4 +126,4 @@ def test_get_task_model_partial_config_uses_defaults_for_missing_fields():
     cfg = _cfg({"alt_text": {"model": "google/gemini-2.5-flash-lite"}})
     p, m = get_task_model(cfg, "alt_text")
     assert m == "google/gemini-2.5-flash-lite"
-    assert p == "openrouter"  # falls back to _DEFAULTS provider
+    assert p == "google_direct"  # falls back to _DEFAULTS provider

@@ -567,15 +567,18 @@ def suggest_price(
             was_cond_filtered = cfiltered
             source = 'browse:category+short'
 
-    # Stage 3 — category name only
-    if not all_prices and category_name:
-        summaries = _fetch_raw(cfg, category_name)
-        prices, cfiltered = _best_prices(summaries, item_rank)
-        if len(prices) >= MIN_COMPS:
-            all_prices = prices
-            winning_summaries = summaries
-            was_cond_filtered = cfiltered
-            source = 'browse:category_only'
+    # Stage 3 (category name only) removed 2026-07-02 (session 41): an eBay
+    # category name (e.g. "California", "Ashtrays", "Horse Racing") is a taxonomy
+    # label, not a description of the item, and searching Browse for it returns
+    # anything that happens to share the word — confirmed on tgw202605060201087
+    # (a $29.99 vintage plaque): querying "California" returned raw almonds,
+    # medjool dates, zinnia seeds, and a $309.95 "goldback," and even after
+    # LLM/IQR filtering the survivors were still incoherent enough to price the
+    # item at $340.99 (10% over the $309.95 max) — an 11x overprice that got
+    # staged live and then deadlocked publish (see ebay_publish.py fix, same
+    # session). Stages 4/5 below (category-group typical price, category config
+    # default) are a strictly safer fallback for "not enough real comps" than
+    # trusting a category-name text search.
 
     if was_cond_filtered:
         source += '+cond'

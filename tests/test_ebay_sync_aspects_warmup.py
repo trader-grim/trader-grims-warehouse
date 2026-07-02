@@ -29,6 +29,11 @@ def _mock_dependencies(monkeypatch):
     # stub it out so these tests isolate the warm-up wiring in handle().
     monkeypatch.setattr(EbaySyncWorker, "_sync_one", lambda self, offer, sku: 0)
     monkeypatch.setattr(EbaySyncWorker, "_reschedule", lambda self: None)
+    # Session 41: warm-up is now gated to the pre-reset PST window (see
+    # test_ebay_sync_aspects_warmup_gate.py for that gate's own tests) — these tests
+    # are about the wiring/dedup/failure-isolation, not the time gate, so force it on.
+    monkeypatch.setattr(EbaySyncWorker, "_aspects_warmup_due", lambda self: True)
+    monkeypatch.setattr(EbaySyncWorker, "_mark_aspects_warmup_run", lambda self: None)
 
 
 def _cfg(tmp_path) -> Dict[str, Any]:

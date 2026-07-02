@@ -220,11 +220,37 @@ class EbayPriceReducerWorker(QueueWorker):
         }
         item.setdefault('price_history', []).append(price_entry)
         item['reprice_schedule'] = schedule
-        fence_ebay_write(self.config, sku, ebay_offer={'price': new_price})
+
+        # Session 41 fix: draft_listing.price was never persisted here — only
+        # mutated in memory (see draft['price'] = new_price above) and then
+        # silently dropped, every run, success or failure. ebay_stage.py reads
+        # draft_listing.price as its FIRST price source, so the next time
+        # ebay_stage ran for any reason it would push the stale pre-reduction
+        # price back live, silently reverting the markdown eBay had already
+        # accepted (confirmed live on tgw202605051933258: draft_listing.price
+        # stuck at the original $82.99 while ebay_offer/price_history correctly
+        # tracked the reduction schedule down to $32.92 — the drift was
+        # invisible until an ebay_stage re-run pushed $82.99 back live).
+        #
+        # patch_item persists this — the more critical, authoritative write —
+        # before the ebay_write() deep-merge below, so a failure in the latter
+        # (as happened here, a transient KeyError('api_key') crash) can no
+        # longer discard the bookkeeping for a price change eBay already
+        # accepted live.
         fence_patch_item(self.config, sku, {
             'reprice_schedule': schedule,
             'price_history':    item['price_history'],
+            'draft_listing':    draft,
         })
+        try:
+            fence_ebay_write(self.config, sku, ebay_offer={'price': new_price})
+        except Exception:
+            log.exception(
+                'ebay_price_reducer: ebay_offer.price merge failed for %s after '
+                'the live eBay PUT and local bookkeeping already succeeded — '
+                'ebay_offer.price may lag draft_listing.price until the next sync',
+                sku,
+            )
         stats['reduced'] += 1
 
     def _reschedule(self) -> None:

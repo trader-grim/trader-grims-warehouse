@@ -8,6 +8,7 @@ A5: any field write clears the catalog_verified hall-pass (the verifiedupdate
 """
 
 import json
+import os
 
 import pytest
 
@@ -45,6 +46,26 @@ def test_atomic_write_overwrite_keeps_single_file(tmp_path):
     items.atomic_write_json(path, {'sku': 'tgw1', 'v': 2})
     assert json.loads(path.read_text(encoding='utf-8'))['v'] == 2
     assert [p.name for p in path.parent.iterdir()] == ['tgw1.json']
+
+
+def test_atomic_write_new_file_defaults_to_group_writable(tmp_path):
+    """NamedTemporaryFile creates its file at 0600 regardless of the parent
+    directory's ACL/umask — session 41 confirmed this silently reverts shared
+    files (docs/TGW-Plan-Vault) to owner-only on every write. A brand-new file
+    must land at 0660, not 0600."""
+    path = tmp_path / 'tgw1' / 'tgw1.json'
+    items.atomic_write_json(path, {'sku': 'tgw1'})
+    assert (path.stat().st_mode & 0o777) == 0o660
+
+
+def test_atomic_write_preserves_existing_mode(tmp_path):
+    """A rewrite must not silently tighten an existing file's permissions —
+    match whatever mode was already there rather than always defaulting."""
+    path = tmp_path / 'tgw1' / 'tgw1.json'
+    items.atomic_write_json(path, {'sku': 'tgw1', 'v': 1})
+    os.chmod(path, 0o640)
+    items.atomic_write_json(path, {'sku': 'tgw1', 'v': 2})
+    assert (path.stat().st_mode & 0o777) == 0o640
 
 
 # ---------------------------------------------------------------------------

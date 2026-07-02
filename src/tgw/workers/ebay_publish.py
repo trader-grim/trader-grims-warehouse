@@ -135,9 +135,24 @@ class EbayPublishWorker(QueueWorker):
         staged_price = ebay_offer.get('staged_price')
         if draft_price is not None and staged_price is not None:
             if abs(float(draft_price) - float(staged_price)) > 0.001:
+                # Session 41: ebay_stage's idempotency guard (existing offer_id →
+                # skip) has no price-drift check, so nothing was ever forcing a
+                # re-stage here — this used to just retry forever waiting for a
+                # correction that would never come (see tgw202605060201087, stuck
+                # since 2026-07-01 with staged price $340.99 vs draft $29.99).
+                # Break the deadlock by requesting the force-restage ourselves.
+                try:
+                    state_machine.enqueue_job(
+                        queue_name='ebay_stage',
+                        payload={'sku': sku, 'force': True},
+                        dedupe_key=f'ebay_stage:force:{sku}',
+                        max_attempts=3,
+                    )
+                except psycopg2.errors.UniqueViolation:
+                    pass
                 raise RuntimeError(
                     f'{sku}: draft price ${draft_price} != staged price ${staged_price} '
-                    f'— waiting for ebay_stage to sync current price before publishing'
+                    f'— requested a forced ebay_stage re-sync, will retry'
                 )
 
         # Build reprice schedule from comps — price is already correct on the offer.

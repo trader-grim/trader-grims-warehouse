@@ -45,8 +45,22 @@ def set_mutation_context(source: str, session_id: Optional[str] = None) -> None:
 # ---------------------------------------------------------------------------
 
 def atomic_write_json(path: Path, data: Any, pretty: bool = True) -> None:
-    """Write JSON atomically via a temp file + rename."""
+    """Write JSON atomically via a temp file + rename.
+
+    NamedTemporaryFile creates the temp file at mode 0600 regardless of the
+    parent directory's permissions or any default ACL in place — an ACL can
+    only constrain a requested mode downward, not grant access the creator
+    explicitly excluded. Left alone, every atomic write here would silently
+    revert the file to owner-only, undoing shared group-write permissions
+    (confirmed live in session 41 on docs/TGW-Plan-Vault). Explicitly chmod
+    the temp file before the rename so the final file keeps the target's
+    existing mode (or 0o660, the group-writable default, for a new file).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        want_mode = path.stat().st_mode & 0o777
+    except FileNotFoundError:
+        want_mode = 0o660
     with tempfile.NamedTemporaryFile(
         'w', encoding='utf-8', delete=False, dir=path.parent
     ) as tmp:
@@ -54,6 +68,7 @@ def atomic_write_json(path: Path, data: Any, pretty: bool = True) -> None:
                   indent=2 if pretty else None, sort_keys=False)
         tmp.write('\n')
         tmp_path = Path(tmp.name)
+    os.chmod(tmp_path, want_mode)
     os.replace(tmp_path, path)
 
 

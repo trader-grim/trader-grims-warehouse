@@ -90,6 +90,62 @@ class TestTreeIndexBuild:
         assert index['2']['leaf'] is True
 
 
+class TestTreeCacheNeverAutoExpires:
+    """Session 41: Dave's design (stated twice) is that the tree cache has no
+    time-based expiry — eBay announces taxonomy changes, they're rare, so there is
+    no reason to burn a live re-fetch on a schedule. A 30-day auto-expiry shipped
+    instead and silently caused 3+ days of perpetual quota exhaustion in production
+    because the disk cache never actually got a chance to persist past that window
+    under real usage. These tests lock in "no auto-expiry" as a regression guard."""
+
+    def setup_method(self):
+        _reset_caches()
+
+    def test_arbitrarily_old_cache_is_still_used(self, tmp_path):
+        import json
+        cache_path = tmp_path / 'ebay-category-tree.json'
+        # 10 years old — must still be honored; only manual refresh invalidates it.
+        cache_path.write_text(json.dumps({'_cached_at': 0, 'tree': _FAKE_TREE}))
+        cfg = _cfg(tmp_path)
+        with patch.object(taxonomy, 'get_category_tree_id', return_value='0'), \
+             patch.object(taxonomy, 'ebay_get', side_effect=AssertionError('must not hit live API')):
+            index = taxonomy._ensure_tree_index(cfg)
+        assert index['111']['name'] == 'US Coins'
+
+
+class TestRefreshCategoryTreeCache:
+    def setup_method(self):
+        _reset_caches()
+
+    def test_refresh_forces_live_fetch_and_overwrites_cache(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        with patch.object(taxonomy, 'get_category_tree_id', return_value='0'), \
+             patch.object(taxonomy, 'ebay_get', return_value=_FAKE_TREE):
+            taxonomy._ensure_tree_index(cfg)  # populate stale cache
+
+        _reset_caches()
+        updated_tree = {
+            'rootCategoryNode': {
+                'category': {'categoryId': '0', 'categoryName': 'Root'},
+                'childCategoryTreeNodes': [
+                    {'category': {'categoryId': '9', 'categoryName': 'New Category'},
+                     'leafCategoryTreeNode': True},
+                ],
+            },
+        }
+        with patch.object(taxonomy, 'get_category_tree_id', return_value='0'), \
+             patch.object(taxonomy, 'ebay_get', return_value=updated_tree) as mock_get:
+            count = taxonomy.refresh_category_tree_cache(cfg)
+
+        assert mock_get.call_count == 1
+        assert count == 1
+        _reset_caches()
+        with patch.object(taxonomy, 'get_category_tree_id', return_value='0'), \
+             patch.object(taxonomy, 'ebay_get', side_effect=AssertionError('must not hit live API')):
+            index = taxonomy._ensure_tree_index(cfg)
+        assert set(index) == {'9'}
+
+
 class TestSearchCategoriesLocal:
     def setup_method(self):
         _reset_caches()

@@ -478,7 +478,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
         "category-groups", "catalog-verify",
     ]),
     ("Ops / Admin", [
-        "health", "serve", "restart-workers", "restart-ebay-token",
+        "health", "serve", "restart-workers", "restart-ebay-token", "refresh-ebay-taxonomy",
         "dead-letter", "queue-history", "todo", "plan", "ai-usage", "report",
         "admin-file", "classify-suggestions", "picklist", "print-label", "mvitems",
         "suggest", "quiet-check", "perp-run", "whisper-suggest",
@@ -855,6 +855,8 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("strikethrough-check", help="show strikethrough pricing config state and MSRP coverage (PP-STRIKE-001)")
 
     sub.add_parser("restart-ebay-token", help="clear dead-letter token jobs and enqueue a fresh token_refresh immediately")
+
+    sub.add_parser("refresh-ebay-taxonomy", help="force a live re-fetch of the eBay category tree cache (run when eBay announces a taxonomy change — cache never auto-expires)")
 
     p = sub.add_parser("restart-workers", help="restart tgw-worker@<queue>.service systemd units (uses sudo if not root)")
     p.add_argument("queues", nargs="*", help="specific queue name(s) to restart (default: all canonical workers)")
@@ -4847,6 +4849,12 @@ def main() -> int:
                 "new_job_id": jid,
                 "note": "Token refresh job enqueued. Run tgw get-ebay-token first if refresh token is dead.",
             }
+
+        elif args.op == "refresh-ebay-taxonomy":
+            from .apis.ebay.taxonomy import refresh_category_tree_cache
+
+            count = refresh_category_tree_cache(cfg)
+            result = {"ok": True, "categories_cached": count}
 
         elif args.op == "get-ebay-token":
             from urllib.parse import unquote

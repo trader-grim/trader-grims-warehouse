@@ -30,8 +30,23 @@ from .resolver import find_item_jsons, load_item_doc
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+def _existing_mode_or_default(path: Path, default: int = 0o660) -> int:
+    """Mode to give a replacement file: match what's already there, else default.
+
+    NamedTemporaryFile creates its file at 0600 regardless of the parent
+    directory's permissions or any default ACL — an ACL can only constrain a
+    requested mode downward, never grant access the creator excluded. Left
+    unfixed, every atomic write silently reverts the target to owner-only.
+    """
+    try:
+        return path.stat().st_mode & 0o777
+    except FileNotFoundError:
+        return default
+
+
 def atomic_write_json(path: Path, data: Any, pretty: bool = True) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    want_mode = _existing_mode_or_default(path)
     with tempfile.NamedTemporaryFile(
         'w', encoding='utf-8', delete=False, dir=path.parent
     ) as tmp:
@@ -39,12 +54,14 @@ def atomic_write_json(path: Path, data: Any, pretty: bool = True) -> None:
                   indent=2 if pretty else None, sort_keys=False)
         tmp.write('\n')
         tmp_path = Path(tmp.name)
+    os.chmod(tmp_path, want_mode)
     os.replace(tmp_path, path)
 
 
 def atomic_write_csv(path: Path, rows: List[Dict[str, Any]],
                      fieldnames: List[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    want_mode = _existing_mode_or_default(path)
     with tempfile.NamedTemporaryFile(
         'w', encoding='utf-8', newline='', delete=False, dir=path.parent
     ) as tmp:
@@ -53,6 +70,7 @@ def atomic_write_csv(path: Path, rows: List[Dict[str, Any]],
         writer.writeheader()
         writer.writerows(rows)
         tmp_path = Path(tmp.name)
+    os.chmod(tmp_path, want_mode)
     os.replace(tmp_path, path)
 
 

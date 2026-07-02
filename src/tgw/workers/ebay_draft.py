@@ -11,7 +11,9 @@ will overwrite draft_listing but never touch title/description/condition.
 
 from __future__ import annotations
 
+import base64
 import csv
+import io
 import json
 import logging
 import time
@@ -26,8 +28,9 @@ from tgw.apis.ebay.client import ebay_get
 from tgw.apis.ebay.conditions import best_condition
 from tgw.apis.ebay.specifics import get_aspects
 from tgw.apis.fence import patch_item as fence_patch_item
-from tgw.apis.llm import call_model, get_task_model
+from tgw.apis.llm import CLOUD_PROVIDERS, call_model, get_task_model
 from tgw.apis.ollama import extract_json
+from tgw.assets import ordered_photos as _asset_ordered_photos
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.ebay.description import build_listing_description
 from tgw.queue import state_machine
@@ -37,12 +40,24 @@ log = logging.getLogger(__name__)
 
 QUEUE_NAME  = 'ebay_draft'
 
+# Session 41 — aspect-fill now looks at the item's photos instead of asking a
+# text-only model to guess from the title. "Without good starting data all of
+# our guesses will be poor" — this is the same batch limit as ai_identify's
+# candidate selection (exclude -alt./cropped- derivatives), just routed through
+# the cheap bulk_classify task since this is high-volume, structured extraction,
+# not prose generation (ebay_draft's own task stays on gemini-2.5-flash for the
+# description-enrichment call below, which needs the stronger model).
+_MAX_PHOTOS_ASPECTS = 10
+_VISION_MAX_PX_ASPECTS = 1024
+
 _SYSTEM = """\
-You are an eBay listing assistant. Given item details and a list of eBay item
-specifics (aspects), suggest the best value for each aspect.
-For SELECTION_ONLY aspects, you MUST choose from the allowed values listed.
-For FREE_TEXT aspects, suggest a concise, accurate value.
-If an aspect does not apply, use null.
+You are an eBay listing assistant. You will be shown photos of the item and a
+list of eBay item specifics (aspects) to fill in. Examine ALL the photos — a
+detail visible in only one photo (a barcode, a tag, an engraving, packaging
+text) still counts. For SELECTION_ONLY aspects, you MUST choose from the
+allowed values listed. For FREE_TEXT aspects, suggest a concise, accurate
+value grounded in what you can actually see. If an aspect does not apply or
+isn't visible in any photo, use null — never guess.
 Respond with valid JSON only — an object mapping aspect name to suggested value.
 """
 
@@ -139,43 +154,15 @@ def _validate_category_suggestion(
     resolved_category_id: str,
     top_n: int = 5,
 ) -> Dict[str, Any]:
-    """Query getCategorySuggestions with the drafted title and compute agreement.
-
-    Fail-soft: any API error returns ``{'category_agreement': 'unavailable'}``.
-
-    Returns::
-
-        {
-            'category_suggestions': [{'category_id': str, 'category_name': str}, ...],
-            'category_agreement': 'agreed' | 'mismatch' | 'unavailable',
-        }
-
-    Agreement is ``'agreed'`` if the resolved category is in the top-3
-    suggestions; ``'mismatch'`` otherwise.  No category_choice change is made.
+    """Disabled 2026-07-02 (session 41): this used to fire a live
+    getCategorySuggestions call on every drafted item purely for QA telemetry,
+    duplicating ai_identify's category call on the same title moments earlier —
+    confirmed as a live contributor to repeated Taxonomy API 429 exhaustion
+    (session-39 audit finding #3). Always returns 'unavailable' now. Re-enable only
+    once PP-CATPICK-001 makes this call provably unnecessary, or behind a disk cache /
+    explicit opt-in — never as an unconditional per-item live call again.
     """
-    try:
-        from tgw.apis.ebay.taxonomy import get_category_suggestions
-        raw_suggestions = get_category_suggestions(cfg, title)
-    except Exception as exc:
-        log.debug('category validation unavailable for %r: %s', title, exc)
-        return {'category_suggestions': [], 'category_agreement': 'unavailable'}
-
-    simplified = [
-        {
-            'category_id':   s.get('category', {}).get('categoryId'),
-            'category_name': s.get('category', {}).get('categoryName'),
-        }
-        for s in raw_suggestions[:top_n]
-        if s.get('category', {}).get('categoryId')
-    ]
-
-    top_ids = {s['category_id'] for s in simplified[:3]}
-    agreement = 'agreed' if str(resolved_category_id) in top_ids else 'mismatch'
-
-    return {
-        'category_suggestions': simplified,
-        'category_agreement':   agreement,
-    }
+    return {'category_suggestions': [], 'category_agreement': 'unavailable'}
 
 
 def _is_ebay_offline(exc: Exception) -> bool:
@@ -254,8 +241,38 @@ def _build_prompt(item: Dict[str, Any], aspects: List[Dict[str, Any]],
             else:
                 lines.append(f'  {a["name"]}{req}: free text')
         lines.append('')
+    lines.append('Photos of the item are attached — examine all of them before answering.')
     lines.append('Respond with JSON: {"Brand": "...", "Theme": "...", ...}')
     return '\n'.join(lines)
+
+
+def _encode_resized(img_path: Path, max_px: int = _VISION_MAX_PX_ASPECTS) -> str:
+    """Return base64 JPEG, resized to max_px on the longest edge."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return base64.b64encode(img_path.read_bytes()).decode()
+
+    with Image.open(img_path) as img:
+        img.thumbnail((max_px, max_px), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.convert('RGB').save(buf, format='JPEG', quality=85)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def _aspect_fill_photos(item: Dict[str, Any], sku_dir: Path, provider: str) -> List[Path]:
+    """Select up to _MAX_PHOTOS_ASPECTS photos for the vision aspect-fill call.
+
+    Cloud providers get the item's real photo set (excluding -alt./cropped-
+    derivatives); anything else gets none (falls back to the text-only prompt).
+    """
+    if provider not in CLOUD_PROVIDERS:
+        return []
+    all_photos = _asset_ordered_photos(item, sku_dir)
+    return [
+        p for p in all_photos
+        if '-alt.' not in p.name and not p.name.startswith('cropped-')
+    ][:_MAX_PHOTOS_ASPECTS]
 
 
 class EbayDraftWorker(QueueWorker):
@@ -280,6 +297,7 @@ class EbayDraftWorker(QueueWorker):
         category_name = item.get('ebay_category_name', '')
 
         # If taxonomy lookup failed during ai_identify, retry it here
+        category_resolved_here = False
         if not category_id:
             log.info('no ebay_category_id for %s — retrying taxonomy lookup', sku)
             try:
@@ -289,6 +307,7 @@ class EbayDraftWorker(QueueWorker):
                 if category_id:
                     item['ebay_category_id']   = category_id
                     item['ebay_category_name'] = category_name
+                    category_resolved_here = True
                     log.info('taxonomy retry succeeded for %s: %s %s',
                              sku, category_id, category_name)
             except Exception as exc:
@@ -380,20 +399,42 @@ class EbayDraftWorker(QueueWorker):
             log.info('%s: pre-filled %d specifics from item_attributes: %s',
                      sku, len(ia_filled), ia_filled)
 
-        # Use text model to fill aspect values
-        prompt  = _build_prompt(item, aspects, prefilled=prefilled, browse_hints=browse_hints)
-        _, _draft_model = get_task_model(self.config, 'ebay_draft')
-        log.info('asking %s to fill %d aspects for %s', _draft_model, len(aspects), sku)
-        tgw_logging.log_event('ebay_draft_aspects_call', sku=sku,
-                              category_id=category_id, aspect_count=len(aspects))
+        # Use a vision model to fill aspect values — looks at the item's actual
+        # photos (up to _MAX_PHOTOS_ASPECTS) instead of guessing from title text
+        # alone, so details only visible in one photo (barcode, tag, engraving)
+        # aren't silently missed. Routed through bulk_classify (cheap, free-tier
+        # Gemini) since this is high-volume structured extraction, not prose.
+        remaining_aspects = [a for a in aspects if a['name'] not in prefilled]
+        if not remaining_aspects:
+            suggested: Dict[str, Any] = {}
+            log.info('%s: all %d aspects already prefilled — skipping vision call',
+                     sku, len(aspects))
+        else:
+            prompt = _build_prompt(item, aspects, prefilled=prefilled, browse_hints=browse_hints)
+            _classify_provider, _classify_model = get_task_model(self.config, 'bulk_classify')
+            sku_dir = json_path.parent
+            photos = _aspect_fill_photos(item, sku_dir, _classify_provider)
+            img_b64_list = [_encode_resized(p) for p in photos]
+            log.info('asking %s/%s to fill %d aspects for %s (%d photos)',
+                     _classify_provider, _classify_model, len(remaining_aspects), sku, len(photos))
+            tgw_logging.log_event('ebay_draft_aspects_call', sku=sku,
+                                  category_id=category_id, aspect_count=len(remaining_aspects),
+                                  photo_count=len(photos))
+
+            raw = call_model('bulk_classify', _SYSTEM, prompt, self.config,
+                             img_b64_list=img_b64_list, sku=sku)
+            try:
+                suggested = extract_json(raw)
+            except Exception as exc:
+                raise HardFailure(
+                    f'ebay_draft: model returned non-JSON for {sku}: {raw[:200]}'
+                ) from exc
 
         # Phase 5 — description enrichment: if product_lookup has a substantive
         # description, ask the model to produce a 200+ word eBay description that
         # weaves in the product data, brand/MPN, and the AI's visual observation.
         pl_description = (pl.get('description') or '').strip()
         enrich_description = bool(pl_description and len(pl_description.split()) >= 20)
-
-        raw = call_model('ebay_draft', _SYSTEM, prompt, self.config, sku=sku)
 
         if enrich_description:
             brand = pl.get('brand', '') or prefilled.get('Brand', '')
@@ -414,13 +455,6 @@ class EbayDraftWorker(QueueWorker):
                      sku, len(enriched_description.split()))
         else:
             enriched_description = None
-
-        try:
-            suggested = extract_json(raw)
-        except Exception as exc:
-            raise HardFailure(
-                f'ebay_draft: model returned non-JSON for {sku}: {raw[:200]}'
-            ) from exc
 
         # Filter nulls and validate SELECTION_ONLY values; merge prefilled on top
         item_specifics: Dict[str, str] = {}
@@ -567,7 +601,16 @@ class EbayDraftWorker(QueueWorker):
         draft['quality'] = score_draft(item, photo_count=photo_count).to_dict()
 
         item['draft_listing'] = draft
-        fence_patch_item(self.config, sku, {'draft_listing': draft})
+        patch_fields: Dict[str, Any] = {'draft_listing': draft}
+        if category_resolved_here:
+            # Session 41 fix: this used to be mutated in memory only — never
+            # persisted — so every subsequent re-draft of an item ai_identify
+            # failed to categorize burned another live Taxonomy API call
+            # re-resolving the exact same category, on top of everything else
+            # already straining that quota today.
+            patch_fields['ebay_category_id']   = item['ebay_category_id']
+            patch_fields['ebay_category_name'] = item['ebay_category_name']
+        fence_patch_item(self.config, sku, patch_fields)
 
         log.info('ebay_draft complete for %s: %d specifics filled', sku, len(item_specifics))
         tgw_logging.log_event('ebay_draft_complete', sku=sku,

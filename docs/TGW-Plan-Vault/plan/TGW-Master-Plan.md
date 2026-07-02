@@ -2727,6 +2727,15 @@ eBay webhooks) and distributes to any consumer (Flutter HUD, Android/Tasker, pm_
 
 **Next: Phase 2 — rofi/dmenu history picker (classic clipboard manager UI)**
 
+**GATE (Dave, 2026-07-02 session 40): a conceptual planning pass comes FIRST — todo #1086.**
+Before building Phase 2 or any further clipboard tooling, run a /tgw-plan pass that unifies
+the whole clipboard picture: PP-CLIP-001 phases, PP-EVENTD-001 event-server design
+(reference/PP-EVENTD-001-design.md), and the unprocessed inbox research drop
+("linux universal lan clipboard manager", 2026-06-28). Validate or revise the staircase
+clipd → rofi picker → hook sync → event server so the rofi UI is built against the
+destination architecture, not in isolation. Output: docs/ai-plans/clipboard-concept.md.
+Todo #1055 (rofi picker) now depends on #1086.
+
 **Decisions (session 28, revised 2026-06-28 session 33):**
 - **Wayland primary; X11 compatibility if we are lucky.** Original decision held X11 as the
   stable platform. Reversed after nine hours of X11/Wayland clipboard debugging — the cost of
@@ -3823,14 +3832,15 @@ up: relocate them off this page entirely, they don't need to live here even coll
   (contextual-log vs. picklist) isn't settled, so no button removal/relocation was done
   this session beyond the status-bar restyle.
 - Stateful/smart buttons replacing status indicators.
-- Draft-vs-live view toggle.
+- Draft-vs-live view toggle — **principle settled 2026-07-01 session 40, see
+  "Design principle settled — state-driven interface" below**; transition table still
+  to design.
 - Operator notes field.
 
 **Next step when picked back up:** settle the contextual-log-action design (what
 triggers what, where per-log-line action metadata comes from) before touching the
-Pipeline Tools button set; the status-indicator stateful-button rework should probably
-follow the draft-vs-live toggle design since they're related (both about "what state is
-this listing in, and what am I looking at").
+Pipeline Tools button set; the status-indicator stateful-button rework and the
+draft-vs-live question resolved into one state-driven design (see below).
 
 **Refinement (Dave, same session, follow-up):** the stateful-button direction is not a
 new pattern to invent — it's an **extension of behavior that already exists**: today,
@@ -3853,6 +3863,105 @@ consistently to every action slot, not building something new from scratch.
   stage actually needs to be re-run (re-identify, re-draft, re-price, etc.) is an
   implementation detail the button figures out and executes — the operator doesn't pick
   a stage, they just say "this isn't right, redo it."
+
+**Design principle settled (Dave, 2026-07-01 session 40) — state-driven interface:**
+The "draft-vs-live toggle" open item is now resolved as a *principle*, not a widget:
+**state drives the interface; every control is also an indicator; compaction without
+losing anything.** The interface reflects the item's state so the operator gets it at a
+glance without separate status elements, and the correct tools appear in useful places
+as they become relevant. Color language on the buttons themselves: green = good/settled,
+yellow = working/pending, red = error.
+
+Worked example — the publish lifecycle (one instance of the principle, **list is
+deliberately non-exhaustive**; more instances to be enumerated in the design pass with
+Dave):
+1. *Draft state*: operator sees the editor. Button: **"List on eBay"** — pressing it
+   saves the draft, runs every pipeline step needed (stage, photos, etc.), publishes.
+   Pipeline stages are never operator-visible.
+2. *Goes live*: a **Live Listing tab appears** — read-only, showing the published offer
+   as eBay has it; the draft sits behind it, now matching live. The tab's *existence* is
+   the "this item is live" indicator. "List on eBay" becomes **"Update Item"**;
+   **"End Item on eBay"** appears.
+3. *Draft edited again*: draft diverges from live → "Update Item" shifts color (pending
+   delta). **Clear draft / reset local state from live** are the escape hatches here
+   (= discard the revision delta / re-pin the live baseline in PP-REVISION-001 terms).
+
+Notes:
+- The read-only live-listing view is NOT a separate page/feature — it's a state
+  manifestation (tab exists only when the item is on eBay).
+- This dissolves the earlier sequencing question ("stateful-button rework should follow
+  the draft-vs-live toggle design") — they are the same design.
+- **Build dependency**: "Update Item" on a live listing = revision apply →
+  PP-LISTEDITOR-001 Phase 2 (fill eBay PUT stub, extract body builders,
+  `_APPLY_ENABLED = True`) is the enabling backend and remains the build prerequisite.
+- Remaining design work before building: the concrete state → button-slot transition
+  table (the "work out the logic correctly" pass), plus enumerating the other instances
+  of the principle across the page with Dave.
+
+**Design pass (Dave + Claude, 2026-07-01 session 40, todo #1083) — settled points:**
+
+1. **Status bar removed entirely.** The session-39 breadcrumb restyle isn't enough —
+   the bar displays nothing the buttons and tabs don't already say. Gone. The one
+   thing of value it could carry becomes a real tool: a **"View on eBay" link**
+   (`ebay.com/itm/<listing_id>`), appearing when live, on/near the Live Listing tab.
+   **Correction (Dave):** the element in question is not just a bar — it's the
+   collapsible **"eBay Live Data" dropdown panel** (`<details>` section showing the
+   raw eBay mirror). The *element* goes away but its *content graduates*: that
+   dropdown's content IS the Live Listing tab in the new design — promoted from a
+   collapsed section to the first-class read-only live view. Nothing is lost.
+   Dave confirmed after reviewing the page: "most of it is the page we are making
+   for the live listing." Two content dispositions from the same review:
+   - **Pricing History → left column, merged into the existing display there**
+     (Dave's call): a pricing display already exists in the left log/history
+     column — don't add a second one, merge to ONE clean pricing history section
+     alongside Identification History and the jobs trail.
+   - **Comps display was redundant** — shown more than once; kill the duplicates,
+     comps data appears once (within the merged left-column pricing section).
+2. **One action line.** All pipeline buttons + Save Draft collapse into a single row of
+   state-appropriate actions. The "Publish gate" vs "Pipeline Tools" section split dies.
+   Per-state contents:
+   | State | Action line |
+   |---|---|
+   | Intake (no draft) | **Prepare Listing** · Archive · Delete |
+   | Draft ready | **List on eBay** · Approve · Reset Draft · Archive · Delete |
+   | Working | **Listing…** (yellow, disabled) · Archive · Delete |
+   | Live, in sync | **Update Item** (quiet) · End Listing · Archive · Delete · View-on-eBay |
+   | Live, edited | **Update Item** (yellow) · Reset Draft · End Listing · Archive · Delete |
+   | Error | **Retry** (red) · state-appropriate rest |
+3. **Reset Draft has dual semantics by state:** not yet live → regenerate draft from
+   canonical fields via ebay_draft (discard operator edits); live → re-pin draft from
+   live (discard revision delta). Same button label, different backing op. Hidden in
+   live-in-sync (nothing to reset).
+4. **End eBay Listing** — confirmed required, red-bordered, visible in all live states.
+5. **The principle is platform-wide** (house style, not an item-detail feature):
+   fulfillment/warehousing pages get the same state-driven, task-appropriate,
+   decluttered treatment. PP-ACTIONCONSOLE-001 is the pattern-setter.
+6. **Pipeline jobs section = the contextual-repair surface** (settled in principle):
+   it stays the quiet status trail; repair buttons appear ONLY on actionable failure
+   states (e.g. red "Retry"/re-enqueue on a dead-letter line — today a manual
+   enqueue_job() from a shell). **Zero-clutter guarantee: happy path shows zero
+   buttons.** Which failure states get which button: enumerate during build. This
+   answers the earlier console-vs-log-line question: log lines get pipeline-mechanic
+   repairs; the primary action slot goes red only when the failure blocks the
+   operator's task (and can jump to the offending log line).
+7. **Repair actions double as a data-collection / pipeline-improvement loop:** each
+   click records failure signature + action taken + outcome (queue_jobs ledger mostly
+   has this; needs the operator-action annotation linked to the retry job). Same
+   manual fix repeatedly succeeding on the same failure type → promote to automatic
+   retry policy (button argues for its own elimination); repeatedly failing →
+   aggregated root-cause evidence. Completes the self-healing loop: auto-detect →
+   surface → self-service resolution → **learn from the resolution**.
+
+**Final three calls (Dave, 2026-07-01 s40) — design now buildable, no opens left:**
+- **Sold state:** the live listing view becomes a **sold listing view and moves to the
+  front tab**; the editor stays, just behind. **Relist** button appears. Inventory
+  record shows the qty decrement (−sold qty; consistent with mark_item_sold
+  qty-decrement behavior — sold only at qty 0).
+- **Approve = toggle near primary** ("queue for auto-listing" checkbox next to List on
+  eBay) — it's a scheduling preference, not a distinct action; action line keeps one
+  real button.
+- **"Update Item" when in sync: grey-visible** — slot never jumps; the grey itself
+  signals in-sync.
 
 ---
 

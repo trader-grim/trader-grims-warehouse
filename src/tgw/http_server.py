@@ -1238,6 +1238,47 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
             )
             return {"ok": True, "sku": sku, "action": "sync_from_ebay", "job_id": job_id}
 
+        elif action == "reset_draft_from_live":
+            # PP-ACTIONCONSOLE-001: discard local draft edits — re-pin the draft
+            # to what is live on eBay (the ebay_live mirror). Escape hatch for the
+            # live-edited state; also clears any pending revision proposals.
+            doc = load_item_doc(json_path)
+            _live = doc.get("ebay_live") or {}
+            _live_inv = _live.get("inventory_item") or {}
+            _live_prod = _live_inv.get("product") or {}
+            _live_off = _live.get("offer") or {}
+            if not _live_inv and not _live_off:
+                raise HTTPException(
+                    status_code=400,
+                    detail="no ebay_live mirror — run Sync from eBay first",
+                )
+            dl_reset = dict(doc.get("draft_listing") or {})
+            if _live_prod.get("title"):
+                dl_reset["title"] = _live_prod["title"]
+            if _live_prod.get("description"):
+                dl_reset["description"] = _live_prod["description"]
+            if _live_prod.get("imageUrls"):
+                dl_reset["imageUrls"] = _live_prod["imageUrls"]
+            if _live_prod.get("aspects"):
+                dl_reset["item_specifics"] = {
+                    k: (v[0] if isinstance(v, list) and v else v)
+                    for k, v in _live_prod["aspects"].items()
+                }
+            if _live_inv.get("condition"):
+                dl_reset["condition_enum"] = _live_inv["condition"]
+            _live_price = ((_live_off.get("pricingSummary") or {}).get("price") or {}).get("value")
+            if _live_price is not None:
+                try:
+                    dl_reset["price"] = float(_live_price)
+                except (TypeError, ValueError):
+                    pass
+            if _live_off.get("availableQuantity") is not None:
+                dl_reset["quantity"] = _live_off["availableQuantity"]
+            if _live_off.get("listingDescription"):
+                dl_reset["listing_description"] = _live_off["listingDescription"]
+            _apply_patch(json_path, {"draft_listing": dl_reset, "revision_draft": None})
+            return {"ok": True, "sku": sku, "action": "reset_draft_from_live"}
+
         elif action == "set_ready":
             from .ready import set_ready as _set_ready
 
@@ -1596,6 +1637,11 @@ def requeue_job(job_id: str) -> Dict[str, Any]:
 
     payload = dict(row["payload_json"]) if row["payload_json"] else {}
     sku = payload.get("sku") or job_id[:8]
+    # PP-ACTIONCONSOLE-001 improvement loop: mark operator-triggered retries so
+    # the ledger can be mined for "same failure, same manual fix, keeps working"
+    # patterns — candidates for automatic retry policy.
+    payload["operator_retry"] = True
+    payload["retried_from_job"] = str(job_id)
     new_dedupe = f"{row['queue_name']}:{sku}:requeue:{int(time.time())}"
 
     try:
@@ -4047,14 +4093,9 @@ def _render_item_detail_html(
         except (TypeError, ValueError):
             return "—"
 
-    if _comps.get("count"):
-        _ph_rows += (
-            f'<div class="frow"><span class="fn">Comp count</span><span class="fv">{h(str(_comps.get("count", "—")))}</span></div>'
-            f'<div class="frow"><span class="fn">Range</span><span class="fv">{_cfmt(_comps.get("min"))} – {_cfmt(_comps.get("max"))}</span></div>'
-            f'<div class="frow"><span class="fn">p25 / median / p75</span><span class="fv">'
-            f"{_cfmt(_comps.get('p25'))} / {_cfmt(_comps.get('median'))} / {_cfmt(_comps.get('p75'))}"
-            f"</span></div>"
-        )
+    # PP-ACTIONCONSOLE-001: comp stats/listings dropped from here — they were
+    # redundant with the comps range-bar panel next to the price field in the
+    # editor, which is the single place comps appear now.
     if _floor is not None:
         _ph_rows += f'<div class="frow"><span class="fn">Category floor</span><span class="fv">${float(_floor):.2f}</span></div>'
     if _typical is not None:
@@ -4065,44 +4106,8 @@ def _render_item_detail_html(
         _ph_rows += f'<div class="frow"><span class="fn">Price source</span><span class="fv">{h(_price_source)}</span></div>'
     if _priced_at:
         _ph_rows += f'<div class="frow"><span class="fn">Priced at</span><span class="fv">{h(_priced_at)}</span></div>'
-    # Comp items table — individual Browse API listings used to compute stats
-    _comp_items = _comps.get("items") or []
-    if _comp_items:
-        _ci_rows = ""
-        for _ci in _comp_items:
-            _ci_price = f"${float(_ci.get('price', 0)):.2f}"
-            _ci_cond = h(str(_ci.get("condition") or ""))
-            _ci_title = h(str(_ci.get("title") or "")[:70])
-            _ci_url = _ci.get("url") or ""
-            _ci_title_cell = f'<a href="{h(_ci_url)}" target="_blank" rel="noopener noreferrer" style="color:#7af;text-decoration:none">{_ci_title}</a>' if _ci_url else _ci_title
-            _ci_rows += (
-                f'<tr><td style="color:#bfb;font-size:.8em">{h(_ci_price)}</td><td style="color:#aaa;font-size:.78em">{_ci_cond}</td><td style="color:#ccc;font-size:.78em">{_ci_title_cell}</td></tr>'
-            )
-        _ph_rows += (
-            f'<details style="margin-top:6px">'
-            f'<summary style="cursor:pointer;color:#4a8ade;font-size:.79em;list-style:none">'
-            f"&#9654; {len(_comp_items)} comp listings used</summary>"
-            f'<table style="width:100%;border-collapse:collapse;margin-top:4px">'
-            f'<tr><th style="text-align:left;font-size:.75em;color:#666;padding:2px 6px">Price</th>'
-            f'<th style="text-align:left;font-size:.75em;color:#666;padding:2px 6px">Condition</th>'
-            f'<th style="text-align:left;font-size:.75em;color:#666;padding:2px 6px">Title</th></tr>'
-            f"{_ci_rows}"
-            f"</table>"
-            f"</details>"
-        )
-    _ph_content = _ph_rows if _ph_rows else '<span style="color:#555;font-size:.82em">No pricing data yet</span>'
-    _pricing_history_html = (
-        (
-            f'<details open style="margin-top:4px">'
-            f'<summary style="cursor:pointer;color:#4a8ade;font-size:.82em;list-style:none">▶ Pricing History</summary>'
-            f'<div style="margin-top:6px;padding:6px;background:#111;border:1px solid #222;border-radius:4px">'
-            f"{_ph_content}"
-            f"</div>"
-            f"</details>"
-        )
-        if eo
-        else ""
-    )
+    # (comp listings table removed — see comps range-bar panel in the editor;
+    # _ph_rows carries pricing context rows into the left-column Price History)
 
     offer_section = (
         (
@@ -4112,7 +4117,6 @@ def _render_item_detail_html(
             + fr("eBay Category", h(str(eo.get("category_id", "") or "")))
             + fr("Quantity", h(str(eo.get("quantity", "") or "")))
             + fr("Published At", h(str(eo.get("published_at", "") or "")[:19]))
-            + _pricing_history_html
             + fr("Staged At", h(str(eo.get("staged_at", "") or "")[:19]))
         )
         if eo
@@ -4235,7 +4239,16 @@ def _render_item_detail_html(
             qn = j.get("queue_name", "")
             tip = _WORKER_TOOLTIPS.get(qn, "")
             tip_attr = f' title="{h(tip)}"' if tip else ""
-            job_rows += f'<tr><td{tip_attr}>{h(qn)}</td><td class="{sc}">{h(state)}</td><td style="color:#666;font-size:.8em">{h(ts)}</td><td style="color:#f99;font-size:.8em">{err}</td></tr>'
+            # PP-ACTIONCONSOLE-001: contextual repair — a Retry button appears
+            # ONLY on actionable failure states (zero buttons in the happy path).
+            _retry_btn = ""
+            if state == "dead_letter" and j.get("job_id"):
+                _retry_btn = (
+                    f' <button class="act-btn" style="font-size:.72em;padding:1px 8px;'
+                    f'background:#2a0d0d;border-color:#a44;color:#e88" '
+                    f"onclick=\"retryJob('{h(str(j['job_id']))}')\">Retry</button>"
+                )
+            job_rows += f'<tr><td{tip_attr}>{h(qn)}</td><td class="{sc}">{h(state)}{_retry_btn}</td><td style="color:#666;font-size:.8em">{h(ts)}</td><td style="color:#f99;font-size:.8em">{err}</td></tr>'
         jobs_html = f'<table class="jtable"><tr><th>Queue</th><th>State</th><th>Updated</th><th>Error</th></tr>{job_rows}</table>'
 
     title = item.get("title", "")
@@ -4275,8 +4288,11 @@ def _render_item_detail_html(
     else:
         _price_display = '<span style="color:#444">—</span>'
 
-    # ── Price history section ──────────────────────────────────────────────────
+    # ── Price history section (single merged pricing display, left column) ────
+    # PP-ACTIONCONSOLE-001: absorbed the old offer-section "Pricing History"
+    # dropdown — price-change events + pricing context in ONE place.
     _ph_events = item.get("price_history") or []
+    _phev_table = ""
     if _ph_events:
         _phev_rows = ""
         for _ev in reversed(_ph_events):
@@ -4294,15 +4310,22 @@ def _render_item_detail_html(
                 f'<td style="color:#666;font-size:.78em">{_ev_src}</td>'
                 f"</tr>"
             )
-        price_history_html = (
-            f'<div class="dsec">'
-            f'<h3>Price History <span style="font-size:.7em;color:#555;font-weight:normal">{len(_ph_events)} events</span></h3>'
-            f'<div style="font-size:.73em;color:#556;margin-bottom:6px">Every price change recorded — launch through markdowns</div>'
+        _phev_table = (
             f'<table class="jtable">'
             f"<tr><th>When</th><th>Price</th><th>Previous</th><th>Stage</th><th>Source</th></tr>"
             f"{_phev_rows}"
             f"</table>"
-            f"</div>"
+        )
+    if _phev_table or _ph_rows:
+        price_history_html = (
+            '<div class="dsec">'
+            '<h3>Pricing History'
+            + (f' <span style="font-size:.7em;color:#555;font-weight:normal">{len(_ph_events)} events</span>' if _ph_events else "")
+            + "</h3>"
+            '<div style="font-size:.73em;color:#556;margin-bottom:6px">Every price change recorded — launch through markdowns</div>'
+            + _phev_table
+            + (f'<div style="margin-top:6px;border-top:1px solid #222;padding-top:6px">{_ph_rows}</div>' if _ph_rows else "")
+            + "</div>"
         )
     else:
         price_history_html = ""
@@ -4742,88 +4765,112 @@ def _render_item_detail_html(
     _is_unpublished_offer = offer_status.upper() == "UNPUBLISHED"
     _has_draft = bool(dl.get("title"))
 
-    # Pipeline status breadcrumb — plain text, not button-styled: this is status,
-    # not a control (session 39: Dave flagged the old chip styling as reading like
-    # clickable buttons). "Staged" dropped from operator view — it's an eBay
-    # Inventory API implementation detail the operator can't see or act on;
-    # "Approved" is considered satisfied once live (Publish Now supersedes it).
-    def _pipe_step(label: str, done: bool, active: bool = False) -> str:
-        if done:
-            style = "color:#4a4;font-weight:600"
-        elif active:
-            style = "color:#aa0;font-weight:600"
-        else:
-            style = "color:#445;font-weight:400"
-        return f'<span style="{style};font-size:.82em;white-space:nowrap">{label}</span>'
-
-    _pipe_arrow = '<span style="color:#334;padding:0 6px;font-size:.8em">—</span>'
-    _pipeline_bar = (
-        '<div style="margin-bottom:12px;font-size:.82em">'
-        + _pipe_step("Draft", _has_draft, not _has_draft)
-        + _pipe_arrow
-        + _pipe_step("Approved", is_ready or is_active, _has_draft and not is_ready and not is_active)
-        + _pipe_arrow
-        + _pipe_step("Live", is_active)
-        + "</div>"
+    # ── PP-ACTIONCONSOLE-001: state-driven action line ─────────────────────────
+    # One row of state-appropriate actions replaces the pipeline breadcrumb and
+    # the Publish-gate/Pipeline-Tools split. The buttons ARE the indicators:
+    # green = ready, yellow = working/pending, red = error/destructive,
+    # grey = nothing to do. Operator-visible states only — "staged" stays hidden.
+    _is_sold = str(item.get("status") or "").lower() == "sold"
+    _working = any(
+        j.get("state") in ("pending", "running", "claimed", "retry") for j in jobs
     )
+    _has_error = bool(_pe and isinstance(_pe, dict) and _pe.get("error")) or any(
+        j.get("state") == "dead_letter" for j in jobs
+    )
+    # Draft-vs-live divergence: does the draft differ from what eBay holds?
+    _live_inv = (_ebay_live_raw.get("inventory_item") or {}) if _ebay_live_raw else {}
+    _live_offer_raw = (_ebay_live_raw.get("offer") or {}) if _ebay_live_raw else {}
+    _diverged = False
+    if is_active and _ebay_live_raw:
+        _lp = (_live_offer_raw.get("pricingSummary") or {}).get("price") or {}
+        _live_product = _live_inv.get("product") or {}
+        try:
+            _price_differs = (
+                dl.get("price") is not None
+                and _lp.get("value") is not None
+                and abs(float(dl["price"]) - float(_lp["value"])) > 0.01
+            )
+        except (TypeError, ValueError):
+            _price_differs = False
+        _diverged = (
+            _price_differs
+            or (dl.get("title") and dl["title"] != _live_product.get("title"))
+            or (dl.get("quantity") is not None
+                and _live_offer_raw.get("availableQuantity") is not None
+                and int(dl["quantity"]) != int(_live_offer_raw["availableQuantity"]))
+        )
 
-    # Publish gate — actions depend on pipeline state
-    _stage_label = "Re-stage" if _is_unpublished_offer else "Stage"
-    _stage_disabled = ' disabled title="Listing is live — End Listing first to relist"' if _is_published else ""
-    _stage_cls = " act-disabled" if _is_published else ""
+    def _abtn(label: str, onclick: str, color: str, *, disabled: bool = False,
+              title: str = "", push: bool = False) -> str:
+        colors = {
+            "green":  "background:#0d2a0d;border-color:#4a4;color:#8e8",
+            "yellow": "background:#2a2a0a;border-color:#aa4;color:#cc8",
+            "red":    "background:#2a0d0d;border-color:#a44;color:#e88",
+            "grey":   "background:#1a1a1a;border-color:#333;color:#667",
+            "blue":   "background:#1a2a3a;border-color:#2a4a6a;color:#cce",
+        }
+        dis = " disabled" if disabled else ""
+        push_s = "margin-left:auto;" if push else ""
+        title_a = f' title="{h(title)}"' if title else ""
+        return (
+            f'<button class="act-btn"{dis}{title_a} style="{push_s}{colors[color]}" '
+            f'onclick="{onclick}">{label}</button>'
+        )
 
-    if is_active:
-        # Live: update in place (preferred) or end listing
-        _gate_html = (
-            '<div style="margin-bottom:12px;padding:8px 12px;background:#0d1a0d;'
-            'border:1px solid #464;border-radius:4px;font-size:.82em;color:#8c8">'
-            "✓ Listing is live. <strong>Update Listing</strong> pushes draft changes to eBay without "
-            "ending or relisting — preserving listing age and search ranking. "
-            "Edit aspects → Re-draft → Update Listing. "
-            "Only End Listing if you're pulling this item entirely.</div>" + '<div class="act-row">' + '<button class="act-btn act-publish" '
-            "onclick=\"triggerAction('ebay_update','Push current draft to the live listing?"
-            "\\nThis updates title, aspects, and description in place without ending the listing.')\""
-            ">Update Listing</button>"
-            + ('<button class="act-btn" onclick="triggerAction(\'sync_from_ebay\')" title="Fetch current price and status from eBay">Sync from eBay</button>' if listing_id else "")
-            + '<button class="act-btn act-warn" style="margin-left:auto" '
-            "onclick=\"triggerAction('ebay_end_listing',"
-            "'End this listing on eBay? This cannot be undone.')\">End Listing</button>" + "</div>"
-        )
-    elif _is_unpublished_offer:
-        # Staged but not yet approved: show approve + publish now
-        _ready_note = (
-            '<div style="margin-bottom:12px;padding:8px 12px;background:#1a2a1a;'
-            'border:1px solid #4a4;border-radius:4px;font-size:.82em;color:#6c6">'
-            "✓ Staged (UNPUBLISHED). Approve to list at next dole cycle, or Publish Now to go live immediately.</div>"
-            if not is_ready
-            else '<div style="margin-bottom:12px;padding:8px 12px;background:#1a2a1a;'
-            'border:1px solid #4a4;border-radius:4px;font-size:.82em;color:#6c6">'
-            "✓ Approved — will list at next dole cycle. Click Publish Now to go live immediately, "
-            "or Withdraw Approval to hold.</div>"
-        )
-        _approve_btn = (
-            '<button class="act-btn act-publish" onclick="approveForListing()">Approve for Listing</button>'
-            if not is_ready
-            else '<button class="act-btn" onclick="triggerAction(\'unset_ready\','
-            '\'Remove this item from the ready queue?\')" style="background:#1a1a2a;border-color:#44a;color:#88c">'
-            "Withdraw Approval</button>"
-        )
-        _gate_html = (
-            _ready_note + '<div class="act-row">' + _approve_btn + '<button class="act-btn act-publish" style="background:#2a1a0a;border-color:#c84" '
-            'onclick="publishNow()">Publish Now</button>' + f'<button class="act-btn{_stage_cls}"{_stage_disabled} '
-            f"onclick=\"triggerAction('ebay_stage')\">{_stage_label}</button>" + "</div>"
-        )
+    _line: List[str] = []
+    if _is_sold:
+        _line.append(_abtn("Relist", "relistItem()", "green",
+                           title="Stage and publish this item again"))
+    elif _has_error:
+        _line.append(_abtn("Retry", "retryPipeline()", "red",
+                           title="Something failed — retry the failed step"))
+    elif _working:
+        _line.append(_abtn("Working…", "", "yellow", disabled=True,
+                           title="Pipeline is running — refresh to update"))
+    elif is_active:
+        if _diverged:
+            _line.append(_abtn("Update Item", "updateItem()", "yellow",
+                               title="Draft has unpushed changes — push to eBay in place"))
+        else:
+            _line.append(_abtn("Update Item", "updateItem()", "grey",
+                               title="Draft matches the live listing"))
+    elif _has_draft:
+        _line.append(_abtn("List on eBay", "listOnEbay()", "green",
+                           title="Save draft, run every needed step, and publish"))
+        if _is_unpublished_offer:
+            _apv_chk = " checked" if is_ready else ""
+            _line.append(
+                f'<label style="display:flex;align-items:center;gap:5px;font-size:.8em;'
+                f'color:#8a8;cursor:pointer;padding:0 6px">'
+                f'<input type="checkbox"{_apv_chk} onchange="toggleApprove(this)">'
+                f"queue for auto-listing</label>"
+            )
+        _line.append(_abtn("Reset Draft", "resetDraft()", "blue",
+                           title="Discard edits and regenerate the draft from the catalog record"))
     else:
-        # Not staged yet
-        _gate_html = (
-            '<div style="margin-bottom:12px;padding:8px 12px;background:#111;'
-            'border:1px solid #333;border-radius:4px;font-size:.82em;color:#667">'
-            + ("Draft ready — Stage to create an eBay offer, then Approve to list." if _has_draft else "No draft yet — run Re-draft to prepare the eBay listing data.")
-            + "</div>"
-            + '<div class="act-row">'
-            + f'<button class="act-btn{_stage_cls}"{_stage_disabled} '
-            f"onclick=\"triggerAction('ebay_stage')\">{_stage_label}</button>" + "</div>"
+        _line.append(_abtn("Prepare Listing", "prepareListing()", "green",
+                           title="Run identification and draft the eBay listing"))
+
+    if is_active and not _is_sold:
+        if _diverged:
+            _line.append(_abtn("Reset Draft", "resetDraftFromLive()", "blue",
+                               title="Discard local edits — re-pin the draft to what is live on eBay"))
+        _line.append(_abtn("End Listing", (
+            "triggerAction('ebay_end_listing',"
+            "'End this listing on eBay? This cannot be undone.')"), "red"))
+
+    _line.append(_abtn("Archive", (
+        "triggerAction('archive','Archive this item? It will be hidden from the catalog.')"
+    ), "grey", push=True))
+    _line.append(_abtn("Delete", "deleteItem()", "grey"))
+    if listing_url:
+        _line.append(
+            f'<a class="ebay-btn ebay-btn-primary" style="align-self:center" '
+            f'href="{h(listing_url)}" target="_blank" rel="noopener noreferrer">View on eBay ↗</a>'
         )
+
+    _gate_html = '<div class="act-row" id="action-line">' + "".join(_line) + "</div>"
+    _pipeline_bar = ""  # removed — the action line and tabs carry the state
 
     _proposals_banner = ""
     if _has_proposals:
@@ -4950,7 +4997,7 @@ def _render_item_detail_html(
         f'<span class="fn">Cond. notes</span>'
         f'<span class="fv" style="flex:1">'
         f'<input id="dl-cond-desc-input" type="text" '
-        f'value="{h((dl or {{}}).get("condition_description") or "")}" '
+        f'value="{h((dl or dict()).get("condition_description") or "")}" '
         f'placeholder="e.g. minor wear on corners, no missing pieces" '
         f'style="width:100%;background:#1a1a1a;color:#eee;border:1px solid #444;'
         f'border-radius:4px;padding:4px 6px;font-size:.85em">'
@@ -5044,14 +5091,12 @@ def _render_item_detail_html(
         f'<div id="aspects-loading" style="color:#556;font-size:.82em">Loading aspects…</div>'
         f'<div id="aspects-form"></div>'
         f"</div>"
-        # Save button
+        # Draft save feedback (saving happens via the action line — List on eBay /
+        # Update Item save the draft first; PP-ACTIONCONSOLE-001 one-line consolidation)
         f'<div style="margin-top:12px;display:flex;gap:8px;align-items:center">'
-        f'<button class="act-btn" onclick="saveEbayDraft()" '
-        f'style="background:#1a3a5a">Save Draft</button>'
         f'<span id="dl-save-msg" style="font-size:.82em;color:#4a4"></span>'
         f"</div>"
-        # ── Publish to eBay — integrated into the eBay section ──
-        '<hr style="border:none;border-top:1px solid #2a2a2a;margin:14px 0">' + _pipeline_error_html + _pipeline_bar + _gate_html + f"</div>"
+        + f"</div>"
         # hidden data for JS
         f"<script>"
         f"window._DL_CAT_ID = {_aspects_cat_json};"
@@ -5062,20 +5107,14 @@ def _render_item_detail_html(
         f"</script>"
     )
 
-    _ebay_status_html = (
-        f'<details class="dsec" style="padding:0">'
-        f'<summary style="padding:8px 10px;cursor:pointer;list-style:none;font-size:.78em;'
-        f"text-transform:uppercase;letter-spacing:.06em;color:#888;display:flex;"
-        f'align-items:center;gap:6px">eBay Status {listing_badge}{offer_badge}'
-        f'<span style="margin-left:auto;color:#444;font-size:.9em">▸</span></summary>'
-        f'<div style="padding:0 10px 10px">' + listing_section + offer_section + "</div></details>"
-    )
+    # PP-ACTIONCONSOLE-001: the "eBay Status" dropdown is gone — its content
+    # graduated into the Live Listing tab (listing_section + offer_section).
 
     _left_log_html = (
         '<div class="dleft-log">'
         + _readiness_html_str
         + _eps_strip_html
-        + (f'<div class="dsec"><h3>Pipeline Jobs</h3>{jobs_html}</div>' if jobs_html else "")
+        + (f'<div class="dsec" id="jobs-section"><h3>Pipeline Jobs</h3>{jobs_html}</div>' if jobs_html else "")
         + price_history_html
         + reprice_schedule_html
         + product_lookup_html
@@ -5083,9 +5122,44 @@ def _render_item_detail_html(
         + "</div>"
     )
 
+    # ── PP-ACTIONCONSOLE-001: tabbed right column ──────────────────────────────
+    # Editor tab always exists; the Live Listing tab appears only when the item
+    # is on eBay — the tab's existence IS the "this item is live" indicator.
+    # Sold: the live tab becomes "Sold Listing" and moves to the front; the
+    # editor stays behind it.
+    _has_live_tab = bool(listing_id or _ebay_live_raw)
+    _live_tab_label = "Sold Listing" if _is_sold else "Live Listing"
+    _default_tab = "live" if (_is_sold and _has_live_tab) else "editor"
+
+    def _tab_btn(name: str, label: str) -> str:
+        active = ' dtab-active' if name == _default_tab else ""
+        return (
+            f'<button class="dtab-btn{active}" data-tab="{name}" '
+            f"onclick=\"showTab('{name}')\">{label}</button>"
+        )
+
+    _tab_bar = (
+        '<style>.dtab-btn{padding:6px 16px;background:#141414;color:#889;border:1px solid #2a2a2a;'
+        "border-bottom:none;border-radius:6px 6px 0 0;cursor:pointer;font-size:.85em}"
+        ".dtab-btn.dtab-active{background:#1a1a1a;color:#cce;border-color:#3a3a3a;font-weight:600}"
+        "</style>"
+        '<div class="dtab-bar" style="display:flex;gap:4px;margin-bottom:0">'
+        + (_tab_btn("live", _live_tab_label) if (_has_live_tab and _is_sold) else "")
+        + _tab_btn("editor", "Editor")
+        + (_tab_btn("live", _live_tab_label) if (_has_live_tab and not _is_sold) else "")
+        + "</div>"
+    )
+
+    _editor_panel_open = (
+        '<div class="dtab-panel" data-tab="editor"'
+        + (' style="display:none"' if _default_tab != "editor" else "")
+        + ">"
+    )
+
     fields_html = (
         '<div class="dfields">'
-        # — Inventory record (what we track)
+        # ── Inventory Record — TGW's canonical layer, NOT part of the eBay
+        # listing workflow. Standalone at the top (own redesign effort later).
         + '<div id="catalog-section" class="dsec">'
         '<h3>Inventory Record <span style="color:#2a4a6a;font-size:.72em;font-weight:normal">dbl-click to edit · <a href="#" onclick="saveCatalog();return false" style="color:#4a8;font-size:.9em">Save to Catalog</a> <span id="catalog-save-msg" style="font-size:.82em;color:#4a4"></span></span></h3>'
         '<div style="font-size:.73em;color:#556;margin-bottom:6px">Canonical TGW data — never overwritten by marketplace sync</div>'
@@ -5135,36 +5209,105 @@ def _render_item_detail_html(
             )
         )(item.get("item_attributes") or {}, (dl or {}).get("item_specifics") or {})
         + "</div>"
-        # — Pipeline proposals banner (between inventory record and eBay sections)
+        # ── eBay Listing — the draft/live workflow section (PP-ACTIONCONSOLE-001).
+        # Visually separated from the Inventory Record above: its own header,
+        # action line, and Editor/Live tabs.
+        + '<div id="ebay-listing-block" style="margin-top:18px;padding-top:14px;'
+        'border-top:2px solid #2a3a4a">'
+        '<h3 style="margin:0 0 10px;font-size:.78em;text-transform:uppercase;'
+        'letter-spacing:.06em;color:#6a8ab5">eBay Listing</h3>'
+        + _pipeline_error_html
+        + _gate_html
+        + _tab_bar
+        + _editor_panel_open
+        # — Pipeline proposals banner (inside the editor tab, above the draft form)
         + (_proposals_banner if _has_proposals else "")
-        # — Consolidated eBay Status (listing + submission)
-        + _ebay_status_html
-        # — Phase 1B: eBay Draft editor
+        # — eBay Draft editor
         + _ebay_draft_editor
+        + "</div>"  # close editor tab panel
+        # — Live/Sold Listing tab: read-only view of what eBay holds
+        + (
+            (
+                '<div class="dtab-panel" data-tab="live"'
+                + (' style="display:none"' if _default_tab != "live" else "")
+                + ">"
+                + '<div class="dsec">'
+                + f"<h3>{_live_tab_label}{listing_badge}{offer_badge}"
+                + (
+                    '<a href="#" onclick="triggerAction(\'sync_from_ebay\');return false" '
+                    'style="float:right;color:#4a8ade;font-size:.85em;font-weight:normal">⟳ Sync from eBay</a>'
+                    if listing_id else ""
+                )
+                + "</h3>"
+                + listing_section
+                + offer_section
+                + "</div>"
+                + _ebay_live_html
+                + "</div>"
+            )
+            if _has_live_tab
+            else ""
+        )
+        + "</div>"  # close ebay-listing-block
         + "</div>"
     )
 
+    # PP-ACTIONCONSOLE-001: the Pipeline Tools button set is gone from this page —
+    # troubleshooting controls belong on a separate ops surface; repair actions
+    # appear contextually on failed pipeline-job lines. Archive/Delete moved into
+    # the action line. Only the shared JS remains here.
+    _prep_action_json = _json.dumps("ebay_draft" if item.get("ai_identified") else "ai_identify")
     actions_html = (
-        '<div class="dsec danger-zone">'
-        "<h3>Pipeline Tools</h3>"
-        '<div class="act-row">'
-        '<button class="act-btn" onclick="triggerAction(\'ai_identify\')">Re-identify</button>'
-        '<button class="act-btn" onclick="triggerAction(\'ebay_draft\')">Re-draft</button>'
-        '<button class="act-btn" onclick="triggerAction(\'ebay_upload\')">Re-upload photos</button>'
-        '<button class="act-btn" onclick="triggerAction(\'ebay_price\')">Re-price</button>'
-        + ('<button class="act-btn" onclick="triggerAction(\'sync_from_ebay\')" title="Fetch current price and status from eBay">Sync from eBay</button>' if listing_id else "")
-        + f"</div>"
-        f'<div class="act-row" style="margin-top:10px">'
-        f"<button class=\"act-btn act-warn\" onclick=\"triggerAction('archive','Archive this item? It will be hidden from the catalog.')\">Archive</button>"
-        f'<button class="act-btn act-delete" onclick="deleteItem()">Delete item</button>'
-        f"</div>"
-        f"</div>"
         f"<script>"
         f"window.TGW_API_KEY={_ak_json2};"
         f"var _SKU={_sku_json2};"
         f"var _LISTING_ID={_listing_id_json};"
         f"var _IS_ACTIVE={_is_active_js};"
+        f"var _PREP_ACTION={_prep_action_json};"
         f"window._ITEM_SKU={_sku_json2};"
+        # ── Action-line handlers (state-driven console) ──
+        f"function prepareListing(){{"
+        f"  if(!confirm('Prepare this listing?\\nRuns identification and drafts the eBay listing.'))return;"
+        f"  triggerAction(_PREP_ACTION);"
+        f"}}"
+        f"function listOnEbay(){{"
+        f"  if(!confirm('List this item on eBay?\\nSaves the draft, runs every needed step, and publishes.'))return;"
+        f"  saveEbayDraft(function(){{triggerAction('ebay_publish');}});"
+        f"}}"
+        f"function updateItem(){{"
+        f"  if(!confirm('Push draft changes to the live listing?\\nUpdates in place without ending the listing.'))return;"
+        f"  saveEbayDraft(function(){{triggerAction('ebay_update');}});"
+        f"}}"
+        f"function relistItem(){{"
+        f"  if(!confirm('Relist this item on eBay?\\nCheck quantity in the Inventory Record first.'))return;"
+        f"  saveEbayDraft(function(){{triggerAction('ebay_publish');}});"
+        f"}}"
+        f"function resetDraft(){{"
+        f"  if(!confirm('Reset the draft?\\nDiscards draft edits and regenerates from the catalog record.'))return;"
+        f"  triggerAction('ebay_draft');"
+        f"}}"
+        f"function resetDraftFromLive(){{"
+        f"  if(!confirm('Reset the draft from the live listing?\\nDiscards local edits — the draft will match eBay again.'))return;"
+        f"  triggerAction('reset_draft_from_live');"
+        f"}}"
+        f"function toggleApprove(cb){{"
+        f"  triggerAction(cb.checked?'set_ready':'unset_ready');"
+        f"}}"
+        f"function retryPipeline(){{"
+        f"  var el=document.getElementById('pipeline-error-box')||document.getElementById('jobs-section');"
+        f"  if(el)el.scrollIntoView({{behavior:'smooth',block:'center'}});"
+        f"}}"
+        f"function retryJob(jobId){{"
+        f"  if(!confirm('Retry this failed job?'))return;"
+        f"  fetch('/api/jobs/'+jobId+'/requeue',{{method:'POST',headers:authHeaders()}})"
+        f"  .then(function(r){{return r.json();}}).then(function(d){{"
+        f"    if(d.ok)location.reload();else alert('Retry failed: '+(d.detail||'error'));"
+        f"  }}).catch(function(e){{alert('Network error: '+e);}});"
+        f"}}"
+        f"function showTab(name){{"
+        f"  document.querySelectorAll('.dtab-panel').forEach(function(p){{p.style.display=p.dataset.tab===name?'':'none';}});"
+        f"  document.querySelectorAll('.dtab-btn').forEach(function(b){{b.classList.toggle('dtab-active',b.dataset.tab===name);}});"
+        f"}}"
         f"function triggerAction(action,confirmMsg){{"
         f"  if(confirmMsg&&!confirm(confirmMsg))return;"
         f"  fetch('/api/items/'+_SKU+'/action',{{"
@@ -5173,7 +5316,7 @@ def _render_item_detail_html(
         f"    body:JSON.stringify({{action:action}})"
         f"  }}).then(function(r){{return r.json();}}).then(function(d){{"
         f"    if(d.ok&&(action==='archive'||action==='ebay_end_listing')){{window.location.href='/form/items';return;}}"
-        f"    if(d.ok&&(action==='set_ready'||action==='unset_ready'||action==='ebay_publish'||action==='ebay_stage'||action==='ebay_update')){{location.reload();return;}}"
+        f"    if(d.ok&&(action==='set_ready'||action==='unset_ready'||action==='ebay_publish'||action==='ebay_stage'||action==='ebay_update'||action==='reset_draft_from_live')){{location.reload();return;}}"
         f"    alert(d.ok ? 'Action queued: '+action : 'Error: '+(d.detail||'failed'));"
         f"  }}).catch(function(e){{alert('Network error: '+e);}});"
         f"}}"
@@ -5298,7 +5441,7 @@ def _render_item_detail_html(
         f"  }}).catch(function(e){{if(msg){{msg.textContent='Network error';msg.style.color='#c44';}}}});"
         f"}}"
         # ── saveEbayDraft ─────────────────────────────────────────────────────
-        f"function saveEbayDraft(){{"
+        f"function saveEbayDraft(done){{"
         f"  var dl={{}};"
         f"  var t=document.getElementById('dl-title-input');"
         f"  if(t)dl.title=t.value;"
@@ -5342,6 +5485,7 @@ def _render_item_detail_html(
         f"    if(msg){{msg.textContent=d.ok?'✓ Saved':' Error: '+(d.detail||'failed');"
         f"    msg.style.color=d.ok?'#4a4':'#c44';"
         f"    if(d.ok)setTimeout(function(){{msg.textContent='';}},2000);}}"
+        f"    if(d.ok&&typeof done==='function')done();"
         f"  }}).catch(function(e){{if(msg){{msg.textContent='Network error';msg.style.color='#c44';}}}});"
         f"}}"
         # ── saveAndReprice ────────────────────────────────────────────────────
@@ -5489,7 +5633,7 @@ def item_detail_form(sku: str):
             with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     """
-                    SELECT queue_name, state, created_at, updated_at,
+                    SELECT job_id, queue_name, state, created_at, updated_at,
                            finished_at, error_code, error_detail
                       FROM queue_jobs
                      WHERE payload_json->>'sku' = %s
@@ -6211,7 +6355,15 @@ def apply_revision(sku: str, body: RevisionApplyBody) -> Dict[str, Any]:
     """Apply or preview the stored revision_draft for a SKU."""
     from .revision import cmd_revise_apply
 
-    return cmd_revise_apply(_cfg, sku, dry_run=body.dry_run, by=body.by)
+    result = cmd_revise_apply(_cfg, sku, dry_run=body.dry_run, by=body.by)
+    if result.get("ok") and result.get("applied"):
+        # Refresh the local live-mirror so the UI reflects what was just pushed.
+        result["sync_job_id"] = state_machine.enqueue_job(
+            queue_name="ebay_sync",
+            payload={"sku": sku, "reason": "revision_apply"},
+            max_attempts=2,
+        )
+    return result
 
 
 @app.delete("/api/items/{sku}/revision", dependencies=[AUTH])

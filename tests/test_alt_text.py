@@ -508,3 +508,142 @@ class TestSortedGallery:
         sku_dir = tmp_path / "tgw001"
         sku_dir.mkdir()
         assert sorted_gallery("tgw001", sku_dir) == []
+
+
+# ---------------------------------------------------------------------------
+# Multi-photo per item (session 41) — cloud providers send more than the
+# single primary photo; the batching infra existed (google_genai builds
+# multi-image tasks) but cmd_alt_text never assembled more than one image.
+# ---------------------------------------------------------------------------
+
+
+class TestMultiPhotoSelection:
+    def test_openrouter_sends_multiple_photos(self, tmp_path, monkeypatch):
+        cfg = _make_cfg(tmp_path)
+        _make_item(cfg, "tgw001")
+        _add_photo(cfg, "tgw001", "tgw001.jpg")
+        _add_photo(cfg, "tgw001", "tgw001_2.jpg")
+        _add_photo(cfg, "tgw001", "tgw001_3.jpg")
+
+        calls = []
+        monkeypatch.setattr(alt_text_mod, "_encode_resized", lambda p, max_px=512: f"B64:{p.name}")
+        monkeypatch.setattr(alt_text_mod, "call_model",
+                            lambda *a, **kw: calls.append(kw) or _GOOD_RESPONSE)
+
+        result = cmd_alt_text(cfg, "tgw001", provider="openrouter", model="google/gemini-2.5-flash-lite")
+
+        assert result["ok"] is True
+        assert len(calls) == 1
+        assert len(calls[0]["img_b64_list"]) == 3
+        assert "img_b64" not in calls[0]
+
+    def test_openrouter_excludes_alt_and_cropped(self, tmp_path, monkeypatch):
+        cfg = _make_cfg(tmp_path)
+        _make_item(cfg, "tgw001")
+        _add_photo(cfg, "tgw001", "tgw001.jpg")
+        _add_photo(cfg, "tgw001", "tgw001_2.jpg")
+        _add_photo(cfg, "tgw001", "tgw001-alt.jpg")
+        _add_photo(cfg, "tgw001", "cropped-tgw001.jpg")
+
+        calls = []
+        monkeypatch.setattr(alt_text_mod, "_encode_resized", lambda p, max_px=512: "B64")
+        monkeypatch.setattr(alt_text_mod, "call_model",
+                            lambda *a, **kw: calls.append(kw) or _GOOD_RESPONSE)
+
+        cmd_alt_text(cfg, "tgw001", provider="openrouter", model="google/gemini-2.5-flash-lite")
+
+        assert len(calls[0]["img_b64_list"]) == 2
+
+    def test_openrouter_caps_at_max_photos_cloud(self, tmp_path, monkeypatch):
+        cfg = _make_cfg(tmp_path)
+        _make_item(cfg, "tgw001")
+        for i in range(8):
+            _add_photo(cfg, "tgw001", f"tgw001_{i}.jpg")
+
+        calls = []
+        monkeypatch.setattr(alt_text_mod, "_encode_resized", lambda p, max_px=512: "B64")
+        monkeypatch.setattr(alt_text_mod, "call_model",
+                            lambda *a, **kw: calls.append(kw) or _GOOD_RESPONSE)
+
+        cmd_alt_text(cfg, "tgw001", provider="openrouter", model="google/gemini-2.5-flash-lite")
+
+        assert len(calls[0]["img_b64_list"]) == alt_text_mod._MAX_PHOTOS_CLOUD
+
+    def test_ollama_still_single_photo(self, tmp_path, monkeypatch):
+        cfg = _make_cfg(tmp_path)
+        _make_item(cfg, "tgw001")
+        _add_photo(cfg, "tgw001", "tgw001.jpg")
+        _add_photo(cfg, "tgw001", "tgw001_2.jpg")
+
+        calls = []
+        monkeypatch.setattr(alt_text_mod, "is_available", lambda model: True)
+        monkeypatch.setattr(alt_text_mod, "_encode_resized", lambda p, max_px=512: "B64")
+        monkeypatch.setattr(alt_text_mod, "call_model",
+                            lambda *a, **kw: calls.append(kw) or _GOOD_RESPONSE)
+
+        cmd_alt_text(cfg, "tgw001", provider="ollama", model=_DUMMY_MODEL)
+
+        assert len(calls[0]["img_b64_list"]) == 1
+
+    def test_multi_photo_call_not_cached(self, tmp_path, monkeypatch):
+        """Multi-photo results must not pollute the single-image phash cache —
+        a later single-photo call for a different item sharing that photo hash
+        would wrongly inherit a multi-photo-derived answer."""
+        cfg = _make_cfg(tmp_path)
+        _make_item(cfg, "tgw001")
+        _add_photo(cfg, "tgw001", "tgw001.jpg")
+        _add_photo(cfg, "tgw001", "tgw001_2.jpg")
+
+        stored = []
+        monkeypatch.setattr(alt_text_mod, "_encode_resized", lambda p, max_px=512: "B64")
+        monkeypatch.setattr(alt_text_mod, "call_model", lambda *a, **kw: _GOOD_RESPONSE)
+        import tgw.image_hash as image_hash_mod
+        monkeypatch.setattr(image_hash_mod, "store_hash",
+                            lambda *a, **k: stored.append((a, k)))
+        monkeypatch.setattr(image_hash_mod, "lookup_hash", lambda *a, **k: None)
+
+        cmd_alt_text(cfg, "tgw001", provider="openrouter", model="google/gemini-2.5-flash-lite")
+
+        assert stored == []
+
+
+# ---------------------------------------------------------------------------
+# CLOUD_PROVIDERS regression (session 41): adding google_direct as a third
+# provider exposed hardcoded `provider == "openrouter"` / `!= "openrouter"`
+# checks that assumed only two providers ever existed — cmd_alt_text used to
+# wrongly run the Ollama is_available() liveness gate against google_direct,
+# breaking every non-Ollama, non-OpenRouter default the moment _DEFAULTS
+# changed. This locks in the fix.
+# ---------------------------------------------------------------------------
+
+
+class TestGoogleDirectProvider:
+    def test_google_direct_treated_as_cloud_not_ollama(self, tmp_path, monkeypatch):
+        cfg = _make_cfg(tmp_path)
+        _make_item(cfg, "tgw001")
+        _add_photo(cfg, "tgw001")
+
+        # is_available (Ollama liveness) must never be consulted for google_direct
+        def _boom(model):
+            raise AssertionError("is_available() must not be called for google_direct")
+        monkeypatch.setattr(alt_text_mod, "is_available", _boom)
+        monkeypatch.setattr(alt_text_mod, "_encode_resized", lambda p, max_px=512: "B64")
+        monkeypatch.setattr(alt_text_mod, "call_model", lambda *a, **kw: _GOOD_RESPONSE)
+
+        result = cmd_alt_text(cfg, "tgw001", provider="google_direct", model="gemini-2.5-flash-lite")
+        assert result["ok"] is True
+
+    def test_google_direct_gets_multi_photo(self, tmp_path, monkeypatch):
+        cfg = _make_cfg(tmp_path)
+        _make_item(cfg, "tgw001")
+        _add_photo(cfg, "tgw001", "tgw001.jpg")
+        _add_photo(cfg, "tgw001", "tgw001_2.jpg")
+
+        calls = []
+        monkeypatch.setattr(alt_text_mod, "_encode_resized", lambda p, max_px=512: "B64")
+        monkeypatch.setattr(alt_text_mod, "call_model",
+                            lambda *a, **kw: calls.append(kw) or _GOOD_RESPONSE)
+
+        cmd_alt_text(cfg, "tgw001", provider="google_direct", model="gemini-2.5-flash-lite")
+
+        assert len(calls[0]["img_b64_list"]) == 2

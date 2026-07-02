@@ -19,6 +19,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 import psycopg2.errors
 import requests
@@ -34,6 +35,14 @@ from tgw.queue import state_machine
 from tgw.queue.worker_base import QueueWorker
 
 log = logging.getLogger(__name__)
+
+# eBay daily quotas reset at 00:00 PST (verified 2026-07-01, see eBay-API-Landscape.md).
+# The aspects-cache warm-up is meant to spend only quota that would otherwise go
+# unused before that reset — Dave's spec (session 39): "crawl it at the end of every
+# day, then our limit resets." Restrict it to this window so it never competes with
+# quota needed during the working day.
+_RESET_TZ = ZoneInfo("America/Los_Angeles")
+_WARMUP_WINDOW_START_HOUR = 22  # 22:00-23:59 PST/PDT, i.e. the 2h before reset
 
 QUEUE_NAME = "ebay_sync"
 SYNC_INTERVAL_S = 6 * 3600  # check eBay every 6 hours
@@ -129,18 +138,30 @@ class EbaySyncWorker(QueueWorker):
                     if consecutive >= 2:
                         log.error(
                             "ebay_sync: bulk offer list blocked by bad SKU (eBay 25707) for "
-                            "%d consecutive runs — falling back to per-SKU lookups "
-                            "(this multiplies call volume ~N-fold; the underlying orphaned "
-                            "offer needs clearing, see todo #1077)",
+                            "%d consecutive runs — the underlying orphaned offer needs "
+                            "clearing, see todo #1077",
                             consecutive,
                         )
                         tgw_logging.log_event("ebay_sync_fallback_persistent", consecutive=consecutive)
+                        if not self._fallback_due():
+                            # Session-41 circuit breaker: once the 25707 error is confirmed
+                            # persistent, the ~N-fold-more-expensive per-SKU fallback (one
+                            # Inventory API call per published SKU, ~2,000+/run) was firing
+                            # every 6h and silently draining the daily Inventory quota. Cap
+                            # it to once per 24h until the orphaned offer is cleared.
+                            log.warning(
+                                "ebay_sync: skipping per-SKU fallback this cycle — ran "
+                                "within the last 24h already; will retry next cycle"
+                            )
+                            self._reschedule()
+                            return
                     else:
                         log.warning(
                             "ebay_sync: bulk offer list blocked by bad SKU (eBay 25707) — "
                             "falling back to per-SKU individual lookups"
                         )
                     offers = self._fetch_offers_by_local_skus()
+                    self._mark_fallback_executed()
                 else:
                     raise
             else:
@@ -174,13 +195,22 @@ class EbaySyncWorker(QueueWorker):
         # Taxonomy API quota is left today to fill in categories we actually sell in
         # but haven't cached aspects for yet. Self-throttling — stops at the first
         # failure rather than retrying — so this never risks the sync run itself.
-        if seen_category_ids:
+        #
+        # Session 41 fix: this was originally hooked to fire on every 6h ebay_sync
+        # cycle with no time gate — reported done, but Dave's actual spec was a
+        # once-daily drain of leftover quota right before the 00:00 PST reset, not an
+        # all-day-long drain that competes with quota needed during working hours
+        # (confirmed firing at 04:50am and hitting a 429 before Dave opened his first
+        # item of the day). Now restricted to at most once per calendar PST day, only
+        # within the 2h window before reset.
+        if seen_category_ids and self._aspects_warmup_due():
             try:
                 from tgw.apis.ebay.specifics import warm_missing_aspects
 
                 warmed = warm_missing_aspects(self.config, seen_category_ids)
                 if warmed:
                     log.info("ebay_sync: warmed aspects cache for %d category(ies)", warmed)
+                self._mark_aspects_warmup_run()
             except Exception as exc:
                 log.warning("ebay_sync: aspects warm-up skipped: %s", exc)
 
@@ -202,41 +232,95 @@ class EbaySyncWorker(QueueWorker):
         root = self.config.get("catalog_root")
         return Path(root) / "ebay-sync-fallback-state.json" if root else None
 
-    def _record_fallback_state(self, used_fallback: bool) -> int:
-        """Track consecutive per-SKU fallback runs so a recurring eBay 25707 error
-        (session-39 API audit finding #2) surfaces as a visible health warning instead
-        of silently running the ~N-fold-more-expensive per-SKU path forever.
+    def _load_fallback_state(self) -> Dict[str, Any]:
+        path = self._fallback_state_path()
+        if not path or not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
 
-        Returns the current consecutive-fallback-run count (0 if this run used the
-        normal bulk path).
-        """
+    def _write_fallback_state(self, state: Dict[str, Any]) -> None:
         path = self._fallback_state_path()
         if not path:
-            return 1 if used_fallback else 0
+            return
+        try:
+            path.write_text(json.dumps(state), encoding="utf-8")
+        except OSError as exc:
+            log.warning("ebay_sync: could not write fallback state: %s", exc)
 
-        state: Dict[str, Any] = {}
-        if path.exists():
-            try:
-                state = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                state = {}
+    def _record_fallback_state(self, used_fallback: bool) -> int:
+        """Track consecutive cycles blocked by the eBay 25707 error (session-39 API
+        audit finding #2) so persistence surfaces as a visible health warning. Does
+        NOT track whether the expensive per-SKU fetch actually ran — see
+        ``_fallback_due`` / ``_mark_fallback_executed`` for the execution-rate gate.
 
+        Returns the current consecutive-blocked-run count (0 if this run used the
+        normal bulk path).
+        """
+        state = self._load_fallback_state()
         now_iso = datetime.now(timezone.utc).isoformat()
         consecutive = int(state.get("consecutive_fallback_runs", 0))
         if used_fallback:
             consecutive += 1
             state["consecutive_fallback_runs"] = consecutive
-            state["last_fallback_at"] = now_iso
+            state["last_blocked_at"] = now_iso
         else:
             consecutive = 0
             state["consecutive_fallback_runs"] = 0
             state["last_bulk_ok_at"] = now_iso
-
-        try:
-            path.write_text(json.dumps(state), encoding="utf-8")
-        except OSError as exc:
-            log.warning("ebay_sync: could not write fallback state: %s", exc)
+        self._write_fallback_state(state)
         return consecutive
+
+    def _fallback_due(self) -> bool:
+        """True if the expensive per-SKU fallback hasn't run in the last 24h (or has
+        never run). Session-41 circuit breaker: once the 25707 block is confirmed
+        persistent, cap the ~N-fold-more-expensive per-SKU path to once/24h instead of
+        firing on every 6h sync cycle."""
+        state = self._load_fallback_state()
+        last = state.get("last_fallback_executed_at")
+        if not last:
+            return True
+        try:
+            last_dt = datetime.fromisoformat(last)
+        except ValueError:
+            return True
+        return (datetime.now(timezone.utc) - last_dt).total_seconds() >= 24 * 3600
+
+    def _mark_fallback_executed(self) -> None:
+        state = self._load_fallback_state()
+        state["last_fallback_executed_at"] = datetime.now(timezone.utc).isoformat()
+        self._write_fallback_state(state)
+
+    def _aspects_warmup_state_path(self) -> Optional[Path]:
+        root = self.config.get("catalog_root")
+        return Path(root) / "ebay-sync-aspects-warmup-state.json" if root else None
+
+    def _aspects_warmup_due(self) -> bool:
+        """True only within the 2h window before the 00:00 PST quota reset, and only
+        if the warm-up hasn't already run today (PST calendar date)."""
+        now_pst = datetime.now(_RESET_TZ)
+        if now_pst.hour < _WARMUP_WINDOW_START_HOUR:
+            return False
+        path = self._aspects_warmup_state_path()
+        if not path or not path.exists():
+            return True
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return True
+        return state.get("last_run_date") != now_pst.date().isoformat()
+
+    def _mark_aspects_warmup_run(self) -> None:
+        path = self._aspects_warmup_state_path()
+        if not path:
+            return
+        now_pst = datetime.now(_RESET_TZ)
+        try:
+            path.write_text(json.dumps({"last_run_date": now_pst.date().isoformat()}), encoding="utf-8")
+        except OSError as exc:
+            log.warning("ebay_sync: could not write aspects warm-up state: %s", exc)
 
     def _fetch_offers_by_local_skus(self) -> List[Dict[str, Any]]:
         """Fallback: fetch offers one SKU at a time from local items with offer_ids.

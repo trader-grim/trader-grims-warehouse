@@ -24,7 +24,7 @@ import psycopg2.errors
 
 import tgw.logging as tgw_logging
 from tgw.apis.fence import patch_item as fence_patch_item
-from tgw.apis.llm import call_model, get_task_model
+from tgw.apis.llm import CLOUD_PROVIDERS, call_model, get_task_model
 from tgw.apis.ollama import extract_json, is_available
 from tgw.assets import ordered_photos as _asset_ordered_photos
 from tgw.config import DEFAULT_CONFIG, load_config
@@ -197,7 +197,7 @@ class AIIdentifyWorker(QueueWorker):
         if not all_photos:
             raise HardFailure(f"no images found for {sku}")
 
-        if provider == "openrouter":
+        if provider in CLOUD_PROVIDERS:
             # Skip -alt. duplicates and cropped- derivatives for the batch;
             # they add tokens without new information. Photo selection UI is PP-TODO.
             candidate_photos = [p for p in all_photos if "-alt." not in p.name and not p.name.startswith("cropped-")][:_MAX_PHOTOS_CLOUD] or all_photos[:1]
@@ -223,7 +223,7 @@ class AIIdentifyWorker(QueueWorker):
             if provider == "ollama" and not is_available(model):
                 raise RuntimeError(f"Ollama unavailable or model {model!r} not found")
 
-            max_px = _VISION_MAX_PX_CLOUD if provider == "openrouter" else _VISION_MAX_PX
+            max_px = _VISION_MAX_PX_CLOUD if provider in CLOUD_PROVIDERS else _VISION_MAX_PX
             encoded = [_encode_resized(p, max_px=max_px) for p in candidate_photos]
             img_b64_list = [e[0] for e in encoded]
             total_kb = sum(e[2] for e in encoded)

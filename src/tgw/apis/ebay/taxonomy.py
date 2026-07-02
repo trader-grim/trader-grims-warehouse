@@ -25,7 +25,14 @@ from tgw.apis.ebay.client import ebay_get
 log = logging.getLogger(__name__)
 
 MARKETPLACE_ID = 'EBAY_US'
-_TREE_CACHE_MAX_AGE = 30 * 86400  # 30 days — eBay's tree changes rarely
+# Session 41 (2026-07-02): the category tree does NOT expire on a timer. Dave's
+# design (stated twice — session 39 and again here): eBay announces category-tree
+# changes, it doesn't change often, so there is no reason to burn a live re-fetch on
+# a schedule. The cache is permanent until explicitly invalidated — see
+# `refresh_category_tree_cache()` / `tgw refresh-ebay-taxonomy`, run manually when an
+# eBay taxonomy change is announced. A 30-day auto-expiry was implemented here
+# instead of that spec and went unnoticed for 3+ days of live production, during
+# which quota was perpetually re-exhausted refetching a tree that never changed.
 _TREE_ID_CACHE_MAX_AGE = 365 * 86400  # tree ID for a marketplace is effectively permanent
 
 # eBay's documented default category tree ID for EBAY_US — this is a stable platform
@@ -158,7 +165,12 @@ def _build_index(cfg: Dict[str, Any], tree_data: Dict[str, Any]) -> Dict[str, Di
 
 
 def _ensure_tree_index(cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    """Return (and lazily build/cache) the full category id → node index."""
+    """Return (and lazily build/cache) the full category id → node index.
+
+    The disk cache never auto-expires — see the module-level note by
+    ``_TREE_ID_CACHE_MAX_AGE`` for why. Use ``refresh_category_tree_cache()`` to
+    force a re-fetch when eBay announces an actual taxonomy change.
+    """
     global _tree_index_cache, _tree_roots_cache
     if _tree_index_cache is not None:
         return _tree_index_cache
@@ -169,8 +181,7 @@ def _ensure_tree_index(cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     if cache_path and cache_path.exists():
         try:
             wrapper = json.loads(cache_path.read_text(encoding='utf-8'))
-            if time.time() - wrapper.get('_cached_at', 0) < _TREE_CACHE_MAX_AGE:
-                tree_data = wrapper.get('tree')
+            tree_data = wrapper.get('tree')
         except (OSError, ValueError) as exc:
             log.warning('category tree cache unreadable, refetching: %s', exc)
 
@@ -191,6 +202,30 @@ def _ensure_tree_index(cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     _tree_roots_cache = [nid for nid, n in index.items() if n['parent_id'] is None]
     log.info('eBay category tree loaded: %d categories', len(index))
     return index
+
+
+def refresh_category_tree_cache(cfg: Dict[str, Any]) -> int:
+    """Force a live re-fetch of the full category tree, overwriting the disk cache
+    and clearing the in-memory cache. Run manually (`tgw refresh-ebay-taxonomy`)
+    when eBay announces an actual taxonomy change — the cache otherwise never
+    expires on its own.
+
+    Returns the number of categories in the newly cached tree.
+    """
+    global _tree_index_cache, _tree_roots_cache
+    tree_id = get_category_tree_id(cfg)
+    tree_data = ebay_get(cfg, f'/commerce/taxonomy/v1/category_tree/{tree_id}')
+    cache_path = _tree_cache_path(cfg)
+    if cache_path:
+        cache_path.write_text(
+            json.dumps({'_cached_at': time.time(), 'tree': tree_data}),
+            encoding='utf-8',
+        )
+    index = _build_index(cfg, tree_data)
+    _tree_index_cache = index
+    _tree_roots_cache = [nid for nid, n in index.items() if n['parent_id'] is None]
+    log.info('eBay category tree cache refreshed: %d categories', len(index))
+    return len(index)
 
 
 def _breadcrumb(index: Dict[str, Dict[str, Any]], category_id: str) -> str:

@@ -59,7 +59,46 @@ Use plan row numbers for plan-table items; "todo #N" only for live tracker IDs.
 
 ---
 
-## 3. What Changed This Session (session 37 — 2026-06-30)
+## 3. What Changed This Session (session 40 — 2026-07-01/02)
+
+**Session 40 — 2026-07-01/02 (action console design+build, revision apply, hermes/flake ops):**
+
+- **PP-ACTIONCONSOLE-001 designed AND built in one session.** Design principle settled
+  with Dave: state drives the interface; every control is also an indicator; compaction
+  without losing anything; platform-wide house style (fulfillment/warehousing next).
+  Built: state-driven action line (intake/draft/working/live-in-sync/live-edited/error/
+  sold), Editor + Live/Sold Listing tabs (live tab = graduated "eBay Live Data" content),
+  pipeline breadcrumb + eBay Status dropdown + Pipeline Tools section removed, pricing
+  history merged to one left-column display (comps deduped to the price-field panel),
+  dead-letter job lines get contextual Retry (zero-clutter guarantee) with
+  operator_retry ledger annotation (improvement loop). Late fix per Dave: Inventory
+  Record separated on top; "eBay Listing" bordered block below. All state pages
+  verified 200. Fixed latent `(dl or {{}})` f-string crash (no-draft items 500'd).
+- **PP-LISTEDITOR-001 Phase 2 revision apply CODE COMPLETE** — `_APPLY_ENABLED=True`
+  (Dave confirmed design), fresh-GET→delta→PUT live path with supported-field table,
+  revision_history audit, endpoint enqueues ebay_sync after apply; 10 new tests (74
+  pass). **Live-fire NOT yet done** — first test: one live item, price-only delta.
+- **Clipboard gated:** new todo #1086 (conceptual planning pass unifying PP-CLIP-001 +
+  PP-EVENTD-001 + inbox research) BLOCKS #1055 rofi picker, per Dave.
+- **Ops (tgw-flake, committed + pushed):** hermes model switched to
+  openrouter/xiaomi/mimo-v2.5-pro (experimentation; Claude remains documented default);
+  disk/storage toolkit added to base.nix (smartmontools ncdu duf fclones rmlint
+  git-annex recoll); a1131 rebuilt via --target-host (no GitHub access there).
+- **Reference:** eBay daily quotas reset 00:00 PST — recorded in eBay-API-Landscape.md.
+
+**Open / risks:**
+- Dave tests the new console next session → iterate (ship-and-adjust).
+- Revision-apply live-fire pending; Update Item button still routes to ebay_update
+  (stage-force) not revision apply — wire after live-fire.
+- Troubleshooting buttons (Re-identify/Re-upload/Re-price/Sync) removed from item page
+  with NO new home yet — ops surface to design.
+- `tgw health` failing: backups, nats, ebay_sync_fallback (pre-existing? unverified).
+- Master plan sync-conflict files from tonight's edit/Syncthing race — expected to
+  self-clear; check next session that they did.
+
+---
+
+## 3b. Previous Session (session 37 — 2026-06-30)
 
 **Session 37 — 2026-06-30 (Sway graphical-session.target fix + reboot test):**
 
