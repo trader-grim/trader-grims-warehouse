@@ -200,9 +200,12 @@ class EbayPriceWorker(QueueWorker):
         # Only stage when we have a price — no point creating an offer with no price
         if suggested is not None:
             try:
+                # Invariant C10: propagate operator provenance down the chain.
                 state_machine.enqueue_job(
                     queue_name='ebay_stage',
-                    payload={'sku': sku},
+                    payload={'sku': sku,
+                             **({'origin': 'operator'}
+                                if payload.get('origin') == 'operator' else {})},
                     dedupe_key=f'ebay_stage:{sku}',
                     max_attempts=5,
                 )

@@ -294,3 +294,28 @@ def test_ebay_write_failure_does_not_discard_draft_listing_price(reducer, tmp_pa
     assert after['draft_listing']['price'] == 18.0
     assert after['reprice_schedule'][1]['done_at'] is not None
     assert after['price_history'][-1]['price'] == 18.0
+
+
+def test_cliff_drop_stage_refused_and_stamped(reducer, tmp_path):
+    # Session 42: a stage cutting >50% off its predecessor stage (fire-sale
+    # comps, e.g. $299 retail -> $4.79 move) is REFUSED, stamped so it never
+    # silently retries, and no PUT reaches eBay.
+    item = _item()
+    item['reprice_schedule'][1]['done_at'] = PAST      # retail already applied
+    item['reprice_schedule'][2]['price'] = 4.79        # cliff vs retail 18.0
+    item['reprice_schedule'][2]['due_at'] = PAST
+    path = _write(tmp_path, item)
+    _, after = _run(reducer, path)
+    assert reducer._puts == []
+    stage2 = after['reprice_schedule'][2]
+    assert stage2.get('refused_at')
+    assert stage2.get('done_at')
+
+
+def test_below_hard_floor_refused_even_if_gradual(reducer, tmp_path):
+    item = _item(price=5.0)
+    item['reprice_schedule'][1]['price'] = 2.50        # below $2.99 hard floor
+    path = _write(tmp_path, item)
+    _, after = _run(reducer, path)
+    assert reducer._puts == []
+    assert after['reprice_schedule'][1].get('refused_at')

@@ -409,6 +409,12 @@ class EbaySyncWorker(QueueWorker):
                     changed = True
             except (TypeError, ValueError):
                 pass
+        # Mirror the LIVE fulfillment policy (session 42: interface showed the
+        # operator's FC4 while eBay actually had FC8 — the live policy was
+        # never mirrored home, so no surface could show the divergence).
+        live_fulfillment = str((offer.get("listingPolicies") or {}).get("fulfillmentPolicyId") or "")
+        if live_fulfillment and ebay_offer.get("fulfillment_policy_id") != live_fulfillment:
+            offer_updates["fulfillment_policy_id"] = live_fulfillment
         if category_id and ebay_offer.get("category_id") != category_id:
             offer_updates["category_id"] = category_id
         if quantity is not None and ebay_offer.get("quantity") != quantity:

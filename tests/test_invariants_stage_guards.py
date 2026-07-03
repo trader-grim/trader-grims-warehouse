@@ -25,6 +25,8 @@ def stage(tmp_path, monkeypatch):
     """(worker, staged_calls) with stage_draft and all side effects stubbed."""
     monkeypatch.setattr(ebay_stage.tgw_logging, 'log_event', lambda *a, **k: None)
     enqueued = []
+    monkeypatch.setattr(ebay_stage.state_machine, 'active_jobs_for_sku',
+                        lambda sku, queues: [])
     monkeypatch.setattr(ebay_stage.state_machine, 'enqueue_job',
                         lambda **kw: enqueued.append(kw))
     calls = []
@@ -163,3 +165,80 @@ def test_successful_stage_is_unpublished_and_preserves_comps(stage, tmp_path):
     assert offer['price_comps'] == {'count': 3, 'p25': 9.99}  # merge, not replace
     assert 'ebay_listing' not in after                        # never published
     assert any(kw['queue_name'] == 'catalog_rebuild' for kw in stage._enqueued)
+
+# ---------------------------------------------------------------------------
+# C5-extended — never-raise clamp on force re-stage (session 42 incident)
+# ---------------------------------------------------------------------------
+
+def _run_force(worker, sku, **extra_payload):
+    # operator origin by default — C9 blocks operator-less force on live items
+    payload = {'sku': sku, 'force': True, 'origin': 'operator', **extra_payload}
+    worker.handle({'payload_json': payload})
+
+
+def _live_item(draft_price, offer_price):
+    item = _ready_item()
+    item['draft_listing']['price'] = draft_price
+    item['ebay_offer'].update({'price': offer_price, 'offer_id': 'OFF-1',
+                               'status': 'PUBLISHED'})
+    return item
+
+
+def test_force_restage_never_raises_live_price(stage, tmp_path):
+    # Stale pre-s41 draft price above the live markdown must be clamped to the
+    # live price AND persisted back (heals the stale draft, price_history event).
+    path = _write(tmp_path, 'tgw10', _live_item(draft_price=9.97, offer_price=7.98))
+    _run_force(stage, 'tgw10')
+    assert stage._staged == ['tgw10']
+    after = json.loads(path.read_text(encoding='utf-8'))
+    assert after['draft_listing']['price'] == 7.98
+    ev = after['price_history'][-1]
+    assert ev['label'] == 'never_raise_clamp'
+    assert ev['previous_price'] == 9.97
+
+
+def test_force_restage_allows_operator_authorized_raise(stage, tmp_path):
+    path = _write(tmp_path, 'tgw11', _live_item(draft_price=12.00, offer_price=7.98))
+    _run_force(stage, 'tgw11', allow_price_raise=True)
+    assert stage._staged == ['tgw11']
+    after = json.loads(path.read_text(encoding='utf-8'))
+    assert after['draft_listing']['price'] == 12.00
+    assert not after.get('price_history')
+
+
+def test_force_restage_lowering_passes_unclamped(stage, tmp_path):
+    # A pending reduction (draft below live) is the reducer doing its job.
+    path = _write(tmp_path, 'tgw12', _live_item(draft_price=6.50, offer_price=7.98))
+    _run_force(stage, 'tgw12')
+    assert stage._staged == ['tgw12']
+    after = json.loads(path.read_text(encoding='utf-8'))
+    assert after['draft_listing']['price'] == 6.50
+
+
+def test_nonforce_unpublished_stage_not_clamped(stage, tmp_path):
+    # First-time staging of a fresh item is untouched by the guard.
+    _write(tmp_path, 'tgw13', _ready_item())
+    _run(stage, 'tgw13')
+    assert stage._staged == ['tgw13']
+
+
+# ---------------------------------------------------------------------------
+# C9 — uninspected AI content never reaches a live listing (session 42)
+# ---------------------------------------------------------------------------
+
+def test_force_on_live_listing_without_operator_origin_is_blocked(stage, tmp_path):
+    path = _write(tmp_path, 'tgw14', _live_item(draft_price=9.99, offer_price=9.99))
+    before = path.read_text()
+    stage.handle({'payload_json': {'sku': 'tgw14', 'force': True}})
+    assert stage._staged == []               # refused — no PUT
+    assert path.read_text() == before        # and nothing written
+
+
+def test_force_on_unpublished_offer_passes_without_origin(stage, tmp_path):
+    # Pre-publish price-drift force re-stage (ebay_publish deadlock-breaker)
+    # targets an UNPUBLISHED offer — C9 does not apply.
+    item = _ready_item()
+    item['ebay_offer'].update({'offer_id': 'OFF-2', 'status': 'UNPUBLISHED'})
+    _write(tmp_path, 'tgw15', item)
+    stage.handle({'payload_json': {'sku': 'tgw15', 'force': True}})
+    assert stage._staged == ['tgw15']

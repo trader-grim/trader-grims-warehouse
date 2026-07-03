@@ -19,7 +19,14 @@ _BASE = "http://127.0.0.1:7373"
 
 
 def _headers(cfg: Dict[str, Any]) -> Dict[str, str]:
-    return {"Authorization": f"Bearer {cfg['api_key']}"}
+    # X-TGW-Caller identifies the fence client (worker:<queue>, cli:<op>,
+    # tgw-http) so the server can distinguish machine writes from operator
+    # edits. Session-42 incident: the PATCH endpoint's auto-redraft-on-
+    # draft_listing-change fired on WORKER patches too, creating an infinite
+    # draft→patch→redraft pipeline loop (one SKU accumulated 287 draft jobs).
+    from tgw import quota
+    return {"Authorization": f"Bearer {cfg['api_key']}",
+            "X-TGW-Caller": f"{quota._context_kind}:{quota._context_name}"}
 
 
 def _raise(resp: requests.Response) -> None:

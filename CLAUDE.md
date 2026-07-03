@@ -4,6 +4,32 @@ Trader Grim's Warehouse (TGW) is a resale business (eBay seller: DaveBuko-Webkul
 custom inventory management and eBay automation platform built in Python. Dave runs the business
 and directs all development. Read this file first, then read the master plan before doing anything.
 
+## PRIME DIRECTIVES — override everything below except direct instructions from Dave
+
+These are Dave's standing orders. They have been violated repeatedly by sessions that
+treated them as background prose. They are not background. Every design decision and
+every line of code is checked against these first:
+
+1. **The local dataset IS the business; eBay is a rented window.** Preserve the data
+   set — all of it, always. Never discard, overwrite, or decline to record data;
+   anything received from outside (eBay, AI models, lookups) is an asset the moment it
+   arrives, and persisting it is part of receiving it. Raw is permanent; derived is
+   recomputable. A feature that touches external data and grows the dataset by nothing
+   is a red flag — say so. Read `reference/TGW-Data-Charter.md` before any pipeline
+   work. (Invariants E5/E7; raw capture at `apis/ebay/client.py` — never bypass it.)
+2. **Act on alarms immediately.** A thermal alarm, health RED, crash loop, or quota 429
+   is YOUR incident the moment you see it: investigate to root cause in the same turn,
+   never acknowledge-and-continue. Check your own processes first.
+3. **Implement exactly what Dave specified.** If you substitute anything — a cadence, a
+   TTL, a default — you flag the deviation in your reply and get it approved. Silent
+   substitutions have caused real production outages twice.
+4. **"Tests pass" is not done. Done = verified live on real data**, with the observable
+   result (URL, log line, item JSON, eBay state) shown to Dave.
+5. **When Dave states a new standing requirement, encode it before proceeding**: add it
+   here, add an invariant + detector, and note which check enforces it. A requirement
+   that lives only in conversation will be lost — that is a proven failure mode of this
+   project, not a hypothetical.
+
 ## Start every session here
 
 **Step 0 — check thermal status before anything else:**
@@ -106,7 +132,8 @@ Plain Markdown; open in Obsidian for interactive mind map view where noted.
 | `eBay-Error-Codes.md` | eBay API error codes, HTTP status handling, dead-letter diagnosis |
 | `SHELL-AUDIT.md` | tgw.source / tgw-dev.source function audit — what to keep, wrap, or remove |
 | `HARDWARE-AI-INFERENCE.md` | Ollama model sizing, GPU upgrade planning, inference perf |
-| `invariants.md` | 29 system invariants (A1–E4) + enforcement status — check before any structural change |
+| `TGW-Data-Charter.md` | **Any pipeline/worker/eBay work** — the data axiom, asset inventory, rules for new work (Prime Directive 1) |
+| `invariants.md` | System invariants (A1–E7) + enforcement status — check before any structural change |
 | `TGW-Architecture-Services.md` | Service-by-service responsibility, deps, failure modes, critical invariants |
 | `TGW-Architecture-Overview.md` | System topology — how subsystems connect |
 | `TGW-NixOS-Reference.md` | NixOS bootstrap sequence, Syncthing topology, host inventory, troubleshooting |

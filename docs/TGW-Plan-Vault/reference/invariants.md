@@ -436,3 +436,94 @@ would have been permanently lost. The archive is the last line of defense.
 **Status:** ❌ gap — archive step exists as a manual operator habit (ItemArchive on
 `/media/db/masterarchive`) but is not enforced in any code path. Must be added to
 PP-FENCE-001 Session A as a required fence behaviour before workers restart.
+
+---
+
+## E6 — Timestamps are stored tz-aware UTC; local time exists only at render ✅ (2026-07-02, session 42)
+
+**Rule:** Any timestamp written to durable storage (item JSON, Postgres, state
+files) must be timezone-aware UTC (`datetime.now(timezone.utc)`, ISO 8601 with
+offset). Naive `datetime.now()` / deprecated `utcnow()` are forbidden in `src/`.
+Human-facing rendering (web UI, labels, filenames the operator reads) converts at
+display time — web UI via `http_server._local_ts()` (America/Los_Angeles);
+CLI/label sites via explicit `datetime.now().astimezone()`. Schedule logic tied to
+an external clock (e.g. eBay's 00:00 PST quota reset) uses an explicit
+`ZoneInfo("America/Los_Angeles")`, never the host timezone.
+
+**Why:** Session 41: Postgres session tz (GMT) + 13 display sites truncating the
+`+00:00` offset made a dead-letter job appear timestamped "7 hours in the future."
+Verified 2026-07-02: no stored data was ever wrong — `queue_jobs` columns are all
+`timestamptz` (UTC internally) and journald stores UTC — the ambiguity was
+rendering-only, plus 6 naive `datetime.now()` sites (reports/health/printing/
+http_server ×2), all fixed session 42. To correlate logs across surfaces, view in
+one zone: `journalctl --utc` beside raw ISO values. Note psql already prints the
+`+00` offset on timestamptz — bare-looking values in the web UI were the only trap.
+
+**Enforcement:** grep gate candidate: `grep -rn 'datetime.now()\|utcnow()' src/tgw/`
+must return only `.astimezone()`-wrapped render sites (currently 5). No CI hook yet.
+
+---
+
+## E7 — Every eBay response is captured raw at the fence ✅ (2026-07-02, session 42)
+
+**Rule:** Every response eBay sends us — REST, Trading XML, EPS, success or
+error — is appended to `incoming/ebay/YYYY-MM-DD.jsonl.gz` by
+`capture_response()` inside the client choke point (`apis/ebay/client.py`)
+BEFORE any worker parses it. Preservation is not a worker responsibility; a
+worker cannot forget it because it never owned it. Bodies over 5 MB are
+recorded as metadata (large downloads keep their own raw asset, e.g. the bulk
+taxonomy gz). Capture is fail-open: a capture failure never breaks the call it
+preserves. Config: `ebay_capture_enabled` (default true), `ebay_capture_root`.
+
+**Why (PRIME DIRECTIVE 1):** Dave's day-1 requirement — get, use, and preserve
+the full eBay data set — was violated for three weeks because it lived as plan
+prose rather than as code at a choke point: workers pulled from the API,
+extracted the fields they wanted, and discarded the rest. This invariant makes
+that class of loss structurally impossible for everything eBay sends from
+2026-07-02 forward. Enforced by `tests/test_ebay_capture.py`.
+
+---
+
+## C9 — Uninspected AI content never reaches a live listing ✅ (2026-07-02, session 42)
+
+**Rule:** No AI-regenerated listing content (draft text, aspects, price, photos)
+is pushed to a LIVE eBay listing automatically. A force update of a live listing
+executes only when the job payload carries `origin='operator'` — set exclusively
+by UI/CLI actions where a human inspected the content and pushed the button
+(item editor "Update Listing" / revision apply). `ebay_draft` completing on a
+live item logs `ebay_draft_live_update_pending` and stops; `ebay_stage` refuses
+operator-less force jobs against live listings (`ebay_stage_blocked_uninspected`).
+Pre-publish force re-stages of UNPUBLISHED offers are unaffected.
+
+**Why:** Dave, 2026-07-02: "we cannot have uninspected AI changes going live
+automatically yet. They are rarely correct so far." Enforced at the worker, not
+just at the enqueuer, so no future enqueue path can bypass it.
+
+**Enforcement:** guard in `workers/ebay_stage.py` handle(); tests in
+`tests/test_invariants_stage_guards.py`.
+
+## C10 — An operator action stays an operator action end-to-end 🔶 (2026-07-03, session 43)
+
+**Rule:** Every job enqueued from an operator surface (item-action endpoint,
+bulk actions, PATCH auto-redraft, dead-letter retry button, revision apply)
+carries `origin='operator'` in its payload. Every pipeline worker that enqueues
+a downstream pipeline job propagates that origin (draft→price/upload,
+price→stage, stage→publish, publish→force-restage, upload→rate-limit requeue).
+`worker_base._process` runs `origin='operator'` jobs in the **interactive**
+quota context — counted, never background-halted — and restores background
+context afterwards. Background/scheduled work never carries the origin.
+
+**Why:** Dave, 2026-07-03: "this should be the behavior of List on eBay, it is
+an operator action… encode that into all of the operator action surfaces."
+Three consecutive days of EPS quota exhaustion by background debris blocked all
+operator listing work while `quota.py`'s 30% operator reserve sat unreachable —
+no code path ever ran operator-triggered uploads as interactive. Same field as
+C9's inspection gate: `origin='operator'` means a human pressed the button, and
+both the content gate and the quota lane key off it.
+
+**Enforcement:** context switch in `queue/worker_base.py` `_process()`;
+origin stamps at all 14 operator enqueue sites in `http_server.py`;
+propagation in `workers/ebay_draft.py`, `ebay_price.py`, `ebay_stage.py`,
+`ebay_publish.py`, `ebay_upload.py`. Tests: `tests/test_operator_origin.py`.
+🔶 = detector pending: no CI check yet that a NEW operator endpoint stamps the
+origin — candidate: grep-audit like the fence's, or a shared enqueue helper.

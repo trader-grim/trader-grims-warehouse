@@ -68,12 +68,33 @@ class EbayStageWorker(QueueWorker):
         if not json_path.exists():
             raise HardFailure(f'item JSON not found for {sku}')
 
+        # Ordering guard (session 42, same class as ebay_publish's): a directly-
+        # triggered stage must not push while draft/price/upload for the same SKU
+        # are still in flight — it would stage the OLD draft.
+        upstream = state_machine.active_jobs_for_sku(
+            sku, ['ebay_draft', 'ebay_price', 'ebay_upload'])
+        if upstream:
+            raise RuntimeError(
+                f'{sku}: pipeline steps still running ({", ".join(upstream)}) '
+                f'— stage waits for them (will retry)')
+
         item = json.loads(json_path.read_text(encoding='utf-8'))
 
-        # Guard: item is already actively listed on eBay.
-        # Without force=True: skip to avoid duplicate offer.
-        # With force=True: proceed to PUT the inventory item + offer in-place (no relist needed).
+        # Guard (invariant C9, session 42): uninspected AI-regenerated content
+        # never goes live automatically. A force update of a LIVE listing is
+        # only executed when the job carries origin='operator' (set by the UI /
+        # CLI paths where a human pushed the button). Pipeline-internal force
+        # jobs against live listings are refused here regardless of who
+        # enqueued them — Dave: "we cannot have uninspected AI changes going
+        # live automatically yet. They are rarely correct so far."
         existing_listing = item.get('ebay_listing', {})
+        _live = (existing_listing.get('status') == 'Active'
+                 or item.get('ebay_offer', {}).get('status') == 'PUBLISHED')
+        if force and _live and payload.get('origin') != 'operator':
+            log.warning('ebay_stage: %s force-update of LIVE listing blocked — '
+                        'no operator origin (uninspected AI content, C9)', sku)
+            tgw_logging.log_event('ebay_stage_blocked_uninspected', sku=sku)
+            return
         if existing_listing.get('status') == 'Active':
             listing_id = existing_listing.get('listing_id', '')
             if not force:
@@ -127,6 +148,39 @@ class EbayStageWorker(QueueWorker):
             raise RuntimeError(
                 f'{sku}: no price yet — waiting for ebay_price or manual price set'
             )
+
+        # Never-raise guard (invariant C5 extended, session 42 incident): a force
+        # re-stage of a live/published offer must not RAISE the price eBay already
+        # has. Reductions made before the s41 reducer fix never persisted to
+        # draft_listing.price, so stale-higher draft prices silently reverted live
+        # markdowns when re-staged (5 confirmed live, 2026-07-02). Deliberate
+        # operator raises pass `allow_price_raise` in the payload. The clamp is
+        # also persisted, healing the stale draft as we touch it.
+        offer_price = item.get('ebay_offer', {}).get('price')
+        offer_live = (item.get('ebay_offer', {}).get('status') == 'PUBLISHED'
+                      or existing_listing.get('status') == 'Active')
+        if (force and offer_live and offer_price is not None
+                and float(price) > float(offer_price)
+                and not payload.get('allow_price_raise')):
+            log.warning('ebay_stage: %s never-raise clamp: draft $%s > live $%s — '
+                        'pushing live price (pass allow_price_raise to override)',
+                        sku, price, offer_price)
+            stale_draft_price = float(price)
+            tgw_logging.log_event('ebay_stage_never_raise_clamp', sku=sku,
+                                  draft_price=stale_draft_price,
+                                  live_price=float(offer_price))
+            price = offer_price
+            draft['price'] = float(offer_price)
+            item.setdefault('price_history', []).append({
+                'ts': datetime.now(timezone.utc).isoformat(),
+                'price': float(offer_price), 'previous_price': stale_draft_price,
+                'stage': None, 'label': 'never_raise_clamp',
+                'source': 'ebay_stage_guard',
+            })
+            fence_patch_item(self.config, sku, {
+                'draft_listing': {'price': float(offer_price)},
+                'price_history': item['price_history'],
+            })
 
         # Photos must be uploaded — retryable if ebay_upload hasn't finished yet
         image_urls = draft.get('imageUrls') or [e['url'] for e in item.get('ebay_photos', [])]
@@ -217,9 +271,12 @@ class EbayStageWorker(QueueWorker):
         # (including category changes), so we must re-publish to restore live status.
         if item.get('ebay_listing', {}).get('listing_id'):
             try:
+                # Invariant C10: propagate operator provenance down the chain.
                 state_machine.enqueue_job(
                     queue_name='ebay_publish',
-                    payload={'sku': sku},
+                    payload={'sku': sku,
+                             **({'origin': 'operator'}
+                                if payload.get('origin') == 'operator' else {})},
                     dedupe_key=f'ebay_publish:{sku}',
                     max_attempts=3,
                 )

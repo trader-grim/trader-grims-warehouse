@@ -115,19 +115,41 @@ class TestGetAspectsCaching:
         assert {a['name'] for a in r1} == {'Brand', 'Color'}
         assert {a['name'] for a in r2} == {'Size'}
 
-    def test_stale_disk_cache_refetches(self, tmp_path):
+    def test_old_disk_cache_is_permanent_no_refetch(self, tmp_path):
+        # Session 42 / R0.4: cached aspects never auto-expire (same policy as
+        # the category tree) — an arbitrarily old entry is served with NO live
+        # call. Refresh happens only via `tgw warm-ebay-aspects`.
         cfg = _cfg(tmp_path)
         cache_path = tmp_path / 'ebay-aspects-cache.json'
         import json
         cache_path.write_text(json.dumps({
-            '12345': {'_cached_at': 0, 'aspects': [{'name': 'Stale', 'required': False,
+            '12345': {'_cached_at': 0, 'aspects': [{'name': 'Vintage', 'required': False,
                                                      'mode': 'FREE_TEXT', 'allowed_values': []}]},
         }))
         with patch.object(specifics, 'get_category_tree_id', return_value='0'), \
              patch.object(specifics, 'ebay_get', return_value=_RAW_ASPECTS) as mock_get:
             result = specifics.get_aspects(cfg, '12345')
-        assert mock_get.call_count == 1
-        assert {a['name'] for a in result} == {'Brand', 'Color'}
+        assert mock_get.call_count == 0
+        assert {a['name'] for a in result} == {'Vintage'}
+
+    def test_bulk_shard_fallback_no_live_call(self, tmp_path):
+        # A category absent from the per-category cache but present in the
+        # bulk shard dir is served from the shard with no live call.
+        cfg = _cfg(tmp_path)
+        import json
+        bulk = tmp_path / 'ebay-aspects-bulk'
+        bulk.mkdir()
+        (bulk / '777.json').write_text(json.dumps({
+            '_cached_at': 1, 'name': 'Widgets',
+            'aspects': [{'name': 'Size', 'required': True,
+                         'mode': 'SELECTION_ONLY', 'allowed_values': ['S', 'M']}],
+        }))
+        with patch.object(specifics, 'get_category_tree_id', return_value='0'), \
+             patch.object(specifics, 'ebay_get', return_value=_RAW_ASPECTS) as mock_get:
+            result = specifics.get_aspects(cfg, '777')
+        assert mock_get.call_count == 0
+        assert result == [{'name': 'Size', 'required': True,
+                           'mode': 'SELECTION_ONLY', 'allowed_values': ['S', 'M']}]
 
 
 class TestWarmMissingAspects:

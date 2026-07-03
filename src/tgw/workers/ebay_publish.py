@@ -106,6 +106,16 @@ class EbayPublishWorker(QueueWorker):
         if not json_path.exists():
             raise HardFailure(f'item JSON not found for {sku}')
 
+        # Ordering guard (session 42): 'List on eBay' enqueues publish alongside
+        # the draft chain — publish once went live with the OLD staged offer while
+        # the fresh draft was still generating. Wait for upstream stages to drain.
+        upstream = state_machine.active_jobs_for_sku(
+            sku, ['ebay_draft', 'ebay_price', 'ebay_upload', 'ebay_stage'])
+        if upstream:
+            raise RuntimeError(
+                f'{sku}: pipeline steps still running ({", ".join(upstream)}) '
+                f'— publish waits for them (will retry)')
+
         item = json.loads(json_path.read_text(encoding='utf-8'))
 
         # Idempotent: a replayed/directly-enqueued job for a live item must not
@@ -142,9 +152,14 @@ class EbayPublishWorker(QueueWorker):
                 # since 2026-07-01 with staged price $340.99 vs draft $29.99).
                 # Break the deadlock by requesting the force-restage ourselves.
                 try:
+                    # Invariant C10: the forced re-stage keeps the publish job's
+                    # operator provenance (also satisfies C9's inspection gate
+                    # when the operator pressed the button).
                     state_machine.enqueue_job(
                         queue_name='ebay_stage',
-                        payload={'sku': sku, 'force': True},
+                        payload={'sku': sku, 'force': True,
+                                 **({'origin': 'operator'}
+                                    if payload.get('origin') == 'operator' else {})},
                         dedupe_key=f'ebay_stage:force:{sku}',
                         max_attempts=3,
                     )
@@ -155,14 +170,26 @@ class EbayPublishWorker(QueueWorker):
                     f'— requested a forced ebay_stage re-sync, will retry'
                 )
 
-        # Build reprice schedule from comps — price is already correct on the offer.
-        # ebay_price now sets draft_listing.price = launch_price (max→.99), so
-        # ebay_stage already staged at the right price. No pre-publish update needed.
-        stages       = self.config.get('reprice_stages', [])
-        comps        = ebay_offer.get('price_comps', {})
-        cat_id       = str(item.get('ebay_category_id', ''))
-        cat_defaults = self.config.get('category_price_defaults', {})
-        schedule     = _build_reprice_schedule(stages, comps, cat_id, cat_defaults)
+        # Reprice-schedule minting is DISABLED by default (session 42): schedules
+        # were built from Browse-API asking-price "comps", which produced
+        # fire-sale floors on 6 of the first 8 pipeline-published items
+        # ($309.99 launch → $4.79 floor; one floor was literally $0.00). Dave
+        # ended all 6 listings and ruled: the pipeline does not change prices
+        # unsupervised. Re-enable via `reprice_schedule_enabled: true` in config
+        # ONLY after pricing is rebuilt on real sold-price data
+        # (PP-REPRICER-001, blocked on the buy.marketplace_insights scope).
+        _sched_enabled = bool(
+            self.config.get('reprice_schedule_enabled',
+                            self.config.get('raw', {}).get('reprice_schedule_enabled', False)))
+        if _sched_enabled:
+            stages       = self.config.get('reprice_stages', [])
+            comps        = ebay_offer.get('price_comps', {})
+            cat_id       = str(item.get('ebay_category_id', ''))
+            cat_defaults = self.config.get('category_price_defaults', {})
+            schedule     = _build_reprice_schedule(stages, comps, cat_id, cat_defaults)
+        else:
+            schedule = []
+            log.info('%s: reprice schedule NOT minted (disabled — manual pricing only)', sku)
         launch_entry = next((s for s in schedule if s['label'] == 'launch'), None)
 
         log.info('publishing %s (offerId=%s)', sku, offer_id)
@@ -229,11 +256,15 @@ class EbayPublishWorker(QueueWorker):
         item['reprice_schedule'] = schedule
 
         # Record the publish price as the first price_history entry so the full
-        # price trail (launch → markdown steps) is complete and auditable.
-        if launch_price is not None:
+        # price trail is complete and auditable. Session 42 fix: record the
+        # price that is ACTUALLY live on eBay (staged_price), not the schedule's
+        # launch figure — the old version wrote $309.99 into history while the
+        # listing was live at $29.99 (Dave caught it on tgw202605060201087).
+        recorded_price = actual_price if actual_price is not None else launch_price
+        if recorded_price is not None:
             item.setdefault('price_history', []).append({
                 'ts':             now.isoformat(),
-                'price':          launch_price,
+                'price':          float(recorded_price),
                 'previous_price': item.get('price'),
                 'stage':          'launch',
                 'label':          'Published to eBay',

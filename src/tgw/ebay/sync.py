@@ -157,11 +157,20 @@ def _resolve_fulfillment_id(cfg: Dict[str, Any], ebay_category_id: str,
     Returns None if nothing resolves (caller then falls back to the account API).
     """
     if shipping_profile:
+        sp = str(shipping_profile)
+        # Session 42 (Dave's one-at-a-time test): the item editor's shipping
+        # selector saves the chosen POLICY ID into shipping_profile, but this
+        # resolver only accepted mapped NAMES — the operator's explicit FC4
+        # selection was silently discarded (fell through to the account-first
+        # fallback, which shipped FC8). An all-digit value IS a policy id:
+        # honor the operator's choice directly.
+        if sp.isdigit() and len(sp) >= 8:
+            return sp
         by_profile = cfg.get('fulfillment_policy_by_profile', {})
-        resolved = by_profile.get(str(shipping_profile))
+        resolved = by_profile.get(sp)
         if resolved:
             return str(resolved)
-        # Unmapped profile — fall through rather than forward the name verbatim as a policy ID.
+        # Unmapped profile NAME — fall through rather than forward it verbatim.
         # Log so misconfigured/typo'd profile names are visible before eBay rejects the listing.
         log.warning('sync: shipping_profile %r not in fulfillment_policy_by_profile — falling through',
                     shipping_profile)

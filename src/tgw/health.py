@@ -249,10 +249,9 @@ def check_sqlite_catalog(cfg: Dict[str, Any]) -> Dict[str, Any]:
         row_count = con.execute('SELECT COUNT(*) FROM catalog').fetchone()[0]
         con.close()
         mtime = db_path.stat().st_mtime
-        import datetime
-        age = datetime.datetime.now() - datetime.datetime.fromtimestamp(mtime)
+        age_s = time.time() - mtime
         return _result('sqlite_catalog', True,
-                       f'{row_count:,} rows — updated {int(age.total_seconds() // 60)}m ago',
+                       f'{row_count:,} rows — updated {int(age_s // 60)}m ago',
                        (time.time() - t) * 1000, row_count=row_count)
     except Exception as e:
         return _result('sqlite_catalog', False, str(e), (time.time() - t) * 1000)
@@ -598,6 +597,47 @@ def check_ebay_sync_fallback(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Metered-API quota check (PP-QUOTA-001, session 42)
+# ---------------------------------------------------------------------------
+
+def check_quota(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Surface today's metered-API spend and any 429 incidents.
+
+    Green (ok=True): no 429s today, no pool past its background-halt fraction.
+    Yellow (ok=True, warn=True): a pool is past the halt fraction (background
+    callers are being held; operator reserve is protecting interactive use).
+    Red (ok=False, warn=True): one or more 429 incidents today — a 429 always
+    means a drain bug or budget breach; see var/log/quota-incidents.jsonl.
+    """
+    t = time.time()
+    try:
+        from tgw import quota
+        st = quota.status(cfg)
+    except Exception as exc:
+        return _result('quota', True, f'status unavailable: {exc}', (time.time() - t) * 1000)
+
+    incidents = st.get('incidents_today', 0)
+    hot = {p: v for p, v in st.get('pools', {}).items()
+           if v.get('fraction') is not None and v['fraction'] >= 0.70}
+    spent_summary = ', '.join(
+        f"{p}={v['spent']}" + (f"/{v['budget']}" if v.get('budget') else '')
+        for p, v in sorted(st.get('pools', {}).items())) or 'no calls recorded today'
+
+    if incidents:
+        return _result('quota', False,
+                       f'{incidents} × 429 incident(s) today — {spent_summary}',
+                       (time.time() - t) * 1000, warn=True,
+                       incidents_today=incidents, pools=st.get('pools', {}))
+    if hot:
+        return _result('quota', True,
+                       f"background halted: {', '.join(sorted(hot))} — {spent_summary}",
+                       (time.time() - t) * 1000, warn=True, pools=st.get('pools', {}))
+    return _result('quota', True, spent_summary, (time.time() - t) * 1000,
+                   pools=st.get('pools', {}))
+
+
+# ---------------------------------------------------------------------------
 # Combined check
 # ---------------------------------------------------------------------------
 
@@ -628,6 +668,7 @@ def check_all(cfg: Dict[str, Any],
     ]
     checks.append(check_nats(cfg))
     checks.append(check_ebay_sync_fallback(cfg))
+    checks.append(check_quota(cfg))
     if include_ollama:
         checks.append(check_ollama())
     if include_ebay:

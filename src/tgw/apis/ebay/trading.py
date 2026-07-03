@@ -21,7 +21,8 @@ from typing import Any, Dict, Generator, List, Optional
 
 import requests
 
-from tgw.apis.ebay.client import load_token
+from tgw import quota
+from tgw.apis.ebay.client import capture_response, load_token
 
 log = logging.getLogger(__name__)
 
@@ -50,14 +51,22 @@ def trading_call(cfg: Dict[str, Any], call_name: str,
         'X-EBAY-API-SITEID':             _SITE_ID,
         'Content-Type':                  'text/xml;charset=utf-8',
     }
+    quota.precheck(cfg, 'ebay_trading')
     resp = _SESSION.post(_TRADING_ENDPOINT, headers=headers,
                          data=xml_body.encode('utf-8'), timeout=timeout)
+    quota.record(cfg, 'ebay_trading')
+    if resp.status_code == 429:
+        quota.record_429(cfg, 'ebay_trading', call_name)
+    capture_response(cfg, 'trading', call_name, None, resp.status_code, resp.content)
     resp.raise_for_status()
     root = ET.fromstring(resp.text)
     ack  = root.findtext(_t('Ack')) or ''
     if ack == 'Failure':
         errs = root.findall(f'.//{_t("LongMessage")}')
         msg  = '; '.join(e.text or '' for e in errs) or 'unknown error'
+        # Trading reports quota exhaustion as Ack=Failure, not HTTP 429
+        if 'usage limit' in msg.lower():
+            quota.record_429(cfg, 'ebay_trading', f'{call_name}: {msg}')
         raise RuntimeError(f'Trading API {call_name} failed: {msg}')
     return root
 

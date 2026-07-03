@@ -97,10 +97,13 @@ class EbayUploadWorker(QueueWorker):
                             'ebay_photos': uploaded,
                             'draft_listing': {'imageUrls': [e['url'] for e in uploaded]},
                         })
-                    # Requeue for 6 hours from now (EPS resets daily at midnight eBay time)
+                    # Requeue for 6 hours from now (EPS resets daily at midnight eBay time).
+                    # Invariant C10: the requeue keeps the job's operator provenance.
                     state_machine.enqueue_job(
                         queue_name=QUEUE_NAME,
-                        payload={'sku': sku, 'reason': 'rate_limit_retry'},
+                        payload={'sku': sku, 'reason': 'rate_limit_retry',
+                                 **({'origin': 'operator'}
+                                    if payload.get('origin') == 'operator' else {})},
                         not_before=time.time() + 6 * 3600,
                         max_attempts=3,
                     )

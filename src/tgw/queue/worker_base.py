@@ -52,6 +52,13 @@ _TRANSIENT_ERRORS: list[tuple[str, int]] = [
     ('connectionerror',        120),   # transient network
     ('503 server error',       300),   # eBay / EPS service temporarily unavailable
     ('service unavailable',    300),   # generic upstream 503
+    # Quota walls are transient by definition — they clear at the daily reset
+    # (00:00 America/Los_Angeles). Requeue-with-delay instead of dead-lettering
+    # so exhaustion never piles up thousands of dead letters again (session 42).
+    ('pipeline steps still running', 60),   # ordering guard: stage/publish wait for upstream (s42)
+    ('quota budget exhausted', 1800),  # tgw.quota background halt (pre-call)
+    ('too many requests',      1800),  # HTTP 429 from any metered API
+    ('usage limit',            1800),  # Trading/EPS Ack=Failure quota message
 ]
 
 
@@ -85,6 +92,14 @@ class QueueWorker:
         self._last_recover   = 0.0
         state_machine.init(config.get('postgres_dsn', 'dbname=state_machine user=tgw'))
         tgw_logging.setup_logging(component=f'worker.{queue_name}')
+
+        # PP-QUOTA-001: workers are background callers — the quota layer may
+        # halt them at the budget threshold to protect the operator's reserve.
+        try:
+            from tgw import quota
+            quota.set_context('background', f'worker:{queue_name}')
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug('quota context skipped: %s', exc)
 
         # PP-AIOPS-001: set mutation attribution context for this worker process
         try:
@@ -172,6 +187,26 @@ class QueueWorker:
         tgw_logging.log_event('job_claimed', job_id=job_id, queue=self.queue_name)
         log.info('claimed job %s', job_id)
 
+        # Invariant C10 (Dave, session 43): an operator action stays an operator
+        # action end-to-end. Jobs carrying origin='operator' (stamped by every
+        # operator surface, propagated worker-to-worker) run in the interactive
+        # quota context — counted, never background-halted — so background
+        # debris can never starve the operator's reserve out from under a
+        # button press. Restored in the finally: the worker process itself
+        # remains a background caller between operator jobs.
+        # The context NAME keeps the worker: prefix — the fence's X-TGW-Caller
+        # header is built from it, and the PATCH auto-redraft guard must still
+        # recognize this as a machine write (a worker acting FOR the operator
+        # is not the operator editing in the UI). Dropping the prefix here
+        # resurrected the s42 redraft loop within two cycles (2026-07-03).
+        _operator_job = (job.get('payload_json') or {}).get('origin') == 'operator'
+        if _operator_job:
+            try:
+                from tgw import quota
+                quota.set_context('interactive', f'worker:{self.queue_name}:operator')
+            except Exception as exc:  # pragma: no cover - defensive
+                log.debug('quota context switch skipped: %s', exc)
+
         try:
             state_machine.mark_running(job_id, self.owner)
             self.handle(job)
@@ -223,6 +258,13 @@ class QueueWorker:
             state_machine.mark_succeeded(job_id, self.owner)
             tgw_logging.log_event('job_succeeded', job_id=job_id)
             log.info('job %s succeeded', job_id)
+        finally:
+            if _operator_job:
+                try:
+                    from tgw import quota
+                    quota.set_context('background', f'worker:{self.queue_name}')
+                except Exception as exc:  # pragma: no cover - defensive
+                    log.debug('quota context restore skipped: %s', exc)
 
     # ------------------------------------------------------------------
     # Subclass contract

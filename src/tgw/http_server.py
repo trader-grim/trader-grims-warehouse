@@ -181,6 +181,14 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         log.debug("nats init skipped: %s", exc)
 
+    # PP-QUOTA-001: operator-facing server — interactive quota context
+    # (never budget-halted, only counted)
+    try:
+        from tgw import quota
+        quota.set_context("interactive", "tgw-http")
+    except Exception as exc:
+        log.debug("quota context skipped: %s", exc)
+
     log.info("tgw-http started on port 7373")
     yield
     log.info("tgw-http shutting down")
@@ -425,7 +433,17 @@ def list_items(
     if location:
         clauses.append("location = ?")
         params.append(location)
-    if status_filter:
+    if status_filter == "__eligible__":
+        # Eligible for listing (Dave, s42): new / In Stock, and not currently on
+        # eBay (no Active listing, no PUBLISHED offer). Ended listings qualify —
+        # they can be relisted. Sold/disposed/archived excluded by the status
+        # allow-list. This is the feed for one-at-a-time listing runs.
+        clauses.append("LOWER(COALESCE(status, '')) IN ('new', 'in stock')")
+        clauses.append("(json_extract(data, '$.ebay_listing.status') IS NULL"
+                       " OR json_extract(data, '$.ebay_listing.status') NOT IN ('Active', 'PUBLISHED'))")
+        clauses.append("(json_extract(data, '$.ebay_offer.status') IS NULL"
+                       " OR json_extract(data, '$.ebay_offer.status') != 'PUBLISHED')")
+    elif status_filter:
         clauses.append("status = ?")
         params.append(status_filter)
     if date_from:
@@ -441,6 +459,7 @@ def list_items(
     sql = (
         f"SELECT sku, title, location, status, price, qty, image, attribute_set,"
         f" json_extract(data, '$.ebay_listing.listing_id') AS ebay_listing_id,"
+        f" json_extract(data, '$.ebay_listing.status') AS ebay_listing_status,"
         f" json_extract(data, '$.ebay_offer.offer_id') AS ebay_offer_id,"
         f" json_extract(data, '$.ebay_offer.ready_at') AS ebay_ready_at,"
         f" CASE WHEN json_extract(data, '$.draft_listing') IS NOT NULL THEN 1 ELSE 0 END AS has_draft"
@@ -637,7 +656,7 @@ def get_item(sku: str) -> Dict[str, Any]:
 
 
 @app.patch("/api/items/{sku}", dependencies=[AUTH])
-def patch_item(sku: str, body: PatchBody) -> Dict[str, Any]:
+def patch_item(sku: str, body: PatchBody, request: Request) -> Dict[str, Any]:
     if "sku" in body.fields:
         raise HTTPException(status_code=400, detail="sku field is immutable")
     if not body.fields:
@@ -655,6 +674,29 @@ def patch_item(sku: str, body: PatchBody) -> Dict[str, Any]:
     doc_before = load_item_doc(json_path)
     updated_keys = _apply_patch(json_path, body.fields)
 
+    # Price edits leave a history trail (session 42): manual/UI price changes
+    # previously appended nothing to price_history — Dave's $82.99 and every
+    # other hand-set price was invisible in the pricing panel. Any patch that
+    # changes draft_listing.price gets an audit event, whoever the caller is.
+    try:
+        _new_dl = body.fields.get("draft_listing")
+        if isinstance(_new_dl, dict) and "price" in _new_dl:
+            _old_p = (doc_before.get("draft_listing") or {}).get("price")
+            _new_p = _new_dl.get("price")
+            if _new_p is not None and str(_new_p) != str(_old_p):
+                _caller_id = request.headers.get("X-TGW-Caller", "operator")
+                _hist = (doc_before.get("price_history") or []) + [{
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "price": float(_new_p),
+                    "previous_price": float(_old_p) if _old_p not in (None, "") else None,
+                    "stage": None,
+                    "label": "price edited",
+                    "source": _caller_id,
+                }]
+                _apply_patch(json_path, {"price_history": _hist})
+    except (TypeError, ValueError) as _exc:
+        log.warning("price_history append skipped for %s: %s", sku, _exc)
+
     if location_value is not None:
         result = locationupdate(_cfg, sku, location_value)
         if not result.get("ok"):
@@ -665,14 +707,28 @@ def patch_item(sku: str, body: PatchBody) -> Dict[str, Any]:
 
     # If draft_listing content changed and the item is already on eBay, push the
     # update automatically — the operator should never have to remember to Re-draft.
+    #
+    # OPERATOR EDITS ONLY (session-42 incident): workers patch draft_listing
+    # through this same endpoint (ebay_draft writes the draft, ebay_upload writes
+    # imageUrls, ...). Auto-redrafting on those created an infinite
+    # draft→patch→redraft pipeline loop — one SKU accumulated 287 draft jobs and
+    # two live listings were PUT to eBay every ~90s for hours. Fence clients now
+    # identify themselves via X-TGW-Caller (background:worker:<queue>); anything
+    # backgrounded is skipped here.
+    _caller = request.headers.get("X-TGW-Caller", "")
+    # Machine write = any worker-process fence write, regardless of quota
+    # context: C10 operator-origin jobs run as interactive:worker:<queue>:operator,
+    # but a worker acting for the operator is still not a human editing in the
+    # UI — treating it as one resurrected the s42 redraft loop (2026-07-03).
+    _machine_write = _caller.startswith("background:") or "worker:" in _caller
     _DRAFT_LISTING_FIELDS = {"draft_listing", "title", "description", "item_attributes"}
-    if _DRAFT_LISTING_FIELDS.intersection(body.fields):
+    if not _machine_write and _DRAFT_LISTING_FIELDS.intersection(body.fields):
         offer_id = (doc_before.get("ebay_offer") or {}).get("offer_id")
         if offer_id:
             try:
                 state_machine.enqueue_job(
                     queue_name="ebay_draft",
-                    payload={"sku": sku},
+                    payload={"sku": sku, "origin": "operator"},
                     dedupe_key=f"ebay_draft:{sku}",
                     max_attempts=3,
                 )
@@ -998,7 +1054,7 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
                 try:
                     state_machine.enqueue_job(
                         queue_name="ebay_upload",
-                        payload={"sku": sku},
+                        payload={"sku": sku, "origin": "operator"},
                         dedupe_key=f"ebay_upload:{sku}",
                         max_attempts=5,
                     )
@@ -1007,7 +1063,7 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
                 try:
                     state_machine.enqueue_job(
                         queue_name="ebay_stage",
-                        payload={"sku": sku},
+                        payload={"sku": sku, "origin": "operator"},
                         dedupe_key=f"ebay_stage:{sku}",
                         max_attempts=5,
                     )
@@ -1070,6 +1126,8 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
                         "status": "Ended",
                         "ended_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     },
+                    # withdraw makes the offer UNPUBLISHED on eBay — mirror it (s42)
+                    ebay_offer={"status": "UNPUBLISHED"},
                 )
                 done.append(sku)
             except Exception as exc:
@@ -1091,7 +1149,7 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
                 _apply_patch(json_path, {"ai_reidentify": True})
             state_machine.enqueue_job(
                 queue_name=body.action,
-                payload={"sku": sku},
+                payload={"sku": sku, "origin": "operator"},
                 dedupe_key=f"{body.action}:{sku}",
                 max_attempts=5,
             )
@@ -1173,6 +1231,10 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                     from .apis.ebay.trading import end_item as _end_item
 
                     _end_item(_cfg, listing_id_val)
+                # Session 42 (Dave's one-at-a-time test #1): ending must update the
+                # WHOLE local truth — withdraw makes the offer UNPUBLISHED on eBay
+                # (verified live), but this used to leave ebay_offer.status at
+                # 'PUBLISHED', so every display kept showing the item as listed.
                 _apply_ebay_write(
                     json_path,
                     sku,
@@ -1180,6 +1242,7 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                         "status": "Ended",
                         "ended_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     },
+                    ebay_offer={"status": "UNPUBLISHED"},
                 )
                 _enqueue_catalog_rebuild(f"ebay_end:{sku}")
             except HTTPException:
@@ -1254,9 +1317,11 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
             # Update a live listing in place — PUT inventory item + offer without ending/relisting.
             # Preserves listing age, view history, and search ranking.
             # Reads current draft_listing; run Re-draft first to incorporate aspect edits.
+            # origin='operator': this button IS the inspection gate (invariant C9) —
+            # ebay_stage refuses force updates of live listings without it.
             job_id = state_machine.enqueue_job(
                 queue_name="ebay_stage",
-                payload={"sku": sku, "force": True},
+                payload={"sku": sku, "force": True, "origin": "operator"},
                 max_attempts=2,
             )
             return {"ok": True, "sku": sku, "action": "ebay_update", "job_id": job_id}
@@ -1264,7 +1329,7 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
         elif action == "sync_from_ebay":
             job_id = state_machine.enqueue_job(
                 queue_name="ebay_sync",
-                payload={"sku": sku, "reason": "manual"},
+                payload={"sku": sku, "reason": "manual", "origin": "operator"},
                 max_attempts=2,
             )
             return {"ok": True, "sku": sku, "action": "sync_from_ebay", "job_id": job_id}
@@ -1319,13 +1384,16 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                 try:
                     state_machine.enqueue_job(
                         queue_name="ebay_upload",
-                        payload={"sku": sku},
+                        payload={"sku": sku, "origin": "operator"},
                         dedupe_key=f"ebay_upload:{sku}",
                         max_attempts=5,
                     )
                 except Exception:
                     pass
-                return {"ok": True, "sku": sku, "action": "set_ready", "note": "approved for listing — will publish at next dole cycle"}
+                return {"ok": True, "sku": sku, "action": "set_ready",
+                        "note": "approved into the ready pool — NOTE: the dole worker "
+                                "is not installed yet, nothing publishes from the pool "
+                                "(todo #1113); use 'List on eBay' to publish this item now"}
             err = (result.get("errors") or ["unknown error"])[0]
             return {"ok": False, "sku": sku, "detail": err}
 
@@ -1342,7 +1410,7 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
             _apply_patch(json_path, {"ai_reidentify": True})
             job_id = state_machine.enqueue_job(
                 queue_name="ai_identify",
-                payload={"sku": sku},
+                payload={"sku": sku, "origin": "operator"},
                 dedupe_key=f"ai_identify:{sku}",
                 max_attempts=3,
             )
@@ -1359,7 +1427,7 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
             _apply_patch(json_path, {"ebay_offer": _eo, "draft_listing": _dl})
             job_id = state_machine.enqueue_job(
                 queue_name="ebay_price",
-                payload={"sku": sku},
+                payload={"sku": sku, "origin": "operator"},
                 dedupe_key=f"ebay_price:{sku}",
                 max_attempts=5,
             )
@@ -1374,7 +1442,7 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                 try:
                     state_machine.enqueue_job(
                         queue_name="ebay_upload",
-                        payload={"sku": sku},
+                        payload={"sku": sku, "origin": "operator"},
                         dedupe_key=f"ebay_upload:{sku}",
                         max_attempts=5,
                     )
@@ -1382,7 +1450,7 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                     pass
             job_id = state_machine.enqueue_job(
                 queue_name="ebay_stage",
-                payload={"sku": sku},
+                payload={"sku": sku, "origin": "operator"},
                 dedupe_key=f"ebay_stage:{sku}",
                 max_attempts=5,
             )
@@ -1401,7 +1469,7 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                     try:
                         state_machine.enqueue_job(
                             queue_name="ebay_upload",
-                            payload={"sku": sku},
+                            payload={"sku": sku, "origin": "operator"},
                             dedupe_key=f"ebay_upload:{sku}",
                             max_attempts=5,
                         )
@@ -1410,7 +1478,23 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                 try:
                     state_machine.enqueue_job(
                         queue_name="ebay_stage",
-                        payload={"sku": sku},
+                        payload={"sku": sku, "origin": "operator"},
+                        dedupe_key=f"ebay_stage:{sku}",
+                        max_attempts=5,
+                    )
+                except Exception:
+                    pass
+            else:
+                # Session 42 (Dave's order finding): an existing offer holds the
+                # PREVIOUSLY staged content — without a re-stage, publish ships
+                # stale content no matter how well-ordered the queue is. The
+                # operator pressed the button, so the re-stage carries operator
+                # origin (C9) and the ordering guards serialize it after
+                # draft/price/upload and before publish.
+                try:
+                    state_machine.enqueue_job(
+                        queue_name="ebay_stage",
+                        payload={"sku": sku, "force": True, "origin": "operator"},
                         dedupe_key=f"ebay_stage:{sku}",
                         max_attempts=5,
                     )
@@ -1418,7 +1502,7 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                     pass
             job_id = state_machine.enqueue_job(
                 queue_name="ebay_publish",
-                payload={"sku": sku},
+                payload={"sku": sku, "origin": "operator"},
                 dedupe_key=f"ebay_publish:{sku}",
                 max_attempts=10,
             )
@@ -1426,7 +1510,7 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
         else:
             job_id = state_machine.enqueue_job(
                 queue_name=action,
-                payload={"sku": sku},
+                payload={"sku": sku, "origin": "operator"},
                 dedupe_key=f"{action}:{sku}",
                 max_attempts=5,
             )
@@ -1672,6 +1756,7 @@ def requeue_job(job_id: str) -> Dict[str, Any]:
     # the ledger can be mined for "same failure, same manual fix, keeps working"
     # patterns — candidates for automatic retry policy.
     payload["operator_retry"] = True
+    payload["origin"] = "operator"
     payload["retried_from_job"] = str(job_id)
     new_dedupe = f"{row['queue_name']}:{sku}:requeue:{int(time.time())}"
 
@@ -2039,7 +2124,7 @@ def delete_item(sku: str) -> Dict[str, Any]:
     if not json_path.exists():
         raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
 
-    _apply_patch(json_path, {"status": "deleted", "deleted_at": datetime.now().isoformat()})
+    _apply_patch(json_path, {"status": "deleted", "deleted_at": datetime.now(timezone.utc).isoformat()})
     _enqueue_catalog_rebuild(f"delete:{sku}")
     return {"ok": True, "sku": sku, "status": "deleted"}
 
@@ -3328,7 +3413,7 @@ async def api_inbox_upload(file: UploadFile = File(...)) -> Dict[str, Any]:
     if len(content) > _INBOX_MAX_BYTES:
         raise HTTPException(status_code=413, detail="file too large (max 512 KB)")
 
-    ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+    ts = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S")
     dest_name = f"{ts}_{raw_name}"
 
     inbox_dir: Path = _cfg["plan_inbox_path"]
@@ -3598,6 +3683,7 @@ _BROWSE_HTML = """\
 </div>
 <div class="chips" id="status-chips" style="margin-bottom:10px">
   <button class="chip active" data-s="">All</button>
+  <button class="chip" data-s="__eligible__" title="new / In Stock, not on eBay — ready to list">Eligible</button>
   <button class="chip" data-s="In Stock">In Stock</button>
   <button class="chip" data-s="Listed">Listed</button>
   <button class="chip" data-s="Staged">Staged</button>
@@ -3648,9 +3734,14 @@ function setView(v){{
 }}
 function _ebayBadge(it){{
   const lid=it.ebay_listing_id,oid=it.ebay_offer_id,rat=it.ebay_ready_at;
+  const lst=(it.ebay_listing_status||'').toLowerCase();
   const sold=(it.status||'').toLowerCase()==='sold';
+  // "Listed" means LIVE — an Ended listing keeps its listing_id forever, and
+  // badging it Listed misled the Eligible view (Dave, s42 one-at-a-time test).
+  const live=lid&&(lst==='active'||lst==='published'||lst==='');
   if(sold) return '<span class="eb eb-sold">Sold</span>';
-  if(lid) return `<a class="eb eb-listed" href="https://www.ebay.com/itm/${{esc(lid)}}" target="_blank" onclick="event.stopPropagation()">Listed ↗</a>`;
+  if(live) return `<a class="eb eb-listed" href="https://www.ebay.com/itm/${{esc(lid)}}" target="_blank" onclick="event.stopPropagation()">Listed ↗</a>`;
+  if(lid&&lst==='ended') return `<a class="eb eb-none" href="https://www.ebay.com/itm/${{esc(lid)}}" target="_blank" onclick="event.stopPropagation()">Ended</a>`;
   if(oid&&rat) return '<span class="eb eb-ready">Ready</span>';
   if(oid) return '<span class="eb eb-staged">Staged</span>';
   if(it.has_draft) return '<span class="eb eb-draft">Needs Review</span>';
@@ -3663,17 +3754,20 @@ const _ALL_ACTIONS=[
 ];
 function _cardActions(it){{
   const lid=it.ebay_listing_id,oid=it.ebay_offer_id,rat=it.ebay_ready_at;
+  const lst=(it.ebay_listing_status||'').toLowerCase();
+  const live=lid&&(lst==='active'||lst==='published'||lst==='');
   const sold=(it.status||'').toLowerCase()==='sold';
   const acts=[];
   if(!sold){{
     acts.push(['ai_identify','Re-identify'],['ebay_draft','Re-draft'],['ebay_price','Re-price']);
   }}
-  if(!lid&&!sold){{
+  if(!live&&!sold){{
+    // Ended items get the relist path, not the end-listing path (s42)
     acts.push(['approve','Set Ready']);
     if(it.has_draft||oid) acts.push(['ebay_stage','Stage']);
     acts.push(['ebay_publish','Publish']);
   }}
-  if(lid){{
+  if(live){{
     acts.push(['ebay_end_listing','End on eBay'],['mark_sold','Mark Sold']);
   }}
   if(sold) acts.push(['ai_identify','Re-identify'],['ebay_draft','Re-draft']);
@@ -4754,6 +4848,21 @@ def _render_item_detail_html(
     _ship_opts_html = "".join(
         f'<option value="{pid}"{" selected" if pid == _dl_ship_val else ""}>{h(name)} ({pid[:8]}…)</option>' for pid, name in sorted(_fulfillment_opts.items(), key=lambda kv: kv[1])
     )
+    # Live fulfillment policy beside the selector (session 42: the selector kept
+    # showing the operator's FC4 while eBay actually had FC8 — the divergence was
+    # invisible). Mirrored home by ebay_sync; red when it disagrees with the draft.
+    _live_ship = str((item.get("ebay_offer") or {}).get("fulfillment_policy_id") or "")
+    if _live_ship:
+        _ls_name = _fulfillment_opts.get(_live_ship) or f"{_live_ship[:10]}…"
+        _ls_mismatch = bool(_dl_ship_val) and _live_ship != _dl_ship_val
+        _live_ship_html = (
+            f'<span style="font-size:.72em;margin-left:8px;'
+            f'color:{"#e88" if _ls_mismatch else "#585"}" '
+            f'title="fulfillment policy currently on the live eBay listing (mirrored by ebay_sync)">'
+            f'live: {h(_ls_name)}{" — differs from draft, Update Listing to apply" if _ls_mismatch else ""}</span>'
+        )
+    else:
+        _live_ship_html = ""
     _return_opts_html = "".join(
         f'<option value="{pid}"{" selected" if pid == _dl_return_val else ""}>{h(name)} ({pid[:8]}…)</option>' for pid, name in sorted(_return_opts.items(), key=lambda kv: kv[1])
     )
@@ -4874,7 +4983,10 @@ def _render_item_detail_html(
                 f'<label style="display:flex;align-items:center;gap:5px;font-size:.8em;'
                 f'color:#8a8;cursor:pointer;padding:0 6px">'
                 f'<input type="checkbox"{_apv_chk} onchange="toggleApprove(this)">'
-                f"queue for auto-listing</label>"
+                f"queue for auto-listing "
+                f'<span style="color:#b66" title="approved items collect in the ready '
+                f'pool but the ebay_dole worker is not installed — nothing publishes '
+                f'from the pool yet (todo #1113)">(inactive)</span></label>'
             )
         _line.append(_abtn("Reset Draft", "resetDraft()", "blue",
                            title="Discard edits and regenerate the draft from the catalog record"))
@@ -5106,6 +5218,7 @@ def _render_item_detail_html(
         f"{_ship_opts_html}"
         f"</select>"
         f'<span id="dl-ship-hint" style="font-size:.72em;color:#445;margin-left:8px"></span>'
+        f"{_live_ship_html}"
         f"</span></div>"
         f'<div class="frow" id="dl-returns">'
         f'<span class="fn">Returns</span>'
@@ -6391,7 +6504,7 @@ def apply_revision(sku: str, body: RevisionApplyBody) -> Dict[str, Any]:
         # Refresh the local live-mirror so the UI reflects what was just pushed.
         result["sync_job_id"] = state_machine.enqueue_job(
             queue_name="ebay_sync",
-            payload={"sku": sku, "reason": "revision_apply"},
+            payload={"sku": sku, "reason": "revision_apply", "origin": "operator"},
             max_attempts=2,
         )
     return result

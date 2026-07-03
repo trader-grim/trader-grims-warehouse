@@ -752,3 +752,21 @@ def requeue_with_backoff(job_id: str, lease_owner: str, delay_seconds: int, erro
                 """,
                 (str(delay_seconds), error_detail[:2000], job_id, lease_owner),
             )
+
+
+def active_jobs_for_sku(sku: str, queue_names: List[str]) -> List[str]:
+    """Queue names with an active (queued/running/leased) job for this SKU.
+
+    Session 42: lets order-sensitive workers (ebay_stage, ebay_publish) wait for
+    in-flight upstream stages instead of racing them — 'List on eBay' used to
+    publish the OLD staged offer while the fresh draft was still generating."""
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """SELECT DISTINCT queue_name FROM queue_jobs
+                    WHERE payload_json->>'sku' = %s
+                      AND queue_name = ANY(%s)
+                      AND state IN ('queued', 'running', 'leased')""",
+                (sku, queue_names),
+            )
+            return [r[0] for r in cur.fetchall()]

@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List
 
-from .client import _BASE, _SESSION, _headers, ebay_delete, ebay_get, ebay_post
+from .client import _counted, _headers, ebay_delete, ebay_get, ebay_post
 
 log = logging.getLogger(__name__)
 
@@ -75,13 +75,13 @@ def create_item_price_markdown(
             }
         ],
     }
-    resp = _SESSION.post(
-        f'{_BASE}{_MKT}/item_price_markdown',
+    # goes through _counted (not ebay_post) because the Location header is needed
+    resp = _counted(
+        cfg, 'post', f'{_MKT}/item_price_markdown',
         headers=_headers(cfg),
         json=body,
         timeout=30,
     )
-    resp.raise_for_status()
     location = resp.headers.get('Location', '')
     if not location:
         raise RuntimeError('eBay did not return Location header after creating promotion')

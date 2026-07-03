@@ -628,10 +628,13 @@ class EbayDraftWorker(QueueWorker):
         except psycopg2.errors.UniqueViolation:
             pass
 
+        # Invariant C10: operator provenance travels the whole chain — a draft
+        # job the operator pressed for hands its origin to price and upload.
+        _origin = {'origin': 'operator'} if payload.get('origin') == 'operator' else {}
         try:
             state_machine.enqueue_job(
                 queue_name='ebay_price',
-                payload={'sku': sku},
+                payload={'sku': sku, **_origin},
                 dedupe_key=f'ebay_price:{sku}',
                 max_attempts=5,
             )
@@ -641,28 +644,24 @@ class EbayDraftWorker(QueueWorker):
         try:
             state_machine.enqueue_job(
                 queue_name='ebay_upload',
-                payload={'sku': sku},
+                payload={'sku': sku, **_origin},
                 dedupe_key=f'ebay_upload:{sku}',
                 max_attempts=5,
             )
         except psycopg2.errors.UniqueViolation:
             pass
 
-        # If the item is already staged on eBay, push the updated content back.
-        # Delayed 90 s so ebay_price and ebay_upload have time to complete first.
-        # force=True bypasses the idempotency guard that would otherwise skip it.
+        # If the item is already staged/live on eBay, the regenerated draft is
+        # NOT pushed automatically. Dave's rule (session 42): "we cannot have
+        # uninspected AI changes going live automatically — they are rarely
+        # correct so far." The draft waits as a pending update; the operator
+        # inspects it in the item editor and pushes via the UI (Update
+        # Listing), which enqueues ebay_stage with origin='operator'.
         if item.get('ebay_offer', {}).get('offer_id'):
-            try:
-                state_machine.enqueue_job(
-                    queue_name='ebay_stage',
-                    payload={'sku': sku, 'force': True},
-                    dedupe_key=f'ebay_stage:{sku}',
-                    not_before=time.time() + 90,
-                    max_attempts=3,
-                )
-                log.info('%s: already staged — queued ebay_stage(force) to push updated content', sku)
-            except psycopg2.errors.UniqueViolation:
-                pass
+            log.info('%s: re-draft complete — pending operator inspection '
+                     '(NOT auto-pushed to the existing offer)', sku)
+            tgw_logging.log_event('ebay_draft_live_update_pending', sku=sku,
+                                  offer_id=item['ebay_offer']['offer_id'])
 
 
 def main() -> int:

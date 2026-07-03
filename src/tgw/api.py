@@ -479,6 +479,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ]),
     ("Ops / Admin", [
         "health", "serve", "restart-workers", "restart-ebay-token", "refresh-ebay-taxonomy",
+        "warm-ebay-aspects", "ops-digest",
         "dead-letter", "queue-history", "todo", "plan", "ai-usage", "report",
         "admin-file", "classify-suggestions", "picklist", "print-label", "mvitems",
         "suggest", "quiet-check", "perp-run", "whisper-suggest",
@@ -857,6 +858,11 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("restart-ebay-token", help="clear dead-letter token jobs and enqueue a fresh token_refresh immediately")
 
     sub.add_parser("refresh-ebay-taxonomy", help="force a live re-fetch of the eBay category tree cache (run when eBay announces a taxonomy change — cache never auto-expires)")
+
+    sub.add_parser("warm-ebay-aspects", help="download aspects for ALL leaf categories in ONE bulk Taxonomy call (separate 100/day pool); after this, UI aspect lookups need zero live calls")
+
+    p = sub.add_parser("ops-digest", help="one-screen operational digest: flagged health, quota spend + 429 incidents, dead-letter deltas, restart flags, stale inbox notes")
+    p.add_argument("--json", action="store_true", dest="as_json", help="emit raw JSON instead of text")
 
     p = sub.add_parser("restart-workers", help="restart tgw-worker@<queue>.service systemd units (uses sudo if not root)")
     p.add_argument("queues", nargs="*", help="specific queue name(s) to restart (default: all canonical workers)")
@@ -3544,6 +3550,13 @@ def main() -> int:
     cfg = load_config(Path(os.path.expanduser(args.config)))
     check = getattr(args, "check_only", False)
 
+    # PP-QUOTA-001: CLI runs are operator-driven — interactive quota context
+    try:
+        from tgw import quota
+        quota.set_context("interactive", f"cli:{args.op}")
+    except Exception:
+        pass
+
     try:
         if args.op == "get":
             result = get_item(cfg, args.sku)
@@ -4855,6 +4868,21 @@ def main() -> int:
 
             count = refresh_category_tree_cache(cfg)
             result = {"ok": True, "categories_cached": count}
+
+        elif args.op == "warm-ebay-aspects":
+            from .apis.ebay.specifics import bulk_refresh_aspects
+
+            info = bulk_refresh_aspects(cfg)
+            result = {"ok": True, **info}
+
+        elif args.op == "ops-digest":
+            from .ops_digest import collect, render_text
+
+            digest = collect(cfg)
+            if not getattr(args, "as_json", False):
+                print(render_text(digest))
+                return 0
+            result = {"ok": True, **digest}
 
         elif args.op == "get-ebay-token":
             from urllib.parse import unquote

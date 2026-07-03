@@ -170,6 +170,33 @@ class EbayPriceReducerWorker(QueueWorker):
                                   price=new_price, current_price=old_price_f)
             return
 
+        # Cliff guard (session 42): schedules minted from asking-price "comps"
+        # produced fire-sale floors (one was literally $0.00, due in 3 days).
+        # A stage may not cut more than half off its PREDECESSOR stage's price
+        # (measured against the schedule's own shape, so a legitimate multi-
+        # stage catch-up after worker downtime isn't refused), nor go below a
+        # hard floor. A refused stage is stamped 'refused_at' so it never
+        # retries silently — a broken schedule needs a human, not a retry.
+        _HARD_FLOOR = 2.99
+        _prior = next((float(s.get('price') or 0) for s in reversed(schedule)
+                       if s.get('stage', 0) < entry.get('stage', 0)
+                       and s.get('price') is not None), old_price_f)
+        if new_price < max(_prior * 0.5, _HARD_FLOOR):
+            entry['refused_at'] = now.isoformat()
+            entry['done_at'] = now.isoformat()
+            item['reprice_schedule'] = schedule
+            fence_patch_item(self.config, sku, {'reprice_schedule': schedule})
+            log.error('ebay_price_reducer: %s stage %d (%s) REFUSED — $%.2f is a '
+                      'cliff-drop from current $%.2f (>50%% or below $%.2f floor); '
+                      'schedule needs operator review',
+                      sku, entry['stage'], entry['label'], new_price, old_price_f,
+                      _HARD_FLOOR)
+            tgw_logging.log_event('ebay_price_reducer_stage_refused', sku=sku,
+                                  stage=entry['stage'], label=entry['label'],
+                                  price=new_price, current_price=old_price_f)
+            stats['errors'] += 1
+            return
+
         draft = item.get('draft_listing')
         if not draft:
             log.error('ebay_price_reducer: %s has a reprice_schedule but no '

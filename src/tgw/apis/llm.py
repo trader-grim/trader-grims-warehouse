@@ -213,6 +213,8 @@ def _call_google_direct(
 
     model_ref = model if model.startswith('models/') else f'models/{model}'
 
+    from tgw import quota
+
     last_exc: Optional[Exception] = None
     for attempt in range(max_retries):
         try:
@@ -221,10 +223,14 @@ def _call_google_direct(
                 contents=[{'role': 'user', 'parts': parts}],
                 config={'system_instruction': system_prompt},
             )
+            quota.record(cfg, 'llm_google')
             break
         except Exception as exc:
             last_exc = exc
+            quota.record(cfg, 'llm_google')
             status = getattr(getattr(exc, 'response', None), 'status_code', None)
+            if status == 429 or 'RESOURCE_EXHAUSTED' in str(exc):
+                quota.record_429(cfg, 'llm_google', f'{model}: {str(exc)[:150]}')
             if status == 429 and attempt < max_retries - 1:
                 time.sleep(15 * (attempt + 1))
                 continue
@@ -305,6 +311,8 @@ def _call_openrouter(
         'X-Title': 'TGW',
     }
 
+    from tgw import quota
+
     for attempt in range(max_retries):
         resp = requests.post(
             'https://openrouter.ai/api/v1/chat/completions',
@@ -312,6 +320,9 @@ def _call_openrouter(
             json=payload,
             timeout=60,
         )
+        quota.record(cfg, 'llm_openrouter')
+        if resp.status_code == 429:
+            quota.record_429(cfg, 'llm_openrouter', model)
         if resp.status_code == 429 and attempt < max_retries - 1:
             time.sleep(15 * (attempt + 1))
             continue
