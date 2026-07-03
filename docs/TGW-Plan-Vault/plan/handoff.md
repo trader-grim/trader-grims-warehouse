@@ -99,12 +99,13 @@ Nothing committed to git yet.
   (Dave GO 2026-07-03**, packet `packets/1122-r18-dataset-snapshot.md`) +
   PP-BACKUP-001 (#61/#146/#147/#1052) + #1102. Collision rule in the PP doc.
 - **Dave pre-authorized** P4 fleet photo repair ramp 1→5→ramp (inspect at n=1, n=5).
-- ⚠ **s43 diff UNCOMMITTED** (worker_base, http_server, 5 workers, invariants.md,
-  2 test files) — first executor session gets Dave's commit go first.
+- **Committed + pushed**: `ae9b1e6` on `catio-nix-0.0.1-alpha` (s42+s43, 108 files,
+  Dave-approved). PR to main DEFERRED until P1 (#1115) verifies — then
+  `/tgw-pr-review` + merge (main is 46 commits behind; don't snapshot it mid-fix).
 
-**Recommended next sequence:** (1) commit s43 diff → (2) fix track P1 #1115 →
-(3) forward track #1122 snapshot (any time, pool-disjoint) → (4) P2/P3 while P4
-ramps → (5) PP-BACKUP-001 packets interleaved.
+**Recommended next sequence:** (1) fix track P1 #1115 → (2) forward track #1122
+snapshot (any time, pool-disjoint) → (3) P2/P3 while P4 ramps → (4) PP-BACKUP-001
+packets interleaved → (5) PR to main via /tgw-pr-review.
 
 ---
 

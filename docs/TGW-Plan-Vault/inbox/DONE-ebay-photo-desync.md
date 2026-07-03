@@ -67,3 +67,22 @@ any `worker:`-containing caller as machine. Both sides tested
 5. Fleet-wide photo-shortfall rescan (was 492/9,403) now the backlog is gone.
 6. NOTHING COMMITTED — Dave controls git. Today's diff: worker_base.py,
    http_server.py, 5 workers, invariants.md, 2 test files.
+
+---
+
+## SESSION CLOSE-OUT (2026-07-03, /tgw-exit) — supersedes stale lines above
+
+Everything above the divider was written mid-session; final state:
+
+- **C10 LIVE + VERIFIED**: tgw202606021133367 shows 24 photos on eBay (ebay-pull
+  confirmed, not local state). Operator lane works end-to-end.
+- **Committed + pushed**: `ae9b1e6` on `catio-nix-0.0.1-alpha` (s42+s43, 108 files,
+  Dave approved via /commit). PR to main DEFERRED until PP-PHOTOSYNC-001 P1 verifies.
+- **Plan issued for parallel opusplan execution**:
+  - Fix track: PP-PHOTOSYNC-001 P1–P6 = todos #1115 #1117 #1118 #1119 #1120 #1121
+    (design + packet contracts: `plan/pp/PP-PHOTOSYNC-001.md`)
+  - Forward track: #1122 R1.8 snapshot (**Dave GO**, packet
+    `plan/packets/1122-r18-dataset-snapshot.md`) + PP-BACKUP-001 + #1102
+  - P4 fleet-repair ramp 1→5→ramp **pre-authorized by Dave**.
+- **Next step for any executor**: start at #1115 (fix track) or #1122 (forward
+  track); collision rule in the PP doc. `tgw plan check` was all-clear at close.

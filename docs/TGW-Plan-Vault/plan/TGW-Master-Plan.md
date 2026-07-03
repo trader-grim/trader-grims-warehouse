@@ -114,8 +114,8 @@ absent — decide: install or drop check).
 fixed — retry_wait backlog (2,715 jobs) cancelled; invariant **C10 operator lane
 live** (operator actions can no longer be starved by background debris); upload
 worker's partial-success masking still open as PP-PHOTOSYNC-001 P1 (#1115); 492
-published items measured photo-short (P4 repair, ramp pre-authorized). s43 diff is
-live on prod, UNCOMMITTED.
+published items measured photo-short (P4 repair, ramp pre-authorized). s41–s43 work
+committed+pushed: `ae9b1e6` on `catio-nix-0.0.1-alpha`.
 
 ---
 
@@ -209,11 +209,17 @@ policy left a 2,514-SKU immortal backlog (cancelled, Dave-authorized); the opera
 quota reserve was unreachable (fixed s43 as invariant C10, live-verified on
 tgw202606021133367 — 9→24 live photos). Runs PARALLEL with the forward track
 (R1.8 #1122 / PP-BACKUP-001 / #1102) — collision rule in the design doc.
-Packets P1–P6 = todos **#1115 #1117 #1118 #1119 #1120 #1121**; P4 fleet repair
-(492 photo-short items) ramp **pre-authorized 1→5→ramp by Dave 2026-07-03**.
+Packets P1–P9 = todos **#1115 #1117 #1118 #1119 #1120 #1121 #1123 #1124 #1125**;
+P4 fleet repair (492 photo-short items) ramp **pre-authorized 1→5→ramp by Dave
+2026-07-03**. P7–P9 added at Dave's direction same day: truth-audit rules ("test
+the function and read the log" as a nightly job — PD4 automated), canary probe
+(real buttons on one item, daily), and whole-site audit via the cheapest bulk
+source reachable with EXISTING scopes (Feed API report candidate; scopes LOCKED).
+**P1 ✅ DONE 2026-07-03** — live-verified against the still-halted real EPS wall;
+P4/P8 now unblocked; full suite regression-clean (1444 pass, same 9 pre-existing
+failures as baseline).
 Full design + packet contracts: `pp/PP-PHOTOSYNC-001.md`.
-⚠ s43's C10 build is live on prod but UNCOMMITTED — first executor session gets
-Dave's commit go before layering diffs.
+s42+s43 committed+pushed (`ae9b1e6`); PR to main deferred until P1 verifies.
 
 ## PP-LISTEDITOR-001 — listing editor + revision apply
 Phase 2 code complete s40 (`_APPLY_ENABLED=True`, drift-gated live PUT). **Gate:

@@ -96,6 +96,42 @@ def _build_reprice_schedule(stages: List[Dict[str, Any]],
 
 class EbayPublishWorker(QueueWorker):
 
+    def _refresh_photo_verify(self, sku: str, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """PP-EBAY-SNAPSHOT-001 Phase 2 / PP-PHOTOSYNC-001 P1: verify photos
+        actually live on eBay match what we submitted. One extra GET; logged
+        but never blocks the caller. Must run on EVERY path that pushes new
+        photo content live — not just first publish — or photo_verify goes
+        stale the moment an already-Active item gets a photo update (found
+        s43: an operator ebay_update pushed 24 photos live but photo_verify
+        kept showing the original publish's 9/9 until a manual ebay-pull)."""
+        try:
+            live = ebay_get(self.config, f'/sell/inventory/v1/inventory_item/{sku}')
+            confirmed = live.get('product', {}).get('imageUrls', [])
+            submitted = (
+                item.get('ebay_submitted', {})
+                    .get('inventory_item', {})
+                    .get('product', {})
+                    .get('imageUrls')
+                or item.get('draft_listing', {}).get('imageUrls', [])
+            )
+            photo_verify = {
+                'submitted_count': len(submitted),
+                'confirmed_count': len(confirmed),
+                'verified_at':     datetime.now(timezone.utc).isoformat(),
+            }
+            if len(confirmed) < len(submitted):
+                log.warning('%s: photo count mismatch — submitted=%d confirmed=%d',
+                            sku, len(submitted), len(confirmed))
+                tgw_logging.log_event('ebay_photo_verify_mismatch', sku=sku,
+                                      submitted=len(submitted), confirmed=len(confirmed))
+            else:
+                log.info('%s: photo verify OK — %d/%d confirmed', sku, len(confirmed), len(submitted))
+                tgw_logging.log_event('ebay_photo_verify_ok', sku=sku, confirmed=len(confirmed))
+            return photo_verify
+        except Exception as exc:
+            log.warning('%s: photo verify GET failed (non-fatal): %s', sku, exc)
+            return None
+
     def handle(self, job: Dict[str, Any]) -> None:
         payload = job.get('payload_json') or {}
         sku = payload.get('sku', '')
@@ -127,6 +163,10 @@ class EbayPublishWorker(QueueWorker):
             tgw_logging.log_event('ebay_publish_skipped', sku=sku,
                                   reason='already_active',
                                   listing_id=str(existing_listing.get('listing_id', '')))
+            photo_verify = self._refresh_photo_verify(sku, item)
+            if photo_verify is not None:
+                existing_listing['photo_verify'] = photo_verify
+                fence_ebay_write(self.config, sku, ebay_listing=existing_listing)
             return
 
         ebay_offer = item.get('ebay_offer', {})
@@ -277,33 +317,11 @@ class EbayPublishWorker(QueueWorker):
             item['draft_listing']['listing_description'] = build_listing_description(
                 item, self.config)
 
-        # PP-EBAY-SNAPSHOT-001 Phase 2: verify photos survived publish.
-        # One extra GET; logged but never blocks the publish completing.
-        try:
-            live = ebay_get(self.config, f'/sell/inventory/v1/inventory_item/{sku}')
-            confirmed = live.get('product', {}).get('imageUrls', [])
-            submitted = (
-                item.get('ebay_submitted', {})
-                    .get('inventory_item', {})
-                    .get('product', {})
-                    .get('imageUrls')
-                or item.get('draft_listing', {}).get('imageUrls', [])
-            )
-            item['ebay_listing']['photo_verify'] = {
-                'submitted_count': len(submitted),
-                'confirmed_count': len(confirmed),
-                'verified_at':     now.isoformat(),
-            }
-            if len(confirmed) < len(submitted):
-                log.warning('%s: photo count mismatch after publish — submitted=%d confirmed=%d',
-                            sku, len(submitted), len(confirmed))
-                tgw_logging.log_event('ebay_photo_verify_mismatch', sku=sku,
-                                      submitted=len(submitted), confirmed=len(confirmed))
-            else:
-                log.info('%s: photo verify OK — %d/%d confirmed', sku, len(confirmed), len(submitted))
-                tgw_logging.log_event('ebay_photo_verify_ok', sku=sku, confirmed=len(confirmed))
-        except Exception as exc:
-            log.warning('%s: photo verify GET failed (non-fatal): %s', sku, exc)
+        # PP-EBAY-SNAPSHOT-001 Phase 2 / PP-PHOTOSYNC-001 P1: verify photos
+        # survived publish. One extra GET; logged but never blocks completion.
+        photo_verify = self._refresh_photo_verify(sku, item)
+        if photo_verify is not None:
+            item['ebay_listing']['photo_verify'] = photo_verify
 
         fence_ebay_write(self.config, sku,
                          ebay_listing=item.get('ebay_listing'),

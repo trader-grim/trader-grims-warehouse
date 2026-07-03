@@ -39,7 +39,16 @@ protecting the acquisition path itself.
 
 ## Packets (one packet = one todo = one session; specs below are the contract)
 
-### P1 = todo #1115 — upload completion integrity  ← START HERE, blocks P4
+### P1 = todo #1115 — upload completion integrity ✅ DONE 2026-07-03
+Live-verified: `ebay_upload.py` completion guard + quota-retry cap (limit 3,
+then HardFailure+notify) + `_persist_partial()` (also fixed a latent bug where
+a network error mid-loop lost already-succeeded photos); `ebay_publish.py`
+`_refresh_photo_verify()` factored + wired into the already-Active skip path.
+Tests: `tests/test_ebay_upload_integrity.py` (6) + 1 in
+`test_invariants_publish_idempotency.py`. Live: real photo-short item
+`tgw202604042035007` hit the still-halted EPS wall and correctly requeued
+(`quota_retries: 1`) instead of falsely completing. Full detail:
+`inbox/DONE-photosync-p1-upload-integrity.md`. P4 and P8 now unblocked.
 **Context budget:** plan core + this file + `workers/ebay_upload.py` +
 `ebay/upload.py` + `queue/worker_base.py` (read) + `tests/test_operator_origin.py`
 (pattern reference).
@@ -121,6 +130,71 @@ Cancel job(s) in the workerless `ebay_repush` queue; grep for what enqueues it
 (PP-EBAY-SNAPSHOT-001 Phase 4 relic?); either delete the enqueue path or note the
 queue as future work in that PP. 15 minutes; no eBay calls.
 
+### P7 = todo #1123 — truth-audit rules (the liar detector) — pairs with P1
+**Why (Dave, s43):** "All this needed was to test the function and read the log."
+The 1,399-test suite verifies code against its own expectations (mocks); today's
+bugs were the system lying about outcomes. To catch a liar, compare its CLAIMS
+against EVIDENCE. This is Prime Directive 4 automated.
+**Context budget:** plan core + this file + `api.py` catalog-verify section +
+existing verify rules (PP-VERIFY-001, ~13 rules) + `ops_digest.py`.
+**Spec:** new catalog-verify rules, severity critical unless noted:
+- `photos_short_on_ebay`: Active inventory-API item where `len(ebay_photos)` <
+  on-disk photo count → the upload claimed success it didn't earn. (This one rule,
+  nightly, catches today's month-old bug within 24h of introduction, forever.)
+- `photo_verify_stale`: `photo_verify.submitted != confirmed`, or `verified_at`
+  older than `ebay_offer.staged_at`.
+- `submitted_live_drift` (warning): field diffs `ebay_submitted` vs `ebay_live` —
+  ONLY when `ebay_live.pulled_at` > `ebay_submitted.staged_at`. Timestamp-order
+  discipline is part of the rule's contract: comparing a submit against an OLDER
+  live snapshot produced a false "eBay rewrote our data" conclusion on 2026-07-03;
+  encode the ordering check so no session can repeat it.
+- `success_count_contradiction` (from the events log): `ebay_upload_complete`
+  events where photos-to-upload > 0 but new == 0 in the same job window.
+Nightly systemd timer runs `tgw catalog-verify --severity critical` scoped to these
+rules; red lines feed `tgw ops-digest`. **Acceptance (live):** seed one known-short
+item (or use a real one pre-P4), run the timer path, show the digest line.
+**Quota:** zero eBay calls (local data + ledger only).
+
+### P8 = todo #1124 — canary probe (AFTER P1; one item, real buttons)
+**Spec:** a scheduled job (timer, not a queue worker) that exercises the REAL
+operator surface on ONE designated item: POST the same HTTP action endpoints the
+UI uses (List/Update chain), wait for the chain to drain, then `ebay-pull` and
+diff live state vs intended (title, price, photo count, aspects), and scan the
+journal window for the SKU for ERROR/WARN. Pass/fail line to digest; notify() on
+red. Canary item: Dave designates (low-value live listing or a dedicated test
+item — ask him at packet start, do not choose silently).
+**Acceptance (live):** one green canary run end-to-end shown in digest; one
+deliberately-broken run (e.g. temporarily rename a photo) goes red and notifies.
+**Quota:** a handful of inventory-pool calls + 0–2 EPS calls per run; daily cadence.
+
+### P9 = todo #1125 — whole-site audit for near-zero API cost (Dave, s43)
+**Why:** Dave: "there is likely for us to do a bulk, maybe even whole site audit
+for less api cost if we look hard through all of our scopes." Per-SKU offer pulls
+cost ~19.5k calls; bulk sources may cut a whole-site audit to a handful.
+**HARD CONSTRAINT: existing scopes ONLY** (sell.inventory, sell.account,
+sell.marketing + Trading IAF). Scopes are LOCKED (broke OAuth 2026-06-05; memory:
+feedback-ebay-config). If a candidate needs a new scope, it goes in the report as
+"blocked on scope," never requested.
+**Spec (research → live verify, one packet):**
+1. Enumerate every READ endpoint reachable with current scopes; rank by
+   items-per-call. Known candidates to verify live:
+   - **Feed API `ACTIVE_INVENTORY_REPORT`** (sell.inventory scope family): the
+     whole active-listings state as ONE downloadable report (~3 calls: create
+     task, poll, download). If this works, the whole-site audit is ~free and can
+     run daily. Verify live with one small task; raw report lands via E7 capture.
+   - **Trading `GetSellerList`/`GetMyeBaySelling`** (paged ~200/call ≈ 100 calls
+     for 19.5k listings, includes PictureDetails — listing-level photo truth on
+     the 5k/day Trading pool).
+   - Inventory API paged `getInventoryItems` (already used by R1.8).
+2. Deliverable: `reference/` note ranking sources (coverage × cost × freshness) +
+   the P7 audit re-pointed at the cheapest source for LIVE-side truth (P7 v1 uses
+   the local mirror; P9 upgrades it to compare against actual site state).
+**Acceptance (live):** one bulk pull executed through capture, record count shown
+vs the 19,486 expected; cost accounting from quota state shown to Dave.
+**Quota:** the verification pulls themselves (~3–100 calls depending on source).
+**Dataset:** every bulk pull is raw capture — this packet GROWS the dataset by an
+entire site snapshot per run, the local-mirror goal's cheapest feed.
+
 ## Parallel forward track (NOT this PP — listed so the two sessions don't collide)
 
 - **#1122 R1.8 snapshot — GO granted 2026-07-03.** `scripts/ebay_snapshot_all.py`,
@@ -136,12 +210,11 @@ queue as future work in that PP. 15 minutes; no eBay calls.
 `http_server.py`; the forward track owns `scripts/`, `etc/`, `tests/` (except
 operator-origin tests). Neither touches `apis/ebay/client.py`.
 
-## Session-43 context an executor must know (uncommitted!)
+## Session-43 context an executor must know
 
 The C10 build (worker_base context switch, 14 origin stamps, chain propagation, the
 redraft-loop regression fix `worker:<queue>:operator` + widened machine-write guard)
-is LIVE ON PROD but NOT COMMITTED. First action of the first executor session:
-ask Dave to commit (or get his go and commit) so packet diffs stay reviewable.
-Diff surface: `queue/worker_base.py`, `http_server.py`, 5 `workers/ebay_*.py`,
-`reference/invariants.md`, `tests/test_operator_origin.py`,
-`tests/test_invariants_publish_idempotency.py`.
+is LIVE ON PROD and **committed+pushed: `ae9b1e6` on `catio-nix-0.0.1-alpha`**
+(s42+s43 combined, 108 files). Packet diffs layer on a clean tree. PR to main is
+deliberately DEFERRED until P1 (#1115) lands and verifies — then `/tgw-pr-review`
+and merge from a coherent, incident-closed state.

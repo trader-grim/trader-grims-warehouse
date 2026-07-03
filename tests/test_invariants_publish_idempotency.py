@@ -88,7 +88,11 @@ def _run(worker, sku):
     worker.handle({'payload_json': {'sku': sku}})
 
 
-def test_already_active_item_is_not_republished(publisher, tmp_path):
+def test_already_active_item_is_not_republished(publisher, tmp_path, monkeypatch):
+    # ebay_get unstubbed here on purpose: it fails (no token/network in test
+    # env), _refresh_photo_verify catches that and returns None, so no write
+    # happens — proving the skip path doesn't touch anything ELSE besides
+    # photo_verify. The refresh behavior itself is pinned separately below.
     item = _staged_item(
         ebay_listing={'status': 'Active', 'listing_id': '110001',
                       'published_at': '2026-06-01T00:00:00+00:00'},
@@ -102,6 +106,29 @@ def test_already_active_item_is_not_republished(publisher, tmp_path):
     _run(publisher, 'tgw1')
     assert publisher._published == []          # no eBay call
     assert path.read_text() == before          # reprice_schedule clock untouched
+
+
+def test_already_active_item_refreshes_photo_verify(publisher, tmp_path, monkeypatch):
+    """PP-PHOTOSYNC-001 P1: photo_verify must refresh even when publish is
+    skipped as already-Active — an operator ebay_update pushes new photos
+    live without ever re-publishing, and photo_verify was found stale (s43,
+    tgw202606021133367 showed 9/9 from the original publish while 24 photos
+    were actually live) until a manual ebay-pull."""
+    monkeypatch.setattr(publish_mod, 'ebay_get', lambda cfg, path: {
+        'product': {'imageUrls': ['https://x/1', 'https://x/2', 'https://x/3']}})
+    item = _staged_item(
+        ebay_listing={'status': 'Active', 'listing_id': '110001',
+                      'published_at': '2026-06-01T00:00:00+00:00'},
+        ebay_submitted={'inventory_item': {'product': {
+            'imageUrls': ['https://x/1', 'https://x/2', 'https://x/3']}}},
+    )
+    item['ebay_offer']['status'] = 'PUBLISHED'
+    _write(tmp_path, 'tgw1', item)
+    _run(publisher, 'tgw1')
+    after = json.loads((tmp_path / 'tgw1' / 'tgw1.json').read_text(encoding='utf-8'))
+    pv = after['ebay_listing']['photo_verify']
+    assert pv['submitted_count'] == 3
+    assert pv['confirmed_count'] == 3
 
 
 def test_unstaged_item_retries_not_dead_letter(publisher, tmp_path):
