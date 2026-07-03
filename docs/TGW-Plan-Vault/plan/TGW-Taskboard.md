@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-07-03 17:53 UTC — 201 open, 33 done in the last 7 days._
+_Rendered 2026-07-03 23:03 UTC — 200 open, 34 done in the last 7 days._
 
 ## admin (23 open)
 
@@ -41,11 +41,11 @@ _Rendered 2026-07-03 17:53 UTC — 201 open, 33 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (34 open)
+## claude (33 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
-| 1122 | 2 |  | R1.8 EXECUTE (Dave GO 2026-07-03): full dataset snapshot of 19,486 live items via scripts/ebay_snapshot_all.py — ~40k calls, 2M inventory pool, budgeter-supervised, capture layer lands raw in incoming/ebay/ |  |  |
+| 1122 | 2 |  | R1.8 EXECUTE (Dave GO 2026-07-03): full dataset snapshot of 19,486 live items via scripts/ebay_snapshot_all.py — ~40k calls, 2M inventory pool, budgeter-supervised, capture layer lands raw in incoming/ebay/ — separate parallel-track sequence, not started yet |  |  |
 | 1062 | 5 |  | GATED on Dave R1.1 live-fire — do not auto-claim. PP-LISTEDITOR-001: Listing editor — item detail page restructure + editable aspects (original scope; verify remaining work against s40-42 UI rebuild before starting) | [[TGW-Master-Plan#PP-LISTEDITOR-001 — listing editor + revision apply\|PP-LISTEDITOR-001]] |  |
 | 1112 | 6 |  | Inventory page: 'Eligible for listing' filter — status new/In Stock, NOT listed/sold/disposed (Dave s42). Feed for one-at-a-time listing runs. |  |  |
 | 1084 | 8 |  | GATED on Dave R1.1 live-fire — do not auto-claim. PP-LISTEDITOR-001 Phase 2 CODE COMPLETE s40: live apply implemented in revision.py (_APPLY_ENABLED=True, drift-gated); remaining: R1.1 live-fire verify + wire Update-Item button | [[TGW-Master-Plan#PP-LISTEDITOR-001 — listing editor + revision apply\|PP-LISTEDITOR-001]] |  |
@@ -60,7 +60,6 @@ _Rendered 2026-07-03 17:53 UTC — 201 open, 33 done in the last 7 days._
 | 1079 | 20 |  | PP-CATPICK-001 Phase 1: backfill category_candidates (name+path from tree cache) for all 25 category-groups.json groups | [[TGW-Master-Plan#PP-CATPICK-001 — smart category picker\|PP-CATPICK-001]] |  |
 | 1103 | 20 |  | Data Charter observability: dataset-growth lines in ops-digest (eBayCapture bytes/day, items with raw snapshots, archive coverage) — a day where the pipeline ran but the dataset didn't grow = something is discarding again |  |  |
 | 1053 | 22 |  | data-scrub: strip legacy Magento fields from item JSONs — fields to remove: 'Item number', '#STATUS', 'attribute_set', 'm2_categories', 'category_ids', 'ebay_condition_number', 'eBay category 1 name', 'eBay category 1 number', 'C:Brand', 'C:Type', 'C:MPN', 'C:Model', 'C:Language', 'C:Movie/TV Title', 'input_voltage', 'description_history', 'title_history', 'location_history'. Historical data preserved in historical-tgwcatalog.json / historical-master-catalog.json. Write a scrub worker or one-shot script; archive before/after per policy. |  |  |
-| 1123 | 22 |  | PP-PHOTOSYNC-001 P7: truth-audit rules in catalog-verify — pipeline claims vs reality (ebay_photos < disk on Active items; photo_verify mismatch/stale; ebay_submitted vs ebay_live diff with timestamp-order discipline; success events whose counts contradict) + nightly timer + digest red lines | [[TGW-Master-Plan#PP-PHOTOSYNC-001 — upload integrity + operator lane hardening + fleet photo repair\|PP-PHOTOSYNC-001]] |  |
 | 1049 | 25 |  | get-ebay-token browser UX: add --print-url flag to Python CLI + upgrade tgw fish wrapper in nix/tgw/home.nix to call xdg-open as db user (currently prints URL; this makes it auto-open) | [[TGW-Master-Plan#PP-NIXOS-001 — NixOS migration (CatioNIX)\|PP-NIXOS-001]] |  |
 | 1064 | 25 |  | PP-PHOTO-001 Phase A: GDrive → Gemini multimodal ebay_draft — pass all item photos to gemini-2.5-flash via GDrive HTTPS URLs instead of base64 encoding. Expected: major listing quality jump (all 8+ photos analyzed; Gemini extracts condition details, labels, markings, color, wear from every angle). Design: (1) store gdrive_file_ids map in item JSON (populated by rclone sync hook or one-time scan); (2) in ebay_draft worker, temporarily grant anyone-reader on each photo, build image_url array with drive.google.com/uc?export=download&id= URLs, pass to gemini-2.5-flash alongside text prompt, revoke after call; (3) add gdrive_api helper in tgw/apis/; (4) OAuth token in secrets_root/gdrive-token.json (drive.file scope preferred). Prereqs: Google Cloud project with Drive API enabled, OAuth creds in secrets_root. Research: docs/TGW-Plan-Vault/dev-workflow/research/RESEARCH-gdrive-zero-bandwidth-ebay-image-upload.md | [[TGW-Master-Plan#PP-PHOTO-001 — photo pipeline (GDrive → Gemini / eBay)\|PP-PHOTO-001]] |  |
 | 1108 | 25 |  | alt_text queue has no consumer: no tgw-worker@alt_text unit exists but ai_identify enqueues alt_text jobs (sit queued forever, confuse item-page pipeline log). Decide: install worker unit vs batch path (AI-Studio todo #144) vs stop enqueueing. |  |  |
@@ -232,10 +231,11 @@ _Rendered 2026-07-03 17:53 UTC — 201 open, 33 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — sold-event webhook (Tier 4)\|PP-SOLD-001]] |  |
 
-## Done this week (33)  — showing 15 most recent
+## Done this week (34)  — showing 15 most recent
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 1123 | claude | 2026-07-03 | in_progress: PP-PHOTOSYNC-001 P7 — truth-audit rules in catalog-verify |
 | 1115 | claude | 2026-07-03 | in_progress: implementing P1 completion-guard fix + quota-retry cap |
 | 1116 | claude | 2026-07-03 | List on eBay must run as operator context end-to-end: operator-initiated pipeline jobs carry initiator through the whole chain (draft/upload/stage/publish) and use the interactive quota reserve, never the background halt (Dave 2026-07-03) |
 | 1107 | claude | 2026-07-03 | S42 INCIDENT (RESOLVED, downgraded): price 'raises' never reached eBay — capture ground-truth shows the 5 legacy-Item# SKUs were always SKIPPED by ebay_stage's legacy guard; damage was local stale draft prices only. FIXED: 784-item draft-price backfill from live mirror (archived, /opt/TGW/var/backups/s42-price-backfill/), never-raise clamp in ebay_stage (C5-extended, 4 tests). ROOT CAUSE of all churn: http PATCH auto-redraft fired on WORKER fence patches -> infinite draft loop (287 jobs/SKU, 2 live listings PUT every ~90s for hours) — FIXED via X-TGW-Caller header, operator-edits-only. Verification of loop death in progress. |
@@ -250,5 +250,4 @@ _Rendered 2026-07-03 17:53 UTC — 201 open, 33 done in the last 7 days._
 | 1094 | claude | 2026-07-02 | Permissions: extended default ACL to src/bin/config/var/backups; patched atomic_write_json (items.py+catalog.py) to preserve/default file mode instead of NamedTemporaryFile's 0600; permissions-reset script now logs --check results to permissions-audit.log |
 | 1093 | claude | 2026-07-02 | Data-preservation audit (E5-related): found + fixed 2 fence_patch_item bugs where in-memory mutations were silently never persisted (ebay_price_reducer draft_listing.price, ebay_draft taxonomy-retry category resolution); audited all 20 fence_patch_item call sites, other 18 clean |
 | 1092 | claude | 2026-07-02 | Wire bulk_classify into ebay_draft aspect-fill as vision-based (multi-photo) instead of text-only |
-| 1091 | claude | 2026-07-02 | Build direct Google Gemini synchronous call path in apis/llm.py (provider='google_direct') with OpenRouter fallback, once Dave has sorted Google API token/billing |
-| … | | | _…and 18 more — run `tgw todo --all` to see everything_ |
+| … | | | _…and 19 more — run `tgw todo --all` to see everything_ |

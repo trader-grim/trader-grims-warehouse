@@ -130,7 +130,26 @@ Cancel job(s) in the workerless `ebay_repush` queue; grep for what enqueues it
 (PP-EBAY-SNAPSHOT-001 Phase 4 relic?); either delete the enqueue path or note the
 queue as future work in that PP. 15 minutes; no eBay calls.
 
-### P7 = todo #1123 — truth-audit rules (the liar detector) — pairs with P1
+### P7 = todo #1123 — truth-audit rules (the liar detector) ✅ DONE 2026-07-03
+4 new rules live in `_verify_item`/`cmd_catalog_verify` (`photos_short_on_ebay`,
+`photo_verify_stale`, `submitted_live_drift`, `success_count_contradiction` — the
+last via a real journald scan, gated on a new `to_attempt` field added to the
+`ebay_upload_complete` event in P1). JSON sidecar (`--output` now also writes a
+`.json` summary) feeds a new CATALOG-VERIFY section in `tgw ops-digest` — cheap
+file read, ops-digest never re-scans itself. Nightly systemd timer
+(`tgw-catalog-verify-nightly`, 02:00 daily) written in the flake
+(`nix/tgw/backup.nix`), `nix flake check` clean for all 3 host configs — **NOT
+yet deployed** (needs Dave's go for `nixos-rebuild switch`, a live infra action).
+**Bug caught and fixed during live verification**: the first version used
+`ebay_photos` as the "live photo count" proxy — worked in unit tests, but a live
+run against all 55,419 items produced **9,382 false positives** because most of
+the historical catalog never populated that bookkeeping field even when photos
+were genuinely live via an older pipeline path. Switched to
+`draft_listing.imageUrls`/`ebay_offer.photo_urls` (the methodology already
+validated at 492/9,403 earlier the same session) — corrected live run: **491**
+(down 1 from 492, matching this morning's manual repair of tgw202606021133367).
+Tests: `tests/test_catalog_verify.py` (+18), `tests/test_ops_digest_catalog_verify.py`
+(6, new). Full targeted suite: 127/127 green.
 **Why (Dave, s43):** "All this needed was to test the function and read the log."
 The 1,399-test suite verifies code against its own expectations (mocks); today's
 bugs were the system lying about outcomes. To catch a liar, compare its CLAIMS

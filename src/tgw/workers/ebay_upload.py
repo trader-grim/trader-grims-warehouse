@@ -192,8 +192,13 @@ class EbayUploadWorker(QueueWorker):
         new_count = len(uploaded) - len(existing)
         log.info('ebay_upload complete for %s: %d total (%d new)',
                  sku, len(reordered), new_count)
+        # to_attempt travels with the event so PP-PHOTOSYNC-001 P7's
+        # success_count_contradiction rule can detect a regression of the s43
+        # bug (new==0 while to_attempt>0 logged as complete) from the
+        # structured event alone, without parsing free-text log messages.
         tgw_logging.log_event('ebay_upload_complete', sku=sku,
-                              total=len(reordered), new=new_count)
+                              total=len(reordered), new=new_count,
+                              to_attempt=to_attempt)
 
         try:
             state_machine.enqueue_job(

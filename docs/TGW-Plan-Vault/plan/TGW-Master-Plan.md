@@ -119,6 +119,7 @@ committed+pushed: `ae9b1e6` on `catio-nix-0.0.1-alpha`.
 
 ---
 
+C10 invariant live + verified (2026-07-03). See SESSION-043.
 ## Active tracks
 
 Retarget rationale and full packet specs: `RETARGET-2026-07-02.md`. R0 (quota
@@ -172,6 +173,7 @@ nonexistent `ebay_dole`); CLAUDE.md `tgw todo --add` syntax fix.
 
 ---
 
+P1 upload integrity fix complete — see document for spec, implementation, tests, and live verification.
 ## Work-packet protocol
 
 One packet = one todo = one model session. Non-trivial packets get
@@ -201,6 +203,21 @@ Full designs: `pp/<REF>.md` unless noted. On next touch of an archive-section de
 promote it to `pp/`.
 
 ### Open — active or gated
+
+## PP-CATALOG-INCR-001 — incremental catalog update (PROPOSAL, not yet built)
+**Opened s43 (2026-07-03).** Dave's original design, recovered from an unprocessed
+inbox transcript (`inbox/hermes-out-of-flake-portable-catalog-concept.md`) after he
+flagged `catalog_rebuild`'s full 55,419-item disk scan on every single write as the
+system's most intensive task (1,361 rebuilds/33h, ~57s each). Design: atomic per-item
+SQLite upsert + conditional thumbnail regen at write time; the full 4-artifact
+rebuild becomes a scheduled reconciliation timer, not a per-write trigger. Revises
+the "Catalog rebuild is always a job" settled-architecture line — needs Dave's
+explicit sign-off before implementation. Found while confirming the design: the
+JetStream mutation-audit stream this needs (PP-AIOPS-001 Phase 1) already exists but
+is wired to the wrong door (CLI path only, not the real HTTP fence). Full design +
+itemization of what intersects PP-PHOTOSYNC-001 (P4's ramp, P8's daily canary — both
+would multiply this same cost if built before this lands): `pp/PP-CATALOG-INCR-001.md`.
+No todos filed yet — proposal stage.
 
 ## PP-PHOTOSYNC-001 — upload integrity + operator lane hardening + fleet photo repair
 **Opened s43 (2026-07-03) — THE ACTIVE FIX TRACK.** Born from the 3-day EPS quota

@@ -1142,6 +1142,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--skip-verified", action="store_true", help="skip items that already have a catalog_verified hall pass (faster re-scan)")
     p.add_argument("--fix", action="store_true", help="report auto-applicable fixes (e.g. strip stale TEMPLATE: title prefix); dry-run unless --write is given")
     p.add_argument("--write", action="store_true", help="with --fix: actually apply the fixes (default: dry-run only)")
+    p.add_argument("--scan-events-hours", type=int, default=24, metavar="N", help="window for the success_count_contradiction log-scan rule (PP-PHOTOSYNC-001 P7); 0 disables it")
 
     p = sub.add_parser(
         "nix-bundle-usb",
@@ -1295,6 +1296,90 @@ def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any]) -> List[Dict[str
         )
         v("category_suggestion_mismatch", "warning", detail)
 
+    # --- PP-PHOTOSYNC-001 P7: truth-audit rules — pipeline claims vs reality ---
+    # "Test the function and read the log" (Dave, s43), automated: these compare
+    # what the pipeline SAYS happened against the dataset it actually produced,
+    # rather than checking the code's own internal expectations (what unit tests
+    # do). This is how the s43 quota-masking bug (17/17 photo failures logged as
+    # "complete, 0 new") would have surfaced within 24h of first occurring instead
+    # of running undetected for a month.
+    # Live-hosted count: draft_listing.imageUrls (falling back to
+    # ebay_offer.photo_urls) is what actually went live, matching the
+    # methodology already validated against this exact dataset (492/9,403
+    # shortfall, 2026-07-03). `ebay_photos` looked like the obvious field but
+    # is a local upload-bookkeeping list that most of the older catalog never
+    # populated even when photos were genuinely live — using it here produced
+    # 9,382 false positives on the first real run (found live, same day).
+    live_photo_urls = ((doc.get("draft_listing") or {}).get("imageUrls")
+                       or ebay_offer.get("photo_urls") or [])
+    if ebay_listing.get("status") == "Active" and ebay_listing.get("api") == "inventory":
+        if live_photo_urls and len(live_photo_urls) < len(photos):
+            v("photos_short_on_ebay", "critical",
+              f"Active listing has {len(live_photo_urls)} live eBay photo URLs but "
+              f"{len(photos)} on disk — an upload claimed success it didn't earn")
+
+    photo_verify = ebay_listing.get("photo_verify") or {}
+    if photo_verify:
+        submitted_n = photo_verify.get("submitted_count")
+        confirmed_n = photo_verify.get("confirmed_count")
+        if submitted_n is not None and confirmed_n is not None and submitted_n != confirmed_n:
+            v("photo_verify_stale", "critical",
+              f"photo_verify submitted={submitted_n} != confirmed={confirmed_n} "
+              f"— last verification did not match what was actually sent")
+        else:
+            verified_at = photo_verify.get("verified_at")
+            staged_at = ebay_offer.get("staged_at")
+            if verified_at and staged_at:
+                try:
+                    v_dt = datetime.fromisoformat(str(verified_at).replace("Z", "+00:00"))
+                    s_dt = datetime.fromisoformat(str(staged_at).replace("Z", "+00:00"))
+                    if v_dt < s_dt:
+                        v("photo_verify_stale", "critical",
+                          f"photo_verify.verified_at ({verified_at}) predates the "
+                          f"most recent stage ({staged_at}) — verification is stale")
+                except ValueError:
+                    pass
+
+    # Timestamp-order discipline is part of this rule's contract, not an
+    # afterthought: comparing a submission against an OLDER live snapshot
+    # produced a false "eBay silently rewrote our data" conclusion on
+    # 2026-07-03 (session 43) — the live pull simply predated the edit. This
+    # rule only fires when the live snapshot is demonstrably NEWER than what
+    # we submitted, so it can never repeat that mistake.
+    ebay_submitted = doc.get("ebay_submitted") or {}
+    ebay_live = doc.get("ebay_live") or {}
+    if ebay_submitted and ebay_live:
+        staged_at = ebay_submitted.get("staged_at")
+        pulled_at = ebay_live.get("pulled_at")
+        if staged_at and pulled_at:
+            try:
+                staged_dt = datetime.fromisoformat(str(staged_at).replace("Z", "+00:00"))
+                pulled_dt = datetime.fromisoformat(str(pulled_at).replace("Z", "+00:00"))
+            except ValueError:
+                staged_dt = pulled_dt = None
+            if staged_dt is not None and pulled_dt is not None and pulled_dt > staged_dt:
+                sub_prod = (ebay_submitted.get("inventory_item") or {}).get("product") or {}
+                live_prod = (ebay_live.get("inventory_item") or {}).get("product") or {}
+                sub_title = sub_prod.get("title")
+                live_title = live_prod.get("title")
+                if sub_title and live_title and sub_title != live_title:
+                    v("submitted_live_drift", "warning",
+                      f"title differs from the last-submitted value even though "
+                      f"the live pull ({pulled_at}) postdates submission "
+                      f"({staged_at}): submitted={sub_title!r} live={live_title!r}")
+                sub_aspects = sub_prod.get("aspects") or {}
+                live_aspects = live_prod.get("aspects") or {}
+                if sub_aspects and live_aspects:
+                    live_flat = {k: (v_[0] if isinstance(v_, list) and v_ else v_)
+                                for k, v_ in live_aspects.items()}
+                    for key, sub_val in sub_aspects.items():
+                        sub_flat = sub_val[0] if isinstance(sub_val, list) and sub_val else sub_val
+                        if key in live_flat and str(live_flat[key]) != str(sub_flat):
+                            v("submitted_live_drift", "warning",
+                              f"aspect {key!r} differs from the last-submitted "
+                              f"value even though the live pull postdates "
+                              f"submission: submitted={sub_flat!r} live={live_flat[key]!r}")
+
     return viols
 
 
@@ -1333,6 +1418,55 @@ def _compute_fixes(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
     return fixes
 
 
+def _scan_upload_complete_contradictions(hours: int = 24) -> List[Dict[str, Any]]:
+    """PP-PHOTOSYNC-001 P7 — success_count_contradiction.
+
+    Scans journald for `ebay_upload_complete` events where `new == 0` but
+    `to_attempt > 0` in the same event — the exact shape of the s43 bug
+    (17/17 photo failures logged as "complete, 0 new"). The completion-guard
+    fix (P1) makes this structurally impossible going forward; this rule is
+    the regression guard that would catch it immediately if that ever
+    changes. Reads the structured `to_attempt` field added to the event in
+    P1 — never parses free-text log messages.
+
+    Best-effort: journalctl absence/failure yields an empty list, not an
+    exception — a log-scan rule must never break the rest of catalog-verify.
+    """
+    import subprocess
+
+    violations: List[Dict[str, Any]] = []
+    try:
+        proc = subprocess.run(
+            ["journalctl", "-u", "tgw-worker@ebay_upload.service",
+             "-o", "cat", "--since", f"{hours} hours ago", "--no-pager"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return violations  # journalctl unavailable — best-effort, not fatal
+
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if '"event": "ebay_upload_complete"' not in line:
+            continue
+        try:
+            rec = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        to_attempt = rec.get("to_attempt")
+        new = rec.get("new")
+        if to_attempt is None or new is None:
+            continue  # pre-P1 event, no to_attempt field — not comparable
+        if to_attempt > 0 and new == 0:
+            violations.append({
+                "rule": "success_count_contradiction",
+                "sku": rec.get("sku", "?"),
+                "severity": "critical",
+                "detail": f"ebay_upload_complete logged with to_attempt={to_attempt} "
+                          f"but new=0 — a shortfall reported as success",
+            })
+    return violations
+
+
 def cmd_catalog_verify(
     cfg: Dict[str, Any],
     *,
@@ -1345,6 +1479,7 @@ def cmd_catalog_verify(
     skip_verified: bool = False,
     fix: bool = False,
     write: bool = False,
+    scan_events_hours: int = 24,
 ) -> Dict[str, Any]:
     """Scan ItemData for assumption violations and emit a markdown checklist.
 
@@ -1436,6 +1571,15 @@ def cmd_catalog_verify(
         if limit and scanned >= limit:
             break
 
+    # PP-PHOTOSYNC-001 P7: log-derived rule, not per-item — runs once,
+    # independent of --location/--limit scoping (it scans the event log, not
+    # ItemData). Skipped entirely if the caller already filtered to a
+    # location, since a partial scan would misreport the global check.
+    if not location and scan_events_hours > 0:
+        for viol in _scan_upload_complete_contradictions(scan_events_hours):
+            if _SEV_ORDER.get(viol["severity"], 99) <= min_sev:
+                all_violations.append(viol)
+
     by_rule: Dict[str, int] = {}
     for viol in all_violations:
         by_rule[viol["rule"]] = by_rule.get(viol["rule"], 0) + 1
@@ -1480,7 +1624,7 @@ def cmd_catalog_verify(
     else:
         print(report)
 
-    return {
+    result = {
         "ok": True,
         "scanned": scanned,
         "violations": len(all_violations),
@@ -1492,6 +1636,19 @@ def cmd_catalog_verify(
         "fixes_applied": fixes_applied,
         "fixes_proposed": len(fix_log),
     }
+
+    # PP-PHOTOSYNC-001 P7: a JSON sidecar next to any markdown --output, so
+    # the nightly timer's run can feed `tgw ops-digest` a cheap file read
+    # instead of ops-digest re-running an expensive full scan itself.
+    if output:
+        try:
+            output.with_suffix(".json").write_text(
+                json.dumps({**result, "generated_at": datetime.now(tz=timezone.utc).isoformat()}),
+                encoding="utf-8")
+        except OSError:
+            pass  # sidecar is a convenience, never fatal to the scan itself
+
+    return result
 
 
 def cmd_hint(cfg: Dict[str, Any], sku: str, hint: str, force: bool = False) -> Dict[str, Any]:
@@ -4784,6 +4941,7 @@ def main() -> int:
                 skip_verified=getattr(args, "skip_verified", False),
                 fix=getattr(args, "fix", False),
                 write=getattr(args, "write", False),
+                scan_events_hours=getattr(args, "scan_events_hours", 24),
             )
             if getattr(args, "as_json", False):
                 print(json.dumps(result, indent=2))

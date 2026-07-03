@@ -58,6 +58,31 @@ def _unit_restarts() -> Dict[str, int]:
     return out
 
 
+_DEFAULT_CATALOG_VERIFY_SIDECAR = '/opt/TGW/var/run/catalog-verify-nightly.json'
+
+
+def _catalog_verify_summary(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """PP-PHOTOSYNC-001 P7: read the nightly catalog-verify timer's JSON
+    sidecar — a cheap file read, never a fresh scan (that's the timer's job,
+    not ops-digest's). Missing/stale file degrades to None, not an error."""
+    raw = cfg.get('raw', cfg)
+    path = Path(raw.get('catalog_verify_sidecar_path', _DEFAULT_CATALOG_VERIFY_SIDECAR))
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+    age_h = None
+    gen = data.get('generated_at')
+    if gen:
+        try:
+            age_h = round((datetime.now(timezone.utc)
+                          - datetime.fromisoformat(gen)).total_seconds() / 3600, 1)
+        except ValueError:
+            pass
+    return {'violations': data.get('violations', 0), 'by_rule': data.get('by_rule', {}),
+            'age_hours': age_h}
+
+
 def _oldest_inbox_note(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     inbox = cfg.get('plan_vault_path')
     if not inbox:
@@ -125,6 +150,7 @@ def collect(cfg: Dict[str, Any]) -> Dict[str, Any]:
         'restart_flags': restart_flags,
         'quota': quota.status(cfg),
         'oldest_inbox_note': _oldest_inbox_note(cfg),
+        'catalog_verify': _catalog_verify_summary(cfg),
     }
 
     try:
@@ -178,6 +204,17 @@ def render_text(d: Dict[str, Any]) -> str:
         for unit, info in sorted(d['restart_flags'].items()):
             lines.append(f"  {unit}: {info['since_last']:+d} since last "
                          f"(total {info['total']})")
+
+    cv = d.get('catalog_verify')
+    if cv is not None:
+        lines.append('')
+        stale = f" (STALE — {cv['age_hours']}h old)" if cv['age_hours'] and cv['age_hours'] > 30 else ''
+        if cv['violations']:
+            lines.append(f"CATALOG-VERIFY — {cv['violations']} critical violation(s){stale}")
+            for rule, n in sorted(cv['by_rule'].items(), key=lambda kv: -kv[1]):
+                lines.append(f"  {rule:28s} {n:>6}")
+        else:
+            lines.append(f"CATALOG-VERIFY — clean{stale}")
 
     note = d.get('oldest_inbox_note')
     if note and note['age_hours'] > 24:

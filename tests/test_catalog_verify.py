@@ -597,3 +597,211 @@ def test_compute_fixes_template_prefix_empty_body_not_fixable():
     """
     fixes = _compute_fixes({'title': '  TEMPLATE: '})
     assert fixes == []
+
+
+# ---------------------------------------------------------------------------
+# PP-PHOTOSYNC-001 P7 — truth-audit rules (pipeline claims vs reality)
+# ---------------------------------------------------------------------------
+
+def test_photos_short_on_ebay_flags_active_shortfall(tmp_path):
+    """The exact s43 bug, made detectable: an Active inventory-API listing
+    with fewer live eBay photo URLs than exist on disk."""
+    sku = 'tgw202601010000010'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'E5',
+        'ebay_listing': {'status': 'Active', 'api': 'inventory'},
+        'draft_listing': {'imageUrls': ['https://x/1']},
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc, photos=9)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'photos_short_on_ebay' in rules
+
+
+def test_photos_short_on_ebay_ignores_non_active(tmp_path):
+    sku = 'tgw202601010000011'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'E6',
+        'ebay_listing': {'status': 'Draft', 'api': 'inventory'},
+        'draft_listing': {'imageUrls': ['https://x/1']},
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc, photos=9)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'photos_short_on_ebay' not in rules
+
+
+def test_photos_short_on_ebay_ignores_items_with_no_recorded_urls(tmp_path):
+    """Most of the historical catalog never populated a live-URL field even
+    when photos genuinely went live via an older pipeline path (found live,
+    2026-07-03 — using ebay_photos as the proxy produced 9,382 false
+    positives on the first real run). With no live_photo_urls at all, this
+    rule must stay silent rather than assume a shortfall."""
+    sku = 'tgw202601010000018'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'E10',
+        'ebay_listing': {'status': 'Active', 'api': 'inventory'},
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc, photos=9)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'photos_short_on_ebay' not in rules
+
+
+def test_photo_verify_stale_count_mismatch(tmp_path):
+    sku = 'tgw202601010000012'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'E7',
+        'ebay_listing': {'status': 'Active', 'api': 'inventory',
+                         'photo_verify': {'submitted_count': 24, 'confirmed_count': 9}},
+        'ebay_photos': [{'local': f'{i}', 'url': f'https://x/{i}'} for i in range(24)],
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc, photos=24)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'photo_verify_stale' in rules
+
+
+def test_photo_verify_stale_predates_last_stage(tmp_path):
+    """tgw202606021133367's exact bug: photo_verify counts matched (9==9) at
+    the time it was written, but a later re-stage made it stale."""
+    sku = 'tgw202601010000013'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'E8',
+        'ebay_listing': {'status': 'Active', 'api': 'inventory',
+                         'photo_verify': {'submitted_count': 9, 'confirmed_count': 9,
+                                         'verified_at': '2026-07-01T00:00:00+00:00'}},
+        'ebay_offer': {'staged_at': '2026-07-03T09:55:00+00:00'},
+        'ebay_photos': [{'local': f'{i}', 'url': f'https://x/{i}'} for i in range(9)],
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc, photos=9)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'photo_verify_stale' in rules
+
+
+def test_photo_verify_fresh_no_violation(tmp_path):
+    sku = 'tgw202601010000014'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'E9',
+        'ebay_listing': {'status': 'Active', 'api': 'inventory',
+                         'photo_verify': {'submitted_count': 9, 'confirmed_count': 9,
+                                         'verified_at': '2026-07-03T10:00:00+00:00'}},
+        'ebay_offer': {'staged_at': '2026-07-03T09:55:00+00:00'},
+        'ebay_photos': [{'local': f'{i}', 'url': f'https://x/{i}'} for i in range(9)],
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc, photos=9)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'photo_verify_stale' not in rules
+
+
+def test_submitted_live_drift_fires_when_live_is_newer(tmp_path):
+    """Live pull postdates our submission and the title genuinely differs —
+    this IS worth flagging."""
+    sku = 'tgw202601010000016'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'F3',
+        'ebay_submitted': {
+            'staged_at': '2026-07-01T00:00:00+00:00',
+            'inventory_item': {'product': {'title': 'Old Title'}},
+        },
+        'ebay_live': {
+            'pulled_at': '2026-07-02T00:00:00+00:00',
+            'inventory_item': {'product': {'title': 'New Title'}},
+        },
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'submitted_live_drift' in rules
+
+
+def test_submitted_live_drift_never_fires_when_live_is_older(tmp_path):
+    """The exact mistake made on 2026-07-03: comparing a submission against
+    an OLDER live snapshot always shows a 'diff' that isn't evidence of
+    anything except staleness. This rule must never repeat it."""
+    sku = 'tgw202601010000017'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'F1',
+        'ebay_submitted': {
+            'staged_at': '2026-07-03T15:55:00+00:00',
+            'inventory_item': {'product': {'title': "Grant's Blended Scotch"}},
+        },
+        'ebay_live': {
+            'pulled_at': '2026-07-01T15:11:00+00:00',
+            'inventory_item': {'product': {'title': "Vintage Grant's Scotch"}},
+        },
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'submitted_live_drift' not in rules
+
+
+def test_submitted_live_drift_flags_aspect_change(tmp_path):
+    sku = 'tgw202601010000015'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'F2',
+        'ebay_submitted': {
+            'staged_at': '2026-07-01T00:00:00+00:00',
+            'inventory_item': {'product': {'aspects': {'Color': ['Green']}}},
+        },
+        'ebay_live': {
+            'pulled_at': '2026-07-02T00:00:00+00:00',
+            'inventory_item': {'product': {'aspects': {'Color': ['Brown']}}},
+        },
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'submitted_live_drift' in rules
+
+
+# ---------------------------------------------------------------------------
+# success_count_contradiction — journald-derived rule (structural test only;
+# real journald access is exercised live, not in the unit suite)
+# ---------------------------------------------------------------------------
+
+def test_scan_upload_complete_contradictions_flags_shortfall(monkeypatch):
+    import subprocess as _subprocess
+
+    from tgw.api import _scan_upload_complete_contradictions
+
+    fake_stdout = '\n'.join([
+        json.dumps({'event': 'ebay_upload_complete', 'sku': 'tgw1', 'total': 9,
+                   'new': 0, 'to_attempt': 17}),
+        json.dumps({'event': 'ebay_upload_complete', 'sku': 'tgw2', 'total': 5,
+                   'new': 5, 'to_attempt': 5}),
+        'not json at all',
+    ])
+
+    class _FakeProc:
+        stdout = fake_stdout
+
+    monkeypatch.setattr(_subprocess, 'run', lambda *a, **k: _FakeProc())
+    violations = _scan_upload_complete_contradictions(hours=24)
+    assert len(violations) == 1
+    assert violations[0]['sku'] == 'tgw1'
+    assert violations[0]['rule'] == 'success_count_contradiction'
+
+
+def test_scan_upload_complete_contradictions_ignores_pre_p1_events(monkeypatch):
+    """Events logged before the P1 fix have no to_attempt field — not
+    comparable, must not false-positive."""
+    import subprocess as _subprocess
+
+    from tgw.api import _scan_upload_complete_contradictions
+
+    fake_stdout = json.dumps({'event': 'ebay_upload_complete', 'sku': 'tgw1',
+                              'total': 9, 'new': 0})
+
+    class _FakeProc:
+        stdout = fake_stdout
+
+    monkeypatch.setattr(_subprocess, 'run', lambda *a, **k: _FakeProc())
+    violations = _scan_upload_complete_contradictions(hours=24)
+    assert violations == []
+
+
+def test_scan_upload_complete_contradictions_journalctl_missing_is_safe(monkeypatch):
+    import subprocess as _subprocess
+
+    from tgw.api import _scan_upload_complete_contradictions
+
+    def _raise(*a, **k):
+        raise FileNotFoundError('journalctl not found')
+
+    monkeypatch.setattr(_subprocess, 'run', _raise)
+    assert _scan_upload_complete_contradictions(hours=24) == []
