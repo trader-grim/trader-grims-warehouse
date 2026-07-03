@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-07-03 23:03 UTC — 200 open, 34 done in the last 7 days._
+_Rendered 2026-07-03 23:29 UTC — 201 open, 35 done in the last 7 days._
 
 ## admin (23 open)
 
@@ -41,7 +41,7 @@ _Rendered 2026-07-03 23:03 UTC — 200 open, 34 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (33 open)
+## claude (34 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
@@ -59,14 +59,15 @@ _Rendered 2026-07-03 23:03 UTC — 200 open, 34 done in the last 7 days._
 | 1052 | 18 |  | PP-BACKUP-001: write restore script + README for USB keys — script covers: (1) boot NixOS installer, (2) nixos-anywhere --flake path:.#tgw-prod, (3) pg_restore from dump, (4) rsync /opt/TGW from TGW-SNAPSHOT-0, (5) verify tgw health + echo round-trip. README covers user/password, uid=900 tgw check, secrets chmod. Files go in root of TGW-SECRETS-A and TGW-SECRETS-B. Plain text + shell script, no dependencies. | [[TGW-Master-Plan#PP-BACKUP-001 — backup + DR\|PP-BACKUP-001]] |  |
 | 1079 | 20 |  | PP-CATPICK-001 Phase 1: backfill category_candidates (name+path from tree cache) for all 25 category-groups.json groups | [[TGW-Master-Plan#PP-CATPICK-001 — smart category picker\|PP-CATPICK-001]] |  |
 | 1103 | 20 |  | Data Charter observability: dataset-growth lines in ops-digest (eBayCapture bytes/day, items with raw snapshots, archive coverage) — a day where the pipeline ran but the dataset didn't grow = something is discarding again |  |  |
+| 1126 | 20 |  | Deploy nix-flake catalog-verify-nightly timer to tgw-prod (nixos-rebuild switch) — code written + nix flake check clean in nix/tgw/backup.nix (PP-PHOTOSYNC-001 P7), awaiting explicit go for live infra deploy | [[TGW-Master-Plan#PP-PHOTOSYNC-001 — upload integrity + operator lane hardening + fleet photo repair\|PP-PHOTOSYNC-001]] |  |
 | 1053 | 22 |  | data-scrub: strip legacy Magento fields from item JSONs — fields to remove: 'Item number', '#STATUS', 'attribute_set', 'm2_categories', 'category_ids', 'ebay_condition_number', 'eBay category 1 name', 'eBay category 1 number', 'C:Brand', 'C:Type', 'C:MPN', 'C:Model', 'C:Language', 'C:Movie/TV Title', 'input_voltage', 'description_history', 'title_history', 'location_history'. Historical data preserved in historical-tgwcatalog.json / historical-master-catalog.json. Write a scrub worker or one-shot script; archive before/after per policy. |  |  |
 | 1049 | 25 |  | get-ebay-token browser UX: add --print-url flag to Python CLI + upgrade tgw fish wrapper in nix/tgw/home.nix to call xdg-open as db user (currently prints URL; this makes it auto-open) | [[TGW-Master-Plan#PP-NIXOS-001 — NixOS migration (CatioNIX)\|PP-NIXOS-001]] |  |
 | 1064 | 25 |  | PP-PHOTO-001 Phase A: GDrive → Gemini multimodal ebay_draft — pass all item photos to gemini-2.5-flash via GDrive HTTPS URLs instead of base64 encoding. Expected: major listing quality jump (all 8+ photos analyzed; Gemini extracts condition details, labels, markings, color, wear from every angle). Design: (1) store gdrive_file_ids map in item JSON (populated by rclone sync hook or one-time scan); (2) in ebay_draft worker, temporarily grant anyone-reader on each photo, build image_url array with drive.google.com/uc?export=download&id= URLs, pass to gemini-2.5-flash alongside text prompt, revoke after call; (3) add gdrive_api helper in tgw/apis/; (4) OAuth token in secrets_root/gdrive-token.json (drive.file scope preferred). Prereqs: Google Cloud project with Drive API enabled, OAuth creds in secrets_root. Research: docs/TGW-Plan-Vault/dev-workflow/research/RESEARCH-gdrive-zero-bandwidth-ebay-image-upload.md | [[TGW-Master-Plan#PP-PHOTO-001 — photo pipeline (GDrive → Gemini / eBay)\|PP-PHOTO-001]] |  |
 | 1108 | 25 |  | alt_text queue has no consumer: no tgw-worker@alt_text unit exists but ai_identify enqueues alt_text jobs (sit queued forever, confuse item-page pipeline log). Decide: install worker unit vs batch path (AI-Studio todo #144) vs stop enqueueing. |  |  |
 | 1117 | 25 |  | PP-PHOTOSYNC-001 P2: ops-digest + web-UI-digest lines for retry_wait liability per queue and next-reset quota exposure (the detector that would have shown the 2,514-SKU landmine as loud red) | [[TGW-Master-Plan#PP-PHOTOSYNC-001 — upload integrity + operator lane hardening + fleet photo repair\|PP-PHOTOSYNC-001]] |  |
-| 1125 | 28 |  | PP-PHOTOSYNC-001 P9: bulk truth source within EXISTING scopes (Dave 2026-07-03) — verify eBay Feed API ACTIVE_INVENTORY_REPORT works under sell.inventory (whole-site listing state in ~3 calls vs 19.5k); also Trading GetSellerList paged compare; design whole-site audit around the cheapest source; raw report lands via E7 capture | [[TGW-Master-Plan#PP-PHOTOSYNC-001 — upload integrity + operator lane hardening + fleet photo repair\|PP-PHOTOSYNC-001]] |  |
 | 1113 | 30 |  | ebay_dole worker not installed: 'queue for auto-listing' checkbox approves items into a ready pool NOTHING drains, and the UI says 'will publish at next dole cycle' (false). Decide at volume time (with PP-BULKLIST-001): install the unit + set dole rate, or remove/disable the checkbox until then. Interim: fix the checkbox label/response to say the pool is inactive. Found by Dave s42. |  |  |
 | 1118 | 30 |  | PP-PHOTOSYNC-001 P3: C10 detector — test that every http_server operator enqueue site stamps origin=operator (source-scan test like the fence grep audit); closes the 🔶 on invariant C10 | [[TGW-Master-Plan#PP-PHOTOSYNC-001 — upload integrity + operator lane hardening + fleet photo repair\|PP-PHOTOSYNC-001]] |  |
+| 1127 | 32 |  | PP-PHOTOSYNC-001 follow-up (from P9): re-point photos_short_on_ebay (catalog-verify) at the Inventory API bulk getInventoryItems list (~98 calls, live-verified) instead of the local draft_listing.imageUrls mirror — catches drift in our own local record, not just upload failures | [[TGW-Master-Plan#PP-PHOTOSYNC-001 — upload integrity + operator lane hardening + fleet photo repair\|PP-PHOTOSYNC-001]] |  |
 | 1065 | 35 |  | PP-PHOTO-001 Phase B: GDrive → eBay zero-bandwidth image upload — replace deprecated UploadSiteHostedPictures (Trading API) in ebay_upload worker with GDrive direct-URL pattern. Flow: (1) make each SKU photo temporarily public (anyone-reader), (2) pass GDrive direct download URL to Inventory API imageUrls[], (3) eBay CDN fetches from Google directly — TGW server sends zero image bytes, (4) revoke public access after staging confirms imageUrls populated in ebay_live. Eliminates all local upload bandwidth from photo pipeline. Same GDrive OAuth helper from Phase A. NOTE: Phase A (multimodal draft) is higher priority and should be built first since it shares the GDrive API helper. Research: docs/TGW-Plan-Vault/dev-workflow/research/RESEARCH-gdrive-zero-bandwidth-ebay-image-upload.md | [[TGW-Master-Plan#PP-PHOTO-001 — photo pipeline (GDrive → Gemini / eBay)\|PP-PHOTO-001]] |  |
 | 1119 | 35 |  | PP-PHOTOSYNC-001 P4: fleet photo repair 1→5→ramp (PRE-AUTHORIZED by Dave 2026-07-03) — after P1 lands: repair 1 item, verify live; then 5, show diff; then ramp remaining ~486 paced within background EPS budget | [[TGW-Master-Plan#PP-PHOTOSYNC-001 — upload integrity + operator lane hardening + fleet photo repair\|PP-PHOTOSYNC-001]] | ✓ deps done |
 | 1066 | 40 |  | PP-SEARCH-001 Phase 0: recoll universal index — ItemArchive + masterarchive/history + catalogs + docs vault |  |  |
@@ -231,10 +232,11 @@ _Rendered 2026-07-03 23:03 UTC — 200 open, 34 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — sold-event webhook (Tier 4)\|PP-SOLD-001]] |  |
 
-## Done this week (34)  — showing 15 most recent
+## Done this week (35)  — showing 15 most recent
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 1125 | claude | 2026-07-03 | in_progress: PP-PHOTOSYNC-001 P9 — bulk truth source within existing scopes |
 | 1123 | claude | 2026-07-03 | in_progress: PP-PHOTOSYNC-001 P7 — truth-audit rules in catalog-verify |
 | 1115 | claude | 2026-07-03 | in_progress: implementing P1 completion-guard fix + quota-retry cap |
 | 1116 | claude | 2026-07-03 | List on eBay must run as operator context end-to-end: operator-initiated pipeline jobs carry initiator through the whole chain (draft/upload/stage/publish) and use the interactive quota reserve, never the background halt (Dave 2026-07-03) |
@@ -249,5 +251,4 @@ _Rendered 2026-07-03 23:03 UTC — 200 open, 34 done in the last 7 days._
 | 1096 | claude | 2026-07-02 | R0.3 probe eBay Developer Analytics getRateLimits with current app keys — feasibility for real quota readings (see plan/RETARGET-2026-07-02.md) |
 | 1094 | claude | 2026-07-02 | Permissions: extended default ACL to src/bin/config/var/backups; patched atomic_write_json (items.py+catalog.py) to preserve/default file mode instead of NamedTemporaryFile's 0600; permissions-reset script now logs --check results to permissions-audit.log |
 | 1093 | claude | 2026-07-02 | Data-preservation audit (E5-related): found + fixed 2 fence_patch_item bugs where in-memory mutations were silently never persisted (ebay_price_reducer draft_listing.price, ebay_draft taxonomy-retry category resolution); audited all 20 fence_patch_item call sites, other 18 clean |
-| 1092 | claude | 2026-07-02 | Wire bulk_classify into ebay_draft aspect-fill as vision-based (multi-photo) instead of text-only |
-| … | | | _…and 19 more — run `tgw todo --all` to see everything_ |
+| … | | | _…and 20 more — run `tgw todo --all` to see everything_ |

@@ -186,7 +186,22 @@ item — ask him at packet start, do not choose silently).
 deliberately-broken run (e.g. temporarily rename a photo) goes red and notifies.
 **Quota:** a handful of inventory-pool calls + 0–2 EPS calls per run; daily cadence.
 
-### P9 = todo #1125 — whole-site audit for near-zero API cost (Dave, s43)
+### P9 = todo #1125 — whole-site audit for near-zero API cost ✅ DONE 2026-07-03
+Winner found and live-verified: **Inventory API bulk `getInventoryItems`
+(paged, limit=200)** — ~98 calls covers ALL 19,486 items, and the bulk LIST
+response already includes full `product.imageUrls` per item (no per-SKU offer
+call needed for photo truth). ~200x cheaper than R1.8's per-SKU offer pull for
+this specific comparison. Feed API `ACTIVE_INVENTORY_REPORT` confirmed
+**blocked on scope** (`sell.item.feed`, not granted — the packet's original
+"sell.inventory family" hypothesis was wrong) — recorded as blocked, not
+requested. `GetMyeBaySelling` is already live daily (`ebay_legacy_sync`) but
+found narrower than assumed: explicitly skips inventory-API items and never
+extracts PictureDetails from the already-captured raw XML — low priority since
+the bulk-list winner already covers the higher-value cohort. Full ranking:
+`reference/eBay-Bulk-Audit-Sources.md`. **Follow-up (not yet filed as a
+todo)**: point `photos_short_on_ebay` (P7) at the bulk list instead of the
+local `draft_listing.imageUrls` mirror — catches drift the local record itself
+might have, not just upload failures.
 **Why:** Dave: "there is likely for us to do a bulk, maybe even whole site audit
 for less api cost if we look hard through all of our scopes." Per-SKU offer pulls
 cost ~19.5k calls; bulk sources may cut a whole-site audit to a handful.
