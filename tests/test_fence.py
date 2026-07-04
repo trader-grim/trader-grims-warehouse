@@ -90,7 +90,7 @@ def env(tmp_path, monkeypatch, enqueue_calls):
     }
     monkeypatch.setattr(http_server, "_cfg", cfg)
     monkeypatch.setattr(http_server, "_api_key", API_KEY)
-    monkeypatch.setattr(http_server, "_web_key", "")
+    monkeypatch.setattr(http_server, "_web_password", "")
     monkeypatch.setattr(http_server.psycopg2, "connect", lambda *a, **k: _FakeConn())
 
     _write_item(itemdata_root, SKU, {

@@ -57,6 +57,11 @@ def test_price_mismatch_enqueues_forced_restage(tmp_path, monkeypatch):
         ebay_publish_mod.state_machine, 'enqueue_job',
         lambda **k: calls.append(k) or 'job-1',
     )
+    # Ordering guard (session 42, ebay_publish.py:148) queries the real DB for
+    # in-flight upstream jobs — must be mocked offline like enqueue_job, or
+    # this test hits a live Postgres connection under the test's real DSN.
+    monkeypatch.setattr(
+        ebay_publish_mod.state_machine, 'active_jobs_for_sku', lambda *a, **k: [])
 
     worker = _worker(_cfg(tmp_path))
     with pytest.raises(RuntimeError, match=r'requested a forced ebay_stage re-sync'):
@@ -76,6 +81,11 @@ def test_matching_prices_do_not_enqueue_restage(tmp_path, monkeypatch):
         ebay_publish_mod.state_machine, 'enqueue_job',
         lambda **k: calls.append(k) or 'job-1',
     )
+    # Ordering guard (session 42, ebay_publish.py:148) queries the real DB for
+    # in-flight upstream jobs — must be mocked offline like enqueue_job, or
+    # this test hits a live Postgres connection under the test's real DSN.
+    monkeypatch.setattr(
+        ebay_publish_mod.state_machine, 'active_jobs_for_sku', lambda *a, **k: [])
     monkeypatch.setattr(ebay_publish_mod, 'publish_offer',
                         lambda cfg, offer_id: {'listing_id': 'L1', 'listing_url': 'http://x', 'status': 'PUBLISHED'})
     monkeypatch.setattr(ebay_publish_mod, 'fence_ebay_write', lambda *a, **k: {'ok': True})

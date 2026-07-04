@@ -104,11 +104,16 @@ listing editor built but **not yet operator-verified** — that is the current g
 live items. `ebay_sku_migrate` COMPLETE (s35).
 
 **Known red (tracked):** no backup timers (PP-BACKUP-001, operator todos); test suite
-rot — true state 1,399 pass / 11 fail / 236 errors, `test_http_server.py` broken since
-cookie-auth refactor (todo #1102); 3,239 `ebay_draft` dead-letters (bulk requeue
-awaits Dave's go); todo #1077 orphaned offer forces ebay_sync per-SKU fallback (Dave →
-eBay support); 15 Syncthing conflict files in vault; nats health check red (module
-absent — decide: install or drop check).
+repaired 2026-07-04 (todo #1102 DONE) — 1,761 pass / 1 skipped / 0 fail / 0 errors,
+up from 1,513/12/236; root cause was `test_http_server.py`'s fixtures never updated
+for the s42/43 cookie-login wall (`_web_key` renamed `_web_password`, `/form/*` now
+needs a session cookie) plus a handful of unrelated drifts (`test_fence.py` same
+fixture rename; `test_ebay_publish_price_drift.py` missing a mock for the s42
+ordering-guard DB call; `test_config_hygiene.py`/`test_freeship.py` leaking into the
+real `/opt/TGW/secrets` path for non-tgw test runners). 3,239 `ebay_draft`
+dead-letters (bulk requeue awaits Dave's go); todo #1077 orphaned offer forces
+ebay_sync per-SKU fallback (Dave → eBay support); 15 Syncthing conflict files in
+vault; nats health check red (module absent — decide: install or drop check).
 
 **s43 update (2026-07-03):** EPS-exhaustion root causes found and the standing parts
 fixed — retry_wait backlog (2,715 jobs) cancelled; invariant **C10 operator lane
@@ -174,6 +179,8 @@ nonexistent `ebay_dole`); CLAUDE.md `tgw todo --add` syntax fix.
 ---
 
 P1 upload integrity fix complete — see document for spec, implementation, tests, and live verification.
+
+P9 bulk audit: Inventory API getInventoryItems winner (~98 calls), Feed API blocked, GetMyeBaySelling narrower than assumed. Full ranking in dev-workflow/research/RESEARCH-photosync-bulk-audit.md. Follow-up #1127 filed.
 ## Work-packet protocol
 
 One packet = one todo = one model session. Non-trivial packets get
@@ -204,6 +211,7 @@ promote it to `pp/`.
 
 ### Open — active or gated
 
+Hermes agent architecture research filed: mixture-of-expert-pairs pattern with Claude CLI + Aider + site-specific MCP server.
 ## PP-EBAY-MOTORS-001 — eBay Motors not accounted for anywhere (URGENT, unscoped)
 **Opened 2026-07-04, surfaced live during PP-PHOTOSYNC-001 P10.** Dave: "we do
 not have ebay motors accounted for anywhere... add that as an urgent planning

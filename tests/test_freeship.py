@@ -61,7 +61,9 @@ def test_freeship_zero_base_price():
 
 def test_config_freeship_defaults(tmp_path):
     cfg_path = tmp_path / "tgw-api-config.json"
-    cfg_path.write_text("{}", encoding="utf-8")
+    # secrets_root must stay inside tmp_path — otherwise load_config() falls
+    # back to the real /opt/TGW/secrets and PermissionErrors for non-tgw runners.
+    cfg_path.write_text(json.dumps({"secrets_root": str(tmp_path / "secrets")}), encoding="utf-8")
     cfg = load_config(cfg_path)
     assert cfg["free_shipping_enabled"] is False
     assert cfg["default_shipping_cost"] == 0.0
@@ -71,6 +73,7 @@ def test_config_freeship_defaults(tmp_path):
 def test_config_freeship_from_json(tmp_path):
     cfg_path = tmp_path / "tgw-api-config.json"
     cfg_path.write_text(json.dumps({
+        "secrets_root": str(tmp_path / "secrets"),
         "free_shipping_enabled": True,
         "default_shipping_cost": 6.95,
         "fulfillment_policy_free_shipping": "POLICY-FREE-123",
