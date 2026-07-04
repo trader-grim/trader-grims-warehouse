@@ -94,11 +94,14 @@ def load_config(path: Path) -> Dict[str, Any]:
 
     _api_key_path = secrets_root / "tgw-api-key.json"
     _api_key = ""
-    if _api_key_path.exists():
-        try:
+    try:
+        if _api_key_path.exists():
             _api_key = json.loads(_api_key_path.read_text(encoding="utf-8"))["api_key"]
-        except Exception:
-            pass
+    except Exception:
+        # secrets_root is 700 tgw:tgw — a non-tgw caller (e.g. `tgw clip`,
+        # which the nix wrapper runs as the operator's own user, not tgw)
+        # can't even stat() inside it. Treat as absent, same as a missing key.
+        pass
     ebay_draft_csv_path = p("ebay_draft_csv_path", str(catalog_root / "ebay-draft-offline.csv"))
 
     postgres_dsn = raw.get("postgres_dsn", "dbname=state_machine user=tgw")
