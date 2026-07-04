@@ -173,3 +173,29 @@ Extend this, don't invent a second system:
    now or deferred? Recommend deferred — manual `markmap` invocation after
    plan changes is a 10-second operator action, not worth automating until
    it's actually annoying.
+
+## Added 2026-07-04 — Perplexity footnote/citation pass (todo #1141)
+
+Dave: add a plan item to have Perplexity footnote the master plan (and
+key PP docs) with citations to our own reference documents and to
+external resources — the same numbered-footnote style Perplexity already
+produces on its own research drops (e.g. `pricing-research-ui.md`'s
+`[^1_1]`-style citations linking claims back to sources).
+
+**Why this fits here:** it's a documentation-quality initiative, same
+spirit as the four-bucket taxonomy and cross-reference (`[[wikilink]]`)
+convention already proposed above — footnotes are the *external*-facing
+half of cross-referencing (linking a plan assertion to an eBay API doc,
+a research thread, or a reference/*.md file), where `[[wikilink]]`s are
+the *internal* half (linking between vault documents).
+
+**Not scoped yet — needs a decision before building:** does this run as
+a one-time pass over the current master plan + active PP docs, or an
+ongoing practice applied to new plan writing going forward (or both —
+backfill once, then adopt going forward)? Which documents are in scope
+first (just `TGW-Master-Plan.md`, or the `pp/*.md` design docs too)?
+Does "external resources" mean live Perplexity research calls per claim
+(cost/quota implications — Perplexity access is presumably outside our
+existing quota-tracked pools, worth checking), or reusing citations
+already gathered in past research drops sitting in the vault? Needs
+Dave's input on scope before any build.
