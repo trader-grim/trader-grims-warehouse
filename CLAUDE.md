@@ -125,6 +125,7 @@ Plain Markdown; open in Obsidian for interactive mind map view where noted.
 | `TGW-Pipeline-Flow.md` | Worker logic, queue flow, enqueue decisions, debugging |
 | `TGW-Config-Reference.md` | Config keys, secrets, policy IDs, adding new config |
 | `TGW-Ollama-Prompts.md` | ai_identify + ebay_draft prompts, tuning levers |
+| `LLM-Providers-Quotas.md` | **Any LLM provider/model/quota change** — Google free tier is ~20/day/model PER PROJECT (not the published 1,000); OpenRouter primary, Google = operator emergency reserve; rediscovered 3× before being written down |
 | `PP-LOOKUP-001-APIs.md` | Product enrichment, barcode lookup, ai_identify augmentation |
 | `PP-PROMO-001-sale-event-design.md` | Sale event automation via Promotions API — design, API shape, operator checklist |
 | `CATEGORY-QUIRKS.md` | Per-category eBay quirks, fulfillment overrides, condition limits |

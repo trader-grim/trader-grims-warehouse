@@ -605,3 +605,30 @@ resolving. `cmd_resolve_legacy` runs the same live check by default. New
 catalog-verify rule `legacy_listing_unrepaired` is the "regularly check"
 detector. Tests: `tests/test_invariants_stage_guards.py`,
 `tests/test_resolve_legacy_duplicate_check.py`.
+
+## E8 — The Google free tier is the operator emergency reserve ✅ (2026-07-04, session 45)
+
+**Rule:** Background jobs never spend the Google Gemini free tier. OpenRouter
+is the primary provider for all cloud LLM tasks; `google_direct` may only be
+called (a) as the interactive-caller-only fallback when OpenRouter fails —
+the C10 operator lane qualifies — or (b) as a configured primary once a PAID
+Google key exists. Never assume a published free-tier number applies to this
+project: Google doles quota per project (~20 req/day/model observed here vs
+1,000 published). Full findings + re-verification recipe:
+`reference/LLM-Providers-Quotas.md`.
+
+**Why:** Dave, s45: "it's only 20 calls... make that the operator emergency
+reserve. It's not very valuable otherwise." Background use of the free tier
+produced 2,171 doomed 429s in one day (2026-07-04), each burning ~40s of
+retry latency per requeue-backlog job, and the true per-project grant had
+been rediscovered from scratch at least three times (s41, s44, s45) because
+it was never written down.
+
+**Enforcement:** `llm.py call_model()` gates the openrouter→google_direct
+fallback on `quota.context_kind() == 'interactive'`; the google_direct path
+is `quota.precheck('llm_google')`-gated (post-429 stand-down / circuit
+breaker); `quota._DEFAULT_BUDGETS['llm_google'] = 20` halts background
+callers at the threshold and surfaces spend in the `quota` health check.
+Tests: `tests/test_llm_google_direct.py`
+(TestOperatorEmergencyReserve, TestGoogleStandDown),
+`tests/test_quota.py::TestEnforcement::test_llm_google_default_budget_halts_background`.
