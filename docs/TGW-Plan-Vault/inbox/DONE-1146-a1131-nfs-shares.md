@@ -39,3 +39,8 @@ PENDING (a1131 went unreachable ~15:10, "no route to host" — needs power-on):
 - OPEN QUESTION for Dave: sudo for claude on a1131 — harness requires his
   explicit authorization for a NOPASSWD rule (Option A) vs no sudo (Option B,
   current state, sufficient for checks).
+
+**RESOLVED:** Dave authorized sudo (Option A) same evening — "you have ssh
+access to a1131 from tgw, no reason to make that more difficult when you
+have your own room." NOPASSWD rule deployed + verified (`sudo -n whoami` →
+root as claude). Flake commit records the quote.
