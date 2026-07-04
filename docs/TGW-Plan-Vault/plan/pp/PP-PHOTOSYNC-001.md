@@ -104,7 +104,7 @@ attempt to work around it; RETRY_WAIT render logic is instead covered by
 `tests/test_ops_digest_retry_exposure.py` (5 cases: clean, below-threshold,
 over-count RED, over-age RED, multi-queue exposure sum).
 
-### P3 = todo #1118 — C10 detector (closes invariant 🔶)
+### P3 = todo #1118 — C10 detector (closes invariant 🔶) — DONE 2026-07-03/04
 **Context budget:** plan core + this file + `tests/test_operator_origin.py` +
 `http_server.py` (scan target only).
 **Spec:** source-scan test (fence-grep-audit pattern): every
@@ -115,6 +115,17 @@ author which invariant they hit. Update `invariants.md` C10 🔶→✅.
 **Acceptance:** test fails when a deliberately-unstamped enqueue is added locally,
 passes on current tree. Tests-only packet — live-fire N/A (flag per PD4 that this is
 a detector, not behavior).
+
+**What shipped:** `tests/test_operator_origin_sourcescan.py` — a paren-balanced
+block scanner (not full AST — matches the fence-audit test's style) over every
+`state_machine.enqueue_job(` call in `http_server.py`. Passes on all 25 current
+call sites (allowlist = `catalog_rebuild` queue only; the webhook site at line
+~9015 already enqueues `catalog_rebuild`, so no separate webhook allowlist entry
+was needed). 4 tests: real-tree scan (0 violations), a poisoned synthetic site
+(flags it), an allowlisted synthetic site (passes), and an out-of-line
+`payload["origin"] = "operator"` stamp — the `/api/dead-letter/{id}/retry`
+pattern at http_server.py:1764-ish — resolves correctly (passes). `invariants.md`
+C10 updated 🔶→✅.
 
 ### P4 = todo #1119 — fleet photo repair — PAUSED (mid-execution, see P10)
 **Context budget:** plan core + this file + the P1-fixed `ebay_upload.py` + P10

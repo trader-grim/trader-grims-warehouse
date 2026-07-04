@@ -502,7 +502,7 @@ just at the enqueuer, so no future enqueue path can bypass it.
 **Enforcement:** guard in `workers/ebay_stage.py` handle(); tests in
 `tests/test_invariants_stage_guards.py`.
 
-## C10 — An operator action stays an operator action end-to-end 🔶 (2026-07-03, session 43)
+## C10 — An operator action stays an operator action end-to-end ✅ (2026-07-03, session 43; detector 2026-07-03/04)
 
 **Rule:** Every job enqueued from an operator surface (item-action endpoint,
 bulk actions, PATCH auto-redraft, dead-letter retry button, revision apply)
@@ -522,11 +522,16 @@ C9's inspection gate: `origin='operator'` means a human pressed the button, and
 both the content gate and the quota lane key off it.
 
 **Enforcement:** context switch in `queue/worker_base.py` `_process()`;
-origin stamps at all 14 operator enqueue sites in `http_server.py`;
+origin stamps at all operator enqueue sites in `http_server.py`;
 propagation in `workers/ebay_draft.py`, `ebay_price.py`, `ebay_stage.py`,
 `ebay_publish.py`, `ebay_upload.py`. Tests: `tests/test_operator_origin.py`.
-🔶 = detector pending: no CI check yet that a NEW operator endpoint stamps the
-origin — candidate: grep-audit like the fence's, or a shared enqueue helper.
+Detector (P3, todo #1118, closes the 🔶): `tests/test_operator_origin_sourcescan.py`
+source-scans every `state_machine.enqueue_job(` call in `http_server.py`
+(fence-grep-audit pattern) — each site must stamp `origin="operator"` in its
+payload (dict literal or an out-of-line `payload["origin"] = "operator"`
+before the call) or target the allowlisted `catalog_rebuild` queue (coalesced
+rebuilds never carry operator origin by design). A new unstamped, non-allowlisted
+site fails the test with the offending line number.
 
 ## C11 — A skip/guard is a finding, not a log line ✅ (2026-07-03, session 43)
 
