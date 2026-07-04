@@ -206,6 +206,8 @@ One packet = one todo = one model session. Non-trivial packets get
 `plan/packets/<todo-id>-<slug>.md`:
 
 ```
+
+Fixed tgw-restore.sh bug, wrote TGW-VAULT-RESTORE.md (both restore paths, live-verified dry-run).
 # Packet: <observable outcome>
 Todo: #NNNN   PP: PP-XXX-001   Track: R1.x
 ## Context budget (ALL the model may load)
@@ -288,8 +290,32 @@ P10 complete (legacy duplicate check + eBay Motors awareness). P4 paused per P10
 P6 investigated: ebay_repush orphan queue diagnosed (2 orphan jobs, no systemd unit). Needs Dave decision: install unit or retire enqueue path. Full detail in `plan/pp/PP-PHOTOSYNC-001.md`.
 ## PP-LISTEDITOR-001 — listing editor + revision apply
 Phase 2 code complete s40 (`_APPLY_ENABLED=True`, drift-gated live PUT). **Gate:
-live-fire R1.1.** Then wire Update-Item button to revision apply. Todos #1062/#1084.
-Design: `archive/sections/Pending-projects-revisit.md` (promote on touch).
+live-fire R1.1 — still not done** (todo #1137; #1084 was mistakenly closed
+mid-session 2026-07-04 after a related-but-different bug got fixed instead —
+see below — R1.1's actual price-only-delta test via `revision.py`'s apply
+path was never run). Candidate item: `tgw201501021970128` (Simpsons Game of
+Life canary set). Then wire Update-Item button to revision apply. Design:
+`archive/sections/Pending-projects-revisit.md` (promote on touch).
+
+**Same-day fix, todo #1114 — auto-redraft-clobbers-operator-edit, DONE and
+live-verified.** Investigated per Dave's request ("verify why we did it that
+way before changing") rather than jumping straight to a fix. Root cause: the
+HTTP PATCH auto-enqueue trigger (`patch_item()`) conflated two different
+things under one condition — "a raw fact changed, regenerate the AI draft"
+vs. "the operator polished the final draft content directly." In practice
+only the second ever happens (the editor UI only ever PATCHes into
+`draft_listing.*` — no code path sends bare top-level `title`/
+`item_attributes` through this endpoint), so regenerating was never
+correct: every operator edit to an already-live item's draft got silently
+overwritten by a fresh AI regeneration before it was ever seen. Cost impact
+(Dave's own estimate, confirmed): each needless regen burns 2 AI calls
+(primary draft + `bulk_classify` aspect-fill) for zero benefit — a typical
+2-3-edit polish session tripled the AI cost of a step that should cost
+nothing. Fixed to mirror the existing "Update Listing" button exactly: push
+(`ebay_stage`, `force=True`, `origin=operator`) instead of regenerate
+(`ebay_draft`). Live-verified against a real published listing
+(`tgw201501021970354`) all the way to a real eBay title change, confirmed
+via a fresh uncached API read, then reverted. 3 new tests.
 
 ## PP-ACTIONCONSOLE-001 — state-driven item action console
 Built s40 (state-driven action line, Editor/Live tabs). **Gate: Dave's operator test
