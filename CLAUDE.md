@@ -106,6 +106,7 @@ loses recoverability. Run `/tgw-exit` when done or switching to a1131 — it fin
 | ItemData | `/opt/TGW/data/ItemData/<SKU>/<SKU>.json` + photos |
 | Catalog | `/opt/TGW/data/ItemCatalog/` |
 | Logs | `/opt/TGW/var/log/` |
+| Universal search index | `/opt/TGW/.recoll/` (config + xapiandb; not in git) — `recoll -q "..."` for cross-archive recovery/audit queries (PP-SEARCH-001 Phase 0) |
 | Plan vault | `docs/TGW-Plan-Vault/` (Syncthing-synced Obsidian) |
 | Plan inbox | `docs/TGW-Plan-Vault/inbox/` (drop .md files here) |
 | **Reference docs** | `docs/TGW-Plan-Vault/reference/` — read before working on relevant areas |
