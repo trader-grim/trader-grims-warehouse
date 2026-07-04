@@ -776,6 +776,81 @@ def test_patch_succeeds_even_if_enqueue_raises(env, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# PATCH auto-enqueue on draft_listing edit (todo #1114) — push, never regen
+# ---------------------------------------------------------------------------
+
+def _seed_live_item(env, sku, extra_fields=None):
+    doc = {
+        "sku": sku, "title": "Live Widget", "location": "A1",
+        "condition": "Good",
+        "draft_listing": {"title": "Live Widget", "price": "9.99"},
+        "ebay_offer": {"offer_id": "OFF-LIVE-1", "status": "PUBLISHED"},
+    }
+    doc.update(extra_fields or {})
+    _write_item(env["itemdata_root"], sku, doc)
+
+
+def test_operator_edit_to_live_draft_pushes_not_regenerates(env, enqueue_calls):
+    sku = "tgw20260401000000009"
+    _seed_live_item(env, sku)
+
+    r = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"draft_listing": {"title": "Live Widget (fixed typo)"}}},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+
+    queue_names = [c["kwargs"].get("queue_name") for c in enqueue_calls]
+    assert "ebay_stage" in queue_names
+    assert "ebay_draft" not in queue_names
+    stage_call = next(c for c in enqueue_calls if c["kwargs"].get("queue_name") == "ebay_stage")
+    assert stage_call["kwargs"]["payload"]["force"] is True
+    assert stage_call["kwargs"]["payload"]["origin"] == "operator"
+
+    # The operator's edit itself must survive on disk — the whole point.
+    doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
+    assert doc["draft_listing"]["title"] == "Live Widget (fixed typo)"
+
+
+def test_worker_write_to_live_draft_does_not_auto_enqueue(env, enqueue_calls):
+    """A machine write (X-TGW-Caller identifies it as a worker) must not
+    trigger the push — only genuine operator edits should (s42 regression
+    guard, still applies after the #1114 fix)."""
+    sku = "tgw20260401000000010"
+    _seed_live_item(env, sku)
+
+    r = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"draft_listing": {"title": "Worker-written title"}}},
+        headers={**AUTH_HEADERS, "X-TGW-Caller": "background:worker:ebay_draft"},
+    )
+    assert r.status_code == 200
+    queue_names = [c["kwargs"].get("queue_name") for c in enqueue_calls]
+    assert "ebay_stage" not in queue_names
+    assert "ebay_draft" not in queue_names
+
+
+def test_operator_edit_to_not_yet_live_draft_does_not_auto_enqueue(env, enqueue_calls):
+    """No offer_id yet — nothing to push to, so no auto-enqueue at all
+    (unchanged pre-#1114 behavior for pre-publish items)."""
+    sku = "tgw20260401000000011"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Draft Widget", "location": "A1",
+        "draft_listing": {"title": "Draft Widget"},
+    })
+    r = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"draft_listing": {"title": "Draft Widget v2"}}},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    queue_names = [c["kwargs"].get("queue_name") for c in enqueue_calls]
+    assert "ebay_stage" not in queue_names
+    assert "ebay_draft" not in queue_names
+
+
+# ---------------------------------------------------------------------------
 # GET /api/locations
 # ---------------------------------------------------------------------------
 

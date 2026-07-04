@@ -707,7 +707,8 @@ def patch_item(sku: str, body: PatchBody, request: Request) -> Dict[str, Any]:
     _enqueue_catalog_rebuild(f"http_patch:{sku}")
 
     # If draft_listing content changed and the item is already on eBay, push the
-    # update automatically — the operator should never have to remember to Re-draft.
+    # update automatically — the operator should never have to remember to click
+    # "Update Listing".
     #
     # OPERATOR EDITS ONLY (session-42 incident): workers patch draft_listing
     # through this same endpoint (ebay_draft writes the draft, ebay_upload writes
@@ -722,21 +723,35 @@ def patch_item(sku: str, body: PatchBody, request: Request) -> Dict[str, Any]:
     # but a worker acting for the operator is still not a human editing in the
     # UI — treating it as one resurrected the s42 redraft loop (2026-07-03).
     _machine_write = _caller.startswith("background:") or "worker:" in _caller
+    # todo #1114 (2026-07-04): this used to enqueue ebay_draft here, which
+    # RE-RUNS the AI drafting pass and overwrites draft_listing with fresh
+    # model output — clobbering the very edit the operator just made. Root
+    # cause: the trigger field set conflates two different edits. The
+    # editor UI only ever PATCHes into draft_listing.* directly (condition,
+    # shipping profile, aspects, price, title, description all live there —
+    # confirmed by grep, no UI path sends bare top-level title/description/
+    # item_attributes through this endpoint), so this branch has, in
+    # practice, ALWAYS meant "the operator polished the final draft
+    # content," never "a raw fact changed, please regenerate." Regenerating
+    # is therefore never correct here. Fixed to mirror the existing
+    # "Update Listing" button's ebay_update action exactly: push the
+    # operator's edited draft_listing straight to the live offer
+    # (ebay_stage, force=True, origin=operator) — no AI involved.
     _DRAFT_LISTING_FIELDS = {"draft_listing", "title", "description", "item_attributes"}
     if not _machine_write and _DRAFT_LISTING_FIELDS.intersection(body.fields):
         offer_id = (doc_before.get("ebay_offer") or {}).get("offer_id")
         if offer_id:
             try:
                 state_machine.enqueue_job(
-                    queue_name="ebay_draft",
-                    payload={"sku": sku, "origin": "operator"},
-                    dedupe_key=f"ebay_draft:{sku}",
-                    max_attempts=3,
+                    queue_name="ebay_stage",
+                    payload={"sku": sku, "force": True, "origin": "operator"},
+                    max_attempts=2,
                 )
-                log.info("auto-queued ebay_draft for %s (draft_listing changed, offer_id present)", sku)
+                log.info("auto-queued ebay_stage (push, no regen) for %s "
+                        "(draft_listing changed, offer_id present)", sku)
             except Exception as _eq:
                 if "unique" not in str(_eq).lower() and "duplicate" not in str(_eq).lower():
-                    log.warning("failed to auto-enqueue ebay_draft for %s: %s", sku, _eq)
+                    log.warning("failed to auto-enqueue ebay_stage for %s: %s", sku, _eq)
 
     return {"ok": True, "sku": sku, "updated": updated_keys}
 
