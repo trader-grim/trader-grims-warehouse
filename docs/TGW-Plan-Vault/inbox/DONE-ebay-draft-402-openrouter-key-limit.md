@@ -40,3 +40,19 @@ queued, 1 running, 63244 succeeded, 2762 dead_letter, 1662 cancelled.
 - Consider adding an OpenRouter `auth/key` weekly-limit check to `tgw
   health`'s quota section so this doesn't require log-diving to find next
   time.
+
+**UPDATE 2026-07-04 ~14:48 UTC — one more finding, not a new incident:**
+`tgw health`'s quota check showed `llm_google` spend jumping from 92→973
+with a 429 at 13:09 UTC, ~9 min after the pause. Traced it: each successful
+`ebay_draft` job fires **two** separate Gemini calls, not one — the primary
+draft (`gemini-2.5-flash`) and a secondary vision call for aspect-filling
+routed through `bulk_classify` (`gemini-2.5-flash-lite`,
+`workers/ebay_draft.py` ~L405-424). The 97 `bulk_classify` calls and 196
+`RESOURCE_EXHAUSTED` hits on `gemini-2.5-flash-lite` in the last 3h all
+trace to the 38 jobs that succeeded before the pause plus the handful still
+`running` when `cancel_queued` fired (which only touches `state='queued'`,
+not in-flight jobs) — confirmed quiet since 13:09, no new activity as of
+14:48. Not a new runaway, but worth remembering: **this doubles free-tier
+pressure per successful ebay_draft job** (two Gemini calls, one on each of
+two different models) — a factor for whatever billing/limit fix gets
+chosen next.
