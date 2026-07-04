@@ -83,6 +83,48 @@ def _catalog_verify_summary(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             'age_hours': age_h}
 
 
+def _dataset_growth(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Data Charter observability (todo #1103): eBayCapture bytes/records for
+    today's capture file, and ItemArchive coverage (E5, todo #1104). Cheap
+    stat/listdir calls only — never re-parses the capture file's contents.
+
+    Purpose (Dave): "a day where the pipeline ran but the dataset didn't
+    grow = something is discarding again" — Prime Directive 1, automated.
+    """
+    raw = cfg.get('raw', cfg)
+    capture_root = Path(raw.get('ebay_capture_root', '/opt/TGW/incoming/ebay'))
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    capture_file = capture_root / f'{today}.jsonl.gz'
+    try:
+        capture_bytes = capture_file.stat().st_size
+    except OSError:
+        capture_bytes = 0
+
+    itemdata_root = cfg.get('itemdata_root')
+    archive_root = cfg.get('archive_root')
+    total_items = 0
+    archived_items = 0
+    try:
+        if itemdata_root:
+            total_items = sum(1 for p in Path(itemdata_root).iterdir()
+                              if p.is_dir() and p.name.startswith('tgw'))
+    except OSError:
+        pass
+    try:
+        if archive_root and Path(archive_root).is_dir():
+            archived_items = sum(1 for p in Path(archive_root).iterdir()
+                                 if p.suffix == '.zip')
+    except OSError:
+        pass
+
+    return {
+        'capture_bytes_today': capture_bytes,
+        'total_items': total_items,
+        'archived_items': archived_items,
+        'archive_fraction': round(archived_items / total_items, 4) if total_items else None,
+    }
+
+
 def _oldest_inbox_note(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     inbox = cfg.get('plan_vault_path')
     if not inbox:
@@ -140,6 +182,27 @@ def collect(cfg: Dict[str, Any]) -> Dict[str, Any]:
                      if n - prev_restarts.get(u, 0) > _RESTART_FLAG_THRESHOLD
                      or (u not in prev_restarts and n > _RESTART_FLAG_THRESHOLD)}
 
+    quota_status = quota.status(cfg)
+    dataset_growth = _dataset_growth(cfg)
+    today_key = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    prev_growth = prev.get('dataset_growth') or {}
+    # Only compare deltas within the same UTC day — a fresh day's capture
+    # file starting smaller than yesterday's full file is not a stall.
+    same_day = prev_growth.get('date') == today_key
+    capture_bytes_delta = (
+        dataset_growth['capture_bytes_today'] - prev_growth.get('capture_bytes_today', 0)
+        if same_day else None
+    )
+    dataset_growth['date'] = today_key
+    dataset_growth['capture_bytes_delta'] = capture_bytes_delta
+    # The alarm: eBay calls happened (any pool spent > 0) since last look, but
+    # today's capture file didn't grow a single byte — something is
+    # discarding raw responses again (Prime Directive 1 / invariant E7).
+    ebay_activity = any(p.get('spent', 0) > 0 for pool, p in quota_status.get('pools', {}).items()
+                       if pool.startswith('ebay_'))
+    dataset_growth['capture_stalled'] = bool(
+        same_day and ebay_activity and capture_bytes_delta is not None and capture_bytes_delta <= 0)
+
     digest = {
         'generated_at': datetime.now(timezone.utc).isoformat(),
         'previous_run': prev.get('generated_at'),
@@ -150,11 +213,12 @@ def collect(cfg: Dict[str, Any]) -> Dict[str, Any]:
         'dead_letter_delta': dl_delta,
         'restarts': restarts,
         'restart_flags': restart_flags,
-        'quota': quota.status(cfg),
+        'quota': quota_status,
         'oldest_inbox_note': _oldest_inbox_note(cfg),
         'catalog_verify': _catalog_verify_summary(cfg),
         'retry_wait': retry_wait,
         'morning_exposure': morning_exposure,
+        'dataset_growth': dataset_growth,
     }
 
     try:
@@ -246,6 +310,21 @@ def render_text(d: Dict[str, Any]) -> str:
         lines.append('')
         lines.append(f"INBOX — oldest unprocessed note {note['age_hours']}h old: "
                      f"{note['name']} (pm_intake stalled?)")
+
+    dg = d.get('dataset_growth')
+    if dg is not None:
+        lines.append('')
+        delta = dg.get('capture_bytes_delta')
+        delta_s = f" ({delta:+,} bytes since last look)" if delta is not None else ''
+        frac = dg.get('archive_fraction')
+        frac_s = f"{int(frac * 100)}%" if frac is not None else '?'
+        stalled = dg.get('capture_stalled')
+        header = 'RED DATASET GROWTH' if stalled else 'DATASET GROWTH'
+        lines.append(f"{header} — eBayCapture today: {dg['capture_bytes_today']:,} bytes{delta_s}; "
+                     f"ItemArchive coverage: {dg['archived_items']}/{dg['total_items']} items ({frac_s})")
+        if stalled:
+            lines.append("  eBay calls happened but the capture file did not grow — "
+                        "something is discarding raw responses again (invariant E7)")
 
     qs = d.get('queues', {})
     lines.append('')
