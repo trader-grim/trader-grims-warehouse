@@ -54,7 +54,7 @@ field-extraction); it is now Prime Directive 1 and enforced in code (invariant E
 | Taxonomy assets | Category tree + **all 15,105 categories' aspects** cached permanently (bulk pool); manual refresh only | — |
 | AI derivations | ai_identify raw scans persisted; vision aspect-fill live (s41) | PP-DERIVED-001 full-capture design in `pp/` |
 | Price/revision history | Append-only in item JSON; reducer persistence bug fixed s41 | — |
-| Work ledger (Postgres) | Live; **not re-derivable** | **No backup running** — PP-BACKUP-001, top operator risk |
+| Work ledger (Postgres) | Live; **not re-derivable** | **A1 daily dump running since 2026-06-20 (stale note fixed 2026-07-04)** — moved onto a genuinely separate physical drive (`/opt/TGW/mnt/tgw-db-backup`, was silently on the same nvme filesystem); A2 (off-site GDrive sync) mid-first-sync, not broken — see `PLAN-backup-dr.md` |
 | Photos | ItemData + GDrive sync (PP-PHOTO-001 infra live) | EPS zero-bandwidth upload (Phase B) open |
 | Catalogs/indexes | Derived tier — legitimately disposable | — |
 
@@ -269,6 +269,8 @@ Full design + packet contracts: `pp/PP-PHOTOSYNC-001.md`.
 s42+s43 committed+pushed (`ae9b1e6`); PR to main deferred until P1 verifies.
 
 P10 complete (legacy duplicate check + eBay Motors awareness). P4 paused per P10 findings. See RESEARCH-photosync-p10-legacy-duplicate.md.
+
+P6 investigated: ebay_repush orphan queue diagnosed (2 orphan jobs, no systemd unit). Needs Dave decision: install unit or retire enqueue path. Full detail in `plan/pp/PP-PHOTOSYNC-001.md`.
 ## PP-LISTEDITOR-001 — listing editor + revision apply
 Phase 2 code complete s40 (`_APPLY_ENABLED=True`, drift-gated live PUT). **Gate:
 live-fire R1.1.** Then wire Update-Item button to revision apply. Todos #1062/#1084.

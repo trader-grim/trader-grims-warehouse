@@ -300,6 +300,39 @@ ledger 23 MB, `/opt/TGW` partition 187 G used / 295 G.
 Ordered by risk closed per effort. A1–A3 are systemd template work (repo files, operator
 installs); A4 is a normal code task; A5–A6 are operator drills/policy.
 
+**Status update (2026-07-04):** A1 was already fully built, installed, and running
+successfully since 2026-06-20 — the master plan's "no backup running, top operator
+risk" note was **stale**. The real gap found: `SNAP_DIR` (the rsync target meant to
+be a separate device) was actually on the same `nvme0n1p3` filesystem as the primary
+dump — a single point of failure. Fixed live: `/dev/sdc` (698.6G, previously labeled
+`trader_grims_backup`, an old superseded backup Dave confirmed safe to wipe) was
+repartitioned into 3 btrfs partitions, mounted under `/opt/TGW/mnt/` (not
+`/home/db/devices/` — that path is 700 db-only, unreachable by the `tgw` service
+account that needs to write these):
+- `/opt/TGW/mnt/tgw-db-backup` (20G) — `bin/tgw-db-backup` and `bin/tgw-secrets-backup`
+  now point here (`config.py`'s `backup_snapshot_root`). Live-verified: today's dump
+  landed here successfully.
+- `/opt/TGW/mnt/tgw-itemdata-snap` (300G) — reserved, not yet wired to anything.
+- `/opt/TGW/mnt/tgw-itemarchive` (378.6G) — reserved for the E5 local archive
+  (`archive_root`, todo #1104) once it needs to grow past NVMe's 57G free.
+
+**A2 (cloud sync) investigated and NOT broken** — `tgw health` shows it red
+("rclone sync never completed"), but the real story: this is the **first-ever full
+sync** of ItemData (~500K photos), and `rclone sync` only reaches a completed state
+once it wins the race against new writes arriving mid-pass (Dave, 2026-07-04). Once
+this first pass completes, subsequent cycles will be incremental (new/changed files
+only) and fast, and the shared flock with `tgw-itemdata-sync` will stop starving
+`tgw-cloud-sync`. No code changed — correctly left alone rather than patched at 1am.
+
+**Future direction (Dave, 2026-07-04, not started):** replace the current
+rclone-based `tgw-itemdata-sync` with a combined **git-annex + recoll + NATS
+JetStream + Google Drive** pipeline — better and faster than a full-tree rclone
+scan every cycle. Ties together threads already scattered across the plan:
+PP-EVENTD-001's git-annex+GDrive data-plane section (`reference/PP-EVENTD-001-design.md`),
+the NATS JetStream audit-stream precedent from PP-AIOPS-001, and PP-SEARCH-001's
+recoll index (Dave's own parallel project, integrating soon). Not scoped or named
+yet — flagging for a dedicated planning pass, not attempting to design it inline here.
+
 **A1 — Daily ledger dump (closes the worst gap; handoff §6 step 3).**
 *Do:* `tgw-db-backup.service` (oneshot, `User=tgw`) + `.timer` (daily 03:30):
 ```

@@ -105,7 +105,11 @@ def load_config(path: Path) -> Dict[str, Any]:
 
     # PP-BACKUP-001 — backup infrastructure paths (not in JSON config; fixed layout)
     backup_db_dir = Path('/opt/TGW/var/backups/trader_grims_warehouse/db')
-    backup_snapshot_root = Path('/opt/TGW/var/local/backups/trader_grims_warehouse')
+    # backup_snapshot_root moved 2026-07-04 onto a genuinely separate physical
+    # drive (/dev/sdc1, LABEL=tgw-db-backup) — the old path was on the same
+    # nvme0n1p3 filesystem as backup_db_dir, a single point of failure this
+    # tree was supposed to protect against.
+    backup_snapshot_root = Path('/opt/TGW/mnt/tgw-db-backup/trader_grims_warehouse')
     backup_secrets_dir = backup_snapshot_root / 'secrets'
     backup_rclone_stamp = Path('/opt/TGW/var/log/rclone-sync-last-success')
 
