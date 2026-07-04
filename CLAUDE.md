@@ -224,8 +224,14 @@ Run as `tgw` user — source files are `rw-------`, secrets are `chmod 600`.
   **a1131 is shared Dave+Claude precisely for thermal relief** (tgw-prod runs hot): on hot
   days run your own heavy checks — test suites, big greps, review sweeps — there via ssh.
   Never pause pipeline workers for heat (worker load is only a thermal problem when our own
-  bugs loop). NFS shares of the data Claude's checks need: todo #1146. Caveat: a1131's repo
-  checkout can be stale (#1082) — sync repo state before trusting its test results.
+  bugs loop). Read-only NFS views of tgw-prod's data+logs are mounted at
+  `/opt/TGW/mnt/tgw-prod/{data,log}` (ro is load-bearing — writes go through the fence).
+  Claude has its own account there: `ssh claude@192.168.60.101` (key-only, no sudo).
+  **If a1131 is asleep, wake it: `wakeonlan c8:2a:14:2a:a1:85`** (tool on tgw-prod, or
+  `nix shell nixpkgs#wakeonlan -c wakeonlan <mac>`). Do NOT run `systemctl suspend` on
+  a1131 yourself — iMac12,1 suspend is buggy (Dave); sleep is Dave's power management's
+  job, waking is yours. Caveat: a1131's repo checkout can be stale (#1082) — sync repo
+  state before trusting its test results.
 - **Run a code check at least once per work day, more if the session touches a lot of
   files** (Dave, 2026-07-04): a full week of commits (2026-06-24 through 2026-07-02)
   never went through `/code-review`/ultrareview because the diff grew too large to
