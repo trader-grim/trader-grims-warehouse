@@ -182,12 +182,19 @@ external resources — the same numbered-footnote style Perplexity already
 produces on its own research drops (e.g. `pricing-research-ui.md`'s
 `[^1_1]`-style citations linking claims back to sources).
 
-**Why this fits here:** it's a documentation-quality initiative, same
-spirit as the four-bucket taxonomy and cross-reference (`[[wikilink]]`)
-convention already proposed above — footnotes are the *external*-facing
-half of cross-referencing (linking a plan assertion to an eBay API doc,
-a research thread, or a reference/*.md file), where `[[wikilink]]`s are
-the *internal* half (linking between vault documents).
+**Why this fits here — the real intent (Dave, follow-up):** this is not
+just documentation hygiene. Right now, when Dave asks "did you read X"
+or "how did we decide Y," the answer requires a search — grep the vault,
+re-derive context, hope the right doc turns up. **The goal is for the
+plan itself to be a direct-lookup surface**: every non-obvious claim in
+the master plan/PP docs links straight to its source (an internal
+reference doc, a past research thread, an external API doc, a specific
+code location) so a "did we look at that" question resolves to "yes,
+here it is" — a citation to follow, not a search to run. Footnotes are
+the *external*-facing half of this (linking a plan assertion to an eBay
+API doc, a research thread, or a `reference/*.md` file); `[[wikilink]]`s
+are the *internal* half (vault-to-vault). Both serve the same end: zero
+search burden when revisiting a past decision.
 
 **Not scoped yet — needs a decision before building:** does this run as
 a one-time pass over the current master plan + active PP docs, or an
