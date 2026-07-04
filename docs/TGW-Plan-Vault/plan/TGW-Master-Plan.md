@@ -306,6 +306,22 @@ packets tracked under R2, not here.
 exist in `etc/systemd/`. Operator todos #61/#146/#147; restore script #1052; DR
 drills #1050/#1051. Plan: `PLAN-backup-dr.md`.
 
+## Drive-space re-evaluation (flagged 2026-07-04, todo #1136)
+**Dave: "put revaluation item into plan for drive space."** Todo #1056
+(extend `vg_tgw` into HDD space) turned out blocked on a stale premise:
+checked live `lsblk`/`pvs` — sdb no longer appears in the disk list at
+all, and sdc (the other candidate) was fully repartitioned and put into
+active service the same session for backup infra (`sdc1`=tgw-db-backup,
+`sdc2`=tgw-itemdata-snap, `sdc3`=tgw-itemarchive). No free/unclaimed disk
+currently exists to grow `vg_tgw` into (PV `nvme0n1p2` has 96MB free), and
+`reference/DRIVE-REGISTRY.md` itself is stale against today's real layout
+(doesn't reflect sdc's repartition, `TGW-VAULT`, or several other drives
+now in service). **Needed:** a full physical-disk-fleet audit + registry
+refresh, then a fresh decision on where `vg_tgw`/nix growth room comes
+from — new hardware, or an explicit repurpose of something already in
+service. Not started; the original LVM-expansion plan (sdb/sdc as
+candidate PVs) is superseded by this finding.
+
 ## PP-NIXOS-001 — NixOS migration (CatioNIX)
 Canonical flake `~/tgw-flake` working; main-repo merge + workflow rules pending; a1131
 no-GitHub-access (todo #1082); no process supervision for agent processes (design
