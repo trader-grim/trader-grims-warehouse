@@ -181,6 +181,10 @@ nonexistent `ebay_dole`); CLAUDE.md `tgw todo --add` syntax fix.
 P1 upload integrity fix complete — see document for spec, implementation, tests, and live verification.
 
 P9 bulk audit: Inventory API getInventoryItems winner (~98 calls), Feed API blocked, GetMyeBaySelling narrower than assumed. Full ranking in dev-workflow/research/RESEARCH-photosync-bulk-audit.md. Follow-up #1127 filed.
+
+P2 ops-digest pending-liability lines shipped (see DONE-photosync-p2-digest-liability.md in dev-workflow/research).
+
+- P9 follow-up #127: `photos_short_on_ebay` re-pointed at live capture index; open question on recurring nightly capture flagged for 2pm triage.
 ## Work-packet protocol
 
 One packet = one todo = one model session. Non-trivial packets get
@@ -419,6 +423,26 @@ feedback-self-healing-system — auto-detect, auto-sanitize or surface, self-ser
 resolution, never just patch-and-move-on). Dave wants this specifically verified for
 quality at the 2pm session — i.e. confirm the investigations are actually correct and
 thorough, not just reassuringly-worded, before trusting the pattern going forward.
+
+**PP-INTAKE-004 (proposed) — unified Kotlin intake app, and a much bigger platform
+question behind it.** Full design: `docs/ai-plans/tgw-intake-app.md`. Supersedes
+PP-INTAKE-002/003; the handheld camera/barcode/video app absorbs PP-TASKER-001's
+functions and replaces the current Tasker-Scenes + AutoTools-WebScreens overlay.
+Decided so far: own repo (Kotlin); early-`ai_identify` trigger = the ID call's own
+batch size (`_MAX_PHOTOS_CLOUD`, 6) with a session-completion fallback for smaller
+sets; custom turntable (not Foldio360) targeting ~12 photos/item, still being
+sourced; dedicated turntable/collector devices get rooted deliberately (fixed-
+purpose hardware), the handheld app itself should need no root at all (owns its
+whole stack). **Bigger, unresolved:** Dave wants the handheld app built to real
+product polish because "TGW" itself — trader-grims-warehouse, but running someone
+else's inventory — may become a sellable platform. Three business models raised,
+not chosen between: Dave hosts it multi-tenant; sell/license it for others to
+self-host and customize; or TGW/Dave as the service provider on top of a possibly
+open-sourced core. Any of these implies generalizing config/secrets/category-groups
+beyond a single-operator deployment — flagged as its own future PP item, not decided
+by the intake-app plan. Also flagged: `clip-route`'s ingest path needs a session/
+capture-batch correlation ID independent of SKU, since capture can start before an
+item record exists in ItemData.
 
 ## Standing gates (human-only)
 
