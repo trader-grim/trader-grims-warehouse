@@ -220,6 +220,17 @@ Run as `tgw` user — source files are `rw-------`, secrets are `chmod 600`.
 - **Test environment** — use `ssh a1131` for UI/integration testing instead of a VM; it's a
   NixOS host on the LAN with a partial TGW install and 18 GB free RAM. Run `/tgw-exit` before
   switching to it so the inbox note captures your current state.
+- **Run a code check at least once per work day, more if the session touches a lot of
+  files** (Dave, 2026-07-04): a full week of commits (2026-06-24 through 2026-07-02)
+  never went through `/code-review`/ultrareview because the diff grew too large to
+  review before anyone tried — and the first review that *did* run, on just one day's
+  diff, found 7 real confirmed bugs. Don't let unreviewed work accumulate: `/code-review`
+  (free, inline) for a quick same-day pass; `/code-review ultra` for a periodic cloud
+  pass while the diff is still small enough to clear its size guard. If a day's own diff
+  already feels large, review it immediately rather than waiting — it only grows harder
+  to review, not easier. See todo #1143 for the one-time backlog catch-up plan
+  (full-codebase cohesion audit, staged per-subsystem, run opportunistically against
+  spare usage).
 
 ## eBay API notes
 
