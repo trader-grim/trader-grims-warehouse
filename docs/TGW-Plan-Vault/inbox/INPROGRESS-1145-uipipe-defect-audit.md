@@ -59,3 +59,11 @@ catalog-verify divergence detector + per-defect packets.
 - a1131 offload: pipeline workers can't move today (need fence + postgres +
   local ItemData); heavy agent-side ops (tests/greps) can run via ssh a1131.
   Real offload design belongs with #1139 (decouple Hermes/AI fleet).
+
+**Correction (Dave):** the a1131 offload meant CLAUDE'S CHECKS (tests, greps,
+review sweeps), not pipeline workers — pipeline load is not a thermal problem
+absent our own error loops. ebay_draft drain RESTARTED 15:0x (active, zero
+429s). a1131 confirmed reachable, idle (load 0.08), repo present — agent-side
+heavy checks run there for the rest of the hot day. Note: a1131 checkout may
+be stale (todo #1082, no GitHub access) — sync repo state before trusting
+test results from it.
