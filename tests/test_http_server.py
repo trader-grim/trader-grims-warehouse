@@ -439,6 +439,68 @@ def test_list_items_ebay_fields(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# status_filter=__eligible__ — "Eligible for listing" (Dave, s42, todo #1112)
+# new/In Stock, NOT currently on eBay (no Active listing, no PUBLISHED offer).
+# Ended listings qualify (relistable); sold/disposed excluded by the status
+# allow-list itself (they're never 'new'/'in stock').
+# ---------------------------------------------------------------------------
+
+def test_eligible_filter_status_and_ebay_state(tmp_path, monkeypatch):
+    catalog_path = tmp_path / "catalog.sqlite"
+    itemdata_root = tmp_path / "ItemData"
+    itemdata_root.mkdir()
+
+    sku_new_never_listed = "tgw20260201000000001"
+    sku_new_active = "tgw20260201000000002"
+    sku_instock_published_offer = "tgw20260201000000003"
+    sku_instock_ended_relistable = "tgw20260201000000004"
+    sku_sold = "tgw20260201000000005"
+    sku_staged_not_eligible_status = "tgw20260201000000006"
+
+    _make_catalog_with_data(catalog_path, [
+        (sku_new_never_listed, "A", "A1", "new", 9.99, 1, "", "{}"),
+        (sku_new_active, "B", "A2", "New", 9.99, 1, "",
+         json.dumps({"ebay_listing": {"status": "Active"}})),
+        (sku_instock_published_offer, "C", "A3", "In Stock", 9.99, 1, "",
+         json.dumps({"ebay_offer": {"status": "PUBLISHED"}})),
+        (sku_instock_ended_relistable, "D", "A4", "In Stock", 9.99, 1, "",
+         json.dumps({"ebay_listing": {"status": "Ended"}})),
+        (sku_sold, "E", "A5", "Sold", 9.99, 1, "", "{}"),
+        (sku_staged_not_eligible_status, "F", "A6", "Staged", 9.99, 1, "", "{}"),
+    ])
+
+    cfg = {
+        "sqlite_catalog_path": catalog_path,
+        "itemdata_root": itemdata_root,
+        "location_tree_root": tmp_path / "loctree",
+        "thumbnail_root": tmp_path / "thumbs",
+        "category_groups_path": str(tmp_path / "cg.json"),
+        "plan_vault_path": tmp_path / "vault",
+        "plan_inbox_path": tmp_path / "vault" / "inbox",
+        "postgres_dsn": "postgresql://fake/db",
+        "pretty": True,
+        "raw": {},
+    }
+    monkeypatch.setattr(http_server, "_cfg", cfg)
+    monkeypatch.setattr(http_server, "_api_key", API_KEY)
+    monkeypatch.setattr(http_server, "_web_password", WEB_KEY)
+    monkeypatch.setattr(http_server.psycopg2, "connect", lambda *a, **k: _FakeConn([]))
+
+    client = TestClient(http_server.app)
+    r = client.get("/api/items", params={"status_filter": "__eligible__"},
+                   headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    skus = {it["sku"] for it in r.json()["items"]}
+
+    assert sku_new_never_listed in skus
+    assert sku_instock_ended_relistable in skus  # ended listings are relistable
+    assert sku_new_active not in skus            # already Active on eBay
+    assert sku_instock_published_offer not in skus  # PUBLISHED offer blocks it
+    assert sku_sold not in skus                  # status excluded outright
+    assert sku_staged_not_eligible_status not in skus  # not new/In Stock
+
+
+# ---------------------------------------------------------------------------
 # GET /api/items/{sku} — 404, media-list assembly, queue-jobs fetch
 # ---------------------------------------------------------------------------
 
