@@ -119,8 +119,10 @@ def collect(cfg: Dict[str, Any]) -> Dict[str, Any]:
         state_machine.init(cfg.get('postgres_dsn', 'dbname=state_machine user=tgw'))
         dl = state_machine.dead_letter_breakdown()
         queues = state_machine.queue_state_summary()
+        retry_wait = state_machine.retry_wait_breakdown()
+        morning_exposure = state_machine.morning_exposure()
     except Exception as exc:  # noqa: BLE001
-        dl, queues = {}, {}
+        dl, queues, retry_wait, morning_exposure = {}, {}, [], []
         checks_bad.append({'check': 'ops_digest_db', 'ok': False, 'warn': True,
                            'detail': f'queue DB unreachable: {exc}'})
 
@@ -151,6 +153,8 @@ def collect(cfg: Dict[str, Any]) -> Dict[str, Any]:
         'quota': quota.status(cfg),
         'oldest_inbox_note': _oldest_inbox_note(cfg),
         'catalog_verify': _catalog_verify_summary(cfg),
+        'retry_wait': retry_wait,
+        'morning_exposure': morning_exposure,
     }
 
     try:
@@ -197,6 +201,27 @@ def render_text(d: Dict[str, Any]) -> str:
     for queue, n in sorted(dl.items(), key=lambda kv: -kv[1]):
         dnote = f" ({delta[queue]:+d})" if queue in delta else ''
         lines.append(f"  {queue:20s} {n:>6}{dnote}")
+
+    rw = d.get('retry_wait', [])
+    lines.append('')
+    if rw:
+        flagged_rw = [r for r in rw if r['count'] > 50 or r['oldest_age_hours'] > 24]
+        sev = 'RED ' if flagged_rw else ''
+        lines.append(f"{sev}RETRY_WAIT — {sum(r['count'] for r in rw)} job(s) pending retry:")
+        for r in rw:
+            flag = ' [RED]' if r['count'] > 50 or r['oldest_age_hours'] > 24 else ''
+            lines.append(f"  {r['queue_name']:20s} {r['count']:>6}  oldest {r['oldest_age_hours']}h{flag}")
+    else:
+        lines.append('RETRY_WAIT — none')
+
+    exp = d.get('morning_exposure', [])
+    lines.append('')
+    if exp:
+        lines.append(f"MORNING EXPOSURE — {sum(r['count'] for r in exp)} job(s) scheduled to fire before 06:00 PST:")
+        for r in exp:
+            lines.append(f"  {r['queue_name']:20s} {r['count']:>6}")
+    else:
+        lines.append('MORNING EXPOSURE — nothing scheduled before 06:00 PST')
 
     if d['restart_flags']:
         lines.append('')

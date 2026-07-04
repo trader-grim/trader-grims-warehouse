@@ -369,6 +369,51 @@ def dead_letter_breakdown() -> Dict[str, int]:
             return {row[0]: row[1] for row in cur.fetchall()}
 
 
+def retry_wait_breakdown() -> List[Dict[str, Any]]:
+    """PP-PHOTOSYNC-001 P2: per-queue retry_wait count + oldest not_before age,
+    for the ops-digest pending-liability line. A pile of retry_wait jobs with
+    an old not_before is a stuck worker, not a job "waiting its turn"."""
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT queue_name, COUNT(*) AS n,
+                       EXTRACT(EPOCH FROM (NOW() - MIN(not_before))) / 3600 AS oldest_age_hours
+                  FROM queue_jobs
+                 WHERE state = 'retry_wait'
+                 GROUP BY queue_name
+                 ORDER BY n DESC, queue_name
+                """
+            )
+            return [{'queue_name': r['queue_name'], 'count': r['n'],
+                      'oldest_age_hours': round(r['oldest_age_hours'], 1)}
+                    for r in cur.fetchall()]
+
+
+def morning_exposure(cutoff_hour: int = 6, tz_name: str = 'America/Los_Angeles') -> List[Dict[str, Any]]:
+    """PP-PHOTOSYNC-001 P2: per-queue count of queued/retry_wait jobs whose
+    not_before falls before <cutoff_hour>:00 in <tz_name> tomorrow — the
+    "landmine view" of what's about to fire on fresh quota before anyone's awake."""
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT queue_name, COUNT(*) AS n
+                  FROM queue_jobs
+                 WHERE state IN ('queued', 'retry_wait')
+                   AND (not_before IS NULL
+                        OR not_before <= (
+                            date_trunc('day', NOW() AT TIME ZONE %s)
+                            + interval '1 day' + (%s || ' hours')::interval
+                        ) AT TIME ZONE %s)
+                 GROUP BY queue_name
+                 ORDER BY n DESC, queue_name
+                """,
+                (tz_name, cutoff_hour, tz_name),
+            )
+            return [{'queue_name': r['queue_name'], 'count': r['n']} for r in cur.fetchall()]
+
+
 def dead_letter_errors() -> List[Dict[str, Any]]:
     """Return (queue_name, error_detail) for every dead_letter job.
 

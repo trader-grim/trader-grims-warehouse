@@ -73,7 +73,7 @@ artificially near halt (or stub) → job must requeue, not "complete"; then with
 completes, `photo_verify` counts match, shown for one real SKU.
 **Quota:** no new call types; strictly fewer wasted EPS calls.
 
-### P2 = todo #1117 — pending-liability visibility (the missing detector)
+### P2 = todo #1117 — pending-liability visibility (the missing detector) — DONE 2026-07-03
 **Context budget:** plan core + this file + `ops_digest.py` + quota.py `status()` +
 the http digest render if R2.2 has landed (else CLI only).
 **Spec:** ops-digest gains two line groups: (a) per-queue `retry_wait` counts with
@@ -83,6 +83,26 @@ budget — the landmine view. Plain SQL against queue_jobs + quota state; no new
 **Acceptance (live):** `tgw ops-digest` run showing both sections with real data;
 seed one artificial retry_wait job and watch it appear.
 **Quota:** zero eBay calls.
+
+**What shipped:** `state_machine.retry_wait_breakdown()` (per-queue count +
+oldest `not_before` age) and `state_machine.morning_exposure()` (queued/retry_wait
+jobs due before 06:00 America/Los_Angeles tomorrow, grouped by queue_name — plain
+SQL, `date_trunc` + timezone arithmetic, no new deps). `ops_digest.render_text`
+gained RETRY_WAIT and MORNING EXPOSURE sections, RED-flagged at count > 50 or
+age > 24h. Deviation from spec: exposure is grouped by `queue_name`, not by quota
+pool — there is no queue→pool mapping in the codebase (pools are keyed by REST
+path, `quota.pool_for_rest_path()`) and workers call multiple paths per job, so a
+per-pool attribution would be a guess. Flagging this per PD3: queue_name is a
+reasonable proxy since Dave already reads by queue, and QUOTA section right above
+it shows live per-pool spend/budget for cross-reference. Live-verified 2026-07-03:
+`tgw ops-digest` showed `MORNING EXPOSURE — 32 job(s)` (ebay_sync 16, alt_text 5,
+ebay_legacy_sync 4, ebay_repush 2, ebay_upload 2, token_refresh 2,
+ebay_price_reducer 1) against real queue_jobs rows. Seeding a synthetic
+retry_wait row into the live production table was correctly blocked by the auto
+mode classifier (shared-resource write without explicit authorization) — did not
+attempt to work around it; RETRY_WAIT render logic is instead covered by
+`tests/test_ops_digest_retry_exposure.py` (5 cases: clean, below-threshold,
+over-count RED, over-age RED, multi-queue exposure sum).
 
 ### P3 = todo #1118 — C10 detector (closes invariant 🔶)
 **Context budget:** plan core + this file + `tests/test_operator_origin.py` +
