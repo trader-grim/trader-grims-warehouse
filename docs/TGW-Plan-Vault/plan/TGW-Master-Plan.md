@@ -231,23 +231,23 @@ promote it to `pp/`.
 ### Open — active or gated
 
 Hermes agent architecture research filed: mixture-of-expert-pairs pattern with Claude CLI + Aider + site-specific MCP server.
-## PP-EBAY-MOTORS-001 — eBay Motors not accounted for anywhere (URGENT, unscoped)
-**Opened 2026-07-04, surfaced live during PP-PHOTOSYNC-001 P10.** Dave: "we do
-not have ebay motors accounted for anywhere... add that as an urgent planning
-request item." Confirmed: **no `marketplaceId` field exists anywhere in the
-item JSON schema** (cannot even count affected items from local data), and
-**`tgw.apis.ebay.trading.py` hardcodes SiteID=0 (EBAY_US) for every Trading API
-call** — `GetMyeBaySelling`, revise, upload, everything — meaning the entire
-Trading API surface may be structurally blind to Motors-site listings. Surfaced
-by a real eBay rejection ("Best Offer is not permitted with a SKU selling on
-multiple eBay marketplaces") that our duplicate-checker (P10) could see only
-one side of. Immediate scoped fix landed same session: the duplicate-checker
-is now marketplace-aware (`marketplace_id`, `is_ebay_motors`, cross-marketplace
-duplicate detection) — this does NOT close the gap, it just makes the one
-check already being built aware of it. **Needs a dedicated planning session**
-(todo #1129, p10) to scope: real item count, SiteID-hardcoding fix, schema
-field, category/fulfillment-policy marketplace dimension. Full writeup:
-`pp/PP-EBAY-MOTORS-001.md`.
+## PP-EBAY-MOTORS-001 — eBay Motors, now scoped (was URGENT/unscoped)
+**Opened 2026-07-04, surfaced live during PP-PHOTOSYNC-001 P10; scoped same
+day (todo #1129).** Dave: "we do not have ebay motors accounted for
+anywhere... add that as an urgent planning request item." **Scoping pass
+complete — this is small, not fleet-wide:** todo #1131's census (parsed
+existing raw offer capture, zero live calls) found **202 EBAY_MOTORS SKUs
+out of 19,448 marketplace-tagged** (~1%), **zero cross-marketplace
+duplicates** in this snapshot. The `trading.py` SiteID hardcoding is also
+smaller than feared — one central `trading_call()` function, not a
+sprawling per-call-site problem. Recommended order: (1) backfill
+`marketplace_id` onto the 202 known SKUs from existing census data — no
+API calls needed, (2) add the schema field + wire `ebay_stage` population
+going forward, (3) thread `site_id` through `trading_call()` once (1)
+exists, (4) audit the 202 SKUs' category/fulfillment config, (5) re-run
+the census periodically rather than trusting today's zero-duplicates
+result forever. No code changed by the scoping pass — ready to slice into
+ordinary todos whenever Dave prioritizes. Full writeup: `pp/PP-EBAY-MOTORS-001.md`.
 
 ## PP-CATALOG-INCR-001 — incremental catalog update (PROPOSAL, not yet built)
 **Opened s43 (2026-07-03).** Dave's original design, recovered from an unprocessed
