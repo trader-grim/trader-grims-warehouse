@@ -600,6 +600,40 @@ def check_ebay_sync_fallback(cfg: Dict[str, Any]) -> Dict[str, Any]:
 # Metered-API quota check (PP-QUOTA-001, session 42)
 # ---------------------------------------------------------------------------
 
+def _openrouter_key_limit(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Live per-key spend limit/remaining from OpenRouter's auth/key endpoint.
+
+    Added 2026-07-04 (todo #1132) after a real incident: OpenRouter's
+    *account* balance looked fine, but the specific API key TGW uses had
+    its own separate spend limit (then $15/week) that was silently
+    near-exhausted, causing a 402 pile-up that took a live log-dive to
+    diagnose. Surfacing it here means the next time this happens it's
+    visible in `tgw health` instead. Returns None (not an error) if the
+    credentials file or the `requests` call fails — this is a nice-to-have
+    signal, never a reason to fail the whole quota check.
+    """
+    try:
+        import requests
+        cred_path = Path(cfg.get('secrets_root', '/opt/TGW/secrets')) / 'openrouter-credentials.json'
+        if not cred_path.exists():
+            return None
+        key = json.loads(cred_path.read_text(encoding='utf-8')).get('api_key')
+        if not key:
+            return None
+        resp = requests.get(
+            'https://openrouter.ai/api/v1/auth/key',
+            headers={'Authorization': f'Bearer {key}'}, timeout=5,
+        )
+        resp.raise_for_status()
+        d = resp.json().get('data', {})
+        return {
+            'limit': d.get('limit'), 'limit_reset': d.get('limit_reset'),
+            'limit_remaining': d.get('limit_remaining'),
+        }
+    except Exception:
+        return None
+
+
 def check_quota(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """
     Surface today's metered-API spend and any 429 incidents.
@@ -624,17 +658,29 @@ def check_quota(cfg: Dict[str, Any]) -> Dict[str, Any]:
         f"{p}={v['spent']}" + (f"/{v['budget']}" if v.get('budget') else '')
         for p, v in sorted(st.get('pools', {}).items())) or 'no calls recorded today'
 
+    or_limit = _openrouter_key_limit(cfg)
+    or_note = ''
+    or_low = False
+    if or_limit and or_limit.get('limit') is not None:
+        remaining = or_limit.get('limit_remaining') or 0
+        or_note = (f" | openrouter key: ${remaining:.2f} of ${or_limit['limit']} "
+                   f"remaining ({or_limit.get('limit_reset')})")
+        or_low = remaining < (0.1 * or_limit['limit'])
+
     if incidents:
         return _result('quota', False,
-                       f'{incidents} × 429 incident(s) today — {spent_summary}',
+                       f'{incidents} × 429 incident(s) today — {spent_summary}{or_note}',
                        (time.time() - t) * 1000, warn=True,
-                       incidents_today=incidents, pools=st.get('pools', {}))
-    if hot:
+                       incidents_today=incidents, pools=st.get('pools', {}),
+                       openrouter_key_limit=or_limit)
+    if hot or or_low:
+        reason = ', '.join(sorted(hot)) if hot else 'openrouter key near its limit'
         return _result('quota', True,
-                       f"background halted: {', '.join(sorted(hot))} — {spent_summary}",
-                       (time.time() - t) * 1000, warn=True, pools=st.get('pools', {}))
-    return _result('quota', True, spent_summary, (time.time() - t) * 1000,
-                   pools=st.get('pools', {}))
+                       f"background halted: {reason} — {spent_summary}{or_note}",
+                       (time.time() - t) * 1000, warn=True, pools=st.get('pools', {}),
+                       openrouter_key_limit=or_limit)
+    return _result('quota', True, f'{spent_summary}{or_note}', (time.time() - t) * 1000,
+                   pools=st.get('pools', {}), openrouter_key_limit=or_limit)
 
 
 # ---------------------------------------------------------------------------
