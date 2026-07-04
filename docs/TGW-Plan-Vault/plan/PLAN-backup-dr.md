@@ -575,6 +575,15 @@ itself isn't constantly written to.
 
 Not implemented tonight — Dave asked for this to be captured as a planning item only.
 
+**2014-2019 coverage gap (found 2026-07-04, todo #1053):** all three currently-mounted
+archive copies — `porche/history/ItemData` (55,356 items), `porche/history/ItemArchive`
+(54,683 zips), and `blk1tb/ItemData` (55,422 items) — draw from the same underlying
+~55K-item snapshot, skewed to 2020+ (only ~136-137 overlap each with the live
+2014-2019 cohort of 33,516 items). None currently has independent older coverage.
+Matches Dave's own note that the full consolidated index isn't ready yet. Worth
+re-checking data-scrub coverage (#1053-style verification) once the "nice full
+index" (mentioned above) lands — it may finally close this gap.
+
 ## 7. Verification (standing, after Phase A)
 
 Daily (automatic): `tgw health` includes the four backup ages.

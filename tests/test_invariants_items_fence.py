@@ -250,3 +250,40 @@ def test_archive_failure_aborts_the_write(tmp_path, monkeypatch):
         items.atomic_write_json(path, {'v': 2}, archive_root=archive_root)
     # original content must be untouched — the overwrite never happened
     assert json.loads(path.read_text())['v'] == 1
+
+
+# ---------------------------------------------------------------------------
+# strip_fields (todo #1053 support) — one archive entry per item, not per field
+# ---------------------------------------------------------------------------
+
+def test_strip_fields_removes_present_fields_only(cfg):
+    items.create_item(cfg, 'tgw1', {'title': 't', 'attribute_set': 'Books', 'category_ids': '5'})
+    res = items.strip_fields(cfg, 'tgw1', ['attribute_set', 'category_ids', 'not_present'])
+    assert res['ok'] is True
+    assert sorted(res['removed']) == ['attribute_set', 'category_ids']
+    doc = json.loads((cfg['itemdata_root'] / 'tgw1' / 'tgw1.json').read_text())
+    assert 'attribute_set' not in doc
+    assert 'category_ids' not in doc
+    assert doc['title'] == 't'
+
+
+def test_strip_fields_is_idempotent_when_nothing_present(cfg):
+    items.create_item(cfg, 'tgw1', {'title': 't'})
+    res = items.strip_fields(cfg, 'tgw1', ['attribute_set'])
+    assert res['ok'] is True
+    assert res['removed'] == []
+
+
+def test_strip_fields_archives_once_not_per_field(cfg):
+    items.create_item(cfg, 'tgw1', {'title': 't', 'a': 1, 'b': 2, 'c': 3})
+    items.strip_fields(cfg, 'tgw1', ['a', 'b', 'c'])
+    with zipfile.ZipFile(cfg['archive_root'] / 'tgw1.zip') as zf:
+        assert len(zf.namelist()) == 1  # one archive entry for the whole multi-field removal
+
+
+def test_strip_fields_check_only_does_not_write(cfg):
+    items.create_item(cfg, 'tgw1', {'title': 't', 'attribute_set': 'Books'})
+    res = items.strip_fields(cfg, 'tgw1', ['attribute_set'], check_only=True)
+    assert res['removed'] == ['attribute_set']
+    doc = json.loads((cfg['itemdata_root'] / 'tgw1' / 'tgw1.json').read_text())
+    assert 'attribute_set' in doc  # untouched

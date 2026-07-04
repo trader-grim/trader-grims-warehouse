@@ -222,6 +222,29 @@ def _write_field(cfg: Dict[str, Any], sku: str, field: str,
     return {'sku': sku, 'field': field, 'before': before, 'after': value}
 
 
+def strip_fields(cfg: Dict[str, Any], sku: str, fields: List[str],
+                 check_only: bool = False) -> Dict[str, Any]:
+    """Remove a set of top-level fields from one item's JSON in a single
+    write — one archive entry per item (E5), not one per field. Fields
+    absent from the doc are silently skipped (idempotent). Used by the
+    legacy-field data-scrub pass (todo #1053)."""
+    path = sku_json(cfg, sku)
+    if not path.exists():
+        return {'ok': False, 'error': f'sku not found: {sku!r}'}
+    doc = load_item_doc(path)
+    present = [f for f in fields if f in doc]
+    if check_only:
+        return {'ok': True, 'sku': sku, 'removed': present, 'check_only': True}
+    if not present:
+        return {'ok': True, 'sku': sku, 'removed': []}
+    for f in present:
+        doc.pop(f, None)
+    doc.pop('catalog_verified', None)
+    atomic_write_json(path, doc, pretty=cfg.get('pretty', True),
+                      archive_root=cfg.get('archive_root'))
+    return {'ok': True, 'sku': sku, 'removed': present}
+
+
 def update_item(cfg: Dict[str, Any], sku: str, field: str, value: Any,
                 check_only: bool = False) -> Dict[str, Any]:
     """Update one field on one item."""
