@@ -306,6 +306,13 @@ delta field" error at apply time, not silently ignored. Next: wire the
 Update-Item button to this same apply path. Design:
 `archive/sections/Pending-projects-revisit.md` (promote on touch).
 
+**Todo #1062 closed as satisfied, not built new (2026-07-04).** Its scope
+("item detail page restructure + editable aspects") is already fully
+covered by PP-ACTIONCONSOLE-001's s40 build — verified in code: Editor
+tab + Live/Sold Listing tab, 3-layer live/proposed/edit aspect merge,
+condition select, price history, reprice schedule. Consolidated into
+#1085's "operator eyeball" gate instead of duplicating.
+
 **Same-day fix, todo #1114 — auto-redraft-clobbers-operator-edit, DONE and
 live-verified.** Investigated per Dave's request ("verify why we did it that
 way before changing") rather than jumping straight to a fix. Root cause: the
