@@ -74,3 +74,78 @@ and significantly improve identification accuracy for unknown items.
 - [ ] Write keys to `secrets_root/` (chmod 600)
 - [ ] Restart `ai_identify` worker after keys land
 
+---
+
+### Phase 0 — Comping interface (research inbox, 2026-07-04, todo #1109 validates the premise)
+
+**Origin:** Perplexity research thread dropped in inbox (`pricing-research-ui.md`),
+processed 2026-07-04. Directly confirmed by the PP-REPRICER-001 eval packet run
+the same day (todo #1109): Gemini + Google Search grounding *underperformed*
+the existing free Browse comps signal (45.3% vs 30.4% mean abs error against
+10 real sold items) — it kept finding plausible-but-wrong comps for
+near-generic items. This validates the research's core thesis: **don't let a
+model invent prices from scratch; comp retrieval + human supervision beats
+model-grounded search.**
+
+**Core idea — supervised hybrid, not autonomous scraping:** operator opens
+eBay Seller Hub Product Research (Terapeak) inside a browser pane, reviews
+comps like they already do, then hits "Capture snapshot" — the system stores
+the *reviewed, structured result* rather than trying to scrape or invent it.
+Marketplace Insights API access (still pending business-division approval,
+3+ weeks) becomes a drop-in upgrade path later, not a dependency — same
+schema, better-sourced data.
+
+**Proposed UI: 3-pane web editor, not Flutter.** Decision already reasoned
+through in the research thread and matches TGW's existing web/Flutter split
+(web = universal/comprehensive surface, Flutter = event-driven premium
+client over the same backend state — no forked business logic): the browser
+pane is the entire point of this tool, and Flutter's Linux desktop webview
+story is CEF-plugin-dependent and immature. Layout:
+
+| Region | Width | Purpose |
+|---|---|---|
+| Item pane | 28% | title draft, category, brand/model/MPN/UPC, condition, completeness flags |
+| Browser pane | 44% | embedded eBay Product Research/sold search, operator-driven, quick-query chips (exact title / brand+model / MPN / UPC / broad fallback) |
+| Comp pane | 28% | structured capture form + pricing recommendation + approve/override |
+
+**Data model (draft, needs Dave's review before building):**
+- `comp_snapshot` — source, query, match_assessment, market_stats (comp_count,
+  sold_median, sold_mean_trimmed, sold_low/high, avg_shipping), operator_notes,
+  exclusions. One per research session, timestamped, reviewer-attributed.
+- `pricing_recommendation` — based_on_comp_snapshot_id, strategy, inputs
+  (base_price + adjustments), outputs (target/list/floor/auto-accept prices),
+  guardrails (cost_floor, min_profit_abs, min_margin_pct), review status.
+- Main item JSON keeps only current-state pointers (`pricing.current`,
+  `pricing.latest_comp_snapshot_id`) — full history lives in the item's
+  history sidecar, matching TGW's existing current-vs-history split
+  (E5/archive-before-overwrite pattern already enforced elsewhere).
+- Status ladder: `uncomped → researching → captured → priced → approved`
+  (+ `override_required`, `manual_only` for low-confidence/thin-market items).
+
+**v1 guardrails (from the research, matches TGW's existing C9 operator-gate
+philosophy):** no autonomous scraping — human must initiate every search and
+confirm every capture. Auto-price only when match is exact/near-exact AND
+comp count clears a threshold; everything else routes to manual pricing.
+First-cut formula: `list_price = round_up(target_price * 1.12)`,
+`offer_floor = max(cost_floor, target_price * 0.92)`, disable auto-price if
+comp_count < 5 or confidence < 0.70 (starting point, tune per category).
+
+**Relationship to the rest of PP-PRICING-001:** this is a *third*, distinct
+pricing-signal source alongside Phase 1 (SerpApi, still blocked on #1110's
+key) and Phase 2 (Bing Visual Search) — and per the eval, it may end up the
+*most trustworthy* of the three since it's grounded in an operator-reviewed
+first-party source rather than a model's own web search. Feeds
+`recommend_price()` in `market_data.py` the same way the other phases do,
+as a `MarketDataProvider` once built.
+
+**Not started — this is a design capture, not a build commitment.** Needs
+Dave's go/no-go and priority slotting before any web-UI/editor code is
+written. Open questions: which existing web-UI framework/editor surface
+does the 3-pane view attach to (extend PP-EDITOR-001's existing item-detail
+view, or a new standalone route?); does the browser pane need to be a real
+embedded iframe/webview, or is "open Product Research in a new tab +
+paste-back the numbers" an acceptable v1 shortcut that avoids embedding a
+browser at all (simpler, avoids the exact Linux-webview friction the
+research flagged for Flutter — worth asking whether the web UI needs true
+embedding either, or whether tab-switch + paste is good enough for v1).
+

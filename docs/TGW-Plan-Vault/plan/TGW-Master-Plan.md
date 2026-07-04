@@ -122,6 +122,10 @@ would hide a real problem). Half (1,291) bulk-requeued 2026-07-04 via
 (quota headroom held back deliberately for today's troubleshooting); the
 other 1,291 + the ~657 non-402 dead-letters remain queued for a follow-up
 run. Zero requeue errors, worker active, 0 incidents at requeue time. Todo
+
+- DONE-1054: item detail History link via sku_old — live, 39,485 records indexed; test suite 1790 pass / 1 skip (was 1786).
+
+- #1049 get-ebay-token --print-url CLI half completed (d8a961c). fish wrapper deferred under PP-NIXOS-001 freeze.
 #1077 orphaned offer forces ebay_sync per-SKU fallback (Dave → eBay
 support); 15 Syncthing conflict files in vault; nats health check red
 (module absent — decide: install or drop check).
@@ -323,6 +327,7 @@ Sync infra live. Phase A (GDrive→Gemini multimodal draft) #1064; Phase B
 Phase 1 done; crash loop fixed s41. #1086 conceptual pass (unify with PP-EVENTD-001)
 BLOCKS #1055 rofi picker. FROZEN. Design: `pp/PP-CLIP-001.md`, `pp/PP-EVENTD-001.md`.
 
+PP-CLIP-001 conceptual pass: identified duplication with PP-EVENTD-001; recommended split (tgw-clipd local-only, cross-machine sync to EVENTD). Full analysis filed as CLIPBOARD-CONCEPT-PLANNING-1086.md.
 ## PP-CATPICK-001 — smart category picker
 **Phase 1 DONE 2026-07-04** (#1079): `category_candidates` (id/name/full ancestor
 path) backfilled onto all 25 `category-groups.json` groups from the on-disk eBay
@@ -350,10 +355,24 @@ delivers trustworthy data. Two candidate data sources, not mutually exclusive:
    "not accessible via API" is now stale: Gemini supports Search grounding as an API
    tool on our free-tier direct key). Zero-cost eval before paying for SerpApi.
 
-Eval packet (#1109): run BOTH — grounded Gemini and (if Dave provisions a SerpApi
-key) Shopping SERP — on ~10 operator-known items; compare against Browse-comps
-garbage and Dave's real prices; the winner (or the pair) becomes the interim comps
-source. Related: PP-AGENTIC-PRICE-001 candidate-query design composes with either.
+Eval packet (#1109) — DONE 2026-07-04: ran grounded Gemini (gemini-2.5-flash +
+Google Search grounding) against 10 real sold TGW items, scored vs the existing
+free `BrowseCompsProvider` signal. **Result: Gemini grounding LOST** — 45.3%
+mean abs error vs 30.4% for Browse comps; it kept finding plausible-but-wrong
+comps for near-generic/vintage items. **Do not wire grounded Gemini as a
+pricing signal.** SerpApi (Shopping SERP) still untested — blocked on #1110's
+key. Full writeup: `docs/TGW-Plan-Vault/inbox/DONE-1109-repricer-eval.md`,
+raw data `/opt/TGW/var/log/repricer-eval-1109.json`.
+
+**New candidate, same day — Phase 0 comping interface** (research inbox,
+`pp/PP-PRICING-001.md` Phase 0 section): the #1109 result directly validates
+a Perplexity research thread's thesis — don't let a model invent prices,
+build a supervised capture tool instead. Proposed: 3-pane web UI (item /
+embedded eBay Product Research browser / structured comp+pricing capture),
+`comp_snapshot` + `pricing_recommendation` schema, Marketplace Insights as a
+later drop-in upgrade to the same schema. Design capture only, not started —
+needs Dave's go/no-go. Related: PP-AGENTIC-PRICE-001 candidate-query design
+composes with either.
 
 ## PP-SOLD-001 — sold-event webhook (Tier 4)
 Code done. BLOCKED: webhook infra (#16) gated on ISS-005 signature verification
@@ -363,6 +382,7 @@ Code done. BLOCKED: webhook infra (#16) gated on ISS-005 signature verification
 Phases 1–3 done. Phase 4 `tgw ebay re-push` + plan documentation #896. Overlaps with
 eBayCapture — reassess scope at next touch. Design: `pp/PP-EBAY-SNAPSHOT-001.md`.
 
+Snapshot baseline completed (19,486 SKUs) — unblocks #1131 Motors census; drift detection baseline set.
 ## PP-RECOVERY-001 — web UI regression audit
 Findings doc'd (#1039, admin). Reassess against s40–42 UI rebuild — much may be
 obsolete. Design: `pp/PP-RECOVERY-001.md`.
@@ -385,6 +405,7 @@ PP-SEO-001 · PP-STAGE-001 · PP-SYNC-001 · PP-FREESHIP-001 · PP-STRIKE-001.
 PP-PRICE-002 (absorbed into PP-REPRICE-001) · PP-PLASMA-001 (delivered via CatioNIX
 desktop split, a1131 Plasma).
 
+DONE-1053: data-scrub legacy eBay Trading API fields — 20,419 items modified, zero exceptions (see filed document)
 ### Gated on R1 — named, designed later
 
 ## PP-BULKLIST-001 — bulk editing + listing surface (stub, Dave 2026-07-02)
