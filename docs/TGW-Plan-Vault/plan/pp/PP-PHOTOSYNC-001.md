@@ -158,6 +158,18 @@ but check for both specifically, then resolve."
   default before marking anything resolved; `--force` bypasses it for a SKU
   already verified some other way. New `catalog-verify` rule
   `legacy_listing_unrepaired` for the ongoing "regularly check" requirement.
+- **eBay Motors extension (same session)**: the n=1 dead-letter (Best Offer +
+  multi-marketplace conflict) surfaced that we have zero handling anywhere for
+  eBay Motors as a distinct marketplace — filed as **PP-EBAY-MOTORS-001
+  (urgent, unscoped)**. Immediate scoped piece landed here:
+  `check_legacy_duplicate_listing` now returns `marketplace_id`,
+  `is_ebay_motors`, and `other_marketplaces`, and treats ANY SKU with more
+  than one published offer across marketplaces as a duplicate outright —
+  never resolved even if one listingId happens to match. Live-verified on the
+  same test item: correctly detected `is_ebay_motors: true`, though
+  `other_marketplaces: []` shows the Inventory API only sees one side of the
+  conflict — the other marketplace is likely only visible via Trading API,
+  which is blind to non-EBAY_US sites (see PP-EBAY-MOTORS-001).
 - **Dead end found and NOT kept as the repair mechanism**: initially built
   `revise_item_pictures()` (Trading API `ReviseFixedPriceItem` +
   `PictureDetails`) assuming these were genuinely Trading-managed listings.

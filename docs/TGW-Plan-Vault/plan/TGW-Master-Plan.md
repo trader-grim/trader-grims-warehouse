@@ -204,6 +204,24 @@ promote it to `pp/`.
 
 ### Open — active or gated
 
+## PP-EBAY-MOTORS-001 — eBay Motors not accounted for anywhere (URGENT, unscoped)
+**Opened 2026-07-04, surfaced live during PP-PHOTOSYNC-001 P10.** Dave: "we do
+not have ebay motors accounted for anywhere... add that as an urgent planning
+request item." Confirmed: **no `marketplaceId` field exists anywhere in the
+item JSON schema** (cannot even count affected items from local data), and
+**`tgw.apis.ebay.trading.py` hardcodes SiteID=0 (EBAY_US) for every Trading API
+call** — `GetMyeBaySelling`, revise, upload, everything — meaning the entire
+Trading API surface may be structurally blind to Motors-site listings. Surfaced
+by a real eBay rejection ("Best Offer is not permitted with a SKU selling on
+multiple eBay marketplaces") that our duplicate-checker (P10) could see only
+one side of. Immediate scoped fix landed same session: the duplicate-checker
+is now marketplace-aware (`marketplace_id`, `is_ebay_motors`, cross-marketplace
+duplicate detection) — this does NOT close the gap, it just makes the one
+check already being built aware of it. **Needs a dedicated planning session**
+(todo #1129, p10) to scope: real item count, SiteID-hardcoding fix, schema
+field, category/fulfillment-policy marketplace dimension. Full writeup:
+`pp/PP-EBAY-MOTORS-001.md`.
+
 ## PP-CATALOG-INCR-001 — incremental catalog update (PROPOSAL, not yet built)
 **Opened s43 (2026-07-03).** Dave's original design, recovered from an unprocessed
 inbox transcript (`inbox/hermes-out-of-flake-portable-catalog-concept.md`) after he

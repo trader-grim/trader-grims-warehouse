@@ -402,6 +402,9 @@ def sync_active_listings(cfg: Dict[str, Any], itemdata_root: Path,
     return stats
 
 
+_MOTORS_MARKETPLACE = 'EBAY_MOTORS'
+
+
 def check_legacy_duplicate_listing(cfg: Dict[str, Any], sku: str,
                                    local_listing_id: str) -> Dict[str, Any]:
     """
@@ -412,15 +415,27 @@ def check_legacy_duplicate_listing(cfg: Dict[str, Any], sku: str,
     Dave, s43: a month of gaps in our own inventory tooling meant occasionally
     using Seller Hub directly — "a known consequence of my actions... it
     could happen again and needs an auto repair path." This is that path:
-    GET the live Inventory API offer for the SKU and compare its
-    listing.listingId against the locally-recorded (legacy) listing_id. Same
-    ID = one listing, dual-manageable via both APIs (safe to resolve). A
-    mismatch, or no published offer at all, means a genuine duplicate-listing
-    risk and must NEVER be auto-resolved.
+    GET the live Inventory API offer(s) for the SKU and compare listing IDs
+    against the locally-recorded (legacy) listing_id. Same ID, one offer =
+    one listing, dual-manageable via both APIs (safe to resolve). A mismatch,
+    no published offer, or MULTIPLE published offers across marketplaces
+    means a genuine duplicate-listing risk and must NEVER be auto-resolved.
 
-    Returns {'ok': True, 'duplicate': bool, 'inventory_listing_id': str|None,
-    'inventory_status': str|None, 'match': bool} — 'ok': False on a fetch
-    error (treat as unresolved, do not proceed).
+    eBay Motors extension (same session, live-found): a real rejection —
+    "Best Offer is not permitted with a SKU selling on multiple eBay
+    marketplaces" — surfaced that this SKU's offer carries
+    marketplaceId=EBAY_MOTORS. PP-EBAY-MOTORS-001 (urgent, unscoped) tracks
+    the larger gap (no marketplaceId stored anywhere locally, Trading API
+    hardcoded to SiteID=0/EBAY_US); this function is the immediate,
+    marketplace-AWARE piece of it — it surfaces marketplace_id and flags
+    cross-marketplace duplication explicitly, rather than only checking a
+    single listingId match.
+
+    Returns {'ok': True, 'duplicate': bool, 'match': bool,
+    'inventory_listing_id': str|None, 'inventory_status': str|None,
+    'marketplace_id': str|None, 'is_ebay_motors': bool,
+    'other_marketplaces': list[str]} — 'ok': False on a fetch error (treat
+    as unresolved, do not proceed).
     """
     try:
         resp = ebay_get(cfg, '/sell/inventory/v1/offer', params={'sku': sku})
@@ -432,11 +447,28 @@ def check_legacy_duplicate_listing(cfg: Dict[str, Any], sku: str,
     if not published:
         return {'ok': True, 'duplicate': True, 'match': False,
                 'inventory_listing_id': None, 'inventory_status': None,
+                'marketplace_id': None, 'is_ebay_motors': False,
+                'other_marketplaces': [],
                 'reason': 'no published Inventory API offer found for this SKU'}
 
-    inv_listing = published[0].get('listing') or {}
+    # Multiple published offers for the same SKU = live on more than one
+    # marketplace simultaneously. That IS the duplicate-listing risk, full
+    # stop — never treat as safe even if one of them matches local_listing_id.
+    marketplaces = [str(o.get('marketplaceId') or '') for o in published]
+    if len(published) > 1:
+        return {'ok': True, 'duplicate': True, 'match': False,
+                'inventory_listing_id': None, 'inventory_status': None,
+                'marketplace_id': marketplaces[0] if marketplaces else None,
+                'is_ebay_motors': _MOTORS_MARKETPLACE in marketplaces,
+                'other_marketplaces': marketplaces,
+                'reason': f'SKU has {len(published)} published offers across '
+                          f'marketplaces {marketplaces} — cross-marketplace duplicate'}
+
+    offer = published[0]
+    inv_listing = offer.get('listing') or {}
     inv_listing_id = str(inv_listing.get('listingId') or '')
     inv_status = inv_listing.get('listingStatus')
+    marketplace_id = str(offer.get('marketplaceId') or '') or None
     match = bool(inv_listing_id) and inv_listing_id == str(local_listing_id)
 
     return {
@@ -445,6 +477,9 @@ def check_legacy_duplicate_listing(cfg: Dict[str, Any], sku: str,
         'match': match,
         'inventory_listing_id': inv_listing_id,
         'inventory_status': inv_status,
+        'marketplace_id': marketplace_id,
+        'is_ebay_motors': marketplace_id == _MOTORS_MARKETPLACE,
+        'other_marketplaces': [],
     }
 
 

@@ -61,3 +61,20 @@ conflict (Best Offer + multi-marketplace, needs Dave's call, not code).
 ## Status: P10 COMPLETE. P4 remains PAUSED — need a clean n=1 (no incidental
 ## per-item conflicts) for a real before/after demo, and Dave's decision on
 ## the Best-Offer/multi-marketplace item found during this test.
+
+## Update: eBay Motors gap filed (Dave, same session)
+"we do not have ebay motors accounted for anywhere... add that as an urgent
+planning request item. Also add checking ebay motors to your duplicate
+checker." Filed PP-EBAY-MOTORS-001 (urgent, todo #1129, p10) — confirmed no
+marketplaceId field exists anywhere locally, and tgw.apis.ebay.trading.py
+hardcodes SiteID=0/EBAY_US for every Trading API call (structurally blind to
+Motors-site listings). Real scope unknown, needs a dedicated planning session.
+
+Scoped fix landed same session: check_legacy_duplicate_listing() now returns
+marketplace_id/is_ebay_motors/other_marketplaces and treats any SKU with
+multiple published offers across marketplaces as a duplicate outright. Tests:
++3 in test_resolve_legacy_duplicate_check.py (11 total in that file). Live-
+verified on tgw20160122242616788: is_ebay_motors=true detected correctly,
+other_marketplaces=[] confirms Inventory API only sees one side of the
+conflict — the deeper cross-API blindness is PP-EBAY-MOTORS-001's job, not
+closed here. Full suite: 1489 passed, same 9/18 baseline.

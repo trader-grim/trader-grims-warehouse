@@ -127,3 +127,47 @@ def test_check_duplicate_listing_fetch_error(monkeypatch):
     monkeypatch.setattr(pull_mod, 'ebay_get', _raise)
     result = pull_mod.check_legacy_duplicate_listing({}, 'tgw1', '226700000001')
     assert result['ok'] is False
+
+
+# ---------------------------------------------------------------------------
+# PP-EBAY-MOTORS-001 — marketplace-aware duplicate detection (session 43,
+# found live: "Best Offer is not permitted with a SKU selling on multiple
+# eBay marketplaces" for an EBAY_MOTORS offer).
+# ---------------------------------------------------------------------------
+
+def test_check_duplicate_listing_surfaces_marketplace_id(monkeypatch):
+    monkeypatch.setattr(pull_mod, 'ebay_get', lambda cfg, path, params=None: {
+        'offers': [{'status': 'PUBLISHED', 'marketplaceId': 'EBAY_MOTORS',
+                   'listing': {'listingId': '226700000001', 'listingStatus': 'ACTIVE'}}]})
+    result = pull_mod.check_legacy_duplicate_listing({}, 'tgw1', '226700000001')
+    assert result['match'] is True
+    assert result['marketplace_id'] == 'EBAY_MOTORS'
+    assert result['is_ebay_motors'] is True
+
+
+def test_check_duplicate_listing_non_motors_marketplace(monkeypatch):
+    monkeypatch.setattr(pull_mod, 'ebay_get', lambda cfg, path, params=None: {
+        'offers': [{'status': 'PUBLISHED', 'marketplaceId': 'EBAY_US',
+                   'listing': {'listingId': '226700000001', 'listingStatus': 'ACTIVE'}}]})
+    result = pull_mod.check_legacy_duplicate_listing({}, 'tgw1', '226700000001')
+    assert result['is_ebay_motors'] is False
+
+
+def test_check_duplicate_listing_multiple_marketplaces_is_duplicate(monkeypatch):
+    """The literal scenario eBay's rejection described: the same SKU has a
+    published offer on more than one marketplace at once. This must be
+    flagged as a duplicate even if one of the listingIds matches our local
+    record — never treated as safe."""
+    monkeypatch.setattr(pull_mod, 'ebay_get', lambda cfg, path, params=None: {
+        'offers': [
+            {'status': 'PUBLISHED', 'marketplaceId': 'EBAY_MOTORS',
+             'listing': {'listingId': '226700000001', 'listingStatus': 'ACTIVE'}},
+            {'status': 'PUBLISHED', 'marketplaceId': 'EBAY_US',
+             'listing': {'listingId': '226700000099', 'listingStatus': 'ACTIVE'}},
+        ]})
+    result = pull_mod.check_legacy_duplicate_listing({}, 'tgw1', '226700000001')
+    assert result['ok'] is True
+    assert result['duplicate'] is True
+    assert result['match'] is False
+    assert result['is_ebay_motors'] is True
+    assert set(result['other_marketplaces']) == {'EBAY_MOTORS', 'EBAY_US'}

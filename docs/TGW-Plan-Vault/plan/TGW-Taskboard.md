@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-07-04 00:43 UTC — 201 open, 36 done in the last 7 days._
+_Rendered 2026-07-04 00:52 UTC — 202 open, 37 done in the last 7 days._
 
 ## admin (23 open)
 
@@ -41,7 +41,7 @@ _Rendered 2026-07-04 00:43 UTC — 201 open, 36 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (34 open)
+## claude (35 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
@@ -52,6 +52,7 @@ _Rendered 2026-07-04 00:43 UTC — 201 open, 36 done in the last 7 days._
 | 1085 | 8 |  | PP-ACTIONCONSOLE-001 build LANDED s40: state-driven action line (6 states), Editor/Live-Sold tabs, status bar + eBay Status dropdown + Pipeline Tools removed, pricing history merged left + comps deduped, dead-letter contextual Retry w/ operator_retry ledger annotation, reset_draft_from_live action. All 4 state pages render 200; ruff clean; 74 revision tests pass. Remaining: operator eyeball + iterate per Dave's ship-and-adjust rule; ops surface for relocated troubleshooting buttons not yet built | [[TGW-Master-Plan#PP-ACTIONCONSOLE-001 — state-driven item action console\|PP-ACTIONCONSOLE-001]] |  |
 | 1102 | 8 |  | Repair rotten test suite (found s42): FULL-SUITE TRUTH = 1399 pass, 11 fail, 236 errors. test_http_server 218E+3F (cookie-auth refactor, _web_key), test_fence 18E, test_config_hygiene 5F, test_freeship 2F, test_invariants_publish_idempotency 1F. 'Suite green' belief was stale — fix + add CI/digest check so rot is visible. |  |  |
 | 1114 | 10 |  | DESIGN QUESTION (Dave input): saving an operator-edited draft triggers auto-redraft which REGENERATES AI content over the just-saved edits — conflicts with operator-gate-is-the-design. Decide: redraft preserves operator-authored fields (field-level locks?) / auto-redraft only rebuilds description from aspects / drop auto-redraft entirely. Found s42 via listOnEbay flow. |  |  |
+| 1129 | 10 |  | URGENT PLANNING: PP-EBAY-MOTORS-001 — eBay Motors not accounted for anywhere (no marketplaceId stored locally, Trading API hardcoded SiteID=0/EBAY_US blind to Motors listings, unknown item count/scope). Needs a dedicated planning session, not a packet. | [[TGW-Master-Plan#PP-EBAY-MOTORS-001 — eBay Motors not accounted for anywhere (URGENT, unscoped)\|PP-EBAY-MOTORS-001]] |  |
 | 1104 | 12 |  | Enforce invariant E5 in code (archive-before-delete/overwrite at the fence) — STILL the open gap from 2026-06-28; charter names it; promote from prose to enforcement like E7 was |  |  |
 | 1086 | 14 |  | PP-CLIP-001 conceptual planning pass (BEFORE any clipboard tool work incl. #1055 rofi picker): /tgw-plan unified clipboard concept — read PP-EVENTD-001-design.md + inbox 'linux universal lan clipboard manager' research + PP-CLIP-001 plan section; validate/revise the staircase clipd → rofi → hook sync → event server; output docs/ai-plans/clipboard-concept.md | [[TGW-Master-Plan#PP-CLIP-001 — clipboard manager\|PP-CLIP-001]] |  |
 | 1055 | 15 |  | PP-CLIP-001 Phase 2: rofi clipboard history picker — keybind launches rofi fed from tgw clip list; select entry copies back via tgw clip get --id N --copy; SKUs pinned/highlighted; optional immediate paste via xdotool/wl-paste | [[TGW-Master-Plan#PP-CLIP-001 — clipboard manager\|PP-CLIP-001]] | ⛔ #1086 |
@@ -232,10 +233,11 @@ _Rendered 2026-07-04 00:43 UTC — 201 open, 36 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — sold-event webhook (Tier 4)\|PP-SOLD-001]] |  |
 
-## Done this week (36)  — showing 15 most recent
+## Done this week (37)  — showing 15 most recent
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 1130 | claude | 2026-07-04 | PP-PHOTOSYNC-001: check_legacy_duplicate_listing is now marketplace-aware (marketplace_id, is_ebay_motors, cross-marketplace duplicate detection) — DONE, live-verified on tgw20160122242616788 |
 | 1128 | claude | 2026-07-04 | PP-PHOTOSYNC-001 P10: legacy-listing skip was silently discarded (journald only) — now persisted durably + live duplicate-check-before-resolve built (Dave 2026-07-03: 'check for both specifically, then resolve'). DONE, live-verified. |
 | 1125 | claude | 2026-07-03 | in_progress: PP-PHOTOSYNC-001 P9 — bulk truth source within existing scopes |
 | 1123 | claude | 2026-07-03 | in_progress: PP-PHOTOSYNC-001 P7 — truth-audit rules in catalog-verify |
@@ -250,5 +252,4 @@ _Rendered 2026-07-04 00:43 UTC — 201 open, 36 done in the last 7 days._
 | 1097 | claude | 2026-07-02 | R0.5 timestamp integrity: fix 6 naive datetime.now()/utcnow() sites (reports/health/printing/http_server) + UTC-storage invariant + explicit tgw psql session tz |
 | 1100 | claude | 2026-07-02 | R0.4 budgeted aspects warm-crawl command (tgw warm-ebay-aspects) for categories referenced by inventory; run after 00:00 PST reset; align aspects cache with tree-cache no-TTL policy |
 | 1096 | claude | 2026-07-02 | R0.3 probe eBay Developer Analytics getRateLimits with current app keys — feasibility for real quota readings (see plan/RETARGET-2026-07-02.md) |
-| 1094 | claude | 2026-07-02 | Permissions: extended default ACL to src/bin/config/var/backups; patched atomic_write_json (items.py+catalog.py) to preserve/default file mode instead of NamedTemporaryFile's 0600; permissions-reset script now logs --check results to permissions-audit.log |
-| … | | | _…and 21 more — run `tgw todo --all` to see everything_ |
+| … | | | _…and 22 more — run `tgw todo --all` to see everything_ |
