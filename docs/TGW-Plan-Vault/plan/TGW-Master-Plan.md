@@ -110,10 +110,21 @@ for the s42/43 cookie-login wall (`_web_key` renamed `_web_password`, `/form/*` 
 needs a session cookie) plus a handful of unrelated drifts (`test_fence.py` same
 fixture rename; `test_ebay_publish_price_drift.py` missing a mock for the s42
 ordering-guard DB call; `test_config_hygiene.py`/`test_freeship.py` leaking into the
-real `/opt/TGW/secrets` path for non-tgw test runners). 3,239 `ebay_draft`
-dead-letters (bulk requeue awaits Dave's go); todo #1077 orphaned offer forces
-ebay_sync per-SKU fallback (Dave → eBay support); 15 Syncthing conflict files in
-vault; nats health check red (module absent — decide: install or drop check).
+real `/opt/TGW/secrets` path for non-tgw test runners). **2,582 of 3,239 `ebay_draft`
+dead-letters root-caused 2026-07-04**: OpenRouter "402 Payment Required" on
+2026-07-02 (billing gap, since resolved — Dave confirmed credits available,
+little use since) — not a logic bug; `ebay_draft`'s primary provider is
+`google_direct` (free tier), OpenRouter only touched on a Google failure.
+Deliberately not auto-retried (payment errors aren't in
+`worker_base._TRANSIENT_ERRORS` by design — auto-retrying a billing failure
+would hide a real problem). Half (1,291) bulk-requeued 2026-07-04 via
+`scripts/requeue_ebay_draft_402_dead_letters.py --apply --limit 1291`
+(quota headroom held back deliberately for today's troubleshooting); the
+other 1,291 + the ~657 non-402 dead-letters remain queued for a follow-up
+run. Zero requeue errors, worker active, 0 incidents at requeue time. Todo
+#1077 orphaned offer forces ebay_sync per-SKU fallback (Dave → eBay
+support); 15 Syncthing conflict files in vault; nats health check red
+(module absent — decide: install or drop check).
 
 **s43 update (2026-07-03):** EPS-exhaustion root causes found and the standing parts
 fixed — retry_wait backlog (2,715 jobs) cancelled; invariant **C10 operator lane
@@ -147,7 +158,7 @@ Goal: graduate what is already built to *operator-verified in production*.
 |---|--------|------|
 | R1.1 | Live-fire PP-LISTEDITOR-001 Phase 2: one live item, price-only delta, verify on eBay + revision_history | Dave picks item |
 | R1.2 | Dave operator-tests PP-ACTIONCONSOLE-001 on 3 real items; each friction point becomes a packet | Dave |
-| R1.3 | Requeue 50 of 3,239 ebay_draft dead-letters → review → ramp 500 → rest | Dave's go |
+| R1.3 | **PARTIAL 2026-07-04**: root-caused (OpenRouter 402 billing gap, resolved), 1,291/2,582 requeued with Dave's go — remainder + non-402 dead-letters follow-up | in progress |
 | R1.4 | Post-reset: confirm Taxonomy-429 jobs self-clear via new transient-requeue path; confirm Trading reset for ebay_legacy_sync | after 00:00 PST |
 | R1.5 | Confirm/correct `tgw202605051933258` live price (reducer-bug victim) | Dave |
 | R1.6 | **One true end-to-end**: Dave intakes ONE physical item to live entirely through the UI; every terminal-escape becomes a packet | after R1.1–R1.3 |
