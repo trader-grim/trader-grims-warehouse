@@ -123,7 +123,13 @@ photo set. No new mechanism needed here either.
        desktop, not firing discrete commands) but the macro-grid piece
        specifically should be re-evaluated once `clip-route` exists, not
        built as a bespoke parallel channel. Not resolved here — flagging for
-       whoever scopes the actual build.
+       whoever scopes the actual build. **Low complexity confirmed** (Dave):
+       xmouse itself is "mostly just sending ssh commands" — the macro-grid
+       is a thin dispatch layer, not entangled with the `ydotool`/Wayland
+       quirks (those are specific to xmouse's separate remote-mouse
+       feature). Swapping the transport (SSH → event-server call, or a
+       direct HTTP call to `tgw-http`) is a small, low-risk change either
+       way this gets built.
    - Replaces the Tasker Scenes + AutoTools WebScreens overlay entirely —
      this becomes the primary on-device intake surface.
 
