@@ -408,6 +408,18 @@ API/photo capture (machine-written, group-only perms, different retention model)
 Dave is linking his existing `docs/TGW-Plan-Vault/inbox/` via Syncthing across his
 workstations in the meantime — no filesystem move happening until this is decided.
 
+**Self-healing philosophy is visibly working — verify quality at 2pm (Dave, 2026-07-03).**
+Observed live tonight during the overnight queue: the agent is finding, investigating,
+and logging anomalies as part of the normal workflow, not just executing tasks blind —
+e.g. the R1.8 snapshot's per-SKU error counter jumping 3→23→29 was checked against the
+quota-incident log and confirmed benign (silently-counted 404s for items with no offer,
+not 429s/quota exhaustion) before being written off, rather than either ignored or
+mis-flagged as an alarm. Matches the standing design philosophy (memory:
+feedback-self-healing-system — auto-detect, auto-sanitize or surface, self-service
+resolution, never just patch-and-move-on). Dave wants this specifically verified for
+quality at the 2pm session — i.e. confirm the investigations are actually correct and
+thorough, not just reassuringly-worded, before trusting the pattern going forward.
+
 ## Standing gates (human-only)
 
 Never: alter eBay OAuth scopes · auto-publish · **push AI-regenerated content to a
