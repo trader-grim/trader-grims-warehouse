@@ -16,6 +16,7 @@ import secrets
 import sqlite3
 import subprocess
 import time
+import urllib.parse
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -3303,6 +3304,82 @@ def todos_form(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# GET /form/history/{sku_old} — historical-catalog lookup (todo #1054)
+# ---------------------------------------------------------------------------
+
+_historical_index_by_sku_old: Optional[Dict[str, Dict[str, Any]]] = None
+
+
+def _load_historical_index_by_sku_old() -> Dict[str, Dict[str, Any]]:
+    """Build (and cache for process lifetime) sku_old -> historical record,
+    merging historical-tgwcatalog.json and historical-master-catalog.json.
+    Both files carry their own sku_old field that matches current items'
+    sku_old exactly (confirmed live) — no case-normalization guessing needed.
+    Static snapshot files; never auto-refreshes, matching the category-tree
+    cache's own no-auto-expiry convention."""
+    global _historical_index_by_sku_old
+    if _historical_index_by_sku_old is not None:
+        return _historical_index_by_sku_old
+
+    catalog_root = Path(_cfg.get("catalog_root", "/opt/TGW/data/ItemCatalog"))
+    index: Dict[str, Dict[str, Any]] = {}
+
+    tgwcat_path = catalog_root / "historical-tgwcatalog.json"
+    if tgwcat_path.exists():
+        try:
+            for rec in json.loads(tgwcat_path.read_text(encoding="utf-8")).values():
+                so = rec.get("sku_old")
+                if so:
+                    index.setdefault(so, rec)
+        except (OSError, ValueError) as exc:
+            log.warning("historical-tgwcatalog.json unreadable: %s", exc)
+
+    mastercat_path = catalog_root / "historical-master-catalog.json"
+    if mastercat_path.exists():
+        try:
+            for rec in json.loads(mastercat_path.read_text(encoding="utf-8")):
+                so = rec.get("sku_old")
+                if so:
+                    index.setdefault(so, rec)
+        except (OSError, ValueError) as exc:
+            log.warning("historical-master-catalog.json unreadable: %s", exc)
+
+    _historical_index_by_sku_old = index
+    return index
+
+
+@app.get("/form/history/{sku_old}")
+def history_form(sku_old: str):
+    """Historical-catalog lookup by sku_old — linked from item detail's
+    'SKU (old)' field. Gated by the standard /form/* session-cookie wall
+    (_session_guard middleware) like every other /form/* page."""
+    import html as _html
+
+    rec = _load_historical_index_by_sku_old().get(sku_old)
+    if rec is None:
+        body = (
+            "<h2>History</h2>"
+            f'<p>No historical record found for <code>{_html.escape(sku_old)}</code>.</p>'
+        )
+    else:
+        rows = "".join(
+            f"<tr><td>{_html.escape(str(k))}</td><td>{_html.escape(str(v))}</td></tr>"
+            for k, v in sorted(rec.items()) if v not in (None, "")
+        )
+        body = (
+            f"<h2>History — {_html.escape(sku_old)}</h2>"
+            f'<table class="dtable"><tbody>{rows}</tbody></table>'
+        )
+    page = (
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        "<title>TGW History</title>" + _STATIC_HEAD + "</head><body>"
+        + body + _STATIC_FOOT + "</body></html>"
+    )
+    return HTMLResponse(page)
+
+
+# ---------------------------------------------------------------------------
 # GET/POST /form/suggest — punctuation-safe suggestion entry (PP-CAPTURE-001,
 # Round 5 #44). Plain HTML form: no JS, no shell quoting, no Bearer auth
 # (network trust, like /form/intake and /form/todos).
@@ -5328,7 +5405,10 @@ def _render_item_detail_html(
         + fr("Manufacturer", key="manufacturer", editable=True)
         + fr("Country of mfr", key="country_of_manufacture", editable=True)
         + fr("Model number", key="model_number", editable=True)
-        + (fr("SKU (old)", h(str(item.get("sku_old", "") or ""))) if item.get("sku_old") else "")
+        + (fr("SKU (old)", h(str(item.get("sku_old", "") or ""))
+                            + f' <a href="/form/history/{urllib.parse.quote(str(item.get("sku_old")))}" '
+                            'style="color:#4a8;font-size:.85em">History &rarr;</a>')
+          if item.get("sku_old") else "")
         + (fr("UPC", h(str(item.get("upc", "") or ""))) if item.get("upc") else "")
         + (fr("ISBN", h(str(item.get("isbn", "") or ""))) if item.get("isbn") else "")
         + (fr("Part number", h(str(item.get("part_number", "") or ""))) if item.get("part_number") else "")

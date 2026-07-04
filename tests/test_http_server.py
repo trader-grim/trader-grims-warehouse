@@ -501,6 +501,92 @@ def test_eligible_filter_status_and_ebay_state(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# GET /form/history/{sku_old} — historical-catalog lookup (todo #1054)
+# ---------------------------------------------------------------------------
+
+def _write_historical_catalogs(tmp_path, tgwcat_records=None, mastercat_records=None):
+    catalog_root = tmp_path / "ItemCatalog"
+    catalog_root.mkdir(exist_ok=True)
+    if tgwcat_records is not None:
+        (catalog_root / "historical-tgwcatalog.json").write_text(
+            json.dumps(tgwcat_records), encoding="utf-8")
+    if mastercat_records is not None:
+        (catalog_root / "historical-master-catalog.json").write_text(
+            json.dumps(mastercat_records), encoding="utf-8")
+    return catalog_root
+
+
+def _history_client(tmp_path, monkeypatch, catalog_root):
+    cfg = {
+        "itemdata_root": tmp_path / "ItemData",
+        "catalog_root": catalog_root,
+        "location_tree_root": tmp_path / "loctree",
+        "thumbnail_root": tmp_path / "thumbs",
+        "category_groups_path": str(tmp_path / "cg.json"),
+        "plan_vault_path": tmp_path / "vault",
+        "plan_inbox_path": tmp_path / "vault" / "inbox",
+        "postgres_dsn": "postgresql://fake/db",
+        "pretty": True,
+        "raw": {},
+    }
+    monkeypatch.setattr(http_server, "_cfg", cfg)
+    monkeypatch.setattr(http_server, "_historical_index_by_sku_old", None)
+    client = TestClient(http_server.app)
+    _login(client)  # /form/* is gated by the session-cookie wall (s42/43)
+    return client
+
+
+def test_history_form_found_in_tgwcatalog(tmp_path, monkeypatch):
+    catalog_root = _write_historical_catalogs(tmp_path, tgwcat_records={
+        "tgw20140101144105453": {
+            "sku": "tgw20140101144105453",
+            "sku_old": "TGW20140101144105453",
+            "tgw_name": "Mumm Champagne Bottle Stopper",
+            "price": "4.99",
+        },
+    })
+    client = _history_client(tmp_path, monkeypatch, catalog_root)
+    r = client.get("/form/history/TGW20140101144105453")
+    assert r.status_code == 200
+    assert "Mumm Champagne Bottle Stopper" in r.text
+    assert "TGW20140101144105453" in r.text
+
+
+def test_history_form_found_in_mastercatalog_when_absent_from_tgwcatalog(tmp_path, monkeypatch):
+    catalog_root = _write_historical_catalogs(
+        tmp_path,
+        tgwcat_records={},
+        mastercat_records=[
+            {"sku": "tgw20140101144105453", "sku_old": "TGW20140101144105453",
+             "title": "Mumm Champagne Bottle Stopper (master)"},
+        ],
+    )
+    client = _history_client(tmp_path, monkeypatch, catalog_root)
+    r = client.get("/form/history/TGW20140101144105453")
+    assert r.status_code == 200
+    assert "Mumm Champagne Bottle Stopper (master)" in r.text
+
+
+def test_history_form_not_found_renders_clean_message(tmp_path, monkeypatch):
+    catalog_root = _write_historical_catalogs(tmp_path, tgwcat_records={}, mastercat_records=[])
+    client = _history_client(tmp_path, monkeypatch, catalog_root)
+    r = client.get("/form/history/TGW-DOES-NOT-EXIST")
+    assert r.status_code == 200
+    assert "No historical record found" in r.text
+
+
+def test_item_detail_history_link_present_when_sku_old_set(env):
+    sku = SKU_A
+    doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
+    doc["sku_old"] = "TGW20140101144105453"
+    (env["itemdata_root"] / sku / f"{sku}.json").write_text(json.dumps(doc), encoding="utf-8")
+    _login(env["client"])
+    r = env["client"].get(f"/form/items/{sku}")
+    assert "/form/history/TGW20140101144105453" in r.text
+    assert "History" in r.text
+
+
+# ---------------------------------------------------------------------------
 # GET /api/items/{sku} — 404, media-list assembly, queue-jobs fetch
 # ---------------------------------------------------------------------------
 
