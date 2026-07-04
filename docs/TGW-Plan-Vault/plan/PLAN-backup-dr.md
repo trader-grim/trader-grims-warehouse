@@ -539,6 +539,42 @@ build) properly instead of by deletion:
 | B5 | Dump runs while a migration batch writes sku_history | `--format=custom` is a consistent snapshot by construction (single transaction) — no action needed, noted for confidence |
 | B6 | rclone sync propagates a local catastrophe upward | `--backup-dir` dated trash (A2) is the rewind; restic versioning (Phase B) is the real fix |
 
+## 6.5. ItemArchive zipmerge cadence — PLANNING NOTE for 2pm 2026-07-04 (not implemented)
+
+**Context (2026-07-03/04, invariant E5 enforcement, todo #1104):** `items.atomic_write_json`
+now zips the item's prior state into `archive_root/<sku>.zip` before every overwrite
+(fail-closed). `archive_root` (`/opt/TGW/data/ItemArchive`) is a **temporary local
+directory on the NVMe root** — Dave's explicit direction, since the previously
+configured symlink pointed at an unmounted drive. It only accumulates new go-forward
+writes; disk check at the time showed 57G free on that partition (80% used).
+
+The **real, consolidated archive** (54,688 zips, ~163G) currently lives at
+`/home/db/devices/porche/history/ItemArchive` — Dave is manually merging several
+older archive copies into this set with `zipmerge`. His stated pattern: keep a
+"regular writes" archive location that changes are appended to continuously, then
+periodically `zipmerge` its contents into the consolidated master so the master
+itself isn't constantly written to.
+
+**What needs deciding at 2pm:**
+- Formalize the zipmerge cadence (daily? weekly? triggered by a size/count threshold
+  on the local `/opt/TGW/data/ItemArchive` dir?) as a scheduled job, same tier as the
+  A1–A6 backup jobs above.
+- Decide the merge direction/tooling: does it fold local `ItemArchive/*.zip` into the
+  porche master via `zipmerge`, then truncate/clear the local copies? Or copy-then-verify
+  then delete? Must not lose any entry — E5's whole purpose is zero-loss archiving.
+- Decide final resting place for `archive_root` once the porche consolidation settles
+  (stay local + scheduled merge, or repoint at porche/another mount directly) — this
+  plan explicitly allows moving it later without code changes (archive_root is
+  config-driven), so no urgency, but it should land on a real decision rather than
+  stay open-ended.
+- Space risk: if the local accumulation is never merged/cleared, it competes with
+  ItemData (180G) on the same 277G NVMe partition (57G free as of 2026-07-03) — not
+  a near-term problem at current edit volume, but worth a threshold alarm (extend
+  `tgw health`'s disk check, or fold into B3's quota risk above) rather than silent
+  growth to exhaustion.
+
+Not implemented tonight — Dave asked for this to be captured as a planning item only.
+
 ## 7. Verification (standing, after Phase A)
 
 Daily (automatic): `tgw health` includes the four backup ages.
