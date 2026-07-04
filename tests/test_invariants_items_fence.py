@@ -302,6 +302,24 @@ def test_set_fields_sets_absent_fields(cfg):
     assert doc['ebay_category_id'] == '123'
 
 
+def test_set_fields_publishes_mutation_events(cfg, monkeypatch):
+    """Code-review fix: bulk writes via set_fields() must feed the
+    PP-AIOPS-001 audit/mutation stream the same way single-field
+    update_item() writes already do — previously silently omitted."""
+    from unittest import mock
+    calls = []
+    fake_module = mock.MagicMock()
+    fake_module.publish_mutation = lambda **kw: calls.append(kw)
+    monkeypatch.setitem(__import__('sys').modules, 'tgw.apis.nats_client', fake_module)
+
+    items.create_item(cfg, 'tgw1', {'title': 't'})
+    items.set_fields(cfg, 'tgw1', {'ebay_category_id': '123', 'ebay_category_name': 'Books'})
+
+    fields_published = {c['field'] for c in calls}
+    assert fields_published == {'ebay_category_id', 'ebay_category_name'}
+    assert all(c['sku'] == 'tgw1' for c in calls)
+
+
 def test_set_fields_never_clobbers_present_value_by_default(cfg):
     items.create_item(cfg, 'tgw1', {'title': 't', 'ebay_category_id': 'existing'})
     res = items.set_fields(cfg, 'tgw1', {'ebay_category_id': 'recovered'})

@@ -850,6 +850,42 @@ def test_operator_edit_to_not_yet_live_draft_does_not_auto_enqueue(env, enqueue_
     assert "ebay_draft" not in queue_names
 
 
+def test_bare_top_level_title_edit_does_not_auto_enqueue(env, enqueue_calls):
+    """Code-review fix: a PATCH to a bare top-level 'title' (not
+    draft_listing.title) must NOT trigger the auto-push — ebay_stage only
+    ever reads draft_listing's own title/description, so pushing here
+    would silently send stale draft_listing content while claiming the
+    edit was propagated. Only draft_listing.* edits should trigger."""
+    sku = "tgw20260401000000012"
+    _seed_live_item(env, sku)
+
+    r = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"title": "Bare top-level title edit"}},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    queue_names = [c["kwargs"].get("queue_name") for c in enqueue_calls]
+    assert "ebay_stage" not in queue_names
+    assert "ebay_draft" not in queue_names
+
+
+def test_operator_edit_to_live_draft_uses_dedupe_key(env, enqueue_calls):
+    """Code-review fix: the auto-push must dedupe by SKU like the other
+    ebay_stage enqueue call sites, so rapid successive edits collapse
+    into one queued push instead of piling up duplicate live PUTs."""
+    sku = "tgw20260401000000013"
+    _seed_live_item(env, sku)
+
+    env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"draft_listing": {"title": "Edit one"}}},
+        headers=AUTH_HEADERS,
+    )
+    stage_call = next(c for c in enqueue_calls if c["kwargs"].get("queue_name") == "ebay_stage")
+    assert stage_call["kwargs"]["dedupe_key"] == f"ebay_stage:{sku}"
+
+
 # ---------------------------------------------------------------------------
 # GET /api/locations
 # ---------------------------------------------------------------------------

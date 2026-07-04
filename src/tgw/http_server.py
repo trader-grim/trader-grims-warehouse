@@ -726,7 +726,7 @@ def patch_item(sku: str, body: PatchBody, request: Request) -> Dict[str, Any]:
     # todo #1114 (2026-07-04): this used to enqueue ebay_draft here, which
     # RE-RUNS the AI drafting pass and overwrites draft_listing with fresh
     # model output — clobbering the very edit the operator just made. Root
-    # cause: the trigger field set conflates two different edits. The
+    # cause: the trigger field set conflated two different edits. The
     # editor UI only ever PATCHes into draft_listing.* directly (condition,
     # shipping profile, aspects, price, title, description all live there —
     # confirmed by grep, no UI path sends bare top-level title/description/
@@ -737,7 +737,18 @@ def patch_item(sku: str, body: PatchBody, request: Request) -> Dict[str, Any]:
     # "Update Listing" button's ebay_update action exactly: push the
     # operator's edited draft_listing straight to the live offer
     # (ebay_stage, force=True, origin=operator) — no AI involved.
-    _DRAFT_LISTING_FIELDS = {"draft_listing", "title", "description", "item_attributes"}
+    #
+    # Code-review fix (2026-07-04): trigger set narrowed to just
+    # "draft_listing" — ebay_stage/stage_draft() only ever reads
+    # item["draft_listing"] when building the eBay push body (falling back
+    # to a bare top-level field only if draft_listing's own value is
+    # empty). Keeping bare "title"/"description"/"item_attributes" in the
+    # trigger meant a PATCH to one of those alone would fire the push and
+    # log "pushed" while the stale draft_listing content — not the actual
+    # edit — is what reaches eBay. dedupe_key added to match the other
+    # ebay_stage enqueue call sites in this file (this one and the sibling
+    # "ebay_update" action were the only two without it).
+    _DRAFT_LISTING_FIELDS = {"draft_listing"}
     if not _machine_write and _DRAFT_LISTING_FIELDS.intersection(body.fields):
         offer_id = (doc_before.get("ebay_offer") or {}).get("offer_id")
         if offer_id:
@@ -745,6 +756,7 @@ def patch_item(sku: str, body: PatchBody, request: Request) -> Dict[str, Any]:
                 state_machine.enqueue_job(
                     queue_name="ebay_stage",
                     payload={"sku": sku, "force": True, "origin": "operator"},
+                    dedupe_key=f"ebay_stage:{sku}",
                     max_attempts=2,
                 )
                 log.info("auto-queued ebay_stage (push, no regen) for %s "

@@ -39,25 +39,29 @@ fi
 
 if command -v rofi >/dev/null 2>&1; then
     selected="$(printf '%s\n' "$rows" | cut -f2- | rofi -dmenu -p 'Clipboard' -no-custom -format i)"
+    # rofi -format i gives a 0-based row index into the piped list, or
+    # empty/-1 on Escape/no selection.
+    if [ -z "${selected:-}" ] || [ "$selected" -lt 0 ] 2>/dev/null; then
+        exit 0
+    fi
+    clip_id="$(printf '%s\n' "$rows" | sed -n "$((selected + 1))p" | cut -f1)"
 elif command -v dmenu >/dev/null 2>&1; then
-    selected_line="$(printf '%s\n' "$rows" | cut -f2- | dmenu -p 'Clipboard:')"
-    selected="$(printf '%s\n' "$rows" | cut -f2- | grep -n -F -x "$selected_line" | head -1 | cut -d: -f1)"
-    [ -n "$selected" ] && selected=$((selected - 1))
+    # Code-review fix: dmenu's stdout protocol only returns the selected
+    # TEXT, not a position, so re-matching truncated/displayed content
+    # back against $rows can't disambiguate two rows with identical
+    # (100-char-truncated) content — the wrong clip id could get resolved.
+    # Fix: pipe the full "id\t[tag] content" line (id included) to dmenu
+    # itself, so whatever dmenu echoes back already carries its own
+    # unique id at the front — no re-matching needed at all.
+    selected_line="$(printf '%s\n' "$rows" | dmenu -p 'Clipboard:')"
+    clip_id="$(printf '%s\n' "$selected_line" | cut -f1)"
 else
     echo "tgw-clip-picker: neither rofi nor dmenu found" >&2
     exit 1
 fi
 
-# rofi -format i gives a 0-based row index into the piped list, or empty/-1
-# on Escape/no selection.
-if [ -z "${selected:-}" ] || [ "$selected" -lt 0 ] 2>/dev/null; then
+if [ -z "${clip_id:-}" ]; then
     exit 0
-fi
-
-clip_id="$(printf '%s\n' "$rows" | sed -n "$((selected + 1))p" | cut -f1)"
-if [ -z "$clip_id" ]; then
-    echo "tgw-clip-picker: could not resolve selection to a clip id" >&2
-    exit 1
 fi
 
 "$TGW_BIN" clip get --id "$clip_id" --copy >/dev/null

@@ -267,10 +267,27 @@ def set_fields(cfg: Dict[str, Any], sku: str, fields: Dict[str, Any],
         return {'ok': True, 'sku': sku, 'would_set': to_set, 'check_only': True}
     if not to_set:
         return {'ok': True, 'sku': sku, 'set': {}}
+    before = {f: doc.get(f) for f in to_set}
     doc.update(to_set)
     doc.pop('catalog_verified', None)
     atomic_write_json(path, doc, pretty=cfg.get('pretty', True),
                       archive_root=cfg.get('archive_root'))
+    # Publish to audit stream (PP-AIOPS-001 Phase 1) — fire-and-forget.
+    # Code-review fix: this was missing entirely, making bulk backfill
+    # writes (e.g. the category-recompile pass) invisible to the
+    # mutation stream that single-field update_item() writes already
+    # feed. One event per field, matching _write_field()'s shape.
+    try:
+        from .apis.nats_client import publish_mutation
+        for f, v in to_set.items():
+            publish_mutation(
+                sku=sku, field=f,
+                old_value=before.get(f), new_value=v,
+                source=_mutation_source.get(),
+                session_id=_session_id.get(),
+            )
+    except Exception:
+        pass
     return {'ok': True, 'sku': sku, 'set': to_set}
 
 

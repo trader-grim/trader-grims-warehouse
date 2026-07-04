@@ -102,11 +102,30 @@ def _live_snapshot(item: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _normalize_aspects(aspects: Dict[str, Any]) -> Dict[str, str]:
+    """draft_listing.item_specifics values are bare strings
+    ({"Brand": "Milton Bradley"}); ebay_live's inventory_item.product
+    aspects are list-valued per eBay's Inventory API convention
+    ({"Brand": ["Milton Bradley"]}). Normalize both to {name: "a;b"} so
+    _diff can compare them fairly instead of always mismatching on shape."""
+    out = {}
+    for name, value in (aspects or {}).items():
+        if isinstance(value, list):
+            out[name] = ';'.join(str(v) for v in value)
+        else:
+            out[name] = str(value)
+    return out
+
+
 def _diff(intent: Dict[str, Any], live: Dict[str, Any]) -> List[str]:
     mismatches = []
     for key in ('title', 'price', 'photo_count'):
         if intent.get(key) != live.get(key):
             mismatches.append(f'{key}: intent={intent.get(key)!r} live={live.get(key)!r}')
+    intent_aspects = _normalize_aspects(intent.get('aspects'))
+    live_aspects = _normalize_aspects(live.get('aspects'))
+    if intent_aspects != live_aspects:
+        mismatches.append(f'aspects: intent={intent_aspects!r} live={live_aspects!r}')
     return mismatches
 
 

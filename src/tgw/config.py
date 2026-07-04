@@ -95,13 +95,22 @@ def load_config(path: Path) -> Dict[str, Any]:
     _api_key_path = secrets_root / "tgw-api-key.json"
     _api_key = ""
     try:
-        if _api_key_path.exists():
-            _api_key = json.loads(_api_key_path.read_text(encoding="utf-8"))["api_key"]
-    except Exception:
+        _api_key_present = _api_key_path.exists()
+    except PermissionError:
         # secrets_root is 700 tgw:tgw — a non-tgw caller (e.g. `tgw clip`,
         # which the nix wrapper runs as the operator's own user, not tgw)
-        # can't even stat() inside it. Treat as absent, same as a missing key.
-        pass
+        # can't even stat() inside it. Treat as absent, same as a missing
+        # key. Scoped to PermissionError only (code-review fix) — a
+        # transient I/O error here (e.g. a flaky network-mounted
+        # secrets_root) should not look identical to "key not present".
+        _api_key_present = False
+    if _api_key_present:
+        try:
+            _api_key = json.loads(_api_key_path.read_text(encoding="utf-8"))["api_key"]
+        except Exception:
+            # Malformed/unreadable key file — pre-existing tolerant
+            # behavior, unrelated to the permission fix above.
+            pass
     ebay_draft_csv_path = p("ebay_draft_csv_path", str(catalog_root / "ebay-draft-offline.csv"))
 
     postgres_dsn = raw.get("postgres_dsn", "dbname=state_machine user=tgw")

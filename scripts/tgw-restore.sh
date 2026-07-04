@@ -68,7 +68,14 @@ case "$SOURCE" in
             exit 1
         fi
         if [ "$DRY_RUN" = true ]; then
-            echo "[DRY RUN] Would copy secrets/ dumps/ flake/ from $USB_PATH to $BACKUP_DIR"
+            # Code-review fix: this script only ever copies dumps/ and
+            # secrets/ (below) — flake/ restoration is a separate,
+            # correctly-documented manual step (git clone directly from
+            # the mounted vault, see TGW-VAULT-RESTORE.md Path 2 step 3),
+            # not something this script touches. The old message claimed
+            # flake/ too, which was never true.
+            echo "[DRY RUN] Would copy secrets/ dumps/ from $USB_PATH to $BACKUP_DIR"
+            echo "[DRY RUN] (flake/ is not handled by this script — see TGW-VAULT-RESTORE.md Path 2)"
         else
             echo "Copying from USB vault at $USB_PATH..."
             cp -rv "$USB_PATH/dumps" "$BACKUP_DIR/"
