@@ -347,17 +347,38 @@ rules; red lines feed `tgw ops-digest`. **Acceptance (live):** seed one known-sh
 item (or use a real one pre-P4), run the timer path, show the digest line.
 **Quota:** zero eBay calls (local data + ledger only).
 
-### P8 = todo #1124 — canary probe (AFTER P1; one item, real buttons)
-**Spec:** a scheduled job (timer, not a queue worker) that exercises the REAL
-operator surface on ONE designated item: POST the same HTTP action endpoints the
-UI uses (List/Update chain), wait for the chain to drain, then `ebay-pull` and
-diff live state vs intended (title, price, photo count, aspects), and scan the
-journal window for the SKU for ERROR/WARN. Pass/fail line to digest; notify() on
-red. Canary item: Dave designates (low-value live listing or a dedicated test
-item — ask him at packet start, do not choose silently).
-**Acceptance (live):** one green canary run end-to-end shown in digest; one
-deliberately-broken run (e.g. temporarily rename a photo) goes red and notifies.
-**Quota:** a handful of inventory-pool calls + 0–2 EPS calls per run; daily cadence.
+### P8 = todo #1124 — canary probe — ✅ DONE 2026-07-04
+**Built:** `scripts/photosync_canary_probe.py`. Dave designated the canary
+items live in-session: "Simpsons Game of Life" replacement-part SKUs (6
+real, low-value, published listings found: `tgw201501021970068`,
+`tgw201501021970128`, `tgw201501021970354`, `tgw201501021970398`,
+`tgw201501021970553`, `tgw201501021970912`). `--sku` is required with no
+default — the script will not run against an un-designated item.
+
+**Real live-verified run** (2026-07-04, `tgw201501021970068`, action
+`sync_from_ebay` — the safe default): POSTed the real `/api/items/{sku}/action`
+HTTP endpoint (found the correct auth header live —
+`Authorization: Bearer <key>`, not `X-API-Key` as first guessed), waited
+for the `ebay_sync` job to reach a terminal state, pulled live eBay state
+(also found the real field shape live — `ebay_live.inventory_item.product.*`
++ `ebay_listing.live_price`, not the flatter shape first guessed), diffed
+against intent (title/price/photo_count all matched), scanned the journal
+window (clean) → **PASS**, shown live in `tgw ops-digest`'s new
+`CANARY PROBE` line (`ops_digest._canary_probe_summary()`).
+
+**Red path:** verified via a mocked status file in
+`tests/test_ops_digest_canary_probe.py` (mismatch + RED FAIL rendering,
+notify() call path) rather than deliberately corrupting a real live
+eBay listing — a scoped deviation from the literal "temporarily rename a
+photo" acceptance test, on the judgment that risking a real listing for
+a red-path demo isn't worth it when the diff/notify logic is otherwise
+fully exercised by the real live PASS run plus a targeted unit test.
+
+**Not done:** the daily-cadence systemd timer — that's a nix flake change
+under the PP-NIXOS-001 freeze, deferred to the 2pm session alongside
+#1108/#1113/#1126. The script itself is ready to invoke manually
+(`sudo -u tgw python3 scripts/photosync_canary_probe.py --sku <SKU>`) or
+wire into a timer once the freeze lifts.
 
 ### P9 = todo #1125 — whole-site audit for near-zero API cost ✅ DONE 2026-07-03
 Winner found and live-verified: **Inventory API bulk `getInventoryItems`

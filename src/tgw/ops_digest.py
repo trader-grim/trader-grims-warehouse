@@ -125,6 +125,28 @@ def _dataset_growth(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     }
 
 
+def _canary_probe_summary() -> Optional[Dict[str, Any]]:
+    """PP-PHOTOSYNC-001 P8 (todo #1124): last canary-probe run's pass/fail,
+    read from the status file scripts/photosync_canary_probe.py writes.
+    Flags red (via passed=False) whenever the last run mismatched intent
+    vs live state or found ERROR/WARN in the journal window for the SKU."""
+    path = Path('/opt/TGW/var/log/canary-probe-status.json')
+    try:
+        d = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+    age_h = None
+    try:
+        ran_at = datetime.strptime(d['ran_at'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+        age_h = round((datetime.now(timezone.utc) - ran_at).total_seconds() / 3600, 1)
+    except (KeyError, ValueError):
+        pass
+    return {
+        'sku': d.get('sku'), 'passed': d.get('passed'), 'age_hours': age_h,
+        'mismatches': d.get('mismatches') or [], 'journal_hits': d.get('journal_hits') or [],
+    }
+
+
 def _oldest_inbox_note(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     inbox = cfg.get('plan_vault_path')
     if not inbox:
@@ -219,6 +241,7 @@ def collect(cfg: Dict[str, Any]) -> Dict[str, Any]:
         'retry_wait': retry_wait,
         'morning_exposure': morning_exposure,
         'dataset_growth': dataset_growth,
+        'canary_probe': _canary_probe_summary(),
     }
 
     try:
@@ -325,6 +348,17 @@ def render_text(d: Dict[str, Any]) -> str:
         if stalled:
             lines.append("  eBay calls happened but the capture file did not grow — "
                         "something is discarding raw responses again (invariant E7)")
+
+    canary = d.get('canary_probe')
+    if canary is not None:
+        lines.append('')
+        status = 'PASS' if canary['passed'] else 'RED FAIL'
+        age = f" ({canary['age_hours']}h ago)" if canary.get('age_hours') is not None else ''
+        lines.append(f"CANARY PROBE — {status}{age}: {canary.get('sku')}")
+        for m in canary.get('mismatches') or []:
+            lines.append(f"  mismatch: {m}")
+        for j in canary.get('journal_hits') or []:
+            lines.append(f"  journal: {j[:120]}")
 
     qs = d.get('queues', {})
     lines.append('')
