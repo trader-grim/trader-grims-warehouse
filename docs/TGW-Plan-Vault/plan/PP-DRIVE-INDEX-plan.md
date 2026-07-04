@@ -43,6 +43,66 @@ project should follow: reliable bus-powered USB stays attached, dock-housed
 3.5" drives get connected only when actively surveyed, to respect Dave's
 generator-power constraint).
 
+## UPDATE 2026-07-04 (later same day, todo #1140) — first drive indexed, Phase 0.4 script built
+
+**Dave: "we can index the ext documents though right? Then plan an
+affordable crawler to do the rest once we know the scope."** Answer: yes
+to both, and both done same day.
+
+- **`sdi` (the idle 500G bus-powered USB drive) is now indexed.** Mounted
+  read-only at `/opt/TGW/mnt/db-home` (manual mount, not fstab — matches
+  the power-off-when-idle policy above; unmount when not actively
+  querying). Contains `db/` (700 db:users — mirrors the `/home/db`
+  policy, `tgw` uid 900 can't read it at all, so recoll silently skips
+  that subtree with zero extra config needed), plus world-readable
+  `root/` and `linuxbrew/`. Added to recoll's topdirs alongside
+  `.ssh`/`.gnupg`/`.aws`/`.config` in `skippedNames` (belt-and-suspenders
+  — permissions already block `db/`, but any world-readable dotfile
+  elsewhere on future drives shouldn't get its contents extracted either).
+  Content is a broad personal-document mishmash (invoices, photos, music,
+  PDFs, archives) — Track B territory, confirmed by direct inspection
+  before indexing.
+
+- **Phase 0.4's per-drive survey script is built:**
+  `scripts/survey_drive.sh` — read-only mount, `smartctl` identity, full
+  file listing (path/size/mtime), extension-based type breakdown,
+  top-level `du`, one-page summary report, auto-unmount via trap. No
+  hashing/dedup fingerprinting yet (deliberately deferred to Phase 1.2 —
+  this script's whole point is a *cheap* first look so Dave can prioritize
+  which of the ~11 drives are worth the time before committing to a full
+  pass). Live-verified against `sdf1` (a Ventoy stick) — clean mount,
+  report, and auto-cleanup.
+
+**Not yet done:** running the survey script against the drives that
+aren't currently connected (`sdd`/`sdh`/the "drive holster" stack of 5 +
+6 more USB drives per this plan's original inventory) — those need Dave
+to physically connect them, one batch at a time, per this plan's own
+Phase 1 design ("batch by connection"). The tools/config now needed to
+do this cheaply, incrementally, and safely all exist as of today.
+
+**Correction, same day (Dave):** ran a first dedup pass (`fclones`)
+against `ItemArchive`+`ItemCatalog` as a test — found only 232 redundant
+files / 210.8MB. **Dave clarified this is expected and not the point:**
+there won't be much dedup *within* `ItemData` itself (each item's photos
+are unique to that item, not duplicates of each other). **The real
+dedup value is cross-drive consolidation** — the same file backed up
+across multiple external drives over the years, which is exactly this
+plan's original Phase 1.2 goal ("same file on 3 drives? find all copies,
+keep the best, record where the others were"). That only becomes
+findable once more of the ~11 drives are surveyed and indexed, not from
+scanning what's already on the live `/opt/TGW` partition.
+
+**Standing requirement, confirmed (Dave):** he must personally approve
+every data-deletion decision from this project — matches the existing
+operator-gate philosophy (invariant C9) applied to data deletion, not
+just AI listing output. This is why he originally wanted Hermes running
+this project: a long, one-at-a-time approval queue (which drive/file to
+delete once a duplicate is confirmed) is exactly Hermes's PM-admin shape,
+not a single Claude session's. Any dedup/consolidation tooling built for
+this project should assume: identify + report candidates, never delete
+unattended, and structure output as an approval queue Hermes (or Dave
+directly) can work through incrementally.
+
 # PP-DRIVE-INDEX: File Sorting & Indexing
 
 ## Overview
