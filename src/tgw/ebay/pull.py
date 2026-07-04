@@ -402,6 +402,52 @@ def sync_active_listings(cfg: Dict[str, Any], itemdata_root: Path,
     return stats
 
 
+def check_legacy_duplicate_listing(cfg: Dict[str, Any], sku: str,
+                                   local_listing_id: str) -> Dict[str, Any]:
+    """
+    PP-PHOTOSYNC-001 P10 (session 43) — verify a legacy-flagged SKU is NOT
+    actually two live listings on eBay (the old classic Item# plus a separate
+    Inventory-API listing) before ever marking it legacy_listing_resolved.
+
+    Dave, s43: a month of gaps in our own inventory tooling meant occasionally
+    using Seller Hub directly — "a known consequence of my actions... it
+    could happen again and needs an auto repair path." This is that path:
+    GET the live Inventory API offer for the SKU and compare its
+    listing.listingId against the locally-recorded (legacy) listing_id. Same
+    ID = one listing, dual-manageable via both APIs (safe to resolve). A
+    mismatch, or no published offer at all, means a genuine duplicate-listing
+    risk and must NEVER be auto-resolved.
+
+    Returns {'ok': True, 'duplicate': bool, 'inventory_listing_id': str|None,
+    'inventory_status': str|None, 'match': bool} — 'ok': False on a fetch
+    error (treat as unresolved, do not proceed).
+    """
+    try:
+        resp = ebay_get(cfg, '/sell/inventory/v1/offer', params={'sku': sku})
+    except Exception as exc:
+        return {'ok': False, 'error': str(exc)[:300]}
+
+    offers = resp.get('offers') or []
+    published = [o for o in offers if o.get('status') == 'PUBLISHED']
+    if not published:
+        return {'ok': True, 'duplicate': True, 'match': False,
+                'inventory_listing_id': None, 'inventory_status': None,
+                'reason': 'no published Inventory API offer found for this SKU'}
+
+    inv_listing = published[0].get('listing') or {}
+    inv_listing_id = str(inv_listing.get('listingId') or '')
+    inv_status = inv_listing.get('listingStatus')
+    match = bool(inv_listing_id) and inv_listing_id == str(local_listing_id)
+
+    return {
+        'ok': True,
+        'duplicate': not match,
+        'match': match,
+        'inventory_listing_id': inv_listing_id,
+        'inventory_status': inv_status,
+    }
+
+
 def _apply_active_listing(listing: Dict[str, Any], itemdata_root: Path,
                            synced_at: str, stats: Dict[str, Any],
                            dry_run: bool, cfg: Dict[str, Any]) -> None:

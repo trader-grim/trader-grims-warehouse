@@ -805,3 +805,71 @@ def test_scan_upload_complete_contradictions_journalctl_missing_is_safe(monkeypa
 
     monkeypatch.setattr(_subprocess, 'run', _raise)
     assert _scan_upload_complete_contradictions(hours=24) == []
+
+
+# ---------------------------------------------------------------------------
+# PP-PHOTOSYNC-001 P10 — legacy_listing_unrepaired (the "we ignored and did
+# not record the error message" fix): a persisted legacy-listing skip must be
+# detectable, not just logged and forgotten.
+# ---------------------------------------------------------------------------
+
+def test_legacy_listing_never_repaired_is_critical(tmp_path):
+    sku = 'tgw202601010000019'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'G1',
+        'legacy_listing_blocked': {
+            'listing_id': '226700000001', 'item_number': '110000012345',
+            'detected_at': '2026-07-03T16:44:00+00:00', 'photo_repair': None,
+        },
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'legacy_listing_unrepaired' in rules
+
+
+def test_legacy_listing_repair_failure_is_critical(tmp_path):
+    sku = 'tgw202601010000020'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'G2',
+        'legacy_listing_blocked': {
+            'listing_id': '226700000001', 'item_number': '110000012345',
+            'detected_at': '2026-07-03T16:44:00+00:00',
+            'photo_repair': {'ok': False, 'error': 'item suspended'},
+        },
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'legacy_listing_unrepaired' in rules
+
+
+def test_legacy_listing_successful_repair_no_violation(tmp_path):
+    sku = 'tgw202601010000021'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'G3',
+        'legacy_listing_blocked': {
+            'listing_id': '226700000001', 'item_number': '110000012345',
+            'detected_at': '2026-07-03T16:44:00+00:00',
+            'photo_repair': {'ok': True, 'image_count': 7, 'repaired_at': '2026-07-03T16:45:00+00:00'},
+        },
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'legacy_listing_unrepaired' not in rules
+
+
+def test_legacy_listing_resolved_suppresses_rule(tmp_path):
+    """An operator can mark legacy_listing_resolved=True (existing escape
+    hatch) once the underlying listing is dealt with some other way — the
+    rule must not keep nagging after that."""
+    sku = 'tgw202601010000022'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'G4',
+        'legacy_listing_resolved': True,
+        'legacy_listing_blocked': {
+            'listing_id': '226700000001', 'item_number': '110000012345',
+            'detected_at': '2026-07-03T16:44:00+00:00', 'photo_repair': None,
+        },
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'legacy_listing_unrepaired' not in rules

@@ -163,6 +163,14 @@ Plain Markdown; open in Obsidian for interactive mind map view where noted.
 - **Secrets from `secrets_root`** — no hardcoded paths anywhere in `src/`
 - **Catalog rebuild is always a job** — never call `build_all_catalogs()` inline
 - **SKU format** — `tgwYYYYMMDDHHMMSSmmm`
+- **A worker's skip/guard is a finding, not a log line (invariant C11)** — when
+  a worker refuses to act on a real recurring condition, persist the reason
+  durably on the item (queryable by `catalog-verify`), never just log it and
+  move on. Before trusting a static local flag to gate an action, re-verify
+  it live against the authoritative external source — local state can go
+  stale (Dave, s43: manual Seller Hub use during the Inventory-API migration
+  gap silently changed what was true on eBay's side without our records
+  updating; the same class "could happen again"). See invariants.md C11.
 
 ## Running workers (systemd)
 

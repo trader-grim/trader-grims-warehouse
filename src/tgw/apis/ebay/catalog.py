@@ -45,7 +45,14 @@ def lookup_epid(cfg: Dict[str, Any], barcode: str) -> Optional[str]:
         return None
     except requests.exceptions.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else 0
-        if status in (401, 403):
+        if status in (400, 401, 403):
+            # eBay returns 400 (not 401/403) when the app has never been
+            # granted commerce.catalog.readonly at all, as opposed to an
+            # expired/invalid token for a scope it does have — found live
+            # 2026-07-04 (PP-PHOTOSYNC-001 P10): a legacy-listing repair job
+            # retried forever on this exact call for any item with a barcode,
+            # since the module's own documented "scope not granted" handling
+            # only covered 401/403.
             log.debug('catalog: commerce.catalog.readonly not granted — EPID skipped')
             return None
         if status == 404:

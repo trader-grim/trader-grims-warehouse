@@ -79,6 +79,87 @@ class EbayStageWorker(QueueWorker):
                 f'— stage waits for them (will retry)')
 
         item = json.loads(json_path.read_text(encoding='utf-8'))
+        existing_listing = item.get('ebay_listing', {})
+
+        # Guard: item was previously listed via Trading API — must not create a
+        # duplicate Inventory API offer until the legacy listing is resolved.
+        #
+        # PP-PHOTOSYNC-001 P10 (session 43): runs BEFORE the C9 gate below on
+        # purpose. The original ordering put this after C9's return, so a
+        # background/no-origin job against an Active legacy listing never
+        # reached this code at all — it was silently absorbed by the generic
+        # "uninspected content blocked" log line, and the legacy-specific fact
+        # (which needs the relist workflow, not just a human pushing a button)
+        # was never recorded anywhere durable. That's the exact bug Dave
+        # flagged live (session 43): "we ignored and did not record the error
+        # message... this would have been resolved if we had been collecting
+        # and using all of the data" — plus a standing instruction to
+        # regularly check for and repair instances of it. Detection now runs
+        # unconditionally and persists durably regardless of who triggered the
+        # job; only the ACTUAL REPAIR (a live write to eBay) stays gated on
+        # operator origin, same as every other C9-covered action.
+        legacy_item_number = item.get('Item number') or item.get('item_number')
+        if legacy_item_number and not item.get('legacy_listing_resolved'):
+            now_iso = datetime.now(timezone.utc).isoformat()
+            log.warning(
+                'ebay_stage: %s has legacy eBay Item# %s — checking for a '
+                'genuine duplicate listing before proceeding',
+                sku, legacy_item_number,
+            )
+            tgw_logging.log_event('ebay_stage_skipped', sku=sku,
+                                  reason='legacy_trading_api_listing',
+                                  item_number=str(legacy_item_number))
+
+            legacy_blocked = {
+                'listing_id':      existing_listing.get('listing_id', ''),
+                'item_number':     str(legacy_item_number),
+                'detected_at':     now_iso,
+                'duplicate_check': None,
+            }
+
+            # PP-PHOTOSYNC-001 P10 (session 43): Dave — a month-long gap in
+            # our own Inventory tooling meant occasionally managing listings
+            # directly via Seller Hub, "a known consequence of my actions...
+            # it could happen again and needs an auto repair path. Check for
+            # both specifically, then resolve." Only an operator-triggered
+            # force update runs the live check (C9: no eBay-state-changing
+            # decision from an uninspected background job); a background hit
+            # only ever records the finding above and stops here.
+            if force and payload.get('origin') == 'operator':
+                from tgw.ebay.pull import check_legacy_duplicate_listing
+                dup = check_legacy_duplicate_listing(
+                    self.config, sku, legacy_blocked['listing_id'])
+                legacy_blocked['duplicate_check'] = dup
+
+                if dup.get('ok') and dup.get('match'):
+                    # Confirmed: one listing, addressable via both APIs — not
+                    # a duplicate. Safe to resolve and fall through to the
+                    # standard Inventory-API staging below (the guard's
+                    # premise — "this must be a separate classic listing" —
+                    # is false for this SKU).
+                    item['legacy_listing_resolved'] = True
+                    log.info('ebay_stage: %s legacy listing %s confirmed NOT a '
+                            'duplicate (Inventory offer matches) — resolved, '
+                            'proceeding via standard path', sku, legacy_item_number)
+                    tgw_logging.log_event('ebay_stage_legacy_resolved_no_duplicate',
+                                          sku=sku, listing_id=legacy_blocked['listing_id'])
+                    fence_patch_item(self.config, sku, {
+                        'legacy_listing_blocked':  legacy_blocked,
+                        'legacy_listing_resolved': True,
+                    })
+                    # Deliberately no `return` — falls through to the normal
+                    # staging path below with legacy_listing_resolved now set.
+                else:
+                    log.warning('ebay_stage: %s legacy listing %s — duplicate '
+                               'risk detected or unverifiable, NOT resolving: %s',
+                               sku, legacy_item_number, dup)
+                    tgw_logging.log_event('ebay_stage_legacy_duplicate_risk',
+                                          sku=sku, detail=dup)
+                    fence_patch_item(self.config, sku, {'legacy_listing_blocked': legacy_blocked})
+                    return
+            else:
+                fence_patch_item(self.config, sku, {'legacy_listing_blocked': legacy_blocked})
+                return
 
         # Guard (invariant C9, session 42): uninspected AI-regenerated content
         # never goes live automatically. A force update of a LIVE listing is
@@ -87,7 +168,6 @@ class EbayStageWorker(QueueWorker):
         # jobs against live listings are refused here regardless of who
         # enqueued them — Dave: "we cannot have uninspected AI changes going
         # live automatically yet. They are rarely correct so far."
-        existing_listing = item.get('ebay_listing', {})
         _live = (existing_listing.get('status') == 'Active'
                  or item.get('ebay_offer', {}).get('status') == 'PUBLISHED')
         if force and _live and payload.get('origin') != 'operator':
@@ -110,20 +190,6 @@ class EbayStageWorker(QueueWorker):
             log.info('ebay_stage: %s is live (listingId=%s) — updating in place (force)',
                      sku, listing_id)
             tgw_logging.log_event('ebay_stage_update', sku=sku, listing_id=str(listing_id))
-
-        # Guard: item was previously listed via Trading API — must not create a
-        # duplicate Inventory API offer until the legacy listing is resolved.
-        legacy_item_number = item.get('Item number') or item.get('item_number')
-        if legacy_item_number and not item.get('legacy_listing_resolved'):
-            log.warning(
-                'ebay_stage: %s has legacy eBay Item# %s — skipping to avoid '
-                'duplicate listing; resolve via relist workflow first',
-                sku, legacy_item_number,
-            )
-            tgw_logging.log_event('ebay_stage_skipped', sku=sku,
-                                  reason='legacy_trading_api_listing',
-                                  item_number=str(legacy_item_number))
-            return
 
         # Idempotent: already staged — skip unless force (update)
         existing_offer_id = item.get('ebay_offer', {}).get('offer_id')

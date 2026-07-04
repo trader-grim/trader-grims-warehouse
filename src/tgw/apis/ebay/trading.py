@@ -308,6 +308,35 @@ def revise_item_sku(cfg: Dict[str, Any], listing_id: str, new_sku: str) -> None:
     log.info('ReviseFixedPriceItem: listing %s custom label → %s', listing_id, new_sku)
 
 
+def revise_item_pictures(cfg: Dict[str, Any], listing_id: str,
+                         image_urls: List[str]) -> None:
+    """
+    Replace the photo set on a live Trading API (legacy Item#) listing in-place.
+
+    Uses ReviseFixedPriceItem with only ItemID + PictureDetails — every other
+    field (price, title, description, listing age, watchers, search rank) is
+    left untouched. This is the in-place repair path for listings ebay_stage's
+    relist guard refuses to touch via the Inventory API (PP-PHOTOSYNC-001 P10,
+    session 43): those items are real classic eBay listings mislabeled
+    'api: inventory' in our local metadata, and ending+relisting them via the
+    modern flow would lose their listing history for no reason — this call
+    updates the SAME listing instead.
+    """
+    pics = ''.join(f'<PictureURL>{u}</PictureURL>' for u in image_urls)
+    xml_body = f'''<?xml version="1.0" encoding="utf-8"?>
+<ReviseFixedPriceItemRequest xmlns="{_NS}">
+  <Item>
+    <ItemID>{listing_id}</ItemID>
+    <PictureDetails>
+      {pics}
+    </PictureDetails>
+  </Item>
+</ReviseFixedPriceItemRequest>'''
+    trading_call(cfg, 'ReviseFixedPriceItem', xml_body)
+    log.info('ReviseFixedPriceItem: listing %s photos replaced (%d urls)',
+             listing_id, len(image_urls))
+
+
 def get_api_access_rules(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     Call GetAPIAccessRules and return usage info for GetBestOffers.

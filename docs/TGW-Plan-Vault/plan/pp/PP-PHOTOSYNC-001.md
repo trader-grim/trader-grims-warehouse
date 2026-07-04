@@ -96,10 +96,9 @@ author which invariant they hit. Update `invariants.md` C10 🔶→✅.
 passes on current tree. Tests-only packet — live-fire N/A (flag per PD4 that this is
 a detector, not behavior).
 
-### P4 = todo #1119 — fleet photo repair (GATED ON P1; ramp pre-authorized)
-**Context budget:** plan core + this file + the P1-fixed `ebay_upload.py` + s43 scope
-scan method (in session transcript / re-derive: compare `ebay_photos` count vs
-on-disk photo count for Active inventory-API items).
+### P4 = todo #1119 — fleet photo repair — PAUSED (mid-execution, see P10)
+**Context budget:** plan core + this file + the P1-fixed `ebay_upload.py` + P10
+below (mandatory: P4's entire target population turned out to need P10's fix).
 **Spec:** re-run the scope scan post-backlog (fresh number, was 492). Then: enqueue
 operator-origin `ebay_upload` + `ebay_stage(force, origin)` for ONE item → verify live
 imageUrls on eBay (ebay-pull, not local state). Then 5 items → show Dave the
@@ -113,6 +112,78 @@ fix); legacy `api != inventory` items.
 ramp-phase daily digest line; final rescan shows shortfall count ≤ unrepairable list.
 **Quota:** ~2–4k EPS calls total, paced by the halt across days; inventory-pool calls
 for re-stages (negligible vs 2M).
+
+**What actually happened (2026-07-03, n=1):** the fresh scope scan came back
+**491** (not 492 — one already fixed live earlier the same session), all
+`photos_short_on_ebay`. Photo upload for the n=1 test succeeded (7/7 new). The
+push-live half hit `ebay_stage`'s legacy-listing relist guard — and a scan of
+ALL 491 against the Inventory API bulk list (read-only, live-verified) showed
+**100% match**: every single one is genuinely Inventory-API-managed on eBay's
+side despite a stale local `Item number` field. This became **P10**, a
+prerequisite fix — see below. After P10 landed, the SAME n=1 item's duplicate
+check confirmed no conflict, auto-resolved, and fell through to the normal
+staging path — where it hit a completely unrelated per-item eBay business rule
+(Best Offer + multi-marketplace conflict) that correctly dead-lettered instead
+of looping. **P4 remains paused**: need a clean n=1 (no incidental per-item
+conflicts) to get a real before/after demo before ramping the other ~490, and
+Dave's call on the Best-Offer/multi-marketplace item specifically.
+
+### P10 = todo #1128 (unplanned, surfaced live 2026-07-03) — legacy-listing
+### skip must be persisted + duplicate-checked before resolving ✅ DONE
+**Why:** Dave, live-fire of P4's n=1: "there is the problem of us ignoring and
+not recording the error message... I instructed that we both check for this
+type of issue, and for us to regularly check for and repair any instances of
+it happening, because it does happen." Then, after the fix surfaced a genuine
+"legacy Item#" population turned out to be 100% mislabeled: "make sure they do
+not appear in both api. that is a known consequence of my actions [occasional
+Seller Hub use during the month-long Inventory-API migration gap] and the
+reason I mentioned it. It could happen again and needs an auto repair path,
+but check for both specifically, then resolve."
+**Built:**
+- `ebay_stage.py`'s legacy-listing guard now runs BEFORE the C9 gate (was
+  after — meant background/no-origin hits never even reached it, so the skip
+  was invisible for the exact bulk-ramp case P4 needs) and persists
+  `legacy_listing_blocked` durably on every hit, operator or not.
+- `tgw.ebay.pull.check_legacy_duplicate_listing(cfg, sku, local_listing_id)` —
+  live GET of the Inventory API offer for the SKU, compares
+  `offer.listing.listingId` against our locally-recorded (legacy) listing_id.
+  Match = one listing, safe. Mismatch, or no published offer at all = genuine
+  duplicate-listing risk, never auto-resolved.
+- Operator-origin force-updates run this check inline: a confirmed match sets
+  `legacy_listing_resolved=True` and falls through to the normal Inventory-API
+  staging path (no `return` — this IS the actual repair). A duplicate risk or
+  a failed check persists the finding and stops; C9 still applies (background
+  jobs never run the live check or resolve anything on their own).
+- `cmd_resolve_legacy` (the manual escape hatch) now runs the same check by
+  default before marking anything resolved; `--force` bypasses it for a SKU
+  already verified some other way. New `catalog-verify` rule
+  `legacy_listing_unrepaired` for the ongoing "regularly check" requirement.
+- **Dead end found and NOT kept as the repair mechanism**: initially built
+  `revise_item_pictures()` (Trading API `ReviseFixedPriceItem` +
+  `PictureDetails`) assuming these were genuinely Trading-managed listings.
+  Live test returned eBay's own rejection: *"Inventory-based listing
+  management is not currently supported by this tool."* — proving the
+  opposite of the assumption. Cross-referenced against `migrate-blocked.json`
+  (session 35): the identical error was already recorded there 26/57 times
+  since 2026-06-20, never aggregated or turned into a check — confirming
+  Dave's "lackadaisical logging" read. The Trading-revise code and its tests
+  were kept (still correct, possibly useful for a genuinely-Trading-only
+  case) but is no longer auto-invoked.
+**Tests:** `tests/test_invariants_stage_guards.py` (+5 rewritten for the
+duplicate-check design), `tests/test_resolve_legacy_duplicate_check.py` (8,
+new), `tests/test_trading_revise_pictures.py` (2, kept), `tests/
+test_catalog_epid_lookup.py` (5, new — see below). Full suite: 1486 passed,
+same 9 pre-existing failures/18 errors as baseline.
+**Incidental fix (found live, same n=1 test):** `apis/ebay/catalog.py`'s
+`lookup_epid()` only treated 401/403 as "scope not granted, skip gracefully"
+— eBay actually returns 400 when `commerce.catalog.readonly` was never
+granted at all (vs. 401/403 for an expired token on a scope you do have).
+Before this fix, ANY staging attempt on a barcoded item retried forever on
+this call. One-line fix, tested, live-verified (got past this step on retry).
+**Live verification:** all of the above confirmed against the real n=1 item
+(`tgw20160122242616788`) end-to-end through several iterations — durable
+persistence, duplicate-check match, auto-resolve, fall-through, EPID skip,
+and the correct dead-letter on an unrelated per-item business conflict.
 
 ### P5 = todo #1120 — operator price is never machine-overridden
 **Context budget:** plan core + this file + `workers/ebay_price.py` +

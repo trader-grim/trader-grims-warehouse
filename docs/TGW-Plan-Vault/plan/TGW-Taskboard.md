@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-07-03 23:29 UTC — 201 open, 35 done in the last 7 days._
+_Rendered 2026-07-04 00:43 UTC — 201 open, 36 done in the last 7 days._
 
 ## admin (23 open)
 
@@ -69,7 +69,7 @@ _Rendered 2026-07-03 23:29 UTC — 201 open, 35 done in the last 7 days._
 | 1118 | 30 |  | PP-PHOTOSYNC-001 P3: C10 detector — test that every http_server operator enqueue site stamps origin=operator (source-scan test like the fence grep audit); closes the 🔶 on invariant C10 | [[TGW-Master-Plan#PP-PHOTOSYNC-001 — upload integrity + operator lane hardening + fleet photo repair\|PP-PHOTOSYNC-001]] |  |
 | 1127 | 32 |  | PP-PHOTOSYNC-001 follow-up (from P9): re-point photos_short_on_ebay (catalog-verify) at the Inventory API bulk getInventoryItems list (~98 calls, live-verified) instead of the local draft_listing.imageUrls mirror — catches drift in our own local record, not just upload failures | [[TGW-Master-Plan#PP-PHOTOSYNC-001 — upload integrity + operator lane hardening + fleet photo repair\|PP-PHOTOSYNC-001]] |  |
 | 1065 | 35 |  | PP-PHOTO-001 Phase B: GDrive → eBay zero-bandwidth image upload — replace deprecated UploadSiteHostedPictures (Trading API) in ebay_upload worker with GDrive direct-URL pattern. Flow: (1) make each SKU photo temporarily public (anyone-reader), (2) pass GDrive direct download URL to Inventory API imageUrls[], (3) eBay CDN fetches from Google directly — TGW server sends zero image bytes, (4) revoke public access after staging confirms imageUrls populated in ebay_live. Eliminates all local upload bandwidth from photo pipeline. Same GDrive OAuth helper from Phase A. NOTE: Phase A (multimodal draft) is higher priority and should be built first since it shares the GDrive API helper. Research: docs/TGW-Plan-Vault/dev-workflow/research/RESEARCH-gdrive-zero-bandwidth-ebay-image-upload.md | [[TGW-Master-Plan#PP-PHOTO-001 — photo pipeline (GDrive → Gemini / eBay)\|PP-PHOTO-001]] |  |
-| 1119 | 35 |  | PP-PHOTOSYNC-001 P4: fleet photo repair 1→5→ramp (PRE-AUTHORIZED by Dave 2026-07-03) — after P1 lands: repair 1 item, verify live; then 5, show diff; then ramp remaining ~486 paced within background EPS budget | [[TGW-Master-Plan#PP-PHOTOSYNC-001 — upload integrity + operator lane hardening + fleet photo repair\|PP-PHOTOSYNC-001]] | ✓ deps done |
+| 1119 | 35 |  | PAUSED (updated): P10 legacy-duplicate-check fix built+verified — n=1 test item confirmed NOT a duplicate, auto-resolved, fell through to normal path, but then hit an UNRELATED per-item eBay business rule (Best Offer + multi-marketplace conflict) — dead-lettered correctly, needs Dave's call. Need a clean n=1 (no incidental conflicts) to complete the before/after demo before ramping the other ~490. | [[TGW-Master-Plan#PP-PHOTOSYNC-001 — upload integrity + operator lane hardening + fleet photo repair\|PP-PHOTOSYNC-001]] | ✓ deps done |
 | 1066 | 40 |  | PP-SEARCH-001 Phase 0: recoll universal index — ItemArchive + masterarchive/history + catalogs + docs vault |  |  |
 | 1120 | 40 |  | PP-PHOTOSYNC-001 P5: chain-enqueued ebay_price must never override an operator-set draft price (guard + test; C5 clamp only blocks raises today) | [[TGW-Master-Plan#PP-PHOTOSYNC-001 — upload integrity + operator lane hardening + fleet photo repair\|PP-PHOTOSYNC-001]] |  |
 | 1054 | 45 |  | item detail: add History link using sku_old → historical catalog lookup. History uses old-format SKUs (tgw202005031234173 style); current items carry sku_old as the bridge. Need a /form/history/<old_sku> route or link to historical-catalog search. Design first. |  |  |
@@ -232,10 +232,11 @@ _Rendered 2026-07-03 23:29 UTC — 201 open, 35 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — sold-event webhook (Tier 4)\|PP-SOLD-001]] |  |
 
-## Done this week (35)  — showing 15 most recent
+## Done this week (36)  — showing 15 most recent
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 1128 | claude | 2026-07-04 | PP-PHOTOSYNC-001 P10: legacy-listing skip was silently discarded (journald only) — now persisted durably + live duplicate-check-before-resolve built (Dave 2026-07-03: 'check for both specifically, then resolve'). DONE, live-verified. |
 | 1125 | claude | 2026-07-03 | in_progress: PP-PHOTOSYNC-001 P9 — bulk truth source within existing scopes |
 | 1123 | claude | 2026-07-03 | in_progress: PP-PHOTOSYNC-001 P7 — truth-audit rules in catalog-verify |
 | 1115 | claude | 2026-07-03 | in_progress: implementing P1 completion-guard fix + quota-retry cap |
@@ -250,5 +251,4 @@ _Rendered 2026-07-03 23:29 UTC — 201 open, 35 done in the last 7 days._
 | 1100 | claude | 2026-07-02 | R0.4 budgeted aspects warm-crawl command (tgw warm-ebay-aspects) for categories referenced by inventory; run after 00:00 PST reset; align aspects cache with tree-cache no-TTL policy |
 | 1096 | claude | 2026-07-02 | R0.3 probe eBay Developer Analytics getRateLimits with current app keys — feasibility for real quota readings (see plan/RETARGET-2026-07-02.md) |
 | 1094 | claude | 2026-07-02 | Permissions: extended default ACL to src/bin/config/var/backups; patched atomic_write_json (items.py+catalog.py) to preserve/default file mode instead of NamedTemporaryFile's 0600; permissions-reset script now logs --check results to permissions-audit.log |
-| 1093 | claude | 2026-07-02 | Data-preservation audit (E5-related): found + fixed 2 fence_patch_item bugs where in-memory mutations were silently never persisted (ebay_price_reducer draft_listing.price, ebay_draft taxonomy-retry category resolution); audited all 20 fence_patch_item call sites, other 18 clean |
-| … | | | _…and 20 more — run `tgw todo --all` to see everything_ |
+| … | | | _…and 21 more — run `tgw todo --all` to see everything_ |

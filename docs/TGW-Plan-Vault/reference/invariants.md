@@ -527,3 +527,35 @@ propagation in `workers/ebay_draft.py`, `ebay_price.py`, `ebay_stage.py`,
 `ebay_publish.py`, `ebay_upload.py`. Tests: `tests/test_operator_origin.py`.
 🔶 = detector pending: no CI check yet that a NEW operator endpoint stamps the
 origin — candidate: grep-audit like the fence's, or a shared enqueue helper.
+
+## C11 — A skip/guard is a finding, not a log line ✅ (2026-07-03, session 43)
+
+**Rule:** When a worker refuses to act on a real, recurring condition (not a
+transient retry situation), the reason must be persisted durably on the item
+— queryable by `catalog-verify`, not just written to journald where it rots.
+Before acting on any escape-hatch/override for that condition, re-verify it
+live against the authoritative source (the external system, not a local
+static field) — a static local flag that was true once can go stale.
+
+**Why:** Dave, s43, live during PP-PHOTOSYNC-001 P4/P10: "we have been
+ignoring and not recording the error message... I instructed that we both
+check for this type of issue, and for us to regularly check for and repair
+any instances of it." `ebay_stage`'s legacy-listing guard had been silently
+skipping and logging to journald only since at least 2026-06-20 (confirmed:
+`migrate-blocked.json` already had 26/57 identical rejections recorded, never
+aggregated into anything actionable). Worse, the guard's own premise (a
+static local `Item number` field means "this is still a separate Trading-
+managed listing") was proven wrong for 100% of a 491-item sample it was
+blocking — a month of occasionally managing listings via Seller Hub directly
+(a real operational gap, not a bug) can silently change what's true on eBay's
+side without our local record ever updating. "It could happen again and
+needs an auto repair path... check for both specifically, then resolve."
+
+**Enforcement:** `ebay_stage.py`'s legacy-listing guard persists
+`legacy_listing_blocked` on every hit (operator-triggered or background) and
+runs `tgw.ebay.pull.check_legacy_duplicate_listing()` — a live Inventory-API
+offer lookup compared against the locally-recorded listing_id — before ever
+resolving. `cmd_resolve_legacy` runs the same live check by default. New
+catalog-verify rule `legacy_listing_unrepaired` is the "regularly check"
+detector. Tests: `tests/test_invariants_stage_guards.py`,
+`tests/test_resolve_legacy_duplicate_check.py`.

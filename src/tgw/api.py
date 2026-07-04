@@ -728,6 +728,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("resolve-legacy", help="mark item(s) as having legacy eBay listing cleared, enabling ebay_stage to proceed")
     p.add_argument("skus", nargs="+", help="one or more SKUs to resolve")
     p.add_argument("--no-stage", action="store_true", help="mark resolved but do not enqueue ebay_stage")
+    p.add_argument("--force", action="store_true", help="skip the live duplicate-listing check (PP-PHOTOSYNC-001 P10) — only if you've already verified some other way")
 
     p = sub.add_parser("staged", help="list items staged as UNPUBLISHED eBay offers, awaiting review")
     p.add_argument("--json", action="store_true", dest="as_json", help="output as JSON instead of a table")
@@ -1380,6 +1381,24 @@ def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any]) -> List[Dict[str
                               f"value even though the live pull postdates "
                               f"submission: submitted={sub_flat!r} live={live_flat[key]!r}")
 
+    # PP-PHOTOSYNC-001 P10 (session 43): the legacy-listing relist guard used
+    # to skip and log to journald only — a data-loss bug (Dave: "we ignored
+    # and did not record the error message"). ebay_stage now persists it
+    # durably as `legacy_listing_blocked`; this is the "regularly check for
+    # and repair" detector for that standing requirement, not a one-off fix.
+    legacy_blocked = doc.get("legacy_listing_blocked")
+    if legacy_blocked and not doc.get("legacy_listing_resolved"):
+        repair = legacy_blocked.get("photo_repair")
+        if repair is None:
+            v("legacy_listing_unrepaired", "critical",
+              f"item_number={legacy_blocked.get('item_number')} blocked at "
+              f"{legacy_blocked.get('detected_at')} — never attempted an "
+              f"operator-driven photo repair")
+        elif repair.get("ok") is False:
+            v("legacy_listing_unrepaired", "critical",
+              f"item_number={legacy_blocked.get('item_number')} photo repair "
+              f"failed: {repair.get('error')}")
+
     return viols
 
 
@@ -2031,21 +2050,34 @@ def cmd_requeue(
     }
 
 
-def cmd_resolve_legacy(cfg: Dict[str, Any], skus: List[str], enqueue_stage: bool = True) -> Dict[str, Any]:
+def cmd_resolve_legacy(cfg: Dict[str, Any], skus: List[str], enqueue_stage: bool = True,
+                       force: bool = False) -> Dict[str, Any]:
     """
     Mark one or more items as having their legacy eBay Trading API listing
     cleared, setting legacy_listing_resolved=True so ebay_stage can proceed.
     Optionally enqueues ebay_stage for each resolved item.
+
+    PP-PHOTOSYNC-001 P10 (session 43): before resolving, verify live that the
+    SKU is NOT actually a genuine duplicate listing (a live Trading-managed
+    item number plus a SEPARATE Inventory-API offer) — Dave: "check for both
+    specifically, then resolve... it could happen again," from a month of
+    occasionally managing listings directly via Seller Hub during the
+    Inventory-API migration gap. A SKU that fails this live check is skipped
+    and reported, never silently resolved. `force=True` bypasses the check
+    for a SKU the operator has already verified some other way (e.g. by hand
+    in Seller Hub) — use deliberately, not as a default.
     """
     import psycopg2.errors
 
     from tgw.config import sku_json
+    from tgw.ebay.pull import check_legacy_duplicate_listing
     from tgw.items import atomic_write_json
     from tgw.queue import state_machine
 
     state_machine.init(cfg.get("postgres_dsn", "dbname=state_machine user=tgw"))
 
     resolved, not_found, already_done, staged = [], [], [], []
+    duplicate_risk: List[Dict[str, Any]] = []
 
     for sku in skus:
         json_path = sku_json(cfg, sku)
@@ -2058,7 +2090,16 @@ def cmd_resolve_legacy(cfg: Dict[str, Any], skus: List[str], enqueue_stage: bool
         if item.get("legacy_listing_resolved"):
             already_done.append(sku)
         else:
+            listing_id = (item.get("ebay_listing") or {}).get("listing_id", "")
+            dup = {"ok": True, "match": True} if force else check_legacy_duplicate_listing(cfg, sku, listing_id)
+            if not (dup.get("ok") and dup.get("match")):
+                duplicate_risk.append({"sku": sku, "check": dup})
+                continue
             item["legacy_listing_resolved"] = True
+            item["legacy_listing_blocked"] = {
+                **(item.get("legacy_listing_blocked") or {}),
+                "duplicate_check": dup,
+            }
             atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
             resolved.append(sku)
 
@@ -2081,6 +2122,7 @@ def cmd_resolve_legacy(cfg: Dict[str, Any], skus: List[str], enqueue_stage: bool
     return {
         "ok": True,
         "resolved": resolved,
+        "duplicate_risk": duplicate_risk,
         "already_done": already_done,
         "not_found": not_found,
         "stage_queued": staged,
@@ -4008,7 +4050,8 @@ def main() -> int:
             )
 
         elif args.op == "resolve-legacy":
-            result = cmd_resolve_legacy(cfg, _expand_skus(args.skus), enqueue_stage=not args.no_stage)
+            result = cmd_resolve_legacy(cfg, _expand_skus(args.skus), enqueue_stage=not args.no_stage,
+                                       force=getattr(args, "force", False))
 
         elif args.op == "bulk":
             result = cmd_bulk(
