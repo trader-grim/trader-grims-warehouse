@@ -866,7 +866,7 @@ def _apply_patch(json_path: "Path", fields: Dict[str, Any]) -> List[str]:
     doc.update(fields)
     if "catalog_verified" not in fields:
         doc.pop("catalog_verified", None)
-    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True), archive_root=_cfg.get("archive_root"))
     return list(fields.keys()) + to_delete
 
 
@@ -911,7 +911,7 @@ def _apply_ebay_write(
                 merged[pf] = existing[pf]
         doc[block_key] = merged
         changed.append(block_key)
-    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True), archive_root=_cfg.get("archive_root"))
     return changed
 
 
@@ -2245,7 +2245,7 @@ def remove_comp(sku: str, body: RemoveCompBody) -> Dict[str, Any]:
         comps["count"] = 0
     eo["price_comps"] = comps
     doc["ebay_offer"] = eo
-    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True), archive_root=_cfg.get("archive_root"))
     return {"ok": True, "sku": sku, "removed": body.url, "remaining": len(kept)}
 
 

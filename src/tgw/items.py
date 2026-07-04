@@ -16,6 +16,7 @@ import json
 import os
 import tempfile
 import time
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -44,7 +45,23 @@ def set_mutation_context(source: str, session_id: Optional[str] = None) -> None:
 # Atomic write
 # ---------------------------------------------------------------------------
 
-def atomic_write_json(path: Path, data: Any, pretty: bool = True) -> None:
+def _archive_before_overwrite(archive_root: Path, path: Path) -> None:
+    """Invariant E5: zip the item's current on-disk JSON into ItemArchive
+    before a destructive overwrite. This is the last line of defense for data
+    recovery (Prime Directive 1) — 49 item JSONs were unrecoverable from every
+    other source on 2026-06-28 and were rescued solely from these zips.
+    Archiving failure MUST abort the write (no try/except swallow here);
+    a best-effort archive is not what the invariant means by "before"."""
+    archive_root = Path(archive_root)
+    archive_root.mkdir(parents=True, exist_ok=True)
+    zpath = archive_root / f'{path.stem}.zip'
+    ts = datetime.datetime.now(datetime.UTC).strftime('%Y%m%d%H%M%S%f')
+    with zipfile.ZipFile(zpath, 'a', compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.write(path, arcname=f'{path.name}.{ts}')
+
+
+def atomic_write_json(path: Path, data: Any, pretty: bool = True,
+                      *, archive_root: Optional[Path] = None) -> None:
     """Write JSON atomically via a temp file + rename.
 
     NamedTemporaryFile creates the temp file at mode 0600 regardless of the
@@ -55,7 +72,15 @@ def atomic_write_json(path: Path, data: Any, pretty: bool = True) -> None:
     (confirmed live in session 41 on docs/TGW-Plan-Vault). Explicitly chmod
     the temp file before the rename so the final file keeps the target's
     existing mode (or 0o660, the group-writable default, for a new file).
+
+    ``archive_root``: pass ``cfg['archive_root']`` to enforce invariant E5 —
+    if the target already exists (a real overwrite, not first creation), its
+    current content is archived to ``archive_root/<sku>.zip`` before the
+    overwrite proceeds. Omit only for non-item writes (catalogs, digests,
+    caches) that aren't covered by E5.
     """
+    if archive_root is not None and path.exists():
+        _archive_before_overwrite(archive_root, path)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         want_mode = path.stat().st_mode & 0o777
@@ -182,7 +207,7 @@ def _write_field(cfg: Dict[str, Any], sku: str, field: str,
     doc[field] = value
     if field != 'catalog_verified':
         doc.pop('catalog_verified', None)
-    atomic_write_json(path, doc, pretty=True)
+    atomic_write_json(path, doc, pretty=True, archive_root=cfg.get('archive_root'))
     # Publish to audit stream (PP-AIOPS-001 Phase 1) — fire-and-forget
     try:
         from .apis.nats_client import publish_mutation
@@ -311,7 +336,7 @@ def verifiedupdate(cfg: Dict[str, Any], sku: str, value: str,
     doc['verified'] = value
     doc['#STATUS'] = 'In Stock'
     doc.pop('catalog_verified', None)
-    atomic_write_json(path, doc, pretty=True)
+    atomic_write_json(path, doc, pretty=True, archive_root=cfg.get('archive_root'))
     return {'ok': True, 'sku': sku, 'field': 'verified', 'value': value}
 
 

@@ -57,6 +57,7 @@ def load_config(path: Path) -> Dict[str, Any]:
     secrets_root = p("secrets_root", "/opt/TGW/secrets")
     itemdata_root = p("itemdata_root", "/opt/TGW/data/ItemData")
     catalog_root = p("catalog_root", "/opt/TGW/data/ItemCatalog")
+    archive_root = p("archive_root", "/opt/TGW/data/ItemArchive")
     incoming_path = p("incoming_path", "/opt/TGW/incoming")
     plan_vault_path = p("plan_vault_path", "/opt/TGW/src/trader-grims-warehouse/docs/TGW-Plan-Vault")
 
@@ -160,6 +161,7 @@ def load_config(path: Path) -> Dict[str, Any]:
         "postgres_dsn": postgres_dsn,
         "itemdata_root": itemdata_root,
         "catalog_root": catalog_root,
+        "archive_root": archive_root,
         "full_catalog_path": full_catalog_path,
         "search_catalog_path": search_catalog_path,
         "full_catalog_csv_path": full_catalog_csv_path,

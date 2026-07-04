@@ -1,14 +1,17 @@
-"""Invariants A1/A2/A3/A5 (docs/invariants.md) — item store write rules.
+"""Invariants A1/A2/A3/A5/E5 (docs/invariants.md) — item store write rules.
 
 A1: item JSON writes are atomic and leave no temp-file litter.
 A2: sku is not bulk-editable (whitelist pin).
 A3: create_item never overwrites an existing item.
 A5: any field write clears the catalog_verified hall-pass (the verifiedupdate
     bypass was fixed 2026-06-10).
+E5: no item JSON is overwritten without archiving the prior state first
+    (todo #1104, 2026-07-03/04 — was prose-only, promoted to enforcement).
 """
 
 import json
 import os
+import zipfile
 
 import pytest
 
@@ -20,6 +23,7 @@ def cfg(tmp_path):
     return {
         'itemdata_root':      tmp_path / 'ItemData',
         'location_tree_root': tmp_path / 'by-location',
+        'archive_root':       tmp_path / 'ItemArchive',
         'pretty':             False,
     }
 
@@ -166,3 +170,83 @@ def test_atomic_write_json_banned_in_workers_and_ebay():
         "atomic_write_json call(s) found in workers/ or ebay/ — use fence client instead:\n"
         + "\n".join(violations)
     )
+
+
+# ---------------------------------------------------------------------------
+# E5 — no overwrite without archiving first (todo #1104)
+# ---------------------------------------------------------------------------
+
+def test_atomic_write_json_archives_prior_state_on_overwrite(tmp_path):
+    path = tmp_path / 'tgw1' / 'tgw1.json'
+    archive_root = tmp_path / 'ItemArchive'
+    items.atomic_write_json(path, {'sku': 'tgw1', 'v': 1}, archive_root=archive_root)
+    # first write is a creation — nothing to archive yet
+    assert not (archive_root / 'tgw1.zip').exists()
+
+    items.atomic_write_json(path, {'sku': 'tgw1', 'v': 2}, archive_root=archive_root)
+    zpath = archive_root / 'tgw1.zip'
+    assert zpath.exists()
+    with zipfile.ZipFile(zpath) as zf:
+        names = zf.namelist()
+        assert len(names) == 1
+        archived = json.loads(zf.read(names[0]))
+        assert archived['v'] == 1  # the state BEFORE the second write
+
+
+def test_atomic_write_json_archives_every_overwrite_as_separate_entry(tmp_path):
+    path = tmp_path / 'tgw1' / 'tgw1.json'
+    archive_root = tmp_path / 'ItemArchive'
+    items.atomic_write_json(path, {'v': 1}, archive_root=archive_root)
+    items.atomic_write_json(path, {'v': 2}, archive_root=archive_root)
+    items.atomic_write_json(path, {'v': 3}, archive_root=archive_root)
+    with zipfile.ZipFile(archive_root / 'tgw1.zip') as zf:
+        versions = sorted(json.loads(zf.read(n))['v'] for n in zf.namelist())
+        assert versions == [1, 2]  # states before write 2 and write 3
+
+
+def test_atomic_write_json_without_archive_root_skips_archiving(tmp_path):
+    """Backward compatible: callers that don't pass archive_root (non-item
+    writers — catalogs, digests, caches) get the old unarchived behavior."""
+    path = tmp_path / 'tgw1' / 'tgw1.json'
+    items.atomic_write_json(path, {'v': 1})
+    items.atomic_write_json(path, {'v': 2})
+    assert json.loads(path.read_text())['v'] == 2
+    assert not (tmp_path / 'ItemArchive').exists()
+
+
+def test_write_field_archives_before_overwrite(cfg):
+    items.create_item(cfg, 'tgw1', {'title': 'first'})
+    items.update_item(cfg, 'tgw1', 'title', 'second')
+    zpath = cfg['archive_root'] / 'tgw1.zip'
+    assert zpath.exists()
+    with zipfile.ZipFile(zpath) as zf:
+        archived = json.loads(zf.read(zf.namelist()[0]))
+        assert archived['title'] == 'first'
+
+
+def test_verifiedupdate_archives_before_overwrite(cfg):
+    items.create_item(cfg, 'tgw1', {'title': 'thing', 'verified': 'old'})
+    items.verifiedupdate(cfg, 'tgw1', '2026-07-04')
+    zpath = cfg['archive_root'] / 'tgw1.zip'
+    assert zpath.exists()
+    with zipfile.ZipFile(zpath) as zf:
+        archived = json.loads(zf.read(zf.namelist()[0]))
+        assert archived['verified'] == 'old'
+
+
+def test_archive_failure_aborts_the_write(tmp_path, monkeypatch):
+    """E5 is a hard gate, not best-effort: if archiving fails, the overwrite
+    must not happen either — silently proceeding would be exactly the
+    'delete without archiving' failure mode the invariant exists to prevent."""
+    path = tmp_path / 'tgw1' / 'tgw1.json'
+    archive_root = tmp_path / 'ItemArchive'
+    items.atomic_write_json(path, {'v': 1}, archive_root=archive_root)
+
+    def _boom(*a, **k):
+        raise OSError('disk full')
+    monkeypatch.setattr(items, '_archive_before_overwrite', _boom)
+
+    with pytest.raises(OSError):
+        items.atomic_write_json(path, {'v': 2}, archive_root=archive_root)
+    # original content must be untouched — the overwrite never happened
+    assert json.loads(path.read_text())['v'] == 1

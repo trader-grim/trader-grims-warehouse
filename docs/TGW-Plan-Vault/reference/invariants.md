@@ -416,27 +416,51 @@ Affected workers need a restart to pick up the changes:
 
 ---
 
-## E5 — No data is ever deleted without archiving first ❌ (gap — 2026-06-28)
+## E5 — No data is ever deleted without archiving first ✅ (partial — todo #1104, 2026-07-03/04)
 
 **Rule:** No item JSON, photo, or associated file may be deleted, overwritten, or
 removed from ItemData until the current state has been written to the ItemArchive
-(`/media/db/masterarchive/history/ItemArchive/<sku>.zip`). The archive is the only
-place data may be culled, and only by explicit operator decision.
+(`archive_root/<sku>.zip`, config key `archive_root`, default
+`/opt/TGW/data/ItemArchive`). The archive is the only place data may be culled, and
+only by explicit operator decision.
 
 **Why:** On 2026-06-28, 49 item JSONs (May 2021 paperback books, SKUs
 `tgw202105091454567`–`tgw202105091545326`) were found missing from all live data sources
 — ItemData, btrfs snapshots, Google Drive, and the tgw-claude-dump. They were recovered
-**solely** because the ItemArchive zips existed at
-`/media/db/masterarchive/history/ItemArchive/<sku>.zip`. Without those zips the data
-would have been permanently lost. The archive is the last line of defense.
+**solely** because the ItemArchive zips existed. Without those zips the data would
+have been permanently lost. The archive is the last line of defense.
 
-**Where to enforce:**
-- The fence (`POST /api/items/{sku}` delete or replace path) must zip the current
-  ItemData directory into the ItemArchive before any destructive write.
-- `atomic_write_json` (legacy path, pre-fence) must do the same.
-- `ebay_sku_migrate` must archive the old SKU directory before renaming.
+**Enforced (2026-07-03/04, todo #1104):** `items.atomic_write_json(..., archive_root=...)`
+zips the on-disk JSON into `archive_root/<sku>.zip` (one timestamped entry per
+overwrite) before the temp-file rename, whenever the target already exists and a
+caller opts in. Archiving is fail-closed — an archive error raises and aborts the
+write; it is never a best-effort try/except. Wired into `items.py`'s `_write_field`
+(covers `update_item`/`update_items`/`locationupdate`/`catlocmvall`) and
+`verifiedupdate`, and into `http_server.py`'s three overwrite call sites
+(`_apply_patch`, `_apply_ebay_write`, the photo-order-removal PATCH). `create_item`
+needs no archiving — it already refuses to overwrite (A3). Live-verified 2026-07-04:
+real item `tgw201412211145262` written via `verifiedupdate()`; pre-write JSON (title,
+verified, sku all intact) landed in `/opt/TGW/data/ItemArchive/tgw201412211145262.zip`
+before the overwrite. Tests: `tests/test_invariants_items_fence.py` (+6, including a
+fail-closed case: a monkeypatched archive failure raises and leaves the original file
+untouched).
+
+**Archive location note (2026-07-03/04):** `archive_root`'s configured symlink
+(`/opt/TGW/data/ItemArchive` → `/media/TGW/store/ItemArchive`) was stale/unmounted on
+tgw-prod; Dave confirmed the real, current archive (54,688 zips) temporarily lives at
+`/home/db/devices/porche/history/ItemArchive` while he manually zipmerges several
+archive copies together. Per Dave's direction, `/opt/TGW/data/ItemArchive` is now a
+plain local directory (tgw:tgw, 750) on the NVMe root — writes accumulate there
+directly rather than through any symlink, movable to another partition later without
+code changes (`archive_root` is config-driven).
+
+**Not yet done (deferred, out of scope for #1104):**
+- `POST /api/items/{sku}` delete path (if one exists) — not audited this pass.
+- `ebay_sku_migrate` archiving the old SKU directory before renaming (separate PP).
 - No worker, script, or operator command may `rm -rf` an ItemData directory without
-  first calling the archive step.
+  first calling the archive step — not audited this pass (no known offenders found,
+  but not exhaustively grep-audited like PP-FENCE-001's atomic_write_json ban).
+- Photo/media-file deletion (only item JSON is covered; photos aren't zipped here).
 
 **How it could fail:**
 - A worker calls `shutil.rmtree` or `os.remove` directly on ItemData paths.
