@@ -308,6 +308,13 @@ no-GitHub-access (todo #1082); no process supervision for agent processes (desig
 requirement). FROZEN except stability fixes. Plan: `PLAN-nixos-migration.md`,
 `nix/CLAUDE-NIX.md`.
 
+**todo #1049 split (2026-07-04):** `--print-url` flag on the Python `tgw get-ebay-token`
+CLI was **already fully implemented** (found while checking, not built new) — live-
+verified, real auth URL generated, zero eBay calls. DONE, 5 new tests. The other half
+(upgrading the `tgw` fish wrapper in `nix/tgw/home.nix` to call `xdg-open` automatically)
+is a flake change under the freeze — left untouched, deferred to whenever PP-NIXOS-001
+thaws or Dave wants a targeted exception.
+
 ## PP-PHOTO-001 — photo pipeline (GDrive → Gemini / eBay)
 Sync infra live. Phase A (GDrive→Gemini multimodal draft) #1064; Phase B
 (zero-bandwidth EPS upload) #1065. FROZEN until R1 drains.
