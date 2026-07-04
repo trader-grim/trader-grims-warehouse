@@ -374,6 +374,36 @@ later drop-in upgrade to the same schema. Design capture only, not started —
 needs Dave's go/no-go. Related: PP-AGENTIC-PRICE-001 candidate-query design
 composes with either.
 
+**Same day, Phase -1 — self-powered comp engine (Dave request, todo #1134):**
+the infrastructure (`OwnSalesProvider` + `velocity_stats` worker) already
+exists and runs — this turned out to be a data-density problem, not a
+missing feature. Checked real coverage: only ~12 of 1,316 tracked
+categories clear even a 3-sample minimum (best category: 18 sold items
+ever), because **71% of the catalog (39,224/55,419 items) has no category
+recorded at all** — the real bottleneck is PP-CATPICK-001's job, not the
+comp math. Largest current-inventory categories worth targeting once
+categorized: Collectibles (2,432), AC Adapter (2,059), Arts and Crafts
+(1,261), DVD (1,245), Magazines (954) — AC Adapter/DVD especially, since
+repeat generic SKUs build same-item comp history fast. Full plan:
+`pp/PP-PRICING-001.md` Phase -1 section. Not started — needs Dave's
+priority call (mainly: reprioritize PP-CATPICK-001).
+
+## PP-AMAZON-001 — Amazon FBM for books/media (exploration, 2026-07-04)
+**Opened same day as the comp-engine request** ("let's also start looking
+into branching out to Amazon fulfilled by merchant for books and media").
+Research-only pass, no account/code yet. Real findings: Amazon's Books
+category ungating has tightened significantly (often requires 10+-unit
+supplier invoices — a structural blocker for thrift/estate-sourced
+inventory); DVD/CD/Video Games/Magazines are less gated and match TGW's
+existing inventory well. Fee math is real and needs modeling before
+committing: Professional plan $39.99/mo + ~15% referral + $1.35–1.80/item
+media closing fee + Media Mail shipping could eat most of the margin on a
+typical $10–20 media item — worth a per-category price model before
+listing anything. Recommended order: check live gating status → price
+model → SP-API read-only comp-data integration first (lower risk, "second
+data source" half of the ask) → full listing pipeline only after margin
+confirmed. Full writeup: `pp/PP-AMAZON-001.md`.
+
 ## PP-SOLD-001 — sold-event webhook (Tier 4)
 Code done. BLOCKED: webhook infra (#16) gated on ISS-005 signature verification
 (invariant C8) — forged notifications could mark items sold.

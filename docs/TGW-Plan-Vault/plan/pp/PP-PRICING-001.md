@@ -149,3 +149,72 @@ browser at all (simpler, avoids the exact Linux-webview friction the
 research flagged for Flutter — worth asking whether the web UI needs true
 embedding either, or whether tab-switch + paste is good enough for v1).
 
+---
+
+### Phase -1 — Self-powered comp engine, own dataset (Dave request, 2026-07-04, todo #1134)
+
+**"Let's use the pricing research web ui and our own dataset to build our
+own self powered comp engine. Target our largest categories first."**
+
+**The infrastructure already exists and is running — this is a data-density
+problem, not a missing-feature problem.** `OwnSalesProvider`
+(`src/tgw/ebay/market_data.py`) already reads per-category sold-price stats
+from `velocity-stats.json`, produced by the live `tgw-worker@velocity_stats`
+worker, and already plugs into `recommend_price()`'s comp blend alongside
+`BrowseCompsProvider`. It has been running this whole time.
+
+**Checked the real numbers (2026-07-04):**
+- `velocity-stats.json` tracks 1,316 distinct category IDs, but only
+  **~12 clear the `MIN_SAMPLES = 3` threshold** to count as usable comps at
+  all. The single best-covered category has **18** sold items ever.
+- Root cause, not a velocity-worker bug: **39,224 of 55,419 items (71% of
+  the whole catalog) have no category (`attribute_set`) recorded at all.**
+  Category-keyed comps are structurally starved because most of the
+  catalog was never categorized in the first place — this is the same
+  underlying gap PP-CATPICK-001 (smart category picker) already targets.
+- **Real "largest categories" by current inventory** (the ones worth
+  targeting first, since they have both volume AND, being accessory/media
+  categories, high item-to-item similarity — the ideal case for a
+  same-item comp engine): **Collectibles (2,432 items)**, **AC Adapter
+  (2,059)**, **Arts and Crafts (1,261)**, **DVD (1,245)**, **Magazines
+  (954)**, Toys and Games (763), Tools and Hardware (728), Computer (691).
+  AC Adapter and DVD stand out — generic/repeat SKUs (the same charger or
+  disc model gets bought and resold repeatedly) build strong same-item
+  comp history *faster* than one-off collectibles ever will, even at lower
+  per-category item counts.
+
+**Proposed near-term plan (bootstraps the existing engine, doesn't replace
+it):**
+1. **Backfill category on the 71% uncategorized items** — this is the
+   single highest-leverage fix; it's the actual bottleneck, not the comp
+   math. Ties directly into PP-CATPICK-001; worth reprioritizing that
+   project higher given this new finding.
+2. **Feed the Phase 0 comping interface's captured snapshots into
+   `velocity-stats.json`'s same schema** — every operator-reviewed
+   Product Research capture is *also* a same-item/near-item comp,
+   independent of whether TGW has sold that exact item before. This
+   compounds faster than waiting for organic TGW sales alone, especially
+   for AC Adapter/DVD-style repeat-SKU categories.
+3. **Lower or replace the flat `MIN_SAMPLES = 3` gate with a confidence
+   score** (matches the comping interface's `confidence: high/medium/low`
+   language already proposed in Phase 0) so a 1-2-sample comp isn't binary
+   discarded, just weighted down and flagged for operator review instead
+   of auto-priced.
+4. Once (1) lands, re-run `tgw-worker@velocity_stats` and re-check
+   coverage — the 12-category number should jump substantially just from
+   having a category to key on.
+
+**Not started — needs Dave's priority call**, especially on (1) since it's
+really "reprioritize PP-CATPICK-001," not a standalone build.
+
+---
+
+### Related — Amazon FBM (books/media) exploration
+
+See new `pp/PP-AMAZON-001.md` — a second data source (Amazon's own
+comps/pricing for books/media) and a second sales channel, researched
+2026-07-04 per Dave's same request. Kept as a separate PP item since it's
+a marketplace-expansion decision, not a pricing-signal addition, but the
+two are related: Amazon FBM sales would also feed this same
+own-dataset comp engine once live.
+
