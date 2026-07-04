@@ -42,9 +42,12 @@ status) → `reference/` docs. Tracker beats plan when they disagree.
    test_http_server.py broken since cookie-auth refactor). "Suite green" claims from
    earlier sessions were stale. Repair: todo #1102. Until fixed, only targeted test
    runs are meaningful.
-3. **3,239 ebay_draft dead-letters** — old OpenRouter-402 pile; pipeline is now
-   google_direct + quota-supervised; bulk requeue ramp (50 → 500 → rest) awaits
-   Dave's go (R1.3).
+3. **ebay_draft 402 pile: requeue RUNNING (s45)** — ~3k jobs draining on
+   OpenRouter-primary (post-flip, no 429 tax); monitor watches the $5/day key
+   cap + dead-letter deltas. ~2.7k dead-letters remain (incl. ~657 non-402,
+   uninvestigated). 2 new dead-letters 07-04: truncated image files on disk
+   (2016 SKUs) — data-quality, not provider; candidate corrupted-photo
+   detector for #1145.
 4. **Live-fire gates unexecuted** — listeditor revision apply (R1.1) and action
    console operator test (R1.2) are the current critical path; everything else waits.
 5. **todo #1077** — orphaned bad-SKU offer keeps ebay_sync on per-SKU fallback
@@ -108,48 +111,40 @@ snapshot (any time, pool-disjoint) → (3) P2/P3 while P4 ramps → (4) PP-BACKU
 packets interleaved → (5) PR to main via /tgw-pr-review.
 
 ---
+## Session 45 — 2026-07-04 afternoon (LLM provider flip + UI-pipeline defect evidence) — CONTINUES 4pm
 
-## Session 42 — 2026-07-02 (retarget + R0 quota independence + data-first redraw)
+Committed as-we-went (Dave's instruction), 7 commits on catio-nix-0.0.1-alpha.
 
-Nothing committed to git yet — Dave controls commits. All changes live in prod.
+- **LLM provider flip (todo #1144 DONE, live-verified):** Google dole
+  free-tier quota PER PROJECT (~20 req/day/model here vs published 1,000) —
+  2,171 llm_google 429s in one day from the 402-requeue backlog. Dave's call:
+  OpenRouter is PRIMARY; Google free tier = OPERATOR EMERGENCY RESERVE
+  (interactive-only fallback); failover pattern kept + precheck-gated for a
+  future paid Google key. Docs: reference/LLM-Providers-Quotas.md (canonical,
+  finding was rediscovered 3× before being written down), invariant E8,
+  CLAUDE.md row, memories. Backlog drains ~10× faster since (no 429+40s tax).
+- **#1145 PP-UIPIPE-001 opened (p5): web UI pipeline defect audit.** Dave:
+  "the web ui pipeline ain't cutting it"; his draft-vs-offer hypothesis
+  CONFIRMED by evidence sweep — tgw202605052336026 LIVE at $40.99 with local
+  draft_listing.price=None; tgw202605060125081 published 07-04 with 1/8
+  photos (after #1115 P1 marked done!); 9/10 items same fulfillment policy;
+  publish silently re-runnable (dozens of succeeded publish jobs per SKU,
+  C3); published items never get a published status locally. Full evidence:
+  inbox/INPROGRESS-1145-uipipe-defect-audit.md. 4pm: Dave names the
+  wrong-shipping listing + rest of defect list → root-cause→packet map.
+- **Standing rules encoded:** a1131 is shared Dave+Claude for THERMAL RELIEF
+  — offload Claude's checks there on hot days, never pause pipeline workers
+  for heat (CLAUDE.md + memory); NFS shares for check data = todo #1146.
+- Also: archived 6 processed s44 inbox notes; swept last night's uncommitted
+  pm-intake vault filings into a labeled commit (verified against FILING-LOG
+  first).
 
-- **Retarget approved + executed**: `plan/RETARGET-2026-07-02.md` (diagnosis F1–F5,
-  tracks R0–R3, freeze list, work-packet protocol).
-- **Quota independence (R0) built and live-verified**:
-  - `getRateLimits` probe works (snapshot `/opt/TGW/var/run/ebay-rate-limits-probe.json`).
-  - **Bulk aspects**: `tgw warm-ebay-aspects` — ONE call on the untouched
-    `commerce.taxonomy.bulk` pool (100/day) cached aspects for ALL 15,105 leaf
-    categories (shards + raw gz at `ItemCatalog/ebay-aspects-bulk/`). UI aspect
-    lookups now need zero live Taxonomy calls; operator testing unblocked same day.
-    Aspects cache is permanent + manual refresh (TTL removed, matches tree policy).
-  - **`tgw.quota` budget layer** at every metered choke point (REST/Trading/EPS/LLM):
-    daily per-pool counters (PST boundary), background halt at 70%, 30-min post-429
-    stand-down, 429s logged as incidents with caller identity
-    (`var/log/quota-incidents.jsonl`), new `quota` health check. Caught 181 real 429s
-    (ebay_draft/ebay_upload churning exhausted pools) within minutes; churn stopped
-    after stand-down deploy. Quota/429/usage-limit errors now TRANSIENT-requeue in
-    workers — quota walls can no longer pile up dead letters.
-  - **`tgw ops-digest`** — morning one-screen: flagged health, quota spend,
-    dead-letter deltas, restart flags, stale inbox notes.
-  - Timestamps: 6 naive datetime sites fixed; invariant E6. Verified stored data was
-    never wrong (timestamptz + journald store UTC; s41 bug was rendering-only).
-- **PRIME DIRECTIVES added to top of CLAUDE.md** (Dave's standing orders, enforcement
-  over memory) + **`reference/TGW-Data-Charter.md`** (axiom: eBay is a rented window,
-  the local dataset IS the business; asset inventory; rules for new work).
-- **Raw eBay capture at the fence** (invariant E7): every eBay response (REST/Trading/
-  EPS, errors included) → `incoming/ebay/YYYY-MM-DD.jsonl.gz`, fail-open, capture
-  happens in `client.py` before any worker parses. Live-verified.
-- **Master plan REDRAWN data-first** (~250 lines): PP designs split byte-exact to
-  `plan/pp/`, history to `plan/archive/sections/`; `tgw plan check` all clear after.
-- Found: `tgw restart-workers` references nonexistent `ebay_dole` unit (batch fails);
-  CLAUDE.md `tgw todo add` syntax stale (it's `--add`).
-- Tests: +23 new (quota 17, capture 6); targeted suite green outside pre-rotten files.
-
-**Open from s42:** R1 live-fires; R1.8 dataset backfill (Dave's go); R2.2 digest on
-web UI home; R2.3 push-on-red; #1102 suite repair; #1103 dataset-growth digest lines;
-#1104 enforce E5 in code; thermal hook authorization.
+**Open into 4pm:** #1145 walkthrough (top priority), ebay_draft backlog
+~3k draining (watch OpenRouter $5/day cap on `tgw health`), #1143 2pm audit
+agenda missed (reschedule), #1139 fleet decoupling, #1146 NFS shares.
 
 ---
+
 
 Older sessions: `archive/SESSION-LOG.md`.
 
