@@ -110,6 +110,20 @@ photo set. No new mechanism needed here either.
        running as-is while the panes above get built incrementally,
        whichever order makes sense, with no fixed deadline to retire it.
        Not a build-everything-now requirement.
+     - **Reconsider against lan-mouse + the event server (Dave, same
+       message): this whole design predates both.** lan-mouse (true
+       peer-to-peer desktop KVM, live) and the planned `clip-route` event
+       server (PP-EVENTD-001) may cover part of what xmouse's macro-pad
+       dispatch was solving from scratch — e.g. discrete macro commands
+       (`ic_mkitem`/`ic_data`/`ic_template`-style triggers) could just be
+       another event on the same bus that already routes clipboard/barcode
+       events, rather than the intake app reinventing its own SSH/dispatch
+       mechanism. Doesn't necessarily kill the VNC/RDP-viewer or terminal
+       panes (those solve a different problem — actually seeing/driving the
+       desktop, not firing discrete commands) but the macro-grid piece
+       specifically should be re-evaluated once `clip-route` exists, not
+       built as a bespoke parallel channel. Not resolved here — flagging for
+       whoever scopes the actual build.
    - Replaces the Tasker Scenes + AutoTools WebScreens overlay entirely —
      this becomes the primary on-device intake surface.
 
