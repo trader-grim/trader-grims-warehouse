@@ -645,6 +645,40 @@ def test_photos_short_on_ebay_ignores_items_with_no_recorded_urls(tmp_path):
     assert 'photos_short_on_ebay' not in rules
 
 
+def test_photos_short_on_ebay_prefers_live_photo_index_over_local_mirror(tmp_path):
+    """PP-PHOTOSYNC-001 P9 follow-up (todo #1127): when a live_photo_index is
+    supplied (built from the R1.8 whole-site capture), it is authoritative —
+    even if the local mirror (draft_listing.imageUrls) disagrees."""
+    sku = 'tgw202601010000030'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'E5',
+        'ebay_listing': {'status': 'Active', 'api': 'inventory'},
+        'draft_listing': {'imageUrls': ['https://x/1', 'https://x/2', 'https://x/3',
+                                        'https://x/4', 'https://x/5', 'https://x/6',
+                                        'https://x/7', 'https://x/8', 'https://x/9']},
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc, photos=9)
+    # local mirror says 9/9 (clean) but the live capture says only 2 are live
+    rules_no_index = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'photos_short_on_ebay' not in rules_no_index
+    rules_with_index = {v['rule'] for v in _verify_item(sku, item_dir, doc, {sku: 2})}
+    assert 'photos_short_on_ebay' in rules_with_index
+
+
+def test_photos_short_on_ebay_index_present_but_sku_missing_falls_back(tmp_path):
+    """A SKU absent from the capture (e.g. new since the snapshot) must fall
+    back to the local-mirror method, not silently pass or fail."""
+    sku = 'tgw202601010000031'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'E5',
+        'ebay_listing': {'status': 'Active', 'api': 'inventory'},
+        'draft_listing': {'imageUrls': ['https://x/1']},
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc, photos=9)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc, {'tgw-some-other-sku': 9})}
+    assert 'photos_short_on_ebay' in rules  # local mirror: 1 < 9
+
+
 def test_photo_verify_stale_count_mismatch(tmp_path):
     sku = 'tgw202601010000012'
     doc = {
@@ -873,3 +907,59 @@ def test_legacy_listing_resolved_suppresses_rule(tmp_path):
     item_dir, _ = _make_item(tmp_path, sku, doc)
     rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
     assert 'legacy_listing_unrepaired' not in rules
+
+
+# ---------------------------------------------------------------------------
+# PP-PHOTOSYNC-001 P9 follow-up (todo #1127) — _load_live_photo_index
+# ---------------------------------------------------------------------------
+
+def _write_capture(path, records):
+    import gzip as _gzip
+    with open(path, 'ab') as fh:
+        for rec in records:
+            fh.write(_gzip.compress((json.dumps(rec) + '\n').encode('utf-8')))
+
+
+def test_load_live_photo_index_reads_fresh_capture(tmp_path):
+    from tgw.api import _load_live_photo_index
+    capture_root = tmp_path / 'ebay'
+    capture_root.mkdir()
+    _write_capture(capture_root / '2026-07-04.jsonl.gz', [
+        {'name': 'GET /sell/inventory/v1/inventory_item', 'status': 200,
+         'body': json.dumps({'inventoryItems': [
+             {'sku': 'tgwA', 'product': {'imageUrls': ['a', 'b', 'c']}},
+             {'sku': 'tgwB', 'product': {'imageUrls': ['a']}},
+         ]})},
+        {'name': 'GET /sell/inventory/v1/offer', 'status': 200,
+         'body': json.dumps({'offers': [{'sku': 'tgwA'}]})},
+    ])
+    cfg = {'raw': {'ebay_capture_root': str(capture_root)}}
+    index, age_h = _load_live_photo_index(cfg)
+    assert index == {'tgwA': 3, 'tgwB': 1}
+    assert age_h is not None and age_h < 1
+
+
+def test_load_live_photo_index_stale_capture_returns_none(tmp_path):
+    import os
+
+    from tgw.api import _load_live_photo_index
+    capture_root = tmp_path / 'ebay'
+    capture_root.mkdir()
+    f = capture_root / '2026-07-01.jsonl.gz'
+    _write_capture(f, [{'name': 'GET /sell/inventory/v1/inventory_item', 'status': 200,
+                        'body': json.dumps({'inventoryItems': [
+                            {'sku': 'tgwA', 'product': {'imageUrls': ['a']}}]})}])
+    old = 1_783_000_000  # well over 24h before "now" in any plausible test run
+    os.utime(f, (old, old))
+    cfg = {'raw': {'ebay_capture_root': str(capture_root)}}
+    index, age_h = _load_live_photo_index(cfg)
+    assert index is None
+    assert age_h > 24
+
+
+def test_load_live_photo_index_missing_root_returns_none(tmp_path):
+    from tgw.api import _load_live_photo_index
+    cfg = {'raw': {'ebay_capture_root': str(tmp_path / 'nope')}}
+    index, age_h = _load_live_photo_index(cfg)
+    assert index is None
+    assert age_h is None

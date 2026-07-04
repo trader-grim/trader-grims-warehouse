@@ -11,7 +11,9 @@ No business logic lives here.
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
+import logging
 import os
 import sys
 import time
@@ -47,6 +49,8 @@ from .resolver import resolve, sku_date_str
 from .scrub import data_scrub_pass1, data_scrub_qty_repair, data_scrub_size_class_backfill
 from .sqlite_catalog import build_sqlite_catalog
 from .thumbnail import build_thumbnail_cache
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # list_items — lives here because it bridges catalog and resolver
@@ -1183,7 +1187,63 @@ _KNOWN_STATUS_VALUES: set[str] = {
 _SEV_ORDER: Dict[str, int] = {"critical": 0, "warning": 1, "info": 2}
 
 
-def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any]) -> List[Dict[str, Any]]:
+_LIVE_PHOTO_INDEX_STALE_HOURS = 24.0
+
+
+def _load_live_photo_index(cfg: Dict[str, Any]) -> "tuple[Optional[Dict[str, int]], Optional[float]]":
+    """PP-PHOTOSYNC-001 P9 follow-up (todo #1127): build sku -> live eBay photo
+    count from the freshest R1.8-style whole-site capture (today's or
+    yesterday's `incoming/ebay/YYYY-MM-DD.jsonl.gz`), instead of the local
+    draft_listing/ebay_offer mirror. The capture's `GET /sell/inventory/v1/
+    inventory_item` pages already carry `product.imageUrls` per SKU — the
+    same live-side truth R1.8/P9 validated for the bulk-list audit.
+
+    Returns (index, age_hours) — (None, None) when no capture is fresh
+    enough (> _LIVE_PHOTO_INDEX_STALE_HOURS old or missing); callers must
+    fall back to the local-mirror method in that case rather than making a
+    fresh eBay call — catalog-verify is a zero-API-cost scan by design (P7).
+    """
+    raw = cfg.get("raw", cfg) if isinstance(cfg, dict) else {}
+    root = Path(raw.get("ebay_capture_root", "/opt/TGW/incoming/ebay"))
+    try:
+        candidates = sorted(root.glob("*.jsonl.gz"), reverse=True)
+    except OSError:
+        return None, None
+    if not candidates:
+        return None, None
+    latest = candidates[0]
+    age_hours = (time.time() - latest.stat().st_mtime) / 3600
+    if age_hours > _LIVE_PHOTO_INDEX_STALE_HOURS:
+        return None, age_hours
+
+    index: Dict[str, int] = {}
+    try:
+        with gzip.open(latest, "rb") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if rec.get("name") != "GET /sell/inventory/v1/inventory_item":
+                    continue
+                try:
+                    body = json.loads(rec["body"])
+                except (KeyError, ValueError):
+                    continue
+                for item in body.get("inventoryItems", []):
+                    item_sku = item.get("sku")
+                    if not item_sku:
+                        continue
+                    urls = (item.get("product") or {}).get("imageUrls") or []
+                    index[item_sku] = len(urls)
+    except OSError as exc:
+        log.warning("live-photo-index: could not read capture %s: %s", latest, exc)
+        return None, None
+    return index, age_hours
+
+
+def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any],
+                  live_photo_index: Optional[Dict[str, int]] = None) -> List[Dict[str, Any]]:
     """Return list of violation dicts for one item (PP-VERIFY-001)."""
     import re
 
@@ -1304,19 +1364,27 @@ def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any]) -> List[Dict[str
     # do). This is how the s43 quota-masking bug (17/17 photo failures logged as
     # "complete, 0 new") would have surfaced within 24h of first occurring instead
     # of running undetected for a month.
-    # Live-hosted count: draft_listing.imageUrls (falling back to
-    # ebay_offer.photo_urls) is what actually went live, matching the
-    # methodology already validated against this exact dataset (492/9,403
-    # shortfall, 2026-07-03). `ebay_photos` looked like the obvious field but
-    # is a local upload-bookkeeping list that most of the older catalog never
-    # populated even when photos were genuinely live — using it here produced
-    # 9,382 false positives on the first real run (found live, same day).
-    live_photo_urls = ((doc.get("draft_listing") or {}).get("imageUrls")
-                       or ebay_offer.get("photo_urls") or [])
+    # Live-side count: PP-PHOTOSYNC-001 P9 follow-up (todo #1127) re-points this
+    # at the freshest whole-site capture (R1.8-style, `incoming/ebay/*.jsonl.gz`
+    # inventory_item pages carry `product.imageUrls`) when one exists and is
+    # <24h old — genuine live-site truth instead of our own upload bookkeeping.
+    # Falls back to the P7 local-mirror method (draft_listing.imageUrls, then
+    # ebay_offer.photo_urls) when no fresh capture exists, so the rule never
+    # goes blind between snapshots. `ebay_photos` itself is excluded from both
+    # paths — a local upload-bookkeeping list that most of the older catalog
+    # never populated even when photos were genuinely live — using it here
+    # produced 9,382 false positives on the first real run (found live, same day).
+    if live_photo_index is not None and sku in live_photo_index:
+        live_count = live_photo_index[sku]
+        source = "capture"
+    else:
+        live_count = len((doc.get("draft_listing") or {}).get("imageUrls")
+                         or ebay_offer.get("photo_urls") or [])
+        source = "local-mirror"
     if ebay_listing.get("status") == "Active" and ebay_listing.get("api") == "inventory":
-        if live_photo_urls and len(live_photo_urls) < len(photos):
+        if live_count and live_count < len(photos):
             v("photos_short_on_ebay", "critical",
-              f"Active listing has {len(live_photo_urls)} live eBay photo URLs but "
+              f"Active listing has {live_count} live eBay photo URLs ({source}) but "
               f"{len(photos)} on disk — an upload claimed success it didn't earn")
 
     photo_verify = ebay_listing.get("photo_verify") or {}
@@ -1519,6 +1587,12 @@ def cmd_catalog_verify(
     json_errors = 0
     fixes_applied = 0
 
+    live_photo_index, live_photo_index_age_h = _load_live_photo_index(cfg)
+    if live_photo_index is None and live_photo_index_age_h is not None:
+        log.warning("catalog-verify: capture is %.1fh old (> %sh) — "
+                    "photos_short_on_ebay falling back to local mirror",
+                    live_photo_index_age_h, _LIVE_PHOTO_INDEX_STALE_HOURS)
+
     for item_dir in sorted(root.iterdir()):
         if not item_dir.is_dir() or not item_dir.name.startswith("tgw"):
             continue
@@ -1552,7 +1626,7 @@ def cmd_catalog_verify(
             continue
 
         scanned += 1
-        item_viols = _verify_item(sku, item_dir, doc)
+        item_viols = _verify_item(sku, item_dir, doc, live_photo_index)
 
         # Apply fixes FIRST (when writing) so the violation list, the report,
         # the by_rule tally, and the mark_verified gate all reflect post-fix
@@ -1573,7 +1647,7 @@ def cmd_catalog_verify(
                         error = res.get("error")
                 fix_log.append({"sku": sku, **f, "applied": applied, "error": error})
             if item_fixed:
-                item_viols = _verify_item(sku, item_dir, doc)  # re-scan mutated doc
+                item_viols = _verify_item(sku, item_dir, doc, live_photo_index)  # re-scan mutated doc
 
         for viol in item_viols:
             if _SEV_ORDER.get(viol["severity"], 99) <= min_sev:

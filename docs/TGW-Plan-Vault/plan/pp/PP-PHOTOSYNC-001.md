@@ -312,10 +312,34 @@ requested. `GetMyeBaySelling` is already live daily (`ebay_legacy_sync`) but
 found narrower than assumed: explicitly skips inventory-API items and never
 extracts PictureDetails from the already-captured raw XML — low priority since
 the bulk-list winner already covers the higher-value cohort. Full ranking:
-`reference/eBay-Bulk-Audit-Sources.md`. **Follow-up (not yet filed as a
-todo)**: point `photos_short_on_ebay` (P7) at the bulk list instead of the
+`reference/eBay-Bulk-Audit-Sources.md`. **Follow-up — todo #1127, DONE 2026-07-03/04:**
+point `photos_short_on_ebay` (P7) at the bulk list instead of the
 local `draft_listing.imageUrls` mirror — catches drift the local record itself
 might have, not just upload failures.
+
+**#1127 — what shipped:** `api._load_live_photo_index(cfg)` reads the freshest
+`incoming/ebay/*.jsonl.gz` capture (R1.8-style whole-site snapshot — the
+`GET /sell/inventory/v1/inventory_item` pages already carry `product.imageUrls`
+per SKU), builds a `sku -> live photo count` dict, and returns `(None, age_hours)`
+when the newest capture is >24h old (no fresh eBay call triggered from the
+scan path — catalog-verify stays zero-API-cost per P7). `cmd_catalog_verify`
+builds this index once per run and passes it into `_verify_item`; the
+`photos_short_on_ebay` rule prefers it over the P7 local-mirror method when the
+SKU is present in the index, falling back per-SKU (not just per-run) when a
+SKU is missing from the capture. Scoped deviation from the literal spec: no
+automatic "fall back to bulk getInventoryItems (~98 calls)" live-refresh when
+stale — triggering an eBay call from inside a read-only verify scan would
+break the P7 zero-API-cost invariant; a stale capture instead degrades
+gracefully to the pre-existing local-mirror check and logs a warning naming
+the age. Refreshing the capture is R1.8's/#1122's job, run independently
+(nightly timer candidate — not filed as a new todo, flag for 2pm triage: is a
+recurring R1.8-style snapshot job wanted, or is this a one-time backfill?).
+Live-verified 2026-07-04: `_load_live_photo_index` against the real,
+in-progress R1.8 capture returned all 19,486 SKUs with correct counts
+(`tgw202606021133367` → 24, matching the raw capture record); `tgw
+catalog-verify --limit 500 --severity critical` ran clean end-to-end using it.
+Tests: `tests/test_catalog_verify.py` (+5: 2 for the rule preferring/falling-
+back on the index, 3 for `_load_live_photo_index` — fresh/stale/missing-root).
 **Why:** Dave: "there is likely for us to do a bulk, maybe even whole site audit
 for less api cost if we look hard through all of our scopes." Per-SKU offer pulls
 cost ~19.5k calls; bulk sources may cut a whole-site audit to a handful.
