@@ -45,6 +45,10 @@ _DEFAULT_INCIDENT_LOG = '/opt/TGW/var/log/quota-incidents.jsonl'
 # Daily budgets per pool — from the live getRateLimits probe (2026-07-02),
 # snapshot at /opt/TGW/var/run/ebay-rate-limits-probe.json. None = count-only
 # (no enforcement) — used where the real limit is unconfirmed (LLM free tiers).
+# llm_google: Google slashed the flash-lite free tier to 20 requests/day
+# (confirmed live 2026-07-04, 2,171 429s). Dave's decision: those 20 calls are
+# the OPERATOR EMERGENCY RESERVE — background callers never touch them
+# (OpenRouter is primary; see tgw-models.json + llm.py call_model).
 _DEFAULT_BUDGETS: Dict[str, Optional[int]] = {
     'ebay_taxonomy':      5_000,
     'ebay_taxonomy_bulk':   100,
@@ -56,7 +60,7 @@ _DEFAULT_BUDGETS: Dict[str, Optional[int]] = {
     'ebay_trading':       5_000,
     'ebay_eps':           5_000,
     'ebay_other':          None,
-    'llm_google':          None,
+    'llm_google':            20,
     'llm_openrouter':      None,
 }
 
@@ -86,6 +90,15 @@ def set_context(kind: str, name: str) -> None:
     global _context_kind, _context_name
     _context_kind = kind
     _context_name = name
+
+
+def context_kind() -> str:
+    """This process's current caller kind ('background'|'interactive').
+
+    Reflects C10 operator-lane overrides: worker_base flips the context to
+    interactive while running an origin=operator job, so gates keyed on this
+    (e.g. the llm.py operator emergency reserve) honour the operator lane."""
+    return _context_kind
 
 
 def pool_for_rest_path(path: str) -> str:

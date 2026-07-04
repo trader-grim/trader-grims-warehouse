@@ -87,10 +87,17 @@ class TestEnforcement:
     def test_unknown_budget_pool_not_halted(self, tmp_path):
         cfg = _cfg(tmp_path)
         quota.set_context('background', 'worker:ai_identify')
-        for _ in range(10_000):
-            pass
-        quota.record(cfg, 'llm_google', 10_000)
-        quota.precheck(cfg, 'llm_google')  # count-only pool: must not raise
+        quota.record(cfg, 'llm_openrouter', 10_000)
+        quota.precheck(cfg, 'llm_openrouter')  # count-only pool: must not raise
+
+    def test_llm_google_default_budget_halts_background(self, tmp_path):
+        # s45: llm_google budget defaults to 20 (operator emergency reserve) —
+        # background callers must halt once the threshold is spent.
+        cfg = _cfg(tmp_path)
+        quota.set_context('background', 'worker:ai_identify')
+        quota.record(cfg, 'llm_google', 20)
+        with pytest.raises(quota.QuotaBudgetExceeded):
+            quota.precheck(cfg, 'llm_google')
 
     def test_background_passes_under_threshold(self, tmp_path):
         cfg = _cfg(tmp_path, quota_budgets={'ebay_taxonomy': 100})

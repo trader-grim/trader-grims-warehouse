@@ -34,23 +34,24 @@ CLOUD_PROVIDERS = {'openrouter', 'google_direct'}
 
 # Hardcoded defaults — override via tgw-models.json (cfg['models'])
 #
-# Session 41: ai_identify/alt_text/ebay_draft/bulk_classify moved to google_direct —
-# verified live against the actual configured key (secrets/google-credentials.json)
-# that gemini-2.5-flash and gemini-2.5-flash-lite both return 200 on this project's
-# free tier (serviceTier: 'standard', real inference, no billing hit). gemini-2.0-flash
-# and gemini-2.0-flash-lite are NOT free on this key/project (429 RESOURCE_EXHAUSTED,
-# quota limit: 0 for generate_content_free_tier_requests) — Google's own docs now flag
-# 2.0-flash-lite as deprecated, which is almost certainly why; bulk_classify moved to
-# gemini-2.5-flash-lite (current, free, at least as capable) rather than paying to keep
-# using a deprecated model. call_model() falls back to OpenRouter automatically on any
-# google_direct failure, so this is a cost change, not a reliability change.
+# Session 45 (2026-07-04, Dave): OpenRouter is PRIMARY for all cloud vision
+# tasks. Google slashed the flash-lite free tier to 20 requests/day, so
+# google_direct is no longer viable as a primary — its ~20 free calls/day are
+# now the OPERATOR EMERGENCY RESERVE: call_model() falls back to google_direct
+# only for interactive (C10 operator-lane) callers when OpenRouter fails, so an
+# operator can keep working through an OpenRouter outage/credit gap. The
+# reverse fallback (google_direct → openrouter, precheck-gated with post-429
+# stand-down) is kept intact for when a paid Google API key makes google_direct
+# a primary again — flip tgw-models.json back, no code change needed.
+# (History: s41 moved these tasks TO google_direct when its free tier was
+# verified live; 2.0-flash models remain quota-0/deprecated on this key.)
 _DEFAULTS: Dict[str, tuple[str, str]] = {
-    'ai_identify':            ('google_direct', 'gemini-2.5-flash-lite'),
-    'alt_text':               ('google_direct', 'gemini-2.5-flash-lite'),
+    'ai_identify':            ('openrouter', 'google/gemini-2.5-flash-lite'),
+    'alt_text':               ('openrouter', 'google/gemini-2.5-flash-lite'),
     'suggestions_classify':   ('openrouter', 'deepseek/deepseek-v4-flash'),
-    'bulk_classify':          ('google_direct', 'gemini-2.5-flash-lite'),
+    'bulk_classify':          ('openrouter', 'google/gemini-2.5-flash-lite'),
     'pm_chat':                ('openrouter', 'anthropic/claude-haiku-4-5'),
-    'ebay_draft':             ('google_direct', 'gemini-2.5-flash'),
+    'ebay_draft':             ('openrouter', 'google/gemini-2.5-flash'),
     'pm_intake':              ('openrouter', 'deepseek/deepseek-v4-flash'),
 }
 
@@ -86,6 +87,9 @@ def call_model(
     provider='google_direct' calls Gemini directly via the google-genai SDK
     (no OpenRouter markup) and falls back to OpenRouter automatically on any
     failure — model should be a bare Gemini model id (e.g. 'gemini-2.5-flash-lite').
+    provider='openrouter' with a google/* model falls back the other way for
+    interactive callers only: the Google free tier (~20 calls/day) is the
+    operator emergency reserve, never spent by background jobs.
     """
     if provider is None or model is None:
         _p, _m = get_task_model(cfg, task)
@@ -110,27 +114,67 @@ def call_model(
 
     try:
         if provider == 'google_direct':
+            from tgw import quota
+
+            google_exc: Optional[Exception] = None
             try:
-                text, usage = _call_google_direct(
-                    model, system_prompt, user_prompt, cfg, img_b64_list=_images,
-                )
-            except Exception as exc:
+                # Circuit breaker: after a Google 429, background callers stand
+                # down for the cooldown instead of burning a doomed attempt per
+                # call. The first call after the cooldown expires is the
+                # restoration probe — if Google is back, it stays primary.
+                quota.precheck(cfg, 'llm_google')
+            except quota.QuotaBudgetExceeded as exc:
+                google_exc = exc
+            if google_exc is None:
+                try:
+                    text, usage = _call_google_direct(
+                        model, system_prompt, user_prompt, cfg, img_b64_list=_images,
+                    )
+                except Exception as exc:
+                    google_exc = exc
+            if google_exc is not None:
                 # Fail soft to OpenRouter — a Google-side outage/quota/auth error
                 # must not dead-letter the job when a paid fallback path exists.
                 fallback_model = model if model.startswith('google/') else f'google/{model}'
                 log.warning(
-                    'google_direct call failed for task %r (%s) — falling back to '
-                    'openrouter/%s: %s', task, model, fallback_model, exc,
+                    'google_direct unavailable for task %r (%s) — falling back to '
+                    'openrouter/%s: %s', task, model, fallback_model, google_exc,
                 )
                 text, usage = _call_openrouter(
                     fallback_model, system_prompt, user_prompt, cfg,
                     img_b64_list=_images, messages=messages,
                 )
         elif provider == 'openrouter':
-            text, usage = _call_openrouter(
-                model, system_prompt, user_prompt, cfg,
-                img_b64_list=_images, messages=messages,
-            )
+            try:
+                text, usage = _call_openrouter(
+                    model, system_prompt, user_prompt, cfg,
+                    img_b64_list=_images, messages=messages,
+                )
+            except Exception as exc:
+                from tgw import quota
+
+                # Operator emergency reserve (Dave, 2026-07-04): Google's ~20
+                # free calls/day are held for interactive (C10 operator-lane)
+                # callers so the operator can keep working through an OpenRouter
+                # outage/credit gap. Background jobs re-raise — worker_base
+                # requeues them as transient; they must not drain the reserve.
+                if (
+                    quota.context_kind() == 'interactive'
+                    and messages is None
+                    and model.startswith('google/')
+                ):
+                    reserve_model = model.split('/', 1)[1]
+                    log.warning(
+                        'openrouter call failed for task %r (%s) — operator '
+                        'emergency reserve: google_direct/%s: %s',
+                        task, model, reserve_model, exc,
+                    )
+                    text, usage = _call_google_direct(
+                        reserve_model, system_prompt, user_prompt, cfg,
+                        img_b64_list=_images,
+                    )
+                else:
+                    raise
         elif _images:
             # Ollama only supports single image; use the first
             text, usage = _call_ollama_vision(model, system_prompt, user_prompt, cfg, _images[0])

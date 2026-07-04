@@ -145,3 +145,121 @@ class TestCallModelGoogleDirectDispatch:
                            provider='google_direct', model='google/gemini-2.5-flash-lite')
 
         assert or_calls == ['google/gemini-2.5-flash-lite']
+
+
+class TestGoogleStandDown:
+    """Circuit breaker: during the llm_google post-429 cooldown, call_model
+    skips the doomed google_direct attempt and goes straight to OpenRouter."""
+
+    def test_standdown_skips_google_entirely(self, monkeypatch):
+        from tgw import quota
+
+        def _raise_precheck(cfg, pool):
+            assert pool == 'llm_google'
+            raise quota.QuotaBudgetExceeded('429 received 60s ago — stand-down')
+
+        monkeypatch.setattr('tgw.quota.precheck', _raise_precheck)
+        google_calls = []
+        monkeypatch.setattr(
+            llm_mod, '_call_google_direct',
+            lambda *a, **k: google_calls.append(1) or ('google', {}),
+        )
+        or_calls = []
+        monkeypatch.setattr(
+            llm_mod, '_call_openrouter',
+            lambda model, *a, **k: or_calls.append(model) or ('fallback text', {}),
+        )
+        monkeypatch.setattr(llm_mod, '_record_usage', lambda *a, **k: None)
+
+        text = llm_mod.call_model('ai_identify', 'sys', 'user', _cfg(),
+                                  provider='google_direct', model='gemini-2.5-flash-lite')
+
+        assert text == 'fallback text'
+        assert google_calls == []
+        assert or_calls == ['google/gemini-2.5-flash-lite']
+
+    def test_no_standdown_google_called_normally(self, monkeypatch):
+        monkeypatch.setattr('tgw.quota.precheck', lambda cfg, pool: None)
+        monkeypatch.setattr(llm_mod, '_call_google_direct',
+                            lambda *a, **k: ('google says hi', {}))
+        or_calls = []
+        monkeypatch.setattr(llm_mod, '_call_openrouter',
+                            lambda *a, **k: or_calls.append(1) or ('', {}))
+        monkeypatch.setattr(llm_mod, '_record_usage', lambda *a, **k: None)
+
+        text = llm_mod.call_model('ai_identify', 'sys', 'user', _cfg(),
+                                  provider='google_direct', model='gemini-2.5-flash-lite')
+
+        assert text == 'google says hi'
+        assert or_calls == []
+
+
+class TestOperatorEmergencyReserve:
+    """OpenRouter-primary failure falls back to the Google free tier ONLY for
+    interactive (C10 operator-lane) callers with a google/* model. Background
+    jobs re-raise (transient requeue) and never drain the ~20-call reserve."""
+
+    def _fail_openrouter(self, monkeypatch):
+        monkeypatch.setattr(
+            llm_mod, '_call_openrouter',
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError('or down')),
+        )
+        monkeypatch.setattr(llm_mod, '_record_usage', lambda *a, **k: None)
+
+    def test_interactive_google_model_uses_reserve(self, monkeypatch):
+        self._fail_openrouter(monkeypatch)
+        monkeypatch.setattr('tgw.quota.context_kind', lambda: 'interactive')
+        google_calls = []
+        monkeypatch.setattr(
+            llm_mod, '_call_google_direct',
+            lambda model, *a, **k: google_calls.append(model) or ('reserve text', {}),
+        )
+
+        text = llm_mod.call_model('ai_identify', 'sys', 'user', _cfg(),
+                                  provider='openrouter', model='google/gemini-2.5-flash-lite')
+
+        assert text == 'reserve text'
+        assert google_calls == ['gemini-2.5-flash-lite']
+
+    def test_background_reraises_and_never_touches_reserve(self, monkeypatch):
+        self._fail_openrouter(monkeypatch)
+        monkeypatch.setattr('tgw.quota.context_kind', lambda: 'background')
+        google_calls = []
+        monkeypatch.setattr(
+            llm_mod, '_call_google_direct',
+            lambda *a, **k: google_calls.append(1) or ('', {}),
+        )
+
+        with pytest.raises(RuntimeError, match='or down'):
+            llm_mod.call_model('ai_identify', 'sys', 'user', _cfg(),
+                               provider='openrouter', model='google/gemini-2.5-flash-lite')
+        assert google_calls == []
+
+    def test_non_google_model_reraises_even_interactive(self, monkeypatch):
+        self._fail_openrouter(monkeypatch)
+        monkeypatch.setattr('tgw.quota.context_kind', lambda: 'interactive')
+        google_calls = []
+        monkeypatch.setattr(
+            llm_mod, '_call_google_direct',
+            lambda *a, **k: google_calls.append(1) or ('', {}),
+        )
+
+        with pytest.raises(RuntimeError, match='or down'):
+            llm_mod.call_model('pm_intake', 'sys', 'user', _cfg(),
+                               provider='openrouter', model='deepseek/deepseek-v4-flash')
+        assert google_calls == []
+
+    def test_prebuilt_messages_reraise_even_interactive(self, monkeypatch):
+        self._fail_openrouter(monkeypatch)
+        monkeypatch.setattr('tgw.quota.context_kind', lambda: 'interactive')
+        google_calls = []
+        monkeypatch.setattr(
+            llm_mod, '_call_google_direct',
+            lambda *a, **k: google_calls.append(1) or ('', {}),
+        )
+
+        with pytest.raises(RuntimeError, match='or down'):
+            llm_mod.call_model('pm_chat', 'sys', 'user', _cfg(),
+                               provider='openrouter', model='google/gemini-2.5-flash',
+                               messages=[{'role': 'user', 'content': 'hi'}])
+        assert google_calls == []
