@@ -126,6 +126,8 @@ run. Zero requeue errors, worker active, 0 incidents at requeue time. Todo
 - DONE-1054: item detail History link via sku_old — live, 39,485 records indexed; test suite 1790 pass / 1 skip (was 1786).
 
 - #1049 get-ebay-token --print-url CLI half completed (d8a961c). fish wrapper deferred under PP-NIXOS-001 freeze.
+
+Recoll index Phase 0 built: 441K docs, 4.6 GB per #1066. Follow-up: nightly timer + CLI wrapper pending.
 #1077 orphaned offer forces ebay_sync per-SKU fallback (Dave → eBay
 support); 15 Syncthing conflict files in vault; nats health check red
 (module absent — decide: install or drop check).
@@ -355,6 +357,54 @@ from — new hardware, or an explicit repurpose of something already in
 service. Not started; the original LVM-expansion plan (sdb/sdc as
 candidate PVs) is superseded by this finding.
 
+**Real current pressure (checked 2026-07-04):** not `/nix` (52% used, 33G
+free, fine) — `/opt/TGW` (nvme, ItemData/ItemCatalog/incoming) is at
+**83% used, only 48G free**, and `ItemData` alone is already 180G for 55K
+items. Dave: "I have half a million items here ready to process" once
+the pipeline is fixed — heading toward that ~9x scale, this is the
+partition that will actually run out first.
+
+**Power constraint (Dave, 2026-07-04):** generator-powered — prefer
+drives that can come offline when not needed. Real drive inventory
+mapped (`lsblk` + `TRAN`/model): `nvme0n1` (internal NVMe) + `sda`
+(internal SATA HDD) can't be unplugged but draw modest power; `sdc`
+(700G) + `sdi` (465G, currently idle) are 2.5" USB laptop drives —
+bus-powered, no external brick, the reliable always-on tier; `sdd`
+(MasterArchive, 1.8T) + `sdh` (tgw-backup, 931G) are 3.5" drives in a
+powered dock — connect only when actively syncing, matches the existing
+PP-BACKUP-001 A7 "rotating offline drive tier" design exactly, just
+applied for power reasons too, not only DR rotation. Planned upgrade:
+a 4-bay USB3 NVMe dock (bus-powered, low-heat) — Dave has the SSDs
+already, multi-terabyte capacity once built, likely retires the need to
+keep `sdd`/`sdh` connected as often.
+
+**Merged with PP-DRIVE-INDEX-001** (see below) — recoll-driven dedup
+across the already-mounted data is the near-term space-recovery lever,
+before deciding what (if anything) to offload onto `sdi`.
+
+## PP-DRIVE-INDEX-001 — drive survey, dedup, universal index (merged 2026-07-04)
+**Pre-existing plan (session 40, 2026-07-01) found and merged into the
+live drive-space conversation, per Dave's direction.** Long-horizon
+project: catalog, deduplicate, and index everything across Dave's ~11
+external drives + Google Drive (Track A = TGW business data, Track B =
+personal), full design in `plan/PP-DRIVE-INDEX-plan.md`.
+
+**Phase 4's Track A recoll piece landed today, ahead of the plan's own
+sequencing** — todo #1066 (PP-SEARCH-001 Phase 0) built the exact recoll
+index this plan calls for, independently, before knowing this plan
+existed. 441,374 docs indexed (`ItemArchive`, `ItemCatalog`, plan vault),
+live-verified real recovery queries. The rest of this plan (drive-survey
+tooling, per-drive manifests/SMART checks, cross-drive dedup report,
+Track B, Google Drive inventory) is still fully open — no external
+drives have been surveyed yet.
+
+**Why it matters right now:** this plan's own Phase 1.2 (cross-drive
+dedup report) is exactly the space-recovery mechanism Dave described for
+`/opt/TGW`'s 83%-full pressure above — years of ItemData/ItemArchive
+history plausibly has real duplicate files recoverable via a dedup scan
+(fclones/rmlint/sha256 fingerprinting, per Phase 0.1's own tooling list),
+achievable against what's already mounted, no new drives needed first.
+
 ## PP-NIXOS-001 — NixOS migration (CatioNIX)
 Canonical flake `~/tgw-flake` working; main-repo merge + workflow rules pending; a1131
 no-GitHub-access (todo #1082); no process supervision for agent processes (design
@@ -508,7 +558,7 @@ PP-EVENTD-001 (event server — pending #1086 concept pass) · PP-FULFILLMENT-00
 PP-TASKER-001 · PP-PERP-AUTO-001 · PP-EMAIL-001 · PP-CLAUDE-HELP-001 ·
 PP-DERIVED-001 (design feeds Data Charter) · PP-DATA-OWN-001 (axiom absorbed into
 charter; mirror work continues as R1.8 + mirror fields) · PP-UI-INTEGRITY-001 ·
-PP-REVIEW-001 · PP-MACRO-001 (#15) · PP-SEARCH-001 (#1066) · PP-DOCLIB-001 (#1044) ·
+PP-REVIEW-001 · PP-MACRO-001 (#15) · PP-DOCLIB-001 (#1044) ·
 PP-STORAGE-001/PP-VISION-001 (GPU-gated) · PP-RESCUE-001 · PP-AGENTIC-PRICE-001 ·
 PP-AIOPS-001 (see `PP-AIOPS-001-cat-herding-platform.md`) · LVM expansion (#1056) ·
 PP-PRICING-001 (Google Shopping SERP comps — design `pp/PP-PRICING-001.md`, thaws with

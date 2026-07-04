@@ -1,8 +1,47 @@
 ---
 title: PP-DRIVE-INDEX — Long-term File Sorting & Indexing
 created: 2026-07-01 (session 40)
-status: Phase 0 — planning
+status: Phase 0 partially DONE (2026-07-04) — see update below
 ---
+
+## UPDATE 2026-07-04 — Phase 4's Track A recoll piece landed early, merge point found
+
+Built independently today (todo #1066, PP-SEARCH-001 Phase 0) without
+knowing this plan existed — found and merged on Dave's prompt after a
+drive-space conversation surfaced it. **This satisfies Phase 4's Track A
+checkbox ahead of schedule:** a live recoll index at `/opt/TGW/.recoll/`
+covering `ItemArchive` (zip contents transparently indexed), `ItemCatalog`
+(incl. the 235MB `historical-master-catalog.json`), the `history/` symlink
+(picks up MasterArchive automatically whenever that drive is mounted —
+no config change needed), and the plan vault. 441,374 docs indexed, real
+recovery-style queries live-verified (the exact "49 missing item JSONs"
+scenario this plan and `project-universal-index` memory both call out).
+Config: `/opt/TGW/.recoll/recoll.conf` (outside git, tgw's `$HOME` — see
+`CLAUDE.md` key-paths table).
+
+**What this doesn't yet do** (the rest of this plan, still fully open):
+Phases 0.1–0.4's drive-survey tooling, Phase 1's per-drive manifests/SMART
+checks, the cross-drive dedup report (1.2), Track B (personal data)
+entirely, and Google Drive inventory. None of the 11 drives/holster stack
+this plan describes have been surveyed — today's index only covers what
+was already mounted on the live TGW server.
+
+**Why this matters right now (2026-07-04 drive-space conversation):**
+`/opt/TGW` (the live ItemData/ItemCatalog partition) is at 83% full, 48G
+free — the real near-term pressure point, not `/nix`. This plan's own
+Phase 1.2 (cross-drive dedup) is exactly the space-recovery lever Dave
+described ("the recoll project will also identify a lot of duplicates and
+I will recover a lot of space") — years of accumulated ItemData/ItemArchive
+history plausibly has real duplicate photos/files. Recommend: run a
+dedup pass (fclones/rmlint, or a sha256-fingerprint scan per Phase 0.1's
+own tooling list) against the currently-indexed scope *first* — no new
+drives need connecting for that, it's a scan against what's already
+mounted and already indexed — before deciding whether/what to offload onto
+`sdi` (idle 500G bus-powered USB drive, see `PLAN-backup-dr.md` /
+`DRIVE-REGISTRY.md` for the current drive-power-management policy this
+project should follow: reliable bus-powered USB stays attached, dock-housed
+3.5" drives get connected only when actively surveyed, to respect Dave's
+generator-power constraint).
 
 # PP-DRIVE-INDEX: File Sorting & Indexing
 
