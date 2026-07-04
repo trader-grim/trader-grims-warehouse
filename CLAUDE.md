@@ -218,9 +218,14 @@ Run as `tgw` user — source files are `rw-------`, secrets are `chmod 600`.
 - **Suggest, don't implement** for exploratory questions until Dave approves direction
 - **Workers need restart after source changes** — `systemctl restart tgw-worker@<queue>.service`
 - **Re-enqueue manually after dead_letter** — dead_letter jobs don't auto-retry; use `state_machine.enqueue_job()` with a fresh dedupe key
-- **Test environment** — use `ssh a1131` for UI/integration testing instead of a VM; it's a
-  NixOS host on the LAN with a partial TGW install and 18 GB free RAM. Run `/tgw-exit` before
-  switching to it so the inbox note captures your current state.
+- **Test environment + thermal-relief compute** — use `ssh a1131` for UI/integration testing
+  instead of a VM; it's a NixOS host on the LAN with a partial TGW install and 18 GB free RAM.
+  Run `/tgw-exit` before switching to it so the inbox note captures your current state.
+  **a1131 is shared Dave+Claude precisely for thermal relief** (tgw-prod runs hot): on hot
+  days run your own heavy checks — test suites, big greps, review sweeps — there via ssh.
+  Never pause pipeline workers for heat (worker load is only a thermal problem when our own
+  bugs loop). NFS shares of the data Claude's checks need: todo #1146. Caveat: a1131's repo
+  checkout can be stale (#1082) — sync repo state before trusting its test results.
 - **Run a code check at least once per work day, more if the session touches a lot of
   files** (Dave, 2026-07-04): a full week of commits (2026-06-24 through 2026-07-02)
   never went through `/code-review`/ultrareview because the diff grew too large to
