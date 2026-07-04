@@ -457,6 +457,17 @@ by the intake-app plan. Also flagged: `clip-route`'s ingest path needs a session
 capture-batch correlation ID independent of SKU, since capture can start before an
 item record exists in ItemData.
 
+**catalog_rebuild dead-letter root cause (2026-07-04): SKU-rename races, not a bug.**
+15 `catalog_rebuild` dead-letters, all "No such file: ItemData/<old-sku>/..." —
+confirmed via `sku_history`: each old SKU was renamed by `ebay_sku_migrate`
+(e.g. `tgw20171218042138799` → `tgw201712180421387`, `normalize_class_a`,
+2026-06-29) and the new SKU directory exists fine. A rebuild scan just caught
+the old path mid-rename; catalog rebuilds have clearly succeeded since (fresh
+catalog data used all night). Cancelled (Dave's go). Not fixed at the source —
+worth a small robustness pass later (`_verify_item`/`build_all_catalogs`
+tolerating a missing file mid-scan as a skip-and-continue rather than failing
+the whole rebuild) if this recurs during a future migration batch.
+
 ## Standing gates (human-only)
 
 Never: alter eBay OAuth scopes · auto-publish · **push AI-regenerated content to a
