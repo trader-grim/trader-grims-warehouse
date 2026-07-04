@@ -264,6 +264,7 @@ failures as baseline).
 Full design + packet contracts: `pp/PP-PHOTOSYNC-001.md`.
 s42+s43 committed+pushed (`ae9b1e6`); PR to main deferred until P1 verifies.
 
+P10 complete (legacy duplicate check + eBay Motors awareness). P4 paused per P10 findings. See RESEARCH-photosync-p10-legacy-duplicate.md.
 ## PP-LISTEDITOR-001 — listing editor + revision apply
 Phase 2 code complete s40 (`_APPLY_ENABLED=True`, drift-gated live PUT). **Gate:
 live-fire R1.1.** Then wire Update-Item button to revision apply. Todos #1062/#1084.
@@ -299,8 +300,14 @@ Phase 1 done; crash loop fixed s41. #1086 conceptual pass (unify with PP-EVENTD-
 BLOCKS #1055 rofi picker. FROZEN. Design: `pp/PP-CLIP-001.md`, `pp/PP-EVENTD-001.md`.
 
 ## PP-CATPICK-001 — smart category picker
-Phase 1 (backfill category_candidates from tree cache, zero API calls) #1079. FROZEN
-until R1 drains. Memory: project-smart-category-picker.
+**Phase 1 DONE 2026-07-04** (#1079): `category_candidates` (id/name/full ancestor
+path) backfilled onto all 25 `category-groups.json` groups from the on-disk eBay
+category tree cache — zero live API calls. `scripts/catpick_backfill_candidates.py`
+(dry-run default, `--apply` to write); 4 unit tests. 2 stale category IDs
+(`manuals: 34210`, `tools_hand: 43994`) not found in the tree cache — kept as
+bare-ID fallback rather than dropped, flagged for review. Phase 2 (the actual
+group-shortlist-first picker UI/logic) remains FROZEN until R1 drains. Memory:
+project-smart-category-picker.
 
 ## PP-REPRICER-001 — market-data repricer (the pricing rebuild)
 Read-only foundation done. **Context (s42): automated pricing is DEFUSED** — schedule
