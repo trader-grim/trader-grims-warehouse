@@ -392,6 +392,22 @@ byte-complete in `archive/sections/` and promote to `pp/` on touch.)*
 
 ---
 
+## Open discussion items (for 2pm 2026-07-04 planning session)
+
+**Relocate the plan-vault document inbox into `/opt/TGW/incoming/`?** Dave recalled
+discussing this before (2026-07-04) but no record of it was found in this plan, any
+PP design doc, or memory — capturing now per Prime Directive 5 so it isn't lost
+again. `/opt/TGW/incoming/` was built session 42 as the general "root of ALL inbound
+data" (Data Charter) — `newitems/` (camera/intake drops), `ebay/` (raw API capture,
+E7), `lookups/` (reserved) — but `docs/TGW-Plan-Vault/inbox/` (research docs,
+PP-intake notes, Syncthing-synced across workstations) remains separate, its own
+thing. Open question: should the vault inbox move under `/opt/TGW/incoming/`
+alongside the other inbound streams, or does it stay separate since it's
+document/note intake (human research, Syncthing-native) rather than raw
+API/photo capture (machine-written, group-only perms, different retention model)?
+Dave is linking his existing `docs/TGW-Plan-Vault/inbox/` via Syncthing across his
+workstations in the meantime — no filesystem move happening until this is decided.
+
 ## Standing gates (human-only)
 
 Never: alter eBay OAuth scopes · auto-publish · **push AI-regenerated content to a
