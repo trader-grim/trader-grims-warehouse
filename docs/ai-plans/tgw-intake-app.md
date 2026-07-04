@@ -76,9 +76,36 @@ photo set. No new mechanism needed here either.
    - Template/size/location entry — the "custom intake flow" from
      `PP-TASKER-001` — posts the same way `tgw-http`'s existing PATCH
      endpoint already accepts.
-   - Macro-pad grid + remote form/VNC panes from PP-INTAKE-003's Phase 1-3
-     roadmap, ported to Kotlin (still a valid 3-phase build order: dispatch
-     grid → inline web form via a Kotlin WebView → embedded VNC).
+   - **Remote-control surface (refined, Dave 2026-07-04) — replaces "xmouse."**
+     xmouse is a third-party Android app (Play Store/F-Droid/vendor repo): an
+     SSH/xdotool-based macro pad + remote mouse. Dave's replacement design,
+     more capable than PP-INTAKE-003's original 3-phase plan:
+     - Drop the remote-mouse/xdotool-cursor-emulation approach entirely —
+       replace it with a real **VNC/RDP framebuffer viewer** (screen +
+       keyboard + pointer all come for free from the protocol, no xdotool
+       hackery needed).
+     - Add a **terminal pane** (SSH) — new, not in the original design.
+     - Keep the **macro-button grid** (direct HTTP/SSH command dispatch —
+       the `ic_mkitem`/`ic_data`/`ic_template` COMMAND:/DATA:/TEMPLATE:
+       clipboard-relay tricks in `tgw.source`/`SHELL-AUDIT.md` get replaced
+       by direct calls, no clipboard relay needed).
+     - **Views are modular and user-composable, not one fixed layout:** just
+       macro buttons; just VNC; VNC + keyboard + macro grid combined; etc.
+       Goal — a photographer carries **one small, purpose-configured control
+       surface** (macro-only, say) instead of needing a full computer or a
+       tablet running someone else's fixed-layout app. This reframes
+       PP-INTAKE-003's old "Phase 1/2/3 in sequence" roadmap as **panes to
+       build, then compose** — macro-grid pane, VNC/RDP pane, terminal pane,
+       inline web-form pane (still useful — was already scoped) — with a
+       per-user/per-role layout picker on top, rather than a strict linear
+       rollout.
+     - **Scope check (Dave, same message): this may be too much to build all
+       at once — and that's fine.** xmouse (the existing third-party app)
+       remains genuinely valuable as a companion to the camera workflow
+       *today*. There's no urgency to replace it wholesale; it can keep
+       running as-is while the panes above get built incrementally,
+       whichever order makes sense, with no fixed deadline to retire it.
+       Not a build-everything-now requirement.
    - Replaces the Tasker Scenes + AutoTools WebScreens overlay entirely —
      this becomes the primary on-device intake surface.
 
@@ -120,13 +147,14 @@ photo set. No new mechanism needed here either.
    the actual mechanism to PP-EVENTD-001 (still design-complete-not-
    implemented) or a follow-up pass once that daemon's build starts.
 
-4. **Migration of PP-INTAKE-002/003 content.** Both docs' non-Flutter-specific
-   design content survives: PP-INTAKE-002's Foldio360 root-bypass service
-   (still relevant if photos come from that turntable rig, independent of
-   which app framework hosts it) and PP-INTAKE-003's 3-phase remote-control
-   roadmap. Recommend renaming/merging both into one `PP-INTAKE-004.md`
-   design doc once Dave confirms this direction, rather than maintaining
-   three overlapping docs.
+4. **Migration of PP-INTAKE-002/003 content.** PP-INTAKE-002's Foldio360
+   root-bypass service is superseded (custom turntable direction, see
+   below) rather than migrated. PP-INTAKE-003's remote-control roadmap
+   survives in refined/expanded form (see the "Remote-control surface"
+   bullet above — modular panes replacing the old fixed 3-phase sequence).
+   Recommend renaming/merging surviving content from both into one
+   `PP-INTAKE-004.md` design doc once Dave confirms this direction, rather
+   than maintaining three overlapping docs.
 
 ## Files to change
 
