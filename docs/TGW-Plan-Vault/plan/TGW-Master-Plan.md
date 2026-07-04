@@ -253,6 +253,7 @@ the census periodically rather than trusting today's zero-duplicates
 result forever. No code changed by the scoping pass — ready to slice into
 ordinary todos whenever Dave prioritizes. Full writeup: `pp/PP-EBAY-MOTORS-001.md`.
 
+- Scoping summary filed → reference/PP-EBAY-MOTORS-001-scoping-summary.md
 ## PP-CATALOG-INCR-001 — incremental catalog update (PROPOSAL, not yet built)
 **Opened s43 (2026-07-03).** Dave's original design, recovered from an unprocessed
 inbox transcript (`inbox/hermes-out-of-flake-portable-catalog-concept.md`) after he
@@ -348,6 +349,43 @@ packets tracked under R2, not here.
 exist in `etc/systemd/`. Operator todos #61/#146/#147; restore script #1052; DR
 drills #1050/#1051. Plan: `PLAN-backup-dr.md`.
 
+## Full-codebase cohesion+correctness audit (2pm agenda, todo #1143)
+**Dave: "I want to right the ship... check the whole thing and make sure
+each part and the whole are cohesive."** Prompted by discovering that a
+full week of code (2026-06-24 through 2026-07-02, the `ae9b1e6` commit
+and everything before it) never went through `/code-review`/ultrareview
+— diffs had grown too large to review by the time anyone tried. Same-day
+finding: an 8-angle review of just today's 47-file/3,800-insertion diff
+(todo #1114 fix + drive-index work) found 7 real confirmed bugs, all
+fixed same session — real signal that unreviewed accumulation is a
+genuine regression source, not a hypothetical.
+
+**Plan:** a `Workflow`-based audit, staged per-subsystem (workers/,
+apis/ebay/, `http_server.py` on its own — it's grown into a multi-
+thousand-line file, queue/state-machine, scripts/, the Nix flake) rather
+than by git history — sidesteps the "one commit mixes noise and signal"
+problem that blocked ultrareview entirely. Two passes per subsystem:
+correctness-bug finding (same 8-angle method as today) plus a **cohesion
+pass** checking cross-subsystem consistency (is "tgw-api is the fence"
+actually honored everywhere, do invariants.md's rules hold everywhere
+they claim to, are there now-drifted duplicate implementations across
+files).
+
+**Sizing (calibrated from today's real pass):** ~830K tokens for one
+47-file diff-sized review. Full codebase ≈ 8-10 subsystem-sized chunks
++ a cohesion pass ≈ **~8-11M tokens total**, order-of-magnitude. Deliberately
+NOT scoped to one session — each subsystem chunk is independent and
+resumable (Workflow's run-caching), so this runs opportunistically
+whenever usage allows (Dave: "having a project like this would be an
+excellent use of that [bonus] usage"), picking up wherever a prior run
+left off. Not started — gated on Dave's go-ahead at 2pm.
+
+**Prevention going forward** (Dave: "I need to do the reviews more
+regularly"): review each day's diff before it accumulates — plain
+`/code-review` for a free/quick inline pass, `/code-review ultra` for a
+periodic cloud pass while diffs are still small enough to clear its
+size guard.
+
 ## Drive-space re-evaluation (flagged 2026-07-04, todo #1136)
 **Dave: "put revaluation item into plan for drive space."** Todo #1056
 (extend `vg_tgw` into HDD space) turned out blocked on a stale premise:
@@ -434,6 +472,8 @@ Phase 1 done; crash loop fixed s41. #1086 conceptual pass (unify with PP-EVENTD-
 BLOCKS #1055 rofi picker. FROZEN. Design: `pp/PP-CLIP-001.md`, `pp/PP-EVENTD-001.md`.
 
 PP-CLIP-001 conceptual pass: identified duplication with PP-EVENTD-001; recommended split (tgw-clipd local-only, cross-machine sync to EVENTD). Full analysis filed as CLIPBOARD-CONCEPT-PLANNING-1086.md.
+
+Phase 2 rofi picker completed (DONE-1055-clip-picker.md)
 ## PP-CATPICK-001 — smart category picker
 **Phase 1 DONE 2026-07-04** (#1079): `category_candidates` (id/name/full ancestor
 path) backfilled onto all 25 `category-groups.json` groups from the on-disk eBay
