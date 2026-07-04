@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
@@ -57,6 +58,31 @@ class EbayPriceWorker(QueueWorker):
         draft = item.get('draft_listing')
         if not draft:
             raise HardFailure(f'{sku}: no draft_listing — run ebay_draft first')
+
+        # PP-PHOTOSYNC-001 P5 (todo #1120): an operator-set price is consent-
+        # gated. The draft→price auto-chain (no origin stamp) must never
+        # overwrite a price the operator explicitly typed in — even if
+        # ebay_offer.price has since gone missing (e.g. a redraft cleared
+        # other offer fields). Only a job carrying origin='operator' — the
+        # Re-price button, which clears ebay_offer.price/draft.price itself
+        # as its consent signal (invariant C10) — may compute a fresh price
+        # over an operator's last price_history entry.
+        price_history = item.get('price_history') or []
+        if (payload.get('origin') != 'operator' and price_history
+                and price_history[-1].get('source') == 'operator'):
+            op_price = price_history[-1].get('price')
+            log.info('ebay_price: %s — last price_history entry is operator-sourced '
+                     '($%s); skipping auto-chain price, not overwriting', sku, op_price)
+            tgw_logging.log_event('ebay_price_skipped_operator_override', sku=sku,
+                                  operator_price=op_price)
+            fence_ebay_write(self.config, sku, ebay_offer={
+                'price_guard_skipped': {
+                    'ts': datetime.now(timezone.utc).isoformat(),
+                    'reason': 'operator_price_history',
+                    'operator_price': op_price,
+                },
+            })
+            return
 
         # Idempotent: skip if already priced
         existing = item.get('ebay_offer', {})

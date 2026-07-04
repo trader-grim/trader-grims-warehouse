@@ -228,7 +228,7 @@ this call. One-line fix, tested, live-verified (got past this step on retry).
 persistence, duplicate-check match, auto-resolve, fall-through, EPID skip,
 and the correct dead-letter on an unrelated per-item business conflict.
 
-### P5 = todo #1120 — operator price is never machine-overridden
+### P5 = todo #1120 — operator price is never machine-overridden — DONE 2026-07-03/04
 **Context budget:** plan core + this file + `workers/ebay_price.py` +
 `price_history` conventions + C5 notes in invariants.md.
 **Spec:** chain-enqueued ebay_price (origin or not) must not overwrite
@@ -238,6 +238,36 @@ say so in the PR body). Operator-initiated re-price via the button (which clears
 fields first — that's the consent signal) keeps working. Add the C5-family test.
 **Acceptance (live):** set a price via UI, trigger a redraft chain, price survives;
 shown on one real SKU's JSON + price_history.
+
+**What shipped:** inspected the real predicate first (per the packet's own
+instruction) — `http_server.py`'s PATCH handler already stamps
+`price_history[-1].source` literally `"operator"` on any direct UI price edit
+(via `X-TGW-Caller` defaulting to `"operator"`); machine writes carry
+`background:worker:...`/`interactive:worker:...` caller strings via the fence,
+never the literal string. `workers/ebay_price.py::handle` now checks, before
+computing anything: if `payload.get('origin') != 'operator'` AND
+`price_history[-1]['source'] == 'operator'`, skip entirely (no comps query —
+saves a Browse API call too) and persist a durable finding
+(`ebay_offer.price_guard_skipped: {ts, reason, operator_price}`, invariant
+C11 — queryable via the item JSON, not just a log line) instead of silently
+no-op'ing. The distinguishing "consent" signal for the Re-price button is its
+`origin: 'operator'` payload stamp (C10) — the SAME field the button already
+carries — so the button keeps working even though price_history's last entry
+is the very price being replaced. Tests (`tests/test_invariants_pricing.py`,
++4): chain-triggered skip persists the finding and never enqueues stage;
+operator-origin re-price overrides its own prior history entry; a
+non-operator source (e.g. `ebay_price_reducer`) never triggers the guard;
+already-priced idempotent skip is unaffected. **Live-fire gap (flagged, not
+silently skipped):** did not additionally mutate a real production item's
+price_history to demonstrate this against live ItemData — doing so bypasses
+the fence's authenticated HTTP path (finding the API key/secrets to call the
+real endpoint was correctly blocked by the session's auto-mode credential-
+exploration guard). The worker-level tests exercise the actual production
+`ebay_price.py` code path (real `suggest_price`/`fence_ebay_write` call
+sites, only the fence I/O and comps HTTP are faked per this repo's existing
+worker-test convention) — high confidence, but not a real-SKU PD4 live-fire.
+Flagging for Dave: re-run this packet's live-fire step with him present if a
+real-SKU demo is wanted before closing.
 
 ### P6 = todo #1121 (XS) — ebay_repush orphan
 Cancel job(s) in the workerless `ebay_repush` queue; grep for what enqueues it

@@ -245,3 +245,94 @@ def test_launch_price_at_least_target_price(price_worker, tmp_path, monkeypatch)
     offer = result['ebay_offer']
     assert offer['price'] >= offer['target_price']
     assert offer['price'] == to_99(5.0)   # clamp keeps the .99 convention
+
+
+# ---------------------------------------------------------------------------
+# P5 (PP-PHOTOSYNC-001, todo #1120) — operator price never machine-overridden
+# ---------------------------------------------------------------------------
+
+def _write_item_with_history(tmp_path, sku, price_history, ebay_offer=None):
+    item = {'title': 'Acme Thing', 'condition': 'good',
+            'draft_listing': {'title': 'Acme Thing', 'category_id': '12345',
+                              'category_name': 'Widgets'},
+            'price_history': price_history}
+    if ebay_offer is not None:
+        item['ebay_offer'] = ebay_offer
+    d = tmp_path / sku
+    d.mkdir(parents=True)
+    (d / f'{sku}.json').write_text(json.dumps(item), encoding='utf-8')
+
+
+def test_chain_enqueued_price_skips_when_operator_set_last(price_worker, tmp_path, monkeypatch):
+    """A background/chain-triggered ebay_price job (no origin stamp) must not
+    overwrite an operator-typed price, even if ebay_offer.price has gone
+    missing (e.g. some other field-clearing path)."""
+    sku = 'tgw5'
+    _write_item_with_history(tmp_path, sku, [
+        {'ts': '2026-07-03T10:00:00Z', 'price': 42.0, 'previous_price': None,
+         'stage': None, 'label': 'price edited', 'source': 'operator'},
+    ])
+    called = {'n': 0}
+    monkeypatch.setattr(ebay_price, 'suggest_price',
+                        lambda *a, **k: (called.__setitem__('n', called['n'] + 1)
+                                        or _suggestion(99.0, {'count': 3, 'min': 1, 'p25': 1,
+                                                              'median': 1, 'p75': 1, 'max': 1})))
+    price_worker.handle({'payload_json': {'sku': sku}})
+    result = json.loads((tmp_path / sku / f'{sku}.json').read_text(encoding='utf-8'))
+    assert called['n'] == 0  # never even queried comps — skip is early
+    assert result.get('ebay_offer', {}).get('price') is None
+    assert result['ebay_offer']['price_guard_skipped']['reason'] == 'operator_price_history'
+    assert result['ebay_offer']['price_guard_skipped']['operator_price'] == 42.0
+    assert all(kw['queue_name'] != 'ebay_stage' for kw in price_worker._enqueued)
+
+
+def test_operator_origin_reprice_overrides_operator_history(price_worker, tmp_path, monkeypatch):
+    """The Re-price button's consent signal is the origin='operator' stamp on
+    its own job (it already cleared ebay_offer.price/draft.price itself) —
+    this must still compute a fresh price even though price_history's last
+    entry says 'operator' (that's the price BEING replaced)."""
+    sku = 'tgw6'
+    _write_item_with_history(tmp_path, sku, [
+        {'ts': '2026-07-03T10:00:00Z', 'price': 42.0, 'previous_price': None,
+         'stage': None, 'label': 'price edited', 'source': 'operator'},
+    ])
+    comps = {'count': 3, 'min': 10.0, 'p25': 10.0, 'median': 12.0, 'p75': 14.0, 'max': 15.0}
+    monkeypatch.setattr(ebay_price, 'suggest_price', lambda *a, **k: _suggestion(10.0, comps))
+    price_worker.handle({'payload_json': {'sku': sku, 'origin': 'operator'}})
+    result = json.loads((tmp_path / sku / f'{sku}.json').read_text(encoding='utf-8'))
+    assert result['ebay_offer']['price'] is not None
+    assert 'price_guard_skipped' not in result.get('ebay_offer', {})
+
+
+def test_non_operator_history_does_not_trigger_guard(price_worker, tmp_path, monkeypatch):
+    """A price_history entry from anything other than a literal 'operator'
+    source (e.g. the price reducer, or a worker-attributed caller id) must
+    not block the auto-chain — only genuine operator edits do."""
+    sku = 'tgw7'
+    _write_item_with_history(tmp_path, sku, [
+        {'ts': '2026-07-03T10:00:00Z', 'price': 20.0, 'previous_price': 25.0,
+         'stage': 1, 'label': 'scheduled reduction', 'source': 'ebay_price_reducer'},
+    ])
+    comps = {'count': 3, 'min': 10.0, 'p25': 10.0, 'median': 12.0, 'p75': 14.0, 'max': 15.0}
+    monkeypatch.setattr(ebay_price, 'suggest_price', lambda *a, **k: _suggestion(10.0, comps))
+    price_worker.handle({'payload_json': {'sku': sku}})
+    result = json.loads((tmp_path / sku / f'{sku}.json').read_text(encoding='utf-8'))
+    assert result['ebay_offer']['price'] is not None
+
+
+def test_already_priced_item_still_idempotent_with_operator_history(price_worker, tmp_path, monkeypatch):
+    """Existing idempotent skip (ebay_offer.price already set) is unaffected
+    by the new guard — both paths agree to leave the item alone, for
+    different reasons."""
+    sku = 'tgw8'
+    _write_item_with_history(
+        tmp_path, sku,
+        [{'ts': '2026-07-03T10:00:00Z', 'price': 42.0, 'previous_price': None,
+          'stage': None, 'label': 'price edited', 'source': 'operator'}],
+        ebay_offer={'price': 42.0},
+    )
+    called = {'n': 0}
+    monkeypatch.setattr(ebay_price, 'suggest_price',
+                        lambda *a, **k: called.__setitem__('n', called['n'] + 1))
+    price_worker.handle({'payload_json': {'sku': sku}})
+    assert called['n'] == 0

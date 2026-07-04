@@ -273,6 +273,23 @@ Companion test files added by this review:
   pass — idempotent on eBay's side, acceptable.
 - **How to test:** unit tests for a–d with `ebay_put` stubbed (added, pass).
 
+### C6.5. An operator-set price is never overwritten by the auto-price chain ✅ (PP-PHOTOSYNC-001 P5, todo #1120, 2026-07-03/04)
+- **Statement:** `workers/ebay_price.py::handle` refuses to compute/write a fresh
+  price when `price_history[-1].source == 'operator'` and the job does not carry
+  `origin: 'operator'` — a chain-enqueued (draft→price) job has no consent to
+  override a manually-typed price. The Re-price button's own `origin: 'operator'`
+  stamp is the consent signal (same field as C10), so it still overrides its own
+  prior operator entry.
+- **Enforced:** early-return guard in `ebay_price.py::handle`, before any comps
+  query; persists a durable finding (`ebay_offer.price_guard_skipped`, invariant
+  C11) rather than a log-only skip.
+- **How it could fail:** a new price-writing path that doesn't check `origin`, or
+  a caller that stamps `origin: 'operator'` without genuine operator action
+  (would need auditing at the enqueue site, same as any C10 site).
+- **How to test:** `tests/test_invariants_pricing.py` (4 new cases: chain-skip
+  persists finding, operator-origin override works, non-operator history source
+  doesn't trigger the guard, already-priced idempotent skip unaffected).
+
 ### C7. `reprice_schedule` is computed once, at publish, from comps + config ✅
 - **Statement:** the schedule is frozen into the item at publish (`done_at` stamped on
   launch); later config changes affect only future publishes. Stages with no price data
