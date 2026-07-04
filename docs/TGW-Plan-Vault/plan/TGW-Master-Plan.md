@@ -291,6 +291,8 @@ s42+s43 committed+pushed (`ae9b1e6`); PR to main deferred until P1 verifies.
 P10 complete (legacy duplicate check + eBay Motors awareness). P4 paused per P10 findings. See RESEARCH-photosync-p10-legacy-duplicate.md.
 
 P6 investigated: ebay_repush orphan queue diagnosed (2 orphan jobs, no systemd unit). Needs Dave decision: install unit or retire enqueue path. Full detail in `plan/pp/PP-PHOTOSYNC-001.md`.
+
+- #1124 P8 canary probe completed: `scripts/photosync_canary_probe.py` built and live-verified against `tgw201501021970068`. Fixed two bugs (auth header, live-state field shape). 4 new tests, full suite 1814 passed. Daily timer deferred to 2pm.
 ## PP-LISTEDITOR-001 — listing editor + revision apply
 **R1.1 live-fire DONE 2026-07-04 (todo #1137).** Price-only delta
 (`tgw201501021970128`, $7.99→$8.49) via `revision.py`'s drift-gated apply
@@ -427,6 +429,7 @@ keep `sdd`/`sdh` connected as often.
 across the already-mounted data is the near-term space-recovery lever,
 before deciding what (if anything) to offload onto `sdi`.
 
+Audited sdb/sdc live: sdb absent, sdc repartitioned into backup services. No free disk to grow vg_tgw. Closing #1056 as superseded, opened #1136 for re-evaluation.
 ## PP-DRIVE-INDEX-001 — drive survey, dedup, universal index (merged 2026-07-04)
 **Pre-existing plan (session 40, 2026-07-01) found and merged into the
 live drive-space conversation, per Dave's direction.** Long-horizon
@@ -588,6 +591,10 @@ PP-PRICE-002 (absorbed into PP-REPRICE-001) · PP-PLASMA-001 (delivered via Cati
 desktop split, a1131 Plasma).
 
 DONE-1053: data-scrub legacy eBay Trading API fields — 20,419 items modified, zero exceptions (see filed document)
+
+- PP-PRICING-001 (self-powered comp engine extension) design doc complete. PP-AMAZON-001 (Amazon FBM exploration) design doc complete. Research doc filed.
+
+#1135 category recompile completed — 5,367 categories recovered.
 ### Gated on R1 — named, designed later
 
 ## PP-BULKLIST-001 — bulk editing + listing surface (stub, Dave 2026-07-02)
@@ -678,6 +685,7 @@ worth a small robustness pass later (`_verify_item`/`build_all_catalogs`
 tolerating a missing file mid-scan as a skip-and-continue rather than failing
 the whole rebuild) if this recurs during a future migration batch.
 
+- DRAFT-1076-eps-support-ticket.md filed — pending Dave's review/submit.
 ## Standing gates (human-only)
 
 Never: alter eBay OAuth scopes · auto-publish · **push AI-regenerated content to a
