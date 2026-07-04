@@ -207,6 +207,43 @@ it):**
 **Not started — needs Dave's priority call**, especially on (1) since it's
 really "reprioritize PP-CATPICK-001," not a standalone build.
 
+**UPDATE 2026-07-04 (todo #1135) — step 1 done, corrected + completed.**
+The initial `attribute_set`-based analysis above was checking the wrong
+field (Magento warehouse taxonomy, which the pricing engine never reads).
+The real field is `ebay_category_id`/`draft_listing.category_id`
+(`_category()` in `velocity.py`). Corrected numbers: **28,710/55,419
+items (52%) already have a real category** — much better than first
+thought. Of the 26,709 that don't, checked three structured sources
+(historical-tgwcatalog.json, historical-master-catalog.json via sku_old,
+and `searchcatalog.csv`'s `ebaycat` column — a genuinely distinct
+eBay-only export, its `'uncategorized'` placeholder on 34,478/55,347 rows
+excluded as noise) — **5,367 recoverable (20%), 21,342 genuinely
+unrecoverable from flat exports.**
+
+Per Dave's direction ("we have better tools and more data and we can
+recompile a better dataset... build it like we are going to go back in
+with a stronger dataset every so often") this was built as a **repeatable
+recompile job**, not a one-shot fix: `scripts/recompile_category_backfill.py`
+(dry-run default, `--apply` to write), sources as modular functions so a
+future run with a new/better source just adds one more. Writes to
+`ebay_category_id`/`ebay_category_name` (never `draft_listing.category_id`
+— that field means "this item's actual current eBay draft," a stronger
+signal that should only come from the real drafting pipeline). Additive
+only via the new `items.set_fields(only_if_absent=True)` fence helper —
+never overwrites an item that already has a category from anywhere.
+
+**Live-verified and APPLIED 2026-07-04:** 5,367/5,367 items updated, 0
+errors. Re-run confirmed idempotent (`already had a real category` jumped
+28,710→34,077, exactly +5,367; second run reports 0 recoverable). 8 new
+tests (4 for `items.set_fields`, 4 for the script's source loaders), full
+suite 1810 passed.
+
+The remaining 21,342-item gap is the real target for (2) above — the
+comping interface — plus whatever a live eBay Taxonomy sweep or the
+Amazon comp-data integration eventually contribute. Re-run this script
+after any of those land; it'll pick up newly-recoverable items
+automatically without reprocessing what's already fixed.
+
 ---
 
 ### Related — Amazon FBM (books/media) exploration

@@ -287,3 +287,39 @@ def test_strip_fields_check_only_does_not_write(cfg):
     assert res['removed'] == ['attribute_set']
     doc = json.loads((cfg['itemdata_root'] / 'tgw1' / 'tgw1.json').read_text())
     assert 'attribute_set' in doc  # untouched
+
+
+# ---------------------------------------------------------------------------
+# set_fields (todo #1135 support) — one archive entry per item, not per field
+# ---------------------------------------------------------------------------
+
+def test_set_fields_sets_absent_fields(cfg):
+    items.create_item(cfg, 'tgw1', {'title': 't'})
+    res = items.set_fields(cfg, 'tgw1', {'ebay_category_id': '123', 'ebay_category_name': 'Books'})
+    assert res['ok'] is True
+    assert res['set'] == {'ebay_category_id': '123', 'ebay_category_name': 'Books'}
+    doc = json.loads((cfg['itemdata_root'] / 'tgw1' / 'tgw1.json').read_text())
+    assert doc['ebay_category_id'] == '123'
+
+
+def test_set_fields_never_clobbers_present_value_by_default(cfg):
+    items.create_item(cfg, 'tgw1', {'title': 't', 'ebay_category_id': 'existing'})
+    res = items.set_fields(cfg, 'tgw1', {'ebay_category_id': 'recovered'})
+    assert res['set'] == {}
+    doc = json.loads((cfg['itemdata_root'] / 'tgw1' / 'tgw1.json').read_text())
+    assert doc['ebay_category_id'] == 'existing'
+
+
+def test_set_fields_archives_once_not_per_field(cfg):
+    items.create_item(cfg, 'tgw1', {'title': 't'})
+    items.set_fields(cfg, 'tgw1', {'a': 1, 'b': 2, 'c': 3})
+    with zipfile.ZipFile(cfg['archive_root'] / 'tgw1.zip') as zf:
+        assert len(zf.namelist()) == 1
+
+
+def test_set_fields_check_only_does_not_write(cfg):
+    items.create_item(cfg, 'tgw1', {'title': 't'})
+    res = items.set_fields(cfg, 'tgw1', {'ebay_category_id': '5'}, check_only=True)
+    assert res['would_set'] == {'ebay_category_id': '5'}
+    doc = json.loads((cfg['itemdata_root'] / 'tgw1' / 'tgw1.json').read_text())
+    assert 'ebay_category_id' not in doc

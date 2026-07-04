@@ -245,6 +245,35 @@ def strip_fields(cfg: Dict[str, Any], sku: str, fields: List[str],
     return {'ok': True, 'sku': sku, 'removed': present}
 
 
+def set_fields(cfg: Dict[str, Any], sku: str, fields: Dict[str, Any],
+               only_if_absent: bool = True,
+               check_only: bool = False) -> Dict[str, Any]:
+    """Set a set of top-level fields on one item's JSON in a single write —
+    one archive entry per item (E5), not one per field. When
+    only_if_absent=True (default), a field already present with a truthy
+    value is left untouched — this makes the caller safe for repeat
+    backfill runs (never clobbers a stronger/newer signal with an older
+    recovered one). Used by the category-recompile pass (todo #1135)."""
+    path = sku_json(cfg, sku)
+    if not path.exists():
+        return {'ok': False, 'error': f'sku not found: {sku!r}'}
+    doc = load_item_doc(path)
+    to_set = {}
+    for f, v in fields.items():
+        if only_if_absent and doc.get(f):
+            continue
+        to_set[f] = v
+    if check_only:
+        return {'ok': True, 'sku': sku, 'would_set': to_set, 'check_only': True}
+    if not to_set:
+        return {'ok': True, 'sku': sku, 'set': {}}
+    doc.update(to_set)
+    doc.pop('catalog_verified', None)
+    atomic_write_json(path, doc, pretty=cfg.get('pretty', True),
+                      archive_root=cfg.get('archive_root'))
+    return {'ok': True, 'sku': sku, 'set': to_set}
+
+
 def update_item(cfg: Dict[str, Any], sku: str, field: str, value: Any,
                 check_only: bool = False) -> Dict[str, Any]:
     """Update one field on one item."""

@@ -377,16 +377,22 @@ composes with either.
 **Same day, Phase -1 — self-powered comp engine (Dave request, todo #1134):**
 the infrastructure (`OwnSalesProvider` + `velocity_stats` worker) already
 exists and runs — this turned out to be a data-density problem, not a
-missing feature. Checked real coverage: only ~12 of 1,316 tracked
-categories clear even a 3-sample minimum (best category: 18 sold items
-ever), because **71% of the catalog (39,224/55,419 items) has no category
-recorded at all** — the real bottleneck is PP-CATPICK-001's job, not the
-comp math. Largest current-inventory categories worth targeting once
-categorized: Collectibles (2,432), AC Adapter (2,059), Arts and Crafts
-(1,261), DVD (1,245), Magazines (954) — AC Adapter/DVD especially, since
-repeat generic SKUs build same-item comp history fast. Full plan:
-`pp/PP-PRICING-001.md` Phase -1 section. Not started — needs Dave's
-priority call (mainly: reprioritize PP-CATPICK-001).
+missing feature. **Initial 71%-uncategorized figure was checking the
+wrong field** (Magento `attribute_set`, not what the pricing engine
+reads) — corrected via todo #1135: the real field (`ebay_category_id`)
+is already populated on 52% of the catalog (28,710/55,419).
+
+**Todo #1135 — DONE, applied 2026-07-04.** Built
+`scripts/recompile_category_backfill.py` as a **repeatable recompile
+job** (Dave: "build it like we are going to go back in with a stronger
+dataset every so often") — modular sources, additive-only via the new
+`items.set_fields(only_if_absent=True)` fence helper, safe to re-run.
+Checked 3 structured sources (historical-tgwcatalog.json,
+historical-master-catalog.json via sku_old, `searchcatalog.csv`'s real
+`ebaycat` values) against the 26,709 gap: **5,367 recoverable (20%),
+applied live, 0 errors, idempotent on re-run.** 21,342 genuinely
+unrecoverable from flat exports — that's the real target for the Phase 0
+comping interface. Full detail: `pp/PP-PRICING-001.md` Phase -1 section.
 
 ## PP-AMAZON-001 — Amazon FBM for books/media (exploration, 2026-07-04)
 **Opened same day as the comp-engine request** ("let's also start looking
