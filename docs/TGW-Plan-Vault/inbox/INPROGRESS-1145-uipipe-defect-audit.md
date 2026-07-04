@@ -43,3 +43,19 @@ Unifying diagnosis: draft_listing (local intent) vs eBay offer (remote
 reality) have no reconciliation discipline in the new-listing path. Proposed
 spine for the plan item: publish-time draft==offer verification invariant +
 catalog-verify divergence detector + per-defect packets.
+
+## Session pause state (2026-07-04 ~15:00, continue ~4pm)
+
+- HOT DAY: ebay_draft backlog drain PAUSED per Dave (systemctl stop
+  tgw-worker@ebay_draft) — 3,052 jobs queued, durable. It was also
+  chain-triggering nonstop full 55k catalog rebuilds (~60s CPU+disk each).
+  RESTART IN THE EVENING when cool: `sudo systemctl restart
+  tgw-worker@ebay_draft.service` (catalog_rebuild follows it back down).
+- Thermal at pause: NORMAL 73°C, load dropping after stop.
+- #1145 next step at 4pm: Dave identifies the wrong-shipping-policy listing
+  + rest of his "etc." defect list; then walkthrough of the evidence above →
+  defect→root-cause→packet map. Also verify why #1115 P1 fix didn't prevent
+  the tgw202605060125081 1-of-8-photos publish (deploy timing vs path gap).
+- a1131 offload: pipeline workers can't move today (need fence + postgres +
+  local ItemData); heavy agent-side ops (tests/greps) can run via ssh a1131.
+  Real offload design belongs with #1139 (decouple Hermes/AI fleet).
