@@ -478,6 +478,20 @@ def zero_work_queues(stall_hours: float) -> List[Dict[str, Any]]:
             return [dict(r) for r in cur.fetchall()]
 
 
+def cancel_queued(queue_name: str) -> int:
+    """Cancel all 'queued' jobs for a given queue_name — for orphan queues with
+    no worker consuming them (PP-PHOTOSYNC-001 P6, todo #1121). Returns the
+    number of rows affected."""
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """UPDATE queue_jobs SET state = 'cancelled'
+                   WHERE queue_name = %s AND state = 'queued'""",
+                (queue_name,),
+            )
+            return cur.rowcount
+
+
 def clear_dead_letter(queue_name: str) -> int:
     """Cancel all dead_letter jobs for a given queue. Returns the number of rows affected."""
     with _conn() as con:

@@ -269,10 +269,39 @@ worker-test convention) — high confidence, but not a real-SKU PD4 live-fire.
 Flagging for Dave: re-run this packet's live-fire step with him present if a
 real-SKU demo is wanted before closing.
 
-### P6 = todo #1121 (XS) — ebay_repush orphan
+### P6 = todo #1121 (XS) — ebay_repush orphan — investigated, action pending Dave
 Cancel job(s) in the workerless `ebay_repush` queue; grep for what enqueues it
 (PP-EBAY-SNAPSHOT-001 Phase 4 relic?); either delete the enqueue path or note the
 queue as future work in that PP. 15 minutes; no eBay calls.
+
+**Findings (2026-07-03/04):** NOT a relic — `workers/ebay_repush.py` is real,
+working code (re-PUTs `ebay_submitted` to fix a photo-count drop), enqueued
+live by `workers/ebay_sync.py:548` when it detects a drop. The gap is
+narrower: no `tgw-worker@ebay_repush.service` systemd unit was ever added
+(missing from the worker list in CLAUDE.md and the nix flake) — so jobs land
+in `queue_jobs` and nothing ever consumes them. 2 orphaned jobs found, both
+queued since 2026-07-01:
+- `tgw202606021133367` — the SKU manually repaired this morning (P9 note);
+  current state per the new live-photo-index (#1127): 24 live vs 25 on disk —
+  still short by 1, so this job isn't fully moot.
+- `tgw201809090837211` — 4-5 live vs 9 on disk — a genuine unrepaired shortfall.
+
+Both SKUs fall inside P4's population (fleet photo repair), which Dave has
+explicitly PAUSED — this session did not touch either item's photos or cancel
+the queued jobs, since that decision belongs to P4/Dave, not this XS cleanup
+packet. Added `state_machine.cancel_queued(queue_name)` (mirrors the existing
+`clear_dead_letter` pattern) so cancellation is one call away once Dave
+decides. **Two options for the 2pm session:** (a) install a systemd unit for
+`ebay_repush` (infra change, same Dave-gated class as #1126's
+`nixos-rebuild switch`) so the queue stops being an orphan permanently, or
+(b) retire `ebay_sync.py`'s repush-enqueue path entirely — the new
+`photos_short_on_ebay` rule (P9 follow-up, #1127) now catches this same drift
+via nightly catalog-verify against live-capture truth, so `ebay_repush` may be
+a now-redundant second detector for the same condition. Not filed as a new
+todo — flagging for Dave's call at 2pm. The 2 queued jobs remain queued,
+untouched, pending that decision (an attempt to cancel them was correctly
+blocked by the session's auto-mode guard as a shared-queue mutation needing
+explicit authorization — did not attempt to work around it).
 
 ### P7 = todo #1123 — truth-audit rules (the liar detector) ✅ DONE 2026-07-03
 4 new rules live in `_verify_item`/`cmd_catalog_verify` (`photos_short_on_ebay`,
