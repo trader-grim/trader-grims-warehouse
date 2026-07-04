@@ -289,12 +289,19 @@ P10 complete (legacy duplicate check + eBay Motors awareness). P4 paused per P10
 
 P6 investigated: ebay_repush orphan queue diagnosed (2 orphan jobs, no systemd unit). Needs Dave decision: install unit or retire enqueue path. Full detail in `plan/pp/PP-PHOTOSYNC-001.md`.
 ## PP-LISTEDITOR-001 — listing editor + revision apply
-Phase 2 code complete s40 (`_APPLY_ENABLED=True`, drift-gated live PUT). **Gate:
-live-fire R1.1 — still not done** (todo #1137; #1084 was mistakenly closed
-mid-session 2026-07-04 after a related-but-different bug got fixed instead —
-see below — R1.1's actual price-only-delta test via `revision.py`'s apply
-path was never run). Candidate item: `tgw201501021970128` (Simpsons Game of
-Life canary set). Then wire Update-Item button to revision apply. Design:
+**R1.1 live-fire DONE 2026-07-04 (todo #1137).** Price-only delta
+(`tgw201501021970128`, $7.99→$8.49) via `revision.py`'s drift-gated apply
+path (`tgw revise <sku> --set price=X --show` then `--apply --live`).
+Live-verified in both directions with fresh uncached eBay API reads (not
+just job-succeeded logs): real price changed on the actual listing, then
+reverted; `revision_history` correctly recorded delta + baseline hash +
+the exact API call made (`PUT offer/264095634018`), hash_match=true, zero
+drift. **Gate cleared.** Real bug found along the way (todo #1138, minor):
+the CLI's `--set` help text claims dotted-path support
+(`draft_listing.price`) but the live-apply path only accepts bare field
+names (`price`) — use bare names; dotted paths raise a clear "unsupported
+delta field" error at apply time, not silently ignored. Next: wire the
+Update-Item button to this same apply path. Design:
 `archive/sections/Pending-projects-revisit.md` (promote on touch).
 
 **Same-day fix, todo #1114 — auto-redraft-clobbers-operator-edit, DONE and
