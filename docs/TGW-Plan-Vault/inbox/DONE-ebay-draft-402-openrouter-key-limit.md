@@ -56,3 +56,23 @@ not in-flight jobs) — confirmed quiet since 13:09, no new activity as of
 pressure per successful ebay_draft job** (two Gemini calls, one on each of
 two different models) — a factor for whatever billing/limit fix gets
 chosen next.
+
+**UPDATE 2026-07-04 ~15:00 UTC — resumed, unblocked by Dave raising the OpenRouter key limit:**
+Dave changed the OpenRouter key's spend limit from $15/week to **$5/day**
+(confirmed live via `auth/key`: `limit: 5, limit_reset: daily`). Backlog
+sized first: 3,768 jobs total (1,110 previously-paused `cancelled` +
+2,658 `dead_letter` matching the 402 pattern) at ~$0.00084/job (primary
+draft call + `bulk_classify` aspect-fill call) ≈ **$3.16** — comfortably
+inside the new $5/day cap.
+
+Resumed the 1,110 tagged-cancelled jobs back to `queued` (scoped UPDATE,
+same tag as the earlier pause). Re-ran
+`scripts/requeue_ebay_draft_402_dead_letters.py --apply` (no `--limit`
+this time) — 2,658/2,658 requeued, zero errors. Queue now: 3,764 queued +
+1 running against 63,247 succeeded / 2,765 dead_letter (old rows, left in
+place) / 552 cancelled (pre-existing, untouched, not part of this batch).
+
+Monitor `bmzc3ibf8` watching the drain — alerts on any new (non-402)
+dead-letter regression, reports done when the queue empties, and tracks
+`limit_remaining` on the OpenRouter key each pass so we can see actual
+spend-down against the $5 cap in real time.
