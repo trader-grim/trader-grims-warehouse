@@ -80,10 +80,14 @@ photo set. No new mechanism needed here either.
      xmouse is a third-party Android app (Play Store/F-Droid/vendor repo): an
      SSH/xdotool-based macro pad + remote mouse. Dave's replacement design,
      more capable than PP-INTAKE-003's original 3-phase plan:
-     - Drop the remote-mouse/xdotool-cursor-emulation approach entirely —
-       replace it with a real **VNC/RDP framebuffer viewer** (screen +
-       keyboard + pointer all come for free from the protocol, no xdotool
-       hackery needed).
+     - Drop the remote-mouse/cursor-emulation approach entirely — replace it
+       with a real **VNC/RDP framebuffer viewer** (screen + keyboard +
+       pointer all come for free from the protocol, no synthetic-input
+       injection needed). Dave already tried the incremental fix — patching
+       xmouse's `xdotool` calls to `ydotool` for Wayland compatibility (since
+       xdotool is X11-only) — and it still has Wayland quirks. VNC/RDP
+       sidesteps the whole synthetic-input-injection problem rather than
+       chasing `ydotool` reliability further.
      - Add a **terminal pane** (SSH) — new, not in the original design.
      - Keep the **macro-button grid** (direct HTTP/SSH command dispatch —
        the `ic_mkitem`/`ic_data`/`ic_template` COMMAND:/DATA:/TEMPLATE:
