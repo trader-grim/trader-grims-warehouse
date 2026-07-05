@@ -134,3 +134,21 @@ STILL OPEN:
   is only 29 items.
 - Account has 31 fulfillment policies incl ~10 'Copy' clutter — cleanup
   candidate (operator task, low priority).
+
+## TOOL FIX #1152 DONE + live-verified (2026-07-04 late)
+
+Dave's course correction (now memory feedback-fix-the-tool-not-the-list):
+fix the tool, don't make him review data lists. Done:
+- _get_listing_policies now PER-FIELD (config wins where present; account
+  first-listed fills only genuinely missing fields, logged loudly as a
+  finding). 3 regression tests; 130 policy/sync tests green.
+- Config completed from live evidence (no Dave gate): payment 246544838015
+  'eBay Managed Payments' + return 246544837015 'Free Returns' — what every
+  live listing already carries.
+- LIVE-VERIFIED: forced restage of tgw201501021970354 through the fixed
+  path → fresh offer GET shows all three policies from config, no fallback,
+  status still PUBLISHED. Every future stage/publish is now correct.
+- Un-gated decisions sweep: fleet getOffer sweep will just run (read-only);
+  broker proceeds on recommended whitelist; 0125081 photo repush goes via
+  C10 without review; ONLY genuine Dave call remaining on these items:
+  2336026's intended price — via his (now-working) listing tool.
