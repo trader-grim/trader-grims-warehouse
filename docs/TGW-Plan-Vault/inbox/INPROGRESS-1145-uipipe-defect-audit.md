@@ -180,9 +180,16 @@ must validate against TRUTH planes (disk, config, live reads), NEVER against
 the plan — the plan is the thing that drifts. P1's plan-as-denominator
 verify is the canonical counterexample.
 
-**Corrupt-photo roster (data hygiene, s45 drain):** tgw201601011311007,
-tgw201601011312446 (truncated), tgw201707050929532 (broken data stream) —
-2016/2017-era files damaged on disk. Candidate broker/verify rule:
-photo_files_readable (PIL-open sweep, disk truth). Repair needs source
-photos from ItemArchive/originals if they exist — bulk check when the
-fleet sweep runs.
+**Corrupt-photo roster + ROOT CAUSE (s45 forensics):** tgw201601011311007,
+tgw201601011312446, tgw201707050929532. Damaged during the FEB 2022 bulk
+migration, untouched since: every file in the dirs shares mtime 2022-02-03/04
+and the truncated pair are EXACT 64KiB multiples (196608B, 65536B vs ~600KB
+originals) — interrupted buffered copy signature. Nothing in TGW modified
+them; tonight's drain was the first full decode in years (accidental
+integrity sweep). ItemArchive zips hold JSON history only, no photos;
+recoll finds no other copy on indexed storage → recovery source = the
+pre-2022 drive fleet (PP-DRIVE-INDEX Phase 1 shopping-list item).
+Dave's point, confirmed hard: git-annex hashes would have (a) FAILED the
+2022 copy loudly at ingest and (b) enumerated every casualty today with one
+`git annex fsck`. Logged as A-track argument #1. Broker rule candidate:
+photo_files_readable (PIL-open sweep against disk truth).
