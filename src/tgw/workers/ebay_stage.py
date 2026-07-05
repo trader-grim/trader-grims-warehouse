@@ -207,10 +207,36 @@ class EbayStageWorker(QueueWorker):
                 f'{sku}: no draft_listing yet — waiting for pipeline to complete'
             )
 
-        # Price must be set (either by ebay_price or manually)
-        price = draft.get('price') or item.get('ebay_offer', {}).get('price')
+        # Price must be set in draft_listing — the operator-reviewed surface.
+        # Session 45 (tgw202605052336026): the old fallback to ebay_offer.price
+        # published a STALE machine price ($40.99, browse-comps, stamped weeks
+        # earlier by the pricing system Dave disabled in s42) while the editor
+        # showed an empty price — the operator clicked List and went live with
+        # data nobody had reviewed. ebay_price writes draft.price when it runs,
+        # so draft.price is the only legitimate source; a bare ebay_offer.price
+        # is by definition un-reviewed leftovers (C9: uninspected machine
+        # content never reaches a live listing — prices are content).
+        price = draft.get('price')
         if price is None:
-            # Retryable — ebay_price may still be running
+            stale = (item.get('ebay_offer') or {}).get('price')
+            if payload.get('origin') == 'operator':
+                # Operator pressed List on an unpriced item: fail loudly and
+                # persist the finding so the editor can render "needs price"
+                # (invariant C11 — a finding, not a log line).
+                fence_patch_item(self.config, sku, {'pipeline_error': {
+                    'code':   'no_price_set',
+                    'detail': ('draft_listing.price is empty — set a price in '
+                               'the editor before listing'
+                               + (f' (ignored stale ebay_offer.price={stale}'
+                                  f' from disabled auto-pricer)' if stale is not None else '')),
+                    'ts':     datetime.now(timezone.utc).isoformat(),
+                    'source': 'ebay_stage',
+                }})
+                raise HardFailure(
+                    f'{sku}: no price set in draft_listing — operator must price '
+                    f'the item in the editor (stale ebay_offer.price={stale} ignored)'
+                )
+            # Background chain — ebay_price may still be running
             raise RuntimeError(
                 f'{sku}: no price yet — waiting for ebay_price or manual price set'
             )

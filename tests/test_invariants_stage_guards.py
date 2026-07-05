@@ -332,3 +332,33 @@ def test_legacy_duplicate_check_fetch_error_never_resolves(stage, tmp_path, monk
     assert stage._staged == []
     after = json.loads((tmp_path / 'tgw24' / 'tgw24.json').read_text(encoding='utf-8'))
     assert 'legacy_listing_resolved' not in after
+
+
+def test_stale_offer_price_never_staged(stage, tmp_path):
+    """s45 (tgw202605052336026): draft.price is the ONLY price source. A bare
+    ebay_offer.price is un-reviewed leftovers from the disabled auto-pricer —
+    the old fallback published $40.99 the operator never saw."""
+    item = _ready_item()
+    item['draft_listing'].pop('price')
+    item['ebay_offer']['price'] = 40.99   # stale machine price
+    _write(tmp_path, 'tgw8s45', item)
+    with pytest.raises(RuntimeError, match='no price'):
+        _run(stage, 'tgw8s45')
+    assert stage._staged == []
+
+
+def test_operator_list_without_price_hard_fails_with_finding(stage, tmp_path, monkeypatch):
+    """Operator pressed List on an unpriced item: HardFailure (not silent
+    retry) + pipeline_error persisted so the editor renders 'needs price'
+    (C11)."""
+    patched = []
+    monkeypatch.setattr(ebay_stage, 'fence_patch_item',
+                        lambda cfg, sku, fields: patched.append((sku, fields)))
+    item = _ready_item()
+    item['draft_listing'].pop('price')
+    item['ebay_offer']['price'] = 40.99
+    _write(tmp_path, 'tgw9s45', item)
+    with pytest.raises(HardFailure, match='no price set in draft_listing'):
+        stage.handle({'payload_json': {'sku': 'tgw9s45', 'origin': 'operator'}})
+    assert stage._staged == []
+    assert patched and patched[0][1]['pipeline_error']['code'] == 'no_price_set'
