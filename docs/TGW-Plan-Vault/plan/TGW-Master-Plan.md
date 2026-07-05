@@ -128,6 +128,8 @@ run. Zero requeue errors, worker active, 0 incidents at requeue time. Todo
 - #1049 get-ebay-token --print-url CLI half completed (d8a961c). fish wrapper deferred under PP-NIXOS-001 freeze.
 
 Recoll index Phase 0 built: 441K docs, 4.6 GB per #1066. Follow-up: nightly timer + CLI wrapper pending.
+
+- #1146 a1131 NFS shares + claude account (LIVE 2026-07-04) — full setup doc in reference/a1131-nfs-setup.md
 #1077 orphaned offer forces ebay_sync per-SKU fallback (Dave → eBay
 support); 15 Syncthing conflict files in vault; nats health check red
 (module absent — decide: install or drop check).
