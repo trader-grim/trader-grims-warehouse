@@ -81,6 +81,28 @@ discipline). Suggested todo priorities in parens.
 
 ### Track E — event fabric (PP-EVENTS-001, new; absorbs PP-AIOPS-001 Phase 1 wiring)
 
+**TRANSPORT IS NOW AN OPEN DECISION (Dave, s45):** JetStream was originally picked to
+ride along with a presumed Flutter dependency — verified 2026-07-04: NOTHING uses NATS
+anywhere (not the Flutter app, not a running server; only the dormant publisher
+module). Two candidates, decided in E0 before any build:
+
+- **Option P (recommended): Postgres events table + LISTEN/NOTIFY + SSE/WebSocket on
+  tgw-http.** Zero new daemons. Events land in the SAME ledger as the state machine
+  (the two-ledgers guard taken to its logical end), replay is SQL, durable consumers
+  are cursor rows, backup rides the existing DB backup, remote/portable clients get
+  events through the fence door they already use (SSE/WS is also easier in Flutter
+  than dart-nats). At TGW volume (55k items, single host, a handful of consumers)
+  this is comfortably sufficient.
+- **Option J: NATS JetStream** as originally drafted. Wins when: multi-host fan-out,
+  event volume that shouldn't load the DB, clients speaking NATS natively, or the
+  isolation-platform blueprint (future PP) arrives wanting a real bus.
+
+Either way, **all publishers/consumers go through a thin `tgw.events` facade**
+(publish(event), subscribe(subject, cursor)) so the transport is swappable — the
+existing `nats_client.py` becomes one backend of it, not the API. "It is just a job
+in the process" (Dave). Packets below are transport-agnostic; E1/E2 become
+"stand up the chosen transport + facade."
+
 - **E1 (S, p15): NATS+JetStream server in the flake.** nix/tgw/ module (TGW layer, not
   CatioNIX): `nats-server -js`, storage under /opt/TGW/var/nats, listen localhost +
   tailnet only (no LAN-wide 4222 until a consumer needs it), memory/disk limits set,
