@@ -123,3 +123,45 @@ def test_offer_body_uses_item_size_class():
 def test_offer_body_defaults_to_global_without_overrides():
     _, offer = sync._build_offer_bodies(_cfg(), "tgw1", _item())
     assert offer["listingPolicies"]["fulfillmentPolicyId"] == "GLOBAL"
+
+
+# ---------------------------------------------------------------------------
+# s45: per-field fallback — a configured policy must NEVER be discarded just
+# because a different policy field is missing from config (the all-or-nothing
+# gate shipped eBay's first-listed 'PS' policy on every new listing).
+# ---------------------------------------------------------------------------
+
+def test_configured_fulfillment_survives_missing_payment_return(monkeypatch):
+    cfg = {"fulfillment_policy_id": "FC4", "raw": {}}  # no payment/return ids
+    monkeypatch.setattr(sync, "_get_policies", lambda c: {
+        "fulfillmentPolicyId": "FIRST_LISTED",
+        "paymentPolicyId":     "ACCT_PAY",
+        "returnPolicyId":      "ACCT_RET",
+    })
+    got = sync._get_listing_policies(cfg, "12345")
+    assert got["fulfillmentPolicyId"] == "FC4"        # config wins per-field
+    assert got["paymentPolicyId"] == "ACCT_PAY"       # only missing fields fall back
+    assert got["returnPolicyId"] == "ACCT_RET"
+
+
+def test_full_config_never_touches_account_lookup(monkeypatch):
+    called = []
+    monkeypatch.setattr(sync, "_get_policies",
+                        lambda c: called.append(1) or {})
+    got = sync._get_listing_policies(_cfg(), "12345")
+    assert got == {"fulfillmentPolicyId": "GLOBAL",
+                   "paymentPolicyId": "PAY1",
+                   "returnPolicyId": "RET1"}
+    assert called == []
+
+
+def test_operator_selected_policy_id_survives_partial_config(monkeypatch):
+    # Editor saves an explicit policy ID into shipping_profile; must be honored
+    # even when payment/return come from the account fallback.
+    cfg = {"fulfillment_policy_id": "FC4", "raw": {}}
+    monkeypatch.setattr(sync, "_get_policies", lambda c: {
+        "fulfillmentPolicyId": "FIRST_LISTED",
+        "paymentPolicyId": "ACCT_PAY", "returnPolicyId": "ACCT_RET",
+    })
+    got = sync._get_listing_policies(cfg, "12345", shipping_profile="199931450015")
+    assert got["fulfillmentPolicyId"] == "199931450015"

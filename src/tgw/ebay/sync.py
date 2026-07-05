@@ -222,15 +222,30 @@ def _get_listing_policies(cfg: Dict[str, Any], ebay_category_id: str, *,
     pay_id = cfg.get('payment_policy_id')
     ret_id = cfg.get('return_policy_id')
 
-    if fulf_id and pay_id and ret_id:
-        return {
-            'fulfillmentPolicyId': str(fulf_id),
-            'paymentPolicyId':     str(pay_id),
-            'returnPolicyId':      str(ret_id),
-        }
-
-    # Fallback: fetch first policy of each type from eBay account
-    return _get_policies(cfg)
+    # Per-field: use each configured/resolved value where present; consult the
+    # account first-policy lookup ONLY for fields that are actually missing.
+    # Session 45: the previous all-or-nothing gate (all three or none) silently
+    # discarded a valid configured FC4 whenever payment/return ids were absent
+    # from config — every new listing shipped with eBay's first-listed policy
+    # ('PS') instead. A fallback on any field is a finding, not a quiet default.
+    resolved = {
+        'fulfillmentPolicyId': str(fulf_id) if fulf_id else None,
+        'paymentPolicyId':     str(pay_id) if pay_id else None,
+        'returnPolicyId':      str(ret_id) if ret_id else None,
+    }
+    missing = [k for k, v in resolved.items() if not v]
+    if missing:
+        account = _get_policies(cfg)
+        for k in missing:
+            resolved[k] = account[k]
+        log.error(
+            'sync: policy field(s) %s missing from config — fell back to eBay '
+            'account first-listed policy (%s). Configure them in '
+            'tgw-api-config.json; first-listed is arbitrary and has shipped '
+            'wrong policies before (s45).',
+            ', '.join(missing), {k: resolved[k] for k in missing},
+        )
+    return resolved  # all values are non-None strings here
 
 
 # ---------------------------------------------------------------------------
