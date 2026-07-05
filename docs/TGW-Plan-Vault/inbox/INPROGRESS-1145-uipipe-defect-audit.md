@@ -181,7 +181,7 @@ the plan — the plan is the thing that drifts. P1's plan-as-denominator
 verify is the canonical counterexample.
 
 **Corrupt-photo roster + ROOT CAUSE (s45 forensics):** tgw201601011311007,
-tgw201601011312446, tgw201707050929532. Damaged during the FEB 2022 bulk
+tgw201601011312446, tgw201707050929532, tgw201707151156404 (4th, found later same night). Damaged during the FEB 2022 bulk
 migration, untouched since: every file in the dirs shares mtime 2022-02-03/04
 and the truncated pair are EXACT 64KiB multiples (196608B, 65536B vs ~600KB
 originals) — interrupted buffered copy signature. Nothing in TGW modified
