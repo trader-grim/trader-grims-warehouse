@@ -67,3 +67,45 @@ absent our own error loops. ebay_draft drain RESTARTED 15:0x (active, zero
 heavy checks run there for the rest of the hot day. Note: a1131 checkout may
 be stale (todo #1082, no GitHub access) — sync repo state before trusting
 test results from it.
+
+## DESIGN DIRECTIVE from Dave (2026-07-04 evening) — the reconciliation broker
+
+Dave, after reviewing today's item resolutions: "Concentrate on making sure
+the draft matches ebay offer, then edit offer via ai or editor, get
+interface of operator in a consistent state. We have nothing brokering
+there, making sure the item fits our specs and repairing if not."
+
+The shape this sets:
+1. **draft ⇄ offer consistency is enforced continuously**, not assumed at
+   publish — a broker/reconciler detects divergence (price, policy, photos,
+   category, aspects) and drives convergence.
+2. **All edits (AI or operator editor) route through the same convergence** —
+   offer edits land in draft, draft edits land on the offer; one truth.
+3. **The operator interface always renders a consistent state** — never a
+   draft that silently disagrees with the live offer (today's phantom-$40.99
+   case is the canonical counterexample).
+4. **Spec validation + self-repair**: the broker checks each item against
+   our specs (required policy = config's, price present, photo count matches
+   disk, category sane) and repairs automatically where safe, surfaces to the
+   operator where not (C11: a finding, not a log line; matches
+   feedback-self-healing-system).
+
+Sequencing per Dave: broker/pipeline correctness FIRST; feature work after.
+"We have a lot of items in states caused by pipeline errors that would not
+normally exist if the pipeline was functioning" — the broker + a one-time
+state-repair sweep drains that standing population.
+
+Existing pieces the broker composes (build on, don't duplicate): the nightly
+catalog-verify truth audit (P7, detects), the canary probe (P8, detects),
+C10 operator lane (acts), revision.py drift-gated apply (writes safely),
+todays' #1152 policy fix (one spec rule of many).
+
+## New defects/ideas from today's items (same conversation)
+- **Keychain category was wrong** (Dave manually corrected on the BASS
+  keychain) — investigate category selection for keychains specifically;
+  relates PP-CATPICK-001 (group-shortlist + operator-correction learning:
+  his manual fix should have been captured as training signal).
+- **Prefill the short search-term description from vision scans** — the raw
+  vision scan data (PP-DERIVED-001 principle: scan once, derive many) can
+  generate it. EXPLICITLY DEFERRED by Dave until the pipeline fires correct
+  actions at correct times.
