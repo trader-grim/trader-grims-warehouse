@@ -179,3 +179,10 @@ BROKER SPEC INSIGHT (added to ai-plans/reconciliation-broker.md): the broker
 must validate against TRUTH planes (disk, config, live reads), NEVER against
 the plan — the plan is the thing that drifts. P1's plan-as-denominator
 verify is the canonical counterexample.
+
+**Corrupt-photo roster (data hygiene, s45 drain):** tgw201601011311007,
+tgw201601011312446 (truncated), tgw201707050929532 (broken data stream) —
+2016/2017-era files damaged on disk. Candidate broker/verify rule:
+photo_files_readable (PIL-open sweep, disk truth). Repair needs source
+photos from ItemArchive/originals if they exist — bulk check when the
+fleet sweep runs.
