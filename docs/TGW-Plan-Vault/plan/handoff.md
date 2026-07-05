@@ -42,12 +42,11 @@ status) → `reference/` docs. Tracker beats plan when they disagree.
    test_http_server.py broken since cookie-auth refactor). "Suite green" claims from
    earlier sessions were stale. Repair: todo #1102. Until fixed, only targeted test
    runs are meaningful.
-3. **ebay_draft 402 pile: requeue RUNNING (s45)** — ~3k jobs draining on
-   OpenRouter-primary (post-flip, no 429 tax); monitor watches the $5/day key
-   cap + dead-letter deltas. ~2.7k dead-letters remain (incl. ~657 non-402,
-   uninvestigated). 2 new dead-letters 07-04: truncated image files on disk
-   (2016 SKUs) — data-quality, not provider; candidate corrupted-photo
-   detector for #1145.
+3. **RESOLVED s45 (2026-07-04/05 night): ebay_draft 402 pile fully drained.**
+   Final pass 2,656/2,658 succeeded (99.92%); day total ~6,500 jobs, ~$1.08
+   OpenRouter spend. Only failures: 4 corrupt-photo SKUs (Feb-2022 migration
+   truncation — recovery roster in #1145 note; fleet integrity sweep running
+   on a1131, todo #1154). dead_letter table rows are historical (D4 clones).
 4. **Live-fire gates unexecuted** — listeditor revision apply (R1.1) and action
    console operator test (R1.2) are the current critical path; everything else waits.
 5. **todo #1077** — orphaned bad-SKU offer keeps ebay_sync on per-SKU fallback
