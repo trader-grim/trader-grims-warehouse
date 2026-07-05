@@ -109,3 +109,28 @@ todays' #1152 policy fix (one spec rule of many).
   vision scan data (PP-DERIVED-001 principle: scan once, derive many) can
   generate it. EXPLICITLY DEFERRED by Dave until the pipeline fires correct
   actions at correct times.
+
+## Shipping-policy repair executed (2026-07-04 evening, Dave: "all fc4")
+
+Root cause fully traced: config has ONLY fulfillment_policy_id;
+_get_listing_policies (ebay/sync.py) is ALL-OR-NOTHING — missing
+payment/return ids make it discard the valid FC4 and fall back to
+_get_policies() = first-policy-from-API = 150147260015 'PS'. eBay confirms
+199931446015 = 'FC4' (live policy list pulled).
+
+REPAIRED: all 8 wrong offers PUT to FC4 (fresh GET → strip read-only →
+mutate → PUT → read-back verify, revision.py pattern), every one OK.
+Mirrors refreshed; audit regenerated: 0 published-wrong remain among
+mirrored items. Report: /opt/TGW/var/reports/ship-policy-audit-2026-07-04.tsv
+
+STILL OPEN:
+- Close the config gate: add payment_policy_id + return_policy_id — needs
+  Dave's picks: payment 246544838015 'eBay Managed Payments' (only real
+  option) + return = 246544837015 'Free Returns' OR 290664933015 'free 30
+  days money back'?
+- #1152 code fix: make _get_listing_policies per-field (use config where
+  present) + C11 finding on fallback.
+- Fleet-wide sweep (~2k getOffer) still pending Dave go — mirrored coverage
+  is only 29 items.
+- Account has 31 fulfillment policies incl ~10 'Copy' clutter — cleanup
+  candidate (operator task, low priority).
