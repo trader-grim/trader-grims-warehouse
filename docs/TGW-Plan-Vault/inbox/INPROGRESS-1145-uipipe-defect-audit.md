@@ -1,17 +1,14 @@
+# IN PROGRESS — #1145 PP-UIPIPE-001 defect audit → reconciliation broker
 
-## FLEET PHOTO INTEGRITY SWEEP COMPLETE (2026-07-05 ~03:00, todo #1154)
+Full evidence trail (s45, four-item forensics, tool fixes, sweep results)
+was filed by pm-intake to dev-workflow/research/RESEARCH-1145-uipipe-defect-audit.md
+— read that first.
 
-Ran on a1131 over the ro NFS mount (3.4h, 270,525 photos decoded, zero
-thermal impact on tgw-prod). Report: /opt/TGW/var/reports/photo-integrity-2026-07-05.tsv
+State: two tool fixes LIVE (per-field policies #1152; draft-price-only
+staging). 402 pile drained. Fleet photo sweep done (#1154 — 206 bad/149
+SKUs, roster in var/reports). Broker PLANNED: ai-plans/reconciliation-broker.md.
 
-- **206 damaged files / 149 SKUs (0.076% of fleet)**
-- 205/206 carry the Feb-2022 migration mtime — ONE event, confirmed:
-  148 zero-byte + 42 truncated-at-64KiB-multiple + 15 other corruption.
-  1 stray from 2016-06.
-- **30 of the 149 are LIVE listings** (shoppers may see missing/partial
-  photos) — these are the recovery priority. 0 staged, 119 unlisted.
-- The 4 drain-discovered SKUs are all in the roster (validates the sweep).
-
-Next (per photo-integrity-mitigation plan): recovery shopping list is final
-for PP-DRIVE-INDEX Phase 1; the 30 live SKUs get first pull when archive
-drives connect. photo_files_readable catalog-verify rule = next code packet.
+NEXT: (1) Dave's B0 sign-off — broker rule table + auto-repair whitelist
+(20 min) → file B1-B5 packets; (2) rest of Dave's defect list for the
+walkthrough; (3) tgw202605052336026 price via the (now working) editor;
+(4) fleet getOffer policy sweep (ungated, just run it).
