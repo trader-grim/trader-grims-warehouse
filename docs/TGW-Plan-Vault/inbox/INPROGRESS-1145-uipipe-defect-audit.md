@@ -152,3 +152,30 @@ fix the tool, don't make him review data lists. Done:
   broker proceeds on recommended whitelist; 0125081 photo repush goes via
   C10 without review; ONLY genuine Dave call remaining on these items:
   2336026's intended price — via his (now-working) listing tool.
+
+## Four-item forensics COMPLETE (2026-07-04 night) — one root shape
+
+Dave's 4 items, 4 symptoms, 1 cause: three state planes (TRUTH=disk/ItemData,
+PLAN=draft_listing, LIVE=offer) with nothing reconciling them — an error
+freezes into the PLAN and becomes invisible because everything downstream
+validates against the plan.
+
+1. tgw202605052336026 (price): stale auto-pricer remnant in ebay_offer.price
+   (2026-06-17, browse-comps, disabled system) published unreviewed via
+   stage's fallback; also made ebay_price skip forever. TOOL FIXED tonight
+   (draft-only price + no_price_set finding). Live listing awaits Dave's
+   price via editor.
+2. tgw202605060125081 (photos): July 1-2 EPS exhaustion + pre-P1 masking
+   dropped 7 photos AND left draft.imageUrls=1; today's P1 photo-verify
+   passed "1/1 OK" because it used the PLAN as denominator, not the disk.
+   HEALED tonight via C10 repush chain: 8/8 live, verified fresh.
+3. tgw202605131827555 + tgw202606021107459 (churn): #1107 redraft loop — 57
+   full draft→price→upload→stage→publish chains EACH (07-02, and 06-26→07-04
+   for 1107459); worker fence-writes misread as operator intent regenerated
+   the plan endlessly. Root fixed s42/s43 (X-TGW-Caller); final states
+   converged; the chaos Dave experienced was loop-era churn.
+
+BROKER SPEC INSIGHT (added to ai-plans/reconciliation-broker.md): the broker
+must validate against TRUTH planes (disk, config, live reads), NEVER against
+the plan — the plan is the thing that drifts. P1's plan-as-denominator
+verify is the canonical counterexample.

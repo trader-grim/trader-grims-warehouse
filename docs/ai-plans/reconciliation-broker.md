@@ -48,7 +48,11 @@ loop is missing. This plan is a composition.
 
 ## Proposed approach
 
-Three functions, one loop:
+Three functions, one loop. Cardinal rule (s45 four-item forensics): **the
+broker validates against TRUTH planes — disk, config, fresh live reads —
+never against the plan (draft)**. The plan is the thing that drifts; a
+validator that uses the plan as its denominator certifies the drift as
+correct (P1's "1/1 photos OK" on an 8-photo item is the canonical case).
 
 **1. SPEC — one declarative rule table** (new `src/tgw/spec_rules.py`, rendered to
 `reference/ITEM-SPEC.md` for humans). Each rule: id, scope (draft / offer / both /
@@ -59,7 +63,7 @@ disk), severity, comparator, and `repair` = one of `auto:<action>` |
 |---|---|---|---|
 | policy_matches_spec | offer.fulfillmentPolicyId == resolved config policy (FC4 or category/size override) | critical | auto:put_policy |
 | price_present_and_converged | draft.price set AND == offer price | critical | surface (price is money — operator decides direction) |
-| photos_converged | live photo count == disk count (cap 24) | critical | auto:repush_photos (C10 lane, proven P4 path) |
+| photos_converged | live photo count == DISK count (cap 24) — NEVER the draft's imageUrls: s45's 0125081 passed "1/1 OK" because P1's verify used the plan as denominator while 8 photos sat on disk | critical | auto:repush_photos (C10 lane, proven P4 path) |
 | status_advanced | published offer ⇒ local status reflects it | warning | auto:set_status (fence) |
 | category_sane | category set + passes CATPICK shortlist sanity | warning | surface (+ capture operator correction as CATPICK training signal) |
 | aspects_converged | draft item_specifics ⊆ live aspects | warning | surface |
