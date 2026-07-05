@@ -430,6 +430,25 @@ across the already-mounted data is the near-term space-recovery lever,
 before deciding what (if anything) to offload onto `sdi`.
 
 Audited sdb/sdc live: sdb absent, sdc repartitioned into backup services. No free disk to grow vg_tgw. Closing #1056 as superseded, opened #1136 for re-evaluation.
+## PP-KNOWLEDGE-001 — the knowledge plane (recoll + git-annex + event fabric) — PLANNED s45 (2026-07-04)
+**Umbrella for:** PP-SEARCH-001 (live), PP-ANNEX-001 (promoted from FUTURE-IDEAS,
+rescoped: history/archive consolidation ONLY, no live-data migration), PP-EVENTS-001
+(new; transport is decision E0 — Postgres events+NOTIFY+SSE recommended over NATS
+JetStream, `tgw.events` facade either way), feeder PP-DRIVE-INDEX-001, first consumer
+PP-CATALOG-INCR-001, Hermes doc-triage (gated #1139).
+**Full plan + soundness review (4 system-specific guards, reject list):**
+`docs/ai-plans/recoll-annex-jetstream.md` — treat as the design doc of record.
+**Dave's stage 1 (s45): "organize and make accessible all of our valuable data,"
+as a concerted parallel lane alongside the fix/execution tracks** — the knowledge
+dataset becomes a better discovery search than the catalog (catalog stays the
+structured/UI projection; recoll is the find-anything layer). recoll already paid
+for itself in week one (real recovery/audit queries, s44/s45).
+Stage-1 packets: #1147 (R2 search surface — priority), #1148 (R1 field mapping),
+#1149 (A0 Syncthing/annex boundary decision, Dave 15min), #1150 (A1 annex pilot on
+archive corpus), E0 decision packet with Dave. Drive-fleet manifests continue under
+PP-DRIVE-INDEX (#1136).
+
+
 ## PP-DRIVE-INDEX-001 — drive survey, dedup, universal index (merged 2026-07-04)
 **Pre-existing plan (session 40, 2026-07-01) found and merged into the
 live drive-space conversation, per Dave's direction.** Long-horizon
