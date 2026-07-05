@@ -60,57 +60,7 @@ status) → `reference/` docs. Tracker beats plan when they disagree.
 
 ---
 
-## Session 43 — 2026-07-03 (quota-exhaustion root cause + backlog purge)
-
-Nothing committed to git yet.
-
-- Diagnosed Dave's report on `tgw202606021133367` (interface/eBay mismatch, edit not
-  preserved, partial photo set) down to real root causes via `journalctl` + `queue_jobs`
-  + `quota-state.json` (an initial "eBay silently rewrote the listing" theory was WRONG
-  — corrected after Dave pushed back; see `feedback-verify-before-blaming-external`
-  memory). Confirmed:
-  - `ebay_upload.py:111` reports success even when every new photo fails (completion
-    guard only checks "at least one photo exists", not "all expected photos present").
-  - The #1107 redraft-loop fix (s42) stopped new churn but left ~2,514 legacy SKUs'
-    worth of `ebay_upload` jobs in `retry_wait`, auto-requeuing every ~6h forever —
-    this backlog raced the worker at every day-reset and burned the full `ebay_eps`
-    budget (5,000/day, halted at 3,500) within about an hour, 3 days running.
-  - The 30%-reserve "operator priority" carve-out in `quota.py` (interactive callers
-    never blocked) is structurally unreachable for photo uploads — nothing tags
-    operator-triggered `ebay_upload` jobs as interactive; all run through the same
-    background worker.
-- Cancelled the 2,715-job stale backlog (Dave explicitly authorized after being shown
-  the evidence). Today's 3,500/5,000 `ebay_eps` real spend is NOT recoverable.
-- Filed todo #1115 (p20) for the code fixes (completion-guard + dedupe/cap).
-- Did NOT do a manual interactive-context bypass for `tgw202606021133367`'s remaining
-  17 missing photos — harness correctly blocked a self-devised safety-bypass attempt;
-  left the decision to Dave (session ended via /tgw-exit before he answered).
-- Full detail: `inbox/INPROGRESS-ebay-photo-desync.md`.
-
-**s43 later same day — C10 built + live-verified, plan issued for parallel execution:**
-- **Invariant C10 (operator lane) LIVE**: all 14 operator surfaces stamp
-  `origin='operator'`; workers propagate it chain-wide; `worker_base` runs such jobs
-  in interactive quota context. Live-fired on `tgw202606021133367`: 17 photos sailed
-  through the halted pool, listing verified at 24 photos via ebay-pull (eBay cap; 26
-  submitted). Regression caught+fixed during live-fire: context name must keep
-  `worker:` prefix or the PATCH auto-redraft guard sees worker fence-writes as human
-  edits — s42 redraft loop came back for 2 cycles. Both sides now tested (68 green).
-- **Plan issued (Dave: "put it in the plan so opusplan can execute")**:
-  **PP-PHOTOSYNC-001** (`pp/PP-PHOTOSYNC-001.md`) = fix track, packets P1–P6 = todos
-  #1115 #1117 #1118 #1119 #1120 #1121. Forward track runs PARALLEL: **R1.8 #1122
-  (Dave GO 2026-07-03**, packet `packets/1122-r18-dataset-snapshot.md`) +
-  PP-BACKUP-001 (#61/#146/#147/#1052) + #1102. Collision rule in the PP doc.
-- **Dave pre-authorized** P4 fleet photo repair ramp 1→5→ramp (inspect at n=1, n=5).
-- **Committed + pushed**: `ae9b1e6` on `catio-nix-0.0.1-alpha` (s42+s43, 108 files,
-  Dave-approved). PR to main DEFERRED until P1 (#1115) verifies — then
-  `/tgw-pr-review` + merge (main is 46 commits behind; don't snapshot it mid-fix).
-
-**Recommended next sequence:** (1) fix track P1 #1115 → (2) forward track #1122
-snapshot (any time, pool-disjoint) → (3) P2/P3 while P4 ramps → (4) PP-BACKUP-001
-packets interleaved → (5) PR to main via /tgw-pr-review.
-
----
-## Session 45 — 2026-07-04 afternoon (LLM provider flip + UI-pipeline defect evidence) — CONTINUES 4pm
+## Session 45 — 2026-07-04→05 (provider flip · a1131 buildout · tool fixes · knowledge-plane plan) — COMPLETE
 
 Committed as-we-went (Dave's instruction), 7 commits on catio-nix-0.0.1-alpha.
 
@@ -138,9 +88,41 @@ Committed as-we-went (Dave's instruction), 7 commits on catio-nix-0.0.1-alpha.
   pm-intake vault filings into a labeled commit (verified against FILING-LOG
   first).
 
-**Open into 4pm:** #1145 walkthrough (top priority), ebay_draft backlog
-~3k draining (watch OpenRouter $5/day cap on `tgw health`), #1143 2pm audit
-agenda missed (reschedule), #1139 fleet decoupling, #1146 NFS shares.
+**s45 evening/night (continued past 4pm through ~03:00):**
+- **a1131 fully built out** (#1146 DONE): ro NFS data/log mounts, claude
+  account (key-only + Dave-authorized NOPASSWD sudo), Wake-on-LAN live-fired
+  (`wakeonlan c8:2a:14:2a:a1:85`; NEVER initiate suspend — iMac bug).
+  nix-syncthing overrideDevices/Folders=false fix (rebuilds were wiping
+  GUI-added peers — Dave's vault share); devices restored, Dave re-accepting
+  shares.
+- **Two UI-pipeline TOOL FIXES live-verified** (Dave's course-correction:
+  fix the tool, not the data lists — see memories): per-field policy
+  resolution (#1152; config FC4/payment/return now always win) and
+  draft-price-only staging (stale ebay_offer.price can never publish
+  unreviewed; operator List on unpriced item → HardFailure + no_price_set
+  finding persisted). 8 wrong-policy live listings repaired PS→FC4;
+  0125081 healed 1→8 photos via C10 chain.
+- **Four-item forensics:** one root shape — truth/plan/live planes never
+  reconciled. Broker planned (`ai-plans/reconciliation-broker.md`, packets
+  B0–B5; B0 = Dave's 20-min rule-table sign-off; cardinal rule: validate
+  against TRUTH, never the plan).
+- **Knowledge plane planned** (`ai-plans/recoll-annex-jetstream.md` +
+  PP-KNOWLEDGE-001 in master plan): stage 1 = organize/make accessible;
+  todos #1147-#1151; Dave: annex-gdrive REPLACES Syncthing for data trees
+  (vault→git); E0 transport decision leans Postgres-events over JetStream.
+- **402 pile FULLY DRAINED:** ~6,500 jobs, 99.9% success, ~$1.08; ~2,650
+  fresh drafts now await operator review (NB #1113 ebay_dole not installed).
+- **Fleet photo-integrity sweep DONE** (a1131 over NFS, 3.4h): 206 bad/149
+  SKUs (0.076%), single Feb-2022 unverified-copy event, 30 LIVE listings
+  prioritized; roster = var/reports/photo-integrity-2026-07-05.tsv; plan =
+  ai-plans/photo-integrity-mitigation.md (#1154).
+- New skill: `/tgw-packet`. New todos: #1145-#1154.
+
+**Open into next session:** B0 broker sign-off (20min, unlocks B1-B5) ·
+#1145 walkthrough remainder (Dave's full defect list; 2336026 price via
+editor) · #1147 search surface (top delegable) · fleet getOffer policy
+sweep (~2k calls, no gate) · #1143 audit (missed again) · #1139 · E0/A0
+decision packets.
 
 ---
 
