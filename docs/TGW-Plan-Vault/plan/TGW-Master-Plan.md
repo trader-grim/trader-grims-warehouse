@@ -130,6 +130,8 @@ run. Zero requeue errors, worker active, 0 incidents at requeue time. Todo
 Recoll index Phase 0 built: 441K docs, 4.6 GB per #1066. Follow-up: nightly timer + CLI wrapper pending.
 
 - #1146 a1131 NFS shares + claude account (LIVE 2026-07-04) — full setup doc in reference/a1131-nfs-setup.md
+
+- #1145 PP-UIPIPE-001 defect audit: two tool fixes LIVE, 402 pile drained, fleet photo sweep done (#1154 — 206 bad/149 SKUs). Broker PLANNED (ai-plans/reconciliation-broker.md). Next: Dave B0 sign-off, defect walkthrough, price test, fleet getOffer sweep.
 #1077 orphaned offer forces ebay_sync per-SKU fallback (Dave → eBay
 support); 15 Syncthing conflict files in vault; nats health check red
 (module absent — decide: install or drop check).

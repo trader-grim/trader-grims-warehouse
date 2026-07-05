@@ -68,11 +68,12 @@ class EbayPriceWorker(QueueWorker):
         # as its consent signal (invariant C10) — may compute a fresh price
         # over an operator's last price_history entry.
         price_history = item.get('price_history') or []
+        suggest_only = False
         if (payload.get('origin') != 'operator' and price_history
                 and price_history[-1].get('source') == 'operator'):
             op_price = price_history[-1].get('price')
             log.info('ebay_price: %s — last price_history entry is operator-sourced '
-                     '($%s); skipping auto-chain price, not overwriting', sku, op_price)
+                     '($%s); suggest-only, not overwriting', sku, op_price)
             tgw_logging.log_event('ebay_price_skipped_operator_override', sku=sku,
                                   operator_price=op_price)
             fence_ebay_write(self.config, sku, ebay_offer={
@@ -82,17 +83,19 @@ class EbayPriceWorker(QueueWorker):
                     'operator_price': op_price,
                 },
             })
-            return
+            suggest_only = True
 
-        # Idempotent: skip if already priced
+        # Dave (s46): the auto-pricer sets a price only on the initial
+        # identification. Any later run still refreshes comps and records a
+        # suggestion (ebay_offer.suggested_price) — it powers the comp
+        # engine but never touches draft/offer price or the repricer floor.
         existing = item.get('ebay_offer', {})
-        if existing.get('price') is not None:
-            log.info('ebay_price: %s already priced at $%.2f — skipping',
-                     sku, existing['price'])
-            tgw_logging.log_event('ebay_price_skipped', sku=sku,
-                                  reason='already_priced',
-                                  price=existing['price'])
-            return
+        if existing.get('price') is not None or draft.get('price') is not None:
+            if not suggest_only:
+                log.info('ebay_price: %s already priced — suggest-only re-run', sku)
+                tgw_logging.log_event('ebay_price_suggest_only', sku=sku,
+                                      price=existing.get('price') or draft.get('price'))
+            suggest_only = True
 
         title          = draft.get('title') or item.get('title', '')
         category_name  = draft.get('category_name') or item.get('ebay_category_name', '')
@@ -129,6 +132,31 @@ class EbayPriceWorker(QueueWorker):
         ebay_offer['priced_at']    = result['queried_at']
 
         suggested = result['price']
+        if suggest_only:
+            # Comp refresh + suggestion only: price_comps/priced_at were set
+            # above; record the suggestion and stop. No draft_listing write —
+            # a suggest run must not flip the item's lifecycle state.
+            if suggested is not None:
+                ebay_offer['suggested_price'] = suggested
+                ebay_offer['suggested_at'] = result['queried_at']
+            fence_ebay_write(self.config, sku, ebay_offer=ebay_offer)
+            log.info('ebay_price: %s suggest-only → suggested=$%s (%d comps)',
+                     sku, suggested, (result['comps'] or {}).get('count', 0))
+            tgw_logging.log_event('ebay_price_suggested', sku=sku,
+                                  suggested_price=suggested,
+                                  source=result['source'])
+            try:
+                state_machine.enqueue_job(
+                    queue_name='catalog_rebuild',
+                    payload={'reason': f'ebay_price_suggest:{sku}'},
+                    dedupe_key='catalog_rebuild:pending',
+                    not_before=time.time() + 30,
+                    max_attempts=3,
+                )
+            except psycopg2.errors.UniqueViolation:
+                pass
+            return
+
         if suggested is not None:
             # Launch price: max comp rounded up to next .99 — this is the initial
             # listed price, creating a visible "discount" when the repricer lowers

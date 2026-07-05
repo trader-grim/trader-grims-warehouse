@@ -37,6 +37,9 @@ all fields from stages 0..N-1 plus its own.
 | `ai_reidentify` | bool | operator | manual / pm_intake | Set `true` to force ai_identify to re-run |
 | `upc` | str | intake | pm_intake / bundle_intake | Barcode if scanned at intake |
 | `draft_listing` | dict | drafted | ebay_draft | See `draft_listing` sub-fields below |
+| `draft_listing_state` | str | any | http PATCH hook, draft_sync | Draft lifecycle (broker B1a): `editing` = AI/operator manipulation in flight (set automatically on any `draft_listing` write); `baseline` = draft re-pinned to the offer (publish success, Reset Draft). Broker drift repair may only touch `baseline` items |
+| `baseline_at` | str | any | draft_sync | UTC ts of the last re-baseline; dead_letter jobs older than this are superseded history |
+| `pipeline_error` | dict | staged/published | ebay_stage, ebay_publish | Canonical schema `{code, detail, ts, source, raw?}` — guard findings (e.g. `no_price_set`, C11) and eBay rejections (`code: ebay_rejected`, raw body). Legacy `{worker, error, raw, at}` still on old items (reader shim in http_server). Cleared only when resolved: guard findings self-clear when a draft edit fixes the condition; rejections clear on re-pin |
 | `ebay_photos` | list[dict] | uploaded | ebay_upload | See `ebay_photos` entries below |
 | `offline_draft` | bool | drafted | ebay_draft | `true` if draft built without eBay API (taxonomy offline) |
 | `ebay_offer` | dict | priced → staged → published → synced | multiple | See `ebay_offer` sub-fields below |

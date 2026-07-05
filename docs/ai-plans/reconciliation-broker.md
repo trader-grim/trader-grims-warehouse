@@ -46,6 +46,58 @@ loop is missing. This plan is a composition.
 - C11: every violation persists on the item (`spec_violations` block), so the
   console and catalog-verify can query it.
 
+## Draft lifecycle — B0 design decision (Dave, 2026-07-05, s46)
+
+Dave's directive, near-verbatim: *"The operator's clear-draft button is not a system
+repair tool — it is for the operator to restore the draft to the live state and start
+over because that is better than the draft. But the function behind it can be used in
+this event plane. If the manager/broker manages the state properly, the error state
+won't occur. We have AI draft manipulation, then operator manipulation. The AI
+manipulation should begin with that live state, so when it is done it puts the now
+updated and still complete result into the draft. The operator looks, edits, approves
+and lists. THEN THE MANAGER MAKES THE DRAFT MATCH THE OFFER. Now the next operation
+starts correctly. Identify the states where you can match safely without interfering,
+and when they absolutely must match — such as when you start with a new item and when
+you list an item for the first time."*
+
+The draft is a **working surface**, not a mirror: it legitimately diverges while AI
+or the operator is manipulating it, and it must be re-baselined to the offer at
+defined points so every new manipulation starts from a complete, current base.
+
+**State field:** `draft_listing_state` on the item — `baseline` | `editing`.
+- Any write to `draft_listing` (AI worker or operator PATCH) ⇒ `editing`.
+- The manager's pin (draft := offer/live) ⇒ `baseline` (+ `baseline_at` ts).
+
+**MUST-match points (manager pins, always):**
+
+| id | point | mechanism |
+|----|-------|-----------|
+| M1 | first publish succeeds (new item listed) | publish success ⇒ offer content came from draft; mark `baseline` (content already equal by construction — draft-price-only staging, #1152 policies) |
+| M2 | live revision applied (operator Update Item) | after read-back-verified PUT, pin draft := live read-back ⇒ `baseline` |
+| M3 | AI manipulation starts on an already-listed item | seed the working copy from live state, not the stale draft; on completion the updated-and-still-complete result goes into the draft (⇒ `editing` until listed) |
+| M4 | operator presses Reset Draft ("live is better, start over") | same pin primitive, origin=operator ⇒ `baseline` |
+
+**SAFE-to-match states (broker may converge without interfering):**
+
+| id | state | action |
+|----|-------|--------|
+| S1 | live item, `draft_listing_state == baseline`, draft ≠ live (drift: reprice worker, Seller Hub manual edit, partial failure) | re-pin draft := live, record what drifted (C11) — nobody's work is lost because baseline means nobody was working |
+
+**NEVER-touch states:**
+
+| id | state | why |
+|----|-------|-----|
+| N1 | `draft_listing_state == editing` | operator or AI manipulation in flight — divergence is intentional |
+| N2 | pipeline jobs pending/running for the SKU | push in flight; converging mid-push races the worker |
+| N3 | item never listed (no offer) | draft is the only truth; there is nothing to match FROM |
+| N4 | item sold | frozen |
+
+**Pin primitive (library, not handler):** one `pin_draft_to_live()` function shared by
+M1/M2/M4/S1. C11-safe clearing: guard findings (`pipeline_error.code`) are cleared
+only if the new draft resolves the condition (e.g. `no_price_set` only clears when the
+pinned draft has a price); push-rejection errors clear unconditionally (they describe
+an abandoned draft push); unknown codes are kept.
+
 ## Proposed approach
 
 Three functions, one loop. Cardinal rule (s45 four-item forensics): **the
@@ -109,6 +161,40 @@ before mopping. Broker packets then can't be repairing a live leak.
 | `src/tgw/http_server.py` | console: "needs repair" state + approve endpoint (C10 origin) |
 | `docs/TGW-Plan-Vault/reference/ITEM-SPEC.md` | NEW — human-readable spec table |
 | tests | rule table unit tests; detect-on-seeded-defect; repair round-trip mocks |
+
+## Implementation status (s46, 2026-07-05)
+
+**DONE (todos #1157/#1158), live-verified on tgw202605052336026:**
+- `src/tgw/draft_sync.py` — pin/baseline/resolve primitives (library, pure).
+- `draft_listing_state` lifecycle live: PATCH hook marks `editing` on any
+  draft write (workers + operator, both via the fence PATCH endpoint);
+  `ebay_publish` success marks `baseline` (M1/M2 — covers Update Item too,
+  since stage force-updates republish); Reset Draft (M4) pins via the library.
+- C11-safe clearing (resolve_pipeline_error): guard findings persist until the
+  condition verifiably resolves; self-clear on the draft edit that fixes them.
+- pipeline_error writer schema unified: `{code, detail, ts, source, raw}` in
+  ebay_stage + ebay_publish; reader shim renders legacy items.
+- Console: Set Price affordance for any state; dead_letter older than
+  `baseline_at` is superseded history (no red button on settled items).
+
+**B5a fleet baseline sweep DONE (2026-07-05):** 19,256 items pinned to their
+live mirrors and at `draft_listing_state=baseline`; converged to zero writes
+on the final pass (scripts/fleet_baseline_sweep.py, re-runnable; reports in
+var/reports/fleet-baseline-sweep-*.json). Not coverable: 388 listed items
+with no ebay_live mirror (legacy Trading-API — detect-only per plan), 3,050
+sold (frozen), ~33k never-listed (draft is the only truth until M1).
+s46 incident during the first run: the sweep's non-machine X-TGW-Caller made
+the fence auto-enqueue 8,183 forced ebay_stage pushes (73 executed as no-ops
+and republished cleanly, 18 dead-lettered on pre-existing orphaned offers,
+rest cancelled). Fix: callers of bulk PATCH must self-identify as
+`background:<name>`. Reducer now maintains baseline on reprice; ebay_price
+is initial-price-only — re-runs refresh comps + `ebay_offer.suggested_price`
+and never touch draft/offer price or the repricer floor (Dave directive, s46).
+
+**Publish-baseline hook (M1/M2) is code-live but awaits its first real
+publish for live-fire evidence.** NOT yet built: M3 (AI manipulation seeds
+from live state — ebay_draft worker change, next packet), S1 drift repair
+(reconcile worker, B3), spec_rules.py + detect (B1), fleet drain (B5).
 
 ## Packets (file as todos on Dave's go)
 

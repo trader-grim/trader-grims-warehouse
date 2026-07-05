@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-07-05 15:04 UTC — 189 open, 74 done in the last 7 days._
+_Rendered 2026-07-05 20:13 UTC — 189 open, 79 done in the last 7 days._
 
 ## admin (23 open)
 
@@ -220,10 +220,16 @@ _Rendered 2026-07-05 15:04 UTC — 189 open, 74 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — sold-event webhook (Tier 4)\|PP-SOLD-001]] |  |
 
-## Done this week (74)  — showing 15 most recent
+## Done this week (79)  — showing 15 most recent
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 1160 | claude | 2026-07-05 | PP-UIPIPE-001 incident+fixes: sweep must self-identify as background: caller (s46 auto-enqueue flood, 8183 cancelled); reducer must preserve baseline state; ebay_price → initial-price-only, re-runs suggest+comps only (Dave directive) |
+| 1159 | claude | 2026-07-05 | PP-UIPIPE-001 broker B5a: fleet baseline sweep — pin every mirrored item's draft to live (draft_listing_state=baseline), idempotent script + report; skip sold/editing/no-mirror |
+| 1158 | claude | 2026-07-05 | PP-UIPIPE-001 broker B1b: unify pipeline_error writer schema (code/detail/ts/source/raw) in ebay_stage+ebay_publish, reader shim stays; UI: Set Price affordance for non-active items + needs-attention fallback for dead_letter-without-finding |
+| 1157 | claude | 2026-07-05 | PP-UIPIPE-001 broker B1a: draft lifecycle manager — draft_listing_state field (baseline/editing), pin_draft_to_live library fn (C11-safe clears), baseline at publish success + revision apply, operator Reset Draft uses same primitive |
+| 1156 | claude | 2026-07-05 | PP-UIPIPE-001/#1145: Reset Draft (re-pin from live) must be operator-accessible on every live item, not gated on _diverged; reset clears stale pipeline_error |
+| 1155 | claude | 2026-07-05 | PP-UIPIPE-001/#1145: console fix — normalize pipeline_error schemas (code/detail vs error/raw) + live-listing state must outrank dead_letter in action line (no blind Retry on active items) |
 | 1152 | claude | 2026-07-05 | PP-UIPIPE-001/#1145 CONFIRMED ROOT CAUSE: ebay_stage omits fulfillmentPolicyId -> eBay fills account default 150147260015 on every publish. Evidence: all 8 recently-mirrored UI-pipeline listings wrong (report /opt/TGW/var/reports/ship-policy-audit-2026-07-04.tsv); config+drafts say 199931446015. Fix: stage sends policy explicitly (config default, draft/category override); then repair batch for affected live listings via revision path. Full-fleet audit sweep (~2k getOffer, inventory pool, trivial) pending Dave go |
 | 1146 | claude | 2026-07-04 | NFS shares tgw-prod -> a1131 for Claude's thermal-relief offload (Dave s45): a1131 is SHARED Dave+Claude precisely for thermal relief; add NFS exports of the content Claude's checks need. Proposed scope (Dave to approve): /opt/TGW/data (ItemData+ItemCatalog) read-only, /opt/TGW/var/log read-only; repo stays git-synced (fixes #1082 staleness separately); secrets NEVER exported. NixOS: exports in flake for both hosts (ties to PLAN-nixos-migration + #1139 fleet decoupling) |
 | 1126 | claude | 2026-07-04 | Deploy nix-flake catalog-verify-nightly timer to tgw-prod (nixos-rebuild switch) — code written + nix flake check clean in nix/tgw/backup.nix (PP-PHOTOSYNC-001 P7), awaiting explicit go for live infra deploy |
@@ -233,10 +239,4 @@ _Rendered 2026-07-05 15:04 UTC — 189 open, 74 done in the last 7 days._
 | 1062 | claude | 2026-07-04 | SATISFIED by PP-ACTIONCONSOLE-001's s40 build (same as #1085) -- verified in code: Editor tab + Live/Sold Listing tab, editable aspects with 3-layer live/proposed/edit merge, condition select, price history, reprice schedule, product lookup, identification history all present. This is the exact 'item detail page restructure + editable aspects' scope originally asked for. Not duplicating -- consolidating into #1085's 'operator eyeball' gate instead of building new UI. |
 | 1137 | claude | 2026-07-04 | R1.1 executing now: tgw201501021970128, price 7.99 -> 8.49 (small, reversible test delta) via tgw revise --set draft_listing.price --apply --live |
 | 1114 | claude | 2026-07-04 | RESOLVED via #1084 investigation -- root cause was a design error, not a needed feature: the auto-enqueue trigger conflated 'raw fact changed, please regenerate' with 'operator polished the final draft directly' because the UI only ever PATCHes draft_listing.* (no UI path sends bare title/item_attributes). Fixed: auto-enqueue now pushes (ebay_stage force=operator) instead of regenerating (ebay_draft). Live-verified end to end including a real eBay listing mutation + revert. |
-| 1084 | claude | 2026-07-04 | R1.1 live-fire in progress: using tgw201501021970128 (Simpsons Game of Life canary set) for price-only delta test |
-| 1056 | claude | 2026-07-04 | BLOCKED, premise stale: sdb (Toshiba, previously 'contents unknown') no longer appears in lsblk at all; sdc was fully repartitioned + put into service today for backup infra (tgw-db-backup/tgw-itemdata-snap/tgw-itemarchive, all actively mounted). No free/unclaimed disk currently exists to extend vg_tgw into (nvme0n1p2 PV has only 96MB free). Needs Dave: either a new physical disk, or an explicit decision to repurpose something already in service (not safe to do silently) |
-| 1124 | claude | 2026-07-04 | Building canary probe script + ops_digest integration; will ask Dave for canary item designation before running the live acceptance test (spec requires asking, not choosing silently) |
-| 1135 | claude | 2026-07-04 | Build repeatable category-backfill recompile script (own-dataset sources, dry-run+apply, re-runnable as new sources/tools improve) |
-| 1134 | claude | 2026-07-04 | Self-powered comp engine (own dataset) design pass + Amazon FBM books/media exploration -- Dave request 2026-07-04 |
-| 1132 | claude | 2026-07-04 | Investigate: OpenRouter API key has weekly $15 spend limit (near-exhausted) separate from account's $30 credit balance -- add auth/key check to tgw health quota section; requeue remaining 402 dead-letters once weekly limit resets or Dave raises it |
-| … | | | _…and 59 more — run `tgw todo --all` to see everything_ |
+| … | | | _…and 64 more — run `tgw todo --all` to see everything_ |

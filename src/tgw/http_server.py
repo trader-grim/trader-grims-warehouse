@@ -31,6 +31,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from . import draft_sync
 from .assets import ordered_photos as _ordered_photos
 from .config import DEFAULT_CONFIG, load_config
 from .items import atomic_write_json, locationupdate
@@ -149,6 +150,7 @@ PIPELINE_ACTIONS = {
     "migrate_unblock",
     "review_mark_ready",
     "sync_from_ebay",
+    "reset_draft_from_live",
     "set_ready",
     "unset_ready",
 }
@@ -672,7 +674,28 @@ def patch_item(sku: str, body: PatchBody, request: Request) -> Dict[str, Any]:
     if "location" in body.fields:
         location_value = body.fields.pop("location")
 
+    # Draft lifecycle (broker B1a): any draft_listing write — AI worker via
+    # the fence or operator via the editor — is a manipulation in progress,
+    # so mark 'editing' unless the caller manages the state itself (the pin
+    # and baseline paths patch draft_listing_state explicitly).
+    if "draft_listing" in body.fields and "draft_listing_state" not in body.fields:
+        body.fields["draft_listing_state"] = "editing"
+
     doc_before = load_item_doc(json_path)
+
+    # Self-resolving guard findings: if this edit fixes the persisted
+    # condition (e.g. no_price_set and the patch sets a price), clear the
+    # finding in the same write — the operator should never have to clear
+    # an error the system can verify is gone. Rejection errors are kept:
+    # editing one field does not prove the rejected content was fixed.
+    _new_dl_fields = body.fields.get("draft_listing")
+    if isinstance(_new_dl_fields, dict) and doc_before.get("pipeline_error"):
+        _merged_dl = {**(doc_before.get("draft_listing") or {}), **_new_dl_fields}
+        _resolved = draft_sync.resolve_pipeline_error(
+            doc_before["pipeline_error"], _merged_dl, clear_rejections=False)
+        if _resolved is None:
+            body.fields["pipeline_error"] = None
+
     updated_keys = _apply_patch(json_path, body.fields)
 
     # Price edits leave a history trail (session 42): manual/UI price changes
@@ -1363,44 +1386,16 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
             return {"ok": True, "sku": sku, "action": "sync_from_ebay", "job_id": job_id}
 
         elif action == "reset_draft_from_live":
-            # PP-ACTIONCONSOLE-001: discard local draft edits — re-pin the draft
-            # to what is live on eBay (the ebay_live mirror). Escape hatch for the
-            # live-edited state; also clears any pending revision proposals.
+            # PP-ACTIONCONSOLE-001 / broker B1a (M4): operator's "live is
+            # better, start over" — re-pin the draft to the ebay_live mirror
+            # via the shared lifecycle primitive. C11-safe: guard findings
+            # are cleared only if the pinned draft resolves them.
             doc = load_item_doc(json_path)
-            _live = doc.get("ebay_live") or {}
-            _live_inv = _live.get("inventory_item") or {}
-            _live_prod = _live_inv.get("product") or {}
-            _live_off = _live.get("offer") or {}
-            if not _live_inv and not _live_off:
-                raise HTTPException(
-                    status_code=400,
-                    detail="no ebay_live mirror — run Sync from eBay first",
-                )
-            dl_reset = dict(doc.get("draft_listing") or {})
-            if _live_prod.get("title"):
-                dl_reset["title"] = _live_prod["title"]
-            if _live_prod.get("description"):
-                dl_reset["description"] = _live_prod["description"]
-            if _live_prod.get("imageUrls"):
-                dl_reset["imageUrls"] = _live_prod["imageUrls"]
-            if _live_prod.get("aspects"):
-                dl_reset["item_specifics"] = {
-                    k: (v[0] if isinstance(v, list) and v else v)
-                    for k, v in _live_prod["aspects"].items()
-                }
-            if _live_inv.get("condition"):
-                dl_reset["condition_enum"] = _live_inv["condition"]
-            _live_price = ((_live_off.get("pricingSummary") or {}).get("price") or {}).get("value")
-            if _live_price is not None:
-                try:
-                    dl_reset["price"] = float(_live_price)
-                except (TypeError, ValueError):
-                    pass
-            if _live_off.get("availableQuantity") is not None:
-                dl_reset["quantity"] = _live_off["availableQuantity"]
-            if _live_off.get("listingDescription"):
-                dl_reset["listing_description"] = _live_off["listingDescription"]
-            _apply_patch(json_path, {"draft_listing": dl_reset, "revision_draft": None})
+            try:
+                _pin_fields = draft_sync.pin_draft_to_live(doc)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            _apply_patch(json_path, _pin_fields)
             return {"ok": True, "sku": sku, "action": "reset_draft_from_live"}
 
         elif action == "set_ready":
@@ -4979,22 +4974,49 @@ def _render_item_detail_html(
     _listing_id_json = _json.dumps(listing_id)
     _is_active_js = "true" if is_active else "false"
 
-    # Pipeline error (written by ebay_stage/ebay_publish on eBay rejection)
+    # Pipeline error — two writer schemas exist and both must render:
+    # eBay HTTP rejections write {worker, error, raw, at} (ebay_stage/ebay_publish
+    # 4xx paths); local guard findings write {code, detail, ts, source} (e.g. the
+    # no_price_set C11 finding, written precisely so this page can say what to do).
     _pe = item.get("pipeline_error")
-    if _pe and isinstance(_pe, dict) and _pe.get("error"):
-        _pe_when = _local_ts(_pe.get("at"))
-        _pe_worker = _pe.get("worker", "?")
-        _pe_raw_js = _json.dumps(_pe.get("raw", ""))
+    _pe_norm: Optional[Dict[str, Any]] = None
+    if _pe and isinstance(_pe, dict):
+        if _pe.get("error"):
+            _pe_norm = {
+                "heading": f"eBay rejected {_pe.get('worker', '?')}",
+                "detail": _pe["error"],
+                "raw": _pe.get("raw", ""),
+                "at": _pe.get("at"),
+                "code": _pe.get("code"),
+            }
+        elif _pe.get("detail") or _pe.get("code"):
+            _pe_code = _pe.get("code")
+            _pe_norm = {
+                "heading": (f"eBay rejected {_pe.get('source', '?')}"
+                            if _pe_code == "ebay_rejected"
+                            else f"{_pe.get('source', 'pipeline')} stopped: "
+                                 f"{_pe_code or 'error'}"),
+                "detail": _pe.get("detail") or str(_pe_code or ""),
+                "raw": _pe.get("raw", ""),
+                "at": _pe.get("ts"),
+                "code": _pe_code,
+            }
+    if _pe_norm:
+        _pe_when = _local_ts(_pe_norm["at"])
+        _pe_raw_js = _json.dumps(_pe_norm["raw"])
+        _raw_btn = (
+            '<button class="act-btn" style="font-size:.78em;padding:2px 8px" '
+            'onclick="toggleRawError()">Show raw</button>'
+        ) if _pe_norm["raw"] else ""
         _pipeline_error_html = (
             f'<div id="pipeline-error-box" style="margin-bottom:12px;padding:10px 14px;'
             f'background:#1a0505;border:1px solid #844;border-radius:4px;font-size:.82em;color:#e88">'
             f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">'
-            f"<strong>eBay rejected {_pe_worker}</strong>"
+            f"<strong>{h(_pe_norm['heading'])}</strong>"
             f'<span style="color:#666;font-size:.85em">{_pe_when} UTC</span></div>'
-            f'<div style="color:#f99;margin-bottom:6px">{h(_pe["error"])}</div>'
+            f'<div style="color:#f99;margin-bottom:6px">{h(_pe_norm["detail"])}</div>'
             f'<div style="display:flex;gap:8px;flex-wrap:wrap">'
-            f'<button class="act-btn" style="font-size:.78em;padding:2px 8px" '
-            f'onclick="toggleRawError()">Show raw</button>'
+            f"{_raw_btn}"
             f'<button class="act-btn act-warn" style="font-size:.78em;padding:2px 8px" '
             f'onclick="clearPipelineError()">Clear error</button></div>'
             f'<pre id="pipeline-error-raw" style="display:none;margin-top:8px;font-size:.75em;'
@@ -5018,9 +5040,26 @@ def _render_item_detail_html(
     _working = any(
         j.get("state") in ("pending", "running", "claimed", "retry") for j in jobs
     )
-    _has_error = bool(_pe and isinstance(_pe, dict) and _pe.get("error")) or any(
-        j.get("state") == "dead_letter" for j in jobs
+    # A dead_letter older than the last re-baseline is superseded history:
+    # the manager made draft == offer after that failure (broker B1a), so it
+    # is no longer an actionable state. Newer dead_letters are live failures.
+    _baseline_at = item.get("baseline_at")
+
+    def _after_baseline(j: Dict[str, Any]) -> bool:
+        if not _baseline_at:
+            return True
+        ts = j.get("finished_at") or j.get("updated_at") or j.get("created_at")
+        if not ts:
+            return True
+        try:
+            return datetime.fromisoformat(ts) > datetime.fromisoformat(_baseline_at)
+        except (ValueError, TypeError):
+            return True
+
+    _has_error = bool(_pe_norm) or any(
+        j.get("state") == "dead_letter" and _after_baseline(j) for j in jobs
     )
+    _needs_price = bool(_pe_norm and _pe_norm.get("code") == "no_price_set")
     # Draft-vs-live divergence: does the draft differ from what eBay holds?
     _live_inv = (_ebay_live_raw.get("inventory_item") or {}) if _ebay_live_raw else {}
     _live_offer_raw = (_ebay_live_raw.get("offer") or {}) if _ebay_live_raw else {}
@@ -5065,13 +5104,48 @@ def _render_item_detail_html(
     if _is_sold:
         _line.append(_abtn("Relist", "relistItem()", "green",
                            title="Stage and publish this item again"))
-    elif _has_error:
+    elif _needs_price:
+        # A guard finding with a known fix gets its affordance regardless of
+        # listing state — Retry cannot resolve a missing price, the editor can.
+        _line.append(_abtn(
+            "Set Price",
+            "var p=document.getElementById('dl-price-input');"
+            "if(p){p.scrollIntoView({behavior:'smooth',block:'center'});p.focus();}",
+            "red",
+            title=("Live on eBay, but the draft has no operator-set price — "
+                   "set one, then Update Item to push it live") if is_active
+                  else "The draft has no price — set one, then List on eBay"))
+        if not is_active and _has_draft:
+            _line.append(_abtn("List on eBay", "listOnEbay()", "green",
+                               title="Save draft, run every needed step, and publish"))
+    elif _has_error and not is_active:
         _line.append(_abtn("Retry", "retryPipeline()", "red",
                            title="Something failed — retry the failed step"))
     elif _working:
         _line.append(_abtn("Working…", "", "yellow", disabled=True,
                            title="Pipeline is running — refresh to update"))
     elif is_active:
+        # The live listing is the ground truth — a failed re-run must never
+        # mask it behind a bare Retry (which would only fail the same way).
+        # The error becomes a directed affordance instead.
+        if _pe_norm:
+            # Keyed off the persisted finding (C11), not the job ledger — a
+            # historical dead_letter whose finding was resolved is not a state.
+            _line.append(_abtn(
+                "Needs attention",
+                "var b=document.getElementById('pipeline-error-box');"
+                "if(b)b.scrollIntoView({behavior:'smooth'});",
+                "red",
+                title="Live on eBay, but the last pipeline step failed — see the error box"))
+        elif _has_error:
+            # Dead-letter in the ledger with no persisted finding (worker
+            # crash paths write none) — quieter, but never silent.
+            _line.append(_abtn(
+                "Needs attention",
+                "var j=document.getElementById('jobs-section');"
+                "if(j)j.scrollIntoView({behavior:'smooth'});",
+                "red",
+                title="Live on eBay, but a pipeline job failed — see job history"))
         if _diverged:
             _line.append(_abtn("Update Item", "updateItem()", "yellow",
                                title="Draft has unpushed changes — push to eBay in place"))
@@ -5099,9 +5173,12 @@ def _render_item_detail_html(
                            title="Run identification and draft the eBay listing"))
 
     if is_active and not _is_sold:
-        if _diverged:
-            _line.append(_abtn("Reset Draft", "resetDraftFromLive()", "blue",
-                               title="Discard local edits — re-pin the draft to what is live on eBay"))
+        # Always operator-accessible on a live item (Dave, s46): this is THE
+        # component that resolves the draft interface to the live data — the
+        # broken-draft states (e.g. draft price empty vs live price set) are
+        # exactly the ones the _diverged heuristic can't see.
+        _line.append(_abtn("Reset Draft", "resetDraftFromLive()", "blue",
+                           title="Discard local edits — re-pin the draft to what is live on eBay"))
         _line.append(_abtn("End Listing", (
             "triggerAction('ebay_end_listing',"
             "'End this listing on eBay? This cannot be undone.')"), "red"))

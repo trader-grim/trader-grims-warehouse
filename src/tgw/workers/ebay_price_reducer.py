@@ -43,6 +43,7 @@ from tgw.apis.ebay.client import ebay_put
 from tgw.apis.fence import ebay_write as fence_ebay_write
 from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.config import DEFAULT_CONFIG, load_config
+from tgw.draft_sync import baseline_fields
 from tgw.ebay.sync import _build_offer_bodies
 from tgw.queue import state_machine
 from tgw.queue.worker_base import QueueWorker
@@ -264,10 +265,20 @@ class EbayPriceReducerWorker(QueueWorker):
         # (as happened here, a transient KeyError('api_key') crash) can no
         # longer discard the bookkeeping for a price change eBay already
         # accepted live.
+        # Draft lifecycle (broker B1a): this write makes draft == offer by
+        # construction (the reduced price just went live AND into the draft),
+        # so it MAINTAINS the baseline rather than breaking it. Without the
+        # explicit state, the fence PATCH hook would flip the item to
+        # 'editing' every 6h and the fleet baseline would erode within days.
+        # An in-flight operator edit (state 'editing') is preserved as-is.
+        _state = ({'draft_listing_state': 'editing'}
+                  if item.get('draft_listing_state') == 'editing'
+                  else baseline_fields())
         fence_patch_item(self.config, sku, {
             'reprice_schedule': schedule,
             'price_history':    item['price_history'],
             'draft_listing':    draft,
+            **_state,
         })
         try:
             fence_ebay_write(self.config, sku, ebay_offer={'price': new_price})

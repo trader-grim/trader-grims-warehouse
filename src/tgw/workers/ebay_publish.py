@@ -27,6 +27,7 @@ from tgw.apis.ebay.client import ebay_get, ebay_put
 from tgw.apis.fence import ebay_write as fence_ebay_write
 from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.config import DEFAULT_CONFIG, load_config
+from tgw.draft_sync import baseline_fields
 from tgw.ebay.pricing import to_99
 from tgw.ebay.sync import publish_offer
 from tgw.queue import state_machine
@@ -257,11 +258,14 @@ class EbayPublishWorker(QueueWorker):
                     result = publish_offer(self.config, offer_id)
                 else:
                     msg = _format_ebay_error(body_text, status)
+                    # Canonical pipeline_error schema (broker B1b) — see
+                    # ebay_stage.py; legacy schema still rendered by shim.
                     pipeline_error = {
-                        'worker': 'ebay_publish',
-                        'error': msg,
-                        'raw': body_text[:800],
-                        'at': datetime.now(timezone.utc).isoformat(),
+                        'code':   'ebay_rejected',
+                        'detail': msg,
+                        'raw':    body_text[:800],
+                        'ts':     datetime.now(timezone.utc).isoformat(),
+                        'source': 'ebay_publish',
                     }
                     fence_patch_item(self.config, sku, {'pipeline_error': pipeline_error})
                     raise HardFailure(f'{sku}: eBay rejected publish: {msg}') from exc
@@ -326,10 +330,15 @@ class EbayPublishWorker(QueueWorker):
         fence_ebay_write(self.config, sku,
                          ebay_listing=item.get('ebay_listing'),
                          ebay_offer=item.get('ebay_offer'))
+        # Broker B1a (M1/M2): the draft→offer push is complete — the offer
+        # now holds exactly what the draft specified, so the manager marks
+        # the draft re-baselined. The next manipulation (AI or operator)
+        # starts from a correct base, and drift is detectable again.
         fence_patch_item(self.config, sku, {
             'reprice_schedule': item.get('reprice_schedule'),
             'price_history':    item.get('price_history', []),
             'draft_listing':    item.get('draft_listing'),
+            **baseline_fields(now),
         })
 
         log.info('published %s → %s', sku, result['listing_url'])

@@ -309,11 +309,16 @@ class EbayStageWorker(QueueWorker):
             if status in (400, 422):
                 raw = exc.response.text if exc.response is not None else ''
                 msg = _format_ebay_error(raw, status)
+                # Canonical pipeline_error schema (broker B1b): guard findings
+                # and rejections share {code, detail, ts, source}; rejections
+                # add the raw eBay body. Reader shim in http_server still
+                # renders the legacy {worker, error, raw, at} on old items.
                 pipeline_error = {
-                    'worker': 'ebay_stage',
-                    'error': msg,
-                    'raw': raw[:800],
-                    'at': datetime.now(timezone.utc).isoformat(),
+                    'code':   'ebay_rejected',
+                    'detail': msg,
+                    'raw':    raw[:800],
+                    'ts':     datetime.now(timezone.utc).isoformat(),
+                    'source': 'ebay_stage',
                 }
                 fence_patch_item(self.config, sku, {'pipeline_error': pipeline_error})
                 raise HardFailure(f'{sku}: eBay rejected staging: {msg}') from exc
