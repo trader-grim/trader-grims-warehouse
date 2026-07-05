@@ -133,9 +133,17 @@ Sequenced pilot-first, exactly per the transcript's "do not overbuild" advice:
   one more part). Transcript leans GCS for the end-state; A2's evidence informs this.
   Includes the remote partitioning plan: `gdrive-archive-YYYY` date-partitioned FROM
   DAY ONE (scale-context standing rule), 500k-objects-per-folder ceiling respected.
-- **A4 (M, p30, AFTER A1-A3 + Dave sign-off, GATED on a PP-BACKUP-001 baseline
-  existing — soundness guard 4): ItemData photos design doc.** Includes the full
-  symlink-consumer audit (soundness guard 3). The big
+- **A4 — RESCOPED per Dave (s45, same session): NO live-data migration.** Annex
+  manages **history + archive only, and only to consolidate** — ItemData stays
+  exactly as it is, fence-owned, untouched. Dave's framing (now the design intent):
+  git-annex = metadata/location store; Google Drive = the portable full-data backup
+  + on-the-go full-size fetch; the infrastructure just automates that; recoll makes
+  all of it lightning-fast. This retires most of soundness guards 2–4 for the near
+  term (no Syncthing collision on live trees, no live symlink consumers, no
+  storage restructure without backups — archive worst-case is inconvenience, not
+  outage). A4 is now: **archive/masterarchive/drive-fleet consolidation design**,
+  still gated on A0's boundary map and Dave approving every deletion. A live-ItemData
+  annex remains a someday-option documented here, nothing more. The big
   one — fence-mediated (SKU-addressed API unchanged — the fence design already
   survives storage-tier changes, per FUTURE-IDEAS), intake writes through annex,
   `status=sold → git annex move --to archive-YYYY` lifecycle, numcopies enforced
