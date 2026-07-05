@@ -136,9 +136,27 @@ in the process" (Dave). Packets below are transport-agnostic; E1/E2 become
 
 Sequenced pilot-first, exactly per the transcript's "do not overbuild" advice:
 
-- **A0 (decision packet, p20): the Syncthing/annex boundary map.** Per-directory
-  ruling on which tool owns which subtree (soundness guard 2). Nothing annexed until
-  its subtree is off Syncthing's routes.
+- **A0 (decision packet, p20): the Syncthing/annex boundary map — DIRECTION SET by
+  Dave (s45): annex-based GDrive tooling REPLACES Syncthing for data trees.**
+  Rationale (Dave): faster + atomic transfers, and hashes + metadata come free.
+  Technically correct: content-addressed objects are complete-or-absent (no partial
+  states, no `.sync-conflict` files — impossible by construction), photos/JPEGs never
+  benefit from Syncthing's delta sync anyway, and every transferred object arrives
+  pre-hashed and taggable. Two refinements carried into the packet:
+  1. **LAN topology:** Drive-as-rendezvous would make tgw-prod↔a1131 transfers slower
+     than Syncthing (up-then-down through Google). Fix: a1131 (and any LAN host) is a
+     plain ssh git-annex remote — direct LAN transfers at wire speed; Drive is the
+     off-site/portable/backup tier only. `git annex sync --content` policies pick
+     routes automatically.
+  2. **The vault carve-out:** the plan vault is the one Syncthing role annex should
+     NOT take — bidirectional small-markdown sync wants real merges, which is plain
+     **git** (Obsidian git plugin on Dave's devices), not annex and not Syncthing.
+     Bonus: retires the conflict-file plague (15 in the vault today) and #1106's
+     one-way-split workaround becomes moot. Separate packet (A0b), sequenced last.
+  Remaining A0 work: inventory every current Syncthing folder (both instances,
+  db:8384 + tgw:8385 — install bundles, USB kit, phone-facing drops, vault) and give
+  each a landing spot (annex / git / NFS-already / retire). Syncthing turns off when
+  the map is empty, not before.
 - **A1 (S, p20): pilot annex on the document corpus** (masterarchive/history +
   drive-consolidation staging area — NOT ItemData). `git annex init` a dedicated repo,
   import a bounded sample (~5-10GB), set `numcopies=2`, prove: add, metadata tag,
