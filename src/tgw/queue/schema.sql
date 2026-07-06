@@ -210,9 +210,13 @@ DECLARE
     v_count INTEGER;
     v_retry INTEGER;
 BEGIN
+    -- Exhausted lease-expired jobs go straight to dead_letter (never rest in
+    -- 'failed' — mirrors mark_failed's immediate failed->dead_letter cascade)
+    -- otherwise they become invisible zombies: missed by dead_letter_count,
+    -- dead-letter CLI/MCP tools, and the stall watchdog.
     UPDATE queue_jobs
        SET state = CASE
-            WHEN attempt_count >= max_attempts THEN 'failed'::queue_job_state
+            WHEN attempt_count >= max_attempts THEN 'dead_letter'::queue_job_state
             ELSE 'queued'::queue_job_state
            END,
            lease_owner = NULL,
@@ -234,12 +238,6 @@ BEGIN
        AND lease_expires_at < NOW();
 
     GET DIAGNOSTICS v_count = ROW_COUNT;
-
-    -- 'failed' never rests (mirrors mark_failed's immediate failed->dead_letter
-    -- cascade) — otherwise exhausted lease-expired jobs become invisible zombies:
-    -- missed by dead_letter_count, dead-letter CLI/MCP tools, and the stall watchdog.
-    UPDATE queue_jobs SET state = 'dead_letter'::queue_job_state
-     WHERE state = 'failed';
 
     -- Promote retry_wait jobs whose not_before has passed back to queued
     UPDATE queue_jobs
