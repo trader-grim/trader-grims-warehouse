@@ -69,7 +69,22 @@ forward — but that backfill also needs explicit authorization, it's a
 production data mutation).
 
 ## Out of scope (not touched)
-- Backfilling the 62 existing zombie rows — flagged above, needs Dave's go-ahead.
+- Backfilling the 62 existing zombie rows — self-healed automatically by the
+  fix itself, see follow-up below, no manual backfill was ever needed.
 - `mark_dead_letter()`/`mark_failed()` themselves were not modified — they
   already had the correct cascading behavior; only their declared-transition
   matrix gap was closed.
+
+## Follow-up: /code-review found the cascade UPDATE was inefficient (commit 7ec2a23)
+The two-statement fix above (first UPDATE demotes to 'failed', second UPDATE
+cascades 'failed'->'dead_letter') worked but was flagged in review: the second
+UPDATE is an unindexed full-table scan (`WHERE state='failed'`, no partial
+index like the other state-based indexes in schema.sql have) run on *every*
+worker's 60s recovery cycle forever, and its ROW_COUNT wasn't folded into
+`v_count`, undercounting the recovered-jobs total that worker_base.py logs.
+Fixed by folding the dead_letter assignment directly into the existing CASE
+expression (`WHEN attempt_count >= max_attempts THEN 'dead_letter'` instead of
+`'failed'`) — same live-verified outcome, no separate scan, accurate count.
+Re-applied to the live DB (`sudo -u postgres psql -d state_machine -f
+schema.sql`), re-verified `failed` stays at 0. Committed separately (7ec2a23)
+per Dave's request to keep it apart from the original fix (3ab832b).

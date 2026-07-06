@@ -139,6 +139,40 @@ push flake fixes to a1131 (#1233, may be asleep — `wakeonlan c8:2a:14:2a:a1:85
 · get intake device's reserved IP to unblock #1219/#1228 · #1234-#1239 as
 normal execution-track packets · #1230 governance/policy review (not started).
 
+## Session 48 — 2026-07-06 (todo #1200 — recover_expired_jobs dead-letter zombie fix)
+
+- **Fixed via `/tgw-packet 1200`** (todo #1200 DONE): `recover_expired_jobs()`
+  was demoting exhausted lease-expired jobs to `'failed'` and leaving them
+  there forever — invisible to `dead_letter_count`, the dead-letter CLI/MCP
+  tools, and the stall watchdog (Prime Directive 2 violation). Pre-flight
+  live query found 62 real zombie jobs already stuck this way
+  (ebay_sync/ebay_legacy_sync/ebay_sku_migrate, oldest since 2026-06-24).
+  Fixed `src/tgw/queue/schema.sql` to set `dead_letter` directly, plus closed
+  a declared-transition-matrix gap in `state_machine.py`
+  (`leased`/`running` → `dead_letter` now allowed, matching existing
+  `mark_dead_letter()` behavior). New test added. Offline suite: 1837
+  passed, same 9 pre-existing/unrelated failures as main.
+- **Live apply, Dave approved ("yes, apply")**: deployed via
+  `sudo -u postgres psql -d state_machine -f schema.sql` — `tgw` role is
+  not the schema owner, `postgres` is (new reference memory:
+  `reference-schema-sql-apply-role`). All 62 zombie jobs self-healed to
+  `dead_letter` within the next worker's normal 60s recovery cycle, no
+  manual backfill needed. `tgw health` confirmed the count now folds in
+  correctly.
+- **`/code-review` follow-up (commit 7ec2a23, separate per Dave's request):**
+  the first-pass fix used a second cascade UPDATE (`WHERE state='failed'`)
+  that was an unindexed full-table scan run on every worker's 60s recovery
+  cycle forever, and undercounted the recovered-jobs total. Folded the
+  `dead_letter` assignment directly into the existing CASE expression
+  instead — same live-verified outcome, no extra scan, accurate count.
+  Re-applied live, re-verified.
+- Two commits: `3ab832b` (original fix) and `7ec2a23` (review follow-up).
+  Inbox note: `docs/TGW-Plan-Vault/inbox/DONE-1200-dead-letter-zombie.md`.
+
+**Open into next session:** nothing new blocked by this session. Same
+carry-forwards as Session 47 above (Hermes restart, a1131 push, #1219/#1228,
+#1234-#1239 packets, #1230 review) are still open.
+
 ---
 
 Older sessions: `archive/SESSION-LOG.md`.
