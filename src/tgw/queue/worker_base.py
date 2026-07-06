@@ -225,32 +225,34 @@ class QueueWorker:
             error_text = repr(exc)
             log.exception('job %s failed: %s', job_id, error_text)
 
-            # When the job has exhausted normal retries, classify the error.
-            # Transient errors get rescheduled with a fresh retry window rather
-            # than dying permanently — keeps dead_letter clean.
+            # Classify the error on every attempt, not just the last one.
+            # Transient errors (expired token, quota wall, 429) get the tuned
+            # backoff immediately — retrying sooner with generic 30-240s
+            # exponential backoff just re-hammers an already-broken dependency
+            # several times before the real backoff kicks in (same failure
+            # class as the 3-day EPS quota exhaustion incident, PP-QUOTA-001).
             attempt = int(job.get('attempt_count') or 0)
             max_att = int(job.get('max_attempts') or 5)
-            if attempt >= max_att:
-                action, delay = classify_dead_letter(error_text)
-                if action == 'requeue':
-                    log.warning(
-                        'transient error at retry limit on %s; rescheduling in %ds: %s',
-                        self.queue_name, delay, error_text[:200],
-                    )
-                    from tgw.notify import notify
-                    notify(
-                        f'Transient requeue: {self.queue_name}',
-                        f'Rescheduling in {delay}s — {error_text[:120]}',
-                        level='warning',
-                    )
-                    state_machine.requeue_with_backoff(
-                        job_id, self.owner, delay, error_text
-                    )
-                    tgw_logging.log_event(
-                        'job_transient_requeue', job_id=job_id,
-                        queue=self.queue_name, delay=delay,
-                    )
-                    return
+            action, delay = classify_dead_letter(error_text)
+            if action == 'requeue':
+                log.warning(
+                    'transient error on %s (attempt %d/%d); rescheduling in %ds: %s',
+                    self.queue_name, attempt, max_att, delay, error_text[:200],
+                )
+                from tgw.notify import notify
+                notify(
+                    f'Transient requeue: {self.queue_name}',
+                    f'Rescheduling in {delay}s — {error_text[:120]}',
+                    level='warning',
+                )
+                state_machine.requeue_with_backoff(
+                    job_id, self.owner, delay, error_text
+                )
+                tgw_logging.log_event(
+                    'job_transient_requeue', job_id=job_id,
+                    queue=self.queue_name, delay=delay,
+                )
+                return
 
             state_machine.mark_failed(job_id, self.owner, error_text)
             tgw_logging.log_event('job_failed', job_id=job_id, error=error_text)

@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
+from tgw import quota
 from tgw.config import load_config, sku_json
 from tgw.resolver import iter_all_skus
 from tgw.apis.fence import ebay_write as fence_ebay_write, patch_item as fence_patch_item
@@ -130,6 +131,13 @@ def main() -> None:
     cfg = load_config(Path('/opt/TGW/config/tgw-api-config.json'))
     key_path = cfg['secrets_root'] / 'tgw-api-key.json'
     cfg['api_key'] = json.loads(key_path.read_text(encoding='utf-8'))['api_key']
+
+    # This script's writes go through the fence as a background/machine
+    # caller — without this, http_server treats every patch_item call as
+    # operator-originated and auto-enqueues a live force=True ebay_stage
+    # push to eBay for every touched item (real EPS-quota consumption
+    # despite this script's own "No eBay API calls" docstring promise).
+    quota.set_context('background', 'ebay_normalize')
 
     if args.sku:
         result = _normalize_one(cfg, args.sku, dry_run=args.dry_run)
