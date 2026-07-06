@@ -48,8 +48,8 @@ STATES = {
 
 ALLOWED_TRANSITIONS = {
     'queued': {'leased', 'cancelled'},
-    'leased': {'running', 'queued', 'cancelled'},
-    'running': {'succeeded', 'retry_wait', 'failed', 'queued', 'cancelled'},
+    'leased': {'running', 'queued', 'cancelled', 'dead_letter'},
+    'running': {'succeeded', 'retry_wait', 'failed', 'queued', 'cancelled', 'dead_letter'},
     'retry_wait': {'queued', 'cancelled', 'dead_letter'},
     'failed': {'dead_letter', 'queued', 'cancelled'},
     'succeeded': set(),
@@ -68,9 +68,11 @@ RULES = {
     ('queued', 'leased'): TransitionRule('queued', 'leased', requires_worker=True),
     ('leased', 'running'): TransitionRule('leased', 'running', requires_worker=True),
     ('leased', 'queued'): TransitionRule('leased', 'queued'),
+    ('leased', 'dead_letter'): TransitionRule('leased', 'dead_letter', terminal=True),
     ('running', 'succeeded'): TransitionRule('running', 'succeeded', requires_worker=True, terminal=True),
     ('running', 'retry_wait'): TransitionRule('running', 'retry_wait', requires_worker=True),
     ('running', 'failed'): TransitionRule('running', 'failed', requires_worker=True, terminal=True),
+    ('running', 'dead_letter'): TransitionRule('running', 'dead_letter', terminal=True),
     ('running', 'queued'): TransitionRule('running', 'queued'),
     ('retry_wait', 'queued'): TransitionRule('retry_wait', 'queued'),
     ('retry_wait', 'dead_letter'): TransitionRule('retry_wait', 'dead_letter', terminal=True),

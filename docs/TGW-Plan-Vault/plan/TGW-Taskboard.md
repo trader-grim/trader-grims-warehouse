@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-07-06 20:41 UTC — 230 open, 109 done in the last 7 days._
+_Rendered 2026-07-06 20:53 UTC — 229 open, 110 done in the last 7 days._
 
 ## admin (23 open)
 
@@ -41,12 +41,11 @@ _Rendered 2026-07-06 20:41 UTC — 230 open, 109 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (63 open)
+## claude (62 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
 | 1145 | 5 |  | PP-UIPIPE-001 planning: web UI listing pipeline defect audit with Dave — his observed defects on real new listings: (1) wrong shipping policy on new listing, (2) item PUBLISHED with no price set in interface (C1 invariant violation — guard bypassed or broken), (3) only one photo uploaded, no reattempt (relation to #1115/P1 completion-guard fix — verify fix actually deployed/covers this path), + more TBD. Go over full list together as one plan item; produce defect->root-cause->packet map. Dave 2026-07-04: 'the web ui pipeline ain't cutting it' |  |  |
-| 1200 | 6 |  | audit#1143: state_machine.py:285/schema.sql:213 recover_expired_jobs() demotes exhausted lease-expired jobs to 'failed' but never promotes to 'dead_letter' like mark_failed() does -- job becomes a permanent invisible zombie, missed by tgw health dead_letter_count, dead-letter CLI/MCP tools, and stall watchdog; also violates ALLOWED_TRANSITIONS (leased->failed not in matrix) -- Prime Directive 2 (act on alarms) violated since it's invisible |  |  |
 | 1201 | 6 |  | audit#1143: worker_base.py:231 tuned transient-error backoff table (900s token-expired, 1800s quota/429) only consulted on the FINAL attempt -- every earlier retry uses generic 30-240s exponential backoff, re-hammering an already-broken dependency (expired token/quota wall) 4x before the real backoff kicks in; same failure class as the 3-day EPS quota exhaustion incident PP-QUOTA-001 was built to prevent |  |  |
 | 1207 | 6 |  | audit#1143: ebay_normalize.py:115 never sets quota.set_context('background',...) before its fence_patch_item calls -- http_server treats every write as operator-originated, auto-enqueuing a live force=True ebay_stage push to eBay for ~19k items despite the script's own docstring saying 'No eBay API calls' -- unflagged bulk eBay write, real EPS-quota consumption |  |  |
 | 1217 | 6 |  | audit#1143 SECURITY: nix/os/base.nix:78 Syncthing GUI bound 0.0.0.0:8384, firewall opens 8384/tcp network-wide, no guiAddress auth/HTTPS configured -- any LAN/Tailscale device gets full unauthenticated Syncthing GUI/API, can repoint the tgw-flake + ItemData sync folders or exfiltrate data |  |  |
@@ -261,10 +260,11 @@ _Rendered 2026-07-06 20:41 UTC — 230 open, 109 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — sold-event webhook (Tier 4)\|PP-SOLD-001]] |  |
 
-## Done this week (109)  — showing 15 most recent
+## Done this week (110)  — showing 15 most recent
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 1200 | claude | 2026-07-06 | audit#1143: recover_expired_jobs() invisible zombie fix — CODE DONE (schema.sql cascade failed->dead_letter + state_machine.py matrix fixed for leased/running->dead_letter), offline tests pass (1837 passed, pre-existing 9 unrelated failures unchanged). BLOCKED on live DB apply: tgw role lacks owner perms on recover_expired_jobs(), needs Dave to apply via correct role + decide on backfilling 62 existing zombie 'failed' rows. See inbox/INPROGRESS-1200-dead-letter-zombie.md |
 | 1174 | claude | 2026-07-06 | audit#1143 SECURITY: notifications.py verify_notification_signature() fails OPEN (returns True) on missing header/signature/parse-exception on the public unauthenticated /webhooks/ebay/notification endpoint -- attacker can forge sold-notification for any known listing_id to corrupt inventory (mark sold/decrement qty) |
 | 1237 | claude | 2026-07-06 | in_progress: executing packet via /tgw-packet |
 | 1227 | claude | 2026-07-06 | Plan: decouple Hermes + Aider from flake control for faster prototyping (no rebuild) |
@@ -279,5 +279,4 @@ _Rendered 2026-07-06 20:41 UTC — 230 open, 109 done in the last 7 days._
 | 1184 | claude | 2026-07-06 | SUPERSEDED -- merged into #1237, see #1237 for full scope. Not fixed yet, just consolidated. |
 | 1205 | claude | 2026-07-06 | SUPERSEDED -- merged into #1236, see #1236 for full scope. Not fixed yet, just consolidated. |
 | 1204 | claude | 2026-07-06 | SUPERSEDED -- merged into #1236, see #1236 for full scope. Not fixed yet, just consolidated. |
-| 1212 | claude | 2026-07-06 | SUPERSEDED -- merged into #1235, see #1235 for full scope. Not fixed yet, just consolidated. |
-| … | | | _…and 94 more — run `tgw todo --all` to see everything_ |
+| … | | | _…and 95 more — run `tgw todo --all` to see everything_ |

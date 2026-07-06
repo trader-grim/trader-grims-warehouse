@@ -235,6 +235,12 @@ BEGIN
 
     GET DIAGNOSTICS v_count = ROW_COUNT;
 
+    -- 'failed' never rests (mirrors mark_failed's immediate failed->dead_letter
+    -- cascade) — otherwise exhausted lease-expired jobs become invisible zombies:
+    -- missed by dead_letter_count, dead-letter CLI/MCP tools, and the stall watchdog.
+    UPDATE queue_jobs SET state = 'dead_letter'::queue_job_state
+     WHERE state = 'failed';
+
     -- Promote retry_wait jobs whose not_before has passed back to queued
     UPDATE queue_jobs
        SET state = 'queued'::queue_job_state,
