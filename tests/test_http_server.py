@@ -62,8 +62,9 @@ def _login(client):
 class _FakeCursor:
     """Minimal psycopg2-ish cursor that returns canned queue-job rows."""
 
-    def __init__(self, rows):
+    def __init__(self, rows, rowcount=1):
         self._rows = rows
+        self.rowcount = rowcount
 
     def __enter__(self):
         return self
@@ -82,8 +83,9 @@ class _FakeCursor:
 
 
 class _FakeConn:
-    def __init__(self, rows):
+    def __init__(self, rows, rowcount=1):
         self._rows = rows
+        self._rowcount = rowcount
 
     def __enter__(self):
         return self
@@ -92,7 +94,7 @@ class _FakeConn:
         return False
 
     def cursor(self, *args, **kwargs):
-        return _FakeCursor(self._rows)
+        return _FakeCursor(self._rows, rowcount=self._rowcount)
 
 
 def _make_catalog(db_path: Path, rows):
@@ -1078,6 +1080,50 @@ def test_bulk_action_mark_sold_writes_status(env, enqueue_calls):
     assert any(c["kwargs"].get("queue_name") == "catalog_rebuild" for c in enqueue_calls)
 
 
+def test_bulk_action_mark_sold_decrements_multi_qty_instead_of_sold(env, enqueue_calls):
+    """audit#1143 #1190: a multi-qty item must decrement, not jump straight
+    to status=Sold and hide the remaining unsold units."""
+    client = env["client"]
+    doc_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+    doc = json.loads(doc_path.read_text())
+    doc["draft_listing"] = {"quantity": 3}
+    doc_path.write_text(json.dumps(doc))
+
+    r = client.post("/api/bulk/action", headers=AUTH_HEADERS,
+                    json={"skus": [SKU_A], "action": "mark_sold"})
+    assert r.status_code == 200
+    doc = json.loads(doc_path.read_text())
+    assert doc.get("status") != "Sold"
+    assert doc["draft_listing"]["quantity"] == 2
+
+
+def test_bulk_action_mark_sold_reads_item_doc_exactly_once(env, enqueue_calls, monkeypatch):
+    """code-review follow-up: the original mark_sold fix read the item doc
+    once to compute `remaining`, then _apply_patch's own internal read
+    merged that now-stale value -- a TOCTOU window a concurrent real-sale
+    decrement (ebay/pull.py mark_item_sold) could land in. Closing it means
+    exactly one read feeds the one write, no second independent read."""
+    client = env["client"]
+    doc_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+    doc = json.loads(doc_path.read_text())
+    doc["draft_listing"] = {"quantity": 3}
+    doc_path.write_text(json.dumps(doc))
+
+    calls = []
+    real_load = http_server.load_item_doc
+
+    def _counting_load(path):
+        calls.append(path)
+        return real_load(path)
+
+    monkeypatch.setattr(http_server, "load_item_doc", _counting_load)
+
+    r = client.post("/api/bulk/action", headers=AUTH_HEADERS,
+                    json={"skus": [SKU_A], "action": "mark_sold"})
+    assert r.status_code == 200
+    assert len(calls) == 1
+
+
 def test_bulk_action_delete_writes_status(env, enqueue_calls):
     client = env["client"]
     r = client.post("/api/bulk/action", headers=AUTH_HEADERS,
@@ -1099,6 +1145,69 @@ def test_bulk_action_missing_sku_reported_in_errors(env, enqueue_calls):
     assert body["count"] == 0
     assert len(body["errors"]) == 1
     assert "not found" in body["errors"][0]
+
+
+def test_ebay_write_protects_price_comps_from_worker_overwrite(env):
+    """audit#1143 #1189: _apply_ebay_write's field-protection loop was a
+    no-op -- it only restored the protected value when the incoming block
+    didn't set it, which is exactly when nothing needed restoring. A worker
+    write that tries to overwrite price_comps must be blocked outright."""
+    client = env["client"]
+    doc_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+    doc = json.loads(doc_path.read_text())
+    doc["ebay_offer"] = {"offer_id": "o1", "price_comps": {"median": 12.5}}
+    doc_path.write_text(json.dumps(doc))
+
+    r = client.post(f"/api/items/{SKU_A}/ebay-write", headers=AUTH_HEADERS,
+                     json={"ebay_offer": {"offer_id": "o1", "price_comps": {"median": 999}}})
+    assert r.status_code == 200
+    doc = json.loads(doc_path.read_text())
+    assert doc["ebay_offer"]["price_comps"]["median"] == 12.5
+
+
+def test_ebay_write_allow_protected_lets_owner_refresh_price_comps(env):
+    """code-review follow-up: the #1189 fix must not block the ONE legitimate
+    owner (ebay_price) from refreshing price_comps -- it opts in via
+    allow_protected."""
+    client = env["client"]
+    doc_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+    doc = json.loads(doc_path.read_text())
+    doc["ebay_offer"] = {"offer_id": "o1", "price_comps": {"median": 12.5}}
+    doc_path.write_text(json.dumps(doc))
+
+    r = client.post(f"/api/items/{SKU_A}/ebay-write", headers=AUTH_HEADERS,
+                     json={"ebay_offer": {"offer_id": "o1", "price_comps": {"median": 999}},
+                           "allow_protected": ["price_comps"]})
+    assert r.status_code == 200
+    doc = json.loads(doc_path.read_text())
+    assert doc["ebay_offer"]["price_comps"]["median"] == 999
+
+
+def test_remove_comp_uses_same_stats_formula_as_pricing_module(env):
+    """audit#1143 #1193: remove_comp must use the same nearest-rank formula
+    as ebay/pricing.py._compute_stats, not a separate linear-interpolation
+    one, or stored comps stats silently shift on every operator edit."""
+    from tgw.ebay.pricing import _compute_stats
+
+    client = env["client"]
+    doc_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+    prices = [10.0, 12.0, 15.0, 20.0, 25.0]
+    items = [{"url": f"http://x/{i}", "price": p} for i, p in enumerate(prices)]
+    doc = json.loads(doc_path.read_text())
+    doc["ebay_offer"] = {"price_comps": {"items": items + [
+        {"url": "http://x/drop", "price": 1000.0},
+    ]}}
+    doc_path.write_text(json.dumps(doc))
+
+    r = client.post(f"/api/items/{SKU_A}/remove-comp", headers=AUTH_HEADERS,
+                     json={"url": "http://x/drop"})
+    assert r.status_code == 200
+    doc = json.loads(doc_path.read_text())
+    comps = doc["ebay_offer"]["price_comps"]
+    expected = _compute_stats(prices)
+    assert comps["p25"] == expected["p25"]
+    assert comps["median"] == expected["median"]
+    assert comps["p75"] == expected["p75"]
 
 
 def test_bulk_action_set_ready_missing_offer(env):
@@ -2916,6 +3025,25 @@ def test_discard_revision_removes_draft(env):
     assert "revision_draft" not in saved
 
 
+def test_discard_revision_persists_finding_when_rebuild_enqueue_fails(env, monkeypatch):
+    """code-review follow-up: discard_revision's comment claimed a C11
+    finding was persisted on a failed catalog_rebuild enqueue, but the code
+    only logged a warning -- fix must actually write pipeline_error."""
+    _write_item_with_revision(env["itemdata_root"], SKU_A, _REVISION_DRAFT)
+    client = env["client"]
+
+    def _boom(*a, **k):
+        raise RuntimeError("postgres unavailable")
+
+    monkeypatch.setattr(http_server.state_machine, "enqueue_job", _boom)
+
+    r = client.delete(f"/api/items/{SKU_A}/revision", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+
+    saved = json.loads((env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text())
+    assert saved["pipeline_error"]["code"] == "revision_discard_rebuild_not_queued"
+
+
 def test_discard_revision_noop_when_absent(env):
     """DELETE /revision on item without a draft returns ok with a note."""
     _write_item_with_revision(env["itemdata_root"], SKU_A)  # no draft
@@ -3426,6 +3554,23 @@ def test_cancel_job_success(env, monkeypatch):
     body = r.json()
     assert body["ok"] is True
     assert body["cancelled"] is True
+
+
+def test_cancel_job_race_with_worker_lease_returns_409(env, monkeypatch):
+    """audit#1143 #1197: SELECT sees dead_letter, but a worker leases the job
+    before the UPDATE runs (WHERE state=ANY(...) matches zero rows) -- this
+    must surface as a 409, not a silent 200 'cancelled'."""
+    call_count = [0]
+    def _connect(*a, **k):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return _FakeConn([{"state": "dead_letter"}])
+        return _FakeConn([], rowcount=0)
+
+    monkeypatch.setattr(http_server.psycopg2, "connect", _connect)
+
+    r = env["client"].post("/api/jobs/raced-job-1/cancel", headers=AUTH_HEADERS)
+    assert r.status_code == 409
 
 
 def test_form_pipeline_renders(client):

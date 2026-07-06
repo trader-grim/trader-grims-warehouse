@@ -139,7 +139,7 @@ class EbayPriceWorker(QueueWorker):
             if suggested is not None:
                 ebay_offer['suggested_price'] = suggested
                 ebay_offer['suggested_at'] = result['queried_at']
-            fence_ebay_write(self.config, sku, ebay_offer=ebay_offer)
+            fence_ebay_write(self.config, sku, ebay_offer=ebay_offer, allow_protected=['price_comps'])
             log.info('ebay_price: %s suggest-only → suggested=$%s (%d comps)',
                      sku, suggested, (result['comps'] or {}).get('count', 0))
             tgw_logging.log_event('ebay_price_suggested', sku=sku,
@@ -234,7 +234,7 @@ class EbayPriceWorker(QueueWorker):
         except Exception as exc:
             log.warning('ebay_price: quality rescore failed for %s: %s', sku, exc)
 
-        fence_ebay_write(self.config, sku, ebay_offer=ebay_offer)
+        fence_ebay_write(self.config, sku, ebay_offer=ebay_offer, allow_protected=['price_comps'])
         top_level_patch = {'draft_listing': draft}
         if item.get('free_shipping'):
             top_level_patch['free_shipping'] = True

@@ -88,6 +88,27 @@ def test_verify_template_prefix(tmp_path):
     assert 'stale_template_prefix' in rules
 
 
+def test_verify_surfaces_persisted_pipeline_error(tmp_path):
+    """code-review follow-up: none of the C11 findings persisted by
+    http_server.py (location_update_failed, ebay_end_desync,
+    revision_sync_not_queued, revision_discard_rebuild_not_queued) were
+    queryable by catalog-verify -- surface pipeline_error generically."""
+    sku = 'tgw202601010000099'
+    doc = {
+        'sku': sku, 'title': 'Some Item With A Finding', 'location': 'C3',
+        'pipeline_error': {
+            'code': 'ebay_end_desync',
+            'detail': 'eBay listing ended but local write failed: boom',
+            'ts': '2026-07-06T00:00:00+00:00',
+            'source': 'bulk_action:ebay_end_listing',
+        },
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    viols = _verify_item(sku, item_dir, doc)
+    rules = {v['rule'] for v in viols}
+    assert 'pipeline_error:ebay_end_desync' in rules
+
+
 def test_verify_no_photo(tmp_path):
     sku = 'tgw202601010000004'
     doc = {'sku': sku, 'title': 'Some Item with No Photo Here', 'location': 'B2'}

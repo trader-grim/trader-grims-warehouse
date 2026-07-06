@@ -345,7 +345,8 @@ class EbayStageWorker(QueueWorker):
             'staged_at': ebay_offer['staged_at'],
         }
         item['ebay_submitted'] = ebay_submitted
-        fence_ebay_write(self.config, sku, ebay_offer=ebay_offer, ebay_submitted=ebay_submitted)
+        fence_ebay_write(self.config, sku, ebay_offer=ebay_offer, ebay_submitted=ebay_submitted,
+                          allow_protected=["staged_at"])
 
         log.info('ebay_stage: %s staged → offerId=%s (visible in Seller Hub)',
                  sku, result['offer_id'])

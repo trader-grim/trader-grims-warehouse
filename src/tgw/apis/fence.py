@@ -9,7 +9,7 @@ Auth: Bearer token from cfg["api_key"] — same key used by Flutter / MC.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -92,13 +92,20 @@ def ebay_write(
     ebay_listing: Optional[Dict[str, Any]] = None,
     ebay_submitted: Optional[Dict[str, Any]] = None,
     ebay_live: Optional[Dict[str, Any]] = None,
+    allow_protected: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     POST /api/items/{sku}/ebay-write — deep-merge eBay blocks.
 
     Merges the supplied blocks into the item JSON, preserving protected sub-fields
-    (price_comps, staged_at, photo_verify) that workers must not overwrite.
-    Logs price divergence when incoming price differs from stored price.
+    (price_comps, staged_at, photo_verify) that workers must not overwrite BY
+    DEFAULT — a generic resync (e.g. ebay_sync re-saving its own full snapshot
+    of ebay_offer/ebay_listing) must never clobber a fresher value it doesn't
+    know about. The one or two workers that actually OWN a protected field
+    (ebay_price owns price_comps, ebay_repush owns photo_verify) pass that
+    field's name explicitly via allow_protected to intentionally refresh/clear
+    it — everyone else stays blocked. Logs price divergence when incoming
+    price differs from stored price.
     """
     body: Dict[str, Any] = {}
     if ebay_offer is not None:
@@ -109,6 +116,8 @@ def ebay_write(
         body["ebay_submitted"] = ebay_submitted
     if ebay_live is not None:
         body["ebay_live"] = ebay_live
+    if allow_protected:
+        body["allow_protected"] = list(allow_protected)
     resp = requests.post(
         f"{_BASE}/api/items/{sku}/ebay-write",
         json=body,

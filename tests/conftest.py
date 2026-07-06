@@ -11,7 +11,8 @@ def make_fake_fence_write(itemdata_root):
     the item JSON back after worker.handle() see the expected fields.
     """
     def fake_fence_ebay_write(cfg, sku, ebay_offer=None, ebay_listing=None,
-                              ebay_submitted=None, ebay_live=None):
+                              ebay_submitted=None, ebay_live=None,
+                              allow_protected=None):
         root = Path(cfg.get('itemdata_root', itemdata_root))
         p = root / sku / f'{sku}.json'
         doc = json.loads(p.read_text(encoding='utf-8'))
@@ -42,7 +43,8 @@ def make_fake_fence_write_tmp(tmp_path):
     from pathlib import Path
 
     def fake_fence_ebay_write(cfg, sku, ebay_offer=None, ebay_listing=None,
-                              ebay_submitted=None, ebay_live=None):
+                              ebay_submitted=None, ebay_live=None,
+                              allow_protected=None):
         # Try cfg['itemdata_root'] first, then fall back to tmp_path
         root = cfg.get('itemdata_root') or tmp_path
         p = Path(root) / sku / f'{sku}.json'

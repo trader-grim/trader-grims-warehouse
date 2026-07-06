@@ -52,7 +52,8 @@ class EbayRepushWorker(QueueWorker):
         photo_count = len(inv_body.get('product', {}).get('imageUrls', []))
 
         now_iso = datetime.now(timezone.utc).isoformat()
-        fence_ebay_write(self.config, sku, ebay_listing={"repush_at": now_iso, "photo_verify": None})
+        fence_ebay_write(self.config, sku, ebay_listing={"repush_at": now_iso, "photo_verify": None},
+                          allow_protected=["photo_verify"])
 
         log.info('ebay_repush: %s repushed successfully (%d photo(s))', sku, photo_count)
         tgw_logging.log_event('ebay_repush_complete', sku=sku, photo_count=photo_count)

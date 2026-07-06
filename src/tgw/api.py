@@ -1289,6 +1289,17 @@ def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any],
     if raw_status and raw_status not in _KNOWN_STATUS_VALUES:
         v("unknown_status", "info", f"Unrecognised #STATUS value: {raw_status!r}")
 
+    # invariant C11: a persisted pipeline_error is a live guard finding —
+    # surface it generically here so any code written via _persist_finding
+    # (http_server.py) or resolve_pipeline_error (draft_sync.py) is queryable
+    # by catalog-verify without adding a new hardcoded check per code.
+    pipeline_error = doc.get("pipeline_error")
+    if isinstance(pipeline_error, dict) and pipeline_error:
+        _pe_code = pipeline_error.get("code") or (
+            "ebay_rejected" if pipeline_error.get("error") else "unknown")
+        _pe_detail = pipeline_error.get("detail") or pipeline_error.get("error") or str(pipeline_error)
+        v(f"pipeline_error:{_pe_code}", "warning", str(_pe_detail)[:300])
+
     # New-pipeline checks
     offer_price = None
     ebay_offer = doc.get("ebay_offer") or {}

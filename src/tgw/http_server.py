@@ -412,6 +412,10 @@ class EbayWriteBody(BaseModel):
     ebay_listing: Optional[Dict[str, Any]] = None
     ebay_submitted: Optional[Dict[str, Any]] = None
     ebay_live: Optional[Dict[str, Any]] = None
+    # Fields the caller explicitly asserts it OWNS and intends to refresh —
+    # e.g. ["price_comps"] from ebay_price, ["photo_verify"] from ebay_repush.
+    # Everyone else stays blocked from touching a protected field (#1189).
+    allow_protected: Optional[List[str]] = None
 
 
 class CreateItemBody(BaseModel):
@@ -738,9 +742,17 @@ def patch_item(sku: str, body: PatchBody, request: Request) -> Dict[str, Any]:
 
     if location_value is not None:
         result = locationupdate(_cfg, sku, location_value)
-        if not result.get("ok"):
+        if result.get("ok"):
+            updated_keys.append("location")
+        else:
+            # invariant C11: a failed location move is a finding, not a log
+            # line — otherwise the operator/Flutter UI sees false success
+            # ("updated": ["location"]) while the item is silently misfiled.
             log.warning("location tree update failed for %s: %s", sku, result)
-        updated_keys.append("location")
+            _persist_finding(
+                json_path, sku, "location_update_failed",
+                f"locationupdate() failed: {result}", "patch_item:location",
+            )
 
     _enqueue_catalog_rebuild(f"http_patch:{sku}")
 
@@ -887,6 +899,7 @@ def ebay_write(sku: str, body: EbayWriteBody) -> Dict[str, Any]:
         ebay_listing=body.ebay_listing,
         ebay_submitted=body.ebay_submitted,
         ebay_live=body.ebay_live,
+        allow_protected=body.allow_protected,
     )
     _enqueue_catalog_rebuild(f"ebay_write:{sku}")
     return {"ok": True, "sku": sku, "changed_fields": changed_fields}
@@ -910,6 +923,25 @@ def _enqueue_catalog_rebuild(reason: str) -> None:
         )
     except Exception:
         pass
+
+
+def _persist_finding(json_path: "Path", sku: str, code: str, detail: str, source: str) -> None:
+    """Write a C11 guard finding to pipeline_error — a persisted, queryable
+    reason the pipeline skipped/failed something, never just a log line.
+    Canonical {code, detail, ts, source} shape (see draft_sync.py,
+    workers/ebay_stage.py, workers/ebay_publish.py). Best-effort: if the
+    persist itself fails, that failure is only a log line — there is nowhere
+    lower to record it.
+    """
+    try:
+        _apply_patch(json_path, {"pipeline_error": {
+            "code": code,
+            "detail": detail,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "source": source,
+        }})
+    except Exception:
+        log.exception("failed to persist %s finding for %s", code, sku)
 
 
 def _apply_patch(json_path: "Path", fields: Dict[str, Any]) -> List[str]:
@@ -944,8 +976,18 @@ def _apply_ebay_write(
     ebay_listing: Optional[Dict[str, Any]] = None,
     ebay_submitted: Optional[Dict[str, Any]] = None,
     ebay_live: Optional[Dict[str, Any]] = None,
+    allow_protected: Optional[List[str]] = None,
 ) -> List[str]:
-    """eBay block deep-merge with field protection — same logic as POST /ebay-write."""
+    """eBay block deep-merge with field protection — same logic as POST /ebay-write.
+
+    Protected sub-fields (price_comps, staged_at, photo_verify) are restored
+    to their existing value by default — a generic resync (e.g. ebay_sync
+    re-saving its own stale snapshot of ebay_offer/ebay_listing) must never
+    clobber a fresher value it doesn't know about (#1189). The one or two
+    workers that actually OWN a protected field pass its name via
+    allow_protected to intentionally refresh/clear it.
+    """
+    allow_protected_set = set(allow_protected or ())
     incoming = {
         "ebay_offer": ebay_offer,
         "ebay_listing": ebay_listing,
@@ -973,7 +1015,7 @@ def _apply_ebay_write(
                 )
         merged = {**existing, **incoming_block}
         for pf in protected:
-            if pf in existing and pf not in incoming_block:
+            if pf in existing and pf not in allow_protected_set:
                 merged[pf] = existing[pf]
         doc[block_key] = merged
         changed.append(block_key)
@@ -1151,10 +1193,33 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
                 errors.append(f"{sku}: not found")
                 continue
             try:
-                fields: Dict[str, Any] = {"status": new_status}
-                if body.action == "delete":
-                    fields["deleted_at"] = datetime.now(timezone.utc).isoformat()
-                _apply_patch(json_path, fields)
+                if body.action == "mark_sold":
+                    # Same quantity-decrement rule as ebay/pull.py mark_item_sold:
+                    # a bulk "mark sold" click accounts for one unit sold, not the
+                    # whole quantity — jumping straight to status=Sold hides
+                    # remaining unsold units on multi-qty items.
+                    #
+                    # Single read-decide-write (not a separate lookup read
+                    # followed by _apply_patch's own independent re-read):
+                    # two reads open a TOCTOU window where a concurrent real
+                    # sale (ebay/pull.py mark_item_sold, via an eBay webhook)
+                    # landing between them gets silently clobbered by a
+                    # `remaining` value computed from the stale first read.
+                    doc = load_item_doc(json_path)
+                    draft = dict(doc.get("draft_listing") or {})
+                    current_qty = int(draft.get("quantity") or 1)
+                    remaining = max(0, current_qty - 1)
+                    draft["quantity"] = remaining
+                    doc["draft_listing"] = draft
+                    if remaining == 0:
+                        doc["status"] = new_status
+                    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True),
+                                       archive_root=_cfg.get("archive_root"))
+                else:
+                    fields = {"status": new_status}
+                    if body.action == "delete":
+                        fields["deleted_at"] = datetime.now(timezone.utc).isoformat()
+                    _apply_patch(json_path, fields)
                 done.append(sku)
             except Exception as exc:
                 errors.append(f"{sku}: {exc}")
@@ -1185,6 +1250,15 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
                     from .apis.ebay.trading import end_item as _end_item
 
                     _end_item(_cfg, listing_id_val)
+            except Exception as exc:
+                errors.append(f"{sku}: {exc}")
+                continue
+            # eBay call above has already succeeded — a failure past this
+            # point means the listing is ended on eBay but our local mirror
+            # says PUBLISHED forever. Invariant C11: persist that as a
+            # finding rather than just returning an API error (session 43
+            # local/eBay desync class).
+            try:
                 _apply_ebay_write(
                     json_path,
                     sku,
@@ -1197,7 +1271,13 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
                 )
                 done.append(sku)
             except Exception as exc:
-                errors.append(f"{sku}: {exc}")
+                errors.append(f"{sku}: ended on eBay but local write failed: {exc}")
+                _persist_finding(
+                    json_path, sku, "ebay_end_desync",
+                    f"eBay listing ended but local ebay_offer/ebay_listing "
+                    f"update failed: {exc}",
+                    "bulk_action:ebay_end_listing",
+                )
         _enqueue_catalog_rebuild("bulk_ebay_end_listing")
         return {"ok": not errors, "count": len(done), "done": done, "errors": errors}
 
@@ -2058,15 +2138,21 @@ def catalog_snapshot(background_tasks: BackgroundTasks):
 
     fd, tmp_path = tempfile.mkstemp(suffix=".db", prefix="tgwcatalog_snapshot_")
     os.close(fd)
-    src_con = sqlite3.connect(str(db_path))
     try:
-        dst_con = sqlite3.connect(tmp_path)
+        src_con = sqlite3.connect(str(db_path))
         try:
-            src_con.backup(dst_con)
+            dst_con = sqlite3.connect(tmp_path)
+            try:
+                src_con.backup(dst_con)
+            finally:
+                dst_con.close()
         finally:
-            dst_con.close()
-    finally:
-        src_con.close()
+            src_con.close()
+    except Exception:
+        # backup() raised before the unlink task was ever scheduled — clean
+        # up here instead of leaking a multi-MB temp file per failed sync.
+        os.unlink(tmp_path)
+        raise
 
     background_tasks.add_task(os.unlink, tmp_path)
     return FileResponse(
@@ -2259,28 +2345,15 @@ def remove_comp(sku: str, body: RemoveCompBody) -> Dict[str, Any]:
     kept = [ci for ci in items if ci.get("url", "").split("&mkcid")[0] != body.url.split("&mkcid")[0]]
     if len(kept) == before:
         raise HTTPException(status_code=404, detail="comp not found by url")
-    # Recalculate stats from kept active items (exclude outliers/llm_dropped)
-    active_prices = sorted(ci["price"] for ci in kept if not ci.get("outlier") and not ci.get("llm_dropped") and ci.get("price") is not None)
-    if active_prices:
-        import statistics as _stats
+    # Recalculate stats from kept active items (exclude outliers/llm_dropped).
+    # Use the same nearest-rank formula as ebay/pricing.py._compute_stats —
+    # a separate linear-interpolation formula here made stored comps stats
+    # silently shift for unrelated reasons whenever an operator edited comps.
+    from .ebay.pricing import _compute_stats
 
-        n = len(active_prices)
-
-        def _pct_val(arr, p):
-            idx = (len(arr) - 1) * p / 100
-            lo, hi = int(idx), min(int(idx) + 1, len(arr) - 1)
-            return round(arr[lo] + (arr[hi] - arr[lo]) * (idx - lo), 2)
-
-        comps["items"] = kept
-        comps["count"] = n
-        comps["min"] = round(active_prices[0], 2)
-        comps["max"] = round(active_prices[-1], 2)
-        comps["p25"] = _pct_val(active_prices, 25)
-        comps["median"] = round(_stats.median(active_prices), 2)
-        comps["p75"] = _pct_val(active_prices, 75)
-    else:
-        comps["items"] = kept
-        comps["count"] = 0
+    active_prices = [ci["price"] for ci in kept if not ci.get("outlier") and not ci.get("llm_dropped") and ci.get("price") is not None]
+    comps["items"] = kept
+    comps.update(_compute_stats(active_prices) or {"count": 0})
     eo["price_comps"] = comps
     doc["ebay_offer"] = eo
     atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True), archive_root=_cfg.get("archive_root"))
@@ -6703,11 +6776,28 @@ def apply_revision(sku: str, body: RevisionApplyBody) -> Dict[str, Any]:
     result = cmd_revise_apply(_cfg, sku, dry_run=body.dry_run, by=body.by)
     if result.get("ok") and result.get("applied"):
         # Refresh the local live-mirror so the UI reflects what was just pushed.
-        result["sync_job_id"] = state_machine.enqueue_job(
-            queue_name="ebay_sync",
-            payload={"sku": sku, "reason": "revision_apply", "origin": "operator"},
-            max_attempts=2,
-        )
+        # The revision has ALREADY landed on eBay at this point — a queue/DB
+        # hiccup enqueuing the follow-up sync must not turn into a 500 to the
+        # operator (who would then retry an already-applied revision) and
+        # must not vanish silently either (invariant C11): persist a finding
+        # so local stays known-desynced until a sync actually runs.
+        json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+        try:
+            result["sync_job_id"] = state_machine.enqueue_job(
+                queue_name="ebay_sync",
+                payload={"sku": sku, "reason": "revision_apply", "origin": "operator"},
+                max_attempts=2,
+            )
+        except Exception as exc:
+            log.exception("failed to enqueue post-revision ebay_sync for %s", sku)
+            result["sync_job_id"] = None
+            result["sync_enqueue_error"] = str(exc)
+            _persist_finding(
+                json_path, sku, "revision_sync_not_queued",
+                f"revision applied on eBay but follow-up ebay_sync "
+                f"enqueue failed: {exc}",
+                "apply_revision",
+            )
     return result
 
 
@@ -6732,8 +6822,20 @@ def discard_revision(sku: str) -> Dict[str, Any]:
             not_before=time.time() + 30,
             max_attempts=3,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        # invariant C11: a skipped rebuild is a finding, not a swallowed
+        # exception — otherwise the catalog goes stale after a discard with
+        # no queryable trace of why.
+        if "unique" not in str(exc).lower() and "duplicate" not in str(exc).lower():
+            log.warning(
+                "failed to enqueue catalog_rebuild after revision discard for %s: %s",
+                sku, exc,
+            )
+            _persist_finding(
+                json_path, sku, "revision_discard_rebuild_not_queued",
+                f"catalog_rebuild enqueue failed after revision discard: {exc}",
+                "discard_revision",
+            )
     return {"ok": True, "sku": sku, "discarded": True}
 
 
@@ -7909,12 +8011,24 @@ def cancel_job(job_id: str) -> Dict[str, Any]:
     try:
         with psycopg2.connect(_cfg["postgres_dsn"]) as con:
             with con.cursor() as cur:
+                # WHERE-state guard closes the race between the SELECT above
+                # and this UPDATE: a worker leasing the job in between would
+                # otherwise get silently stomped either direction.
                 cur.execute(
-                    "UPDATE queue_jobs SET state = 'cancelled' WHERE job_id = %s",
-                    (job_id,),
+                    "UPDATE queue_jobs SET state = 'cancelled' "
+                    "WHERE job_id = %s AND state = ANY(%s)",
+                    (job_id, list(cancellable)),
                 )
+                cancelled = cur.rowcount > 0
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"cancel failed: {exc}")
+
+    if not cancelled:
+        raise HTTPException(
+            status_code=409,
+            detail=f"job {job_id} changed state before it could be cancelled "
+                   f"(race with a worker lease) — refresh and retry",
+        )
 
     return {"ok": True, "job_id": job_id, "cancelled": True}
 
