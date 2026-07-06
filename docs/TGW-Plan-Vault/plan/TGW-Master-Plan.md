@@ -206,6 +206,8 @@ P9 bulk audit: Inventory API getInventoryItems winner (~98 calls), Feed API bloc
 P2 ops-digest pending-liability lines shipped (see DONE-photosync-p2-digest-liability.md in dev-workflow/research).
 
 - P9 follow-up #127: `photos_short_on_ebay` re-pointed at live capture index; open question on recurring nightly capture flagged for 2pm triage.
+
+- #1145 console error-state fix + broker B1a/B1b built, fleet baseline done — see dev-workflow/research/RESEARCH-1145-console-error-state-broker.md
 ## Work-packet protocol
 
 One packet = one todo = one model session. Non-trivial packets get
