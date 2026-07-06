@@ -3837,3 +3837,91 @@ def test_inbox_upload_creates_inbox_dir_if_missing(env, monkeypatch):
     )
     assert r.status_code == 200
     assert new_inbox.exists()
+
+
+# ---------------------------------------------------------------------------
+# audit#1143 todo #1237 — http_server.py unescaped/unsafe output sweep
+# ---------------------------------------------------------------------------
+
+
+def test_login_get_escapes_next_param(client):
+    """/login reflects `next` into a hidden input; must escape HTML metachars."""
+    r = client.get('/login', params={"next": '"><script>alert(1)</script>'})
+    assert r.status_code == 200
+    assert "<script>alert(1)</script>" not in r.text
+    assert "&lt;script&gt;" in r.text
+
+
+def test_login_post_escapes_next_on_failure(client):
+    """On a failed login the form re-renders with `next` — must stay escaped."""
+    r = client.post(
+        "/login",
+        data={"next": '"><script>alert(1)</script>', "key": "wrong-password"},
+    )
+    assert r.status_code == 401
+    assert "<script>alert(1)</script>" not in r.text
+    assert "&lt;script&gt;" in r.text
+
+
+def test_login_post_rejects_protocol_relative_redirect(env):
+    """Open-redirect guard must reject //evil.com, not just check a leading '/'."""
+    r = env["client"].post(
+        "/login",
+        data={"next": "//evil.com/phish", "key": WEB_KEY},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == "/form/home"
+
+
+def test_login_post_allows_safe_relative_redirect(env):
+    """A genuine same-origin relative path still redirects normally."""
+    r = env["client"].post(
+        "/login",
+        data={"next": "/form/items/tgw123", "key": WEB_KEY},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == "/form/items/tgw123"
+
+
+def test_intake_form_404_escapes_unknown_sku(env):
+    """Unknown-SKU 404 page reflects the path segment; must escape it."""
+    _login(env["client"])
+    # No slash in the payload: the {sku} route param is a single path
+    # segment and won't match across an encoded "/".
+    r = env["client"].get("/form/intake/%3Cimg%20onerror%3Dalert(1)%3E")
+    assert r.status_code == 404
+    assert "<img onerror=alert(1)>" not in r.text
+    assert "&lt;img" in r.text
+
+
+def test_intake_form_escapes_stored_fields(env):
+    """weight_oz/barcode/ai_hint render into value=\"...\" attrs; must escape quotes/tags."""
+    _login(env["client"])
+    sku = "tgw20260401000000099"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "barcode": '"><script>alert(1)</script>',
+        "ai_hint": '" onmouseover="alert(2)',
+        "weight_oz": '4.5"><b>x</b>',
+    })
+    r = env["client"].get(f"/form/intake/{sku}")
+    assert r.status_code == 200
+    assert "<script>alert(1)</script>" not in r.text
+    assert 'onmouseover="alert(2)' not in r.text
+    assert "<b>x</b>" not in r.text
+    assert "&lt;script&gt;" in r.text
+
+
+def test_docs_page_escapes_raw_html_in_markdown(env):
+    """/docs renders vault markdown; raw HTML/script must not execute verbatim."""
+    vault = env["cfg"]["plan_vault_path"]
+    vault.mkdir(parents=True, exist_ok=True)
+    (vault / "evil.md").write_text(
+        "# Title\n\n<script>alert(1)</script>\n", encoding="utf-8",
+    )
+    r = env["client"].get("/docs/evil.md")
+    assert r.status_code == 200
+    assert "<script>alert(1)</script>" not in r.text
+    assert "&lt;script&gt;" in r.text

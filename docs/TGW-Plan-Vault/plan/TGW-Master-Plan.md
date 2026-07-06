@@ -394,6 +394,9 @@ regularly"): review each day's diff before it accumulates — plain
 periodic cloud pass while diffs are still small enough to clear its
 size guard.
 
+Status (2026-07-05): `workers/` subsystem slice DONE — 25 files, 5 groups, 60 agents, ~2.3M tokens. 17 findings confirmed (2-of-3 adversarial verify), 1 refuted/dropped. Full report at `docs/TGW-Plan-Vault/dev-workflow/research/RESEARCH-1143-workers-audit.md`. 9 correctness bugs spun off as #1162-#1170; 8 lower-severity findings batched into #1171. Remaining subsystems: apis/ebay/, http_server.py, queue/state-machine, scripts/, nix flake. No action in progress — next session can pick next subsystem or work spun-off correctness-bug todos.
+
+Scripts subsystem audit INPROGRESS (todo #1203, part of #1143). See AUDIT-scripts-subsystem-1143.md.
 ## Drive-space re-evaluation (flagged 2026-07-04, todo #1136)
 **Dave: "put revaluation item into plan for drive space."** Todo #1056
 (extend `vg_tgw` into HDD space) turned out blocked on a stale premise:
@@ -483,6 +486,60 @@ Canonical flake `~/tgw-flake` working; main-repo merge + workflow rules pending;
 no-GitHub-access (todo #1082); no process supervision for agent processes (design
 requirement). FROZEN except stability fixes. Plan: `PLAN-nixos-migration.md`,
 `nix/CLAUDE-NIX.md`.
+
+**Standing rule (Dave, 2026-07-06, todo #1227): iterated-on tools stay out of the
+flake.** Every `nixos-rebuild switch` carries risk, and wrangling the flake has
+repeatedly burned whole day-usage-budgets against tasks that should be ordinary
+coding — that cost is a signal the flake's surface area is too large, not a skill
+gap. Rule going forward: before adding anything to the flake, ask whether it's
+settled infrastructure (OS layer, the TGW service stack, secrets wiring,
+user/group + hardening) or something still being actively iterated on (a tool
+Dave is tuning/swapping versions of/prototyping with). Iterated-on tools default
+to userspace install (pipx/uv/npm/git checkout) even at the cost of losing Nix's
+reproducibility for that one tool — not worth the rebuild-risk + usage-cost tax
+while it's still moving. **EXECUTED same day:** Hermes' `settings.model` and
+Aider's package pin pulled out of Nix control (`nixos-rebuild switch` succeeded,
+Hermes stayed healthy through the switch, Aider now pipx-managed) — see
+`docs/ai-plans/decouple-hermes-aider-flake.md`. Hermes' primary model live-edited
+to `deepseek-v4-flash` same session (Dave purchased DeepSeek + Google credits);
+`hermes-agent` deliberately NOT restarted yet — `DEEPSEEK_API_KEY` doesn't exist
+until Dave generates it, restart pending that.
+
+**Audit #1143 nix-flake mitigation batch, EXECUTED 2026-07-06 (todos #1216,
+#1220-#1225):** all 10 findings reconciled against live state first (all
+confirmed still real, none stale) before any fix — same discipline as the
+Hermes/Aider plan. Fixed: SSH password auth disabled (#1216 — new ed25519 key
+generated + verified working *before* the flip, password auth now confirmed
+rejected); `services.tgw.enablePostgres` option added so the portable/client
+tier genuinely skips PostgreSQL (#1220 — this fix itself regressed
+`nix/tgw/users.nix`'s unconditional `postgres` user extraGroups line, caught by
+`nix flake check` before it ever reached a1131, then fixed); a1131 no longer
+imports production-only `keyd.nix` (#1221); duplicate `kdeconnectd` unit
+removed from Home Manager, single definition in `os/sway.nix` now governs both
+hosts, live-verified running from the correct unit path post-rebuild (#1222);
+backup timer renamed/documented to match its confirmed-intentional 30-min
+cadence, cadence itself untouched (#1223 — Dave: "we changed to every half
+hour on purpose"); stale disko free-space comment corrected to match live
+`vgs` (96MB free, not 292G) (#1224); dead `tgw/desktop.nix` Qtile stub deleted
++ gid-assertion symmetry added to portable.nix (#1225, partial).
+**Deliberately NOT applied, filed as follow-ups:** #1219 NFS export — no
+static IP exists for the actual intake camera/phone device (only tgw-prod
+.100/a1131 .101 are reserved), so host-locking would break real intake; left
+as-is pending a reservation (todo #1228). #1217/#1218 Syncthing GUI auth —
+Dave is still actively configuring Syncthing peers/folders; deferred
+alongside the earlier SSH deferral logic, explicitly not done yet. #1225's
+other 2 sub-items — a1131 power-management (blocked: the "fix" would import
+`IdleAction=suspend`, directly contradicting a1131's own standing "never
+suspend, iMac12,1 bug" note) and the portable/master.nix boot-loader line
+duplication (cosmetic, lowest priority) — filed as todo #1231 rather than
+silently marked done. New findings surfaced while reconciling, not part of
+the original 10: keyd-macroboard's `tgw-macro`/`tm` hardcode
+`WAYLAND_DISPLAY=wayland-0` as a fallback but tgw-prod's live Sway session
+runs `wayland-1` — likely broken for any macro invoked outside the graphical
+session's own env (todo #1229, needs dynamic discovery not a hardcoded
+guess). Also: a governance follow-up filed (todo #1230, Dave 2026-07-06) to
+periodically review standing conventions/freeze-lists so none quietly
+become development-blocking without cause.
 
 **todo #1049 split (2026-07-04):** `--print-url` flag on the Python `tgw get-ebay-token`
 CLI was **already fully implemented** (found while checking, not built new) — live-
@@ -653,6 +710,31 @@ byte-complete in `archive/sections/` and promote to `pp/` on touch.)*
 
 ## Open discussion items (for 2pm 2026-07-04 planning session)
 
+**Web UI vs Flutter app — duplicate-development fork, not yet resolved (Dave,
+2026-07-06, todo #1227 planning session).** Confirmed while investigating why
+the Flutter app is "basically ready but unusable": `reference/TGW-HTTP-API.md`
+(dated 2026-06-04) documents the Bearer-token `/api/*` surface Flutter actually
+calls (item search/detail/PATCH, action enqueue, eBay aspects, templates) — but
+all the operator-facing feature work since then (PP-ACTIONCONSOLE-001's
+state-driven action line + Editor/Live tabs, PP-LISTEDITOR-001's drift-gated
+revision apply, live-fire 2026-07-04) landed on a different, newer surface this
+doc doesn't cover. Flutter isn't broken — it's calling a real API that's now
+missing the capabilities the current web UI has, and the gap widens with every
+new web-UI feature. Also found while locating the app: `flutter/` in this repo
+is the vendored Flutter **SDK source** (engine/, dev/bots/, examples/), not
+Dave's project — the actual app is `apps/tgw_app/`; `apps/` also has orphaned
+top-level `android/ios/web/windows/macos` folders alongside `tgw_app/` (likely
+leftover from an earlier `flutter create` before the project settled into
+`tgw_app/`), worth a cleanup pass regardless of which unification direction is
+chosen. Three directions discussed, not decided: (A) extract the action
+console's server-side logic into `/api/*` so both surfaces share one backend
+contract — most work, keeps Flutter's real offline-catalog advantage
+(PP-PORTABLE-CATALOG-001); (B) make Flutter a thin WebView shell over the
+existing web pages — fastest, loses native/offline feel; (C) freeze Flutter,
+converge on a web PWA — simplest, but doesn't deliver true offline satellite
+catalog use. Dave: not ready to decide this session, flagging for a dedicated
+pass.
+
 **Relocate the plan-vault document inbox into `/opt/TGW/incoming/`?** Dave recalled
 discussing this before (2026-07-04) but no record of it was found in this plan, any
 PP design doc, or memory — capturing now per Prime Directive 5 so it isn't lost
@@ -683,6 +765,11 @@ thorough, not just reassuringly-worded, before trusting the pattern going forwar
 question behind it.** Full design: `docs/ai-plans/tgw-intake-app.md`. Supersedes
 PP-INTAKE-002/003; the handheld camera/barcode/video app absorbs PP-TASKER-001's
 functions and replaces the current Tasker-Scenes + AutoTools-WebScreens overlay.
+**Added 2026-07-06 (todo #1227 planning session):** also absorb the third-party
+"Tasker Permissions" companion app's role — the handheld app should self-grant
+whatever special ADB-level permissions it needs (or ship a matching
+adb-permissions helper of our own) rather than depend on an external app on the
+device. Not scoped further yet; revisit when this track thaws.
 Decided so far: own repo (Kotlin); early-`ai_identify` trigger = the ID call's own
 batch size (`_MAX_PHOTOS_CLOUD`, 6) with a session-completion fallback for smaller
 sets; custom turntable (not Foldio360) targeting ~12 photos/item, still being

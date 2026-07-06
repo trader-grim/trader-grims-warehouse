@@ -9,12 +9,9 @@ Covered:
   * pull.build_title_lookup + pull.find_title_match — Jaccard match, threshold, tie-reject
   * pull.mark_item_sold       — idempotency, ebay_sale block, dry-run no-write
   * notifications.parse_sold_notification     — Transaction parse vs ping/test -> None
-  * notifications.verify_notification_signature — MD5 check + deliberate accept-when-unverifiable
-
-NOTE on verify_notification_signature: the code accepts (returns True) when there
-is no SOAP header or no signature element — those are legitimate eBay ping/test
-patterns. When a signature IS present but dev_id is absent from credentials, the
-call REJECTS (returns False) — no accept-when-unsigned fallback (ISS-005 resolved).
+  * notifications.verify_notification_signature — MD5 check, fails CLOSED on any
+    unverifiable case (audit#1143 / todo #1174: this endpoint is public and
+    unauthenticated, so a fail-open here let an attacker forge sold notifications)
 """
 
 from __future__ import annotations
@@ -270,7 +267,7 @@ def test_parse_sold_notification_garbage_returns_none():
 
 
 # ---------------------------------------------------------------------------
-# verify_notification_signature (deliberate accept-when-unverifiable)
+# verify_notification_signature (fails CLOSED on any unverifiable case)
 # ---------------------------------------------------------------------------
 
 def _creds_cfg(tmp_path, **creds):
@@ -279,18 +276,25 @@ def _creds_cfg(tmp_path, **creds):
     return {"ebay_credentials_path": p}
 
 
-def test_verify_signature_accepts_when_no_header(tmp_path):
-    # No SOAP header at all -> unverifiable -> deliberately accepted.
+def test_verify_signature_rejects_when_no_header(tmp_path):
+    # No SOAP header at all -> unverifiable -> rejected (audit#1143 / #1174).
     assert notifications.verify_notification_signature(
         _soap(header_sig=None), _creds_cfg(tmp_path, dev_id="D", app_id="A", cert_id="C")
-    ) is True
+    ) is False
 
 
-def test_verify_signature_accepts_when_no_signature(tmp_path):
-    # Header present but empty signature -> accepted.
+def test_verify_signature_rejects_when_no_signature(tmp_path):
+    # Header present but empty signature -> rejected.
     assert notifications.verify_notification_signature(
         _soap(header_sig=""), _creds_cfg(tmp_path, dev_id="D", app_id="A", cert_id="C")
-    ) is True
+    ) is False
+
+
+def test_verify_signature_rejects_on_unparseable_body(tmp_path):
+    # Garbage/non-XML payload -> parse exception -> rejected, not accepted.
+    assert notifications.verify_notification_signature(
+        b"not xml at all", _creds_cfg(tmp_path, dev_id="D", app_id="A", cert_id="C")
+    ) is False
 
 
 def test_verify_signature_rejects_when_dev_id_missing(tmp_path):

@@ -104,3 +104,68 @@ Nothing committed to git yet.
 **Recommended next sequence:** (1) fix track P1 #1115 → (2) forward track #1122
 snapshot (any time, pool-disjoint) → (3) P2/P3 while P4 ramps → (4) PP-BACKUP-001
 packets interleaved → (5) PR to main via /tgw-pr-review.
+---
+## Session 45 — 2026-07-04→05 (provider flip · a1131 buildout · tool fixes · knowledge-plane plan) — COMPLETE
+
+Committed as-we-went (Dave's instruction), 7 commits on catio-nix-0.0.1-alpha.
+
+- **LLM provider flip (todo #1144 DONE, live-verified):** Google dole
+  free-tier quota PER PROJECT (~20 req/day/model here vs published 1,000) —
+  2,171 llm_google 429s in one day from the 402-requeue backlog. Dave's call:
+  OpenRouter is PRIMARY; Google free tier = OPERATOR EMERGENCY RESERVE
+  (interactive-only fallback); failover pattern kept + precheck-gated for a
+  future paid Google key. Docs: reference/LLM-Providers-Quotas.md (canonical,
+  finding was rediscovered 3× before being written down), invariant E8,
+  CLAUDE.md row, memories. Backlog drains ~10× faster since (no 429+40s tax).
+- **#1145 PP-UIPIPE-001 opened (p5): web UI pipeline defect audit.** Dave:
+  "the web ui pipeline ain't cutting it"; his draft-vs-offer hypothesis
+  CONFIRMED by evidence sweep — tgw202605052336026 LIVE at $40.99 with local
+  draft_listing.price=None; tgw202605060125081 published 07-04 with 1/8
+  photos (after #1115 P1 marked done!); 9/10 items same fulfillment policy;
+  publish silently re-runnable (dozens of succeeded publish jobs per SKU,
+  C3); published items never get a published status locally. Full evidence:
+  inbox/INPROGRESS-1145-uipipe-defect-audit.md. 4pm: Dave names the
+  wrong-shipping listing + rest of defect list → root-cause→packet map.
+- **Standing rules encoded:** a1131 is shared Dave+Claude for THERMAL RELIEF
+  — offload Claude's checks there on hot days, never pause pipeline workers
+  for heat (CLAUDE.md + memory); NFS shares for check data = todo #1146.
+- Also: archived 6 processed s44 inbox notes; swept last night's uncommitted
+  pm-intake vault filings into a labeled commit (verified against FILING-LOG
+  first).
+
+**s45 evening/night (continued past 4pm through ~03:00):**
+- **a1131 fully built out** (#1146 DONE): ro NFS data/log mounts, claude
+  account (key-only + Dave-authorized NOPASSWD sudo), Wake-on-LAN live-fired
+  (`wakeonlan c8:2a:14:2a:a1:85`; NEVER initiate suspend — iMac bug).
+  nix-syncthing overrideDevices/Folders=false fix (rebuilds were wiping
+  GUI-added peers — Dave's vault share); devices restored, Dave re-accepting
+  shares.
+- **Two UI-pipeline TOOL FIXES live-verified** (Dave's course-correction:
+  fix the tool, not the data lists — see memories): per-field policy
+  resolution (#1152; config FC4/payment/return now always win) and
+  draft-price-only staging (stale ebay_offer.price can never publish
+  unreviewed; operator List on unpriced item → HardFailure + no_price_set
+  finding persisted). 8 wrong-policy live listings repaired PS→FC4;
+  0125081 healed 1→8 photos via C10 chain.
+- **Four-item forensics:** one root shape — truth/plan/live planes never
+  reconciled. Broker planned (`ai-plans/reconciliation-broker.md`, packets
+  B0–B5; B0 = Dave's 20-min rule-table sign-off; cardinal rule: validate
+  against TRUTH, never the plan).
+- **Knowledge plane planned** (`ai-plans/recoll-annex-jetstream.md` +
+  PP-KNOWLEDGE-001 in master plan): stage 1 = organize/make accessible;
+  todos #1147-#1151; Dave: annex-gdrive REPLACES Syncthing for data trees
+  (vault→git); E0 transport decision leans Postgres-events over JetStream.
+- **402 pile FULLY DRAINED:** ~6,500 jobs, 99.9% success, ~$1.08; ~2,650
+  fresh drafts now await operator review (NB #1113 ebay_dole not installed).
+- **Fleet photo-integrity sweep DONE** (a1131 over NFS, 3.4h): 206 bad/149
+  SKUs (0.076%), single Feb-2022 unverified-copy event, 30 LIVE listings
+  prioritized; roster = var/reports/photo-integrity-2026-07-05.tsv; plan =
+  ai-plans/photo-integrity-mitigation.md (#1154).
+- New skill: `/tgw-packet`. New todos: #1145-#1154.
+
+**Open into next session:** B0 broker sign-off (20min, unlocks B1-B5) ·
+#1145 walkthrough remainder (Dave's full defect list; 2336026 price via
+editor) · #1147 search surface (top delegable) · fleet getOffer policy
+sweep (~2k calls, no gate) · #1139 · E0/A0 decision packets.
+
+---

@@ -60,71 +60,6 @@ status) → `reference/` docs. Tracker beats plan when they disagree.
 
 ---
 
-## Session 45 — 2026-07-04→05 (provider flip · a1131 buildout · tool fixes · knowledge-plane plan) — COMPLETE
-
-Committed as-we-went (Dave's instruction), 7 commits on catio-nix-0.0.1-alpha.
-
-- **LLM provider flip (todo #1144 DONE, live-verified):** Google dole
-  free-tier quota PER PROJECT (~20 req/day/model here vs published 1,000) —
-  2,171 llm_google 429s in one day from the 402-requeue backlog. Dave's call:
-  OpenRouter is PRIMARY; Google free tier = OPERATOR EMERGENCY RESERVE
-  (interactive-only fallback); failover pattern kept + precheck-gated for a
-  future paid Google key. Docs: reference/LLM-Providers-Quotas.md (canonical,
-  finding was rediscovered 3× before being written down), invariant E8,
-  CLAUDE.md row, memories. Backlog drains ~10× faster since (no 429+40s tax).
-- **#1145 PP-UIPIPE-001 opened (p5): web UI pipeline defect audit.** Dave:
-  "the web ui pipeline ain't cutting it"; his draft-vs-offer hypothesis
-  CONFIRMED by evidence sweep — tgw202605052336026 LIVE at $40.99 with local
-  draft_listing.price=None; tgw202605060125081 published 07-04 with 1/8
-  photos (after #1115 P1 marked done!); 9/10 items same fulfillment policy;
-  publish silently re-runnable (dozens of succeeded publish jobs per SKU,
-  C3); published items never get a published status locally. Full evidence:
-  inbox/INPROGRESS-1145-uipipe-defect-audit.md. 4pm: Dave names the
-  wrong-shipping listing + rest of defect list → root-cause→packet map.
-- **Standing rules encoded:** a1131 is shared Dave+Claude for THERMAL RELIEF
-  — offload Claude's checks there on hot days, never pause pipeline workers
-  for heat (CLAUDE.md + memory); NFS shares for check data = todo #1146.
-- Also: archived 6 processed s44 inbox notes; swept last night's uncommitted
-  pm-intake vault filings into a labeled commit (verified against FILING-LOG
-  first).
-
-**s45 evening/night (continued past 4pm through ~03:00):**
-- **a1131 fully built out** (#1146 DONE): ro NFS data/log mounts, claude
-  account (key-only + Dave-authorized NOPASSWD sudo), Wake-on-LAN live-fired
-  (`wakeonlan c8:2a:14:2a:a1:85`; NEVER initiate suspend — iMac bug).
-  nix-syncthing overrideDevices/Folders=false fix (rebuilds were wiping
-  GUI-added peers — Dave's vault share); devices restored, Dave re-accepting
-  shares.
-- **Two UI-pipeline TOOL FIXES live-verified** (Dave's course-correction:
-  fix the tool, not the data lists — see memories): per-field policy
-  resolution (#1152; config FC4/payment/return now always win) and
-  draft-price-only staging (stale ebay_offer.price can never publish
-  unreviewed; operator List on unpriced item → HardFailure + no_price_set
-  finding persisted). 8 wrong-policy live listings repaired PS→FC4;
-  0125081 healed 1→8 photos via C10 chain.
-- **Four-item forensics:** one root shape — truth/plan/live planes never
-  reconciled. Broker planned (`ai-plans/reconciliation-broker.md`, packets
-  B0–B5; B0 = Dave's 20-min rule-table sign-off; cardinal rule: validate
-  against TRUTH, never the plan).
-- **Knowledge plane planned** (`ai-plans/recoll-annex-jetstream.md` +
-  PP-KNOWLEDGE-001 in master plan): stage 1 = organize/make accessible;
-  todos #1147-#1151; Dave: annex-gdrive REPLACES Syncthing for data trees
-  (vault→git); E0 transport decision leans Postgres-events over JetStream.
-- **402 pile FULLY DRAINED:** ~6,500 jobs, 99.9% success, ~$1.08; ~2,650
-  fresh drafts now await operator review (NB #1113 ebay_dole not installed).
-- **Fleet photo-integrity sweep DONE** (a1131 over NFS, 3.4h): 206 bad/149
-  SKUs (0.076%), single Feb-2022 unverified-copy event, 30 LIVE listings
-  prioritized; roster = var/reports/photo-integrity-2026-07-05.tsv; plan =
-  ai-plans/photo-integrity-mitigation.md (#1154).
-- New skill: `/tgw-packet`. New todos: #1145-#1154.
-
-**Open into next session:** B0 broker sign-off (20min, unlocks B1-B5) ·
-#1145 walkthrough remainder (Dave's full defect list; 2336026 price via
-editor) · #1147 search surface (top delegable) · fleet getOffer policy
-sweep (~2k calls, no gate) · #1139 · E0/A0 decision packets.
-
----
-
 ## Session 46 — 2026-07-05 (todo #1143 audit — workers/ subsystem, first slice)
 
 Dave asked for "the one that fixes the commit backlog," expecting it first on his
@@ -159,6 +94,52 @@ rule (confirmed by line 124 above — "missed again" three sessions running).
 
 ---
 
+## Session 47 — 2026-07-06 (flake decouple · audit#1143 nix mitigation · todo consolidation · router research)
+
+Standing rule encoded: **iterated-on tools stay out of the flake** (Dave —
+rebuild risk + usage-cost tax not worth it while a tool is still moving).
+Memory: `feedback-flake-minimal-surface`.
+
+- **Hermes/Aider decoupled from `~/tgw-flake`** (todo #1227 DONE): Hermes'
+  `settings.model` and Aider's nixpkgs pin pulled out; `android-tools`/`pipx`
+  added (settled tools). `nixos-rebuild switch` succeeded; Aider now
+  pipx-managed (0.86.2, already newer than the removed 0.83.1 pin). Plan:
+  `ai-plans/decouple-hermes-aider-flake.md`. Hermes model live-edited to
+  `deepseek-v4-flash` (Dave bought DeepSeek+Google credits) — **service NOT
+  restarted yet**, `DEEPSEEK_API_KEY` doesn't exist until Dave generates it.
+- **audit#1143 nix-flake batch, all 10 findings fixed** (todos #1216,
+  #1220-#1225, #1231 — DONE): SSH password auth disabled (new ed25519 key
+  verified working first); `services.tgw.enablePostgres` option added
+  (portable tier genuinely skips Postgres — this fix regressed
+  `tgw/users.nix`'s unconditional postgres-user line, caught by `nix flake
+  check` before reaching a1131, fixed same session); a1131's stray
+  `keyd.nix` import removed; duplicate `kdeconnectd` unit removed; backup
+  timer relabeled (30min cadence confirmed intentional by Dave, not a bug);
+  stale disko comment fixed; dead `tgw/desktop.nix` stub deleted; a1131
+  power-management rewritten suspend-free (the naive fix would have
+  reintroduced the iMac12,1 "never suspend" bug — caught before applying).
+  **New todo #1229, also fixed:** keyd-macroboard's `wayland-0` hardcode vs
+  live `wayland-1` session — dynamic socket discovery now. **Deliberately
+  NOT fixed:** #1219/#1228 NFS export (no static IP for the intake device
+  yet) and #1217/#1218 Syncthing GUI auth (Dave mid-configuring peers).
+  **New todo #1233:** a1131 itself still needs its own config push/rebuild
+  to pick up these fixes (only tgw-prod rebuilt so far).
+- **19 audit#1143 findings consolidated into 6 todos** (#1234-#1239) by
+  shared root cause, not just shared file — e.g. #1165+#1166 (identical
+  self-rescheduling flaw in two workers) → one todo. Originals marked
+  `SUPERSEDED` + closed, not deleted. Memory: `feedback-todo-consolidation`.
+- **Router ecosystem research** (todo #1232, PROPOSAL only): D-Link
+  DIR-868L → DD-WRT recommended over OpenWrt (chipset support finding, not a
+  guess). Plan: `ai-plans/router-dlink-dir868l-ecosystem.md`. DHCP
+  reservations mostly done (tgw-prod/a1131/others) but intake
+  cameras/devices NOT yet reserved — why #1219/#1228 stay blocked.
+
+**Open into next session:** restart `hermes-agent` once DeepSeek key exists ·
+push flake fixes to a1131 (#1233, may be asleep — `wakeonlan c8:2a:14:2a:a1:85`)
+· get intake device's reserved IP to unblock #1219/#1228 · #1234-#1239 as
+normal execution-track packets · #1230 governance/policy review (not started).
+
+---
 
 Older sessions: `archive/SESSION-LOG.md`.
 

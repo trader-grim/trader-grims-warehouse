@@ -5,8 +5,9 @@ SetNotificationPreferences registers a delivery URL for FixedPriceTransaction ev
 eBay POSTs SOAP XML to the URL when an item sells.
 
 Verification: NotificationSignature = MD5(timestamp + dev_id + app_id + cert_id).
-dev_id must be present in ebay-credentials.json; a signed notification without a
-verifiable dev_id is rejected (no accept-when-unsigned fallback).
+Fails CLOSED on any unverifiable case (missing header, missing/empty signature,
+unparseable payload, missing dev_id) — this endpoint is public and unauthenticated,
+so there is no accept-when-unsigned fallback.
 
 Setup: call set_notification_preferences() once, or run `tgw setup-ebay-hooks`.
 """
@@ -72,23 +73,27 @@ def _load_app_credentials(cfg: Dict[str, Any]) -> Dict[str, str]:
 def verify_notification_signature(xml_body: bytes, cfg: Dict[str, Any]) -> bool:
     """
     Verify eBay's NotificationSignature: MD5(timestamp + dev_id + app_id + cert_id).
-    Returns True if valid. Returns False if a signature is present but dev_id is
-    missing from credentials (cannot verify → reject). No accept-when-unsigned fallback.
+    Returns True only if the signature is present and matches. Fails CLOSED
+    (returns False) on missing header, missing/empty signature, unparseable
+    payload, or missing dev_id — this is the sole gate on the public
+    unauthenticated /webhooks/ebay/notification endpoint, and dev_id/app_id/
+    cert_id are always configured, so every genuine eBay notification carries
+    a verifiable signature. There is no legitimate unsigned case.
     """
     try:
         root = ET.fromstring(xml_body)
 
         header = root.find(f'{{{_SOAP_NS}}}Header')
         if header is None:
-            log.debug('ebay_webhook: no SOAP header — signature unverifiable, accepting')
-            return True
+            log.warning('ebay_webhook: no SOAP header — rejecting')
+            return False
 
         creds_el = header.find(f'.//{{{_NS}}}RequesterCredentials')
         sig_el = creds_el.find(f'{{{_NS}}}NotificationSignature') if creds_el is not None else None
         received_sig = (sig_el.text or '').strip() if sig_el is not None else ''
         if not received_sig:
-            log.debug('ebay_webhook: no NotificationSignature — accepting')
-            return True
+            log.warning('ebay_webhook: no NotificationSignature — rejecting')
+            return False
 
         body_el = root.find(f'{{{_SOAP_NS}}}Body')
         ts_el = body_el.find(f'.//{{{_NS}}}Timestamp') if body_el is not None else None
@@ -113,8 +118,8 @@ def verify_notification_signature(xml_body: bytes, cfg: Dict[str, Any]) -> bool:
         return True
 
     except Exception as exc:
-        log.warning('ebay_webhook: signature check error: %s — accepting', exc)
-        return True
+        log.warning('ebay_webhook: signature check error: %s — rejecting', exc)
+        return False
 
 
 def parse_sold_notification(xml_body: bytes) -> Optional[Dict[str, Any]]:

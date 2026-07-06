@@ -255,6 +255,17 @@ button:hover{{background:#2a5a9a}}
 </html>"""
 
 
+def _safe_next_path(path: str) -> str:
+    """Only allow same-origin relative paths as a post-login redirect target.
+
+    Rejects protocol-relative URLs (//evil.com) that browsers resolve as
+    absolute, and anything not starting with a single leading slash.
+    """
+    if not path or not path.startswith("/") or path.startswith("//") or path.startswith("/\\"):
+        return "/form/home"
+    return path
+
+
 def _require_auth(
     credentials: Optional[HTTPAuthorizationCredentials] = Security(_security),
     request: Request = None,
@@ -286,7 +297,9 @@ async def _session_guard(request: Request, call_next):
 
 @app.get("/login")
 def login_get(next: str = "/form/home"):
-    return HTMLResponse(_LOGIN_HTML.format(next=next, error=""))
+    import html as _html
+
+    return HTMLResponse(_LOGIN_HTML.format(next=_html.escape(next), error=""))
 
 
 @app.post("/login")
@@ -294,6 +307,8 @@ async def login_post(
     next: str = Form(default="/form/home"),
     key: str = Form(default=""),
 ):
+    import html as _html
+
     if _web_password and secrets.compare_digest(key.encode(), _web_password.encode()):
         # Prune expired sessions before adding a new one
         now = time.time()
@@ -302,14 +317,14 @@ async def login_post(
             del _sessions[t]
         tok = secrets.token_hex(32)
         _sessions[tok] = now + _SESSION_MAX_AGE
-        dest = next if next.startswith("/") else "/form/home"
+        dest = _safe_next_path(next)
         resp = RedirectResponse(dest, status_code=303)
         resp.set_cookie(
             _SESSION_COOKIE, tok,
             httponly=True, samesite="strict", max_age=_SESSION_MAX_AGE,
         )
         return resp
-    html = _LOGIN_HTML.format(next=next, error='<p class="err">Invalid key.</p>')
+    html = _LOGIN_HTML.format(next=_html.escape(next), error='<p class="err">Invalid key.</p>')
     return HTMLResponse(html, status_code=401)
 
 
@@ -2940,6 +2955,8 @@ _CONDITIONS = ["", "New", "Like New", "Very Good", "Good", "Acceptable"]
 @app.get("/form/intake/{sku}")
 def intake_form(sku: str, request: Request):
     """Mobile-friendly intake form — no Bearer auth, relies on network trust."""
+    import html as _html
+
     from fastapi.responses import HTMLResponse
 
     json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
@@ -2951,7 +2968,7 @@ def intake_form(sku: str, request: Request):
             json_path = _cfg["itemdata_root"] / current / f"{current}.json"
             sku = current
         else:
-            return HTMLResponse(f"<h2>SKU not found: {sku}</h2>", status_code=404)
+            return HTMLResponse(f"<h2>SKU not found: {_html.escape(sku)}</h2>", status_code=404)
 
     doc = load_item_doc(json_path)
 
@@ -2975,9 +2992,9 @@ def intake_form(sku: str, request: Request):
         sel = "selected" if c == cond_val else ""
         cond_opts += f'<option value="{c}" {sel}>{c if c else "— not set —"}</option>'
 
-    weight = doc.get("weight_oz", "")
-    barcode = doc.get("barcode", doc.get("upc", ""))
-    ai_hint = doc.get("ai_hint", "")
+    weight = _html.escape(str(doc.get("weight_oz", "")))
+    barcode = _html.escape(str(doc.get("barcode", doc.get("upc", ""))))
+    ai_hint = _html.escape(str(doc.get("ai_hint", "")))
     sku_short = sku[-9:]
 
     # Photo count from filesystem (server-side; JS keeps it live via polling)
@@ -9126,7 +9143,7 @@ def docs_page(path: str):
         raise HTTPException(status_code=500, detail=f"read error: {exc}")
 
     md = mistune.create_markdown(
-        escape=False,
+        escape=True,
         plugins=["table", "strikethrough"],
     )
     body_html = md(content)
