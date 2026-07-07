@@ -60,9 +60,11 @@ def _archive_before_overwrite(archive_root: Path, path: Path) -> None:
         zf.write(path, arcname=f'{path.name}.{ts}')
 
 
-def atomic_write_json(path: Path, data: Any, pretty: bool = True,
-                      *, archive_root: Optional[Path] = None) -> None:
-    """Write JSON atomically via a temp file + rename.
+def _atomic_write(path: Path, write_body: Any, *,
+                  archive_root: Optional[Path] = None) -> None:
+    """Shared core: temp file + chmod + rename, with optional archive-before-
+    overwrite (invariant E5). ``write_body`` is called with the open temp
+    file handle and does the actual serialization (json.dump vs plain text).
 
     NamedTemporaryFile creates the temp file at mode 0600 regardless of the
     parent directory's permissions or any default ACL in place — an ACL can
@@ -72,12 +74,6 @@ def atomic_write_json(path: Path, data: Any, pretty: bool = True,
     (confirmed live in session 41 on docs/TGW-Plan-Vault). Explicitly chmod
     the temp file before the rename so the final file keeps the target's
     existing mode (or 0o660, the group-writable default, for a new file).
-
-    ``archive_root``: pass ``cfg['archive_root']`` to enforce invariant E5 —
-    if the target already exists (a real overwrite, not first creation), its
-    current content is archived to ``archive_root/<sku>.zip`` before the
-    overwrite proceeds. Omit only for non-item writes (catalogs, digests,
-    caches) that aren't covered by E5.
     """
     if archive_root is not None and path.exists():
         _archive_before_overwrite(archive_root, path)
@@ -89,12 +85,50 @@ def atomic_write_json(path: Path, data: Any, pretty: bool = True,
     with tempfile.NamedTemporaryFile(
         'w', encoding='utf-8', delete=False, dir=path.parent
     ) as tmp:
-        json.dump(data, tmp, ensure_ascii=False,
-                  indent=2 if pretty else None, sort_keys=False)
-        tmp.write('\n')
+        write_body(tmp)
         tmp_path = Path(tmp.name)
     os.chmod(tmp_path, want_mode)
     os.replace(tmp_path, path)
+
+
+def atomic_write_json(path: Path, data: Any, pretty: bool = True,
+                      *, archive_root: Optional[Path] = None,
+                      sort_keys: bool = False) -> None:
+    """Write JSON atomically via a temp file + rename.
+
+    ``archive_root``: pass ``cfg['archive_root']`` to enforce invariant E5 —
+    if the target already exists (a real overwrite, not first creation), its
+    current content is archived to ``archive_root/<sku>.zip`` before the
+    overwrite proceeds. Omit only for non-item writes (catalogs, digests,
+    caches) that aren't covered by E5.
+
+    ``sort_keys``: off by default (matches historical behavior of most
+    callers). Pass True for callers that relied on deterministic, diffable
+    key order (e.g. itemdata_scrub.py, audit#1143 #1235 follow-up).
+    """
+    def _write(tmp):
+        json.dump(data, tmp, ensure_ascii=False,
+                  indent=2 if pretty else None, sort_keys=sort_keys)
+        tmp.write('\n')
+    _atomic_write(path, _write, archive_root=archive_root)
+
+
+def atomic_write_text(path: Path, text: str, *,
+                      archive_root: Optional[Path] = None) -> None:
+    """Write plain text atomically via temp file + rename.
+
+    Same tmp+rename+chmod guarantee as ``atomic_write_json``, for the
+    non-JSON durable docs (e.g. the Master Plan) that also need it —
+    audit#1143 #1162+#1177 found several call sites writing straight to the
+    target path with plain ``write_text``, risking a truncated file on crash
+    mid-write and, for anything with prior content worth keeping, an
+    unrecoverable overwrite (invariant E5).
+
+    ``archive_root``: same contract as ``atomic_write_json`` — if the target
+    already exists, its current content is zipped into
+    ``archive_root/<stem>.zip`` before the overwrite proceeds.
+    """
+    _atomic_write(path, lambda tmp: tmp.write(text), archive_root=archive_root)
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +261,13 @@ def strip_fields(cfg: Dict[str, Any], sku: str, fields: List[str],
     """Remove a set of top-level fields from one item's JSON in a single
     write — one archive entry per item (E5), not one per field. Fields
     absent from the doc are silently skipped (idempotent). Used by the
-    legacy-field data-scrub pass (todo #1053)."""
+    legacy-field data-scrub pass (todo #1053).
+
+    Side effect: also clears 'catalog_verified' whenever any field is
+    actually removed (the catalog-derived hall-pass no longer reflects the
+    doc's new contents). Every caller inherits this — audit#1143 #1244
+    follow-up found it undocumented and surprising when data_scrub_magento.py
+    started routing through this function."""
     path = sku_json(cfg, sku)
     if not path.exists():
         return {'ok': False, 'error': f'sku not found: {sku!r}'}

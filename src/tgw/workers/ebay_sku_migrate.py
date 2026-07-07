@@ -850,6 +850,17 @@ class EbaySkuMigrateWorker(QueueWorker):
         tgw_logging.log_event('ebay_sku_migrate_batch', **stats)
         self._reschedule(interval_h)
 
+    def _on_terminal_failure(self, job: Dict[str, Any], error_text: str) -> None:
+        # audit#1143 #1234 follow-up (todo #1242): a dead-lettered batch must
+        # not end the chain — migration would silently stall forever. handle()
+        # computes interval_h from config before the batch loop; recompute the
+        # same way here since a terminal failure means handle() never reached
+        # its own self._reschedule(interval_h) call.
+        migrate_cfg = self.config.get('ebay_sku_migrate', {})
+        interval_h = float(migrate_cfg.get('interval_hours', 1))
+        log.warning('ebay_sku_migrate dead-lettered; rescheduling next batch anyway')
+        self._reschedule(interval_h)
+
     def _reschedule(self, interval_hours: float) -> None:
         next_run = time.time() + interval_hours * 3600
         jid = state_machine.enqueue_job(

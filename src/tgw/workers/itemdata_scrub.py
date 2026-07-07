@@ -10,6 +10,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+# PP-FENCE-001 gap (audit#1143 #1235): scrub_itemdata applies recursive,
+# pattern-based key removal across the whole doc. The fence's patch_item()
+# only sets top-level fields — no delete semantics — so this worker keeps
+# writing via atomic_write_json directly (same documented gap class as
+# multi_intake.py's key-deletion write) rather than a fence redesign.
+from tgw.items import atomic_write_json
+
 logger = logging.getLogger(__name__)
 
 
@@ -81,7 +88,8 @@ def derive_item_path(itemdata_root: Path, sku: str) -> Path:
     return Path(itemdata_root) / sku / f"{sku}.json"
 
 
-def process_queue_job(job_file: Path, rules: ScrubRules, default_root: Path) -> bool:
+def process_queue_job(job_file: Path, rules: ScrubRules, default_root: Path,
+                       archive_root: Path | None = None) -> bool:
     sku = job_file.name
     if sku.endswith('.json'):
         sku = sku[:-5]
@@ -118,7 +126,8 @@ def process_queue_job(job_file: Path, rules: ScrubRules, default_root: Path) -> 
         item_data = json.loads(file_path.read_text(encoding='utf-8'))
         cleaned_data, removed_paths = scrub_itemdata(item_data, rules)
 
-        file_path.write_text(json.dumps(cleaned_data, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+        atomic_write_json(file_path, cleaned_data, archive_root=archive_root,
+                         sort_keys=True)
         logger.info(f"Successfully scrubbed SKU {sku}. Removed {len(removed_paths)} paths.")
         return True
 
@@ -141,6 +150,7 @@ def main() -> None:
         cfg = load_config(args.config)
         rules = load_rules(cfg)
         default_root = Path(cfg.get("itemdata_root", "/opt/TGW/data/items"))
+        archive_root = Path(cfg["archive_root"]) if cfg.get("archive_root") else None
 
         queue_dir = Path.cwd()
         job_files = [f for f in queue_dir.iterdir() if f.is_file() and not f.name.startswith('.')]
@@ -151,7 +161,7 @@ def main() -> None:
 
         logger.info(f"Processing batch of {len(job_files)} queue files...")
         for job_file in sorted(job_files):
-            success = process_queue_job(job_file, rules, default_root)
+            success = process_queue_job(job_file, rules, default_root, archive_root)
             if success:
                 job_file.unlink()
 

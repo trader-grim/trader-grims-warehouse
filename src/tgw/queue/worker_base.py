@@ -221,6 +221,7 @@ class QueueWorker:
                 f'{repr(exc)[:140]}',
                 level='error',
             )
+            self._on_terminal_failure(job, repr(exc))
         except Exception as exc:
             error_text = repr(exc)
             log.exception('job %s failed: %s', job_id, error_text)
@@ -254,8 +255,18 @@ class QueueWorker:
                 )
                 return
 
-            state_machine.mark_failed(job_id, self.owner, error_text)
+            result_state = state_machine.mark_failed(job_id, self.owner, error_text)
             tgw_logging.log_event('job_failed', job_id=job_id, error=error_text)
+            if result_state == 'dead_letter':
+                log.error('job %s dead_letter after %d/%d attempts: %s',
+                          job_id, attempt, max_att, error_text[:200])
+                from tgw.notify import notify
+                notify(
+                    f'Dead letter: {self.queue_name}',
+                    f'{error_text[:140]}',
+                    level='error',
+                )
+                self._on_terminal_failure(job, error_text)
         else:
             state_machine.mark_succeeded(job_id, self.owner)
             tgw_logging.log_event('job_succeeded', job_id=job_id)
@@ -279,3 +290,50 @@ class QueueWorker:
         data access. Never construct ItemData paths here.
         """
         raise NotImplementedError
+
+    def _on_terminal_failure(self, job: Dict[str, Any], error_text: str) -> None:
+        """Called once a job reaches dead_letter (HardFailure or exhausted
+        retries) — after the dead-letter notify has already fired.
+
+        Self-rescheduling workers (handle() calls self._reschedule() only on
+        success — token_refresh, velocity_stats, ebay_sync, ebay_dole,
+        ebay_price_reducer, ebay_legacy_sync, sync_conflict) need their next
+        job enqueued here too, or a single dead-lettered job ends the chain
+        forever with no future job ever enqueued: the dead-letter notify
+        tells Dave a job failed, but nothing tells him the recurring check
+        itself stopped (audit#1143 #1165+#1166).
+
+        audit#1143 #1244 follow-up (code review): originally fixed by having
+        each self-rescheduling worker hand-write an identical 4-line
+        override (log + call self._reschedule()), guarded only by a test
+        that scanned for the omission. Generalized here instead — any
+        subclass whose _reschedule() takes no required arguments gets it
+        called automatically, so the omission this audit already caught
+        once (todo #1234 fixed 2 of 8 workers; review caught the other 6 as
+        todo #1242) can't recur for a future worker of this shape.
+
+        Workers whose _reschedule() needs an argument (ebay_sku_migrate,
+        which needs interval_hours recomputed from config since handle()
+        never reached its own call) must still override this explicitly —
+        the override takes precedence over this default.
+        """
+        reschedule = getattr(self, '_reschedule', None)
+        if reschedule is None:
+            return
+        try:
+            import inspect
+            sig = inspect.signature(reschedule)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return
+        if any(
+            p.default is inspect.Parameter.empty
+            and p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                          inspect.Parameter.POSITIONAL_ONLY)
+            for p in sig.parameters.values()
+        ):
+            # _reschedule needs an argument this base class can't supply —
+            # the subclass must override _on_terminal_failure itself.
+            return
+        log.warning('%s dead-lettered; rescheduling next run anyway',
+                   self.queue_name)
+        reschedule()

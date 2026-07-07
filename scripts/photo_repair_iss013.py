@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import logging
 import re
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -53,6 +54,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 ITEMDATA_ROOT = Path('/opt/TGW/data/ItemData')
+HISTORY_ROOT  = ITEMDATA_ROOT.parent / 'history' / 'ItemData'
 # Local snapshots are pruned immediately after send (LOCAL_KEEP=2).
 # Check the backup target, which retains all received snapshots.
 SNAPSHOT_DIRS = [
@@ -264,6 +266,16 @@ def repair_item(sku: str, execute: bool) -> dict:
     if not execute:
         r['status'] = 'DRY_RUN'
         return r
+
+    # Archive before manipulation (audit#1143 #1163+#1208: this rename had no
+    # archive-before-manipulation step, unlike alt_text.py's established
+    # copy2-to-history convention). Copy only if not already archived, same
+    # as alt_text.py's _history_sku_dir usage.
+    history_dir = HISTORY_ROOT / sku
+    history_path = history_dir / alt_path.name
+    if not history_path.exists():
+        history_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(alt_path, history_path)
 
     # Rename
     try:

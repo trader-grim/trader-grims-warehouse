@@ -200,12 +200,17 @@ def mark_succeeded(job_id: str, lease_owner: str, result: Optional[Dict[str, Any
             )
 
 
-def mark_failed(job_id: str, lease_owner: str, error: str) -> None:
+def mark_failed(job_id: str, lease_owner: str, error: str) -> str:
     """
     Transition running → retry_wait or failed → dead_letter.
 
     Respects max_attempts: if attempt_count >= max_attempts, goes straight
     to dead_letter. Otherwise goes to retry_wait with exponential backoff.
+
+    Returns 'retry_wait' or 'dead_letter' — the caller needs this to know
+    whether the job chain just ended (audit#1143 #1165+#1166: callers must
+    be able to detect a terminal failure to alert on it / restart a
+    self-rescheduling chain; silently returning None hid that signal).
     """
     with _conn() as con:
         with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -215,7 +220,11 @@ def mark_failed(job_id: str, lease_owner: str, error: str) -> None:
             )
             row = cur.fetchone()
             if row is None:
-                return
+                # audit#1143 #1234/#1243 follow-up: the row is gone — nothing
+                # will ever retry this job_id, so this is terminal, not
+                # 'retry_wait'. Report it as 'dead_letter' so the caller
+                # alerts/reschedules instead of silently doing nothing.
+                return 'dead_letter'
             attempt = row['attempt_count']
             max_att = row['max_attempts']
             new_state = next_failure_state(attempt, max_att)
@@ -262,6 +271,8 @@ def mark_failed(job_id: str, lease_owner: str, error: str) -> None:
                     """,
                     (job_id,),
                 )
+
+            return 'retry_wait' if new_state == 'retry_wait' else 'dead_letter'
 
 
 def mark_dead_letter(job_id: str, lease_owner: str, error: str) -> None:

@@ -8,6 +8,8 @@ from typing import Any, Dict
 
 import requests
 
+from tgw.apis.ebay._token_io import atomic_write_token_json
+
 TGW_ROOT = Path(os.getenv('TGW_ROOT', '/opt/TGW'))
 TGW_CONFIG_PATH = TGW_ROOT / 'config' / 'tgw-api-config.json'
 
@@ -60,9 +62,10 @@ def load_token_state() -> Dict[str, Any]:
         return json.load(f)
 
 def save_token_state(state: Dict[str, Any]) -> None:
-    TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-    TOKEN_PATH.write_text(json.dumps(state, indent=2) + '\n')
-    TOKEN_PATH.chmod(0o600)
+    # audit#1143 #1162+#1177: atomic tmp+rename — TOKEN_PATH is the sole
+    # copy of the eBay refresh token; a partial write (crash/kill mid-write)
+    # corrupts it and forces full browser re-consent.
+    atomic_write_token_json(TOKEN_PATH, json.dumps(state, indent=2) + '\n')
 
 def is_token_expired(state: Dict[str, Any]) -> bool:
     expiry = state.get('expiry', 0)

@@ -25,9 +25,10 @@ from typing import Any, Dict, List
 import tgw.logging as tgw_logging
 from tgw.config import DEFAULT_CONFIG, load_config
 
-# PP-FENCE-001: atomic_write_json kept for two gaps not yet in fence:
-#   1. Stub writes go to newitems_path (not itemdata_root) — outside fence scope.
-#   2. ItemData write below removes a key (Item number) — fence needs delete_fields.
+# PP-FENCE-001: atomic_write_json kept for one remaining gap not yet in fence:
+#   Stub writes go to newitems_path (not itemdata_root) — outside fence scope.
+# (The second gap — a direct ItemData key-deletion write — was removed in
+# session 48; see the SKU-collision handling below.)
 from tgw.items import atomic_write_json
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
@@ -153,26 +154,40 @@ class MultiIntakeWorker(QueueWorker):
                     'source_sku': base_sku,
                 }, pretty=self.config.get('pretty', True))
 
-                # If this child's ItemData JSON already exists (e.g. the item
-                # was previously catalogued as part of a bundle listing), strip
-                # the parent bundle's eBay item number — it belongs to the
-                # package, not the individual item.
+                # audit#1143 #1235 follow-up (session 48): a derived child SKU
+                # can collide with an already-catalogued ItemData record (e.g.
+                # a re-drop of the same multi-zip after a prior partial run).
+                # bundle_intake's own idempotency already handles this safely
+                # — _write_item_json()/_copy_images() no-op on an existing
+                # SKU, never touching its fields — so this worker used to
+                # ALSO directly patch the existing record (strip 'Item
+                # number', bypassing the fence) is both redundant and
+                # unverified: one confirmed case in production
+                # (tgw202604130911246) turned out to be a currently-Active
+                # live eBay listing with no sibling children and no archived
+                # pre-strip snapshot, i.e. never actually validated safe.
+                # Removed. Only surface the collision for operator awareness;
+                # let the normal newitems_dir path (already written above)
+                # handle it.
                 existing_json = (self.config['itemdata_root']
                                  / sku / f'{sku}.json')
                 if existing_json.exists():
-                    try:
-                        import json as _json
-                        data = _json.loads(
-                            existing_json.read_text(encoding='utf-8'))
-                        if 'Item number' in data:
-                            del data['Item number']
-                            data.setdefault('source_sku', base_sku)
-                            atomic_write_json(existing_json, data,
-                                             pretty=self.config.get('pretty', True))
-                            log.info('multi_intake: stripped Item number from '
-                                     'existing %s (source_sku=%s)', sku, base_sku)
-                    except Exception:
-                        log.exception('multi_intake: failed to scrub %s', sku)
+                    log.warning(
+                        'multi_intake: derived child sku %s (from base %s) '
+                        'already has an ItemData record — leaving it untouched, '
+                        'new photos will merge in via the normal newitems_dir path',
+                        sku, base_sku,
+                    )
+                    tgw_logging.log_event(
+                        'multi_intake_sku_collision', sku=sku, base_sku=base_sku,
+                    )
+                    from tgw.notify import notify
+                    notify(
+                        'multi_intake SKU collision',
+                        f'Derived child {sku} (base {base_sku}) already has an '
+                        f'ItemData record — verify it is not a mistaken duplicate.',
+                        level='warning',
+                    )
 
                 children.append(sku)
                 log.info('child bundle %s: %d photos (from zip subdir %s)',

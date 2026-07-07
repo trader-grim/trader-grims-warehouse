@@ -138,13 +138,20 @@ def test_verifiedupdate_clears_catalog_verified(cfg):
 # PP-FENCE-001 — grep audit: atomic_write_json banned in workers/ and ebay/
 # ---------------------------------------------------------------------------
 # Known gaps (documented in source with PP-FENCE-001 comment):
-#   multi_intake.py:   newitems_dir stub write + key-deletion write (2 sites)
+#   multi_intake.py:   newitems_dir stub write (1 site) — the key-deletion
+#                      write was removed in session 48; bundle_intake's own
+#                      idempotent no-op-on-existing-SKU handling covers it
 #   ebay_sku_migrate.py: dir-rename + write sequence (3 sites)
 #   ebay/pull.py:       restore_archive_tombstone — needs upsert semantics (1 site)
+#   itemdata_scrub.py: recursive/pattern-based key removal — fence's patch_item
+#                      only sets top-level fields, no delete semantics (audit#1143
+#                      #1235: fixed the write's atomicity/archive gap in-place
+#                      rather than redesigning the fence for this one worker)
 _FENCE_GAPS = frozenset({
     "multi_intake.py",
     "ebay_sku_migrate.py",
     "pull.py",
+    "itemdata_scrub.py",
 })
 
 
