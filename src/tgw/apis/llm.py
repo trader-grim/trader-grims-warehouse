@@ -13,10 +13,8 @@ Usage:
 
 from __future__ import annotations
 
-import json
 import logging
 import time
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -32,35 +30,32 @@ log = logging.getLogger(__name__)
 # use this set instead of hardcoding provider names at call sites.
 CLOUD_PROVIDERS = {'openrouter', 'google_direct'}
 
-# Hardcoded defaults — override via tgw-models.json (cfg['models'])
+# Dave, 2026-07-09: which provider/model serves a task is a CONFIG decision,
+# never a code decision — "why change code just to change models?" This file
+# used to carry a hardcoded per-task _DEFAULTS dict as a silent fallback,
+# which drifted out of sync with the real decision more than once (e.g. it
+# still said OpenRouter-primary/Google-free-tier weeks after Dave flipped to
+# direct-provider-primary with paid keys — audit#1143 code-review, #1252).
+# The only source of truth now is /opt/TGW/config/tgw-models.json (loaded
+# into cfg['models'] by tgw.config.load_config; see its own '_comment' entry
+# for the current live decision and the provider/model-id conventions).
 #
-# Session 45 (2026-07-04, Dave): OpenRouter is PRIMARY for all cloud vision
-# tasks. Google slashed the flash-lite free tier to 20 requests/day, so
-# google_direct is no longer viable as a primary — its ~20 free calls/day are
-# now the OPERATOR EMERGENCY RESERVE: call_model() falls back to google_direct
-# only for interactive (C10 operator-lane) callers when OpenRouter fails, so an
-# operator can keep working through an OpenRouter outage/credit gap. The
-# reverse fallback (google_direct → openrouter, precheck-gated with post-429
-# stand-down) is kept intact for when a paid Google API key makes google_direct
-# a primary again — flip tgw-models.json back, no code change needed.
-# (History: s41 moved these tasks TO google_direct when its free tier was
-# verified live; 2.0-flash models remain quota-0/deprecated on this key.)
-_DEFAULTS: Dict[str, tuple[str, str]] = {
-    'ai_identify':            ('openrouter', 'google/gemini-2.5-flash-lite'),
-    'alt_text':               ('openrouter', 'google/gemini-2.5-flash-lite'),
-    'suggestions_classify':   ('openrouter', 'deepseek/deepseek-v4-flash'),
-    'bulk_classify':          ('openrouter', 'google/gemini-2.5-flash-lite'),
-    'pm_chat':                ('openrouter', 'anthropic/claude-haiku-4-5'),
-    'ebay_draft':             ('openrouter', 'google/gemini-2.5-flash'),
-    'pm_intake':              ('openrouter', 'deepseek/deepseek-v4-flash'),
-}
+# Example shape (see tgw-models.json for the real, current values):
+#   {"ai_identify": {"provider": "google_direct", "model": "gemini-2.5-flash-lite"}}
 
 
 def get_task_model(cfg: Dict[str, Any], task: str) -> tuple[str, str]:
-    """Return (provider, model) for a task from cfg['models'], falling back to _DEFAULTS."""
-    entry = cfg.get('models', {}).get(task, {})
-    default_provider, default_model = _DEFAULTS.get(task, ('openrouter', 'google/gemini-2.0-flash-lite'))
-    return entry.get('provider', default_provider), entry.get('model', default_model)
+    """Return (provider, model) for *task* from cfg['models'][task] — the
+    ONLY source; see /opt/TGW/config/tgw-models.json. Raises KeyError with a
+    clear message if the task isn't configured there — a task's model must
+    never be a silent code-level guess (Dave, 2026-07-09)."""
+    entry = cfg.get('models', {}).get(task)
+    if not entry or 'provider' not in entry or 'model' not in entry:
+        raise KeyError(
+            f"No models[{task!r}] entry in tgw-models.json (need "
+            f"{{'provider': ..., 'model': ...}}) — see TGW-Config-Reference.md"
+        )
+    return entry['provider'], entry['model']
 
 
 def call_model(
@@ -139,6 +134,60 @@ def call_model(
                 log.warning(
                     'google_direct unavailable for task %r (%s) — falling back to '
                     'openrouter/%s: %s', task, model, fallback_model, google_exc,
+                )
+                text, usage = _call_openrouter(
+                    fallback_model, system_prompt, user_prompt, cfg,
+                    img_b64_list=_images, messages=messages,
+                )
+        elif provider == 'deepseek_direct':
+            from tgw import quota
+
+            ds_exc: Optional[Exception] = None
+            try:
+                quota.precheck(cfg, 'llm_deepseek')
+            except quota.QuotaBudgetExceeded as exc:
+                ds_exc = exc
+            if ds_exc is None:
+                try:
+                    text, usage = _call_deepseek_direct(
+                        model, system_prompt, user_prompt, cfg, messages=messages,
+                    )
+                except Exception as exc:
+                    ds_exc = exc
+            if ds_exc is not None:
+                fallback_model = model if model.startswith('deepseek/') else f'deepseek/{model}'
+                log.warning(
+                    'deepseek_direct unavailable for task %r (%s) — falling back to '
+                    'openrouter/%s: %s', task, model, fallback_model, ds_exc,
+                )
+                text, usage = _call_openrouter(
+                    fallback_model, system_prompt, user_prompt, cfg,
+                    img_b64_list=_images, messages=messages,
+                )
+        elif provider == 'anthropic_direct':
+            from tgw import quota
+
+            an_exc: Optional[Exception] = None
+            try:
+                quota.precheck(cfg, 'llm_anthropic')
+            except quota.QuotaBudgetExceeded as exc:
+                an_exc = exc
+            if an_exc is None:
+                try:
+                    text, usage = _call_anthropic_direct(
+                        model, system_prompt, user_prompt, cfg, messages=messages,
+                    )
+                except Exception as exc:
+                    an_exc = exc
+            if an_exc is not None:
+                # OpenRouter's alias drops the date suffix Anthropic's direct
+                # API requires (e.g. 'claude-haiku-4-5-20251001' ->
+                # 'anthropic/claude-haiku-4-5') — strip it for the fallback.
+                base_id = model.rsplit('-20', 1)[0] if '-20' in model else model
+                fallback_model = model if model.startswith('anthropic/') else f'anthropic/{base_id}'
+                log.warning(
+                    'anthropic_direct unavailable for task %r (%s) — falling back to '
+                    'openrouter/%s: %s', task, model, fallback_model, an_exc,
                 )
                 text, usage = _call_openrouter(
                     fallback_model, system_prompt, user_prompt, cfg,
@@ -292,17 +341,170 @@ def _call_google_direct(
     return text, usage
 
 
-def _load_openrouter_key(cfg: Dict[str, Any]) -> str:
-    """Load OpenRouter API key from secrets file, falling back to env var."""
-    import os
+def _load_deepseek_key(cfg: Dict[str, Any]) -> str:
+    """Load DeepSeek API key via the single-facility DEEPSEEK_API_KEY env
+    var (tgw.apis.secrets.get_api_key) — see secrets_root/tgw.env."""
+    from tgw.apis.secrets import get_api_key
 
-    cred_path = cfg.get('openrouter_credentials_path')
-    if cred_path and Path(cred_path).exists():
-        try:
-            return json.loads(Path(cred_path).read_text())['api_key']
-        except (KeyError, ValueError, OSError):
-            return ''
-    return os.environ.get('OPENROUTER_API_KEY', '')
+    return get_api_key('deepseek')
+
+
+def _call_deepseek_direct(
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    cfg: Dict[str, Any],
+    messages: Optional[List[Dict[str, Any]]] = None,
+    max_retries: int = 3,
+) -> tuple:
+    """Call DeepSeek's OpenAI-compatible chat completions API directly — no
+    OpenRouter markup. *model* is a bare DeepSeek model id (e.g.
+    'deepseek-v4-flash'), not the 'deepseek/...' OpenRouter form. No image
+    support — neither current caller (pm_intake, suggestions_classify) sends
+    photos. Raises on any failure; call_model() catches and falls back to
+    OpenRouter. Returns (text, usage_dict).
+    """
+    api_key = _load_deepseek_key(cfg)
+
+    if messages is not None:
+        msg_list: Any = messages
+    else:
+        msg_list = [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user',   'content': user_prompt},
+        ]
+
+    payload = {'model': model, 'messages': msg_list}
+    headers = {
+        'Authorization': f'Bearer {api_key}',
+        'Content-Type': 'application/json',
+    }
+
+    from tgw import quota
+
+    for attempt in range(max_retries):
+        resp = requests.post(
+            'https://api.deepseek.com/chat/completions',
+            headers=headers,
+            json=payload,
+            timeout=60,
+        )
+        quota.record(cfg, 'llm_deepseek')
+        if resp.status_code == 429:
+            quota.record_429(cfg, 'llm_deepseek', model)
+        if resp.status_code == 429 and attempt < max_retries - 1:
+            time.sleep(15 * (attempt + 1))
+            continue
+        break
+
+    resp.raise_for_status()
+    body = resp.json()
+    text = body['choices'][0]['message']['content']
+    raw_usage = body.get('usage') or {}
+    usage = {
+        'prompt_tokens':     raw_usage.get('prompt_tokens'),
+        'completion_tokens': raw_usage.get('completion_tokens'),
+        'total_tokens':      raw_usage.get('total_tokens'),
+    }
+    return text, usage
+
+
+def _load_anthropic_key(cfg: Dict[str, Any]) -> str:
+    """Load Anthropic API key via the single-facility ANTHROPIC_API_KEY env
+    var (tgw.apis.secrets.get_api_key) — see secrets_root/tgw.env."""
+    from tgw.apis.secrets import get_api_key
+
+    return get_api_key('anthropic')
+
+
+_ANTHROPIC_MAX_TOKENS = 4096
+
+
+def _call_anthropic_direct(
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    cfg: Dict[str, Any],
+    messages: Optional[List[Dict[str, Any]]] = None,
+    max_retries: int = 3,
+) -> tuple:
+    """Call Anthropic's Messages API directly — no OpenRouter markup. *model*
+    is a full versioned Claude model id (e.g. 'claude-haiku-4-5-20251001'),
+    not the 'anthropic/...' OpenRouter alias. No image support — pm_chat is
+    the only current caller and it's text-only. Raises on any failure;
+    call_model() catches and falls back to OpenRouter. Returns (text, usage_dict).
+    """
+    api_key = _load_anthropic_key(cfg)
+
+    # Anthropic's Messages API takes system as a top-level field, not a
+    # system-role message — pull one out of *messages* if present (pm_chat
+    # builds OpenAI-style message lists with a leading system message).
+    system = system_prompt
+    msg_list: List[Dict[str, Any]]
+    if messages is not None:
+        msg_list = [m for m in messages if m.get('role') != 'system']
+        sys_msgs = [m['content'] for m in messages if m.get('role') == 'system']
+        if sys_msgs:
+            system = '\n\n'.join(sys_msgs)
+    else:
+        msg_list = [{'role': 'user', 'content': user_prompt}]
+
+    payload: Dict[str, Any] = {
+        'model': model,
+        'max_tokens': _ANTHROPIC_MAX_TOKENS,
+        'messages': msg_list,
+    }
+    if system:
+        payload['system'] = system
+
+    headers = {
+        'x-api-key': api_key,
+        'anthropic-version': '2023-06-01',
+        'Content-Type': 'application/json',
+    }
+
+    from tgw import quota
+
+    for attempt in range(max_retries):
+        resp = requests.post(
+            'https://api.anthropic.com/v1/messages',
+            headers=headers,
+            json=payload,
+            timeout=60,
+        )
+        quota.record(cfg, 'llm_anthropic')
+        if resp.status_code == 429:
+            quota.record_429(cfg, 'llm_anthropic', model)
+        if resp.status_code == 429 and attempt < max_retries - 1:
+            time.sleep(15 * (attempt + 1))
+            continue
+        break
+
+    resp.raise_for_status()
+    body = resp.json()
+    text = ''.join(
+        block.get('text', '') for block in body.get('content', [])
+        if block.get('type') == 'text'
+    )
+    raw_usage = body.get('usage') or {}
+    prompt_tokens = raw_usage.get('input_tokens')
+    completion_tokens = raw_usage.get('output_tokens')
+    usage = {
+        'prompt_tokens':     prompt_tokens,
+        'completion_tokens': completion_tokens,
+        'total_tokens':      (prompt_tokens + completion_tokens)
+                              if prompt_tokens is not None and completion_tokens is not None
+                              else None,
+    }
+    return text, usage
+
+
+def _load_openrouter_key(cfg: Dict[str, Any]) -> str:
+    """Load OpenRouter API key via the single-facility OPENROUTER_API_KEY
+    env var (tgw.apis.secrets.get_api_key) — see secrets_root/tgw.env."""
+    from tgw.apis.secrets import get_api_key
+
+    return get_api_key('openrouter')
 
 
 def _call_openrouter(
@@ -321,8 +523,6 @@ def _call_openrouter(
     img_b64_list sends multiple images; img_b64 is a single-image fallback.
     """
     api_key = _load_openrouter_key(cfg)
-    if not api_key:
-        raise RuntimeError('OpenRouter API key not found in secrets or config')
 
     # Resolve image list — prefer img_b64_list, fall back to single img_b64
     images = img_b64_list or ([img_b64] if img_b64 else [])

@@ -214,7 +214,6 @@ def _make_cfg(tmp_path: Path) -> dict:
         'plan_master_path': plan,
         'pm_intake_delay_hours': 4.0,
         'models': {'pm_intake': {'provider': 'openrouter', 'model': 'google/gemini-2.5-flash'}},
-        'openrouter_credentials_path': None,
         'postgres_dsn': 'dbname=state_machine user=tgw',
     }
 

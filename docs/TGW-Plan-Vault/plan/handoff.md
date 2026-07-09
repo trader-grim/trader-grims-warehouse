@@ -38,10 +38,10 @@ status) → `reference/` docs. Tracker beats plan when they disagree.
 
 1. **No backup running** — Postgres work ledger (todos + job history) is NOT
    re-derivable from ItemData. PP-BACKUP-001 operator todos #61/#146/#147. Weeks old.
-2. **Test suite rot** — true state 1,399 pass / 11 fail / 236 errors (most:
-   test_http_server.py broken since cookie-auth refactor). "Suite green" claims from
-   earlier sessions were stale. Repair: todo #1102. Until fixed, only targeted test
-   runs are meaningful.
+2. **RESOLVED (todo #1102, closed)** — test suite repaired; full-suite state as of
+   session 48 (2026-07-06 evening): 1874 pass, 10 fail (all pre-existing/unrelated:
+   google_direct→openrouter rollback + pricing-invariant tests), 1 skipped. Full
+   `pytest -q` is meaningful again, not just targeted runs.
 3. **RESOLVED s45 (2026-07-04/05 night): ebay_draft 402 pile fully drained.**
    Final pass 2,656/2,658 succeeded (99.92%); day total ~6,500 jobs, ~$1.08
    OpenRouter spend. Only failures: 4 corrupt-photo SKUs (Feb-2022 migration
@@ -57,40 +57,6 @@ status) → `reference/` docs. Tracker beats plan when they disagree.
 7. **Thermal hook not installed** — agent shell commands are not yet blocked at
    THROTTLE/SHUTDOWN; harness denied agent self-modification; needs Dave's explicit
    authorization or manual file drop (script in s42 transcript/inbox note).
-
----
-
-## Session 46 — 2026-07-05 (todo #1143 audit — workers/ subsystem, first slice)
-
-Dave asked for "the one that fixes the commit backlog," expecting it first on his
-admin todo list — it was **#1039** (PP-RECOVERY-001), a stale 2026-06-17 web-UI
-regression audit whose only real recovery action (merge `task/aider-20260616145314`
-→ main) turned out already done; correctly redirected to **#1143**, the
-full-codebase cohesion+correctness audit named in CLAUDE.md's code-review cadence
-rule (confirmed by line 124 above — "missed again" three sessions running).
-
-- **#1143 workers/ slice DONE** (first of 6 staged subsystems): Workflow tool, 5
-  file-groups, 60 agents, ~2.3M tokens, 25 files/6,817 lines, 2-of-3 adversarial
-  verify per finding. 17 confirmed, 1 dropped. Report:
-  `dev-workflow/research/RESEARCH-1143-workers-audit.md`.
-- **9 correctness bugs filed as individual todos #1162-#1170** — most notable:
-  `token_refresh.py`/`velocity_stats.py` self-scheduling flaw (an unexpected error
-  silently ends the loop forever — token_refresh dying eventually breaks every
-  eBay-facing worker with no alert); `ebay_publish.py:250` condition-fallback never
-  syncs back to the local record after a 25021 rejection, so local permanently
-  disagrees with live eBay and re-staging repeats the same reject+fallback cycle;
-  `ebay_sku_migrate.py:252` partial migration (eBay ok, local rename fails) never
-  flags the item blocked, so it's silently reprocessed every cycle.
-- **8 lower-severity invariant/cohesion findings batched into #1171** (fence-bypass
-  path construction in 5 files, one ad-hoc queue, one duplicated helper function).
-- **#1143 remaining subsystems (queued, run opportunistically):** apis/ebay/,
-  http_server.py, queue/state-machine, scripts/, nix flake.
-- No files in `src/` changed this session — audit only; nothing to commit besides
-  plan-vault docs/todos.
-
-**Open into next session:** work #1162-#1170 correctness bugs directly, or continue
-#1143 with the next subsystem (apis/ebay/ recommended next — same lifecycle code
-`ebay_publish.py`/`ebay_sku_migrate.py` just flagged touches it heavily).
 
 ---
 
@@ -169,9 +135,69 @@ normal execution-track packets · #1230 governance/policy review (not started).
 - Two commits: `3ab832b` (original fix) and `7ec2a23` (review follow-up).
   Inbox note: `docs/TGW-Plan-Vault/inbox/DONE-1200-dead-letter-zombie.md`.
 
-**Open into next session:** nothing new blocked by this session. Same
-carry-forwards as Session 47 above (Hermes restart, a1131 push, #1219/#1228,
-#1234-#1239 packets, #1230 review) are still open.
+**Same session, continued — audit#1143 dead-letter/atomic-write/multi_intake
+(todos #1234, #1235, #1242-#1246):**
+
+- **#1234 DONE**: self-rescheduling workers (token_refresh, velocity_stats,
+  +6 more found by review) only re-enqueued their next job on success — a
+  dead-lettered job silently ended the chain forever. `state_machine.
+  mark_failed()` now returns `'retry_wait'`/`'dead_letter'` instead of
+  `None`. **#1235 DONE**: 6 non-atomic/no-archive-before-write sites fixed
+  (new `items.atomic_write_text()`, `_token_io.py` for eBay token saves,
+  `data_scrub_magento.py` rewritten onto `items.strip_fields()`).
+- `/code-review` found #1234's fix only covered 2 of 8 self-rescheduling
+  workers — fixed the other 6 (**#1242**), then a second review pass
+  generalized the whole mechanism (**#1245**): `worker_base.QueueWorker.
+  _on_terminal_failure()` now auto-detects a no-arg `self._reschedule` via
+  signature introspection instead of 8 hand-copied overrides
+  (`ebay_sku_migrate` keeps its own — needs `interval_hours`).
+- Dave questioned `multi_intake.py`'s fence-bypassing SKU-collision patch
+  live in conversation; investigated with a live `ebay-pull` + exhaustive
+  photo-size search across all ItemData/NewItems, confirmed it was
+  unverified and redundant with `bundle_intake`'s existing safe idempotent
+  handling, removed it (**#1244**).
+- **#1246** files 4 remaining PLAUSIBLE review findings Dave explicitly
+  deferred (usage/reset timing) — small, no urgency: multi_intake notify
+  spam risk, `mark_failed` rowcount race, `ebay_sku_migrate` interval_h
+  duplication, notify text missing the ebay_stage next-step.
+- Committed as `3efdaed`, pushed — updates existing open **PR #8**
+  (`catio-nix-0.0.1-alpha` → `main`), no duplicate PR created.
+- Restarted all 19 active `tgw-worker@*` services twice (once per fix
+  round); `tgw health` clean except 3 pre-existing tracked warnings
+  (backups, nats, ebay_sync_fallback/#1077) — unrelated.
+- Full offline suite at each step: 1874 passed at the end, same 10
+  pre-existing unrelated failures (google_direct/openrouter rollback +
+  pricing-invariant tests) throughout.
+
+**Same session, continued — PR #8 investigation + `~/tgw-flake` git cleanup
+(todo #1247):**
+
+- Dave asked what PR #8 was. Traced it: `trader-grims-warehouse`'s
+  `flake.nix`/`flake.lock`/`nix/` are convenience symlinks to a fully
+  separate repo, `~/tgw-flake` (own GitHub remote) — confirmed intentional.
+  PR #8 predates that symlink move, so its diff had drifted to show 595
+  files of stale pre-move nix content this repo doesn't use anymore.
+- While checking "which flake is applied, is one older than the other,"
+  found `~/tgw-flake` had **14 modified + 1 deleted file uncommitted since
+  2026-07-04** — turned out to be the earlier Session 47/48 audit#1143
+  nix-flake mitigation (SSH key-only, Postgres gating, dead-file removal,
+  a1131 suspend-block, Hermes/Aider decouple). Live on tgw-prod (dry-activate
+  produced the identical store path to running gen 80) but never committed
+  — a fix being "live" and "safe" (committed/pushed) turned out to be two
+  different claims.
+- Ran the `~/tgw-flake` `commit-nix-flake` skill workflow: cleaned a stray
+  `hermes.nix.save`, `nix flake check` clean, committed `a58d86a`,
+  dry-activate confirmed no live change needed, pushed to `origin/master`
+  (only after separate explicit approval — the permission classifier
+  correctly blocked bundling push into an earlier "commit then rebuild"
+  approval).
+- Dave's call: **PR #8 closed, not merged** — intent already achieved
+  elsewhere, "a speedbump." Branch `catio-nix-0.0.1-alpha` itself untouched.
+
+**Open into next session:** todo #1246 (4 small deferred code-review
+findings, process whenever Dave asks — not urgent). PR #8 is closed, no
+longer a carry-forward. Same carry-forwards as Session 47 above (Hermes
+restart, a1131 push, #1219/#1228, #1230 review) are still open.
 
 ---
 

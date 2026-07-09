@@ -25,6 +25,15 @@ whose value matches at least one historical source are removed. A live
 value with no match anywhere in history is left untouched and reported as
 an exception for Dave to review — never silently dropped.
 
+'eBay category 1 name'/'eBay category 1 number' get an extra guard
+(audit#1143 #1209/#1252): even when the value matches history, they are
+never removed unless the item's canonical ebay_category_id is already
+populated — otherwise this legacy field is the item's ONLY category signal,
+and deleting it (even though the value is technically recoverable from the
+historical catalogs used for verification) silently zeroes the item's live
+category. Held items are reported separately (held_pending_promotion), never
+silently dropped — run recompile_category_backfill.py --apply first.
+
 Writes go through items.strip_fields() (one archive entry per item, not per
 field — invariant E5, todo #1104). Default is dry-run; pass --apply to write.
 
@@ -42,9 +51,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tgw import items  # noqa: E402
 from tgw.config import DEFAULT_CONFIG, load_config  # noqa: E402
+from recompile_category_backfill import _canonical_category  # noqa: E402
 
 FIELDS_TO_CHECK = [
     'Item number', '#STATUS', 'attribute_set', 'm2_categories', 'category_ids',
@@ -52,6 +63,13 @@ FIELDS_TO_CHECK = [
     'C:Brand', 'C:Type', 'C:MPN', 'C:Model', 'C:Language', 'C:Movie/TV Title',
     'input_voltage',
 ]
+
+# audit#1143 #1209/#1252: these two fields are the item's ONLY category
+# signal until something promotes them to the canonical ebay_category_id
+# field (see scripts/recompile_category_backfill.py). Deleting them before
+# that promotion has happened silently zeroes the item's category — never
+# strip them unless _canonical_category() already finds a real value.
+_CATEGORY_LEGACY_FIELDS = {'eBay category 1 name', 'eBay category 1 number'}
 
 
 def _load_historical_index(catalog_root: Path) -> Dict[str, Dict[str, Any]]:
@@ -99,20 +117,35 @@ def _matches_history(field: str, live_value: Any, hist_record: Dict[str, Any]) -
 
 
 def _scan_item(sku: str, doc: Dict[str, Any],
-              hist_record: Dict[str, Any]) -> Tuple[List[str], List[Dict[str, Any]], int]:
-    """Return (fields_safe_to_remove, real_exceptions, no_history_count).
+              hist_record: Dict[str, Any]
+              ) -> Tuple[List[str], List[Dict[str, Any]], int, List[str]]:
+    """Return (fields_safe_to_remove, real_exceptions, no_history_count,
+    held_pending_promotion).
 
     A field present live with no historical record for the SKU AT ALL is not
     a discrepancy to review — it's expected for items outside the Magento
     snapshot's coverage (created after migration, or churned before it) and
     is counted, not itemized. A field present in BOTH but disagreeing in
     value is the real signal Dave asked to see.
+
+    _CATEGORY_LEGACY_FIELDS get an extra guard (#1209/#1252): even when the
+    value matches history, never remove them unless the item's canonical
+    ebay_category_id is already populated — otherwise this is the item's
+    only category signal and deleting it zeroes the item's category. Held
+    fields are reported separately (held_pending_promotion), never silently
+    dropped (invariant C11) — run recompile_category_backfill.py --apply
+    first, then re-run this scan.
     """
     safe: List[str] = []
     exceptions: List[Dict[str, Any]] = []
     no_history = 0
+    held_pending_promotion: List[str] = []
+    canonical_cat_id, _ = _canonical_category(doc)
     for field in FIELDS_TO_CHECK:
         if field not in doc:
+            continue
+        if field in _CATEGORY_LEGACY_FIELDS and not canonical_cat_id:
+            held_pending_promotion.append(field)
             continue
         if _matches_history(field, doc[field], hist_record):
             safe.append(field)
@@ -125,7 +158,7 @@ def _scan_item(sku: str, doc: Dict[str, Any],
                 'sku': sku, 'field': field, 'live_value': doc[field],
                 'historical_value': hist_record[field],
             })
-    return safe, exceptions, no_history
+    return safe, exceptions, no_history, held_pending_promotion
 
 
 def _scan(args) -> Dict[str, Any]:
@@ -154,6 +187,7 @@ def _scan(args) -> Dict[str, Any]:
     field_counts: Dict[str, int] = {f: 0 for f in FIELDS_TO_CHECK}
     all_exceptions: List[Dict[str, Any]] = []
     plan: Dict[str, List[str]] = {}
+    held_pending_promotion: Dict[str, List[str]] = {}
 
     for sku_dir in sorted(itemdata_root.iterdir()):
         if not sku_dir.is_dir() or not sku_dir.name.startswith('tgw'):
@@ -178,7 +212,7 @@ def _scan(args) -> Dict[str, Any]:
             drive_rec = _load_from_history_itemdata(history_itemdata_root, sku)
             if drive_rec:
                 hist_record = drive_rec
-        safe, exceptions, no_history = _scan_item(sku, doc, hist_record)
+        safe, exceptions, no_history, held = _scan_item(sku, doc, hist_record)
         all_exceptions.extend(exceptions)
         no_history_total += no_history
 
@@ -186,6 +220,8 @@ def _scan(args) -> Dict[str, Any]:
             plan[sku] = safe
             for f in safe:
                 field_counts[f] += 1
+        if held:
+            held_pending_promotion[sku] = held
 
         if scanned % 5000 == 0:
             print(f'  ... {scanned} scanned, {len(plan)} planned so far', flush=True)
@@ -195,6 +231,9 @@ def _scan(args) -> Dict[str, Any]:
          f'expected, not itemized): {no_history_total}')
     print(f'REAL exceptions (SKU in history but value disagrees — for Dave to '
          f'review): {len(all_exceptions)}')
+    print(f'HELD PENDING PROMOTION (legacy category field is the item\'s only '
+         f'category signal — run recompile_category_backfill.py --apply first, '
+         f'#1209/#1252): {len(held_pending_promotion)}')
     print('Per-field planned-removal counts:')
     for f, n in sorted(field_counts.items(), key=lambda kv: -kv[1]):
         if n:
@@ -204,6 +243,7 @@ def _scan(args) -> Dict[str, Any]:
         'scanned': scanned, 'planned': len(plan), 'unreadable': unreadable,
         'no_history_field_count': no_history_total, 'field_counts': field_counts,
         'real_exceptions': all_exceptions, 'plan': plan,
+        'held_pending_promotion': held_pending_promotion,
     }
 
 

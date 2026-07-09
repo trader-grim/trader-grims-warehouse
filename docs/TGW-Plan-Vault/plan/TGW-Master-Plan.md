@@ -134,6 +134,10 @@ Recoll index Phase 0 built: 441K docs, 4.6 GB per #1066. Follow-up: nightly time
 - #1145 PP-UIPIPE-001 defect audit: two tool fixes LIVE, 402 pile drained, fleet photo sweep done (#1154 — 206 bad/149 SKUs). Broker PLANNED (ai-plans/reconciliation-broker.md). Next: Dave B0 sign-off, defect walkthrough, price test, fleet getOffer sweep.
 
 - [#1174] eBay webhook signature fail-open security fix shipped (see `dev-workflow/research/DONE-1174-webhook-fail-open.md`)
+
+- Todo #1245 completed: 3 confirmed fixes applied, 4 plausible findings deferred per Dave's instruction (to process at end of process).
+
+- #1248 ebay_legacy_sync stopped due to 6-minute retrigger eating trading quota; root cause unknown, sold detection paused (blocked on #16 webhook endpoint).
 #1077 orphaned offer forces ebay_sync per-SKU fallback (Dave → eBay
 support); 15 Syncthing conflict files in vault; nats health check red
 (module absent — decide: install or drop check).
@@ -399,6 +403,10 @@ size guard.
 Status (2026-07-05): `workers/` subsystem slice DONE — 25 files, 5 groups, 60 agents, ~2.3M tokens. 17 findings confirmed (2-of-3 adversarial verify), 1 refuted/dropped. Full report at `docs/TGW-Plan-Vault/dev-workflow/research/RESEARCH-1143-workers-audit.md`. 9 correctness bugs spun off as #1162-#1170; 8 lower-severity findings batched into #1171. Remaining subsystems: apis/ebay/, http_server.py, queue/state-machine, scripts/, nix flake. No action in progress — next session can pick next subsystem or work spun-off correctness-bug todos.
 
 Scripts subsystem audit INPROGRESS (todo #1203, part of #1143). See AUDIT-scripts-subsystem-1143.md.
+
+- DONE #1235 atomic-write sweep: 6 sites fixed, 8 new tests, 1861 passing. Deviation: itemdata_scrub.py write stays outside fence (PP-FENCE-001 gap documented).
+
+- Session 48 (2026-07-06) completed dead-letter, atomic-write, multi_intake fixes; code reviews addressed all critical findings except 4 PLAUSIBLE deferred as todo #1246. Dave manually checking UI post-changes before next steps. PR #8 not yet merged.
 ## Drive-space re-evaluation (flagged 2026-07-04, todo #1136)
 **Dave: "put revaluation item into plan for drive space."** Todo #1056
 (extend `vg_tgw` into HDD space) turned out blocked on a stale premise:

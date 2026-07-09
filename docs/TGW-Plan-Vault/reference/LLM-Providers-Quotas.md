@@ -5,8 +5,37 @@ These facts have been independently rediscovered at least three times
 (s41 migration, s44 "debunking" session, s45 429-storm root-cause). Do not
 re-derive them; if reality changes, update THIS file and cite the log evidence.
 
-Last verified: 2026-07-04 (session 45). Owner surfaces: `tgw-models.json`,
-`src/tgw/apis/llm.py`, `src/tgw/quota.py`.
+Last verified: 2026-07-09 (audit#1143 code-review follow-up, #1252/#1253).
+Owner surfaces: `tgw-models.json`, `src/tgw/apis/llm.py`, `src/tgw/quota.py`,
+`src/tgw/apis/secrets.py`.
+
+## SUPERSEDES the s45 "OpenRouter is PRIMARY" architecture below
+
+**Dave, 2026-07-08: paid direct-API keys installed for Google, DeepSeek, and
+Anthropic — all three flipped to direct-primary, OpenRouter demoted to
+fallback-only.** This is the live, current routing — confirmed 2026-07-09 by
+reading `/opt/TGW/config/tgw-models.json` directly (its own `_comment` field
+carries this decision) and by a live `get_task_model()` call returning
+`google_direct`/`deepseek_direct`/`anthropic_direct` for all 7 tasks. The
+"OpenRouter is PRIMARY" section below (s45, 2026-07-04) is now HISTORY, not
+current state — kept for the Google free-tier post-mortem facts, which are
+still true background, not for the provider-priority conclusion.
+
+**Caveat on the Google free-tier facts below:** the "~20 requests/day/model"
+measurement was taken under the OLD free-tier account state. Whether that
+specific Google API key's account now has paid billing enabled (as opposed
+to just being routed as if it does) has not been independently re-verified
+against a live 429 — if `tgw health`'s `llm_google` spend starts hitting 300
+and 429s return with the old `FreeTier` quotaId, the paid-key assumption is
+wrong and the budget must drop back down (see `quota.py _DEFAULT_BUDGETS`
+comment — same file, same the-facts-live-here discipline as this doc).
+
+**Where the keys live now:** `secrets_root/tgw.env` (todo #1252) — one
+`KEY=value` per provider (`GOOGLE_API_KEY`, `DEEPSEEK_API_KEY`,
+`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`), sourced into the process
+environment by `tgw.config.load_config()`. Every direct-call function reads
+its key via `tgw.apis.secrets.get_api_key(provider)` — see
+`TGW-Config-Reference.md`'s Secrets Reference section.
 
 ## The Google free tier — what is actually true
 
@@ -42,25 +71,23 @@ has Google headroom. To measure real Google capacity, count `ai_usage`
 that timestamp, "successful" google_direct rows were actually served by the
 OpenRouter fallback.
 
-## The settled architecture (Dave, 2026-07-04 — do not relitigate)
+## HISTORY — the s45 architecture (Dave, 2026-07-04), superseded 2026-07-08
 
-- **OpenRouter is PRIMARY** for all cloud vision/LLM tasks (`tgw-models.json`;
-  google models via their `google/*` OpenRouter ids). It is paid
-  (~$0.0002/flash-lite call), metered by the key's daily limit (currently $5),
-  and reliable.
+Kept for the free-tier facts and incident history above; the provider
+priority below is no longer current — see the SUPERSEDES note at the top.
+
+- ~~OpenRouter is PRIMARY for all cloud vision/LLM tasks~~ — superseded;
+  direct providers (`google_direct`/`deepseek_direct`/`anthropic_direct`) are
+  primary as of 2026-07-08, OpenRouter is the fallback.
 - **The Google free tier (~20 calls/day) is the OPERATOR EMERGENCY RESERVE.**
   `call_model()` falls back openrouter→google_direct ONLY for interactive
   callers (C10 operator lane). Background jobs re-raise and transient-requeue;
   they must never drain the reserve. Purpose: the operator can keep
-  identifying/drafting through an OpenRouter outage or credit gap.
-- **The reverse failover (google_direct→openrouter) is kept intact** and is
-  circuit-breaker-gated (`quota.precheck('llm_google')`: post-429 stand-down,
-  first call after cooldown is the restoration probe). It is dormant while
-  OpenRouter is primary. **When a paid Google API key lands**, flip
-  `tgw-models.json` back to `google_direct` — no code change needed.
-- `llm_google` has a daily budget of 20 in `quota._DEFAULT_BUDGETS` so
-  `tgw health` shows real utilization and background callers halt before
-  burning the reserve.
+  identifying/drafting through an OpenRouter outage or credit gap. This
+  reserve mechanic is still intact in code as the fallback direction; it's
+  just not the primary path anymore.
+- ~~llm_google has a daily budget of 20~~ — now 300 (`quota._DEFAULT_BUDGETS`,
+  2026-07-08 paid-key decision); see the caveat at the top of this doc.
 
 ## How to re-verify (instead of re-deriving)
 

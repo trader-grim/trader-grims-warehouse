@@ -385,6 +385,13 @@ Companion test files added by this review:
   (`api.py` main; existing tests assert per-command).
 - **E2 Secrets** — only under `secrets_root` (700/600, user `tgw`); eBay scopes locked.
   Enforced by `scripts/tgw-permissions-reset.sh --check` via `tgw health`.
+  Single-value provider keys (LLM + lookup APIs) go through ONE facility as
+  of 2026-07-09 (todo #1252): `secrets_root/tgw.env` (`KEY=value`, sourced
+  into the process environment by `tgw.config.load_config()`), read via
+  `tgw.apis.secrets.get_api_key(provider)`/`get_secret(name)` — never a
+  per-provider `<name>-credentials.json` reader anymore. Structured
+  multi-field credentials (eBay app/token, tgw-api-key) stay as JSON files.
+  See `TGW-Config-Reference.md`.
 - **E3 Ollama single-flight** — advisory lock 8472 (`queue/ollama_lock.py`); needs
   Postgres to test; enforced at the one call site.
 - **E4 Catalog-derived data is regenerable** — no data lives only in a catalog
@@ -606,23 +613,86 @@ catalog-verify rule `legacy_listing_unrepaired` is the "regularly check"
 detector. Tests: `tests/test_invariants_stage_guards.py`,
 `tests/test_resolve_legacy_duplicate_check.py`.
 
-## E8 — The Google free tier is the operator emergency reserve ✅ (2026-07-04, session 45)
+## E8 — The Google free tier is the operator emergency reserve ✅ (2026-07-04, session 45) — SUPERSEDED for background use 2026-07-08
 
-**Rule:** Background jobs never spend the Google Gemini free tier. OpenRouter
-is the primary provider for all cloud LLM tasks; `google_direct` may only be
-called (a) as the interactive-caller-only fallback when OpenRouter fails —
-the C10 operator lane qualifies — or (b) as a configured primary once a PAID
-Google key exists. Never assume a published free-tier number applies to this
-project: Google doles quota per project (~20 req/day/model observed here vs
-1,000 published). Full findings + re-verification recipe:
-`reference/LLM-Providers-Quotas.md`.
+**Original rule (free-tier era):** Background jobs never spend the Google
+Gemini free tier. OpenRouter is the primary provider for all cloud LLM
+tasks; `google_direct` may only be called (a) as the interactive-caller-only
+fallback when OpenRouter fails — the C10 operator lane qualifies — or (b) as
+a configured primary once a PAID Google key exists. Never assume a
+published free-tier number applies to this project: Google doles quota per
+project (~20 req/day/model observed here vs 1,000 published). Full findings
++ re-verification recipe: `reference/LLM-Providers-Quotas.md`.
 
-**Why:** Dave, s45: "it's only 20 calls... make that the operator emergency
-reserve. It's not very valuable otherwise." Background use of the free tier
-produced 2,171 doomed 429s in one day (2026-07-04), each burning ~40s of
-retry latency per requeue-backlog job, and the true per-project grant had
-been rediscovered from scratch at least three times (s41, s44, s45) because
-it was never written down.
+**Why (original):** Dave, s45: "it's only 20 calls... make that the
+operator emergency reserve. It's not very valuable otherwise." Background
+use of the free tier produced 2,171 doomed 429s in one day (2026-07-04),
+each burning ~40s of retry latency per requeue-backlog job, and the true
+per-project grant had been rediscovered from scratch at least three times
+(s41, s44, s45) because it was never written down.
+
+**2026-07-08 update (session 48/49):** condition (b) is now live, and
+extended beyond Google — Dave installed paid keys for Google, DeepSeek, and
+Anthropic and asked for all three to go direct-primary with OpenRouter as
+fallback only. `ai_identify`/`alt_text`/`ebay_draft`/`bulk_classify` →
+`google_direct`; `pm_intake`/`suggestions_classify` → new `deepseek_direct`
+(`llm.py: _call_deepseek_direct`, OpenAI-compatible chat completions
+against `api.deepseek.com`); `pm_chat` → new `anthropic_direct`
+(`_call_anthropic_direct`, Anthropic Messages API against
+`api.anthropic.com`, system prompt extracted from a leading system-role
+message since Anthropic's API takes it as a separate field). Each direct
+provider fails soft to OpenRouter on any error, mirroring the existing
+`google_direct` pattern exactly (same shape: precheck → try direct → catch
+→ log → openrouter fallback). Live-smoke-tested both new providers
+individually before rollout (real API round-trip, not just code review).
+
+All three quota pools (`llm_google`=300, `llm_deepseek`=500,
+`llm_anthropic`=100 — see `quota.py: _DEFAULT_BUDGETS`) are **provisional
+safety caps, not measured limits** — Dave deliberately keeps billing credit
+low until the 2026-07-01/07-04 resubmission-storm class of bug (E9, todo
+#1250) is confirmed resolved. A 429 on any of these pools now means either
+normal throughput hitting the cap (raise it) or a repeat of the storm
+(investigate first, don't just raise the cap reflexively). The C10
+operator-lane fallback behavior (openrouter → google_direct on interactive
+failure) is unaffected — redundant with google_direct being primary now,
+but harmless left in place. `http_server.py`'s `pm_chat` endpoint had a
+hardcoded `provider != "openrouter"` guard that would have 503'd the moment
+this flipped — updated to accept `anthropic_direct` too.
+
+## E9 — One-off scripts announce themselves before doing anything ⚠️ (2026-07-08, session 48/49)
+
+**Rule:** Any ad hoc script (bulk requeue, backfill, remediation, migration —
+run by hand under `scripts/`, not a systemd worker) must call
+`tgw_logging.announce_script_run(script_name, purpose, **fields)` once at
+the top of `main()`, before touching the queue or making any API call.
+Standard per-call/per-job logging already covers the mechanical details;
+this is specifically so an anomalous *section* of the log/queue history has
+an attributable cause, without relying on anyone's memory of a terminal
+session.
+
+**Why:** Dave, s48/49: investigating why the pipeline was "burning tokens
+and not really doing any work toward listing items," found
+`scripts/requeue_ebay_draft_402_dead_letters.py` had created 6,607 requeue
+jobs against a documented expectation of ~2,689 — it had been run more than
+once, silently, because it has no logging beyond `print()` to a terminal
+that's long gone. Nothing in the durable record said "this script ran, at
+this time, with these args" — the only reason it was traceable at all is
+that the script happens to stamp `bulk_requeue_reason`/`retried_from_job`
+onto each job's payload, which won't be true of every future one-off
+script. Dave: "one off scripts should definitely announce what they are up
+to... it would help to know why an anomalous log entry section was
+occurring."
+
+**Enforcement:** `tgw.logging.announce_script_run()` added
+(`src/tgw/logging.py`) — emits a `script_run_start` event via the existing
+`log_event` machinery. **Not yet retrofitted** onto existing scripts under
+`scripts/`, including `requeue_ebay_draft_402_dead_letters.py` itself
+(left unrun, per Dave — no reason to touch it further right now). **No
+automated detector yet** — nothing currently fails a script that skips the
+announce call. Todo #1250 tracks both: audit `scripts/` for one-off tooling
+missing this, and decide whether to add a grep-based CI/catalog-verify
+check that flags a `scripts/*.py` file with a `main()` but no
+`announce_script_run` call.
 
 **Enforcement:** `llm.py call_model()` gates the openrouter→google_direct
 fallback on `quota.context_kind() == 'interactive'`; the google_direct path

@@ -5,22 +5,21 @@ PriceCharting Tier 2 enrichment (PP-LOOKUP-001): IGDB/JustTCG return metadata
 but no price; PriceCharting fills LookupResult.msrp with a category-specific
 current value the price worker consumes.
 
-Silently skipped if secrets_root/pricecharting-credentials.json is absent
-(mirrors the IGDB graceful-skip pattern), so this module is inert until the
-operator supplies a token. Public API; prices are returned in pennies.
-
-Key file: {"token": "..."}   (or {"api_key": "..."})
+Silently skipped if PRICECHARTING_API_KEY isn't set
+(tgw.apis.secrets.get_api_key, sourced from secrets_root/tgw.env) — mirrors
+the IGDB graceful-skip pattern, so this module is inert until the operator
+supplies a token. Public API; prices are returned in pennies.
 """
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, Dict, Optional
 
 import requests
 
+from tgw.apis.secrets import get_api_key
+
 from .base import LookupResult, now_iso
-from .base import secrets_root as _secrets_root
 
 log = logging.getLogger(__name__)
 
@@ -37,24 +36,14 @@ def _to_dollars(pennies: Any) -> Optional[float]:
     return round(cents / 100.0, 2) if cents > 0 else None
 
 
-def _load_token(cfg: Dict[str, Any]) -> str:
-    key_file = _secrets_root(cfg) / 'pricecharting-credentials.json'
-    if not key_file.exists():
-        return ''
-    try:
-        creds = json.loads(key_file.read_text())
-    except Exception:
-        return ''
-    return str(creds.get('token') or creds.get('api_key') or '').strip()
-
-
 def lookup(title: str, cfg: Dict[str, Any]) -> Optional[LookupResult]:
     """Look up current market value by title. None if no token, on miss, or error."""
     if not title or not title.strip():
         return None
 
-    token = _load_token(cfg)
-    if not token:
+    try:
+        token = get_api_key('pricecharting')
+    except RuntimeError:
         return None
 
     try:

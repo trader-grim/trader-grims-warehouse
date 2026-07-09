@@ -6324,8 +6324,8 @@ def pm_chat(body: PMChatBody) -> Dict[str, Any]:
     msg_list.append({"role": "user", "content": body.message})
 
     provider, model = get_task_model(_cfg, "pm_chat")
-    if provider != "openrouter":
-        raise HTTPException(status_code=503, detail="pm_chat only supports openrouter provider")
+    if provider not in ("openrouter", "anthropic_direct"):
+        raise HTTPException(status_code=503, detail=f"pm_chat does not support provider {provider!r}")
 
     try:
         raw = call_model("pm_chat", "", "", _cfg, provider=provider, model=model, messages=msg_list)

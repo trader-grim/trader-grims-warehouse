@@ -162,7 +162,17 @@ Plain Markdown; open in Obsidian for interactive mind map view where noted.
 - **PostgreSQL is the work ledger** — database `state_machine`; workers use `QueueWorker` base
 - **Workers are thin** — ask tgw-api, never construct paths directly
 - **Output contract** — every API call returns `{ok, ...}`
-- **Secrets from `secrets_root`** — no hardcoded paths anywhere in `src/`
+- **Secrets from `secrets_root`** — no hardcoded paths anywhere in `src/`.
+  Single-value provider keys (LLM + lookup APIs) go through ONE facility
+  (Dave, 2026-07-09, todo #1252): `secrets_root/tgw.env` (`KEY=value`),
+  read via `tgw.apis.secrets.get_api_key(provider)` — never a new
+  per-provider `<name>-credentials.json` reader. See TGW-Config-Reference.md.
+- **Model routing is config, never code** (Dave, 2026-07-09): which
+  provider/model serves an LLM task lives ONLY in
+  `/opt/TGW/config/tgw-models.json` (`cfg['models']`). "Why change code just
+  to change models?" — `tgw.apis.llm.get_task_model()` has no hardcoded
+  per-task fallback and raises if a task isn't configured there. Changing a
+  task's provider/model is always a config edit.
 - **Catalog rebuild is always a job** — never call `build_all_catalogs()` inline
 - **SKU format** — `tgwYYYYMMDDHHMMSSmmm`
 - **A worker's skip/guard is a finding, not a log line (invariant C11)** — when
@@ -258,8 +268,37 @@ Run as `tgw` user — source files are `rw-------`, secrets are `chmod 600`.
 See `docs/TGW-Plan-Vault/plan/TGW-Master-Plan.md` for the authoritative current state.
 See `docs/TGW-Plan-Vault/plan/handoff.md` for current risks and recommended next sequence.
 
-As of 2026-06-28 (session 31): PP-FENCE-001 Sessions A+B COMPLETE. Workers still stopped — restart now unblocked.
-PP-FENCE-001 Session B done: all 30 atomic_write_json sites in workers/ and ebay/ migrated to fence calls; 27 tests pass; CI grep audit added. Gaps documented in source: multi_intake (2 sites), ebay_sku_migrate (3 sites), pull.py restore_archive_tombstone (1 site).
-eBay backfill complete: 2,089 published listings have offer_id/listing_id/price; remaining items are draft/unpublished (expected).
-PP-PHOTO-001 sync infrastructure live (`tgw-itemdata-sync` service, `gdrive_sync.py`).
-PP-REPRICER-001 blocked on `buy.marketplace_insights` scope (eBay DS 8 questions pending).
+**As of 2026-07-09:**
+
+- **Worker status (`systemctl list-units 'tgw-worker@*'`, verified live):**
+  active — `ai_identify`, `bundle_intake`, `ebay_draft`, `ebay_price`,
+  `ebay_publish`, `ebay_stage`, `ebay_upload`, `echo`, `multi_intake`,
+  `plan_render`, `token_refresh`. inactive/dead — `catalog_rebuild`,
+  `ebay_legacy_sync`, `ebay_price_reducer`, `ebay_sku_migrate`, `ebay_sync`,
+  `thumbnail_gen`, `velocity_stats`. **`pm_intake` stopped 2026-07-09** —
+  Dave: "going a different direction for pm intake" (a redesign, not a
+  crash); still shows `enabled` in systemd since the unit file is Nix-managed
+  (`/etc` read-only) — a flake change is needed to make the stop durable
+  across reboots, not done yet. NOTE: this list of 11 active workers
+  contradicts Dave's own recollection ("yesterday I had most services
+  stopped except main pipeline") — flagging the discrepancy rather than
+  silently reconciling it; worth Dave confirming which state is intended.
+  Plan: stabilize main pipeline + publish/update-existing-listings, demonstrate
+  data-maintenance + budget-conscious execution, THEN reactivate the rest one
+  at a time.
+- **LLM providers (2026-07-08, Dave):** paid direct-API keys added for
+  Google, DeepSeek, Anthropic; all three flipped to direct-primary
+  (`google_direct`/`deepseek_direct`/`anthropic_direct`), OpenRouter demoted
+  to automatic fallback-only. Routing lives ONLY in
+  `/opt/TGW/config/tgw-models.json` — see CLAUDE.md's Settled Architecture
+  entry and `reference/LLM-Providers-Quotas.md`.
+- **Secrets (2026-07-09, todo #1252):** single-value provider keys
+  (LLM + lookup APIs) consolidated from 9 separate ad-hoc
+  `<name>-credentials.json` readers into one facility —
+  `secrets_root/tgw.env` + `tgw.apis.secrets.get_api_key()`. Old JSON files
+  moved to `secrets_root/_migrated-to-tgw-env-20260709/` (not deleted).
+  Todo #1253 (planning, not started): extend to interactive shell use +
+  scoped/least-privilege key issuance per confined worker for Catio.
+- audit#1143 code-review follow-ups #1178/#1209 (condition-upgrade and
+  category-legacy-field bugs) fixed same session; a residual instance of the
+  #1178 bug class found and fixed in `best_condition()` too (#1252).

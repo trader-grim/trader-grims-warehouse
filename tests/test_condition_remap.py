@@ -77,6 +77,27 @@ class TestBestConditionForEnumNeverUpgrades:
             result = best_condition_for_enum({}, "X", "NOT_A_REAL_ENUM")
         assert result is None
 
+    def test_ambiguous_enum_never_upgrades_to_better_alias(self):
+        # LIKE_NEW is ambiguous: '2750' (rank 3, "Like New") and '2990'
+        # (rank 6, "Pre-loved Refurbished") both map to it. If the item was
+        # actually graded Pre-loved Refurbished, remapping must never land
+        # on the better-ranked '2750' alias just because the new category
+        # happens to allow both — audit#1143 / todo #1178.
+        policy = [("1000", "Brand New"), ("2750", "Like New"), ("2990", "Pre-loved Refurbished")]
+        with patch("tgw.apis.ebay.conditions._get_policies", return_value={"X": policy}):
+            result = best_condition_for_enum({}, "X", "LIKE_NEW")
+        assert result == {"condition_id": "2990", "condition_label": "Pre-loved Refurbished",
+                           "condition_enum": "LIKE_NEW"}
+
+    def test_ambiguous_enum_falls_back_to_manual_review_not_upgrade(self):
+        # Same ambiguous LIKE_NEW enum, but the new category only allows the
+        # better-ranked '2750' alias (no same-or-worse option exists). Must
+        # return None for manual review rather than silently upgrading.
+        policy = [("1000", "Brand New"), ("2750", "Like New")]
+        with patch("tgw.apis.ebay.conditions._get_policies", return_value={"X": policy}):
+            result = best_condition_for_enum({}, "X", "LIKE_NEW")
+        assert result is None
+
 
 class TestCategoryContextConditionRemap:
     """Integration through the /api/ebay/category-context endpoint."""

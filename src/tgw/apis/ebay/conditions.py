@@ -207,7 +207,13 @@ def best_condition(cfg: Dict[str, Any], category_id: str,
 
     normalized = item_condition.lower().strip()
     preferred_ids = _ITEM_CONDITION_PREFERRED.get(normalized, _DEFAULT_PREFERRED)
-    item_rank = min((CONDITION_RANK.get(cid, 7) for cid in preferred_ids), default=7)
+    # MAX (worst-case), not MIN: several _ITEM_CONDITION_PREFERRED lists are
+    # not rank-ascending (e.g. 'refurbished': ['2500' rank6, '3500' rank5,
+    # '2000' rank4]) — MIN would set the same-or-worse floor below the
+    # primary entry's own rank, letting step 2 hand out a genuinely better
+    # condition than the item's true grade. Same upgrade-risk class as
+    # best_condition_for_enum() below (audit#1143 #1178/#1252).
+    item_rank = max((CONDITION_RANK.get(cid, 7) for cid in preferred_ids), default=7)
 
     allowed_map: Dict[str, str] = {cid: desc for cid, desc in allowed}
 
@@ -277,14 +283,22 @@ def best_condition_for_enum(
     if not source_ids:
         return None
 
-    item_rank = min(CONDITION_RANK.get(cid, 7) for cid in source_ids)
+    # An enum can be ambiguous (e.g. LIKE_NEW covers both '2750' rank-3 and
+    # '2990' rank-6 "Pre-loved Refurbished") and we don't know which real
+    # conditionId the item actually had. Assume the worst (MAX rank) so the
+    # remap can never upgrade a worse-graded item that happens to share an
+    # enum with a better one.
+    item_rank = max(CONDITION_RANK.get(cid, 7) for cid in source_ids)
 
     policies = _get_policies(cfg)
     allowed_list = policies.get(str(category_id), [])
     allowed_map: Dict[str, str] = {cid: desc for cid, desc in allowed_list}
 
-    # 1. Direct hit: one of the source conditionIds is allowed as-is
-    for src_id in sorted(source_ids, key=lambda c: CONDITION_RANK.get(c, 7)):
+    # 1. Direct hit: only the worst-ranked source conditionId(s) qualify —
+    # a better-ranked alias of the same enum is never a safe direct match,
+    # since it would be an upgrade relative to the worst-case assumption.
+    worst_source_ids = [cid for cid in source_ids if CONDITION_RANK.get(cid, 7) == item_rank]
+    for src_id in worst_source_ids:
         if src_id in allowed_map:
             return _make_result(src_id, allowed_map[src_id])
 

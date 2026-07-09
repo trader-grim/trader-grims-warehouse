@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 from tgw.apis.ebay.client import ebay_get
+from tgw.apis.secrets import get_api_key
 
 log = logging.getLogger(__name__)
 
@@ -369,19 +370,12 @@ def _llm_filter_comps(
 ) -> Tuple[List[float], str]:
     """Filter comps with gpt-4o-mini via OpenRouter. Returns (kept prices, confidence).
     Falls back to all non-outlier prices + 'medium' on any error."""
-    creds_path = cfg.get('openrouter_credentials_path')
     fallback_prices, _ = _best_prices(
         [s for s in summaries if not s.get('_outlier')], item_rank
     )
-    if not creds_path or not Path(str(creds_path)).exists():
-        for s in summaries:
-            s.setdefault('_llm_dropped', False)
-            s.setdefault('_llm_reason', '')
-        return fallback_prices, 'medium'
-
     try:
-        api_key = json.loads(Path(str(creds_path)).read_text(encoding='utf-8'))['api_key']
-    except Exception as exc:
+        api_key = get_api_key('openrouter')
+    except RuntimeError as exc:
         log.warning('pricing: could not load openrouter key: %s', exc)
         for s in summaries:
             s.setdefault('_llm_dropped', False)

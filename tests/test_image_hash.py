@@ -252,7 +252,11 @@ class TestStoreHash:
 
 class TestAltTextCacheIntegration:
     def _make_cfg(self, tmp_path: Path) -> dict:
-        return {"itemdata_root": tmp_path / "ItemData", "pretty": False}
+        return {
+            "itemdata_root": tmp_path / "ItemData",
+            "pretty": False,
+            "models": {"alt_text": {"provider": "openrouter", "model": "google/gemini-2.5-flash-lite"}},
+        }
 
     def _make_item(self, cfg: dict, sku: str) -> None:
         sku_dir = Path(cfg["itemdata_root"]) / sku

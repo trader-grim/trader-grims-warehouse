@@ -186,7 +186,7 @@ def cmd_alt_text(
     """Generate alt_text + seo_caption for one item and rename its primary image."""
     from .items import atomic_write_json
 
-    # Resolve provider/model (CLI overrides → models config → _DEFAULTS)
+    # Resolve provider/model (CLI overrides → tgw-models.json — the only source)
     resolved_provider, resolved_model = get_task_model(cfg, 'alt_text')
     provider = provider or resolved_provider
     model = model or resolved_model

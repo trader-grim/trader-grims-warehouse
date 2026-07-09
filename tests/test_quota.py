@@ -91,9 +91,13 @@ class TestEnforcement:
         quota.precheck(cfg, 'llm_openrouter')  # count-only pool: must not raise
 
     def test_llm_google_default_budget_halts_background(self, tmp_path):
-        # s45: llm_google budget defaults to 20 (operator emergency reserve) —
-        # background callers must halt once the threshold is spent.
-        cfg = _cfg(tmp_path)
+        # llm_google is a provisional safety cap (quota.py _DEFAULT_BUDGETS —
+        # currently 300, a paid-key value set 2026-07-08; was 20 under the
+        # earlier free-tier-only setup) — background callers must halt once
+        # the threshold is spent, regardless of the live default's exact
+        # value. Override the budget explicitly so this test doesn't drift
+        # out of sync with _DEFAULT_BUDGETS again (audit#1143 code-review, #1252).
+        cfg = _cfg(tmp_path, quota_budgets={'llm_google': 20})
         quota.set_context('background', 'worker:ai_identify')
         quota.record(cfg, 'llm_google', 20)
         with pytest.raises(quota.QuotaBudgetExceeded):

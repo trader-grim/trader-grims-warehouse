@@ -1,19 +1,20 @@
 """
 tgw.apis.lookup.go_upc — UPC/EAN fallback via go-upc.com.
 
-Silently skipped if secrets_root/go-upc-credentials.json is absent.
-Key: {"api_key": "Bearer <token>"}
+Silently skipped if GO_UPC_API_KEY isn't set (tgw.apis.secrets.get_api_key,
+sourced from secrets_root/tgw.env). Value is the full header string,
+e.g. "Bearer <token>".
 """
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, Dict, Optional
 
 import requests
 
+from tgw.apis.secrets import get_api_key
+
 from .base import LookupResult, now_iso
-from .base import secrets_root as _secrets_root
 
 log = logging.getLogger(__name__)
 
@@ -23,15 +24,9 @@ _TIMEOUT  = 10
 
 def lookup(barcode: str, cfg: Dict[str, Any]) -> Optional[LookupResult]:
     """Look up a barcode via Go-UPC. Returns None if no key or on miss."""
-    key_file = _secrets_root(cfg) / 'go-upc-credentials.json'
-    if not key_file.exists():
-        return None
     try:
-        creds = json.loads(key_file.read_text())
-        api_key = creds.get('api_key', '')
-    except Exception:
-        return None
-    if not api_key:
+        api_key = get_api_key('go_upc')
+    except RuntimeError:
         return None
 
     try:

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 
@@ -78,7 +77,3 @@ def barcode_from_item(item: Dict[str, Any]) -> tuple[str, str]:
             return val, btype
 
     return '', ''
-
-
-def secrets_root(cfg: Dict[str, Any]) -> Path:
-    return Path(cfg.get('secrets_root', '/opt/TGW/secrets'))

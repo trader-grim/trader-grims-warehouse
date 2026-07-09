@@ -1,5 +1,37 @@
 # Session log archive (rolled off handoff.md's 2-session window)
 
+## Session 46 — 2026-07-05 (todo #1143 audit — workers/ subsystem, first slice)
+
+Dave asked for "the one that fixes the commit backlog," expecting it first on his
+admin todo list — it was **#1039** (PP-RECOVERY-001), a stale 2026-06-17 web-UI
+regression audit whose only real recovery action (merge `task/aider-20260616145314`
+→ main) turned out already done; correctly redirected to **#1143**, the
+full-codebase cohesion+correctness audit named in CLAUDE.md's code-review cadence
+rule (confirmed by line 124 above — "missed again" three sessions running).
+
+- **#1143 workers/ slice DONE** (first of 6 staged subsystems): Workflow tool, 5
+  file-groups, 60 agents, ~2.3M tokens, 25 files/6,817 lines, 2-of-3 adversarial
+  verify per finding. 17 confirmed, 1 dropped. Report:
+  `dev-workflow/research/RESEARCH-1143-workers-audit.md`.
+- **9 correctness bugs filed as individual todos #1162-#1170** — most notable:
+  `token_refresh.py`/`velocity_stats.py` self-scheduling flaw (an unexpected error
+  silently ends the loop forever — token_refresh dying eventually breaks every
+  eBay-facing worker with no alert); `ebay_publish.py:250` condition-fallback never
+  syncs back to the local record after a 25021 rejection, so local permanently
+  disagrees with live eBay and re-staging repeats the same reject+fallback cycle;
+  `ebay_sku_migrate.py:252` partial migration (eBay ok, local rename fails) never
+  flags the item blocked, so it's silently reprocessed every cycle.
+- **8 lower-severity invariant/cohesion findings batched into #1171** (fence-bypass
+  path construction in 5 files, one ad-hoc queue, one duplicated helper function).
+- **#1143 remaining subsystems (queued, run opportunistically):** apis/ebay/,
+  http_server.py, queue/state-machine, scripts/, nix flake.
+- No files in `src/` changed this session — audit only; nothing to commit besides
+  plan-vault docs/todos.
+
+**Open into next session:** work #1162-#1170 correctness bugs directly, or continue
+#1143 with the next subsystem (apis/ebay/ recommended next — same lifecycle code
+`ebay_publish.py`/`ebay_sku_migrate.py` just flagged touches it heavily).
+
 ## Session 41 — 2026-07-02 (quota drains, data-preservation bugs, google_direct)
 
 Committed: `a7e7439`, `f511f2d`, `d1cad9a`. Full detail:

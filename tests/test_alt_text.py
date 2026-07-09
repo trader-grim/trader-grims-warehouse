@@ -28,6 +28,7 @@ def _make_cfg(tmp_path: Path) -> dict:
     return {
         "itemdata_root": tmp_path / "ItemData",
         "pretty": False,
+        "models": {"alt_text": {"provider": "openrouter", "model": "google/gemini-2.5-flash-lite"}},
     }
 
 

@@ -22,6 +22,13 @@ velocity.py already checks second, after draft_listing.category_id).
 
 Sources checked, in order (first match wins per item, reported for
 provenance/audit):
+  0. the item's own legacy 'eBay category 1 number' raw field, if present —
+     promoted to the canonical field, not skipped as "already has a
+     category" (audit#1143 #1209: velocity._category() correctly falls
+     back to this field for read paths, but using that same fallback here
+     as an "already handled" gate left the value uncopied; a later
+     data_scrub_legacy_ebay_fields.py run deletes the raw field once it
+     matches history, silently zeroing the item's only category signal)
   1. historical-tgwcatalog.json  — direct sku lookup (55,347 entries,
      eBay-side fields mixed with Magento export)
   2. historical-master-catalog.json — sku_old lookup (55,347 entries,
@@ -56,7 +63,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 from tgw import items  # noqa: E402
 from tgw.config import DEFAULT_CONFIG, load_config  # noqa: E402
-from tgw.velocity import _category  # noqa: E402
+
+
+def _canonical_category(doc: Dict[str, Any]) -> Tuple[str, str]:
+    """Return (category_id, category_name) from canonical sources only —
+    draft_listing.category_id or ebay_category_id. Deliberately does NOT
+    fall back to the legacy raw 'eBay category 1 number' field the way
+    velocity._category() does: that field is a promotion candidate here,
+    not a reason to skip the item (audit#1143 #1209 — treating it as
+    "already had a category" left it uncopied to the canonical field, and
+    a later data_scrub_legacy_ebay_fields.py run deletes the raw field
+    once it matches history, silently zeroing the item's only category
+    signal)."""
+    dl = doc.get('draft_listing') or {}
+    if dl.get('category_id'):
+        return str(dl['category_id']), str(dl.get('category_name') or '')
+    if doc.get('ebay_category_id'):
+        return str(doc['ebay_category_id']), str(doc.get('ebay_category_name') or '')
+    return '', ''
+
+
+def _legacy_category(doc: Dict[str, Any]) -> Tuple[str, str]:
+    """Return (category_id, category_name) from the legacy raw Trading-API
+    field only, or ('', '') if absent."""
+    cat_id = str(doc.get('eBay category 1 number') or '').strip()
+    cat_name = str(doc.get('eBay category 1 name') or '').strip()
+    return cat_id, cat_name
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +165,7 @@ def main() -> int:
     recovered: Dict[str, Dict[str, Any]] = {}
     still_missing = 0
     already_had_category = 0
+    promoted_from_legacy = 0
     scanned = 0
 
     for sku in dirs:
@@ -145,9 +178,21 @@ def main() -> int:
         except Exception:
             continue
 
-        cat_id, _ = _category(doc)
+        cat_id, _ = _canonical_category(doc)
         if cat_id:
             already_had_category += 1
+            continue
+
+        # Legacy raw field present but never copied to the canonical field —
+        # promote it now, before a future data-scrub pass can delete the
+        # only copy (#1209). Uses the normal recovered/apply path below;
+        # items.set_fields() is only_if_absent, so this is idempotent.
+        legacy_id, legacy_name = _legacy_category(doc)
+        if legacy_id:
+            recovered[sku] = {'ebay_category_id': legacy_id,
+                              'ebay_category_name': legacy_name,
+                              'source': 'legacy-raw-field-promotion'}
+            promoted_from_legacy += 1
             continue
 
         sku_old = (doc.get('sku_old') or '').strip().lower()
@@ -169,7 +214,8 @@ def main() -> int:
 
     print(f'\nScanned {scanned} items.')
     print(f'  already had a real category: {already_had_category}')
-    print(f'  recoverable this run: {len(recovered)}')
+    print(f'  promoted from legacy raw field: {promoted_from_legacy}')
+    print(f'  recoverable this run (incl. promotions): {len(recovered)}')
     print(f'  still unrecoverable: {still_missing}')
 
     if not args.apply:
@@ -180,6 +226,7 @@ def main() -> int:
         args.report.write_text(json.dumps(
             {'mode': 'DRY-RUN', 'scanned': scanned,
              'already_had_category': already_had_category,
+             'promoted_from_legacy': promoted_from_legacy,
              'recoverable': len(recovered), 'still_missing': still_missing,
              'items': recovered}, indent=2))
         print(f'Report written to {args.report}')
@@ -201,6 +248,7 @@ def main() -> int:
     args.report.write_text(json.dumps(
         {'mode': 'APPLIED', 'scanned': scanned,
          'already_had_category': already_had_category,
+         'promoted_from_legacy': promoted_from_legacy,
          'recoverable': len(recovered), 'applied': applied,
          'still_missing': still_missing, 'errors': errors,
          'items': recovered}, indent=2))

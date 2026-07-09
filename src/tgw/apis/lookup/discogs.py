@@ -1,19 +1,19 @@
 """
 tgw.apis.lookup.discogs — Music release lookup via Discogs barcode search.
 
-Silently skipped if secrets_root/discogs-credentials.json is absent.
-Key: {"personal_access_token": "..."} or {"user_token": "..."}
+Silently skipped if DISCOGS_API_KEY isn't set (tgw.apis.secrets.get_api_key,
+sourced from secrets_root/tgw.env).
 """
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, Dict, Optional
 
 import httpx
 
+from tgw.apis.secrets import get_api_key
+
 from .base import LookupResult, now_iso
-from .base import secrets_root as _secrets_root
 
 log = logging.getLogger(__name__)
 
@@ -24,15 +24,9 @@ _UA       = 'TGW-inventory/1.0 (trader-grims-warehouse)'
 
 def lookup(barcode: str, cfg: Dict[str, Any]) -> Optional[LookupResult]:
     """Search Discogs by barcode. Returns None if no key or on miss."""
-    key_file = _secrets_root(cfg) / 'discogs-credentials.json'
-    if not key_file.exists():
-        return None
     try:
-        creds = json.loads(key_file.read_text())
-        token = creds.get('personal_access_token') or creds.get('user_token', '')
-    except Exception:
-        return None
-    if not token:
+        token = get_api_key('discogs')
+    except RuntimeError:
         return None
 
     try:

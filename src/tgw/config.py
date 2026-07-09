@@ -20,6 +20,29 @@ DEFAULT_CONFIG = Path("/opt/TGW/config/tgw-api-config.json")
 # ---------------------------------------------------------------------------
 
 
+def _load_secrets_env(secrets_root: Path) -> None:
+    """Source secrets_root/tgw.env into the process environment — the
+    single facility for provider API keys (Dave, 2026-07-09). Plain
+    KEY=value lines, '#' comments allowed. Real environment variables
+    always win (setdefault only) so a one-off shell export still overrides
+    the file without editing it."""
+    env_path = secrets_root / 'tgw.env'
+    try:
+        if not env_path.exists():
+            return
+        for line in env_path.read_text(encoding='utf-8').splitlines():
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            key, _, value = line.partition('=')
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key:
+                os.environ.setdefault(key, value)
+    except OSError:
+        pass
+
+
 def load_json_strict(path: Path) -> Any:
     """Load JSON, raising ValueError on duplicate keys."""
 
@@ -55,6 +78,7 @@ def load_config(path: Path) -> Dict[str, Any]:
         return Path(os.path.expanduser(raw.get(key, default)))
 
     secrets_root = p("secrets_root", "/opt/TGW/secrets")
+    _load_secrets_env(secrets_root)
     itemdata_root = p("itemdata_root", "/opt/TGW/data/ItemData")
     catalog_root = p("catalog_root", "/opt/TGW/data/ItemCatalog")
     archive_root = p("archive_root", "/opt/TGW/data/ItemArchive")
@@ -90,7 +114,6 @@ def load_config(path: Path) -> Dict[str, Any]:
 
     ebay_token_path = secrets_root / "ebay-token.json"
     ebay_credentials_path = secrets_root / "ebay-credentials.json"
-    openrouter_credentials_path = secrets_root / "openrouter-credentials.json"
 
     _api_key_path = secrets_root / "tgw-api-key.json"
     _api_key = ""
@@ -169,7 +192,6 @@ def load_config(path: Path) -> Dict[str, Any]:
         "secrets_root": secrets_root,
         "ebay_token_path": ebay_token_path,
         "ebay_credentials_path": ebay_credentials_path,
-        "openrouter_credentials_path": openrouter_credentials_path,
         "ebay_draft_csv_path": ebay_draft_csv_path,
         "api_key": _api_key,
         "alt_text_provider": raw.get("alt_text_provider", "openrouter"),

@@ -436,41 +436,18 @@ class TestCmdAltTextGeminiBatch:
 
 
 class TestLoadGoogleKey:
-    def test_loads_from_secrets_file(self, tmp_path):
-        from tgw.apis.google_genai import load_google_key
+    """Single-facility env-var convention (tgw.apis.secrets, #1252/#1253) —
+    load_google_key() no longer reads a credentials.json file at all."""
 
-        secrets_dir = tmp_path / "secrets"
-        secrets_dir.mkdir()
-        (secrets_dir / "google-credentials.json").write_text(
-            json.dumps({"api_key": "test-key-123"}), encoding="utf-8"
-        )
-        cfg = {"secrets_root": str(secrets_dir)}
-        assert load_google_key(cfg) == "test-key-123"
-
-    def test_loads_from_env_var(self, tmp_path, monkeypatch):
+    def test_loads_from_env_var(self, monkeypatch):
         from tgw.apis.google_genai import load_google_key
 
         monkeypatch.setenv("GOOGLE_API_KEY", "env-key-456")
-        cfg = {"secrets_root": str(tmp_path / "secrets")}
-        assert load_google_key(cfg) == "env-key-456"
+        assert load_google_key({}) == "env-key-456"
 
-    def test_raises_when_key_absent(self, tmp_path, monkeypatch):
+    def test_raises_when_key_absent(self, monkeypatch):
         from tgw.apis.google_genai import load_google_key
 
         monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-        cfg = {"secrets_root": str(tmp_path / "no-secrets")}
-        with pytest.raises(RuntimeError, match="Google API key not found"):
-            load_google_key(cfg)
-
-    def test_raises_when_file_missing_key_field(self, tmp_path, monkeypatch):
-        from tgw.apis.google_genai import load_google_key
-
-        secrets_dir = tmp_path / "secrets"
-        secrets_dir.mkdir()
-        (secrets_dir / "google-credentials.json").write_text(
-            json.dumps({"other_field": "value"}), encoding="utf-8"
-        )
-        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-        cfg = {"secrets_root": str(secrets_dir)}
-        with pytest.raises(RuntimeError, match="Google API key not found"):
-            load_google_key(cfg)
+        with pytest.raises(RuntimeError, match="GOOGLE_API_KEY not set"):
+            load_google_key({})

@@ -45,10 +45,14 @@ _DEFAULT_INCIDENT_LOG = '/opt/TGW/var/log/quota-incidents.jsonl'
 # Daily budgets per pool — from the live getRateLimits probe (2026-07-02),
 # snapshot at /opt/TGW/var/run/ebay-rate-limits-probe.json. None = count-only
 # (no enforcement) — used where the real limit is unconfirmed (LLM free tiers).
-# llm_google: Google slashed the flash-lite free tier to 20 requests/day
-# (confirmed live 2026-07-04, 2,171 429s). Dave's decision: those 20 calls are
-# the OPERATOR EMERGENCY RESERVE — background callers never touch them
-# (OpenRouter is primary; see tgw-models.json + llm.py call_model).
+# llm_google/llm_deepseek/llm_anthropic: paid direct-API keys as of
+# 2026-07-08 (Dave) — these are now PROVISIONAL SAFETY CAPS, not measured
+# rate limits. See invariants.md E8 (superseded) and E9 for why: a prior
+# session's requeue script caused a runaway resubmission storm, so Dave is
+# deliberately keeping billing credit low and these caps conservative until
+# that class of bug (todo #1250) is confirmed resolved. Override per-pool
+# via `quota_budgets` in tgw-api-config.json; raise once real usage patterns
+# and loaded credit justify it — don't just delete the cap.
 _DEFAULT_BUDGETS: Dict[str, Optional[int]] = {
     'ebay_taxonomy':      5_000,
     'ebay_taxonomy_bulk':   100,
@@ -60,7 +64,9 @@ _DEFAULT_BUDGETS: Dict[str, Optional[int]] = {
     'ebay_trading':       5_000,
     'ebay_eps':           5_000,
     'ebay_other':          None,
-    'llm_google':            20,
+    'llm_google':           300,
+    'llm_deepseek':         500,
+    'llm_anthropic':        100,
     'llm_openrouter':      None,
 }
 
