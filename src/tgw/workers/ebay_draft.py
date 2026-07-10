@@ -24,6 +24,7 @@ import psycopg2.errors
 import requests
 
 import tgw.logging as tgw_logging
+from tgw import quota
 from tgw.apis.ebay.client import ebay_get
 from tgw.apis.ebay.conditions import best_condition
 from tgw.apis.ebay.specifics import get_aspects
@@ -310,6 +311,12 @@ class EbayDraftWorker(QueueWorker):
                     category_resolved_here = True
                     log.info('taxonomy retry succeeded for %s: %s %s',
                              sku, category_id, category_name)
+            except quota.QuotaBudgetExceeded:
+                # code-review follow-up (#1181): best_category() deliberately
+                # re-raises this so the job requeues transiently instead of
+                # silently falling through to the '99 Everything Else'
+                # fallback below — must not catch it here.
+                raise
             except Exception as exc:
                 log.warning('taxonomy retry failed for %s: %s', sku, exc)
 

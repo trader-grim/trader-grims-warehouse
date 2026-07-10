@@ -144,6 +144,15 @@ def best_category(cfg: Dict[str, Any],
             # silently degrading to "no category found" (same convention
             # as audit#1143 #1173's lookup_epid fix).
             raise
+        except RuntimeError:
+            # code-review follow-up: the #1173 precedent cited above also
+            # re-raises the plain RuntimeError client.py's load_token()
+            # raises for an expired token ('eBay access token is
+            # expired...') — every query would fail identically until
+            # token_refresh runs, so this must reach worker_base's
+            # dedicated 900s 'token is expired' transient-requeue pattern
+            # instead of being logged N times and degrading to no category.
+            raise
         except Exception as exc:
             # audit#1143 #1181: previously uncaught — a failure on the
             # first (title) query aborted the whole documented fallback

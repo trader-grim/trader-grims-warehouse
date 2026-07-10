@@ -23,13 +23,15 @@ class TestBestCategoryFallbackOnError:
     def test_first_query_failure_falls_through_to_second_query(self):
         # Regression: previously an uncaught exception on the first query
         # propagated straight out of best_category(), never trying the
-        # second (broader category) query at all.
+        # second (broader category) query at all. Uses a plain (non-
+        # RuntimeError) exception — RuntimeError is now re-raised
+        # separately (expired-token case), see TestBestCategoryTokenExpiry.
         calls = []
 
         def _fake(cfg, query):
             calls.append(query)
             if query == 'Vintage Widget Title':
-                raise RuntimeError('500 Internal Server Error')
+                raise ValueError('500 Internal Server Error')
             return [{'category': {'categoryId': '123', 'categoryName': 'Widgets'}}]
 
         with patch.object(taxonomy, 'get_category_suggestions', side_effect=_fake):
@@ -40,7 +42,7 @@ class TestBestCategoryFallbackOnError:
 
     def test_all_queries_failing_returns_none_none_not_raise(self):
         def _fake(cfg, query):
-            raise RuntimeError('503 Service Unavailable')
+            raise ValueError('503 Service Unavailable')
 
         with patch.object(taxonomy, 'get_category_suggestions', side_effect=_fake):
             result = taxonomy.best_category(_cfg(), 'title', 'category')
@@ -56,6 +58,22 @@ class TestBestCategoryFallbackOnError:
 
         with patch.object(taxonomy, 'get_category_suggestions', side_effect=_fake):
             with pytest.raises(quota.QuotaBudgetExceeded):
+                taxonomy.best_category(_cfg(), 'title', 'category')
+
+
+class TestBestCategoryTokenExpiry:
+    def test_expired_token_runtime_error_propagates_instead_of_being_swallowed(self):
+        # Code-review follow-up: client.py's load_token() raises a plain
+        # RuntimeError for an expired token — every query would fail
+        # identically until token_refresh runs, so this must reach
+        # worker_base's dedicated 'token is expired' transient-requeue
+        # pattern instead of being logged N times and degrading to
+        # (None, None), same convention as #1173's lookup_epid fix.
+        def _fake(cfg, query):
+            raise RuntimeError('eBay access token is expired — token_refresh worker should fix this')
+
+        with patch.object(taxonomy, 'get_category_suggestions', side_effect=_fake):
+            with pytest.raises(RuntimeError, match='token is expired'):
                 taxonomy.best_category(_cfg(), 'title', 'category')
 
     def test_first_query_success_does_not_try_second(self):

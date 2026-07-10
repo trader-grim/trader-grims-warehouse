@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 import psycopg2.errors
 
 import tgw.logging as tgw_logging
+from tgw import quota
 from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.apis.llm import CLOUD_PROVIDERS, call_model, get_task_model
 from tgw.apis.ollama import extract_json, is_available
@@ -273,6 +274,12 @@ class AIIdentifyWorker(QueueWorker):
             from tgw.apis.ebay.taxonomy import best_category
 
             ebay_category_id, ebay_category_name = best_category(self.config, title, category)
+        except quota.QuotaBudgetExceeded:
+            # code-review follow-up (#1181): best_category() deliberately
+            # re-raises this so the job requeues transiently (worker_base's
+            # 'quota budget exhausted' classifier) instead of silently
+            # writing the item with no category — must not catch it here.
+            raise
         except Exception as exc:
             log.warning("taxonomy lookup failed for %r: %s", category, exc)
 
