@@ -462,7 +462,33 @@ Findings-execution status by subsystem (2026-07-10 check):
   catalog-refresh trigger, shared `_format_ebay_error`, ebay_sku_migrate.py
   write-pattern documented in invariants.md A5). One follow-up deferred as
   todo #1261 (itemdata_scrub.py's ad-hoc queue — bigger execution-model
-  change, out of scope for a cohesion batch).
+  change, out of scope for a cohesion batch). **2026-07-10, re-examined and
+  deliberately left deferred again (Dave: document for a future planning
+  session rather than force a fix now)** — see below.
+
+**PLANNING ITEM — itemdata_scrub.py queue migration (deferred 2x, needs a
+real scoping pass):** `itemdata_scrub.py`'s `main()` uses a bare
+`queue_dir = Path.cwd()` file-based queue (job = a file in the cwd; success
+= the file gets deleted) instead of `state_machine`/`QueueWorker` like every
+other worker — no visibility in `tgw queue-status`, no postgres-backed
+retry/dead-letter semantics. **Checked live 2026-07-10: it isn't currently
+scheduled anywhere** — no cron entry, no systemd timer, no reference in the
+nix flake (`grep -rn itemdata_scrub ~/tgw-flake` → nothing). So the
+practical impact of the visibility gap is zero today; nobody is missing
+status on jobs that aren't flowing through it.
+
+The real fix is a genuine migration, not a quick conversion: a new systemd
+service + timer (or on-demand queue entry point), converting the dequeue
+model from "file exists in cwd" to postgres rows, deciding how
+`ScrubRules`/`--config` get supplied in that model (currently CLI args to a
+one-shot batch run), and deciding whether this becomes a `tgw-worker@` unit
+like everything else or stays a manual on-demand tool with better status
+reporting bolted on. That's real design work — worth scoping properly in a
+dedicated session rather than forcing a partial fix (e.g. just logging queue
+depth somewhere `tgw health` can see, without fixing the underlying
+file-vs-postgres model split) into a batched cleanup pass. Todo #1261
+remains open, now explicitly framed as "needs a scoping pass," not "needs a
+quick fix."
 - `apis/ebay/` — DONE. #1182 fixed 2026-07-10 (conditions.py policy-cache
   memoization, trading.py 429-retry shared across all 3 Trading API
   generators).
