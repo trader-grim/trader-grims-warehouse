@@ -1079,3 +1079,25 @@ def test_cmd_catalog_verify_check_photos_flag(tmp_path):
     result_on = cmd_catalog_verify(cfg, min_severity='critical', check_photos=True)
     assert result_on['by_rule'].get('photo_files_readable') == 1
     assert (catalog_root / 'photo-decode-cache.json').exists()
+
+
+def test_save_photo_decode_cache_merges_not_overwrites(tmp_path):
+    """code-review follow-up: _save_photo_decode_cache used to be a plain
+    write_text -- a concurrent writer's entries (or entries from an earlier
+    run not present in this process's in-memory dict) would be silently
+    dropped. Must merge onto whatever's on disk, like the other eBay disk
+    caches (locked_merge_cache_json)."""
+    from tgw.api import _load_photo_decode_cache, _save_photo_decode_cache
+
+    catalog_root = tmp_path / 'catalog'
+    cfg = {'catalog_root': catalog_root}
+
+    _save_photo_decode_cache(cfg, {'/a/1.jpg': {'fingerprint': [1, 1.0], 'error': None}})
+    # a second, independent save with a DIFFERENT key -- simulates either a
+    # concurrent writer or a fresh in-memory cache that didn't inherit the
+    # first entry (e.g. two separate cmd_catalog_verify runs)
+    _save_photo_decode_cache(cfg, {'/b/2.jpg': {'fingerprint': [2, 2.0], 'error': 'bad'}})
+
+    on_disk = _load_photo_decode_cache(cfg)
+    assert '/a/1.jpg' in on_disk
+    assert '/b/2.jpg' in on_disk

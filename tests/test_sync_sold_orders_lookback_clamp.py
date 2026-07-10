@@ -1,9 +1,9 @@
 """audit#1143 #1153: sync_sold_orders() fed GetOrders a scan_from far
-outside its rolling 90-day CreateTimeFrom limit on a first sync
-(SOLD_INITIAL_LOOKBACK_DAYS=365), so the very first call failed with
-"Invalid dates in CreateTimeFrom -- orders older than 90 days cannot be
-retrieved." Chunking the window narrower didn't help since the START date
-was already too old -- scan_from itself must be clamped.
+outside its rolling 90-day CreateTimeFrom limit on a first sync (a since-
+removed SOLD_INITIAL_LOOKBACK_DAYS=365 constant), so the very first call
+failed with "Invalid dates in CreateTimeFrom -- orders older than 90 days
+cannot be retrieved." Chunking the window narrower didn't help since the
+START date was already too old -- scan_from itself must be clamped.
 
 All eBay API calls are mocked -- tests pass completely offline.
 """

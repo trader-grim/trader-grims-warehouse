@@ -83,6 +83,22 @@ class EbayPriceWorker(QueueWorker):
                     'operator_price': op_price,
                 },
             })
+            # audit#1143 #1240 code-review follow-up: the write above is a
+            # real item mutation (invariant A7 — every mutation enqueues a
+            # coalesced catalog_rebuild). The pre-#1240 code used to reach
+            # this same enqueue further down (after wastefully calling
+            # suggest_price() first); the #1240 early return skipped it
+            # entirely, leaving the catalog stale until an unrelated write.
+            try:
+                state_machine.enqueue_job(
+                    queue_name='catalog_rebuild',
+                    payload={'reason': f'ebay_price_guard_skipped:{sku}'},
+                    dedupe_key='catalog_rebuild:pending',
+                    not_before=time.time() + 30,
+                    max_attempts=3,
+                )
+            except psycopg2.errors.UniqueViolation:
+                pass
             # audit#1143 #1240: this used to fall through and still call
             # suggest_price() unconditionally below — an operator's last
             # price_history entry means "leave this alone," full stop, not

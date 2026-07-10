@@ -1246,16 +1246,21 @@ def _load_live_photo_index(cfg: Dict[str, Any]) -> "tuple[Optional[Dict[str, int
     return index, age_hours
 
 
+_PHOTO_DECODE_CACHE_FLUSH_EVERY = 500  # items scanned between periodic cache flushes
+
+
+def _photo_decode_cache_path(cfg: Dict[str, Any]) -> Optional[Path]:
+    catalog_root = cfg.get("catalog_root")
+    return Path(catalog_root) / "photo-decode-cache.json" if catalog_root else None
+
+
 def _load_photo_decode_cache(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """Load the (size,mtime)->decode-result sidecar cache (photo-integrity
     mitigation plan leg 3, todo #1154). Missing/corrupt cache -> empty dict,
     same fail-open-to-full-rescan behavior as the other disk caches in this
     codebase (e.g. condition policies, aspects)."""
-    catalog_root = cfg.get("catalog_root")
-    if not catalog_root:
-        return {}
-    cache_path = Path(catalog_root) / "photo-decode-cache.json"
-    if not cache_path.exists():
+    cache_path = _photo_decode_cache_path(cfg)
+    if not cache_path or not cache_path.exists():
         return {}
     try:
         return json.loads(cache_path.read_text(encoding="utf-8"))
@@ -1264,13 +1269,18 @@ def _load_photo_decode_cache(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _save_photo_decode_cache(cfg: Dict[str, Any], cache: Dict[str, Any]) -> None:
-    catalog_root = cfg.get("catalog_root")
-    if not catalog_root:
+    """Merge *cache* onto whatever's on disk under an exclusive flock
+    (code-review follow-up: a plain write_text was both non-atomic — a
+    crash mid-write could corrupt the whole cache, same failure class
+    audit#1143 #1239 already fixed for the other eBay disk caches — and a
+    lost-update risk against any concurrent writer). Uses the same shared
+    helper those caches use rather than a fourth hand-rolled read/write."""
+    cache_path = _photo_decode_cache_path(cfg)
+    if not cache_path:
         return
-    cache_path = Path(catalog_root) / "photo-decode-cache.json"
     try:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps(cache, sort_keys=True), encoding="utf-8")
+        from tgw.apis.ebay._cache_io import locked_merge_cache_json
+        locked_merge_cache_json(cache_path, lambda current: {**current, **cache})
     except OSError as exc:
         log.warning("catalog-verify: could not write photo-decode-cache: %s", exc)
 
@@ -1752,6 +1762,14 @@ def cmd_catalog_verify(
         for viol in item_viols:
             if _SEV_ORDER.get(viol["severity"], 99) <= min_sev:
                 all_violations.append(viol)
+
+        # code-review follow-up: flush the photo-decode cache periodically,
+        # not only after the whole scan finishes — a full-fleet run is
+        # explicitly documented as heavy, and a crash/kill partway through
+        # used to discard every decode already done in that run, defeating
+        # the "cheap incremental" point of caching by (size,mtime) at all.
+        if photo_decode_cache is not None and scanned % _PHOTO_DECODE_CACHE_FLUSH_EVERY == 0:
+            _save_photo_decode_cache(cfg, photo_decode_cache)
 
         if mark_verified:
             has_violations = bool(item_viols)

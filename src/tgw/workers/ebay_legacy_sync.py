@@ -13,7 +13,7 @@ Sold sync (PP-SOLD-001):
   Builds a listing_id → item_path index from ItemData, then for each order
   transaction marks the matched item status=sold and writes ebay_sale block.
   Tracks last sync timestamp in SOLD_STATE_FILE; initial run looks back
-  SOLD_INITIAL_LOOKBACK_DAYS days in 90-day windows (GetOrders limit).
+  pull._MAX_ORDER_LOOKBACK_DAYS days (GetOrders' hard rolling-90-day limit).
 
 Self-scheduling: runs daily. Queue name: ebay_legacy_sync
 """

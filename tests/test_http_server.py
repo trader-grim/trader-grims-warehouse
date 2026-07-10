@@ -4188,8 +4188,10 @@ def test_item_detail_store_category_dropdowns_populate_and_select(env):
 
 
 def test_item_detail_best_offer_control_reflects_state(env):
-    """todo #1256: per-item Best Offer control (offer.listingPolicies.
-    bestOfferTerms) -- checkbox reflects draft_listing.best_offer_enabled,
+    """todo #1256 (+ code-review follow-up): per-item Best Offer control
+    (offer.listingPolicies.bestOfferTerms) -- tri-state select (not a
+    checkbox: "not set" must be a real, distinct, selectable option, not
+    conflated with "disabled") reflects draft_listing.best_offer_enabled;
     auto-accept/decline prices prefill from draft_listing."""
     sku = "tgw20260701000000078"
     _write_item(env["itemdata_root"], sku, {
@@ -4205,15 +4207,38 @@ def test_item_detail_best_offer_control_reflects_state(env):
     r = env["client"].get(f"/form/items/{sku}")
     assert r.status_code == 200
     text = r.text
-    assert 'id="dl-best-offer-enabled" checked' in text
+    assert '<option value="true" selected>Enabled</option>' in text
     assert 'id="dl-best-offer-accept" placeholder="auto-accept $" value="45.0"' in text
     assert 'id="dl-best-offer-decline" placeholder="auto-decline $" value="20"' in text
 
 
-def test_item_detail_best_offer_control_unchecked_when_unset(env):
+def test_item_detail_best_offer_control_not_set_when_unset(env):
+    """The unset state must render as its own selected option ("not set"),
+    never silently coerced to the "Disabled" option -- that's exactly the
+    bug where saving any unrelated field forced best_offer_enabled=false."""
     sku = "tgw20260701000000079"
     _write_item(env["itemdata_root"], sku, {"sku": sku, "title": "No Best Offer Item"})
     _login(env["client"])
     r = env["client"].get(f"/form/items/{sku}")
     assert r.status_code == 200
-    assert 'id="dl-best-offer-enabled" checked' not in r.text
+    text = r.text
+    assert '<option value="" selected>' in text
+    assert '<option value="false" selected>' not in text
+    assert '<option value="true" selected>' not in text
+
+
+def test_item_detail_best_offer_control_disabled_when_explicitly_false(env):
+    """False is a real, meaningful, distinct choice from unset -- must
+    render as the "Disabled" option selected, not fall back to "not set"."""
+    sku = "tgw20260701000000080"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Best Offer Disabled Item",
+        "draft_listing": {"best_offer_enabled": False},
+    })
+    _login(env["client"])
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    text = r.text
+    assert '<option value="false" selected>' in text
+    assert '<option value="" selected>' not in text

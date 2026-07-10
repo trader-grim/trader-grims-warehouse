@@ -33,15 +33,18 @@ from tgw.apis.fence import patch_item as fence_patch_item
 
 log = logging.getLogger(__name__)
 
-SOLD_INITIAL_LOOKBACK_DAYS = 365
 SOLD_ORDERS_WINDOW_DAYS    = 90    # GetOrders API max per call
 # GetOrders' real constraint is a rolling one: CreateTimeFrom can never be
 # more than 90 days before *now*, no matter the window width (audit#1143
-# #1153 -- SOLD_INITIAL_LOOKBACK_DAYS=365 fed a scan_from far outside that
-# boundary straight into the first 90-day chunk, so the very first call
-# failed with "Invalid dates in CreateTimeFrom -- orders older than 90 days
-# cannot be retrieved"; chunking the window narrower doesn't help since the
-# START date was already too old). 89, not 90, for a one-day safety margin.
+# #1153 -- a prior SOLD_INITIAL_LOOKBACK_DAYS=365 constant fed a scan_from
+# far outside that boundary straight into the first 90-day chunk, so the
+# very first call failed with "Invalid dates in CreateTimeFrom -- orders
+# older than 90 days cannot be retrieved"; chunking the window narrower
+# doesn't help since the START date was already too old — a real backfill
+# beyond this ceiling is not achievable via GetOrders at all, so a separate
+# "look back 365 days" constant was never anything but misleading. 89, not
+# 90, for a one-day safety margin. code-review follow-up (2026-07-10):
+# collapsed the two contradictory constants into this one source of truth.
 _MAX_ORDER_LOOKBACK_DAYS = 89
 
 _TITLE_STOPWORDS = frozenset({
@@ -559,23 +562,25 @@ def sync_sold_orders(cfg: Dict[str, Any], listing_index: Dict[str, Path],
     stats: Dict[str, Any] = {'orders_fetched': 0, 'sold_marked': 0, 'errors': 0}
     now = datetime.now(timezone.utc)
 
+    # GetOrders can never see further back than _MAX_ORDER_LOOKBACK_DAYS from
+    # now, no matter what triggered this sync (first-ever run or a
+    # long-stale incremental resume) — this is the ceiling on both paths,
+    # not a fallback clamp on top of a separate "ideal" lookback.
+    earliest_allowed = now - timedelta(days=_MAX_ORDER_LOOKBACK_DAYS)
+
     if state_path.exists():
         state = json.loads(state_path.read_text())
         scan_from = datetime.fromisoformat(state['last_synced_at']) - timedelta(hours=2)
+        if scan_from < earliest_allowed:
+            log.info('ebay_pull: scan_from %s predates GetOrders\' %d-day limit — '
+                     'clamped to %s', scan_from.date(), _MAX_ORDER_LOOKBACK_DAYS,
+                     earliest_allowed.date())
+            scan_from = earliest_allowed
     else:
-        scan_from = now - timedelta(days=SOLD_INITIAL_LOOKBACK_DAYS)
-        log.info('ebay_pull: first sold sync — looking back %d days',
-                 SOLD_INITIAL_LOOKBACK_DAYS)
-
-    # GetOrders can never see further back than _MAX_ORDER_LOOKBACK_DAYS from
-    # now, regardless of how far scan_from wants to go (first-sync or a
-    # long-stale incremental resume) — clamp here, not just the window width.
-    earliest_allowed = now - timedelta(days=_MAX_ORDER_LOOKBACK_DAYS)
-    if scan_from < earliest_allowed:
-        log.info('ebay_pull: scan_from %s predates GetOrders\' %d-day limit — '
-                 'clamped to %s', scan_from.date(), _MAX_ORDER_LOOKBACK_DAYS,
-                 earliest_allowed.date())
         scan_from = earliest_allowed
+        log.info('ebay_pull: first sold sync — looking back %d days '
+                 '(GetOrders cannot see further back than this)',
+                 _MAX_ORDER_LOOKBACK_DAYS)
 
     orders: List[Dict[str, Any]] = []
     window_start = scan_from

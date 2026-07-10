@@ -4969,7 +4969,16 @@ def _render_item_detail_html(
     # default -- previously not exposed anywhere in TGW, so whatever a
     # listing showed was either an eBay category default or an untracked
     # manual Seller Hub change (invariant C11 drift class).
-    _dl_bo_checked = " checked" if (dl or {}).get("best_offer_enabled") else ""
+    # Tri-state (None/True/False), not a checkbox: audit#1143 code-review
+    # follow-up on #1256 -- a plain checkbox can't represent "unset," so
+    # saveEbayDraft() was unconditionally sending the checkbox's current
+    # (always-defined) checked state on every save, silently forcing
+    # best_offer_enabled=false the first time an operator saved ANY
+    # unrelated field on an item that had never touched Best Offer,
+    # defeating the "unset means don't touch" contract this same field
+    # documents in tgw.ebay.sync._build_offer_bodies.
+    _dl_bo_raw = (dl or {}).get("best_offer_enabled")
+    _dl_bo_select_val = "true" if _dl_bo_raw is True else ("false" if _dl_bo_raw is False else "")
     _dl_bo_accept = (dl or {}).get("best_offer_auto_accept_price")
     _dl_bo_decline = (dl or {}).get("best_offer_auto_decline_price")
     _dl_bo_accept_val = h(str(_dl_bo_accept)) if _dl_bo_accept not in (None, "") else ""
@@ -5396,11 +5405,17 @@ def _render_item_detail_html(
         "</span></div>"
         # Best Offer (todo #1256) — per-item Inventory API field, not an
         # account default; enabling/disabling here is now authoritative.
+        # Tri-state select, not a checkbox — "not set" is a real, distinct
+        # value (leave eBay's category default alone), not just "false".
         f'<div class="frow" id="dl-best-offer">'
         f'<span class="fn">Best Offer</span>'
         f'<span class="fv">'
-        f'<label style="display:flex;align-items:center;gap:5px;font-size:.85em;cursor:pointer">'
-        f'<input type="checkbox" id="dl-best-offer-enabled"{_dl_bo_checked}>enabled</label>'
+        f'<select id="dl-best-offer-enabled" '
+        f'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px;font-size:.85em">'
+        f'<option value=""{" selected" if _dl_bo_select_val == "" else ""}>— not set (eBay default) —</option>'
+        f'<option value="true"{" selected" if _dl_bo_select_val == "true" else ""}>Enabled</option>'
+        f'<option value="false"{" selected" if _dl_bo_select_val == "false" else ""}>Disabled</option>'
+        f'</select>'
         f'<input type="text" id="dl-best-offer-accept" placeholder="auto-accept $" value="{_dl_bo_accept_val}" '
         f'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px;'
         f'font-size:.85em;width:110px;margin-left:8px">'
@@ -5890,12 +5905,12 @@ def _render_item_detail_html(
         f"  }}"
         f"  var scat2=document.getElementById('dl-store-cat2-select');"
         f"  if(scat2)dl.secondary_store_category_id=scat2.value||null;"
-        f"  var boChk=document.getElementById('dl-best-offer-enabled');"
-        f"  if(boChk)dl.best_offer_enabled=boChk.checked;"
+        f"  var boSel=document.getElementById('dl-best-offer-enabled');"
+        f"  if(boSel&&boSel.value!=='')dl.best_offer_enabled=(boSel.value==='true');"
         f"  var boAcc=document.getElementById('dl-best-offer-accept');"
-        f"  if(boAcc)dl.best_offer_auto_accept_price=boAcc.value!==''?(parseFloat(boAcc.value)||null):null;"
+        f"  if(boAcc&&boAcc.value!==''){{var boAccN=parseFloat(boAcc.value);dl.best_offer_auto_accept_price=isNaN(boAccN)?null:boAccN;}}"
         f"  var boDec=document.getElementById('dl-best-offer-decline');"
-        f"  if(boDec)dl.best_offer_auto_decline_price=boDec.value!==''?(parseFloat(boDec.value)||null):null;"
+        f"  if(boDec&&boDec.value!==''){{var boDecN=parseFloat(boDec.value);dl.best_offer_auto_decline_price=isNaN(boDecN)?null:boDecN;}}"
         f"  var cat2id=document.getElementById('dl-cat2-id');"
         f"  if(cat2id)dl.secondary_category_id=cat2id.value||null;"
         f"  var aspInputs=document.querySelectorAll('#aspects-form [data-aspect]');"
