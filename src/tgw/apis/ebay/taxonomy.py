@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from tgw import quota
 from tgw.apis.ebay.client import ebay_get
 from tgw.catalog import atomic_write_json as _atomic_write_cache_json
 
@@ -135,7 +136,21 @@ def best_category(cfg: Dict[str, Any],
     for query in queries:
         if not query:
             continue
-        suggestions = get_category_suggestions(cfg, query)
+        try:
+            suggestions = get_category_suggestions(cfg, query)
+        except quota.QuotaBudgetExceeded:
+            # A second live query would be gated the same way — propagate
+            # so the caller's worker requeues transiently instead of
+            # silently degrading to "no category found" (same convention
+            # as audit#1143 #1173's lookup_epid fix).
+            raise
+        except Exception as exc:
+            # audit#1143 #1181: previously uncaught — a failure on the
+            # first (title) query aborted the whole documented fallback
+            # chain instead of trying the next (broader category) query.
+            log.warning('category suggestion query %r failed (%s) — trying next fallback',
+                        query, exc)
+            continue
         if suggestions:
             cat = suggestions[0].get('category', {})
             category_id   = cat.get('categoryId')
