@@ -71,3 +71,22 @@ def test_epid_lookup_propagates_quota_budget_exceeded(monkeypatch):
     monkeypatch.setattr(catalog_mod, 'ebay_get', _raise_quota)
     with pytest.raises(quota.QuotaBudgetExceeded):
         lookup_epid({}, '54199034971')
+
+
+def test_epid_lookup_propagates_expired_token_runtime_error(monkeypatch):
+    # Code-review follow-up to #1173: client.py's load_token() raises a plain
+    # RuntimeError ('eBay access token is expired...') proactively — same
+    # swallow bug as QuotaBudgetExceeded, just a different exception type.
+    # worker_base.py has a dedicated 'token is expired' transient-requeue
+    # pattern that must get the chance to fire instead of this being
+    # silently caught and returning None.
+    import pytest
+
+    import tgw.apis.ebay.catalog as catalog_mod
+
+    def _raise_expired(cfg, path, params=None):
+        raise RuntimeError('eBay access token is expired — token_refresh worker should fix this')
+
+    monkeypatch.setattr(catalog_mod, 'ebay_get', _raise_expired)
+    with pytest.raises(RuntimeError, match='token is expired'):
+        lookup_epid({}, '54199034971')

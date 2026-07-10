@@ -66,6 +66,15 @@ def lookup_epid(cfg: Dict[str, Any], barcode: str) -> Optional[str]:
         # item would silently ship without EPID enrichment during quota
         # exhaustion instead of the job requeuing until the pool resets.
         raise
+    except RuntimeError:
+        # code-review follow-up to #1173: client.py's load_token() raises a
+        # plain RuntimeError ('eBay access token is expired...') proactively,
+        # before any request goes out — same swallow bug as QuotaBudgetExceeded
+        # above, just a different exception type. worker_base.py has its own
+        # dedicated 'token is expired' transient-requeue pattern (900s delay,
+        # waits for token_refresh) that this must reach instead of silently
+        # skipping EPID enrichment.
+        raise
     except Exception as exc:
         log.warning('catalog: EPID lookup failed for %s: %s', barcode, exc)
         return None

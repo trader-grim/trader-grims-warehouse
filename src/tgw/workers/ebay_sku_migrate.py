@@ -345,7 +345,14 @@ def _migrate_inventory(cfg: Dict[str, Any],
             return {'ok': False, 'old_sku': old_sku,
                     'error': f'DELETE old offer {old_offer_id}: {body}'}
 
-    # Publish new offer — retry with USED_EXCELLENT if category rejects condition
+    # Publish new offer — retry with USED_EXCELLENT if category rejects condition.
+    # code-review follow-up (#1169): a failure here leaves new_sku's offer
+    # created-but-unpublished with old_offer already deleted — exactly the
+    # partial state _recover_partial() exists to auto-heal on a later run
+    # (migrate_one() routes back to it via _find_offer(new_sku)). Mark
+    # 'recoverable': True so handle() keeps retrying instead of permanently
+    # blocking on the first transient publish failure (unlike a local-rename
+    # failure below, which has no automatic self-heal path).
     try:
         pub = publish_offer(cfg, new_offer_id)
         new_listing_id  = pub['listing_id']
@@ -365,17 +372,17 @@ def _migrate_inventory(cfg: Dict[str, Any],
                     body = exc2.response.text[:300] if exc2.response is not None else str(exc2)
                     return {'ok': False, 'old_sku': old_sku,
                             'error': f'publish offer {new_offer_id}: {body}',
-                            'ebay_done': True}
+                            'ebay_done': True, 'recoverable': True}
             else:
                 body = exc.response.text[:300]
                 return {'ok': False, 'old_sku': old_sku,
                         'error': f'publish offer {new_offer_id}: {body}',
-                        'ebay_done': True}
+                        'ebay_done': True, 'recoverable': True}
         else:
             body = exc.response.text[:300] if exc.response is not None else str(exc)
             return {'ok': False, 'old_sku': old_sku,
                     'error': f'publish offer {new_offer_id}: {body}',
-                    'ebay_done': True}
+                    'ebay_done': True, 'recoverable': True}
 
     # Delete old inventory item (cleanup; non-fatal)
     try:
@@ -506,7 +513,9 @@ def _migrate_inventory_live(cfg: Dict[str, Any],
             return {'ok': False, 'old_sku': old_sku,
                     'error': f'DELETE old offer {old_offer_id}: {body}'}
 
-    # Publish new offer
+    # Publish new offer — recoverable (see _migrate_inventory's comment above):
+    # a failure here leaves new_sku's offer created-but-unpublished, which
+    # _recover_partial() auto-heals on a later run.
     try:
         pub = publish_offer(cfg, new_offer_id)
         new_listing_id  = pub['listing_id']
@@ -515,7 +524,7 @@ def _migrate_inventory_live(cfg: Dict[str, Any],
         body = exc.response.text[:300] if exc.response is not None else str(exc)
         return {'ok': False, 'old_sku': old_sku,
                 'error': f'publish offer {new_offer_id}: {body}',
-                'ebay_done': True}
+                'ebay_done': True, 'recoverable': True}
 
     # Delete old inventory item (cleanup; non-fatal)
     try:
@@ -611,7 +620,10 @@ def _recover_partial(cfg: Dict[str, Any],
         return {'ok': False, 'old_sku': old_sku,
                 'error': f'PUT offer {new_offer_id} (recovery): {body}'}
 
-    # Publish — retry with USED_EXCELLENT if category rejects the stored condition
+    # Publish — retry with USED_EXCELLENT if category rejects the stored
+    # condition. All failures below are 'recoverable': True — this IS the
+    # recovery function; a failure here just means the same partial state
+    # persists for the next scheduled run to retry, not a new permanent one.
     try:
         pub = publish_offer(cfg, new_offer_id)
         new_listing_id  = pub['listing_id']
@@ -635,17 +647,17 @@ def _recover_partial(cfg: Dict[str, Any],
                     body = exc2.response.text[:300] if exc2.response is not None else str(exc2)
                     return {'ok': False, 'old_sku': old_sku,
                             'error': f'publish offer {new_offer_id} (recovery+condition): {body}',
-                            'ebay_done': True}
+                            'ebay_done': True, 'recoverable': True}
             else:
                 body = exc.response.text[:300]
                 return {'ok': False, 'old_sku': old_sku,
                         'error': f'publish offer {new_offer_id} (recovery): {body}',
-                        'ebay_done': True}
+                        'ebay_done': True, 'recoverable': True}
         else:
             body = exc.response.text[:300] if exc.response is not None else str(exc)
             return {'ok': False, 'old_sku': old_sku,
                     'error': f'publish offer {new_offer_id} (recovery): {body}',
-                    'ebay_done': True}
+                    'ebay_done': True, 'recoverable': True}
 
     # Delete old inventory item (non-fatal)
     try:
@@ -833,9 +845,13 @@ class EbaySkuMigrateWorker(QueueWorker):
                 error_text = result.get('error', '')
                 log.error('ebay_sku_migrate: FAILED %s → %s: %s',
                           old_sku, new_sku, error_text)
-                if result.get('ebay_done'):
+                if result.get('ebay_done') and not result.get('recoverable'):
                     log.error('ebay_sku_migrate: eBay already revised/migrated for %s '
                               '— manual local fix required', old_sku)
+                elif result.get('ebay_done'):
+                    log.warning('ebay_sku_migrate: %s left in a recoverable partial '
+                                'state (new offer created, not yet published) — '
+                                '_recover_partial will retry next run', old_sku)
                 # audit#1143 #1169: ebay_done=True (eBay-side migration already
                 # succeeded, only the local folder rename failed) was never
                 # classified as permanent — _is_permanent_failure() only
@@ -845,10 +861,17 @@ class EbaySkuMigrateWorker(QueueWorker):
                 # against a listing that's already on new_sku, local rename
                 # re-attempted against whatever local condition is still
                 # failing (unlikely to self-heal), no alert ever raised.
-                # ebay_done is always blocking — retrying can't fix a local
-                # rename failure and the local/eBay SKU are now provably out
-                # of sync, which needs a human, not another cycle.
-                if result.get('ebay_done') or _is_permanent_failure(error_text):
+                #
+                # code-review follow-up: the fix above was too broad — it also
+                # permanently blocked the OTHER ebay_done=True case (publish
+                # failed after the old offer was already deleted), which
+                # _recover_partial() exists specifically to auto-heal on a
+                # later run (migrate_one() routes back to it via
+                # _find_offer(new_sku)). Only the non-recoverable case (local
+                # rename failure — no automatic self-heal path exists for
+                # that) should block; the recoverable case must stay
+                # retryable, or _recover_partial never gets to run.
+                if (result.get('ebay_done') and not result.get('recoverable')) or _is_permanent_failure(error_text):
                     try:
                         from tgw.items import _write_field
                         now = datetime.now(timezone.utc).isoformat()

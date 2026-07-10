@@ -24,9 +24,10 @@ import tgw.workers.ebay_publish as ebay_publish_mod
 from tgw.workers.ebay_publish import EbayPublishWorker
 
 
-def _item(sku: str) -> Dict[str, Any]:
+def _item(sku: str, category_id: str = '12345') -> Dict[str, Any]:
     return {
         'sku': sku,
+        'ebay_category_id': category_id,
         'draft_listing': {
             'price': 29.99,
             'condition_id': '4000',
@@ -87,6 +88,9 @@ def test_condition_fallback_writes_corrected_condition_back_to_draft_listing(tmp
 
     monkeypatch.setattr(ebay_publish_mod, 'publish_offer', _fake_publish_offer)
     monkeypatch.setattr(ebay_publish_mod, 'ebay_put', lambda *a, **k: {'ok': True})
+    # No cached policy for this category — condition_label falls back to 'Used'.
+    monkeypatch.setattr(ebay_publish_mod.conditions, 'allowed_conditions_for_category',
+                        lambda cfg, cat_id: [])
 
     patched = {}
     monkeypatch.setattr(ebay_publish_mod, 'fence_patch_item',
@@ -98,6 +102,73 @@ def test_condition_fallback_writes_corrected_condition_back_to_draft_listing(tmp
     assert calls['publish'] == 2
     assert patched['draft_listing']['condition_enum'] == 'USED_EXCELLENT'
     assert patched['draft_listing']['condition_id'] == '3000'
+    assert patched['draft_listing']['condition_label'] == 'Used'
+
+
+def test_condition_fallback_uses_category_specific_label_when_available(tmp_path, monkeypatch):
+    # code-review follow-up: the label must come from conditions.py's
+    # canonical per-category lookup, not a hardcoded 'Used' string, when
+    # the category's real eBay-returned description differs.
+    sku = 'tgw3'
+    _write_item(tmp_path, sku, _item(sku, category_id='999'))
+    _mock_common(monkeypatch, tmp_path)
+
+    def _fake_publish_offer(cfg, offer_id):
+        if not hasattr(_fake_publish_offer, 'called'):
+            _fake_publish_offer.called = True
+            raise _http_error_25021()
+        return {'listing_id': 'L1', 'listing_url': 'http://x', 'status': 'PUBLISHED'}
+
+    monkeypatch.setattr(ebay_publish_mod, 'publish_offer', _fake_publish_offer)
+    monkeypatch.setattr(ebay_publish_mod, 'ebay_put', lambda *a, **k: {'ok': True})
+
+    def _fake_allowed(cfg, cat_id):
+        assert cat_id == '999'
+        return [{'condition_id': '3000', 'condition_label': 'Pre-owned - Good', 'condition_enum': 'USED_EXCELLENT'}]
+
+    monkeypatch.setattr(ebay_publish_mod.conditions, 'allowed_conditions_for_category', _fake_allowed)
+
+    patched = {}
+    monkeypatch.setattr(ebay_publish_mod, 'fence_patch_item',
+                        lambda cfg, sku, fields: patched.update(fields) or {'ok': True})
+
+    worker = _worker(_cfg(tmp_path))
+    worker.handle({'payload_json': {'sku': sku}})
+
+    assert patched['draft_listing']['condition_label'] == 'Pre-owned - Good'
+
+
+def test_condition_fallback_label_lookup_failure_falls_back_safely(tmp_path, monkeypatch):
+    # A broken/unavailable condition-policy lookup must not fail the
+    # already-succeeded publish — falls back to the safe default label.
+    sku = 'tgw4'
+    _write_item(tmp_path, sku, _item(sku))
+    _mock_common(monkeypatch, tmp_path)
+
+    calls = {'publish': 0}
+
+    def _fake_publish_offer(cfg, offer_id):
+        calls['publish'] += 1
+        if calls['publish'] == 1:
+            raise _http_error_25021()
+        return {'listing_id': 'L1', 'listing_url': 'http://x', 'status': 'PUBLISHED'}
+
+    monkeypatch.setattr(ebay_publish_mod, 'publish_offer', _fake_publish_offer)
+    monkeypatch.setattr(ebay_publish_mod, 'ebay_put', lambda *a, **k: {'ok': True})
+
+    def _raise(cfg, cat_id):
+        raise RuntimeError('condition policy cache unavailable')
+
+    monkeypatch.setattr(ebay_publish_mod.conditions, 'allowed_conditions_for_category', _raise)
+
+    patched = {}
+    monkeypatch.setattr(ebay_publish_mod, 'fence_patch_item',
+                        lambda cfg, sku, fields: patched.update(fields) or {'ok': True})
+
+    worker = _worker(_cfg(tmp_path))
+    worker.handle({'payload_json': {'sku': sku}})
+
+    assert calls['publish'] == 2
     assert patched['draft_listing']['condition_label'] == 'Used'
 
 

@@ -23,6 +23,7 @@ import psycopg2.errors
 import requests
 
 import tgw.logging as tgw_logging
+from tgw.apis.ebay import conditions
 from tgw.apis.ebay.client import ebay_get, ebay_put
 from tgw.apis.fence import ebay_write as fence_ebay_write
 from tgw.apis.fence import patch_item as fence_patch_item
@@ -264,9 +265,29 @@ class EbayPublishWorker(QueueWorker):
                     # actually live). Persisted below via the function's own
                     # end-of-run fence_patch_item(draft_listing=...) write.
                     if item.get('draft_listing'):
+                        # code-review follow-up: use conditions.py's canonical
+                        # mapping instead of hardcoding the enum/label, so this
+                        # never drifts from the same source of truth
+                        # ebay_draft.py uses. The label is the category's own
+                        # eBay-returned description for conditionId 3000 (can
+                        # legitimately differ per category — e.g. "Used" vs
+                        # "Pre-owned - Good"), not a fixed string; 'Used' is
+                        # only the fallback if that lookup is unavailable.
+                        label = 'Used'
+                        cat_id_for_condition = str(item.get('ebay_category_id', ''))
+                        try:
+                            for cond in conditions.allowed_conditions_for_category(
+                                    self.config, cat_id_for_condition):
+                                if cond['condition_id'] == '3000':
+                                    label = cond['condition_label']
+                                    break
+                        except Exception as exc:
+                            log.warning('%s: could not look up canonical label for '
+                                        'conditionId 3000 (%s) — using default %r',
+                                        sku, exc, label)
                         item['draft_listing']['condition_id']    = '3000'
-                        item['draft_listing']['condition_label'] = 'Used'
-                        item['draft_listing']['condition_enum']  = 'USED_EXCELLENT'
+                        item['draft_listing']['condition_label'] = label
+                        item['draft_listing']['condition_enum']  = conditions.condition_enum('3000')
                 else:
                     msg = _format_ebay_error(body_text, status)
                     # Canonical pipeline_error schema (broker B1b) — see
