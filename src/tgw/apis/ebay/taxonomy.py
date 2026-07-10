@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from tgw.apis.ebay.client import ebay_get
+from tgw.catalog import atomic_write_json as _atomic_write_cache_json
 
 log = logging.getLogger(__name__)
 
@@ -95,10 +96,15 @@ def get_category_tree_id(cfg: Dict[str, Any]) -> str:
         log.debug('eBay category tree ID: %s', _tree_id_cache)
         if cache_path:
             try:
-                cache_path.write_text(
-                    json.dumps({'_cached_at': time.time(), 'tree_id': _tree_id_cache}),
-                    encoding='utf-8',
-                )
+                # audit#1143 #1239: plain write_text — a crash mid-write
+                # could corrupt this file, forcing every subsequent process
+                # to silently re-hit the live Taxonomy API (the exact
+                # quota-exhaustion mode this cache exists to prevent).
+                # tgw.catalog.atomic_write_json (tmp+rename, mode-preserving)
+                # fixes that.
+                _atomic_write_cache_json(
+                    cache_path, {'_cached_at': time.time(), 'tree_id': _tree_id_cache},
+                    pretty=False)
             except OSError as exc:
                 log.warning('could not write tree-id cache: %s', exc)
     except Exception as exc:
@@ -196,10 +202,12 @@ def _load_or_fetch_tree(cfg: Dict[str, Any], tree_id: str,
         tree_data = ebay_get(cfg, f'/commerce/taxonomy/v1/category_tree/{tree_id}')
         if cache_path:
             try:
-                cache_path.write_text(
-                    json.dumps({'_cached_at': time.time(), 'tree': tree_data}),
-                    encoding='utf-8',
-                )
+                # audit#1143 #1239: plain write_text — see get_category_tree_id's
+                # comment above; same non-atomic-write corruption risk, just
+                # for the full tree instead of the tree ID.
+                _atomic_write_cache_json(
+                    cache_path, {'_cached_at': time.time(), 'tree': tree_data},
+                    pretty=False)
             except OSError as exc:
                 log.warning('could not write %s cache: %s', cache_label, exc)
     return tree_data
@@ -212,10 +220,9 @@ def _fetch_tree_live(cfg: Dict[str, Any], tree_id: str,
     the disk cache unconditionally. Returns the raw tree_data dict."""
     tree_data = ebay_get(cfg, f'/commerce/taxonomy/v1/category_tree/{tree_id}')
     if cache_path:
-        cache_path.write_text(
-            json.dumps({'_cached_at': time.time(), 'tree': tree_data}),
-            encoding='utf-8',
-        )
+        _atomic_write_cache_json(
+            cache_path, {'_cached_at': time.time(), 'tree': tree_data},
+            pretty=False)
     return tree_data
 
 

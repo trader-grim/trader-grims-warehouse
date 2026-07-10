@@ -37,8 +37,10 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from tgw.apis.ebay._cache_io import locked_merge_cache_json
 from tgw.apis.ebay.client import ebay_get, ebay_get_bytes
 from tgw.apis.ebay.taxonomy import get_category_tree_id
+from tgw.catalog import atomic_write_json as _atomic_write_cache_json
 
 log = logging.getLogger(__name__)
 
@@ -150,11 +152,17 @@ def bulk_refresh_aspects(cfg: Dict[str, Any]) -> Dict[str, Any]:
         if not cid:
             continue
         shard = bulk / f'{cid}.json'
-        shard.write_text(json.dumps({
+        # code-review follow-up (#1239): plain write_text here left this
+        # loop's ~15,000 shard writes as the one unconverted site — a
+        # crash mid-loop could corrupt a shard, and _load_bulk_shard()'s
+        # silent catch-and-fall-through would then burn a live per-category
+        # Taxonomy call (5,000/day pool) instead of using the bulk shard
+        # (100/day pool), defeating the whole point of this bulk download.
+        _atomic_write_cache_json(shard, {
             '_cached_at': fetched_at,
             'name': entry.get('category', {}).get('categoryName', ''),
             'aspects': _structure_aspects(entry.get('aspects', [])),
-        }), encoding='utf-8')
+        }, pretty=False)
         written += 1
     log.info('bulk aspects refresh: %d category shards written to %s', written, bulk)
     return {'categories': written, 'raw_bytes': len(raw), 'shard_dir': str(bulk)}
@@ -188,9 +196,20 @@ def get_aspects(cfg: Dict[str, Any], category_id: str) -> List[Dict[str, Any]]:
     results = _fetch_aspects_live(cfg, category_id)
     _aspects_mem_cache[category_id] = results
     if cache_path:
-        disk_cache[category_id] = {'_cached_at': time.time(), 'aspects': results}
+        # audit#1143 #1239: previously read-modify-wrote the whole disk_cache
+        # dict with a plain write_text — unlocked, so two concurrent
+        # cache-miss writers could race and silently drop each other's new
+        # entries, and a crash mid-write could corrupt the entire cache
+        # (every category, not just this one). locked_merge_cache_json holds
+        # a flock across a FRESH read+merge+atomic-write — the live fetch
+        # above already happened outside the lock, so this doesn't
+        # serialize concurrent live API calls, only the disk merge itself.
+        entry = {'_cached_at': time.time(), 'aspects': results}
         try:
-            cache_path.write_text(json.dumps(disk_cache), encoding='utf-8')
+            locked_merge_cache_json(
+                cache_path,
+                lambda current, _cid=category_id, _entry=entry: {**current, _cid: _entry},
+            )
         except OSError as exc:
             log.warning('could not write aspects cache: %s', exc)
     return results

@@ -40,3 +40,22 @@ def test_csv_preserves_existing_mode(tmp_path):
     os.chmod(path, 0o640)
     catalog.atomic_write_csv(path, [{"sku": "tgw2"}], fieldnames=["sku"])
     assert (path.stat().st_mode & 0o777) == 0o640
+
+
+def test_json_write_failure_does_not_leak_tmp_file(tmp_path, monkeypatch):
+    # Code-review follow-up (audit#1143 #1239): NamedTemporaryFile(delete=False)
+    # never auto-cleans on an error mid-write (e.g. a non-serializable value,
+    # or ENOSPC) -- without cleanup, a failed write leaks a tmp file into
+    # path.parent forever.
+    path = tmp_path / "out.json"
+
+    class Unserializable:
+        pass
+
+    import pytest
+
+    with pytest.raises(TypeError):
+        catalog.atomic_write_json(path, {"bad": Unserializable()})
+
+    assert not path.exists()
+    assert list(tmp_path.iterdir()) == []

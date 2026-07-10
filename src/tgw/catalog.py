@@ -47,15 +47,25 @@ def _existing_mode_or_default(path: Path, default: int = 0o660) -> int:
 def atomic_write_json(path: Path, data: Any, pretty: bool = True) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     want_mode = _existing_mode_or_default(path)
-    with tempfile.NamedTemporaryFile(
-        'w', encoding='utf-8', delete=False, dir=path.parent
-    ) as tmp:
-        json.dump(data, tmp, ensure_ascii=False,
-                  indent=2 if pretty else None, sort_keys=False)
-        tmp.write('\n')
-        tmp_path = Path(tmp.name)
-    os.chmod(tmp_path, want_mode)
-    os.replace(tmp_path, path)
+    tmp_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            'w', encoding='utf-8', delete=False, dir=path.parent
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+            json.dump(data, tmp, ensure_ascii=False,
+                      indent=2 if pretty else None, sort_keys=False)
+            tmp.write('\n')
+        os.chmod(tmp_path, want_mode)
+        os.replace(tmp_path, path)
+    except BaseException:
+        # code-review follow-up (#1239): NamedTemporaryFile(delete=False)
+        # never auto-cleans on an error mid-write (e.g. a non-serializable
+        # value, or ENOSPC) — without this, a failed write leaks a tmp file
+        # into path.parent forever.
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def atomic_write_csv(path: Path, rows: List[Dict[str, Any]],
