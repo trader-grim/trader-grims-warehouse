@@ -33,6 +33,7 @@ from tgw.apis.llm import CLOUD_PROVIDERS, call_model, get_task_model
 from tgw.apis.ollama import extract_json
 from tgw.assets import ordered_photos as _asset_ordered_photos
 from tgw.config import DEFAULT_CONFIG, load_config
+from tgw.config import sku_json as _cfg_sku_json
 from tgw.ebay.description import build_listing_description
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
@@ -284,7 +285,7 @@ class EbayDraftWorker(QueueWorker):
         if not sku:
             raise HardFailure('ebay_draft job missing sku in payload')
 
-        json_path = self.config['itemdata_root'] / sku / f'{sku}.json'
+        json_path = _cfg_sku_json(self.config, sku)
         if not json_path.exists():
             raise HardFailure(f'item JSON not found for {sku}')
 

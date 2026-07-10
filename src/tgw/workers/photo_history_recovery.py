@@ -6,8 +6,11 @@ import json
 import logging
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Iterable
+
+from tgw.queue import state_machine
 
 
 def load_config(path: Path) -> dict:
@@ -174,6 +177,26 @@ def main() -> int:
     would_copy = sum(1 for r in rows if r['action'] == 'would_copy')
     if not args.write and would_copy:
         logging.info('Dry-run: run with --write to copy %d photos.', would_copy)
+
+    copied = sum(1 for r in rows if r['action'] == 'copied')
+    if copied:
+        # audit#1143 #1171, finding 12: photos were copied into live item
+        # folders with no catalog-refresh trigger — the catalog stayed
+        # stale (photo count/thumbnail) until an unrelated write happened
+        # to fire the coalesced rebuild. Same dedupe key/coalescing every
+        # other writer uses (A7).
+        try:
+            state_machine.init(cfg.get('postgres_dsn', 'dbname=state_machine user=tgw'))
+            state_machine.enqueue_job(
+                queue_name='catalog_rebuild',
+                payload={'reason': 'photo_history_recovery'},
+                dedupe_key='catalog_rebuild:pending',
+                not_before=time.time() + 30,
+                max_attempts=3,
+            )
+            logging.info('photo_history_recovery: enqueued catalog_rebuild after %d copies', copied)
+        except Exception as exc:
+            logging.warning('photo_history_recovery: could not enqueue catalog_rebuild: %s', exc)
     return 0
 
 

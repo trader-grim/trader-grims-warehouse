@@ -30,6 +30,7 @@ from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.draft_sync import baseline_fields
 from tgw.ebay.pricing import to_99
+from tgw.ebay.sync import format_ebay_error as _format_ebay_error
 from tgw.ebay.sync import publish_offer
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
@@ -37,18 +38,6 @@ from tgw.queue.worker_base import HardFailure, QueueWorker
 log = logging.getLogger(__name__)
 
 QUEUE_NAME = 'ebay_publish'
-
-
-def _format_ebay_error(body: str, status: int) -> str:
-    """Extract human-readable messages from eBay error JSON."""
-    try:
-        errs = json.loads(body).get('errors', [])
-        msgs = [e.get('longMessage') or e.get('message', '') for e in errs if e.get('longMessage') or e.get('message')]
-        if msgs:
-            return '; '.join(msgs)
-    except Exception:
-        pass
-    return f'HTTP {status}: {body[:300]}'
 
 
 def _build_reprice_schedule(stages: List[Dict[str, Any]],

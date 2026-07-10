@@ -84,7 +84,16 @@ Companion test files added by this review:
   `ebay_publish`, reducer, sync) write whole item docs via `atomic_write_json` and do
   not clear it — intentional: they touch `ebay_*` mirror blocks, not the
   operator-verified physical fields the hall-pass certifies. The invariant is therefore
-  scoped to operator-facing writes.
+  scoped to operator-facing writes. `ebay_sku_migrate.py`'s three post-rename
+  `atomic_write_json(new_path, item, ...)` sites (audit#1143 #1171, finding 10) belong
+  to the same accepted class: they load the whole item doc, mutate `ebay_listing`/
+  `ebay_offer` fields in memory, and write it back after `os.rename()` — same
+  read-modify-write-whole-doc shape as the pipeline workers above, same lost-update
+  race against a concurrent operator PATCH. Previously undocumented ("not on the
+  tracked-gap list" per the audit); now tracked here rather than fixed, since a real
+  fix (optimistic-concurrency check or a narrower field-patch primitive that survives
+  a just-completed SKU rename) is a bigger structural change than this batched
+  cohesion pass scopes for.
 - **How to test:** unit tests on `_write_field` + `verifiedupdate`
   (`tests/test_invariants_items_fence.py`, pass).
 

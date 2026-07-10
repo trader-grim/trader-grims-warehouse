@@ -29,6 +29,7 @@ from tgw.apis.llm import CLOUD_PROVIDERS, call_model, get_task_model
 from tgw.apis.ollama import extract_json, is_available
 from tgw.assets import ordered_photos as _asset_ordered_photos
 from tgw.config import DEFAULT_CONFIG, load_config
+from tgw.config import sku_dir as _cfg_sku_dir
 from tgw.items import append_history_event
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
@@ -146,7 +147,7 @@ class AIIdentifyWorker(QueueWorker):
         if not sku:
             raise HardFailure("ai_identify job missing sku in payload")
 
-        sku_dir = self.config["itemdata_root"] / sku
+        sku_dir = _cfg_sku_dir(self.config, sku)
         json_path = sku_dir / f"{sku}.json"
 
         if not json_path.exists():

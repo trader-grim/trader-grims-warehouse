@@ -363,6 +363,44 @@ packets tracked under R2, not here.
 exist in `etc/systemd/`. Operator todos #61/#146/#147; restore script #1052; DR
 drills #1050/#1051. Plan: `PLAN-backup-dr.md`.
 
+**2026-07-10 ALARM + fix (todo #1258):** `tgw health` reported db dump stale
+124h (limit 26h) and rclone cloud-sync had never completed. Root cause:
+`tgw-db-backup`'s script was moved 2026-07-04 to also write onto a dedicated
+physical drive (`/dev/sdc1`, LABEL=`tgw-db-backup`, btrfs) mounted at
+`/opt/TGW/mnt/tgw-db-backup` — but that mount was done by hand, never
+declared in the NixOS flake, and the 2026-07-06 reboot silently dropped it.
+Every nightly dump since failed with a bare `mkdir: Permission denied`
+against the empty, root-owned mountpoint; `tgw-cloud-sync` failed
+independently and separately (unrelated to the mount — its first-ever full
+run had just never completed).
+
+Immediate fix (done live, with Dave's sign-off): remounted `/dev/sdc1`,
+ran `tgw-db-backup.service` to catch up the dump (confirmed via `tgw
+health` — staleness cleared), kicked off `tgw-cloud-sync.service` (first
+full run, long-running, left running in background).
+
+**Durable fix — drafted, validated, NOT yet applied to the live host**
+(Dave: "add that to the plan" rather than deploy immediately). Changes
+staged in `~/tgw-flake` (uncommitted):
+- `nix/hosts/tgw-prod.nix` — new `fileSystems` entries (by-label, `nofail`)
+  for all three `sdc` partitions: `tgw-db-backup`, `tgw-itemdata-snap`,
+  `tgw-itemarchive` — the latter two were equally undeclared and at the
+  same silent-unmount risk, just not yet symptomatic.
+- `nix/tgw/backup.nix` — `tgw-db-backup.service` gets
+  `unitConfig.RequiresMountsFor = "/opt/TGW/mnt/tgw-db-backup"` (same
+  pattern `tgw-snapshot` already uses for its own mount) so a missing mount
+  is a loud, correctly-attributed service failure instead of a confusing
+  `mkdir` error.
+- Validated: `nix flake check` clean for all 3 hosts; `nixos-rebuild build
+  --flake .#tgw-prod` succeeds; generated `/etc/fstab` inspected and
+  correct (all three `LABEL=...  nofail,x-systemd.device-timeout=5s`
+  entries present).
+- **Next step (needs Dave's go, or his own run):** `sudo nixos-rebuild
+  switch --flake .#tgw-prod` from `~/tgw-flake`, then commit the flake
+  changes. Until switched, the current mount is only in the live running
+  system state (from the manual `mount` above) — it will NOT survive
+  another reboot.
+
 ## Full-codebase cohesion+correctness audit (2pm agenda, todo #1143)
 **Dave: "I want to right the ship... check the whole thing and make sure
 each part and the whole are cohesive."** Prompted by discovering that a
@@ -400,9 +438,46 @@ regularly"): review each day's diff before it accumulates — plain
 periodic cloud pass while diffs are still small enough to clear its
 size guard.
 
-Status (2026-07-05): `workers/` subsystem slice DONE — 25 files, 5 groups, 60 agents, ~2.3M tokens. 17 findings confirmed (2-of-3 adversarial verify), 1 refuted/dropped. Full report at `docs/TGW-Plan-Vault/dev-workflow/research/RESEARCH-1143-workers-audit.md`. 9 correctness bugs spun off as #1162-#1170; 8 lower-severity findings batched into #1171. Remaining subsystems: apis/ebay/, http_server.py, queue/state-machine, scripts/, nix flake. No action in progress — next session can pick next subsystem or work spun-off correctness-bug todos.
+**Status (2026-07-10, refactored — the "Remaining subsystems" note below was
+stale): the discovery phase is COMPLETE.** All 6 planned subsystem audits
+have research docs — `workers/` (2026-07-05), `apis/ebay/`, `http_server.py`,
+`queue/state-machine`, `scripts/`, and the nix flake ("FINAL SLICE",
+confirmed in `RESEARCH-1143-nix-flake-audit.md`). What's left is executing
+the findings each audit spun off, not more discovery.
 
-Scripts subsystem audit INPROGRESS (todo #1203, part of #1143). See AUDIT-scripts-subsystem-1143.md.
+Findings-execution status by subsystem (2026-07-10 check):
+- `workers/` — DONE. #1162-#1170 (9 correctness bugs) fixed earlier; #1171
+  (8 batched cohesion findings) fixed 2026-07-10 (path-construction cleanup,
+  itemdata_scrub.py root/sku validation hardening, photo_history_recovery.py
+  catalog-refresh trigger, shared `_format_ebay_error`, ebay_sku_migrate.py
+  write-pattern documented in invariants.md A5). One follow-up deferred as
+  todo #1261 (itemdata_scrub.py's ad-hoc queue — bigger execution-model
+  change, out of scope for a cohesion batch).
+- `apis/ebay/` — DONE. #1182 fixed 2026-07-10 (conditions.py policy-cache
+  memoization, trading.py 429-retry shared across all 3 Trading API
+  generators).
+- `http_server.py` — DONE. #1198 fixed 2026-07-10 (shared catalog_rebuild
+  enqueue helper, sku traversal guards on 2 routes, store-category dropdown
+  dead-code + fragile-fallback cleanup, deduped price formatter).
+- `queue/state-machine` — findings executed in earlier sessions (see commit
+  history around #1202, #1206 fixes); no open audit#1143 todos remain for
+  this subsystem.
+- `scripts/` — DONE. #1213 fixed 2026-07-10 (photo_repair_iss013.py
+  ITEMDATA_ROOT now config-derived, matching sibling
+  photosync_canary_probe.py). Todo #1203 is `done` — this section used to
+  say "INPROGRESS," which was stale.
+- **nix flake — 3 SECURITY findings remain open, not yet fixed:**
+  - #1219 (NFS Queue export writable to the whole 192.168.60.0/24 subnet,
+    should be host-locked like the ro exports below it) — **BLOCKED** on
+    #1228 (no static IP/DHCP reservation exists yet for the intake
+    camera/phone device; checked live ARP table 2026-07-10, several
+    unidentified LAN hosts, none confirmable as the intake device from
+    tgw-prod alone — needs Dave to identify the device + reserve its lease
+    on the router).
+  - #1217/#1218 (Syncthing GUI/second-instance bind exposure) — explicitly
+    set to p95 by Dave 2026-07-07, deferred until dev settles (see
+    `feedback-deprioritize-syncthing-auth` memory) — intentionally not
+    being worked, not an oversight.
 
 - DONE #1235 atomic-write sweep: 6 sites fixed, 8 new tests, 1861 passing. Deviation: itemdata_scrub.py write stays outside fence (PP-FENCE-001 gap documented).
 

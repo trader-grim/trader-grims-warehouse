@@ -22,6 +22,7 @@ are fetched once per process lifetime and cached.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -30,6 +31,23 @@ import requests
 from tgw.apis.ebay.client import ebay_get, ebay_post, ebay_put
 
 log = logging.getLogger(__name__)
+
+
+def format_ebay_error(body: str, status: int) -> str:
+    """Extract human-readable messages from eBay error JSON.
+
+    Shared by ebay_publish.py and ebay_stage.py (audit#1143 #1171, finding
+    17 — was byte-for-byte duplicated in both, a future fix to one would
+    have silently missed the other).
+    """
+    try:
+        errs = json.loads(body).get('errors', [])
+        msgs = [e.get('longMessage') or e.get('message', '') for e in errs if e.get('longMessage') or e.get('message')]
+        if msgs:
+            return '; '.join(msgs)
+    except Exception:
+        pass
+    return f'HTTP {status}: {body[:300]}'
 
 
 class AmbiguousOfferError(RuntimeError):

@@ -96,3 +96,29 @@ class TestWrongPrimaryCleanup:
         r = pr.repair_item(sku, execute=True)
 
         assert r['status'] == 'RENAMED'
+
+
+class TestItemdataRootFromConfig:
+    """audit#1143 #1213: ITEMDATA_ROOT used to be hardcoded to
+    '/opt/TGW/data/ItemData' instead of reading tgw.config's itemdata_root,
+    unlike sibling photosync_canary_probe.py -- silently stale/wrong if
+    itemdata_root is ever repointed. Now derived from load_config() at
+    import time; reloading the module with a different config value must
+    change ITEMDATA_ROOT to match."""
+
+    def test_itemdata_root_follows_config_value(self, monkeypatch, tmp_path):
+        import importlib
+
+        import tgw.config as config_mod
+
+        custom_root = tmp_path / 'custom-itemdata-root'
+        real_load_config = config_mod.load_config
+        monkeypatch.setattr(
+            config_mod, 'load_config',
+            lambda path: {**real_load_config(path), 'itemdata_root': custom_root},
+        )
+        try:
+            importlib.reload(pr)
+            assert pr.ITEMDATA_ROOT == custom_root
+        finally:
+            importlib.reload(pr)  # restore real config-derived value for later tests

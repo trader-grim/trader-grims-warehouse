@@ -25,6 +25,8 @@ import tgw.logging as tgw_logging
 from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.assets import ordered_photos
 from tgw.config import DEFAULT_CONFIG, load_config
+from tgw.config import sku_dir as _cfg_sku_dir
+from tgw.config import sku_json as _cfg_sku_json
 from tgw.ebay.upload import upload_photo
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
@@ -73,7 +75,7 @@ class EbayUploadWorker(QueueWorker):
         if not sku:
             raise HardFailure('ebay_upload job missing sku in payload')
 
-        json_path = self.config['itemdata_root'] / sku / f'{sku}.json'
+        json_path = _cfg_sku_json(self.config, sku)
         if not json_path.exists():
             raise HardFailure(f'item JSON not found for {sku}')
 
@@ -83,7 +85,7 @@ class EbayUploadWorker(QueueWorker):
         existing: Set[str] = {e['local'] for e in item.get('ebay_photos', [])}
 
         # Collect photos in photo_order display order
-        sku_dir: Path = self.config['itemdata_root'] / sku
+        sku_dir: Path = _cfg_sku_dir(self.config, sku)
         all_photos: List[Path] = ordered_photos(item, sku_dir)
         photos: List[Path] = all_photos
 

@@ -88,29 +88,44 @@ def derive_item_path(itemdata_root: Path, sku: str) -> Path:
     return Path(itemdata_root) / sku / f"{sku}.json"
 
 
+def _is_safe_sku(sku: str) -> bool:
+    """Reject any sku that could escape default_root as a path component
+    (audit#1143 #1171, finding 11: SKU was taken from job content with no
+    validation at all)."""
+    return bool(sku) and '..' not in sku and '/' not in sku and '\\' not in sku
+
+
 def process_queue_job(job_file: Path, rules: ScrubRules, default_root: Path,
                        archive_root: Path | None = None) -> bool:
     sku = job_file.name
     if sku.endswith('.json'):
         sku = sku[:-5]
 
+    # root_dir is always the configured default_root — a queue job must
+    # never be able to redirect writes elsewhere (audit#1143 #1171, finding
+    # 11: job content used to be able to set an arbitrary 'root'/
+    # 'itemdata_root', bypassing the fence's single canonical ItemData root
+    # entirely).
+    root_dir = default_root
+
     try:
         # Protect against completely empty or zero-byte queue files
         if job_file.stat().st_size == 0:
             logger.warning(f"Queue job file {job_file.name} is empty (0 bytes). Using filename as SKU fallback.")
-            root_dir = default_root
         else:
             job_content = job_file.read_text(encoding='utf-8').strip()
-            root_dir = default_root
             if job_content:
                 try:
                     msg = json.loads(job_content)
                     if isinstance(msg, dict):
                         sku = msg.get("sku") or msg.get("SKU") or sku
-                        root_dir = Path(msg.get("root", msg.get("itemdata_root", default_root)))
                 except json.JSONDecodeError:
                     if len(job_content) < 64 and '\n' not in job_content:
                         sku = job_content
+
+        if not _is_safe_sku(sku):
+            logger.error(f"Rejecting unsafe SKU {sku!r} from job file {job_file.name}")
+            return False
 
         file_path = derive_item_path(root_dir, sku)
 

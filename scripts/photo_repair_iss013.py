@@ -51,11 +51,18 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+
+from tgw.config import DEFAULT_CONFIG, load_config  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-ITEMDATA_ROOT = Path('/opt/TGW/data/ItemData')
+# audit#1143 #1213: was hardcoded to '/opt/TGW/data/ItemData' instead of
+# reading itemdata_root from tgw.config, unlike sibling photosync_canary_probe.py
+# — silently stale/wrong if itemdata_root is ever repointed (e.g. LVM expansion).
+ITEMDATA_ROOT = Path(load_config(DEFAULT_CONFIG)['itemdata_root'])
 HISTORY_ROOT  = ITEMDATA_ROOT.parent / 'history' / 'ItemData'
 # Local snapshots are pruned immediately after send (LOCAL_KEEP=2).
 # Check the backup target, which retains all received snapshots.
