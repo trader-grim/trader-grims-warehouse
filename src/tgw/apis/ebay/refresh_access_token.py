@@ -21,17 +21,28 @@ def _secrets_root() -> Path:
     raw = _load_raw_config()
     return Path(raw.get('secrets_root', '/opt/TGW/secrets'))
 
-TOKEN_PATH = _secrets_root() / 'ebay-token.json'
-LOG_PATH   = Path(_load_raw_config().get('log_root', '/opt/TGW/runtime/logs')) / 'ebay_token_manager.log'
-LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+try:
+    # CI/portability fix: this all used to run unconditionally at import
+    # time, so merely importing this module (e.g. this session's own new
+    # tests/test_refresh_access_token.py additions, or any CI runner
+    # without /opt/TGW) crashed with FileNotFoundError before a single test
+    # could run — every CI run on main/PRs since 2026-06-15 failed
+    # collection on this exact line. Fall back to a harmless stream-only-
+    # logging default when the real config isn't present; any function that
+    # actually reads/writes TOKEN_PATH still surfaces a clear error at call
+    # time if truly unconfigured, rather than crashing on mere import.
+    TOKEN_PATH = _secrets_root() / 'ebay-token.json'
+    LOG_PATH   = Path(_load_raw_config().get('log_root', '/opt/TGW/runtime/logs')) / 'ebay_token_manager.log'
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _log_handlers = [logging.FileHandler(LOG_PATH), logging.StreamHandler()]
+except OSError:
+    TOKEN_PATH = TGW_ROOT / 'secrets' / 'ebay-token.json'
+    _log_handlers = [logging.StreamHandler()]
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_PATH),
-        logging.StreamHandler()
-    ]
+    handlers=_log_handlers,
 )
 logger = logging.getLogger(__name__)
 

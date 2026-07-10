@@ -37,14 +37,12 @@ from tgw.apis.fence import ebay_write as fence_ebay_write, patch_item as fence_p
 
 LOG_PATH = Path('/opt/TGW/var/log/ebay-normalize.log')
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s %(levelname)s %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(LOG_PATH),
-    ],
-)
+# CI/portability fix: logging.FileHandler(LOG_PATH) used to run at import
+# time, so merely importing this module (e.g. tests/test_ebay_normalize.py's
+# offline unit tests, or any CI runner without /opt/TGW) crashed with
+# FileNotFoundError before a single test could run. Deferred into main() —
+# this module has no other import-time side effects, and every CI run on
+# main/PRs since 2026-06-15 failed collection on this exact line.
 log = logging.getLogger('ebay_normalize')
 
 EBAY_ITEM_URL = 'https://www.ebay.com/itm/{listing_id}'
@@ -122,6 +120,15 @@ def _normalize_one(
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s %(levelname)s %(message)s',
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler(LOG_PATH),
+        ],
+    )
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--sku', help='normalize a single SKU')

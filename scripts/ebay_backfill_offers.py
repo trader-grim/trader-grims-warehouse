@@ -34,14 +34,11 @@ LOG_PATH  = Path('/opt/TGW/var/log/ebay-backfill-offers.log')
 CKPT_PATH = Path('/opt/TGW/var/run/ebay-backfill-offers-ckpt.json')
 ITEMDATA  = Path('/opt/TGW/data/ItemData')
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s %(levelname)s %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(LOG_PATH),
-    ],
-)
+# CI/portability fix: logging.FileHandler(LOG_PATH) used to run at import
+# time, so merely importing this module (e.g. tests/test_ebay_backfill_offers.py's
+# offline unit tests, or any CI runner without /opt/TGW) crashed with
+# FileNotFoundError before a single test could run. Deferred into main() —
+# every CI run on main/PRs since 2026-06-15 failed collection on this exact line.
 log = logging.getLogger('backfill')
 
 
@@ -61,6 +58,15 @@ def has_offer_data(item: dict) -> bool:
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s %(levelname)s %(message)s',
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler(LOG_PATH),
+        ],
+    )
+
     parser = argparse.ArgumentParser()
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--limit', type=int, default=0)

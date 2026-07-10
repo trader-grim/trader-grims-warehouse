@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-07-10 14:04 UTC — 207 open, 129 done in the last 7 days._
+_Rendered 2026-07-10 14:12 UTC — 208 open, 130 done in the last 7 days._
 
 ## admin (23 open)
 
@@ -41,7 +41,7 @@ _Rendered 2026-07-10 14:04 UTC — 207 open, 129 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (40 open)
+## claude (41 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
@@ -82,6 +82,7 @@ _Rendered 2026-07-10 14:04 UTC — 207 open, 129 done in the last 7 days._
 | 1076 | 50 |  | Draft ticket text ready at docs/TGW-Plan-Vault/inbox/DRAFT-1076-eps-support-ticket.md -- needs Dave's review/edit + submission through eBay Developer Support (external comms, can't submit on his behalf) |  |  |
 | 1121 | 55 |  | PAUSED pending Dave 2pm decision: ebay_repush is NOT a relic (workers/ebay_sync.py:548 enqueues it live on photo-count drop) but has no systemd worker unit. 2 orphaned jobs found (tgw202606021133367, tgw201809090837211) — cancellation blocked by auto-mode guard as a shared-queue mutation needing explicit authorization. Added state_machine.cancel_queued() utility. Decision needed: install worker unit (infra, Dave-gated like #1126) vs retire the enqueue path (photos_short_on_ebay/#1127 now covers the same drift). See PP-PHOTOSYNC-001.md P6. | [[TGW-Master-Plan#PP-PHOTOSYNC-001 — upload integrity + operator lane hardening + fleet photo repair\|PP-PHOTOSYNC-001]] |  |
 | 1138 | 60 |  | Minor: tgw revise --set help text claims dotted-path support (draft_listing.price) but cmd_revise_apply only accepts bare field names -- either fix the help text or normalize dotted->bare in cmd_revise. Found during R1.1 live-fire |  |  |
+| 1259 | 60 |  | tgw health reports nats check failing: No module named 'nats' -- PP-AIOPS-001's audit-mutation stream (nats_client.py, fire-and-forget by design) has never had its Python dependency installed, so item mutations are silently not being published/audited. Low urgency (fire-and-forget, not blocking), but worth deciding: install nats-py, or drop the check if the audit stream isn't being pursued. |  |  |
 | 1111 | 70 |  | PP-BULKLIST-001 design pass: bulk edit/approve/list surface — GATED: do not start until R1.6 one-item end-to-end passes operator verification. First workload: the ~550 pending re-drafts. Principle: bulk-approve the 99%, exception-route the rest. | [[TGW-Master-Plan#PP-BULKLIST-001 — bulk editing + listing surface (stub, Dave 2026-07-02)\|PP-BULKLIST-001]] |  |
 | 1217 | 95 |  | audit#1143 SECURITY: nix/os/base.nix:78 Syncthing GUI bound 0.0.0.0:8384, firewall opens 8384/tcp network-wide, no guiAddress auth/HTTPS configured -- any LAN/Tailscale device gets full unauthenticated Syncthing GUI/API, can repoint the tgw-flake + ItemData sync folders or exfiltrate data |  |  |
 | 1218 | 95 |  | audit#1143 SECURITY: nix/tgw/platform.nix:78 second Syncthing instance (syncthing-tgw, owns plan-vault docs sync) also bound 0.0.0.0:8385 with firewall open and zero GUI auth -- unauthenticated read/write access to business plan-vault content (handoff notes, todo history) over LAN/Tailnet |  |  |
@@ -238,10 +239,11 @@ _Rendered 2026-07-10 14:04 UTC — 207 open, 129 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — sold-event webhook (Tier 4)\|PP-SOLD-001]] |  |
 
-## Done this week (129)  — showing 15 most recent
+## Done this week (130)  — showing 15 most recent
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 1260 | claude | 2026-07-10 | Fixed: CI (.github/workflows/ci.yml) has failed on every run since 2026-06-15 (last success 2026-06-13) -- 4 modules (scripts/ebay_backfill_offers.py, scripts/ebay_normalize.py, apis/ebay/get_access_token.py, apis/ebay/refresh_access_token.py) opened /opt/TGW/config/tgw-api-config.json and log FileHandlers at module IMPORT time, which doesn't exist on the GitHub-hosted runner. Deferred logging.basicConfig into main() for the two scripts; wrapped the two library modules' eager TOKEN_PATH/LOG_PATH init in try/except OSError with a portable fallback. Verified by importing all 4 with TGW_ROOT pointed at a nonexistent path -- all import cleanly now. |
 | 1257 | claude | 2026-07-10 | audit#1143 #1167 follow-up: 4 items still have stale ai_reidentify=true persisted alongside ai_identified=true (tgw202605051936445, tgw202605052242107, tgw202605060201087, tgw202606021107459) -- pre-date the #1167 fix (fence_fields never included ai_reidentify, so item.pop() never persisted); each would re-trigger a billed vision-AI call on next ai_identify run. Also noted: 3 of the 4 have identification_history recording 3 ai_identify rounds but vision_results only has 1 entry -- inconsistency worth checking separately. Needs a one-off cleanup (clear the stale flag, no re-identify needed) rather than manual data mutation without Dave's sign-off. |
 | 1246 | claude | 2026-07-10 | audit#1143 code-review deferred findings (from #1245, process at Dave's convenience): (1) multi_intake.py collision notify() could spam external channels on batch re-drop, no dedup; (2) state_machine.mark_failed() doesn't check cur.rowcount, lease-race could report phantom transition; (3) ebay_sku_migrate.py duplicates interval_h computation between handle() and _on_terminal_failure(); (4) multi_intake collision notify() text doesn't tell operator the SKU needs an ebay_stage operator-forced duplicate-check pass |
 | 1206 | claude | 2026-07-10 | audit#1143: requeue_ebay_draft_402_dead_letters.py:78 dedupe key uses fresh timestamp every invocation with no run-once guard -- re-running --apply requeues the same dead-letter rows again, burning a second full round of AI-drafting cost with no flag per the bulk-AI-cost standing rule |
@@ -256,5 +258,4 @@ _Rendered 2026-07-10 14:04 UTC — 207 open, 129 done in the last 7 days._
 | 1211 | claude | 2026-07-10 | audit#1143: photo_repair_iss013.py:292 unlinks wrongly-created <SKU>.jpg based only on byte-size match with no content-hash check and no archive-before-delete -- can permanently destroy a non-duplicate file that happens to share byte count (violates E5) |
 | 1210 | claude | 2026-07-10 | audit#1143: photosync_canary_probe.py:96 price field stringified in live snapshot but left numeric in intent snapshot -- _diff always reports spurious price mismatch, canary FAILs on every priced item even when price matches, trains operators to ignore its alerts |
 | 1238 | claude | 2026-07-10 | audit#1143 MERGED (#1175+#1176): get_access_token.py has two separate bugs, one session/context -- :119 imports nonexistent module tgw_ebay_token_manager_refresh_access_token_v1 (auto-refresh fallback always throws, silently forces manual browser+paste OAuth even when a valid refresh_token exists); load_config() never applies the sandbox_ credential prefix that refresh_access_token.py's get_ebay_config() does (sandbox runs silently auth with production app_id/cert_id -- real risk of sandbox test traffic hitting prod eBay creds). |
-| 1255 | claude | 2026-07-10 | CORRECTED 2026-07-09 (see #1254): eBay Motors is NOT a branch of the EBAY_US category tree -- it's a genuinely separate tree, ID 100 (EBAY_US is tree ID 0). Confirmed live: get_default_category_tree_id(marketplace_id=EBAY_MOTORS_US) -> tree 100; real Motors category IDs 404 against tree 0 and resolve correctly against tree 100. tgw.apis.ebay.taxonomy only caches tree 0 -- proactive draft-time detection needs its own tree-100 cache (mirroring _ensure_tree_index/_flatten_tree/refresh_category_tree_cache for tree 0), not an ancestor-chain check within the existing cache. sync.py now has a per-category live check (_is_motors_category, todo #1254) as a working stopgap -- this todo is about replacing that with a proper local cache once the Motors footprint grows beyond ~200 items. Best Offer enablement question still open, unrelated to the tree-id correction. |
-| … | | | _…and 114 more — run `tgw todo --all` to see everything_ |
+| … | | | _…and 115 more — run `tgw todo --all` to see everything_ |
