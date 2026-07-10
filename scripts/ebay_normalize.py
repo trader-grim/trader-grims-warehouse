@@ -120,13 +120,17 @@ def _normalize_one(
 
 
 def main() -> None:
+    # CI/portability: tests call main() directly with mocked I/O boundaries
+    # but no /opt/TGW filesystem — fall back to stream-only logging rather
+    # than crashing on a log directory that doesn't exist there.
+    try:
+        _handlers = [logging.StreamHandler(sys.stdout), logging.FileHandler(LOG_PATH)]
+    except OSError:
+        _handlers = [logging.StreamHandler(sys.stdout)]
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s %(levelname)s %(message)s',
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler(LOG_PATH),
-        ],
+        handlers=_handlers,
     )
 
     parser = argparse.ArgumentParser(description=__doc__)
