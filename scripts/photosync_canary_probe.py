@@ -93,10 +93,9 @@ def _live_snapshot(item: Dict[str, Any]) -> Dict[str, Any]:
     live = item.get('ebay_live') or {}
     product = (live.get('inventory_item') or {}).get('product') or {}
     listing = item.get('ebay_listing') or {}
-    price = listing.get('live_price')
     return {
         'title': product.get('title'),
-        'price': str(price) if price is not None else None,
+        'price': listing.get('live_price'),
         'photo_count': len(product.get('imageUrls') or []),
         'aspects': product.get('aspects') or {},
     }
@@ -117,11 +116,22 @@ def _normalize_aspects(aspects: Dict[str, Any]) -> Dict[str, str]:
     return out
 
 
+def _normalize_price(value: Any) -> Optional[float]:
+    """Both sides are numeric (draft_listing/ebay_listing store price as
+    float — confirmed against ebay_stage.py/ebay_sync.py), but rounding to
+    cents avoids spurious float-precision mismatches."""
+    if value is None:
+        return None
+    return round(float(value), 2)
+
+
 def _diff(intent: Dict[str, Any], live: Dict[str, Any]) -> List[str]:
     mismatches = []
-    for key in ('title', 'price', 'photo_count'):
+    for key in ('title', 'photo_count'):
         if intent.get(key) != live.get(key):
             mismatches.append(f'{key}: intent={intent.get(key)!r} live={live.get(key)!r}')
+    if _normalize_price(intent.get('price')) != _normalize_price(live.get('price')):
+        mismatches.append(f'price: intent={intent.get("price")!r} live={live.get("price")!r}')
     intent_aspects = _normalize_aspects(intent.get('aspects'))
     live_aspects = _normalize_aspects(live.get('aspects'))
     if intent_aspects != live_aspects:
