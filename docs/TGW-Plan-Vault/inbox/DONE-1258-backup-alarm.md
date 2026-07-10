@@ -20,6 +20,17 @@ its first-ever full run had simply never completed.
 - Started `tgw-cloud-sync.service` (first full run) — long-running, left
   running in background; will confirm on completion.
 
+**UPDATE (same day, after this note was originally written and merged):**
+that first cloud-sync run FAILED after 43 minutes — Google Drive API 403
+`RATE_LIMIT_EXCEEDED` (`defaultPerMinutePerProject`, 840000/min) from
+listing the entire `/opt/TGW` tree for the first time in one burst. This is
+a genuinely new, separate root cause from the mount issue above (which is
+still correctly fixed) — `tgw health`'s "backups" check remains WARN on
+"rclone sync never completed" for this new reason. Tracked as **todo
+#1264**; not retried live (retrying immediately would likely hit the same
+wall since the underlying cause — one giant first-listing burst — is
+unchanged; needs rate-limiting or a chunked first sync, not a bare retry).
+
 ## Durable fix — drafted + validated, NOT yet deployed
 
 Full detail in `TGW-Master-Plan.md` under PP-BACKUP-001. Summary: staged

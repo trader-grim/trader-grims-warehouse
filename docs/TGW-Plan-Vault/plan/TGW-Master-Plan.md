@@ -401,6 +401,16 @@ staged in `~/tgw-flake` (uncommitted):
   system state (from the manual `mount` above) — it will NOT survive
   another reboot.
 
+**Separate, newly-discovered issue (todo #1264):** the `tgw-cloud-sync.service`
+run kicked off above did NOT succeed — it failed after 43 minutes with a
+Google Drive API 403 `RATE_LIMIT_EXCEEDED` (`defaultPerMinutePerProject`,
+840000/min), from listing the entire `/opt/TGW` tree in one burst on its
+first-ever completed run. `tgw health`'s "backups" check is still WARN on
+this. Distinct root cause from the mount issue above (which is genuinely
+fixed) — needs rclone rate-limiting (`--tpslimit`/`--drive-pacer-min-sleep`)
+or a chunked first sync, not a bare retry (the underlying cause is
+unchanged, a retry now would likely hit the same wall).
+
 ## Full-codebase cohesion+correctness audit (2pm agenda, todo #1143)
 **Dave: "I want to right the ship... check the whole thing and make sure
 each part and the whole are cohesive."** Prompted by discovering that a

@@ -7,6 +7,13 @@
 # Verify: rclone --config /opt/TGW/config/rclone.conf size tgw-gdrive:TGW-historypoint-20260514
 #
 # Shares a flock with tgw-itemdata-sync so the two never run concurrently.
+#
+# --tpslimit 2 (todo #1264, Dave 2026-07-10): 3 req/s usually works but
+# occasionally fails against Drive's per-minute quota (or gets caught mid
+# retry, which reads the same as a failure). 2 avoids most rate-limit
+# errors and still leaves headroom for a second rclone process (e.g.
+# dedupe-gdrive.sh) running at the same time. Same value already proven at
+# bin/dedupe-gdrive.sh's TPS_LIMIT.
 set -euo pipefail
 
 RCLONE_CONF=/opt/TGW/config/rclone.conf
@@ -35,6 +42,7 @@ rclone sync /opt/TGW "$REMOTE" \
     --log-level INFO \
     --fast-list \
     --transfers 4 \
-    --checkers 8
+    --checkers 8 \
+    --tpslimit 2
 
 date -Iseconds > "$STAMP_FILE"

@@ -48,6 +48,10 @@ while true; do
         write_status "running" "$STARTED" "null"
         log "cycle $CYCLE started"
 
+        # --tpslimit 2 (todo #1264, Dave 2026-07-10): same known-good value
+        # as bin/tgw-cloud-sync / bin/dedupe-gdrive.sh — avoids Drive
+        # per-minute quota errors while leaving headroom for a second
+        # rclone process running concurrently.
         rclone sync "$LOCAL" "$REMOTE" \
             --config "$RCLONE_CONF" \
             --log-file "$LOG" \
@@ -56,7 +60,8 @@ while true; do
             --transfers 4 \
             --checkers 8 \
             --fast-list \
-            --use-mmap
+            --use-mmap \
+            --tpslimit 2
 
         COMPLETED=$(date -Iseconds)
         write_status "idle" "$STARTED" "\"$COMPLETED\""
