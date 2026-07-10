@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-07-10 18:35 UTC — 203 open, 143 done in the last 7 days._
+_Rendered 2026-07-10 18:47 UTC — 204 open, 143 done in the last 7 days._
 
 ## admin (23 open)
 
@@ -41,7 +41,7 @@ _Rendered 2026-07-10 18:35 UTC — 203 open, 143 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (35 open)
+## claude (36 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
@@ -74,6 +74,7 @@ _Rendered 2026-07-10 18:35 UTC — 203 open, 143 done in the last 7 days._
 | 1141 | 45 |  | Plan item: have Perplexity footnote/cite our master plan + key PP docs with links to our own reference documents and external resources (similar to the numbered-footnote style already used in Perplexity research drops like pricing-research-ui.md) -- grounds plan assertions in verifiable sources, ties into PP-DOCLIB-001's cross-reference goals |  |  |
 | 1232 | 45 |  | PROPOSAL (not started): bring D-Link DIR-868L router into TGW ecosystem via DD-WRT (OpenWrt doesn't support this Broadcom chipset) -- VLAN segmentation, router health in tgw health/digest, DHCP reservation audit, local DNS, WireGuard, config backup. Full research + candidate services in docs/ai-plans/router-dlink-dir868l-ecosystem.md |  |  |
 | 1076 | 50 |  | Draft ticket text ready at docs/TGW-Plan-Vault/inbox/DRAFT-1076-eps-support-ticket.md -- needs Dave's review/edit + submission through eBay Developer Support (external comms, can't submit on his behalf) |  |  |
+| 1271 | 50 |  | sold-order-history-gaps.jsonl is written but never read: wire it into ops_digest.py/health.py (or a catalog-verify rule) the same way quota.record_429 is surfaced, so #1270 gap records are actually queryable per invariant C11, not just an unread log file |  |  |
 | 1121 | 55 |  | PAUSED pending Dave 2pm decision: ebay_repush is NOT a relic (workers/ebay_sync.py:548 enqueues it live on photo-count drop) but has no systemd worker unit. 2 orphaned jobs found (tgw202606021133367, tgw201809090837211) — cancellation blocked by auto-mode guard as a shared-queue mutation needing explicit authorization. Added state_machine.cancel_queued() utility. Decision needed: install worker unit (infra, Dave-gated like #1126) vs retire the enqueue path (photos_short_on_ebay/#1127 now covers the same drift). See PP-PHOTOSYNC-001.md P6. | [[TGW-Master-Plan#PP-PHOTOSYNC-001 — upload integrity + operator lane hardening + fleet photo repair\|PP-PHOTOSYNC-001]] |  |
 | 1261 | 55 |  | PLANNING (deferred 2x, re-examined 2026-07-10): itemdata_scrub.py's ad-hoc file-based queue (queue_dir=Path.cwd(), main()) has no visibility in tgw queue-status and doesn't go through state_machine/QueueWorker. Checked live 2026-07-10: not currently scheduled anywhere (no cron, no systemd timer, no nix flake reference) -- zero current impact. Real fix is a genuine migration (new systemd unit, file-vs-postgres dequeue model change, decide on-demand-tool vs tgw-worker@ unit), not a quick fix -- needs a proper scoping pass in a dedicated session. See master plan audit#1143 workers/ section for full writeup. Do not attempt a partial fix without a real design pass first. | [[TGW-Master-Plan#Full-codebase cohesion+correctness audit (2pm agenda, todo #1143)\|plan]] |  |
 | 1259 | 60 |  | tgw health reports nats check failing: No module named 'nats' -- PP-AIOPS-001's audit-mutation stream (nats_client.py, fire-and-forget by design) has never had its Python dependency installed, so item mutations are silently not being published/audited. Low urgency (fire-and-forget, not blocking), but worth deciding: install nats-py, or drop the check if the audit stream isn't being pursued. |  |  |
