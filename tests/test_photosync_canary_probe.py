@@ -54,6 +54,23 @@ def test_normalize_price_none_stays_none():
     assert _normalize_price(None) is None
 
 
+def test_normalize_price_empty_string_treated_as_unpriced():
+    # ISS-011: real item price fields hold '' for unpriced items.
+    assert _normalize_price('') is None
+
+
+def test_normalize_price_garbage_string_does_not_crash():
+    # Any other unparseable value must not raise — returned as-is so _diff()
+    # still reports a mismatch instead of crashing the whole canary run.
+    assert _normalize_price('TBD') == 'TBD'
+
+
+def test_diff_does_not_crash_on_unpriced_item_with_empty_string_price():
+    intent = {'title': 't', 'price': '', 'photo_count': 2, 'aspects': {}}
+    live = {'title': 't', 'price': None, 'photo_count': 2, 'aspects': {}}
+    assert _diff(intent, live) == []
+
+
 def test_diff_no_longer_flags_matching_price_across_numeric_types():
     # Regression for #1210: intent (draft_listing.price) is a real float;
     # live (ebay_listing.live_price) is also a float — before the fix,

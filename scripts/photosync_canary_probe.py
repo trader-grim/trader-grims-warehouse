@@ -116,13 +116,23 @@ def _normalize_aspects(aspects: Dict[str, Any]) -> Dict[str, str]:
     return out
 
 
-def _normalize_price(value: Any) -> Optional[float]:
-    """Both sides are numeric (draft_listing/ebay_listing store price as
-    float — confirmed against ebay_stage.py/ebay_sync.py), but rounding to
-    cents avoids spurious float-precision mismatches."""
-    if value is None:
+def _normalize_price(value: Any) -> Any:
+    """Both sides are normally numeric (draft_listing/ebay_listing store
+    price as float — confirmed against ebay_stage.py/ebay_sync.py), but
+    rounding to cents avoids spurious float-precision mismatches.
+
+    ISSUES.md ISS-011: price fields are known to hold '' for unpriced items
+    in real data — treat that the same as None (unpriced) rather than
+    crashing the whole probe run on float(''). Any other unparseable value
+    is returned as-is so _diff() still reports a mismatch instead of
+    raising uncaught out of main().
+    """
+    if value is None or value == '':
         return None
-    return round(float(value), 2)
+    try:
+        return round(float(value), 2)
+    except (TypeError, ValueError):
+        return value
 
 
 def _diff(intent: Dict[str, Any], live: Dict[str, Any]) -> List[str]:

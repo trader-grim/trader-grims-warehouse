@@ -35,21 +35,27 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def get_ebay_config() -> Dict[str, Any]:
+def get_ebay_config(is_sandbox: bool | None = None) -> Dict[str, Any]:
+    """is_sandbox=None (default) falls back to the EBAY_ENV env var, preserving
+    token_refresh.py's existing (env-var-only) behavior. Pass is_sandbox
+    explicitly (audit#1143 #1211 follow-up) to select sandbox/production by
+    parameter instead — avoids callers having to mutate process-global
+    EBAY_ENV, which would leak across unrelated calls in the same process."""
     raw = _load_raw_config()
     creds_path = Path(raw.get('secrets_root', '/opt/TGW/secrets')) / 'ebay-credentials.json'
     if not creds_path.exists():
         raise FileNotFoundError(f'eBay credentials not found: {creds_path}')
     creds = json.loads(creds_path.read_text())
-    env = os.getenv('EBAY_ENV', 'production')
-    prefix = 'sandbox_' if env == 'sandbox' else ''
+    if is_sandbox is None:
+        is_sandbox = os.getenv('EBAY_ENV', 'production') == 'sandbox'
+    prefix = 'sandbox_' if is_sandbox else ''
     app_id  = creds.get(f'{prefix}app_id')
     cert_id = creds.get(f'{prefix}cert_id')
     if not app_id or not cert_id:
         raise ValueError(f'Missing {prefix}app_id/cert_id in {creds_path}')
     ebay_cfg = raw.get('ebay', {})
     return {
-        'api_root_ebay': 'https://api.sandbox.ebay.com' if env == 'sandbox' else 'https://api.ebay.com',
+        'api_root_ebay': 'https://api.sandbox.ebay.com' if is_sandbox else 'https://api.ebay.com',
         'app_id':  app_id,
         'cert_id': cert_id,
         'scopes':  ebay_cfg.get('scopes', 'https://api.ebay.com/oauth/api_scope'),
@@ -71,7 +77,7 @@ def is_token_expired(state: Dict[str, Any]) -> bool:
     expiry = state.get('expiry', 0)
     return time.time() >= expiry - 300  # 5min buffer
 
-def refresh_access_token(force: bool = False) -> str:
+def refresh_access_token(force: bool = False, is_sandbox: bool | None = None) -> str:
     """Refresh the eBay access token.
 
     When force=True the internal expiry guard is bypassed — the caller is
@@ -80,8 +86,11 @@ def refresh_access_token(force: bool = False) -> str:
     decision; using the internal guard there would create a double-buffer
     bug that delays the actual eBay call until the last 5 minutes of
     token life instead of the intended 30-minute window.
+
+    is_sandbox=None (default) falls back to EBAY_ENV, unchanged from before —
+    token_refresh.py's worker call (force=True, no is_sandbox) is unaffected.
     """
-    ebay_config = get_ebay_config()
+    ebay_config = get_ebay_config(is_sandbox=is_sandbox)
     state = load_token_state()
 
     if not force and not is_token_expired(state):

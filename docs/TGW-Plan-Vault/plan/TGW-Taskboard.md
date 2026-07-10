@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-07-10 06:34 UTC — 217 open, 117 done in the last 7 days._
+_Rendered 2026-07-10 06:38 UTC — 216 open, 118 done in the last 7 days._
 
 ## admin (23 open)
 
@@ -41,7 +41,7 @@ _Rendered 2026-07-10 06:34 UTC — 217 open, 117 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (50 open)
+## claude (49 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
@@ -50,7 +50,6 @@ _Rendered 2026-07-10 06:34 UTC — 217 open, 117 done in the last 7 days._
 | 1219 | 8 |  | audit#1143 SECURITY: nix/nfs-exports.nix:24 Queue intake NFS export is read-write to the entire 192.168.60.0/24 subnet with all_squash to tgw uid -- any LAN device (not just the intended intake device) can write arbitrary files that feed directly into the intake pipeline as fabricated inventory items, unlike the ro+single-host-locked data/log exports right below it |  |  |
 | 1228 | 8 |  | audit#1143: reserve a static IP/DHCP lease for the intake camera/phone device so nfs-exports.nix Queue export (#1219) can be host-locked like the a1131 exports below it; currently no such reservation exists |  |  |
 | 1139 | 10 |  | URGENT PLANNING: decouple Hermes + AI fleet from the nix flake so Dave can prototype/test/configure without nixos-rebuild cycles -- gates PP-DRIVE-INDEX-001 completion. Currently: nix/os/hermes.nix declares hermes-agent as a NixOS service, imported by tgw-prod.nix. Dave has supporting research to add. |  |  |
-| 1211 | 10 |  | audit#1143: photo_repair_iss013.py:292 unlinks wrongly-created <SKU>.jpg based only on byte-size match with no content-hash check and no archive-before-delete -- can permanently destroy a non-duplicate file that happens to share byte count (violates E5) |  |  |
 | 1249 | 10 |  | Simplify: pause peripheral workers (ebay_sync, ebay_legacy_sync, ebay_sku_migrate, ebay_price_reducer, catalog_rebuild, thumbnail_gen, velocity_stats); keep core list/edit loop + plan_render; leave echo/repush untouched; then diagnose 2771 dead-lettered ebay_draft jobs |  |  |
 | 1168 | 12 |  | audit#1143: ebay_publish.py:250 condition-rejection fallback (25021) succeeds on eBay but corrected condition never written back to draft_listing/ebay_offer -- local record permanently disagrees with live eBay, repeats 400+fallback cycle |  |  |
 | 1169 | 12 |  | audit#1143: ebay_sku_migrate.py:252 local folder rename failure after successful eBay-side migration never flags item blocked -- reprocessed every cycle forever, no alert |  |  |
@@ -248,10 +247,11 @@ _Rendered 2026-07-10 06:34 UTC — 217 open, 117 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — sold-event webhook (Tier 4)\|PP-SOLD-001]] |  |
 
-## Done this week (117)  — showing 15 most recent
+## Done this week (118)  — showing 15 most recent
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 1211 | claude | 2026-07-10 | audit#1143: photo_repair_iss013.py:292 unlinks wrongly-created <SKU>.jpg based only on byte-size match with no content-hash check and no archive-before-delete -- can permanently destroy a non-duplicate file that happens to share byte count (violates E5) |
 | 1210 | claude | 2026-07-10 | audit#1143: photosync_canary_probe.py:96 price field stringified in live snapshot but left numeric in intent snapshot -- _diff always reports spurious price mismatch, canary FAILs on every priced item even when price matches, trains operators to ignore its alerts |
 | 1238 | claude | 2026-07-10 | audit#1143 MERGED (#1175+#1176): get_access_token.py has two separate bugs, one session/context -- :119 imports nonexistent module tgw_ebay_token_manager_refresh_access_token_v1 (auto-refresh fallback always throws, silently forces manual browser+paste OAuth even when a valid refresh_token exists); load_config() never applies the sandbox_ credential prefix that refresh_access_token.py's get_ebay_config() does (sandbox runs silently auth with production app_id/cert_id -- real risk of sandbox test traffic hitting prod eBay creds). |
 | 1255 | claude | 2026-07-10 | CORRECTED 2026-07-09 (see #1254): eBay Motors is NOT a branch of the EBAY_US category tree -- it's a genuinely separate tree, ID 100 (EBAY_US is tree ID 0). Confirmed live: get_default_category_tree_id(marketplace_id=EBAY_MOTORS_US) -> tree 100; real Motors category IDs 404 against tree 0 and resolve correctly against tree 100. tgw.apis.ebay.taxonomy only caches tree 0 -- proactive draft-time detection needs its own tree-100 cache (mirroring _ensure_tree_index/_flatten_tree/refresh_category_tree_cache for tree 0), not an ancestor-chain check within the existing cache. sync.py now has a per-category live check (_is_motors_category, todo #1254) as a working stopgap -- this todo is about replacing that with a proper local cache once the Motors footprint grows beyond ~200 items. Best Offer enablement question still open, unrelated to the tree-id correction. |
@@ -266,5 +266,4 @@ _Rendered 2026-07-10 06:34 UTC — 217 open, 117 done in the last 7 days._
 | 1244 | claude | 2026-07-07 | audit#1143 session 48: multi_intake.py SKU-collision handling redesign — removed unverified direct ItemData patch (strip 'Item number'), replaced with log+notify relying on bundle_intake's existing idempotent handling |
 | 1243 | claude | 2026-07-07 | audit#1143 code-review follow-up: fix remaining 7 findings from today's review (data_scrub_magento error handling, mark_failed row-None edge case, itemdata_scrub sort_keys, atomic_write dedup, token save dedup, ITEM_DATA_ROOT drift, token_refresh dup read) |
 | 1242 | claude | 2026-07-07 | audit#1143 follow-up: extend _on_terminal_failure override (todo #1234 fix) to the 6 self-rescheduling workers missed the first time: ebay_sync, ebay_dole, ebay_price_reducer, ebay_legacy_sync, ebay_sku_migrate, sync_conflict |
-| 1235 | claude | 2026-07-07 | audit#1143 MERGED (#1162+#1163+#1164+#1177+#1208+#1212): non-atomic / no-archive-before-write JSON writes across 6 sites, same root cause -- bypassing the fence's atomic tmp+rename + archive-before-manipulate pattern (invariant E5, memory feedback-archive-before-after). Sites: itemdata_scrub.py:121 (item JSON overwrite), multi_intake.py:170 (bundle child item JSON), pm_intake.py:616 (Master Plan doc, Syncthing-propagated), refresh_access_token.py+get_access_token.py save_token_state() (sole ebay-token.json, forces full re-consent if corrupted), data_scrub_magento.py:86 --execute mode (bypasses fence + atomic_write_json entirely), photo_repair_iss013.py:270 (alt-photo rename, no archive-before-manipulation unlike alt_text.py's established copy2-to-history convention). One fix per site using the SAME existing helper (items.atomic_write_json / the fence's archive-before pattern) rather than 6 separate designs. NOTE: #1209 (recompile_category_backfill.py/data_scrub_legacy_ebay_fields.py order-dependency) looked related but is NOT -- that's a sequencing bug, not an atomicity bug, left standalone. |
-| … | | | _…and 102 more — run `tgw todo --all` to see everything_ |
+| … | | | _…and 103 more — run `tgw todo --all` to see everything_ |

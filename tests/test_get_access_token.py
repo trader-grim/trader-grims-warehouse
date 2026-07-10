@@ -72,21 +72,21 @@ class TestGetAccessTokenAutoRefresh:
             with patch.object(get_access_token, 'webbrowser'):
                 token = get_access_token.get_access_token(prompt_if_needed=False)
         assert token == 'new-token'
-        mock_refresh.assert_called_once_with(force=True)
+        mock_refresh.assert_called_once_with(force=True, is_sandbox=False)
 
-    def test_sandbox_intent_bridged_to_ebay_env(self, _creds, monkeypatch):
+    def test_sandbox_intent_passed_as_parameter_not_env_mutation(self, _creds, monkeypatch):
+        # Regression: this used to bridge is_sandbox via a process-global
+        # os.environ['EBAY_ENV'] mutation that was never restored, leaking
+        # into any later call in the same process. Confirm is_sandbox now
+        # goes straight through as a parameter, and EBAY_ENV is left alone.
+        monkeypatch.delenv('EBAY_ENV', raising=False)
         monkeypatch.setattr(get_access_token, 'load_token_state', lambda: {
             'access_token': '', 'refresh_token': 'rt-123', 'expiry': 0,
         })
-        seen_env = {}
-
-        def _fake_refresh(force=False):
-            seen_env['EBAY_ENV'] = get_access_token.os.environ.get('EBAY_ENV')
-            return 'new-token'
-
-        with patch('tgw.apis.ebay.refresh_access_token.refresh_access_token', side_effect=_fake_refresh):
+        with patch('tgw.apis.ebay.refresh_access_token.refresh_access_token', return_value='new-token') as mock_refresh:
             get_access_token.get_access_token(prompt_if_needed=False, is_sandbox=True)
-        assert seen_env['EBAY_ENV'] == 'sandbox'
+        mock_refresh.assert_called_once_with(force=True, is_sandbox=True)
+        assert 'EBAY_ENV' not in get_access_token.os.environ
 
 
 def test_generate_auth_url_includes_client_id():

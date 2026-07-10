@@ -134,13 +134,13 @@ def get_access_token(prompt_if_needed: bool = True, is_sandbox: bool = False) ->
             # audit#1143 #1238: previously imported a nonexistent module, so
             # this branch always raised and silently fell through to the
             # manual browser+paste flow even with a valid refresh_token.
-            # refresh_access_token() determines sandbox-ness from EBAY_ENV
-            # (see refresh_access_token.py's get_ebay_config), not a
-            # parameter, so bridge this call's explicit is_sandbox intent
-            # into that env var before calling it.
+            # audit#1143 #1211-followup: originally bridged is_sandbox into
+            # refresh_access_token() via a process-global EBAY_ENV mutation
+            # that was never restored (would leak into unrelated later
+            # calls in the same process). refresh_access_token() now takes
+            # is_sandbox directly, same as load_config() above.
             from tgw.apis.ebay.refresh_access_token import refresh_access_token
-            os.environ['EBAY_ENV'] = 'sandbox' if is_sandbox else 'production'
-            refreshed = refresh_access_token(force=True)
+            refreshed = refresh_access_token(force=True, is_sandbox=is_sandbox)
             logger.info("Auto-refreshed token - no browser needed.")
             return refreshed
         except Exception as e:
