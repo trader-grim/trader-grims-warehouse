@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 
 import requests
 
+from tgw import quota
 from tgw.apis.ebay.client import ebay_get
 
 log = logging.getLogger(__name__)
@@ -57,6 +58,13 @@ def lookup_epid(cfg: Dict[str, Any], barcode: str) -> Optional[str]:
             return None
         if status == 404:
             return None
+        raise
+    except quota.QuotaBudgetExceeded:
+        # audit#1143 #1173: the bare except below used to swallow this too,
+        # defeating the quota-halt/requeue pattern (worker_base.py's
+        # 'quota budget exhausted' transient-requeue classification) — the
+        # item would silently ship without EPID enrichment during quota
+        # exhaustion instead of the job requeuing until the pool resets.
         raise
     except Exception as exc:
         log.warning('catalog: EPID lookup failed for %s: %s', barcode, exc)

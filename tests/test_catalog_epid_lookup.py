@@ -52,3 +52,22 @@ def test_epid_lookup_returns_epid_on_success(monkeypatch):
     monkeypatch.setattr(catalog_mod, 'ebay_get', lambda cfg, path, params=None: {
         'productSummaries': [{'epid': '12345678'}]})
     assert lookup_epid({}, '54199034971') == '12345678'
+
+
+def test_epid_lookup_propagates_quota_budget_exceeded(monkeypatch):
+    # audit#1143 #1173: the bare `except Exception` used to swallow
+    # QuotaBudgetExceeded too, defeating worker_base.py's
+    # 'quota budget exhausted' transient-requeue classification — the item
+    # would silently ship without EPID enrichment during quota exhaustion
+    # instead of the job requeuing until the pool resets.
+    import pytest
+
+    import tgw.apis.ebay.catalog as catalog_mod
+    from tgw import quota
+
+    def _raise_quota(cfg, path, params=None):
+        raise quota.QuotaBudgetExceeded('quota budget exhausted for ebay_rest: 100/100 spent')
+
+    monkeypatch.setattr(catalog_mod, 'ebay_get', _raise_quota)
+    with pytest.raises(quota.QuotaBudgetExceeded):
+        lookup_epid({}, '54199034971')
