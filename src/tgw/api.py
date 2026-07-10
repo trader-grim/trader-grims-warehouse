@@ -1151,6 +1151,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fix", action="store_true", help="report auto-applicable fixes (e.g. strip stale TEMPLATE: title prefix); dry-run unless --write is given")
     p.add_argument("--write", action="store_true", help="with --fix: actually apply the fixes (default: dry-run only)")
     p.add_argument("--scan-events-hours", type=int, default=24, metavar="N", help="window for the success_count_contradiction log-scan rule (PP-PHOTOSYNC-001 P7); 0 disables it")
+    p.add_argument("--check-photos", action="store_true", help="decode every item photo and flag unreadable/corrupt files (photo_files_readable rule, #1154); cached by (size,mtime), off by default")
 
     p = sub.add_parser(
         "nix-bundle-usb",
@@ -1245,8 +1246,70 @@ def _load_live_photo_index(cfg: Dict[str, Any]) -> "tuple[Optional[Dict[str, int
     return index, age_hours
 
 
+def _load_photo_decode_cache(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Load the (size,mtime)->decode-result sidecar cache (photo-integrity
+    mitigation plan leg 3, todo #1154). Missing/corrupt cache -> empty dict,
+    same fail-open-to-full-rescan behavior as the other disk caches in this
+    codebase (e.g. condition policies, aspects)."""
+    catalog_root = cfg.get("catalog_root")
+    if not catalog_root:
+        return {}
+    cache_path = Path(catalog_root) / "photo-decode-cache.json"
+    if not cache_path.exists():
+        return {}
+    try:
+        return json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_photo_decode_cache(cfg: Dict[str, Any], cache: Dict[str, Any]) -> None:
+    catalog_root = cfg.get("catalog_root")
+    if not catalog_root:
+        return
+    cache_path = Path(catalog_root) / "photo-decode-cache.json"
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(cache, sort_keys=True), encoding="utf-8")
+    except OSError as exc:
+        log.warning("catalog-verify: could not write photo-decode-cache: %s", exc)
+
+
+def _check_photo_readable(photo_path: Path, cache: Dict[str, Any]) -> Optional[str]:
+    """Return an error string if *photo_path* fails to decode, else None.
+
+    Cheap incremental (photo-integrity mitigation leg 1, todo #1154): a file
+    whose (size, mtime) matches the cached entry is trusted without
+    re-decoding — only files that changed since the last pass (or were
+    never checked) pay the PIL decode cost. Cache key is the path string so
+    a rename/move is treated as a fresh file, never silently inherits a
+    stale verdict.
+    """
+    try:
+        st = photo_path.stat()
+    except OSError as exc:
+        return f"stat failed: {exc}"
+    key = str(photo_path)
+    fingerprint = [st.st_size, st.st_mtime]
+    cached = cache.get(key)
+    if cached and cached.get("fingerprint") == fingerprint:
+        return cached.get("error")
+
+    error: Optional[str] = None
+    try:
+        from PIL import Image
+        with Image.open(photo_path) as im:
+            im.load()
+    except Exception as exc:
+        error = str(exc)
+
+    cache[key] = {"fingerprint": fingerprint, "error": error}
+    return error
+
+
 def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any],
-                  live_photo_index: Optional[Dict[str, int]] = None) -> List[Dict[str, Any]]:
+                  live_photo_index: Optional[Dict[str, int]] = None,
+                  photo_decode_cache: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """Return list of violation dicts for one item (PP-VERIFY-001)."""
     import re
 
@@ -1276,6 +1339,19 @@ def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any],
     photos = [f for f in item_dir.iterdir() if f.suffix.lower() in (".jpg", ".jpeg", ".png", ".gif", ".webp") and not f.name.startswith(".")]
     if not photos:
         v("no_photo", "warning", "No photo files in item folder")
+
+    # photo-integrity mitigation leg 1 (todo #1154): a truncated/corrupt
+    # photo sat silent for 3.5 years (Feb-2022 bulk-migration copy bug)
+    # because nothing decodes photos until a worker needs them. Opt-in via
+    # photo_decode_cache (None = skip, matches every pre-existing caller/
+    # test) so this only runs where a caller has explicitly wired a cache —
+    # real catalog-verify runs always pass one; ad-hoc/test calls don't pay
+    # the PIL decode cost unless they ask for it.
+    if photo_decode_cache is not None:
+        for photo in photos:
+            error = _check_photo_readable(photo, photo_decode_cache)
+            if error:
+                v("photo_files_readable", "critical", f"{photo.name}: {error}")
 
     cat_id = doc.get("ebay_category_id")
     if cat_id is not None and str(cat_id).strip():
@@ -1581,12 +1657,20 @@ def cmd_catalog_verify(
     fix: bool = False,
     write: bool = False,
     scan_events_hours: int = 24,
+    check_photos: bool = False,
 ) -> Dict[str, Any]:
     """Scan ItemData for assumption violations and emit a markdown checklist.
 
     With ``fix=True`` the scan also reports auto-applicable corrections (dry-run
     by default); pass ``write=True`` to actually apply them through the item
     update fence.  A per-SKU fix log is printed and returned under ``fixes``.
+
+    ``check_photos=True`` enables the photo_files_readable rule (todo #1154)
+    — decodes every item photo (cheap incremental via a (size,mtime) sidecar
+    cache; only changed files pay the real PIL decode cost) and flags any
+    that fail. Off by default: a full-fleet run is comparatively heavy and
+    this is meant to be opted into (nightly timer, or an explicit CLI ask),
+    not silently added to every ad-hoc scan.
     """
     from tgw.items import atomic_write_json, update_item
 
@@ -1606,6 +1690,8 @@ def cmd_catalog_verify(
         log.warning("catalog-verify: capture is %.1fh old (> %sh) — "
                     "photos_short_on_ebay falling back to local mirror",
                     live_photo_index_age_h, _LIVE_PHOTO_INDEX_STALE_HOURS)
+
+    photo_decode_cache: Optional[Dict[str, Any]] = _load_photo_decode_cache(cfg) if check_photos else None
 
     for item_dir in sorted(root.iterdir()):
         if not item_dir.is_dir() or not item_dir.name.startswith("tgw"):
@@ -1640,7 +1726,7 @@ def cmd_catalog_verify(
             continue
 
         scanned += 1
-        item_viols = _verify_item(sku, item_dir, doc, live_photo_index)
+        item_viols = _verify_item(sku, item_dir, doc, live_photo_index, photo_decode_cache)
 
         # Apply fixes FIRST (when writing) so the violation list, the report,
         # the by_rule tally, and the mark_verified gate all reflect post-fix
@@ -1661,7 +1747,7 @@ def cmd_catalog_verify(
                         error = res.get("error")
                 fix_log.append({"sku": sku, **f, "applied": applied, "error": error})
             if item_fixed:
-                item_viols = _verify_item(sku, item_dir, doc, live_photo_index)  # re-scan mutated doc
+                item_viols = _verify_item(sku, item_dir, doc, live_photo_index, photo_decode_cache)  # re-scan mutated doc
 
         for viol in item_viols:
             if _SEV_ORDER.get(viol["severity"], 99) <= min_sev:
@@ -1686,6 +1772,9 @@ def cmd_catalog_verify(
         for viol in _scan_upload_complete_contradictions(scan_events_hours):
             if _SEV_ORDER.get(viol["severity"], 99) <= min_sev:
                 all_violations.append(viol)
+
+    if photo_decode_cache is not None:
+        _save_photo_decode_cache(cfg, photo_decode_cache)
 
     by_rule: Dict[str, int] = {}
     for viol in all_violations:
@@ -5073,6 +5162,7 @@ def main() -> int:
                 fix=getattr(args, "fix", False),
                 write=getattr(args, "write", False),
                 scan_events_hours=getattr(args, "scan_events_hours", 24),
+                check_photos=getattr(args, "check_photos", False),
             )
             if getattr(args, "as_json", False):
                 print(json.dumps(result, indent=2))

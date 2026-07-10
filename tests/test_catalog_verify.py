@@ -984,3 +984,98 @@ def test_load_live_photo_index_missing_root_returns_none(tmp_path):
     index, age_h = _load_live_photo_index(cfg)
     assert index is None
     assert age_h is None
+
+
+# ---------------------------------------------------------------------------
+# photo_files_readable rule (todo #1154, photo-integrity mitigation leg 1)
+# ---------------------------------------------------------------------------
+
+def _write_real_jpeg(path: Path) -> None:
+    from PIL import Image
+    Image.new("RGB", (8, 8), color="red").save(path, format="JPEG")
+
+
+def test_photo_decode_check_off_by_default(tmp_path):
+    """Every pre-existing caller/test passes no photo_decode_cache -- the
+    rule must not fire (existing fixtures use empty-byte .jpg files)."""
+    item_dir, doc = _make_item(tmp_path, 'tgw1', {'title': 'Widget', 'location': 'A1'}, photos=1)
+    viols = _verify_item('tgw1', item_dir, doc)
+    assert 'photo_files_readable' not in {v['rule'] for v in viols}
+
+
+def test_photo_decode_check_flags_corrupt_file(tmp_path):
+    item_dir, doc = _make_item(tmp_path, 'tgw2', {'title': 'Widget', 'location': 'A1'}, photos=0)
+    (item_dir / 'photo0.jpg').write_bytes(b'not a real jpeg')
+    cache: dict = {}
+    viols = _verify_item('tgw2', item_dir, doc, photo_decode_cache=cache)
+    rules = {v['rule'] for v in viols}
+    assert 'photo_files_readable' in rules
+    assert cache  # populated
+
+
+def test_photo_decode_check_passes_real_jpeg(tmp_path):
+    item_dir, doc = _make_item(tmp_path, 'tgw3', {'title': 'Widget', 'location': 'A1'}, photos=0)
+    _write_real_jpeg(item_dir / 'photo0.jpg')
+    cache: dict = {}
+    viols = _verify_item('tgw3', item_dir, doc, photo_decode_cache=cache)
+    assert 'photo_files_readable' not in {v['rule'] for v in viols}
+
+
+def test_photo_decode_cache_skips_pil_on_unchanged_file(tmp_path, monkeypatch):
+    """A second check of the SAME (size,mtime) file must not touch PIL at
+    all -- the whole point of the cache is to make repeat catalog-verify
+    passes cheap."""
+    from tgw.api import _check_photo_readable
+
+    photo_path = tmp_path / 'photo.jpg'
+    _write_real_jpeg(photo_path)
+    cache: dict = {}
+
+    assert _check_photo_readable(photo_path, cache) is None  # first call: real decode
+
+    opens = {'n': 0}
+    real_open = __import__('PIL.Image', fromlist=['Image']).open
+
+    def _counting_open(*a, **k):
+        opens['n'] += 1
+        return real_open(*a, **k)
+
+    monkeypatch.setattr('PIL.Image.open', _counting_open)
+    assert _check_photo_readable(photo_path, cache) is None  # cache hit
+    assert opens['n'] == 0
+
+
+def test_photo_decode_cache_redecodes_when_file_changes(tmp_path):
+    from tgw.api import _check_photo_readable
+
+    photo_path = tmp_path / 'photo.jpg'
+    _write_real_jpeg(photo_path)
+    cache: dict = {}
+    assert _check_photo_readable(photo_path, cache) is None
+
+    # overwrite with corrupt bytes but keep checking the SAME path -- size
+    # and/or mtime must change for the cache to notice and re-decode
+    import time
+    time.sleep(0.01)
+    photo_path.write_bytes(b'corrupt now')
+    error = _check_photo_readable(photo_path, cache)
+    assert error is not None
+
+
+def test_cmd_catalog_verify_check_photos_flag(tmp_path):
+    itemdata_root = tmp_path / 'ItemData'
+    itemdata_root.mkdir()
+    catalog_root = tmp_path / 'catalog'
+    item_dir = itemdata_root / 'tgw5'
+    item_dir.mkdir()
+    (item_dir / 'tgw5.json').write_text(json.dumps({'title': 'Widget', 'location': 'A1'}), encoding='utf-8')
+    (item_dir / 'photo0.jpg').write_bytes(b'not a real jpeg')
+
+    cfg = {'itemdata_root': itemdata_root, 'catalog_root': catalog_root, 'raw': {}}
+
+    result_off = cmd_catalog_verify(cfg, min_severity='critical', check_photos=False)
+    assert 'photo_files_readable' not in result_off['by_rule']
+
+    result_on = cmd_catalog_verify(cfg, min_severity='critical', check_photos=True)
+    assert result_on['by_rule'].get('photo_files_readable') == 1
+    assert (catalog_root / 'photo-decode-cache.json').exists()
