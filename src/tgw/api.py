@@ -1069,7 +1069,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="FIELD=VALUE",
         dest="assignments",
         default=[],
-        help="field=value pair to add to the delta (repeat for multiple fields; supports dotted paths like draft_listing.price)",
+        help="field=value pair to add to the delta (repeat for multiple fields; bare field names only, e.g. price=19.99 — see revision._SUPPORTED_FIELDS)",
     )
     p.add_argument("--show", action="store_true", help="print human-readable diff to stdout before JSON result")
     p.add_argument("--by", default="claude", metavar="AGENT", help="who is creating this revision draft (default: claude)")
