@@ -42,15 +42,27 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def load_config() -> Dict[str, Any]:
-    """Load eBay non-secret config (redirect_uri, scopes) from main config."""
+def load_config(is_sandbox: bool = False) -> Dict[str, Any]:
+    """Load eBay non-secret config (redirect_uri, scopes) from main config.
+
+    audit#1143 #1238: previously always returned production app_id/cert_id
+    regardless of is_sandbox — a sandbox OAuth run would silently
+    authenticate with production eBay credentials. Mirrors
+    refresh_access_token.py's get_ebay_config(), which already applies this
+    sandbox_ prefix correctly.
+    """
     raw = _load_raw_config()
     creds_path = _secrets_root() / 'ebay-credentials.json'
     if not creds_path.exists():
         raise FileNotFoundError(f'eBay credentials not found: {creds_path}')
     creds = json.loads(creds_path.read_text())
+    prefix = 'sandbox_' if is_sandbox else ''
+    app_id = creds.get(f'{prefix}app_id')
+    cert_id = creds.get(f'{prefix}cert_id')
+    if not app_id or not cert_id:
+        raise ValueError(f'Missing {prefix}app_id/{prefix}cert_id in {creds_path}')
     ebay_cfg = raw.get('ebay', {})
-    return {**creds, **ebay_cfg}
+    return {**creds, **ebay_cfg, 'app_id': app_id, 'cert_id': cert_id}
 
 def load_token_state() -> Dict[str, Any]:
     if TOKEN_PATH.exists():
@@ -108,7 +120,7 @@ def exchange_code_for_tokens(code: str, ebay_config: Dict[str, Any], is_sandbox:
 
 def get_access_token(prompt_if_needed: bool = True, is_sandbox: bool = False) -> str:
     """Get valid token: auto-refresh if possible, browser only for initial consent."""
-    ebay_config = load_config()
+    ebay_config = load_config(is_sandbox=is_sandbox)
     state = load_token_state()
 
     # Fast path: valid token exists
@@ -119,8 +131,16 @@ def get_access_token(prompt_if_needed: bool = True, is_sandbox: bool = False) ->
     # Auto-refresh if refresh_token exists (99% cases, NO BROWSER)
     if state.get('refresh_token'):
         try:
-            from tgw_ebay_token_manager_refresh_access_token_v1 import refresh_access_token
-            refreshed = refresh_access_token(is_sandbox=is_sandbox)
+            # audit#1143 #1238: previously imported a nonexistent module, so
+            # this branch always raised and silently fell through to the
+            # manual browser+paste flow even with a valid refresh_token.
+            # refresh_access_token() determines sandbox-ness from EBAY_ENV
+            # (see refresh_access_token.py's get_ebay_config), not a
+            # parameter, so bridge this call's explicit is_sandbox intent
+            # into that env var before calling it.
+            from tgw.apis.ebay.refresh_access_token import refresh_access_token
+            os.environ['EBAY_ENV'] = 'sandbox' if is_sandbox else 'production'
+            refreshed = refresh_access_token(force=True)
             logger.info("Auto-refreshed token - no browser needed.")
             return refreshed
         except Exception as e:

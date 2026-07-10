@@ -5186,14 +5186,16 @@ def main() -> int:
             from .apis.ebay.get_access_token import load_config as _ebay_load_config
 
             if getattr(args, "print_url", False):
-                url = generate_auth_url(_ebay_load_config(), is_sandbox=getattr(args, "sandbox", False))
+                url = generate_auth_url(
+                    _ebay_load_config(is_sandbox=getattr(args, "sandbox", False)), is_sandbox=getattr(args, "sandbox", False)
+                )
                 print(url)
                 result = {"ok": True, "url": url}
             else:
                 direct_code = getattr(args, "code", None)
                 if direct_code:
                     direct_code = unquote(direct_code)
-                    ebay_cfg = _ebay_load_config()
+                    ebay_cfg = _ebay_load_config(is_sandbox=getattr(args, "sandbox", False))
                     tokens = exchange_code_for_tokens(direct_code, ebay_cfg, is_sandbox=getattr(args, "sandbox", False))
                     save_token_state(tokens)
                     token = tokens["access_token"]
