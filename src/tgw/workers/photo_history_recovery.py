@@ -81,15 +81,22 @@ def find_matches(ref: str, index: dict[str, list[Path]]) -> list[Path]:
     return rank_matches(index.get(normalize_name(ref), []))
 
 
-def ensure_copy(src: Path, dst: Path, overwrite: bool = False) -> str:
-    dst.parent.mkdir(parents=True, exist_ok=True)
+def ensure_copy(src: Path, dst: Path, overwrite: bool = False, write: bool = False) -> str:
+    # audit#1143 #1170: this script had no dry-run gate at all — every match
+    # was copied straight into live ItemData with no review step, unlike the
+    # tools/ near-duplicate this was copied from (which defaults to dry-run
+    # and requires --write). Mirror that same convention here.
     if dst.exists() and not overwrite:
         return 'exists'
+    if not write:
+        return 'would_copy'
+    dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
     return 'copied'
 
 
-def process_item(itemdata_path: Path, cfg: dict, index: dict[str, list[Path]]) -> list[dict]:
+def process_item(itemdata_path: Path, cfg: dict, index: dict[str, list[Path]],
+                 write: bool = False) -> list[dict]:
     raw = itemdata_path.read_text(encoding='utf-8').strip()
     if not raw:
         logging.warning('Skipping empty item file: %s', itemdata_path)
@@ -115,7 +122,11 @@ def process_item(itemdata_path: Path, cfg: dict, index: dict[str, list[Path]]) -
         if dest.exists() and not cfg['destination'].get('overwrite', False):
             action = 'exists'
         else:
-            action = ensure_copy(src, dest, overwrite=bool(cfg['destination'].get('overwrite', False))) if cfg['destination'].get('copy_if_missing', True) else 'skipped'
+            action = ensure_copy(
+                src, dest,
+                overwrite=bool(cfg['destination'].get('overwrite', False)),
+                write=write,
+            ) if cfg['destination'].get('copy_if_missing', True) else 'skipped'
         results.append({'itemdata': str(itemdata_path), 'photo_ref': ref, 'action': action, 'source_path': str(src), 'dest_path': str(dest), 'all_matches': [str(p) for p in matches]})
     return results
 
@@ -141,6 +152,8 @@ def main() -> int:
     ap.add_argument('--config', required=True)
     ap.add_argument('--itemdata')
     ap.add_argument('--report')
+    ap.add_argument('--write', action='store_true',
+                    help='Actually copy files (default is dry-run)')
     args = ap.parse_args()
 
     if not args.config:
@@ -149,13 +162,18 @@ def main() -> int:
     config_path = Path(args.config)
 
     cfg = load_config(config_path)
+    mode = 'WRITE' if args.write else 'DRY-RUN'
+    logging.info('photo_history_recovery: starting — mode=%s', mode)
     index = build_index([Path(p) for p in cfg['default_search_roots']])
     item_files = [Path(args.itemdata)] if args.itemdata else list(iter_itemdata_files(Path(cfg['itemdata_root'])))
     rows: list[dict] = []
     for item_file in item_files:
-        rows.extend(process_item(item_file, cfg, index))
+        rows.extend(process_item(item_file, cfg, index, write=args.write))
     report_path = Path(args.report) if args.report else Path('output/photo_recovery_report.jsonl')
     write_report(rows, report_path)
+    would_copy = sum(1 for r in rows if r['action'] == 'would_copy')
+    if not args.write and would_copy:
+        logging.info('Dry-run: run with --write to copy %d photos.', would_copy)
     return 0
 
 

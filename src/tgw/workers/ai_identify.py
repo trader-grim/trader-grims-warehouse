@@ -379,6 +379,16 @@ class AIIdentifyWorker(QueueWorker):
             "vision_results": item["vision_results"],
             "identification_history": item.get("identification_history", []),
         }
+        if force_reidentify:
+            # audit#1143 #1167: item.pop("ai_reidentify", None) above only
+            # clears the in-memory copy — fence_fields is a curated
+            # allow-list and never included this key, so the persisted flag
+            # never actually cleared. Every subsequent run for this SKU saw
+            # ai_reidentify still true on disk and re-triggered a billed
+            # vision-AI call forever. _apply_patch() deletes a field from the
+            # document when its patched value is None (http_server.py's
+            # _apply_patch docstring) — that's the mechanism to use here.
+            fence_fields["ai_reidentify"] = None
         if "ebay_category_id" in item:
             fence_fields["ebay_category_id"] = item["ebay_category_id"]
             fence_fields["ebay_category_name"] = item.get("ebay_category_name")

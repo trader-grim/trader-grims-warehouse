@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-07-10 07:07 UTC — 213 open, 121 done in the last 7 days._
+_Rendered 2026-07-10 11:09 UTC — 212 open, 123 done in the last 7 days._
 
 ## admin (23 open)
 
@@ -41,7 +41,7 @@ _Rendered 2026-07-10 07:07 UTC — 213 open, 121 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (46 open)
+## claude (45 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
@@ -52,8 +52,6 @@ _Rendered 2026-07-10 07:07 UTC — 213 open, 121 done in the last 7 days._
 | 1139 | 10 |  | URGENT PLANNING: decouple Hermes + AI fleet from the nix flake so Dave can prototype/test/configure without nixos-rebuild cycles -- gates PP-DRIVE-INDEX-001 completion. Currently: nix/os/hermes.nix declares hermes-agent as a NixOS service, imported by tgw-prod.nix. Dave has supporting research to add. |  |  |
 | 1249 | 10 |  | Simplify: pause peripheral workers (ebay_sync, ebay_legacy_sync, ebay_sku_migrate, ebay_price_reducer, catalog_rebuild, thumbnail_gen, velocity_stats); keep core list/edit loop + plan_render; leave echo/repush untouched; then diagnose 2771 dead-lettered ebay_draft jobs |  |  |
 | 1206 | 12 |  | audit#1143: requeue_ebay_draft_402_dead_letters.py:78 dedupe key uses fresh timestamp every invocation with no run-once guard -- re-running --apply requeues the same dead-letter rows again, burning a second full round of AI-drafting cost with no flag per the bulk-AI-cost standing rule |  |  |
-| 1167 | 15 |  | audit#1143: ai_identify.py:288 force-reidentify flag cleared in memory only, never persisted -- re-triggers billed vision-AI calls forever |  |  |
-| 1170 | 15 |  | audit#1143: photo_history_recovery.py (workers/ copy) dropped dry-run safety gate present in tools/ near-duplicate -- writes straight to live records with no review step |  |  |
 | 1239 | 15 |  | audit#1143 MERGED (#1179+#1180): unlocked/non-atomic disk-cache read-modify-write, same root cause, two cache files -- specifics.py:190 get_aspects() cache (shared across ebay_draft/ebay_sync/tgw-http; concurrent cache-miss writes race and silently drop each other's entries, crash mid-write risks corrupting the whole cache) and taxonomy.py:86 category tree ID + full tree caches (plain write_text, no atomic tmp+rename/flock unlike items.atomic_write_json elsewhere; corruption silently re-triggers live Taxonomy API calls -- the exact quota-exhaustion failure mode this cache exists to prevent). One shared locking+atomic-write helper likely fixes both. |  |  |
 | 1154 | 18 |  | Photo integrity (plan: ai-plans/photo-integrity-mitigation.md): SWEEP DONE 2026-07-05 03:00 — 206 bad/149 SKUs/0.076% of 270,525 photos, single Feb-2022 event, 30 LIVE listings prioritized; roster /opt/TGW/var/reports/photo-integrity-2026-07-05.tsv. REMAINING packets: (1) photo_files_readable rule in catalog-verify + (size,mtime) decode cache, (2) verify-after-copy sha256 helper for bulk copy paths, (3) intake decode-verify, (4) recovery workflow rides PP-DRIVE-INDEX Phase 1 (30 live SKUs first) |  |  |
 | 1147 | 20 |  | PP-KNOWLEDGE-001 R2: tgw search --full-text (recollq-backed) + web UI search bar + MCP tool tgw_search_full — put the already-paying-off recoll layer in front of every agent and surface. Spec: docs/ai-plans/recoll-annex-jetstream.md Track R. Live acceptance: the six hours-to-seconds queries from FUTURE-IDEAS PP-SEARCH-001 run against real data |  |  |
@@ -72,6 +70,7 @@ _Rendered 2026-07-10 07:07 UTC — 213 open, 121 done in the last 7 days._
 | 1246 | 30 |  | audit#1143 code-review deferred findings (from #1245, process at Dave's convenience): (1) multi_intake.py collision notify() could spam external channels on batch re-drop, no dedup; (2) state_machine.mark_failed() doesn't check cur.rowcount, lease-race could report phantom transition; (3) ebay_sku_migrate.py duplicates interval_h computation between handle() and _on_terminal_failure(); (4) multi_intake collision notify() text doesn't tell operator the SKU needs an ebay_stage operator-forced duplicate-check pass |  |  |
 | 1248 | 30 |  | stop ebay_legacy_sync worker to halt Trading-API quota drain (~6min re-trigger bug); sold-detection will lag until restarted or webhook #16 ships |  |  |
 | 1250 | 30 |  | PLANNING: harden one-off scripts pattern (invariant E9). (1) tgw_logging.announce_script_run() added — retrofit onto all scripts/ one-off tooling (starting with requeue_ebay_draft_402_dead_letters.py, left unrun). (2) Decide/build a detector: grep-based check flagging scripts/*.py with main() but no announce_script_run call. (3) Separately: requeue_ebay_draft_402_dead_letters.py's fresh-per-run dedupe key defeats loop protection (caused 6,607-job storm 07-04/05) — needs an attempt cap/backoff fix before it's ever run again |  |  |
+| 1257 | 30 |  | audit#1143 #1167 follow-up: 4 items still have stale ai_reidentify=true persisted alongside ai_identified=true (tgw202605051936445, tgw202605052242107, tgw202605060201087, tgw202606021107459) -- pre-date the #1167 fix (fence_fields never included ai_reidentify, so item.pop() never persisted); each would re-trigger a billed vision-AI call on next ai_identify run. Also noted: 3 of the 4 have identification_history recording 3 ai_identify rounds but vision_results only has 1 entry -- inconsistency worth checking separately. Needs a one-off cleanup (clear the stale flag, no re-identify needed) rather than manual data mutation without Dave's sign-off. |  |  |
 | 1065 | 35 |  | PP-PHOTO-001 Phase B: GDrive → eBay zero-bandwidth image upload — replace deprecated UploadSiteHostedPictures (Trading API) in ebay_upload worker with GDrive direct-URL pattern. Flow: (1) make each SKU photo temporarily public (anyone-reader), (2) pass GDrive direct download URL to Inventory API imageUrls[], (3) eBay CDN fetches from Google directly — TGW server sends zero image bytes, (4) revoke public access after staging confirms imageUrls populated in ebay_live. Eliminates all local upload bandwidth from photo pipeline. Same GDrive OAuth helper from Phase A. NOTE: Phase A (multimodal draft) is higher priority and should be built first since it shares the GDrive API helper. Research: docs/TGW-Plan-Vault/dev-workflow/research/RESEARCH-gdrive-zero-bandwidth-ebay-image-upload.md | [[TGW-Master-Plan#PP-PHOTO-001 — photo pipeline (GDrive → Gemini / eBay)\|PP-PHOTO-001]] |  |
 | 1119 | 35 |  | PAUSED (updated): P10 legacy-duplicate-check fix built+verified — n=1 test item confirmed NOT a duplicate, auto-resolved, fell through to normal path, but then hit an UNRELATED per-item eBay business rule (Best Offer + multi-marketplace conflict) — dead-lettered correctly, needs Dave's call. Need a clean n=1 (no incidental conflicts) to complete the before/after demo before ramping the other ~490. | [[TGW-Master-Plan#PP-PHOTOSYNC-001 — upload integrity + operator lane hardening + fleet photo repair\|PP-PHOTOSYNC-001]] | ✓ deps done |
 | 1182 | 35 |  | audit#1143 (batched, lower prio): apis/ebay/ cohesion findings -- conditions.py:177 _get_policies() re-reads+re-parses full 2.7MB policy file every call, no memoization unlike sibling caches (taxonomy._tree_id_cache, specifics._aspects_mem_cache); trading.py:445 429-retry/backoff logic only in get_best_offers, missing from get_orders/get_my_ebay_selling generators despite same trading_call() choke point |  |  |
@@ -244,10 +243,12 @@ _Rendered 2026-07-10 07:07 UTC — 213 open, 121 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — sold-event webhook (Tier 4)\|PP-SOLD-001]] |  |
 
-## Done this week (121)  — showing 15 most recent
+## Done this week (123)  — showing 15 most recent
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 1170 | claude | 2026-07-10 | audit#1143: photo_history_recovery.py (workers/ copy) dropped dry-run safety gate present in tools/ near-duplicate -- writes straight to live records with no review step |
+| 1167 | claude | 2026-07-10 | audit#1143: ai_identify.py:288 force-reidentify flag cleared in memory only, never persisted -- re-triggers billed vision-AI calls forever |
 | 1173 | claude | 2026-07-10 | audit#1143: catalog.py:61 lookup_epid swallows QuotaBudgetExceeded via bare except, defeats quota-halt/requeue pattern -- items silently ship w/o EPID enrichment during quota exhaustion |
 | 1169 | claude | 2026-07-10 | audit#1143: ebay_sku_migrate.py:252 local folder rename failure after successful eBay-side migration never flags item blocked -- reprocessed every cycle forever, no alert |
 | 1168 | claude | 2026-07-10 | audit#1143: ebay_publish.py:250 condition-rejection fallback (25021) succeeds on eBay but corrected condition never written back to draft_listing/ebay_offer -- local record permanently disagrees with live eBay, repeats 400+fallback cycle |
@@ -261,6 +262,4 @@ _Rendered 2026-07-10 07:07 UTC — 213 open, 121 done in the last 7 days._
 | 1252 | claude | 2026-07-09 | in_progress |
 | 1209 | claude | 2026-07-09 | fix applied + tests added; live dry-run confirms 8802 items currently legacy-only-category, exposed until --apply runs |
 | 1178 | claude | 2026-07-09 | in_progress: fixing MIN->MAX rank bug in best_condition_for_enum |
-| 1247 | claude | 2026-07-07 | session 48 evening: investigated PR #8 (stale, predates nix-flake→~/tgw-flake symlink move), committed+pushed 14 uncommitted audit#1143 nix-flake fixes in ~/tgw-flake (a58d86a, verified dry-activate matches live gen 80), closed PR #8 as superseded per Dave's call |
-| 1245 | claude | 2026-07-07 | audit#1143 code-review round 2: fixed 3 CONFIRMED findings (catalog_verified side-effect doc, collapse 8 _on_terminal_failure overrides into worker_base default). 4 PLAUSIBLE findings deferred: multi_intake notify spam risk, mark_failed rowcount race, ebay_sku_migrate interval_h duplication, notify text missing ebay_stage next-step |
-| … | | | _…and 106 more — run `tgw todo --all` to see everything_ |
+| … | | | _…and 108 more — run `tgw todo --all` to see everything_ |
