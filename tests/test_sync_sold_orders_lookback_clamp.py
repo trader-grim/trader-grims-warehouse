@@ -10,13 +10,16 @@ All eBay API calls are mocked -- tests pass completely offline.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import tgw.ebay.pull as pull_mod
 
 
-def _cfg():
-    return {}
+def _cfg(gap_log_path=None):
+    if gap_log_path is None:
+        return {}
+    return {'raw': {'sold_order_gap_log': str(gap_log_path)}}
 
 
 def test_first_sync_clamps_scan_from_within_90_days(monkeypatch, tmp_path):
@@ -59,13 +62,65 @@ def test_stale_incremental_resume_also_clamped(monkeypatch, tmp_path):
     stale_ts = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
     state_path.write_text('{"last_synced_at": "%s"}' % stale_ts, encoding='utf-8')
 
-    pull_mod.sync_sold_orders(_cfg(), {}, 'now', state_path)
+    gap_log = tmp_path / 'sold-order-history-gaps.jsonl'
+    pull_mod.sync_sold_orders(_cfg(gap_log), {}, 'now', state_path)
 
     assert len(calls) == 1
     window_start, _ = calls[0]
     now = datetime.now(timezone.utc)
     earliest_allowed = now - timedelta(days=pull_mod._MAX_ORDER_LOOKBACK_DAYS)
     assert window_start >= earliest_allowed - timedelta(seconds=5)
+
+
+# ---------------------------------------------------------------------------
+# Durable finding on a real (incremental-resume) history gap (todo #1270,
+# code-review follow-up: this used to be logged at INFO only, not recorded
+# anywhere durable/queryable per invariant C11)
+# ---------------------------------------------------------------------------
+
+def test_stale_resume_gap_recorded_as_durable_finding(monkeypatch, tmp_path):
+    monkeypatch.setattr(pull_mod, 'get_orders', lambda *a, **k: iter([]))
+
+    state_path = tmp_path / 'sold-sync-state.json'
+    stale_ts = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
+    state_path.write_text('{"last_synced_at": "%s"}' % stale_ts, encoding='utf-8')
+
+    gap_log = tmp_path / 'sold-order-history-gaps.jsonl'
+    pull_mod.sync_sold_orders(_cfg(gap_log), {}, 'now', state_path)
+
+    assert gap_log.exists()
+    lines = gap_log.read_text(encoding='utf-8').strip().splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record['gap_days'] > 100  # 200-day-stale resume clamped to 89 days
+    assert 'requested_from' in record
+    assert 'clamped_from' in record
+
+
+def test_first_sync_does_not_record_a_gap(monkeypatch, tmp_path):
+    """First-ever sync clamping to the 89-day ceiling is expected/routine
+    -- there was never a previously-tracked sync point to lose, so this is
+    NOT an incident and must not be recorded as one."""
+    monkeypatch.setattr(pull_mod, 'get_orders', lambda *a, **k: iter([]))
+
+    state_path = tmp_path / 'sold-sync-state.json'  # does not exist -> first sync
+    gap_log = tmp_path / 'sold-order-history-gaps.jsonl'
+    pull_mod.sync_sold_orders(_cfg(gap_log), {}, 'now', state_path)
+
+    assert not gap_log.exists()
+
+
+def test_recent_resume_does_not_record_a_gap(monkeypatch, tmp_path):
+    monkeypatch.setattr(pull_mod, 'get_orders', lambda *a, **k: iter([]))
+
+    state_path = tmp_path / 'sold-sync-state.json'
+    recent_ts = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+    state_path.write_text('{"last_synced_at": "%s"}' % recent_ts, encoding='utf-8')
+
+    gap_log = tmp_path / 'sold-order-history-gaps.jsonl'
+    pull_mod.sync_sold_orders(_cfg(gap_log), {}, 'now', state_path)
+
+    assert not gap_log.exists()
 
 
 def test_recent_incremental_resume_not_clamped(monkeypatch, tmp_path):

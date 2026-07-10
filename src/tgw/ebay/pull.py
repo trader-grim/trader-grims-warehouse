@@ -33,6 +33,8 @@ from tgw.apis.fence import patch_item as fence_patch_item
 
 log = logging.getLogger(__name__)
 
+_DEFAULT_SOLD_ORDER_GAP_LOG = '/opt/TGW/var/log/sold-order-history-gaps.jsonl'
+
 SOLD_ORDERS_WINDOW_DAYS    = 90    # GetOrders API max per call
 # GetOrders' real constraint is a rolling one: CreateTimeFrom can never be
 # more than 90 days before *now*, no matter the window width (audit#1143
@@ -551,6 +553,36 @@ def _apply_active_listing(listing: Dict[str, Any], itemdata_root: Path,
 # Sold orders sync
 # ---------------------------------------------------------------------------
 
+def _record_sold_order_gap(cfg: Dict[str, Any], requested_from: datetime,
+                           clamped_from: datetime, now: datetime) -> None:
+    """A real, PERMANENT sold-order history gap (audit#1143 #1270,
+    code-review follow-up on #1153): GetOrders cannot see further back than
+    _MAX_ORDER_LOOKBACK_DAYS no matter what, so any incremental resume whose
+    last sync predates that window loses that history irrecoverably — not
+    "weather," an incident, same class as quota.record_429 (invariant C11:
+    durable, queryable, never just a log line). Only called for the
+    incremental-resume path; a first-ever sync clamping to the ceiling is
+    expected/routine, not a loss of anything previously tracked."""
+    gap_days = (clamped_from - requested_from).days
+    record = {
+        'ts': now.isoformat(),
+        'requested_from': requested_from.isoformat(),
+        'clamped_from': clamped_from.isoformat(),
+        'gap_days': gap_days,
+    }
+    log.error('SOLD-ORDER HISTORY GAP: %d days of sold-order history unrecoverable '
+              '(requested from %s, GetOrders can only see back to %s)',
+              gap_days, requested_from.date(), clamped_from.date())
+    try:
+        raw = cfg.get('raw', {}) if isinstance(cfg.get('raw'), dict) else {}
+        gap_log_path = Path(raw.get('sold_order_gap_log', _DEFAULT_SOLD_ORDER_GAP_LOG))
+        gap_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(gap_log_path, 'a', encoding='utf-8') as fh:
+            fh.write(json.dumps(record) + '\n')
+    except OSError as exc:
+        log.warning('sold-order-gap incident log write failed: %s', exc)
+
+
 def sync_sold_orders(cfg: Dict[str, Any], listing_index: Dict[str, Path],
                      synced_at: str, state_path: Path,
                      dry_run: bool = False) -> Dict[str, Any]:
@@ -572,9 +604,7 @@ def sync_sold_orders(cfg: Dict[str, Any], listing_index: Dict[str, Path],
         state = json.loads(state_path.read_text())
         scan_from = datetime.fromisoformat(state['last_synced_at']) - timedelta(hours=2)
         if scan_from < earliest_allowed:
-            log.info('ebay_pull: scan_from %s predates GetOrders\' %d-day limit — '
-                     'clamped to %s', scan_from.date(), _MAX_ORDER_LOOKBACK_DAYS,
-                     earliest_allowed.date())
+            _record_sold_order_gap(cfg, scan_from, earliest_allowed, now)
             scan_from = earliest_allowed
     else:
         scan_from = earliest_allowed
