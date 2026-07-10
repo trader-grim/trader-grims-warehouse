@@ -83,7 +83,13 @@ class EbayPriceWorker(QueueWorker):
                     'operator_price': op_price,
                 },
             })
-            suggest_only = True
+            # audit#1143 #1240: this used to fall through and still call
+            # suggest_price() unconditionally below — an operator's last
+            # price_history entry means "leave this alone," full stop, not
+            # "leave the price alone but still burn a comps query." Return
+            # here so the guard is a hard skip, matching its own log message
+            # ("skip is early" per test_chain_enqueued_price_skips_when_operator_set_last).
+            return
 
         # Dave (s46): the auto-pricer sets a price only on the initial
         # identification. Any later run still refreshes comps and records a
