@@ -1695,6 +1695,18 @@ def test_item_detail_uses_static_css(env):
     assert 'font-family:system-ui' not in r.text
 
 
+def test_item_detail_no_stale_dole_cycle_claim(env):
+    """audit#1143 #1113: approveForListing() was dead code (never called --
+    the checkbox uses toggleApprove()) still shipping a confirm() dialog
+    that falsely claimed items 'will go live at the next dole cycle' even
+    though the ebay_dole worker was never installed. Removed."""
+    _login(env["client"])
+    r = env["client"].get(f"/form/items/{SKU_A}")
+    assert r.status_code == 200
+    assert "next dole cycle" not in r.text
+    assert "approveForListing" not in r.text
+
+
 # ---------------------------------------------------------------------------
 # GET /form/items/{sku} — eBay deep links (PP-EDITOR-001 Phase 3m)
 # ---------------------------------------------------------------------------

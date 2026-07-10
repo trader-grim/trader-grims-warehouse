@@ -841,6 +841,13 @@ operator-verified end-to-end first (R1.6/R1.7 pass)** — a bulk surface over a 
 pipeline bulk-applies the breakage. Design draws on the action-console principle
 (state drives interface) and the 550 pending re-drafts as the first real workload.
 
+**Rides along (todo #1113):** the "queue for auto-listing" checkbox's `ebay_dole`
+worker was never installed — decide at this design pass whether to build it (+ set
+a dole rate) or remove the checkbox permanently. Interim UI fix already shipped
+2026-07-10: checkbox labeled "(inactive)" with an accurate tooltip, backend
+`set_ready` response says the same, and a stray unreachable confirm-dialog still
+claiming "next dole cycle" was dead code and removed.
+
 ### Frozen — parked, not cancelled (thaw only if it blocks an R1 packet)
 
 PP-MC-001 (Midnight Commander UI) · PP-MCP-001 (MCP server — partial, tools live) ·
