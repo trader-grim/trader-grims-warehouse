@@ -434,8 +434,15 @@ class EbayDraftWorker(QueueWorker):
             try:
                 suggested = extract_json(raw)
             except Exception as exc:
+                # audit#1143 #1249: 200 chars was too short to see whether a
+                # failure was a genuinely malformed response or just missing
+                # its closing ```fence beyond the cutoff -- every one of the
+                # 95 dead-lettered jobs of this class was undiagnosable after
+                # the fact because the truncated text always looked
+                # identically "cut off mid-JSON." 2000 chars covers a full
+                # aspect-fill response in the overwhelming majority of cases.
                 raise HardFailure(
-                    f'ebay_draft: model returned non-JSON for {sku}: {raw[:200]}'
+                    f'ebay_draft: model returned non-JSON for {sku}: {raw[:2000]}'
                 ) from exc
 
         # Phase 5 — description enrichment: if product_lookup has a substantive
