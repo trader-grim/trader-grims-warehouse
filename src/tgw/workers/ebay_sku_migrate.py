@@ -51,7 +51,7 @@ from tgw.apis.ebay.trading import revise_item_sku
 # Migrate to fence.create_item in Session C when the dir rename is also fenced.
 from tgw.apis.fence import ebay_write as fence_ebay_write
 from tgw.config import DEFAULT_CONFIG, load_config
-from tgw.ebay.sync import _build_offer_bodies, _find_offer, _get_policies, publish_offer
+from tgw.ebay.sync import MARKETPLACE_ID, _build_offer_bodies, _find_offer, _get_policies, publish_offer
 from tgw.items import atomic_write_json, load_item_doc
 from tgw.queue import state_machine
 from tgw.queue.worker_base import QueueWorker
@@ -65,13 +65,22 @@ _MAX_ASPECT_LEN = 65  # Inventory API rejects aspect values longer than this
 
 
 def _get_listing_policies(cfg: Dict[str, Any],
-                          category_id: Optional[str] = None) -> Dict[str, str]:
+                          category_id: Optional[str] = None, *,
+                          marketplace_id: str = MARKETPLACE_ID) -> Dict[str, str]:
     """
     Return {fulfillmentPolicyId, paymentPolicyId, returnPolicyId}.
     Uses explicit IDs from config; picks fulfillment policy by category when
     a category-specific override exists in fulfillment_policy_by_category.
     Falls back to account-default lookup only when config has no IDs at all.
+
+    *marketplace_id*: for anything other than EBAY_US, config overrides
+    (EBAY_US business policies) are skipped entirely — resolves via the
+    account API scoped to that marketplace instead (code-review follow-up
+    to #1254/#1255; mirrors tgw.ebay.sync._get_listing_policies).
     """
+    if marketplace_id != MARKETPLACE_ID:
+        return _get_policies(cfg, marketplace_id=marketplace_id)
+
     fulfillment_id = (
         (cfg.get('fulfillment_policy_by_category', {}).get(str(category_id))
          if category_id else None)
@@ -284,8 +293,16 @@ def _migrate_inventory(cfg: Dict[str, Any],
     if item_copy.get('draft_listing'):
         item_copy['draft_listing']['price'] = current_price
 
+    # Look up any existing offer for new_sku FIRST (code-review follow-up to
+    # #1254): a partial prior migration run's own live marketplaceId is
+    # ground truth, so _build_offer_bodies never needs to guess via the
+    # Motors category-tree check — same fix as sync.stage_draft.
+    existing = _find_offer(cfg, new_sku)
+    known_marketplace_id = existing.get('marketplaceId') if existing else None
+
     try:
-        inv_body, offer_body = _build_offer_bodies(cfg, new_sku, item_copy)
+        inv_body, offer_body = _build_offer_bodies(
+            cfg, new_sku, item_copy, known_marketplace_id=known_marketplace_id)
     except ValueError as exc:
         return {'ok': False, 'old_sku': old_sku,
                 'error': f'build offer body: {exc}'}
@@ -299,9 +316,8 @@ def _migrate_inventory(cfg: Dict[str, Any],
         return {'ok': False, 'old_sku': old_sku,
                 'error': f'PUT inventory_item/{new_sku}: {body}'}
 
-    # Find or create unpublished offer for new_sku
+    # Create the offer, or update the one found above
     try:
-        existing = _find_offer(cfg, new_sku)
         if existing:
             new_offer_id = existing['offerId']
             ebay_put(cfg, f'/sell/inventory/v1/offer/{new_offer_id}',
@@ -442,7 +458,8 @@ def _migrate_inventory_live(cfg: Dict[str, Any],
     offer_body['sku'] = new_sku
     # Live offers often lack explicit policy IDs — inject from account policies
     category_id = old_offer.get('categoryId')
-    policies = _get_listing_policies(cfg, category_id)
+    policies = _get_listing_policies(
+        cfg, category_id, marketplace_id=old_offer.get('marketplaceId') or MARKETPLACE_ID)
     offer_body.setdefault('listingPolicies', {}).update(policies)
 
     # PUT new inventory item (idempotent)
@@ -459,6 +476,11 @@ def _migrate_inventory_live(cfg: Dict[str, Any],
         existing = _find_offer(cfg, new_sku)
         if existing:
             new_offer_id = existing['offerId']
+            # Ground truth wins over offer_body's marketplaceId (copied
+            # from old_offer above): a partial prior run may have created
+            # new_sku's offer on a different marketplace than old_offer's
+            # (code-review follow-up to #1254) — never assume they match.
+            offer_body['marketplaceId'] = existing.get('marketplaceId') or offer_body.get('marketplaceId')
             ebay_put(cfg, f'/sell/inventory/v1/offer/{new_offer_id}',
                      offer_body)
         else:
@@ -576,7 +598,8 @@ def _recover_partial(cfg: Dict[str, Any],
     # Inject account policies — the offer was likely created without them
     try:
         category_id = new_offer.get('categoryId')
-        policies = _get_listing_policies(cfg, category_id)
+        policies = _get_listing_policies(
+            cfg, category_id, marketplace_id=new_offer.get('marketplaceId') or MARKETPLACE_ID)
         offer_body = {k: v for k, v in new_offer.items()
                       if k not in ('offerId', 'status', 'listing')}
         offer_body.setdefault('listingPolicies', {}).update(policies)

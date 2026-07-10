@@ -46,6 +46,18 @@ _tree_id_cache: Optional[str] = None
 _tree_index_cache: Optional[Dict[str, Dict[str, Any]]] = None
 _tree_roots_cache: Optional[List[str]] = None
 
+# eBay Motors US — a genuinely SEPARATE category tree from EBAY_US's tree 0,
+# confirmed live 2026-07-09 (todo #1254): a real Motors category 404s
+# against tree 0 and only resolves under tree 100. NOT a branch of the
+# EBAY_US tree, an assumption an earlier planning pass got wrong. Hardcoded
+# here the same way _EBAY_US_DEFAULT_TREE_ID is — a stable platform
+# constant, not business data. The Taxonomy API's marketplace_id enum for
+# this marketplace is 'EBAY_MOTORS_US' (distinct from the Sell/Inventory
+# API's offer.marketplaceId value 'EBAY_MOTORS' — same marketplace,
+# different spelling per eBay API family).
+_MOTORS_TREE_ID = '100'
+_motors_tree_index_cache: Optional[Dict[str, Dict[str, Any]]] = None
+
 
 def _tree_id_cache_path(cfg: Dict[str, Any]) -> Optional[Path]:
     root = cfg.get('catalog_root')
@@ -164,6 +176,49 @@ def _build_index(cfg: Dict[str, Any], tree_data: Dict[str, Any]) -> Dict[str, Di
     return index
 
 
+def _load_or_fetch_tree(cfg: Dict[str, Any], tree_id: str,
+                        cache_path: Optional[Path], cache_label: str) -> Dict[str, Any]:
+    """Shared core for _ensure_tree_index/_ensure_motors_tree_index (todo
+    #1255 code-review follow-up — was two ~30-line copies): load the raw
+    tree JSON from disk cache if present, else fetch live and write it.
+    The disk cache never auto-expires — see the module-level note by
+    ``_TREE_ID_CACHE_MAX_AGE`` for why. Returns the raw tree_data dict
+    (not yet flattened into an index)."""
+    tree_data: Optional[Dict[str, Any]] = None
+    if cache_path and cache_path.exists():
+        try:
+            wrapper = json.loads(cache_path.read_text(encoding='utf-8'))
+            tree_data = wrapper.get('tree')
+        except (OSError, ValueError) as exc:
+            log.warning('%s cache unreadable, refetching: %s', cache_label, exc)
+
+    if tree_data is None:
+        tree_data = ebay_get(cfg, f'/commerce/taxonomy/v1/category_tree/{tree_id}')
+        if cache_path:
+            try:
+                cache_path.write_text(
+                    json.dumps({'_cached_at': time.time(), 'tree': tree_data}),
+                    encoding='utf-8',
+                )
+            except OSError as exc:
+                log.warning('could not write %s cache: %s', cache_label, exc)
+    return tree_data
+
+
+def _fetch_tree_live(cfg: Dict[str, Any], tree_id: str,
+                     cache_path: Optional[Path]) -> Dict[str, Any]:
+    """Shared core for refresh_category_tree_cache/
+    refresh_motors_category_tree_cache: force a live re-fetch, overwriting
+    the disk cache unconditionally. Returns the raw tree_data dict."""
+    tree_data = ebay_get(cfg, f'/commerce/taxonomy/v1/category_tree/{tree_id}')
+    if cache_path:
+        cache_path.write_text(
+            json.dumps({'_cached_at': time.time(), 'tree': tree_data}),
+            encoding='utf-8',
+        )
+    return tree_data
+
+
 def _ensure_tree_index(cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     """Return (and lazily build/cache) the full category id → node index.
 
@@ -175,27 +230,8 @@ def _ensure_tree_index(cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     if _tree_index_cache is not None:
         return _tree_index_cache
 
-    cache_path = _tree_cache_path(cfg)
-    tree_data: Optional[Dict[str, Any]] = None
-
-    if cache_path and cache_path.exists():
-        try:
-            wrapper = json.loads(cache_path.read_text(encoding='utf-8'))
-            tree_data = wrapper.get('tree')
-        except (OSError, ValueError) as exc:
-            log.warning('category tree cache unreadable, refetching: %s', exc)
-
-    if tree_data is None:
-        tree_id = get_category_tree_id(cfg)
-        tree_data = ebay_get(cfg, f'/commerce/taxonomy/v1/category_tree/{tree_id}')
-        if cache_path:
-            try:
-                cache_path.write_text(
-                    json.dumps({'_cached_at': time.time(), 'tree': tree_data}),
-                    encoding='utf-8',
-                )
-            except OSError as exc:
-                log.warning('could not write category tree cache: %s', exc)
+    tree_id = get_category_tree_id(cfg)
+    tree_data = _load_or_fetch_tree(cfg, tree_id, _tree_cache_path(cfg), 'category tree')
 
     index = _build_index(cfg, tree_data)
     _tree_index_cache = index
@@ -214,18 +250,87 @@ def refresh_category_tree_cache(cfg: Dict[str, Any]) -> int:
     """
     global _tree_index_cache, _tree_roots_cache
     tree_id = get_category_tree_id(cfg)
-    tree_data = ebay_get(cfg, f'/commerce/taxonomy/v1/category_tree/{tree_id}')
-    cache_path = _tree_cache_path(cfg)
-    if cache_path:
-        cache_path.write_text(
-            json.dumps({'_cached_at': time.time(), 'tree': tree_data}),
-            encoding='utf-8',
-        )
+    tree_data = _fetch_tree_live(cfg, tree_id, _tree_cache_path(cfg))
     index = _build_index(cfg, tree_data)
     _tree_index_cache = index
     _tree_roots_cache = [nid for nid, n in index.items() if n['parent_id'] is None]
     log.info('eBay category tree cache refreshed: %d categories', len(index))
     return len(index)
+
+
+# ---------------------------------------------------------------------------
+# eBay Motors tree (tree 100) — todo #1255, PP-EBAY-MOTORS-001
+#
+# Mirrors the EBAY_US tree caching above, but for the genuinely separate
+# Motors tree. Deliberately a parallel set of GLOBAL CACHES (not threading
+# tree_id through every EBAY_US function above and its callers) — the
+# EBAY_US tree is the hot path for the whole drafting pipeline (category
+# suggestions, search, browse) and stays untouched; only the fetch/cache
+# mechanics are shared, via _load_or_fetch_tree/_fetch_tree_live above.
+# ---------------------------------------------------------------------------
+
+def _motors_tree_cache_path(cfg: Dict[str, Any]) -> Optional[Path]:
+    root = cfg.get('catalog_root')
+    return Path(root) / 'ebay-motors-category-tree.json' if root else None
+
+
+def _ensure_motors_tree_index(cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Return (and lazily build/cache) the Motors category id → node index.
+
+    Same never-auto-expires contract as _ensure_tree_index — use
+    refresh_motors_category_tree_cache() to force a re-fetch.
+    """
+    global _motors_tree_index_cache
+    if _motors_tree_index_cache is not None:
+        return _motors_tree_index_cache
+
+    tree_data = _load_or_fetch_tree(cfg, _MOTORS_TREE_ID, _motors_tree_cache_path(cfg),
+                                    'Motors category tree')
+    index = _build_index(cfg, tree_data)
+    _motors_tree_index_cache = index
+    log.info('eBay Motors category tree loaded: %d categories', len(index))
+    return index
+
+
+def refresh_motors_category_tree_cache(cfg: Dict[str, Any]) -> int:
+    """Force a live re-fetch of the Motors category tree (mirrors
+    refresh_category_tree_cache for the EBAY_US tree). Returns the number
+    of categories in the newly cached tree."""
+    global _motors_tree_index_cache
+    tree_data = _fetch_tree_live(cfg, _MOTORS_TREE_ID, _motors_tree_cache_path(cfg))
+    index = _build_index(cfg, tree_data)
+    _motors_tree_index_cache = index
+    log.info('eBay Motors category tree cache refreshed: %d categories', len(index))
+    return len(index)
+
+
+def is_motors_category(cfg: Dict[str, Any], category_id: str) -> bool:
+    """True if *category_id* belongs to eBay Motors' distinct category tree.
+
+    Backed by the local disk+memory Motors tree cache above — a real
+    membership check, not a live API call per category (todo #1255,
+    replacing the per-category live-call stopgap sync.py used from todo
+    #1254). Fails closed to False on any fetch error — never blocks a
+    draft push over a Taxonomy API hiccup.
+
+    Cross-tree collision check (code-review follow-up): verified live
+    against the real cached trees — 17,105 assignable EBAY_US categories
+    (tree 0) vs 3,288 Motors categories (tree 100), **zero overlap**. The
+    only id present in both trees' raw data is '0' (each tree's own
+    synthetic rootCategoryNode), and _build_index() already excludes the
+    root from the indexed set (only its children are indexed), so it can
+    never appear as a real category_id here either. A false positive
+    (an ordinary EBAY_US category_id misidentified as Motors) is not
+    possible with the current tree data.
+    """
+    if not category_id:
+        return False
+    try:
+        index = _ensure_motors_tree_index(cfg)
+    except Exception as exc:
+        log.warning('Motors category tree unavailable (defaulting to EBAY_US): %s', exc)
+        return False
+    return str(category_id).strip() in index
 
 
 def _breadcrumb(index: Dict[str, Dict[str, Any]], category_id: str) -> str:

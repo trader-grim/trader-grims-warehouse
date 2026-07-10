@@ -5,8 +5,17 @@ ebay_backfill_offers.py — write offer_id + listing_id + price to every ItemDat
 Strategy:
   1. Page through all Inventory API items (100/page) to collect all live SKUs.
   2. For each SKU missing offer data locally, fetch offer from eBay.
-  3. Write ebay_offer + ebay_listing blocks to item JSON.
+  3. Write ebay_offer + ebay_listing blocks via the tgw-api fence
+     (apis.fence.ebay_write) — never atomic_write_json directly.
   4. Save progress checkpoint every 500 items so the script can resume.
+
+audit#1143 #1204+#1205 (todo #1236): this used to bypass the fence entirely
+via atomic_write_json, which (a) silently discarded any concurrent
+ebay_sync/ebay_publish fence write (lost-update race) and skipped the
+fence's protected-subfield merge logic, and (b) never enqueued
+catalog_rebuild (invariant A7), leaving catalog/thumbnails stale after a
+fleet-wide backfill. Routing through apis.fence.ebay_write closes both —
+the fence write path already enqueues catalog_rebuild per A7.
 
 Usage:
   sudo -u tgw python3 scripts/ebay_backfill_offers.py
@@ -19,7 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from tgw.config import load_config
 from tgw.ebay.pull import iter_inventory_api_items, fetch_offer_for_sku
-from tgw.items import atomic_write_json
+from tgw.apis.fence import ebay_write as fence_ebay_write
 
 LOG_PATH  = Path('/opt/TGW/var/log/ebay-backfill-offers.log')
 CKPT_PATH = Path('/opt/TGW/var/run/ebay-backfill-offers-ckpt.json')
@@ -126,20 +135,28 @@ def main():
         sold_qty   = offer.get('listing', {}).get('soldQuantity', 0)
         category   = offer.get('categoryId', '')
 
-        item.setdefault('ebay_offer', {}).update({
-            'offer_id':    offer_id,
-            'listing_id':  listing_id,
-            'price':       price,
-            'category_id': category,
-        })
-        item.setdefault('ebay_listing', {}).update({
-            'listing_id':     listing_id,
-            'listing_status': status,
-            'sold_quantity':  sold_qty,
-        })
-
+        # Pass only the fields we're actually setting — NOT a locally
+        # pre-merged copy of the existing ebay_offer/ebay_listing blocks.
+        # The fence does its own current-state merge server-side (audit#1143
+        # #1204+#1205, todo #1236): pre-merging locally from our own read
+        # earlier in this loop and sending the WHOLE block back would
+        # reintroduce the same lost-update race one layer up, overwriting
+        # any concurrent ebay_sync/ebay_publish write with our stale copy.
         try:
-            atomic_write_json(json_path, item)
+            fence_ebay_write(
+                cfg, sku,
+                ebay_offer={
+                    'offer_id':    offer_id,
+                    'listing_id':  listing_id,
+                    'price':       price,
+                    'category_id': category,
+                },
+                ebay_listing={
+                    'listing_id':     listing_id,
+                    'listing_status': status,
+                    'sold_quantity':  sold_qty,
+                },
+            )
             written += 1
             ckpt['done'].append(sku)
         except Exception as e:

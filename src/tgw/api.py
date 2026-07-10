@@ -483,6 +483,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ]),
     ("Ops / Admin", [
         "health", "serve", "restart-workers", "restart-ebay-token", "refresh-ebay-taxonomy",
+        "refresh-motors-ebay-taxonomy",
         "warm-ebay-aspects", "ops-digest",
         "dead-letter", "queue-history", "todo", "plan", "ai-usage", "report",
         "admin-file", "classify-suggestions", "picklist", "print-label", "mvitems",
@@ -863,6 +864,8 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("restart-ebay-token", help="clear dead-letter token jobs and enqueue a fresh token_refresh immediately")
 
     sub.add_parser("refresh-ebay-taxonomy", help="force a live re-fetch of the eBay category tree cache (run when eBay announces a taxonomy change — cache never auto-expires)")
+
+    sub.add_parser("refresh-motors-ebay-taxonomy", help="force a live re-fetch of the eBay Motors category tree cache (tree 100, separate from EBAY_US — todo #1255; never auto-expires)")
 
     sub.add_parser("warm-ebay-aspects", help="download aspects for ALL leaf categories in ONE bulk Taxonomy call (separate 100/day pool); after this, UI aspect lookups need zero live calls")
 
@@ -5153,6 +5156,12 @@ def main() -> int:
             from .apis.ebay.taxonomy import refresh_category_tree_cache
 
             count = refresh_category_tree_cache(cfg)
+            result = {"ok": True, "categories_cached": count}
+
+        elif args.op == "refresh-motors-ebay-taxonomy":
+            from .apis.ebay.taxonomy import refresh_motors_category_tree_cache
+
+            count = refresh_motors_category_tree_cache(cfg)
             result = {"ok": True, "categories_cached": count}
 
         elif args.op == "warm-ebay-aspects":
