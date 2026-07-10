@@ -35,6 +35,14 @@ log = logging.getLogger(__name__)
 
 SOLD_INITIAL_LOOKBACK_DAYS = 365
 SOLD_ORDERS_WINDOW_DAYS    = 90    # GetOrders API max per call
+# GetOrders' real constraint is a rolling one: CreateTimeFrom can never be
+# more than 90 days before *now*, no matter the window width (audit#1143
+# #1153 -- SOLD_INITIAL_LOOKBACK_DAYS=365 fed a scan_from far outside that
+# boundary straight into the first 90-day chunk, so the very first call
+# failed with "Invalid dates in CreateTimeFrom -- orders older than 90 days
+# cannot be retrieved"; chunking the window narrower doesn't help since the
+# START date was already too old). 89, not 90, for a one-day safety margin.
+_MAX_ORDER_LOOKBACK_DAYS = 89
 
 _TITLE_STOPWORDS = frozenset({
     'a', 'an', 'the', 'and', 'or', 'of', 'in', 'for',
@@ -558,6 +566,16 @@ def sync_sold_orders(cfg: Dict[str, Any], listing_index: Dict[str, Path],
         scan_from = now - timedelta(days=SOLD_INITIAL_LOOKBACK_DAYS)
         log.info('ebay_pull: first sold sync — looking back %d days',
                  SOLD_INITIAL_LOOKBACK_DAYS)
+
+    # GetOrders can never see further back than _MAX_ORDER_LOOKBACK_DAYS from
+    # now, regardless of how far scan_from wants to go (first-sync or a
+    # long-stale incremental resume) — clamp here, not just the window width.
+    earliest_allowed = now - timedelta(days=_MAX_ORDER_LOOKBACK_DAYS)
+    if scan_from < earliest_allowed:
+        log.info('ebay_pull: scan_from %s predates GetOrders\' %d-day limit — '
+                 'clamped to %s', scan_from.date(), _MAX_ORDER_LOOKBACK_DAYS,
+                 earliest_allowed.date())
+        scan_from = earliest_allowed
 
     orders: List[Dict[str, Any]] = []
     window_start = scan_from
