@@ -256,6 +256,17 @@ class EbayPublishWorker(QueueWorker):
                              f'/sell/inventory/v1/inventory_item/{sku}',
                              {'condition': 'USED_EXCELLENT'})
                     result = publish_offer(self.config, offer_id)
+                    # audit#1143 #1168: this succeeded on eBay, but draft_listing's
+                    # condition_enum was left at the rejected granular value —
+                    # the next ebay_stage re-stage would resubmit that same
+                    # value, get 25021 again, and re-apply this same fallback
+                    # forever (local record permanently disagreeing with what's
+                    # actually live). Persisted below via the function's own
+                    # end-of-run fence_patch_item(draft_listing=...) write.
+                    if item.get('draft_listing'):
+                        item['draft_listing']['condition_id']    = '3000'
+                        item['draft_listing']['condition_label'] = 'Used'
+                        item['draft_listing']['condition_enum']  = 'USED_EXCELLENT'
                 else:
                     msg = _format_ebay_error(body_text, status)
                     # Canonical pipeline_error schema (broker B1b) — see

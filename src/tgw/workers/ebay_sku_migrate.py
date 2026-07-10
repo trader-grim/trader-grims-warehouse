@@ -117,6 +117,7 @@ _REASON_CODE_MAP: tuple = (
     (('Best Offer',),                      'FEATURE_UNSUPPORTED'),
     (('not currently supported',),         'FEATURE_UNSUPPORTED'),
     (('no price',),                        'NO_PRICE'),
+    (('local rename failed',),             'LOCAL_RENAME_FAILED_AFTER_EBAY_DONE'),
 )
 
 
@@ -835,7 +836,19 @@ class EbaySkuMigrateWorker(QueueWorker):
                 if result.get('ebay_done'):
                     log.error('ebay_sku_migrate: eBay already revised/migrated for %s '
                               '— manual local fix required', old_sku)
-                if _is_permanent_failure(error_text):
+                # audit#1143 #1169: ebay_done=True (eBay-side migration already
+                # succeeded, only the local folder rename failed) was never
+                # classified as permanent — _is_permanent_failure() only
+                # matches known eBay errorId substrings, none of which appear
+                # in a local filesystem rename error. The item was silently
+                # reprocessed every cycle forever: revise_item_sku() re-run
+                # against a listing that's already on new_sku, local rename
+                # re-attempted against whatever local condition is still
+                # failing (unlikely to self-heal), no alert ever raised.
+                # ebay_done is always blocking — retrying can't fix a local
+                # rename failure and the local/eBay SKU are now provably out
+                # of sync, which needs a human, not another cycle.
+                if result.get('ebay_done') or _is_permanent_failure(error_text):
                     try:
                         from tgw.items import _write_field
                         now = datetime.now(timezone.utc).isoformat()
