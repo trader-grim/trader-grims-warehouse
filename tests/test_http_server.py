@@ -2844,6 +2844,24 @@ def test_photo_order_not_found(client):
     assert r.status_code == 404
 
 
+def test_photo_order_enqueues_via_shared_helper(client, enqueue_calls):
+    """audit#1143 (#1198): set_photo_order used to duplicate the
+    catalog_rebuild enqueue inline instead of calling
+    _enqueue_catalog_rebuild(); verify it now goes through the shared
+    helper (same dedupe key, same coalescing behavior)."""
+    r = client.post(
+        f"/api/items/{SKU_A}/photo-order",
+        json={"order": ["a.jpg"]},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    assert len(enqueue_calls) == 1
+    kwargs = enqueue_calls[0]["kwargs"]
+    assert kwargs["queue_name"] == "catalog_rebuild"
+    assert kwargs["dedupe_key"] == "catalog_rebuild:pending"
+    assert kwargs["payload"]["reason"] == f"photo_order:{SKU_A}"
+
+
 # ---------------------------------------------------------------------------
 # Browse page — per-page selector and view toggle
 # ---------------------------------------------------------------------------
@@ -4059,6 +4077,39 @@ def test_intake_form_escapes_stored_fields(env):
     assert "&lt;script&gt;" in r.text
 
 
+def test_intake_form_rejects_path_traversal_sku(env):
+    """audit#1143 (#1198): intake_form built the ItemData path from a raw
+    sku with no '..' guard, unlike sibling media routes (get_media,
+    get_thumb_noauth). A sku containing '..' must be rejected before any
+    filesystem access."""
+    _login(env["client"])
+    r = env["client"].get("/form/intake/..sneaky")
+    assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# GET /api/items/{sku}/hint-trail
+# ---------------------------------------------------------------------------
+
+
+def test_hint_trail_returns_history(client, env):
+    _write_item(env["itemdata_root"], SKU_A, {
+        "sku": SKU_A,
+        "identification_history": [{"round": 1, "at": "2026-07-01T00:00:00Z"}],
+    })
+    r = client.get(f"/api/items/{SKU_A}/hint-trail", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    d = r.json()
+    assert d["count"] == 1
+
+
+def test_hint_trail_rejects_path_traversal_sku(client):
+    """audit#1143 (#1198): get_hint_trail built the ItemData path from a
+    raw sku with no '..' guard, unlike sibling media routes."""
+    r = client.get("/api/items/..sneaky/hint-trail", headers=AUTH_HEADERS)
+    assert r.status_code == 400
+
+
 def test_docs_page_escapes_raw_html_in_markdown(env):
     """/docs renders vault markdown; raw HTML/script must not execute verbatim."""
     vault = env["cfg"]["plan_vault_path"]
@@ -4070,3 +4121,55 @@ def test_docs_page_escapes_raw_html_in_markdown(env):
     assert r.status_code == 200
     assert "<script>alert(1)</script>" not in r.text
     assert "&lt;script&gt;" in r.text
+
+
+# ---------------------------------------------------------------------------
+# GET /form/items/{sku} — store category dropdowns (primary + secondary)
+# ---------------------------------------------------------------------------
+
+
+def test_item_detail_store_category_dropdowns_populate_and_select(env):
+    """audit#1143 (#1198): the secondary store-category dropdown used to be
+    built from a plain rebuild block that silently relied on the primary
+    block's _sc_list surviving a shared try/except -- if the primary lookup
+    ever failed partway, the secondary block's NameError would be silently
+    swallowed too. Both dropdowns now share one _sc_list + a single builder
+    function, so both should populate correctly and mark the right option
+    selected."""
+    groups_path = env["groups_path"]
+    groups_path.write_text(
+        json.dumps({
+            "groups": {
+                "books": {
+                    "name": "Books",
+                    "store_category": "Books & Media",
+                    "store_category_id": "111",
+                },
+                "electronics": {
+                    "name": "Electronics",
+                    "store_category": "Electronics",
+                    "store_category_id": "222",
+                },
+            }
+        }),
+        encoding="utf-8",
+    )
+    sku = "tgw20260701000000077"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Store Cat Test Item",
+        "draft_listing": {
+            "store_category_id": "111",
+            "secondary_store_category_id": "222",
+        },
+    })
+    _login(env["client"])
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    text = r.text
+    # both known store categories appear in both dropdowns
+    assert 'value="111" data-name="Books &amp; Media"' in text
+    assert 'value="222" data-name="Electronics"' in text
+    # primary dropdown selects 111, secondary selects 222
+    assert 'value="111" data-name="Books &amp; Media" selected' in text
+    assert 'value="222" data-name="Electronics" selected' in text

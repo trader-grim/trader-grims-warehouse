@@ -2265,16 +2265,7 @@ def set_photo_order(sku: str, body: PhotoOrderBody) -> Dict[str, Any]:
     if not json_path.exists():
         raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
     _apply_patch(json_path, {"photo_order": [n for n in body.order if n]})
-    try:
-        state_machine.enqueue_job(
-            queue_name="catalog_rebuild",
-            payload={"reason": f"photo_order:{sku}"},
-            dedupe_key="catalog_rebuild:pending",
-            not_before=time.time() + 30,
-            max_attempts=3,
-        )
-    except Exception:
-        pass
+    _enqueue_catalog_rebuild(f"photo_order:{sku}")
     return {"ok": True, "sku": sku, "order": [n for n in body.order if n]}
 
 
@@ -2367,6 +2358,8 @@ def remove_comp(sku: str, body: RemoveCompBody) -> Dict[str, Any]:
 
 @app.get("/api/items/{sku}/hint-trail", dependencies=[AUTH])
 def get_hint_trail(sku: str) -> Dict[str, Any]:
+    if ".." in sku:
+        raise HTTPException(status_code=400, detail="invalid sku")
     json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
     if not json_path.exists():
         raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
@@ -3031,6 +3024,9 @@ def intake_form(sku: str, request: Request):
     import html as _html
 
     from fastapi.responses import HTMLResponse
+
+    if ".." in sku:
+        raise HTTPException(status_code=400, detail="invalid sku")
 
     json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
     if not json_path.exists():
@@ -4377,13 +4373,6 @@ def _render_item_detail_html(
         + ebay_links_html
     )
 
-    # eBay offer data (what we submitted)
-    def _fmt_price(v: Any) -> str:
-        try:
-            return f"${float(v):.2f}" if v is not None else "—"
-        except (ValueError, TypeError):
-            return "—"
-
     # Pricing history expandable section (todo 877)
     _comps = eo.get("price_comps") or {} if eo else {}
     _price_source = eo.get("price_source", "") if eo else ""
@@ -4427,7 +4416,7 @@ def _render_item_detail_html(
         (
             fr("Offer ID", h(str(eo.get("offer_id", "") or "")))
             + fr("Offer Status", h(offer_status) if offer_status else "")
-            + fr("Offer Price", _fmt_price(offer_price))
+            + fr("Offer Price", _safe_price(offer_price))
             + fr("eBay Category", h(str(eo.get("category_id", "") or "")))
             + fr("Quantity", h(str(eo.get("quantity", "") or "")))
             + fr("Published At", h(_local_ts(eo.get("published_at"))))
@@ -4441,9 +4430,9 @@ def _render_item_detail_html(
     if dl:
         _dl_raw_price = dl.get("price")
         if _dl_raw_price is None and offer_price is not None:
-            dl_price_str = _fmt_price(offer_price) + ' <span style="color:#888;font-size:.78em">(from offer)</span>'
+            dl_price_str = _safe_price(offer_price) + ' <span style="color:#888;font-size:.78em">(from offer)</span>'
         else:
-            dl_price_str = _fmt_price(_dl_raw_price)
+            dl_price_str = _safe_price(_dl_raw_price)
         q = dl.get("quality") or {}
         q_score = q.get("score", "—")
         q_flags = ", ".join(q.get("flags", [])) or "—"
@@ -4989,15 +4978,14 @@ def _render_item_detail_html(
     _dl_store_cat2_id = str((dl or {}).get("secondary_store_category_id") or "")
     _dl_cat2_id_v = h(str((dl or {}).get("secondary_category_id") or ""))
     _dl_cat2_name = h(str((dl or {}).get("secondary_category_name") or ""))
-    _store_cat_opts_html = '<option value="">— not set —</option>'
+    _sc_list: list = []
     try:
         import json as _json_sc
 
         _cg_path_sc = _cfg.get("category_groups_path")
-        if _cg_path_sc and _cg_path_sc.exists():
-            _cg_sc = _json_sc.loads(_cg_path_sc.read_text())
+        if _cg_path_sc and Path(_cg_path_sc).exists():
+            _cg_sc = _json_sc.loads(Path(_cg_path_sc).read_text())
             _seen_sc: set = set()
-            _sc_list = []
             for _grp_sc in _cg_sc.get("groups", _cg_sc).values():
                 _sn = _grp_sc.get("store_category") or _grp_sc.get("store_category_name") or ""
                 _si = str(_grp_sc.get("store_category_id") or "")
@@ -5005,20 +4993,19 @@ def _render_item_detail_html(
                     _seen_sc.add(_si)
                     _sc_list.append((_sn, _si))
             _sc_list.sort(key=lambda x: x[0])
-            _store_cat_opts_html += "".join(f'<option value="{_si}" data-name="{h(_sn)}"{" selected" if _si == _dl_store_cat_id else ""}>{h(_sn)} ({_si})</option>' for _sn, _si in _sc_list)
     except Exception:
-        pass
-    # Build second store cat options (same list, different selected value)
-    _store_cat2_opts_html = _store_cat_opts_html.replace(
-        f'value="{_dl_store_cat_id}" data-name=',
-        f'value="{_dl_store_cat_id}" data-name=',  # no-op placeholder
-    )
-    # Rebuild with secondary selection
-    _store_cat2_opts_html = '<option value="">— not set —</option>'
-    try:
-        _store_cat2_opts_html += "".join(f'<option value="{_si}" data-name="{h(_sn)}"{" selected" if _si == _dl_store_cat2_id else ""}>{h(_sn)} ({_si})</option>' for _sn, _si in _sc_list)
-    except Exception:
-        pass
+        _sc_list = []
+
+    def _store_cat_options_html(selected_id: str) -> str:
+        opts = '<option value="">— not set —</option>'
+        opts += "".join(
+            f'<option value="{_si}" data-name="{h(_sn)}"{" selected" if _si == selected_id else ""}>{h(_sn)} ({_si})</option>'
+            for _sn, _si in _sc_list
+        )
+        return opts
+
+    _store_cat_opts_html = _store_cat_options_html(_dl_store_cat_id)
+    _store_cat2_opts_html = _store_cat_options_html(_dl_store_cat2_id)
     import json as _json2
 
     _cat_root = _cfg.get("catalog_root")

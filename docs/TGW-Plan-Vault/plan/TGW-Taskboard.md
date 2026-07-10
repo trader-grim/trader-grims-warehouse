@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-07-10 14:23 UTC — 207 open, 131 done in the last 7 days._
+_Rendered 2026-07-10 14:32 UTC — 206 open, 132 done in the last 7 days._
 
 ## admin (23 open)
 
@@ -41,7 +41,7 @@ _Rendered 2026-07-10 14:23 UTC — 207 open, 131 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (40 open)
+## claude (39 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
@@ -68,7 +68,6 @@ _Rendered 2026-07-10 14:23 UTC — 207 open, 131 done in the last 7 days._
 | 1250 | 30 |  | PLANNING: harden one-off scripts pattern (invariant E9). (1) tgw_logging.announce_script_run() added — retrofit onto all scripts/ one-off tooling (starting with requeue_ebay_draft_402_dead_letters.py, left unrun). (2) Decide/build a detector: grep-based check flagging scripts/*.py with main() but no announce_script_run call. (3) Separately: requeue_ebay_draft_402_dead_letters.py's fresh-per-run dedupe key defeats loop protection (caused 6,607-job storm 07-04/05) — needs an attempt cap/backoff fix before it's ever run again |  |  |
 | 1065 | 35 |  | PP-PHOTO-001 Phase B: GDrive → eBay zero-bandwidth image upload — replace deprecated UploadSiteHostedPictures (Trading API) in ebay_upload worker with GDrive direct-URL pattern. Flow: (1) make each SKU photo temporarily public (anyone-reader), (2) pass GDrive direct download URL to Inventory API imageUrls[], (3) eBay CDN fetches from Google directly — TGW server sends zero image bytes, (4) revoke public access after staging confirms imageUrls populated in ebay_live. Eliminates all local upload bandwidth from photo pipeline. Same GDrive OAuth helper from Phase A. NOTE: Phase A (multimodal draft) is higher priority and should be built first since it shares the GDrive API helper. Research: docs/TGW-Plan-Vault/dev-workflow/research/RESEARCH-gdrive-zero-bandwidth-ebay-image-upload.md | [[TGW-Master-Plan#PP-PHOTO-001 — photo pipeline (GDrive → Gemini / eBay)\|PP-PHOTO-001]] |  |
 | 1119 | 35 |  | PAUSED (updated): P10 legacy-duplicate-check fix built+verified — n=1 test item confirmed NOT a duplicate, auto-resolved, fell through to normal path, but then hit an UNRELATED per-item eBay business rule (Best Offer + multi-marketplace conflict) — dead-lettered correctly, needs Dave's call. Need a clean n=1 (no incidental conflicts) to complete the before/after demo before ramping the other ~490. | [[TGW-Master-Plan#PP-PHOTOSYNC-001 — upload integrity + operator lane hardening + fleet photo repair\|PP-PHOTOSYNC-001]] | ✓ deps done |
-| 1198 | 35 |  | audit#1143 (batched, lower prio): http_server.py cohesion findings -- set_photo_order:2167 duplicates catalog_rebuild enqueue inline instead of using _enqueue_catalog_rebuild helper; get_hint_trail:2282/intake_form:2945 build ItemData path from raw sku with no '..' traversal guard (unlike sibling media routes); dead code + fragile silent-fail fallback in store-category dropdown build (:4922); _safe_price/_fmt_price byte-identical duplicate helpers (:4263) |  |  |
 | 1171 | 40 |  | audit#1143 (lower prio, batched): invariant/cohesion findings from workers/ audit -- fence-bypass path construction (ebay_sku_migrate.py:220, bundle_intake.py:212, ebay_draft.py:286, ebay_upload.py:76, ai_identify.py:148), itemdata_scrub.py:101 unvalidated job SKU/path, photo_history_recovery.py:118 no catalog-refresh trigger, itemdata_scrub.py:84 ad-hoc queue, ebay_stage.py:46 duplicated error formatter. See RESEARCH-1143-workers-audit.md |  |  |
 | 1213 | 40 |  | audit#1143 (cohesion, low prio): photo_repair_iss013.py:55 ITEMDATA_ROOT hardcoded instead of read from tgw.config itemdata_root (sibling photosync_canary_probe.py does it correctly) -- silently stale/wrong if itemdata_root is ever repointed (e.g. LVM expansion project) |  |  |
 | 1240 | 40 |  | fix 9 pre-existing broken tests (7 test_model_routing.py openrouter-vs-google_direct stale expectations, 2 test_invariants_pricing.py ebay_price.py:124 NoneType) surfaced during #1174 full-suite run |  |  |
@@ -238,10 +237,11 @@ _Rendered 2026-07-10 14:23 UTC — 207 open, 131 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — sold-event webhook (Tier 4)\|PP-SOLD-001]] |  |
 
-## Done this week (131)  — showing 15 most recent
+## Done this week (132)  — showing 15 most recent
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 1198 | claude | 2026-07-10 | audit#1143 (batched, lower prio): http_server.py cohesion findings -- set_photo_order:2167 duplicates catalog_rebuild enqueue inline instead of using _enqueue_catalog_rebuild helper; get_hint_trail:2282/intake_form:2945 build ItemData path from raw sku with no '..' traversal guard (unlike sibling media routes); dead code + fragile silent-fail fallback in store-category dropdown build (:4922); _safe_price/_fmt_price byte-identical duplicate helpers (:4263) |
 | 1182 | claude | 2026-07-10 | audit#1143 (batched, lower prio): apis/ebay/ cohesion findings -- conditions.py:177 _get_policies() re-reads+re-parses full 2.7MB policy file every call, no memoization unlike sibling caches (taxonomy._tree_id_cache, specifics._aspects_mem_cache); trading.py:445 429-retry/backoff logic only in get_best_offers, missing from get_orders/get_my_ebay_selling generators despite same trading_call() choke point |
 | 1260 | claude | 2026-07-10 | Fixed: CI (.github/workflows/ci.yml) has failed on every run since 2026-06-15 (last success 2026-06-13) -- 4 modules (scripts/ebay_backfill_offers.py, scripts/ebay_normalize.py, apis/ebay/get_access_token.py, apis/ebay/refresh_access_token.py) opened /opt/TGW/config/tgw-api-config.json and log FileHandlers at module IMPORT time, which doesn't exist on the GitHub-hosted runner. Deferred logging.basicConfig into main() for the two scripts; wrapped the two library modules' eager TOKEN_PATH/LOG_PATH init in try/except OSError with a portable fallback. Verified by importing all 4 with TGW_ROOT pointed at a nonexistent path -- all import cleanly now. |
 | 1257 | claude | 2026-07-10 | audit#1143 #1167 follow-up: 4 items still have stale ai_reidentify=true persisted alongside ai_identified=true (tgw202605051936445, tgw202605052242107, tgw202605060201087, tgw202606021107459) -- pre-date the #1167 fix (fence_fields never included ai_reidentify, so item.pop() never persisted); each would re-trigger a billed vision-AI call on next ai_identify run. Also noted: 3 of the 4 have identification_history recording 3 ai_identify rounds but vision_results only has 1 entry -- inconsistency worth checking separately. Needs a one-off cleanup (clear the stale flag, no re-identify needed) rather than manual data mutation without Dave's sign-off. |
@@ -256,5 +256,4 @@ _Rendered 2026-07-10 14:23 UTC — 207 open, 131 done in the last 7 days._
 | 1169 | claude | 2026-07-10 | audit#1143: ebay_sku_migrate.py:252 local folder rename failure after successful eBay-side migration never flags item blocked -- reprocessed every cycle forever, no alert |
 | 1168 | claude | 2026-07-10 | audit#1143: ebay_publish.py:250 condition-rejection fallback (25021) succeeds on eBay but corrected condition never written back to draft_listing/ebay_offer -- local record permanently disagrees with live eBay, repeats 400+fallback cycle |
 | 1211 | claude | 2026-07-10 | audit#1143: photo_repair_iss013.py:292 unlinks wrongly-created <SKU>.jpg based only on byte-size match with no content-hash check and no archive-before-delete -- can permanently destroy a non-duplicate file that happens to share byte count (violates E5) |
-| 1210 | claude | 2026-07-10 | audit#1143: photosync_canary_probe.py:96 price field stringified in live snapshot but left numeric in intent snapshot -- _diff always reports spurious price mismatch, canary FAILs on every priced item even when price matches, trains operators to ignore its alerts |
-| … | | | _…and 116 more — run `tgw todo --all` to see everything_ |
+| … | | | _…and 117 more — run `tgw todo --all` to see everything_ |
