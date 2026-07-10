@@ -1,0 +1,77 @@
+"""audit#1143 (todo #1182): conditions._get_policies() was re-reading and
+re-parsing the full ~2.7MB on-disk policy cache on every call, unlike its
+sibling caches (taxonomy._tree_id_cache, specifics._aspects_mem_cache) which
+hold the parsed result in memory for the process lifetime. This verifies the
+disk cache is now only read once per process, and that an explicit
+refresh_condition_policies() call updates the in-memory copy rather than
+being shadowed by it.
+
+All eBay API calls are mocked — tests pass completely offline.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+
+import tgw.apis.ebay.conditions as conditions
+
+
+def setup_function(_):
+    conditions._policies_mem_cache = None
+
+
+def _cfg(tmp_path):
+    return {'catalog_root': tmp_path}
+
+
+def _write_disk_cache(tmp_path, policies):
+    path = tmp_path / 'ebay-condition-policies.json'
+    path.write_text(json.dumps({
+        'fetched_at': datetime.now(timezone.utc).isoformat(),
+        'policies': policies,
+    }), encoding='utf-8')
+
+
+def test_get_policies_reads_disk_cache_only_once(tmp_path, monkeypatch):
+    _write_disk_cache(tmp_path, {'165806': [['3000', 'Used']]})
+    reads = {'n': 0}
+    real_load = conditions._load_cache
+
+    def _counting_load(cfg):
+        reads['n'] += 1
+        return real_load(cfg)
+
+    monkeypatch.setattr(conditions, '_load_cache', _counting_load)
+
+    cfg = _cfg(tmp_path)
+    first = conditions._get_policies(cfg)
+    second = conditions._get_policies(cfg)
+    third = conditions._get_policies(cfg)
+
+    assert first == second == third
+    assert reads['n'] == 1
+
+
+def test_refresh_condition_policies_updates_mem_cache(tmp_path, monkeypatch):
+    _write_disk_cache(tmp_path, {'165806': [['3000', 'Used']]})
+    cfg = _cfg(tmp_path)
+
+    # prime the mem cache with the stale disk copy
+    conditions._get_policies(cfg)
+    assert conditions._policies_mem_cache == {'165806': [('3000', 'Used')]}
+
+    def _fake_ebay_get(cfg, path):
+        return {
+            'itemConditionPolicies': [
+                {'categoryId': '165806', 'itemConditions': [
+                    {'conditionId': '1000', 'conditionDescription': 'New'},
+                ]},
+            ],
+        }
+
+    monkeypatch.setattr(conditions, 'ebay_get', _fake_ebay_get)
+    conditions.refresh_condition_policies(cfg)
+
+    # the freshly-refreshed value, not the stale primed one, must come back
+    assert conditions._get_policies(cfg) == {'165806': [('1000', 'New')]}

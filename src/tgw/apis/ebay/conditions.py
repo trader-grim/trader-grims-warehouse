@@ -39,6 +39,13 @@ log = logging.getLogger(__name__)
 CACHE_MAX_AGE_DAYS = 7
 _METADATA_PATH = '/sell/metadata/v1/marketplace/EBAY_US/get_item_condition_policies'
 
+# In-process memoization (same pattern as taxonomy._tree_id_cache /
+# specifics._aspects_mem_cache): _get_policies() was re-reading and
+# re-parsing the full ~2.7MB disk cache on every call, unlike its sibling
+# caches which hold the parsed result in memory for the life of the process
+# (audit#1143).
+_policies_mem_cache: Optional[Dict[str, List[Tuple[str, str]]]] = None
+
 
 # ---------------------------------------------------------------------------
 # Condition quality ranking — lower rank = better for buyer
@@ -149,6 +156,7 @@ def _load_cache(cfg: Dict[str, Any]) -> Optional[Dict[str, List[Tuple[str, str]]
 
 def refresh_condition_policies(cfg: Dict[str, Any]) -> Dict[str, List[Tuple[str, str]]]:
     """Fetch full condition policy table from eBay and write to cache."""
+    global _policies_mem_cache
     log.info('fetching eBay condition policies from Metadata API')
     data = ebay_get(cfg, _METADATA_PATH)
     policies: Dict[str, List[Tuple[str, str]]] = {}
@@ -171,13 +179,23 @@ def refresh_condition_policies(cfg: Dict[str, Any]) -> Dict[str, List[Tuple[str,
     log.info('condition policies cached: %d categories, %d unique sets',
              len(policies),
              len({frozenset(c[0] for c in v) for v in policies.values()}))
+    _policies_mem_cache = policies
     return policies
 
 
 def _get_policies(cfg: Dict[str, Any]) -> Dict[str, List[Tuple[str, str]]]:
-    """Return policies from cache, refreshing if needed."""
+    """Return policies from cache, refreshing if needed.
+
+    Memoized in-process for the life of the process — an on-demand
+    refresh_condition_policies() call updates the in-memory cache too, so it
+    is never shadowed by a stale copy held here.
+    """
+    global _policies_mem_cache
+    if _policies_mem_cache is not None:
+        return _policies_mem_cache
     cached = _load_cache(cfg)
     if cached is not None:
+        _policies_mem_cache = cached
         return cached
     return refresh_condition_policies(cfg)
 

@@ -96,6 +96,36 @@ def trading_call(cfg: Dict[str, Any], call_name: str,
     return root
 
 
+_RETRY_DELAYS = [1, 4, 16]
+
+
+def _trading_call_retrying(cfg: Dict[str, Any], call_name: str, xml_body: str,
+                           timeout: int, site_id: str) -> ET.Element:
+    """trading_call() wrapped with 429/call-limit retry+backoff.
+
+    Every Trading API call shares the same trading_call() choke point, but
+    only get_best_offers() had this retry logic — get_orders() and
+    get_my_ebay_selling() would raise on the first rate limit (audit#1143).
+    """
+    _last_exc: Optional[Exception] = None
+    for _attempt, _delay in enumerate([0] + _RETRY_DELAYS):
+        if _delay:
+            time.sleep(_delay)
+        try:
+            root = trading_call(cfg, call_name, xml_body, timeout=timeout, site_id=site_id)
+            return root
+        except Exception as exc:
+            _raw = str(exc)
+            # 429 or eBay call-limit error code 21919188
+            if '429' in _raw or '21919188' in _raw:
+                log.warning('%s: rate limited (attempt %d): %s', call_name, _attempt + 1, exc)
+                _last_exc = exc
+                if _attempt < len(_RETRY_DELAYS):
+                    continue
+            raise
+    raise _last_exc  # type: ignore[misc]
+
+
 def _order_from_xml(order_el: ET.Element) -> Dict[str, Any]:
     """Extract order data (order_id, buyer, transactions) from an <Order> element."""
     def txt(tag: str) -> str:
@@ -167,8 +197,8 @@ def get_orders(cfg: Dict[str, Any],
   </Pagination>
 </GetOrdersRequest>'''
 
-        root = trading_call(cfg, 'GetOrders', xml_body, timeout=120,
-                            site_id=_resolve_site_id(marketplace_id))
+        root = _trading_call_retrying(cfg, 'GetOrders', xml_body, timeout=120,
+                                      site_id=_resolve_site_id(marketplace_id))
 
         pagination = root.find(_t('PaginationResult'))
         if pagination is not None:
@@ -248,8 +278,8 @@ def get_my_ebay_selling(cfg: Dict[str, Any],
   <DetailLevel>ReturnAll</DetailLevel>
 </GetMyeBaySellingRequest>'''
 
-        root = trading_call(cfg, 'GetMyeBaySelling', xml_body, timeout=90,
-                            site_id=_resolve_site_id(marketplace_id))
+        root = _trading_call_retrying(cfg, 'GetMyeBaySelling', xml_body, timeout=90,
+                                      site_id=_resolve_site_id(marketplace_id))
 
         active_list = root.find(_t('ActiveList'))
         if active_list is None:
@@ -543,27 +573,8 @@ def get_best_offers(
             f'</GetBestOffersRequest>'
         )
 
-        _delays = [1, 4, 16]
-        _last_exc: Optional[Exception] = None
-        for _attempt, _delay in enumerate([0] + _delays):
-            if _delay:
-                time.sleep(_delay)
-            try:
-                root = trading_call(cfg, 'GetBestOffers', xml_body, timeout=60,
-                                    site_id=_resolve_site_id(marketplace_id))
-                _last_exc = None
-                break
-            except Exception as exc:
-                _raw = str(exc)
-                # 429 or eBay call-limit error code 21919188
-                if '429' in _raw or '21919188' in _raw:
-                    log.warning('get_best_offers: rate limited (attempt %d): %s', _attempt + 1, exc)
-                    _last_exc = exc
-                    if _attempt < len(_delays):
-                        continue
-                raise
-        if _last_exc is not None:
-            raise _last_exc
+        root = _trading_call_retrying(cfg, 'GetBestOffers', xml_body, timeout=60,
+                                      site_id=_resolve_site_id(marketplace_id))
 
         pagination = root.find(_t('PaginationResult'))
         if pagination is not None:
