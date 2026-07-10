@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-07-10 11:17 UTC — 211 open, 124 done in the last 7 days._
+_Rendered 2026-07-10 11:36 UTC — 210 open, 125 done in the last 7 days._
 
 ## admin (23 open)
 
@@ -41,7 +41,7 @@ _Rendered 2026-07-10 11:17 UTC — 211 open, 124 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (44 open)
+## claude (43 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
@@ -54,7 +54,6 @@ _Rendered 2026-07-10 11:17 UTC — 211 open, 124 done in the last 7 days._
 | 1206 | 12 |  | audit#1143: requeue_ebay_draft_402_dead_letters.py:78 dedupe key uses fresh timestamp every invocation with no run-once guard -- re-running --apply requeues the same dead-letter rows again, burning a second full round of AI-drafting cost with no flag per the bulk-AI-cost standing rule |  |  |
 | 1154 | 18 |  | Photo integrity (plan: ai-plans/photo-integrity-mitigation.md): SWEEP DONE 2026-07-05 03:00 — 206 bad/149 SKUs/0.076% of 270,525 photos, single Feb-2022 event, 30 LIVE listings prioritized; roster /opt/TGW/var/reports/photo-integrity-2026-07-05.tsv. REMAINING packets: (1) photo_files_readable rule in catalog-verify + (size,mtime) decode cache, (2) verify-after-copy sha256 helper for bulk copy paths, (3) intake decode-verify, (4) recovery workflow rides PP-DRIVE-INDEX Phase 1 (30 live SKUs first) |  |  |
 | 1147 | 20 |  | PP-KNOWLEDGE-001 R2: tgw search --full-text (recollq-backed) + web UI search bar + MCP tool tgw_search_full — put the already-paying-off recoll layer in front of every agent and surface. Spec: docs/ai-plans/recoll-annex-jetstream.md Track R. Live acceptance: the six hours-to-seconds queries from FUTURE-IDEAS PP-SEARCH-001 run against real data |  |  |
-| 1181 | 20 |  | audit#1143: taxonomy.py:117 best_category() doesn't catch per-query exceptions from get_category_suggestions -- a failure on the first (title) query aborts the whole fallback chain instead of trying the second (broader category) query as documented |  |  |
 | 1202 | 20 |  | audit#1143: ollama_lock.py:30 acquire_ollama_lock's DSN fallback binds tgw.queue.state_machine._DSN by value at import time -- never reflects a later state_machine.init(dsn) override, so a caller with cfg missing postgres_dsn silently connects to a stale/wrong DB target instead of the live configured one |  |  |
 | 1233 | 20 |  | a1131 needs a config push + rebuild to pick up the 2026-07-06 power-client.nix (suspend-free) + keyd-import-removal fixes -- flake changes only, not yet applied on a1131 itself. Run: bash scripts/tgw-push-config.sh a1131 192.168.60.101 (wake via wakeonlan if asleep) |  |  |
 | 1149 | 22 |  | PP-KNOWLEDGE-001 A0: Syncthing retirement map — DIRECTION SET by Dave s45: annex-based GDrive tooling replaces Syncthing for data trees (atomic, hashed, metadata; conflicts impossible by construction). Inventory every Syncthing folder on both instances (db:8384, tgw:8385) and assign each a landing spot: annex / plain git (vault -> Obsidian git plugin, retires conflict files + moots #1106) / NFS-already / retire. LAN speed via ssh annex remotes (a1131), Drive = off-site+portable tier. Syncthing off when the map is empty. Spec: ai-plans/recoll-annex-jetstream.md A0 |  |  |
@@ -242,10 +241,11 @@ _Rendered 2026-07-10 11:17 UTC — 211 open, 124 done in the last 7 days._
 |---:|----:|:----:|------|------|----------|
 | 17 | 20 |  | PP-SOLD-001 Tier 3 — physical sweep checklist after full-history CSV import; run tgw ebay-sweep | [[TGW-Master-Plan#PP-SOLD-001 — sold-event webhook (Tier 4)\|PP-SOLD-001]] |  |
 
-## Done this week (124)  — showing 15 most recent
+## Done this week (125)  — showing 15 most recent
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 1181 | claude | 2026-07-10 | audit#1143: taxonomy.py:117 best_category() doesn't catch per-query exceptions from get_category_suggestions -- a failure on the first (title) query aborts the whole fallback chain instead of trying the second (broader category) query as documented |
 | 1239 | claude | 2026-07-10 | audit#1143 MERGED (#1179+#1180): unlocked/non-atomic disk-cache read-modify-write, same root cause, two cache files -- specifics.py:190 get_aspects() cache (shared across ebay_draft/ebay_sync/tgw-http; concurrent cache-miss writes race and silently drop each other's entries, crash mid-write risks corrupting the whole cache) and taxonomy.py:86 category tree ID + full tree caches (plain write_text, no atomic tmp+rename/flock unlike items.atomic_write_json elsewhere; corruption silently re-triggers live Taxonomy API calls -- the exact quota-exhaustion failure mode this cache exists to prevent). One shared locking+atomic-write helper likely fixes both. |
 | 1170 | claude | 2026-07-10 | audit#1143: photo_history_recovery.py (workers/ copy) dropped dry-run safety gate present in tools/ near-duplicate -- writes straight to live records with no review step |
 | 1167 | claude | 2026-07-10 | audit#1143: ai_identify.py:288 force-reidentify flag cleared in memory only, never persisted -- re-triggers billed vision-AI calls forever |
@@ -260,5 +260,4 @@ _Rendered 2026-07-10 11:17 UTC — 211 open, 124 done in the last 7 days._
 | 1236 | claude | 2026-07-10 | audit#1143 MERGED (#1204+#1205): ebay_backfill_offers.py bypasses the tgw-api fence entirely, causing two symptoms from one root cause -- line 100: reads/writes item JSON via atomic_write_json instead of apis.fence.ebay_write, silently discarding concurrent ebay_sync/ebay_publish fence writes (lost-update race) and skipping protected-subfield merge logic; line 142: writes ebay_offer/ebay_listing directly without enqueuing catalog_rebuild (invariant A7), leaving catalog/thumbnails stale after a fleet-wide backfill. Fix: route the whole script through apis.fence.ebay_write -- the fence write path already enqueues catalog_rebuild per A7, so this one fix should close both symptoms. |
 | 1214 | claude | 2026-07-09 | audit#1143: ebay_motors_census.py:90 --apply path bakes stale marketplaceId data from arbitrarily old capture files into ItemData with no recency/status check, and unconditionally overwrites SKUs its own report flags as ambiguous cross-marketplace cases needing human review -- silently auto-resolves the exact ambiguity it tells the operator not to auto-resolve (C11 stale-flag-vs-live-eBay class) |
 | 1252 | claude | 2026-07-09 | in_progress |
-| 1209 | claude | 2026-07-09 | fix applied + tests added; live dry-run confirms 8802 items currently legacy-only-category, exposed until --apply runs |
-| … | | | _…and 109 more — run `tgw todo --all` to see everything_ |
+| … | | | _…and 110 more — run `tgw todo --all` to see everything_ |
