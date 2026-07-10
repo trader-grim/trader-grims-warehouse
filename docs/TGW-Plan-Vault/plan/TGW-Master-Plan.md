@@ -739,11 +739,70 @@ Snapshot baseline completed (19,486 SKUs) — unblocks #1131 Motors census; drif
 Findings doc'd (#1039, admin). Reassess against s40–42 UI rebuild — much may be
 obsolete. Design: `pp/PP-RECOVERY-001.md`.
 
+## PP-PLANDB-001 — plan/tracker tooling
+Phases 1-4 done 2026-06-12→14: **P1** todo_items schema (`pp_ref`, `depends_on`,
+`plan_anchor` columns, #109) · **P2** `tgw plan render` — wholly-generated
+`plan/TGW-Taskboard.md` (#110) · **P3** `tgw plan check` — reconciles
+plan↔tracker (orphaned pp_refs, stale anchors, mismatched done/open, #112) ·
+**P4** `tgw plan status [PP-REF]` — one-line open/done/blocked rollup per PP
+item (#132). P3 and P4 (`tgw plan check` / `tgw plan status`) run in the
+mandatory session-start sequence in CLAUDE.md (Step 3); P2's output
+(`TGW-Taskboard.md`) is read as reference, but `tgw plan render` itself is
+not invoked at session start — it runs via the `plan_render` worker.
+
+### Phase 5 — execution track / goal view (PROPOSED, Dave 2026-07-10)
+
+**The ask, in Dave's words:** "all of the tasks to achieve the intended
+product should be able to be viewed in order without the noise of equally
+weighted items in other tracks." Concrete pain point: the audit#1143 cleanup
+work just completed (todos #1171/#1182/#1198/#1213 this session, plus
+earlier #1162-#1170/#1202/#1206/#1235/#1246) had to be gleaned by hand-
+grepping `source=audit-1143` across the flat todo list — there was no single
+view of "everything needed to finish this track, in order." Compounding it:
+some of the same track's items live in Dave's own todo queue (agent=`db`),
+not just Claude's, and today's flat per-agent lists never united them.
+
+**What exists today that a v1 could use as-is (no new schema required):**
+`source` (free-text, e.g. `audit-1143`), `pp_ref` (PP-* item), `depends_on`
+(ordering signal already in the schema per Phase 1), and `agent`
+(claude/admin/gemini/db — the cross-agent-unification piece). A track view
+doesn't need new columns to exist; it needs a render mode that **filters** to
+one track's items across all agents and **orders** by the dependency graph
+(topological, using `depends_on`) rather than each todo's global priority
+number — global priority is exactly the "equally weighted noise" problem:
+an audit#1143 item at p95 reads identically to an unrelated p95 item from a
+totally different track in the flat list, even though within its own track
+it might be the very next thing to do.
+
+**Shape (sketch, not yet designed in detail):** something like `tgw plan
+track <pp_ref-or-source-value>` producing a rendered, ordered list — same
+spirit as `tgw plan render`'s taskboard but scoped to one track and blind to
+everything outside it. Test case once built: run it for `audit-1143` and
+confirm it reproduces (in the right order) exactly the items worked this
+session, with none of the unrelated backlog visible.
+
+**Where this is headed (Dave, forward-looking — more to be planned, not
+speced yet):** specific teams executing specific tracks end-to-end. The nix
+flake is the working example that surfaced this need — today's session
+independently arrived at exactly this pattern by hand: multiple
+nix-touching findings (todo #1258's backup-mount durability fix, more
+pending) got batched into one pending changeset in `~/tgw-flake` rather than
+applied one at a time, because Dave wants "a bunch of flake updates to apply
+... all at once." The anticipated future model: Dave (or Claude) submits
+requirements against a track, a specialist team (e.g. a "nix specialist
+team") compiles the accumulated requests into a single coherent deliverable
+(one flake update, one PR, etc.) instead of a stream of one-off changes.
+That implies track/goal becomes a first-class routing concept, not just a
+display filter — todo metadata may eventually need an explicit
+`track`/`owner_team` field once the team-routing design lands. **Not
+building that yet** — this phase entry captures the initial ask (the view)
+only; the team-routing piece is intentionally left unspec'd until Dave's
+next planning pass.
+
 ### Done (designs in `pp/` or archive; tracker holds history)
 
 PP-EDITOR-001 (web UI, 31 todos) · PP-EBAY-MIRROR-001 (P1/P1.5/P2) · PP-MIGRATE-001 ✅
-2026-06-20 · PP-PORTABLE-CATALOG-001 (P2 Flutter build) · PP-PLANDB-001 (plan/tracker
-tooling) · PP-DEADLETTER-001 · PP-DOCFLOW-001 · PP-INTAKE-001 · PP-DATALEARN-001 ·
+2026-06-20 · PP-PORTABLE-CATALOG-001 (P2 Flutter build) · PP-DEADLETTER-001 · PP-DOCFLOW-001 · PP-INTAKE-001 · PP-DATALEARN-001 ·
 PP-MULTIMODEL-001 · PP-OFFER-001 · PP-OPS-001 · PP-PROMO-001 · PP-REF-002 ·
 PP-REVISION-001 · PP-SHELL-001 · PP-STORE-001 · PP-TODO-001 · PP-VERIFY-001 (scaffold;
 integration deferred) · PP-WM-001/PP-HM-001 (Sway/HM desktop) · PP-ADD-009 ·

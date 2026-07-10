@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-07-10 15:13 UTC — 205 open, 135 done in the last 7 days._
+_Rendered 2026-07-10 15:25 UTC — 206 open, 135 done in the last 7 days._
 
 ## admin (23 open)
 
@@ -41,7 +41,7 @@ _Rendered 2026-07-10 15:13 UTC — 205 open, 135 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ |  |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows |  |  |
 
-## claude (38 open)
+## claude (39 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
@@ -66,6 +66,7 @@ _Rendered 2026-07-10 15:13 UTC — 205 open, 135 done in the last 7 days._
 | 1230 | 30 |  | Review standing conventions/policies (freeze lists, 'never' gates, flake-surface rule, etc.) periodically to confirm none are unintentionally blocking legitimate development -- Dave 2026-07-06: 'we are not so stodgy that we cannot review and improve them' |  |  |
 | 1248 | 30 |  | stop ebay_legacy_sync worker to halt Trading-API quota drain (~6min re-trigger bug); sold-detection will lag until restarted or webhook #16 ships |  |  |
 | 1250 | 30 |  | PLANNING: harden one-off scripts pattern (invariant E9). (1) tgw_logging.announce_script_run() added — retrofit onto all scripts/ one-off tooling (starting with requeue_ebay_draft_402_dead_letters.py, left unrun). (2) Decide/build a detector: grep-based check flagging scripts/*.py with main() but no announce_script_run call. (3) Separately: requeue_ebay_draft_402_dead_letters.py's fresh-per-run dedupe key defeats loop protection (caused 6,607-job storm 07-04/05) — needs an attempt cap/backoff fix before it's ever run again |  |  |
+| 1263 | 30 |  | PP-PLANDB-001 Phase 5 (PROPOSED, Dave 2026-07-10): execution track/goal view of the plan -- filtered, dependency-ordered view of one track's todos across all agents (not just Claude's), using existing pp_ref/source/depends_on metadata, no new schema needed for v1. Motivated by audit#1143 cleanup being hard to view as a unit. Forward-looking: specialist teams (e.g. nix team) executing tracks end-to-end, compiling requests into single deliverables (the nix-flake batching pattern from today). See master plan PP-PLANDB-001 Phase 5 for full spec. Design/scope pass needed before building. | [[TGW-Master-Plan#PP-PLANDB-001 — plan/tracker tooling\|PP-PLANDB-001]] |  |
 | 1065 | 35 |  | PP-PHOTO-001 Phase B: GDrive → eBay zero-bandwidth image upload — replace deprecated UploadSiteHostedPictures (Trading API) in ebay_upload worker with GDrive direct-URL pattern. Flow: (1) make each SKU photo temporarily public (anyone-reader), (2) pass GDrive direct download URL to Inventory API imageUrls[], (3) eBay CDN fetches from Google directly — TGW server sends zero image bytes, (4) revoke public access after staging confirms imageUrls populated in ebay_live. Eliminates all local upload bandwidth from photo pipeline. Same GDrive OAuth helper from Phase A. NOTE: Phase A (multimodal draft) is higher priority and should be built first since it shares the GDrive API helper. Research: docs/TGW-Plan-Vault/dev-workflow/research/RESEARCH-gdrive-zero-bandwidth-ebay-image-upload.md | [[TGW-Master-Plan#PP-PHOTO-001 — photo pipeline (GDrive → Gemini / eBay)\|PP-PHOTO-001]] |  |
 | 1119 | 35 |  | PAUSED (updated): P10 legacy-duplicate-check fix built+verified — n=1 test item confirmed NOT a duplicate, auto-resolved, fell through to normal path, but then hit an UNRELATED per-item eBay business rule (Best Offer + multi-marketplace conflict) — dead-lettered correctly, needs Dave's call. Need a clean n=1 (no incidental conflicts) to complete the before/after demo before ramping the other ~490. | [[TGW-Master-Plan#PP-PHOTOSYNC-001 — upload integrity + operator lane hardening + fleet photo repair\|PP-PHOTOSYNC-001]] | ✓ deps done |
 | 1240 | 40 |  | fix 9 pre-existing broken tests (7 test_model_routing.py openrouter-vs-google_direct stale expectations, 2 test_invariants_pricing.py ebay_price.py:124 NoneType) surfaced during #1174 full-suite run |  |  |
