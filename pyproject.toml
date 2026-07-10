@@ -18,6 +18,7 @@ dependencies = [
     "uvicorn[standard]>=0.29",
     "mcp>=1.0",
     "pyperclip>=1.8",
+    "python-xlib>=0.33",
     "mistune>=3.0",
     "Pillow>=10.0",
 ]
@@ -85,6 +86,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+norecursedirs = ["nix", ".git", "__pycache__", "*.egg-info", "systemd"]
 
 [tool.ruff]
 line-length = 200
@@ -96,3 +98,7 @@ exclude = ["systemd/history", "tools/archive"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# http_server.py contains inline minified JS blobs — E501 is not actionable there
+"src/tgw/http_server.py" = ["E501"]

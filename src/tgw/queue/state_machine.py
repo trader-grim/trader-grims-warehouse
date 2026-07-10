@@ -48,8 +48,8 @@ STATES = {
 
 ALLOWED_TRANSITIONS = {
     'queued': {'leased', 'cancelled'},
-    'leased': {'running', 'queued', 'cancelled'},
-    'running': {'succeeded', 'retry_wait', 'failed', 'queued', 'cancelled'},
+    'leased': {'running', 'queued', 'cancelled', 'dead_letter'},
+    'running': {'succeeded', 'retry_wait', 'failed', 'queued', 'cancelled', 'dead_letter'},
     'retry_wait': {'queued', 'cancelled', 'dead_letter'},
     'failed': {'dead_letter', 'queued', 'cancelled'},
     'succeeded': set(),
@@ -68,9 +68,11 @@ RULES = {
     ('queued', 'leased'): TransitionRule('queued', 'leased', requires_worker=True),
     ('leased', 'running'): TransitionRule('leased', 'running', requires_worker=True),
     ('leased', 'queued'): TransitionRule('leased', 'queued'),
+    ('leased', 'dead_letter'): TransitionRule('leased', 'dead_letter', terminal=True),
     ('running', 'succeeded'): TransitionRule('running', 'succeeded', requires_worker=True, terminal=True),
     ('running', 'retry_wait'): TransitionRule('running', 'retry_wait', requires_worker=True),
     ('running', 'failed'): TransitionRule('running', 'failed', requires_worker=True, terminal=True),
+    ('running', 'dead_letter'): TransitionRule('running', 'dead_letter', terminal=True),
     ('running', 'queued'): TransitionRule('running', 'queued'),
     ('retry_wait', 'queued'): TransitionRule('retry_wait', 'queued'),
     ('retry_wait', 'dead_letter'): TransitionRule('retry_wait', 'dead_letter', terminal=True),
@@ -198,12 +200,17 @@ def mark_succeeded(job_id: str, lease_owner: str, result: Optional[Dict[str, Any
             )
 
 
-def mark_failed(job_id: str, lease_owner: str, error: str) -> None:
+def mark_failed(job_id: str, lease_owner: str, error: str) -> str:
     """
     Transition running → retry_wait or failed → dead_letter.
 
     Respects max_attempts: if attempt_count >= max_attempts, goes straight
     to dead_letter. Otherwise goes to retry_wait with exponential backoff.
+
+    Returns 'retry_wait' or 'dead_letter' — the caller needs this to know
+    whether the job chain just ended (audit#1143 #1165+#1166: callers must
+    be able to detect a terminal failure to alert on it / restart a
+    self-rescheduling chain; silently returning None hid that signal).
     """
     with _conn() as con:
         with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -213,7 +220,11 @@ def mark_failed(job_id: str, lease_owner: str, error: str) -> None:
             )
             row = cur.fetchone()
             if row is None:
-                return
+                # audit#1143 #1234/#1243 follow-up: the row is gone — nothing
+                # will ever retry this job_id, so this is terminal, not
+                # 'retry_wait'. Report it as 'dead_letter' so the caller
+                # alerts/reschedules instead of silently doing nothing.
+                return 'dead_letter'
             attempt = row['attempt_count']
             max_att = row['max_attempts']
             new_state = next_failure_state(attempt, max_att)
@@ -237,6 +248,7 @@ def mark_failed(job_id: str, lease_owner: str, error: str) -> None:
                     """,
                     (nb, error[:2000], job_id, lease_owner),
                 )
+                transitioned = cur.rowcount > 0
             else:
                 cur.execute(
                     """
@@ -252,14 +264,45 @@ def mark_failed(job_id: str, lease_owner: str, error: str) -> None:
                     """,
                     (error[:2000], job_id, lease_owner),
                 )
-                # Immediately promote failed → dead_letter
-                cur.execute(
-                    """
-                    UPDATE queue_jobs SET state = 'dead_letter'
-                     WHERE job_id = %s AND state = 'failed'
-                    """,
-                    (job_id,),
+                # audit#1143 #1246: only promote failed → dead_letter if the
+                # running → failed UPDATE above actually matched this job's
+                # row under our lease — otherwise (lease race) some other
+                # owner's row may legitimately already be sitting in
+                # 'failed' for a reason that has nothing to do with us, and
+                # this promotion would wrongly claim/fast-forward it.
+                transitioned = cur.rowcount > 0
+                if transitioned:
+                    cur.execute(
+                        """
+                        UPDATE queue_jobs SET state = 'dead_letter'
+                         WHERE job_id = %s AND state = 'failed'
+                        """,
+                        (job_id,),
+                    )
+
+            if not transitioned:
+                # audit#1143 #1246 (deferred #1245 finding): the lease-guarded
+                # UPDATE above matched zero rows — this caller lost a lease
+                # race (e.g. recover_expired_jobs() already reclaimed the
+                # lease between the SELECT above and this UPDATE) and did NOT
+                # actually perform the transition it's about to claim.
+                # Re-query the row's real current state instead of blindly
+                # returning new_state, so the caller's terminal-failure
+                # handling (alerting / restarting a self-rescheduling chain)
+                # reflects what's actually true in the DB.
+                log.warning(
+                    'mark_failed: lease race for job %s (lease_owner=%s) — '
+                    '0 rows matched state=running; re-checking actual state',
+                    job_id, lease_owner,
                 )
+                cur.execute('SELECT state FROM queue_jobs WHERE job_id = %s', (job_id,))
+                actual = cur.fetchone()
+                if actual is None:
+                    return 'dead_letter'
+                actual_state = actual['state']
+                return 'dead_letter' if actual_state in ('failed', 'dead_letter') else 'retry_wait'
+
+            return 'retry_wait' if new_state == 'retry_wait' else 'dead_letter'
 
 
 def mark_dead_letter(job_id: str, lease_owner: str, error: str) -> None:
@@ -369,6 +412,51 @@ def dead_letter_breakdown() -> Dict[str, int]:
             return {row[0]: row[1] for row in cur.fetchall()}
 
 
+def retry_wait_breakdown() -> List[Dict[str, Any]]:
+    """PP-PHOTOSYNC-001 P2: per-queue retry_wait count + oldest not_before age,
+    for the ops-digest pending-liability line. A pile of retry_wait jobs with
+    an old not_before is a stuck worker, not a job "waiting its turn"."""
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT queue_name, COUNT(*) AS n,
+                       EXTRACT(EPOCH FROM (NOW() - MIN(not_before))) / 3600 AS oldest_age_hours
+                  FROM queue_jobs
+                 WHERE state = 'retry_wait'
+                 GROUP BY queue_name
+                 ORDER BY n DESC, queue_name
+                """
+            )
+            return [{'queue_name': r['queue_name'], 'count': r['n'],
+                      'oldest_age_hours': round(r['oldest_age_hours'], 1)}
+                    for r in cur.fetchall()]
+
+
+def morning_exposure(cutoff_hour: int = 6, tz_name: str = 'America/Los_Angeles') -> List[Dict[str, Any]]:
+    """PP-PHOTOSYNC-001 P2: per-queue count of queued/retry_wait jobs whose
+    not_before falls before <cutoff_hour>:00 in <tz_name> tomorrow — the
+    "landmine view" of what's about to fire on fresh quota before anyone's awake."""
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT queue_name, COUNT(*) AS n
+                  FROM queue_jobs
+                 WHERE state IN ('queued', 'retry_wait')
+                   AND (not_before IS NULL
+                        OR not_before <= (
+                            date_trunc('day', NOW() AT TIME ZONE %s)
+                            + interval '1 day' + (%s || ' hours')::interval
+                        ) AT TIME ZONE %s)
+                 GROUP BY queue_name
+                 ORDER BY n DESC, queue_name
+                """,
+                (tz_name, cutoff_hour, tz_name),
+            )
+            return [{'queue_name': r['queue_name'], 'count': r['n']} for r in cur.fetchall()]
+
+
 def dead_letter_errors() -> List[Dict[str, Any]]:
     """Return (queue_name, error_detail) for every dead_letter job.
 
@@ -431,6 +519,20 @@ def zero_work_queues(stall_hours: float) -> List[Dict[str, Any]]:
                 (stall_hours, stall_hours),
             )
             return [dict(r) for r in cur.fetchall()]
+
+
+def cancel_queued(queue_name: str) -> int:
+    """Cancel all 'queued' jobs for a given queue_name — for orphan queues with
+    no worker consuming them (PP-PHOTOSYNC-001 P6, todo #1121). Returns the
+    number of rows affected."""
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """UPDATE queue_jobs SET state = 'cancelled'
+                   WHERE queue_name = %s AND state = 'queued'""",
+                (queue_name,),
+            )
+            return cur.rowcount
 
 
 def clear_dead_letter(queue_name: str) -> int:
@@ -752,3 +854,21 @@ def requeue_with_backoff(job_id: str, lease_owner: str, delay_seconds: int, erro
                 """,
                 (str(delay_seconds), error_detail[:2000], job_id, lease_owner),
             )
+
+
+def active_jobs_for_sku(sku: str, queue_names: List[str]) -> List[str]:
+    """Queue names with an active (queued/running/leased) job for this SKU.
+
+    Session 42: lets order-sensitive workers (ebay_stage, ebay_publish) wait for
+    in-flight upstream stages instead of racing them — 'List on eBay' used to
+    publish the OLD staged offer while the fresh draft was still generating."""
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """SELECT DISTINCT queue_name FROM queue_jobs
+                    WHERE payload_json->>'sku' = %s
+                      AND queue_name = ANY(%s)
+                      AND state IN ('queued', 'running', 'leased')""",
+                (sku, queue_names),
+            )
+            return [r[0] for r in cur.fetchall()]

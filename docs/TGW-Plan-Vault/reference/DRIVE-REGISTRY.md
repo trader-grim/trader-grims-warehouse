@@ -7,6 +7,23 @@ Last updated: 2026-06-13.
 
 ## Drive assignments
 
+### `sdc` — internal 698.6G HDD (repartitioned 2026-07-04)
+
+Previously a single btrfs partition, `LABEL=trader_grims_backup` (an old, now-superseded
+backup — Dave confirmed safe to wipe 2026-07-04). Repartitioned into 3 btrfs partitions,
+mounted under `/opt/TGW/mnt/` (not `/home/db/devices/` — that path is 700 db-only,
+unreachable by the `tgw` service account these partitions serve).
+
+| Partition | Label | Size | Mount point | Purpose |
+|-----------|-------|------|-------------|---------|
+| `sdc1` | `tgw-db-backup` | 20G | `/opt/TGW/mnt/tgw-db-backup` | PP-BACKUP-001 A1/A3 — DB dumps + secrets bundle (genuinely separate device, fixes the single-point-of-failure the old `SNAP_DIR` had) |
+| `sdc2` | `tgw-itemdata-snap` | 300G | `/opt/TGW/mnt/tgw-itemdata-snap` | Reserved — 3rd local ItemData snapshot target, not yet wired |
+| `sdc3` | `tgw-itemarchive` | 378.6G | `/opt/TGW/mnt/tgw-itemarchive` | Reserved — overflow target for the E5 local archive (`archive_root`, todo #1104) once NVMe's 57G free runs low |
+
+Mounted manually (matches this host's convention for `/home/db/devices/*` — no
+fstab/NixOS declarative entry). Does not survive reboot as-is; remount manually
+or add a fstab/systemd-mount entry later if persistence is wanted.
+
 ### 500 GB HDDs (7 drives)
 
 | Label | Role | Rotation | Auto-sync | What's synced |

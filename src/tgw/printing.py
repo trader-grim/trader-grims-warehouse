@@ -53,7 +53,7 @@ def build_picklist_pdf(
     HEADER_H = 0.55 * inch
 
     c = rl_canvas.Canvas(str(output_path), pagesize=letter)
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    now_str = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M")
 
     def _draw_page_header():
         c.setFont("Helvetica-Bold", 14)
@@ -206,7 +206,7 @@ def cups_print(path, queue: str) -> bool:
 
 
 def _default_picklist_path() -> Path:
-    ts = datetime.now().strftime("%Y%m%d%H%M%S")
+    ts = datetime.now().astimezone().strftime("%Y%m%d%H%M%S")
     return Path(tempfile.gettempdir()) / f"tgw-picklist-{ts}.pdf"
 
 

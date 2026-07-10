@@ -23,11 +23,15 @@ import psycopg2.errors
 import requests
 
 import tgw.logging as tgw_logging
+from tgw.apis.ebay import conditions
 from tgw.apis.ebay.client import ebay_get, ebay_put
+from tgw.apis.fence import ebay_write as fence_ebay_write
+from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.config import DEFAULT_CONFIG, load_config
+from tgw.draft_sync import baseline_fields
 from tgw.ebay.pricing import to_99
+from tgw.ebay.sync import format_ebay_error as _format_ebay_error
 from tgw.ebay.sync import publish_offer
-from tgw.items import atomic_write_json
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
@@ -83,6 +87,42 @@ def _build_reprice_schedule(stages: List[Dict[str, Any]],
 
 class EbayPublishWorker(QueueWorker):
 
+    def _refresh_photo_verify(self, sku: str, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """PP-EBAY-SNAPSHOT-001 Phase 2 / PP-PHOTOSYNC-001 P1: verify photos
+        actually live on eBay match what we submitted. One extra GET; logged
+        but never blocks the caller. Must run on EVERY path that pushes new
+        photo content live — not just first publish — or photo_verify goes
+        stale the moment an already-Active item gets a photo update (found
+        s43: an operator ebay_update pushed 24 photos live but photo_verify
+        kept showing the original publish's 9/9 until a manual ebay-pull)."""
+        try:
+            live = ebay_get(self.config, f'/sell/inventory/v1/inventory_item/{sku}')
+            confirmed = live.get('product', {}).get('imageUrls', [])
+            submitted = (
+                item.get('ebay_submitted', {})
+                    .get('inventory_item', {})
+                    .get('product', {})
+                    .get('imageUrls')
+                or item.get('draft_listing', {}).get('imageUrls', [])
+            )
+            photo_verify = {
+                'submitted_count': len(submitted),
+                'confirmed_count': len(confirmed),
+                'verified_at':     datetime.now(timezone.utc).isoformat(),
+            }
+            if len(confirmed) < len(submitted):
+                log.warning('%s: photo count mismatch — submitted=%d confirmed=%d',
+                            sku, len(submitted), len(confirmed))
+                tgw_logging.log_event('ebay_photo_verify_mismatch', sku=sku,
+                                      submitted=len(submitted), confirmed=len(confirmed))
+            else:
+                log.info('%s: photo verify OK — %d/%d confirmed', sku, len(confirmed), len(submitted))
+                tgw_logging.log_event('ebay_photo_verify_ok', sku=sku, confirmed=len(confirmed))
+            return photo_verify
+        except Exception as exc:
+            log.warning('%s: photo verify GET failed (non-fatal): %s', sku, exc)
+            return None
+
     def handle(self, job: Dict[str, Any]) -> None:
         payload = job.get('payload_json') or {}
         sku = payload.get('sku', '')
@@ -92,6 +132,16 @@ class EbayPublishWorker(QueueWorker):
         json_path = self.config['itemdata_root'] / sku / f'{sku}.json'
         if not json_path.exists():
             raise HardFailure(f'item JSON not found for {sku}')
+
+        # Ordering guard (session 42): 'List on eBay' enqueues publish alongside
+        # the draft chain — publish once went live with the OLD staged offer while
+        # the fresh draft was still generating. Wait for upstream stages to drain.
+        upstream = state_machine.active_jobs_for_sku(
+            sku, ['ebay_draft', 'ebay_price', 'ebay_upload', 'ebay_stage'])
+        if upstream:
+            raise RuntimeError(
+                f'{sku}: pipeline steps still running ({", ".join(upstream)}) '
+                f'— publish waits for them (will retry)')
 
         item = json.loads(json_path.read_text(encoding='utf-8'))
 
@@ -104,23 +154,73 @@ class EbayPublishWorker(QueueWorker):
             tgw_logging.log_event('ebay_publish_skipped', sku=sku,
                                   reason='already_active',
                                   listing_id=str(existing_listing.get('listing_id', '')))
+            photo_verify = self._refresh_photo_verify(sku, item)
+            if photo_verify is not None:
+                existing_listing['photo_verify'] = photo_verify
+                fence_ebay_write(self.config, sku, ebay_listing=existing_listing)
             return
 
         ebay_offer = item.get('ebay_offer', {})
         offer_id = ebay_offer.get('offer_id')
         if not offer_id:
-            raise HardFailure(
-                f'{sku}: not staged on eBay yet — run ebay_stage first'
+            # Retryable — ebay_stage may still be in flight when publish was
+            # queued as part of the automated chain (upload → stage → publish).
+            raise RuntimeError(
+                f'{sku}: not staged on eBay yet — waiting for ebay_stage'
             )
 
-        # Build reprice schedule from comps — price is already correct on the offer.
-        # ebay_price now sets draft_listing.price = launch_price (max→.99), so
-        # ebay_stage already staged at the right price. No pre-publish update needed.
-        stages       = self.config.get('reprice_stages', [])
-        comps        = ebay_offer.get('price_comps', {})
-        cat_id       = str(item.get('ebay_category_id', ''))
-        cat_defaults = self.config.get('category_price_defaults', {})
-        schedule     = _build_reprice_schedule(stages, comps, cat_id, cat_defaults)
+        # Guard: if the operator set a manual price in draft_listing that hasn't
+        # been staged yet, publishing would go live at the old offer price.
+        # Wait for ebay_stage to run with the current price first.
+        draft_price = (item.get('draft_listing') or {}).get('price')
+        staged_price = ebay_offer.get('staged_price')
+        if draft_price is not None and staged_price is not None:
+            if abs(float(draft_price) - float(staged_price)) > 0.001:
+                # Session 41: ebay_stage's idempotency guard (existing offer_id →
+                # skip) has no price-drift check, so nothing was ever forcing a
+                # re-stage here — this used to just retry forever waiting for a
+                # correction that would never come (see tgw202605060201087, stuck
+                # since 2026-07-01 with staged price $340.99 vs draft $29.99).
+                # Break the deadlock by requesting the force-restage ourselves.
+                try:
+                    # Invariant C10: the forced re-stage keeps the publish job's
+                    # operator provenance (also satisfies C9's inspection gate
+                    # when the operator pressed the button).
+                    state_machine.enqueue_job(
+                        queue_name='ebay_stage',
+                        payload={'sku': sku, 'force': True,
+                                 **({'origin': 'operator'}
+                                    if payload.get('origin') == 'operator' else {})},
+                        dedupe_key=f'ebay_stage:force:{sku}',
+                        max_attempts=3,
+                    )
+                except psycopg2.errors.UniqueViolation:
+                    pass
+                raise RuntimeError(
+                    f'{sku}: draft price ${draft_price} != staged price ${staged_price} '
+                    f'— requested a forced ebay_stage re-sync, will retry'
+                )
+
+        # Reprice-schedule minting is DISABLED by default (session 42): schedules
+        # were built from Browse-API asking-price "comps", which produced
+        # fire-sale floors on 6 of the first 8 pipeline-published items
+        # ($309.99 launch → $4.79 floor; one floor was literally $0.00). Dave
+        # ended all 6 listings and ruled: the pipeline does not change prices
+        # unsupervised. Re-enable via `reprice_schedule_enabled: true` in config
+        # ONLY after pricing is rebuilt on real sold-price data
+        # (PP-REPRICER-001, blocked on the buy.marketplace_insights scope).
+        _sched_enabled = bool(
+            self.config.get('reprice_schedule_enabled',
+                            self.config.get('raw', {}).get('reprice_schedule_enabled', False)))
+        if _sched_enabled:
+            stages       = self.config.get('reprice_stages', [])
+            comps        = ebay_offer.get('price_comps', {})
+            cat_id       = str(item.get('ebay_category_id', ''))
+            cat_defaults = self.config.get('category_price_defaults', {})
+            schedule     = _build_reprice_schedule(stages, comps, cat_id, cat_defaults)
+        else:
+            schedule = []
+            log.info('%s: reprice schedule NOT minted (disabled — manual pricing only)', sku)
         launch_entry = next((s for s in schedule if s['label'] == 'launch'), None)
 
         log.info('publishing %s (offerId=%s)', sku, offer_id)
@@ -146,10 +246,50 @@ class EbayPublishWorker(QueueWorker):
                              f'/sell/inventory/v1/inventory_item/{sku}',
                              {'condition': 'USED_EXCELLENT'})
                     result = publish_offer(self.config, offer_id)
+                    # audit#1143 #1168: this succeeded on eBay, but draft_listing's
+                    # condition_enum was left at the rejected granular value —
+                    # the next ebay_stage re-stage would resubmit that same
+                    # value, get 25021 again, and re-apply this same fallback
+                    # forever (local record permanently disagreeing with what's
+                    # actually live). Persisted below via the function's own
+                    # end-of-run fence_patch_item(draft_listing=...) write.
+                    if item.get('draft_listing'):
+                        # code-review follow-up: use conditions.py's canonical
+                        # mapping instead of hardcoding the enum/label, so this
+                        # never drifts from the same source of truth
+                        # ebay_draft.py uses. The label is the category's own
+                        # eBay-returned description for conditionId 3000 (can
+                        # legitimately differ per category — e.g. "Used" vs
+                        # "Pre-owned - Good"), not a fixed string; 'Used' is
+                        # only the fallback if that lookup is unavailable.
+                        label = 'Used'
+                        cat_id_for_condition = str(item.get('ebay_category_id', ''))
+                        try:
+                            for cond in conditions.allowed_conditions_for_category(
+                                    self.config, cat_id_for_condition):
+                                if cond['condition_id'] == '3000':
+                                    label = cond['condition_label']
+                                    break
+                        except Exception as exc:
+                            log.warning('%s: could not look up canonical label for '
+                                        'conditionId 3000 (%s) — using default %r',
+                                        sku, exc, label)
+                        item['draft_listing']['condition_id']    = '3000'
+                        item['draft_listing']['condition_label'] = label
+                        item['draft_listing']['condition_enum']  = conditions.condition_enum('3000')
                 else:
-                    raise HardFailure(
-                        f'{sku}: eBay rejected publish (HTTP {status}): {body_text[:500]}'
-                    ) from exc
+                    msg = _format_ebay_error(body_text, status)
+                    # Canonical pipeline_error schema (broker B1b) — see
+                    # ebay_stage.py; legacy schema still rendered by shim.
+                    pipeline_error = {
+                        'code':   'ebay_rejected',
+                        'detail': msg,
+                        'raw':    body_text[:800],
+                        'ts':     datetime.now(timezone.utc).isoformat(),
+                        'source': 'ebay_publish',
+                    }
+                    fence_patch_item(self.config, sku, {'pipeline_error': pipeline_error})
+                    raise HardFailure(f'{sku}: eBay rejected publish: {msg}') from exc
             else:
                 raise  # transient — base class retries
 
@@ -164,9 +304,13 @@ class EbayPublishWorker(QueueWorker):
         }
         ebay_offer['status']       = 'PUBLISHED'
         ebay_offer['published_at'] = now.isoformat()
+        # ebay_offer.price = what is actually live on eBay = what ebay_stage PUT there.
+        # The reprice schedule has its own per-stage price fields; don't overwrite the
+        # live price with schedule data here.
+        actual_price = ebay_offer.get('staged_price')
+        if actual_price is not None:
+            ebay_offer['price'] = float(actual_price)
         launch_price = launch_entry['price'] if launch_entry and launch_entry['price'] is not None else None
-        if launch_price is not None:
-            ebay_offer['price'] = launch_price
         item['ebay_offer'] = ebay_offer
 
         # Stamp launch entry done_at and store full schedule
@@ -177,11 +321,15 @@ class EbayPublishWorker(QueueWorker):
         item['reprice_schedule'] = schedule
 
         # Record the publish price as the first price_history entry so the full
-        # price trail (launch → markdown steps) is complete and auditable.
-        if launch_price is not None:
+        # price trail is complete and auditable. Session 42 fix: record the
+        # price that is ACTUALLY live on eBay (staged_price), not the schedule's
+        # launch figure — the old version wrote $309.99 into history while the
+        # listing was live at $29.99 (Dave caught it on tgw202605060201087).
+        recorded_price = actual_price if actual_price is not None else launch_price
+        if recorded_price is not None:
             item.setdefault('price_history', []).append({
                 'ts':             now.isoformat(),
-                'price':          launch_price,
+                'price':          float(recorded_price),
                 'previous_price': item.get('price'),
                 'stage':          'launch',
                 'label':          'Published to eBay',
@@ -194,35 +342,25 @@ class EbayPublishWorker(QueueWorker):
             item['draft_listing']['listing_description'] = build_listing_description(
                 item, self.config)
 
-        # PP-EBAY-SNAPSHOT-001 Phase 2: verify photos survived publish.
-        # One extra GET; logged but never blocks the publish completing.
-        try:
-            live = ebay_get(self.config, f'/sell/inventory/v1/inventory_item/{sku}')
-            confirmed = live.get('product', {}).get('imageUrls', [])
-            submitted = (
-                item.get('ebay_submitted', {})
-                    .get('inventory_item', {})
-                    .get('product', {})
-                    .get('imageUrls')
-                or item.get('draft_listing', {}).get('imageUrls', [])
-            )
-            item['ebay_listing']['photo_verify'] = {
-                'submitted_count': len(submitted),
-                'confirmed_count': len(confirmed),
-                'verified_at':     now.isoformat(),
-            }
-            if len(confirmed) < len(submitted):
-                log.warning('%s: photo count mismatch after publish — submitted=%d confirmed=%d',
-                            sku, len(submitted), len(confirmed))
-                tgw_logging.log_event('ebay_photo_verify_mismatch', sku=sku,
-                                      submitted=len(submitted), confirmed=len(confirmed))
-            else:
-                log.info('%s: photo verify OK — %d/%d confirmed', sku, len(confirmed), len(submitted))
-                tgw_logging.log_event('ebay_photo_verify_ok', sku=sku, confirmed=len(confirmed))
-        except Exception as exc:
-            log.warning('%s: photo verify GET failed (non-fatal): %s', sku, exc)
+        # PP-EBAY-SNAPSHOT-001 Phase 2 / PP-PHOTOSYNC-001 P1: verify photos
+        # survived publish. One extra GET; logged but never blocks completion.
+        photo_verify = self._refresh_photo_verify(sku, item)
+        if photo_verify is not None:
+            item['ebay_listing']['photo_verify'] = photo_verify
 
-        atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
+        fence_ebay_write(self.config, sku,
+                         ebay_listing=item.get('ebay_listing'),
+                         ebay_offer=item.get('ebay_offer'))
+        # Broker B1a (M1/M2): the draft→offer push is complete — the offer
+        # now holds exactly what the draft specified, so the manager marks
+        # the draft re-baselined. The next manipulation (AI or operator)
+        # starts from a correct base, and drift is detectable again.
+        fence_patch_item(self.config, sku, {
+            'reprice_schedule': item.get('reprice_schedule'),
+            'price_history':    item.get('price_history', []),
+            'draft_listing':    item.get('draft_listing'),
+            **baseline_fields(now),
+        })
 
         log.info('published %s → %s', sku, result['listing_url'])
         tgw_logging.log_event('ebay_listing_published', sku=sku,

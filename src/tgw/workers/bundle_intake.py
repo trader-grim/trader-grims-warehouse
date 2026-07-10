@@ -26,8 +26,9 @@ from typing import Any, Dict, List, Optional
 import psycopg2.errors
 
 import tgw.logging as tgw_logging
+from tgw.apis.fence import create_item as fence_create_item
 from tgw.config import DEFAULT_CONFIG, load_config
-from tgw.items import atomic_write_json
+from tgw.config import sku_dir as _cfg_sku_dir
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
@@ -209,7 +210,7 @@ class BundleIntakeWorker(QueueWorker):
 
     def _handle_symlink(self, sku: str, symlink: Path) -> None:
         """Item already in ItemData — just remove symlink and enqueue downstream."""
-        itemdata_dir = self.config['itemdata_root'] / sku
+        itemdata_dir = _cfg_sku_dir(self.config, sku)
         if not itemdata_dir.exists():
             raise HardFailure(f'symlink target ItemData/{sku} does not exist')
 
@@ -297,7 +298,7 @@ class BundleIntakeWorker(QueueWorker):
             raise HardFailure(f'bad stub JSON for {sku}: {exc}') from exc
 
     def _prepare_dest(self, sku: str) -> Path:
-        dest_dir: Path = self.config['itemdata_root'] / sku
+        dest_dir: Path = _cfg_sku_dir(self.config, sku)
         dest_dir.mkdir(parents=True, exist_ok=True)
         return dest_dir
 
@@ -322,7 +323,7 @@ class BundleIntakeWorker(QueueWorker):
         # Set image field to first photo (alphabetical) for thumbnail generation
         first_image = sorted(images, key=lambda p: p.name)[0]
         record['image'] = first_image.name
-        atomic_write_json(json_path, record, pretty=self.config.get('pretty', True))
+        fence_create_item(self.config, sku, record)
 
     def _enqueue_downstream(self, sku: str) -> None:
         # catalog-rebuild: coalesced 30s delay so rapid intakes batch together

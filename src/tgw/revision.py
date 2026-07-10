@@ -246,10 +246,120 @@ def cmd_revise(
 # Apply path (PP-REVISION-001 second slice)
 # ---------------------------------------------------------------------------
 
-# Live eBay writes gated until Dave confirms the sparse-delta apply design.
-# Flip to True only after explicit confirmation; the CLI --live flag is
-# also required so an accidental call never fires.
-_APPLY_ENABLED = False
+# Design confirmed by Dave 2026-07-01 (session 40). The CLI --live flag /
+# dry_run=False is still required so an accidental call never fires.
+_APPLY_ENABLED = True
+
+# Delta fields the live apply knows how to place into the eBay API bodies.
+# Anything else refuses the apply — silently dropping an operator edit is
+# worse than making them re-draft.
+_INV_ITEM_FIELDS = {
+    "title", "description", "condition", "condition_enum",
+    "item_specifics", "aspects", "imageUrls", "quantity",
+}
+_OFFER_FIELDS = {"price", "live_price", "listing_description", "quantity"}
+_SUPPORTED_FIELDS = _INV_ITEM_FIELDS | _OFFER_FIELDS
+
+
+def _place_delta_in_bodies(
+    inv_body: Dict[str, Any],
+    offer_body: Dict[str, Any],
+    delta: Dict[str, Any],
+) -> tuple:
+    """Mutate fresh GET bodies with the delta. Returns (inv_changed, offer_changed)."""
+    inv_changed = offer_changed = False
+    product = inv_body.setdefault("product", {})
+    for field, val in delta.items():
+        if field == "title":
+            product["title"] = str(val)
+            inv_changed = True
+        elif field == "description":
+            product["description"] = str(val)
+            inv_changed = True
+        elif field in ("condition", "condition_enum"):
+            inv_body["condition"] = str(val)
+            inv_changed = True
+        elif field in ("item_specifics", "aspects") and isinstance(val, dict):
+            product["aspects"] = {
+                k: (v if isinstance(v, list) else [str(v)]) for k, v in val.items()
+            }
+            inv_changed = True
+        elif field == "imageUrls" and isinstance(val, list):
+            product["imageUrls"] = [str(u) for u in val][:24]
+            inv_changed = True
+        elif field == "quantity":
+            qty = int(val)
+            avail = inv_body.setdefault("availability", {}).setdefault(
+                "shipToLocationAvailability", {}
+            )
+            avail["quantity"] = qty
+            for dist in avail.get("availabilityDistributions") or []:
+                dist["quantity"] = qty
+            offer_body["availableQuantity"] = qty
+            inv_changed = offer_changed = True
+        elif field in ("price", "live_price"):
+            pricing = offer_body.setdefault("pricingSummary", {})
+            price_block = pricing.setdefault("price", {"currency": "USD"})
+            price_block["value"] = f"{float(val):.2f}"
+            offer_changed = True
+        elif field == "listing_description":
+            offer_body["listingDescription"] = str(val)
+            offer_changed = True
+    return inv_changed, offer_changed
+
+
+def _apply_live_revision(
+    cfg: Dict[str, Any],
+    sku: str,
+    item: Dict[str, Any],
+    delta: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Push the composed revision to eBay: fresh GET → place delta → PUT.
+
+    Inventory API only. Returns {ok, calls: [...]} or {ok: False, error}.
+    """
+    unsupported = sorted(set(delta) - _SUPPORTED_FIELDS)
+    if unsupported:
+        return {
+            "ok": False,
+            "error": (
+                f"unsupported delta field(s) for live apply: {', '.join(unsupported)} — "
+                f"supported: {', '.join(sorted(_SUPPORTED_FIELDS))}"
+            ),
+        }
+
+    listing = item.get("ebay_listing") or {}
+    offer_id = listing.get("offer_id") or (item.get("ebay_offer") or {}).get("offer_id")
+    if listing.get("api") == "trading" or not offer_id:
+        return {
+            "ok": False,
+            "error": (
+                f"{sku}: live apply requires an Inventory API offer "
+                "(Trading API revision is a follow-on — see PP-LISTEDITOR-001)"
+            ),
+        }
+
+    from tgw.apis.ebay.client import ebay_get, ebay_put
+
+    # Fresh live state is the composition baseline — never the cached mirror.
+    inv_body = ebay_get(cfg, f"/sell/inventory/v1/inventory_item/{sku}")
+    offer_body = ebay_get(cfg, f"/sell/inventory/v1/offer/{offer_id}")
+    # GET returns read-only fields the PUT schema rejects; strip them.
+    for k in ("sku", "locale"):
+        inv_body.pop(k, None)
+    for k in ("offerId", "sku", "status", "listing", "statusReason"):
+        offer_body.pop(k, None)
+
+    inv_changed, offer_changed = _place_delta_in_bodies(inv_body, offer_body, delta)
+
+    calls: List[str] = []
+    if inv_changed:
+        ebay_put(cfg, f"/sell/inventory/v1/inventory_item/{sku}", inv_body)
+        calls.append(f"PUT inventory_item/{sku}")
+    if offer_changed:
+        ebay_put(cfg, f"/sell/inventory/v1/offer/{offer_id}", offer_body)
+        calls.append(f"PUT offer/{offer_id}")
+    return {"ok": True, "calls": calls, "offer_id": offer_id}
 
 
 def compose_revised_state(
@@ -383,26 +493,45 @@ def cmd_revise_apply(
     composed = compose_revised_state(current_mirror, delta)
     diff_lines = format_apply_diff(delta, current_mirror, composed, [], non_blocking)
 
+    calls: List[str] = []
     if not dry_run:
         if not _APPLY_ENABLED:
             return {
                 "ok": False,
                 "sku": sku,
                 "error": (
-                    "Live eBay write not yet enabled — "
-                    "sparse-delta apply design is pending Dave's confirmation. "
+                    "Live eBay write is disabled (_APPLY_ENABLED = False). "
                     "Re-run without --live to preview the composed state."
                 ),
                 "dry_run": dry_run,
             }
-        # Live apply: Inventory API PUT / ReviseFixedPriceItem goes here
-        # (activated when _APPLY_ENABLED = True and design confirmed by Dave)
+        live = _apply_live_revision(cfg, sku, item, delta)
+        if not live.get("ok"):
+            return {"ok": False, "sku": sku, "dry_run": dry_run, **{
+                k: v for k, v in live.items() if k != "ok"
+            }}
+        calls = live.get("calls") or []
+
+        # Clear the draft and keep an audit trail of what was pushed.
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        history = item.get("revision_history") or []
+        history.append({
+            "applied_at": now_iso,
+            "by": by,
+            "delta": delta,
+            "baseline_hash": pinned_hash,
+            "calls": calls,
+        })
+        item["revision_history"] = history
+        item.pop("revision_draft", None)
+        atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
 
     return {
         "ok": True,
         "sku": sku,
         "dry_run": dry_run,
-        "applied": not dry_run and _APPLY_ENABLED,
+        "applied": not dry_run,
+        "calls": calls,
         "delta": delta,
         "composed": composed,
         "baseline_hash": pinned_hash,

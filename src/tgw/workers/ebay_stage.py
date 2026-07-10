@@ -31,9 +31,11 @@ import psycopg2.errors
 import requests
 
 import tgw.logging as tgw_logging
+from tgw.apis.fence import ebay_write as fence_ebay_write
+from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.config import DEFAULT_CONFIG, load_config
+from tgw.ebay.sync import format_ebay_error as _format_ebay_error
 from tgw.ebay.sync import stage_draft
-from tgw.items import atomic_write_json
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
@@ -47,6 +49,7 @@ class EbayStageWorker(QueueWorker):
     def handle(self, job: Dict[str, Any]) -> None:
         payload = job.get('payload_json') or {}
         sku = payload.get('sku', '')
+        force = bool(payload.get('force'))  # bypass guards — update a live listing in place
         if not sku:
             raise HardFailure('ebay_stage job missing sku in payload')
 
@@ -54,39 +57,132 @@ class EbayStageWorker(QueueWorker):
         if not json_path.exists():
             raise HardFailure(f'item JSON not found for {sku}')
 
-        item = json.loads(json_path.read_text(encoding='utf-8'))
+        # Ordering guard (session 42, same class as ebay_publish's): a directly-
+        # triggered stage must not push while draft/price/upload for the same SKU
+        # are still in flight — it would stage the OLD draft.
+        upstream = state_machine.active_jobs_for_sku(
+            sku, ['ebay_draft', 'ebay_price', 'ebay_upload'])
+        if upstream:
+            raise RuntimeError(
+                f'{sku}: pipeline steps still running ({", ".join(upstream)}) '
+                f'— stage waits for them (will retry)')
 
-        # Guard: item is already actively listed on eBay — do not create a
-        # duplicate Inventory API offer over a live listing.
+        item = json.loads(json_path.read_text(encoding='utf-8'))
         existing_listing = item.get('ebay_listing', {})
-        if existing_listing.get('status') == 'Active':
-            listing_id = existing_listing.get('listing_id', '')
-            log.warning(
-                'ebay_stage: %s is already live (listingId=%s, api=%s) — skipping',
-                sku, listing_id, existing_listing.get('api', ''),
-            )
-            tgw_logging.log_event('ebay_stage_skipped', sku=sku,
-                                  reason='already_active_listing',
-                                  listing_id=str(listing_id))
-            return
 
         # Guard: item was previously listed via Trading API — must not create a
         # duplicate Inventory API offer until the legacy listing is resolved.
+        #
+        # PP-PHOTOSYNC-001 P10 (session 43): runs BEFORE the C9 gate below on
+        # purpose. The original ordering put this after C9's return, so a
+        # background/no-origin job against an Active legacy listing never
+        # reached this code at all — it was silently absorbed by the generic
+        # "uninspected content blocked" log line, and the legacy-specific fact
+        # (which needs the relist workflow, not just a human pushing a button)
+        # was never recorded anywhere durable. That's the exact bug Dave
+        # flagged live (session 43): "we ignored and did not record the error
+        # message... this would have been resolved if we had been collecting
+        # and using all of the data" — plus a standing instruction to
+        # regularly check for and repair instances of it. Detection now runs
+        # unconditionally and persists durably regardless of who triggered the
+        # job; only the ACTUAL REPAIR (a live write to eBay) stays gated on
+        # operator origin, same as every other C9-covered action.
         legacy_item_number = item.get('Item number') or item.get('item_number')
         if legacy_item_number and not item.get('legacy_listing_resolved'):
+            now_iso = datetime.now(timezone.utc).isoformat()
             log.warning(
-                'ebay_stage: %s has legacy eBay Item# %s — skipping to avoid '
-                'duplicate listing; resolve via relist workflow first',
+                'ebay_stage: %s has legacy eBay Item# %s — checking for a '
+                'genuine duplicate listing before proceeding',
                 sku, legacy_item_number,
             )
             tgw_logging.log_event('ebay_stage_skipped', sku=sku,
                                   reason='legacy_trading_api_listing',
                                   item_number=str(legacy_item_number))
-            return
 
-        # Idempotent: already staged
+            legacy_blocked = {
+                'listing_id':      existing_listing.get('listing_id', ''),
+                'item_number':     str(legacy_item_number),
+                'detected_at':     now_iso,
+                'duplicate_check': None,
+            }
+
+            # PP-PHOTOSYNC-001 P10 (session 43): Dave — a month-long gap in
+            # our own Inventory tooling meant occasionally managing listings
+            # directly via Seller Hub, "a known consequence of my actions...
+            # it could happen again and needs an auto repair path. Check for
+            # both specifically, then resolve." Only an operator-triggered
+            # force update runs the live check (C9: no eBay-state-changing
+            # decision from an uninspected background job); a background hit
+            # only ever records the finding above and stops here.
+            if force and payload.get('origin') == 'operator':
+                from tgw.ebay.pull import check_legacy_duplicate_listing
+                dup = check_legacy_duplicate_listing(
+                    self.config, sku, legacy_blocked['listing_id'])
+                legacy_blocked['duplicate_check'] = dup
+
+                if dup.get('ok') and dup.get('match'):
+                    # Confirmed: one listing, addressable via both APIs — not
+                    # a duplicate. Safe to resolve and fall through to the
+                    # standard Inventory-API staging below (the guard's
+                    # premise — "this must be a separate classic listing" —
+                    # is false for this SKU).
+                    item['legacy_listing_resolved'] = True
+                    log.info('ebay_stage: %s legacy listing %s confirmed NOT a '
+                            'duplicate (Inventory offer matches) — resolved, '
+                            'proceeding via standard path', sku, legacy_item_number)
+                    tgw_logging.log_event('ebay_stage_legacy_resolved_no_duplicate',
+                                          sku=sku, listing_id=legacy_blocked['listing_id'])
+                    fence_patch_item(self.config, sku, {
+                        'legacy_listing_blocked':  legacy_blocked,
+                        'legacy_listing_resolved': True,
+                    })
+                    # Deliberately no `return` — falls through to the normal
+                    # staging path below with legacy_listing_resolved now set.
+                else:
+                    log.warning('ebay_stage: %s legacy listing %s — duplicate '
+                               'risk detected or unverifiable, NOT resolving: %s',
+                               sku, legacy_item_number, dup)
+                    tgw_logging.log_event('ebay_stage_legacy_duplicate_risk',
+                                          sku=sku, detail=dup)
+                    fence_patch_item(self.config, sku, {'legacy_listing_blocked': legacy_blocked})
+                    return
+            else:
+                fence_patch_item(self.config, sku, {'legacy_listing_blocked': legacy_blocked})
+                return
+
+        # Guard (invariant C9, session 42): uninspected AI-regenerated content
+        # never goes live automatically. A force update of a LIVE listing is
+        # only executed when the job carries origin='operator' (set by the UI /
+        # CLI paths where a human pushed the button). Pipeline-internal force
+        # jobs against live listings are refused here regardless of who
+        # enqueued them — Dave: "we cannot have uninspected AI changes going
+        # live automatically yet. They are rarely correct so far."
+        _live = (existing_listing.get('status') == 'Active'
+                 or item.get('ebay_offer', {}).get('status') == 'PUBLISHED')
+        if force and _live and payload.get('origin') != 'operator':
+            log.warning('ebay_stage: %s force-update of LIVE listing blocked — '
+                        'no operator origin (uninspected AI content, C9)', sku)
+            tgw_logging.log_event('ebay_stage_blocked_uninspected', sku=sku)
+            return
+        if existing_listing.get('status') == 'Active':
+            listing_id = existing_listing.get('listing_id', '')
+            if not force:
+                log.warning(
+                    'ebay_stage: %s is already live (listingId=%s) — skipping '
+                    '(use force=True to update in place)',
+                    sku, listing_id,
+                )
+                tgw_logging.log_event('ebay_stage_skipped', sku=sku,
+                                      reason='already_active_listing',
+                                      listing_id=str(listing_id))
+                return
+            log.info('ebay_stage: %s is live (listingId=%s) — updating in place (force)',
+                     sku, listing_id)
+            tgw_logging.log_event('ebay_stage_update', sku=sku, listing_id=str(listing_id))
+
+        # Idempotent: already staged — skip unless force (update)
         existing_offer_id = item.get('ebay_offer', {}).get('offer_id')
-        if existing_offer_id:
+        if existing_offer_id and not force:
             log.info('ebay_stage: %s already staged (offerId=%s) — skipping',
                      sku, existing_offer_id)
             tgw_logging.log_event('ebay_stage_skipped', sku=sku,
@@ -100,13 +196,72 @@ class EbayStageWorker(QueueWorker):
                 f'{sku}: no draft_listing yet — waiting for pipeline to complete'
             )
 
-        # Price must be set (either by ebay_price or manually)
-        price = draft.get('price') or item.get('ebay_offer', {}).get('price')
+        # Price must be set in draft_listing — the operator-reviewed surface.
+        # Session 45 (tgw202605052336026): the old fallback to ebay_offer.price
+        # published a STALE machine price ($40.99, browse-comps, stamped weeks
+        # earlier by the pricing system Dave disabled in s42) while the editor
+        # showed an empty price — the operator clicked List and went live with
+        # data nobody had reviewed. ebay_price writes draft.price when it runs,
+        # so draft.price is the only legitimate source; a bare ebay_offer.price
+        # is by definition un-reviewed leftovers (C9: uninspected machine
+        # content never reaches a live listing — prices are content).
+        price = draft.get('price')
         if price is None:
-            # Retryable — ebay_price may still be running
+            stale = (item.get('ebay_offer') or {}).get('price')
+            if payload.get('origin') == 'operator':
+                # Operator pressed List on an unpriced item: fail loudly and
+                # persist the finding so the editor can render "needs price"
+                # (invariant C11 — a finding, not a log line).
+                fence_patch_item(self.config, sku, {'pipeline_error': {
+                    'code':   'no_price_set',
+                    'detail': ('draft_listing.price is empty — set a price in '
+                               'the editor before listing'
+                               + (f' (ignored stale ebay_offer.price={stale}'
+                                  f' from disabled auto-pricer)' if stale is not None else '')),
+                    'ts':     datetime.now(timezone.utc).isoformat(),
+                    'source': 'ebay_stage',
+                }})
+                raise HardFailure(
+                    f'{sku}: no price set in draft_listing — operator must price '
+                    f'the item in the editor (stale ebay_offer.price={stale} ignored)'
+                )
+            # Background chain — ebay_price may still be running
             raise RuntimeError(
                 f'{sku}: no price yet — waiting for ebay_price or manual price set'
             )
+
+        # Never-raise guard (invariant C5 extended, session 42 incident): a force
+        # re-stage of a live/published offer must not RAISE the price eBay already
+        # has. Reductions made before the s41 reducer fix never persisted to
+        # draft_listing.price, so stale-higher draft prices silently reverted live
+        # markdowns when re-staged (5 confirmed live, 2026-07-02). Deliberate
+        # operator raises pass `allow_price_raise` in the payload. The clamp is
+        # also persisted, healing the stale draft as we touch it.
+        offer_price = item.get('ebay_offer', {}).get('price')
+        offer_live = (item.get('ebay_offer', {}).get('status') == 'PUBLISHED'
+                      or existing_listing.get('status') == 'Active')
+        if (force and offer_live and offer_price is not None
+                and float(price) > float(offer_price)
+                and not payload.get('allow_price_raise')):
+            log.warning('ebay_stage: %s never-raise clamp: draft $%s > live $%s — '
+                        'pushing live price (pass allow_price_raise to override)',
+                        sku, price, offer_price)
+            stale_draft_price = float(price)
+            tgw_logging.log_event('ebay_stage_never_raise_clamp', sku=sku,
+                                  draft_price=stale_draft_price,
+                                  live_price=float(offer_price))
+            price = offer_price
+            draft['price'] = float(offer_price)
+            item.setdefault('price_history', []).append({
+                'ts': datetime.now(timezone.utc).isoformat(),
+                'price': float(offer_price), 'previous_price': stale_draft_price,
+                'stage': None, 'label': 'never_raise_clamp',
+                'source': 'ebay_stage_guard',
+            })
+            fence_patch_item(self.config, sku, {
+                'draft_listing': {'price': float(offer_price)},
+                'price_history': item['price_history'],
+            })
 
         # Photos must be uploaded — retryable if ebay_upload hasn't finished yet
         image_urls = draft.get('imageUrls') or [e['url'] for e in item.get('ebay_photos', [])]
@@ -114,6 +269,7 @@ class EbayStageWorker(QueueWorker):
             raise RuntimeError(
                 f'{sku}: no eBay photo URLs yet — waiting for ebay_upload (will retry)'
             )
+        image_urls = image_urls[:24]  # eBay max is 24 images per listing
 
         # Phase 3 — EPID association: look up eBay Catalog EPID for barcoded items.
         # Scope commerce.catalog.readonly required; silently skipped if not granted.
@@ -125,6 +281,7 @@ class EbayStageWorker(QueueWorker):
                 epid = lookup_epid(self.config, barcode)
                 if epid:
                     item['epid'] = epid
+                    fence_patch_item(self.config, sku, {'epid': epid})
                     log.info('%s: EPID %s cached (barcode %s)', sku, epid, barcode)
                     tgw_logging.log_event('ebay_epid_found', sku=sku,
                                           epid=epid, barcode=barcode)
@@ -139,27 +296,46 @@ class EbayStageWorker(QueueWorker):
         except requests.exceptions.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else 0
             if status in (400, 422):
-                body = exc.response.text[:500] if exc.response is not None else ''
-                raise HardFailure(
-                    f'{sku}: eBay rejected staging (HTTP {status}): {body}'
-                ) from exc
+                raw = exc.response.text if exc.response is not None else ''
+                msg = _format_ebay_error(raw, status)
+                # Canonical pipeline_error schema (broker B1b): guard findings
+                # and rejections share {code, detail, ts, source}; rejections
+                # add the raw eBay body. Reader shim in http_server still
+                # renders the legacy {worker, error, raw, at} on old items.
+                pipeline_error = {
+                    'code':   'ebay_rejected',
+                    'detail': msg,
+                    'raw':    raw[:800],
+                    'ts':     datetime.now(timezone.utc).isoformat(),
+                    'source': 'ebay_stage',
+                }
+                fence_patch_item(self.config, sku, {'pipeline_error': pipeline_error})
+                raise HardFailure(f'{sku}: eBay rejected staging: {msg}') from exc
             raise  # transient — base class retries
 
         # Merge into ebay_offer block (preserves price_comps etc from ebay_price)
         ebay_offer = dict(item.get('ebay_offer', {}))
-        ebay_offer['offer_id']   = result['offer_id']
-        ebay_offer['status']     = 'UNPUBLISHED'
-        ebay_offer['staged_at']  = datetime.now(timezone.utc).isoformat()
+        ebay_offer['offer_id']    = result['offer_id']
+        # Preserve PUBLISHED status on force-updates of live listings — the offer
+        # remains live on eBay; only our content changed.
+        if item.get('ebay_listing', {}).get('status') == 'Active':
+            ebay_offer['status'] = 'PUBLISHED'
+        else:
+            ebay_offer['status'] = 'UNPUBLISHED'
+        ebay_offer['staged_at']   = datetime.now(timezone.utc).isoformat()
+        ebay_offer['staged_price'] = float(price)  # what was actually submitted to eBay
 
         item['ebay_offer'] = ebay_offer
 
         # PP-EBAY-SNAPSHOT-001: snapshot what we PUT so photo verify and repush
         # have a ground-truth reference for what eBay should be showing.
-        item['ebay_submitted'] = {
+        ebay_submitted = {
             'inventory_item': result['inventory_item'],
             'staged_at': ebay_offer['staged_at'],
         }
-        atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
+        item['ebay_submitted'] = ebay_submitted
+        fence_ebay_write(self.config, sku, ebay_offer=ebay_offer, ebay_submitted=ebay_submitted,
+                          allow_protected=["staged_at"])
 
         log.info('ebay_stage: %s staged → offerId=%s (visible in Seller Hub)',
                  sku, result['offer_id'])
@@ -176,6 +352,24 @@ class EbayStageWorker(QueueWorker):
             )
         except psycopg2.errors.UniqueViolation:
             pass
+
+        # If the item was previously published, republish after staging.
+        # eBay sets the offer back to UNPUBLISHED on any updateOffer call
+        # (including category changes), so we must re-publish to restore live status.
+        if item.get('ebay_listing', {}).get('listing_id'):
+            try:
+                # Invariant C10: propagate operator provenance down the chain.
+                state_machine.enqueue_job(
+                    queue_name='ebay_publish',
+                    payload={'sku': sku,
+                             **({'origin': 'operator'}
+                                if payload.get('origin') == 'operator' else {})},
+                    dedupe_key=f'ebay_publish:{sku}',
+                    max_attempts=3,
+                )
+                log.info('%s: was published — queued ebay_publish to restore live status', sku)
+            except psycopg2.errors.UniqueViolation:
+                pass
 
 
 def main() -> int:

@@ -22,6 +22,7 @@ are fetched once per process lifetime and cached.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -31,7 +32,70 @@ from tgw.apis.ebay.client import ebay_get, ebay_post, ebay_put
 
 log = logging.getLogger(__name__)
 
+
+def format_ebay_error(body: str, status: int) -> str:
+    """Extract human-readable messages from eBay error JSON.
+
+    Shared by ebay_publish.py and ebay_stage.py (audit#1143 #1171, finding
+    17 — was byte-for-byte duplicated in both, a future fix to one would
+    have silently missed the other).
+    """
+    try:
+        errs = json.loads(body).get('errors', [])
+        msgs = [e.get('longMessage') or e.get('message', '') for e in errs if e.get('longMessage') or e.get('message')]
+        if msgs:
+            return '; '.join(msgs)
+    except Exception:
+        pass
+    return f'HTTP {status}: {body[:300]}'
+
+
+class AmbiguousOfferError(RuntimeError):
+    """Raised when a SKU has more than one existing eBay offer across
+    marketplaces — the exact cross-marketplace duplicate-listing risk
+    ebay_motors_census.py's report flags as 'needs human review, not
+    auto-resolution' (todo #1214/#1254/#1255 code-review follow-up). Never
+    silently pick one — callers should let this propagate so the job
+    fails loudly (dead-letters) instead of guessing."""
+
+
 MARKETPLACE_ID = 'EBAY_US'
+
+# eBay Motors US is a genuinely SEPARATE category tree (ID 100) from
+# EBAY_US's tree (ID 0) — confirmed live 2026-07-09 (todo #1254/
+# PP-EBAY-MOTORS-001): a categoryId used by real Motors listings 404s
+# against tree 0, and only resolves under tree 100. It is NOT a branch of
+# the EBAY_US tree, an assumption an earlier planning pass got wrong.
+# eBay rejects createOffer when marketplaceId/categoryId don't agree, so a
+# genuinely new item in a Motors-tree category would fail outright under
+# the old hardcoded EBAY_US — this is what makes the check below necessary,
+# not optional.
+_MOTORS_MARKETPLACE_ID = 'EBAY_MOTORS'
+
+# eBay's Account API (Business Policies: fulfillment/payment/return) uses a
+# DIFFERENT marketplace enum spelling for Motors than the Sell/Inventory
+# API's offer.marketplaceId field — 'EBAY_MOTORS_US', not 'EBAY_MOTORS'
+# (confirmed live 2026-07-10, code-review follow-up: the same per-API-family
+# enum inconsistency already found for the Taxonomy API's
+# get_default_category_tree_id in #1254). _get_policies() translates
+# through this map; callers everywhere else keep using the offer-level
+# 'EBAY_MOTORS' value.
+_ACCOUNT_API_MARKETPLACE_ID = {
+    _MOTORS_MARKETPLACE_ID: 'EBAY_MOTORS_US',
+}
+
+
+def _is_motors_category(cfg: Dict[str, Any], category_id: str) -> bool:
+    """True if *category_id* belongs to eBay Motors' distinct category tree.
+
+    Delegates to tgw.apis.ebay.taxonomy.is_motors_category() (todo #1255)
+    — backed by a local disk+memory cache of the full Motors tree, not a
+    live call per category. Only matters when creating a genuinely NEW
+    offer (an existing offer's real marketplaceId is used directly
+    instead, see stage_draft).
+    """
+    from tgw.apis.ebay.taxonomy import is_motors_category
+    return is_motors_category(cfg, category_id)
 
 # ---------------------------------------------------------------------------
 # Condition mapping  (AI string → eBay Inventory API enum)
@@ -48,6 +112,7 @@ _CONDITION_MAP: Dict[str, str] = {
     'manufacturer refurbished': 'MANUFACTURER_REFURBISHED',
     'seller refurbished':       'SELLER_REFURBISHED',
     'refurbished':              'SELLER_REFURBISHED',
+    '3000':                     'USED_EXCELLENT',  # Trading API conditionId for generic "Used"
     'used: excellent':          'USED_EXCELLENT',
     'excellent':                'USED_EXCELLENT',
     'used: very good':          'USED_VERY_GOOD',
@@ -75,27 +140,34 @@ def _map_condition(condition: str) -> str:
 # Per-process caches for account-level data that rarely changes
 # ---------------------------------------------------------------------------
 
-_policies_cache: Optional[Dict[str, str]] = None
+_policies_cache: Dict[str, Dict[str, str]] = {}
 _location_cache: Optional[str] = None
 _store_categories_cache: Optional[List[Dict[str, Any]]] = None
 
 
-def _get_policies(cfg: Dict[str, Any]) -> Dict[str, str]:
-    """Return {fulfillmentPolicyId, paymentPolicyId, returnPolicyId} for the account."""
-    global _policies_cache
-    if _policies_cache is not None:
-        return _policies_cache
+def _get_policies(cfg: Dict[str, Any], marketplace_id: str = MARKETPLACE_ID) -> Dict[str, str]:
+    """Return {fulfillmentPolicyId, paymentPolicyId, returnPolicyId} for the
+    account, scoped to *marketplace_id* (eBay Business Policies are
+    per-marketplace — code-review follow-up to #1254/#1255: this used to
+    hardcode EBAY_US unconditionally, so a Motors offer could get an
+    EBAY_US policy id attached, which eBay would reject as invalid for
+    that marketplace). Cached per marketplace_id, not a single global."""
+    if marketplace_id in _policies_cache:
+        return _policies_cache[marketplace_id]
+
+    account_marketplace_id = _ACCOUNT_API_MARKETPLACE_ID.get(marketplace_id, marketplace_id)
 
     def _first(path: str, list_key: str, id_field: str) -> str:
-        data = ebay_get(cfg, path, params={'marketplace_id': MARKETPLACE_ID})
+        data = ebay_get(cfg, path, params={'marketplace_id': account_marketplace_id})
         items = data.get(list_key, [])
         if not items:
             raise RuntimeError(
-                f'No {list_key} found in eBay account — create at least one in Seller Hub'
+                f'No {list_key} found in eBay account for marketplace '
+                f'{account_marketplace_id!r} — create at least one in Seller Hub'
             )
         return items[0][id_field]
 
-    _policies_cache = {
+    policies = {
         'fulfillmentPolicyId': _first('/sell/account/v1/fulfillment_policy',
                                       'fulfillmentPolicies', 'fulfillmentPolicyId'),
         'paymentPolicyId':     _first('/sell/account/v1/payment_policy',
@@ -103,8 +175,9 @@ def _get_policies(cfg: Dict[str, Any]) -> Dict[str, str]:
         'returnPolicyId':      _first('/sell/account/v1/return_policy',
                                       'returnPolicies', 'returnPolicyId'),
     }
-    log.info('eBay account policies: %s', _policies_cache)
-    return _policies_cache
+    _policies_cache[marketplace_id] = policies
+    log.info('eBay account policies for %s: %s', marketplace_id, policies)
+    return policies
 
 
 def _get_merchant_location(cfg: Dict[str, Any]) -> str:
@@ -156,11 +229,20 @@ def _resolve_fulfillment_id(cfg: Dict[str, Any], ebay_category_id: str,
     Returns None if nothing resolves (caller then falls back to the account API).
     """
     if shipping_profile:
+        sp = str(shipping_profile)
+        # Session 42 (Dave's one-at-a-time test): the item editor's shipping
+        # selector saves the chosen POLICY ID into shipping_profile, but this
+        # resolver only accepted mapped NAMES — the operator's explicit FC4
+        # selection was silently discarded (fell through to the account-first
+        # fallback, which shipped FC8). An all-digit value IS a policy id:
+        # honor the operator's choice directly.
+        if sp.isdigit() and len(sp) >= 8:
+            return sp
         by_profile = cfg.get('fulfillment_policy_by_profile', {})
-        resolved = by_profile.get(str(shipping_profile))
+        resolved = by_profile.get(sp)
         if resolved:
             return str(resolved)
-        # Unmapped profile — fall through rather than forward the name verbatim as a policy ID.
+        # Unmapped profile NAME — fall through rather than forward it verbatim.
         # Log so misconfigured/typo'd profile names are visible before eBay rejects the listing.
         log.warning('sync: shipping_profile %r not in fulfillment_policy_by_profile — falling through',
                     shipping_profile)
@@ -196,14 +278,28 @@ def _get_listing_policies(cfg: Dict[str, Any], ebay_category_id: str, *,
                           shipping_profile: Optional[str] = None,
                           size_class: Optional[str] = None,
                           thickness_in: Optional[float] = None,
-                          free_shipping: bool = False) -> Dict[str, str]:
+                          free_shipping: bool = False,
+                          marketplace_id: str = MARKETPLACE_ID) -> Dict[str, str]:
     """
     Return {fulfillmentPolicyId, paymentPolicyId, returnPolicyId} for an offer.
 
     Prefers explicit config values so per-item / per-category / per-size_class
     fulfillment overrides work (see _resolve_fulfillment_id for precedence).
     Falls back to eBay account first-policy lookup when config is incomplete.
+
+    *marketplace_id*: for anything other than EBAY_US (e.g. EBAY_MOTORS),
+    the config-based overrides below are skipped entirely and this always
+    resolves via the account API scoped to that marketplace (code-review
+    follow-up to #1254/#1255) — tgw-api-config.json's fulfillment_policy_id
+    etc. are EBAY_US business policies; eBay scopes business policies per
+    marketplace, so reusing them for a different marketplace's offer would
+    get rejected. If no policies exist yet for that marketplace, this
+    raises a clear RuntimeError (create one in Seller Hub) rather than
+    silently attaching an EBAY_US policy id that eBay would reject anyway.
     """
+    if marketplace_id != MARKETPLACE_ID:
+        return _get_policies(cfg, marketplace_id=marketplace_id)
+
     fulf_id = _resolve_fulfillment_id(cfg, ebay_category_id,
                                       shipping_profile=shipping_profile,
                                       size_class=size_class,
@@ -212,15 +308,30 @@ def _get_listing_policies(cfg: Dict[str, Any], ebay_category_id: str, *,
     pay_id = cfg.get('payment_policy_id')
     ret_id = cfg.get('return_policy_id')
 
-    if fulf_id and pay_id and ret_id:
-        return {
-            'fulfillmentPolicyId': str(fulf_id),
-            'paymentPolicyId':     str(pay_id),
-            'returnPolicyId':      str(ret_id),
-        }
-
-    # Fallback: fetch first policy of each type from eBay account
-    return _get_policies(cfg)
+    # Per-field: use each configured/resolved value where present; consult the
+    # account first-policy lookup ONLY for fields that are actually missing.
+    # Session 45: the previous all-or-nothing gate (all three or none) silently
+    # discarded a valid configured FC4 whenever payment/return ids were absent
+    # from config — every new listing shipped with eBay's first-listed policy
+    # ('PS') instead. A fallback on any field is a finding, not a quiet default.
+    resolved = {
+        'fulfillmentPolicyId': str(fulf_id) if fulf_id else None,
+        'paymentPolicyId':     str(pay_id) if pay_id else None,
+        'returnPolicyId':      str(ret_id) if ret_id else None,
+    }
+    missing = [k for k, v in resolved.items() if not v]
+    if missing:
+        account = _get_policies(cfg)
+        for k in missing:
+            resolved[k] = account[k]
+        log.error(
+            'sync: policy field(s) %s missing from config — fell back to eBay '
+            'account first-listed policy (%s). Configure them in '
+            'tgw-api-config.json; first-listed is arbitrary and has shipped '
+            'wrong policies before (s45).',
+            ', '.join(missing), {k: resolved[k] for k in missing},
+        )
+    return resolved  # all values are non-None strings here
 
 
 # ---------------------------------------------------------------------------
@@ -264,15 +375,35 @@ def _resolve_store_category_names(cfg: Dict[str, Any],
 # ---------------------------------------------------------------------------
 
 def _find_offer(cfg: Dict[str, Any], sku: str) -> Optional[Dict[str, Any]]:
-    """Return the existing eBay offer for *sku*, or None."""
+    """Return the existing eBay offer for *sku*, or None.
+
+    No marketplace_id filter (todo #1254/PP-EBAY-MOTORS-001, live-verified
+    2026-07-09): filtering by EBAY_US made this 404 for a SKU whose real
+    offer lives under EBAY_MOTORS, so stage_draft would conclude "no
+    existing offer" and could attempt to create a DUPLICATE under EBAY_US
+    for an item already live on Motors. A bare sku= query returns the one
+    offer regardless of which marketplace it's actually on.
+
+    Raises AmbiguousOfferError if the SKU genuinely has MORE THAN ONE offer
+    (real cross-marketplace duplicate risk, code-review follow-up to
+    #1254) — never silently pick offers[0], which would be an
+    undocumented, order-dependent guess about which marketplace's offer is
+    "the" one to update.
+    """
     try:
-        data = ebay_get(cfg, '/sell/inventory/v1/offer',
-                        params={'sku': sku, 'marketplace_id': MARKETPLACE_ID})
+        data = ebay_get(cfg, '/sell/inventory/v1/offer', params={'sku': sku})
         offers = data.get('offers', [])
-        return offers[0] if offers else None
     except Exception as exc:
         log.debug('offer lookup for %s returned: %s', sku, exc)
         return None
+    if len(offers) > 1:
+        marketplaces = sorted({str(o.get('marketplaceId') or '?') for o in offers})
+        raise AmbiguousOfferError(
+            f'{sku} has {len(offers)} existing offers across marketplaces '
+            f'{marketplaces} — needs human review, not auto-resolution '
+            f'(see ebay-marketplace-census report, todo #1214)'
+        )
+    return offers[0] if offers else None
 
 
 # ---------------------------------------------------------------------------
@@ -280,10 +411,18 @@ def _find_offer(cfg: Dict[str, Any], sku: str) -> Optional[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
-                        item: Dict[str, Any]) -> tuple:
+                        item: Dict[str, Any], *,
+                        known_marketplace_id: Optional[str] = None) -> tuple:
     """
     Build (inv_body, offer_body) for the eBay Inventory + Offer APIs.
     Raises ValueError for missing required fields.
+
+    *known_marketplace_id*: pass the SKU's EXISTING offer's real
+    marketplaceId when the caller already looked one up (code-review
+    follow-up to #1254/#1255) — ground truth always wins over guessing
+    from the category, and skips the Motors category-tree check entirely
+    (the common case: most calls are updates to an already-staged item,
+    not brand-new creates).
     """
     draft = item.get('draft_listing', {})
     ebay_offer = item.get('ebay_offer', {})
@@ -295,7 +434,7 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
     image_urls: List[str] = (
         draft.get('imageUrls')
         or [e['url'] for e in item.get('ebay_photos', [])]
-    )
+    )[:24]  # eBay max is 24 images per listing
     if not image_urls:
         raise ValueError(f'{sku}: no eBay photo URLs — run ebay_upload first')
 
@@ -324,6 +463,22 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
         product_block['epid'] = epid
 
     category_id_str = str(draft.get('category_id', ''))
+
+    # Never assume EBAY_US — a genuinely new item in a Motors-tree category
+    # (todo #1254/PP-EBAY-MOTORS-001) needs marketplaceId=EBAY_MOTORS or
+    # eBay rejects the createOffer call outright. Ground truth (an existing
+    # offer's own live marketplaceId, passed by the caller) always wins
+    # over this guess, and skips the Motors category-tree check entirely.
+    # Computed BEFORE _get_listing_policies below so listing policies can
+    # also be resolved for the correct marketplace (code-review follow-up:
+    # EBAY_US business policies attached to a Motors offer get rejected).
+    if known_marketplace_id:
+        offer_marketplace_id = known_marketplace_id
+    else:
+        offer_marketplace_id = (
+            _MOTORS_MARKETPLACE_ID if _is_motors_category(cfg, category_id_str) else MARKETPLACE_ID
+        )
+
     # PP-HINT-001 / PP-STORAGE-001 / PP-FULFILLMENT-001: a per-item shipping_profile,
     # size_class, or confirmed thickness_in drives fulfillment policy selection.
     _thickness = item.get('thickness_in')
@@ -333,11 +488,15 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
         _thickness = None
     policies     = _get_listing_policies(
         cfg, category_id_str,
-        shipping_profile=item.get('shipping_profile'),
+        shipping_profile=draft.get('shipping_profile') or item.get('shipping_profile'),
         size_class=item.get('size_class'),
         thickness_in=_thickness,
         free_shipping=bool(item.get('free_shipping', False)),
+        marketplace_id=offer_marketplace_id,
     )
+    if draft.get('return_policy_id'):
+        policies = dict(policies)
+        policies['returnPolicyId'] = str(draft['return_policy_id'])
     location_key = _get_merchant_location(cfg)
     qty          = draft.get('quantity', 1)
 
@@ -357,6 +516,9 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
             },
         },
     }
+    cond_desc = draft.get('condition_description', '').strip()
+    if cond_desc:
+        inv_body['conditionDescription'] = cond_desc
 
     # PP-GLOBALS-001: pass the operator-captured shipping weight through to the
     # Inventory API so calculated-shipping buyers get accurate rates. The intake
@@ -392,7 +554,7 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
 
     offer_body: Dict[str, Any] = {
         'sku':                 sku,
-        'marketplaceId':       MARKETPLACE_ID,
+        'marketplaceId':       offer_marketplace_id,
         'format':              'FIXED_PRICE',
         'availableQuantity':   qty,
         'categoryId':          category_id_str,
@@ -405,19 +567,33 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
         },
     }
 
-    # PP-STORE-001: file item into the matching eBay store category.
+    # Secondary eBay marketplace category (optional — costs extra on eBay)
+    secondary_cat_id = str(draft.get('secondary_category_id') or '').strip()
+    if secondary_cat_id:
+        offer_body['secondaryCategoryId'] = secondary_cat_id
+
+    # PP-STORE-001: file item into matching eBay store categories (primary + optional secondary).
     # Prefer store_category_id from draft (set by ebay_draft via category-groups.json);
     # fall back to the config-based store_category_by_ebay_category name mapping.
-    store_cat_id = draft.get('store_category_id')
-    if store_cat_id is not None:
-        store_cats = _get_store_categories_cached(cfg)
-        matched = next((c for c in store_cats if c['id'] == str(store_cat_id)), None)
-        if matched:
-            offer_body['storeCategoryNames'] = [matched['name']]
-    if 'storeCategoryNames' not in offer_body:
+    store_cats = _get_store_categories_cached(cfg)
+    store_cat_id  = str(draft.get('store_category_id') or '').strip()
+    store_cat2_id = str(draft.get('secondary_store_category_id') or '').strip()
+
+    store_names: List[str] = []
+    if store_cat_id:
+        m = next((c for c in store_cats if c['id'] == store_cat_id), None)
+        if m:
+            store_names.append(m['name'])
+    if store_cat2_id:
+        m2 = next((c for c in store_cats if c['id'] == store_cat2_id), None)
+        if m2:
+            store_names.append(m2['name'])
+
+    if not store_names:
         store_names = _resolve_store_category_names(cfg, category_id_str)
-        if store_names:
-            offer_body['storeCategoryNames'] = store_names
+
+    if store_names:
+        offer_body['storeCategoryNames'] = store_names[:2]  # eBay max 2
 
     return inv_body, offer_body
 
@@ -433,8 +609,18 @@ def stage_draft(cfg: Dict[str, Any], sku: str,
     Returns {offer_id, status: UNPUBLISHED}.
     Raises ValueError for missing price or photos.
     Raises requests.exceptions.* on network/auth failures (caller retries).
+    Raises AmbiguousOfferError if the SKU has more than one existing offer
+    across marketplaces (never auto-resolved — see _find_offer).
     """
-    inv_body, offer_body = _build_offer_bodies(cfg, sku, item)
+    # Look up any existing offer FIRST (code-review follow-up to #1254):
+    # its own live marketplaceId is ground truth and, when present, means
+    # _build_offer_bodies never needs to guess via the Motors category-tree
+    # check at all — skipping that work on the common path (most stage_draft
+    # calls are updates to an already-staged item, not brand-new creates).
+    existing = _find_offer(cfg, sku)
+    known_marketplace_id = existing.get('marketplaceId') if existing else None
+    inv_body, offer_body = _build_offer_bodies(
+        cfg, sku, item, known_marketplace_id=known_marketplace_id)
 
     try:
         ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{sku}', inv_body)
@@ -456,7 +642,6 @@ def stage_draft(cfg: Dict[str, Any], sku: str,
             raise
     log.info('inventory item upserted for %s', sku)
 
-    existing = _find_offer(cfg, sku)
     if existing:
         offer_id = existing['offerId']
         ebay_put(cfg, f'/sell/inventory/v1/offer/{offer_id}', offer_body)
@@ -514,6 +699,21 @@ def fetch_all_offers(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     Returns [] if the account has no Inventory API offers (eBay returns 400 in
     this case rather than an empty list, so we treat it as a graceful empty).
+
+    No marketplace_id filter (code-review follow-up to #1254): the old
+    hardcoded EBAY_US would silently exclude any Motors offers from this
+    account-wide reconciliation, the same bug class fixed in _find_offer.
+    eBay's own getOffers docs describe marketplace_id as a purely optional
+    narrowing filter with no correctness effect when omitted — this call
+    was already receiving offers from whichever marketplaces exist,
+    dropping the filter just stops silently excluding non-EBAY_US ones.
+    NOTE: this endpoint is currently blocked account-wide by an unrelated,
+    pre-existing issue (eBay error 25707 — see the 400-handling below and
+    ebay_sync.py's circuit breaker), which falls back to
+    _fetch_offers_by_local_skus() (already marketplace-agnostic, per-SKU).
+    Whether getOffers even supports true bulk pagination without a sku
+    filter (its docs describe it as SKU-scoped) is a separate, deeper
+    question not resolved here — flagged as a follow-up, not fixed.
     """
     import requests as _requests
     results: List[Dict[str, Any]] = []
@@ -521,14 +721,28 @@ def fetch_all_offers(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     while True:
         try:
             data = ebay_get(cfg, '/sell/inventory/v1/offer',
-                            params={'marketplace_id': MARKETPLACE_ID,
-                                    'limit': limit, 'offset': offset})
+                            params={'limit': limit, 'offset': offset})
         except _requests.exceptions.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else 0
-            if status in (400, 404):
-                # eBay returns 400/404 when the seller has no Inventory API offers
-                log.debug('fetch_all_offers: no offers (HTTP %s) — returning []', status)
+            if status == 404:
+                log.debug('fetch_all_offers: 404 — no Inventory API offers registered')
                 break
+            if status == 400:
+                _NO_OFFERS_IDS = {25702, 25710, 25009}
+                try:
+                    errors = exc.response.json().get('errors', [])
+                    eids = {int(e.get('errorId', 0)) for e in errors}
+                except Exception:
+                    log.warning('fetch_all_offers: 400 with unparseable body — %s',
+                                exc.response.text[:200] if exc.response else '')
+                    raise exc
+                if eids and eids.issubset(_NO_OFFERS_IDS):
+                    log.debug('fetch_all_offers: 400/%s — no offers (graceful empty)', eids)
+                    break
+                for e in errors:
+                    log.warning('fetch_all_offers: eBay error %s: %s',
+                                e.get('errorId'), e.get('message', ''))
+                raise
             raise
         batch = data.get('offers', [])
         results.extend(batch)

@@ -1,10 +1,16 @@
 #!/bin/bash
 # PP-BACKUP-001 A1 — daily PostgreSQL ledger dump
 # Dumps state_machine to nvme, rsyncs to snapshot disk, prunes >35 days.
+#
+# SNAP_DIR moved 2026-07-04 onto a genuinely separate physical drive
+# (/dev/sdc1, LABEL=tgw-db-backup, mounted at /opt/TGW/mnt/tgw-db-backup)
+# — the old path (/opt/TGW/var/local/backups/...) was discovered to be on
+# the SAME nvme0n1p3 filesystem as the primary dump, a single point of
+# failure this rsync step was supposed to protect against.
 set -euo pipefail
 
 DB_DIR=/opt/TGW/var/backups/trader_grims_warehouse/db
-SNAP_DIR=/opt/TGW/var/local/backups/trader_grims_warehouse/db
+SNAP_DIR=/opt/TGW/mnt/tgw-db-backup/trader_grims_warehouse/db
 LOG=/opt/TGW/var/log/db-backup.log
 STAMP=$(date +%Y%m%d)
 DUMP="$DB_DIR/state_machine-${STAMP}.dump"

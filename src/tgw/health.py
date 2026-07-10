@@ -249,10 +249,9 @@ def check_sqlite_catalog(cfg: Dict[str, Any]) -> Dict[str, Any]:
         row_count = con.execute('SELECT COUNT(*) FROM catalog').fetchone()[0]
         con.close()
         mtime = db_path.stat().st_mtime
-        import datetime
-        age = datetime.datetime.now() - datetime.datetime.fromtimestamp(mtime)
+        age_s = time.time() - mtime
         return _result('sqlite_catalog', True,
-                       f'{row_count:,} rows — updated {int(age.total_seconds() // 60)}m ago',
+                       f'{row_count:,} rows — updated {int(age_s // 60)}m ago',
                        (time.time() - t) * 1000, row_count=row_count)
     except Exception as e:
         return _result('sqlite_catalog', False, str(e), (time.time() - t) * 1000)
@@ -434,23 +433,6 @@ def check_taskboard(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
-def check_backup_service() -> Dict[str, Any]:
-    """trader-grims-backup systemd service is active."""
-    t = time.time()
-    try:
-        r = subprocess.run(
-            ['systemctl', 'is-active', 'trader-grims-backup.service'],
-            capture_output=True, text=True, timeout=5
-        )
-        active = r.stdout.strip() == 'active'
-        return _result('backup', active,
-                       r.stdout.strip(), (time.time() - t) * 1000)
-    except FileNotFoundError:
-        return _result('backup', False,
-                       'systemctl not available', (time.time() - t) * 1000)
-    except Exception as e:
-        return _result('backup', False, str(e), (time.time() - t) * 1000)
-
 
 def check_ollama(model: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -577,6 +559,131 @@ def check_nats(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# ebay_sync per-SKU fallback check (session-39 API audit finding #2)
+# ---------------------------------------------------------------------------
+
+def check_ebay_sync_fallback(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Warn if ebay_sync has fallen back to per-SKU offer lookups (eBay error 25707 —
+    an orphaned offer with a non-alphanumeric SKU breaks the bulk offer list).
+
+    Green (ok=True): never fell back, or fell back once (transient — the bulk path
+    may just have had a one-off hiccup).
+    Red (ok=False, warn=True): fell back 2+ consecutive runs — the per-SKU path is
+    ~N-fold more expensive in API calls than the bulk list and this is now the
+    steady state, not a blip. See todo #1077 (clear the orphaned offer).
+    """
+    t = time.time()
+    root = cfg.get("catalog_root")
+    path = Path(root) / "ebay-sync-fallback-state.json" if root else None
+    if not path or not path.exists():
+        return _result("ebay_sync_fallback", True, "no fallback recorded", (time.time() - t) * 1000)
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return _result("ebay_sync_fallback", True, f"state unreadable: {exc}", (time.time() - t) * 1000)
+
+    consecutive = int(state.get("consecutive_fallback_runs", 0))
+    if consecutive >= 2:
+        return _result(
+            "ebay_sync_fallback", False,
+            f"{consecutive} consecutive per-SKU fallback runs — clear orphaned offer (todo #1077)",
+            (time.time() - t) * 1000, warn=True, consecutive=consecutive,
+        )
+    if consecutive == 1:
+        return _result("ebay_sync_fallback", True, "1 fallback run (transient)",
+                       (time.time() - t) * 1000, warn=True, consecutive=consecutive)
+    return _result("ebay_sync_fallback", True, "bulk offer list OK", (time.time() - t) * 1000)
+
+
+# ---------------------------------------------------------------------------
+# Metered-API quota check (PP-QUOTA-001, session 42)
+# ---------------------------------------------------------------------------
+
+def _openrouter_key_limit(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Live per-key spend limit/remaining from OpenRouter's auth/key endpoint.
+
+    Added 2026-07-04 (todo #1132) after a real incident: OpenRouter's
+    *account* balance looked fine, but the specific API key TGW uses had
+    its own separate spend limit (then $15/week) that was silently
+    near-exhausted, causing a 402 pile-up that took a live log-dive to
+    diagnose. Surfacing it here means the next time this happens it's
+    visible in `tgw health` instead. Returns None (not an error) if the
+    credentials file or the `requests` call fails — this is a nice-to-have
+    signal, never a reason to fail the whole quota check.
+    """
+    try:
+        import requests
+        cred_path = Path(cfg.get('secrets_root', '/opt/TGW/secrets')) / 'openrouter-credentials.json'
+        if not cred_path.exists():
+            return None
+        key = json.loads(cred_path.read_text(encoding='utf-8')).get('api_key')
+        if not key:
+            return None
+        resp = requests.get(
+            'https://openrouter.ai/api/v1/auth/key',
+            headers={'Authorization': f'Bearer {key}'}, timeout=5,
+        )
+        resp.raise_for_status()
+        d = resp.json().get('data', {})
+        return {
+            'limit': d.get('limit'), 'limit_reset': d.get('limit_reset'),
+            'limit_remaining': d.get('limit_remaining'),
+        }
+    except Exception:
+        return None
+
+
+def check_quota(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Surface today's metered-API spend and any 429 incidents.
+
+    Green (ok=True): no 429s today, no pool past its background-halt fraction.
+    Yellow (ok=True, warn=True): a pool is past the halt fraction (background
+    callers are being held; operator reserve is protecting interactive use).
+    Red (ok=False, warn=True): one or more 429 incidents today — a 429 always
+    means a drain bug or budget breach; see var/log/quota-incidents.jsonl.
+    """
+    t = time.time()
+    try:
+        from tgw import quota
+        st = quota.status(cfg)
+    except Exception as exc:
+        return _result('quota', True, f'status unavailable: {exc}', (time.time() - t) * 1000)
+
+    incidents = st.get('incidents_today', 0)
+    hot = {p: v for p, v in st.get('pools', {}).items()
+           if v.get('fraction') is not None and v['fraction'] >= 0.70}
+    spent_summary = ', '.join(
+        f"{p}={v['spent']}" + (f"/{v['budget']}" if v.get('budget') else '')
+        for p, v in sorted(st.get('pools', {}).items())) or 'no calls recorded today'
+
+    or_limit = _openrouter_key_limit(cfg)
+    or_note = ''
+    or_low = False
+    if or_limit and or_limit.get('limit') is not None:
+        remaining = or_limit.get('limit_remaining') or 0
+        or_note = (f" | openrouter key: ${remaining:.2f} of ${or_limit['limit']} "
+                   f"remaining ({or_limit.get('limit_reset')})")
+        or_low = remaining < (0.1 * or_limit['limit'])
+
+    if incidents:
+        return _result('quota', False,
+                       f'{incidents} × 429 incident(s) today — {spent_summary}{or_note}',
+                       (time.time() - t) * 1000, warn=True,
+                       incidents_today=incidents, pools=st.get('pools', {}),
+                       openrouter_key_limit=or_limit)
+    if hot or or_low:
+        reason = ', '.join(sorted(hot)) if hot else 'openrouter key near its limit'
+        return _result('quota', True,
+                       f"background halted: {reason} — {spent_summary}{or_note}",
+                       (time.time() - t) * 1000, warn=True, pools=st.get('pools', {}),
+                       openrouter_key_limit=or_limit)
+    return _result('quota', True, f'{spent_summary}{or_note}', (time.time() - t) * 1000,
+                   pools=st.get('pools', {}), openrouter_key_limit=or_limit)
+
+
+# ---------------------------------------------------------------------------
 # Combined check
 # ---------------------------------------------------------------------------
 
@@ -600,13 +707,14 @@ def check_all(cfg: Dict[str, Any],
         check_sqlite_catalog(cfg),
         check_thumbnail_cache(cfg),
         check_postgres(cfg),
-        check_backup_service(),
         check_backups(cfg),
         check_taskboard(cfg),
         check_ownership(cfg),
         check_sync_conflicts(cfg),
     ]
     checks.append(check_nats(cfg))
+    checks.append(check_ebay_sync_fallback(cfg))
+    checks.append(check_quota(cfg))
     if include_ollama:
         checks.append(check_ollama())
     if include_ebay:

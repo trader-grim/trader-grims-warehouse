@@ -52,7 +52,11 @@ def reducer(tmp_path, monkeypatch):
         'payment_policy_id':     'PAY1',
         'return_policy_id':      'RET1',
         'raw':                   {},
+        'api_key':               'test-api-key',
     }
+    from tests.conftest import make_fake_fence_write, make_fake_patch_item
+    monkeypatch.setattr(reducer_mod, 'fence_ebay_write', make_fake_fence_write(tmp_path))
+    monkeypatch.setattr(reducer_mod, 'fence_patch_item', make_fake_patch_item(tmp_path))
     worker._puts = puts
     return worker
 
@@ -238,3 +242,80 @@ def test_price_history_accumulates_across_reductions(reducer, tmp_path):
     _, after = _run(reducer, path)
     assert len(after['price_history']) == 2
     assert after['price_history'][-1]['price'] == 18.0
+
+
+# ---------------------------------------------------------------------------
+# Session 41 regression — draft_listing.price must persist after a reduction
+# ---------------------------------------------------------------------------
+#
+# Bug: the reducer mutated draft['price'] in memory but never included
+# draft_listing in the fence_patch_item payload, so it was silently dropped
+# every run. ebay_stage.py reads draft_listing.price FIRST, so the next
+# ebay_stage run (for any reason — redraft, force restage) would push the
+# stale pre-reduction price back live, silently reverting the markdown eBay
+# had already accepted. Confirmed live on tgw202605051933258.
+
+def test_draft_listing_price_persisted_after_reduction(reducer, tmp_path):
+    path = _write(tmp_path, _item())
+    _, after = _run(reducer, path)
+    assert after['draft_listing']['price'] == 18.0
+
+
+def test_draft_listing_price_matches_ebay_offer_price(reducer, tmp_path):
+    """The two must never be allowed to drift apart again — ebay_stage.py
+    reads draft_listing.price first, so if it lags ebay_offer.price a later
+    stage re-run silently reverts the live markdown."""
+    path = _write(tmp_path, _item())
+    _, after = _run(reducer, path)
+    assert after['draft_listing']['price'] == after['ebay_offer']['price']
+
+
+def test_draft_listing_price_persisted_on_catchup(reducer, tmp_path):
+    item = _item()
+    item['reprice_schedule'][2]['due_at'] = PAST
+    path = _write(tmp_path, item)
+    _, after = _run(reducer, path)
+    assert after['draft_listing']['price'] == 12.0
+
+
+def test_ebay_write_failure_does_not_discard_draft_listing_price(reducer, tmp_path, monkeypatch):
+    """Even if the ebay_offer.price deep-merge fails (e.g. the transient
+    KeyError('api_key') crash confirmed in production logs), the more
+    critical draft_listing/reprice_schedule/price_history bookkeeping — for a
+    price change eBay has ALREADY accepted live — must not be lost."""
+    def boom(*a, **k):
+        raise KeyError('api_key')
+    monkeypatch.setattr(reducer_mod, 'fence_ebay_write', boom)
+
+    path = _write(tmp_path, _item())
+    stats, after = _run(reducer, path)
+
+    assert stats['reduced'] == 1
+    assert after['draft_listing']['price'] == 18.0
+    assert after['reprice_schedule'][1]['done_at'] is not None
+    assert after['price_history'][-1]['price'] == 18.0
+
+
+def test_cliff_drop_stage_refused_and_stamped(reducer, tmp_path):
+    # Session 42: a stage cutting >50% off its predecessor stage (fire-sale
+    # comps, e.g. $299 retail -> $4.79 move) is REFUSED, stamped so it never
+    # silently retries, and no PUT reaches eBay.
+    item = _item()
+    item['reprice_schedule'][1]['done_at'] = PAST      # retail already applied
+    item['reprice_schedule'][2]['price'] = 4.79        # cliff vs retail 18.0
+    item['reprice_schedule'][2]['due_at'] = PAST
+    path = _write(tmp_path, item)
+    _, after = _run(reducer, path)
+    assert reducer._puts == []
+    stage2 = after['reprice_schedule'][2]
+    assert stage2.get('refused_at')
+    assert stage2.get('done_at')
+
+
+def test_below_hard_floor_refused_even_if_gradual(reducer, tmp_path):
+    item = _item(price=5.0)
+    item['reprice_schedule'][1]['price'] = 2.50        # below $2.99 hard floor
+    path = _write(tmp_path, item)
+    _, after = _run(reducer, path)
+    assert reducer._puts == []
+    assert after['reprice_schedule'][1].get('refused_at')

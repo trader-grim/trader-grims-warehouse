@@ -16,49 +16,83 @@ import secrets
 import sqlite3
 import subprocess
 import time
+import urllib.parse
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import psycopg2
 import psycopg2.extras
-from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Request, Security, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request, Security, UploadFile, status
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from . import draft_sync
 from .assets import ordered_photos as _ordered_photos
 from .config import DEFAULT_CONFIG, load_config
 from .items import atomic_write_json, locationupdate
 from .queue import state_machine
+from .readiness import check_ebay, readiness_html
 from .resolver import load_item_doc
 
 log = logging.getLogger(__name__)
 
+_DISPLAY_TZ = ZoneInfo("America/Los_Angeles")
+
+
+def _local_ts(raw: Any, fmt: str = "%Y-%m-%d %H:%M") -> str:
+    """Format a timestamp (datetime, or ISO string with/without offset) in the
+    operator's local timezone for display.
+
+    Session 41: postgres's session timezone is GMT, so every queue_jobs
+    timestamp comes back as UTC. Every display site in this file truncated
+    the raw ISO string (e.g. `str(ts)[:16]`) to shorten it for the table —
+    which strips the `+00:00` offset entirely, leaving a bare value that
+    looks like local time but is actually UTC (off by the PST/PDT offset —
+    confirmed live: an operator read a dead-lettered job's timestamp as
+    "7 hours in the future"). Always convert through this helper instead of
+    slicing the raw string directly.
+    """
+    if not raw:
+        return ""
+    if isinstance(raw, datetime):
+        dt = raw
+    else:
+        try:
+            dt = datetime.fromisoformat(str(raw))
+        except ValueError:
+            return str(raw)[:16]
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_DISPLAY_TZ).strftime(fmt)
+
+
 # ---------------------------------------------------------------------------
 # Worker pipeline tooltip text — sourced from TGW-Pipeline-Flow.md
 _WORKER_TOOLTIPS: Dict[str, str] = {
-    "token_refresh":     "OAuth token refresh via eBay API; fires when token expires within 30 min",
-    "pm_intake":         "Reads plan-vault inbox notes → Ollama classifies → patches Master Plan",
-    "catalog_rebuild":   "Rebuilds JSON catalog + SQLite + location tree from all ItemData",
-    "thumbnail_gen":     "Generates SKU thumbnail from primary photo (Pillow)",
-    "bundle_intake":     "Polls incoming/newitems/, creates item stubs, enqueues ai_identify",
-    "multi_intake":      "Splits multi-item bundles into individual child SKUs",
-    "ai_identify":       "Sends photo to Ollama vision model → extracts title, category, condition",
-    "ebay_draft":        "Fetches eBay aspects, fills with AI (Qwen2.5), builds draft_listing block",
-    "ebay_upload":       "Uploads photos to eBay EPS via Trading API → permanent picture URLs",
-    "ebay_price":        "Browse API comps search → sets launch price + price_comps on offer",
-    "ebay_stage":        "Inventory API upsert + creates UNPUBLISHED offer; item visible in Seller Hub",
-    "ebay_publish":      "Publishes offer to eBay (manual trigger only); writes listing_id + reprice_schedule",
-    "ebay_price_reducer":"Applies reprice schedule stages (launch → retail → move) via Inventory API",
-    "ebay_sync":         "Fetches all eBay offers → syncs status back to item JSON every 6 h",
-    "ebay_legacy_sync":  "GetMyeBaySelling + GetOrders via Trading API; marks sold items",
-    "ebay_dole":         "Self-scheduling; publishes oldest ready items at configured dole rate",
-    "ebay_sku_migrate":  "Batches Class A live listings: delist → rename SKU → relist (hourly)",
-    "velocity_stats":    "Computes nightly category velocity stats for repricer tuning",
-    "echo":              "No-op test worker — echoes payload and succeeds",
+    "token_refresh": "OAuth token refresh via eBay API; fires when token expires within 30 min",
+    "pm_intake": "Reads plan-vault inbox notes → Ollama classifies → patches Master Plan",
+    "catalog_rebuild": "Rebuilds JSON catalog + SQLite + location tree from all ItemData",
+    "thumbnail_gen": "Generates SKU thumbnail from primary photo (Pillow)",
+    "bundle_intake": "Polls incoming/newitems/, creates item stubs, enqueues ai_identify",
+    "multi_intake": "Splits multi-item bundles into individual child SKUs",
+    "ai_identify": "Sends photo to Ollama vision model → extracts title, category, condition",
+    "ebay_draft": "Fetches eBay aspects, fills with AI (Qwen2.5), builds draft_listing block",
+    "ebay_upload": "Uploads photos to eBay EPS via Trading API → permanent picture URLs",
+    "ebay_price": "Browse API comps search → sets launch price + price_comps on offer",
+    "ebay_stage": "Inventory API upsert + creates UNPUBLISHED offer; item visible in Seller Hub",
+    "ebay_publish": "Publishes offer to eBay (manual trigger only); writes listing_id + reprice_schedule",
+    "ebay_price_reducer": "Applies reprice schedule stages (launch → retail → move) via Inventory API",
+    "ebay_sync": "Fetches all eBay offers → syncs status back to item JSON every 6 h",
+    "ebay_legacy_sync": "GetMyeBaySelling + GetOrders via Trading API; marks sold items",
+    "ebay_dole": "Self-scheduling; publishes oldest ready items at configured dole rate",
+    "ebay_sku_migrate": "Batches Class A live listings: delist → rename SKU → relist (hourly)",
+    "velocity_stats": "Computes nightly category velocity stats for repricer tuning",
+    "echo": "No-op test worker — echoes payload and succeeds",
 }
 
 # Module-level state (set during lifespan startup)
@@ -66,9 +100,10 @@ _WORKER_TOOLTIPS: Dict[str, str] = {
 
 _cfg: Dict[str, Any] = {}
 _api_key: str = ""
-_web_key: str = ""  # per-process session key embedded in form-page HTML; rotates on restart
+_web_password: str = ""  # human-memorable login password; falls back to _api_key if unset
+_sessions: Dict[str, float] = {}  # token → expiry timestamp (epoch seconds)
 
-_security = HTTPBearer()
+_security = HTTPBearer(auto_error=False)
 
 # Listing index cache for webhook lookups: {listing_id: json_path}
 _listing_index: Dict[str, Path] = {}
@@ -85,15 +120,17 @@ def _get_listing_index() -> Dict[str, Path]:
     global _listing_index, _listing_index_built_at
     if time.time() - _listing_index_built_at > _LISTING_INDEX_TTL:
         from .workers.ebay_legacy_sync import _build_listing_index
-        _listing_index = _build_listing_index(_cfg['itemdata_root'])
+
+        _listing_index = _build_listing_index(_cfg["itemdata_root"])
         _listing_index_built_at = time.time()
-        log.info('ebay_webhook: listing index rebuilt (%d entries)', len(_listing_index))
+        log.info("ebay_webhook: listing index rebuilt (%d entries)", len(_listing_index))
     return _listing_index
 
 
 def _listing_index_built_at_reset() -> None:
     global _listing_index_built_at
     _listing_index_built_at = 0.0
+
 
 PIPELINE_ACTIONS = {
     "ai_identify",
@@ -103,6 +140,9 @@ PIPELINE_ACTIONS = {
     "ebay_stage",
     "ebay_publish",
     "ebay_end_listing",
+    "ebay_update",
+    "accept_proposals",
+    "dismiss_proposals",
     "catalog_rebuild",
     "thumbnail_gen",
     "approve",
@@ -110,6 +150,9 @@ PIPELINE_ACTIONS = {
     "migrate_unblock",
     "review_mark_ready",
     "sync_from_ebay",
+    "reset_draft_from_live",
+    "set_ready",
+    "unset_ready",
 }
 
 
@@ -117,26 +160,37 @@ PIPELINE_ACTIONS = {
 # Startup / shutdown
 # ---------------------------------------------------------------------------
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _cfg, _api_key, _web_key
+    global _cfg, _api_key, _web_password
     _cfg = load_config(DEFAULT_CONFIG)
     state_machine.init(_cfg["postgres_dsn"])
 
     key_path: Path = _cfg["secrets_root"] / "tgw-api-key.json"
     if not key_path.exists():
         raise RuntimeError(f"API key file not found: {key_path}")
-    _api_key = json.loads(key_path.read_text(encoding="utf-8"))["api_key"]
-    _web_key = secrets.token_hex(32)
+    key_data = json.loads(key_path.read_text(encoding="utf-8"))
+    _api_key = key_data["api_key"]
+    _web_password = key_data.get("web_password") or _api_key
 
     # PP-AIOPS-001: start NATS publisher and set API attribution context
     try:
         from .apis.nats_client import init_nats
         from .items import set_mutation_context
+
         init_nats(_cfg)
         set_mutation_context("api:operator")
     except Exception as exc:
         log.debug("nats init skipped: %s", exc)
+
+    # PP-QUOTA-001: operator-facing server — interactive quota context
+    # (never budget-halted, only counted)
+    try:
+        from tgw import quota
+        quota.set_context("interactive", "tgw-http")
+    except Exception as exc:
+        log.debug("quota context skipped: %s", exc)
 
     log.info("tgw-http started on port 7373")
     yield
@@ -157,20 +211,127 @@ app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 
 # ---------------------------------------------------------------------------
-# Auth dependency
+# Auth — Bearer token (CLI/Flutter) or browser session cookie
 # ---------------------------------------------------------------------------
 
-def _require_auth(credentials: HTTPAuthorizationCredentials = Security(_security)) -> None:
-    if credentials.credentials not in (_api_key, _web_key):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token")
+_SESSION_COOKIE = "tgw_session"
+_SESSION_MAX_AGE = 365 * 86400  # 1 year — expires only when user clears browser data
+
+_LOGIN_HTML = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TGW — Sign in</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:#0d0d0d;color:#ccc;font-family:system-ui,sans-serif;
+     display:flex;align-items:center;justify-content:center;min-height:100vh}}
+.box{{background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:32px 28px;width:320px}}
+h1{{font-size:1.1em;color:#9bf;margin-bottom:20px}}
+label{{font-size:.8em;color:#888;display:block;margin-bottom:6px}}
+input[type=password]{{width:100%;background:#111;border:1px solid #444;border-radius:4px;
+  color:#eee;padding:8px 10px;font-size:.95em;margin-bottom:14px}}
+input[type=password]:focus{{outline:none;border-color:#4a8ade}}
+button{{width:100%;background:#1a4a8a;color:#fff;border:none;border-radius:4px;
+  padding:10px;font-size:.95em;cursor:pointer}}
+button:hover{{background:#2a5a9a}}
+.err{{color:#f77;font-size:.82em;margin-top:10px}}
+</style>
+</head>
+<body>
+<div class="box">
+  <h1>TGW</h1>
+  <form method="post" action="/login">
+    <input type="hidden" name="next" value="{next}">
+    <label for="key">Password</label>
+    <input type="password" id="key" name="key" autofocus autocomplete="current-password">
+    <button type="submit">Sign in</button>
+    {error}
+  </form>
+</div>
+</body>
+</html>"""
+
+
+def _safe_next_path(path: str) -> str:
+    """Only allow same-origin relative paths as a post-login redirect target.
+
+    Rejects protocol-relative URLs (//evil.com) that browsers resolve as
+    absolute, and anything not starting with a single leading slash.
+    """
+    if not path or not path.startswith("/") or path.startswith("//") or path.startswith("/\\"):
+        return "/form/home"
+    return path
+
+
+def _require_auth(
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(_security),
+    request: Request = None,
+) -> None:
+    if credentials and credentials.credentials == _api_key:
+        return
+    tok = request.cookies.get(_SESSION_COOKIE) if request else None
+    if tok and _sessions.get(tok, 0) > time.time():
+        return
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token")
 
 
 AUTH = Depends(_require_auth)
 
 
+@app.middleware("http")
+async def _session_guard(request: Request, call_next):
+    """Redirect unauthenticated /form/* requests to the login page."""
+    if request.url.path.startswith("/form/"):
+        tok = request.cookies.get(_SESSION_COOKIE)
+        if not (tok and _sessions.get(tok, 0) > time.time()):
+            from urllib.parse import quote
+            dest = request.url.path
+            if request.url.query:
+                dest += "?" + request.url.query
+            return RedirectResponse(f"/login?next={quote(dest)}", status_code=303)
+    return await call_next(request)
+
+
+@app.get("/login")
+def login_get(next: str = "/form/home"):
+    import html as _html
+
+    return HTMLResponse(_LOGIN_HTML.format(next=_html.escape(next), error=""))
+
+
+@app.post("/login")
+async def login_post(
+    next: str = Form(default="/form/home"),
+    key: str = Form(default=""),
+):
+    import html as _html
+
+    if _web_password and secrets.compare_digest(key.encode(), _web_password.encode()):
+        # Prune expired sessions before adding a new one
+        now = time.time()
+        expired = [t for t, exp in _sessions.items() if exp <= now]
+        for t in expired:
+            del _sessions[t]
+        tok = secrets.token_hex(32)
+        _sessions[tok] = now + _SESSION_MAX_AGE
+        dest = _safe_next_path(next)
+        resp = RedirectResponse(dest, status_code=303)
+        resp.set_cookie(
+            _SESSION_COOKIE, tok,
+            httponly=True, samesite="strict", max_age=_SESSION_MAX_AGE,
+        )
+        return resp
+    html = _LOGIN_HTML.format(next=_html.escape(next), error='<p class="err">Invalid key.</p>')
+    return HTMLResponse(html, status_code=401)
+
+
 # ---------------------------------------------------------------------------
 # SQLite helper
 # ---------------------------------------------------------------------------
+
 
 def _sqlite_conn() -> sqlite3.Connection:
     con = sqlite3.connect(str(_cfg["sqlite_catalog_path"]), check_same_thread=False)
@@ -181,6 +342,7 @@ def _sqlite_conn() -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
+
 
 class PatchBody(BaseModel):
     fields: Dict[str, Any]
@@ -240,9 +402,31 @@ class PhotoOrderBody(BaseModel):
     order: List[str]
 
 
+class AppendBody(BaseModel):
+    op: str
+    data: Dict[str, Any]
+
+
+class EbayWriteBody(BaseModel):
+    ebay_offer: Optional[Dict[str, Any]] = None
+    ebay_listing: Optional[Dict[str, Any]] = None
+    ebay_submitted: Optional[Dict[str, Any]] = None
+    ebay_live: Optional[Dict[str, Any]] = None
+    # Fields the caller explicitly asserts it OWNS and intends to refresh —
+    # e.g. ["price_comps"] from ebay_price, ["photo_verify"] from ebay_repush.
+    # Everyone else stays blocked from touching a protected field (#1189).
+    allow_protected: Optional[List[str]] = None
+
+
+class CreateItemBody(BaseModel):
+    sku: str
+    data: Dict[str, Any]
+
+
 # ---------------------------------------------------------------------------
 # GET /api/items — search catalog
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/items", dependencies=[AUTH])
 def list_items(
@@ -271,7 +455,17 @@ def list_items(
     if location:
         clauses.append("location = ?")
         params.append(location)
-    if status_filter:
+    if status_filter == "__eligible__":
+        # Eligible for listing (Dave, s42): new / In Stock, and not currently on
+        # eBay (no Active listing, no PUBLISHED offer). Ended listings qualify —
+        # they can be relisted. Sold/disposed/archived excluded by the status
+        # allow-list. This is the feed for one-at-a-time listing runs.
+        clauses.append("LOWER(COALESCE(status, '')) IN ('new', 'in stock')")
+        clauses.append("(json_extract(data, '$.ebay_listing.status') IS NULL"
+                       " OR json_extract(data, '$.ebay_listing.status') NOT IN ('Active', 'PUBLISHED'))")
+        clauses.append("(json_extract(data, '$.ebay_offer.status') IS NULL"
+                       " OR json_extract(data, '$.ebay_offer.status') != 'PUBLISHED')")
+    elif status_filter:
         clauses.append("status = ?")
         params.append(status_filter)
     if date_from:
@@ -287,6 +481,7 @@ def list_items(
     sql = (
         f"SELECT sku, title, location, status, price, qty, image, attribute_set,"
         f" json_extract(data, '$.ebay_listing.listing_id') AS ebay_listing_id,"
+        f" json_extract(data, '$.ebay_listing.status') AS ebay_listing_status,"
         f" json_extract(data, '$.ebay_offer.offer_id') AS ebay_offer_id,"
         f" json_extract(data, '$.ebay_offer.ready_at') AS ebay_ready_at,"
         f" CASE WHEN json_extract(data, '$.draft_listing') IS NOT NULL THEN 1 ELSE 0 END AS has_draft"
@@ -308,6 +503,7 @@ def list_items(
 # Must be registered before /api/items/{sku} so the literal path wins.
 # ---------------------------------------------------------------------------
 
+
 @app.get("/api/items/pending-revision", dependencies=[AUTH])
 def get_pending_revisions() -> Dict[str, Any]:
     """Return items that have a non-empty revision_draft, with draft details."""
@@ -317,11 +513,7 @@ def get_pending_revisions() -> Dict[str, Any]:
     if db_path and Path(db_path).exists():
         try:
             with _sqlite_conn() as con:
-                rows = con.execute(
-                    "SELECT sku, title, location, data FROM catalog"
-                    " WHERE json_extract(data, '$.revision_draft') IS NOT NULL"
-                    " ORDER BY sku"
-                ).fetchall()
+                rows = con.execute("SELECT sku, title, location, data FROM catalog WHERE json_extract(data, '$.revision_draft') IS NOT NULL ORDER BY sku").fetchall()
             for row in rows:
                 draft: Dict[str, Any] = {}
                 try:
@@ -331,12 +523,14 @@ def get_pending_revisions() -> Dict[str, Any]:
                     pass
                 if not draft or not draft.get("delta"):
                     continue
-                items.append({
-                    "sku": row["sku"],
-                    "title": row["title"] or "",
-                    "location": row["location"] or "",
-                    "draft": draft,
-                })
+                items.append(
+                    {
+                        "sku": row["sku"],
+                        "title": row["title"] or "",
+                        "location": row["location"] or "",
+                        "draft": draft,
+                    }
+                )
         except Exception as exc:
             log.warning("pending-revision: catalog query failed: %s", exc)
 
@@ -347,6 +541,7 @@ def get_pending_revisions() -> Dict[str, Any]:
 # GET /api/items/review-queue — post-draft items awaiting human approval
 # Must be registered before /api/items/{sku} so the literal path wins.
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/items/review-queue", dependencies=[AUTH])
 def get_review_queue() -> Dict[str, Any]:
@@ -382,26 +577,28 @@ def get_review_queue() -> Dict[str, Any]:
             except Exception:
                 pass
             draft = doc.get("draft_listing") or {}
-            items.append({
-                "sku": row["sku"],
-                "title": draft.get("title") or row["title"] or "",
-                "location": row["location"] or "",
-                "status": row["status"] or "",
-                "price": draft.get("price") if draft.get("price") is not None else row["price"],
-                "condition": draft.get("condition") or doc.get("condition") or "",
-                "condition_label": draft.get("condition_label") or "",
-                "condition_description": draft.get("description") or "",
-                "category_id": draft.get("category_id") or doc.get("ebay_category_id") or "",
-                "category_name": draft.get("category_name") or doc.get("ebay_category_name") or "",
-                "shipping_profile": draft.get("shipping_profile") or doc.get("shipping_profile") or "",
-                "quality": draft.get("quality") or {},
-                "aspects_required_total": draft.get("aspects_required_total"),
-                "aspects_required_filled": draft.get("aspects_required_filled"),
-                "category_confidence": draft.get("category_confidence") or doc.get("category_confidence") or "",
-                "offline_draft": bool(draft.get("offline_draft") or doc.get("offline_draft")),
-                "lookup_category_name": (doc.get("product_lookup") or {}).get("category_name") or "",
-                "lookup_category_id": str((doc.get("product_lookup") or {}).get("ebay_category_id") or ""),
-            })
+            items.append(
+                {
+                    "sku": row["sku"],
+                    "title": draft.get("title") or row["title"] or "",
+                    "location": row["location"] or "",
+                    "status": row["status"] or "",
+                    "price": draft.get("price") if draft.get("price") is not None else row["price"],
+                    "condition": draft.get("condition") or doc.get("condition") or "",
+                    "condition_label": draft.get("condition_label") or "",
+                    "condition_description": draft.get("description") or "",
+                    "category_id": draft.get("category_id") or doc.get("ebay_category_id") or "",
+                    "category_name": draft.get("category_name") or doc.get("ebay_category_name") or "",
+                    "shipping_profile": draft.get("shipping_profile") or doc.get("shipping_profile") or "",
+                    "quality": draft.get("quality") or {},
+                    "aspects_required_total": draft.get("aspects_required_total"),
+                    "aspects_required_filled": draft.get("aspects_required_filled"),
+                    "category_confidence": draft.get("category_confidence") or doc.get("category_confidence") or "",
+                    "offline_draft": bool(draft.get("offline_draft") or doc.get("offline_draft")),
+                    "lookup_category_name": (doc.get("product_lookup") or {}).get("category_name") or "",
+                    "lookup_category_id": str((doc.get("product_lookup") or {}).get("ebay_category_id") or ""),
+                }
+            )
 
     return {"ok": True, "items": items, "count": len(items)}
 
@@ -409,6 +606,7 @@ def get_review_queue() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # GET /api/items/{sku} — full item detail
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/items/{sku}", dependencies=[AUTH])
 def get_item(sku: str) -> Dict[str, Any]:
@@ -419,8 +617,7 @@ def get_item(sku: str) -> Dict[str, Any]:
             with psycopg2.connect(_cfg["postgres_dsn"]) as con:
                 with con.cursor() as cur:
                     cur.execute(
-                        "SELECT sku_new FROM sku_history WHERE sku_old = %s"
-                        " ORDER BY changed_at DESC LIMIT 1",
+                        "SELECT sku_new FROM sku_history WHERE sku_old = %s ORDER BY changed_at DESC LIMIT 1",
                         (sku,),
                     )
                     row = cur.fetchone()
@@ -431,6 +628,7 @@ def get_item(sku: str) -> Dict[str, Any]:
             new_path = _cfg["itemdata_root"] / new_sku / f"{new_sku}.json"
             if new_path.exists():
                 from fastapi.responses import RedirectResponse
+
                 return RedirectResponse(
                     url=f"/api/items/{new_sku}",
                     status_code=301,
@@ -442,10 +640,7 @@ def get_item(sku: str) -> Dict[str, Any]:
     # Attach media file lists (images in photo_order order)
     sku_dir = json_path.parent
     item["_images"] = [p.name for p in _ordered_photos(item, sku_dir)]
-    videos = [
-        p.name for p in sorted(sku_dir.iterdir())
-        if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}
-    ]
+    videos = [p.name for p in sorted(sku_dir.iterdir()) if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}]
     item["_videos"] = videos
 
     # Attach recent queue job states for this SKU
@@ -481,8 +676,9 @@ def get_item(sku: str) -> Dict[str, Any]:
 # PATCH /api/items/{sku} — update fields
 # ---------------------------------------------------------------------------
 
+
 @app.patch("/api/items/{sku}", dependencies=[AUTH])
-def patch_item(sku: str, body: PatchBody) -> Dict[str, Any]:
+def patch_item(sku: str, body: PatchBody, request: Request) -> Dict[str, Any]:
     if "sku" in body.fields:
         raise HTTPException(status_code=400, detail="sku field is immutable")
     if not body.fields:
@@ -497,23 +693,230 @@ def patch_item(sku: str, body: PatchBody) -> Dict[str, Any]:
     if "location" in body.fields:
         location_value = body.fields.pop("location")
 
-    # Atomic multi-field update: load → merge → write
-    doc = load_item_doc(json_path)
-    doc.update(body.fields)
-    if "catalog_verified" not in body.fields:
-        doc.pop("catalog_verified", None)
-    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+    # Draft lifecycle (broker B1a): any draft_listing write — AI worker via
+    # the fence or operator via the editor — is a manipulation in progress,
+    # so mark 'editing' unless the caller manages the state itself (the pin
+    # and baseline paths patch draft_listing_state explicitly).
+    if "draft_listing" in body.fields and "draft_listing_state" not in body.fields:
+        body.fields["draft_listing_state"] = "editing"
+
+    doc_before = load_item_doc(json_path)
+
+    # Self-resolving guard findings: if this edit fixes the persisted
+    # condition (e.g. no_price_set and the patch sets a price), clear the
+    # finding in the same write — the operator should never have to clear
+    # an error the system can verify is gone. Rejection errors are kept:
+    # editing one field does not prove the rejected content was fixed.
+    _new_dl_fields = body.fields.get("draft_listing")
+    if isinstance(_new_dl_fields, dict) and doc_before.get("pipeline_error"):
+        _merged_dl = {**(doc_before.get("draft_listing") or {}), **_new_dl_fields}
+        _resolved = draft_sync.resolve_pipeline_error(
+            doc_before["pipeline_error"], _merged_dl, clear_rejections=False)
+        if _resolved is None:
+            body.fields["pipeline_error"] = None
+
+    updated_keys = _apply_patch(json_path, body.fields)
+
+    # Price edits leave a history trail (session 42): manual/UI price changes
+    # previously appended nothing to price_history — Dave's $82.99 and every
+    # other hand-set price was invisible in the pricing panel. Any patch that
+    # changes draft_listing.price gets an audit event, whoever the caller is.
+    try:
+        _new_dl = body.fields.get("draft_listing")
+        if isinstance(_new_dl, dict) and "price" in _new_dl:
+            _old_p = (doc_before.get("draft_listing") or {}).get("price")
+            _new_p = _new_dl.get("price")
+            if _new_p is not None and str(_new_p) != str(_old_p):
+                _caller_id = request.headers.get("X-TGW-Caller", "operator")
+                _hist = (doc_before.get("price_history") or []) + [{
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "price": float(_new_p),
+                    "previous_price": float(_old_p) if _old_p not in (None, "") else None,
+                    "stage": None,
+                    "label": "price edited",
+                    "source": _caller_id,
+                }]
+                _apply_patch(json_path, {"price_history": _hist})
+    except (TypeError, ValueError) as _exc:
+        log.warning("price_history append skipped for %s: %s", sku, _exc)
 
     if location_value is not None:
         result = locationupdate(_cfg, sku, location_value)
-        if not result.get("ok"):
+        if result.get("ok"):
+            updated_keys.append("location")
+        else:
+            # invariant C11: a failed location move is a finding, not a log
+            # line — otherwise the operator/Flutter UI sees false success
+            # ("updated": ["location"]) while the item is silently misfiled.
             log.warning("location tree update failed for %s: %s", sku, result)
+            _persist_finding(
+                json_path, sku, "location_update_failed",
+                f"locationupdate() failed: {result}", "patch_item:location",
+            )
 
-    # Enqueue coalesced catalog rebuild
+    _enqueue_catalog_rebuild(f"http_patch:{sku}")
+
+    # If draft_listing content changed and the item is already on eBay, push the
+    # update automatically — the operator should never have to remember to click
+    # "Update Listing".
+    #
+    # OPERATOR EDITS ONLY (session-42 incident): workers patch draft_listing
+    # through this same endpoint (ebay_draft writes the draft, ebay_upload writes
+    # imageUrls, ...). Auto-redrafting on those created an infinite
+    # draft→patch→redraft pipeline loop — one SKU accumulated 287 draft jobs and
+    # two live listings were PUT to eBay every ~90s for hours. Fence clients now
+    # identify themselves via X-TGW-Caller (background:worker:<queue>); anything
+    # backgrounded is skipped here.
+    _caller = request.headers.get("X-TGW-Caller", "")
+    # Machine write = any worker-process fence write, regardless of quota
+    # context: C10 operator-origin jobs run as interactive:worker:<queue>:operator,
+    # but a worker acting for the operator is still not a human editing in the
+    # UI — treating it as one resurrected the s42 redraft loop (2026-07-03).
+    _machine_write = _caller.startswith("background:") or "worker:" in _caller
+    # todo #1114 (2026-07-04): this used to enqueue ebay_draft here, which
+    # RE-RUNS the AI drafting pass and overwrites draft_listing with fresh
+    # model output — clobbering the very edit the operator just made. Root
+    # cause: the trigger field set conflated two different edits. The
+    # editor UI only ever PATCHes into draft_listing.* directly (condition,
+    # shipping profile, aspects, price, title, description all live there —
+    # confirmed by grep, no UI path sends bare top-level title/description/
+    # item_attributes through this endpoint), so this branch has, in
+    # practice, ALWAYS meant "the operator polished the final draft
+    # content," never "a raw fact changed, please regenerate." Regenerating
+    # is therefore never correct here. Fixed to mirror the existing
+    # "Update Listing" button's ebay_update action exactly: push the
+    # operator's edited draft_listing straight to the live offer
+    # (ebay_stage, force=True, origin=operator) — no AI involved.
+    #
+    # Code-review fix (2026-07-04): trigger set narrowed to just
+    # "draft_listing" — ebay_stage/stage_draft() only ever reads
+    # item["draft_listing"] when building the eBay push body (falling back
+    # to a bare top-level field only if draft_listing's own value is
+    # empty). Keeping bare "title"/"description"/"item_attributes" in the
+    # trigger meant a PATCH to one of those alone would fire the push and
+    # log "pushed" while the stale draft_listing content — not the actual
+    # edit — is what reaches eBay. dedupe_key added to match the other
+    # ebay_stage enqueue call sites in this file (this one and the sibling
+    # "ebay_update" action were the only two without it).
+    _DRAFT_LISTING_FIELDS = {"draft_listing"}
+    if not _machine_write and _DRAFT_LISTING_FIELDS.intersection(body.fields):
+        offer_id = (doc_before.get("ebay_offer") or {}).get("offer_id")
+        if offer_id:
+            try:
+                state_machine.enqueue_job(
+                    queue_name="ebay_stage",
+                    payload={"sku": sku, "force": True, "origin": "operator"},
+                    dedupe_key=f"ebay_stage:{sku}",
+                    max_attempts=2,
+                )
+                log.info("auto-queued ebay_stage (push, no regen) for %s "
+                        "(draft_listing changed, offer_id present)", sku)
+            except Exception as _eq:
+                if "unique" not in str(_eq).lower() and "duplicate" not in str(_eq).lower():
+                    log.warning("failed to auto-enqueue ebay_stage for %s: %s", sku, _eq)
+
+    return {"ok": True, "sku": sku, "updated": updated_keys}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/items/{sku}/append — typed list append (PP-FENCE-001 Layer 3)
+# ---------------------------------------------------------------------------
+
+_APPEND_OP_TO_FIELD: Dict[str, Optional[str]] = {
+    "vision_result": "vision_results",
+    "photo": "photos",
+    "price_event": "price_history",
+    "history_event": None,  # target determined by data["type"]
+}
+_HISTORY_SUBTYPES = {"title", "description", "location"}
+
+
+@app.post("/api/items/{sku}/append", dependencies=[AUTH])
+def append_item(sku: str, body: AppendBody) -> Dict[str, Any]:
+    if body.op not in _APPEND_OP_TO_FIELD:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown op {body.op!r}; valid: {sorted(_APPEND_OP_TO_FIELD)}",
+        )
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+
+    field = _APPEND_OP_TO_FIELD[body.op]
+    if field is None:
+        subtype = body.data.get("type", "")
+        if subtype not in _HISTORY_SUBTYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"history_event requires data.type in {_HISTORY_SUBTYPES}",
+            )
+        field = f"{subtype}_history"
+
+    entry = {**body.data, "appended_at": datetime.now(timezone.utc).isoformat()}
+    doc = load_item_doc(json_path)
+    lst = doc.get(field)
+    if not isinstance(lst, list):
+        lst = []
+    lst.append(entry)
+    _apply_patch(json_path, {field: lst})
+    _enqueue_catalog_rebuild(f"append:{sku}:{body.op}")
+
+    return {"ok": True, "sku": sku, "op": body.op, "field": field}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/items/{sku}/ebay-write — deep-merge eBay blocks (PP-FENCE-001 Layer 3)
+# ---------------------------------------------------------------------------
+
+# Sub-fields workers must NOT clobber when merging eBay blocks
+_EBAY_WRITE_PROTECTED: Dict[str, set] = {
+    "ebay_offer": {"price_comps", "staged_at"},
+    "ebay_listing": {"photo_verify"},
+    "ebay_submitted": set(),
+    "ebay_live": set(),
+}
+
+
+@app.post("/api/items/{sku}/ebay-write", dependencies=[AUTH])
+def ebay_write(sku: str, body: EbayWriteBody) -> Dict[str, Any]:
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+
+    incoming = {
+        "ebay_offer": body.ebay_offer,
+        "ebay_listing": body.ebay_listing,
+        "ebay_submitted": body.ebay_submitted,
+        "ebay_live": body.ebay_live,
+    }
+    if not any(v is not None for v in incoming.values()):
+        raise HTTPException(status_code=400, detail="no eBay blocks provided")
+
+    changed_fields = _apply_ebay_write(
+        json_path,
+        sku,
+        ebay_offer=body.ebay_offer,
+        ebay_listing=body.ebay_listing,
+        ebay_submitted=body.ebay_submitted,
+        ebay_live=body.ebay_live,
+        allow_protected=body.allow_protected,
+    )
+    _enqueue_catalog_rebuild(f"ebay_write:{sku}")
+    return {"ok": True, "sku": sku, "changed_fields": changed_fields}
+
+
+# ---------------------------------------------------------------------------
+# Internal write helpers — all item data writes route through these
+# (PP-FENCE-001 Session C: UI layer must not call atomic_write_json directly)
+# ---------------------------------------------------------------------------
+
+
+def _enqueue_catalog_rebuild(reason: str) -> None:
+    """Coalesced catalog rebuild — 30s delay, single dedupe key."""
     try:
         state_machine.enqueue_job(
             queue_name="catalog_rebuild",
-            payload={"reason": f"http_patch:{sku}"},
+            payload={"reason": reason},
             dedupe_key="catalog_rebuild:pending",
             not_before=time.time() + 30,
             max_attempts=3,
@@ -521,16 +924,146 @@ def patch_item(sku: str, body: PatchBody) -> Dict[str, Any]:
     except Exception:
         pass
 
-    updated_keys = list(body.fields.keys())
-    if location_value is not None:
-        updated_keys.append("location")
 
-    return {"ok": True, "sku": sku, "updated": updated_keys}
+def _persist_finding(json_path: "Path", sku: str, code: str, detail: str, source: str) -> None:
+    """Write a C11 guard finding to pipeline_error — a persisted, queryable
+    reason the pipeline skipped/failed something, never just a log line.
+    Canonical {code, detail, ts, source} shape (see draft_sync.py,
+    workers/ebay_stage.py, workers/ebay_publish.py). Best-effort: if the
+    persist itself fails, that failure is only a log line — there is nowhere
+    lower to record it.
+    """
+    try:
+        _apply_patch(json_path, {"pipeline_error": {
+            "code": code,
+            "detail": detail,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "source": source,
+        }})
+    except Exception:
+        log.exception("failed to persist %s finding for %s", code, sku)
+
+
+def _apply_patch(json_path: "Path", fields: Dict[str, Any]) -> List[str]:
+    """Core item patch: deep-merge dict fields, write atomically, schedule rebuild.
+
+    Fields with value None are deleted from the document.
+    Returns the list of keys that were written or deleted.
+    """
+    fields = dict(fields)
+    doc = load_item_doc(json_path)
+    for dmk in ("draft_listing", "item_attributes"):
+        if dmk in fields and isinstance(fields[dmk], dict):
+            existing = doc.get(dmk) or {}
+            existing.update(fields.pop(dmk))
+            doc[dmk] = existing
+    to_delete = [k for k, v in fields.items() if v is None]
+    for k in to_delete:
+        doc.pop(k, None)
+        fields.pop(k)
+    doc.update(fields)
+    if "catalog_verified" not in fields:
+        doc.pop("catalog_verified", None)
+    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True), archive_root=_cfg.get("archive_root"))
+    return list(fields.keys()) + to_delete
+
+
+def _apply_ebay_write(
+    json_path: "Path",
+    sku: str,
+    *,
+    ebay_offer: Optional[Dict[str, Any]] = None,
+    ebay_listing: Optional[Dict[str, Any]] = None,
+    ebay_submitted: Optional[Dict[str, Any]] = None,
+    ebay_live: Optional[Dict[str, Any]] = None,
+    allow_protected: Optional[List[str]] = None,
+) -> List[str]:
+    """eBay block deep-merge with field protection — same logic as POST /ebay-write.
+
+    Protected sub-fields (price_comps, staged_at, photo_verify) are restored
+    to their existing value by default — a generic resync (e.g. ebay_sync
+    re-saving its own stale snapshot of ebay_offer/ebay_listing) must never
+    clobber a fresher value it doesn't know about (#1189). The one or two
+    workers that actually OWN a protected field pass its name via
+    allow_protected to intentionally refresh/clear it.
+    """
+    allow_protected_set = set(allow_protected or ())
+    incoming = {
+        "ebay_offer": ebay_offer,
+        "ebay_listing": ebay_listing,
+        "ebay_submitted": ebay_submitted,
+        "ebay_live": ebay_live,
+    }
+    doc = load_item_doc(json_path)
+    changed: List[str] = []
+    for block_key, incoming_block in incoming.items():
+        if incoming_block is None:
+            continue
+        protected = _EBAY_WRITE_PROTECTED.get(block_key, set())
+        existing = doc.get(block_key) or {}
+        if not isinstance(existing, dict):
+            existing = {}
+        if block_key == "ebay_offer" and "price" in incoming_block:
+            stored_price = existing.get("price")
+            incoming_price = incoming_block.get("price")
+            if stored_price and incoming_price and str(stored_price) != str(incoming_price):
+                log.warning(
+                    "ebay_write price divergence for %s: stored=%s incoming=%s",
+                    sku,
+                    stored_price,
+                    incoming_price,
+                )
+        merged = {**existing, **incoming_block}
+        for pf in protected:
+            if pf in existing and pf not in allow_protected_set:
+                merged[pf] = existing[pf]
+        doc[block_key] = merged
+        changed.append(block_key)
+    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True), archive_root=_cfg.get("archive_root"))
+    return changed
+
+
+# ---------------------------------------------------------------------------
+# POST /api/items — item creation (PP-FENCE-001 Layer 3)
+# ---------------------------------------------------------------------------
+
+_SKU_RE = re.compile(r"^tgw\d{17,20}$")
+
+
+@app.post("/api/items", dependencies=[AUTH])
+def create_item_endpoint(body: CreateItemBody) -> Dict[str, Any]:
+    if not _SKU_RE.match(body.sku):
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid sku format {body.sku!r}; must match tgwYYYYMMDDHHMMSSmmm",
+        )
+    item_dir = _cfg["itemdata_root"] / body.sku
+    json_path = item_dir / f"{body.sku}.json"
+    if json_path.exists():
+        raise HTTPException(status_code=409, detail=f"sku already exists: {body.sku}")
+
+    item_dir.mkdir(parents=True, exist_ok=True)
+    record = {"sku": body.sku, **body.data}
+    atomic_write_json(json_path, record, pretty=_cfg.get("pretty", True))
+
+    try:
+        state_machine.enqueue_job(
+            queue_name="catalog_rebuild",
+            payload={"reason": f"create:{body.sku}"},
+            dedupe_key="catalog_rebuild:pending",
+            not_before=time.time() + 30,
+            max_attempts=3,
+        )
+    except Exception:
+        pass
+
+    return {"ok": True, "sku": body.sku, "path": str(json_path)}
 
 
 # ---------------------------------------------------------------------------
 # POST /api/bulk/preview + /api/bulk/apply — bulk field edit (PP-BULKEDIT-001)
 # ---------------------------------------------------------------------------
+
 
 def _bulk_selectors(body: BulkBody) -> Dict[str, Any]:
     sel: Dict[str, Any] = {}
@@ -549,6 +1082,7 @@ def _bulk_selectors(body: BulkBody) -> Dict[str, Any]:
 def bulk_preview(body: BulkBody) -> Dict[str, Any]:
     """Dry-run: return matched items with current vs. proposed value. No writes."""
     from .items import bulk_edit
+
     sel = _bulk_selectors(body)
     if not sel:
         raise HTTPException(status_code=400, detail="no selector — give skus or a filter")
@@ -559,6 +1093,7 @@ def bulk_preview(body: BulkBody) -> Dict[str, Any]:
 def bulk_apply(body: BulkBody) -> Dict[str, Any]:
     """Apply the bulk edit through the item fence, then enqueue a catalog rebuild."""
     from .items import bulk_edit
+
     sel = _bulk_selectors(body)
     if not sel:
         raise HTTPException(status_code=400, detail="no selector — give skus or a filter")
@@ -606,6 +1141,7 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
 
     if body.action == "set_ready":
         from .ready import set_ready
+
         return set_ready(_cfg, body.skus)
 
     if body.action in ("approve", "list_now"):
@@ -617,9 +1153,7 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
                 errors.append(f"{sku}: not found")
                 continue
             try:
-                doc = load_item_doc(json_path)
-                doc["status"] = "Ready"
-                atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+                _apply_patch(json_path, {"status": "Ready"})
                 done.append(sku)
             except Exception as exc:
                 errors.append(f"{sku}: {exc}")
@@ -627,8 +1161,17 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
             if body.action == "list_now":
                 try:
                     state_machine.enqueue_job(
+                        queue_name="ebay_upload",
+                        payload={"sku": sku, "origin": "operator"},
+                        dedupe_key=f"ebay_upload:{sku}",
+                        max_attempts=5,
+                    )
+                except Exception:
+                    pass
+                try:
+                    state_machine.enqueue_job(
                         queue_name="ebay_stage",
-                        payload={"sku": sku},
+                        payload={"sku": sku, "origin": "operator"},
                         dedupe_key=f"ebay_stage:{sku}",
                         max_attempts=5,
                     )
@@ -636,16 +1179,7 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
                     err = str(exc)
                     if "unique" not in err.lower() and "duplicate" not in err.lower():
                         errors.append(f"{sku} (stage): {err}")
-        try:
-            state_machine.enqueue_job(
-                queue_name="catalog_rebuild",
-                payload={"reason": f"bulk_{body.action}"},
-                dedupe_key="catalog_rebuild:pending",
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
-        except Exception:
-            pass
+        _enqueue_catalog_rebuild(f"bulk_{body.action}")
         return {"ok": bool(done), "count": len(done), "done": done, "errors": errors}
 
     if body.action in ("mark_sold", "delete", "archive"):
@@ -659,24 +1193,37 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
                 errors.append(f"{sku}: not found")
                 continue
             try:
-                doc = load_item_doc(json_path)
-                doc["status"] = new_status
-                if body.action == "delete":
-                    doc["deleted_at"] = datetime.now(timezone.utc).isoformat()
-                atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+                if body.action == "mark_sold":
+                    # Same quantity-decrement rule as ebay/pull.py mark_item_sold:
+                    # a bulk "mark sold" click accounts for one unit sold, not the
+                    # whole quantity — jumping straight to status=Sold hides
+                    # remaining unsold units on multi-qty items.
+                    #
+                    # Single read-decide-write (not a separate lookup read
+                    # followed by _apply_patch's own independent re-read):
+                    # two reads open a TOCTOU window where a concurrent real
+                    # sale (ebay/pull.py mark_item_sold, via an eBay webhook)
+                    # landing between them gets silently clobbered by a
+                    # `remaining` value computed from the stale first read.
+                    doc = load_item_doc(json_path)
+                    draft = dict(doc.get("draft_listing") or {})
+                    current_qty = int(draft.get("quantity") or 1)
+                    remaining = max(0, current_qty - 1)
+                    draft["quantity"] = remaining
+                    doc["draft_listing"] = draft
+                    if remaining == 0:
+                        doc["status"] = new_status
+                    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True),
+                                       archive_root=_cfg.get("archive_root"))
+                else:
+                    fields = {"status": new_status}
+                    if body.action == "delete":
+                        fields["deleted_at"] = datetime.now(timezone.utc).isoformat()
+                    _apply_patch(json_path, fields)
                 done.append(sku)
             except Exception as exc:
                 errors.append(f"{sku}: {exc}")
-        try:
-            state_machine.enqueue_job(
-                queue_name="catalog_rebuild",
-                payload={"reason": f"bulk_{body.action}"},
-                dedupe_key="catalog_rebuild:pending",
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
-        except Exception:
-            pass
+        _enqueue_catalog_rebuild(f"bulk_{body.action}")
         return {"ok": not errors, "count": len(done), "done": done, "errors": errors}
 
     if body.action == "ebay_end_listing":
@@ -697,27 +1244,41 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
                     continue
                 if offer_id:
                     from .apis.ebay.client import ebay_post
+
                     ebay_post(_cfg, f"/sell/inventory/v1/offer/{offer_id}/withdraw", {})
                 else:
                     from .apis.ebay.trading import end_item as _end_item
+
                     _end_item(_cfg, listing_id_val)
-                eb["status"] = "Ended"
-                eb["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                doc["ebay_listing"] = eb
-                atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
-                done.append(sku)
             except Exception as exc:
                 errors.append(f"{sku}: {exc}")
-        try:
-            state_machine.enqueue_job(
-                queue_name="catalog_rebuild",
-                payload={"reason": "bulk_ebay_end_listing"},
-                dedupe_key="catalog_rebuild:pending",
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
-        except Exception:
-            pass
+                continue
+            # eBay call above has already succeeded — a failure past this
+            # point means the listing is ended on eBay but our local mirror
+            # says PUBLISHED forever. Invariant C11: persist that as a
+            # finding rather than just returning an API error (session 43
+            # local/eBay desync class).
+            try:
+                _apply_ebay_write(
+                    json_path,
+                    sku,
+                    ebay_listing={
+                        "status": "Ended",
+                        "ended_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    },
+                    # withdraw makes the offer UNPUBLISHED on eBay — mirror it (s42)
+                    ebay_offer={"status": "UNPUBLISHED"},
+                )
+                done.append(sku)
+            except Exception as exc:
+                errors.append(f"{sku}: ended on eBay but local write failed: {exc}")
+                _persist_finding(
+                    json_path, sku, "ebay_end_desync",
+                    f"eBay listing ended but local ebay_offer/ebay_listing "
+                    f"update failed: {exc}",
+                    "bulk_action:ebay_end_listing",
+                )
+        _enqueue_catalog_rebuild("bulk_ebay_end_listing")
         return {"ok": not errors, "count": len(done), "done": done, "errors": errors}
 
     # Pipeline actions — enqueue a job per SKU
@@ -731,12 +1292,10 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
             continue
         try:
             if body.action == "ai_identify":
-                doc = load_item_doc(json_path)
-                doc["ai_reidentify"] = True
-                atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+                _apply_patch(json_path, {"ai_reidentify": True})
             state_machine.enqueue_job(
                 queue_name=body.action,
-                payload={"sku": sku},
+                payload={"sku": sku, "origin": "operator"},
                 dedupe_key=f"{body.action}:{sku}",
                 max_attempts=5,
             )
@@ -754,6 +1313,7 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
 # GET /api/items/{sku}/thumbnail — serve thumbnail
 # ---------------------------------------------------------------------------
 
+
 @app.get("/api/items/{sku}/thumbnail", dependencies=[AUTH])
 def get_thumbnail(sku: str):
     thumb = _cfg["thumbnail_root"] / f"{sku}.jpg"
@@ -765,6 +1325,7 @@ def get_thumbnail(sku: str):
 # ---------------------------------------------------------------------------
 # POST /api/items/{sku}/action — enqueue pipeline stage
 # ---------------------------------------------------------------------------
+
 
 @app.post("/api/items/{sku}/action", dependencies=[AUTH])
 def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
@@ -782,19 +1343,8 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
     try:
         if action == "approve":
             # Human approval of AI draft — set status=Ready, no job enqueued
-            doc = load_item_doc(json_path)
-            doc["status"] = "Ready"
-            atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
-            try:
-                state_machine.enqueue_job(
-                    queue_name="catalog_rebuild",
-                    payload={"reason": f"approve:{sku}"},
-                    dedupe_key="catalog_rebuild:pending",
-                    not_before=time.time() + 30,
-                    max_attempts=3,
-                )
-            except Exception:
-                pass
+            _apply_patch(json_path, {"status": "Ready"})
+            _enqueue_catalog_rebuild(f"approve:{sku}")
             return {"ok": True, "sku": sku, "action": "approve", "status": "Ready"}
         elif action == "catalog_rebuild":
             job_id = state_machine.enqueue_job(
@@ -805,19 +1355,8 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                 max_attempts=3,
             )
         elif action == "archive":
-            doc = load_item_doc(json_path)
-            doc["status"] = "archived"
-            atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
-            try:
-                state_machine.enqueue_job(
-                    queue_name="catalog_rebuild",
-                    payload={"reason": f"archive:{sku}"},
-                    dedupe_key="catalog_rebuild:pending",
-                    not_before=time.time() + 30,
-                    max_attempts=3,
-                )
-            except Exception:
-                pass
+            _apply_patch(json_path, {"status": "archived"})
+            _enqueue_catalog_rebuild(f"archive:{sku}")
             return {"ok": True, "sku": sku, "action": "archive", "status": "archived"}
 
         elif action == "ebay_end_listing":
@@ -831,25 +1370,27 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                 if offer_id:
                     # Inventory API: withdraw the published offer
                     from .apis.ebay.client import ebay_post
+
                     ebay_post(_cfg, f"/sell/inventory/v1/offer/{offer_id}/withdraw", {})
                 else:
                     # Trading API: end the legacy listing
                     from .apis.ebay.trading import end_item as _end_item
+
                     _end_item(_cfg, listing_id_val)
-                eb["status"] = "Ended"
-                eb["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                doc["ebay_listing"] = eb
-                atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
-                try:
-                    state_machine.enqueue_job(
-                        queue_name="catalog_rebuild",
-                        payload={"reason": f"ebay_end:{sku}"},
-                        dedupe_key="catalog_rebuild:pending",
-                        not_before=time.time() + 30,
-                        max_attempts=3,
-                    )
-                except Exception:
-                    pass
+                # Session 42 (Dave's one-at-a-time test #1): ending must update the
+                # WHOLE local truth — withdraw makes the offer UNPUBLISHED on eBay
+                # (verified live), but this used to leave ebay_offer.status at
+                # 'PUBLISHED', so every display kept showing the item as listed.
+                _apply_ebay_write(
+                    json_path,
+                    sku,
+                    ebay_listing={
+                        "status": "Ended",
+                        "ended_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    },
+                    ebay_offer={"status": "UNPUBLISHED"},
+                )
+                _enqueue_catalog_rebuild(f"ebay_end:{sku}")
             except HTTPException:
                 raise
             except Exception as exc:
@@ -859,10 +1400,9 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
         elif action == "migrate_unblock":
             import json as _json
             from pathlib import Path as _Path
-            doc = load_item_doc(json_path)
-            was_blocked = doc.pop("sku_migrate_blocked", None)
-            doc.pop("sku_migrate_skip", None)
-            atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+
+            was_blocked_val = load_item_doc(json_path).get("sku_migrate_blocked")
+            _apply_patch(json_path, {"sku_migrate_blocked": None, "sku_migrate_skip": None})
             # Remove from blocked registry
             registry_path = _Path("/opt/TGW/var/migrate-blocked.json")
             try:
@@ -870,52 +1410,225 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                     registry = _json.loads(registry_path.read_text(encoding="utf-8"))
                     registry.pop(sku, None)
                     tmp = registry_path.with_suffix(".tmp")
-                    tmp.write_text(_json.dumps(registry, indent=2, ensure_ascii=False),
-                                   encoding="utf-8")
+                    tmp.write_text(_json.dumps(registry, indent=2, ensure_ascii=False), encoding="utf-8")
                     tmp.replace(registry_path)
             except Exception:
                 pass
-            return {"ok": True, "sku": sku, "action": "migrate_unblock",
-                    "was_blocked": was_blocked is not None}
+            return {"ok": True, "sku": sku, "action": "migrate_unblock", "was_blocked": was_blocked_val is not None}
 
         elif action == "review_mark_ready":
             from datetime import datetime as _dt
             from datetime import timezone as _tz
+
             doc = load_item_doc(json_path)
             rb = doc.get("review_block") or {}
             if not rb:
-                return {"ok": True, "sku": sku, "action": "review_mark_ready",
-                        "note": "no review_block present"}
+                return {"ok": True, "sku": sku, "action": "review_mark_ready", "note": "no review_block present"}
             rb["ready"] = True
             rb["retested_at"] = _dt.now(_tz.utc).isoformat()
-            doc["review_block"] = rb
-            atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
-            return {"ok": True, "sku": sku, "action": "review_mark_ready",
-                    "stage": rb.get("stage"), "reason_code": rb.get("reason_code")}
+            _apply_patch(json_path, {"review_block": rb})
+            return {"ok": True, "sku": sku, "action": "review_mark_ready", "stage": rb.get("stage"), "reason_code": rb.get("reason_code")}
+
+        elif action == "accept_proposals":
+            doc = load_item_doc(json_path)
+            rev = doc.get("revision_draft") or {}
+            delta = rev.get("delta") or {}
+            if not delta:
+                return {"ok": False, "detail": "no revision_draft delta to accept"}
+            ia = doc.get("item_attributes") or {}
+            if "item_specifics" in delta and isinstance(delta["item_specifics"], dict):
+                ia.update(delta["item_specifics"])
+                doc["item_attributes"] = ia
+            dl2 = doc.get("draft_listing") or {}
+            if "title" in delta:
+                dl2["title"] = delta["title"]
+            if "description" in delta:
+                dl2["description"] = delta["description"]
+            proposal_fields: Dict[str, Any] = {"revision_draft": None}
+            if ia is not doc.get("item_attributes"):
+                proposal_fields["item_attributes"] = ia
+            if dl2 is not doc.get("draft_listing"):
+                proposal_fields["draft_listing"] = dl2
+            _apply_patch(json_path, proposal_fields)
+            _enqueue_catalog_rebuild(f"accept_proposals:{sku}")
+            return {"ok": True, "sku": sku, "action": "accept_proposals"}
+
+        elif action == "dismiss_proposals":
+            if "revision_draft" not in load_item_doc(json_path):
+                return {"ok": True, "sku": sku, "note": "no revision_draft present"}
+            _apply_patch(json_path, {"revision_draft": None})
+            return {"ok": True, "sku": sku, "action": "dismiss_proposals"}
+
+        elif action == "ebay_update":
+            # Update a live listing in place — PUT inventory item + offer without ending/relisting.
+            # Preserves listing age, view history, and search ranking.
+            # Reads current draft_listing; run Re-draft first to incorporate aspect edits.
+            # origin='operator': this button IS the inspection gate (invariant C9) —
+            # ebay_stage refuses force updates of live listings without it.
+            job_id = state_machine.enqueue_job(
+                queue_name="ebay_stage",
+                payload={"sku": sku, "force": True, "origin": "operator"},
+                max_attempts=2,
+            )
+            return {"ok": True, "sku": sku, "action": "ebay_update", "job_id": job_id}
 
         elif action == "sync_from_ebay":
             job_id = state_machine.enqueue_job(
                 queue_name="ebay_sync",
-                payload={"sku": sku, "reason": "manual"},
+                payload={"sku": sku, "reason": "manual", "origin": "operator"},
                 max_attempts=2,
             )
             return {"ok": True, "sku": sku, "action": "sync_from_ebay", "job_id": job_id}
 
-        elif action == "ai_identify":
-            # Clear ai_identified so the worker will run
+        elif action == "reset_draft_from_live":
+            # PP-ACTIONCONSOLE-001 / broker B1a (M4): operator's "live is
+            # better, start over" — re-pin the draft to the ebay_live mirror
+            # via the shared lifecycle primitive. C11-safe: guard findings
+            # are cleared only if the pinned draft resolves them.
             doc = load_item_doc(json_path)
-            doc["ai_reidentify"] = True
-            atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+            try:
+                _pin_fields = draft_sync.pin_draft_to_live(doc)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            _apply_patch(json_path, _pin_fields)
+            return {"ok": True, "sku": sku, "action": "reset_draft_from_live"}
+
+        elif action == "set_ready":
+            from .ready import set_ready as _set_ready
+
+            result = _set_ready(_cfg, [sku])
+            if result.get("marked"):
+                # Proactively start photo upload so it's ready when the dole cycle stages the item.
+                try:
+                    state_machine.enqueue_job(
+                        queue_name="ebay_upload",
+                        payload={"sku": sku, "origin": "operator"},
+                        dedupe_key=f"ebay_upload:{sku}",
+                        max_attempts=5,
+                    )
+                except Exception:
+                    pass
+                return {"ok": True, "sku": sku, "action": "set_ready",
+                        "note": "approved into the ready pool — NOTE: the dole worker "
+                                "is not installed yet, nothing publishes from the pool "
+                                "(todo #1113); use 'List on eBay' to publish this item now"}
+            err = (result.get("errors") or ["unknown error"])[0]
+            return {"ok": False, "sku": sku, "detail": err}
+
+        elif action == "unset_ready":
+            from .ready import unset_ready as _unset_ready
+
+            result = _unset_ready(_cfg, [sku])
+            if result.get("unmarked"):
+                return {"ok": True, "sku": sku, "action": "unset_ready", "note": "removed from ready pool"}
+            err = (result.get("errors") or ["unknown error"])[0]
+            return {"ok": False, "sku": sku, "detail": err}
+
+        elif action == "ai_identify":
+            _apply_patch(json_path, {"ai_reidentify": True})
             job_id = state_machine.enqueue_job(
                 queue_name="ai_identify",
-                payload={"sku": sku},
+                payload={"sku": sku, "origin": "operator"},
                 dedupe_key=f"ai_identify:{sku}",
                 max_attempts=3,
             )
+
+        elif action == "ebay_price":
+            # Clear price sub-fields so the worker runs fresh (load→strip→patch)
+            _doc = load_item_doc(json_path)
+            _eo = dict(_doc.get("ebay_offer") or {})
+            for _k in ("price", "price_comps", "priced_at", "price_source", "target_price"):
+                _eo.pop(_k, None)
+            _dl = dict(_doc.get("draft_listing") or {})
+            _dl.pop("price", None)
+            _dl.pop("price_confidence", None)
+            _apply_patch(json_path, {"ebay_offer": _eo, "draft_listing": _dl})
+            job_id = state_machine.enqueue_job(
+                queue_name="ebay_price",
+                payload={"sku": sku, "origin": "operator"},
+                dedupe_key=f"ebay_price:{sku}",
+                max_attempts=5,
+            )
+
+        elif action == "ebay_stage":
+            _doc = load_item_doc(json_path)
+            _has_photos = bool(
+                (_doc.get("draft_listing") or {}).get("imageUrls")
+                or _doc.get("ebay_photos")
+            )
+            if not _has_photos:
+                try:
+                    state_machine.enqueue_job(
+                        queue_name="ebay_upload",
+                        payload={"sku": sku, "origin": "operator"},
+                        dedupe_key=f"ebay_upload:{sku}",
+                        max_attempts=5,
+                    )
+                except Exception:
+                    pass
+            job_id = state_machine.enqueue_job(
+                queue_name="ebay_stage",
+                payload={"sku": sku, "origin": "operator"},
+                dedupe_key=f"ebay_stage:{sku}",
+                max_attempts=5,
+            )
+
+        elif action == "ebay_publish":
+            _doc = load_item_doc(json_path)
+            _offer_id = (_doc.get("ebay_offer") or {}).get("offer_id")
+            _has_photos = bool(
+                (_doc.get("draft_listing") or {}).get("imageUrls")
+                or _doc.get("ebay_photos")
+            )
+            if not _offer_id:
+                # Not yet staged — queue the full chain; each worker retries until
+                # its prerequisite completes (upload → stage → publish).
+                if not _has_photos:
+                    try:
+                        state_machine.enqueue_job(
+                            queue_name="ebay_upload",
+                            payload={"sku": sku, "origin": "operator"},
+                            dedupe_key=f"ebay_upload:{sku}",
+                            max_attempts=5,
+                        )
+                    except Exception:
+                        pass
+                try:
+                    state_machine.enqueue_job(
+                        queue_name="ebay_stage",
+                        payload={"sku": sku, "origin": "operator"},
+                        dedupe_key=f"ebay_stage:{sku}",
+                        max_attempts=5,
+                    )
+                except Exception:
+                    pass
+            else:
+                # Session 42 (Dave's order finding): an existing offer holds the
+                # PREVIOUSLY staged content — without a re-stage, publish ships
+                # stale content no matter how well-ordered the queue is. The
+                # operator pressed the button, so the re-stage carries operator
+                # origin (C9) and the ordering guards serialize it after
+                # draft/price/upload and before publish.
+                try:
+                    state_machine.enqueue_job(
+                        queue_name="ebay_stage",
+                        payload={"sku": sku, "force": True, "origin": "operator"},
+                        dedupe_key=f"ebay_stage:{sku}",
+                        max_attempts=5,
+                    )
+                except Exception:
+                    pass
+            job_id = state_machine.enqueue_job(
+                queue_name="ebay_publish",
+                payload={"sku": sku, "origin": "operator"},
+                dedupe_key=f"ebay_publish:{sku}",
+                max_attempts=10,
+            )
+
         else:
             job_id = state_machine.enqueue_job(
                 queue_name=action,
-                payload={"sku": sku},
+                payload={"sku": sku, "origin": "operator"},
                 dedupe_key=f"{action}:{sku}",
                 max_attempts=5,
             )
@@ -931,6 +1644,7 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # GET /api/health — platform health check (Flutter home screen, audible alerts)
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/health", dependencies=[AUTH])
 def api_health() -> Dict[str, Any]:
@@ -948,9 +1662,7 @@ def api_health() -> Dict[str, Any]:
     try:
         with psycopg2.connect(_cfg["postgres_dsn"]) as con:
             with con.cursor() as cur:
-                cur.execute(
-                    "SELECT COUNT(*) FROM queue_jobs WHERE state = 'dead_letter'"
-                )
+                cur.execute("SELECT COUNT(*) FROM queue_jobs WHERE state = 'dead_letter'")
                 dead_letter_count = cur.fetchone()[0]
     except Exception:
         pass
@@ -964,6 +1676,7 @@ def api_health() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # GET /api/queue/status — job counts
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/queue/status", dependencies=[AUTH])
 def queue_status() -> Dict[str, Any]:
@@ -996,10 +1709,12 @@ def queue_status() -> Dict[str, Any]:
 # GET /api/migrate/blocked — items blocked in SKU migration (need human review)
 # ---------------------------------------------------------------------------
 
+
 @app.get("/api/migrate/blocked", dependencies=[AUTH])
 def get_migrate_blocked() -> Dict[str, Any]:
     import json as _json
     from pathlib import Path as _Path
+
     registry_path = _Path("/opt/TGW/var/migrate-blocked.json")
     if not registry_path.exists():
         return {"ok": True, "count": 0, "items": []}
@@ -1015,11 +1730,12 @@ def get_migrate_blocked() -> Dict[str, Any]:
 # GET /api/review — all items with review_block.ready=false (PP-REVIEW-001 P1)
 # ---------------------------------------------------------------------------
 
+
 @app.get("/api/review", dependencies=[AUTH])
-def get_review_items(stage: Optional[str] = None,
-                     reason_code: Optional[str] = None) -> Dict[str, Any]:
+def get_review_items(stage: Optional[str] = None, reason_code: Optional[str] = None) -> Dict[str, Any]:
     """Return all items that need human review, optionally filtered by stage/reason_code."""
     import sqlite3 as _sqlite3
+
     db_path = _cfg.get("sqlite_catalog_path")
     if not db_path or not db_path.exists():
         raise HTTPException(status_code=503, detail="catalog not built")
@@ -1038,6 +1754,7 @@ def get_review_items(stage: Optional[str] = None,
         raise HTTPException(status_code=500, detail=f"catalog query failed: {exc}")
 
     import json as _json
+
     items = []
     for sku, title, rb_json in rows:
         try:
@@ -1070,6 +1787,7 @@ def get_review_items(stage: Optional[str] = None,
 # GET /api/system/workers — systemd unit states (PP-EDITOR-001 Phase 3j)
 # ---------------------------------------------------------------------------
 
+
 @app.get("/api/system/workers", dependencies=[AUTH])
 def system_workers() -> Dict[str, Any]:
     """Return systemd active/sub state for all tgw-worker@ units + tgw-http."""
@@ -1080,10 +1798,10 @@ def system_workers() -> Dict[str, Any]:
 
     try:
         r = subprocess.run(
-            ["systemctl", "show", "--no-pager",
-             "--property=Id,ActiveState,SubState,MainPID",
-             *units],
-            capture_output=True, text=True, timeout=8,
+            ["systemctl", "show", "--no-pager", "--property=Id,ActiveState,SubState,MainPID", *units],
+            capture_output=True,
+            text=True,
+            timeout=8,
         )
         # systemctl show outputs blank-line-separated blocks per unit
         block: Dict[str, str] = {}
@@ -1091,31 +1809,32 @@ def system_workers() -> Dict[str, Any]:
             line = line.strip()
             if not line:
                 if block.get("Id"):
-                    workers.append({
-                        "unit": block["Id"],
-                        "active": block.get("ActiveState", "unknown"),
-                        "sub": block.get("SubState", "unknown"),
-                        "pid": int(block["MainPID"]) if block.get("MainPID", "0").isdigit() and block["MainPID"] != "0" else None,
-                    })
+                    workers.append(
+                        {
+                            "unit": block["Id"],
+                            "active": block.get("ActiveState", "unknown"),
+                            "sub": block.get("SubState", "unknown"),
+                            "pid": int(block["MainPID"]) if block.get("MainPID", "0").isdigit() and block["MainPID"] != "0" else None,
+                        }
+                    )
                 block = {}
             else:
                 k, _, v = line.partition("=")
                 block[k] = v
         # flush last block
         if block.get("Id"):
-            workers.append({
-                "unit": block["Id"],
-                "active": block.get("ActiveState", "unknown"),
-                "sub": block.get("SubState", "unknown"),
-                "pid": int(block["MainPID"]) if block.get("MainPID", "0").isdigit() and block["MainPID"] != "0" else None,
-            })
+            workers.append(
+                {
+                    "unit": block["Id"],
+                    "active": block.get("ActiveState", "unknown"),
+                    "sub": block.get("SubState", "unknown"),
+                    "pid": int(block["MainPID"]) if block.get("MainPID", "0").isdigit() and block["MainPID"] != "0" else None,
+                }
+            )
     except Exception as exc:
         log.warning("system_workers: systemctl query failed: %s", exc)
         # Fall back: return all as unknown
-        workers = [
-            {"unit": u, "active": "unknown", "sub": "unknown", "pid": None}
-            for u in units
-        ]
+        workers = [{"unit": u, "active": "unknown", "sub": "unknown", "pid": None} for u in units]
 
     up = sum(1 for w in workers if w["active"] == "active")
     return {"ok": True, "workers": workers, "up": up, "total": len(units)}
@@ -1125,6 +1844,7 @@ def system_workers() -> Dict[str, Any]:
 # POST /api/jobs/{job_id}/requeue — re-enqueue a dead-letter job (Phase 3j)
 # ---------------------------------------------------------------------------
 
+
 @app.post("/api/jobs/{job_id}/requeue", dependencies=[AUTH])
 def requeue_job(job_id: str) -> Dict[str, Any]:
     """Re-enqueue a dead-letter job with a fresh dedupe key so it can run again."""
@@ -1132,8 +1852,7 @@ def requeue_job(job_id: str) -> Dict[str, Any]:
         with psycopg2.connect(_cfg["postgres_dsn"]) as con:
             with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
-                    "SELECT job_id, queue_name, payload_json, state, max_attempts"
-                    " FROM queue_jobs WHERE job_id = %s",
+                    "SELECT job_id, queue_name, payload_json, state, max_attempts FROM queue_jobs WHERE job_id = %s",
                     (job_id,),
                 )
                 row = cur.fetchone()
@@ -1151,6 +1870,12 @@ def requeue_job(job_id: str) -> Dict[str, Any]:
 
     payload = dict(row["payload_json"]) if row["payload_json"] else {}
     sku = payload.get("sku") or job_id[:8]
+    # PP-ACTIONCONSOLE-001 improvement loop: mark operator-triggered retries so
+    # the ledger can be mined for "same failure, same manual fix, keeps working"
+    # patterns — candidates for automatic retry policy.
+    payload["operator_retry"] = True
+    payload["origin"] = "operator"
+    payload["retried_from_job"] = str(job_id)
     new_dedupe = f"{row['queue_name']}:{sku}:requeue:{int(time.time())}"
 
     try:
@@ -1170,10 +1895,12 @@ def requeue_job(job_id: str) -> Dict[str, Any]:
 # GET /api/ebay/aspects/{category_id} — aspect list for offer form
 # ---------------------------------------------------------------------------
 
+
 @app.get("/api/ebay/aspects/{category_id}", dependencies=[AUTH])
 def ebay_aspects(category_id: str) -> Dict[str, Any]:
     try:
         from .apis.ebay.specifics import get_aspects
+
         aspects = get_aspects(_cfg, category_id)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"eBay aspects error: {e}")
@@ -1181,8 +1908,198 @@ def ebay_aspects(category_id: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/ebay/category-context/{category_id}
+# Unified category data: conditions, aspects, store category, pricing hints.
+# Single call used by the editor to drive all category-specific form fields.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/ebay/category-context/{category_id}", dependencies=[AUTH])
+def ebay_category_context(category_id: str, current_condition: str = "") -> Dict[str, Any]:
+    from .ebay.pricing import _groups_reverse, _load_groups
+
+    # ── Conditions — real per-category eBay policy, not a fabricated superset ──
+    # (session 39: the old _CONDITION_ID_MAP fanned one real conditionId like 3000
+    # "Used" out into three invented grades — USED_EXCELLENT/GOOD/ACCEPTABLE — none
+    # of which eBay actually allows for categories with only a single "Used" bucket)
+    conditions: List[Dict[str, str]] = []
+    try:
+        from .apis.ebay.conditions import allowed_conditions_for_category
+
+        seen: set = set()
+        for c in allowed_conditions_for_category(_cfg, category_id):
+            if c["condition_enum"] not in seen:
+                conditions.append({"enum": c["condition_enum"], "label": c["condition_label"]})
+                seen.add(c["condition_enum"])
+    except Exception as exc:
+        log.warning("category-context: conditions load error: %s", exc)
+
+    # ── Condition remap — never upgrade condition when category changes ────────
+    # (session 39: switching category could otherwise leave a stale/invalid enum
+    # in place, or — per Dave — silently jump to a better grade like "Like New".
+    # best_condition_for_enum() already implements the correct same-or-worse-only
+    # remap; it just wasn't wired into the live category-change UI path.)
+    condition_remap: Optional[Dict[str, str]] = None
+    if current_condition and current_condition not in {c["enum"] for c in conditions}:
+        try:
+            from .apis.ebay.conditions import best_condition_for_enum
+
+            remap = best_condition_for_enum(_cfg, category_id, current_condition)
+            if remap:
+                condition_remap = {"enum": remap["condition_enum"], "label": remap["condition_label"]}
+        except Exception as exc:
+            log.warning("category-context: condition remap error: %s", exc)
+
+    # ── Aspects from eBay API ────────────────────────────────────────────
+    # No real eBay category has zero item specifics (at minimum: Country/Region
+    # of Manufacture, and most also carry California Prop 65 Warning) — an empty
+    # list here means the lookup FAILED (e.g. Taxonomy API rate-limited), not that
+    # the category genuinely has none. aspects_error carries that distinction to
+    # the UI so it can say "lookup failed, retry" instead of "no specifics".
+    aspects: List[Any] = []
+    aspects_error: Optional[str] = None
+    try:
+        from .apis.ebay.specifics import get_aspects
+
+        aspects = get_aspects(_cfg, category_id)
+    except Exception as exc:
+        log.warning("category-context: aspects error: %s", exc)
+        aspects_error = str(exc)
+
+    # ── Group data from category-groups.json ─────────────────────────────
+    _load_groups(_cfg)  # warm cache
+    grp_key = (_groups_reverse or {}).get(str(category_id))
+    grp: Dict[str, Any] = {}
+    if grp_key:
+        from .ebay.pricing import _groups_cache
+
+        grp = (_groups_cache or {}).get("groups", {}).get(grp_key, {})
+
+    pricing = grp.get("pricing") or {}
+    store_category = grp.get("store_category") or ""
+    store_category_id = grp.get("store_category_id")
+    size_class = grp.get("size_class") or ""
+    group_name = grp.get("name") or ""
+
+    # ── Fulfillment policy for this category ─────────────────────────────
+    fulfillment_id = (_cfg.get("fulfillment_policy_by_category") or {}).get(str(category_id)) or _cfg.get("fulfillment_policy_id") or ""
+    if not fulfillment_id:
+        _pol_path = _cfg.get("catalog_root")
+        if _pol_path:
+            _pol_file = _pol_path / "ebay-fulfillment-policies.json"
+            if _pol_file.exists():
+                try:
+                    import json as _pj
+                    _pdata = _pj.loads(_pol_file.read_text())
+                    _fids = _pdata.get("fulfillment", {})
+                    # prefer FC4 by name, else first entry
+                    fulfillment_id = next((pid for pid, name in _fids.items() if name == "FC4"), next(iter(_fids), ""))
+                except Exception:
+                    pass
+
+    return {
+        "ok": True,
+        "category_id": category_id,
+        "conditions": conditions,
+        "condition_remap": condition_remap,
+        "aspects": aspects,
+        "aspects_error": aspects_error,
+        "store_category": store_category,
+        "store_category_id": store_category_id,
+        "group_name": group_name,
+        "size_class": size_class,
+        "pricing": {
+            "floor": pricing.get("floor"),
+            "typical_used": pricing.get("typical_used"),
+            "typical_new": pricing.get("typical_new"),
+        },
+        "fulfillment_policy_id": fulfillment_id,
+    }
+
+
+# GET /api/ebay/category-search?q=...
+# Live eBay category type-ahead — returns up to 15 suggestions with breadcrumb paths.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/ebay/category-search", dependencies=[AUTH])
+def ebay_category_search(q: str = "") -> Dict[str, Any]:
+    if not q or len(q.strip()) < 2:
+        return {"ok": True, "results": []}
+    try:
+        from .apis.ebay.taxonomy import search_categories_local
+
+        results = search_categories_local(_cfg, q.strip(), limit=20)
+        return {"ok": True, "results": results}
+    except Exception as exc:
+        log.warning("category-search error: %s", exc)
+        return {"ok": False, "detail": str(exc), "results": []}
+
+
+# GET /api/ebay/category-node/{category_id} — resolve a raw operator-typed ID
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/ebay/category-node/{category_id}", dependencies=[AUTH])
+def ebay_category_node(category_id: str) -> Dict[str, Any]:
+    try:
+        from .apis.ebay.taxonomy import get_category_node
+
+        node = get_category_node(_cfg, category_id)
+        if not node:
+            return {"ok": False, "detail": "unknown category id"}
+        return {"ok": True, **node}
+    except Exception as exc:
+        log.warning("category-node error: %s", exc)
+        return {"ok": False, "detail": str(exc)}
+
+
+# GET /api/ebay/category-children?parent_id=... — tree-browse navigation
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/ebay/category-children", dependencies=[AUTH])
+def ebay_category_children(parent_id: str = "") -> Dict[str, Any]:
+    try:
+        from .apis.ebay.taxonomy import get_category_children, get_category_node
+
+        children = get_category_children(_cfg, parent_id or None)
+        parent = get_category_node(_cfg, parent_id) if parent_id else None
+        return {"ok": True, "parent": parent, "children": children}
+    except Exception as exc:
+        log.warning("category-children error: %s", exc)
+        return {"ok": False, "detail": str(exc), "children": []}
+
+
+# GET /api/ebay/store-categories
+# Returns store categories from category-groups.json, sorted by name.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/ebay/store-categories", dependencies=[AUTH])
+def ebay_store_categories() -> Dict[str, Any]:
+    try:
+        from .ebay.pricing import _groups_cache, _load_groups
+
+        _load_groups(_cfg)
+        groups = (_groups_cache or {}).get("groups", {})
+        seen: Dict[str, Any] = {}
+        for grp in groups.values():
+            name = grp.get("store_category") or grp.get("store_category_name") or ""
+            sid = grp.get("store_category_id")
+            if name and name not in seen:
+                seen[name] = sid
+        results = sorted([{"id": v, "name": k} for k, v in seen.items()], key=lambda x: x["name"])
+        return {"ok": True, "results": results}
+    except Exception as exc:
+        log.warning("store-categories error: %s", exc)
+        return {"ok": False, "detail": str(exc), "results": []}
+
+
+# ---------------------------------------------------------------------------
 # GET /api/locations — distinct locations from SQLite
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/locations", dependencies=[AUTH])
 def list_locations() -> Dict[str, Any]:
@@ -1192,9 +2109,7 @@ def list_locations() -> Dict[str, Any]:
 
     con = _sqlite_conn()
     try:
-        rows = con.execute(
-            "SELECT DISTINCT location FROM catalog WHERE location != '' ORDER BY location"
-        ).fetchall()
+        rows = con.execute("SELECT DISTINCT location FROM catalog WHERE location != '' ORDER BY location").fetchall()
     finally:
         con.close()
 
@@ -1205,6 +2120,7 @@ def list_locations() -> Dict[str, Any]:
 # GET /api/catalog/snapshot — atomic SQLite snapshot for Flutter offline sync
 # PP-PORTABLE-CATALOG-001 Phase 2
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/catalog/snapshot", dependencies=[AUTH])
 def catalog_snapshot(background_tasks: BackgroundTasks):
@@ -1220,29 +2136,36 @@ def catalog_snapshot(background_tasks: BackgroundTasks):
     if not db_path.exists():
         raise HTTPException(status_code=503, detail="SQLite catalog not built — run tgw build-sqlite")
 
-    fd, tmp_path = tempfile.mkstemp(suffix='.db', prefix='tgwcatalog_snapshot_')
+    fd, tmp_path = tempfile.mkstemp(suffix=".db", prefix="tgwcatalog_snapshot_")
     os.close(fd)
-    src_con = sqlite3.connect(str(db_path))
     try:
-        dst_con = sqlite3.connect(tmp_path)
+        src_con = sqlite3.connect(str(db_path))
         try:
-            src_con.backup(dst_con)
+            dst_con = sqlite3.connect(tmp_path)
+            try:
+                src_con.backup(dst_con)
+            finally:
+                dst_con.close()
         finally:
-            dst_con.close()
-    finally:
-        src_con.close()
+            src_con.close()
+    except Exception:
+        # backup() raised before the unlink task was ever scheduled — clean
+        # up here instead of leaking a multi-MB temp file per failed sync.
+        os.unlink(tmp_path)
+        raise
 
     background_tasks.add_task(os.unlink, tmp_path)
     return FileResponse(
         tmp_path,
-        media_type='application/octet-stream',
-        filename='tgwcatalog.db',
+        media_type="application/octet-stream",
+        filename="tgwcatalog.db",
     )
 
 
 # ---------------------------------------------------------------------------
 # GET /api/category-groups — template list for intake form
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/category-groups", dependencies=[AUTH])
 def list_category_groups() -> Dict[str, Any]:
@@ -1253,20 +2176,23 @@ def list_category_groups() -> Dict[str, Any]:
     groups = raw.get("groups", {})
     result = []
     for key, grp in groups.items():
-        result.append({
-            "key":        key,
-            "name":       grp.get("name", key),
-            "size_class": grp.get("size_class", ""),
-            "ai_hint":    grp.get("ai_hint", ""),
-            "floor":      grp.get("pricing", {}).get("floor"),
-            "typical_used": grp.get("pricing", {}).get("typical_used"),
-        })
+        result.append(
+            {
+                "key": key,
+                "name": grp.get("name", key),
+                "size_class": grp.get("size_class", ""),
+                "ai_hint": grp.get("ai_hint", ""),
+                "floor": grp.get("pricing", {}).get("floor"),
+                "typical_used": grp.get("pricing", {}).get("typical_used"),
+            }
+        )
     return {"ok": True, "count": len(result), "groups": result}
 
 
 # ---------------------------------------------------------------------------
 # POST /api/items/{sku}/set-template — apply category-group template
 # ---------------------------------------------------------------------------
+
 
 @app.post("/api/items/{sku}/set-template", dependencies=[AUTH])
 def set_item_template(sku: str, body: SetTemplateBody) -> Dict[str, Any]:
@@ -1300,22 +2226,10 @@ def set_item_template(sku: str, body: SetTemplateBody) -> Dict[str, Any]:
     if cats and not doc.get("ebay_category_id"):
         fields["ebay_category_id"] = cats[0]
 
-    doc.update(fields)
-    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+    _apply_patch(json_path, fields)
+    _enqueue_catalog_rebuild(f"set_template:{sku}")
 
-    try:
-        state_machine.enqueue_job(
-            queue_name="catalog_rebuild",
-            payload={"reason": f"set_template:{sku}"},
-            dedupe_key="catalog_rebuild:pending",
-            not_before=time.time() + 30,
-            max_attempts=3,
-        )
-    except Exception:
-        pass
-
-    return {"ok": True, "sku": sku, "template_key": body.template_key,
-            "applied": fields, "group_name": grp.get("name", body.template_key)}
+    return {"ok": True, "sku": sku, "template_key": body.template_key, "applied": fields, "group_name": grp.get("name", body.template_key)}
 
 
 # ---------------------------------------------------------------------------
@@ -1334,22 +2248,8 @@ def delete_item(sku: str) -> Dict[str, Any]:
     if not json_path.exists():
         raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
 
-    doc = load_item_doc(json_path)
-    doc["status"] = "deleted"
-    doc["deleted_at"] = datetime.now().isoformat()
-    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
-
-    try:
-        state_machine.enqueue_job(
-            queue_name="catalog_rebuild",
-            payload={"reason": f"delete:{sku}"},
-            dedupe_key="catalog_rebuild:pending",
-            not_before=time.time() + 30,
-            max_attempts=3,
-        )
-    except Exception:
-        pass
-
+    _apply_patch(json_path, {"status": "deleted", "deleted_at": datetime.now(timezone.utc).isoformat()})
+    _enqueue_catalog_rebuild(f"delete:{sku}")
     return {"ok": True, "sku": sku, "status": "deleted"}
 
 
@@ -1364,25 +2264,15 @@ def set_photo_order(sku: str, body: PhotoOrderBody) -> Dict[str, Any]:
     json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
     if not json_path.exists():
         raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
-    doc = load_item_doc(json_path)
-    doc["photo_order"] = [n for n in body.order if n]
-    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
-    try:
-        state_machine.enqueue_job(
-            queue_name="catalog_rebuild",
-            payload={"reason": f"photo_order:{sku}"},
-            dedupe_key="catalog_rebuild:pending",
-            not_before=time.time() + 30,
-            max_attempts=3,
-        )
-    except Exception:
-        pass
-    return {"ok": True, "sku": sku, "order": doc["photo_order"]}
+    _apply_patch(json_path, {"photo_order": [n for n in body.order if n]})
+    _enqueue_catalog_rebuild(f"photo_order:{sku}")
+    return {"ok": True, "sku": sku, "order": [n for n in body.order if n]}
 
 
 # ---------------------------------------------------------------------------
 # GET /api/items/{sku}/assets — ordered photo list (Stage 1 asset fence)
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/items/{sku}/assets", dependencies=[AUTH])
 def list_assets(sku: str) -> Dict[str, Any]:
@@ -1392,16 +2282,14 @@ def list_assets(sku: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
     doc = load_item_doc(json_path)
     photos = _ordered_photos(doc, json_path.parent)
-    assets = [
-        {"name": p.name, "url": f"/media/{sku}/{p.name}", "position": i}
-        for i, p in enumerate(photos)
-    ]
+    assets = [{"name": p.name, "url": f"/media/{sku}/{p.name}", "position": i} for i, p in enumerate(photos)]
     return {"ok": True, "sku": sku, "count": len(assets), "assets": assets}
 
 
 # ---------------------------------------------------------------------------
 # DELETE /api/items/{sku}/assets/{filename} — remove a photo
 # ---------------------------------------------------------------------------
+
 
 @app.delete("/api/items/{sku}/assets/{filename}", dependencies=[AUTH])
 def delete_asset(sku: str, filename: str) -> Dict[str, Any]:
@@ -1421,17 +2309,57 @@ def delete_asset(sku: str, filename: str) -> Dict[str, Any]:
     doc = load_item_doc(json_path)
     order = doc.get("photo_order") or []
     if filename in order:
-        doc["photo_order"] = [n for n in order if n != filename]
-        atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+        _apply_patch(json_path, {"photo_order": [n for n in order if n != filename]})
     return {"ok": True, "sku": sku, "deleted": filename}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/items/{sku}/remove-comp — operator removes a bad comp listing
+# ---------------------------------------------------------------------------
+
+
+class RemoveCompBody(BaseModel):
+    url: str  # comp listing URL to remove (unique key within price_comps.items)
+
+
+@app.post("/api/items/{sku}/remove-comp", dependencies=[AUTH])
+def remove_comp(sku: str, body: RemoveCompBody) -> Dict[str, Any]:
+    """Remove one comp listing from price_comps.items and recalculate stats."""
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+    doc = load_item_doc(json_path)
+    eo = doc.get("ebay_offer") or {}
+    comps = eo.get("price_comps") or {}
+    items = comps.get("items") or []
+    before = len(items)
+    kept = [ci for ci in items if ci.get("url", "").split("&mkcid")[0] != body.url.split("&mkcid")[0]]
+    if len(kept) == before:
+        raise HTTPException(status_code=404, detail="comp not found by url")
+    # Recalculate stats from kept active items (exclude outliers/llm_dropped).
+    # Use the same nearest-rank formula as ebay/pricing.py._compute_stats —
+    # a separate linear-interpolation formula here made stored comps stats
+    # silently shift for unrelated reasons whenever an operator edited comps.
+    from .ebay.pricing import _compute_stats
+
+    active_prices = [ci["price"] for ci in kept if not ci.get("outlier") and not ci.get("llm_dropped") and ci.get("price") is not None]
+    comps["items"] = kept
+    comps.update(_compute_stats(active_prices) or {"count": 0})
+    eo["price_comps"] = comps
+    doc["ebay_offer"] = eo
+    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True), archive_root=_cfg.get("archive_root"))
+    return {"ok": True, "sku": sku, "removed": body.url, "remaining": len(kept)}
 
 
 # ---------------------------------------------------------------------------
 # GET /api/items/{sku}/hint-trail — identification history
 # ---------------------------------------------------------------------------
 
+
 @app.get("/api/items/{sku}/hint-trail", dependencies=[AUTH])
 def get_hint_trail(sku: str) -> Dict[str, Any]:
+    if ".." in sku:
+        raise HTTPException(status_code=400, detail="invalid sku")
     json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
     if not json_path.exists():
         raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
@@ -1444,15 +2372,270 @@ def get_hint_trail(sku: str) -> Dict[str, Any]:
 # GET /form/intake/{sku} — mobile intake form (HTML)
 # ---------------------------------------------------------------------------
 
-_STATIC_HEAD = (
-    '<link rel="stylesheet" href="/static/tgw.css">'
-    '<link rel="stylesheet" href="/static/nav.css">'
-)
-_STATIC_FOOT = (
-    '<script src="/static/tgw.js"></script>'
-    '<script src="/static/nav.js"></script>'
-)
+_STATIC_HEAD = '<link rel="stylesheet" href="/static/tgw.css"><link rel="stylesheet" href="/static/nav.css">'
+_STATIC_FOOT = '<script src="/static/tgw.js"></script><script src="/static/nav.js"></script>'
 
+
+
+# Shared multi-mode category picker: type-to-search (local cached tree, no
+# live eBay quota), type digits to resolve a raw category ID, or Browse the
+# tree by drilling into branches. Used for both the primary and 2nd category.
+_CATEGORY_PICKER_JS = """
+function initCatPicker(cfg){
+  var inp=document.getElementById(cfg.searchId);
+  var hid=document.getElementById(cfg.catIdFieldId);
+  var dd=document.getElementById(cfg.ddId);
+  var bc=document.getElementById(cfg.bcId);
+  var browseBtn=document.getElementById(cfg.browseBtnId);
+  var browsePanel=document.getElementById(cfg.browsePanelId);
+  if(!inp||!hid||!dd)return;
+  var _timer=null, _idx=-1, _items=[], _pendingId=null;
+
+  function selectCategory(cid,cname){
+    hid.value=cid;
+    if(bc)bc.textContent=cid+' \\u00b7 '+cname;
+    inp.value='';
+    dd.style.display='none';dd.innerHTML='';
+    _idx=-1;_items=[];_pendingId=null;
+    if(browsePanel)browsePanel.style.display='none';
+    var patch={};
+    patch[cfg.idField]=cid;
+    patch[cfg.nameField]=cname;
+    fetch('/api/items/'+window._ITEM_SKU,{
+      method:'PATCH',
+      headers:authHeaders({'Content-Type':'application/json'}),
+      body:JSON.stringify({fields:{draft_listing:patch}})
+    }).then(function(r){return r.json();}).then(function(d){
+      if(d.ok&&cfg.primary&&typeof loadCatCtx==='function')loadCatCtx(cid);
+    });
+  }
+
+  function highlight(){
+    Array.from(dd.querySelectorAll('.cat-opt')).forEach(function(el,i){
+      el.style.background=(i===_idx)?'#2a2a3a':'';
+    });
+  }
+
+  function renderResults(results){
+    _items=results;_idx=-1;
+    if(!results.length){dd.style.display='none';dd.innerHTML='';return;}
+    var html='';
+    results.forEach(function(s,i){
+      html+='<div class="cat-opt" data-i="'+i+'" style="padding:6px 10px;cursor:pointer;'
+        +'border-bottom:1px solid #2a2a2a;font-size:.85em">'
+        +'<span style="color:#eee">'+s.name+'</span>'
+        +(s.path?'<div style="color:#556;font-size:.78em">'+s.path+'</div>':'')
+        +'</div>';
+    });
+    dd.innerHTML=html;dd.style.display='block';
+    Array.from(dd.querySelectorAll('.cat-opt')).forEach(function(el){
+      el.addEventListener('mouseenter',function(){_idx=parseInt(el.dataset.i,10);highlight();});
+      el.addEventListener('click',function(){
+        var s=_items[parseInt(el.dataset.i,10)];
+        selectCategory(s.id,s.name);
+      });
+    });
+  }
+
+  function showError(msg){
+    _items=[];_idx=-1;_pendingId=null;
+    dd.innerHTML='<div style="padding:6px 10px;font-size:.82em;color:#e88">'+msg+'</div>';
+    dd.style.display='block';
+  }
+
+  function renderIdConfirm(node){
+    _pendingId=node;
+    dd.innerHTML='<div class="cat-opt" data-idconfirm="1" style="padding:6px 10px;'
+      +'cursor:pointer;font-size:.85em;background:#132213">'
+      +'<span style="color:#8e8">Use category '+node.id+' \\u2014 press Enter</span>'
+      +'<div style="color:#556;font-size:.78em">'+node.path
+      +(node.leaf?'':' (branch, not a leaf \\u2014 eBay requires a leaf category)')+'</div>'
+      +'</div>';
+    dd.style.display='block';
+    var el=dd.querySelector('[data-idconfirm]');
+    if(el)el.addEventListener('click',function(){selectCategory(node.id,node.name);});
+  }
+
+  inp.addEventListener('input',function(){
+    clearTimeout(_timer);
+    var q=inp.value.trim();
+    _pendingId=null;
+    if(!q){dd.style.display='none';return;}
+    var isId=/^[0-9]+$/.test(q);
+    _timer=setTimeout(function(){
+      if(isId){
+        fetch('/api/ebay/category-node/'+encodeURIComponent(q),{headers:authHeaders()})
+          .then(function(r){return r.json();})
+          .then(function(d){
+            if(d.ok)renderIdConfirm(d);
+            else showError(d.detail&&d.detail.indexOf('429')>=0
+              ?'eBay category lookup is rate-limited right now \\u2014 try again later'
+              :(d.detail||'unknown category id'));
+          })
+          .catch(function(){showError('Network error');});
+        return;
+      }
+      if(q.length<2){dd.style.display='none';return;}
+      fetch('/api/ebay/category-search?q='+encodeURIComponent(q),{headers:authHeaders()})
+        .then(function(r){return r.json();})
+        .then(function(d){
+          if(!d.ok){
+            showError(d.detail&&d.detail.indexOf('429')>=0
+              ?'eBay category search is rate-limited right now \\u2014 try again later'
+              :'Category search failed');
+            return;
+          }
+          renderResults(d.results||[]);
+        })
+        .catch(function(){showError('Network error');});
+    },150);
+  });
+
+  inp.addEventListener('keydown',function(e){
+    if(e.key==='ArrowDown'){
+      if(!_items.length)return;
+      e.preventDefault();_idx=(_idx+1)%_items.length;highlight();
+    }else if(e.key==='ArrowUp'){
+      if(!_items.length)return;
+      e.preventDefault();_idx=(_idx-1+_items.length)%_items.length;highlight();
+    }else if(e.key==='Enter'){
+      e.preventDefault();
+      if(_pendingId){selectCategory(_pendingId.id,_pendingId.name);return;}
+      if(_idx>=0&&_items[_idx]){selectCategory(_items[_idx].id,_items[_idx].name);return;}
+      if(_items.length===1)selectCategory(_items[0].id,_items[0].name);
+    }else if(e.key==='Escape'){
+      dd.style.display='none';
+    }
+  });
+
+  document.addEventListener('click',function(e){
+    if(!dd.contains(e.target)&&e.target!==inp)dd.style.display='none';
+  });
+
+  if(browseBtn&&browsePanel){
+    var _stack=[];
+    function renderBrowse(parentId){
+      fetch('/api/ebay/category-children?parent_id='+encodeURIComponent(parentId||''),{headers:authHeaders()})
+        .then(function(r){return r.json();})
+        .then(function(d){
+          if(!d.ok){
+            browsePanel.innerHTML='<div style="padding:6px 10px;font-size:.82em;color:#e88">'
+              +(d.detail&&d.detail.indexOf('429')>=0
+                ?'eBay category tree is rate-limited right now \\u2014 try again later'
+                :'Category browse failed')+'</div>';
+            return;
+          }
+          var crumb='<span data-crumb-i="-1" style="cursor:pointer;text-decoration:underline;color:#8ac">Top</span>'
+            +_stack.map(function(s,i){
+              return ' \\u00bb <span data-crumb-i="'+i+'" style="cursor:pointer;text-decoration:underline;color:#8ac">'+s.name+'</span>';
+            }).join('');
+          var list=d.children.map(function(c){
+            return '<div class="cat-browse-opt" data-id="'+c.id+'" data-name="'+c.name.replace(/"/g,'&quot;')+'" '
+              +'data-leaf="'+(c.leaf?1:0)+'" style="padding:5px 8px;cursor:pointer;border-bottom:1px solid #2a2a2a;'
+              +'font-size:.85em;display:flex;justify-content:space-between">'
+              +'<span>'+c.name+'</span>'+(c.leaf?'':'<span style="color:#556">\\u203a</span>')+'</div>';
+          }).join('');
+          browsePanel.innerHTML='<div style="font-size:.78em;margin-bottom:4px">'+crumb+'</div>'
+            +'<div style="max-height:220px;overflow-y:auto">'+(list||'<span style="color:#556;font-size:.8em">No subcategories</span>')+'</div>';
+          browsePanel.querySelectorAll('[data-crumb-i]').forEach(function(el){
+            el.addEventListener('click',function(){
+              var i=parseInt(el.dataset.crumbI,10);
+              if(i===-1){_stack=[];renderBrowse(null);}
+              else{_stack=_stack.slice(0,i+1);renderBrowse(_stack[i].id);}
+            });
+          });
+          browsePanel.querySelectorAll('.cat-browse-opt').forEach(function(el){
+            el.addEventListener('click',function(){
+              var cid=el.dataset.id,cname=el.dataset.name,leaf=el.dataset.leaf==='1';
+              if(leaf)selectCategory(cid,cname);
+              else{_stack.push({id:cid,name:cname});renderBrowse(cid);}
+            });
+          });
+        });
+    }
+    browseBtn.addEventListener('click',function(){
+      var isOpen=browsePanel.style.display==='block';
+      if(isOpen){browsePanel.style.display='none';return;}
+      dd.style.display='none';
+      _stack=[];renderBrowse(null);browsePanel.style.display='block';
+    });
+    document.addEventListener('click',function(e){
+      if(!browsePanel.contains(e.target)&&e.target!==browseBtn)browsePanel.style.display='none';
+    });
+  }
+}
+function initCatSearch(){
+  initCatPicker({searchId:'dl-cat-search',catIdFieldId:'dl-cat-id',ddId:'dl-cat-dropdown',
+    bcId:'dl-cat-breadcrumb',browseBtnId:'dl-cat-browse-btn',browsePanelId:'dl-cat-browse-panel',
+    idField:'category_id',nameField:'category_name',primary:true});
+}
+function initCatSearch2(){
+  initCatPicker({searchId:'dl-cat2-search',catIdFieldId:'dl-cat2-id',ddId:'dl-cat2-dropdown',
+    bcId:'dl-cat2-breadcrumb',browseBtnId:'dl-cat2-browse-btn',browsePanelId:'dl-cat2-browse-panel',
+    idField:'secondary_category_id',nameField:'secondary_category_name',primary:false});
+}
+"""
+
+# Module-level constant — avoids nested quote hell in f-string script blocks
+_CATEGORY_CONTEXT_IIFE = "function loadCatCtx(catId){\n  var prefill=window._DL_PREFILL||{};\n  var loading=document.getElementById('aspects-loading');\n  var form=document.getElementById('aspects-form');\n  if(!catId){if(loading)loading.textContent='No category.';return;}\n  var curCondSel=document.getElementById('dl-condition-select');\n  var curCondQ=curCondSel&&curCondSel.value?'?current_condition='+encodeURIComponent(curCondSel.value):'';\n  fetch('/api/ebay/category-context/'+encodeURIComponent(catId)+curCondQ,{headers:authHeaders()})\n  .then(function(r){return r.json();}).then(function(d){\n    if(!d||!d.ok){if(loading)loading.textContent='Context load failed.';return;}\n    window._CAT_CTX=d;\n    var sel=document.getElementById('dl-condition-select');\n    if(sel&&d.conditions&&d.conditions.length){\n      var curVal=sel.value;\n      var stillValid=d.conditions.some(function(c){return c.enum===curVal;});\n      var html='';\n      if(!curVal)html+='<option value=\"\" selected disabled>\\u2014 select \\u2014</option>';\n      d.conditions.forEach(function(c){\n        html+='<option value=\"'+c.enum+'\"'+(c.enum===curVal?' selected':'')+'>'+c.label+'</option>';\n      });\n      if(curVal&&!stillValid){\n        if(d.condition_remap){\n          curVal=d.condition_remap.enum;\n          html=html.replace('<option value=\"'+curVal+'\"','<option value=\"'+curVal+'\" selected');\n        }else{\n          html+='<option value=\"'+curVal+'\" selected>'+curVal+' \\u2014 not valid for this category, please fix</option>';\n        }\n      }\n      sel.innerHTML=html;\n      if(d.condition_remap&&curVal===d.condition_remap.enum){\n        fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',\n          headers:authHeaders({'Content-Type':'application/json'}),\n          body:JSON.stringify({fields:{draft_listing:{condition_enum:curVal}}})});\n      }\n      var cn=document.getElementById('condition-policy-note');\n      var nl=d.conditions.length;\n      if(cn)cn.textContent=nl+(nl===1?' condition':' conditions')+' allowed'+(d.condition_remap?' \\u2014 category changed, condition auto-matched to nearest same-or-worse: '+d.condition_remap.label:'')+((curVal&&!stillValid&&!d.condition_remap)?' \\u2014 current value invalid, please re-select':'');\n    }\n    if(d.fulfillment_policy_id){\n      var fsel=document.getElementById('dl-ship-input');\n      var fhint=document.getElementById('dl-ship-hint');\n      if(fsel&&!fsel.value){\n        for(var fi=0;fi<fsel.options.length;fi++){\n          if(fsel.options[fi].value===d.fulfillment_policy_id){fsel.value=d.fulfillment_policy_id;break;}\n        }\n        if(fsel.value){\n          fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',\n            headers:authHeaders({'Content-Type':'application/json'}),\n            body:JSON.stringify({fields:{draft_listing:{shipping_profile:fsel.value}}})});\n        }\n      }\n      if(fhint&&!fsel.value)fhint.textContent='suggested: '+d.fulfillment_policy_id;\n    }\n    if(d.store_category){\n      var sch=document.getElementById('store-cat-hint');\n      if(sch)sch.textContent='suggested: '+d.store_category;\n    }\n    if(d.group_name){\n      var gh=document.getElementById('category-group-hint');\n      if(gh){\n        var pt=d.pricing&&d.pricing.typical_used?' · typical $'+d.pricing.typical_used.toFixed(2):'';\n        var pf=d.pricing&&d.pricing.floor?' · floor $'+d.pricing.floor.toFixed(2):'';\n        gh.textContent='group: '+d.group_name+pf+pt;\n      }\n    }\n    if(loading)loading.style.display='none';\n    if(!form)return;\n    if(!d.aspects||!d.aspects.length){\n      form.innerHTML=d.aspects_error\n        ?'<span style=\"color:#e88;font-size:.82em\">Item specifics lookup failed (\\u2018'+d.aspects_error+'\\u2019) \\u2014 every eBay category has specifics; this is a lookup error, not an empty category. <a href=\"#\" onclick=\"loadCatCtx(\\''+catId+'\\');return false\" style=\"color:#8ac\">Retry</a></span>'\n        :'<span style=\"color:#556;font-size:.82em\">No specifics returned for this category \\u2014 unexpected, please verify manually</span>';\n      return;\n    }\n    var html='';\n    d.aspects.forEach(function(asp){\n      var badge=asp.required\n        ?'<span style=\"font-size:.7em;background:#3a1a1a;color:#c44;border-radius:3px;padding:1px 5px;margin-left:4px\">REQ</span>'\n        :'<span style=\"font-size:.7em;background:#2a2a0a;color:#aa0;border-radius:3px;padding:1px 5px;margin-left:4px\">REC</span>';\n      // Three-layer merge: operator edits (blue) > proposed (yellow) > live (baseline)\n      var liveVal=(window._LIVE_ASPECTS&&window._LIVE_ASPECTS[asp.name]!==undefined?(window._LIVE_ASPECTS[asp.name]||'').toString():'');\n      var proposedVal=(window._PROPOSED_ASPECTS&&window._PROPOSED_ASPECTS[asp.name]!==undefined?(window._PROPOSED_ASPECTS[asp.name]||'').toString():'');\n      var editVal=(prefill[asp.name]!==undefined?(prefill[asp.name]||'').toString():'');\n      var cur,layer;\n      if(editVal){cur=editVal;layer=(editVal!==liveVal)?'edit':'same';}\n      else if(proposedVal){cur=proposedVal;layer=(proposedVal!==liveVal)?'proposed':'same';}\n      else{cur=liveVal;layer=liveVal?'live':'empty';}\n      cur=cur.replace(/\"/g,'&quot;');\n      var reqEmpty=asp.required&&!cur;\n      // Colours by layer\n      var bord=reqEmpty?'#c44':(layer==='edit'?'#44c':(layer==='proposed'?'#884':'#444'));\n      var bg=reqEmpty?'#1a0a0a':(layer==='edit'?'#0a0a1a':(layer==='proposed'?'#1a1a00':'#1a1a1a'));\n      // Hint: show live value when overridden or proposed differs\n      var liveHint=(layer==='edit'||layer==='proposed')&&liveVal\n        ?'<div style=\"font-size:.7em;color:#445;margin-top:1px\">live: '+liveVal.replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>'\n        :'';\n      var inp;\n      if(asp.allowed_values&&asp.allowed_values.length&&asp.mode==='SELECTION_ONLY'){\n        var opts=asp.allowed_values.map(function(v){\n          return '<option value=\"'+v+'\"'+(v===cur?' selected':'')+'>'+v+'</option>';\n        }).join('');\n        inp='<select data-aspect=\"'+asp.name+'\" style=\"background:'+bg+';color:#eee;border:1px solid '+bord+';border-radius:3px;padding:2px 5px;font-size:.85em\"><option value=\"\">—</option>'+opts+'</select>';\n      }else{\n        var dlid='dl-asp-'+asp.name.replace(/[^a-zA-Z0-9]/g,'-');\n        var dlopts=asp.allowed_values&&asp.allowed_values.length\n          ?'<datalist id=\"'+dlid+'\">'+asp.allowed_values.map(function(v){return '<option value=\"'+v+'\"></option>';}).join('')+'</datalist>'\n          :'';\n        inp='<input type=\"text\"'+(dlopts?' list=\"'+dlid+'\"':'')+' data-aspect=\"'+asp.name+'\" value=\"'+cur+'\"'\n           +' style=\"background:'+bg+';color:#eee;border:1px solid '+bord+';border-radius:3px;padding:2px 5px;font-size:.85em;width:200px\">'\n           +dlopts;\n      }\n      html+='<div class=\"frow\"'+(reqEmpty?' style=\"border-left:2px solid #944;padding-left:4px\"':'')+'>  <span class=\"fn\" style=\"font-size:.82em\">'+asp.name+badge+'</span><span class=\"fv\">'+inp+liveHint+'</span></div>';\n    });\n    \n    var missingReq=d.aspects.filter(function(a){return a.required&&!(prefill[a.name]||'');}).length;if(missingReq>0){html='<div style=\"margin-bottom:8px;padding:5px 8px;background:#1a0808;border:1px solid #844;border-radius:3px;font-size:.78em;color:#e88\">'+missingReq+' required aspect'+(missingReq===1?'':'s')+' missing values — fill before staging</div>'+html;}form.innerHTML=html;\n  }).catch(function(){\n    if(loading)loading.textContent='Category context load failed.';\n  });\n}\ndocument.addEventListener('DOMContentLoaded',function(){\n  if(window._DL_CAT_ID)loadCatCtx(window._DL_CAT_ID);\n  if(typeof initCatSearch==='function')initCatSearch();\n  if(typeof initCatSearch2==='function')initCatSearch2();\n});\n"
+
+# Custom context menu for gallery images — fetches bytes locally then POSTs to
+# Google Lens upload so the LAN-only URL is never sent to Google directly.
+_LENS_CTX_MENU_JS = """\
+(function(){
+  var menu=document.createElement('div');
+  menu.id='img-ctx-menu';
+  menu.style.cssText='display:none;position:fixed;z-index:9999;background:#1e1e1e;border:1px solid #444;border-radius:4px;padding:4px 0;min-width:200px;box-shadow:0 2px 8px rgba(0,0,0,.6);font-size:13px;';
+  function addItem(label,fn){
+    var d=document.createElement('div');
+    d.textContent=label;
+    d.style.cssText='padding:6px 14px;cursor:pointer;color:#ddd;';
+    d.onmouseenter=function(){this.style.background='#333';};
+    d.onmouseleave=function(){this.style.background='';};
+    d.onclick=function(){hide();fn();};
+    menu.appendChild(d);
+  }
+  var _src='';
+  function hide(){menu.style.display='none';}
+  async function lensSearch(){
+    try{
+      var resp=await fetch(_src);
+      var blob=await resp.blob();
+      var file=new File([blob],'photo.jpg',{type:blob.type||'image/jpeg'});
+      var form=document.createElement('form');
+      form.method='POST';
+      form.action='https://lens.google.com/upload';
+      form.enctype='multipart/form-data';
+      form.target='_blank';
+      var inp=document.createElement('input');
+      inp.type='file';
+      inp.name='encoded_image';
+      var dt=new DataTransfer();
+      dt.items.add(file);
+      inp.files=dt.files;
+      form.appendChild(inp);
+      document.body.appendChild(form);
+      form.submit();
+      document.body.removeChild(form);
+    }catch(e){alert('Lens search failed: '+e);}
+  }
+  addItem('Search with Google Lens',lensSearch);
+  document.body.appendChild(menu);
+  document.addEventListener('contextmenu',function(e){
+    var img=e.target.closest('img.main-photo,#lb-img,.strip img');
+    if(!img){hide();return;}
+    var src=img.src;
+    if(!src||src==='data:,'||src.startsWith('data:'))return;
+    e.preventDefault();
+    _src=src;
+    menu.style.left=Math.min(e.clientX,window.innerWidth-220)+'px';
+    menu.style.top=Math.min(e.clientY,window.innerHeight-60)+'px';
+    menu.style.display='block';
+  });
+  document.addEventListener('click',hide);
+  document.addEventListener('scroll',hide,{passive:true});
+})();
+"""
 
 # ---------------------------------------------------------------------------
 # GET /form/intake — intake landing page (HTML)
@@ -1582,7 +2765,7 @@ def intake_landing():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         landing_css=_INTAKE_LANDING_CSS,
-        api_key_json=json.dumps(_web_key),
+        api_key_json=json.dumps(""),
     )
     return HTMLResponse(html)
 
@@ -1838,11 +3021,23 @@ _CONDITIONS = ["", "New", "Like New", "Very Good", "Good", "Acceptable"]
 @app.get("/form/intake/{sku}")
 def intake_form(sku: str, request: Request):
     """Mobile-friendly intake form — no Bearer auth, relies on network trust."""
+    import html as _html
+
     from fastapi.responses import HTMLResponse
+
+    if ".." in sku:
+        raise HTTPException(status_code=400, detail="invalid sku")
 
     json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
     if not json_path.exists():
-        return HTMLResponse(f"<h2>SKU not found: {sku}</h2>", status_code=404)
+        from .resolver import find_current_sku
+
+        current = find_current_sku(_cfg, sku)
+        if current:
+            json_path = _cfg["itemdata_root"] / current / f"{current}.json"
+            sku = current
+        else:
+            return HTMLResponse(f"<h2>SKU not found: {_html.escape(sku)}</h2>", status_code=404)
 
     doc = load_item_doc(json_path)
 
@@ -1863,20 +3058,17 @@ def intake_form(sku: str, request: Request):
     cond_val = doc.get("condition", "")
     cond_opts = ""
     for c in _CONDITIONS:
-        sel = 'selected' if c == cond_val else ''
+        sel = "selected" if c == cond_val else ""
         cond_opts += f'<option value="{c}" {sel}>{c if c else "— not set —"}</option>'
 
-    weight = doc.get("weight_oz", "")
-    barcode = doc.get("barcode", doc.get("upc", ""))
-    ai_hint = doc.get("ai_hint", "")
+    weight = _html.escape(str(doc.get("weight_oz", "")))
+    barcode = _html.escape(str(doc.get("barcode", doc.get("upc", ""))))
+    ai_hint = _html.escape(str(doc.get("ai_hint", "")))
     sku_short = sku[-9:]
 
     # Photo count from filesystem (server-side; JS keeps it live via polling)
     sku_dir = json_path.parent
-    n_photos = sum(
-        1 for p in sku_dir.iterdir()
-        if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png", ".gif", ".webp"}
-    )
+    n_photos = sum(1 for p in sku_dir.iterdir() if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png", ".gif", ".webp"})
     photo_cls = "badge-photo-warn" if n_photos == 0 else "badge-photo"
     photo_plural = "" if n_photos == 1 else "s"
 
@@ -1898,8 +3090,8 @@ def intake_form(sku: str, request: Request):
         barcode=barcode,
         ai_hint=ai_hint,
         condition_options=cond_opts,
-        api_key=_web_key,
-        api_key_json=json.dumps(_web_key),
+        api_key="",
+        api_key_json=json.dumps(""),
         n_photos=n_photos,
         photo_cls=photo_cls,
         photo_plural=photo_plural,
@@ -2041,11 +3233,12 @@ def bulk_form(request: Request):
     """Tablet-first bulk editor — no Bearer auth on the page (network trust);
     the embedded JS calls the authenticated /api/bulk/* endpoints."""
     from fastapi.responses import HTMLResponse
+
     html = _BULK_FORM_HTML.format(
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         extra_css=_BULK_EXTRA_CSS,
-        api_key=_web_key,
+        api_key="",
     )
     return HTMLResponse(html)
 
@@ -2132,7 +3325,7 @@ _TODOS_JS = """
 
 def _extract_pp_refs(body: str) -> "list[str]":
     """Extract PP-XXX-NNN references from a todo body string."""
-    return list(dict.fromkeys(re.findall(r'PP-[A-Z0-9]+-\d+', body)))
+    return list(dict.fromkeys(re.findall(r"PP-[A-Z0-9]+-\d+", body)))
 
 
 def _render_todos_html(rows) -> str:
@@ -2142,14 +3335,12 @@ def _render_todos_html(rows) -> str:
     head = (
         '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        '<title>TGW Todos</title>'
-        + _STATIC_HEAD
-        + '<style>' + _TODOS_EXTRA_CSS + '</style>'
-        '</head><body>'
-        '<h2>Open Todos</h2>'
+        "<title>TGW Todos</title>" + _STATIC_HEAD + "<style>" + _TODOS_EXTRA_CSS + "</style>"
+        "</head><body>"
+        "<h2>Open Todos</h2>"
     )
     if not rows:
-        return head + '<div class="allclear">✓ All clear — no open todos.</div>' + _STATIC_FOOT + _TODOS_JS + '</body></html>'
+        return head + '<div class="allclear">✓ All clear — no open todos.</div>' + _STATIC_FOOT + _TODOS_JS + "</body></html>"
 
     # Preserve todo_list ordering (agent, priority, id); group consecutively.
     groups: "list[tuple[str, list]]" = []
@@ -2167,51 +3358,34 @@ def _render_todos_html(rows) -> str:
 
     parts = [
         head,
-        '<div class="todos-ctrl">'
-        f'<label for="agent-sel">Agent:</label>'
-        f'<select id="agent-sel">{filter_opts}</select>'
-        '</div>',
+        f'<div class="todos-ctrl"><label for="agent-sel">Agent:</label><select id="agent-sel">{filter_opts}</select></div>',
         f'<div class="total">{len(rows)} open item(s)</div>',
     ]
 
     for agent, items in groups:
         agent_esc = _html.escape(str(agent))
-        parts.append(
-            f'<div class="agent" data-agent="{agent_esc}">'
-            f'<h3>{agent_esc}</h3>'
-            f'<span class="count">{len(items)} open</span></div>'
-        )
-        parts.append(
-            f'<table data-agent="{agent_esc}">'
-            '<tr><th>ID</th><th>P</th><th>Task</th><th>Src</th><th></th></tr>'
-        )
+        parts.append(f'<div class="agent" data-agent="{agent_esc}"><h3>{agent_esc}</h3><span class="count">{len(items)} open</span></div>')
+        parts.append(f'<table data-agent="{agent_esc}"><tr><th>ID</th><th>P</th><th>Task</th><th>Src</th><th></th></tr>')
         for it in items:
             body_raw = str(it.get("body", ""))
             body_esc = _html.escape(body_raw)
             pp_refs = _extract_pp_refs(body_raw)
-            pp_badges = "".join(
-                f'<a class="pp-badge" href="/docs/plan/TGW-Master-Plan.md" title="{r}">{r}</a>'
-                for r in pp_refs
-            )
-            body_cell = (
-                f'<div class="task-body" data-agent="{agent_esc}">{body_esc}</div>'
-                f'<span class="task-expand"></span>'
-                + (pp_badges if pp_badges else "")
-            )
+            pp_badges = "".join(f'<a class="pp-badge" href="/docs/plan/TGW-Master-Plan.md" title="{r}">{r}</a>' for r in pp_refs)
+            body_cell = f'<div class="task-body" data-agent="{agent_esc}">{body_esc}</div><span class="task-expand"></span>' + (pp_badges if pp_badges else "")
             parts.append(
                 f'<tr data-agent="{agent_esc}">'
                 f'<td class="id">#{_html.escape(str(it.get("id", "")))}</td>'
                 f'<td class="p">{_html.escape(str(it.get("priority", "")))}</td>'
-                f'<td>{body_cell}</td>'
+                f"<td>{body_cell}</td>"
                 f'<td class="src">{_html.escape(str(it.get("source", "")))}</td>'
                 f'<td><button class="copy-btn" data-body="{body_esc}" title="Copy task text">📋</button></td>'
-                '</tr>'
+                "</tr>"
             )
-        parts.append('</table>')
+        parts.append("</table>")
     parts.append(_STATIC_FOOT)
     parts.append(_TODOS_JS)
-    parts.append('</body></html>')
-    return ''.join(parts)
+    parts.append("</body></html>")
+    return "".join(parts)
 
 
 @app.get("/form/todos")
@@ -2221,23 +3395,96 @@ def todos_form(request: Request):
     from fastapi.responses import HTMLResponse
 
     from tgw import todo
+
     try:
         rows = todo.todo_list()
     except Exception as exc:  # DB down → still render a page, don't 500
         body = (
             '<!DOCTYPE html><html><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
-            '<title>TGW Todos</title>'
-            + _STATIC_HEAD
-            + '<style>' + _TODOS_EXTRA_CSS + '</style>'
-            '</head><body>'
-            '<h2>Open Todos</h2>'
-            f'<div class="msg err" style="display:block">todo store unavailable: {exc}</div>'
-            + _STATIC_FOOT
-            + '</body></html>'
+            "<title>TGW Todos</title>" + _STATIC_HEAD + "<style>" + _TODOS_EXTRA_CSS + "</style>"
+            "</head><body>"
+            "<h2>Open Todos</h2>"
+            f'<div class="msg err" style="display:block">todo store unavailable: {exc}</div>' + _STATIC_FOOT + "</body></html>"
         )
         return HTMLResponse(body, status_code=200)
     return HTMLResponse(_render_todos_html(rows))
+
+
+# ---------------------------------------------------------------------------
+# GET /form/history/{sku_old} — historical-catalog lookup (todo #1054)
+# ---------------------------------------------------------------------------
+
+_historical_index_by_sku_old: Optional[Dict[str, Dict[str, Any]]] = None
+
+
+def _load_historical_index_by_sku_old() -> Dict[str, Dict[str, Any]]:
+    """Build (and cache for process lifetime) sku_old -> historical record,
+    merging historical-tgwcatalog.json and historical-master-catalog.json.
+    Both files carry their own sku_old field that matches current items'
+    sku_old exactly (confirmed live) — no case-normalization guessing needed.
+    Static snapshot files; never auto-refreshes, matching the category-tree
+    cache's own no-auto-expiry convention."""
+    global _historical_index_by_sku_old
+    if _historical_index_by_sku_old is not None:
+        return _historical_index_by_sku_old
+
+    catalog_root = Path(_cfg.get("catalog_root", "/opt/TGW/data/ItemCatalog"))
+    index: Dict[str, Dict[str, Any]] = {}
+
+    tgwcat_path = catalog_root / "historical-tgwcatalog.json"
+    if tgwcat_path.exists():
+        try:
+            for rec in json.loads(tgwcat_path.read_text(encoding="utf-8")).values():
+                so = rec.get("sku_old")
+                if so:
+                    index.setdefault(so, rec)
+        except (OSError, ValueError) as exc:
+            log.warning("historical-tgwcatalog.json unreadable: %s", exc)
+
+    mastercat_path = catalog_root / "historical-master-catalog.json"
+    if mastercat_path.exists():
+        try:
+            for rec in json.loads(mastercat_path.read_text(encoding="utf-8")):
+                so = rec.get("sku_old")
+                if so:
+                    index.setdefault(so, rec)
+        except (OSError, ValueError) as exc:
+            log.warning("historical-master-catalog.json unreadable: %s", exc)
+
+    _historical_index_by_sku_old = index
+    return index
+
+
+@app.get("/form/history/{sku_old}")
+def history_form(sku_old: str):
+    """Historical-catalog lookup by sku_old — linked from item detail's
+    'SKU (old)' field. Gated by the standard /form/* session-cookie wall
+    (_session_guard middleware) like every other /form/* page."""
+    import html as _html
+
+    rec = _load_historical_index_by_sku_old().get(sku_old)
+    if rec is None:
+        body = (
+            "<h2>History</h2>"
+            f'<p>No historical record found for <code>{_html.escape(sku_old)}</code>.</p>'
+        )
+    else:
+        rows = "".join(
+            f"<tr><td>{_html.escape(str(k))}</td><td>{_html.escape(str(v))}</td></tr>"
+            for k, v in sorted(rec.items()) if v not in (None, "")
+        )
+        body = (
+            f"<h2>History — {_html.escape(sku_old)}</h2>"
+            f'<table class="dtable"><tbody>{rows}</tbody></table>'
+        )
+    page = (
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        "<title>TGW History</title>" + _STATIC_HEAD + "</head><body>"
+        + body + _STATIC_FOOT + "</body></html>"
+    )
+    return HTMLResponse(page)
 
 
 # ---------------------------------------------------------------------------
@@ -2258,18 +3505,13 @@ def _render_suggest_html(msg: str = "", ok: bool = False) -> str:
     return (
         '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        '<title>TGW Suggest</title>'
-        + _STATIC_HEAD
-        + '</head><body>'
-        '<h2>Add Suggestion</h2>'
+        "<title>TGW Suggest</title>" + _STATIC_HEAD + "</head><body>"
+        "<h2>Add Suggestion</h2>"
         '<form method="post" action="/form/suggest">'
-        '<label>Suggestion — any punctuation is safe here</label>'
+        "<label>Suggestion — any punctuation is safe here</label>"
         '<textarea name="text" required autofocus placeholder="idea, task, note ..."></textarea>'
         '<button class="btn" type="submit">Add to SUGGESTIONS.md</button>'
-        '</form>'
-        + banner
-        + _STATIC_FOOT
-        + '</body></html>'
+        "</form>" + banner + _STATIC_FOOT + "</body></html>"
     )
 
 
@@ -2306,6 +3548,7 @@ async def suggest_submit(request: Request):
 # auth, network trust — same policy as /form/suggest and /form/todos).
 # ---------------------------------------------------------------------------
 
+
 @app.post("/api/suggest")
 async def api_suggest(request: Request) -> Dict[str, Any]:
     """Network-trust JSON suggest endpoint used by the nav popup overlay.
@@ -2318,6 +3561,7 @@ async def api_suggest(request: Request) -> Dict[str, Any]:
     if not text:
         raise HTTPException(status_code=400, detail="empty suggestion")
     from .api import cmd_suggest
+
     try:
         result = cmd_suggest(_cfg, text)
     except Exception as exc:
@@ -2354,7 +3598,7 @@ async def api_inbox_upload(file: UploadFile = File(...)) -> Dict[str, Any]:
     if len(content) > _INBOX_MAX_BYTES:
         raise HTTPException(status_code=413, detail="file too large (max 512 KB)")
 
-    ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+    ts = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S")
     dest_name = f"{ts}_{raw_name}"
 
     inbox_dir: Path = _cfg["plan_inbox_path"]
@@ -2372,6 +3616,7 @@ async def api_inbox_upload(file: UploadFile = File(...)) -> Dict[str, Any]:
 # GET /thumb/{sku}           — serve thumbnail  (no auth, for <img src>)
 # ---------------------------------------------------------------------------
 
+
 @app.get("/media/{sku}/{filename}")
 def get_media(sku: str, filename: str):
     """Serve a photo/video from ItemData. No Bearer auth — network trust."""
@@ -2380,9 +3625,7 @@ def get_media(sku: str, filename: str):
     safe = Path(filename).name
     if safe != filename or not safe or safe.startswith("."):
         raise HTTPException(status_code=400, detail="invalid filename")
-    if Path(safe).suffix.lower() not in {
-        ".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".mov", ".mkv", ".webm"
-    }:
+    if Path(safe).suffix.lower() not in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".mov", ".mkv", ".webm"}:
         raise HTTPException(status_code=400, detail="unsupported media type")
     itemdata_root = _cfg["itemdata_root"].resolve()
     p = (itemdata_root / sku / safe).resolve()
@@ -2544,6 +3787,8 @@ _ITEMS_EXTRA_CSS = """
 .act-delete:hover:not(:disabled){background:#3a1a1a}
 .act-warn{background:#2a1a00;color:#fb7;border-color:#5a3a00}
 .act-warn:hover:not(:disabled){background:#3a2a00}
+.act-publish{background:#1a3a1a;color:#8e8;border-color:#2a6a2a}
+.act-publish:hover:not(:disabled){background:#1a4a1a}
 .act-disabled,.act-btn:disabled{opacity:.45;cursor:not-allowed}
 .lbadge{display:inline-block;padding:1px 7px;border-radius:9px;font-size:.7em;
   vertical-align:middle;margin-left:5px;font-weight:600}
@@ -2588,6 +3833,11 @@ _ITEMS_EXTRA_CSS = """
   line-height:1.4;display:none;z-index:2}
 .strip-item:hover .strip-mv{display:block}
 .strip-mv:hover{background:rgba(10,60,130,.85)}
+.dleft{display:flex;flex-direction:column;gap:12px}
+.dleft-log{display:flex;flex-direction:column;gap:12px}
+.gallery{overflow:hidden}
+details.dsec>summary::-webkit-details-marker{display:none}
+details.dsec[open]>summary span:last-child{transform:rotate(90deg)}
 """
 
 _BROWSE_HTML = """\
@@ -2618,6 +3868,7 @@ _BROWSE_HTML = """\
 </div>
 <div class="chips" id="status-chips" style="margin-bottom:10px">
   <button class="chip active" data-s="">All</button>
+  <button class="chip" data-s="__eligible__" title="new / In Stock, not on eBay — ready to list">Eligible</button>
   <button class="chip" data-s="In Stock">In Stock</button>
   <button class="chip" data-s="Listed">Listed</button>
   <button class="chip" data-s="Staged">Staged</button>
@@ -2668,9 +3919,14 @@ function setView(v){{
 }}
 function _ebayBadge(it){{
   const lid=it.ebay_listing_id,oid=it.ebay_offer_id,rat=it.ebay_ready_at;
+  const lst=(it.ebay_listing_status||'').toLowerCase();
   const sold=(it.status||'').toLowerCase()==='sold';
+  // "Listed" means LIVE — an Ended listing keeps its listing_id forever, and
+  // badging it Listed misled the Eligible view (Dave, s42 one-at-a-time test).
+  const live=lid&&(lst==='active'||lst==='published'||lst==='');
   if(sold) return '<span class="eb eb-sold">Sold</span>';
-  if(lid) return `<a class="eb eb-listed" href="https://www.ebay.com/itm/${{esc(lid)}}" target="_blank" onclick="event.stopPropagation()">Listed ↗</a>`;
+  if(live) return `<a class="eb eb-listed" href="https://www.ebay.com/itm/${{esc(lid)}}" target="_blank" onclick="event.stopPropagation()">Listed ↗</a>`;
+  if(lid&&lst==='ended') return `<a class="eb eb-none" href="https://www.ebay.com/itm/${{esc(lid)}}" target="_blank" onclick="event.stopPropagation()">Ended</a>`;
   if(oid&&rat) return '<span class="eb eb-ready">Ready</span>';
   if(oid) return '<span class="eb eb-staged">Staged</span>';
   if(it.has_draft) return '<span class="eb eb-draft">Needs Review</span>';
@@ -2683,17 +3939,20 @@ const _ALL_ACTIONS=[
 ];
 function _cardActions(it){{
   const lid=it.ebay_listing_id,oid=it.ebay_offer_id,rat=it.ebay_ready_at;
+  const lst=(it.ebay_listing_status||'').toLowerCase();
+  const live=lid&&(lst==='active'||lst==='published'||lst==='');
   const sold=(it.status||'').toLowerCase()==='sold';
   const acts=[];
   if(!sold){{
     acts.push(['ai_identify','Re-identify'],['ebay_draft','Re-draft'],['ebay_price','Re-price']);
   }}
-  if(!lid&&!sold){{
+  if(!live&&!sold){{
+    // Ended items get the relist path, not the end-listing path (s42)
     acts.push(['approve','Set Ready']);
     if(it.has_draft||oid) acts.push(['ebay_stage','Stage']);
     acts.push(['ebay_publish','Publish']);
   }}
-  if(lid){{
+  if(live){{
     acts.push(['ebay_end_listing','End on eBay'],['mark_sold','Mark Sold']);
   }}
   if(sold) acts.push(['ai_identify','Re-identify'],['ebay_draft','Re-draft']);
@@ -2876,6 +4135,67 @@ load(0);
 """
 
 
+_GENERIC_CONDITION_FALLBACK: List[Tuple[str, str]] = [
+    ("NEW", "New"),
+    ("LIKE_NEW", "Like New"),
+    ("EXCELLENT_REFURBISHED", "Excellent – Refurbished"),
+    ("VERY_GOOD_REFURBISHED", "Very Good – Refurbished"),
+    ("GOOD_REFURBISHED", "Good – Refurbished"),
+    ("USED_EXCELLENT", "Used – Excellent"),
+    ("USED_VERY_GOOD", "Used – Very Good"),
+    ("USED_GOOD", "Used – Good"),
+    ("USED_ACCEPTABLE", "Used – Acceptable"),
+    ("FOR_PARTS_OR_NOT_WORKING", "For Parts / Not Working"),
+]
+
+
+def _build_condition_options(current_enum: str, category_id: str = "") -> str:
+    """Return <option> tags for eBay condition enum dropdown.
+
+    Sourced from the item's real per-category eBay condition policy (Metadata API
+    get_item_condition_policies, cached in tgw.apis.ebay.conditions) — eBay groups
+    all categories into ~26 condition sets and most categories allow only 1-2 of
+    the 10 generic Inventory API condition enums, not all of them. Previously this
+    always rendered the full generic list regardless of category, which both
+    over-offered choices eBay would reject at publish time and under-labeled the
+    ones it does allow (e.g. conditionId 3000 is simply "Used" for many categories,
+    not "Used – Excellent/Good/Acceptable" as separate grades).
+
+    Falls back to the generic list only when no cached policy exists for this
+    category (e.g. not yet in the Metadata API cache).
+    """
+    conds: List[Tuple[str, str]] = []
+    if category_id:
+        try:
+            from .apis.ebay.conditions import allowed_conditions_for_category
+
+            seen: set = set()
+            for c in allowed_conditions_for_category(_cfg, category_id):
+                pair = (c["condition_enum"], c["condition_label"])
+                if pair[0] not in seen:
+                    conds.append(pair)
+                    seen.add(pair[0])
+        except Exception as exc:
+            log.warning("condition options: policy lookup failed for category %s: %s", category_id, exc)
+
+    if not conds:
+        conds = list(_GENERIC_CONDITION_FALLBACK)
+
+    # If the currently-saved enum isn't in the allowed set (e.g. a stale value from
+    # before this fix, or the category changed since it was set), surface it anyway
+    # so the operator sees and corrects it rather than have it silently vanish.
+    if current_enum and current_enum not in {v for v, _ in conds}:
+        conds = [(current_enum, f"{current_enum} — not valid for this category, please fix")] + conds
+
+    opts = []
+    if not current_enum:
+        opts.append('<option value="" selected disabled>— select —</option>')
+    for val, lbl in conds:
+        sel = " selected" if val == current_enum else ""
+        opts.append(f'<option value="{val}"{sel}>{lbl}</option>')
+    return "".join(opts)
+
+
 def _render_item_detail_html(
     sku: str,
     item: Dict[str, Any],
@@ -2897,19 +4217,8 @@ def _render_item_detail_html(
         if editable and key:
             raw = item.get(key)
             raw_str = h(str(raw)) if raw is not None else ""
-            return (
-                f'<div class="frow">'
-                f'<span class="fn">{label}</span>'
-                f'<span class="fv editable" data-field="{h(key)}" data-raw="{raw_str}"'
-                f' title="Double-click to edit">{display}</span>'
-                f"</div>"
-            )
-        return (
-            f'<div class="frow">'
-            f'<span class="fn">{label}</span>'
-            f'<span class="fv">{display}</span>'
-            f"</div>"
-        )
+            return f'<div class="frow"><span class="fn">{label}</span><span class="fv editable" data-field="{h(key)}" data-raw="{raw_str}" title="Double-click to edit">{display}</span></div>'
+        return f'<div class="frow"><span class="fn">{label}</span><span class="fv">{display}</span></div>'
 
     # Gallery
     if images:
@@ -2918,14 +4227,9 @@ def _render_item_detail_html(
         for i, img in enumerate(images):
             mv_buttons = ""
             if i > 1:
-                mv_buttons += (
-                    f'<button class="strip-mv" onclick="mvFront({i})" title="Move to front">⇑</button>'
-                )
+                mv_buttons += f'<button class="strip-mv" onclick="mvFront({i})" title="Move to front">⇑</button>'
             if i > 0:
-                mv_buttons += (
-                    f'<button class="strip-mv" style="top:{"1px" if i <= 1 else "22px"}" '
-                    f'onclick="mvPhoto({i})" title="Move earlier">↑</button>'
-                )
+                mv_buttons += f'<button class="strip-mv" style="top:{"1px" if i <= 1 else "22px"}" onclick="mvPhoto({i})" title="Move earlier">↑</button>'
             strip_items.append(
                 f'<div class="strip-item">'
                 f'<img src="/media/{h(sku)}/{h(img)}" class="{"active" if i == 0 else ""}"'
@@ -2939,8 +4243,8 @@ def _render_item_detail_html(
             f'<div class="gallery">'
             f'<div class="lb-overlay" id="lb" onclick="lbClose()">'
             f'<button class="lb-close" onclick="lbClose();event.stopPropagation()">✕</button>'
-            f'<img class="lb-img" id="lb-img" src="" alt="">'
-            f'</div>'
+            f'<img class="lb-img" id="lb-img" src="data:," alt="">'
+            f"</div>"
             f'<img class="main-photo" id="mp" src="{main_src}" alt="" onclick="lbOpen(this.src)">'
             f'<div class="strip" id="photo-strip">{strip}</div>'
             f"</div>"
@@ -2992,29 +4296,22 @@ def _render_item_detail_html(
             f"}}"
             f"</script>"
         )
+        gallery_html += "<script>" + _LENS_CTX_MENU_JS + "</script>"
     else:
         gallery_html = '<div style="color:#555;padding:30px;text-align:center">No photos</div>'
 
     # Video strip
     if videos:
         video_items = "".join(
-            f'<div class="strip-item video-item">'
-            f'<video src="/media/{h(sku)}/{h(vid)}" class="strip-vid"'
-            f' onclick="window.open(this.src,\'_blank\')" preload="none"></video>'
-            f'</div>'
-            for vid in videos
+            f'<div class="strip-item video-item"><video src="/media/{h(sku)}/{h(vid)}" class="strip-vid" onclick="window.open(this.src,\'_blank\')" preload="none"></video></div>' for vid in videos
         )
-        video_strip = (
-            f'<div class="video-strip">'
-            f'<div class="video-strip-hdr">VIDEO</div>'
-            f'<div class="strip">{video_items}</div>'
-            f'</div>'
-        )
+        video_strip = f'<div class="video-strip"><div class="video-strip-hdr">VIDEO</div><div class="strip">{video_items}</div></div>'
         gallery_html += video_strip
 
     # eBay sub-docs
     eb = item.get("ebay_listing") or {}
     eo = item.get("ebay_offer") or {}
+    _ebay_live_raw = item.get("ebay_live") or {}
     dl = item.get("draft_listing") or {}
 
     listing_id = eb.get("listing_id") or item.get("listing_id", "")
@@ -3023,7 +4320,8 @@ def _render_item_detail_html(
     offer_status = (eo.get("status") or "").strip()
     offer_price = eo.get("price")
     is_active = listing_status.lower() in ("active",) or offer_status.upper() in ("PUBLISHED",)
-    is_staged = offer_status.upper() in ("UNPUBLISHED", "PUBLISHED")
+    _is_staged = offer_status.upper() in ("UNPUBLISHED", "PUBLISHED")
+    is_ready = bool(eo.get("ready_at")) and offer_status.upper() == "UNPUBLISHED"
 
     # Resolved display price (offer > internal > draft)
     _price_val = offer_price if offer_price is not None else item.get("price")
@@ -3037,27 +4335,15 @@ def _render_item_detail_html(
     # eBay listing section HTML
     ebay_link_parts: List[str] = []
     if listing_url:
-        ebay_link_parts.append(
-            f'<a class="ebay-btn ebay-btn-primary" href="{h(listing_url)}"'
-            f' target="_blank" rel="noopener noreferrer">View on eBay ↗</a>'
-        )
+        ebay_link_parts.append(f'<a class="ebay-btn ebay-btn-primary" href="{h(listing_url)}" target="_blank" rel="noopener noreferrer">View on eBay ↗</a>')
     if listing_id:
         sh_url = f"https://www.ebay.com/sh/lst/active?keyword={h(listing_id)}"
-        ebay_link_parts.append(
-            f'<a class="ebay-btn ebay-btn-sec" href="{sh_url}"'
-            f' target="_blank" rel="noopener noreferrer">Seller Hub ↗</a>'
-        )
+        ebay_link_parts.append(f'<a class="ebay-btn ebay-btn-sec" href="{sh_url}" target="_blank" rel="noopener noreferrer">Seller Hub ↗</a>')
     if is_active:
-        ebay_link_parts.append(
-            '<a class="ebay-btn ebay-btn-sec" href="https://messages.ebay.com/"'
-            ' target="_blank" rel="noopener noreferrer">eBay Messages ↗</a>'
-        )
+        ebay_link_parts.append('<a class="ebay-btn ebay-btn-sec" href="https://messages.ebay.com/" target="_blank" rel="noopener noreferrer">eBay Messages ↗</a>')
     if listing_id:
         ebay_link_parts.append('<span id="offer-badge-wrap"></span>')
-    ebay_links_html = (
-        f'<div class="ebay-links">{"".join(ebay_link_parts)}</div>'
-        if ebay_link_parts else ""
-    )
+    ebay_links_html = f'<div class="ebay-links">{"".join(ebay_link_parts)}</div>' if ebay_link_parts else ""
 
     # eBay listing confirmed data
     def _safe_price(v: Any) -> str:
@@ -3076,32 +4362,22 @@ def _render_item_detail_html(
             except (TypeError, ValueError):
                 _diverged = False
             if _diverged:
-                _lp_str += (
-                    f' <span style="color:#f99;font-size:.79em">⚠ differs from offer'
-                    f' ({_safe_price(offer_price)})</span>'
-                )
+                _lp_str += f' <span style="color:#f99;font-size:.79em">⚠ differs from offer ({_safe_price(offer_price)})</span>'
         _live_price_html = fr("Live Price (eBay)", _lp_str)
     listing_section = (
         fr("Listing ID", h(listing_id) if listing_id else "")
         + fr("eBay Status", h(listing_status) if listing_status else "")
-        + fr("Published", h(str(eb.get("published_at", "") or "")[:19]))
+        + fr("Published", h(_local_ts(eb.get("published_at"))))
         + fr("API", h(str(eb.get("api", "") or "")))
         + _live_price_html
         + ebay_links_html
     )
 
-    # eBay offer data (what we submitted)
-    def _fmt_price(v: Any) -> str:
-        try:
-            return f"${float(v):.2f}" if v is not None else "—"
-        except (ValueError, TypeError):
-            return "—"
-
     # Pricing history expandable section (todo 877)
     _comps = eo.get("price_comps") or {} if eo else {}
     _price_source = eo.get("price_source", "") if eo else ""
     _target_price = eo.get("target_price") if eo else None
-    _priced_at = (eo.get("priced_at") or "")[:19] if eo else ""
+    _priced_at = _local_ts(eo.get("priced_at")) if eo else ""
     _category_group_name = item.get("category_group", "")
     # category-group floor/typical from config (via item fields populated by ebay_price)
     _floor = None
@@ -3113,19 +4389,16 @@ def _render_item_detail_html(
     except Exception:
         pass
     _ph_rows = ""
+
     def _cfmt(v: Any) -> str:
         try:
             return f"${float(v):.2f}"
         except (TypeError, ValueError):
             return "—"
-    if _comps.get("count"):
-        _ph_rows += (
-            f'<div class="frow"><span class="fn">Comp count</span><span class="fv">{h(str(_comps.get("count","—")))}</span></div>'
-            f'<div class="frow"><span class="fn">Range</span><span class="fv">{_cfmt(_comps.get("min"))} – {_cfmt(_comps.get("max"))}</span></div>'
-            f'<div class="frow"><span class="fn">p25 / median / p75</span><span class="fv">'
-            f'{_cfmt(_comps.get("p25"))} / {_cfmt(_comps.get("median"))} / {_cfmt(_comps.get("p75"))}'
-            f'</span></div>'
-        )
+
+    # PP-ACTIONCONSOLE-001: comp stats/listings dropped from here — they were
+    # redundant with the comps range-bar panel next to the price field in the
+    # editor, which is the single place comps appear now.
     if _floor is not None:
         _ph_rows += f'<div class="frow"><span class="fn">Category floor</span><span class="fv">${float(_floor):.2f}</span></div>'
     if _typical is not None:
@@ -3136,70 +4409,30 @@ def _render_item_detail_html(
         _ph_rows += f'<div class="frow"><span class="fn">Price source</span><span class="fv">{h(_price_source)}</span></div>'
     if _priced_at:
         _ph_rows += f'<div class="frow"><span class="fn">Priced at</span><span class="fv">{h(_priced_at)}</span></div>'
-    # Comp items table — individual Browse API listings used to compute stats
-    _comp_items = _comps.get("items") or []
-    if _comp_items:
-        _ci_rows = ""
-        for _ci in _comp_items:
-            _ci_price = f"${float(_ci.get('price', 0)):.2f}"
-            _ci_cond  = h(str(_ci.get("condition") or ""))
-            _ci_title = h(str(_ci.get("title") or "")[:70])
-            _ci_url   = _ci.get("url") or ""
-            _ci_title_cell = (
-                f'<a href="{h(_ci_url)}" target="_blank" rel="noopener noreferrer"'
-                f' style="color:#7af;text-decoration:none">{_ci_title}</a>'
-                if _ci_url else _ci_title
-            )
-            _ci_rows += (
-                f"<tr>"
-                f'<td style="color:#bfb;font-size:.8em">{h(_ci_price)}</td>'
-                f'<td style="color:#aaa;font-size:.78em">{_ci_cond}</td>'
-                f'<td style="color:#ccc;font-size:.78em">{_ci_title_cell}</td>'
-                f"</tr>"
-            )
-        _ph_rows += (
-            f'<details style="margin-top:6px">'
-            f'<summary style="cursor:pointer;color:#4a8ade;font-size:.79em;list-style:none">'
-            f'&#9654; {len(_comp_items)} comp listings used</summary>'
-            f'<table style="width:100%;border-collapse:collapse;margin-top:4px">'
-            f'<tr><th style="text-align:left;font-size:.75em;color:#666;padding:2px 6px">Price</th>'
-            f'<th style="text-align:left;font-size:.75em;color:#666;padding:2px 6px">Condition</th>'
-            f'<th style="text-align:left;font-size:.75em;color:#666;padding:2px 6px">Title</th></tr>'
-            f'{_ci_rows}'
-            f'</table>'
-            f'</details>'
-        )
-    _ph_content = _ph_rows if _ph_rows else '<span style="color:#555;font-size:.82em">No pricing data yet</span>'
-    _pricing_history_html = (
-        f'<details open style="margin-top:4px">'
-        f'<summary style="cursor:pointer;color:#4a8ade;font-size:.82em;list-style:none">▶ Pricing History</summary>'
-        f'<div style="margin-top:6px;padding:6px;background:#111;border:1px solid #222;border-radius:4px">'
-        f'{_ph_content}'
-        f'</div>'
-        f'</details>'
-    ) if eo else ""
+    # (comp listings table removed — see comps range-bar panel in the editor;
+    # _ph_rows carries pricing context rows into the left-column Price History)
 
     offer_section = (
-        fr("Offer ID", h(str(eo.get("offer_id", "") or "")))
-        + fr("Offer Status", h(offer_status) if offer_status else "")
-        + fr("Offer Price", _fmt_price(offer_price))
-        + fr("eBay Category", h(str(eo.get("category_id", "") or "")))
-        + fr("Quantity", h(str(eo.get("quantity", "") or "")))
-        + fr("Published At", h(str(eo.get("published_at", "") or "")[:19]))
-        + _pricing_history_html
-        + fr("Staged At", h(str(eo.get("staged_at", "") or "")[:19]))
-    ) if eo else '<div class="frow"><span class="fv" style="color:#555">No offer yet</span></div>'
+        (
+            fr("Offer ID", h(str(eo.get("offer_id", "") or "")))
+            + fr("Offer Status", h(offer_status) if offer_status else "")
+            + fr("Offer Price", _safe_price(offer_price))
+            + fr("eBay Category", h(str(eo.get("category_id", "") or "")))
+            + fr("Quantity", h(str(eo.get("quantity", "") or "")))
+            + fr("Published At", h(_local_ts(eo.get("published_at"))))
+            + fr("Staged At", h(_local_ts(eo.get("staged_at"))))
+        )
+        if eo
+        else '<div class="frow"><span class="fv" style="color:#555">No offer yet</span></div>'
+    )
 
     # Draft listing data (what we prepared for eBay)
     if dl:
         _dl_raw_price = dl.get("price")
         if _dl_raw_price is None and offer_price is not None:
-            dl_price_str = (
-                _fmt_price(offer_price)
-                + ' <span style="color:#888;font-size:.78em">(from offer)</span>'
-            )
+            dl_price_str = _safe_price(offer_price) + ' <span style="color:#888;font-size:.78em">(from offer)</span>'
         else:
-            dl_price_str = _fmt_price(_dl_raw_price)
+            dl_price_str = _safe_price(_dl_raw_price)
         q = dl.get("quality") or {}
         q_score = q.get("score", "—")
         q_flags = ", ".join(q.get("flags", [])) or "—"
@@ -3213,34 +4446,24 @@ def _render_item_detail_html(
         # Build item_specifics table
         _specifics = dl.get("item_specifics") or {}
         if _specifics:
-            _spec_rows = "".join(
-                f'<tr><td class="spec-k">{h(k)}</td><td class="spec-v">{h(str(v))}</td></tr>'
-                for k, v in sorted(_specifics.items())
-            )
-            _spec_html = (
-                f'<table class="spec-tbl">'
-                f'<tr><th>Aspect</th><th>Value</th></tr>'
-                f'{_spec_rows}</table>'
-            )
+            _spec_rows = "".join(f'<tr><td class="spec-k">{h(k)}</td><td class="spec-v">{h(str(v))}</td></tr>' for k, v in sorted(_specifics.items()))
+            _spec_html = f'<table class="spec-tbl"><tr><th>Aspect</th><th>Value</th></tr>{_spec_rows}</table>'
         else:
             _spec_html = '<span style="color:#555">None filled</span>'
-        _spec_note = (
-            f' <span style="color:#888;font-size:.75em">({req_fill}/{req_total} req, {rec_fill}/{rec_total} rec)</span>'
-        )
+        _spec_note = f' <span style="color:#888;font-size:.75em">({req_fill}/{req_total} req, {rec_fill}/{rec_total} rec)</span>'
         # Listing description preview — strip the hidden picklist line before display
         import re as _re
+
         _ld_raw = str(dl.get("listing_description") or dl.get("description") or "")
-        _ld_clean = _re.sub(r'<p>[^<]*tgw-pl::[^<]*</p>', '', _ld_raw).strip()
-        _ld_html = (
-            f'<div class="listing-preview">{_ld_clean}</div>'
-            if _ld_clean else '<span style="color:#555">—</span>'
-        )
+        _ld_clean = _re.sub(r"<p>[^<]*tgw-pl::[^<]*</p>", "", _ld_raw).strip()
+        _ld_html = f'<div class="listing-preview">{_ld_clean}</div>' if _ld_clean else '<span style="color:#555">—</span>'
         _offline_warn = (
             '<div style="background:#2a1a00;border:1px solid #664400;border-radius:6px;'
             'padding:6px 10px;margin-bottom:6px;color:#fb7;font-size:.82em">'
-            '⚠ Offline draft — created without live eBay data; aspects and category may be incomplete.'
-            '</div>'
-            if dl.get("offline_draft") else ""
+            "⚠ Offline draft — created without live eBay data; aspects and category may be incomplete."
+            "</div>"
+            if dl.get("offline_draft")
+            else ""
         )
         _cat_conf = dl.get("category_confidence") or ""
         _pl_cat = (item.get("product_lookup") or {}).get("category_name") or ""
@@ -3250,19 +4473,19 @@ def _render_item_detail_html(
             if _pl_cat and _pl_cat != dl.get("category_name", ""):
                 _cat_conf_warn += (
                     f'<div style="margin-top:4px;font-size:.79em;color:#aaa">'
-                    f'AI: {h(str(dl.get("category_id","")))} · {h(str(dl.get("category_name","")))} '
-                    f'vs Lookup: {h(_pl_cat_id)} · {h(_pl_cat)}'
-                    f'</div>'
+                    f"AI: {h(str(dl.get('category_id', '')))} · {h(str(dl.get('category_name', '')))} "
+                    f"vs Lookup: {h(_pl_cat_id)} · {h(_pl_cat)}"
+                    f"</div>"
                 )
         else:
             _cat_conf_warn = ""
-        draft_section = (
+        _draft_section = (
             _offline_warn
             + fr("Draft Title", h(str(dl.get("title", "") or "")))
-            + fr("Category Sent", h(f"{dl.get('category_id','')} · {dl.get('category_name','')}") + _cat_conf_warn)
+            + fr("Category Sent", h(f"{dl.get('category_id', '')} · {dl.get('category_name', '')}") + _cat_conf_warn)
             + (fr("Store Category", h(_dl_store_cat)) if _dl_store_cat else "")
             + (fr("Shipping Policy", h(_dl_ship)) if _dl_ship else "")
-            + fr("Condition Sent", h(f"{dl.get('condition_label','')} ({dl.get('condition_enum','')})"))
+            + fr("Condition Sent", h(f"{dl.get('condition_label', '')} ({dl.get('condition_enum', '')})"))
             + fr("Draft Price", dl_price_str)
             + fr("Quality Score", h(str(q_score)))
             + fr("Quality Flags", h(q_flags))
@@ -3271,10 +4494,10 @@ def _render_item_detail_html(
             + f'<div class="frow listing-desc-row"><span class="fn">Listing Description</span><span class="fv">{_ld_html}</span></div>'
         )
     else:
-        draft_section = '<div class="frow"><span class="fv" style="color:#555">No draft yet — run Re-identify then Re-draft</span></div>'
+        _draft_section = "&"
 
     # Revision draft diff
-    revision_draft_html = ""
+    _revision_draft_html = ""
     revision = item.get("revision_draft")
     if revision:
         delta = revision.get("delta") or {}
@@ -3284,15 +4507,8 @@ def _render_item_detail_html(
         at = h(str(revision.get("at", "")))[:19]
         bhash = h(str(baseline.get("hash", "")))[:12]
         if delta:
-            rev_rows = "".join(
-                f'<tr>'
-                f'<td class="dfield">{h(f)}</td>'
-                f'<td class="dwas">{h(str(snap.get(f, "—")))}</td>'
-                f'<td class="dnow">{h(str(v))}</td>'
-                f"</tr>"
-                for f, v in delta.items()
-            )
-            revision_draft_html = (
+            rev_rows = "".join(f'<tr><td class="dfield">{h(f)}</td><td class="dwas">{h(str(snap.get(f, "—")))}</td><td class="dnow">{h(str(v))}</td></tr>' for f, v in delta.items())
+            _revision_draft_html = (
                 f'<h3 class="diff-hdr">Revision Draft</h3>'
                 f'<div class="diff-meta">by {by} · {at} · baseline {bhash}…</div>'
                 f'<table class="dtable">'
@@ -3308,37 +4524,35 @@ def _render_item_detail_html(
         for j in jobs[:10]:
             state = j.get("state", "")
             sc = "js-" + state.replace("_", "-").lower()
-            ts = (j.get("updated_at") or j.get("finished_at") or j.get("created_at") or "")[:16]
+            ts = _local_ts(j.get("updated_at") or j.get("finished_at") or j.get("created_at"))
             _err_full = str(j.get("error_detail") or "")
             _err_short = _err_full[:80]
             if _err_full:
                 err = (
                     f'<details style="display:inline">'
                     f'<summary style="cursor:pointer;color:#f99;font-size:.8em;list-style:none">'
-                    f'{h(_err_short)}{"…" if len(_err_full) > 80 else ""}</summary>'
+                    f"{h(_err_short)}{'…' if len(_err_full) > 80 else ''}</summary>"
                     f'<pre style="white-space:pre-wrap;word-break:break-all;font-size:.75em;'
                     f'color:#f99;margin:4px 0;padding:4px;background:#1a0a0a;border-radius:4px">'
-                    f'{h(_err_full)}</pre>'
-                    f'</details>'
+                    f"{h(_err_full)}</pre>"
+                    f"</details>"
                 )
             else:
                 err = ""
             qn = j.get("queue_name", "")
             tip = _WORKER_TOOLTIPS.get(qn, "")
             tip_attr = f' title="{h(tip)}"' if tip else ""
-            job_rows += (
-                f"<tr>"
-                f'<td{tip_attr}>{h(qn)}</td>'
-                f'<td class="{sc}">{h(state)}</td>'
-                f'<td style="color:#666;font-size:.8em">{h(ts)}</td>'
-                f'<td style="color:#f99;font-size:.8em">{err}</td>'
-                f"</tr>"
-            )
-        jobs_html = (
-            f'<table class="jtable">'
-            f"<tr><th>Queue</th><th>State</th><th>Updated</th><th>Error</th></tr>"
-            f"{job_rows}</table>"
-        )
+            # PP-ACTIONCONSOLE-001: contextual repair — a Retry button appears
+            # ONLY on actionable failure states (zero buttons in the happy path).
+            _retry_btn = ""
+            if state == "dead_letter" and j.get("job_id"):
+                _retry_btn = (
+                    f' <button class="act-btn" style="font-size:.72em;padding:1px 8px;'
+                    f'background:#2a0d0d;border-color:#a44;color:#e88" '
+                    f"onclick=\"retryJob('{h(str(j['job_id']))}')\">Retry</button>"
+                )
+            job_rows += f'<tr><td{tip_attr}>{h(qn)}</td><td class="{sc}">{h(state)}{_retry_btn}</td><td style="color:#666;font-size:.8em">{h(ts)}</td><td style="color:#f99;font-size:.8em">{err}</td></tr>'
+        jobs_html = f'<table class="jtable"><tr><th>Queue</th><th>State</th><th>Updated</th><th>Error</th></tr>{job_rows}</table>'
 
     title = item.get("title", "")
 
@@ -3358,31 +4572,38 @@ def _render_item_detail_html(
     # Effective qty: top-level → draft_listing.quantity
     _qty_raw = item.get("qty")
     _qty_display = (
-        h(str(_qty_raw)) if _qty_raw is not None
-        else (h(str(dl.get("quantity"))) + ' <span style="color:#555;font-size:.78em">(from draft)</span>'
-              if dl.get("quantity") is not None else '<span style="color:#444">—</span>')
+        h(str(_qty_raw))
+        if _qty_raw is not None
+        else (h(str(dl.get("quantity"))) + ' <span style="color:#555;font-size:.78em">(from draft)</span>' if dl.get("quantity") is not None else '<span style="color:#444">—</span>')
     )
-    # Effective price display with source annotation
+    # Effective price display — draft_listing.price is operator-set, show it first
     _price_raw = item.get("price")
-    if _price_raw is not None:
+    _dl_price_raw = dl.get("price")
+    if _dl_price_raw is not None:
+        try:
+            _price_display = "$" + f"{float(_dl_price_raw):.2f}" + ' <span style="color:#555;font-size:.78em">(draft)</span>'
+        except (ValueError, TypeError):
+            _price_display = h(str(_dl_price_raw))
+    elif _price_raw is not None:
         _price_display = h(price_str)
     elif offer_price is not None:
         _price_display = h(price_str) + ' <span style="color:#555;font-size:.78em">(from eBay offer)</span>'
-    elif dl.get("price") is not None:
-        _price_display = h(price_str) + ' <span style="color:#555;font-size:.78em">(from draft)</span>'
     else:
         _price_display = '<span style="color:#444">—</span>'
 
-    # ── Price history section ──────────────────────────────────────────────────
+    # ── Price history section (single merged pricing display, left column) ────
+    # PP-ACTIONCONSOLE-001: absorbed the old offer-section "Pricing History"
+    # dropdown — price-change events + pricing context in ONE place.
     _ph_events = item.get("price_history") or []
+    _phev_table = ""
     if _ph_events:
         _phev_rows = ""
         for _ev in reversed(_ph_events):
-            _ev_ts    = h(str(_ev.get("ts", ""))[:19])
+            _ev_ts = h(_local_ts(_ev.get("ts")))
             _ev_price = h(f"${float(_ev.get('price', 0)):.2f}")
-            _ev_prev  = h(f"${float(_ev.get('previous_price', 0)):.2f}") if _ev.get("previous_price") is not None else "—"
+            _ev_prev = h(f"${float(_ev.get('previous_price', 0)):.2f}") if _ev.get("previous_price") is not None else "—"
             _ev_label = h(str(_ev.get("label") or _ev.get("stage") or ""))
-            _ev_src   = h(str(_ev.get("source") or ""))
+            _ev_src = h(str(_ev.get("source") or ""))
             _phev_rows += (
                 f"<tr>"
                 f'<td style="color:#888;font-size:.8em">{_ev_ts}</td>'
@@ -3392,15 +4613,22 @@ def _render_item_detail_html(
                 f'<td style="color:#666;font-size:.78em">{_ev_src}</td>'
                 f"</tr>"
             )
-        price_history_html = (
-            f'<div class="dsec">'
-            f'<h3>Price History <span style="font-size:.7em;color:#555;font-weight:normal">{len(_ph_events)} events</span></h3>'
-            f'<div style="font-size:.73em;color:#556;margin-bottom:6px">Every price change recorded — launch through markdowns</div>'
+        _phev_table = (
             f'<table class="jtable">'
-            f'<tr><th>When</th><th>Price</th><th>Previous</th><th>Stage</th><th>Source</th></tr>'
-            f'{_phev_rows}'
-            f'</table>'
-            f'</div>'
+            f"<tr><th>When</th><th>Price</th><th>Previous</th><th>Stage</th><th>Source</th></tr>"
+            f"{_phev_rows}"
+            f"</table>"
+        )
+    if _phev_table or _ph_rows:
+        price_history_html = (
+            '<div class="dsec">'
+            '<h3>Pricing History'
+            + (f' <span style="font-size:.7em;color:#555;font-weight:normal">{len(_ph_events)} events</span>' if _ph_events else "")
+            + "</h3>"
+            '<div style="font-size:.73em;color:#556;margin-bottom:6px">Every price change recorded — launch through markdowns</div>'
+            + _phev_table
+            + (f'<div style="margin-top:6px;border-top:1px solid #222;padding-top:6px">{_ph_rows}</div>' if _ph_rows else "")
+            + "</div>"
         )
     else:
         price_history_html = ""
@@ -3410,11 +4638,11 @@ def _render_item_detail_html(
     if _rps:
         _rps_rows = ""
         for _st in _rps:
-            _st_label  = h(str(_st.get("label") or _st.get("stage") or ""))
-            _st_price  = h(f"${float(_st.get('price', 0)):.2f}") if _st.get("price") is not None else "—"
-            _st_due    = h(str(_st.get("due_at") or "")[:19])
-            _st_done   = h(str(_st.get("done_at") or "")[:19])
-            _done_cls  = 'color:#888' if _st.get("done_at") else 'color:#fb7'
+            _st_label = h(str(_st.get("label") or _st.get("stage") or ""))
+            _st_price = h(f"${float(_st.get('price', 0)):.2f}") if _st.get("price") is not None else "—"
+            _st_due = h(_local_ts(_st.get("due_at")))
+            _st_done = h(_local_ts(_st.get("done_at")))
+            _done_cls = "color:#888" if _st.get("done_at") else "color:#fb7"
             _rps_rows += (
                 f"<tr>"
                 f'<td style="color:#aaa">{_st_label}</td>'
@@ -3428,10 +4656,10 @@ def _render_item_detail_html(
             f'<h3>Reprice Schedule <span style="font-size:.7em;color:#555;font-weight:normal">{len(_rps)} stages</span></h3>'
             f'<div style="font-size:.73em;color:#556;margin-bottom:6px">Automated markdown plan — pending stages fire automatically</div>'
             f'<table class="jtable">'
-            f'<tr><th>Stage</th><th>Price</th><th>Due</th><th>Done</th></tr>'
-            f'{_rps_rows}'
-            f'</table>'
-            f'</div>'
+            f"<tr><th>Stage</th><th>Price</th><th>Due</th><th>Done</th></tr>"
+            f"{_rps_rows}"
+            f"</table>"
+            f"</div>"
         )
     else:
         reprice_schedule_html = ""
@@ -3441,27 +4669,26 @@ def _render_item_detail_html(
     if _pl:
         _pl_rows = ""
         for _k, _v in (
-            ("Brand",   _pl.get("brand")),
-            ("MPN",     _pl.get("mpn")),
-            ("MSRP",    f"${float(_pl['msrp']):.2f}" if _pl.get("msrp") else None),
-            ("Source",  _pl.get("source")),
-            ("Title",   _pl.get("title")),
-            ("UPC",     _pl.get("upc")),
+            ("Brand", _pl.get("brand")),
+            ("MPN", _pl.get("mpn")),
+            ("MSRP", f"${float(_pl['msrp']):.2f}" if _pl.get("msrp") else None),
+            ("Source", _pl.get("source")),
+            ("Title", _pl.get("title")),
+            ("UPC", _pl.get("upc")),
         ):
             if _v:
-                _pl_rows += (
-                    f'<div class="frow">'
-                    f'<span class="fn">{h(_k)}</span>'
-                    f'<span class="fv">{h(str(_v))}</span>'
-                    f'</div>'
-                )
+                _pl_rows += f'<div class="frow"><span class="fn">{h(_k)}</span><span class="fv">{h(str(_v))}</span></div>'
         product_lookup_html = (
-            f'<div class="dsec">'
-            f'<h3>Product Lookup <span style="font-size:.7em;color:#555;font-weight:normal">{h(str(_pl.get("source","")))})</span></h3>'
-            f'<div style="font-size:.73em;color:#556;margin-bottom:6px">Structured product data enriching pricing and aspects</div>'
-            f'{_pl_rows}'
-            f'</div>'
-        ) if _pl_rows else ""
+            (
+                f'<div class="dsec">'
+                f'<h3>Product Lookup <span style="font-size:.7em;color:#555;font-weight:normal">{h(str(_pl.get("source", "")))})</span></h3>'
+                f'<div style="font-size:.73em;color:#556;margin-bottom:6px">Structured product data enriching pricing and aspects</div>'
+                f"{_pl_rows}"
+                f"</div>"
+            )
+            if _pl_rows
+            else ""
+        )
     else:
         product_lookup_html = ""
 
@@ -3470,10 +4697,10 @@ def _render_item_detail_html(
     if _id_hist:
         _idh_rows = ""
         for _ev in reversed(_id_hist[-10:]):  # most recent 10
-            _idh_ts    = h(str(_ev.get("ts", ""))[:19])
+            _idh_ts = h(_local_ts(_ev.get("ts")))
             _idh_event = h(str(_ev.get("event") or ""))
             _idh_title = h(str(_ev.get("title") or ""))
-            _idh_cat   = h(str(_ev.get("category") or ""))
+            _idh_cat = h(str(_ev.get("category") or ""))
             _idh_model = h(str(_ev.get("model") or ""))
             _idh_round = h(str(_ev.get("round") or ""))
             _idh_rows += (
@@ -3487,27 +4714,857 @@ def _render_item_detail_html(
             )
         identification_history_html = (
             f'<div class="dsec">'
-            f'<details>'
+            f"<details>"
             f'<summary style="cursor:pointer;color:#4a8ade;font-weight:600;font-size:.9em">'
             f'Identification History <span style="color:#555;font-weight:normal">({len(_id_hist)} rounds)</span>'
-            f'</summary>'
+            f"</summary>"
             f'<div style="font-size:.73em;color:#556;margin:4px 0 6px">AI identification rounds — title, category, model used</div>'
             f'<table class="jtable">'
-            f'<tr><th>When</th><th>Event</th><th>Title</th><th>Category</th><th>Model</th></tr>'
-            f'{_idh_rows}'
-            f'</table>'
-            f'</details>'
-            f'</div>'
+            f"<tr><th>When</th><th>Event</th><th>Title</th><th>Category</th><th>Model</th></tr>"
+            f"{_idh_rows}"
+            f"</table>"
+            f"</details>"
+            f"</div>"
         )
     else:
         identification_history_html = ""
 
+    # ── Phase 1A: EPS photo strip ─────────────────────────────────────────────
+    _inv_item = _ebay_live_raw.get("inventory_item") or {}
+    _eps_urls = (_inv_item.get("product") or {}).get("imageUrls") or (dl or {}).get("imageUrls") or []
+    _local_eps = [e.get("url") for e in (item.get("ebay_photos") or []) if e.get("url")]
+    _display_eps = _eps_urls or _local_eps
+    if _display_eps:
+        _eps_thumbs = "".join(
+            f'<a href="{h(u)}" target="_blank" rel="noopener noreferrer"><img src="{h(u)}" style="height:80px;width:80px;object-fit:cover;border-radius:4px;border:1px solid #333;cursor:pointer"></a>'
+            for u in _display_eps[:12]
+        )
+        _eps_strip_html = (
+            f'<div id="eps-photos" class="dsec">'
+            f"<h3>Photos on eBay"
+            f' <span style="font-size:.7em;color:#555;font-weight:normal">'
+            f"EPS hosted · {len(_display_eps)} photo(s)</span></h3>"
+            f'<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">'
+            f"{_eps_thumbs}</div>"
+            f"</div>"
+        )
+    else:
+        _eps_strip_html = '<div id="eps-photos" class="dsec"><div style="color:#555;font-size:.85em">No photos on eBay yet — run ebay_upload to upload photos to EPS</div></div>'
+
+    # ── Phase 1A: eBay live collapsible panel ──────────────────────────────────
+    _el_synced = eb.get("synced_at") or ""
+    if _ebay_live_raw:
+        _el_prod = _inv_item.get("product") or {}
+        _el_title = _el_prod.get("title") or "—"
+        _el_aspects = _el_prod.get("aspects") or {}
+        _el_offer = _ebay_live_raw.get("offer") or {}
+        _el_price_v = (_el_offer.get("pricingSummary") or {}).get("price") or {}
+        _el_price_str = f"${float(_el_price_v['value']):.2f}" if _el_price_v.get("value") else "—"
+        _el_asp_rows = (
+            "".join(
+                f'<tr><td style="color:#8af;font-size:.8em;padding:2px 8px 2px 0">{h(k)}</td><td style="color:#ccc;font-size:.8em">{h(", ".join(v) if isinstance(v, list) else str(v))}</td></tr>'
+                for k, v in sorted(_el_aspects.items())
+            )
+            if _el_aspects
+            else ('<tr><td colspan="2" style="color:#555;font-size:.8em">none</td></tr>')
+        )
+        _sync_lbl = f'<span style="font-size:.73em;color:#556;font-weight:normal;margin-left:6px">synced {h(_el_synced[:19])}</span>' if _el_synced else ""
+        _ebay_live_html = (
+            '<div class="dsec"><details open>'
+            f'<summary style="cursor:pointer;color:#4a8ade;font-weight:600;font-size:.9em">'
+            f"eBay Live Data{_sync_lbl}</summary>"
+            '<div style="font-size:.73em;color:#556;margin:4px 0 6px">'
+            "Raw eBay mirror — what eBay currently holds. Not edited here.</div>"
+            + fr("Live title", h(_el_title))
+            + fr("Live price", _el_price_str)
+            + fr("Category", h(str(_el_offer.get("categoryId") or "—")))
+            + '<div style="margin-top:6px;font-size:.8em;color:#778">Aspects on eBay:</div>'
+            + f'<table style="margin-top:4px">{_el_asp_rows}</table>'
+            + "</details></div>"
+        )
+    else:
+        _ebay_live_html = ""
+
+    # ── Readiness checklist ────────────────────────────────────────────────────
+    _item_for_readiness = dict(item)
+    _item_for_readiness["_catalog_root"] = _cfg.get("catalog_root")
+    _readiness_html_str = readiness_html(check_ebay(_item_for_readiness))
+
+    # ── Price comps range bar + detail panel ────────────────────────────────────
+    _st_val = h(str(item.get("search_terms") or ""))
+    _comps = eo.get("price_comps") or {}
+    _price_source = eo.get("price_source") or ""
+    _priced_at = (eo.get("priced_at") or "")[:10]
+    if _comps and _comps.get("max") and _comps.get("min") is not None:
+        try:
+            _cp_min = float(_comps.get("min", 0))
+            _cp_p25 = float(_comps.get("p25", 0))
+            _cp_med = float(_comps.get("median", 0))
+            _cp_p75 = float(_comps.get("p75", 0))
+            _cp_max = float(_comps.get("max", 0))
+            _cp_cnt = int(_comps.get("count", 0))
+            _cp_rng = max(_cp_max - _cp_min, 0.01)
+
+            def _pct(v):
+                return max(0, min(100, int((v - _cp_min) / _cp_rng * 100)))
+
+            # Confidence badge
+            _conf = _comps.get("confidence") or eo.get("price_confidence") or ""
+            _n_out = _comps.get("outlier_count", 0)
+            _n_drop = _comps.get("llm_dropped_count", 0)
+            _conf_col = {"high": "#4a4", "medium": "#aa0", "low": "#c44"}.get(_conf, "#556")
+            _conf_badge = (
+                (
+                    f'<span style="font-size:.72em;font-weight:600;margin-left:6px;'
+                    f"padding:1px 5px;border-radius:3px;background:{_conf_col}22;"
+                    f'color:{_conf_col};border:1px solid {_conf_col}44">{_conf}</span>'
+                )
+                if _conf
+                else ""
+            )
+            # Count badge: red <5, yellow 5-9, grey ≥10
+            _cnt_col = "#c44" if _cp_cnt < 5 else ("#aa0" if _cp_cnt < 10 else "#556")
+            _cnt_badge = (
+                f'<span style="font-size:.75em;color:{_cnt_col};'
+                f'font-weight:600;margin-left:4px">{_cp_cnt} comps'
+                + (" ⚠" if _cp_cnt < 5 else "")
+                + (_conf_badge)
+                + (f' <span style="font-size:.85em;color:#556">({_n_out} outlier{"s" if _n_out != 1 else ""} removed)</span>' if _n_out else "")
+                + (f' <span style="font-size:.85em;color:#556">({_n_drop} irrelevant filtered)</span>' if _n_drop else "")
+                + "</span>"
+            )
+            # Source label
+            _src_lbl = (f'<span style="font-size:.72em;color:#445;margin-left:8px">{h(_price_source)}' + (f" · {_priced_at}" if _priced_at else "") + "</span>") if _price_source else ""
+            # Range bar
+            _bar = (
+                f'<div style="position:relative;height:14px;background:#1a1a1a;'
+                f'border-radius:3px;border:1px solid #333;margin-bottom:3px">'
+                f'<div style="position:absolute;left:{_pct(_cp_p25)}%;'
+                f'right:{100 - _pct(_cp_p75)}%;height:100%;background:#1a3a1a;border-radius:2px"></div>'
+                f'<div style="position:absolute;left:{_pct(_cp_med)}%;width:2px;'
+                f'height:100%;background:#4a4"></div>'
+                f"</div>"
+                f'<div style="display:flex;justify-content:space-between;font-size:.73em;color:#556">'
+                f"<span>min ${_cp_min:.2f}</span>"
+                f'<span style="color:#7a7">p25 ${_cp_p25:.2f}</span>'
+                f'<span style="color:#afa">▲ med ${_cp_med:.2f}</span>'
+                f'<span style="color:#7a7">p75 ${_cp_p75:.2f}</span>'
+                f"<span>max ${_cp_max:.2f}</span>"
+                f"</div>"
+            )
+            # Individual comp rows
+            _comp_items = _comps.get("items") or []
+            if _comp_items:
+
+                def _ci_row(ci):
+                    _is_out = ci.get("outlier", False)
+                    _is_drop = ci.get("llm_dropped", False)
+                    _excluded = _is_out or _is_drop
+                    _row_op = "0.45" if _excluded else "1"
+                    _title_dec = "line-through" if _excluded else "none"
+                    _tag = ""
+                    if _is_out:
+                        _tag = '<span style="font-size:.72em;color:#c44;margin-left:4px" title="Price is statistical outlier (IQR)">outlier</span>'
+                    elif _is_drop:
+                        _reason = h(ci.get("llm_reason", ""))
+                        _tag = f'<span style="font-size:.72em;color:#aa0;margin-left:4px" title="{_reason}">filtered ⓘ</span>'
+                    _raw_url = ci.get("url", "") or ""
+                    _url = h(_raw_url + ("&mkcid=1&mkrid=711-53200-19255-0&siteid=0&campid=5338722076&toolid=10001&mkevt=1" if _raw_url else ""))
+                    _url_js = _raw_url.replace("'", "\\'")
+                    _rm_btn = (
+                        f"<button onclick=\"removeComp('{_url_js}')\" "
+                        f'title="Remove this comp from pricing data" '
+                        f'style="background:none;border:none;color:#c44;cursor:pointer;'
+                        f'font-size:.9em;padding:0 4px;line-height:1;opacity:.7" '
+                        f">✕</button>"
+                    )
+                    return (
+                        f'<tr style="border-bottom:1px solid #1a1a1a;opacity:{_row_op}">'
+                        f'<td style="padding:4px 8px 4px 0;font-size:.8em;color:#ccc;max-width:300px;word-break:break-word">'
+                        f"{_rm_btn}"
+                        f'<a href="{_url}" target="_blank" rel="noopener noreferrer" '
+                        f'style="color:#7af;text-decoration:{_title_dec}">'
+                        f"{h(ci.get('title', ''))[:80]}{'…' if len(ci.get('title', '')) > 80 else ''}</a>"
+                        f"{_tag}</td>"
+                        f'<td style="padding:4px 6px;font-size:.8em;color:#7a7;white-space:nowrap">'
+                        f"{h(str(ci.get('condition', ''))[:30])}</td>"
+                        f'<td style="padding:4px 0 4px 6px;font-size:.85em;color:#afa;white-space:nowrap;'
+                        f'font-weight:600">${ci.get("price", 0):.2f}</td>'
+                        f"</tr>"
+                    )
+
+                _comp_rows = "".join(_ci_row(ci) for ci in _comp_items)
+                _n_active = sum(1 for ci in _comp_items if not ci.get("outlier") and not ci.get("llm_dropped"))
+                _comp_detail = (
+                    f'<details style="margin-top:6px">'
+                    f'<summary style="cursor:pointer;font-size:.78em;color:#4a8ade;'
+                    f'list-style:none;user-select:none">▶ Show {len(_comp_items)} comp listings ({_n_active} used for price)</summary>'
+                    f'<table style="width:100%;border-collapse:collapse;margin-top:6px">'
+                    f"<thead><tr>"
+                    f'<th style="font-size:.73em;color:#556;text-align:left;padding:2px 8px 4px 0;'
+                    f'border-bottom:1px solid #333">Title</th>'
+                    f'<th style="font-size:.73em;color:#556;text-align:left;padding:2px 6px;'
+                    f'border-bottom:1px solid #333">Condition</th>'
+                    f'<th style="font-size:.73em;color:#556;text-align:left;padding:2px 0 4px 6px;'
+                    f'border-bottom:1px solid #333">Price</th>'
+                    f"</tr></thead>"
+                    f"<tbody>{_comp_rows}</tbody>"
+                    f"</table>"
+                    f"<script>"
+                    f"function removeComp(url){{"
+                    f'  if(!confirm("Remove this comp from pricing data?"))return;'
+                    f'  fetch("/api/items/{sku}/remove-comp",{{method:"POST",'
+                    f'    headers:{{"Content-Type":"application/json","Authorization":"Bearer "+window._apiKey}},'
+                    f"    body:JSON.stringify({{url:url}})}}"
+                    f'  ).then(r=>r.json()).then(d=>{{if(d.ok)location.reload();else alert("Error: "+JSON.stringify(d));}});'
+                    f"}}"
+                    f"</script>"
+                    f"</details>"
+                )
+            else:
+                _comp_detail = '<div style="font-size:.75em;color:#445;margin-top:4px">Individual comp listings not saved — click Re-price to capture them.</div>'
+            _price_comps_bar = '<div style="margin:6px 0 2px"><span style="font-size:.78em;color:#778">Market comps</span>' + _cnt_badge + _src_lbl + "</div>" + _bar + _comp_detail
+        except (TypeError, ValueError):
+            _price_comps_bar = ""
+    else:
+        _price_comps_bar = ""
+
+    # ── Three-layer aspect data: live (eBay) / proposed (pipeline) / edits (operator) ──
+    import json as _json
+
+    _ia = item.get("item_attributes") or {}  # operator edits — highest priority
+    _spec = (dl or {}).get("item_specifics") or {}  # live on eBay — baseline
+    _rev = item.get("revision_draft") or {}
+    _rev_delta = _rev.get("delta") or {}
+    _proposed_aspects = _rev_delta.get("item_specifics") or {}
+    _has_proposals = bool(_rev_delta)
+
+    _cat_id_for_aspects = str((dl or {}).get("category_id") or item.get("ebay_category_id") or "")
+    _aspects_prefill_json = _json.dumps(_ia)  # operator edits only
+    _live_aspects_json = _json.dumps(_spec)  # live eBay values
+    _proposed_aspects_json = _json.dumps(_proposed_aspects)  # pipeline proposals
+    _aspects_cat_json = _json.dumps(_cat_id_for_aspects)
+    _proposals_meta_json = _json.dumps(
+        {
+            "title": _rev_delta.get("title") or "",
+            "description": _rev_delta.get("description") or "",
+            "by": _rev.get("by") or "pipeline",
+            "at": _local_ts(_rev.get("at")),
+            "count": len(_rev_delta),
+        }
+    )
+
+    # ── eBay Draft editor section (Phase 1B) ───────────────────────────────────
+    _dl_title_val = h((dl or {}).get("title") or "")
+    _dl_price_val = str((dl or {}).get("price") or "")
+    _dl_cond_val = h((dl or {}).get("condition_enum") or (dl or {}).get("condition") or "")
+    _dl_cond_lbl = h((dl or {}).get("condition_label") or (dl or {}).get("condition_description") or "")
+    _dl_desc_val = h((dl or {}).get("description") or item.get("description") or "")
+    _dl_cat_name = h(str((dl or {}).get("category_name") or ""))
+    _dl_cat_id_v = h(str((dl or {}).get("category_id") or ""))
+    _dl_ship_val = str((dl or {}).get("shipping_profile") or (dl or {}).get("fulfillment_policy_id") or "")
+    _dl_return_val = str((dl or {}).get("return_policy_id") or "")
+    _dl_store_cat_id = str((dl or {}).get("store_category_id") or "")
+    if not _dl_store_cat_id:
+        _cg_key = item.get("category_group", "")
+        if _cg_key:
+            try:
+                import json as _jsc2
+                _cg2 = _jsc2.loads(Path(_cfg["category_groups_path"]).read_text())
+                _grp2 = _cg2.get("groups", _cg2).get(_cg_key, {})
+                _dl_store_cat_id = str(_grp2.get("store_category_id") or "")
+            except Exception:
+                pass
+    _dl_store_cat2_id = str((dl or {}).get("secondary_store_category_id") or "")
+    _dl_cat2_id_v = h(str((dl or {}).get("secondary_category_id") or ""))
+    _dl_cat2_name = h(str((dl or {}).get("secondary_category_name") or ""))
+    _sc_list: list = []
+    try:
+        import json as _json_sc
+
+        _cg_path_sc = _cfg.get("category_groups_path")
+        if _cg_path_sc and Path(_cg_path_sc).exists():
+            _cg_sc = _json_sc.loads(Path(_cg_path_sc).read_text())
+            _seen_sc: set = set()
+            for _grp_sc in _cg_sc.get("groups", _cg_sc).values():
+                _sn = _grp_sc.get("store_category") or _grp_sc.get("store_category_name") or ""
+                _si = str(_grp_sc.get("store_category_id") or "")
+                if _sn and _si and _si not in _seen_sc:
+                    _seen_sc.add(_si)
+                    _sc_list.append((_sn, _si))
+            _sc_list.sort(key=lambda x: x[0])
+    except Exception:
+        _sc_list = []
+
+    def _store_cat_options_html(selected_id: str) -> str:
+        opts = '<option value="">— not set —</option>'
+        opts += "".join(
+            f'<option value="{_si}" data-name="{h(_sn)}"{" selected" if _si == selected_id else ""}>{h(_sn)} ({_si})</option>'
+            for _sn, _si in _sc_list
+        )
+        return opts
+
+    _store_cat_opts_html = _store_cat_options_html(_dl_store_cat_id)
+    _store_cat2_opts_html = _store_cat_options_html(_dl_store_cat2_id)
+    import json as _json2
+
+    _cat_root = _cfg.get("catalog_root")
+    _pol_cache = (_cat_root / "ebay-fulfillment-policies.json") if _cat_root else None
+    _fulfillment_opts: dict = {}
+    _return_opts: dict = {}
+    if _pol_cache and _pol_cache.exists():
+        try:
+            _pd = _json2.loads(_pol_cache.read_text())
+            _fulfillment_opts = _pd.get("fulfillment", {})
+            _return_opts = _pd.get("return", {})
+            if not _dl_return_val and _return_opts:
+                _dl_return_val = next(iter(_return_opts))
+        except Exception:
+            pass
+    _ship_opts_html = "".join(
+        f'<option value="{pid}"{" selected" if pid == _dl_ship_val else ""}>{h(name)} ({pid[:8]}…)</option>' for pid, name in sorted(_fulfillment_opts.items(), key=lambda kv: kv[1])
+    )
+    # Live fulfillment policy beside the selector (session 42: the selector kept
+    # showing the operator's FC4 while eBay actually had FC8 — the divergence was
+    # invisible). Mirrored home by ebay_sync; red when it disagrees with the draft.
+    _live_ship = str((item.get("ebay_offer") or {}).get("fulfillment_policy_id") or "")
+    if _live_ship:
+        _ls_name = _fulfillment_opts.get(_live_ship) or f"{_live_ship[:10]}…"
+        _ls_mismatch = bool(_dl_ship_val) and _live_ship != _dl_ship_val
+        _live_ship_html = (
+            f'<span style="font-size:.72em;margin-left:8px;'
+            f'color:{"#e88" if _ls_mismatch else "#585"}" '
+            f'title="fulfillment policy currently on the live eBay listing (mirrored by ebay_sync)">'
+            f'live: {h(_ls_name)}{" — differs from draft, Update Listing to apply" if _ls_mismatch else ""}</span>'
+        )
+    else:
+        _live_ship_html = ""
+    _return_opts_html = "".join(
+        f'<option value="{pid}"{" selected" if pid == _dl_return_val else ""}>{h(name)} ({pid[:8]}…)</option>' for pid, name in sorted(_return_opts.items(), key=lambda kv: kv[1])
+    )
+    # Build proposals banner if pipeline has proposed changes
+    # Actions section — context-aware based on eBay status
+    import json as _json
+
+    _ak_json2 = _json.dumps(api_key)
+    _sku_json2 = _json.dumps(sku)
+    _listing_id_json = _json.dumps(listing_id)
+    _is_active_js = "true" if is_active else "false"
+
+    # Pipeline error — two writer schemas exist and both must render:
+    # eBay HTTP rejections write {worker, error, raw, at} (ebay_stage/ebay_publish
+    # 4xx paths); local guard findings write {code, detail, ts, source} (e.g. the
+    # no_price_set C11 finding, written precisely so this page can say what to do).
+    _pe = item.get("pipeline_error")
+    _pe_norm: Optional[Dict[str, Any]] = None
+    if _pe and isinstance(_pe, dict):
+        if _pe.get("error"):
+            _pe_norm = {
+                "heading": f"eBay rejected {_pe.get('worker', '?')}",
+                "detail": _pe["error"],
+                "raw": _pe.get("raw", ""),
+                "at": _pe.get("at"),
+                "code": _pe.get("code"),
+            }
+        elif _pe.get("detail") or _pe.get("code"):
+            _pe_code = _pe.get("code")
+            _pe_norm = {
+                "heading": (f"eBay rejected {_pe.get('source', '?')}"
+                            if _pe_code == "ebay_rejected"
+                            else f"{_pe.get('source', 'pipeline')} stopped: "
+                                 f"{_pe_code or 'error'}"),
+                "detail": _pe.get("detail") or str(_pe_code or ""),
+                "raw": _pe.get("raw", ""),
+                "at": _pe.get("ts"),
+                "code": _pe_code,
+            }
+    if _pe_norm:
+        _pe_when = _local_ts(_pe_norm["at"])
+        _pe_raw_js = _json.dumps(_pe_norm["raw"])
+        _raw_btn = (
+            '<button class="act-btn" style="font-size:.78em;padding:2px 8px" '
+            'onclick="toggleRawError()">Show raw</button>'
+        ) if _pe_norm["raw"] else ""
+        _pipeline_error_html = (
+            f'<div id="pipeline-error-box" style="margin-bottom:12px;padding:10px 14px;'
+            f'background:#1a0505;border:1px solid #844;border-radius:4px;font-size:.82em;color:#e88">'
+            f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">'
+            f"<strong>{h(_pe_norm['heading'])}</strong>"
+            f'<span style="color:#666;font-size:.85em">{_pe_when} UTC</span></div>'
+            f'<div style="color:#f99;margin-bottom:6px">{h(_pe_norm["detail"])}</div>'
+            f'<div style="display:flex;gap:8px;flex-wrap:wrap">'
+            f"{_raw_btn}"
+            f'<button class="act-btn act-warn" style="font-size:.78em;padding:2px 8px" '
+            f'onclick="clearPipelineError()">Clear error</button></div>'
+            f'<pre id="pipeline-error-raw" style="display:none;margin-top:8px;font-size:.75em;'
+            f'color:#a77;white-space:pre-wrap;word-break:break-all;max-height:160px;overflow:auto">'
+            f"</pre></div>"
+            f"<script>var _PE_RAW={_pe_raw_js};</script>"
+        )
+    else:
+        _pipeline_error_html = ""
+
+    _is_published = offer_status.upper() == "PUBLISHED"
+    _is_unpublished_offer = offer_status.upper() == "UNPUBLISHED"
+    _has_draft = bool(dl.get("title"))
+
+    # ── PP-ACTIONCONSOLE-001: state-driven action line ─────────────────────────
+    # One row of state-appropriate actions replaces the pipeline breadcrumb and
+    # the Publish-gate/Pipeline-Tools split. The buttons ARE the indicators:
+    # green = ready, yellow = working/pending, red = error/destructive,
+    # grey = nothing to do. Operator-visible states only — "staged" stays hidden.
+    _is_sold = str(item.get("status") or "").lower() == "sold"
+    _working = any(
+        j.get("state") in ("pending", "running", "claimed", "retry") for j in jobs
+    )
+    # A dead_letter older than the last re-baseline is superseded history:
+    # the manager made draft == offer after that failure (broker B1a), so it
+    # is no longer an actionable state. Newer dead_letters are live failures.
+    _baseline_at = item.get("baseline_at")
+
+    def _after_baseline(j: Dict[str, Any]) -> bool:
+        if not _baseline_at:
+            return True
+        ts = j.get("finished_at") or j.get("updated_at") or j.get("created_at")
+        if not ts:
+            return True
+        try:
+            return datetime.fromisoformat(ts) > datetime.fromisoformat(_baseline_at)
+        except (ValueError, TypeError):
+            return True
+
+    _has_error = bool(_pe_norm) or any(
+        j.get("state") == "dead_letter" and _after_baseline(j) for j in jobs
+    )
+    _needs_price = bool(_pe_norm and _pe_norm.get("code") == "no_price_set")
+    # Draft-vs-live divergence: does the draft differ from what eBay holds?
+    _live_inv = (_ebay_live_raw.get("inventory_item") or {}) if _ebay_live_raw else {}
+    _live_offer_raw = (_ebay_live_raw.get("offer") or {}) if _ebay_live_raw else {}
+    _diverged = False
+    if is_active and _ebay_live_raw:
+        _lp = (_live_offer_raw.get("pricingSummary") or {}).get("price") or {}
+        _live_product = _live_inv.get("product") or {}
+        try:
+            _price_differs = (
+                dl.get("price") is not None
+                and _lp.get("value") is not None
+                and abs(float(dl["price"]) - float(_lp["value"])) > 0.01
+            )
+        except (TypeError, ValueError):
+            _price_differs = False
+        _diverged = (
+            _price_differs
+            or (dl.get("title") and dl["title"] != _live_product.get("title"))
+            or (dl.get("quantity") is not None
+                and _live_offer_raw.get("availableQuantity") is not None
+                and int(dl["quantity"]) != int(_live_offer_raw["availableQuantity"]))
+        )
+
+    def _abtn(label: str, onclick: str, color: str, *, disabled: bool = False,
+              title: str = "", push: bool = False) -> str:
+        colors = {
+            "green":  "background:#0d2a0d;border-color:#4a4;color:#8e8",
+            "yellow": "background:#2a2a0a;border-color:#aa4;color:#cc8",
+            "red":    "background:#2a0d0d;border-color:#a44;color:#e88",
+            "grey":   "background:#1a1a1a;border-color:#333;color:#667",
+            "blue":   "background:#1a2a3a;border-color:#2a4a6a;color:#cce",
+        }
+        dis = " disabled" if disabled else ""
+        push_s = "margin-left:auto;" if push else ""
+        title_a = f' title="{h(title)}"' if title else ""
+        return (
+            f'<button class="act-btn"{dis}{title_a} style="{push_s}{colors[color]}" '
+            f'onclick="{onclick}">{label}</button>'
+        )
+
+    _line: List[str] = []
+    if _is_sold:
+        _line.append(_abtn("Relist", "relistItem()", "green",
+                           title="Stage and publish this item again"))
+    elif _needs_price:
+        # A guard finding with a known fix gets its affordance regardless of
+        # listing state — Retry cannot resolve a missing price, the editor can.
+        _line.append(_abtn(
+            "Set Price",
+            "var p=document.getElementById('dl-price-input');"
+            "if(p){p.scrollIntoView({behavior:'smooth',block:'center'});p.focus();}",
+            "red",
+            title=("Live on eBay, but the draft has no operator-set price — "
+                   "set one, then Update Item to push it live") if is_active
+                  else "The draft has no price — set one, then List on eBay"))
+        if not is_active and _has_draft:
+            _line.append(_abtn("List on eBay", "listOnEbay()", "green",
+                               title="Save draft, run every needed step, and publish"))
+    elif _has_error and not is_active:
+        _line.append(_abtn("Retry", "retryPipeline()", "red",
+                           title="Something failed — retry the failed step"))
+    elif _working:
+        _line.append(_abtn("Working…", "", "yellow", disabled=True,
+                           title="Pipeline is running — refresh to update"))
+    elif is_active:
+        # The live listing is the ground truth — a failed re-run must never
+        # mask it behind a bare Retry (which would only fail the same way).
+        # The error becomes a directed affordance instead.
+        if _pe_norm:
+            # Keyed off the persisted finding (C11), not the job ledger — a
+            # historical dead_letter whose finding was resolved is not a state.
+            _line.append(_abtn(
+                "Needs attention",
+                "var b=document.getElementById('pipeline-error-box');"
+                "if(b)b.scrollIntoView({behavior:'smooth'});",
+                "red",
+                title="Live on eBay, but the last pipeline step failed — see the error box"))
+        elif _has_error:
+            # Dead-letter in the ledger with no persisted finding (worker
+            # crash paths write none) — quieter, but never silent.
+            _line.append(_abtn(
+                "Needs attention",
+                "var j=document.getElementById('jobs-section');"
+                "if(j)j.scrollIntoView({behavior:'smooth'});",
+                "red",
+                title="Live on eBay, but a pipeline job failed — see job history"))
+        if _diverged:
+            _line.append(_abtn("Update Item", "updateItem()", "yellow",
+                               title="Draft has unpushed changes — push to eBay in place"))
+        else:
+            _line.append(_abtn("Update Item", "updateItem()", "grey",
+                               title="Draft matches the live listing"))
+    elif _has_draft:
+        _line.append(_abtn("List on eBay", "listOnEbay()", "green",
+                           title="Save draft, run every needed step, and publish"))
+        if _is_unpublished_offer:
+            _apv_chk = " checked" if is_ready else ""
+            _line.append(
+                f'<label style="display:flex;align-items:center;gap:5px;font-size:.8em;'
+                f'color:#8a8;cursor:pointer;padding:0 6px">'
+                f'<input type="checkbox"{_apv_chk} onchange="toggleApprove(this)">'
+                f"queue for auto-listing "
+                f'<span style="color:#b66" title="approved items collect in the ready '
+                f'pool but the ebay_dole worker is not installed — nothing publishes '
+                f'from the pool yet (todo #1113)">(inactive)</span></label>'
+            )
+        _line.append(_abtn("Reset Draft", "resetDraft()", "blue",
+                           title="Discard edits and regenerate the draft from the catalog record"))
+    else:
+        _line.append(_abtn("Prepare Listing", "prepareListing()", "green",
+                           title="Run identification and draft the eBay listing"))
+
+    if is_active and not _is_sold:
+        # Always operator-accessible on a live item (Dave, s46): this is THE
+        # component that resolves the draft interface to the live data — the
+        # broken-draft states (e.g. draft price empty vs live price set) are
+        # exactly the ones the _diverged heuristic can't see.
+        _line.append(_abtn("Reset Draft", "resetDraftFromLive()", "blue",
+                           title="Discard local edits — re-pin the draft to what is live on eBay"))
+        _line.append(_abtn("End Listing", (
+            "triggerAction('ebay_end_listing',"
+            "'End this listing on eBay? This cannot be undone.')"), "red"))
+
+    _line.append(_abtn("Archive", (
+        "triggerAction('archive','Archive this item? It will be hidden from the catalog.')"
+    ), "grey", push=True))
+    _line.append(_abtn("Delete", "deleteItem()", "grey"))
+    if listing_url:
+        _line.append(
+            f'<a class="ebay-btn ebay-btn-primary" style="align-self:center" '
+            f'href="{h(listing_url)}" target="_blank" rel="noopener noreferrer">View on eBay ↗</a>'
+        )
+
+    _gate_html = '<div class="act-row" id="action-line">' + "".join(_line) + "</div>"
+    _pipeline_bar = ""  # removed — the action line and tabs carry the state
+
+    _proposals_banner = ""
+    if _has_proposals:
+        _pr_by = h(_rev.get("by") or "pipeline")
+        _pr_at = _local_ts(_rev.get("at"))
+        _pr_cnt = len(_rev_delta)
+        _pr_asp = len(_proposed_aspects)
+        _pr_title = _rev_delta.get("title") or ""
+        _pr_desc = _rev_delta.get("description") or ""
+        _detail_lines = []
+        if _pr_asp:
+            _detail_lines.append(f"{_pr_asp} aspect{'s' if _pr_asp != 1 else ''}")
+        if _pr_title:
+            _detail_lines.append(f"title → {h(_pr_title[:60])}{'…' if len(_pr_title) > 60 else ''}")
+        if _pr_desc:
+            _detail_lines.append("description")
+        _detail_str = ", ".join(_detail_lines) or f"{_pr_cnt} field{'s' if _pr_cnt != 1 else ''}"
+        _proposals_banner = (
+            f'<div id="proposals-banner" style="margin-bottom:12px;padding:10px 14px;'
+            f'background:#1a1a00;border:1px solid #664;border-radius:4px;font-size:.82em;color:#cc8">'
+            f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">'
+            f"<strong>Pipeline proposed changes</strong>"
+            f'<span style="color:#665;font-size:.85em">{_pr_by} · {_pr_at} UTC</span></div>'
+            f'<div style="color:#aa8;margin-bottom:8px">{_detail_str}</div>'
+            f'<div style="font-size:.75em;color:#665;margin-bottom:8px">'
+            f"Yellow highlights show proposed values. Edit any field to override. "
+            f"Accept copies proposals into your draft — review then Update Listing to push to eBay.</div>"
+            f'<div style="display:flex;gap:8px">'
+            f'<button class="act-btn act-publish" style="font-size:.78em;padding:3px 10px;background:#1a1a00;border-color:#884" '
+            f'onclick="acceptProposals()">Accept All Proposals</button>'
+            f'<button class="act-btn" style="font-size:.78em;padding:3px 10px" '
+            f'onclick="dismissProposals()">Dismiss</button>'
+            f"</div></div>"
+        )
+
+    _ebay_draft_editor = (
+        '<div id="dl-section" class="dsec">'
+        "<h3>Listing</h3>" + f'<div class="frow" id="dl-title">'
+        # Title
+        f'<span class="fn">eBay Title</span>'
+        f'<span class="fv" style="flex:1">'
+        f'<input id="dl-title-input" type="text" maxlength="80" value="{_dl_title_val}" '
+        f'style="width:100%;background:#1a1a1a;color:#eee;border:1px solid #444;'
+        f'border-radius:4px;padding:4px 6px;font-size:.9em" '
+        f"oninput=\"updateCharCount(this,80,'dl-title-count')\">"
+        f'<span id="dl-title-count" style="font-size:.75em;color:#556;margin-left:4px">'
+        f"{len((dl or {}).get('title') or '')}/80</span>"
+        f"</span></div>"
+        # Category — search to change
+        f'<div class="frow" id="dl-category">'
+        f'<span class="fn">Category</span>'
+        f'<span class="fv" style="flex:1;position:relative">'
+        f'<div id="dl-cat-breadcrumb" style="font-size:.82em;color:#aaa;margin-bottom:3px">'
+        f"{_dl_cat_id_v}{'&nbsp;·&nbsp;' + _dl_cat_name if _dl_cat_name else ''}"
+        f"</div>"
+        f'<div style="display:flex;gap:4px;align-items:flex-start">'
+        f'<input id="dl-cat-search" type="text" placeholder="Search name, type an ID, or Browse…" '
+        f'autocomplete="off" '
+        f'style="flex:1;background:#1a1a1a;color:#eee;border:1px solid #444;'
+        f'border-radius:4px;padding:3px 6px;font-size:.88em">'
+        f'<a href="#" id="dl-cat-browse-btn" onclick="return false" '
+        f'style="display:inline-block;padding:3px 8px;border-radius:4px;font-size:.8em;'
+        f'background:#2a2a2a;color:#9ab;border:1px solid #444;white-space:nowrap">Browse</a>'
+        f"</div>"
+        f'<input type="hidden" id="dl-cat-id" value="{_dl_cat_id_v}">'
+        f'<div id="dl-cat-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;'
+        f"background:#1e1e1e;border:1px solid #555;border-radius:4px;z-index:50;"
+        f'max-height:220px;overflow-y:auto"></div>'
+        f'<div id="dl-cat-browse-panel" style="display:none;position:absolute;top:100%;left:0;right:0;'
+        f"background:#1e1e1e;border:1px solid #555;border-radius:4px;z-index:49;"
+        f'padding:6px;margin-top:2px"></div>'
+        f'<span id="category-group-hint" style="font-size:.72em;color:#445;display:block;margin-top:2px"></span>'
+        f"</span></div>"
+        # Secondary eBay category
+        f'<div class="frow" id="dl-category2">'
+        f'<span class="fn">2nd Category</span>'
+        f'<span class="fv" style="flex:1;position:relative">'
+        f'<div id="dl-cat2-breadcrumb" style="font-size:.82em;color:#aaa;margin-bottom:3px">'
+        f"{_dl_cat2_id_v}{'&nbsp;·&nbsp;' + _dl_cat2_name if _dl_cat2_name else ''}"
+        f"</div>"
+        f'<div style="display:flex;gap:4px;align-items:flex-start">'
+        f'<input id="dl-cat2-search" type="text" placeholder="Search name, type an ID, or Browse…" '
+        f'autocomplete="off" '
+        f'style="flex:1;background:#1a1a1a;color:#eee;border:1px solid #444;'
+        f'border-radius:4px;padding:3px 6px;font-size:.88em">'
+        f'<a href="#" id="dl-cat2-browse-btn" onclick="return false" '
+        f'style="display:inline-block;padding:3px 8px;border-radius:4px;font-size:.8em;'
+        f'background:#2a2a2a;color:#9ab;border:1px solid #444;white-space:nowrap">Browse</a>'
+        f"</div>"
+        f'<input type="hidden" id="dl-cat2-id" value="{_dl_cat2_id_v}">'
+        f'<div id="dl-cat2-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;'
+        f"background:#1e1e1e;border:1px solid #555;border-radius:4px;z-index:50;"
+        f'max-height:220px;overflow-y:auto"></div>'
+        f'<div id="dl-cat2-browse-panel" style="display:none;position:absolute;top:100%;left:0;right:0;'
+        f"background:#1e1e1e;border:1px solid #555;border-radius:4px;z-index:49;"
+        f'padding:6px;margin-top:2px"></div>'
+        f"</span></div>"
+        # Store category — select from known groups
+        f'<div class="frow" id="dl-store-category">'
+        f'<span class="fn">Store cat 1</span>'
+        f'<span class="fv">'
+        f'<select id="dl-store-cat-select" '
+        f'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px;font-size:.88em">' + _store_cat_opts_html + "</select>"
+        '<span id="store-cat-hint" style="font-size:.72em;color:#445;margin-left:8px"></span>'
+        "</span></div>"
+        # Secondary store category
+        '<div class="frow" id="dl-store-category2">'
+        '<span class="fn">Store cat 2</span>'
+        '<span class="fv">'
+        '<select id="dl-store-cat2-select" '
+        'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px;font-size:.88em">' + _store_cat2_opts_html + "</select>"
+        "</span></div>"
+        # Condition
+        '<div class="frow" id="dl-condition">'
+        '<span class="fn">Condition</span>'
+        '<span class="fv">'
+        '<select id="dl-condition-select" '
+        'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px">'
+        + _build_condition_options((dl or {}).get("condition_enum") or (dl or {}).get("condition") or "", _cat_id_for_aspects)
+        + f"</select>"
+        f'<span id="condition-policy-note" style="font-size:.72em;color:#445;margin-left:8px"></span>'
+        f"</span></div>"
+        f'<div class="frow" id="dl-condition-desc">'
+        f'<span class="fn">Cond. notes</span>'
+        f'<span class="fv" style="flex:1">'
+        f'<input id="dl-cond-desc-input" type="text" '
+        f'value="{h((dl or dict()).get("condition_description") or "")}" '
+        f'placeholder="e.g. minor wear on corners, no missing pieces" '
+        f'style="width:100%;background:#1a1a1a;color:#eee;border:1px solid #444;'
+        f'border-radius:4px;padding:4px 6px;font-size:.85em">'
+        f"</span></div>"
+        # Price with comps bar
+        f'<div class="frow" id="dl-price">'
+        f'<span class="fn">Price</span>'
+        f'<span class="fv" style="flex:1">'
+        f'<input id="dl-price-input" type="number" step="0.01" min="0" value="{h(_dl_price_val)}" '
+        f'style="width:120px;background:#1a1a1a;color:#eee;border:1px solid #444;'
+        f'border-radius:4px;padding:4px 6px;font-size:.9em">'
+        f"{_price_comps_bar}"
+        f"</span></div>"
+        # Search terms — own frow, never nested inside a span
+        f'<div class="frow" id="dl-search-terms">'
+        f'<span class="fn">Search terms</span>'
+        f'<span class="fv" style="flex:1">'
+        f'<input id="search-terms-input" type="text" value="{_st_val}" '
+        f'placeholder="e.g. vintage acetone bottle" '
+        f'style="width:100%;background:#1a1a1a;color:#eee;border:1px solid #444;'
+        f'border-radius:4px;padding:4px 6px;font-size:.88em" '
+        f"onkeydown=\"if(event.key==='Enter')saveAndReprice()\">"
+        f'<div style="margin-top:5px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">'
+        f'<a href="#" onclick="saveAndReprice();return false" '
+        f'style="display:inline-block;padding:3px 10px;border-radius:4px;font-size:.8em;'
+        f"font-weight:600;background:#1e3a5f;color:#7af;border:1px solid #2a5080;"
+        f'text-decoration:none">'
+        f"Save &amp; Re-price</a>"
+        f'<a href="#" onclick="(function(){{'
+        f"  var t=document.getElementById('search-terms-input');"
+        f"  var q=t?t.value.trim():'';"
+        f"  if(q)window.open('https://www.ebay.com/sch/i.html?_nkw='+encodeURIComponent(q)+'&LH_Complete=1&LH_Sold=1','_blank');"
+        f'}})();return false" '
+        f'style="display:inline-block;padding:3px 10px;border-radius:4px;font-size:.8em;'
+        f"font-weight:600;background:#1a3a1a;color:#4d4;border:1px solid #2a5a2a;"
+        f'text-decoration:none">'
+        f"eBay Sold ↗</a>"
+        f'<a href="#" onclick="(function(){{'
+        f"  var t=document.getElementById('search-terms-input');"
+        f"  var q=t?t.value.trim():'';"
+        f"  if(q)window.open('https://www.ebay.com/sch/i.html?_nkw='+encodeURIComponent(q),'_blank');"
+        f'}})();return false" '
+        f'style="display:inline-block;padding:3px 10px;border-radius:4px;font-size:.8em;'
+        f"font-weight:600;background:#1a1a2a;color:#88c;border:1px solid #2a2a4a;"
+        f'text-decoration:none">'
+        f"eBay Active ↗</a>"
+        f'<a href="#" onclick="(function(){{'
+        f"  var t=document.getElementById('search-terms-input');"
+        f"  var q=t?t.value.trim():'';"
+        f"  if(q)window.open('https://www.ebay.com/sh/research?marketplace=EBAY-US&keywords='+encodeURIComponent(q),'_blank');"
+        f'}})();return false" '
+        f'style="display:inline-block;padding:3px 10px;border-radius:4px;font-size:.8em;'
+        f"font-weight:600;background:#2a1a0a;color:#c84;border:1px solid #4a2a0a;"
+        f'text-decoration:none">'
+        f"Terapeak ↗</a>"
+        f'<span id="reprice-msg" style="color:#4a4;font-size:.8em"></span>'
+        f"</div>"
+        f"</span></div>"
+        # Description
+        f'<div class="frow" id="dl-description">'
+        f'<span class="fn">Description</span>'
+        f'<span class="fv" style="flex:1">'
+        f'<textarea id="dl-desc-input" rows="3" '
+        f'style="width:100%;background:#1a1a1a;color:#eee;border:1px solid #444;'
+        f'border-radius:4px;padding:4px 6px;font-size:.85em;resize:vertical">'
+        f"{_dl_desc_val}</textarea>"
+        f"</span></div>"
+        # Shipping
+        f'<div class="frow" id="dl-shipping">'
+        f'<span class="fn">Fulfillment</span>'
+        f'<span class="fv">'
+        f'<select id="dl-ship-input" '
+        f'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px;font-size:.85em">'
+        f'<option value="">— auto-resolved —</option>'
+        f"{_ship_opts_html}"
+        f"</select>"
+        f'<span id="dl-ship-hint" style="font-size:.72em;color:#445;margin-left:8px"></span>'
+        f"{_live_ship_html}"
+        f"</span></div>"
+        f'<div class="frow" id="dl-returns">'
+        f'<span class="fn">Returns</span>'
+        f'<span class="fv">'
+        f'<select id="dl-return-select" '
+        f'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px;font-size:.85em">'
+        f"{_return_opts_html}"
+        f"</select>"
+        f"</span></div>"
+        # Aspects
+        f'<div id="dl-aspects" style="margin-top:10px">'
+        f'<div style="font-size:.83em;color:#aaa;font-weight:600;margin-bottom:6px">'
+        f"Item Specifics / Aspects</div>"
+        f'<div id="aspects-loading" style="color:#556;font-size:.82em">Loading aspects…</div>'
+        f'<div id="aspects-form"></div>'
+        f"</div>"
+        # Draft save feedback (saving happens via the action line — List on eBay /
+        # Update Item save the draft first; PP-ACTIONCONSOLE-001 one-line consolidation)
+        f'<div style="margin-top:12px;display:flex;gap:8px;align-items:center">'
+        f'<span id="dl-save-msg" style="font-size:.82em;color:#4a4"></span>'
+        f"</div>"
+        + f"</div>"
+        # hidden data for JS
+        f"<script>"
+        f"window._DL_CAT_ID = {_aspects_cat_json};"
+        f"window._DL_PREFILL = {_aspects_prefill_json};"
+        f"window._LIVE_ASPECTS = {_live_aspects_json};"
+        f"window._PROPOSED_ASPECTS = {_proposed_aspects_json};"
+        f"window._DL_PROPOSALS = {_proposals_meta_json};"
+        f"</script>"
+    )
+
+    # PP-ACTIONCONSOLE-001: the "eBay Status" dropdown is gone — its content
+    # graduated into the Live Listing tab (listing_section + offer_section).
+
+    _left_log_html = (
+        '<div class="dleft-log">'
+        + _readiness_html_str
+        + _eps_strip_html
+        + (f'<div class="dsec" id="jobs-section"><h3>Pipeline Jobs</h3>{jobs_html}</div>' if jobs_html else "")
+        + price_history_html
+        + reprice_schedule_html
+        + product_lookup_html
+        + identification_history_html
+        + "</div>"
+    )
+
+    # ── PP-ACTIONCONSOLE-001: tabbed right column ──────────────────────────────
+    # Editor tab always exists; the Live Listing tab appears only when the item
+    # is on eBay — the tab's existence IS the "this item is live" indicator.
+    # Sold: the live tab becomes "Sold Listing" and moves to the front; the
+    # editor stays behind it.
+    _has_live_tab = bool(listing_id or _ebay_live_raw)
+    _live_tab_label = "Sold Listing" if _is_sold else "Live Listing"
+    _default_tab = "live" if (_is_sold and _has_live_tab) else "editor"
+
+    def _tab_btn(name: str, label: str) -> str:
+        active = ' dtab-active' if name == _default_tab else ""
+        return (
+            f'<button class="dtab-btn{active}" data-tab="{name}" '
+            f"onclick=\"showTab('{name}')\">{label}</button>"
+        )
+
+    _tab_bar = (
+        '<style>.dtab-btn{padding:6px 16px;background:#141414;color:#889;border:1px solid #2a2a2a;'
+        "border-bottom:none;border-radius:6px 6px 0 0;cursor:pointer;font-size:.85em}"
+        ".dtab-btn.dtab-active{background:#1a1a1a;color:#cce;border-color:#3a3a3a;font-weight:600}"
+        "</style>"
+        '<div class="dtab-bar" style="display:flex;gap:4px;margin-bottom:0">'
+        + (_tab_btn("live", _live_tab_label) if (_has_live_tab and _is_sold) else "")
+        + _tab_btn("editor", "Editor")
+        + (_tab_btn("live", _live_tab_label) if (_has_live_tab and not _is_sold) else "")
+        + "</div>"
+    )
+
+    _editor_panel_open = (
+        '<div class="dtab-panel" data-tab="editor"'
+        + (' style="display:none"' if _default_tab != "editor" else "")
+        + ">"
+    )
+
     fields_html = (
         '<div class="dfields">'
-        # — Inventory record (what we track)
-        '<div class="dsec">'
-        '<h3>Inventory Record <span style="color:#2a4a6a;font-size:.72em;font-weight:normal">dbl-click to edit</span></h3>'
-        '<div style="font-size:.73em;color:#556;margin-bottom:6px">Your internal record — drives the pipeline</div>'
+        # ── Inventory Record — TGW's canonical layer, NOT part of the eBay
+        # listing workflow. Standalone at the top (own redesign effort later).
+        + '<div id="catalog-section" class="dsec">'
+        '<h3>Inventory Record <span style="color:#2a4a6a;font-size:.72em;font-weight:normal">dbl-click to edit · <a href="#" onclick="saveCatalog();return false" style="color:#4a8;font-size:.9em">Save to Catalog</a> <span id="catalog-save-msg" style="font-size:.82em;color:#4a4"></span></span></h3>'
+        '<div style="font-size:.73em;color:#556;margin-bottom:6px">Canonical TGW data — never overwritten by marketplace sync</div>'
         + fr("Title", key="title", editable=True)
         + fr("Condition", key="condition", editable=True)
         + fr("AI hint", key="ai_hint", editable=True)
@@ -3516,161 +5573,361 @@ def _render_item_detail_html(
         + fr("Model", key="model", editable=True)
         + fr("Category group", key="category_group")
         + fr("Barcode", key="barcode")
-        + fr("Price", _price_display, key="price", editable=True)
+        + fr("Price", _price_display + '<span style="font-size:.7em;color:#3a6a3a;margin-left:5px">(set in eBay Draft Editor below)</span>')
         + fr("Qty", _qty_display, key="qty", editable=True)
+        + fr("Floor price", key="floor_price", editable=True)
+        + fr("Cost (what we paid)", key="cost", editable=True)
         + fr("Location", key="location", editable=True)
         + fr("Weight (oz)", key="weight_oz", editable=True)
         + fr("Size class", key="size_class")
         + fr("Verified", key="verified")
         + fr("Alt text", h(str(dl.get("alt_text") or item.get("alt_text") or "")))
-        + "</div>"
-        # — eBay Listing (confirmed by eBay after publish)
-        f'<div class="dsec"><h3>eBay Listing{listing_badge}</h3>'
-        '<div style="font-size:.73em;color:#556;margin-bottom:6px">Confirmed eBay data after listing is live</div>'
-        + listing_section
-        + "</div>"
-        # — eBay Submission (what we sent to eBay — not a buyer offer)
-        f'<div class="dsec"><h3>eBay Submission{offer_badge} <span style="font-size:.7em;color:#555;font-weight:normal">our offer to eBay</span></h3>'
-        '<div style="font-size:.73em;color:#556;margin-bottom:6px">The offer record TGW created on eBay — not a buyer offer</div>'
-        + offer_section
-        + "</div>"
-        # — eBay Draft (what the pipeline prepared, before staging)
-        '<div class="dsec"><h3>eBay Draft <span style="font-size:.7em;color:#555;font-weight:normal">pipeline output</span></h3>'
-        '<div style="font-size:.73em;color:#556;margin-bottom:6px">Output from ebay_draft — staged to eBay when you click Stage</div>'
-        + draft_section
-        + "</div>"
+        + fr("Status", key="status", editable=True)
+        + fr("Manufacturer", key="manufacturer", editable=True)
+        + fr("Country of mfr", key="country_of_manufacture", editable=True)
+        + fr("Model number", key="model_number", editable=True)
+        + (fr("SKU (old)", h(str(item.get("sku_old", "") or ""))
+                            + f' <a href="/form/history/{urllib.parse.quote(str(item.get("sku_old")))}" '
+                            'style="color:#4a8;font-size:.85em">History &rarr;</a>')
+          if item.get("sku_old") else "")
+        + (fr("UPC", h(str(item.get("upc", "") or ""))) if item.get("upc") else "")
+        + (fr("ISBN", h(str(item.get("isbn", "") or ""))) if item.get("isbn") else "")
+        + (fr("Part number", h(str(item.get("part_number", "") or ""))) if item.get("part_number") else "")
         + (
-            f'<div class="dsec">'
-            f'<h3>Revision Draft <span style="font-size:.7em;color:#555;font-weight:normal">proposed changes</span></h3>'
-            f'<div style="font-size:.73em;color:#556;margin-bottom:6px">AI or operator proposed changes — apply to push to eBay</div>'
-            f'{revision_draft_html}</div>'
-            if revision_draft_html else ""
-        )
+            lambda ia, isp: (
+                (
+                    '<div style="margin-top:6px;border-top:1px solid #222;padding-top:6px">'
+                    '<div style="font-size:.75em;color:#556;margin-bottom:4px">Item specifics (edit in eBay Draft Editor below)</div>'
+                    + "".join(
+                        f'<div class="frow"><span class="fn" style="font-size:.82em">{h(k)}</span><span class="fv" style="font-size:.82em">{h(str(v))}</span></div>'
+                        for k, v in sorted({**isp, **ia}.items())
+                        if v
+                    )
+                    + "</div>"
+                )
+                if {**isp, **ia}
+                else (
+                    '<div style="margin-top:6px;border-top:1px solid #222;padding-top:6px">'
+                    '<span style="font-size:.75em;color:#333">No item specifics yet — fill in eBay Draft Editor below</span>'
+                    "</div>"
+                )
+            )
+        )(item.get("item_attributes") or {}, (dl or {}).get("item_specifics") or {})
+        + "</div>"
+        # ── eBay Listing — the draft/live workflow section (PP-ACTIONCONSOLE-001).
+        # Visually separated from the Inventory Record above: its own header,
+        # action line, and Editor/Live tabs.
+        + '<div id="ebay-listing-block" style="margin-top:18px;padding-top:14px;'
+        'border-top:2px solid #2a3a4a">'
+        '<h3 style="margin:0 0 10px;font-size:.78em;text-transform:uppercase;'
+        'letter-spacing:.06em;color:#6a8ab5">eBay Listing</h3>'
+        + _pipeline_error_html
+        + _gate_html
+        + _tab_bar
+        + _editor_panel_open
+        # — Pipeline proposals banner (inside the editor tab, above the draft form)
+        + (_proposals_banner if _has_proposals else "")
+        # — eBay Draft editor
+        + _ebay_draft_editor
+        + "</div>"  # close editor tab panel
+        # — Live/Sold Listing tab: read-only view of what eBay holds
         + (
-            f'<div class="dsec"><h3>Pipeline Jobs</h3>{jobs_html}</div>'
-            if jobs_html else ""
+            (
+                '<div class="dtab-panel" data-tab="live"'
+                + (' style="display:none"' if _default_tab != "live" else "")
+                + ">"
+                + '<div class="dsec">'
+                + f"<h3>{_live_tab_label}{listing_badge}{offer_badge}"
+                + (
+                    '<a href="#" onclick="triggerAction(\'sync_from_ebay\');return false" '
+                    'style="float:right;color:#4a8ade;font-size:.85em;font-weight:normal">⟳ Sync from eBay</a>'
+                    if listing_id else ""
+                )
+                + "</h3>"
+                + listing_section
+                + offer_section
+                + "</div>"
+                + _ebay_live_html
+                + "</div>"
+            )
+            if _has_live_tab
+            else ""
         )
-        + price_history_html
-        + reprice_schedule_html
-        + product_lookup_html
-        + identification_history_html
+        + "</div>"  # close ebay-listing-block
         + "</div>"
     )
 
-    # Actions section — context-aware based on eBay status
-    import json as _json
-    _ak_json2 = _json.dumps(api_key)
-    _sku_json2 = _json.dumps(sku)
-    _listing_id_json = _json.dumps(listing_id)
-    _is_active_js = "true" if is_active else "false"
-
-    publish_disabled = ' disabled title="Already active on eBay — End Listing first to relist"' if is_active else ""
-    publish_cls = " act-disabled" if is_active else ""
-    stage_disabled = ' disabled title="Already staged/published — use End Listing + relist to update"' if is_staged else ""
-    stage_cls = " act-disabled" if is_staged else ""
-    end_btn = (
-        '<button class="act-btn act-warn" onclick="triggerAction(\'ebay_end_listing\',\'End this listing on eBay? This cannot be undone.\')">'
-        "End Listing on eBay</button>"
-        if is_active else ""
-    )
-
+    # PP-ACTIONCONSOLE-001: the Pipeline Tools button set is gone from this page —
+    # troubleshooting controls belong on a separate ops surface; repair actions
+    # appear contextually on failed pipeline-job lines. Archive/Delete moved into
+    # the action line. Only the shared JS remains here.
+    _prep_action_json = _json.dumps("ebay_draft" if item.get("ai_identified") else "ai_identify")
     actions_html = (
-        f'<div class="dsec danger-zone">'
-        f'<h3>Actions</h3>'
-        f'<div class="act-row">'
-        f'<button class="act-btn" onclick="triggerAction(\'ai_identify\')">Re-identify</button>'
-        f'<button class="act-btn" onclick="triggerAction(\'ebay_draft\')">Re-draft</button>'
-        f'<button class="act-btn" onclick="triggerAction(\'ebay_price\')">Re-price</button>'
-        f'<button class="act-btn{stage_cls}"{stage_disabled} onclick="triggerAction(\'ebay_stage\')">Stage</button>'
-        f'<button class="act-btn{publish_cls}"{publish_disabled} onclick="triggerAction(\'ebay_publish\')">Publish</button>'
-        f'{end_btn}'
-        + (
-            '<button class="act-btn" onclick="triggerAction(\'sync_from_ebay\')"'
-            ' title="Fetch current price and status from eBay">Sync from eBay</button>'
-            if listing_id else ""
-        )
-        + '</div>'
-        + f'<div class="act-row" style="margin-top:10px">'
-        f'<button class="act-btn act-warn" onclick="triggerAction(\'archive\',\'Archive this item? It will be hidden from the catalog.\')">Archive</button>'
-        f'<button class="act-btn act-delete" onclick="deleteItem()">Delete item</button>'
-        f'</div>'
-        f'</div>'
-        f'<script>'
-        f'window.TGW_API_KEY={_ak_json2};'
-        f'var _SKU={_sku_json2};'
-        f'var _LISTING_ID={_listing_id_json};'
-        f'var _IS_ACTIVE={_is_active_js};'
-        f'function triggerAction(action,confirmMsg){{'
-        f'  if(confirmMsg&&!confirm(confirmMsg))return;'
-        f'  fetch(\'/api/items/\'+_SKU+\'/action\',{{'
-        f'    method:\'POST\','
-        f'    headers:authHeaders({{\'Content-Type\':\'application/json\'}}),'
-        f'    body:JSON.stringify({{action:action}})'
-        f'  }}).then(function(r){{return r.json();}}).then(function(d){{'
-        f'    if(d.ok&&(action===\'archive\'||action===\'ebay_end_listing\')){{window.location.href=\'/form/items\';return;}}'
-        f'    alert(d.ok ? \'Action queued: \'+action : \'Error: \'+(d.detail||\'failed\'));'
-        f'  }}).catch(function(e){{alert(\'Network error: \'+e);}});'
-        f'}}'
-        f'function deleteItem(){{'
-        f'  var msg=\'Delete \'+_SKU+\'?\\nThis marks the item as deleted.\\nThe ItemData folder is preserved.\';'
-        f'  if(_IS_ACTIVE){{msg+=\'\\n\\n⚠️ Active eBay listing (ID: \'+_LISTING_ID+\').\\nEnd Listing first, or use the End Listing button.\';}} '
-        f'  if(!confirm(msg))return;'
-        f'  fetch(\'/api/items/\'+_SKU,{{'
-        f'    method:\'DELETE\','
-        f'    headers:authHeaders()'
-        f'  }}).then(function(r){{return r.json();}}).then(function(d){{'
-        f'    if(d.ok){{window.location.href=\'/form/items\';}}'
-        f'    else{{alert(\'Delete failed: \'+(d.detail||\'unknown error\'));}}'
-        f'  }}).catch(function(e){{alert(\'Network error: \'+e);}});'
-        f'}}'
-        f'// Inline field editing — dblclick on .fv.editable to edit in place'
-        f'document.querySelectorAll(\'.fv.editable\').forEach(function(span){{'
-        f'  span.addEventListener(\'dblclick\',function(){{'
-        f'    var field=span.dataset.field;'
-        f'    var oldVal=span.dataset.raw!==undefined?span.dataset.raw:span.textContent;'
-        f'    if(oldVal===\'—\')oldVal=\'\';'
-        f'    var inp=document.createElement(\'input\');'
-        f'    inp.type=\'text\';inp.value=oldVal;inp.className=\'fv fv-edit\';'
-        f'    span.parentNode.replaceChild(inp,span);'
-        f'    inp.focus();inp.select();'
-        f'    function commit(){{'
-        f'      var newVal=inp.value;'
-        f'      inp.disabled=true;'
-        f'      fetch(\'/api/items/\'+_SKU,{{'
-        f'        method:\'PATCH\','
-        f'        headers:authHeaders({{\'Content-Type\':\'application/json\'}}),'
-        f'        body:JSON.stringify({{fields:{{[field]:newVal}}}})'
-        f'      }}).then(function(r){{return r.json();}}).then(function(d){{'
-        f'        if(d.ok){{'
-        f'          span.textContent=newVal||\'—\';'
-        f'          span.dataset.raw=newVal;'
-        f'          inp.parentNode.replaceChild(span,inp);'
-        f'          span.classList.add(\'fv-saved\');'
-        f'          setTimeout(function(){{span.classList.remove(\'fv-saved\');}},800);'
-        f'        }}else{{'
-        f'          alert(\'Save failed: \'+(d.detail||\'error\'));'
-        f'          inp.parentNode.replaceChild(span,inp);'
-        f'        }}'
-        f'      }}).catch(function(e){{'
-        f'        alert(\'Network error: \'+e);'
-        f'        inp.parentNode.replaceChild(span,inp);'
-        f'      }});'
-        f'    }}'
-        f'    function cancel(){{inp.parentNode.replaceChild(span,inp);}}'
-        f'    inp.addEventListener(\'keydown\',function(e){{'
-        f'      if(e.key===\'Enter\'){{e.preventDefault();commit();}}'
-        f'      if(e.key===\'Escape\')cancel();'
-        f'    }});'
-        f'    inp.addEventListener(\'blur\',function(){{if(!inp.disabled)commit();}});'
-        f'  }});'
-        f'}});'
-        f'</script>\n'
+        f"<script>"
+        f"window.TGW_API_KEY={_ak_json2};"
+        f"var _SKU={_sku_json2};"
+        f"var _LISTING_ID={_listing_id_json};"
+        f"var _IS_ACTIVE={_is_active_js};"
+        f"var _PREP_ACTION={_prep_action_json};"
+        f"window._ITEM_SKU={_sku_json2};"
+        # ── Action-line handlers (state-driven console) ──
+        f"function prepareListing(){{"
+        f"  if(!confirm('Prepare this listing?\\nRuns identification and drafts the eBay listing.'))return;"
+        f"  triggerAction(_PREP_ACTION);"
+        f"}}"
+        f"function listOnEbay(){{"
+        f"  if(!confirm('List this item on eBay?\\nSaves the draft, runs every needed step, and publishes.'))return;"
+        f"  saveEbayDraft(function(){{triggerAction('ebay_publish');}});"
+        f"}}"
+        f"function updateItem(){{"
+        f"  if(!confirm('Push draft changes to the live listing?\\nUpdates in place without ending the listing.'))return;"
+        f"  saveEbayDraft(function(){{triggerAction('ebay_update');}});"
+        f"}}"
+        f"function relistItem(){{"
+        f"  if(!confirm('Relist this item on eBay?\\nCheck quantity in the Inventory Record first.'))return;"
+        f"  saveEbayDraft(function(){{triggerAction('ebay_publish');}});"
+        f"}}"
+        f"function resetDraft(){{"
+        f"  if(!confirm('Reset the draft?\\nDiscards draft edits and regenerates from the catalog record.'))return;"
+        f"  triggerAction('ebay_draft');"
+        f"}}"
+        f"function resetDraftFromLive(){{"
+        f"  if(!confirm('Reset the draft from the live listing?\\nDiscards local edits — the draft will match eBay again.'))return;"
+        f"  triggerAction('reset_draft_from_live');"
+        f"}}"
+        f"function toggleApprove(cb){{"
+        f"  triggerAction(cb.checked?'set_ready':'unset_ready');"
+        f"}}"
+        f"function retryPipeline(){{"
+        f"  var el=document.getElementById('pipeline-error-box')||document.getElementById('jobs-section');"
+        f"  if(el)el.scrollIntoView({{behavior:'smooth',block:'center'}});"
+        f"}}"
+        f"function retryJob(jobId){{"
+        f"  if(!confirm('Retry this failed job?'))return;"
+        f"  fetch('/api/jobs/'+jobId+'/requeue',{{method:'POST',headers:authHeaders()}})"
+        f"  .then(function(r){{return r.json();}}).then(function(d){{"
+        f"    if(d.ok)location.reload();else alert('Retry failed: '+(d.detail||'error'));"
+        f"  }}).catch(function(e){{alert('Network error: '+e);}});"
+        f"}}"
+        f"function showTab(name){{"
+        f"  document.querySelectorAll('.dtab-panel').forEach(function(p){{p.style.display=p.dataset.tab===name?'':'none';}});"
+        f"  document.querySelectorAll('.dtab-btn').forEach(function(b){{b.classList.toggle('dtab-active',b.dataset.tab===name);}});"
+        f"}}"
+        f"function triggerAction(action,confirmMsg){{"
+        f"  if(confirmMsg&&!confirm(confirmMsg))return;"
+        f"  fetch('/api/items/'+_SKU+'/action',{{"
+        f"    method:'POST',"
+        f"    headers:authHeaders({{'Content-Type':'application/json'}}),"
+        f"    body:JSON.stringify({{action:action}})"
+        f"  }}).then(function(r){{return r.json();}}).then(function(d){{"
+        f"    if(d.ok&&(action==='archive'||action==='ebay_end_listing')){{window.location.href='/form/items';return;}}"
+        f"    if(d.ok&&(action==='set_ready'||action==='unset_ready'||action==='ebay_publish'||action==='ebay_stage'||action==='ebay_update'||action==='reset_draft_from_live')){{location.reload();return;}}"
+        f"    alert(d.ok ? 'Action queued: '+action : 'Error: '+(d.detail||'failed'));"
+        f"  }}).catch(function(e){{alert('Network error: '+e);}});"
+        f"}}"
+        f"function approveForListing(){{"
+        f"  if(!confirm('Approve this item for listing?\\nIt will go live at the next dole cycle (up to 1 hour).\\nUse Publish Now to list immediately.'))return;"
+        f"  triggerAction('set_ready');"
+        f"}}"
+        f"function publishNow(){{"
+        f"  if(!confirm('Publish this item to eBay NOW?\\nIt will go live immediately at the current offer price.'))return;"
+        f"  triggerAction('ebay_publish');"
+        f"}}"
+        f"function acceptProposals(){{"
+        f"  if(!confirm('Accept all pipeline proposals?\\nThis copies proposed values into your draft.'+"
+        f"'\\nReview then click Update Listing to push to eBay.'))return;"
+        f"  fetch('/api/items/'+_SKU+'/action',{{method:'POST',"
+        f"    headers:authHeaders({{'Content-Type':'application/json'}}),"
+        f"    body:JSON.stringify({{action:'accept_proposals'}})}}"
+        f"  ).then(function(r){{return r.json();}}).then(function(d){{"
+        f"    if(d.ok)location.reload();else alert('Accept failed: '+(d.detail||'error'));"
+        f"  }});"
+        f"}}"
+        f"function dismissProposals(){{"
+        f"  fetch('/api/items/'+_SKU+'/action',{{method:'POST',"
+        f"    headers:authHeaders({{'Content-Type':'application/json'}}),"
+        f"    body:JSON.stringify({{action:'dismiss_proposals'}})}}"
+        f"  ).then(function(r){{return r.json();}}).then(function(d){{"
+        f"    if(d.ok)location.reload();else alert('Dismiss failed: '+(d.detail||'error'));"
+        f"  }});"
+        f"}}"
+        f"function clearPipelineError(){{"
+        f"  fetch('/api/items/'+_SKU,{{method:'PATCH',"
+        f"    headers:authHeaders({{'Content-Type':'application/json'}}),"
+        f"    body:JSON.stringify({{fields:{{pipeline_error:null}}}})}}"
+        f"  ).then(function(r){{return r.json();}}).then(function(d){{"
+        f"    if(d.ok)location.reload();else alert('Clear failed: '+(d.detail||'error'));"
+        f"  }});"
+        f"}}"
+        f"function toggleRawError(){{"
+        f"  var el=document.getElementById('pipeline-error-raw');"
+        f"  if(!el)return;"
+        f"  if(el.style.display==='none'){{el.textContent=_PE_RAW;el.style.display='block';}}"
+        f"  else{{el.style.display='none';}}"
+        f"}}"
+        f"function deleteItem(){{"
+        f"  var msg='Delete '+_SKU+'?\\nThis marks the item as deleted.\\nThe ItemData folder is preserved.';"
+        f"  if(_IS_ACTIVE){{msg+='\\n\\n⚠️ Active eBay listing (ID: '+_LISTING_ID+').\\nEnd Listing first, or use the End Listing button.';}} "
+        f"  if(!confirm(msg))return;"
+        f"  fetch('/api/items/'+_SKU,{{"
+        f"    method:'DELETE',"
+        f"    headers:authHeaders()"
+        f"  }}).then(function(r){{return r.json();}}).then(function(d){{"
+        f"    if(d.ok){{window.location.href='/form/items';}}"
+        f"    else{{alert('Delete failed: '+(d.detail||'unknown error'));}}"
+        f"  }}).catch(function(e){{alert('Network error: '+e);}});"
+        f"}}"
+        f"document.querySelectorAll('.fv.editable').forEach(function(span){{"
+        f"  span.addEventListener('dblclick',function(){{"
+        f"    var field=span.dataset.field;"
+        f"    var oldVal=span.dataset.raw!==undefined?span.dataset.raw:span.textContent;"
+        f"    if(oldVal==='—')oldVal='';"
+        f"    var inp=document.createElement('input');"
+        f"    inp.type='text';inp.value=oldVal;inp.className='fv fv-edit';"
+        f"    span.parentNode.replaceChild(inp,span);"
+        f"    inp.focus();inp.select();"
+        f"    function commit(){{"
+        f"      var newVal=inp.value;"
+        f"      inp.disabled=true;"
+        f"      fetch('/api/items/'+_SKU,{{"
+        f"        method:'PATCH',"
+        f"        headers:authHeaders({{'Content-Type':'application/json'}}),"
+        f"        body:JSON.stringify({{fields:{{[field]:newVal}}}})"
+        f"      }}).then(function(r){{return r.json();}}).then(function(d){{"
+        f"        if(d.ok){{"
+        f"          span.textContent=newVal||'—';"
+        f"          span.dataset.raw=newVal;"
+        f"          inp.parentNode.replaceChild(span,inp);"
+        f"          span.classList.add('fv-saved');"
+        f"          setTimeout(function(){{span.classList.remove('fv-saved');}},800);"
+        f"        }}else{{"
+        f"          alert('Save failed: '+(d.detail||'error'));"
+        f"          inp.parentNode.replaceChild(span,inp);"
+        f"        }}"
+        f"      }}).catch(function(e){{"
+        f"        alert('Network error: '+e);"
+        f"        inp.parentNode.replaceChild(span,inp);"
+        f"      }});"
+        f"    }}"
+        f"    function cancel(){{inp.parentNode.replaceChild(span,inp);}}"
+        f"    inp.addEventListener('keydown',function(e){{"
+        f"      if(e.key==='Enter'){{e.preventDefault();commit();}}"
+        f"      if(e.key==='Escape')cancel();"
+        f"    }});"
+        f"    inp.addEventListener('blur',function(){{if(!inp.disabled)commit();}});"
+        f"  }});"
+        f"}});"
+        # ── updateCharCount ───────────────────────────────────────────────────
+        f"function updateCharCount(inp,max,countId){{"
+        f"  var n=inp.value.length;"
+        f"  var el=document.getElementById(countId);"
+        f"  if(!el)return;"
+        f"  el.textContent=n+'/'+max;"
+        f"  el.style.color=n>max?'#c44':(n>max*0.9?'#aa0':'#556');"
+        f"}}"
+        # ── saveCatalog ───────────────────────────────────────────────────────
+        f"function saveCatalog(){{"
+        f"  var fields={{}};"
+        f'  ["title","condition","floor_price","cost","location","ai_hint"].forEach(function(k){{'
+        f"    var span=document.querySelector('.fv.editable[data-field=\"'+k+'\"]');"
+        f"    if(span&&span.dataset.raw!==undefined)fields[k]=span.dataset.raw;"
+        f"  }});"
+        f"  if(!Object.keys(fields).length){{alert('No catalog fields to save.');return;}}"
+        f"  var msg=document.getElementById('catalog-save-msg');"
+        f"  if(msg)msg.textContent='Saving…';"
+        f"  fetch('/api/items/'+_SKU,{{"
+        f"    method:'PATCH',"
+        f"    headers:authHeaders({{'Content-Type':'application/json'}}),"
+        f"    body:JSON.stringify({{fields:fields}})"
+        f"  }}).then(function(r){{return r.json();}}).then(function(d){{"
+        f"    if(msg){{msg.textContent=d.ok?'✓ Saved':' Error: '+(d.detail||'failed');"
+        f"    msg.style.color=d.ok?'#4a4':'#c44';"
+        f"    if(d.ok)setTimeout(function(){{msg.textContent='';}},2000);}}"
+        f"  }}).catch(function(e){{if(msg){{msg.textContent='Network error';msg.style.color='#c44';}}}});"
+        f"}}"
+        # ── saveEbayDraft ─────────────────────────────────────────────────────
+        f"function saveEbayDraft(done){{"
+        f"  var dl={{}};"
+        f"  var t=document.getElementById('dl-title-input');"
+        f"  if(t)dl.title=t.value;"
+        f"  var p=document.getElementById('dl-price-input');"
+        f"  if(p&&p.value!=='')dl.price=parseFloat(p.value)||null;"
+        f"  var c=document.getElementById('dl-condition-select');"
+        f"  if(c&&c.value)dl.condition_enum=c.value;"
+        f"  var cd=document.getElementById('dl-cond-desc-input');"
+        f"  if(cd)dl.condition_description=cd.value;"
+        f"  var desc=document.getElementById('dl-desc-input');"
+        f"  if(desc)dl.description=desc.value;"
+        f"  var ship=document.getElementById('dl-ship-input');"
+        f"  if(ship&&ship.value)dl.shipping_profile=ship.value;"
+        f"  var ret=document.getElementById('dl-return-select');"
+        f"  if(ret&&ret.value)dl.return_policy_id=ret.value;"
+        f"  var scat=document.getElementById('dl-store-cat-select');"
+        f"  if(scat&&scat.value){{"
+        f"    dl.store_category_id=scat.value;"
+        f"    var scopt=scat.selectedOptions&&scat.selectedOptions[0];"
+        f'    if(scopt)dl.store_category_name=scopt.dataset.name||scopt.textContent.replace(/\\s*\\(\\d+\\)\\s*$/,"");'
+        f"  }}"
+        f"  var scat2=document.getElementById('dl-store-cat2-select');"
+        f"  if(scat2)dl.secondary_store_category_id=scat2.value||null;"
+        f"  var cat2id=document.getElementById('dl-cat2-id');"
+        f"  if(cat2id)dl.secondary_category_id=cat2id.value||null;"
+        f"  var aspInputs=document.querySelectorAll('#aspects-form [data-aspect]');"
+        f"  var attrs={{}};"
+        f"  aspInputs.forEach(function(el){{"
+        f"    var k=el.dataset.aspect;var v=el.value.trim();"
+        f"    if(v)attrs[k]=v;"
+        f"  }});"
+        f"  var patch={{draft_listing:dl}};"
+        f"  if(Object.keys(attrs).length)patch.item_attributes=attrs;"
+        f"  var msg=document.getElementById('dl-save-msg');"
+        f"  if(msg)msg.textContent='Saving…';"
+        f"  fetch('/api/items/'+_SKU,{{"
+        f"    method:'PATCH',"
+        f"    headers:authHeaders({{'Content-Type':'application/json'}}),"
+        f"    body:JSON.stringify({{fields:patch}})"
+        f"  }}).then(function(r){{return r.json();}}).then(function(d){{"
+        f"    if(msg){{msg.textContent=d.ok?'✓ Saved':' Error: '+(d.detail||'failed');"
+        f"    msg.style.color=d.ok?'#4a4':'#c44';"
+        f"    if(d.ok)setTimeout(function(){{msg.textContent='';}},2000);}}"
+        f"    if(d.ok&&typeof done==='function')done();"
+        f"  }}).catch(function(e){{if(msg){{msg.textContent='Network error';msg.style.color='#c44';}}}});"
+        f"}}"
+        # ── saveAndReprice ────────────────────────────────────────────────────
+        f"function saveAndReprice(){{"
+        f'  var st=document.getElementById("search-terms-input");'
+        f'  var msg=document.getElementById("reprice-msg");'
+        f'  var terms=st?st.value.trim():"";'
+        f'  if(msg)msg.textContent="Saving…";'
+        f'  fetch("/api/items/"+_SKU,{{'
+        f'    method:"PATCH",'
+        f'    headers:authHeaders({{"Content-Type":"application/json"}}),'
+        f"    body:JSON.stringify({{fields:{{search_terms:terms}}}})"
+        f"  }}).then(function(r){{return r.json();}}).then(function(d){{"
+        f'    if(!d.ok){{if(msg){{msg.textContent="Save failed";msg.style.color="#c44";}}return;}}'
+        f'    if(msg)msg.textContent="Saved — pricing…";'
+        f'    fetch("/api/items/"+_SKU+"/action",{{'
+        f'      method:"POST",'
+        f'      headers:authHeaders({{"Content-Type":"application/json"}}),'
+        f'      body:JSON.stringify({{action:"ebay_price"}})'
+        f"    }}).then(function(r){{return r.json();}}).then(function(d){{"
+        f'      if(msg){{msg.textContent=d.ok?"✓ Re-price queued":"Price queue failed";'
+        f'      msg.style.color=d.ok?"#4a4":"#c44";}}'
+        f"      if(d.ok)setTimeout(function(){{location.reload();}},3500);"
+        f'    }}).catch(function(e){{if(msg){{msg.textContent="Network error";msg.style.color="#c44";}}}});'
+        f'  }}).catch(function(e){{if(msg){{msg.textContent="Network error";msg.style.color="#c44";}}}});'
+        f"}}"
+        # ── category picker (search / ID entry / tree browse, shared) ─────────
+        + _CATEGORY_PICKER_JS +
+        # ── category context IIFE (conditions + aspects + store cat + hints) ──────
+        _CATEGORY_CONTEXT_IIFE + "</script>\n"
     )
 
     # Offer count badge: JS fetches /api/offers (cached), filters to this SKU.
     offer_script = ""
     if listing_id and api_key:
         import json as _json
+
         _ak_json = _json.dumps(api_key)
         _sku_json = _json.dumps(sku)
         offer_script = (
@@ -3704,31 +5961,29 @@ def _render_item_detail_html(
         _rb_code = h(str(_rb.get("reason_code") or ""))
         _rb_err = h(str(_rb.get("error") or ""))
         _rb_sugg = h(str(_rb.get("suggestion") or ""))
-        _rb_at = h(str(_rb.get("flagged_at") or "")[:19])
+        _rb_at = h(_local_ts(_rb.get("flagged_at")))
         _rb_detail = f'<div style="font-size:.82em;color:#f99;margin-top:4px">{_rb_err}</div>' if _rb_err else ""
         _rb_sugg_html = f'<div style="font-size:.82em;color:#fb7;margin-top:4px">Suggestion: {_rb_sugg}</div>' if _rb_sugg else ""
         review_block_html = (
             f'<div style="background:#3a1010;border:1.5px solid #8a2020;border-radius:8px;'
             f'padding:10px 14px;margin:10px 0;color:#f77;font-size:.9em">'
-            f'<strong>⛔ Blocked in review</strong>'
-            f' — stage: <code>{_rb_stage}</code>'
-            f', reason: <code>{_rb_code}</code>'
-            f'{(" · flagged " + _rb_at) if _rb_at else ""}'
-            f'{_rb_detail}'
-            f'{_rb_sugg_html}'
+            f"<strong>⛔ Blocked in review</strong>"
+            f" — stage: <code>{_rb_stage}</code>"
+            f", reason: <code>{_rb_code}</code>"
+            f"{(' · flagged ' + _rb_at) if _rb_at else ''}"
+            f"{_rb_detail}"
+            f"{_rb_sugg_html}"
             f'<div style="font-size:.79em;color:#884;margin-top:6px">'
             f'<a href="/form/needs-review" style="color:#aaa">← All blocked items</a>'
-            f' · Use <code>tgw migrate-unblock {h(sku)}</code> or click Mark Ready in the blocked queue after resolving.</div>'
-            f'</div>'
+            f" · Use <code>tgw migrate-unblock {h(sku)}</code> or click Mark Ready in the blocked queue after resolving.</div>"
+            f"</div>"
         )
 
     return (
         f"<!DOCTYPE html>\n<html lang='en'>\n<head>\n"
         f"<meta charset='utf-8'>"
         f"<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        f"<title>{h(sku)} — TGW</title>"
-        + _STATIC_HEAD
-        + f"<style>{_ITEMS_EXTRA_CSS}</style>"
+        f"<title>{h(sku)} — TGW</title>" + _STATIC_HEAD + f"<style>{_ITEMS_EXTRA_CSS}</style>"
         f"</head>\n<body>\n"
         f'<a class="back" href="/form/items">← Inventory</a>\n'
         f'<div class="sku-hdr">'
@@ -3737,13 +5992,11 @@ def _render_item_detail_html(
         f"</div>\n"
         f"{review_block_html}"
         f'<div class="detail-layout">'
-        f"{gallery_html}"
-        f"{fields_html}"
-        f"</div>\n"
+        f'<div class="dleft">{gallery_html}{_left_log_html}</div>'
+        f"{fields_html[:-6]}"
         f"{actions_html}"
-        + _STATIC_FOOT
-        + offer_script
-        + "</body></html>"
+        f"</div>"
+        f"</div>\n" + _STATIC_FOOT + offer_script + "</body></html>"
     )
 
 
@@ -3756,7 +6009,7 @@ def items_browse_form():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         extra_css=_ITEMS_EXTRA_CSS,
-        api_key=_web_key,
+        api_key="",
     )
     return HTMLResponse(html, headers={"Cache-Control": "no-store, no-cache"})
 
@@ -3777,10 +6030,7 @@ def item_detail_form(sku: str):
 
     sku_dir = json_path.parent
     images: List[str] = [p.name for p in _ordered_photos(item, sku_dir)]
-    videos: List[str] = [
-        p.name for p in sorted(sku_dir.iterdir())
-        if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}
-    ]
+    videos: List[str] = [p.name for p in sorted(sku_dir.iterdir()) if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}]
 
     jobs: List[Dict[str, Any]] = []
     try:
@@ -3788,7 +6038,7 @@ def item_detail_form(sku: str):
             with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     """
-                    SELECT queue_name, state, created_at, updated_at,
+                    SELECT job_id, queue_name, state, created_at, updated_at,
                            finished_at, error_code, error_detail
                       FROM queue_jobs
                      WHERE payload_json->>'sku' = %s
@@ -3805,7 +6055,7 @@ def item_detail_form(sku: str):
         log.warning("queue job fetch failed for %s: %s", sku, exc)
 
     return HTMLResponse(
-        _render_item_detail_html(sku, item, images, videos, jobs, _web_key),
+        _render_item_detail_html(sku, item, images, videos, jobs, ""),
         headers={"Cache-Control": "no-store, no-cache"},
     )
 
@@ -3813,6 +6063,7 @@ def item_detail_form(sku: str):
 # ---------------------------------------------------------------------------
 # GET /api/dashboard — home dashboard summary (PP-EDITOR-001 Phase 3b)
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/dashboard", dependencies=[AUTH])
 def dashboard() -> Dict[str, Any]:
@@ -3865,9 +6116,7 @@ def dashboard() -> Dict[str, Any]:
                     result["ready_count"] = row[3]
                     result["blocked_count"] = row[4]
                 else:
-                    row = con.execute(
-                        "SELECT COUNT(*) FROM catalog WHERE image IS NULL OR image = ''"
-                    ).fetchone()
+                    row = con.execute("SELECT COUNT(*) FROM catalog WHERE image IS NULL OR image = ''").fetchone()
                     result["needs_review"] = None
                     result["needs_photos"] = row[0]
                     result["has_revision_draft"] = None
@@ -3876,11 +6125,9 @@ def dashboard() -> Dict[str, Any]:
                 con.close()
         except Exception as exc:
             log.warning("dashboard: SQLite query failed: %s", exc)
-            result.update(needs_review=None, needs_photos=None,
-                          has_revision_draft=None, ready_count=None, blocked_count=None)
+            result.update(needs_review=None, needs_photos=None, has_revision_draft=None, ready_count=None, blocked_count=None)
     else:
-        result.update(needs_review=None, needs_photos=None,
-                      has_revision_draft=None, ready_count=None, blocked_count=None)
+        result.update(needs_review=None, needs_photos=None, has_revision_draft=None, ready_count=None, blocked_count=None)
 
     # --- PostgreSQL: dead_letter_count ---
     dead_letter_count = 0
@@ -3895,21 +6142,19 @@ def dashboard() -> Dict[str, Any]:
 
     # --- eBay pending_offers (cached, null on failure) ---
     global _pending_offers_cache, _pending_offers_cache_at
-    if (
-        _pending_offers_cache is not None
-        and time.time() - _pending_offers_cache_at < _PENDING_OFFERS_TTL
-    ):
+    if _pending_offers_cache is not None and time.time() - _pending_offers_cache_at < _PENDING_OFFERS_TTL:
         result["pending_offers"] = _pending_offers_cache
     else:
         try:
             from .apis.ebay.trading import get_best_offers
+
             offers = list(get_best_offers(_cfg, status="Pending"))
             _pending_offers_cache = len(offers)
             _pending_offers_cache_at = time.time()
             result["pending_offers"] = _pending_offers_cache
         except Exception as exc:
             _raw = str(exc)
-            if '429' in _raw or '21919188' in _raw or 'rate' in _raw.lower():
+            if "429" in _raw or "21919188" in _raw or "rate" in _raw.lower():
                 log.warning("dashboard: GetBestOffers rate limited — suppressing: %s", exc)
                 _pending_offers_cache = 0
             else:
@@ -3923,7 +6168,9 @@ def dashboard() -> Dict[str, Any]:
         units = [f"tgw-worker@{q}.service" for q in WORKER_QUEUES]
         r = subprocess.run(
             ["systemctl", "is-active", *units],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         up = sum(1 for line in r.stdout.splitlines() if line.strip() == "active")
     except Exception as exc:
@@ -3937,6 +6184,7 @@ def dashboard() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # GET /api/activity — recent queue job completions (activity feed)
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/activity", dependencies=[AUTH])
 def activity(limit: int = 15) -> Dict[str, Any]:
@@ -4001,6 +6249,7 @@ def _build_pm_context() -> str:
     # Open todos by agent
     try:
         from . import todo as _todo
+
         todos = _todo.todo_list()
         by_agent: Dict[str, int] = {}
         for t in todos:
@@ -4015,22 +6264,12 @@ def _build_pm_context() -> str:
     try:
         with psycopg2.connect(_cfg["postgres_dsn"]) as con:
             with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    "SELECT queue_name, state, COUNT(*) AS n FROM queue_jobs"
-                    " GROUP BY queue_name, state ORDER BY queue_name, state"
-                )
+                cur.execute("SELECT queue_name, state, COUNT(*) AS n FROM queue_jobs GROUP BY queue_name, state ORDER BY queue_name, state")
                 qrows = [dict(r) for r in cur.fetchall()]
-        active = {
-            r["queue_name"]: r["n"]
-            for r in qrows if r["state"] in ("queued", "claimed")
-        }
+        active = {r["queue_name"]: r["n"] for r in qrows if r["state"] in ("queued", "claimed")}
         dead = sum(r["n"] for r in qrows if r["state"] == "dead_letter")
-        lines.append(
-            "Active queues: " + (", ".join(f"{k}={v}" for k, v in active.items()) or "all idle")
-        )
-        lines.append(
-            f"Dead-letter jobs: {dead}" + (" — NEEDS ATTENTION" if dead else "")
-        )
+        lines.append("Active queues: " + (", ".join(f"{k}={v}" for k, v in active.items()) or "all idle"))
+        lines.append(f"Dead-letter jobs: {dead}" + (" — NEEDS ATTENTION" if dead else ""))
     except Exception as exc:
         lines.append(f"Queue/dead-letter: unavailable ({exc})")
 
@@ -4041,15 +6280,10 @@ def _build_pm_context() -> str:
             con = _sqlite_conn()
             try:
                 row = con.execute(
-                    "SELECT COUNT(*),"
-                    " COUNT(CASE WHEN LOWER(status) IN ('published','live','listed') THEN 1 END),"
-                    " COUNT(CASE WHEN LOWER(status) = 'staged' THEN 1 END)"
-                    " FROM catalog"
+                    "SELECT COUNT(*), COUNT(CASE WHEN LOWER(status) IN ('published','live','listed') THEN 1 END), COUNT(CASE WHEN LOWER(status) = 'staged' THEN 1 END) FROM catalog"
                 ).fetchone()
                 if row:
-                    lines.append(
-                        f"Inventory: {row[0]} total items, {row[1]} live on eBay, {row[2]} staged"
-                    )
+                    lines.append(f"Inventory: {row[0]} total items, {row[1]} live on eBay, {row[2]} staged")
             finally:
                 con.close()
     except Exception as exc:
@@ -4077,8 +6311,8 @@ def pm_chat(body: PMChatBody) -> Dict[str, Any]:
     msg_list.append({"role": "user", "content": body.message})
 
     provider, model = get_task_model(_cfg, "pm_chat")
-    if provider != "openrouter":
-        raise HTTPException(status_code=503, detail="pm_chat only supports openrouter provider")
+    if provider not in ("openrouter", "anthropic_direct"):
+        raise HTTPException(status_code=503, detail=f"pm_chat does not support provider {provider!r}")
 
     try:
         raw = call_model("pm_chat", "", "", _cfg, provider=provider, model=model, messages=msg_list)
@@ -4109,6 +6343,7 @@ def pm_action(body: PMActionBody) -> Dict[str, Any]:
         if not body.agent or not body.body:
             raise HTTPException(status_code=400, detail="add_todo requires agent and body")
         from . import todo as _todo
+
         result = _todo.todo_add(
             agent=body.agent,
             body=body.body,
@@ -4121,6 +6356,7 @@ def pm_action(body: PMActionBody) -> Dict[str, Any]:
         if not body.text:
             raise HTTPException(status_code=400, detail="add_suggestion requires text")
         from .api import cmd_suggest
+
         result = cmd_suggest(_cfg, body.text)
         return {"ok": True, "message": f"Suggestion added: {result.get('written', '')}", **result}
 
@@ -4132,15 +6368,14 @@ def pm_action(body: PMActionBody) -> Dict[str, Any]:
 # POST /api/offers/{offer_id}/respond — accept / counter / decline
 # ---------------------------------------------------------------------------
 
+
 def _offer_location(sku: str) -> str:
     """Return location from the SQLite catalog for a given SKU, or ''."""
     if not sku:
         return ""
     try:
         with _sqlite_conn() as con:
-            row = con.execute(
-                "SELECT location FROM catalog WHERE sku = ?", (sku,)
-            ).fetchone()
+            row = con.execute("SELECT location FROM catalog WHERE sku = ?", (sku,)).fetchone()
         return (row["location"] or "") if row else ""
     except Exception:
         return ""
@@ -4197,10 +6432,10 @@ def get_offers_limits() -> Dict[str, Any]:
     return {
         "ok": True,
         "limits": {
-            "daily_limit":  r["daily_limit"],
-            "daily_used":   r["daily_used"],
+            "daily_limit": r["daily_limit"],
+            "daily_used": r["daily_used"],
             "hourly_limit": r["hourly_limit"],
-            "hourly_used":  r["hourly_used"],
+            "hourly_used": r["hourly_used"],
         },
     }
 
@@ -4507,7 +6742,7 @@ def offers_form():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         offers_css=_OFFERS_EXTRA_CSS,
-        api_key_json=json.dumps(_web_key),
+        api_key_json=json.dumps(""),
     )
     return HTMLResponse(html)
 
@@ -4519,12 +6754,38 @@ def offers_form():
 # (GET /api/items/pending-revision registered earlier, before /{sku})
 # ---------------------------------------------------------------------------
 
+
 @app.post("/api/items/{sku}/revision/apply", dependencies=[AUTH])
 def apply_revision(sku: str, body: RevisionApplyBody) -> Dict[str, Any]:
     """Apply or preview the stored revision_draft for a SKU."""
     from .revision import cmd_revise_apply
 
-    return cmd_revise_apply(_cfg, sku, dry_run=body.dry_run, by=body.by)
+    result = cmd_revise_apply(_cfg, sku, dry_run=body.dry_run, by=body.by)
+    if result.get("ok") and result.get("applied"):
+        # Refresh the local live-mirror so the UI reflects what was just pushed.
+        # The revision has ALREADY landed on eBay at this point — a queue/DB
+        # hiccup enqueuing the follow-up sync must not turn into a 500 to the
+        # operator (who would then retry an already-applied revision) and
+        # must not vanish silently either (invariant C11): persist a finding
+        # so local stays known-desynced until a sync actually runs.
+        json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+        try:
+            result["sync_job_id"] = state_machine.enqueue_job(
+                queue_name="ebay_sync",
+                payload={"sku": sku, "reason": "revision_apply", "origin": "operator"},
+                max_attempts=2,
+            )
+        except Exception as exc:
+            log.exception("failed to enqueue post-revision ebay_sync for %s", sku)
+            result["sync_job_id"] = None
+            result["sync_enqueue_error"] = str(exc)
+            _persist_finding(
+                json_path, sku, "revision_sync_not_queued",
+                f"revision applied on eBay but follow-up ebay_sync "
+                f"enqueue failed: {exc}",
+                "apply_revision",
+            )
+    return result
 
 
 @app.delete("/api/items/{sku}/revision", dependencies=[AUTH])
@@ -4539,8 +6800,7 @@ def discard_revision(sku: str) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"read error: {exc}")
     if "revision_draft" not in doc:
         return {"ok": True, "sku": sku, "note": "no revision_draft present"}
-    del doc["revision_draft"]
-    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True))
+    _apply_patch(json_path, {"revision_draft": None})
     try:
         state_machine.enqueue_job(
             queue_name="catalog_rebuild",
@@ -4549,8 +6809,20 @@ def discard_revision(sku: str) -> Dict[str, Any]:
             not_before=time.time() + 30,
             max_attempts=3,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        # invariant C11: a skipped rebuild is a finding, not a swallowed
+        # exception — otherwise the catalog goes stale after a discard with
+        # no queryable trace of why.
+        if "unique" not in str(exc).lower() and "duplicate" not in str(exc).lower():
+            log.warning(
+                "failed to enqueue catalog_rebuild after revision discard for %s: %s",
+                sku, exc,
+            )
+            _persist_finding(
+                json_path, sku, "revision_discard_rebuild_not_queued",
+                f"catalog_rebuild enqueue failed after revision discard: {exc}",
+                "discard_revision",
+            )
     return {"ok": True, "sku": sku, "discarded": True}
 
 
@@ -4797,7 +7069,7 @@ def revisions_form():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         revisions_css=_REVISIONS_EXTRA_CSS,
-        api_key_json=json.dumps(_web_key),
+        api_key_json=json.dumps(""),
     )
     return HTMLResponse(html)
 
@@ -5079,7 +7351,7 @@ def drafts_form():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         review_css=_REVIEW_EXTRA_CSS,
-        api_key_json=json.dumps(_web_key),
+        api_key_json=json.dumps(""),
     )
     return HTMLResponse(html)
 
@@ -5088,6 +7360,7 @@ def drafts_form():
 def review_form_redirect():
     """Backward-compat redirect — /form/review renamed to /form/drafts."""
     from fastapi.responses import RedirectResponse
+
     return RedirectResponse(url="/form/drafts", status_code=301)
 
 
@@ -5275,7 +7548,7 @@ def needs_review_form():
     html = _NEEDS_REVIEW_HTML.format(
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
-        api_key_json=json.dumps(_web_key),
+        api_key_json=json.dumps(""),
     )
     return HTMLResponse(html)
 
@@ -5641,7 +7914,7 @@ def pipeline_form():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         pipeline_css=_PIPELINE_EXTRA_CSS,
-        api_key_json=json.dumps(_web_key),
+        api_key_json=json.dumps(""),
     )
     return HTMLResponse(html)
 
@@ -5649,6 +7922,7 @@ def pipeline_form():
 # ---------------------------------------------------------------------------
 # GET /api/pipeline/jobs — active + dead-letter jobs for the pipeline monitor
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/pipeline/jobs", dependencies=[AUTH])
 def pipeline_jobs() -> Dict[str, Any]:
@@ -5696,6 +7970,7 @@ def pipeline_jobs() -> Dict[str, Any]:
 # POST /api/jobs/{job_id}/cancel — cancel a dead-letter or queued job
 # ---------------------------------------------------------------------------
 
+
 @app.post("/api/jobs/{job_id}/cancel", dependencies=[AUTH])
 def cancel_job(job_id: str) -> Dict[str, Any]:
     """Cancel a dead-letter (or queued/retry_wait) job."""
@@ -5723,12 +7998,24 @@ def cancel_job(job_id: str) -> Dict[str, Any]:
     try:
         with psycopg2.connect(_cfg["postgres_dsn"]) as con:
             with con.cursor() as cur:
+                # WHERE-state guard closes the race between the SELECT above
+                # and this UPDATE: a worker leasing the job in between would
+                # otherwise get silently stomped either direction.
                 cur.execute(
-                    "UPDATE queue_jobs SET state = 'cancelled' WHERE job_id = %s",
-                    (job_id,),
+                    "UPDATE queue_jobs SET state = 'cancelled' "
+                    "WHERE job_id = %s AND state = ANY(%s)",
+                    (job_id, list(cancellable)),
                 )
+                cancelled = cur.rowcount > 0
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"cancel failed: {exc}")
+
+    if not cancelled:
+        raise HTTPException(
+            status_code=409,
+            detail=f"job {job_id} changed state before it could be cancelled "
+                   f"(race with a worker lease) — refresh and retry",
+        )
 
     return {"ok": True, "job_id": job_id, "cancelled": True}
 
@@ -5736,6 +8023,7 @@ def cancel_job(job_id: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # GET /api/system/info — disk, token, sync stamp, job-state counts (Phase 3k)
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/system/info", dependencies=[AUTH])
 def system_info() -> Dict[str, Any]:
@@ -5745,8 +8033,8 @@ def system_info() -> Dict[str, Any]:
     # Disk usage for key paths
     disk_paths = {
         "itemdata": _cfg.get("itemdata_root", Path("/opt/TGW/data/ItemData")),
-        "logs":     Path("/opt/TGW/var/log"),
-        "backup":   Path("/opt/TGW/var/local/backups"),
+        "logs": Path("/opt/TGW/var/log"),
+        "backup": Path("/opt/TGW/var/local/backups"),
     }
     disk: Dict[str, Any] = {}
     for label, path in disk_paths.items():
@@ -5755,9 +8043,9 @@ def system_info() -> Dict[str, Any]:
             disk[label] = {
                 "path": str(path),
                 "total": usage.total,
-                "used":  usage.used,
-                "free":  usage.free,
-                "pct":   round(usage.used / usage.total * 100, 1) if usage.total else 0,
+                "used": usage.used,
+                "free": usage.free,
+                "pct": round(usage.used / usage.total * 100, 1) if usage.total else 0,
             }
         except Exception as exc:
             disk[label] = {"path": str(path), "error": str(exc)}
@@ -5779,11 +8067,11 @@ def system_info() -> Dict[str, Any]:
                 except (ValueError, TypeError):
                     pass
             token_info = {
-                "exists":           True,
-                "mtime":            mtime,
-                "expires_at":       expires_at,
+                "exists": True,
+                "mtime": mtime,
+                "expires_at": expires_at,
                 "remaining_seconds": remaining,
-                "ok":               remaining is None or remaining > 300,
+                "ok": remaining is None or remaining > 300,
             }
         else:
             token_info = {"exists": False, "ok": False, "error": "file not found"}
@@ -5806,19 +8094,17 @@ def system_info() -> Dict[str, Any]:
     try:
         with psycopg2.connect(_cfg["postgres_dsn"]) as con:
             with con.cursor() as cur:
-                cur.execute(
-                    "SELECT state, COUNT(*) FROM queue_jobs GROUP BY state ORDER BY state"
-                )
+                cur.execute("SELECT state, COUNT(*) FROM queue_jobs GROUP BY state ORDER BY state")
                 for row in cur.fetchall():
                     job_states[str(row[0])] = int(row[1])
     except Exception as exc:
         job_states["_error"] = str(exc)
 
     return {
-        "ok":         True,
-        "disk":       disk,
+        "ok": True,
+        "disk": disk,
         "ebay_token": token_info,
-        "sync":       sync_info,
+        "sync": sync_info,
         "job_states": job_states,
     }
 
@@ -5826,6 +8112,7 @@ def system_info() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # POST /api/system/workers/{unit}/restart — restart a systemd unit (Phase 3k)
 # ---------------------------------------------------------------------------
+
 
 @app.post("/api/system/workers/{unit}/restart", dependencies=[AUTH])
 def restart_worker(unit: str) -> Dict[str, Any]:
@@ -5842,14 +8129,16 @@ def restart_worker(unit: str) -> Dict[str, Any]:
     try:
         r = subprocess.run(
             ["sudo", "-n", "systemctl", "restart", unit],
-            capture_output=True, text=True, timeout=20,
+            capture_output=True,
+            text=True,
+            timeout=20,
         )
         if r.returncode != 0:
             return {
-                "ok":         False,
-                "unit":       unit,
+                "ok": False,
+                "unit": unit,
                 "returncode": r.returncode,
-                "stderr":     r.stderr.strip(),
+                "stderr": r.stderr.strip(),
             }
         return {"ok": True, "unit": unit, "returncode": r.returncode}
     except Exception as exc:
@@ -6267,7 +8556,7 @@ def system_form():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         system_css=_SYSTEM_EXTRA_CSS,
-        api_key_json=json.dumps(_web_key),
+        api_key_json=json.dumps(""),
     )
     return HTMLResponse(html)
 
@@ -6650,7 +8939,7 @@ def home_form():
         static_head=_STATIC_HEAD,
         static_foot=_STATIC_FOOT,
         home_css=_HOME_EXTRA_CSS,
-        api_key_json=json.dumps(_web_key),
+        api_key_json=json.dumps(""),
     )
     return HTMLResponse(html, headers={"Cache-Control": "no-store, no-cache"})
 
@@ -6788,10 +9077,12 @@ def links_form():
     """External links hub — eBay, AI/ML, infrastructure, research. No auth, no API calls."""
     from fastapi.responses import HTMLResponse
 
-    return HTMLResponse(_LINKS_HTML.format(
-        static_head=_STATIC_HEAD,
-        static_foot=_STATIC_FOOT,
-    ))
+    return HTMLResponse(
+        _LINKS_HTML.format(
+            static_head=_STATIC_HEAD,
+            static_foot=_STATIC_FOOT,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -6877,22 +9168,21 @@ def _list_docs_sections() -> list[tuple[str, list[tuple[str, str]]]]:
 
 def _docs_sidebar_html(sections: list[tuple[str, list[tuple[str, str]]]], current: str) -> str:
     import html as _html
+
     parts: list[str] = ['<nav class="docs-sidebar">']
     for label, files in sections:
         parts.append(f'<div class="docs-section"><div class="docs-sec-label">{_html.escape(label)}</div>')
         for rel, display in files:
             active = " active" if rel == current else ""
-            parts.append(
-                f'<a class="docs-link{active}" href="/docs/{rel}"'
-                f' title="{_html.escape(rel)}">{_html.escape(display)}</a>'
-            )
-        parts.append('</div>')
-    parts.append('</nav>')
+            parts.append(f'<a class="docs-link{active}" href="/docs/{rel}" title="{_html.escape(rel)}">{_html.escape(display)}</a>')
+        parts.append("</div>")
+    parts.append("</nav>")
     return "".join(parts)
 
 
 def _docs_page_html(title: str, body_html: str, sidebar_html: str) -> str:
     import html as _html
+
     return (
         "<!DOCTYPE html><html lang='en'><head>"
         "<meta charset='utf-8'>"
@@ -6914,6 +9204,7 @@ def _docs_page_html(title: str, body_html: str, sidebar_html: str) -> str:
 def docs_index_redirect():
     """Redirect /docs to the runbook index."""
     from fastapi.responses import RedirectResponse
+
     return RedirectResponse(url="/docs/reference/runbooks/INDEX.md", status_code=302)
 
 
@@ -6953,7 +9244,7 @@ def docs_page(path: str):
         raise HTTPException(status_code=500, detail=f"read error: {exc}")
 
     md = mistune.create_markdown(
-        escape=False,
+        escape=True,
         plugins=["table", "strikethrough"],
     )
     body_html = md(content)
@@ -6969,6 +9260,7 @@ def docs_page(path: str):
 # POST /webhooks/ebay/notification — eBay push notification (no Bearer auth)
 # ---------------------------------------------------------------------------
 
+
 @app.post("/webhooks/ebay/notification")
 async def ebay_notification_webhook(request: Request) -> Dict[str, Any]:
     """
@@ -6980,58 +9272,58 @@ async def ebay_notification_webhook(request: Request) -> Dict[str, Any]:
     from .workers.ebay_legacy_sync import _mark_item_sold
 
     body = await request.body()
-    log.debug('ebay_webhook: received %d bytes', len(body))
+    log.debug("ebay_webhook: received %d bytes", len(body))
 
     if not verify_notification_signature(body, _cfg):
-        log.warning('ebay_webhook: invalid signature — rejected')
-        raise HTTPException(status_code=400, detail='invalid signature')
+        log.warning("ebay_webhook: invalid signature — rejected")
+        raise HTTPException(status_code=400, detail="invalid signature")
 
     event = parse_sold_notification(body)
     if event is None:
         # Ping/test notification from eBay — just ack it
-        log.info('ebay_webhook: non-sold notification (ping or unknown type)')
-        return {'ack': 'Success'}
+        log.info("ebay_webhook: non-sold notification (ping or unknown type)")
+        return {"ack": "Success"}
 
-    listing_id = event['listing_id']
+    listing_id = event["listing_id"]
     index = _get_listing_index()
     json_path = index.get(listing_id)
 
     # Cache miss — maybe a newly listed item; do a targeted scan
     if json_path is None or not json_path.exists():
-        log.info('ebay_webhook: listing %s not in index — rebuilding', listing_id)
+        log.info("ebay_webhook: listing %s not in index — rebuilding", listing_id)
         _listing_index_built_at_reset()
         index = _get_listing_index()
         json_path = index.get(listing_id)
 
     if json_path is None or not json_path.exists():
-        log.warning('ebay_webhook: no local item for listing_id=%s — acking anyway', listing_id)
-        return {'ack': 'Success'}
+        log.warning("ebay_webhook: no local item for listing_id=%s — acking anyway", listing_id)
+        return {"ack": "Success"}
 
     synced_at = datetime.now(timezone.utc).isoformat()
     try:
         did_mark = _mark_item_sold(
             json_path,
-            order_id=event['order_id'],
-            buyer=event['buyer'],
-            sale_price=event['sale_price'],
-            quantity=event['quantity'],
-            sale_date=event['sale_date'],
+            order_id=event["order_id"],
+            buyer=event["buyer"],
+            sale_price=event["sale_price"],
+            quantity=event["quantity"],
+            sale_date=event["sale_date"],
             synced_at=synced_at,
             cfg=_cfg,
         )
         if did_mark:
-            log.info('ebay_webhook: marked sold listing_id=%s', listing_id)
+            log.info("ebay_webhook: marked sold listing_id=%s", listing_id)
             try:
                 state_machine.enqueue_job(
-                    queue_name='catalog_rebuild',
-                    payload={'reason': 'ebay_webhook_sold'},
-                    dedupe_key='catalog_rebuild:pending',
+                    queue_name="catalog_rebuild",
+                    payload={"reason": "ebay_webhook_sold"},
+                    dedupe_key="catalog_rebuild:pending",
                     not_before=time.time() + 30,
                     max_attempts=3,
                 )
             except Exception:
                 pass
     except Exception as exc:
-        log.error('ebay_webhook: mark failed listing_id=%s: %s', listing_id, exc)
+        log.error("ebay_webhook: mark failed listing_id=%s: %s", listing_id, exc)
 
-    return {'ack': 'Success'}
+    return {"ack": "Success"}

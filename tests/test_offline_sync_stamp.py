@@ -8,29 +8,26 @@ legacy (flat) drives.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
 SCRIPT = Path(__file__).parents[1] / "bin" / "tgw-offline-sync"
 _TEST_LABEL = "TGW-TEST-STAMP-PYTEST"
-_MOUNT = Path(f"/media/tgw/{_TEST_LABEL}")
 
 
 def _make_fake_bin(tmp_path: Path) -> Path:
     fake_bin = tmp_path / "fakebin"
     fake_bin.mkdir()
     stubs = {
-        "mountpoint": "#!/bin/bash\nexit 0\n",
-        # rsync: succeed without copying anything; mkdir -p ensures dirs exist
-        "rsync": "#!/bin/bash\nexit 0\n",
-        "sync": "#!/bin/bash\nexit 0\n",
+        "mountpoint": "#!/usr/bin/env bash\nexit 0\n",
+        "rsync": "#!/usr/bin/env bash\nexit 0\n",
+        "sync": "#!/usr/bin/env bash\nexit 0\n",
         # btrfs: create the snapshot target dir so the prune pipeline has entries
         # and ls @snapshots/*/ doesn't fail with set -euo pipefail.
         "btrfs": (
-            "#!/bin/bash\n"
-            "if [ \"$1\" = subvolume ] && [ \"$2\" = snapshot ]; then\n"
-            "    mkdir -p \"${!#}\"\n"
+            "#!/usr/bin/env bash\n"
+            'if [ "$1" = subvolume ] && [ "$2" = snapshot ]; then\n'
+            '    mkdir -p "${!#}"\n'
             "fi\n"
             "exit 0\n"
         ),
@@ -42,9 +39,10 @@ def _make_fake_bin(tmp_path: Path) -> Path:
     return fake_bin
 
 
-def _run_sync(fake_bin: Path) -> subprocess.CompletedProcess:
+def _run_sync(fake_bin: Path, mount_base: Path) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env["PATH"] = str(fake_bin) + ":" + env.get("PATH", "")
+    env["TGW_OFFLINE_MOUNT_BASE"] = str(mount_base)
     return subprocess.run(
         ["bash", str(SCRIPT), _TEST_LABEL],
         env=env,
@@ -54,36 +52,34 @@ def _run_sync(fake_bin: Path) -> subprocess.CompletedProcess:
 
 
 class TestStampPlacement:
-    def setup_method(self):
-        _MOUNT.mkdir(parents=True, exist_ok=True)
-
-    def teardown_method(self):
-        shutil.rmtree(_MOUNT, ignore_errors=True)
-
     def test_btrfs_layout_stamp_inside_data(self, tmp_path: Path) -> None:
         """btrfs drives: stamp must be inside @data so snapshots capture it."""
-        (_MOUNT / "@data").mkdir()
-        (_MOUNT / "@snapshots").mkdir()
+        mount = tmp_path / _TEST_LABEL
+        mount.mkdir()
+        (mount / "@data").mkdir()
+        (mount / "@snapshots").mkdir()
         fake_bin = _make_fake_bin(tmp_path)
 
-        result = _run_sync(fake_bin)
+        result = _run_sync(fake_bin, tmp_path)
         assert result.returncode == 0, result.stderr
 
-        assert (_MOUNT / "@data" / ".tgw-sync-stamp").exists(), (
+        assert (mount / "@data" / ".tgw-sync-stamp").exists(), (
             "Stamp must be inside @data for btrfs snapshot coverage"
         )
-        assert not (_MOUNT / ".tgw-sync-stamp").exists(), (
+        assert not (mount / ".tgw-sync-stamp").exists(), (
             "Stamp must NOT be at mount root for btrfs layout"
         )
 
     def test_legacy_layout_stamp_at_mount_root(self, tmp_path: Path) -> None:
         """Legacy flat layout (no @data subvolume): stamp stays at mount root."""
+        mount = tmp_path / _TEST_LABEL
+        mount.mkdir()
         fake_bin = _make_fake_bin(tmp_path)
 
-        result = _run_sync(fake_bin)
+        result = _run_sync(fake_bin, tmp_path)
         assert result.returncode == 0, result.stderr
 
-        assert (_MOUNT / ".tgw-sync-stamp").exists(), (
+        assert (mount / ".tgw-sync-stamp").exists(), (
             "Stamp must be at mount root for legacy layout"
         )
-        assert not (_MOUNT / "@data" / ".tgw-sync-stamp").exists()
+        assert not (mount / "@data" / ".tgw-sync-stamp").exists()

@@ -15,7 +15,8 @@ from typing import Any, Dict
 
 import requests
 
-from tgw.apis.ebay.client import load_token
+from tgw import quota
+from tgw.apis.ebay.client import capture_response, load_token
 
 log = logging.getLogger(__name__)
 
@@ -70,7 +71,13 @@ def upload_photo(cfg: Dict[str, Any], photo_path: Path) -> str:
         'image':       (photo_path.name, photo_path.read_bytes(), mime),
     }
 
+    quota.precheck(cfg, 'ebay_eps')
     resp = requests.post(_TRADING_ENDPOINT, headers=headers, files=files, timeout=90)
+    quota.record(cfg, 'ebay_eps')
+    if resp.status_code == 429:
+        quota.record_429(cfg, 'ebay_eps', photo_path.name)
+    capture_response(cfg, 'eps', f'UploadSiteHostedPictures {photo_path.name}',
+                     None, resp.status_code, resp.content)
     resp.raise_for_status()
 
     root = ET.fromstring(resp.text)
@@ -79,6 +86,9 @@ def upload_photo(cfg: Dict[str, Any], photo_path: Path) -> str:
     if ack not in ('Success', 'Warning'):
         msgs = root.findall(f'.//{{{_NS}}}ShortMessage')
         error_text = '; '.join(m.text or '' for m in msgs) or 'unknown error'
+        # EPS reports quota exhaustion as Ack=Failure, not HTTP 429
+        if 'usage limit' in error_text.lower():
+            quota.record_429(cfg, 'ebay_eps', error_text)
         raise RuntimeError(f'UploadSiteHostedPictures failed ({ack}): {error_text}')
 
     url = root.findtext(f'{{{_NS}}}SiteHostedPictureDetails/{{{_NS}}}FullURL') or ''

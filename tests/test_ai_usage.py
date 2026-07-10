@@ -17,7 +17,6 @@ import pytest
 def _make_cfg():
     return {
         'models': {},
-        'openrouter_credentials_path': None,
         'postgres_dsn': 'dbname=state_machine user=tgw',
     }
 

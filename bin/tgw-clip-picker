@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# tgw-clip-picker — rofi/dmenu clipboard history picker (PP-CLIP-001 Phase 2, todo #1055)
+#
+# Reads from the tgw-clipd SQLite store via `tgw.clip.list_history()`, shows
+# a rofi menu (SKU clips pinned to the top, tagged), and on selection copies
+# the chosen entry back to the clipboard via `tgw clip get --id N --copy`.
+#
+# Bind to a Sway/Qtile keybind, e.g. (Sway config):
+#   bindsym $mod+v exec /opt/TGW/src/trader-grims-warehouse/bin/tgw-clip-picker
+#
+# Requires: rofi (or dmenu as a fallback), the tgw venv, tgw-clipd running
+# with history in ~/.local/share/tgw-clip/ (per-user, per PP-CLIP-001 Phase 1).
+
+set -euo pipefail
+
+TGW_BIN="${TGW_BIN:-tgw}"
+LIMIT="${TGW_CLIP_PICKER_LIMIT:-30}"
+
+# Format: "<id>\t[SKU] content" or "<id>\t     content", SKU entries first
+# (pinned), then the rest by recency. Talks to the SQLite store directly
+# via the installed tgw package -- no CLI parsing round-trip needed.
+rows="$(python3 -c "
+import sys
+sys.path.insert(0, '$(dirname "$(dirname "$(readlink -f "$0")")")/src')
+from tgw.clip import list_history
+rows = list_history(limit=${LIMIT})
+skus = [r for r in rows if r['is_sku']]
+rest = [r for r in rows if not r['is_sku']]
+for r in skus + rest:
+    tag = 'SKU' if r['is_sku'] else '   '
+    content = r['content'].replace('\n', ' ').replace('\t', ' ')[:100]
+    print(f\"{r['id']}\t[{tag}] {content}\")
+")"
+
+if [ -z "$rows" ]; then
+    echo "tgw-clip-picker: no clipboard history yet" >&2
+    exit 0
+fi
+
+if command -v rofi >/dev/null 2>&1; then
+    selected="$(printf '%s\n' "$rows" | cut -f2- | rofi -dmenu -p 'Clipboard' -no-custom -format i)"
+    # rofi -format i gives a 0-based row index into the piped list, or
+    # empty/-1 on Escape/no selection.
+    if [ -z "${selected:-}" ] || [ "$selected" -lt 0 ] 2>/dev/null; then
+        exit 0
+    fi
+    clip_id="$(printf '%s\n' "$rows" | sed -n "$((selected + 1))p" | cut -f1)"
+elif command -v dmenu >/dev/null 2>&1; then
+    # Code-review fix: dmenu's stdout protocol only returns the selected
+    # TEXT, not a position, so re-matching truncated/displayed content
+    # back against $rows can't disambiguate two rows with identical
+    # (100-char-truncated) content — the wrong clip id could get resolved.
+    # Fix: pipe the full "id\t[tag] content" line (id included) to dmenu
+    # itself, so whatever dmenu echoes back already carries its own
+    # unique id at the front — no re-matching needed at all.
+    selected_line="$(printf '%s\n' "$rows" | dmenu -p 'Clipboard:')"
+    clip_id="$(printf '%s\n' "$selected_line" | cut -f1)"
+else
+    echo "tgw-clip-picker: neither rofi nor dmenu found" >&2
+    exit 1
+fi
+
+if [ -z "${clip_id:-}" ]; then
+    exit 0
+fi
+
+"$TGW_BIN" clip get --id "$clip_id" --copy >/dev/null

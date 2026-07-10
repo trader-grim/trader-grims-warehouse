@@ -1,13 +1,12 @@
 """
 tgw.apis.lookup.igdb — Video game lookup via IGDB (Twitch developer API).
 
-Silently skipped if secrets_root/igdb-credentials.json is absent.
-Key: {"client_id": "...", "client_secret": "..."}
+Silently skipped if IGDB_CLIENT_ID/IGDB_CLIENT_SECRET aren't set
+(tgw.apis.secrets.get_secret, sourced from secrets_root/tgw.env).
 Requires free Twitch developer account: https://dev.twitch.tv/console
 """
 from __future__ import annotations
 
-import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -15,8 +14,9 @@ from typing import Any, Dict, Optional, Tuple
 
 import requests
 
+from tgw.apis.secrets import get_secret
+
 from .base import LookupResult, now_iso
-from .base import secrets_root as _secrets_root
 
 log = logging.getLogger(__name__)
 
@@ -61,16 +61,10 @@ def lookup(title: str, cfg: Dict[str, Any]) -> Optional[LookupResult]:
     if not title or not title.strip():
         return None
 
-    key_file = _secrets_root(cfg) / 'igdb-credentials.json'
-    if not key_file.exists():
-        return None
     try:
-        creds         = json.loads(key_file.read_text())
-        client_id     = creds.get('client_id', '')
-        client_secret = creds.get('client_secret', '')
-    except Exception:
-        return None
-    if not client_id or not client_secret:
+        client_id = get_secret('IGDB_CLIENT_ID')
+        client_secret = get_secret('IGDB_CLIENT_SECRET')
+    except RuntimeError:
         return None
 
     token = _get_token(client_id, client_secret)

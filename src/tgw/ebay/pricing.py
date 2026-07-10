@@ -34,7 +34,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import httpx
+
 from tgw.apis.ebay.client import ebay_get
+from tgw.apis.secrets import get_api_key
 
 log = logging.getLogger(__name__)
 
@@ -256,11 +259,14 @@ def _extract_comp_records(summaries: List[Dict[str, Any]]) -> List[Dict[str, Any
         cond = (cond_raw if isinstance(cond_raw, str)
                 else cond_raw.get('conditionDisplayName', ''))
         records.append({
-            'item_id':   item.get('itemId', ''),
-            'title':     item.get('title', ''),
-            'price':     round(price, 2),
-            'condition': cond,
-            'url':       item.get('itemWebUrl', ''),
+            'item_id':    item.get('itemId', ''),
+            'title':      item.get('title', ''),
+            'price':      round(price, 2),
+            'condition':  cond,
+            'url':        item.get('itemWebUrl', ''),
+            'outlier':    item.get('_outlier', False),
+            'llm_dropped': item.get('_llm_dropped', False),
+            'llm_reason': item.get('_llm_reason', ''),
         })
     return records
 
@@ -324,7 +330,134 @@ def _price_confidence(stats: Dict[str, Any], source: str) -> str:
     return 'low'
 
 
+
+
 # ---------------------------------------------------------------------------
+# Comp post-filters: IQR outlier removal + LLM relevance check
+# ---------------------------------------------------------------------------
+
+def _iqr_mark_and_filter(
+    summaries: List[Dict[str, Any]], prices: List[float]
+) -> Tuple[List[float], int]:
+    """Mark summaries with _outlier flag using IQR fence; return (cleaned prices, n_removed).
+    prices is the condition-filtered subset already extracted from summaries."""
+    if len(prices) < 4:
+        for s in summaries:
+            s.setdefault('_outlier', False)
+        return prices, 0
+    sp = sorted(prices)
+    n = len(sp)
+    q1 = sp[n // 4]
+    q3 = sp[3 * n // 4]
+    iqr = q3 - q1
+    lo = q1 - 1.5 * iqr
+    hi = q3 + 1.5 * iqr
+    for s in summaries:
+        try:
+            p = float(s['price']['value'])
+            s['_outlier'] = p < lo or p > hi
+        except (KeyError, ValueError, TypeError):
+            s['_outlier'] = False
+    cleaned = [p for p in prices if lo <= p <= hi]
+    return cleaned, len(prices) - len(cleaned)
+
+
+def _llm_filter_comps(
+    cfg: Dict[str, Any],
+    item_title: str,
+    summaries: List[Dict[str, Any]],
+    item_rank: Optional[int],
+) -> Tuple[List[float], str]:
+    """Filter comps with gpt-4o-mini via OpenRouter. Returns (kept prices, confidence).
+    Falls back to all non-outlier prices + 'medium' on any error."""
+    fallback_prices, _ = _best_prices(
+        [s for s in summaries if not s.get('_outlier')], item_rank
+    )
+    try:
+        api_key = get_api_key('openrouter')
+    except RuntimeError as exc:
+        log.warning('pricing: could not load openrouter key: %s', exc)
+        for s in summaries:
+            s.setdefault('_llm_dropped', False)
+            s.setdefault('_llm_reason', '')
+        return fallback_prices, 'medium'
+
+    candidates = [s for s in summaries if not s.get('_outlier')]
+    if not candidates:
+        for s in summaries:
+            s.setdefault('_llm_dropped', False)
+            s.setdefault('_llm_reason', '')
+        return [], 'low'
+
+    lines = []
+    for i, s in enumerate(candidates):
+        try:
+            p = float(s['price']['value'])
+        except (KeyError, ValueError, TypeError):
+            p = 0.0
+        cond = s.get('condition') or {}
+        if isinstance(cond, dict):
+            cond = cond.get('conditionDisplayName', '')
+        lines.append(f'{i}: ${p:.2f} [{cond}] — {s.get("title", "")[:80]}')
+
+    prompt = (
+        'We are selling: ' + item_title[:100] + '\n\n'
+        'Evaluate these active eBay listings as price comps:\n'
+        + '\n'.join(lines)
+        + '\n\nFor each: KEEP if it is a comparable item that should inform our price, '
+        'DROP if it is a different product, lot sale, wrong category, or otherwise incomparable. '
+        'Also rate overall confidence: high (5+ solid matches, tight range), '
+        'medium (3-4 matches or moderate range), low (few or mixed).\n\n'
+        'Reply with JSON only:\n'
+        '{"confidence":"high|medium|low","comps":[{"i":0,"keep":true,"reason":"..."}]}'
+    )
+
+    try:
+        resp = httpx.post(
+            'https://openrouter.ai/api/v1/chat/completions',
+            headers={
+                'Authorization': 'Bearer ' + api_key,
+                'Content-Type': 'application/json',
+                'HTTP-Referer': 'https://tgw.local',
+            },
+            json={
+                'model': 'openai/gpt-4o-mini',
+                'messages': [{'role': 'user', 'content': prompt}],
+                'max_tokens': 700,
+                'temperature': 0.1,
+            },
+            timeout=25.0,
+        )
+        resp.raise_for_status()
+        raw = resp.json()['choices'][0]['message']['content'].strip()
+        if raw.startswith('```'):
+            raw = raw.split('```')[1].lstrip('json').strip()
+        result = json.loads(raw)
+    except Exception as exc:
+        log.warning('pricing: LLM comp filter error: %s', exc)
+        for s in summaries:
+            s.setdefault('_llm_dropped', False)
+            s.setdefault('_llm_reason', '')
+        return fallback_prices, 'medium'
+
+    llm_conf = result.get('confidence', 'medium')
+    verdicts = {c['i']: c for c in result.get('comps', [])}
+
+    for i, s in enumerate(candidates):
+        v = verdicts.get(i, {})
+        s['_llm_dropped'] = not v.get('keep', True)
+        s['_llm_reason'] = v.get('reason', '')
+
+    for s in summaries:
+        s.setdefault('_llm_dropped', False)
+        s.setdefault('_llm_reason', '')
+
+    kept = [s for s in candidates if not s['_llm_dropped']]
+    kept_prices, _ = _best_prices(kept, item_rank)
+    log.info('pricing: LLM filter %d->%d comps confidence=%s', len(candidates), len(kept), llm_conf)
+    return kept_prices, llm_conf
+
+
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -336,9 +469,14 @@ def suggest_price(
     item_condition: str = '',
     product_lookup: Optional[Dict[str, Any]] = None,
     velocity: Optional[Dict[str, Any]] = None,
+    search_terms: str = '',
 ) -> Dict[str, Any]:
     """
     Suggest a price for *title* based on Browse API active listing comps.
+
+    search_terms: operator-set Browse API query (stage 0, highest priority).
+    When set, tried before product_lookup and title searches. Each manual entry
+    is a labelled training example for PP-AGENTIC-PRICE-001.
 
     When product_lookup is provided, tries a structured brand+MPN query before
     falling back to title-based search. Condition filtering removes better-condition
@@ -378,9 +516,20 @@ def suggest_price(
     source = ''
     was_cond_filtered = False
 
-    # Stage 0 — product_lookup structured query (brand+MPN or brand+product_title)
+    # Stage 0a — operator search_terms (highest priority; each entry is training data)
+    if search_terms and search_terms.strip():
+        summaries = _fetch_raw(cfg, search_terms.strip())
+        prices, cfiltered = _best_prices(summaries, item_rank)
+        if len(prices) >= MIN_COMPS:
+            all_prices = prices
+            winning_summaries = summaries
+            was_cond_filtered = cfiltered
+            source = 'browse:search_terms'
+            log.info('pricing stage 0a (search_terms): %r → %d comps', search_terms, len(prices))
+
+    # Stage 0b — product_lookup structured query (brand+MPN or brand+product_title)
     lq = _lookup_query(title, pl)
-    if lq:
+    if lq and not all_prices:
         summaries = _fetch_raw(cfg, lq)
         prices, cfiltered = _best_prices(summaries, item_rank)
         if len(prices) >= MIN_COMPS:
@@ -412,18 +561,37 @@ def suggest_price(
             was_cond_filtered = cfiltered
             source = 'browse:category+short'
 
-    # Stage 3 — category name only
-    if not all_prices and category_name:
-        summaries = _fetch_raw(cfg, category_name)
-        prices, cfiltered = _best_prices(summaries, item_rank)
-        if len(prices) >= MIN_COMPS:
-            all_prices = prices
-            winning_summaries = summaries
-            was_cond_filtered = cfiltered
-            source = 'browse:category_only'
+    # Stage 3 (category name only) removed 2026-07-02 (session 41): an eBay
+    # category name (e.g. "California", "Ashtrays", "Horse Racing") is a taxonomy
+    # label, not a description of the item, and searching Browse for it returns
+    # anything that happens to share the word — confirmed on tgw202605060201087
+    # (a $29.99 vintage plaque): querying "California" returned raw almonds,
+    # medjool dates, zinnia seeds, and a $309.95 "goldback," and even after
+    # LLM/IQR filtering the survivors were still incoherent enough to price the
+    # item at $340.99 (10% over the $309.95 max) — an 11x overprice that got
+    # staged live and then deadlocked publish (see ebay_publish.py fix, same
+    # session). Stages 4/5 below (category-group typical price, category config
+    # default) are a strictly safer fallback for "not enough real comps" than
+    # trusting a category-name text search.
 
     if was_cond_filtered:
         source += '+cond'
+
+    # Post-filter: IQR outlier removal then LLM relevance check on winning comps
+    llm_confidence: Optional[str] = None
+    if winning_summaries and len(all_prices) >= MIN_COMPS:
+        all_prices, _n_out = _iqr_mark_and_filter(winning_summaries, all_prices)
+        if _n_out:
+            log.info('pricing: IQR removed %d outlier(s) from %r comps', _n_out, source)
+        if len(all_prices) >= MIN_COMPS:
+            llm_prices, llm_confidence = _llm_filter_comps(
+                cfg, title, winning_summaries, item_rank
+            )
+            if len(llm_prices) >= MIN_COMPS:
+                all_prices = llm_prices
+            else:
+                log.info('pricing: LLM filter left <MIN_COMPS; keeping IQR result')
+                llm_confidence = 'low'
 
     stats = _compute_stats(all_prices)
 
@@ -483,6 +651,14 @@ def suggest_price(
 
     price = stats['p25']
     confidence = _price_confidence(stats, source)
+    if llm_confidence:
+        # LLM's assessment supersedes heuristic when it ran successfully
+        if llm_confidence == 'low' or confidence == 'low':
+            confidence = 'low'
+        elif llm_confidence == 'medium' or confidence == 'medium':
+            confidence = 'medium'
+        else:
+            confidence = 'high'
 
     # Hard floor — apply to Browse API results too
     price, floored = _apply_floor(price, cfg, str(category_id))
@@ -492,10 +668,18 @@ def suggest_price(
     log.info('pricing: %r → $%.2f (p25 of %d comps, %s, confidence=%s)',
              title[:60], price, stats['count'], source, confidence)
 
+    _n_outlier = sum(1 for s in winning_summaries if s.get('_outlier')) if winning_summaries else 0
+    _n_dropped = sum(1 for s in winning_summaries if s.get('_llm_dropped')) if winning_summaries else 0
+    _comp_stats = dict(stats)
+    if _n_outlier:
+        _comp_stats['outlier_count'] = _n_outlier
+    if _n_dropped:
+        _comp_stats['llm_dropped_count'] = _n_dropped
+    _comp_stats['confidence'] = confidence
     return {
         'price':            price,
         'source':           source,
-        'comps':            stats,
+        'comps':            _comp_stats,
         'comp_items':       _extract_comp_records(winning_summaries),
         'price_confidence': confidence,
         'velocity_hint':    vel_hint,

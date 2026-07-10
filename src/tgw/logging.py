@@ -195,6 +195,31 @@ def log_event(event: str, level: str = 'info', **fields: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
+# One-off / ad hoc scripts: announce before doing anything
+# ---------------------------------------------------------------------------
+
+def announce_script_run(script_name: str, purpose: str, **fields: Any) -> None:
+    """
+    Every one-off script (backfill, bulk requeue, remediation, migration —
+    anything under scripts/ run by hand, not a systemd worker) must call this
+    once at the top of main(), before touching the queue or any data.
+
+    Without this, an anomalous burst of queue activity or API calls has no
+    attributable cause in the logs — see 2026-07-04/05 requeue storm
+    (invariant E9): a script ran more than once with zero durable trace that
+    it had run at all, and the resulting spike looked inexplicable for days.
+
+    Usage:
+        announce_script_run(
+            'requeue_ebay_draft_402_dead_letters.py',
+            'bulk-requeue ebay_draft dead-letters matching a 402 error pattern',
+            apply=args.apply, limit=args.limit,
+        )
+    """
+    log_event('script_run_start', script=script_name, purpose=purpose, **fields)
+
+
+# ---------------------------------------------------------------------------
 # Convenience: get a named logger (import shortcut for workers)
 # ---------------------------------------------------------------------------
 

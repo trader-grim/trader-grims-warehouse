@@ -28,78 +28,35 @@ def _suggestions(*pairs):
 # ---------------------------------------------------------------------------
 
 class TestValidateCategorySuggestion:
-    """Direct unit tests for the helper — taxonomy API always mocked."""
+    """Disabled 2026-07-02 (session 41): _validate_category_suggestion no longer makes
+    a live getCategorySuggestions call (session-39 audit finding #3 — it duplicated
+    ai_identify's category call on every drafted item and was a confirmed contributor
+    to repeated Taxonomy API 429 exhaustion). It's now an unconditional stub that
+    always returns 'unavailable' regardless of input or mocked API response — these
+    tests confirm the taxonomy API is never touched. The agreed/mismatch comparison
+    logic these tests used to cover was removed with the live call; re-add equivalent
+    coverage if the helper is ever re-enabled (see docstring in ebay_draft.py)."""
 
     def _call(self, title, resolved_id, raw_suggestions, top_n=5):
         from tgw.workers.ebay_draft import _validate_category_suggestion
-        with patch(_TAX_PATCH, return_value=raw_suggestions):
-            return _validate_category_suggestion({}, title, resolved_id, top_n=top_n)
+        with patch(_TAX_PATCH, return_value=raw_suggestions) as mocked:
+            result = _validate_category_suggestion({}, title, resolved_id, top_n=top_n)
+        return result, mocked
 
-    def test_agreed_when_top_match(self):
+    def test_always_unavailable_and_never_calls_taxonomy_api(self):
         suggestions = _suggestions(('12345', 'Antique Pocket Watches'), ('99999', 'Other'))
-        result = self._call('Silver Elgin pocket watch', '12345', suggestions)
-        assert result['category_agreement'] == 'agreed'
-
-    def test_agreed_within_top3(self):
-        suggestions = _suggestions(
-            ('11111', 'First'), ('22222', 'Second'), ('12345', 'Target'), ('33333', 'Fourth'),
-        )
-        result = self._call('some item', '12345', suggestions)
-        assert result['category_agreement'] == 'agreed'
-
-    def test_mismatch_when_not_in_top3(self):
-        suggestions = _suggestions(
-            ('11111', 'Wrong A'), ('22222', 'Wrong B'), ('33333', 'Wrong C'),
-            ('12345', 'Right (4th)'),
-        )
-        result = self._call('some item', '12345', suggestions)
-        assert result['category_agreement'] == 'mismatch'
-
-    def test_mismatch_when_not_in_any_suggestion(self):
-        suggestions = _suggestions(('11111', 'Completely Different'), ('22222', 'Also Different'))
-        result = self._call('rare item', '99999', suggestions)
-        assert result['category_agreement'] == 'mismatch'
-
-    def test_mismatch_when_empty_suggestions(self):
-        result = self._call('item title', '12345', [])
-        assert result['category_agreement'] == 'mismatch'
+        result, mocked = self._call('Silver Elgin pocket watch', '12345', suggestions)
+        assert result['category_agreement'] == 'unavailable'
         assert result['category_suggestions'] == []
+        mocked.assert_not_called()
 
     def test_unavailable_on_api_exception(self):
         from tgw.workers.ebay_draft import _validate_category_suggestion
-        with patch(_TAX_PATCH, side_effect=ConnectionError('eBay unreachable')):
+        with patch(_TAX_PATCH, side_effect=ConnectionError('eBay unreachable')) as mocked:
             result = _validate_category_suggestion({}, 'title', '12345')
         assert result['category_agreement'] == 'unavailable'
         assert result['category_suggestions'] == []
-
-    def test_simplified_suggestions_structure(self):
-        suggestions = _suggestions(('55555', 'Cameras'), ('66666', 'Lenses'))
-        result = self._call('Canon 50mm lens', '55555', suggestions)
-        assert result['category_agreement'] == 'agreed'
-        for s in result['category_suggestions']:
-            assert 'category_id' in s
-            assert 'category_name' in s
-
-    def test_top_n_limits_suggestions(self):
-        suggestions = _suggestions(*[(str(i), f'Cat {i}') for i in range(10)])
-        result = self._call('item', '0', suggestions, top_n=3)
-        assert len(result['category_suggestions']) <= 3
-
-    def test_strips_entries_missing_category_id(self):
-        raw = [
-            {'category': {}},   # no categoryId — must be dropped
-            {'category': {'categoryId': '12345', 'categoryName': 'Good'}},
-        ]
-        from tgw.workers.ebay_draft import _validate_category_suggestion
-        with patch(_TAX_PATCH, return_value=raw):
-            result = _validate_category_suggestion({}, 'title', '12345')
-        assert all(s['category_id'] for s in result['category_suggestions'])
-
-    def test_agreed_category_id_as_string(self):
-        """category_id comparison must work regardless of int vs str input."""
-        suggestions = _suggestions(('47223', 'Pocket Watches'))
-        result = self._call('watch', 47223, suggestions)   # int resolved_id
-        assert result['category_agreement'] == 'agreed'
+        mocked.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

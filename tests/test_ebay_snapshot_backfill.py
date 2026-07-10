@@ -6,13 +6,24 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
 import requests
 
 from tgw.ebay.snapshot_backfill import _backfill_one, cmd_ebay_backfill_snapshot
 
+
+@pytest.fixture(autouse=True)
+def _mock_fence(monkeypatch):
+    import tgw.ebay.snapshot_backfill as _smod
+    from tests.conftest import make_fake_patch_item
+
+    monkeypatch.setattr(_smod, "fence_patch_item", make_fake_patch_item(None))
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _write_item(root: Path, sku: str, doc: dict) -> Path:
     d = root / sku
@@ -26,6 +37,7 @@ def _make_cfg(tmp_path: Path) -> dict:
     return {
         "itemdata_root": tmp_path / "ItemData",
         "pretty": False,
+        "api_key": "test-api-key",
     }
 
 
@@ -65,6 +77,7 @@ _ITEM_NO_LISTING_ID = {
 # ---------------------------------------------------------------------------
 # _backfill_one unit tests
 # ---------------------------------------------------------------------------
+
 
 def test_backfill_one_dry_run(tmp_path, monkeypatch):
     """Dry-run returns ok=True, dry_run=True without calling ebay_get."""
@@ -193,6 +206,7 @@ def test_backfill_one_missing_json(tmp_path, monkeypatch):
 # cmd_ebay_backfill_snapshot integration tests
 # ---------------------------------------------------------------------------
 
+
 def test_cmd_dry_run_no_api_calls(tmp_path, monkeypatch):
     """--dry-run scans and reports without calling ebay_get."""
     root = tmp_path / "ItemData"
@@ -263,11 +277,15 @@ def test_cmd_limit_respected(tmp_path, monkeypatch):
     root.mkdir()
     for i in range(5):
         sku = f"tgw2026010112000000{i}"
-        _write_item(root, sku, {
-            "sku": sku,
-            "title": f"Widget {i}",
-            "ebay_listing": {"listing_id": f"ID{i}", "status": "Active"},
-        })
+        _write_item(
+            root,
+            sku,
+            {
+                "sku": sku,
+                "title": f"Widget {i}",
+                "ebay_listing": {"listing_id": f"ID{i}", "status": "Active"},
+            },
+        )
     cfg = _make_cfg(tmp_path)
 
     calls = []

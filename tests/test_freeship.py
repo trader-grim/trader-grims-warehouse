@@ -61,7 +61,9 @@ def test_freeship_zero_base_price():
 
 def test_config_freeship_defaults(tmp_path):
     cfg_path = tmp_path / "tgw-api-config.json"
-    cfg_path.write_text("{}", encoding="utf-8")
+    # secrets_root must stay inside tmp_path — otherwise load_config() falls
+    # back to the real /opt/TGW/secrets and PermissionErrors for non-tgw runners.
+    cfg_path.write_text(json.dumps({"secrets_root": str(tmp_path / "secrets")}), encoding="utf-8")
     cfg = load_config(cfg_path)
     assert cfg["free_shipping_enabled"] is False
     assert cfg["default_shipping_cost"] == 0.0
@@ -71,6 +73,7 @@ def test_config_freeship_defaults(tmp_path):
 def test_config_freeship_from_json(tmp_path):
     cfg_path = tmp_path / "tgw-api-config.json"
     cfg_path.write_text(json.dumps({
+        "secrets_root": str(tmp_path / "secrets"),
         "free_shipping_enabled": True,
         "default_shipping_cost": 6.95,
         "fulfillment_policy_free_shipping": "POLICY-FREE-123",
@@ -107,6 +110,7 @@ def _cfg(tmp_path):
         "free_shipping_enabled": False,
         "default_shipping_cost": 0.0,
         "fulfillment_policy_free_shipping": None,
+        "api_key": "test-api-key",
     }
 
 
@@ -216,12 +220,16 @@ def price_worker(tmp_path, monkeypatch):
             return {"stub": True}
 
     monkeypatch.setattr(lq, "score_draft", lambda item: _Q())
+    from tests.conftest import make_fake_fence_write_tmp, make_fake_patch_item_tmp
+    monkeypatch.setattr(ebay_price_mod, 'fence_ebay_write', make_fake_fence_write_tmp(tmp_path))
+    monkeypatch.setattr(ebay_price_mod, 'fence_patch_item', make_fake_patch_item_tmp(tmp_path))
     worker = object.__new__(ebay_price_mod.EbayPriceWorker)
     worker.config = {
         "itemdata_root": tmp_path,
         "pretty": False,
         "free_shipping_enabled": True,
         "default_shipping_cost": 6.00,
+        "api_key": "test-api-key",
     }
     worker._enqueued = enqueued
     return worker
@@ -302,12 +310,16 @@ def test_worker_no_freeship_when_disabled(tmp_path, monkeypatch):
             return {"stub": True}
 
     monkeypatch.setattr(lq, "score_draft", lambda item: _Q())
+    from tests.conftest import make_fake_fence_write_tmp, make_fake_patch_item_tmp
+    monkeypatch.setattr(ebay_price_mod, 'fence_ebay_write', make_fake_fence_write_tmp(tmp_path))
+    monkeypatch.setattr(ebay_price_mod, 'fence_patch_item', make_fake_patch_item_tmp(tmp_path))
     worker = object.__new__(ebay_price_mod.EbayPriceWorker)
     worker.config = {
         "itemdata_root": tmp_path,
         "pretty": False,
         "free_shipping_enabled": False,
         "default_shipping_cost": 6.00,
+        "api_key": "test-api-key",
     }
     comps = {"count": 3, "min": 10.0, "p25": 12.99, "median": 14.0,
              "p75": 15.0, "max": 15.0}
@@ -460,12 +472,16 @@ def test_worker_empty_string_shipping_cost_falls_through(tmp_path, monkeypatch):
             return {"stub": True}
 
     monkeypatch.setattr(lq, "score_draft", lambda item: _Q())
+    from tests.conftest import make_fake_fence_write_tmp, make_fake_patch_item_tmp
+    monkeypatch.setattr(ebay_price_mod, 'fence_ebay_write', make_fake_fence_write_tmp(tmp_path))
+    monkeypatch.setattr(ebay_price_mod, 'fence_patch_item', make_fake_patch_item_tmp(tmp_path))
     worker = object.__new__(ebay_price_mod.EbayPriceWorker)
     worker.config = {
         "itemdata_root": tmp_path,
         "pretty": False,
         "free_shipping_enabled": True,
         "default_shipping_cost": 5.00,
+        "api_key": "test-api-key",
     }
     comps = {"count": 3, "min": 10.0, "p25": 12.99, "median": 14.0,
              "p75": 15.0, "max": 15.0}
@@ -496,12 +512,16 @@ def test_worker_zero_shipping_cost_not_overridden(tmp_path, monkeypatch):
             return {"stub": True}
 
     monkeypatch.setattr(lq, "score_draft", lambda item: _Q())
+    from tests.conftest import make_fake_fence_write_tmp, make_fake_patch_item_tmp
+    monkeypatch.setattr(ebay_price_mod, 'fence_ebay_write', make_fake_fence_write_tmp(tmp_path))
+    monkeypatch.setattr(ebay_price_mod, 'fence_patch_item', make_fake_patch_item_tmp(tmp_path))
     worker = object.__new__(ebay_price_mod.EbayPriceWorker)
     worker.config = {
         "itemdata_root": tmp_path,
         "pretty": False,
         "free_shipping_enabled": True,
         "default_shipping_cost": 9.99,  # must NOT be used when item has shipping_cost=0
+        "api_key": "test-api-key",
     }
     comps = {"count": 3, "min": 10.0, "p25": 12.99, "median": 14.0,
              "p75": 15.0, "max": 15.0}

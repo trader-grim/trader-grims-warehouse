@@ -5,8 +5,9 @@ Provides batch pipeline support for full-catalog alt-text sweeps.
 The google-genai package is an OPTIONAL dependency — functions that need it
 raise ImportError with an install message if absent.
 
-Credentials: secrets_root/google-credentials.json → {"api_key": "..."}
-Fallback:    GOOGLE_API_KEY environment variable
+Credentials: GOOGLE_API_KEY env var (tgw.apis.secrets.get_api_key), sourced
+from secrets_root/tgw.env — see tgw.apis.secrets for the single-facility
+convention shared by every provider.
 
 Batch flow:
     1. Build task dicts (build_alt_text_task) — pure Python, no SDK needed
@@ -27,8 +28,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
-_GOOGLE_CRED_FILENAME = "google-credentials.json"
-
 # Per PERPLEXITY-007: 40 images keeps well within token + file-size limits.
 # ~5 SKUs × ~8 images = 40; for primary-image-only mode = 40 SKUs/chunk.
 BATCH_IMAGES_PER_TASK = 40
@@ -42,28 +41,14 @@ _ALT_TEXT_SYSTEM_PROMPT = (
 
 
 def load_google_key(cfg: Dict[str, Any]) -> str:
-    """Return Google API key from secrets_root or GOOGLE_API_KEY env var.
+    """Return Google API key via the single-facility GOOGLE_API_KEY env var
+    (tgw.apis.secrets.get_api_key) — see secrets_root/tgw.env.
 
     Raises RuntimeError when the key is absent.
     """
-    import os
+    from tgw.apis.secrets import get_api_key
 
-    cred_path = Path(cfg.get("secrets_root", "/opt/TGW/secrets")) / _GOOGLE_CRED_FILENAME
-    if cred_path.exists():
-        try:
-            data = json.loads(cred_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            raise RuntimeError(f"Cannot read {cred_path}: {exc}") from exc
-        key = data.get("api_key") or data.get("key") or data.get("GOOGLE_API_KEY", "")
-        if key:
-            return key
-    env_key = os.environ.get("GOOGLE_API_KEY", "")
-    if env_key:
-        return env_key
-    raise RuntimeError(
-        f"Google API key not found in {cred_path} or GOOGLE_API_KEY env var. "
-        "Complete todo #153 (Google API key setup) before running this command."
-    )
+    return get_api_key('google')
 
 
 def _require_genai():

@@ -300,6 +300,39 @@ ledger 23 MB, `/opt/TGW` partition 187 G used / 295 G.
 Ordered by risk closed per effort. A1–A3 are systemd template work (repo files, operator
 installs); A4 is a normal code task; A5–A6 are operator drills/policy.
 
+**Status update (2026-07-04):** A1 was already fully built, installed, and running
+successfully since 2026-06-20 — the master plan's "no backup running, top operator
+risk" note was **stale**. The real gap found: `SNAP_DIR` (the rsync target meant to
+be a separate device) was actually on the same `nvme0n1p3` filesystem as the primary
+dump — a single point of failure. Fixed live: `/dev/sdc` (698.6G, previously labeled
+`trader_grims_backup`, an old superseded backup Dave confirmed safe to wipe) was
+repartitioned into 3 btrfs partitions, mounted under `/opt/TGW/mnt/` (not
+`/home/db/devices/` — that path is 700 db-only, unreachable by the `tgw` service
+account that needs to write these):
+- `/opt/TGW/mnt/tgw-db-backup` (20G) — `bin/tgw-db-backup` and `bin/tgw-secrets-backup`
+  now point here (`config.py`'s `backup_snapshot_root`). Live-verified: today's dump
+  landed here successfully.
+- `/opt/TGW/mnt/tgw-itemdata-snap` (300G) — reserved, not yet wired to anything.
+- `/opt/TGW/mnt/tgw-itemarchive` (378.6G) — reserved for the E5 local archive
+  (`archive_root`, todo #1104) once it needs to grow past NVMe's 57G free.
+
+**A2 (cloud sync) investigated and NOT broken** — `tgw health` shows it red
+("rclone sync never completed"), but the real story: this is the **first-ever full
+sync** of ItemData (~500K photos), and `rclone sync` only reaches a completed state
+once it wins the race against new writes arriving mid-pass (Dave, 2026-07-04). Once
+this first pass completes, subsequent cycles will be incremental (new/changed files
+only) and fast, and the shared flock with `tgw-itemdata-sync` will stop starving
+`tgw-cloud-sync`. No code changed — correctly left alone rather than patched at 1am.
+
+**Future direction (Dave, 2026-07-04, not started):** replace the current
+rclone-based `tgw-itemdata-sync` with a combined **git-annex + recoll + NATS
+JetStream + Google Drive** pipeline — better and faster than a full-tree rclone
+scan every cycle. Ties together threads already scattered across the plan:
+PP-EVENTD-001's git-annex+GDrive data-plane section (`reference/PP-EVENTD-001-design.md`),
+the NATS JetStream audit-stream precedent from PP-AIOPS-001, and PP-SEARCH-001's
+recoll index (Dave's own parallel project, integrating soon). Not scoped or named
+yet — flagging for a dedicated planning pass, not attempting to design it inline here.
+
 **A1 — Daily ledger dump (closes the worst gap; handoff §6 step 3).**
 *Do:* `tgw-db-backup.service` (oneshot, `User=tgw`) + `.timer` (daily 03:30):
 ```
@@ -538,6 +571,51 @@ build) properly instead of by deletion:
 | B4 | Snapshot disk (`sde1`) dies silently | A4 yellow on snapshot-age catches write-stops; disk SMART is operator routine; cloud tier is the redundancy |
 | B5 | Dump runs while a migration batch writes sku_history | `--format=custom` is a consistent snapshot by construction (single transaction) — no action needed, noted for confidence |
 | B6 | rclone sync propagates a local catastrophe upward | `--backup-dir` dated trash (A2) is the rewind; restic versioning (Phase B) is the real fix |
+
+## 6.5. ItemArchive zipmerge cadence — PLANNING NOTE for 2pm 2026-07-04 (not implemented)
+
+**Context (2026-07-03/04, invariant E5 enforcement, todo #1104):** `items.atomic_write_json`
+now zips the item's prior state into `archive_root/<sku>.zip` before every overwrite
+(fail-closed). `archive_root` (`/opt/TGW/data/ItemArchive`) is a **temporary local
+directory on the NVMe root** — Dave's explicit direction, since the previously
+configured symlink pointed at an unmounted drive. It only accumulates new go-forward
+writes; disk check at the time showed 57G free on that partition (80% used).
+
+The **real, consolidated archive** (54,688 zips, ~163G) currently lives at
+`/home/db/devices/porche/history/ItemArchive` — Dave is manually merging several
+older archive copies into this set with `zipmerge`. His stated pattern: keep a
+"regular writes" archive location that changes are appended to continuously, then
+periodically `zipmerge` its contents into the consolidated master so the master
+itself isn't constantly written to.
+
+**What needs deciding at 2pm:**
+- Formalize the zipmerge cadence (daily? weekly? triggered by a size/count threshold
+  on the local `/opt/TGW/data/ItemArchive` dir?) as a scheduled job, same tier as the
+  A1–A6 backup jobs above.
+- Decide the merge direction/tooling: does it fold local `ItemArchive/*.zip` into the
+  porche master via `zipmerge`, then truncate/clear the local copies? Or copy-then-verify
+  then delete? Must not lose any entry — E5's whole purpose is zero-loss archiving.
+- Decide final resting place for `archive_root` once the porche consolidation settles
+  (stay local + scheduled merge, or repoint at porche/another mount directly) — this
+  plan explicitly allows moving it later without code changes (archive_root is
+  config-driven), so no urgency, but it should land on a real decision rather than
+  stay open-ended.
+- Space risk: if the local accumulation is never merged/cleared, it competes with
+  ItemData (180G) on the same 277G NVMe partition (57G free as of 2026-07-03) — not
+  a near-term problem at current edit volume, but worth a threshold alarm (extend
+  `tgw health`'s disk check, or fold into B3's quota risk above) rather than silent
+  growth to exhaustion.
+
+Not implemented tonight — Dave asked for this to be captured as a planning item only.
+
+**2014-2019 coverage gap (found 2026-07-04, todo #1053):** all three currently-mounted
+archive copies — `porche/history/ItemData` (55,356 items), `porche/history/ItemArchive`
+(54,683 zips), and `blk1tb/ItemData` (55,422 items) — draw from the same underlying
+~55K-item snapshot, skewed to 2020+ (only ~136-137 overlap each with the live
+2014-2019 cohort of 33,516 items). None currently has independent older coverage.
+Matches Dave's own note that the full consolidated index isn't ready yet. Worth
+re-checking data-scrub coverage (#1053-style verification) once the "nice full
+index" (mentioned above) lands — it may finally close this gap.
 
 ## 7. Verification (standing, after Phase A)
 

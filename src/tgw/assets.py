@@ -26,8 +26,12 @@ PHOTO_EXTS: frozenset[str] = frozenset({
 })
 
 
-def _nat_key(name: str) -> list:
-    return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', name)]
+def _nat_key(name: str) -> tuple:
+    # Sort '-alt' variants after their base file; keep everything else by natural order.
+    is_alt = '-alt.' in name
+    base = name.replace('-alt.', '.') if is_alt else name
+    parts = tuple(int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', base))
+    return (parts, int(is_alt))
 
 
 def _photos_nat(sku_dir: Path) -> List[str]:

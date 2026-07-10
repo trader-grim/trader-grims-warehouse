@@ -77,6 +77,10 @@ class VelocityStatsWorker(QueueWorker):
                               categories=cat_count, item_count=item_count)
         self._reschedule()
 
+    # _on_terminal_failure: no override needed — worker_base.QueueWorker's
+    # default detects _reschedule() (no-arg) and calls it automatically on
+    # dead_letter (audit#1143 #1244).
+
     def _reschedule(self) -> None:
         next_run = time.time() + RUN_INTERVAL_S
         jid = state_machine.enqueue_job(

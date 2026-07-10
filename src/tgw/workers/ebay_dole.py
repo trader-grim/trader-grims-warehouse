@@ -88,6 +88,10 @@ class EbayDoleWorker(QueueWorker):
 
         self._reschedule()
 
+    # _on_terminal_failure: no override needed — worker_base.QueueWorker's
+    # default detects _reschedule() (no-arg) and calls it automatically on
+    # dead_letter (audit#1143 #1244).
+
     def _reschedule(self) -> None:
         interval_s = int(self.config.get('dole_interval_s', 3600))
         jid = state_machine.enqueue_job(

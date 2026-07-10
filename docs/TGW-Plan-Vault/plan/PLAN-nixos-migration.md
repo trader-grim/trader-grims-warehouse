@@ -230,7 +230,7 @@ still pending (nice-to-have, not blocking).
 *Test coverage:* manual credential audit passed (no secrets in any included file); cloned
 successfully to /media/tgw/TGW-SECRETS/site-config and TGW-SECRETS1/site-config.
 
-**0.6 Migrate the live `tgw` user to a system uid below 1000** (operator, on MX, **before
+**0.6 Migrate the live `tgw` user to a system uid below 1000** ✅ DONE 2026-06-22 (operator, on MX, **before
 the Phase-1 ISO bake** so the rollback image already carries the final uid):
 *Target value:* **uid/gid 900** — verified free on the MX host 2026-06-10 (`getent` shows
 900–909 fully free; 999 is taken by dnsmasq/systemd-journal). Re-verify at execution time
@@ -267,13 +267,15 @@ chown/audit in reverse — symmetric and low-risk while the pipeline is stopped.
 
 ### Phase 1 — Bake the rollback (operator; PP-DEPLOY-001 runbook, unchanged)
 
+**Status 2026-06-22:** workers stopped, pg_dump complete (`data/dumps/db-backup-PRE-NIXOS-20260622T164601.dump`, 6.2M/84 objects), ISO bake in progress. Going direct to NixOS install — no pipeline restart. Models may be excluded from ISO if image too large.
+
 **1.1 Execute `reference/PP-DEPLOY-001-MX-RESTORE-RUNBOOK.md` end-to-end:** drain + stop
 pipeline, `pg_dump --format=custom` into the tree, permissions `--check`, MX Snapshot with
 ItemData excluded, sha256, **boot-verify in QEMU**, loop-mount spot-check, manifest.
 *Test coverage:* the runbook's own §3 verification is the test; additionally record
 `tgw health` green + queue-depth snapshot before stopping, and re-run both after restart.
 *Done when:* manifest line "ISO verified <date> — bootable, key roots + DB dump present"
-exists and the live pipeline is running again (this phase pauses production ~1–2 h).
+exists. (Pipeline restart skipped — proceeding directly to NixOS install.)
 
 ### Phase 2 — VM validation of the full stack (no production risk; parallel-safe with 3)
 
@@ -484,13 +486,12 @@ This replaces the earlier "Btrfs + NoCoW for postgres" design (chattr +C approac
 
 **Status:**
 - `nix/hosts/tgw-test-disko.nix` ✅ done (Btrfs-only, matches A1131 as manually installed — kept for reinstall parity)
-- `nix/hosts/tgw-prod-disko.nix` ✅ authored 2026-06-22 — LVM+XFS+Btrfs layout; device `/dev/sda` is a placeholder, **override before nixos-anywhere run**
+- `nix/hosts/tgw-prod-disko.nix` ✅ authored 2026-06-22; **✅ FIXED 2026-06-23**: device set to `/dev/nvme0n1`, LVM size reduced 500G → 200G (disk is ~477G)
 - `disko.nixosModules.disko` wired into tgw-test, tgw-test-rehearsal, and tgw-prod in `flake.nix` ✅
 
 **Remaining:**
-- Set correct device name in tgw-prod-disko.nix at cutover time (`lsblk` to confirm)
-- Adjust LV and Btrfs partition sizes to match actual production disk capacity
-- Gate: nixos-anywhere can fully reprovision tgw-test from MX before production cutover (validate using `--dry-run` first)
+- ~~Set correct device name~~ ✅ done
+- ~~Adjust LV and Btrfs partition sizes~~ ✅ done (200G LVM + remaining Btrfs on 477G disk)
 
 ### Phase 4 — Dress rehearsal: shadow server on the spare machine
 
@@ -543,7 +544,7 @@ Nothing is lost — the question is where to restore things on the new host.
 | **Operator rclone config** | HDD backup of `~db/` | Check `~db/.config/rclone/` if separate from tgw user's |
 | **Tailscale** | Auth key (have one ready) | `sudo tailscale up --authkey <key>` |
 | **Syncthing peers** | Re-pair after install | New device ID — share with all peers; plan-vault/ItemData/ItemCatalog folders re-pair |
-| **Claude Code** | npm post-install | `npm install -g @anthropic-ai/claude-code`; memory files in repo ✅ |
+| **Claude Code** | npm post-install + db-home disk | `npm install -g @anthropic-ai/claude-code`; set `ANTHROPIC_API_KEY` from secrets; `cd /opt/TGW/src/trader-grims-warehouse && claude` — CLAUDE.md drives the first session, plan files carry all state. Restore `~/.claude/settings.json` from db-home (sdf1) for hooks/permissions/MCP. Re-register MCP server: `tgw-mcp-server` path = `/opt/TGW/.venvironments/tgw/bin/tgw-mcp-server`. Full reconnect procedure: `reference/runbooks/nixos-prod-cutover-runbook.md` § Claude Code reconnect plan. |
 
 **Post-install one-time steps (after restore, before starting workers):**
 

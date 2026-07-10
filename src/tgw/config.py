@@ -20,6 +20,29 @@ DEFAULT_CONFIG = Path("/opt/TGW/config/tgw-api-config.json")
 # ---------------------------------------------------------------------------
 
 
+def _load_secrets_env(secrets_root: Path) -> None:
+    """Source secrets_root/tgw.env into the process environment — the
+    single facility for provider API keys (Dave, 2026-07-09). Plain
+    KEY=value lines, '#' comments allowed. Real environment variables
+    always win (setdefault only) so a one-off shell export still overrides
+    the file without editing it."""
+    env_path = secrets_root / 'tgw.env'
+    try:
+        if not env_path.exists():
+            return
+        for line in env_path.read_text(encoding='utf-8').splitlines():
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            key, _, value = line.partition('=')
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key:
+                os.environ.setdefault(key, value)
+    except OSError:
+        pass
+
+
 def load_json_strict(path: Path) -> Any:
     """Load JSON, raising ValueError on duplicate keys."""
 
@@ -55,8 +78,10 @@ def load_config(path: Path) -> Dict[str, Any]:
         return Path(os.path.expanduser(raw.get(key, default)))
 
     secrets_root = p("secrets_root", "/opt/TGW/secrets")
+    _load_secrets_env(secrets_root)
     itemdata_root = p("itemdata_root", "/opt/TGW/data/ItemData")
     catalog_root = p("catalog_root", "/opt/TGW/data/ItemCatalog")
+    archive_root = p("archive_root", "/opt/TGW/data/ItemArchive")
     incoming_path = p("incoming_path", "/opt/TGW/incoming")
     plan_vault_path = p("plan_vault_path", "/opt/TGW/src/trader-grims-warehouse/docs/TGW-Plan-Vault")
 
@@ -89,14 +114,37 @@ def load_config(path: Path) -> Dict[str, Any]:
 
     ebay_token_path = secrets_root / "ebay-token.json"
     ebay_credentials_path = secrets_root / "ebay-credentials.json"
-    openrouter_credentials_path = secrets_root / "openrouter-credentials.json"
+
+    _api_key_path = secrets_root / "tgw-api-key.json"
+    _api_key = ""
+    try:
+        _api_key_present = _api_key_path.exists()
+    except PermissionError:
+        # secrets_root is 700 tgw:tgw — a non-tgw caller (e.g. `tgw clip`,
+        # which the nix wrapper runs as the operator's own user, not tgw)
+        # can't even stat() inside it. Treat as absent, same as a missing
+        # key. Scoped to PermissionError only (code-review fix) — a
+        # transient I/O error here (e.g. a flaky network-mounted
+        # secrets_root) should not look identical to "key not present".
+        _api_key_present = False
+    if _api_key_present:
+        try:
+            _api_key = json.loads(_api_key_path.read_text(encoding="utf-8"))["api_key"]
+        except Exception:
+            # Malformed/unreadable key file — pre-existing tolerant
+            # behavior, unrelated to the permission fix above.
+            pass
     ebay_draft_csv_path = p("ebay_draft_csv_path", str(catalog_root / "ebay-draft-offline.csv"))
 
     postgres_dsn = raw.get("postgres_dsn", "dbname=state_machine user=tgw")
 
     # PP-BACKUP-001 — backup infrastructure paths (not in JSON config; fixed layout)
     backup_db_dir = Path('/opt/TGW/var/backups/trader_grims_warehouse/db')
-    backup_snapshot_root = Path('/opt/TGW/var/local/backups/trader_grims_warehouse')
+    # backup_snapshot_root moved 2026-07-04 onto a genuinely separate physical
+    # drive (/dev/sdc1, LABEL=tgw-db-backup) — the old path was on the same
+    # nvme0n1p3 filesystem as backup_db_dir, a single point of failure this
+    # tree was supposed to protect against.
+    backup_snapshot_root = Path('/opt/TGW/mnt/tgw-db-backup/trader_grims_warehouse')
     backup_secrets_dir = backup_snapshot_root / 'secrets'
     backup_rclone_stamp = Path('/opt/TGW/var/log/rclone-sync-last-success')
 
@@ -144,13 +192,14 @@ def load_config(path: Path) -> Dict[str, Any]:
         "secrets_root": secrets_root,
         "ebay_token_path": ebay_token_path,
         "ebay_credentials_path": ebay_credentials_path,
-        "openrouter_credentials_path": openrouter_credentials_path,
         "ebay_draft_csv_path": ebay_draft_csv_path,
+        "api_key": _api_key,
         "alt_text_provider": raw.get("alt_text_provider", "openrouter"),
         "alt_text_model": raw.get("alt_text_model", "google/gemini-2.5-flash"),
         "postgres_dsn": postgres_dsn,
         "itemdata_root": itemdata_root,
         "catalog_root": catalog_root,
+        "archive_root": archive_root,
         "full_catalog_path": full_catalog_path,
         "search_catalog_path": search_catalog_path,
         "full_catalog_csv_path": full_catalog_csv_path,

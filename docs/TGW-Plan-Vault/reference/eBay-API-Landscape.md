@@ -8,6 +8,12 @@ updated: 2026-06-04
 
 # eBay API Landscape
 
+## Rate Limits
+
+- **Daily quotas reset at 00:00 PST (midnight Pacific)** — verified by Dave 2026-07-01.
+  When a quota is exhausted (Taxonomy 429s, EPS upload cap, etc.), that's when it clears.
+  Host timezone is America/Los_Angeles, so local midnight ≈ reset time.
+
 ## Auth & Scopes
 
 ### ✅ Have

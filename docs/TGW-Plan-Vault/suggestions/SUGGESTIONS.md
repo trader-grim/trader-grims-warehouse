@@ -232,3 +232,48 @@
 - [x] 2026-06-20T04:03 :: PP-CATIOOS-001 (deferred): Explore extracting the TGW base platform — NixOS service topology + PostgreSQL work ledger + NATS JetStream audit stream + QueueWorker base class + litterbox pattern (auto-fix info/warning, queue critical for operator ack) — as a standalone general-purpose AI operational safety platform ("CatioOS"). Differentiator: operational safety (audit trail, anomaly detection, human-in-the-loop gating, automated remediation with escalation) vs the crowded model-safety space. Revisit after PP-AIOPS-001 Phase 4 (litterbox) is complete and the pattern is proven end-to-end on TGW. — → FUTURE-IDEAS.md (PP-CATIONIX-001; full entry with Sécurix research; stub in master plan Future Concepts table)
 - [x] 2026-06-21T17:57 :: we are mostly there, but lets solidify our nixos based tgw distribution. I want to be as simple to distribute it as it has been to distribute the current mx version. I dont mean bootable tgw usb sticks yet but rather the distribution of the bundle that gives us the stable replicatable bast and add ons we desire. The resrarch in the inbos nisos-distro.md contains many pieces that can help. I will summarize the direction simple. Git for versioning. Syncthing for distribution. nix MCP specialist for maintenance. → master plan (PP-NIXOS-001 TGW Distribution Design section; Google AI research incorporated)
 - [x] 2026-06-21T23:01 :: create future planning item for mc syncthing vfs. See mc-syncthing-vfs.md in the inbox. → FUTURE-IDEAS.md (MC-SYNCTHING-VFS; research from perplexity/RESEARCH-syncthing-mc-plugin.md incorporated)
+- [x] 2026-06-24T23:19 :: catio 0.1.0: tgw-rescue live ISO — nixosConfigurations.tgw-rescue in flake: minimal NixOS live USB with claude-code, btrfs-progs, postgresql client, age, rsync, and restore script pre-loaded. nix build .#tgw-rescue → write to USB. Boots to recovery shell. Stays in sync with platform via flake. Emergency Claude assistance fob without needing a separate distro. → master plan (PP-RESCUE-001 added to Pending projects)
+- [x] 2026-06-24T23:26 :: catio 0.1.0 tgw-rescue ISO (addendum): guided recovery via Aider + Claude — Aider handles the scripted mechanical restore path (known-good sequence: nixos-anywhere → pg_restore → rsync → tgw health), Claude handles unexpected failures and advanced troubleshooting. Operator boots USB, gets AI-guided recovery with live reasoning about what it sees (lsblk output, error messages, health check failures). Better than any static runbook because it adapts. Aider = scripted path, Claude = escalation. Both pre-installed in the ISO, API keys either baked in via age-encrypted secrets on the USB or prompted at boot. → master plan (folded into PP-RESCUE-001)
+- [x] 2026-06-24T23:30 :: catio 0.1.0 tgw-rescue ISO (correction to prior addendum): AI assistance on USB is operator consultation backup — not guided install for an uninformed user. Dave knows the system; the USB is for unexpected conflicts mid-recovery where a second opinion helps. Primary DR target: nixos-anywhere + flake builds a usable system. Hardware gaps cannot be resolved until better test hardware is available. Keep scope realistic. → master plan (scope constraint incorporated into PP-RESCUE-001)
+- [x] 2026-06-26T02:45 :: PP-AGENTIC-PRICE-001: Agentic comp search for auto-pricing — the heart of what makes TGW different from commodity resale tools.
+
+Problem: the current pricing fallback chain (brand+MPN → full title → category+short → category name) degenerates badly when titles are specific/obscure. "Vintage Ladco Acetone Technical Poison Amber Bottle" fell all the way to "Medicine" as the Browse API query and priced against pill organizers.
+
+Core insight from session 2026-06-25: good comp search terms are neither the listing title (too specific, SEO-optimized) nor the category name (too broad). They are what a *buyer* would type — shorter, focused on the object type, brand included only if the brand has search recognition (Microsoft YES, Ladco NO).
+
+Design (three maturity levels):
+
+Phase 1 — Manual search_terms field (build now as PP-LISTEDITOR-001 sub-task):
+- Operator-editable field on root item (item.search_terms)
+- Used as stage 0 in suggest_price() fallback chain
+- "Save & Re-price" button in comp panel — fast iteration loop
+- Every manual entry is a labelled training example
+
+Phase 2 — Candidate generation + Browse API scoring:
+- Single LLM call (Gemini Flash Lite) generates 4-5 candidate queries ranked specific→general
+- Run all in parallel against Browse API
+- Score each: count × relevance; pick winner
+- Handles brand recognition automatically (model knows Ladco ≠ Microsoft)
+- No iteration needed, covers fallback space much better than current chain
+
+Phase 3 — Agentic loop with Browse API as tool:
+- Model gets search_ebay(query) tool
+- Iterates: try query → read results → judge relevance → refine or accept
+- 3-4 steps max, mirrors what Dave does manually
+- Relevance judgment: "are these listings comparable to [item description]?" — Claude Sonnet handles this well
+
+Phase 4 — Learn from corrections:
+- Collect Phase 1 manual search_terms as few-shot training examples
+- Input: title + category + what automatic chain tried + what it returned
+- Output: operator correction
+- 50-100 examples → prompt few-shots that capture domain judgment (when to drop brand, when to keep, what descriptor terms buyers use)
+- Price variance as automated relevance signal (high variance = mixed comp set = bad query)
+
+Key technical pieces needed:
+- Browse API relevance scorer (count + semantic match + price variance)
+- LLM judge prompt: "Are these listings comparable to [item]? Rate 1-5."
+- Operator correction log (already captured by search_terms field)
+- Parallel Browse API query runner
+
+This is the platform differentiator: most resale tools price by category average. We price by agentic comp search with operator-tunable search terms and eventual self-improvement from corrections. → master plan (PP-AGENTIC-PRICE-001 added to Pending projects with full 4-phase design)
+- [x] 2026-06-26T18:28 :: [Context: TGW Home — http://127.0.0.1:7373/form/home] Research document on nix store migration and swap size increase solution: When mixing SSDs and HDDs in LVM, it is highly recommended not to combine them into a single, unstructured Volume Group. Because LVM does not natively distinguish between fast and slow disks, random data placement will result in sluggish I/O performance. → FUTURE-IDEAS.md (LVM architecture constraint: HDD must not extend vg_tgw; use separate VG or standalone devices)

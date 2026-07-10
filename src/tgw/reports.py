@@ -418,7 +418,7 @@ def cmd_report_sales(
     monthly = _build_monthly_pivot(sold_rows, key_to_name)
 
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now().astimezone().strftime("%Y-%m-%d")
 
     # Render artifacts
     md_text = render_markdown(monthly, dead_stock, generated_at, total_items, stale_only=stale_only)

@@ -71,11 +71,55 @@ def load_item_doc(json_path: Path) -> Dict[str, Any]:
     return doc
 
 
+# sku_old → current sku index, built lazily on first miss, cached per process.
+_sku_old_index: Optional[Dict[str, str]] = None
+
+
+def _build_sku_old_index(cfg: Dict[str, Any]) -> Dict[str, str]:
+    """Scan all item JSONs once and build {sku_old: current_sku} mapping."""
+    import json as _json
+    index: Dict[str, str] = {}
+    for path in find_item_jsons(cfg):
+        try:
+            raw = path.read_text(encoding='utf-8', errors='replace')
+            # Fast scan: skip full parse if sku_old not in file at all
+            if 'sku_old' not in raw:
+                continue
+            doc = _json.loads(raw)
+            if isinstance(doc, dict):
+                old_sku = str(doc.get('sku_old', '')).strip()
+                if old_sku:
+                    index[old_sku] = path.parent.name
+        except Exception:
+            pass
+    return index
+
+
+def find_current_sku(cfg: Dict[str, Any], old_sku: str) -> Optional[str]:
+    """Return the current SKU whose sku_old field matches old_sku, or None.
+
+    Builds a process-level cache on first call (scans only items containing
+    'sku_old' in their JSON text, so the scan is fast on modern items).
+    """
+    global _sku_old_index
+    if _sku_old_index is None:
+        _sku_old_index = _build_sku_old_index(cfg)
+    return _sku_old_index.get(old_sku)
+
+
 def load_item_doc_by_sku(cfg: Dict[str, Any], sku: str) -> Dict[str, Any]:
-    """Load the canonical JSON for a SKU."""
+    """Load the canonical JSON for a SKU.
+
+    Falls back to sku_old lookup if the SKU directory is not found, so
+    callers transparently handle old-format / pre-migration SKUs.
+    """
     path = sku_json(cfg, sku)
     if not path.exists():
-        raise FileNotFoundError(f'no item JSON for sku {sku!r}: {path}')
+        current = find_current_sku(cfg, sku)
+        if current:
+            path = sku_json(cfg, current)
+        else:
+            raise FileNotFoundError(f'no item JSON for sku {sku!r}: {path}')
     return load_item_doc(path)
 
 

@@ -79,6 +79,10 @@ class SyncConflictWorker(QueueWorker):
         )
         self._reschedule()
 
+    # _on_terminal_failure: no override needed — worker_base.QueueWorker's
+    # default detects _reschedule() (no-arg) and calls it automatically on
+    # dead_letter (audit#1143 #1244).
+
     def _reschedule(self) -> None:
         interval = int(self.config.get('sync_conflict_interval_s', RUN_INTERVAL_S))
         not_before = time.time() + interval

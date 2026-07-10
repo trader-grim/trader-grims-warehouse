@@ -13,32 +13,49 @@ Usage:
 
 from __future__ import annotations
 
-import json
+import logging
 import time
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
 
 from tgw.queue.ollama_lock import acquire_ollama_lock
 
-# Hardcoded defaults — override via tgw-models.json
-_DEFAULTS: Dict[str, tuple[str, str]] = {
-    'ai_identify':            ('openrouter', 'google/gemini-2.5-flash-lite'),
-    'alt_text':               ('openrouter', 'google/gemini-2.5-flash-lite'),
-    'suggestions_classify':   ('openrouter', 'deepseek/deepseek-v4-flash'),
-    'bulk_classify':          ('openrouter', 'google/gemini-2.0-flash-lite'),
-    'pm_chat':                ('openrouter', 'anthropic/claude-haiku-4-5'),
-    'ebay_draft':             ('ollama',     'Qwen2.5:latest'),
-    'pm_intake':              ('ollama',     'Qwen2.5:latest'),
-}
+log = logging.getLogger(__name__)
+
+# Providers that accept multiple images per call and don't need the Ollama
+# is_available() liveness check. Session 41: adding google_direct exposed that
+# callers (ai_identify, alt_text) had hardcoded `provider == "openrouter"` / `!=
+# "openrouter"` checks that silently assumed only two providers ever existed —
+# use this set instead of hardcoding provider names at call sites.
+CLOUD_PROVIDERS = {'openrouter', 'google_direct'}
+
+# Dave, 2026-07-09: which provider/model serves a task is a CONFIG decision,
+# never a code decision — "why change code just to change models?" This file
+# used to carry a hardcoded per-task _DEFAULTS dict as a silent fallback,
+# which drifted out of sync with the real decision more than once (e.g. it
+# still said OpenRouter-primary/Google-free-tier weeks after Dave flipped to
+# direct-provider-primary with paid keys — audit#1143 code-review, #1252).
+# The only source of truth now is /opt/TGW/config/tgw-models.json (loaded
+# into cfg['models'] by tgw.config.load_config; see its own '_comment' entry
+# for the current live decision and the provider/model-id conventions).
+#
+# Example shape (see tgw-models.json for the real, current values):
+#   {"ai_identify": {"provider": "google_direct", "model": "gemini-2.5-flash-lite"}}
 
 
 def get_task_model(cfg: Dict[str, Any], task: str) -> tuple[str, str]:
-    """Return (provider, model) for a task from cfg['models'], falling back to _DEFAULTS."""
-    entry = cfg.get('models', {}).get(task, {})
-    default_provider, default_model = _DEFAULTS.get(task, ('ollama', 'Qwen2.5:latest'))
-    return entry.get('provider', default_provider), entry.get('model', default_model)
+    """Return (provider, model) for *task* from cfg['models'][task] — the
+    ONLY source; see /opt/TGW/config/tgw-models.json. Raises KeyError with a
+    clear message if the task isn't configured there — a task's model must
+    never be a silent code-level guess (Dave, 2026-07-09)."""
+    entry = cfg.get('models', {}).get(task)
+    if not entry or 'provider' not in entry or 'model' not in entry:
+        raise KeyError(
+            f"No models[{task!r}] entry in tgw-models.json (need "
+            f"{{'provider': ..., 'model': ...}}) — see TGW-Config-Reference.md"
+        )
+    return entry['provider'], entry['model']
 
 
 def call_model(
@@ -47,6 +64,7 @@ def call_model(
     user_prompt: str,
     cfg: Dict[str, Any],
     img_b64: Optional[str] = None,
+    img_b64_list: Optional[List[str]] = None,
     provider: Optional[str] = None,
     model: Optional[str] = None,
     sku: Optional[str] = None,
@@ -59,11 +77,22 @@ def call_model(
     Pass sku to attribute the call to a specific item in the per-SKU report.
     Pass messages to supply a pre-built multi-turn list (openrouter only);
     system_prompt/user_prompt are ignored when messages is given.
+    Pass img_b64_list for multi-image calls (OpenRouter/google_direct only);
+    img_b64 used as single-image fallback for Ollama or when list has one entry.
+    provider='google_direct' calls Gemini directly via the google-genai SDK
+    (no OpenRouter markup) and falls back to OpenRouter automatically on any
+    failure — model should be a bare Gemini model id (e.g. 'gemini-2.5-flash-lite').
+    provider='openrouter' with a google/* model falls back the other way for
+    interactive callers only: the Google free tier (~20 calls/day) is the
+    operator emergency reserve, never spent by background jobs.
     """
     if provider is None or model is None:
         _p, _m = get_task_model(cfg, task)
         provider = provider or _p
         model = model or _m
+
+    # Normalise: img_b64_list takes precedence; single img_b64 becomes a list
+    _images: List[str] = img_b64_list or ([img_b64] if img_b64 else [])
 
     if messages is not None:
         input_chars = sum(
@@ -79,13 +108,125 @@ def call_model(
     error_msg: Optional[str] = None
 
     try:
-        if provider == 'openrouter':
-            text, usage = _call_openrouter(
-                model, system_prompt, user_prompt, cfg,
-                img_b64=img_b64, messages=messages,
-            )
-        elif img_b64:
-            text, usage = _call_ollama_vision(model, system_prompt, user_prompt, cfg, img_b64)
+        if provider == 'google_direct':
+            from tgw import quota
+
+            google_exc: Optional[Exception] = None
+            try:
+                # Circuit breaker: after a Google 429, background callers stand
+                # down for the cooldown instead of burning a doomed attempt per
+                # call. The first call after the cooldown expires is the
+                # restoration probe — if Google is back, it stays primary.
+                quota.precheck(cfg, 'llm_google')
+            except quota.QuotaBudgetExceeded as exc:
+                google_exc = exc
+            if google_exc is None:
+                try:
+                    text, usage = _call_google_direct(
+                        model, system_prompt, user_prompt, cfg, img_b64_list=_images,
+                    )
+                except Exception as exc:
+                    google_exc = exc
+            if google_exc is not None:
+                # Fail soft to OpenRouter — a Google-side outage/quota/auth error
+                # must not dead-letter the job when a paid fallback path exists.
+                fallback_model = model if model.startswith('google/') else f'google/{model}'
+                log.warning(
+                    'google_direct unavailable for task %r (%s) — falling back to '
+                    'openrouter/%s: %s', task, model, fallback_model, google_exc,
+                )
+                text, usage = _call_openrouter(
+                    fallback_model, system_prompt, user_prompt, cfg,
+                    img_b64_list=_images, messages=messages,
+                )
+        elif provider == 'deepseek_direct':
+            from tgw import quota
+
+            ds_exc: Optional[Exception] = None
+            try:
+                quota.precheck(cfg, 'llm_deepseek')
+            except quota.QuotaBudgetExceeded as exc:
+                ds_exc = exc
+            if ds_exc is None:
+                try:
+                    text, usage = _call_deepseek_direct(
+                        model, system_prompt, user_prompt, cfg, messages=messages,
+                    )
+                except Exception as exc:
+                    ds_exc = exc
+            if ds_exc is not None:
+                fallback_model = model if model.startswith('deepseek/') else f'deepseek/{model}'
+                log.warning(
+                    'deepseek_direct unavailable for task %r (%s) — falling back to '
+                    'openrouter/%s: %s', task, model, fallback_model, ds_exc,
+                )
+                text, usage = _call_openrouter(
+                    fallback_model, system_prompt, user_prompt, cfg,
+                    img_b64_list=_images, messages=messages,
+                )
+        elif provider == 'anthropic_direct':
+            from tgw import quota
+
+            an_exc: Optional[Exception] = None
+            try:
+                quota.precheck(cfg, 'llm_anthropic')
+            except quota.QuotaBudgetExceeded as exc:
+                an_exc = exc
+            if an_exc is None:
+                try:
+                    text, usage = _call_anthropic_direct(
+                        model, system_prompt, user_prompt, cfg, messages=messages,
+                    )
+                except Exception as exc:
+                    an_exc = exc
+            if an_exc is not None:
+                # OpenRouter's alias drops the date suffix Anthropic's direct
+                # API requires (e.g. 'claude-haiku-4-5-20251001' ->
+                # 'anthropic/claude-haiku-4-5') — strip it for the fallback.
+                base_id = model.rsplit('-20', 1)[0] if '-20' in model else model
+                fallback_model = model if model.startswith('anthropic/') else f'anthropic/{base_id}'
+                log.warning(
+                    'anthropic_direct unavailable for task %r (%s) — falling back to '
+                    'openrouter/%s: %s', task, model, fallback_model, an_exc,
+                )
+                text, usage = _call_openrouter(
+                    fallback_model, system_prompt, user_prompt, cfg,
+                    img_b64_list=_images, messages=messages,
+                )
+        elif provider == 'openrouter':
+            try:
+                text, usage = _call_openrouter(
+                    model, system_prompt, user_prompt, cfg,
+                    img_b64_list=_images, messages=messages,
+                )
+            except Exception as exc:
+                from tgw import quota
+
+                # Operator emergency reserve (Dave, 2026-07-04): Google's ~20
+                # free calls/day are held for interactive (C10 operator-lane)
+                # callers so the operator can keep working through an OpenRouter
+                # outage/credit gap. Background jobs re-raise — worker_base
+                # requeues them as transient; they must not drain the reserve.
+                if (
+                    quota.context_kind() == 'interactive'
+                    and messages is None
+                    and model.startswith('google/')
+                ):
+                    reserve_model = model.split('/', 1)[1]
+                    log.warning(
+                        'openrouter call failed for task %r (%s) — operator '
+                        'emergency reserve: google_direct/%s: %s',
+                        task, model, reserve_model, exc,
+                    )
+                    text, usage = _call_google_direct(
+                        reserve_model, system_prompt, user_prompt, cfg,
+                        img_b64_list=_images,
+                    )
+                else:
+                    raise
+        elif _images:
+            # Ollama only supports single image; use the first
+            text, usage = _call_ollama_vision(model, system_prompt, user_prompt, cfg, _images[0])
         else:
             text, usage = _call_ollama_text(model, system_prompt, user_prompt, cfg)
     except Exception as exc:
@@ -136,17 +277,234 @@ def _record_usage(
 # ---------------------------------------------------------------------------
 
 
-def _load_openrouter_key(cfg: Dict[str, Any]) -> str:
-    """Load OpenRouter API key from secrets file, falling back to env var."""
-    import os
+def _call_google_direct(
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    cfg: Dict[str, Any],
+    img_b64_list: Optional[List[str]] = None,
+    max_retries: int = 3,
+) -> tuple:
+    """Call Gemini directly via the google-genai SDK — no OpenRouter markup.
 
-    cred_path = cfg.get('openrouter_credentials_path')
-    if cred_path and Path(cred_path).exists():
+    *model* is a bare Gemini model id (e.g. 'gemini-2.5-flash-lite'), not the
+    'google/...' OpenRouter form. Raises on any failure (missing SDK, missing
+    key, quota, network) — call_model() catches and falls back to OpenRouter.
+    Returns (text, usage_dict).
+    """
+    from tgw.apis.google_genai import _require_genai, load_google_key
+
+    genai = _require_genai()
+    api_key = load_google_key(cfg)
+    client = genai.Client(api_key=api_key)
+
+    parts: List[Dict[str, Any]] = [
+        {'inline_data': {'mime_type': 'image/jpeg', 'data': b64}}
+        for b64 in (img_b64_list or [])
+    ]
+    parts.append({'text': user_prompt})
+
+    model_ref = model if model.startswith('models/') else f'models/{model}'
+
+    from tgw import quota
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_retries):
         try:
-            return json.loads(Path(cred_path).read_text())['api_key']
-        except (KeyError, ValueError, OSError):
-            return ''
-    return os.environ.get('OPENROUTER_API_KEY', '')
+            response = client.models.generate_content(
+                model=model_ref,
+                contents=[{'role': 'user', 'parts': parts}],
+                config={'system_instruction': system_prompt},
+            )
+            quota.record(cfg, 'llm_google')
+            break
+        except Exception as exc:
+            last_exc = exc
+            quota.record(cfg, 'llm_google')
+            status = getattr(getattr(exc, 'response', None), 'status_code', None)
+            if status == 429 or 'RESOURCE_EXHAUSTED' in str(exc):
+                quota.record_429(cfg, 'llm_google', f'{model}: {str(exc)[:150]}')
+            if status == 429 and attempt < max_retries - 1:
+                time.sleep(15 * (attempt + 1))
+                continue
+            raise
+    else:
+        raise last_exc  # pragma: no cover — loop always breaks or raises
+
+    text = response.text or ''
+    um = getattr(response, 'usage_metadata', None)
+    usage = {
+        'prompt_tokens':     getattr(um, 'prompt_token_count', None) if um else None,
+        'completion_tokens': getattr(um, 'candidates_token_count', None) if um else None,
+        'total_tokens':      getattr(um, 'total_token_count', None) if um else None,
+    }
+    return text, usage
+
+
+def _load_deepseek_key(cfg: Dict[str, Any]) -> str:
+    """Load DeepSeek API key via the single-facility DEEPSEEK_API_KEY env
+    var (tgw.apis.secrets.get_api_key) — see secrets_root/tgw.env."""
+    from tgw.apis.secrets import get_api_key
+
+    return get_api_key('deepseek')
+
+
+def _call_deepseek_direct(
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    cfg: Dict[str, Any],
+    messages: Optional[List[Dict[str, Any]]] = None,
+    max_retries: int = 3,
+) -> tuple:
+    """Call DeepSeek's OpenAI-compatible chat completions API directly — no
+    OpenRouter markup. *model* is a bare DeepSeek model id (e.g.
+    'deepseek-v4-flash'), not the 'deepseek/...' OpenRouter form. No image
+    support — neither current caller (pm_intake, suggestions_classify) sends
+    photos. Raises on any failure; call_model() catches and falls back to
+    OpenRouter. Returns (text, usage_dict).
+    """
+    api_key = _load_deepseek_key(cfg)
+
+    if messages is not None:
+        msg_list: Any = messages
+    else:
+        msg_list = [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user',   'content': user_prompt},
+        ]
+
+    payload = {'model': model, 'messages': msg_list}
+    headers = {
+        'Authorization': f'Bearer {api_key}',
+        'Content-Type': 'application/json',
+    }
+
+    from tgw import quota
+
+    for attempt in range(max_retries):
+        resp = requests.post(
+            'https://api.deepseek.com/chat/completions',
+            headers=headers,
+            json=payload,
+            timeout=60,
+        )
+        quota.record(cfg, 'llm_deepseek')
+        if resp.status_code == 429:
+            quota.record_429(cfg, 'llm_deepseek', model)
+        if resp.status_code == 429 and attempt < max_retries - 1:
+            time.sleep(15 * (attempt + 1))
+            continue
+        break
+
+    resp.raise_for_status()
+    body = resp.json()
+    text = body['choices'][0]['message']['content']
+    raw_usage = body.get('usage') or {}
+    usage = {
+        'prompt_tokens':     raw_usage.get('prompt_tokens'),
+        'completion_tokens': raw_usage.get('completion_tokens'),
+        'total_tokens':      raw_usage.get('total_tokens'),
+    }
+    return text, usage
+
+
+def _load_anthropic_key(cfg: Dict[str, Any]) -> str:
+    """Load Anthropic API key via the single-facility ANTHROPIC_API_KEY env
+    var (tgw.apis.secrets.get_api_key) — see secrets_root/tgw.env."""
+    from tgw.apis.secrets import get_api_key
+
+    return get_api_key('anthropic')
+
+
+_ANTHROPIC_MAX_TOKENS = 4096
+
+
+def _call_anthropic_direct(
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    cfg: Dict[str, Any],
+    messages: Optional[List[Dict[str, Any]]] = None,
+    max_retries: int = 3,
+) -> tuple:
+    """Call Anthropic's Messages API directly — no OpenRouter markup. *model*
+    is a full versioned Claude model id (e.g. 'claude-haiku-4-5-20251001'),
+    not the 'anthropic/...' OpenRouter alias. No image support — pm_chat is
+    the only current caller and it's text-only. Raises on any failure;
+    call_model() catches and falls back to OpenRouter. Returns (text, usage_dict).
+    """
+    api_key = _load_anthropic_key(cfg)
+
+    # Anthropic's Messages API takes system as a top-level field, not a
+    # system-role message — pull one out of *messages* if present (pm_chat
+    # builds OpenAI-style message lists with a leading system message).
+    system = system_prompt
+    msg_list: List[Dict[str, Any]]
+    if messages is not None:
+        msg_list = [m for m in messages if m.get('role') != 'system']
+        sys_msgs = [m['content'] for m in messages if m.get('role') == 'system']
+        if sys_msgs:
+            system = '\n\n'.join(sys_msgs)
+    else:
+        msg_list = [{'role': 'user', 'content': user_prompt}]
+
+    payload: Dict[str, Any] = {
+        'model': model,
+        'max_tokens': _ANTHROPIC_MAX_TOKENS,
+        'messages': msg_list,
+    }
+    if system:
+        payload['system'] = system
+
+    headers = {
+        'x-api-key': api_key,
+        'anthropic-version': '2023-06-01',
+        'Content-Type': 'application/json',
+    }
+
+    from tgw import quota
+
+    for attempt in range(max_retries):
+        resp = requests.post(
+            'https://api.anthropic.com/v1/messages',
+            headers=headers,
+            json=payload,
+            timeout=60,
+        )
+        quota.record(cfg, 'llm_anthropic')
+        if resp.status_code == 429:
+            quota.record_429(cfg, 'llm_anthropic', model)
+        if resp.status_code == 429 and attempt < max_retries - 1:
+            time.sleep(15 * (attempt + 1))
+            continue
+        break
+
+    resp.raise_for_status()
+    body = resp.json()
+    text = ''.join(
+        block.get('text', '') for block in body.get('content', [])
+        if block.get('type') == 'text'
+    )
+    raw_usage = body.get('usage') or {}
+    prompt_tokens = raw_usage.get('input_tokens')
+    completion_tokens = raw_usage.get('output_tokens')
+    usage = {
+        'prompt_tokens':     prompt_tokens,
+        'completion_tokens': completion_tokens,
+        'total_tokens':      (prompt_tokens + completion_tokens)
+                              if prompt_tokens is not None and completion_tokens is not None
+                              else None,
+    }
+    return text, usage
+
+
+def _load_openrouter_key(cfg: Dict[str, Any]) -> str:
+    """Load OpenRouter API key via the single-facility OPENROUTER_API_KEY
+    env var (tgw.apis.secrets.get_api_key) — see secrets_root/tgw.env."""
+    from tgw.apis.secrets import get_api_key
+
+    return get_api_key('openrouter')
 
 
 def _call_openrouter(
@@ -155,26 +513,30 @@ def _call_openrouter(
     user_prompt: str,
     cfg: Dict[str, Any],
     img_b64: Optional[str] = None,
+    img_b64_list: Optional[List[str]] = None,
     max_retries: int = 3,
     messages: Optional[List[Dict[str, Any]]] = None,
 ) -> tuple:
     """Call OpenRouter chat completions. Returns (text, usage_dict).
 
     If *messages* is provided it is used as-is; system_prompt/user_prompt are ignored.
+    img_b64_list sends multiple images; img_b64 is a single-image fallback.
     """
     api_key = _load_openrouter_key(cfg)
-    if not api_key:
-        raise RuntimeError('OpenRouter API key not found in secrets or config')
+
+    # Resolve image list — prefer img_b64_list, fall back to single img_b64
+    images = img_b64_list or ([img_b64] if img_b64 else [])
 
     if messages is not None:
         msg_list: Any = messages
     else:
         user_content: Any
-        if img_b64:
-            user_content = [
-                {'type': 'text', 'text': user_prompt},
-                {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{img_b64}'}},
-            ]
+        if images:
+            user_content = [{'type': 'text', 'text': user_prompt}]
+            for _b64 in images:
+                user_content.append(
+                    {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{_b64}'}}
+                )
         else:
             user_content = user_prompt
         msg_list = [
@@ -193,6 +555,8 @@ def _call_openrouter(
         'X-Title': 'TGW',
     }
 
+    from tgw import quota
+
     for attempt in range(max_retries):
         resp = requests.post(
             'https://openrouter.ai/api/v1/chat/completions',
@@ -200,6 +564,9 @@ def _call_openrouter(
             json=payload,
             timeout=60,
         )
+        quota.record(cfg, 'llm_openrouter')
+        if resp.status_code == 429:
+            quota.record_429(cfg, 'llm_openrouter', model)
         if resp.status_code == 429 and attempt < max_retries - 1:
             time.sleep(15 * (attempt + 1))
             continue

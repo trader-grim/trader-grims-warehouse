@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import socket
 import subprocess
@@ -27,7 +28,14 @@ def test_detect_backend_default_is_x11(monkeypatch):
 
 def test_detect_backend_wayland_display(monkeypatch):
     monkeypatch.setenv('WAYLAND_DISPLAY', 'wayland-0')
+    monkeypatch.delenv('DISPLAY', raising=False)
     assert clipd.detect_backend() == 'wayland'
+
+
+def test_detect_backend_both_when_xwayland(monkeypatch):
+    monkeypatch.setenv('WAYLAND_DISPLAY', 'wayland-1')
+    monkeypatch.setenv('DISPLAY', ':0')
+    assert clipd.detect_backend() == 'both'
 
 
 def test_detect_backend_xdg_session_type(monkeypatch):
@@ -314,9 +322,16 @@ def test_socket_subscribe_receives_push(running_server):
 # WaylandBackend
 # ---------------------------------------------------------------------------
 
-def _make_proc(lines: list) -> MagicMock:
+def _make_proc(events: list) -> MagicMock:
+    """Create a mock Popen for _run_watcher tests.
+
+    Each entry in *events* is a clipboard content string; _run_watcher reads
+    raw bytes and splits on null-byte sentinels (wl-paste --watch … printf "\\0").
+    An empty BytesIO (events=[]) signals immediate EOF so the watcher exits.
+    """
     proc = MagicMock()
-    proc.stdout.__iter__ = MagicMock(return_value=iter(lines))
+    data = b"".join(e.encode() + b"\x00" for e in events)
+    proc.stdout = io.BytesIO(data)
     return proc
 
 

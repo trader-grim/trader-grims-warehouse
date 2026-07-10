@@ -2,18 +2,19 @@
 tgw.apis.lookup.upcitemdb — UPC/EAN barcode lookup via upcitemdb.com.
 
 Free tier: 100 req/day (no key required; key raises burst limit).
-Key (optional): secrets_root/upcitemdb-credentials.json → {"api_key": "..."}
+Key (optional): UPCITEMDB_API_KEY env var (tgw.apis.secrets.get_api_key,
+sourced from secrets_root/tgw.env).
 """
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, Dict, Optional
 
 import requests
 
+from tgw.apis.secrets import get_api_key
+
 from .base import LookupResult, now_iso
-from .base import secrets_root as _secrets_root
 
 log = logging.getLogger(__name__)
 
@@ -24,14 +25,10 @@ _TIMEOUT  = 10
 def lookup(barcode: str, cfg: Dict[str, Any]) -> Optional[LookupResult]:
     """Look up a UPC or EAN barcode. Returns None on miss or error."""
     headers: Dict[str, str] = {'Accept': 'application/json'}
-    key_file = _secrets_root(cfg) / 'upcitemdb-credentials.json'
-    if key_file.exists():
-        try:
-            creds = json.loads(key_file.read_text())
-            if creds.get('api_key'):
-                headers['user_key'] = creds['api_key']
-        except Exception:
-            pass
+    try:
+        headers['user_key'] = get_api_key('upcitemdb')
+    except RuntimeError:
+        pass
 
     try:
         resp = requests.get(_ENDPOINT, params={'upc': barcode},

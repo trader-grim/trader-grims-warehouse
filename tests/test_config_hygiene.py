@@ -14,8 +14,12 @@ from tgw.config import load_config
 
 
 def _write_cfg(tmp_path: Path, data: dict) -> Path:
+    # secrets_root must stay inside tmp_path — load_config() otherwise falls
+    # back to the real /opt/TGW/secrets and dies with PermissionError for any
+    # non-tgw test runner (secrets are correctly chmod 600 tgw-owned).
+    merged = {"secrets_root": str(tmp_path / "secrets"), **data}
     p = tmp_path / "tgw-api-config.json"
-    p.write_text(json.dumps(data))
+    p.write_text(json.dumps(merged))
     return p
 
 

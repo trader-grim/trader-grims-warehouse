@@ -46,8 +46,12 @@ import requests
 import tgw.logging as tgw_logging
 from tgw.apis.ebay.client import ebay_delete, ebay_get, ebay_post, ebay_put
 from tgw.apis.ebay.trading import revise_item_sku
+
+# PP-FENCE-001: atomic_write_json kept — all three writes happen after os.rename().
+# Migrate to fence.create_item in Session C when the dir rename is also fenced.
+from tgw.apis.fence import ebay_write as fence_ebay_write
 from tgw.config import DEFAULT_CONFIG, load_config
-from tgw.ebay.sync import _build_offer_bodies, _find_offer, _get_policies, publish_offer
+from tgw.ebay.sync import MARKETPLACE_ID, _build_offer_bodies, _find_offer, _get_policies, publish_offer
 from tgw.items import atomic_write_json, load_item_doc
 from tgw.queue import state_machine
 from tgw.queue.worker_base import QueueWorker
@@ -61,13 +65,22 @@ _MAX_ASPECT_LEN = 65  # Inventory API rejects aspect values longer than this
 
 
 def _get_listing_policies(cfg: Dict[str, Any],
-                          category_id: Optional[str] = None) -> Dict[str, str]:
+                          category_id: Optional[str] = None, *,
+                          marketplace_id: str = MARKETPLACE_ID) -> Dict[str, str]:
     """
     Return {fulfillmentPolicyId, paymentPolicyId, returnPolicyId}.
     Uses explicit IDs from config; picks fulfillment policy by category when
     a category-specific override exists in fulfillment_policy_by_category.
     Falls back to account-default lookup only when config has no IDs at all.
+
+    *marketplace_id*: for anything other than EBAY_US, config overrides
+    (EBAY_US business policies) are skipped entirely — resolves via the
+    account API scoped to that marketplace instead (code-review follow-up
+    to #1254/#1255; mirrors tgw.ebay.sync._get_listing_policies).
     """
+    if marketplace_id != MARKETPLACE_ID:
+        return _get_policies(cfg, marketplace_id=marketplace_id)
+
     fulfillment_id = (
         (cfg.get('fulfillment_policy_by_category', {}).get(str(category_id))
          if category_id else None)
@@ -104,6 +117,7 @@ _REASON_CODE_MAP: tuple = (
     (('Best Offer',),                      'FEATURE_UNSUPPORTED'),
     (('not currently supported',),         'FEATURE_UNSUPPORTED'),
     (('no price',),                        'NO_PRICE'),
+    (('local rename failed',),             'LOCAL_RENAME_FAILED_AFTER_EBAY_DONE'),
 )
 
 
@@ -123,6 +137,25 @@ _PERMANENT_ERROR_SIGNALS = (
     # Policy violation — listing flagged by eBay; needs human review
     '"errorId":25019',
     "'errorId': 25019",
+    # Condition invalid for category even after USED_EXCELLENT retry — needs category fix
+    '"errorId":25021',
+    "'errorId': 25021",
+    # Missing/invalid item specific (e.g. Type, Book Title too long) — needs data fix
+    '"errorId":25002',
+    "'errorId': 25002",
+    # Quantity must be > 0 — item sold/zeroed on eBay; mark sold via ebay_legacy_sync
+    '"errorId":25004',
+    "'errorId': 25004",
+    # Invalid category ID — needs category correction in item JSON
+    '"errorId":25005',
+    "'errorId': 25005",
+    # Availability not found — offer in bad state; needs manual inspection
+    '"errorId":25604',
+    "'errorId': 25604",
+    # Duplicate listing detected by eBay
+    'already have on eBay',
+    # Ended listing can not be revised via Trading API
+    'not allowed to revise ended listings',
 )
 
 
@@ -261,8 +294,16 @@ def _migrate_inventory(cfg: Dict[str, Any],
     if item_copy.get('draft_listing'):
         item_copy['draft_listing']['price'] = current_price
 
+    # Look up any existing offer for new_sku FIRST (code-review follow-up to
+    # #1254): a partial prior migration run's own live marketplaceId is
+    # ground truth, so _build_offer_bodies never needs to guess via the
+    # Motors category-tree check — same fix as sync.stage_draft.
+    existing = _find_offer(cfg, new_sku)
+    known_marketplace_id = existing.get('marketplaceId') if existing else None
+
     try:
-        inv_body, offer_body = _build_offer_bodies(cfg, new_sku, item_copy)
+        inv_body, offer_body = _build_offer_bodies(
+            cfg, new_sku, item_copy, known_marketplace_id=known_marketplace_id)
     except ValueError as exc:
         return {'ok': False, 'old_sku': old_sku,
                 'error': f'build offer body: {exc}'}
@@ -276,9 +317,8 @@ def _migrate_inventory(cfg: Dict[str, Any],
         return {'ok': False, 'old_sku': old_sku,
                 'error': f'PUT inventory_item/{new_sku}: {body}'}
 
-    # Find or create unpublished offer for new_sku
+    # Create the offer, or update the one found above
     try:
-        existing = _find_offer(cfg, new_sku)
         if existing:
             new_offer_id = existing['offerId']
             ebay_put(cfg, f'/sell/inventory/v1/offer/{new_offer_id}',
@@ -305,16 +345,44 @@ def _migrate_inventory(cfg: Dict[str, Any],
             return {'ok': False, 'old_sku': old_sku,
                     'error': f'DELETE old offer {old_offer_id}: {body}'}
 
-    # Publish new offer
+    # Publish new offer — retry with USED_EXCELLENT if category rejects condition.
+    # code-review follow-up (#1169): a failure here leaves new_sku's offer
+    # created-but-unpublished with old_offer already deleted — exactly the
+    # partial state _recover_partial() exists to auto-heal on a later run
+    # (migrate_one() routes back to it via _find_offer(new_sku)). Mark
+    # 'recoverable': True so handle() keeps retrying instead of permanently
+    # blocking on the first transient publish failure (unlike a local-rename
+    # failure below, which has no automatic self-heal path).
     try:
         pub = publish_offer(cfg, new_offer_id)
         new_listing_id  = pub['listing_id']
         new_listing_url = pub['listing_url']
     except requests.exceptions.HTTPError as exc:
-        body = exc.response.text[:300] if exc.response is not None else str(exc)
-        return {'ok': False, 'old_sku': old_sku,
-                'error': f'publish offer {new_offer_id}: {body}',
-                'ebay_done': True}
+        if exc.response is not None and exc.response.status_code == 400:
+            errors = exc.response.json().get('errors', [])
+            if any(e.get('errorId') == 25021 for e in errors):
+                log.warning('condition rejected for %s — retrying with USED_EXCELLENT', new_sku)
+                try:
+                    inv_body['condition'] = 'USED_EXCELLENT'
+                    ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{new_sku}', inv_body)
+                    pub = publish_offer(cfg, new_offer_id)
+                    new_listing_id  = pub['listing_id']
+                    new_listing_url = pub['listing_url']
+                except requests.exceptions.HTTPError as exc2:
+                    body = exc2.response.text[:300] if exc2.response is not None else str(exc2)
+                    return {'ok': False, 'old_sku': old_sku,
+                            'error': f'publish offer {new_offer_id}: {body}',
+                            'ebay_done': True, 'recoverable': True}
+            else:
+                body = exc.response.text[:300]
+                return {'ok': False, 'old_sku': old_sku,
+                        'error': f'publish offer {new_offer_id}: {body}',
+                        'ebay_done': True, 'recoverable': True}
+        else:
+            body = exc.response.text[:300] if exc.response is not None else str(exc)
+            return {'ok': False, 'old_sku': old_sku,
+                    'error': f'publish offer {new_offer_id}: {body}',
+                    'ebay_done': True, 'recoverable': True}
 
     # Delete old inventory item (cleanup; non-fatal)
     try:
@@ -398,7 +466,8 @@ def _migrate_inventory_live(cfg: Dict[str, Any],
     offer_body['sku'] = new_sku
     # Live offers often lack explicit policy IDs — inject from account policies
     category_id = old_offer.get('categoryId')
-    policies = _get_listing_policies(cfg, category_id)
+    policies = _get_listing_policies(
+        cfg, category_id, marketplace_id=old_offer.get('marketplaceId') or MARKETPLACE_ID)
     offer_body.setdefault('listingPolicies', {}).update(policies)
 
     # PUT new inventory item (idempotent)
@@ -415,6 +484,11 @@ def _migrate_inventory_live(cfg: Dict[str, Any],
         existing = _find_offer(cfg, new_sku)
         if existing:
             new_offer_id = existing['offerId']
+            # Ground truth wins over offer_body's marketplaceId (copied
+            # from old_offer above): a partial prior run may have created
+            # new_sku's offer on a different marketplace than old_offer's
+            # (code-review follow-up to #1254) — never assume they match.
+            offer_body['marketplaceId'] = existing.get('marketplaceId') or offer_body.get('marketplaceId')
             ebay_put(cfg, f'/sell/inventory/v1/offer/{new_offer_id}',
                      offer_body)
         else:
@@ -439,7 +513,9 @@ def _migrate_inventory_live(cfg: Dict[str, Any],
             return {'ok': False, 'old_sku': old_sku,
                     'error': f'DELETE old offer {old_offer_id}: {body}'}
 
-    # Publish new offer
+    # Publish new offer — recoverable (see _migrate_inventory's comment above):
+    # a failure here leaves new_sku's offer created-but-unpublished, which
+    # _recover_partial() auto-heals on a later run.
     try:
         pub = publish_offer(cfg, new_offer_id)
         new_listing_id  = pub['listing_id']
@@ -448,7 +524,7 @@ def _migrate_inventory_live(cfg: Dict[str, Any],
         body = exc.response.text[:300] if exc.response is not None else str(exc)
         return {'ok': False, 'old_sku': old_sku,
                 'error': f'publish offer {new_offer_id}: {body}',
-                'ebay_done': True}
+                'ebay_done': True, 'recoverable': True}
 
     # Delete old inventory item (cleanup; non-fatal)
     try:
@@ -532,7 +608,8 @@ def _recover_partial(cfg: Dict[str, Any],
     # Inject account policies — the offer was likely created without them
     try:
         category_id = new_offer.get('categoryId')
-        policies = _get_listing_policies(cfg, category_id)
+        policies = _get_listing_policies(
+            cfg, category_id, marketplace_id=new_offer.get('marketplaceId') or MARKETPLACE_ID)
         offer_body = {k: v for k, v in new_offer.items()
                       if k not in ('offerId', 'status', 'listing')}
         offer_body.setdefault('listingPolicies', {}).update(policies)
@@ -543,16 +620,44 @@ def _recover_partial(cfg: Dict[str, Any],
         return {'ok': False, 'old_sku': old_sku,
                 'error': f'PUT offer {new_offer_id} (recovery): {body}'}
 
-    # Publish
+    # Publish — retry with USED_EXCELLENT if category rejects the stored
+    # condition. All failures below are 'recoverable': True — this IS the
+    # recovery function; a failure here just means the same partial state
+    # persists for the next scheduled run to retry, not a new permanent one.
     try:
         pub = publish_offer(cfg, new_offer_id)
         new_listing_id  = pub['listing_id']
         new_listing_url = pub['listing_url']
     except requests.exceptions.HTTPError as exc:
-        body = exc.response.text[:300] if exc.response is not None else str(exc)
-        return {'ok': False, 'old_sku': old_sku,
-                'error': f'publish offer {new_offer_id} (recovery): {body}',
-                'ebay_done': True}
+        if exc.response is not None and exc.response.status_code == 400:
+            errors = exc.response.json().get('errors', [])
+            if any(e.get('errorId') == 25021 for e in errors):
+                log.warning('recovery: condition rejected for %s — retrying with USED_EXCELLENT',
+                            new_sku)
+                try:
+                    inv_body2 = ebay_get(cfg, f'/sell/inventory/v1/inventory_item/{new_sku}')
+                    inv_body2.pop('sku', None)
+                    inv_body2.pop('locale', None)
+                    inv_body2['condition'] = 'USED_EXCELLENT'
+                    ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{new_sku}', inv_body2)
+                    pub = publish_offer(cfg, new_offer_id)
+                    new_listing_id  = pub['listing_id']
+                    new_listing_url = pub['listing_url']
+                except requests.exceptions.HTTPError as exc2:
+                    body = exc2.response.text[:300] if exc2.response is not None else str(exc2)
+                    return {'ok': False, 'old_sku': old_sku,
+                            'error': f'publish offer {new_offer_id} (recovery+condition): {body}',
+                            'ebay_done': True, 'recoverable': True}
+            else:
+                body = exc.response.text[:300]
+                return {'ok': False, 'old_sku': old_sku,
+                        'error': f'publish offer {new_offer_id} (recovery): {body}',
+                        'ebay_done': True, 'recoverable': True}
+        else:
+            body = exc.response.text[:300] if exc.response is not None else str(exc)
+            return {'ok': False, 'old_sku': old_sku,
+                    'error': f'publish offer {new_offer_id} (recovery): {body}',
+                    'ebay_done': True, 'recoverable': True}
 
     # Delete old inventory item (non-fatal)
     try:
@@ -621,12 +726,38 @@ def migrate_one(cfg: Dict[str, Any],
         live_offer = _find_offer(cfg, old_sku)
         if live_offer:
             offer_id = live_offer['offerId']
+            # Guard: if the offer is sold/ended on eBay but locally still Active,
+            # update local status and skip — do NOT re-list a sold item.
+            live_status = live_offer.get('status', '')
+            if live_status not in ('PUBLISHED', 'UNPUBLISHED', 'ACTIVE', ''):
+                log.warning(
+                    'migrate_one: %s — eBay offer %s is %r (not active); '
+                    'updating local status and skipping',
+                    old_sku, offer_id, live_status,
+                )
+                fence_ebay_write(
+                    cfg, old_sku,
+                    ebay_listing={'status': live_status},
+                )
+                return {'ok': False, 'old_sku': old_sku, 'skip': True,
+                        'error': f'eBay offer status is {live_status!r} — item not active'}
 
     if offer_id:
         if live_offer is not None:
             # Have live offer data already — use it directly
             return _migrate_inventory_live(cfg, old_sku, new_sku, live_offer, listing_id)
         else:
+            # Belt-and-suspenders: if photo_urls missing locally, fall back to live path.
+            if not item.get('ebay_offer', {}).get('photo_urls'):
+                log.warning(
+                    'migrate_one: %s — offer_id known locally but photo_urls missing; '
+                    'falling back to live eBay fetch',
+                    old_sku,
+                )
+                live_offer = _find_offer(cfg, old_sku)
+                if live_offer:
+                    return _migrate_inventory_live(
+                        cfg, old_sku, new_sku, live_offer, listing_id)
             return _migrate_inventory(cfg, old_sku, new_sku, item, offer_id, listing_id)
     else:
         # Check for partial state: a previous run may have created new_sku offer
@@ -675,10 +806,13 @@ class EbaySkuMigrateWorker(QueueWorker):
 
         tgw_logging.log_event('worker_stop', queue=QUEUE_NAME, owner=self.owner)
 
+    def _interval_hours(self) -> float:
+        return float(self.config.get('ebay_sku_migrate', {}).get('interval_hours', 1))
+
     def handle(self, job: Dict[str, Any]) -> None:
         migrate_cfg = self.config.get('ebay_sku_migrate', {})
         batch_size  = int(migrate_cfg.get('batch_size', 5))
-        interval_h  = float(migrate_cfg.get('interval_hours', 1))
+        interval_h  = self._interval_hours()
 
         log.info('ebay_sku_migrate: scanning for batch (size=%d)', batch_size)
         tgw_logging.log_event('ebay_sku_migrate_start', batch_size=batch_size)
@@ -714,10 +848,33 @@ class EbaySkuMigrateWorker(QueueWorker):
                 error_text = result.get('error', '')
                 log.error('ebay_sku_migrate: FAILED %s → %s: %s',
                           old_sku, new_sku, error_text)
-                if result.get('ebay_done'):
+                if result.get('ebay_done') and not result.get('recoverable'):
                     log.error('ebay_sku_migrate: eBay already revised/migrated for %s '
                               '— manual local fix required', old_sku)
-                if _is_permanent_failure(error_text):
+                elif result.get('ebay_done'):
+                    log.warning('ebay_sku_migrate: %s left in a recoverable partial '
+                                'state (new offer created, not yet published) — '
+                                '_recover_partial will retry next run', old_sku)
+                # audit#1143 #1169: ebay_done=True (eBay-side migration already
+                # succeeded, only the local folder rename failed) was never
+                # classified as permanent — _is_permanent_failure() only
+                # matches known eBay errorId substrings, none of which appear
+                # in a local filesystem rename error. The item was silently
+                # reprocessed every cycle forever: revise_item_sku() re-run
+                # against a listing that's already on new_sku, local rename
+                # re-attempted against whatever local condition is still
+                # failing (unlikely to self-heal), no alert ever raised.
+                #
+                # code-review follow-up: the fix above was too broad — it also
+                # permanently blocked the OTHER ebay_done=True case (publish
+                # failed after the old offer was already deleted), which
+                # _recover_partial() exists specifically to auto-heal on a
+                # later run (migrate_one() routes back to it via
+                # _find_offer(new_sku)). Only the non-recoverable case (local
+                # rename failure — no automatic self-heal path exists for
+                # that) should block; the recoverable case must stay
+                # retryable, or _recover_partial never gets to run.
+                if (result.get('ebay_done') and not result.get('recoverable')) or _is_permanent_failure(error_text):
                     try:
                         from tgw.items import _write_field
                         now = datetime.now(timezone.utc).isoformat()
@@ -754,6 +911,17 @@ class EbaySkuMigrateWorker(QueueWorker):
         log.info('ebay_sku_migrate batch complete: %s', stats)
         tgw_logging.log_event('ebay_sku_migrate_batch', **stats)
         self._reschedule(interval_h)
+
+    def _on_terminal_failure(self, job: Dict[str, Any], error_text: str) -> None:
+        # audit#1143 #1234 follow-up (todo #1242): a dead-lettered batch must
+        # not end the chain — migration would silently stall forever. handle()
+        # computes interval_h before the batch loop; recompute the same way
+        # here since a terminal failure means handle() never reached its own
+        # self._reschedule(interval_h) call. code-review follow-up (#1246):
+        # both call sites now share _interval_hours() instead of duplicating
+        # the config lookup + default, so they can't drift apart.
+        log.warning('ebay_sku_migrate dead-lettered; rescheduling next batch anyway')
+        self._reschedule(self._interval_hours())
 
     def _reschedule(self, interval_hours: float) -> None:
         next_run = time.time() + interval_hours * 3600

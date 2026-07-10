@@ -22,15 +22,17 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
 import psycopg2.errors
 
 import tgw.logging as tgw_logging
+from tgw.apis.fence import ebay_write as fence_ebay_write
+from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.ebay.pricing import freeship_price, suggest_price, to_99
-from tgw.items import atomic_write_json
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
@@ -57,42 +59,110 @@ class EbayPriceWorker(QueueWorker):
         if not draft:
             raise HardFailure(f'{sku}: no draft_listing — run ebay_draft first')
 
-        # Idempotent: skip if already priced
-        existing = item.get('ebay_offer', {})
-        if existing.get('price') is not None:
-            log.info('ebay_price: %s already priced at $%.2f — skipping',
-                     sku, existing['price'])
-            tgw_logging.log_event('ebay_price_skipped', sku=sku,
-                                  reason='already_priced',
-                                  price=existing['price'])
+        # PP-PHOTOSYNC-001 P5 (todo #1120): an operator-set price is consent-
+        # gated. The draft→price auto-chain (no origin stamp) must never
+        # overwrite a price the operator explicitly typed in — even if
+        # ebay_offer.price has since gone missing (e.g. a redraft cleared
+        # other offer fields). Only a job carrying origin='operator' — the
+        # Re-price button, which clears ebay_offer.price/draft.price itself
+        # as its consent signal (invariant C10) — may compute a fresh price
+        # over an operator's last price_history entry.
+        price_history = item.get('price_history') or []
+        suggest_only = False
+        if (payload.get('origin') != 'operator' and price_history
+                and price_history[-1].get('source') == 'operator'):
+            op_price = price_history[-1].get('price')
+            log.info('ebay_price: %s — last price_history entry is operator-sourced '
+                     '($%s); suggest-only, not overwriting', sku, op_price)
+            tgw_logging.log_event('ebay_price_skipped_operator_override', sku=sku,
+                                  operator_price=op_price)
+            fence_ebay_write(self.config, sku, ebay_offer={
+                'price_guard_skipped': {
+                    'ts': datetime.now(timezone.utc).isoformat(),
+                    'reason': 'operator_price_history',
+                    'operator_price': op_price,
+                },
+            })
+            # audit#1143 #1240: this used to fall through and still call
+            # suggest_price() unconditionally below — an operator's last
+            # price_history entry means "leave this alone," full stop, not
+            # "leave the price alone but still burn a comps query." Return
+            # here so the guard is a hard skip, matching its own log message
+            # ("skip is early" per test_chain_enqueued_price_skips_when_operator_set_last).
             return
+
+        # Dave (s46): the auto-pricer sets a price only on the initial
+        # identification. Any later run still refreshes comps and records a
+        # suggestion (ebay_offer.suggested_price) — it powers the comp
+        # engine but never touches draft/offer price or the repricer floor.
+        existing = item.get('ebay_offer', {})
+        if existing.get('price') is not None or draft.get('price') is not None:
+            if not suggest_only:
+                log.info('ebay_price: %s already priced — suggest-only re-run', sku)
+                tgw_logging.log_event('ebay_price_suggest_only', sku=sku,
+                                      price=existing.get('price') or draft.get('price'))
+            suggest_only = True
 
         title          = draft.get('title') or item.get('title', '')
         category_name  = draft.get('category_name') or item.get('ebay_category_name', '')
         category_id    = str(draft.get('category_id') or item.get('ebay_category_id', ''))
         item_condition = str(item.get('condition', '')).strip()
         product_lookup = item.get('product_lookup') or {}
+        search_terms   = str(item.get('search_terms') or '').strip()
 
         if not title or title == sku:
             raise HardFailure(f'{sku}: no title — run ai_identify first')
 
+        if search_terms:
+            log.info('ebay_price: using operator search_terms %r for %s', search_terms, sku)
         log.info('ebay_price: querying comps for %r (condition=%r)', title[:60], item_condition)
-        tgw_logging.log_event('ebay_price_start', sku=sku, title=title[:60])
+        tgw_logging.log_event('ebay_price_start', sku=sku, title=title[:60],
+                               search_terms=search_terms or None)
 
         result = suggest_price(
             self.config, title, category_name, category_id,
             item_condition=item_condition,
             product_lookup=product_lookup,
+            search_terms=search_terms,
         )
 
         ebay_offer = dict(existing)
         ebay_offer['price_source'] = result['source']
-        ebay_offer['price_comps']  = result['comps']
-        if result.get('comp_items'):
-            ebay_offer['price_comps']['items'] = result['comp_items']
+        # Only overwrite price_comps when we have real data — preserve existing
+        # comps if the new search returned nothing (avoids wiping on re-price)
+        new_comps = result['comps']
+        if new_comps and (new_comps.get('count') or 0) > 0:
+            if result.get('comp_items'):
+                new_comps['items'] = result['comp_items']
+            ebay_offer['price_comps'] = new_comps
         ebay_offer['priced_at']    = result['queried_at']
 
         suggested = result['price']
+        if suggest_only:
+            # Comp refresh + suggestion only: price_comps/priced_at were set
+            # above; record the suggestion and stop. No draft_listing write —
+            # a suggest run must not flip the item's lifecycle state.
+            if suggested is not None:
+                ebay_offer['suggested_price'] = suggested
+                ebay_offer['suggested_at'] = result['queried_at']
+            fence_ebay_write(self.config, sku, ebay_offer=ebay_offer, allow_protected=['price_comps'])
+            log.info('ebay_price: %s suggest-only → suggested=$%s (%d comps)',
+                     sku, suggested, (result['comps'] or {}).get('count', 0))
+            tgw_logging.log_event('ebay_price_suggested', sku=sku,
+                                  suggested_price=suggested,
+                                  source=result['source'])
+            try:
+                state_machine.enqueue_job(
+                    queue_name='catalog_rebuild',
+                    payload={'reason': f'ebay_price_suggest:{sku}'},
+                    dedupe_key='catalog_rebuild:pending',
+                    not_before=time.time() + 30,
+                    max_attempts=3,
+                )
+            except psycopg2.errors.UniqueViolation:
+                pass
+            return
+
         if suggested is not None:
             # Launch price: max comp rounded up to next .99 — this is the initial
             # listed price, creating a visible "discount" when the repricer lowers
@@ -170,7 +240,11 @@ class EbayPriceWorker(QueueWorker):
         except Exception as exc:
             log.warning('ebay_price: quality rescore failed for %s: %s', sku, exc)
 
-        atomic_write_json(json_path, item, pretty=self.config.get('pretty', True))
+        fence_ebay_write(self.config, sku, ebay_offer=ebay_offer, allow_protected=['price_comps'])
+        top_level_patch = {'draft_listing': draft}
+        if item.get('free_shipping'):
+            top_level_patch['free_shipping'] = True
+        fence_patch_item(self.config, sku, top_level_patch)
 
         try:
             state_machine.enqueue_job(
@@ -186,9 +260,12 @@ class EbayPriceWorker(QueueWorker):
         # Only stage when we have a price — no point creating an offer with no price
         if suggested is not None:
             try:
+                # Invariant C10: propagate operator provenance down the chain.
                 state_machine.enqueue_job(
                     queue_name='ebay_stage',
-                    payload={'sku': sku},
+                    payload={'sku': sku,
+                             **({'origin': 'operator'}
+                                if payload.get('origin') == 'operator' else {})},
                     dedupe_key=f'ebay_stage:{sku}',
                     max_attempts=5,
                 )

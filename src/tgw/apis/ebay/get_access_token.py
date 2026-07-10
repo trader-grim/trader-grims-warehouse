@@ -19,6 +19,8 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
 
+from tgw.apis.ebay._token_io import atomic_write_token_json
+
 TGW_ROOT   = Path(os.getenv('TGW_ROOT', '/opt/TGW'))
 CONFIG_PATH = TGW_ROOT / 'config' / 'tgw-api-config.json'
 
@@ -29,26 +31,52 @@ def _load_raw_config() -> Dict[str, Any]:
 def _secrets_root() -> Path:
     return Path(_load_raw_config().get('secrets_root', '/opt/TGW/secrets'))
 
-TOKEN_PATH = _secrets_root() / 'ebay-token.json'
-LOG_PATH   = Path(_load_raw_config().get('log_root', '/opt/TGW/runtime/logs')) / 'ebay_token_manager.log'
-LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+try:
+    # CI/portability fix: this all used to run unconditionally at import
+    # time, so merely importing this module (e.g. this session's own new
+    # tests/test_get_access_token.py additions, or any CI runner without
+    # /opt/TGW) crashed with FileNotFoundError before a single test could
+    # run — every CI run on main/PRs since 2026-06-15 failed collection on
+    # this exact line. Fall back to a harmless stream-only-logging default
+    # when the real config isn't present; any function that actually
+    # reads/writes TOKEN_PATH still surfaces a clear error at call time if
+    # truly unconfigured, rather than crashing on mere import.
+    TOKEN_PATH = _secrets_root() / 'ebay-token.json'
+    LOG_PATH   = Path(_load_raw_config().get('log_root', '/opt/TGW/runtime/logs')) / 'ebay_token_manager.log'
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _log_handlers = [logging.FileHandler(LOG_PATH), logging.StreamHandler()]
+except OSError:
+    TOKEN_PATH = TGW_ROOT / 'secrets' / 'ebay-token.json'
+    _log_handlers = [logging.StreamHandler()]
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.FileHandler(LOG_PATH), logging.StreamHandler()]
+    handlers=_log_handlers,
 )
 logger = logging.getLogger(__name__)
 
-def load_config() -> Dict[str, Any]:
-    """Load eBay non-secret config (redirect_uri, scopes) from main config."""
+def load_config(is_sandbox: bool = False) -> Dict[str, Any]:
+    """Load eBay non-secret config (redirect_uri, scopes) from main config.
+
+    audit#1143 #1238: previously always returned production app_id/cert_id
+    regardless of is_sandbox — a sandbox OAuth run would silently
+    authenticate with production eBay credentials. Mirrors
+    refresh_access_token.py's get_ebay_config(), which already applies this
+    sandbox_ prefix correctly.
+    """
     raw = _load_raw_config()
     creds_path = _secrets_root() / 'ebay-credentials.json'
     if not creds_path.exists():
         raise FileNotFoundError(f'eBay credentials not found: {creds_path}')
     creds = json.loads(creds_path.read_text())
+    prefix = 'sandbox_' if is_sandbox else ''
+    app_id = creds.get(f'{prefix}app_id')
+    cert_id = creds.get(f'{prefix}cert_id')
+    if not app_id or not cert_id:
+        raise ValueError(f'Missing {prefix}app_id/{prefix}cert_id in {creds_path}')
     ebay_cfg = raw.get('ebay', {})
-    return {**creds, **ebay_cfg}
+    return {**creds, **ebay_cfg, 'app_id': app_id, 'cert_id': cert_id}
 
 def load_token_state() -> Dict[str, Any]:
     if TOKEN_PATH.exists():
@@ -57,9 +85,10 @@ def load_token_state() -> Dict[str, Any]:
     return {'access_token': '', 'refresh_token': '', 'expiry': 0}
 
 def save_token_state(state: Dict[str, Any]) -> None:
-    TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-    TOKEN_PATH.write_text(json.dumps(state, indent=2) + '\n')
-    TOKEN_PATH.chmod(0o600)
+    # audit#1143 #1162+#1177: atomic tmp+rename — TOKEN_PATH is the sole
+    # copy of the eBay refresh token; a partial write (crash/kill mid-write)
+    # corrupts it and forces full browser re-consent.
+    atomic_write_token_json(TOKEN_PATH, json.dumps(state, indent=2) + '\n')
     logger.info(f'State saved: {TOKEN_PATH}')
 
 def is_token_expired(state: Dict[str, Any]) -> bool:
@@ -105,7 +134,7 @@ def exchange_code_for_tokens(code: str, ebay_config: Dict[str, Any], is_sandbox:
 
 def get_access_token(prompt_if_needed: bool = True, is_sandbox: bool = False) -> str:
     """Get valid token: auto-refresh if possible, browser only for initial consent."""
-    ebay_config = load_config()
+    ebay_config = load_config(is_sandbox=is_sandbox)
     state = load_token_state()
 
     # Fast path: valid token exists
@@ -116,8 +145,16 @@ def get_access_token(prompt_if_needed: bool = True, is_sandbox: bool = False) ->
     # Auto-refresh if refresh_token exists (99% cases, NO BROWSER)
     if state.get('refresh_token'):
         try:
-            from tgw_ebay_token_manager_refresh_access_token_v1 import refresh_access_token
-            refreshed = refresh_access_token(is_sandbox=is_sandbox)
+            # audit#1143 #1238: previously imported a nonexistent module, so
+            # this branch always raised and silently fell through to the
+            # manual browser+paste flow even with a valid refresh_token.
+            # audit#1143 #1211-followup: originally bridged is_sandbox into
+            # refresh_access_token() via a process-global EBAY_ENV mutation
+            # that was never restored (would leak into unrelated later
+            # calls in the same process). refresh_access_token() now takes
+            # is_sandbox directly, same as load_config() above.
+            from tgw.apis.ebay.refresh_access_token import refresh_access_token
+            refreshed = refresh_access_token(force=True, is_sandbox=is_sandbox)
             logger.info("Auto-refreshed token - no browser needed.")
             return refreshed
         except Exception as e:
@@ -127,17 +164,29 @@ def get_access_token(prompt_if_needed: bool = True, is_sandbox: bool = False) ->
         logger.info("Initial OAuth needed (no refresh_token).")
         auth_url = generate_auth_url(ebay_config, is_sandbox)
         import subprocess as _sp
-        try:
-            _sp.Popen(['firefox', auth_url],
-                      stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
-        except FileNotFoundError:
-            webbrowser.open(auth_url)
-        print()
-        print('=' * 60)
-        print('  eBay OAuth: browser opened. Complete login + consent.')
-        print('  After eBay redirects, COPY the full URL from the browser')
-        print('  address bar and PASTE IT HERE (in THIS terminal window).')
-        print('=' * 60)
+        sudo_user = os.environ.get('SUDO_USER')
+        if sudo_user:
+            # Running via sudo — tgw cannot open the calling user's display.
+            # Print the URL; it's clickable in most terminal emulators.
+            print()
+            print('=' * 60)
+            print('  eBay OAuth — open this URL in your browser:')
+            print(f'  {auth_url}')
+            print('  After eBay redirects, COPY the full URL from the browser')
+            print('  address bar and PASTE IT HERE (in THIS terminal window).')
+            print('=' * 60)
+        else:
+            try:
+                _sp.Popen(['xdg-open', auth_url],
+                          stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+            except FileNotFoundError:
+                webbrowser.open(auth_url)
+            print()
+            print('=' * 60)
+            print('  eBay OAuth: browser opened. Complete login + consent.')
+            print('  After eBay redirects, COPY the full URL from the browser')
+            print('  address bar and PASTE IT HERE (in THIS terminal window).')
+            print('=' * 60)
         full_url = input('  Paste full redirect URL here → ').strip()
         print('=' * 60)
         parsed = urlparse(full_url)

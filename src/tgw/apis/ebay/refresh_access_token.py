@@ -8,6 +8,8 @@ from typing import Any, Dict
 
 import requests
 
+from tgw.apis.ebay._token_io import atomic_write_token_json
+
 TGW_ROOT = Path(os.getenv('TGW_ROOT', '/opt/TGW'))
 TGW_CONFIG_PATH = TGW_ROOT / 'config' / 'tgw-api-config.json'
 
@@ -19,35 +21,52 @@ def _secrets_root() -> Path:
     raw = _load_raw_config()
     return Path(raw.get('secrets_root', '/opt/TGW/secrets'))
 
-TOKEN_PATH = _secrets_root() / 'ebay-token.json'
-LOG_PATH   = Path(_load_raw_config().get('log_root', '/opt/TGW/runtime/logs')) / 'ebay_token_manager.log'
-LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+try:
+    # CI/portability fix: this all used to run unconditionally at import
+    # time, so merely importing this module (e.g. this session's own new
+    # tests/test_refresh_access_token.py additions, or any CI runner
+    # without /opt/TGW) crashed with FileNotFoundError before a single test
+    # could run — every CI run on main/PRs since 2026-06-15 failed
+    # collection on this exact line. Fall back to a harmless stream-only-
+    # logging default when the real config isn't present; any function that
+    # actually reads/writes TOKEN_PATH still surfaces a clear error at call
+    # time if truly unconfigured, rather than crashing on mere import.
+    TOKEN_PATH = _secrets_root() / 'ebay-token.json'
+    LOG_PATH   = Path(_load_raw_config().get('log_root', '/opt/TGW/runtime/logs')) / 'ebay_token_manager.log'
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _log_handlers = [logging.FileHandler(LOG_PATH), logging.StreamHandler()]
+except OSError:
+    TOKEN_PATH = TGW_ROOT / 'secrets' / 'ebay-token.json'
+    _log_handlers = [logging.StreamHandler()]
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_PATH),
-        logging.StreamHandler()
-    ]
+    handlers=_log_handlers,
 )
 logger = logging.getLogger(__name__)
 
-def get_ebay_config() -> Dict[str, Any]:
+def get_ebay_config(is_sandbox: bool | None = None) -> Dict[str, Any]:
+    """is_sandbox=None (default) falls back to the EBAY_ENV env var, preserving
+    token_refresh.py's existing (env-var-only) behavior. Pass is_sandbox
+    explicitly (audit#1143 #1211 follow-up) to select sandbox/production by
+    parameter instead — avoids callers having to mutate process-global
+    EBAY_ENV, which would leak across unrelated calls in the same process."""
     raw = _load_raw_config()
     creds_path = Path(raw.get('secrets_root', '/opt/TGW/secrets')) / 'ebay-credentials.json'
     if not creds_path.exists():
         raise FileNotFoundError(f'eBay credentials not found: {creds_path}')
     creds = json.loads(creds_path.read_text())
-    env = os.getenv('EBAY_ENV', 'production')
-    prefix = 'sandbox_' if env == 'sandbox' else ''
+    if is_sandbox is None:
+        is_sandbox = os.getenv('EBAY_ENV', 'production') == 'sandbox'
+    prefix = 'sandbox_' if is_sandbox else ''
     app_id  = creds.get(f'{prefix}app_id')
     cert_id = creds.get(f'{prefix}cert_id')
     if not app_id or not cert_id:
         raise ValueError(f'Missing {prefix}app_id/cert_id in {creds_path}')
     ebay_cfg = raw.get('ebay', {})
     return {
-        'api_root_ebay': 'https://api.sandbox.ebay.com' if env == 'sandbox' else 'https://api.ebay.com',
+        'api_root_ebay': 'https://api.sandbox.ebay.com' if is_sandbox else 'https://api.ebay.com',
         'app_id':  app_id,
         'cert_id': cert_id,
         'scopes':  ebay_cfg.get('scopes', 'https://api.ebay.com/oauth/api_scope'),
@@ -60,15 +79,16 @@ def load_token_state() -> Dict[str, Any]:
         return json.load(f)
 
 def save_token_state(state: Dict[str, Any]) -> None:
-    TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-    TOKEN_PATH.write_text(json.dumps(state, indent=2) + '\n')
-    TOKEN_PATH.chmod(0o600)
+    # audit#1143 #1162+#1177: atomic tmp+rename — TOKEN_PATH is the sole
+    # copy of the eBay refresh token; a partial write (crash/kill mid-write)
+    # corrupts it and forces full browser re-consent.
+    atomic_write_token_json(TOKEN_PATH, json.dumps(state, indent=2) + '\n')
 
 def is_token_expired(state: Dict[str, Any]) -> bool:
     expiry = state.get('expiry', 0)
     return time.time() >= expiry - 300  # 5min buffer
 
-def refresh_access_token(force: bool = False) -> str:
+def refresh_access_token(force: bool = False, is_sandbox: bool | None = None) -> str:
     """Refresh the eBay access token.
 
     When force=True the internal expiry guard is bypassed — the caller is
@@ -77,8 +97,11 @@ def refresh_access_token(force: bool = False) -> str:
     decision; using the internal guard there would create a double-buffer
     bug that delays the actual eBay call until the last 5 minutes of
     token life instead of the intended 30-minute window.
+
+    is_sandbox=None (default) falls back to EBAY_ENV, unchanged from before —
+    token_refresh.py's worker call (force=True, no is_sandbox) is unaffected.
     """
-    ebay_config = get_ebay_config()
+    ebay_config = get_ebay_config(is_sandbox=is_sandbox)
     state = load_token_state()
 
     if not force and not is_token_expired(state):

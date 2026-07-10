@@ -40,8 +40,9 @@ from tgw.apis.google_genai import (
     poll_batch,
     submit_batch,
 )
-from tgw.apis.llm import call_model, get_task_model
+from tgw.apis.llm import CLOUD_PROVIDERS, call_model, get_task_model
 from tgw.apis.ollama import extract_json, is_available
+from tgw.assets import ordered_photos as _asset_ordered_photos
 from tgw.assets import primary_photo as _asset_primary_photo
 
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
@@ -49,10 +50,26 @@ _VISION_MAX_PX = 512  # Ollama (memory-constrained CPU)
 _OR_MAX_PX = 768      # OpenRouter (quality matters more)
 _ALT_STEM_SUFFIX = "-alt"  # final image name: <sku>-alt.jpg
 _OPENROUTER_MIN_INTERVAL_S = 3.0  # 60s / 20 req = 3s; stays under free-tier ceiling
+# Multi-photo per item (session 41): the batching infra for this already existed
+# (build_alt_text_task takes a list of images) but cmd_alt_text only ever sent the
+# single primary photo — requested, built, never wired in. Cloud providers can take
+# more than one image per call for a richer alt_text/seo_caption; Ollama stays
+# single-image (memory-constrained CPU, see feedback-ollama-performance).
+_MAX_PHOTOS_CLOUD = 4
 
 _SYSTEM_PROMPT = "You are an expert in web accessibility and SEO. Respond with valid JSON only — no markdown fences, no commentary."
 _USER_PROMPT = (
     "Describe this product photo for web accessibility and SEO. "
+    "Return JSON with exactly two string fields:\n"
+    '  "alt_text": concise description of the main subject (max 150 chars; '
+    'do NOT start with "image of" or "picture of"),\n'
+    '  "seo_caption": 1-2 sentences including brand, model, and key features.\n'
+    "JSON only."
+)
+_USER_PROMPT_MULTI = (
+    "These photos all show the same product from different angles. Describe it for "
+    "web accessibility and SEO, using all the photos together to identify details "
+    "(brand, model, material, condition) that might not be visible in any single shot. "
     "Return JSON with exactly two string fields:\n"
     '  "alt_text": concise description of the main subject (max 150 chars; '
     'do NOT start with "image of" or "picture of"),\n'
@@ -169,7 +186,7 @@ def cmd_alt_text(
     """Generate alt_text + seo_caption for one item and rename its primary image."""
     from .items import atomic_write_json
 
-    # Resolve provider/model (CLI overrides → models config → _DEFAULTS)
+    # Resolve provider/model (CLI overrides → tgw-models.json — the only source)
     resolved_provider, resolved_model = get_task_model(cfg, 'alt_text')
     provider = provider or resolved_provider
     model = model or resolved_model
@@ -204,6 +221,18 @@ def cmd_alt_text(
     if img_path is None:
         return {"ok": False, "error": f"no primary image found in {sku_dir}"}
 
+    # Multi-photo selection for cloud providers (session 41 — see _MAX_PHOTOS_CLOUD).
+    # img_path stays the single primary for cache key / rename / archive bookkeeping;
+    # candidate_photos is what actually gets sent to the model.
+    if provider in CLOUD_PROVIDERS:
+        all_photos = _asset_ordered_photos(item, sku_dir)
+        candidate_photos = [
+            p for p in all_photos
+            if "-alt." not in p.name and not p.name.startswith("cropped-")
+        ][:_MAX_PHOTOS_CLOUD] or [img_path]
+    else:
+        candidate_photos = [img_path]
+
     if dry_run:
         history_sku_dir = _history_sku_dir(cfg, sku)
         history_path = history_sku_dir / img_path.name
@@ -214,30 +243,35 @@ def cmd_alt_text(
             "provider": provider,
             "model": model,
             "image": img_path.name,
+            "photos_used": [p.name for p in candidate_photos],
             "alt_path_would_be": str(sku_dir / f"{sku}{_ALT_STEM_SUFFIX}{img_path.suffix.lower()}"),
             "archive_needed": not history_path.exists(),
             "history_path": str(history_path),
         }
 
-    # pHash cache check — skip API call if we've processed this image before
+    # pHash cache check — skip API call if we've processed this image before.
+    # Only cache single-photo calls — multi-photo gives richer results and isn't
+    # keyed sanely on one image's hash (mirrors ai_identify's same rule).
     from tgw.image_hash import compute_dhash, lookup_hash, store_hash
 
     img_hash = compute_dhash(img_path)
-    cached = lookup_hash(img_hash, "alt_text") if img_hash else None
+    use_cache = len(candidate_photos) == 1
+    cached = lookup_hash(img_hash, "alt_text") if (img_hash and use_cache) else None
 
     if cached is not None:
         result = cached
     else:
         # Fail-fast: check Ollama availability before expensive encoding
-        if provider != "openrouter" and not is_available(model):
+        if provider == "ollama" and not is_available(model):
             return {"ok": False, "error": f"Ollama unavailable or model {model!r} not found"}
 
-        max_px = _OR_MAX_PX if provider == "openrouter" else _VISION_MAX_PX
-        img_b64 = _encode_resized(img_path, max_px=max_px)
+        max_px = _OR_MAX_PX if provider in CLOUD_PROVIDERS else _VISION_MAX_PX
+        img_b64_list = [_encode_resized(p, max_px=max_px) for p in candidate_photos]
+        user_prompt = _USER_PROMPT_MULTI if len(candidate_photos) > 1 else _USER_PROMPT
 
         try:
-            raw = call_model('alt_text', _SYSTEM_PROMPT, _USER_PROMPT, cfg,
-                             img_b64=img_b64, provider=provider, model=model, sku=sku)
+            raw = call_model('alt_text', _SYSTEM_PROMPT, user_prompt, cfg,
+                             img_b64_list=img_b64_list, provider=provider, model=model, sku=sku)
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
@@ -246,7 +280,7 @@ def cmd_alt_text(
         except Exception:
             return {"ok": False, "error": f"model returned non-JSON: {raw[:200]}"}
 
-        if img_hash:
+        if img_hash and use_cache:
             store_hash(img_hash, sku, "alt_text", result)
 
     alt_text = str(result.get("alt_text", "")).strip()[:150]

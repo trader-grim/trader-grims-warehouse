@@ -49,10 +49,12 @@ SOCKET_NAME = 'clipd.sock'
 # ---------------------------------------------------------------------------
 
 def detect_backend() -> str:
-    """Return 'wayland' or 'x11' based on the current session environment."""
-    if os.environ.get('WAYLAND_DISPLAY'):
-        return 'wayland'
-    if os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland':
+    """Return 'x11', 'wayland', or 'both' based on the current session environment."""
+    has_wayland = bool(os.environ.get('WAYLAND_DISPLAY'))
+    has_x11 = bool(os.environ.get('DISPLAY'))
+    if has_wayland and has_x11:
+        return 'both'   # XWayland mixed session — watch both clipboards
+    if has_wayland or os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland':
         return 'wayland'
     return 'x11'
 
@@ -101,13 +103,27 @@ class _SubscriberRegistry:
 # Core change handler — backend-agnostic
 # ---------------------------------------------------------------------------
 
+_last_content: Optional[str] = None
+_last_content_lock = threading.Lock()
+
+
 def process_change(
     content: str,
     selection: str,
     subscribers: _SubscriberRegistry,
     db_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Record a clipboard change and push an event to all subscribers."""
+    """Record a clipboard change and push an event to all subscribers.
+
+    Deduplicates: skips if content is identical to the last recorded entry
+    (prevents dual-backend double-writes when both X11 and Wayland fire for the
+    same clipboard event in a mixed XWayland session).
+    """
+    global _last_content
+    with _last_content_lock:
+        if content == _last_content:
+            return {'ok': True, 'skipped': True}
+        _last_content = content
     result = record_clip(content, selection=selection, db_path=db_path)
     subscribers.push({
         'event': 'clip',
@@ -134,7 +150,53 @@ def handle_command(cmd: Dict[str, Any], db_path: Optional[Path] = None) -> Dict[
     if action == 'list':
         limit = int(cmd.get('limit', 20))
         return {'ok': True, 'rows': list_history(limit=limit, db_path=db_path)}
+    if action == 'pick':
+        return {'ok': True, 'action': 'launch_rofi'}
     return {'ok': False, 'error': f'unknown command: {action!r}'}
+
+def launch_rofi_picker(db_path: Path) -> Optional[str]:
+    """Launch rofi to pick from clipboard history. Returns selected content or None."""
+    import sqlite3
+    
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+        cursor.execute('SELECT content FROM clips ORDER BY ts DESC LIMIT 200')
+        items = [row[0][:120] for row in cursor.fetchall()]
+        conn.close()
+
+        if not items:
+            return None
+
+        proc = subprocess.Popen(
+            ['rofi', '-dmenu', '-p', 'Clip', '-i'],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        assert proc.stdin is not None
+        proc.stdin.write('\n'.join(items))
+        proc.stdin.close()
+        
+        selected = proc.stdout.read().strip() if proc.stdout else None
+        proc.wait()
+        if not selected:
+            return None
+
+        # Look up full content (not truncated) from db
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT content FROM clips WHERE content LIKE ? LIMIT 1',
+            (f'{selected}%',)
+        )
+        full_content = cursor.fetchone()[0] if cursor.fetchone() else selected
+        conn.close()
+        return full_content
+
+    except Exception as e:
+        log.warning('rofi picker failed: %s', e)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -227,15 +289,11 @@ class X11Backend:
         self._stop = stop_event or threading.Event()
 
     def _open_display(self):
-        import sys
-        # python3-xlib is a system package, not in the TGW venv
-        if '/usr/lib/python3/dist-packages' not in sys.path:
-            sys.path.insert(0, '/usr/lib/python3/dist-packages')
         from Xlib import display as xdisplay
         return xdisplay.Display()
 
     def _read_selection_content(self, selection: str) -> Optional[str]:
-        """Read clipboard content for the named selection via xclip subprocess."""
+        """Read X11 clipboard content via xclip (reads X11 selection, not Wayland)."""
         sel_arg = 'primary' if selection == 'primary' else 'clipboard'
         try:
             r = subprocess.run(
@@ -251,9 +309,7 @@ class X11Backend:
     def run(self) -> None:
         """Block until stop_event, processing XFixes SelectionOwner events."""
         import select as _select
-        import sys
-        if '/usr/lib/python3/dist-packages' not in sys.path:
-            sys.path.insert(0, '/usr/lib/python3/dist-packages')
+
         from Xlib import Xatom
         from Xlib.ext.xfixes import XFixesSetSelectionOwnerNotifyMask
 
@@ -337,7 +393,10 @@ class WaylandBackend:
         args = ['wl-paste']
         if selection == 'primary':
             args.append('--primary')
-        args += ['--watch', 'cat']
+        # printf '\0' after cat writes a null-byte sentinel after each event so we can
+        # recover complete multi-line clipboard content from the concatenated stdout stream.
+        # Reading line-by-line would split multi-paragraph clips at every newline.
+        args += ['--watch', 'sh', '-c', r'cat; printf "\0"']
 
         while not self._stop.is_set():
             try:
@@ -345,7 +404,6 @@ class WaylandBackend:
                     args,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
-                    text=True,
                 )
             except FileNotFoundError:
                 log.error('wl-paste not found; Wayland backend unavailable')
@@ -353,12 +411,17 @@ class WaylandBackend:
 
             try:
                 assert proc.stdout is not None
-                for line in proc.stdout:
-                    if self._stop.is_set():
+                buf = b''
+                while not self._stop.is_set():
+                    chunk = proc.stdout.read(4096)
+                    if not chunk:
                         break
-                    content = line.rstrip('\n')
-                    if content:
-                        process_change(content, selection, self._subscribers, self._db_path)
+                    buf += chunk
+                    while b'\x00' in buf:
+                        raw, buf = buf.split(b'\x00', 1)
+                        content = raw.decode('utf-8', errors='replace').rstrip('\n')
+                        if content.strip():
+                            process_change(content, selection, self._subscribers, self._db_path)
             except OSError:
                 pass
             finally:
@@ -373,7 +436,12 @@ class WaylandBackend:
                 self._stop.wait(self._restart_delay)
 
     def run(self) -> None:
-        """Start watchers for clipboard and primary; block until stop_event."""
+        """Start watchers for clipboard (and primary if X11 not also active); block until stop_event."""
+        # In a mixed XWayland session ('both' backend), X11/XFixes already watches PRIMARY.
+        # Only watch PRIMARY via wl-paste when there's no X11 backend running alongside.
+        selections = ['clipboard']
+        if not os.environ.get('DISPLAY'):
+            selections.append('primary')
         threads = [
             threading.Thread(
                 target=self._run_watcher,
@@ -381,7 +449,7 @@ class WaylandBackend:
                 daemon=True,
                 name=f'wl-watch-{sel}',
             )
-            for sel in ('clipboard', 'primary')
+            for sel in selections
         ]
         for t in threads:
             t.start()
@@ -424,16 +492,16 @@ class ClipDaemon:
         st.start()
         self._threads.append(st)
 
-        if self._backend_name == 'wayland':
-            bk: Any = WaylandBackend(self._subscribers, self._db_path, self._stop_event)
-        else:
-            bk = X11Backend(self._subscribers, self._db_path, self._stop_event)
+        backends: List[Any] = []
+        if self._backend_name in ('wayland', 'both'):
+            backends.append(('wayland', WaylandBackend(self._subscribers, self._db_path, self._stop_event)))
+        if self._backend_name in ('x11', 'both'):
+            backends.append(('x11', X11Backend(self._subscribers, self._db_path, self._stop_event)))
 
-        bt = threading.Thread(
-            target=bk.run, daemon=True, name=f'clipd-{self._backend_name}'
-        )
-        bt.start()
-        self._threads.append(bt)
+        for name, bk in backends:
+            bt = threading.Thread(target=bk.run, daemon=True, name=f'clipd-{name}')
+            bt.start()
+            self._threads.append(bt)
         log.info('ClipDaemon started: backend=%s socket=%s', self._backend_name, self.socket_path)
 
     def stop(self) -> None:
@@ -456,9 +524,64 @@ def main() -> int:
     import signal
 
     parser = argparse.ArgumentParser(prog='tgw-clipd')
+    # Bare invocation (no subcommand) is the real-world case — the systemd
+    # unit calls `tgw-clipd` with no args — so --backend/--verbose must exist
+    # on the top-level parser too, not just the 'daemon' subparser, or the
+    # no-subcommand path below crashes on args.verbose/args.backend every run.
     parser.add_argument('--backend', choices=['auto', 'x11', 'wayland'], default='auto')
     parser.add_argument('--verbose', '-v', action='store_true')
+    subparsers = parser.add_subparsers(dest='command', required=False)
+
+    # Daemon mode (default)
+    daemon_parser = subparsers.add_parser('daemon')
+    daemon_parser.add_argument('--backend', choices=['auto', 'x11', 'wayland'], default='auto')
+    daemon_parser.add_argument('--verbose', '-v', action='store_true')
+
+    # Pick command
+    pick_parser = subparsers.add_parser('pick')
+    pick_parser.add_argument('--db-path', type=Path, default=_DEFAULT_CLIP_DIR / 'clip.db')
+
     args = parser.parse_args()
+
+    if not args.command or args.command == 'daemon':
+        # Original daemon behavior
+        logging.basicConfig(
+            level=logging.DEBUG if args.verbose else logging.INFO,
+            format='%(asctime)s %(name)s %(levelname)s %(message)s',
+        )
+        daemon = ClipDaemon(backend=args.backend)
+        daemon.start()
+        stop = threading.Event()
+        def _sig(_signum, _frame) -> None:
+            log.info('signal received — stopping')
+            stop.set()
+        signal.signal(signal.SIGINT, _sig)
+        signal.signal(signal.SIGTERM, _sig)
+        stop.wait()
+        daemon.stop()
+        return 0
+
+    if args.command == 'pick':
+        import sys
+        selected = launch_rofi_picker(args.db_path)
+        if not selected:
+            return 1
+
+        # Set clipboard using best available method
+        try:
+            if os.environ.get('WAYLAND_DISPLAY'):
+                subprocess.run(['wl-copy'], input=selected, text=True, check=True)
+            else:
+                subprocess.run(
+                    ['xclip', '-selection', 'clipboard'],
+                    input=selected, text=True, check=True
+                )
+        except Exception as e:
+            print(f"Failed to set clipboard: {e}", file=sys.stderr)
+            return 1
+
+        print(selected)
+        return 0
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,

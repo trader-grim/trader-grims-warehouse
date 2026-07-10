@@ -23,11 +23,14 @@ from typing import Any, Dict, List, Optional
 import psycopg2.errors
 
 import tgw.logging as tgw_logging
-from tgw.apis.llm import call_model, get_task_model
+from tgw import quota
+from tgw.apis.fence import patch_item as fence_patch_item
+from tgw.apis.llm import CLOUD_PROVIDERS, call_model, get_task_model
 from tgw.apis.ollama import extract_json, is_available
-from tgw.assets import primary_photo as _asset_primary_photo
+from tgw.assets import ordered_photos as _asset_ordered_photos
 from tgw.config import DEFAULT_CONFIG, load_config
-from tgw.items import append_history_event, atomic_write_json
+from tgw.config import sku_dir as _cfg_sku_dir
+from tgw.items import append_history_event
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
@@ -37,65 +40,67 @@ QUEUE_NAME = "ai_identify"
 _OLLAMA_FALLBACK_MODEL = "qwen2.5vl:7b"
 
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"}
-_VISION_MAX_PX = 512  # 56KB resized; model loads in ~10 min cold, ~18s warm
+_VISION_MAX_PX = 512  # Ollama CPU path — keep small
+_VISION_MAX_PX_CLOUD = 1024  # OpenRouter/Gemini — higher res, no cold-start cost
+_MAX_PHOTOS_CLOUD = 6  # max images per call for cloud providers
 
 _SYSTEM_PROMPT = """\
-You are an eBay listing assistant. You will be shown a photo of an item for sale.
+You are an inventory cataloguing assistant. You will be shown a photo of an item.
+Extract every field you can observe or reasonably infer. Use null for fields you cannot determine.
 Respond with valid JSON only — no prose, no markdown fences.
 """
 
-_USER_PROMPT = """\
-Look at this item photo and provide:
-- A concise, descriptive eBay-style title (under 80 characters)
-- The most likely eBay category name (plain English, e.g. "Board Games", "Action Figures")
-- A 1-2 sentence description of what the item appears to be
-- Your best guess at condition: "New", "Like New", "Very Good", "Good", "Acceptable"
-
-Respond with JSON:
+_ITEM_FIELDS_SCHEMA = """\
 {
-  "title": "...",
-  "category": "...",
-  "description": "...",
-  "condition": "..."
-}
+  "title": "concise descriptive title under 80 chars, include brand and model if visible",
+  "category": "plain English category name (e.g. Board Games, Action Figures, Vintage Electronics)",
+  "description": "2-4 sentences describing what the item is, what is visible, notable features",
+  "condition": "one of: New, Like New, Very Good, Good, Acceptable",
+  "brand": "brand or manufacturer name if visible on item or packaging, else null",
+  "model": "specific model name or number if visible, else null",
+  "manufacturer": "full manufacturer name if different from brand or more specific, else null",
+  "mpn": "model/part number printed on item if visible, else null",
+  "color": "primary color or color description, else null",
+  "material": "primary material (e.g. plastic, metal, fabric, ceramic, paper), else null",
+  "country_of_manufacture": "country if visible on item or packaging, else null",
+  "upc": "barcode number if clearly legible, else null",
+  "item_specifics": "object of any other notable key-value attributes visible on the item (e.g. {\"Size\": \"Large\", \"Style\": \"Vintage\"}), or empty object"
+}"""
+
+_USER_PROMPT = f"""\
+Look at this item photo and extract as much information as you can.
+
+Respond with JSON matching this schema (null for any field you cannot determine):
+{_ITEM_FIELDS_SCHEMA}
 """
 
-_USER_PROMPT_HINTED = """\
+_USER_PROMPT_HINTED = (
+    """\
 Look at this item photo. I already know this item is: {hint}
 
-Using that context together with the photo, provide:
-- A concise, descriptive eBay-style title (under 80 characters) that builds on what I told you
-- The most likely eBay category name (plain English, e.g. "Thimbles", "Miniature Bottles")
-- A 1-2 sentence description covering what is visible (quantity, materials, notable markings)
-- Your best guess at condition: "New", "Like New", "Very Good", "Good", "Acceptable"
+Using that context together with the photo, extract as much information as you can.
 
-Respond with JSON:
-{{
-  "title": "...",
-  "category": "...",
-  "description": "...",
-  "condition": "..."
-}}
+Respond with JSON matching this schema (null for any field you cannot determine):
 """
-
-_USER_PROMPT_ENRICHED = """\
-Look at this item photo. Barcode lookup identified this product: {product_context}
-
-Using that product data together with the photo:
-- Confirm or refine the title to be eBay-ready (under 80 characters, include brand/model)
-- The most likely eBay category name (plain English)
-- A 1-2 sentence description focusing on condition and any notable visible details
-- Condition based on what you see: "New", "Like New", "Very Good", "Good", "Acceptable"
-
-Respond with JSON:
-{{
-  "title": "...",
-  "category": "...",
-  "description": "...",
-  "condition": "..."
-}}
+    + _ITEM_FIELDS_SCHEMA
+    + """
 """
+)
 
+_USER_PROMPT_ENRICHED = (
+    """\
+Look at this item photo. Barcode lookup identified this product:
+{product_context}
+
+Using that product data together with the photo, extract as much information as you can.
+Confirm or refine any fields where the photo gives better information than the lookup data.
+
+Respond with JSON matching this schema (null for any field you cannot determine):
+"""
+    + _ITEM_FIELDS_SCHEMA
+    + """
+"""
+)
 
 
 def _encode_resized(img_path: Path, max_px: int = _VISION_MAX_PX) -> tuple[str, int, int]:
@@ -118,8 +123,8 @@ def _encode_resized(img_path: Path, max_px: int = _VISION_MAX_PX) -> tuple[str, 
 
 class AIIdentifyWorker(QueueWorker):
     def run(self) -> None:
-        provider, model = get_task_model(self.config, 'ai_identify')
-        if provider == 'ollama':
+        provider, model = get_task_model(self.config, "ai_identify")
+        if provider == "ollama":
             self._warmup(model)
         super().run()
 
@@ -142,7 +147,7 @@ class AIIdentifyWorker(QueueWorker):
         if not sku:
             raise HardFailure("ai_identify job missing sku in payload")
 
-        sku_dir = self.config["itemdata_root"] / sku
+        sku_dir = _cfg_sku_dir(self.config, sku)
         json_path = sku_dir / f"{sku}.json"
 
         if not json_path.exists():
@@ -179,24 +184,37 @@ class AIIdentifyWorker(QueueWorker):
         if not hint and existing_title and existing_title != sku:
             hint = existing_title
 
-        img_path = _asset_primary_photo(item, sku_dir)
-        if img_path is None:
-            raise HardFailure(f"no images found for {sku}")
-
-        provider, model = get_task_model(self.config, 'ai_identify')
+        provider, model = get_task_model(self.config, "ai_identify")
 
         if product_context:
-            prompt = _USER_PROMPT_ENRICHED.format(product_context=product_context)
+            # Use replace() not format() — the schema contains literal {} JSON braces
+            prompt = _USER_PROMPT_ENRICHED.replace('{product_context}', product_context)
         elif hint:
-            prompt = _USER_PROMPT_HINTED.format(hint=hint)
+            prompt = _USER_PROMPT_HINTED.replace('{hint}', hint)
         else:
             prompt = _USER_PROMPT
 
-        # pHash cache check — skip API call if we've processed this image before
+        # Select photos — cloud providers get multiple images; Ollama gets one
+        all_photos = _asset_ordered_photos(item, sku_dir)
+        if not all_photos:
+            raise HardFailure(f"no images found for {sku}")
+
+        if provider in CLOUD_PROVIDERS:
+            # Skip -alt. duplicates and cropped- derivatives for the batch;
+            # they add tokens without new information. Photo selection UI is PP-TODO.
+            candidate_photos = [p for p in all_photos if "-alt." not in p.name and not p.name.startswith("cropped-")][:_MAX_PHOTOS_CLOUD] or all_photos[:1]
+        else:
+            candidate_photos = all_photos[:1]
+
+        img_path = candidate_photos[0]  # primary — used for cache key + logging
+
+        # pHash cache check on the primary photo only
         from tgw.image_hash import compute_dhash, lookup_hash, store_hash
 
         img_hash = compute_dhash(img_path)
-        cached_result = lookup_hash(img_hash, "ai_identify") if img_hash else None
+        # Only use cache for single-photo calls — multi-photo gives richer results
+        use_cache = len(candidate_photos) == 1
+        cached_result = lookup_hash(img_hash, "ai_identify") if (img_hash and use_cache) else None
 
         raw: Optional[str] = None
         if cached_result is not None:
@@ -204,31 +222,49 @@ class AIIdentifyWorker(QueueWorker):
             tgw_logging.log_event("ai_identify_cache_hit", sku=sku, phash=img_hash)
             result = cached_result
         else:
-            # Fail-fast for Ollama before the slow encoding step
-            if provider == 'ollama' and not is_available(model):
+            if provider == "ollama" and not is_available(model):
                 raise RuntimeError(f"Ollama unavailable or model {model!r} not found")
 
-            # Use higher resolution for cloud providers; keep low for CPU-bound Ollama
-            max_px = 768 if provider == 'openrouter' else _VISION_MAX_PX
-            img_b64, orig_kb, resized_kb = _encode_resized(img_path, max_px=max_px)
+            max_px = _VISION_MAX_PX_CLOUD if provider in CLOUD_PROVIDERS else _VISION_MAX_PX
+            encoded = [_encode_resized(p, max_px=max_px) for p in candidate_photos]
+            img_b64_list = [e[0] for e in encoded]
+            total_kb = sum(e[2] for e in encoded)
 
-            log.info("calling %s/%s for %s (image: %s, %dKB→%dKB%s)", provider, model, sku, img_path.name, orig_kb, resized_kb, f", hint={hint!r}" if hint else "")
-            tgw_logging.log_event("ai_identify_call", sku=sku, provider=provider, model=model, image=img_path.name, orig_kb=orig_kb, resized_kb=resized_kb, hint=hint or None)
+            photo_names = [p.name for p in candidate_photos]
+            log.info("calling %s/%s for %s (%d photos: %s, %dKB total%s)", provider, model, sku, len(candidate_photos), ", ".join(photo_names), total_kb, f", hint={hint!r}" if hint else "")
+            tgw_logging.log_event("ai_identify_call", sku=sku, provider=provider, model=model, photos=photo_names, photo_count=len(candidate_photos), total_kb=total_kb, hint=hint or None)
 
-            raw = call_model('ai_identify', _SYSTEM_PROMPT, prompt, self.config, img_b64=img_b64, sku=sku)
+            raw = call_model("ai_identify", _SYSTEM_PROMPT, prompt, self.config, img_b64_list=img_b64_list, sku=sku)
 
             try:
                 result = extract_json(raw)
             except Exception as exc:
                 raise HardFailure(f"ai_identify: model returned non-JSON for {sku}: {raw[:200]}") from exc
 
-            if img_hash:
+            if img_hash and use_cache:
                 store_hash(img_hash, sku, "ai_identify", result)
 
-        title = str(result.get("title", "")).strip()
-        category = str(result.get("category", "")).strip()
-        description = str(result.get("description", "")).strip()
-        condition = str(result.get("condition", "")).strip()
+        def _str(key: str) -> str:
+            v = result.get(key)
+            return str(v).strip() if v and str(v).strip().lower() not in ("null", "none", "") else ""
+
+        title = _str("title")
+        category = _str("category")
+        description = _str("description")
+        condition = _str("condition")
+
+        # Extended inventory fields — fill canonical record, never discard
+        brand = _str("brand")
+        model = _str("model")
+        manufacturer = _str("manufacturer")
+        mpn = _str("mpn")
+        color = _str("color")
+        material = _str("material")
+        country_of_manufacture = _str("country_of_manufacture")
+        upc = _str("upc")
+        ai_item_specifics = result.get("item_specifics") or {}
+        if not isinstance(ai_item_specifics, dict):
+            ai_item_specifics = {}
 
         if not title:
             raise HardFailure(f"ai_identify: empty title in model response for {sku}")
@@ -239,10 +275,16 @@ class AIIdentifyWorker(QueueWorker):
             from tgw.apis.ebay.taxonomy import best_category
 
             ebay_category_id, ebay_category_name = best_category(self.config, title, category)
+        except quota.QuotaBudgetExceeded:
+            # code-review follow-up (#1181): best_category() deliberately
+            # re-raises this so the job requeues transiently (worker_base's
+            # 'quota budget exhausted' classifier) instead of silently
+            # writing the item with no category — must not catch it here.
+            raise
         except Exception as exc:
             log.warning("taxonomy lookup failed for %r: %s", category, exc)
 
-        # Write results — always overwrite on re-identify, fill gaps on first pass
+        # Write results — always overwrite core fields; fill gaps for extended fields
         item["title"] = title
         item["category"] = category
         item["description"] = description
@@ -252,6 +294,29 @@ class AIIdentifyWorker(QueueWorker):
             item["ebay_category_name"] = ebay_category_name
         item["ai_identified"] = True
         item.pop("ai_reidentify", None)  # clear the force flag
+
+        # Extended canonical inventory fields — fill any empty slot; never wipe existing
+        # operator-set values (a re-identify should not clobber what a human corrected)
+        _is_reidentify = bool(item.get("ai_identified"))  # True means this is a re-scan
+        for _field, _val in [
+            ("brand", brand),
+            ("model", model),
+            ("manufacturer", manufacturer),
+            ("model_number", mpn),
+            ("color", color),
+            ("material", material),
+            ("country_of_manufacture", country_of_manufacture),
+            ("upc", upc),
+        ]:
+            if _val and not item.get(_field):
+                item[_field] = _val
+
+        # Merge AI-extracted item specifics into item_attributes (never overwrite existing keys)
+        if ai_item_specifics:
+            existing_attrs = item.get("item_attributes") or {}
+            merged_attrs = {**ai_item_specifics, **existing_attrs}  # existing wins
+            item["item_attributes"] = merged_attrs
+
         # product_lookup already written above if lookup succeeded
 
         # Record identification round in history trail
@@ -282,17 +347,28 @@ class AIIdentifyWorker(QueueWorker):
         # Re-scans append; they never replace prior entries. Derivation reads this list.
         scanned_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         vision_record: Dict[str, Any] = {
-            "photo":          img_path.name,
-            "photo_hash":     img_hash or "",
-            "model":          f"{provider}/{model}",
-            "prompt_type":    prompt_type,
+            "photo": img_path.name,
+            "photos": [p.name for p in candidate_photos],
+            "photo_count": len(candidate_photos),
+            "photo_hash": img_hash or "",
+            "model": f"{provider}/{model}",
+            "prompt_type": prompt_type,
             "prompt_context": product_context or hint or "",
-            "scanned_at":     scanned_at,
+            "scanned_at": scanned_at,
             "extracted": {
-                "title":       title,
-                "category":    category,
+                "title": title,
+                "category": category,
                 "description": description,
-                "condition":   condition,
+                "condition": condition,
+                "brand": brand or None,
+                "model": model or None,
+                "manufacturer": manufacturer or None,
+                "mpn": mpn or None,
+                "color": color or None,
+                "material": material or None,
+                "country_of_manufacture": country_of_manufacture or None,
+                "upc": upc or None,
+                "item_specifics": ai_item_specifics or None,
             },
         }
         if raw is not None:
@@ -301,7 +377,40 @@ class AIIdentifyWorker(QueueWorker):
         vision_results.append(vision_record)
         item["vision_results"] = vision_results
 
-        atomic_write_json(json_path, item, pretty=self.config.get("pretty", True))
+        # Push all changes through fence (single atomic write)
+        fence_fields = {
+            "title": item["title"],
+            "category": item["category"],
+            "description": item["description"],
+            "condition": item["condition"],
+            "ai_identified": item["ai_identified"],
+            "vision_results": item["vision_results"],
+            "identification_history": item.get("identification_history", []),
+        }
+        if force_reidentify:
+            # audit#1143 #1167: item.pop("ai_reidentify", None) above only
+            # clears the in-memory copy — fence_fields is a curated
+            # allow-list and never included this key, so the persisted flag
+            # never actually cleared. Every subsequent run for this SKU saw
+            # ai_reidentify still true on disk and re-triggered a billed
+            # vision-AI call forever. _apply_patch() deletes a field from the
+            # document when its patched value is None (http_server.py's
+            # _apply_patch docstring) — that's the mechanism to use here.
+            fence_fields["ai_reidentify"] = None
+        if "ebay_category_id" in item:
+            fence_fields["ebay_category_id"] = item["ebay_category_id"]
+            fence_fields["ebay_category_name"] = item.get("ebay_category_name")
+        if "product_lookup" in item:
+            fence_fields["product_lookup"] = item["product_lookup"]
+        if "free_shipping" in item:
+            fence_fields["free_shipping"] = item["free_shipping"]
+        # Extended fields — only write non-empty values
+        for _f in ("brand", "model", "manufacturer", "model_number", "color", "material", "country_of_manufacture", "upc"):
+            if item.get(_f):
+                fence_fields[_f] = item[_f]
+        if item.get("item_attributes"):
+            fence_fields["item_attributes"] = item["item_attributes"]
+        fence_patch_item(self.config, sku, fence_fields)
 
         log.info("ai_identify complete for %s: %r (eBay cat %s)", sku, title, ebay_category_id)
         tgw_logging.log_event(

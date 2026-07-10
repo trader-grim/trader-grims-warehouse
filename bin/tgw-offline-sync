@@ -15,7 +15,7 @@
 set -euo pipefail
 
 LABEL="${1:?Usage: tgw-offline-sync <DRIVE_LABEL>}"
-MOUNT="/media/tgw/${LABEL}"
+MOUNT="${TGW_OFFLINE_MOUNT_BASE:-/media/tgw}/${LABEL}"
 LOG=/opt/TGW/var/log/offline-sync.log
 SNAPSHOT_KEEP=8  # keep last N snapshots per drive
 

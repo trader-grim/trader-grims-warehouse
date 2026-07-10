@@ -1,174 +1,216 @@
-# TGW Handoff Packet — Next Process
+# TGW Handoff — rolling (last 2 sessions + current risks)
 
-**Status:** v5, 2026-06-12. All docs consolidated into vault (single tree). Supersedes v4.
-Tracker beats plan when they disagree.
-Branch `round4-vision-export-todos` merged to main (PR #2, 2026-06-12).
+**Rules for this file (R3.2, session 42):** hard cap ~150 lines. Holds ONLY: current
+risks, the last two sessions' summaries, and the recommended next sequence. When a new
+session is added, the oldest moves to `archive/SESSION-LOG.md`. Pre-redraw handoff
+(v5 + all session logs): `archive/handoff-v5-2026-07-02-preredraw.md`.
 
----
-
-## 1. Source of Truth (ranked)
-
-| Source | What it owns |
-|--------|-------------|
-| `tgw todo claude` / `tgw todo admin` | **Canonical task queue** — if it's not here, it doesn't exist as work |
-| `plan/TGW-Master-Plan.md` | Reference spec, architecture decisions, PP-* design |
-| `reference/invariants.md` | 29 invariants (A1–A8, B1–B5, C1–C8, D1–D7, E1–E4) + resolution log; 7 companion test files |
-| `reference/TGW-Architecture-Services.md` + `TGW-Architecture-Overview.md` | Service-by-service responsibility, deps, failure modes, critical invariants |
-| `plan/next-process.md` | Session handoff protocol + Aider + Antigravity tool routing |
-| `reference/runbooks/INDEX.md` + 8 runbooks | Incident response (dead-letter triage, pipeline stall, token failure, etc.) |
-| `plan/PLAN-nixos-migration.md` + `PLAN-backup-dr.md` | Approved migration/DR plans; phases become todos on Dave's go |
-| Test suite (563 passing) | Correctness contract — `pytest` must stay green |
-| `tgw health` | System liveness gate — run before and after any significant change |
-
-**Numbering pitfall:** tracker IDs and plan Round-table row numbers are different sequences.
-Use plan row numbers for plan-table items; "todo #N" only for live tracker IDs.
+Source-of-truth ranking: `tgw todo` (canonical tasks) → `TGW-Master-Plan.md` (spec/
+status) → `reference/` docs. Tracker beats plan when they disagree.
 
 ---
 
-## 2. Planned but Not Implemented
+## Current risks (ranked)
 
-### Claude-ready — not yet in tracker (seed first)
+0a. **OPEN (todo #1115) — ebay_upload silently masks partial photo-upload failure,
+    and a leftover redraft-loop backlog re-exhausted ebay_eps quota 3 days running
+    (07-01/02/03)**. `ebay_upload.py`'s completion guard only fails if ZERO photos
+    exist, so quota-blocked photos get silently dropped and logged as "success ―
+    0 new". Backlog (2,715 stale retry_wait jobs, ~2,514 legacy SKUs, left behind by
+    the #1107 loop) auto-requeued every ~6h and raced the worker at every midnight-PST
+    quota reset, burning the full daily EPS budget before real work ran. Backlog
+    CANCELLED 2026-07-03 (Dave authorized); code fix still open. `tgw202606021133367`
+    still short 17/26 photos — needs a decision on how to finish it (see
+    `dev-workflow/research/` session-43 note). Full detail:
+    `inbox/DONE-ebay-photo-desync.md` (or `INPROGRESS-` if not yet closed).
+0. **RESOLVED s42 evening (todo #1107, closed)** — the R1.3 requeue test exposed a
+   chain that was diagnosed to root cause: the http PATCH endpoint's
+   auto-redraft-on-draft_listing-change fired on WORKER fence patches too, creating an
+   infinite draft→patch→redraft loop (one SKU: 287 draft jobs; 2 live listings PUT to
+   eBay every ~90s for hours; the all-day 4-jobs/min queue drip). **Fixed**: fence
+   clients send `X-TGW-Caller`; auto-redraft is operator-edits-only. The feared price
+   reverts NEVER reached eBay (capture ground truth: only the 2 loop SKUs were PUT;
+   the 5 flagged items are legacy-Item# and stage always skipped them). Local damage
+   fixed: **784 items** carried stale pre-s41 draft prices above their live markdown —
+   backfilled from the live mirror (before/after in `var/backups/s42-price-backfill/`)
+   + a never-raise clamp added to ebay_stage (C5-extended, `allow_price_raise` to
+   override, 4 tests). All workers running again.
 
-| Plan row | Size | Task |
-|----------|------|------|
-| 40 | XS | `category-groups.json` pricing calibration (GEMINI-005): `electrical_fixtures`→12.50, `media_records`→13.50, `collectibles_pins_buttons`→10.50; run `tgw category-groups --reseed` |
-| 41 | XS | `category-groups.json` store_category mappings (GEMINI-006): `tools_hand`, `electronics_adapters_chargers`, `electronics_remotes`, `kitchen_utensils` |
-
-### Operator-gated (in tracker as admin todos)
-
-- **#61** PP-BACKUP-001 Phase A operator items: scripts + timers exist in `etc/systemd/`; **nothing is running yet.** Remaining: gpg passphrase custody → install 3 timers → first manual cloud sync → restore drill (RTO timing).
-- **#7** IGDB credentials (Twitch dev portal)
-- **#11** `tgw ebay-sweep` physical inventory review
-- **#12** Fix 9 wrong-shipping Seller Hub listings (ISS-002)
-- **#16** eBay webhook infra (nginx/cloudflared) — **gate: ISS-005 signature verification first**
-- **#20** Qtile WM install
-
-### Larger planned work (no todos yet)
-
-| Item | Status | Blocker |
-|------|--------|---------|
-| PP-NIXOS-001 execution | Plan written + approved | Dave signals go → Phase 0 becomes todos |
-| PP-REPRICER-001 live | Read-only foundation done | `buy.marketplace_insights` scope (eBay DS 8 questions unanswered) |
-| PP-PORTABLE-CATALOG-001 P2 | Design complete (PERPLEXITY-006) | PP-PYIPC-001 done ✅; no remaining blocker |
-| PP-SOLD-001 Tier 4 webhook | Code done | Infra (#16) + ISS-005 |
-| PP-VISION-001 P2+ | Deferred | GPU upgrade required |
-| PP-VERIFY-001 | Scaffolded (Gemini Track 2) | Integration + tests |
-| PP-STORE-001 / PP-REF-002 / PP-CAPTURE-001 | Designed | Track 1 queue |
-| A4 grep gate | Documented in invariants.md | CI integration (no ticket yet) |
-| `ebay_sku_migrate` | Running | ~8,350 live listings; months to complete |
-
----
-
-## 3. What Changed This Session (session 39 — 2026-06-22)
-
-**Sessions 27–38** covered Home Manager / fish shell (PP-HM-001 Phase 1), dress rehearsal config (`tgw-test-rehearsal.nix`), schema init (`tgw-db-init`), USB vault (`TGW-VAULT` btrfs partition + `tgw-usb-stamp.sh`), `tgw-push-config.sh` validated end-to-end, `nix flake check` passing all 4 configs. See master plan session log for full detail.
-
-**Session 39 — 2026-06-22 (this session):**
-
-| Change | Detail |
-|--------|--------|
-| Storage architecture decision | LVM for OS base + PostgreSQL + future microVMs; Btrfs for `/opt/TGW` data. Replaces Btrfs+NoCoW design. |
-| `nix/hosts/tgw-prod-disko.nix` | New file — LVM+XFS+Btrfs layout; device `/dev/sda` placeholder, sizes for ~1 TB drive. |
-| `flake.nix` | Wired `disko.nixosModules.disko` + `tgw-prod-disko.nix` into tgw-prod config. |
-| `PLAN-nixos-migration.md` step 3.3 | Updated with storage architecture decision table + status. |
-| Master plan Disko row | Updated; Stage 4 Disko todo checked off. |
-| Disko files | Warning comments added to both disko files — `extraArgs=["-f"]` danger if nixos-anywhere re-run post-restore. |
-| `inbox/lvm.md` | Archived (Perplexity research on LVM storage architecture). |
-
-**Dave's confirmed execution sequence (in progress 2026-06-22):**
-1. Back up data; confirm storage devices safely offline
-2. Disable all tgw services + Syncthing + rclone
-3. uid migration (`usermod -u 900 tgw`, full-disk audit, permissions check)
-4. Database dump (`pg_dump --format=custom`)
-5. MX snapshot (Phase 1 ISO bake)
-6. Phase 4 dress rehearsal → Phase 5 production cutover
-
-⚠️ **One flag on this sequence:** the plan (Phase 0.6) calls for briefly restarting the pipeline after uid migration and doing a reboot test *before* the pg_dump — to confirm the uid change didn't leave anything broken. If you skip this, you'll have no validation that uid=900 works on MX before the ISO is baked. Low risk since the procedure is well-defined, but worth a quick `tgw health` + `tgw enqueue-sku <any> echo` after the uid change before proceeding to the dump.
+1. **No backup running** — Postgres work ledger (todos + job history) is NOT
+   re-derivable from ItemData. PP-BACKUP-001 operator todos #61/#146/#147. Weeks old.
+2. **RESOLVED (todo #1102, closed)** — test suite repaired; full-suite state as of
+   session 48 (2026-07-06 evening): 1874 pass, 10 fail (all pre-existing/unrelated:
+   google_direct→openrouter rollback + pricing-invariant tests), 1 skipped. Full
+   `pytest -q` is meaningful again, not just targeted runs.
+3. **RESOLVED s45 (2026-07-04/05 night): ebay_draft 402 pile fully drained.**
+   Final pass 2,656/2,658 succeeded (99.92%); day total ~6,500 jobs, ~$1.08
+   OpenRouter spend. Only failures: 4 corrupt-photo SKUs (Feb-2022 migration
+   truncation — recovery roster in #1145 note; fleet integrity sweep running
+   on a1131, todo #1154). dead_letter table rows are historical (D4 clones).
+4. **Live-fire gates unexecuted** — listeditor revision apply (R1.1) and action
+   console operator test (R1.2) are the current critical path; everything else waits.
+5. **todo #1077** — orphaned bad-SKU offer keeps ebay_sync on per-SKU fallback
+   (health red). Dave must contact eBay support.
+6. **15 Syncthing conflict files** in the vault (master-plan edit races 07-01/02).
+   NOTE: the plan was redrawn s42 — resolve conflicts in favor of the new plan; the
+   pre-redraw content is archived.
+7. **Thermal hook not installed** — agent shell commands are not yet blocked at
+   THROTTLE/SHUTDOWN; harness denied agent self-modification; needs Dave's explicit
+   authorization or manual file drop (script in s42 transcript/inbox note).
 
 ---
 
-## 4. What Remains Risky
+## Session 47 — 2026-07-06 (flake decouple · audit#1143 nix mitigation · todo consolidation · router research)
 
-Ordered by urgency:
+Standing rule encoded: **iterated-on tools stay out of the flake** (Dave —
+rebuild risk + usage-cost tax not worth it while a tool is still moving).
+Memory: `feedback-flake-minimal-surface`.
 
-1. **No backup running (deadline risk):** PP-BACKUP-001 Phase A scripts exist but timers are not installed. `todo_items` (canonical task queue) and `queue_job_history` **cannot be re-derived from ItemData** — a disk loss today loses them since the last manual dump. *Mitigation: operator todo #61.*
+- **Hermes/Aider decoupled from `~/tgw-flake`** (todo #1227 DONE): Hermes'
+  `settings.model` and Aider's nixpkgs pin pulled out; `android-tools`/`pipx`
+  added (settled tools). `nixos-rebuild switch` succeeded; Aider now
+  pipx-managed (0.86.2, already newer than the removed 0.83.1 pin). Plan:
+  `ai-plans/decouple-hermes-aider-flake.md`. Hermes model live-edited to
+  `deepseek-v4-flash` (Dave bought DeepSeek+Google credits) — **service NOT
+  restarted yet**, `DEEPSEEK_API_KEY` doesn't exist until Dave generates it.
+- **audit#1143 nix-flake batch, all 10 findings fixed** (todos #1216,
+  #1220-#1225, #1231 — DONE): SSH password auth disabled (new ed25519 key
+  verified working first); `services.tgw.enablePostgres` option added
+  (portable tier genuinely skips Postgres — this fix regressed
+  `tgw/users.nix`'s unconditional postgres-user line, caught by `nix flake
+  check` before reaching a1131, fixed same session); a1131's stray
+  `keyd.nix` import removed; duplicate `kdeconnectd` unit removed; backup
+  timer relabeled (30min cadence confirmed intentional by Dave, not a bug);
+  stale disko comment fixed; dead `tgw/desktop.nix` stub deleted; a1131
+  power-management rewritten suspend-free (the naive fix would have
+  reintroduced the iMac12,1 "never suspend" bug — caught before applying).
+  **New todo #1229, also fixed:** keyd-macroboard's `wayland-0` hardcode vs
+  live `wayland-1` session — dynamic socket discovery now. **Deliberately
+  NOT fixed:** #1219/#1228 NFS export (no static IP for the intake device
+  yet) and #1217/#1218 Syncthing GUI auth (Dave mid-configuring peers).
+  **New todo #1233:** a1131 itself still needs its own config push/rebuild
+  to pick up these fixes (only tgw-prod rebuilt so far).
+- **19 audit#1143 findings consolidated into 6 todos** (#1234-#1239) by
+  shared root cause, not just shared file — e.g. #1165+#1166 (identical
+  self-rescheduling flaw in two workers) → one todo. Originals marked
+  `SUPERSEDED` + closed, not deleted. Memory: `feedback-todo-consolidation`.
+- **Router ecosystem research** (todo #1232, PROPOSAL only): D-Link
+  DIR-868L → DD-WRT recommended over OpenWrt (chipset support finding, not a
+  guess). Plan: `ai-plans/router-dlink-dir868l-ecosystem.md`. DHCP
+  reservations mostly done (tgw-prod/a1131/others) but intake
+  cameras/devices NOT yet reserved — why #1219/#1228 stay blocked.
 
-2. **Antigravity validation window (hard deadline 2026-06-18 — 7 days):** Headless/scripted use and skills/hooks carry-over are unverified. Side-by-side Gemini CLI comparison is only possible while both CLIs run. Checklist in `plan/next-process.md` §3. After shutoff, reduced confidence is permanent.
+**Open into next session:** restart `hermes-agent` once DeepSeek key exists ·
+push flake fixes to a1131 (#1233, may be asleep — `wakeonlan c8:2a:14:2a:a1:85`)
+· get intake device's reserved IP to unblock #1219/#1228 · #1234-#1239 as
+normal execution-track packets · #1230 governance/policy review (not started).
 
-3. **eBay DS 8 questions unanswered:** Blocks `buy.marketplace_insights` → PP-REPRICER-001 live. Dave must respond to eBay Developer Support.
+## Session 48 — 2026-07-06 (todo #1200 — recover_expired_jobs dead-letter zombie fix)
 
-4. **ISS-005 webhook signature gap:** `accept_when_unsigned` is a deliberate interim. Deploy webhook infra (todo #16) only after dev_id signature verification is implemented — forged notifications can mark items sold otherwise. Gate documented in invariants (C8), ISSUES.md, and services.md.
+- **Fixed via `/tgw-packet 1200`** (todo #1200 DONE): `recover_expired_jobs()`
+  was demoting exhausted lease-expired jobs to `'failed'` and leaving them
+  there forever — invisible to `dead_letter_count`, the dead-letter CLI/MCP
+  tools, and the stall watchdog (Prime Directive 2 violation). Pre-flight
+  live query found 62 real zombie jobs already stuck this way
+  (ebay_sync/ebay_legacy_sync/ebay_sku_migrate, oldest since 2026-06-24).
+  Fixed `src/tgw/queue/schema.sql` to set `dead_letter` directly, plus closed
+  a declared-transition-matrix gap in `state_machine.py`
+  (`leased`/`running` → `dead_letter` now allowed, matching existing
+  `mark_dead_letter()` behavior). New test added. Offline suite: 1837
+  passed, same 9 pre-existing/unrelated failures as main.
+- **Live apply, Dave approved ("yes, apply")**: deployed via
+  `sudo -u postgres psql -d state_machine -f schema.sql` — `tgw` role is
+  not the schema owner, `postgres` is (new reference memory:
+  `reference-schema-sql-apply-role`). All 62 zombie jobs self-healed to
+  `dead_letter` within the next worker's normal 60s recovery cycle, no
+  manual backfill needed. `tgw health` confirmed the count now folds in
+  correctly.
+- **`/code-review` follow-up (commit 7ec2a23, separate per Dave's request):**
+  the first-pass fix used a second cascade UPDATE (`WHERE state='failed'`)
+  that was an unindexed full-table scan run on every worker's 60s recovery
+  cycle forever, and undercounted the recovered-jobs total. Folded the
+  `dead_letter` assignment directly into the existing CASE expression
+  instead — same live-verified outcome, no extra scan, accurate count.
+  Re-applied live, re-verified.
+- Two commits: `3ab832b` (original fix) and `7ec2a23` (review follow-up).
+  Inbox note: `docs/TGW-Plan-Vault/inbox/DONE-1200-dead-letter-zombie.md`.
 
-5. **Branch not merged to main:** 27 commits are on `round4-vision-export-todos`, pushed to origin but no PR merged. Losing the production machine before merge = audit/rollback difficulty. Open and merge the PR.
+**Same session, continued — audit#1143 dead-letter/atomic-write/multi_intake
+(todos #1234, #1235, #1242-#1246):**
 
-6. **`pm_intake` needs OpenRouter key:** PP-DOCFLOW-001 Phase 1 routes `pm_intake` to `openrouter/google/gemini-2.5-flash`. If `openrouter-credentials.json` is absent, `pm_intake` will dead-letter every job. Verify before restarting the worker.
+- **#1234 DONE**: self-rescheduling workers (token_refresh, velocity_stats,
+  +6 more found by review) only re-enqueued their next job on success — a
+  dead-lettered job silently ended the chain forever. `state_machine.
+  mark_failed()` now returns `'retry_wait'`/`'dead_letter'` instead of
+  `None`. **#1235 DONE**: 6 non-atomic/no-archive-before-write sites fixed
+  (new `items.atomic_write_text()`, `_token_io.py` for eBay token saves,
+  `data_scrub_magento.py` rewritten onto `items.strip_fields()`).
+- `/code-review` found #1234's fix only covered 2 of 8 self-rescheduling
+  workers — fixed the other 6 (**#1242**), then a second review pass
+  generalized the whole mechanism (**#1245**): `worker_base.QueueWorker.
+  _on_terminal_failure()` now auto-detects a no-arg `self._reschedule` via
+  signature introspection instead of 8 hand-copied overrides
+  (`ebay_sku_migrate` keeps its own — needs `interval_hours`).
+- Dave questioned `multi_intake.py`'s fence-bypassing SKU-collision patch
+  live in conversation; investigated with a live `ebay-pull` + exhaustive
+  photo-size search across all ItemData/NewItems, confirmed it was
+  unverified and redundant with `bundle_intake`'s existing safe idempotent
+  handling, removed it (**#1244**).
+- **#1246** files 4 remaining PLAUSIBLE review findings Dave explicitly
+  deferred (usage/reset timing) — small, no urgency: multi_intake notify
+  spam risk, `mark_failed` rowcount race, `ebay_sku_migrate` interval_h
+  duplication, notify text missing the ebay_stage next-step.
+- Committed as `3efdaed`, pushed — updates existing open **PR #8**
+  (`catio-nix-0.0.1-alpha` → `main`), no duplicate PR created.
+- Restarted all 19 active `tgw-worker@*` services twice (once per fix
+  round); `tgw health` clean except 3 pre-existing tracked warnings
+  (backups, nats, ebay_sync_fallback/#1077) — unrelated.
+- Full offline suite at each step: 1874 passed at the end, same 10
+  pre-existing unrelated failures (google_direct/openrouter rollback +
+  pricing-invariant tests) throughout.
 
-7. **Inline ItemData path construction (invariant A4):** Several workers duplicate `itemdata_root / sku / f'{sku}.json'` inline instead of calling `config.sku_json()`. No CI gate. Becomes a bug when PP-PORTABLE-CATALOG changes layout. See `reference/invariants.md` A4.
+**Same session, continued — PR #8 investigation + `~/tgw-flake` git cleanup
+(todo #1247):**
 
-8. **Two-surface task drift:** Plan rows not seeded as todos vanish (rows 40–41 still unseeded). Procedural — not enforced.
+- Dave asked what PR #8 was. Traced it: `trader-grims-warehouse`'s
+  `flake.nix`/`flake.lock`/`nix/` are convenience symlinks to a fully
+  separate repo, `~/tgw-flake` (own GitHub remote) — confirmed intentional.
+  PR #8 predates that symlink move, so its diff had drifted to show 595
+  files of stale pre-move nix content this repo doesn't use anymore.
+- While checking "which flake is applied, is one older than the other,"
+  found `~/tgw-flake` had **14 modified + 1 deleted file uncommitted since
+  2026-07-04** — turned out to be the earlier Session 47/48 audit#1143
+  nix-flake mitigation (SSH key-only, Postgres gating, dead-file removal,
+  a1131 suspend-block, Hermes/Aider decouple). Live on tgw-prod (dry-activate
+  produced the identical store path to running gen 80) but never committed
+  — a fix being "live" and "safe" (committed/pushed) turned out to be two
+  different claims.
+- Ran the `~/tgw-flake` `commit-nix-flake` skill workflow: cleaned a stray
+  `hermes.nix.save`, `nix flake check` clean, committed `a58d86a`,
+  dry-activate confirmed no live change needed, pushed to `origin/master`
+  (only after separate explicit approval — the permission classifier
+  correctly blocked bundling push into an earlier "commit then rebuild"
+  approval).
+- Dave's call: **PR #8 closed, not merged** — intent already achieved
+  elsewhere, "a speedbump." Branch `catio-nix-0.0.1-alpha` itself untouched.
+
+**Open into next session:** todo #1246 (4 small deferred code-review
+findings, process whenever Dave asks — not urgent). PR #8 is closed, no
+longer a carry-forward. Same carry-forwards as Session 47 above (Hermes
+restart, a1131 push, #1219/#1228, #1230 review) are still open.
 
 ---
 
-## 5. Recommended Next Sequence
-
-**Migration in flight (2026-06-22) — Dave executing:**
-
-1. ✅ Data backed up, storage devices safe
-2. → Disable all tgw + Syncthing + rclone services
-3. → uid migration (0.6) — then `tgw health` + echo round-trip + reboot before pg_dump
-4. → `pg_dump --format=custom` into `/opt/TGW/var/`
-5. → MX snapshot (Phase 1 ISO bake, boot-verify in QEMU)
-6. → Phase 4 dress rehearsal on A1131: push `tgw-test-rehearsal`, restore from backup, run §7 battery, record timings
-7. → Phase 5 production cutover: nixos-anywhere on prod SSD, restore /opt/TGW (from HDD local copy if available — much faster than rclone), unmask/start workers in order
-
-**Code-side still open (Phase 0.4):**
-
-- Config normalization: clean dead keys from `tgw-api-config.json`, surface `ebay_sku_migrate` through `load_config()` proper. Can be done any time before or after cutover — not a migration gate.
-
-**After cutover stabilises:**
-
-- PP-PORTABLE-CATALOG-001 P2 (no remaining code blocker)
-- PP-BACKUP-001 Phase A timers (scripts exist in `etc/systemd/`; nothing running yet)
-- A4 CI gate (invariant close; small)
-- Code/venv LV in LVM (deferred — not needed for migration)
+Older sessions: `archive/SESSION-LOG.md`.
 
 ---
 
-## 6. Tool Routing
-
-See `plan/next-process.md` for the full decision tree + Aider config + Antigravity constraints.
-
-| Task type | Tool | Notes |
-|-----------|------|-------|
-| Bounded PP-* slices, new workers, test coverage | **Claude CLI (Sonnet)** | One session per item; `tgw health` + tests after |
-| Architecture decisions, high-stakes design | **Claude CLI (Opus)** | Planning sessions, invariant design, risk assessment |
-| Mechanical refactors, adding tests to existing code | **Aider** | Gate: API key + billing cap + ≥3 Aider-ready todos queued |
-| Large-context analysis, alt-text batch, corpus work | **Antigravity/OpenRouter** | `agy` configured; free vision via `openrouter/free`; compute-cap refresh ~5h |
-| Research inbox docs, self-contained structured tasks | **Gemini CLI** | Until 2026-06-18 cutover; keep tasks small |
-| Live web research, cited sources | **Perplexity** | 4 briefs unrun (PERPLEXITY-001–004) |
-| eBay OAuth, Seller Hub edits, infra deploy, hardware | **Human only (Dave)** | Never automate publish, scopes, live config, bulk-destructive ops |
-
-**Standing human-only gates:** never alter eBay OAuth scopes; never auto-publish; never commit without Dave's review; dry-run before any bulk ItemData mutation.
-
----
-
-## 7. First 5 Commands for the Next Process
+## First commands for the next session
 
 ```bash
-# 1. Baseline health check
-sudo -u tgw tgw health
-
-# 2. Current task queue
-sudo -u tgw tgw todo
-
-# 3. Any new dead-letters since last session
-sudo -u tgw tgw dead-letter
-
-# 4. Inbox: pending items for pm_intake
-ls -la /opt/TGW/src/trader-grims-warehouse/docs/TGW-Plan-Vault/inbox/
-
-# 5. Branch status
-git log --oneline main..HEAD
+cat /opt/TGW/var/run/thermal.status
+sudo -u tgw tgw ops-digest          # replaces ad-hoc health/dead-letter checks
+sudo -u tgw tgw todo claude
+sudo -u tgw tgw plan check
+git status --short | head           # s42 work is UNCOMMITTED until Dave says commit
 ```
-
-Then: read the master plan and check §2 above against `tgw todo` to confirm alignment.

@@ -46,6 +46,7 @@ import tgw.logging as tgw_logging
 from tgw.apis.llm import call_model, get_task_model
 from tgw.apis.ollama import extract_json
 from tgw.config import DEFAULT_CONFIG, load_config
+from tgw.items import atomic_write_text
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 from tgw.todo import todo_add
@@ -613,7 +614,8 @@ class PMIntakeWorker(QueueWorker):
                 new_plan = _patch_plan_append(plan_text, section, content)
             except ValueError as exc:
                 raise HardFailure(str(exc)) from exc
-            master_plan_path.write_text(new_plan, encoding='utf-8')
+            atomic_write_text(master_plan_path, new_plan,
+                              archive_root=self.config.get('archive_root'))
             log.info('plan updated: appended to %r', section)
             tgw_logging.log_event(
                 'pm_intake_plan_updated',
@@ -657,7 +659,8 @@ class PMIntakeWorker(QueueWorker):
                 try:
                     refreshed_plan = master_plan_path.read_text(encoding='utf-8')
                     new_plan = _patch_plan_append(refreshed_plan, plan_pointer_section, plan_pointer)
-                    master_plan_path.write_text(new_plan, encoding='utf-8')
+                    atomic_write_text(master_plan_path, new_plan,
+                              archive_root=self.config.get('archive_root'))
                     log.info('plan pointer added to section %r', plan_pointer_section)
                     tgw_logging.log_event(
                         'pm_intake_plan_pointer',

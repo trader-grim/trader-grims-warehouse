@@ -34,11 +34,28 @@ CREATE INDEX IF NOT EXISTS idx_title    ON catalog(title);
 """
 
 
+_TERMINAL_STATUSES = frozenset({
+    'sold', 'archived', 'disposed', 'recalled', 'merged', 'discard', 'vero',
+    'disposeddisposed',  # known typo variant in data
+})
+
+
 def _scalar(doc: Dict[str, Any], key: str) -> str:
     val = doc.get(key, '')
     if isinstance(val, (list, dict)) or val is None:
         return ''
     return str(val)
+
+
+def _resolve_status(doc: Dict[str, Any]) -> str:
+    """Resolve status: terminal state wins over non-terminal; otherwise status > #STATUS."""
+    s = str(doc.get('status') or '').strip()
+    hs = str(doc.get('#STATUS') or '').strip()
+    if s.lower() in _TERMINAL_STATUSES:
+        return s
+    if hs.lower() in _TERMINAL_STATUSES:
+        return hs
+    return s or hs
 
 
 def _price_col(doc: Dict[str, Any]) -> str:
@@ -90,7 +107,7 @@ def build_sqlite_catalog(cfg: Dict[str, Any],
             _scalar(r, 'sku'),
             _scalar(r, 'title'),
             _scalar(r, 'location'),
-            _scalar(r, '#STATUS') or _scalar(r, 'status'),
+            _resolve_status(r),
             _price_col(r),
             _scalar(r, 'qty'),
             _scalar(r, 'image'),

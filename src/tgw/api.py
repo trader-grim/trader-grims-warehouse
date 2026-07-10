@@ -11,7 +11,9 @@ No business logic lives here.
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
+import logging
 import os
 import sys
 import time
@@ -47,6 +49,8 @@ from .resolver import resolve, sku_date_str
 from .scrub import data_scrub_pass1, data_scrub_qty_repair, data_scrub_size_class_backfill
 from .sqlite_catalog import build_sqlite_catalog
 from .thumbnail import build_thumbnail_cache
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # list_items — lives here because it bridges catalog and resolver
@@ -478,7 +482,9 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
         "category-groups", "catalog-verify",
     ]),
     ("Ops / Admin", [
-        "health", "serve", "restart-workers", "restart-ebay-token",
+        "health", "serve", "restart-workers", "restart-ebay-token", "refresh-ebay-taxonomy",
+        "refresh-motors-ebay-taxonomy",
+        "warm-ebay-aspects", "ops-digest",
         "dead-letter", "queue-history", "todo", "plan", "ai-usage", "report",
         "admin-file", "classify-suggestions", "picklist", "print-label", "mvitems",
         "suggest", "quiet-check", "perp-run", "whisper-suggest",
@@ -632,10 +638,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--launch", action="store_true", help="exec claude now (default: print the command)")
 
     p = sub.add_parser("clip", help="TGW clipboard history store/query (PP-CLIP-001)")
-    p.add_argument("clip_action", choices=["list", "last-sku", "search", "wipe"])
+    p.add_argument("clip_action", choices=["list", "last-sku", "search", "wipe", "get"])
     p.add_argument("pattern", nargs="?", default="", help="search pattern (for search)")
     p.add_argument("--limit", type=int, default=20, help="max rows (list/search)")
     p.add_argument("--sku-only", action="store_true", help="list: SKU clips only")
+    p.add_argument("--id", type=int, default=None, metavar="ID",
+                   help="get: clip entry ID to retrieve (prints full content)")
+    p.add_argument("--copy", action="store_true", help="get: also copy content back to clipboard")
 
     p = sub.add_parser("catlocmvall", help="(deprecated) move all items from one location to another — use mvitems")
     p.add_argument("from_location")
@@ -724,6 +733,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("resolve-legacy", help="mark item(s) as having legacy eBay listing cleared, enabling ebay_stage to proceed")
     p.add_argument("skus", nargs="+", help="one or more SKUs to resolve")
     p.add_argument("--no-stage", action="store_true", help="mark resolved but do not enqueue ebay_stage")
+    p.add_argument("--force", action="store_true", help="skip the live duplicate-listing check (PP-PHOTOSYNC-001 P10) — only if you've already verified some other way")
 
     p = sub.add_parser("staged", help="list items staged as UNPUBLISHED eBay offers, awaiting review")
     p.add_argument("--json", action="store_true", dest="as_json", help="output as JSON instead of a table")
@@ -853,6 +863,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("restart-ebay-token", help="clear dead-letter token jobs and enqueue a fresh token_refresh immediately")
 
+    sub.add_parser("refresh-ebay-taxonomy", help="force a live re-fetch of the eBay category tree cache (run when eBay announces a taxonomy change — cache never auto-expires)")
+
+    sub.add_parser("refresh-motors-ebay-taxonomy", help="force a live re-fetch of the eBay Motors category tree cache (tree 100, separate from EBAY_US — todo #1255; never auto-expires)")
+
+    sub.add_parser("warm-ebay-aspects", help="download aspects for ALL leaf categories in ONE bulk Taxonomy call (separate 100/day pool); after this, UI aspect lookups need zero live calls")
+
+    p = sub.add_parser("ops-digest", help="one-screen operational digest: flagged health, quota spend + 429 incidents, dead-letter deltas, restart flags, stale inbox notes")
+    p.add_argument("--json", action="store_true", dest="as_json", help="emit raw JSON instead of text")
+
     p = sub.add_parser("restart-workers", help="restart tgw-worker@<queue>.service systemd units (uses sudo if not root)")
     p.add_argument("queues", nargs="*", help="specific queue name(s) to restart (default: all canonical workers)")
     p.add_argument("--dry-run", action="store_true", help="print the systemctl command without running it")
@@ -892,6 +911,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("get-ebay-token", help="browser OAuth re-consent flow — use when refresh token is dead (HTTP 400)")
     p.add_argument("--sandbox", action="store_true", help="use eBay sandbox instead of production")
     p.add_argument("--code", default=None, help="skip browser: supply auth code from redirect URL directly (URL-encoded OK)")
+    p.add_argument("--print-url", action="store_true", dest="print_url", help="print the OAuth authorization URL and exit without opening a browser")
 
     p = sub.add_parser("report", help="generate reports from ItemData (PP-DOCFLOW-001 Phase-3 seed)")
     p.add_argument("report_type", choices=["sales"], help="sales: monthly units/revenue by category-group + dead-stock ranking")
@@ -899,8 +919,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output", default=None, metavar="DIR", help="output directory (default: vault/dev-workflow/research/)")
     p.add_argument("--no-vault", action="store_true", dest="no_vault", help="return data only, do not write files")
 
-    p = sub.add_parser("promo", help="sale event automation — draft + scope check (PP-PROMO-001 P2)")
-    p.add_argument("promo_sub", choices=["draft", "list"], help="draft: generate markdown draft from dead-stock scan; list: verify sell.marketing scope")
+    p = sub.add_parser("promo", help="sale event automation (PP-PROMO-001)")
+    p.add_argument("promo_sub", choices=["draft", "list", "apply", "end", "start", "sync"],
+                   help="draft: generate markdown draft | list: scope check | apply: POST to eBay | end: delete/pause + clear blocks | start: activate DRAFT promo | sync: import Seller Hub promos")
+    p.add_argument("promo_arg", nargs="?", default=None,
+                   help="apply: path to draft file; end/start: promo_id")
     p.add_argument("--discount", type=int, default=None, metavar="N", help="discount %% 5–80 (default: promo.discount_pct config or 20)")
     p.add_argument("--min-days", type=int, default=None, metavar="N", dest="min_days", help="minimum days stale (default: promo.min_days_stale or 30)")
     p.add_argument("--min-price", type=float, default=None, metavar="X", dest="min_price", help="minimum current price (default: promo.min_price or 2.00)")
@@ -909,6 +932,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--start-offset", type=int, default=None, metavar="DAYS", dest="start_offset", help="days from today to event start (default: promo.start_offset_days or 2)")
     p.add_argument("--output", default=None, metavar="DIR", help="output directory for draft (default: vault/inbox/)")
     p.add_argument("--no-vault", action="store_true", dest="no_vault", help="return data only, do not write draft file")
+    p.add_argument("--pause", action="store_true", help="end: pause instead of delete (reversible)")
 
     p = sub.add_parser("category-groups", help="view/manage category group taxonomy (PP-PRICE-005)")
     p.add_argument("category_id", nargs="?", default=None, help="look up which group a specific eBay category ID belongs to")
@@ -1126,6 +1150,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--skip-verified", action="store_true", help="skip items that already have a catalog_verified hall pass (faster re-scan)")
     p.add_argument("--fix", action="store_true", help="report auto-applicable fixes (e.g. strip stale TEMPLATE: title prefix); dry-run unless --write is given")
     p.add_argument("--write", action="store_true", help="with --fix: actually apply the fixes (default: dry-run only)")
+    p.add_argument("--scan-events-hours", type=int, default=24, metavar="N", help="window for the success_count_contradiction log-scan rule (PP-PHOTOSYNC-001 P7); 0 disables it")
 
     p = sub.add_parser(
         "nix-bundle-usb",
@@ -1165,7 +1190,63 @@ _KNOWN_STATUS_VALUES: set[str] = {
 _SEV_ORDER: Dict[str, int] = {"critical": 0, "warning": 1, "info": 2}
 
 
-def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any]) -> List[Dict[str, Any]]:
+_LIVE_PHOTO_INDEX_STALE_HOURS = 24.0
+
+
+def _load_live_photo_index(cfg: Dict[str, Any]) -> "tuple[Optional[Dict[str, int]], Optional[float]]":
+    """PP-PHOTOSYNC-001 P9 follow-up (todo #1127): build sku -> live eBay photo
+    count from the freshest R1.8-style whole-site capture (today's or
+    yesterday's `incoming/ebay/YYYY-MM-DD.jsonl.gz`), instead of the local
+    draft_listing/ebay_offer mirror. The capture's `GET /sell/inventory/v1/
+    inventory_item` pages already carry `product.imageUrls` per SKU — the
+    same live-side truth R1.8/P9 validated for the bulk-list audit.
+
+    Returns (index, age_hours) — (None, None) when no capture is fresh
+    enough (> _LIVE_PHOTO_INDEX_STALE_HOURS old or missing); callers must
+    fall back to the local-mirror method in that case rather than making a
+    fresh eBay call — catalog-verify is a zero-API-cost scan by design (P7).
+    """
+    raw = cfg.get("raw", cfg) if isinstance(cfg, dict) else {}
+    root = Path(raw.get("ebay_capture_root", "/opt/TGW/incoming/ebay"))
+    try:
+        candidates = sorted(root.glob("*.jsonl.gz"), reverse=True)
+    except OSError:
+        return None, None
+    if not candidates:
+        return None, None
+    latest = candidates[0]
+    age_hours = (time.time() - latest.stat().st_mtime) / 3600
+    if age_hours > _LIVE_PHOTO_INDEX_STALE_HOURS:
+        return None, age_hours
+
+    index: Dict[str, int] = {}
+    try:
+        with gzip.open(latest, "rb") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if rec.get("name") != "GET /sell/inventory/v1/inventory_item":
+                    continue
+                try:
+                    body = json.loads(rec["body"])
+                except (KeyError, ValueError):
+                    continue
+                for item in body.get("inventoryItems", []):
+                    item_sku = item.get("sku")
+                    if not item_sku:
+                        continue
+                    urls = (item.get("product") or {}).get("imageUrls") or []
+                    index[item_sku] = len(urls)
+    except OSError as exc:
+        log.warning("live-photo-index: could not read capture %s: %s", latest, exc)
+        return None, None
+    return index, age_hours
+
+
+def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any],
+                  live_photo_index: Optional[Dict[str, int]] = None) -> List[Dict[str, Any]]:
     """Return list of violation dicts for one item (PP-VERIFY-001)."""
     import re
 
@@ -1210,6 +1291,17 @@ def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any]) -> List[Dict[str
     raw_status = str(doc.get("#STATUS") or doc.get("status") or "").strip()
     if raw_status and raw_status not in _KNOWN_STATUS_VALUES:
         v("unknown_status", "info", f"Unrecognised #STATUS value: {raw_status!r}")
+
+    # invariant C11: a persisted pipeline_error is a live guard finding —
+    # surface it generically here so any code written via _persist_finding
+    # (http_server.py) or resolve_pipeline_error (draft_sync.py) is queryable
+    # by catalog-verify without adding a new hardcoded check per code.
+    pipeline_error = doc.get("pipeline_error")
+    if isinstance(pipeline_error, dict) and pipeline_error:
+        _pe_code = pipeline_error.get("code") or (
+            "ebay_rejected" if pipeline_error.get("error") else "unknown")
+        _pe_detail = pipeline_error.get("detail") or pipeline_error.get("error") or str(pipeline_error)
+        v(f"pipeline_error:{_pe_code}", "warning", str(_pe_detail)[:300])
 
     # New-pipeline checks
     offer_price = None
@@ -1279,6 +1371,116 @@ def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any]) -> List[Dict[str
         )
         v("category_suggestion_mismatch", "warning", detail)
 
+    # --- PP-PHOTOSYNC-001 P7: truth-audit rules — pipeline claims vs reality ---
+    # "Test the function and read the log" (Dave, s43), automated: these compare
+    # what the pipeline SAYS happened against the dataset it actually produced,
+    # rather than checking the code's own internal expectations (what unit tests
+    # do). This is how the s43 quota-masking bug (17/17 photo failures logged as
+    # "complete, 0 new") would have surfaced within 24h of first occurring instead
+    # of running undetected for a month.
+    # Live-side count: PP-PHOTOSYNC-001 P9 follow-up (todo #1127) re-points this
+    # at the freshest whole-site capture (R1.8-style, `incoming/ebay/*.jsonl.gz`
+    # inventory_item pages carry `product.imageUrls`) when one exists and is
+    # <24h old — genuine live-site truth instead of our own upload bookkeeping.
+    # Falls back to the P7 local-mirror method (draft_listing.imageUrls, then
+    # ebay_offer.photo_urls) when no fresh capture exists, so the rule never
+    # goes blind between snapshots. `ebay_photos` itself is excluded from both
+    # paths — a local upload-bookkeeping list that most of the older catalog
+    # never populated even when photos were genuinely live — using it here
+    # produced 9,382 false positives on the first real run (found live, same day).
+    if live_photo_index is not None and sku in live_photo_index:
+        live_count = live_photo_index[sku]
+        source = "capture"
+    else:
+        live_count = len((doc.get("draft_listing") or {}).get("imageUrls")
+                         or ebay_offer.get("photo_urls") or [])
+        source = "local-mirror"
+    if ebay_listing.get("status") == "Active" and ebay_listing.get("api") == "inventory":
+        if live_count and live_count < len(photos):
+            v("photos_short_on_ebay", "critical",
+              f"Active listing has {live_count} live eBay photo URLs ({source}) but "
+              f"{len(photos)} on disk — an upload claimed success it didn't earn")
+
+    photo_verify = ebay_listing.get("photo_verify") or {}
+    if photo_verify:
+        submitted_n = photo_verify.get("submitted_count")
+        confirmed_n = photo_verify.get("confirmed_count")
+        if submitted_n is not None and confirmed_n is not None and submitted_n != confirmed_n:
+            v("photo_verify_stale", "critical",
+              f"photo_verify submitted={submitted_n} != confirmed={confirmed_n} "
+              f"— last verification did not match what was actually sent")
+        else:
+            verified_at = photo_verify.get("verified_at")
+            staged_at = ebay_offer.get("staged_at")
+            if verified_at and staged_at:
+                try:
+                    v_dt = datetime.fromisoformat(str(verified_at).replace("Z", "+00:00"))
+                    s_dt = datetime.fromisoformat(str(staged_at).replace("Z", "+00:00"))
+                    if v_dt < s_dt:
+                        v("photo_verify_stale", "critical",
+                          f"photo_verify.verified_at ({verified_at}) predates the "
+                          f"most recent stage ({staged_at}) — verification is stale")
+                except ValueError:
+                    pass
+
+    # Timestamp-order discipline is part of this rule's contract, not an
+    # afterthought: comparing a submission against an OLDER live snapshot
+    # produced a false "eBay silently rewrote our data" conclusion on
+    # 2026-07-03 (session 43) — the live pull simply predated the edit. This
+    # rule only fires when the live snapshot is demonstrably NEWER than what
+    # we submitted, so it can never repeat that mistake.
+    ebay_submitted = doc.get("ebay_submitted") or {}
+    ebay_live = doc.get("ebay_live") or {}
+    if ebay_submitted and ebay_live:
+        staged_at = ebay_submitted.get("staged_at")
+        pulled_at = ebay_live.get("pulled_at")
+        if staged_at and pulled_at:
+            try:
+                staged_dt = datetime.fromisoformat(str(staged_at).replace("Z", "+00:00"))
+                pulled_dt = datetime.fromisoformat(str(pulled_at).replace("Z", "+00:00"))
+            except ValueError:
+                staged_dt = pulled_dt = None
+            if staged_dt is not None and pulled_dt is not None and pulled_dt > staged_dt:
+                sub_prod = (ebay_submitted.get("inventory_item") or {}).get("product") or {}
+                live_prod = (ebay_live.get("inventory_item") or {}).get("product") or {}
+                sub_title = sub_prod.get("title")
+                live_title = live_prod.get("title")
+                if sub_title and live_title and sub_title != live_title:
+                    v("submitted_live_drift", "warning",
+                      f"title differs from the last-submitted value even though "
+                      f"the live pull ({pulled_at}) postdates submission "
+                      f"({staged_at}): submitted={sub_title!r} live={live_title!r}")
+                sub_aspects = sub_prod.get("aspects") or {}
+                live_aspects = live_prod.get("aspects") or {}
+                if sub_aspects and live_aspects:
+                    live_flat = {k: (v_[0] if isinstance(v_, list) and v_ else v_)
+                                for k, v_ in live_aspects.items()}
+                    for key, sub_val in sub_aspects.items():
+                        sub_flat = sub_val[0] if isinstance(sub_val, list) and sub_val else sub_val
+                        if key in live_flat and str(live_flat[key]) != str(sub_flat):
+                            v("submitted_live_drift", "warning",
+                              f"aspect {key!r} differs from the last-submitted "
+                              f"value even though the live pull postdates "
+                              f"submission: submitted={sub_flat!r} live={live_flat[key]!r}")
+
+    # PP-PHOTOSYNC-001 P10 (session 43): the legacy-listing relist guard used
+    # to skip and log to journald only — a data-loss bug (Dave: "we ignored
+    # and did not record the error message"). ebay_stage now persists it
+    # durably as `legacy_listing_blocked`; this is the "regularly check for
+    # and repair" detector for that standing requirement, not a one-off fix.
+    legacy_blocked = doc.get("legacy_listing_blocked")
+    if legacy_blocked and not doc.get("legacy_listing_resolved"):
+        repair = legacy_blocked.get("photo_repair")
+        if repair is None:
+            v("legacy_listing_unrepaired", "critical",
+              f"item_number={legacy_blocked.get('item_number')} blocked at "
+              f"{legacy_blocked.get('detected_at')} — never attempted an "
+              f"operator-driven photo repair")
+        elif repair.get("ok") is False:
+            v("legacy_listing_unrepaired", "critical",
+              f"item_number={legacy_blocked.get('item_number')} photo repair "
+              f"failed: {repair.get('error')}")
+
     return viols
 
 
@@ -1317,6 +1519,55 @@ def _compute_fixes(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
     return fixes
 
 
+def _scan_upload_complete_contradictions(hours: int = 24) -> List[Dict[str, Any]]:
+    """PP-PHOTOSYNC-001 P7 — success_count_contradiction.
+
+    Scans journald for `ebay_upload_complete` events where `new == 0` but
+    `to_attempt > 0` in the same event — the exact shape of the s43 bug
+    (17/17 photo failures logged as "complete, 0 new"). The completion-guard
+    fix (P1) makes this structurally impossible going forward; this rule is
+    the regression guard that would catch it immediately if that ever
+    changes. Reads the structured `to_attempt` field added to the event in
+    P1 — never parses free-text log messages.
+
+    Best-effort: journalctl absence/failure yields an empty list, not an
+    exception — a log-scan rule must never break the rest of catalog-verify.
+    """
+    import subprocess
+
+    violations: List[Dict[str, Any]] = []
+    try:
+        proc = subprocess.run(
+            ["journalctl", "-u", "tgw-worker@ebay_upload.service",
+             "-o", "cat", "--since", f"{hours} hours ago", "--no-pager"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return violations  # journalctl unavailable — best-effort, not fatal
+
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if '"event": "ebay_upload_complete"' not in line:
+            continue
+        try:
+            rec = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        to_attempt = rec.get("to_attempt")
+        new = rec.get("new")
+        if to_attempt is None or new is None:
+            continue  # pre-P1 event, no to_attempt field — not comparable
+        if to_attempt > 0 and new == 0:
+            violations.append({
+                "rule": "success_count_contradiction",
+                "sku": rec.get("sku", "?"),
+                "severity": "critical",
+                "detail": f"ebay_upload_complete logged with to_attempt={to_attempt} "
+                          f"but new=0 — a shortfall reported as success",
+            })
+    return violations
+
+
 def cmd_catalog_verify(
     cfg: Dict[str, Any],
     *,
@@ -1329,6 +1580,7 @@ def cmd_catalog_verify(
     skip_verified: bool = False,
     fix: bool = False,
     write: bool = False,
+    scan_events_hours: int = 24,
 ) -> Dict[str, Any]:
     """Scan ItemData for assumption violations and emit a markdown checklist.
 
@@ -1348,6 +1600,12 @@ def cmd_catalog_verify(
     marked = 0
     json_errors = 0
     fixes_applied = 0
+
+    live_photo_index, live_photo_index_age_h = _load_live_photo_index(cfg)
+    if live_photo_index is None and live_photo_index_age_h is not None:
+        log.warning("catalog-verify: capture is %.1fh old (> %sh) — "
+                    "photos_short_on_ebay falling back to local mirror",
+                    live_photo_index_age_h, _LIVE_PHOTO_INDEX_STALE_HOURS)
 
     for item_dir in sorted(root.iterdir()):
         if not item_dir.is_dir() or not item_dir.name.startswith("tgw"):
@@ -1382,7 +1640,7 @@ def cmd_catalog_verify(
             continue
 
         scanned += 1
-        item_viols = _verify_item(sku, item_dir, doc)
+        item_viols = _verify_item(sku, item_dir, doc, live_photo_index)
 
         # Apply fixes FIRST (when writing) so the violation list, the report,
         # the by_rule tally, and the mark_verified gate all reflect post-fix
@@ -1403,7 +1661,7 @@ def cmd_catalog_verify(
                         error = res.get("error")
                 fix_log.append({"sku": sku, **f, "applied": applied, "error": error})
             if item_fixed:
-                item_viols = _verify_item(sku, item_dir, doc)  # re-scan mutated doc
+                item_viols = _verify_item(sku, item_dir, doc, live_photo_index)  # re-scan mutated doc
 
         for viol in item_viols:
             if _SEV_ORDER.get(viol["severity"], 99) <= min_sev:
@@ -1419,6 +1677,15 @@ def cmd_catalog_verify(
 
         if limit and scanned >= limit:
             break
+
+    # PP-PHOTOSYNC-001 P7: log-derived rule, not per-item — runs once,
+    # independent of --location/--limit scoping (it scans the event log, not
+    # ItemData). Skipped entirely if the caller already filtered to a
+    # location, since a partial scan would misreport the global check.
+    if not location and scan_events_hours > 0:
+        for viol in _scan_upload_complete_contradictions(scan_events_hours):
+            if _SEV_ORDER.get(viol["severity"], 99) <= min_sev:
+                all_violations.append(viol)
 
     by_rule: Dict[str, int] = {}
     for viol in all_violations:
@@ -1464,7 +1731,7 @@ def cmd_catalog_verify(
     else:
         print(report)
 
-    return {
+    result = {
         "ok": True,
         "scanned": scanned,
         "violations": len(all_violations),
@@ -1476,6 +1743,19 @@ def cmd_catalog_verify(
         "fixes_applied": fixes_applied,
         "fixes_proposed": len(fix_log),
     }
+
+    # PP-PHOTOSYNC-001 P7: a JSON sidecar next to any markdown --output, so
+    # the nightly timer's run can feed `tgw ops-digest` a cheap file read
+    # instead of ops-digest re-running an expensive full scan itself.
+    if output:
+        try:
+            output.with_suffix(".json").write_text(
+                json.dumps({**result, "generated_at": datetime.now(tz=timezone.utc).isoformat()}),
+                encoding="utf-8")
+        except OSError:
+            pass  # sidecar is a convenience, never fatal to the scan itself
+
+    return result
 
 
 def cmd_hint(cfg: Dict[str, Any], sku: str, hint: str, force: bool = False) -> Dict[str, Any]:
@@ -1858,21 +2138,34 @@ def cmd_requeue(
     }
 
 
-def cmd_resolve_legacy(cfg: Dict[str, Any], skus: List[str], enqueue_stage: bool = True) -> Dict[str, Any]:
+def cmd_resolve_legacy(cfg: Dict[str, Any], skus: List[str], enqueue_stage: bool = True,
+                       force: bool = False) -> Dict[str, Any]:
     """
     Mark one or more items as having their legacy eBay Trading API listing
     cleared, setting legacy_listing_resolved=True so ebay_stage can proceed.
     Optionally enqueues ebay_stage for each resolved item.
+
+    PP-PHOTOSYNC-001 P10 (session 43): before resolving, verify live that the
+    SKU is NOT actually a genuine duplicate listing (a live Trading-managed
+    item number plus a SEPARATE Inventory-API offer) — Dave: "check for both
+    specifically, then resolve... it could happen again," from a month of
+    occasionally managing listings directly via Seller Hub during the
+    Inventory-API migration gap. A SKU that fails this live check is skipped
+    and reported, never silently resolved. `force=True` bypasses the check
+    for a SKU the operator has already verified some other way (e.g. by hand
+    in Seller Hub) — use deliberately, not as a default.
     """
     import psycopg2.errors
 
     from tgw.config import sku_json
+    from tgw.ebay.pull import check_legacy_duplicate_listing
     from tgw.items import atomic_write_json
     from tgw.queue import state_machine
 
     state_machine.init(cfg.get("postgres_dsn", "dbname=state_machine user=tgw"))
 
     resolved, not_found, already_done, staged = [], [], [], []
+    duplicate_risk: List[Dict[str, Any]] = []
 
     for sku in skus:
         json_path = sku_json(cfg, sku)
@@ -1885,7 +2178,16 @@ def cmd_resolve_legacy(cfg: Dict[str, Any], skus: List[str], enqueue_stage: bool
         if item.get("legacy_listing_resolved"):
             already_done.append(sku)
         else:
+            listing_id = (item.get("ebay_listing") or {}).get("listing_id", "")
+            dup = {"ok": True, "match": True} if force else check_legacy_duplicate_listing(cfg, sku, listing_id)
+            if not (dup.get("ok") and dup.get("match")):
+                duplicate_risk.append({"sku": sku, "check": dup})
+                continue
             item["legacy_listing_resolved"] = True
+            item["legacy_listing_blocked"] = {
+                **(item.get("legacy_listing_blocked") or {}),
+                "duplicate_check": dup,
+            }
             atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
             resolved.append(sku)
 
@@ -1908,6 +2210,7 @@ def cmd_resolve_legacy(cfg: Dict[str, Any], skus: List[str], enqueue_stage: bool
     return {
         "ok": True,
         "resolved": resolved,
+        "duplicate_risk": duplicate_risk,
         "already_done": already_done,
         "not_found": not_found,
         "stage_queued": staged,
@@ -3534,6 +3837,13 @@ def main() -> int:
     cfg = load_config(Path(os.path.expanduser(args.config)))
     check = getattr(args, "check_only", False)
 
+    # PP-QUOTA-001: CLI runs are operator-driven — interactive quota context
+    try:
+        from tgw import quota
+        quota.set_context("interactive", f"cli:{args.op}")
+    except Exception:
+        pass
+
     try:
         if args.op == "get":
             result = get_item(cfg, args.sku)
@@ -3654,7 +3964,7 @@ def main() -> int:
         elif args.op == "clip":
             from .clip import cmd_clip
 
-            result = cmd_clip(args.clip_action, pattern=args.pattern, limit=args.limit, sku_only=args.sku_only)
+            result = cmd_clip(args.clip_action, pattern=args.pattern, limit=args.limit, sku_only=args.sku_only, clip_id=getattr(args, "id", None), copy=getattr(args, "copy", False))
 
         elif args.op == "catlocmvall":
             result = catlocmvall(cfg, args.from_location, args.to_location, check_only=check)
@@ -3828,7 +4138,8 @@ def main() -> int:
             )
 
         elif args.op == "resolve-legacy":
-            result = cmd_resolve_legacy(cfg, _expand_skus(args.skus), enqueue_stage=not args.no_stage)
+            result = cmd_resolve_legacy(cfg, _expand_skus(args.skus), enqueue_stage=not args.no_stage,
+                                       force=getattr(args, "force", False))
 
         elif args.op == "bulk":
             result = cmd_bulk(
@@ -4761,6 +5072,7 @@ def main() -> int:
                 skip_verified=getattr(args, "skip_verified", False),
                 fix=getattr(args, "fix", False),
                 write=getattr(args, "write", False),
+                scan_events_hours=getattr(args, "scan_events_hours", 24),
             )
             if getattr(args, "as_json", False):
                 print(json.dumps(result, indent=2))
@@ -4840,27 +5152,61 @@ def main() -> int:
                 "note": "Token refresh job enqueued. Run tgw get-ebay-token first if refresh token is dead.",
             }
 
+        elif args.op == "refresh-ebay-taxonomy":
+            from .apis.ebay.taxonomy import refresh_category_tree_cache
+
+            count = refresh_category_tree_cache(cfg)
+            result = {"ok": True, "categories_cached": count}
+
+        elif args.op == "refresh-motors-ebay-taxonomy":
+            from .apis.ebay.taxonomy import refresh_motors_category_tree_cache
+
+            count = refresh_motors_category_tree_cache(cfg)
+            result = {"ok": True, "categories_cached": count}
+
+        elif args.op == "warm-ebay-aspects":
+            from .apis.ebay.specifics import bulk_refresh_aspects
+
+            info = bulk_refresh_aspects(cfg)
+            result = {"ok": True, **info}
+
+        elif args.op == "ops-digest":
+            from .ops_digest import collect, render_text
+
+            digest = collect(cfg)
+            if not getattr(args, "as_json", False):
+                print(render_text(digest))
+                return 0
+            result = {"ok": True, **digest}
+
         elif args.op == "get-ebay-token":
             from urllib.parse import unquote
 
-            from .apis.ebay.get_access_token import exchange_code_for_tokens, get_access_token, save_token_state
+            from .apis.ebay.get_access_token import exchange_code_for_tokens, generate_auth_url, get_access_token, save_token_state
             from .apis.ebay.get_access_token import load_config as _ebay_load_config
 
-            direct_code = getattr(args, "code", None)
-            if direct_code:
-                direct_code = unquote(direct_code)
-                ebay_cfg = _ebay_load_config()
-                tokens = exchange_code_for_tokens(direct_code, ebay_cfg, is_sandbox=getattr(args, "sandbox", False))
-                save_token_state(tokens)
-                token = tokens["access_token"]
-                import time as _time
-
-                exp = int(tokens.get("expiry", 0) - _time.time())
-                print(f"Token exchanged. Expires in {exp}s ({exp // 3600}h). Run: tgw restart-ebay-token")
+            if getattr(args, "print_url", False):
+                url = generate_auth_url(
+                    _ebay_load_config(is_sandbox=getattr(args, "sandbox", False)), is_sandbox=getattr(args, "sandbox", False)
+                )
+                print(url)
+                result = {"ok": True, "url": url}
             else:
-                token = get_access_token(prompt_if_needed=True, is_sandbox=getattr(args, "sandbox", False))
-                print("Token written to secrets. Run: tgw restart-ebay-token")
-            result = {"ok": True, "token_prefix": token[:20] + "..."}
+                direct_code = getattr(args, "code", None)
+                if direct_code:
+                    direct_code = unquote(direct_code)
+                    ebay_cfg = _ebay_load_config(is_sandbox=getattr(args, "sandbox", False))
+                    tokens = exchange_code_for_tokens(direct_code, ebay_cfg, is_sandbox=getattr(args, "sandbox", False))
+                    save_token_state(tokens)
+                    token = tokens["access_token"]
+                    import time as _time
+
+                    exp = int(tokens.get("expiry", 0) - _time.time())
+                    print(f"Token exchanged. Expires in {exp}s ({exp // 3600}h). Run: tgw restart-ebay-token")
+                else:
+                    token = get_access_token(prompt_if_needed=True, is_sandbox=getattr(args, "sandbox", False))
+                    print("Token written to secrets. Run: tgw restart-ebay-token")
+                result = {"ok": True, "token_prefix": token[:20] + "..."}
 
         elif args.op == "report":
             from .reports import cmd_report_sales
@@ -4876,7 +5222,14 @@ def main() -> int:
                 result = {"ok": False, "error": f"unknown report type: {args.report_type!r}"}
 
         elif args.op == "promo":
-            from .promo import cmd_promo_draft, cmd_promo_list
+            from .promo import (
+                cmd_promo_apply,
+                cmd_promo_draft,
+                cmd_promo_end,
+                cmd_promo_list,
+                cmd_promo_start,
+                cmd_promo_sync,
+            )
 
             if args.promo_sub == "draft":
                 result = cmd_promo_draft(
@@ -4892,6 +5245,23 @@ def main() -> int:
                 )
             elif args.promo_sub == "list":
                 result = cmd_promo_list(cfg)
+            elif args.promo_sub == "apply":
+                if not args.promo_arg:
+                    result = {"ok": False, "error": "apply requires a draft file path argument"}
+                else:
+                    result = cmd_promo_apply(cfg, args.promo_arg)
+            elif args.promo_sub == "end":
+                if not args.promo_arg:
+                    result = {"ok": False, "error": "end requires a promo_id argument"}
+                else:
+                    result = cmd_promo_end(cfg, args.promo_arg, pause=getattr(args, "pause", False))
+            elif args.promo_sub == "start":
+                if not args.promo_arg:
+                    result = {"ok": False, "error": "start requires a promo_id argument"}
+                else:
+                    result = cmd_promo_start(cfg, args.promo_arg)
+            elif args.promo_sub == "sync":
+                result = cmd_promo_sync(cfg)
             else:
                 result = {"ok": False, "error": f"unknown promo sub-command: {args.promo_sub!r}"}
 

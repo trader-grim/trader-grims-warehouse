@@ -2,9 +2,12 @@
 
 Covers PriceCharting Tier 2, IGDB (video games), Discogs (music/records), and
 dispatcher routing for all three. All HTTP is mocked; no network or API keys.
-"""
 
-import json
+Credentials are env vars (tgw.apis.secrets — single facility, #1252/#1253),
+set per-test via monkeypatch.setenv and always cleared with delenv(raising=
+False) in the "skips without credentials" tests, since a real key may be
+present in the actual environment this suite runs in.
+"""
 
 import httpx
 import requests.exceptions
@@ -28,16 +31,15 @@ def test_to_dollars_conversion():
     assert pc._to_dollars("nope") is None
 
 
-def test_pricecharting_skips_without_token(tmp_path):
-    # No credentials file -> inert (returns None), like IGDB.
-    cfg = {"secrets_root": str(tmp_path)}
-    assert pc.lookup("Super Mario 64", cfg) is None
+def test_pricecharting_skips_without_token(monkeypatch):
+    # No PRICECHARTING_API_KEY -> inert (returns None), like IGDB.
+    monkeypatch.delenv("PRICECHARTING_API_KEY", raising=False)
+    assert pc.lookup("Super Mario 64", {}) is None
 
 
-def _token_cfg(tmp_path):
-    (tmp_path / "pricecharting-credentials.json").write_text(
-        json.dumps({"token": "TESTTOKEN"}), encoding="utf-8")
-    return {"secrets_root": str(tmp_path)}
+def _token_cfg(monkeypatch):
+    monkeypatch.setenv("PRICECHARTING_API_KEY", "TESTTOKEN")
+    return {}
 
 
 class _Resp:
@@ -70,7 +72,7 @@ def test_pricecharting_hit(tmp_path, monkeypatch):
         })
 
     monkeypatch.setattr(pc.requests, "get", fake_get)
-    res = pc.lookup("Super Mario 64", _token_cfg(tmp_path))
+    res = pc.lookup("Super Mario 64", _token_cfg(monkeypatch))
     assert isinstance(res, LookupResult)
     assert res.source == "pricecharting"
     assert res.title == "Super Mario 64"
@@ -84,14 +86,14 @@ def test_pricecharting_hit(tmp_path, monkeypatch):
 def test_pricecharting_miss_returns_none(tmp_path, monkeypatch):
     monkeypatch.setattr(pc.requests, "get",
                         lambda *a, **k: _Resp({"status": "error"}))
-    assert pc.lookup("Nonexistent Game", _token_cfg(tmp_path)) is None
+    assert pc.lookup("Nonexistent Game", _token_cfg(monkeypatch)) is None
 
 
 def test_pricecharting_msrp_falls_back_to_loose(tmp_path, monkeypatch):
     monkeypatch.setattr(pc.requests, "get", lambda *a, **k: _Resp({
         "id": "1", "product-name": "Loose Only", "loose-price": 1200,
     }))
-    res = pc.lookup("Loose Only", _token_cfg(tmp_path))
+    res = pc.lookup("Loose Only", _token_cfg(monkeypatch))
     assert res.msrp == 12.0
 
 
@@ -163,14 +165,16 @@ def test_dispatcher_returns_fresh_cache_without_calling_sources(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _igdb_creds(tmp_path):
-    f = tmp_path / "igdb-credentials.json"
-    f.write_text(json.dumps({"client_id": "cid", "client_secret": "csec"}))
-    return {"secrets_root": str(tmp_path)}
+def _igdb_creds(monkeypatch):
+    monkeypatch.setenv("IGDB_CLIENT_ID", "cid")
+    monkeypatch.setenv("IGDB_CLIENT_SECRET", "csec")
+    return {}
 
 
-def test_igdb_skips_without_credentials(tmp_path):
-    assert igdb_mod.lookup("Mario", {"secrets_root": str(tmp_path)}) is None
+def test_igdb_skips_without_credentials(monkeypatch):
+    monkeypatch.delenv("IGDB_CLIENT_ID", raising=False)
+    monkeypatch.delenv("IGDB_CLIENT_SECRET", raising=False)
+    assert igdb_mod.lookup("Mario", {}) is None
 
 
 def test_igdb_hit(tmp_path, monkeypatch):
@@ -194,7 +198,7 @@ def test_igdb_hit(tmp_path, monkeypatch):
     # clear token cache so the token fetch fires
     igdb_mod._token_cache.clear()
 
-    res = igdb_mod.lookup("Super Mario 64", _igdb_creds(tmp_path))
+    res = igdb_mod.lookup("Super Mario 64", _igdb_creds(monkeypatch))
     assert res is not None
     assert res.source == "igdb"
     assert res.title == "Super Mario 64"
@@ -219,16 +223,16 @@ def test_igdb_uses_cached_token(tmp_path, monkeypatch):
     monkeypatch.setattr(igdb_mod.requests, "post", fake_post)
     igdb_mod._token_cache.clear()
 
-    igdb_mod.lookup("Zelda", _igdb_creds(tmp_path))  # seeds cache
+    igdb_mod.lookup("Zelda", _igdb_creds(monkeypatch))  # seeds cache
     post_calls.clear()
-    igdb_mod.lookup("Zelda 2", _igdb_creds(tmp_path))  # should skip token call
+    igdb_mod.lookup("Zelda 2", _igdb_creds(monkeypatch))  # should skip token call
     assert all("oauth2" not in url for url in post_calls)
 
 
 def test_igdb_miss_returns_none(tmp_path, monkeypatch):
     monkeypatch.setattr(igdb_mod, "_get_token", lambda *a: "tok")
     monkeypatch.setattr(igdb_mod.requests, "post", lambda *a, **k: _Resp([]))
-    assert igdb_mod.lookup("Unknown Game XYZ", _igdb_creds(tmp_path)) is None
+    assert igdb_mod.lookup("Unknown Game XYZ", _igdb_creds(monkeypatch)) is None
 
 
 def test_igdb_request_error_returns_none(tmp_path, monkeypatch):
@@ -236,12 +240,12 @@ def test_igdb_request_error_returns_none(tmp_path, monkeypatch):
     monkeypatch.setattr(igdb_mod.requests, "post",
                         lambda *a, **k: (_ for _ in ()).throw(
                             requests.exceptions.RequestException("timeout")))
-    assert igdb_mod.lookup("Mario", _igdb_creds(tmp_path)) is None
+    assert igdb_mod.lookup("Mario", _igdb_creds(monkeypatch)) is None
 
 
 def test_igdb_token_failure_returns_none(tmp_path, monkeypatch):
     monkeypatch.setattr(igdb_mod, "_get_token", lambda *a: None)
-    assert igdb_mod.lookup("Mario", _igdb_creds(tmp_path)) is None
+    assert igdb_mod.lookup("Mario", _igdb_creds(monkeypatch)) is None
 
 
 # ---------------------------------------------------------------------------
@@ -249,17 +253,17 @@ def test_igdb_token_failure_returns_none(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _discogs_creds(tmp_path):
-    f = tmp_path / "discogs-credentials.json"
-    f.write_text(json.dumps({"personal_access_token": "tok_discogs"}))
-    return {"secrets_root": str(tmp_path)}
+def _discogs_creds(monkeypatch):
+    monkeypatch.setenv("DISCOGS_API_KEY", "tok_discogs")
+    return {}
 
 
-def test_discogs_skips_without_credentials(tmp_path):
-    assert discogs_mod.lookup("012345678901", {"secrets_root": str(tmp_path)}) is None
+def test_discogs_skips_without_credentials(monkeypatch):
+    monkeypatch.delenv("DISCOGS_API_KEY", raising=False)
+    assert discogs_mod.lookup("012345678901", {}) is None
 
 
-def test_discogs_hit(tmp_path, monkeypatch):
+def test_discogs_hit(monkeypatch):
     hit = {
         "title": "Dark Side of the Moon",
         "year": 1973,
@@ -271,7 +275,7 @@ def test_discogs_hit(tmp_path, monkeypatch):
     monkeypatch.setattr(discogs_mod.httpx, "get",
                         lambda *a, **k: _Resp({"results": [hit]}))
 
-    res = discogs_mod.lookup("012345678901", _discogs_creds(tmp_path))
+    res = discogs_mod.lookup("012345678901", _discogs_creds(monkeypatch))
     assert res is not None
     assert res.source == "discogs"
     assert res.title == "Dark Side of the Moon"
@@ -282,17 +286,17 @@ def test_discogs_hit(tmp_path, monkeypatch):
     assert "1973" in res.description
 
 
-def test_discogs_miss_returns_none(tmp_path, monkeypatch):
+def test_discogs_miss_returns_none(monkeypatch):
     monkeypatch.setattr(discogs_mod.httpx, "get",
                         lambda *a, **k: _Resp({"results": []}))
-    assert discogs_mod.lookup("000000000000", _discogs_creds(tmp_path)) is None
+    assert discogs_mod.lookup("000000000000", _discogs_creds(monkeypatch)) is None
 
 
-def test_discogs_request_error_returns_none(tmp_path, monkeypatch):
+def test_discogs_request_error_returns_none(monkeypatch):
     monkeypatch.setattr(discogs_mod.httpx, "get",
                         lambda *a, **k: (_ for _ in ()).throw(
                             httpx.ConnectError("timeout")))
-    assert discogs_mod.lookup("012345678901", _discogs_creds(tmp_path)) is None
+    assert discogs_mod.lookup("012345678901", _discogs_creds(monkeypatch)) is None
 
 
 # ---------------------------------------------------------------------------

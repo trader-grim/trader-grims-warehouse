@@ -36,6 +36,16 @@ def test_dead_letter_never_auto_requeues_to_running():
     assert not sm.can_transition('dead_letter', 'leased')
 
 
+def test_expired_lease_exhausted_attempts_reach_dead_letter():
+    # recover_expired_jobs() must be able to land exhausted lease-expired jobs
+    # in dead_letter directly, from either leased (never started) or running
+    # (crashed mid-run) — otherwise they become invisible zombies in 'failed',
+    # missed by dead_letter_count/CLI/MCP tools and the stall watchdog
+    # (todo #1200 / audit#1143).
+    assert sm.can_transition('leased', 'dead_letter')
+    assert sm.can_transition('running', 'dead_letter')
+
+
 def test_unknown_states_rejected():
     assert not sm.can_transition('queued', 'bogus')
     assert not sm.can_transition('bogus', 'queued')

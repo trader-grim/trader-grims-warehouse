@@ -27,7 +27,7 @@ from typing import Any, Dict, Generator
 
 import psycopg2
 
-from tgw.queue.state_machine import _DSN
+from tgw.queue import state_machine
 
 log = logging.getLogger(__name__)
 
@@ -42,7 +42,13 @@ def acquire_ollama_lock(cfg: Dict[str, Any]) -> Generator[None, None, None]:
     Opens a dedicated connection for the lock so it doesn't interfere
     with the worker's normal state-machine connection.
     """
-    dsn = cfg.get('postgres_dsn', _DSN)
+    # audit#1143 #1202: `from tgw.queue.state_machine import _DSN` used to
+    # bind this by value at import time, never reflecting a later
+    # state_machine.init(dsn) override — a caller whose cfg was missing
+    # postgres_dsn would silently connect to a stale/wrong DB target instead
+    # of the live configured one. Read the module attribute at call time
+    # instead, so it always sees whatever init() last set.
+    dsn = cfg.get('postgres_dsn', state_machine._DSN)
     t0  = time.monotonic()
 
     con = psycopg2.connect(dsn)

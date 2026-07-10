@@ -3,7 +3,7 @@ title: TGW Config Reference
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 3
-updated: 2026-06-04
+updated: 2026-07-09
 ---
 
 # TGW Config Reference
@@ -121,6 +121,8 @@ These are read into `cfg['raw']` but have no effect. Safe to remove when cleanin
 
 ## Secrets Reference (files in secrets_root)
 
+Structured, multi-field credentials stay as individual JSON files:
+
 | File | Contents | Used by |
 |------|----------|---------|
 | `ebay-credentials.json` | `{app_id, cert_id, dev_id*}` — eBay app credentials | token_refresh, all eBay API callers |
@@ -129,11 +131,58 @@ These are read into `cfg['raw']` but have no effect. Safe to remove when cleanin
 
 *`dev_id` optional; enables full SOAP notification signature verification (PP-SOLD-001 Tier 4)
 
-**Needed for PP-LOOKUP-001 (not yet created):**
-- `upcitemdb-credentials.json` — `{api_key}`
-- `go-upc-credentials.json` — `{api_key}`
-- `discogs-credentials.json` — `{token}`
-- `igdb-credentials.json` — `{client_id, client_secret}`
+### Single-value provider keys — `secrets_root/tgw.env` (todo #1252)
+
+Dave, 2026-07-09: "why change code just to change models... regardless it
+should be a single facility" for keys. Every provider that needs just one
+string (or a couple of named strings) is now a `KEY=value` line in one file,
+`secrets_root/tgw.env` (chmod 600), sourced into the process environment by
+`tgw.config.load_config()` at startup (`os.environ.setdefault` — a real env
+var already set always wins over the file). Every loader in the codebase
+calls `tgw.apis.secrets.get_api_key(provider)` / `get_secret(name)` instead
+of reading its own `<name>-credentials.json` — this replaced 9 separate
+ad-hoc file-reading implementations across `llm.py` (×3), `google_genai.py`,
+`pricing.py`, and 5 `apis/lookup/*.py` modules.
+
+```
+# tgw.env example shape
+ANTHROPIC_API_KEY=...
+DEEPSEEK_API_KEY=...
+GOOGLE_API_KEY=...
+OPENROUTER_API_KEY=...
+DISCOGS_API_KEY=...
+GO_UPC_API_KEY=...
+PRICECHARTING_API_KEY=...
+UPCITEMDB_API_KEY=...        # optional — works without a key, just rate-limited
+IGDB_CLIENT_ID=...
+IGDB_CLIENT_SECRET=...
+```
+
+Follow-up planned (todo #1253): extend this to interactive shell use and
+design scoped/least-privilege key issuance per confined worker once Catio
+isolates workers.
+
+---
+
+## Model routing — `/opt/TGW/config/tgw-models.json` (todo #1252)
+
+A SEPARATE file from `tgw-api-config.json` (own `models_config_path` config
+key, default `/opt/TGW/config/tgw-models.json`), loaded into `cfg['models']`.
+This is the ONLY source for which provider/model serves each LLM task —
+`tgw.apis.llm.get_task_model(cfg, task)` raises `KeyError` if a task isn't
+configured here; there is no hardcoded per-task fallback in code (Dave,
+2026-07-09 — a task's model must be a config edit, never a code change).
+
+Shape: one entry per task, `{"provider": ..., "model": ...}`. `provider` is
+one of `google_direct | deepseek_direct | anthropic_direct | openrouter |
+ollama`. Direct providers take a bare/native model id (`google_direct`:
+`gemini-2.5-flash-lite`; `deepseek_direct`: `deepseek-v4-flash`;
+`anthropic_direct`: full versioned id, e.g. `claude-haiku-4-5-20251001`) and
+auto-fall-back to `openrouter` on any failure — no further code change
+needed to add a task or repoint one to a different provider/model.
+`tgw-models.json` carries its own `_comment` key (stripped by `load_config`)
+documenting the live decision date and rationale; read that for the current
+history instead of duplicating it here.
 
 ---
 

@@ -16,6 +16,7 @@ import json
 import os
 import tempfile
 import time
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -44,17 +45,90 @@ def set_mutation_context(source: str, session_id: Optional[str] = None) -> None:
 # Atomic write
 # ---------------------------------------------------------------------------
 
-def atomic_write_json(path: Path, data: Any, pretty: bool = True) -> None:
-    """Write JSON atomically via a temp file + rename."""
+def _archive_before_overwrite(archive_root: Path, path: Path) -> None:
+    """Invariant E5: zip the item's current on-disk JSON into ItemArchive
+    before a destructive overwrite. This is the last line of defense for data
+    recovery (Prime Directive 1) — 49 item JSONs were unrecoverable from every
+    other source on 2026-06-28 and were rescued solely from these zips.
+    Archiving failure MUST abort the write (no try/except swallow here);
+    a best-effort archive is not what the invariant means by "before"."""
+    archive_root = Path(archive_root)
+    archive_root.mkdir(parents=True, exist_ok=True)
+    zpath = archive_root / f'{path.stem}.zip'
+    ts = datetime.datetime.now(datetime.UTC).strftime('%Y%m%d%H%M%S%f')
+    with zipfile.ZipFile(zpath, 'a', compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.write(path, arcname=f'{path.name}.{ts}')
+
+
+def _atomic_write(path: Path, write_body: Any, *,
+                  archive_root: Optional[Path] = None) -> None:
+    """Shared core: temp file + chmod + rename, with optional archive-before-
+    overwrite (invariant E5). ``write_body`` is called with the open temp
+    file handle and does the actual serialization (json.dump vs plain text).
+
+    NamedTemporaryFile creates the temp file at mode 0600 regardless of the
+    parent directory's permissions or any default ACL in place — an ACL can
+    only constrain a requested mode downward, not grant access the creator
+    explicitly excluded. Left alone, every atomic write here would silently
+    revert the file to owner-only, undoing shared group-write permissions
+    (confirmed live in session 41 on docs/TGW-Plan-Vault). Explicitly chmod
+    the temp file before the rename so the final file keeps the target's
+    existing mode (or 0o660, the group-writable default, for a new file).
+    """
+    if archive_root is not None and path.exists():
+        _archive_before_overwrite(archive_root, path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        want_mode = path.stat().st_mode & 0o777
+    except FileNotFoundError:
+        want_mode = 0o660
     with tempfile.NamedTemporaryFile(
         'w', encoding='utf-8', delete=False, dir=path.parent
     ) as tmp:
-        json.dump(data, tmp, ensure_ascii=False,
-                  indent=2 if pretty else None, sort_keys=False)
-        tmp.write('\n')
+        write_body(tmp)
         tmp_path = Path(tmp.name)
+    os.chmod(tmp_path, want_mode)
     os.replace(tmp_path, path)
+
+
+def atomic_write_json(path: Path, data: Any, pretty: bool = True,
+                      *, archive_root: Optional[Path] = None,
+                      sort_keys: bool = False) -> None:
+    """Write JSON atomically via a temp file + rename.
+
+    ``archive_root``: pass ``cfg['archive_root']`` to enforce invariant E5 —
+    if the target already exists (a real overwrite, not first creation), its
+    current content is archived to ``archive_root/<sku>.zip`` before the
+    overwrite proceeds. Omit only for non-item writes (catalogs, digests,
+    caches) that aren't covered by E5.
+
+    ``sort_keys``: off by default (matches historical behavior of most
+    callers). Pass True for callers that relied on deterministic, diffable
+    key order (e.g. itemdata_scrub.py, audit#1143 #1235 follow-up).
+    """
+    def _write(tmp):
+        json.dump(data, tmp, ensure_ascii=False,
+                  indent=2 if pretty else None, sort_keys=sort_keys)
+        tmp.write('\n')
+    _atomic_write(path, _write, archive_root=archive_root)
+
+
+def atomic_write_text(path: Path, text: str, *,
+                      archive_root: Optional[Path] = None) -> None:
+    """Write plain text atomically via temp file + rename.
+
+    Same tmp+rename+chmod guarantee as ``atomic_write_json``, for the
+    non-JSON durable docs (e.g. the Master Plan) that also need it —
+    audit#1143 #1162+#1177 found several call sites writing straight to the
+    target path with plain ``write_text``, risking a truncated file on crash
+    mid-write and, for anything with prior content worth keeping, an
+    unrecoverable overwrite (invariant E5).
+
+    ``archive_root``: same contract as ``atomic_write_json`` — if the target
+    already exists, its current content is zipped into
+    ``archive_root/<stem>.zip`` before the overwrite proceeds.
+    """
+    _atomic_write(path, lambda tmp: tmp.write(text), archive_root=archive_root)
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +173,12 @@ def get_item(cfg: Dict[str, Any], sku: str) -> Dict[str, Any]:
     """
     path = sku_json(cfg, sku)
     if not path.exists():
-        raise FileNotFoundError(f'no item JSON for sku {sku!r}: {path}')
+        from .resolver import find_current_sku
+        current = find_current_sku(cfg, sku)
+        if current:
+            path = sku_json(cfg, current)
+        else:
+            raise FileNotFoundError(f'no item JSON for sku {sku!r}: {path}')
     with open(path, 'r', encoding='utf-8', errors='replace') as f:
         data = json.load(f)
     images, videos = [], []
@@ -162,7 +241,7 @@ def _write_field(cfg: Dict[str, Any], sku: str, field: str,
     doc[field] = value
     if field != 'catalog_verified':
         doc.pop('catalog_verified', None)
-    atomic_write_json(path, doc, pretty=True)
+    atomic_write_json(path, doc, pretty=True, archive_root=cfg.get('archive_root'))
     # Publish to audit stream (PP-AIOPS-001 Phase 1) — fire-and-forget
     try:
         from .apis.nats_client import publish_mutation
@@ -175,6 +254,81 @@ def _write_field(cfg: Dict[str, Any], sku: str, field: str,
     except Exception:
         pass
     return {'sku': sku, 'field': field, 'before': before, 'after': value}
+
+
+def strip_fields(cfg: Dict[str, Any], sku: str, fields: List[str],
+                 check_only: bool = False) -> Dict[str, Any]:
+    """Remove a set of top-level fields from one item's JSON in a single
+    write — one archive entry per item (E5), not one per field. Fields
+    absent from the doc are silently skipped (idempotent). Used by the
+    legacy-field data-scrub pass (todo #1053).
+
+    Side effect: also clears 'catalog_verified' whenever any field is
+    actually removed (the catalog-derived hall-pass no longer reflects the
+    doc's new contents). Every caller inherits this — audit#1143 #1244
+    follow-up found it undocumented and surprising when data_scrub_magento.py
+    started routing through this function."""
+    path = sku_json(cfg, sku)
+    if not path.exists():
+        return {'ok': False, 'error': f'sku not found: {sku!r}'}
+    doc = load_item_doc(path)
+    present = [f for f in fields if f in doc]
+    if check_only:
+        return {'ok': True, 'sku': sku, 'removed': present, 'check_only': True}
+    if not present:
+        return {'ok': True, 'sku': sku, 'removed': []}
+    for f in present:
+        doc.pop(f, None)
+    doc.pop('catalog_verified', None)
+    atomic_write_json(path, doc, pretty=cfg.get('pretty', True),
+                      archive_root=cfg.get('archive_root'))
+    return {'ok': True, 'sku': sku, 'removed': present}
+
+
+def set_fields(cfg: Dict[str, Any], sku: str, fields: Dict[str, Any],
+               only_if_absent: bool = True,
+               check_only: bool = False) -> Dict[str, Any]:
+    """Set a set of top-level fields on one item's JSON in a single write —
+    one archive entry per item (E5), not one per field. When
+    only_if_absent=True (default), a field already present with a truthy
+    value is left untouched — this makes the caller safe for repeat
+    backfill runs (never clobbers a stronger/newer signal with an older
+    recovered one). Used by the category-recompile pass (todo #1135)."""
+    path = sku_json(cfg, sku)
+    if not path.exists():
+        return {'ok': False, 'error': f'sku not found: {sku!r}'}
+    doc = load_item_doc(path)
+    to_set = {}
+    for f, v in fields.items():
+        if only_if_absent and doc.get(f):
+            continue
+        to_set[f] = v
+    if check_only:
+        return {'ok': True, 'sku': sku, 'would_set': to_set, 'check_only': True}
+    if not to_set:
+        return {'ok': True, 'sku': sku, 'set': {}}
+    before = {f: doc.get(f) for f in to_set}
+    doc.update(to_set)
+    doc.pop('catalog_verified', None)
+    atomic_write_json(path, doc, pretty=cfg.get('pretty', True),
+                      archive_root=cfg.get('archive_root'))
+    # Publish to audit stream (PP-AIOPS-001 Phase 1) — fire-and-forget.
+    # Code-review fix: this was missing entirely, making bulk backfill
+    # writes (e.g. the category-recompile pass) invisible to the
+    # mutation stream that single-field update_item() writes already
+    # feed. One event per field, matching _write_field()'s shape.
+    try:
+        from .apis.nats_client import publish_mutation
+        for f, v in to_set.items():
+            publish_mutation(
+                sku=sku, field=f,
+                old_value=before.get(f), new_value=v,
+                source=_mutation_source.get(),
+                session_id=_session_id.get(),
+            )
+    except Exception:
+        pass
+    return {'ok': True, 'sku': sku, 'set': to_set}
 
 
 def update_item(cfg: Dict[str, Any], sku: str, field: str, value: Any,
@@ -291,7 +445,7 @@ def verifiedupdate(cfg: Dict[str, Any], sku: str, value: str,
     doc['verified'] = value
     doc['#STATUS'] = 'In Stock'
     doc.pop('catalog_verified', None)
-    atomic_write_json(path, doc, pretty=True)
+    atomic_write_json(path, doc, pretty=True, archive_root=cfg.get('archive_root'))
     return {'ok': True, 'sku': sku, 'field': 'verified', 'value': value}
 
 

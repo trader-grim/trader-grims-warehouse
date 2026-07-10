@@ -1,13 +1,17 @@
-"""Invariants A1/A2/A3/A5 (docs/invariants.md) — item store write rules.
+"""Invariants A1/A2/A3/A5/E5 (docs/invariants.md) — item store write rules.
 
 A1: item JSON writes are atomic and leave no temp-file litter.
 A2: sku is not bulk-editable (whitelist pin).
 A3: create_item never overwrites an existing item.
 A5: any field write clears the catalog_verified hall-pass (the verifiedupdate
     bypass was fixed 2026-06-10).
+E5: no item JSON is overwritten without archiving the prior state first
+    (todo #1104, 2026-07-03/04 — was prose-only, promoted to enforcement).
 """
 
 import json
+import os
+import zipfile
 
 import pytest
 
@@ -19,6 +23,7 @@ def cfg(tmp_path):
     return {
         'itemdata_root':      tmp_path / 'ItemData',
         'location_tree_root': tmp_path / 'by-location',
+        'archive_root':       tmp_path / 'ItemArchive',
         'pretty':             False,
     }
 
@@ -45,6 +50,26 @@ def test_atomic_write_overwrite_keeps_single_file(tmp_path):
     items.atomic_write_json(path, {'sku': 'tgw1', 'v': 2})
     assert json.loads(path.read_text(encoding='utf-8'))['v'] == 2
     assert [p.name for p in path.parent.iterdir()] == ['tgw1.json']
+
+
+def test_atomic_write_new_file_defaults_to_group_writable(tmp_path):
+    """NamedTemporaryFile creates its file at 0600 regardless of the parent
+    directory's ACL/umask — session 41 confirmed this silently reverts shared
+    files (docs/TGW-Plan-Vault) to owner-only on every write. A brand-new file
+    must land at 0660, not 0600."""
+    path = tmp_path / 'tgw1' / 'tgw1.json'
+    items.atomic_write_json(path, {'sku': 'tgw1'})
+    assert (path.stat().st_mode & 0o777) == 0o660
+
+
+def test_atomic_write_preserves_existing_mode(tmp_path):
+    """A rewrite must not silently tighten an existing file's permissions —
+    match whatever mode was already there rather than always defaulting."""
+    path = tmp_path / 'tgw1' / 'tgw1.json'
+    items.atomic_write_json(path, {'sku': 'tgw1', 'v': 1})
+    os.chmod(path, 0o640)
+    items.atomic_write_json(path, {'sku': 'tgw1', 'v': 2})
+    assert (path.stat().st_mode & 0o777) == 0o640
 
 
 # ---------------------------------------------------------------------------
@@ -107,3 +132,219 @@ def test_verifiedupdate_clears_catalog_verified(cfg):
     assert 'catalog_verified' not in doc
     assert doc['verified'] == '2026-06-10'
     assert doc['#STATUS'] == 'In Stock'
+
+
+# ---------------------------------------------------------------------------
+# PP-FENCE-001 — grep audit: atomic_write_json banned in workers/ and ebay/
+# ---------------------------------------------------------------------------
+# Known gaps (documented in source with PP-FENCE-001 comment):
+#   multi_intake.py:   newitems_dir stub write (1 site) — the key-deletion
+#                      write was removed in session 48; bundle_intake's own
+#                      idempotent no-op-on-existing-SKU handling covers it
+#   ebay_sku_migrate.py: dir-rename + write sequence (3 sites)
+#   ebay/pull.py:       restore_archive_tombstone — needs upsert semantics (1 site)
+#   itemdata_scrub.py: recursive/pattern-based key removal — fence's patch_item
+#                      only sets top-level fields, no delete semantics (audit#1143
+#                      #1235: fixed the write's atomicity/archive gap in-place
+#                      rather than redesigning the fence for this one worker)
+_FENCE_GAPS = frozenset({
+    "multi_intake.py",
+    "ebay_sku_migrate.py",
+    "pull.py",
+    "itemdata_scrub.py",
+})
+
+
+def test_atomic_write_json_banned_in_workers_and_ebay():
+    """All workers and ebay/ modules must use fence calls, not atomic_write_json directly."""
+    import pathlib
+    repo = pathlib.Path(__file__).parents[1]
+    targets = [repo / "src" / "tgw" / "workers", repo / "src" / "tgw" / "ebay"]
+    violations = []
+    for target in targets:
+        for py in sorted(target.glob("*.py")):
+            if py.name in _FENCE_GAPS:
+                continue
+            text = py.read_text(encoding="utf-8")
+            # Count real atomic_write_json call lines (not comments or import lines)
+            for lineno, line in enumerate(text.splitlines(), 1):
+                stripped = line.lstrip()
+                if "atomic_write_json" in line and not stripped.startswith("#"):
+                    # Allow the import in items.py itself; flag usage in workers/ebay
+                    if "from tgw.items import" not in line and "import atomic_write_json" not in line:
+                        violations.append(f"{py.relative_to(repo)}:{lineno}: {line.strip()}")
+    assert not violations, (
+        "atomic_write_json call(s) found in workers/ or ebay/ — use fence client instead:\n"
+        + "\n".join(violations)
+    )
+
+
+# ---------------------------------------------------------------------------
+# E5 — no overwrite without archiving first (todo #1104)
+# ---------------------------------------------------------------------------
+
+def test_atomic_write_json_archives_prior_state_on_overwrite(tmp_path):
+    path = tmp_path / 'tgw1' / 'tgw1.json'
+    archive_root = tmp_path / 'ItemArchive'
+    items.atomic_write_json(path, {'sku': 'tgw1', 'v': 1}, archive_root=archive_root)
+    # first write is a creation — nothing to archive yet
+    assert not (archive_root / 'tgw1.zip').exists()
+
+    items.atomic_write_json(path, {'sku': 'tgw1', 'v': 2}, archive_root=archive_root)
+    zpath = archive_root / 'tgw1.zip'
+    assert zpath.exists()
+    with zipfile.ZipFile(zpath) as zf:
+        names = zf.namelist()
+        assert len(names) == 1
+        archived = json.loads(zf.read(names[0]))
+        assert archived['v'] == 1  # the state BEFORE the second write
+
+
+def test_atomic_write_json_archives_every_overwrite_as_separate_entry(tmp_path):
+    path = tmp_path / 'tgw1' / 'tgw1.json'
+    archive_root = tmp_path / 'ItemArchive'
+    items.atomic_write_json(path, {'v': 1}, archive_root=archive_root)
+    items.atomic_write_json(path, {'v': 2}, archive_root=archive_root)
+    items.atomic_write_json(path, {'v': 3}, archive_root=archive_root)
+    with zipfile.ZipFile(archive_root / 'tgw1.zip') as zf:
+        versions = sorted(json.loads(zf.read(n))['v'] for n in zf.namelist())
+        assert versions == [1, 2]  # states before write 2 and write 3
+
+
+def test_atomic_write_json_without_archive_root_skips_archiving(tmp_path):
+    """Backward compatible: callers that don't pass archive_root (non-item
+    writers — catalogs, digests, caches) get the old unarchived behavior."""
+    path = tmp_path / 'tgw1' / 'tgw1.json'
+    items.atomic_write_json(path, {'v': 1})
+    items.atomic_write_json(path, {'v': 2})
+    assert json.loads(path.read_text())['v'] == 2
+    assert not (tmp_path / 'ItemArchive').exists()
+
+
+def test_write_field_archives_before_overwrite(cfg):
+    items.create_item(cfg, 'tgw1', {'title': 'first'})
+    items.update_item(cfg, 'tgw1', 'title', 'second')
+    zpath = cfg['archive_root'] / 'tgw1.zip'
+    assert zpath.exists()
+    with zipfile.ZipFile(zpath) as zf:
+        archived = json.loads(zf.read(zf.namelist()[0]))
+        assert archived['title'] == 'first'
+
+
+def test_verifiedupdate_archives_before_overwrite(cfg):
+    items.create_item(cfg, 'tgw1', {'title': 'thing', 'verified': 'old'})
+    items.verifiedupdate(cfg, 'tgw1', '2026-07-04')
+    zpath = cfg['archive_root'] / 'tgw1.zip'
+    assert zpath.exists()
+    with zipfile.ZipFile(zpath) as zf:
+        archived = json.loads(zf.read(zf.namelist()[0]))
+        assert archived['verified'] == 'old'
+
+
+def test_archive_failure_aborts_the_write(tmp_path, monkeypatch):
+    """E5 is a hard gate, not best-effort: if archiving fails, the overwrite
+    must not happen either — silently proceeding would be exactly the
+    'delete without archiving' failure mode the invariant exists to prevent."""
+    path = tmp_path / 'tgw1' / 'tgw1.json'
+    archive_root = tmp_path / 'ItemArchive'
+    items.atomic_write_json(path, {'v': 1}, archive_root=archive_root)
+
+    def _boom(*a, **k):
+        raise OSError('disk full')
+    monkeypatch.setattr(items, '_archive_before_overwrite', _boom)
+
+    with pytest.raises(OSError):
+        items.atomic_write_json(path, {'v': 2}, archive_root=archive_root)
+    # original content must be untouched — the overwrite never happened
+    assert json.loads(path.read_text())['v'] == 1
+
+
+# ---------------------------------------------------------------------------
+# strip_fields (todo #1053 support) — one archive entry per item, not per field
+# ---------------------------------------------------------------------------
+
+def test_strip_fields_removes_present_fields_only(cfg):
+    items.create_item(cfg, 'tgw1', {'title': 't', 'attribute_set': 'Books', 'category_ids': '5'})
+    res = items.strip_fields(cfg, 'tgw1', ['attribute_set', 'category_ids', 'not_present'])
+    assert res['ok'] is True
+    assert sorted(res['removed']) == ['attribute_set', 'category_ids']
+    doc = json.loads((cfg['itemdata_root'] / 'tgw1' / 'tgw1.json').read_text())
+    assert 'attribute_set' not in doc
+    assert 'category_ids' not in doc
+    assert doc['title'] == 't'
+
+
+def test_strip_fields_is_idempotent_when_nothing_present(cfg):
+    items.create_item(cfg, 'tgw1', {'title': 't'})
+    res = items.strip_fields(cfg, 'tgw1', ['attribute_set'])
+    assert res['ok'] is True
+    assert res['removed'] == []
+
+
+def test_strip_fields_archives_once_not_per_field(cfg):
+    items.create_item(cfg, 'tgw1', {'title': 't', 'a': 1, 'b': 2, 'c': 3})
+    items.strip_fields(cfg, 'tgw1', ['a', 'b', 'c'])
+    with zipfile.ZipFile(cfg['archive_root'] / 'tgw1.zip') as zf:
+        assert len(zf.namelist()) == 1  # one archive entry for the whole multi-field removal
+
+
+def test_strip_fields_check_only_does_not_write(cfg):
+    items.create_item(cfg, 'tgw1', {'title': 't', 'attribute_set': 'Books'})
+    res = items.strip_fields(cfg, 'tgw1', ['attribute_set'], check_only=True)
+    assert res['removed'] == ['attribute_set']
+    doc = json.loads((cfg['itemdata_root'] / 'tgw1' / 'tgw1.json').read_text())
+    assert 'attribute_set' in doc  # untouched
+
+
+# ---------------------------------------------------------------------------
+# set_fields (todo #1135 support) — one archive entry per item, not per field
+# ---------------------------------------------------------------------------
+
+def test_set_fields_sets_absent_fields(cfg):
+    items.create_item(cfg, 'tgw1', {'title': 't'})
+    res = items.set_fields(cfg, 'tgw1', {'ebay_category_id': '123', 'ebay_category_name': 'Books'})
+    assert res['ok'] is True
+    assert res['set'] == {'ebay_category_id': '123', 'ebay_category_name': 'Books'}
+    doc = json.loads((cfg['itemdata_root'] / 'tgw1' / 'tgw1.json').read_text())
+    assert doc['ebay_category_id'] == '123'
+
+
+def test_set_fields_publishes_mutation_events(cfg, monkeypatch):
+    """Code-review fix: bulk writes via set_fields() must feed the
+    PP-AIOPS-001 audit/mutation stream the same way single-field
+    update_item() writes already do — previously silently omitted."""
+    from unittest import mock
+    calls = []
+    fake_module = mock.MagicMock()
+    fake_module.publish_mutation = lambda **kw: calls.append(kw)
+    monkeypatch.setitem(__import__('sys').modules, 'tgw.apis.nats_client', fake_module)
+
+    items.create_item(cfg, 'tgw1', {'title': 't'})
+    items.set_fields(cfg, 'tgw1', {'ebay_category_id': '123', 'ebay_category_name': 'Books'})
+
+    fields_published = {c['field'] for c in calls}
+    assert fields_published == {'ebay_category_id', 'ebay_category_name'}
+    assert all(c['sku'] == 'tgw1' for c in calls)
+
+
+def test_set_fields_never_clobbers_present_value_by_default(cfg):
+    items.create_item(cfg, 'tgw1', {'title': 't', 'ebay_category_id': 'existing'})
+    res = items.set_fields(cfg, 'tgw1', {'ebay_category_id': 'recovered'})
+    assert res['set'] == {}
+    doc = json.loads((cfg['itemdata_root'] / 'tgw1' / 'tgw1.json').read_text())
+    assert doc['ebay_category_id'] == 'existing'
+
+
+def test_set_fields_archives_once_not_per_field(cfg):
+    items.create_item(cfg, 'tgw1', {'title': 't'})
+    items.set_fields(cfg, 'tgw1', {'a': 1, 'b': 2, 'c': 3})
+    with zipfile.ZipFile(cfg['archive_root'] / 'tgw1.zip') as zf:
+        assert len(zf.namelist()) == 1
+
+
+def test_set_fields_check_only_does_not_write(cfg):
+    items.create_item(cfg, 'tgw1', {'title': 't'})
+    res = items.set_fields(cfg, 'tgw1', {'ebay_category_id': '5'}, check_only=True)
+    assert res['would_set'] == {'ebay_category_id': '5'}
+    doc = json.loads((cfg['itemdata_root'] / 'tgw1' / 'tgw1.json').read_text())
+    assert 'ebay_category_id' not in doc

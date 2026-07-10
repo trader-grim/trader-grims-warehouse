@@ -39,6 +39,13 @@ log = logging.getLogger(__name__)
 CACHE_MAX_AGE_DAYS = 7
 _METADATA_PATH = '/sell/metadata/v1/marketplace/EBAY_US/get_item_condition_policies'
 
+# In-process memoization (same pattern as taxonomy._tree_id_cache /
+# specifics._aspects_mem_cache): _get_policies() was re-reading and
+# re-parsing the full ~2.7MB disk cache on every call, unlike its sibling
+# caches which hold the parsed result in memory for the life of the process
+# (audit#1143).
+_policies_mem_cache: Optional[Dict[str, List[Tuple[str, str]]]] = None
+
 
 # ---------------------------------------------------------------------------
 # Condition quality ranking — lower rank = better for buyer
@@ -149,6 +156,7 @@ def _load_cache(cfg: Dict[str, Any]) -> Optional[Dict[str, List[Tuple[str, str]]
 
 def refresh_condition_policies(cfg: Dict[str, Any]) -> Dict[str, List[Tuple[str, str]]]:
     """Fetch full condition policy table from eBay and write to cache."""
+    global _policies_mem_cache
     log.info('fetching eBay condition policies from Metadata API')
     data = ebay_get(cfg, _METADATA_PATH)
     policies: Dict[str, List[Tuple[str, str]]] = {}
@@ -171,13 +179,23 @@ def refresh_condition_policies(cfg: Dict[str, Any]) -> Dict[str, List[Tuple[str,
     log.info('condition policies cached: %d categories, %d unique sets',
              len(policies),
              len({frozenset(c[0] for c in v) for v in policies.values()}))
+    _policies_mem_cache = policies
     return policies
 
 
 def _get_policies(cfg: Dict[str, Any]) -> Dict[str, List[Tuple[str, str]]]:
-    """Return policies from cache, refreshing if needed."""
+    """Return policies from cache, refreshing if needed.
+
+    Memoized in-process for the life of the process — an on-demand
+    refresh_condition_policies() call updates the in-memory cache too, so it
+    is never shadowed by a stale copy held here.
+    """
+    global _policies_mem_cache
+    if _policies_mem_cache is not None:
+        return _policies_mem_cache
     cached = _load_cache(cfg)
     if cached is not None:
+        _policies_mem_cache = cached
         return cached
     return refresh_condition_policies(cfg)
 
@@ -207,7 +225,13 @@ def best_condition(cfg: Dict[str, Any], category_id: str,
 
     normalized = item_condition.lower().strip()
     preferred_ids = _ITEM_CONDITION_PREFERRED.get(normalized, _DEFAULT_PREFERRED)
-    item_rank = min((CONDITION_RANK.get(cid, 7) for cid in preferred_ids), default=7)
+    # MAX (worst-case), not MIN: several _ITEM_CONDITION_PREFERRED lists are
+    # not rank-ascending (e.g. 'refurbished': ['2500' rank6, '3500' rank5,
+    # '2000' rank4]) — MIN would set the same-or-worse floor below the
+    # primary entry's own rank, letting step 2 hand out a genuinely better
+    # condition than the item's true grade. Same upgrade-risk class as
+    # best_condition_for_enum() below (audit#1143 #1178/#1252).
+    item_rank = max((CONDITION_RANK.get(cid, 7) for cid in preferred_ids), default=7)
 
     allowed_map: Dict[str, str] = {cid: desc for cid, desc in allowed}
 
@@ -240,6 +264,78 @@ def condition_enum(condition_id: str) -> str:
     """Return the Inventory API enum string for a conditionId."""
     return CONDITION_ID_TO_ENUM.get(condition_id, 'USED_EXCELLENT')
 
+
+
+def allowed_conditions_for_category(
+    cfg: Dict[str, Any], category_id: str
+) -> List[Dict[str, str]]:
+    """
+    Return all allowed conditions for *category_id* as a list of dicts:
+      [{'condition_id': '1000', 'condition_label': 'Brand New',
+        'condition_enum': 'NEW'}, ...]
+    Returns [] if the category has no policy entry.
+    """
+    policies = _get_policies(cfg)
+    allowed = policies.get(str(category_id), [])
+    return [_make_result(cid, desc) for cid, desc in allowed]
+
+
+def best_condition_for_enum(
+    cfg: Dict[str, Any], category_id: str, current_enum: str
+) -> Optional[Dict[str, str]]:
+    """
+    Given a condition_enum already set on a draft (e.g. "USED_EXCELLENT") and a
+    (possibly new) category_id, return the best valid condition dict for that
+    category, or None if the enum cannot map to any allowed condition.
+
+    Used when category changes: remaps the existing condition to the new
+    category's constraint set without requiring the original human-readable
+    condition string.  Never upgrades condition quality.
+    """
+    # Build enum → [conditionIds] reverse map
+    enum_to_ids: Dict[str, List[str]] = {}
+    for cid, en in CONDITION_ID_TO_ENUM.items():
+        enum_to_ids.setdefault(en, []).append(cid)
+
+    source_ids = enum_to_ids.get(current_enum, [])
+    if not source_ids:
+        return None
+
+    # An enum can be ambiguous (e.g. LIKE_NEW covers both '2750' rank-3 and
+    # '2990' rank-6 "Pre-loved Refurbished") and we don't know which real
+    # conditionId the item actually had. Assume the worst (MAX rank) so the
+    # remap can never upgrade a worse-graded item that happens to share an
+    # enum with a better one.
+    item_rank = max(CONDITION_RANK.get(cid, 7) for cid in source_ids)
+
+    policies = _get_policies(cfg)
+    allowed_list = policies.get(str(category_id), [])
+    allowed_map: Dict[str, str] = {cid: desc for cid, desc in allowed_list}
+
+    # 1. Direct hit: only the worst-ranked source conditionId(s) qualify —
+    # a better-ranked alias of the same enum is never a safe direct match,
+    # since it would be an upgrade relative to the worst-case assumption.
+    worst_source_ids = [cid for cid in source_ids if CONDITION_RANK.get(cid, 7) == item_rank]
+    for src_id in worst_source_ids:
+        if src_id in allowed_map:
+            return _make_result(src_id, allowed_map[src_id])
+
+    # 2. Fallback: best allowed condition at same or worse rank
+    candidates = [
+        (CONDITION_RANK.get(cid, 7), cid, desc)
+        for cid, desc in allowed_list
+        if CONDITION_RANK.get(cid, 7) >= item_rank
+    ]
+    if candidates:
+        candidates.sort()
+        _, best_id, best_desc = candidates[0]
+        log.info('condition remap for enum %r in category %s: %s (%s)',
+                 current_enum, category_id, best_id, best_desc)
+        return _make_result(best_id, best_desc)
+
+    log.warning('no valid condition remap for enum %r in category %s (all allowed are better)',
+                current_enum, category_id)
+    return None
 
 def _make_result(condition_id: str, condition_label: str) -> Dict[str, str]:
     return {

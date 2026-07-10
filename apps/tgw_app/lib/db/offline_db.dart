@@ -1,12 +1,11 @@
-import 'dart:convert';
 import 'dart:io';
+import 'dart:convert';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import '../config/tgw_config.dart';
 import '../models/models.dart';
 
 class OfflineDb {
   Database? _db;
-  final FlutterSecureStorage _storage = const FlutterSecureStorage();
   String? _dbPath;
   String? _thumbnailDir;
   bool _initialized = false;
@@ -20,8 +19,8 @@ class OfflineDb {
 
   Future<void> ensureInitialized() async {
     if (_initialized) return;
-    _dbPath = await _storage.read(key: 'db_path');
-    _thumbnailDir = await _storage.read(key: 'thumbnail_dir');
+    _dbPath = await TgwConfig.read('db_path');
+    _thumbnailDir = await TgwConfig.read('thumbnail_dir');
     if (_dbPath != null && await File(_dbPath!).exists()) {
       _db = await openDatabase(_dbPath!, readOnly: true);
     }
@@ -31,7 +30,7 @@ class OfflineDb {
   Future<void> setConfig({String? dbPath, String? thumbnailDir}) async {
     if (dbPath != null) {
       _dbPath = dbPath;
-      await _storage.write(key: 'db_path', value: dbPath);
+      await TgwConfig.write('db_path', dbPath);
       if (_db != null) {
         await _db!.close();
         _db = null;
@@ -39,7 +38,7 @@ class OfflineDb {
     }
     if (thumbnailDir != null) {
       _thumbnailDir = thumbnailDir;
-      await _storage.write(key: 'thumbnail_dir', value: thumbnailDir);
+      await TgwConfig.write('thumbnail_dir', thumbnailDir);
     }
     _initialized = false;
     await ensureInitialized();

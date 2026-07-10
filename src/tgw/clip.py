@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 
 # Canonical TGW SKU: tgw + 15 digits (18 chars). Matches the pattern used by
 # the Qtile widgets and api.py clipboard action.
-_SKU_RE = re.compile(r'^tgw\d{15}$')
+_SKU_RE = re.compile(r'^tgw(?:\d{15}|\d{17})$')  # 15 = legacy (no ms), 17 = current (with ms)
 
 _RETENTION = 2000  # keep at most this many rows; prune oldest on insert
 
@@ -137,8 +137,9 @@ def wipe_nonsku(db_path: Optional[Path] = None) -> int:
 
 
 def cmd_clip(action: str, *, pattern: str = '', limit: int = 20,
-             sku_only: bool = False, db_path: Optional[Path] = None) -> Dict[str, Any]:
-    """CLI handler for `tgw clip {list,last-sku,search,wipe}`."""
+             sku_only: bool = False, clip_id: Optional[int] = None,
+             copy: bool = False, db_path: Optional[Path] = None) -> Dict[str, Any]:
+    """CLI handler for `tgw clip {list,last-sku,search,wipe,get}`."""
     if action == 'last-sku':
         sku = last_sku(db_path)
         if sku:
@@ -162,5 +163,33 @@ def cmd_clip(action: str, *, pattern: str = '', limit: int = 20,
         n = wipe_nonsku(db_path)
         print(f'wiped {n} non-SKU clip(s)')
         return {'ok': True, 'wiped': n}
+
+    if action == 'get':
+        if clip_id is None:
+            return {'ok': False, 'error': 'get requires --id <ID>'}
+        con = _connect(db_path)
+        try:
+            row = con.execute(
+                'SELECT id, content, selection, is_sku, sku, captured_at FROM clip_history WHERE id = ?',
+                (clip_id,),
+            ).fetchone()
+        finally:
+            con.close()
+        if row is None:
+            return {'ok': False, 'error': f'no clip entry with id {clip_id}'}
+        content = row['content']
+        print(content)
+        if copy:
+            import subprocess as _sp
+            # Try wl-copy first (Wayland), fall back to xclip
+            for cmd in (['wl-copy'], ['xclip', '-selection', 'clipboard']):
+                try:
+                    r = _sp.run(cmd, input=content, text=True, timeout=3)
+                    if r.returncode == 0:
+                        break
+                except (FileNotFoundError, _sp.TimeoutExpired):
+                    pass
+        return {'ok': True, 'id': row['id'], 'content': content,
+                'is_sku': bool(row['is_sku']), 'captured_at': row['captured_at']}
 
     return {'ok': False, 'error': f'unknown clip action: {action!r}'}

@@ -581,7 +581,7 @@ class TestCmdReviseApply:
         with patch("tgw.revision._APPLY_ENABLED", False):
             result = cmd_revise_apply(cfg, "tgw001", dry_run=False)
         assert result["ok"] is False
-        assert "not yet enabled" in result["error"].lower() or "not yet enabled" in result["error"]
+        assert "disabled" in result["error"].lower()
 
     def test_returns_diff_lines(self, tmp_path):
         mirror = {"listing_id": "abc", "price": 20.0}
@@ -598,3 +598,160 @@ class TestCmdReviseApply:
         _make_item_with_draft(cfg, "tgw001", delta={"title": "X"}, mirror=mirror)
         result = cmd_revise_apply(cfg, "tgw001", dry_run=True)
         assert result["sku"] == "tgw001"
+
+
+# ---------------------------------------------------------------------------
+# Live apply (PP-LISTEDITOR-001 Phase 2) — mocked eBay client
+# ---------------------------------------------------------------------------
+
+_LIVE_MIRROR = {
+    "listing_id": "326000000001",
+    "offer_id": "262000000001",
+    "api": "inventory",
+    "status": "Active",
+    "live_price": 20.0,
+}
+
+
+def _fresh_bodies():
+    """Fresh GET responses as eBay would return them (incl. read-only keys)."""
+    inv = {
+        "sku": "tgw001",
+        "locale": "en_US",
+        "condition": "USED_EXCELLENT",
+        "product": {"title": "Old Title", "description": "Old desc",
+                    "imageUrls": ["https://i.example/1.jpg"],
+                    "aspects": {"Brand": ["Acme"]}},
+        "availability": {"shipToLocationAvailability": {
+            "quantity": 1,
+            "availabilityDistributions": [
+                {"merchantLocationKey": "LOC1", "quantity": 1}],
+        }},
+    }
+    offer = {
+        "offerId": "262000000001",
+        "sku": "tgw001",
+        "status": "PUBLISHED",
+        "marketplaceId": "EBAY_US",
+        "listingDescription": "Old listing desc",
+        "availableQuantity": 1,
+        "pricingSummary": {"price": {"currency": "USD", "value": "20.00"}},
+    }
+    return inv, offer
+
+
+class TestLiveApply:
+    def _run(self, tmp_path, delta, mirror=None):
+        cfg = _make_cfg(tmp_path)
+        _make_item_with_draft(cfg, "tgw001", delta=delta,
+                              mirror=dict(mirror or _LIVE_MIRROR))
+        inv, offer = _fresh_bodies()
+        puts = []
+
+        def fake_get(cfg_, path, **kw):
+            return dict(inv) if "inventory_item" in path else dict(offer)
+
+        def fake_put(cfg_, path, body, **kw):
+            puts.append((path, body))
+            return {}
+
+        with patch("tgw.apis.ebay.client.ebay_get", side_effect=fake_get), \
+             patch("tgw.apis.ebay.client.ebay_put", side_effect=fake_put):
+            result = cmd_revise_apply(cfg, "tgw001", dry_run=False, by="test")
+        return cfg, result, puts
+
+    def test_price_delta_puts_offer_only(self, tmp_path):
+        cfg, result, puts = self._run(tmp_path, {"price": 25.0})
+        assert result["ok"] is True
+        assert result["applied"] is True
+        assert len(puts) == 1
+        path, body = puts[0]
+        assert "offer/262000000001" in path
+        assert body["pricingSummary"]["price"]["value"] == "25.00"
+        # read-only keys stripped before PUT
+        assert "offerId" not in body and "status" not in body
+
+    def test_title_delta_puts_inventory_only(self, tmp_path):
+        cfg, result, puts = self._run(tmp_path, {"title": "New Title"})
+        assert result["ok"] is True
+        assert len(puts) == 1
+        path, body = puts[0]
+        assert "inventory_item/tgw001" in path
+        assert body["product"]["title"] == "New Title"
+        assert "sku" not in body and "locale" not in body
+
+    def test_quantity_delta_puts_both(self, tmp_path):
+        cfg, result, puts = self._run(tmp_path, {"quantity": 3})
+        assert result["ok"] is True
+        assert len(puts) == 2
+        inv_body = next(b for p, b in puts if "inventory_item" in p)
+        offer_body = next(b for p, b in puts if "offer/" in p)
+        avail = inv_body["availability"]["shipToLocationAvailability"]
+        assert avail["quantity"] == 3
+        assert avail["availabilityDistributions"][0]["quantity"] == 3
+        assert offer_body["availableQuantity"] == 3
+
+    def test_aspects_delta_normalizes_values(self, tmp_path):
+        cfg, result, puts = self._run(
+            tmp_path, {"item_specifics": {"Brand": "NewCo", "Color": ["Red"]}})
+        assert result["ok"] is True
+        inv_body = puts[0][1]
+        assert inv_body["product"]["aspects"] == {
+            "Brand": ["NewCo"], "Color": ["Red"]}
+
+    def test_unsupported_field_refuses(self, tmp_path):
+        cfg, result, puts = self._run(tmp_path, {"bogus_field": 1})
+        assert result["ok"] is False
+        assert "unsupported" in result["error"]
+        assert puts == []
+
+    def test_trading_api_item_refuses(self, tmp_path):
+        mirror = {"listing_id": "1", "api": "trading", "offer_id": ""}
+        cfg, result, puts = self._run(tmp_path, {"price": 25.0}, mirror=mirror)
+        assert result["ok"] is False
+        assert "Inventory API" in result["error"]
+        assert puts == []
+
+    def test_no_offer_id_refuses(self, tmp_path):
+        mirror = {"listing_id": "1", "api": "inventory"}
+        cfg, result, puts = self._run(tmp_path, {"price": 25.0}, mirror=mirror)
+        assert result["ok"] is False
+        assert puts == []
+
+    def test_apply_clears_draft_and_writes_history(self, tmp_path):
+        cfg, result, puts = self._run(tmp_path, {"price": 25.0})
+        assert result["ok"] is True
+        doc = _read_item(cfg, "tgw001")
+        assert "revision_draft" not in doc
+        history = doc["revision_history"]
+        assert len(history) == 1
+        assert history[0]["delta"] == {"price": 25.0}
+        assert history[0]["by"] == "test"
+        assert history[0]["calls"] == result["calls"]
+
+    def test_blocking_drift_still_refuses_live(self, tmp_path):
+        cfg = _make_cfg(tmp_path)
+        path = _make_item_with_draft(cfg, "tgw001", delta={"live_price": 25.0},
+                                     mirror=dict(_LIVE_MIRROR))
+        item = json.loads(path.read_text())
+        item["ebay_listing"]["live_price"] = 22.0  # drifted on delta field
+        path.write_text(json.dumps(item))
+        with patch("tgw.apis.ebay.client.ebay_get") as g, \
+             patch("tgw.apis.ebay.client.ebay_put") as p:
+            result = cmd_revise_apply(cfg, "tgw001", dry_run=False)
+        assert result["ok"] is False
+        assert "drifted" in result["error"]
+        g.assert_not_called()
+        p.assert_not_called()
+
+    def test_dry_run_never_calls_ebay(self, tmp_path):
+        cfg = _make_cfg(tmp_path)
+        _make_item_with_draft(cfg, "tgw001", delta={"price": 25.0},
+                              mirror=dict(_LIVE_MIRROR))
+        with patch("tgw.apis.ebay.client.ebay_get") as g, \
+             patch("tgw.apis.ebay.client.ebay_put") as p:
+            result = cmd_revise_apply(cfg, "tgw001", dry_run=True)
+        assert result["ok"] is True
+        assert result["applied"] is False
+        g.assert_not_called()
+        p.assert_not_called()

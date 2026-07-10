@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# tgw-itemdata-sync — continuous ItemData → GDrive sync (PP-PHOTO-001)
+#
+# Runs as a long-lived systemd service (tgw-itemdata-sync.service).
+# Syncs /opt/TGW/data/ItemData/ → tgw-gdrive:TGW/data/ItemData/ every
+# INTERVAL seconds.  Uses a shared flock so this and tgw-cloud-sync never
+# hit Drive in parallel.
+#
+# Sync status is written atomically to STATUS_FILE at cycle start and end
+# so other processes (ebay_draft, PP-PHOTO-001 GDrive URL helper) can tell
+# exactly when Drive was last fully consistent with local ItemData.
+#
+# Status file schema:
+#   state        "running" | "idle" | "skipped"
+#   cycle        integer, increments each loop iteration
+#   started_at   ISO-8601 timestamp when this cycle's rclone began
+#   completed_at ISO-8601 timestamp when rclone exited cleanly (null if running/skipped)
+#   pid          this process's PID (for watchdog use)
+set -uo pipefail
+
+RCLONE_CONF=/opt/TGW/config/rclone.conf
+REMOTE=tgw-gdrive:TGW/data/ItemData
+LOCAL=/opt/TGW/data/ItemData
+LOG=/opt/TGW/var/log/rclone-itemdata-sync.log
+STATUS_FILE=/opt/TGW/var/log/rclone-itemdata-sync-status.json
+LOCK=/run/lock/tgw-rclone-gdrive.lock
+INTERVAL=120   # seconds between sync cycles
+CYCLE=0
+
+log() { echo "$(date -Iseconds) $*" >> "$LOG"; }
+
+# Atomic status write — temp file + rename so readers never see a partial write
+write_status() {
+    local state=$1 started=$2 completed=$3
+    printf '{"state":"%s","cycle":%d,"started_at":"%s","completed_at":%s,"pid":%d}\n' \
+        "$state" "$CYCLE" "$started" "$completed" "$$" \
+        > "${STATUS_FILE}.tmp"
+    mv -f "${STATUS_FILE}.tmp" "$STATUS_FILE"
+}
+
+log "tgw-itemdata-sync started (pid=$$, interval=${INTERVAL}s)"
+
+while true; do
+    CYCLE=$(( CYCLE + 1 ))
+    STARTED=$(date -Iseconds)
+
+    if flock -n 9; then
+        write_status "running" "$STARTED" "null"
+        log "cycle $CYCLE started"
+
+        rclone sync "$LOCAL" "$REMOTE" \
+            --config "$RCLONE_CONF" \
+            --log-file "$LOG" \
+            --log-level INFO \
+            --stats 60s \
+            --transfers 4 \
+            --checkers 8 \
+            --fast-list \
+            --use-mmap
+
+        COMPLETED=$(date -Iseconds)
+        write_status "idle" "$STARTED" "\"$COMPLETED\""
+        log "cycle $CYCLE completed at $COMPLETED"
+    else
+        write_status "skipped" "$STARTED" "null"
+        log "cycle $CYCLE skipped — lock held by another rclone process"
+    fi 9>"$LOCK"
+
+    sleep "$INTERVAL"
+done

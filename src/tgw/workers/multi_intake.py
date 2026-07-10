@@ -24,6 +24,11 @@ from typing import Any, Dict, List
 
 import tgw.logging as tgw_logging
 from tgw.config import DEFAULT_CONFIG, load_config
+
+# PP-FENCE-001: atomic_write_json kept for one remaining gap not yet in fence:
+#   Stub writes go to newitems_path (not itemdata_root) — outside fence scope.
+# (The second gap — a direct ItemData key-deletion write — was removed in
+# session 48; see the SKU-collision handling below.)
 from tgw.items import atomic_write_json
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
@@ -34,6 +39,40 @@ IMAGE_SUFFIXES = {'.jpg', '.jpeg', '.png', '.gif', '.webp',
                   '.JPG', '.JPEG', '.PNG'}
 # App-generated artifacts that are not item photos
 _SKIP_NAMES    = {'film.jpg', 'singleShot.jpg', 'exportGif.gif'}
+
+# audit#1143 #1246 (deferred #1245 finding): dedup registry for the SKU-
+# collision notify() below. Child SKUs are derived deterministically from
+# base_sku (_child_skus above), so a batch re-drop of the identical zip
+# reproduces the exact same collision on the exact same SKU every time —
+# without this, notify() would spam the same external channel once per
+# re-drop instead of once ever per SKU.
+_COLLISION_NOTIFY_REGISTRY = Path('/opt/TGW/var/multi-intake-collision-notified.json')
+
+
+def _already_notified_collision(sku: str) -> bool:
+    try:
+        if not _COLLISION_NOTIFY_REGISTRY.exists():
+            return False
+        registry = json.loads(_COLLISION_NOTIFY_REGISTRY.read_text(encoding='utf-8'))
+        return sku in registry
+    except (OSError, ValueError) as exc:
+        log.warning('multi_intake: collision-notify registry unreadable (%s) — notifying anyway', exc)
+        return False
+
+
+def _record_notified_collision(sku: str, base_sku: str) -> None:
+    try:
+        registry: Dict[str, Any] = {}
+        if _COLLISION_NOTIFY_REGISTRY.exists():
+            registry = json.loads(_COLLISION_NOTIFY_REGISTRY.read_text(encoding='utf-8'))
+        from datetime import datetime, timezone
+        registry[sku] = {'base_sku': base_sku, 'notified_at': datetime.now(timezone.utc).isoformat()}
+        _COLLISION_NOTIFY_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _COLLISION_NOTIFY_REGISTRY.with_suffix('.tmp')
+        tmp.write_text(json.dumps(registry, indent=2, ensure_ascii=False), encoding='utf-8')
+        tmp.replace(_COLLISION_NOTIFY_REGISTRY)
+    except Exception as exc:
+        log.warning('multi_intake: could not update collision-notify registry: %s', exc)
 
 
 def _is_timestamp_dir(name: str) -> bool:
@@ -149,26 +188,53 @@ class MultiIntakeWorker(QueueWorker):
                     'source_sku': base_sku,
                 }, pretty=self.config.get('pretty', True))
 
-                # If this child's ItemData JSON already exists (e.g. the item
-                # was previously catalogued as part of a bundle listing), strip
-                # the parent bundle's eBay item number — it belongs to the
-                # package, not the individual item.
+                # audit#1143 #1235 follow-up (session 48): a derived child SKU
+                # can collide with an already-catalogued ItemData record (e.g.
+                # a re-drop of the same multi-zip after a prior partial run).
+                # bundle_intake's own idempotency already handles this safely
+                # — _write_item_json()/_copy_images() no-op on an existing
+                # SKU, never touching its fields — so this worker used to
+                # ALSO directly patch the existing record (strip 'Item
+                # number', bypassing the fence) is both redundant and
+                # unverified: one confirmed case in production
+                # (tgw202604130911246) turned out to be a currently-Active
+                # live eBay listing with no sibling children and no archived
+                # pre-strip snapshot, i.e. never actually validated safe.
+                # Removed. Only surface the collision for operator awareness;
+                # let the normal newitems_dir path (already written above)
+                # handle it.
                 existing_json = (self.config['itemdata_root']
                                  / sku / f'{sku}.json')
                 if existing_json.exists():
-                    try:
-                        import json as _json
-                        data = _json.loads(
-                            existing_json.read_text(encoding='utf-8'))
-                        if 'Item number' in data:
-                            del data['Item number']
-                            data.setdefault('source_sku', base_sku)
-                            atomic_write_json(existing_json, data,
-                                             pretty=self.config.get('pretty', True))
-                            log.info('multi_intake: stripped Item number from '
-                                     'existing %s (source_sku=%s)', sku, base_sku)
-                    except Exception:
-                        log.exception('multi_intake: failed to scrub %s', sku)
+                    log.warning(
+                        'multi_intake: derived child sku %s (from base %s) '
+                        'already has an ItemData record — leaving it untouched, '
+                        'new photos will merge in via the normal newitems_dir path',
+                        sku, base_sku,
+                    )
+                    tgw_logging.log_event(
+                        'multi_intake_sku_collision', sku=sku, base_sku=base_sku,
+                    )
+                    # audit#1143 #1246 (deferred #1245 finding): the durable
+                    # per-item finding (log line + log_event above) always
+                    # records every hit, but the external notify() channel
+                    # is deduped per-SKU — a batch re-drop of the identical
+                    # zip reproduces the exact same collision on the exact
+                    # same SKU every time (_child_skus is deterministic), so
+                    # without this the same channel gets spammed once per
+                    # re-drop instead of once ever.
+                    if not _already_notified_collision(sku):
+                        from tgw.notify import notify
+                        notify(
+                            'multi_intake SKU collision',
+                            f'Derived child {sku} (base {base_sku}) already has an '
+                            f'ItemData record — leaving it untouched. Verify it is not '
+                            f'a mistaken duplicate; if it turns out to be one, run an '
+                            f'operator-forced ebay_stage duplicate-check pass on {sku} '
+                            f'before publishing/updating it.',
+                            level='warning',
+                        )
+                        _record_notified_collision(sku, base_sku)
 
                 children.append(sku)
                 log.info('child bundle %s: %d photos (from zip subdir %s)',

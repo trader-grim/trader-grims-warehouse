@@ -1,0 +1,26 @@
+{
+  "mcpServers": {
+    "tgw": {
+      "command": "sudo",
+      "args": [
+        "-u",
+        "tgw",
+        "/opt/TGW/.venvironments/tgw/bin/python",
+        "-m",
+        "tgw.mcp_server"
+      ],
+      "env": {}
+    },
+    "tgw-aider": {
+      "command": "sudo",
+      "args": [
+        "-u",
+        "tgw",
+        "/opt/TGW/.venvironments/tgw/bin/python",
+        "-m",
+        "tgw.aider_mcp_server"
+      ],
+      "env": {}
+    }
+  }
+}

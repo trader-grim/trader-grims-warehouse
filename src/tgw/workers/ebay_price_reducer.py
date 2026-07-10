@@ -40,9 +40,11 @@ import requests
 
 import tgw.logging as tgw_logging
 from tgw.apis.ebay.client import ebay_put
+from tgw.apis.fence import ebay_write as fence_ebay_write
+from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.config import DEFAULT_CONFIG, load_config
+from tgw.draft_sync import baseline_fields
 from tgw.ebay.sync import _build_offer_bodies
-from tgw.items import atomic_write_json
 from tgw.queue import state_machine
 from tgw.queue.worker_base import QueueWorker
 
@@ -111,6 +113,13 @@ class EbayPriceReducerWorker(QueueWorker):
 
         if item.get('reprice_skip'):
             return
+        # Skip repricing while item is in an active markdown promotion (R2 risk in PP-PROMO-001)
+        from tgw.promo import has_active_promo
+        if has_active_promo(item):
+            log.debug('ebay_price_reducer: %s in active promo — skipping reprice',
+                      jf.parent.name)
+            stats['skipped'] += 1
+            return
         schedule: List[Dict[str, Any]] = item.get('reprice_schedule', [])
         if not schedule:
             return
@@ -152,7 +161,7 @@ class EbayPriceReducerWorker(QueueWorker):
         if old_price_f is not None and float(new_price) >= old_price_f:
             _stamp_due_stages()
             item['reprice_schedule'] = schedule
-            atomic_write_json(jf, item, pretty=self.config.get('pretty', True))
+            fence_patch_item(self.config, sku, {'reprice_schedule': schedule})
             stats['skipped'] += 1
             log.info('ebay_price_reducer: %s stage %d (%s) $%.2f >= current $%.2f'
                      ' — stamped done without applying',
@@ -160,6 +169,33 @@ class EbayPriceReducerWorker(QueueWorker):
             tgw_logging.log_event('ebay_price_reducer_stage_satisfied', sku=sku,
                                   stage=entry['stage'], label=entry['label'],
                                   price=new_price, current_price=old_price_f)
+            return
+
+        # Cliff guard (session 42): schedules minted from asking-price "comps"
+        # produced fire-sale floors (one was literally $0.00, due in 3 days).
+        # A stage may not cut more than half off its PREDECESSOR stage's price
+        # (measured against the schedule's own shape, so a legitimate multi-
+        # stage catch-up after worker downtime isn't refused), nor go below a
+        # hard floor. A refused stage is stamped 'refused_at' so it never
+        # retries silently — a broken schedule needs a human, not a retry.
+        _HARD_FLOOR = 2.99
+        _prior = next((float(s.get('price') or 0) for s in reversed(schedule)
+                       if s.get('stage', 0) < entry.get('stage', 0)
+                       and s.get('price') is not None), old_price_f)
+        if new_price < max(_prior * 0.5, _HARD_FLOOR):
+            entry['refused_at'] = now.isoformat()
+            entry['done_at'] = now.isoformat()
+            item['reprice_schedule'] = schedule
+            fence_patch_item(self.config, sku, {'reprice_schedule': schedule})
+            log.error('ebay_price_reducer: %s stage %d (%s) REFUSED — $%.2f is a '
+                      'cliff-drop from current $%.2f (>50%% or below $%.2f floor); '
+                      'schedule needs operator review',
+                      sku, entry['stage'], entry['label'], new_price, old_price_f,
+                      _HARD_FLOOR)
+            tgw_logging.log_event('ebay_price_reducer_stage_refused', sku=sku,
+                                  stage=entry['stage'], label=entry['label'],
+                                  price=new_price, current_price=old_price_f)
+            stats['errors'] += 1
             return
 
         draft = item.get('draft_listing')
@@ -202,17 +238,62 @@ class EbayPriceReducerWorker(QueueWorker):
             return
 
         _stamp_due_stages()
-        item.setdefault('price_history', []).append({
+        price_entry = {
             'ts':             now.isoformat(),
             'price':          new_price,
             'previous_price': old_price,
             'stage':          entry['stage'],
             'label':          entry['label'],
             'source':         'ebay_price_reducer',
-        })
+        }
+        item.setdefault('price_history', []).append(price_entry)
         item['reprice_schedule'] = schedule
-        atomic_write_json(jf, item, pretty=self.config.get('pretty', True))
+
+        # Session 41 fix: draft_listing.price was never persisted here — only
+        # mutated in memory (see draft['price'] = new_price above) and then
+        # silently dropped, every run, success or failure. ebay_stage.py reads
+        # draft_listing.price as its FIRST price source, so the next time
+        # ebay_stage ran for any reason it would push the stale pre-reduction
+        # price back live, silently reverting the markdown eBay had already
+        # accepted (confirmed live on tgw202605051933258: draft_listing.price
+        # stuck at the original $82.99 while ebay_offer/price_history correctly
+        # tracked the reduction schedule down to $32.92 — the drift was
+        # invisible until an ebay_stage re-run pushed $82.99 back live).
+        #
+        # patch_item persists this — the more critical, authoritative write —
+        # before the ebay_write() deep-merge below, so a failure in the latter
+        # (as happened here, a transient KeyError('api_key') crash) can no
+        # longer discard the bookkeeping for a price change eBay already
+        # accepted live.
+        # Draft lifecycle (broker B1a): this write makes draft == offer by
+        # construction (the reduced price just went live AND into the draft),
+        # so it MAINTAINS the baseline rather than breaking it. Without the
+        # explicit state, the fence PATCH hook would flip the item to
+        # 'editing' every 6h and the fleet baseline would erode within days.
+        # An in-flight operator edit (state 'editing') is preserved as-is.
+        _state = ({'draft_listing_state': 'editing'}
+                  if item.get('draft_listing_state') == 'editing'
+                  else baseline_fields())
+        fence_patch_item(self.config, sku, {
+            'reprice_schedule': schedule,
+            'price_history':    item['price_history'],
+            'draft_listing':    draft,
+            **_state,
+        })
+        try:
+            fence_ebay_write(self.config, sku, ebay_offer={'price': new_price})
+        except Exception:
+            log.exception(
+                'ebay_price_reducer: ebay_offer.price merge failed for %s after '
+                'the live eBay PUT and local bookkeeping already succeeded — '
+                'ebay_offer.price may lag draft_listing.price until the next sync',
+                sku,
+            )
         stats['reduced'] += 1
+
+    # _on_terminal_failure: no override needed — worker_base.QueueWorker's
+    # default detects _reschedule() (no-arg) and calls it automatically on
+    # dead_letter (audit#1143 #1244).
 
     def _reschedule(self) -> None:
         next_run = time.time() + RUN_INTERVAL_S

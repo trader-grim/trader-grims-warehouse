@@ -29,7 +29,9 @@ SAFETY DESIGN
 - Confirms both files are valid JPEGs before renaming.
 - Confirms files share identical first 64 KB (content match, not just size).
 - After rename: verifies old path gone, new path exists, size unchanged.
-- Removes a wrongly-created <SKU>.jpg if present (leftover from prior repair attempt).
+- Removes a wrongly-created <SKU>.jpg if present (leftover from prior repair
+  attempt) — only after both a size AND content-hash match against the
+  original, and only after archiving it to history/ first.
 - Writes a timestamped log to /opt/TGW/var/log/.
 
 USAGE
@@ -44,15 +46,24 @@ from __future__ import annotations
 import argparse
 import logging
 import re
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+
+from tgw.config import DEFAULT_CONFIG, load_config  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-ITEMDATA_ROOT = Path('/opt/TGW/data/ItemData')
+# audit#1143 #1213: was hardcoded to '/opt/TGW/data/ItemData' instead of
+# reading itemdata_root from tgw.config, unlike sibling photosync_canary_probe.py
+# — silently stale/wrong if itemdata_root is ever repointed (e.g. LVM expansion).
+ITEMDATA_ROOT = Path(load_config(DEFAULT_CONFIG)['itemdata_root'])
+HISTORY_ROOT  = ITEMDATA_ROOT.parent / 'history' / 'ItemData'
 # Local snapshots are pruned immediately after send (LOCAL_KEEP=2).
 # Check the backup target, which retains all received snapshots.
 SNAPSHOT_DIRS = [
@@ -265,6 +276,16 @@ def repair_item(sku: str, execute: bool) -> dict:
         r['status'] = 'DRY_RUN'
         return r
 
+    # Archive before manipulation (audit#1143 #1163+#1208: this rename had no
+    # archive-before-manipulation step, unlike alt_text.py's established
+    # copy2-to-history convention). Copy only if not already archived, same
+    # as alt_text.py's _history_sku_dir usage.
+    history_dir = HISTORY_ROOT / sku
+    history_path = history_dir / alt_path.name
+    if not history_path.exists():
+        history_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(alt_path, history_path)
+
     # Rename
     try:
         alt_path.rename(new_alt)
@@ -283,21 +304,39 @@ def repair_item(sku: str, execute: bool) -> dict:
         r['reason'] = 'renamed file size does not match original — unexpected'
         return r
 
-    # Cleanup: remove any wrongly-created <SKU>.jpg from a prior repair attempt
+    # Cleanup: remove any wrongly-created <SKU>.jpg from a prior repair attempt.
+    # audit#1143 #1211: byte-size match alone is not proof this file is the
+    # duplicate it's assumed to be — a coincidental same-size, different-content
+    # file would be permanently destroyed (violates E5). Require the same
+    # content-hash confirmation used for the alt rename above, and archive
+    # before delete (same copy2-to-history convention as the rename path)
+    # rather than a bare unlink.
     wrong_primary = item_dir / f'{sku}.jpg'
     if wrong_primary.exists():
         wrong_size = wrong_primary.stat().st_size
-        if wrong_size == original.stat().st_size:
-            try:
-                wrong_primary.unlink()
-                log.info('[CLEANUP] %s | removed wrongly-created %s', sku, wrong_primary.name)
-            except OSError as e:
-                log.warning('[CLEANUP] %s | could not remove %s: %s', sku, wrong_primary.name, e)
-        else:
+        if wrong_size != original.stat().st_size:
             log.warning(
                 '[CLEANUP] %s | %s exists but size (%d) differs from original (%d) — left in place',
                 sku, wrong_primary.name, wrong_size, original.stat().st_size,
             )
+        else:
+            wrong_head = first_n_bytes(wrong_primary, CONTENT_CHECK_BYTES)
+            orig_head_cleanup = first_n_bytes(original, CONTENT_CHECK_BYTES)
+            if wrong_head is None or orig_head_cleanup is None or wrong_head != orig_head_cleanup:
+                log.warning(
+                    '[CLEANUP] %s | %s matches %s by size but not content — left in place, manual review needed',
+                    sku, wrong_primary.name, original.name,
+                )
+            else:
+                wrong_history_path = history_dir / wrong_primary.name
+                try:
+                    if not wrong_history_path.exists():
+                        history_dir.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(wrong_primary, wrong_history_path)
+                    wrong_primary.unlink()
+                    log.info('[CLEANUP] %s | removed wrongly-created %s (archived first)', sku, wrong_primary.name)
+                except OSError as e:
+                    log.warning('[CLEANUP] %s | could not remove %s: %s', sku, wrong_primary.name, e)
 
     r['status'] = 'RENAMED'
     return r

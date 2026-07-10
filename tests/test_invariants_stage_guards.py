@@ -25,6 +25,8 @@ def stage(tmp_path, monkeypatch):
     """(worker, staged_calls) with stage_draft and all side effects stubbed."""
     monkeypatch.setattr(ebay_stage.tgw_logging, 'log_event', lambda *a, **k: None)
     enqueued = []
+    monkeypatch.setattr(ebay_stage.state_machine, 'active_jobs_for_sku',
+                        lambda sku, queues: [])
     monkeypatch.setattr(ebay_stage.state_machine, 'enqueue_job',
                         lambda **kw: enqueued.append(kw))
     calls = []
@@ -36,7 +38,10 @@ def stage(tmp_path, monkeypatch):
     monkeypatch.setattr(ebay_stage, 'stage_draft', fake_stage_draft)
 
     worker = object.__new__(ebay_stage.EbayStageWorker)
-    worker.config = {'itemdata_root': tmp_path, 'pretty': False}
+    from tests.conftest import make_fake_fence_write, make_fake_patch_item
+    monkeypatch.setattr(ebay_stage, 'fence_ebay_write', make_fake_fence_write(tmp_path))
+    monkeypatch.setattr(ebay_stage, 'fence_patch_item', make_fake_patch_item(tmp_path))
+    worker.config = {'itemdata_root': tmp_path, 'pretty': False, 'api_key': 'test-api-key'}
     worker._staged = calls
     worker._enqueued = enqueued
     return worker
@@ -160,3 +165,200 @@ def test_successful_stage_is_unpublished_and_preserves_comps(stage, tmp_path):
     assert offer['price_comps'] == {'count': 3, 'p25': 9.99}  # merge, not replace
     assert 'ebay_listing' not in after                        # never published
     assert any(kw['queue_name'] == 'catalog_rebuild' for kw in stage._enqueued)
+
+# ---------------------------------------------------------------------------
+# C5-extended — never-raise clamp on force re-stage (session 42 incident)
+# ---------------------------------------------------------------------------
+
+def _run_force(worker, sku, **extra_payload):
+    # operator origin by default — C9 blocks operator-less force on live items
+    payload = {'sku': sku, 'force': True, 'origin': 'operator', **extra_payload}
+    worker.handle({'payload_json': payload})
+
+
+def _live_item(draft_price, offer_price):
+    item = _ready_item()
+    item['draft_listing']['price'] = draft_price
+    item['ebay_offer'].update({'price': offer_price, 'offer_id': 'OFF-1',
+                               'status': 'PUBLISHED'})
+    return item
+
+
+def test_force_restage_never_raises_live_price(stage, tmp_path):
+    # Stale pre-s41 draft price above the live markdown must be clamped to the
+    # live price AND persisted back (heals the stale draft, price_history event).
+    path = _write(tmp_path, 'tgw10', _live_item(draft_price=9.97, offer_price=7.98))
+    _run_force(stage, 'tgw10')
+    assert stage._staged == ['tgw10']
+    after = json.loads(path.read_text(encoding='utf-8'))
+    assert after['draft_listing']['price'] == 7.98
+    ev = after['price_history'][-1]
+    assert ev['label'] == 'never_raise_clamp'
+    assert ev['previous_price'] == 9.97
+
+
+def test_force_restage_allows_operator_authorized_raise(stage, tmp_path):
+    path = _write(tmp_path, 'tgw11', _live_item(draft_price=12.00, offer_price=7.98))
+    _run_force(stage, 'tgw11', allow_price_raise=True)
+    assert stage._staged == ['tgw11']
+    after = json.loads(path.read_text(encoding='utf-8'))
+    assert after['draft_listing']['price'] == 12.00
+    assert not after.get('price_history')
+
+
+def test_force_restage_lowering_passes_unclamped(stage, tmp_path):
+    # A pending reduction (draft below live) is the reducer doing its job.
+    path = _write(tmp_path, 'tgw12', _live_item(draft_price=6.50, offer_price=7.98))
+    _run_force(stage, 'tgw12')
+    assert stage._staged == ['tgw12']
+    after = json.loads(path.read_text(encoding='utf-8'))
+    assert after['draft_listing']['price'] == 6.50
+
+
+def test_nonforce_unpublished_stage_not_clamped(stage, tmp_path):
+    # First-time staging of a fresh item is untouched by the guard.
+    _write(tmp_path, 'tgw13', _ready_item())
+    _run(stage, 'tgw13')
+    assert stage._staged == ['tgw13']
+
+
+# ---------------------------------------------------------------------------
+# C9 — uninspected AI content never reaches a live listing (session 42)
+# ---------------------------------------------------------------------------
+
+def test_force_on_live_listing_without_operator_origin_is_blocked(stage, tmp_path):
+    path = _write(tmp_path, 'tgw14', _live_item(draft_price=9.99, offer_price=9.99))
+    before = path.read_text()
+    stage.handle({'payload_json': {'sku': 'tgw14', 'force': True}})
+    assert stage._staged == []               # refused — no PUT
+    assert path.read_text() == before        # and nothing written
+
+
+def test_force_on_unpublished_offer_passes_without_origin(stage, tmp_path):
+    # Pre-publish price-drift force re-stage (ebay_publish deadlock-breaker)
+    # targets an UNPUBLISHED offer — C9 does not apply.
+    item = _ready_item()
+    item['ebay_offer'].update({'offer_id': 'OFF-2', 'status': 'UNPUBLISHED'})
+    _write(tmp_path, 'tgw15', item)
+    stage.handle({'payload_json': {'sku': 'tgw15', 'force': True}})
+    assert stage._staged == ['tgw15']
+
+
+# ---------------------------------------------------------------------------
+# PP-PHOTOSYNC-001 P10 (session 43) — legacy-listing skip must be persisted
+# durably (not just logged), and repaired in-place when operator-driven.
+# ---------------------------------------------------------------------------
+
+def _legacy_item(**extra):
+    item = _ready_item(**{'Item number': '110000012345',
+                          'ebay_listing': {'status': 'Active', 'listing_id': '226700000001'}})
+    item.update(extra)
+    return item
+
+
+def test_legacy_skip_persists_durably_even_without_operator_origin(stage, tmp_path):
+    """The core data-loss fix: a legacy skip must land in the item JSON, not
+    just journald — regardless of whether a duplicate check was attempted."""
+    _write(tmp_path, 'tgw20', _legacy_item())
+    stage.handle({'payload_json': {'sku': 'tgw20', 'force': True, 'origin': 'operator'}})
+    after = json.loads((tmp_path / 'tgw20' / 'tgw20.json').read_text(encoding='utf-8'))
+    assert after['legacy_listing_blocked']['item_number'] == '110000012345'
+    assert after['legacy_listing_blocked']['listing_id'] == '226700000001'
+
+
+def test_legacy_duplicate_check_only_attempted_with_operator_origin(stage, tmp_path, monkeypatch):
+    """C9 applies to this check exactly like the Inventory-API path: a
+    background (no-origin) job may record the finding but must never make a
+    live eBay-state decision on its own."""
+    check_calls = []
+    import tgw.ebay.pull as pull_mod
+    monkeypatch.setattr(pull_mod, 'check_legacy_duplicate_listing',
+                        lambda cfg, sku, listing_id: check_calls.append(sku) or {'ok': True, 'match': True})
+
+    _write(tmp_path, 'tgw21', _legacy_item())
+    stage.handle({'payload_json': {'sku': 'tgw21', 'force': True}})  # no origin
+    assert check_calls == []
+    after = json.loads((tmp_path / 'tgw21' / 'tgw21.json').read_text(encoding='utf-8'))
+    assert after['legacy_listing_blocked']['duplicate_check'] is None
+    assert 'legacy_listing_resolved' not in after
+
+
+def test_legacy_confirmed_not_duplicate_resolves_and_falls_through(stage, tmp_path, monkeypatch):
+    """Dave, s43: 'check for both specifically, then resolve.' A confirmed
+    match (same listingId on both APIs) must auto-resolve and proceed to the
+    normal staging path — this is the actual repair for the 491-item find."""
+    import tgw.ebay.pull as pull_mod
+    monkeypatch.setattr(pull_mod, 'check_legacy_duplicate_listing',
+                        lambda cfg, sku, listing_id: {
+                            'ok': True, 'match': True, 'duplicate': False,
+                            'inventory_listing_id': listing_id, 'inventory_status': 'ACTIVE'})
+
+    _write(tmp_path, 'tgw22', _legacy_item())
+    stage.handle({'payload_json': {'sku': 'tgw22', 'force': True, 'origin': 'operator'}})
+    assert stage._staged == ['tgw22']   # fell through to stage_draft
+    after = json.loads((tmp_path / 'tgw22' / 'tgw22.json').read_text(encoding='utf-8'))
+    assert after['legacy_listing_resolved'] is True
+    assert after['legacy_listing_blocked']['duplicate_check']['match'] is True
+
+
+def test_legacy_duplicate_risk_never_resolves(stage, tmp_path, monkeypatch):
+    """A mismatch (or no published Inventory offer at all) is exactly the
+    genuine-duplicate-listing danger Dave described — must never auto-resolve,
+    never touch eBay further, and must be visible in the persisted record."""
+    import tgw.ebay.pull as pull_mod
+    monkeypatch.setattr(pull_mod, 'check_legacy_duplicate_listing',
+                        lambda cfg, sku, listing_id: {
+                            'ok': True, 'match': False, 'duplicate': True,
+                            'inventory_listing_id': None, 'inventory_status': None,
+                            'reason': 'no published Inventory API offer found for this SKU'})
+
+    _write(tmp_path, 'tgw23', _legacy_item())
+    stage.handle({'payload_json': {'sku': 'tgw23', 'force': True, 'origin': 'operator'}})
+    assert stage._staged == []
+    after = json.loads((tmp_path / 'tgw23' / 'tgw23.json').read_text(encoding='utf-8'))
+    assert 'legacy_listing_resolved' not in after
+    assert after['legacy_listing_blocked']['duplicate_check']['duplicate'] is True
+
+
+def test_legacy_duplicate_check_fetch_error_never_resolves(stage, tmp_path, monkeypatch):
+    """A failed live check ('ok': False) must be treated as unresolved, not
+    silently treated as safe."""
+    import tgw.ebay.pull as pull_mod
+    monkeypatch.setattr(pull_mod, 'check_legacy_duplicate_listing',
+                        lambda cfg, sku, listing_id: {'ok': False, 'error': 'timeout'})
+
+    _write(tmp_path, 'tgw24', _legacy_item())
+    stage.handle({'payload_json': {'sku': 'tgw24', 'force': True, 'origin': 'operator'}})
+    assert stage._staged == []
+    after = json.loads((tmp_path / 'tgw24' / 'tgw24.json').read_text(encoding='utf-8'))
+    assert 'legacy_listing_resolved' not in after
+
+
+def test_stale_offer_price_never_staged(stage, tmp_path):
+    """s45 (tgw202605052336026): draft.price is the ONLY price source. A bare
+    ebay_offer.price is un-reviewed leftovers from the disabled auto-pricer —
+    the old fallback published $40.99 the operator never saw."""
+    item = _ready_item()
+    item['draft_listing'].pop('price')
+    item['ebay_offer']['price'] = 40.99   # stale machine price
+    _write(tmp_path, 'tgw8s45', item)
+    with pytest.raises(RuntimeError, match='no price'):
+        _run(stage, 'tgw8s45')
+    assert stage._staged == []
+
+
+def test_operator_list_without_price_hard_fails_with_finding(stage, tmp_path, monkeypatch):
+    """Operator pressed List on an unpriced item: HardFailure (not silent
+    retry) + pipeline_error persisted so the editor renders 'needs price'
+    (C11)."""
+    patched = []
+    monkeypatch.setattr(ebay_stage, 'fence_patch_item',
+                        lambda cfg, sku, fields: patched.append((sku, fields)))
+    item = _ready_item()
+    item['draft_listing'].pop('price')
+    item['ebay_offer']['price'] = 40.99
+    _write(tmp_path, 'tgw9s45', item)
+    with pytest.raises(HardFailure, match='no price set in draft_listing'):
+        stage.handle({'payload_json': {'sku': 'tgw9s45', 'origin': 'operator'}})
+    assert stage._staged == []
+    assert patched and patched[0][1]['pipeline_error']['code'] == 'no_price_set'

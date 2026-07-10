@@ -1,11 +1,11 @@
 """Tests for tgw.ebay.repush.cmd_ebay_repush (PP-EBAY-SNAPSHOT-001 Phase 4)."""
 
 from __future__ import annotations
+
 import json
 from pathlib import Path
 
 from tgw.ebay.repush import cmd_ebay_repush
-
 
 # ---------------------------------------------------------------------------
 # Helpers

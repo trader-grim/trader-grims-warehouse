@@ -4,7 +4,41 @@ Trader Grim's Warehouse (TGW) is a resale business (eBay seller: DaveBuko-Webkul
 custom inventory management and eBay automation platform built in Python. Dave runs the business
 and directs all development. Read this file first, then read the master plan before doing anything.
 
+## PRIME DIRECTIVES — override everything below except direct instructions from Dave
+
+These are Dave's standing orders. They have been violated repeatedly by sessions that
+treated them as background prose. They are not background. Every design decision and
+every line of code is checked against these first:
+
+1. **The local dataset IS the business; eBay is a rented window.** Preserve the data
+   set — all of it, always. Never discard, overwrite, or decline to record data;
+   anything received from outside (eBay, AI models, lookups) is an asset the moment it
+   arrives, and persisting it is part of receiving it. Raw is permanent; derived is
+   recomputable. A feature that touches external data and grows the dataset by nothing
+   is a red flag — say so. Read `reference/TGW-Data-Charter.md` before any pipeline
+   work. (Invariants E5/E7; raw capture at `apis/ebay/client.py` — never bypass it.)
+2. **Act on alarms immediately.** A thermal alarm, health RED, crash loop, or quota 429
+   is YOUR incident the moment you see it: investigate to root cause in the same turn,
+   never acknowledge-and-continue. Check your own processes first.
+3. **Implement exactly what Dave specified.** If you substitute anything — a cadence, a
+   TTL, a default — you flag the deviation in your reply and get it approved. Silent
+   substitutions have caused real production outages twice.
+4. **"Tests pass" is not done. Done = verified live on real data**, with the observable
+   result (URL, log line, item JSON, eBay state) shown to Dave.
+5. **When Dave states a new standing requirement, encode it before proceeding**: add it
+   here, add an invariant + detector, and note which check enforces it. A requirement
+   that lives only in conversation will be lost — that is a proven failure mode of this
+   project, not a hypothetical.
+
 ## Start every session here
+
+**Step 0 — check thermal status before anything else:**
+
+```
+cat /opt/TGW/var/run/thermal.status 2>/dev/null || echo "NORMAL|0|0"
+```
+
+If the status is HOT, THROTTLE, or SHUTDOWN: **stop all disk-intensive operations** (no recursive grep/find on ItemData/ItemCatalog). At THROTTLE the watchdog has already stopped workers — do not restart them. At HOT, slow down and avoid large scans.
 
 **Step 1 — process any pending plan updates before reading the plan:**
 
@@ -49,6 +83,19 @@ Use `tgw plan status --pp PP-XXX-001` to drill into a single item.
 
 Memory index (cross-session context): `/home/tgw/.claude/projects/-opt-TGW-src-trader-grims-warehouse/memory/MEMORY.md`
 
+**Step 4 — register planned work before touching any code or config:**
+
+Before making any change this session, do both of these:
+
+1. Check existing todos: `sudo -u tgw tgw todo` — mark any relevant items `in_progress`.
+2. For new work: `sudo -u tgw tgw todo add "what you are about to do"` — then mark it `in_progress`.
+3. Write a recovery breadcrumb to `docs/TGW-Plan-Vault/inbox/INPROGRESS-<slug>.md` — one short
+   paragraph describing what you are working on and where you are. If the session is interrupted,
+   the next session startup sequence will read this and reconstruct your state.
+
+**This is mandatory, not optional.** A session that makes changes without a todo + inbox note
+loses recoverability. Run `/tgw-exit` when done or switching to a1131 — it finalises the note.
+
 ## Key paths
 
 | What | Path |
@@ -59,6 +106,7 @@ Memory index (cross-session context): `/home/tgw/.claude/projects/-opt-TGW-src-t
 | ItemData | `/opt/TGW/data/ItemData/<SKU>/<SKU>.json` + photos |
 | Catalog | `/opt/TGW/data/ItemCatalog/` |
 | Logs | `/opt/TGW/var/log/` |
+| Universal search index | `/opt/TGW/.recoll/` (config + xapiandb; not in git) — `recoll -q "..."` for cross-archive recovery/audit queries (PP-SEARCH-001 Phase 0) |
 | Plan vault | `docs/TGW-Plan-Vault/` (Syncthing-synced Obsidian) |
 | Plan inbox | `docs/TGW-Plan-Vault/inbox/` (drop .md files here) |
 | **Reference docs** | `docs/TGW-Plan-Vault/reference/` — read before working on relevant areas |
@@ -77,6 +125,7 @@ Plain Markdown; open in Obsidian for interactive mind map view where noted.
 | `TGW-Pipeline-Flow.md` | Worker logic, queue flow, enqueue decisions, debugging |
 | `TGW-Config-Reference.md` | Config keys, secrets, policy IDs, adding new config |
 | `TGW-Ollama-Prompts.md` | ai_identify + ebay_draft prompts, tuning levers |
+| `LLM-Providers-Quotas.md` | **Any LLM provider/model/quota change** — Google free tier is ~20/day/model PER PROJECT (not the published 1,000); OpenRouter primary, Google = operator emergency reserve; rediscovered 3× before being written down |
 | `PP-LOOKUP-001-APIs.md` | Product enrichment, barcode lookup, ai_identify augmentation |
 | `PP-PROMO-001-sale-event-design.md` | Sale event automation via Promotions API — design, API shape, operator checklist |
 | `CATEGORY-QUIRKS.md` | Per-category eBay quirks, fulfillment overrides, condition limits |
@@ -85,7 +134,8 @@ Plain Markdown; open in Obsidian for interactive mind map view where noted.
 | `eBay-Error-Codes.md` | eBay API error codes, HTTP status handling, dead-letter diagnosis |
 | `SHELL-AUDIT.md` | tgw.source / tgw-dev.source function audit — what to keep, wrap, or remove |
 | `HARDWARE-AI-INFERENCE.md` | Ollama model sizing, GPU upgrade planning, inference perf |
-| `invariants.md` | 29 system invariants (A1–E4) + enforcement status — check before any structural change |
+| `TGW-Data-Charter.md` | **Any pipeline/worker/eBay work** — the data axiom, asset inventory, rules for new work (Prime Directive 1) |
+| `invariants.md` | System invariants (A1–E7) + enforcement status — check before any structural change |
 | `TGW-Architecture-Services.md` | Service-by-service responsibility, deps, failure modes, critical invariants |
 | `TGW-Architecture-Overview.md` | System topology — how subsystems connect |
 | `TGW-NixOS-Reference.md` | NixOS bootstrap sequence, Syncthing topology, host inventory, troubleshooting |
@@ -112,9 +162,27 @@ Plain Markdown; open in Obsidian for interactive mind map view where noted.
 - **PostgreSQL is the work ledger** — database `state_machine`; workers use `QueueWorker` base
 - **Workers are thin** — ask tgw-api, never construct paths directly
 - **Output contract** — every API call returns `{ok, ...}`
-- **Secrets from `secrets_root`** — no hardcoded paths anywhere in `src/`
+- **Secrets from `secrets_root`** — no hardcoded paths anywhere in `src/`.
+  Single-value provider keys (LLM + lookup APIs) go through ONE facility
+  (Dave, 2026-07-09, todo #1252): `secrets_root/tgw.env` (`KEY=value`),
+  read via `tgw.apis.secrets.get_api_key(provider)` — never a new
+  per-provider `<name>-credentials.json` reader. See TGW-Config-Reference.md.
+- **Model routing is config, never code** (Dave, 2026-07-09): which
+  provider/model serves an LLM task lives ONLY in
+  `/opt/TGW/config/tgw-models.json` (`cfg['models']`). "Why change code just
+  to change models?" — `tgw.apis.llm.get_task_model()` has no hardcoded
+  per-task fallback and raises if a task isn't configured there. Changing a
+  task's provider/model is always a config edit.
 - **Catalog rebuild is always a job** — never call `build_all_catalogs()` inline
 - **SKU format** — `tgwYYYYMMDDHHMMSSmmm`
+- **A worker's skip/guard is a finding, not a log line (invariant C11)** — when
+  a worker refuses to act on a real recurring condition, persist the reason
+  durably on the item (queryable by `catalog-verify`), never just log it and
+  move on. Before trusting a static local flag to gate an action, re-verify
+  it live against the authoritative external source — local state can go
+  stale (Dave, s43: manual Seller Hub use during the Inventory-API migration
+  gap silently changed what was true on eBay's side without our records
+  updating; the same class "could happen again"). See invariants.md C11.
 
 ## Running workers (systemd)
 
@@ -148,12 +216,43 @@ Run as `tgw` user — source files are `rw-------`, secrets are `chmod 600`.
 ## Working rules for Claude
 
 - **Read the master plan first** — it has the full architecture context
+- **Before making any code or config changes** — log the work first:
+  1. Create a todo: `tgw todo add "what you're about to do"` (or `tgw todo` to check existing)
+  2. Drop an inbox note: write a brief `.md` file to `docs/TGW-Plan-Vault/inbox/` describing
+     what you're working on and where you are. Filename: `INPROGRESS-<slug>.md`. This lets
+     the startup sequence reconstruct context if the session is interrupted.
+  3. Mark the todo `in_progress` when you start, `done` when complete.
 - **Run `tgw health` after significant changes** to config, secrets, or workers
 - **Commit only when Dave asks** — he controls git history
 - **All commands as `tgw` user** — use `sudo -u tgw` or note this when suggesting commands
 - **Suggest, don't implement** for exploratory questions until Dave approves direction
 - **Workers need restart after source changes** — `systemctl restart tgw-worker@<queue>.service`
 - **Re-enqueue manually after dead_letter** — dead_letter jobs don't auto-retry; use `state_machine.enqueue_job()` with a fresh dedupe key
+- **Test environment + thermal-relief compute** — use `ssh a1131` for UI/integration testing
+  instead of a VM; it's a NixOS host on the LAN with a partial TGW install and 18 GB free RAM.
+  Run `/tgw-exit` before switching to it so the inbox note captures your current state.
+  **a1131 is shared Dave+Claude precisely for thermal relief** (tgw-prod runs hot): on hot
+  days run your own heavy checks — test suites, big greps, review sweeps — there via ssh.
+  Never pause pipeline workers for heat (worker load is only a thermal problem when our own
+  bugs loop). Read-only NFS views of tgw-prod's data+logs are mounted at
+  `/opt/TGW/mnt/tgw-prod/{data,log}` (ro is load-bearing — writes go through the fence).
+  Claude has its own account there: `ssh claude@192.168.60.101` (key-only, no sudo).
+  **If a1131 is asleep, wake it: `wakeonlan c8:2a:14:2a:a1:85`** (tool on tgw-prod, or
+  `nix shell nixpkgs#wakeonlan -c wakeonlan <mac>`). Do NOT run `systemctl suspend` on
+  a1131 yourself — iMac12,1 suspend is buggy (Dave); sleep is Dave's power management's
+  job, waking is yours. Caveat: a1131's repo checkout can be stale (#1082) — sync repo
+  state before trusting its test results.
+- **Run a code check at least once per work day, more if the session touches a lot of
+  files** (Dave, 2026-07-04): a full week of commits (2026-06-24 through 2026-07-02)
+  never went through `/code-review`/ultrareview because the diff grew too large to
+  review before anyone tried — and the first review that *did* run, on just one day's
+  diff, found 7 real confirmed bugs. Don't let unreviewed work accumulate: `/code-review`
+  (free, inline) for a quick same-day pass; `/code-review ultra` for a periodic cloud
+  pass while the diff is still small enough to clear its size guard. If a day's own diff
+  already feels large, review it immediately rather than waiting — it only grows harder
+  to review, not easier. See todo #1143 for the one-time backlog catch-up plan
+  (full-codebase cohesion audit, staged per-subsystem, run opportunistically against
+  spare usage).
 
 ## eBay API notes
 
@@ -169,8 +268,37 @@ Run as `tgw` user — source files are `rw-------`, secrets are `chmod 600`.
 See `docs/TGW-Plan-Vault/plan/TGW-Master-Plan.md` for the authoritative current state.
 See `docs/TGW-Plan-Vault/plan/handoff.md` for current risks and recommended next sequence.
 
-As of 2026-06-11 (session 26): 563 tests passing. Pipeline fully live.
-PP-DOCFLOW-001 P1+P2, PP-PYIPC-001, PP-BACKUP-001 Phase A, history-index complete.
-`ebay_sku_migrate` running (~8,350 live listings remain). `velocity_stats` nightly.
-PP-REPRICER-001 blocked on `buy.marketplace_insights` scope (eBay DS 8 questions pending).
-PP-PORTABLE-CATALOG-001 P2 unblocked (PP-PYIPC-001 done).
+**As of 2026-07-09:**
+
+- **Worker status (`systemctl list-units 'tgw-worker@*'`, verified live):**
+  active — `ai_identify`, `bundle_intake`, `ebay_draft`, `ebay_price`,
+  `ebay_publish`, `ebay_stage`, `ebay_upload`, `echo`, `multi_intake`,
+  `plan_render`, `token_refresh`. inactive/dead — `catalog_rebuild`,
+  `ebay_legacy_sync`, `ebay_price_reducer`, `ebay_sku_migrate`, `ebay_sync`,
+  `thumbnail_gen`, `velocity_stats`. **`pm_intake` stopped 2026-07-09** —
+  Dave: "going a different direction for pm intake" (a redesign, not a
+  crash); still shows `enabled` in systemd since the unit file is Nix-managed
+  (`/etc` read-only) — a flake change is needed to make the stop durable
+  across reboots, not done yet. NOTE: this list of 11 active workers
+  contradicts Dave's own recollection ("yesterday I had most services
+  stopped except main pipeline") — flagging the discrepancy rather than
+  silently reconciling it; worth Dave confirming which state is intended.
+  Plan: stabilize main pipeline + publish/update-existing-listings, demonstrate
+  data-maintenance + budget-conscious execution, THEN reactivate the rest one
+  at a time.
+- **LLM providers (2026-07-08, Dave):** paid direct-API keys added for
+  Google, DeepSeek, Anthropic; all three flipped to direct-primary
+  (`google_direct`/`deepseek_direct`/`anthropic_direct`), OpenRouter demoted
+  to automatic fallback-only. Routing lives ONLY in
+  `/opt/TGW/config/tgw-models.json` — see CLAUDE.md's Settled Architecture
+  entry and `reference/LLM-Providers-Quotas.md`.
+- **Secrets (2026-07-09, todo #1252):** single-value provider keys
+  (LLM + lookup APIs) consolidated from 9 separate ad-hoc
+  `<name>-credentials.json` readers into one facility —
+  `secrets_root/tgw.env` + `tgw.apis.secrets.get_api_key()`. Old JSON files
+  moved to `secrets_root/_migrated-to-tgw-env-20260709/` (not deleted).
+  Todo #1253 (planning, not started): extend to interactive shell use +
+  scoped/least-privilege key issuance per confined worker for Catio.
+- audit#1143 code-review follow-ups #1178/#1209 (condition-upgrade and
+  category-legacy-field bugs) fixed same session; a residual instance of the
+  #1178 bug class found and fixed in `best_condition()` too (#1252).

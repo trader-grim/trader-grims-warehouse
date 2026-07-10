@@ -28,7 +28,8 @@ import tgw.config as config
 import tgw.logging as tgw_logging
 from tgw.apis.ebay.client import ebay_get
 from tgw.apis.ebay.trading import get_my_ebay_selling, get_orders
-from tgw.items import atomic_write_json
+from tgw.apis.fence import ebay_write as fence_ebay_write
+from tgw.apis.fence import patch_item as fence_patch_item
 
 log = logging.getLogger(__name__)
 
@@ -238,7 +239,10 @@ def restore_archive_tombstone(
     item['_archive_tombstone'] = True
 
     json_path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(json_path, item, pretty=cfg.get('pretty', True))
+    # PP-FENCE-001 gap: needs upsert/overwrite semantics not yet in fence;
+    # migrate to fence.create_or_overwrite once that endpoint exists.
+    from tgw.items import atomic_write_json as _atomic_write_json
+    _atomic_write_json(json_path, item, pretty=cfg.get('pretty', True))
     log.info('restore_archive_tombstone: restored %s from %s', sku, zip_path.name)
     tgw_logging.log_event('archive_tombstone_restored', sku=sku)
     return json_path
@@ -302,19 +306,28 @@ def mark_item_sold(json_path: Path, order_id: str, buyer: str,
                    synced_at: str, cfg: Dict[str, Any],
                    dry_run: bool = False) -> bool:
     """
-    Mark an item sold in-place.  Idempotent — returns False if already sold.
-    Writes status=sold + ebay_sale block and logs the event.
+    Decrement inventory quantity by the sold quantity.
+    Marks status=sold + ebay_listing.status=Sold only when remaining qty reaches 0.
+    Idempotent — returns False if already sold or order already recorded.
     """
     item = json.loads(json_path.read_text(encoding='utf-8'))
     if item.get('status') == 'sold':
         return False
+    # Idempotency for multi-qty: skip if this order was already recorded
+    if item.get('ebay_sale', {}).get('order_id') == order_id:
+        return False
     sku = json_path.parent.name
+
+    current_qty = int(item.get('draft_listing', {}).get('quantity') or 1)
+    remaining = max(0, current_qty - quantity)
+
     if dry_run:
-        log.info('[dry-run] would mark %s sold order=%s price=$%s', sku, order_id, sale_price)
+        action = 'sold out' if remaining == 0 else f'qty {current_qty} → {remaining}'
+        log.info('[dry-run] %s sold order=%s price=$%s qty_sold=%d (%s)',
+                 sku, order_id, sale_price, quantity, action)
         return True
-    item['status'] = 'sold'
-    item.setdefault('ebay_listing', {})['status'] = 'Sold'
-    item['ebay_sale'] = {
+
+    ebay_sale = {
         'order_id':   order_id,
         'buyer':      buyer,
         'sale_price': sale_price,
@@ -322,10 +335,27 @@ def mark_item_sold(json_path: Path, order_id: str, buyer: str,
         'sale_date':  sale_date,
         'synced_at':  synced_at,
     }
-    atomic_write_json(json_path, item, pretty=cfg.get('pretty', True))
-    log.info('ebay_pull: sold %s order=%s price=$%s', sku, order_id, sale_price)
-    tgw_logging.log_event('ebay_item_sold', sku=sku,
-                          order_id=order_id, sale_price=sale_price)
+
+    if remaining == 0:
+        fence_ebay_write(cfg, sku, ebay_listing={'status': 'Sold'})
+        fence_patch_item(cfg, sku, {
+            'status': 'sold',
+            'ebay_sale': ebay_sale,
+            'draft_listing': {'quantity': 0},
+        })
+        log.info('ebay_pull: sold out %s order=%s price=$%s', sku, order_id, sale_price)
+        tgw_logging.log_event('ebay_item_sold', sku=sku,
+                              order_id=order_id, sale_price=sale_price, sold_out=True)
+    else:
+        fence_patch_item(cfg, sku, {
+            'ebay_sale': ebay_sale,
+            'draft_listing': {'quantity': remaining},
+        })
+        log.info('ebay_pull: partial sale %s order=%s price=$%s qty %d→%d',
+                 sku, order_id, sale_price, current_qty, remaining)
+        tgw_logging.log_event('ebay_item_sold', sku=sku,
+                              order_id=order_id, sale_price=sale_price, sold_out=False,
+                              remaining_qty=remaining)
     return True
 
 
@@ -370,6 +400,87 @@ def sync_active_listings(cfg: Dict[str, Any], itemdata_root: Path,
             stats['errors'] += 1
 
     return stats
+
+
+_MOTORS_MARKETPLACE = 'EBAY_MOTORS'
+
+
+def check_legacy_duplicate_listing(cfg: Dict[str, Any], sku: str,
+                                   local_listing_id: str) -> Dict[str, Any]:
+    """
+    PP-PHOTOSYNC-001 P10 (session 43) — verify a legacy-flagged SKU is NOT
+    actually two live listings on eBay (the old classic Item# plus a separate
+    Inventory-API listing) before ever marking it legacy_listing_resolved.
+
+    Dave, s43: a month of gaps in our own inventory tooling meant occasionally
+    using Seller Hub directly — "a known consequence of my actions... it
+    could happen again and needs an auto repair path." This is that path:
+    GET the live Inventory API offer(s) for the SKU and compare listing IDs
+    against the locally-recorded (legacy) listing_id. Same ID, one offer =
+    one listing, dual-manageable via both APIs (safe to resolve). A mismatch,
+    no published offer, or MULTIPLE published offers across marketplaces
+    means a genuine duplicate-listing risk and must NEVER be auto-resolved.
+
+    eBay Motors extension (same session, live-found): a real rejection —
+    "Best Offer is not permitted with a SKU selling on multiple eBay
+    marketplaces" — surfaced that this SKU's offer carries
+    marketplaceId=EBAY_MOTORS. PP-EBAY-MOTORS-001 (urgent, unscoped) tracks
+    the larger gap (no marketplaceId stored anywhere locally, Trading API
+    hardcoded to SiteID=0/EBAY_US); this function is the immediate,
+    marketplace-AWARE piece of it — it surfaces marketplace_id and flags
+    cross-marketplace duplication explicitly, rather than only checking a
+    single listingId match.
+
+    Returns {'ok': True, 'duplicate': bool, 'match': bool,
+    'inventory_listing_id': str|None, 'inventory_status': str|None,
+    'marketplace_id': str|None, 'is_ebay_motors': bool,
+    'other_marketplaces': list[str]} — 'ok': False on a fetch error (treat
+    as unresolved, do not proceed).
+    """
+    try:
+        resp = ebay_get(cfg, '/sell/inventory/v1/offer', params={'sku': sku})
+    except Exception as exc:
+        return {'ok': False, 'error': str(exc)[:300]}
+
+    offers = resp.get('offers') or []
+    published = [o for o in offers if o.get('status') == 'PUBLISHED']
+    if not published:
+        return {'ok': True, 'duplicate': True, 'match': False,
+                'inventory_listing_id': None, 'inventory_status': None,
+                'marketplace_id': None, 'is_ebay_motors': False,
+                'other_marketplaces': [],
+                'reason': 'no published Inventory API offer found for this SKU'}
+
+    # Multiple published offers for the same SKU = live on more than one
+    # marketplace simultaneously. That IS the duplicate-listing risk, full
+    # stop — never treat as safe even if one of them matches local_listing_id.
+    marketplaces = [str(o.get('marketplaceId') or '') for o in published]
+    if len(published) > 1:
+        return {'ok': True, 'duplicate': True, 'match': False,
+                'inventory_listing_id': None, 'inventory_status': None,
+                'marketplace_id': marketplaces[0] if marketplaces else None,
+                'is_ebay_motors': _MOTORS_MARKETPLACE in marketplaces,
+                'other_marketplaces': marketplaces,
+                'reason': f'SKU has {len(published)} published offers across '
+                          f'marketplaces {marketplaces} — cross-marketplace duplicate'}
+
+    offer = published[0]
+    inv_listing = offer.get('listing') or {}
+    inv_listing_id = str(inv_listing.get('listingId') or '')
+    inv_status = inv_listing.get('listingStatus')
+    marketplace_id = str(offer.get('marketplaceId') or '') or None
+    match = bool(inv_listing_id) and inv_listing_id == str(local_listing_id)
+
+    return {
+        'ok': True,
+        'duplicate': not match,
+        'match': match,
+        'inventory_listing_id': inv_listing_id,
+        'inventory_status': inv_status,
+        'marketplace_id': marketplace_id,
+        'is_ebay_motors': marketplace_id == _MOTORS_MARKETPLACE,
+        'other_marketplaces': [],
+    }
 
 
 def _apply_active_listing(listing: Dict[str, Any], itemdata_root: Path,
@@ -419,7 +530,7 @@ def _apply_active_listing(listing: Dict[str, Any], itemdata_root: Path,
         return
 
     item['ebay_listing'] = new_listing
-    atomic_write_json(json_path, item, pretty=cfg.get('pretty', True))
+    fence_ebay_write(cfg, sku, ebay_listing=new_listing)
     stats['updated'] += 1
     log.debug('ebay_pull: synced %s listing_id=%s price=$%s',
               sku, listing['listing_id'], listing['live_price'])
@@ -684,6 +795,92 @@ def backfill_draft_from_live(item: Dict[str, Any], cfg: Dict[str, Any]) -> bool:
     return True
 
 
+def backfill_canonical_from_live(item: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Promote eBay live data into top-level canonical inventory fields.
+
+    Only fills fields that are currently empty/missing. Never overwrites
+    existing operator-set values. Returns a dict of field → new_value
+    for every field that was changed.
+
+    Sources in priority order:
+      1. ebay_live.inventory_item (freshest eBay data)
+      2. draft_listing (already normalised from ebay_live)
+      3. Legacy top-level fields with different names (e.g. weight → weight_oz)
+    """
+    changed: Dict[str, str] = {}
+
+    live   = item.get('ebay_live') or {}
+    inv    = live.get('inventory_item') or {}
+    product = inv.get('product') or {}
+    aspects = product.get('aspects') or {}
+    dl     = item.get('draft_listing') or {}
+
+    def _set(field: str, value: Any) -> None:
+        """Set field only if currently empty."""
+        if value and not item.get(field):
+            item[field] = value
+            changed[field] = value
+
+    def _overwrite(field: str, value: Any) -> None:
+        """Set field unconditionally (for cases where current value is known-bad)."""
+        if value and item.get(field) != value:
+            item[field] = value
+            changed[field] = value
+
+    # Title — use eBay title if our title is missing or just repeats the SKU
+    _title = product.get('title') or dl.get('title') or ''
+    if _title and (not item.get('title') or item.get('title') == item.get('sku')):
+        _overwrite('title', _title)
+
+    # Description — promote the real eBay description.
+    # Overwrite if empty OR if it's just a copy of the title (placeholder).
+    _desc = dl.get('description') or ''
+    _current_desc = str(item.get('description') or '').strip()
+    _current_title = str(item.get('title') or _title).strip()
+    if _desc and (not _current_desc or _current_desc == _current_title):
+        _overwrite('description', _desc)
+
+    # Condition — prefer human enum string over legacy raw conditionId integer.
+    _cond_live = inv.get('condition', '')  # e.g. USED_EXCELLENT
+    if _cond_live:
+        _current_cond = str(item.get('condition') or '').strip()
+        if not _current_cond or _current_cond.isdigit():
+            _overwrite('condition', _cond_live)
+
+    # Brand from eBay aspects
+    _brand = (aspects.get('Brand') or aspects.get('brand') or [''])[0]
+    _set('brand', _brand)
+
+    # Model from eBay aspects
+    _model = (aspects.get('Model') or aspects.get('model') or [''])[0]
+    _set('model', _model)
+
+    # MPN / model number
+    _mpn = (aspects.get('MPN') or aspects.get('mpn') or [''])[0]
+    _set('model_number', _mpn)
+
+    # Country of manufacture
+    _coo = (aspects.get('Country of Manufacture') or
+            aspects.get('Country of Origin') or [''])[0]
+    _set('country_of_manufacture', _coo)
+
+    # UPC from product or draft
+    _upc = product.get('upc') or dl.get('upc')
+    if isinstance(_upc, list):
+        _upc = _upc[0] if _upc else ''
+    _set('upc', _upc)
+
+    # weight_oz — promote from legacy 'weight' field (Magento export used oz)
+    if not item.get('weight_oz') and item.get('weight'):
+        try:
+            _set('weight_oz', float(item['weight']))
+        except (TypeError, ValueError):
+            pass
+
+    return changed
+
+
 def sync_inventory_api(
     cfg: Dict[str, Any],
     itemdata_root: Path,
@@ -752,13 +949,16 @@ def sync_inventory_api(
             if rate_limit_sleep > 0:
                 time.sleep(rate_limit_sleep)
 
-        apply_ebay_live(item, inventory_item=inv_item, offer=offer, synced_at=synced_at)
+        live_changed = apply_ebay_live(item, inventory_item=inv_item, offer=offer, synced_at=synced_at)
 
+        draft_changed = False
         if not skip_draft:
-            if backfill_draft_from_live(item, cfg):
+            draft_changed = backfill_draft_from_live(item, cfg)
+            if draft_changed:
                 stats['drafts_written'] += 1
 
-        # Also keep ebay_listing in sync with what we now know
+        # Keep ebay_listing in sync with what we now know from the offer
+        ebay_listing_update = None
         if offer:
             listing_info = offer.get('listing', {})
             if listing_info.get('listingId'):
@@ -776,8 +976,15 @@ def sync_inventory_api(
                 ebay_listing['api']       = 'inventory'
                 ebay_listing['synced_at'] = synced_at
                 item['ebay_listing'] = ebay_listing
+                ebay_listing_update = ebay_listing
 
-        atomic_write_json(jf, item, pretty=cfg.get('pretty', True))
+        # Write changed blocks through fence
+        if live_changed or ebay_listing_update is not None:
+            fence_ebay_write(cfg, sku,
+                             ebay_live=item.get('ebay_live') if live_changed else None,
+                             ebay_listing=ebay_listing_update)
+        if draft_changed:
+            fence_patch_item(cfg, sku, {'draft_listing': item.get('draft_listing')})
 
         if stats['inventory_fetched'] % 500 == 0:
             log.info('ebay_pull: progress %d inventory items processed, %d matched, %d drafts',
