@@ -239,7 +239,11 @@ class AIIdentifyWorker(QueueWorker):
             try:
                 result = extract_json(raw)
             except Exception as exc:
-                raise HardFailure(f"ai_identify: model returned non-JSON for {sku}: {raw[:200]}") from exc
+                # audit#1143 #1269: 200 chars was too short to tell whether a
+                # failure was genuinely malformed or just missing its closing
+                # ```fence beyond the cutoff -- same fix as ebay_draft.py's
+                # #1249 code-review follow-up.
+                raise HardFailure(f"ai_identify: model returned non-JSON for {sku}: {raw[:2000]}") from exc
 
             if img_hash and use_cache:
                 store_hash(img_hash, sku, "ai_identify", result)
