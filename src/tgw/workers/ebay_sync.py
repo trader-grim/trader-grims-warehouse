@@ -424,6 +424,24 @@ class EbaySyncWorker(QueueWorker):
             item["ebay_offer"] = ebay_offer
             changed = True
 
+        # Mirror the LIVE marketplaceId (PP-EBAY-MOTORS-001, todo #1214
+        # follow-up, Dave 2026-07-09: "make sure it is handled if the item
+        # is edited and the category changed"). This is the ONLY point that
+        # re-derives marketplace_id from the live offer on every sync — both
+        # the first time ebay_sync ever sees a newly staged item, and every
+        # time afterward (including the ebay_sync job apply_revision()
+        # enqueues right after a live category-change PUT) — so a category
+        # edit that moves a SKU onto/off eBay Motors is never stuck showing
+        # a stale value. Never invented locally; always read from eBay.
+        live_marketplace_id = str(offer.get("marketplaceId") or "")
+        top_level_updates: Dict[str, Any] = {}
+        if live_marketplace_id and item.get("marketplace_id") != live_marketplace_id:
+            top_level_updates["marketplace_id"] = live_marketplace_id
+        if top_level_updates:
+            item.update(top_level_updates)
+            fence_patch_item(self.config, sku, top_level_updates)
+            changed = True
+
         # PP-EBAY-MIRROR-001 P2: propagate cached ebay_live imageUrls → ebay_offer.photo_urls
         live_block = item.get("ebay_live") or {}
         live_image_urls = live_block.get("inventory_item", {}).get("product", {}).get("imageUrls")
