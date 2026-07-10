@@ -806,10 +806,13 @@ class EbaySkuMigrateWorker(QueueWorker):
 
         tgw_logging.log_event('worker_stop', queue=QUEUE_NAME, owner=self.owner)
 
+    def _interval_hours(self) -> float:
+        return float(self.config.get('ebay_sku_migrate', {}).get('interval_hours', 1))
+
     def handle(self, job: Dict[str, Any]) -> None:
         migrate_cfg = self.config.get('ebay_sku_migrate', {})
         batch_size  = int(migrate_cfg.get('batch_size', 5))
-        interval_h  = float(migrate_cfg.get('interval_hours', 1))
+        interval_h  = self._interval_hours()
 
         log.info('ebay_sku_migrate: scanning for batch (size=%d)', batch_size)
         tgw_logging.log_event('ebay_sku_migrate_start', batch_size=batch_size)
@@ -912,13 +915,13 @@ class EbaySkuMigrateWorker(QueueWorker):
     def _on_terminal_failure(self, job: Dict[str, Any], error_text: str) -> None:
         # audit#1143 #1234 follow-up (todo #1242): a dead-lettered batch must
         # not end the chain — migration would silently stall forever. handle()
-        # computes interval_h from config before the batch loop; recompute the
-        # same way here since a terminal failure means handle() never reached
-        # its own self._reschedule(interval_h) call.
-        migrate_cfg = self.config.get('ebay_sku_migrate', {})
-        interval_h = float(migrate_cfg.get('interval_hours', 1))
+        # computes interval_h before the batch loop; recompute the same way
+        # here since a terminal failure means handle() never reached its own
+        # self._reschedule(interval_h) call. code-review follow-up (#1246):
+        # both call sites now share _interval_hours() instead of duplicating
+        # the config lookup + default, so they can't drift apart.
         log.warning('ebay_sku_migrate dead-lettered; rescheduling next batch anyway')
-        self._reschedule(interval_h)
+        self._reschedule(self._interval_hours())
 
     def _reschedule(self, interval_hours: float) -> None:
         next_run = time.time() + interval_hours * 3600

@@ -40,6 +40,40 @@ IMAGE_SUFFIXES = {'.jpg', '.jpeg', '.png', '.gif', '.webp',
 # App-generated artifacts that are not item photos
 _SKIP_NAMES    = {'film.jpg', 'singleShot.jpg', 'exportGif.gif'}
 
+# audit#1143 #1246 (deferred #1245 finding): dedup registry for the SKU-
+# collision notify() below. Child SKUs are derived deterministically from
+# base_sku (_child_skus above), so a batch re-drop of the identical zip
+# reproduces the exact same collision on the exact same SKU every time —
+# without this, notify() would spam the same external channel once per
+# re-drop instead of once ever per SKU.
+_COLLISION_NOTIFY_REGISTRY = Path('/opt/TGW/var/multi-intake-collision-notified.json')
+
+
+def _already_notified_collision(sku: str) -> bool:
+    try:
+        if not _COLLISION_NOTIFY_REGISTRY.exists():
+            return False
+        registry = json.loads(_COLLISION_NOTIFY_REGISTRY.read_text(encoding='utf-8'))
+        return sku in registry
+    except (OSError, ValueError) as exc:
+        log.warning('multi_intake: collision-notify registry unreadable (%s) — notifying anyway', exc)
+        return False
+
+
+def _record_notified_collision(sku: str, base_sku: str) -> None:
+    try:
+        registry: Dict[str, Any] = {}
+        if _COLLISION_NOTIFY_REGISTRY.exists():
+            registry = json.loads(_COLLISION_NOTIFY_REGISTRY.read_text(encoding='utf-8'))
+        from datetime import datetime, timezone
+        registry[sku] = {'base_sku': base_sku, 'notified_at': datetime.now(timezone.utc).isoformat()}
+        _COLLISION_NOTIFY_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _COLLISION_NOTIFY_REGISTRY.with_suffix('.tmp')
+        tmp.write_text(json.dumps(registry, indent=2, ensure_ascii=False), encoding='utf-8')
+        tmp.replace(_COLLISION_NOTIFY_REGISTRY)
+    except Exception as exc:
+        log.warning('multi_intake: could not update collision-notify registry: %s', exc)
+
 
 def _is_timestamp_dir(name: str) -> bool:
     """True for YYYYMMDDHHMMSS subdir names (14 digits)."""
@@ -181,13 +215,26 @@ class MultiIntakeWorker(QueueWorker):
                     tgw_logging.log_event(
                         'multi_intake_sku_collision', sku=sku, base_sku=base_sku,
                     )
-                    from tgw.notify import notify
-                    notify(
-                        'multi_intake SKU collision',
-                        f'Derived child {sku} (base {base_sku}) already has an '
-                        f'ItemData record — verify it is not a mistaken duplicate.',
-                        level='warning',
-                    )
+                    # audit#1143 #1246 (deferred #1245 finding): the durable
+                    # per-item finding (log line + log_event above) always
+                    # records every hit, but the external notify() channel
+                    # is deduped per-SKU — a batch re-drop of the identical
+                    # zip reproduces the exact same collision on the exact
+                    # same SKU every time (_child_skus is deterministic), so
+                    # without this the same channel gets spammed once per
+                    # re-drop instead of once ever.
+                    if not _already_notified_collision(sku):
+                        from tgw.notify import notify
+                        notify(
+                            'multi_intake SKU collision',
+                            f'Derived child {sku} (base {base_sku}) already has an '
+                            f'ItemData record — leaving it untouched. Verify it is not '
+                            f'a mistaken duplicate; if it turns out to be one, run an '
+                            f'operator-forced ebay_stage duplicate-check pass on {sku} '
+                            f'before publishing/updating it.',
+                            level='warning',
+                        )
+                        _record_notified_collision(sku, base_sku)
 
                 children.append(sku)
                 log.info('child bundle %s: %d photos (from zip subdir %s)',

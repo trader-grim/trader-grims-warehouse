@@ -248,6 +248,7 @@ def mark_failed(job_id: str, lease_owner: str, error: str) -> str:
                     """,
                     (nb, error[:2000], job_id, lease_owner),
                 )
+                transitioned = cur.rowcount > 0
             else:
                 cur.execute(
                     """
@@ -263,14 +264,43 @@ def mark_failed(job_id: str, lease_owner: str, error: str) -> str:
                     """,
                     (error[:2000], job_id, lease_owner),
                 )
-                # Immediately promote failed → dead_letter
-                cur.execute(
-                    """
-                    UPDATE queue_jobs SET state = 'dead_letter'
-                     WHERE job_id = %s AND state = 'failed'
-                    """,
-                    (job_id,),
+                # audit#1143 #1246: only promote failed → dead_letter if the
+                # running → failed UPDATE above actually matched this job's
+                # row under our lease — otherwise (lease race) some other
+                # owner's row may legitimately already be sitting in
+                # 'failed' for a reason that has nothing to do with us, and
+                # this promotion would wrongly claim/fast-forward it.
+                transitioned = cur.rowcount > 0
+                if transitioned:
+                    cur.execute(
+                        """
+                        UPDATE queue_jobs SET state = 'dead_letter'
+                         WHERE job_id = %s AND state = 'failed'
+                        """,
+                        (job_id,),
+                    )
+
+            if not transitioned:
+                # audit#1143 #1246 (deferred #1245 finding): the lease-guarded
+                # UPDATE above matched zero rows — this caller lost a lease
+                # race (e.g. recover_expired_jobs() already reclaimed the
+                # lease between the SELECT above and this UPDATE) and did NOT
+                # actually perform the transition it's about to claim.
+                # Re-query the row's real current state instead of blindly
+                # returning new_state, so the caller's terminal-failure
+                # handling (alerting / restarting a self-rescheduling chain)
+                # reflects what's actually true in the DB.
+                log.warning(
+                    'mark_failed: lease race for job %s (lease_owner=%s) — '
+                    '0 rows matched state=running; re-checking actual state',
+                    job_id, lease_owner,
                 )
+                cur.execute('SELECT state FROM queue_jobs WHERE job_id = %s', (job_id,))
+                actual = cur.fetchone()
+                if actual is None:
+                    return 'dead_letter'
+                actual_state = actual['state']
+                return 'dead_letter' if actual_state in ('failed', 'dead_letter') else 'retry_wait'
 
             return 'retry_wait' if new_state == 'retry_wait' else 'dead_letter'
 
