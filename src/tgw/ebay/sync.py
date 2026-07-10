@@ -497,6 +497,25 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
     if draft.get('return_policy_id'):
         policies = dict(policies)
         policies['returnPolicyId'] = str(draft['return_policy_id'])
+
+    # PP-OFFER-001 follow-up (todo #1256): offer.listingPolicies.bestOfferTerms
+    # is a per-item Inventory API field, not an account default — only send it
+    # when the operator has made an explicit choice (draft_listing.best_offer_enabled
+    # is not None); leaving it unset means "don't touch, let eBay use whatever
+    # the category default is" rather than silently forcing it off.
+    if draft.get('best_offer_enabled') is not None:
+        policies = dict(policies)
+        best_offer_terms: Dict[str, Any] = {
+            'bestOfferEnabled': bool(draft['best_offer_enabled']),
+        }
+        auto_accept = draft.get('best_offer_auto_accept_price')
+        if auto_accept not in (None, ''):
+            best_offer_terms['autoAcceptPrice'] = {'currency': 'USD', 'value': f'{float(auto_accept):.2f}'}
+        auto_decline = draft.get('best_offer_auto_decline_price')
+        if auto_decline not in (None, ''):
+            best_offer_terms['autoDeclinePrice'] = {'currency': 'USD', 'value': f'{float(auto_decline):.2f}'}
+        policies['bestOfferTerms'] = best_offer_terms
+
     location_key = _get_merchant_location(cfg)
     qty          = draft.get('quantity', 1)
 

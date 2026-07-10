@@ -4185,3 +4185,35 @@ def test_item_detail_store_category_dropdowns_populate_and_select(env):
     # primary dropdown selects 111, secondary selects 222
     assert 'value="111" data-name="Books &amp; Media" selected' in text
     assert 'value="222" data-name="Electronics" selected' in text
+
+
+def test_item_detail_best_offer_control_reflects_state(env):
+    """todo #1256: per-item Best Offer control (offer.listingPolicies.
+    bestOfferTerms) -- checkbox reflects draft_listing.best_offer_enabled,
+    auto-accept/decline prices prefill from draft_listing."""
+    sku = "tgw20260701000000078"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Best Offer Test Item",
+        "draft_listing": {
+            "best_offer_enabled": True,
+            "best_offer_auto_accept_price": 45.0,
+            "best_offer_auto_decline_price": 20,
+        },
+    })
+    _login(env["client"])
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    text = r.text
+    assert 'id="dl-best-offer-enabled" checked' in text
+    assert 'id="dl-best-offer-accept" placeholder="auto-accept $" value="45.0"' in text
+    assert 'id="dl-best-offer-decline" placeholder="auto-decline $" value="20"' in text
+
+
+def test_item_detail_best_offer_control_unchecked_when_unset(env):
+    sku = "tgw20260701000000079"
+    _write_item(env["itemdata_root"], sku, {"sku": sku, "title": "No Best Offer Item"})
+    _login(env["client"])
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    assert 'id="dl-best-offer-enabled" checked' not in r.text

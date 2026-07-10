@@ -4964,6 +4964,16 @@ def _render_item_detail_html(
     _dl_cat_id_v = h(str((dl or {}).get("category_id") or ""))
     _dl_ship_val = str((dl or {}).get("shipping_profile") or (dl or {}).get("fulfillment_policy_id") or "")
     _dl_return_val = str((dl or {}).get("return_policy_id") or "")
+    # PP-OFFER-001 follow-up (todo #1256): Best Offer is a per-item Inventory
+    # API field (offer.listingPolicies.bestOfferTerms), not an account
+    # default -- previously not exposed anywhere in TGW, so whatever a
+    # listing showed was either an eBay category default or an untracked
+    # manual Seller Hub change (invariant C11 drift class).
+    _dl_bo_checked = " checked" if (dl or {}).get("best_offer_enabled") else ""
+    _dl_bo_accept = (dl or {}).get("best_offer_auto_accept_price")
+    _dl_bo_decline = (dl or {}).get("best_offer_auto_decline_price")
+    _dl_bo_accept_val = h(str(_dl_bo_accept)) if _dl_bo_accept not in (None, "") else ""
+    _dl_bo_decline_val = h(str(_dl_bo_decline)) if _dl_bo_decline not in (None, "") else ""
     _dl_store_cat_id = str((dl or {}).get("store_category_id") or "")
     if not _dl_store_cat_id:
         _cg_key = item.get("category_group", "")
@@ -5384,6 +5394,20 @@ def _render_item_detail_html(
         '<select id="dl-store-cat2-select" '
         'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px;font-size:.88em">' + _store_cat2_opts_html + "</select>"
         "</span></div>"
+        # Best Offer (todo #1256) — per-item Inventory API field, not an
+        # account default; enabling/disabling here is now authoritative.
+        f'<div class="frow" id="dl-best-offer">'
+        f'<span class="fn">Best Offer</span>'
+        f'<span class="fv">'
+        f'<label style="display:flex;align-items:center;gap:5px;font-size:.85em;cursor:pointer">'
+        f'<input type="checkbox" id="dl-best-offer-enabled"{_dl_bo_checked}>enabled</label>'
+        f'<input type="text" id="dl-best-offer-accept" placeholder="auto-accept $" value="{_dl_bo_accept_val}" '
+        f'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px;'
+        f'font-size:.85em;width:110px;margin-left:8px">'
+        f'<input type="text" id="dl-best-offer-decline" placeholder="auto-decline $" value="{_dl_bo_decline_val}" '
+        f'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px;'
+        f'font-size:.85em;width:110px;margin-left:6px">'
+        f"</span></div>"
         # Condition
         '<div class="frow" id="dl-condition">'
         '<span class="fn">Condition</span>'
@@ -5866,6 +5890,12 @@ def _render_item_detail_html(
         f"  }}"
         f"  var scat2=document.getElementById('dl-store-cat2-select');"
         f"  if(scat2)dl.secondary_store_category_id=scat2.value||null;"
+        f"  var boChk=document.getElementById('dl-best-offer-enabled');"
+        f"  if(boChk)dl.best_offer_enabled=boChk.checked;"
+        f"  var boAcc=document.getElementById('dl-best-offer-accept');"
+        f"  if(boAcc)dl.best_offer_auto_accept_price=boAcc.value!==''?(parseFloat(boAcc.value)||null):null;"
+        f"  var boDec=document.getElementById('dl-best-offer-decline');"
+        f"  if(boDec)dl.best_offer_auto_decline_price=boDec.value!==''?(parseFloat(boDec.value)||null):null;"
         f"  var cat2id=document.getElementById('dl-cat2-id');"
         f"  if(cat2id)dl.secondary_category_id=cat2id.value||null;"
         f"  var aspInputs=document.querySelectorAll('#aspects-form [data-aspect]');"
