@@ -199,6 +199,68 @@ findings, process whenever Dave asks — not urgent). PR #8 is closed, no
 longer a carry-forward. Same carry-forwards as Session 47 above (Hermes
 restart, a1131 push, #1219/#1228, #1230 review) are still open.
 
+## Session 2026-07-10 (workflow code review · full-codebase cohesion audit ·
+live title-length + Save-Draft UI incident)
+
+- **Workflow-tool code review** (89cf6d7..5c6223e): 1 confirmed finding
+  (`sold-order-history-gaps.jsonl` written but never surfaced anywhere) —
+  todo #1271.
+- **Full-codebase cohesion audit** ("the big workflow review like #1143"):
+  6 subsystems x 3 dimensions, adversarial-verified. 54 candidates, 49
+  confirmed, deduped to 45 todos (**#1273-#1317**). First run hit the
+  session's rate limit mid-flight (80/126 agents failed); resumed cleanly
+  post-reset via cached-agent replay — no work lost. Biggest pattern: the
+  tgw-api fence's own write helpers (`archive_root`, atomic-write, path
+  construction) are bypassed far more widely than known (`api.py`,
+  `revision.py`, `scrub.py`, `photo_history_recovery.py`, `http_server.py`,
+  `mcp_server.py`) — filed as **PP-FENCE-002** proposal in the inbox
+  ("don't climb the fence, use the gate"), proposing new invariants A9
+  (path-input validation) and F1 (untrusted content never reaches a live
+  external write unescaped). Not yet incorporated into the master plan —
+  queued for the next planning session.
+- **Proposed planning-session agenda drafted**: `inbox/AGENDA-planning-session-2026-07-10.md`,
+  7 sections (alarms, cohesion-audit triage, autosave/pre-flight-validation
+  discussion, open PP items, carried-over 07-04 discussion items, future
+  ideas, housekeeping).
+- **Live incident, found and fixed same session** (todos #1318/#1319/#1320):
+  investigating "what does Retry do" on two dead-lettered items surfaced a
+  real UX bug — the standalone "Save Draft" button had been removed by
+  `a7e7439`/PP-ACTIONCONSOLE-001, leaving NO way to save a draft edit while
+  an item shows a pipeline error and isn't live (only "Retry" renders there,
+  and it's scroll-only — does nothing). Restored the button. Root-caused a
+  related bug while there: `seo/title.py::enhance_title()` only flagged
+  oversized titles instead of enforcing eBay's 80-char cap, so 3 real items
+  dead-lettered after burning an eBay API call for something knowable
+  locally. Fixed with a pre-flight guard in `ebay_stage.py` (same shape as
+  the existing `no_price_set` guard) — but does NOT auto-truncate: Dave
+  redirected mid-fix to match eBay's own bulk-CSV-editor UX (preserve the
+  full oversized title, let the operator trim by double-click-deleting
+  words). Added a "Trim Title" action-line affordance + live red-border
+  highlighting on the problem field. All verified live (266 tests passed,
+  both known-affected items' actual rendered pages confirmed post-restart).
+  See memory `project-title-length-guard-2026-07-10.md`.
+- **Alarm found and flagged (not fixed):** `tgw-cloud-sync.service` failed
+  6x since 07-05 with Google Drive "Queries per minute" quota 403s; the
+  eBay-mirror sync workers (`ebay_sync`, `ebay_legacy_sync`, `catalog_rebuild`)
+  have been inactive since 07-08, so local eBay-mirror state is ~2 days
+  stale with a real backlog (117 queued jobs). Decision needed at planning
+  session. **Note:** a stray, unrecognized `<task-notification>` referenced
+  a "Start the cloud-sync service" background command near session end that
+  I never issued — flagged in the inbox note, re-verify actual service state
+  from scratch next session rather than trusting either that notification
+  or this summary.
+- **No active pipeline incidents**: verified live — 0 jobs leased/running,
+  0 dead-letter transitions in the last 24h; the large dead_letter total
+  (2942, mostly `ebay_draft:2771`) is historical debt from the already-
+  resolved session-45 402 pile-drain, not current failures.
+
+**Open into next session:** run the planning session against
+`AGENDA-planning-session-2026-07-10.md`; decide the eBay-mirror-sync
+reactivation and cloud-sync quota fix; triage the 45 cohesion-audit todos;
+re-verify `tgw-cloud-sync.service`'s real state before trusting the flagged
+notification either way; `handoff.md` itself is over its stated 150-line cap
+and due for a Session-47 archival rotation (flagged, not done this session).
+
 ---
 
 Older sessions: `archive/SESSION-LOG.md`.

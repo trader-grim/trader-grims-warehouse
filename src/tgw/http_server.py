@@ -4955,6 +4955,7 @@ def _render_item_detail_html(
     )
 
     # ── eBay Draft editor section (Phase 1B) ───────────────────────────────────
+    _dl_title_len = len((dl or {}).get("title") or "")
     _dl_title_val = h((dl or {}).get("title") or "")
     _dl_price_val = str((dl or {}).get("price") or "")
     _dl_cond_val = h((dl or {}).get("condition_enum") or (dl or {}).get("condition") or "")
@@ -5156,6 +5157,17 @@ def _render_item_detail_html(
         j.get("state") == "dead_letter" and _after_baseline(j) for j in jobs
     )
     _needs_price = bool(_pe_norm and _pe_norm.get("code") == "no_price_set")
+    # Also catches pre-existing findings written by the OLD path (an actual
+    # eBay API rejection, code='ebay_rejected', before the ebay_stage.py
+    # pre-flight guard existed) whose detail is specifically the 80-char
+    # title rejection — so already-dead-lettered items (e.g. tgw202605051752520)
+    # get the same "Trim Title" affordance without needing to be re-staged
+    # first just to get a fresh finding in the new shape.
+    _needs_title_trim = bool(_pe_norm and (
+        _pe_norm.get("code") == "title_too_long"
+        or (_pe_norm.get("code") == "ebay_rejected"
+            and "80 characters" in (_pe_norm.get("detail") or ""))
+    ))
     # Draft-vs-live divergence: does the draft differ from what eBay holds?
     _live_inv = (_ebay_live_raw.get("inventory_item") or {}) if _ebay_live_raw else {}
     _live_offer_raw = (_ebay_live_raw.get("offer") or {}) if _ebay_live_raw else {}
@@ -5211,6 +5223,22 @@ def _render_item_detail_html(
             title=("Live on eBay, but the draft has no operator-set price — "
                    "set one, then Update Item to push it live") if is_active
                   else "The draft has no price — set one, then List on eBay"))
+        if not is_active and _has_draft:
+            _line.append(_abtn("List on eBay", "listOnEbay()", "green",
+                               title="Save draft, run every needed step, and publish"))
+    elif _needs_title_trim:
+        # Same shape as _needs_price: Retry cannot fix an over-length title,
+        # the editor can. The title field holds the FULL untruncated text
+        # (seo/title.py deliberately doesn't auto-truncate) — this scrolls to
+        # it so the operator can trim by double-click-deleting words, same
+        # workflow eBay's own bulk-CSV editor uses.
+        _line.append(_abtn(
+            "Trim Title",
+            "var t=document.getElementById('dl-title-input');"
+            "if(t){t.scrollIntoView({behavior:'smooth',block:'center'});t.focus();}",
+            "red",
+            title=(f"Title is {len((dl or {}).get('title') or '')} chars — "
+                   f"eBay allows at most 80. Trim it, then Save Draft and List on eBay.")))
         if not is_active and _has_draft:
             _line.append(_abtn("List on eBay", "listOnEbay()", "green",
                                title="Save draft, run every needed step, and publish"))
@@ -5333,11 +5361,13 @@ def _render_item_detail_html(
         f'<span class="fn">eBay Title</span>'
         f'<span class="fv" style="flex:1">'
         f'<input id="dl-title-input" type="text" maxlength="80" value="{_dl_title_val}" '
-        f'style="width:100%;background:#1a1a1a;color:#eee;border:1px solid #444;'
+        f'style="width:100%;background:#1a1a1a;color:#eee;'
+        f'border:1px solid {"#c44" if _dl_title_len > 80 else "#444"};'
         f'border-radius:4px;padding:4px 6px;font-size:.9em" '
         f"oninput=\"updateCharCount(this,80,'dl-title-count')\">"
-        f'<span id="dl-title-count" style="font-size:.75em;color:#556;margin-left:4px">'
-        f"{len((dl or {}).get('title') or '')}/80</span>"
+        f'<span id="dl-title-count" style="font-size:.75em;margin-left:4px;'
+        f'color:{"#c44" if _dl_title_len > 80 else ("#aa0" if _dl_title_len > 72 else "#556")}">'
+        f"{_dl_title_len}/80</span>"
         f"</span></div>"
         # Category — search to change
         f'<div class="frow" id="dl-category">'
@@ -5447,7 +5477,8 @@ def _render_item_detail_html(
         f'<span class="fn">Price</span>'
         f'<span class="fv" style="flex:1">'
         f'<input id="dl-price-input" type="number" step="0.01" min="0" value="{h(_dl_price_val)}" '
-        f'style="width:120px;background:#1a1a1a;color:#eee;border:1px solid #444;'
+        f'style="width:120px;background:#1a1a1a;color:#eee;'
+        f'border:1px solid {"#c44" if (dl or {}).get("price") is None else "#444"};'
         f'border-radius:4px;padding:4px 6px;font-size:.9em">'
         f"{_price_comps_bar}"
         f"</span></div>"
@@ -5532,9 +5563,19 @@ def _render_item_detail_html(
         f'<div id="aspects-loading" style="color:#556;font-size:.82em">Loading aspects…</div>'
         f'<div id="aspects-form"></div>'
         f"</div>"
-        # Draft save feedback (saving happens via the action line — List on eBay /
-        # Update Item save the draft first; PP-ACTIONCONSOLE-001 one-line consolidation)
+        # Explicit Save (restored 2026-07-10, todo #1318): List on eBay / Update
+        # Item save the draft first as part of their own flow, but the
+        # _has_error-and-not-is_active action-line state renders ONLY "Retry"
+        # (which just scrolls to the error box — it never calls saveEbayDraft()).
+        # An operator fixing a rejected field (e.g. a too-long title) had no way
+        # to persist the edit at all without first clicking "Clear error" to
+        # reach a different action-line state — not discoverable, and the old
+        # rejected content kept getting resubmitted. This button covers every
+        # state, not just the error one, since draft edits should always be
+        # explicitly savable regardless of what the action line shows.
         f'<div style="margin-top:12px;display:flex;gap:8px;align-items:center">'
+        f'<button class="act-btn" onclick="saveEbayDraft()" '
+        f'style="background:#1a3a5a">Save Draft</button>'
         f'<span id="dl-save-msg" style="font-size:.82em;color:#4a4"></span>'
         f"</div>"
         + f"</div>"
@@ -5856,6 +5897,7 @@ def _render_item_detail_html(
         f"function updateCharCount(inp,max,countId){{"
         f"  var n=inp.value.length;"
         f"  var el=document.getElementById(countId);"
+        f"  inp.style.borderColor=n>max?'#c44':'#444';"
         f"  if(!el)return;"
         f"  el.textContent=n+'/'+max;"
         f"  el.style.color=n>max?'#c44':(n>max*0.9?'#aa0':'#556');"

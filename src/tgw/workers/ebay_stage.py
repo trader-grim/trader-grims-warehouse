@@ -230,6 +230,32 @@ class EbayStageWorker(QueueWorker):
                 f'{sku}: no price yet — waiting for ebay_price or manual price set'
             )
 
+        # Title length guard (2026-07-10): eBay rejects any title over 80 chars
+        # outright (errorId 25718, "title should be between 1 and 80
+        # characters"). tgw202605051752520/051913468/051936445 all reached
+        # eBay's API before finding this out, dead-lettering after burning a
+        # real API call for something knowable locally. seo/title.py's
+        # enhance_title() deliberately does NOT auto-truncate (Dave: eBay's
+        # own bulk-CSV editor loads the full title and lets the operator
+        # trim it by double-click-deleting words — faster and more accurate
+        # than an automated word-boundary chop) — the full title stays in
+        # draft_listing.title so the editor can offer exactly that. This
+        # guard is what actually stops the wasted API round-trip: same
+        # C11/no_price_set shape, blocks staging until the operator trims it.
+        title = draft.get('title') or ''
+        if len(title) > 80:
+            fence_patch_item(self.config, sku, {'pipeline_error': {
+                'code':   'title_too_long',
+                'detail': (f'draft_listing.title is {len(title)} chars — eBay '
+                           f'allows at most 80. Trim it in the editor before listing.'),
+                'ts':     datetime.now(timezone.utc).isoformat(),
+                'source': 'ebay_stage',
+            }})
+            raise HardFailure(
+                f'{sku}: title is {len(title)} chars, over eBay\'s 80-char limit — '
+                f'operator must trim it in the editor'
+            )
+
         # Never-raise guard (invariant C5 extended, session 42 incident): a force
         # re-stage of a live/published offer must not RAISE the price eBay already
         # has. Reductions made before the s41 reducer fix never persisted to
