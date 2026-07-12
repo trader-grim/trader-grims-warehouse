@@ -1000,6 +1000,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--priority", type=int, default=50, metavar="N", help="priority for --add (lower = higher priority; default 50)")
     p.add_argument("--source", default="session", metavar="SRC", help="source label for --add (default: session)")
     p.add_argument("--all", dest="show_all", action="store_true", help="show completed items too")
+    p.add_argument("--by-pp", dest="by_pp", action="store_true", help="group the listing by pp_ref instead of agent")
     p.add_argument("--seed", action="store_true", help="seed Work Tracks items from master plan into the tracker")
     p.add_argument("--update", nargs="+", metavar=("ID", "TEXT"), help="update body text of an item: --update ID new text here")
     p.add_argument("--delegate", nargs=2, metavar=("ID", "AGENT"), help="reassign item to a different agent: --delegate ID agent")

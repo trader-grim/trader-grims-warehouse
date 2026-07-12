@@ -195,6 +195,7 @@ already in digest — add threshold alerting; **R2.5** PP-BACKUP-001 recut into
 lines in digest; **#1102** test-suite repair; thermal PreToolUse hook (blocked on
 Dave authorizing agent-config change).
 
+R2: #1181/#1202 exception propagation fix complete — quota exhaustion now correctly requeues from ai_identify and ebay_draft (full doc in dev-workflow/research/DONE-1181-1202-review-followups.md)
 ### R3 — Plan and process hygiene
 
 Done: this redraw; work-packet protocol below; PRIME DIRECTIVES in CLAUDE.md; Data
@@ -247,6 +248,47 @@ promote it to `pp/`.
 ### Open — active or gated
 
 Hermes agent architecture research filed: mixture-of-expert-pairs pattern with Claude CLI + Aider + site-specific MCP server.
+
+PP-FENCE-002 — "Don't climb the fence, use the gate" proposal — see document: dev-workflow/research/PP-FENCE-002-climb-the-fence-2026-07-10.md
+
+## PP-CATIONIX-001 — CatioNIX structural kickoff ("catio, dev team, and Dave upgrade")
+**PROMOTED from FUTURE-IDEAS 2026-07-11**, by Dave's direct decision, ahead of
+its own originally-stated promotion criteria — see `pp/PP-CATIONIX-001.md`
+for the full reasoning (not a silent contradiction). Umbrella for the
+session's 6-concept advancement: Concept 1 (Hermes personas Tigwa/Leotha +
+cat-herder harness — technical substrate is the already-thorough
+**PP-AIOPS-001**, `plan/PP-AIOPS-001-cat-herding-platform.md`, not
+re-derived), Concept 5 (spec/invariant-as-correctness doctrine, lands in
+CLAUDE.md not here). Sequencing explicitly UNCHANGED: R1 critical path keeps
+running as before; cats (AI workers) go into the catio one at a time; the
+crypto-lock cage comes last. Full design: `pp/PP-CATIONIX-001.md`; persona
+design: `pp/PP-HERMES-EA-001.md`.
+
+## PP-HERMES-EA-001 — Tigwa & Leotha personas (the "dev team" upgrade)
+**New 2026-07-11.** Two personas on one Hermes instance — Tigwa
+(business-facing executor, new direction for the stopped `pm_intake`
+worker) and Leotha (Dave-facing translator, curates PP-KNOWLEDGE-001's
+data long-term). **Both explicitly IN TRAINING** — Tigwa learns to operate
+by using `tgw` itself, supervised, before any autonomous authority unlocks
+(gated behind the crypto-lock, PP-CATIONIX-001). First concrete
+apprenticeship task: justshoutit (PP-INTAKE-004). Execution/isolation
+substrate is PP-AIOPS-001, not re-designed here. Full design:
+`pp/PP-HERMES-EA-001.md`.
+
+## PP-AIOPS-001 — structured AI/operational resilience platform ("cat herding and litterbox cleaning")
+**Given its own heading 2026-07-11** — previously only a bare Frozen-list
+mention despite being genuinely central substrate for PP-CATIONIX-001/
+PP-HERMES-EA-001 above. Status/gating UNCHANGED by this — still the same
+6-phase design (JetStream mutation-audit stream → queue-transition outbox →
+anomaly detector → litterbox worker + MCP audit tools → Btrfs/nspawn AI
+session isolation → rollback/observability), Phases 1-4 have no PP-NIXOS-001
+dependency and could start on the current OS today, Phase 5 gates on
+PP-NIXOS-001. **Not started** — its own "Open Questions for Dave Before
+Phase 1 Starts" (NATS install method, audit retention, session-ID scoping,
+litterbox autonomy level) remain unanswered; this heading only fixes
+visibility, it does not authorize starting the build. Full design:
+`plan/PP-AIOPS-001-cat-herding-platform.md`.
+
 ## PP-EBAY-MOTORS-001 — eBay Motors, now scoped (was URGENT/unscoped)
 **Opened 2026-07-04, surfaced live during PP-PHOTOSYNC-001 P10; scoped same
 day (todo #1129).** Dave: "we do not have ebay motors accounted for
@@ -353,6 +395,18 @@ Built s40 (state-driven action line, Editor/Live tabs). **Gate: Dave's operator 
 R1.2.** Principle settled: state drives interface; controls are indicators;
 platform-wide style. Todo #1085. Troubleshooting buttons removed with no new home yet
 — ops surface to design.
+
+## PP-EDITOR-001 — web UI (listing pipeline, editor, dashboard)
+**Given its own heading 2026-07-11** — previously only a bare "Done" rollup
+mention (31 todos) despite being the umbrella for the whole web UI. **Absorbs
+PP-UIPIPE-001** (Dave, 2026-07-11: "the web ui pipeline ain't cutting it") —
+real production defects surfaced through the web UI on live listings: wrong
+shipping policy on new listings, items PUBLISHED with no price set (C1
+invariant violation — guard bypassed or broken), incomplete photo upload
+with no reattempt (relates to #1115/P1 completion-guard — verify deployed
+coverage). Todo #1145: go over the full defect list with Dave, produce a
+defect→root-cause→packet map. Next: Dave B0 sign-off, defect walkthrough,
+price test, fleet getOffer sweep.
 
 ## PP-QUOTA-001 — metered-API budget layer ✅ (built s42)
 `tgw.quota`, raw capture, ops digest, health check live. Remaining observability
@@ -505,6 +559,20 @@ quick fix."
 - **nix flake — 3 SECURITY findings remain open, not yet fixed:**
   - #1219 (NFS Queue export writable to the whole 192.168.60.0/24 subnet,
     should be host-locked like the ro exports below it) — **BLOCKED** on
+
+Fixed 1/2/3 from #1168/#1169/#1173 code review (see document)
+
+- #1168 fix: ebay_publish condition fallback now writes corrected condition back to draft_listing. Tests added. Done.
+
+***DONE-1171*** — workers audit cohesion findings fixed and tested (see document)
+
+- #1173 fix: lookup_epid re-raises QuotaBudgetExceeded (see reference).
+
+todo #1181 (audit#1143) — best_category() fallback chain fixed; see document in dev-workflow/research.
+
+Findings #2 (ebay conditions memoization) and #3 (trading retry backoff) shipped — see [DONE-1182-ebay-cohesion-cache-retry.md](reference/DONE-1182-ebay-cohesion-cache-retry.md)
+
+- #1206 (requeue-402 dedupe guard) resolved and documented.
     #1228 (no static IP/DHCP reservation exists yet for the intake
     camera/phone device; checked live ARP table 2026-07-10, several
     unidentified LAN hosts, none confirmable as the intake device from
@@ -560,23 +628,89 @@ across the already-mounted data is the near-term space-recovery lever,
 before deciding what (if anything) to offload onto `sdi`.
 
 Audited sdb/sdc live: sdb absent, sdc repartitioned into backup services. No free disk to grow vg_tgw. Closing #1056 as superseded, opened #1136 for re-evaluation.
-## PP-KNOWLEDGE-001 — the knowledge plane (recoll + git-annex + event fabric) — PLANNED s45 (2026-07-04)
-**Umbrella for:** PP-SEARCH-001 (live), PP-ANNEX-001 (promoted from FUTURE-IDEAS,
-rescoped: history/archive consolidation ONLY, no live-data migration), PP-EVENTS-001
-(new; transport is decision E0 — Postgres events+NOTIFY+SSE recommended over NATS
-JetStream, `tgw.events` facade either way), feeder PP-DRIVE-INDEX-001, first consumer
-PP-CATALOG-INCR-001, Hermes doc-triage (gated #1139).
+## PP-KNOWLEDGE-001 — the knowledge & translation hub — 5-LAYER UMBRELLA, extended 2026-07-11
+**PLANNED s45 (2026-07-04), extended this session into the full 5-layer
+umbrella (Concept 2).** Leotha (PP-HERMES-EA-001) curates/organizes the data
+long-term; this plan is the architecture only.
+
+**Absorbed 2026-07-11 (Dave):** PP-DOCLIB-001 and PP-HISTORY-001 fold in
+here — "it's recoll+mcp on the knowledgebase." Both were existing facilities
+(document cross-referencing, `tgw history-index`) that sit ON TOP of this
+hub's Search (Recoll) and MCP (agent front door) layers, not separate PPs.
+No standalone design docs existed for either — folded as todos, not
+promoted to their own `pp/` files.
+
+| Layer | Tool | Answers | Status |
+|---|---|---|---|
+| Storage | git-annex (canonical files, dedupe) | — | **PP-ANNEX-001, promoted 2026-07-11 — see below** |
+| Search | Recoll (full-text/metadata) | "where is the evidence?" | **PP-SEARCH-001, LIVE** at `/opt/TGW/.recoll/` (441K docs) |
+| Core spine | **PostgreSQL LISTEN/NOTIFY** (event bus) | pays off broadly: charting/forecasting, photo-set production-time analytics, the event server (PP-EVENTD-001), research feeding AI workers | **RESOLVED 2026-07-11** — not NATS JetStream, see note below |
+| Memory | Hindsight (timelines/experiences) | "what happened before?" | exploratory — prebuilt layered ON the core spine, not committed |
+| Knowledge | gbrain (curated "working truth") | "what do we believe now?" | exploratory — same, not committed |
+| Graph | Graphify (code + doc relationships) | "what connects to this?" | new, near-term — TGW `src/` + arch docs + plans/ADRs; Hermes-driven trigger policy (file, not hardcoded); userspace, not the flake |
+
+**Core-spine NATS-vs-Postgres note (2026-07-11, do not conflate with
+PP-AIOPS-001's separate JetStream use):** PostgreSQL LISTEN/NOTIFY wins for
+this general operational event bus (clip-route/knowledge-hub/UI routing) —
+`FUTURE-IDEAS.md`'s old NATS mention here is superseded. **This is a
+DIFFERENT question from PP-AIOPS-001's JetStream audit/CDC stream**, which
+is still the intended mechanism for durable, replayable mutation-history
+logging (Dave, 2026-07-11: "we want the transactional logging") — that use
+of NATS is NOT superseded, the currently-failing `nats` health check
+("No module named 'nats'") is a real gap for PP-AIOPS-001 Phase 1 whenever
+picked up, not a moot pre-existing nuisance.
+
 **Full plan + soundness review (4 system-specific guards, reject list):**
-`docs/ai-plans/recoll-annex-jetstream.md` — treat as the design doc of record.
-**Dave's stage 1 (s45): "organize and make accessible all of our valuable data,"
-as a concerted parallel lane alongside the fix/execution tracks** — the knowledge
-dataset becomes a better discovery search than the catalog (catalog stays the
-structured/UI projection; recoll is the find-anything layer). recoll already paid
-for itself in week one (real recovery/audit queries, s44/s45).
-Stage-1 packets: #1147 (R2 search surface — priority), #1148 (R1 field mapping),
-#1149 (A0 Syncthing/annex boundary decision, Dave 15min), #1150 (A1 annex pilot on
-archive corpus), E0 decision packet with Dave. Drive-fleet manifests continue under
+`docs/ai-plans/recoll-annex-jetstream.md` — treat as the design doc of
+record for the storage/search/annex legs (Graphify/Hindsight/gbrain are new
+this session, not yet in that doc).
+
+**Dave's stage 1 (s45): "organize and make accessible all of our valuable
+data," as a concerted parallel lane alongside the fix/execution tracks** —
+the knowledge dataset becomes a better discovery search than the catalog
+(catalog stays the structured/UI projection; recoll is the find-anything
+layer). recoll already paid for itself in week one (real recovery/audit
+queries, s44/s45).
+Stage-1 packets: #1147 (R2 search surface — priority), #1148 (R1 field
+mapping), #1149 (A0 Syncthing/annex boundary decision, Dave 15min), #1150
+(A1 annex pilot on archive corpus). Drive-fleet manifests continue under
 PP-DRIVE-INDEX (#1136).
+
+### PP-ANNEX-001 — the archiving/librarian layer — PROMOTED 2026-07-11
+**"A librarian/archivist tool built into the library itself"** (Dave) —
+git-annex doesn't manage the library from outside, it replaces the file
+with a symlink and tracks location/metadata directly in the repo. Full
+prior design moved from `FUTURE-IDEAS.md` into `docs/ai-plans/recoll-annex-jetstream.md`
+(Track A, packets A0-A5); do not relitigate what's already settled there:
+git-annex replaces Syncthing for data trees; LAN hosts (a1131) are plain ssh
+git-annex remotes (wire-speed); Google Drive is the off-site/portable/backup
+tier ONLY, never the LAN rendezvous; plan vault stays plain git, never
+annex; scope = history/archive corpus consolidation ONLY, ItemData stays
+fence-owned and untouched (A4 rescoped away from live-data migration);
+`numcopies=2`; date-partitioned `gdrive-archive-YYYY`; Dave approves every
+deletion (C9); A5 (Go companion tool) deferred until stock remotes proven.
+
+**A3 cloud backend — SETTLED 2026-07-11: Google Drive** (not GCS/S3 — new
+metered spend not justified below the $4k-server budget line, even though
+git-annex's native `type=S3` would be the cleanest integration technically).
+Current capacity: 2TB Google One @ $100/yr, upgrade path to 5TB @ +$140/yr.
+**Adapter kept genuinely open, evaluate empirically**: rclone special remote
+(already proven in production for PP-PHOTO-001 photo sync, zero new auth)
+vs. native `git-annex-remote-googledrive` (Lykos153, direct API, needs its
+own OAuth credential) vs. anything else found during the A2 pilot.
+
+**"The archivist" reframe (Dave, 2026-07-11):** archiving stops being a
+hardcoded library call (`items.atomic_write_json(..., archive_root=...)`
+zipping inline) and becomes a delegated hand-off to one authoritative
+service that owns the full chain — archive (zip, existing E5/#1104
+mechanism) → log → index (Recoll) → place (git-annex → GDrive) — driven by
+a filing policy Leotha curates over time. **Open design constraint, not yet
+solved:** E5/#1104 is explicitly fail-closed (write must not proceed unless
+archive succeeds) — delegating to an external service risks losing that
+synchronous guarantee unless the hand-off blocks for ack or there's a
+durable write-ahead step. Real design work, candidate for "model the
+worker in Hermes first" (PP-HERMES-EA-001) before it touches the live
+`items.py` write path.
 
 
 ## PP-DRIVE-INDEX-001 — drive survey, dedup, universal index (merged 2026-07-04)
@@ -627,6 +761,9 @@ to `deepseek-v4-flash` same session (Dave purchased DeepSeek + Google credits);
 until Dave generates it, restart pending that.
 
 **Audit #1143 nix-flake mitigation batch, EXECUTED 2026-07-06 (todos #1216,
+
+a1131 SSH + kdotool/ydotool follow-up fixed — see document: dev-workflow/research/DONE-a1131-ssh-kdotool-followup.md
+#1321 nix flake: SSH key rotation, hermes removal, vivaldi, lan-mouse/firefox fixes — see document: dev-workflow/research/RESEARCH-INPROGRESS-1321-nix-flake-changes.md
 #1220-#1225):** all 10 findings reconciled against live state first (all
 confirmed still real, none stale) before any fix — same discipline as the
 Hermes/Aider plan. Fixed: SSH password auth disabled (#1216 — new ed25519 key
@@ -673,13 +810,34 @@ thaws or Dave wants a targeted exception.
 Sync infra live. Phase A (GDrive→Gemini multimodal draft) #1064; Phase B
 (zero-bandwidth EPS upload) #1065. FROZEN until R1 drains.
 
-## PP-CLIP-001 — clipboard manager
-Phase 1 done; crash loop fixed s41. #1086 conceptual pass (unify with PP-EVENTD-001)
-BLOCKS #1055 rofi picker. FROZEN. Design: `pp/PP-CLIP-001.md`, `pp/PP-EVENTD-001.md`.
+## PP-CLIP-001 — clipboard manager (local-only, ratified 2026-07-11)
+Phase 1 done; crash loop fixed s41. Phase 2 rofi picker DONE
+(DONE-1055-clip-picker.md). **#1086 conceptual pass's split RATIFIED
+2026-07-11: tgw-clipd + rofi picker stay LOCAL-ONLY forever.** Cross-machine
+sync (the old "Phase 3" line) is **retired here, moved entirely to
+PP-EVENTD-001** — `lan-mouse enter_hook` calls `clip-route --target`
+directly; `clip-route` reads the clipboard itself, never routes through
+tgw-clipd. Design: `pp/PP-CLIP-001.md`. Full #1086 analysis:
+`docs/ai-plans/clipboard-concept.md` / `CLIPBOARD-CONCEPT-PLANNING-1086.md`.
 
-PP-CLIP-001 conceptual pass: identified duplication with PP-EVENTD-001; recommended split (tgw-clipd local-only, cross-machine sync to EVENTD). Full analysis filed as CLIPBOARD-CONCEPT-PLANNING-1086.md.
+## PP-EVENTD-001 — event server ("Radar") — UNFROZEN 2026-07-11, #1086 gate cleared
+**Go `clip-route` daemon, design complete (2026-06-29), not yet built.**
+Prerequisite (PP-CLIP-001 Phase 2) is DONE — Phase 1 here is now unblocked.
+This is Concept 3's "real Radar O'Reilly": write a SKU to the clipboard, the
+system already has an answer waiting. Restores + automates the old
+`tgw.source`-era active-item context (`CurrentItem`/`CurrentItem.json`/
+`CurrentLocation` symlinks) — trigger becomes implicit (any recognized
+clipboard write swaps context) instead of an explicit macro/command.
+**Regression to fix: `CurrentLocation` was silently dropped** when
+PP-CONTEXT-001 replaced the old symlink dance — restore in
+`src/tgw/context.py`. Trigger scope: recognized content only (SKU/URL/part
+number regex, reuses tgw-clipd's classifier) — no noise on incidental
+copies. Surface: folds into ActionConsole/tgw-http (not native DE widgets,
+not the Flutter HUD) — active-item panel (photos, JSON, links, location).
+Transport: PostgreSQL LISTEN/NOTIFY (already the settled design, NOT NATS —
+distinct from PP-AIOPS-001's separate JetStream audit-log use). Full design
++ Radar requirements: `reference/PP-EVENTD-001-design.md`.
 
-Phase 2 rofi picker completed (DONE-1055-clip-picker.md)
 ## PP-CATPICK-001 — smart category picker
 **Phase 1 DONE 2026-07-04** (#1079): `category_candidates` (id/name/full ancestor
 path) backfilled onto all 25 `category-groups.json` groups from the on-disk eBay
@@ -690,22 +848,38 @@ bare-ID fallback rather than dropped, flagged for review. Phase 2 (the actual
 group-shortlist-first picker UI/logic) remains FROZEN until R1 drains. Memory:
 project-smart-category-picker.
 
-## PP-REPRICER-001 — market-data repricer (the pricing rebuild)
-Read-only foundation done. **Context (s42): automated pricing is DEFUSED** — schedule
-minting disabled, reducer cliff-guarded, prices are operator-only until this project
-delivers trustworthy data. Two candidate data sources, not mutually exclusive:
-1. **eBay sold data** via `buy.marketplace_insights` — BLOCKED external: scope request
-   in the eBay application review (#79, Dave answers DS questions).
-2. **PP-PRICING-001 — Google Shopping comps via SerpApi (paid)** — the designed
-   interim substitute for marketplace_insights, dropped from the s42 redraw index by
-   mistake and restored at Dave's flag. Full Phase 1 design (title-based Shopping
-   SERP in ai_identify, `apis/lookup/shopping_search.py`, key at
-   `secrets_root/serpapi-credentials.json`): `pp/PP-PRICING-001.md`. Cross-market
-   active prices (Google Shopping: eBay/Amazon/Walmart) — a real floor signal, unlike
-   same-marketplace Browse asking prices.
-3. **Google-grounded price check** (Dave's 2026-06-09 suggestion, also dropped —
-   "not accessible via API" is now stale: Gemini supports Search grounding as an API
-   tool on our free-tier direct key). Zero-cost eval before paying for SerpApi.
+## PP-REPRICER-001 — market-data repricer (the tool)
+**Rescoped 2026-07-11 (Dave): this PP is the mechanical tool, not pricing
+strategy** — "repricer a tool I believe?" Confirmed: schedule minting, the
+markdown reducer, cliff-guard logic. Strategy (what price is right, why,
+comps/positioning) moved to **PP-MARKETING-001** below — this section no
+longer carries that content.
+
+Read-only foundation done. **Context (s42): automated pricing is DEFUSED** —
+schedule minting disabled, reducer cliff-guarded, prices are operator-only
+until PP-MARKETING-001 delivers trustworthy data for the tool to act on.
+
+## PP-MARKETING-001 — marketing strategy (pricing, positioning, promotions) — NEW 2026-07-11
+**New PP (Dave, 2026-07-11): "pricing is really marketing strategy."**
+Umbrella for positioning/pricing-strategy work, previously miscategorized as
+part of the repricer tool. PP-PRICING-001 is its first tenant — likely not
+its last (comps, listing-copy strategy, promotions could land here too).
+
+### PP-PRICING-001 — Google Shopping comps via SerpApi (paid)
+Two candidate data sources for comps, not mutually exclusive:
+1. **eBay sold data** via `buy.marketplace_insights` — BLOCKED external: scope
+   request in the eBay application review (#79, Dave answers DS questions).
+2. **Google Shopping comps via SerpApi (paid)** — the designed interim
+   substitute for marketplace_insights, dropped from the s42 redraw index by
+   mistake and restored at Dave's flag. Full Phase 1 design (title-based
+   Shopping SERP in ai_identify, `apis/lookup/shopping_search.py`, key at
+   `secrets_root/serpapi-credentials.json`): `pp/PP-PRICING-001.md`.
+   Cross-market active prices (Google Shopping: eBay/Amazon/Walmart) — a
+   real floor signal, unlike same-marketplace Browse asking prices.
+3. **Google-grounded price check** (Dave's 2026-06-09 suggestion, also
+   dropped — "not accessible via API" is now stale: Gemini supports Search
+   grounding as an API tool on our free-tier direct key). Zero-cost eval
+   before paying for SerpApi.
 
 Eval packet (#1109) — DONE 2026-07-04: ran grounded Gemini (gemini-2.5-flash +
 Google Search grounding) against 10 real sold TGW items, scored vs the existing
@@ -716,23 +890,23 @@ pricing signal.** SerpApi (Shopping SERP) still untested — blocked on #1110's
 key. Full writeup: `docs/TGW-Plan-Vault/inbox/DONE-1109-repricer-eval.md`,
 raw data `/opt/TGW/var/log/repricer-eval-1109.json`.
 
-**New candidate, same day — Phase 0 comping interface** (research inbox,
-`pp/PP-PRICING-001.md` Phase 0 section): the #1109 result directly validates
-a Perplexity research thread's thesis — don't let a model invent prices,
-build a supervised capture tool instead. Proposed: 3-pane web UI (item /
-embedded eBay Product Research browser / structured comp+pricing capture),
-`comp_snapshot` + `pricing_recommendation` schema, Marketplace Insights as a
-later drop-in upgrade to the same schema. Design capture only, not started —
-needs Dave's go/no-go. Related: PP-AGENTIC-PRICE-001 candidate-query design
-composes with either.
+**Phase 0 comping interface** (research inbox, `pp/PP-PRICING-001.md` Phase 0
+section): the #1109 result directly validates a Perplexity research thread's
+thesis — don't let a model invent prices, build a supervised capture tool
+instead. Proposed: 3-pane web UI (item / embedded eBay Product Research
+browser / structured comp+pricing capture), `comp_snapshot` +
+`pricing_recommendation` schema, Marketplace Insights as a later drop-in
+upgrade to the same schema. Design capture only, not started — needs Dave's
+go/no-go. Related: PP-AGENTIC-PRICE-001 candidate-query design composes
+with either.
 
-**Same day, Phase -1 — self-powered comp engine (Dave request, todo #1134):**
-the infrastructure (`OwnSalesProvider` + `velocity_stats` worker) already
-exists and runs — this turned out to be a data-density problem, not a
-missing feature. **Initial 71%-uncategorized figure was checking the
-wrong field** (Magento `attribute_set`, not what the pricing engine
-reads) — corrected via todo #1135: the real field (`ebay_category_id`)
-is already populated on 52% of the catalog (28,710/55,419).
+**Phase -1 — self-powered comp engine (Dave request, todo #1134):** the
+infrastructure (`OwnSalesProvider` + `velocity_stats` worker) already exists
+and runs — this turned out to be a data-density problem, not a missing
+feature. **Initial 71%-uncategorized figure was checking the wrong field**
+(Magento `attribute_set`, not what the pricing engine reads) — corrected via
+todo #1135: the real field (`ebay_category_id`) is already populated on 52%
+of the catalog (28,710/55,419).
 
 **Todo #1135 — DONE, applied 2026-07-04.** Built
 `scripts/recompile_category_backfill.py` as a **repeatable recompile
@@ -774,6 +948,29 @@ Snapshot baseline completed (19,486 SKUs) — unblocks #1131 Motors census; drif
 ## PP-RECOVERY-001 — web UI regression audit
 Findings doc'd (#1039, admin). Reassess against s40–42 UI rebuild — much may be
 obsolete. Design: `pp/PP-RECOVERY-001.md`.
+
+## PP-INTAKE-004 — camera app, "our core data acquisition tool" — scope expanded 2026-07-11
+**PROMOTED from `docs/ai-plans/tgw-intake-app.md`.** Unified native Kotlin
+handheld intake app (barcode/photo/video, SKU assignment, template/size/
+location entry) — supersedes PP-INTAKE-002/003, absorbs PP-TASKER-001.
+**Separate app from TGW's existing Flutter app — do not conflate** (see Open
+discussion items below). **2026-07-11 expansion:** must be a full
+bidirectional event-bus participant (producer AND consumer of PP-EVENTD-001,
+not just an HTTP-POST delivery target) while remaining fully standalone with
+zero event-server dependency; absorbs 3 live Tasker capabilities natively
+(send-attributes→JSON, save-item, advance-location); hybrid barcode scanner
+(native ML Kit/ZXing default + configurable external-app override, Dave's
+current app may be faster, tuned to 8 cores). **This app IS the write
+surface for justshoutit** (Tigwa's first apprenticeship task,
+PP-HERMES-EA-001) — voice-parsed attributes land through the same interface
+manual entry uses. Backend incremental-ID trigger (threshold=6, session-
+completion fallback) is small/additive/already-fully-specified and unblocks
+justshoutit independent of the rest of the app. 3-phase build: (1) core
+capture, standalone; (2) event-bus integration, depends on PP-EVENTD-001;
+(3) remote-control surface (VNC/terminal/macro-grid panes, macro-grid
+sequenced after PP-EVENTD-001). Turntable hardware + dedicated
+data-collector device remain a separate, deferred, non-blocking track.
+Full design: `pp/PP-INTAKE-004.md`.
 
 ## PP-PLANDB-001 — plan/tracker tooling
 Phases 1-4 done 2026-06-12→14: **P1** todo_items schema (`pp_ref`, `depends_on`,
@@ -856,6 +1053,30 @@ DONE-1053: data-scrub legacy eBay Trading API fields — 20,419 items modified, 
 
 - PP-PRICING-001 (self-powered comp engine extension) design doc complete. PP-AMAZON-001 (Amazon FBM exploration) design doc complete. Research doc filed.
 
+* #1113 ebay_dole interim fix — dead code removed, test added (2026-07-10)
+
+- todo #1138: revised help text for `tgw revise --set` to clarify dotted-path claim (bare field names only, no nested expansion). Live evidence: 2046 passed, ruff clean.
+
+#1320 title-length guard — see document: dev-workflow/research/DONE-title-length-guard-2026-07-10.md
+#1319 title-length enforcement fixed — see document: dev-workflow/research/DONE-1319-title-length-enforcement.md
+#1318 restore save-draft button fixed — see document: dev-workflow/research/DONE-1318-restore-save-draft-button.md
+#1258 backup alarm (db dump stale, rclone never completed) — see document: dev-workflow/research/DONE-1258-backup-alarm.md
+#1257 stale ai_reidentify flags cleared — see document: dev-workflow/research/DONE-1257-clear-stale-ai-reidentify-flags.md
+#1256 per-item Best Offer control — see document: dev-workflow/research/DONE-1256-best-offer-control.md
+#1255 Motors category tree cache built — see document: dev-workflow/research/DONE-1255-motors-category-tree-cache.md
+#1254 sync marketplaceId hardcoding fixed — see document: dev-workflow/research/DONE-1254-sync-marketplace-id-hardcoding.md
+#1252 condition scrub + secrets facility — see document: dev-workflow/research/DONE-1252-condition-scrub-and-secrets-facility.md
+#1249 diagnose dead letters — see document: dev-workflow/research/DONE-1249-diagnose-dead-letters.md (flagged: #1265 bulk requeue needs Dave's go)
+#1240 fix broken tests (ebay_price.py) — see document: dev-workflow/research/DONE-1240-fix-broken-tests.md
+#1239 code-review follow-ups (atomic write fixes) — see document: dev-workflow/research/DONE-1239-review-followups.md
+#1238 get_access_token refresh + sandbox bugs fixed — see document: dev-workflow/research/DONE-1238-get-access-token-refresh-and-sandbox-bugs.md
+#1236 ebay_backfill_offers fence bypass fixed — see document: dev-workflow/research/DONE-1236-ebay-backfill-offers-fence-bypass.md
+#1214 ebay_motors_census stale-data + ambiguity fix — see document: dev-workflow/research/DONE-1214-motors-census-stale-ambiguous-fix.md
+#1213 ITEMDATA_ROOT hardcoded fixed — see document: dev-workflow/research/DONE-1213-photo-repair-itemdata-root.md
+#1211 photo-repair unlink safety fixed — see document: dev-workflow/research/DONE-1211-photo-repair-unlink-safety.md
+#1210 photosync-canary price diff fixed — see document: dev-workflow/research/DONE-1210-photosync-canary-price-diff.md
+#1210/#1211/#1238 code-review follow-ups fixed — see document: dev-workflow/research/DONE-1210-1211-1238-review-followups.md
+#1209 order-dependency bug fixed — see document: dev-workflow/research/DONE-1209-category-legacy-order-dependency.md
 #1135 category recompile completed — 5,367 categories recovered.
 ### Gated on R1 — named, designed later
 
@@ -877,13 +1098,13 @@ claiming "next dole cycle" was dead code and removed.
 ### Frozen — parked, not cancelled (thaw only if it blocks an R1 packet)
 
 PP-MC-001 (Midnight Commander UI) · PP-MCP-001 (MCP server — partial, tools live) ·
-PP-EVENTD-001 (event server — pending #1086 concept pass) · PP-FULFILLMENT-001 ·
-PP-TASKER-001 · PP-PERP-AUTO-001 · PP-EMAIL-001 · PP-CLAUDE-HELP-001 ·
+PP-FULFILLMENT-001 ·
+PP-TASKER-001 (functions being absorbed into PP-INTAKE-004) · PP-PERP-AUTO-001 · PP-EMAIL-001 · PP-CLAUDE-HELP-001 ·
 PP-DERIVED-001 (design feeds Data Charter) · PP-DATA-OWN-001 (axiom absorbed into
 charter; mirror work continues as R1.8 + mirror fields) · PP-UI-INTEGRITY-001 ·
-PP-REVIEW-001 · PP-MACRO-001 (#15) · PP-DOCLIB-001 (#1044) ·
+PP-REVIEW-001 · PP-MACRO-001 (#15) ·
 PP-STORAGE-001/PP-VISION-001 (GPU-gated) · PP-RESCUE-001 · PP-AGENTIC-PRICE-001 ·
-PP-AIOPS-001 (see `PP-AIOPS-001-cat-herding-platform.md`) · LVM expansion (#1056) ·
+LVM expansion (#1056) ·
 PP-PRICING-001 (Google Shopping SERP comps — design `pp/PP-PRICING-001.md`, thaws with
 the pricing rebuild, see PP-REPRICER-001) · PP-CANONICALIZE-001 · PP-CAPTURE-001 ·
 PP-HINT-001 (revisit) · PP-IFDIR-001 · PP-REMOTE-001 · PP-REF-003 · PP-GIT-001.
@@ -922,6 +1143,27 @@ converge on a web PWA — simplest, but doesn't deliver true offline satellite
 catalog use. Dave: not ready to decide this session, flagging for a dedicated
 pass.
 
+**2026-07-11 update — nuanced answer, still NOT resolved (do not mark
+settled):**
+- Web UI is primary/most-complete today — pragmatic choice ("I had to get
+  something working to test the site so I directed the web UI build"), not
+  a philosophical commitment against Flutter.
+- Flutter is NOT abandoned — real capabilities worth leveraging later ("I
+  really like the flutter app and I believe we will be able to take
+  advantage of its capabilities"). Current state: browse-only, no write/
+  action capability ("really nice to browse around in, just does nothing
+  else").
+- Neither surface does everything; web UI is closer to complete.
+- **The actual division of responsibility is explicitly deferred** —
+  "divide later."
+- **Hard constraint going forward, decided now:** Flutter must **reuse the
+  same web backend functions** the web UI calls, not duplicate logic — "so
+  we do not have too much extra dev." Any future Flutter work is a client
+  against existing `/api/*` endpoints, never a parallel implementation.
+- Note: this is entirely separate from PP-INTAKE-004's new Kotlin camera
+  app (a different, unrelated app) — an earlier synthesis pass this session
+  wrongly conflated the two before being corrected.
+
 **Relocate the plan-vault document inbox into `/opt/TGW/incoming/`?** Dave recalled
 discussing this before (2026-07-04) but no record of it was found in this plan, any
 PP design doc, or memory — capturing now per Prime Directive 5 so it isn't lost
@@ -948,30 +1190,16 @@ resolution, never just patch-and-move-on). Dave wants this specifically verified
 quality at the 2pm session — i.e. confirm the investigations are actually correct and
 thorough, not just reassuringly-worded, before trusting the pattern going forward.
 
-**PP-INTAKE-004 (proposed) — unified Kotlin intake app, and a much bigger platform
-question behind it.** Full design: `docs/ai-plans/tgw-intake-app.md`. Supersedes
-PP-INTAKE-002/003; the handheld camera/barcode/video app absorbs PP-TASKER-001's
-functions and replaces the current Tasker-Scenes + AutoTools-WebScreens overlay.
-**Added 2026-07-06 (todo #1227 planning session):** also absorb the third-party
-"Tasker Permissions" companion app's role — the handheld app should self-grant
-whatever special ADB-level permissions it needs (or ship a matching
-adb-permissions helper of our own) rather than depend on an external app on the
-device. Not scoped further yet; revisit when this track thaws.
-Decided so far: own repo (Kotlin); early-`ai_identify` trigger = the ID call's own
-batch size (`_MAX_PHOTOS_CLOUD`, 6) with a session-completion fallback for smaller
-sets; custom turntable (not Foldio360) targeting ~12 photos/item, still being
-sourced; dedicated turntable/collector devices get rooted deliberately (fixed-
-purpose hardware), the handheld app itself should need no root at all (owns its
-whole stack). **Bigger, unresolved:** Dave wants the handheld app built to real
-product polish because "TGW" itself — trader-grims-warehouse, but running someone
-else's inventory — may become a sellable platform. Three business models raised,
-not chosen between: Dave hosts it multi-tenant; sell/license it for others to
-self-host and customize; or TGW/Dave as the service provider on top of a possibly
-open-sourced core. Any of these implies generalizing config/secrets/category-groups
-beyond a single-operator deployment — flagged as its own future PP item, not decided
-by the intake-app plan. Also flagged: `clip-route`'s ingest path needs a session/
-capture-batch correlation ID independent of SKU, since capture can start before an
-item record exists in ItemData.
+**PP-INTAKE-004 — PROMOTED to active PP 2026-07-11**, no longer just a
+discussion item — see its own heading above (Pending projects index) and
+full design `pp/PP-INTAKE-004.md`. The platform-question half (is TGW a
+sellable platform) remains genuinely open and is now explicitly
+acknowledged-and-parked rather than an unstructured loose end — three
+business models named (multi-tenant host / licensed self-host / open-core
+services), not chosen between, flagged as its own future planning topic.
+Also still open, unsolved: "Tasker Permissions" companion-app absorption
+(todo #1227, revisit when this track thaws); `clip-route`'s capture-before-
+SKU-exists correlation ID (lands in PP-INTAKE-004's Phase 2).
 
 **catalog_rebuild dead-letter root cause (2026-07-04): SKU-rename races, not a bug.**
 15 `catalog_rebuild` dead-letters, all "No such file: ItemData/<old-sku>/..." —
@@ -985,6 +1213,8 @@ tolerating a missing file mid-scan as a skip-and-continue rather than failing
 the whole rebuild) if this recurs during a future migration batch.
 
 - DRAFT-1076-eps-support-ticket.md filed — pending Dave's review/submit.
+
+2026-07-10 planning session agenda filed as reference (see reference/AGENDA-planning-session-2026-07-10.md).
 ## Standing gates (human-only)
 
 Never: alter eBay OAuth scopes · auto-publish · **push AI-regenerated content to a

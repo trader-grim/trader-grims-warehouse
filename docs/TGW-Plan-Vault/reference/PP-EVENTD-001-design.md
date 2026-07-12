@@ -1,8 +1,36 @@
-# PP-EVENTD-001 — TGW Event Server Design
+# PP-EVENTD-001 — TGW Event Server Design ("Radar")
 
 **Status:** Design complete (2026-06-29 sessions 37+38). Not yet implemented.
-**Prerequisite:** PP-CLIP-001 Phase 2 (rofi picker); Phase 3 starts here.
+**Prerequisite: PP-CLIP-001 Phase 2 (rofi picker) — DONE (#1055).** Phase 1
+of this doc is now unblocked.
 **Implementation language:** Go
+**2026-07-11 update:** the long-dormant #1086 unification gate is ratified
+this session — see "Ratified two-track split" and "Radar / active-context
+requirements" below. This IS "our real Radar O'Reilly" (Dave) — anticipates
+before being asked; write a SKU to the clipboard, the system already has an
+answer waiting.
+
+---
+
+## Ratified two-track split (2026-07-11, resolves the #1086 conceptual pass)
+
+The #1086 pass (`docs/ai-plans/clipboard-concept.md`, 2026-07-04) found
+PP-CLIP-001 Phase 3 and this whole doc described the SAME cross-machine-sync
+job twice, and recommended splitting by machine-scope. That recommendation
+was never formally ratified — **ratified now**:
+1. **tgw-clipd (Python, local-only forever)** — owns local history, SKU/
+   location classification, per-machine SQLite. Never grows a cross-machine
+   socket.
+2. **Rofi picker (#1055, local-only)** — reads only through the stable
+   `tgw clip {list,get,last-sku}` CLI contract. Already correctly designed.
+3. **Hook sync retargets entirely to `clip-route`** — PP-CLIP-001's Phase 3
+   line is retired (see that doc). `lan-mouse enter_hook` calls
+   `clip-route --target` directly; `clip-route` reads the clipboard itself
+   (`wl-paste -n`), does not route through tgw-clipd.
+4. **This doc (event server, cross-machine only)** — owns Postgres
+   `clipboard_states`, KDE/Android delivery, git-annex/GDrive, barcode
+   fan-out, Flutter HUD WebSocket, pm_intake (→ Tigwa, PP-HERMES-EA-001)
+   subscriber.
 
 ---
 
@@ -241,6 +269,69 @@ Near-serverless: GitHub + Google Drive + NixOS flake = no cloud VM required.
 | 8 | Google Drive direct API (Go) for ItemData photo uploads — benchmark vs gdrive_sync.py | Phase 4 |
 
 ---
+
+## Radar / active-context requirements (2026-07-11)
+
+**The spec — Dave's old `tgw.source`-era macro workflow, now automatic (this
+is the acceptance bar):** keyboard macros set the active SKU → symlinks
+flipped → item folder + item JSON became defaults for scripts acting on
+that SKU → swipe/click bindings for related actions (open the eBay item/
+edit page). "We would be making a better, more compact, more direct, more
+automatic version of that."
+
+**Ground truth on the old system (confirmed via code archaeology this
+session):** `tgw.source`'s `tgwset()` did a non-atomic `rm`+`ln -sf` of
+THREE symlinks: `CurrentItem` (item folder/photos), `CurrentItem.json`
+(item JSON), `CurrentLocation` (catalog location dir — "all items in that
+location"). Already partially rebuilt as **PP-CONTEXT-001** (DONE, session
+23): `tgw set-context`/`get-context`/`clear-context`, real state file
+(`runtime/state/current-item.json`), `CurrentItem`/`CurrentItem.json` kept
+as an atomic derived compat view.
+
+**Regression found this session — restore it:** `CurrentLocation` was
+silently dropped when PP-CONTEXT-001 replaced the old symlink dance. One of
+the things Dave explicitly named wanting back. Fix in `src/tgw/context.py`.
+
+**Also found, low-priority, not blocking:** `tgwset_selected()` in
+`tgw.source` still calls a now-nonexistent `tgw tgwset` subcommand
+(orphaned since the `set-context` rebuild) — repoint to `tgw set-context`.
+
+**What's different this time (Dave, 2026-07-11):**
+> "Ours, as mentioned, would be event server to clipboard, more direct and
+> accurate, and changing clipboard entries brings back context. Makes it
+> into a real tool."
+
+I.e. the trigger stops being an explicit macro/command and becomes
+**implicit and bidirectional**: any recognized clipboard change
+re-evaluates and swaps the active context automatically — copying a
+different SKU (or URL/part-number) IS the "set" action. This is
+`tgwset_selected()`'s original intent (X selection → context), now wired
+through this daemon's clipboard-write event instead of manual invocation.
+
+**Trigger scope — recognized content only:** SKUs, URLs, part/model
+numbers, product-like text — reuse tgw-clipd's existing `is_sku`/regex
+classification. Plain/incidental copies (passwords, random text) trigger
+nothing. Avoids noise.
+
+**Surface — fold into ActionConsole/tgw-http, NOT native per-DE widgets,
+NOT the Flutter HUD.** Extends the already-settled "state drives interface,
+controls are indicators, platform-wide" design (PP-ACTIONCONSOLE-001) with
+an active-item panel (photos, JSON, links, location) — works identically on
+tgw-prod (Sway) and a1131 (Plasma) with no DE-specific widget config to
+build/maintain twice. (The old Plasma folder-view widget layout itself is
+genuinely lost — desktop-side config on the pre-NixOS machine, never
+captured in this repo — only the symlink targets it pointed at survive,
+above.)
+
+**Surfaced content candidate, not yet confirmed:** Dave floated including
+pricing/research links (comps, sold listings) in what the panel surfaces
+alongside item data — unreviewed Downloads doc `pricing-research-ui.md`
+may be relevant; revisit when read into a session.
+
+**"Research options" (external half) — not yet decided where it lands:**
+likely routes through existing `PP-LOOKUP-001-APIs.md` (product enrichment/
+barcode lookup) rather than new integrations, with Leotha (PP-HERMES-EA-001)
+translating recognized content into a good research query.
 
 ## Key decisions not yet made
 

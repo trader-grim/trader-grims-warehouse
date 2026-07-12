@@ -1,6 +1,6 @@
-## PP-CLIP-001 — TGW-Aware Clipboard Manager
+## PP-CLIP-001 — TGW-Aware Clipboard Manager (local-only, ratified 2026-07-11)
 
-### Status: Phase 1 COMPLETE 2026-06-24 (session 43)
+### Status: Phase 1 + Phase 2 COMPLETE. Local-only scope RATIFIED 2026-07-11 — Phase 3 RETIRED, see below.
 
 **Phase 1 delivered:**
 - `tgw-clipd` daemon: dual-backend (X11/XFixes + Wayland/wl-paste), mixed-session 'both' mode,
@@ -181,15 +181,17 @@ User service: `systemctl --user enable --now tgw-clipd`
 - Secondary cause found during investigation: Input Leap orphan process (zombie from
   prior activation) was also intercepting clipboard. Removed from flake; process killed.
 
-**Cross-machine clipboard sync approach (Phase 3)**
-- Simple shell hook → extend tgw-clipd as daemon. No new language required for the hook.
-- Hook fires on boundary cross: `wl-paste -n | socat - UNIX-CONNECT:/run/user/$(id -u)/tgw-clipd.sock`
-- tgw-clipd daemon receives payload via Unix socket, classifies it, fans out via HTTP:
-  - Peer machine: SSH → `wl-copy`
-  - Android/Tasker: HTTP POST → Set Clipboard
-- If hook needs real logic (hashing, routing decisions) before hitting the socket, a compiled
-  binary (Go or Rust) is appropriate for that CLI; Python is fine for the long-running daemon.
-- KDE Connect remains for Android file transfer and notifications; clipboard relay replaced.
+**Cross-machine clipboard sync — Phase 3 RETIRED 2026-07-11, superseded by PP-EVENTD-001**
+This section described extending tgw-clipd itself with a Unix socket +
+cross-machine fan-out — that plan is now the SAME job PP-EVENTD-001's
+`clip-route` daemon does, described twice. Ratified split (#1086 pass,
+2026-07-04, formally confirmed 2026-07-11): **tgw-clipd stays local-only
+forever.** `lan-mouse enter_hook` calls `clip-route --target` directly;
+`clip-route` reads the clipboard itself (`wl-paste -n`) and never routes
+through tgw-clipd. See `reference/PP-EVENTD-001-design.md` for the actual
+design (Go binary, Postgres `clipboard_states`, KDE/Android/GDrive/Recoll
+fan-out) and the "Radar" active-context requirements layered on it
+2026-07-11.
 
 **Barcode reader as shared peripheral (insight 2026-06-29)**
 - Barcode readers are USB HID keyboard devices physically on tgw-prod.
@@ -197,10 +199,14 @@ User service: `systemctl --user enable --now tgw-clipd`
 - Tasker receives SKU → triggers lookup workflow without manual copy/paste.
 - Effectively makes the physical reader a shared cross-platform peripheral at zero hardware cost.
 
-**Future: tgw-eventd (PP-EVENTD-001)**
-- Full event server with PostgreSQL state machine, typed event schema, git-annex data plane,
-  WebSocket Flutter HUD, pm_intake event subscriber. Design in `reference/PP-EVENTD-001-design.md`.
-- Not planned for immediate implementation. Phase 3 (simple hook) comes first and informs design.
+**tgw-eventd (PP-EVENTD-001) — UNFROZEN 2026-07-11, #1086 gate cleared, owns all cross-machine sync**
+- Full event server with PostgreSQL state machine (LISTEN/NOTIFY, not NATS —
+  see design doc), typed event schema, git-annex data plane, WebSocket
+  Flutter HUD, pm_intake (→ Tigwa) event subscriber, "Radar" active-context
+  automation. Design in `reference/PP-EVENTD-001-design.md`.
+- Prerequisite (this doc's Phase 2) is DONE — Phase 1 there is now
+  unblocked. This doc's own former Phase 3 is retired in its favor, not a
+  future informant of it.
 
 **lan-mouse hook config (both machines, symmetric):**
 ```toml
@@ -213,12 +219,12 @@ enter_hook = "~/.config/lan-mouse/hooks/push-clipboard.sh"
 | Phase | Scope | Status |
 |-------|-------|--------|
 | 1 | Daemon: dual-backend, SQLite, SKU tagging, CLI, systemd service | ✅ DONE 2026-06-24 |
-| 2 | rofi/dmenu history picker | **NEXT** (todo #1055) |
+| 2 | rofi/dmenu history picker | ✅ DONE (todo #1055) |
 | 2.5 | Diagnose + fix multi-paragraph clipboard truncation on Sway | ✅ DONE 2026-06-29 (MOZ_ENABLE_WAYLAND; Input Leap removed) |
-| 3 | Unix socket endpoint in tgw-clipd + lan-mouse hook scripts for cross-machine sync | after Phase 2.5 |
-| 4 | Tasker Android integration — HTTP POST on clipboard change | after Phase 3 |
-| 5 | App-name tagging; macroboard `last-sku` fallback | after Phase 4 |
-| 6 | eBay URL detection → auto-link to item JSON | after Phase 5 |
+| 3 | ~~Unix socket endpoint in tgw-clipd + lan-mouse hook scripts~~ | **RETIRED 2026-07-11 — superseded by PP-EVENTD-001, see above** |
+| 4 | Tasker Android integration | now owned by PP-EVENTD-001 (Android/Tasker delivery leg) |
+| 5 | App-name tagging; macroboard `last-sku` fallback | local-only, still valid here, unscheduled |
+| 6 | eBay URL detection → auto-link to item JSON | now overlaps PP-EVENTD-001's Radar quick-actions |
 
 ### Phase 2 design — rofi history picker
 Keybind (e.g. Super+V or macroboard key) launches a rofi menu showing clipboard history.

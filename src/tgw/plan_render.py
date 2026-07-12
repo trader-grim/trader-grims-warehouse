@@ -343,6 +343,26 @@ def plan_check(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 ),
             })
 
+    # ------------------------------------------------------------------ #
+    # 5. Missing pp_ref on todos added on/after the standing-requirement   #
+    #    cutoff (CLAUDE.md, Dave 2026-07-11): every new todo gets a PP.    #
+    #    Pre-cutoff backlog is explicitly grandfathered — no backtracking. #
+    # ------------------------------------------------------------------ #
+    pp_ref_cutoff = datetime(2026, 7, 11, tzinfo=timezone.utc)
+    missing_pp_ids = [
+        item['id'] for item in open_items
+        if not item.get('pp_ref') and item.get('added_at') and item['added_at'] >= pp_ref_cutoff
+    ]
+    if missing_pp_ids:
+        issues.append({
+            'kind': 'missing_pp_ref',
+            'severity': 'warning',
+            'message': (
+                f'{len(missing_pp_ids)} open todo(s) added on/after 2026-07-11 '
+                f'have no pp_ref (standing requirement, CLAUDE.md): {_fmt_ids(missing_pp_ids)}'
+            ),
+        })
+
     warnings = sum(1 for i in issues if i['severity'] == 'warning')
     infos = sum(1 for i in issues if i['severity'] == 'info')
     return {

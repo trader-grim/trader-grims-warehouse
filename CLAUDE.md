@@ -30,6 +30,50 @@ every line of code is checked against these first:
    that lives only in conversation will be lost — that is a proven failure mode of this
    project, not a hypothetical.
 
+## Development doctrine: the plan/invariant structure IS the determinator of code correctness
+
+This is Dave's own standing team-management principle, formalized — not a
+borrowed framework. He ran his human development teams the same way: "They
+talked about diffs amongst themselves. I said does it match the spec and
+does it do what we want it to." Applied to AI-speed output now for the same
+reason it applied to a human team then: **you are faster than Dave can
+read.** Reading every diff line-by-line was never the actual review — the
+spec was. The checkpoint moves upstream, to where intent is defined, before
+code exists.
+
+**In practice, this means:**
+- **Specs and invariants are the source of truth; code is their artifact.**
+  A change is correct if it matches the plan and the invariant it's meant
+  to satisfy — not because a human read every line.
+- **Dave's review role is spec/acceptance judge, not diff-reader**: "do I
+  like the form" (architectural taste — does it match settled architecture)
+  and "does it do what it's supposed to" (live acceptance — Prime Directive
+  4). Both already-standing practices; this doctrine just names the pattern
+  they were always part of.
+- **Prime Directive 4 ("done = verified live") already IS this doctrine's
+  core mechanism** — arrived at independently before this was named.
+- Every requirement still gets encoded as an invariant + detector (Prime
+  Directive 5) — that is the deterministic-guardrail half of this doctrine,
+  not a separate rule.
+
+**What this changes going forward:**
+- Work-packet specs (below) and invariants.md are load-bearing, not
+  paperwork — a packet without an explicit spec is not delegatable.
+- Adversarial/independent verification (the `/code-review` skill's verify
+  pass, Workflow's adversarial-verify pattern) is how correctness gets
+  checked at AI speed, not a substitute for Dave reading code — use it
+  proactively per the existing regular code-review cadence rule below.
+- **Not yet built, a real gap**: competitive generation (multiple ranked
+  attempts) has no TGW equivalent today — single-agent-per-packet is the
+  norm. Not adopted by this doctrine, just named as an honest gap.
+- **Permission architecture** (scoped agent authority, escalation triggers)
+  is PP-CATIONIX-001's crypto-lock endgame — the same idea, still being
+  built, not yet live.
+
+Reference: Ankit Jain, "How to Kill the Code Review" (thenewstack.io /
+latent.space, 2026-07-07) — named/systematized a pattern Dave already
+practiced; treat it as confirmation, not origin.
+
 ## Start every session here
 
 **Step 0 — check thermal status before anything else:**
@@ -222,6 +266,16 @@ Run as `tgw` user — source files are `rw-------`, secrets are `chmod 600`.
      what you're working on and where you are. Filename: `INPROGRESS-<slug>.md`. This lets
      the startup sequence reconstruct context if the session is interrupted.
   3. Mark the todo `in_progress` when you start, `done` when complete.
+- **Every todo gets a `--pp` tag, from 2026-07-11 forward (Dave, standing requirement).**
+  "All tasks are assigned to an existing or a new PP. Even if it's just opened or closed,
+  but mostly everything is a fix of an original PP somewhere." If nothing existing fits,
+  open a new PP rather than leave it untagged — do not add a todo with no `pp_ref`.
+  **No backtracking** — the pre-2026-07-11 backlog stays untagged, this is a going-forward
+  rule only. Use `tgw todo --add "..." --pp PP-XXX-001` (new item) or
+  `tgw todo --set-meta ID --pp PP-XXX-001` (existing item). Enforcement:
+  `tgw plan check` flags any open todo added on/after 2026-07-11 with no `pp_ref`
+  (`missing_pp_ref` warning) — this is the detector for this rule.
+  View the tracker organized this way: `tgw todo --by-pp`.
 - **Run `tgw health` after significant changes** to config, secrets, or workers
 - **Commit only when Dave asks** — he controls git history
 - **All commands as `tgw` user** — use `sudo -u tgw` or note this when suggesting commands
