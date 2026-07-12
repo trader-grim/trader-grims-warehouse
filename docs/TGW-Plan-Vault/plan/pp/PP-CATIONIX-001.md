@@ -66,20 +66,34 @@ generically.
 
 ## Current module structure (layer separation progress)
 
-The `nix/` tree is already structured with the CatioNIX/TGW boundary in mind:
+The `nix/` tree is already structured with the CatioNIX/TGW boundary in mind.
+**Corrected 2026-07-12 (Fable independent review, #1338): this section was 3
+weeks stale** — it still described the Qtile-era layout. `nix/tgw/desktop.nix`
+(the TGW Qtile config) was deleted 2026-06-28 as a dead stub when the desktop
+migrated Qtile→Sway (audit finding #1225, recorded elsewhere in this plan);
+the corrected current layout, plus the canonical-flake caveat, follows:
 
 ```
 nix/os/          ← CatioNIX layer (TGW-agnostic)
   base.nix         OS config any CatioNIX host would have (SSH, tailscale, syncthing, admin tools)
   users.nix        Human operator account (db, uid 1000) — NOT TGW-specific
-  desktop.nix      Opt-in GUI layer (X11+Qtile, KDE Connect, bluetooth, desktop apps)
+  desktop.nix      Opt-in GUI layer (X11 compat/XWayland, KDE Connect, bluetooth, desktop apps) —
+                   Qtile removed; Wayland compositors added by sway.nix / plasma.nix
+  sway.nix         Sway compositor (tgw-prod's live desktop)
+  plasma.nix       Plasma compositor (a1131's live desktop)
+  power-*.nix      Power-management policy (client/server split)
 
 nix/tgw/         ← TGW application layer (CatioNIX implementation)
   users.nix        tgw service account (uid 900, isSystemUser) — the first CatioNIX "agent user"
   platform.nix     TGW tools + syncthing folders + tgw-rebuild alias
-  desktop.nix      TGW Qtile config (extraPackages, config.py symlinks)
   usb-sync.nix     TGW install bundle → USB via Syncthing markerName
+  (no desktop.nix — deleted 2026-06-28, see above)
 ```
+
+**Canonical flake is `~/tgw-flake`, not this repo's `nix/` tree** — this
+repo's copy is the main-repo merge target (PP-NIXOS-001, still pending),
+not the one actually deployed. Don't treat edits here as live until that
+merge lands.
 
 **Separation test applied to `nix/os/base.nix`:** As of 2026-06-21, cleaned
 out TGW-specific packages that had leaked in (`ffmpeg`, `imagemagick`,

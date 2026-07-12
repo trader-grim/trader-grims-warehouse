@@ -60,144 +60,7 @@ status) → `reference/` docs. Tracker beats plan when they disagree.
 
 ---
 
-## Session 47 — 2026-07-06 (flake decouple · audit#1143 nix mitigation · todo consolidation · router research)
-
-Standing rule encoded: **iterated-on tools stay out of the flake** (Dave —
-rebuild risk + usage-cost tax not worth it while a tool is still moving).
-Memory: `feedback-flake-minimal-surface`.
-
-- **Hermes/Aider decoupled from `~/tgw-flake`** (todo #1227 DONE): Hermes'
-  `settings.model` and Aider's nixpkgs pin pulled out; `android-tools`/`pipx`
-  added (settled tools). `nixos-rebuild switch` succeeded; Aider now
-  pipx-managed (0.86.2, already newer than the removed 0.83.1 pin). Plan:
-  `ai-plans/decouple-hermes-aider-flake.md`. Hermes model live-edited to
-  `deepseek-v4-flash` (Dave bought DeepSeek+Google credits) — **service NOT
-  restarted yet**, `DEEPSEEK_API_KEY` doesn't exist until Dave generates it.
-- **audit#1143 nix-flake batch, all 10 findings fixed** (todos #1216,
-  #1220-#1225, #1231 — DONE): SSH password auth disabled (new ed25519 key
-  verified working first); `services.tgw.enablePostgres` option added
-  (portable tier genuinely skips Postgres — this fix regressed
-  `tgw/users.nix`'s unconditional postgres-user line, caught by `nix flake
-  check` before reaching a1131, fixed same session); a1131's stray
-  `keyd.nix` import removed; duplicate `kdeconnectd` unit removed; backup
-  timer relabeled (30min cadence confirmed intentional by Dave, not a bug);
-  stale disko comment fixed; dead `tgw/desktop.nix` stub deleted; a1131
-  power-management rewritten suspend-free (the naive fix would have
-  reintroduced the iMac12,1 "never suspend" bug — caught before applying).
-  **New todo #1229, also fixed:** keyd-macroboard's `wayland-0` hardcode vs
-  live `wayland-1` session — dynamic socket discovery now. **Deliberately
-  NOT fixed:** #1219/#1228 NFS export (no static IP for the intake device
-  yet) and #1217/#1218 Syncthing GUI auth (Dave mid-configuring peers).
-  **New todo #1233:** a1131 itself still needs its own config push/rebuild
-  to pick up these fixes (only tgw-prod rebuilt so far).
-- **19 audit#1143 findings consolidated into 6 todos** (#1234-#1239) by
-  shared root cause, not just shared file — e.g. #1165+#1166 (identical
-  self-rescheduling flaw in two workers) → one todo. Originals marked
-  `SUPERSEDED` + closed, not deleted. Memory: `feedback-todo-consolidation`.
-- **Router ecosystem research** (todo #1232, PROPOSAL only): D-Link
-  DIR-868L → DD-WRT recommended over OpenWrt (chipset support finding, not a
-  guess). Plan: `ai-plans/router-dlink-dir868l-ecosystem.md`. DHCP
-  reservations mostly done (tgw-prod/a1131/others) but intake
-  cameras/devices NOT yet reserved — why #1219/#1228 stay blocked.
-
-**Open into next session:** restart `hermes-agent` once DeepSeek key exists ·
-push flake fixes to a1131 (#1233, may be asleep — `wakeonlan c8:2a:14:2a:a1:85`)
-· get intake device's reserved IP to unblock #1219/#1228 · #1234-#1239 as
-normal execution-track packets · #1230 governance/policy review (not started).
-
-## Session 48 — 2026-07-06 (todo #1200 — recover_expired_jobs dead-letter zombie fix)
-
-- **Fixed via `/tgw-packet 1200`** (todo #1200 DONE): `recover_expired_jobs()`
-  was demoting exhausted lease-expired jobs to `'failed'` and leaving them
-  there forever — invisible to `dead_letter_count`, the dead-letter CLI/MCP
-  tools, and the stall watchdog (Prime Directive 2 violation). Pre-flight
-  live query found 62 real zombie jobs already stuck this way
-  (ebay_sync/ebay_legacy_sync/ebay_sku_migrate, oldest since 2026-06-24).
-  Fixed `src/tgw/queue/schema.sql` to set `dead_letter` directly, plus closed
-  a declared-transition-matrix gap in `state_machine.py`
-  (`leased`/`running` → `dead_letter` now allowed, matching existing
-  `mark_dead_letter()` behavior). New test added. Offline suite: 1837
-  passed, same 9 pre-existing/unrelated failures as main.
-- **Live apply, Dave approved ("yes, apply")**: deployed via
-  `sudo -u postgres psql -d state_machine -f schema.sql` — `tgw` role is
-  not the schema owner, `postgres` is (new reference memory:
-  `reference-schema-sql-apply-role`). All 62 zombie jobs self-healed to
-  `dead_letter` within the next worker's normal 60s recovery cycle, no
-  manual backfill needed. `tgw health` confirmed the count now folds in
-  correctly.
-- **`/code-review` follow-up (commit 7ec2a23, separate per Dave's request):**
-  the first-pass fix used a second cascade UPDATE (`WHERE state='failed'`)
-  that was an unindexed full-table scan run on every worker's 60s recovery
-  cycle forever, and undercounted the recovered-jobs total. Folded the
-  `dead_letter` assignment directly into the existing CASE expression
-  instead — same live-verified outcome, no extra scan, accurate count.
-  Re-applied live, re-verified.
-- Two commits: `3ab832b` (original fix) and `7ec2a23` (review follow-up).
-  Inbox note: `docs/TGW-Plan-Vault/inbox/DONE-1200-dead-letter-zombie.md`.
-
-**Same session, continued — audit#1143 dead-letter/atomic-write/multi_intake
-(todos #1234, #1235, #1242-#1246):**
-
-- **#1234 DONE**: self-rescheduling workers (token_refresh, velocity_stats,
-  +6 more found by review) only re-enqueued their next job on success — a
-  dead-lettered job silently ended the chain forever. `state_machine.
-  mark_failed()` now returns `'retry_wait'`/`'dead_letter'` instead of
-  `None`. **#1235 DONE**: 6 non-atomic/no-archive-before-write sites fixed
-  (new `items.atomic_write_text()`, `_token_io.py` for eBay token saves,
-  `data_scrub_magento.py` rewritten onto `items.strip_fields()`).
-- `/code-review` found #1234's fix only covered 2 of 8 self-rescheduling
-  workers — fixed the other 6 (**#1242**), then a second review pass
-  generalized the whole mechanism (**#1245**): `worker_base.QueueWorker.
-  _on_terminal_failure()` now auto-detects a no-arg `self._reschedule` via
-  signature introspection instead of 8 hand-copied overrides
-  (`ebay_sku_migrate` keeps its own — needs `interval_hours`).
-- Dave questioned `multi_intake.py`'s fence-bypassing SKU-collision patch
-  live in conversation; investigated with a live `ebay-pull` + exhaustive
-  photo-size search across all ItemData/NewItems, confirmed it was
-  unverified and redundant with `bundle_intake`'s existing safe idempotent
-  handling, removed it (**#1244**).
-- **#1246** files 4 remaining PLAUSIBLE review findings Dave explicitly
-  deferred (usage/reset timing) — small, no urgency: multi_intake notify
-  spam risk, `mark_failed` rowcount race, `ebay_sku_migrate` interval_h
-  duplication, notify text missing the ebay_stage next-step.
-- Committed as `3efdaed`, pushed — updates existing open **PR #8**
-  (`catio-nix-0.0.1-alpha` → `main`), no duplicate PR created.
-- Restarted all 19 active `tgw-worker@*` services twice (once per fix
-  round); `tgw health` clean except 3 pre-existing tracked warnings
-  (backups, nats, ebay_sync_fallback/#1077) — unrelated.
-- Full offline suite at each step: 1874 passed at the end, same 10
-  pre-existing unrelated failures (google_direct/openrouter rollback +
-  pricing-invariant tests) throughout.
-
-**Same session, continued — PR #8 investigation + `~/tgw-flake` git cleanup
-(todo #1247):**
-
-- Dave asked what PR #8 was. Traced it: `trader-grims-warehouse`'s
-  `flake.nix`/`flake.lock`/`nix/` are convenience symlinks to a fully
-  separate repo, `~/tgw-flake` (own GitHub remote) — confirmed intentional.
-  PR #8 predates that symlink move, so its diff had drifted to show 595
-  files of stale pre-move nix content this repo doesn't use anymore.
-- While checking "which flake is applied, is one older than the other,"
-  found `~/tgw-flake` had **14 modified + 1 deleted file uncommitted since
-  2026-07-04** — turned out to be the earlier Session 47/48 audit#1143
-  nix-flake mitigation (SSH key-only, Postgres gating, dead-file removal,
-  a1131 suspend-block, Hermes/Aider decouple). Live on tgw-prod (dry-activate
-  produced the identical store path to running gen 80) but never committed
-  — a fix being "live" and "safe" (committed/pushed) turned out to be two
-  different claims.
-- Ran the `~/tgw-flake` `commit-nix-flake` skill workflow: cleaned a stray
-  `hermes.nix.save`, `nix flake check` clean, committed `a58d86a`,
-  dry-activate confirmed no live change needed, pushed to `origin/master`
-  (only after separate explicit approval — the permission classifier
-  correctly blocked bundling push into an earlier "commit then rebuild"
-  approval).
-- Dave's call: **PR #8 closed, not merged** — intent already achieved
-  elsewhere, "a speedbump." Branch `catio-nix-0.0.1-alpha` itself untouched.
-
-**Open into next session:** todo #1246 (4 small deferred code-review
-findings, process whenever Dave asks — not urgent). PR #8 is closed, no
-longer a carry-forward. Same carry-forwards as Session 47 above (Hermes
-restart, a1131 push, #1219/#1228, #1230 review) are still open.
+*(Session 48 — 2026-07-06 rolled to `archive/SESSION-LOG.md` 2026-07-12.)*
 
 ## Session 2026-07-10 (workflow code review · full-codebase cohesion audit ·
 live title-length + Save-Draft UI incident)
@@ -276,3 +139,99 @@ sudo -u tgw tgw todo claude
 sudo -u tgw tgw plan check
 git status --short | head           # s42 work is UNCOMMITTED until Dave says commit
 ```
+
+## Session 2026-07-11 (master plan retarget: catio structural kickoff · full tracker triage)
+
+**The biggest single session in this project's plan history — read
+`project-catio-sequencing` + `project-plan-retarget-2026-07` memory before
+anything else, don't re-derive from this summary alone.**
+
+- **Six-concept structural retarget**, framed by Dave as PP-CATIONIX-001
+  Phase 1 ("a catio, dev team, and Dave upgrade"): Hermes personas Tigwa/
+  Leotha (PP-HERMES-EA-001, apprenticeship model), 5-layer knowledge hub
+  (PP-KNOWLEDGE-001 extended, PP-ANNEX-001 promoted), event server/"Radar"
+  (PP-EVENTD-001 unfrozen — the long-dormant #1086 gate finally ratified),
+  justshoutit voice-operated listing, plan/invariant-as-correctness
+  doctrine (new CLAUDE.md section), camera app (PP-INTAKE-004 promoted +
+  expanded scope). PP-AIOPS-001 turned out to already be a thorough
+  6-phase cat-herder/litterbox design — cross-referenced, not re-derived.
+- **Full `tgw todo --by-pp` tracker triage**, new tool built same session:
+  ~114 untagged open todos → 1 (Dave's own call, #1253 left alone). 5 brand
+  new PPs opened (PP-SELLERHUB-001, PP-DATAINTEGRITY-001, PP-INVENTORY-001,
+  PP-HARDWARE-001, PP-COHESION-001), several promoted from bare mentions to
+  real headings (PP-AIOPS-001, PP-EDITOR-001, PP-DATALEARN-001,
+  PP-LOOKUP-001, PP-MACRO-001, PP-MULTIMODEL-001, PP-VISION-001,
+  PP-MARKETING-001 new).
+- **Real gaps found, not just reorganized**: PP-PORTABLE-CATALOG-001 was
+  marked done but never live-verified/installed (a1131) — got its first
+  real design doc with an honest architecture assessment; PP-EVENTD-001's
+  design doc had a FALSE "already implemented" backchannel claim, corrected;
+  PP-QUOTA-001's ✅ removed (no dollar-balance monitoring exists, only
+  call-count proxies — todo #1337, "fine now only because pipeline is
+  quiet"); #1251 was silently gated on #1250 via a config comment, now an
+  explicit `depends_on`.
+- **Process note**: multiple real synthesis errors were caught mid-session
+  by re-verifying against primary sources instead of trusting earlier-
+  session assumptions (NATS-vs-Postgres conflation — two DIFFERENT NATS
+  questions got merged into one wrong answer at first; Web-UI-vs-Flutter-
+  app conflation — the new Kotlin camera app got wrongly identified as the
+  existing Flutter app). Both corrected before landing in the real vault.
+  Worth remembering: verify, don't just synthesize forward.
+- Two real commits, both pushed: `3080e3c` (the main retarget) and
+  `acaf930` (the triage round) on `catio-nix-0.0.1-alpha`, covered by
+  existing open PR #10. Flake repo also has an unrelated earlier-session
+  commit `6292326` pushed (SSH key rotation, hermes.nix removal,
+  backup-drive mount durability fix — all live-verified before commit).
+
+**Open into next session:**
+- PP-SELLERHUB-001's Gemini audit (unlimited scope per Dave) — not yet
+  run, todo #1336 is just the scoping pass.
+- #150-152 (PP-PORTABLE-CATALOG-001) — status left as "done" in the
+  tracker even though the honest assessment says otherwise; Dave hasn't
+  decided whether to formally reopen them.
+- Full master-plan diet pass to ≤500 lines — still owed (todo #1331,
+  deferred twice now for the same "don't rush a mechanical rewrite of
+  dense history" reason; #1338's findings folded in as specifics).
+- Dave will handle #1253 (secrets facility → interactive shell) himself in
+  Hermes config planning — not TGW's tracker, don't pick this up.
+
+## Session 2026-07-12 (Fable independent review #1338 · live worker-resurrection incident)
+
+- **Ran todo #1338**, the Fable independent review deferred from the
+  2026-07-11 retarget session. 13 confirmed findings against commits
+  `3080e3c`/`acaf930` — full report + corrections filed:
+  `dev-workflow/research/DONE-1338-plan-retarget-followup-triage.md`.
+- **LIVE INCIDENT caught and fixed same turn (Prime Directive 2):** the
+  2026-07-11 11:11 reboot had resurrected `pm_intake` + 4 other
+  deliberately-stopped/dead workers (systemd-disable never made durable —
+  the exact risk CLAUDE.md had already flagged as unfixed). `pm_intake`
+  ran ~9h unnoticed and autonomously filed+archived one plan document via
+  LLM decision before being caught. **Stopped `pm_intake` live**, restoring
+  Dave's 2026-07-09 direction; verified nothing else was touched. The other
+  4 (`thumbnail_gen`, `velocity_stats`, `ebay_price_reducer`,
+  `ebay_sku_migrate`) were left running — no individual standing
+  instruction found for each — **Dave's call whether to stop them too.**
+  Durable-stop fix (todo #1322/PP-NIXOS-001) bumped to p5 given the live
+  incident behind it now.
+- **12 doc/plan corrections applied same session** (mechanical, not design
+  judgment — see the DONE doc above for full detail): PP-BACKUP-001 status
+  corrected (durable fix was actually applied + reboot-verified, plan still
+  said otherwise); PP-DATAINTEGRITY-001.md's wrong pp_ref for #152 and
+  missing #1271 absorption; PP-EVENTD-001.md stub's stale frozen status;
+  PP-PRICING-001.md's banned per-provider-JSON secrets pattern (both
+  master-plan and pp/ copies); PP-KNOWLEDGE-001 "5-LAYER" → "6-LAYER";
+  PP-CATIONIX-001.md's 3-week-stale Qtile module-structure section;
+  `ebay_dole` three-way contradiction reconciled across CLAUDE.md + master
+  plan + PP-BULKLIST-001; Done-rollup/Frozen-list stale entries removed
+  (PP-EDITOR-001/PP-DATALEARN-001/PP-MULTIMODEL-001 had open work;
+  #1056 LVM item was closed/superseded); PP-CLIP-001.md header/body Phase 2
+  contradiction; PP-WHISPER-001/PP-STORAGE-001 added to the plan index
+  (recurrence of the s42 "27 PPs dropped from index" failure mode); a
+  severed mid-sentence dependency clause and packet-template code-fence
+  debris repaired.
+- **Not attempted this session, deliberately** — the larger structural fix
+  (master plan is 1,381 lines vs its own ≤500-line rule; ~30 floating
+  unfiled status notes; several PPs still living inline instead of in
+  `plan/pp/`). Folded into existing todo #1331 rather than duplicating.
+- `tgw plan check` clean after all edits. Nothing committed yet — same as
+  every prior session this week, awaiting Dave's go.

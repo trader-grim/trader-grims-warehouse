@@ -237,7 +237,11 @@ journalctl -u 'tgw-worker@<queue>.service' -f
 
 Workers: `token_refresh`, `pm_intake`, `bundle_intake`, `multi_intake`, `ai_identify`,
 `catalog_rebuild`, `plan_render`, `thumbnail_gen`, `ebay_draft`, `ebay_upload`, `ebay_price`,
-`ebay_stage`, `ebay_publish`, `ebay_dole`, `ebay_sync`, `ebay_legacy_sync`, `echo`
+`ebay_stage`, `ebay_publish`, `ebay_sync`, `ebay_legacy_sync`, `echo`. **`ebay_dole` is a
+module (`src/tgw/workers/ebay_dole.py`) but has no installed systemd unit** — corrected
+2026-07-12 (Fable independent review #1338; this list previously implied it runs). A bare
+`tgw restart-workers` would run `systemctl restart` against the unbuilt template unit for
+it — see PP-BULKLIST-001/#1113 before touching that command.
 
 ## Checking queue state
 
@@ -322,24 +326,29 @@ Run as `tgw` user — source files are `rw-------`, secrets are `chmod 600`.
 See `docs/TGW-Plan-Vault/plan/TGW-Master-Plan.md` for the authoritative current state.
 See `docs/TGW-Plan-Vault/plan/handoff.md` for current risks and recommended next sequence.
 
-**As of 2026-07-09:**
+**As of 2026-07-12:**
 
-- **Worker status (`systemctl list-units 'tgw-worker@*'`, verified live):**
-  active — `ai_identify`, `bundle_intake`, `ebay_draft`, `ebay_price`,
-  `ebay_publish`, `ebay_stage`, `ebay_upload`, `echo`, `multi_intake`,
-  `plan_render`, `token_refresh`. inactive/dead — `catalog_rebuild`,
-  `ebay_legacy_sync`, `ebay_price_reducer`, `ebay_sku_migrate`, `ebay_sync`,
-  `thumbnail_gen`, `velocity_stats`. **`pm_intake` stopped 2026-07-09** —
-  Dave: "going a different direction for pm intake" (a redesign, not a
-  crash); still shows `enabled` in systemd since the unit file is Nix-managed
-  (`/etc` read-only) — a flake change is needed to make the stop durable
-  across reboots, not done yet. NOTE: this list of 11 active workers
-  contradicts Dave's own recollection ("yesterday I had most services
-  stopped except main pipeline") — flagging the discrepancy rather than
-  silently reconciling it; worth Dave confirming which state is intended.
-  Plan: stabilize main pipeline + publish/update-existing-listings, demonstrate
-  data-maintenance + budget-conscious execution, THEN reactivate the rest one
-  at a time.
+- **LIVE INCIDENT + fix, 2026-07-12 (Fable independent review #1338 →
+  verified live):** the 2026-07-11 11:11 reboot resurrected `pm_intake` +
+  4 other deliberately-stopped/dead workers (`thumbnail_gen`,
+  `velocity_stats`, `ebay_price_reducer`, `ebay_sku_migrate`), because the
+  systemd-disable was never made durable (exactly the risk flagged below —
+  it happened). `pm_intake` ran unnoticed for ~9h and autonomously
+  filed+archived one plan document via LLM decision before being caught.
+  **`pm_intake` re-stopped live 2026-07-12** — Dave's 2026-07-09 "going a
+  different direction for pm_intake" direction restored. The other 4 were
+  left running (no equivalent explicit standing instruction found for each
+  individually) pending Dave's call. **The durable-stop flake fix is
+  already tracked — todo #1322/PP-NIXOS-001, now with a live incident
+  behind it, worth reprioritizing.**
+- **Worker status (`systemctl list-units 'tgw-worker@*'`, verified live
+  2026-07-12, post-fix):** active — `ai_identify`, `bundle_intake`,
+  `ebay_draft`, `ebay_price`, `ebay_price_reducer`, `ebay_publish`,
+  `ebay_sku_migrate`, `ebay_stage`, `ebay_upload`, `echo`, `multi_intake`,
+  `plan_render`, `thumbnail_gen`, `token_refresh`, `velocity_stats`.
+  stopped — `pm_intake` (re-stopped 2026-07-12, see incident above),
+  `catalog_rebuild`, `ebay_legacy_sync`, `ebay_sync`. Until #1322 lands,
+  treat any worker-status snapshot as valid only until the next reboot.
 - **LLM providers (2026-07-08, Dave):** paid direct-API keys added for
   Google, DeepSeek, Anthropic; all three flipped to direct-primary
   (`google_direct`/`deepseek_direct`/`anthropic_direct`), OpenRouter demoted

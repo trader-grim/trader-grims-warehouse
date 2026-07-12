@@ -201,8 +201,13 @@ R2: #1181/#1202 exception propagation fix complete — quota exhaustion now corr
 Done: this redraw; work-packet protocol below; PRIME DIRECTIVES in CLAUDE.md; Data
 Charter; rolling handoff rewrite. Open: keep handoff ≤150 lines; vault conflict-file
 cleanup (15 files); drain `inbox/queued/`; tracker prune with Dave (open todos >30d
-untouched → packet, FUTURE-IDEAS, or delete); fix `tgw restart-workers` (references
-nonexistent `ebay_dole`); CLAUDE.md `tgw todo --add` syntax fix.
+untouched → packet, FUTURE-IDEAS, or delete); fix `tgw restart-workers` — the
+`ebay_dole` module exists (`src/tgw/workers/ebay_dole.py`, in `WORKER_QUEUES`)
+but **no systemd unit was ever installed** for it (corrected 2026-07-12,
+Fable independent review #1338: "nonexistent" was wrong); a bare
+`tgw restart-workers` would run `systemctl restart` against the unbuilt
+template unit and could start it unintentionally — latent hazard, not just
+a wording nit, see PP-BULKLIST-001/#1113; CLAUDE.md `tgw todo --add` syntax fix.
 
 ---
 
@@ -221,8 +226,6 @@ One packet = one todo = one model session. Non-trivial packets get
 `plan/packets/<todo-id>-<slug>.md`:
 
 ```
-
-Fixed tgw-restore.sh bug, wrote TGW-VAULT-RESTORE.md (both restore paths, live-verified dry-run).
 # Packet: <observable outcome>
 Todo: #NNNN   PP: PP-XXX-001   Track: R1.x
 ## Context budget (ALL the model may load)
@@ -440,9 +443,10 @@ ran `tgw-db-backup.service` to catch up the dump (confirmed via `tgw
 health` — staleness cleared), kicked off `tgw-cloud-sync.service` (first
 full run, long-running, left running in background).
 
-**Durable fix — drafted, validated, NOT yet applied to the live host**
-(Dave: "add that to the plan" rather than deploy immediately). Changes
-staged in `~/tgw-flake` (uncommitted):
+**Durable fix — APPLIED and reboot-verified 2026-07-12** (corrected from
+"NOT yet applied," Fable independent review #1338: the master plan's own
+warning had gone stale — the fix was live-verified before this correction
+landed). Changes shipped in `~/tgw-flake`:
 - `nix/hosts/tgw-prod.nix` — new `fileSystems` entries (by-label, `nofail`)
   for all three `sdc` partitions: `tgw-db-backup`, `tgw-itemdata-snap`,
   `tgw-itemarchive` — the latter two were equally undeclared and at the
@@ -452,15 +456,16 @@ staged in `~/tgw-flake` (uncommitted):
   pattern `tgw-snapshot` already uses for its own mount) so a missing mount
   is a loud, correctly-attributed service failure instead of a confusing
   `mkdir` error.
-- Validated: `nix flake check` clean for all 3 hosts; `nixos-rebuild build
-  --flake .#tgw-prod` succeeds; generated `/etc/fstab` inspected and
-  correct (all three `LABEL=...  nofail,x-systemd.device-timeout=5s`
-  entries present).
-- **Next step (needs Dave's go, or his own run):** `sudo nixos-rebuild
-  switch --flake .#tgw-prod` from `~/tgw-flake`, then commit the flake
-  changes. Until switched, the current mount is only in the live running
-  system state (from the manual `mount` above) — it will NOT survive
-  another reboot.
+- Validated: `nix flake check` clean for all 3 hosts; `/etc/fstab` confirmed
+  containing all three `LABEL=...  nofail,x-systemd.device-timeout=5s`
+  entries; **the 2026-07-11 11:11 reboot proved the fix live** — `/dev/sdc1`
+  came back mounted at `/opt/TGW/mnt/tgw-db-backup` without manual
+  intervention.
+- Remaining open item: only the rclone rate-limit issue below (#1264) —
+  the mount-durability risk itself is closed.
+
+**Also fixed:** `tgw-restore.sh` bug; `TGW-VAULT-RESTORE.md` written
+covering both restore paths, live-verified dry-run.
 
 **Separate, newly-discovered issue (todo #1264):** the `tgw-cloud-sync.service`
 run kicked off above did NOT succeed — it failed after 43 minutes with a
@@ -570,23 +575,11 @@ quick fix."
   ITEMDATA_ROOT now config-derived, matching sibling
   photosync_canary_probe.py). Todo #1203 is `done` — this section used to
   say "INPROGRESS," which was stale.
-- **nix flake — 3 SECURITY findings remain open, not yet fixed:**
+- **nix flake — 3 SECURITY findings remain open, not yet fixed** (sentence
+  reunited 2026-07-12, Fable independent review #1338 — this list had been
+  severed mid-clause by misfiled notes for over a week):
   - #1219 (NFS Queue export writable to the whole 192.168.60.0/24 subnet,
     should be host-locked like the ro exports below it) — **BLOCKED** on
-
-Fixed 1/2/3 from #1168/#1169/#1173 code review (see document)
-
-- #1168 fix: ebay_publish condition fallback now writes corrected condition back to draft_listing. Tests added. Done.
-
-***DONE-1171*** — workers audit cohesion findings fixed and tested (see document)
-
-- #1173 fix: lookup_epid re-raises QuotaBudgetExceeded (see reference).
-
-todo #1181 (audit#1143) — best_category() fallback chain fixed; see document in dev-workflow/research.
-
-Findings #2 (ebay conditions memoization) and #3 (trading retry backoff) shipped — see [DONE-1182-ebay-cohesion-cache-retry.md](reference/DONE-1182-ebay-cohesion-cache-retry.md)
-
-- #1206 (requeue-402 dedupe guard) resolved and documented.
     #1228 (no static IP/DHCP reservation exists yet for the intake
     camera/phone device; checked live ARP table 2026-07-10, several
     unidentified LAN hosts, none confirmable as the intake device from
@@ -597,9 +590,19 @@ Findings #2 (ebay conditions memoization) and #3 (trading retry backoff) shipped
     `feedback-deprioritize-syncthing-auth` memory) — intentionally not
     being worked, not an oversight.
 
-- DONE #1235 atomic-write sweep: 6 sites fixed, 8 new tests, 1861 passing. Deviation: itemdata_scrub.py write stays outside fence (PP-FENCE-001 gap documented).
-
-- Session 48 (2026-07-06) completed dead-letter, atomic-write, multi_intake fixes; code reviews addressed all critical findings except 4 PLAUSIBLE deferred as todo #1246. Dave manually checking UI post-changes before next steps. PR #8 not yet merged.
+**Other audit#1143 fixes landed this stretch** (misfiled notes consolidated
+2026-07-12): #1168 (ebay_publish condition fallback now writes corrected
+condition back to draft_listing, tests added), #1171 (workers-audit cohesion
+findings, see `DONE-1171`), #1173 (`lookup_epid` re-raises
+`QuotaBudgetExceeded`), #1181 (`best_category()` fallback chain fixed),
+#1182 findings #2/#3 (ebay conditions memoization + trading retry backoff,
+[DONE-1182-ebay-cohesion-cache-retry.md](reference/DONE-1182-ebay-cohesion-cache-retry.md)),
+#1206 (requeue-402 dedupe guard), #1235 (atomic-write sweep: 6 sites fixed,
+8 new tests, 1861 passing — deviation: `itemdata_scrub.py` write stays
+outside fence, PP-FENCE-001 gap documented). Session 48 (2026-07-06)
+completed dead-letter/atomic-write/multi_intake fixes; code reviews
+addressed all critical findings except 4 PLAUSIBLE deferred as todo #1246;
+PR #8 not yet merged.
 ## PP-HARDWARE-001 — IT / hardware track (drive-space re-evaluation absorbed) — NEW 2026-07-11
 **Dave, triaging #1136: "it and #1136 and similar need an IT or hardware
 PP."** Previously PP-HARDWARE-001 was only referenced by name from other
@@ -659,7 +662,9 @@ across the already-mounted data is the near-term space-recovery lever,
 before deciding what (if anything) to offload onto `sdi`.
 
 Audited sdb/sdc live: sdb absent, sdc repartitioned into backup services. No free disk to grow vg_tgw. Closing #1056 as superseded, opened #1136 for re-evaluation.
-## PP-KNOWLEDGE-001 — the knowledge & translation hub — 5-LAYER UMBRELLA, extended 2026-07-11
+## PP-KNOWLEDGE-001 — the knowledge & translation hub — 6-LAYER UMBRELLA, extended 2026-07-11
+**Corrected from "5-LAYER" 2026-07-12 (Fable independent review #1338) — the
+Graph/Graphify row was added this session without updating the count.**
 **PLANNED s45 (2026-07-04), extended this session into the full 5-layer
 umbrella (Concept 2).** Leotha (PP-HERMES-EA-001) curates/organizes the data
 long-term; this plan is the architecture only.
@@ -983,6 +988,23 @@ physical-stock-vs-record reconciliation. Not started, needs its own
 scoping pass before either leg is buildable. Full design:
 `pp/PP-INVENTORY-001.md`.
 
+## PP-STORAGE-001 — semi-chaotic storage (size-class, not category)
+**Added to index 2026-07-12** (Fable independent review #1338 found it
+relied on by PP-INVENTORY-001 and referenced above as a settled sibling,
+but absent from this index entirely — recurrence of the s42 27-PP-dropped
+failure mode). Items stored by size class, not category;
+`size_class` lives in `category-groups.json`. No fresh design pass done
+this session — pointer only; promote to a real heading + `pp/` doc on
+next touch.
+
+## PP-WHISPER-001 — voice transcription → suggestion pipeline
+**Added to index 2026-07-12** (Fable independent review #1338 — `pp/PP-INTAKE-004.md`
+cites this as an existing proven pipeline, but it had zero entry anywhere
+in this plan). Real facility, verified live: `cmd_whisper_to_suggest`
+(`src/tgw/api.py`) + `tgw history-index` CLI. No design doc or todo history
+captured here yet — pointer only; promote to a real heading + `pp/` doc on
+next touch, feeds PP-INTAKE-004's justshoutit voice-operated listing.
+
 ## PP-VISION-001 — vision-matching capability (GPU-gated)
 **Given its own heading 2026-07-11** — was a bare Frozen-list mention with
 zero design substance. FROZEN, GPU-gated, unchanged. The underlying
@@ -1017,8 +1039,9 @@ Two candidate data sources for comps, not mutually exclusive:
 2. **Google Shopping comps via SerpApi (paid)** — the designed interim
    substitute for marketplace_insights, dropped from the s42 redraw index by
    mistake and restored at Dave's flag. Full Phase 1 design (title-based
-   Shopping SERP in ai_identify, `apis/lookup/shopping_search.py`, key at
-   `secrets_root/serpapi-credentials.json`): `pp/PP-PRICING-001.md`.
+   Shopping SERP in ai_identify, `apis/lookup/shopping_search.py`, key via
+   `secrets_root/tgw.env` per settled architecture, corrected 2026-07-12):
+   `pp/PP-PRICING-001.md`.
    Cross-market active prices (Google Shopping: eBay/Amazon/Walmart) — a
    real floor signal, unlike same-marketplace Browse asking prices.
 3. **Google-grounded price check** (Dave's 2026-06-09 suggestion, also
@@ -1179,9 +1202,16 @@ next planning pass.
 
 ### Done (designs in `pp/` or archive; tracker holds history)
 
-PP-EDITOR-001 (web UI, 31 todos) · PP-EBAY-MIRROR-001 (P1/P1.5/P2) · PP-MIGRATE-001 ✅
-2026-06-20 · PP-DEADLETTER-001 · PP-DOCFLOW-001 · PP-INTAKE-001 · PP-DATALEARN-001 ·
-PP-MULTIMODEL-001 · PP-OFFER-001 · PP-OPS-001 · PP-PROMO-001 · PP-REF-002 ·
+**PP-EDITOR-001, PP-DATALEARN-001, PP-MULTIMODEL-001 removed from this list
+2026-07-12** (Fable independent review #1338) — each was given its own
+"Open" heading above on 2026-07-11 specifically because it has real open
+work (PP-EDITOR-001: #1145 defect map; PP-DATALEARN-001: #1108/#144;
+PP-MULTIMODEL-001: #1251), but the promotion never removed the matching
+Done-rollup entry. See their headings under "Open — active or gated" above.
+
+PP-EBAY-MIRROR-001 (P1/P1.5/P2) · PP-MIGRATE-001 ✅
+2026-06-20 · PP-DEADLETTER-001 · PP-DOCFLOW-001 · PP-INTAKE-001 ·
+PP-OFFER-001 · PP-OPS-001 · PP-PROMO-001 · PP-REF-002 ·
 PP-REVISION-001 · PP-SHELL-001 · PP-STORE-001 · PP-TODO-001 · PP-VERIFY-001 (scaffold;
 integration deferred) · PP-WM-001/PP-HM-001 (Sway/HM desktop) · PP-ADD-009 ·
 PP-CI-001 · PP-CONTEXT-001 · PP-GLOBALS-001 (analysis) · PP-LISTING-001 ·
@@ -1202,6 +1232,7 @@ DONE-1053: data-scrub legacy eBay Trading API fields — 20,419 items modified, 
 
 - todo #1138: revised help text for `tgw revise --set` to clarify dotted-path claim (bare field names only, no nested expansion). Live evidence: 2046 passed, ruff clean.
 
+#1338 Fable independent review of 2026-07-11 master-plan retarget — 13 confirmed findings (1 live incident: reboot-resurrected workers incl. pm_intake, re-stopped; 12 doc/plan corrections applied same session) — see document: dev-workflow/research/DONE-1338-plan-retarget-followup-triage.md
 #1323 master plan retarget — catio development framework — see document: dev-workflow/research/DONE-1323-master-plan-catio-retarget.md
 #1320 title-length guard — see document: dev-workflow/research/DONE-title-length-guard-2026-07-10.md
 #1319 title-length enforcement fixed — see document: dev-workflow/research/DONE-1319-title-length-enforcement.md
@@ -1250,10 +1281,13 @@ PP-DERIVED-001 (design feeds Data Charter) · PP-DATA-OWN-001 (axiom absorbed in
 charter; mirror work continues as R1.8 + mirror fields) · PP-UI-INTEGRITY-001 ·
 PP-REVIEW-001 ·
 PP-RESCUE-001 · PP-AGENTIC-PRICE-001 ·
-LVM expansion (#1056) ·
 PP-CANONICALIZE-001 · PP-CAPTURE-001 ·
 PP-HINT-001 (revisit) · PP-IFDIR-001 · PP-REMOTE-001 · PP-REF-003 · PP-GIT-001.
 Long-horizon concepts: `FUTURE-IDEAS.md` (planning sessions only).
+
+*(Frozen list: "LVM expansion (#1056)" removed 2026-07-12, Fable independent
+review #1338 — #1056 is closed, superseded by #1136 under PP-HARDWARE-001,
+see that section's own "Closing #1056 as superseded" note above.)*
 
 *(Index completeness: restored 2026-07-02 after Dave caught PP-PRICING-001 missing —
 the s42 redraw had dropped 27 PPs from the index; all archived designs remain

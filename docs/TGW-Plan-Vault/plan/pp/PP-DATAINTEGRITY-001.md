@@ -32,12 +32,18 @@ not duplicated here. Three legs:
    (per the doc): PP-ANNEX-001's content-addressed ingest makes this class
    of bug structurally impossible — annex hashes by construction.
 
+4. **Sold-order-history-gap wiring** (todo #1271) — `sold-order-history-gaps.jsonl`
+   is written but had no reader wired in; absorbed into this track same
+   session it was opened (invariant-C11 follow-up from commit 5c6223e).
+
 ## Future candidates for this track (not yet triaged, flag at next touch)
 
 Reconciliation-class work that currently lives elsewhere but may belong
 here on next review: the sync-conflict resolution worker
-(`src/tgw/sync_conflict.py`, todo #152, done, currently tagged
-PP-KNOWLEDGE-001 as a Recoll/MCP consumer) — arguably also a data-integrity
+(`src/tgw/sync_conflict.py`, todo #152, done, never actually run against a
+real conflict file, no systemd unit — currently tagged **PP-PORTABLE-CATALOG-001**,
+corrected 2026-07-12 by Fable independent review #1338; this doc previously
+misstated it as tagged PP-KNOWLEDGE-001) — arguably also a data-integrity
 concern (resolving divergent Syncthing copies), not re-tagged now since
 it's closed and the current tag isn't wrong, just worth a look if this
 track grows.

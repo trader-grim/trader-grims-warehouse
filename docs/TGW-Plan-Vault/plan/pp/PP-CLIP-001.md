@@ -9,16 +9,15 @@
 - `tgw` fish wrapper bypasses sudo for `clip` subcommand (DB is per-user in /home/db)
 - `nix/qtile/autostart.sh` imports session env on login so service always has DISPLAY/WAYLAND_DISPLAY
 
-**Next: Phase 2 — rofi/dmenu history picker (classic clipboard manager UI)**
+**Phase 2 delivered:** rofi/dmenu history picker (classic clipboard manager UI),
+`DONE-1055-clip-picker.md`.
 
-**GATE (Dave, 2026-07-02 session 40): a conceptual planning pass comes FIRST — todo #1086.**
-Before building Phase 2 or any further clipboard tooling, run a /tgw-plan pass that unifies
-the whole clipboard picture: PP-CLIP-001 phases, PP-EVENTD-001 event-server design
-(reference/PP-EVENTD-001-design.md), and the unprocessed inbox research drop
-("linux universal lan clipboard manager", 2026-06-28). Validate or revise the staircase
-clipd → rofi picker → hook sync → event server so the rofi UI is built against the
-destination architecture, not in isolation. Output: docs/ai-plans/clipboard-concept.md.
-Todo #1055 (rofi picker) now depends on #1086.
+**GATE (Dave, 2026-07-02 session 40) — CLEARED 2026-07-11:** the conceptual
+planning pass (todo #1086) that had to come before Phase 2/further clipboard
+tooling has run and RATIFIED the local-only split (see Status line above and
+`docs/ai-plans/clipboard-concept.md`) — cross-machine sync moved to
+PP-EVENTD-001, tgw-clipd/rofi stay local-only forever. Todo #1055 (rofi
+picker) is DONE, no longer gated.
 
 **Decisions (session 28, revised 2026-06-28 session 33):**
 - **Wayland primary; X11 compatibility if we are lucky.** Original decision held X11 as the
