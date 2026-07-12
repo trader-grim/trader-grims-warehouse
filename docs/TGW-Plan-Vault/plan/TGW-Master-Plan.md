@@ -408,9 +408,16 @@ coverage). Todo #1145: go over the full defect list with Dave, produce a
 defect→root-cause→packet map. Next: Dave B0 sign-off, defect walkthrough,
 price test, fleet getOffer sweep.
 
-## PP-QUOTA-001 — metered-API budget layer ✅ (built s42)
-`tgw.quota`, raw capture, ops digest, health check live. Remaining observability
-packets tracked under R2, not here.
+## PP-QUOTA-001 — metered-API budget layer (call-count budgets built s42; balance monitoring open)
+`tgw.quota`, raw capture, ops digest, health check live for CALL-COUNT
+budgets. **✅ removed 2026-07-11** — Dave found a real remaining gap: the
+llm_google/llm_deepseek/llm_anthropic caps (300/500/100) are call-count
+proxies, not actual dollar-balance tracking. No code anywhere queries real
+provider account balance or warns proactively before it runs dry — the
+provider's own hard cap is currently the ONLY safety net, and that should
+be the fallback, not the primary signal. "Fine now only because the
+pipeline is quiet" (Dave) — a real risk once volume returns. Todo #1337.
+Remaining observability packets tracked under R2, not here.
 
 ## PP-BACKUP-001 — backup + DR
 **Top operator risk: nothing running; work ledger not re-derivable.** Scripts+timers
@@ -465,7 +472,14 @@ fixed) — needs rclone rate-limiting (`--tpslimit`/`--drive-pacer-min-sleep`)
 or a chunked first sync, not a bare retry (the underlying cause is
 unchanged, a retry now would likely hit the same wall).
 
-## Full-codebase cohesion+correctness audit (2pm agenda, todo #1143)
+## PP-COHESION-001 — full-codebase cohesion+correctness audit (2pm agenda, todo #1143)
+**Given a real PP designation 2026-07-11** — was source-tagged only
+(`audit#1143`, `audit#COHESION-2026-07`) despite being a real, recurring,
+already-substantial body of work with its own section here. Now also
+covers the 2026-07-07 follow-up cohesion pass (45 findings, todos
+#1273-1317), not just the original #1143 batch — both batches share this
+heading/PP going forward.
+
 **Dave: "I want to right the ship... check the whole thing and make sure
 each part and the whole are cohesive."** Prompted by discovering that a
 full week of code (2026-06-24 through 2026-07-02, the `ae9b1e6` commit
@@ -586,7 +600,24 @@ Findings #2 (ebay conditions memoization) and #3 (trading retry backoff) shipped
 - DONE #1235 atomic-write sweep: 6 sites fixed, 8 new tests, 1861 passing. Deviation: itemdata_scrub.py write stays outside fence (PP-FENCE-001 gap documented).
 
 - Session 48 (2026-07-06) completed dead-letter, atomic-write, multi_intake fixes; code reviews addressed all critical findings except 4 PLAUSIBLE deferred as todo #1246. Dave manually checking UI post-changes before next steps. PR #8 not yet merged.
-## Drive-space re-evaluation (flagged 2026-07-04, todo #1136)
+## PP-HARDWARE-001 — IT / hardware track (drive-space re-evaluation absorbed) — NEW 2026-07-11
+**Dave, triaging #1136: "it and #1136 and similar need an IT or hardware
+PP."** Previously PP-HARDWARE-001 was only referenced by name from other
+docs (GPU upgrade), never had its own heading. Governing philosophy:
+"we get it running, we make money, we get server. We no make money we use
+this thing" — bootstrap hardware until revenue justifies real
+infrastructure. Near-term concrete plan (Dave's own words): M.2-to-SATA
+adapter to bring a 1TB USB SSD onto the board replacing an HDD; a 4-bay
+SSD enclosure + 4 spare SSDs for a real storage tier; heat sinks on the
+SSDs. **Open, unresolved, flagged for a dedicated pass:** where should
+knowledge-hub work (PP-KNOWLEDGE-001) physically live so it doesn't fill
+`/opt/TGW` — the existing tiered-remote design (PP-ANNEX-001, the
+power-tiered drive inventory below) points away from the NVMe but this
+hasn't been explicitly confirmed for this specific question; and Dave's
+own ask for "a real analysis of what we need, what we want, what we will
+need" — not done, this PP is the placeholder for it, not a substitute.
+Full design: `pp/PP-HARDWARE-001.md`.
+
 **Dave: "put revaluation item into plan for drive space."** Todo #1056
 (extend `vg_tgw` into HDD space) turned out blocked on a stale premise:
 checked live `lsblk`/`pvs` — sdb no longer appears in the disk list at
@@ -736,6 +767,22 @@ history plausibly has real duplicate files recoverable via a dedup scan
 (fclones/rmlint/sha256 fingerprinting, per Phase 0.1's own tooling list),
 achievable against what's already mounted, no new drives needed first.
 
+## PP-DATAINTEGRITY-001 — data reconciliation & integrity track — NEW 2026-07-11
+**Dave: "there should be a data integrity track, for all of the data
+reconciliations — there is a planning item or two unaddressed."** Correct
+diagnosis — `docs/ai-plans/photo-integrity-mitigation.md` already existed
+as a real 3-legged design (detect/recover/prevent) but had no single
+owning PP (split across PP-UIPIPE-001+PP-DRIVE-INDEX-001+PP-ANNEX-001),
+which is exactly why legs 2/3 (#1266, #1267) sat untagged with nowhere
+clean to live — doubly true since PP-UIPIPE-001 no longer exists as its
+own PP (folded into PP-EDITOR-001 same session). Leg 1 (detect,
+`photo_files_readable` catalog-verify rule) DONE #1154 2026-07-05 — 206
+bad/149 SKUs found. Legs 2 (verify-after-copy sha256 helper) and 3
+(decode-verify at intake) open. Recovery still rides PP-DRIVE-INDEX-001
+Phase 1; prevention's structural endgame still depends on PP-ANNEX-001.
+Full design: `docs/ai-plans/photo-integrity-mitigation.md`; PP index:
+`pp/PP-DATAINTEGRITY-001.md`.
+
 ## PP-NIXOS-001 — NixOS migration (CatioNIX)
 Canonical flake `~/tgw-flake` working; main-repo merge + workflow rules pending; a1131
 no-GitHub-access (todo #1082); no process supervision for agent processes (design
@@ -838,6 +885,30 @@ Transport: PostgreSQL LISTEN/NOTIFY (already the settled design, NOT NATS —
 distinct from PP-AIOPS-001's separate JetStream audit-log use). Full design
 + Radar requirements: `reference/PP-EVENTD-001-design.md`.
 
+## PP-PORTABLE-CATALOG-001 — offline/portable catalog sync (Flutter) — first real design doc 2026-07-11
+**Given its own heading, pulled OUT of the "Done" rollup — it was never
+actually done.** Real, substantive code exists (Dio offline data layer,
+sqflite outbox, snapshot-atomic-sync) but has **never been installed on
+a1131** (its target device), never live-verified, and a documented
+precedent exists of this exact feature self-marking "done" while the
+Flutter build was actively failing (`SUGGESTIONS.md:209-210`, todo #151).
+Deep architecture review (2026-07-11, Dave: "see where it lacks or
+shines") found real structural gaps, not just missing tests: connectivity
+detection is 100% manual despite the packages for automating it being
+installed and unused; zero conflict resolution; offline reads don't
+reflect the device's own queued edits; no retry cap on failed mutations;
+several sync-state UI providers are computed and never rendered; and
+**the backchannel Dave flagged as still-needed is confirmed missing** — no
+server-initiated communication of any kind exists. A planning doc
+(`PP-EVENTD-001-design.md`) had separately and incorrectly claimed a
+Flutter HTTP listener was "already implemented" — corrected same day.
+The backchannel fix is PP-EVENTD-001's own already-scoped Phase 5 (Flutter
+HUD WebSocket) — not new work, just now confirmed necessary rather than
+assumed-someday. Full assessment + phased remediation plan (Phase A:
+harden the existing manual model; Phase B: build the backchannel, depends
+on PP-EVENTD-001; Phase C: conflict resolution, needs its own design pass):
+`pp/PP-PORTABLE-CATALOG-001.md`.
+
 ## PP-CATPICK-001 — smart category picker
 **Phase 1 DONE 2026-07-04** (#1079): `category_candidates` (id/name/full ancestor
 path) backfilled onto all 25 `category-groups.json` groups from the on-disk eBay
@@ -847,6 +918,80 @@ category tree cache — zero live API calls. `scripts/catpick_backfill_candidate
 bare-ID fallback rather than dropped, flagged for review. Phase 2 (the actual
 group-shortlist-first picker UI/logic) remains FROZEN until R1 drains. Memory:
 project-smart-category-picker.
+
+## PP-SELLERHUB-001 — TGW as a full Seller Hub replacement — NEW 2026-07-11
+**Dave: "our app needs to be able to do everything eBay Seller Hub does,
+but better."** Surfaced while triaging a homeless todo (#895) — not a
+one-off config gap, a previously-unstated principle. Scope deliberately
+unlimited (Dave declined to bound it) — this PP is the durable home for any
+"TGW should do X the way Seller Hub does" note going forward, even ones
+that won't get built soon. **Priority #1, concrete: category management +
+business policies** (shipping etc.) — TGW has category *data*
+(PP-CATPICK-001) but no live management/sync surface; absorbs #895
+(shipping-cost config) and #12 (9 wrong-shipping Seller Hub listings — same
+gap class). Everything else (profile editing, broader policy management,
+and whatever else surfaces) parked pending a proposed but **not-yet-run**
+Gemini audit of Seller Hub's full feature surface vs. TGW's current
+capability — real work needing its own scoping pass (mechanism, cost/quota
+estimate) before it runs. Full design: `pp/PP-SELLERHUB-001.md`.
+
+## PP-DATALEARN-001 — alt-text / vision data pipeline
+**Given its own heading 2026-07-11** — previously only a bare "Done"
+rollup mention despite still having open work (#1108: `alt_text` queue has
+no consumer, no `tgw-worker@alt_text` unit exists though `ai_identify`
+writes to it; #144: full alt-text batch via Gemini Batch API). See also
+FUTURE-IDEAS.md's deferred "alt-text on all item photos" item (multi-photo
+pass, still gated on model routing settling) — related but not the same
+scope as these two open todos.
+
+## PP-LOOKUP-001 — product enrichment / barcode lookup (Tier 1)
+**Given its own heading 2026-07-11** — previously only a bare "Done"
+rollup mention (Tier 1). Open: #7, IGDB credentials (Twitch dev account →
+register app → save client_id/client_secret) for game/media identification
+lookups. See `reference/PP-LOOKUP-001-APIs.md`.
+
+## PP-MULTIMODEL-001 — LLM provider/model routing
+**Given its own heading 2026-07-11** — previously only a bare "Done"
+rollup mention despite still having open work. Open: #1251, provisional
+quota-cap revisit for the DeepSeek/Anthropic direct-API integrations
+(`llm.py _call_deepseek_direct`/`_call_anthropic_direct`, quota caps
+300/500/100) — **blocked on #1250** (`PP-COHESION-001`, the resubmission-
+storm bug-class hardening) per `tgw-models.json`'s own config comment;
+dependency now explicit (`depends_on=[1250]`), not just discoverable by
+re-reading the comment. Also needs confirming `deepseek-v4-flash` and
+`claude-haiku-4-5-20251001` are still the correct/current direct-API model
+ids after a few days of real traffic.
+
+## PP-MACRO-001 — macroboard hardware (#15)
+**Given its own heading 2026-07-11** — was a bare Frozen-list mention.
+Status UNCHANGED — still frozen until R1 drains, this only fixes
+visibility. Open: #15, second keyboard wired up as a macroboard (see
+`etc/interfaces/keyd/tgw-macroboard.conf`) — an operator-interface
+hardware addition, not gated on anything beyond the freeze itself.
+
+## PP-INVENTORY-001 — physical inventory verification — NEW 2026-07-11
+**Dave: "11 is an entire missing PP — the tools to accomplish the job,
+both the standard manual tool as well as the already supposedly in the
+plan AI vision inventory helper."** Confirmed: no design doc existed for
+either leg — `PP-VISION-001` was only ever a bare "(GPU-gated)" mention,
+no substance. Two complementary tools: (1) manual sweep, absorbs #11
+(`tgw ebay-sweep → physical inventory review`); (2) AI-vision-assisted
+verification, consumes PP-VISION-001's capability. Distinct from
+PP-STORAGE-001 (storage *organization*, size-class not category) and
+PP-DATAINTEGRITY-001 (data *record* integrity) — this is specifically
+physical-stock-vs-record reconciliation. Not started, needs its own
+scoping pass before either leg is buildable. Full design:
+`pp/PP-INVENTORY-001.md`.
+
+## PP-VISION-001 — vision-matching capability (GPU-gated)
+**Given its own heading 2026-07-11** — was a bare Frozen-list mention with
+zero design substance. FROZEN, GPU-gated, unchanged. The underlying
+vision-matching capability consumed by PP-INVENTORY-001's automated leg;
+originally conceived for findability ("locate this specific known item"
+in PP-STORAGE-001's semi-chaotic size-class storage) — PP-INVENTORY-001's
+verification use case ("does physical stock match records") is a related
+but distinct application of the same capability. No design doc exists yet
+for the capability itself, only its use cases.
 
 ## PP-REPRICER-001 — market-data repricer (the tool)
 **Rescoped 2026-07-11 (Dave): this PP is the mechanical tool, not pricing
@@ -1035,7 +1180,7 @@ next planning pass.
 ### Done (designs in `pp/` or archive; tracker holds history)
 
 PP-EDITOR-001 (web UI, 31 todos) · PP-EBAY-MIRROR-001 (P1/P1.5/P2) · PP-MIGRATE-001 ✅
-2026-06-20 · PP-PORTABLE-CATALOG-001 (P2 Flutter build) · PP-DEADLETTER-001 · PP-DOCFLOW-001 · PP-INTAKE-001 · PP-DATALEARN-001 ·
+2026-06-20 · PP-DEADLETTER-001 · PP-DOCFLOW-001 · PP-INTAKE-001 · PP-DATALEARN-001 ·
 PP-MULTIMODEL-001 · PP-OFFER-001 · PP-OPS-001 · PP-PROMO-001 · PP-REF-002 ·
 PP-REVISION-001 · PP-SHELL-001 · PP-STORE-001 · PP-TODO-001 · PP-VERIFY-001 (scaffold;
 integration deferred) · PP-WM-001/PP-HM-001 (Sway/HM desktop) · PP-ADD-009 ·
@@ -1057,6 +1202,7 @@ DONE-1053: data-scrub legacy eBay Trading API fields — 20,419 items modified, 
 
 - todo #1138: revised help text for `tgw revise --set` to clarify dotted-path claim (bare field names only, no nested expansion). Live evidence: 2046 passed, ruff clean.
 
+#1323 master plan retarget — catio development framework — see document: dev-workflow/research/DONE-1323-master-plan-catio-retarget.md
 #1320 title-length guard — see document: dev-workflow/research/DONE-title-length-guard-2026-07-10.md
 #1319 title-length enforcement fixed — see document: dev-workflow/research/DONE-1319-title-length-enforcement.md
 #1318 restore save-draft button fixed — see document: dev-workflow/research/DONE-1318-restore-save-draft-button.md
@@ -1102,11 +1248,10 @@ PP-FULFILLMENT-001 ·
 PP-TASKER-001 (functions being absorbed into PP-INTAKE-004) · PP-PERP-AUTO-001 · PP-EMAIL-001 · PP-CLAUDE-HELP-001 ·
 PP-DERIVED-001 (design feeds Data Charter) · PP-DATA-OWN-001 (axiom absorbed into
 charter; mirror work continues as R1.8 + mirror fields) · PP-UI-INTEGRITY-001 ·
-PP-REVIEW-001 · PP-MACRO-001 (#15) ·
-PP-STORAGE-001/PP-VISION-001 (GPU-gated) · PP-RESCUE-001 · PP-AGENTIC-PRICE-001 ·
+PP-REVIEW-001 ·
+PP-RESCUE-001 · PP-AGENTIC-PRICE-001 ·
 LVM expansion (#1056) ·
-PP-PRICING-001 (Google Shopping SERP comps — design `pp/PP-PRICING-001.md`, thaws with
-the pricing rebuild, see PP-REPRICER-001) · PP-CANONICALIZE-001 · PP-CAPTURE-001 ·
+PP-CANONICALIZE-001 · PP-CAPTURE-001 ·
 PP-HINT-001 (revisit) · PP-IFDIR-001 · PP-REMOTE-001 · PP-REF-003 · PP-GIT-001.
 Long-horizon concepts: `FUTURE-IDEAS.md` (planning sessions only).
 

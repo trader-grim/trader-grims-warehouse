@@ -226,12 +226,28 @@ systemd.user.services.clip-route-daemon = {
 
 ## Flutter HUD integration
 
-Flutter app connects via HTTP listener (already implemented). On event:
+**CORRECTED 2026-07-11 — the "already implemented" claim below was false,
+found during a deep architecture review of `apps/tgw_app/` triggered by
+Dave asking for a cohesive assessment of PP-PORTABLE-CATALOG-001.**
+Exhaustively checked: no `HttpServer`, no `shelf`, no WebSocket/SSE client,
+no push-notification setup, no background-task wiring anywhere in the
+Flutter app. It is a pure HTTP *client* (Dio, request/response only) —
+there is **no listener of any kind**, and zero server-initiated
+communication exists today. This was never built; the original text below
+overstated the state of the codebase and should not have been trusted
+without verification (the same "marked/described as done without checking"
+failure mode found elsewhere this session — see PP-PORTABLE-CATALOG-001.md).
+
+Original (aspirational) design intent, still the right shape, just not
+built — kept for reference:
 - `payload_type: sku` → show item lookup card
 - `payload_type: clipboard_image` → show preview (inline or annex fetch)
 - `payload_type: pipeline_event` → worker notification
 
-WebSocket upgrade from the Go daemon is straightforward — add in Phase 5.
+This is now tracked as real, scoped work in `plan/pp/PP-PORTABLE-CATALOG-001.md`
+("the backchannel") rather than an assumed-done integration point. Building
+it makes the Flutter app a bidirectional event-bus participant, the same
+pattern already specified for PP-INTAKE-004's camera app.
 
 ---
 

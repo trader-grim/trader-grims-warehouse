@@ -57,6 +57,17 @@ Hermes = the assistant; Tigwa/Leotha = which way the door is open.
   changes are isolated until explicitly committed" — Tigwa's training runs
   happen inside that same isolation model once it's built, not before.
 
+## Task-selection pattern for early apprenticeship (Dave, 2026-07-11)
+
+While triaging the backlog, Dave flagged `#1232` (a D-Link router
+ecosystem proposal) as "a good fit for Tigwa to handle." Not a subject-
+matter classification — a design note on what KIND of task suits early
+training: self-contained, low blast-radius, proposal/research-shaped work
+that doesn't touch production data or live listings. Worth using this as
+the actual selection criterion when queuing Tigwa's first real tasks,
+rather than picking by subject matter alone. (`#1232` itself stays tagged
+`PP-HARDWARE-001` — this note is about task *shape*, not ownership.)
+
 ## Two levels of "model it first"
 
 1. **Hermes/Tigwa models new *workers & processes*.** Prototype a would-be
