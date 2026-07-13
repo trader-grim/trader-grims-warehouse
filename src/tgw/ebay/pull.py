@@ -11,6 +11,7 @@ Public API:
     sync_sold_orders(cfg, listing_index, ...)                   → stats dict
     sync_inventory_api(cfg, itemdata_root, ...)                 → stats dict
     backfill_draft_from_live(item, cfg)                         → bool (True if draft written)
+    record_orphan_listings(orphans, synced_at, full_scan)       → None (persists to ORPHAN_REGISTRY)
 """
 
 from __future__ import annotations
@@ -34,6 +35,14 @@ from tgw.apis.fence import patch_item as fence_patch_item
 log = logging.getLogger(__name__)
 
 _DEFAULT_SOLD_ORDER_GAP_LOG = '/opt/TGW/var/log/sold-order-history-gaps.jsonl'
+
+# invariant C11 — a skip/guard (here: an unreconcilable active listing) is a
+# finding, not a log line. Orphaned listings have no ItemData record to carry
+# a field, so (following the migrate-blocked.json precedent in
+# workers/ebay_sku_migrate.py) they get a standalone durable JSON registry,
+# keyed by listing_id, that an operator/catalog-verify-style check can read
+# later instead of a discarded in-memory count.
+ORPHAN_REGISTRY = Path('/opt/TGW/var/ebay-orphan-listings.json')
 
 SOLD_ORDERS_WINDOW_DAYS    = 90    # GetOrders API max per call
 # GetOrders' real constraint is a rolling one: CreateTimeFrom can never be
@@ -373,6 +382,74 @@ def mark_item_sold(json_path: Path, order_id: str, buyer: str,
 
 
 # ---------------------------------------------------------------------------
+# Orphaned-listing registry (invariant C11)
+# ---------------------------------------------------------------------------
+
+def _load_orphan_registry() -> Dict[str, Any]:
+    try:
+        if ORPHAN_REGISTRY.exists():
+            return json.loads(ORPHAN_REGISTRY.read_text(encoding='utf-8'))
+    except Exception as exc:
+        log.warning('ebay_pull: could not read orphan registry: %s', exc)
+    return {}
+
+
+def _save_orphan_registry(registry: Dict[str, Any]) -> None:
+    try:
+        ORPHAN_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+        tmp = ORPHAN_REGISTRY.with_suffix('.tmp')
+        tmp.write_text(json.dumps(registry, indent=2, ensure_ascii=False, sort_keys=True),
+                       encoding='utf-8')
+        tmp.replace(ORPHAN_REGISTRY)
+    except Exception as exc:
+        log.warning('ebay_pull: could not write orphan registry: %s', exc)
+
+
+def record_orphan_listings(orphans: List[Dict[str, Any]], synced_at: str,
+                            full_scan: bool = True) -> None:
+    """
+    Persist findings from the active-listing reconciliation (invariant C11):
+    active eBay listings with no `custom_label`, or a `custom_label` that has
+    no matching local ItemData record. These have no ItemData to attach a
+    field to, so they get a standalone JSON registry keyed by listing_id
+    (same shape/pattern as workers/ebay_sku_migrate.py's migrate-blocked.json)
+    instead of being counted and discarded.
+
+    full_scan: True when this call covered every active listing (no
+    sku_filter) — in that case listing_ids no longer reported as orphans are
+    pruned from the registry (resolved: matched, delisted, or SKU fixed).
+    A filtered/partial run only adds/refreshes entries, never prunes.
+    """
+    registry = _load_orphan_registry()
+    seen_ids = set()
+
+    for listing in orphans:
+        listing_id = str(listing.get('listing_id') or '')
+        if not listing_id:
+            continue
+        seen_ids.add(listing_id)
+        existing = registry.get(listing_id, {})
+        registry[listing_id] = {
+            'listing_id':   listing_id,
+            'custom_label': listing.get('custom_label', ''),
+            'title':        listing.get('title', ''),
+            'status':       listing.get('status'),
+            'live_price':   listing.get('live_price'),
+            'listing_url':  listing.get('listing_url'),
+            'first_seen':   existing.get('first_seen', synced_at),
+            'last_seen':    synced_at,
+            'seen_count':   existing.get('seen_count', 0) + 1,
+        }
+
+    if full_scan:
+        for listing_id in list(registry.keys()):
+            if listing_id not in seen_ids:
+                registry.pop(listing_id, None)
+
+    _save_orphan_registry(registry)
+
+
+# ---------------------------------------------------------------------------
 # Active listings sync
 # ---------------------------------------------------------------------------
 
@@ -411,6 +488,11 @@ def sync_active_listings(cfg: Dict[str, Any], itemdata_root: Path,
         except Exception:
             log.exception('ebay_pull: error on listing %s', listing.get('listing_id'))
             stats['errors'] += 1
+
+    # invariant C11 — persist orphan findings durably; a full unfiltered scan
+    # is authoritative and prunes stale registry entries, a sku_filter'd run
+    # only adds/refreshes what it actually saw.
+    record_orphan_listings(stats['orphans'], synced_at, full_scan=sku_filter is None)
 
     return stats
 
