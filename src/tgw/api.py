@@ -1571,6 +1571,19 @@ def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any],
               f"item_number={legacy_blocked.get('item_number')} photo repair "
               f"failed: {repair.get('error')}")
 
+    # Invariant C11 (todo #1303): ebay_upload.py's no-photos-on-disk guard
+    # used to log+skip with the job still reported SUCCEEDED — an item could
+    # silently stall forever with no durable record. It now persists
+    # `ebay_upload_blocked`; surface unrepaired instances here (same pattern
+    # as legacy_listing_unrepaired above) so operators can regularly find
+    # and fix them. Cleared to None by the worker on the next full success.
+    upload_blocked = doc.get("ebay_upload_blocked")
+    if upload_blocked:
+        v("ebay_upload_no_photos_unrepaired", "critical",
+          f"reason={upload_blocked.get('reason')} detected at "
+          f"{upload_blocked.get('detected_at')} — item has no photos on "
+          f"disk for eBay upload, blocked since detection")
+
     return viols
 
 
