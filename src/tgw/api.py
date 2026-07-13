@@ -830,6 +830,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("migrate-restore", help="restore item JSON from pre-migration archive snapshot")
     p.add_argument("old_sku", help="original (old-format) SKU — used to locate the archive file")
     p.add_argument("--dry-run", action="store_true", help="show what would be restored without writing")
+    p.add_argument("--force", action="store_true",
+                   help="overwrite an existing live item JSON at the restore destination "
+                        "(default: refuse if destination already exists)")
 
     p = sub.add_parser("sku-migrate", help="SKU normalization (PP-ADD-005)")
     p.add_argument("--check-collisions", action="store_true", help="run collision check only — no changes")
@@ -1777,7 +1780,7 @@ def cmd_catalog_verify(
             if force or not has_violations:
                 ts = datetime.now(tz=timezone.utc).isoformat()
                 doc["catalog_verified"] = {"ts": ts, "by": "catalog-verify"}
-                atomic_write_json(jf, doc, pretty=cfg.get("pretty", True))
+                atomic_write_json(jf, doc, pretty=cfg.get("pretty", True), archive_root=cfg.get("archive_root"))
                 marked += 1
 
         if limit and scanned >= limit:
@@ -1896,7 +1899,7 @@ def cmd_hint(cfg: Dict[str, Any], sku: str, hint: str, force: bool = False) -> D
         },
     )
 
-    atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
+    atomic_write_json(json_path, item, pretty=cfg.get("pretty", True), archive_root=cfg.get("archive_root"))
 
     # Enqueue ai_identify — dedupe key means a pending job won't double-enqueue
     import psycopg2.errors
@@ -2296,7 +2299,7 @@ def cmd_resolve_legacy(cfg: Dict[str, Any], skus: List[str], enqueue_stage: bool
                 **(item.get("legacy_listing_blocked") or {}),
                 "duplicate_check": dup,
             }
-            atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
+            atomic_write_json(json_path, item, pretty=cfg.get("pretty", True), archive_root=cfg.get("archive_root"))
             resolved.append(sku)
 
         # Only queue ebay_stage if the item has already been priced —
@@ -3113,7 +3116,7 @@ def cmd_price_freeship(
             draft["price"] = combined
             item["draft_listing"] = draft
         item["free_shipping"] = True
-        atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
+        atomic_write_json(json_path, item, pretty=cfg.get("pretty", True), archive_root=cfg.get("archive_root"))
         try:
             import psycopg2.errors  # noqa: PLC0415
 
@@ -3756,7 +3759,7 @@ def cmd_set_template(
     doc = load_item_doc(json_path)
     fields = _build_template_fields(cfg, grp, group_key, doc)
     doc.update(fields)
-    atomic_write_json(json_path, doc, pretty=True)
+    atomic_write_json(json_path, doc, pretty=True, archive_root=cfg.get("archive_root"))
 
     # Push SETTEMPLATE: to clipboard for KDE Connect camera relay
     template_str = f"SETTEMPLATE:{grp['name']}"
@@ -4162,7 +4165,7 @@ def main() -> int:
                 row: Dict[str, Any] = {"sku": sku, "ok": True, **q.to_dict()}
                 if args.save and item.get("draft_listing") is not None:
                     item["draft_listing"]["quality"] = q.to_dict()
-                    atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
+                    atomic_write_json(json_path, item, pretty=cfg.get("pretty", True), archive_root=cfg.get("archive_root"))
                     row["saved"] = True
                 rows.append(row)
             result = {"ok": True, "items": rows}
@@ -4199,7 +4202,7 @@ def main() -> int:
                     result = {"ok": True, "sku": args.sku, "found": True, "result": lookup.to_dict()}
                     if args.save:
                         item["product_lookup"] = lookup.to_dict()
-                        atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
+                        atomic_write_json(json_path, item, pretty=cfg.get("pretty", True), archive_root=cfg.get("archive_root"))
                         result["saved"] = True
 
         elif args.op in ("suggest", "note", "btw"):
@@ -4532,7 +4535,7 @@ def main() -> int:
                 was_blocked = "sku_migrate_blocked" in doc
                 doc.pop("sku_migrate_blocked", None)
                 doc.pop("sku_migrate_skip", None)
-                atomic_write_json(json_path, doc, pretty=cfg.get("pretty", True))
+                atomic_write_json(json_path, doc, pretty=cfg.get("pretty", True), archive_root=cfg.get("archive_root"))
                 registry.pop(sku, None)
                 status = "unblocked" if was_blocked else "skip flag cleared (was not blocked)"
                 print(f"  {sku}: {status}")
@@ -4583,6 +4586,11 @@ def main() -> int:
                 print(f"Destination directory does not exist: {dest.parent}")
                 return 1
 
+            if dest.exists() and not args.force:
+                print(f"Destination already has a live item — refusing to overwrite: {dest}. "
+                      f"Use --force to override.")
+                return 1
+
             print(f"Restore target: {dest}")
             if args.dry_run:
                 print("Dry run — no changes written.")
@@ -4592,7 +4600,7 @@ def main() -> int:
             restore_data = dict(snapshot)
             restore_data["sku"] = new_sku if new_sku else old_sku
             from .items import atomic_write_json as _awj
-            _awj(dest, restore_data, pretty=cfg.get("pretty", True))
+            _awj(dest, restore_data, pretty=cfg.get("pretty", True), archive_root=cfg.get("archive_root"))
             print(f"Restored {len(restore_data)} fields to {dest}")
             return 0
 

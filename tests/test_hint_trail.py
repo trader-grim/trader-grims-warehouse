@@ -180,3 +180,30 @@ def test_cmd_hint_trail_records_prev_hint():
         ev = item['identification_history'][0]
         assert ev['hint'] == 'new hint'
         assert ev['prev_hint'] == 'old hint'
+
+
+# ---------------------------------------------------------------------------
+# todo #1298 / PP-COHESION-001 — cmd_hint's atomic_write_json call must pass
+# archive_root (invariant E5, archive-before-overwrite on an existing item),
+# not silently skip it like the direct tgw.items import used to.
+# ---------------------------------------------------------------------------
+
+def test_cmd_hint_passes_archive_root_to_atomic_write_json():
+    from unittest.mock import patch
+
+    from tgw.api import cmd_hint
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        sku = 'tgw20260101000000005'
+        make_item(root, sku, ai_identified=False)
+        cfg = make_cfg(root)
+        cfg['archive_root'] = root / 'archive'
+
+        with patch('tgw.queue.state_machine.init'), \
+             patch('tgw.queue.state_machine.enqueue_job', return_value=42), \
+             patch('tgw.items.atomic_write_json') as mock_awj:
+            cmd_hint(cfg, sku, 'thimbles', force=False)
+
+        assert mock_awj.called
+        _, kwargs = mock_awj.call_args
+        assert kwargs.get('archive_root') == cfg['archive_root']
