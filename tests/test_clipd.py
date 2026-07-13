@@ -495,3 +495,55 @@ def test_x11_read_selection_returns_none_on_timeout():
 
     with patch('tgw.clipd.subprocess.run', side_effect=subprocess.TimeoutExpired(['xclip'], 2.0)):
         assert backend._read_selection_content('clipboard') is None
+
+
+# ---------------------------------------------------------------------------
+# launch_rofi_picker (todo #1292/#1293 — queried nonexistent 'clips' table
+# and double cursor.fetchone() call; regression coverage against the real
+# clip_history schema)
+# ---------------------------------------------------------------------------
+
+def _fake_rofi_process(select_value):
+    """Build a fake Popen result that 'selects' select_value from rofi's stdin feed."""
+    proc = MagicMock()
+    proc.stdin = MagicMock()
+    proc.stdout = MagicMock()
+    proc.stdout.read.return_value = select_value + '\n'
+    proc.wait.return_value = 0
+    return proc
+
+
+def test_launch_rofi_picker_returns_full_content_not_truncated(tmp_path):
+    db_path = tmp_path / 'history.db'
+    long_content = 'A' * 500 + ' END-OF-CONTENT-MARKER'
+    record_clip('short one', db_path=db_path)
+    record_clip(long_content, db_path=db_path)  # most recent -> first in ORDER BY id DESC
+
+    truncated_selection = long_content[:120]
+    with patch('tgw.clipd.subprocess.Popen', return_value=_fake_rofi_process(truncated_selection)):
+        result = clipd.launch_rofi_picker(db_path)
+
+    assert result == long_content
+
+
+def test_launch_rofi_picker_falls_back_to_raw_selection_on_no_match(tmp_path):
+    db_path = tmp_path / 'history.db'
+    record_clip('something else entirely', db_path=db_path)
+
+    with patch('tgw.clipd.subprocess.Popen', return_value=_fake_rofi_process('NO-MATCH-XYZ')):
+        result = clipd.launch_rofi_picker(db_path)
+
+    assert result == 'NO-MATCH-XYZ'
+
+
+def test_launch_rofi_picker_queries_clip_history_table(tmp_path):
+    db_path = tmp_path / 'history.db'
+    record_clip('a clip', db_path=db_path)
+
+    # No mocking of Popen internals needed beyond stdout/stdin — this just
+    # proves the SELECT against clip_history (not the nonexistent 'clips'
+    # table) succeeds instead of being swallowed by the except-and-return-None.
+    with patch('tgw.clipd.subprocess.Popen', return_value=_fake_rofi_process('a clip')):
+        result = clipd.launch_rofi_picker(db_path)
+
+    assert result == 'a clip'

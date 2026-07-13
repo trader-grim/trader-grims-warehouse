@@ -161,7 +161,7 @@ def launch_rofi_picker(db_path: Path) -> Optional[str]:
     try:
         conn = sqlite3.connect(str(db_path))
         cursor = conn.cursor()
-        cursor.execute('SELECT content FROM clips ORDER BY ts DESC LIMIT 200')
+        cursor.execute('SELECT content FROM clip_history ORDER BY id DESC LIMIT 200')
         items = [row[0][:120] for row in cursor.fetchall()]
         conn.close()
 
@@ -187,10 +187,11 @@ def launch_rofi_picker(db_path: Path) -> Optional[str]:
         conn = sqlite3.connect(str(db_path))
         cursor = conn.cursor()
         cursor.execute(
-            'SELECT content FROM clips WHERE content LIKE ? LIMIT 1',
+            'SELECT content FROM clip_history WHERE content LIKE ? LIMIT 1',
             (f'{selected}%',)
         )
-        full_content = cursor.fetchone()[0] if cursor.fetchone() else selected
+        row = cursor.fetchone()
+        full_content = row[0] if row else selected
         conn.close()
         return full_content
 
