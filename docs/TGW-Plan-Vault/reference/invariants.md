@@ -622,6 +622,15 @@ catalog-verify rule `legacy_listing_unrepaired` is the "regularly check"
 detector. Tests: `tests/test_invariants_stage_guards.py`,
 `tests/test_resolve_legacy_duplicate_check.py`.
 
+**Second instance (todo #1304, 2026-07-13):** `multi_intake.py`'s
+derived-child-SKU-collision guard had the same gap — collision with an
+existing ItemData record was only `log_event`/`notify`'d, never persisted.
+Fixed the same way: persists `sku_collision_blocked` (colliding_sku,
+base_sku, detected_at) on the colliding item via `fence_patch_item` on every
+hit, additive alongside the existing transient log/notify. New catalog-verify
+rule `sku_collision_unrepaired` mirrors `legacy_listing_unrepaired`. Test:
+`tests/test_multi_intake.py`.
+
 ## E8 — The Google free tier is the operator emergency reserve ✅ (2026-07-04, session 45) — SUPERSEDED for background use 2026-07-08
 
 **Original rule (free-tier era):** Background jobs never spend the Google

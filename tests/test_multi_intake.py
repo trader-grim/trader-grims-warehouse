@@ -14,6 +14,7 @@ import zipfile
 from pathlib import Path
 
 import tgw.workers.multi_intake as multi_intake
+from tgw import api as tgw_api
 
 
 def _make_worker(tmp_path, newitems_dir, itemdata_root):
@@ -58,12 +59,29 @@ def test_extract_items_skips_existing_sku_without_touching_it(tmp_path, monkeypa
     # path (audit#1143 #1246) — must not read/write /opt/TGW/var for a test.
     monkeypatch.setattr(multi_intake, '_COLLISION_NOTIFY_REGISTRY', tmp_path / 'collision-notified.json')
 
+    from tests.conftest import make_fake_patch_item
+    monkeypatch.setattr(multi_intake, 'fence_patch_item', make_fake_patch_item(itemdata_root))
+
     worker = _make_worker(tmp_path, newitems_dir, itemdata_root)
     children = worker._extract_items(zip_path, newitems_dir, base_sku, 'LOC1', 'default')
 
     assert children == [base_sku]
-    # The existing record must be completely untouched — no strip, no archive write.
-    assert json.loads(existing_path.read_text(encoding='utf-8')) == original_doc
+    # The existing record's original fields must be untouched — no strip, no
+    # archive write — but todo #1304 (invariant C11) requires a durable
+    # `sku_collision_blocked` finding to be added additively.
+    updated_doc = json.loads(existing_path.read_text(encoding='utf-8'))
+    for key, val in original_doc.items():
+        assert updated_doc[key] == val
+    collision = updated_doc['sku_collision_blocked']
+    assert collision['colliding_sku'] == base_sku
+    assert collision['base_sku'] == base_sku
+    assert collision['detected_at']
+
+    # catalog-verify must surface this as an unrepaired finding.
+    viols = tgw_api._verify_item(base_sku, existing_dir, updated_doc)
+    rules = [v_['rule'] for v_ in viols]
+    assert 'sku_collision_unrepaired' in rules
+
     # A collision must be surfaced, not silent.
     assert len(notified) == 1
     assert 'collision' in notified[0][0][0].lower()
@@ -103,6 +121,9 @@ def test_collision_notify_is_deduped_across_batch_redrop(tmp_path, monkeypatch):
     monkeypatch.setattr(notify_mod, 'notify', lambda *a, **k: notified.append((a, k)))
     registry_path = tmp_path / 'collision-notified.json'
     monkeypatch.setattr(multi_intake, '_COLLISION_NOTIFY_REGISTRY', registry_path)
+
+    from tests.conftest import make_fake_patch_item
+    monkeypatch.setattr(multi_intake, 'fence_patch_item', make_fake_patch_item(itemdata_root))
 
     worker = _make_worker(tmp_path, newitems_dir, itemdata_root)
 

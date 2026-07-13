@@ -1571,6 +1571,19 @@ def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any],
               f"item_number={legacy_blocked.get('item_number')} photo repair "
               f"failed: {repair.get('error')}")
 
+    # todo #1304 / invariant C11: multi_intake.py used to only log/notify
+    # when a derived child SKU collided with an existing ItemData record —
+    # transient, not queryable later. It now persists `sku_collision_blocked`
+    # on the colliding item on every hit; this is the "regularly check for
+    # and repair" detector for that finding, mirroring `legacy_listing_
+    # unrepaired` above.
+    sku_collision_blocked = doc.get("sku_collision_blocked")
+    if sku_collision_blocked and not doc.get("sku_collision_resolved"):
+        v("sku_collision_unrepaired", "warning",
+          f"base_sku={sku_collision_blocked.get('base_sku')} collided with this "
+          f"item's SKU at {sku_collision_blocked.get('detected_at')} — never "
+          f"resolved (verify not a mistaken duplicate)")
+
     return viols
 
 
