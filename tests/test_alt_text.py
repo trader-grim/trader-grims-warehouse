@@ -110,6 +110,51 @@ class TestAltText:
         assert doc["draft_listing"]["alt_text"] == "Silver pocket watch with chain on white background"
         assert "Elgin" in doc["draft_listing"]["seo_caption"]
 
+    def test_success_persists_raw_llm_response(self, tmp_path, monkeypatch):
+        """Data Charter raw-preservation rule: the raw model response must be
+        kept alongside the parsed alt_text/seo_caption, not discarded once
+        parsed — mirrors ai_identify's vision_results[] pattern."""
+        cfg = _make_cfg(tmp_path)
+        _make_item(cfg, "tgw001")
+        _add_photo(cfg, "tgw001")
+        _patch_vision(monkeypatch)
+
+        result = cmd_alt_text(cfg, sku="tgw001", model=_DUMMY_MODEL)
+        assert result["ok"] is True
+
+        doc = json.loads((Path(cfg["itemdata_root"]) / "tgw001" / "tgw001.json").read_text())
+        assert "alt_text_results" in doc
+        assert len(doc["alt_text_results"]) == 1
+        record = doc["alt_text_results"][0]
+        assert record["raw_response"] == _GOOD_RESPONSE
+        assert record["extracted"]["alt_text"] == doc["draft_listing"]["alt_text"]
+        assert record["extracted"]["seo_caption"] == doc["draft_listing"]["seo_caption"]
+        assert record["model"] == _DUMMY_MODEL
+        assert record["photo"] == "tgw001.jpg"
+
+    def test_cache_hit_does_not_append_new_raw_record(self, tmp_path, monkeypatch):
+        """A pHash cache hit reuses a prior derived result without calling the
+        model again — nothing new to persist, so no duplicate record."""
+        cfg = _make_cfg(tmp_path)
+        _make_item(cfg, "tgw001")
+        _add_photo(cfg, "tgw001")
+        _patch_vision(monkeypatch)
+
+        cached_result = {
+            "alt_text": "Cached description",
+            "seo_caption": "Cached caption.",
+        }
+        import tgw.image_hash as image_hash_mod
+        monkeypatch.setattr(image_hash_mod, "compute_dhash", lambda *a, **kw: "deadbeef")
+        monkeypatch.setattr(image_hash_mod, "lookup_hash", lambda *a, **kw: cached_result)
+
+        result = cmd_alt_text(cfg, sku="tgw001", model=_DUMMY_MODEL)
+        assert result["ok"] is True
+        assert result["cache_hit"] is True
+
+        doc = json.loads((Path(cfg["itemdata_root"]) / "tgw001" / "tgw001.json").read_text())
+        assert "alt_text_results" not in doc
+
     def test_success_copies_to_alt_companion(self, tmp_path, monkeypatch):
         cfg = _make_cfg(tmp_path)
         _make_item(cfg, "tgw001")
