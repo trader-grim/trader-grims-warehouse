@@ -42,7 +42,6 @@ from mcp.server import FastMCP
 
 _REPO_ROOT = Path('/opt/TGW/src/trader-grims-warehouse')
 _AIDER_BIN = Path('/home/tgw/.local/bin/aider')
-_SECRETS_ROOT = Path('/opt/TGW/secrets')
 _AUDIT_LOG = Path.home() / '.local/share/aider-audit/usage.csv'
 
 _AUDIT_FIELDS = ['timestamp', 'mode', 'files', 'prompt_excerpt', 'exit_code', 'duration_s']
@@ -55,14 +54,15 @@ _TASK_TIMEOUT = 300  # seconds; architect mode can be slow
 
 
 def _load_api_keys() -> dict[str, str]:
+    from tgw.apis.secrets import get_api_key
+
     keys = {}
-    for env_name, filename in [
-        ('ANTHROPIC_API_KEY', 'anthropic-credentials.json'),
-        ('OPENROUTER_API_KEY', 'openrouter-credentials.json'),
+    for env_name, provider in [
+        ('ANTHROPIC_API_KEY', 'anthropic'),
+        ('OPENROUTER_API_KEY', 'openrouter'),
     ]:
-        p = _SECRETS_ROOT / filename
         try:
-            val = json.loads(p.read_text())['api_key']
+            val = get_api_key(provider)
             if val:
                 keys[env_name] = val
         except Exception:
