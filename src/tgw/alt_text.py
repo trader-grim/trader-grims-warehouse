@@ -28,6 +28,7 @@ import io
 import json
 import shutil
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -258,6 +259,8 @@ def cmd_alt_text(
     use_cache = len(candidate_photos) == 1
     cached = lookup_hash(img_hash, "alt_text") if (img_hash and use_cache) else None
 
+    raw: Optional[str] = None  # raw LLM response, only set on an actual (non-cached) call
+
     if cached is not None:
         result = cached
     else:
@@ -309,6 +312,27 @@ def cmd_alt_text(
         item["draft_listing"] = {}
     item["draft_listing"]["alt_text"] = alt_text
     item["draft_listing"]["seo_caption"] = seo_caption
+
+    # Data Charter raw-preservation rule (Prime Directive 1): the raw LLM
+    # response is the permanent asset, the parsed alt_text/seo_caption are
+    # recomputable derivations of it. Mirrors ai_identify's vision_results[]
+    # pattern — append-only, one record per actual (non-cached) model call,
+    # never overwritten. A cache hit reuses a prior call's already-recorded
+    # raw response, so nothing new to append here.
+    if raw is not None:
+        alt_text_results: List[Dict[str, Any]] = item.get("alt_text_results") or []
+        alt_text_results.append({
+            "photo": img_path.name,
+            "photos": [p.name for p in candidate_photos],
+            "photo_count": len(candidate_photos),
+            "photo_hash": img_hash or "",
+            "provider": provider,
+            "model": model,
+            "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "extracted": {"alt_text": alt_text, "seo_caption": seo_caption},
+            "raw_response": raw,
+        })
+        item["alt_text_results"] = alt_text_results
 
     atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
 
