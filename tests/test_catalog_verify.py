@@ -931,6 +931,38 @@ def test_legacy_listing_resolved_suppresses_rule(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# todo #1303 / invariant C11 — ebay_upload_blocked (no-photos-on-disk guard
+# now persists a durable finding instead of a log-only skip).
+# ---------------------------------------------------------------------------
+
+def test_ebay_upload_no_photos_blocked_is_critical(tmp_path):
+    sku = 'tgw202601010000023'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'G5',
+        'ebay_upload_blocked': {
+            'reason': 'no_photos_on_disk',
+            'detected_at': '2026-07-13T00:00:00+00:00',
+        },
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'ebay_upload_no_photos_unrepaired' in rules
+
+
+def test_ebay_upload_no_photos_cleared_suppresses_rule(tmp_path):
+    """The worker clears ebay_upload_blocked to None on a subsequent full
+    success — the rule must not keep nagging after that."""
+    sku = 'tgw202601010000024'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'G6',
+        'ebay_upload_blocked': None,
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'ebay_upload_no_photos_unrepaired' not in rules
+
+
+# ---------------------------------------------------------------------------
 # PP-PHOTOSYNC-001 P9 follow-up (todo #1127) — _load_live_photo_index
 # ---------------------------------------------------------------------------
 

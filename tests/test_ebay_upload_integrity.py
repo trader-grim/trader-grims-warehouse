@@ -165,6 +165,42 @@ def test_full_success_still_reports_complete(worker, tmp_path, monkeypatch):
     assert len(doc['ebay_photos']) == 2
 
 
+def test_no_photos_on_disk_persists_durable_finding(worker, tmp_path):
+    """Invariant C11 (todo #1303): the no-photos guard must persist a durable
+    finding on the item JSON (queryable by catalog-verify), not just log and
+    silently succeed leaving the item stalled forever."""
+    sku = 'tgwtest7'
+    _write_item(tmp_path, sku)  # no photos created on disk
+
+    worker.handle(_job(sku))
+
+    doc = _read(tmp_path, sku)
+    blocked = doc.get('ebay_upload_blocked')
+    assert blocked is not None, 'no-photos guard must persist ebay_upload_blocked'
+    assert blocked['reason'] == 'no_photos_on_disk'
+    assert blocked['detected_at']
+
+
+def test_full_success_clears_prior_no_photos_finding(worker, tmp_path, monkeypatch):
+    """Self-healing: once photos are added back and upload succeeds, the
+    prior ebay_upload_blocked finding must be cleared, not left stale."""
+    sku = 'tgwtest8'
+    d = _write_item(tmp_path, sku)
+    # Simulate a previously-recorded finding from an earlier no-photos pass.
+    doc = _read(tmp_path, sku)
+    doc['ebay_upload_blocked'] = {'reason': 'no_photos_on_disk', 'detected_at': 'x'}
+    (d / f'{sku}.json').write_text(json.dumps(doc), encoding='utf-8')
+
+    _make_photos(d, ['1.jpg'])
+    monkeypatch.setattr(ebay_upload, 'upload_photo',
+                        lambda cfg, photo: f'https://x/{photo.name}')
+
+    worker.handle(_job(sku))
+
+    doc = _read(tmp_path, sku)
+    assert not doc.get('ebay_upload_blocked'), 'finding must be cleared on full success'
+
+
 def test_network_error_persists_partial_progress_before_reraising(worker, tmp_path, monkeypatch):
     """A prior latent bug: on a network error mid-loop, photos that already
     succeeded THIS pass were never persisted, so a retry would re-upload them
