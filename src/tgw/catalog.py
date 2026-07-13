@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from .config import load_json_strict
+from .config import load_json_strict, location_dir
 from .resolver import find_item_jsons, load_item_doc
 
 # ---------------------------------------------------------------------------
@@ -293,7 +293,11 @@ def build_location_tree(cfg: Dict[str, Any], source: str = 'auto',
             problems.append(f'missing item dir for sku {sku}: {target}')
             continue
         if not check_only:
-            link_dir  = dest_root / location
+            try:
+                link_dir = location_dir(cfg, location)
+            except ValueError as exc:
+                problems.append(f'unsafe location for sku {sku}: {exc}')
+                continue
             link_path = link_dir / sku
             link_dir.mkdir(parents=True, exist_ok=True)
             if link_path.exists() or link_path.is_symlink():
