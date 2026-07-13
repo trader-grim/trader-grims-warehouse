@@ -3254,6 +3254,104 @@ def test_approve_action_requires_auth(client):
     assert r.status_code in (401, 403)
 
 
+def test_accept_proposals_persists_item_attributes_edit(env, monkeypatch):
+    """POST action=accept_proposals actually writes accepted item_specifics
+    into item_attributes on disk when item_attributes already existed
+    (regression test for #1291 -- an identity-comparison bug on a
+    mutated-in-place dict silently discarded this edit before)."""
+    monkeypatch.setattr(http_server.state_machine, "enqueue_job", lambda *a, **k: "job-fake")
+
+    _write_item_with_draft(
+        env["itemdata_root"], SKU_A, _DRAFT_LISTING,
+        extra={
+            "item_attributes": {"Brand": "OldBrand", "Color": "Red"},
+            "revision_draft": {
+                "delta": {"item_specifics": {"Brand": "NewBrand", "Size": "Large"}}
+            },
+        },
+    )
+
+    client = env["client"]
+    r = client.post(
+        f"/api/items/{SKU_A}/action",
+        json={"action": "accept_proposals"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+
+    json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert doc["item_attributes"]["Brand"] == "NewBrand"
+    assert doc["item_attributes"]["Color"] == "Red"
+    assert doc["item_attributes"]["Size"] == "Large"
+    assert doc.get("revision_draft") is None
+
+
+def test_accept_proposals_persists_draft_listing_title_description(env, monkeypatch):
+    """Same regression as above, for draft_listing title/description edits."""
+    monkeypatch.setattr(http_server.state_machine, "enqueue_job", lambda *a, **k: "job-fake")
+
+    _write_item_with_draft(
+        env["itemdata_root"], SKU_A, dict(_DRAFT_LISTING),
+        extra={
+            "revision_draft": {
+                "delta": {
+                    "title": "Corrected Title",
+                    "description": "Corrected description text.",
+                }
+            },
+        },
+    )
+
+    client = env["client"]
+    r = client.post(
+        f"/api/items/{SKU_A}/action",
+        json={"action": "accept_proposals"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+    json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert doc["draft_listing"]["title"] == "Corrected Title"
+    assert doc["draft_listing"]["description"] == "Corrected description text."
+    # Original draft_listing fields untouched by the merge
+    assert doc["draft_listing"]["price"] == _DRAFT_LISTING["price"]
+    assert doc.get("revision_draft") is None
+
+
+def test_accept_proposals_item_attributes_absent_before(env, monkeypatch):
+    """When item_attributes did not exist before, accept_proposals still
+    creates it correctly (this path was already accidentally correct;
+    guard against regressing it)."""
+    monkeypatch.setattr(http_server.state_machine, "enqueue_job", lambda *a, **k: "job-fake")
+
+    _write_item_with_draft(
+        env["itemdata_root"], SKU_A, _DRAFT_LISTING,
+        extra={
+            "revision_draft": {
+                "delta": {"item_specifics": {"Brand": "FreshBrand"}}
+            },
+        },
+    )
+
+    client = env["client"]
+    r = client.post(
+        f"/api/items/{SKU_A}/action",
+        json={"action": "accept_proposals"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+    json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert doc["item_attributes"]["Brand"] == "FreshBrand"
+
+
 def test_form_review_renders(client):
     """/form/drafts returns HTML with expected structure; /form/review redirects."""
     _login(client)
