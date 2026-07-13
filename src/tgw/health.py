@@ -609,15 +609,18 @@ def _openrouter_key_limit(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     near-exhausted, causing a 402 pile-up that took a live log-dive to
     diagnose. Surfacing it here means the next time this happens it's
     visible in `tgw health` instead. Returns None (not an error) if the
-    credentials file or the `requests` call fails — this is a nice-to-have
-    signal, never a reason to fail the whole quota check.
+    OPENROUTER_API_KEY secret is unset (see tgw.apis.secrets.get_api_key())
+    or the `requests` call fails — this is a nice-to-have signal, never a
+    reason to fail the whole quota check.
     """
     try:
         import requests
-        cred_path = Path(cfg.get('secrets_root', '/opt/TGW/secrets')) / 'openrouter-credentials.json'
-        if not cred_path.exists():
+
+        from tgw.apis.secrets import get_api_key
+        try:
+            key = get_api_key('openrouter')
+        except RuntimeError:
             return None
-        key = json.loads(cred_path.read_text(encoding='utf-8')).get('api_key')
         if not key:
             return None
         resp = requests.get(
