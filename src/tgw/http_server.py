@@ -1436,18 +1436,23 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
             if not delta:
                 return {"ok": False, "detail": "no revision_draft delta to accept"}
             ia = doc.get("item_attributes") or {}
+            ia_touched = False
             if "item_specifics" in delta and isinstance(delta["item_specifics"], dict):
                 ia.update(delta["item_specifics"])
                 doc["item_attributes"] = ia
+                ia_touched = True
             dl2 = doc.get("draft_listing") or {}
+            dl_touched = False
             if "title" in delta:
                 dl2["title"] = delta["title"]
+                dl_touched = True
             if "description" in delta:
                 dl2["description"] = delta["description"]
+                dl_touched = True
             proposal_fields: Dict[str, Any] = {"revision_draft": None}
-            if ia is not doc.get("item_attributes"):
+            if ia_touched:
                 proposal_fields["item_attributes"] = ia
-            if dl2 is not doc.get("draft_listing"):
+            if dl_touched:
                 proposal_fields["draft_listing"] = dl2
             _apply_patch(json_path, proposal_fields)
             _enqueue_catalog_rebuild(f"accept_proposals:{sku}")
