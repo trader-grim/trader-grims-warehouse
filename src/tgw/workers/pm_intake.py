@@ -30,14 +30,17 @@ Queue name: pm_intake
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
 import shutil
+import socket
 import time
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import psycopg2
 import psycopg2.errors
@@ -123,6 +126,7 @@ Respond with JSON only:
 
 _NOTE_MAX_CHARS = 32000
 _URL_FETCH_MAX_CHARS = 32000
+_MAX_RESPONSE_BYTES = 5_000_000  # 5MB — generous for HTML/text pages, well above _URL_FETCH_MAX_CHARS's needs
 
 # Matches a bare HTTP/HTTPS URL as the entire note content
 _URL_ONLY_RE = re.compile(r'^https?://\S+$', re.IGNORECASE)
@@ -184,6 +188,35 @@ def is_url_submission(text: str) -> Optional[str]:
     return stripped if _URL_ONLY_RE.match(stripped) else None
 
 
+def _resolve_is_safe(hostname: str) -> bool:
+    """False if *hostname* resolves to any private/loopback/link-local/
+    reserved/multicast address — blocks SSRF to internal network targets."""
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        return False  # can't resolve → can't safely proceed
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast):
+            return False
+    return True
+
+
+class _SSRFBlocked(Exception):
+    """Raised from the httpx request event hook to abort a request/redirect
+    whose target resolves to a private/internal address."""
+
+
+def _ssrf_guard_hook(request: 'Any') -> None:
+    """httpx request event hook — fires for the initial request AND for
+    every redirect hop when follow_redirects=True, so this re-checks each
+    hop before it is sent."""
+    host = request.url.host
+    if not host or not _resolve_is_safe(host):
+        raise _SSRFBlocked(f'blocked: url targets a private/internal address ({host!r})')
+
+
 def fetch_url(url: str, timeout_s: float = 10.0) -> Dict[str, Any]:
     """Fetch a URL and return extracted text content.
 
@@ -207,26 +240,65 @@ def fetch_url(url: str, timeout_s: float = 10.0) -> Dict[str, Any]:
     except ImportError:
         return {'ok': False, 'url': url, 'error': 'httpx not installed'}
 
+    parsed = urlparse(url)
+    if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+        return {'ok': False, 'url': url,
+                'error': 'blocked: url targets a private/internal address (no valid hostname)'}
+    if not _resolve_is_safe(parsed.hostname):
+        return {'ok': False, 'url': url,
+                'error': 'blocked: url targets a private/internal address'}
+
     try:
-        with httpx.Client(follow_redirects=True, timeout=timeout_s) as client:
-            resp = client.get(url, headers={'User-Agent': 'TGW-pm-intake/1.0'})
+        with httpx.Client(
+            follow_redirects=True,
+            timeout=timeout_s,
+            event_hooks={'request': [_ssrf_guard_hook]},
+        ) as client:
+            with client.stream(
+                'GET', url, headers={'User-Agent': 'TGW-pm-intake/1.0'}
+            ) as resp:
+                content_length = resp.headers.get('content-length')
+                if content_length is not None:
+                    try:
+                        if int(content_length) > _MAX_RESPONSE_BYTES:
+                            return {
+                                'ok': False, 'url': url,
+                                'error': f'response too large (content-length {content_length} '
+                                         f'exceeds {_MAX_RESPONSE_BYTES} bytes)',
+                            }
+                    except ValueError:
+                        pass  # malformed header — fall through to the real streaming guard
+
+                body = bytearray()
+                for chunk in resp.iter_bytes():
+                    body.extend(chunk)
+                    if len(body) > _MAX_RESPONSE_BYTES:
+                        return {
+                            'ok': False, 'url': url,
+                            'error': f'response too large (exceeded {_MAX_RESPONSE_BYTES} bytes '
+                                     f'while streaming)',
+                        }
+
+                if resp.status_code >= 400:
+                    return {'ok': False, 'url': url,
+                            'error': f'HTTP {resp.status_code} from {resp.url}'}
+
+                content_type = resp.headers.get('content-type', '').lower()
+                final_url = str(resp.url)
+                encoding = resp.encoding or 'utf-8'
+                text = body.decode(encoding, errors='replace')
+    except _SSRFBlocked as exc:
+        return {'ok': False, 'url': url, 'error': str(exc)}
     except httpx.TimeoutException:
         return {'ok': False, 'url': url, 'error': f'timeout after {timeout_s}s'}
     except httpx.RequestError as exc:
         return {'ok': False, 'url': url, 'error': f'request error: {exc}'}
 
-    if resp.status_code >= 400:
-        return {'ok': False, 'url': url,
-                'error': f'HTTP {resp.status_code} from {resp.url}'}
-
-    content_type = resp.headers.get('content-type', '').lower()
-    final_url = str(resp.url)
-
     if 'html' in content_type:
-        raw_text = _html_to_text(resp.text)
-        title = _extract_title(resp.text)
+        raw_text = _html_to_text(text)
+        title = _extract_title(text)
     elif content_type.startswith('text/'):
-        raw_text = resp.text.strip()
+        raw_text = text.strip()
         title = ''
     else:
         return {
