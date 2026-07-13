@@ -102,15 +102,7 @@ class EbaySyncWorker(QueueWorker):
                 updated = 0
             if updated:
                 try:
-                    import time as _time
-
-                    state_machine.enqueue_job(
-                        queue_name="catalog_rebuild",
-                        payload={"reason": "ebay_sync_targeted"},
-                        dedupe_key="catalog_rebuild:pending",
-                        not_before=_time.time() + 5,
-                        max_attempts=3,
-                    )
+                    state_machine.enqueue_catalog_rebuild("ebay_sync_targeted", delay_seconds=5.0)
                 except Exception:
                     pass
             log.info("ebay_sync: targeted sync %s → %s", target_sku, "updated" if updated else "no change")
@@ -216,13 +208,7 @@ class EbaySyncWorker(QueueWorker):
 
         if updated:
             try:
-                state_machine.enqueue_job(
-                    queue_name="catalog_rebuild",
-                    payload={"reason": "ebay_sync"},
-                    dedupe_key="catalog_rebuild:pending",
-                    not_before=time.time() + 30,
-                    max_attempts=3,
-                )
+                state_machine.enqueue_catalog_rebuild("ebay_sync")
             except psycopg2.errors.UniqueViolation:
                 pass
 

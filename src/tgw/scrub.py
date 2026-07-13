@@ -7,7 +7,6 @@ Each pass is idempotent and safe to re-run. Always dry-run first.
 from __future__ import annotations
 
 import logging
-import time
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -221,13 +220,7 @@ def data_scrub_size_class_backfill(cfg: Dict[str, Any], dry_run: bool = True) ->
         try:
             from .queue import state_machine as _sm
             _sm.init(cfg['postgres_dsn'])
-            _sm.enqueue_job(
-                queue_name='catalog_rebuild',
-                payload={'reason': 'size_class_backfill'},
-                dedupe_key='catalog_rebuild:pending',
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
+            _sm.enqueue_catalog_rebuild('size_class_backfill')
         except Exception:
             pass
 

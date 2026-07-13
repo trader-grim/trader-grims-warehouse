@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -369,13 +368,7 @@ class EbayPublishWorker(QueueWorker):
                               listing_url=result['listing_url'])
 
         try:
-            state_machine.enqueue_job(
-                queue_name='catalog_rebuild',
-                payload={'reason': f'ebay_publish:{sku}'},
-                dedupe_key='catalog_rebuild:pending',
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
+            state_machine.enqueue_catalog_rebuild(f'ebay_publish:{sku}')
         except psycopg2.errors.UniqueViolation:
             pass
 

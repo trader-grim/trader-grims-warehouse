@@ -415,13 +415,7 @@ def rename_sku(cfg: Dict[str, Any], old_sku: str, new_sku: str,
 
         # 5. Enqueue coalesced catalog_rebuild
         try:
-            state_machine.enqueue_job(
-                queue_name='catalog_rebuild',
-                payload={'reason': f'sku_migrate:{new_sku}'},
-                dedupe_key='catalog_rebuild:pending',
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
+            state_machine.enqueue_catalog_rebuild(f'sku_migrate:{new_sku}')
         except Exception:
             pass  # already queued
 

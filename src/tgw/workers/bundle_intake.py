@@ -328,13 +328,7 @@ class BundleIntakeWorker(QueueWorker):
     def _enqueue_downstream(self, sku: str) -> None:
         # catalog-rebuild: coalesced 30s delay so rapid intakes batch together
         try:
-            state_machine.enqueue_job(
-                queue_name='catalog_rebuild',
-                payload={'reason': f'bundle_intake:{sku}'},
-                dedupe_key='catalog_rebuild:pending',
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
+            state_machine.enqueue_catalog_rebuild(f'bundle_intake:{sku}')
         except psycopg2.errors.UniqueViolation:
             pass  # already queued, coalescing
 

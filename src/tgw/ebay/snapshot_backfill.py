@@ -140,13 +140,7 @@ def cmd_ebay_backfill_snapshot(
     if saved and not dry_run:
         try:
             from tgw.queue import state_machine
-            state_machine.enqueue_job(
-                queue_name='catalog_rebuild',
-                payload={'reason': 'ebay_backfill_snapshot'},
-                dedupe_key='catalog_rebuild:pending',
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
+            state_machine.enqueue_catalog_rebuild('ebay_backfill_snapshot')
             log.info('ebay_backfill: enqueued catalog_rebuild')
         except Exception as exc:
             log.warning('ebay_backfill: catalog_rebuild enqueue failed: %s', exc)

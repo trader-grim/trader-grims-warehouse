@@ -16,7 +16,6 @@ import csv
 import io
 import json
 import logging
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -633,13 +632,7 @@ class EbayDraftWorker(QueueWorker):
                               item_specifics=item_specifics)
 
         try:
-            state_machine.enqueue_job(
-                queue_name='catalog_rebuild',
-                payload={'reason': f'ebay_draft:{sku}'},
-                dedupe_key='catalog_rebuild:pending',
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
+            state_machine.enqueue_catalog_rebuild(f'ebay_draft:{sku}')
         except psycopg2.errors.UniqueViolation:
             pass
 

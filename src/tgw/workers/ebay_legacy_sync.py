@@ -117,13 +117,7 @@ class EbayLegacySyncWorker(QueueWorker):
 
         if active_stats.get('updated', 0) or sold_stats.get('sold_marked', 0):
             try:
-                state_machine.enqueue_job(
-                    queue_name='catalog_rebuild',
-                    payload={'reason': 'ebay_legacy_sync'},
-                    dedupe_key='catalog_rebuild:pending',
-                    not_before=time.time() + 30,
-                    max_attempts=3,
-                )
+                state_machine.enqueue_catalog_rebuild('ebay_legacy_sync')
             except psycopg2.errors.UniqueViolation:
                 pass
 

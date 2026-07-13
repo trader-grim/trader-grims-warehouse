@@ -323,3 +323,58 @@ let her interview me."
   "tackling the audit results"** — check CLAUDE.md's Current Phase section
   and open PP-COHESION-001 items first to confirm which audit before
   assuming.
+
+## Session 2026-07-13 (task-execution contract designed + piloted — 14 real fixes)
+
+Dave's stated goal: "find out if our results improve by strictly following
+the processes we have and also to save me time" — an experiment, not a
+settled process yet. Framed explicitly as "uberscripting" of his own
+review/git process, not autonomous execution (see
+[[feedback-uberscripting-not-autonomy]]).
+
+- **Built the task-execution contract** in `pp/PP-HERMES-EA-001.md`:
+  branch-per-task + result manifest, Tigwa's bounded check/fix
+  enforcement loop (escalation-only, deliberate pre-crypto-lock
+  exception), `.claude/agents/tgw-coder.md` (executor) +
+  `.claude/skills/tgw-runner-review/SKILL.md` (reviewer, persona-agnostic
+  by design).
+- **Piloted it for real**: two full stitch cycles against
+  `PP-COHESION-001` findings — 5 mechanical bugs, then 5 SECURITY findings
+  (including a 4-item shared-root path-traversal cluster:
+  `config.py`'s `sku_dir()`/`location_dir()` had zero containment
+  validation). **14 real bugs fixed and merged**, full suite green
+  throughout (2111 passed, 1 skipped as of last run).
+- **Two durable process rules emerged from real friction**, both encoded
+  in the plan doc: (1) cadence rule — stitch after each clean task except
+  the first of a new sequence, which needs 2-in-a-row clean before
+  stitching + graduating to concurrent execution; (2) shared-root cluster
+  rule — fix the root alone, then verify each dependent rather than
+  assuming branch count (proven with a real 50/50 split: one dependent
+  needed zero code, two needed independent fixes).
+- **Mandatory git-worktree-per-task isolation** added mid-pilot
+  (`/opt/TGW/var/worktrees/`) after two tasks shared one working directory.
+  A `PYTHONPATH` hazard was found and closed (the venv's editable install
+  points at the shared checkout, so untested-worktree code could silently
+  pass). Claude's own prompts wrongly said "branch off `main`" for several
+  tasks — this repo's actual branch is `catio-nix-0.0.1-alpha` (see
+  [[reference-catio-nix-branch]]); caught before real harm, `tgw-coder.md`
+  now requires live verification. New standing rule: any operational
+  friction (not just code deviations) gets a todo, always.
+- **Tigwa**: set to auto-review the plan every 4 hours (read-only). Filed
+  and got two requests reconciled through the inbox seam on her own
+  initiative — a Hermes-native checkpoint adapter (#1356) and a plan-review
+  publishing folder (#1359, `docs/TGW-Plan-Vault/tigwa-reviews/`) — both
+  approved as proposed, no changes needed. A third, a narrow
+  `tgw-inbox-intake` skill so she can discover Claude's responses without
+  Dave relaying them, reconciled same session (#1362). She asked how to
+  proceed via the seam even holding Dave's own explicit permission already
+  given — see [[project-tigwa-inbox-request-validated-2026-07-13]].
+- **Still open**: `#1359`'s controlled baseline publication (Tigwa's side,
+  not blocked on Claude). Remaining untouched SECURITY findings: `#1276`,
+  `#1277`, `#1278`, `#1279`, `#1281`, `#1283`. `#1358` (wire Aider into the
+  worktree contract) and `#1361` (minor `.pytest_cache` ownership friction)
+  filed, not started. `#1360` is a reminder for Dave (Antigravity
+  UI-generation idea), assigned to Tigwa.
+- **Housekeeping note**: this file is well over its stated ~150-line cap
+  (325+ lines) — due for a prune/archive pass per its own rule; not done
+  this session, flagging rather than silently ignoring.

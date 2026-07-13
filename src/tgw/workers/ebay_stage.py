@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
@@ -369,13 +368,7 @@ class EbayStageWorker(QueueWorker):
                               offer_id=result['offer_id'])
 
         try:
-            state_machine.enqueue_job(
-                queue_name='catalog_rebuild',
-                payload={'reason': f'ebay_stage:{sku}'},
-                dedupe_key='catalog_rebuild:pending',
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
+            state_machine.enqueue_catalog_rebuild(f'ebay_stage:{sku}')
         except psycopg2.errors.UniqueViolation:
             pass
 

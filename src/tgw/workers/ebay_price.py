@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
@@ -90,13 +89,7 @@ class EbayPriceWorker(QueueWorker):
             # suggest_price() first); the #1240 early return skipped it
             # entirely, leaving the catalog stale until an unrelated write.
             try:
-                state_machine.enqueue_job(
-                    queue_name='catalog_rebuild',
-                    payload={'reason': f'ebay_price_guard_skipped:{sku}'},
-                    dedupe_key='catalog_rebuild:pending',
-                    not_before=time.time() + 30,
-                    max_attempts=3,
-                )
+                state_machine.enqueue_catalog_rebuild(f'ebay_price_guard_skipped:{sku}')
             except psycopg2.errors.UniqueViolation:
                 pass
             # audit#1143 #1240: this used to fall through and still call
@@ -168,13 +161,7 @@ class EbayPriceWorker(QueueWorker):
                                   suggested_price=suggested,
                                   source=result['source'])
             try:
-                state_machine.enqueue_job(
-                    queue_name='catalog_rebuild',
-                    payload={'reason': f'ebay_price_suggest:{sku}'},
-                    dedupe_key='catalog_rebuild:pending',
-                    not_before=time.time() + 30,
-                    max_attempts=3,
-                )
+                state_machine.enqueue_catalog_rebuild(f'ebay_price_suggest:{sku}')
             except psycopg2.errors.UniqueViolation:
                 pass
             return
@@ -263,13 +250,7 @@ class EbayPriceWorker(QueueWorker):
         fence_patch_item(self.config, sku, top_level_patch)
 
         try:
-            state_machine.enqueue_job(
-                queue_name='catalog_rebuild',
-                payload={'reason': f'ebay_price:{sku}'},
-                dedupe_key='catalog_rebuild:pending',
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
+            state_machine.enqueue_catalog_rebuild(f'ebay_price:{sku}')
         except psycopg2.errors.UniqueViolation:
             pass
 

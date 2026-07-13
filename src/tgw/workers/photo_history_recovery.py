@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import shutil
-import time
 from pathlib import Path
 from typing import Iterable
 
@@ -187,13 +186,7 @@ def main() -> int:
         # other writer uses (A7).
         try:
             state_machine.init(cfg.get('postgres_dsn', 'dbname=state_machine user=tgw'))
-            state_machine.enqueue_job(
-                queue_name='catalog_rebuild',
-                payload={'reason': 'photo_history_recovery'},
-                dedupe_key='catalog_rebuild:pending',
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
+            state_machine.enqueue_catalog_rebuild('photo_history_recovery')
             logging.info('photo_history_recovery: enqueued catalog_rebuild after %d copies', copied)
         except Exception as exc:
             logging.warning('photo_history_recovery: could not enqueue catalog_rebuild: %s', exc)

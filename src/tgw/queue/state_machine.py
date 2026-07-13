@@ -124,8 +124,19 @@ def enqueue_job(
     not_before: Optional[float] = None,
     dedupe_key: Optional[str] = None,
     max_attempts: int = 5,
+    debounce: bool = False,
 ) -> str:
-    """Insert a new queued job. Returns the new job_id (UUID string)."""
+    """Insert a new queued job. Returns the job_id (UUID string).
+
+    debounce=True changes dedupe_key collision handling from reject (the
+    default — raises psycopg2.errors.UniqueViolation, correct for per-SKU
+    pipeline dedup like `ebay_stage:{sku}` where a second enqueue must be a
+    no-op, never a delay) to extend: a colliding insert instead pushes the
+    existing pending job's not_before forward via GREATEST(). Use this only
+    for batch-coalescing keys (e.g. catalog_rebuild:pending) where the goal
+    is one job fired after writes go quiet, not one fired at a fixed offset
+    from the first write in a sustained burst. See uq_queue_jobs_dedupe_key_active.
+    """
     handler_family = handler_family or queue_name
     entity_id = entity_id or queue_name
     nb = None
@@ -134,20 +145,63 @@ def enqueue_job(
         nb = datetime.fromtimestamp(not_before, tz=timezone.utc)
     with _conn() as con:
         with con.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO queue_jobs
+            if debounce:
+                cur.execute(
+                    """
+                    INSERT INTO queue_jobs
+                        (queue_name, entity_type, entity_id, operation,
+                         handler_family, priority, payload_json,
+                         not_before, dedupe_key, max_attempts)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (dedupe_key)
+                        WHERE dedupe_key IS NOT NULL
+                          AND state NOT IN ('succeeded','failed','dead_letter','cancelled')
+                    DO UPDATE SET
+                        not_before = GREATEST(queue_jobs.not_before, EXCLUDED.not_before),
+                        payload_json = EXCLUDED.payload_json,
+                        updated_at = NOW()
+                    RETURNING job_id::text
+                    """,
                     (queue_name, entity_type, entity_id, operation,
-                     handler_family, priority, payload_json,
-                     not_before, dedupe_key, max_attempts)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING job_id::text
-                """,
-                (queue_name, entity_type, entity_id, operation,
-                 handler_family, priority, json.dumps(payload),
-                 nb, dedupe_key, max_attempts),
-            )
+                     handler_family, priority, json.dumps(payload),
+                     nb, dedupe_key, max_attempts),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO queue_jobs
+                        (queue_name, entity_type, entity_id, operation,
+                         handler_family, priority, payload_json,
+                         not_before, dedupe_key, max_attempts)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING job_id::text
+                    """,
+                    (queue_name, entity_type, entity_id, operation,
+                     handler_family, priority, json.dumps(payload),
+                     nb, dedupe_key, max_attempts),
+                )
             return cur.fetchone()[0]
+
+
+def enqueue_catalog_rebuild(reason: str, delay_seconds: float = 30.0) -> str:
+    """Coalesced catalog_rebuild enqueue — the one place this pattern lives.
+
+    Debounced: a burst of writes extends the single pending job's
+    not_before forward instead of each write re-arming a fresh job the
+    instant the previous one finishes (that fixed-offset behavior turned a
+    sustained write burst into one full rebuild roughly every
+    rebuild-duration + delay_seconds, nonstop, for the burst's whole
+    length — see PP-NIXOS-001 2026-07-12 incident).
+    """
+    import time as _time
+    return enqueue_job(
+        queue_name='catalog_rebuild',
+        payload={'reason': reason},
+        dedupe_key='catalog_rebuild:pending',
+        not_before=_time.time() + delay_seconds,
+        max_attempts=3,
+        debounce=True,
+    )
 
 
 def claim_queue_jobs(

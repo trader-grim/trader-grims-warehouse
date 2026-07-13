@@ -538,6 +538,13 @@ for nspawn. Rejected for now; revisit if untrusted code execution becomes a conc
   severity; hold critical severity changes for operator approval before applying? Or
   auto-fix everything and just log it? The conservative default is: auto-fix
   info/warning, queue critical for operator ack.
+  **Partially answered 2026-07-13 for the code-review case** — see
+  `pp/PP-HERMES-EA-001.md`'s "Tigwa as branch-review enforcer" section:
+  bounded check/fix loop, escalation-only reporting, explicit "out of
+  control" trigger list. That's a distinct mechanism from this doc's
+  data-mutation litterbox (same shape, different target: task-branch
+  fidelity vs. ItemData/queue anomalies) — still open here for the
+  data-mutation case specifically.
 
 - **Phase 5 timing:** Phase 5 gates on PP-NIXOS-001. Is there value in a lightweight
   Phase 5 prototype on MX Linux (manual nspawn invocation, no NixOS module) to validate

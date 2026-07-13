@@ -203,13 +203,7 @@ class EbayUploadWorker(QueueWorker):
                               to_attempt=to_attempt)
 
         try:
-            state_machine.enqueue_job(
-                queue_name='catalog_rebuild',
-                payload={'reason': f'ebay_upload:{sku}'},
-                dedupe_key='catalog_rebuild:pending',
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
+            state_machine.enqueue_catalog_rebuild(f'ebay_upload:{sku}')
         except psycopg2.errors.UniqueViolation:
             pass
 

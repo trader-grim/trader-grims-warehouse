@@ -914,13 +914,7 @@ def ebay_write(sku: str, body: EbayWriteBody) -> Dict[str, Any]:
 def _enqueue_catalog_rebuild(reason: str) -> None:
     """Coalesced catalog rebuild — 30s delay, single dedupe key."""
     try:
-        state_machine.enqueue_job(
-            queue_name="catalog_rebuild",
-            payload={"reason": reason},
-            dedupe_key="catalog_rebuild:pending",
-            not_before=time.time() + 30,
-            max_attempts=3,
-        )
+        state_machine.enqueue_catalog_rebuild(reason)
     except Exception:
         pass
 
@@ -1047,13 +1041,7 @@ def create_item_endpoint(body: CreateItemBody) -> Dict[str, Any]:
     atomic_write_json(json_path, record, pretty=_cfg.get("pretty", True))
 
     try:
-        state_machine.enqueue_job(
-            queue_name="catalog_rebuild",
-            payload={"reason": f"create:{body.sku}"},
-            dedupe_key="catalog_rebuild:pending",
-            not_before=time.time() + 30,
-            max_attempts=3,
-        )
+        state_machine.enqueue_catalog_rebuild(f"create:{body.sku}")
     except Exception:
         pass
 
@@ -1102,13 +1090,7 @@ def bulk_apply(body: BulkBody) -> Dict[str, Any]:
     # item JSONs and must refresh the catalog.
     if result.get("count"):
         try:
-            state_machine.enqueue_job(
-                queue_name="catalog_rebuild",
-                payload={"reason": "http_bulk"},
-                dedupe_key="catalog_rebuild:pending",
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
+            state_machine.enqueue_catalog_rebuild("http_bulk")
         except Exception:
             pass
     return result
@@ -1347,13 +1329,7 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
             _enqueue_catalog_rebuild(f"approve:{sku}")
             return {"ok": True, "sku": sku, "action": "approve", "status": "Ready"}
         elif action == "catalog_rebuild":
-            job_id = state_machine.enqueue_job(
-                queue_name="catalog_rebuild",
-                payload={"reason": f"manual:{sku}"},
-                dedupe_key="catalog_rebuild:pending",
-                not_before=time.time() + 5,
-                max_attempts=3,
-            )
+            state_machine.enqueue_catalog_rebuild(f"manual:{sku}", delay_seconds=5.0)
         elif action == "archive":
             _apply_patch(json_path, {"status": "archived"})
             _enqueue_catalog_rebuild(f"archive:{sku}")
@@ -6890,13 +6866,7 @@ def discard_revision(sku: str) -> Dict[str, Any]:
         return {"ok": True, "sku": sku, "note": "no revision_draft present"}
     _apply_patch(json_path, {"revision_draft": None})
     try:
-        state_machine.enqueue_job(
-            queue_name="catalog_rebuild",
-            payload={"reason": f"revision_discard:{sku}"},
-            dedupe_key="catalog_rebuild:pending",
-            not_before=time.time() + 30,
-            max_attempts=3,
-        )
+        state_machine.enqueue_catalog_rebuild(f"revision_discard:{sku}")
     except Exception as exc:
         # invariant C11: a skipped rebuild is a finding, not a swallowed
         # exception — otherwise the catalog goes stale after a discard with
@@ -9402,13 +9372,7 @@ async def ebay_notification_webhook(request: Request) -> Dict[str, Any]:
         if did_mark:
             log.info("ebay_webhook: marked sold listing_id=%s", listing_id)
             try:
-                state_machine.enqueue_job(
-                    queue_name="catalog_rebuild",
-                    payload={"reason": "ebay_webhook_sold"},
-                    dedupe_key="catalog_rebuild:pending",
-                    not_before=time.time() + 30,
-                    max_attempts=3,
-                )
+                state_machine.enqueue_catalog_rebuild("ebay_webhook_sold")
             except Exception:
                 pass
     except Exception as exc:

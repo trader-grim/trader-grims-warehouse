@@ -57,6 +57,244 @@ Hermes = the assistant; Tigwa/Leotha = which way the door is open.
   changes are isolated until explicitly committed" — Tigwa's training runs
   happen inside that same isolation model once it's built, not before.
 
+## Goal, stated plainly (Dave, 2026-07-13)
+
+This is an experiment, not a settled process: find out whether strictly
+following the work-packet/branch/manifest discipline actually improves
+results, and saves Dave time, versus the prior ad-hoc flow. Both halves
+matter — a process that improves code quality but costs more of Dave's
+time to run is not a win by this measure. Revisit this framing once
+there's enough real usage to judge it against; don't assume the answer
+yet just because the structure is built.
+
+## Scope correction (Dave, 2026-07-13): this is NOT a full autonomous loop yet
+
+Read the section below with this framing or it will be over-read. Dave's
+actual operational intent today: this is **"uberscripting" of his own
+code-review and git-handling process** — an intelligent enforcement layer
+on work he is still driving, not a delegation of autonomous task
+execution. The branch-per-task contract, result manifest, and Tigwa
+check/fix shape are being built now because **they are the reusable
+pieces true automation will need later** — but the near-term use is Dave
+using this tooling on his own workflow, with policy/spec enforcement
+applied intelligently, not workers running unattended end to end. Do not
+assume from the section below that tasks are meant to flow through Tigwa
+and land without Dave's involvement today — that is the eventual shape,
+not the current one.
+
+## Tigwa as branch-review enforcer — bounded pre-crypto-lock exception (Dave, 2026-07-13)
+
+**This is a deliberate, explicit exception** to the Authority model above
+("autonomy unlocks only once the crypto-lock exists") — not a redefinition
+that it doesn't count as autonomy, and not deferred to wait for the cage.
+Dave's own framing: "We have to try something, and this seems manageable
+and valuable... if it isn't already clear, I'll make it clear." Scope of
+the exception is narrow: Tigwa's own task-review loop, branch-isolated,
+never a direct live/production write. Answers PP-AIOPS-001's open
+"litterbox autonomy level" question for the **code-review case**
+specifically — this is a distinct mechanism from that doc's data-mutation
+litterbox (price_set_zero, status_regressed, etc.), same shape, different
+target.
+
+### Why now, motivating context
+A more streamlined, Aider-like executor profile is coming for running todo
+tasks. With more than one worker (Claude, Aider, eventually Tigwa herself,
+whatever comes next) executing tasks concurrently, constantly landing
+changes straight onto live code is risk Dave is willing to reduce but not
+eliminate ("I don't mind living on the edge a bit, but we have a lot of
+communication to manage and only an inkling of what options are yet to
+come"). The goal is a flexible, growing workforce that still executes the
+plan with fidelity — "the plan is the company." Tigwa's role is the
+mechanism that keeps that promise as the workforce grows, without routing
+every task through Dave.
+
+### The task-execution contract (worker-agnostic)
+Applies to any worker — Claude, Aider, future agents — executing a todo
+under the existing [[Work-packet protocol]] (`TGW-Master-Plan.md`):
+
+1. **One todo = one branch, in its own isolated git worktree**, based on
+   the repo's actual current branch (`catio-nix-0.0.1-alpha` as of
+   2026-07-13, verified live via `git branch --show-current` before every
+   worktree creation — **never hardcode a base branch name**, including
+   in the invoking prompt). **Mandatory for every executor of this
+   contract, not just `tgw-coder`** — Aider (`tgw-aider-step`) and any
+   future coder must set up the same worktree before working, never
+   check out branches in the shared repo checkout. Added 2026-07-13 after
+   the pilot's first two runs shared one working directory and had to
+   stash/restore around each other's uncommitted state — safe for one
+   task at a time by luck of sequencing, not by design, and unsafe once
+   tasks run concurrently. Nothing lands on main until stitched (below).
+   **Near-miss, pilot's 12th run (todo #1284):** Claude's own invoking
+   prompts had been saying "branch off `main`" all session — a real ref
+   that exists but is 41 commits behind `catio-nix-0.0.1-alpha`, a stale
+   ancestor, not the branch anyone is actually working on. No harm
+   resulted (`main` has zero unique commits — every prior worktree was
+   just missing recent context, not conflicting content, and every merge
+   went through cleanly), but it was luck, not design — a real divergence
+   would have surfaced as a hard-to-diagnose merge conflict. Caught only
+   because this run's executor verified the base branch live instead of
+   trusting the prompt. `tgw-coder.md` now requires that verification
+   unconditionally.
+   **Near-miss, first concurrent batch (todo #1291):** an executor wrote
+   its breadcrumb straight into the shared checkout instead of its
+   worktree — harmless that round (no filename collision), but a real
+   gap against the isolation guarantee. `tgw-coder.md` now spells out the
+   worktree's literal absolute path for every write, not just "inside the
+   worktree" — that phrasing left room for an absolute-shared-checkout-path
+   mistake to slip through.
+2. **Execution surface is worker-agnostic.** The contract doesn't care
+   whether the worker is an interactive session or a single-shot run — only
+   that it produces a result manifest at completion.
+3. **Result manifest at completion** — status (`done`/`blocked`/`partial`),
+   todo id, pp_ref, files touched, and the live-verification evidence the
+   packet's Acceptance section already requires (command/URL/SKU + observed
+   result). This is what lets a reviewer judge fidelity without re-deriving
+   context — the same artifact regardless of which worker produced it.
+
+### Tigwa's check/fix loop
+1. Reads the branch diff + result manifest against the work-packet's Spec
+   and `invariants.md` — a fidelity check against the packet, not general
+   code taste (matches the doctrine in `CLAUDE.md`: "does it match the plan
+   and the invariant it's meant to satisfy").
+2. **Bounded fix attempts — capped, not open-ended.** Proposed cap: 2
+   attempts. Past the cap, escalate regardless of whether Tigwa believes
+   it's clean — the cap exists so her judgment is never the only thing
+   standing between a drifting fix and Dave, however good that judgment is
+   this month.
+3. **Escalation-only reporting to Dave** — the normal case is silent
+   pass-through to stitch; Dave sees output only when an "out of control"
+   trigger fires. Tigwa's existing cost-awareness (Groq FREE key work, see
+   PP-HERMES-EA-001 infra notes) is a soft signal here, not the hard gate.
+4. **"Out of control" must be an explicit encoded list, never Tigwa's
+   subjective call** (Prime Directive 5 — a requirement that lives only in
+   her judgment is the exact failure mode this project keeps re-learning).
+   Starting list, to be refined once the mechanism is actually built:
+   - Spec deviation not resolved within the fix-attempt cap
+   - An `invariants.md` violation still present after fix attempts
+   - Any file touched outside the packet's declared scope — **except** test
+     file(s) (new or modified) for a function/module already in the
+     packet's declared scope. Writing tests has always been part of the
+     process, not scope creep — the carve-out is about WHAT is tested
+     (the code you touched, vs. something else), never whether a test
+     file happened to exist already. Tests for anything outside the
+     packet's scope, or new test frameworks/fixtures/conftest changes
+     unrelated to the fix, still fire this trigger. Added 2026-07-13,
+     refined same day after two pilot runs hit this from different
+     angles: an existing-file addition (task 1,
+     `plan/packets/results/1292-1293-clipd-rofi-picker-ESCALATION.md`)
+     and a wholly-new test file for a previously-untested module (task 4,
+     `plan/packets/results/1294-ESCALATION.md`) — both were the same
+     underlying case, just worded too narrowly the first time.
+   - Any attempted live/production write before the stitch step
+   - Todo/pp_ref mismatch or a packet with no explicit spec at all
+     (undelegated per the Work-packet protocol's own rule)
+5. **Stitch step unchanged** — Dave (or Claude) merges cleared branches;
+   this is the "spec/acceptance judge" role the CLAUDE.md doctrine already
+   names, not a new invention.
+6. **Operational friction gets a todo, always — not left to whether the
+   reviewer happens to remember** (Dave, 2026-07-13, after the
+   `.pytest_cache` permission workaround during a stitch — the fix itself
+   was fine, but filing #1361 for it was an ad hoc choice, not a required
+   step). Any time the stitch step, `tgw-coder`, or `tgw-runner-review`
+   works around something that ISN'T the actual bug being fixed —
+   a permission mismatch, a tooling quirk, a stale assumption in the
+   environment — a todo capturing it is mandatory before the task counts
+   as complete, the same way a code deviation is mandatory to flag
+   (Prime Directive 3, applied here to operational friction instead of
+   code). Narrow, reversible workarounds (like `sudo -u tgw rm -rf` on a
+   wrongly-owned cache dir) are fine to apply in the moment — the
+   requirement is the todo, not avoiding the workaround.
+
+### Cadence rule (Dave, 2026-07-13, after the first 5-task pilot cycle)
+Sequential-by-default, with a graduation gate to concurrency:
+- **Normal cadence: stitch immediately after each single task clears** —
+  don't accumulate a batch before merging (the first cycle's "run 5, then
+  stitch" was a one-time full-cycle test, not the standing pattern).
+- **Exception: the first task of a fresh sequence is never stitched
+  alone**, even if it passes clean — a single clean run has proven
+  nothing every time so far (task 5 passed clean; task 1's code was also
+  fine, its *scope check* was what needed fixing). One task alone can't
+  distinguish "this is stable" from "this specific task happened not to
+  hit a gap."
+- **Once that first task AND a second task both pass clean (2 in a
+  row)**: stitch both together, and from that point on this sequence
+  graduates to running several tasks concurrently (the worktree isolation
+  built in this same cycle is what makes that safe).
+- A framework fix mid-sequence (trigger-list change, new hazard found)
+  resets the count — the next task after a fix is the new "first run,"
+  not a continuation of the prior streak.
+- **Switching to a materially different risk category (e.g. mechanical
+  bugs → SECURITY findings) resets the count too**, even mid-batch —
+  the "2 in a row" proof doesn't automatically transfer across categories
+  that carry different stakes.
+
+### Shared-root cluster rule (Dave, 2026-07-13 — "still 3 branches or one?")
+When multiple audit todos trace back to the same underlying function
+(a "shared root"), don't decide branch-count up front — it's a triage
+step that happens AFTER the root is fixed, not a rule fixed in advance:
+
+1. **Fix the shared root as its own single task first**, not concurrent
+   with any of its dependents (same logic as the cadence rule above —
+   the dependents' own fix, if any, depends on the root actually landing).
+2. **For each dependent todo, run a verification pass against the fixed
+   root before writing any new code** — re-check that todo's own reported
+   scenario. Two outcomes, and you don't know which until you check:
+   - **Fully resolved, zero code needed** → close the todo directly,
+     citing the root fix's commit/todo as the evidence. No branch, no
+     packet.
+   - **Still broken** (the call site never actually went through the
+     shared root to begin with) → it gets its own packet/branch, scoped
+     to just that residual gap.
+3. This is partly a "better audit prep would have caught the coupling
+   upfront" situation too — but retroactively re-triaging an already-filed
+   audit isn't worth it; handle the shape at execution time instead.
+
+**First real case, proving the rule (2026-07-13):** `#1274` (root:
+`config.sku_dir()`/`location_dir()` had zero path-traversal validation)
+had three dependents — `#1273`, `#1275`, `#1284`. Verification pass found
+BOTH outcomes in the same cluster:
+- `#1273` (http_server.py PATCH → `items.locationupdate()` →
+  `_rebuild_location_link()`/`_remove_location_link()` → `location_dir()`)
+  — **fully resolved by #1274 alone.** The call chain already wraps
+  `location_dir()` in `except Exception` and the PATCH handler already
+  treats a failure as a persisted finding (invariant C11) — a malicious
+  value now raises `ValueError` there and is caught by existing, correct
+  error handling. Closed via verification, no branch.
+- `#1275` (catalog.py `build_location_tree()`) and `#1284`
+  (sku_migration.py `rename_sku()`) — **both bypass `location_dir()`
+  entirely**, building `cfg['location_tree_root'] / location` as their
+  own raw, separate, still-unsafe join. Neither is touched by #1274 at
+  all. Both get their own packet (same fix shape: route through the now-
+  hardened `location_dir()`).
+
+### Open, not resolved by this note
+- The full "out of control" detector list needs its own pass when this is
+  actually built, not just the starting list above.
+- Tigwa's MCP scope is currently read-only (`TGW_MCP_READONLY=1`) — this
+  loop's "fix" half needs write authority on her own branches specifically;
+  that's a real permission change to make explicitly, not an implicit
+  side-effect of this note.
+- Fix-attempt cap (2, above) is a proposal, not yet confirmed by Dave.
+
+### Executor profile built to this contract, 2026-07-13
+
+`.claude/agents/tgw-coder.md` — a streamlined Claude Code subagent that
+executes exactly one todo/packet on a `todo/<id>-<slug>` branch, loads only
+the packet (not the master plan), and stops at a result manifest
+(`plan/packets/results/<id>-RESULT.md`) instead of merging. It never
+self-reviews for spec fidelity and never merges/marks the todo done — that
+is deliberately left to the stitch/Tigwa-review step above, not folded
+into the executor. Explicitly does NOT itself implement the check/fix
+loop — that consumer is `.claude/skills/tgw-runner-review/SKILL.md` (added
+same session), a **skill**, not a persona-locked agent: any executive
+monitor — Tigwa, Claude, whoever's chosen next — follows it identically to
+review a `tgw-coder` branch + manifest, apply bounded fixes, and escalate
+only on the out-of-control triggers listed above (kept in sync between
+this doc and the skill — this doc is authoritative if they ever diverge).
+Main Claude session's own CLAUDE.md profile was deliberately left
+unchanged (Dave, 2026-07-13) — `tgw-coder` and `tgw-runner-review` are
+additional profiles, not a replacement.
+
 ## Task-selection pattern for early apprenticeship (Dave, 2026-07-11)
 
 While triaging the backlog, Dave flagged `#1232` (a D-Link router
@@ -284,6 +522,19 @@ setup a structure that accommodates that."
 4. **Decision log** — every wake (shadow or real) recorded with trigger +
    outcome, same pattern as quota-429 incident logging. This is what
    tuning actually works from over time.
+
+### Standing operational change, 2026-07-13 — Tigwa self-schedules plan review
+
+Dave: "Tigwa now set to automatically review the plan several times a day
+to stay on track." A recurring, read-only pass over
+`TGW-Master-Plan.md`/`tgw plan check`/`tgw plan status` — consistent with
+her current `TGW_MCP_READONLY=1` scope (Authority model above) and with
+the Wake-trigger structure's existing "Signal sources" layer, which
+already names these same commands as reused, not new, monitoring. Not yet
+tied to the wake-trigger's shadow-mode/decision-log discipline described
+there — if this recurring review starts producing actions (not just
+staying informed), it should route through that same structure rather
+than becoming a second, parallel mechanism.
 
 ### Deferred-investigation queue — a second, distinct Tigwa function
 

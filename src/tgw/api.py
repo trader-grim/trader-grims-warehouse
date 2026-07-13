@@ -3119,13 +3119,7 @@ def cmd_price_freeship(
 
             from tgw.queue import state_machine as _sm
             _sm.init(cfg["postgres_dsn"])
-            _sm.enqueue_job(
-                queue_name="catalog_rebuild",
-                payload={"reason": f"price_freeship:{sku}"},
-                dedupe_key="catalog_rebuild:pending",
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
+            _sm.enqueue_catalog_rebuild(f"price_freeship:{sku}")
         except psycopg2.errors.UniqueViolation:
             pass
         except Exception as exc:
@@ -3232,13 +3226,7 @@ def cmd_bulk(
             from .queue import state_machine as _sm
 
             _sm.init(cfg["postgres_dsn"])
-            _sm.enqueue_job(
-                queue_name="catalog_rebuild",
-                payload={"reason": "bulk_edit"},
-                dedupe_key="catalog_rebuild:pending",
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
+            _sm.enqueue_catalog_rebuild("bulk_edit")
         except Exception:
             pass
 
@@ -4703,13 +4691,7 @@ def main() -> int:
                 marked = result.get("marked", 0)
                 if marked and not args.dry_run:
                     try:
-                        _sm.enqueue_job(
-                            queue_name="catalog_rebuild",
-                            payload={"reason": "import_sold_csv"},
-                            dedupe_key="catalog_rebuild:pending",
-                            not_before=time.time() + 30,
-                            max_attempts=3,
-                        )
+                        _sm.enqueue_catalog_rebuild("import_sold_csv")
                         print("catalog_rebuild job enqueued.")
                     except Exception:
                         pass
@@ -4814,13 +4796,7 @@ def main() -> int:
 
             if total_changes and not dry_run:
                 try:
-                    _sm.enqueue_job(
-                        queue_name="catalog_rebuild",
-                        payload={"reason": "ebay_pull"},
-                        dedupe_key="catalog_rebuild:pending",
-                        not_before=time.time() + 30,
-                        max_attempts=3,
-                    )
+                    _sm.enqueue_catalog_rebuild("ebay_pull")
                     print("catalog_rebuild job enqueued.")
                 except Exception:
                     pass
