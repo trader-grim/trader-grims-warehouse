@@ -227,6 +227,15 @@ Sequential-by-default, with a graduation gate to concurrency:
   bugs → SECURITY findings) resets the count too**, even mid-batch —
   the "2 in a row" proof doesn't automatically transfer across categories
   that carry different stakes.
+- **Lone task with no pairing candidate** (nothing left in its risk
+  category/sequence to run second) — expected to happen regularly, not a
+  rare edge case. Hard adherence to "never stitch alone" would leave a
+  correctly-reviewed fix stuck forever with no way to ever produce the
+  missing second data point (Dave, 2026-07-13). Whether it stitches solo
+  is the reviewer's/PM's call (whoever is running `tgw-runner-review`),
+  never the stitch step's own default — the stitcher does not unilaterally
+  apply or waive the pairing requirement. Default state while that call is
+  pending: hold.
 
 ### Shared-root cluster rule (Dave, 2026-07-13 — "still 3 branches or one?")
 When multiple audit todos trace back to the same underlying function

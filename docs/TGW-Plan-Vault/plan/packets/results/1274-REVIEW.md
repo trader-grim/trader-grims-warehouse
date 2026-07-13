@@ -1,6 +1,6 @@
 # Review: 1274 config-path-safety-validation
-Status: cleared — NOT stitched yet (cadence rule: first run of the
-SECURITY track, holding for a second clean run before stitching)
+Status: cleared — stitched with #1275 in `dbac723` (second clean run of
+the SECURITY track completed the cadence-rule hold noted below)
 Reviewer: Claude (main session, tgw-runner-review)
 
 Checked: Spec (exact `_safe_segment()` implementation, wired into both
@@ -19,4 +19,4 @@ scenario, using this worktree's fixed config.py — not automatic new
 coding tasks for each, per the shared-root triage rule being proposed to
 Dave this session.
 
-Ready to stitch pending the cadence rule's second clean run.
+Stitched.

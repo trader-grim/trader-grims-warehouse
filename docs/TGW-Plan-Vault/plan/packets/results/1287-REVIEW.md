@@ -1,6 +1,9 @@
 # Review: 1287 ai-identify-model-var-clobber
-Status: cleared — NOT stitched yet (cadence rule: first run of a new
-sequence, holding for a second clean run before stitching either)
+Status: cleared — stitched solo in `9bcf73b`. At the time this had no
+pairing candidate left in its sequence; per the 2026-07-13 cadence-rule
+clarification (lone task with no pairing candidate — reviewer's/PM's call,
+not a rule violation), stitching solo on this review's own evidence was
+within the reviewer's authority, not a deviation.
 Reviewer: Claude (main session, tgw-runner-review)
 
 Checked: Spec (exact 3-site rename, provider-model provenance untouched at
@@ -13,4 +16,4 @@ correct in both identification_history and vision_results, product model
 still correctly captured in both places it's needed, full suite green).
 No deviations, no out-of-control triggers fired.
 
-Run 1 of 2 needed before stitch, per the 2026-07-13 cadence rule.
+Stitched.
