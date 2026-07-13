@@ -282,6 +282,29 @@ def test_missing_token_rejected(client):
     assert r.status_code in (401, 403)
 
 
+def test_bearer_auth_uses_constant_time_compare(client, monkeypatch):
+    """#1282 — bearer-token check must use secrets.compare_digest, not `==`,
+    to close the timing side-channel the password check already avoided."""
+    calls = []
+    real_compare_digest = http_server.secrets.compare_digest
+
+    def spy(a, b):
+        calls.append((a, b))
+        return real_compare_digest(a, b)
+
+    monkeypatch.setattr(http_server.secrets, "compare_digest", spy)
+
+    r = client.get("/api/items", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    assert calls, "secrets.compare_digest was never called for bearer auth"
+    assert calls[0] == (API_KEY.encode(), API_KEY.encode())
+
+    calls.clear()
+    r = client.get("/api/items", headers={"Authorization": "Bearer wrong"})
+    assert r.status_code == 401
+    assert calls == [(b"wrong", API_KEY.encode())]
+
+
 # ---------------------------------------------------------------------------
 # GET /api/items — search / location / status filters + limit/offset
 # ---------------------------------------------------------------------------
