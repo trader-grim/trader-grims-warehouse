@@ -84,6 +84,15 @@ cat /opt/TGW/var/run/thermal.status 2>/dev/null || echo "NORMAL|0|0"
 
 If the status is HOT, THROTTLE, or SHUTDOWN: **stop all disk-intensive operations** (no recursive grep/find on ItemData/ItemCatalog). At THROTTLE the watchdog has already stopped workers — do not restart them. At HOT, slow down and avoid large scans.
 
+**Todo #1344 / PP-HERMES-EA-001, tgw-prod half DONE 2026-07-12:** Hermes-lite
+gateway is a `systemd --user` service on tgw-prod (not flake-managed —
+matches the 2026-07-11 decision to keep Hermes in userspace), and its `tgw`
+MCP link is wired read-only (`TGW_MCP_READONLY=1`, see `mcp_server.py`;
+excludes `tgw_enqueue`/`tgw_add_suggest` while Tigwa is IN TRAINING). a1131
+(full Tigwa) service + SSH-tunneled MCP wiring is Dave/Tigwa's to set up
+themselves going forward — see PP-HERMES-EA-001.md for the full design and
+the still-open wake-rules/dispatch mechanism.
+
 **Step 1 — process any pending plan updates before reading the plan:**
 
 1. Check `docs/TGW-Plan-Vault/inbox/` for any `.md` files. If any exist, read them and

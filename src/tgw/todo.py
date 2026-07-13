@@ -5,7 +5,7 @@ Storage: PostgreSQL table ``todo_items`` in ``state_machine`` DB.
 CLI entry point: ``tgw todo [agent] [--add TEXT] [--done ID] [--seed]``
                  ``tgw todo brief <id>`` — self-contained per-agent task spec
 
-Agents: claude, admin, gemini, db  (open-ended — any string is valid)
+Agents: claude, admin, gemini, db, tigwa  (open-ended — any string is valid)
 Priority: integer, lower = higher priority (50 = default, 10 = urgent, 90 = someday)
 
 PP-PLANDB-001 Phase 1 columns (migration, applied 2026-06-12)::

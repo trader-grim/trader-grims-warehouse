@@ -29,6 +29,15 @@ from typing import Any, Dict
 from mcp.server import FastMCP
 
 # ---------------------------------------------------------------------------
+# Read-only mode: TGW_MCP_READONLY=1 drops write-capable tools (tgw_enqueue,
+# tgw_add_suggest) from registration entirely — used for Tigwa/Hermes MCP
+# access while she is IN TRAINING (PP-HERMES-EA-001), not just hidden from
+# a client's tool list.
+# ---------------------------------------------------------------------------
+
+_READONLY = os.environ.get('TGW_MCP_READONLY', '') in ('1', 'true', 'yes')
+
+# ---------------------------------------------------------------------------
 # Bootstrap: load TGW config once at server startup
 # ---------------------------------------------------------------------------
 
@@ -199,7 +208,6 @@ def tgw_health() -> str:
 # tgw_enqueue — enqueue a pipeline action for a SKU
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
 def tgw_enqueue(sku: str, action: str) -> str:
     """Enqueue a pipeline action for a given item SKU.
 
@@ -252,6 +260,10 @@ def tgw_enqueue(sku: str, action: str) -> str:
         return json.dumps({'ok': False, 'error': str(exc)})
 
 
+if not _READONLY:
+    mcp.tool()(tgw_enqueue)
+
+
 # ---------------------------------------------------------------------------
 # tgw_get_todo — list open TODO items
 # ---------------------------------------------------------------------------
@@ -261,7 +273,7 @@ def tgw_get_todo(agent: str = '') -> str:
     """List open TODO items from the TGW multi-agent tracker.
 
     Args:
-        agent: Filter by agent ('claude', 'admin', 'gemini', 'db', or '' for all)
+        agent: Filter by agent ('claude', 'admin', 'gemini', 'db', 'tigwa', or '' for all)
 
     Returns JSON list of open TODO items with id, agent, priority, body.
     """
@@ -298,7 +310,6 @@ def tgw_get_todo(agent: str = '') -> str:
 # tgw_add_suggest — append to SUGGESTIONS.md
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
 def tgw_add_suggest(text: str) -> str:
     """Append a suggestion or note to SUGGESTIONS.md for the next planning session.
 
@@ -317,6 +328,10 @@ def tgw_add_suggest(text: str) -> str:
         return json.dumps(result)
     except Exception as exc:
         return json.dumps({'ok': False, 'error': str(exc)})
+
+
+if not _READONLY:
+    mcp.tool()(tgw_add_suggest)
 
 
 # ---------------------------------------------------------------------------

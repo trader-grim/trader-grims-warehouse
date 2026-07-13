@@ -992,7 +992,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("todo", help="multi-agent TODO tracker (PP-TODO-001 / PP-PLANDB-001)")
     p.add_argument("agent", nargs="?", default=None,
-                   help="filter by agent: claude, admin, gemini, db (omit for all); "
+                   help="filter by agent: claude, admin, gemini, db, tigwa (omit for all); "
                         "or 'brief' to generate a task spec; combine with --next for top task")
     p.add_argument("brief_id", nargs="?", default=None, help="todo id for 'tgw todo brief <id>'")
     p.add_argument("--add", metavar="TEXT", help="add a new TODO item")
@@ -1015,7 +1015,7 @@ def _build_parser() -> argparse.ArgumentParser:
                         "replaces 'brief --next --agent AGENT --clip'")
     p.add_argument("--nextloop", action="store_true", dest="nextloop",
                    help="loop --next continuously until tasks are exhausted or user quits (y=done/s=skip/q=quit)")
-    p.add_argument("--agent", default=None, metavar="AGENT", dest="next_agent", help="agent name for --next / --nextloop (e.g. claude, gemini, admin)")
+    p.add_argument("--agent", default=None, metavar="AGENT", dest="next_agent", help="agent name for --next / --nextloop (e.g. claude, gemini, admin, tigwa)")
 
     p = sub.add_parser("plan", help="plan/taskboard operations (PP-PLANDB-001)")
     p.add_argument(

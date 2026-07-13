@@ -6319,7 +6319,7 @@ ACTIONS: [{"type": "add_todo", "agent": "claude", "body": "Task description", "p
 ACTIONS: [{"type": "add_suggestion", "text": "text of suggestion"}]
 ACTIONS: [{"type": "none"}]
 
-Valid agents: claude, gemini, sokoban (database tasks), admin, operator.
+Valid agents: claude, gemini, sokoban (database tasks), admin, operator, tigwa.
 Priority: 10 (urgent) to 90 (low). Default 50.
 Always end with ACTIONS — use none when no action is warranted.\
 """

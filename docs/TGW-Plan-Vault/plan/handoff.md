@@ -195,6 +195,40 @@ anything else, don't re-derive from this summary alone.**
 - Dave will handle #1253 (secrets facility → interactive shell) himself in
   Hermes config planning — not TGW's tracker, don't pick this up.
 
+## Session 2026-07-12 continued (Hermes setup + a1131 toolkit + #1322 durable fix)
+
+- **Hermes-lite** installed+configured on tgw-prod (userspace, `nix profile
+  install`), recovered old state restored, all 4 API keys wired
+  (deepseek-v4-flash). Not yet a systemd service.
+- **a1131 toolkit** (all under the `claude` account): Codex CLI, Aider,
+  Claude Code CLI, AGY, notebooklm-py, xdg-utils — all installed, latest
+  stable. Claude Code CLI OAuth-authenticated (Pro sub,
+  claude@mappo.eu.org) after a long fight — see memory
+  `feedback-a1131-claude-account-oauth` for the gotchas (home-dir
+  permissions, DISPLAY-inheritance hang, code-relay-through-agent
+  fragility, clipboard failures). Codex CLI + AGY logins still pending.
+  Hermes's own openai-codex OAuth (tgw-prod) still OpenAI-429-throttled.
+- **Todo #1322 FIXED**: durable worker-stop mechanism. `services.tgw.
+  workers` was defaulting to ALL queues — root cause of this morning's
+  reboot resurrecting pm_intake etc. Explicit exclusion list added to
+  `nix/hosts/tgw-prod.nix`, verified, staged via `nixos-rebuild boot`
+  (not `switch` — live system untouched, takes effect on Dave's next
+  reboot). Flake change uncommitted, pending Dave's review.
+- **Design fully written up**: `pp/PP-HERMES-EA-001.md` — office split
+  (Hermes-lite always-on tgw-prod / full Tigwa woken on a1131 via WoL),
+  wake-trigger structure (reuse tgw health/ops-digest, shadow mode first),
+  deferred-investigation queue (new Tigwa function, NotebookLM as first
+  use case), Nix-safety rules (test>switch, build-vm off-host).
+- **Dave rebooting both machines now** to test whether it resolves a1131
+  clipboard-paste failures that blocked OAuth code entry all session.
+
+**Open into next session:** verify #1322's fix actually took effect
+post-reboot; finish Codex CLI + AGY auth on a1131; retry Hermes's
+openai-codex OAuth after real cooldown; a1131 browser-launch still not
+working even with xdg-utils (Dave: "wasn't pulling up the browser") — not
+yet root-caused, troubleshoot if it recurs; create the dedicated tigwa/tgw
+Google account (Dave) to unblock notebooklm-py auth.
+
 ## Session 2026-07-12 (Fable independent review #1338 · live worker-resurrection incident)
 
 - **Ran todo #1338**, the Fable independent review deferred from the
@@ -235,3 +269,57 @@ anything else, don't re-derive from this summary alone.**
   `plan/pp/`). Folded into existing todo #1331 rather than duplicating.
 - `tgw plan check` clean after all edits. Nothing committed yet — same as
   every prior session this week, awaiting Dave's go.
+
+## Session 2026-07-12, later (post-reboot checkup → Tigwa's a1131 office fully provisioned)
+
+Picked up right after the reboot from the previous session (testing whether it
+fixed a1131 clipboard paste). Turned into completing PP-HERMES-EA-001's a1131
+leg end-to-end. Dave, on seeing it work: "Seems we have a scaffolding to build
+this tool. It is a keystone in our strategy, time for me to onboard tigwa and
+let her interview me."
+
+- **Post-reboot checkup**: #1322 durable-worker-stop fix confirmed live
+  (pm_intake/thumbnail_gen/velocity_stats/ebay_price_reducer/ebay_sku_migrate
+  correctly absent). `tgw health` clean (as `tgw` user — running as the wrong
+  user gives misleading permission-denied noise, not real failures).
+- **Codex CLI OAuth, a1131**: got working after real friction — device-auth
+  needs the local process to observe its own completion, finishing the
+  ChatGPT-webUI side alone isn't enough (3 failed attempts before this was
+  understood). See [[feedback-a1131-claude-account-oauth]].
+- **Hermes model config, tgw-prod**: main model set to `openai-codex`/
+  `gpt-5.6-sol` via the interactive `hermes model` picker (not hand-edited —
+  the picker also manages provider-specific api_mode/base_url correctly).
+  Hermes's own `openai-codex` OAuth also completed (earlier 429 throttle had
+  cleared). OpenRouter confirmed healthy, $5/day cap is intentional sizing
+  for its fallback-only role, not a problem.
+- **a1131 account renamed `claude` -> `tigwa`**, Dave's direction ("moving
+  tigwa into her new office... under my authority"). Done via the nix flake
+  (uid 1001 pinned, uncommitted pending Dave's review — same pattern as the
+  #1322 fix), not raw `usermod`. Real regressions found+fixed post-rename:
+  stale absolute paths in `~/.nix-profile` symlinks and `~/.npmrc`, pipx
+  venvs (`aider-chat`, `notebooklm-py`) needed `pipx reinstall`. Full detail
+  and reusable gotchas in [[project-tigwa-office-a1131]].
+- **Full toolkit verified live on `tigwa@a1131`**: Codex (OAuth), Claude Code
+  CLI (auth intact), Aider, notebooklm-py, AGY (binary runs, auth deferred),
+  Hermes (installed, not yet configured). Added a missing `~/.profile` so all
+  six resolve on PATH with a normal login — the account had none before.
+- **`bubblewrap` added to a1131's system packages** — Codex's `--sandbox`
+  mode needs `bwrap`, wasn't present anywhere on the host. Build-then-switch,
+  verified live.
+- **Deliberately deferred, not gaps**: AGY and notebooklm-py auth both wait
+  on Dave's own timeline for deciding whether/how to migrate off his personal
+  Google account for Tigwa's identity — explicitly not a rush.
+- **Still open**: Hermes-lite's a1131 model/credential config (Dave doing
+  himself), Hermes-lite gateway service (still stopped), wake-rules config,
+  office-side dispatch mechanism (not yet designed). See todo #1340 (updated
+  this session) and `docs/TGW-Plan-Vault/inbox/INPROGRESS-1340-hermes-setup.md`.
+- Both flake changes **committed** (Dave: "commit the flake"), as two
+  separate commits: `1a3285c` (#1322 durable-worker-stop, tgw-prod.nix) and
+  `8592ae2` (#1340 tigwa rename + bubblewrap, a1131.nix). Neither pushed to
+  origin — not asked for.
+- Dave's closing note: onboarding Tigwa doesn't change Claude's role —
+  "You are still lead engineering architect. Tigwa is here as both of our
+  assistant to reduce our workloads." **Next session's stated priority:
+  "tackling the audit results"** — check CLAUDE.md's Current Phase section
+  and open PP-COHESION-001 items first to confirm which audit before
+  assuming.
