@@ -270,7 +270,7 @@ def _require_auth(
     credentials: Optional[HTTPAuthorizationCredentials] = Security(_security),
     request: Request = None,
 ) -> None:
-    if credentials and credentials.credentials == _api_key:
+    if credentials and secrets.compare_digest(credentials.credentials.encode(), _api_key.encode()):
         return
     tok = request.cookies.get(_SESSION_COOKIE) if request else None
     if tok and _sessions.get(tok, 0) > time.time():
