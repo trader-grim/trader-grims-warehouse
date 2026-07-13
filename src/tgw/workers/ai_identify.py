@@ -212,9 +212,14 @@ class AIIdentifyWorker(QueueWorker):
         from tgw.image_hash import compute_dhash, lookup_hash, store_hash
 
         img_hash = compute_dhash(img_path)
+        import hashlib
+        context_sig = hashlib.sha256(
+            (product_context or hint or "").encode("utf-8")
+        ).hexdigest()[:16] if (product_context or hint) else "no_context"
+        cache_key = f"{img_hash}:{context_sig}" if img_hash else None
         # Only use cache for single-photo calls — multi-photo gives richer results
         use_cache = len(candidate_photos) == 1
-        cached_result = lookup_hash(img_hash, "ai_identify") if (img_hash and use_cache) else None
+        cached_result = lookup_hash(cache_key, "ai_identify") if (cache_key and use_cache) else None
 
         raw: Optional[str] = None
         if cached_result is not None:
@@ -245,8 +250,8 @@ class AIIdentifyWorker(QueueWorker):
                 # #1249 code-review follow-up.
                 raise HardFailure(f"ai_identify: model returned non-JSON for {sku}: {raw[:2000]}") from exc
 
-            if img_hash and use_cache:
-                store_hash(img_hash, sku, "ai_identify", result)
+            if cache_key and use_cache:
+                store_hash(cache_key, sku, "ai_identify", result)
 
         def _str(key: str) -> str:
             v = result.get(key)
