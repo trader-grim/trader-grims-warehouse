@@ -563,14 +563,13 @@ def run_migration(
 def collision_report(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """Run collision check and return structured report."""
     collisions = check_collisions(cfg)
-    by_type: Dict[str, int] = {}
-    for c in collisions:
-        t = c['conflict_type']
-        by_type[t] = by_type.get(t, 0) + 1
     return {
-        'ok':             len(collisions) == 0,
-        'total':          len(collisions),
-        'by_type':        by_type,
-        'collisions':     collisions[:50],
-        'safe_to_migrate': len(collisions) == 0,
+        'ok': collisions['ok'],
+        'total': collisions['raw_a_collisions'],
+        'by_type': {
+            'auto_resolved': collisions['auto_resolved'],
+            'unresolvable': collisions['unresolvable'],
+        },
+        'collisions': collisions['resolved_pairs'][:50],
+        'safe_to_migrate': collisions['safe_to_migrate'],
     }
