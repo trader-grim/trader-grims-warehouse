@@ -15,6 +15,7 @@ from tgw.reports import (
     _item_group,
     _median,
     _parse_date,
+    _pct,
     _scan_items,
     cmd_report_sales,
     render_csv,
@@ -324,7 +325,19 @@ class TestBuildMonthlyPivot:
         r = rows[0]
         assert r["pct_launch"] == "50.0%"
         assert r["pct_retail"] == "50.0%"
-        assert r["pct_move"] == "—"
+        # total_stage > 0 and move count == 0 -> genuine 0.0%, not "no data"
+        assert r["pct_move"] == "0.0%"
+
+    def test_pct_zero_n_with_real_total_is_genuine_zero(self):
+        # total > 0, n == 0 -> a real, computable 0.0%, not missing data
+        assert _pct(0, 10) == "0.0%"
+
+    def test_pct_zero_total_is_no_data(self):
+        # total == 0 -> genuinely no data to compute a percentage from
+        assert _pct(0, 0) == "—"
+
+    def test_pct_normal_case(self):
+        assert _pct(5, 10) == "50.0%"
 
     def test_group_name_resolved_from_key(self):
         sold = [{"month": "2026-01", "group": "books", "price": 5.0, "days_to_sale": None, "stage": "unknown"}]
