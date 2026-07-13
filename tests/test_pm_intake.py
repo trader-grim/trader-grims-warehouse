@@ -479,25 +479,61 @@ def test_html_to_text_collapses_whitespace():
 
 
 def _make_mock_response(text, content_type='text/html; charset=utf-8',
-                        status_code=200, url='https://example.com/'):
-    """Build a fake httpx Response-like object."""
+                        status_code=200, url='https://example.com/',
+                        content_length=None):
+    """Build a fake httpx streamed-Response-like object.
+
+    fetch_url() now uses client.stream(...).iter_bytes() rather than a
+    buffering client.get(...), so the mock exposes .iter_bytes() and is
+    itself usable as a context manager (matching what client.stream(...)
+    returns from real httpx).
+    """
     resp = MagicMock()
     resp.status_code = status_code
-    resp.headers = {'content-type': content_type}
+    headers = {'content-type': content_type}
+    if content_length is not None:
+        headers['content-length'] = str(content_length)
+    resp.headers = headers
     resp.text = text
     resp.url = url
+    resp.encoding = 'utf-8'
+    body = text if isinstance(text, bytes) else text.encode('utf-8')
+    resp.iter_bytes = MagicMock(return_value=iter([body]) if body else iter([]))
+    resp.__enter__ = MagicMock(return_value=resp)
+    resp.__exit__ = MagicMock(return_value=False)
     return resp
 
 
+def _patch_resolve_safe(safe=True):
+    """Patch the SSRF hostname-resolution check so fetch_url tests that are
+    exercising unrelated behavior don't depend on real DNS resolution."""
+    return patch('tgw.workers.pm_intake._resolve_is_safe', return_value=safe)
+
+
 def _mock_httpx_ok(html, url='https://example.com/article'):
-    """Context manager that patches httpx.Client to return a successful response."""
+    """Context manager that patches httpx.Client to stream a successful
+    response, and treats the target host as SSRF-safe (real DNS not used)."""
     from unittest.mock import MagicMock, patch
     mock_resp = _make_mock_response(html, url=url)
     mock_client = MagicMock()
     mock_client.__enter__ = MagicMock(return_value=mock_client)
     mock_client.__exit__ = MagicMock(return_value=False)
-    mock_client.get = MagicMock(return_value=mock_resp)
-    return patch('httpx.Client', return_value=mock_client)
+    mock_client.stream = MagicMock(return_value=mock_resp)
+
+    class _Combined:
+        def __enter__(self):
+            self._p1 = patch('httpx.Client', return_value=mock_client)
+            self._p2 = _patch_resolve_safe(True)
+            self._p1.__enter__()
+            self._p2.__enter__()
+            return mock_client
+
+        def __exit__(self, *exc):
+            self._p2.__exit__(*exc)
+            self._p1.__exit__(*exc)
+            return False
+
+    return _Combined()
 
 
 def test_fetch_url_success(tmp_path):
@@ -517,8 +553,8 @@ def test_fetch_url_http_error():
     mock_client = MagicMock()
     mock_client.__enter__ = MagicMock(return_value=mock_client)
     mock_client.__exit__ = MagicMock(return_value=False)
-    mock_client.get = MagicMock(return_value=resp)
-    with patch('httpx.Client', return_value=mock_client):
+    mock_client.stream = MagicMock(return_value=resp)
+    with patch('httpx.Client', return_value=mock_client), _patch_resolve_safe(True):
         result = fetch_url('https://example.com/missing')
     assert result['ok'] is False
     assert '404' in result['error']
@@ -530,8 +566,8 @@ def test_fetch_url_unsupported_content_type():
     mock_client = MagicMock()
     mock_client.__enter__ = MagicMock(return_value=mock_client)
     mock_client.__exit__ = MagicMock(return_value=False)
-    mock_client.get = MagicMock(return_value=resp)
-    with patch('httpx.Client', return_value=mock_client):
+    mock_client.stream = MagicMock(return_value=resp)
+    with patch('httpx.Client', return_value=mock_client), _patch_resolve_safe(True):
         result = fetch_url('https://example.com/file.pdf')
     assert result['ok'] is False
     assert 'unsupported' in result['error']
@@ -541,11 +577,11 @@ def test_fetch_url_network_error():
     import httpx
 
     from tgw.workers.pm_intake import fetch_url
-    with patch('httpx.Client') as mock_cls:
+    with patch('httpx.Client') as mock_cls, _patch_resolve_safe(True):
         mock_client = MagicMock()
         mock_client.__enter__ = MagicMock(return_value=mock_client)
         mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.get = MagicMock(side_effect=httpx.RequestError('connection refused'))
+        mock_client.stream = MagicMock(side_effect=httpx.RequestError('connection refused'))
         mock_cls.return_value = mock_client
         result = fetch_url('https://down.example.com/')
     assert result['ok'] is False
@@ -558,11 +594,128 @@ def test_fetch_url_plaintext():
     mock_client = MagicMock()
     mock_client.__enter__ = MagicMock(return_value=mock_client)
     mock_client.__exit__ = MagicMock(return_value=False)
-    mock_client.get = MagicMock(return_value=resp)
-    with patch('httpx.Client', return_value=mock_client):
+    mock_client.stream = MagicMock(return_value=resp)
+    with patch('httpx.Client', return_value=mock_client), _patch_resolve_safe(True):
         result = fetch_url('https://example.com/file.txt')
     assert result['ok'] is True
     assert result['text'] == 'plain text content'
+
+
+# ---------------------------------------------------------------------------
+# SSRF protection (#1278) and response-size cap (#1279)
+# ---------------------------------------------------------------------------
+
+def test_fetch_url_blocks_loopback():
+    """fetch_url() must refuse http://127.0.0.1/ with no network call made."""
+    from tgw.workers.pm_intake import fetch_url
+    with patch('httpx.Client') as mock_cls:
+        result = fetch_url('http://127.0.0.1/')
+    assert result['ok'] is False
+    assert 'blocked' in result['error']
+    mock_cls.assert_not_called()
+
+
+def test_fetch_url_blocks_link_local_metadata():
+    """fetch_url() must refuse the cloud-metadata link-local address."""
+    from tgw.workers.pm_intake import fetch_url
+    with patch('httpx.Client') as mock_cls:
+        result = fetch_url('http://169.254.169.254/')
+    assert result['ok'] is False
+    assert 'blocked' in result['error']
+    mock_cls.assert_not_called()
+
+
+def test_fetch_url_blocks_redirect_to_loopback():
+    """A public-looking URL that 302-redirects to a loopback target must be
+    blocked mid-redirect by the event_hooks guard, not followed.
+
+    Uses a real httpx.Client with an httpx.MockTransport (only the
+    transport is mocked) so this actually exercises follow_redirects=True
+    + event_hooks for this httpx version, not just fetch_url's own logic.
+    """
+    import httpx
+
+    from tgw.workers.pm_intake import fetch_url
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == 'redirect-source.example.com':
+            return httpx.Response(302, headers={'Location': 'http://127.0.0.1:9/'})
+        # Should never be reached — the redirect target must be blocked first.
+        return httpx.Response(200, text='should not be reached')
+
+    transport = httpx.MockTransport(handler)
+    real_client_cls = httpx.Client
+
+    def patched_client(*args, **kwargs):
+        kwargs['transport'] = transport
+        return real_client_cls(*args, **kwargs)
+
+    from tgw.workers.pm_intake import _resolve_is_safe as _real_resolve_is_safe
+
+    def fake_resolve_is_safe(hostname):
+        # The "public" test host is treated as safe without real DNS; the
+        # redirect target (a real loopback literal) is judged for real —
+        # this is what actually proves the mid-redirect check fires.
+        if hostname == 'redirect-source.example.com':
+            return True
+        return _real_resolve_is_safe(hostname)
+
+    with patch('httpx.Client', side_effect=patched_client), \
+         patch('tgw.workers.pm_intake._resolve_is_safe', side_effect=fake_resolve_is_safe):
+        result = fetch_url('http://redirect-source.example.com/')
+
+    assert result['ok'] is False
+    assert 'blocked' in result['error']
+
+
+def test_fetch_url_normal_case_no_regression():
+    """A real public URL (mocked) still returns ok with extracted text."""
+    from tgw.workers.pm_intake import fetch_url
+    html = '<html><head><title>Hi</title></head><body><p>Normal page.</p></body></html>'
+    with _mock_httpx_ok(html, url='https://example.com/normal'):
+        result = fetch_url('https://example.com/normal')
+    assert result['ok'] is True
+    assert result['title'] == 'Hi'
+    assert 'Normal page.' in result['text']
+
+
+def test_fetch_url_rejects_oversized_content_length():
+    """A Content-Length header over the cap must be rejected before any
+    body bytes are read — the iterator must never be fully consumed."""
+    from tgw.workers.pm_intake import _MAX_RESPONSE_BYTES, fetch_url
+    resp = _make_mock_response(
+        'x' * 100, url='https://example.com/huge', content_length=_MAX_RESPONSE_BYTES + 1,
+    )
+    consumed = MagicMock(side_effect=AssertionError('body iterator must not be consumed'))
+    resp.iter_bytes = consumed
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_client.stream = MagicMock(return_value=resp)
+    with patch('httpx.Client', return_value=mock_client), _patch_resolve_safe(True):
+        result = fetch_url('https://example.com/huge')
+    assert result['ok'] is False
+    assert 'too large' in result['error']
+    consumed.assert_not_called()
+
+
+def test_fetch_url_aborts_streaming_body_over_cap_without_content_length():
+    """No Content-Length header, but the streamed body exceeds the cap —
+    must still be aborted once the accumulated size crosses the limit
+    (proves the fast-path header check isn't the only guard)."""
+    from tgw.workers.pm_intake import _MAX_RESPONSE_BYTES, fetch_url
+    chunk = b'a' * 1_000_000
+    n_chunks = (_MAX_RESPONSE_BYTES // len(chunk)) + 3  # comfortably over the cap
+    resp = _make_mock_response('placeholder', url='https://example.com/stream-huge')
+    resp.iter_bytes = MagicMock(return_value=iter([chunk] * n_chunks))
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_client.stream = MagicMock(return_value=resp)
+    with patch('httpx.Client', return_value=mock_client), _patch_resolve_safe(True):
+        result = fetch_url('https://example.com/stream-huge')
+    assert result['ok'] is False
+    assert 'too large' in result['error']
 
 
 def test_handle_url_submission_filed(tmp_path):
