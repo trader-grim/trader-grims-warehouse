@@ -215,9 +215,8 @@ def resolve(cfg: Dict[str, Any], **selectors: Any) -> Set[str]:
         if (root / q).is_dir():
             narrow({q})
         else:
-            prefix18 = q[:18]
             if len(q) <= 18 and q.lower().startswith('tgw') and len(q) >= 14:
-                narrow({s for s in iter_all_skus(cfg) if s[:18] == prefix18})
+                narrow({s for s in iter_all_skus(cfg) if s[:len(q)] == q})
             else:
                 narrow({q})
 

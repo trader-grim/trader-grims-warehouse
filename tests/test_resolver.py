@@ -88,6 +88,25 @@ def test_resolve_exact_sku():
         assert result == {'tgw20260101000000001'}
 
 
+def test_resolve_old_format_partial_sku_prefix_match():
+    # A 14-17 char query that isn't itself a directory should still match
+    # full-length SKUs sharing that prefix (old-format prefix-match fast
+    # path). Regression test for #1285: comparing s[:18] to q[:18] never
+    # matched because slicing a <18-char query to [:18] is a no-op, so the
+    # two operands ended up different lengths and could never be equal.
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        make_item(root, 'tgw20260101000000001', location='A1')
+        make_item(root, 'tgw20260601000000002', location='A2')
+        cfg = make_cfg(root)
+
+        # 17 chars: 'tgw' + 14 digits
+        partial = 'tgw20260101000000'[:17]
+        assert 14 <= len(partial) <= 17
+        result = resolve(cfg, sku=partial)
+        assert result == {'tgw20260101000000001'}
+
+
 def test_resolve_date_range():
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
