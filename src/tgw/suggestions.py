@@ -177,7 +177,15 @@ def apply_classifications(
             line_patches[entry['line_no']] = new_line
 
         elif action == 'todo' and write:
-            agent = c.get('todo_agent', 'claude')
+            # todo_agent must be exactly 'claude' or 'admin' — a hallucinated/
+            # malformed value here would otherwise flow straight into a real
+            # todo record's agent field unvalidated. Fall back to 'admin'
+            # (routes to a human for review) rather than silently defaulting
+            # to 'claude', which would let an unverified value drive
+            # autonomous action.
+            agent = (c.get('todo_agent') or '').strip()
+            if agent not in ('claude', 'admin'):
+                agent = 'admin'
             body = (c.get('todo_body') or entry['text'])[:200]
             # link to the PP item only when the LLM was confident AND the ref
             # is well-formed — a hallucinated link is worse than none
