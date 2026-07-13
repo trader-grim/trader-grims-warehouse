@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 _SKU_RE = re.compile(r'^tgw(?:\d{15}|\d{17})$')  # 15 = legacy (no ms), 17 = current (with ms)
 
 _RETENTION = 2000  # keep at most this many rows; prune oldest on insert
+_RETENTION_DAYS = 14  # prune rows older than this many days on insert
 
 
 def _default_db_path() -> Path:
@@ -35,7 +36,9 @@ def _default_db_path() -> Path:
 def _connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     path = Path(db_path) if db_path else _default_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
     con = sqlite3.connect(str(path))
+    path.chmod(0o600)
     con.row_factory = sqlite3.Row
     con.execute(
         """
@@ -79,6 +82,11 @@ def record_clip(content: str, selection: str = 'clipboard',
             'DELETE FROM clip_history WHERE id NOT IN '
             '(SELECT id FROM clip_history ORDER BY id DESC LIMIT ?)',
             (_RETENTION,),
+        )
+        # Retention: prune rows older than the TTL.
+        con.execute(
+            "DELETE FROM clip_history WHERE captured_at < datetime('now', ?)",
+            (f'-{_RETENTION_DAYS} days',),
         )
         con.commit()
         return {'ok': True, 'id': rowid, 'is_sku': bool(sku), 'sku': sku or None}
