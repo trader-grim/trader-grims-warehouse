@@ -146,7 +146,11 @@ def setup_logging(
 
     # --- Structured JSON file handler (optional) ---
     if json_file:
-        json_path = log_root / (filename.replace('.log', '.jsonl') or 'tgw.jsonl')
+        if filename.endswith('.log'):
+            json_filename = filename[:-len('.log')] + '.jsonl'
+        else:
+            json_filename = 'tgw.jsonl'
+        json_path = log_root / json_filename
         jh = logging.handlers.RotatingFileHandler(
             json_path,
             maxBytes=max_bytes,
