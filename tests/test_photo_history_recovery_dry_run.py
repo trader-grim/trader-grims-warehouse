@@ -10,6 +10,8 @@ otherwise the action is reported as 'would_copy' with nothing touched.
 
 from __future__ import annotations
 
+import json
+
 from tgw.workers import photo_history_recovery as phr
 
 
@@ -86,3 +88,42 @@ def test_process_item_write_true_actually_copies(tmp_path):
 
     assert rows[0]['action'] == 'copied'
     assert (item_dir / 'match.jpg').read_bytes() == b'recovered-photo'
+
+
+def test_main_announces_script_run_before_touching_anything(tmp_path, monkeypatch):
+    """todo #1308 / invariant E9: main() must call announce_script_run()
+    before it loads config or touches ItemData/the queue — otherwise a run
+    of this one-off script leaves no durable trace that it happened."""
+    itemdata_root = tmp_path / 'ItemData'
+    itemdata_root.mkdir()
+    config = {
+        'itemdata_root': str(itemdata_root),
+        'photo_reference_keys': ['photos'],
+        'destination': {},
+        'default_search_roots': [],
+    }
+    config_path = tmp_path / 'config.json'
+    config_path.write_text(json.dumps(config), encoding='utf-8')
+    report_path = tmp_path / 'report.jsonl'
+
+    calls: list[str] = []
+
+    def fake_announce(script_name, purpose, **fields):
+        calls.append('announce')
+
+    def fake_load_config(path):
+        calls.append('load_config')
+        return config
+
+    monkeypatch.setattr(phr, 'announce_script_run', fake_announce)
+    monkeypatch.setattr(phr, 'load_config', fake_load_config)
+    monkeypatch.setattr(
+        'sys.argv',
+        ['photo_history_recovery.py', '--config', str(config_path), '--report', str(report_path)],
+    )
+
+    rc = phr.main()
+
+    assert rc == 0
+    assert calls[0] == 'announce'
+    assert 'load_config' in calls

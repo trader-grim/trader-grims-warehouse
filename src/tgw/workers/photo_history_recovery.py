@@ -9,6 +9,7 @@ import shutil
 from pathlib import Path
 from typing import Iterable
 
+from tgw.logging import announce_script_run
 from tgw.queue import state_machine
 
 
@@ -162,6 +163,12 @@ def main() -> int:
         ap.error('must supply --config')
 
     config_path = Path(args.config)
+
+    announce_script_run(
+        'photo_history_recovery.py',
+        'recover missing item photos from history archives into ItemData',
+        write=args.write, config=str(config_path), itemdata=args.itemdata,
+    )
 
     cfg = load_config(config_path)
     mode = 'WRITE' if args.write else 'DRY-RUN'
