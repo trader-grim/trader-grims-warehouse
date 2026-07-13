@@ -8,6 +8,7 @@ Usage:
 """
 from __future__ import annotations
 
+import html as _html
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
@@ -237,7 +238,7 @@ def readiness_html(fields: List[ReadinessField]) -> str:
     for f in fields:
         bg, bl, icon = _STATUS_STYLE.get((f.status, f.severity), _DEFAULT_STYLE)
         val_html = (
-            f'<span style="color:#667;font-size:.82em;margin-left:8px">{f.value}</span>'
+            f'<span style="color:#667;font-size:.82em;margin-left:8px">{_html.escape(str(f.value))}</span>'
             if f.value else ""
         )
         parts.append(
