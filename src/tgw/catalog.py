@@ -382,10 +382,19 @@ def build_all_catalogs(cfg: Dict[str, Any],
     from .sqlite_catalog import build_sqlite_catalog
     started = time.time()
     steps = []
+    # source='auto' (rather than a hardcoded 'full_catalog'/'search_catalog')
+    # is required here, not just a stylistic choice: in check_only mode the
+    # prior step never writes its output file (see build_full_catalog /
+    # build_search_catalog `if not check_only: atomic_write_json(...)`), so
+    # a fresh system doing a check_only dry-run has no full_catalog file on
+    # disk yet. Forcing source='full_catalog' would make load_full_catalog()
+    # raise FileNotFoundError instead of the preview falling back to reading
+    # ItemData directly, exactly as build_search_catalog's own 'auto' mode
+    # already does when full_catalog_path doesn't exist (#1286).
     for result in [
         build_full_catalog(cfg, check_only=check_only),
-        build_search_catalog(cfg, source='full_catalog', check_only=check_only),
-        build_location_tree(cfg, source='search_catalog', check_only=check_only),
+        build_search_catalog(cfg, source='auto', check_only=check_only),
+        build_location_tree(cfg, source='auto', check_only=check_only),
         build_sqlite_catalog(cfg, check_only=check_only),
     ]:
         steps.append(result)
