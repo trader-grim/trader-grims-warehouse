@@ -107,7 +107,7 @@ def _median(values: List[float]) -> Optional[float]:
 
 
 def _pct(n: int, total: int) -> str:
-    if not total or not n:
+    if not total:
         return "—"
     return f"{round(100.0 * n / total, 1):.1f}%"
 
