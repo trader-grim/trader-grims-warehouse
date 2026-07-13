@@ -770,7 +770,7 @@ def cmd_promo_sync(cfg: Dict[str, Any]) -> Dict[str, Any]:
     errors: List[str] = []
 
     for promo_summary in active_promos:
-        promo_id = promo_summary.get("promotionId") or promo_summary.get("promotionHref", "").split("/")[-1]
+        promo_id = promo_summary.get("promotionId") or (promo_summary.get("promotionHref") or "").split("/")[-1]
         if not promo_id:
             continue
         promo_status = promo_summary.get("promotionStatus", "")
