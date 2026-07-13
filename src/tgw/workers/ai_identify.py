@@ -255,7 +255,7 @@ class AIIdentifyWorker(QueueWorker):
 
         # Extended inventory fields — fill canonical record, never discard
         brand = _str("brand")
-        model = _str("model")
+        item_model = _str("model")
         manufacturer = _str("manufacturer")
         mpn = _str("mpn")
         color = _str("color")
@@ -300,7 +300,7 @@ class AIIdentifyWorker(QueueWorker):
         _is_reidentify = bool(item.get("ai_identified"))  # True means this is a re-scan
         for _field, _val in [
             ("brand", brand),
-            ("model", model),
+            ("model", item_model),
             ("manufacturer", manufacturer),
             ("model_number", mpn),
             ("color", color),
@@ -361,7 +361,7 @@ class AIIdentifyWorker(QueueWorker):
                 "description": description,
                 "condition": condition,
                 "brand": brand or None,
-                "model": model or None,
+                "model": item_model or None,
                 "manufacturer": manufacturer or None,
                 "mpn": mpn or None,
                 "color": color or None,
