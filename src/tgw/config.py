@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, Set
 
@@ -254,10 +255,24 @@ def load_config(path: Path) -> Dict[str, Any]:
 # Canonical path helpers — the only place paths are constructed
 # ---------------------------------------------------------------------------
 
+_SAFE_SEGMENT_RE = re.compile(r'^[A-Za-z0-9_.-]+$')
+
+
+def _safe_segment(root: Path, name: str, kind: str) -> Path:
+    """Join *name* under *root* as a single path segment, raising
+    ValueError if it isn't a safe, contained segment."""
+    if not name or name in ('.', '..') or not _SAFE_SEGMENT_RE.match(name):
+        raise ValueError(f"unsafe {kind} value: {name!r}")
+    candidate = (root / name).resolve()
+    root_resolved = root.resolve()
+    if candidate != root_resolved and root_resolved not in candidate.parents:
+        raise ValueError(f"{kind} {name!r} escapes {root}")
+    return candidate
+
 
 def sku_dir(cfg: Dict[str, Any], sku: str) -> Path:
     """Canonical directory for a SKU."""
-    return cfg["itemdata_root"] / sku
+    return _safe_segment(cfg["itemdata_root"], sku, "sku")
 
 
 def sku_json(cfg: Dict[str, Any], sku: str) -> Path:
@@ -272,7 +287,7 @@ def sku_exists(cfg: Dict[str, Any], sku: str) -> bool:
 
 def location_dir(cfg: Dict[str, Any], location: str) -> Path:
     """Canonical location directory in the symlink tree."""
-    return cfg["location_tree_root"] / location
+    return _safe_segment(cfg["location_tree_root"], location, "location")
 
 
 def queue_dir(cfg: Dict[str, Any], queue_name: str) -> Path:
