@@ -780,7 +780,7 @@ class EbaySkuMigrateWorker(QueueWorker):
         log.info('ebay_sku_migrate worker started: owner=%s', self.owner)
 
         migrate_cfg = self.config.get('ebay_sku_migrate', {})
-        if not migrate_cfg.get('enabled', True):
+        if not migrate_cfg.get('enabled', False):
             log.info('ebay_sku_migrate: disabled in config — exiting')
             return
 
