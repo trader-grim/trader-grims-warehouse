@@ -109,7 +109,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
 
-from .config import sku_dir, sku_json
+from .config import location_dir, sku_dir, sku_json
 from .items import atomic_write_json
 from .queue import state_machine
 from .resolver import iter_all_skus, load_item_doc
@@ -393,15 +393,19 @@ def rename_sku(cfg: Dict[str, Any], old_sku: str, new_sku: str,
 
         # 3. Update location symlink
         if location:
-            link_dir  = cfg['location_tree_root'] / location
-            old_link  = link_dir / old_sku
-            new_link  = link_dir / new_sku
-            if old_link.exists() or old_link.is_symlink():
-                old_link.unlink()
-            if link_dir.exists():
-                if new_link.exists() or new_link.is_symlink():
-                    new_link.unlink()
-                os.symlink(new_dir, new_link)
+            try:
+                link_dir = location_dir(cfg, location)
+            except ValueError as exc:
+                log.warning("rename_sku: unsafe location %r for %s: %s", location, new_sku, exc)
+            else:
+                old_link  = link_dir / old_sku
+                new_link  = link_dir / new_sku
+                if old_link.exists() or old_link.is_symlink():
+                    old_link.unlink()
+                if link_dir.exists():
+                    if new_link.exists() or new_link.is_symlink():
+                        new_link.unlink()
+                    os.symlink(new_dir, new_link)
 
         # 4. Record in sku_history
         with psycopg2.connect(cfg['postgres_dsn']) as con:
