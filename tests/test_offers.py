@@ -14,10 +14,13 @@ from unittest.mock import patch
 
 import pytest
 
+import tgw.offers as offers_mod
 from tgw.apis.ebay.trading import _NS, _offer_from_xml, get_best_offers, respond_to_best_offer
 from tgw.offers import (
     _find_item_by_listing_id,
     _log_offer_history,
+    _record_unresolved_offer,
+    _resolve_unresolved_offer,
     cmd_offers_list,
     cmd_offers_respond,
 )
@@ -347,10 +350,15 @@ class TestLogOfferHistory:
         saved = json.loads(path.read_text())
         assert saved["offer_history"][0]["counter_price"] == pytest.approx(27.50)
 
-    def test_noop_when_listing_id_not_found(self, tmp_path):
+    def test_noop_when_listing_id_not_found(self, tmp_path, monkeypatch):
+        registry_path = tmp_path / "offers-unresolved.json"
+        monkeypatch.setattr(offers_mod, "_UNRESOLVED_REGISTRY", registry_path)
+
         cfg = _make_cfg(tmp_path, with_db=True)
         _log_offer_history(cfg, "99999999", "99001", "Accept", None, "claude", "2026-06-14T12:00:00Z")
-        # No exception — just logs a warning
+        # No exception — but this is no longer a silent drop: the C11
+        # finding is persisted durably (see TestUnresolvedOfferRegistry).
+        assert registry_path.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -526,3 +534,93 @@ class TestCmdOffersRespond:
     def test_default_by_is_claude(self):
         result = cmd_offers_respond({"token": "x"}, "99001", "12345678", "Accept", dry_run=True)
         assert result["by"] == "claude"
+
+
+# ---------------------------------------------------------------------------
+# C11: unresolved-SKU Best-Offer finding (invariant C11, todo #1314)
+# ---------------------------------------------------------------------------
+
+class TestUnresolvedOfferRegistry:
+    def test_live_success_with_unresolvable_sku_persists_finding(self, tmp_path, monkeypatch):
+        """The core scenario: eBay API call SUCCEEDS (mocked), but SQLite
+        catalog lookup misses -- the outcome must be durably recorded, not
+        just logged and dropped."""
+        registry_path = tmp_path / "offers-unresolved.json"
+        monkeypatch.setattr(offers_mod, "_UNRESOLVED_REGISTRY", registry_path)
+
+        # SQLite catalog exists but has no row for this listing_id at all.
+        cfg = _make_cfg(tmp_path, with_db=True)
+
+        with patch("tgw.offers.respond_to_best_offer") as mock_api:
+            result = cmd_offers_respond(
+                cfg, "99001", "99999999", "Accept", dry_run=False, by="claude",
+            )
+
+        # eBay call happened and "succeeded" (mock didn't raise).
+        mock_api.assert_called_once()
+        assert result["ok"] is True
+        assert result["dry_run"] is False
+
+        # Durable finding was persisted -- queryable later, not just logged.
+        assert registry_path.exists()
+        registry = json.loads(registry_path.read_text())
+        assert "99001" in registry
+        entry = registry["99001"]
+        assert entry["offer_id"] == "99001"
+        assert entry["listing_id"] == "99999999"
+        assert entry["action"] == "Accept"
+        assert entry["by"] == "claude"
+        assert entry["resolved"] is False
+        assert entry["attempts"] == 1
+
+    def test_record_unresolved_offer_writes_new_entry(self, tmp_path, monkeypatch):
+        registry_path = tmp_path / "offers-unresolved.json"
+        monkeypatch.setattr(offers_mod, "_UNRESOLVED_REGISTRY", registry_path)
+
+        _record_unresolved_offer("99002", "12345678", "Decline", None, "claude", "2026-07-13T10:00:00Z")
+
+        registry = json.loads(registry_path.read_text())
+        assert registry["99002"]["attempts"] == 1
+        assert registry["99002"]["first_seen_at"] == "2026-07-13T10:00:00Z"
+        assert registry["99002"]["resolved"] is False
+
+    def test_record_unresolved_offer_bumps_attempts_on_repeat(self, tmp_path, monkeypatch):
+        """Retry-friendliness: a second occurrence of the same offer_id
+        (e.g. a future repair pass re-attempting resolution and failing
+        again) increments attempts rather than clobbering history."""
+        registry_path = tmp_path / "offers-unresolved.json"
+        monkeypatch.setattr(offers_mod, "_UNRESOLVED_REGISTRY", registry_path)
+
+        _record_unresolved_offer("99003", "12345678", "Counter", 28.0, "claude", "2026-07-13T10:00:00Z")
+        _record_unresolved_offer("99003", "12345678", "Counter", 28.0, "claude", "2026-07-13T11:00:00Z")
+
+        registry = json.loads(registry_path.read_text())
+        assert registry["99003"]["attempts"] == 2
+        assert registry["99003"]["first_seen_at"] == "2026-07-13T10:00:00Z"
+        assert registry["99003"]["last_attempt_at"] == "2026-07-13T11:00:00Z"
+
+    def test_resolve_unresolved_offer_removes_entry(self, tmp_path, monkeypatch):
+        registry_path = tmp_path / "offers-unresolved.json"
+        monkeypatch.setattr(offers_mod, "_UNRESOLVED_REGISTRY", registry_path)
+
+        _record_unresolved_offer("99004", "12345678", "Accept", None, "claude", "2026-07-13T10:00:00Z")
+        assert "99004" in json.loads(registry_path.read_text())
+
+        _resolve_unresolved_offer("99004")
+        assert "99004" not in json.loads(registry_path.read_text())
+
+    def test_resolved_offer_found_by_listing_id_does_not_touch_registry(self, tmp_path, monkeypatch):
+        """Sanity check: when SKU resolution succeeds, nothing is written
+        to the unresolved registry at all."""
+        registry_path = tmp_path / "offers-unresolved.json"
+        monkeypatch.setattr(offers_mod, "_UNRESOLVED_REGISTRY", registry_path)
+
+        cfg = _make_cfg(tmp_path, with_db=True)
+        doc = {"sku": "tgw001", "ebay_listing": {"listing_id": "12345678"}}
+        _insert_catalog(tmp_path / "catalog.db", "tgw001", doc)
+        _write_item(cfg["itemdata_root"], "tgw001", doc)
+
+        with patch("tgw.offers.respond_to_best_offer"):
+            cmd_offers_respond(cfg, "99005", "12345678", "Accept", dry_run=False)
+
+        assert not registry_path.exists()
