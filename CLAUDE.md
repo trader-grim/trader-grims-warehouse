@@ -84,6 +84,18 @@ cat /opt/TGW/var/run/thermal.status 2>/dev/null || echo "NORMAL|0|0"
 
 If the status is HOT, THROTTLE, or SHUTDOWN: **stop all disk-intensive operations** (no recursive grep/find on ItemData/ItemCatalog). At THROTTLE the watchdog has already stopped workers — do not restart them. At HOT, slow down and avoid large scans.
 
+**This is not a once-per-session check.** Re-run it immediately before
+every full `pytest -q` suite run (2000+ tests, sustained heavy I/O) and
+before any other large scan/index/reindex operation, even if it was
+NORMAL a few minutes ago — not just once at Step 0. **Session that already
+had a thermal incident = higher vigilance required, not lower** — a prior
+CRITICAL/HOT event in this session is a stronger signal to check before
+the next heavy operation, not evidence it's already handled. Confirmed
+failure mode 2026-07-13: a session that had just root-caused a real
+thermal CRITICAL shutdown (triggered partly by an in-flight pytest run)
+then ran two more full-suite pytest runs back-to-back without rechecking
+— see [[feedback-stacked-disk-io-thermal]] (memory).
+
 **Todo #1344 / PP-HERMES-EA-001, tgw-prod half DONE 2026-07-12:** Hermes-lite
 gateway is a `systemd --user` service on tgw-prod (not flake-managed —
 matches the 2026-07-11 decision to keep Hermes in userspace), and its `tgw`
