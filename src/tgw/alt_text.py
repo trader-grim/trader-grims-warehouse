@@ -334,7 +334,7 @@ def cmd_alt_text(
         })
         item["alt_text_results"] = alt_text_results
 
-    atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
+    atomic_write_json(json_path, item, pretty=cfg.get("pretty", True), archive_root=cfg.get("archive_root"))
 
     return {
         "ok": True,
@@ -541,7 +541,7 @@ def _apply_alt_text_result(
         })
         item["alt_text_results"] = alt_text_results
 
-    atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
+    atomic_write_json(json_path, item, pretty=cfg.get("pretty", True), archive_root=cfg.get("archive_root"))
 
     # Cache result
     if img_hash:
