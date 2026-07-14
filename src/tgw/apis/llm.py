@@ -322,11 +322,23 @@ def _call_google_direct(
             last_exc = exc
             quota.record(cfg, 'llm_google')
             status = getattr(getattr(exc, 'response', None), 'status_code', None)
-            if status == 429 or 'RESOURCE_EXHAUSTED' in str(exc):
-                quota.record_429(cfg, 'llm_google', f'{model}: {str(exc)[:150]}')
-            if status == 429 and attempt < max_retries - 1:
-                time.sleep(15 * (attempt + 1))
-                continue
+            exc_str = str(exc)
+            is_quota_exhausted = status == 429 or 'RESOURCE_EXHAUSTED' in exc_str
+            # 503/UNAVAILABLE ("high demand... temporary... try again later") is
+            # Google's own transient-overload signal, not quota exhaustion --
+            # don't feed it into the quota circuit breaker (record_429), just
+            # retry with a short backoff (2026-07-14, Dave: saw a bare 503 fall
+            # straight to the OpenRouter fallback with zero retry).
+            is_transient_overload = status == 503 or 'UNAVAILABLE' in exc_str
+            if is_quota_exhausted:
+                quota.record_429(cfg, 'llm_google', f'{model}: {exc_str[:150]}')
+            if attempt < max_retries - 1:
+                if is_quota_exhausted:
+                    time.sleep(15 * (attempt + 1))
+                    continue
+                if is_transient_overload:
+                    time.sleep(2 * (attempt + 1))
+                    continue
             raise
     else:
         raise last_exc  # pragma: no cover — loop always breaks or raises

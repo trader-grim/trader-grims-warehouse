@@ -102,6 +102,50 @@ class TestCallGoogleDirect:
         with pytest.raises(RuntimeError, match='quota exhausted'):
             llm_mod._call_google_direct('gemini-2.5-flash-lite', 'sys', 'user', _cfg(tmp_path), max_retries=1)
 
+    def test_retries_on_transient_503_then_succeeds(self, monkeypatch, tmp_path):
+        """2026-07-14, Dave: a bare 503 UNAVAILABLE ("high demand... temporary")
+        fell straight through to the OpenRouter fallback with zero retry --
+        unlike 429, which already retried with backoff. 503 should retry too."""
+        calls = []
+
+        class _FlakyModels:
+            def generate_content(self, **kwargs):
+                calls.append(kwargs)
+                if len(calls) < 3:
+                    raise RuntimeError(
+                        "503 UNAVAILABLE. {'error': {'code': 503, "
+                        "'message': 'high demand', 'status': 'UNAVAILABLE'}}"
+                    )
+                return _FakeResponse(text='recovered')
+
+        fake_client = _FakeClient(_FlakyModels())
+        monkeypatch.setattr('tgw.apis.google_genai._require_genai',
+                           lambda: SimpleNamespace(Client=lambda api_key: fake_client))
+        monkeypatch.setattr('tgw.apis.google_genai.load_google_key', lambda cfg: 'fake-key')
+        sleeps = []
+        monkeypatch.setattr(llm_mod.time, 'sleep', lambda s: sleeps.append(s))
+
+        text, _ = llm_mod._call_google_direct('gemini-2.5-flash-lite', 'sys', 'user', _cfg(tmp_path))
+
+        assert text == 'recovered'
+        assert len(calls) == 3
+        assert sleeps == [2, 4]  # short backoff, not the 429 15s*attempt cooldown
+
+    def test_503_does_not_feed_quota_circuit_breaker(self, monkeypatch, tmp_path):
+        """A transient 503 is not quota exhaustion -- must not call
+        quota.record_429 (that's reserved for actual 429/RESOURCE_EXHAUSTED),
+        or a demand spike would incorrectly trip the llm_google cooldown."""
+        _patch_genai(monkeypatch, exc=RuntimeError('503 UNAVAILABLE'))
+        recorded_429 = []
+        monkeypatch.setattr('tgw.quota.record_429',
+                           lambda cfg, key, detail: recorded_429.append((key, detail)))
+        monkeypatch.setattr(llm_mod.time, 'sleep', lambda s: None)
+
+        with pytest.raises(RuntimeError, match='503 UNAVAILABLE'):
+            llm_mod._call_google_direct('gemini-2.5-flash-lite', 'sys', 'user', _cfg(tmp_path), max_retries=1)
+
+        assert recorded_429 == []
+
 
 class TestCallModelGoogleDirectDispatch:
     def test_success_does_not_touch_openrouter(self, monkeypatch, tmp_path):
