@@ -226,7 +226,11 @@ def parse_batch_results(
 
     Each output line corresponds to one submitted task in order.
     Returns a list of the same length as the input tasks:
-      - list[dict] with {index, alt_text, seo_caption} on success
+      - list[dict] with {index, alt_text, seo_caption, raw_response} on
+        success — raw_response is the verbatim per-task model response text
+        (Data Charter raw-preservation rule, Prime Directive 1); every image
+        parsed out of one task shares that task's raw_response since one
+        Batch API call covers all images in the task.
       - None on error / unparseable line
     """
     parsed: List[Optional[List[Dict[str, Any]]]] = []
@@ -258,6 +262,13 @@ def parse_batch_results(
                     items = items["items"]
                 else:
                     items = [items]
+            # Data Charter raw-preservation rule (Prime Directive 1): keep the
+            # verbatim per-task model response text alongside the parsed
+            # fields — one Batch API call covers N images, so every image
+            # parsed out of this task shares the same raw response text.
+            for entry in items:
+                if isinstance(entry, dict):
+                    entry["raw_response"] = text
             parsed.append(items)
         except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
             log.warning("Result line %d: parse error: %s", i, exc)

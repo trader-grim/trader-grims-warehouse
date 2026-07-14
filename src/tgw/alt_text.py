@@ -473,12 +473,23 @@ def _apply_alt_text_result(
     seo_caption: str,
     img_path: Path,
     img_hash: str,
+    *,
+    model: str = "",
+    raw_response: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Write one batch result back through the alt_text ledger.
 
     Mirrors cmd_alt_text's write path: archive original, rename to -alt.jpg,
     write draft_listing fields, store hash.  Idempotent.
+
+    Data Charter raw-preservation rule (Prime Directive 1): when raw_response
+    is given (an actual, non-cached Batch API call), append an
+    alt_text_results[] record mirroring cmd_alt_text's pattern — a cache hit
+    (raw_response is None) reuses a prior call's already-recorded raw
+    response, so nothing new to append.
     """
+    from datetime import datetime, timezone
+
     from .items import atomic_write_json
 
     itemdata_root = Path(cfg["itemdata_root"])
@@ -514,6 +525,21 @@ def _apply_alt_text_result(
         item["draft_listing"] = {}
     item["draft_listing"]["alt_text"] = alt_text_str
     item["draft_listing"]["seo_caption"] = seo_caption.strip()
+
+    if raw_response is not None:
+        alt_text_results: List[Dict[str, Any]] = item.get("alt_text_results") or []
+        alt_text_results.append({
+            "photo": img_path.name,
+            "photos": [img_path.name],
+            "photo_count": 1,
+            "photo_hash": img_hash or "",
+            "provider": "google_direct",
+            "model": model,
+            "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "extracted": {"alt_text": alt_text_str, "seo_caption": seo_caption.strip()},
+            "raw_response": raw_response,
+        })
+        item["alt_text_results"] = alt_text_results
 
     atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
 
@@ -769,12 +795,16 @@ def cmd_alt_text_gemini_batch(
 
             alt_text_val = str(result_item.get("alt_text", "")).strip()
             seo_caption_val = str(result_item.get("seo_caption", "")).strip()
+            raw_response_val = result_item.get("raw_response")
 
             if not alt_text_val:
                 error_details.append({"sku": sku, "error": "model returned empty alt_text"})
                 continue
 
-            write_result = _apply_alt_text_result(cfg, sku, alt_text_val, seo_caption_val, img_path, img_hash)
+            write_result = _apply_alt_text_result(
+                cfg, sku, alt_text_val, seo_caption_val, img_path, img_hash,
+                model=effective_model, raw_response=raw_response_val,
+            )
             if write_result.get("ok"):
                 processed += 1
             else:
