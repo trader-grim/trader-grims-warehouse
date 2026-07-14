@@ -808,21 +808,33 @@ detection event, not separate monitors:
 1. **Contact Dave** — Telegram, already built (2026-07-13).
 2. **Set off an Android alarm** — local Tasker device alert, todo #1375,
    not yet built.
-3. **Interrupt Claude** — tmux send-keys into Claude's active pane,
-   notifying Claude live instead of relying on Claude to poll
-   `thermal.status` (the gap CLAUDE.md's "no ambient monitoring for
-   Claude" note names). Not yet built.
+3. **Interrupt Claude** — tmux send-keys into Claude's active pane. **Purpose
+   (Dave, 2026-07-14): this is the fix for Claude having no event-driven
+   thermal notification at all** — CLAUDE.md's "no push/ambient monitoring
+   for Claude" note and its periodic-recheck-every-few-tool-rounds workaround
+   both exist only because, until this leg is built, Claude can never learn
+   of an alarm except by actively polling `thermal.status`. Once live, a
+   HOT/THROTTLE/SHUTDOWN transition interrupts Claude directly, and Claude
+   is expected to do what Prime Directive 2 already requires when an alarm
+   is seen — **throttle its own activity proactively** (stop disk-intensive
+   operations, slow down, same response as if it had just run the manual
+   check) **and investigate to root cause if warranted**, in the same turn.
+   The periodic-recheck workaround becomes a fallback once this leg is live,
+   not the only mechanism. Not yet built.
 
 **Authority granted, explicitly: notify/interrupt only, across all three
 legs.** None of the three legs authorizes Tigwa to pause, kill, or
-otherwise act on any workload/process/host power state. This directly
-reaffirms the incident report's own line — "monitoring authority does not
-imply power-control authority" — and extends the same boundary to the new
-interrupt-Claude leg: interrupting Claude's session to surface an alarm is
-not the same as Tigwa being authorized to act on it herself. Any actual
-mitigation (pausing a process, throttling, shutdown) still requires Dave's
-explicit approval in the moment, or the existing on-host 88°C automatic
-shutdown service — neither of which this design changes.
+otherwise act on any workload/process/host power state — including
+Claude's own. This directly reaffirms the incident report's own line —
+"monitoring authority does not imply power-control authority" — and
+extends the same boundary to the new interrupt-Claude leg: Tigwa may wake
+Claude with the fact of an alarm, never command a specific mitigation.
+What Claude *does* with that notification (throttle, investigate) is
+Claude's own existing Prime Directive 2 obligation, not new authority
+granted to Tigwa. Any mitigation beyond Claude's own self-throttling
+(pausing another process, host shutdown) still requires Dave's explicit
+approval in the moment, or the existing on-host 88°C automatic shutdown
+service — neither of which this design changes.
 
 **Open, not resolved by this decision** (per #1382's own listed open
 questions, still to be designed when built): stable pane-discovery for
