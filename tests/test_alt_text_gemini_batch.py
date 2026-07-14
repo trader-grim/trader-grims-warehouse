@@ -164,6 +164,26 @@ class TestParseBatchResults:
         results = parse_batch_results(raw)
         assert results[0][0]["alt_text"] == "X"
 
+    def test_raw_response_retained_per_item(self):
+        """Data Charter raw-preservation rule (#1371): each parsed item must
+        carry the verbatim per-task model response text alongside the
+        extracted fields, mirroring #1306's serial-path pattern."""
+        items = [
+            {"index": 0, "alt_text": "A watch", "seo_caption": "Elgin watch."},
+            {"index": 1, "alt_text": "A ring", "seo_caption": "Gold ring."},
+        ]
+        raw = (self._make_line(items) + "\n").encode()
+        results = parse_batch_results(raw)
+        expected_raw_text = json.dumps(items)
+        assert results[0][0]["raw_response"] == expected_raw_text
+        assert results[0][1]["raw_response"] == expected_raw_text
+
+    def test_raw_response_none_on_error_line(self):
+        error_line = json.dumps({"error": {"code": 400, "message": "bad request"}})
+        raw = (error_line + "\n").encode()
+        results = parse_batch_results(raw)
+        assert results[0] is None
+
 
 # ---------------------------------------------------------------------------
 # Tests for cmd_alt_text_gemini_batch
@@ -328,6 +348,63 @@ class TestCmdAltTextGeminiBatch:
             jp = Path(cfg["itemdata_root"]) / sku / f"{sku}.json"
             item = json.loads(jp.read_text())
             assert item["draft_listing"]["alt_text"].startswith("Product ")
+
+    def test_successful_run_persists_raw_llm_response(self, tmp_path, monkeypatch):
+        """Data Charter raw-preservation rule (#1371, follow-up to #1306): the
+        Gemini Batch path must also persist the raw per-image model response
+        to alt_text_results[], not just the parsed alt_text/seo_caption."""
+        from tgw.alt_text import cmd_alt_text_gemini_batch
+
+        cfg = self._setup(tmp_path, skus=("tgw001", "tgw002"))
+        self._mock_genai(monkeypatch)
+
+        result_line = self._make_result_line(2)
+        monkeypatch.setattr("tgw.alt_text.download_batch_output", lambda *a, **kw: result_line)
+
+        result = cmd_alt_text_gemini_batch(cfg)
+        assert result["ok"] is True
+        assert result["processed"] == 2
+
+        expected_raw_text = json.dumps([
+            {"index": 0, "alt_text": "Product 0", "seo_caption": "Caption 0."},
+            {"index": 1, "alt_text": "Product 1", "seo_caption": "Caption 1."},
+        ])
+
+        for sku in ("tgw001", "tgw002"):
+            jp = Path(cfg["itemdata_root"]) / sku / f"{sku}.json"
+            item = json.loads(jp.read_text())
+            assert "alt_text_results" in item
+            assert len(item["alt_text_results"]) == 1
+            record = item["alt_text_results"][0]
+            assert record["raw_response"] == expected_raw_text
+            assert record["extracted"]["alt_text"] == item["draft_listing"]["alt_text"]
+            assert record["extracted"]["seo_caption"] == item["draft_listing"]["seo_caption"]
+            assert record["model"] == "gemini-2.5-flash-lite"
+            assert record["photo"] == f"{sku}.jpg"
+
+    def test_cache_hit_does_not_append_raw_record(self, tmp_path, monkeypatch):
+        """A pHash cache hit (Phase 2) reuses a prior derived result without
+        an actual model call — nothing new raw to persist, so no
+        alt_text_results[] record is appended for that path."""
+        from tgw.alt_text import cmd_alt_text_gemini_batch
+
+        cfg = self._setup(tmp_path, skus=("tgw001",))
+        monkeypatch.setattr("tgw.alt_text._encode_resized", lambda p, max_px=512: "AABB==")
+        monkeypatch.setattr("tgw.image_hash.compute_dhash", lambda p: "deadbeef")
+        monkeypatch.setattr(
+            "tgw.image_hash.lookup_hash",
+            lambda h, t: {"alt_text": "Cached alt", "seo_caption": "Cached caption."},
+        )
+        monkeypatch.setattr("tgw.image_hash.store_hash", lambda *a, **kw: None)
+
+        result = cmd_alt_text_gemini_batch(cfg)
+        assert result["ok"] is True
+        assert result["skipped_cached"] == 1
+
+        jp = Path(cfg["itemdata_root"]) / "tgw001" / "tgw001.json"
+        item = json.loads(jp.read_text())
+        assert item["draft_listing"]["alt_text"] == "Cached alt"
+        assert "alt_text_results" not in item
 
     def test_failed_batch_returns_error(self, tmp_path, monkeypatch):
         from tgw.alt_text import cmd_alt_text_gemini_batch
