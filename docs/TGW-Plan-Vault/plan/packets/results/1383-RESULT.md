@@ -1,7 +1,19 @@
 # Result: 1383 photo-history-recovery-tools-atomic-copy
 Status: done
 Todo: #1383   PP: PP-COHESION-001
-Files touched: tools/photo_history_recovery.py
+Files touched: tools/photo_history_recovery.py, tests/test_photo_history_recovery_tools_atomic_copy.py (added by reviewer — see note below)
+
+Reviewer addition (2026-07-14): the packet's own acceptance criteria were
+satisfied via manual verification, but no automated regression test existed
+for `recover_item()`'s atomic-copy behavior specifically — unlike the
+sibling worker-side #1307 fix, which has 3 dedicated tests
+(`test_ensure_copy_leaves_no_tmp_file_behind_on_success` /
+`test_ensure_copy_uses_temp_file_then_atomic_replace` /
+`test_ensure_copy_cleans_up_temp_file_on_copy_failure`). Reviewer added the
+mirrored 3 tests for `recover_item()` in
+`tests/test_photo_history_recovery_tools_atomic_copy.py` before stitching,
+closing that gap. All 3 pass; full suite re-run at 2200 passed (2197 + 3
+new), 1 skipped, zero regressions.
 
 Live evidence:
 - `recover_item()` now writes via a temp file (`dest.with_name(dest.name + f'.tmp{os.getpid()}')`)
