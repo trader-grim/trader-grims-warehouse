@@ -3,6 +3,18 @@
 ISS-003: full_catalog_path code default must match JSON value (master-catalog.json).
 ISS-004: ebay_sku_migrate block must be surfaced in the normalised config dict,
          not require callers to reach into cfg['raw'].
+
+todo #1400 (PP-DEADLETTER-001): regression coverage for a real historic bug —
+before commit 00cf9274 (2026-06-30), load_config()'s returned dict had NO
+'api_key' key at all unless secrets_root/tgw-api-key.json happened to exist
+(the key was only added to the dict inside an `if _api_key_path.exists():`
+block). tgw.apis.fence._headers() does `cfg['api_key']` unconditionally —
+every fence call from a worker whose cfg came from a load_config() call made
+before that key file existed hit KeyError('api_key'). Fixed same-day by
+00cf9274 (key file existence now only gates the *value*, not whether the key
+is present at all). These tests pin the invariant so it can't regress
+silently: 'api_key' must always be a key in the returned dict, present as an
+empty string when the secret file is absent.
 """
 
 from __future__ import annotations
@@ -70,3 +82,45 @@ def test_ebay_sku_migrate_block_surfaced_without_raw(tmp_path):
     assert cfg["ebay_sku_migrate"] == migrate_block
     assert cfg["ebay_sku_migrate"]["enabled"] is True
     assert cfg["ebay_sku_migrate"]["batch_size"] == 10
+
+
+# ---------------------------------------------------------------------------
+# todo #1400 — 'api_key' must always be a key in the normalised config,
+# regardless of whether secrets_root/tgw-api-key.json exists (regression for
+# the KeyError('api_key') dead-letters fixed by 00cf9274)
+# ---------------------------------------------------------------------------
+
+
+def test_api_key_present_when_secret_file_missing(tmp_path):
+    """No tgw-api-key.json on disk — 'api_key' key must still exist (empty),
+    never be absent from the dict. This is the exact historic bug: fence.py's
+    _headers() does cfg['api_key'] unconditionally, so a missing DICT KEY
+    (not just an empty value) raised KeyError for every fence call made with
+    this cfg."""
+    cfg_path = _write_cfg(tmp_path, {})
+    cfg = load_config(cfg_path)
+    assert "api_key" in cfg
+    assert cfg["api_key"] == ""
+
+
+def test_api_key_loaded_when_secret_file_present(tmp_path):
+    """When the key file exists, its 'api_key' value is surfaced onto cfg."""
+    secrets_root = tmp_path / "secrets"
+    secrets_root.mkdir(parents=True, exist_ok=True)
+    (secrets_root / "tgw-api-key.json").write_text(json.dumps({"api_key": "sekrit-123"}))
+    cfg_path = _write_cfg(tmp_path, {})
+    cfg = load_config(cfg_path)
+    assert cfg["api_key"] == "sekrit-123"
+
+
+def test_api_key_present_when_secret_file_malformed(tmp_path):
+    """A malformed/unreadable key file must degrade to empty string, never
+    an absent dict key or an unhandled exception (pre-existing tolerant
+    behavior around the read, unrelated to the key-presence fix itself)."""
+    secrets_root = tmp_path / "secrets"
+    secrets_root.mkdir(parents=True, exist_ok=True)
+    (secrets_root / "tgw-api-key.json").write_text("{not valid json")
+    cfg_path = _write_cfg(tmp_path, {})
+    cfg = load_config(cfg_path)
+    assert "api_key" in cfg
+    assert cfg["api_key"] == ""
