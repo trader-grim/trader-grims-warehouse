@@ -11,6 +11,8 @@ otherwise the action is reported as 'would_copy' with nothing touched.
 from __future__ import annotations
 
 import json
+from pathlib import Path
+from unittest import mock
 
 from tgw.workers import photo_history_recovery as phr
 
@@ -127,3 +129,70 @@ def test_main_announces_script_run_before_touching_anything(tmp_path, monkeypatc
     assert rc == 0
     assert calls[0] == 'announce'
     assert 'load_config' in calls
+
+
+# todo #1307 / audit#COHESION-2026-07 — ensure_copy() previously wrote
+# straight to the live dest path with shutil.copy2(src, dst). Fixed to copy
+# to a temp file in the same destination directory then os.replace() onto
+# the final path (same temp+os.replace atomicity items.atomic_write_json()
+# uses for JSON — invariants.md A1/A8), so a reader never observes a
+# partial/corrupt photo and no stray "tmp*" file survives a crash mid-copy.
+
+def test_ensure_copy_leaves_no_tmp_file_behind_on_success(tmp_path):
+    src = tmp_path / 'src.jpg'
+    src.write_bytes(b'photo-bytes')
+    dest_dir = tmp_path / 'dest'
+    dst = dest_dir / 'src.jpg'
+
+    action = phr.ensure_copy(src, dst, write=True)
+
+    assert action == 'copied'
+    assert dst.read_bytes() == b'photo-bytes'
+    leftover = [p for p in dest_dir.iterdir() if p != dst]
+    assert leftover == []
+
+
+def test_ensure_copy_uses_temp_file_then_atomic_replace(tmp_path):
+    src = tmp_path / 'src.jpg'
+    src.write_bytes(b'photo-bytes')
+    dst = tmp_path / 'dest' / 'src.jpg'
+
+    real_replace = phr.os.replace
+    calls = []
+
+    def spy_replace(a, b):
+        # at the moment of replace, the temp file must already contain the
+        # full bytes and the final destination must not exist yet — proves
+        # the write happened to a side path, not in-place on dst.
+        calls.append((str(a), str(b)))
+        assert Path(a).read_bytes() == b'photo-bytes'
+        assert not Path(b).exists()
+        return real_replace(a, b)
+
+    with mock.patch.object(phr.os, 'replace', side_effect=spy_replace):
+        action = phr.ensure_copy(src, dst, write=True)
+
+    assert action == 'copied'
+    assert len(calls) == 1
+    tmp_name = Path(calls[0][0]).name
+    assert tmp_name != dst.name
+    assert tmp_name.startswith(dst.name)
+    assert dst.read_bytes() == b'photo-bytes'
+
+
+def test_ensure_copy_cleans_up_temp_file_on_copy_failure(tmp_path):
+    src = tmp_path / 'src.jpg'
+    src.write_bytes(b'photo-bytes')
+    dest_dir = tmp_path / 'dest'
+    dst = dest_dir / 'src.jpg'
+
+    with mock.patch.object(phr.shutil, 'copy2', side_effect=OSError('disk full')):
+        try:
+            phr.ensure_copy(src, dst, write=True)
+            raised = False
+        except OSError:
+            raised = True
+
+    assert raised
+    assert not dst.exists()
+    assert list(dest_dir.iterdir()) == []
