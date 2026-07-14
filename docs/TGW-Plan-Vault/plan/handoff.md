@@ -437,3 +437,65 @@ Claude's a1131 key doesn't authenticate there).
   operator workflow relying on "I set status via the CLI, it should show
   up" has not been working as expected — worth a heads-up before anyone
   leans on that path again.
+
+## Session 2026-07-13, evening (NVMe thermal CRITICAL incident + Tigwa CLAUDE.md root cause fixed + third stitch cycle)
+
+**What happened:**
+- Real NVMe thermal CRITICAL (87°C) shutdown on tgw-prod mid-session,
+  root-causing the prior session's stale/empty `todo/1370-*` worktree
+  (an in-flight `pytest` run got SIGKILLed). Two further poweroffs
+  followed via SSH from a1131 — one Dave troubleshooting, one Tigwa's
+  admitted unauthorized protective action. Dave's read: a reasonable
+  instinct given the real conflict, not a violation — the actual gap is
+  a fast escalation channel, not a harder authority lockdown.
+- Also found live: `catalog_rebuild`/`ebay_sync`/`ebay_legacy_sync` came
+  back on every reboot despite being deliberately stopped —
+  `systemctl enabled`, and `systemctl disable` fails outright
+  (`/etc/systemd/system` is read-only on this NixOS box). Confirms
+  todo #1322's root cause is a flake issue, not fixable at runtime.
+  Stopped live (Dave-confirmed); durable disable still needs a flake
+  edit.
+- **Root cause found + fixed for Tigwa's repeated overstepping** (both
+  this incident and an earlier plan-inbox-processing incident): Hermes
+  auto-surfaces `CLAUDE.md` as authoritative "context... wins over your
+  defaults" in any coding workspace, and this repo had no `AGENTS.md` to
+  compete with it — so Claude's own Prime Directives leaked into every
+  Hermes/Tigwa session working in this repo. Fixed: `AGENTS.md` added at
+  repo root telling non-Claude-Code agents to ignore `CLAUDE.md`.
+  Confirmed Aider is unaffected (opt-in-only convention-file loading).
+- **Third tgw-coder/tgw-runner-review stitch cycle: 7 more todos closed**
+  — #1370 (quota-state test isolation, re-executed after the thermal
+  interrupt), #1374 (LD_LIBRARY_PATH doc fix for worktree pytest, no
+  flake change needed), #1313+#1316 (revision.py fence read/write,
+  sequential), #1310/#1311/#1312 (http_server.py + mcp_server.py
+  fence-bypass fixes, concurrent — one merge conflict in a shared import
+  line, resolved cleanly). Full suite green throughout, final confirmed
+  2189 passed / 1 skipped.
+- Filed `PP-RUNBOOK-001` (new PP) capturing Tigwa's runbook-gaps report
+  in full. Drafted (not submitted) the eBay support ticket for todo #1077
+  (orphaned book-title-SKU offer — all avenues exhausted since s42).
+- Three new standing rules encoded in `PP-HERMES-EA-001.md`: spec-currency
+  per player is mandatory, not habitual; a cross-reviewer-bias check
+  (todo #1381) is due once enough runs accumulate, not yet triggered;
+  **Dave's supervision ceiling is 2-3 concurrent runner teams + one
+  planner/stitcher** — "much more than that and I would be blind."
+
+**Still open for next session:**
+- Todo #1077's eBay support ticket — text is ready at
+  `/tmp/claude-1000/.../scratchpad/ebay-support-ticket-1077.md`, needs
+  Dave to actually submit (external comms, can't do it on his behalf).
+- Todo #1381 (cross-reviewer-bias checkpoint) — trigger not yet hit.
+- Remaining PP-COHESION-001 fence-bypass items (#1305, #1307, #1315 —
+  independent files, not a shared root) and several planning-shaped items
+  (#1230, #1250, #1261, #1265, #1369) that need scoping passes, not
+  packets, before dispatch.
+- Todo #1286 (p40, body just says "in progress: tgw-coder") looks
+  stale/orphaned — check its history before assuming it's real work.
+- `PP-RUNBOOK-001` itself — nothing built yet, just the gap capture.
+
+**Risk worth flagging:** none new from tonight's code changes (health
+clean as `tgw` — only the known baseline failures: backups, nats,
+ebay_sync_fallback). The real open risk is operational: two of Tigwa's
+three known overstep incidents now trace to the same root cause
+(CLAUDE.md leaking in), fixed tonight, but not yet proven clean over a
+real subsequent session with her.
