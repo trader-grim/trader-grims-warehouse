@@ -176,10 +176,16 @@ def recover_item(item_dir: Path,
         src = ranked[0]
 
         if write:
+            tmp_dest = dest.with_name(dest.name + f'.tmp{os.getpid()}')
             try:
-                shutil.copy2(src, dest)
+                shutil.copy2(src, tmp_dest)
+                os.replace(tmp_dest, dest)
                 action = 'copied'
             except Exception as e:
+                try:
+                    tmp_dest.unlink(missing_ok=True)
+                except Exception:
+                    pass
                 rows.append({'sku': sku, 'ref': ref, 'action': 'error',
                              'source': str(src), 'dest': str(dest),
                              'error': str(e)})
