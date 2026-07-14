@@ -3751,7 +3751,8 @@ _ITEMS_EXTRA_CSS = """
 .jtable th{color:#666;text-align:left;padding:4px 6px;border-bottom:1px solid #2a2a2a;
   font-weight:normal;font-size:.75em;text-transform:uppercase}
 .jtable td{padding:4px 6px;border-bottom:1px solid #1e1e1e;vertical-align:top}
-.js-done{color:#7f7}.js-pending,.js-running{color:#fb7}
+.js-succeeded{color:#7f7}.js-queued,.js-leased,.js-running{color:#7af}
+.js-retry-wait{color:#fb7}.js-cancelled{color:#888}
 .js-failed,.js-dead-letter{color:#f77}
 .ebay-links{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .ebay-btn{display:inline-block;padding:7px 13px;border-radius:6px;font-size:.82em;
@@ -4513,13 +4514,24 @@ def _render_item_detail_html(
             ts = _local_ts(j.get("updated_at") or j.get("finished_at") or j.get("created_at"))
             _err_full = str(j.get("error_detail") or "")
             _err_short = _err_full[:80]
+            # PP-COHESION-001: retry_wait is a transient/expected backoff, not
+            # a fatal error like failed/dead_letter — give it a distinct
+            # warning (yellow) color instead of the same red so an operator
+            # scanning the pipeline log can tell "will retry itself" apart
+            # from "needs a human" at a glance (Dave, 2026-07-14).
+            if state in ("failed", "dead_letter"):
+                _err_color, _err_bg = "#f99", "#1a0a0a"
+            elif state == "retry_wait":
+                _err_color, _err_bg = "#fd8", "#2a2000"
+            else:
+                _err_color, _err_bg = "#f99", "#1a0a0a"
             if _err_full:
                 err = (
                     f'<details style="display:inline">'
-                    f'<summary style="cursor:pointer;color:#f99;font-size:.8em;list-style:none">'
+                    f'<summary style="cursor:pointer;color:{_err_color};font-size:.8em;list-style:none">'
                     f"{h(_err_short)}{'…' if len(_err_full) > 80 else ''}</summary>"
                     f'<pre style="white-space:pre-wrap;word-break:break-all;font-size:.75em;'
-                    f'color:#f99;margin:4px 0;padding:4px;background:#1a0a0a;border-radius:4px">'
+                    f'color:{_err_color};margin:4px 0;padding:4px;background:{_err_bg};border-radius:4px">'
                     f"{h(_err_full)}</pre>"
                     f"</details>"
                 )
@@ -4537,7 +4549,7 @@ def _render_item_detail_html(
                     f'background:#2a0d0d;border-color:#a44;color:#e88" '
                     f"onclick=\"retryJob('{h(str(j['job_id']))}')\">Retry</button>"
                 )
-            job_rows += f'<tr><td{tip_attr}>{h(qn)}</td><td class="{sc}">{h(state)}{_retry_btn}</td><td style="color:#666;font-size:.8em">{h(ts)}</td><td style="color:#f99;font-size:.8em">{err}</td></tr>'
+            job_rows += f'<tr><td{tip_attr}>{h(qn)}</td><td class="{sc}">{h(state)}{_retry_btn}</td><td style="color:#666;font-size:.8em">{h(ts)}</td><td style="color:{_err_color};font-size:.8em">{err}</td></tr>'
         jobs_html = f'<table class="jtable"><tr><th>Queue</th><th>State</th><th>Updated</th><th>Error</th></tr>{job_rows}</table>'
 
     title = item.get("title", "")

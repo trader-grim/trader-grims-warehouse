@@ -4545,3 +4545,51 @@ def test_delete_asset_no_archive_root_still_deletes(env):
     # No archive directory should have been created anywhere under tmp_path
     # as a side effect of this delete.
     assert not (env["itemdata_root"].parent / "archive").exists()
+
+
+def test_item_detail_pipeline_log_distinguishes_retry_wait_from_dead_letter():
+    """Dave, 2026-07-14: retry_wait (transient, will retry itself) was
+    rendered in the same red color as dead_letter/failed (fatal, needs a
+    human) in the item-detail page's pipeline-jobs log -- the CSS class
+    names didn't even match the real queue_jobs.state values, and the
+    error-detail text color was hardcoded red regardless of state. Fixed
+    to a distinct warning color for retry_wait."""
+    from tgw.http_server import _render_item_detail_html
+
+    item = {"sku": "tgw1", "title": "Test Item"}
+    jobs = [
+        {
+            "queue_name": "ebay_draft",
+            "state": "retry_wait",
+            "error_detail": "rate limited, will retry",
+            "job_id": "j1",
+            "updated_at": None,
+            "finished_at": None,
+            "created_at": None,
+        },
+        {
+            "queue_name": "ebay_upload",
+            "state": "dead_letter",
+            "error_detail": "fatal upload error",
+            "job_id": "j2",
+            "updated_at": None,
+            "finished_at": None,
+            "created_at": None,
+        },
+    ]
+
+    html = _render_item_detail_html("tgw1", item, [], [], jobs)
+
+    # CSS class names match the real state strings (previously js-done/
+    # js-pending never matched any actual queue_jobs.state value).
+    assert 'class="js-retry-wait"' in html
+    assert 'class="js-dead-letter"' in html
+
+    # retry_wait's error text uses the warning color, not the critical one.
+    retry_wait_pos = html.index("rate limited, will retry")
+    dead_letter_pos = html.index("fatal upload error")
+    retry_wait_row = html[:retry_wait_pos]
+    dead_letter_row = html[retry_wait_pos:dead_letter_pos]
+
+    assert "#fd8" in retry_wait_row[-600:]
+    assert "#f99" in dead_letter_row
