@@ -101,7 +101,10 @@ flake change needed, just add it alongside the `PYTHONPATH` override:
 LD_LIBRARY_PATH=$NIX_LD_LIBRARY_PATH PYTHONPATH=/opt/TGW/var/worktrees/<id>-<slug>/src:$PYTHONPATH pytest ...
 ```
 
-- Mark the todo `in_progress`: `sudo -u tgw tgw todo --update <id> "in progress: tgw-coder"`.
+- Mark the todo `in_progress`: `sudo -u tgw tgw todo --note <id> "in progress: tgw-coder"`.
+  **Never use `--update` for this** — it overwrites `body`, destroying the
+  original finding text (confirmed live on #1305/#1307/#1315/#1286, todo
+  #1384). `--note` sets a separate `status_note` field instead.
 - Drop a one-paragraph breadcrumb — what you're doing, where you are.
   Required, not optional (CLAUDE.md working rules) — it is what lets a
   session interruption be reconstructed.

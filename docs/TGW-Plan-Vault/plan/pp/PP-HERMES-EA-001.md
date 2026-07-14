@@ -723,6 +723,45 @@ tonight was "no" past that ceiling. Treat any future push to run more
 concurrent runners as needing an explicit answer to "how does Dave still
 see and judge this," not just "can the infrastructure handle it."
 
+## Planner and stitcher run in parallel, not sequentially (Dave, 2026-07-14)
+
+Refines the 2026-07-13 "2-3 runner teams + one planner/stitcher" ceiling
+above: **planner and stitcher are separate concurrent roles, not one
+combined unit that runners wait behind.** The planner runs alongside the
+stitcher (and alongside the runner teams), so when a runner hits a
+decision point it can't resolve itself — a "Decide:"-style question, a
+process-gap finding, anything that needs authorization outside the
+runner's own scope — the planner is already live and can respond quickly,
+rather than the whole pipeline stalling until a synchronous human-in-the-loop
+turn completes. Dave's framing: "generally the responses from the todos or
+whatever questioning mechanism we use are returned quickly, just a
+speedbump." This is what makes "packets should exist before dispatch, not
+be reconstructed by the runner" (#1388) actually sustainable at more than
+one runner at a time — the planner is the one authoring packets ahead of
+dispatch, concurrently with runners executing already-dispatched work, not
+in a separate blocking phase before any runner starts.
+
+**Question channel, as of 2026-07-14:** todos are the current mechanism a
+blocked runner uses to raise a question the planner picks up (the
+`#1384`-style "Decide:" pattern demonstrated this — see
+[[reference-todo-title-overwrite-bug]] in memory). Dave: "todo is the
+channel we have now, but maybe an in-process channel is a good idea, we
+should discuss in planning." **Open, not yet decided** — do not assume
+todos are the final answer here; a lower-latency in-process channel
+(direct message/queue rather than poll-the-tracker) is an open design
+question for a dedicated planning session, not resolved by this note.
+
+**Who runs the planner/stitcher: Dave does, personally (Dave, 2026-07-14):**
+"I still run the planner stitcher and monitor for even more quality and
+control." Parallelizing planner and stitcher is not a step toward handing
+either role to an autonomous agent — it's Dave running both concurrently
+(with Hermes/Claude assisting) so runner questions get fast turnaround
+without him being the sequential bottleneck. Read this together with the
+2026-07-13 supervision-ceiling section above and
+[[feedback-operator-gate-is-the-design]] in memory: the parallelism is in
+service of Dave seeing and judging more work, not a delegation of the
+judging itself.
+
 ## Standing requirement: keep every player's spec current + cross-check before trusting the process (Dave, 2026-07-13)
 
 Two ongoing rules, not one-off asks:

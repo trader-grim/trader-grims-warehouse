@@ -1006,6 +1006,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--by-pp", dest="by_pp", action="store_true", help="group the listing by pp_ref instead of agent")
     p.add_argument("--seed", action="store_true", help="seed Work Tracks items from master plan into the tracker")
     p.add_argument("--update", nargs="+", metavar=("ID", "TEXT"), help="update body text of an item: --update ID new text here")
+    p.add_argument("--note", nargs="+", metavar=("ID", "TEXT"), help="set a status/progress note without touching body text: --note ID new note here")
     p.add_argument("--delegate", nargs=2, metavar=("ID", "AGENT"), help="reassign item to a different agent: --delegate ID agent")
     p.add_argument("--set-priority", nargs=2, metavar=("ID", "N"), dest="set_priority", help="change item priority: --set-priority ID N")
     p.add_argument("--pp", default=None, metavar="PP-REF", help="PP-* plan item for --add / --set-meta (e.g. PP-PLANDB-001)")
