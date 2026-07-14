@@ -37,6 +37,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import requests
+
 from tgw.apis.ebay._cache_io import locked_merge_cache_json
 from tgw.apis.ebay.client import ebay_get, ebay_get_bytes
 from tgw.apis.ebay.taxonomy import get_category_tree_id
@@ -89,14 +91,50 @@ def _structure_aspects(raw_aspects: List[Dict[str, Any]]) -> List[Dict[str, Any]
     return results
 
 
-def _fetch_aspects_live(cfg: Dict[str, Any], category_id: str) -> List[Dict[str, Any]]:
+# Live per-category calls (todo #1394 / PP-DEADLETTER-001): the Taxonomy API's
+# get_item_aspects_for_category was falling straight to dead_letter on a bare
+# 429 with zero retry -- same bug *shape* fixed the same day in
+# llm.py::_call_google_direct() for Gemini's 429/503, but this is a different
+# API (eBay REST via requests, not an LLM SDK) with different status
+# semantics: only 429 is rate-limiting here, there's no 503-equivalent
+# transient-overload case to distinguish, so this is a single retry path, not
+# two. Scoped local to this one call site (not shared ebay_get()) -- ebay_get
+# has ~15 other call sites across sync/publish/sku_migrate/etc. with their own
+# established fail-fast-to-dead-letter behavior; changing that shared
+# function's semantics for everyone was out of scope for a single-endpoint bug.
+_AAC_MAX_RETRIES = 3
+_AAC_BACKOFF_SECONDS = 5  # fixed multiplier per attempt, matches Retry-After fallback
+
+
+def _fetch_aspects_live(cfg: Dict[str, Any], category_id: str,
+                        max_retries: int = _AAC_MAX_RETRIES) -> List[Dict[str, Any]]:
     tree_id = get_category_tree_id(cfg)
-    data = ebay_get(
-        cfg,
-        f'/commerce/taxonomy/v1/category_tree/{tree_id}/get_item_aspects_for_category',
-        params={'category_id': category_id},
-    )
-    return _structure_aspects(data.get('aspects', []))
+    path = f'/commerce/taxonomy/v1/category_tree/{tree_id}/get_item_aspects_for_category'
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_retries):
+        try:
+            data = ebay_get(cfg, path, params={'category_id': category_id})
+            return _structure_aspects(data.get('aspects', []))
+        except requests.exceptions.HTTPError as exc:
+            resp = exc.response
+            status = getattr(resp, 'status_code', None)
+            if status != 429 or attempt >= max_retries - 1:
+                raise
+            last_exc = exc
+            wait = _AAC_BACKOFF_SECONDS * (attempt + 1)
+            retry_after = resp.headers.get('Retry-After') if resp is not None else None
+            if retry_after:
+                try:
+                    wait = max(wait, float(retry_after))
+                except ValueError:
+                    pass
+            log.warning(
+                'Taxonomy API 429 on get_item_aspects_for_category (category %s, '
+                'attempt %d/%d) -- retrying in %.0fs',
+                category_id, attempt + 1, max_retries, wait,
+            )
+            time.sleep(wait)
+    raise last_exc  # pragma: no cover — loop always returns or raises above
 
 
 def _bulk_dir(cfg: Dict[str, Any]) -> Optional[Path]:
