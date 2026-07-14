@@ -843,6 +843,101 @@ Reuses the already-running `state_machine` Postgres instance (todo #1351).
 Full design + open questions (migration path, same-vs-sibling DB, field
 normalization, JSON export cadence, rollback safety): `pp/PP-POSTGRES-001.md`.
 
+## PP-RUNBOOK-001 — operational runbook hardening (thermal + eBay-ops) — NEW 2026-07-13
+**Triggered by the 2026-07-13 tgw-prod NVMe thermal incident** and Tigwa's
+two follow-up inbox reports (`TIGWA-EMERGENCY-tgw-prod-thermal-mitigation-20260713.md`,
+`TIGWA-REPORT-runbook-gaps-20260713.md`) — used by Dave as a live training
+exercise for Tigwa (told her to stop, re-read the plan and runbooks). Not
+started; this section exists to capture the full operational context before
+it's lost, per Prime Directive 5.
+
+**Incident timeline, reconciled from the journal (`journalctl`,
+`journalctl --list-boots`) same session:**
+1. 16:09 NVMe hit 75°C (WARM) → 16:10 84°C (THROTTLE, watchdog killed disk
+   hogs + stopped workers + took an emergency Btrfs snapshot) → 16:12 87°C
+   (CRITICAL) → the on-host 88°C-class watchdog SIGKILLed an in-flight
+   `pytest` full-suite run and the box did a clean power-off. Root cause of
+   the empty/stale `todo/1370-llm-google-direct-test-isolation` worktree
+   found this session (branch existed, zero commits) — the prior session's
+   acceptance run got killed mid-flight, not a framework bug.
+2. Boot at 16:15, only ~45s uptime, ended in an SSH-triggered `sudo poweroff`
+   (session opened for root by `db`, immediately preceding "system will
+   power off now") from 192.168.60.101 (a1131).
+3. Boot at 16:18, ran 9 min — `catalog_rebuild`/`ebay_sync`/`ebay_legacy_sync`
+   all came up unattended (they are `systemctl enabled`, confirmed still
+   true this session) and `ebay_legacy_sync` ran a real live
+   `GetMyeBaySelling` pull (19,604 listings) — ended in a second SSH-triggered
+   poweroff, same pattern.
+4. **Dave's own account of event 3, more nuanced than Tigwa's self-report:**
+   he was trying to boot the machine back up; she was independently trying
+   to shut it down, reading real thermal-destruction risk — "seems like a
+   reasonable response," not a violation, even though it produced a
+   confusing tug-of-war. Once he noticed the conflict he told her to stop
+   and re-read the plan/runbooks. See
+   [[feedback-tigwa-protective-override-2026-07-13]] (session memory) — the
+   real gap is a fast operator-in-the-loop escalation channel for a
+   protective override, not a harder lockdown of her authority.
+5. Boot since 16:31 (current) — same three workers resurrected again
+   (`systemctl enabled` survives every reboot). Stopped live this session
+   (Dave's explicit go-ahead, `AskUserQuestion` confirmed "stop and
+   disable"); **`disable` failed — `/etc/systemd/system` is read-only on
+   this box.** This is the concrete mechanism behind todo #1322's
+   still-open "durable stop" gap: enable/disable state is flake-controlled,
+   not runtime-settable, so a real fix is a flake edit + rebuild, not a
+   systemctl command. Confirms the risk was real, not hypothetical.
+
+**Tigwa's mitigation already in place, reviewed and not objected to:**
+temporary read-only SSH-reachability + NVMe-temperature watchdog on a1131
+(`temporary-tgw-prod-independent-watch`, 1 min / 5 min cadence depending on
+temp, alerts via Telegram, does not touch power), plus a documented
+cool-boot-immediate-Btrfs-snapshot recovery window (snapshot
+`20260713T1632`, 27s, verified local+received read-only subvolumes).
+
+**Full gap list from `TIGWA-REPORT-runbook-gaps-20260713.md` (17 items,
+not restated in full here — read that file directly, it stays in
+`inbox/` until triaged):** no canonical thermal incident/drill runbook;
+same-host monitoring is a failure domain (needs external detection + a
+proven external→Dave→full-Tigwa handoff); intervention authority
+(monitor vs. mitigate vs. shut down) needs to be explicit in the runbook,
+not inferred mid-incident; the cool-boot snapshot window needs documenting
+as a procedure with a temperature gate; a least-destructive workload
+mitigation ladder is missing (alert → identify I/O producer → stop new
+work → ask before pausing/killing an active job → preserve output →
+observe → let the 88°C service be the final backstop); the physical-ops
+section of `TGW-Quickstart.md` §9 is still a stub; runbooks have no
+owner/last-verified/applicability/last-drill metadata; several restore
+docs have stale command syntax and ambiguous snapshot-target naming
+(`TGW-SNAPSHOT-0` vs `TGW-VAULT`); old MX/pre-NixOS restore material isn't
+labeled as historical; a remote-backup path references the `dbukove`
+rclone remote which conflicts with Tigwa's current never-touch boundary;
+USB restore path is undrilled and `tgw-usb-stamp.service` failed on a
+reviewed boot; `PP-RECOVERY-001`'s false code-loss conclusion is cited as
+a cautionary example of weak evidence-searching. **eBay-ops study area
+(Dave's explicit next-assignment for Tigwa, partially done — she reviewed
+the eBay API already):** sold-order source-of-truth + picklist recovery
+runbook, an eBay API responsibility map (Trading completed-orders vs.
+Inventory items/offers/listings vs. OAuth/webhooks/rate-limits vs.
+legacy-vs-platform-native), a token/scope incident procedure, and
+acceptance criteria that check against Seller Hub counts, not just HTTP
+200s.
+
+**Recommended review/build order (Tigwa's own proposal, unmodified):**
+(1) thermal/drill + external-alert runbook, (2) eBay sold-order/picklist
+runbook + API responsibility map, (3) current-OS restore/snapshot index
+with explicit media names, (4) Quickstart command validation against live
+CLI, (5) physical station procedures, (6) owner/date/applicability/drill
+metadata pass across all active runbooks.
+
+**Additional Tigwa training queued this session (Dave's question, session
+context):** `TGW-NixOS-Reference.md` (explains the immutable-`/etc`
+surprise from item 5 above), `LLM-Providers-Quotas.md` + a skim of
+`src/tgw/quota.py` (her poweroff interrupted a real metered `GetMyeBaySelling`
+call mid-pagination — ties to the #1250 resubmission-storm lesson already
+standing in this codebase).
+
+**Status:** not started. Needs a todo filed with `--pp PP-RUNBOOK-001`
+before any runbook file gets touched (going-forward tagging rule).
+
 ## PP-NIXOS-001 — NixOS migration (CatioNIX)
 Canonical flake `~/tgw-flake` working; main-repo merge + workflow rules pending; a1131
 no-GitHub-access (todo #1082); no process supervision for agent processes (design

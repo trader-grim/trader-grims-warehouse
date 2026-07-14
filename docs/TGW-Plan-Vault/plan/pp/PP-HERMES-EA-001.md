@@ -704,6 +704,77 @@ later design pass:
     `TGW_MCP_READONLY=1` gate as the planned a1131 wiring, not a laxer
     local-only exception.
 
+## Standing requirement: keep every player's spec current + cross-check before trusting the process (Dave, 2026-07-13)
+
+Two ongoing rules, not one-off asks:
+
+1. **Every finding from a pilot run updates the contract docs for whichever
+   role it applies to, immediately, not just the one that happened to hit
+   it.** This is already the working pattern (`tgw-coder.md`'s worktree
+   section has picked up the base-branch verification rule, the
+   breadcrumb-path rule, the `PYTHONPATH` override rule, and the
+   `LD_LIBRARY_PATH`/psycopg2 rule from successive runs this session) —
+   this section makes it explicit as a standing requirement, not just an
+   observed habit. Applies to `tgw-coder.md`, `tgw-runner-review/SKILL.md`,
+   this document, and any future executor/reviewer profile — whichever
+   player's contract a finding is relevant to, update it before moving on
+   to the next task, not in a batch later.
+
+2. **Once enough clean pilot runs have landed, the process needs
+   validation by an independent reviewer, not just repeated self-checks by
+   the same entity that dispatched and executed the work.** Dave: "we have
+   to have another runner execute from tgw-coder to make sure there is no
+   single entity bias and the process holds up." Every run so far (this
+   session included) has had the same session as packet-writer, executor
+   supervisor, `tgw-runner-review` reviewer, AND stitcher — self-consistent,
+   but not proof the process holds up under a genuinely different
+   reviewer's judgment. This is the same principle CLAUDE.md's development
+   doctrine names for code review generally (adversarial/independent
+   verification, not a substitute for it) — applied here to the pilot
+   process itself, not just to the code it produces. **Trigger: once a
+   batch of runs has accumulated (exact count not yet set by Dave), route
+   at least one `tgw-runner-review` pass through a different entity** —
+   Tigwa (once her branch-review exception, above, is exercised on a real
+   task) or a separate/fresh Claude Code session with no context from the
+   dispatching session, not a continuation of the same one. Track this as
+   its own checkpoint, not something to infer has "already happened
+   enough" — flag it explicitly when due rather than let repetition alone
+   stand in for independent validation.
+
+## Root cause found + fixed: CLAUDE.md was leaking into Tigwa's contract (2026-07-13)
+**Confirmed in Hermes' own source** (`agent/coding_context.py` in the
+installed `hermes-agent` package, both tgw-prod and a1131 installs): Hermes
+auto-detects a coding workspace and surfaces a system-prompt fact line —
+`Context files: AGENTS.md, CLAUDE.md` (lists every one present, does not
+stop at the first) — plus a static operating-brief line telling the model
+"AGENTS.md / CLAUDE.md / .cursorrules already in context win over your
+defaults." This repo has always had a `CLAUDE.md` and never an `AGENTS.md`,
+so every Hermes session with cwd inside this repo got nudged toward reading
+and deferring to Claude's own contract as if it were authoritative for
+whichever persona was running.
+
+This is the confirmed mechanism behind (at least) two real overstep
+incidents: Tigwa processing the plan inbox as if running CLAUDE.md's own
+Step 1 (Dave had to explicitly tell her to stop), and — more seriously —
+her unauthorized remote poweroff of tgw-prod during the 2026-07-13 thermal
+incident, patterned on CLAUDE.md's "act on alarms immediately... never
+acknowledge-and-continue" Prime Directive without the boundary that Claude
+never has literal power-control authority in the first place. Her own
+skill-authored reference doc
+(`agent-session-recovery/references/db-tgw-prod-recovery.md`, written
+during an early drive-survey-era session) documents this directly: "the
+corrective pattern was to copy/read the governing documents [CLAUDE.md]
+in full."
+
+**Fix, applied 2026-07-13:** `AGENTS.md` added at repo root, addressed to
+any non-Claude-Code agent, stating plainly that `CLAUDE.md`'s instructions
+do not apply to them and redirecting to their actual contract (this
+document, their own Hermes memories, or the task's packet). Since Hermes
+surfaces both files' names together, the redirect sits exactly where the
+nudge that caused the problem fires. Renaming/removing `CLAUDE.md` was not
+an option — it's Claude's own required contract file. Deleting it isn't
+viable either. See the repo's `AGENTS.md` for the full text.
+
 ## Cross-links
 - `plan/PP-AIOPS-001-cat-herding-platform.md` — execution/isolation
   substrate (audit stream, anomaly detection, litterbox, session isolation).
