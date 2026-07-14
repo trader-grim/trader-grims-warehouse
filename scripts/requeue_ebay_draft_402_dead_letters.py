@@ -48,6 +48,7 @@ from typing import Set
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 from tgw.queue import state_machine  # noqa: E402
+from tgw.logging import announce_script_run  # noqa: E402
 
 _MARKER_PATH = Path('/opt/TGW/var/run/requeue_ebay_draft_402_dead_letters.done.json')
 
@@ -78,6 +79,12 @@ def main() -> int:
                        help='Path to the run-once marker file (default: %(default)s)')
     args = parser.parse_args()
     marker_path = Path(args.marker)
+
+    announce_script_run(
+        'requeue_ebay_draft_402_dead_letters.py',
+        'bulk-requeue ebay_draft dead-letters matching a 402 error pattern',
+        apply=args.apply, limit=args.limit,
+    )
 
     state_machine.init('dbname=state_machine user=tgw')
 
