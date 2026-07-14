@@ -18,6 +18,7 @@ import json
 import pytest
 
 import tgw.mcp_server as mcp_server
+from tgw import resolver
 from tgw.queue import state_machine as sm
 
 # ---------------------------------------------------------------------------
@@ -64,6 +65,10 @@ def _install_conn(monkeypatch, rows):
 def cfg(tmp_path, monkeypatch):
     c = {"itemdata_root": tmp_path, "postgres_dsn": "postgresql://fake/db"}
     monkeypatch.setattr(mcp_server, "_cfg", c)
+    # resolver.find_current_sku caches a process-level {sku_old: current}
+    # index the first time it's called; reset it per-test so a renamed
+    # fixture written under this test's tmp_path is actually picked up.
+    monkeypatch.setattr(resolver, "_sku_old_index", None)
     return c
 
 
@@ -106,6 +111,17 @@ def test_get_item_missing(cfg):
     out = json.loads(mcp_server.tgw_get_item("tgw404"))
     assert out["ok"] is False
     assert "not found" in out["error"]
+
+
+def test_get_item_resolves_renamed_sku_via_alias_fallback(cfg):
+    # Item now lives under tgw002 but was previously tgw001; the doc
+    # records sku_old so resolver.find_current_sku() can map it forward.
+    _write_item(cfg, "tgw002", {"sku": "tgw002", "sku_old": "tgw001",
+                                "title": "Renamed Widget"})
+    out = json.loads(mcp_server.tgw_get_item("tgw001"))
+    assert out["ok"] is True
+    assert out["item"]["title"] == "Renamed Widget"
+    assert out["item"]["sku"] == "tgw002"
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +220,15 @@ def test_enqueue_item_not_found(cfg):
     out = json.loads(mcp_server.tgw_enqueue("tgw404", "ai_identify"))
     assert out["ok"] is False
     assert "not found" in out["error"]
+
+
+def test_enqueue_resolves_renamed_sku_via_alias_fallback(cfg, monkeypatch):
+    _write_item(cfg, "tgw002", {"sku": "tgw002", "sku_old": "tgw001"})
+    monkeypatch.setattr(sm, "init", lambda *a, **k: None)
+    monkeypatch.setattr(sm, "enqueue_job", lambda **kw: "job-88")
+    out = json.loads(mcp_server.tgw_enqueue("tgw001", "ebay_draft"))
+    assert out["ok"] is True
+    assert out["job_id"] == "job-88"
 
 
 def test_enqueue_success(cfg, monkeypatch):
