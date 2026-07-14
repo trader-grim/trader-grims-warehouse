@@ -117,6 +117,90 @@ def _resolve_unresolved_offer(offer_id: str) -> None:
         log.warning("offer_history: could not clear resolved offer %s: %s", offer_id, exc)
 
 
+def repair_unresolved_offers(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Retry local SKU resolution for every entry in the unresolved-offer
+    registry (C11 repair pass, todo #1373 -- follow-up to #1314).
+
+    Makes NO eBay API calls: each entry already recorded a Best-Offer
+    response that succeeded live against eBay at the time it was first
+    seen. This only re-runs `_find_item_by_listing_id()` (the same
+    offline SQLite-catalog lookup that failed originally) in case the
+    catalog has since caught up (e.g. a delayed catalog_rebuild, or the
+    item was intake'd/synced after the offer response landed).
+
+    On success: the offer-history entry is written onto the now-found
+    item (same shape `_log_offer_history()` writes on its success path)
+    and the registry entry is cleared via `_resolve_unresolved_offer()`.
+    On repeat failure: `_record_unresolved_offer()` is called again,
+    which bumps `attempts`/`last_attempt_at` in place (no data lost).
+
+    Returns {ok, repaired: [offer_id...], still_unresolved: [offer_id...],
+    total}.
+    """
+    repaired: List[str] = []
+    still_unresolved: List[str] = []
+
+    if not _UNRESOLVED_REGISTRY.exists():
+        return {"ok": True, "repaired": repaired, "still_unresolved": still_unresolved, "total": 0}
+
+    try:
+        registry: Dict[str, Any] = json.loads(_UNRESOLVED_REGISTRY.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log.error("repair_unresolved_offers: could not read registry: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    for offer_id, entry in list(registry.items()):
+        if entry.get("resolved"):
+            continue
+        listing_id = entry.get("listing_id", "")
+        action = entry.get("action", "")
+        counter_price = entry.get("counter_price")
+        by = entry.get("by", "claude")
+
+        path = _find_item_by_listing_id(cfg, listing_id)
+        if path is None:
+            _record_unresolved_offer(offer_id, listing_id, action, counter_price, by, now_iso)
+            still_unresolved.append(offer_id)
+            continue
+
+        try:
+            item = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            log.warning("repair_unresolved_offers: could not read %s: %s", path, exc)
+            still_unresolved.append(offer_id)
+            continue
+
+        history_entry: Dict[str, Any] = {
+            "offer_id": offer_id,
+            "listing_id": listing_id,
+            "action": action,
+            "by": by,
+            "at": entry.get("first_seen_at", now_iso),
+        }
+        if counter_price is not None:
+            history_entry["counter_price"] = counter_price
+
+        history: List[Dict[str, Any]] = item.setdefault("offer_history", [])
+        history.append(history_entry)
+        atomic_write_json(path, item, pretty=cfg.get("pretty", True))
+
+        _resolve_unresolved_offer(offer_id)
+        repaired.append(offer_id)
+        log.info(
+            "repair_unresolved_offers: resolved offer %s (listing_id=%s) onto %s",
+            offer_id, listing_id, path,
+        )
+
+    return {
+        "ok": True,
+        "repaired": repaired,
+        "still_unresolved": still_unresolved,
+        "total": len(repaired) + len(still_unresolved),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Item lookup helpers
 # ---------------------------------------------------------------------------
