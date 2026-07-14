@@ -84,14 +84,14 @@ def tgw_get_item(sku: str) -> str:
     Returns JSON string with item data, or an error object.
     """
     cfg = _get_cfg()
-    jf = cfg['itemdata_root'] / sku / f'{sku}.json'
-    if not jf.exists():
-        return json.dumps({'ok': False, 'error': f'item not found: {sku}'})
+    from tgw import items
     try:
-        doc = json.loads(jf.read_text(encoding='utf-8'))
-        return json.dumps({'ok': True, 'sku': sku, 'item': doc}, default=str)
+        doc = items.get_item(cfg, sku)
+    except FileNotFoundError:
+        return json.dumps({'ok': False, 'error': f'item not found: {sku}'})
     except Exception as exc:
         return json.dumps({'ok': False, 'error': str(exc)})
+    return json.dumps({'ok': True, 'sku': sku, 'item': doc}, default=str)
 
 
 # ---------------------------------------------------------------------------
@@ -238,9 +238,16 @@ def tgw_enqueue(sku: str, action: str) -> str:
             'error': f'invalid action {action!r}; valid: {sorted(_VALID_ACTIONS)}',
         })
 
-    jf = cfg['itemdata_root'] / sku / f'{sku}.json'
+    from tgw import items
+    from tgw.resolver import find_current_sku
+
+    jf = items.sku_json(cfg, sku)
     if not jf.exists():
-        return json.dumps({'ok': False, 'error': f'item not found: {sku}'})
+        current = find_current_sku(cfg, sku)
+        if current:
+            jf = items.sku_json(cfg, current)
+        else:
+            return json.dumps({'ok': False, 'error': f'item not found: {sku}'})
 
     state_machine.init(cfg['postgres_dsn'])
     try:
