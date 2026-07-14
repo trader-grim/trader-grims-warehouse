@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field
 from . import draft_sync
 from .assets import ordered_photos as _ordered_photos
 from .config import DEFAULT_CONFIG, load_config
-from .items import atomic_write_json, locationupdate
+from .items import _archive_before_overwrite, atomic_write_json, locationupdate
 from .queue import state_machine
 from .readiness import check_ebay, readiness_html
 from .resolver import load_item_doc
@@ -2292,6 +2292,9 @@ def delete_asset(sku: str, filename: str) -> Dict[str, Any]:
         target.resolve().relative_to(sku_dir.resolve())
     except ValueError:
         raise HTTPException(status_code=400, detail="path traversal not allowed")
+    archive_root = _cfg.get("archive_root")
+    if archive_root:
+        _archive_before_overwrite(archive_root, target)
     target.unlink()
     doc = load_item_doc(json_path)
     order = doc.get("photo_order") or []

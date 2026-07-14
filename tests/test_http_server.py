@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -4436,3 +4437,59 @@ def test_item_detail_best_offer_control_disabled_when_explicitly_false(env):
     text = r.text
     assert '<option value="false" selected>' in text
     assert '<option value="" selected>' not in text
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/items/{sku}/assets/{filename} — archive-before-delete (#1310,
+# invariant E5, PP-COHESION-001)
+# ---------------------------------------------------------------------------
+
+def test_delete_asset_archives_before_unlink(env):
+    """When archive_root is configured, deleting a photo must zip its bytes
+    into archive_root before the file is unlinked from disk."""
+    sku = SKU_B
+    item_dir = env["itemdata_root"] / sku
+    photo = item_dir / "front.jpg"
+    original_bytes = photo.read_bytes()
+
+    archive_root = env["cfg"]["itemdata_root"].parent / "archive"
+    env["cfg"]["archive_root"] = archive_root
+
+    r = env["client"].delete(f"/api/items/{sku}/assets/front.jpg", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"ok": True, "sku": sku, "deleted": "front.jpg"}
+
+    # (a) the photo file is gone from the SKU dir
+    assert not photo.exists()
+
+    # (b) a zip matching the photo's stem exists in archive_root and
+    # contains the original photo bytes
+    zpath = archive_root / "front.zip"
+    assert zpath.exists()
+    with zipfile.ZipFile(zpath, "r") as zf:
+        names = zf.namelist()
+        assert len(names) == 1
+        assert names[0].startswith("front.jpg.")
+        assert zf.read(names[0]) == original_bytes
+
+
+def test_delete_asset_no_archive_root_still_deletes(env):
+    """With archive_root unset/None, delete must still succeed with no
+    exception and no archive step attempted (null-safe guard, matching
+    atomic_write_json's own pattern)."""
+    sku = SKU_B
+    item_dir = env["itemdata_root"] / sku
+    photo = item_dir / "back.PNG"
+    assert photo.exists()
+    assert "archive_root" not in env["cfg"]
+
+    r = env["client"].delete(f"/api/items/{sku}/assets/back.PNG", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"ok": True, "sku": sku, "deleted": "back.PNG"}
+
+    assert not photo.exists()
+    # No archive directory should have been created anywhere under tmp_path
+    # as a side effect of this delete.
+    assert not (env["itemdata_root"].parent / "archive").exists()
