@@ -794,6 +794,42 @@ nudge that caused the problem fires. Renaming/removing `CLAUDE.md` was not
 an option — it's Claude's own required contract file. Deleting it isn't
 viable either. See the repo's `AGENTS.md` for the full text.
 
+## Thermal emergency response — three-leg design + authority decision (Dave, 2026-07-14)
+
+**Decides the open authority question from the 2026-07-13 thermal incident**
+(`inbox/TIGWA-EMERGENCY-tgw-prod-thermal-mitigation-20260713.md`,
+reconciliation item 4: "decide whether workload mitigation may include
+pausing a specific agent/process and under what threshold/authority") and
+gives todo #1382's "leg 3" its authority grant.
+
+**The design, confirmed by Dave:** on a HOT/THROTTLE/SHUTDOWN thermal
+transition, Tigwa-lite's response is three parallel legs off the same
+detection event, not separate monitors:
+1. **Contact Dave** — Telegram, already built (2026-07-13).
+2. **Set off an Android alarm** — local Tasker device alert, todo #1375,
+   not yet built.
+3. **Interrupt Claude** — tmux send-keys into Claude's active pane,
+   notifying Claude live instead of relying on Claude to poll
+   `thermal.status` (the gap CLAUDE.md's "no ambient monitoring for
+   Claude" note names). Not yet built.
+
+**Authority granted, explicitly: notify/interrupt only, across all three
+legs.** None of the three legs authorizes Tigwa to pause, kill, or
+otherwise act on any workload/process/host power state. This directly
+reaffirms the incident report's own line — "monitoring authority does not
+imply power-control authority" — and extends the same boundary to the new
+interrupt-Claude leg: interrupting Claude's session to surface an alarm is
+not the same as Tigwa being authorized to act on it herself. Any actual
+mitigation (pausing a process, throttling, shutdown) still requires Dave's
+explicit approval in the moment, or the existing on-host 88°C automatic
+shutdown service — neither of which this design changes.
+
+**Open, not resolved by this decision** (per #1382's own listed open
+questions, still to be designed when built): stable pane-discovery for
+leg 3 (not hardcoded session/pane), dedup/rate-limiting consistent with
+Tigwa's existing chronic-warning suppression, and safe no-op behavior if
+no matching Claude pane exists.
+
 ## Cross-links
 - `plan/PP-AIOPS-001-cat-herding-platform.md` — execution/isolation
   substrate (audit stream, anomaly detection, litterbox, session isolation).
