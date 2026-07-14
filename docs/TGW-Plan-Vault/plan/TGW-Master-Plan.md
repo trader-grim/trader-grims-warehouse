@@ -995,6 +995,20 @@ cross-host MCP access mechanism (tgw-prod packets need to reach a1131's
 graph), repo-sync mechanism (a1131's checkout is known-stale, #1082), and
 parse scope (`src/tgw/` only vs. also `tools/`/`scripts/`).
 
+**Convergence with PP-HERMES-EA-001's planner/stitcher, flagged 2026-07-14
+(Dave, still ideation — not yet a build decision):** the Z3 invariant
+catalog isn't just a lookup an agent queries — it's a candidate trigger
+for the planner's replanning decisions. If a runner's output gets checked
+against the invariant catalog and Z3 confirms it holds, that's the
+planner's "yeah, that's what I designed" signal to move forward; a failed
+confirmation is a replan trigger, not just a bug flag. That makes the
+planner/stitcher (see PP-HERMES-EA-001's "operating console/decision gate"
+framing) the consumer of PP-CODEGRAPH-001's invariant-confirmation output,
+and the in-process question channel (todo #1390) the plausible wire it
+rides on. Not designed yet — Dave was still building this idea aloud when
+it got captured; treat as a design lead for the eventual build session
+(#1386), not a spec.
+
 ## PP-NIXOS-001 — NixOS migration (CatioNIX)
 Canonical flake `~/tgw-flake` working; main-repo merge + workflow rules pending; a1131
 no-GitHub-access (todo #1082); no process supervision for agent processes (design

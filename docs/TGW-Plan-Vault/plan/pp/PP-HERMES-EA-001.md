@@ -751,6 +751,37 @@ todos are the final answer here; a lower-latency in-process channel
 (direct message/queue rather than poll-the-tracker) is an open design
 question for a dedicated planning session, not resolved by this note.
 
+**Concrete case grounding this, same session (2026-07-14):** todo #1286's
+body had been clobbered by the bug #1384 fixed. Restoring it was a one-line
+`tgw todo --update`, but the auto-mode permission classifier correctly
+blocked the edit (a pre-existing shared tracker item, not created that
+session) and required an explicit yes/no from Dave before proceeding. In
+*this* session that was a two-message round trip because Dave was right
+there. **In an unsupervised tgw-coder run, that same block would park the
+worktree until someone happened to poll the todo tracker** — there's no
+guarantee the planner sees it promptly. That gap — permission-gated
+decision mid-task, runner can't self-resolve, needs a fast answer to keep
+going rather than sit idle — is exactly the scenario the in-process channel
+question above is meant to close. Use this as the concrete test case when
+the planning session designs it: would the proposed channel have turned
+that two-message round trip into something a runner gets back inside its
+own task loop, not on the next tracker poll?
+
+**Planner/stitcher as operating console + decision gate — converges with
+PP-CODEGRAPH-001's Z3 invariant catalog (Dave, 2026-07-14, still
+ideation):** the two "solid" pieces of this design fit together —
+PP-CODEGRAPH-001's Z3-backed invariant confirmation gives the planner an
+automated "yeah, that's what I designed" signal (invariants hold →
+proceed) or a replan trigger (invariants fail → don't just flag the bug,
+kick it back to planning). That makes the planner/stitcher not just a
+Q&A responder to runner questions but the decision gate that Z3/invariant
+results feed into, with the in-process channel (todo #1390) as the
+plausible transport for both directions (runner questions out, invariant
+confirmations in). See PP-CODEGRAPH-001's master-plan section for the
+mirrored note. **Not a spec yet** — Dave was thinking this through live;
+treat as a design lead for the eventual PP-CODEGRAPH-001 build session
+(#1386), not a decided architecture.
+
 **Who runs the planner/stitcher: Dave does, personally (Dave, 2026-07-14):**
 "I still run the planner stitcher and monitor for even more quality and
 control." Parallelizing planner and stitcher is not a step toward handing
