@@ -704,6 +704,25 @@ later design pass:
     `TGW_MCP_READONLY=1` gate as the planned a1131 wiring, not a laxer
     local-only exception.
 
+## Dave's supervision capacity — a real ceiling on batch/fleet size (Dave, 2026-07-13)
+
+Dave's own assessment, stated plainly at the end of tonight's pilot batch:
+"I believe I can manage 2 or 3 tgw-coder/aider runner teams and a planner
+stitcher in parallel and still monitor and contribute if Hermes helps me.
+much more than that and I would be blind." This is a hard operator-gate
+constraint, not a soft preference — it belongs in the same category as
+Prime Directive 4's "done = verified live" and the "operator gate is the
+design" standing note: the whole point of the stitch/review contract is
+that Dave can actually see and judge the work, not just watch volume flow
+past him. Concurrency in this pilot (and in whatever fleet shape comes
+after it) should default to **2-3 runner teams + one planner/stitcher**,
+assuming Hermes is helping him monitor. Scaling beyond that isn't a
+capability question (the mechanics already support arbitrary
+concurrency) — it's a supervision-bandwidth question, and the answer
+tonight was "no" past that ceiling. Treat any future push to run more
+concurrent runners as needing an explicit answer to "how does Dave still
+see and judge this," not just "can the infrastructure handle it."
+
 ## Standing requirement: keep every player's spec current + cross-check before trusting the process (Dave, 2026-07-13)
 
 Two ongoing rules, not one-off asks:
