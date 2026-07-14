@@ -499,3 +499,57 @@ ebay_sync_fallback). The real open risk is operational: two of Tigwa's
 three known overstep incidents now trace to the same root cause
 (CLAUDE.md leaking in), fixed tonight, but not yet proven clean over a
 real subsequent session with her.
+
+## Session 2026-07-14 morning (stitch cycle · thermal emergency policy · PP-CODEGRAPH-001 promoted)
+
+- **Stitch cycle closed out**: #1305/#1307/#1315 (the three remaining
+  independent PP-COHESION-001 fence-bypass items) reviewed via
+  tgw-runner-review, one real (additive, clean) merge conflict resolved,
+  merged and pushed. Full suite green (2197 passed, 1 skipped) before and
+  after. **#1286's stale appearance explained, not just noted**: confirmed
+  live that dispatching a todo to tgw-coder overwrites its title/body with
+  a generic placeholder (`"in progress: tgw-coder"`) — #1286 likely had
+  real content once, now unrecoverable from the tracker itself. See memory
+  `reference-todo-title-overwrite-bug`.
+- **Filed #1384**: process-refinement findings from this cycle — no
+  pre-existing packets for any of the three tasks (self-authored by the
+  executor each time), inconsistent worktree/branch naming (harness
+  auto-provisioned vs. the manual `todo/<id>-*` convention), and the
+  title-overwrite bug above. **This is Dave's stated next-session focus
+  ("process refinement")** — start here.
+- **Thermal emergency response authority resolved** (open since the
+  2026-07-13 incident report): Tigwa-lite's 3-leg response (Telegram +
+  Android/Tasker alarm + tmux interrupt into Claude's pane) is
+  notify/interrupt-only, no pause/kill/shutdown authority on any leg.
+  Formal policy written: `reference/runbooks/thermal-emergency-response.md`
+  (PP-RUNBOOK-001/#1380 thermal half done). #1385 filed + delegated to
+  tigwa for her actual build.
+- **PP-CODEGRAPH-001 promoted** to an active PP same day it was filed —
+  Dave is building the full stack (FalkorDB/Z3/DuckDB/MCP unification) on
+  **a1131**, not the cut-down version first proposed. Infrastructure
+  planning doc: `docs/ai-plans/pp-codegraph-001-a1131-infrastructure.md`.
+  Dave bringing additional research before the build session — #1386
+  tracks folding it in. Nothing installed/built yet. Real process lesson
+  from how this unfolded: an initial too-cautious deferral got corrected
+  twice by Dave — see memory `feedback-take-care-before-discarding-ideas`.
+- All work committed and pushed to `catio-nix-0.0.1-alpha` on origin
+  (explicit request each time).
+
+**Open into next session:**
+- **#1384 — Dave's stated priority ("process refinement")**: decide
+  whether packets must be pre-authored before dispatch, whether the
+  tgw-coder contract should formally accept harness-provisioned worktrees,
+  and fix the todo title-overwrite bug (append status, don't clobber
+  title). Check whether #1286's original content is recoverable.
+- #1385 (Tigwa's thermal-monitor build) and #1375 (Android alarm leg) —
+  not started, Tigwa's side.
+- #1386 — waiting on Dave's PP-CODEGRAPH-001 research.
+- #1380's eBay-ops runbook half and the broader 17-item gap-report triage
+  — still not started beyond what fed the thermal policy.
+- Carried over, still untouched: #1077 (eBay support ticket — Dave has
+  this handled himself), #1381 (cross-reviewer-bias checkpoint, trigger
+  not yet hit), planning-shaped PP-COHESION-001 items (#1230, #1250,
+  #1261, #1265, #1369).
+
+**Risk worth flagging:** none new. Thermal stayed NORMAL throughout,
+checked before/after every heavy operation.
