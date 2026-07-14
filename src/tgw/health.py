@@ -597,6 +597,57 @@ def check_ebay_sync_fallback(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Unresolved Best-Offer registry check (invariant C11, todo #1373, follow-up
+# to #1314)
+# ---------------------------------------------------------------------------
+
+# Same fixed path as tgw.offers._UNRESOLVED_REGISTRY. Not cfg-driven (the
+# registry itself has no ItemData/SKU to key off, so there's no per-item
+# catalog-verify rule that fits — this is the cross-cutting discovery
+# mechanism instead). Kept as a module-level constant (not inlined) so
+# tests can monkeypatch it the same way tests/test_offers.py monkeypatches
+# the source-of-truth constant in offers.py.
+_OFFERS_UNRESOLVED_REGISTRY = Path('/opt/TGW/var/offers-unresolved.json')
+
+
+def check_offers_unresolved(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Surface the count of Best-Offer responses that succeeded live on
+    eBay but could not be resolved to a local SKU (see
+    tgw.offers._record_unresolved_offer / invariant C11).
+
+    Without this, the registry (/opt/TGW/var/offers-unresolved.json) has
+    no discovery mechanism at all -- an operator would never know it
+    exists. `tgw offers repair` (tgw.offers.repair_unresolved_offers)
+    retries resolution; this check just surfaces the count so someone
+    knows to run it.
+
+    ok=True when the registry is absent/empty or every entry is resolved.
+    ok=False (warn=True) when 1+ unresolved entries remain.
+    """
+    t = time.time()
+    path = _OFFERS_UNRESOLVED_REGISTRY
+    if not path.exists():
+        return _result("offers_unresolved", True, "no unresolved offers", (time.time() - t) * 1000,
+                       offers_unresolved_count=0)
+    try:
+        registry = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return _result("offers_unresolved", True, f"registry unreadable: {exc}", (time.time() - t) * 1000,
+                       offers_unresolved_count=0)
+
+    unresolved = [oid for oid, entry in registry.items() if not entry.get("resolved")]
+    n = len(unresolved)
+    if n == 0:
+        return _result("offers_unresolved", True, "no unresolved offers", (time.time() - t) * 1000,
+                       offers_unresolved_count=0)
+    return _result(
+        "offers_unresolved", False,
+        f"{n} unresolved Best-Offer entr{'y' if n == 1 else 'ies'} — run `tgw offers repair`",
+        (time.time() - t) * 1000, warn=True, offers_unresolved_count=n,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Metered-API quota check (PP-QUOTA-001, session 42)
 # ---------------------------------------------------------------------------
 
@@ -717,6 +768,7 @@ def check_all(cfg: Dict[str, Any],
     ]
     checks.append(check_nats(cfg))
     checks.append(check_ebay_sync_fallback(cfg))
+    checks.append(check_offers_unresolved(cfg))
     checks.append(check_quota(cfg))
     if include_ollama:
         checks.append(check_ollama())

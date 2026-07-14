@@ -624,3 +624,95 @@ class TestUnresolvedOfferRegistry:
             cmd_offers_respond(cfg, "99005", "12345678", "Accept", dry_run=False)
 
         assert not registry_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# repair_unresolved_offers (todo #1373, follow-up to #1314)
+# ---------------------------------------------------------------------------
+
+class TestRepairUnresolvedOffers:
+    def test_repairs_entry_once_sku_now_resolvable(self, tmp_path, monkeypatch):
+        """Core scenario: the registry has an unresolved entry recorded
+        before the item existed locally; once the item shows up in the
+        catalog, the repair pass must clear the registry entry and land
+        the offer history on the found item."""
+        registry_path = tmp_path / "offers-unresolved.json"
+        monkeypatch.setattr(offers_mod, "_UNRESOLVED_REGISTRY", registry_path)
+
+        cfg = _make_cfg(tmp_path, with_db=True)
+
+        # Seed the registry as if _record_unresolved_offer() had already run.
+        offers_mod._record_unresolved_offer(
+            "99010", "12345678", "Accept", None, "claude", "2026-07-13T10:00:00Z",
+        )
+        assert registry_path.exists()
+
+        # SKU now resolvable: catalog row + item JSON now exist.
+        doc = {"sku": "tgw001", "ebay_listing": {"listing_id": "12345678"}}
+        _insert_catalog(tmp_path / "catalog.db", "tgw001", doc)
+        item_path = _write_item(cfg["itemdata_root"], "tgw001", doc)
+
+        result = offers_mod.repair_unresolved_offers(cfg)
+
+        assert result["ok"] is True
+        assert result["repaired"] == ["99010"]
+        assert result["still_unresolved"] == []
+
+        # Registry entry cleared.
+        registry = json.loads(registry_path.read_text())
+        assert "99010" not in registry
+
+        # Offer history landed on the item.
+        saved = json.loads(item_path.read_text())
+        assert len(saved["offer_history"]) == 1
+        entry = saved["offer_history"][0]
+        assert entry["offer_id"] == "99010"
+        assert entry["action"] == "Accept"
+        assert entry["by"] == "claude"
+
+    def test_still_unresolved_entry_bumps_attempts_and_stays(self, tmp_path, monkeypatch):
+        registry_path = tmp_path / "offers-unresolved.json"
+        monkeypatch.setattr(offers_mod, "_UNRESOLVED_REGISTRY", registry_path)
+
+        cfg = _make_cfg(tmp_path, with_db=True)
+        offers_mod._record_unresolved_offer(
+            "99011", "99999999", "Decline", None, "claude", "2026-07-13T10:00:00Z",
+        )
+
+        result = offers_mod.repair_unresolved_offers(cfg)
+
+        assert result["ok"] is True
+        assert result["repaired"] == []
+        assert result["still_unresolved"] == ["99011"]
+
+        registry = json.loads(registry_path.read_text())
+        assert registry["99011"]["attempts"] == 2
+        assert registry["99011"]["resolved"] is False
+
+    def test_no_registry_file_is_a_noop(self, tmp_path, monkeypatch):
+        registry_path = tmp_path / "offers-unresolved.json"
+        monkeypatch.setattr(offers_mod, "_UNRESOLVED_REGISTRY", registry_path)
+
+        cfg = _make_cfg(tmp_path, with_db=True)
+        result = offers_mod.repair_unresolved_offers(cfg)
+
+        assert result == {"ok": True, "repaired": [], "still_unresolved": [], "total": 0}
+
+    def test_already_resolved_entries_are_skipped(self, tmp_path, monkeypatch):
+        registry_path = tmp_path / "offers-unresolved.json"
+        monkeypatch.setattr(offers_mod, "_UNRESOLVED_REGISTRY", registry_path)
+        registry_path.write_text(json.dumps({
+            "99012": {
+                "offer_id": "99012", "listing_id": "12345678", "action": "Accept",
+                "counter_price": None, "by": "claude",
+                "first_seen_at": "2026-07-13T10:00:00Z", "last_attempt_at": "2026-07-13T10:00:00Z",
+                "attempts": 1, "resolved": True,
+            }
+        }), encoding="utf-8")
+
+        cfg = _make_cfg(tmp_path, with_db=True)
+        result = offers_mod.repair_unresolved_offers(cfg)
+
+        assert result["repaired"] == []
+        assert result["still_unresolved"] == []
+        assert result["total"] == 0

@@ -1083,8 +1083,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("offers", help="list and respond to incoming Best Offers (PP-OFFER-001)")
     p.add_argument(
         "offer_op",
-        choices=["list", "respond"],
-        help="list: show incoming offers; respond: accept/decline/counter an offer",
+        choices=["list", "respond", "repair"],
+        help="list: show incoming offers; respond: accept/decline/counter an offer; "
+             "repair: retry local SKU resolution for the unresolved-offer registry (C11, #1373)",
     )
     p.add_argument("offer_id", nargs="?", default=None, metavar="OFFER_ID", help="Best Offer ID (required for respond)")
     p.add_argument("--listing-id", default=None, metavar="LISTING_ID", help="eBay listing/item ID (required for respond)")
@@ -5064,9 +5065,11 @@ def main() -> int:
                     print()
 
         elif args.op == "offers":
-            from .offers import cmd_offers_list, cmd_offers_respond
+            from .offers import cmd_offers_list, cmd_offers_respond, repair_unresolved_offers
 
-            if args.offer_op == "respond":
+            if args.offer_op == "repair":
+                result = repair_unresolved_offers(cfg)
+            elif args.offer_op == "respond":
                 action = args.offer_action
                 if action is None and args.counter_price is not None:
                     action = "Counter"
