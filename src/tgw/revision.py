@@ -29,6 +29,7 @@ from typing import Any, Dict, List
 
 from tgw.config import sku_json
 from tgw.items import atomic_write_json
+from tgw.resolver import find_current_sku, load_item_doc
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -189,12 +190,15 @@ def cmd_revise(
         return {"ok": False, "error": str(exc)}
 
     json_path = sku_json(cfg, sku)
-
     if not json_path.exists():
-        return {"ok": False, "error": f"item JSON not found: {json_path}"}
+        current = find_current_sku(cfg, sku)
+        if current:
+            json_path = sku_json(cfg, current)
+        else:
+            return {"ok": False, "error": f"item JSON not found: {json_path}"}
 
     try:
-        item = json.loads(json_path.read_text(encoding="utf-8"))
+        item = load_item_doc(json_path)
     except Exception as exc:
         return {"ok": False, "error": f"failed to read item JSON: {exc}"}
 
@@ -227,7 +231,8 @@ def cmd_revise(
 
     # Only revision_draft is written — all other item fields are untouched
     item["revision_draft"] = revision_draft
-    atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
+    atomic_write_json(json_path, item, pretty=cfg.get("pretty", True),
+                       archive_root=cfg.get("archive_root"))
 
     return {
         "ok": True,
@@ -442,10 +447,14 @@ def cmd_revise_apply(
     """
     json_path = sku_json(cfg, sku)
     if not json_path.exists():
-        return {"ok": False, "error": f"item JSON not found: {json_path}"}
+        current = find_current_sku(cfg, sku)
+        if current:
+            json_path = sku_json(cfg, current)
+        else:
+            return {"ok": False, "error": f"item JSON not found: {json_path}"}
 
     try:
-        item = json.loads(json_path.read_text(encoding="utf-8"))
+        item = load_item_doc(json_path)
     except Exception as exc:
         return {"ok": False, "error": f"failed to read item JSON: {exc}"}
 
@@ -524,7 +533,8 @@ def cmd_revise_apply(
         })
         item["revision_history"] = history
         item.pop("revision_draft", None)
-        atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
+        atomic_write_json(json_path, item, pretty=cfg.get("pretty", True),
+                           archive_root=cfg.get("archive_root"))
 
     return {
         "ok": True,
