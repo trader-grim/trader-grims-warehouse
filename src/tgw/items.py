@@ -155,6 +155,7 @@ def create_item(cfg: Dict[str, Any], sku: str, data: Dict[str, Any]) -> Path:
     path = sku_json(cfg, sku)
     if path.exists():
         raise FileExistsError(f'item already exists: {path}')
+    path.parent.mkdir(parents=True, exist_ok=True)
     record = {'sku': sku, **data}
     atomic_write_json(path, record, pretty=cfg.get('pretty', True))
     return path

@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field
 from . import draft_sync
 from .assets import ordered_photos as _ordered_photos
 from .config import DEFAULT_CONFIG, load_config
-from .items import _archive_before_overwrite, atomic_write_json, locationupdate
+from .items import _archive_before_overwrite, atomic_write_json, create_item, locationupdate
 from .queue import state_machine
 from .readiness import check_ebay, readiness_html
 from .resolver import load_item_doc
@@ -1037,14 +1037,10 @@ def create_item_endpoint(body: CreateItemBody) -> Dict[str, Any]:
             status_code=400,
             detail=f"invalid sku format {body.sku!r}; must match tgwYYYYMMDDHHMMSSmmm",
         )
-    item_dir = _cfg["itemdata_root"] / body.sku
-    json_path = item_dir / f"{body.sku}.json"
-    if json_path.exists():
+    try:
+        json_path = create_item(_cfg, body.sku, body.data)
+    except FileExistsError:
         raise HTTPException(status_code=409, detail=f"sku already exists: {body.sku}")
-
-    item_dir.mkdir(parents=True, exist_ok=True)
-    record = {"sku": body.sku, **body.data}
-    atomic_write_json(json_path, record, pretty=_cfg.get("pretty", True))
 
     try:
         state_machine.enqueue_catalog_rebuild(f"create:{body.sku}")

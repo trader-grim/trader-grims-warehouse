@@ -980,6 +980,58 @@ def test_category_groups_requires_auth(client):
 
 
 # ---------------------------------------------------------------------------
+# POST /api/items — create_item_endpoint (todo #1311: routed through the
+# tgw.items.create_item fence instead of duplicating its path-construction
+# logic inline)
+# ---------------------------------------------------------------------------
+
+NEW_SKU = "tgw20260401000000009"
+
+
+def test_create_item_endpoint_writes_via_fence(env, enqueue_calls):
+    client = env["client"]
+    r = client.post(
+        "/api/items", headers=AUTH_HEADERS,
+        json={"sku": NEW_SKU, "data": {"title": "Fence-Created Item"}},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["sku"] == NEW_SKU
+    doc = json.loads((env["itemdata_root"] / NEW_SKU / f"{NEW_SKU}.json").read_text())
+    assert doc["title"] == "Fence-Created Item"
+    assert doc["sku"] == NEW_SKU
+    # catalog_rebuild still enqueued (untouched behavior)
+    assert any(c["kwargs"].get("queue_name") == "catalog_rebuild" for c in enqueue_calls)
+
+
+def test_create_item_endpoint_duplicate_sku_409(env):
+    client = env["client"]
+    r1 = client.post(
+        "/api/items", headers=AUTH_HEADERS,
+        json={"sku": NEW_SKU, "data": {"title": "First"}},
+    )
+    assert r1.status_code == 200
+    r2 = client.post(
+        "/api/items", headers=AUTH_HEADERS,
+        json={"sku": NEW_SKU, "data": {"title": "Second"}},
+    )
+    assert r2.status_code == 409
+    assert NEW_SKU in r2.json()["detail"]
+    # original doc unchanged
+    doc = json.loads((env["itemdata_root"] / NEW_SKU / f"{NEW_SKU}.json").read_text())
+    assert doc["title"] == "First"
+
+
+def test_create_item_endpoint_bad_sku_format_400(client):
+    r = client.post(
+        "/api/items", headers=AUTH_HEADERS,
+        json={"sku": "not-a-sku", "data": {"title": "x"}},
+    )
+    assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
 # PP-BULKEDIT-001 — /form/bulk + /api/bulk/preview + /api/bulk/apply
 # ---------------------------------------------------------------------------
 
