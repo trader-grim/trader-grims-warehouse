@@ -295,6 +295,47 @@ class TestCmdRevise:
 
 
 # ---------------------------------------------------------------------------
+# fence-compliant read/write (#1313/#1316): sku_old fallback + E5 archiving
+# ---------------------------------------------------------------------------
+
+class TestCmdReviseFenceCompliance:
+    def _reset_resolver_cache(self):
+        import tgw.resolver as resolver_mod
+        resolver_mod._sku_old_index = None
+
+    def test_resolves_old_sku_via_sku_old_fallback(self, tmp_path):
+        """A request using a renamed item's OLD sku must resolve via
+        find_current_sku, matching items.get_item()'s established idiom."""
+        self._reset_resolver_cache()
+        cfg = _make_cfg(tmp_path)
+        _make_item(cfg, "tgw002", {"title": "Renamed item", "sku_old": "tgw001"})
+
+        result = cmd_revise(cfg, "tgw001", ["title=New title"])
+
+        assert result["ok"] is True
+        assert result["sku"] == "tgw001"
+        item = _read_item(cfg, "tgw002")
+        assert item["revision_draft"]["delta"] == {"title": "New title"}
+
+    def test_archives_pre_overwrite_content_on_write(self, tmp_path):
+        """atomic_write_json must receive archive_root so invariant E5
+        (archive-before-overwrite) fires on the revision_draft write."""
+        cfg = _make_cfg(tmp_path)
+        archive_root = tmp_path / "archive"
+        cfg["archive_root"] = archive_root
+        _make_item(cfg, "tgw001", {"title": "Old title"})
+
+        # First write: item JSON doesn't exist yet at write-time... it does
+        # (created by _make_item), so this write is itself an overwrite.
+        result = cmd_revise(cfg, "tgw001", ["title=New title"])
+
+        assert result["ok"] is True
+        assert archive_root.exists()
+        archived = list(archive_root.rglob("*.zip"))
+        assert archived, f"expected an archive zip under {archive_root}, found none"
+
+
+# ---------------------------------------------------------------------------
 # detect_drift in context of existing draft
 # ---------------------------------------------------------------------------
 
@@ -711,6 +752,31 @@ class TestLiveApply:
         assert result["ok"] is False
         assert "Inventory API" in result["error"]
         assert puts == []
+
+    def test_archives_pre_overwrite_content_on_live_apply(self, tmp_path):
+        """#1316: the live-apply write must also pass archive_root so
+        invariant E5 fires (item JSON already exists at write-time)."""
+        cfg = _make_cfg(tmp_path)
+        archive_root = tmp_path / "archive"
+        cfg["archive_root"] = archive_root
+        _make_item_with_draft(cfg, "tgw001", delta={"price": 25.0},
+                              mirror=dict(_LIVE_MIRROR))
+        inv, offer = _fresh_bodies()
+
+        def fake_get(cfg_, path, **kw):
+            return dict(inv) if "inventory_item" in path else dict(offer)
+
+        def fake_put(cfg_, path, body, **kw):
+            return {}
+
+        with patch("tgw.apis.ebay.client.ebay_get", side_effect=fake_get), \
+             patch("tgw.apis.ebay.client.ebay_put", side_effect=fake_put):
+            result = cmd_revise_apply(cfg, "tgw001", dry_run=False, by="test")
+
+        assert result["ok"] is True
+        assert archive_root.exists()
+        archived = list(archive_root.rglob("*.zip"))
+        assert archived, f"expected an archive zip under {archive_root}, found none"
 
     def test_no_offer_id_refuses(self, tmp_path):
         mirror = {"listing_id": "1", "api": "inventory"}
