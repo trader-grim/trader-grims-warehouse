@@ -30,6 +30,7 @@ verification.
 | 6 | [catalog-stale.md](catalog-stale.md) | SQLite catalog / search / location tree / thumbnails stale or broken | All list/search surfaces (CLI, Flutter, web forms) show wrong data |
 | 7 | [ollama-inference-stall.md](ollama-inference-stall.md) | Ollama down/slow or advisory lock 8472 stuck | ai_identify, ebay_draft, pm_intake stall — intake pipeline backs up |
 | 8 | [sold-sync-gaps.md](sold-sync-gaps.md) | Sold on eBay but still "available" locally; sold-event loss | Oversell / re-list of sold items; bad velocity data |
+| 9 | [thermal-emergency-response.md](thermal-emergency-response.md) | tgw-prod thermal HOT/THROTTLE/SHUTDOWN | Host may shut down; formal policy for Tigwa-lite's monitor response (not an operator-diagnosis runbook) |
 
 ## Quick triage — "something is wrong, where do I start?"
 

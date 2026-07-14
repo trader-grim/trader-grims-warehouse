@@ -842,6 +842,15 @@ leg 3 (not hardcoded session/pane), dedup/rate-limiting consistent with
 Tigwa's existing chronic-warning suppression, and safe no-op behavior if
 no matching Claude pane exists.
 
+**Formal policy written 2026-07-14**: `reference/runbooks/thermal-emergency-response.md`
+(PP-RUNBOOK-001, todo #1380) turns this decision into Tigwa-lite's literal
+ordered monitor response — notify-if-active/don't-auto-start Claude, verify
+the on-host 88°C service is responding, try to reach Dave, snapshot-babysit
+as the default unattended action, and explicitly drops "maybe open Claude
+on a1131" from automated response (informational-only, Dave's own call).
+Dave: "I will have her upgrade her monitoring appropriately" — that runbook
+is what she upgrades against.
+
 ## Cross-links
 - `plan/PP-AIOPS-001-cat-herding-platform.md` — execution/isolation
   substrate (audit stream, anomaly detection, litterbox, session isolation).
