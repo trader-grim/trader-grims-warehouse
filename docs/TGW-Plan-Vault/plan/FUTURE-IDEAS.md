@@ -16,6 +16,78 @@ review future ideas. Do NOT scan or process this file at routine session start.
 
 ---
 
+## PP-CODEGRAPH-001 — Structural/invariant/trace infrastructure for the plan-as-correctness doctrine
+
+**Filed:** 2026-07-14
+**Source:** Dave's own research (Perplexity/LLM literature pass, filed as inbox note
+`plan-invariant-supporting-infrastructure.md`, citing SemanticForge, GRACG, Athale et al.,
+FalkorDB Code-Graph, DuckDB/MotherDuck "agent brain" pieces, Airbyte context-store docs, MCP
+papers) verifying/grounding a 4-part architecture idea against current repo-level-codegen
+literature.
+
+### The idea
+
+Four supporting layers underneath CLAUDE.md's existing "plan/invariant structure IS the
+determinator of code correctness" doctrine (see CLAUDE.md's Development doctrine section) —
+research argues each layer is standard practice in current repo-level code-generation systems,
+not a novel proposal:
+
+1. **Structural graph layer** — Tree-sitter-built heterogeneous code graph (files/classes/
+   functions/edges like CALLS/IMPORTS/INHERITS), stored in FalkorDB. Analogous to FalkorDB's
+   own "Code-Graph" product and academic KG-for-codegen systems (Athale et al., in Neo4j).
+2. **Relational + SMT invariant layer** — a Postgres-backed catalog of TGW's own invariants
+   (the A1-E7/etc. set already in `reference/invariants.md`), with Z3 as an automated verifier
+   that checks candidate diffs against them and can prune violating code paths before they land.
+3. **Trace layer** — DuckDB store of per-commit execution traces/performance/coverage, keyed by
+   commit hash, queryable by agents before editing code ("agent brain" pattern).
+4. **Unified context store via MCP** — a single MCP server fronting all three (FalkorDB +
+   Postgres/Z3 + DuckDB), exposing small tool calls (sketched: `get_impact_graph`,
+   `get_invariants`, `verify_diff`, `get_trace_history`) so Hermes/Tigwa/Claude agents get one
+   coherent briefing instead of juggling three backends.
+
+### Why deferred, not built now
+
+- **New infra dependencies** (FalkorDB, Z3, DuckDB, Tree-sitter graph tooling) cut directly
+  against [[feedback-flake-minimal-surface]] — TGW's standing bias to keep the Nix flake
+  surface minimal and let iterated-on tools stay userspace until proven. None of these four
+  are proven-needed yet; today's invariant enforcement is markdown (`reference/invariants.md`)
+  + human/agent judgment + `tgw plan check`'s mechanical detectors, and that has been adequate.
+- **Scope-vs-need mismatch**: per [[feedback-improvements-are-missing-pieces]], the standing
+  rule is to scope work as "the smallest connecting piece between organs," not stand up new
+  subsystems speculatively. A full graph-DB + SMT-solver + trace-DB stack is the opposite of
+  smallest-piece — it's infrastructure sized for a scale/complexity TGW hasn't hit yet.
+  Real signal about when it *would* be warranted: the source research's own caveat #6 — cost
+  of building/maintaining the graph, curating invariant coverage, and trace completeness are
+  all real ongoing engineering costs, not one-time setup.
+- **No live pain point yet.** The doctrine section this would support was itself only just
+  written (2026-07-11 retarget session) and is still being exercised manually
+  (tgw-coder/tgw-runner-review packet cycles, `tgw plan check`'s `missing_pp_ref`-style
+  detectors). Worth letting the manual version run long enough to find its own real gaps
+  before building automated infrastructure to close gaps that haven't been demonstrated yet.
+
+### What's worth keeping if this is picked back up
+
+- The MCP tool signature sketch (`get_impact_graph`/`get_invariants`/`verify_diff`/
+  `get_trace_history`) is a reasonable starting shape for whatever unification layer gets built,
+  if/when one is.
+- The Postgres+Z3 invariant-catalog idea maps cleanly onto the *existing*
+  `reference/invariants.md` content — if this is ever promoted, that file is the seed data, not
+  something to re-derive.
+- Full citations/research preserved in git history of this file's source inbox note (now
+  processed) rather than re-fetched.
+
+### Promotion criteria
+
+- [ ] The manual plan/invariant doctrine (packet specs + `tgw plan check` detectors +
+      tgw-runner-review) has been running long enough to surface a concrete, recurring failure
+      mode that automated graph/SMT/trace tooling would actually have caught
+- [ ] PP-CATIONIX-001's permission-architecture endgame (scoped agent authority) is far enough
+      along that agents autonomously querying/writing this kind of infrastructure is a
+      considered risk, not a new one
+- [ ] Dave explicitly re-raises it — this is speculative research, not a request to build
+
+---
+
 ## Generic wake-a-helper-node skill (Wake-on-LAN, reusable)
 
 **Filed:** 2026-07-13
