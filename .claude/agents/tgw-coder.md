@@ -91,6 +91,16 @@ once and check it resolves under your worktree path, not the shared
 checkout. Treat a test run that doesn't do this as invalid live evidence,
 not just risky.
 
+**Also required in a worktree (todo #1374):** `psycopg2`'s compiled
+extension needs `libz.so.1`, which isn't on the default linker path inside
+a Nix-built Python venv — every worktree `pytest`/`python -m tgw...` run
+fails with `ImportError: libz.so.1` unless `LD_LIBRARY_PATH` is also set.
+nix-ld already publishes the right path via `$NIX_LD_LIBRARY_PATH` — no
+flake change needed, just add it alongside the `PYTHONPATH` override:
+```
+LD_LIBRARY_PATH=$NIX_LD_LIBRARY_PATH PYTHONPATH=/opt/TGW/var/worktrees/<id>-<slug>/src:$PYTHONPATH pytest ...
+```
+
 - Mark the todo `in_progress`: `sudo -u tgw tgw todo --update <id> "in progress: tgw-coder"`.
 - Drop a one-paragraph breadcrumb — what you're doing, where you are.
   Required, not optional (CLAUDE.md working rules) — it is what lets a
