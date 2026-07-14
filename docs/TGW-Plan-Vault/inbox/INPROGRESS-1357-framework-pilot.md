@@ -162,3 +162,18 @@ writeup, the three new standing rules, and the capacity ceiling. Check
 `PP-RUNBOOK-001` (new) for the thermal/eBay-ops runbook work still to be
 scoped. Todo #1357 stays open — the pilot continues next session, sized
 to 2-3 concurrent runners per Dave's stated ceiling.
+
+## Late addendum: thermal-alarm-noticing gap found + tmux relay idea filed
+Dave caught a real gap after the main session close: I never noticed
+tonight's thermal alarm live — only reconstructed it from journalctl
+after he mentioned it. Root cause: no ambient/push monitoring exists for
+Claude, unlike Tigwa-lite's actual 5-minute polling. Encoded two fixes in
+`CLAUDE.md`'s Step 0: recheck before every heavy pytest/scan op
+(self-inflicted risk), and periodic rechecks during any session with
+sustained activity (the "notice it live" gap — still a soft/manual
+mitigation, not a real fix). Dave proposed the real fix: Tigwa-lite
+`tmux send-keys` into Claude's active pane on a thermal transition —
+confirmed technically feasible live (same user, same host). Filed as
+todo #1382 under PP-HERMES-EA-001 with four open design questions
+(stable pane discovery, explicit authority grant, dedup, safe no-op).
+Not built — next session's to pick up.
