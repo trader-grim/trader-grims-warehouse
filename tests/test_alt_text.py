@@ -693,3 +693,50 @@ class TestGoogleDirectProvider:
         cmd_alt_text(cfg, "tgw001", provider="google_direct", model="gemini-2.5-flash-lite")
 
         assert len(calls[0]["img_b64_list"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# todo #1372 / PP-COHESION-001 — both alt_text.py atomic_write_json call sites
+# (serial cmd_alt_text + batch _apply_alt_text_result) must pass archive_root
+# (invariant E5, archive-before-overwrite on an existing item), matching the
+# fix already applied to api.py's call sites in #1298/#1299/#1300.
+# ---------------------------------------------------------------------------
+
+
+class TestArchiveRootPassthrough:
+    def test_cmd_alt_text_passes_archive_root_to_atomic_write_json(self, tmp_path, monkeypatch):
+        from unittest.mock import patch
+
+        cfg = _make_cfg(tmp_path)
+        cfg["archive_root"] = tmp_path / "archive"
+        _make_item(cfg, "tgw001")
+        _add_photo(cfg, "tgw001")
+        _patch_vision(monkeypatch)
+
+        with patch("tgw.items.atomic_write_json") as mock_awj:
+            result = cmd_alt_text(cfg, sku="tgw001", model=_DUMMY_MODEL)
+
+        assert result["ok"] is True
+        assert mock_awj.called
+        _, kwargs = mock_awj.call_args
+        assert kwargs.get("archive_root") == cfg["archive_root"]
+
+    def test_apply_alt_text_result_passes_archive_root_to_atomic_write_json(self, tmp_path):
+        from unittest.mock import patch
+
+        from tgw.alt_text import _apply_alt_text_result
+
+        cfg = _make_cfg(tmp_path)
+        cfg["archive_root"] = tmp_path / "archive"
+        _make_item(cfg, "tgw001")
+        photo = _add_photo(cfg, "tgw001")
+
+        with patch("tgw.items.atomic_write_json") as mock_awj:
+            result = _apply_alt_text_result(
+                cfg, "tgw001", "Some alt text", "Some caption.", photo, "deadbeef",
+            )
+
+        assert result["ok"] is True
+        assert mock_awj.called
+        _, kwargs = mock_awj.call_args
+        assert kwargs.get("archive_root") == cfg["archive_root"]
