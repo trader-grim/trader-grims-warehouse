@@ -94,7 +94,24 @@ def ensure_copy(src: Path, dst: Path, overwrite: bool = False, write: bool = Fal
     if not write:
         return 'would_copy'
     dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dst)
+    # todo #1307 / audit#COHESION-2026-07: previously shutil.copy2(src, dst)
+    # wrote straight to the live destination path — a reader (thumbnail_gen,
+    # ebay_upload, catalog_rebuild) could observe a partial/corrupt photo if
+    # the process was interrupted mid-copy. Mirror the same temp-file +
+    # os.replace atomicity items.atomic_write_json()/context.py use for JSON
+    # and symlinks (invariants.md A1/A8) — write to a temp file in the same
+    # destination directory (guarantees os.replace stays on one filesystem),
+    # then atomically rename onto the final path.
+    tmp_dst = dst.with_name(dst.name + f'.tmp{os.getpid()}')
+    try:
+        shutil.copy2(src, tmp_dst)
+        os.replace(tmp_dst, dst)
+    except BaseException:
+        try:
+            tmp_dst.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
     return 'copied'
 
 
