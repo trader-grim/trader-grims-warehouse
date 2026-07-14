@@ -124,6 +124,7 @@ class EbaySyncWorker(QueueWorker):
                     errs = exc.response.json().get('errors', [])
                     eids = {int(e.get('errorId', 0)) for e in errs}
                 except Exception:
+                    errs = []
                     eids = set()
                 if 25707 in eids:
                     consecutive = self._record_fallback_state(used_fallback=True)
@@ -155,6 +156,26 @@ class EbaySyncWorker(QueueWorker):
                     offers = self._fetch_offers_by_local_skus()
                     self._mark_fallback_executed()
                 else:
+                    # Unrecognized 400 — not the known 25707 orphaned-SKU class.
+                    # fetch_all_offers() already logs the raw eBay error IDs/messages
+                    # before re-raising when it can parse the response body, but log
+                    # again here (with the eids this handler independently parsed) so
+                    # triage of "yet another eBay error ID we don't handle" never
+                    # depends solely on that inner log line surviving unbroken up the
+                    # call chain (todo #1397/PP-DEADLETTER-001).
+                    if errs:
+                        for e in errs:
+                            log.error(
+                                "ebay_sync: unrecognized eBay 400 on bulk offer list — "
+                                "errorId=%s message=%s",
+                                e.get('errorId'), e.get('message', ''),
+                            )
+                    else:
+                        log.error(
+                            "ebay_sync: unrecognized eBay 400 on bulk offer list — "
+                            "unparseable/empty error body: %s",
+                            exc.response.text[:300] if exc.response is not None else '',
+                        )
                     raise
             else:
                 raise
