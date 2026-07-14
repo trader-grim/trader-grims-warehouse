@@ -119,9 +119,9 @@ _PENDING_OFFERS_TTL = 300
 def _get_listing_index() -> Dict[str, Path]:
     global _listing_index, _listing_index_built_at
     if time.time() - _listing_index_built_at > _LISTING_INDEX_TTL:
-        from .workers.ebay_legacy_sync import _build_listing_index
+        from .ebay.pull import build_listing_index
 
-        _listing_index = _build_listing_index(_cfg["itemdata_root"])
+        _listing_index = build_listing_index(_cfg["itemdata_root"])
         _listing_index_built_at = time.time()
         log.info("ebay_webhook: listing index rebuilt (%d entries)", len(_listing_index))
     return _listing_index
@@ -456,11 +456,17 @@ def list_items(
         clauses.append("location = ?")
         params.append(location)
     if status_filter == "__eligible__":
-        # Eligible for listing (Dave, s42): new / In Stock, and not currently on
-        # eBay (no Active listing, no PUBLISHED offer). Ended listings qualify —
-        # they can be relisted. Sold/disposed/archived excluded by the status
-        # allow-list. This is the feed for one-at-a-time listing runs.
-        clauses.append("LOWER(COALESCE(status, '')) IN ('new', 'in stock')")
+        # Eligible for listing (Dave, s42; blank-status fix #1377): new /
+        # In Stock, and not currently on eBay (no Active listing, no
+        # PUBLISHED offer). Ended listings qualify — they can be relisted.
+        # Sold/disposed/archived excluded by the status allow-list. Items
+        # with no status field at all (never stamped by the intake
+        # pipeline — a real, common gap, not a data error) count as
+        # eligible too, matching how the default "All" view already
+        # treats blank status as active/non-terminal (see the
+        # `if not status_filter` clause above). This is the feed for
+        # one-at-a-time listing runs.
+        clauses.append("(status IS NULL OR status = '' OR LOWER(status) IN ('new', 'in stock'))")
         clauses.append("(json_extract(data, '$.ebay_listing.status') IS NULL"
                        " OR json_extract(data, '$.ebay_listing.status') NOT IN ('Active', 'PUBLISHED'))")
         clauses.append("(json_extract(data, '$.ebay_offer.status') IS NULL"
@@ -9327,7 +9333,7 @@ async def ebay_notification_webhook(request: Request) -> Dict[str, Any]:
     Always returns {"ack": "Success"} to prevent eBay retry storms.
     """
     from .apis.ebay.notifications import parse_sold_notification, verify_notification_signature
-    from .workers.ebay_legacy_sync import _mark_item_sold
+    from .ebay.pull import mark_item_sold as _mark_item_sold
 
     body = await request.body()
     log.debug("ebay_webhook: received %d bytes", len(body))

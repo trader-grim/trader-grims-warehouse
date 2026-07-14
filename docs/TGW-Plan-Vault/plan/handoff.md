@@ -378,3 +378,62 @@ review/git process, not autonomous execution (see
 - **Housekeeping note**: this file is well over its stated ~150-line cap
   (325+ lines) — due for a prune/archive pass per its own rule; not done
   this session, flagging rather than silently ignoring.
+
+## Session 2026-07-13, later (resumed after rate-limit — Eligible filter → status/#STATUS incident → PP-POSTGRES-001)
+
+Resumed a rate-limited prior session: closed out the interrupted
+PP-COHESION-001 follow-up batch (#1371/#1372/#1373 — merged, one real
+conflict resolved in `alt_text.py`, tested, closed) and delegated the
+priority-emergency-channel work (#1346) to Tigwa (her infrastructure,
+Claude's a1131 key doesn't authenticate there).
+
+- **#1377 DONE**: web UI Eligible filter (`http_server.py` `__eligible__`)
+  silently excluded any item with blank `status` — fixed, tested,
+  live-verified (1541→2351 eligible items), deployed.
+- **Root-cause chain, #1376 (logged, not fixed)**: diffing
+  `ItemArchive/<sku>.zip` snapshot pairs + a stray
+  `data-scrub-1053-report.json` proved `scripts/data_scrub_legacy_ebay_fields.py
+  --apply` stripped the legacy `#STATUS` key from 20,415 items on
+  2026-07-03 22:21 with no promotion-first guard. Dave then corrected the
+  read: `status` (lowercase) is the real canonical field; `#STATUS` was
+  his own manual convenience alias, "sometimes not updated." Real bug:
+  `items.statusupdate()`/`verifiedupdate()`/`bulk_edit` all write to
+  `#STATUS`, never `status` — see [[reference-status-vs-hashtag-status]].
+  Dave: "this is a big fix" — logged under PP-DATAINTEGRITY-001, explicitly
+  not executed pending his scoping. See
+  [[feedback-dont-stop-at-first-plausible-fix]] for how this was found
+  (Dave pushed back twice on a "done" surface fix before the real incident
+  surfaced).
+- **#1378 DONE**: while checking "do known-solds have operational status"
+  (answer: yes, zero real mismatches, one false positive), found the eBay
+  sold-webhook handler has 500'd on every real call since 2026-06-04 (two
+  imports of functions that don't exist under those names in
+  `tgw.workers.ebay_legacy_sync` — real names live in `tgw.ebay.pull`).
+  Fixed both imports, added an end-to-end regression test, deployed.
+- **#1375 logged**: Android/Tasker emergency annunciator proposal
+  (Dave+Tigwa's own prior design) filed into PP-HARDWARE-001, cross-linked
+  to #1346 (same producer script, needs coordination).
+- **PP-POSTGRES-001 opened (design doc only, #1379)**: Dave, prompted by
+  the incident chain plus a recurring SSD thermal problem: "we have been
+  futzing around with json for too long. Time to grow up." Confirms a
+  hybrid design from Dave's own separate Perplexity research: Postgres
+  becomes item source-of-truth (identity/status/location/workflow,
+  jsonb for evolving content), photos stay on disk untouched, JSON becomes
+  a generated export artifact. Explicit role split (Dave's words): "once
+  you have a message bus like that use it. It just isn't our state
+  master" — NATS JetStream (`ITEMDATA_MUTATIONS`, already partially built
+  under PP-AIOPS-001 Phase 1 but wired to the wrong door) carries the
+  durable change log; Postgres holds current truth. Flagged an unresolved
+  premise conflict with `PP-CATALOG-INCR-001` (assumes JSON stays truth)
+  for Dave to reconcile. See [[project-status-postgres-migration]]. Full
+  design: `pp/PP-POSTGRES-001.md`. Nothing built — needs a dedicated
+  planning pass before any code.
+- **Still open**: #1370 (flaky quota-state test isolation — worktree
+  exists, no code written, own breadcrumb still active). Full test suite
+  green throughout (2176 passed) except this known pre-existing failure.
+- **Risk worth flagging**: the `#STATUS`→`status` write-path bug (#1376)
+  means every `tgw update-verified` / bulk-status-edit call since this
+  pattern started has been silently landing on the wrong field. Any
+  operator workflow relying on "I set status via the CLI, it should show
+  up" has not been working as expected — worth a heads-up before anyone
+  leans on that path again.

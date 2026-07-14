@@ -42,6 +42,27 @@ not yet broken into buildable steps.
 - GPU upgrade (referenced from `PP-AIOPS-001`'s Phase 5 and
   `PROPOSED-PLAN-2026-06-19.md`) — inference performance, timing is
   operator call, not yet scoped.
+- **Android/Tasker emergency annunciator** (Dave + Tigwa, planned together
+  2026-07-13, proposal: `inbox/TIGWA-PROPOSAL-android-tasker-emergency-annunciator-20260713.md`,
+  filed by Claude same session) — dedicate one of Dave's existing
+  Android/Tasker devices as a local, battery-backed, LAN-only human
+  alarm+ACK panel for tgw-prod/Tigwa-lite incidents. V1: a1131's
+  independent watchdog (see `#1346` below) POSTs a local HTTP alert to a
+  Tasker listener → siren/TTS/full-screen/vibrate until Dave taps
+  acknowledge → ACK posts back to a1131. No Telegram/cloud/NATS/router/flake
+  change required for v1; explicitly a human-alarm appliance, not the
+  canonical event bus or business-state authority. V2/V3 (local broker
+  bridge, full emergency fabric) are follow-on, not required now.
+  **Coordination note (Claude, 2026-07-13):** this proposal's v1 producer
+  is the same a1131 watchdog script (`tgw_prod_reachability_watch.py`)
+  that `#1346`/`PP-HERMES-EA-001` just delegated to Tigwa to formalize
+  (Telegram delivery fix). Both pieces of work should land as one
+  coherent alerting fabric on that script, not built independently —
+  flagged to Tigwa via the inbox request for #1346.
+  Open decisions (Dave's call, not yet made): which device, which Tasker
+  plugin path, physical placement, alarm/repeat/ack behavior, SMS/call
+  fallback, VLAN placement. Acceptance: internet disconnected, LAN Wi-Fi
+  up, alert still produces local audible alarm and a full ACK round-trip.
 
 ## Open — genuinely unresolved, flag for a dedicated pass, not solved here
 

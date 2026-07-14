@@ -481,6 +481,8 @@ def test_eligible_filter_status_and_ebay_state(tmp_path, monkeypatch):
     sku_instock_ended_relistable = "tgw20260201000000004"
     sku_sold = "tgw20260201000000005"
     sku_staged_not_eligible_status = "tgw20260201000000006"
+    sku_blank_never_listed = "tgw20260201000000007"
+    sku_blank_active = "tgw20260201000000008"
 
     _make_catalog_with_data(catalog_path, [
         (sku_new_never_listed, "A", "A1", "new", 9.99, 1, "", "{}"),
@@ -492,6 +494,14 @@ def test_eligible_filter_status_and_ebay_state(tmp_path, monkeypatch):
          json.dumps({"ebay_listing": {"status": "Ended"}})),
         (sku_sold, "E", "A5", "Sold", 9.99, 1, "", "{}"),
         (sku_staged_not_eligible_status, "F", "A6", "Staged", 9.99, 1, "", "{}"),
+        # todo #1377: items the intake pipeline never stamped with a status
+        # at all (blank/NULL) are a real, common case — not a data error —
+        # and must count as eligible when not listed/published, matching
+        # how the default "All" view already treats blank status as
+        # active/non-terminal.
+        (sku_blank_never_listed, "G", "A7", "", 9.99, 1, "", "{}"),
+        (sku_blank_active, "H", "A8", "", 9.99, 1, "",
+         json.dumps({"ebay_listing": {"status": "Active"}})),
     ])
 
     cfg = {
@@ -523,6 +533,8 @@ def test_eligible_filter_status_and_ebay_state(tmp_path, monkeypatch):
     assert sku_instock_published_offer not in skus  # PUBLISHED offer blocks it
     assert sku_sold not in skus                  # status excluded outright
     assert sku_staged_not_eligible_status not in skus  # not new/In Stock
+    assert sku_blank_never_listed in skus        # blank status = never stamped, still eligible (#1377)
+    assert sku_blank_active not in skus          # blank status but already Active still excluded
 
 
 # ---------------------------------------------------------------------------
@@ -1145,6 +1157,67 @@ def test_bulk_action_mark_sold_reads_item_doc_exactly_once(env, enqueue_calls, m
                     json={"skus": [SKU_A], "action": "mark_sold"})
     assert r.status_code == 200
     assert len(calls) == 1
+
+
+def test_ebay_sold_webhook_marks_item_sold(env, enqueue_calls, monkeypatch):
+    """todo #1378: the sold-notification webhook imported two functions that
+    don't exist in tgw.workers.ebay_legacy_sync (_mark_item_sold,
+    _build_listing_index -- both live in tgw.ebay.pull under different
+    names) -- every real eBay sold webhook call has 500'd since 2026-06-04
+    (commit 429ebc5), before ever reaching the try/except. This drives the
+    real endpoint end-to-end (signature check stubbed, everything else
+    real) so an import regression fails loudly instead of silently."""
+    import tgw.apis.ebay.notifications as notifications
+    import tgw.ebay.pull as pull
+    from tgw.http_server import _listing_index_built_at_reset
+
+    monkeypatch.setattr(notifications, "verify_notification_signature", lambda body, cfg: True)
+    _listing_index_built_at_reset()
+
+    mark_calls = []
+
+    def _fake_mark_item_sold(json_path, **kwargs):
+        mark_calls.append((json_path, kwargs))
+        return True
+
+    monkeypatch.setattr(pull, "mark_item_sold", _fake_mark_item_sold)
+
+    doc_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+    doc = json.loads(doc_path.read_text())
+    doc["draft_listing"] = {"quantity": 1}
+    doc["ebay_listing"] = {"listing_id": "998877"}
+    doc_path.write_text(json.dumps(doc))
+
+    ns = "urn:ebay:apis:eBLBaseComponents"
+    xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <GetItemTransactionsResponse xmlns="{ns}">
+      <Timestamp>2026-07-13T00:00:00.000Z</Timestamp>
+      <TransactionArray><Transaction>
+        <Item><ItemID>998877</ItemID></Item>
+        <TransactionPrice>9.99</TransactionPrice>
+        <QuantityPurchased>1</QuantityPurchased>
+        <CreatedDate>2026-07-13T00:00:00.000Z</CreatedDate>
+        <Buyer><UserID>someone</UserID></Buyer>
+        <TransactionID>tx-1</TransactionID>
+      </Transaction></TransactionArray>
+      <OrderID>order-1</OrderID>
+    </GetItemTransactionsResponse>
+  </soap:Body>
+</soap:Envelope>"""
+
+    client = env["client"]
+    r = client.post("/webhooks/ebay/notification", headers=AUTH_HEADERS,
+                    content=xml.encode("utf-8"))
+    assert r.status_code == 200
+    assert r.json() == {"ack": "Success"}
+
+    assert len(mark_calls) == 1
+    called_path, kwargs = mark_calls[0]
+    assert called_path == doc_path
+    assert kwargs["order_id"] == "order-1"
+    assert kwargs["quantity"] == 1
 
 
 def test_bulk_action_delete_writes_status(env, enqueue_calls):

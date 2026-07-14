@@ -788,6 +788,61 @@ Phase 1; prevention's structural endgame still depends on PP-ANNEX-001.
 Full design: `docs/ai-plans/photo-integrity-mitigation.md`; PP index:
 `pp/PP-DATAINTEGRITY-001.md`.
 
+**New leg 2026-07-13: `status` vs `#STATUS` write-path bug (todo #1377).**
+Found while fixing the web UI's Eligible filter (it was silently excluding
+items with blank status). Root-caused via ItemArchive snapshot diffs +
+`/opt/TGW/var/log/data-scrub-1053-report.json`: on 2026-07-03 22:21,
+`scripts/data_scrub_legacy_ebay_fields.py --apply` stripped the legacy
+`#STATUS` key from 20,415 items, treating it like the script's other
+genuinely-obsolete Magento artifact fields — but unlike its own sibling
+guard for legacy category fields (which correctly refuses to delete until
+the value is confirmed promoted to the canonical field first, #1209/#1252),
+`#STATUS` had no equivalent protection. **Dave, 2026-07-13: `status`
+(lowercase) was always the real canonical field — `#STATUS` was a manual
+convenience alias (the `#` sorted it to the top of the JSON for hand
+inspection) that was "sometimes not updated."** That inverts the obvious
+read of the incident: the Jul 3 strip wasn't the core bug (removing a
+stale convenience key is arguably correct), the core bug is that
+`items.statusupdate()`, `items.verifiedupdate()`, and `bulk_edit`'s status
+field (`BULK_FIELD_KEYS['status'] = '#STATUS'`) have **always written to
+the wrong key** — every operator status update via `tgw update-verified`
+or the bulk editor has been silently landing on the stale/legacy field,
+never the canonical one. Live scope: 5,118 items currently have neither
+key set (810 of those genuinely unlisted/unsold, the rest already resolved
+via `ebay_listing`/`ebay_offer`). Dave: "this is a big fix" — logged only,
+not yet scoped/executed. Needs: (1) write-path fix (point status writes at
+`status`, stop writing `#STATUS`), (2) `data_scrub_legacy_ebay_fields.py`
+either drops `#STATUS` from `FIELDS_TO_CHECK` entirely or gets the same
+promotion-first guard as the category fields, (3) `items.create_item()`
+still has no default status for intake paths that omit it, (4) real
+reconciliation pass across all items with any status signal once Dave has
+scoped the "fun inventory" — not attempted yet.
+
+## PP-POSTGRES-001 — PostgreSQL item source-of-truth migration — NEW 2026-07-13
+**PROPOSAL — design doc only, nothing built.** Dave, same session as the
+#1376/#1377/#1378 incident chain above: "we have been futzing around with
+json for too long. Time to grow up. Plus the ssd overheat today." Confirms
+a hybrid design Dave separately worked out with Perplexity research
+(`inbox/RESEARCH-55K-ITEMDATA-POSTGRES-SOURCE-OF-TRUTH.md`): **PostgreSQL
+becomes the source of truth for item identity/status/location/workflow
+state** (normalized columns for hot fields, `jsonb` for evolving content),
+**photos stay untouched on disk** (Dave: "I really don't like my photos in
+a database, and they aren't hit as hard as the data"), **JSON becomes a
+generated export/archive artifact**, not the primary store — a real
+inversion of today's architecture. Role split, Dave explicit: "once you
+have a message bus like that use it. It just isn't our state master" —
+NATS JetStream (already partially built, `ITEMDATA_MUTATIONS` stream +
+`publish_mutation()`, PP-AIOPS-001 Phase 1) carries the durable
+change-event log; Postgres holds current queryable truth. The JetStream
+piece is wired to the wrong door today (only `items.py`'s narrow CLI write
+path, not `http_server.py`'s real fence) — recommended as the first,
+small, independent packet regardless of the larger migration timeline.
+Needs reconciliation with [[PP-CATALOG-INCR-001]] (opened 2026-07-03,
+explicitly assumes JSON stays truth — premise conflict, not yet resolved).
+Reuses the already-running `state_machine` Postgres instance (todo #1351).
+Full design + open questions (migration path, same-vs-sibling DB, field
+normalization, JSON export cadence, rollback safety): `pp/PP-POSTGRES-001.md`.
+
 ## PP-NIXOS-001 — NixOS migration (CatioNIX)
 Canonical flake `~/tgw-flake` working; main-repo merge + workflow rules pending; a1131
 no-GitHub-access (todo #1082); no process supervision for agent processes (design
