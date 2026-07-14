@@ -86,6 +86,17 @@ class TestPass1:
         assert result["renamed"] == 0
         assert result["skipped"] == 1
 
+    def test_overwrite_is_archived(self, item_root, tmp_path):
+        # invariant E5: a real overwrite of an existing item JSON must be
+        # archived to archive_root before the write proceeds (todo #1315).
+        archive_root = tmp_path / "archive"
+        _write_item(item_root, "tgw001", {"sku": "tgw001", "#VERIFIED": "yes"})
+        result = data_scrub_pass1(
+            {"itemdata_root": item_root, "archive_root": archive_root}, dry_run=False
+        )
+        assert result["renamed"] == 1
+        assert (archive_root / "tgw001.zip").exists()
+
 
 # ---------------------------------------------------------------------------
 # data_scrub_size_class_backfill (pass 2)
@@ -163,6 +174,16 @@ class TestPass2:
         assert "sample_would_update" in result
         assert result["sample_would_update"][0]["sku"] == "tgw001"
 
+    def test_overwrite_is_archived(self, item_root, tmp_path):
+        # invariant E5: a real overwrite of an existing item JSON must be
+        # archived to archive_root before the write proceeds (todo #1315).
+        archive_root = tmp_path / "archive"
+        _write_item(item_root, "tgw001", {"sku": "tgw001", "ebay_category_id": "261186"})
+        cfg = dict(self._cfg(item_root), archive_root=archive_root)
+        result = data_scrub_size_class_backfill(cfg, dry_run=False)
+        assert result["updated"] == 1
+        assert (archive_root / "tgw001.zip").exists()
+
     def test_batch_of_mixed_items(self, item_root):
         # 2 updatable, 1 already-set, 1 unmappable
         _write_item(item_root, "tgw001", {"sku": "tgw001", "ebay_category_id": "261186"})
@@ -226,3 +247,14 @@ class TestPass3:
         assert "sample_would_repair" in result
         assert result["sample_would_repair"][0]["sku"] == "tgw001"
         assert result["sample_would_repair"][0]["old_qty"] == -1
+
+    def test_overwrite_is_archived(self, item_root, tmp_path):
+        # invariant E5: a real overwrite of an existing item JSON must be
+        # archived to archive_root before the write proceeds (todo #1315).
+        archive_root = tmp_path / "archive"
+        _write_item(item_root, "tgw001", {"sku": "tgw001", "qty": -5})
+        result = data_scrub_qty_repair(
+            {"itemdata_root": item_root, "archive_root": archive_root}, dry_run=False
+        )
+        assert result["repaired"] == 1
+        assert (archive_root / "tgw001.zip").exists()
