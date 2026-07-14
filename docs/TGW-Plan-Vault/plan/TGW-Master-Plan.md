@@ -935,8 +935,65 @@ surprise from item 5 above), `LLM-Providers-Quotas.md` + a skim of
 call mid-pagination — ties to the #1250 resubmission-storm lesson already
 standing in this codebase).
 
-**Status:** not started. Needs a todo filed with `--pp PP-RUNBOOK-001`
-before any runbook file gets touched (going-forward tagging rule).
+**Status:** thermal half DONE 2026-07-14 — `reference/runbooks/thermal-emergency-response.md`
+written (formal Tigwa-lite monitor policy, ties into PP-HERMES-EA-001's
+leg-3 authority decision). eBay-ops runbook half and the remaining 17-item
+gap-report triage still not started. Needs a todo filed with
+`--pp PP-RUNBOOK-001` before any further runbook file gets touched
+(going-forward tagging rule).
+
+## PP-CODEGRAPH-001 — code graph + invariant/trace infrastructure (agents see design convergences) — NEW 2026-07-14
+
+**Origin:** filed as a deferred FUTURE-IDEAS.md entry 2026-07-14 morning
+after Dave's directed Perplexity research (not blind — grounded against
+this actual repo) proposed a 4-layer architecture: Tree-sitter code graph
+(FalkorDB), Postgres+Z3 invariant catalog, DuckDB execution-trace store,
+unified MCP layer. **Promoted to active PP same day** once Dave confirmed
+he's building it — not deferred.
+
+**The problem it solves (Dave's own framing, not a borrowed pattern):**
+coders and planners lack insight into the interconnections of the design,
+so cross-cutting "convergences" get missed until a manual audit sweep
+finds them — and even then the finding doesn't get resolved into working
+process, just logged. Real, already-paid cost: the fence-bypass pattern
+(direct `ItemData/` writes skipping the tgw-api fence) was found
+independently across 9+ separate files over multiple PP-COHESION-001 audit
+sessions instead of in one pass; `status`/`#STATUS` write-path divergence
+went undetected until forensic archive-diffing; NATS/JetStream built under
+PP-AIOPS-001 wired to the wrong door relative to PP-POSTGRES-001's later
+needs; PP-CATALOG-INCR-001 vs PP-POSTGRES-001 still has an unreconciled
+premise conflict sitting in this plan.
+
+**Decision (Dave, 2026-07-14): build the full stack, not a cut-down Phase
+1.** An earlier Claude-authored planning pass
+(`docs/ai-plans/pp-codegraph-001.md`) had proposed deferring Z3/DuckDB and
+substituting Postgres-on-tgw-prod for FalkorDB, reasoning from "keep the
+flake surface minimal" and "no demonstrated need yet." Dave corrected
+this twice: the research was grounded in the actual repo, not generic
+literature (evidence for the design was already stronger than that
+Postgres-first framing credited), and the standing rule going forward is
+more care before scoping down what he's already reasoned toward — see
+memory `feedback-take-care-before-discarding-ideas`.
+
+**Host: a1131, not tgw-prod.** Full stack (FalkorDB, Z3, DuckDB, Tree-sitter,
+a new unified MCP server) hosted on a1131 — already Tigwa's office and
+TGW's thermal-relief compute, client-shaped (no production traffic
+dependent on it), 4 cores/19GB RAM/169GB free disk confirmed live
+2026-07-14. This placement is what actually resolves the flake-minimal-
+surface tension from the earlier draft — new infrastructure on a
+non-production, already-less-minimal host doesn't compete with tgw-prod's
+constraint the way it would have on tgw-prod itself.
+
+**Status:** infrastructure-establishment planning doc written 2026-07-14 —
+`docs/ai-plans/pp-codegraph-001-a1131-infrastructure.md` (components,
+packaging options, data-flow, access model, resource budget, open
+questions). **Dave is bringing additional research before the actual build
+session** — nothing installed, no code written yet. Open questions
+flagged for that session: FalkorDB packaging (flake vs. userspace),
+invariant-catalog storage engine (DuckDB vs. a1131-local Postgres),
+cross-host MCP access mechanism (tgw-prod packets need to reach a1131's
+graph), repo-sync mechanism (a1131's checkout is known-stale, #1082), and
+parse scope (`src/tgw/` only vs. also `tools/`/`scripts/`).
 
 ## PP-NIXOS-001 — NixOS migration (CatioNIX)
 Canonical flake `~/tgw-flake` working; main-repo merge + workflow rules pending; a1131
