@@ -84,7 +84,20 @@ cat /opt/TGW/var/run/thermal.status 2>/dev/null || echo "NORMAL|0|0"
 
 If the status is HOT, THROTTLE, or SHUTDOWN: **stop all disk-intensive operations** (no recursive grep/find on ItemData/ItemCatalog). At THROTTLE the watchdog has already stopped workers — do not restart them. At HOT, slow down and avoid large scans.
 
-**This is not a once-per-session check.** Re-run it immediately before
+**There is no push/ambient monitoring for Claude — an alarm that fires
+from something other than your own action will go unnoticed unless you
+check.** Unlike Tigwa-lite's actual 5-minute polling cron, a Claude
+session only knows `thermal.status` at the instant it runs the check
+command. Confirmed failure mode 2026-07-13: a real thermal
+CRITICAL→shutdown→multiple-reboot incident happened mid-session and was
+only discovered afterward when Dave mentioned it — reconstructed from
+`journalctl`, not noticed live. **Re-check `thermal.status` periodically
+during any session with sustained activity** (a natural cadence: every
+several tool-call rounds, or whenever picking up a new task within the
+same session), not just at Step 0 — this is the only substitute for
+push-based awareness available.
+
+**This is not a once-per-session check, for self-inflicted risk either.** Re-run it immediately before
 every full `pytest -q` suite run (2000+ tests, sustained heavy I/O) and
 before any other large scan/index/reindex operation, even if it was
 NORMAL a few minutes ago — not just once at Step 0. **Session that already
