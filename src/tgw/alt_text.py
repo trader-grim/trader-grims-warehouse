@@ -26,12 +26,15 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import tgw.logging as tgw_logging
+from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.apis.google_genai import (
     BATCH_IMAGES_PER_TASK,
     build_alt_text_task,
@@ -112,6 +115,29 @@ def _history_sku_dir(cfg: Dict[str, Any], sku: str) -> Path:
     """Return /opt/TGW/data/history/ItemData/<sku>/ derived from itemdata_root."""
     itemdata_root = Path(cfg["itemdata_root"])
     return itemdata_root.parent / "history" / "ItemData" / sku
+
+
+def _history_root_reachable(cfg: Dict[str, Any]) -> bool:
+    """Return True if the configured history root actually resolves to something.
+
+    ``itemdata_root.parent / "history"`` is normally a symlink onto the
+    MasterArchive cold-archive drive (`/media/tgw/MasterArchive/history`).
+    When that drive isn't mounted, the symlink is broken. A broken symlink's
+    ``mkdir(exist_ok=True)`` still raises ``FileExistsError`` (pathlib only
+    suppresses that for a target where ``is_dir()`` is True, and a dangling
+    symlink's ``is_dir()`` is False) — so we must detect "resolves to
+    nothing" *before* attempting mkdir, not rely on exist_ok. Resolving with
+    ``os.path.realpath`` and checking existence of the resolved path handles
+    a broken symlink correctly (unlike checking `.exists()` on the symlink's
+    parents, which doesn't distinguish "creatable" from "target vanished").
+    """
+    itemdata_root = Path(cfg["itemdata_root"])
+    history_root = itemdata_root.parent / "history"
+    if not history_root.is_symlink():
+        # Not a symlink at all (e.g. a real local dir) — normal existence
+        # check is safe here.
+        return history_root.parent.exists()
+    return os.path.exists(os.path.realpath(history_root))
 
 
 def repair_renamed_originals(item_data_root: Path) -> list[str]:
@@ -292,10 +318,48 @@ def cmd_alt_text(
     if not alt_text:
         return {"ok": False, "error": "model returned empty alt_text"}
 
-    # Archive original to history before creating companion
+    # Archive original to history before creating companion.
+    #
+    # Pre-flight (todo #1407): the history root is normally a symlink onto
+    # the MasterArchive cold-archive drive. When that drive isn't mounted,
+    # the symlink is broken and mkdir(exist_ok=True) still raises
+    # FileExistsError — don't crash the job over a supplementary archive
+    # copy (Prime Directive 1: the ORIGINAL photo stays untouched in
+    # ItemData/<sku>/, only the cold-archive copy is deferred). Skip the
+    # archive step and persist a durable C11 finding instead.
     history_sku_dir = _history_sku_dir(cfg, sku)
     history_path = history_sku_dir / img_path.name
-    if not history_path.exists():
+    archive_finding: Optional[Dict[str, Any]] = None
+    if not _history_root_reachable(cfg):
+        archived = False
+        history_root = Path(cfg["itemdata_root"]).parent / "history"
+        resolved = os.path.realpath(history_root)
+        # NOTE (todo #1407): the fence PATCH for this finding is issued
+        # *after* the atomic_write_json call below, not here — cmd_alt_text
+        # loaded `item` into memory at the top of this function and does
+        # its own direct atomic_write_json of the whole dict at the end
+        # (pre-existing behavior, out of scope to change here). A
+        # fence_patch_item() call made here, before that later direct
+        # write, would get silently clobbered when the stale in-memory
+        # `item` (which never got the finding field) is written back out.
+        # Confirmed live during Stage A testing on 2026-07-14
+        # (tgw202605052242107): the finding never showed up on disk until
+        # the ordering was fixed.
+        archive_finding = {
+            'code':   'archive_target_unmounted',
+            'detail': (f"history archive target unreachable: "
+                       f"{history_root} resolves to {resolved}, which "
+                       f"does not exist — cold-archive drive is likely "
+                       f"unmounted. alt_text/seo_caption were still "
+                       f"generated normally; the archive copy is "
+                       f"deferred until the drive is mounted and this "
+                       f"item is reprocessed."),
+            'ts':     datetime.now(timezone.utc).isoformat(),
+            'source': 'alt_text',
+        }
+        tgw_logging.log_event('alt_text_archive_target_unmounted', sku=sku,
+                               history_root=str(history_root))
+    elif not history_path.exists():
         history_sku_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(img_path, history_path)
         archived = True
@@ -335,6 +399,15 @@ def cmd_alt_text(
         item["alt_text_results"] = alt_text_results
 
     atomic_write_json(json_path, item, pretty=cfg.get("pretty", True), archive_root=cfg.get("archive_root"))
+
+    # Persist the C11 durable finding via the fence *after* the direct write
+    # above, so it isn't clobbered by it (see NOTE where archive_finding is
+    # built).
+    if archive_finding is not None:
+        try:
+            fence_patch_item(cfg, sku, {'pipeline_error': archive_finding})
+        except Exception as exc:
+            tgw_logging.log_event('alt_text_finding_write_failed', sku=sku, error=str(exc))
 
     return {
         "ok": True,
