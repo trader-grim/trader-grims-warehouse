@@ -35,6 +35,7 @@ from .catalog import (
 from .config import DEFAULT_CONFIG, load_config
 from .context import clear_context, get_context, set_context
 from .ebay.draft_specifics import get_ebay_aspects as _get_ebay_aspects
+from .ebay.inventory_diff import diff_ebay_draft_to_inventory as _diff_ebay_to_inventory
 from .health import check_all
 from .inventory_record import get_inventory_fields as _get_inventory_fields
 from .items import (
@@ -1417,6 +1418,43 @@ def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any],
             v("field_set_drift", "warning",
               f"item_attributes (Set A) and draft_listing.item_specifics "
               f"(Set B) disagree on live item, key(s): {', '.join(_c12_drift)}")
+
+    # invariant C13 (todo #1417): a real, discoverable eBay->Inventory
+    # diff (tgw.ebay.inventory_diff.diff_ebay_draft_to_inventory) that has
+    # sat unresolved for a long time is stale unreviewed drift — make it
+    # queryable via catalog-verify rather than only a manual `curl` of the
+    # diff endpoint. Unlike field_set_drift above, this is NOT gated on a
+    # live ebay_offer.offer_id — a pending/never-published draft's
+    # eBay-discovered value can sit unreviewed just as long as a live
+    # item's, and Dave's design intent for this packet ("gated automatic
+    # update... operator can uncheck or skip") is about routine review
+    # cadence, not just live-listing correctness.
+    # 30 days is the packet spec's proposed default (spec point 7);
+    # flagged here as a default worth confirming with Dave, not silently
+    # picked as settled. Only flags a key when `detected_at` is known
+    # (Prime Directive 1: a legacy item with no history/timestamp is not
+    # claimed to be "30+ days stale" when that age is actually unknown).
+    _C13_STALE_DAYS = 30
+    _c13_diffs = _diff_ebay_to_inventory(doc)
+    if _c13_diffs:
+        _now = datetime.now(timezone.utc)
+        _c13_stale_keys = []
+        for _fd in _c13_diffs:
+            _detected = _fd.get("detected_at")
+            if not _detected:
+                continue
+            try:
+                _detected_dt = datetime.fromisoformat(str(_detected).replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if (_now - _detected_dt).days >= _C13_STALE_DAYS:
+                _c13_stale_keys.append(_fd["key"])
+        if _c13_stale_keys:
+            v("inventory_diff_unresolved_stale", "warning",
+              f"eBay draft and inventory record have disagreed on "
+              f"key(s) {', '.join(sorted(_c13_stale_keys))} for "
+              f"{_C13_STALE_DAYS}+ days with no operator review "
+              f"(GET /api/items/{sku}/inventory-diff)")
 
     # New-pipeline checks
     offer_price = None

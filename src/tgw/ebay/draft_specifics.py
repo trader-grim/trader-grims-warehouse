@@ -75,6 +75,8 @@ __all__ = [
     "is_envelope",
     "get_ebay_aspects",
     "get_ebay_aspect",
+    "get_ebay_aspects_history",
+    "get_ebay_aspects_updated_at",
     "wrap_ebay_specifics",
     "set_ebay_aspects",
 ]
@@ -111,6 +113,41 @@ def get_ebay_aspects(item: Dict[str, Any]) -> Dict[str, Any]:
 def get_ebay_aspect(item: Dict[str, Any], key: str, default: Any = None) -> Any:
     """Return one Set B aspect value, or `default` if absent."""
     return get_ebay_aspects(item).get(key, default)
+
+
+def get_ebay_aspects_history(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return the Set B provenance history array (append-only, may be
+    empty for legacy pre-migration items with no history yet).
+
+    Added for todo #1417 (reverse-flow diff engine): the diff needs each
+    key's most recent Set B `source`/`ts` to attribute a proposed Set A
+    write correctly. Kept inside this accessor module rather than read
+    ad hoc by the diff engine, same "one sanctioned access point" rule
+    C12 applies to the fields themselves.
+    """
+    dl = item.get("draft_listing") or {}
+    if not isinstance(dl, dict):
+        return []
+    hist = dl.get("item_specifics_history")
+    return list(hist) if isinstance(hist, list) else []
+
+
+def get_ebay_aspects_updated_at(item: Dict[str, Any]) -> Optional[str]:
+    """Return the Set B envelope's `updated_at` timestamp, or None if the
+    item predates the envelope shape (bare-dict `item_specifics`, no
+    timestamp available — Prime Directive 1: don't fabricate one).
+
+    Added for todo #1417: a fallback `detected_at` for a diff key that has
+    no matching history entry (e.g. the envelope was written once with no
+    prior value to record a transition from).
+    """
+    dl = item.get("draft_listing") or {}
+    if not isinstance(dl, dict):
+        return None
+    raw = dl.get("item_specifics")
+    if is_envelope(raw):
+        return raw.get("updated_at")
+    return None
 
 
 def wrap_ebay_specifics(

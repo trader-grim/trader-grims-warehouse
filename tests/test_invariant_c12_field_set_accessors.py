@@ -62,13 +62,16 @@ _ALLOWLIST = {
     (_SRC / "tgw" / "workers" / "ai_identify.py", 273),   # (b) AI model response
     (_SRC / "tgw" / "workers" / "ai_identify.py", 333),   # (a) accessor patch write
     (_SRC / "tgw" / "workers" / "ai_identify.py", 428),   # (a) accessor patch write
-    (_SRC / "tgw" / "http_server.py", 992),               # (a) accessor patch write
-    (_SRC / "tgw" / "http_server.py", 1013),              # (a) accessor patch write (todo #1416, draft_listing.item_specifics)
-    (_SRC / "tgw" / "http_server.py", 1018),              # (a) accessor output (full envelope) moving onward
-    (_SRC / "tgw" / "http_server.py", 1506),              # (b) revision_draft.delta
-    (_SRC / "tgw" / "http_server.py", 1508),              # (b) revision_draft.delta
-    (_SRC / "tgw" / "http_server.py", 1514),              # (a) accessor patch write (todo #1416)
-    (_SRC / "tgw" / "http_server.py", 5044),              # (b) revision_draft.delta — line shifted by the runner-review listing_description fix (todo #1416)
+    (_SRC / "tgw" / "http_server.py", 1001),              # (a) accessor patch write
+    (_SRC / "tgw" / "http_server.py", 1022),              # (a) accessor patch write (todo #1416, draft_listing.item_specifics)
+    (_SRC / "tgw" / "http_server.py", 1027),              # (a) accessor output (full envelope) moving onward
+    (_SRC / "tgw" / "http_server.py", 1515),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 1517),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 1523),              # (a) accessor patch write (todo #1416)
+    (_SRC / "tgw" / "http_server.py", 2407),              # (a) accessor output (tgw.ebay.inventory_diff.apply_inventory_diff's patch) moving onward into _apply_patch (todo #1417)
+    (_SRC / "tgw" / "http_server.py", 5104),              # (b) revision_draft.delta — line shifted by this packet's new inv-diff panel (todo #1417)
+    (_SRC / "tgw" / "ebay" / "inventory_diff.py", 159),   # (a) accessor patch output moving onward (todo #1417 apply_inventory_diff)
+    (_SRC / "tgw" / "ebay" / "inventory_diff.py", 163),   # (a) accessor patch output moving onward (todo #1417 apply_inventory_diff)
 }
 
 

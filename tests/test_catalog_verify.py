@@ -183,6 +183,87 @@ def test_verify_field_set_drift_clean_when_sets_agree(tmp_path):
     assert 'field_set_drift' not in rules
 
 
+# ---------------------------------------------------------------------------
+# invariant C13 (todo #1417): inventory_diff_unresolved_stale detector —
+# the "regularly check and repair" data-drift half for the REVERSE
+# (eBay Draft -> Inventory Record) direction. Not gated on a live
+# ebay_offer.offer_id, unlike field_set_drift (see api.py comment).
+# ---------------------------------------------------------------------------
+
+def test_verify_inventory_diff_stale_flagged_past_threshold(tmp_path):
+    sku = 'tgw202601010000040'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'F6',
+        'item_attributes': {'Type': 'Lapel Pin'},
+        'draft_listing': {
+            'item_specifics': {'Type': 'Brooch'},
+            'item_specifics_history': [
+                {'ts': '2026-01-01T00:00:00+00:00', 'key': 'Type',
+                 'value': 'Brooch', 'previous_value': 'Lapel Pin',
+                 'source': 'ebay_draft', 'applied_by': 'system'},
+            ],
+        },
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    viols = {v['rule']: v for v in _verify_item(sku, item_dir, doc)}
+    assert 'inventory_diff_unresolved_stale' in viols
+    assert 'Type' in viols['inventory_diff_unresolved_stale']['detail']
+
+
+def test_verify_inventory_diff_stale_not_flagged_when_recent(tmp_path):
+    from datetime import datetime, timezone
+    recent = datetime.now(timezone.utc).isoformat()
+    sku = 'tgw202601010000041'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'F6',
+        'item_attributes': {'Type': 'Lapel Pin'},
+        'draft_listing': {
+            'item_specifics': {'Type': 'Brooch'},
+            'item_specifics_history': [
+                {'ts': recent, 'key': 'Type', 'value': 'Brooch',
+                 'previous_value': 'Lapel Pin', 'source': 'ebay_draft',
+                 'applied_by': 'system'},
+            ],
+        },
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'inventory_diff_unresolved_stale' not in rules
+
+
+def test_verify_inventory_diff_stale_not_flagged_when_no_timestamp(tmp_path):
+    """Legacy bare-dict item_specifics with no history/timestamp —
+    Prime Directive 1: never claim a fabricated age."""
+    sku = 'tgw202601010000042'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'F6',
+        'item_attributes': {'Type': 'Lapel Pin'},
+        'draft_listing': {'item_specifics': {'Type': 'Brooch'}},
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'inventory_diff_unresolved_stale' not in rules
+
+
+def test_verify_inventory_diff_stale_clean_when_resolved(tmp_path):
+    sku = 'tgw202601010000043'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'F6',
+        'item_attributes': {'Type': 'Brooch'},
+        'draft_listing': {
+            'item_specifics': {'Type': 'Brooch'},
+            'item_specifics_history': [
+                {'ts': '2026-01-01T00:00:00+00:00', 'key': 'Type',
+                 'value': 'Brooch', 'previous_value': 'Lapel Pin',
+                 'source': 'ebay_draft', 'applied_by': 'system'},
+            ],
+        },
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'inventory_diff_unresolved_stale' not in rules
+
+
 def test_verify_no_location(tmp_path):
     sku = 'tgw202601010000007'
     doc = {'sku': sku, 'title': 'Valid Title For Testing Here', 'location': ''}
