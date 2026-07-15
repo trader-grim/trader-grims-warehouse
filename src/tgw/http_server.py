@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 from . import draft_sync
 from .assets import ordered_photos as _ordered_photos
 from .config import DEFAULT_CONFIG, load_config
+from .ebay.description import build_listing_description
 from .items import _archive_before_overwrite, atomic_write_json, create_item, locationupdate
 from .queue import state_machine
 from .readiness import check_ebay, readiness_html
@@ -720,6 +721,21 @@ def patch_item(sku: str, body: PatchBody, request: Request) -> Dict[str, Any]:
             doc_before["pipeline_error"], _merged_dl, clear_rejections=False)
         if _resolved is None:
             body.fields["pipeline_error"] = None
+
+    # listing_description is a derived cache (AI description + boilerplate +
+    # picklist line, built by build_listing_description()) that stage_draft()
+    # prefers over the plain description field when pushing to eBay (sync.py
+    # ~line 453). If a patch edits draft_listing.description without also
+    # supplying listing_description, the cache goes stale and every future
+    # eBay push silently re-sends the old text — found live on
+    # tgw202605040949058, where 9 ebay_stage jobs "succeeded" while pushing
+    # stale AI text over the operator's edits. Regenerate it here so the
+    # cache can never outlive the field it's derived from.
+    if isinstance(_new_dl_fields, dict) and "description" in _new_dl_fields \
+            and "listing_description" not in _new_dl_fields:
+        _merged_dl_for_desc = {**(doc_before.get("draft_listing") or {}), **_new_dl_fields}
+        _item_for_desc = {**doc_before, "draft_listing": _merged_dl_for_desc}
+        _new_dl_fields["listing_description"] = build_listing_description(_item_for_desc, _cfg)
 
     updated_keys = _apply_patch(json_path, body.fields)
 
