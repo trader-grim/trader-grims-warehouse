@@ -68,12 +68,29 @@ def chat_full(
 
 
 def extract_json(text: str) -> Any:
-    """Parse JSON from model output, stripping markdown fences if present."""
+    """Parse JSON from model output, stripping markdown fences if present.
+
+    Handles both a closed fence (```json ... ```) and an *open-only* fence
+    (```json with no closing ``` — e.g. a response truncated before the
+    closing marker, or a provider that never emits one). #1393: 95
+    ebay_draft dead-letters were a complete-but-unfenced response failing
+    to parse purely because the old regex required both markers. If the
+    fence-stripped text still isn't valid JSON (genuine truncation
+    mid-object), this still raises json.JSONDecodeError -- that's a real
+    truncated response, not a parsing bug, and callers should treat it as
+    such (see ebay_draft.py's aspect-fill HardFailure path).
+    """
     text = text.strip()
-    # Strip ```json ... ``` fences
+    # Strip ```json ... ``` fences (closed case)
     fenced = re.search(r'```(?:json)?\s*([\s\S]+?)\s*```', text)
     if fenced:
         text = fenced.group(1)
+    else:
+        # Open-only fence: strip a leading ``` or ```json marker even with
+        # no closing fence present.
+        open_fence = re.match(r'```(?:json)?\s*', text)
+        if open_fence:
+            text = text[open_fence.end():]
     return json.loads(text)
 
 
