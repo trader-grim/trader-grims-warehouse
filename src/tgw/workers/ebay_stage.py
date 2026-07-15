@@ -195,6 +195,35 @@ class EbayStageWorker(QueueWorker):
                 f'{sku}: no draft_listing yet — waiting for pipeline to complete'
             )
 
+        # Non-leaf category guard (todo #1395 / PP-DEADLETTER-001): ebay_draft
+        # falls back to category_id '99' ("Everything Else") when it can't
+        # resolve a real category — that fallback is explicitly non-leaf
+        # (ebay_draft.py comment: "eBay will prompt"). eBay's Inventory API
+        # unconditionally rejects createOrReplaceOffer/publish for a non-leaf
+        # category ("The category selected is not a leaf category."), so
+        # staging with '99' always burns a live API call for a guaranteed
+        # HardFailure and lands in dead_letter with no actionable trail (17
+        # confirmed instances, 2026-07-05 batch). Block it here — before the
+        # API call — and persist a durable, queryable finding (invariant
+        # C11) instead, same shape as the price/title guards below.
+        category_id = draft.get('category_id')
+        if category_id == '99':
+            fence_patch_item(self.config, sku, {'pipeline_error': {
+                'code':   'category_not_leaf',
+                'detail': ("draft_listing.category_id is the '99' Everything "
+                           "Else fallback (non-leaf) — eBay always rejects "
+                           "staging/publishing with it. Operator must select "
+                           "a real leaf category in the editor before listing."),
+                'ts':     datetime.now(timezone.utc).isoformat(),
+                'source': 'ebay_stage',
+            }})
+            tgw_logging.log_event('ebay_stage_category_not_leaf', sku=sku)
+            raise HardFailure(
+                f"{sku}: draft_listing.category_id is fallback '99' (Everything "
+                f"Else, non-leaf) — operator must select a leaf category "
+                f"before staging"
+            )
+
         # Price must be set in draft_listing — the operator-reviewed surface.
         # Session 45 (tgw202605052336026): the old fallback to ebay_offer.price
         # published a STALE machine price ($40.99, browse-comps, stamped weeks
