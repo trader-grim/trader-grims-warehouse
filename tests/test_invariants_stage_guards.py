@@ -362,3 +362,36 @@ def test_operator_list_without_price_hard_fails_with_finding(stage, tmp_path, mo
         stage.handle({'payload_json': {'sku': 'tgw9s45', 'origin': 'operator'}})
     assert stage._staged == []
     assert patched and patched[0][1]['pipeline_error']['code'] == 'no_price_set'
+
+
+# ---------------------------------------------------------------------------
+# Todo #1395 / PP-DEADLETTER-001 — the '99' (Everything Else) fallback
+# category is explicitly non-leaf; eBay always rejects staging/publishing
+# with it ("The category selected is not a leaf category."). 17 real
+# dead-letters (2026-07-05 batch, all confirmed draft_listing.category_id
+# == '99') burned a live API call each for a guaranteed HardFailure with no
+# actionable trail. Block it locally instead, same shape as the price/title
+# guards above.
+# ---------------------------------------------------------------------------
+
+def test_fallback_category_99_never_staged_no_api_call(stage, tmp_path, monkeypatch):
+    """Reproduces the real dead-letter shape (tgw201501021970513 et al):
+    draft_listing.category_id == '99'. Must HardFailure locally — never call
+    stage_draft (no wasted/guaranteed-failing eBay API round-trip)."""
+    patched = []
+    monkeypatch.setattr(ebay_stage, 'fence_patch_item',
+                        lambda cfg, sku, fields: patched.append((sku, fields)))
+    item = _ready_item()
+    item['draft_listing']['category_id'] = '99'
+    _write(tmp_path, 'tgw-cat99', item)
+    with pytest.raises(HardFailure, match="fallback '99'"):
+        _run(stage, 'tgw-cat99')
+    assert stage._staged == []   # stage_draft (the eBay call) never reached
+    assert patched and patched[0][1]['pipeline_error']['code'] == 'category_not_leaf'
+
+
+def test_real_leaf_category_stages_normally(stage, tmp_path):
+    """Control: a real category_id (not '99') is unaffected by the new guard."""
+    _write(tmp_path, 'tgw-catleaf', _ready_item())  # category_id '12345' in fixture
+    _run(stage, 'tgw-catleaf')
+    assert stage._staged == ['tgw-catleaf']
