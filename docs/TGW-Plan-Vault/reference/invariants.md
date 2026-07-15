@@ -673,11 +673,15 @@ corrupting write has already happened. The test pins an explicit,
 reviewed allowlist of every legitimate non-accessor hit (accessor output
 being written onward, or an unrelated dict — e.g. an AI model response or
 a `revision_draft.delta` proposal — that happens to share a key name); any
-new, unreviewed hit fails the test. `#1416`'s planned drift detector
-(catalog-verify rule flagging live items where Set A and Set B disagree on
-an overlapping key) is the complementary "regularly check and repair"
-half, for DATA drift rather than CODE drift — not yet built as of this
-entry (see #1416's packet).
+new, unreviewed hit fails the test. `#1416`'s drift detector (catalog-verify
+rule `field_set_drift`, `tgw.api._verify_item`) is the complementary
+"regularly check and repair" half, for DATA drift rather than CODE drift —
+landed 2026-07-15, flags any item with a live `ebay_offer.offer_id` where
+Set A and Set B disagree on an overlapping key (severity: warning; dry-run
+by default, matching every other catalog-verify rule — no auto-repair).
+Spot-checked live against `tgw202605040949058` (the item cited in #1416's
+own investigation), which shows the real, confirmed drift
+(`Type: "Lapel Pin"` vs `"Brooch"`) at the time #1416 landed.
 
 **Migration note:** the envelope shape landed via
 `scripts/migrate_field_set_envelope.py` (dry-run + accessor back-compat

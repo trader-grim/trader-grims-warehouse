@@ -77,6 +77,17 @@ a separate, explicit, named function built on top of these accessors
 (#1416/#1417) — never a per-key merge or `{**a, **b}` spread performed
 locally in a display or save handler.
 
+**Set A → Set B translation (todo #1416, landed):**
+`tgw.ebay.aspect_translation.translate_inventory_to_ebay_draft(item_attributes,
+category_id, cfg, *, aspects=None, already_filled=None)` is the ONE named
+translation function — extracted from what used to be `ebay_draft.py`'s
+inline "Phase 2b" prefill logic (no behavior change beyond the
+extraction). `ebay_draft.py` calls it to pre-fill `item_specifics` from
+`item_attributes` (below `product_lookup` priority); any future caller
+that needs to move a Set A value onto a Set B aspect calls this function
+too, rather than reinventing a partial version. The reverse flow (Set B
+→ Set A diff-apply) is #1417, not yet built.
+
 ### Field-set envelope shape
 
 Both `item_attributes` and `draft_listing.item_specifics` are

@@ -34,6 +34,7 @@ from tgw.apis.ollama import extract_json
 from tgw.assets import ordered_photos as _asset_ordered_photos
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.config import sku_json as _cfg_sku_json
+from tgw.ebay.aspect_translation import translate_inventory_to_ebay_draft
 from tgw.ebay.description import build_listing_description
 from tgw.ebay.draft_specifics import set_ebay_aspects, wrap_ebay_specifics
 from tgw.queue import state_machine
@@ -454,27 +455,15 @@ class EbayDraftWorker(QueueWorker):
 
         # Phase 2b — pre-fill from item_attributes (AI-identified attributes, lower
         # priority than product_lookup so they only fill what's not already set)
-        # todo #1418: Set A read via tgw.inventory_record (the sanctioned accessor) —
-        # this is the ONE legitimate Set A -> Set B translation point in the codebase
-        # today (see #1416, which extracts/names it as an explicit function).
+        # todo #1416: routed through the named Set A -> Set B translation
+        # function (tgw.ebay.aspect_translation) — the ONE legitimate
+        # cross-set translation point in the codebase, extracted from what
+        # used to be inline logic here (no behavior change).
         ia = inventory_record.get_inventory_fields(item)
-        ia_filled: List[str] = []
-        for attr_name, attr_val in ia.items():
-            if not attr_val or attr_name in prefilled:
-                continue
-            if attr_name not in aspect_names:
-                continue
-            val = str(attr_val).strip()
-            if not val:
-                continue
-            aspect_def = next((a for a in aspects if a['name'] == attr_name), None)
-            if aspect_def and aspect_def['mode'] == 'SELECTION_ONLY' and aspect_def['allowed_values']:
-                if val not in aspect_def['allowed_values']:
-                    log.debug('item_attr prefill: %r not in allowed values for %r — skipping',
-                              val, attr_name)
-                    continue
-            prefilled[attr_name] = val
-            ia_filled.append(attr_name)
+        ia_translated = translate_inventory_to_ebay_draft(
+            ia, category_id, self.config, aspects=aspects, already_filled=prefilled)
+        ia_filled: List[str] = list(ia_translated.keys())
+        prefilled.update(ia_translated)
 
         if ia_filled:
             log.info('%s: pre-filled %d specifics from item_attributes: %s',

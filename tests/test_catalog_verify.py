@@ -135,6 +135,54 @@ def test_verify_invalid_category_id(tmp_path):
     assert 'invalid_ebay_category' in rules
 
 
+# ---------------------------------------------------------------------------
+# invariant C12 (todo #1416): field_set_drift detector — the "regularly
+# check and repair" data-drift half, complementing the static code-level
+# detector (tests/test_invariant_c12_field_set_accessors.py).
+# ---------------------------------------------------------------------------
+
+def test_verify_field_set_drift_flagged_when_live_offer_present(tmp_path):
+    sku = 'tgw202601010000030'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'E5',
+        'item_attributes': {'Type': 'Lapel Pin', 'Brand': 'Unbranded'},
+        'draft_listing': {'item_specifics': {'Type': 'Brooch', 'Brand': 'Unbranded'}},
+        'ebay_offer': {'offer_id': '266061679018'},
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    viols = {v['rule']: v for v in _verify_item(sku, item_dir, doc)}
+    assert 'field_set_drift' in viols
+    assert 'Type' in viols['field_set_drift']['detail']
+    assert 'Brand' not in viols['field_set_drift']['detail']
+
+
+def test_verify_field_set_drift_not_flagged_without_live_offer(tmp_path):
+    """A never-published draft's Set A/Set B disagreeing is normal
+    pre-publish churn, not a finding — only live items are checked."""
+    sku = 'tgw202601010000031'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'E5',
+        'item_attributes': {'Type': 'Lapel Pin'},
+        'draft_listing': {'item_specifics': {'Type': 'Brooch'}},
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'field_set_drift' not in rules
+
+
+def test_verify_field_set_drift_clean_when_sets_agree(tmp_path):
+    sku = 'tgw202601010000032'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'E5',
+        'item_attributes': {'Type': 'Brooch'},
+        'draft_listing': {'item_specifics': {'Type': 'Brooch'}},
+        'ebay_offer': {'offer_id': '266061679018'},
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'field_set_drift' not in rules
+
+
 def test_verify_no_location(tmp_path):
     sku = 'tgw202601010000007'
     doc = {'sku': sku, 'title': 'Valid Title For Testing Here', 'location': ''}
