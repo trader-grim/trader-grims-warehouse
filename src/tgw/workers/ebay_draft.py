@@ -16,6 +16,7 @@ import csv
 import io
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -247,33 +248,102 @@ def _build_prompt(item: Dict[str, Any], aspects: List[Dict[str, Any]],
     return '\n'.join(lines)
 
 
-def _encode_resized(img_path: Path, max_px: int = _VISION_MAX_PX_ASPECTS) -> str:
-    """Return base64 JPEG, resized to max_px on the longest edge."""
+def _encode_resized(img_path: Path, max_px: int = _VISION_MAX_PX_ASPECTS) -> Optional[str]:
+    """Return base64 JPEG, resized to max_px on the longest edge.
+
+    Returns None (rather than raising) if *img_path* is truncated/corrupt and
+    can't be decoded -- the same corruption class PP-DATAINTEGRITY-001 leg 1's
+    photo_files_readable catalog-verify rule already detects project-wide
+    (#1154, 206 bad files/149 SKUs). Before this fix the OSError propagated
+    uncaught all the way to a bare dead_letter with no durable finding (todo
+    #1403; confirmed live: 7-8 ebay_draft dead-letters, 'image file is
+    truncated'/'broken data stream'). Callers are responsible for skipping a
+    None result and recording a finding -- see _aspect_fill_photos, which
+    already screens for this before a photo ever reaches here, so this catch
+    is a second line of defense (e.g. a file that changes between selection
+    and encode).
+    """
     try:
         from PIL import Image
     except ImportError:
         return base64.b64encode(img_path.read_bytes()).decode()
 
-    with Image.open(img_path) as img:
-        img.thumbnail((max_px, max_px), Image.LANCZOS)
-        buf = io.BytesIO()
-        img.convert('RGB').save(buf, format='JPEG', quality=85)
+    try:
+        with Image.open(img_path) as img:
+            img.thumbnail((max_px, max_px), Image.LANCZOS)
+            buf = io.BytesIO()
+            img.convert('RGB').save(buf, format='JPEG', quality=85)
+    except OSError:
+        return None
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def _aspect_fill_photos(item: Dict[str, Any], sku_dir: Path, provider: str) -> List[Path]:
+def _aspect_fill_photos(
+    item: Dict[str, Any],
+    sku_dir: Path,
+    provider: str,
+    *,
+    sku: Optional[str] = None,
+    config: Optional[Dict[str, Any]] = None,
+) -> List[Path]:
     """Select up to _MAX_PHOTOS_ASPECTS photos for the vision aspect-fill call.
 
     Cloud providers get the item's real photo set (excluding -alt./cropped-
     derivatives); anything else gets none (falls back to the text-only prompt).
+
+    Truncated/corrupt photos are screened out here rather than left to raise
+    OSError deep inside the vision call and dead-letter the whole job (todo
+    #1403) -- this is the same corruption class PP-DATAINTEGRITY-001 leg 1's
+    photo_files_readable catalog-verify rule already detects project-wide
+    (#1154). When *sku*/*config* are supplied, each skip is recorded as a
+    durable pipeline_error finding (invariant C11 -- a guard's skip is a
+    finding, not a log line), reusing the existing generic pipeline_error
+    mechanism (see api.py's _verify_item, which surfaces any pipeline_error
+    as a catalog-verify violation) rather than inventing a second "corrupt
+    photo" tracking scheme. Callers that don't pass sku/config (e.g. the
+    existing pre-#1403 test suite) get filtering only, no persistence --
+    matches every pre-existing call site's positional-args-only signature.
     """
     if provider not in CLOUD_PROVIDERS:
         return []
     all_photos = _asset_ordered_photos(item, sku_dir)
-    return [
+    candidates = [
         p for p in all_photos
         if '-alt.' not in p.name and not p.name.startswith('cropped-')
     ][:_MAX_PHOTOS_ASPECTS]
+
+    readable: List[Path] = []
+    unreadable: List[str] = []
+    for p in candidates:
+        try:
+            from PIL import Image
+            with Image.open(p) as im:
+                im.load()
+        except ImportError:
+            # No PIL available -- can't pre-screen; trust the file the same
+            # way _encode_resized falls back to a raw base64 read.
+            readable.append(p)
+            continue
+        except OSError as exc:
+            unreadable.append(f'{p.name}: {exc}')
+            continue
+        readable.append(p)
+
+    if unreadable and sku and config is not None:
+        log.warning('%s: %d unreadable/corrupt photo(s) skipped for vision '
+                    'aspect-fill: %s', sku, len(unreadable), unreadable)
+        fence_patch_item(config, sku, {'pipeline_error': {
+            'code':   'photo_files_readable',
+            'detail': (f'{len(unreadable)} photo(s) unreadable/corrupt, skipped '
+                       f'for vision aspect-fill (other readable photos/fields '
+                       f'still used): {"; ".join(unreadable)}'),
+            'ts':     datetime.now(timezone.utc).isoformat(),
+            'source': 'ebay_draft',
+        }})
+        tgw_logging.log_event('ebay_draft_unreadable_photo', sku=sku,
+                              unreadable_count=len(unreadable))
+
+    return readable
 
 
 class EbayDraftWorker(QueueWorker):
@@ -420,8 +490,17 @@ class EbayDraftWorker(QueueWorker):
             prompt = _build_prompt(item, aspects, prefilled=prefilled, browse_hints=browse_hints)
             _classify_provider, _classify_model = get_task_model(self.config, 'bulk_classify')
             sku_dir = json_path.parent
-            photos = _aspect_fill_photos(item, sku_dir, _classify_provider)
-            img_b64_list = [_encode_resized(p) for p in photos]
+            photos = _aspect_fill_photos(item, sku_dir, _classify_provider,
+                                         sku=sku, config=self.config)
+            img_b64_list = []
+            for p in photos:
+                b64 = _encode_resized(p)
+                if b64 is None:
+                    # Second-line defense: became unreadable between
+                    # selection and encode (see _encode_resized docstring).
+                    log.warning('%s: %s unreadable at encode time -- skipping', sku, p.name)
+                    continue
+                img_b64_list.append(b64)
             log.info('asking %s/%s to fill %d aspects for %s (%d photos)',
                      _classify_provider, _classify_model, len(remaining_aspects), sku, len(photos))
             tgw_logging.log_event('ebay_draft_aspects_call', sku=sku,

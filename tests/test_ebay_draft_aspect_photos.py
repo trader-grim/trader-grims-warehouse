@@ -17,7 +17,12 @@ from tgw.workers.ebay_draft import (
 
 
 def _touch(sku_dir: Path, name: str) -> None:
-    (sku_dir / name).write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 16)
+    # A genuinely decodable 1x1 JPEG, not just a header stub -- todo #1403
+    # made _aspect_fill_photos screen out undecodable files (the truncated/
+    # corrupt-photo class), so a bare header-only stub would now be
+    # (correctly) filtered out and break these filename-selection tests.
+    from PIL import Image
+    Image.new("RGB", (1, 1), color=(128, 128, 128)).save(sku_dir / name, format="JPEG")
 
 
 class TestAspectFillPhotos:
