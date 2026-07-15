@@ -261,6 +261,13 @@ Plain Markdown; open in Obsidian for interactive mind map view where noted.
   stale (Dave, s43: manual Seller Hub use during the Inventory-API migration
   gap silently changed what was true on eBay's side without our records
   updating; the same class "could happen again"). See invariants.md C11.
+- **Item field-sets are read/written as wholes, never key-by-key (invariant
+  C12)** — `item_attributes` (Set A, universal inventory record) and
+  `draft_listing.item_specifics` (Set B, eBay-specific draft) are
+  self-describing envelopes accessed ONLY through `tgw.inventory_record` /
+  `tgw.ebay.draft_specifics`; cross-set moves go through one named
+  translation function, never a per-key merge or `{**a, **b}` spread. See
+  invariants.md C12.
 
 ## Running workers (systemd)
 

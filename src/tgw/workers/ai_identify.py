@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 import psycopg2.errors
 
 import tgw.logging as tgw_logging
-from tgw import quota
+from tgw import inventory_record, quota
 from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.apis.llm import CLOUD_PROVIDERS, call_model, get_task_model
 from tgw.apis.ollama import extract_json, is_available
@@ -320,10 +320,18 @@ class AIIdentifyWorker(QueueWorker):
                 item[_field] = _val
 
         # Merge AI-extracted item specifics into item_attributes (never overwrite existing keys)
+        # todo #1418: routed through tgw.inventory_record — the ONLY sanctioned
+        # writer of the Set A envelope. "existing wins" is preserved by only
+        # proposing updates for keys the record doesn't already have.
+        _ia_patch: Dict[str, Any] = {}
         if ai_item_specifics:
-            existing_attrs = item.get("item_attributes") or {}
-            merged_attrs = {**ai_item_specifics, **existing_attrs}  # existing wins
-            item["item_attributes"] = merged_attrs
+            existing_attrs = inventory_record.get_inventory_fields(item)
+            new_only = {k: v for k, v in ai_item_specifics.items() if k not in existing_attrs}
+            if new_only:
+                _ia_patch = inventory_record.set_inventory_fields(
+                    item, new_only, source="ai_identify", applied_by="system")
+                item["item_attributes"] = _ia_patch["item_attributes"]
+                item["item_attributes_history"] = _ia_patch["item_attributes_history"]
 
         # product_lookup already written above if lookup succeeded
 
@@ -416,8 +424,9 @@ class AIIdentifyWorker(QueueWorker):
         for _f in ("brand", "model", "manufacturer", "model_number", "color", "material", "country_of_manufacture", "upc"):
             if item.get(_f):
                 fence_fields[_f] = item[_f]
-        if item.get("item_attributes"):
-            fence_fields["item_attributes"] = item["item_attributes"]
+        if _ia_patch:
+            fence_fields["item_attributes"] = _ia_patch["item_attributes"]
+            fence_fields["item_attributes_history"] = _ia_patch["item_attributes_history"]
         fence_patch_item(self.config, sku, fence_fields)
 
         log.info("ai_identify complete for %s: %r (eBay cat %s)", sku, title, ebay_category_id)

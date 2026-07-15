@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from tgw.apis.ebay.client import ebay_get, ebay_post, ebay_put
+from tgw.ebay.draft_specifics import get_ebay_aspects
 
 log = logging.getLogger(__name__)
 
@@ -438,8 +439,10 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
     if not image_urls:
         raise ValueError(f'{sku}: no eBay photo URLs — run ebay_upload first')
 
+    # todo #1418: Set B read via tgw.ebay.draft_specifics (the sanctioned accessor) —
+    # this is the ONE code path that pushes aspects to eBay's live Inventory API.
     aspects: Dict[str, List[str]] = {
-        k: [str(v)] for k, v in draft.get('item_specifics', {}).items()
+        k: [str(v)] for k, v in get_ebay_aspects(item).items()
     }
 
     # Prefer the pre-resolved condition_enum written by ebay_draft (already

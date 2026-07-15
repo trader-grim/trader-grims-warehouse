@@ -31,10 +31,11 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import draft_sync
+from . import draft_sync, inventory_record
 from .assets import ordered_photos as _ordered_photos
 from .config import DEFAULT_CONFIG, load_config
 from .ebay.description import build_listing_description
+from .ebay.draft_specifics import get_ebay_aspects
 from .items import _archive_before_overwrite, atomic_write_json, create_item, locationupdate
 from .queue import state_machine
 from .readiness import check_ebay, readiness_html
@@ -971,8 +972,27 @@ def _apply_patch(json_path: "Path", fields: Dict[str, Any]) -> List[str]:
     for dmk in ("draft_listing", "item_attributes"):
         if dmk in fields and isinstance(fields[dmk], dict):
             existing = doc.get(dmk) or {}
-            existing.update(fields.pop(dmk))
-            doc[dmk] = existing
+            incoming = fields.pop(dmk)
+            # todo #1418 / invariant C12: item_attributes is now a self-describing
+            # Set A envelope ({_set, version, updated_at, fields}), not a bare
+            # dict. A caller that already sends a full envelope (the sanctioned
+            # accessor's output, e.g. tgw.inventory_record.set_inventory_fields)
+            # is handled by the plain shallow-merge below — every envelope key
+            # gets overwritten wholesale, which is a correct full replace. A
+            # caller that still sends a bare partial dict of field updates (a
+            # legacy/UI path not yet migrated onto the accessor — see #1416)
+            # must NOT have those keys merged onto the envelope's top level
+            # (that would silently corrupt _set/version/fields with sibling
+            # scalar keys) — route it through the accessor instead so the
+            # envelope shape is always preserved.
+            if dmk == "item_attributes" and not inventory_record.is_envelope(incoming):
+                patch = inventory_record.set_inventory_fields(
+                    doc, incoming, source="http_patch", applied_by="operator")
+                doc["item_attributes"] = patch["item_attributes"]
+                doc["item_attributes_history"] = patch["item_attributes_history"]
+            else:
+                existing.update(incoming)
+                doc[dmk] = existing
     to_delete = [k for k, v in fields.items() if v is None]
     for k in to_delete:
         doc.pop(k, None)
@@ -1429,11 +1449,19 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
             delta = rev.get("delta") or {}
             if not delta:
                 return {"ok": False, "detail": "no revision_draft delta to accept"}
-            ia = doc.get("item_attributes") or {}
+            # todo #1418: Set A write via tgw.inventory_record (the sanctioned
+            # accessor) — preserves the envelope shape + records provenance.
+            # NOTE: this still targets item_attributes (Set A), same as before
+            # this packet — #1416 point 4 is the one that redirects this action
+            # to draft_listing.item_specifics (Set B) to match its own banner's
+            # stated contract; out of scope here (#1418 only fixes the
+            # container shape, not which set this write targets).
             ia_touched = False
+            ia_patch: Dict[str, Any] = {}
             if "item_specifics" in delta and isinstance(delta["item_specifics"], dict):
-                ia.update(delta["item_specifics"])
-                doc["item_attributes"] = ia
+                ia_patch = inventory_record.set_inventory_fields(
+                    doc, delta["item_specifics"], source="accept_proposals",
+                    applied_by="operator")
                 ia_touched = True
             dl2 = doc.get("draft_listing") or {}
             dl_touched = False
@@ -1445,7 +1473,8 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                 dl_touched = True
             proposal_fields: Dict[str, Any] = {"revision_draft": None}
             if ia_touched:
-                proposal_fields["item_attributes"] = ia
+                proposal_fields["item_attributes"] = ia_patch["item_attributes"]
+                proposal_fields["item_attributes_history"] = ia_patch["item_attributes_history"]
             if dl_touched:
                 proposal_fields["draft_listing"] = dl2
             _apply_patch(json_path, proposal_fields)
@@ -4447,7 +4476,8 @@ def _render_item_detail_html(
         _dl_store_cat = str(dl.get("store_category_name") or dl.get("store_category") or "")
         _dl_ship = str(dl.get("shipping_profile") or dl.get("fulfillment_policy_id") or "")
         # Build item_specifics table
-        _specifics = dl.get("item_specifics") or {}
+        # todo #1418: Set B read via tgw.ebay.draft_specifics (the sanctioned accessor)
+        _specifics = get_ebay_aspects(item)
         if _specifics:
             _spec_rows = "".join(f'<tr><td class="spec-k">{h(k)}</td><td class="spec-v">{h(str(v))}</td></tr>' for k, v in sorted(_specifics.items()))
             _spec_html = f'<table class="spec-tbl"><tr><th>Aspect</th><th>Value</th></tr>{_spec_rows}</table>'
@@ -4946,8 +4976,9 @@ def _render_item_detail_html(
     # ── Three-layer aspect data: live (eBay) / proposed (pipeline) / edits (operator) ──
     import json as _json
 
-    _ia = item.get("item_attributes") or {}  # operator edits — highest priority
-    _spec = (dl or {}).get("item_specifics") or {}  # live on eBay — baseline
+    # todo #1418: Set A/Set B reads via their sanctioned accessors
+    _ia = inventory_record.get_inventory_fields(item)  # operator edits — highest priority
+    _spec = get_ebay_aspects(item)  # live on eBay — baseline
     _rev = item.get("revision_draft") or {}
     _rev_delta = _rev.get("delta") or {}
     _proposed_aspects = _rev_delta.get("item_specifics") or {}
@@ -5706,7 +5737,11 @@ def _render_item_detail_html(
                     "</div>"
                 )
             )
-        )(item.get("item_attributes") or {}, (dl or {}).get("item_specifics") or {})
+        # todo #1418: Set A/Set B reads via their sanctioned accessors (the
+        # {**isp, **ia} blend itself is #1416's problem to fix, not this
+        # packet's — this only updates HOW the two dicts are read, not the
+        # blend logic)
+        )(inventory_record.get_inventory_fields(item), get_ebay_aspects(item))
         + "</div>"
         # ── eBay Listing — the draft/live workflow section (PP-ACTIONCONSOLE-001).
         # Visually separated from the Inventory Record above: its own header,

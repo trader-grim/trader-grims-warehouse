@@ -20,6 +20,8 @@ and the manager must not converge over it.
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from tgw.ebay.draft_specifics import wrap_ebay_specifics
+
 __all__ = ["baseline_fields", "resolve_pipeline_error", "pin_draft_to_live"]
 
 
@@ -82,10 +84,13 @@ def pin_draft_to_live(doc: Dict[str, Any]) -> Dict[str, Any]:
     if live_prod.get("imageUrls"):
         dl["imageUrls"] = live_prod["imageUrls"]
     if live_prod.get("aspects"):
-        dl["item_specifics"] = {
+        # todo #1418: Set B envelope, written via tgw.ebay.draft_specifics — this
+        # is a full re-pin to the live mirror (M4/S1), so a full-replace envelope
+        # is correct (no history diff here; the live mirror IS the new baseline).
+        dl["item_specifics"] = wrap_ebay_specifics({
             k: (v[0] if isinstance(v, list) and v else v)
             for k, v in live_prod["aspects"].items()
-        }
+        })
     if live_inv.get("condition"):
         dl["condition_enum"] = live_inv["condition"]
     live_price = ((live_off.get("pricingSummary") or {}).get("price") or {}).get("value")

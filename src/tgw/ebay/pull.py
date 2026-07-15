@@ -31,6 +31,7 @@ from tgw.apis.ebay.client import ebay_get
 from tgw.apis.ebay.trading import get_my_ebay_selling, get_orders
 from tgw.apis.fence import ebay_write as fence_ebay_write
 from tgw.apis.fence import patch_item as fence_patch_item
+from tgw.ebay.draft_specifics import wrap_ebay_specifics
 
 log = logging.getLogger(__name__)
 
@@ -905,7 +906,10 @@ def backfill_draft_from_live(item: Dict[str, Any], cfg: Dict[str, Any]) -> bool:
         'format':           'FixedPrice',
         'quantity':         qty_avail,
         'price':            price,
-        'item_specifics':   item_specifics,
+        # todo #1418: Set B envelope, written via tgw.ebay.draft_specifics (no
+        # prior draft.item_specifics to diff against on this code path — this
+        # only fires when creating a fresh 'ebay_live'-sourced draft).
+        'item_specifics':   wrap_ebay_specifics(item_specifics),
         'description':      listing_desc_text,
         'listing_description': listing_desc_html,
         'imageUrls':        image_urls,

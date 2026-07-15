@@ -33,7 +33,7 @@ httpx = pytest.importorskip(
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from tgw import http_server  # noqa: E402
+from tgw import http_server, inventory_record  # noqa: E402
 
 API_KEY = "test-key-abc123"
 WEB_KEY = "test-web-key-xyz"  # browser login password (checked against _web_password)
@@ -3432,9 +3432,14 @@ def test_accept_proposals_persists_item_attributes_edit(env, monkeypatch):
 
     json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
     doc = json.loads(json_path.read_text(encoding="utf-8"))
-    assert doc["item_attributes"]["Brand"] == "NewBrand"
-    assert doc["item_attributes"]["Color"] == "Red"
-    assert doc["item_attributes"]["Size"] == "Large"
+    # todo #1418: item_attributes is now a self-describing Set A envelope —
+    # read via the sanctioned accessor, not the bare dict directly.
+    ia_fields = inventory_record.get_inventory_fields(doc)
+    assert ia_fields["Brand"] == "NewBrand"
+    assert ia_fields["Color"] == "Red"
+    assert ia_fields["Size"] == "Large"
+    assert doc["item_attributes"]["_set"] == "inventory_record"
+    assert len(doc["item_attributes_history"]) >= 1
     assert doc.get("revision_draft") is None
 
 
@@ -3498,7 +3503,7 @@ def test_accept_proposals_item_attributes_absent_before(env, monkeypatch):
 
     json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
     doc = json.loads(json_path.read_text(encoding="utf-8"))
-    assert doc["item_attributes"]["Brand"] == "FreshBrand"
+    assert inventory_record.get_inventory_fields(doc)["Brand"] == "FreshBrand"
 
 
 def test_form_review_renders(client):
