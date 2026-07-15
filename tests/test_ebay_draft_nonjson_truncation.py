@@ -45,7 +45,8 @@ def _mock_common(monkeypatch, tmp_path, sku, raw_response):
     monkeypatch.setattr(ebay_draft_mod, "_fetch_browse_aspect_hints", lambda *a, **k: {})
     monkeypatch.setattr(ebay_draft_mod, "get_task_model",
                         lambda cfg, task: ("openrouter", "google/gemini-2.5-flash-lite"))
-    monkeypatch.setattr(ebay_draft_mod, "_aspect_fill_photos", lambda item, sku_dir, provider: [])
+    monkeypatch.setattr(ebay_draft_mod, "_aspect_fill_photos",
+                        lambda item, sku_dir, provider, **kw: [])
     monkeypatch.setattr(ebay_draft_mod, "_encode_resized", lambda p, max_px=512: ("b64", 1, 1))
     monkeypatch.setattr(ebay_draft_mod, "call_model", lambda *a, **k: raw_response)
     monkeypatch.setattr(ebay_draft_mod.state_machine, "enqueue_job", lambda **k: "job-1")
