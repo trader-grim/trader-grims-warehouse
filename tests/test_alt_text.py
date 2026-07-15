@@ -193,6 +193,68 @@ class TestAltText:
         # Original history file unchanged
         assert (hist_dir / "tgw001.jpg").read_bytes() == b"old"
 
+    def test_broken_history_symlink_does_not_crash(self, tmp_path, monkeypatch):
+        """todo #1407: unmounted cold-archive drive (dangling symlink at the
+        history root) must not crash the job with FileExistsError — it
+        should skip the archive step, still complete alt_text/seo_caption,
+        and persist a durable pipeline_error finding."""
+        cfg = _make_cfg(tmp_path)
+        _make_item(cfg, "tgw001")
+        _add_photo(cfg, "tgw001", name="tgw001.jpg")
+        _patch_vision(monkeypatch)
+
+        # Simulate MasterArchive not mounted: history root is a dangling symlink.
+        history_root = Path(tmp_path) / "history"
+        history_root.symlink_to(Path(tmp_path) / "does-not-exist" / "MasterArchive-history")
+
+        patched_calls = []
+        monkeypatch.setattr(
+            alt_text_mod, "fence_patch_item",
+            lambda cfg, sku, fields: patched_calls.append((sku, fields)) or {"ok": True},
+        )
+
+        result = cmd_alt_text(cfg, sku="tgw001", model=_DUMMY_MODEL)
+
+        assert result["ok"] is True
+        assert result["archived_to_history"] is False
+        # Rest of the job still completed normally.
+        assert result["alt_text"]
+        alt_path = Path(cfg["itemdata_root"]) / "tgw001" / "tgw001-alt.jpg"
+        assert alt_path.exists()
+
+        # Durable C11 finding persisted.
+        assert len(patched_calls) == 1
+        sku, fields = patched_calls[0]
+        assert sku == "tgw001"
+        finding = fields["pipeline_error"]
+        assert finding["code"] == "archive_target_unmounted"
+        assert finding["source"] == "alt_text"
+        assert str(history_root) in finding["detail"] or "history" in finding["detail"]
+
+        # Item JSON itself was still written with alt_text/seo_caption.
+        item_json = json.loads((Path(cfg["itemdata_root"]) / "tgw001" / "tgw001.json").read_text())
+        assert item_json["draft_listing"]["alt_text"]
+
+    def test_history_root_reachable_helper(self, tmp_path):
+        from tgw.alt_text import _history_root_reachable
+
+        cfg = _make_cfg(tmp_path)
+        history_root = Path(tmp_path) / "history"
+
+        # No symlink at all yet -> parent dir (tmp_path) exists -> reachable
+        assert _history_root_reachable(cfg) is True
+
+        # Dangling symlink -> unreachable
+        history_root.symlink_to(Path(tmp_path) / "nope")
+        assert _history_root_reachable(cfg) is False
+
+        # Symlink resolves to a real dir -> reachable
+        history_root.unlink()
+        real_target = Path(tmp_path) / "real-history"
+        real_target.mkdir()
+        history_root.symlink_to(real_target)
+        assert _history_root_reachable(cfg) is True
+
     def test_idempotent_skip_when_already_processed(self, tmp_path):
         cfg = _make_cfg(tmp_path)
         _make_item(cfg, "tgw001", {"draft_listing": {"alt_text": "already set"}})
