@@ -758,9 +758,16 @@ def fetch_all_offers(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                 if eids and eids.issubset(_NO_OFFERS_IDS):
                     log.debug('fetch_all_offers: 400/%s — no offers (graceful empty)', eids)
                     break
-                for e in errors:
-                    log.warning('fetch_all_offers: eBay error %s: %s',
-                                e.get('errorId'), e.get('message', ''))
+                if errors:
+                    for e in errors:
+                        log.warning('fetch_all_offers: eBay error %s: %s',
+                                    e.get('errorId'), e.get('message', ''))
+                else:
+                    # Parsed OK but the 'errors' list itself was empty — still worth
+                    # a log line before re-raising so this doesn't silently look like
+                    # a no-op 400 in triage (todo #1397/PP-DEADLETTER-001).
+                    log.warning('fetch_all_offers: 400 with empty errors list — %s',
+                                exc.response.text[:200] if exc.response else '')
                 raise
             raise
         batch = data.get('offers', [])
