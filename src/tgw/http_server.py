@@ -1517,7 +1517,16 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                 dl2["title"] = delta["title"]
                 dl_touched = True
             if "description" in delta:
+                # Runner-review fix (todo #1416): accept_proposals is a
+                # separate endpoint (item_action) from patch_item(), which
+                # is the only place the #1415 listing_description
+                # regeneration lived. Without this, an accepted description
+                # proposal reintroduces the exact stale-push bug #1415 fixed
+                # (listing_description never regenerated, eBay pushes keep
+                # sending old text) through this second code path.
                 dl2["description"] = delta["description"]
+                _item_for_desc = {**doc, "draft_listing": dl2}
+                dl2["listing_description"] = build_listing_description(_item_for_desc, _cfg)
                 dl_touched = True
             proposal_fields: Dict[str, Any] = {"revision_draft": None}
             if dl_touched:

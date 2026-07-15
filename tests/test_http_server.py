@@ -3520,6 +3520,12 @@ def test_accept_proposals_persists_draft_listing_title_description(env, monkeypa
     doc = json.loads(json_path.read_text(encoding="utf-8"))
     assert doc["draft_listing"]["title"] == "Corrected Title"
     assert doc["draft_listing"]["description"] == "Corrected description text."
+    # Runner-review regression (todo #1416): accept_proposals is a separate
+    # endpoint from patch_item() — the #1415 fix (regenerate
+    # listing_description whenever description changes) lives only in
+    # patch_item(), so accept_proposals must regenerate it independently or
+    # the exact stale-push bug #1415 fixed comes back through this door.
+    assert "Corrected description text." in doc["draft_listing"]["listing_description"]
     # Original draft_listing fields untouched by the merge
     assert doc["draft_listing"]["price"] == _DRAFT_LISTING["price"]
     assert doc.get("revision_draft") is None

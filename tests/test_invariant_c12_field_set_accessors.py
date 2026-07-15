@@ -68,7 +68,7 @@ _ALLOWLIST = {
     (_SRC / "tgw" / "http_server.py", 1506),              # (b) revision_draft.delta
     (_SRC / "tgw" / "http_server.py", 1508),              # (b) revision_draft.delta
     (_SRC / "tgw" / "http_server.py", 1514),              # (a) accessor patch write (todo #1416)
-    (_SRC / "tgw" / "http_server.py", 5035),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 5044),              # (b) revision_draft.delta — line shifted by the runner-review listing_description fix (todo #1416)
 }
 
 
