@@ -691,6 +691,72 @@ go/no-go decision, not bundled into this invariant landing — both the old
 bare-dict shape and the new envelope shape must (and do) coexist correctly
 for as long as that transition takes.
 
+## C13 — Set A writes are gated, provenance-recorded, operator-reviewed proposals — never a silent auto-promotion ✅ (2026-07-15, todo #1417, PP-LISTEDITOR-001)
+
+**Rule:** `item_attributes` (Set A) may be written by an eBay-draft-discovered
+value ONLY through an explicit, named, provenance-recording write path —
+`tgw.ebay.inventory_diff.apply_inventory_diff()` — never a generic PATCH
+passthrough, and never silently/automatically (no confidence-threshold
+auto-promotion). Every promotion is an explicit operator submit against a
+default-checked diff (Dave, 2026-07-15: "presenting a selectable diff
+offering to update the inventory record, all differences checked by
+default, operator can uncheck or skip altogether. Gated automatic
+update."). This is C12's write-discipline extended specifically to the
+REVERSE (Set B -> Set A) direction; C12 itself already covers "read/write
+only through the named accessor" for both sets and both directions.
+
+**Why:** #1416's investigation (see C12 above) found no reverse-flow
+mechanism existed at all — an eBay-draft-discovered correction (e.g. an
+AI-vision-resolved "Brooch" vs the stale universal "Lapel Pin") had no
+path back into the universal inventory record, confirmed by absence, not
+a bug to locate. Building that path without a review gate would have
+violated the operator-gate-is-the-design precedent (C9/C10) the same way
+a silent forward auto-write would have.
+
+**Enforcement:**
+- *Code level*: `tgw.ebay.inventory_diff.apply_inventory_diff()` is the
+  sole sanctioned reverse-flow write function, built on
+  `tgw.inventory_record.set_inventory_fields()` (never a raw dict merge).
+  It re-diffs live against the item at call time rather than trusting
+  caller-supplied values — a stale/no-longer-true diff key requested by a
+  client is silently skipped (idempotent no-op), never force-written.
+  Covered by the same C12 static allowlist detector
+  (`tests/test_invariant_c12_field_set_accessors.py`) since it's built on
+  the same accessor.
+- *UI level*: `GET /api/items/{sku}/inventory-diff` (read-only, safe to
+  call any time) + `POST /api/items/{sku}/inventory-diff/apply` (writes
+  ONLY the checked subset) are a separate, distinctly-labeled panel
+  ("eBay → Inventory Record sync") from the FORWARD `accept_proposals`
+  banner ("Pipeline proposed changes") — no shared action name, no shared
+  write path, so an operator can never confuse "accept this eBay-side
+  proposal" (Set A -> Set B) with "accept this inventory-record-bound
+  diff" (Set B -> Set A).
+- *Data level*: catalog-verify rule `inventory_diff_unresolved_stale`
+  (`tgw.api._verify_item`) flags any item where
+  `tgw.ebay.inventory_diff.diff_ebay_draft_to_inventory()` finds a key
+  that has disagreed for 30+ days with a known `detected_at` (never
+  fabricates an age for a legacy item with no timestamp — Prime Directive
+  1). Unlike `field_set_drift` (C12's data detector), this is NOT gated on
+  a live `ebay_offer.offer_id` — an unresolved reverse-flow diff matters
+  for a pre-publish draft too, since Dave's design intent here is routine
+  review cadence, not just live-listing correctness. The 30-day threshold
+  is the packet spec's proposed default, flagged as worth confirming with
+  Dave rather than silently settled.
+
+**Idempotency / re-diffing (spec point 5, confirmed design choice — see
+todo #1417's result manifest for the full reasoning):** an unapplied/
+unchecked diff has NO stored "dismissed" state — it simply reappears on
+the next `GET /inventory-diff` call because Set A and Set B still
+genuinely disagree, which is correct (the disagreement is still true).
+Chosen over a sticky-skip because (a) the packet spec's own default
+reasoning is "no stored dismissed state needed... an unapplied diff just
+reappears... which is correct," and (b) a sticky-skip would need its own
+new persisted state (a fourth thing to track per key, when C12/C13 are
+already working to keep the two field-sets' bookkeeping minimal) with no
+stated requirement driving it. If Dave wants a sticky skip later, that's
+a small, additive change on top of this (a `dismissed_diff_keys` list
+checked by the diff engine) — not a redesign.
+
 ## E8 — The Google free tier is the operator emergency reserve ✅ (2026-07-04, session 45) — SUPERSEDED for background use 2026-07-08
 
 **Original rule (free-tier era):** Background jobs never spend the Google

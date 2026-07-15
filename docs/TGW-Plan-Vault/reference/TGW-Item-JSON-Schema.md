@@ -85,8 +85,26 @@ inline "Phase 2b" prefill logic (no behavior change beyond the
 extraction). `ebay_draft.py` calls it to pre-fill `item_specifics` from
 `item_attributes` (below `product_lookup` priority); any future caller
 that needs to move a Set A value onto a Set B aspect calls this function
-too, rather than reinventing a partial version. The reverse flow (Set B
-→ Set A diff-apply) is #1417, not yet built.
+too, rather than reinventing a partial version.
+
+**Set B → Set A reverse flow (todo #1417, landed):**
+`tgw.ebay.inventory_diff.diff_ebay_draft_to_inventory(item)` compares
+`draft_listing.item_specifics` (Set B) against `item_attributes` (Set A)
+key-by-key and returns one `FieldDiff` per differing key (a Set B-only key
+is a diff too, `inventory_value=None`; a Set A-only key is NOT — Set A can
+legitimately hold facts no marketplace needs). `apply_inventory_diff(item,
+keys, *, applied_by="operator")` writes ONLY the requested keys into Set A
+(built on `tgw.inventory_record.set_inventory_fields`, with each history
+entry annotated with the diff's own `detected_at` in addition to the
+accessor's usual `ts`/`source`/`applied_by`/`previous_value`) — it re-diffs
+live rather than trusting caller-supplied values, so a stale/no-longer-true
+request is a silent no-op, never a forced write. Exposed as
+`GET /api/items/{sku}/inventory-diff` (read-only) and
+`POST /api/items/{sku}/inventory-diff/apply` (gated write, checked-subset
+only), with their own UI panel ("eBay → Inventory Record sync") — a
+DIFFERENT code path from `accept_proposals`/`revision_draft` (the forward
+proposal system), no shared write path or action name. See
+`invariants.md` C13.
 
 ### Field-set envelope shape
 

@@ -33,7 +33,7 @@ httpx = pytest.importorskip(
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from tgw import http_server  # noqa: E402
+from tgw import http_server, inventory_record  # noqa: E402
 from tgw.ebay import draft_specifics  # noqa: E402
 
 API_KEY = "test-key-abc123"
@@ -3607,6 +3607,197 @@ def test_item_detail_aspects_form_prefills_from_set_b_not_set_a(env):
     assert r.status_code == 200
     assert 'window._DL_PREFILL = {"Type": "Brooch"}' in r.text
     assert "Lapel Pin" not in r.text.split("window._DL_PREFILL")[1][:200]
+
+
+# ---------------------------------------------------------------------------
+# todo #1417: eBay Draft -> Inventory Record reverse-flow endpoints. A
+# DIFFERENT code path from accept_proposals above (different data source
+# Set B -> different destination Set A, own button, no shared action name
+# — spec point 6/3) — verified as real, separate HTTP endpoints, not a
+# unit test of internal functions in isolation.
+# ---------------------------------------------------------------------------
+
+def test_inventory_diff_get_surfaces_mismatch(env):
+    sku = "tgw20260615110000030"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Diff Test Widget", "location": "X9",
+        "item_attributes": {"Type": "Lapel Pin", "Brand": "Unbranded"},
+        "draft_listing": {
+            "item_specifics": {"Type": "Brooch", "Brand": "Unbranded", "Metal": "Silver"},
+        },
+    })
+    r = env["client"].get(f"/api/items/{sku}/inventory-diff", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    keys = {d["key"] for d in body["diffs"]}
+    assert keys == {"Type", "Metal"}
+    type_diff = next(d for d in body["diffs"] if d["key"] == "Type")
+    assert type_diff["inventory_value"] == "Lapel Pin"
+    assert type_diff["ebay_value"] == "Brooch"
+    metal_diff = next(d for d in body["diffs"] if d["key"] == "Metal")
+    assert metal_diff["inventory_value"] is None  # new fact, not a correction
+
+
+def test_inventory_diff_get_requires_auth(client):
+    sku = "tgw20260615110000031"
+    r = client.get(f"/api/items/{sku}/inventory-diff")
+    assert r.status_code in (401, 403)
+
+
+def test_inventory_diff_get_404_unknown_sku(env):
+    r = env["client"].get("/api/items/tgw99999999999999999/inventory-diff", headers=AUTH_HEADERS)
+    assert r.status_code == 404
+
+
+def test_inventory_diff_get_read_only_no_mutation(env):
+    """Spec point 2: the GET endpoint never mutates anything, callable any
+    time."""
+    sku = "tgw20260615110000032"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Read Only Test", "location": "X9",
+        "item_attributes": {"Type": "Lapel Pin"},
+        "draft_listing": {"item_specifics": {"Type": "Brooch"}},
+    })
+    json_path = env["itemdata_root"] / sku / f"{sku}.json"
+    before = json_path.read_text(encoding="utf-8")
+    r = env["client"].get(f"/api/items/{sku}/inventory-diff", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    after = json_path.read_text(encoding="utf-8")
+    assert before == after
+
+
+def test_inventory_diff_apply_writes_only_checked_keys(env, monkeypatch):
+    """Acceptance item 2: uncheck one field, submit, confirm only the
+    checked field landed in item_attributes with provenance, and the
+    unchecked one still shows as an open diff afterward."""
+    monkeypatch.setattr(http_server, "_enqueue_catalog_rebuild", lambda *a, **k: None)
+    sku = "tgw20260615110000033"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Apply Test Widget", "location": "X9",
+        "item_attributes": {"Type": "Lapel Pin"},
+        "draft_listing": {
+            "item_specifics": {"Type": "Brooch", "Metal": "Silver"},
+            "item_specifics_history": [
+                {"ts": "2026-07-01T00:00:00+00:00", "key": "Type",
+                 "value": "Brooch", "previous_value": "Lapel Pin",
+                 "source": "ebay_draft", "applied_by": "system"},
+                {"ts": "2026-07-01T00:00:00+00:00", "key": "Metal",
+                 "value": "Silver", "previous_value": None,
+                 "source": "ebay_draft", "applied_by": "system"},
+            ],
+        },
+    })
+
+    client = env["client"]
+    # Operator unchecked "Metal" in the UI — only "Type" submitted.
+    r = client.post(
+        f"/api/items/{sku}/inventory-diff/apply",
+        json={"keys": ["Type"]},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["applied"] == ["Type"]
+
+    json_path = env["itemdata_root"] / sku / f"{sku}.json"
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    ia_fields = inventory_record.get_inventory_fields(doc)
+    assert ia_fields["Type"] == "Brooch"
+    assert "Metal" not in ia_fields  # not checked, not applied
+    hist = doc["item_attributes_history"]
+    assert hist[-1]["key"] == "Type"
+    assert hist[-1]["source"] == "ebay_draft"
+    assert hist[-1]["applied_by"] == "operator"
+    assert hist[-1]["detected_at"] == "2026-07-01T00:00:00+00:00"
+
+    # The un-checked/skipped key still shows as an open diff — no sticky
+    # dismissed state (spec point 5).
+    r2 = client.get(f"/api/items/{sku}/inventory-diff", headers=AUTH_HEADERS)
+    remaining_keys = {d["key"] for d in r2.json()["diffs"]}
+    assert remaining_keys == {"Metal"}
+
+
+def test_inventory_diff_apply_does_not_touch_draft_listing_or_revision_draft(env, monkeypatch):
+    """Spec point 6: this packet's apply action shares no write path with
+    accept_proposals/revision_draft — draft_listing must be untouched."""
+    monkeypatch.setattr(http_server, "_enqueue_catalog_rebuild", lambda *a, **k: None)
+    sku = "tgw20260615110000034"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Isolation Test Widget", "location": "X9",
+        "item_attributes": {"Type": "Lapel Pin"},
+        "draft_listing": {"item_specifics": {"Type": "Brooch"}, "price": 14.99},
+        "revision_draft": {"delta": {"title": "Unrelated pipeline proposal"}},
+    })
+    client = env["client"]
+    r = client.post(
+        f"/api/items/{sku}/inventory-diff/apply",
+        json={"keys": ["Type"]},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    json_path = env["itemdata_root"] / sku / f"{sku}.json"
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert doc["draft_listing"]["price"] == 14.99
+    assert draft_specifics.get_ebay_aspects(doc)["Type"] == "Brooch"  # Set B untouched
+    assert doc["revision_draft"]["delta"]["title"] == "Unrelated pipeline proposal"
+
+
+def test_inventory_diff_apply_idempotent_no_op_when_stale(env, monkeypatch):
+    """A key requested that is no longer an active diff (Set A/Set B
+    already agree by the time of the call) is a silent no-op, not an
+    error — re-diffing live, never trusting caller-supplied values."""
+    monkeypatch.setattr(http_server, "_enqueue_catalog_rebuild", lambda *a, **k: None)
+    sku = "tgw20260615110000035"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Stale Apply Test", "location": "X9",
+        "item_attributes": {"Type": "Brooch"},
+        "draft_listing": {"item_specifics": {"Type": "Brooch"}},
+    })
+    client = env["client"]
+    r = client.post(
+        f"/api/items/{sku}/inventory-diff/apply",
+        json={"keys": ["Type"]},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["applied"] == []
+
+
+def test_inventory_diff_apply_requires_auth(client):
+    sku = "tgw20260615110000036"
+    r = client.post(f"/api/items/{sku}/inventory-diff/apply", json={"keys": ["Type"]})
+    assert r.status_code in (401, 403)
+
+
+def test_item_detail_page_renders_inv_diff_panel_container(env):
+    """Acceptance item 3: the reverse-flow panel is a distinct, separately
+    labeled panel from the forward "Pipeline proposed changes" banner —
+    both present on the same test item, never sharing an action name."""
+    _login(env["client"])
+    sku = "tgw20260615110000037"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Both Panels Test Widget", "location": "X9",
+        "item_attributes": {"Type": "Lapel Pin"},
+        "draft_listing": {"item_specifics": {"Type": "Brooch"}},
+        "revision_draft": {"delta": {"title": "Some pipeline title proposal"}},
+    })
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    # The reverse-flow panel container + its own distinct button/label.
+    assert 'id="inv-diff-panel"' in r.text
+    assert "eBay &rarr; Inventory Record sync" in r.text or "eBay → Inventory Record sync" in r.text
+    assert "applyInventoryDiff()" in r.text
+    assert "Apply Checked to Inventory Record" in r.text
+    # The forward banner is also present and uses a DIFFERENT button/action.
+    assert "Pipeline proposed changes" in r.text
+    assert "acceptProposals()" in r.text
+    assert "Accept All Proposals" in r.text
+    # No shared action name between the two.
+    assert "applyInventoryDiff" != "acceptProposals"
 
 
 def test_form_review_renders(client):
