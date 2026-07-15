@@ -128,6 +128,22 @@ def _prepare_upload_bytes(photo_path: Path) -> bytes:
     return resized_bytes
 
 
+def _build_upload_payload(picture_name: str) -> str:
+    """
+    Build the UploadSiteHostedPicturesRequest XML body.
+
+    *picture_name* (typically a photo's filename stem) is placed as element
+    text content via ElementTree, which XML-escapes it automatically --
+    unlike raw f-string interpolation, this is safe for names containing
+    `&`, `<`, `>`, etc.
+    """
+    root = ET.Element('UploadSiteHostedPicturesRequest', xmlns=_NS)
+    ET.SubElement(root, 'PictureName').text = picture_name
+    ET.SubElement(root, 'PictureSet').text = 'Supersize'
+    body = ET.tostring(root, encoding='unicode')
+    return f'<?xml version="1.0" encoding="utf-8"?>{body}'
+
+
 def upload_photo(cfg: Dict[str, Any], photo_path: Path) -> str:
     """
     Upload *photo_path* to eBay EPS and return the eBay-hosted FullURL.
@@ -142,13 +158,7 @@ def upload_photo(cfg: Dict[str, Any], photo_path: Path) -> str:
     token = load_token(cfg)
     mime = _MIME.get(photo_path.suffix.lower(), 'image/jpeg')
 
-    xml_payload = (
-        '<?xml version="1.0" encoding="utf-8"?>'
-        f'<UploadSiteHostedPicturesRequest xmlns="{_NS}">'
-        f'<PictureName>{photo_path.stem}</PictureName>'
-        '<PictureSet>Supersize</PictureSet>'
-        '</UploadSiteHostedPicturesRequest>'
-    )
+    xml_payload = _build_upload_payload(photo_path.stem)
 
     headers = {
         'X-EBAY-API-IAF-TOKEN':          token,
