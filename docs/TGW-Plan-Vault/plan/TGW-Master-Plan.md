@@ -267,6 +267,14 @@ running as before; cats (AI workers) go into the catio one at a time; the
 crypto-lock cage comes last. Full design: `pp/PP-CATIONIX-001.md`; persona
 design: `pp/PP-HERMES-EA-001.md`.
 
+**Buildout beginning 2026-07-14 — standing requirement: build portable,
+independent of the separate/unresolved Nix question** (Dave: "our platform
+is better off being portable in the long run"). Immediate consequence for
+PP-AIOPS-001 Phase 5: bubblewrap vs. nspawn+Btrfs reconciliation now leans
+portable-by-default. Full writeup in `pp/PP-CATIONIX-001.md`'s new
+standing-requirement section; broader Nix-or-not question stays parked in
+`FUTURE-IDEAS.md`, unaffected by this.
+
 ## PP-HERMES-EA-001 — Tigwa & Leotha personas (the "dev team" upgrade)
 **New 2026-07-11.** Two personas on one Hermes instance — Tigwa
 (business-facing executor, new direction for the stopped `pm_intake`
@@ -277,6 +285,16 @@ by using `tgw` itself, supervised, before any autonomous authority unlocks
 apprenticeship task: justshoutit (PP-INTAKE-004). Execution/isolation
 substrate is PP-AIOPS-001, not re-designed here. Full design:
 `pp/PP-HERMES-EA-001.md`.
+
+## PP-RUNNERCOMMS-001 — the runner-question channel — NEW 2026-07-14
+**OPEN, needs a dedicated planning session — not decided.** Split out of
+PP-HERMES-EA-001 same day (Dave: "seems we need an overall plan for that
+piece") once the question of how a blocked runner gets a fast answer grew
+into three real candidate options: todos (current), an in-process channel,
+or asking Tigwa to relay to Dave. Concrete test case: todo #1286's
+permission-gated restore. Converges with PP-CODEGRAPH-001's Z3 invariant
+catalog as a plausible shared transport. Full design: `pp/PP-RUNNERCOMMS-001.md`;
+tracked by todo #1390.
 
 ## PP-AIOPS-001 — structured AI/operational resilience platform ("cat herding and litterbox cleaning")
 **Given its own heading 2026-07-11** — previously only a bare Frozen-list
@@ -683,7 +701,7 @@ promoted to their own `pp/` files.
 | Core spine | **PostgreSQL LISTEN/NOTIFY** (event bus) | pays off broadly: charting/forecasting, photo-set production-time analytics, the event server (PP-EVENTD-001), research feeding AI workers | **RESOLVED 2026-07-11** — not NATS JetStream, see note below |
 | Memory | Hindsight (timelines/experiences) | "what happened before?" | exploratory — prebuilt layered ON the core spine, not committed |
 | Knowledge | gbrain (curated "working truth") | "what do we believe now?" | exploratory — same, not committed |
-| Graph | Graphify (code + doc relationships) | "what connects to this?" | new, near-term — TGW `src/` + arch docs + plans/ADRs; Hermes-driven trigger policy (file, not hardcoded); userspace, not the flake |
+| Graph | Graphify (code + doc relationships) | "what connects to this?" | **detailed design merged in from PP-CODEGRAPH-001, 2026-07-14** — 4-layer stack (Tree-sitter/FalkorDB code graph, Postgres+Z3 invariant catalog, DuckDB execution-trace store, unified MCP layer), hosted on a1131, see PP-CODEGRAPH-001 section below for full design; awaiting Dave's research before build |
 
 **Core-spine NATS-vs-Postgres note (2026-07-11, do not conflate with
 PP-AIOPS-001's separate JetStream use):** PostgreSQL LISTEN/NOTIFY wins for
@@ -711,6 +729,43 @@ Stage-1 packets: #1147 (R2 search surface — priority), #1148 (R1 field
 mapping), #1149 (A0 Syncthing/annex boundary decision, Dave 15min), #1150
 (A1 annex pilot on archive corpus). Drive-fleet manifests continue under
 PP-DRIVE-INDEX (#1136).
+
+**Starting point for Tigwa's knowledgebase work, decided 2026-07-14 (Dave):**
+"my first research started with graphify, but I found the better solution."
+The Graph/Graphify layer (FalkorDB/Z3/DuckDB/MCP, PP-CODEGRAPH-001 section
+below) was Dave's original research target, but he's since decided
+git-annex + Recoll (Storage + Search, A0/A1 above — A0's boundary decision
+is already set, A1 is unblocked) is the better starting point for Tigwa to
+actually begin on and for Dave to get familiar with the tools hands-on.
+Event fabric (Track E / "JetStream", see `recoll-annex-jetstream.md`) is
+explicitly deferred — not part of this starting point. Graph/Graphify
+still needs its own planning pass (5 open packaging questions, see
+PP-CODEGRAPH-001 section) before Tigwa or anyone builds it — not skipped,
+just sequenced after git-annex/Recoll.
+
+**Target use cases, same decision (Dave, 2026-07-14):** PP-DATAINTEGRITY-001
+(see its own master-plan section) is what Tigwa targets with this — not
+a generic "index everything" exercise. Concrete starting scope: the
+photo-integrity design's open legs 2/3, and the `status`/`#STATUS`
+write-path reconciliation once scoped. Grounds the buildout in real,
+already-identified reconciliation work instead of an abstract capability.
+
+**This is infrastructure, not an iterated/churny tool (Dave, 2026-07-14):**
+"I want this to be an infrastructure piece. When it is mature and we have
+better hardware they may live side by side." a1131 hosts it for now (good
+workspace, thermal-relief compute, no production traffic), but unlike
+Hermes/Aider (deliberately kept in userspace — PP-NIXOS-001's standing
+rule, see `decouple-hermes-aider-flake.md`) the knowledgebase stack is
+meant to mature into real settled infrastructure that could eventually run
+alongside tgw-prod's production stack on better hardware. Practical
+consequence: package it **declaratively in a1131's flake** (`git-annex`,
+`recoll`), not via imperative `nix profile install` — directly applying
+today's lesson from the Hermes incident (imperative per-user nix-profile
+installs broke `hermes update` on two hosts because they're just as
+immutable as a flake package but without any of the declarative tracking).
+This also leans the still-open FalkorDB packaging question (Graph layer,
+PP-CODEGRAPH-001) toward "NixOS service" over "userspace nix-profile" —
+not decided yet, but the precedent points that way.
 
 ### PP-ANNEX-001 — the archiving/librarian layer — PROMOTED 2026-07-11
 **"A librarian/archivist tool built into the library itself"** (Dave) —
@@ -772,6 +827,15 @@ history plausibly has real duplicate files recoverable via a dedup scan
 (fclones/rmlint/sha256 fingerprinting, per Phase 0.1's own tooling list),
 achievable against what's already mounted, no new drives needed first.
 
+## PP-DEADLETTER-001 — pipeline dead-letter root-cause triage — NEW 2026-07-14
+Surfaced monitoring #1265's bulk requeue (only covers the 402 pattern,
+2658 of ebay_draft's 2771 dead-letters). Dave: "those are our known edge
+cases, let's get them covered. Let's run it through the process" — same
+PP-COHESION-001 discipline (packets before dispatch, tgw-coder,
+tgw-runner-review). ~350 dead-letters across 8 queues triaged into
+transient-only (safe requeue, no fix) vs. real bug findings (own
+packet+todo each). Full breakdown + execution plan: `pp/PP-DEADLETTER-001.md`.
+
 ## PP-DATAINTEGRITY-001 — data reconciliation & integrity track — NEW 2026-07-11
 **Dave: "there should be a data integrity track, for all of the data
 reconciliations — there is a planning item or two unaddressed."** Correct
@@ -787,6 +851,20 @@ bad/149 SKUs found. Legs 2 (verify-after-copy sha256 helper) and 3
 Phase 1; prevention's structural endgame still depends on PP-ANNEX-001.
 Full design: `docs/ai-plans/photo-integrity-mitigation.md`; PP index:
 `pp/PP-DATAINTEGRITY-001.md`.
+
+**Target use cases for Tigwa's knowledgebase buildout (Dave, 2026-07-14):**
+"I will have tigwa target these use cases in her knowledgebase build out."
+This PP's own reconciliation work (photo integrity detect/recover/prevent
+legs, the `status`/`#STATUS` write-path forensics below) is exactly the
+shape of problem the git-annex/Recoll knowledgebase (PP-KNOWLEDGE-001,
+buildout starting 2026-07-14) is meant to make fast — archive-snapshot
+diffing, write-path history tracing, catalog-verify cross-checks were all
+done by hand this project's history (see the `#1377` writeup below: found
+via "ItemArchive snapshot diffs + `data-scrub-1053-report.json`," exactly
+the kind of search a mature knowledgebase should make trivial). Concrete
+starting scope for her, not abstract: legs 2/3 of the photo-integrity
+design (open), and the `status`/`#STATUS` reconciliation pass (not yet
+scoped/executed) once Dave scopes the "fun inventory."
 
 **New leg 2026-07-13: `status` vs `#STATUS` write-path bug (todo #1377).**
 Found while fixing the web UI's Eligible filter (it was silently excluding
@@ -942,7 +1020,20 @@ gap-report triage still not started. Needs a todo filed with
 `--pp PP-RUNBOOK-001` before any further runbook file gets touched
 (going-forward tagging rule).
 
-## PP-CODEGRAPH-001 — code graph + invariant/trace infrastructure (agents see design convergences) — NEW 2026-07-14
+## PP-CODEGRAPH-001 — code graph + invariant/trace infrastructure (agents see design convergences) — FOLDED INTO PP-KNOWLEDGE-001, 2026-07-14
+
+**Merged same day as filed (Dave, 2026-07-14 afternoon): "pp-codegraph also
+same project now"** — PP-CODEGRAPH-001 is no longer tracked as a separate
+PP; it's the concrete build-out of PP-KNOWLEDGE-001's "Graph | Graphify"
+layer (see that section's 6-layer table above), which already existed as a
+placeholder row before this PP was filed this morning. Both are hosted on
+a1131, both were "awaiting Dave's research before build," and today's
+"knowledge project on a1131" request refers to this single merged project
+going forward — don't treat them as two separate initiatives requiring
+separate scaffolding decisions. This section is kept in place (not deleted
+— Prime Directive 1) as the detailed design record for the Graphify layer;
+new work should be logged under PP-KNOWLEDGE-001 going forward, with this
+section as its Graph-layer appendix.
 
 **Origin:** filed as a deferred FUTURE-IDEAS.md entry 2026-07-14 morning
 after Dave's directed Perplexity research (not blind — grounded against

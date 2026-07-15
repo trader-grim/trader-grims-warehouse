@@ -741,31 +741,13 @@ one runner at a time — the planner is the one authoring packets ahead of
 dispatch, concurrently with runners executing already-dispatched work, not
 in a separate blocking phase before any runner starts.
 
-**Question channel, as of 2026-07-14:** todos are the current mechanism a
-blocked runner uses to raise a question the planner picks up (the
-`#1384`-style "Decide:" pattern demonstrated this — see
-[[reference-todo-title-overwrite-bug]] in memory). Dave: "todo is the
-channel we have now, but maybe an in-process channel is a good idea, we
-should discuss in planning." **Open, not yet decided** — do not assume
-todos are the final answer here; a lower-latency in-process channel
-(direct message/queue rather than poll-the-tracker) is an open design
-question for a dedicated planning session, not resolved by this note.
-
-**Concrete case grounding this, same session (2026-07-14):** todo #1286's
-body had been clobbered by the bug #1384 fixed. Restoring it was a one-line
-`tgw todo --update`, but the auto-mode permission classifier correctly
-blocked the edit (a pre-existing shared tracker item, not created that
-session) and required an explicit yes/no from Dave before proceeding. In
-*this* session that was a two-message round trip because Dave was right
-there. **In an unsupervised tgw-coder run, that same block would park the
-worktree until someone happened to poll the todo tracker** — there's no
-guarantee the planner sees it promptly. That gap — permission-gated
-decision mid-task, runner can't self-resolve, needs a fast answer to keep
-going rather than sit idle — is exactly the scenario the in-process channel
-question above is meant to close. Use this as the concrete test case when
-the planning session designs it: would the proposed channel have turned
-that two-message round trip into something a runner gets back inside its
-own task loop, not on the next tracker poll?
+**Question channel — split out to its own PP, 2026-07-14:** how a blocked
+runner gets a fast answer (todos vs. an in-process channel vs. asking
+Tigwa to relay to Dave) grew into three real candidate options and needed
+its own home — see **`pp/PP-RUNNERCOMMS-001.md`** (todo #1390) for the
+full writeup, concrete test case (#1286), and all three options. Not
+resolved here, not resolved there yet either — still needs the dedicated
+planning session.
 
 **Planner/stitcher as operating console + decision gate — converges with
 PP-CODEGRAPH-001's Z3 invariant catalog (Dave, 2026-07-14, still

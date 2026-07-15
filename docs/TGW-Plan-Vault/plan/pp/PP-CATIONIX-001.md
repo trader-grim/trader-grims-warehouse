@@ -182,6 +182,38 @@ Phase 1"), not a claim that the underlying build prerequisites are done.
 
 ---
 
+## Standing requirement: build portable, independent of the Nix decision (Dave, 2026-07-14)
+
+**"The catio buildout is beginning. Even if we decide to keep Nix,
+temporarily or permanently, our platform is better off being portable in
+the long run."** This is a standing design constraint on Catio work from
+here forward, not contingent on resolving the broader open Nix question
+(parked, see `FUTURE-IDEAS.md` "How tied are we to Nix, really" — Dave is
+still mulling that one and it stays unresolved). Two different questions,
+don't conflate them: "should TGW leave Nix" is undecided; "should new
+Catio infrastructure avoid unnecessary Nix-specific coupling" is decided,
+now, regardless of how the first one eventually resolves.
+
+**Concrete, immediate consequence:** PP-AIOPS-001 Phase 5's AI session
+isolation was designed around systemd-nspawn + Btrfs CoW snapshots,
+explicitly gated on PP-NIXOS-001 and meant to be "reproducible and
+versionable in the flake." That's the opposite of this requirement.
+Bubblewrap (already in a1131's flake, serving Codex CLI's own `--sandbox`
+mode — plain Linux user namespaces, no NixOS module dependency, portable
+to any distro) is the standing candidate to reconcile against nspawn
+before Phase 5 build starts — not yet decided (Btrfs CoW rollback,
+session-isolation guarantees, and GPU-passthrough notes in the original
+design all need real scrutiny, not just "it's not Nix so it's simpler"),
+but the default lean is now toward the portable option, not the Nix-native
+one, when the two are otherwise comparable.
+
+**How to apply going forward:** when a Catio-buildout decision has a choice
+between a Nix-coupled mechanism and a portable one with comparable
+guarantees, prefer the portable one — flag the tradeoff explicitly if the
+Nix-coupled option is meaningfully better on a real axis (not just
+familiarity), don't silently default to Nix because that's what the rest
+of the host already uses.
+
 ## Phase 1 — Structure (2026-07-11 session)
 
 Three simultaneous upgrades, per Dave's own framing — "a catio, dev team,

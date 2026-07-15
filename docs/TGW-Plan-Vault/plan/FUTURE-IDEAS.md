@@ -342,3 +342,96 @@ indexed). PP-ANNEX-001's full design lives in
 research content (control-plane/data-plane grounding, tiered-remote design,
 scale context) is preserved in that design doc and this session's plan
 notes — not deleted, just relocated out of the future-ideas holding pen.
+
+---
+
+## How tied are we to Nix, really — a reality check Dave wants to mull, not decide (2026-07-14)
+
+**Dave's own framing, the actual thing driving this:** "NIX is great and it
+is also a pain in the ass. In my experience even Gentoo was easier to
+maintain... I do not like being afraid updating my system can make it
+unusable." Not a syntax complaint — a real operational fear about update
+risk. Explicitly **not ready for a decision** ("I will mull a while") —
+this entry exists so the reality check doesn't evaporate before he's ready
+to act on it, not to propose a migration.
+
+**Same-day concrete evidence feeding the question:** a per-user imperative
+`nix profile install` of hermes-agent (immutable `/nix/store` path, no
+declarative tracking) broke `hermes update` on two hosts, discovered only
+because Dave hit the error directly on a1131. Real cost paid today:
+backup, uninstall, official-reinstall, verify, on tigwa's account, plus
+the same root cause confirmed present on tgw-prod's `db` account too.
+Also this project's own repeated history: "wrangling the flake has been
+consuming disproportionate usage — whole day-budgets spent... against
+tasks that should be ordinary coding" (the standing rule that pulled
+Hermes/Aider out of the flake in the first place, 2026-07-06, reinforced
+again today).
+
+**Coupling assessment, as it actually stands (not proposed, current
+reality):**
+- **Application layer — barely tied at all.** `src/tgw/` runs as a plain
+  Python venv (`/opt/TGW/.venvironments/tgw`) deployed via git + systemd
+  restarts. Every code fix this whole session took effect with zero
+  `nixos-rebuild` involved — this is portable to any Linux distro today.
+- **OS/host layer — deeply tied, by design.** NixOS is the actual
+  operating system on tgw-prod and a1131. Leaving means an OS reinstall,
+  not a package-manager swap. Declarative system config, users, network,
+  security hardening, filesystems all live here. No app-code dependency
+  on Nix specifically, but real depth of commitment at the provisioning
+  layer.
+
+**The proposed-system tie-in Dave specifically recalled:** PP-AIOPS-001
+Phase 5 (AI session isolation — the actual technical substrate for
+PP-CATIONIX-001's crypto-lock cage) is designed around **systemd-nspawn +
+Btrfs CoW snapshots**, explicitly gated on PP-NIXOS-001, with the sandbox
+container definition meant to be "reproducible and versionable in the
+flake" (`plan/PP-AIOPS-001-cat-herding-platform.md`). Docker/Podman were
+compared and rejected in that doc — nspawn's argued advantage is sharing
+the host's `/nix/store` with zero overhead, itself a Nix-specific
+argument. **Bubblewrap was never in that comparison.**
+
+**The "better non-nix solution" Dave believes we already found:**
+bubblewrap — added to a1131's flake 2026-07-12 for Codex CLI's own
+`--sandbox` mode (command isolation via plain Linux user namespaces, no
+NixOS module or flake dependency, portable to any distro). It solves the
+same *class* of problem (isolate an AI agent's file/process access) that
+PP-AIOPS-001 Phase 5 wants nspawn for. **Not yet reconciled** — bubblewrap
+is only logged as serving Codex's own sandboxing today; the AIOPS Phase 5
+design doc still says nspawn+Btrfs and still gates on PP-NIXOS-001. If
+bubblewrap is meant to replace nspawn as the crypto-lock cage's actual
+mechanism, that pivot hasn't been evaluated (session isolation guarantees,
+Btrfs CoW rollback story bubblewrap doesn't natively give, GPU passthrough
+considerations noted in the original doc) — worth real scrutiny before
+assuming it's a drop-in swap, not just "it's not Nix so it's simpler."
+
+**What this entry is NOT:** a recommendation to migrate off Nix, drop
+PP-NIXOS-001, or rewrite PP-AIOPS-001 Phase 5. It's a faithful capture of
+where the coupling actually is today plus the specific pivot Dave flagged,
+so the next time he's ready to think about it, the reality check doesn't
+need to be re-derived from scratch.
+
+**Partial resolution, same day (2026-07-14) — does NOT close this entry:**
+Dave decided the Catio buildout itself should be built portable "even if
+we decide to keep Nix, temporarily or permanently" — see
+`pp/PP-CATIONIX-001.md`'s new standing-requirement section. That's a
+narrower, decided question ("should *new Catio infrastructure* avoid
+unnecessary Nix coupling" — yes) layered on top of this still-undecided
+one ("should TGW leave Nix generally" — still parked, still Dave's to
+mull). The bubblewrap-vs-nspawn promotion criterion below is now also
+tracked as a live standing requirement in PP-CATIONIX-001, not just a
+hypothetical here — but don't read that as the broader question being
+resolved.
+
+### Promotion criteria
+
+- [ ] Dave decides he's ready to have the "gripe and options" session —
+      this entry is explicitly parked pending that, not a queued task
+- [ ] If revisited: reconcile bubblewrap vs. nspawn+Btrfs for PP-AIOPS-001
+      Phase 5 specifically — does bubblewrap's isolation model actually
+      satisfy the same guarantees, or is Btrfs CoW rollback load-bearing
+      for something bubblewrap can't give
+- [ ] If revisited: does "OS/host layer stays Nix" remain acceptable once
+      the actual pain point (fear of an update breaking the system) is
+      named explicitly, or does that fear point at NixOS itself, not just
+      the flake-surface-creep the 2026-07-06 standing rule already
+      addressed
