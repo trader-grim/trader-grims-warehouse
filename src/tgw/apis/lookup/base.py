@@ -7,6 +7,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from tgw.ebay.draft_specifics import get_ebay_aspects
+
 
 @dataclass
 class LookupResult:
@@ -70,7 +72,8 @@ def barcode_from_item(item: Dict[str, Any]) -> tuple[str, str]:
             return val, btype
 
     # Fall back to item_specifics in draft_listing
-    specs = item.get('draft_listing', {}).get('item_specifics', {})
+    # todo #1418: Set B read via tgw.ebay.draft_specifics (the sanctioned accessor)
+    specs = get_ebay_aspects(item)
     for spec_key, btype in (('UPC', 'upc'), ('EAN', 'ean'), ('ISBN', 'isbn')):
         val = str(specs.get(spec_key, '')).strip()
         if val.lower() not in _SKIP:

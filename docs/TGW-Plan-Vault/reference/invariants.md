@@ -631,6 +631,62 @@ hit, additive alongside the existing transient log/notify. New catalog-verify
 rule `sku_collision_unrepaired` mirrors `legacy_listing_unrepaired`. Test:
 `tests/test_multi_intake.py`.
 
+## C12 — Item field-sets are self-describing envelopes, read/written only through their named accessor ✅ (2026-07-15, todo #1418, PP-LISTEDITOR-001)
+
+**Rule:** `item_attributes` (Set A — "Inventory Record": universal,
+marketplace-agnostic facts) and `draft_listing.item_specifics` (Set B —
+"eBay Draft": the eBay-specific, category-mapped values actually pushed to
+eBay's Inventory API) — and any future marketplace-specific set — are
+self-describing envelopes (`{_set, version, updated_at, fields}` + an
+append-only provenance history array), never bare dicts. They are read and
+written ONLY through their named accessor module: `tgw.inventory_record`
+for Set A, `tgw.ebay.draft_specifics` for Set B. No other file may index
+directly into either dict's contents (`item.get("item_attributes")[...]`,
+`draft_listing["item_specifics"][...]`, etc.) — and no code may move data
+between the two sets via a per-key merge, prefill fallback, or `{**a, **b}`
+spread performed locally; that belongs in one explicit, named translation
+function (see #1416/#1417) built on top of the accessors, never ad hoc.
+
+**Why:** Dave, this session: "The problem is you are considering keys
+individually... They are sets of data. If you don't look at it that way
+you will keep mixing them up." Confirmed live: two prior sessions (#1291,
+2026-07-13; #1313/#1316, 2026-07-13) each fixed a real, well-tested bug in
+this exact territory without ever noticing the set-boundary problem
+underneath, because the old bare-dict shape had no self-identifying
+marker — indistinguishable at a glance from any other dict in the item
+JSON. `item_attributes` was also entirely undocumented in
+`TGW-Item-JSON-Schema.md` before this packet (confirmed: zero grep hits).
+A full codebase audit (todo #1416's investigation) found FOUR independent
+code paths that had each separately reinvented a (wrong) use for
+`item_attributes`, including one whose own UI banner text contradicted
+what the code actually did.
+
+**Enforcement:** `tgw.inventory_record` (Set A) and `tgw.ebay.draft_specifics`
+(Set B) are the sole sanctioned accessor modules — see their banner
+comments for the full two-set explanation, cross-referencing this
+invariant and todo #1418/#1416/#1417. Detector: a static, commit-time
+grep-based check (`tests/test_invariant_c12_field_set_accessors.py`),
+chosen over a catalog-verify (data-scan) detector because a static check
+catches a violation the moment the code is written, before it ever
+touches live data — a data-scan detector can only ever notice AFTER a
+corrupting write has already happened. The test pins an explicit,
+reviewed allowlist of every legitimate non-accessor hit (accessor output
+being written onward, or an unrelated dict — e.g. an AI model response or
+a `revision_draft.delta` proposal — that happens to share a key name); any
+new, unreviewed hit fails the test. `#1416`'s planned drift detector
+(catalog-verify rule flagging live items where Set A and Set B disagree on
+an overlapping key) is the complementary "regularly check and repair"
+half, for DATA drift rather than CODE drift — not yet built as of this
+entry (see #1416's packet).
+
+**Migration note:** the envelope shape landed via
+`scripts/migrate_field_set_envelope.py` (dry-run + accessor back-compat
+for both shapes — pre-migration bare dicts are read transparently by the
+accessors). The full 55k-item catalog migration is a separate, explicit
+go/no-go decision, not bundled into this invariant landing — both the old
+bare-dict shape and the new envelope shape must (and do) coexist correctly
+for as long as that transition takes.
+
 ## E8 — The Google free tier is the operator emergency reserve ✅ (2026-07-04, session 45) — SUPERSEDED for background use 2026-07-08
 
 **Original rule (free-tier era):** Background jobs never spend the Google

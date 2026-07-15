@@ -52,6 +52,77 @@ all fields from stages 0..N-1 plus its own.
 | `legacy_listing_resolved` | bool | operator | manual | Set `true` once legacy Trading API listing is ended/migrated |
 | `reprice_skip` | bool | operator | manual | Set `true` to stop price_reducer from reducing price |
 | `source_sku` | str | migration | ebay_sku_migrate | Original SKU when item was migrated from legacy system |
+| `item_attributes` | dict (envelope) | identified | ai_identify (fills gaps only); `tgw.inventory_record` is the ONLY sanctioned accessor | **Set A — "Inventory Record."** Universal, marketplace-agnostic facts (Type, Brand, Metal, Department, ...) — the record meant to translate across eBay and any future marketplace. NOT what gets pushed to eBay directly (that's `draft_listing.item_specifics`, Set B, below). See "Field-set envelope shape" below. |
+| `item_attributes_history` | list[dict] | identified onward | `tgw.inventory_record.set_inventory_fields` | Append-only provenance trail for Set A edits. See "Field-set envelope shape" below. |
+
+### Set A vs. Set B — the two-set rule (todo #1418/#1416/#1417, invariant C12)
+
+`item_attributes` (Set A, this table) and `draft_listing.item_specifics`
+(Set B, see below) look superficially similar — both are "a dict of
+aspect-like facts" — but are deliberately separate and must never be
+merged key-by-key. Set A is the universal record; Set B is the
+eBay-specific, category-mapped values actually pushed to eBay's Inventory
+API (`tgw.ebay.sync._build_offer_bodies` reads ONLY Set B for the live
+push). Two prior sessions (#1291, #1313/#1316) each fixed a real bug in
+this territory without ever noticing the set-boundary problem underneath,
+because the old bare-dict shape had no self-identifying marker — see
+`invariants.md` C12 for the full "why" and enforcement.
+
+**Read/write ONLY through the sanctioned accessor modules:**
+- Set A: `tgw.inventory_record` (`get_inventory_field(s)`, `set_inventory_fields`)
+- Set B: `tgw.ebay.draft_specifics` (`get_ebay_aspect(s)`, `set_ebay_aspects`)
+
+Cross-set moves (Set A → Set B translation, or the reverse-flow diff) are
+a separate, explicit, named function built on top of these accessors
+(#1416/#1417) — never a per-key merge or `{**a, **b}` spread performed
+locally in a display or save handler.
+
+### Field-set envelope shape
+
+Both `item_attributes` and `draft_listing.item_specifics` are
+self-describing envelopes, not bare dicts — this is the third application
+of the "cheap current value + append-only history array" shape already
+established in this codebase by `price_history` (session 42) and
+`vision_results`/`alt_text_results` (raw AI-call preservation), not a new
+invention:
+
+```json
+"item_attributes": {
+  "_set": "inventory_record",
+  "version": 1,
+  "updated_at": "2026-07-15T12:00:00+00:00",
+  "updated_at_backfilled": false,
+  "fields": {"Type": "Brooch", "Brand": "Unbranded"}
+}
+```
+
+`_set` is a literal, hardcoded, self-describing string — its whole purpose
+is that someone looking at raw JSON with zero other context knows
+immediately which set they're looking at (`grep '"_set": "inventory_record"'`
+finds every instance directly, independent of nesting). `updated_at_backfilled`
+is `true` only for items migrated from the old bare-dict shape whose real
+edit timestamp was never recorded — the migration uses the best available
+proxy timestamp (or the migration run time) rather than fabricate false
+precision (Prime Directive 1).
+
+**Back-compat note:** items not yet migrated (see
+`scripts/migrate_field_set_envelope.py`) still carry `item_attributes` /
+`item_specifics` as a bare `{key: value}` dict with no `_set` tag — the
+accessor modules read both shapes transparently. The full 55k-item catalog
+migration is a separate, explicit go/no-go decision, not bundled into the
+envelope shape landing (todo #1418).
+
+Provenance history — append-only, never edited or truncated (same
+discipline as `price_history`):
+
+```json
+"item_attributes_history": [
+  {"ts": "...", "key": "Type", "value": "Brooch", "previous_value": "Lapel Pin",
+   "source": "ai_identify", "applied_by": "system"}
+]
+```
+`draft_listing.item_specifics_history` is the Set B equivalent, nested
+alongside `item_specifics` inside `draft_listing` (see below).
 
 ### Legacy-only fields (old Trading API items; not written by current workers)
 
@@ -103,7 +174,8 @@ Written entirely by `ebay_draft`. `price` and `imageUrls` are filled in later by
 | `format` | str | ebay_draft | Always `FixedPrice` |
 | `quantity` | int | ebay_draft | Always 1 |
 | `price` | float \| null | **ebay_price** | Set after draft; null until priced |
-| `item_specifics` | dict[str, str] | ebay_draft | Aspect name → value; all strings |
+| `item_specifics` | dict (envelope) | ebay_draft | **Set B — "eBay Draft."** Aspect name → value; the ONE set that actually reaches eBay's Inventory API (`tgw.ebay.sync._build_offer_bodies` reads only this). `tgw.ebay.draft_specifics` is the ONLY sanctioned accessor. See "Field-set envelope shape" above. |
+| `item_specifics_history` | list[dict] | ebay_draft onward | `tgw.ebay.draft_specifics.set_ebay_aspects` | Append-only provenance trail for Set B edits, nested alongside `item_specifics`. |
 | `description` | str | ebay_draft | Short AI description (may be enriched from product_lookup) |
 | `description_source` | str | ebay_draft | `enriched` if product_lookup description was used as base |
 | `listing_description` | str | ebay_draft → ebay_publish | Full eBay HTML description (AI text + footer + picklist line) |

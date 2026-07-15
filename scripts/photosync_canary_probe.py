@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 from tgw.config import DEFAULT_CONFIG, load_config  # noqa: E402
+from tgw.ebay.draft_specifics import get_ebay_aspects  # noqa: E402
 from tgw.items import load_item_doc  # noqa: E402
 from tgw.notify import notify  # noqa: E402
 from tgw.queue import state_machine  # noqa: E402
@@ -81,7 +82,8 @@ def _intent_snapshot(item: Dict[str, Any]) -> Dict[str, Any]:
         'title': dl.get('title') or item.get('title'),
         'price': dl.get('price') or item.get('price'),
         'photo_count': len(dl.get('imageUrls') or []),
-        'aspects': dl.get('item_specifics') or {},
+        # todo #1418: Set B read via tgw.ebay.draft_specifics (the sanctioned accessor)
+        'aspects': get_ebay_aspects(item),
     }
 
 

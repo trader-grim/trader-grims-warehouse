@@ -24,7 +24,7 @@ import psycopg2.errors
 import requests
 
 import tgw.logging as tgw_logging
-from tgw import quota
+from tgw import inventory_record, quota
 from tgw.apis.ebay.client import ebay_get
 from tgw.apis.ebay.conditions import best_condition
 from tgw.apis.ebay.specifics import get_aspects
@@ -35,6 +35,7 @@ from tgw.assets import ordered_photos as _asset_ordered_photos
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.config import sku_json as _cfg_sku_json
 from tgw.ebay.description import build_listing_description
+from tgw.ebay.draft_specifics import set_ebay_aspects, wrap_ebay_specifics
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
@@ -453,7 +454,10 @@ class EbayDraftWorker(QueueWorker):
 
         # Phase 2b — pre-fill from item_attributes (AI-identified attributes, lower
         # priority than product_lookup so they only fill what's not already set)
-        ia = item.get('item_attributes') or {}
+        # todo #1418: Set A read via tgw.inventory_record (the sanctioned accessor) —
+        # this is the ONE legitimate Set A -> Set B translation point in the codebase
+        # today (see #1416, which extracts/names it as an explicit function).
+        ia = inventory_record.get_inventory_fields(item)
         ia_filled: List[str] = []
         for attr_name, attr_val in ia.items():
             if not attr_val or attr_name in prefilled:
@@ -627,6 +631,14 @@ class EbayDraftWorker(QueueWorker):
         # Build draft listing block
         effective_description = enriched_description or item.get('description', '')
         _prev_dl = item.get('draft_listing') or {}
+        # todo #1418: item_specifics is Set B's envelope, written ONLY through
+        # tgw.ebay.draft_specifics. ebay_draft rebuilds the full aspect set from
+        # scratch each run (not an incremental merge), so the envelope's `fields`
+        # is a full replace — but history still records genuinely-changed keys,
+        # via the accessor's diff-against-existing logic, matching price_history's
+        # "only append on a real change" discipline.
+        _specifics_hist_patch = set_ebay_aspects(item, item_specifics, source='ebay_draft')
+        item_specifics_envelope = wrap_ebay_specifics(item_specifics)
         draft: Dict[str, Any] = {
             'title':                      title,
             'category_id':                category_id,
@@ -639,7 +651,8 @@ class EbayDraftWorker(QueueWorker):
             'quantity':                   1,
             'price':                      _prev_dl.get('price'),
             'shipping_profile':           _prev_dl.get('shipping_profile'),
-            'item_specifics':             item_specifics,
+            'item_specifics':             item_specifics_envelope,
+            'item_specifics_history':     _specifics_hist_patch['item_specifics_history'],
             'description':                effective_description,
             'aspects_category_id':        category_id,
             'aspects_required_total':     len(req_aspects),
