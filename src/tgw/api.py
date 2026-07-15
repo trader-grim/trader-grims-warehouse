@@ -34,7 +34,9 @@ from .catalog import (
 )
 from .config import DEFAULT_CONFIG, load_config
 from .context import clear_context, get_context, set_context
+from .ebay.draft_specifics import get_ebay_aspects as _get_ebay_aspects
 from .health import check_all
+from .inventory_record import get_inventory_fields as _get_inventory_fields
 from .items import (
     catlocmvall,
     get_item,
@@ -1394,6 +1396,27 @@ def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any],
             "ebay_rejected" if pipeline_error.get("error") else "unknown")
         _pe_detail = pipeline_error.get("detail") or pipeline_error.get("error") or str(pipeline_error)
         v(f"pipeline_error:{_pe_code}", "warning", str(_pe_detail)[:300])
+
+    # invariant C12 (todo #1416): Set A (item_attributes) and Set B
+    # (draft_listing.item_specifics) drifting apart on an overlapping key
+    # is a DATA-level symptom of the exact boundary bug C12 exists to
+    # prevent at the CODE level (see invariants.md C12's static detector,
+    # tests/test_invariant_c12_field_set_accessors.py, for the "regularly
+    # check and repair" half's complement). Only flagged when the item has
+    # a live ebay_offer.offer_id — a drift only matters here because it's
+    # live (a never-published draft's Set A/Set B disagreeing is normal
+    # pre-publish churn, not a finding).
+    if (doc.get("ebay_offer") or {}).get("offer_id"):
+        _c12_ia = _get_inventory_fields(doc)
+        _c12_isp = _get_ebay_aspects(doc)
+        _c12_drift = sorted(
+            k for k in (set(_c12_ia) & set(_c12_isp))
+            if str(_c12_ia[k]) != str(_c12_isp[k])
+        )
+        if _c12_drift:
+            v("field_set_drift", "warning",
+              f"item_attributes (Set A) and draft_listing.item_specifics "
+              f"(Set B) disagree on live item, key(s): {', '.join(_c12_drift)}")
 
     # New-pipeline checks
     offer_price = None

@@ -35,7 +35,8 @@ from . import draft_sync, inventory_record
 from .assets import ordered_photos as _ordered_photos
 from .config import DEFAULT_CONFIG, load_config
 from .ebay.description import build_listing_description
-from .ebay.draft_specifics import get_ebay_aspects
+from .ebay.draft_specifics import get_ebay_aspects, set_ebay_aspects
+from .ebay.draft_specifics import is_envelope as _is_ebay_draft_envelope
 from .items import _archive_before_overwrite, atomic_write_json, create_item, locationupdate
 from .queue import state_machine
 from .readiness import check_ebay, readiness_html
@@ -990,6 +991,32 @@ def _apply_patch(json_path: "Path", fields: Dict[str, Any]) -> List[str]:
                     doc, incoming, source="http_patch", applied_by="operator")
                 doc["item_attributes"] = patch["item_attributes"]
                 doc["item_attributes_history"] = patch["item_attributes_history"]
+            elif dmk == "draft_listing":
+                # todo #1416 point 3: the eBay Draft Editor's aspects form
+                # (saveEbayDraft()) now sends its edits nested inside
+                # draft_listing.item_specifics, matching every other Draft
+                # Editor field (title, price, condition_enum, ...). Same
+                # envelope-corruption risk as item_attributes above applies
+                # here: a bare partial {name: value} dict of aspect edits
+                # must NOT be shallow-merged directly onto item_specifics's
+                # envelope (that would clobber _set/version/fields with
+                # sibling scalar keys) — route it through the sanctioned Set
+                # B accessor (tgw.ebay.draft_specifics) instead, same
+                # discipline as item_attributes's accessor routing above.
+                incoming_specifics = incoming.pop("item_specifics", None) \
+                    if isinstance(incoming, dict) else None
+                existing.update(incoming)
+                doc[dmk] = existing
+                if isinstance(incoming_specifics, dict) and not _is_ebay_draft_envelope(incoming_specifics):
+                    sp_patch = set_ebay_aspects(
+                        doc, incoming_specifics, source="http_patch", applied_by="operator")
+                    existing["item_specifics"] = sp_patch["item_specifics"]
+                    existing["item_specifics_history"] = sp_patch["item_specifics_history"]
+                elif incoming_specifics is not None:
+                    # Already a full envelope (accessor output moving onward, e.g.
+                    # accept_proposals) — plain replace, no re-diffing needed.
+                    existing["item_specifics"] = incoming_specifics
+                doc[dmk] = existing
             else:
                 existing.update(incoming)
                 doc[dmk] = existing
@@ -1449,22 +1476,43 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
             delta = rev.get("delta") or {}
             if not delta:
                 return {"ok": False, "detail": "no revision_draft delta to accept"}
-            # todo #1418: Set A write via tgw.inventory_record (the sanctioned
-            # accessor) — preserves the envelope shape + records provenance.
-            # NOTE: this still targets item_attributes (Set A), same as before
-            # this packet — #1416 point 4 is the one that redirects this action
-            # to draft_listing.item_specifics (Set B) to match its own banner's
-            # stated contract; out of scope here (#1418 only fixes the
-            # container shape, not which set this write targets).
-            ia_touched = False
-            ia_patch: Dict[str, Any] = {}
+            # todo #1416 point 4: accepted proposals target draft_listing.
+            # item_specifics (Set B), via the sanctioned tgw.ebay.draft_specifics
+            # accessor — NOT item_attributes (Set A). This is the action's own
+            # button banner's stated contract ("copies proposals into your
+            # draft — review then Update Listing to push to eBay"): the
+            # accepted values must land somewhere the existing "Update
+            # Listing"/ebay_stage push path actually reads from
+            # (sync.py:_build_offer_bodies reads ONLY item_specifics), which
+            # item_attributes never was. Prior to this fix the accepted delta
+            # was silently written to the wrong set and never reached eBay —
+            # confirmed live during this packet's investigation (two
+            # ebay_stage jobs "succeeded" while pushing unchanged content).
+            #
+            # NOT routed through revision.cmd_revise_apply (point 6): that
+            # function requires an existing Inventory API offer_id and pushes
+            # live immediately (fresh GET -> compose -> PUT, no staging), which
+            # would break accept_proposals' own two-step contract ("accept"
+            # stages, a separate "Update Listing" click pushes) and would hard-
+            # fail for any item with a pending revision_draft but no live offer
+            # yet (a normal pre-publish state). Both mechanisms remain
+            # legitimate, distinct consumers of the same revision_draft.delta
+            # shape for two different UI flows; what's fixed here is that
+            # accept_proposals now writes to the SET that the staged-push path
+            # actually reads, closing the boundary bug without collapsing two
+            # intentionally different flows into one.
+            dl_touched = False
+            dl_patch: Dict[str, Any] = {}
             if "item_specifics" in delta and isinstance(delta["item_specifics"], dict):
-                ia_patch = inventory_record.set_inventory_fields(
+                dl_patch = set_ebay_aspects(
                     doc, delta["item_specifics"], source="accept_proposals",
                     applied_by="operator")
-                ia_touched = True
+                dl_touched = True
             dl2 = doc.get("draft_listing") or {}
-            dl_touched = False
+            if dl_touched:
+                dl2 = dict(dl2)
+                dl2["item_specifics"] = dl_patch["item_specifics"]
+                dl2["item_specifics_history"] = dl_patch["item_specifics_history"]
             if "title" in delta:
                 dl2["title"] = delta["title"]
                 dl_touched = True
@@ -1472,9 +1520,6 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                 dl2["description"] = delta["description"]
                 dl_touched = True
             proposal_fields: Dict[str, Any] = {"revision_draft": None}
-            if ia_touched:
-                proposal_fields["item_attributes"] = ia_patch["item_attributes"]
-                proposal_fields["item_attributes_history"] = ia_patch["item_attributes_history"]
             if dl_touched:
                 proposal_fields["draft_listing"] = dl2
             _apply_patch(json_path, proposal_fields)
@@ -4973,20 +5018,26 @@ def _render_item_detail_html(
     else:
         _price_comps_bar = ""
 
-    # ── Three-layer aspect data: live (eBay) / proposed (pipeline) / edits (operator) ──
+    # ── Three-layer aspect data: live/current-draft (Set B) / proposed (pipeline, not
+    # yet accepted) / edits (operator, form's current value) ──
     import json as _json
 
-    # todo #1418: Set A/Set B reads via their sanctioned accessors
-    _ia = inventory_record.get_inventory_fields(item)  # operator edits — highest priority
-    _spec = get_ebay_aspects(item)  # live on eBay — baseline
+    # todo #1416 point 3: the aspects form (#aspects-form / saveEbayDraft())
+    # is Set B's own editing surface — it prefills from and PATCHes into
+    # draft_listing.item_specifics ONLY, never item_attributes (Set A).
+    # Since operator edits now save directly into the same field this reads
+    # as "live," the prefill layer and the live layer are the same value by
+    # construction going forward (an operator's saved edit IS the current
+    # draft state) — no separate Set A "override" layer exists anymore.
+    _spec = get_ebay_aspects(item)  # Set B: current draft_listing.item_specifics
     _rev = item.get("revision_draft") or {}
     _rev_delta = _rev.get("delta") or {}
     _proposed_aspects = _rev_delta.get("item_specifics") or {}
     _has_proposals = bool(_rev_delta)
 
     _cat_id_for_aspects = str((dl or {}).get("category_id") or item.get("ebay_category_id") or "")
-    _aspects_prefill_json = _json.dumps(_ia)  # operator edits only
-    _live_aspects_json = _json.dumps(_spec)  # live eBay values
+    _aspects_prefill_json = _json.dumps(_spec)  # Set B current values — the form's own field
+    _live_aspects_json = _json.dumps(_spec)  # same Set B values, used as the "live" comparison baseline
     _proposed_aspects_json = _json.dumps(_proposed_aspects)  # pipeline proposals
     _aspects_cat_json = _json.dumps(_cat_id_for_aspects)
     _proposals_meta_json = _json.dumps(
@@ -5719,28 +5770,41 @@ def _render_item_detail_html(
         + (fr("ISBN", h(str(item.get("isbn", "") or ""))) if item.get("isbn") else "")
         + (fr("Part number", h(str(item.get("part_number", "") or ""))) if item.get("part_number") else "")
         + (
+            # todo #1416 point 5: this panel is explicitly labeled "Canonical
+            # TGW data — never overwritten by marketplace sync" (see the
+            # `<div>` a few lines up), so it must show Set A
+            # (`item_attributes`) UNMERGED — never blended with Set B
+            # (`draft_listing.item_specifics`) into one ambiguous key/value
+            # row, which was #1418's confirmed bug (`{**isp, **ia}`, Set A
+            # silently winning on any overlapping key with no way to tell
+            # which set a viewer was looking at). The eBay-side value is
+            # shown as a clearly-separate, dimmed secondary line under the
+            # same row only when it exists AND differs, so a viewer can
+            # compare without either value being ambiguous about its set.
             lambda ia, isp: (
                 (
                     '<div style="margin-top:6px;border-top:1px solid #222;padding-top:6px">'
-                    '<div style="font-size:.75em;color:#556;margin-bottom:4px">Item specifics (edit in eBay Draft Editor below)</div>'
+                    '<div style="font-size:.75em;color:#556;margin-bottom:4px">Inventory Record specifics (edit in eBay Draft Editor below to affect what\'s pushed to eBay)</div>'
                     + "".join(
-                        f'<div class="frow"><span class="fn" style="font-size:.82em">{h(k)}</span><span class="fv" style="font-size:.82em">{h(str(v))}</span></div>'
-                        for k, v in sorted({**isp, **ia}.items())
+                        f'<div class="frow"><span class="fn" style="font-size:.82em">{h(k)}</span><span class="fv" style="font-size:.82em">{h(str(v))}'
+                        + (
+                            f'<div style="font-size:.72em;color:#556;margin-top:1px">eBay value: {h(str(isp[k]))}</div>'
+                            if k in isp and str(isp[k]) != str(v)
+                            else ""
+                        )
+                        + "</span></div>"
+                        for k, v in sorted(ia.items())
                         if v
                     )
                     + "</div>"
                 )
-                if {**isp, **ia}
+                if ia
                 else (
                     '<div style="margin-top:6px;border-top:1px solid #222;padding-top:6px">'
-                    '<span style="font-size:.75em;color:#333">No item specifics yet — fill in eBay Draft Editor below</span>'
+                    '<span style="font-size:.75em;color:#333">No inventory record specifics yet — fill in eBay Draft Editor below</span>'
                     "</div>"
                 )
             )
-        # todo #1418: Set A/Set B reads via their sanctioned accessors (the
-        # {**isp, **ia} blend itself is #1416's problem to fix, not this
-        # packet's — this only updates HOW the two dicts are read, not the
-        # blend logic)
         )(inventory_record.get_inventory_fields(item), get_ebay_aspects(item))
         + "</div>"
         # ── eBay Listing — the draft/live workflow section (PP-ACTIONCONSOLE-001).
@@ -6004,14 +6068,21 @@ def _render_item_detail_html(
         f"  if(boDec&&boDec.value!==''){{var boDecN=parseFloat(boDec.value);dl.best_offer_auto_decline_price=isNaN(boDecN)?null:boDecN;}}"
         f"  var cat2id=document.getElementById('dl-cat2-id');"
         f"  if(cat2id)dl.secondary_category_id=cat2id.value||null;"
+        # todo #1416 point 3: this form (#aspects-form) is Set B's own
+        # editing surface (draft_listing.item_specifics) — it must PATCH
+        # directly into draft_listing, exactly like every other Draft
+        # Editor field above (title/price/condition/etc.), never into
+        # item_attributes (Set A). The nested dl.item_specifics key is
+        # unwrapped server-side by _apply_patch's draft_listing branch
+        # through the sanctioned tgw.ebay.draft_specifics accessor.
         f"  var aspInputs=document.querySelectorAll('#aspects-form [data-aspect]');"
         f"  var attrs={{}};"
         f"  aspInputs.forEach(function(el){{"
         f"    var k=el.dataset.aspect;var v=el.value.trim();"
         f"    if(v)attrs[k]=v;"
         f"  }});"
+        f"  if(Object.keys(attrs).length)dl.item_specifics=attrs;"
         f"  var patch={{draft_listing:dl}};"
-        f"  if(Object.keys(attrs).length)patch.item_attributes=attrs;"
         f"  var msg=document.getElementById('dl-save-msg');"
         f"  if(msg)msg.textContent='Saving…';"
         f"  fetch('/api/items/'+_SKU,{{"

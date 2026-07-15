@@ -62,11 +62,13 @@ _ALLOWLIST = {
     (_SRC / "tgw" / "workers" / "ai_identify.py", 273),   # (b) AI model response
     (_SRC / "tgw" / "workers" / "ai_identify.py", 333),   # (a) accessor patch write
     (_SRC / "tgw" / "workers" / "ai_identify.py", 428),   # (a) accessor patch write
-    (_SRC / "tgw" / "http_server.py", 991),               # (a) accessor patch write
-    (_SRC / "tgw" / "http_server.py", 1461),              # (b) revision_draft.delta
-    (_SRC / "tgw" / "http_server.py", 1463),              # (b) revision_draft.delta
-    (_SRC / "tgw" / "http_server.py", 1476),               # (a) accessor patch write
-    (_SRC / "tgw" / "http_server.py", 4984),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 992),               # (a) accessor patch write
+    (_SRC / "tgw" / "http_server.py", 1013),              # (a) accessor patch write (todo #1416, draft_listing.item_specifics)
+    (_SRC / "tgw" / "http_server.py", 1018),              # (a) accessor output (full envelope) moving onward
+    (_SRC / "tgw" / "http_server.py", 1506),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 1508),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 1514),              # (a) accessor patch write (todo #1416)
+    (_SRC / "tgw" / "http_server.py", 5035),              # (b) revision_draft.delta
 }
 
 

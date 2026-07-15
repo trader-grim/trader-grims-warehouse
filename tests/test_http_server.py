@@ -33,7 +33,8 @@ httpx = pytest.importorskip(
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from tgw import http_server, inventory_record  # noqa: E402
+from tgw import http_server  # noqa: E402
+from tgw.ebay import draft_specifics  # noqa: E402
 
 API_KEY = "test-key-abc123"
 WEB_KEY = "test-web-key-xyz"  # browser login password (checked against _web_password)
@@ -906,6 +907,43 @@ def test_bare_top_level_title_edit_does_not_auto_enqueue(env, enqueue_calls):
     queue_names = [c["kwargs"].get("queue_name") for c in enqueue_calls]
     assert "ebay_stage" not in queue_names
     assert "ebay_draft" not in queue_names
+
+
+def test_saveebaydraft_shaped_patch_routes_item_specifics_through_accessor(env, enqueue_calls):
+    """todo #1416 point 3: saveEbayDraft() now nests aspect edits inside
+    draft_listing.item_specifics (matching every other Draft Editor
+    field), matching the PATCH shape at http_server.py's saveEbayDraft().
+    _apply_patch must route a bare partial item_specifics dict through
+    the sanctioned tgw.ebay.draft_specifics accessor (preserving the
+    envelope + provenance history), not shallow-merge it directly, and
+    the existing auto-push-on-draft_listing-change behavior must still
+    fire (no new trigger-set change needed, per the packet spec)."""
+    sku = "tgw20260401000000014"
+    _seed_live_item(env, sku, extra_fields={
+        "draft_listing": {
+            "title": "Live Widget", "price": "9.99",
+            "item_specifics": {"Type": "Lapel Pin"},
+        },
+    })
+
+    r = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"draft_listing": {"item_specifics": {"Type": "Brooch"}}}},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+
+    doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
+    assert draft_specifics.get_ebay_aspects(doc)["Type"] == "Brooch"
+    assert doc["draft_listing"]["item_specifics"]["_set"] == "ebay_draft"
+    assert len(doc["draft_listing"]["item_specifics_history"]) == 1
+    assert doc["draft_listing"]["item_specifics_history"][0]["previous_value"] == "Lapel Pin"
+    # Sibling draft_listing fields (title, price) must survive the merge.
+    assert doc["draft_listing"]["title"] == "Live Widget"
+    assert doc["draft_listing"]["price"] == "9.99"
+    # Auto-push must still fire — this is just a normal draft_listing edit.
+    queue_names = [c["kwargs"].get("queue_name") for c in enqueue_calls]
+    assert "ebay_stage" in queue_names
 
 
 def test_operator_edit_to_live_draft_uses_dedupe_key(env, enqueue_calls):
@@ -3403,17 +3441,24 @@ def test_approve_action_requires_auth(client):
     assert r.status_code in (401, 403)
 
 
-def test_accept_proposals_persists_item_attributes_edit(env, monkeypatch):
+def test_accept_proposals_persists_item_specifics_edit(env, monkeypatch):
     """POST action=accept_proposals actually writes accepted item_specifics
-    into item_attributes on disk when item_attributes already existed
-    (regression test for #1291 -- an identity-comparison bug on a
-    mutated-in-place dict silently discarded this edit before)."""
+    into draft_listing.item_specifics (Set B) on disk when item_specifics
+    already existed.
+
+    todo #1416 point 4: this used to write into item_attributes (Set A) —
+    a boundary bug, since sync.py's actual eBay push (_build_offer_bodies)
+    reads ONLY draft_listing.item_specifics. Regression test for #1291
+    (an identity-comparison bug on a mutated-in-place dict silently
+    discarded this edit) is preserved by asserting the write actually
+    lands, now against the corrected target set."""
     monkeypatch.setattr(http_server.state_machine, "enqueue_job", lambda *a, **k: "job-fake")
 
+    draft = dict(_DRAFT_LISTING)
+    draft["item_specifics"] = {"Brand": "OldBrand", "Color": "Red"}
     _write_item_with_draft(
-        env["itemdata_root"], SKU_A, _DRAFT_LISTING,
+        env["itemdata_root"], SKU_A, draft,
         extra={
-            "item_attributes": {"Brand": "OldBrand", "Color": "Red"},
             "revision_draft": {
                 "delta": {"item_specifics": {"Brand": "NewBrand", "Size": "Large"}}
             },
@@ -3432,14 +3477,17 @@ def test_accept_proposals_persists_item_attributes_edit(env, monkeypatch):
 
     json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
     doc = json.loads(json_path.read_text(encoding="utf-8"))
-    # todo #1418: item_attributes is now a self-describing Set A envelope —
-    # read via the sanctioned accessor, not the bare dict directly.
-    ia_fields = inventory_record.get_inventory_fields(doc)
-    assert ia_fields["Brand"] == "NewBrand"
-    assert ia_fields["Color"] == "Red"
-    assert ia_fields["Size"] == "Large"
-    assert doc["item_attributes"]["_set"] == "inventory_record"
-    assert len(doc["item_attributes_history"]) >= 1
+    # todo #1416: Set B envelope — read via the sanctioned accessor, not
+    # the bare dict directly.
+    isp_fields = draft_specifics.get_ebay_aspects(doc)
+    assert isp_fields["Brand"] == "NewBrand"
+    assert isp_fields["Color"] == "Red"
+    assert isp_fields["Size"] == "Large"
+    assert doc["draft_listing"]["item_specifics"]["_set"] == "ebay_draft"
+    assert len(doc["draft_listing"]["item_specifics_history"]) >= 1
+    # The accepted delta must NOT have landed in item_attributes (Set A) —
+    # that's the exact boundary bug this packet fixes.
+    assert "item_attributes" not in doc
     assert doc.get("revision_draft") is None
 
 
@@ -3477,10 +3525,9 @@ def test_accept_proposals_persists_draft_listing_title_description(env, monkeypa
     assert doc.get("revision_draft") is None
 
 
-def test_accept_proposals_item_attributes_absent_before(env, monkeypatch):
-    """When item_attributes did not exist before, accept_proposals still
-    creates it correctly (this path was already accidentally correct;
-    guard against regressing it)."""
+def test_accept_proposals_item_specifics_absent_before(env, monkeypatch):
+    """When draft_listing.item_specifics did not exist before, accept_proposals
+    still creates it correctly (Set B, not Set A)."""
     monkeypatch.setattr(http_server.state_machine, "enqueue_job", lambda *a, **k: "job-fake")
 
     _write_item_with_draft(
@@ -3503,7 +3550,57 @@ def test_accept_proposals_item_attributes_absent_before(env, monkeypatch):
 
     json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
     doc = json.loads(json_path.read_text(encoding="utf-8"))
-    assert inventory_record.get_inventory_fields(doc)["Brand"] == "FreshBrand"
+    assert draft_specifics.get_ebay_aspects(doc)["Brand"] == "FreshBrand"
+    assert "item_attributes" not in doc
+
+
+def test_item_detail_inventory_record_panel_shows_set_a_unblended(env):
+    """todo #1416 point 5: the Inventory Record panel ("Canonical TGW
+    data — never overwritten by marketplace sync") must show Set A
+    (item_attributes) values unblended with Set B — no single displayed
+    value may be ambiguous about which set it came from."""
+    _login(env["client"])
+    sku = "tgw20260615110000020"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Drift Test Widget",
+        "location": "X9",
+        "item_attributes": {"Type": "Lapel Pin", "Brand": "Unbranded"},
+        "draft_listing": {
+            "item_specifics": {"Type": "Brooch", "Brand": "Unbranded"},
+        },
+    })
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    # Set A's own value ("Lapel Pin") is shown as the primary value.
+    assert "Lapel Pin" in r.text
+    # The differing Set B value is shown as a clearly-labeled secondary
+    # line, never silently overwritten or blended into the same key.
+    assert "eBay value: Brooch" in r.text
+    # An overlapping key that AGREES between the two sets must not print
+    # a redundant "eBay value:" line (only genuine drift is called out).
+    assert "eBay value: Unbranded" not in r.text
+
+
+def test_item_detail_aspects_form_prefills_from_set_b_not_set_a(env):
+    """todo #1416 point 3: the eBay Draft Editor's aspects form
+    (window._DL_PREFILL) must prefill from draft_listing.item_specifics
+    (Set B) — NOT item_attributes (Set A). Before this fix, an operator's
+    typed edit in this form silently wrote to item_attributes and never
+    reached the eBay push path."""
+    _login(env["client"])
+    sku = "tgw20260615110000021"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Prefill Test Widget",
+        "location": "X9",
+        "item_attributes": {"Type": "Lapel Pin"},
+        "draft_listing": {"item_specifics": {"Type": "Brooch"}},
+    })
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    assert 'window._DL_PREFILL = {"Type": "Brooch"}' in r.text
+    assert "Lapel Pin" not in r.text.split("window._DL_PREFILL")[1][:200]
 
 
 def test_form_review_renders(client):
