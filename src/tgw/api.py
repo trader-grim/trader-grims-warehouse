@@ -1056,6 +1056,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("admin-file", help="scan inbox and enqueue eligible notes for PM-intake (PP-DOCFLOW-001)")
     p.add_argument("--now", action="store_true", help="bypass submission-delay gate (process all files regardless of age)")
+    p.add_argument("--dry-run", action="store_true", help="report a manifest of eligible/ineligible candidates without moving or enqueuing anything")
 
     p = sub.add_parser("classify-suggestions", help="batch-classify unprocessed SUGGESTIONS.md entries via LLM (PP-DOCFLOW-001 Phase 2)")
     p.add_argument("--apply", action="store_true", help="mark already-done entries [x] and create todos for new-work entries")
@@ -4173,7 +4174,11 @@ def main() -> int:
 
         elif args.op == "admin-file":
             from tgw.workers.pm_intake import cmd_admin_file
-            result = cmd_admin_file(cfg, bypass_delay=getattr(args, "now", False))
+            result = cmd_admin_file(
+                cfg,
+                bypass_delay=getattr(args, "now", False),
+                dry_run=getattr(args, "dry_run", False),
+            )
             return 0 if result["ok"] else 1
 
         elif args.op == "classify-suggestions":

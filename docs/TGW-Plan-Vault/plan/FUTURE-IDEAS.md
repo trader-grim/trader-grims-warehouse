@@ -435,3 +435,31 @@ resolved.
       named explicitly, or does that fear point at NixOS itself, not just
       the flake-surface-creep the 2026-07-06 standing rule already
       addressed
+
+## Second Aider "brain" — Google/Gemini-ecosystem model profile
+
+**New 2026-07-15**, Dave, while setting Aider's default model to
+deepseek-v4-flash for the busywork tier: "if a project can benefit from
+tool or Google ecosphere use we can create a gemini brain version." Not
+a request to build now — a conditional idea to reach for if/when a
+specific task genuinely needs Google-ecosystem tool integration (e.g.
+Gemini's native tool-calling to Google services, or a task where Google's
+context/vision handling beats DeepSeek's) rather than just "another
+cheap model."
+
+Shape if promoted: a second `.aider.conf.yml`-equivalent (or a
+`--model`/`--config` override invoked per-task, same pattern as the
+existing Flutter/Dart Gemini-3.1-Flash-Lite override already in
+`.aider.conf.yml`) rather than replacing the deepseek-v4-flash default —
+this is an *additional* profile for a specific class of task, not a
+model swap.
+
+### Promotion criteria
+
+- [ ] A concrete task surfaces that needs Google-ecosystem tool access
+      Aider can't get through the deepseek-v4-flash default (name the
+      task, not "might be useful someday")
+- [ ] Confirm which Google API key/quota this would draw from — same
+      `secrets_root` facility, `google_direct` provider already exists
+      for other TGW LLM tasks (see `reference/LLM-Providers-Quotas.md`)
+      — before assuming a new key is needed

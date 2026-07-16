@@ -111,7 +111,9 @@
       "mcp__tgw__tgw_dead_letter",
       "Bash(lsblk -f)",
       "Bash(lsblk)",
-      "Bash(git -C /media/db/TGW/src/trader-grims-warehouse diff --stat HEAD)"
+      "Bash(git -C /media/db/TGW/src/trader-grims-warehouse diff --stat HEAD)",
+      "Bash(bin/tgw-aider --yes *)",
+      "Bash(/opt/TGW/src/trader-grims-warehouse/bin/tgw-aider --yes *)"
     ]
   },
   "remote": {

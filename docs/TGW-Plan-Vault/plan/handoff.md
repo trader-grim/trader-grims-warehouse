@@ -553,3 +553,146 @@ real subsequent session with her.
 
 **Risk worth flagging:** none new. Thermal stayed NORMAL throughout,
 checked before/after every heavy operation.
+
+## Session 2026-07-14, evening (PP-DEADLETTER-001 batch → alt_text worker install → catalog false-alarm → process-maturity decision)
+
+**What was done:**
+- PP-DEADLETTER-001: 9 packets (#1393-1404) triaged, dispatched as an
+  8-wide concurrent tgw-coder experiment (Dave's explicit ask, to surface
+  process gaps faster). Hit Dave's API session limit mid-batch; corrected
+  ceiling to 3-4 concurrent going forward. All merged clean, zero
+  regressions on final suite. Requeue script applied (45 dead-letters);
+  found and fixed 4 stale workers running pre-merge code post-stitch.
+- #1108: installed `tgw-worker@alt_text.service` via the Nix flake
+  (`nixos-rebuild switch`, Dave-authorized). Immediately surfaced a real
+  crash (unmounted MasterArchive drive breaking the history-archive write).
+- #1407: fixed the crash properly — pre-flight mount-reachability check,
+  defer-and-log (C11 finding `archive_target_unmounted`) instead of crash.
+  Caught a bonus bug (fence-write ordering clobber) during live testing.
+- Dave provided the drive at `/dev/sdg5`, mounted it, found a SECOND bug
+  (orphaned uid 1001 ownership blocking new-folder writes), `chown -R
+  tgw:tgw` authorized and done (1.4T/2.6M files). Worker verified fully
+  healthy end to end.
+- **#1108/#1407 branches are NOT YET MERGED** — check next session.
+- alt_text coverage check: only 189/11,021 currently-ACTIVE listings have
+  alt_text (10,832-item backlog, near-zero prior coverage since worker
+  never existed before today). Batch API path (#144) flagged as the right
+  tool, pacing undecided.
+- New PP-QUEUESTATS-001 filed: `/form/pipeline` webui's "Done today"
+  column is a mislabeled lifetime-cumulative count, no date filter at all.
+  Not urgent (Dave: "I can live with it for a bit"). Real fix + Dave's
+  own anomaly/surge-detection follow-on idea captured in the plan.
+- Investigated an apparent "8257 missing ItemData folders" alarm — turned
+  out to be entirely my own analysis error (reading a stale orphaned
+  catalog file instead of the live config-wired one) compounded by not
+  knowing about the documented SKU-migration classes (PP-ADD-005,
+  `sku_migration.py`). Corrected in full; confirmed migration is 99.7%
+  done (149 stragglers, #1411); sku_history audit-trail gap filed (#1412,
+  only 3305 of ~34k+ documented renames logged). Moved the 2 genuinely
+  orphaned catalog files to `/opt/TGW/data/history/ItemCatalog/`.
+- Process-maturity decision: walked the full planner/coder/stitcher/
+  reviewer pipeline with Dave. Coder role + code review + stitch already
+  transfer cleanly; master-plan authoring and plan-review are already
+  working practices. **Packet-breakdown (planner) rubric is the confirmed
+  gap** — todo #1414, full writeup in `pp/PP-HERMES-EA-001.md`. Dave wants
+  this written next code-running session, ahead of new feature work.
+
+**Still open into next session:**
+- Confirm/merge #1108 and #1407 branches.
+- Dave said he's "going to use it for a while and make a new list" —
+  next session may open with new work rather than continuing this thread.
+- Todo #1414 (planner rubric) — Dave's explicit next-session priority.
+- Lower priority: #1405 (real fix for ebay_draft non-JSON dead-letters,
+  needs maxOutputTokens/thinkingConfig plumbing), #1406 (entity_id
+  default, low pri), #1409 (pipeline stats date-scoping), #1411/#1412
+  (SKU migration tail + audit gap), #1408 (alt_text batch-path crash
+  guard, same fix pattern as #1407 but for `_apply_alt_text_result`).
+
+**Risk worth flagging:** MasterArchive (`/dev/sdg5`) is currently mounted
+at `/media/tgw/MasterArchive` — NOT in fstab (deliberate, Dave doesn't
+want it permanently spun up). If left mounted across a reboot it'll just
+unmount (not in fstab means no auto-remount either) — no action needed,
+but don't assume it's still mounted next session without checking.
+Thermal stayed NORMAL throughout, checked before every heavy operation
+(chown -R on 2.6M files, full suite runs).
+
+## Session 2026-07-15 (Aider + deepseek-v4-flash busywork execution tier)
+
+Dave directed applying the tgw-coder branch-per-task contract to Aider and
+switching its model to deepseek-v4-flash (direct API) — a cheap/fast
+execution tier for XS/S mechanical work (coding, monitoring, schlepping,
+merging), reserving Claude Code tokens for architecture/eBay-invariant
+work. Full detail: `docs/TGW-Plan-Vault/inbox/INPROGRESS-2026-07-15-
+aider-deepseek-busywork-tier.md` and memory `project-aider-deepseek-
+tier-validated.md`.
+
+- `.aider.conf.yml` switched to single-model `deepseek/deepseek-v4-flash`
+  direct API (funded key, not OpenRouter), map-tokens raised to 65536.
+- Fixed todo #1358's real gap: `bin/tgw-aider` and the new
+  `aider_run_task(task_slug=...)` MCP param both now create/reattach an
+  isolated worktree+branch per task, live-verified working twice.
+- Live smoke test on a real todo (#1365, not a toy) found a real aider
+  harness bug (#1424: `--yes` auto-adds any mentioned repo path as a chat
+  file; fails hard if that path is a directory) and, while finishing
+  #1365 by hand, found the todo's own premise was incomplete — no
+  pytest-config option can fix it, the PermissionError fires during
+  pytest's pre-ignore-list directory scan. #1365 now blocked pending
+  Dave's call on a filesystem permission fix. #1361 (tgw-owned
+  `.pytest_cache` blocking worktree cleanup) reproduced live along the way.
+- Dave's read: process validated end-to-end; default to routing XS/S work
+  through this tier going forward, failed attempts are ~free.
+
+**Still open into next session:**
+- Uncommitted in the shared checkout: `.aider.conf.yml`, `bin/tgw-aider`,
+  `src/tgw/aider_mcp_server.py`, `.claude/settings.local.json` — awaiting
+  Dave's review/commit.
+- #1365 blocked — needs Dave's decision (widen tgw-group access to
+  `~/tgw-flake` vs. re-point the repo-root symlinks).
+- #1424 (aider auto-add-on-mention bug) filed, not investigated further.
+- Field-set fix (#1415/#1418/#1416/#1417) review sequence is a SEPARATE
+  open thread (Dave→Tigwa/GPT→Dave/Opus-Fable) — don't conflate with this
+  session's work on resume.
+
+## Session 2026-07-15 (Tigwa's knowledgebase toolset on a1131)
+
+Two distinct toolset requests, initially conflated then disambiguated live
+with Dave. Full detail: `docs/TGW-Plan-Vault/inbox/INPROGRESS-2026-07-15-
+tigwa-knowledgebase-toolset.md` and memory
+`project-tigwa-knowledgebase-toolset-setup.md`.
+
+- **PP-KNOWLEDGE-001 (todo #1150, the actual "knowledgebase" ask):**
+  `git-annex`/`recoll` packages were already declared+deployed from a
+  prior session. This session gave Tigwa the actual usable pieces: git
+  identity, `git annex init "tigwa-a1131-pilot"` at `~/knowledgebase-
+  pilot` (numcopies=2, empty — A1's bounded sample import is still the
+  next step), and her own `~/.recoll/recoll.conf` indexing the read-only
+  NFS view of tgw-prod's data+log into a **separate local** xapiandb on
+  a1131 (design doc's R3 pattern, zero risk to tgw-prod's own live
+  PP-SEARCH-001 index). `recollindex` was still running at session end
+  (~261K docs / 2.1G of a 241G corpus) — check with `ssh a1131 "sudo -u
+  tigwa -i sh -c 'ps -p 117742; tail ~/.recoll/recollindex.log'"`.
+- **Todo #1427 (PP-CATIONIX-001, separate — MasterArchive maintenance
+  toolset Dave+Tigwa scoped together):** archive/database/media
+  inspection tools (p7zip, sqlite, mariadb, postgresql, duckdb, jq,
+  yq-go, csvkit, exiftool, tesseract, ocrmypdf, imagemagick, mediainfo,
+  etc.) added to `nix/hosts/a1131.nix`, `nixos-rebuild switch` applied,
+  all binaries verified live. Closed.
+- **`glabels` dropped, not abandoned.** nixpkgs 25.05's build is broken
+  (deprecated GTK2 API); nixpkgs-unstable removed the package entirely in
+  favor of the `glabels-qt` fork. A lan-mouse-style overlay pinning
+  `glabels-qt` was drafted and evaluated clean but deliberately reverted —
+  Dave wants Tigwa to go over the fork decision with him first (different
+  toolkit, not a drop-in). Filed as todo #1430, delegated to tigwa, p25 —
+  not urgent today but inventory label printing is coming soon per Dave.
+- Along the way: the permission classifier correctly blocked an
+  overclaimed "GO confirmed (Dave)" comment I drafted for a commit before
+  Dave had actually named that specific package list — see memory
+  `feedback-dont-overclaim-authorization-in-commits.md`.
+
+**Still open into next session:**
+- Recollindex first pass not yet complete — verify a live query works
+  once it finishes.
+- A1's actual pilot import (bounded 5-10GB sample from masterarchive/
+  history) — repo initialized but still empty.
+- A0's Syncthing folder inventory — separate decision packet, not started.
+- Todo #1430 (glabels-qt fork decision) needs Dave+Tigwa's conversation.

@@ -22,6 +22,10 @@ going forward.
   is your real operating contract — roles, authority boundaries, the
   IN TRAINING scope, the branch-review exception, the emergency-override
   rule. Read that in full, not `CLAUDE.md`.
+- **Your inbox (2026-07-15):** `docs/TGW-Plan-Vault/inbox/` is now split per-actor —
+  Tigwa's is `docs/TGW-Plan-Vault/inbox/tigwa/`, Dave's is `inbox/dave/`. Claude's is
+  `inbox/claude/` — that one is not yours to process, ever (see the "why this file
+  exists" incident below). `inbox/archive/` and `inbox/queued/` stay shared.
 - Your own Hermes memories (`~/.hermes/memories/USER.md`, `MEMORY.md`,
   `SOUL.md`) are the durable, persona-specific record of what Dave has told
   you directly — those govern your behavior, not this repo's `CLAUDE.md`.

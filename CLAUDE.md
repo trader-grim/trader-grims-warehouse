@@ -120,8 +120,12 @@ the still-open wake-rules/dispatch mechanism.
 
 **Step 1 — process any pending plan updates before reading the plan:**
 
-1. Check `docs/TGW-Plan-Vault/inbox/` for any `.md` files. If any exist, read them and
-   incorporate their content into the master plan, then delete (or move) each processed file.
+1. Check `docs/TGW-Plan-Vault/inbox/claude/` for any `.md` files. If any exist, read them
+   and incorporate their content into the master plan, then delete (or move) each processed
+   file. (2026-07-15: the inbox was split per-actor — `inbox/claude/` is mine, `inbox/tigwa/`
+   and `inbox/dave/` belong to them. Never read another actor's subfolder as if it were your
+   own contract — that exact mistake caused a real incident, see `AGENTS.md` and
+   `pp/PP-HERMES-EA-001.md`'s "CLAUDE.md was leaking into Tigwa's contract" section.)
 2. Check `docs/TGW-Plan-Vault/suggestions/SUGGESTIONS.md` for any unprocessed suggestions.
    Evaluate each unchecked item:
    - **Actionable now** → incorporate into master plan as a PP-* item; check off with "→ master plan"
@@ -143,7 +147,7 @@ cat docs/TGW-Plan-Vault/plan/TGW-Master-Plan.md
 
 The master plan is the single source of truth: what's done, what's in progress, settled
 architecture decisions, and open pending projects (PP-* items). The PM-intake worker keeps it
-current from notes dropped into `docs/TGW-Plan-Vault/inbox/`.
+current from notes dropped into `docs/TGW-Plan-Vault/inbox/claude/`.
 
 **Step 3 — run plan reconciliation + status check (PP-PLANDB-001 Phase 3+4):**
 
@@ -167,7 +171,7 @@ Before making any change this session, do both of these:
 
 1. Check existing todos: `sudo -u tgw tgw todo` — mark any relevant items `in_progress`.
 2. For new work: `sudo -u tgw tgw todo add "what you are about to do"` — then mark it `in_progress`.
-3. Write a recovery breadcrumb to `docs/TGW-Plan-Vault/inbox/INPROGRESS-<slug>.md` — one short
+3. Write a recovery breadcrumb to `docs/TGW-Plan-Vault/inbox/claude/INPROGRESS-<slug>.md` — one short
    paragraph describing what you are working on and where you are. If the session is interrupted,
    the next session startup sequence will read this and reconstruct your state.
 
@@ -186,7 +190,7 @@ loses recoverability. Run `/tgw-exit` when done or switching to a1131 — it fin
 | Logs | `/opt/TGW/var/log/` |
 | Universal search index | `/opt/TGW/.recoll/` (config + xapiandb; not in git) — `recoll -q "..."` for cross-archive recovery/audit queries (PP-SEARCH-001 Phase 0) |
 | Plan vault | `docs/TGW-Plan-Vault/` (Syncthing-synced Obsidian) |
-| Plan inbox | `docs/TGW-Plan-Vault/inbox/` (drop .md files here) |
+| Plan inbox | `docs/TGW-Plan-Vault/inbox/claude/` (mine; `inbox/tigwa/`, `inbox/dave/` are theirs — `inbox/archive/`, `inbox/queued/` stay shared) |
 | **Reference docs** | `docs/TGW-Plan-Vault/reference/` — read before working on relevant areas |
 
 ## Reference library
@@ -307,8 +311,8 @@ Run as `tgw` user — source files are `rw-------`, secrets are `chmod 600`.
 - **Read the master plan first** — it has the full architecture context
 - **Before making any code or config changes** — log the work first:
   1. Create a todo: `tgw todo add "what you're about to do"` (or `tgw todo` to check existing)
-  2. Drop an inbox note: write a brief `.md` file to `docs/TGW-Plan-Vault/inbox/` describing
-     what you're working on and where you are. Filename: `INPROGRESS-<slug>.md`. This lets
+  2. Drop an inbox note: write a brief `.md` file to `docs/TGW-Plan-Vault/inbox/claude/`
+     describing what you're working on and where you are. Filename: `INPROGRESS-<slug>.md`. This lets
      the startup sequence reconstruct context if the session is interrupted.
   3. Mark the todo `in_progress` when you start, `done` when complete.
 - **Every todo gets a `--pp` tag, from 2026-07-11 forward (Dave, standing requirement).**

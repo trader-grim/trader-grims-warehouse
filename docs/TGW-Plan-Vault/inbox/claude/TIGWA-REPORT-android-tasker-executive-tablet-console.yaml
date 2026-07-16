@@ -1,0 +1,163 @@
+schema_version: 1
+artifact:
+  id: tgw-android-tasker-executive-console-2026-07-15
+  type: research_recommendation
+  status: review_requested
+  related:
+    - PP-TASKER-001
+    - PP-HERMES-EA-001
+    - PP-HARDWARE-001
+    - todo:1425
+scope:
+  source_tree_status: not_yet_supplied
+  actions_taken: []
+  non_actions:
+    - no_android_or_tasker_change
+    - no_repository_created
+    - no_service_or_network_change
+    - no_production_data_change
+known_estate:
+  android_role: operational_infrastructure
+  cameradata_runtime: Tasker
+  lineage_start: 2014
+  device_classes:
+    - tablets
+    - camera_collectors
+    - picker_tools
+  picker_capabilities:
+    - pick_list
+    - magnifier
+    - flashlight
+  available_components:
+    - Tasker
+    - AutoTools
+    - Termux
+    - Termux_API
+    - KDE_Connect
+    - Syncthing
+    - Join_licensed
+  reference_console:
+    physical_role: tablet_in_front_of_a1131
+architecture:
+  pattern: bounded_edge_connector
+  authority_model: named_capabilities_only
+  primary_transport:
+    type: a1131_local_LAN_authenticated_gateway
+    ingress_preference: tasker_or_termux_outbound_HTTPS_to_gateway
+    local_http_receive: narrowly_scoped_test_or_adapter_only
+    properties:
+      - per_device_credential
+      - typed_payload
+      - timestamp_and_nonce
+      - event_id
+      - expiry
+      - replay_rejection
+      - idempotency
+      - audit_record
+  device_runtime:
+    - Tasker
+    - Tasker_Scenes
+    - optional_Termux_and_Termux_API
+  supporting_transports:
+    KDE_Connect: lan_local_convenience_only
+    Join: cross_network_human_facing_fallback
+    Syncthing: durable_async_artifact_plane_only
+  prohibited:
+    - arbitrary_shell_execution
+    - arbitrary_tasker_task_execution
+    - arbitrary_android_intent
+    - accessibility_automation_as_core_flow
+    - cloud_only_critical_alarm
+capabilities:
+  - kfmawi.health.read
+  - kfmawi.status.show
+  - kfmawi.alarm.raise
+  - kfmawi.alarm.ack
+  - kfmawi.self_test.run
+  - kfmawi.console.open_review
+console:
+  jobs:
+    - interrupt
+    - orient
+    - acknowledge_or_route
+  modes:
+    - normal_glance
+    - critical_incident
+    - review_approval
+  rules:
+    - acknowledgement_is_not_approval
+    - failure_state_must_be_stale_or_unknown_not_green
+    - critical_alarms_local_first
+component_recommendations:
+  Tasker: runtime_and_scene_ui
+  TaskerNet: untrusted_pattern_library_review_before_adoption
+  AutoTools: selective_ui_helper
+  AutoNotification: actionable_local_incident_notifications
+  AutoInput: compatibility_only_not_core
+  AutoVoice: deferred_optional
+  AutoRemote: secondary_adapter_after_testing
+  Join: supplemental_transport
+  AutoShare: optional_explicit_handoff
+  AutoBarcode: evaluate_after_real_scanner_intent_audit
+  Termux_API: edge_utility_layer
+  KDE_Connect: predefined_manual_local_convenience
+  Syncthing: evidence_and_exports_not_commands
+  Fully_Kiosk: evaluate_after_v1_if_dedicated_kiosk_needed
+phases:
+  - id: phase_0
+    name: preserve_and_inventory
+    owner: Claude_after_source_arrival
+    deliverables:
+      - untouched_import_snapshot
+      - sha256_manifest
+      - dependency_manifest
+      - device_registry
+      - capability_contract
+      - secrets_redaction_review
+  - id: phase_1
+    name: local_alarm_ack_vertical_slice
+    deliverables:
+      - typed_alert_receive
+      - full_screen_local_alarm
+      - event_bound_ack
+      - tablet_heartbeat
+      - manual_self_test
+      - drill_evidence
+  - id: phase_2
+    name: read_only_executive_dashboard
+  - id: phase_3
+    name: fleet_interfaces_after_inventory
+  - id: phase_4
+    name: optional_transports_and_features_after_drills
+promotion_gates:
+  - local_alarm_works_without_internet
+  - duplicate_expired_and_out_of_order_events_are_unambiguous
+  - reboot_recovery_verified
+  - missing_heartbeat_never_appears_healthy
+  - secrets_excluded_from_repository
+  - Dave_reviews_ergonomics_and_authority_boundary
+  - independent_review
+  - human_sign_off
+review_questions:
+  Dave:
+    - confirm_reference_tablet_and_alarm_expectations
+    - choose_scene_first_or_local_web_surface
+    - define_ack_and_repeat_policy
+  Claude:
+    - create_independent_git_after_source_arrival
+    - inventory_exports_before_modernization
+    - propose_smallest_tested_bridge_and_tasker_delta
+    - produce_machine_readable_companions
+sources:
+  report: TIGWA-REPORT-android-tasker-executive-tablet-console.md
+  official:
+    - https://tasker.joaoapps.com/userguide/en/scenes.html
+    - https://tasker.joaoapps.com/userguide/en/help/ah_http_request.html
+    - https://tasker.joaoapps.com/userguide/en/intents.html
+    - https://taskernet.com/
+    - https://joaoapps.com/autotools/
+    - https://joaoapps.com/autonotification/
+    - https://joaoapps.com/join/
+    - https://github.com/termux/termux-api
+    - https://kdeconnect.kde.org/
+    - https://docs.syncthing.net/users/syncing.html

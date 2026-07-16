@@ -1,0 +1,201 @@
+schema_version: 1
+artifact:
+  id: TIGWA-RESEARCH-universal-dictation-justshoutit
+  status: review_requested
+  date: '2026-07-15'
+  owner: tigwa
+  plan_ref: PP-INTAKE-004
+  related_todos: [1426, 1327, 1353]
+  intent: >-
+    Select a universal local-LAN voice/dictation architecture for JustShoutIt,
+    a1131, the photo booth remote microphone, and the executive tablet.
+verified_current_state:
+  legacy_justshoutit:
+    components: [Voice_In, xmouse_SSH_macro_pad, tiny_local_web_page, Tasker_camera_event_server]
+    active_transport: KDE_Connect_clipboard_relay
+    message_forms: ['COMMAND:<name>', 'DATA:<key>=<value>', 'TEMPLATE:<name>', 'SETLOCATION:<location>']
+    role: remote_camera_operation_and_intake_HUD_control
+    migration_posture: preserve_and_type_existing_Tasker_event_contract
+    evidence: SHELL-AUDIT.md_and_Dave_2026-07-15_correction
+  hermes_voice:
+    groq_stt: verified_direct_test_2026-07-12
+    engine: whisper-large-v3-turbo
+    edge_tts: verified
+    source: TGW todo 1353
+  tgw_local_stt:
+    pipeline: ffmpeg_to_whisper-cli
+    status: proven
+    current_sink: global_SUGGESTIONS_md
+    target_sink: item_scoped_ai_hint
+    source: PP-INTAKE-004
+  a1131:
+    cpu: Intel_Core_i5-2400S_4_cores
+    memory: 19_GiB
+    gpu_compute_detected: false
+    desktop_audio:
+      session: db_KDE_Wayland
+      server: PipeWire_1.4.7
+      capture_source: Built-in_Audio_Analog_Stereo
+      playback_sink: Built-in_Audio_Analog_Stereo
+    input_injection:
+      ydotoold: active
+      db_in_ydotool_group: true
+      preferred_path: clipboard_then_synthetic_Ctrl_V
+      policy: explicit_armed_field_only_and_validate_per_workstation
+  unknowns:
+    - photo_booth_microphone_connection_and_host
+    - second_linux_host_identity_and_audio_session
+    - actual_photo_booth_noise_and_speech_profile
+assisted_capture_loop:
+  purpose: fast_operator_assisted_item_intake_not_remote_macro_dispatch
+  inputs: [operator_justshoutit_facts, Syncthing_queue_photos, camera_completion]
+  correlation_key: capture_session_id_independent_of_final_SKU
+  stages:
+    - early_photos_arrive_then_provisional_identity_pass
+    - candidate_facts_and_required_missing_prompts_shown_to_operator
+    - operator_confirms_required_facts_and_location
+    - camera_wraps_bundle_to_incoming_newitems
+    - final_merge_validation_and_ai_reidentify_with_complete_capture
+    - listing_ready_candidate_requires_review_before_publish
+  threshold_posture:
+    provisional: configurable_minimum_photos_after_a_couple_arrive
+    strong_pass: documented_six_photo_batch
+    completion: session_completion_fallback_and_refinement
+  authority:
+    operator_facts: override_AI_for_addressed_fields
+    syncthing: transport_only
+    canonical_write: fenced_reviewed_finalization_only
+architecture:
+  boundary: authenticated_typed_local_LAN_voice_gateway
+  capture_adapters:
+    - photo_booth_microphone
+    - a1131_desktop
+    - executive_tablet
+  request_contract:
+    required: [device_id, request_id, issued_at, expires_at, mode]
+    optional: [audio, transcript, active_item_id, capture_session_id]
+    modes: [dictate, attribute, converse]
+  response_contract:
+    fields: [transcript, stt_engine, provenance, confidence, candidate, reply_text, reply_audio]
+  outputs:
+    dictation:
+      desktop: explicit_armed_field_then_validated_ydotool_injection
+      tablet: native_app_or_tasker_ui
+    semantic:
+      target: PP-INTAKE-004_manual_attribute_write_interface
+      operator_precedence: operator_speech_wins_for_addressed_field
+    conversation:
+      target: Hermes_session_with_distinct_scope
+selection:
+  primary_connected:
+    component: Hermes_Groq_STT_plus_Edge_TTS
+    use: rich_dictation_and_conversation
+    status: already_verified
+  primary_offline_fallback:
+    component: existing_ffmpeg_to_whisper-cli
+    use: item_scoped_transcription_and_evidence
+    status: already_proven
+  evaluation_candidate:
+    component: whisper.cpp
+    use: interactive_local_cpu_STT
+    initial_profile: base.en_PTT_release_with_VAD
+    condition: benchmark_on_real_TGW_vocabulary_and_noise
+  tablet_voice_runtime:
+    component: sherpa-onnx_native_foreground_service
+    use: local_KWS_VAD_streaming_ASR_TTS
+    wake_phrases: [Tigwa, Hey Tigwa, Leotha, Hey Leotha]
+    tasker_termux_role: PTT_diagnostics_and_relay_fallback
+  optional_tablet_wake_runtime:
+    component: Picovoice_Porcupine
+    tradeoff: custom_AccessKey_and_model_provisioning
+  temporary_photo_mic_transport:
+    component: AudioRelay
+    status: optional_paired_LAN_proof_only_not_platform_boundary
+  bounded_offline_fallback:
+    component: Vosk_engine_or_server
+    use: short_command_grammar_or_degraded_mode
+  excluded_as_foundation:
+    - VOSK4Tasker_archived
+    - AutoVoice_Google_Assistant_integration_removed
+    - browser_only_Voice_In_as_universal_solution
+    - arbitrary_voice_to_shell_or_Tasker_execution
+  retain_until_replacement_proven:
+    - Voice_In_Chrome_photo_booth_fallback
+rollout:
+  phase_0:
+    name: instrument_and_benchmark
+    gates:
+      - inventory_photo_microphone_path
+      - collect_consented_redacted_test_corpus
+      - compare_groq_whisper-cli_and_whisper_cpp
+      - validate_clipboard_then_ydotool_Ctrl_V_per_workstation
+      - specify_armed_field_cancel_undo_and_physical_PTT_UI
+      - evaluate_AudioRelay_only_if_photo_mic_is_Android_hosted
+  phase_1:
+    name: universal_push_to_talk_dictation
+    requirements:
+      - explicit_armed_field
+      - transcript_visible
+      - undo_available
+      - engine_and_fallback_status_visible
+  phase_2:
+    name: justshoutit_semantic_entry
+    requirements:
+      - active_item_or_capture_session_association
+      - typed_attribute_candidates
+      - uncertainty_visible
+      - same_manual_attribute_write_contract
+      - provenance_persisted
+  phase_3:
+    name: Tigwa_Leotha_conversation
+    requirements:
+      - push_to_talk_interrupts_playback
+      - visual_transcript_fallback
+      - session_scope_is_explicit
+  phase_4:
+    name: wake_word_evaluation
+    triggers:
+      normal: [Tigwa, Leotha]
+      higher_confidence: [Hey Tigwa, Hey Leotha]
+    rules:
+      - native_Android_microphone_foreground_service_not_Tasker_only_listener
+      - sherpa_onnx_preferred_FOSS_runtime
+      - wake_word_only_opens_short_capture_window
+      - no_authority_or_confirmation_bypass
+      - deploy_only_after_real_photo_booth_false_accept_reject_benchmark
+training_data:
+  required_records:
+    - transcript
+    - parser_or_model_guess
+    - operator_approved_value
+    - operator_correction
+    - item_or_capture_session_reference
+    - stt_engine_and_version
+    - timestamp
+  raw_audio: explicit_retention_and_privacy_decision_required
+safety:
+  - LAN_only_authenticated_per_device
+  - request_expiry_nonce_idempotency
+  - no_arbitrary_shell_Tasker_or_intent_execution
+  - no_auto_mutation_from_raw_transcript
+  - consequential_actions_require_explicit_confirmation
+  - clear_unavailable_state_on_total_STT_failure
+sources:
+  canonical:
+    - PP-INTAKE-004
+    - TGW_todo_1353
+  external:
+    - https://tasker.joaoapps.com/userguide/en/help/ah_get_voice.html
+    - https://tasker.joaoapps.com/userguide/en/help/ah_say.html
+    - https://github.com/Admicos/VOSK4Tasker
+    - https://alphacephei.com/vosk/android
+    - https://github.com/alphacep/vosk-server
+    - https://github.com/ggml-org/whisper.cpp
+    - https://github.com/SYSTRAN/faster-whisper
+    - https://github.com/ideasman42/nerd-dictation
+    - https://github.com/Picovoice/porcupine
+    - https://k2-fsa.github.io/sherpa/onnx/android/index.html
+    - https://k2-fsa.github.io/sherpa/onnx/kws/index.html
+    - https://audiorelay.net/docs/
+    - https://developer.android.com/develop/background-work/services/fgs/restrictions-bg-start
+    - https://github.com/dscripka/openWakeWord

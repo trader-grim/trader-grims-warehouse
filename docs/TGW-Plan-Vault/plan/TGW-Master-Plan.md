@@ -1720,6 +1720,38 @@ packet → Claude (Sonnet) or Aider, loading only the packet's context budget. E
 LLM task names its model (memory: feedback-llm-model-selection). Human-only: OAuth,
 Seller Hub edits, infra deploy, hardware.
 
+## PP-QUEUESTATS-001 — pipeline page accuracy + throughput anomaly detection — NEW 2026-07-14
+**Found while investigating a stuck-item question (todo #1108's alt_text
+worker):** the `/form/pipeline` webui page's "Done today" column
+(`http_server.py:7793,7798`) is mislabeled — its data source,
+`queue_status()` (`http_server.py:1664-1688`), is `SELECT queue_name,
+state, COUNT(*) FROM queue_jobs GROUP BY queue_name, state` with **no
+date filter at all**. Both the "Failed/DL" and "Done today" columns are
+lifetime cumulative `queue_jobs` state counts, not scoped to today. The
+"Failed/DL" label is honest (it doesn't claim to be daily); "Done today"
+is not. Dave, 2026-07-14: "proper. I can live with it for a bit" —
+confirmed as a real fix (date-scoped throughput, not just a relabel), not
+urgent, no packet dispatched yet.
+
+**Dave's own framing, same message, worth building toward:** "looking at
+those numbers, and knowing I have 55k items and we only were supposed to
+process some, we can see where the issues are. The same set of stats can
+me used to detect an out of band surge in usage, especially after we have
+worked it for a while." Two distinct asks bundled in one PP:
+1. Fix the query to be genuinely date-scoped (today's succeeded/failed
+   per queue, not lifetime) — the immediate, concrete fix.
+2. Once real daily-throughput numbers exist, use them as a **baseline for
+   anomaly/surge detection** — after some period of "normal" operation,
+   flag when a queue's daily volume (success or failure) deviates sharply
+   from its own recent baseline. This is explicitly a *use* of the same
+   per-queue per-day stat, not a separate metrics system — build #1 in a
+   way that makes #2 a straightforward follow-on (e.g. a `queue_daily_stats`
+   view/table, not just an ad-hoc page query), but don't build the
+   anomaly-detection logic itself until Dave asks — not yet scoped/dated.
+
+Not yet packetized — low urgency per Dave's own "I can live with it for a
+bit."
+
 ## Session protocol
 
 Start: thermal → inbox → SESSION-BRIEF/this plan → `tgw plan check` + `tgw ops-digest`

@@ -921,3 +921,52 @@ is what she upgrades against.
 - [[project-catio-sequencing]] — "stabilize TGW first, cage comes last."
 - [[feedback-nix-prevent-not-recover]], [[feedback-time-money-constraints]]
   — the constraints shaping this design.
+
+## Planner/coder/stitcher/reviewer process maturity — decision 2026-07-14
+**Dave, after a full working session (PP-DEADLETTER-001's 9-packet batch +
+#1108/#1407 alt_text fixes + live catalog investigation): "what I thought
+we captured a good set for the coder but you ran the other parts like
+you."** Not a request for a lesser model anywhere — best model/agent stays
+on every role, including a planned **second independent reviewer for
+important work** (adversarial-verify pattern, not a downgrade). The actual
+finding is a documentation gap, not a capability gap. Walked the full
+pipeline stage by stage and landed on:
+
+1. **Master plan authoring** — separate, human-driven (Dave + PM-intake).
+   Already has a process. No gap.
+2. **Plan review** — Dave: "pretty much what we already do in our big
+   master plan sessions." Already a working practice. No gap.
+3. **Packet breakdown (planner)** — **the real, confirmed gap.** The
+   packet template used all session (Context budget / Verified-live-facts
+   / Spec / Out-of-scope / Dataset / Acceptance / Quota-risk) IS a
+   transferable planning method — it was just never written down as its
+   own rubric, so it only exists as a habit inside whichever session is
+   doing the planning. A fresh planner (different person, different
+   model instance, no accumulated session memory) has no written guide
+   for calibrating "loose enough for creativity, strict enough to get
+   what we want" — e.g. how tight to scope context budget, what counts as
+   a sufficient verified-live fact before writing spec steps, how
+   permissive out-of-scope should be.
+4. **Runners (coders)** — proven working this session across 8+ fresh
+   tgw-coder agents with zero shared memory, including one catching a
+   real bug outside its own spec (the #1407 fence-write-ordering fix) and
+   another correctly declining an unauthorized production
+   `nixos-rebuild switch`. No gap — this role's process already
+   transfers cleanly.
+5. **Merge (stitch)** — mechanical, low-skill, already gated on Dave's
+   explicit go-ahead each time. No gap.
+6. **Review** — code review already has a defined process (`/code-review`
+   skill). Reviewing a *whole stitched batch* rather than one packet at a
+   time isn't separately called out anywhere, but is a smaller gap than
+   #3.
+7. **Implement + test** — already lives inside each packet's own
+   Acceptance section (live verification + full offline suite required),
+   travels with the runner step, not a separate stage.
+
+**Decision: next code-running session, work on closing gap #3** — write
+the packet-breakdown rubric as its own reference doc (same treatment the
+coder packet format and `/code-review` already got), sized to allow real
+runner-level judgment calls (per point 4's evidence) while still pinning
+down the non-negotiables. Not started this session — captured as the
+next session's process-improvement work, separate from any specific
+PP-DEADLETTER-001-style feature work.

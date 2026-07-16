@@ -1,9 +1,13 @@
 """
 tgw.workers.pm_intake — Plan-Manager intake worker.
 
-Watches inbox/ for dropped Markdown notes. When a note appears:
-    1. Move it to inbox/queued/<filename> (only after submission-delay gate)
-    2. Enqueue a pm_intake job referencing the file
+Watches inbox/, inbox/dave/, and inbox/tigwa/ for dropped Markdown notes
+(inbox/claude/, inbox/queued/, inbox/archive/, inbox/review/ are never
+scanned — see the topology comment above scan_and_enqueue). When a note
+appears:
+    1. Move it to inbox/queued/<owner-qualified-name> (only after submission-delay gate)
+    2. Enqueue a pm_intake job referencing the file, with owner/source_path/sha256
+       recorded in the payload for provenance and idempotent dedupe
     3. On claim: read file, call LLM to classify the change,
        dispatch action (append_to_section | file_document | flag_for_review | no_change)
     4. Archive to inbox/archive/ (durable — included in vault sync)
@@ -346,11 +350,18 @@ def _build_url_note(fetch_result: Dict[str, Any]) -> str:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _archive(note_path: Path, processed_dir: Path) -> None:
+def _archive(note_path: Path, processed_dir: Path, source_label: Optional[str] = None) -> None:
+    """Move note_path into processed_dir with a timestamp prefix.
+
+    source_label (e.g. 'tigwa/foo.md') is flattened into the archived filename
+    when given, so provenance survives archiving and same-name notes from
+    different owner queues never collide in the flat archive/ dir.
+    """
     ts = datetime.now(tz=timezone.utc).strftime('%Y%m%dT%H%M%S')
-    archive_path = processed_dir / f'{ts}-{note_path.name}'
+    flat_name = source_label.replace('/', '__') if source_label else note_path.name
+    archive_path = processed_dir / f'{ts}-{flat_name}'
     shutil.move(str(note_path), archive_path)
-    log.info('archived %s → archive/%s', note_path.name, archive_path.name)
+    log.info('archived %s → archive/%s', source_label or note_path.name, archive_path.name)
 
 
 def _patch_plan_append(plan_text: str, section_heading: str, content: str) -> str:
@@ -419,13 +430,118 @@ def _write_filing_log(
 
 # ---------------------------------------------------------------------------
 # Shared scan-and-enqueue logic (used by worker loop and tgw admin-file)
+#
+# Plan Vault inbox topology (2026-07-15, PP-HERMES-EA-001 #1435/#1436): the
+# inbox was split per-actor to stop the class of incident where one actor
+# processed another's inbox as their own contract (Tigwa reading Claude's
+# inbox as her own Step 1 job). admin-file/pm_intake now discovers ONLY:
+#   inbox/            root staging (unassigned intake)
+#   inbox/dave/       Dave-originated intake
+#   inbox/tigwa/      Tigwa-originated intake
+# and never recurses into inbox/claude/ (Claude's own correspondence —
+# explicitly not general intake), inbox/queued/, inbox/archive/, or
+# inbox/review/ (operational subtrees, not fresh intake). glob('*.md') on
+# each of those three directories is non-recursive, so this exclusion is
+# structural, not just a filename check.
 # ---------------------------------------------------------------------------
 
+_INTAKE_OWNERS: tuple = ('root', 'dave', 'tigwa')
+
+
+def _owner_dir(inbox_dir: Path, owner: str) -> Path:
+    return inbox_dir if owner == 'root' else inbox_dir / owner
+
+
+def _relative_name(owner: str, md_file: Path) -> str:
+    """Owner-qualified relative name used as queue payload/path identity.
+
+    Root files keep their bare filename (backward compatible with existing
+    queued/<filename> layout); dave/tigwa files are qualified as
+    '<owner>/<filename>' so same-name notes from different owners never
+    collide once staged into queued/, review/, or archive/.
+    """
+    return md_file.name if owner == 'root' else f'{owner}/{md_file.name}'
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with path.open('rb') as f:
+        for chunk in iter(lambda: f.read(65536), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _iter_source_files(inbox_dir: Path):
+    """Yield (owner, md_file) for every intake-eligible candidate, sorted
+    deterministically by owner then filename."""
+    for owner in _INTAKE_OWNERS:
+        subdir = _owner_dir(inbox_dir, owner)
+        if not subdir.is_dir():
+            continue
+        for md_file in sorted(subdir.glob('*.md')):
+            if owner == 'root' and md_file.name.lower() == 'readme.md':
+                continue
+            yield owner, md_file
+
+
+def build_intake_manifest(cfg: Dict[str, Any], bypass_delay: bool = False) -> List[Dict[str, Any]]:
+    """Non-mutating inventory of intake candidates across root/dave/tigwa.
+
+    Each entry reports source path, owner queue, file type, size, mtime,
+    sha256, eligibility decision, and the queue path a real run would use.
+    Never touches the filesystem beyond stat()/read for hashing.
+    """
+    inbox_dir: Path = cfg['plan_inbox_path']
+    delay_hours: float = float(cfg.get('pm_intake_delay_hours', 4.0))
+    manifest: List[Dict[str, Any]] = []
+
+    for owner, md_file in _iter_source_files(inbox_dir):
+        rel_name = _relative_name(owner, md_file)
+        try:
+            stat = md_file.stat()
+        except OSError as exc:
+            manifest.append({
+                'source_path': rel_name, 'owner': owner, 'eligible': False,
+                'reason': f'stat failed: {exc}',
+            })
+            continue
+
+        age_hours = (time.time() - stat.st_mtime) / 3600
+        aged_enough = bypass_delay or age_hours >= delay_hours
+        try:
+            sha256 = _sha256_file(md_file)
+        except OSError as exc:
+            manifest.append({
+                'source_path': rel_name, 'owner': owner, 'eligible': False,
+                'reason': f'read failed: {exc}',
+            })
+            continue
+
+        manifest.append({
+            'source_path': rel_name,
+            'owner': owner,
+            'file_type': md_file.suffix.lstrip('.') or 'unknown',
+            'size_bytes': stat.st_size,
+            'mtime': datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            'age_hours': round(age_hours, 1),
+            'sha256': sha256,
+            'eligible': aged_enough,
+            'reason': 'ready' if aged_enough else f'{age_hours:.1f}h old, delay gate is {delay_hours:.0f}h',
+            'planned_queue_path': f'queued/{rel_name}',
+        })
+
+    return manifest
+
+
 def scan_and_enqueue(cfg: Dict[str, Any], bypass_delay: bool = False) -> List[str]:
-    """Scan inbox for eligible .md files, move to queued/, enqueue jobs.
+    """Scan root/dave/tigwa inbox queues for eligible .md files, move each to
+    queued/<owner-qualified-name>, and enqueue a pm_intake job.
 
     Files that have not yet aged past pm_intake_delay_hours are skipped unless
-    bypass_delay is True. Returns list of filenames enqueued (or already queued).
+    bypass_delay is True. Returns list of owner-qualified names enqueued (or
+    already queued) — plain filename for root, '<owner>/<filename>' for
+    dave/tigwa sources.
     """
     inbox_dir: Path = cfg['plan_inbox_path']
     queued_dir = inbox_dir / 'queued'
@@ -434,9 +550,8 @@ def scan_and_enqueue(cfg: Dict[str, Any], bypass_delay: bool = False) -> List[st
     delay_hours: float = float(cfg.get('pm_intake_delay_hours', 4.0))
     enqueued: List[str] = []
 
-    for md_file in sorted(inbox_dir.glob('*.md')):
-        if md_file.name.lower() == 'readme.md':
-            continue
+    for owner, md_file in _iter_source_files(inbox_dir):
+        rel_name = _relative_name(owner, md_file)
 
         if not bypass_delay:
             try:
@@ -446,47 +561,83 @@ def scan_and_enqueue(cfg: Dict[str, Any], bypass_delay: bool = False) -> List[st
             if age_hours < delay_hours:
                 log.debug(
                     'skipping %s: %.1fh old, delay gate is %.0fh',
-                    md_file.name, age_hours, delay_hours,
+                    rel_name, age_hours, delay_hours,
                 )
                 continue
 
-        dest = queued_dir / md_file.name
+        try:
+            sha256 = _sha256_file(md_file)
+        except OSError as exc:
+            log.warning('could not hash %s: %s', rel_name, exc)
+            continue
+
+        dest = queued_dir / rel_name
+        dest.parent.mkdir(parents=True, exist_ok=True)
         try:
             md_file.rename(dest)
         except OSError as exc:
-            log.warning('could not move %s to queued/: %s', md_file.name, exc)
+            log.warning('could not move %s to queued/: %s', rel_name, exc)
             continue
 
-        dedupe_key = f'pm_intake:{md_file.name}'
+        # Content+path-qualified dedupe key: same owner+filename with unchanged
+        # content is not re-enqueued (idempotent rerun), but an edited note
+        # (new sha256) or a same-named note from a different owner (different
+        # rel_name) gets its own key — no cross-owner or stale-content collision.
+        dedupe_key = f'pm_intake:{rel_name}:{sha256[:16]}'
         try:
             jid = state_machine.enqueue_job(
                 queue_name=QUEUE_NAME,
-                payload={'filename': md_file.name},
+                payload={
+                    'filename': rel_name,
+                    'owner': owner,
+                    'source_path': rel_name,
+                    'sha256': sha256,
+                    'intake_ts': datetime.now(tz=timezone.utc).isoformat(),
+                },
                 dedupe_key=dedupe_key,
                 max_attempts=3,
             )
-            log.info('enqueued pm_intake job for %s (job %s)', md_file.name, jid)
-            tgw_logging.log_event('pm_intake_enqueued', filename=md_file.name, job_id=jid)
-            enqueued.append(md_file.name)
+            log.info('enqueued pm_intake job for %s (job %s)', rel_name, jid)
+            tgw_logging.log_event('pm_intake_enqueued', filename=rel_name, owner=owner, job_id=jid)
+            enqueued.append(rel_name)
         except psycopg2.errors.UniqueViolation:
-            log.info('pm_intake job already exists for %s — skipping', md_file.name)
-            enqueued.append(md_file.name)
+            log.info('pm_intake job already exists for %s — skipping', rel_name)
+            enqueued.append(rel_name)
         except Exception:
-            log.exception('failed to enqueue pm_intake job for %s', md_file.name)
+            log.exception('failed to enqueue pm_intake job for %s', rel_name)
             dest.rename(md_file)
 
     return enqueued
 
 
 # ---------------------------------------------------------------------------
-# CLI command: tgw admin-file [--now]
+# CLI command: tgw admin-file [--now] [--dry-run]
 # ---------------------------------------------------------------------------
 
-def cmd_admin_file(cfg: Dict[str, Any], bypass_delay: bool = False) -> Dict[str, Any]:
+def cmd_admin_file(
+    cfg: Dict[str, Any],
+    bypass_delay: bool = False,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
     """Scan inbox and enqueue eligible notes for pm_intake processing.
 
-    Called by `tgw admin-file [--now]`. Returns {'ok', 'enqueued', 'files'}.
+    Called by `tgw admin-file [--now] [--dry-run]`.
+    --dry-run reports a manifest (source path, owner, type, size, mtime,
+    sha256, eligibility, planned queue path) without moving or enqueuing
+    anything. Returns {'ok', 'enqueued', 'files'} normally, or
+    {'ok', 'dry_run': True, 'candidates': [...]} under --dry-run.
     """
+    if dry_run:
+        manifest = build_intake_manifest(cfg, bypass_delay=bypass_delay)
+        if manifest:
+            print(f'{len(manifest)} candidate(s) found (dry run — nothing moved or enqueued):')
+            for entry in manifest:
+                status = 'ELIGIBLE' if entry.get('eligible') else 'skip'
+                print(f'  [{status}] {entry["owner"]:5s} {entry["source_path"]} — {entry.get("reason", "")}')
+        else:
+            print('No candidate inbox files found (dry run).')
+        return {'ok': True, 'dry_run': True, 'candidates': manifest}
+
     state_machine.init(cfg.get('postgres_dsn', 'dbname=state_machine user=tgw'))
     files = scan_and_enqueue(cfg, bypass_delay=bypass_delay)
     if files:
@@ -547,7 +698,7 @@ class PMIntakeWorker(QueueWorker):
         if not note_text:
             log.info('note %s is empty — archiving with no_change', filename)
             tgw_logging.log_event('pm_intake_empty_note', filename=filename)
-            _archive(note_path, processed_dir)
+            _archive(note_path, processed_dir, source_label=filename)
             return
 
         # PP-DOCFLOW-001 Phase 3: URL submission — fetch and substitute content
@@ -565,8 +716,8 @@ class PMIntakeWorker(QueueWorker):
                 )
                 # Immediate flag_for_review — no LLM call needed
                 review_dir = inbox_dir / 'review'
-                review_dir.mkdir(parents=True, exist_ok=True)
                 dest = review_dir / filename
+                dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(str(note_path), str(dest))
                 try:
                     todo_add(
@@ -577,7 +728,7 @@ class PMIntakeWorker(QueueWorker):
                     )
                 except Exception:
                     log.exception('failed to create todo for URL fetch failure — review file still moved')
-                _archive(note_path, processed_dir)
+                _archive(note_path, processed_dir, source_label=filename)
                 tgw_logging.log_event(
                     'pm_intake_url_flagged', filename=filename, url=url, error=error_msg
                 )
@@ -747,8 +898,8 @@ class PMIntakeWorker(QueueWorker):
 
         elif action == 'flag_for_review':
             review_dir = inbox_dir / 'review'
-            review_dir.mkdir(parents=True, exist_ok=True)
             dest = review_dir / filename
+            dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(str(note_path), str(dest))
             log.info('flagged for review: %s → inbox/review/%s', filename, filename)
 
@@ -776,7 +927,7 @@ class PMIntakeWorker(QueueWorker):
         else:
             raise HardFailure(f'unknown action {action!r} from LLM for {filename}')
 
-        _archive(note_path, processed_dir)
+        _archive(note_path, processed_dir, source_label=filename)
         tgw_logging.log_event('pm_intake_archived', filename=filename)
 
 

@@ -194,6 +194,183 @@ def test_scan_and_enqueue_skips_readme(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Per-actor inbox topology (2026-07-15, PP-HERMES-EA-001 #1435/#1436):
+# root/dave/tigwa are intake sources; claude/queued/archive/review are not.
+# ---------------------------------------------------------------------------
+
+def _mk_note(path: Path, content: str = '# Test', age_hours: float = 10.0) -> Path:
+    path.write_text(content)
+    ts = time.time() - (age_hours * 3600)
+    os.utime(path, (ts, ts))
+    return path
+
+
+def test_scan_and_enqueue_discovers_dave_and_tigwa(tmp_path):
+    from tgw.workers.pm_intake import scan_and_enqueue
+
+    inbox = tmp_path / 'inbox'
+    (inbox / 'dave').mkdir(parents=True)
+    (inbox / 'tigwa').mkdir(parents=True)
+    _mk_note(inbox / 'dave' / 'note-a.md')
+    _mk_note(inbox / 'tigwa' / 'note-b.md')
+
+    cfg = {'plan_inbox_path': inbox, 'pm_intake_delay_hours': 4.0,
+           'postgres_dsn': 'dbname=state_machine user=tgw'}
+    mock_sm = MagicMock()
+    mock_sm.enqueue_job.return_value = 'job-uuid'
+
+    with patch('tgw.workers.pm_intake.state_machine', mock_sm):
+        result = scan_and_enqueue(cfg, bypass_delay=False)
+
+    assert sorted(result) == ['dave/note-a.md', 'tigwa/note-b.md']
+    assert (inbox / 'queued' / 'dave' / 'note-a.md').exists()
+    assert (inbox / 'queued' / 'tigwa' / 'note-b.md').exists()
+
+
+def test_scan_and_enqueue_excludes_claude_queued_archive_review(tmp_path):
+    from tgw.workers.pm_intake import scan_and_enqueue
+
+    inbox = tmp_path / 'inbox'
+    for sub in ('claude', 'queued', 'archive', 'review'):
+        (inbox / sub).mkdir(parents=True)
+    _mk_note(inbox / 'claude' / 'handoff.md')
+    _mk_note(inbox / 'queued' / 'already-queued.md')
+    _mk_note(inbox / 'archive' / '20260101-old.md')
+    _mk_note(inbox / 'review' / 'flagged.md')
+
+    cfg = {'plan_inbox_path': inbox, 'pm_intake_delay_hours': 4.0,
+           'postgres_dsn': 'dbname=state_machine user=tgw'}
+
+    with patch('tgw.workers.pm_intake.state_machine'):
+        result = scan_and_enqueue(cfg, bypass_delay=False)
+
+    assert result == []
+    # nothing was touched
+    assert (inbox / 'claude' / 'handoff.md').exists()
+    assert (inbox / 'queued' / 'already-queued.md').exists()
+
+
+def test_scan_and_enqueue_same_filename_different_owners_no_collision(tmp_path):
+    from tgw.workers.pm_intake import scan_and_enqueue
+
+    inbox = tmp_path / 'inbox'
+    (inbox / 'dave').mkdir(parents=True)
+    (inbox / 'tigwa').mkdir(parents=True)
+    _mk_note(inbox / 'dave' / 'shared-name.md', content='dave content')
+    _mk_note(inbox / 'tigwa' / 'shared-name.md', content='tigwa content')
+
+    cfg = {'plan_inbox_path': inbox, 'pm_intake_delay_hours': 4.0,
+           'postgres_dsn': 'dbname=state_machine user=tgw'}
+    mock_sm = MagicMock()
+    mock_sm.enqueue_job.return_value = 'job-uuid'
+
+    with patch('tgw.workers.pm_intake.state_machine', mock_sm):
+        result = scan_and_enqueue(cfg, bypass_delay=False)
+
+    assert sorted(result) == ['dave/shared-name.md', 'tigwa/shared-name.md']
+    dave_queued = (inbox / 'queued' / 'dave' / 'shared-name.md').read_text()
+    tigwa_queued = (inbox / 'queued' / 'tigwa' / 'shared-name.md').read_text()
+    assert dave_queued == 'dave content'
+    assert tigwa_queued == 'tigwa content'
+    # dedupe keys differ (owner-qualified path), both jobs actually enqueued
+    call_keys = [c.kwargs['dedupe_key'] for c in mock_sm.enqueue_job.call_args_list]
+    assert len(set(call_keys)) == 2
+
+
+def test_scan_and_enqueue_idempotent_same_content_not_reenqueued(tmp_path):
+    """Unique-violation on an unchanged dedupe key should still count as
+    'already queued' (idempotent rerun), not silently dropped."""
+    import psycopg2.errors
+
+    from tgw.workers.pm_intake import scan_and_enqueue
+
+    inbox = tmp_path / 'inbox'
+    (inbox / 'tigwa').mkdir(parents=True)
+    _mk_note(inbox / 'tigwa' / 'note.md', content='same content')
+
+    cfg = {'plan_inbox_path': inbox, 'pm_intake_delay_hours': 4.0,
+           'postgres_dsn': 'dbname=state_machine user=tgw'}
+    mock_sm = MagicMock()
+    mock_sm.enqueue_job.side_effect = psycopg2.errors.UniqueViolation('already exists')
+
+    with patch('tgw.workers.pm_intake.state_machine', mock_sm):
+        result = scan_and_enqueue(cfg, bypass_delay=False)
+
+    assert result == ['tigwa/note.md']
+    # file still moved into queued/ even though the job already existed
+    assert (inbox / 'queued' / 'tigwa' / 'note.md').exists()
+
+
+def test_scan_and_enqueue_payload_has_provenance(tmp_path):
+    from tgw.workers.pm_intake import scan_and_enqueue
+
+    inbox = tmp_path / 'inbox'
+    (inbox / 'dave').mkdir(parents=True)
+    _mk_note(inbox / 'dave' / 'note.md', content='provenance test')
+
+    cfg = {'plan_inbox_path': inbox, 'pm_intake_delay_hours': 4.0,
+           'postgres_dsn': 'dbname=state_machine user=tgw'}
+    mock_sm = MagicMock()
+    mock_sm.enqueue_job.return_value = 'job-uuid'
+
+    with patch('tgw.workers.pm_intake.state_machine', mock_sm):
+        scan_and_enqueue(cfg, bypass_delay=False)
+
+    payload = mock_sm.enqueue_job.call_args.kwargs['payload']
+    assert payload['filename'] == 'dave/note.md'
+    assert payload['owner'] == 'dave'
+    assert payload['source_path'] == 'dave/note.md'
+    assert len(payload['sha256']) == 64
+    assert 'intake_ts' in payload
+
+
+def test_build_intake_manifest_dry_run_no_mutation(tmp_path):
+    from tgw.workers.pm_intake import build_intake_manifest
+
+    inbox = tmp_path / 'inbox'
+    (inbox / 'dave').mkdir(parents=True)
+    (inbox / 'tigwa').mkdir(parents=True)
+    _mk_note(inbox / 'dave' / 'ready.md', age_hours=10.0)
+    _mk_note(inbox / 'tigwa' / 'too-fresh.md', age_hours=0.1)
+
+    cfg = {'plan_inbox_path': inbox, 'pm_intake_delay_hours': 4.0}
+
+    manifest = build_intake_manifest(cfg, bypass_delay=False)
+
+    by_path = {m['source_path']: m for m in manifest}
+    assert by_path['dave/ready.md']['eligible'] is True
+    assert by_path['dave/ready.md']['owner'] == 'dave'
+    assert by_path['dave/ready.md']['planned_queue_path'] == 'queued/dave/ready.md'
+    assert 'sha256' in by_path['dave/ready.md']
+    assert by_path['tigwa/too-fresh.md']['eligible'] is False
+
+    # nothing was moved or created
+    assert (inbox / 'dave' / 'ready.md').exists()
+    assert (inbox / 'tigwa' / 'too-fresh.md').exists()
+    assert not (inbox / 'queued').exists()
+
+
+def test_cmd_admin_file_dry_run_does_not_touch_state_machine(tmp_path):
+    from tgw.workers.pm_intake import cmd_admin_file
+
+    inbox = tmp_path / 'inbox'
+    (inbox / 'dave').mkdir(parents=True)
+    _mk_note(inbox / 'dave' / 'note.md')
+
+    cfg = {'plan_inbox_path': inbox, 'pm_intake_delay_hours': 4.0,
+           'postgres_dsn': 'dbname=state_machine user=tgw'}
+
+    with patch('tgw.workers.pm_intake.state_machine') as mock_sm:
+        result = cmd_admin_file(cfg, dry_run=True)
+
+    assert result['ok'] is True
+    assert result['dry_run'] is True
+    assert len(result['candidates']) == 1
+    mock_sm.init.assert_not_called()
+    assert not (inbox / 'queued').exists()
+
+
+# ---------------------------------------------------------------------------
 # Action handlers via handle() with mocked worker
 # ---------------------------------------------------------------------------
 

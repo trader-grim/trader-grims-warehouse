@@ -5,28 +5,45 @@
 #   git checkout -b task/<id>-<slug>
 #   aider --message-file aider/spec-<id>.md <files...>
 #
-# Default model: Anthropic Sonnet (Python/backend tasks)
-#   Requires: ANTHROPIC_API_KEY + hard billing cap in console.anthropic.com (~$40/mo)
+# Default model: DeepSeek V4 Flash, DIRECT API (Dave, 2026-07-15) — funded
+#   direct DeepSeek key already exists (secrets_root/tgw.env DEEPSEEK_API_KEY,
+#   same "deepseek-v4-flash" model id used by llm.py's deepseek_direct route).
+#   Fast, cheap, good instruction-following in limited testing. Reserved for
+#   the "busywork" tier: XS/S mechanical coding tasks, monitoring/schlepping/
+#   merging — not architecture or eBay-invariant work (that stays Claude Code,
+#   per next-process.md's division of labor).
+#   Requires: DEEPSEEK_API_KEY (loaded from /home/db/.env via env-file below
+#   for interactive use, or from secrets_root via aider_mcp_server.py's
+#   _load_api_keys() for the MCP-invoked path).
 #
-# Flutter/Dart tasks: override with Gemini 3.1 Flash-Lite via OpenRouter (cheap, native Dart)
-#   Requires: OPENROUTER_API_KEY (loaded from /home/db/.env via env-file above)
-#   Override flag: --model openrouter/google/gemini-3.1-flash-lite
-#   Pricing: ~$0.10/1M input (confirmed available on OpenRouter 2026-06-13)
+# One model, no architect split, no separate editor/weak model (Dave,
+#   2026-07-15) — deepseek-v4-flash does its own edits directly.
 #
 # See aider/spec-<id>.md for the per-task run command including model override.
 
 env-file: /home/db/.env
 
-#model: anthropic/claude-sonnet-4-6
-#weak-model: anthropic/claude-haiku-4-5-20251001
+model: deepseek/deepseek-v4-flash
 
-model: openrouter/deepseek/deepseek-chat-v3-0324
-editor-model: openrouter/gemini/gemini-2.5-flash
+# Reasoning is a per-task dial, not a fixed structure (Dave, 2026-07-15): default
+#   to non-thinking here since this tier is XS/S mechanical busywork — fast/cheap
+#   is the point. A given spec-<id>.md can override reasoning_effort upward
+#   (high/max) via --set-model-setting for a task that genuinely needs deeper
+#   reasoning (tricky multi-file diff, subtle logic); don't hardcode a second
+#   model/mode split for it. See DeepSeek's thinking-mode docs:
+#   https://api-docs.deepseek.com/guides/thinking_mode
+model-settings:
+  deepseek/deepseek-v4-flash:
+    extra_body:
+      thinking:
+        type: disabled
 
 architect: false
 
 cache-prompts: true
-map-tokens: 16000
+map-tokens: 65536                  # deepseek-v4-flash has a 1M context window — repo map
+                                    # was capped at 16k for smaller-context models; raised
+                                    # to take advantage of the headroom (Dave, 2026-07-15)
 
 show-diffs: true
 git: true
