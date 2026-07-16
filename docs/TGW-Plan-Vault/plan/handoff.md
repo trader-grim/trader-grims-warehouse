@@ -696,3 +696,43 @@ tigwa-knowledgebase-toolset.md` and memory
   history) — repo initialized but still empty.
 - A0's Syncthing folder inventory — separate decision packet, not started.
 - Todo #1430 (glabels-qt fork decision) needs Dave+Tigwa's conversation.
+
+## Session 2026-07-16 (kdeconnect-clipboard triage-failure incident → agent-discipline guardrails)
+
+**What happened:** Dave reported tgw-prod↔a1131 KDE Connect clipboard sync broken. Spent
+most of the session chasing external theories (phone pairing, whether `lan-mouse` even does
+clipboard — it doesn't, confirmed useful finding — a 2.5-week-old Sway/X11 compositor switch)
+before checking my own recent actions, despite Dave pointing at "yesterday or the day before"
+early on. Root cause: I'd committed+deployed a package list to `nix/hosts/a1131.nix` (todo
+#1427) the prior evening on **a1131's own local flake checkout**, which is why my first
+`git log` (run from tgw-prod) came up empty. Directly asked to check memory for this, I
+skimmed a filename match instead of reading it and answered "no" — worse than not checking.
+Full incident write-up: `docs/TGW-Plan-Vault/inbox/claude/INCIDENT-2026-07-16-kdeconnect-clipboard-triage-failure.md`.
+
+**Fixed same session:**
+- Reconciled the actual drift: a1131's checkout was 15 commits ahead of `origin/master`,
+  unpushed, unknown duration. Merged, pushed, fast-forwarded a1131 — both hosts + origin now
+  at `5c729ff`.
+- Amended `commit-nix-flake` SKILL.md — session-safety check now covers a1131, not just
+  tgw-prod (the wording gap that let the original a1131 switch run unflagged).
+- Built PP-AGENT-DISCIPLINE-001 (new): invariant E10 (flake-drift, `reference/invariants.md`,
+  ⚠️ — standing detector still not built), `.claude/agents/nix-flake-maintainer.md` (general
+  sysadmin, wide read / narrow gated-write), and a PreToolUse hook
+  (`.claude/hooks/flake-guard.py` + new `.claude/settings.json`) gating flake-mutating
+  commands. **Hook pipe-tested clean but live-fire not yet confirmed** — this repo had no
+  settings.json before this session, so the watcher needs a `/hooks` reload or restart before
+  it's actually active. Check this first if flake work comes up next session.
+- Saved `feedback-triage-own-actions-first` memory: check own commits/inbox before external
+  theories, and any message right after `/clear` is a session start — run CLAUDE.md Steps 0-4
+  unconditionally, not based on how the message reads.
+
+**Still open into next session:**
+- Confirm the PreToolUse hook fires live (needs `/hooks` reload first).
+- File a todo for E10's standing periodic drift detector (cron/systemd-timer, independent of
+  any agent) — not filed yet.
+- **New pickup item, not addressed this session per Dave's instruction:** `tgw202605040949058`
+  — live eBay data still differs from web UI after a listing revision "succeeds." Evidence the
+  draft/update/revise process (PP-LISTEDITOR-001) is still wrong. Todo #1445. Full note:
+  `docs/TGW-Plan-Vault/inbox/claude/TIGWA-NOTE-listing-revision-drift-tgw202605040949058.md`.
+  Dave asked whether this warrants its own specialist agent, once the actual failure mode is
+  understood.

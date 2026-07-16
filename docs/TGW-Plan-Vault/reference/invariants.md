@@ -846,3 +846,31 @@ callers at the threshold and surfaces spend in the `quota` health check.
 Tests: `tests/test_llm_google_direct.py`
 (TestOperatorEmergencyReserve, TestGoogleStandDown),
 `tests/test_quota.py::TestEnforcement::test_llm_google_default_budget_halts_background`.
+
+## E10 — Every host's flake checkout stays in sync with `origin/master` ⚠️ (2026-07-16, incident)
+
+**Rule:** No host's local `~/tgw-flake` checkout may sit ahead of or diverged from
+`origin/master` for an extended period without it being surfaced. A host-local commit is
+fine as a transient working state; it becomes a violation once it persists unpushed/
+unpulled across sessions with nothing watching for it.
+
+**Why:** Dave, 2026-07-16 (`INCIDENT-2026-07-16-kdeconnect-clipboard-triage-failure.md`):
+a1131's local flake checkout had accumulated **15 commits** ahead of `origin/master` —
+including 2 (`ae13f50`, `61e9a3f`, todo #1427) that existed nowhere else — for an unknown
+period, silently. tgw-prod's own checkout was independently 2 commits ahead
+(`b60508a`/`7121049`) with no relation to a1131's drift. Neither divergence was visible
+until a live incident forced a manual `git log`/`merge-base` comparison across both hosts.
+This is a structural gap, not an agent-discipline gap alone: even a perfectly disciplined
+session working on one host in isolation will eventually hit this if nothing external ever
+forces a push/pull or alerts on the gap.
+
+**Enforcement:**
+- `nix-flake-maintainer` agent (`.claude/agents/nix-flake-maintainer.md`) treats "diff
+  every known host's checkout against `origin/master` and against each other" as its
+  mandatory first step before any flake mutation — not conditional on suspicion.
+- **Gap, not yet built:** a standing, agent-independent detector (cron/systemd-timer script,
+  or folded into Tigwa's existing scheduled plan-review cadence) that checks each known
+  host's `HEAD` against `origin/master` on its own schedule and surfaces drift past a small
+  commit threshold, the same way `thermal.status` is checked independent of any session
+  choosing to look. Tracked under PP-AGENT-DISCIPLINE-001, todo #1444's follow-up (not
+  filed as its own todo yet — file one before considering this invariant ✅).

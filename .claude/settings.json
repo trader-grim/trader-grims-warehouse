@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /opt/TGW/src/trader-grims-warehouse/.claude/hooks/flake-guard.py",
+            "timeout": 10,
+            "statusMessage": "Checking flake-mutation guardrail..."
+          }
+        ]
+      }
+    ]
+  }
+}
