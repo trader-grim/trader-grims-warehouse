@@ -1313,6 +1313,94 @@ def test_bulk_action_ai_identify_enqueues(env, enqueue_calls):
     assert queued_names.count("ai_identify") == 2
 
 
+# ---------------------------------------------------------------------------
+# POST /api/items/{sku}/append — PP-INTAKE-004 Phase 1a incremental-ID trigger
+# ---------------------------------------------------------------------------
+
+def _append_photo(client, sku, name):
+    return client.post(
+        f"/api/items/{sku}/append", headers=AUTH_HEADERS,
+        json={"op": "photo", "data": {"filename": name}},
+    )
+
+
+def test_append_photo_below_threshold_does_not_enqueue_ai_identify(env, enqueue_calls):
+    client = env["client"]
+    for i in range(5):  # below _MAX_PHOTOS_CLOUD (6)
+        r = _append_photo(client, SKU_A, f"p{i}.jpg")
+        assert r.status_code == 200
+    queued_names = [c["kwargs"]["queue_name"] for c in enqueue_calls]
+    assert "ai_identify" not in queued_names
+
+
+def test_append_photo_crossing_threshold_enqueues_ai_identify_once(env, enqueue_calls):
+    client = env["client"]
+    for i in range(6):  # crosses _MAX_PHOTOS_CLOUD (6) on the 6th append
+        r = _append_photo(client, SKU_A, f"p{i}.jpg")
+        assert r.status_code == 200
+    queued_names = [c["kwargs"]["queue_name"] for c in enqueue_calls]
+    assert queued_names.count("ai_identify") == 1
+    ai_calls = [c for c in enqueue_calls if c["kwargs"]["queue_name"] == "ai_identify"]
+    assert ai_calls[0]["kwargs"]["payload"]["sku"] == SKU_A
+    assert ai_calls[0]["kwargs"]["dedupe_key"] == f"ai_identify:{SKU_A}"
+
+
+def test_append_photo_does_not_refire_once_already_identified(env, enqueue_calls):
+    client = env["client"]
+    itemdata_root = env["itemdata_root"]
+    doc_path = itemdata_root / SKU_A / f"{SKU_A}.json"
+    doc = json.loads(doc_path.read_text())
+    doc["ai_identified"] = True
+    doc_path.write_text(json.dumps(doc))
+
+    for i in range(7):  # already past threshold, already identified
+        r = _append_photo(client, SKU_A, f"p{i}.jpg")
+        assert r.status_code == 200
+    queued_names = [c["kwargs"]["queue_name"] for c in enqueue_calls]
+    assert "ai_identify" not in queued_names
+
+
+def test_session_complete_sets_ai_reidentify_when_already_identified(env, enqueue_calls):
+    client = env["client"]
+    itemdata_root = env["itemdata_root"]
+    doc_path = itemdata_root / SKU_A / f"{SKU_A}.json"
+    doc = json.loads(doc_path.read_text())
+    doc["ai_identified"] = True
+    doc_path.write_text(json.dumps(doc))
+
+    r = client.post(
+        f"/api/items/{SKU_A}/append", headers=AUTH_HEADERS,
+        json={"op": "photo", "data": {"filename": "last.jpg"}, "session_complete": True},
+    )
+    assert r.status_code == 200
+    doc_after = json.loads(doc_path.read_text())
+    assert doc_after.get("ai_reidentify") is True
+    # refinement is a flag-set, not a direct re-enqueue of ai_identify itself
+    queued_names = [c["kwargs"]["queue_name"] for c in enqueue_calls]
+    assert "ai_identify" not in queued_names
+
+
+def test_session_complete_fallback_enqueues_ai_identify_when_never_run(env, enqueue_calls):
+    client = env["client"]
+    # only 2 photos — never crosses the early-fire threshold
+    for i in range(2):
+        r = _append_photo(client, SKU_A, f"p{i}.jpg")
+        assert r.status_code == 200
+    queued_names = [c["kwargs"]["queue_name"] for c in enqueue_calls]
+    assert "ai_identify" not in queued_names
+
+    r = client.post(
+        f"/api/items/{SKU_A}/append", headers=AUTH_HEADERS,
+        json={"op": "photo", "data": {"filename": "last.jpg"}, "session_complete": True},
+    )
+    assert r.status_code == 200
+    queued_names = [c["kwargs"]["queue_name"] for c in enqueue_calls]
+    assert queued_names.count("ai_identify") == 1
+    itemdata_root = env["itemdata_root"]
+    doc = json.loads((itemdata_root / SKU_A / f"{SKU_A}.json").read_text())
+    assert doc.get("ai_reidentify") is not True  # fallback path is enqueue, not the reidentify flag
+
+
 def test_bulk_action_ebay_price_enqueues(env, enqueue_calls):
     client = env["client"]
     r = client.post("/api/bulk/action", headers=AUTH_HEADERS,

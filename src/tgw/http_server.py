@@ -455,6 +455,11 @@ class CategoryAspectMigrationApplyBody(BaseModel):
 class AppendBody(BaseModel):
     op: str
     data: Dict[str, Any]
+    # PP-INTAKE-004 Phase 1a: caller signals the capture session is done —
+    # triggers the ai_reidentify refinement pass (or the fallback first-time
+    # identify, if the early-fire threshold was never reached) once the full
+    # photo set for this SKU exists.
+    session_complete: Optional[bool] = None
 
 
 class EbayWriteBody(BaseModel):
@@ -973,7 +978,88 @@ def append_item(sku: str, body: AppendBody) -> Dict[str, Any]:
     _apply_patch(json_path, {field: lst})
     _enqueue_catalog_rebuild(f"append:{sku}:{body.op}")
 
+    # PP-INTAKE-004 Phase 1a: incremental-ID trigger. Only the photo-append
+    # path can move the running photo count, so only it needs to check.
+    if body.op == "photo":
+        _maybe_early_identify(json_path, sku, photo_count=len(lst))
+
+    if body.session_complete:
+        _maybe_session_complete_identify(json_path, sku)
+
     return {"ok": True, "sku": sku, "op": body.op, "field": field}
+
+
+def _maybe_early_identify(json_path: "Path", sku: str, photo_count: int) -> None:
+    """PP-INTAKE-004 Phase 1a: fire ai_identify the first time the running
+    photo count crosses ai_identify's own cloud batch size
+    (`_MAX_PHOTOS_CLOUD`, currently 6 — Dave, 2026-07-04: threshold = the ID
+    call's own batch size, not an arbitrary smaller number), mirroring what
+    `bundle_intake.py` does after its stability wait. Only fires once — the
+    guard is "hasn't already run" (`ai_identified` not yet true); once it
+    has, later photos land quietly and refinement is via the
+    `ai_reidentify` flag on session completion instead (see
+    `_maybe_session_complete_identify`), never a repeat of this early fire.
+    """
+    from tgw.workers.ai_identify import _MAX_PHOTOS_CLOUD
+
+    if photo_count < _MAX_PHOTOS_CLOUD:
+        return
+
+    doc = load_item_doc(json_path)
+    if doc.get("ai_identified"):
+        return  # already identified once; early-fire's job is done
+
+    try:
+        state_machine.enqueue_job(
+            queue_name="ai_identify",
+            payload={"sku": sku},
+            dedupe_key=f"ai_identify:{sku}",
+            max_attempts=3,
+        )
+        log.info(
+            "early ai_identify enqueued for %s (%d photos >= threshold %d)",
+            sku, photo_count, _MAX_PHOTOS_CLOUD,
+        )
+    except psycopg2.errors.UniqueViolation:
+        pass  # already queued, coalescing
+    except Exception as exc:
+        log.warning("failed to enqueue early ai_identify for %s: %s", sku, exc)
+
+
+def _maybe_session_complete_identify(json_path: "Path", sku: str) -> None:
+    """PP-INTAKE-004 Phase 1a: session-completion signal.
+
+    - If ai_identify already ran (early-fire path above, or any other
+      route) and the session is now complete, set `ai_reidentify: true` —
+      the existing re-scan mechanism (`workers/ai_identify.py` already
+      checks this flag and re-runs with the full photo set) gives one
+      refinement pass now that the full capture is in.
+    - If ai_identify never ran at all (fallback — e.g. a quick item that
+      only ever gets 2-3 shots, never crossing the early-fire threshold),
+      enqueue it directly with whatever smaller photo set exists rather
+      than waiting indefinitely for a batch that isn't coming.
+    """
+    doc = load_item_doc(json_path)
+    if doc.get("ai_identified"):
+        try:
+            _apply_patch(json_path, {"ai_reidentify": True})
+            log.info("session-complete: ai_reidentify set for %s", sku)
+        except Exception as exc:
+            log.warning("failed to set ai_reidentify for %s: %s", sku, exc)
+        return
+
+    try:
+        state_machine.enqueue_job(
+            queue_name="ai_identify",
+            payload={"sku": sku},
+            dedupe_key=f"ai_identify:{sku}",
+            max_attempts=3,
+        )
+        log.info("session-complete fallback: ai_identify enqueued for %s", sku)
+    except psycopg2.errors.UniqueViolation:
+        pass  # already queued, coalescing
+    except Exception as exc:
+        log.warning("failed to enqueue fallback ai_identify for %s: %s", sku, exc)
 
 
 # ---------------------------------------------------------------------------
