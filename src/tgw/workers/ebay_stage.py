@@ -422,6 +422,8 @@ class EbayStageWorker(QueueWorker):
                     payload={'sku': sku,
                              **({'origin': 'operator'}
                                 if payload.get('origin') == 'operator' else {})},
+                    entity_type='item',
+                    entity_id=sku,
                     dedupe_key=f'ebay_publish:{sku}',
                     max_attempts=3,
                 )

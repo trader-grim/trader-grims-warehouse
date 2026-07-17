@@ -263,6 +263,8 @@ class EbayPriceWorker(QueueWorker):
                     payload={'sku': sku,
                              **({'origin': 'operator'}
                                 if payload.get('origin') == 'operator' else {})},
+                    entity_type='item',
+                    entity_id=sku,
                     dedupe_key=f'ebay_stage:{sku}',
                     max_attempts=5,
                 )

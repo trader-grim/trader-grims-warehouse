@@ -136,6 +136,17 @@ def enqueue_job(
     for batch-coalescing keys (e.g. catalog_rebuild:pending) where the goal
     is one job fired after writes go quiet, not one fired at a fixed offset
     from the first write in a sustained burst. See uq_queue_jobs_dedupe_key_active.
+
+    entity_id — ALWAYS pass this explicitly (entity_type='item', entity_id=sku)
+    for any per-item job. The `entity_id or queue_name` fallback below exists
+    only for genuinely queue-level jobs (self-rescheduling maintenance runs
+    with no single entity, e.g. token_refresh/ebay_sync's own reschedule).
+    Forgetting to pass entity_id on a per-SKU cross-enqueue silently breaks
+    `tgw queue-history --sku <sku>` (job_history()'s `WHERE entity_id = %s`)
+    with no error — this exact bug shipped for ~300k rows (todo #1406,
+    PP-DEADLETTER-001) before every internal pipeline enqueue_job() caller
+    was audited and fixed to pass entity_id=sku. Do not let a new caller
+    regress it.
     """
     handler_family = handler_family or queue_name
     entity_id = entity_id or queue_name

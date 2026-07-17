@@ -66,6 +66,8 @@ def _enqueue(sku: str, fmt: str, source: str) -> Optional[str]:
         jid = state_machine.enqueue_job(
             queue_name=QUEUE_NAME,
             payload={'sku': sku, 'format': fmt, 'source': source},
+            entity_type='item',
+            entity_id=sku,
             dedupe_key=f'bundle_intake:{sku}',
             max_attempts=3,
         )
@@ -421,6 +423,8 @@ class BundleIntakeWorker(QueueWorker):
             state_machine.enqueue_job(
                 queue_name='thumbnail_gen',
                 payload={'sku': sku},
+                entity_type='item',
+                entity_id=sku,
                 dedupe_key=f'thumbnail_gen:{sku}',
                 max_attempts=3,
             )
@@ -432,6 +436,8 @@ class BundleIntakeWorker(QueueWorker):
             state_machine.enqueue_job(
                 queue_name='ai_identify',
                 payload={'sku': sku},
+                entity_type='item',
+                entity_id=sku,
                 dedupe_key=f'ai_identify:{sku}',
                 max_attempts=3,
             )

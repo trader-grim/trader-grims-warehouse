@@ -572,6 +572,8 @@ class EbaySyncWorker(QueueWorker):
                 state_machine.enqueue_job(
                     queue_name="ebay_repush",
                     payload={"sku": sku},
+                    entity_type="item",
+                    entity_id=sku,
                     dedupe_key=f"ebay_repush:{sku}",
                     max_attempts=3,
                 )

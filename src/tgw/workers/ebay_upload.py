@@ -187,6 +187,8 @@ class EbayUploadWorker(QueueWorker):
                 queue_name=QUEUE_NAME,
                 payload={'sku': sku, 'reason': 'quota_retry',
                          'quota_retries': quota_retries, **_origin},
+                entity_type='item',
+                entity_id=sku,
                 not_before=time.time() + 6 * 3600,
                 max_attempts=3,
             )

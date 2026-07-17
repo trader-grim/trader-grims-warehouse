@@ -441,6 +441,8 @@ class AIIdentifyWorker(QueueWorker):
                 state_machine.enqueue_job(
                     queue_name="ebay_draft",
                     payload={"sku": sku},
+                    entity_type="item",
+                    entity_id=sku,
                     dedupe_key=f"ebay_draft:{sku}",
                     max_attempts=3,
                 )
@@ -450,6 +452,8 @@ class AIIdentifyWorker(QueueWorker):
                 state_machine.enqueue_job(
                     queue_name="alt_text",
                     payload={"sku": sku},
+                    entity_type="item",
+                    entity_id=sku,
                     dedupe_key=f"alt_text:{sku}",
                     max_attempts=3,
                 )

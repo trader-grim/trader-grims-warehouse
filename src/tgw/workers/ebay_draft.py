@@ -724,6 +724,8 @@ class EbayDraftWorker(QueueWorker):
             state_machine.enqueue_job(
                 queue_name='ebay_price',
                 payload={'sku': sku, **_origin},
+                entity_type='item',
+                entity_id=sku,
                 dedupe_key=f'ebay_price:{sku}',
                 max_attempts=5,
             )
@@ -734,6 +736,8 @@ class EbayDraftWorker(QueueWorker):
             state_machine.enqueue_job(
                 queue_name='ebay_upload',
                 payload={'sku': sku, **_origin},
+                entity_type='item',
+                entity_id=sku,
                 dedupe_key=f'ebay_upload:{sku}',
                 max_attempts=5,
             )

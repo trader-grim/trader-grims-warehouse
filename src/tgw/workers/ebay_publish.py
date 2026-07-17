@@ -191,6 +191,8 @@ class EbayPublishWorker(QueueWorker):
                         payload={'sku': sku, 'force': True,
                                  **({'origin': 'operator'}
                                     if payload.get('origin') == 'operator' else {})},
+                        entity_type='item',
+                        entity_id=sku,
                         dedupe_key=f'ebay_stage:force:{sku}',
                         max_attempts=3,
                     )
