@@ -73,3 +73,8 @@ docs/TGW-Plan-Vault/.obsidian/themes/
 
 # Ruff cache (owned by tgw:tgw — not readable by db; breaks nix flake path: eval)
 .ruff_cache/
+
+# PP-VISION-001 Phase 1 pilot — scoped local venv + downloaded model weights + sample cache,
+# never committed (see docs/TGW-Plan-Vault/plan/packets/results/1481-RESULT.md)
+.pilot-venv/
+scripts/pilot_1481_out/
