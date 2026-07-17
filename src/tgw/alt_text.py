@@ -578,10 +578,46 @@ def _apply_alt_text_result(
     if not alt_text_str:
         return {"ok": False, "sku": sku, "error": "batch result has empty alt_text"}
 
-    # Archive original before creating companion
+    # Archive original before creating companion.
+    #
+    # Pre-flight (todo #1408, mirrors #1407's cmd_alt_text fix): the history
+    # root is normally a symlink onto the MasterArchive cold-archive drive.
+    # When that drive isn't mounted, the symlink is broken and
+    # mkdir(exist_ok=True) still raises FileExistsError — don't crash the
+    # batch-apply job over a supplementary archive copy (Prime Directive 1:
+    # the ORIGINAL photo stays untouched in ItemData/<sku>/, only the
+    # cold-archive copy is deferred). Skip the archive step and persist a
+    # durable C11 finding instead.
     history_sku_dir = _history_sku_dir(cfg, sku)
     history_path = history_sku_dir / img_path.name
-    if not history_path.exists():
+    archive_finding: Optional[Dict[str, Any]] = None
+    if not _history_root_reachable(cfg):
+        archived = False
+        history_root = Path(cfg["itemdata_root"]).parent / "history"
+        resolved = os.path.realpath(history_root)
+        # NOTE (todo #1408, same ordering fix as #1407): the fence PATCH for
+        # this finding is issued *after* the atomic_write_json call below,
+        # not here — _apply_alt_text_result loaded `item` into memory above
+        # and does its own direct atomic_write_json of the whole dict later
+        # in this function. A fence_patch_item() call made here, before that
+        # later direct write, would get silently clobbered when the stale
+        # in-memory `item` (which never got the finding field) is written
+        # back out.
+        archive_finding = {
+            'code':   'archive_target_unmounted',
+            'detail': (f"history archive target unreachable: "
+                       f"{history_root} resolves to {resolved}, which "
+                       f"does not exist — cold-archive drive is likely "
+                       f"unmounted. alt_text/seo_caption were still "
+                       f"generated normally; the archive copy is "
+                       f"deferred until the drive is mounted and this "
+                       f"item is reprocessed."),
+            'ts':     datetime.now(timezone.utc).isoformat(),
+            'source': 'alt_text',
+        }
+        tgw_logging.log_event('alt_text_archive_target_unmounted', sku=sku,
+                               history_root=str(history_root))
+    elif not history_path.exists():
         history_sku_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(img_path, history_path)
         archived = True
@@ -615,6 +651,15 @@ def _apply_alt_text_result(
         item["alt_text_results"] = alt_text_results
 
     atomic_write_json(json_path, item, pretty=cfg.get("pretty", True), archive_root=cfg.get("archive_root"))
+
+    # Persist the C11 durable finding via the fence *after* the direct write
+    # above, so it isn't clobbered by it (see NOTE where archive_finding is
+    # built).
+    if archive_finding is not None:
+        try:
+            fence_patch_item(cfg, sku, {'pipeline_error': archive_finding})
+        except Exception as exc:
+            tgw_logging.log_event('alt_text_finding_write_failed', sku=sku, error=str(exc))
 
     # Cache result
     if img_hash:

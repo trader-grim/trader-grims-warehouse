@@ -802,3 +802,83 @@ class TestArchiveRootPassthrough:
         assert mock_awj.called
         _, kwargs = mock_awj.call_args
         assert kwargs.get("archive_root") == cfg["archive_root"]
+
+
+# ---------------------------------------------------------------------------
+# todo #1408 / PP-DATALEARN-001 — same unguarded FileExistsError risk on
+# archive-write as cmd_alt_text had (fixed in #1407), but on the Gemini Batch
+# apply path (_apply_alt_text_result). Mirrors #1407's two new tests exactly,
+# adapted to the batch function's call signature.
+# ---------------------------------------------------------------------------
+
+
+class TestApplyAltTextResultArchiveGuard:
+    def test_apply_alt_text_result_broken_history_symlink_does_not_crash(self, tmp_path, monkeypatch):
+        """todo #1408: unmounted cold-archive drive (dangling symlink at the
+        history root) must not crash the batch-apply job with
+        FileExistsError — it should skip the archive step, still write
+        alt_text/seo_caption, and persist a durable pipeline_error finding."""
+        from tgw.alt_text import _apply_alt_text_result
+
+        cfg = _make_cfg(tmp_path)
+        _make_item(cfg, "tgw001")
+        photo = _add_photo(cfg, "tgw001", name="tgw001.jpg")
+
+        # Simulate MasterArchive not mounted: history root is a dangling symlink.
+        history_root = Path(tmp_path) / "history"
+        history_root.symlink_to(Path(tmp_path) / "does-not-exist" / "MasterArchive-history")
+
+        patched_calls = []
+        monkeypatch.setattr(
+            alt_text_mod, "fence_patch_item",
+            lambda cfg, sku, fields: patched_calls.append((sku, fields)) or {"ok": True},
+        )
+
+        result = _apply_alt_text_result(
+            cfg, "tgw001", "Some alt text", "Some caption.", photo, "deadbeef",
+            model="gemini-2.5-flash-lite", raw_response="{}",
+        )
+
+        assert result["ok"] is True
+        assert result["archived_to_history"] is False
+        # Rest of the job still completed normally.
+        assert result["alt_text"] == "Some alt text"
+
+        # Durable C11 finding persisted.
+        assert len(patched_calls) == 1
+        sku, fields = patched_calls[0]
+        assert sku == "tgw001"
+        finding = fields["pipeline_error"]
+        assert finding["code"] == "archive_target_unmounted"
+        assert finding["source"] == "alt_text"
+        assert "history" in finding["detail"]
+
+        # Item JSON itself was still written with alt_text/seo_caption.
+        item_json = json.loads((Path(cfg["itemdata_root"]) / "tgw001" / "tgw001.json").read_text())
+        assert item_json["draft_listing"]["alt_text"] == "Some alt text"
+
+    def test_apply_alt_text_result_history_reachable_archives_normally(self, tmp_path, monkeypatch):
+        """Control case: history root IS reachable -> normal archive path still
+        works and no finding is persisted (guards against the new pre-flight
+        check accidentally short-circuiting the happy path)."""
+        from tgw.alt_text import _apply_alt_text_result
+
+        cfg = _make_cfg(tmp_path)
+        _make_item(cfg, "tgw001")
+        photo = _add_photo(cfg, "tgw001", name="tgw001.jpg")
+
+        patched_calls = []
+        monkeypatch.setattr(
+            alt_text_mod, "fence_patch_item",
+            lambda cfg, sku, fields: patched_calls.append((sku, fields)) or {"ok": True},
+        )
+
+        result = _apply_alt_text_result(
+            cfg, "tgw001", "Some alt text", "Some caption.", photo, "deadbeef",
+        )
+
+        assert result["ok"] is True
+        assert result["archived_to_history"] is True
+        assert patched_calls == []
+        history_path = Path(tmp_path) / "history" / "ItemData" / "tgw001" / "tgw001.jpg"
+        assert history_path.exists()
