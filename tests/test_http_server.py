@@ -3642,6 +3642,36 @@ def test_item_detail_inventory_record_panel_shows_set_a_unblended(env):
     assert "eBay value: Unbranded" not in r.text
 
 
+def test_item_detail_inventory_record_panel_offers_add_to_listing_for_set_a_only_keys(env):
+    """Todo #1475 (Dave, 2026-07-16): "the initial item draft view after
+    import should show all filled fields, not just the ones the eBay
+    category requires or recommends... gives the operator all the data we
+    have to choose from." A Set A key with no Set B counterpart gets a
+    "+ Add to listing" button wired to addFromInventory(); a key already
+    present in Set B (whether it agrees or differs) does not."""
+    _login(env["client"])
+    sku = "tgw20260615110000057"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Add To Listing Button Test",
+        "location": "X9",
+        "item_attributes": {"Type": "Lapel Pin", "Brand": "Unbranded", "Era": "1980s"},
+        "draft_listing": {
+            "item_specifics": {"Type": "Brooch", "Brand": "Unbranded"},
+        },
+    })
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    # "Era" has no Set B counterpart -> gets the add-to-listing button.
+    assert 'addFromInventory("Era","1980s",this)' in r.text
+    # "Type"/"Brand" already exist in Set B (whether differing or agreeing)
+    # -> no button for either.
+    assert 'addFromInventory("Type"' not in r.text
+    assert 'addFromInventory("Brand"' not in r.text
+    assert "function addFromInventory(" in r.text
+    assert "function buildAspectRow(" in r.text
+
+
 def test_item_detail_aspects_form_prefills_from_set_b_not_set_a(env):
     """todo #1416 point 3: the eBay Draft Editor's aspects form
     (window._DL_PREFILL) must prefill from draft_listing.item_specifics

@@ -490,7 +490,33 @@ precedent as her a1131 MCP setup. Handoff + both original request docs:
 confirmed by Dave.** Watched a real edit end-to-end: job queued, job landed,
 unchecked aspects trimmed from the draft, then added a new custom aspect
 ("Thumb Size = Normal") and confirmed it rendered inline with its own
-checkbox exactly as designed. Dave: "works... Nice work." Closed.
+checkbox exactly as designed. Dave: "works... Nice work." Closed. Dave's own
+framing of the win, same day: "we just did what eBay does a little better.
+eBay discards the custom fields if you change categories unceremoniously,
+never to be found again even if you immediately switch back." eBay's own
+Seller Hub destroys category-orphaned specifics irrecoverably; TGW's
+`category_aspect_migration.py` preserves them in `item_attributes` (Set A)
+instead — same operator-facing discard behavior, non-destructive underneath,
+directly enacting Prime Directive 1 where eBay's own platform doesn't. Second
+confirmed instance of the beats-eBay success bar (first: OPERATOR-QUEUES-001)
+— see memory `project-operator-queues-beats-ebay-example.md`.
+
+**Follow-up, same day — destination NOT settled (todo #1473, open, not
+urgent).** Dave, immediately after: "still not convinced they belong in the
+inventory record. That part still needs work. Can't rebuild Rome in a day."
+The mechanism (checkbox discard → live-verified working) and the destination
+(`item_attributes`/Set A) are two separate claims — only the mechanism is
+confirmed settled. Treat Set A as the CURRENT destination, not the DECIDED
+one, until a fresh design pass with Dave. Do not build anything further on
+top of "discarded aspects land in Set A" as a settled assumption.
+
+**All 3 of 3 flagged `field_set_drift` SKUs now live-confirmed (Dave,
+2026-07-16, same day):** `tgw202605051752520` (item #1, drove the #1472
+redesign), `tgw202605131827555` (Brand, item #2 — worked, though Dave flagged
+the required Save-Draft click as worth a second look, see #1473-adjacent
+discussion), `tgw202606021133367` (Bottle Type, item #3 — "3's good. We got
+this one."). Closes the earlier "1 worked 1 did not, not enough data" open
+loop for this fix set specifically.
 
 Dave, looking at `tgw202605051752520` after #1470/
 #1471 landed: "I like that we have captured all of the custom aspects now but
@@ -2106,6 +2132,41 @@ mutated):
 Full review docs (superseded by this summary, not separately retained):
 `inbox/claude/CLAUDE-REVIEW-OPERATOR-QUEUES-001-2026-07-16.md`,
 `inbox/claude/CLAUDE-UI-REVIEW-OPERATOR-QUEUES-001-2026-07-16.md`.
+
+## PP-FIELDCOMPLETE-001 — category-group attribute completeness, "better than any other eBayer"
+
+**Opened 2026-07-16.** Dave, right after #1472/#1473's live-fire session: "if we try to
+fill every field in our category group dataset during ai_identify we will have a better
+set of attributes to describe the item than ebay does. The initial item draft view after
+import should show all filled fields, not just the ones the set eBay category requires
+or recommends. This gives the operator all the data we have to choose from when
+constructing the listing. Better than any other ebayer." Third confirmed instance of the
+beats-eBay success bar (see `project-operator-queues-beats-ebay-example.md`).
+
+**Todo #1475 — Phase 1, DONE 2026-07-16, offline-tested, not yet browser-verified.**
+The item-detail "Inventory Record specifics" panel (already showed every filled Set A
+field unfiltered — that part pre-existed) now gets a "+ Add to listing" button on any
+Set A key with no Set B counterpart, wired to a new `addFromInventory()` JS function
+(shares `buildAspectRow()` with #1470's `addCustomAspect()`). Clicking adds the field
+into `#aspects-form` as a custom aspect row with #1472's own keep-checkbox — nothing
+written until the operator clicks Save Draft. Confirmed live via `tgw202605051752520`:
+11 genuinely Set-A-only fields exist today (Customized, Handmade, Item Height/Length/
+Weight/Width, Number in Pack, Packaging, Production Technique, Room, Signed) that will
+now surface the button.
+
+**Todo #1476 — Phase 2, scoped, not started.** Dave corrected the design mid-scoping:
+"the category group is the group of categories a type of item fits in. The superset of
+attributes is all of the attributes in all categories [in that group]" (example: the
+Books group's three eBay categories — Books, Antiquarian & Collectible, Textbooks — each
+have their own official aspect list; the target set for `ai_identify` is their union, so
+the operator can pick whichever aspects fit however the item is eventually categorized).
+No new schema needed in `category-groups.json` — the `ebay_categories`/
+`category_candidates` list already there is the input; the union is computed live via
+the existing `get_aspects(cfg, category_id)` taxonomy call per category in the group.
+`ai_identify`'s extraction currently has no target field list at all (freeform "any
+other notable attributes" catch-all only) — Phase 2 adds the union as an explicit
+target, in addition to that catch-all. Needs a cost/token-budget check against
+`LLM-Providers-Quotas.md` before shipping.
 
 ## Session protocol
 

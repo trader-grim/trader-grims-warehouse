@@ -6017,6 +6017,16 @@ def _render_item_detail_html(
             # shown as a clearly-separate, dimmed secondary line under the
             # same row only when it exists AND differs, so a viewer can
             # compare without either value being ambiguous about its set.
+            # todo #1475 (Dave, 2026-07-16: "the initial item draft view after
+            # import should show all filled fields, not just the ones the
+            # eBay category requires or recommends... gives the operator all
+            # the data we have to choose from"): every Set A key not already
+            # present in Set B gets a "+ Add to listing" button, wired to
+            # addFromInventory() (shared row-builder with addCustomAspect(),
+            # #1472's own aspect-keep-cb pattern) — clicking it adds the value
+            # into #aspects-form as a custom aspect, same as if the operator
+            # typed it in themselves. Purely additive UI; no write happens
+            # until the operator clicks Add AND then Save Draft.
             lambda ia, isp: (
                 (
                     '<div style="margin-top:6px;border-top:1px solid #222;padding-top:6px">'
@@ -6026,7 +6036,12 @@ def _render_item_detail_html(
                         + (
                             f'<div style="font-size:.72em;color:#556;margin-top:1px">eBay value: {h(str(isp[k]))}</div>'
                             if k in isp and str(isp[k]) != str(v)
-                            else ""
+                            else (
+                                f'<button class="act-btn" style="font-size:.7em;padding:1px 6px;margin-left:8px" '
+                                f'onclick="addFromInventory({json.dumps(k)},{json.dumps(str(v))},this)">+ Add to listing</button>'
+                                if k not in isp
+                                else ""
+                            )
                         )
                         + "</span></div>"
                         for k, v in sorted(ia.items())
@@ -6439,12 +6454,33 @@ def _render_item_detail_html(
         f"    }}).catch(function(e2){{if(msg){{msg.textContent='Saved, but discard network error';msg.style.color='#c44';}}}});"
         f"  }}).catch(function(e){{if(msg){{msg.textContent='Network error';msg.style.color='#c44';}}}});"
         f"}}"
-        # ── addCustomAspect ── todo #1470: lets an operator deliberately add
-        # a seller-defined custom aspect (a real eBay Inventory API
-        # capability, not just leftover category-mismatch data). Appends a
-        # row with the same data-aspect/data-initial="" contract every other
-        # aspect input uses, so saveEbayDraft()'s existing collection loop
-        # picks it up unchanged — no wiring needed there.
+        # ── buildAspectRow / addCustomAspect / addFromInventory ──────────────
+        # todo #1470: lets an operator deliberately add a seller-defined
+        # custom aspect (a real eBay Inventory API capability, not just
+        # leftover category-mismatch data). buildAspectRow() is the shared
+        # row-builder (same data-aspect/data-initial="" contract every other
+        # aspect input uses, so saveEbayDraft()'s collection loop and #1472's
+        # aspect-keep-cb discard checkbox pick it up unchanged) — used by
+        # both the manual "+ Add custom aspect" control and #1475's "+ Add
+        # to listing" buttons on the Inventory Record specifics panel above
+        # (Dave, 2026-07-16: "the initial item draft view after import
+        # should show all filled fields... gives the operator all the data
+        # we have to choose from").
+        f"function buildAspectRow(name,val){{"
+        f"  var esc=function(s){{return (s||'').replace(/\"/g,'&quot;');}};"
+        f"  var row=document.createElement('div');"
+        f"  row.className='frow';"
+        f"  row.innerHTML='<span class=\"fn\" style=\"font-size:.82em\">'"
+        f"    +'<input type=\"checkbox\" class=\"aspect-keep-cb\" data-aspect-key=\"'+esc(name)+'\" checked '"
+        f"    +'title=\"Checked = keep on this eBay listing. Uncheck = discard at Save (moved to the Inventory Record as a superset, never deleted).\" '"
+        f"    +'style=\"margin-right:4px;vertical-align:middle\">'+esc(name)"
+        f"    +'<span style=\"font-size:.7em;background:#1a2a3a;color:#8ac;border-radius:3px;'"
+        f"    +'padding:1px 5px;margin-left:4px\" title=\"A seller-defined custom aspect\">CUSTOM ASPECT</span></span>'"
+        f"    +'<span class=\"fv\"><input type=\"text\" data-aspect=\"'+esc(name)+'\" data-initial=\"\" value=\"'+esc(val)+'\"'"
+        f"    +' style=\"background:#1a1a2a;color:#eee;border:1px solid #446;border-radius:3px;'"
+        f"    +'padding:2px 5px;font-size:.85em;width:200px\"></span>';"
+        f"  return row;"
+        f"}}"
         f"function addCustomAspect(){{"
         f"  var nameEl=document.getElementById('new-aspect-name');"
         f"  var valEl=document.getElementById('new-aspect-value');"
@@ -6462,21 +6498,23 @@ def _render_item_detail_html(
         f"      return;"
         f"    }}"
         f"  }}"
-        f"  var esc=function(s){{return s.replace(/\"/g,'&quot;');}};"
-        f"  var row=document.createElement('div');"
-        f"  row.className='frow';"
-        f"  row.innerHTML='<span class=\"fn\" style=\"font-size:.82em\">'"
-        f"    +'<input type=\"checkbox\" class=\"aspect-keep-cb\" data-aspect-key=\"'+esc(name)+'\" checked '"
-        f"    +'title=\"Checked = keep on this eBay listing. Uncheck = discard at Save (moved to the Inventory Record as a superset, never deleted).\" '"
-        f"    +'style=\"margin-right:4px;vertical-align:middle\">'+esc(name)"
-        f"    +'<span style=\"font-size:.7em;background:#1a2a3a;color:#8ac;border-radius:3px;'"
-        f"    +'padding:1px 5px;margin-left:4px\" title=\"A seller-defined custom aspect\">CUSTOM ASPECT</span></span>'"
-        f"    +'<span class=\"fv\"><input type=\"text\" data-aspect=\"'+esc(name)+'\" data-initial=\"\" value=\"'+esc(val)+'\"'"
-        f"    +' style=\"background:#1a1a2a;color:#eee;border:1px solid #446;border-radius:3px;'"
-        f"    +'padding:2px 5px;font-size:.85em;width:200px\"></span>';"
-        f"  form.appendChild(row);"
+        f"  form.appendChild(buildAspectRow(name,val));"
         f"  if(nameEl)nameEl.value='';"
         f"  if(valEl)valEl.value='';"
+        f"}}"
+        f"function addFromInventory(name,val,btn){{"
+        f"  var form=document.getElementById('aspects-form');"
+        f"  if(!form){{if(btn){{btn.disabled=true;btn.textContent='form not ready';}}return;}}"
+        f"  var existing=form.querySelectorAll('[data-aspect]');"
+        f"  for(var i=0;i<existing.length;i++){{"
+        f"    if(existing[i].dataset.aspect===name){{"
+        f"      if(!existing[i].value)existing[i].value=val;"
+        f"      if(btn){{btn.disabled=true;btn.textContent='✓ In listing';}}"
+        f"      return;"
+        f"    }}"
+        f"  }}"
+        f"  form.appendChild(buildAspectRow(name,val));"
+        f"  if(btn){{btn.disabled=true;btn.textContent='✓ Added — click Save Draft';}}"
         f"}}"
         # ── saveAndReprice ────────────────────────────────────────────────────
         f"function saveAndReprice(){{"
