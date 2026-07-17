@@ -58,6 +58,24 @@ def get_task_model(cfg: Dict[str, Any], task: str) -> tuple[str, str]:
     return entry['provider'], entry['model']
 
 
+def get_task_generation_config(cfg: Dict[str, Any], task: str) -> Dict[str, Any]:
+    """Return the optional `generation` sub-dict for *task* from
+    cfg['models'][task]['generation'], or {} if absent/not configured.
+
+    General per-task generation knobs (max_output_tokens, thinking_budget,
+    ...) — any task entry may set these; absence means "provider default,
+    unchanged behavior". This is NOT a bulk_classify-only special case —
+    every provider path that supports these knobs reads the same field
+    (PP-DEADLETTER-001, 2026-07-17: gemini-2.5-flash-lite's default
+    'thinking' budget was silently consuming the entire output token
+    budget before any visible text was emitted, causing genuine
+    mid-generation truncation of bulk_classify's JSON responses).
+    """
+    entry = cfg.get('models', {}).get(task) or {}
+    gen = entry.get('generation')
+    return gen if isinstance(gen, dict) else {}
+
+
 def call_model(
     task: str,
     system_prompt: str,
@@ -122,8 +140,11 @@ def call_model(
                 google_exc = exc
             if google_exc is None:
                 try:
+                    gen_cfg = get_task_generation_config(cfg, task)
                     text, usage = _call_google_direct(
                         model, system_prompt, user_prompt, cfg, img_b64_list=_images,
+                        max_output_tokens=gen_cfg.get('max_output_tokens'),
+                        thinking_budget=gen_cfg.get('thinking_budget'),
                     )
                 except Exception as exc:
                     google_exc = exc
@@ -218,9 +239,12 @@ def call_model(
                         'emergency reserve: google_direct/%s: %s',
                         task, model, reserve_model, exc,
                     )
+                    gen_cfg = get_task_generation_config(cfg, task)
                     text, usage = _call_google_direct(
                         reserve_model, system_prompt, user_prompt, cfg,
                         img_b64_list=_images,
+                        max_output_tokens=gen_cfg.get('max_output_tokens'),
+                        thinking_budget=gen_cfg.get('thinking_budget'),
                     )
                 else:
                     raise
@@ -284,6 +308,8 @@ def _call_google_direct(
     cfg: Dict[str, Any],
     img_b64_list: Optional[List[str]] = None,
     max_retries: int = 3,
+    max_output_tokens: Optional[int] = None,
+    thinking_budget: Optional[int] = None,
 ) -> tuple:
     """Call Gemini directly via the google-genai SDK — no OpenRouter markup.
 
@@ -291,6 +317,17 @@ def _call_google_direct(
     'google/...' OpenRouter form. Raises on any failure (missing SDK, missing
     key, quota, network) — call_model() catches and falls back to OpenRouter.
     Returns (text, usage_dict).
+
+    max_output_tokens/thinking_budget are optional per-task generation knobs
+    (see get_task_generation_config / tgw-models.json's per-task
+    "generation" field) — None means "leave the SDK/model default alone".
+    PP-DEADLETTER-001 (2026-07-17): before this plumbing existed, every
+    google_direct call left Gemini's "thinking" budget unset, which for
+    gemini-2.5-flash-lite can consume the entire output token budget on
+    its internal reasoning before emitting any visible text — producing
+    genuine, silent mid-JSON truncation with no error from the SDK. Setting
+    thinking_budget=0 for tasks that need bare structured-output (no
+    visible reasoning) is a config-only fix once this plumbing exists.
     """
     from tgw.apis.google_genai import _require_genai, load_google_key
 
@@ -306,6 +343,12 @@ def _call_google_direct(
 
     model_ref = model if model.startswith('models/') else f'models/{model}'
 
+    generation_config: Dict[str, Any] = {'system_instruction': system_prompt}
+    if max_output_tokens is not None:
+        generation_config['max_output_tokens'] = max_output_tokens
+    if thinking_budget is not None:
+        generation_config['thinking_config'] = {'thinking_budget': thinking_budget}
+
     from tgw import quota
 
     last_exc: Optional[Exception] = None
@@ -314,7 +357,7 @@ def _call_google_direct(
             response = client.models.generate_content(
                 model=model_ref,
                 contents=[{'role': 'user', 'parts': parts}],
-                config={'system_instruction': system_prompt},
+                config=generation_config,
             )
             quota.record(cfg, 'llm_google')
             break

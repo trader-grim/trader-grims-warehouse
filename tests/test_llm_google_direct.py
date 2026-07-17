@@ -131,6 +131,33 @@ class TestCallGoogleDirect:
         assert len(calls) == 3
         assert sleeps == [2, 4]  # short backoff, not the 429 15s*attempt cooldown
 
+    def test_generation_config_omitted_by_default(self, monkeypatch, tmp_path):
+        """No max_output_tokens/thinking_budget passed -> generate_content's
+        config carries neither key, preserving prior behavior exactly."""
+        fake = _patch_genai(monkeypatch)
+        llm_mod._call_google_direct('gemini-2.5-flash-lite', 'sys', 'user', _cfg(tmp_path))
+        config = fake._calls[0]['config']
+        assert 'max_output_tokens' not in config
+        assert 'thinking_config' not in config
+
+    def test_max_output_tokens_passed_through(self, monkeypatch, tmp_path):
+        fake = _patch_genai(monkeypatch)
+        llm_mod._call_google_direct(
+            'gemini-2.5-flash-lite', 'sys', 'user', _cfg(tmp_path),
+            max_output_tokens=2048,
+        )
+        assert fake._calls[0]['config']['max_output_tokens'] == 2048
+
+    def test_thinking_budget_passed_through(self, monkeypatch, tmp_path):
+        """thinking_budget=0 (PP-DEADLETTER-001 fix for gemini-2.5-flash-lite
+        eating its whole output budget on invisible 'thinking' tokens)."""
+        fake = _patch_genai(monkeypatch)
+        llm_mod._call_google_direct(
+            'gemini-2.5-flash-lite', 'sys', 'user', _cfg(tmp_path),
+            thinking_budget=0,
+        )
+        assert fake._calls[0]['config']['thinking_config'] == {'thinking_budget': 0}
+
     def test_503_does_not_feed_quota_circuit_breaker(self, monkeypatch, tmp_path):
         """A transient 503 is not quota exhaustion -- must not call
         quota.record_429 (that's reserved for actual 429/RESOURCE_EXHAUSTED),
@@ -147,7 +174,74 @@ class TestCallGoogleDirect:
         assert recorded_429 == []
 
 
+class TestGetTaskGenerationConfig:
+    def test_absent_returns_empty_dict(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        cfg['models'] = {'ai_identify': {'provider': 'google_direct', 'model': 'gemini-2.5-flash-lite'}}
+        assert llm_mod.get_task_generation_config(cfg, 'ai_identify') == {}
+
+    def test_unknown_task_returns_empty_dict(self, tmp_path):
+        assert llm_mod.get_task_generation_config(_cfg(tmp_path), 'nonexistent') == {}
+
+    def test_present_returns_generation_dict(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        cfg['models'] = {
+            'bulk_classify': {
+                'provider': 'google_direct', 'model': 'gemini-2.5-flash-lite',
+                'generation': {'max_output_tokens': 4096, 'thinking_budget': 0},
+            },
+        }
+        assert llm_mod.get_task_generation_config(cfg, 'bulk_classify') == {
+            'max_output_tokens': 4096, 'thinking_budget': 0,
+        }
+
+
 class TestCallModelGoogleDirectDispatch:
+    def test_generation_config_reaches_google_direct_call(self, monkeypatch, tmp_path):
+        """call_model() must read models[task]['generation'] and pass it
+        through to _call_google_direct -- this is the plumbing PP-DEADLETTER-001
+        needed before a config-only fix for bulk_classify's truncation was
+        even possible."""
+        cfg = _cfg(tmp_path)
+        cfg['models'] = {
+            'bulk_classify': {
+                'provider': 'google_direct', 'model': 'gemini-2.5-flash-lite',
+                'generation': {'max_output_tokens': 4096, 'thinking_budget': 0},
+            },
+        }
+        captured = {}
+
+        def _fake_google_direct(model, system_prompt, user_prompt, cfg_arg, **kwargs):
+            captured.update(kwargs)
+            return 'ok', {}
+
+        monkeypatch.setattr(llm_mod, '_call_google_direct', _fake_google_direct)
+        monkeypatch.setattr(llm_mod, '_record_usage', lambda *a, **k: None)
+        monkeypatch.setattr('tgw.quota.precheck', lambda cfg, pool: None)
+
+        llm_mod.call_model('bulk_classify', 'sys', 'user', cfg)
+
+        assert captured['max_output_tokens'] == 4096
+        assert captured['thinking_budget'] == 0
+
+    def test_task_without_generation_config_passes_none(self, monkeypatch, tmp_path):
+        cfg = _cfg(tmp_path)
+        cfg['models'] = {'ai_identify': {'provider': 'google_direct', 'model': 'gemini-2.5-flash-lite'}}
+        captured = {}
+
+        def _fake_google_direct(model, system_prompt, user_prompt, cfg_arg, **kwargs):
+            captured.update(kwargs)
+            return 'ok', {}
+
+        monkeypatch.setattr(llm_mod, '_call_google_direct', _fake_google_direct)
+        monkeypatch.setattr(llm_mod, '_record_usage', lambda *a, **k: None)
+        monkeypatch.setattr('tgw.quota.precheck', lambda cfg, pool: None)
+
+        llm_mod.call_model('ai_identify', 'sys', 'user', cfg)
+
+        assert captured['max_output_tokens'] is None
+        assert captured['thinking_budget'] is None
+
     def test_success_does_not_touch_openrouter(self, monkeypatch, tmp_path):
         monkeypatch.setattr(llm_mod, '_call_google_direct',
                             lambda *a, **k: ('google says hi', {'total_tokens': 5}))
