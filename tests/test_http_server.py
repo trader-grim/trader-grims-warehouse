@@ -22,6 +22,7 @@ import time
 import zipfile
 from pathlib import Path
 
+import psycopg2.errors
 import pytest
 
 # TestClient (starlette) requires httpx at import/use time. If httpx is not
@@ -868,6 +869,59 @@ def test_worker_write_to_live_draft_does_not_auto_enqueue(env, enqueue_calls):
     queue_names = [c["kwargs"].get("queue_name") for c in enqueue_calls]
     assert "ebay_stage" not in queue_names
     assert "ebay_draft" not in queue_names
+
+
+def test_ebay_update_action_uses_same_dedupe_key_as_patch_auto_push(env, enqueue_calls):
+    """Todo #1469 (live incident, 2026-07-16, Dave: 'why is every item
+    staging twice... not even close to the same as ui'): the 'Update
+    Listing' button calls saveEbayDraft() (PATCH draft_listing, which
+    auto-enqueues ebay_stage under dedupe_key f"ebay_stage:{sku}") and then
+    fires the ebay_update action as its own success callback — which used
+    to enqueue a SECOND, unguarded ebay_stage job with no dedupe_key,
+    racing the first. Both enqueue call sites must now share the exact
+    same dedupe_key so the redundant attempt coalesces."""
+    sku = "tgw20260401000000012"
+    _seed_live_item(env, sku)
+
+    patch_r = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"draft_listing": {"title": "Operator edit"}}},
+        headers=AUTH_HEADERS,
+    )
+    assert patch_r.status_code == 200
+
+    action_r = env["client"].post(
+        f"/api/items/{sku}/action",
+        json={"action": "ebay_update"},
+        headers=AUTH_HEADERS,
+    )
+    assert action_r.status_code == 200
+
+    stage_calls = [c for c in enqueue_calls if c["kwargs"].get("queue_name") == "ebay_stage"]
+    assert len(stage_calls) == 2  # one from the PATCH auto-push, one from the action
+    dedupe_keys = {c["kwargs"].get("dedupe_key") for c in stage_calls}
+    assert dedupe_keys == {f"ebay_stage:{sku}"}  # both share the SAME key — real Postgres would coalesce these
+
+
+def test_ebay_update_action_survives_dedupe_collision(env, monkeypatch):
+    """If the auto-push's job is still active when this action's own
+    enqueue attempt hits the shared dedupe_key, Postgres raises
+    UniqueViolation — the action must degrade to job_id=None, not a 500."""
+    sku = "tgw20260401000000013"
+    _seed_live_item(env, sku)
+
+    def _raise_unique_violation(**kwargs):
+        raise psycopg2.errors.UniqueViolation("duplicate dedupe_key")
+
+    monkeypatch.setattr(http_server.state_machine, "enqueue_job", _raise_unique_violation)
+
+    r = env["client"].post(
+        f"/api/items/{sku}/action",
+        json={"action": "ebay_update"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "sku": sku, "action": "ebay_update", "job_id": None}
 
 
 def test_operator_edit_to_not_yet_live_draft_does_not_auto_enqueue(env, enqueue_calls):
@@ -3609,6 +3663,157 @@ def test_item_detail_aspects_form_prefills_from_set_b_not_set_a(env):
     assert "Lapel Pin" not in r.text.split("window._DL_PREFILL")[1][:200]
 
 
+def test_item_detail_js_renders_stored_aspects_outside_category_list(env):
+    """Todo #1470: the aspects form used to render inputs ONLY for the
+    fields the CURRENT category's official aspect list defines — any
+    stored draft_listing.item_specifics field NOT in that list was
+    completely invisible/uneditable, even though _build_offer_bodies()
+    pushes it to eBay unconditionally regardless of category-schema
+    membership (confirmed live: 18 of 20 real live aspects on a real item
+    were hidden this way, following a category change that left
+    now-mismatched aspects stranded). This locks in that the served page's
+    JS contains the "render every remaining prefill key too" loop.
+
+    Revised per Dave's correction, same day: these fields are eBay's own
+    legitimate "custom aspect" capability, not just category-mismatch
+    debris — badge reads "CUSTOM ASPECT", not an error-sounding label, and
+    a real "add custom aspect" control exists so an operator can create one
+    on purpose going forward, not just inherit stray ones by accident."""
+    _login(env["client"])
+    sku = "tgw20260615110000044"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Extra Aspects Widget", "location": "X9",
+        "draft_listing": {"item_specifics": {"Material": "Porcelain", "Color": "Orange"}},
+    })
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    assert "CUSTOM ASPECT" in r.text
+    assert "NOT IN CATEGORY" not in r.text
+    assert "Object.keys(prefill).forEach(function(name){" in r.text
+    assert "if(covered[name])return;" in r.text
+    assert 'id="new-aspect-name"' in r.text
+    assert 'id="new-aspect-value"' in r.text
+    assert "function addCustomAspect(){" in r.text
+
+
+def test_item_detail_save_ebay_draft_js_sends_cleared_aspects(env):
+    """Todo #1461: saveEbayDraft() used to gate aspect inclusion on
+    `if(v)` — clearing a field's value produced v==='' which was silently
+    dropped from the save payload, so the backend never saw the attempted
+    change and the old value stuck forever (Dave, live: "I have repeatedly
+    deleted material... that field reverts every time"). Fix compares each
+    input's current value against its `data-initial` (rendered value) and
+    sends the key whenever it changed, including a change to empty. This
+    locks in that the served page no longer contains the old silent-drop
+    pattern and does contain the fixed comparison."""
+    _login(env["client"])
+    sku = "tgw20260615110000032"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Aspect Clear Test Widget", "location": "X9",
+        "draft_listing": {"item_specifics": {"Material": "Silver"}},
+    })
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    assert "if(v!==init)attrs[k]=v;" in r.text
+    assert "if(v)attrs[k]=v;" not in r.text
+    assert "data-initial=" in r.text  # rendered by loadCatCtx(), not this response, but the setter must exist
+
+
+# ---------------------------------------------------------------------------
+# Todo #1464 (Tigwa's field-set-boundary audit, invariant C12/C14): the
+# generic PATCH endpoint must not accept a caller-supplied full Set A/Set B
+# envelope from a non-machine caller — that bypasses the sanctioned
+# accessor's own diff/provenance logic entirely. A bare partial dict must
+# keep working exactly as before (that's #1461's aspects-form save path).
+# ---------------------------------------------------------------------------
+
+
+def test_patch_rejects_bare_envelope_item_attributes_from_operator(env):
+    sku = "tgw20260615110000040"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Envelope Guard Widget", "location": "X9",
+        "item_attributes": {"Type": "Brooch"},
+    })
+    forged_envelope = {
+        "_set": "inventory_record", "version": 1,
+        "updated_at": "2026-01-01T00:00:00+00:00",
+        "fields": {"Type": "SOMETHING ELSE ENTIRELY"},
+    }
+    r = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"item_attributes": forged_envelope}},
+        headers=AUTH_HEADERS,  # no X-TGW-Caller — operator/browser-shaped request
+    )
+    assert r.status_code == 422
+    doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
+    assert doc["item_attributes"] == {"Type": "Brooch"}  # untouched
+
+
+def test_patch_rejects_bare_envelope_item_specifics_from_operator(env):
+    sku = "tgw20260615110000041"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Envelope Guard Widget B", "location": "X9",
+        "draft_listing": {"item_specifics": {"Material": "Silver"}},
+    })
+    forged_envelope = {
+        "_set": "ebay_draft", "version": 1,
+        "updated_at": "2026-01-01T00:00:00+00:00",
+        "fields": {"Material": "SOMETHING ELSE ENTIRELY"},
+    }
+    r = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"draft_listing": {"item_specifics": forged_envelope}}},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 422
+    doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
+    assert doc["draft_listing"]["item_specifics"] == {"Material": "Silver"}  # untouched
+
+
+def test_patch_allows_envelope_item_attributes_from_machine_caller(env):
+    """ai_identify.py builds the envelope itself via set_inventory_fields()
+    before ever reaching HTTP — the fence PATCH is just transport for an
+    already-sanctioned write. Must keep working."""
+    sku = "tgw20260615110000042"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Machine Envelope Widget", "location": "X9",
+        "item_attributes": {"Type": "Lapel Pin"},
+    })
+    real_envelope = {
+        "_set": "inventory_record", "version": 1,
+        "updated_at": "2026-07-16T00:00:00+00:00",
+        "updated_at_backfilled": False,
+        "fields": {"Type": "Brooch"},
+    }
+    r = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"item_attributes": real_envelope}},
+        headers={**AUTH_HEADERS, "X-TGW-Caller": "background:worker:ai_identify"},
+    )
+    assert r.status_code == 200
+    doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
+    assert doc["item_attributes"]["fields"] == {"Type": "Brooch"}
+
+
+def test_patch_still_allows_bare_partial_item_specifics_from_operator(env):
+    """The eBay Draft Editor's normal save path (#1461) sends a bare
+    partial dict, not an envelope — must be completely unaffected by the
+    new envelope gate."""
+    sku = "tgw20260615110000043"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Bare Dict Still Works Widget", "location": "X9",
+        "draft_listing": {"item_specifics": {"Material": "Silver"}},
+    })
+    r = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"draft_listing": {"item_specifics": {"Material": ""}}}},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
+    assert doc["draft_listing"]["item_specifics"]["fields"]["Material"] == ""
+
+
 # ---------------------------------------------------------------------------
 # todo #1417: eBay Draft -> Inventory Record reverse-flow endpoints. A
 # DIFFERENT code path from accept_proposals above (different data source
@@ -3798,6 +4003,150 @@ def test_item_detail_page_renders_inv_diff_panel_container(env):
     assert "Accept All Proposals" in r.text
     # No shared action name between the two.
     assert "applyInventoryDiff" != "acceptProposals"
+
+
+# ---------------------------------------------------------------------------
+# todo #1471: category-aspect migration endpoints. A category change can
+# strand Set B aspects the CURRENT category no longer recognizes — eBay's
+# own Seller Hub discards those; TGW's push doesn't (todo #1470's companion
+# finding). This matches eBay's discard-as-default WITHOUT deleting data —
+# checked keys move to item_attributes (Set A), unchecked stay on eBay.
+# Deliberately its own code path from inventory-diff above (spec point 6).
+# ---------------------------------------------------------------------------
+
+def _mock_category_aspects(monkeypatch, names):
+    import tgw.ebay.category_aspect_migration as cam_mod
+    monkeypatch.setattr(cam_mod, "get_aspects",
+                        lambda cfg, category_id: [{"name": n} for n in names])
+
+
+def test_category_aspect_migration_get_surfaces_orphans(env, monkeypatch):
+    _mock_category_aspects(monkeypatch, ["Material"])
+    sku = "tgw20260615110000050"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Orphan Test Widget", "location": "X9",
+        "draft_listing": {
+            "category_id": "38064",
+            "item_specifics": {"Material": "Porcelain", "Color": "Orange", "Type": "Figurine"},
+        },
+    })
+    r = env["client"].get(f"/api/items/{sku}/category-aspect-migration", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert {o["key"] for o in body["orphaned"]} == {"Color", "Type"}
+
+
+def test_category_aspect_migration_get_requires_auth(client):
+    sku = "tgw20260615110000051"
+    r = client.get(f"/api/items/{sku}/category-aspect-migration")
+    assert r.status_code in (401, 403)
+
+
+def test_category_aspect_migration_get_404_unknown_sku(env):
+    r = env["client"].get(
+        "/api/items/tgw99999999999999999/category-aspect-migration", headers=AUTH_HEADERS)
+    assert r.status_code == 404
+
+
+def test_category_aspect_migration_get_read_only_no_mutation(env, monkeypatch):
+    _mock_category_aspects(monkeypatch, ["Material"])
+    sku = "tgw20260615110000052"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Read Only Migration Test", "location": "X9",
+        "draft_listing": {"category_id": "38064", "item_specifics": {"Color": "Orange"}},
+    })
+    json_path = env["itemdata_root"] / sku / f"{sku}.json"
+    before = json_path.read_text(encoding="utf-8")
+    r = env["client"].get(f"/api/items/{sku}/category-aspect-migration", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    assert json_path.read_text(encoding="utf-8") == before
+
+
+def test_category_aspect_migration_apply_moves_checked_keys(env, monkeypatch):
+    """Move Color to Set A, leave Type on eBay (not checked) — same
+    checked-subset discipline as the inventory-diff apply endpoint."""
+    monkeypatch.setattr(http_server, "_enqueue_catalog_rebuild", lambda *a, **k: None)
+    _mock_category_aspects(monkeypatch, ["Material"])
+    sku = "tgw20260615110000053"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Apply Migration Test Widget", "location": "X9",
+        "draft_listing": {
+            "category_id": "38064",
+            "item_specifics": {"Material": "Porcelain", "Color": "Orange", "Type": "Figurine"},
+        },
+    })
+    client = env["client"]
+    r = client.post(
+        f"/api/items/{sku}/category-aspect-migration/apply",
+        json={"keys": ["Color"]},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["migrated"] == ["Color"]
+
+    json_path = env["itemdata_root"] / sku / f"{sku}.json"
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    ia_fields = inventory_record.get_inventory_fields(doc)
+    assert ia_fields["Color"] == "Orange"
+    ebay_fields = draft_specifics.get_ebay_aspects(doc)
+    assert "Color" not in ebay_fields  # removed from Set B
+    assert ebay_fields == {"Material": "Porcelain", "Type": "Figurine"}  # untouched otherwise
+
+    # Removed key no longer shows as an orphan afterward — re-detected live.
+    r2 = client.get(f"/api/items/{sku}/category-aspect-migration", headers=AUTH_HEADERS)
+    remaining = {o["key"] for o in r2.json()["orphaned"]}
+    assert remaining == {"Type"}
+
+
+def test_category_aspect_migration_apply_idempotent_no_op_when_stale(env, monkeypatch):
+    monkeypatch.setattr(http_server, "_enqueue_catalog_rebuild", lambda *a, **k: None)
+    _mock_category_aspects(monkeypatch, ["Material", "Color"])
+    sku = "tgw20260615110000054"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Stale Migration Test", "location": "X9",
+        "draft_listing": {
+            "category_id": "38064",
+            "item_specifics": {"Material": "Porcelain", "Color": "Orange"},
+        },
+    })
+    r = env["client"].post(
+        f"/api/items/{sku}/category-aspect-migration/apply",
+        json={"keys": ["Color"]},  # Color is NOT actually orphaned (in the mocked list)
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["migrated"] == []
+
+
+def test_category_aspect_migration_apply_requires_auth(client):
+    sku = "tgw20260615110000055"
+    r = client.post(f"/api/items/{sku}/category-aspect-migration/apply", json={"keys": ["Color"]})
+    assert r.status_code in (401, 403)
+
+
+def test_item_detail_page_renders_inline_aspect_keep_checkbox_wiring(env):
+    """Todo #1472 (Dave, 2026-07-16): the old standalone migration panel is
+    retired — checkbox-to-discard for non-official aspects now lives inline
+    in #aspects-form and is driven by one Save Draft click, not a separate
+    always-checked confirm()+immediate-apply panel."""
+    _login(env["client"])
+    sku = "tgw20260615110000056"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Migration Panel Container Test", "location": "X9",
+        "draft_listing": {"category_id": "38064", "item_specifics": {"Color": "Orange"}},
+    })
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    assert 'id="cat-aspect-migration-panel"' not in r.text
+    assert "applyCategoryAspectMigration" not in r.text
+    assert "loadCategoryAspectMigration" not in r.text
+    assert "aspect-keep-cb" in r.text
+    assert "/category-aspect-migration/apply" in r.text
 
 
 def test_form_review_renders(client):

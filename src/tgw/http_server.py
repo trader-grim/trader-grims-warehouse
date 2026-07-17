@@ -34,6 +34,10 @@ from pydantic import BaseModel, Field
 from . import draft_sync, inventory_record
 from .assets import ordered_photos as _ordered_photos
 from .config import DEFAULT_CONFIG, load_config
+from .ebay.category_aspect_migration import (
+    apply_category_aspect_migration,
+    detect_category_orphaned_aspects,
+)
 from .ebay.description import build_listing_description
 from .ebay.draft_specifics import get_ebay_aspects, set_ebay_aspects
 from .ebay.draft_specifics import is_envelope as _is_ebay_draft_envelope
@@ -414,6 +418,16 @@ class InventoryDiffApplyBody(BaseModel):
     keys: List[str]
 
 
+class CategoryAspectMigrationApplyBody(BaseModel):
+    # todo #1471: the checked-subset of keys from the migration panel's
+    # default-checked (= discard from eBay, move to Set A) checkboxes.
+    # Values are NEVER trusted from the client — the apply action
+    # re-detects live and only migrates keys still actually orphaned at
+    # call time (tgw.ebay.category_aspect_migration.
+    # apply_category_aspect_migration).
+    keys: List[str]
+
+
 class AppendBody(BaseModel):
     op: str
     data: Dict[str, Any]
@@ -701,6 +715,47 @@ def patch_item(sku: str, body: PatchBody, request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="sku field is immutable")
     if not body.fields:
         raise HTTPException(status_code=400, detail="no fields provided")
+
+    # Todo #1464 (Tigwa's field-set-boundary audit, invariant C12/C14): a
+    # caller-supplied FULL Set A/Set B envelope bypasses the sanctioned
+    # accessor's own diff/provenance logic entirely — _apply_patch's
+    # existing envelope branch just shallow-replaces whatever shape it's
+    # given, no history computed, no previous-value check. That's fine for
+    # ai_identify.py's own legitimate use (it builds the envelope itself via
+    # inventory_record.set_inventory_fields() before ever reaching HTTP —
+    # the fence call here is just transport for an already-sanctioned
+    # write), but nothing stopped ANY other caller with the shared API key
+    # from doing the same with an arbitrary, hand-built envelope and a
+    # forged/absent history — silently corrupting either set with no
+    # accessor ever having seen the change. A bare partial dict (the eBay
+    # Draft Editor's own normal save path, todo #1461) is unaffected — that
+    # already routes through the real accessor below and keeps working.
+    # Gate: only a machine (fence) caller — identified by the same
+    # X-TGW-Caller signal invariant C10's auto-redraft-loop guard already
+    # trusts elsewhere in this function — may submit an envelope-shaped
+    # value here; any operator/browser-originated request must send bare
+    # field updates and let the accessor build the envelope.
+    _caller_for_envelope_gate = request.headers.get("X-TGW-Caller", "")
+    _is_machine_caller = (_caller_for_envelope_gate.startswith("background:")
+                          or "worker:" in _caller_for_envelope_gate)
+    if not _is_machine_caller:
+        _ia = body.fields.get("item_attributes")
+        if isinstance(_ia, dict) and inventory_record.is_envelope(_ia):
+            raise HTTPException(
+                status_code=422,
+                detail=("item_attributes must be a bare field-update dict, not a "
+                        "full Set A envelope, from a non-machine caller — invariant "
+                        "C12/C14, todo #1464"),
+            )
+        _dl_for_gate = body.fields.get("draft_listing")
+        _isp = _dl_for_gate.get("item_specifics") if isinstance(_dl_for_gate, dict) else None
+        if isinstance(_isp, dict) and _is_ebay_draft_envelope(_isp):
+            raise HTTPException(
+                status_code=422,
+                detail=("draft_listing.item_specifics must be a bare field-update "
+                        "dict, not a full Set B envelope, from a non-machine caller "
+                        "— invariant C12/C14, todo #1464"),
+            )
 
     json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
     if not json_path.exists():
@@ -1556,11 +1611,27 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
             # Reads current draft_listing; run Re-draft first to incorporate aspect edits.
             # origin='operator': this button IS the inspection gate (invariant C9) —
             # ebay_stage refuses force updates of live listings without it.
-            job_id = state_machine.enqueue_job(
-                queue_name="ebay_stage",
-                payload={"sku": sku, "force": True, "origin": "operator"},
-                max_attempts=2,
-            )
+            #
+            # Todo #1469 (live incident, 2026-07-16): "Update Listing" calls
+            # saveEbayDraft() first (which PATCHes draft_listing and, per the
+            # auto-push logic above, ALREADY enqueues an ebay_stage job under
+            # dedupe_key f"ebay_stage:{sku}"), then this action fires as
+            # saveEbayDraft's own success callback. Without a matching
+            # dedupe_key here, this was a SECOND, unguarded ebay_stage
+            # enqueue for the same click — two near-simultaneous stage jobs
+            # racing to PUT the same item, confirmed live: "why is every item
+            # staging twice... not even close to the same as ui." Same key as
+            # the auto-push logic so the redundant attempt coalesces instead
+            # of racing.
+            try:
+                job_id = state_machine.enqueue_job(
+                    queue_name="ebay_stage",
+                    payload={"sku": sku, "force": True, "origin": "operator"},
+                    dedupe_key=f"ebay_stage:{sku}",
+                    max_attempts=2,
+                )
+            except psycopg2.errors.UniqueViolation:
+                job_id = None
             return {"ok": True, "sku": sku, "action": "ebay_update", "job_id": job_id}
 
         elif action == "sync_from_ebay":
@@ -2412,6 +2483,66 @@ def apply_inventory_diff_endpoint(sku: str, body: InventoryDiffApplyBody) -> Dic
 
 
 # ---------------------------------------------------------------------------
+# GET/POST /api/items/{sku}/category-aspect-migration[/apply] — todo #1471,
+# PP-LISTEDITOR-001, invariant C14 lineage. A category change can leave Set B
+# (draft_listing.item_specifics) aspects the CURRENT category no longer
+# recognizes — eBay's own Seller Hub discards those; TGW's push doesn't
+# (confirmed live incident, todo #1470's companion finding). This panel
+# matches eBay's discard-as-default behavior WITHOUT deleting the data
+# (Prime Directive 1) — checked keys move into item_attributes (Set A)
+# instead of eBay, unchecked keys stay on eBay as (now legitimate, operator-
+# kept) custom aspects. Deliberately its own code path, same shape as
+# inventory-diff above but a different data source/destination/direction —
+# no shared write path (spec point 6 discipline, same as that panel).
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/items/{sku}/category-aspect-migration", dependencies=[AUTH])
+def get_category_aspect_migration(sku: str) -> Dict[str, Any]:
+    """Read-only: Set B aspects the item's CURRENT category no longer
+    recognizes. Never mutates anything, callable any time. Recomputed live
+    on every call — no stored/dismissed state, same idempotency discipline
+    as the inventory-diff panel."""
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+    doc = load_item_doc(json_path)
+    orphaned = detect_category_orphaned_aspects(_cfg, doc)
+    return {"ok": True, "sku": sku, "orphaned": orphaned}
+
+
+@app.post("/api/items/{sku}/category-aspect-migration/apply", dependencies=[AUTH])
+def apply_category_aspect_migration_endpoint(
+    sku: str, body: CategoryAspectMigrationApplyBody
+) -> Dict[str, Any]:
+    """Move the checked subset of category-orphaned aspects from Set B
+    into Set A, removing them from Set B — a genuinely new, explicit,
+    named write path for BOTH sets, not routed through _apply_patch's
+    generic dict merge (calls the sanctioned
+    tgw.ebay.category_aspect_migration.apply_category_aspect_migration
+    function, itself built on the two sets' own accessors, then hands the
+    resulting full envelopes onward to _apply_patch — safe, same
+    already-enveloped-is-a-plain-replace branch the inventory-diff apply
+    endpoint above relies on)."""
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+    doc = load_item_doc(json_path)
+    patch = apply_category_aspect_migration(doc, body.keys, cfg=_cfg, applied_by="operator")
+    if not patch:
+        # Nothing in the requested key set is still an active orphan —
+        # idempotent no-op, not an error (same reasoning as inventory-diff).
+        return {"ok": True, "sku": sku, "migrated": [], "note": "no active orphaned aspects for requested keys"}
+    _apply_patch(json_path, {
+        "item_attributes": patch["item_attributes"],
+        "item_attributes_history": patch["item_attributes_history"],
+        "draft_listing": patch["draft_listing"],
+    })
+    _enqueue_catalog_rebuild(f"category_aspect_migration_apply:{sku}")
+    return {"ok": True, "sku": sku, "migrated": patch["migrated_keys"]}
+
+
+# ---------------------------------------------------------------------------
 # GET /api/items/{sku}/assets — ordered photo list (Stage 1 asset fence)
 # ---------------------------------------------------------------------------
 
@@ -2722,7 +2853,7 @@ function initCatSearch2(){
 """
 
 # Module-level constant — avoids nested quote hell in f-string script blocks
-_CATEGORY_CONTEXT_IIFE = "function loadCatCtx(catId){\n  var prefill=window._DL_PREFILL||{};\n  var loading=document.getElementById('aspects-loading');\n  var form=document.getElementById('aspects-form');\n  if(!catId){if(loading)loading.textContent='No category.';return;}\n  var curCondSel=document.getElementById('dl-condition-select');\n  var curCondQ=curCondSel&&curCondSel.value?'?current_condition='+encodeURIComponent(curCondSel.value):'';\n  fetch('/api/ebay/category-context/'+encodeURIComponent(catId)+curCondQ,{headers:authHeaders()})\n  .then(function(r){return r.json();}).then(function(d){\n    if(!d||!d.ok){if(loading)loading.textContent='Context load failed.';return;}\n    window._CAT_CTX=d;\n    var sel=document.getElementById('dl-condition-select');\n    if(sel&&d.conditions&&d.conditions.length){\n      var curVal=sel.value;\n      var stillValid=d.conditions.some(function(c){return c.enum===curVal;});\n      var html='';\n      if(!curVal)html+='<option value=\"\" selected disabled>\\u2014 select \\u2014</option>';\n      d.conditions.forEach(function(c){\n        html+='<option value=\"'+c.enum+'\"'+(c.enum===curVal?' selected':'')+'>'+c.label+'</option>';\n      });\n      if(curVal&&!stillValid){\n        if(d.condition_remap){\n          curVal=d.condition_remap.enum;\n          html=html.replace('<option value=\"'+curVal+'\"','<option value=\"'+curVal+'\" selected');\n        }else{\n          html+='<option value=\"'+curVal+'\" selected>'+curVal+' \\u2014 not valid for this category, please fix</option>';\n        }\n      }\n      sel.innerHTML=html;\n      if(d.condition_remap&&curVal===d.condition_remap.enum){\n        fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',\n          headers:authHeaders({'Content-Type':'application/json'}),\n          body:JSON.stringify({fields:{draft_listing:{condition_enum:curVal}}})});\n      }\n      var cn=document.getElementById('condition-policy-note');\n      var nl=d.conditions.length;\n      if(cn)cn.textContent=nl+(nl===1?' condition':' conditions')+' allowed'+(d.condition_remap?' \\u2014 category changed, condition auto-matched to nearest same-or-worse: '+d.condition_remap.label:'')+((curVal&&!stillValid&&!d.condition_remap)?' \\u2014 current value invalid, please re-select':'');\n    }\n    if(d.fulfillment_policy_id){\n      var fsel=document.getElementById('dl-ship-input');\n      var fhint=document.getElementById('dl-ship-hint');\n      if(fsel&&!fsel.value){\n        for(var fi=0;fi<fsel.options.length;fi++){\n          if(fsel.options[fi].value===d.fulfillment_policy_id){fsel.value=d.fulfillment_policy_id;break;}\n        }\n        if(fsel.value){\n          fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',\n            headers:authHeaders({'Content-Type':'application/json'}),\n            body:JSON.stringify({fields:{draft_listing:{shipping_profile:fsel.value}}})});\n        }\n      }\n      if(fhint&&!fsel.value)fhint.textContent='suggested: '+d.fulfillment_policy_id;\n    }\n    if(d.store_category){\n      var sch=document.getElementById('store-cat-hint');\n      if(sch)sch.textContent='suggested: '+d.store_category;\n    }\n    if(d.group_name){\n      var gh=document.getElementById('category-group-hint');\n      if(gh){\n        var pt=d.pricing&&d.pricing.typical_used?' · typical $'+d.pricing.typical_used.toFixed(2):'';\n        var pf=d.pricing&&d.pricing.floor?' · floor $'+d.pricing.floor.toFixed(2):'';\n        gh.textContent='group: '+d.group_name+pf+pt;\n      }\n    }\n    if(loading)loading.style.display='none';\n    if(!form)return;\n    if(!d.aspects||!d.aspects.length){\n      form.innerHTML=d.aspects_error\n        ?'<span style=\"color:#e88;font-size:.82em\">Item specifics lookup failed (\\u2018'+d.aspects_error+'\\u2019) \\u2014 every eBay category has specifics; this is a lookup error, not an empty category. <a href=\"#\" onclick=\"loadCatCtx(\\''+catId+'\\');return false\" style=\"color:#8ac\">Retry</a></span>'\n        :'<span style=\"color:#556;font-size:.82em\">No specifics returned for this category \\u2014 unexpected, please verify manually</span>';\n      return;\n    }\n    var html='';\n    d.aspects.forEach(function(asp){\n      var badge=asp.required\n        ?'<span style=\"font-size:.7em;background:#3a1a1a;color:#c44;border-radius:3px;padding:1px 5px;margin-left:4px\">REQ</span>'\n        :'<span style=\"font-size:.7em;background:#2a2a0a;color:#aa0;border-radius:3px;padding:1px 5px;margin-left:4px\">REC</span>';\n      // Three-layer merge: operator edits (blue) > proposed (yellow) > live (baseline)\n      var liveVal=(window._LIVE_ASPECTS&&window._LIVE_ASPECTS[asp.name]!==undefined?(window._LIVE_ASPECTS[asp.name]||'').toString():'');\n      var proposedVal=(window._PROPOSED_ASPECTS&&window._PROPOSED_ASPECTS[asp.name]!==undefined?(window._PROPOSED_ASPECTS[asp.name]||'').toString():'');\n      var editVal=(prefill[asp.name]!==undefined?(prefill[asp.name]||'').toString():'');\n      var cur,layer;\n      if(editVal){cur=editVal;layer=(editVal!==liveVal)?'edit':'same';}\n      else if(proposedVal){cur=proposedVal;layer=(proposedVal!==liveVal)?'proposed':'same';}\n      else{cur=liveVal;layer=liveVal?'live':'empty';}\n      cur=cur.replace(/\"/g,'&quot;');\n      var reqEmpty=asp.required&&!cur;\n      // Colours by layer\n      var bord=reqEmpty?'#c44':(layer==='edit'?'#44c':(layer==='proposed'?'#884':'#444'));\n      var bg=reqEmpty?'#1a0a0a':(layer==='edit'?'#0a0a1a':(layer==='proposed'?'#1a1a00':'#1a1a1a'));\n      // Hint: show live value when overridden or proposed differs\n      var liveHint=(layer==='edit'||layer==='proposed')&&liveVal\n        ?'<div style=\"font-size:.7em;color:#445;margin-top:1px\">live: '+liveVal.replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>'\n        :'';\n      var inp;\n      if(asp.allowed_values&&asp.allowed_values.length&&asp.mode==='SELECTION_ONLY'){\n        var opts=asp.allowed_values.map(function(v){\n          return '<option value=\"'+v+'\"'+(v===cur?' selected':'')+'>'+v+'</option>';\n        }).join('');\n        inp='<select data-aspect=\"'+asp.name+'\" style=\"background:'+bg+';color:#eee;border:1px solid '+bord+';border-radius:3px;padding:2px 5px;font-size:.85em\"><option value=\"\">—</option>'+opts+'</select>';\n      }else{\n        var dlid='dl-asp-'+asp.name.replace(/[^a-zA-Z0-9]/g,'-');\n        var dlopts=asp.allowed_values&&asp.allowed_values.length\n          ?'<datalist id=\"'+dlid+'\">'+asp.allowed_values.map(function(v){return '<option value=\"'+v+'\"></option>';}).join('')+'</datalist>'\n          :'';\n        inp='<input type=\"text\"'+(dlopts?' list=\"'+dlid+'\"':'')+' data-aspect=\"'+asp.name+'\" value=\"'+cur+'\"'\n           +' style=\"background:'+bg+';color:#eee;border:1px solid '+bord+';border-radius:3px;padding:2px 5px;font-size:.85em;width:200px\">'\n           +dlopts;\n      }\n      html+='<div class=\"frow\"'+(reqEmpty?' style=\"border-left:2px solid #944;padding-left:4px\"':'')+'>  <span class=\"fn\" style=\"font-size:.82em\">'+asp.name+badge+'</span><span class=\"fv\">'+inp+liveHint+'</span></div>';\n    });\n    \n    var missingReq=d.aspects.filter(function(a){return a.required&&!(prefill[a.name]||'');}).length;if(missingReq>0){html='<div style=\"margin-bottom:8px;padding:5px 8px;background:#1a0808;border:1px solid #844;border-radius:3px;font-size:.78em;color:#e88\">'+missingReq+' required aspect'+(missingReq===1?'':'s')+' missing values — fill before staging</div>'+html;}form.innerHTML=html;\n  }).catch(function(){\n    if(loading)loading.textContent='Category context load failed.';\n  });\n}\ndocument.addEventListener('DOMContentLoaded',function(){\n  if(window._DL_CAT_ID)loadCatCtx(window._DL_CAT_ID);\n  if(typeof initCatSearch==='function')initCatSearch();\n  if(typeof initCatSearch2==='function')initCatSearch2();\n  if(typeof loadInventoryDiff==='function')loadInventoryDiff();\n});\n"
+_CATEGORY_CONTEXT_IIFE = "function loadCatCtx(catId){\n  var prefill=window._DL_PREFILL||{};\n  var loading=document.getElementById('aspects-loading');\n  var form=document.getElementById('aspects-form');\n  if(!catId){if(loading)loading.textContent='No category.';return;}\n  var curCondSel=document.getElementById('dl-condition-select');\n  var curCondQ=curCondSel&&curCondSel.value?'?current_condition='+encodeURIComponent(curCondSel.value):'';\n  fetch('/api/ebay/category-context/'+encodeURIComponent(catId)+curCondQ,{headers:authHeaders()})\n  .then(function(r){return r.json();}).then(function(d){\n    if(!d||!d.ok){if(loading)loading.textContent='Context load failed.';return;}\n    window._CAT_CTX=d;\n    var sel=document.getElementById('dl-condition-select');\n    if(sel&&d.conditions&&d.conditions.length){\n      var curVal=sel.value;\n      var stillValid=d.conditions.some(function(c){return c.enum===curVal;});\n      var html='';\n      if(!curVal)html+='<option value=\"\" selected disabled>\\u2014 select \\u2014</option>';\n      d.conditions.forEach(function(c){\n        html+='<option value=\"'+c.enum+'\"'+(c.enum===curVal?' selected':'')+'>'+c.label+'</option>';\n      });\n      if(curVal&&!stillValid){\n        if(d.condition_remap){\n          curVal=d.condition_remap.enum;\n          html=html.replace('<option value=\"'+curVal+'\"','<option value=\"'+curVal+'\" selected');\n        }else{\n          html+='<option value=\"'+curVal+'\" selected>'+curVal+' \\u2014 not valid for this category, please fix</option>';\n        }\n      }\n      sel.innerHTML=html;\n      if(d.condition_remap&&curVal===d.condition_remap.enum){\n        fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',\n          headers:authHeaders({'Content-Type':'application/json'}),\n          body:JSON.stringify({fields:{draft_listing:{condition_enum:curVal}}})});\n      }\n      var cn=document.getElementById('condition-policy-note');\n      var nl=d.conditions.length;\n      if(cn)cn.textContent=nl+(nl===1?' condition':' conditions')+' allowed'+(d.condition_remap?' \\u2014 category changed, condition auto-matched to nearest same-or-worse: '+d.condition_remap.label:'')+((curVal&&!stillValid&&!d.condition_remap)?' \\u2014 current value invalid, please re-select':'');\n    }\n    if(d.fulfillment_policy_id){\n      var fsel=document.getElementById('dl-ship-input');\n      var fhint=document.getElementById('dl-ship-hint');\n      if(fsel&&!fsel.value){\n        for(var fi=0;fi<fsel.options.length;fi++){\n          if(fsel.options[fi].value===d.fulfillment_policy_id){fsel.value=d.fulfillment_policy_id;break;}\n        }\n        if(fsel.value){\n          fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',\n            headers:authHeaders({'Content-Type':'application/json'}),\n            body:JSON.stringify({fields:{draft_listing:{shipping_profile:fsel.value}}})});\n        }\n      }\n      if(fhint&&!fsel.value)fhint.textContent='suggested: '+d.fulfillment_policy_id;\n    }\n    if(d.store_category){\n      var sch=document.getElementById('store-cat-hint');\n      if(sch)sch.textContent='suggested: '+d.store_category;\n    }\n    if(d.group_name){\n      var gh=document.getElementById('category-group-hint');\n      if(gh){\n        var pt=d.pricing&&d.pricing.typical_used?' · typical $'+d.pricing.typical_used.toFixed(2):'';\n        var pf=d.pricing&&d.pricing.floor?' · floor $'+d.pricing.floor.toFixed(2):'';\n        gh.textContent='group: '+d.group_name+pf+pt;\n      }\n    }\n    if(loading)loading.style.display='none';\n    if(!form)return;\n    if(!d.aspects||!d.aspects.length){\n      form.innerHTML=d.aspects_error\n        ?'<span style=\"color:#e88;font-size:.82em\">Item specifics lookup failed (\\u2018'+d.aspects_error+'\\u2019) \\u2014 every eBay category has specifics; this is a lookup error, not an empty category. <a href=\"#\" onclick=\"loadCatCtx(\\''+catId+'\\');return false\" style=\"color:#8ac\">Retry</a></span>'\n        :'<span style=\"color:#556;font-size:.82em\">No specifics returned for this category \\u2014 unexpected, please verify manually</span>';\n      return;\n    }\n    var html='';\n    d.aspects.forEach(function(asp){\n      var badge=asp.required\n        ?'<span style=\"font-size:.7em;background:#3a1a1a;color:#c44;border-radius:3px;padding:1px 5px;margin-left:4px\">REQ</span>'\n        :'<span style=\"font-size:.7em;background:#2a2a0a;color:#aa0;border-radius:3px;padding:1px 5px;margin-left:4px\">REC</span>';\n      // Three-layer merge: operator edits (blue) > proposed (yellow) > live (baseline)\n      var liveVal=(window._LIVE_ASPECTS&&window._LIVE_ASPECTS[asp.name]!==undefined?(window._LIVE_ASPECTS[asp.name]||'').toString():'');\n      var proposedVal=(window._PROPOSED_ASPECTS&&window._PROPOSED_ASPECTS[asp.name]!==undefined?(window._PROPOSED_ASPECTS[asp.name]||'').toString():'');\n      var editVal=(prefill[asp.name]!==undefined?(prefill[asp.name]||'').toString():'');\n      var cur,layer;\n      if(editVal){cur=editVal;layer=(editVal!==liveVal)?'edit':'same';}\n      else if(proposedVal){cur=proposedVal;layer=(proposedVal!==liveVal)?'proposed':'same';}\n      else{cur=liveVal;layer=liveVal?'live':'empty';}\n      cur=cur.replace(/\"/g,'&quot;');\n      var reqEmpty=asp.required&&!cur;\n      // Colours by layer\n      var bord=reqEmpty?'#c44':(layer==='edit'?'#44c':(layer==='proposed'?'#884':'#444'));\n      var bg=reqEmpty?'#1a0a0a':(layer==='edit'?'#0a0a1a':(layer==='proposed'?'#1a1a00':'#1a1a1a'));\n      // Hint: show live value when overridden or proposed differs\n      var liveHint=(layer==='edit'||layer==='proposed')&&liveVal\n        ?'<div style=\"font-size:.7em;color:#445;margin-top:1px\">live: '+liveVal.replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>'\n        :'';\n      var inp;\n      if(asp.allowed_values&&asp.allowed_values.length&&asp.mode==='SELECTION_ONLY'){\n        var opts=asp.allowed_values.map(function(v){\n          return '<option value=\"'+v+'\"'+(v===cur?' selected':'')+'>'+v+'</option>';\n        }).join('');\n        inp='<select data-aspect=\"'+asp.name+'\" data-initial=\"'+cur+'\" style=\"background:'+bg+';color:#eee;border:1px solid '+bord+';border-radius:3px;padding:2px 5px;font-size:.85em\"><option value=\"\">—</option>'+opts+'</select>';\n      }else{\n        var dlid='dl-asp-'+asp.name.replace(/[^a-zA-Z0-9]/g,'-');\n        var dlopts=asp.allowed_values&&asp.allowed_values.length\n          ?'<datalist id=\"'+dlid+'\">'+asp.allowed_values.map(function(v){return '<option value=\"'+v+'\"></option>';}).join('')+'</datalist>'\n          :'';\n        inp='<input type=\"text\"'+(dlopts?' list=\"'+dlid+'\"':'')+' data-aspect=\"'+asp.name+'\" data-initial=\"'+cur+'\" value=\"'+cur+'\"'\n           +' style=\"background:'+bg+';color:#eee;border:1px solid '+bord+';border-radius:3px;padding:2px 5px;font-size:.85em;width:200px\">'\n           +dlopts;\n      }\n      html+='<div class=\"frow\"'+(reqEmpty?' style=\"border-left:2px solid #944;padding-left:4px\"':'')+'>  <span class=\"fn\" style=\"font-size:.82em\">'+asp.name+badge+'</span><span class=\"fv\">'+inp+liveHint+'</span></div>';\n    });\n    var covered={};\n    d.aspects.forEach(function(asp){covered[asp.name]=true;});\n    Object.keys(prefill).forEach(function(name){\n      if(covered[name])return;\n      var xcur=(prefill[name]||'').toString().replace(/\"/g,'&quot;');\n      var xkey=name.replace(/\"/g,'&quot;');\n      var xbadge='<span style=\"font-size:.7em;background:#1a2a3a;color:#8ac;border-radius:3px;padding:1px 5px;margin-left:4px\" title=\"A seller-defined custom aspect \u2014 not in this category\u2019s standard list, but a real eBay field, pushed live like any other\">CUSTOM ASPECT</span>';\n      var xcb='<input type=\"checkbox\" class=\"aspect-keep-cb\" data-aspect-key=\"'+xkey+'\" checked title=\"Checked = keep on this eBay listing. Uncheck = discard at Save (moved to the Inventory Record as a superset, never deleted).\" style=\"margin-right:4px;vertical-align:middle\">';\n      var xinp='<input type=\"text\" data-aspect=\"'+name+'\" data-initial=\"'+xcur+'\" value=\"'+xcur+'\" style=\"background:#1a1a2a;color:#eee;border:1px solid #446;border-radius:3px;padding:2px 5px;font-size:.85em;width:200px\">';\n      html+='<div class=\"frow\"><span class=\"fn\" style=\"font-size:.82em\">'+xcb+name+xbadge+'</span><span class=\"fv\">'+xinp+'</span></div>';\n    });\n\n    var missingReq=d.aspects.filter(function(a){return a.required&&!(prefill[a.name]||'');}).length;if(missingReq>0){html='<div style=\"margin-bottom:8px;padding:5px 8px;background:#1a0808;border:1px solid #844;border-radius:3px;font-size:.78em;color:#e88\">'+missingReq+' required aspect'+(missingReq===1?'':'s')+' missing values — fill before staging</div>'+html;}form.innerHTML=html;\n  }).catch(function(){\n    if(loading)loading.textContent='Category context load failed.';\n  });\n}\ndocument.addEventListener('DOMContentLoaded',function(){\n  if(window._DL_CAT_ID)loadCatCtx(window._DL_CAT_ID);\n  if(typeof initCatSearch==='function')initCatSearch();\n  if(typeof initCatSearch2==='function')initCatSearch2();\n  if(typeof loadInventoryDiff==='function')loadInventoryDiff();\n});\n"
 
 # Custom context menu for gallery images — fetches bytes locally then POSTs to
 # Google Lens upload so the LAN-only URL is never sent to Google directly.
@@ -5727,7 +5858,43 @@ def _render_item_detail_html(
         f"Item Specifics / Aspects</div>"
         f'<div id="aspects-loading" style="color:#556;font-size:.82em">Loading aspects…</div>'
         f'<div id="aspects-form"></div>'
+        # Todo #1470 (live incident, 2026-07-16, Dave: "how will this account
+        # for custom aspect fields? that is where the solution lies"): a
+        # category-defined aspect is only ever whatever the Item Specifics
+        # lookup returns for the current category, but eBay's own Inventory
+        # API accepts additional seller-defined "custom aspects" beyond that
+        # list — real, intentional, buyer-visible fields. Without an explicit
+        # way to add one, every custom aspect on this item so far arrived by
+        # accident (an AI draft under a since-changed category), not by
+        # design — and the read-only "surface what's already stored" half of
+        # this fix alone would just recreate the same invisible-field problem
+        # the next time a category changes. This control lets an operator
+        # deliberately add one; addCustomAspect() appends a row with the same
+        # data-aspect/data-initial="" contract every other aspect input uses,
+        # so saveEbayDraft()'s existing collection loop picks it up with zero
+        # changes there.
+        f'<div style="margin-top:6px;display:flex;gap:6px;align-items:center">'
+        f'<input type="text" id="new-aspect-name" placeholder="Custom aspect name" '
+        f'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:3px;'
+        f'padding:2px 6px;font-size:.82em;width:160px">'
+        f'<input type="text" id="new-aspect-value" placeholder="Value" '
+        f'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:3px;'
+        f'padding:2px 6px;font-size:.82em;width:160px">'
+        f'<button class="act-btn" style="font-size:.78em;padding:2px 8px" '
+        f'onclick="addCustomAspect()">+ Add custom aspect</button>'
+        f'<span id="new-aspect-msg" style="font-size:.78em;color:#c44"></span>'
         f"</div>"
+        f"</div>"
+        # Todo #1472 (Dave, 2026-07-16): the old standalone "Aspects not in
+        # this category" migration panel (a separate always-checked
+        # confirm()+immediate-apply flow, disconnected from the main Save)
+        # is retired here. Its checkbox-to-discard semantics now live
+        # inline in #aspects-form itself, alongside each custom/orphaned
+        # aspect's own input — one Save Draft click drives both. See
+        # `.aspect-keep-cb` in `_CATEGORY_CONTEXT_IIFE` and the
+        # saveEbayDraft() discard chain below; the underlying detect/apply
+        # endpoints (todo #1471) are unchanged, only re-wired to this
+        # single entry point instead of their own panel + button.
         # Explicit Save (restored 2026-07-10, todo #1318): List on eBay / Update
         # Item save the draft first as part of their own flow, but the
         # _has_error-and-not-is_active action-line state renders ONLY "Retry"
@@ -6207,26 +6374,109 @@ def _render_item_detail_html(
         # item_attributes (Set A). The nested dl.item_specifics key is
         # unwrapped server-side by _apply_patch's draft_listing branch
         # through the sanctioned tgw.ebay.draft_specifics accessor.
+        #
+        # Todo #1461: this used to gate inclusion on `if(v)` — an operator
+        # clearing a field's value produced v==='' which was silently
+        # dropped from the payload entirely, so the backend's merge
+        # (set_ebay_aspects) never even saw an attempted change and the old
+        # value stuck forever ("delete Material, save, reverts every
+        # time" — confirmed live 2026-07-16, and it affected every aspect
+        # field uniformly since this loop is shared by all of them). Fix:
+        # compare against each input's `data-initial` (the value it was
+        # rendered with) and send the key whenever it actually changed,
+        # including a change TO empty — matches every other field on this
+        # form, which is always sent unconditionally if the element exists.
         f"  var aspInputs=document.querySelectorAll('#aspects-form [data-aspect]');"
         f"  var attrs={{}};"
         f"  aspInputs.forEach(function(el){{"
         f"    var k=el.dataset.aspect;var v=el.value.trim();"
-        f"    if(v)attrs[k]=v;"
+        f"    var init=el.dataset.initial||'';"
+        f"    if(v!==init)attrs[k]=v;"
         f"  }});"
         f"  if(Object.keys(attrs).length)dl.item_specifics=attrs;"
         f"  var patch={{draft_listing:dl}};"
         f"  var msg=document.getElementById('dl-save-msg');"
+        # todo #1472 (Dave, 2026-07-16): "if the aspect is not in the list
+        # of required or recommended aspects it gets a check box, default
+        # checked, meaning keep... Unchecking means discard at save." A
+        # custom/orphaned aspect's `.aspect-keep-cb` (rendered above and in
+        # addCustomAspect()) is the discard signal — collected here so ONE
+        # Save Draft click drives both the normal field save AND the
+        # discard-to-Inventory-Record move, rather than the two disconnected
+        # actions (main Save + a separate always-checked migration panel)
+        # this replaces. Reuses #1471's sanctioned apply endpoint verbatim
+        # (its own live re-detection + Set B removal / Set A write) — no new
+        # merge path, spec point 6 discipline.
+        f"  var discardKeys=[];"
+        f"  document.querySelectorAll('.aspect-keep-cb:not(:checked)').forEach(function(cb){{discardKeys.push(cb.dataset.aspectKey);}});"
         f"  if(msg)msg.textContent='Saving…';"
         f"  fetch('/api/items/'+_SKU,{{"
         f"    method:'PATCH',"
         f"    headers:authHeaders({{'Content-Type':'application/json'}}),"
         f"    body:JSON.stringify({{fields:patch}})"
         f"  }}).then(function(r){{return r.json();}}).then(function(d){{"
-        f"    if(msg){{msg.textContent=d.ok?'✓ Saved':' Error: '+(d.detail||'failed');"
-        f"    msg.style.color=d.ok?'#4a4':'#c44';"
-        f"    if(d.ok)setTimeout(function(){{msg.textContent='';}},2000);}}"
-        f"    if(d.ok&&typeof done==='function')done();"
+        f"    if(!d.ok){{"
+        f"      if(msg){{msg.textContent=' Error: '+(d.detail||'failed');msg.style.color='#c44';}}"
+        f"      return;"
+        f"    }}"
+        f"    if(!discardKeys.length){{"
+        f"      if(msg){{msg.textContent='✓ Saved';msg.style.color='#4a4';setTimeout(function(){{msg.textContent='';}},2000);}}"
+        f"      if(typeof done==='function')done();"
+        f"      return;"
+        f"    }}"
+        f"    if(msg)msg.textContent='Saved — discarding '+discardKeys.length+' unchecked aspect(s)…';"
+        f"    fetch('/api/items/'+_SKU+'/category-aspect-migration/apply',{{"
+        f"      method:'POST',"
+        f"      headers:authHeaders({{'Content-Type':'application/json'}}),"
+        f"      body:JSON.stringify({{keys:discardKeys}})"
+        f"    }}).then(function(r2){{return r2.json();}}).then(function(d2){{"
+        f"      if(msg){{"
+        f"        msg.textContent=d2.ok?'✓ Saved (moved '+(d2.migrated?d2.migrated.length:0)+' to Inventory Record)':'Saved, but discard failed: '+(d2.detail||'error');"
+        f"        msg.style.color=d2.ok?'#4a4':'#c44';"
+        f"        if(d2.ok)setTimeout(function(){{msg.textContent='';}},2500);"
+        f"      }}"
+        f"      if(typeof done==='function')done();"
+        f"    }}).catch(function(e2){{if(msg){{msg.textContent='Saved, but discard network error';msg.style.color='#c44';}}}});"
         f"  }}).catch(function(e){{if(msg){{msg.textContent='Network error';msg.style.color='#c44';}}}});"
+        f"}}"
+        # ── addCustomAspect ── todo #1470: lets an operator deliberately add
+        # a seller-defined custom aspect (a real eBay Inventory API
+        # capability, not just leftover category-mismatch data). Appends a
+        # row with the same data-aspect/data-initial="" contract every other
+        # aspect input uses, so saveEbayDraft()'s existing collection loop
+        # picks it up unchanged — no wiring needed there.
+        f"function addCustomAspect(){{"
+        f"  var nameEl=document.getElementById('new-aspect-name');"
+        f"  var valEl=document.getElementById('new-aspect-value');"
+        f"  var msgEl=document.getElementById('new-aspect-msg');"
+        f"  var name=(nameEl&&nameEl.value||'').trim();"
+        f"  var val=(valEl&&valEl.value||'').trim();"
+        f"  if(msgEl)msgEl.textContent='';"
+        f"  if(!name){{if(msgEl)msgEl.textContent='Name required';return;}}"
+        f"  var form=document.getElementById('aspects-form');"
+        f"  if(!form)return;"
+        f"  var existing=form.querySelectorAll('[data-aspect]');"
+        f"  for(var i=0;i<existing.length;i++){{"
+        f"    if(existing[i].dataset.aspect===name){{"
+        f"      if(msgEl)msgEl.textContent='Already exists — edit it above instead';"
+        f"      return;"
+        f"    }}"
+        f"  }}"
+        f"  var esc=function(s){{return s.replace(/\"/g,'&quot;');}};"
+        f"  var row=document.createElement('div');"
+        f"  row.className='frow';"
+        f"  row.innerHTML='<span class=\"fn\" style=\"font-size:.82em\">'"
+        f"    +'<input type=\"checkbox\" class=\"aspect-keep-cb\" data-aspect-key=\"'+esc(name)+'\" checked '"
+        f"    +'title=\"Checked = keep on this eBay listing. Uncheck = discard at Save (moved to the Inventory Record as a superset, never deleted).\" '"
+        f"    +'style=\"margin-right:4px;vertical-align:middle\">'+esc(name)"
+        f"    +'<span style=\"font-size:.7em;background:#1a2a3a;color:#8ac;border-radius:3px;'"
+        f"    +'padding:1px 5px;margin-left:4px\" title=\"A seller-defined custom aspect\">CUSTOM ASPECT</span></span>'"
+        f"    +'<span class=\"fv\"><input type=\"text\" data-aspect=\"'+esc(name)+'\" data-initial=\"\" value=\"'+esc(val)+'\"'"
+        f"    +' style=\"background:#1a1a2a;color:#eee;border:1px solid #446;border-radius:3px;'"
+        f"    +'padding:2px 5px;font-size:.85em;width:200px\"></span>';"
+        f"  form.appendChild(row);"
+        f"  if(nameEl)nameEl.value='';"
+        f"  if(valEl)valEl.value='';"
         f"}}"
         # ── saveAndReprice ────────────────────────────────────────────────────
         f"function saveAndReprice(){{"

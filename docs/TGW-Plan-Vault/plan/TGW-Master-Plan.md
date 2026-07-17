@@ -286,6 +286,108 @@ apprenticeship task: justshoutit (PP-INTAKE-004). Execution/isolation
 substrate is PP-AIOPS-001, not re-designed here. Full design:
 `pp/PP-HERMES-EA-001.md`.
 
+**Claude's cross-check of Tigwa's own contract, 2026-07-16 (read-only, no
+mutation), returning the same review she ran on Claude's contract same
+day:** verified live — `AGENTS.md` redirect, the MCP read-only gate
+(traced the actual invocation chain, imported `mcp_server` under the real
+env, confirmed `_READONLY == True`), `pm_intake` stopped,
+`tgw-coder.md`'s pilot-derived rules, `hermes-gateway.service` active.
+**One real finding, filed as todo #1459:** the contract's explicit,
+twice-stated "notify/interrupt only, never pause/kill/shutdown" thermal
+authority boundary (written specifically to prevent a repeat of the
+2026-07-13 unauthorized-poweroff incident) is prose only — the standing
+credential underneath it (`tigwa@a1131`'s SSH key into `db@tgw-prod`,
+verified live: no `command=` restriction, full shell) combined with `db`'s
+verified-live `NOPASSWD: ALL` sudo grant on tgw-prod gives Tigwa the exact
+capability the boundary forbids. The contract itself already flagged this
+as an open scoping question in the 2026-07-12 SSH-key section and it's
+still unresolved. Same class of gap as invariant E11 (written rule vs.
+mechanical enforcement), not yet named as its own invariant for Tigwa's
+side. Full writeup: `inbox/tigwa/CLAUDE-REVIEW-tigwa-contract-cross-
+verification-2026-07-16.md`. Two smaller confirmed-still-open gaps (no
+code gate on the branch-review "out-of-control" triggers/fix-attempt cap;
+no tracked counter for the 2026-07-14 independent-reviewer trigger) noted
+in the same doc, no new todos — already acknowledged as open in the
+contract's own text.
+
+**Redirected to PP-HR-001's job-contract-review process, 2026-07-16
+(Dave):** "Intent is an hr department, this is job contract review. Tigwa
+scoped, you check and approve or comment." Todo #1459 delegated to Tigwa
+— she proposes the actual credential-scoping fix for her own role (Claude
+doesn't design it for her), Claude reviews and approves/comments, same
+review shape as the rest of PP-HR-001. Request:
+`inbox/tigwa/CLAUDE-REQUEST-credential-scoping-2026-07-16.md`.
+
+**Tigwa's Aider contract cross-verification, 2026-07-16 (read-only, no
+mutation):** confirms `bin/tgw-aider`'s intended shell path (spec →
+`task/<id>-<slug>` worktree at `/opt/TGW/var/worktrees/<id>-<slug>`, live
+base-branch lookup) and the MCP bridge's path-traversal/slug-syntax
+validation both check out (`bash -n` / `python -m py_compile` clean).
+`.aider.conf.yml` + `.aiderignore` scope DeepSeek V4 Flash correctly to
+XS/S busywork and exclude secrets. Two real gaps, not yet covered by
+existing todos, confirmed live against `src/tgw/aider_mcp_server.py`
+2026-07-16 (re-verified same session: `task_slug: str = ''` at line 191,
+worktree creation still gated behind `if task_slug:` at line 223 — an
+empty slug silently falls through to the shared checkout, and
+`auto-commits: true` in `.aider.conf.yml` means that shared-checkout path
+can commit outside any task branch):
+1. No Aider preflight seam — unlike Claude's `SessionStart` hook, nothing
+   injects current Plan Vault inbox/plan state into an Aider task, and
+   there's no auditable `skip startup` exception.
+2. `aider_run_task(..., task_slug='')` defaults to the shared checkout
+   instead of requiring a slug or separately approval-gating shared-mode
+   with auto-commit disabled — prose says omitting the slug is only for
+   trivial one-offs, but nothing enforces that.
+Live Claude→Aider MCP discovery (`claude mcp list`) remains unverified —
+Tigwa's first attempt used the wrong process identity (worker subprocess
+runs as `tgw`; Claude client is `db`) and was corrected same day; the
+retry under `db` hit the live Anthropic 529-overloaded outage instead, so
+this is still an open verification, not a resolved one. Tracked as new
+todo (see below) rather than folding into #1358, which covers the worktree
+*wiring* already done, not this preflight/enforcement gap.
+
+## PP-HR-001 — the "HR department" for AI agents/personas — NEW 2026-07-16
+
+**Design mirror, 2026-07-16 (Tigwa, reporting only — not a Claude task):**
+"Agent Contract Acceptance Suite" (ACAS) concept — no role's contract counts
+as accepted on clear prose alone; each needs a versioned test portfolio
+(identity/attribution, startup/intake, tool/access boundary allow+deny,
+required-workflow bypass-proofing, secrets/data handling, review/handoff,
+provider-degradation, audit/delivery, spec-drift, offboarding), 4 evidence
+levels (static audit → fixture/harness → sandbox integration → approved
+live-fire), and explicit `NOT-YET-MECHANIZABLE`/`BLOCKED-UPSTREAM` outcomes
+that may never be restated as compliant. Full text:
+`inbox/claude/TIGWA-NOTE-PP-HR-001-agent-contract-acceptance-suite-2026-07-16.md`.
+Design ownership stays with Tigwa/Dave per the existing PP-HR-001 delegation
+— recorded here for continuity, not adopted as a Claude action item.
+
+**Dave, 2026-07-16, connecting two same-day threads:** invariant E11's
+audit (agent role restrictions are still mostly prose, not mechanically
+enforced — see `reference/invariants.md` E11) and the ferals audit's
+account/ledger/authority governance gap (`TIGWA-REQUEST-1333-ferals-
+audit-draft.md`) are the same underlying problem: nobody owns onboarding,
+credentialing, role-definition, discipline, or review across the growing
+roster of AI workers (Tigwa, Leotha, tgw-coder, nix-flake-maintainer, the
+ferals themselves). Handled ad hoc today, one incident at a time.
+
+**Design ownership: assigned to Tigwa, Dave guiding directly, submitted for
+review afterward** (Dave's explicit instruction) — not designed by Claude.
+Full design-request brief (everything to consider, not a spec): `inbox/
+tigwa/CLAUDE-REQUEST-2026-07-16-hr-department-design-brief.md`.
+
+**Status: "job descriptions" component already delivered, 2026-07-16 (Dave:
+"this was not a waste")** — invariant E11 plus its two concrete instances
+(the `SessionStart` briefing hook replacing CLAUDE.md's prose-only startup
+ritual; the audit of `nix-flake-maintainer`/`tgw-coder` finding which of
+their "must"/"never" rules are hook-enforced vs. still prose, todos #1449/
+#1450) were built *before* PP-HR-001 was named, then recognized as its
+first real piece rather than unrelated prerequisite work. Precedent this
+sets for the rest of the design: a "job description" for an agent isn't
+done until its restrictions are checked against what's actually
+mechanically enforceable, not just written well. Remaining components
+(resource/credential governance, onboarding/training pipeline, performance/
+escalation review — see the design brief) not started.
+
 ## PP-RUNNERCOMMS-001 — the runner-question channel — NEW 2026-07-14
 **OPEN, needs a dedicated planning session — not decided.** Split out of
 PP-HERMES-EA-001 same day (Dave: "seems we need an overall plan for that
@@ -369,6 +471,92 @@ P6 investigated: ebay_repush orphan queue diagnosed (2 orphan jobs, no systemd u
 
 - #1124 P8 canary probe completed: `scripts/photosync_canary_probe.py` built and live-verified against `tgw201501021970068`. Fixed two bugs (auth header, live-state field shape). 4 new tests, full suite 1814 passed. Daily timer deferred to 2pm.
 ## PP-LISTEDITOR-001 — listing editor + revision apply
+
+**Todo #1465 — eBay Seller Hub complete parity audit, reassigned to Tigwa
+2026-07-16.** Filed same day as the incident below, initially addressed to
+Claude. Dave redirected it: "setup the ebay parity audit with a vision
+model and have tigwa manage. she has browser spinup test skills and
+vision capabilities." Confirmed real — `computer_use` skill
+(`/home/db/.hermes/skills/computer-use/SKILL.md`), SOM-mode screenshot
+capture, works with any tool-capable model, matches the audit's own
+evidence standard (live Seller Hub observation, no static/fabricated
+lists). Claude did not touch Tigwa/Hermes model routing — whether this
+pairs with a vision-specific model (Gemini, named in PP-HERMES-EA-001's
+original design, not yet confirmed wired) is her/Dave's call, same
+precedent as her a1131 MCP setup. Handoff + both original request docs:
+`inbox/tigwa/CLAUDE-HANDOFF-seller-hub-parity-audit-2026-07-16.md`.
+
+**Todo #1472 — custom-aspect checkbox redesign, DONE 2026-07-16, live-fire
+confirmed by Dave.** Watched a real edit end-to-end: job queued, job landed,
+unchecked aspects trimmed from the draft, then added a new custom aspect
+("Thumb Size = Normal") and confirmed it rendered inline with its own
+checkbox exactly as designed. Dave: "works... Nice work." Closed.
+
+Dave, looking at `tgw202605051752520` after #1470/
+#1471 landed: "I like that we have captured all of the custom aspects now but
+I don't like the interface... if the aspect is not in the list of required or
+recommended aspects it gets a check box, default checked, meaning keep all of
+these attributes. Unchecking means discard at save. Proper attribute set
+never has check boxes, never gets discarded... Regardless of how or whether
+we save, this is a quality gate with a human and we have to trust any
+unverifiable information when they press save, even if it discard." Replaced
+#1471's standalone "Aspects not in this category" panel (its own always-
+checked confirm()+immediate-apply button, disconnected from the main Save)
+with an inline `.aspect-keep-cb` checkbox on every non-official aspect row,
+right in `#aspects-form` next to its value input — official/required/
+recommended aspects get no checkbox and are never discardable, matching Set
+A/B boundary discipline. `saveEbayDraft()` now collects unchecked keys and,
+after the normal field PATCH succeeds, calls #1471's existing
+`/category-aspect-migration/apply` endpoint for them — same sanctioned Set
+B-removal/Set A-write path, no new merge logic, one Save Draft click drives
+both actions instead of two disconnected ones. Rewrote the one test that
+asserted the old panel's markup. Full offline suite 2364 passed/1 skipped.
+`tgw-http` restarted live; the underlying detect endpoint (now the single
+write path the new Save flow drives) reconfirmed live against the real
+18-orphan item. Not yet click-tested in an actual browser session — needs
+Dave's own login + a live Save with a box unchecked.
+
+**Todo #1471 — category-aspect migration, built + deployed 2026-07-16.**
+Companion to #1470 (which made every stored Set B aspect visible/editable,
+even ones outside the current category's official list, badged "CUSTOM
+ASPECT"). Dave: "ebay behavior is to discard them [on a category change]
+... I always wanted the attributes to move. They are good seo...
+operator chooses discards and makes their own mess to repair if they
+screw up." New module `tgw/ebay/category_aspect_migration.py` —
+`detect_category_orphaned_aspects()` (live-recomputed, fails safe to
+empty on a lookup error) + `apply_category_aspect_migration()` (moves
+checked keys from Set B into Set A via the sanctioned accessors, removes
+them from Set B, re-detects live so a stale request is a no-op). New
+accessor `draft_specifics.remove_ebay_aspects()` — the first EXPLICIT
+Set B deletion path (distinct from `set_ebay_aspects`'s deliberate
+None-is-a-no-op rule), used only for this genuine, operator-confirmed
+removal. New panel in the item-detail UI, mirroring C13's
+eBay→Inventory-Record sync panel's exact pre-checked-by-default review
+pattern, own button/action name (spec point 6 discipline — no shared
+write path). 29 new tests (unit + accessor + HTTP), full suite 2364
+passed/1 skipped. `tgw-http` restarted live; verified read-only against
+the real `tgw202605051752520` — correctly detects all 18 real orphaned
+aspects. Not yet live-fire tested end-to-end (an actual apply against a
+real listing) — needs Dave's own test, same as today's other fixes.
+
+**Todo #1461 — attribute-delete-reverts bug found + fixed 2026-07-16 (Dave:
+"I have repeatedly deleted material, currently set to Silver, saved,
+updates and that field reverts every time. likely not the only one.").**
+Root cause: a frontend bug, not a backend merge issue. `saveEbayDraft()`'s
+aspects-collection loop (`src/tgw/http_server.py`, the eBay Draft
+Editor's `#aspects-form`) only included a field in the save payload
+`if(v)` — i.e. only when non-empty. Clearing a field produced `v===''`,
+silently dropped from the PATCH entirely, so `set_ebay_aspects()` never
+saw an attempted change and the old value stuck forever. Affects every
+aspect field uniformly (shared loop) — confirmed Dave's "likely not the
+only one." **Fix:** each aspect input/select now carries
+`data-initial` (its rendered value); the collection loop sends the key
+whenever the current value differs from `data-initial`, including a
+change to empty — matching how every other field on this form already
+behaves. 2 new tests; full offline suite 2333 passed/1 skipped, no
+regressions. `tgw-http.service` restarted live. Not yet manually
+browser-verified end-to-end (needs Dave's own login session) — asked Dave
+to confirm from his side.
 **R1.1 live-fire DONE 2026-07-04 (todo #1137).** Price-only delta
 (`tgw201501021970128`, $7.99→$8.49) via `revision.py`'s drift-gated apply
 path (`tgw revise <sku> --set price=X --show` then `--apply --live`).
@@ -410,6 +598,64 @@ nothing. Fixed to mirror the existing "Update Listing" button exactly: push
 (`ebay_draft`). Live-verified against a real published listing
 (`tgw201501021970354`) all the way to a real eBay title change, confirmed
 via a fresh uncached API read, then reverted. 3 new tests.
+
+**Todo #1445 investigated 2026-07-16 (Claude, read-only, no writes) — root
+cause found for the "update succeeds but live/local state doesn't match"
+symptom Dave flagged against `tgw202605040949058`.** Live read-only GETs
+against the real eBay offer + `inventory_item` show current eBay API data
+matches the local `ebay_live`/`ebay_submitted` cache exactly — no drift at
+the API level right now. `catalog-verify` flags `photo_verify_stale` at
+**critical** on this SKU: `photo_verify.verified_at` (2026-07-15T02:46)
+predates the most recent `ebay_publish` (2026-07-16T14:50) by 36+ hours.
+Traced why: `queue_jobs` shows 6 `ebay_stage`/`ebay_publish` cycles on this
+SKU today, all succeeded, zero `ebay_sync` jobs alongside them. Confirmed
+in source — `ebay_publish.py` only ever enqueues a follow-up `ebay_stage`
+(price-drift force-restage); the **only** code path that enqueues
+`ebay_sync` as a follow-up is `http_server.py`'s `apply_revision`
+(LISTEDITOR revision/apply endpoint). **A normal republish through the
+ordinary auto-pipeline never refreshes the local live-mirror/photo-verify
+snapshot** — it silently goes stale until some independent sync
+eventually catches up. Candidate fix: have `ebay_publish` enqueue
+`ebay_sync` as a follow-up on success too, same pattern `apply_revision`
+already uses. Todo #1445 kept open (not closed) — this is the diagnosis,
+building the fix needs Dave's go-ahead.
+
+**Live-confirmed on one real item, 2026-07-16 23:02** — Dave cleared
+Material on `tgw202605051207245` (the Cloisonné/Porcelain drift item):
+save recorded correctly, staged/published with no rejection, live eBay
+aspects now show only `Original/Reproduction` (fresh API read confirms
+Material is gone), and an `ebay_sync` job auto-queued alongside the push.
+All three of today's fixes (#1461, #1462, #1445/#1467) working together
+on one real edit. **Dave's own framing: "1 worked 1 did not — not enough
+data"** — more of his own live testing across other items is pending
+before this counts as fleet-confirmed; none of the underlying todos are
+closed yet on the strength of this one success.
+
+**Fix built + deployed 2026-07-16 (Dave: "yes, make the fix"), then
+extended same day to cover the actually-common path (invariant C14
+incident, Dave: "why do we keep having to manually re-sync").** Original
+fix added a post-publish sync call to `ebay_publish.py`'s two success
+paths. Root-caused further same day: the far more common "Update Listing"
+button on an already-live item enqueues `ebay_stage` directly and never
+touches `ebay_publish` except via a conditional chain (ebay_stage's own
+republish trigger, which only fires when a `listing_id` already exists) —
+so `ebay_stage.py`, which runs on nearly every real edit, never refreshed
+the local `ebay_live` mirror at all. Pulled the duplicate enqueue logic up
+into a shared `tgw.ebay.sync.enqueue_post_push_sync()` (same precedent as
+that module's existing `format_ebay_error` cross-worker helper) and wired
+it unconditionally into both `ebay_stage.py`'s and `ebay_publish.py`'s
+success paths — deduped per SKU (`ebay_sync:post_push:<sku>`), non-fatal
+on collision or failure. 5 new offline tests total across
+`tests/test_ebay_publish_post_publish_sync.py` and the new
+`tests/test_ebay_stage_post_push_sync.py`; full offline suite 2338
+passed/1 skipped, no regressions. `tgw-worker@ebay_stage.service` and
+`tgw-worker@ebay_publish.service` restarted live. **Not yet live-fire-
+confirmed against a real publish** — re-publishing the real,
+already-listed `tgw202605040949058` to test it was correctly blocked by
+the permission gate (a live production write against a real listing isn't
+authorized by "make the fix" alone). Confirmation will come from the next
+organic publish/stage, or a Dave-approved safe test item. See invariants.md
+C14 for the full incident this sits inside.
 
 ## PP-ACTIONCONSOLE-001 — state-driven item action console
 Built s40 (state-driven action line, Editor/Live tabs). **Gate: Dave's operator test
@@ -895,6 +1141,79 @@ promotion-first guard as the category fields, (3) `items.create_item()`
 still has no default status for intake paths that omit it, (4) real
 reconciliation pass across all items with any status signal once Dave has
 scoped the "fun inventory" — not attempted yet.
+
+## PP-ADD-005 — SKU migration (legacy formats → canonical) — orphaned pp_ref, backfilled 2026-07-16
+Migration itself is 99.7% done: `src/tgw/sku_migration.py` documents 7 historical
+SKU format classes (A-G) normalized to the canonical `tgwYYYYMMDDHHMMSSs` (18-char)
+format. Two classes look like corruption if you don't know this file exists — Class
+B ("epoch-0", old SKUs literally start `tgw1970...`, real date lost, migration
+best-guesses 2015) and Class E (2-digit-year SKUs actually from 2020, prepend "20").
+A 2026-07-14 stale-catalog investigation that looked like ~8,257 missing ItemData
+folders was 100% explained by these documented classes, not real data loss.
+
+Two open todos, both real and still open:
+- **#1411** (p45) — 149 of 55,419 ItemData folders are still in pre-migration Class
+  A (20-char) SKU format; finish migrating them.
+- **#1412** (p45) — `sku_history` audit table only has 3,305 rows logged, but the
+  migration script's docstring implies ~34k+ renames actually executed (Class A
+  bulk ~26,423 + Class A live-eBay ~8,314). Investigate whether `rename_sku()` was
+  bypassed for the bulk runs, and whether `/opt/TGW/var/log/sku-migrate-*.json`
+  manifests can backfill the missing audit rows.
+
+Before treating any `tgw1970*` or 2-digit-year-prefixed SKU as garbage, check
+`sku_migration.py`'s class table first.
+
+## PP-AGENT-DISCIPLINE-001 — agent role/procedure guardrails made mechanical, not prose — NEW 2026-07-16, orphaned pp_ref backfilled same day
+Born from `INCIDENT-2026-07-16-kdeconnect-clipboard-triage-failure.md`: a session
+skipped the CLAUDE.md startup sequence because the user's first message read as a
+quick question — proof that a written "always run this" instruction still depends
+on the model choosing to comply, and it had already failed. Same-day recurrence
+happened a second time (new session, bare greeting, ran only the thermal check,
+skipped inbox processing) before the fix below existed.
+
+Four pieces built, todo #1444 closed:
+1. **Invariant E10** (`reference/invariants.md`) — flake checkouts across hosts must
+   not silently diverge from `origin/master`. Status ⚠️ not ✅ — a standing periodic
+   detector (cron/systemd-timer, independent of any agent) is the flagged remaining
+   gap, not yet filed as its own todo.
+2. **`.claude/agents/nix-flake-maintainer.md`** — general sysadmin agent for
+   tgw-prod/a1131. Wide standing READ (logs, systemd, process state, SSH, D-Bus),
+   narrow procedure-gated WRITE (git commit/push on the flake, `nixos-rebuild
+   switch`, service restarts). Bakes in mandatory drift-check-both-hosts-first and
+   the `commit-nix-flake` skill's procedure, host-generalized.
+3. **PreToolUse hook** — `.claude/hooks/flake-guard.py` + `.claude/settings.json`.
+   Gates `git commit`/`push` when `tgw-flake` appears in the command, and
+   `nixos-rebuild switch`/`test` unconditionally (`ask`, not a hard block).
+4. **SessionStart hook** — `.claude/hooks/session-start-briefing.py`. Runs
+   automatically before any reply; read-only. Injects the `inbox/claude/` file
+   list, unchecked `SUGGESTIONS.md` count, `tgw plan check`, and capped `tgw plan
+   status`. Removes the judgment call from CLAUDE.md Steps 1/3 entirely — Steps 2/4
+   (actually reading the plan, registering the todo/breadcrumb) still require the
+   model to act on what's surfaced.
+
+**Live-fire not yet confirmed for either hook** — this repo's settings watcher only
+picks up a hooks config that existed when the session started; needs a `/hooks`
+reload or session restart once to prove firing for real.
+
+**Tigwa's Claude-contract cross-verification, 2026-07-16 (read-only, no
+mutation):** confirmed the `nix-flake-maintainer.md` contract and
+`SessionStart` hook wiring/firing are real (hashes recorded in the review).
+Flagged `sudo -u tgw tgw plan check`/`tgw plan status` returning
+`sudo: tgw: command not found` in her test environment — **re-verified
+live in this session, 2026-07-16: both commands run clean** (`tgw plan
+check` → "all clear"; `tgw plan status` → 56 PP-* items), so this
+particular gap does not reproduce here; treat Tigwa's finding as
+environment-specific (PATH/sudoers difference on her host) rather than a
+standing defect, worth a note back to her rather than new work. The other
+finding — flake-guard's PreToolUse matcher covers `Bash` only, not raw
+`Edit`/`Write` on flake files — reconfirmed still open; already tracked as
+#1449/#1450, no new todo needed.
+
+Two open follow-up todos:
+- **#1449** (p50) — extend `flake-guard.py`'s PreToolUse matcher (currently `Bash`
+  only) to also catch raw `Edit`/`Write` on flake files.
+- **#1450** (p50) — evaluate whether Claude Code's `settings.worktree.bgIsolation`
+  harness feature can replace `tgw-coder`'s current 100%-prose worktree isolation.
 
 ## PP-POSTGRES-001 — PostgreSQL item source-of-truth migration — NEW 2026-07-13
 **PROPOSAL — design doc only, nothing built.** Dave, same session as the
@@ -1751,6 +2070,42 @@ worked it for a while." Two distinct asks bundled in one PP:
 
 Not yet packetized — low urgency per Dave's own "I can live with it for a
 bit."
+
+## PP-OPERATOR-QUEUES-001 — saved review-lens queues, browse-page chips
+
+**Todo #1466, reviewed + closed 2026-07-16.** Tigwa built this same-day from a
+3-sentence prompt: `src/tgw/operator_queues.py` (new), `config.py`/`http_server.py`
+diffs (4 endpoints + browse chip strip), `tests/test_operator_queues.py`.
+Two independent reviews filed by Claude, both read-only (no source/config/data
+mutated):
+
+- **Code review — APPROVE-WITH-NITS.** No SQL injection surface (traced full
+  clause/params assembly; column allowlist matches real schema; JSON path
+  validated against `^[A-Za-z_][A-Za-z0-9_]*$`), AI-draft gate real (drafts
+  invisible to `GET /api/operator-queues` until activated), durable (survives
+  a catalog-SQLite rebuild by construction, atomic `mkstemp`+`fsync`+`replace`
+  writes). 3 low-severity nits, none blocking: (1) `source` field is
+  self-declared not authenticated — matches existing app-wide convention
+  (invariant C10), not a new gap; (2) `contains`/LIKE filter doesn't escape
+  literal `%`/`_` — cosmetic, not an injection risk (parameterized binding);
+  (3) a config-fallback branch in `_operator_queue_store()` is dead code in
+  the normal `load_config()` path.
+- **UI review — SHIP-INTERNAL-SLICE, not operator-complete.** Chip
+  placement/interaction mirrors the existing status-chip convention well.
+  Gap: a queue chip and a status chip are visually identical (same `.chip`
+  class) — an operator can't tell "saved review lens" from "status filter"
+  apart from reading the label, which matters because a queue can silently
+  return empty when its underlying condition changes. AI-drafted queues are
+  real in the backend but completely invisible in this UI (no
+  discover/create/edit/activate surface — matches the packet's own stated
+  scope, not an oversight). Recommended next slice: visual distinction from
+  status chips, a "N pending review" badge for drafts, fix the silent
+  fetch-failure pattern (shared with `loadInventoryDiff()`, same bug class
+  Tigwa's field-set-boundary audit flagged separately same day).
+
+Full review docs (superseded by this summary, not separately retained):
+`inbox/claude/CLAUDE-REVIEW-OPERATOR-QUEUES-001-2026-07-16.md`,
+`inbox/claude/CLAUDE-UI-REVIEW-OPERATOR-QUEUES-001-2026-07-16.md`.
 
 ## Session protocol
 
