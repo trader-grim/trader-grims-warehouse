@@ -1977,6 +1977,69 @@ def queue_status() -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/queue/daily_stats — date-scoped per-queue outcome counts
+# (PP-QUEUESTATS-001: queue_status() above is lifetime-cumulative and cannot
+#  answer "how many succeeded/failed TODAY" — this reads queue_daily_stats,
+#  a Postgres view over the append-only queue_job_history ledger, so retried
+#  jobs (which reset queue_jobs.finished_at back to NULL) still count for the
+#  day they actually succeeded/failed. Day boundary is midnight
+#  America/Los_Angeles, matching quota.py's eBay-reset convention.)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/queue/daily_stats", dependencies=[AUTH])
+def queue_daily_stats(date: Optional[str] = None) -> Dict[str, Any]:
+    """Per-queue succeeded/failed counts for one day (default: today, LA tz).
+
+    Also returns a by_hour breakdown per queue — deliberately not collapsed
+    to a single number, so this can serve as the baseline data source for
+    future per-queue surge/anomaly detection (not built yet, out of scope
+    for this endpoint) without a schema/API change later.
+    """
+    if date:
+        try:
+            stat_date = datetime.strptime(date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+    else:
+        stat_date = datetime.now(_DISPLAY_TZ).date()
+
+    try:
+        with psycopg2.connect(_cfg["postgres_dsn"]) as con:
+            with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT queue_name, stat_hour, state, job_count
+                      FROM queue_daily_stats
+                     WHERE stat_date = %s
+                     ORDER BY queue_name, stat_hour
+                    """,
+                    (stat_date,),
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"postgres error: {e}")
+
+    by_queue: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        q = row["queue_name"]
+        entry = by_queue.setdefault(q, {"succeeded": 0, "failed": 0, "dead_letter": 0, "by_hour": []})
+        state = row["state"]
+        count = int(row["job_count"])
+        if state in ("succeeded", "failed", "dead_letter"):
+            entry[state] += count
+        entry["by_hour"].append(
+            {
+                "hour": row["stat_hour"].isoformat() if row["stat_hour"] else None,
+                "state": state,
+                "count": count,
+            }
+        )
+
+    return {"ok": True, "date": stat_date.isoformat(), "tz": "America/Los_Angeles", "queues": by_queue}
+
+
+# ---------------------------------------------------------------------------
 # GET /api/migrate/blocked — items blocked in SKU migration (need human review)
 # ---------------------------------------------------------------------------
 
@@ -8554,32 +8617,42 @@ function fmtAge(iso) {{
   return Math.floor(s/86400) + 'd ago';
 }}
 
-function renderQueues(data) {{
+function renderQueues(data, daily) {{
   var el = document.getElementById('queue-table');
   if (!data || !data.ok) {{
     el.innerHTML = '<div class="err-box">Failed to load queue status.</div>';
     return;
   }}
   var queues = data.queues || {{}};
+  var dailyQueues = (daily && daily.ok) ? (daily.queues || {{}}) : {{}};
+  var dailyOk = !!(daily && daily.ok);
   var names = Object.keys(queues).sort();
   if (names.length === 0) {{
     el.innerHTML = '<div class="empty-state">No queue activity.</div>';
     return;
   }}
   var html = '<table class="pl-table"><tr>' +
-    '<th>Queue</th><th>Pending</th><th>Running</th><th>Done today</th><th>Failed/DL</th></tr>';
+    '<th>Queue</th><th>Pending</th><th>Running</th>' +
+    '<th title="Succeeded today (' + (dailyOk ? escapeHtml(daily.date + ' ' + daily.tz) : 'date-scoped') +
+      '), from queue_daily_stats">Done today</th>' +
+    '<th title="Failed or dead-lettered today (' + (dailyOk ? escapeHtml(daily.date + ' ' + daily.tz) : 'date-scoped') +
+      '), from queue_daily_stats">Failed today</th>' +
+    '<th title="Lifetime dead-letter backlog awaiting review (queue_jobs, not date-scoped)">DL backlog</th></tr>';
   names.forEach(function(q) {{
     var s = queues[q] || {{}};
+    var d = dailyQueues[q] || {{succeeded: 0, failed: 0, dead_letter: 0}};
     var pending = (s.queued || 0) + (s.leased || 0) + (s.retry_wait || 0);
     var running = s.running || 0;
-    var done = s.succeeded || 0;
-    var dead = (s.dead_letter || 0) + (s.failed || 0);
+    var doneToday = dailyOk ? (d.succeeded || 0) : null;
+    var failedToday = dailyOk ? ((d.failed || 0) + (d.dead_letter || 0)) : null;
+    var dlBacklog = s.dead_letter || 0;
     html += '<tr>' +
       '<td class="qname">' + escapeHtml(q) + '</td>' +
       numCell(pending || null, 'n-queued') +
       numCell(running || null, 'n-run') +
-      numCell(done || null, 'n-done') +
-      numCell(dead || null, 'n-dead') +
+      (dailyOk ? numCell(doneToday || null, 'n-done') : '<td class="n-zero">?</td>') +
+      (dailyOk ? numCell(failedToday || null, 'n-dead') : '<td class="n-zero">?</td>') +
+      numCell(dlBacklog || null, 'n-dead') +
       '</tr>';
   }});
   html += '</table>';
@@ -8713,10 +8786,18 @@ async function cancelJob(jobId, flashId) {{
 
 async function loadAll() {{
   startCountdown();
-  // Queue depths
+  // Queue depths (current state) + daily outcome stats (date-scoped)
   try {{
     var r = await fetch('/api/queue/status', {{headers: authHeaders()}});
-    renderQueues(await r.json());
+    var statusData = await r.json();
+    var dailyData = null;
+    try {{
+      var rd = await fetch('/api/queue/daily_stats', {{headers: authHeaders()}});
+      dailyData = await rd.json();
+    }} catch(e2) {{
+      dailyData = null;
+    }}
+    renderQueues(statusData, dailyData);
   }} catch(e) {{
     document.getElementById('queue-table').innerHTML =
       '<div class="err-box">Network error: ' + escapeHtml(String(e)) + '</div>';

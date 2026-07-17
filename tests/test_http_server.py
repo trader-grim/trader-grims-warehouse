@@ -268,6 +268,94 @@ def client(env):
 
 
 # ---------------------------------------------------------------------------
+# GET /api/queue/daily_stats — PP-QUEUESTATS-001 date-scoped daily stats
+# ---------------------------------------------------------------------------
+
+
+def test_queue_daily_stats_requires_auth(client):
+    r = client.get("/api/queue/daily_stats")
+    assert r.status_code in (401, 403)
+
+
+def test_queue_daily_stats_rejects_bad_date(client):
+    r = client.get("/api/queue/daily_stats", params={"date": "not-a-date"},
+                    headers=AUTH_HEADERS)
+    assert r.status_code == 400
+
+
+def test_queue_daily_stats_returns_date_scoped_per_queue_counts(client, queue_rows):
+    import datetime as _dt
+
+    hour = _dt.datetime(2026, 7, 17, 9, 0, 0)
+    queue_rows.extend([
+        {"queue_name": "ebay_upload", "stat_hour": hour, "state": "succeeded", "job_count": 12},
+        {"queue_name": "ebay_upload", "stat_hour": hour, "state": "failed", "job_count": 1},
+        {"queue_name": "ebay_upload", "stat_hour": hour, "state": "dead_letter", "job_count": 2},
+        {"queue_name": "ebay_draft", "stat_hour": hour, "state": "succeeded", "job_count": 5},
+    ])
+    r = client.get("/api/queue/daily_stats", params={"date": "2026-07-17"},
+                    headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is True
+    assert data["date"] == "2026-07-17"
+    assert data["tz"] == "America/Los_Angeles"
+    assert data["queues"]["ebay_upload"]["succeeded"] == 12
+    assert data["queues"]["ebay_upload"]["failed"] == 1
+    assert data["queues"]["ebay_upload"]["dead_letter"] == 2
+    # Per-hour breakdown is kept, not collapsed — groundwork for future
+    # surge/anomaly detection per PP-QUEUESTATS-001.
+    assert len(data["queues"]["ebay_upload"]["by_hour"]) == 3
+    assert data["queues"]["ebay_draft"]["succeeded"] == 5
+    assert data["queues"]["ebay_draft"]["failed"] == 0
+
+
+def test_queue_daily_stats_defaults_to_today_when_no_date_given(client, queue_rows, monkeypatch):
+    captured = {}
+
+    class _CapturingCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, sql, params=None):
+            captured["params"] = params
+
+        def fetchall(self):
+            return []
+
+    class _CapturingConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def cursor(self, *a, **k):
+            return _CapturingCursor()
+
+    monkeypatch.setattr(http_server.psycopg2, "connect", lambda *a, **k: _CapturingConn())
+    r = client.get("/api/queue/daily_stats", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    assert captured["params"][0] == http_server.datetime.now(http_server._DISPLAY_TZ).date()
+
+
+def test_pipeline_page_shows_date_scoped_column_labels(client):
+    """The old 'Done today'/'Failed/DL' pairing collapsed a lifetime count
+    under a daily label (PP-QUEUESTATS-001). The rebuilt page must be
+    explicit about which columns are date-scoped vs. lifetime."""
+    _login(client)
+    r = client.get("/form/pipeline")
+    assert r.status_code == 200
+    assert "Done today" in r.text
+    assert "Failed today" in r.text
+    assert "DL backlog" in r.text
+    assert "/api/queue/daily_stats" in r.text
+
+
+# ---------------------------------------------------------------------------
 # Auth (HTTPBearer) — bad/missing token
 # ---------------------------------------------------------------------------
 

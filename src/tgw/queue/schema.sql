@@ -168,6 +168,34 @@ SELECT h.history_id, h.job_id,
   FROM queue_job_history h
   JOIN queue_jobs j USING (job_id);
 
+-- PP-QUEUESTATS-001: real date-scoped per-queue outcome stats, sourced from
+-- queue_job_history (an append-only, never-reset ledger of every state
+-- transition — unlike queue_jobs.finished_at, which requeue_with_backoff()
+-- clears back to NULL on retry, so it cannot answer "how many succeeded
+-- *today*" once a job has been retried). Day boundary is midnight
+-- America/Los_Angeles, matching quota.py's existing eBay-reset convention.
+-- Grouped by hour (not collapsed to a single daily number) so this can serve
+-- as the baseline data for future per-queue surge/anomaly detection
+-- (Dave, 2026-07-14) without a schema change when that's built — see
+-- TGW-Master-Plan.md PP-QUEUESTATS-001. Only terminal-ish outcome states
+-- (succeeded/failed/dead_letter) are counted; queued/leased/running/
+-- retry_wait are current-state counts (queue_status()), not historical
+-- events, and stay out of this view on purpose.
+CREATE INDEX IF NOT EXISTS idx_queue_job_history_created_at
+    ON queue_job_history (created_at);
+
+CREATE OR REPLACE VIEW queue_daily_stats AS
+SELECT
+    j.queue_name,
+    (h.created_at AT TIME ZONE 'America/Los_Angeles')::date            AS stat_date,
+    date_trunc('hour', h.created_at AT TIME ZONE 'America/Los_Angeles') AS stat_hour,
+    h.new_state                                                         AS state,
+    COUNT(*)::bigint                                                    AS job_count
+  FROM queue_job_history h
+  JOIN queue_jobs j ON j.job_id = h.job_id
+ WHERE h.new_state IN ('succeeded', 'failed', 'dead_letter')
+ GROUP BY j.queue_name, stat_date, stat_hour, h.new_state;
+
 -- Claim next runnable jobs using FOR UPDATE SKIP LOCKED.
 CREATE OR REPLACE FUNCTION claim_queue_jobs(
     p_worker_id TEXT,
