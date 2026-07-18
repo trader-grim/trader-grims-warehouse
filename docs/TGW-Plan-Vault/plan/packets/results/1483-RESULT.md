@@ -1,87 +1,102 @@
-# Result: 1483 PP-UIUX-001 Phase 1 UI inventory + tgw-mapping
+# Result: todo #1483 PP-UIUX-001 Phase 1 UI inventory + tgw-mapping (re-check)
 Status: done
 Todo: #1483   PP: PP-UIUX-001
 
+## Pre-flight finding (important — read before treating this as fresh work)
+
+This exact packet was **already executed once**, live, directly on
+`catio-nix-0.0.1-alpha` — commit `4bf044c` ("PP-UIUX-001 Phase 1 (#1483):
+live UI inventory + tgw-mapping, refresh TGW-HTTP-API.md", 2026-07-17),
+with its own result manifest already present at this same path. The todo
+itself was still open in the tracker (no `--done`), so this dispatch
+re-ran the same packet rather than being a duplicate no-op. Per invariant
+C11 (verify assumptions live before changing anything), I diffed the
+existing 2026-07-17 doc against the live route table instead of assuming
+it was current, and found real drift: **4 routes landed in the ~1 day
+between the first pass and this one**, after `4bf044c` closed but before
+today. This result documents the incremental re-check, not a from-scratch
+rebuild — the bulk of the prior pass's content (79-route inventory,
+Flutter screen mapping, `/form/review` redirect finding, etc.) is still
+accurate and was left as-is.
+
 Files touched:
-- `docs/TGW-Plan-Vault/reference/TGW-HTTP-API.md` (rewritten — see below)
-- `docs/TGW-Plan-Vault/reference/UI-Inventory-PP-UIUX-001.md` (new — the
-  Phase 1 UI-surface inventory artifact)
-- `docs/TGW-Plan-Vault/inbox/claude/INPROGRESS-1483-uiux-inventory.md`
-  (breadcrumb, to be processed/deleted by the next session-start pass)
+- `docs/TGW-Plan-Vault/reference/TGW-HTTP-API.md` (updated, not rewritten)
+- `docs/TGW-Plan-Vault/reference/UI-Inventory-PP-UIUX-001.md` (updated, not rewritten)
+- `docs/TGW-Plan-Vault/inbox/claude/INPROGRESS-1483-ui-inventory.md` (breadcrumb)
 
 No code files touched — documentation-only task per packet scope.
 
-## What changed in TGW-HTTP-API.md
-Live-verified against the actual `@app.get/post/patch/delete` route
-table in `src/tgw/http_server.py` (79 routes total as of 2026-07-17;
-prior doc, dated 2026-06-04, documented 14). Concretely:
-- Added full endpoint tables for all previously-undocumented routes:
-  bulk (`/api/bulk/*`), queue/jobs/pipeline, system (`/api/system/*`,
-  `/api/health`), full eBay category API surface, catalog/reference data
-  (`/api/catalog/snapshot`, `/api/dashboard`, `/api/activity`), offers
-  (`/api/offers*`), PM chat (`/api/pm/*`), suggest/inbox, auth/media, and
-  the remaining 15 `/form/*` pages beyond the two previously documented.
-- Corrected the `POST /api/items/{sku}/action` valid-action list — the
-  old doc listed 8 actions; the live `PIPELINE_ACTIONS` set (line 143)
-  has 15. 7 were undocumented: `ebay_end_listing`, `ebay_update`,
-  `accept_proposals`, `dismiss_proposals`, `approve`, `archive`,
-  `migrate_unblock`.
-- Documented that `/form/review` is a pure 303 redirect to `/form/drafts`
-  (back-compat alias), not a real page — the old doc didn't mention this
-  route existing at all under either name.
-- Clarified the "no Bearer auth" language used throughout the
-  `/form/*` docstrings actually means session-cookie auth via `/login`,
-  not no auth.
-- Nothing previously documented was found to have been *removed* —
-  staleness was 100% coverage gap, not incorrect-claim drift.
+## Discrepancies found (live route-table diff, 83 routes vs. 79 documented)
 
-## New inventory artifact
-`UI-Inventory-PP-UIUX-001.md` — full page-by-page (17 web `/form/*`
-pages) and screen-by-screen (7 Flutter screens in `apps/tgw_app/`)
-inventory, each mapped to the exact `/api/*` endpoints it calls, derived
-by grepping the actual embedded-JS `fetch()` calls per page template and
-the Flutter `api_client.dart`/`repository.dart`/`providers.dart` call
-chains — not from docstrings or intent, per invariant C11.
+Systematic check: extracted every `@app.get/post/patch/delete` decorator
+from `src/tgw/http_server.py` (83 total, confirmed via
+`grep -n '@app\.\(get\|post\|patch\|delete\)'`), then checked each path
+string's presence in the existing `TGW-HTTP-API.md`. 4 were missing, all
+traced to commits that landed *after* `4bf044c` (the first Phase 1 pass)
+but before this re-check:
 
-**Correction to standing session memory:** prior notes described
-"android/ scaffold exists, never built" as if that were the whole
-Flutter story. Live-verified this pass: `apps/android/` +
-`apps/lib/main.dart` IS an unbuilt default `flutter create` stub (zero
-real screens) — but `apps/tgw_app/` is a **separate, real** Flutter
-project with 7 built feature screens, offline SQLite cache, an
-outbox/mutation queue, and a Riverpod provider layer, last touched
-2026-06-29. This distinction was not previously called out and is now
-recorded in the new inventory doc for future PP-UIUX-001 phases.
+1. **`GET /api/queue/daily_stats`** — per-queue succeeded/failed counts
+   for one day + hourly breakdown; backs `/form/system`'s "Done
+   today"/"Failed today" columns (`http_server.py:8994` fetch call,
+   confirmed).
+2. **`GET /form/search`** and **`GET /api/search/full-text`** (todo
+   #1147, PP-KNOWLEDGE-001 R2, commit `70b3b44`) — recoll full-text
+   search, web bar + JSON endpoint + `tgw search --full-text` CLI, all
+   three sharing `tgw.search_full.run_full_text_search()`. `/form/search`
+   is notably no-auth (network trust) like `/form/todos`/`/form/intake`,
+   NOT session-cookie-gated like most `/form/*` pages — documented this
+   distinction explicitly since the old doc implied uniform cookie gating.
+3. **`POST /api/items/{sku}/inventory-lock`** (Dave, 2026-07-18 padlock
+   design) — toggles whether one `item_attributes` key auto-syncs from
+   the eBay draft; called from `/form/items/{sku}`'s embedded JS
+   (`toggleInventoryLock()`, confirmed at `http_server.py:6997`); notable
+   because it deliberately bypasses `item_attributes_history`, unlike
+   every other Set A write path — documented that distinction too.
+
+No route found to have been *removed* — same pattern as the first pass,
+100% coverage-gap staleness, zero incorrect-claim staleness. Also
+corrected the stale "19 of **79**" Flutter-parity-gap total to "19 of
+**83**" and added the newly-confirmed-uncalled-by-Flutter endpoints
+(`inventory-lock`, `daily_stats`, `search/full-text`) to that gap list.
+
+No Flutter caller found for any of the 4 new routes (`grep -rn` across
+`apps/tgw_app/lib` came back empty for all 4 path fragments) — consistent
+with the existing Phase 2/3 parity-gap note, not a new finding requiring
+its own todo.
 
 ## Live evidence
-- Route-table completeness check (script output): "79 routes in code" /
-  "1 not found verbatim in doc" — the one miss was a formatting-only
-  false negative (`/docs/{path:path}` vs the doc's `/docs, /docs/{path}`
-  combined-row phrasing); manually confirmed present.
-- `PIPELINE_ACTIONS` set read directly from `src/tgw/http_server.py:143-158`
-  (15 entries) vs. the pre-existing doc's 8-entry list — diff is the 7
-  actions now documented.
-- `apps/tgw_app/pubspec.yaml` (`name: tgw_app`) vs `apps/pubspec.yaml`
-  (`name: apps`, `description: "A new Flutter project."`) — confirmed
-  two distinct Flutter projects live in the repo, only one real.
-- `find apps/android -iname "*.dart" | wc -l` → 0; `find apps/tgw_app
-  -iname "*.dart"` → 17 files including 7 real feature screens —
-  confirmed live during this session.
-- `grep -rn "sku}/append\|ebay-write" src/tgw` → both trace to
-  `src/tgw/apis/fence.py` (`append_item()`/`ebay_write()`), the
-  worker-facing fence client, not orphaned UI-less routes.
+- `grep -n '@app\.\(get\|post\|patch\|delete\)' src/tgw/http_server.py | wc -l` → 83
+  (vs. 79 the existing doc's Overview claimed).
+- Python cross-check script comparing all 83 extracted route paths
+  against `TGW-HTTP-API.md`'s text: 1 miss, `/docs/{path:path}` — same
+  known false-negative as the first pass (doc phrases it as a combined
+  `/docs, /docs/{path}` row); manually confirmed present, not a real gap.
+- `git log --oneline 4bf044c..HEAD -- src/tgw/http_server.py apps/tgw_app/`
+  → 5 commits since the first pass; 3 touch `http_server.py` meaningfully
+  (`70b3b44` search, `89634e3`/`9e7d5eb`/`4380ca2` C14 fixes to existing
+  endpoints, no new routes from those three); `apps/tgw_app/` untouched
+  since 2026-06-29 (`git log -1 --format=%cd`), confirming the Flutter
+  side of the doc needed no changes this pass.
+- `grep -n "padlock\|inventory-lock" src/tgw/http_server.py` — confirmed
+  both the route (`:2731`) and its sole caller
+  (`toggleInventoryLock()` JS at `:6997`) live in source.
+- `grep -n "daily_stats" src/tgw/http_server.py` — confirmed route
+  (`:2091`) and its `/form/system` JS caller (`:8994`).
 
 ## Deviations from spec
-None. Followed the todo body's 4 steps as given (web UI enumeration →
-Flutter screen enumeration, with an honest correction of what's real vs.
-scaffold → API mapping via live fetch()/api_client grep → doc refresh).
-Scoped strictly to Phase 1 (inventory/documentation); did not attempt to
-redesign, unify, or fix any UI/API mismatch found (e.g. the Flutter app
-covering only 19 of 79 routes) — noted in the new doc as a Phase 2/3
-input, not actioned here.
+None — followed the same 4-step process the original packet specified
+(web UI enumeration, Flutter enumeration, endpoint mapping, doc refresh),
+applied as an incremental re-verification given the packet had already
+been executed once. Did not rewrite either doc from scratch since the
+bulk of the 2026-07-17 content was still accurate; only added/corrected
+what live-diffing found stale, per invariant C11 ("verify assumptions
+live" — not "regenerate everything regardless of what changed").
 
 ## Out-of-scope findings filed
-None. The one candidate finding (possible orphan endpoints
-`/api/items/{sku}/append` and `/api/items/{sku}/ebay-write`) was
-resolved live within this same pass — both trace to
-`apis/fence.py`'s worker-write client, not orphans, no todo needed.
+None new. Confirmed the prior pass's one open question (whether
+`/api/items/{sku}/append`/`/api/items/{sku}/ebay-write` are orphaned UI
+endpoints) is still correctly resolved as "no, internal `apis/fence.py`
+worker path" — no change needed there. The "Flutter has no caller yet
+for 19+ endpoints including the newly-found ones" observation is
+Phase 2/3 design input per the existing parity note, not a new
+actionable finding on its own.

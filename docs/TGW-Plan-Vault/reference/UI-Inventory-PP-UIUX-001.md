@@ -3,7 +3,7 @@ title: UI Inventory — PP-UIUX-001 Phase 1
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 3
-updated: 2026-07-17
+updated: 2026-07-18
 ---
 
 # UI Inventory — PP-UIUX-001 Phase 1
@@ -16,19 +16,37 @@ current codebase (invariant C11 — no trusting old doc claims). See
 (Phase 2: unified spec; Phase 3: hand to a UI/UX-specialist executor
 role, not yet defined).
 
+**Re-checked 2026-07-18 (same todo #1483, same-day drift found):** the
+route table grew from 79 to 83 in the ~1 day between the first pass and
+this re-check — 4 routes (`/form/search`, `/api/search/full-text`,
+`/api/queue/daily_stats`, `/api/items/{sku}/inventory-lock`) landed after
+the first pass closed but before this doc was re-verified. Added below;
+see `TGW-HTTP-API.md`'s "2026-07-18 gaps found" note for the full list.
+This is the exact staleness pattern PP-UIUX-001 exists to catch — a
+one-time inventory pass goes stale again as soon as the next commit
+lands; there is no live-sync mechanism, this is a point-in-time snapshot
+re-verified on demand.
+
 Companion doc: `reference/TGW-HTTP-API.md` (endpoint reference, refreshed
 in the same pass). This doc is the UI-surface-centric view; that one is
 the endpoint-centric view.
 
 ## 1. Web UI — `tgw-http`, `src/tgw/http_server.py`
 
-All 17 pages below are server-rendered HTML with embedded JS (except
+18 pages total (17 as of the 2026-07-17 pass, `/form/search` added
+2026-07-18). All are server-rendered HTML with embedded JS except
 `/form/links`, `/form/todos`, `/form/history/{sku_old}`, `/form/suggest`,
-which are static/no-JS). Gated by session cookie (`/login`), not Bearer
-— the embedded JS holds/injects the API key itself for its own `fetch()`
-calls to `/api/*`. Route table + backing HTML template/function
-identified by reading `src/tgw/http_server.py` directly (route line
-numbers as of 2026-07-17; will drift as the file is edited further).
+and `/form/search`, which are static/no-JS (`/form/search` submits a
+plain GET form, results render server-side). Most pages are gated by
+session cookie (`/login`), not Bearer — the embedded JS holds/injects the
+API key itself for its own `fetch()` calls to `/api/*`. **Not all
+`/form/*` pages are cookie-gated** — `/form/search`, `/form/todos`,
+`/form/intake`, `/form/intake/{sku}`, `/form/bulk`,
+`/form/history/{sku_old}`, `/form/suggest` are explicitly no-auth
+("network trust" per their own docstrings). Route table + backing HTML
+template/function identified by reading `src/tgw/http_server.py` directly
+(route line numbers as of 2026-07-18; will drift as the file is edited
+further).
 
 | Page | Route → template | Backend calls (live-grepped from embedded JS) |
 |---|---|---|
@@ -36,17 +54,18 @@ numbers as of 2026-07-17; will drift as the file is edited further).
 | Intake form | `/form/intake/{sku}` → `_INTAKE_FORM_HTML` | `GET /api/items/{sku}`, `POST /api/items/{sku}/set-template`, `PATCH /api/items/{sku}` |
 | Bulk editor | `/form/bulk` → `_BULK_FORM_HTML` | `POST /api/bulk/preview`, `POST /api/bulk/apply` |
 | Todos dashboard | `/form/todos` → `_render_todos_html()` | none — server-rendered from `tgw todo` data at request time, no client JS |
+| Full-text search | `/form/search` → `_render_search_html()` | none client-side — server-rendered GET form (`?q=`), calls `tgw.search_full.run_full_text_search()` directly in-process (same recoll query as `GET /api/search/full-text` and `tgw search --full-text`); no-auth, network trust |
 | History lookup | `/form/history/{sku_old}` | none — server-rendered lookup, no client JS |
 | Suggest (plain) | `/form/suggest` (GET/POST) → `_render_suggest_html()` | none — plain HTML form POST to itself (`cmd_suggest()`), not a JS fetch |
 | Inventory browse | `/form/items` → `_BROWSE_HTML` | `GET /api/items?...`, `POST /api/items/{sku}/action`, `POST /api/bulk/action` |
-| Item detail | `/form/items/{sku}` → `_render_item_detail_html()` | `GET /api/items/{sku}`, `GET /api/jobs/...` requeue, `PATCH /api/items/{sku}`, `POST /api/items/{sku}/action`, `POST /api/items/{sku}/photo-order`, `GET/POST /api/items/{sku}/inventory-diff[/apply]`, `POST /api/items/{sku}/category-aspect-migration/apply`, `POST /api/items/{sku}/remove-comp`, `GET /api/offers` (badge count) |
+| Item detail | `/form/items/{sku}` → `_render_item_detail_html()` | `GET /api/items/{sku}`, `GET /api/jobs/...` requeue, `PATCH /api/items/{sku}`, `POST /api/items/{sku}/action`, `POST /api/items/{sku}/photo-order`, `GET/POST /api/items/{sku}/inventory-diff[/apply]`, `POST /api/items/{sku}/inventory-lock` (padlock toggle, added 2026-07-18), `POST /api/items/{sku}/category-aspect-migration/apply`, `POST /api/items/{sku}/remove-comp`, `GET /api/offers` (badge count) |
 | Offers | `/form/offers` → `_OFFERS_HTML` | `GET /api/offers`, `POST /api/offers/{offer_id}/respond`, `GET /api/offers/limits` |
 | Revisions | `/form/revisions` → `_REVISIONS_HTML` | `GET /api/items/pending-revision`, `POST /api/items/{sku}/revision/apply`, `DELETE /api/items/{sku}/revision` |
 | Drafts (real page) | `/form/drafts` → `_REVIEW_HTML` | `GET /api/items/review-queue`, item PATCH/action calls |
 | Review (redirect) | `/form/review` | 303 redirect to `/form/drafts` only — **not a real page**, back-compat alias from an earlier rename |
 | Needs-review | `/form/needs-review` → `_NEEDS_REVIEW_HTML` | `GET /api/review` |
 | Pipeline monitor | `/form/pipeline` → `_PIPELINE_HTML` | `GET /api/pipeline/jobs`, `GET /api/queue/status`, `GET /api/system/workers`, `POST /api/jobs/{job_id}/requeue`, `POST /api/jobs/{job_id}/cancel` |
-| System health | `/form/system` → `_SYSTEM_HTML` | `GET /api/health`, `GET /api/system/info`, `GET /api/system/workers`, `POST /api/system/workers/{unit}/restart` |
+| System health | `/form/system` → `_SYSTEM_HTML` | `GET /api/health`, `GET /api/system/info`, `GET /api/system/workers`, `POST /api/system/workers/{unit}/restart`, `GET /api/queue/daily_stats` (Done today/Failed today columns, added 2026-07-18) |
 | Home dashboard | `/form/home` → `_HOME_HTML` | `GET /api/dashboard`, `GET /api/activity`, `GET /api/health`, `POST /api/pm/chat`, `POST /api/pm/action` |
 | Links hub | `/form/links` → `_LINKS_HTML` | none — static external-link list, no API calls |
 
@@ -74,6 +93,13 @@ route): posts to `POST /api/suggest`.
   caller) the internal `apis/fence.py` client used by workers
   (`append_item()`/`ebay_write()`) — not orphans, just not
   UI-facing at all. No todo needed for these two.
+- **2026-07-18 re-check: 4 more routes landed same-day, post-Phase-1**
+  (`/form/search`, `/api/search/full-text`, `/api/queue/daily_stats`,
+  `/api/items/{sku}/inventory-lock`) — total live route count is now 83,
+  not 79. All 4 traced to a real caller (web page or, for
+  `/api/search/full-text`, "no Flutter caller yet" — noted, not a bug).
+  Confirms the note above: this doc is a point-in-time snapshot, not a
+  live-synced artifact — expect the same drift again next re-check.
 
 ## 2. Flutter app
 
@@ -129,12 +155,13 @@ block).
 
 ### Web vs Flutter parity note (for PP-UIUX-001 Phase 2/3)
 
-Flutter's `api_client.dart` covers 19 of the 79 total routes — a subset
+Flutter's `api_client.dart` covers 19 of the 83 total routes — a subset
 of what the web UI's item-detail/browse/pipeline pages call
 (e.g. no Flutter caller found yet for `/api/items/{sku}/inventory-diff`,
-`/api/items/{sku}/photo-order`, `/api/items/{sku}/category-aspect-migration`,
-`/api/offers*`, `/api/system/*`, `/api/dashboard`, `/api/activity`,
-`/api/pm/*`). This is expected for a mobile-first subset app, not
+`/api/items/{sku}/inventory-lock`, `/api/items/{sku}/photo-order`,
+`/api/items/{sku}/category-aspect-migration`, `/api/offers*`,
+`/api/system/*`, `/api/dashboard`, `/api/activity`, `/api/pm/*`,
+`/api/queue/daily_stats`, `/api/search/full-text`). This is expected for a mobile-first subset app, not
 necessarily a gap — but it is exactly the kind of divergence Phase 2's
 "one complete spec covering both surfaces" needs to resolve deliberately
 rather than by accretion. Not actioned in this Phase 1 pass per scope.

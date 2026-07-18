@@ -3,7 +3,7 @@ title: TGW HTTP API (tgw-http)
 markmap:
   colorFreezeLevel: 2
   initialExpandLevel: 3
-updated: 2026-07-17
+updated: 2026-07-18
 ---
 
 # TGW HTTP API
@@ -14,20 +14,44 @@ updated: 2026-07-17
   `dependencies=[AUTH]`); `/form/*` pages use a session cookie instead
   (`_SESSION_COOKIE`, set via `/login`) — "no Bearer auth" on a `/form/*`
   page means no `Authorization` header, not no auth at all; the session
-  middleware still redirects unauthenticated hits on `/form/*` to `/login`
+  middleware still redirects unauthenticated hits on `/form/*` to `/login`.
+  **Exception:** `/form/search`, `/form/todos`, `/form/intake`,
+  `/form/intake/{sku}`, `/form/bulk`, `/form/history/{sku_old}`,
+  `/form/suggest` are explicitly no-auth ("network trust", per their own
+  docstrings) — not session-cookie-gated either. Don't assume every
+  `/form/*` path is behind `/login`; check the individual route.
 - Key: `secrets_root/tgw-api-key.json → api_key`
 - All `/api/*` responses: `{"ok": true, ...}` (error responses: FastAPI's
   standard `{"detail": "..."}` + non-2xx status)
-- Source: `src/tgw/http_server.py` (9,940 lines as of 2026-07-17 — one file,
-  route table + embedded HTML/JS templates)
-- **This pass (PP-UIUX-001 Phase 1, 2026-07-17) is a live-verified refresh** —
-  every endpoint below was confirmed against the actual `@app.get/post/patch/
-  delete` decorator table in the running source, not against the prior
-  version of this doc. The 2026-06-04 version documented 14 of the (now) 79
-  routes; nothing documented then had been *removed* — the gap was entirely
-  routes added since without a doc update. See
-  `reference/UI-Inventory-PP-UIUX-001.md` for the full UI-surface → endpoint
-  mapping this pass also produced.
+- Source: `src/tgw/http_server.py` (one file, route table + embedded
+  HTML/JS templates)
+- **This pass (PP-UIUX-001 Phase 1, 2026-07-17, re-verified 2026-07-18) is
+  a live-verified refresh** — every endpoint below was confirmed against
+  the actual `@app.get/post/patch/delete` decorator table in the running
+  source, not against the prior version of this doc. The 2026-06-04
+  version documented 14 routes; the 2026-07-17 pass brought that to 79;
+  this 2026-07-18 re-check found the live route table had grown to **83**
+  in the interim (4 routes landed same-day, after the first Phase 1 pass,
+  before this doc caught up — see "2026-07-18 gaps found" below).
+  Nothing documented has ever been found *removed* — all staleness so far
+  has been coverage gaps from routes added without a doc update. See
+  `reference/UI-Inventory-PP-UIUX-001.md` for the full UI-surface →
+  endpoint mapping this pass also produced/updated.
+
+### 2026-07-18 gaps found (todo #1483 re-check)
+Four routes existed in `src/tgw/http_server.py` but were absent from the
+2026-07-17 version of this doc — all four landed in commits after the
+first Phase 1 pass closed (`70b3b44` full-text search, then the 2026-07-18
+padlock-lock commits):
+- `GET /api/queue/daily_stats` — per-queue succeeded/failed counts for one
+  day (default today, LA tz), plus an `by_hour` breakdown; backs the
+  "Done today" / "Failed today" columns on `/form/system`.
+- `GET /form/search` + `GET /api/search/full-text` — recoll full-text
+  search (PP-KNOWLEDGE-001 R2, todo #1147); see **Search** section below.
+- `POST /api/items/{sku}/inventory-lock` — the padlock toggle (Dave,
+  2026-07-18 design) that marks one `item_attributes` key as no-longer-
+  auto-synced from the eBay draft; called from `/form/items/{sku}`'s
+  embedded JS (`toggleInventoryLock()`).
 
 ## Endpoints
 
@@ -49,6 +73,7 @@ updated: 2026-07-17
 | POST | `/api/items/{sku}/set-template` | Apply a category-group template (PP-INTAKE-001 P2); body `{"template_key": "..."}`; writes `category_group`/`size_class`/`ai_hint`/`ebay_category_id`; 400 on unknown key |
 | POST | `/api/items/{sku}/photo-order` | Persist operator-set photo display order |
 | GET | `/api/items/{sku}/inventory-diff` | Diff between `item_attributes` (Set A) and `draft_listing.item_specifics` (Set B) — PP-FIELDCOMPLETE-001/field-set-boundary work |
+| POST | `/api/items/{sku}/inventory-lock` | Toggle whether one `item_attributes` key auto-syncs from the eBay draft (padlock, Dave 2026-07-18 design); body `{key, locked}`; metadata-only write, deliberately bypasses `item_attributes_history` (unlike every other Set A write path) |
 | POST | `/api/items/{sku}/inventory-diff/apply` | Apply an inventory-diff resolution (the "+ Add to listing" action, #1475) |
 | GET | `/api/items/{sku}/category-aspect-migration` | Preview an eBay-category-change aspect remap |
 | POST | `/api/items/{sku}/category-aspect-migration/apply` | Apply the aspect remap |
@@ -97,6 +122,7 @@ error.
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/queue/status` | Job counts per queue+state (PostgreSQL `queue_jobs`); states: `queued`, `claimed`, `succeeded`, `failed`, `retry_wait`, `dead_letter` |
+| GET | `/api/queue/daily_stats` | Per-queue succeeded/failed counts for one day (`?date=YYYYMMDD`, default today, America/Los_Angeles); includes an `by_hour` breakdown per queue (unused today, reserved for future surge/anomaly detection); backs `/form/system`'s "Done today"/"Failed today" columns |
 | GET | `/api/pipeline/jobs` | Recent job rows across all queues (feeds `/form/pipeline` dead-letter manager + Flutter's pipeline job sheet) |
 | POST | `/api/jobs/{job_id}/requeue` | Re-enqueue a dead-lettered/failed job with a fresh dedupe key |
 | POST | `/api/jobs/{job_id}/cancel` | Cancel a queued/claimed job |
@@ -133,6 +159,16 @@ error.
 | GET | `/api/dashboard` | Home-dashboard summary (health strip, action cards) — backs `/form/home` |
 | GET | `/api/activity` | Recent activity feed — backs `/form/home` |
 
+### Search — `/form/search`, `/api/search/full-text`
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/form/search` | Server-rendered recoll full-text search bar over the whole knowledge index (`?q=...`, bookmarkable, no JS required); no-auth (network trust), not session-cookie-gated |
+| GET | `/api/search/full-text` | Same recoll query (`tgw.search_full.run_full_text_search()`) as JSON — `?q=`, `?limit=` (default 20); for programmatic/tablet-app callers (no Flutter caller found yet, see UI-Inventory doc); Bearer-auth-gated like the rest of `/api/*`, unlike its `/form/search` sibling |
+
+Both share `tgw search --full-text` as the CLI equivalent (PP-KNOWLEDGE-001
+R2, todo #1147).
+
 ### Offers — `/api/offers*`
 
 | Method | Path | Purpose |
@@ -167,8 +203,8 @@ error.
 ### Forms — `/form/*` (session-cookie gated, no Bearer header)
 
 See `reference/UI-Inventory-PP-UIUX-001.md` for the full page-by-page
-inventory and per-page API mapping. Route table (all live-verified
-2026-07-17):
+inventory and per-page API mapping. Route table (live-verified 2026-07-17,
+re-checked 2026-07-18 — `/form/search` added):
 
 | Path | Page |
 |---|---|
@@ -176,6 +212,7 @@ inventory and per-page API mapping. Route table (all live-verified
 | `/form/intake/{sku}` | Mobile intake form — template chips, weight, barcode, condition |
 | `/form/bulk` | Tablet bulk editor |
 | `/form/todos` | Read-only open-todo dashboard (`tgw todo`, grouped by agent) |
+| `/form/search` | Full-text (recoll) search bar — see **Search** section above |
 | `/form/history/{sku_old}` | Historical-catalog lookup by old SKU |
 | `/form/suggest` (GET/POST) | Plain-HTML suggestion entry, no JS |
 | `/form/items` | Inventory browse — card grid, search/filter |
