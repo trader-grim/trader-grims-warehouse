@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 from tgw import quota
 from tgw.config import load_config, sku_json
+from tgw.logging import announce_script_run
 from tgw.resolver import iter_all_skus
 from tgw.apis.fence import ebay_write as fence_ebay_write, patch_item as fence_patch_item
 
@@ -138,6 +139,12 @@ def main() -> None:
     parser.add_argument('--sku', help='normalize a single SKU')
     parser.add_argument('--limit', type=int, default=0)
     args = parser.parse_args()
+
+    announce_script_run(
+        'ebay_normalize.py',
+        'normalize ebay_live data into ebay_offer/ebay_listing/draft_listing fields via the fence',
+        dry_run=args.dry_run, sku=args.sku, limit=args.limit,
+    )
 
     cfg = load_config(Path('/opt/TGW/config/tgw-api-config.json'))
     key_path = cfg['secrets_root'] / 'tgw-api-key.json'

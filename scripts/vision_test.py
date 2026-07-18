@@ -30,6 +30,7 @@ except ImportError:
 # ai_identify uses max_px=768 for OpenRouter providers (vs 512 for Ollama).
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from tgw.workers.ai_identify import _encode_resized  # noqa: E402
+from tgw.logging import announce_script_run, setup_logging  # noqa: E402
 
 # ── config ─────────────────────────────────────────────────────────────────────
 
@@ -166,6 +167,19 @@ def main():
     parser.add_argument("--compare", action="store_true",
                         help="Run both gemini-2.5-flash-lite AND gemini-3.1-flash-lite")
     args = parser.parse_args()
+
+    # No prior logging configuration in this script (verified live, todo
+    # #1369) — without it, announce_script_run()'s event is silently
+    # dropped (default root level WARNING, no handlers).
+    try:
+        setup_logging('tgw.vision_test')
+    except OSError:
+        pass  # no writable log root (e.g. CI/test env) — announce still attempted below
+    announce_script_run(
+        'vision_test.py',
+        'compare vision models against real TGW product photos using ai_identify prompts (OpenRouter quota)',
+        model=args.model, photos=args.photos, compare=args.compare,
+    )
 
     models = [args.model]
     if args.compare:

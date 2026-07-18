@@ -9,9 +9,22 @@ from pathlib import Path
 sys.path.append(os.path.abspath("src"))
 
 from tgw.config import DEFAULT_CONFIG, load_config
+from tgw.logging import announce_script_run, setup_logging
 
 
 def scan_baseline(limit: int = 500):
+    # No prior logging configuration in this script (verified live, todo
+    # #1369) — without it, announce_script_run()'s event is silently
+    # dropped (default root level WARNING, no handlers).
+    try:
+        setup_logging('tgw.todo_82_baseline')
+    except OSError:
+        pass  # no writable log root (e.g. CI/test env) — announce still attempted below
+    announce_script_run(
+        'todo_82_baseline.py',
+        'scan a sample of item JSONs and report data-completeness baseline stats by category group',
+        limit=limit,
+    )
     cfg = load_config(DEFAULT_CONFIG)
     root = Path(cfg["itemdata_root"])
     

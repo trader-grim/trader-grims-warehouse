@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from tgw import items  # noqa: E402
 from tgw.apis.ebay.taxonomy import _ensure_tree_index  # noqa: E402
 from tgw.config import DEFAULT_CONFIG, load_config  # noqa: E402
+from tgw.logging import announce_script_run, setup_logging  # noqa: E402
 
 
 def _ancestor_path(tree_index: Dict[str, Dict[str, Any]], category_id: str) -> List[str]:
@@ -62,6 +63,19 @@ def main() -> int:
     parser.add_argument('--apply', action='store_true',
                        help='Write changes (default: dry-run/report only)')
     args = parser.parse_args()
+
+    # No prior logging configuration in this script (verified live, todo
+    # #1369) — without it, announce_script_run()'s event is silently
+    # dropped (default root level WARNING, no handlers).
+    try:
+        setup_logging('tgw.catpick_backfill_candidates')
+    except OSError:
+        pass  # no writable log root (e.g. CI/test env) — announce still attempted below
+    announce_script_run(
+        'catpick_backfill_candidates.py',
+        'backfill category_candidates onto every category-groups.json group from the on-disk eBay category tree cache',
+        apply=args.apply,
+    )
 
     cfg = load_config(Path(DEFAULT_CONFIG))
     groups_path: Path = cfg['category_groups_path']

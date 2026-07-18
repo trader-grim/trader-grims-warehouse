@@ -39,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from tgw.apis.ebay.trading import get_my_ebay_selling
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.ebay.pull import fetch_offer_for_sku, iter_inventory_api_items
+from tgw.logging import announce_script_run
 
 logging.basicConfig(
     level=logging.INFO,
@@ -273,6 +274,12 @@ def main() -> int:
     parser.add_argument('--out', default=None,
                         help='Output JSON path (default: /opt/TGW/var/log/ebay-audit-<ts>.json)')
     args = parser.parse_args()
+
+    announce_script_run(
+        'ebay_audit.py',
+        'cross-reference Inventory API vs Trading API vs local ItemData',
+        config=args.config, no_offers=args.no_offers, out=args.out,
+    )
 
     cfg = load_config(Path(args.config))
 

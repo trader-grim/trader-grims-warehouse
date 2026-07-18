@@ -9,7 +9,7 @@ import shutil
 from pathlib import Path
 from typing import Iterable
 
-from tgw.logging import announce_script_run
+from tgw.logging import announce_script_run, setup_logging
 from tgw.queue import state_machine
 
 
@@ -181,6 +181,14 @@ def main() -> int:
 
     config_path = Path(args.config)
 
+    # No prior logging configuration in this script (verified live, todo
+    # #1369 — the same gap existed in this file's #1308 fix too: the
+    # announce_script_run() call was present but silently a no-op without
+    # a handler on the 'tgw' logger, default root level WARNING).
+    try:
+        setup_logging('tgw.photo_history_recovery')
+    except OSError:
+        pass  # no writable log root (e.g. CI/test env) — announce still attempted below
     announce_script_run(
         'photo_history_recovery.py',
         'recover missing item photos from history archives into ItemData',
