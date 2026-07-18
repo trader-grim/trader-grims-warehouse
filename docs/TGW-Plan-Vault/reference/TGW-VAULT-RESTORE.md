@@ -8,6 +8,40 @@ Naming note: earlier plan drafts called this `TGW-SECRETS-A`/`TGW-SECRETS-B`
 and `TGW-SNAPSHOT-0`. Session 38 (2026-06-22) replaced that scheme with a
 single `TGW-VAULT` btrfs USB. This doc reflects the current scheme.
 
+**Three separate, currently-live things share "snapshot"/"vault" language —
+triaged 2026-07-18 (todo #1529/PP-RUNBOOK-001) because the distinction was
+not obvious enough for emergency use:**
+
+| Name | What it is | Where | Verified live 2026-07-18 |
+|---|---|---|---|
+| `TGW-VAULT` | Removable **USB** btrfs volume — `secrets/`, `dumps/` (pg_dump), `flake/` (git bundle). Stamped on insert by `tgw-usb-stamp.service`; this is what Path 1/Path 2 above restore from. | Physical stick, not always attached | `systemctl status tgw-usb-stamp.service` last run 2026-07-14 07:30 PDT, exited 1: `ERROR: no partition with label 'TGW-VAULT' found` — **expected absence** (stick not inserted that day), not a stamp bug. See "USB stamp failures" below for how to tell the two apart. |
+| `TGW-SNAPSHOT-0` | **Local, always-on** Btrfs `send/receive` target on the internal HDD — receives incremental snapshots of `/opt/TGW` every 30 min via `tgw-snapshot.timer`/`.service` (`RequiresMountsFor=/home/snapshot/TGW-SNAPSHOT-0`). Unrelated device from `TGW-VAULT`; this one is never removed. This is the cool-boot-immediate-snapshot target used live during the 2026-07-13 thermal incident (see `reference/runbooks/thermal-emergency-response.md`). | `/home/snapshot/TGW-SNAPSHOT-0` on the internal HDD, always mounted | `systemctl list-timers` shows `tgw-snapshot.timer` active, last/next run within the 30-min cadence. |
+| Archive/ItemData disks | The rotating offline HDD tier and cloud copy (`tgw-gdrive:` rclone remote) described in `plan/PLAN-backup-dr.md` — a different protection target (bulk ItemData/photos), not secrets/database/flake. | External HDDs / Google Drive | Not re-verified in this pass; see `PLAN-backup-dr.md` for current tier status. |
+
+If you only remember one rule during an incident: **`TGW-VAULT` is the
+thing you plug in and carry away; `TGW-SNAPSHOT-0` is the thing that's
+always already there.**
+
+### USB stamp failures — expected absence vs. real failure
+
+`tgw-usb-stamp.service` fails with `ERROR: no partition with label
+'TGW-VAULT' found` whenever the stick simply isn't plugged in — this is
+**expected** and not itself an incident; the service has no schedule of
+its own (udev-triggered on insert), so a long gap since its last run is
+normal, not a health signal. Treat it as a **real** failure only if:
+- the stick IS physically inserted and mounted (`lsblk`/`blkid` shows
+  `TGW-VAULT`) and the service still fails, or
+- `journalctl -u tgw-usb-stamp.service` shows an error other than the
+  missing-partition message above (e.g. a permission error, a copy
+  failure, or a partial/corrupt stamp).
+
+**Still open, filed 2026-07-18 (todo #1532, `--pp PP-RUNBOOK-001`):** the
+actual end-to-end USB restore path (`--source usb` in
+`scripts/tgw-restore.sh`) has never been live-drilled with a physical
+`TGW-VAULT` stick — see `TGW-VAULT-RESTORE-FIXES.md`'s original note.
+That requires a physical stick in hand and is an operator (Dave) task,
+not something this triage pass can execute.
+
 ## What's on the stick
 
 Stamped by `scripts/tgw-usb-stamp.sh` (auto-fires on insert via
@@ -83,7 +117,7 @@ secrets to `/opt/TGW/secrets/` (root:tgw ownership, 700/600 modes),
 
 ```bash
 sudo -u tgw tgw health                                    # expect all-green core checks
-sudo -u tgw tgw enqueue-sku --queue echo <any-sku>         # round-trip probe
+sudo -u tgw tgw enqueue-sku echo <any-sku>                # round-trip probe (QUEUE is positional, no --queue flag — verified against live CLI `tgw enqueue-sku --help` 2026-07-18)
 systemctl start tgw-worker@echo.service
 journalctl -u tgw-worker@echo.service -n 20                # confirm the job actually ran
 ```

@@ -1,5 +1,11 @@
 # NixOS Production Cutover — Standalone Runbook
 
+> **Applicability — historical, one-time event, already executed.**
+> Confirmed 2026-07-18 (todo #1529/PP-RUNBOOK-001, report gap #10): this
+> documents the 2026-06-23 MX→NixOS cutover, which already happened —
+> tgw-prod is NixOS today. Kept as historical/DR reference (e.g. rebuilding
+> a replacement host from scratch), not a routine procedure.
+
 **Written:** 2026-06-23. Execute this without Claude Code assistance.
 **Context:** MX DR abandoned. dd image of nvme0n1p2 taken. Proceeding to NixOS install.
 **Flake target:** `tgw-prod` (bases/master.nix + desktop + dev layers)

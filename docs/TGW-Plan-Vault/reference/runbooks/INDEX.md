@@ -17,6 +17,43 @@ verification.
 - Dead-letter jobs **never auto-retry** — they need a human (see the dead-letter runbook).
 - Commit only when Dave asks. Never change eBay OAuth scopes — a speculative scope change
   killed the refresh token on 2026-06-05.
+- **Verify state directly before declaring anything missing (report gap #13,
+  PP-RECOVERY-001, todo #1529/PP-RUNBOOK-001).** PP-RECOVERY-001 (2026-06-17)
+  is the standing cautionary example: a session concluded real code/work had
+  been lost from an incomplete `"todo #NNN"` commit-message grep and a branch
+  comparison against `main` alone — the work was actually present, just on an
+  unmerged branch and behind an editable install. It took a direct state
+  check (branch diff, running service's actual source, live route walk) to
+  disprove the false alarm. Before declaring code, data, or a completed task
+  missing: check the actual running/editable-install source, check
+  non-`main` branches, and check live behavior — not just one grep or one
+  branch's file list. See `plan/pp/PP-RECOVERY-001.md` for the full incident.
+
+## Runbook metadata convention (report gap #7, todo #1529/PP-RUNBOOK-001)
+
+Every runbook in this directory (and the restore/vault/DR docs in
+`reference/`) should carry these four facts near the top, so an operational
+agent can judge freshness/applicability before acting on it rather than only
+discovering staleness mid-incident:
+
+- **Owner** — who maintains it (Dave, Claude, Tigwa, or "shared").
+- **Last verified** — date it was last checked against live system state
+  (not just last edited).
+- **Applies to** — host/OS generation this procedure is valid for (e.g.
+  "tgw-prod, NixOS, post-2026-06-23 cutover" vs. "historical, pre-NixOS
+  MX era").
+- **Last drill** — date of the last successful end-to-end test of the
+  procedure it describes, or "never drilled" if that's still true (don't
+  omit this rather than admit it — see USB restore gap in
+  `TGW-VAULT-RESTORE.md`).
+
+**Status of this convention itself (2026-07-18):** defined here, applied to
+`TGW-VAULT-RESTORE.md`, `PP-DEPLOY-001-MX-RESTORE-RUNBOOK.md`, and
+`nixos-prod-cutover-runbook.md` as part of this same triage pass (applicability
+banners). Not yet retroactively applied to the 10 numbered runbooks below —
+filed as todo #1533 (`--pp PP-RUNBOOK-001`), a mechanical per-file task
+suited to the Aider/DeepSeek busywork tier rather than a fix bundled into
+this packet.
 
 ## Runbooks, by production impact
 
