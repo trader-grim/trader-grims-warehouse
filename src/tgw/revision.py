@@ -285,8 +285,20 @@ def _place_delta_in_bodies(
             inv_body["condition"] = str(val)
             inv_changed = True
         elif field in ("item_specifics", "aspects") and isinstance(val, dict):
+            # Invariant C14 / todo #1462: a cleared aspect is recorded
+            # internally as an explicit "" — a real value for local
+            # diff/history purposes. But eBay's Inventory API rejects an
+            # empty-string aspect value outright (garbled errorId 25002
+            # dumping the whole aspects dict rather than naming the
+            # offending field). This PUT is a full replace of
+            # product.aspects, so omitting the key entirely achieves the
+            # intended "clear this aspect on eBay" outcome. Mirrors
+            # sync.py's _build_offer_bodies — the fix belongs at this push
+            # boundary, not in the internal record. See #1523/todo #1468.
             product["aspects"] = {
-                k: (v if isinstance(v, list) else [str(v)]) for k, v in val.items()
+                k: (v if isinstance(v, list) else [str(v)])
+                for k, v in val.items()
+                if v not in (None, "")
             }
             inv_changed = True
         elif field == "imageUrls" and isinstance(val, list):
