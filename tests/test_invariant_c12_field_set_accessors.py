@@ -70,18 +70,18 @@ _ALLOWLIST = {
     # fragile against unrelated edits shifting the file — that's a known,
     # accepted tradeoff of this detector's design (see module docstring),
     # not a defect; expect to refresh this list again after future edits.
-    (_SRC / "tgw" / "http_server.py", 766),               # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
-    (_SRC / "tgw" / "http_server.py", 775),               # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
-    (_SRC / "tgw" / "http_server.py", 1080),              # (a) accessor patch write
-    (_SRC / "tgw" / "http_server.py", 1101),              # (a) accessor patch write (todo #1416, draft_listing.item_specifics)
-    (_SRC / "tgw" / "http_server.py", 1106),              # (a) accessor output (full envelope) moving onward
-    (_SRC / "tgw" / "http_server.py", 1119),              # (a) accessor patch write — padlock auto-sync (todo #1406/2026-07-18, inventory_record.sync_from_draft's patch)
-    (_SRC / "tgw" / "http_server.py", 1624),              # (b) revision_draft.delta
-    (_SRC / "tgw" / "http_server.py", 1626),              # (b) revision_draft.delta
-    (_SRC / "tgw" / "http_server.py", 1632),              # (a) accessor patch write (todo #1416)
-    (_SRC / "tgw" / "http_server.py", 2602),              # (a) accessor output (tgw.ebay.inventory_diff.apply_inventory_diff's patch) moving onward into _apply_patch (todo #1417)
-    (_SRC / "tgw" / "http_server.py", 2661),              # (a) category_aspect_migration's patch moving onward into _apply_patch (todo #1471)
-    (_SRC / "tgw" / "http_server.py", 5406),              # (b) revision_draft.delta — line shifted by this packet's new inv-diff panel (todo #1417)
+    (_SRC / "tgw" / "http_server.py", 771),               # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
+    (_SRC / "tgw" / "http_server.py", 780),               # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
+    (_SRC / "tgw" / "http_server.py", 1166),              # (a) accessor patch write
+    (_SRC / "tgw" / "http_server.py", 1187),              # (a) accessor patch write (todo #1416, draft_listing.item_specifics)
+    (_SRC / "tgw" / "http_server.py", 1192),              # (a) accessor output (full envelope) moving onward
+    (_SRC / "tgw" / "http_server.py", 1205),              # (a) accessor patch write — padlock auto-sync (todo #1406/2026-07-18, inventory_record.sync_from_draft's patch)
+    (_SRC / "tgw" / "http_server.py", 1710),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 1712),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 1718),              # (a) accessor patch write (todo #1416)
+    (_SRC / "tgw" / "http_server.py", 2751),              # (a) accessor output (tgw.ebay.inventory_diff.apply_inventory_diff's patch) moving onward into _apply_patch (todo #1417)
+    (_SRC / "tgw" / "http_server.py", 2810),              # (a) category_aspect_migration's patch moving onward into _apply_patch (todo #1471)
+    (_SRC / "tgw" / "http_server.py", 5555),              # (b) revision_draft.delta — line shifted by this packet's new inv-diff panel (todo #1417)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 114),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 121),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 124),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)

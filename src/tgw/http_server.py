@@ -1012,7 +1012,7 @@ def _maybe_early_identify(json_path: "Path", sku: str, photo_count: int) -> None
     try:
         state_machine.enqueue_job(
             queue_name="ai_identify",
-            payload={"sku": sku},
+            payload={"sku": sku, "origin": "operator"},
             dedupe_key=f"ai_identify:{sku}",
             max_attempts=3,
         )
@@ -1051,7 +1051,7 @@ def _maybe_session_complete_identify(json_path: "Path", sku: str) -> None:
     try:
         state_machine.enqueue_job(
             queue_name="ai_identify",
-            payload={"sku": sku},
+            payload={"sku": sku, "origin": "operator"},
             dedupe_key=f"ai_identify:{sku}",
             max_attempts=3,
         )
