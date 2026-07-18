@@ -462,6 +462,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
         "update", "update-where", "update-title", "update-location", "update-verified",
         "update-status", "set-shipping", "bulk", "price-freeship", "hint",
         "data-scrub", "revise", "alt-text",
+        "inventory-sweep", "inventory-record",
     ]),
     ("Context / Intake", [
         "set-context", "get-context", "clear-context", "set-template", "create-item",
@@ -765,6 +766,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--location", default=None, help="filter to a specific shelf location")
     p.add_argument("--limit", type=int, default=0, help="max items per group (0 = unlimited)")
     p.add_argument("--output", default=None, help="write markdown checklist to this file instead of stdout")
+
+    p = sub.add_parser("inventory-sweep", help="generate manifest-vs-physical checklist for one storage location (PP-INVENTORY-001 manual leg)")
+    p.add_argument("location", help="storage location code, e.g. FF0792")
+    p.add_argument("--output", default=None, help="write markdown checklist to this file instead of stdout")
+
+    p = sub.add_parser("inventory-record", help="record one operator reconciliation result during a physical inventory sweep (PP-INVENTORY-001 manual leg)")
+    p.add_argument("sku", help="SKU being reconciled")
+    p.add_argument("result", choices=["present", "missing", "misfiled"], help="physical reconciliation result")
+    p.add_argument("--location", default=None, help="the location being swept (recorded on the finding for provenance)")
+    p.add_argument("--to-location", default=None, help="corrected location (required for result=misfiled)")
+    p.add_argument("--note", default=None, help="free-text note")
 
     p = sub.add_parser("bulk", help="bulk-edit one field across matched items (PP-BULKEDIT-001); dry-run unless --apply")
     p.add_argument("--field", required=True, choices=["title", "location", "status", "ai_hint", "shipping_profile"], help="which field to set on every matched item")
@@ -4882,6 +4894,32 @@ def main() -> int:
             )
             if args.output:
                 print(json.dumps(result, indent=2))
+            return 0 if result["ok"] else 1
+
+        elif args.op == "inventory-sweep":
+            from .physical_inventory import inventory_sweep_checklist
+
+            result = inventory_sweep_checklist(
+                cfg,
+                args.location,
+                output=Path(args.output) if args.output else None,
+            )
+            if args.output:
+                print(json.dumps(result, indent=2))
+            return 0 if result["ok"] else 1
+
+        elif args.op == "inventory-record":
+            from .physical_inventory import inventory_record
+
+            result = inventory_record(
+                cfg,
+                args.sku,
+                args.result,
+                location=args.location,
+                to_location=args.to_location,
+                note=args.note,
+            )
+            print(json.dumps(result, indent=2))
             return 0 if result["ok"] else 1
 
         elif args.op == "build-archive-index":
