@@ -198,7 +198,14 @@ No drives connected yet. Prep work:
 ### Phase 3 — Sort & Consolidate
 
 - [ ] Design canonical directory structure for Track A and Track B
-- [ ] Move/copy files to canonical locations (with verification)
+- [ ] Move/copy files to canonical locations (with verification) — use the
+      shared PP-DATAINTEGRITY-001 leg 2 helper (`tgw.integrity.verified_copy` /
+      `verify_copy_tree`, todo #1266) rather than a bare `cp`/`shutil.copy`;
+      it sha256-verifies dest against source and only atomically renames the
+      staged copy into place once verified, so a copy killed mid-flight can
+      never be mistaken for a successful consolidation move. Not wired up yet
+      because this phase's move code doesn't exist yet — the helper is ready
+      and waiting.
 - [ ] Handle duplicates: keep best copy, record provenance
 - [ ] Archive old drives once contents verified in new location
 

@@ -37,6 +37,23 @@ def make_fake_patch_item(itemdata_root):
     return fake_fence_patch_item
 
 
+def make_fake_create_item(itemdata_root):
+    """Return a fake fence_create_item that writes the item JSON directly to
+    disk under itemdata_root, mirroring what the real fence server does —
+    for testing worker code that calls tgw.apis.fence.create_item without
+    a live http_server.
+    """
+    def fake_fence_create_item(cfg, sku, data):
+        root = Path(cfg.get('itemdata_root', itemdata_root))
+        d = root / sku
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / f'{sku}.json'
+        record = {'sku': sku, **data}
+        p.write_text(json.dumps(record), encoding='utf-8')
+        return {'ok': True, 'sku': sku, 'path': str(p)}
+    return fake_fence_create_item
+
+
 def make_fake_fence_write_tmp(tmp_path):
     """Like make_fake_fence_write but resolves sku path via tmp_path directly."""
     import json

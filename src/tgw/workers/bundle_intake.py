@@ -20,6 +20,7 @@ import re
 import shutil
 import time
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -53,6 +54,10 @@ def _is_stable(paths: List[Path]) -> bool:
 def _images_in(directory: Path) -> List[Path]:
     return [p for p in directory.iterdir()
             if p.is_file() and p.suffix in IMAGE_SUFFIXES]
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _enqueue(sku: str, fmt: str, source: str) -> Optional[str]:
@@ -229,19 +234,34 @@ class BundleIntakeWorker(QueueWorker):
 
         stub_path = source_dir / f'{sku}.json'
         stub = self._load_stub(stub_path, sku)
-        images = _images_in(source_dir)
-        if not images:
+        raw_images = _images_in(source_dir)
+        if not raw_images:
             raise HardFailure(f'no images in bundle dir for {sku}')
+
+        # photo-integrity mitigation leg 3 (todo #1267): decode-verify at
+        # the door, before a corrupt camera file ever gets copied into
+        # ItemData. Full PIL im.load() per the plan doc's recommendation —
+        # catches tail truncation that header-only verify() would miss
+        # (the exact Feb-2022 bulk-copy failure mode this track exists to
+        # prevent). Corrupt files never reach ItemData at all.
+        images, rejected = self._decode_verify(raw_images)
+        if not images:
+            self._log_rejected(sku, rejected)
+            raise HardFailure(
+                f'all {len(raw_images)} image(s) in bundle dir for {sku} '
+                f'failed decode-verify: {rejected}'
+            )
 
         dest_dir = self._prepare_dest(sku)
         self._copy_images(images, dest_dir)
-        self._write_item_json(sku, stub, dest_dir, images)
+        self._write_item_json(sku, stub, dest_dir, images, rejected)
         shutil.rmtree(source_dir)
 
         self._enqueue_downstream(sku)
-        log.info('bundle_intake dir complete: %s (%d photos)', sku, len(images))
+        log.info('bundle_intake dir complete: %s (%d photos, %d rejected)',
+                  sku, len(images), len(rejected))
         tgw_logging.log_event('bundle_intake_complete', sku=sku, fmt='dir',
-                              photos=len(images))
+                              photos=len(images), rejected=len(rejected))
 
     def _handle_zip(self, sku: str, zip_path: Path) -> None:
         stub_path = zip_path.parent / f'{sku}.json'
@@ -273,16 +293,33 @@ class BundleIntakeWorker(QueueWorker):
                 with zf.open(name) as src, open(dest, 'wb') as dst:
                     shutil.copyfileobj(src, dst)
 
-        images = _images_in(dest_dir)
-        self._write_item_json(sku, stub, dest_dir, images)
+        # photo-integrity mitigation leg 3 (todo #1267): decode-verify the
+        # extracted files before they're treated as real inventory photos —
+        # a corrupt file inside the zip (truncated in transit, bad camera
+        # write, etc.) is rejected at the door, not discovered at listing
+        # time. Rejected files are removed from dest_dir; a persisted
+        # finding is recorded on the item, never a silent skip.
+        extracted = _images_in(dest_dir)
+        images, rejected = self._decode_verify(extracted)
+        for bad_path, _err in rejected:
+            bad_path.unlink(missing_ok=True)
+        if not images:
+            self._log_rejected(sku, rejected)
+            raise HardFailure(
+                f'all {len(extracted)} image(s) in zip for {sku} '
+                f'failed decode-verify: {rejected}'
+            )
+
+        self._write_item_json(sku, stub, dest_dir, images, rejected)
         # Remove the source SKU dir (contains the zip + stub)
         source_dir = zip_path.parent
         shutil.rmtree(source_dir, ignore_errors=True)
 
         self._enqueue_downstream(sku)
-        log.info('bundle_intake zip complete: %s (%d photos)', sku, len(images))
+        log.info('bundle_intake zip complete: %s (%d photos, %d rejected)',
+                  sku, len(images), len(rejected))
         tgw_logging.log_event('bundle_intake_complete', sku=sku, fmt='zip',
-                              photos=len(images))
+                              photos=len(images), rejected=len(rejected))
 
     # ------------------------------------------------------------------
     # Shared utilities
@@ -308,8 +345,36 @@ class BundleIntakeWorker(QueueWorker):
             if not dest.exists():
                 shutil.copy2(src, dest)
 
+    def _decode_verify(self, images: List[Path]):
+        """Split *images* into (good, rejected) via full PIL decode
+        (photo-integrity mitigation leg 3, todo #1267). `rejected` is a
+        list of (path, error) tuples. Uses im.load() (full decode), not
+        im.verify() (header-only) — matches the plan doc's own
+        recommendation, since intake is not hot-path and header-only
+        verify() misses tail truncation (the Feb-2022 bulk-copy failure
+        mode this whole track exists to catch).
+        """
+        from tgw.integrity import decode_verify_image
+        good: List[Path] = []
+        rejected: List[Any] = []
+        for img in images:
+            error = decode_verify_image(img)
+            if error is None:
+                good.append(img)
+            else:
+                rejected.append((img, error))
+        return good, rejected
+
+    def _log_rejected(self, sku: str, rejected: List[Any]) -> None:
+        for path, error in rejected:
+            log.warning('bundle_intake decode-verify rejected %s for %s: %s',
+                        path.name, sku, error)
+        tgw_logging.log_event('bundle_intake_photo_rejected', sku=sku,
+                              rejected=[{'file': p.name, 'error': e} for p, e in rejected])
+
     def _write_item_json(self, sku: str, stub: Dict[str, Any],
-                         dest_dir: Path, images: List[Path]) -> None:
+                         dest_dir: Path, images: List[Path],
+                         rejected: Optional[List[Any]] = None) -> None:
         json_path = dest_dir / f'{sku}.json'
         if json_path.exists():
             return  # already written by a prior attempt
@@ -323,6 +388,25 @@ class BundleIntakeWorker(QueueWorker):
         # Set image field to first photo (alphabetical) for thumbnail generation
         first_image = sorted(images, key=lambda p: p.name)[0]
         record['image'] = first_image.name
+
+        if rejected:
+            # invariant C11: a worker's guard/skip is a finding, not a log
+            # line. `pipeline_error` is the existing generic finding field
+            # catalog-verify already surfaces (see api.py's `_verify_item`
+            # pipeline_error handling) and the same shape used by
+            # ebay_stage.py/draft_sync.py's legacy_listing_blocked pattern.
+            self._log_rejected(sku, rejected)
+            detail = ', '.join(f'{p.name}: {e}' for p, e in rejected)
+            record['pipeline_error'] = {
+                'code':   'photo_decode_rejected',
+                'detail': detail[:500],
+                'ts':     _utcnow_iso(),
+                'source': 'bundle_intake',
+            }
+            record['photo_decode_rejected'] = [
+                {'file': p.name, 'error': e} for p, e in rejected
+            ]
+
         fence_create_item(self.config, sku, record)
 
     def _enqueue_downstream(self, sku: str) -> None:

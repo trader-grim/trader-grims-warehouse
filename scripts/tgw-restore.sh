@@ -74,12 +74,17 @@ case "$SOURCE" in
             # the mounted vault, see TGW-VAULT-RESTORE.md Path 2 step 3),
             # not something this script touches. The old message claimed
             # flake/ too, which was never true.
-            echo "[DRY RUN] Would copy secrets/ dumps/ from $USB_PATH to $BACKUP_DIR"
+            echo "[DRY RUN] Would verify-and-copy secrets/ dumps/ from $USB_PATH to $BACKUP_DIR"
             echo "[DRY RUN] (flake/ is not handled by this script — see TGW-VAULT-RESTORE.md Path 2)"
         else
-            echo "Copying from USB vault at $USB_PATH..."
-            cp -rv "$USB_PATH/dumps" "$BACKUP_DIR/"
-            cp -rv "$USB_PATH/secrets" "$BACKUP_DIR/"
+            # PP-DATAINTEGRITY-001 leg 2 (todo #1266): sha256 verify-after-copy
+            # via the shared tgw.integrity helper, not a bare `cp`. A copy
+            # killed mid-flight (USB unplugged, power loss, etc.) must never
+            # leave a truncated file silently accepted as a restored dump or
+            # secret — see docs/ai-plans/photo-integrity-mitigation.md.
+            echo "Copying from USB vault at $USB_PATH (verify-after-copy)..."
+            python3 -m tgw.integrity copy-tree "$USB_PATH/dumps" "$BACKUP_DIR/dumps"
+            python3 -m tgw.integrity copy-tree "$USB_PATH/secrets" "$BACKUP_DIR/secrets"
         fi
         ;;
     local)
