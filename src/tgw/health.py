@@ -542,18 +542,59 @@ def check_sync_conflicts(cfg: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def check_nats(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Probe the NATS audit-mutation stream (PP-AIOPS-001 Phase 1, fire-and-forget
+    by design — never blocks ItemData writes, see nats_client.py).
+
+    Green (ok=True): connected to a broker, streams present.
+    Yellow (ok=True, warn=True): nats-py is installed but no broker is
+      reachable — EXPECTED until PP-AIOPS-001's broker is stood up (todo
+      #1510, deliberately held pending Dave's go-ahead). Fire-and-forget
+      means item mutations are unaffected; this is informational, not a
+      platform failure.
+    Red (ok=False): anything else — e.g. nats-py not installed (dependency
+      regression) or an unexpected probe error — a real problem worth fixing.
+    """
     t = time.time()
     url = cfg.get("nats_url", "nats://127.0.0.1:4222")
     try:
         from tgw.apis.nats_client import check_nats as _probe
+    except ImportError as e:
+        return _result("nats", False,
+                       f"nats-py not installed: {e} — mutations are not being audited",
+                       (time.time() - t) * 1000, url=url)
+
+    try:
         result = _probe(url)
         ok = result.get("ok", False)
         latency = result.get("latency_ms")
         streams = result.get("streams", [])
-        detail = f"connected ({latency}ms)" if ok else result.get("error", "unreachable")
-        return _result("nats", ok, detail, (time.time() - t) * 1000,
-                       url=url, latency_ms=latency, streams=streams,
-                       warn=not ok)
+        error = result.get("error", "")
+
+        if ok:
+            detail = f"connected ({latency}ms)"
+            return _result("nats", True, detail, (time.time() - t) * 1000,
+                           url=url, latency_ms=latency, streams=streams,
+                           warn=False)
+
+        broker_unreachable = any(
+            marker in error.lower()
+            for marker in ("no servers available", "connection refused",
+                           "connection timeout", "timed out")
+        )
+        if broker_unreachable:
+            detail = (f"module installed, broker unreachable ({error}) — "
+                       "expected until #1510 stands up the NATS broker; "
+                       "fire-and-forget, item mutations unaffected")
+            return _result("nats", True, detail, (time.time() - t) * 1000,
+                           url=url, latency_ms=latency, streams=streams,
+                           warn=True)
+
+        # Any other failure (e.g. module missing, auth error, unexpected
+        # exception) is a real problem, not the expected no-broker state.
+        return _result("nats", False, error or "unreachable",
+                       (time.time() - t) * 1000, url=url, latency_ms=latency,
+                       streams=streams, warn=True)
     except Exception as e:
         return _result("nats", False, str(e), (time.time() - t) * 1000, url=url)
 
