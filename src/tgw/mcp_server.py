@@ -21,11 +21,8 @@ Register in Claude Code:
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
-import re
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Dict
 
@@ -48,10 +45,6 @@ _READONLY = os.environ.get('TGW_MCP_READONLY', '') in ('1', 'true', 'yes')
 _CONFIG_PATH = Path(
     os.environ.get('TGW_CONFIG', '/opt/TGW/config/tgw-api-config.json')
 )
-_PLAN_VAULT_ROOT = Path('/opt/TGW/src/trader-grims-warehouse/docs/TGW-Plan-Vault')
-_PLAN_PACKET_VERSION = 'tgw-plan-brief-v1'
-_PLAN_PACKET_MAX_SOURCE_BYTES = 64 * 1024
-_PP_IDENTIFIER_RE = re.compile(r'^PP-[A-Z0-9][A-Z0-9-]*$')
 
 _cfg: Dict[str, Any] = {}
 
@@ -572,143 +565,33 @@ if not _READONLY:
 
 # ---------------------------------------------------------------------------
 # tgw_get_plan_brief — bounded, exact-source Master Plan retrieval
+#
+# Deterministic parser/retrieval logic lives in tgw.plan_render.plan_brief()
+# (PP-KNOWLEDGE-001 / todo #1439, #1520 follow-up refactor, Tigwa's v1
+# reviewed submission) — this tool is a thin delegate, not a second parser.
+# Paths come from cfg['plan_master_path'] / cfg['plan_vault_path']; no Plan
+# Vault root is hard-coded in this module.
 # ---------------------------------------------------------------------------
-
-def _canonical_plan_source() -> tuple[Path, bytes, dict[str, Any]]:
-    """Return canonical Master Plan bytes with reproducible source metadata."""
-    path = _PLAN_VAULT_ROOT / 'plan' / 'TGW-Master-Plan.md'
-    raw = path.read_bytes()
-    stat = path.stat()
-    return path, raw, {
-        'path': str(path),
-        'sha256': hashlib.sha256(raw).hexdigest(),
-        'bytes': len(raw),
-        'mtime_utc': datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
-    }
-
-
-def _plan_heading_sections(text: str, pp: str) -> list[dict[str, Any]]:
-    """Find exact PP-bearing headings and their structural source ranges."""
-    lines = text.splitlines(keepends=True)
-    headings: list[tuple[int, int, str]] = []
-    for index, line in enumerate(lines):
-        match = re.match(r'^(#{2,6})\s+(.+?)\s*$', line)
-        heading = match.group(2).strip() if match else ''
-        if match and re.match(rf'^{re.escape(pp)}(?:\s|:|—|$)', heading.upper()):
-            headings.append((index, len(match.group(1)), heading))
-
-    sections: list[dict[str, Any]] = []
-    for start, level, heading in headings:
-        end = len(lines)
-        for index in range(start + 1, len(lines)):
-            next_heading = re.match(r'^(#{1,6})\s+', lines[index])
-            if next_heading and len(next_heading.group(1)) <= level:
-                end = index
-                break
-        content = ''.join(lines[start:end])
-        byte_start = len(''.join(lines[:start]).encode('utf-8'))
-        content_bytes = content.encode('utf-8')
-        sections.append({
-            'heading': heading,
-            'line_start': start + 1,
-            'line_end': end,
-            'byte_start': byte_start,
-            'byte_end': byte_start + len(content_bytes),
-            'sha256': hashlib.sha256(content_bytes).hexdigest(),
-            'content': content,
-        })
-    return sections
-
 
 @mcp.tool()
 def tgw_get_plan_brief(pp: str) -> str:
     """Retrieve one bounded, exact-source Master Plan packet for a PP identifier.
 
     The Master Plan remains canonical. This read-only tool returns source hashes,
-    exact heading/line/byte anchors, the exact matched section, and the matching
-    canonical PP detail document when it is small enough to include. It never
-    produces a model-written summary and refuses missing or ambiguous PP matches.
+    exact heading/line/byte anchors, and the exact matched section. A linked
+    canonical `plan/pp/<PP>.md` detail document, if present, is reported
+    metadata-only (path/status/hash/bytes) — its content is never inlined.
+    It never produces a model-written summary and refuses missing or
+    ambiguous PP matches.
 
     Args:
         pp: Exact PP identifier, for example `PP-KNOWLEDGE-001`.
 
     Returns JSON packet with canonical-source provenance and retrieval warnings.
     """
-    query_pp = pp.strip().upper()
-    if not _PP_IDENTIFIER_RE.fullmatch(query_pp):
-        return json.dumps({
-            'ok': False,
-            'error': 'pp must be an exact identifier like PP-KNOWLEDGE-001',
-            'code': 'invalid_pp_identifier',
-        })
-
-    try:
-        _path, raw, source = _canonical_plan_source()
-    except OSError as exc:
-        return json.dumps({
-            'ok': False,
-            'error': str(exc),
-            'code': 'canonical_plan_unavailable',
-        })
-
-    text = raw.decode('utf-8')
-    sections = _plan_heading_sections(text, query_pp)
-    if not sections:
-        return json.dumps({
-            'ok': False,
-            'code': 'pp_not_found',
-            'query': {'pp': query_pp},
-            'canonical_source': source,
-            'warning': 'Read the full canonical Master Plan or select another PP; no heading was guessed.',
-        })
-    if len(sections) > 1:
-        return json.dumps({
-            'ok': False,
-            'code': 'ambiguous_pp',
-            'query': {'pp': query_pp},
-            'canonical_source': source,
-            'matches': [{key: section[key] for key in ('heading', 'line_start', 'line_end')}
-                        for section in sections],
-            'warning': 'Multiple exact PP headings found; no section was selected.',
-        })
-
-    section = sections[0]
-    if len(section['content'].encode('utf-8')) > _PLAN_PACKET_MAX_SOURCE_BYTES:
-        return json.dumps({
-            'ok': False,
-            'code': 'section_too_large',
-            'query': {'pp': query_pp},
-            'canonical_source': source,
-            'section': {key: section[key] for key in section if key != 'content'},
-            'warning': 'Exact section exceeds the packet limit; use the canonical source path and anchors.',
-        })
-
-    detail_path = _PLAN_VAULT_ROOT / 'plan' / 'pp' / f'{query_pp}.md'
-    detail: dict[str, Any] = {'path': str(detail_path), 'status': 'absent'}
-    warnings: list[str] = []
-    if detail_path.is_file():
-        detail_raw = detail_path.read_bytes()
-        detail.update({
-            'sha256': hashlib.sha256(detail_raw).hexdigest(),
-            'bytes': len(detail_raw),
-        })
-        if len(detail_raw) <= _PLAN_PACKET_MAX_SOURCE_BYTES:
-            detail.update({'status': 'present', 'content': detail_raw.decode('utf-8')})
-        else:
-            detail.update({'status': 'too_large'})
-            warnings.append('Linked PP detail exceeds the packet limit and was not partially quoted.')
-    else:
-        warnings.append('No linked canonical PP detail document exists at the expected path.')
-
-    return json.dumps({
-        'ok': True,
-        'generator_version': _PLAN_PACKET_VERSION,
-        'query': {'pp': query_pp},
-        'canonical_source': source,
-        'section': section,
-        'linked_pp_detail': detail,
-        'warnings': warnings,
-    }, ensure_ascii=False)
+    from tgw.plan_render import plan_brief
+    cfg = _get_cfg()
+    return json.dumps(plan_brief(cfg, pp), ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------

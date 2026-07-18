@@ -21,6 +21,7 @@ Plan reconciliation (Phase 3):
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import tempfile
@@ -29,6 +30,18 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 TASKBOARD_NAME = 'TGW-Taskboard.md'
+
+# ---------------------------------------------------------------------------
+# plan_brief — bounded, exact-source Master Plan retrieval (PP-KNOWLEDGE-001
+# / todo #1439, #1520). Deterministic pure retrieval: no LLM summarization,
+# no generated cache — the exact matched section of the canonical Master
+# Plan, with source hashes/anchors, plus metadata-only (never inlined)
+# provenance for a linked plan/pp/<PP>.md detail document.
+# ---------------------------------------------------------------------------
+
+PLAN_BRIEF_VERSION = 'tgw-plan-brief-v1'
+PLAN_BRIEF_MAX_SOURCE_BYTES = 64 * 1024
+PP_IDENTIFIER_RE = re.compile(r'^PP-[A-Z0-9][A-Z0-9-]*$')
 
 _DONE_WINDOW_DAYS = 7
 _DONE_MAX_ROWS = 15  # cap shown in the taskboard done section to avoid noise after big sessions
@@ -505,3 +518,157 @@ def format_plan_status(result: Dict[str, Any]) -> str:
         lines.append(f'  {row["pp_ref"]}: {", ".join(counts)}{latest_str}')
 
     return '\n'.join(lines)
+
+
+# ---------------------------------------------------------------------------
+# plan_brief internals
+# ---------------------------------------------------------------------------
+
+def _canonical_plan_source(plan_master_path: Path) -> Tuple[bytes, Dict[str, Any]]:
+    """Return canonical Master Plan bytes with reproducible source metadata."""
+    raw = plan_master_path.read_bytes()
+    stat = plan_master_path.stat()
+    return raw, {
+        'path': str(plan_master_path),
+        'sha256': hashlib.sha256(raw).hexdigest(),
+        'bytes': len(raw),
+        'mtime_utc': datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+    }
+
+
+def _plan_heading_sections(text: str, pp: str) -> List[Dict[str, Any]]:
+    """Find exact PP-bearing headings and their structural source ranges.
+
+    Matches only headings whose *heading text starts with* the exact PP
+    identifier — a heading that merely cross-references or says it was
+    folded into the requested PP (e.g. "PP-OLD-001 Folded into
+    PP-ALPHA-001") must never compete with the canonical section.
+    """
+    lines = text.splitlines(keepends=True)
+    headings: List[Tuple[int, int, str]] = []
+    for index, line in enumerate(lines):
+        match = re.match(r'^(#{2,6})\s+(.+?)\s*$', line)
+        heading = match.group(2).strip() if match else ''
+        if match and re.match(rf'^{re.escape(pp)}(?:\s|:|—|$)', heading.upper()):
+            headings.append((index, len(match.group(1)), heading))
+
+    sections: List[Dict[str, Any]] = []
+    for start, level, heading in headings:
+        end = len(lines)
+        for index in range(start + 1, len(lines)):
+            next_heading = re.match(r'^(#{1,6})\s+', lines[index])
+            if next_heading and len(next_heading.group(1)) <= level:
+                end = index
+                break
+        content = ''.join(lines[start:end])
+        byte_start = len(''.join(lines[:start]).encode('utf-8'))
+        content_bytes = content.encode('utf-8')
+        sections.append({
+            'heading': heading,
+            'line_start': start + 1,
+            'line_end': end,
+            'byte_start': byte_start,
+            'byte_end': byte_start + len(content_bytes),
+            'sha256': hashlib.sha256(content_bytes).hexdigest(),
+            'content': content,
+        })
+    return sections
+
+
+def plan_brief(cfg: Dict[str, Any], pp_ref: str) -> Dict[str, Any]:
+    """Retrieve one bounded, exact-source Master Plan packet for a PP identifier
+    (PP-KNOWLEDGE-001 / todo #1439, #1520).
+
+    Pure, read-only, deterministic retrieval — never writes anything, never
+    produces a model-written summary, and refuses missing or ambiguous PP
+    matches. Paths are derived from ``cfg['plan_master_path']`` and
+    ``cfg['plan_vault_path']`` — no Plan Vault root is hard-coded here, and
+    this is the single implementation shared by the MCP tool (and any future
+    CLI surface, per Tigwa's item 7 — not built here).
+
+    A linked ``plan/pp/<PP>.md`` detail document, if present, is reported
+    metadata-only (path/status/sha256/bytes) — its content is never inlined,
+    even when it would fit the packet's byte cap. A future explicit detail
+    retrieval tool can carry its own bound/provenance contract for that.
+
+    Returns a JSON-serializable dict; never raises for a well-formed
+    ``pp_ref`` string — I/O and validation failures are reported as
+    ``{'ok': False, 'code': ..., ...}``.
+    """
+    query_pp = (pp_ref or '').strip().upper()
+    if not PP_IDENTIFIER_RE.fullmatch(query_pp):
+        return {
+            'ok': False,
+            'error': 'pp must be an exact identifier like PP-KNOWLEDGE-001',
+            'code': 'invalid_pp_identifier',
+        }
+
+    plan_master_path = Path(cfg['plan_master_path'])
+    try:
+        raw, source = _canonical_plan_source(plan_master_path)
+    except OSError as exc:
+        return {
+            'ok': False,
+            'error': str(exc),
+            'code': 'canonical_plan_unavailable',
+        }
+
+    text = raw.decode('utf-8')
+    sections = _plan_heading_sections(text, query_pp)
+    if not sections:
+        return {
+            'ok': False,
+            'code': 'pp_not_found',
+            'query': {'pp': query_pp},
+            'canonical_source': source,
+            'warning': 'Read the full canonical Master Plan or select another PP; no heading was guessed.',
+        }
+    if len(sections) > 1:
+        return {
+            'ok': False,
+            'code': 'ambiguous_pp',
+            'query': {'pp': query_pp},
+            'canonical_source': source,
+            'matches': [{key: section[key] for key in ('heading', 'line_start', 'line_end')}
+                        for section in sections],
+            'warning': 'Multiple exact PP headings found; no section was selected.',
+        }
+
+    section = sections[0]
+    if len(section['content'].encode('utf-8')) > PLAN_BRIEF_MAX_SOURCE_BYTES:
+        return {
+            'ok': False,
+            'code': 'section_too_large',
+            'query': {'pp': query_pp},
+            'canonical_source': source,
+            'section': {key: section[key] for key in section if key != 'content'},
+            'warning': 'Exact section exceeds the packet limit; use the canonical source path and anchors.',
+        }
+
+    plan_vault_path = Path(cfg['plan_vault_path'])
+    detail_path = plan_vault_path / 'plan' / 'pp' / f'{query_pp}.md'
+    detail: Dict[str, Any] = {'path': str(detail_path), 'status': 'absent'}
+    warnings: List[str] = []
+    if detail_path.is_file():
+        detail_stat = detail_path.stat()
+        detail.update({
+            'sha256': hashlib.sha256(detail_path.read_bytes()).hexdigest(),
+            'bytes': detail_stat.st_size,
+            'status': 'present',
+        })
+        warnings.append(
+            'Linked PP detail exists and is reported metadata-only (path/status/hash/'
+            'bytes); its content is never inlined by this tool — read the path directly.'
+        )
+    else:
+        warnings.append('No linked canonical PP detail document exists at the expected path.')
+
+    return {
+        'ok': True,
+        'generator_version': PLAN_BRIEF_VERSION,
+        'query': {'pp': query_pp},
+        'canonical_source': source,
+        'section': section,
+        'linked_pp_detail': detail,
+        'warnings': warnings,
+    }
