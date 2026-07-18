@@ -477,16 +477,25 @@ def test_catalog_verify_error_caught(cfg, monkeypatch):
 # tgw_get_plan_brief — deterministic, source-linked Plan Vault retrieval
 # ---------------------------------------------------------------------------
 
-def test_get_plan_brief_returns_exact_pp_section_with_provenance(tmp_path, monkeypatch):
+def _plan_cfg(tmp_path):
     vault = tmp_path / "plan-vault"
-    plan_path = vault / "plan" / "TGW-Master-Plan.md"
+    return {
+        "plan_vault_path": vault,
+        "plan_master_path": vault / "plan" / "TGW-Master-Plan.md",
+    }
+
+
+def test_get_plan_brief_returns_exact_pp_section_with_provenance(tmp_path, monkeypatch):
+    c = _plan_cfg(tmp_path)
+    plan_path = c["plan_master_path"]
     plan_path.parent.mkdir(parents=True)
     plan = "# TGW Master Plan\n\n## PP-ALPHA-001 Alpha work\nalpha source\n\n## PP-BETA-002 Beta work\nbeta source\n"
     plan_path.write_text(plan, encoding="utf-8")
-    detail = vault / "plan" / "pp" / "PP-ALPHA-001.md"
+    detail = c["plan_vault_path"] / "plan" / "pp" / "PP-ALPHA-001.md"
     detail.parent.mkdir(parents=True)
-    detail.write_text("# PP-ALPHA-001\nDetailed canonical source.\n", encoding="utf-8")
-    monkeypatch.setattr(mcp_server, "_PLAN_VAULT_ROOT", vault, raising=False)
+    detail_bytes = "# PP-ALPHA-001\nDetailed canonical source.\n".encode("utf-8")
+    detail.write_bytes(detail_bytes)
+    monkeypatch.setattr(mcp_server, "_cfg", c)
 
     out = json.loads(mcp_server.tgw_get_plan_brief("pp-alpha-001"))
 
@@ -495,22 +504,44 @@ def test_get_plan_brief_returns_exact_pp_section_with_provenance(tmp_path, monke
     assert out["canonical_source"]["sha256"] == hashlib.sha256(plan.encode()).hexdigest()
     assert out["section"]["heading"] == "PP-ALPHA-001 Alpha work"
     assert out["section"]["content"] == "## PP-ALPHA-001 Alpha work\nalpha source\n\n"
+    # Linked PP detail documents are metadata-only — path/status/hash/bytes,
+    # never inlined content, even when small enough to fit the packet cap
+    # (PP-KNOWLEDGE-001/#1439 follow-up, item 4).
     assert out["linked_pp_detail"]["status"] == "present"
-    assert out["linked_pp_detail"]["content"] == "# PP-ALPHA-001\nDetailed canonical source.\n"
+    assert out["linked_pp_detail"]["sha256"] == hashlib.sha256(detail_bytes).hexdigest()
+    assert out["linked_pp_detail"]["bytes"] == len(detail_bytes)
+    assert "content" not in out["linked_pp_detail"]
 
 
 def test_get_plan_brief_does_not_treat_a_cross_reference_heading_as_a_second_match(tmp_path, monkeypatch):
-    vault = tmp_path / "plan-vault"
-    plan_path = vault / "plan" / "TGW-Master-Plan.md"
+    c = _plan_cfg(tmp_path)
+    plan_path = c["plan_master_path"]
     plan_path.parent.mkdir(parents=True)
     plan_path.write_text(
         "## PP-ALPHA-001 Canonical work\nalpha source\n\n"
         "## PP-OLD-001 Folded into PP-ALPHA-001\nold source\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(mcp_server, "_PLAN_VAULT_ROOT", vault, raising=False)
+    monkeypatch.setattr(mcp_server, "_cfg", c)
 
     out = json.loads(mcp_server.tgw_get_plan_brief("PP-ALPHA-001"))
 
     assert out["ok"] is True
     assert out["section"]["heading"] == "PP-ALPHA-001 Canonical work"
+
+
+def test_get_plan_brief_via_tool_run_boundary(tmp_path, monkeypatch):
+    # FastMCP-boundary coverage (item 6): invoke through the actual MCP tool
+    # dispatch path, not just a direct Python function call.
+    c = _plan_cfg(tmp_path)
+    plan_path = c["plan_master_path"]
+    plan_path.parent.mkdir(parents=True)
+    plan_path.write_text("## PP-GAMMA-003 Gamma work\ngamma source\n", encoding="utf-8")
+    monkeypatch.setattr(mcp_server, "_cfg", c)
+
+    tool = mcp_server.mcp._tool_manager._tools["tgw_get_plan_brief"]
+    out = json.loads(asyncio.run(tool.run({"pp": "pp-gamma-003"})))
+
+    assert out["ok"] is True
+    assert out["query"]["pp"] == "PP-GAMMA-003"
+    assert out["section"]["heading"] == "PP-GAMMA-003 Gamma work"
