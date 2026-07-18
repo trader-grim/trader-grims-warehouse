@@ -41,6 +41,7 @@ _ANNOUNCE_RE = re.compile(r'announce_script_run\s*\(')
 # detector.
 _EXEMPT = {
     'check_announce_script_run.py',  # the detector itself
+    'check_review_md.py',  # pre-stitch gate (todo #1366), a read-only checker, not a data-mutating one-off
 }
 
 
