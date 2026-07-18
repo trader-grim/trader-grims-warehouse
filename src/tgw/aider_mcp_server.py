@@ -269,6 +269,18 @@ def aider_run_task(
             'error': f'invalid mode {mode!r}; must be "edit" or "architect"',
         })
 
+    # Structural input validation first, against _REPO_ROOT — before
+    # _ensure_worktree(), which shells out to live git and needs a real
+    # branch checked out (fails on a detached-HEAD checkout, e.g. CI's
+    # actions/checkout). Bad input shouldn't require creating a worktree
+    # to be rejected. Paths get re-resolved against the real work_dir
+    # below once the worktree exists.
+    if not files:
+        return json.dumps({'ok': False, 'error': 'files list is empty'})
+    _, err = _resolve_files(files, base=_REPO_ROOT)
+    if err:
+        return json.dumps({'ok': False, 'error': err})
+
     if not task_slug or not task_slug.strip():
         return json.dumps({
             'ok': False,
