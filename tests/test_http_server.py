@@ -3932,6 +3932,32 @@ def test_item_detail_save_ebay_draft_js_sends_cleared_aspects(env):
     assert "data-initial=" in r.text  # rendered by loadCatCtx(), not this response, but the setter must exist
 
 
+def test_category_context_js_shows_off_list_selection_value():
+    """Todo #1467 (Dave, 2026-07-16): a filled-in, normal ('same' layer,
+    not custom/orphaned) aspect that uses a SELECTION_ONLY control (a
+    `<select>`) rendered with NO `<option>` marked selected whenever its
+    stored value wasn't among the CURRENT category's allowed_values (e.g.
+    after a category change narrowed the option list) — real live case:
+    Material="Cloisonne" on tgw202605051207245, category "Porcelain" only
+    allows Material="Porcelain". With no <option selected>, the browser
+    silently falls back to the first/blank option, so a genuinely filled
+    field rendered indistinguishable from an empty one ("Dave initially
+    didn't see it was filled"). Not a data bug — the stored value was
+    correct throughout, only the <select>'s rendering discarded it.
+
+    Fix mirrors the pre-existing `dl-condition-select` "not valid for this
+    category, please fix" fallback-option pattern a few lines above this
+    exact code in `_CATEGORY_CONTEXT_IIFE`: when the current value isn't in
+    allowed_values, prepend an extra selected <option> carrying the real
+    value (with a "not in this category's list" hint) instead of silently
+    dropping it. This locks in that the served JS contains that fallback."""
+    src = http_server._CATEGORY_CONTEXT_IIFE
+    assert "SELECTION_ONLY" in src
+    assert "var offList=cur&&asp.allowed_values.indexOf(cur)===-1;" in src
+    assert "if(offList)opts=" in src
+    assert "not in this category" in src
+
+
 # ---------------------------------------------------------------------------
 # Todo #1464 (Tigwa's field-set-boundary audit, invariant C12/C14): the
 # generic PATCH endpoint must not accept a caller-supplied full Set A/Set B
