@@ -519,24 +519,31 @@ Dave remembering a monthly physical swap — automate the distribution the
 same way the rest of TGW automates everything else, and reserve the
 human step for the one piece that must never be automated.
 
-**Where the line should probably sit, not yet decided:** the *encrypted
+**Where the line sits — settled by Dave, 2026-07-18:** the *encrypted
 bundle* (already public-key-encrypted with age) is safe to fan out over
 any synced channel — Syncthing to a tablet, `tgw-gdrive:`, doesn't matter,
-compromise of the ciphertext alone isn't a secrets leak. The *decryption
-identity + its passphrase* is the actual secret; if that gets swept into
-the same automated sync, the design has quietly removed its own air-gap
-along with the manual-swap annoyance. A credible redesign keeps that one
-artifact on a deliberately manual, offline anchor (paper/safe, as now)
-while making bundle *distribution* fully automatic.
+compromise of the ciphertext alone isn't a secrets leak, so bundle
+*distribution* is fully in scope for automation. The *decryption identity
++ its passphrase* stays physical, permanently — Dave, verbatim: "the
+secret key is always a physical and cleverly preserved in 2 disconnected
+locations." That's a firmer, more specific requirement than the current
+A3 design's single-fob keychain↔safe rotation: not "at least one offline
+copy that rotates," but two independently-held physical copies that never
+share a location, full stop. Automation work should not touch this half
+of the design at all — only the bundle-distribution half is in scope for
+the redesign.
 
 ### Promotion criteria
 
 - [ ] Dave schedules the "next big planning session" this was explicitly
       deferred to
-- [ ] Decide the identity/passphrase boundary explicitly before any
-      automation work starts — this is the one design decision that
-      determines whether the redesign strengthens or weakens the actual
-      security guarantee, not just the convenience
+- [ ] Design the "2 disconnected physical locations" mechanism for the
+      identity/passphrase explicitly — current A3 already rotates two USB
+      fobs (keychain ↔ safe) but that's a single fob moving between two
+      places over time, not two fobs simultaneously existing in two
+      places at once; confirm which Dave means and whether the existing
+      rotation already satisfies it or needs a second, permanently-static
+      copy added
 - [ ] Inventory which Syncthing folders/devices and cloud remotes are
       genuinely suitable recovery targets (offline-capable, not
       permanently on the same network/power as tgw-prod) vs. which just
