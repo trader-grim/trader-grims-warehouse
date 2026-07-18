@@ -1,6 +1,7 @@
 # PP-CATIONIX-001 — CatioNIX: TGW Platform as Standalone AI Operational Safety Platform
 
 **Also referred to as:** Catio
+**Tagline (Dave, 2026-07-18):** **“Catio — Harness your cats. Keep them safe.”**
 **Filed:** 2026-06-20 (as a FUTURE-IDEAS concept)
 **PROMOTED to active PP: 2026-07-11**, by Dave's direct decision, ahead of its
 own originally-stated promotion criteria (see "Promotion — advanced ahead of
