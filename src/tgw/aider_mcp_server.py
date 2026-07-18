@@ -126,6 +126,51 @@ def _slugify_task_slug(task_slug: str) -> tuple[str, str | None]:
     return task_slug, None
 
 
+def _build_preflight_context(work_dir: Path) -> str:
+    """Surface the same class of Plan Vault awareness Claude's own sessions
+    get automatically from `.claude/hooks/session-start-briefing.py`
+    (SessionStart hook) — inbox file count/names + `tgw plan check`
+    warnings — into an Aider task's initial prompt.
+
+    Best-effort: any failure here degrades to a short note rather than
+    blocking the task (this is context, not a gate).
+    """
+    lines = ['## Plan Vault preflight (auto-injected, PP-HERMES-EA-001)']
+
+    inbox_dir = work_dir / 'docs/TGW-Plan-Vault/inbox/claude'
+    try:
+        inbox_files = sorted(p.name for p in inbox_dir.glob('*.md'))
+    except Exception:
+        inbox_files = None
+    if inbox_files is None:
+        lines.append('- inbox/claude: could not read (skipped)')
+    elif inbox_files:
+        shown = ', '.join(inbox_files[:10])
+        more = f' (+{len(inbox_files) - 10} more)' if len(inbox_files) > 10 else ''
+        lines.append(f'- inbox/claude: {len(inbox_files)} file(s): {shown}{more}')
+    else:
+        lines.append('- inbox/claude: empty')
+
+    try:
+        proc = subprocess.run(
+            ['tgw', 'plan', 'check'],
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        check_out = (proc.stdout or proc.stderr or '').strip()
+        lines.append(f'- `tgw plan check`: {check_out[:800] or "(no output)"}')
+    except Exception as exc:
+        lines.append(f'- `tgw plan check`: could not run ({exc})')
+
+    lines.append(
+        '- If anything above is directly relevant to the files you are about '
+        'to edit, take it into account before proceeding.'
+    )
+    return '\n'.join(lines) + '\n'
+
+
 def _ensure_worktree(task_slug: str) -> tuple[Path, str | None]:
     """Create (or reattach to) the isolated worktree+branch for one task,
     matching tgw-coder's contract (PP-HERMES-EA-001, mandatory 2026-07-13)
@@ -201,15 +246,15 @@ def aider_run_task(
         mode: "edit" — deepseek-v4-flash edits directly (default, fast, good
             for focused changes).  "architect" — a planning pass first, then
             edits applied (better for multi-file refactors).
-        task_slug: "<todo-id>-<slug>" (e.g. "1358-aider-worktree-fix"). When
-            given, runs in an isolated worktree at
-            /opt/TGW/var/worktrees/<task_slug> on branch task/<task_slug> —
-            the same mandatory-isolation contract tgw-coder follows
-            (PP-HERMES-EA-001). Reattaches if the worktree already exists.
-            Omit ONLY for a trivial one-off edit with no todo behind it; that
-            runs against the shared checkout, same as before this param
-            existed — never do this for anything you'd want reviewed/stitched
-            as a task branch.
+        task_slug: REQUIRED. "<todo-id>-<slug>" (e.g. "1358-aider-worktree-fix").
+            Runs in an isolated worktree at /opt/TGW/var/worktrees/<task_slug>
+            on branch task/<task_slug> — the same mandatory-isolation
+            contract tgw-coder follows (PP-HERMES-EA-001). Reattaches if the
+            worktree already exists. There is no shared-checkout fallback:
+            an empty/omitted task_slug used to silently run directly against
+            the shared checkout with auto-commits enabled (todo #1458) — now
+            rejected outright rather than approval-gated, since no legitimate
+            caller was found depending on that path.
 
     Returns JSON: {ok, exit_code, output, diff, duration_s}
     """
@@ -219,14 +264,24 @@ def aider_run_task(
             'error': f'invalid mode {mode!r}; must be "edit" or "architect"',
         })
 
-    work_dir = _REPO_ROOT
-    if task_slug:
-        task_slug, err = _slugify_task_slug(task_slug)
-        if err:
-            return json.dumps({'ok': False, 'error': err})
-        work_dir, err = _ensure_worktree(task_slug)
-        if err:
-            return json.dumps({'ok': False, 'error': err})
+    if not task_slug or not task_slug.strip():
+        return json.dumps({
+            'ok': False,
+            'error': (
+                'task_slug is required — every aider_run_task dispatch must run '
+                'in its own isolated worktree ("<todo-id>-<slug>", e.g. '
+                '"1358-aider-worktree-fix"), matching tgw-coder\'s mandatory '
+                'worktree-isolation contract (PP-HERMES-EA-001). There is no '
+                'shared-checkout fallback (todo #1458).'
+            ),
+        })
+
+    task_slug, err = _slugify_task_slug(task_slug)
+    if err:
+        return json.dumps({'ok': False, 'error': err})
+    work_dir, err = _ensure_worktree(task_slug)
+    if err:
+        return json.dumps({'ok': False, 'error': err})
 
     paths, err = _resolve_files(files, base=work_dir)
     if err:
@@ -234,12 +289,15 @@ def aider_run_task(
     if not paths:
         return json.dumps({'ok': False, 'error': 'files list is empty'})
 
+    preflight = _build_preflight_context(work_dir)
+    full_prompt = f'{preflight}\n{prompt}'
+
     msg_file = None
     try:
         with tempfile.NamedTemporaryFile(
             mode='w', suffix='.md', prefix='aider_task_', delete=False
         ) as tf:
-            tf.write(prompt)
+            tf.write(full_prompt)
             msg_file = tf.name
 
         cmd = [str(_AIDER_BIN), '--yes', '--message-file', msg_file]
@@ -248,15 +306,13 @@ def aider_run_task(
         cmd += [str(p) for p in paths]
 
         env = {**os.environ, **_API_KEYS}
-        if task_slug:
-            # Matches tgw-coder's documented worktree gotchas (todo #1374):
-            # the tgw venv's editable install + psycopg2's libz.so.1 both
-            # need these or a worktree run silently tests/imports the wrong
-            # copy of the code.
-            env['PYTHONPATH'] = f"{work_dir / 'src'}:{env.get('PYTHONPATH', '')}"
-            env['LD_LIBRARY_PATH'] = (
-                f"{env.get('NIX_LD_LIBRARY_PATH', '')}:{env.get('LD_LIBRARY_PATH', '')}"
-            )
+        # Matches tgw-coder's documented worktree gotchas (todo #1374): the
+        # tgw venv's editable install + psycopg2's libz.so.1 both need these
+        # or a worktree run silently tests/imports the wrong copy of the code.
+        env['PYTHONPATH'] = f"{work_dir / 'src'}:{env.get('PYTHONPATH', '')}"
+        env['LD_LIBRARY_PATH'] = (
+            f"{env.get('NIX_LD_LIBRARY_PATH', '')}:{env.get('LD_LIBRARY_PATH', '')}"
+        )
         t0 = time.monotonic()
 
         proc = subprocess.run(
