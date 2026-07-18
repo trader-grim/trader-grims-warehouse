@@ -1,0 +1,59 @@
+# Aider repo-map / context noise filter for TGW (Dave, 2026-07-15).
+# .gitignore already excludes these paths from the repo; this is defense-in-depth
+# so Aider's repo map and /add never pull them in even under --add-gitignore-files.
+# Source research: docs/TGW-Plan-Vault/inbox/tigwa/Deepseek-v4-flash-aider-config-tweaks.txt
+#
+# Now tracked in git (todo #1424, see .gitignore's !.aiderignore note) so that
+# every fresh `git worktree add` (aider_run_task's task_slug isolation path)
+# actually gets this file, not just whichever checkout someone hand-edited it in.
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# Flutter/Dart (apps/tgw_app is the live app; flutter/ is the vendored 2.3GB SDK clone)
+apps/tgw_app/build/
+apps/tgw_app/.dart_tool/
+flutter/
+*.g.dart
+*.freezed.dart
+
+# Git / editor / secrets
+.git/
+.aider*
+!.aider.conf.yml
+!.aiderignore
+.env
+.env.*
+secrets/
+
+# Large / generated data, not source
+tgwcatalog.json
+tgwcatalog.csv
+catalog.migrated.json*
+*.log
+
+# Repo-root symlinks into /home/db/tgw-flake/ (todo #1365) -- tgw has no read
+# access into /home/db, and `nix` resolves to a directory. Aider's --yes
+# mention-auto-add treats git-tracked symlinks exactly like regular tracked
+# files (GitRepo.get_tracked_files() adds any blob-type tree entry, and git
+# stores symlinks as blobs), so any reply that mentions the word "nix" while
+# discussing this exact problem gets it auto-added, the read fails
+# (IsADirectoryError / PermissionError), the edit can't apply, and the retry
+# loop burns the hardcoded 3-reflection cap without ever landing a fix
+# (todo #1424, reproduced 3x on todo #1365). GitRepo.ignored_file() already
+# consults this file before returning "addable" files, so this is a complete
+# fix at the config layer -- no code change to aider_mcp_server.py needed.
+/nix
+/flake.nix
+/flake.lock
