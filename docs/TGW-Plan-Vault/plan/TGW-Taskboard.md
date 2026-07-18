@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-07-18 20:23 UTC — 141 open, 318 done in the last 7 days._
+_Rendered 2026-07-18 20:30 UTC — 141 open, 318 done in the last 7 days._
 
 ## admin (17 open)
 
