@@ -45,6 +45,16 @@ landed). Changes shipped in `~/tgw-flake`:
 **Also fixed:** `tgw-restore.sh` bug; `TGW-VAULT-RESTORE.md` written
 covering both restore paths, live-verified dry-run.
 
+**A3 redesign — promoted from FUTURE-IDEAS 2026-07-18.** Automate the
+encrypted secrets bundle's *distribution* (new Syncthing leg to a1131,
+alongside the existing GDrive leg), demoting the manual USB-fob swap from
+load-bearing to a supplementary true-air-gap copy. Passphrase/identity
+custody is Dave's personal, undisclosed, out of scope. Honest 3-2-1 note:
+a1131 shares tgw-prod's site, so only GDrive is genuinely off-site today —
+a tablet that actually leaves the premises would be the missing leg, open
+question for Dave on which device qualifies. A7 (bulk-data physical-drive
+rotation) stays a separate tier. Full design: `PLAN-backup-dr.md` §5.5.
+
 **Separate, newly-discovered issue (todo #1264):** the `tgw-cloud-sync.service`
 run kicked off above did NOT succeed — it failed after 43 minutes with a
 Google Drive API 403 `RATE_LIMIT_EXCEEDED` (`defaultPerMinutePerProject`,

@@ -170,6 +170,12 @@ swapoff /dev/vg_tgw/swap && mkswap /dev/vg_tgw/swap && swapon /dev/vg_tgw/swap
 ### Promotion criteria
 Ready to promote when: Dave explicitly approves the plan, sda5 decision is made, and a maintenance window is available (requires reboot). Reference: `inbox/archive/20260626-lvm-nix-cache-research.md`.
 
+**Hold, 2026-07-18 (Dave):** intends to get a SATA-to-NGFF adapter and swap
+the internal HDD for an equal-size SSD soon, then replan storage from that
+new baseline. Don't promote/build this plan as drafted — the disk topology
+it's based on (sda5/sda6/sda7 on a spinning HDD) is about to change. Revisit
+after the hardware swap lands.
+
 ---
 
 **PP-CATIONIX-001 promoted to active PP 2026-07-11** — full content moved to
@@ -485,73 +491,10 @@ Inventory API `sku`/offer fields TGW already sends, or needs its own new field m
 - [ ] Decide replace-vs-supplement relative to the existing picklist-line mechanism before
       touching `build_listing_description()`
 
-## Automate secrets/DR recovery distribution — remove the manual USB-swap step from PP-BACKUP-001 A3/A7
-
-**Dave, 2026-07-18, during the overnight sprint, prompted by fixing `tgw-secrets-backup`'s
-broken remote reference (todo #1521):** "Previously we have been looking at secrets and
-disaster recovery in too old fashioned of a manner. Sneakernets and usb fobs, when we have
-the google drive and phones and tablets and an existing synchronization infrastructure.
-Let's take my frail human tendencies out of the recovery loop."
-
-### Current design (PP-BACKUP-001 A3/A7)
-
-- A3: monthly `tgw-secrets-backup` timer produces an age-encrypted bundle
-  (`secrets/` + `config/`), copies it to cloud (`tgw-gdrive:`, just fixed
-  this session — was silently broken, had never run successfully) and to
-  whichever physical `TGW-SECRETS` USB fob happens to be mounted locally.
-  Recovery model depends on Dave manually rotating two USB fobs
-  (keychain ↔ safe) every month so a reasonably current one is always
-  physically off-site/offline.
-- A7: seven physical drives (`TGW-OFFLINE-A` + 6 more), each connected in
-  turn for a manual `tgw-offline-setup` pass — same class of
-  human-in-the-loop physical rotation discipline, at larger scale (todo
-  #146/#147).
-
-### The idea
-
-Dave's framing: we already run infrastructure that does synchronized,
-automated, multi-device distribution as its actual job — Syncthing
-(already moving the Plan Vault between `db`/`tgw`/a1131/Tigwa), the
-now-working `tgw-gdrive:` cloud remote, and an existing device fleet
-(4 tablets, 6 cameras, see `reference-device-fleet-inventory` memory) that
-could each hold a synced copy. Recovery readiness shouldn't depend on
-Dave remembering a monthly physical swap — automate the distribution the
-same way the rest of TGW automates everything else, and reserve the
-human step for the one piece that must never be automated.
-
-**Where the line sits — settled by Dave, 2026-07-18:** the *encrypted
-bundle* (already public-key-encrypted with age) is safe to fan out over
-any synced channel — Syncthing to a tablet, `tgw-gdrive:`, doesn't matter,
-compromise of the ciphertext alone isn't a secrets leak, so bundle
-*distribution* is fully in scope for automation. The *decryption identity
-+ its passphrase* stays physical, permanently — Dave, verbatim: "the
-secret key is always a physical and cleverly preserved in 2 disconnected
-locations." That's a firmer, more specific requirement than the current
-A3 design's single-fob keychain↔safe rotation: not "at least one offline
-copy that rotates," but two independently-held physical copies that never
-share a location, full stop. Automation work should not touch this half
-of the design at all — only the bundle-distribution half is in scope for
-the redesign.
-
-### Promotion criteria
-
-- [ ] Dave schedules the "next big planning session" this was explicitly
-      deferred to
-- [ ] Design the "2 disconnected physical locations" mechanism for the
-      identity/passphrase explicitly — current A3 already rotates two USB
-      fobs (keychain ↔ safe) but that's a single fob moving between two
-      places over time, not two fobs simultaneously existing in two
-      places at once; confirm which Dave means and whether the existing
-      rotation already satisfies it or needs a second, permanently-static
-      copy added
-- [ ] Inventory which Syncthing folders/devices and cloud remotes are
-      genuinely suitable recovery targets (offline-capable, not
-      permanently on the same network/power as tgw-prod) vs. which just
-      look automated but share tgw-prod's actual failure domain
-- [ ] Decide whether A7's larger physical-drive rotation (todo #146/#147)
-      is in scope for the same redesign or stays a deliberately separate,
-      larger-capacity, still-physical tier
-- [ ] Confirm this doesn't regress the existing 3-2-1 principle (Dave has
-      previously valued at least one genuinely offline/air-gapped copy) —
-      "no manual swap" and "no offline copy at all" are not the same
-      requirement, don't conflate them while designing
+**PP-BACKUP-001 A3 redesign — promoted 2026-07-18.** Full design (bundle-
+distribution automation via a new Syncthing leg to a1131 + existing GDrive
+leg, USB fobs demoted to supplementary air-gap tier, honest 3-2-1 check,
+open tablet-device question, A7 kept separate) moved to
+`PLAN-backup-dr.md` §5.5. Passphrase/identity custody question resolved
+same day — it's Dave's personal custody, already in two undisclosed
+locations, out of scope for automation entirely (not a design question).

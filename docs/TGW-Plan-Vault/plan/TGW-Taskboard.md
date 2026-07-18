@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-07-18 23:06 UTC — 142 open, 326 done in the last 7 days._
+_Rendered 2026-07-18 23:19 UTC — 143 open, 326 done in the last 7 days._
 
 ## admin (17 open)
 
@@ -35,7 +35,7 @@ _Rendered 2026-07-18 23:06 UTC — 142 open, 326 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ | [[TGW-Master-Plan#PP-KNOWLEDGE-001 — the knowledge & translation hub — 6-LAYER UMBRELLA, extended 2026-07-11\|PP-KNOWLEDGE-001]] |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows | [[TGW-Master-Plan#PP-DATALEARN-001 — alt-text / vision data pipeline\|PP-DATALEARN-001]] |  |
 
-## claude (92 open)
+## claude (93 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
@@ -73,6 +73,7 @@ _Rendered 2026-07-18 23:06 UTC — 142 open, 326 done in the last 7 days._
 | 1392 | 40 |  | Tigwa's knowledgebase buildout (PP-KNOWLEDGE-001, git-annex/Recoll starting point) should target PP-DATAINTEGRITY-001's use cases concretely, not build in the abstract -- starting scope: photo-integrity design legs 2/3 (open) and the status/#STATUS write-path reconciliation pass (once Dave scopes it). Dave, 2026-07-14. | [[TGW-Master-Plan#PP-DATAINTEGRITY-001 — data reconciliation & integrity track — NEW 2026-07-11\|PP-DATAINTEGRITY-001]] |  |
 | 1480 | 40 |  | PP-STORAGE-001: file size_class_ranges implementation packet once Dave supplies real weight/dimension ranges per size_class (flat/packet/small_box) | [[TGW-Master-Plan#PP-STORAGE-001 — semi-chaotic storage: size_class as a size/weight signal\|PP-STORAGE-001]] |  |
 | 1484 | 40 |  | PP-RUNNERCOMMS-001 mailbox mechanism: tgw mailbox send CLI + Claude Code skill + MCP tool + generalize SessionStart hook's inbox-count surfacing to any actor | [[TGW-Master-Plan#PP-RUNNERCOMMS-001 — the runner-question channel — NEW 2026-07-14\|PP-RUNNERCOMMS-001]] |  |
+| 1541 | 40 |  | PP-BACKUP-001 A3 redesign: build the Syncthing TGW-Secrets-Bundle read-only share (tgw-prod -> a1131) and extend tgw-secrets-backup to write into it, per PLAN-backup-dr.md sec 5.5. Genuine off-site leg is separately resolved: Dave is building a phone/Tasker script to refresh the USB fob directly (operator-side, not a TGW code task) -- this todo covers only the tgw-prod-to-a1131 Syncthing leg + script extension. | [[TGW-Master-Plan#PP-BACKUP-001 — backup + DR\|PP-BACKUP-001]] |  |
 | 1141 | 45 |  | Plan item: have Perplexity footnote/cite our master plan + key PP docs with links to our own reference documents and external resources (similar to the numbered-footnote style already used in Perplexity research drops like pricing-research-ui.md) -- grounds plan assertions in verifiable sources, ties into PP-DOCLIB-001's cross-reference goals | [[TGW-Master-Plan#PP-KNOWLEDGE-001 — the knowledge & translation hub — 6-LAYER UMBRELLA, extended 2026-07-11\|PP-KNOWLEDGE-001]] |  |
 | 1232 | 45 |  | PROPOSAL (not started): bring D-Link DIR-868L router into TGW ecosystem via DD-WRT (OpenWrt doesn't support this Broadcom chipset) -- VLAN segmentation, router health in tgw health/digest, DHCP reservation audit, local DNS, WireGuard, config backup. Full research + candidate services in docs/ai-plans/router-dlink-dir868l-ecosystem.md | [[TGW-Master-Plan#PP-HARDWARE-001 — IT / hardware track (drive-space re-evaluation absorbed) — NEW 2026-07-11\|PP-HARDWARE-001]] |  |
 | 1335 | 45 |  | PP-PORTABLE-CATALOG-001: Phase A remediation (connectivity_plus wiring, outbox/offline-read overlay, retry cap, sync-state UI) — needs Dave's go, see pp/PP-PORTABLE-CATALOG-001.md | [[TGW-Master-Plan#PP-PORTABLE-CATALOG-001 — offline/portable catalog sync (Flutter) — first real design doc 2026-07-11\|PP-PORTABLE-CATALOG-001]] |  |
