@@ -829,20 +829,51 @@ def check_quota(cfg: Dict[str, Any]) -> Dict[str, Any]:
                    f"remaining ({or_limit.get('limit_reset')})")
         or_low = remaining < (0.1 * or_limit['limit'])
 
+    # todo #1337 / PP-QUOTA-001: proactive low-balance warning for the three
+    # direct-LLM providers. DeepSeek gets a real live balance check;
+    # Google/Anthropic (no balance API — see quota.py module docstring)
+    # get an estimated-spend-today translation of the existing call-count
+    # budget, using real ai_usage token counts x published pricing.
+    bal = {}
+    bal_note = ''
+    bal_low = False
+    try:
+        bal = quota.balance_status(cfg)
+        ds = bal.get('deepseek')
+        parts = []
+        if ds is not None:
+            parts.append(f"deepseek balance: ${ds['total_balance_usd']:.2f}"
+                         + (' [LOW]' if ds.get('low') else ''))
+        est = bal.get('estimated_cost_usd') or {}
+        if est:
+            parts.append('est. spend today: ' + ', '.join(
+                f"{pool}=${amt:.2f}" + (' [LOW]' if bal.get('cost_warn', {}).get(pool) else '')
+                for pool, amt in sorted(est.items())))
+        if parts:
+            bal_note = ' | ' + '; '.join(parts)
+        bal_low = bool(bal.get('low_balance'))
+    except Exception as exc:  # noqa: BLE001 — nice-to-have signal, never fail health
+        log.warning('quota.balance_status failed: %s', exc)
+
     if incidents:
         return _result('quota', False,
-                       f'{incidents} × 429 incident(s) today — {spent_summary}{or_note}',
+                       f'{incidents} × 429 incident(s) today — {spent_summary}{or_note}{bal_note}',
                        (time.time() - t) * 1000, warn=True,
                        incidents_today=incidents, pools=st.get('pools', {}),
-                       openrouter_key_limit=or_limit)
-    if hot or or_low:
-        reason = ', '.join(sorted(hot)) if hot else 'openrouter key near its limit'
+                       openrouter_key_limit=or_limit, balance=bal)
+    if hot or or_low or bal_low:
+        reasons = list(sorted(hot))
+        if or_low:
+            reasons.append('openrouter key near its limit')
+        if bal_low:
+            reasons.append('direct-LLM provider low balance/spend')
+        reason = ', '.join(reasons)
         return _result('quota', True,
-                       f"background halted: {reason} — {spent_summary}{or_note}",
+                       f"background halted: {reason} — {spent_summary}{or_note}{bal_note}",
                        (time.time() - t) * 1000, warn=True, pools=st.get('pools', {}),
-                       openrouter_key_limit=or_limit)
-    return _result('quota', True, f'{spent_summary}{or_note}', (time.time() - t) * 1000,
-                   pools=st.get('pools', {}), openrouter_key_limit=or_limit)
+                       openrouter_key_limit=or_limit, balance=bal)
+    return _result('quota', True, f'{spent_summary}{or_note}{bal_note}', (time.time() - t) * 1000,
+                   pools=st.get('pools', {}), openrouter_key_limit=or_limit, balance=bal)
 
 
 # ---------------------------------------------------------------------------
