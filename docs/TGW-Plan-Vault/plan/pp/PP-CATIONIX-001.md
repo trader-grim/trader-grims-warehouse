@@ -320,6 +320,32 @@ Account-specific balance/expiry verification (signed-in screenshots) is real
 remaining work, but it's Dave's to do, not Claude's/Tigwa's — tracked as its
 own follow-up rather than left open under the research todo (#1333, closed).
 
+## Stripe Minions applicability matrix (2026-07-18) — validated, four todos filed
+
+Dave: "I believe our curated library approach is much stronger than 500 tools" —
+confirms the matrix's read that TGW's small curated MCP surface is a strength
+relative to Stripe's Toolshed model, not a gap to close. Full matrix:
+`dev-workflow/research/CATIO-APPLICABILITY-MATRIX-2026-07-18.md`.
+
+Three mechanical gaps (all "mechanize an existing prose contract," no new
+infra) filed as todos, each still needing its own packet spec before
+execution:
+- **#1537** (PP-AGENT-DISCIPLINE-001) — mechanize `tgw-coder` worktree
+  isolation, closing the E11 "100% prose" gap.
+- **#1538** (PP-AGENT-DISCIPLINE-001) — automated lint+test gate on a task
+  branch before its result manifest is produced (today `pytest -q` passing
+  is a claimed acceptance criterion, not something actually run+verified).
+- **#1539** (PP-HERMES-EA-001) — hard-capped fix-attempt counter for agent
+  self-correction loops, closing the 2026-07-16 cross-check's confirmed-open
+  "out-of-control trigger/fix-attempt cap" gap.
+
+One design-only item — **#1540** (this PP) — name agent task execution as an
+explicit state machine (`prepared → isolated_execution → deterministic_checks
+→ review_pending → accepted|rejected|remediation_required`) so the three
+mechanical fixes above compose into one contract instead of three unrelated
+hooks. Design pass only; no implementation authorized until Dave reviews the
+named states/transitions/guards.
+
 ## Sequencing — explicitly unchanged (Dave, 2026-07-11)
 
 "That doesn't change much yet." [[project-catio-sequencing]]'s existing
