@@ -132,6 +132,16 @@ If steps 2–4 pass with no unresolved trigger:
   — the actual stitch action is a separate, explicit step performed by
   Dave or a Claude session, per PP-HERMES-EA-001's "stitch step
   unchanged." This skill's job ends at "cleared for stitch."
+- **Required pre-merge step, whoever performs the stitch (todo #1366,
+  PP-HERMES-EA-001):** this REVIEW.md write got silently skipped for 6 of
+  7 concurrent-batch-stitched todos in one session (#1280/#1282/#1284/
+  #1288/#1291/#1297), only caught and backfilled after the fact. Before
+  actually merging/stitching any batch, run the mechanical gate —
+  `python3 scripts/check_review_md.py <id> [<id2> ...]` (or
+  `--scan-branches` to check every local `todo/<id>-<slug>` branch at
+  once) — and do not stitch any id it reports missing. This does not
+  replace this skill's own step 6 write; it's the check that catches the
+  write having silently not happened.
 
 ## Constraints
 
