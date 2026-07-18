@@ -79,6 +79,17 @@ def main() -> None:
     ap.add_argument("--out", default="scripts/pilot_1481_out")
     args = ap.parse_args()
 
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    from tgw.logging import announce_script_run
+    announce_script_run(
+        'pilot_1481_clip_embed.py',
+        'PP-VISION-001 Phase 1 pilot -- CPU-only CLIP embedding feasibility '
+        '(read-only against ItemData, never writes item data)',
+        sample_size=args.sample_size, pair_skus=args.pair_skus,
+        model=args.model, pretrained=args.pretrained, seed=args.seed, out=args.out,
+    )
+
     rng = random.Random(args.seed)
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -87,8 +98,6 @@ def main() -> None:
     import open_clip
     from PIL import Image
 
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
     from tgw.fingerprint import dhash, color_histogram, hamming, histogram_distance
 
     print(f"Loading {args.model} / {args.pretrained} (CPU)...")

@@ -143,3 +143,83 @@ class TestRunOnceGuard:
         assert len(calls) == 2
         recorded = json.loads(marker.read_text())['requeued_job_ids']
         assert recorded == ['job-0']
+
+
+class TestDedupeKeyIsStableNotTimeDependent:
+    """todo #1250 acceptance: the dedupe key must be a pure function of its
+    inputs, never time-dependent -- repeated calls with the SAME (sku,
+    job_id) must produce the IDENTICAL key every time, including across
+    calls separated in wall-clock time."""
+
+    def test_same_input_produces_same_key_across_repeated_calls(self):
+        keys = [requeue_mod._make_dedupe_key('tgw123', 'job-abc') for _ in range(5)]
+        assert len(set(keys)) == 1
+        assert keys[0] == 'ebay_draft:tgw123:requeue:job-abc'
+
+    def test_same_input_produces_same_key_even_with_time_elapsed(self, monkeypatch):
+        import time as time_mod
+        k1 = requeue_mod._make_dedupe_key('tgw123', 'job-abc')
+        # Simulate time passing between calls -- a timestamp-based key
+        # (the original #1206 bug) would differ here; the fixed one must not.
+        real_time = time_mod.time
+        monkeypatch.setattr(time_mod, 'time', lambda: real_time() + 999999)
+        k2 = requeue_mod._make_dedupe_key('tgw123', 'job-abc')
+        assert k1 == k2
+
+    def test_different_inputs_produce_different_keys(self):
+        assert (requeue_mod._make_dedupe_key('tgw1', 'job-a')
+                != requeue_mod._make_dedupe_key('tgw2', 'job-a'))
+        assert (requeue_mod._make_dedupe_key('tgw1', 'job-a')
+                != requeue_mod._make_dedupe_key('tgw1', 'job-b'))
+
+
+class TestAttemptCapPerSku:
+    """todo #1250: a job_id-only marker doesn't stop an endlessly
+    re-dead-lettering SKU, because each failed retry gets a brand-new
+    job_id. Cap total requeue attempts per SKU across runs so a
+    persistently-failing item stops looping after N tries."""
+
+    def test_attempt_cap_reached_helper(self):
+        counts = {'tgw1': 2}
+        assert requeue_mod._attempt_cap_reached(counts, 'tgw1', max_attempts_per_sku=2) is True
+        assert requeue_mod._attempt_cap_reached(counts, 'tgw1', max_attempts_per_sku=3) is False
+        assert requeue_mod._attempt_cap_reached(counts, 'tgw-unseen', max_attempts_per_sku=1) is False
+
+    def test_zero_max_attempts_means_uncapped(self):
+        counts = {'tgw1': 999}
+        assert requeue_mod._attempt_cap_reached(counts, 'tgw1', max_attempts_per_sku=0) is False
+
+    def test_same_sku_stops_being_requeued_after_n_attempts_across_runs(self, tmp_path, monkeypatch):
+        # Same SKU, three separate dead-letter job_ids across three runs
+        # (simulating a job that keeps dying and getting a fresh job_id
+        # each time it's requeued and re-dead-letters). With
+        # --max-attempts-per-sku=2, only the first 2 runs should requeue;
+        # the 3rd must be skipped by the cap, not requeued a 3rd time.
+        marker = tmp_path / 'marker.json'
+        sku = 'tgw-persistent-failure'
+
+        for i in range(3):
+            rows = [(f'job-{i}', {'sku': sku}, 3)]
+            calls = _mock_common(monkeypatch, rows)
+            monkeypatch.setattr(sys, 'argv', [
+                'prog', '--apply', '--marker', str(marker), '--max-attempts-per-sku', '2',
+            ])
+            requeue_mod.main()
+            if i < 2:
+                assert len(calls) == 1, f'run {i}: expected a requeue under the cap'
+            else:
+                assert len(calls) == 0, f'run {i}: expected the attempt cap to block this requeue'
+
+        recorded = json.loads(marker.read_text())
+        assert recorded['sku_attempt_counts'][sku] == 2
+
+    def test_marker_without_attempt_counts_is_backward_compatible(self, tmp_path):
+        # Older marker files (written before the attempt-cap feature) only
+        # have 'requeued_job_ids' -- loading one must not blow up, and must
+        # treat every SKU as having zero prior attempts.
+        marker = tmp_path / 'marker.json'
+        marker.write_text(json.dumps({'requeued_job_ids': ['job-0', 'job-1']}))
+
+        already, counts = requeue_mod._load_marker_state(marker)
+        assert already == {'job-0', 'job-1'}
+        assert counts == {}
