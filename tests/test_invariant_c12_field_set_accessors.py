@@ -76,12 +76,12 @@ _ALLOWLIST = {
     (_SRC / "tgw" / "http_server.py", 1187),              # (a) accessor patch write (todo #1416, draft_listing.item_specifics)
     (_SRC / "tgw" / "http_server.py", 1192),              # (a) accessor output (full envelope) moving onward
     (_SRC / "tgw" / "http_server.py", 1205),              # (a) accessor patch write — padlock auto-sync (todo #1406/2026-07-18, inventory_record.sync_from_draft's patch)
-    (_SRC / "tgw" / "http_server.py", 1710),              # (b) revision_draft.delta
-    (_SRC / "tgw" / "http_server.py", 1712),              # (b) revision_draft.delta
-    (_SRC / "tgw" / "http_server.py", 1718),              # (a) accessor patch write (todo #1416)
-    (_SRC / "tgw" / "http_server.py", 2751),              # (a) accessor output (tgw.ebay.inventory_diff.apply_inventory_diff's patch) moving onward into _apply_patch (todo #1417)
-    (_SRC / "tgw" / "http_server.py", 2810),              # (a) category_aspect_migration's patch moving onward into _apply_patch (todo #1471)
-    (_SRC / "tgw" / "http_server.py", 5653),              # (b) revision_draft.delta — line shifted by todo #1147's /form/search + /api/search/full-text insertion
+    (_SRC / "tgw" / "http_server.py", 1725),              # (b) revision_draft.delta — line shifted +15 by todo #1522's padlock base-field/draft mirror fix
+    (_SRC / "tgw" / "http_server.py", 1727),              # (b) revision_draft.delta — line shifted +15 by todo #1522's padlock base-field/draft mirror fix
+    (_SRC / "tgw" / "http_server.py", 1733),              # (a) accessor patch write (todo #1416) — line shifted +15 by todo #1522's padlock base-field/draft mirror fix
+    (_SRC / "tgw" / "http_server.py", 2766),              # (a) accessor output (inventory_diff.apply_inventory_diff's patch) onward into _apply_patch (#1417) — shifted +15 by #1522
+    (_SRC / "tgw" / "http_server.py", 2825),              # (a) category_aspect_migration's patch moving onward into _apply_patch (#1471) — shifted +15 by #1522
+    (_SRC / "tgw" / "http_server.py", 5668),              # (b) revision_draft.delta — line shifted +15 by todo #1522's padlock base-field/draft mirror fix
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 114),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 121),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 124),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)

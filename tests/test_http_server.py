@@ -5786,21 +5786,6 @@ def test_c14_locked_top_level_field_clear_survives_unrelated_draft_save(env):
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "todo #1522 (filed by this packet, #1468): base-data padlock auto-sync "
-        "(_apply_patch's draft_listing branch, 'Padlock auto-sync (Dave, "
-        "2026-07-18)') silently restores an UNLOCKED top-level title/"
-        "description field from the stale draft_listing value on the next "
-        "unrelated draft_listing save, undoing an operator's clear with no "
-        "error and no indication — a live, previously-undiscovered instance "
-        "of the C14 bug class, found while building this detector. Locking "
-        "the field first (see the control test above) is the only "
-        "workaround, and it is NOT the default state. See this todo's "
-        "result manifest for full repro."
-    ),
-)
 def test_c14_unlocked_description_clear_reverted_by_unrelated_draft_save(env):
     client = env["client"]
     json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"

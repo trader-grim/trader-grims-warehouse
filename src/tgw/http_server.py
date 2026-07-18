@@ -1231,6 +1231,21 @@ def _apply_patch(json_path: "Path", fields: Dict[str, Any]) -> List[str]:
     doc.update(fields)
     if "catalog_verified" not in fields:
         doc.pop("catalog_verified", None)
+
+    # todo #1522 / invariant C14: an operator's direct edit (including a
+    # clear) of a top-level padlock-synced base field (title/description)
+    # must keep draft_listing's own copy of that field in agreement,
+    # otherwise the "Padlock auto-sync" block above silently resurrects
+    # the pre-edit value from a now-stale draft_listing on the very next
+    # unrelated draft_listing save (e.g. a price edit) — the base field
+    # never diverges from the draft in the first place, so there is
+    # nothing stale left for the auto-sync to overwrite it with. This
+    # mirrors base -> draft; the auto-sync block above still governs the
+    # opposite draft -> base direction and still honors the lock.
+    if isinstance(doc.get("draft_listing"), dict):
+        for _base_key in ("title", "description"):
+            if _base_key in fields:
+                doc["draft_listing"][_base_key] = fields[_base_key]
     atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True), archive_root=_cfg.get("archive_root"))
     return list(fields.keys()) + to_delete
 
