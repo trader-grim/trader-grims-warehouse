@@ -232,6 +232,7 @@ Plain Markdown; open in Obsidian for interactive mind map view where noted.
 | `TGW-Architecture-Services.md` | Service-by-service responsibility, deps, failure modes, critical invariants |
 | `TGW-Architecture-Overview.md` | System topology — how subsystems connect |
 | `TGW-NixOS-Reference.md` | NixOS bootstrap sequence, Syncthing topology, host inventory, troubleshooting |
+| `TGW-a1131-CLI-Wrapper.md` | Reaching the real `tgw` CLI from a1131 without the (unreliable) Flutter app — Tigwa's `~/.local/bin/tgw-prod` + fish-function SSH wrapper, PP-PORTABLE-CATALOG-001 |
 | `runbooks/INDEX.md` | Incident response index — dead-letter triage, pipeline stall, token failure, etc. |
 | `claude-cli.md` | Claude CLI / Antigravity config reference |
 | `echo.py` / `worker_base.py` | Starting point when writing a new worker |
