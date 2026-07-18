@@ -1,4 +1,7 @@
 {
+  "worktree": {
+    "bgIsolation": "none"
+  },
   "hooks": {
     "PreToolUse": [
       {
@@ -9,6 +12,17 @@
             "command": "python3 /opt/TGW/src/trader-grims-warehouse/.claude/hooks/flake-guard.py",
             "timeout": 10,
             "statusMessage": "Checking flake-mutation guardrail..."
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /opt/TGW/src/trader-grims-warehouse/.claude/hooks/worktree-guard.py",
+            "timeout": 10,
+            "statusMessage": "Checking worktree-isolation guardrail..."
           }
         ]
       }

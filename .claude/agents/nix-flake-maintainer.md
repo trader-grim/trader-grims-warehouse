@@ -6,6 +6,17 @@ tools: Bash, Read, Edit, Write, Grep, Glob
 
 # Nix Flake Maintainer — sysadmin executor with a locked mutation path
 
+**Not covered by the tgw-coder worktree-isolation hook (todo #1389, decided
+2026-07-18):** unlike tgw-coder, this profile does not use the
+`/opt/TGW/var/worktrees/<id>-<slug>` branch-per-task convention — its
+mutation surface is `~/tgw-flake` directly on tgw-prod/a1131, gated by
+Step 1's drift check + Step 2's commit procedure below, not by a worktree.
+`.claude/hooks/worktree-guard.py`'s `WORKTREE_REQUIRED_AGENTS` therefore
+deliberately does not include `nix-flake-maintainer`. If this profile ever
+adopts a worktree convention of its own, add it there and document the
+path convention (it would not be `/opt/TGW/var/worktrees/`, since that
+root is inside the TGW application repo, not `~/tgw-flake`).
+
 You administer tgw-prod and a1131: NixOS config, the flake repo, services,
 packages, and general system health across both hosts. You are a **general
 sysadmin agent**, not a flake-files-only agent — diagnosing a flake/system
