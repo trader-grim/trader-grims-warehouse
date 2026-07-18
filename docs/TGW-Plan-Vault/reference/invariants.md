@@ -825,6 +825,51 @@ than one path fixed reactively per incident — is the real fix for "this
 keeps happening in a new field/form every time," not yet scoped as its
 own todo.
 
+**Detector built, 2026-07-18 (todo #1468, PP-LISTEDITOR-001).** A
+fleet-wide, path-by-path round-trip suite now exists — `tests/
+test_http_server.py`'s `test_c14_*` section and `tests/test_revision.py`'s
+`TestLiveApply::test_c14_*`. Every operator-facing save path in
+`http_server.py` was inventoried; each path either got a set→save→clear→
+save→re-read round-trip test, or is explicitly excluded with a stated
+reason (see the section header comment in `test_http_server.py` and this
+todo's result manifest, `plan/packets/results/1468-RESULT.md`, for the
+full inventory). Currently GREEN (cleared value verified to persist):
+item-detail direct field edit (`PATCH /api/items/{sku}`, bare top-level
+field), the aspects form (`draft_listing.item_specifics` via the same
+endpoint), bulk edit (`POST /api/bulk/apply`), and `accept_proposals`
+(`POST /api/items/{sku}/action`). Excluded with reason (not a "clear an
+operator-supplied value" path): `inventory-diff/apply` and
+`category-aspect-migration/apply` (move data between Set A/Set B, never
+discard it), `set-template` (additive only), `photo-order`/`inventory-
+lock`/`remove-comp` (not field-value corrections).
+
+**Two NEW live instances of the C14 bug class found while building this
+detector, not yet fixed (both filed same day):**
+1. **Todo #1522** — the base-data "padlock" auto-sync
+   (`_apply_patch`'s `draft_listing` branch, the 2026-07-18 padlock
+   design) silently reverts an UNLOCKED top-level `title`/`description`
+   field's clear the next time *any* unrelated `draft_listing` field is
+   saved (e.g. a price edit) — it resyncs the base field from the stale
+   `draft_listing.description`/`.title` value with no error. Locking the
+   field first is the only workaround and is not the default state.
+   Regression test (currently `xfail`, will flip green once fixed):
+   `test_c14_unlocked_description_clear_reverted_by_unrelated_draft_save`
+   in `tests/test_http_server.py`. A control test alongside it,
+   `test_c14_locked_top_level_field_clear_survives_unrelated_draft_save`,
+   confirms locking IS an effective (if non-default) mitigation today.
+2. **Todo #1523** — `tgw/revision.py`'s `_place_delta_in_bodies` (the
+   live-push body-builder behind `POST /api/items/{sku}/revision/apply`)
+   never received the #1462 fix that made `sync.py`'s
+   `_build_offer_bodies` omit a cleared aspect key entirely rather than
+   sending an explicit blank value — eBay's Inventory API rejects an
+   empty aspect value outright per this invariant's own incident
+   narrative above. A revision-apply delta clearing an aspect sends
+   `{"Brand": [""]}` straight to eBay instead of omitting `Brand`, the
+   exact push-boundary bug #1462 fixed for the *other* push path.
+   Regression test (currently `xfail`):
+   `TestLiveApply::test_c14_aspects_delta_clear_omits_key_not_blank_value`
+   in `tests/test_revision.py`.
+
 ## E8 — The Google free tier is the operator emergency reserve ✅ (2026-07-04, session 45) — SUPERSEDED for background use 2026-07-08
 
 **Original rule (free-tier era):** Background jobs never spend the Google

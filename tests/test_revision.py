@@ -795,6 +795,37 @@ class TestLiveApply:
         assert history[0]["by"] == "test"
         assert history[0]["calls"] == result["calls"]
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "todo #1523 (filed by the C14 fleet-wide clear-value detector "
+            "packet, #1468): _place_delta_in_bodies's item_specifics/aspects "
+            "branch never got the #1462 fix (sync.py's _build_offer_bodies "
+            "omits an aspect key entirely when its value is '' — eBay's "
+            "Inventory API rejects an explicit empty-string aspect value "
+            "outright, per the C14 incident). This is the SAME cleared-"
+            "aspect-reaches-eBay-as-a-blank-value bug in a second, never-"
+            "patched push path (revision/apply's live PUT), found while "
+            "building this detector."
+        ),
+    )
+    def test_c14_aspects_delta_clear_omits_key_not_blank_value(self, tmp_path):
+        """An operator's revision-apply delta clearing 'Brand' (an accepted
+        proposal setting it to '') must omit the key from the PUT body sent
+        to eBay's Inventory API, not send Brand: [''] — eBay rejects an
+        explicit empty aspect value outright (invariant C14 incident,
+        #1462), and this push path never got that fix applied."""
+        cfg, result, puts = self._run(
+            tmp_path, {"item_specifics": {"Brand": "", "Color": ["Red"]}})
+        assert result["ok"] is True
+        inv_body = puts[0][1]
+        assert "Brand" not in inv_body["product"]["aspects"], (
+            "cleared aspect 'Brand' was sent to eBay as an explicit blank "
+            "value instead of being omitted — eBay rejects this outright, "
+            "invariant C14"
+        )
+        assert inv_body["product"]["aspects"]["Color"] == ["Red"]
+
     def test_blocking_drift_still_refuses_live(self, tmp_path):
         cfg = _make_cfg(tmp_path)
         path = _make_item_with_draft(cfg, "tgw001", delta={"live_price": 25.0},
