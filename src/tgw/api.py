@@ -540,13 +540,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--skus-only", action="store_true", dest="skus_only", help="output one SKU per line (pipe-friendly)")
 
-    p = sub.add_parser("search", help="search items by text (shorthand for list --search TEXT)")
+    p = sub.add_parser("search", help="search items by text (shorthand for list --search TEXT); --full-text hits the recoll index instead (PP-KNOWLEDGE-001 R2)")
     p.add_argument("text", nargs="?", default="", help="search text")
     p.add_argument("--location", default="")
     p.add_argument("--status", default="")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--skus-only", action="store_true", dest="skus_only")
     p.add_argument("--empty", default=None, dest="empty_field", metavar="FIELD", help="return only items where FIELD is missing/null/empty-string")
+    p.add_argument("--full-text", default=None, dest="full_text", metavar="QUERY", help="run a recoll (recollq) full-text query over the whole knowledge index instead of the item DB")
 
     p = sub.add_parser("resolve", help="resolve identifiers to a set of SKUs")
     p.add_argument("--sku", default=None)
@@ -4154,6 +4155,22 @@ def main() -> int:
             result = get_item(cfg, args.sku)
 
         elif args.op == "search":
+            if args.full_text is not None:
+                from tgw.search_full import format_results_text, run_full_text_search
+                result = run_full_text_search(args.full_text, limit=args.limit)
+                if not result.get("ok"):
+                    print(f"error: {result.get('error')}", file=sys.stderr)
+                    return 1
+                if args.skus_only:
+                    # best-effort: only SKU-shaped tokens found in result urls
+                    import re as _re
+                    for row in result["results"]:
+                        m = _re.search(r"tgw\d{17}", row.get("url", ""))
+                        if m:
+                            print(m.group(0))
+                    return 0
+                print(format_results_text(result))
+                return 0
             result = list_items(cfg, search=args.text, location=args.location, status=args.status, limit=args.limit, empty_field=args.empty_field)
             if args.skus_only:
                 for item in result["items"]:

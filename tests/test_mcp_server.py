@@ -1,4 +1,4 @@
-"""PP-MCP-001 — tests for all 10 TGW MCP tools.
+"""PP-MCP-001 — tests for all 13 TGW MCP tools.
 
 The MCP layer is what Claude itself uses to query live queue/item/health state
 and re-enqueue actions mid-session; the wrapper-to-internal contract drifted
@@ -85,10 +85,10 @@ def _write_item(cfg, sku, doc):
 # ---------------------------------------------------------------------------
 
 EXPECTED_TOOLS = {
-    "tgw_get_item", "tgw_search_items", "tgw_queue_status", "tgw_health",
-    "tgw_enqueue", "tgw_get_todo", "tgw_add_suggest", "tgw_dead_letter",
-    "tgw_hint_trail", "tgw_catalog_verify", "tgw_mailbox_send",
-    "tgw_get_plan_brief",
+    "tgw_get_item", "tgw_search_items", "tgw_search_full", "tgw_queue_status",
+    "tgw_health", "tgw_enqueue", "tgw_get_todo", "tgw_add_suggest",
+    "tgw_dead_letter", "tgw_hint_trail", "tgw_catalog_verify",
+    "tgw_mailbox_send", "tgw_get_plan_brief",
 }
 
 
@@ -96,7 +96,7 @@ def test_exactly_ten_tools_present():
     present = {n for n in dir(mcp_server)
               if n.startswith("tgw_") and callable(getattr(mcp_server, n))}
     assert present == EXPECTED_TOOLS
-    assert len(present) == 12
+    assert len(present) == 13
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +158,43 @@ def test_search_items_error_is_caught(cfg, monkeypatch):
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     out = json.loads(mcp_server.tgw_search_items(search="x"))
     assert out["ok"] is False and "boom" in out["error"]
+
+
+# ---------------------------------------------------------------------------
+# tgw_search_full (PP-KNOWLEDGE-001 R2, todo #1147)
+# ---------------------------------------------------------------------------
+
+def test_search_full_passes_through(cfg, monkeypatch):
+    calls = {}
+
+    def fake_run(query, limit=20):
+        calls["query"] = query
+        calls["limit"] = limit
+        return {"ok": True, "query": query, "count": 1, "elapsed_ms": 5.0,
+                "results": [{"url": "file:///x", "title": "x", "mtype": "text/plain",
+                             "fbytes": "10", "abstract": ""}]}
+
+    monkeypatch.setattr("tgw.search_full.run_full_text_search", fake_run)
+    out = json.loads(mcp_server.tgw_search_full("tgw20260101000000000", limit=50))
+    assert out["ok"] is True
+    assert calls["query"] == "tgw20260101000000000"
+    assert calls["limit"] == 50
+    assert out["results"][0]["url"] == "file:///x"
+
+
+def test_search_full_error_is_caught(cfg, monkeypatch):
+    monkeypatch.setattr("tgw.search_full.run_full_text_search",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    out = json.loads(mcp_server.tgw_search_full("x"))
+    assert out["ok"] is False and "boom" in out["error"]
+
+
+def test_search_full_propagates_ok_false(cfg, monkeypatch):
+    monkeypatch.setattr("tgw.search_full.run_full_text_search",
+                        lambda *a, **k: {"ok": False, "error": "recollq not found on PATH"})
+    out = json.loads(mcp_server.tgw_search_full("x"))
+    assert out["ok"] is False
+    assert "recollq" in out["error"]
 
 
 # ---------------------------------------------------------------------------

@@ -135,6 +135,38 @@ def tgw_search_items(
 
 
 # ---------------------------------------------------------------------------
+# tgw_search_full — full-text search over the recoll knowledge index
+# (PP-KNOWLEDGE-001 Track R2, todo #1147). Distinct from tgw_search_items:
+# that tool searches the structured item DB (title/location/status fields);
+# this one searches everything recoll has indexed (ItemData/ItemArchive/
+# ItemCatalog/plan vault + mounted drives, 441K+ docs) — the "front door"
+# every agent should use for recovery/audit-style lookups instead of ad-hoc
+# grep/find over mounted paths.
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def tgw_search_full(query: str, limit: int = 20) -> str:
+    """Full-text search over the entire recoll knowledge index (files,
+    ItemData/ItemArchive/ItemCatalog, plan vault, mounted drives — NOT just
+    the structured item DB; use tgw_search_items for that).
+
+    Args:
+        query: recoll query-language string (implicit AND, -exclude,
+            field:term, "phrase", OR). Passed through verbatim.
+        limit: Maximum results to return (default 20, max 200)
+
+    Returns JSON {ok, query, count, elapsed_ms, results:[{url, title,
+    mtype, fbytes, abstract}, ...]}.
+    """
+    from tgw.search_full import run_full_text_search
+    try:
+        result = run_full_text_search(query, limit=limit)
+        return json.dumps(result, default=str)
+    except Exception as exc:
+        return json.dumps({'ok': False, 'error': str(exc)})
+
+
+# ---------------------------------------------------------------------------
 # tgw_queue_status — job counts per queue + state
 # ---------------------------------------------------------------------------
 
