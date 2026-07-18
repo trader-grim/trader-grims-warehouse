@@ -14,6 +14,7 @@ invoked with include_ebay=False inside the tool, so the dead token is off-path.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 
 import pytest
@@ -87,6 +88,7 @@ EXPECTED_TOOLS = {
     "tgw_get_item", "tgw_search_items", "tgw_queue_status", "tgw_health",
     "tgw_enqueue", "tgw_get_todo", "tgw_add_suggest", "tgw_dead_letter",
     "tgw_hint_trail", "tgw_catalog_verify", "tgw_mailbox_send",
+    "tgw_get_plan_brief",
 }
 
 
@@ -94,7 +96,7 @@ def test_exactly_ten_tools_present():
     present = {n for n in dir(mcp_server)
               if n.startswith("tgw_") and callable(getattr(mcp_server, n))}
     assert present == EXPECTED_TOOLS
-    assert len(present) == 11
+    assert len(present) == 12
 
 
 # ---------------------------------------------------------------------------
@@ -432,3 +434,46 @@ def test_catalog_verify_error_caught(cfg, monkeypatch):
                         lambda *a, **k: (_ for _ in ()).throw(ValueError("bad")))
     out = json.loads(mcp_server.tgw_catalog_verify())
     assert out["ok"] is False and "bad" in out["error"]
+
+
+# ---------------------------------------------------------------------------
+# tgw_get_plan_brief — deterministic, source-linked Plan Vault retrieval
+# ---------------------------------------------------------------------------
+
+def test_get_plan_brief_returns_exact_pp_section_with_provenance(tmp_path, monkeypatch):
+    vault = tmp_path / "plan-vault"
+    plan_path = vault / "plan" / "TGW-Master-Plan.md"
+    plan_path.parent.mkdir(parents=True)
+    plan = "# TGW Master Plan\n\n## PP-ALPHA-001 Alpha work\nalpha source\n\n## PP-BETA-002 Beta work\nbeta source\n"
+    plan_path.write_text(plan, encoding="utf-8")
+    detail = vault / "plan" / "pp" / "PP-ALPHA-001.md"
+    detail.parent.mkdir(parents=True)
+    detail.write_text("# PP-ALPHA-001\nDetailed canonical source.\n", encoding="utf-8")
+    monkeypatch.setattr(mcp_server, "_PLAN_VAULT_ROOT", vault, raising=False)
+
+    out = json.loads(mcp_server.tgw_get_plan_brief("pp-alpha-001"))
+
+    assert out["ok"] is True
+    assert out["query"]["pp"] == "PP-ALPHA-001"
+    assert out["canonical_source"]["sha256"] == hashlib.sha256(plan.encode()).hexdigest()
+    assert out["section"]["heading"] == "PP-ALPHA-001 Alpha work"
+    assert out["section"]["content"] == "## PP-ALPHA-001 Alpha work\nalpha source\n\n"
+    assert out["linked_pp_detail"]["status"] == "present"
+    assert out["linked_pp_detail"]["content"] == "# PP-ALPHA-001\nDetailed canonical source.\n"
+
+
+def test_get_plan_brief_does_not_treat_a_cross_reference_heading_as_a_second_match(tmp_path, monkeypatch):
+    vault = tmp_path / "plan-vault"
+    plan_path = vault / "plan" / "TGW-Master-Plan.md"
+    plan_path.parent.mkdir(parents=True)
+    plan_path.write_text(
+        "## PP-ALPHA-001 Canonical work\nalpha source\n\n"
+        "## PP-OLD-001 Folded into PP-ALPHA-001\nold source\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(mcp_server, "_PLAN_VAULT_ROOT", vault, raising=False)
+
+    out = json.loads(mcp_server.tgw_get_plan_brief("PP-ALPHA-001"))
+
+    assert out["ok"] is True
+    assert out["section"]["heading"] == "PP-ALPHA-001 Canonical work"
