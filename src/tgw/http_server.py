@@ -3961,6 +3961,104 @@ def todos_form(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# GET /form/search — full-text (recoll) search bar (PP-KNOWLEDGE-001 R2, #1147)
+# ---------------------------------------------------------------------------
+
+_SEARCH_EXTRA_CSS = """
+.search-bar{display:flex;gap:8px;margin-bottom:14px}
+.search-bar input[type=search]{flex:1;padding:10px 12px;font-size:1em}
+.search-bar button{padding:10px 18px}
+.search-meta{font-size:.82em;color:#999;margin-bottom:10px}
+.search-err{padding:10px 14px;border-radius:6px;background:#4a1a1a;color:#f77;margin-bottom:10px}
+table.results{width:100%;border-collapse:collapse}
+table.results th,table.results td{text-align:left;padding:8px 6px;border-bottom:1px solid #333;font-size:.88em;vertical-align:top}
+table.results th{color:#aaa;font-size:.72em;text-transform:uppercase;letter-spacing:.04em}
+td.mtype{color:#7af;white-space:nowrap;font-size:.82em}
+td.rsize{color:#999;white-space:nowrap;font-variant-numeric:tabular-nums}
+.rurl{color:#4a8ade;word-break:break-all;font-size:.85em}
+.rabs{color:#888;font-size:.82em;margin-top:2px}
+"""
+
+
+def _render_search_html(query: str, result: Optional[Dict[str, Any]]) -> str:
+    """Full-text search page — server-rendered, no-auth (network trust) like
+    /form/todos and /form/intake. GET-only (?q=...), so results are
+    bookmarkable/linkable and don't require client-side JS to work."""
+    import html as _html
+
+    head = (
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        "<title>TGW Search</title>" + _STATIC_HEAD + "<style>" + _SEARCH_EXTRA_CSS + "</style>"
+        "</head><body>"
+        "<h2>Full-text Search</h2>"
+        '<form class="search-bar" method="get" action="/form/search">'
+        f'<input type="search" name="q" placeholder="search the whole knowledge index…" value="{_html.escape(query)}" autofocus>'
+        '<button type="submit">Search</button>'
+        "</form>"
+    )
+    parts = [head]
+    if result is None:
+        parts.append('<div class="search-meta">Type a query above — recoll query language: implicit AND, -exclude, field:term, "phrase", OR.</div>')
+    elif not result.get("ok"):
+        parts.append(f'<div class="search-err">{_html.escape(str(result.get("error", "search failed")))}</div>')
+    else:
+        parts.append(
+            f'<div class="search-meta">{result["count"]} result(s) for '
+            f'"{_html.escape(result["query"])}" — {result["elapsed_ms"]:.0f} ms</div>'
+        )
+        if result["results"]:
+            parts.append('<table class="results"><tr><th>Type</th><th>Result</th><th>Size</th></tr>')
+            for row in result["results"]:
+                url = row.get("url", "")
+                title = row.get("title") or url.rsplit("/", 1)[-1]
+                abstract = row.get("abstract", "")
+                size = row.get("fbytes", "")
+                size_str = f"{int(size):,} B" if size.isdigit() else ""
+                parts.append(
+                    '<tr>'
+                    f'<td class="mtype">{_html.escape(row.get("mtype", ""))}</td>'
+                    f'<td><div>{_html.escape(title)}</div>'
+                    f'<div class="rurl">{_html.escape(url)}</div>'
+                    + (f'<div class="rabs">{_html.escape(abstract.strip())}</div>' if abstract.strip() else "")
+                    + "</td>"
+                    f'<td class="rsize">{size_str}</td>'
+                    "</tr>"
+                )
+            parts.append("</table>")
+    parts.append(_STATIC_FOOT)
+    parts.append("</body></html>")
+    return "".join(parts)
+
+
+@app.get("/form/search")
+def search_form(q: str = ""):
+    """Web UI search bar over the recoll knowledge index (PP-KNOWLEDGE-001 R2,
+    todo #1147, Track R). No-auth form page, matching /form/todos/intake/bulk
+    (network trust). Empty q renders the bar with no results yet."""
+    from fastapi.responses import HTMLResponse
+
+    from tgw.search_full import run_full_text_search
+
+    q = (q or "").strip()
+    result = run_full_text_search(q) if q else None
+    return HTMLResponse(_render_search_html(q, result))
+
+
+@app.get("/api/search/full-text", dependencies=[AUTH])
+def api_search_full_text(q: str = "", limit: int = 20):
+    """JSON full-text search endpoint (PP-KNOWLEDGE-001 R2) — same recoll
+    query as /form/search and `tgw search --full-text`, for programmatic/
+    tablet-app callers. Auth-gated like the rest of /api/*."""
+    from tgw.search_full import run_full_text_search
+
+    result = run_full_text_search(q, limit=limit)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error", "search failed"))
+    return result
+
+
+# ---------------------------------------------------------------------------
 # GET /form/history/{sku_old} — historical-catalog lookup (todo #1054)
 # ---------------------------------------------------------------------------
 

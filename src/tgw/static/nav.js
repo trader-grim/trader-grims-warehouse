@@ -14,6 +14,7 @@
     '<a href="/form/links">Links</a>' +
     '<a href="/form/offers">Offers</a>' +
     '<a href="/form/revisions">Revisions</a>' +
+    '<a href="/form/search">Search</a>' +
     '<div class="nav-dropdown">' +
       '<button class="nav-dropdown-toggle">Operations &#9662;</button>' +
       '<div class="nav-dropdown-menu">' +
