@@ -87,6 +87,14 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 norecursedirs = ["nix", ".git", "__pycache__", "*.egg-info", "systemd"]
+# todo #1361: cache_dir MUST stay outside any worktree. tgw-coder worktrees
+# are sometimes run under `sudo -u tgw` and sometimes as `db` -- pytest
+# creates .pytest_cache/ owned by whichever user ran it, and a later
+# other-user `rm -rf` on the worktree then needs sudo to clean it up.
+# $HOME expands per-invoking-user (pytest's resolve_from_str() calls
+# os.path.expandvars()), so tgw and db each get their own cache under
+# their own home and never write into the worktree tree at all.
+cache_dir = "$HOME/.cache/tgw-pytest"
 
 [tool.ruff]
 line-length = 200
