@@ -104,54 +104,32 @@ listing editor built but **not yet operator-verified** — that is the current g
 live items. `ebay_sku_migrate` COMPLETE (s35).
 
 **Known red (tracked):** no backup timers (PP-BACKUP-001, operator todos); test suite
-repaired 2026-07-04 (todo #1102 DONE) — 1,761 pass / 1 skipped / 0 fail / 0 errors,
-up from 1,513/12/236; root cause was `test_http_server.py`'s fixtures never updated
-for the s42/43 cookie-login wall (`_web_key` renamed `_web_password`, `/form/*` now
-needs a session cookie) plus a handful of unrelated drifts (`test_fence.py` same
-fixture rename; `test_ebay_publish_price_drift.py` missing a mock for the s42
-ordering-guard DB call; `test_config_hygiene.py`/`test_freeship.py` leaking into the
-real `/opt/TGW/secrets` path for non-tgw test runners). **2,582 of 3,239 `ebay_draft`
-dead-letters root-caused 2026-07-04**: OpenRouter "402 Payment Required" on
-2026-07-02 (billing gap, since resolved — Dave confirmed credits available,
-little use since) — not a logic bug; `ebay_draft`'s primary provider is
-`google_direct` (free tier), OpenRouter only touched on a Google failure.
-Deliberately not auto-retried (payment errors aren't in
-`worker_base._TRANSIENT_ERRORS` by design — auto-retrying a billing failure
-would hide a real problem). Half (1,291) bulk-requeued 2026-07-04 via
-`scripts/requeue_ebay_draft_402_dead_letters.py --apply --limit 1291`
-(quota headroom held back deliberately for today's troubleshooting); the
-other 1,291 + the ~657 non-402 dead-letters remain queued for a follow-up
-run. Zero requeue errors, worker active, 0 incidents at requeue time. Todo
+repaired 2026-07-04 (todo #1102 DONE) — 1,761 pass / 1 skipped / 0 fail / 0 errors.
+**2,582 of 3,239 `ebay_draft` dead-letters root-caused 2026-07-04**: OpenRouter "402
+Payment Required" billing gap (since resolved) — not a logic bug, deliberately not
+auto-retried (payment errors aren't in `worker_base._TRANSIENT_ERRORS` by design).
+Half bulk-requeued via `scripts/requeue_ebay_draft_402_dead_letters.py`; remainder
+queued for follow-up.
 
-- DONE-1054: item detail History link via sku_old — live, 39,485 records indexed; test suite 1790 pass / 1 skip (was 1786).
-
-- #1049 get-ebay-token --print-url CLI half completed (d8a961c). fish wrapper deferred under PP-NIXOS-001 freeze.
-
-Recoll index Phase 0 built: 441K docs, 4.6 GB per #1066. Follow-up: nightly timer + CLI wrapper pending.
-
-- #1146 a1131 NFS shares + claude account (LIVE 2026-07-04) — full setup doc in reference/a1131-nfs-setup.md
-
-- #1145 PP-UIPIPE-001 defect audit: two tool fixes LIVE, 402 pile drained, fleet photo sweep done (#1154 — 206 bad/149 SKUs). Broker PLANNED (ai-plans/reconciliation-broker.md). Next: Dave B0 sign-off, defect walkthrough, price test, fleet getOffer sweep.
-
-- [#1174] eBay webhook signature fail-open security fix shipped (see `dev-workflow/research/DONE-1174-webhook-fail-open.md`)
-
-- Todo #1245 completed: 3 confirmed fixes applied, 4 plausible findings deferred per Dave's instruction (to process at end of process).
-
-- #1248 ebay_legacy_sync stopped due to 6-minute retrigger eating trading quota; root cause unknown, sold detection paused (blocked on #16 webhook endpoint).
-#1077 orphaned offer forces ebay_sync per-SKU fallback (Dave → eBay
-support); 15 Syncthing conflict files in vault; nats health check red
-(module absent — decide: install or drop check).
-
-**s43 update (2026-07-03):** EPS-exhaustion root causes found and the standing parts
-fixed — retry_wait backlog (2,715 jobs) cancelled; invariant **C10 operator lane
-live** (operator actions can no longer be starved by background debris); upload
-worker's partial-success masking still open as PP-PHOTOSYNC-001 P1 (#1115); 492
-published items measured photo-short (P4 repair, ramp pre-authorized). s41–s43 work
+**s43 update (2026-07-03):** EPS-exhaustion root causes found and fixed — retry_wait
+backlog (2,715 jobs) cancelled; invariant **C10 operator lane live and verified**
+(operator actions can no longer be starved by background debris); upload worker's
+partial-success masking still open as PP-PHOTOSYNC-001 P1 (#1115); 492 published
+items measured photo-short (P4 repair, ramp pre-authorized). s41-s43 work
 committed+pushed: `ae9b1e6` on `catio-nix-0.0.1-alpha`.
 
----
+**Other closed items this stretch** (one-line each, full detail in the named doc):
+- DONE-1054: item detail History link via sku_old — live, 39,485 records indexed.
+- #1049: `get-ebay-token --print-url` CLI DONE; fish wrapper deferred (PP-NIXOS-001 freeze).
+- Recoll index Phase 0 built: 441K docs, 4.6 GB (#1066). Nightly timer + CLI wrapper pending.
+- #1146: a1131 NFS shares + claude account LIVE — `reference/a1131-nfs-setup.md`.
+- #1145: PP-UIPIPE-001 defect audit — two tool fixes LIVE, 402 pile drained, fleet photo sweep done (#1154). Broker planned (`ai-plans/reconciliation-broker.md`).
+- #1174: eBay webhook signature fail-open security fix shipped (`dev-workflow/research/DONE-1174-webhook-fail-open.md`).
+- #1245: 3 confirmed fixes applied, 4 plausible findings deferred per Dave's instruction.
+- #1248: `ebay_legacy_sync` stopped (6-min retrigger eating trading quota, root cause unknown, sold detection paused, blocked on #16 webhook endpoint).
+- #1077: orphaned offer forces `ebay_sync` per-SKU fallback (Dave -> eBay support); 15 Syncthing conflict files in vault; nats health check red (module absent).
 
-C10 invariant live + verified (2026-07-03). See SESSION-043.
+
 ## Active tracks
 
 Retarget rationale and full packet specs: `RETARGET-2026-07-02.md`. R0 (quota
@@ -211,7 +189,7 @@ already in digest — add threshold alerting; **R2.5** PP-BACKUP-001 recut into
 lines in digest; **#1102** test-suite repair; thermal PreToolUse hook (blocked on
 Dave authorizing agent-config change).
 
-R2: #1181/#1202 exception propagation fix complete — quota exhaustion now correctly requeues from ai_identify and ebay_draft (full doc in dev-workflow/research/DONE-1181-1202-review-followups.md)
+R2: #1181/#1202 exception propagation fix complete — quota exhaustion now correctly requeues from ai_identify and ebay_draft (`dev-workflow/research/DONE-1181-1202-review-followups.md`).
 ### R3 — Plan and process hygiene
 
 Done: this redraw; work-packet protocol below; PRIME DIRECTIVES in CLAUDE.md; Data
@@ -225,17 +203,8 @@ Fable independent review #1338: "nonexistent" was wrong); a bare
 template unit and could start it unintentionally — latent hazard, not just
 a wording nit, see PP-BULKLIST-001/#1113; CLAUDE.md `tgw todo --add` syntax fix.
 
----
+Full PP-PHOTOSYNC-001 packet history (P1-P10) and PP-EDITOR-001 console-fix follow-up: `pp/PP-PHOTOSYNC-001.md`.
 
-P1 upload integrity fix complete — see document for spec, implementation, tests, and live verification.
-
-P9 bulk audit: Inventory API getInventoryItems winner (~98 calls), Feed API blocked, GetMyeBaySelling narrower than assumed. Full ranking in dev-workflow/research/RESEARCH-photosync-bulk-audit.md. Follow-up #1127 filed.
-
-P2 ops-digest pending-liability lines shipped (see DONE-photosync-p2-digest-liability.md in dev-workflow/research).
-
-- P9 follow-up #127: `photos_short_on_ebay` re-pointed at live capture index; open question on recurring nightly capture flagged for 2pm triage.
-
-- #1145 console error-state fix + broker B1a/B1b built, fleet baseline done — see dev-workflow/research/RESEARCH-1145-console-error-state-broker.md
 ## Work-packet protocol
 
 One packet = one todo = one model session. Non-trivial packets get
@@ -542,217 +511,18 @@ P6 investigated: ebay_repush orphan queue diagnosed (2 orphan jobs, no systemd u
 
 - #1124 P8 canary probe completed: `scripts/photosync_canary_probe.py` built and live-verified against `tgw201501021970068`. Fixed two bugs (auth header, live-state field shape). 4 new tests, full suite 1814 passed. Daily timer deferred to 2pm.
 ## PP-LISTEDITOR-001 — listing editor + revision apply
+R1.1 live-fire DONE 2026-07-04 (#1137) — price-only delta verified live in both
+directions, drift-gated apply path confirmed, gate cleared. 2026-07-16 was a heavy
+single-day fix session (invariant C14 incident, Set A/B field-set discipline)
+covering: #1461 (attribute-delete-reverts bug, fixed), #1471 (category-aspect
+migration, built+deployed), #1472 (custom-aspect checkbox redesign, DONE, live-fire
+confirmed — beats-eBay success bar #2), #1473 (Set A as discard destination — NOT
+settled, open, needs a fresh design pass), #1445/#1467 (post-push `ebay_sync` gap,
+fixed for both `ebay_stage` and `ebay_publish` success paths), #1465 (Seller Hub
+parity audit, reassigned to Tigwa with vision-model browser testing). All 3 flagged
+`field_set_drift` SKUs now live-confirmed. Full incident timeline, code detail, and
+test counts: `pp/PP-LISTEDITOR-001.md`.
 
-**Todo #1465 — eBay Seller Hub complete parity audit, reassigned to Tigwa
-2026-07-16.** Filed same day as the incident below, initially addressed to
-Claude. Dave redirected it: "setup the ebay parity audit with a vision
-model and have tigwa manage. she has browser spinup test skills and
-vision capabilities." Confirmed real — `computer_use` skill
-(`/home/db/.hermes/skills/computer-use/SKILL.md`), SOM-mode screenshot
-capture, works with any tool-capable model, matches the audit's own
-evidence standard (live Seller Hub observation, no static/fabricated
-lists). Claude did not touch Tigwa/Hermes model routing — whether this
-pairs with a vision-specific model (Gemini, named in PP-HERMES-EA-001's
-original design, not yet confirmed wired) is her/Dave's call, same
-precedent as her a1131 MCP setup. Handoff + both original request docs:
-`inbox/tigwa/CLAUDE-HANDOFF-seller-hub-parity-audit-2026-07-16.md`.
-
-**Todo #1472 — custom-aspect checkbox redesign, DONE 2026-07-16, live-fire
-confirmed by Dave.** Watched a real edit end-to-end: job queued, job landed,
-unchecked aspects trimmed from the draft, then added a new custom aspect
-("Thumb Size = Normal") and confirmed it rendered inline with its own
-checkbox exactly as designed. Dave: "works... Nice work." Closed. Dave's own
-framing of the win, same day: "we just did what eBay does a little better.
-eBay discards the custom fields if you change categories unceremoniously,
-never to be found again even if you immediately switch back." eBay's own
-Seller Hub destroys category-orphaned specifics irrecoverably; TGW's
-`category_aspect_migration.py` preserves them in `item_attributes` (Set A)
-instead — same operator-facing discard behavior, non-destructive underneath,
-directly enacting Prime Directive 1 where eBay's own platform doesn't. Second
-confirmed instance of the beats-eBay success bar (first: OPERATOR-QUEUES-001)
-— see memory `project-operator-queues-beats-ebay-example.md`.
-
-**Follow-up, same day — destination NOT settled (todo #1473, open, not
-urgent).** Dave, immediately after: "still not convinced they belong in the
-inventory record. That part still needs work. Can't rebuild Rome in a day."
-The mechanism (checkbox discard → live-verified working) and the destination
-(`item_attributes`/Set A) are two separate claims — only the mechanism is
-confirmed settled. Treat Set A as the CURRENT destination, not the DECIDED
-one, until a fresh design pass with Dave. Do not build anything further on
-top of "discarded aspects land in Set A" as a settled assumption.
-
-**All 3 of 3 flagged `field_set_drift` SKUs now live-confirmed (Dave,
-2026-07-16, same day):** `tgw202605051752520` (item #1, drove the #1472
-redesign), `tgw202605131827555` (Brand, item #2 — worked, though Dave flagged
-the required Save-Draft click as worth a second look, see #1473-adjacent
-discussion), `tgw202606021133367` (Bottle Type, item #3 — "3's good. We got
-this one."). Closes the earlier "1 worked 1 did not, not enough data" open
-loop for this fix set specifically.
-
-Dave, looking at `tgw202605051752520` after #1470/
-#1471 landed: "I like that we have captured all of the custom aspects now but
-I don't like the interface... if the aspect is not in the list of required or
-recommended aspects it gets a check box, default checked, meaning keep all of
-these attributes. Unchecking means discard at save. Proper attribute set
-never has check boxes, never gets discarded... Regardless of how or whether
-we save, this is a quality gate with a human and we have to trust any
-unverifiable information when they press save, even if it discard." Replaced
-#1471's standalone "Aspects not in this category" panel (its own always-
-checked confirm()+immediate-apply button, disconnected from the main Save)
-with an inline `.aspect-keep-cb` checkbox on every non-official aspect row,
-right in `#aspects-form` next to its value input — official/required/
-recommended aspects get no checkbox and are never discardable, matching Set
-A/B boundary discipline. `saveEbayDraft()` now collects unchecked keys and,
-after the normal field PATCH succeeds, calls #1471's existing
-`/category-aspect-migration/apply` endpoint for them — same sanctioned Set
-B-removal/Set A-write path, no new merge logic, one Save Draft click drives
-both actions instead of two disconnected ones. Rewrote the one test that
-asserted the old panel's markup. Full offline suite 2364 passed/1 skipped.
-`tgw-http` restarted live; the underlying detect endpoint (now the single
-write path the new Save flow drives) reconfirmed live against the real
-18-orphan item. Not yet click-tested in an actual browser session — needs
-Dave's own login + a live Save with a box unchecked.
-
-**Todo #1471 — category-aspect migration, built + deployed 2026-07-16.**
-Companion to #1470 (which made every stored Set B aspect visible/editable,
-even ones outside the current category's official list, badged "CUSTOM
-ASPECT"). Dave: "ebay behavior is to discard them [on a category change]
-... I always wanted the attributes to move. They are good seo...
-operator chooses discards and makes their own mess to repair if they
-screw up." New module `tgw/ebay/category_aspect_migration.py` —
-`detect_category_orphaned_aspects()` (live-recomputed, fails safe to
-empty on a lookup error) + `apply_category_aspect_migration()` (moves
-checked keys from Set B into Set A via the sanctioned accessors, removes
-them from Set B, re-detects live so a stale request is a no-op). New
-accessor `draft_specifics.remove_ebay_aspects()` — the first EXPLICIT
-Set B deletion path (distinct from `set_ebay_aspects`'s deliberate
-None-is-a-no-op rule), used only for this genuine, operator-confirmed
-removal. New panel in the item-detail UI, mirroring C13's
-eBay→Inventory-Record sync panel's exact pre-checked-by-default review
-pattern, own button/action name (spec point 6 discipline — no shared
-write path). 29 new tests (unit + accessor + HTTP), full suite 2364
-passed/1 skipped. `tgw-http` restarted live; verified read-only against
-the real `tgw202605051752520` — correctly detects all 18 real orphaned
-aspects. Not yet live-fire tested end-to-end (an actual apply against a
-real listing) — needs Dave's own test, same as today's other fixes.
-
-**Todo #1461 — attribute-delete-reverts bug found + fixed 2026-07-16 (Dave:
-"I have repeatedly deleted material, currently set to Silver, saved,
-updates and that field reverts every time. likely not the only one.").**
-Root cause: a frontend bug, not a backend merge issue. `saveEbayDraft()`'s
-aspects-collection loop (`src/tgw/http_server.py`, the eBay Draft
-Editor's `#aspects-form`) only included a field in the save payload
-`if(v)` — i.e. only when non-empty. Clearing a field produced `v===''`,
-silently dropped from the PATCH entirely, so `set_ebay_aspects()` never
-saw an attempted change and the old value stuck forever. Affects every
-aspect field uniformly (shared loop) — confirmed Dave's "likely not the
-only one." **Fix:** each aspect input/select now carries
-`data-initial` (its rendered value); the collection loop sends the key
-whenever the current value differs from `data-initial`, including a
-change to empty — matching how every other field on this form already
-behaves. 2 new tests; full offline suite 2333 passed/1 skipped, no
-regressions. `tgw-http.service` restarted live. Not yet manually
-browser-verified end-to-end (needs Dave's own login session) — asked Dave
-to confirm from his side.
-**R1.1 live-fire DONE 2026-07-04 (todo #1137).** Price-only delta
-(`tgw201501021970128`, $7.99→$8.49) via `revision.py`'s drift-gated apply
-path (`tgw revise <sku> --set price=X --show` then `--apply --live`).
-Live-verified in both directions with fresh uncached eBay API reads (not
-just job-succeeded logs): real price changed on the actual listing, then
-reverted; `revision_history` correctly recorded delta + baseline hash +
-the exact API call made (`PUT offer/264095634018`), hash_match=true, zero
-drift. **Gate cleared.** Real bug found along the way (todo #1138, minor):
-the CLI's `--set` help text claims dotted-path support
-(`draft_listing.price`) but the live-apply path only accepts bare field
-names (`price`) — use bare names; dotted paths raise a clear "unsupported
-delta field" error at apply time, not silently ignored. Next: wire the
-Update-Item button to this same apply path. Design:
-`archive/sections/Pending-projects-revisit.md` (promote on touch).
-
-**Todo #1062 closed as satisfied, not built new (2026-07-04).** Its scope
-("item detail page restructure + editable aspects") is already fully
-covered by PP-ACTIONCONSOLE-001's s40 build — verified in code: Editor
-tab + Live/Sold Listing tab, 3-layer live/proposed/edit aspect merge,
-condition select, price history, reprice schedule. Consolidated into
-#1085's "operator eyeball" gate instead of duplicating.
-
-**Same-day fix, todo #1114 — auto-redraft-clobbers-operator-edit, DONE and
-live-verified.** Investigated per Dave's request ("verify why we did it that
-way before changing") rather than jumping straight to a fix. Root cause: the
-HTTP PATCH auto-enqueue trigger (`patch_item()`) conflated two different
-things under one condition — "a raw fact changed, regenerate the AI draft"
-vs. "the operator polished the final draft content directly." In practice
-only the second ever happens (the editor UI only ever PATCHes into
-`draft_listing.*` — no code path sends bare top-level `title`/
-`item_attributes` through this endpoint), so regenerating was never
-correct: every operator edit to an already-live item's draft got silently
-overwritten by a fresh AI regeneration before it was ever seen. Cost impact
-(Dave's own estimate, confirmed): each needless regen burns 2 AI calls
-(primary draft + `bulk_classify` aspect-fill) for zero benefit — a typical
-2-3-edit polish session tripled the AI cost of a step that should cost
-nothing. Fixed to mirror the existing "Update Listing" button exactly: push
-(`ebay_stage`, `force=True`, `origin=operator`) instead of regenerate
-(`ebay_draft`). Live-verified against a real published listing
-(`tgw201501021970354`) all the way to a real eBay title change, confirmed
-via a fresh uncached API read, then reverted. 3 new tests.
-
-**Todo #1445 investigated 2026-07-16 (Claude, read-only, no writes) — root
-cause found for the "update succeeds but live/local state doesn't match"
-symptom Dave flagged against `tgw202605040949058`.** Live read-only GETs
-against the real eBay offer + `inventory_item` show current eBay API data
-matches the local `ebay_live`/`ebay_submitted` cache exactly — no drift at
-the API level right now. `catalog-verify` flags `photo_verify_stale` at
-**critical** on this SKU: `photo_verify.verified_at` (2026-07-15T02:46)
-predates the most recent `ebay_publish` (2026-07-16T14:50) by 36+ hours.
-Traced why: `queue_jobs` shows 6 `ebay_stage`/`ebay_publish` cycles on this
-SKU today, all succeeded, zero `ebay_sync` jobs alongside them. Confirmed
-in source — `ebay_publish.py` only ever enqueues a follow-up `ebay_stage`
-(price-drift force-restage); the **only** code path that enqueues
-`ebay_sync` as a follow-up is `http_server.py`'s `apply_revision`
-(LISTEDITOR revision/apply endpoint). **A normal republish through the
-ordinary auto-pipeline never refreshes the local live-mirror/photo-verify
-snapshot** — it silently goes stale until some independent sync
-eventually catches up. Candidate fix: have `ebay_publish` enqueue
-`ebay_sync` as a follow-up on success too, same pattern `apply_revision`
-already uses. Todo #1445 kept open (not closed) — this is the diagnosis,
-building the fix needs Dave's go-ahead.
-
-**Live-confirmed on one real item, 2026-07-16 23:02** — Dave cleared
-Material on `tgw202605051207245` (the Cloisonné/Porcelain drift item):
-save recorded correctly, staged/published with no rejection, live eBay
-aspects now show only `Original/Reproduction` (fresh API read confirms
-Material is gone), and an `ebay_sync` job auto-queued alongside the push.
-All three of today's fixes (#1461, #1462, #1445/#1467) working together
-on one real edit. **Dave's own framing: "1 worked 1 did not — not enough
-data"** — more of his own live testing across other items is pending
-before this counts as fleet-confirmed; none of the underlying todos are
-closed yet on the strength of this one success.
-
-**Fix built + deployed 2026-07-16 (Dave: "yes, make the fix"), then
-extended same day to cover the actually-common path (invariant C14
-incident, Dave: "why do we keep having to manually re-sync").** Original
-fix added a post-publish sync call to `ebay_publish.py`'s two success
-paths. Root-caused further same day: the far more common "Update Listing"
-button on an already-live item enqueues `ebay_stage` directly and never
-touches `ebay_publish` except via a conditional chain (ebay_stage's own
-republish trigger, which only fires when a `listing_id` already exists) —
-so `ebay_stage.py`, which runs on nearly every real edit, never refreshed
-the local `ebay_live` mirror at all. Pulled the duplicate enqueue logic up
-into a shared `tgw.ebay.sync.enqueue_post_push_sync()` (same precedent as
-that module's existing `format_ebay_error` cross-worker helper) and wired
-it unconditionally into both `ebay_stage.py`'s and `ebay_publish.py`'s
-success paths — deduped per SKU (`ebay_sync:post_push:<sku>`), non-fatal
-on collision or failure. 5 new offline tests total across
-`tests/test_ebay_publish_post_publish_sync.py` and the new
-`tests/test_ebay_stage_post_push_sync.py`; full offline suite 2338
-passed/1 skipped, no regressions. `tgw-worker@ebay_stage.service` and
-`tgw-worker@ebay_publish.service` restarted live. **Not yet live-fire-
-confirmed against a real publish** — re-publishing the real,
-already-listed `tgw202605040949058` to test it was correctly blocked by
-the permission gate (a live production write against a real listing isn't
-authorized by "make the fix" alone). Confirmation will come from the next
-organic publish/stage, or a Dave-approved safe test item. See invariants.md
-C14 for the full incident this sits inside.
 
 ## PP-ACTIONCONSOLE-001 — state-driven item action console
 Built s40 (state-driven action line, Editor/Live tabs). **Gate: Dave's operator test
@@ -784,434 +554,69 @@ pipeline is quiet" (Dave) — a real risk once volume returns. Todo #1337.
 Remaining observability packets tracked under R2, not here.
 
 ## PP-BACKUP-001 — backup + DR
-**Top operator risk: nothing running; work ledger not re-derivable.** Scripts+timers
-exist in `etc/systemd/`. Operator todos #61/#146/#147; restore script #1052; DR
-drills #1050/#1051. Plan: `PLAN-backup-dr.md`.
+Top operator risk historically: nothing running, work ledger not re-derivable.
+**2026-07-10 alarm + durable fix, applied and reboot-verified 2026-07-12**: undeclared
+`sdc` mounts (db-backup/itemdata-snap/itemarchive) caused silent dump failures after a
+reboot; now declared in the flake with `RequiresMountsFor` so a missing mount is a
+loud failure, not silent. Remaining open: `tgw-cloud-sync` rclone rate-limiting (todo
+#1264) — first full GDrive sync hit a 403 rate limit, needs pacing/chunking, not a
+bare retry. Full incident + fix detail: `pp/PP-BACKUP-001.md`; DR plan:
+`plan/PLAN-backup-dr.md`.
 
-**2026-07-10 ALARM + fix (todo #1258):** `tgw health` reported db dump stale
-124h (limit 26h) and rclone cloud-sync had never completed. Root cause:
-`tgw-db-backup`'s script was moved 2026-07-04 to also write onto a dedicated
-physical drive (`/dev/sdc1`, LABEL=`tgw-db-backup`, btrfs) mounted at
-`/opt/TGW/mnt/tgw-db-backup` — but that mount was done by hand, never
-declared in the NixOS flake, and the 2026-07-06 reboot silently dropped it.
-Every nightly dump since failed with a bare `mkdir: Permission denied`
-against the empty, root-owned mountpoint; `tgw-cloud-sync` failed
-independently and separately (unrelated to the mount — its first-ever full
-run had just never completed).
-
-Immediate fix (done live, with Dave's sign-off): remounted `/dev/sdc1`,
-ran `tgw-db-backup.service` to catch up the dump (confirmed via `tgw
-health` — staleness cleared), kicked off `tgw-cloud-sync.service` (first
-full run, long-running, left running in background).
-
-**Durable fix — APPLIED and reboot-verified 2026-07-12** (corrected from
-"NOT yet applied," Fable independent review #1338: the master plan's own
-warning had gone stale — the fix was live-verified before this correction
-landed). Changes shipped in `~/tgw-flake`:
-- `nix/hosts/tgw-prod.nix` — new `fileSystems` entries (by-label, `nofail`)
-  for all three `sdc` partitions: `tgw-db-backup`, `tgw-itemdata-snap`,
-  `tgw-itemarchive` — the latter two were equally undeclared and at the
-  same silent-unmount risk, just not yet symptomatic.
-- `nix/tgw/backup.nix` — `tgw-db-backup.service` gets
-  `unitConfig.RequiresMountsFor = "/opt/TGW/mnt/tgw-db-backup"` (same
-  pattern `tgw-snapshot` already uses for its own mount) so a missing mount
-  is a loud, correctly-attributed service failure instead of a confusing
-  `mkdir` error.
-- Validated: `nix flake check` clean for all 3 hosts; `/etc/fstab` confirmed
-  containing all three `LABEL=...  nofail,x-systemd.device-timeout=5s`
-  entries; **the 2026-07-11 11:11 reboot proved the fix live** — `/dev/sdc1`
-  came back mounted at `/opt/TGW/mnt/tgw-db-backup` without manual
-  intervention.
-- Remaining open item: only the rclone rate-limit issue below (#1264) —
-  the mount-durability risk itself is closed.
-
-**Also fixed:** `tgw-restore.sh` bug; `TGW-VAULT-RESTORE.md` written
-covering both restore paths, live-verified dry-run.
-
-**Separate, newly-discovered issue (todo #1264):** the `tgw-cloud-sync.service`
-run kicked off above did NOT succeed — it failed after 43 minutes with a
-Google Drive API 403 `RATE_LIMIT_EXCEEDED` (`defaultPerMinutePerProject`,
-840000/min), from listing the entire `/opt/TGW` tree in one burst on its
-first-ever completed run. `tgw health`'s "backups" check is still WARN on
-this. Distinct root cause from the mount issue above (which is genuinely
-fixed) — needs rclone rate-limiting (`--tpslimit`/`--drive-pacer-min-sleep`)
-or a chunked first sync, not a bare retry (the underlying cause is
-unchanged, a retry now would likely hit the same wall).
 
 ## PP-COHESION-001 — full-codebase cohesion+correctness audit (2pm agenda, todo #1143)
-**Given a real PP designation 2026-07-11** — was source-tagged only
-(`audit#1143`, `audit#COHESION-2026-07`) despite being a real, recurring,
-already-substantial body of work with its own section here. Now also
-covers the 2026-07-07 follow-up cohesion pass (45 findings, todos
-#1273-1317), not just the original #1143 batch — both batches share this
-heading/PP going forward.
+Staged per-subsystem `Workflow`-based audit (workers/, apis/ebay/, http_server.py,
+queue/state-machine, scripts/, nix flake) plus a cross-subsystem cohesion pass.
+**Discovery phase COMPLETE** (all 6 subsystems audited); most findings executed and
+DONE (workers/, apis/ebay/, http_server.py, queue/state-machine, scripts/ all closed
+out). **3 nix-flake SECURITY findings remain open**: #1219 (NFS Queue export
+subnet-wide, BLOCKED on a static IP reservation for the intake device, #1228),
+#1217/#1218 (Syncthing GUI/bind exposure, intentionally deferred p95 until dev
+settles). `itemdata_scrub.py` queue-migration (#1261) deferred 2x — needs its own
+scoping pass, not a quick fix; confirmed not currently scheduled anywhere so zero
+practical impact today. Full findings list + execution history: `pp/PP-COHESION-001.md`.
 
-**Dave: "I want to right the ship... check the whole thing and make sure
-each part and the whole are cohesive."** Prompted by discovering that a
-full week of code (2026-06-24 through 2026-07-02, the `ae9b1e6` commit
-and everything before it) never went through `/code-review`/ultrareview
-— diffs had grown too large to review by the time anyone tried. Same-day
-finding: an 8-angle review of just today's 47-file/3,800-insertion diff
-(todo #1114 fix + drive-index work) found 7 real confirmed bugs, all
-fixed same session — real signal that unreviewed accumulation is a
-genuine regression source, not a hypothetical.
 
-**Plan:** a `Workflow`-based audit, staged per-subsystem (workers/,
-apis/ebay/, `http_server.py` on its own — it's grown into a multi-
-thousand-line file, queue/state-machine, scripts/, the Nix flake) rather
-than by git history — sidesteps the "one commit mixes noise and signal"
-problem that blocked ultrareview entirely. Two passes per subsystem:
-correctness-bug finding (same 8-angle method as today) plus a **cohesion
-pass** checking cross-subsystem consistency (is "tgw-api is the fence"
-actually honored everywhere, do invariants.md's rules hold everywhere
-they claim to, are there now-drifted duplicate implementations across
-files).
-
-**Sizing (calibrated from today's real pass):** ~830K tokens for one
-47-file diff-sized review. Full codebase ≈ 8-10 subsystem-sized chunks
-+ a cohesion pass ≈ **~8-11M tokens total**, order-of-magnitude. Deliberately
-NOT scoped to one session — each subsystem chunk is independent and
-resumable (Workflow's run-caching), so this runs opportunistically
-whenever usage allows (Dave: "having a project like this would be an
-excellent use of that [bonus] usage"), picking up wherever a prior run
-left off. Not started — gated on Dave's go-ahead at 2pm.
-
-**Prevention going forward** (Dave: "I need to do the reviews more
-regularly"): review each day's diff before it accumulates — plain
-`/code-review` for a free/quick inline pass, `/code-review ultra` for a
-periodic cloud pass while diffs are still small enough to clear its
-size guard.
-
-**Status (2026-07-10, refactored — the "Remaining subsystems" note below was
-stale): the discovery phase is COMPLETE.** All 6 planned subsystem audits
-have research docs — `workers/` (2026-07-05), `apis/ebay/`, `http_server.py`,
-`queue/state-machine`, `scripts/`, and the nix flake ("FINAL SLICE",
-confirmed in `RESEARCH-1143-nix-flake-audit.md`). What's left is executing
-the findings each audit spun off, not more discovery.
-
-Findings-execution status by subsystem (2026-07-10 check):
-- `workers/` — DONE. #1162-#1170 (9 correctness bugs) fixed earlier; #1171
-  (8 batched cohesion findings) fixed 2026-07-10 (path-construction cleanup,
-  itemdata_scrub.py root/sku validation hardening, photo_history_recovery.py
-  catalog-refresh trigger, shared `_format_ebay_error`, ebay_sku_migrate.py
-  write-pattern documented in invariants.md A5). One follow-up deferred as
-  todo #1261 (itemdata_scrub.py's ad-hoc queue — bigger execution-model
-  change, out of scope for a cohesion batch). **2026-07-10, re-examined and
-  deliberately left deferred again (Dave: document for a future planning
-  session rather than force a fix now)** — see below.
-
-**PLANNING ITEM — itemdata_scrub.py queue migration (deferred 2x, needs a
-real scoping pass):** `itemdata_scrub.py`'s `main()` uses a bare
-`queue_dir = Path.cwd()` file-based queue (job = a file in the cwd; success
-= the file gets deleted) instead of `state_machine`/`QueueWorker` like every
-other worker — no visibility in `tgw queue-status`, no postgres-backed
-retry/dead-letter semantics. **Checked live 2026-07-10: it isn't currently
-scheduled anywhere** — no cron entry, no systemd timer, no reference in the
-nix flake (`grep -rn itemdata_scrub ~/tgw-flake` → nothing). So the
-practical impact of the visibility gap is zero today; nobody is missing
-status on jobs that aren't flowing through it.
-
-The real fix is a genuine migration, not a quick conversion: a new systemd
-service + timer (or on-demand queue entry point), converting the dequeue
-model from "file exists in cwd" to postgres rows, deciding how
-`ScrubRules`/`--config` get supplied in that model (currently CLI args to a
-one-shot batch run), and deciding whether this becomes a `tgw-worker@` unit
-like everything else or stays a manual on-demand tool with better status
-reporting bolted on. That's real design work — worth scoping properly in a
-dedicated session rather than forcing a partial fix (e.g. just logging queue
-depth somewhere `tgw health` can see, without fixing the underlying
-file-vs-postgres model split) into a batched cleanup pass. Todo #1261
-remains open, now explicitly framed as "needs a scoping pass," not "needs a
-quick fix."
-- `apis/ebay/` — DONE. #1182 fixed 2026-07-10 (conditions.py policy-cache
-  memoization, trading.py 429-retry shared across all 3 Trading API
-  generators).
-- `http_server.py` — DONE. #1198 fixed 2026-07-10 (shared catalog_rebuild
-  enqueue helper, sku traversal guards on 2 routes, store-category dropdown
-  dead-code + fragile-fallback cleanup, deduped price formatter).
-- `queue/state-machine` — findings executed in earlier sessions (see commit
-  history around #1202, #1206 fixes); no open audit#1143 todos remain for
-  this subsystem.
-- `scripts/` — DONE. #1213 fixed 2026-07-10 (photo_repair_iss013.py
-  ITEMDATA_ROOT now config-derived, matching sibling
-  photosync_canary_probe.py). Todo #1203 is `done` — this section used to
-  say "INPROGRESS," which was stale.
-- **nix flake — 3 SECURITY findings remain open, not yet fixed** (sentence
-  reunited 2026-07-12, Fable independent review #1338 — this list had been
-  severed mid-clause by misfiled notes for over a week):
-  - #1219 (NFS Queue export writable to the whole 192.168.60.0/24 subnet,
-    should be host-locked like the ro exports below it) — **BLOCKED** on
-    #1228 (no static IP/DHCP reservation exists yet for the intake
-    camera/phone device; checked live ARP table 2026-07-10, several
-    unidentified LAN hosts, none confirmable as the intake device from
-    tgw-prod alone — needs Dave to identify the device + reserve its lease
-    on the router).
-  - #1217/#1218 (Syncthing GUI/second-instance bind exposure) — explicitly
-    set to p95 by Dave 2026-07-07, deferred until dev settles (see
-    `feedback-deprioritize-syncthing-auth` memory) — intentionally not
-    being worked, not an oversight.
-
-**Other audit#1143 fixes landed this stretch** (misfiled notes consolidated
-2026-07-12): #1168 (ebay_publish condition fallback now writes corrected
-condition back to draft_listing, tests added), #1171 (workers-audit cohesion
-findings, see `DONE-1171`), #1173 (`lookup_epid` re-raises
-`QuotaBudgetExceeded`), #1181 (`best_category()` fallback chain fixed),
-#1182 findings #2/#3 (ebay conditions memoization + trading retry backoff,
-[DONE-1182-ebay-cohesion-cache-retry.md](reference/DONE-1182-ebay-cohesion-cache-retry.md)),
-#1206 (requeue-402 dedupe guard), #1235 (atomic-write sweep: 6 sites fixed,
-8 new tests, 1861 passing — deviation: `itemdata_scrub.py` write stays
-outside fence, PP-FENCE-001 gap documented). Session 48 (2026-07-06)
-completed dead-letter/atomic-write/multi_intake fixes; code reviews
-addressed all critical findings except 4 PLAUSIBLE deferred as todo #1246;
-PR #8 not yet merged.
 ## PP-HARDWARE-001 — IT / hardware track (drive-space re-evaluation absorbed) — NEW 2026-07-11
-**Dave, triaging #1136: "it and #1136 and similar need an IT or hardware
-PP."** Previously PP-HARDWARE-001 was only referenced by name from other
-docs (GPU upgrade), never had its own heading. Governing philosophy:
-"we get it running, we make money, we get server. We no make money we use
-this thing" — bootstrap hardware until revenue justifies real
-infrastructure. Near-term concrete plan (Dave's own words): M.2-to-SATA
-adapter to bring a 1TB USB SSD onto the board replacing an HDD; a 4-bay
-SSD enclosure + 4 spare SSDs for a real storage tier; heat sinks on the
-SSDs. **Open, unresolved, flagged for a dedicated pass:** where should
-knowledge-hub work (PP-KNOWLEDGE-001) physically live so it doesn't fill
-`/opt/TGW` — the existing tiered-remote design (PP-ANNEX-001, the
-power-tiered drive inventory below) points away from the NVMe but this
-hasn't been explicitly confirmed for this specific question; and Dave's
-own ask for "a real analysis of what we need, what we want, what we will
-need" — not done, this PP is the placeholder for it, not a substitute.
-Full design: `pp/PP-HARDWARE-001.md`.
+Governing philosophy: bootstrap hardware until revenue justifies real infrastructure.
+`/opt/TGW` (nvme) is the real near-term pressure — 83% used, 48G free, ItemData
+already 180G/55K items, heading toward ~9x scale. LVM-expansion premise superseded:
+sdb absent, sdc repartitioned into backup service (#1056 closed, superseded by
+#1136). Power constraint: generator-powered, prefer drives that can go offline — real
+drive-fleet inventory + tiering mapped (bus-powered 2.5in tier always-on, 3.5in
+powered-dock tier connect-only-when-syncing). Merged with PP-DRIVE-INDEX-001 —
+recoll-driven dedup is the near-term space-recovery lever before any new drive
+purchase. Open, unresolved: where PP-KNOWLEDGE-001 physically lives long-term; a full
+drive-fleet audit + registry refresh. Full detail: `pp/PP-HARDWARE-001.md`.
 
-**Dave: "put revaluation item into plan for drive space."** Todo #1056
-(extend `vg_tgw` into HDD space) turned out blocked on a stale premise:
-checked live `lsblk`/`pvs` — sdb no longer appears in the disk list at
-all, and sdc (the other candidate) was fully repartitioned and put into
-active service the same session for backup infra (`sdc1`=tgw-db-backup,
-`sdc2`=tgw-itemdata-snap, `sdc3`=tgw-itemarchive). No free/unclaimed disk
-currently exists to grow `vg_tgw` into (PV `nvme0n1p2` has 96MB free), and
-`reference/DRIVE-REGISTRY.md` itself is stale against today's real layout
-(doesn't reflect sdc's repartition, `TGW-VAULT`, or several other drives
-now in service). **Needed:** a full physical-disk-fleet audit + registry
-refresh, then a fresh decision on where `vg_tgw`/nix growth room comes
-from — new hardware, or an explicit repurpose of something already in
-service. Not started; the original LVM-expansion plan (sdb/sdc as
-candidate PVs) is superseded by this finding.
 
-**Real current pressure (checked 2026-07-04):** not `/nix` (52% used, 33G
-free, fine) — `/opt/TGW` (nvme, ItemData/ItemCatalog/incoming) is at
-**83% used, only 48G free**, and `ItemData` alone is already 180G for 55K
-items. Dave: "I have half a million items here ready to process" once
-the pipeline is fixed — heading toward that ~9x scale, this is the
-partition that will actually run out first.
-
-**Power constraint (Dave, 2026-07-04):** generator-powered — prefer
-drives that can come offline when not needed. Real drive inventory
-mapped (`lsblk` + `TRAN`/model): `nvme0n1` (internal NVMe) + `sda`
-(internal SATA HDD) can't be unplugged but draw modest power; `sdc`
-(700G) + `sdi` (465G, currently idle) are 2.5" USB laptop drives —
-bus-powered, no external brick, the reliable always-on tier; `sdd`
-(MasterArchive, 1.8T) + `sdh` (tgw-backup, 931G) are 3.5" drives in a
-powered dock — connect only when actively syncing, matches the existing
-PP-BACKUP-001 A7 "rotating offline drive tier" design exactly, just
-applied for power reasons too, not only DR rotation. Planned upgrade:
-a 4-bay USB3 NVMe dock (bus-powered, low-heat) — Dave has the SSDs
-already, multi-terabyte capacity once built, likely retires the need to
-keep `sdd`/`sdh` connected as often.
-
-**Merged with PP-DRIVE-INDEX-001** (see below) — recoll-driven dedup
-across the already-mounted data is the near-term space-recovery lever,
-before deciding what (if anything) to offload onto `sdi`.
-
-Audited sdb/sdc live: sdb absent, sdc repartitioned into backup services. No free disk to grow vg_tgw. Closing #1056 as superseded, opened #1136 for re-evaluation.
 ## PP-KNOWLEDGE-001 — the knowledge & translation hub — 6-LAYER UMBRELLA, extended 2026-07-11
-**Corrected from "5-LAYER" 2026-07-12 (Fable independent review #1338) — the
-Graph/Graphify row was added this session without updating the count.**
-**PLANNED s45 (2026-07-04), extended this session into the full 5-layer
-umbrella (Concept 2).** Leotha (PP-HERMES-EA-001) curates/organizes the data
-long-term; this plan is the architecture only.
-
-**The vision statement, Dave 2026-07-16, tying pm_intake + this hub together:**
-"A library with a librarian that can tell you where everything is, cross-
-referenced, in your language, with footnotes. Hopefully." Aspirational, not
-yet built — but it's the one sentence that unifies what's otherwise scattered
-across several PPs: pm_intake's filing/organizing behavior (restored under
-Tigwa's persona, PP-HERMES-EA-001) is the librarian's *intake* half; this
-hub's Storage/Search/Graph layers (git-annex, Recoll, Graphify) are the
-*stacks* she works from; "in your language" is the MCP/query-front-door
-layer answering in natural language, not raw grep; "with footnotes" is
-citation/provenance back to the source document, not just a location pointer
-— an explicit bar the eventual query surface should be held to, not assumed
-free. Nothing here is scoped or built yet; recorded so the destination stays
-visible while the git-annex/Recoll starting point (below) gets built first.
-
-**Filing authority + the plan's own end-state, reinforced 2026-07-16
-(Dave):** "all of the filing locations and tasks are the librarian's
-responsibility. Just tell what goes where." **Clarified same day:** once
-trained, the librarian creates new locations too, not just chooses among
-existing ones — other actors' job shrinks to either (a) defining a new
-document *type* when one doesn't fit an existing category, or (b) simply
-handing raw material to her to route herself. This is explicitly the
-pm_intake pattern restored under Tigwa's persona, not a new invention — see
-CLAUDE.md's "Tigwa's own persona is pm_intake's replacement direction."
-Going forward, Claude's (and any other actor's) job when producing a
-document is to classify/tag it or just send it to her — never to
-unilaterally invent or own a folder/taxonomy. That authority belongs to the
-librarian role (Tigwa/Leotha, [[PP-ANNEX-001]]'s "archivist" framing), a
-standing priority Dave gave Tigwa directly 2026-07-15. Concrete instance
-from this same session: the `reports/` directory + its filing README (below)
-were created unilaterally during the plan-reconciliation pass — correct as
-an interim stopgap (nothing lost, Prime Directive 1), but its
-structure/rules are provisional pending the librarian's own reconciliation,
-not a Claude-owned convention going forward.
-**Real gap this surfaces, not yet in any contract:** the dual-reviewed
-operational-contract cluster ([[PP-HR-001]]) covers identity, review,
-tool/access boundaries, and mechanical enforcement — it does not yet contain
-an explicit clause assigning filing/taxonomy authority to the librarian and
-requiring other actors to classify-and-hand-off rather than decide
-structure themselves. Worth adding as a term the next time Tigwa's or any
-worker's contract is touched.
-
-**Extended to search/recovery, 2026-07-17 (Dave):** the librarian's
-authority isn't just *where new things go* — it's also *finding things
-that went missing*. After a Claude-run "recover lost PPs" sweep this
-session (found PP-ROUTER-001 orphaned, corrected a false claim about
-PP-DOCLIB-001), Dave: "the librarian can handle all that. She has been
-working nights when it is cooler on that." **Correction, same session
-(Dave):** "I did define the responsibility and tell her the weather" —
-not her own initiative; Dave assigned it directly and briefed her on the
-thermal picture that shapes her schedule. Two things this settles: (1)
-search/reinstate requests route to Tigwa, not Claude, going forward — see
-[[feedback-pp-recovery-is-pull-based]]; (2) she's executing an explicit,
-Dave-assigned responsibility on a Dave-briefed schedule, not something she
-discovered or decided to take on herself.
-
-**The plan's own ultimate destination (Dave):** `TGW-Master-Plan.md` itself
-is meant to migrate into this knowledgebase architecture long-term — lighter
-to consume, less of a startup-context burden. Not started, no timeline;
-`tgw-plan-maintain` (the hygiene skill built 2026-07-16) is the interim
-discipline until this hub can absorb the plan's own overflow instead.
-
-**Absorbed 2026-07-11 (Dave):** PP-DOCLIB-001 and PP-HISTORY-001 fold in
-here — "it's recoll+mcp on the knowledgebase." Both were existing facilities
-(document cross-referencing, `tgw history-index`) that sit ON TOP of this
-hub's Search (Recoll) and MCP (agent front door) layers, not separate PPs.
-
-**Correction, 2026-07-17:** the line above ("no standalone design docs
-existed") was wrong — `docs/ai-plans/pp-doclib-001.md` (todo #1044) is a
-real, substantive design (4-bucket taxonomy, a `tgw docs` CLI wrapper,
-`[[wikilink]]` cross-referencing) found during a "recover lost PPs" sweep.
-**Confirmed by Dave, no action needed:** "it was a proposal, we went
-another quicker route for now" (recoll, this section) — the doc stays as
-historical record, not merged back in.
+**Vision (Dave, 2026-07-16):** "A library with a librarian that can tell you where
+everything is, cross-referenced, in your language, with footnotes." Leotha/Tigwa
+curate long-term; this plan is architecture only.
 
 | Layer | Tool | Answers | Status |
 |---|---|---|---|
-| Storage | git-annex (canonical files, dedupe) | — | **PP-ANNEX-001, promoted 2026-07-11 — see below** |
-| Search | Recoll (full-text/metadata) | "where is the evidence?" | **PP-SEARCH-001, LIVE** at `/opt/TGW/.recoll/` (441K docs) |
-| Core spine | **PostgreSQL LISTEN/NOTIFY** (event bus) | pays off broadly: charting/forecasting, photo-set production-time analytics, the event server (PP-EVENTD-001), research feeding AI workers | **RESOLVED 2026-07-11** — not NATS JetStream, see note below |
-| Memory | Hindsight (timelines/experiences) | "what happened before?" | exploratory — prebuilt layered ON the core spine, not committed |
-| Knowledge | gbrain (curated "working truth") | "what do we believe now?" | exploratory — same, not committed |
-| Graph | Graphify (code + doc relationships) | "what connects to this?" | **detailed design merged in from PP-CODEGRAPH-001, 2026-07-14** — 4-layer stack (Tree-sitter/FalkorDB code graph, Postgres+Z3 invariant catalog, DuckDB execution-trace store, unified MCP layer), hosted on a1131, see PP-CODEGRAPH-001 section below for full design; awaiting Dave's research before build |
+| Storage | git-annex (PP-ANNEX-001) | — | promoted 2026-07-11, design in `docs/ai-plans/recoll-annex-jetstream.md` |
+| Search | Recoll | "where is the evidence?" | LIVE at `/opt/TGW/.recoll/` (441K docs) |
+| Core spine | PostgreSQL LISTEN/NOTIFY | general operational event bus | RESOLVED 2026-07-11 — not NATS JetStream (that's PP-AIOPS-001's separate audit-stream use) |
+| Memory | Hindsight | "what happened before?" | exploratory, not committed |
+| Knowledge | gbrain | "what do we believe now?" | exploratory, not committed |
+| Graph | Graphify | "what connects to this?" | merged from PP-CODEGRAPH-001, see that section |
 
-**Core-spine NATS-vs-Postgres note (2026-07-11, do not conflate with
-PP-AIOPS-001's separate JetStream use):** PostgreSQL LISTEN/NOTIFY wins for
-this general operational event bus (clip-route/knowledge-hub/UI routing) —
-`FUTURE-IDEAS.md`'s old NATS mention here is superseded. **This is a
-DIFFERENT question from PP-AIOPS-001's JetStream audit/CDC stream**, which
-is still the intended mechanism for durable, replayable mutation-history
-logging (Dave, 2026-07-11: "we want the transactional logging") — that use
-of NATS is NOT superseded, the currently-failing `nats` health check
-("No module named 'nats'") is a real gap for PP-AIOPS-001 Phase 1 whenever
-picked up, not a moot pre-existing nuisance.
-
-**Full plan + soundness review (4 system-specific guards, reject list):**
-`docs/ai-plans/recoll-annex-jetstream.md` — treat as the design doc of
-record for the storage/search/annex legs (Graphify/Hindsight/gbrain are new
-this session, not yet in that doc).
-
-**Dave's stage 1 (s45): "organize and make accessible all of our valuable
-data," as a concerted parallel lane alongside the fix/execution tracks** —
-the knowledge dataset becomes a better discovery search than the catalog
-(catalog stays the structured/UI projection; recoll is the find-anything
-layer). recoll already paid for itself in week one (real recovery/audit
-queries, s44/s45).
-Stage-1 packets: #1147 (R2 search surface — priority), #1148 (R1 field
-mapping), #1149 (A0 Syncthing/annex boundary decision, Dave 15min), #1150
-(A1 annex pilot on archive corpus). Drive-fleet manifests continue under
-PP-DRIVE-INDEX (#1136).
-
-**Starting point for Tigwa's knowledgebase work, decided 2026-07-14 (Dave):**
-"my first research started with graphify, but I found the better solution."
-The Graph/Graphify layer (FalkorDB/Z3/DuckDB/MCP, PP-CODEGRAPH-001 section
-below) was Dave's original research target, but he's since decided
-git-annex + Recoll (Storage + Search, A0/A1 above — A0's boundary decision
-is already set, A1 is unblocked) is the better starting point for Tigwa to
-actually begin on and for Dave to get familiar with the tools hands-on.
-Event fabric (Track E / "JetStream", see `recoll-annex-jetstream.md`) is
-explicitly deferred — not part of this starting point. Graph/Graphify
-still needs its own planning pass (5 open packaging questions, see
-PP-CODEGRAPH-001 section) before Tigwa or anyone builds it — not skipped,
-just sequenced after git-annex/Recoll.
-
-**Target use cases, same decision (Dave, 2026-07-14):** PP-DATAINTEGRITY-001
-(see its own master-plan section) is what Tigwa targets with this — not
-a generic "index everything" exercise. Concrete starting scope: the
-photo-integrity design's open legs 2/3, and the `status`/`#STATUS`
-write-path reconciliation once scoped. Grounds the buildout in real,
-already-identified reconciliation work instead of an abstract capability.
-
-**This is infrastructure, not an iterated/churny tool (Dave, 2026-07-14):**
-"I want this to be an infrastructure piece. When it is mature and we have
-better hardware they may live side by side." a1131 hosts it for now (good
-workspace, thermal-relief compute, no production traffic), but unlike
-Hermes/Aider (deliberately kept in userspace — PP-NIXOS-001's standing
-rule, see `decouple-hermes-aider-flake.md`) the knowledgebase stack is
-meant to mature into real settled infrastructure that could eventually run
-alongside tgw-prod's production stack on better hardware. Practical
-consequence: package it **declaratively in a1131's flake** (`git-annex`,
-`recoll`), not via imperative `nix profile install` — directly applying
-today's lesson from the Hermes incident (imperative per-user nix-profile
-installs broke `hermes update` on two hosts because they're just as
-immutable as a flake package but without any of the declarative tracking).
-This also leans the still-open FalkorDB packaging question (Graph layer,
-PP-CODEGRAPH-001) toward "NixOS service" over "userspace nix-profile" —
-not decided yet, but the precedent points that way.
-
-### PP-ANNEX-001 — the archiving/librarian layer — PROMOTED 2026-07-11
-**"A librarian/archivist tool built into the library itself"** (Dave) —
-git-annex doesn't manage the library from outside, it replaces the file
-with a symlink and tracks location/metadata directly in the repo. Full
-prior design moved from `FUTURE-IDEAS.md` into `docs/ai-plans/recoll-annex-jetstream.md`
-(Track A, packets A0-A5); do not relitigate what's already settled there:
-git-annex replaces Syncthing for data trees; LAN hosts (a1131) are plain ssh
-git-annex remotes (wire-speed); Google Drive is the off-site/portable/backup
-tier ONLY, never the LAN rendezvous; plan vault stays plain git, never
-annex; scope = history/archive corpus consolidation ONLY, ItemData stays
-fence-owned and untouched (A4 rescoped away from live-data migration);
-`numcopies=2`; date-partitioned `gdrive-archive-YYYY`; Dave approves every
-deletion (C9); A5 (Go companion tool) deferred until stock remotes proven.
-
-**A3 cloud backend — SETTLED 2026-07-11: Google Drive** (not GCS/S3 — new
-metered spend not justified below the $4k-server budget line, even though
-git-annex's native `type=S3` would be the cleanest integration technically).
-Current capacity: 2TB Google One @ $100/yr, upgrade path to 5TB @ +$140/yr.
-**Adapter kept genuinely open, evaluate empirically**: rclone special remote
-(already proven in production for PP-PHOTO-001 photo sync, zero new auth)
-vs. native `git-annex-remote-googledrive` (Lykos153, direct API, needs its
-own OAuth credential) vs. anything else found during the A2 pilot.
-
-**"The archivist" reframe (Dave, 2026-07-11):** archiving stops being a
-hardcoded library call (`items.atomic_write_json(..., archive_root=...)`
-zipping inline) and becomes a delegated hand-off to one authoritative
-service that owns the full chain — archive (zip, existing E5/#1104
-mechanism) → log → index (Recoll) → place (git-annex → GDrive) — driven by
-a filing policy Leotha curates over time. **Open design constraint, not yet
-solved:** E5/#1104 is explicitly fail-closed (write must not proceed unless
-archive succeeds) — delegating to an external service risks losing that
-synchronous guarantee unless the hand-off blocks for ack or there's a
-durable write-ahead step. Real design work, candidate for "model the
-worker in Hermes first" (PP-HERMES-EA-001) before it touches the live
-`items.py` write path.
+**Filing authority (Dave, 2026-07-16, reinforced 2026-07-17):** all filing
+locations/taxonomy are the librarian's (Tigwa/Leotha) responsibility, including
+creating new locations once trained — other actors classify/hand-off, never invent
+folders. Search/recovery (finding lost PPs) is also her assigned responsibility on a
+Dave-briefed schedule, not Claude's routine sweep. Starting point decided 2026-07-14:
+git-annex + Recoll (not Graphify) is where Tigwa actually begins, targeting
+PP-DATAINTEGRITY-001's reconciliation use cases concretely, not an abstract
+index-everything exercise. Infrastructure, not an iterated tool — hosted on a1131,
+packaged declaratively in its flake. Plan's own long-term destination:
+`TGW-Master-Plan.md` itself migrates into this hub eventually (not started;
+`tgw-plan-maintain` is the interim discipline). Full detail (PP-ANNEX-001 sub-design,
+PP-DOCLIB-001/PP-HISTORY-001 absorption, NATS-vs-Postgres reconciliation):
+`pp/PP-KNOWLEDGE-001.md`.
 
 
 ## PP-DRIVE-INDEX-001 — drive survey, dedup, universal index (merged 2026-07-04)
@@ -1247,64 +652,18 @@ transient-only (safe requeue, no fix) vs. real bug findings (own
 packet+todo each). Full breakdown + execution plan: `pp/PP-DEADLETTER-001.md`.
 
 ## PP-DATAINTEGRITY-001 — data reconciliation & integrity track — NEW 2026-07-11
-**Dave: "there should be a data integrity track, for all of the data
-reconciliations — there is a planning item or two unaddressed."** Correct
-diagnosis — `docs/ai-plans/photo-integrity-mitigation.md` already existed
-as a real 3-legged design (detect/recover/prevent) but had no single
-owning PP (split across PP-UIPIPE-001+PP-DRIVE-INDEX-001+PP-ANNEX-001),
-which is exactly why legs 2/3 (#1266, #1267) sat untagged with nowhere
-clean to live — doubly true since PP-UIPIPE-001 no longer exists as its
-own PP (folded into PP-EDITOR-001 same session). Leg 1 (detect,
-`photo_files_readable` catalog-verify rule) DONE #1154 2026-07-05 — 206
-bad/149 SKUs found. Legs 2 (verify-after-copy sha256 helper) and 3
-(decode-verify at intake) open. Recovery still rides PP-DRIVE-INDEX-001
-Phase 1; prevention's structural endgame still depends on PP-ANNEX-001.
-Full design: `docs/ai-plans/photo-integrity-mitigation.md`; PP index:
-`pp/PP-DATAINTEGRITY-001.md`.
+Owns all data-reconciliation work under one PP instead of splitting across
+PP-UIPIPE-001/PP-DRIVE-INDEX-001/PP-ANNEX-001. Leg 1 (`photo_files_readable` detect)
+DONE #1154 (206 bad/149 SKUs). Legs 2 (verify-after-copy sha256) and 3 (decode-verify
+at intake) open. One of Tigwa's knowledgebase-buildout target use cases (2026-07-14).
+**New leg, todo #1377 (2026-07-13): `status` vs `#STATUS` write-path bug** —
+`items.statusupdate()`/`verifiedupdate()`/bulk-edit have always written to the legacy
+`#STATUS` key instead of canonical `status`; a 2026-07-03 data-scrub correctly
+stripped `#STATUS` from 20,415 items but exposed the underlying write-path bug. 5,118
+items currently have neither key set. Dave: "this is a big fix" — logged, not yet
+scoped/executed. Full design + open questions: `pp/PP-DATAINTEGRITY-001.md`;
+photo-integrity design: `docs/ai-plans/photo-integrity-mitigation.md`.
 
-**Target use cases for Tigwa's knowledgebase buildout (Dave, 2026-07-14):**
-"I will have tigwa target these use cases in her knowledgebase build out."
-This PP's own reconciliation work (photo integrity detect/recover/prevent
-legs, the `status`/`#STATUS` write-path forensics below) is exactly the
-shape of problem the git-annex/Recoll knowledgebase (PP-KNOWLEDGE-001,
-buildout starting 2026-07-14) is meant to make fast — archive-snapshot
-diffing, write-path history tracing, catalog-verify cross-checks were all
-done by hand this project's history (see the `#1377` writeup below: found
-via "ItemArchive snapshot diffs + `data-scrub-1053-report.json`," exactly
-the kind of search a mature knowledgebase should make trivial). Concrete
-starting scope for her, not abstract: legs 2/3 of the photo-integrity
-design (open), and the `status`/`#STATUS` reconciliation pass (not yet
-scoped/executed) once Dave scopes the "fun inventory."
-
-**New leg 2026-07-13: `status` vs `#STATUS` write-path bug (todo #1377).**
-Found while fixing the web UI's Eligible filter (it was silently excluding
-items with blank status). Root-caused via ItemArchive snapshot diffs +
-`/opt/TGW/var/log/data-scrub-1053-report.json`: on 2026-07-03 22:21,
-`scripts/data_scrub_legacy_ebay_fields.py --apply` stripped the legacy
-`#STATUS` key from 20,415 items, treating it like the script's other
-genuinely-obsolete Magento artifact fields — but unlike its own sibling
-guard for legacy category fields (which correctly refuses to delete until
-the value is confirmed promoted to the canonical field first, #1209/#1252),
-`#STATUS` had no equivalent protection. **Dave, 2026-07-13: `status`
-(lowercase) was always the real canonical field — `#STATUS` was a manual
-convenience alias (the `#` sorted it to the top of the JSON for hand
-inspection) that was "sometimes not updated."** That inverts the obvious
-read of the incident: the Jul 3 strip wasn't the core bug (removing a
-stale convenience key is arguably correct), the core bug is that
-`items.statusupdate()`, `items.verifiedupdate()`, and `bulk_edit`'s status
-field (`BULK_FIELD_KEYS['status'] = '#STATUS'`) have **always written to
-the wrong key** — every operator status update via `tgw update-verified`
-or the bulk editor has been silently landing on the stale/legacy field,
-never the canonical one. Live scope: 5,118 items currently have neither
-key set (810 of those genuinely unlisted/unsold, the rest already resolved
-via `ebay_listing`/`ebay_offer`). Dave: "this is a big fix" — logged only,
-not yet scoped/executed. Needs: (1) write-path fix (point status writes at
-`status`, stop writing `#STATUS`), (2) `data_scrub_legacy_ebay_fields.py`
-either drops `#STATUS` from `FIELDS_TO_CHECK` entirely or gets the same
-promotion-first guard as the category fields, (3) `items.create_item()`
-still has no default status for intake paths that omit it, (4) real
-reconciliation pass across all items with any status signal once Dave has
-scoped the "fun inventory" — not attempted yet.
 
 ## PP-ADD-005 — SKU migration (legacy formats → canonical) — orphaned pp_ref, backfilled 2026-07-16
 Migration itself is 99.7% done: `src/tgw/sku_migration.py` documents 7 historical
@@ -1327,57 +686,19 @@ Two open todos, both real and still open:
 Before treating any `tgw1970*` or 2-digit-year-prefixed SKU as garbage, check
 `sku_migration.py`'s class table first.
 
-## PP-AGENT-DISCIPLINE-001 — agent role/procedure guardrails made mechanical, not prose — NEW 2026-07-16, orphaned pp_ref backfilled same day
-Born from `INCIDENT-2026-07-16-kdeconnect-clipboard-triage-failure.md`: a session
-skipped the CLAUDE.md startup sequence because the user's first message read as a
-quick question — proof that a written "always run this" instruction still depends
-on the model choosing to comply, and it had already failed. Same-day recurrence
-happened a second time (new session, bare greeting, ran only the thermal check,
-skipped inbox processing) before the fix below existed.
+## PP-AGENT-DISCIPLINE-001 — agent role/procedure guardrails made mechanical, not prose — NEW 2026-07-16
+Born from a real incident (`INCIDENT-2026-07-16-kdeconnect-clipboard-triage-failure.md`)
+— a written "always run this" rule was skipped twice same day, proving prose-only
+compliance isn't enough. Four pieces built, todo #1444 closed: invariant E10
+(flake-drift detector, still needs a standing periodic check not just an agent-time
+one), `.claude/agents/nix-flake-maintainer.md`, the `flake-guard.py` PreToolUse hook,
+and the `session-start-briefing.py` SessionStart hook (both hooks not yet live-fire
+confirmed — needs a `/hooks` reload/session restart to prove firing). Tigwa's
+cross-verification (2026-07-16) confirmed both real; one gap reconfirmed still open
+(flake-guard covers `Bash` only, not raw `Edit`/`Write`). Two open follow-ups: #1449
+(extend flake-guard's matcher), #1450 (evaluate `settings.worktree.bgIsolation` as a
+`tgw-coder` isolation replacement). Full detail: `pp/PP-AGENT-DISCIPLINE-001.md`.
 
-Four pieces built, todo #1444 closed:
-1. **Invariant E10** (`reference/invariants.md`) — flake checkouts across hosts must
-   not silently diverge from `origin/master`. Status ⚠️ not ✅ — a standing periodic
-   detector (cron/systemd-timer, independent of any agent) is the flagged remaining
-   gap, not yet filed as its own todo.
-2. **`.claude/agents/nix-flake-maintainer.md`** — general sysadmin agent for
-   tgw-prod/a1131. Wide standing READ (logs, systemd, process state, SSH, D-Bus),
-   narrow procedure-gated WRITE (git commit/push on the flake, `nixos-rebuild
-   switch`, service restarts). Bakes in mandatory drift-check-both-hosts-first and
-   the `commit-nix-flake` skill's procedure, host-generalized.
-3. **PreToolUse hook** — `.claude/hooks/flake-guard.py` + `.claude/settings.json`.
-   Gates `git commit`/`push` when `tgw-flake` appears in the command, and
-   `nixos-rebuild switch`/`test` unconditionally (`ask`, not a hard block).
-4. **SessionStart hook** — `.claude/hooks/session-start-briefing.py`. Runs
-   automatically before any reply; read-only. Injects the `inbox/claude/` file
-   list, unchecked `SUGGESTIONS.md` count, `tgw plan check`, and capped `tgw plan
-   status`. Removes the judgment call from CLAUDE.md Steps 1/3 entirely — Steps 2/4
-   (actually reading the plan, registering the todo/breadcrumb) still require the
-   model to act on what's surfaced.
-
-**Live-fire not yet confirmed for either hook** — this repo's settings watcher only
-picks up a hooks config that existed when the session started; needs a `/hooks`
-reload or session restart once to prove firing for real.
-
-**Tigwa's Claude-contract cross-verification, 2026-07-16 (read-only, no
-mutation):** confirmed the `nix-flake-maintainer.md` contract and
-`SessionStart` hook wiring/firing are real (hashes recorded in the review).
-Flagged `sudo -u tgw tgw plan check`/`tgw plan status` returning
-`sudo: tgw: command not found` in her test environment — **re-verified
-live in this session, 2026-07-16: both commands run clean** (`tgw plan
-check` → "all clear"; `tgw plan status` → 56 PP-* items), so this
-particular gap does not reproduce here; treat Tigwa's finding as
-environment-specific (PATH/sudoers difference on her host) rather than a
-standing defect, worth a note back to her rather than new work. The other
-finding — flake-guard's PreToolUse matcher covers `Bash` only, not raw
-`Edit`/`Write` on flake files — reconfirmed still open; already tracked as
-#1449/#1450, no new todo needed.
-
-Two open follow-up todos:
-- **#1449** (p50) — extend `flake-guard.py`'s PreToolUse matcher (currently `Bash`
-  only) to also catch raw `Edit`/`Write` on flake files.
-- **#1450** (p50) — evaluate whether Claude Code's `settings.worktree.bgIsolation`
-  harness feature can replace `tgw-coder`'s current 100%-prose worktree isolation.
 
 ## PP-POSTGRES-001 — PostgreSQL item source-of-truth migration — NEW 2026-07-13
 **PROPOSAL — design doc only, nothing built.** Dave, same session as the
@@ -1431,155 +752,37 @@ recovery, API responsibility map) and the rest of the 17-item gap triage not
 started. Needs a todo filed with `--pp PP-RUNBOOK-001` before any further
 runbook file gets touched (going-forward tagging rule).
 
-## PP-CODEGRAPH-001 — code graph + invariant/trace infrastructure (agents see design convergences) — FOLDED INTO PP-KNOWLEDGE-001, 2026-07-14
+## PP-CODEGRAPH-001 — code graph + invariant/trace infrastructure — FOLDED INTO PP-KNOWLEDGE-001, 2026-07-14
+Merged same day as filed — this is the concrete build-out of PP-KNOWLEDGE-001's
+Graph/Graphify layer, not a separate initiative. 4-layer architecture: Tree-sitter
+code graph (FalkorDB), Postgres+Z3 invariant catalog, DuckDB execution-trace store,
+unified MCP layer — hosted on a1131. Problem it solves: cross-cutting design
+"convergences" (fence-bypass pattern, status/#STATUS drift, NATS wired to the wrong
+door) get found by manual audit sweeps instead of the tooling surfacing them. Dave
+decided to build the full stack, not a cut-down Phase 1 (corrected an earlier
+Claude scoping-down attempt — see `feedback-take-care-before-discarding-ideas`).
+**Status: infrastructure-establishment planning doc written, nothing installed** —
+Dave bringing additional research before the build session. Open questions (FalkorDB
+packaging, invariant-catalog engine, cross-host MCP access, repo-sync, parse scope) +
+the planner/stitcher convergence idea: full detail in `pp/PP-CODEGRAPH-001.md`.
 
-**Merged same day as filed (Dave, 2026-07-14 afternoon): "pp-codegraph also
-same project now"** — PP-CODEGRAPH-001 is no longer tracked as a separate
-PP; it's the concrete build-out of PP-KNOWLEDGE-001's "Graph | Graphify"
-layer (see that section's 6-layer table above), which already existed as a
-placeholder row before this PP was filed this morning. Both are hosted on
-a1131, both were "awaiting Dave's research before build," and today's
-"knowledge project on a1131" request refers to this single merged project
-going forward — don't treat them as two separate initiatives requiring
-separate scaffolding decisions. This section is kept in place (not deleted
-— Prime Directive 1) as the detailed design record for the Graphify layer;
-new work should be logged under PP-KNOWLEDGE-001 going forward, with this
-section as its Graph-layer appendix.
-
-**Origin:** filed as a deferred FUTURE-IDEAS.md entry 2026-07-14 morning
-after Dave's directed Perplexity research (not blind — grounded against
-this actual repo) proposed a 4-layer architecture: Tree-sitter code graph
-(FalkorDB), Postgres+Z3 invariant catalog, DuckDB execution-trace store,
-unified MCP layer. **Promoted to active PP same day** once Dave confirmed
-he's building it — not deferred.
-
-**The problem it solves (Dave's own framing, not a borrowed pattern):**
-coders and planners lack insight into the interconnections of the design,
-so cross-cutting "convergences" get missed until a manual audit sweep
-finds them — and even then the finding doesn't get resolved into working
-process, just logged. Real, already-paid cost: the fence-bypass pattern
-(direct `ItemData/` writes skipping the tgw-api fence) was found
-independently across 9+ separate files over multiple PP-COHESION-001 audit
-sessions instead of in one pass; `status`/`#STATUS` write-path divergence
-went undetected until forensic archive-diffing; NATS/JetStream built under
-PP-AIOPS-001 wired to the wrong door relative to PP-POSTGRES-001's later
-needs; PP-CATALOG-INCR-001 vs PP-POSTGRES-001 still has an unreconciled
-premise conflict sitting in this plan.
-
-**Decision (Dave, 2026-07-14): build the full stack, not a cut-down Phase
-1.** An earlier Claude-authored planning pass
-(`docs/ai-plans/pp-codegraph-001.md`) had proposed deferring Z3/DuckDB and
-substituting Postgres-on-tgw-prod for FalkorDB, reasoning from "keep the
-flake surface minimal" and "no demonstrated need yet." Dave corrected
-this twice: the research was grounded in the actual repo, not generic
-literature (evidence for the design was already stronger than that
-Postgres-first framing credited), and the standing rule going forward is
-more care before scoping down what he's already reasoned toward — see
-memory `feedback-take-care-before-discarding-ideas`.
-
-**Host: a1131, not tgw-prod.** Full stack (FalkorDB, Z3, DuckDB, Tree-sitter,
-a new unified MCP server) hosted on a1131 — already Tigwa's office and
-TGW's thermal-relief compute, client-shaped (no production traffic
-dependent on it), 4 cores/19GB RAM/169GB free disk confirmed live
-2026-07-14. This placement is what actually resolves the flake-minimal-
-surface tension from the earlier draft — new infrastructure on a
-non-production, already-less-minimal host doesn't compete with tgw-prod's
-constraint the way it would have on tgw-prod itself.
-
-**Status:** infrastructure-establishment planning doc written 2026-07-14 —
-`docs/ai-plans/pp-codegraph-001-a1131-infrastructure.md` (components,
-packaging options, data-flow, access model, resource budget, open
-questions). **Dave is bringing additional research before the actual build
-session** — nothing installed, no code written yet. Open questions
-flagged for that session: FalkorDB packaging (flake vs. userspace),
-invariant-catalog storage engine (DuckDB vs. a1131-local Postgres),
-cross-host MCP access mechanism (tgw-prod packets need to reach a1131's
-graph), repo-sync mechanism (a1131's checkout is known-stale, #1082), and
-parse scope (`src/tgw/` only vs. also `tools/`/`scripts/`).
-
-**Convergence with PP-HERMES-EA-001's planner/stitcher, flagged 2026-07-14
-(Dave, still ideation — not yet a build decision):** the Z3 invariant
-catalog isn't just a lookup an agent queries — it's a candidate trigger
-for the planner's replanning decisions. If a runner's output gets checked
-against the invariant catalog and Z3 confirms it holds, that's the
-planner's "yeah, that's what I designed" signal to move forward; a failed
-confirmation is a replan trigger, not just a bug flag. That makes the
-planner/stitcher (see PP-HERMES-EA-001's "operating console/decision gate"
-framing) the consumer of PP-CODEGRAPH-001's invariant-confirmation output,
-and the in-process question channel (todo #1390) the plausible wire it
-rides on. Not designed yet — Dave was still building this idea aloud when
-it got captured; treat as a design lead for the eventual build session
-(#1386), not a spec.
 
 ## PP-NIXOS-001 — NixOS migration (CatioNIX)
-Canonical flake `~/tgw-flake` working; main-repo merge + workflow rules pending; a1131
-no-GitHub-access (todo #1082); no process supervision for agent processes (design
-requirement). FROZEN except stability fixes. Plan: `PLAN-nixos-migration.md`,
+Canonical flake `~/tgw-flake` working; FROZEN except stability fixes. **Standing rule
+(Dave, 2026-07-06, #1227): iterated-on tools stay OUT of the flake** — userspace
+install (pipx/uv/npm) even at the cost of losing Nix reproducibility, while a tool is
+still actively being tuned/swapped. Executed: Hermes/Aider decoupled from Nix control
+(`docs/ai-plans/decouple-hermes-aider-flake.md`). **Audit #1143 nix-flake mitigation
+batch EXECUTED 2026-07-06** (todos #1216/#1220-#1225): SSH password auth disabled,
+`enablePostgres` option added, duplicate kdeconnectd unit removed, backup-timer
+cadence documented, stale disko comment fixed, dead Qtile stub removed. Deliberately
+not applied (real blockers, not oversights): #1219 NFS host-lock (no static IP for
+intake device yet), #1217/#1218 Syncthing auth (still being configured), a1131
+power-management (would contradict its "never suspend" rule). New findings filed as
+follow-ups: #1229 (macroboard WAYLAND_DISPLAY hardcode), #1230 (periodic freeze-list
+review). Full detail: `pp/PP-NIXOS-001.md`; plan: `PLAN-nixos-migration.md`,
 `nix/CLAUDE-NIX.md`.
 
-**Standing rule (Dave, 2026-07-06, todo #1227): iterated-on tools stay out of the
-flake.** Every `nixos-rebuild switch` carries risk, and wrangling the flake has
-repeatedly burned whole day-usage-budgets against tasks that should be ordinary
-coding — that cost is a signal the flake's surface area is too large, not a skill
-gap. Rule going forward: before adding anything to the flake, ask whether it's
-settled infrastructure (OS layer, the TGW service stack, secrets wiring,
-user/group + hardening) or something still being actively iterated on (a tool
-Dave is tuning/swapping versions of/prototyping with). Iterated-on tools default
-to userspace install (pipx/uv/npm/git checkout) even at the cost of losing Nix's
-reproducibility for that one tool — not worth the rebuild-risk + usage-cost tax
-while it's still moving. **EXECUTED same day:** Hermes' `settings.model` and
-Aider's package pin pulled out of Nix control (`nixos-rebuild switch` succeeded,
-Hermes stayed healthy through the switch, Aider now pipx-managed) — see
-`docs/ai-plans/decouple-hermes-aider-flake.md`. Hermes' primary model live-edited
-to `deepseek-v4-flash` same session (Dave purchased DeepSeek + Google credits);
-`hermes-agent` deliberately NOT restarted yet — `DEEPSEEK_API_KEY` doesn't exist
-until Dave generates it, restart pending that.
-
-**Audit #1143 nix-flake mitigation batch, EXECUTED 2026-07-06 (todos #1216,
-
-a1131 SSH + kdotool/ydotool follow-up fixed — see document: dev-workflow/research/DONE-a1131-ssh-kdotool-followup.md
-#1321 nix flake: SSH key rotation, hermes removal, vivaldi, lan-mouse/firefox fixes — see document: dev-workflow/research/RESEARCH-INPROGRESS-1321-nix-flake-changes.md
-#1220-#1225):** all 10 findings reconciled against live state first (all
-confirmed still real, none stale) before any fix — same discipline as the
-Hermes/Aider plan. Fixed: SSH password auth disabled (#1216 — new ed25519 key
-generated + verified working *before* the flip, password auth now confirmed
-rejected); `services.tgw.enablePostgres` option added so the portable/client
-tier genuinely skips PostgreSQL (#1220 — this fix itself regressed
-`nix/tgw/users.nix`'s unconditional `postgres` user extraGroups line, caught by
-`nix flake check` before it ever reached a1131, then fixed); a1131 no longer
-imports production-only `keyd.nix` (#1221); duplicate `kdeconnectd` unit
-removed from Home Manager, single definition in `os/sway.nix` now governs both
-hosts, live-verified running from the correct unit path post-rebuild (#1222);
-backup timer renamed/documented to match its confirmed-intentional 30-min
-cadence, cadence itself untouched (#1223 — Dave: "we changed to every half
-hour on purpose"); stale disko free-space comment corrected to match live
-`vgs` (96MB free, not 292G) (#1224); dead `tgw/desktop.nix` Qtile stub deleted
-+ gid-assertion symmetry added to portable.nix (#1225, partial).
-**Deliberately NOT applied, filed as follow-ups:** #1219 NFS export — no
-static IP exists for the actual intake camera/phone device (only tgw-prod
-.100/a1131 .101 are reserved), so host-locking would break real intake; left
-as-is pending a reservation (todo #1228). #1217/#1218 Syncthing GUI auth —
-Dave is still actively configuring Syncthing peers/folders; deferred
-alongside the earlier SSH deferral logic, explicitly not done yet. #1225's
-other 2 sub-items — a1131 power-management (blocked: the "fix" would import
-`IdleAction=suspend`, directly contradicting a1131's own standing "never
-suspend, iMac12,1 bug" note) and the portable/master.nix boot-loader line
-duplication (cosmetic, lowest priority) — filed as todo #1231 rather than
-silently marked done. New findings surfaced while reconciling, not part of
-the original 10: keyd-macroboard's `tgw-macro`/`tm` hardcode
-`WAYLAND_DISPLAY=wayland-0` as a fallback but tgw-prod's live Sway session
-runs `wayland-1` — likely broken for any macro invoked outside the graphical
-session's own env (todo #1229, needs dynamic discovery not a hardcoded
-guess). Also: a governance follow-up filed (todo #1230, Dave 2026-07-06) to
-periodically review standing conventions/freeze-lists so none quietly
-become development-blocking without cause.
-
-**todo #1049 split (2026-07-04):** `--print-url` flag on the Python `tgw get-ebay-token`
-CLI was **already fully implemented** (found while checking, not built new) — live-
-verified, real auth URL generated, zero eBay calls. DONE, 5 new tests. The other half
-(upgrading the `tgw` fish wrapper in `nix/tgw/home.nix` to call `xdg-open` automatically)
-is a flake change under the freeze — left untouched, deferred to whenever PP-NIXOS-001
-thaws or Dave wants a targeted exception.
 
 ## PP-PHOTO-001 — photo pipeline (GDrive → Gemini / eBay)
 Sync infra live. Phase A (GDrive→Gemini multimodal draft) #1064; Phase B
@@ -1620,46 +823,19 @@ distinct from PP-AIOPS-001's separate JetStream audit-log use). Full design
 + Radar requirements: `reference/PP-EVENTD-001-design.md`.
 
 ## PP-PORTABLE-CATALOG-001 — offline/portable catalog sync (Flutter) — first real design doc 2026-07-11
-**Given its own heading, pulled OUT of the "Done" rollup — it was never
-actually done.** Real, substantive code exists (Dio offline data layer,
-sqflite outbox, snapshot-atomic-sync) but has **never been installed on
-a1131** (its target device), never live-verified, and a documented
-precedent exists of this exact feature self-marking "done" while the
-Flutter build was actively failing (`SUGGESTIONS.md:209-210`, todo #151).
-Deep architecture review (2026-07-11, Dave: "see where it lacks or
-shines") found real structural gaps, not just missing tests: connectivity
-detection is 100% manual despite the packages for automating it being
-installed and unused; zero conflict resolution; offline reads don't
-reflect the device's own queued edits; no retry cap on failed mutations;
-several sync-state UI providers are computed and never rendered; and
-**the backchannel Dave flagged as still-needed is confirmed missing** — no
-server-initiated communication of any kind exists. A planning doc
-(`PP-EVENTD-001-design.md`) had separately and incorrectly claimed a
-Flutter HTTP listener was "already implemented" — corrected same day.
-The backchannel fix is PP-EVENTD-001's own already-scoped Phase 5 (Flutter
-HUD WebSocket) — not new work, just now confirmed necessary rather than
-assumed-someday. Full assessment + phased remediation plan (Phase A:
-harden the existing manual model; Phase B: build the backchannel, depends
-on PP-EVENTD-001; Phase C: conflict resolution, needs its own design pass):
+Pulled out of the "Done" rollup — never actually done. Real code exists (Dio offline
+layer, sqflite outbox, snapshot-atomic-sync) but never installed on its target device
+(a1131), never live-verified. Deep review found real structural gaps (no conflict
+resolution, no backchannel, manual connectivity detection unused). **Correction
+2026-07-17 (Dave): the real problem is more basic** — two known devices on the same
+LAN, app has never once successfully launched/connected. This "does it even start"
+problem takes priority over the phased remediation plan (Phase A harden / B
+backchannel / C conflict-resolution). Also revealed: an existing undocumented
+Tigwa-built wrapper already reaches `tgw` without the Flutter app — see
+`reference/TGW-a1131-CLI-Wrapper.md`. Next session should start by verifying the
+basic launch/connect path before touching Phase A/B/C. Full detail:
 `pp/PP-PORTABLE-CATALOG-001.md`.
 
-**Correction, 2026-07-17 (Dave) — the real problem is more basic than any
-of the above:** "forget all the detection and crap. These two known
-devices are sitting right next to each other and I have never even seen
-it fire up a single time." Two known devices, same LAN, zero network
-complexity — and the app has never successfully launched/connected for
-Dave even once. This is not a connectivity-detection edge case or a
-conflict-resolution gap (the Phase A/B/C plan above) — it's a "does the
-thing even start" problem underneath all of it, and it takes priority
-over the phased remediation plan, not a peer item on the same list.
-**Also revealed:** Dave already had Tigwa build a wrapper "to get to tgw
-without futzing around" — meaning there's an existing, currently
-undocumented workaround already in use in place of the Flutter app for
-reaching `tgw`. Not yet located in the plan vault; needs finding (ask
-Tigwa or Dave directly) and documenting before more Flutter work is
-speced, since it may already solve part of what Flutter was meant to do.
-**Next session should start here** — verify the basic launch/connect path
-on a1131 (or wherever the app runs) before touching Phase A/B/C at all.
 
 ## PP-CATPICK-001 — smart category picker
 **Phase 1 DONE 2026-07-04** (#1079): `category_candidates` (id/name/full ancestor
@@ -1736,44 +912,17 @@ directly to specify the `keyd` config — a hands-on hardware/config
 collaboration, not a solo Claude build task.
 
 ## PP-ROUTER-001 — D-Link DIR-868L router into the TGW ecosystem
-**RECOVERED 2026-07-16/17** — real research existed at `docs/ai-plans/
-router-dlink-dir868l-ecosystem.md` (filed 2026-07-06) but had never been
-given a PP number or a master-plan mention, found during a "recover lost
-PPs" sweep Dave requested. **DD-WRT confirmed the correct firmware**
-(OpenWrt doesn't support this Broadcom chipset) — known flash path
-documented, one known post-flash 5GHz quirk with a documented fix. Six
-candidate capabilities once flashed, not prioritized: complete the DHCP
-reservation audit, VLAN-isolate intake/camera devices, fold router health
-into `tgw health`/ops-digest, authoritative local DNS, WireGuard, DR
-backup of router config (todo #1491). **Live finding surfaced by the
-recovery, not just historical:** the DHCP table has two different MACs
-both claiming `192.168.60.112` under the name "hpi3" — real unresolved IP
-conflict, todo #1490.
+**RECOVERED 2026-07-16/17** — real research existed but had never been given a PP
+number, found during a "recover lost PPs" sweep. DD-WRT confirmed correct firmware.
+**Status 2026-07-17: still just a proposal, no flash decision made.** Decision scope
+is narrow: flash or don't — not a commitment to build all 6 candidate capabilities
+(DHCP audit, VLAN isolation, health-check integration, local DNS, WireGuard, config
+backup) at once; once flashed, Entware lets services get added one at a time. Live
+finding: DHCP conflict, two MACs both claiming `192.168.60.112` (todo #1490).
+Possible NATS-JetStream-for-alarm-system leg (distinct from PP-AIOPS-001's use) sent
+to Tigwa for reconciliation against the router's 256MB RAM constraint. Full detail:
+`pp/PP-ROUTER-001.md`.
 
-**Status, 2026-07-17 (Dave): still just a proposal, no flash decision
-made.** **Decision scope, narrowed same day (Dave):** the actual binary
-choice is only "leave it D-Link-proprietary, or take advantage of the
-diminutive but overpowered box" — i.e. flash or don't. It is NOT a
-commitment to build all 6 candidate capabilities at once. Once flashed, a
-package manager (Dave: "optware or whatever" — Entware is Optware's
-actively-maintained successor and the one to actually evaluate) lets
-services get added **one at a time**, same incremental-progress discipline
-as the rest of the plan (see "parallel-track discipline" near the R1
-table) — each candidate capability becomes its own small packet whenever
-it's next in line, not a single big router-rebuild project gating on all
-6 landing together. Nothing in this PP is actionable ahead of the
-flash-or-don't decision itself; the IP-conflict fix and the NATS/
-alarm-system leg below both wait on it too, not on each other.
-
-**Possible NATS JetStream-for-alarm-system leg, 2026-07-17 (Dave):**
-"unrelated to our other use" (i.e. distinct from PP-AIOPS-001's JetStream
-audit-stream design) — Tigwa has already done some research into running
-NATS JetStream on this router as part of an alarm-system design. My
-router findings sent to her (`inbox/tigwa/CLAUDE-NOTE-2026-07-17-router-
-findings-for-nats-alarm-research.md`) for reconciliation with whatever
-she already has — 256MB total RAM on this hardware is the concrete
-constraint her research should be checked against. Not yet merged into
-one design.
 
 ## PP-INVENTORY-001 — physical inventory verification — NEW 2026-07-11
 **Dave: "11 is an entire missing PP — the tools to accomplish the job,
@@ -1882,70 +1031,19 @@ schedule minting disabled, reducer cliff-guarded, prices are operator-only
 until PP-MARKETING-001 delivers trustworthy data for the tool to act on.
 
 ## PP-MARKETING-001 — marketing strategy (pricing, positioning, promotions) — NEW 2026-07-11
-**New PP (Dave, 2026-07-11): "pricing is really marketing strategy."**
-Umbrella for positioning/pricing-strategy work, previously miscategorized as
-part of the repricer tool. PP-PRICING-001 is its first tenant — likely not
-its last (comps, listing-copy strategy, promotions could land here too).
+Umbrella for positioning/pricing strategy (moved out of PP-REPRICER-001, which is now
+mechanical-tool-only). PP-PRICING-001 (Google Shopping comps via SerpApi) is the
+first tenant. SerpApi key (#1110) deferred — pipeline restart takes priority. **Eval
+packet #1109 DONE**: grounded Gemini search LOST against the existing free
+Browse-comps signal (45.3% vs 30.4% mean abs error on 10 real sold items) — do not
+wire grounded Gemini as a pricing signal; SerpApi itself still untested (blocked on
+the key). Phase 0 comping interface (supervised capture tool, not model-invented
+prices) designed, not started, needs Dave's go/no-go. Phase -1 self-powered comp
+engine (`OwnSalesProvider`) already exists and runs — turned out to be a
+data-density problem: `ebay_category_id` populated on 52% of catalog; #1135 recovered
+another 5,367 categories (20% of the gap) via a repeatable recompile job. Full
+detail: `pp/PP-MARKETING-001.md`.
 
-**SerpApi key (#1110), 2026-07-16 (Dave): "maybe, let's get the pipeline
-restarted in earnest first."** Deferred, not urgent — priority is the
-pipeline restart, not a paid-key provisioning decision right now.
-
-### PP-PRICING-001 — Google Shopping comps via SerpApi (paid)
-Two candidate data sources for comps, not mutually exclusive:
-1. **eBay sold data** via `buy.marketplace_insights` — BLOCKED external: scope
-   request in the eBay application review (#79, Dave answers DS questions).
-2. **Google Shopping comps via SerpApi (paid)** — the designed interim
-   substitute for marketplace_insights, dropped from the s42 redraw index by
-   mistake and restored at Dave's flag. Full Phase 1 design (title-based
-   Shopping SERP in ai_identify, `apis/lookup/shopping_search.py`, key via
-   `secrets_root/tgw.env` per settled architecture, corrected 2026-07-12):
-   `pp/PP-PRICING-001.md`.
-   Cross-market active prices (Google Shopping: eBay/Amazon/Walmart) — a
-   real floor signal, unlike same-marketplace Browse asking prices.
-3. **Google-grounded price check** (Dave's 2026-06-09 suggestion, also
-   dropped — "not accessible via API" is now stale: Gemini supports Search
-   grounding as an API tool on our free-tier direct key). Zero-cost eval
-   before paying for SerpApi.
-
-Eval packet (#1109) — DONE 2026-07-04: ran grounded Gemini (gemini-2.5-flash +
-Google Search grounding) against 10 real sold TGW items, scored vs the existing
-free `BrowseCompsProvider` signal. **Result: Gemini grounding LOST** — 45.3%
-mean abs error vs 30.4% for Browse comps; it kept finding plausible-but-wrong
-comps for near-generic/vintage items. **Do not wire grounded Gemini as a
-pricing signal.** SerpApi (Shopping SERP) still untested — blocked on #1110's
-key. Full writeup: `docs/TGW-Plan-Vault/inbox/DONE-1109-repricer-eval.md`,
-raw data `/opt/TGW/var/log/repricer-eval-1109.json`.
-
-**Phase 0 comping interface** (research inbox, `pp/PP-PRICING-001.md` Phase 0
-section): the #1109 result directly validates a Perplexity research thread's
-thesis — don't let a model invent prices, build a supervised capture tool
-instead. Proposed: 3-pane web UI (item / embedded eBay Product Research
-browser / structured comp+pricing capture), `comp_snapshot` +
-`pricing_recommendation` schema, Marketplace Insights as a later drop-in
-upgrade to the same schema. Design capture only, not started — needs Dave's
-go/no-go. Related: PP-AGENTIC-PRICE-001 candidate-query design composes
-with either.
-
-**Phase -1 — self-powered comp engine (Dave request, todo #1134):** the
-infrastructure (`OwnSalesProvider` + `velocity_stats` worker) already exists
-and runs — this turned out to be a data-density problem, not a missing
-feature. **Initial 71%-uncategorized figure was checking the wrong field**
-(Magento `attribute_set`, not what the pricing engine reads) — corrected via
-todo #1135: the real field (`ebay_category_id`) is already populated on 52%
-of the catalog (28,710/55,419).
-
-**Todo #1135 — DONE, applied 2026-07-04.** Built
-`scripts/recompile_category_backfill.py` as a **repeatable recompile
-job** (Dave: "build it like we are going to go back in with a stronger
-dataset every so often") — modular sources, additive-only via the new
-`items.set_fields(only_if_absent=True)` fence helper, safe to re-run.
-Checked 3 structured sources (historical-tgwcatalog.json,
-historical-master-catalog.json via sku_old, `searchcatalog.csv`'s real
-`ebaycat` values) against the 26,709 gap: **5,367 recoverable (20%),
-applied live, 0 errors, idempotent on re-run.** 21,342 genuinely
-unrecoverable from flat exports — that's the real target for the Phase 0
-comping interface. Full detail: `pp/PP-PRICING-001.md` Phase -1 section.
 
 ## PP-AMAZON-001 — Amazon FBM for books/media (exploration, 2026-07-04)
 **Opened same day as the comp-engine request** ("let's also start looking
@@ -2014,231 +1112,54 @@ data-collector device remain a separate, deferred, non-blocking track.
 Full design: `pp/PP-INTAKE-004.md`.
 
 ## PP-PLANDB-001 — plan/tracker tooling
-Phases 1-4 done 2026-06-12→14: **P1** todo_items schema (`pp_ref`, `depends_on`,
-`plan_anchor` columns, #109) · **P2** `tgw plan render` — wholly-generated
-`plan/TGW-Taskboard.md` (#110) · **P3** `tgw plan check` — reconciles
-plan↔tracker (orphaned pp_refs, stale anchors, mismatched done/open, #112) ·
-**P4** `tgw plan status [PP-REF]` — one-line open/done/blocked rollup per PP
-item (#132). P3 and P4 (`tgw plan check` / `tgw plan status`) run in the
-mandatory session-start sequence in CLAUDE.md (Step 3); P2's output
-(`TGW-Taskboard.md`) is read as reference, but `tgw plan render` itself is
-not invoked at session start — it runs via the `plan_render` worker.
-
-### Phase 5 — execution track / goal view (PROPOSED, Dave 2026-07-10)
-
-**The ask, in Dave's words:** "all of the tasks to achieve the intended
-product should be able to be viewed in order without the noise of equally
-weighted items in other tracks." Concrete pain point: the audit#1143 cleanup
-work just completed (todos #1171/#1182/#1198/#1213 this session, plus
-earlier #1162-#1170/#1202/#1206/#1235/#1246) had to be gleaned by hand-
-grepping `source=audit-1143` across the flat todo list — there was no single
-view of "everything needed to finish this track, in order." Compounding it:
-some of the same track's items live in Dave's own todo queue (agent=`db`),
-not just Claude's, and today's flat per-agent lists never united them.
-
-**What exists today that a v1 could use as-is (no new schema required):**
-`source` (free-text, e.g. `audit-1143`), `pp_ref` (PP-* item), `depends_on`
-(ordering signal already in the schema per Phase 1), and `agent`
-(claude/admin/gemini/db — the cross-agent-unification piece). A track view
-doesn't need new columns to exist; it needs a render mode that **filters** to
-one track's items across all agents and **orders** by the dependency graph
-(topological, using `depends_on`) rather than each todo's global priority
-number — global priority is exactly the "equally weighted noise" problem:
-an audit#1143 item at p95 reads identically to an unrelated p95 item from a
-totally different track in the flat list, even though within its own track
-it might be the very next thing to do.
-
-**Shape (sketch, not yet designed in detail):** something like `tgw plan
-track <pp_ref-or-source-value>` producing a rendered, ordered list — same
-spirit as `tgw plan render`'s taskboard but scoped to one track and blind to
-everything outside it. Test case once built: run it for `audit-1143` and
-confirm it reproduces (in the right order) exactly the items worked this
-session, with none of the unrelated backlog visible.
-
-**Where this is headed (Dave, forward-looking — more to be planned, not
-speced yet):** specific teams executing specific tracks end-to-end. The nix
-flake is the working example that surfaced this need — today's session
-independently arrived at exactly this pattern by hand: multiple
-nix-touching findings (todo #1258's backup-mount durability fix, more
-pending) got batched into one pending changeset in `~/tgw-flake` rather than
-applied one at a time, because Dave wants "a bunch of flake updates to apply
-... all at once." The anticipated future model: Dave (or Claude) submits
-requirements against a track, a specialist team (e.g. a "nix specialist
-team") compiles the accumulated requests into a single coherent deliverable
-(one flake update, one PR, etc.) instead of a stream of one-off changes.
-That implies track/goal becomes a first-class routing concept, not just a
-display filter — todo metadata may eventually need an explicit
-`track`/`owner_team` field once the team-routing design lands. **Not
-building that yet** — this phase entry captures the initial ask (the view)
-only; the team-routing piece is intentionally left unspec'd until Dave's
-next planning pass.
+Phases 1-4 done 2026-06-12->14: schema (`pp_ref`/`depends_on`/`plan_anchor`), `tgw
+plan render` (taskboard), `tgw plan check` (plan<->tracker reconciliation), `tgw plan
+status` (per-PP rollup) — P3/P4 run in the mandatory session-start sequence. **Phase
+5 (PROPOSED, Dave 2026-07-10): execution track / goal view** — a `tgw plan track
+<ref>` rendering one track's items ordered by `depends_on`, blind to unrelated
+backlog noise; forward-looking team-routing concept (specialist teams executing
+tracks end-to-end) not yet spec'd. Full Phase 5 rationale + complete Done-rollup list
+of superseded/misc-completed PPs and todos: `pp/PP-PLANDB-001.md`.
 
 ### Done (designs in `pp/` or archive; tracker holds history)
+PP-EBAY-MIRROR-001 · PP-MIGRATE-001 · PP-DEADLETTER-001 · PP-DOCFLOW-001 ·
+PP-INTAKE-001 · PP-OFFER-001 · PP-OPS-001 · PP-PROMO-001 · PP-REF-002 ·
+PP-REVISION-001 · PP-SHELL-001 · PP-STORE-001 · PP-TODO-001 ·
+PP-VERIFY-001 (scaffold; integration deferred) · PP-WM-001/PP-HM-001 · PP-ADD-009 ·
+PP-CI-001 · PP-CONTEXT-001 · PP-GLOBALS-001 · PP-LISTING-001 ·
+PP-LOOKUP-001 (Tier 1) · PP-PRICE-001/003/004/005 · PP-QUALITY-001 · PP-REF-001 ·
+PP-REPRICE-001 (defused s42) · PP-SEO-001 · PP-STAGE-001 · PP-SYNC-001 ·
+PP-FREESHIP-001 · PP-STRIKE-001.
 
-**PP-EDITOR-001, PP-DATALEARN-001, PP-MULTIMODEL-001 removed from this list
-2026-07-12** (Fable independent review #1338) — each was given its own
-"Open" heading above on 2026-07-11 specifically because it has real open
-work (PP-EDITOR-001: #1145 defect map; PP-DATALEARN-001: #1108/#144;
-PP-MULTIMODEL-001: #1251), but the promotion never removed the matching
-Done-rollup entry. See their headings under "Open — active or gated" above.
+**Superseded/obsolete:** PP-DEPLOY-001 (-> PP-NIXOS-001) · PP-PRICE-002 (->
+PP-REPRICE-001) · PP-PLASMA-001 (-> CatioNIX desktop split).
 
-PP-EBAY-MIRROR-001 (P1/P1.5/P2) · PP-MIGRATE-001 ✅
-2026-06-20 · PP-DEADLETTER-001 · PP-DOCFLOW-001 · PP-INTAKE-001 ·
-PP-OFFER-001 · PP-OPS-001 · PP-PROMO-001 · PP-REF-002 ·
-PP-REVISION-001 · PP-SHELL-001 · PP-STORE-001 · PP-TODO-001 · PP-VERIFY-001 (scaffold;
-integration deferred) · PP-WM-001/PP-HM-001 (Sway/HM desktop) · PP-ADD-009 ·
-PP-CI-001 · PP-CONTEXT-001 · PP-GLOBALS-001 (analysis) · PP-LISTING-001 ·
-PP-LOOKUP-001 (Tier 1) · PP-PRICE-001/PP-PRICE-003/PP-PRICE-004/PP-PRICE-005 ·
-PP-QUALITY-001 · PP-REF-001 ·
-PP-REPRICE-001 (the markdown reducer — **defused s42**: minting off, cliff guard) ·
-PP-SEO-001 · PP-STAGE-001 · PP-SYNC-001 · PP-FREESHIP-001 · PP-STRIKE-001.
-
-**Superseded/obsolete:** PP-DEPLOY-001 (MX Linux image → superseded by PP-NIXOS-001) ·
-PP-PRICE-002 (absorbed into PP-REPRICE-001) · PP-PLASMA-001 (delivered via CatioNIX
-desktop split, a1131 Plasma).
-
-**Misc. completed todos, folded from stray loose lines 2026-07-16 (no content
-lost, each already had a doc filed under `dev-workflow/research/DONE-*` or
-noted above):**
-
-- #1053 data-scrub legacy eBay Trading API fields — 20,419 items modified, zero exceptions
-- PP-PRICING-001 (self-powered comp engine extension) + PP-AMAZON-001 (Amazon FBM exploration) — design docs complete
-- #1113 ebay_dole interim fix — dead code removed, test added
-- #1138 `tgw revise --set` help text corrected (bare field names only, no nested expansion)
-- #1338 Fable independent review of the 2026-07-11 retarget — 13 confirmed findings, 12 applied same session (1 live incident: reboot-resurrected workers incl. `pm_intake`, re-stopped)
-- #1323 master plan retarget — catio development framework
-- #1320/#1319 title-length guard + enforcement
-- #1318 restore save-draft button
-- #1258 backup alarm (db dump stale, rclone never completed)
-- #1257 stale `ai_reidentify` flags cleared
-- #1256 per-item Best Offer control
-- #1255 Motors category tree cache built
-- #1254 sync `marketplaceId` hardcoding fixed
-- #1252 condition scrub + secrets facility
-- #1249 dead-letter diagnosis (flagged #1265 bulk requeue needing Dave's go)
-- #1240 broken tests fixed (`ebay_price.py`)
-- #1239/#1210/#1211/#1238 code-review follow-ups (atomic-write fixes)
-- #1236 `ebay_backfill_offers` fence-bypass fixed
-- #1214 `ebay_motors_census` stale-data/ambiguity fix
-- #1213 `ITEMDATA_ROOT` hardcoded path fixed
-- #1211 photo-repair unlink safety fixed
-- #1210 photosync-canary price diff fixed
-- #1209 order-dependency bug fixed
-- #1135 category recompile — 5,367 categories recovered
+**Misc. completed todos** (full one-line-each list: `pp/PP-PLANDB-001.md`): #1053,
+#1113, #1135, #1138, #1209-#1214, #1236, #1239-#1240, #1249, #1252, #1254-#1258,
+#1318-#1320, #1323, #1338.
 
 ### Gated on R1 — named, designed later
 
+
 ## PP-BULKLIST-001 — bulk editing + listing surface (stub, Dave 2026-07-02)
-The operator-gate design at volume: review MANY pending proposals in one sitting —
-bulk-approve the ~99% that are right, pull exceptions into the single-item editor,
-batch-publish approved items. **Hard gate: the single-item pipeline must be
-operator-verified end-to-end first (R1.6/R1.7 pass)** — a bulk surface over a broken
-pipeline bulk-applies the breakage. Design draws on the action-console principle
-(state drives interface) and the 550 pending re-drafts as the first real workload.
+Operator-gate design at volume: bulk-approve the ~99% that are right, pull exceptions
+into the single-item editor. **Hard gate: single-item pipeline must be
+operator-verified end-to-end first (R1.6/R1.7)** — queued as the pass immediately
+after the pipeline restart, not before. Backend plumbing already partially exists
+(`/api/bulk/preview`, `/api/bulk/apply`, `/api/bulk/action`, `/form/bulk` — confirmed
+live 2026-07-16, not a from-zero build). Rides along: `ebay_dole` worker was never
+installed — the "queue for auto-listing" checkbox is labeled inactive with an
+accurate tooltip pending that decision. Full detail: `pp/PP-BULKLIST-001.md`.
 
-**Rides along (todo #1113):** the "queue for auto-listing" checkbox's `ebay_dole`
-worker was never installed — decide at this design pass whether to build it (+ set
-a dole rate) or remove the checkbox permanently. Interim UI fix already shipped
-2026-07-10: checkbox labeled "(inactive)" with an accurate tooltip, backend
-`set_ready` response says the same, and a stray unreachable confirm-dialog still
-claiming "next dole cycle" was dead code and removed.
-
-**2026-07-16 (Dave): "maybe if it works now we will do bulk next pass."**
-Verified live: backend plumbing already partially exists —
-`/api/bulk/preview`, `/api/bulk/apply`, `/api/bulk/action`, and `/form/bulk`
-are all real, present routes in `http_server.py` — this isn't a from-zero
-build. Sequencing: **queued as the pass immediately after the pipeline
-restart-in-earnest** (Dave's stated priority tonight), not before — the
-hard gate above (single-item pipeline operator-verified end-to-end first)
-still applies, just with a concrete "next" slot now instead of an
-indefinite freeze.
-
-### Frozen — parked, not cancelled (thaw only if it blocks an R1 packet)
-
-PP-MC-001 (Midnight Commander UI) · PP-MCP-001 (MCP server — partial, tools live) ·
-PP-FULFILLMENT-001 ·
-PP-TASKER-001 (functions being absorbed into PP-INTAKE-004) · PP-PERP-AUTO-001 · PP-EMAIL-001 · PP-CLAUDE-HELP-001 ·
-PP-DERIVED-001 (design feeds Data Charter) · PP-DATA-OWN-001 (axiom absorbed into
-charter; mirror work continues as R1.8 + mirror fields) · PP-UI-INTEGRITY-001 ·
-PP-REVIEW-001 ·
-PP-RESCUE-001 · PP-AGENTIC-PRICE-001 ·
-PP-CANONICALIZE-001 · PP-CAPTURE-001 ·
-PP-HINT-001 (revisit) · PP-IFDIR-001 · PP-REMOTE-001 · PP-REF-003 · PP-GIT-001.
-Long-horizon concepts: `FUTURE-IDEAS.md` (planning sessions only).
-
-*(Frozen list: "LVM expansion (#1056)" removed 2026-07-12, Fable independent
-review #1338 — #1056 is closed, superseded by #1136 under PP-HARDWARE-001,
-see that section's own "Closing #1056 as superseded" note above.)*
-
-*(Index completeness: restored 2026-07-02 after Dave caught PP-PRICING-001 missing —
-the s42 redraw had dropped 27 PPs from the index; all archived designs remain
-byte-complete in `archive/sections/` and promote to `pp/` on touch.)*
-
----
 
 ## Open discussion items (for 2pm 2026-07-04 planning session)
 
-**Web UI vs Flutter app — MOVED to `pp/PP-UIUX-001.md`, 2026-07-16.** This
-whole discussion (the 2026-07-06 investigation, the 2026-07-11 nuance pass,
-the three undecided directions) sat under this stale, dateless heading for
-ten days with no PP assigned — exactly the kind of orphan `tgw-plan-
-maintain` exists to catch. Dave, 2026-07-16, gave it a real home: "flutter
-vs web is in with the ui inventory/tgw mapping/ui ux project. plan is to
-fully define then have entire set including web ui and flutter to the spec
-by ui/ux specialist coder." Full content preserved verbatim at
-`pp/PP-UIUX-001.md` — see that doc, not here, going forward.
+**Archived 2026-07-18** — this session's items are resolved or superseded (Web UI vs
+Flutter moved to `pp/PP-UIUX-001.md` 2026-07-16; PP-INTAKE-004 promoted; the
+relocate-inbox and catalog_rebuild-dead-letter questions are stale/closed). Full
+verbatim content preserved: `archive/sections/open-discussion-2026-07-04.md`.
 
-**Relocate the plan-vault document inbox into `/opt/TGW/incoming/`?** Dave recalled
-discussing this before (2026-07-04) but no record of it was found in this plan, any
-PP design doc, or memory — capturing now per Prime Directive 5 so it isn't lost
-again. `/opt/TGW/incoming/` was built session 42 as the general "root of ALL inbound
-data" (Data Charter) — `newitems/` (camera/intake drops), `ebay/` (raw API capture,
-E7), `lookups/` (reserved) — but `docs/TGW-Plan-Vault/inbox/` (research docs,
-PP-intake notes, Syncthing-synced across workstations) remains separate, its own
-thing. Open question: should the vault inbox move under `/opt/TGW/incoming/`
-alongside the other inbound streams, or does it stay separate since it's
-document/note intake (human research, Syncthing-native) rather than raw
-API/photo capture (machine-written, group-only perms, different retention model)?
-Dave is linking his existing `docs/TGW-Plan-Vault/inbox/` via Syncthing across his
-workstations in the meantime — no filesystem move happening until this is decided.
 
-**Self-healing philosophy is visibly working — verify quality at 2pm (Dave, 2026-07-03).**
-Observed live tonight during the overnight queue: the agent is finding, investigating,
-and logging anomalies as part of the normal workflow, not just executing tasks blind —
-e.g. the R1.8 snapshot's per-SKU error counter jumping 3→23→29 was checked against the
-quota-incident log and confirmed benign (silently-counted 404s for items with no offer,
-not 429s/quota exhaustion) before being written off, rather than either ignored or
-mis-flagged as an alarm. Matches the standing design philosophy (memory:
-feedback-self-healing-system — auto-detect, auto-sanitize or surface, self-service
-resolution, never just patch-and-move-on). Dave wants this specifically verified for
-quality at the 2pm session — i.e. confirm the investigations are actually correct and
-thorough, not just reassuringly-worded, before trusting the pattern going forward.
-
-**PP-INTAKE-004 — PROMOTED to active PP 2026-07-11**, no longer just a
-discussion item — see its own heading above (Pending projects index) and
-full design `pp/PP-INTAKE-004.md`. The platform-question half (is TGW a
-sellable platform) remains genuinely open and is now explicitly
-acknowledged-and-parked rather than an unstructured loose end — three
-business models named (multi-tenant host / licensed self-host / open-core
-services), not chosen between, flagged as its own future planning topic.
-Also still open, unsolved: "Tasker Permissions" companion-app absorption
-(todo #1227, revisit when this track thaws); `clip-route`'s capture-before-
-SKU-exists correlation ID (lands in PP-INTAKE-004's Phase 2).
-
-**catalog_rebuild dead-letter root cause (2026-07-04): SKU-rename races, not a bug.**
-15 `catalog_rebuild` dead-letters, all "No such file: ItemData/<old-sku>/..." —
-confirmed via `sku_history`: each old SKU was renamed by `ebay_sku_migrate`
-(e.g. `tgw20171218042138799` → `tgw201712180421387`, `normalize_class_a`,
-2026-06-29) and the new SKU directory exists fine. A rebuild scan just caught
-the old path mid-rename; catalog rebuilds have clearly succeeded since (fresh
-catalog data used all night). Cancelled (Dave's go). Not fixed at the source —
-worth a small robustness pass later (`_verify_item`/`build_all_catalogs`
-tolerating a missing file mid-scan as a skip-and-continue rather than failing
-the whole rebuild) if this recurs during a future migration batch.
-
-- DRAFT-1076-eps-support-ticket.md filed — pending Dave's review/submit.
-
-2026-07-10 planning session agenda filed as reference (see reference/AGENDA-planning-session-2026-07-10.md).
 ## Standing gates (human-only)
 
 Never: alter eBay OAuth scopes · auto-publish · **push AI-regenerated content to a
@@ -2286,75 +1207,26 @@ Not yet packetized — low urgency per Dave's own "I can live with it for a
 bit."
 
 ## PP-OPERATOR-QUEUES-001 — saved review-lens queues, browse-page chips
-
 **Todo #1466, reviewed + closed 2026-07-16.** Tigwa built this same-day from a
-3-sentence prompt: `src/tgw/operator_queues.py` (new), `config.py`/`http_server.py`
-diffs (4 endpoints + browse chip strip), `tests/test_operator_queues.py`.
-Two independent reviews filed by Claude, both read-only (no source/config/data
-mutated):
+3-sentence prompt. Code review: APPROVE-WITH-NITS (no SQL injection surface, AI-draft
+gate real, durable writes; 3 low-severity nits). UI review: SHIP-INTERNAL-SLICE, not
+operator-complete (queue chips visually identical to status chips; AI-drafted queues
+have no discover/create/edit UI yet — matches stated scope). Full review detail:
+`pp/PP-OPERATOR-QUEUES-001.md`.
 
-- **Code review — APPROVE-WITH-NITS.** No SQL injection surface (traced full
-  clause/params assembly; column allowlist matches real schema; JSON path
-  validated against `^[A-Za-z_][A-Za-z0-9_]*$`), AI-draft gate real (drafts
-  invisible to `GET /api/operator-queues` until activated), durable (survives
-  a catalog-SQLite rebuild by construction, atomic `mkstemp`+`fsync`+`replace`
-  writes). 3 low-severity nits, none blocking: (1) `source` field is
-  self-declared not authenticated — matches existing app-wide convention
-  (invariant C10), not a new gap; (2) `contains`/LIKE filter doesn't escape
-  literal `%`/`_` — cosmetic, not an injection risk (parameterized binding);
-  (3) a config-fallback branch in `_operator_queue_store()` is dead code in
-  the normal `load_config()` path.
-- **UI review — SHIP-INTERNAL-SLICE, not operator-complete.** Chip
-  placement/interaction mirrors the existing status-chip convention well.
-  Gap: a queue chip and a status chip are visually identical (same `.chip`
-  class) — an operator can't tell "saved review lens" from "status filter"
-  apart from reading the label, which matters because a queue can silently
-  return empty when its underlying condition changes. AI-drafted queues are
-  real in the backend but completely invisible in this UI (no
-  discover/create/edit/activate surface — matches the packet's own stated
-  scope, not an oversight). Recommended next slice: visual distinction from
-  status chips, a "N pending review" badge for drafts, fix the silent
-  fetch-failure pattern (shared with `loadInventoryDiff()`, same bug class
-  Tigwa's field-set-boundary audit flagged separately same day).
-
-Full review docs (superseded by this summary, not separately retained):
-`inbox/claude/CLAUDE-REVIEW-OPERATOR-QUEUES-001-2026-07-16.md`,
-`inbox/claude/CLAUDE-UI-REVIEW-OPERATOR-QUEUES-001-2026-07-16.md`.
 
 ## PP-FIELDCOMPLETE-001 — category-group attribute completeness, "better than any other eBayer"
-
-**Opened 2026-07-16.** Dave, right after #1472/#1473's live-fire session: "if we try to
-fill every field in our category group dataset during ai_identify we will have a better
-set of attributes to describe the item than ebay does. The initial item draft view after
-import should show all filled fields, not just the ones the set eBay category requires
-or recommends. This gives the operator all the data we have to choose from when
-constructing the listing. Better than any other ebayer." Third confirmed instance of the
-beats-eBay success bar (see `project-operator-queues-beats-ebay-example.md`).
-
-**Todo #1475 — Phase 1, DONE 2026-07-16, offline-tested, not yet browser-verified.**
-The item-detail "Inventory Record specifics" panel (already showed every filled Set A
-field unfiltered — that part pre-existed) now gets a "+ Add to listing" button on any
-Set A key with no Set B counterpart, wired to a new `addFromInventory()` JS function
-(shares `buildAspectRow()` with #1470's `addCustomAspect()`). Clicking adds the field
-into `#aspects-form` as a custom aspect row with #1472's own keep-checkbox — nothing
-written until the operator clicks Save Draft. Confirmed live via `tgw202605051752520`:
-11 genuinely Set-A-only fields exist today (Customized, Handmade, Item Height/Length/
-Weight/Width, Number in Pack, Packaging, Production Technique, Room, Signed) that will
-now surface the button.
-
-**Todo #1476 — Phase 2, scoped, not started.** Dave corrected the design mid-scoping:
-"the category group is the group of categories a type of item fits in. The superset of
-attributes is all of the attributes in all categories [in that group]" (example: the
-Books group's three eBay categories — Books, Antiquarian & Collectible, Textbooks — each
-have their own official aspect list; the target set for `ai_identify` is their union, so
-the operator can pick whichever aspects fit however the item is eventually categorized).
-No new schema needed in `category-groups.json` — the `ebay_categories`/
-`category_candidates` list already there is the input; the union is computed live via
-the existing `get_aspects(cfg, category_id)` taxonomy call per category in the group.
-`ai_identify`'s extraction currently has no target field list at all (freeform "any
-other notable attributes" catch-all only) — Phase 2 adds the union as an explicit
-target, in addition to that catch-all. Needs a cost/token-budget check against
+**Opened 2026-07-16.** Dave: fill every category-group field during `ai_identify` so
+the initial draft view shows all data we have, not just eBay's required/recommended
+subset — third confirmed instance of the beats-eBay success bar. **Todo #1475 (Phase
+1), DONE 2026-07-16, offline-tested, not yet browser-verified** — "+ Add to listing"
+button on any Set A key with no Set B counterpart, wired through the existing
+custom-aspect checkbox mechanism (#1472). **Todo #1476 (Phase 2), scoped, not
+started** — target field set is the union of all categories' official aspects within
+a category group (not just the single assigned category); no new schema needed,
+computed live via existing taxonomy calls. Needs a cost/token-budget check against
 `LLM-Providers-Quotas.md` before shipping.
+
 
 ## Session protocol
 
