@@ -484,3 +484,67 @@ Inventory API `sku`/offer fields TGW already sends, or needs its own new field m
       terminology that maps onto something else in the Inventory API
 - [ ] Decide replace-vs-supplement relative to the existing picklist-line mechanism before
       touching `build_listing_description()`
+
+## Automate secrets/DR recovery distribution — remove the manual USB-swap step from PP-BACKUP-001 A3/A7
+
+**Dave, 2026-07-18, during the overnight sprint, prompted by fixing `tgw-secrets-backup`'s
+broken remote reference (todo #1521):** "Previously we have been looking at secrets and
+disaster recovery in too old fashioned of a manner. Sneakernets and usb fobs, when we have
+the google drive and phones and tablets and an existing synchronization infrastructure.
+Let's take my frail human tendencies out of the recovery loop."
+
+### Current design (PP-BACKUP-001 A3/A7)
+
+- A3: monthly `tgw-secrets-backup` timer produces an age-encrypted bundle
+  (`secrets/` + `config/`), copies it to cloud (`tgw-gdrive:`, just fixed
+  this session — was silently broken, had never run successfully) and to
+  whichever physical `TGW-SECRETS` USB fob happens to be mounted locally.
+  Recovery model depends on Dave manually rotating two USB fobs
+  (keychain ↔ safe) every month so a reasonably current one is always
+  physically off-site/offline.
+- A7: seven physical drives (`TGW-OFFLINE-A` + 6 more), each connected in
+  turn for a manual `tgw-offline-setup` pass — same class of
+  human-in-the-loop physical rotation discipline, at larger scale (todo
+  #146/#147).
+
+### The idea
+
+Dave's framing: we already run infrastructure that does synchronized,
+automated, multi-device distribution as its actual job — Syncthing
+(already moving the Plan Vault between `db`/`tgw`/a1131/Tigwa), the
+now-working `tgw-gdrive:` cloud remote, and an existing device fleet
+(4 tablets, 6 cameras, see `reference-device-fleet-inventory` memory) that
+could each hold a synced copy. Recovery readiness shouldn't depend on
+Dave remembering a monthly physical swap — automate the distribution the
+same way the rest of TGW automates everything else, and reserve the
+human step for the one piece that must never be automated.
+
+**Where the line should probably sit, not yet decided:** the *encrypted
+bundle* (already public-key-encrypted with age) is safe to fan out over
+any synced channel — Syncthing to a tablet, `tgw-gdrive:`, doesn't matter,
+compromise of the ciphertext alone isn't a secrets leak. The *decryption
+identity + its passphrase* is the actual secret; if that gets swept into
+the same automated sync, the design has quietly removed its own air-gap
+along with the manual-swap annoyance. A credible redesign keeps that one
+artifact on a deliberately manual, offline anchor (paper/safe, as now)
+while making bundle *distribution* fully automatic.
+
+### Promotion criteria
+
+- [ ] Dave schedules the "next big planning session" this was explicitly
+      deferred to
+- [ ] Decide the identity/passphrase boundary explicitly before any
+      automation work starts — this is the one design decision that
+      determines whether the redesign strengthens or weakens the actual
+      security guarantee, not just the convenience
+- [ ] Inventory which Syncthing folders/devices and cloud remotes are
+      genuinely suitable recovery targets (offline-capable, not
+      permanently on the same network/power as tgw-prod) vs. which just
+      look automated but share tgw-prod's actual failure domain
+- [ ] Decide whether A7's larger physical-drive rotation (todo #146/#147)
+      is in scope for the same redesign or stays a deliberately separate,
+      larger-capacity, still-physical tier
+- [ ] Confirm this doesn't regress the existing 3-2-1 principle (Dave has
+      previously valued at least one genuinely offline/air-gapped copy) —
+      "no manual swap" and "no offline copy at all" are not the same
+      requirement, don't conflate them while designing
