@@ -31,6 +31,7 @@ verification.
 | 7 | [ollama-inference-stall.md](ollama-inference-stall.md) | Ollama down/slow or advisory lock 8472 stuck | ai_identify, ebay_draft, pm_intake stall — intake pipeline backs up |
 | 8 | [sold-sync-gaps.md](sold-sync-gaps.md) | Sold on eBay but still "available" locally; sold-event loss | Oversell / re-list of sold items; bad velocity data |
 | 9 | [thermal-emergency-response.md](thermal-emergency-response.md) | tgw-prod thermal HOT/THROTTLE/SHUTDOWN | Host may shut down; formal policy for Tigwa-lite's monitor response (not an operator-diagnosis runbook) |
+| 10 | [ebay-api-operations.md](ebay-api-operations.md) | eBay API quota/rate-limit exhaustion; 25707 orphaned-offer bulk-fetch cascade (todo #1077); Inventory API empty-aspect-value rejection (invariant C14) | Pipeline-wide eBay API drain; permanently-degraded bulk sync; operator corrections silently lost / listing manually ended |
 
 ## Quick triage — "something is wrong, where do I start?"
 
@@ -63,6 +64,10 @@ Decision guide from the output:
 - Search/list results don't match `tgw get <sku>` (the JSON is truth) → **runbook 6**.
 - `ai_identify`/`ebay_draft` queued forever, `journalctl` shows lock waits → **runbook 7**.
 - An item sold on eBay still shows available locally → **runbook 8**.
+- `429`/"api token limit exhausted" from any eBay API family, `ebay_sync`
+  logging `eBay error 25707` or a multi-thousand "checked N SKUs" fallback
+  pass, or an operator's cleared field/aspect silently not persisting on a
+  push → **runbook 10**.
 
 ## Architecture facts that shape every recovery
 
