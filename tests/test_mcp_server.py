@@ -127,6 +127,16 @@ def test_get_item_resolves_renamed_sku_via_alias_fallback(cfg):
     assert out["item"]["sku"] == "tgw002"
 
 
+def test_get_item_accepts_capitalized_sku_argument(cfg):
+    # FastMCP-boundary coverage (item 4/5): tgw_get_item's `sku` parameter
+    # gets the shared alias_field() helper (todo #1528).
+    _write_item(cfg, "tgw001", {"sku": "tgw001", "title": "Widget"})
+    tool = mcp_server.mcp._tool_manager._tools["tgw_get_item"]
+    out = json.loads(asyncio.run(tool.run({"Sku": "tgw001"})))
+    assert out["ok"] is True
+    assert out["item"]["title"] == "Widget"
+
+
 # ---------------------------------------------------------------------------
 # tgw_search_items
 # ---------------------------------------------------------------------------
@@ -158,6 +168,21 @@ def test_search_items_error_is_caught(cfg, monkeypatch):
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     out = json.loads(mcp_server.tgw_search_items(search="x"))
     assert out["ok"] is False and "boom" in out["error"]
+
+
+def test_search_items_accepts_capitalized_arguments(cfg, monkeypatch):
+    calls = {}
+    monkeypatch.setattr("tgw.api.list_items",
+                        lambda cfg, **kw: calls.update(kw) or {"ok": True, "items": []})
+    tool = mcp_server.mcp._tool_manager._tools["tgw_search_items"]
+    out = json.loads(asyncio.run(tool.run({
+        "Search": "hat", "Location": "A1", "Status": "In Stock", "Limit": 5,
+    })))
+    assert out["ok"] is True
+    assert calls["search"] == "hat"
+    assert calls["location"] == "A1"
+    assert calls["status"] == "In Stock"
+    assert calls["limit"] == 5
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +220,22 @@ def test_search_full_propagates_ok_false(cfg, monkeypatch):
     out = json.loads(mcp_server.tgw_search_full("x"))
     assert out["ok"] is False
     assert "recollq" in out["error"]
+
+
+def test_search_full_accepts_capitalized_arguments(cfg, monkeypatch):
+    calls = {}
+
+    def fake_run(query, limit=20):
+        calls["query"] = query
+        calls["limit"] = limit
+        return {"ok": True, "query": query, "count": 0, "elapsed_ms": 1.0, "results": []}
+
+    monkeypatch.setattr("tgw.search_full.run_full_text_search", fake_run)
+    tool = mcp_server.mcp._tool_manager._tools["tgw_search_full"]
+    out = json.loads(asyncio.run(tool.run({"Query": "widget", "Limit": 7})))
+    assert out["ok"] is True
+    assert calls["query"] == "widget"
+    assert calls["limit"] == 7
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +334,16 @@ def test_enqueue_duplicate_is_ok(cfg, monkeypatch):
     out = json.loads(mcp_server.tgw_enqueue("tgw001", "ebay_draft"))
     assert out["ok"] is True
     assert "already queued" in out["note"]
+
+
+def test_enqueue_accepts_capitalized_arguments(cfg, monkeypatch):
+    _write_item(cfg, "tgw001", {"sku": "tgw001"})
+    monkeypatch.setattr(sm, "init", lambda *a, **k: None)
+    monkeypatch.setattr(sm, "enqueue_job", lambda **kw: "job-99")
+    tool = mcp_server.mcp._tool_manager._tools["tgw_enqueue"]
+    out = json.loads(asyncio.run(tool.run({"Sku": "tgw001", "Action": "ebay_draft"})))
+    assert out["ok"] is True
+    assert out["job_id"] == "job-99"
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +452,32 @@ def test_mailbox_send_accepts_capitalized_arguments(cfg, monkeypatch):
     assert seen == {"to_actor": "claude", "text": "hello"}
 
 
+def test_mailbox_send_accepts_all_extra_aliases_after_alias_field_refactor(cfg, monkeypatch):
+    # Regression: tgw_mailbox_send's params were refactored onto the shared
+    # alias_field() helper (todo #1528) — this confirms its existing
+    # From/Type/Todo shorthand aliases (Tigwa's own precedent, not just the
+    # generic title-cased form) survived the refactor unchanged.
+    seen = {}
+
+    def fake_send(cfg, to_actor, text, from_actor="claude", msg_type="NOTE",
+                  subject=None, todo_id=None):
+        seen.update(to_actor=to_actor, text=text, from_actor=from_actor,
+                    msg_type=msg_type, subject=subject, todo_id=todo_id)
+        return {"ok": True, "file": "/x"}
+
+    monkeypatch.setattr("tgw.api.cmd_mailbox_send", fake_send)
+    tool = mcp_server.mcp._tool_manager._tools["tgw_mailbox_send"]
+    out = json.loads(asyncio.run(tool.run({
+        "To": "claude", "Text": "hello", "From": "tigwa", "Type": "REVIEW",
+        "Subject": "hi there", "Todo": 1528,
+    })))
+    assert out["ok"] is True
+    assert seen == {
+        "to_actor": "claude", "text": "hello", "from_actor": "tigwa",
+        "msg_type": "REVIEW", "subject": "hi there", "todo_id": 1528,
+    }
+
+
 def test_mailbox_send_error_is_caught(cfg, monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("no such actor")
@@ -434,6 +511,22 @@ def test_dead_letter_lists_with_verdict(cfg, monkeypatch):
     assert j["requeue_delay"] == 60
 
 
+def test_dead_letter_accepts_capitalized_arguments(cfg, monkeypatch):
+    monkeypatch.setattr(sm, "init", lambda *a, **k: None)
+    seen = {}
+
+    def fake_jobs(**kw):
+        seen.update(kw)
+        return []
+
+    monkeypatch.setattr(sm, "dead_letter_jobs", fake_jobs)
+    tool = mcp_server.mcp._tool_manager._tools["tgw_dead_letter"]
+    out = json.loads(asyncio.run(tool.run({"Queue": "ebay_draft", "Limit": 3})))
+    assert out["ok"] is True
+    assert seen["queue_name"] == "ebay_draft"
+    assert seen["limit"] == 3
+
+
 # ---------------------------------------------------------------------------
 # tgw_hint_trail
 # ---------------------------------------------------------------------------
@@ -442,6 +535,14 @@ def test_hint_trail_delegates(cfg, monkeypatch):
     monkeypatch.setattr("tgw.api.cmd_hint_trail",
                         lambda cfg, sku: {"ok": True, "sku": sku, "events": []})
     out = json.loads(mcp_server.tgw_hint_trail("tgw001"))
+    assert out["ok"] is True and out["sku"] == "tgw001"
+
+
+def test_hint_trail_accepts_capitalized_sku_argument(cfg, monkeypatch):
+    monkeypatch.setattr("tgw.api.cmd_hint_trail",
+                        lambda cfg, sku: {"ok": True, "sku": sku, "events": []})
+    tool = mcp_server.mcp._tool_manager._tools["tgw_hint_trail"]
+    out = json.loads(asyncio.run(tool.run({"Sku": "tgw001"})))
     assert out["ok"] is True and out["sku"] == "tgw001"
 
 
@@ -471,6 +572,28 @@ def test_catalog_verify_error_caught(cfg, monkeypatch):
                         lambda *a, **k: (_ for _ in ()).throw(ValueError("bad")))
     out = json.loads(mcp_server.tgw_catalog_verify())
     assert out["ok"] is False and "bad" in out["error"]
+
+
+def test_catalog_verify_accepts_capitalized_arguments(cfg, monkeypatch):
+    seen = {}
+
+    def fake_verify(cfg, **kwargs):
+        seen.update(kwargs)
+        return {"ok": True, "scanned": 1, "violations": 0}
+
+    monkeypatch.setattr("tgw.api.cmd_catalog_verify", fake_verify)
+    tool = mcp_server.mcp._tool_manager._tools["tgw_catalog_verify"]
+    out = json.loads(asyncio.run(tool.run({
+        "Location": "A1", "Limit": 5, "Severity": "critical",
+        "Mark_verified": True, "Force": True, "Skip_verified": True,
+    })))
+    assert out["ok"] is True
+    assert seen["location"] == "A1"
+    assert seen["limit"] == 5
+    assert seen["min_severity"] == "critical"
+    assert seen["mark_verified"] is True
+    assert seen["force"] is True
+    assert seen["skip_verified"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -545,3 +668,22 @@ def test_get_plan_brief_via_tool_run_boundary(tmp_path, monkeypatch):
     assert out["ok"] is True
     assert out["query"]["pp"] == "PP-GAMMA-003"
     assert out["section"]["heading"] == "PP-GAMMA-003 Gamma work"
+
+
+def test_get_plan_brief_accepts_all_caps_pp_alias(tmp_path, monkeypatch):
+    # `pp` is a two-letter abbreviation; a client is at least as likely to
+    # present it as the all-caps abbreviation "PP" (matching how PP-* refs
+    # are written everywhere in this codebase) as the mechanical
+    # str.capitalize() form "Pp" — alias_field('pp', 'PP') covers both.
+    c = _plan_cfg(tmp_path)
+    plan_path = c["plan_master_path"]
+    plan_path.parent.mkdir(parents=True)
+    plan_path.write_text("## PP-DELTA-004 Delta work\ndelta source\n", encoding="utf-8")
+    monkeypatch.setattr(mcp_server, "_cfg", c)
+
+    tool = mcp_server.mcp._tool_manager._tools["tgw_get_plan_brief"]
+    out = json.loads(asyncio.run(tool.run({"PP": "pp-delta-004"})))
+
+    assert out["ok"] is True
+    assert out["query"]["pp"] == "PP-DELTA-004"
+    assert out["section"]["heading"] == "PP-DELTA-004 Delta work"
