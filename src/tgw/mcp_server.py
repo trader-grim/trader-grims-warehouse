@@ -72,11 +72,37 @@ mcp = FastMCP(
 
 
 # ---------------------------------------------------------------------------
+# alias_field — shared MCP parameter-alias helper (PP-KNOWLEDGE-001, todo
+# #1528). Agents/clients sometimes present a title-cased parameter label
+# (e.g. `Agent`, `Text`) even though the canonical, stable, public MCP
+# JSON-schema property is lowercase (`agent`, `text`) — Tigwa hit two live
+# cases of this (tgw_get_todo's `Agent` silently ignored, tgw_add_suggest's
+# `Text` failing validation outright) and fixed both with Pydantic
+# AliasChoices. This helper generalizes that established pattern: the
+# canonical lowercase key never changes (requirement 1), the title-cased
+# form (`name.capitalize()` — first letter up, rest as authored, matching
+# Tigwa's own `to_actor` -> `To_actor` precedent, NOT per-word Title_Case)
+# is accepted as an alias (requirement 2), and any genuinely-useful extra
+# shorthand alias (e.g. mailbox_send's `To`/`Type`/`Todo`) can still be
+# passed through explicitly. See
+# docs/TGW-Plan-Vault/inbox/claude/TIGWA-REQUEST-mcp-parameter-alias-pattern-2026-07-18.md
+# for the full spec this implements.
+# ---------------------------------------------------------------------------
+
+def alias_field(name: str, *extra_aliases: str) -> Any:
+    """Return a pydantic Field accepting `name` plus its title-cased form
+    (and any explicit extra_aliases) as validation aliases, while the
+    canonical schema property stays `name`.
+    """
+    return Field(validation_alias=AliasChoices(name, name.capitalize(), *extra_aliases))
+
+
+# ---------------------------------------------------------------------------
 # tgw_get_item — fetch full item JSON for a SKU
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def tgw_get_item(sku: str) -> str:
+def tgw_get_item(sku: Annotated[str, alias_field('sku')]) -> str:
     """Fetch the full item JSON record for a given SKU.
 
     Args:
@@ -101,10 +127,10 @@ def tgw_get_item(sku: str) -> str:
 
 @mcp.tool()
 def tgw_search_items(
-    search: str = '',
-    location: str = '',
-    status: str = '',
-    limit: int = 20,
+    search: Annotated[str, alias_field('search')] = '',
+    location: Annotated[str, alias_field('location')] = '',
+    status: Annotated[str, alias_field('status')] = '',
+    limit: Annotated[int, alias_field('limit')] = 20,
 ) -> str:
     """Search the TGW catalog and return matching item summaries.
 
@@ -138,7 +164,10 @@ def tgw_search_items(
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def tgw_search_full(query: str, limit: int = 20) -> str:
+def tgw_search_full(
+    query: Annotated[str, alias_field('query')],
+    limit: Annotated[int, alias_field('limit')] = 20,
+) -> str:
     """Full-text search over the entire recoll knowledge index (files,
     ItemData/ItemArchive/ItemCatalog, plan vault, mounted drives — NOT just
     the structured item DB; use tgw_search_items for that).
@@ -241,7 +270,10 @@ def tgw_health() -> str:
 # tgw_enqueue — enqueue a pipeline action for a SKU
 # ---------------------------------------------------------------------------
 
-def tgw_enqueue(sku: str, action: str) -> str:
+def tgw_enqueue(
+    sku: Annotated[str, alias_field('sku')],
+    action: Annotated[str, alias_field('action')],
+) -> str:
     """Enqueue a pipeline action for a given item SKU.
 
     Args:
@@ -310,10 +342,7 @@ if not _READONLY:
 
 @mcp.tool()
 def tgw_get_todo(
-    agent: Annotated[
-        str,
-        Field(validation_alias=AliasChoices('agent', 'Agent')),
-    ] = '',
+    agent: Annotated[str, alias_field('agent')] = '',
 ) -> str:
     """List open TODO items from the TGW multi-agent tracker.
 
@@ -356,10 +385,7 @@ def tgw_get_todo(
 # ---------------------------------------------------------------------------
 
 def tgw_add_suggest(
-    text: Annotated[
-        str,
-        Field(validation_alias=AliasChoices('text', 'Text')),
-    ],
+    text: Annotated[str, alias_field('text')],
 ) -> str:
     """Append a suggestion or note to SUGGESTIONS.md for the next planning session.
 
@@ -390,8 +416,8 @@ if not _READONLY:
 
 @mcp.tool()
 def tgw_dead_letter(
-    queue: str = '',
-    limit: int = 50,
+    queue: Annotated[str, alias_field('queue')] = '',
+    limit: Annotated[int, alias_field('limit')] = 50,
 ) -> str:
     """List dead_letter jobs with their classify verdict (transient vs permanent).
 
@@ -431,7 +457,7 @@ def tgw_dead_letter(
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def tgw_hint_trail(sku: str) -> str:
+def tgw_hint_trail(sku: Annotated[str, alias_field('sku')]) -> str:
     """Return the AI identification history for a given item.
 
     Args:
@@ -454,12 +480,12 @@ def tgw_hint_trail(sku: str) -> str:
 
 @mcp.tool()
 def tgw_catalog_verify(
-    location: str = '',
-    limit: int = 100,
-    severity: str = 'warning',
-    mark_verified: bool = False,
-    force: bool = False,
-    skip_verified: bool = False,
+    location: Annotated[str, alias_field('location')] = '',
+    limit: Annotated[int, alias_field('limit')] = 100,
+    severity: Annotated[str, alias_field('severity')] = 'warning',
+    mark_verified: Annotated[bool, alias_field('mark_verified')] = False,
+    force: Annotated[bool, alias_field('force')] = False,
+    skip_verified: Annotated[bool, alias_field('skip_verified')] = False,
 ) -> str:
     """Scan ItemData for assumption violations and return a violation summary.
 
@@ -497,30 +523,12 @@ def tgw_catalog_verify(
 # ---------------------------------------------------------------------------
 
 def tgw_mailbox_send(
-    to_actor: Annotated[
-        str,
-        Field(validation_alias=AliasChoices('to_actor', 'To_actor', 'To')),
-    ],
-    text: Annotated[
-        str,
-        Field(validation_alias=AliasChoices('text', 'Text')),
-    ],
-    from_actor: Annotated[
-        str,
-        Field(validation_alias=AliasChoices('from_actor', 'From_actor', 'From')),
-    ] = 'tigwa',
-    msg_type: Annotated[
-        str,
-        Field(validation_alias=AliasChoices('msg_type', 'Msg_type', 'Type')),
-    ] = 'NOTE',
-    subject: Annotated[
-        str,
-        Field(validation_alias=AliasChoices('subject', 'Subject')),
-    ] = '',
-    todo_id: Annotated[
-        int,
-        Field(validation_alias=AliasChoices('todo_id', 'Todo_id', 'Todo')),
-    ] = 0,
+    to_actor: Annotated[str, alias_field('to_actor', 'To')],
+    text: Annotated[str, alias_field('text')],
+    from_actor: Annotated[str, alias_field('from_actor', 'From')] = 'tigwa',
+    msg_type: Annotated[str, alias_field('msg_type', 'Type')] = 'NOTE',
+    subject: Annotated[str, alias_field('subject')] = '',
+    todo_id: Annotated[int, alias_field('todo_id', 'Todo')] = 0,
 ) -> str:
     """Send a message to another actor's Plan Vault inbox mailbox.
 
@@ -574,7 +582,7 @@ if not _READONLY:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def tgw_get_plan_brief(pp: str) -> str:
+def tgw_get_plan_brief(pp: Annotated[str, alias_field('pp', 'PP')]) -> str:
     """Retrieve one bounded, exact-source Master Plan packet for a PP identifier.
 
     The Master Plan remains canonical. This read-only tool returns source hashes,
