@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-07-18 14:29 UTC — 160 open, 288 done in the last 7 days._
+_Rendered 2026-07-18 15:15 UTC — 160 open, 289 done in the last 7 days._
 
 ## admin (17 open)
 
@@ -196,10 +196,11 @@ _Rendered 2026-07-18 14:29 UTC — 160 open, 288 done in the last 7 days._
 | 1465 | 50 |  | Dave (via Tigwa) request: eBay Seller Hub complete parity audit -- listing form supersedes to full Seller Hub capability audit (listing lifecycle, account-backed policy lists, commerce ops, seller ops, automation/exceptions). Read-only, no mutation. Deliverable: parity register. See inbox/claude/CLAUDE-REQUEST-seller-hub-complete-parity-audit-2026-07-16.md (supersedes CLAUDE-REQUEST-ebay-listing-form-parity-audit-2026-07-16.md). | [[TGW-Master-Plan#PP-LISTEDITOR-001 — listing editor + revision apply\|PP-LISTEDITOR-001]] |  |
 | 15 | 60 |  | Second keyboard wired up as macroboard (see etc/interfaces/keyd/tgw-macroboard.conf) | [[TGW-Master-Plan#PP-MACRO-001 — macroboard hardware (#15)\|PP-MACRO-001]] |  |
 
-## Done this week (288)  — showing 15 most recent
+## Done this week (289)  — showing 15 most recent
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 1520 | claude | 2026-07-18 | PP-KNOWLEDGE-001/#1439: implement Tigwa's requested follow-up refactor for tgw_get_plan_brief v1 -- move parser/retrieval logic from mcp_server.py into a shared pure helper plan_brief(cfg, pp_ref) in plan_render.py, MCP delegates to it, derive paths from cfg, keep linked PP docs metadata-only, add test-first coverage in test_plan_render.py + FastMCP-boundary coverage in test_mcp_server.py using tool.run() |
 | 1517 | claude | 2026-07-18 | tgw-cloud-sync.service observed to hang (not fail) after a Google Drive 403 RATE_LIMIT_EXCEEDED — starved tgw-itemdata-sync via shared flock for ~1.5 days on 2026-07-16 (13:10 run); not reproduced 2026-07-18 (that run correctly exhausted 3 retries and exited). Intermittent hang/deadlock, needs a timeout/watchdog on the flock hold or rclone subprocess. Found while confirming #1264 live. |
 | 1389 | claude | 2026-07-18 | Process gap: #1305's tgw-coder agent got an auto-provisioned harness worktree (.claude/worktrees/agent-{id}, branch worktree-agent-{id}) instead of the manual /opt/TGW/var/worktrees/todo/{id}-{slug} convention PP-HERMES-EA-001 specifies. Decide: either enforce the manual convention in tgw-coder.md/dispatch tooling, or update the spec to accept the harness-provisioned worktree if that's now preferred — don't leave the two conventions coexisting silently. |
 | 1147 | claude | 2026-07-18 | PP-KNOWLEDGE-001 R2: tgw search --full-text (recollq-backed) + web UI search bar + MCP tool tgw_search_full — put the already-paying-off recoll layer in front of every agent and surface. Spec: docs/ai-plans/recoll-annex-jetstream.md Track R. Live acceptance: the six hours-to-seconds queries from FUTURE-IDEAS PP-SEARCH-001 run against real data |
@@ -214,5 +215,4 @@ _Rendered 2026-07-18 14:29 UTC — 160 open, 288 done in the last 7 days._
 | 1512 | claude | 2026-07-18 | a1131 flake: add xorg.libX11/libXi/libxkbcommon for tigwa's cua-driver-rs native desktop control |
 | 1508 | claude | 2026-07-18 | Provision dedicated tigwa OS account foundation on tgw-prod (account/home/lingering only, no sudo, no service start) per Dave's direction via Tigwa |
 | 1511 | tigwa | 2026-07-18 | Create a TGW evidence-intake workflow skill: immutable provenance envelopes, staged confidence-bearing candidates, and explicit review-gated canonical promotion. |
-| 1507 | claude | 2026-07-18 | test_invariant_c12_field_set_accessors.py allowlist line numbers stale vs current http_server.py — 2 pre-existing test failures unrelated to #1324/#1325 context.py work |
-| … | | | _…and 273 more — run `tgw todo --all` to see everything_ |
+| … | | | _…and 274 more — run `tgw todo --all` to see everything_ |
