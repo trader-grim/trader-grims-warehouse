@@ -21,11 +21,50 @@ plan document itself.
 - Right after a batch of new PPs/incidents landed in one sitting (a busy
   session is exactly when stray lines and stub PPs accumulate).
 
+## Archiving mechanism: the commit IS the archive (Dave, 2026-07-18)
+
+**"We do not need to move. We archive, rewrite, and then reconcile the diff
+history of the archive. That is the whole point of the architecture."**
+
+Git already gives a byte-exact, permanent record of every prior version of
+`TGW-Master-Plan.md` — the commit immediately before a rewrite *is* the
+archive. `git log -p` / `git log --follow -p -- docs/TGW-Plan-Vault/plan/
+TGW-Master-Plan.md` / `git show <rev>:<path>` are the reconciliation tools:
+if anyone needs the old detail back, that's how it's recovered — not by
+hunting through a copied-out file. This is also an indexed data source in
+its own right (same Prime Directive 1 logic as everything else in the
+Data Charter: a commit message that names what was compacted is itself
+part of the searchable/recoverable record, not just a formality).
+
+This means two genuinely different things were being conflated as one
+"move it out" step — split them:
+
+- **Pure historical narrative** (a resolved discussion, an incident
+  timeline, a session transcript with no future standalone reference
+  value) — **rewrite in place, commit with a message naming what was
+  compacted, done.** No new file, no `archive/sections/` copy. The
+  pre-rewrite commit already is the permanent record.
+- **A living design doc** (an active PP with ongoing detail that's
+  genuinely useful as its own separately-addressable, still-growing
+  document) — `pp/<REF>.md` remains correct. That's not archival, that's
+  giving an active project a proper home outside the top-level index.
+
+Default to the first path unless the content is clearly still-active
+project detail someone will keep appending to. When in doubt, check
+whether the destination file would ever be edited again — if not, it
+should have been a commit message, not a file.
+
+**Tigwa needs to know this too** — she touches the plan/vault and should
+follow the same mechanism, not re-derive a copy-out habit independently.
+If this hasn't already been relayed to her, drop a note in `inbox/tigwa/`
+explaining the git-history-is-the-archive principle before/while running
+a pass she might also touch.
+
 ## What NOT to do
 
-- Don't delete content to hit the line count. Git history + `pp/`/`archive/`
-  preserve everything (Prime Directive 1) — this is about *where* something
-  lives, never whether it survives.
+- Don't delete content to hit the line count. Git history (see above) +
+  `pp/` for still-active designs preserve everything (Prime Directive 1)
+  — this is about *where* something lives, never whether it survives.
 - Don't invent resolutions to open decisions on Dave's behalf. Flag them;
   he decides. This skill tidies structure, not open questions.
 - Don't silently reword Dave's own quoted framing — preserve his exact words
@@ -46,12 +85,16 @@ plan document itself.
 
 1. **Size.** `wc -l` the file. If a single PP section runs more than ~2-3
    paragraphs of blow-by-blow narrative (incident timelines, session
-   transcripts, full gap lists), that detail belongs in one of:
-   - `pp/<REF>.md` — the PP's own full design doc (promote on next touch,
-     per the file's existing convention)
+   transcripts, full gap lists), decide which of these it is (see
+   "Archiving mechanism" above):
+   - **Pure historical narrative, no future standalone reference value** —
+     compact it in place; the pre-rewrite commit is the archive. No new file.
+   - **Still-active project detail** — `pp/<REF>.md`, the PP's own living
+     design doc (promote on next touch, per the file's existing convention)
    - `reports/` — standing/periodic reports that need no action (see below)
    - a dedicated doc under `dev-workflow/research/` or `reference/runbooks/`
-   Leave a pointer + a one-line status in the plan; move the rest.
+   Leave a pointer + a one-line status in the plan either way; write a
+   commit message that names what was compacted so it's findable later.
 
 2. **Reports vs. plan narrative.** If a report is informational only — a
    monitoring snapshot, an incident writeup where "no action necessary" is
