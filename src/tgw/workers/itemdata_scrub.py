@@ -22,6 +22,7 @@ from typing import Any
 # equivalents and are routed through them (audit#COHESION-2026-07 #1305).
 from tgw import config as tgw_config
 from tgw.items import atomic_write_json
+from tgw.logging import announce_script_run
 from tgw.resolver import find_current_sku, load_item_doc
 
 logger = logging.getLogger(__name__)
@@ -184,6 +185,12 @@ def main() -> None:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    announce_script_run(
+        'itemdata_scrub.py (workers/ file-queue batch variant)',
+        'sweep and process file-based itemdata_scrub queue jobs from cwd (not systemd-scheduled — ad hoc batch run)',
+        config=str(args.config),
+    )
 
     try:
         cfg = load_config(args.config)

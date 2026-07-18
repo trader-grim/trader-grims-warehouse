@@ -11,10 +11,22 @@ from pathlib import Path
 from typing import Any, Dict
 
 from tgw.config import DEFAULT_CONFIG, load_config
+from tgw.logging import announce_script_run, setup_logging
 from tgw.resolver import find_item_jsons, load_item_doc
 
 
 def run_audit() -> None:
+    # This script had zero logging configuration (verified live, todo #1369)
+    # — without a handler on the 'tgw' logger, announce_script_run()'s event
+    # would be silently dropped (default root level WARNING, no handlers).
+    try:
+        setup_logging('tgw.ebay_draft_audit')
+    except OSError:
+        pass  # no writable log root (e.g. CI/test env) — announce still attempted below
+    announce_script_run(
+        'ebay_draft_audit.py',
+        'audit ebay_draft aspect-fill rate across all item JSONs by category',
+    )
     # Load configuration
     cfg = load_config(Path(DEFAULT_CONFIG))
     item_jsons = find_item_jsons(cfg)

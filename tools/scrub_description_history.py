@@ -19,6 +19,8 @@ import re
 import tempfile
 from pathlib import Path
 
+from tgw.logging import announce_script_run, setup_logging
+
 ITEM_DATA_ROOT = Path('/opt/TGW/data/ItemData')
 # Contamination: John F. Rider manuals picklist line leaked from SHELF40
 # into unrelated items' description_history (GEMINI-004 finding).
@@ -100,6 +102,19 @@ def main():
     parser.add_argument('--dry-run', action='store_true', help='report without writing')
     parser.add_argument('--sku', nargs='+', metavar='SKU', help='limit to specific SKUs')
     args = parser.parse_args()
+
+    # No prior logging configuration in this script (verified live, todo
+    # #1369) — without it, announce_script_run()'s event is silently
+    # dropped (default root level WARNING, no handlers).
+    try:
+        setup_logging('tgw.scrub_description_history')
+    except OSError:
+        pass  # no writable log root (e.g. CI/test env) — announce still attempted below
+    announce_script_run(
+        'scrub_description_history.py',
+        'scrub description_history contamination (GEMINI-004 picklist bleed-through) from item JSON files',
+        dry_run=args.dry_run, sku=args.sku,
+    )
 
     if args.sku:
         paths = [ITEM_DATA_ROOT / sku / f'{sku}.json' for sku in args.sku]

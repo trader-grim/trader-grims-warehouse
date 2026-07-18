@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from tgw.config import load_config
 from tgw.ebay.pull import iter_inventory_api_items, fetch_offer_for_sku
 from tgw.apis.fence import ebay_write as fence_ebay_write
+from tgw.logging import announce_script_run
 
 LOG_PATH  = Path('/opt/TGW/var/log/ebay-backfill-offers.log')
 CKPT_PATH = Path('/opt/TGW/var/run/ebay-backfill-offers-ckpt.json')
@@ -77,6 +78,12 @@ def main():
     parser.add_argument('--rate', type=float, default=0.3,
                         help='seconds between offer calls (default 0.3 = ~3/sec)')
     args = parser.parse_args()
+
+    announce_script_run(
+        'ebay_backfill_offers.py',
+        'write offer_id + listing_id + price to every ItemData JSON via the tgw-api fence',
+        resume=args.resume, limit=args.limit, rate=args.rate,
+    )
 
     cfg = load_config(Path('/opt/TGW/config/tgw-api-config.json'))
     ckpt = load_checkpoint() if args.resume else {'done': [], 'failed': []}

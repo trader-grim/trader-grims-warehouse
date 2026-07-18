@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 from tgw import items  # noqa: E402
 from tgw.config import DEFAULT_CONFIG, load_config  # noqa: E402
+from tgw.logging import announce_script_run, setup_logging  # noqa: E402
 
 FIELDS_TO_REMOVE = {
     "ItemCode",
@@ -130,6 +131,19 @@ def main() -> None:
 
     # Default to dry-run if neither flag was given
     execute = args.execute
+
+    # No prior logging configuration in this script (verified live, todo
+    # #1369) — without it, announce_script_run()'s event is silently
+    # dropped (default root level WARNING, no handlers).
+    try:
+        setup_logging('tgw.data_scrub_magento')
+    except OSError:
+        pass  # no writable log root (e.g. CI/test env) — announce still attempted below
+    announce_script_run(
+        'data_scrub_magento.py',
+        'remove legacy Magento/eBay import artifact fields from item JSON files',
+        execute=execute, sku=args.sku, limit=args.limit,
+    )
 
     cfg = load_config(DEFAULT_CONFIG)
     # audit#1143 #1235 follow-up: enumerate from the same root strip_fields()
