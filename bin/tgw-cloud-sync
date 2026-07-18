@@ -14,20 +14,48 @@
 # errors and still leaves headroom for a second rclone process (e.g.
 # dedupe-gdrive.sh) running at the same time. Same value already proven at
 # bin/dedupe-gdrive.sh's TPS_LIMIT.
-set -euo pipefail
+#
+# WATCHDOG (todo #1517, PP-BACKUP-001): a 2026-07-16 run hung indefinitely
+# after a Google Drive 403 RATE_LIMIT_EXCEEDED instead of exhausting
+# rclone's own retries and exiting (confirmed working 2026-07-18) — the
+# hung process held the shared flock for ~1.5 days, starving
+# tgw-itemdata-sync the whole time. rclone's internal retry/backoff (which
+# already works correctly on the normal path) is left untouched here; this
+# only adds an outer ceiling for the abnormal hang case:
+#   - RCLONE_TIMEOUT_SECS (default 4h/14400s): well above the normal ~43min
+#     full-sync duration (about 5.5x headroom) but well below the observed
+#     ~1.5-day hang, so a real hang gets caught same-day instead of running
+#     into the next scheduled run. Exact ceiling is a judgment call (not
+#     specified in the todo) — flagged per CLAUDE.md Prime Directive 3,
+#     not a silent substitution. Overridable via env for testing.
+#   - FLOCK_TIMEOUT_SECS (default same as RCLONE_TIMEOUT_SECS): defense in
+#     depth against the "hung flock hold" case named in the todo — if the
+#     lock is held (e.g. by a similarly-stuck tgw-itemdata-sync cycle)
+#     longer than this, give up loudly instead of blocking forever.
+set -uo pipefail
 
-RCLONE_CONF=/opt/TGW/config/rclone.conf
+RCLONE_CONF="${TGW_RCLONE_CONF:-/opt/TGW/config/rclone.conf}"
 REMOTE=tgw-gdrive:TGW
-LOG=/opt/TGW/var/log/rclone-sync.log
-STAMP_FILE=/opt/TGW/var/log/rclone-sync-last-success
+LOG="${TGW_RCLONE_SYNC_LOG:-/opt/TGW/var/log/rclone-sync.log}"
+STAMP_FILE="${TGW_RCLONE_SYNC_STAMP:-/opt/TGW/var/log/rclone-sync-last-success}"
 TRASH="tgw-gdrive:TGW-trash/$(date +%Y%m%d)"
-LOCK=/run/lock/tgw-rclone-gdrive.lock
+LOCK="${TGW_RCLONE_LOCK:-/run/lock/tgw-rclone-gdrive.lock}"
+RCLONE_TIMEOUT_SECS="${RCLONE_TIMEOUT_SECS:-14400}"
+FLOCK_TIMEOUT_SECS="${FLOCK_TIMEOUT_SECS:-14400}"
+RCLONE_KILL_AFTER_SECS="${RCLONE_KILL_AFTER_SECS:-30}"
 
-# Blocking flock — waits for itemdata-sync to finish its current cycle
+log() { echo "$(date -Iseconds) $*" >> "$LOG"; }
+
+# Blocking flock, but bounded — waits for itemdata-sync to finish its
+# current cycle, but gives up after FLOCK_TIMEOUT_SECS rather than
+# blocking forever against a stuck holder.
 exec 9>"$LOCK"
-flock 9
+if ! flock --timeout "$FLOCK_TIMEOUT_SECS" 9; then
+    log "ERROR: could not acquire cloud-sync lock within ${FLOCK_TIMEOUT_SECS}s — held by a stuck process? not running sync."
+    exit 1
+fi
 
-rclone sync /opt/TGW "$REMOTE" \
+timeout --kill-after="${RCLONE_KILL_AFTER_SECS}" "${RCLONE_TIMEOUT_SECS}s" rclone sync /opt/TGW "$REMOTE" \
     --config "$RCLONE_CONF" \
     --filter "+ bin/**" \
     --filter "+ config/**" \
@@ -44,5 +72,14 @@ rclone sync /opt/TGW "$REMOTE" \
     --transfers 4 \
     --checkers 8 \
     --tpslimit 2
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+        log "ERROR: rclone sync watchdog fired after ${RCLONE_TIMEOUT_SECS}s (hung subprocess killed, lock released on exit) — treat as an incident, not a transient failure."
+    else
+        log "ERROR: rclone sync exited with code $rc (retries exhausted or other failure) — see $LOG for detail."
+    fi
+    exit 1
+fi
 
 date -Iseconds > "$STAMP_FILE"

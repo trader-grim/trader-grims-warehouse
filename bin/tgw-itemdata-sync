@@ -16,15 +16,26 @@
 #   started_at   ISO-8601 timestamp when this cycle's rclone began
 #   completed_at ISO-8601 timestamp when rclone exited cleanly (null if running/skipped)
 #   pid          this process's PID (for watchdog use)
+# WATCHDOG (todo #1517, PP-BACKUP-001): same reasoning as tgw-cloud-sync —
+# an rclone subprocess that hangs (e.g. after a Google Drive 403) instead
+# of exiting would hold this loop's flock for the duration, which would in
+# turn block tgw-cloud-sync's own (also-now-bounded) blocking flock wait.
+# RCLONE_TIMEOUT_SECS default is well above a normal ~120s cycle but bounds
+# any one stuck cycle so the flock is always released within a bounded
+# window; overridable via env for testing. See tgw-cloud-sync for the
+# fuller writeup of the ceiling choice (judgment call, CLAUDE.md Prime
+# Directive 3).
 set -uo pipefail
 
-RCLONE_CONF=/opt/TGW/config/rclone.conf
+RCLONE_CONF="${TGW_RCLONE_CONF:-/opt/TGW/config/rclone.conf}"
 REMOTE=tgw-gdrive:TGW/data/ItemData
-LOCAL=/opt/TGW/data/ItemData
-LOG=/opt/TGW/var/log/rclone-itemdata-sync.log
-STATUS_FILE=/opt/TGW/var/log/rclone-itemdata-sync-status.json
-LOCK=/run/lock/tgw-rclone-gdrive.lock
-INTERVAL=120   # seconds between sync cycles
+LOCAL="${TGW_ITEMDATA_LOCAL:-/opt/TGW/data/ItemData}"
+LOG="${TGW_RCLONE_ITEMDATA_LOG:-/opt/TGW/var/log/rclone-itemdata-sync.log}"
+STATUS_FILE="${TGW_RCLONE_ITEMDATA_STATUS:-/opt/TGW/var/log/rclone-itemdata-sync-status.json}"
+LOCK="${TGW_RCLONE_LOCK:-/run/lock/tgw-rclone-gdrive.lock}"
+INTERVAL="${TGW_ITEMDATA_SYNC_INTERVAL:-120}"   # seconds between sync cycles
+RCLONE_TIMEOUT_SECS="${RCLONE_TIMEOUT_SECS:-14400}"
+RCLONE_KILL_AFTER_SECS="${RCLONE_KILL_AFTER_SECS:-30}"
 CYCLE=0
 
 log() { echo "$(date -Iseconds) $*" >> "$LOG"; }
@@ -52,7 +63,7 @@ while true; do
         # as bin/tgw-cloud-sync / bin/dedupe-gdrive.sh — avoids Drive
         # per-minute quota errors while leaving headroom for a second
         # rclone process running concurrently.
-        rclone sync "$LOCAL" "$REMOTE" \
+        timeout --kill-after="${RCLONE_KILL_AFTER_SECS}" "${RCLONE_TIMEOUT_SECS}s" rclone sync "$LOCAL" "$REMOTE" \
             --config "$RCLONE_CONF" \
             --log-file "$LOG" \
             --log-level INFO \
@@ -62,10 +73,16 @@ while true; do
             --fast-list \
             --use-mmap \
             --tpslimit 2
-
+        rc=$?
         COMPLETED=$(date -Iseconds)
         write_status "idle" "$STARTED" "\"$COMPLETED\""
-        log "cycle $CYCLE completed at $COMPLETED"
+        if [ "$rc" -eq 0 ]; then
+            log "cycle $CYCLE completed at $COMPLETED"
+        elif [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+            log "cycle $CYCLE ERROR: rclone watchdog fired after ${RCLONE_TIMEOUT_SECS}s (hung subprocess killed, lock released) — treat as an incident, not a transient failure."
+        else
+            log "cycle $CYCLE ERROR: rclone exited with code $rc — see $LOG for detail."
+        fi
     else
         write_status "skipped" "$STARTED" "null"
         log "cycle $CYCLE skipped — lock held by another rclone process"
