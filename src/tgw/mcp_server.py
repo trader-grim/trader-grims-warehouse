@@ -460,6 +460,78 @@ def tgw_catalog_verify(
 
 
 # ---------------------------------------------------------------------------
+# tgw_mailbox_send — write a message into another actor's Plan Vault inbox
+# (PP-RUNNERCOMMS-001)
+# ---------------------------------------------------------------------------
+
+def tgw_mailbox_send(
+    to_actor: Annotated[
+        str,
+        Field(validation_alias=AliasChoices('to_actor', 'To_actor', 'To')),
+    ],
+    text: Annotated[
+        str,
+        Field(validation_alias=AliasChoices('text', 'Text')),
+    ],
+    from_actor: Annotated[
+        str,
+        Field(validation_alias=AliasChoices('from_actor', 'From_actor', 'From')),
+    ] = 'tigwa',
+    msg_type: Annotated[
+        str,
+        Field(validation_alias=AliasChoices('msg_type', 'Msg_type', 'Type')),
+    ] = 'NOTE',
+    subject: Annotated[
+        str,
+        Field(validation_alias=AliasChoices('subject', 'Subject')),
+    ] = '',
+    todo_id: Annotated[
+        int,
+        Field(validation_alias=AliasChoices('todo_id', 'Todo_id', 'Todo')),
+    ] = 0,
+) -> str:
+    """Send a message to another actor's Plan Vault inbox mailbox.
+
+    Same mechanism as `tgw mailbox send <actor> "<message>"` from the shell
+    and the `tgw-mailbox-send` Claude Code skill (PP-RUNNERCOMMS-001) — this
+    is the MCP front door for agents (e.g. Tigwa/Hermes) that don't have
+    shell access. Writes a file into docs/TGW-Plan-Vault/inbox/<to_actor>/
+    following the existing per-actor inbox naming/header convention.
+
+    Args:
+        to_actor: Target actor mailbox, e.g. 'claude', 'tigwa', 'dave'
+        text: Message body
+        from_actor: Sending actor (default: 'tigwa' — this tool is normally
+            called by Tigwa/Hermes-based actors, unlike the CLI's 'claude'
+            default)
+        msg_type: Message type, e.g. NOTE, REQUEST, RESPONSE, REVIEW
+        subject: Short subject/title; also used to derive the filename slug
+        todo_id: Related todo id, recorded in the message header (0 = none)
+
+    Returns ok/file path on success.
+    """
+    cfg = _get_cfg()
+    from tgw.api import cmd_mailbox_send
+    try:
+        result = cmd_mailbox_send(
+            cfg,
+            to_actor,
+            text,
+            from_actor=from_actor,
+            msg_type=msg_type,
+            subject=subject or None,
+            todo_id=todo_id or None,
+        )
+        return json.dumps(result)
+    except Exception as exc:
+        return json.dumps({'ok': False, 'error': str(exc)})
+
+
+if not _READONLY:
+    mcp.tool()(tgw_mailbox_send)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
