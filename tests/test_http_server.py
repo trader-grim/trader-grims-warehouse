@@ -5590,3 +5590,218 @@ def test_item_detail_pipeline_log_distinguishes_retry_wait_from_dead_letter():
 
     assert "#fd8" in retry_wait_row[-600:]
     assert "#f99" in dead_letter_row
+
+
+# ---------------------------------------------------------------------------
+# Invariant C14 fleet-wide clear-value round-trip detector (todo #1468,
+# PP-LISTEDITOR-001).
+#
+# The 2026-07-16 Material incident (see reference/invariants.md C14) found
+# ONE save path (the aspects form) silently dropping an operator's CLEARED
+# value. This section is the general check: for every operator-facing save
+# path this file exposes, prove the round trip set -> save -> clear -> save
+# -> re-read actually reflects the clear, not just a changed value. A save
+# path with no test here either doesn't accept operator field corrections
+# (read-only / pipeline-action endpoints) or moves data between sets rather
+# than clearing an operator-supplied value (inventory-diff/apply,
+# category-aspect-migration/apply, set-template) — see this todo's result
+# manifest for the full path inventory and why each one is or isn't covered.
+# ---------------------------------------------------------------------------
+
+def test_c14_patch_item_top_level_field_clear_roundtrip(env):
+    """Item-detail direct-edit path (the dblclick-to-edit fields panel,
+    saveInlineField's commit()) — PATCHes {fields: {field: newVal}}
+    unconditionally, including newVal==''. Confirms the simple case: no
+    other save intervenes between the clear and the re-read."""
+    client = env["client"]
+    json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+
+    r = client.patch(f"/api/items/{SKU_A}", json={"fields": {"brand": "Acme"}},
+                     headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert doc["brand"] == "Acme"
+
+    r = client.patch(f"/api/items/{SKU_A}", json={"fields": {"brand": ""}},
+                     headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert doc["brand"] == "", (
+        "operator cleared 'brand' via the item-detail field editor and the "
+        "save reported ok, but the cleared value was not actually persisted "
+        "— invariant C14"
+    )
+
+
+def test_c14_patch_item_aspects_form_clear_roundtrip(env):
+    """eBay Draft Editor aspects form (saveEbayDraft()) — bare
+    draft_listing.item_specifics dict PATCH, routed through
+    set_ebay_aspects(). This is the exact HTTP-level path #1461 fixed; a
+    prior test (test_draft_specifics.py) covers the accessor directly, this
+    covers the full endpoint round trip an operator's browser actually
+    exercises."""
+    client = env["client"]
+    json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+
+    r = client.patch(
+        f"/api/items/{SKU_A}",
+        json={"fields": {"draft_listing": {"item_specifics": {"Material": "Silver"}}}},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert draft_specifics.get_ebay_aspects(doc)["Material"] == "Silver"
+
+    r = client.patch(
+        f"/api/items/{SKU_A}",
+        json={"fields": {"draft_listing": {"item_specifics": {"Material": ""}}}},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert draft_specifics.get_ebay_aspects(doc)["Material"] == "", (
+        "operator cleared the Material aspect via the aspects form and the "
+        "save reported ok, but the cleared value was not actually persisted "
+        "— the exact 2026-07-16 live incident, invariant C14"
+    )
+
+
+def test_c14_bulk_apply_title_clear_roundtrip(env, enqueue_calls):
+    """Bulk editor (/api/bulk/apply) — BulkBody.value is a plain str, so an
+    empty string is a legitimate 'clear this field across N items' request.
+    Confirms the same round trip for the fleet-edit path, not just the
+    single-item editor."""
+    client = env["client"]
+    json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+
+    r = client.post("/api/bulk/apply", headers=AUTH_HEADERS,
+                    json={"field": "ai_hint", "value": "vintage brooch", "skus": [SKU_A]})
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert doc["ai_hint"] == "vintage brooch"
+
+    r = client.post("/api/bulk/apply", headers=AUTH_HEADERS,
+                    json={"field": "ai_hint", "value": "", "skus": [SKU_A]})
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert doc["ai_hint"] == "", (
+        "bulk-apply cleared 'ai_hint' to '' and reported ok, but the "
+        "cleared value was not actually persisted — invariant C14"
+    )
+
+
+def test_c14_accept_proposals_clear_roundtrip(env, monkeypatch):
+    """POST /api/items/{sku}/action action=accept_proposals — a revision
+    proposal delta can itself propose clearing an aspect (e.g. an AI-drafted
+    correction that a previously-set aspect is wrong and should be blank).
+    Confirms the accept path actually writes the empty value into Set B,
+    not just non-empty proposed values (the existing #1416-era tests here
+    only ever assert non-empty accepted values)."""
+    monkeypatch.setattr(http_server.state_machine, "enqueue_job", lambda *a, **k: "job-fake")
+
+    draft = dict(_DRAFT_LISTING)
+    draft["item_specifics"] = {"Material": "Silver"}
+    _write_item_with_draft(
+        env["itemdata_root"], SKU_A, draft,
+        extra={"revision_draft": {"delta": {"item_specifics": {"Material": ""}}}},
+    )
+
+    client = env["client"]
+    r = client.post(f"/api/items/{SKU_A}/action", json={"action": "accept_proposals"},
+                    headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+    json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert draft_specifics.get_ebay_aspects(doc)["Material"] == "", (
+        "an accepted revision proposal cleared 'Material' but the cleared "
+        "value was not actually persisted into draft_listing.item_specifics "
+        "— invariant C14"
+    )
+
+
+def test_c14_locked_top_level_field_clear_survives_unrelated_draft_save(env):
+    """Control case: the padlock lock (set_locked / toggleInventoryLock)
+    is the documented mitigation for the base-data auto-sync below — a
+    LOCKED field's clear must survive an unrelated draft_listing save.
+    Passes today; kept alongside the unlocked-case regression below so a
+    future change to the lock check itself gets caught."""
+    client = env["client"]
+    json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+
+    _write_item(env["itemdata_root"], SKU_A, {
+        "sku": SKU_A, "title": "Widget", "location": "A1",
+        "description": "Old description text",
+        "draft_listing": {"description": "Old description text"},
+    })
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    lock_patch = inventory_record.set_locked(doc, "description", True)
+    http_server._apply_patch(json_path, lock_patch)
+
+    r = client.patch(f"/api/items/{SKU_A}", json={"fields": {"description": ""}},
+                     headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert doc["description"] == ""
+
+    # Unrelated draft_listing save (e.g. a price edit via the aspects form).
+    r = client.patch(f"/api/items/{SKU_A}",
+                     json={"fields": {"draft_listing": {"price": 12.34}}},
+                     headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert doc["description"] == "", (
+        "a LOCKED top-level field's clear should survive an unrelated "
+        "draft_listing save — if this fails, the padlock mitigation itself "
+        "has regressed"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "todo #1522 (filed by this packet, #1468): base-data padlock auto-sync "
+        "(_apply_patch's draft_listing branch, 'Padlock auto-sync (Dave, "
+        "2026-07-18)') silently restores an UNLOCKED top-level title/"
+        "description field from the stale draft_listing value on the next "
+        "unrelated draft_listing save, undoing an operator's clear with no "
+        "error and no indication — a live, previously-undiscovered instance "
+        "of the C14 bug class, found while building this detector. Locking "
+        "the field first (see the control test above) is the only "
+        "workaround, and it is NOT the default state. See this todo's "
+        "result manifest for full repro."
+    ),
+)
+def test_c14_unlocked_description_clear_reverted_by_unrelated_draft_save(env):
+    client = env["client"]
+    json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+
+    _write_item(env["itemdata_root"], SKU_A, {
+        "sku": SKU_A, "title": "Widget", "location": "A1",
+        "description": "Old description text",
+        "draft_listing": {"description": "Old description text"},
+    })
+
+    # Operator clears the top-level description via the item-detail
+    # dblclick-to-edit field (unlocked — the default state).
+    r = client.patch(f"/api/items/{SKU_A}", json={"fields": {"description": ""}},
+                     headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert doc["description"] == ""
+
+    # Later, the operator saves an unrelated field on the aspects form
+    # (e.g. price) — any draft_listing PATCH triggers the padlock sync.
+    r = client.patch(f"/api/items/{SKU_A}",
+                     json={"fields": {"draft_listing": {"price": 12.34}}},
+                     headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert doc["description"] == "", (
+        "operator's cleared 'description' was silently restored to the "
+        "stale draft_listing.description value by the next unrelated "
+        "draft_listing save — invariant C14"
+    )
