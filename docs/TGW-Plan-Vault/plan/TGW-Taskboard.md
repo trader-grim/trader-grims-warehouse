@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-07-18 23:04 UTC — 143 open, 326 done in the last 7 days._
+_Rendered 2026-07-18 23:06 UTC — 142 open, 326 done in the last 7 days._
 
 ## admin (17 open)
 
@@ -35,7 +35,7 @@ _Rendered 2026-07-18 23:04 UTC — 143 open, 326 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ | [[TGW-Master-Plan#PP-KNOWLEDGE-001 — the knowledge & translation hub — 6-LAYER UMBRELLA, extended 2026-07-11\|PP-KNOWLEDGE-001]] |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows | [[TGW-Master-Plan#PP-DATALEARN-001 — alt-text / vision data pipeline\|PP-DATALEARN-001]] |  |
 
-## claude (93 open)
+## claude (92 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
@@ -48,7 +48,6 @@ _Rendered 2026-07-18 23:04 UTC — 143 open, 326 done in the last 7 days._
 | 1064 | 25 |  | PP-PHOTO-001 Phase A: confirmed rclone's tgw-gdrive OAuth token works for auth (folder-level 'rclone link' returns a real URL instantly), but live per-file lookup during drafting timed out (~20s, Drive API path-resolution contention with ongoing sync) -- confirms the original design's gdrive_file_ids map (populated once, not live-looked-up) is the right approach, not a shortcut. Deferred: real worker-code build, best done as its own focused packet, not squeezed in while ebay_draft is mid-drain on 3600+ jobs | [[TGW-Master-Plan#PP-PHOTO-001 — photo pipeline (GDrive → Gemini / eBay)\|PP-PHOTO-001]] |  |
 | 1148 | 25 |  | PP-KNOWLEDGE-001 R1: recoll field mapping for metadata (scope/domain/entity/document_type/status/confidence) via exttags/xattr — prepared now, populated by annex+Hermes triage later. Spec: ai-plans/recoll-annex-jetstream.md | [[TGW-Master-Plan#PP-KNOWLEDGE-001 — the knowledge & translation hub — 6-LAYER UMBRELLA, extended 2026-07-11\|PP-KNOWLEDGE-001]] |  |
 | 1376 | 25 |  | status vs #STATUS write-path bug: statusupdate()/verifiedupdate()/bulk_edit all write to legacy #STATUS instead of canonical status (Dave confirmed status is the real field). Jul 3 data_scrub_legacy_ebay_fields.py stripped #STATUS from 20,415 items with no promotion-first guard (unlike its own category-field guard). 5,118 items currently blank on both keys (810 unlisted). Dave: big fix, logged only for now, needs scoping before execution. | [[TGW-Master-Plan#PP-DATAINTEGRITY-001 — data reconciliation & integrity track — NEW 2026-07-11\|PP-DATAINTEGRITY-001]] |  |
-| 1537 | 25 |  | PP-AGENT-DISCIPLINE-001: mechanize tgw-coder worktree isolation (E11 gap, currently 100% prose) — a PreToolUse-style hook or wrapper that structurally prevents tgw-coder from writing outside its assigned task/{id}-{slug} worktree, closing the gap named in the 2026-07-16 contract cross-check. Needs its own packet spec before execution (context budget, exact enforcement mechanism, test cases including a hostile bypass attempt). | [[TGW-Master-Plan#PP-AGENT-DISCIPLINE-001 — agent role/procedure guardrails made mechanical, not prose — NEW 2026-07-16\|PP-AGENT-DISCIPLINE-001]] |  |
 | 1538 | 25 |  | PP-AGENT-DISCIPLINE-001: automated lint+test gate on task branches before a result manifest is produced — right now pytest -q passing is a claimed acceptance criterion, nothing actually runs and verifies it before a tgw-coder/Aider task is handed back for review. Wire ruff+pytest to run automatically at task-branch completion (mirrors Stripe Minions' shift-left pattern from CATIO-APPLICABILITY-MATRIX-2026-07-18.md), fail loudly if either fails rather than letting an unverified claim through. | [[TGW-Master-Plan#PP-AGENT-DISCIPLINE-001 — agent role/procedure guardrails made mechanical, not prose — NEW 2026-07-16\|PP-AGENT-DISCIPLINE-001]] |  |
 | 1539 | 25 |  | PP-HERMES-EA-001: hard-capped fix-attempt counter for agent self-correction loops — closes the confirmed-open gap named in the 2026-07-16 contract cross-check (no code gate on the branch-review 'out-of-control' triggers/fix-attempt cap). Stripe Minions' concrete number (max 1-2 automated fix rounds, then hand to a human) is the reference point (CATIO-APPLICABILITY-MATRIX-2026-07-18.md) — pick TGW's own number, encode as a counter + hard stop, not a soft prose limit. | [[TGW-Master-Plan#PP-HERMES-EA-001 — Tigwa & Leotha personas (the "dev team" upgrade)\|PP-HERMES-EA-001]] |  |
 | 1136 | 30 |  | Drive-space re-evaluation: full audit of physical disk fleet + DRIVE-REGISTRY.md refresh -- today's changes (sdc repartitioned for backup infra, LVM expansion #1056 blocked/stale) mean the registry and vg_tgw growth plan both need a fresh look | [[TGW-Master-Plan#PP-HARDWARE-001 — IT / hardware track (drive-space re-evaluation absorbed) — NEW 2026-07-11\|PP-HARDWARE-001]] |  |
@@ -183,6 +182,7 @@ _Rendered 2026-07-18 23:04 UTC — 143 open, 326 done in the last 7 days._
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 1537 | claude | 2026-07-18 | PP-AGENT-DISCIPLINE-001: mechanize tgw-coder worktree isolation (E11 gap, currently 100% prose) — a PreToolUse-style hook or wrapper that structurally prevents tgw-coder from writing outside its assigned task/{id}-{slug} worktree, closing the gap named in the 2026-07-16 contract cross-check. Needs its own packet spec before execution (context budget, exact enforcement mechanism, test cases including a hostile bypass attempt). |
 | 1535 | claude | 2026-07-18 | Plan reconciliation pass: master plan is 2363 lines vs 500-line target, overdue full pass |
 | 1529 | claude | 2026-07-18 | PP-RUNBOOK-001: triage remaining non-thermal/non-eBay gaps (#8-13) from TIGWA-REPORT-runbook-gaps-20260713.md -- restore/snapshot doc naming reconciliation (TGW-VAULT vs TGW-SNAPSHOT-0 vs archive disks), Quickstart command syntax vs live CLI validation, stale pre-NixOS MX restore material labeling, USB restore drill status, runbook owner/date/applicability/last-drill metadata convention. Filed per 1380-RESULT.md's manifest note (packet only covered eBay-ops gaps #14-17). |
 | 1526 | claude | 2026-07-18 | Document the a1131 tgw-prod CLI wrapper (~tigwa/.local/bin/tgw-prod + fish function) found during #1492 verification into the plan vault (reference doc or PP-PORTABLE-CATALOG-001/PP-TASKER-001) — currently only documented in the #1492 result manifest |
@@ -197,5 +197,4 @@ _Rendered 2026-07-18 23:04 UTC — 143 open, 326 done in the last 7 days._
 | 1452 | claude | 2026-07-18 | Reconcile a1131's flake divergence from origin/master (recurrence risk flagged in kdeconnect incident, PP-AGENT-DISCIPLINE-001 E10 gap) |
 | 1475 | claude | 2026-07-18 | in_progress: building Phase 1 draft-view panel now |
 | 1438 | claude | 2026-07-18 | Delivered 2026-07-16: collision-safe rename (content-addressed sibling on differing content, idempotent no-op on identical content) + non-Markdown dry-run visibility. 49/49 tests pass, live dry-run verified. Report: inbox/tigwa/RESPONSE-1438-admin-file-collision-fix.md. Left open pending Tigwa re-review. |
-| 1436 | claude | 2026-07-18 | in progress 2026-07-15: Claude implementing admin-file/pm_intake topology update per #1435/#1436 specs |
 | … | | | _…and 311 more — run `tgw todo --all` to see everything_ |

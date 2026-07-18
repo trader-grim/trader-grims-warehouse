@@ -14,7 +14,7 @@ the E11 "prose vs. mechanical enforcement" gap already tracked).
 
 | Stripe mechanism | Evidence (source) | Catio equivalent / gap | Safety gate | Pilot eligibility |
 |---|---|---|---|---|
-| Isolated devbox, 10s spin-up, no prod/internet access, blast radius = one box | Part 2, "Devboxes, hot and ready" | **Gap.** PP-AIOPS-001 Phase 5 (nspawn+Btrfs, portability-revised toward bubblewrap per Dave 2026-07-14) is the designed equivalent — not built, gated on PP-NIXOS-001. Today's actual substitute is `tgw-coder`'s git-worktree-per-task contract, which is **prose-enforced, not mechanical** (invariant E11 audit: "100% prose"). | Isolation is the *precondition* for skipping confirmation prompts at Stripe — TGW should not skip its operator gate even once isolation exists; the two are orthogonal, not a trade. | **High** — this is the single highest-leverage gap. A worktree-isolation PreToolUse hook (already named in E11's audit as an open item) closes most of the practical risk without needing nspawn/Btrfs at all. |
+| Isolated devbox, 10s spin-up, no prod/internet access, blast radius = one box | Part 2, "Devboxes, hot and ready" | **Corrected 2026-07-18 (this doc's first pass used stale info):** `tgw-coder`'s worktree isolation is **already mechanically enforced** — `.claude/hooks/worktree-guard.py`, a live PreToolUse hook wired in `.claude/settings.json` (todo #1389). One confirmed coverage gap remains open: **#1531** — the hook didn't catch a bypass (agent wrote a *new* file into the shared checkout instead of its worktree, found during #1526) and needs re-verification/a coverage fix, not a from-scratch build. PP-AIOPS-001 Phase 5 (nspawn+Btrfs, portability-revised toward bubblewrap) remains the eventual stronger substrate, gated on PP-NIXOS-001. | Isolation is the *precondition* for skipping confirmation prompts at Stripe — TGW should not skip its operator gate even once isolation is airtight; the two are orthogonal, not a trade. | **Medium** — narrower than first assessed. #1531 (close the specific known coverage gap) is the real remaining work, not a new hook. |
 | Blueprint: named graph mixing deterministic nodes (lint, push, test) with agentic nodes (implement, fix) | Part 2, "Blueprints" | **Partial gap.** PP-AIOPS-001's anomaly-detector/litterbox pattern *is* a deterministic-vs-agentic split, but it targets data-mutation anomalies, not task execution itself. The `tgw-coder`/Aider task flow today is closer to a 2-node graph (agent implements → human reviews) with no named intermediate deterministic checkpoints. | A blueprint's deterministic nodes are exactly where "can't be talked out of it" guarantees belong — matches TGW's C9 operator-gate philosophy, just not applied *inside* a task's execution yet. | **Medium** — worth naming the states explicitly (`prepared → isolated_execution → deterministic_checks → review_pending → accepted\|rejected\|remediation_required`, per the source research doc's own draft) as a PP-CATIONIX-001 design artifact, before building anything. |
 | Context curation: rule files scoped to subdirectories, curated MCP tool subset per agent (Toolshed) | Part 2, "Context gathering" | **Already directionally matched, smaller scale.** CLAUDE.md's "load order: CLAUDE.md → plan → the reference doc named by your packet, nothing else" is the same instinct as subdirectory-scoped rules. `tgw` MCP server's `TGW_MCP_READONLY` gating (per-role tool grants, PP-HR-001) is a curated-subset pattern, just not yet formalized as a registry. | No new gate needed — this axis is working as intended at TGW's scale. | **Low priority** — not broken, don't build a "Toolshed" for its own sake at TGW's current tool count. |
 | Shift-left: local lint/autofix on every push, <5s, so CI rarely fails | Part 1 & 2, "…and iterate" | **Real gap.** No automated local gate exists — `pytest -q` and lint are acceptance *criteria* a packet must satisfy, but nothing runs them automatically before a task is considered done. Verification is currently manual/session-time. | This is a cheap, low-risk mechanical win — a pre-commit-style hook running ruff+pytest on a task branch before it's handed back for review. | **High** — straightforward, no new infra, closes a real "trust the claim vs. verify it" gap that PP-AGENT-DISCIPLINE-001 already names as a pattern to fix. |
@@ -24,15 +24,38 @@ the E11 "prose vs. mechanical enforcement" gap already tracked).
 
 ## Reading the matrix
 
-Three items land at **High** pilot eligibility, and none of them require new infrastructure (no NATS, no nspawn, no NixOS migration) — they're all about mechanizing contracts that already exist as prose:
+**Correction, 2026-07-18 (same day, before this went further):** this doc's
+first pass claimed worktree isolation was "100% prose" and filed a
+from-scratch-build todo (#1537) — both wrong. `worktree-guard.py` is a live
+PreToolUse hook (todo #1389), already mechanically enforcing isolation. #1537
+was closed as a duplicate; the real open item is **#1531** (a known coverage
+gap in the existing hook, found during #1526, needs re-verification not
+reconstruction). Caught by checking memory/tracker history before trusting
+the matrix's own first-pass claim — see `feedback-check-history-before-
+building` and `feedback-verify-before-alarming-own-analysis`.
 
-1. **Worktree isolation, mechanically enforced** (closes the E11 "100% prose" gap for `tgw-coder`)
-2. **Automated local lint/test gate on a task branch**, run before a result manifest is produced — not just claimed
-3. **A hard-capped fix-attempt counter** for agent self-correction loops, closing the already-flagged PP-HERMES-EA-001 gap
+Two items land at genuinely **High** pilot eligibility, requiring no new
+infrastructure (no NATS, no nspawn, no NixOS migration) — mechanizing
+contracts that already exist as prose:
 
-All three are refinements of the *existing* `tgw-coder`/branch-per-task/result-manifest contract — none of them require adopting Stripe's devbox or blueprint machinery wholesale. That matches the research doc's own framing: the transferable lesson is a bounded execution contract, not Stripe's specific infrastructure.
+1. **Automated local lint/test gate on a task branch**, run before a result
+   manifest is produced — not just claimed
+2. **A hard-capped fix-attempt counter** for agent self-correction loops,
+   closing the already-flagged PP-HERMES-EA-001 gap
 
-The **Medium** item (naming task execution as an explicit state machine) is the one actual *design* decision worth a real planning session — it's the connective tissue that would let the three High items above compose into something more than three independent patches.
+One item is **Medium**, narrower than first assessed: **#1531**, closing the
+one known coverage gap in the already-live worktree-isolation hook.
+
+All are refinements of the *existing* `tgw-coder`/branch-per-task/
+result-manifest contract — none require adopting Stripe's devbox or
+blueprint machinery wholesale. That matches the research doc's own framing:
+the transferable lesson is a bounded execution contract, not Stripe's
+specific infrastructure.
+
+The state-machine-naming item (also Medium, see the Blueprint row above) is
+the one actual *design* decision worth a real planning session — it's the
+connective tissue that would let the mechanical fixes above compose into
+something more than independent patches.
 
 ## Not recommended right now
 

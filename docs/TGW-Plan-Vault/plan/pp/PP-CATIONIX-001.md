@@ -327,11 +327,16 @@ confirms the matrix's read that TGW's small curated MCP surface is a strength
 relative to Stripe's Toolshed model, not a gap to close. Full matrix:
 `dev-workflow/research/CATIO-APPLICABILITY-MATRIX-2026-07-18.md`.
 
-Three mechanical gaps (all "mechanize an existing prose contract," no new
+**Correction, same day:** the matrix's first pass claimed worktree isolation
+was "100% prose" and filed #1537 to build it from scratch — wrong.
+`worktree-guard.py` (todo #1389) already mechanically enforces it, live via
+a PreToolUse hook. #1537 closed as duplicate; **#1531** (existing, a known
+coverage gap found during #1526) is the real open item for that axis, not a
+new build.
+
+Two mechanical gaps (all "mechanize an existing prose contract," no new
 infra) filed as todos, each still needing its own packet spec before
 execution:
-- **#1537** (PP-AGENT-DISCIPLINE-001) — mechanize `tgw-coder` worktree
-  isolation, closing the E11 "100% prose" gap.
 - **#1538** (PP-AGENT-DISCIPLINE-001) — automated lint+test gate on a task
   branch before its result manifest is produced (today `pytest -q` passing
   is a claimed acceptance criterion, not something actually run+verified).
