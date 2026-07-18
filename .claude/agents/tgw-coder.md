@@ -75,6 +75,23 @@ someone else's uncommitted work in it at any time and is not yours to
 touch (checking the current branch name with `git branch --show-current`
 is read-only and safe to run there).
 
+**This is now mechanically enforced, not just prose (todo #1389/#1450,
+invariant E11 follow-up):** `.claude/hooks/worktree-guard.py`, a PreToolUse
+hook registered in `.claude/settings.json` (matcher `Edit|Write`), blocks
+any Edit/Write whose `file_path` falls outside
+`/opt/TGW/var/worktrees/<id>-<slug>/` or `/home/db/tgw-worktrees/<id>-<slug>/`
+when it detects `agent_type == "tgw-coder"` — including a dedicated check
+for the harness's own auto-provisioned `.claude/worktrees/agent-<id>/` path
+(the exact conflict #1450 found live: `EnterWorktree` uses a hardcoded
+`.claude/worktrees/` root and an unparseable `worktree-agent-<id>` branch
+name that the rest of PP-HERMES-EA-001's tooling can't find). Companion
+change: `.claude/settings.json` now sets `"worktree": {"bgIsolation":
+"none"}` so Claude Code's own competing background-isolation mechanism
+never auto-provisions a second worktree underneath you in the first place.
+If you ever see the guard fire on a path you believe IS correct, that's a
+signal the worktree wasn't created under one of the two allowed roots —
+fix the worktree location, don't work around the hook.
+
 **Critical, easy to silently get wrong (found in the pilot's 3rd run):**
 the `tgw` venv has an editable install pinned to the shared checkout
 (`/opt/TGW/.venvironments/tgw/lib/python3.12/site-packages/__editable__.trader_grims_warehouse-0.1.0.pth`
