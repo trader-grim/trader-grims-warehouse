@@ -86,7 +86,7 @@ def _write_item(cfg, sku, doc):
 EXPECTED_TOOLS = {
     "tgw_get_item", "tgw_search_items", "tgw_queue_status", "tgw_health",
     "tgw_enqueue", "tgw_get_todo", "tgw_add_suggest", "tgw_dead_letter",
-    "tgw_hint_trail", "tgw_catalog_verify",
+    "tgw_hint_trail", "tgw_catalog_verify", "tgw_mailbox_send",
 }
 
 
@@ -94,7 +94,7 @@ def test_exactly_ten_tools_present():
     present = {n for n in dir(mcp_server)
               if n.startswith("tgw_") and callable(getattr(mcp_server, n))}
     assert present == EXPECTED_TOOLS
-    assert len(present) == 10
+    assert len(present) == 11
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +306,70 @@ def test_add_suggest_accepts_capitalized_text_argument(cfg, monkeypatch):
     out = json.loads(asyncio.run(tool.run({"Text": "remember this"})))
     assert out["ok"] is True
     assert seen["text"] == "remember this"
+
+
+# ---------------------------------------------------------------------------
+# tgw_mailbox_send (PP-RUNNERCOMMS-001)
+# ---------------------------------------------------------------------------
+
+def test_mailbox_send_delegates_to_cmd_mailbox_send(cfg, monkeypatch):
+    seen = {}
+
+    def fake_send(cfg, to_actor, text, from_actor="claude", msg_type="NOTE",
+                  subject=None, todo_id=None):
+        seen.update(to_actor=to_actor, text=text, from_actor=from_actor,
+                    msg_type=msg_type, subject=subject, todo_id=todo_id)
+        return {"ok": True, "file": "/x"}
+
+    monkeypatch.setattr("tgw.api.cmd_mailbox_send", fake_send)
+    out = json.loads(mcp_server.tgw_mailbox_send(
+        "claude", "please review", from_actor="tigwa", msg_type="REVIEW",
+        subject="review please", todo_id=1484,
+    ))
+    assert out["ok"] is True
+    assert seen == {
+        "to_actor": "claude", "text": "please review", "from_actor": "tigwa",
+        "msg_type": "REVIEW", "subject": "review please", "todo_id": 1484,
+    }
+
+
+def test_mailbox_send_defaults_omit_subject_and_todo(cfg, monkeypatch):
+    seen = {}
+
+    def fake_send(cfg, to_actor, text, from_actor="claude", msg_type="NOTE",
+                  subject=None, todo_id=None):
+        seen.update(subject=subject, todo_id=todo_id)
+        return {"ok": True, "file": "/x"}
+
+    monkeypatch.setattr("tgw.api.cmd_mailbox_send", fake_send)
+    json.loads(mcp_server.tgw_mailbox_send("dave", "hi"))
+    assert seen["subject"] is None
+    assert seen["todo_id"] is None
+
+
+def test_mailbox_send_accepts_capitalized_arguments(cfg, monkeypatch):
+    seen = {}
+
+    def fake_send(cfg, to_actor, text, from_actor="claude", msg_type="NOTE",
+                  subject=None, todo_id=None):
+        seen.update(to_actor=to_actor, text=text)
+        return {"ok": True}
+
+    monkeypatch.setattr("tgw.api.cmd_mailbox_send", fake_send)
+    tool = mcp_server.mcp._tool_manager._tools["tgw_mailbox_send"]
+    out = json.loads(asyncio.run(tool.run({"To": "claude", "Text": "hello"})))
+    assert out["ok"] is True
+    assert seen == {"to_actor": "claude", "text": "hello"}
+
+
+def test_mailbox_send_error_is_caught(cfg, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("no such actor")
+
+    monkeypatch.setattr("tgw.api.cmd_mailbox_send", boom)
+    out = json.loads(mcp_server.tgw_mailbox_send("nowhere", "hi"))
+    assert out["ok"] is False
+    assert "no such actor" in out["error"]
 
 
 # ---------------------------------------------------------------------------

@@ -492,6 +492,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
         "admin-file", "classify-suggestions", "picklist", "print-label", "mvitems",
         "suggest", "quiet-check", "perp-run", "whisper-suggest",
         "claude-help", "clip", "suggest-edit", "promo", "nix-bundle-usb",
+        "mailbox",
     ]),
 ]
 
@@ -1053,6 +1054,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("suggest-edit", help="open SUGGESTIONS.md in $EDITOR for review before PM-intake")
     p.add_argument("--pending-only", action="store_true", help="extract only unprocessed ([ ]) entries to a temp file for editing")
+
+    p = sub.add_parser("mailbox", help="mailbox: send a message to another actor's Plan Vault inbox (PP-RUNNERCOMMS-001)")
+    mbox_sub = p.add_subparsers(dest="mailbox_op", required=True, metavar="MAILBOX-OP")
+    mp = mbox_sub.add_parser("send", help="write a message file into <actor>'s inbox")
+    mp.add_argument("to_actor", help="target actor, e.g. claude, tigwa, dave")
+    mp.add_argument("text", help="message body")
+    mp.add_argument("--from", dest="from_actor", default="claude", metavar="ACTOR", help="sending actor (default: claude)")
+    mp.add_argument("--type", dest="msg_type", default="NOTE", metavar="TYPE", help="message type, e.g. NOTE, REQUEST, RESPONSE, REVIEW (default: NOTE)")
+    mp.add_argument("--subject", default=None, metavar="TEXT", help="short subject/title; also used to derive the filename slug (default: derived from message text)")
+    mp.add_argument("--todo", type=int, default=None, dest="todo_id", metavar="ID", help="related todo id, recorded in the message header")
 
     p = sub.add_parser("admin-file", help="scan inbox and enqueue eligible notes for PM-intake (PP-DOCFLOW-001)")
     p.add_argument("--now", action="store_true", help="bypass submission-delay gate (process all files regardless of age)")
@@ -3364,6 +3375,111 @@ def cmd_suggest_edit(cfg: Dict[str, Any], pending_only: bool = False) -> Dict[st
     return {"ok": True}  # unreachable if execlp succeeds
 
 
+# Known standing actors with a mailbox today (PP-RUNNERCOMMS-001). This is a
+# convenience default list for validation/error messages only — any
+# subdirectory that already exists under plan_inbox_path is a valid send
+# target, and a brand-new actor's inbox dir is created on first send rather
+# than gatekept, matching the PP's "extended to any new addressable actor as
+# one gets added" framing. `archive` / `queued` are shared holding areas, not
+# actors, and are refused as send targets.
+MAILBOX_RESERVED_DIRS = {"archive", "queued"}
+MAILBOX_KNOWN_ACTORS = {"claude", "tigwa", "dave"}
+
+_MAILBOX_SLUG_RE = None
+
+
+def _mailbox_slugify(text: str, max_words: int = 8) -> str:
+    """Derive a filename-safe slug from free text (lowercase, hyphenated)."""
+    import re as _re
+
+    words = _re.findall(r"[A-Za-z0-9]+", text.lower())
+    slug = "-".join(words[:max_words]) or "message"
+    return slug[:80]
+
+
+def cmd_mailbox_send(
+    cfg: Dict[str, Any],
+    to_actor: str,
+    text: str,
+    from_actor: str = "claude",
+    msg_type: str = "NOTE",
+    subject: Optional[str] = None,
+    todo_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Write a mailbox message into another actor's Plan Vault inbox.
+
+    PP-RUNNERCOMMS-001: the one send mechanism behind `tgw mailbox send`, the
+    `tgw-mailbox-send` Claude Code skill, and the `tgw_mailbox_send` MCP tool
+    (all three call this function — no logic duplicated between them).
+
+    Follows the naming/header convention already live in
+    docs/TGW-Plan-Vault/inbox/{claude,tigwa,dave}/ — reverse-engineered from
+    real notes there, not invented: `<FROM-ACTOR>-<TYPE>-<slug>-<date>.md`,
+    with a `# <Type>: <title>` header and `**From:**`/`**To:**`/`**Date:**`
+    metadata lines.
+    """
+    to_actor = (to_actor or "").strip().lower()
+    from_actor = (from_actor or "claude").strip().lower()
+    msg_type = (msg_type or "NOTE").strip().upper()
+
+    if not to_actor:
+        return {"ok": False, "error": "to_actor is required"}
+    if to_actor in MAILBOX_RESERVED_DIRS:
+        return {"ok": False, "error": f"{to_actor!r} is a shared holding area, not an actor mailbox"}
+    if not text or not text.strip():
+        return {"ok": False, "error": "message text is required"}
+
+    inbox_root = cfg["plan_inbox_path"]
+    target_dir = inbox_root / to_actor
+
+    # Never silently create a mailbox for a plausible typo of a known actor;
+    # DO create one for a genuinely new actor name (not in the known set,
+    # not a reserved dir) per the PP's extensibility framing.
+    if not target_dir.is_dir() and to_actor not in MAILBOX_KNOWN_ACTORS:
+        existing = sorted(
+            p.name for p in inbox_root.iterdir()
+            if p.is_dir() and p.name not in MAILBOX_RESERVED_DIRS
+        ) if inbox_root.is_dir() else []
+        return {
+            "ok": False,
+            "error": (
+                f"no mailbox for actor {to_actor!r} and it is not a known actor "
+                f"({sorted(MAILBOX_KNOWN_ACTORS)}); existing mailboxes: {existing}. "
+                "Pass the intended actor name, or create inbox/<actor>/ first if this "
+                "is deliberately a brand-new addressable actor."
+            ),
+        }
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    now = datetime.now(tz=timezone.utc)
+    date_str = now.strftime("%Y-%m-%d")
+    slug = _mailbox_slugify(subject or text)
+
+    base_name = f"{from_actor.upper()}-{msg_type}-{slug}-{date_str}"
+    dest = target_dir / f"{base_name}.md"
+    n = 2
+    while dest.exists():
+        dest = target_dir / f"{base_name}-{n}.md"
+        n += 1
+
+    title = subject or (text.strip().splitlines()[0][:80])
+    header_lines = [
+        f"# {msg_type.title()}: {title}",
+        "",
+        f"**From:** {from_actor}",
+        f"**To:** {to_actor}",
+        f"**Date:** {now.strftime('%Y-%m-%dT%H:%M')}Z",
+    ]
+    if todo_id is not None:
+        header_lines.append(f"**Todo:** #{todo_id}")
+    header_lines.append("")
+    header_lines.append(text.strip())
+    header_lines.append("")
+
+    dest.write_text("\n".join(header_lines), encoding="utf-8")
+    return {"ok": True, "file": str(dest), "to": to_actor, "from": from_actor}
+
+
 def cmd_classify_suggestions(
     cfg: Dict[str, Any],
     apply: bool = False,
@@ -4171,6 +4287,20 @@ def main() -> int:
 
         elif args.op == "suggest-edit":
             result = cmd_suggest_edit(cfg, pending_only=args.pending_only)
+
+        elif args.op == "mailbox":
+            if args.mailbox_op == "send":
+                result = cmd_mailbox_send(
+                    cfg,
+                    args.to_actor,
+                    args.text,
+                    from_actor=args.from_actor,
+                    msg_type=args.msg_type,
+                    subject=args.subject,
+                    todo_id=args.todo_id,
+                )
+            else:
+                result = {"ok": False, "error": f"unknown mailbox op: {args.mailbox_op!r}"}
 
         elif args.op == "admin-file":
             from tgw.workers.pm_intake import cmd_admin_file
