@@ -648,6 +648,73 @@ def check_offers_unresolved(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Sold-order history gap check (invariant C11, todo #1271, follow-up to
+# #1270/PP-DATAINTEGRITY-001)
+# ---------------------------------------------------------------------------
+
+# Same default path/override key as tgw.ebay.pull._DEFAULT_SOLD_ORDER_GAP_LOG /
+# _record_sold_order_gap's `raw.sold_order_gap_log` cfg override. Not
+# imported directly from tgw.ebay.pull to avoid pulling that module's
+# eBay-client/fence imports into every `tgw health` run — this mirrors the
+# quota-incident-log pattern (_incident_log_path in quota.py) of a
+# locally-known default + cfg override, kept in sync by convention same as
+# _OFFERS_UNRESOLVED_REGISTRY above.
+_DEFAULT_SOLD_ORDER_GAP_LOG = '/opt/TGW/var/log/sold-order-history-gaps.jsonl'
+
+
+def check_sold_order_gaps(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Surface real, PERMANENT sold-order history gaps recorded by
+    tgw.ebay.pull._record_sold_order_gap (invariant C11): GetOrders cannot
+    see further back than its 89-day rolling ceiling, so an incremental
+    resume whose last sync predates that window loses history
+    irrecoverably. Without this check the JSONL registry has no discovery
+    mechanism — an operator would never know a gap occurred.
+
+    ok=True when the log is absent/empty (no gap has ever occurred).
+    ok=False (warn=True) when 1+ gap records exist — surfaces the count,
+    total days lost, and the most recent gap's detail.
+    """
+    t = time.time()
+    raw = cfg.get('raw', {}) if isinstance(cfg.get('raw'), dict) else {}
+    path = Path(raw.get('sold_order_gap_log', _DEFAULT_SOLD_ORDER_GAP_LOG))
+
+    if not path.exists():
+        return _result('sold_order_gaps', True, 'no sold-order history gaps recorded',
+                       (time.time() - t) * 1000, sold_order_gap_count=0)
+
+    records = []
+    try:
+        for line in path.read_text(encoding='utf-8').splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except Exception:
+                continue
+    except Exception as exc:
+        return _result('sold_order_gaps', True, f'gap log unreadable: {exc}',
+                       (time.time() - t) * 1000, sold_order_gap_count=0)
+
+    n = len(records)
+    if n == 0:
+        return _result('sold_order_gaps', True, 'no sold-order history gaps recorded',
+                       (time.time() - t) * 1000, sold_order_gap_count=0)
+
+    total_days = sum(r.get('gap_days', 0) for r in records)
+    latest = max(records, key=lambda r: r.get('ts', ''))
+    return _result(
+        'sold_order_gaps', False,
+        f"{n} sold-order history gap(s), {total_days} day(s) unrecoverable total — "
+        f"most recent {latest.get('gap_days', '?')} day(s) at {latest.get('ts', '?')} "
+        f"(requested from {latest.get('requested_from', '?')}, clamped to "
+        f"{latest.get('clamped_from', '?')})",
+        (time.time() - t) * 1000, warn=True, sold_order_gap_count=n,
+        sold_order_gap_days_total=total_days, sold_order_gap_latest=latest,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Metered-API quota check (PP-QUOTA-001, session 42)
 # ---------------------------------------------------------------------------
 
@@ -769,6 +836,7 @@ def check_all(cfg: Dict[str, Any],
     checks.append(check_nats(cfg))
     checks.append(check_ebay_sync_fallback(cfg))
     checks.append(check_offers_unresolved(cfg))
+    checks.append(check_sold_order_gaps(cfg))
     checks.append(check_quota(cfg))
     if include_ollama:
         checks.append(check_ollama())
