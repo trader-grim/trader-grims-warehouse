@@ -310,13 +310,14 @@ staffing research's cheap-coordination/premium-escalation pattern, just
 extended to genuinely-free bundled tools instead of only cheap-vs-premium
 paid models.
 
-**Status: concept captured, not yet audited.** No inventory has been taken
-— this session names the category and the instinct ("we should try to take
-advantage of it"), doesn't yet enumerate what's actually available or how
-much of it is usable. Real next step is an audit pass: what's bundled with
-what's already paid for, what's actually usable for TGW work (vs. just
-technically available), and where each fits in the cat-herder's routing
-(interactive tooling, like ChatGPT Plus above, vs. worker-eligible).
+**Status: audited 2026-07-13, reconciled into the plan 2026-07-16.** Tigwa
+delivered the audit pass this section called for — full account/ledger/
+authority governance model, per-resource routing classes, and a correction
+that OpenAI Codex OAuth is already-admitted primary capacity (Tigwa's "second
+big brain"), not a feral. Full audit: `pp/PP-CATIONIX-001-ferals-audit.md`.
+Account-specific balance/expiry verification (signed-in screenshots) is real
+remaining work, but it's Dave's to do, not Claude's/Tigwa's — tracked as its
+own follow-up rather than left open under the research todo (#1333, closed).
 
 ## Sequencing — explicitly unchanged (Dave, 2026-07-11)
 

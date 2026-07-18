@@ -79,6 +79,7 @@ __all__ = [
     "get_ebay_aspects_updated_at",
     "wrap_ebay_specifics",
     "set_ebay_aspects",
+    "remove_ebay_aspects",
 ]
 
 
@@ -207,6 +208,53 @@ def set_ebay_aspects(
             "ts": ts,
             "key": key,
             "value": value,
+            "previous_value": previous,
+            "source": source,
+            "applied_by": applied_by,
+        })
+    return {
+        "item_specifics": wrap_ebay_specifics(new_fields, updated_at=ts),
+        "item_specifics_history": history,
+    }
+
+
+def remove_ebay_aspects(
+    item: Dict[str, Any],
+    keys: List[str],
+    *,
+    source: str,
+    applied_by: str = "system",
+) -> Dict[str, Any]:
+    """Compute the patch fields for EXPLICITLY REMOVING `keys` from Set B.
+
+    `set_ebay_aspects` above deliberately treats a `None` update as a
+    no-op — "Set A/B deletions, if ever needed, are a separate, explicit
+    decision, not a side effect of a generic update" (see its docstring).
+    This is that separate decision, built for todo #1471 (category-change
+    aspect migration, invariant C14 lineage): only call this for a
+    genuine, operator-confirmed removal — never as an implicit side effect
+    of an ordinary field update.
+
+    Pure — does not mutate `item` or perform I/O. Returns the same
+    `{"item_specifics": ..., "item_specifics_history": ...}` shape
+    `set_ebay_aspects` returns. A key not currently present is a silent
+    no-op for that key (idempotent — matches `set_ebay_aspects`'
+    recompute-not-trust-caller philosophy).
+    """
+    existing_fields = get_ebay_aspects(item)
+    dl = item.get("draft_listing") or {}
+    history: List[Dict[str, Any]] = list((dl.get("item_specifics_history") or [])
+                                          if isinstance(dl, dict) else [])
+    ts = _now_iso()
+    new_fields = dict(existing_fields)
+    for key in keys:
+        if key not in new_fields:
+            continue
+        previous = new_fields.pop(key)
+        history.append({
+            "ts": ts,
+            "key": key,
+            "value": None,
             "previous_value": previous,
             "source": source,
             "applied_by": applied_by,

@@ -12,6 +12,18 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /opt/TGW/src/trader-grims-warehouse/.claude/hooks/session-start-briefing.py",
+            "timeout": 30,
+            "statusMessage": "Collecting startup-ritual briefing (inbox/suggestions/plan check)..."
+          }
+        ]
+      }
     ]
   }
 }

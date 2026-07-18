@@ -350,6 +350,115 @@ def test_build_intake_manifest_dry_run_no_mutation(tmp_path):
     assert not (inbox / 'queued').exists()
 
 
+def test_build_intake_manifest_surfaces_non_markdown_as_deferred(tmp_path):
+    """Tigwa review #1438 / knowledge-first policy: non-Markdown direct
+    sources must be visible in --dry-run as preserved/deferred candidates,
+    not silently invisible, even though staging stays Markdown-only."""
+    from tgw.workers.pm_intake import build_intake_manifest
+
+    inbox = tmp_path / 'inbox'
+    (inbox / 'dave').mkdir(parents=True)
+    _mk_note(inbox / 'dave' / 'note.md', age_hours=10.0)
+    (inbox / 'dave' / 'research.pdf').write_bytes(b'%PDF-1.4 fake pdf bytes')
+    (inbox / 'dave' / 'notes.html').write_text('<html>fake</html>')
+    # control files stay excluded, even from this all-files enumeration
+    (inbox / 'README.md').write_text('# control file')
+    (inbox / 'Untitled.base').write_text('control')
+
+    cfg = {'plan_inbox_path': inbox, 'pm_intake_delay_hours': 4.0}
+
+    manifest = build_intake_manifest(cfg, bypass_delay=False)
+    by_path = {m['source_path']: m for m in manifest}
+
+    assert by_path['dave/note.md']['eligible'] is True
+
+    pdf = by_path['dave/research.pdf']
+    assert pdf['eligible'] is False
+    assert pdf['reason'] == 'seen but not actionable: unsupported source type pending supervised normalization'
+    assert pdf['owner'] == 'dave'
+    assert pdf['file_type'] == 'pdf'
+    assert 'sha256' in pdf
+    assert 'size_bytes' in pdf
+    assert 'mtime' in pdf
+    assert 'planned_queue_path' not in pdf
+
+    html = by_path['dave/notes.html']
+    assert html['eligible'] is False
+    assert html['reason'] == 'seen but not actionable: unsupported source type pending supervised normalization'
+
+    assert 'README.md' not in by_path
+    assert 'Untitled.base' not in by_path
+
+    # still fully non-mutating
+    assert (inbox / 'dave' / 'research.pdf').exists()
+    assert (inbox / 'dave' / 'notes.html').exists()
+    assert not (inbox / 'queued').exists()
+
+
+def test_scan_and_enqueue_never_overwrites_existing_queued_file(tmp_path):
+    """Tigwa review #1438: same owner+filename with different content and a
+    pre-existing queued destination must never be silently clobbered."""
+    from tgw.workers.pm_intake import scan_and_enqueue
+
+    inbox = tmp_path / 'inbox'
+    (inbox / 'tigwa').mkdir(parents=True)
+    queued_dir = inbox / 'queued' / 'tigwa'
+    queued_dir.mkdir(parents=True)
+    (queued_dir / 'note.md').write_text('OLD queued content — must survive')
+
+    _mk_note(inbox / 'tigwa' / 'note.md', content='NEW incoming content, different from queued')
+
+    cfg = {'plan_inbox_path': inbox, 'pm_intake_delay_hours': 4.0,
+           'postgres_dsn': 'dbname=state_machine user=tgw'}
+    mock_sm = MagicMock()
+    mock_sm.enqueue_job.return_value = 'job-uuid'
+
+    with patch('tgw.workers.pm_intake.state_machine', mock_sm):
+        result = scan_and_enqueue(cfg, bypass_delay=False)
+
+    # original queued artifact untouched
+    assert (queued_dir / 'note.md').read_text() == 'OLD queued content — must survive'
+    # incoming file routed to a distinct, content-addressed destination
+    siblings = sorted(p.name for p in queued_dir.iterdir())
+    assert 'note.md' in siblings
+    assert len(siblings) == 2
+    new_name = [n for n in siblings if n != 'note.md'][0]
+    assert new_name.startswith('note__') and new_name.endswith('.md')
+    assert (queued_dir / new_name).read_text() == 'NEW incoming content, different from queued'
+    assert any(r.endswith(new_name) for r in result)
+    # source file was moved (not left behind, not duplicated)
+    assert not (inbox / 'tigwa' / 'note.md').exists()
+
+
+def test_scan_and_enqueue_identical_content_collision_is_idempotent_noop(tmp_path):
+    """Same owner+filename+content already queued: skip as a duplicate, do
+    not move (nothing to move to) and do not re-enqueue a fresh job."""
+    from tgw.workers.pm_intake import scan_and_enqueue
+
+    inbox = tmp_path / 'inbox'
+    (inbox / 'tigwa').mkdir(parents=True)
+    queued_dir = inbox / 'queued' / 'tigwa'
+    queued_dir.mkdir(parents=True)
+    (queued_dir / 'note.md').write_text('identical content')
+
+    _mk_note(inbox / 'tigwa' / 'note.md', content='identical content')
+
+    cfg = {'plan_inbox_path': inbox, 'pm_intake_delay_hours': 4.0,
+           'postgres_dsn': 'dbname=state_machine user=tgw'}
+    mock_sm = MagicMock()
+
+    with patch('tgw.workers.pm_intake.state_machine', mock_sm):
+        result = scan_and_enqueue(cfg, bypass_delay=False)
+
+    assert result == ['tigwa/note.md']
+    mock_sm.enqueue_job.assert_not_called()
+    # queued artifact unchanged, and only one file sits in queued/tigwa/
+    assert (queued_dir / 'note.md').read_text() == 'identical content'
+    assert [p.name for p in queued_dir.iterdir()] == ['note.md']
+    # source left in place (not silently deleted) — data preservation
+    assert (inbox / 'tigwa' / 'note.md').exists()
+
+
 def test_cmd_admin_file_dry_run_does_not_touch_state_machine(tmp_path):
     from tgw.workers.pm_intake import cmd_admin_file
 

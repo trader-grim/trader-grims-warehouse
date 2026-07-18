@@ -1,11 +1,99 @@
 # PP-RUNNERCOMMS-001 — the runner-question channel (blocked-task-to-operator communication)
 
-**Status: OPEN, needs a dedicated planning session (Dave, 2026-07-14) — not
-yet decided which option wins, not yet designed, not yet built.** Split out
-2026-07-14 from PP-HERMES-EA-001's "planner/stitcher run in parallel"
-section, where it had grown into three real candidate options — Dave: "akin
-to the channel just discussed for the process communication. Seems we need
-an overall plan for that piece."
+**Status: PLANNED 2026-07-16 — option 2 ("an in-process channel") given a
+real shape: the mailbox design below.** Split out 2026-07-14 from
+PP-HERMES-EA-001's "planner/stitcher run in parallel" section, where it had
+grown into three real candidate options — Dave: "akin to the channel just
+discussed for the process communication. Seems we need an overall plan for
+that piece." Resolved 2026-07-16 when Dave, thinking about a completely
+different problem (every actor forgetting where their own inbox is), landed
+on the same mechanism this PP needed: **"Everybody has one but needs to
+remember where it is. Every worker needs a mailbox. An inbox, a way to send
+interprocess, but in an MCP or a skill right there where they can find it so
+when we use the term or suggest it it works as well as tgw-exit does."**
+
+## The mailbox design (2026-07-16)
+
+Not a new transport — **the existing per-actor `docs/TGW-Plan-Vault/
+inbox/<actor>/` convention, already live for `claude`/`tigwa`/`dave`, made
+uniformly discoverable and directly writable by any actor, not just the
+owner.** Three pieces:
+
+1. **One mailbox per addressable actor**, same location convention already
+   in use — `inbox/claude/`, `inbox/tigwa/`, `inbox/dave/`, extended to any
+   new addressable actor as one gets added (a specific `tgw-coder`/Aider
+   *task run* is NOT itself a persistent addressable actor — it reports via
+   its result manifest/branch, not a mailbox of its own; the mailbox model
+   is for standing personas/roles: Claude, Tigwa, Leotha, Dave). This is
+   the existing per-actor inbox split (2026-07-15) generalized from "where
+   Claude/Tigwa file their own notes" to "where anyone sends anyone else a
+   message."
+2. **One send mechanism, two front doors, same effect.** A `tgw mailbox
+   send <actor> "<message>"` CLI command (new `cmd_mailbox_send` in
+   `api.py`, writes a timestamped `MSG-<ts>-from-<sender>.md` into the
+   target's inbox dir) is the single implementation. Two ways to reach it
+   so it works "as well as tgw-exit does" regardless of which tool
+   ecosystem the sending actor is in:
+   - A Claude Code skill (`tgw-mailbox-send` or folded into an existing
+     skill) for Claude-Code-based actors — same discoverability pattern as
+     `/tgw-exit`.
+   - An MCP tool (`tgw_mailbox_send`, alongside the existing
+     `tgw_enqueue`/`tgw_add_suggest` write-capable tools in
+     `mcp_server.py`) for Hermes-based actors (Tigwa/Leotha) — respects the
+     existing `TGW_MCP_READONLY` gate the same way those two tools already
+     do.
+   Both are thin wrappers over the one CLI command — no logic duplicated
+   between them.
+3. **Discovery, not just delivery.** The existing `SessionStart` briefing
+   hook (`PP-AGENT-DISCIPLINE-001`) already surfaces `inbox/claude/`'s file
+   count automatically at session start — this is the "remember where it
+   is" fix already half-built for Claude specifically. Generalizing it:
+   any actor's own startup/briefing path checks their own mailbox the same
+   way, so a message sent via step 2 is guaranteed to surface next time
+   that actor starts a session or does an equivalent poll, not just sit
+   until someone remembers to check.
+
+## How this resolves the original runner-question problem
+
+A blocked `tgw-coder`/Aider runner still can't have its own mailbox
+(point 1) — but it can **send to the planner's mailbox** using the same
+mechanism (a scoped `tgw mailbox send` call, or the runner's harness
+wrapping it) instead of only filing a todo and stopping. Combined with the
+already-decided "planner and stitcher run in parallel" model
+(`pp/PP-HERMES-EA-001.md`), the planner — live, not polling on a fixed
+cadence — is the one checking their own mailbox regularly, so this turns
+the #1286-style two-message round trip into something closer to
+"whenever the planner next checks in," not "whenever someone happens to
+poll the tracker." It does not promise a hard latency SLA (still
+async/file-based, not a blocking call) — that's an explicit non-goal here,
+matches Dave's own "just a speedbump" framing of acceptable turnaround.
+
+**Option 3 (ask Tigwa to relay to Dave) rides the same rails once she has
+a real conversational channel** — no longer blocked on "no established
+channel exists," since sending to `inbox/dave/` (or Tigwa forwarding a
+runner's message there) is now literally the same mailbox mechanism, not
+a separate design.
+
+## Out of scope (this planning pass)
+
+- A synchronous/blocking channel (a runner halting mid-execution waiting
+  for a reply) — mailbox is async send/check, matching the "speedbump not
+  a stall" framing already settled for this problem.
+- Ordinary `tgw-worker@*` systemd queue workers getting mailboxes — their
+  existing report path (health checks, dead-letter, `tgw ops-digest`) is
+  the settled mechanism per PP-HR-001's scope correction ("ordinary
+  workers... responsible to their owning boss, not party to" the
+  actor-level contract/comms model). Not superseded by this design.
+- The PP-CODEGRAPH-001 Z3 invariant-confirmation convergence (below,
+  unchanged from the prior open framing) — the mailbox is a plausible
+  transport for that too, but wiring it is that PP's build session, not
+  this one.
+
+## Next step
+
+File a todo for the CLI command + skill + MCP tool + SessionStart-hook
+generalization — small, mechanical, delegatable per the planner rubric
+once written as a packet.
 
 ## The problem
 

@@ -166,6 +166,22 @@ then be boring. If item 2 isn't boring, the fix was a patch, and that failure
 belongs to the fixing, not the pipeline's temperament. It should not take 20
 items. Volume is earned, not scheduled.
 
+**Parallel-track discipline, 2026-07-16 (Dave):** R1 (this section, headline
+"get the pipeline restarted in earnest" / R1.6's web-UI end-to-end listing)
+is the concentrated focus, but that doesn't mean every other PP freezes
+while it's underway. Dave's own framing, using PP-UIUX-001's Flutter app as
+the example: "even though the implementation is lagging, the scaffolding
+exists and it works more or less... we concentrate on making the web ui
+list items and plug away at the rest." **The pattern:** background/parallel
+PPs keep making incremental progress (design passes, small unblocked
+packets, credential provisioning, scaffolding maintenance) so they're
+*ready* the moment R1 clears and attention shifts — not fully paused,
+but also not competing for the concentrated focus R1 needs right now. This
+is the operating principle behind today's planning sweep (PP-STORAGE-001/
+PP-VISION-001/PP-INVENTORY-001/PP-UIUX-001/PP-INTAKE-004 all seeded with
+real todos, none of them started) and should govern future sequencing
+calls the same way, not just today's.
+
 ### R1 — Prove the critical path (intake → live listing → sync)
 
 Goal: graduate what is already built to *operator-verified in production*.
@@ -250,9 +266,9 @@ promote it to `pp/`.
 
 ### Open — active or gated
 
-Hermes agent architecture research filed: mixture-of-expert-pairs pattern with Claude CLI + Aider + site-specific MCP server.
-
-PP-FENCE-002 — "Don't climb the fence, use the gate" proposal — see document: dev-workflow/research/PP-FENCE-002-climb-the-fence-2026-07-10.md
+## PP-FENCE-002 — "Don't climb the fence, use the gate" proposal
+Research filed, not yet a scoped todo: `dev-workflow/research/PP-FENCE-002-
+climb-the-fence-2026-07-10.md`. Promote to a real `pp/` doc on next touch.
 
 ## PP-CATIONIX-001 — CatioNIX structural kickoff ("catio, dev team, and Dave upgrade")
 **PROMOTED from FUTURE-IDEAS 2026-07-11**, by Dave's direct decision, ahead of
@@ -266,6 +282,17 @@ CLAUDE.md not here). Sequencing explicitly UNCHANGED: R1 critical path keeps
 running as before; cats (AI workers) go into the catio one at a time; the
 crypto-lock cage comes last. Full design: `pp/PP-CATIONIX-001.md`; persona
 design: `pp/PP-HERMES-EA-001.md`.
+
+**The end state, stated plainly, 2026-07-16 (Dave):** "monitoring, watching,
+fixing, then giving more responsibility. It's not babysitting, it is
+development. When we are done we will have both lightened your burden and
+mine and have a better platform." This is the explicit rationale behind
+every training-then-authority-unlock step already in this plan (Tigwa's
+supervised operation before autonomy, the crypto-lock gating, agent
+role-restriction hooks) — not oversight for its own sake, a deliberate
+capability-building arc with a named destination: less load on Dave, less
+context/startup burden on Claude, and a genuinely better platform as the
+output of the process, not a side effect.
 
 **Buildout beginning 2026-07-14 — standing requirement: build portable,
 independent of the separate/unresolved Nix question** (Dave: "our platform
@@ -348,6 +375,35 @@ todo (see below) rather than folding into #1358, which covers the worktree
 
 ## PP-HR-001 — the "HR department" for AI agents/personas — NEW 2026-07-16
 
+**Consolidation note, 2026-07-16 (Dave): "Seems like it has been boiled down
+to a dual-reviewed operational contract for each worker."** This PP,
+[[PP-HERMES-EA-001]] (Tigwa/Leotha persona contracts), and
+[[PP-AGENT-DISCIPLINE-001]] (mechanical enforcement of contract rules) are
+three angles on the same underlying object, not three separate initiatives:
+a written contract, reviewed by two parties, backed by a hook/detector
+wherever possible rather than left as prose an agent merely reads
+(PP-AGENT-DISCIPLINE-001's contribution). Read the three PPs as one story:
+PP-HR-001 is the process (how a contract gets built/reviewed/accepted),
+PP-HERMES-EA-001 is the first concrete instances of it, PP-AGENT-
+DISCIPLINE-001 is the mechanical-enforcement half. Historical detail stays
+in each section below (Prime Directive 1) — this note is the map, not a
+replacement.
+
+**Scope correction, same day (Dave): "it only applies to you and Tigwa."**
+The dual-reviewed contract is NOT a blanket "every agent/persona/worker gets
+one" model — corrects the overreach in this note's first draft. It's
+specifically the Claude↔Tigwa relationship (the two actors who actually
+cross-review each other's contracts today). **Separate, already-settled
+model for everything else, stated explicitly for the first time here:**
+ordinary workers (the `tgw-worker@*` systemd processes — `ai_identify`,
+`ebay_draft`, etc.) are responsible to their owning "boss," not party to a
+dual-reviewed contract of their own; Claude's obligation toward them is
+either to report on their behalf or to make sure they report themselves
+(health checks, `tgw ops-digest`, dead-letter visibility — the existing R2
+track machinery is what "make sure they report" cashes out to in practice,
+not a new mechanism to build). Leotha's status under either model is not yet
+stated — don't assume either way.
+
 **Design mirror, 2026-07-16 (Tigwa, reporting only — not a Claude task):**
 "Agent Contract Acceptance Suite" (ACAS) concept — no role's contract counts
 as accepted on clear prose alone; each needs a versioned test portfolio
@@ -389,14 +445,25 @@ mechanically enforceable, not just written well. Remaining components
 escalation review — see the design brief) not started.
 
 ## PP-RUNNERCOMMS-001 — the runner-question channel — NEW 2026-07-14
-**OPEN, needs a dedicated planning session — not decided.** Split out of
-PP-HERMES-EA-001 same day (Dave: "seems we need an overall plan for that
-piece") once the question of how a blocked runner gets a fast answer grew
-into three real candidate options: todos (current), an in-process channel,
-or asking Tigwa to relay to Dave. Concrete test case: todo #1286's
-permission-gated restore. Converges with PP-CODEGRAPH-001's Z3 invariant
-catalog as a plausible shared transport. Full design: `pp/PP-RUNNERCOMMS-001.md`;
-tracked by todo #1390.
+**PLANNED 2026-07-16** — option 2 ("an in-process channel") given a real
+shape: the **mailbox design**. Split out of PP-HERMES-EA-001 same day
+(Dave: "seems we need an overall plan for that piece") once the question
+of how a blocked runner gets a fast answer grew into three real candidate
+options: todos (current), an in-process channel, or asking Tigwa to relay
+to Dave. Resolved 2026-07-16 when Dave, thinking about a different problem
+(every actor forgetting where their own inbox is), landed on the same
+mechanism: "every worker needs a mailbox... in an MCP or a skill right
+there... so it works as well as tgw-exit does." Design: the existing
+per-actor `inbox/<actor>/` convention (already live for claude/tigwa/dave)
+made uniformly sendable-to via one CLI command (`tgw mailbox send`) exposed
+through both a Claude Code skill and an MCP tool, plus generalizing the
+`SessionStart` briefing hook's existing "surface my own inbox count"
+pattern to any actor. A blocked runner sends to the planner's mailbox
+instead of only filing a todo; the "planner/stitcher run in parallel"
+model means the planner is live to see it, not polling on a fixed cadence.
+Concrete test case: todo #1286's permission-gated restore. Converges with
+PP-CODEGRAPH-001's Z3 invariant catalog as a plausible shared transport.
+Full design: `pp/PP-RUNNERCOMMS-001.md`; tracked by todo #1390.
 
 ## PP-AIOPS-001 — structured AI/operational resilience platform ("cat herding and litterbox cleaning")
 **Given its own heading 2026-07-11** — previously only a bare Frozen-list
@@ -445,6 +512,10 @@ is wired to the wrong door (CLI path only, not the real HTTP fence). Full design
 itemization of what intersects PP-PHOTOSYNC-001 (P4's ramp, P8's daily canary — both
 would multiply this same cost if built before this lands): `pp/PP-CATALOG-INCR-001.md`.
 No todos filed yet — proposal stage.
+
+**Sequencing vs. [[PP-POSTGRES-001]] resolved 2026-07-16** — this PP's
+JSON-stays-truth premise is correct for the current phase (logic fixes + UI
+first); see PP-POSTGRES-001's section for Dave's full sequencing call.
 
 ## PP-PHOTOSYNC-001 — upload integrity + operator lane hardening + fleet photo repair
 **Opened s43 (2026-07-03) — THE ACTIVE FIX TRACK.** Born from the 3-day EPS quota
@@ -959,12 +1030,79 @@ Graph/Graphify row was added this session without updating the count.**
 umbrella (Concept 2).** Leotha (PP-HERMES-EA-001) curates/organizes the data
 long-term; this plan is the architecture only.
 
+**The vision statement, Dave 2026-07-16, tying pm_intake + this hub together:**
+"A library with a librarian that can tell you where everything is, cross-
+referenced, in your language, with footnotes. Hopefully." Aspirational, not
+yet built — but it's the one sentence that unifies what's otherwise scattered
+across several PPs: pm_intake's filing/organizing behavior (restored under
+Tigwa's persona, PP-HERMES-EA-001) is the librarian's *intake* half; this
+hub's Storage/Search/Graph layers (git-annex, Recoll, Graphify) are the
+*stacks* she works from; "in your language" is the MCP/query-front-door
+layer answering in natural language, not raw grep; "with footnotes" is
+citation/provenance back to the source document, not just a location pointer
+— an explicit bar the eventual query surface should be held to, not assumed
+free. Nothing here is scoped or built yet; recorded so the destination stays
+visible while the git-annex/Recoll starting point (below) gets built first.
+
+**Filing authority + the plan's own end-state, reinforced 2026-07-16
+(Dave):** "all of the filing locations and tasks are the librarian's
+responsibility. Just tell what goes where." **Clarified same day:** once
+trained, the librarian creates new locations too, not just chooses among
+existing ones — other actors' job shrinks to either (a) defining a new
+document *type* when one doesn't fit an existing category, or (b) simply
+handing raw material to her to route herself. This is explicitly the
+pm_intake pattern restored under Tigwa's persona, not a new invention — see
+CLAUDE.md's "Tigwa's own persona is pm_intake's replacement direction."
+Going forward, Claude's (and any other actor's) job when producing a
+document is to classify/tag it or just send it to her — never to
+unilaterally invent or own a folder/taxonomy. That authority belongs to the
+librarian role (Tigwa/Leotha, [[PP-ANNEX-001]]'s "archivist" framing), a
+standing priority Dave gave Tigwa directly 2026-07-15. Concrete instance
+from this same session: the `reports/` directory + its filing README (below)
+were created unilaterally during the plan-reconciliation pass — correct as
+an interim stopgap (nothing lost, Prime Directive 1), but its
+structure/rules are provisional pending the librarian's own reconciliation,
+not a Claude-owned convention going forward.
+**Real gap this surfaces, not yet in any contract:** the dual-reviewed
+operational-contract cluster ([[PP-HR-001]]) covers identity, review,
+tool/access boundaries, and mechanical enforcement — it does not yet contain
+an explicit clause assigning filing/taxonomy authority to the librarian and
+requiring other actors to classify-and-hand-off rather than decide
+structure themselves. Worth adding as a term the next time Tigwa's or any
+worker's contract is touched.
+
+**Extended to search/recovery, 2026-07-17 (Dave):** the librarian's
+authority isn't just *where new things go* — it's also *finding things
+that went missing*. After a Claude-run "recover lost PPs" sweep this
+session (found PP-ROUTER-001 orphaned, corrected a false claim about
+PP-DOCLIB-001), Dave: "the librarian can handle all that. She has been
+working nights when it is cooler on that." **Correction, same session
+(Dave):** "I did define the responsibility and tell her the weather" —
+not her own initiative; Dave assigned it directly and briefed her on the
+thermal picture that shapes her schedule. Two things this settles: (1)
+search/reinstate requests route to Tigwa, not Claude, going forward — see
+[[feedback-pp-recovery-is-pull-based]]; (2) she's executing an explicit,
+Dave-assigned responsibility on a Dave-briefed schedule, not something she
+discovered or decided to take on herself.
+
+**The plan's own ultimate destination (Dave):** `TGW-Master-Plan.md` itself
+is meant to migrate into this knowledgebase architecture long-term — lighter
+to consume, less of a startup-context burden. Not started, no timeline;
+`tgw-plan-maintain` (the hygiene skill built 2026-07-16) is the interim
+discipline until this hub can absorb the plan's own overflow instead.
+
 **Absorbed 2026-07-11 (Dave):** PP-DOCLIB-001 and PP-HISTORY-001 fold in
 here — "it's recoll+mcp on the knowledgebase." Both were existing facilities
 (document cross-referencing, `tgw history-index`) that sit ON TOP of this
 hub's Search (Recoll) and MCP (agent front door) layers, not separate PPs.
-No standalone design docs existed for either — folded as todos, not
-promoted to their own `pp/` files.
+
+**Correction, 2026-07-17:** the line above ("no standalone design docs
+existed") was wrong — `docs/ai-plans/pp-doclib-001.md` (todo #1044) is a
+real, substantive design (4-bucket taxonomy, a `tgw docs` CLI wrapper,
+`[[wikilink]]` cross-referencing) found during a "recover lost PPs" sweep.
+**Confirmed by Dave, no action needed:** "it was a proposal, we went
+another quicker route for now" (recoll, this section) — the doc stays as
+historical record, not merged back in.
 
 | Layer | Tool | Answers | Status |
 |---|---|---|---|
@@ -1260,110 +1398,38 @@ change-event log; Postgres holds current queryable truth. The JetStream
 piece is wired to the wrong door today (only `items.py`'s narrow CLI write
 path, not `http_server.py`'s real fence) — recommended as the first,
 small, independent packet regardless of the larger migration timeline.
-Needs reconciliation with [[PP-CATALOG-INCR-001]] (opened 2026-07-03,
-explicitly assumes JSON stays truth — premise conflict, not yet resolved).
 Reuses the already-running `state_machine` Postgres instance (todo #1351).
 Full design + open questions (migration path, same-vs-sibling DB, field
 normalization, JSON export cadence, rollback safety): `pp/PP-POSTGRES-001.md`.
 
+**Sequencing decided, 2026-07-16 (Dave): "I believe postgresql is the right
+call but this is not the right time yet."** Resolves the premise conflict
+with [[PP-CATALOG-INCR-001]] (which assumes JSON stays truth) — that PP is
+correct for the CURRENT phase, not a competing design needing reconciliation.
+Order: finish the pipeline logic fixes (R1), build the UI out, and only take
+on the backend inversion later — "unless it becomes too painful" to keep
+deferring. JSON stays the live source of truth until that trigger; this PP
+stays PROPOSAL/design-only until then, not started.
+
 ## PP-RUNBOOK-001 — operational runbook hardening (thermal + eBay-ops) — NEW 2026-07-13
-**Triggered by the 2026-07-13 tgw-prod NVMe thermal incident** and Tigwa's
-two follow-up inbox reports (`TIGWA-EMERGENCY-tgw-prod-thermal-mitigation-20260713.md`,
-`TIGWA-REPORT-runbook-gaps-20260713.md`) — used by Dave as a live training
-exercise for Tigwa (told her to stop, re-read the plan and runbooks). Not
-started; this section exists to capture the full operational context before
-it's lost, per Prime Directive 5.
+**Triggered by the 2026-07-13 tgw-prod NVMe thermal incident**, used by Dave
+as a live training exercise for Tigwa. Full incident timeline, gap list (17
+items), and Tigwa's build-order proposal: `reports/TIGWA-REPORT-runbook-gaps-
+20260713.md` — **no action necessary on the incident itself** (Dave's
+protective-shutdown call was reasonable; the fix that mattered came out of it,
+below). Read that report directly rather than re-deriving the narrative here.
 
-**Incident timeline, reconciled from the journal (`journalctl`,
-`journalctl --list-boots`) same session:**
-1. 16:09 NVMe hit 75°C (WARM) → 16:10 84°C (THROTTLE, watchdog killed disk
-   hogs + stopped workers + took an emergency Btrfs snapshot) → 16:12 87°C
-   (CRITICAL) → the on-host 88°C-class watchdog SIGKILLed an in-flight
-   `pytest` full-suite run and the box did a clean power-off. Root cause of
-   the empty/stale `todo/1370-llm-google-direct-test-isolation` worktree
-   found this session (branch existed, zero commits) — the prior session's
-   acceptance run got killed mid-flight, not a framework bug.
-2. Boot at 16:15, only ~45s uptime, ended in an SSH-triggered `sudo poweroff`
-   (session opened for root by `db`, immediately preceding "system will
-   power off now") from 192.168.60.101 (a1131).
-3. Boot at 16:18, ran 9 min — `catalog_rebuild`/`ebay_sync`/`ebay_legacy_sync`
-   all came up unattended (they are `systemctl enabled`, confirmed still
-   true this session) and `ebay_legacy_sync` ran a real live
-   `GetMyeBaySelling` pull (19,604 listings) — ended in a second SSH-triggered
-   poweroff, same pattern.
-4. **Dave's own account of event 3, more nuanced than Tigwa's self-report:**
-   he was trying to boot the machine back up; she was independently trying
-   to shut it down, reading real thermal-destruction risk — "seems like a
-   reasonable response," not a violation, even though it produced a
-   confusing tug-of-war. Once he noticed the conflict he told her to stop
-   and re-read the plan/runbooks. See
-   [[feedback-tigwa-protective-override-2026-07-13]] (session memory) — the
-   real gap is a fast operator-in-the-loop escalation channel for a
-   protective override, not a harder lockdown of her authority.
-5. Boot since 16:31 (current) — same three workers resurrected again
-   (`systemctl enabled` survives every reboot). Stopped live this session
-   (Dave's explicit go-ahead, `AskUserQuestion` confirmed "stop and
-   disable"); **`disable` failed — `/etc/systemd/system` is read-only on
-   this box.** This is the concrete mechanism behind todo #1322's
-   still-open "durable stop" gap: enable/disable state is flake-controlled,
-   not runtime-settable, so a real fix is a flake edit + rebuild, not a
-   systemctl command. Confirms the risk was real, not hypothetical.
+**What actually shipped from it:** `reference/runbooks/thermal-emergency-
+response.md` (formal Tigwa-lite monitor policy, thermal half DONE 2026-07-14,
+ties into PP-HERMES-EA-001's leg-3 authority decision) and confirmation that
+`systemctl disable` doesn't survive on this box — `/etc/systemd/system` is
+read-only, so a durable worker-stop is a flake edit + rebuild, not a runtime
+command (feeds todo #1322).
 
-**Tigwa's mitigation already in place, reviewed and not objected to:**
-temporary read-only SSH-reachability + NVMe-temperature watchdog on a1131
-(`temporary-tgw-prod-independent-watch`, 1 min / 5 min cadence depending on
-temp, alerts via Telegram, does not touch power), plus a documented
-cool-boot-immediate-Btrfs-snapshot recovery window (snapshot
-`20260713T1632`, 27s, verified local+received read-only subvolumes).
-
-**Full gap list from `TIGWA-REPORT-runbook-gaps-20260713.md` (17 items,
-not restated in full here — read that file directly, it stays in
-`inbox/` until triaged):** no canonical thermal incident/drill runbook;
-same-host monitoring is a failure domain (needs external detection + a
-proven external→Dave→full-Tigwa handoff); intervention authority
-(monitor vs. mitigate vs. shut down) needs to be explicit in the runbook,
-not inferred mid-incident; the cool-boot snapshot window needs documenting
-as a procedure with a temperature gate; a least-destructive workload
-mitigation ladder is missing (alert → identify I/O producer → stop new
-work → ask before pausing/killing an active job → preserve output →
-observe → let the 88°C service be the final backstop); the physical-ops
-section of `TGW-Quickstart.md` §9 is still a stub; runbooks have no
-owner/last-verified/applicability/last-drill metadata; several restore
-docs have stale command syntax and ambiguous snapshot-target naming
-(`TGW-SNAPSHOT-0` vs `TGW-VAULT`); old MX/pre-NixOS restore material isn't
-labeled as historical; a remote-backup path references the `dbukove`
-rclone remote which conflicts with Tigwa's current never-touch boundary;
-USB restore path is undrilled and `tgw-usb-stamp.service` failed on a
-reviewed boot; `PP-RECOVERY-001`'s false code-loss conclusion is cited as
-a cautionary example of weak evidence-searching. **eBay-ops study area
-(Dave's explicit next-assignment for Tigwa, partially done — she reviewed
-the eBay API already):** sold-order source-of-truth + picklist recovery
-runbook, an eBay API responsibility map (Trading completed-orders vs.
-Inventory items/offers/listings vs. OAuth/webhooks/rate-limits vs.
-legacy-vs-platform-native), a token/scope incident procedure, and
-acceptance criteria that check against Seller Hub counts, not just HTTP
-200s.
-
-**Recommended review/build order (Tigwa's own proposal, unmodified):**
-(1) thermal/drill + external-alert runbook, (2) eBay sold-order/picklist
-runbook + API responsibility map, (3) current-OS restore/snapshot index
-with explicit media names, (4) Quickstart command validation against live
-CLI, (5) physical station procedures, (6) owner/date/applicability/drill
-metadata pass across all active runbooks.
-
-**Additional Tigwa training queued this session (Dave's question, session
-context):** `TGW-NixOS-Reference.md` (explains the immutable-`/etc`
-surprise from item 5 above), `LLM-Providers-Quotas.md` + a skim of
-`src/tgw/quota.py` (her poweroff interrupted a real metered `GetMyeBaySelling`
-call mid-pagination — ties to the #1250 resubmission-storm lesson already
-standing in this codebase).
-
-**Status:** thermal half DONE 2026-07-14 — `reference/runbooks/thermal-emergency-response.md`
-written (formal Tigwa-lite monitor policy, ties into PP-HERMES-EA-001's
-leg-3 authority decision). eBay-ops runbook half and the remaining 17-item
-gap-report triage still not started. Needs a todo filed with
-`--pp PP-RUNBOOK-001` before any further runbook file gets touched
-(going-forward tagging rule).
+**Status:** thermal runbook DONE. eBay-ops runbook (sold-order/picklist
+recovery, API responsibility map) and the rest of the 17-item gap triage not
+started. Needs a todo filed with `--pp PP-RUNBOOK-001` before any further
+runbook file gets touched (going-forward tagging rule).
 
 ## PP-CODEGRAPH-001 — code graph + invariant/trace infrastructure (agents see design convergences) — FOLDED INTO PP-KNOWLEDGE-001, 2026-07-14
 
@@ -1519,6 +1585,12 @@ thaws or Dave wants a targeted exception.
 Sync infra live. Phase A (GDrive→Gemini multimodal draft) #1064; Phase B
 (zero-bandwidth EPS upload) #1065. FROZEN until R1 drains.
 
+**Phase B reassigned to Tigwa, 2026-07-16 (Dave):** "gdrive zero-bandwidth
+send to tigwa, that's on top of gdrive archive layer/git-annex." Sits on
+top of PP-ANNEX-001/PP-KNOWLEDGE-001's storage-layer work, her territory
+now — not a Claude build item going forward. Phase A (#1064) unaffected,
+stays as-is.
+
 ## PP-CLIP-001 — clipboard manager (local-only, ratified 2026-07-11)
 Phase 1 done; crash loop fixed s41. Phase 2 rofi picker DONE
 (DONE-1055-clip-picker.md). **#1086 conceptual pass's split RATIFIED
@@ -1571,6 +1643,24 @@ harden the existing manual model; Phase B: build the backchannel, depends
 on PP-EVENTD-001; Phase C: conflict resolution, needs its own design pass):
 `pp/PP-PORTABLE-CATALOG-001.md`.
 
+**Correction, 2026-07-17 (Dave) — the real problem is more basic than any
+of the above:** "forget all the detection and crap. These two known
+devices are sitting right next to each other and I have never even seen
+it fire up a single time." Two known devices, same LAN, zero network
+complexity — and the app has never successfully launched/connected for
+Dave even once. This is not a connectivity-detection edge case or a
+conflict-resolution gap (the Phase A/B/C plan above) — it's a "does the
+thing even start" problem underneath all of it, and it takes priority
+over the phased remediation plan, not a peer item on the same list.
+**Also revealed:** Dave already had Tigwa build a wrapper "to get to tgw
+without futzing around" — meaning there's an existing, currently
+undocumented workaround already in use in place of the Flutter app for
+reaching `tgw`. Not yet located in the plan vault; needs finding (ask
+Tigwa or Dave directly) and documenting before more Flutter work is
+speced, since it may already solve part of what Flutter was meant to do.
+**Next session should start here** — verify the basic launch/connect path
+on a1131 (or wherever the app runs) before touching Phase A/B/C at all.
+
 ## PP-CATPICK-001 — smart category picker
 **Phase 1 DONE 2026-07-04** (#1079): `category_candidates` (id/name/full ancestor
 path) backfilled onto all 25 `category-groups.json` groups from the on-disk eBay
@@ -1612,6 +1702,16 @@ rollup mention (Tier 1). Open: #7, IGDB credentials (Twitch dev account →
 register app → save client_id/client_secret) for game/media identification
 lookups. See `reference/PP-LOOKUP-001-APIs.md`.
 
+**#7 reassigned to Tigwa, 2026-07-16 (Dave):** her job is to bug Dave until
+he finishes the Twitch dev-account registration — the credential
+provisioning is his action, not buildable by an agent. **Open question,
+flagged not assumed:** Dave referred to "2 credentials issues" this
+session; only one (#7/IGDB) is currently tracked under this PP. Checked
+`secrets_root` live — Keepa and upcitemdb/go-upc credentials (also named
+in `reference/PP-LOOKUP-001-APIs.md`) are unset too, but neither has a
+filed todo. Worth confirming with Dave whether one of those is the second
+item he meant, rather than assuming.
+
 ## PP-MULTIMODEL-001 — LLM provider/model routing
 **Given its own heading 2026-07-11** — previously only a bare "Done"
 rollup mention despite still having open work. Open: #1251, provisional
@@ -1631,46 +1731,144 @@ visibility. Open: #15, second keyboard wired up as a macroboard (see
 `etc/interfaces/keyd/tgw-macroboard.conf`) — an operator-interface
 hardware addition, not gated on anything beyond the freeze itself.
 
+**#15 reassigned to Tigwa, 2026-07-16 (Dave):** she works with Dave
+directly to specify the `keyd` config — a hands-on hardware/config
+collaboration, not a solo Claude build task.
+
+## PP-ROUTER-001 — D-Link DIR-868L router into the TGW ecosystem
+**RECOVERED 2026-07-16/17** — real research existed at `docs/ai-plans/
+router-dlink-dir868l-ecosystem.md` (filed 2026-07-06) but had never been
+given a PP number or a master-plan mention, found during a "recover lost
+PPs" sweep Dave requested. **DD-WRT confirmed the correct firmware**
+(OpenWrt doesn't support this Broadcom chipset) — known flash path
+documented, one known post-flash 5GHz quirk with a documented fix. Six
+candidate capabilities once flashed, not prioritized: complete the DHCP
+reservation audit, VLAN-isolate intake/camera devices, fold router health
+into `tgw health`/ops-digest, authoritative local DNS, WireGuard, DR
+backup of router config (todo #1491). **Live finding surfaced by the
+recovery, not just historical:** the DHCP table has two different MACs
+both claiming `192.168.60.112` under the name "hpi3" — real unresolved IP
+conflict, todo #1490.
+
+**Status, 2026-07-17 (Dave): still just a proposal, no flash decision
+made.** **Decision scope, narrowed same day (Dave):** the actual binary
+choice is only "leave it D-Link-proprietary, or take advantage of the
+diminutive but overpowered box" — i.e. flash or don't. It is NOT a
+commitment to build all 6 candidate capabilities at once. Once flashed, a
+package manager (Dave: "optware or whatever" — Entware is Optware's
+actively-maintained successor and the one to actually evaluate) lets
+services get added **one at a time**, same incremental-progress discipline
+as the rest of the plan (see "parallel-track discipline" near the R1
+table) — each candidate capability becomes its own small packet whenever
+it's next in line, not a single big router-rebuild project gating on all
+6 landing together. Nothing in this PP is actionable ahead of the
+flash-or-don't decision itself; the IP-conflict fix and the NATS/
+alarm-system leg below both wait on it too, not on each other.
+
+**Possible NATS JetStream-for-alarm-system leg, 2026-07-17 (Dave):**
+"unrelated to our other use" (i.e. distinct from PP-AIOPS-001's JetStream
+audit-stream design) — Tigwa has already done some research into running
+NATS JetStream on this router as part of an alarm-system design. My
+router findings sent to her (`inbox/tigwa/CLAUDE-NOTE-2026-07-17-router-
+findings-for-nats-alarm-research.md`) for reconciliation with whatever
+she already has — 256MB total RAM on this hardware is the concrete
+constraint her research should be checked against. Not yet merged into
+one design.
+
 ## PP-INVENTORY-001 — physical inventory verification — NEW 2026-07-11
 **Dave: "11 is an entire missing PP — the tools to accomplish the job,
 both the standard manual tool as well as the already supposedly in the
 plan AI vision inventory helper."** Confirmed: no design doc existed for
 either leg — `PP-VISION-001` was only ever a bare "(GPU-gated)" mention,
-no substance. Two complementary tools: (1) manual sweep, absorbs #11
-(`tgw ebay-sweep → physical inventory review`); (2) AI-vision-assisted
-verification, consumes PP-VISION-001's capability. Distinct from
-PP-STORAGE-001 (storage *organization*, size-class not category) and
-PP-DATAINTEGRITY-001 (data *record* integrity) — this is specifically
-physical-stock-vs-record reconciliation. Not started, needs its own
-scoping pass before either leg is buildable. Full design:
-`pp/PP-INVENTORY-001.md`.
+no substance.
 
-## PP-STORAGE-001 — semi-chaotic storage (size-class, not category)
-**Added to index 2026-07-12** (Fable independent review #1338 found it
-relied on by PP-INVENTORY-001 and referenced above as a settled sibling,
-but absent from this index entirely — recurrence of the s42 27-PP-dropped
-failure mode). Items stored by size class, not category;
-`size_class` lives in `category-groups.json`. No fresh design pass done
-this session — pointer only; promote to a real heading + `pp/` doc on
-next touch.
+**PLANNED 2026-07-16** — real workflow design now at
+`pp/PP-INVENTORY-001.md`. Dave's own concrete framing, clarifying this
+isn't just "PP-VISION-001 applied": "Vision worker finds items in photos
+of items in box taken by inventory worker and starts checking off boxes
+on the location inventory. Operator completes the rest to cleanup, looks
+for missing or marks missing etc." Two legs, sequenced: (1) the manual
+leg, absorbing `#11` (`tgw ebay-sweep → physical inventory review`),
+buildable now with no PP-VISION-001 dependency; (2) the vision-assisted
+leg (auto-check-off against a location's expected-contents manifest),
+gated on PP-VISION-001's Phase 2 full-catalog embedding index. Distinct
+from PP-STORAGE-001 (storage *organization*, size-class not category) and
+PP-DATAINTEGRITY-001 (data *record* integrity) — this is specifically
+physical-stock-vs-record reconciliation. Manifest/checklist UI question
+explicitly deferred to `pp/PP-UIUX-001.md` rather than picked
+unilaterally.
+
+## PP-UIUX-001 — UI/UX unification: full inventory, mapping, and spec
+**OPENED 2026-07-16.** Absorbs the previously-orphaned "Web UI vs Flutter"
+discussion (see its removed heading above, under "Open discussion items")
+plus Dave's broader direction: "plan is to fully define then have entire
+set including web ui and flutter to the spec by ui/ux specialist coder."
+Sequence: (1) inventory every operator-facing UI surface (web UI pages,
+Flutter's actual screens), (2) map each to the backend it calls
+(`/api/*` endpoints, `tgw` CLI) to find where they've diverged — the
+2026-07-06 investigation already found one concrete gap this way
+(`reference/TGW-HTTP-API.md` stale relative to `PP-ACTIONCONSOLE-001`/
+`PP-LISTEDITOR-001`'s newer surface), (3) write one complete spec covering
+both surfaces, (4) hand to a new UI/UX-specialist executor role (analogous
+to `tgw-coder`, not yet defined) to implement. Hard constraint carried
+forward unchanged: Flutter must reuse the same web backend functions, never
+duplicate logic. PP-INVENTORY-001's manifest/checklist UI is a concrete
+waiting consumer. Full design + all prior Flutter-vs-web context preserved:
+`pp/PP-UIUX-001.md`.
+
+## PP-STORAGE-001 — semi-chaotic storage: size_class as a size/weight signal
+**PLANNED 2026-07-16 (todo #1478's first resolution)** — real design doc
+now at `pp/PP-STORAGE-001.md`. Dave's own framing of the value: "this is a
+great way to determine a size weight range. Especially size." `size_class`
+(`/opt/TGW/config/category-groups.json`, 25 groups tagged
+`flat`/`packet`/`small_box`) already exists for free; the design proposes
+a new `size_class_ranges` config mapping each class to a weight/dimension
+envelope, used both as a shipping-weight estimation fallback (marked
+`weight_oz_source: "estimated"`, never silently presented as a real
+measurement — same class of concern as invariant C14) and as a physical
+findability cue alongside `cmd_locate`'s existing image-similarity search.
+**Open item: the actual numeric ranges are Dave's to supply** (from his
+own handling knowledge or a quick sample-measurement pass) — that's the
+blocker on filing the first real implementation todo, not any remaining
+design work.
 
 ## PP-WHISPER-001 — voice transcription → suggestion pipeline
-**Added to index 2026-07-12** (Fable independent review #1338 — `pp/PP-INTAKE-004.md`
-cites this as an existing proven pipeline, but it had zero entry anywhere
-in this plan). Real facility, verified live: `cmd_whisper_to_suggest`
-(`src/tgw/api.py`) + `tgw history-index` CLI. No design doc or todo history
-captured here yet — pointer only; promote to a real heading + `pp/` doc on
-next touch, feeds PP-INTAKE-004's justshoutit voice-operated listing.
+**Reassigned to Tigwa, 2026-07-16 (Dave):** "assign to tigwa we are
+already working on voice input for interface and justshoutit she already
+found a free external provider at groq and we use that on telegram." Not
+a Claude planning task — Tigwa already has live, in-progress work here
+(Groq as the external transcription provider, already wired into the
+Telegram interface) that supersedes planning this from scratch. Existing
+facility (`cmd_whisper_to_suggest`, `src/tgw/api.py`; `tgw history-index`
+CLI) stays on record as prior art feeding PP-INTAKE-004's justshoutit, but
+ownership and next steps are hers going forward — no Claude todo filed.
 
 ## PP-VISION-001 — vision-matching capability (GPU-gated)
-**Given its own heading 2026-07-11** — was a bare Frozen-list mention with
-zero design substance. FROZEN, GPU-gated, unchanged. The underlying
-vision-matching capability consumed by PP-INVENTORY-001's automated leg;
-originally conceived for findability ("locate this specific known item"
-in PP-STORAGE-001's semi-chaotic size-class storage) — PP-INVENTORY-001's
-verification use case ("does physical stock match records") is a related
-but distinct application of the same capability. No design doc exists yet
-for the capability itself, only its use cases.
+**PLANNED 2026-07-16** — real design doc now at `pp/PP-VISION-001.md`.
+Dave, on priority: "oh yeah. I want this badly. should have already been
+planned." Verified live: a real precursor already exists
+(`src/tgw/fingerprint.py` — perceptual dhash + color-histogram matching,
+its own docstring calling itself "a workflow proof, not a final CLIP
+matcher," CLI-only, no worker wiring) and the fleet is 100% CPU-only today
+(`reference/HARDWARE-AI-INFERENCE.md`) — no GPU exists, which is the real
+reason this sat frozen, not a design gap. The design is phased so it
+doesn't wait on the GPU purchase: **Phase 1 is a CPU-only feasibility
+pilot** (embed ~200-500 sample photos, measure real throughput + match
+quality against the current perceptual-hash baseline) — this generates
+the actual evidence to weigh the GPU purchase against, rather than another
+indefinite "someday." Phases 2-3 (full-catalog batch index once GPU
+acquired, wire into PP-INVENTORY-001's verification leg + PP-STORAGE-001's
+findability flow) are spec'd but gated on Phase 1's result + hardware.
+**Next step: file the Phase 1 todo** once a concrete embedding-model
+variant is picked at kickoff (design doc names CLIP-family candidates,
+not yet pinned — feedback-llm-model-selection requires a real pin before
+dispatch).
+
+**Todo #1478 — resolved 2026-07-16.** All three former stubs now have a
+real disposition: PP-STORAGE-001 and PP-VISION-001 planned (above,
+implementation todos pending Dave's ranges / a model pin respectively);
+PP-WHISPER-001 reassigned to Tigwa's existing live work. No PP left as a
+silent pointer-only stub.
 
 ## PP-REPRICER-001 — market-data repricer (the tool)
 **Rescoped 2026-07-11 (Dave): this PP is the mechanical tool, not pricing
@@ -1688,6 +1886,10 @@ until PP-MARKETING-001 delivers trustworthy data for the tool to act on.
 Umbrella for positioning/pricing-strategy work, previously miscategorized as
 part of the repricer tool. PP-PRICING-001 is its first tenant — likely not
 its last (comps, listing-copy strategy, promotions could land here too).
+
+**SerpApi key (#1110), 2026-07-16 (Dave): "maybe, let's get the pipeline
+restarted in earnest first."** Deferred, not urgent — priority is the
+pipeline restart, not a paid-key provisioning decision right now.
 
 ### PP-PRICING-001 — Google Shopping comps via SerpApi (paid)
 Two candidate data sources for comps, not mutually exclusive:
@@ -1769,10 +1971,24 @@ Code done. BLOCKED: webhook infra (#16) gated on ISS-005 signature verification
 Phases 1–3 done. Phase 4 `tgw ebay re-push` + plan documentation #896. Overlaps with
 eBayCapture — reassess scope at next touch. Design: `pp/PP-EBAY-SNAPSHOT-001.md`.
 
+**#1077 (eBay Dev Support ticket, undeletable item) — status only, 2026-07-16
+(Dave): still waiting.** Bad-sign development: the support rep who hung up
+on Dave mid-call (yelling that the ticket was hurting his numbers) has
+since been promoted into eBay's business-division decision leadership. No
+action available on TGW's side — external, waiting on eBay.
+
 Snapshot baseline completed (19,486 SKUs) — unblocks #1131 Motors census; drift detection baseline set.
 ## PP-RECOVERY-001 — web UI regression audit
-Findings doc'd (#1039, admin). Reassess against s40–42 UI rebuild — much may be
-obsolete. Design: `pp/PP-RECOVERY-001.md`.
+**CLOSED 2026-07-16 — confirmed obsolete, already resolved via later work.**
+Dave asked to check whether this had already been triaged over rather than
+just sitting stale; it had. Verified: the `task/aider-20260616145314`
+branch this audit was gating a merge on no longer exists (long since
+merged), and both todo batches it tracked (WEBUI-AUDIT #998-1038, pre-800
+historical #897-997) are 100% done — zero open items across the whole
+range. The entire audit predates the s40-42 UI rebuild and
+PP-EDITOR-001/PP-ACTIONCONSOLE-001/PP-LISTEDITOR-001, which superseded it.
+No remaining action. Original findings preserved at `pp/PP-RECOVERY-001.md`
+(Prime Directive 1 — not deleted, marked closed).
 
 ## PP-INTAKE-004 — camera app, "our core data acquisition tool" — scope expanded 2026-07-11
 **PROMOTED from `docs/ai-plans/tgw-intake-app.md`.** Unified native Kotlin
@@ -1881,37 +2097,35 @@ PP-SEO-001 · PP-STAGE-001 · PP-SYNC-001 · PP-FREESHIP-001 · PP-STRIKE-001.
 PP-PRICE-002 (absorbed into PP-REPRICE-001) · PP-PLASMA-001 (delivered via CatioNIX
 desktop split, a1131 Plasma).
 
-DONE-1053: data-scrub legacy eBay Trading API fields — 20,419 items modified, zero exceptions (see filed document)
+**Misc. completed todos, folded from stray loose lines 2026-07-16 (no content
+lost, each already had a doc filed under `dev-workflow/research/DONE-*` or
+noted above):**
 
-- PP-PRICING-001 (self-powered comp engine extension) design doc complete. PP-AMAZON-001 (Amazon FBM exploration) design doc complete. Research doc filed.
+- #1053 data-scrub legacy eBay Trading API fields — 20,419 items modified, zero exceptions
+- PP-PRICING-001 (self-powered comp engine extension) + PP-AMAZON-001 (Amazon FBM exploration) — design docs complete
+- #1113 ebay_dole interim fix — dead code removed, test added
+- #1138 `tgw revise --set` help text corrected (bare field names only, no nested expansion)
+- #1338 Fable independent review of the 2026-07-11 retarget — 13 confirmed findings, 12 applied same session (1 live incident: reboot-resurrected workers incl. `pm_intake`, re-stopped)
+- #1323 master plan retarget — catio development framework
+- #1320/#1319 title-length guard + enforcement
+- #1318 restore save-draft button
+- #1258 backup alarm (db dump stale, rclone never completed)
+- #1257 stale `ai_reidentify` flags cleared
+- #1256 per-item Best Offer control
+- #1255 Motors category tree cache built
+- #1254 sync `marketplaceId` hardcoding fixed
+- #1252 condition scrub + secrets facility
+- #1249 dead-letter diagnosis (flagged #1265 bulk requeue needing Dave's go)
+- #1240 broken tests fixed (`ebay_price.py`)
+- #1239/#1210/#1211/#1238 code-review follow-ups (atomic-write fixes)
+- #1236 `ebay_backfill_offers` fence-bypass fixed
+- #1214 `ebay_motors_census` stale-data/ambiguity fix
+- #1213 `ITEMDATA_ROOT` hardcoded path fixed
+- #1211 photo-repair unlink safety fixed
+- #1210 photosync-canary price diff fixed
+- #1209 order-dependency bug fixed
+- #1135 category recompile — 5,367 categories recovered
 
-* #1113 ebay_dole interim fix — dead code removed, test added (2026-07-10)
-
-- todo #1138: revised help text for `tgw revise --set` to clarify dotted-path claim (bare field names only, no nested expansion). Live evidence: 2046 passed, ruff clean.
-
-#1338 Fable independent review of 2026-07-11 master-plan retarget — 13 confirmed findings (1 live incident: reboot-resurrected workers incl. pm_intake, re-stopped; 12 doc/plan corrections applied same session) — see document: dev-workflow/research/DONE-1338-plan-retarget-followup-triage.md
-#1323 master plan retarget — catio development framework — see document: dev-workflow/research/DONE-1323-master-plan-catio-retarget.md
-#1320 title-length guard — see document: dev-workflow/research/DONE-title-length-guard-2026-07-10.md
-#1319 title-length enforcement fixed — see document: dev-workflow/research/DONE-1319-title-length-enforcement.md
-#1318 restore save-draft button fixed — see document: dev-workflow/research/DONE-1318-restore-save-draft-button.md
-#1258 backup alarm (db dump stale, rclone never completed) — see document: dev-workflow/research/DONE-1258-backup-alarm.md
-#1257 stale ai_reidentify flags cleared — see document: dev-workflow/research/DONE-1257-clear-stale-ai-reidentify-flags.md
-#1256 per-item Best Offer control — see document: dev-workflow/research/DONE-1256-best-offer-control.md
-#1255 Motors category tree cache built — see document: dev-workflow/research/DONE-1255-motors-category-tree-cache.md
-#1254 sync marketplaceId hardcoding fixed — see document: dev-workflow/research/DONE-1254-sync-marketplace-id-hardcoding.md
-#1252 condition scrub + secrets facility — see document: dev-workflow/research/DONE-1252-condition-scrub-and-secrets-facility.md
-#1249 diagnose dead letters — see document: dev-workflow/research/DONE-1249-diagnose-dead-letters.md (flagged: #1265 bulk requeue needs Dave's go)
-#1240 fix broken tests (ebay_price.py) — see document: dev-workflow/research/DONE-1240-fix-broken-tests.md
-#1239 code-review follow-ups (atomic write fixes) — see document: dev-workflow/research/DONE-1239-review-followups.md
-#1238 get_access_token refresh + sandbox bugs fixed — see document: dev-workflow/research/DONE-1238-get-access-token-refresh-and-sandbox-bugs.md
-#1236 ebay_backfill_offers fence bypass fixed — see document: dev-workflow/research/DONE-1236-ebay-backfill-offers-fence-bypass.md
-#1214 ebay_motors_census stale-data + ambiguity fix — see document: dev-workflow/research/DONE-1214-motors-census-stale-ambiguous-fix.md
-#1213 ITEMDATA_ROOT hardcoded fixed — see document: dev-workflow/research/DONE-1213-photo-repair-itemdata-root.md
-#1211 photo-repair unlink safety fixed — see document: dev-workflow/research/DONE-1211-photo-repair-unlink-safety.md
-#1210 photosync-canary price diff fixed — see document: dev-workflow/research/DONE-1210-photosync-canary-price-diff.md
-#1210/#1211/#1238 code-review follow-ups fixed — see document: dev-workflow/research/DONE-1210-1211-1238-review-followups.md
-#1209 order-dependency bug fixed — see document: dev-workflow/research/DONE-1209-category-legacy-order-dependency.md
-#1135 category recompile completed — 5,367 categories recovered.
 ### Gated on R1 — named, designed later
 
 ## PP-BULKLIST-001 — bulk editing + listing surface (stub, Dave 2026-07-02)
@@ -1928,6 +2142,16 @@ a dole rate) or remove the checkbox permanently. Interim UI fix already shipped
 2026-07-10: checkbox labeled "(inactive)" with an accurate tooltip, backend
 `set_ready` response says the same, and a stray unreachable confirm-dialog still
 claiming "next dole cycle" was dead code and removed.
+
+**2026-07-16 (Dave): "maybe if it works now we will do bulk next pass."**
+Verified live: backend plumbing already partially exists —
+`/api/bulk/preview`, `/api/bulk/apply`, `/api/bulk/action`, and `/form/bulk`
+are all real, present routes in `http_server.py` — this isn't a from-zero
+build. Sequencing: **queued as the pass immediately after the pipeline
+restart-in-earnest** (Dave's stated priority tonight), not before — the
+hard gate above (single-item pipeline operator-verified end-to-end first)
+still applies, just with a concrete "next" slot now instead of an
+indefinite freeze.
 
 ### Frozen — parked, not cancelled (thaw only if it blocks an R1 packet)
 
@@ -1954,51 +2178,15 @@ byte-complete in `archive/sections/` and promote to `pp/` on touch.)*
 
 ## Open discussion items (for 2pm 2026-07-04 planning session)
 
-**Web UI vs Flutter app — duplicate-development fork, not yet resolved (Dave,
-2026-07-06, todo #1227 planning session).** Confirmed while investigating why
-the Flutter app is "basically ready but unusable": `reference/TGW-HTTP-API.md`
-(dated 2026-06-04) documents the Bearer-token `/api/*` surface Flutter actually
-calls (item search/detail/PATCH, action enqueue, eBay aspects, templates) — but
-all the operator-facing feature work since then (PP-ACTIONCONSOLE-001's
-state-driven action line + Editor/Live tabs, PP-LISTEDITOR-001's drift-gated
-revision apply, live-fire 2026-07-04) landed on a different, newer surface this
-doc doesn't cover. Flutter isn't broken — it's calling a real API that's now
-missing the capabilities the current web UI has, and the gap widens with every
-new web-UI feature. Also found while locating the app: `flutter/` in this repo
-is the vendored Flutter **SDK source** (engine/, dev/bots/, examples/), not
-Dave's project — the actual app is `apps/tgw_app/`; `apps/` also has orphaned
-top-level `android/ios/web/windows/macos` folders alongside `tgw_app/` (likely
-leftover from an earlier `flutter create` before the project settled into
-`tgw_app/`), worth a cleanup pass regardless of which unification direction is
-chosen. Three directions discussed, not decided: (A) extract the action
-console's server-side logic into `/api/*` so both surfaces share one backend
-contract — most work, keeps Flutter's real offline-catalog advantage
-(PP-PORTABLE-CATALOG-001); (B) make Flutter a thin WebView shell over the
-existing web pages — fastest, loses native/offline feel; (C) freeze Flutter,
-converge on a web PWA — simplest, but doesn't deliver true offline satellite
-catalog use. Dave: not ready to decide this session, flagging for a dedicated
-pass.
-
-**2026-07-11 update — nuanced answer, still NOT resolved (do not mark
-settled):**
-- Web UI is primary/most-complete today — pragmatic choice ("I had to get
-  something working to test the site so I directed the web UI build"), not
-  a philosophical commitment against Flutter.
-- Flutter is NOT abandoned — real capabilities worth leveraging later ("I
-  really like the flutter app and I believe we will be able to take
-  advantage of its capabilities"). Current state: browse-only, no write/
-  action capability ("really nice to browse around in, just does nothing
-  else").
-- Neither surface does everything; web UI is closer to complete.
-- **The actual division of responsibility is explicitly deferred** —
-  "divide later."
-- **Hard constraint going forward, decided now:** Flutter must **reuse the
-  same web backend functions** the web UI calls, not duplicate logic — "so
-  we do not have too much extra dev." Any future Flutter work is a client
-  against existing `/api/*` endpoints, never a parallel implementation.
-- Note: this is entirely separate from PP-INTAKE-004's new Kotlin camera
-  app (a different, unrelated app) — an earlier synthesis pass this session
-  wrongly conflated the two before being corrected.
+**Web UI vs Flutter app — MOVED to `pp/PP-UIUX-001.md`, 2026-07-16.** This
+whole discussion (the 2026-07-06 investigation, the 2026-07-11 nuance pass,
+the three undecided directions) sat under this stale, dateless heading for
+ten days with no PP assigned — exactly the kind of orphan `tgw-plan-
+maintain` exists to catch. Dave, 2026-07-16, gave it a real home: "flutter
+vs web is in with the ui inventory/tgw mapping/ui ux project. plan is to
+fully define then have entire set including web ui and flutter to the spec
+by ui/ux specialist coder." Full content preserved verbatim at
+`pp/PP-UIUX-001.md` — see that doc, not here, going forward.
 
 **Relocate the plan-vault document inbox into `/opt/TGW/incoming/`?** Dave recalled
 discussing this before (2026-07-04) but no record of it was found in this plan, any

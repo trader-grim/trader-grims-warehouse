@@ -13,6 +13,7 @@ invoked with include_ebay=False inside the tool, so the dead token is off-path.
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -276,6 +277,14 @@ def test_get_todo_filtered_by_agent(cfg, monkeypatch):
     assert out["agent"] == "gemini"
 
 
+def test_get_todo_accepts_capitalized_agent_argument(cfg, monkeypatch):
+    _install_conn(monkeypatch, [])
+    tool = mcp_server.mcp._tool_manager._tools["tgw_get_todo"]
+    out = json.loads(asyncio.run(tool.run({"Agent": "gemini"})))
+    assert out["ok"] is True
+    assert out["agent"] == "gemini"
+
+
 # ---------------------------------------------------------------------------
 # tgw_add_suggest
 # ---------------------------------------------------------------------------
@@ -285,6 +294,16 @@ def test_add_suggest_delegates_to_cmd_suggest(cfg, monkeypatch):
     monkeypatch.setattr("tgw.api.cmd_suggest",
                         lambda cfg, text: seen.update(text=text) or {"ok": True, "path": "/x"})
     out = json.loads(mcp_server.tgw_add_suggest("remember this"))
+    assert out["ok"] is True
+    assert seen["text"] == "remember this"
+
+
+def test_add_suggest_accepts_capitalized_text_argument(cfg, monkeypatch):
+    seen = {}
+    monkeypatch.setattr("tgw.api.cmd_suggest",
+                        lambda cfg, text: seen.update(text=text) or {"ok": True})
+    tool = mcp_server.mcp._tool_manager._tools["tgw_add_suggest"]
+    out = json.loads(asyncio.run(tool.run({"Text": "remember this"})))
     assert out["ok"] is True
     assert seen["text"] == "remember this"
 

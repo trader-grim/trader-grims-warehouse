@@ -29,8 +29,8 @@ from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.draft_sync import baseline_fields
 from tgw.ebay.pricing import to_99
+from tgw.ebay.sync import enqueue_post_push_sync, publish_offer
 from tgw.ebay.sync import format_ebay_error as _format_ebay_error
-from tgw.ebay.sync import publish_offer
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
@@ -157,6 +157,7 @@ class EbayPublishWorker(QueueWorker):
             if photo_verify is not None:
                 existing_listing['photo_verify'] = photo_verify
                 fence_ebay_write(self.config, sku, ebay_listing=existing_listing)
+            enqueue_post_push_sync(sku)
             return
 
         ebay_offer = item.get('ebay_offer', {})
@@ -371,6 +372,8 @@ class EbayPublishWorker(QueueWorker):
             state_machine.enqueue_catalog_rebuild(f'ebay_publish:{sku}')
         except psycopg2.errors.UniqueViolation:
             pass
+
+        enqueue_post_push_sync(sku)
 
 
 def main() -> int:

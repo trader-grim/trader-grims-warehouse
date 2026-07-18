@@ -24,9 +24,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Annotated, Any, Dict
 
 from mcp.server import FastMCP
+from pydantic import AliasChoices, Field
 
 # ---------------------------------------------------------------------------
 # Read-only mode: TGW_MCP_READONLY=1 drops write-capable tools (tgw_enqueue,
@@ -276,7 +277,12 @@ if not _READONLY:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def tgw_get_todo(agent: str = '') -> str:
+def tgw_get_todo(
+    agent: Annotated[
+        str,
+        Field(validation_alias=AliasChoices('agent', 'Agent')),
+    ] = '',
+) -> str:
     """List open TODO items from the TGW multi-agent tracker.
 
     Args:
@@ -317,7 +323,12 @@ def tgw_get_todo(agent: str = '') -> str:
 # tgw_add_suggest — append to SUGGESTIONS.md
 # ---------------------------------------------------------------------------
 
-def tgw_add_suggest(text: str) -> str:
+def tgw_add_suggest(
+    text: Annotated[
+        str,
+        Field(validation_alias=AliasChoices('text', 'Text')),
+    ],
+) -> str:
     """Append a suggestion or note to SUGGESTIONS.md for the next planning session.
 
     This is the same as running `tgw suggest "..."` from the shell.

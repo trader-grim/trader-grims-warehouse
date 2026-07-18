@@ -463,3 +463,24 @@ model swap.
       `secrets_root` facility, `google_direct` provider already exists
       for other TGW LLM tasks (see `reference/LLM-Providers-Quotas.md`)
       — before assuming a new key is needed
+
+## Store SKU in eBay's Custom Label field, not just the picklist line in the description
+
+**Dave, 2026-07-16, aside during the todo #1471 custom-aspects discussion — explicitly
+flagged "not necessary now."** Currently the SKU round-trips to eBay only embedded in the
+listing description's picklist line (`tgw-pl::=::<location>:=:<title>:=:<sku>:=:<listing_id>`,
+see `build_listing_description()`). Dave's preference: also (or instead) put the SKU in
+eBay's own Custom Label field — his stated reason is that eBay's Custom Label is easy for an
+operator to edit directly in Seller Hub, unlike text buried in a description string. No
+design work done, no decision on whether Custom Label would replace or supplement the
+picklist-line mechanism, and no check yet on whether Custom Label is exposed via the
+Inventory API `sku`/offer fields TGW already sends, or needs its own new field mapping.
+
+### Promotion criteria
+
+- [ ] Dave revisits this (he explicitly said not needed now)
+- [ ] Confirm whether eBay's Inventory API even exposes a settable Custom Label distinct
+      from the SKU we already send, or whether "Custom Label" is Trading-API-era
+      terminology that maps onto something else in the Inventory API
+- [ ] Decide replace-vs-supplement relative to the existing picklist-line mechanism before
+      touching `build_listing_description()`

@@ -1,7 +1,15 @@
 ## PP-RECOVERY-001 — Web UI Regression Audit and Process Recovery
 
 **Opened:** 2026-06-17 (session 33)
-**Status:** IN PROGRESS — audit underway
+**Status:** CLOSED 2026-07-16 — confirmed obsolete, already resolved via
+later work. Dave asked whether this had already been triaged over; it had.
+The `task/aider-20260616145314` branch this audit was gating a merge on no
+longer exists (long since merged). Both todo batches it tracked
+(WEBUI-AUDIT #998-1038, pre-800 historical #897-997) are 100% done — zero
+open items across the whole range, confirmed live via `tgw todo --all`.
+The whole audit predates the s40-42 UI rebuild and PP-EDITOR-001/
+PP-ACTIONCONSOLE-001/PP-LISTEDITOR-001, which superseded it. Findings
+below preserved as historical record (Prime Directive 1), not re-actioned.
 
 ### What happened
 

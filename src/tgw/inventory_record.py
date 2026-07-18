@@ -46,7 +46,21 @@ Envelope shape (self-describing, per grep-discoverable in raw JSON):
                                            # whose real edit time is unknown
                                            # (Prime Directive 1: never claim
                                            # false precision)
-        "fields": {"Type": "Brooch", "Brand": "Unbranded", ...}
+        "fields": {"Type": "Brooch", "Brand": "Unbranded", ...},
+        "locked_keys": ["Type"]            # optional; keys NOT auto-synced
+                                            # from eBay draft edits. Absent
+                                            # or [] means "everything follows
+                                            # eBay" (Dave, 2026-07-18): most
+                                            # item_attributes content starts
+                                            # as an unverified ai_identify
+                                            # guess, not an operator-confirmed
+                                            # fact, so the safe default is
+                                            # "keep following the source that
+                                            # actually gets corrected day to
+                                            # day" — an operator locks a key
+                                            # only when they deliberately want
+                                            # the inventory record to diverge
+                                            # from what's on the live listing.
     }
 
 Provenance history — append-only, never edited or truncated (matches
@@ -88,6 +102,10 @@ __all__ = [
     "get_inventory_field",
     "wrap_inventory_attributes",
     "set_inventory_fields",
+    "get_locked_keys",
+    "is_locked",
+    "set_locked",
+    "sync_from_draft",
 ]
 
 
@@ -126,12 +144,22 @@ def wrap_inventory_attributes(
     *,
     updated_at: Optional[str] = None,
     backfilled: bool = False,
+    locked_keys: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Build a full Set A envelope from a plain fields dict.
 
     `backfilled=True` marks `updated_at` as a migration-time guess rather
     than a real edit timestamp — Prime Directive 1: never claim false
     precision about when the data actually changed.
+
+    `locked_keys` (Dave, 2026-07-18): keys excluded from auto-sync — see
+    module docstring's envelope shape note. ALWAYS included (even as `[]`)
+    despite this module's usual convention of omitting empty/default
+    scaffolding — _apply_patch shallow-merges an already-enveloped
+    item_attributes onto the existing one rather than replacing it, so an
+    omitted key here would leave a stale prior value on disk instead of
+    clearing it (caught live by test_inventory_lock_toggle_endpoint: unlock
+    silently no-opped before this was unconditional).
     """
     return {
         "_set": SET_TAG,
@@ -139,7 +167,74 @@ def wrap_inventory_attributes(
         "updated_at": updated_at or _now_iso(),
         "updated_at_backfilled": bool(backfilled),
         "fields": dict(fields),
+        "locked_keys": list(locked_keys) if locked_keys else [],
     }
+
+
+def get_locked_keys(item: Dict[str, Any]) -> List[str]:
+    """Return the list of Set A keys excluded from eBay-draft auto-sync."""
+    raw = item.get("item_attributes") or {}
+    if not is_envelope(raw):
+        return []
+    keys = raw.get("locked_keys")
+    return list(keys) if isinstance(keys, list) else []
+
+
+def is_locked(item: Dict[str, Any], key: str) -> bool:
+    """True if `key` is excluded from eBay-draft auto-sync."""
+    return key in get_locked_keys(item)
+
+
+def set_locked(item: Dict[str, Any], key: str, locked: bool) -> Dict[str, Any]:
+    """Compute the patch for locking/unlocking one Set A key.
+
+    Pure — like `set_inventory_fields`, returns {"item_attributes": <new
+    envelope>} for the caller to fence-PATCH. Does not touch field values
+    or history — locking is metadata about future sync behavior, not a
+    fact about the item, so it never appends to item_attributes_history.
+    """
+    current = set(get_locked_keys(item))
+    if locked:
+        current.add(key)
+    else:
+        current.discard(key)
+    fields = get_inventory_fields(item)
+    raw = item.get("item_attributes") or {}
+    updated_at = raw.get("updated_at") if is_envelope(raw) else None
+    backfilled = bool(raw.get("updated_at_backfilled")) if is_envelope(raw) else False
+    return {
+        "item_attributes": wrap_inventory_attributes(
+            fields, updated_at=updated_at, backfilled=backfilled,
+            locked_keys=sorted(current),
+        )
+    }
+
+
+def sync_from_draft(
+    item: Dict[str, Any],
+    draft_fields: Dict[str, Any],
+    *,
+    source: str,
+    applied_by: str = "operator",
+) -> Dict[str, Any]:
+    """Auto-sync eBay-draft-sourced values into Set A for every key NOT
+    currently locked (Dave, 2026-07-18 — the padlock design: default is
+    'inventory record follows the eBay draft', an explicit lock is the
+    only way to make a key stop following).
+
+    `draft_fields` is whatever the caller considers the current eBay-side
+    truth for keys that also belong in Set A (e.g. {"Title": <draft
+    title>, **item_specifics}) — this function does not know or care
+    where they came from, same separation of concerns as
+    `set_inventory_fields`.
+
+    Pure. Returns the same shape as `set_inventory_fields` (empty patch —
+    i.e. identical to the item's current fields/history — if nothing
+    changed or everything relevant is locked).
+    """
+    locked = set(get_locked_keys(item))
+    updates = {k: v for k, v in draft_fields.items() if k not in locked}
+    return set_inventory_fields(item, updates, source=source, applied_by=applied_by)
 
 
 def set_inventory_fields(
@@ -182,6 +277,7 @@ def set_inventory_fields(
             "applied_by": applied_by,
         })
     return {
-        "item_attributes": wrap_inventory_attributes(new_fields, updated_at=ts),
+        "item_attributes": wrap_inventory_attributes(
+            new_fields, updated_at=ts, locked_keys=get_locked_keys(item)),
         "item_attributes_history": history,
     }

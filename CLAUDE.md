@@ -69,6 +69,17 @@ code exists.
 - **Permission architecture** (scoped agent authority, escalation triggers)
   is PP-CATIONIX-001's crypto-lock endgame — the same idea, still being
   built, not yet live.
+- **Agent role restrictions are locked in mechanically, not left as prose
+  (Dave, 2026-07-16, invariant E11)** — every custom agent profile in
+  `.claude/agents/*.md` has "must"/"never" rules; each one is a candidate
+  for a scoped `tools:` list, a `PreToolUse`/`SessionStart` hook, or a
+  harness feature (e.g. `settings.worktree.bgIsolation`) before it's
+  trusted as prose the agent reads and complies with. Same lesson as the
+  `SessionStart` briefing hook, generalized: a written rule depends on the
+  model choosing to follow it every time; a hook doesn't ask. See
+  `reference/invariants.md` E11 for the audited gap list (flake-guard hook
+  only matches `Bash`, not raw `Edit`/`Write` on flake files;
+  `tgw-coder`'s worktree isolation is still 100% prose).
 
 Reference: Ankit Jain, "How to Kill the Code Review" (thenewstack.io /
 latent.space, 2026-07-07) — named/systematized a pattern Dave already
@@ -76,38 +87,37 @@ practiced; treat it as confirmation, not origin.
 
 ## Start every session here
 
-**Step 0 — check thermal status before anything else:**
+**No judgment call on whether to run this sequence (Dave, 2026-07-16).** Steps 1-4
+below run at the start of every session — unconditionally, before any other reply —
+regardless of how Dave's first message is phrased (a greeting, a direct technical
+question, anything). The only thing that skips it is Dave explicitly saying so in that
+message (e.g. "skip startup," "quick question, don't run the full sequence"). Deciding
+"this looks like a quick question, I'll skip it" is exactly the failure mode that caused
+`INCIDENT-2026-07-16-kdeconnect-clipboard-triage-failure.md` — message tone is not a
+valid signal for this decision anymore.
 
-```
-cat /opt/TGW/var/run/thermal.status 2>/dev/null || echo "NORMAL|0|0"
-```
+**Mechanically enforced, not just written down (Dave, 2026-07-16, same day, third
+recurrence):** the wording fix above was tried once already that same day and the ritual
+was skipped again hours later — proof that a CLAUDE.md instruction alone depends on the
+model choosing to comply, which had already failed twice. A `SessionStart` hook
+(`.claude/hooks/session-start-briefing.py`, wired in `.claude/settings.json`) now runs
+automatically before any reply is composed and injects: the list of files sitting in
+`docs/TGW-Plan-Vault/inbox/claude/`, a count of unchecked `SUGGESTIONS.md` items, and
+`tgw plan check` + a capped `tgw plan status`. It is read-only — it surfaces state, it
+does not act on it. This removes the judgment call from Steps 1 and 3 entirely (the facts
+are already in context, not something to notice or skip); Steps 2 and 4 (actually reading
+the master plan, and registering the todo/inbox breadcrumb before touching code) still
+require acting on what the hook surfaced — the hook cannot do those parts for you.
+**Live-fire not yet confirmed as of 2026-07-16** — this repo's settings watcher only
+picks up a hooks config that existed when the session started (see
+`reference-hooks-settings-watcher-caveat` memory), so a `/hooks` reload or session
+restart is needed once before this is proven firing for real, same open item as the
+`PP-AGENT-DISCIPLINE-001` PreToolUse flake-guard hook below.
 
-If the status is HOT, THROTTLE, or SHUTDOWN: **stop all disk-intensive operations** (no recursive grep/find on ItemData/ItemCatalog). At THROTTLE the watchdog has already stopped workers — do not restart them. At HOT, slow down and avoid large scans.
-
-**There is no push/ambient monitoring for Claude — an alarm that fires
-from something other than your own action will go unnoticed unless you
-check.** Unlike Tigwa-lite's actual 5-minute polling cron, a Claude
-session only knows `thermal.status` at the instant it runs the check
-command. Confirmed failure mode 2026-07-13: a real thermal
-CRITICAL→shutdown→multiple-reboot incident happened mid-session and was
-only discovered afterward when Dave mentioned it — reconstructed from
-`journalctl`, not noticed live. **Re-check `thermal.status` periodically
-during any session with sustained activity** (a natural cadence: every
-several tool-call rounds, or whenever picking up a new task within the
-same session), not just at Step 0 — this is the only substitute for
-push-based awareness available.
-
-**This is not a once-per-session check, for self-inflicted risk either.** Re-run it immediately before
-every full `pytest -q` suite run (2000+ tests, sustained heavy I/O) and
-before any other large scan/index/reindex operation, even if it was
-NORMAL a few minutes ago — not just once at Step 0. **Session that already
-had a thermal incident = higher vigilance required, not lower** — a prior
-CRITICAL/HOT event in this session is a stronger signal to check before
-the next heavy operation, not evidence it's already handled. Confirmed
-failure mode 2026-07-13: a session that had just root-caused a real
-thermal CRITICAL shutdown (triggered partly by an in-flight pytest run)
-then ran two more full-suite pytest runs back-to-back without rechecking
-— see [[feedback-stacked-disk-io-thermal]] (memory).
+**Thermal monitoring is Tigwa's responsibility, not Claude's** (Dave, 2026-07-16) — she
+runs the actual 5-minute polling cron. Claude no longer checks `thermal.status` at
+session start or during sessions. If Dave reports a thermal alarm directly, that's still
+Prime Directive 2 (act immediately) — this removal only drops the routine self-check.
 
 **Todo #1344 / PP-HERMES-EA-001, tgw-prod half DONE 2026-07-12:** Hermes-lite
 gateway is a `systemd --user` service on tgw-prod (not flake-managed —
@@ -217,6 +227,7 @@ Plain Markdown; open in Obsidian for interactive mind map view where noted.
 | `SHELL-AUDIT.md` | tgw.source / tgw-dev.source function audit — what to keep, wrap, or remove |
 | `HARDWARE-AI-INFERENCE.md` | Ollama model sizing, GPU upgrade planning, inference perf |
 | `TGW-Data-Charter.md` | **Any pipeline/worker/eBay work** — the data axiom, asset inventory, rules for new work (Prime Directive 1) |
+| `PP-HERMES-EA-001-planner-rubric.md` | **Writing a work packet (the planner role)** — section-by-section calibration (Context budget/Verified-live/Spec/Out-of-scope/Dataset/Acceptance/Quota-risk), sizing/splitting, self-check before dispatch |
 | `invariants.md` | System invariants (A1–E7) + enforcement status — check before any structural change |
 | `TGW-Architecture-Services.md` | Service-by-service responsibility, deps, failure modes, critical invariants |
 | `TGW-Architecture-Overview.md` | System topology — how subsystems connect |
@@ -272,6 +283,20 @@ Plain Markdown; open in Obsidian for interactive mind map view where noted.
   `tgw.ebay.draft_specifics`; cross-set moves go through one named
   translation function, never a per-key merge or `{**a, **b}` spread. See
   invariants.md C12.
+- **An operator's correction either takes effect or is visibly reported as
+  failed — never silently lost (invariant C14, ⚠️ open, 2026-07-16
+  incident)** — Dave: "we are putting wrong data and making it
+  unrepairable. That is not in our spec." A save that returns "✓ Saved"
+  but doesn't actually change the stored/pushed value is the same class
+  of violation as silently discarding data (Prime Directive 1), just via a
+  different mechanism. Live incident: an operator's repeated attempts to
+  correct a factually wrong live listing (`Material` field) were silently
+  dropped by the aspects-form save path, with no error and no way to tell
+  the correction hadn't landed — the listing had to be manually ended on
+  eBay as the only remedy. Any new operator-facing save path needs a
+  round-trip test proving a *cleared* value actually persists, not just a
+  changed one. See invariants.md C14 for the full incident chain and
+  what's fixed vs. still open.
 
 ## Running workers (systemd)
 
@@ -280,13 +305,24 @@ systemctl list-units 'tgw-worker@*'
 journalctl -u 'tgw-worker@<queue>.service' -f
 ```
 
-Workers: `token_refresh`, `pm_intake`, `bundle_intake`, `multi_intake`, `ai_identify`,
+Workers: `token_refresh`, `bundle_intake`, `multi_intake`, `ai_identify`,
 `catalog_rebuild`, `plan_render`, `thumbnail_gen`, `ebay_draft`, `ebay_upload`, `ebay_price`,
 `ebay_stage`, `ebay_publish`, `ebay_sync`, `ebay_legacy_sync`, `echo`. **`ebay_dole` is a
 module (`src/tgw/workers/ebay_dole.py`) but has no installed systemd unit** — corrected
 2026-07-12 (Fable independent review #1338; this list previously implied it runs). A bare
 `tgw restart-workers` would run `systemctl restart` against the unbuilt template unit for
 it — see PP-BULKLIST-001/#1113 before touching that command.
+
+**`pm_intake` is DEPRECATED (Dave, 2026-07-16)** — not "temporarily stopped," not a
+candidate for re-enabling without a fresh explicit decision from Dave. Do not re-add
+it to the active worker list above, do not re-enable/start its systemd unit, and do
+not treat any future reboot-driven resurrection of it as a return to normal — a prior
+reboot (2026-07-11) already did exactly that and it ran 9h unnoticed before being
+caught (see incident below). If `systemctl list-units 'tgw-worker@pm_intake*'` ever
+shows it loaded/active, that is itself the finding — stop it and flag the durable-stop
+gap (todo #1322/PP-NIXOS-001), don't just quietly restore silence. Tigwa's own
+persona (PP-HERMES-EA-001) is pm_intake's replacement direction, not a temporary
+stand-in pending pm_intake's return.
 
 ## Checking queue state
 

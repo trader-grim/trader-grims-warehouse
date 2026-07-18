@@ -149,6 +149,7 @@ PIPELINE_ACTIONS = {
     "ebay_publish",
     "ebay_end_listing",
     "ebay_update",
+    "resync_photos",
     "accept_proposals",
     "dismiss_proposals",
     "catalog_rebuild",
@@ -214,8 +215,26 @@ app = FastAPI(
     openapi_url=None,
 )
 
+class _NoCacheStaticFiles(StaticFiles):
+    """Force revalidation on every request (Dave, 2026-07-17): a plain
+    StaticFiles mount lets browsers cache tgw.js/tgw.css indefinitely, so a
+    server-restarted fix (e.g. syncURLParam/getURLParam) can silently keep
+    running the OLD cached script and throw ReferenceErrors that look like
+    a broken fix rather than a stale cache. These files are small and
+    change often during active work — correctness here matters more than
+    saving a browser round-trip."""
+
+    def is_not_modified(self, *args, **kwargs) -> bool:  # pragma: no cover - trivial
+        return False
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
+
+
 _STATIC_DIR = Path(__file__).parent / "static"
-app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+app.mount("/static", _NoCacheStaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +427,11 @@ class RevisionApplyBody(BaseModel):
 
 class PhotoOrderBody(BaseModel):
     order: List[str]
+
+
+class InventoryLockBody(BaseModel):
+    key: str
+    locked: bool
 
 
 class InventoryDiffApplyBody(BaseModel):
@@ -1081,6 +1105,36 @@ def _apply_patch(json_path: "Path", fields: Dict[str, Any]) -> List[str]:
                     # accept_proposals) — plain replace, no re-diffing needed.
                     existing["item_specifics"] = incoming_specifics
                 doc[dmk] = existing
+
+                # Padlock auto-sync (Dave, 2026-07-18): every eBay-draft save
+                # pushes its aspects into item_attributes for any key NOT
+                # explicitly locked — replaces the old "visit a separate
+                # diff panel and check off every field" two-step (todo
+                # #1417) as the default path; #1417's diff/apply endpoints
+                # stay for anything not covered by this sync.
+                _draft_fields: Dict[str, Any] = dict(get_ebay_aspects(doc))
+                if _draft_fields:
+                    _ia_sync = inventory_record.sync_from_draft(
+                        doc, _draft_fields, source="draft_sync", applied_by="operator")
+                    doc["item_attributes"] = _ia_sync["item_attributes"]
+                    doc["item_attributes_history"] = _ia_sync["item_attributes_history"]
+
+                # Same padlock idea, applied to the "base data" fields that
+                # live at the TOP LEVEL of the item, not inside item_attributes
+                # (title, description — Dave, 2026-07-18: "this worked for
+                # aspects/item specifics but not for title or any of the
+                # other base data"). These are what the page header and
+                # main fields panel actually display, so a fix that only
+                # touched item_attributes.fields never showed up where the
+                # operator was looking. Locked via the same locked_keys list
+                # (key names "title"/"description"), so one shared lock
+                # vocabulary covers both aspect-style and top-level facts.
+                for _base_key, _draft_val in (
+                    ("title", existing.get("title")),
+                    ("description", existing.get("description")),
+                ):
+                    if _draft_val and not inventory_record.is_locked(doc, _base_key):
+                        doc[_base_key] = _draft_val
             else:
                 existing.update(incoming)
                 doc[dmk] = existing
@@ -1633,6 +1687,61 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
             except psycopg2.errors.UniqueViolation:
                 job_id = None
             return {"ok": True, "sku": sku, "action": "ebay_update", "job_id": job_id}
+
+        elif action == "resync_photos":
+            # On-demand photo re-verify + re-push (Dave, 2026-07-17): photos
+            # don't need pushing on every "Update Listing" click, so this is
+            # a separate button rather than baked into ebay_update — see
+            # tgw.ebay.repush's module docstring.
+            #
+            # Live bug found same day (tgw202605041013227): photo_order can
+            # have more photos than ebay_photos (the EPS-hosted set) if
+            # ebay_upload only ran once and never re-ran after photos were
+            # added later. repush only re-PUTs already-hosted URLs — the
+            # Inventory API can't accept a raw local path — so resync alone
+            # can never fix this; the missing photos need ebay_upload first.
+            # Detect the gap and queue that instead of silently no-op'ing.
+            #
+            # Second live bug, same day (tgw202605051849352): photo_order
+            # itself can be empty/stale while 26 real files sit on disk —
+            # it's a display-order cache, not the source of truth. Using
+            # len(photo_order) here compared 0 local vs 1 hosted and found
+            # "no gap" on an item that was actually missing 25 photos.
+            # ordered_photos() is what ebay_upload.py itself trusts (falls
+            # back to a directory scan when photo_order is empty) — use
+            # the same source so this check can't disagree with upload.
+            from tgw.assets import ordered_photos
+            doc = load_item_doc(json_path)
+            local_photo_count = len(ordered_photos(doc, json_path.parent))
+            hosted_count = len([e for e in (doc.get("ebay_photos") or []) if e.get("url")])
+            if local_photo_count > hosted_count:
+                job_id = state_machine.enqueue_job(
+                    queue_name="ebay_upload",
+                    payload={"sku": sku, "reason": "resync_photos_gap", "origin": "operator"},
+                    dedupe_key=f"ebay_upload:{sku}",
+                    max_attempts=3,
+                )
+                return {
+                    "ok": True, "sku": sku, "action": "resync_photos",
+                    "upload_queued": True, "job_id": job_id,
+                    "local_photo_count": local_photo_count, "hosted_count": hosted_count,
+                    "detail": f"{local_photo_count - hosted_count} photo(s) never uploaded to eBay — "
+                              f"upload queued, resync again shortly once it completes",
+                }
+
+            # Synchronous (not queued) from here: single item, all photos
+            # already EPS-hosted, operator wants the confirmed count back
+            # immediately, not a "queued" toast.
+            from tgw.ebay.repush import _repush_one
+            result = _repush_one(_cfg, sku)
+            if not result.get("ok"):
+                return {"ok": False, "sku": sku, "action": "resync_photos",
+                        "detail": result.get("reason", "resync failed")}
+            return {
+                "ok": True, "sku": sku, "action": "resync_photos",
+                "submitted_count": result.get("submitted_count"),
+                "confirmed_count": result.get("confirmed_count"),
+            }
 
         elif action == "sync_from_ebay":
             job_id = state_machine.enqueue_job(
@@ -2453,6 +2562,21 @@ def get_inventory_diff(sku: str) -> Dict[str, Any]:
     doc = load_item_doc(json_path)
     diffs = diff_ebay_draft_to_inventory(doc)
     return {"ok": True, "sku": sku, "diffs": diffs}
+
+
+@app.post("/api/items/{sku}/inventory-lock", dependencies=[AUTH])
+def set_inventory_lock(sku: str, body: InventoryLockBody) -> Dict[str, Any]:
+    """Toggle whether one item_attributes key auto-syncs from the eBay
+    draft (Dave, 2026-07-18 padlock design). Locking/unlocking is metadata
+    about future sync behavior, not a fact about the item — never touches
+    item_attributes_history, unlike every other Set A write path here."""
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+    doc = load_item_doc(json_path)
+    patch = inventory_record.set_locked(doc, body.key, body.locked)
+    _apply_patch(json_path, patch)
+    return {"ok": True, "sku": sku, "key": body.key, "locked": body.locked}
 
 
 @app.post("/api/items/{sku}/inventory-diff/apply", dependencies=[AUTH])
@@ -4188,11 +4312,12 @@ const scls=s=>({{
   'in stock':'s-in-stock','listed':'s-listed','staged':'s-staged','sold':'s-sold'
 }})[(s||'').toLowerCase()]||'';
 function getLim(){{return parseInt(document.getElementById('pg-sel').value)||30;}}
-function setView(v){{
+function setView(v,skipLoad){{
   _view=v;
   document.getElementById('vt-card').classList.toggle('active',v==='card');
   document.getElementById('vt-list').classList.toggle('active',v==='list');
-  load(0);
+  syncURLParam('view',v==='list'?'list':'');
+  if(!skipLoad)load(0);
 }}
 function _ebayBadge(it){{
   const lid=it.ebay_listing_id,oid=it.ebay_offer_id,rat=it.ebay_ready_at;
@@ -4403,8 +4528,29 @@ async function _fetchPage(offset,append){{
 function load(o){{_off=0;_fetchPage(o??0,false);}}
 function loadMore(){{_fetchPage(_off,true);}}
 let _t;
-function df(){{clearTimeout(_t);_t=setTimeout(()=>load(0),300);}}
-initChips('#status-chips',()=>load(0));
+function df(){{
+  clearTimeout(_t);
+  syncURLParam('search',document.getElementById('sq').value);
+  syncURLParam('location',document.getElementById('loc').value);
+  _t=setTimeout(()=>load(0),300);
+}}
+initChips('#status-chips',c=>{{syncURLParam('status',c.dataset.s);load(0);}});
+document.getElementById('pg-sel').addEventListener('change',()=>syncURLParam('page_size',getLim()));
+
+// Restore view state from the URL (bookmark / Back-button return) before
+// the first load — reads back whatever syncURLParam() above last wrote.
+(function _restoreFromURL(){{
+  const st=getURLParam('status');
+  if(st){{
+    document.querySelectorAll('#status-chips .chip').forEach(c=>{{
+      c.classList.toggle('active',c.dataset.s===st);
+    }});
+  }}
+  const search=getURLParam('search'); if(search)document.getElementById('sq').value=search;
+  const loc=getURLParam('location'); if(loc)document.getElementById('loc').value=loc;
+  const ps=getURLParam('page_size'); if(ps)document.getElementById('pg-sel').value=ps;
+  const v=getURLParam('view'); if(v==='list')setView('list',true);
+}})();
 load(0);
 </script>
 </body>
@@ -4489,13 +4635,25 @@ def _render_item_detail_html(
         v = item.get(key)
         return h(str(v)) if v is not None else '<span style="color:#444">—</span>'
 
-    def fr(label: str, val: str = "", key: str = "", editable: bool = False) -> str:
+    def fr(label: str, val: str = "", key: str = "", editable: bool = False, lockable: bool = False) -> str:
         display = val if val else fv(key)
+        # Padlock for top-level "base data" fields (Dave, 2026-07-18: title/
+        # description need the same follow-eBay-unless-locked behavior as
+        # item_attributes aspects — same toggleInventoryLock()/lock list,
+        # just keyed by the top-level field name instead of an aspect name).
+        lock_html = ""
+        if lockable and key:
+            _locked = inventory_record.is_locked(item, key)
+            lock_html = (
+                f" <button onclick='toggleInventoryLock({json.dumps(key)},{json.dumps(_locked)},this)' "
+                f'title="{"Locked — click to let this follow the eBay draft again" if _locked else "Unlocked — click to freeze this at its current value"}" '
+                f'style="background:none;border:none;cursor:pointer;font-size:.85em;padding:0 2px">{"🔒" if _locked else "🔓"}</button>'
+            )
         if editable and key:
             raw = item.get(key)
             raw_str = h(str(raw)) if raw is not None else ""
-            return f'<div class="frow"><span class="fn">{label}</span><span class="fv editable" data-field="{h(key)}" data-raw="{raw_str}" title="Double-click to edit">{display}</span></div>'
-        return f'<div class="frow"><span class="fn">{label}</span><span class="fv">{display}</span></div>'
+            return f'<div class="frow"><span class="fn">{label}</span><span class="fv editable" data-field="{h(key)}" data-raw="{raw_str}" title="Double-click to edit">{display}</span>{lock_html}</div>'
+        return f'<div class="frow"><span class="fn">{label}</span><span class="fv">{display}</span>{lock_html}</div>'
 
     # Gallery
     if images:
@@ -5026,19 +5184,32 @@ def _render_item_detail_html(
     if _display_eps:
         _eps_thumbs = "".join(
             f'<a href="{h(u)}" target="_blank" rel="noopener noreferrer"><img src="{h(u)}" style="height:80px;width:80px;object-fit:cover;border-radius:4px;border:1px solid #333;cursor:pointer"></a>'
-            for u in _display_eps[:12]
-        )
+            for u in _display_eps[:24]  # eBay's own per-listing max — the header count
+        )                               # already reports len(_display_eps); this cap must
+                                         # match it or the strip silently under-renders
+                                         # against its own label (Dave, 2026-07-17: an
+                                         # old [:12] slice made photos look missing that
+                                         # were actually live on eBay all along)
         _eps_strip_html = (
             f'<div id="eps-photos" class="dsec">'
             f"<h3>Photos on eBay"
             f' <span style="font-size:.7em;color:#555;font-weight:normal">'
-            f"EPS hosted · {len(_display_eps)} photo(s)</span></h3>"
+            f"EPS hosted · {len(_display_eps)} photo(s)</span>"
+            f' <button onclick="resyncPhotos()" style="font-size:.7em;margin-left:8px;padding:2px 8px;cursor:pointer">Resync Photos</button>'
+            f' <span id="resync-photos-result" style="font-size:.7em;color:#8af;margin-left:6px"></span>'
+            f"</h3>"
             f'<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">'
             f"{_eps_thumbs}</div>"
             f"</div>"
         )
     else:
-        _eps_strip_html = '<div id="eps-photos" class="dsec"><div style="color:#555;font-size:.85em">No photos on eBay yet — run ebay_upload to upload photos to EPS</div></div>'
+        _eps_strip_html = (
+            '<div id="eps-photos" class="dsec">'
+            '<div style="color:#555;font-size:.85em">No photos on eBay yet — run ebay_upload to upload photos to EPS'
+            ' <button onclick="resyncPhotos()" style="font-size:.9em;margin-left:8px;padding:2px 8px;cursor:pointer">Resync Photos</button>'
+            ' <span id="resync-photos-result" style="font-size:.9em;color:#8af;margin-left:6px"></span>'
+            '</div></div>'
+        )
 
     # ── Phase 1A: eBay live collapsible panel ──────────────────────────────────
     _el_synced = eb.get("synced_at") or ""
@@ -5976,11 +6147,11 @@ def _render_item_detail_html(
         # listing workflow. Standalone at the top (own redesign effort later).
         + '<div id="catalog-section" class="dsec">'
         '<h3>Inventory Record <span style="color:#2a4a6a;font-size:.72em;font-weight:normal">dbl-click to edit · <a href="#" onclick="saveCatalog();return false" style="color:#4a8;font-size:.9em">Save to Catalog</a> <span id="catalog-save-msg" style="font-size:.82em;color:#4a4"></span></span></h3>'
-        '<div style="font-size:.73em;color:#556;margin-bottom:6px">Canonical TGW data — never overwritten by marketplace sync</div>'
-        + fr("Title", key="title", editable=True)
+        '<div style="font-size:.73em;color:#556;margin-bottom:6px">Canonical TGW data — Title/Description follow the eBay draft unless 🔒 locked (Dave, 2026-07-18); everything else here is never overwritten by marketplace sync</div>'
+        + fr("Title", key="title", editable=True, lockable=True)
         + fr("Condition", key="condition", editable=True)
         + fr("AI hint", key="ai_hint", editable=True)
-        + fr("Description", key="description", editable=True)
+        + fr("Description", key="description", editable=True, lockable=True)
         + fr("Brand", key="brand", editable=True)
         + fr("Model", key="model", editable=True)
         + fr("Category group", key="category_group")
@@ -6027,19 +6198,41 @@ def _render_item_detail_html(
             # into #aspects-form as a custom aspect, same as if the operator
             # typed it in themselves. Purely additive UI; no write happens
             # until the operator clicks Add AND then Save Draft.
-            lambda ia, isp: (
+            # Padlock design (Dave, 2026-07-18): a key with no lock icon set
+            # just always follows the eBay draft — that sync happens
+            # automatically on every Save Draft (_apply_patch), not from
+            # anything on this page. The lock icon is the ONLY thing this
+            # panel controls directly; clicking it flips the key's synced/
+            # frozen state and reloads so the row reflects it immediately.
+            lambda ia, isp, locked: (
                 (
                     '<div style="margin-top:6px;border-top:1px solid #222;padding-top:6px">'
-                    '<div style="font-size:.75em;color:#556;margin-bottom:4px">Inventory Record specifics (edit in eBay Draft Editor below to affect what\'s pushed to eBay)</div>'
+                    '<div style="font-size:.75em;color:#556;margin-bottom:4px">Inventory Record specifics'
+                    ' <span style="font-weight:normal">— 🔓 follows the eBay draft automatically, 🔒 frozen at its current value</span></div>'
                     + "".join(
-                        f'<div class="frow"><span class="fn" style="font-size:.82em">{h(k)}</span><span class="fv" style="font-size:.82em">{h(str(v))}'
+                        f'<div class="frow"><span class="fn" style="font-size:.82em">{h(k)}</span>'
+                        f'<span class="fv" style="font-size:.82em">{h(str(v))}'
+                        # Single-quoted onclick (Dave, 2026-07-18 live report:
+                        # "the lock buttons have no effect, but they are
+                        # there"): json.dumps() always double-quotes its
+                        # string output, and this attribute used to be
+                        # double-quoted too — the browser's HTML parser
+                        # terminated the attribute at the FIRST embedded `"`,
+                        # e.g. onclick="toggleInventoryLock(" was the entire
+                        # parsed value. Button rendered fine; click did
+                        # nothing, because there was no valid handler left to
+                        # run. Same latent bug existed in the pre-existing
+                        # "+ Add to listing" button below — fixed here too.
+                        + f" <button onclick='toggleInventoryLock({json.dumps(k)},{json.dumps(k in locked)},this)' "
+                          f'title="{"Locked — click to let this key follow the eBay draft again" if k in locked else "Unlocked — click to freeze this key at its current value"}" '
+                          f'style="background:none;border:none;cursor:pointer;font-size:.85em;padding:0 2px">{"🔒" if k in locked else "🔓"}</button>'
                         + (
                             f'<div style="font-size:.72em;color:#556;margin-top:1px">eBay value: {h(str(isp[k]))}</div>'
                             if k in isp and str(isp[k]) != str(v)
                             else (
                                 f'<button class="act-btn" style="font-size:.7em;padding:1px 6px;margin-left:8px" '
-                                f'onclick="addFromInventory({json.dumps(k)},{json.dumps(str(v))},this)">+ Add to listing</button>'
-                                if k not in isp
+                                f"onclick='addFromInventory({json.dumps(k)},{json.dumps(str(v))},this)'>+ Add to listing</button>"
+                                if k not in isp and k != "Title"
                                 else ""
                             )
                         )
@@ -6056,7 +6249,7 @@ def _render_item_detail_html(
                     "</div>"
                 )
             )
-        )(inventory_record.get_inventory_fields(item), get_ebay_aspects(item))
+        )(inventory_record.get_inventory_fields(item), get_ebay_aspects(item), set(inventory_record.get_locked_keys(item)))
         + "</div>"
         # ── eBay -> Inventory Record sync panel (todo #1417, PP-LISTEDITOR-001).
         # DELIBERATELY separate from the "Pipeline proposed changes" banner
@@ -6206,6 +6399,27 @@ def _render_item_detail_html(
         f"  ).then(function(r){{return r.json();}}).then(function(d){{"
         f"    if(d.ok)location.reload();else alert('Accept failed: '+(d.detail||'error'));"
         f"  }});"
+        f"}}"
+        f"function resyncPhotos(){{"
+        f"  var el=document.getElementById('resync-photos-result');"
+        f"  if(el)el.textContent='resyncing…';"
+        f"  fetch('/api/items/'+_SKU+'/action',{{method:'POST',"
+        f"    headers:authHeaders({{'Content-Type':'application/json'}}),"
+        f"    body:JSON.stringify({{action:'resync_photos'}})}}"
+        f"  ).then(function(r){{return r.json();}}).then(function(d){{"
+        f"    if(!el)return;"
+        f"    if(d.ok&&d.upload_queued){{el.textContent=d.detail;}}"
+        f"    else if(d.ok){{"
+        f"      el.textContent=d.confirmed_count+'/'+d.submitted_count+' confirmed live — reloading…';"
+        # Reload so the "Photos on eBay" strip (and everything else on the
+        # page) picks up the just-refreshed ebay_live/ebay_submitted data —
+        # otherwise the button reports success while the page keeps
+        # showing whatever was rendered at initial page load (Dave,
+        # 2026-07-17: "it says 24/24... but only one shows on the webui").
+        f"      setTimeout(function(){{location.reload();}},900);"
+        f"    }}"
+        f"    else{{el.textContent='failed: '+(d.detail||'error');}}"
+        f"  }}).catch(function(e){{if(el)el.textContent='network error';}});"
         f"}}"
         f"function dismissProposals(){{"
         f"  fetch('/api/items/'+_SKU+'/action',{{method:'POST',"
@@ -6516,6 +6730,15 @@ def _render_item_detail_html(
         f"  form.appendChild(buildAspectRow(name,val));"
         f"  if(btn){{btn.disabled=true;btn.textContent='✓ Added — click Save Draft';}}"
         f"}}"
+        f"function toggleInventoryLock(key,currentlyLocked,btn){{"
+        f"  if(btn)btn.disabled=true;"
+        f"  fetch('/api/items/'+_SKU+'/inventory-lock',{{method:'POST',"
+        f"    headers:authHeaders({{'Content-Type':'application/json'}}),"
+        f"    body:JSON.stringify({{key:key,locked:!currentlyLocked}})}}"
+        f"  ).then(function(r){{return r.json();}}).then(function(d){{"
+        f"    if(d.ok)location.reload();else{{if(btn){{btn.disabled=false;}}alert('Lock toggle failed: '+(d.detail||'error'));}}"
+        f"  }}).catch(function(e){{if(btn)btn.disabled=false;alert('Network error: '+e);}});"
+        f"}}"
         # ── saveAndReprice ────────────────────────────────────────────────────
         f"function saveAndReprice(){{"
         f'  var st=document.getElementById("search-terms-input");'
@@ -6609,6 +6832,18 @@ def _render_item_detail_html(
         f"<title>{h(sku)} — TGW</title>" + _STATIC_HEAD + f"<style>{_ITEMS_EXTRA_CSS}</style>"
         f"</head>\n<body>\n"
         f'<a class="back" href="/form/items">← Inventory</a>\n'
+        # Fast jump straight back to a filtered inventory view (Dave,
+        # 2026-07-17): the browse page's status chips now persist their
+        # filter into the URL, so these can just be plain links to it —
+        # no JS/fetch needed here, matches the same filter values/labels.
+        f'<div class="chips" style="margin:4px 0 8px">'
+        f'<a class="chip" style="color:#ccc;text-decoration:none" href="/form/items">All</a>'
+        f'<a class="chip" style="color:#ccc;text-decoration:none" href="/form/items?status=__eligible__">Eligible</a>'
+        f'<a class="chip" style="color:#ccc;text-decoration:none" href="/form/items?status=In+Stock">In Stock</a>'
+        f'<a class="chip" style="color:#ccc;text-decoration:none" href="/form/items?status=Listed">Listed</a>'
+        f'<a class="chip" style="color:#ccc;text-decoration:none" href="/form/items?status=Staged">Staged</a>'
+        f'<a class="chip" style="color:#ccc;text-decoration:none" href="/form/items?status=Sold">Sold</a>'
+        f'</div>'
         f'<div class="sku-hdr">'
         f'<span class="slabel">{h(sku)}</span>'
         f'<span class="stitle">{h(title)}</span>'

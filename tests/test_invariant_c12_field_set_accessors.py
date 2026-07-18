@@ -62,14 +62,20 @@ _ALLOWLIST = {
     (_SRC / "tgw" / "workers" / "ai_identify.py", 273),   # (b) AI model response
     (_SRC / "tgw" / "workers" / "ai_identify.py", 333),   # (a) accessor patch write
     (_SRC / "tgw" / "workers" / "ai_identify.py", 428),   # (a) accessor patch write
-    (_SRC / "tgw" / "http_server.py", 1001),              # (a) accessor patch write
-    (_SRC / "tgw" / "http_server.py", 1022),              # (a) accessor patch write (todo #1416, draft_listing.item_specifics)
-    (_SRC / "tgw" / "http_server.py", 1027),              # (a) accessor output (full envelope) moving onward
-    (_SRC / "tgw" / "http_server.py", 1515),              # (b) revision_draft.delta
-    (_SRC / "tgw" / "http_server.py", 1517),              # (b) revision_draft.delta
-    (_SRC / "tgw" / "http_server.py", 1523),              # (a) accessor patch write (todo #1416)
-    (_SRC / "tgw" / "http_server.py", 2407),              # (a) accessor output (tgw.ebay.inventory_diff.apply_inventory_diff's patch) moving onward into _apply_patch (todo #1417)
-    (_SRC / "tgw" / "http_server.py", 5104),              # (b) revision_draft.delta — line shifted by this packet's new inv-diff panel (todo #1417)
+    (_SRC / "tgw" / "http_server.py", 742),               # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
+    (_SRC / "tgw" / "http_server.py", 751),               # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
+    (_SRC / "tgw" / "http_server.py", 1056),              # (a) accessor patch write
+    (_SRC / "tgw" / "http_server.py", 1077),              # (a) accessor patch write (todo #1416, draft_listing.item_specifics)
+    (_SRC / "tgw" / "http_server.py", 1082),              # (a) accessor output (full envelope) moving onward
+    (_SRC / "tgw" / "http_server.py", 1570),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 1572),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 1578),              # (a) accessor patch write (todo #1416)
+    (_SRC / "tgw" / "http_server.py", 2478),              # (a) accessor output (tgw.ebay.inventory_diff.apply_inventory_diff's patch) moving onward into _apply_patch (todo #1417)
+    (_SRC / "tgw" / "http_server.py", 2537),              # (a) category_aspect_migration's patch moving onward into _apply_patch (todo #1471)
+    (_SRC / "tgw" / "http_server.py", 5235),              # (b) revision_draft.delta — line shifted by this packet's new inv-diff panel (todo #1417)
+    (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 114),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
+    (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 121),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
+    (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 124),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "inventory_diff.py", 159),   # (a) accessor patch output moving onward (todo #1417 apply_inventory_diff)
     (_SRC / "tgw" / "ebay" / "inventory_diff.py", 163),   # (a) accessor patch output moving onward (todo #1417 apply_inventory_diff)
 }

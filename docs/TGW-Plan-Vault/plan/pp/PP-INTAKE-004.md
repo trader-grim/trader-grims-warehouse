@@ -256,8 +256,12 @@ None yet — planning only. When unblocked:
       completion fallback) — 2026-07-04.
 - [x] Scope expanded + barcode scanner + event-bus requirement settled —
       2026-07-11.
-- [ ] Seed build todos for the Kotlin app (Phase 1/2/3, mirroring the
-      breakdown above) and the backend threshold-trigger change.
+- [x] Seed build todos for the Kotlin app (Phase 1/2/3, mirroring the
+      breakdown above) and the backend threshold-trigger change — done
+      2026-07-16, todos #1485-#1489 (Phase 1a-1e). Not started building —
+      seeded so it's ready to dispatch when Dave prioritizes it, per his
+      "we shouldn't be that far yet, but I would rather have it planned
+      and ready."
 - [ ] `pytest -q` unaffected — no source code changed by this pass.
 
 ## Refinement (Dave, 2026-07-04, unchanged): custom turntable + two-device rooting split

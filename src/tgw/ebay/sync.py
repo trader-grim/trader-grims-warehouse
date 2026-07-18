@@ -30,8 +30,39 @@ import requests
 
 from tgw.apis.ebay.client import ebay_get, ebay_post, ebay_put
 from tgw.ebay.draft_specifics import get_ebay_aspects
+from tgw.queue import state_machine
 
 log = logging.getLogger(__name__)
+
+
+def enqueue_post_push_sync(sku: str) -> None:
+    """Todo #1445/#1467: every worker that actually pushes a change to
+    eBay's live state (`ebay_stage` for offer/inventory-item upserts,
+    `ebay_publish` for the publish transition) must refresh the local
+    `ebay_live` mirror afterward, or it goes stale until some unrelated
+    periodic sync happens to catch it — the exact mechanism behind
+    "why do we keep having to manually re-sync" (Dave, 2026-07-16).
+    `ebay_stage` had never enqueued this at all; `ebay_publish` got its own
+    copy of this same call earlier the same day (#1445) before the
+    duplication was noticed and pulled up into this shared home, following
+    the same precedent as `format_ebay_error` above.
+
+    Targeted per-SKU sync (`ebay_sync.handle()` supports `payload['sku']`),
+    deduped per SKU so a burst of pushes for one SKU coalesces into one
+    sync rather than piling up the queue (`uq_queue_jobs_dedupe_key_active`
+    only blocks while a job with this key is still active). Non-fatal —
+    a failed enqueue here must never turn a successful stage/publish into
+    a failed job.
+    """
+    try:
+        state_machine.enqueue_job(
+            queue_name='ebay_sync',
+            payload={'sku': sku, 'reason': 'post_push'},
+            dedupe_key=f'ebay_sync:post_push:{sku}',
+            max_attempts=3,
+        )
+    except Exception as exc:
+        log.warning('%s: post-push ebay_sync enqueue failed (non-fatal): %s', sku, exc)
 
 
 def format_ebay_error(body: str, status: int) -> str:
@@ -441,8 +472,22 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
 
     # todo #1418: Set B read via tgw.ebay.draft_specifics (the sanctioned accessor) —
     # this is the ONE code path that pushes aspects to eBay's live Inventory API.
+    #
+    # Todo #1462: an operator-cleared aspect is stored internally as an
+    # explicit "" (see draft_specifics.set_ebay_aspects — "" is a real
+    # value, distinct from None which is a deliberate no-op) — that's the
+    # correct record of intent locally. But eBay's Inventory API rejects an
+    # empty-string aspect value outright, with a garbled generic errorId
+    # 25002 whose message dumps the entire aspects dict rather than naming
+    # the actual offending field (confirmed live 2026-07-16 on
+    # tgw202605040949058 right after #1461 started correctly sending
+    # cleared fields). This PUT is a full replace of product.aspects, so
+    # omitting the key entirely achieves the intended "clear this aspect on
+    # eBay" outcome — the fix belongs here, at the push boundary, not in
+    # the internal record (which must keep recording "" as a real cleared
+    # value for its own history/diff purposes).
     aspects: Dict[str, List[str]] = {
-        k: [str(v)] for k, v in get_ebay_aspects(item).items()
+        k: [str(v)] for k, v in get_ebay_aspects(item).items() if v not in (None, '')
     }
 
     # Prefer the pre-resolved condition_enum written by ebay_draft (already

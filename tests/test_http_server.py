@@ -3539,9 +3539,13 @@ def test_accept_proposals_persists_item_specifics_edit(env, monkeypatch):
     assert isp_fields["Size"] == "Large"
     assert doc["draft_listing"]["item_specifics"]["_set"] == "ebay_draft"
     assert len(doc["draft_listing"]["item_specifics_history"]) >= 1
-    # The accepted delta must NOT have landed in item_attributes (Set A) —
-    # that's the exact boundary bug this packet fixes.
-    assert "item_attributes" not in doc
+    # Padlock auto-sync (Dave, 2026-07-18) supersedes this test's original
+    # assertion: any draft_listing save now pushes unlocked keys into
+    # item_attributes by design (see inventory_record.sync_from_draft),
+    # so the accepted values SHOULD land there too — nothing here is locked.
+    ia_fields = inventory_record.get_inventory_fields(doc)
+    assert ia_fields["Brand"] == "NewBrand"
+    assert ia_fields["Size"] == "Large"
     assert doc.get("revision_draft") is None
 
 
@@ -3611,7 +3615,10 @@ def test_accept_proposals_item_specifics_absent_before(env, monkeypatch):
     json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
     doc = json.loads(json_path.read_text(encoding="utf-8"))
     assert draft_specifics.get_ebay_aspects(doc)["Brand"] == "FreshBrand"
-    assert "item_attributes" not in doc
+    # Padlock auto-sync (Dave, 2026-07-18): unlocked keys now follow the
+    # draft into item_attributes on every save — supersedes this test's
+    # original "must not land in Set A" assertion.
+    assert inventory_record.get_inventory_fields(doc)["Brand"] == "FreshBrand"
 
 
 def test_item_detail_inventory_record_panel_shows_set_a_unblended(env):
@@ -4005,6 +4012,142 @@ def test_inventory_diff_apply_idempotent_no_op_when_stale(env, monkeypatch):
 def test_inventory_diff_apply_requires_auth(client):
     sku = "tgw20260615110000036"
     r = client.post(f"/api/items/{sku}/inventory-diff/apply", json={"keys": ["Type"]})
+    assert r.status_code in (401, 403)
+
+
+def test_draft_save_auto_syncs_unlocked_key_to_inventory_record(env, enqueue_calls):
+    """Padlock design (Dave, 2026-07-18): saving a draft_listing edit
+    pushes unlocked keys into item_attributes automatically — no separate
+    diff-review step needed for the common case."""
+    sku = "tgw20260615110000040"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Elephant Widget", "location": "X9",
+        "item_attributes": {"_set": "inventory_record", "version": 1,
+                             "updated_at": "2026-07-01T00:00:00+00:00",
+                             "updated_at_backfilled": False,
+                             "fields": {"Type": "Elephant Figurine"}},
+        "draft_listing": {"title": "Elephant Widget",
+                           "item_specifics": {"Type": "Elephant Figurine"}},
+    })
+    r = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"draft_listing": {"item_specifics": {"Type": "Mouse Figurine"}}}},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
+    ia = inventory_record.get_inventory_fields(doc)
+    assert ia["Type"] == "Mouse Figurine"
+
+
+def test_draft_save_auto_syncs_title_and_description_top_level(env, enqueue_calls):
+    """Second live bug (Dave, 2026-07-18): the padlock sync only reached
+    item_attributes aspects, not the top-level title/description fields
+    the page header and fields panel actually display. Both now sync the
+    same way, keyed by "title"/"description" in the shared locked_keys list."""
+    sku = "tgw20260615110000044"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Elephant Thimble", "description": "An elephant.",
+        "location": "X9",
+        "draft_listing": {"title": "Elephant Thimble", "description": "An elephant."},
+    })
+    r = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"draft_listing": {
+            "title": "Mouse Thimble", "description": "A mouse.",
+        }}},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
+    assert doc["title"] == "Mouse Thimble"
+    assert doc["description"] == "A mouse."
+
+
+def test_locked_title_does_not_auto_sync_from_draft_save(env, enqueue_calls):
+    """Locking "title" freezes the top-level field even though it isn't
+    an item_attributes aspect — same shared locked_keys mechanism."""
+    sku = "tgw20260615110000045"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Elephant Thimble", "location": "X9",
+        "item_attributes": {"_set": "inventory_record", "version": 1,
+                             "updated_at": "2026-07-01T00:00:00+00:00",
+                             "updated_at_backfilled": False,
+                             "fields": {}, "locked_keys": ["title"]},
+        "draft_listing": {"title": "Elephant Thimble"},
+    })
+    r = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"draft_listing": {"title": "Mouse Thimble"}}},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
+    assert doc["draft_listing"]["title"] == "Mouse Thimble"
+    assert doc["title"] == "Elephant Thimble"
+
+
+def test_locked_key_does_not_auto_sync_from_draft_save(env, enqueue_calls):
+    """A locked key stays frozen at its current value even when the draft
+    changes — the padlock is the only way a key stops following eBay."""
+    sku = "tgw20260615110000041"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Widget", "location": "X9",
+        "item_attributes": {"_set": "inventory_record", "version": 1,
+                             "updated_at": "2026-07-01T00:00:00+00:00",
+                             "updated_at_backfilled": False,
+                             "fields": {"Type": "Brooch"},
+                             "locked_keys": ["Type"]},
+        "draft_listing": {"item_specifics": {"Type": "Brooch"}},
+    })
+    r = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"draft_listing": {"item_specifics": {"Type": "Pendant"}}}},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
+    # Set B (the actual eBay draft) still updates normally...
+    assert draft_specifics.get_ebay_aspects(doc)["Type"] == "Pendant"
+    # ...but the locked Set A key stays frozen at its old value.
+    assert inventory_record.get_inventory_fields(doc)["Type"] == "Brooch"
+
+
+def test_inventory_lock_toggle_endpoint(env):
+    sku = "tgw20260615110000042"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Widget", "location": "X9",
+        "item_attributes": {"_set": "inventory_record", "version": 1,
+                             "updated_at": "2026-07-01T00:00:00+00:00",
+                             "updated_at_backfilled": False,
+                             "fields": {"Type": "Brooch"}},
+    })
+    r = env["client"].post(
+        f"/api/items/{sku}/inventory-lock",
+        json={"key": "Type", "locked": True},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
+    assert inventory_record.is_locked(doc, "Type") is True
+    # Locking never appends to item_attributes_history — it's metadata
+    # about sync behavior, not a fact about the item.
+    assert not doc.get("item_attributes_history")
+
+    r2 = env["client"].post(
+        f"/api/items/{sku}/inventory-lock",
+        json={"key": "Type", "locked": False},
+        headers=AUTH_HEADERS,
+    )
+    assert r2.status_code == 200
+    doc2 = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
+    assert inventory_record.is_locked(doc2, "Type") is False
+
+
+def test_inventory_lock_requires_auth(client):
+    sku = "tgw20260615110000043"
+    r = client.post(f"/api/items/{sku}/inventory-lock", json={"key": "Type", "locked": True})
     assert r.status_code in (401, 403)
 
 

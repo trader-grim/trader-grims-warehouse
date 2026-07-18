@@ -446,6 +446,7 @@ def _write_filing_log(
 # ---------------------------------------------------------------------------
 
 _INTAKE_OWNERS: tuple = ('root', 'dave', 'tigwa')
+_CONTROL_FILENAMES: frozenset = frozenset({'readme.md', 'untitled.base'})
 
 
 def _owner_dir(inbox_dir: Path, owner: str) -> Path:
@@ -473,33 +474,60 @@ def _sha256_file(path: Path) -> str:
 
 
 def _iter_source_files(inbox_dir: Path):
-    """Yield (owner, md_file) for every intake-eligible candidate, sorted
-    deterministically by owner then filename."""
+    """Yield (owner, md_file) for every intake-eligible (Markdown, staged/
+    enqueued) candidate, sorted deterministically by owner then filename."""
     for owner in _INTAKE_OWNERS:
         subdir = _owner_dir(inbox_dir, owner)
         if not subdir.is_dir():
             continue
         for md_file in sorted(subdir.glob('*.md')):
-            if owner == 'root' and md_file.name.lower() == 'readme.md':
+            if md_file.name.lower() in _CONTROL_FILENAMES:
                 continue
             yield owner, md_file
+
+
+def _iter_all_candidate_files(inbox_dir: Path):
+    """Yield (owner, path) for every direct-child regular file across
+    root/dave/tigwa, including non-Markdown types — manifest reporting only,
+    never used to drive a move/enqueue. Excludes control files. Non-
+    recursive, same as _iter_source_files."""
+    for owner in _INTAKE_OWNERS:
+        subdir = _owner_dir(inbox_dir, owner)
+        if not subdir.is_dir():
+            continue
+        for path in sorted(subdir.iterdir()):
+            if not path.is_file():
+                continue
+            if path.name.lower() in _CONTROL_FILENAMES:
+                continue
+            yield owner, path
+
+
+_UNSUPPORTED_TYPE_REASON = 'seen but not actionable: unsupported source type pending supervised normalization'
 
 
 def build_intake_manifest(cfg: Dict[str, Any], bypass_delay: bool = False) -> List[Dict[str, Any]]:
     """Non-mutating inventory of intake candidates across root/dave/tigwa.
 
-    Each entry reports source path, owner queue, file type, size, mtime,
-    sha256, eligibility decision, and the queue path a real run would use.
-    Never touches the filesystem beyond stat()/read for hashing.
+    Covers every direct-child regular file, not just Markdown (Tigwa review,
+    #1438): non-Markdown files are reported eligible=False with an explicit
+    "seen but not actionable" reason instead of being invisible, since
+    knowledge-first intake (Dave, 2026-07-15) requires every direct source
+    artifact to appear as a preserved/deferred candidate even when staging
+    stays Markdown-only. Each entry reports source path, owner queue, file
+    type, size, mtime, sha256, eligibility decision, and (Markdown only) the
+    queue path a real run would use. Never touches the filesystem beyond
+    stat()/read for hashing.
     """
     inbox_dir: Path = cfg['plan_inbox_path']
     delay_hours: float = float(cfg.get('pm_intake_delay_hours', 4.0))
     manifest: List[Dict[str, Any]] = []
 
-    for owner, md_file in _iter_source_files(inbox_dir):
-        rel_name = _relative_name(owner, md_file)
+    for owner, path in _iter_all_candidate_files(inbox_dir):
+        rel_name = _relative_name(owner, path)
+        is_markdown = path.suffix.lower() == '.md'
         try:
-            stat = md_file.stat()
+            stat = path.stat()
         except OSError as exc:
             manifest.append({
                 'source_path': rel_name, 'owner': owner, 'eligible': False,
@@ -507,10 +535,8 @@ def build_intake_manifest(cfg: Dict[str, Any], bypass_delay: bool = False) -> Li
             })
             continue
 
-        age_hours = (time.time() - stat.st_mtime) / 3600
-        aged_enough = bypass_delay or age_hours >= delay_hours
         try:
-            sha256 = _sha256_file(md_file)
+            sha256 = _sha256_file(path)
         except OSError as exc:
             manifest.append({
                 'source_path': rel_name, 'owner': owner, 'eligible': False,
@@ -518,18 +544,28 @@ def build_intake_manifest(cfg: Dict[str, Any], bypass_delay: bool = False) -> Li
             })
             continue
 
-        manifest.append({
+        age_hours = (time.time() - stat.st_mtime) / 3600
+        entry: Dict[str, Any] = {
             'source_path': rel_name,
             'owner': owner,
-            'file_type': md_file.suffix.lstrip('.') or 'unknown',
+            'file_type': path.suffix.lstrip('.').lower() or 'unknown',
             'size_bytes': stat.st_size,
             'mtime': datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
             'age_hours': round(age_hours, 1),
             'sha256': sha256,
-            'eligible': aged_enough,
-            'reason': 'ready' if aged_enough else f'{age_hours:.1f}h old, delay gate is {delay_hours:.0f}h',
-            'planned_queue_path': f'queued/{rel_name}',
-        })
+        }
+
+        if not is_markdown:
+            entry['eligible'] = False
+            entry['reason'] = _UNSUPPORTED_TYPE_REASON
+            manifest.append(entry)
+            continue
+
+        aged_enough = bypass_delay or age_hours >= delay_hours
+        entry['eligible'] = aged_enough
+        entry['reason'] = 'ready' if aged_enough else f'{age_hours:.1f}h old, delay gate is {delay_hours:.0f}h'
+        entry['planned_queue_path'] = f'queued/{rel_name}'
+        manifest.append(entry)
 
     return manifest
 
@@ -572,6 +608,37 @@ def scan_and_enqueue(cfg: Dict[str, Any], bypass_delay: bool = False) -> List[st
             continue
 
         dest = queued_dir / rel_name
+        queued_name = rel_name
+
+        # Collision guard (Tigwa review, #1438): Path.rename() replaces an
+        # existing destination on this filesystem, so a naive move could
+        # silently clobber an already-queued file of the same owner-
+        # qualified name. Never overwrite: if the queued destination already
+        # exists with identical content, this is an idempotent duplicate
+        # (skip the move, don't re-enqueue); if it exists with different
+        # content, give the incoming file its own content-addressed
+        # destination instead of colliding.
+        if dest.exists():
+            try:
+                existing_sha256 = _sha256_file(dest)
+            except OSError as exc:
+                log.warning('could not hash existing queued/%s to check collision: %s', rel_name, exc)
+                continue
+            if existing_sha256 == sha256:
+                log.info('%s already queued with identical content — skipping duplicate', rel_name)
+                tgw_logging.log_event(
+                    'pm_intake_duplicate_skipped', filename=rel_name, owner=owner, sha256=sha256,
+                )
+                enqueued.append(rel_name)
+                continue
+            collision_filename = f'{dest.stem}__{sha256[:8]}{dest.suffix}'
+            dest = dest.parent / collision_filename
+            queued_name = f'{owner}/{collision_filename}' if owner != 'root' else collision_filename
+            log.warning(
+                'collision at queued/%s (content differs) — routing to queued/%s instead',
+                rel_name, queued_name,
+            )
+
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
             md_file.rename(dest)
@@ -583,12 +650,12 @@ def scan_and_enqueue(cfg: Dict[str, Any], bypass_delay: bool = False) -> List[st
         # content is not re-enqueued (idempotent rerun), but an edited note
         # (new sha256) or a same-named note from a different owner (different
         # rel_name) gets its own key — no cross-owner or stale-content collision.
-        dedupe_key = f'pm_intake:{rel_name}:{sha256[:16]}'
+        dedupe_key = f'pm_intake:{queued_name}:{sha256[:16]}'
         try:
             jid = state_machine.enqueue_job(
                 queue_name=QUEUE_NAME,
                 payload={
-                    'filename': rel_name,
+                    'filename': queued_name,
                     'owner': owner,
                     'source_path': rel_name,
                     'sha256': sha256,
@@ -597,14 +664,14 @@ def scan_and_enqueue(cfg: Dict[str, Any], bypass_delay: bool = False) -> List[st
                 dedupe_key=dedupe_key,
                 max_attempts=3,
             )
-            log.info('enqueued pm_intake job for %s (job %s)', rel_name, jid)
-            tgw_logging.log_event('pm_intake_enqueued', filename=rel_name, owner=owner, job_id=jid)
-            enqueued.append(rel_name)
+            log.info('enqueued pm_intake job for %s (job %s)', queued_name, jid)
+            tgw_logging.log_event('pm_intake_enqueued', filename=queued_name, owner=owner, job_id=jid)
+            enqueued.append(queued_name)
         except psycopg2.errors.UniqueViolation:
-            log.info('pm_intake job already exists for %s — skipping', rel_name)
-            enqueued.append(rel_name)
+            log.info('pm_intake job already exists for %s — skipping', queued_name)
+            enqueued.append(queued_name)
         except Exception:
-            log.exception('failed to enqueue pm_intake job for %s', rel_name)
+            log.exception('failed to enqueue pm_intake job for %s', queued_name)
             dest.rename(md_file)
 
     return enqueued

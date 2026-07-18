@@ -33,8 +33,8 @@ import tgw.logging as tgw_logging
 from tgw.apis.fence import ebay_write as fence_ebay_write
 from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.config import DEFAULT_CONFIG, load_config
+from tgw.ebay.sync import enqueue_post_push_sync, stage_draft
 from tgw.ebay.sync import format_ebay_error as _format_ebay_error
-from tgw.ebay.sync import stage_draft
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
@@ -400,6 +400,16 @@ class EbayStageWorker(QueueWorker):
             state_machine.enqueue_catalog_rebuild(f'ebay_stage:{sku}')
         except psycopg2.errors.UniqueViolation:
             pass
+
+        # Invariant C14 (2026-07-16 incident): this worker runs on nearly
+        # every real operator edit ("Update Listing" on an already-live
+        # item enqueues ebay_stage directly, never ebay_publish) yet never
+        # refreshed the local ebay_live mirror itself — only ebay_publish
+        # did (todo #1445), and only when this worker's own already-live
+        # republish trigger below happens to fire. Call it unconditionally
+        # here so the mirror refreshes on every successful stage, not just
+        # the subset that also happens to republish.
+        enqueue_post_push_sync(sku)
 
         # If the item was previously published, republish after staging.
         # eBay sets the offer back to UNPUBLISHED on any updateOffer call

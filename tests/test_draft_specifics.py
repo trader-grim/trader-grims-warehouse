@@ -85,3 +85,62 @@ def test_set_ebay_aspects_no_change_no_history_entry():
     patch = draft_specifics.set_ebay_aspects(item, {"Type": "Brooch"}, source="ebay_draft")
     assert patch["item_specifics_history"] == []
     assert patch["item_specifics"]["fields"] == {"Type": "Brooch"}
+
+
+def test_set_ebay_aspects_explicit_empty_string_clears_field():
+    """Todo #1461: an operator clearing an aspect field must actually take
+    effect once the frontend sends it as an explicit "" (rather than
+    silently omitting the key, the pre-fix bug). The backend already
+    supported this — "" is a real value, distinct from None (which is a
+    deliberate no-op, see the module docstring) — this test just locks in
+    that the accessor itself was never the problem."""
+    item = {"draft_listing": {"item_specifics": {"Material": "Silver"}}}
+    patch = draft_specifics.set_ebay_aspects(item, {"Material": ""}, source="ebay_draft")
+    assert patch["item_specifics"]["fields"]["Material"] == ""
+    assert len(patch["item_specifics_history"]) == 1
+    entry = patch["item_specifics_history"][0]
+    assert entry["previous_value"] == "Silver"
+    assert entry["value"] == ""
+
+
+def test_remove_ebay_aspects_deletes_key_and_records_history():
+    """Todo #1471: the explicit, operator-confirmed removal path — unlike
+    set_ebay_aspects, this ACTUALLY deletes the key (never a side effect
+    of a generic update, only ever called for a genuine confirmed
+    removal, e.g. category-aspect migration)."""
+    item = {"draft_listing": {"item_specifics": {"Material": "Silver", "Type": "Brooch"}}}
+    patch = draft_specifics.remove_ebay_aspects(
+        item, ["Material"], source="category_aspect_migration")
+    assert patch["item_specifics"]["fields"] == {"Type": "Brooch"}
+    assert len(patch["item_specifics_history"]) == 1
+    entry = patch["item_specifics_history"][0]
+    assert entry["key"] == "Material"
+    assert entry["previous_value"] == "Silver"
+    assert entry["value"] is None
+    assert entry["source"] == "category_aspect_migration"
+
+
+def test_remove_ebay_aspects_missing_key_is_noop():
+    item = {"draft_listing": {"item_specifics": {"Type": "Brooch"}}}
+    patch = draft_specifics.remove_ebay_aspects(
+        item, ["Material"], source="category_aspect_migration")
+    assert patch["item_specifics"]["fields"] == {"Type": "Brooch"}
+    assert patch["item_specifics_history"] == []
+
+
+def test_remove_ebay_aspects_preserves_prior_history_append_only():
+    item = {
+        "draft_listing": {
+            "item_specifics": {"Material": "Silver"},
+            "item_specifics_history": [
+                {"ts": "2026-01-01T00:00:00+00:00", "key": "Material",
+                 "value": "Silver", "previous_value": None,
+                 "source": "ebay_draft", "applied_by": "system"},
+            ],
+        }
+    }
+    patch = draft_specifics.remove_ebay_aspects(
+        item, ["Material"], source="category_aspect_migration")
+    assert len(patch["item_specifics_history"]) == 2
+    assert patch["item_specifics_history"][0]["value"] == "Silver"
+    assert patch["item_specifics_history"][1]["value"] is None

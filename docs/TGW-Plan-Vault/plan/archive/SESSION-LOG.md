@@ -343,3 +343,73 @@ past this session's fixes). #1230 also confirmed DONE (tagged PP-COHESION-001).
 **Open into next session (archived, superseded by later sessions):** todo
 #1246 (4 small deferred code-review findings). PR #8 closed, no longer a
 carry-forward.
+
+
+## 2026-07-16→17 (planner rubric · lost-PP recovery sweep · 6 PPs planned)
+
+**Note: session-number sequence has a gap since Session 48 (2026-07-06) —
+using date heading instead of guessing a number.**
+
+- Master-plan reconciliation (todo #1477) resumed from a prior-session
+  pause; worker-contract gaps (#1458/#1459/#1479) reviewed, left as-is per
+  Dave ("in progress is good enough for today").
+- Wrote `reference/PP-HERMES-EA-001-planner-rubric.md` (todo #1414) —
+  closed the confirmed pipeline-maturity gap #3 from 2026-07-14.
+- Multi-round planning sweep, each round prompted by Dave asking "is that
+  all unplanned?": PP-STORAGE-001, PP-VISION-001, PP-INVENTORY-001,
+  PP-UIUX-001 (new, absorbing an orphaned 10-day Flutter-vs-web
+  discussion), PP-RUNNERCOMMS-001 (resolved as a "mailbox" design), and
+  PP-INTAKE-004 Phase 1 (seeded as real todos, not started) all taken from
+  bare/stub to fully planned.
+- Dave triaged 7 stale/quiet PPs directly: PP-BULKLIST-001 (queued after
+  pipeline restart), PP-PHOTO-001 Phase B (→ Tigwa), PP-RECOVERY-001
+  (CLOSED — confirmed already resolved via later work), PP-MACRO-001 (→
+  Tigwa), PP-LOOKUP-001 (→ Tigwa), PP-EBAY-SNAPSHOT-001 (status only),
+  PP-MARKETING-001 (deferred).
+- "Recover lost PPs" sweep: **PP-ROUTER-001 opened**, recovering an
+  orphaned `docs/ai-plans/router-dlink-dir868l-ecosystem.md` (filed
+  2026-07-06, never had a PP) — found a live DHCP IP-conflict finding in
+  the process. Corrected a false "no design doc existed" claim about
+  PP-DOCLIB-001 (doc exists, Dave confirmed no action needed — recoll was
+  the faster route already taken). Sent router findings to Tigwa re: a
+  possible NATS-JetStream-for-alarm-system leg she's already researched.
+- **Process correction, twice:** lost-PP recovery is pull-based
+  (search/reinstate on request), and the function itself belongs to
+  Tigwa (the librarian), not Claude — she's already working it nightly on
+  Dave's direct assignment. Encoded in memory + master plan; tonight's
+  sweep was explicitly named as not-the-template-to-repeat.
+- Reconfirmed the six-stage-loop doctrine at the PP level and encoded
+  "parallel-track discipline" (R1 concentrated focus, background PPs keep
+  nudging forward) into the master plan.
+- 12 new todos filed (#1480-#1491), all planned/unstarted. `tgw plan
+  check` clean throughout every round.
+
+**Open into next session:** todo #1477 still paused, not Dave-confirmed
+complete. "2 credentials issues" question (PP-LOOKUP-001) unresolved.
+Dave: "we code in the morning" — next session is likely execution
+(pipeline restart-in-earnest), not more planning.
+
+## 2026-07-17 — DeepSeek/OpenRouter billing investigation + registry-log delegation
+
+- Dave asked what was misconfigured after OpenRouter billed "DeepSeek 3"
+  tokens during the 5pm UTC hour on 2026-07-15. Root-caused via git history
+  + file mtimes (no code changes made): the live `.aider.conf.yml` during
+  that hour still had the pre-tuning line `model: openrouter/deepseek/
+  deepseek-chat-v3-0324` — the switch to DeepSeek-direct didn't land until
+  commit `2d98364` that same evening (2026-07-16 03:50 UTC), several hours
+  after todo #1358/#1365's worktree-wiring smoke test ran. Confirmed as the
+  old default being live during a planned test, not an ongoing gap.
+- Side finding, not actioned (Dave didn't ask for a todo): MCP-invoked
+  `aider_run_task` calls have no provider/model/token audit trail — only
+  the `/tgw-aider-step` skill path logs to `usage.csv`.
+- Dave separately noted Tigwa is hashing configs (and, on her own
+  initiative, worker contracts) for the library catalog — partial coverage
+  so far — and asked to formalize it into a durable registry log. Filed
+  todo #1493 (pp_ref PP-KNOWLEDGE-001) and sent
+  `inbox/tigwa/CLAUDE-REQUEST-config-hash-registry-log-2026-07-17.md`
+  relaying the ask; format/schema left to Tigwa to scope, same
+  consult-then-review pattern as HR-001.
+
+**Open into next session:** #1493 awaiting Tigwa's design response. Nothing
+changed on the still-open top-priority thread (#1492 Flutter launch/connect
+verification, #1477 master-plan reconciliation paused) — see handoff.md.

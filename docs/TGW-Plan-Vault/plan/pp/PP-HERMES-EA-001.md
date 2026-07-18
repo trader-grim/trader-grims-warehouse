@@ -970,3 +970,18 @@ runner-level judgment calls (per point 4's evidence) while still pinning
 down the non-negotiables. Not started this session — captured as the
 next session's process-improvement work, separate from any specific
 PP-DEADLETTER-001-style feature work.
+
+**Gap #3 CLOSED, 2026-07-16 (todo #1414):** written as
+`reference/PP-HERMES-EA-001-planner-rubric.md` — section-by-section
+calibration guidance (Context budget / Verified-live / Spec / Out of
+scope / Dataset / Acceptance / Quota-risk) derived from real packets
+already in `plan/packets/`, contrasting a tight security-fix packet
+(`1274`) against a looser schema-foundation packet that explicitly
+delegates named sub-decisions to the runner (`1418`) to show the "loose
+enough for creativity, strict enough to get what we want" calibration in
+practice, not just in the abstract. Includes a packet-sizing test (when to
+split), a batch-ordering rule, and a 5-question self-check a planner runs
+before dispatch. Dave's same-session direction after this: move into
+actually exercising the pipeline live (packets → runners → review →
+stitch) and improve the rubric from what that surfaces, rather than
+refine process on paper indefinitely.

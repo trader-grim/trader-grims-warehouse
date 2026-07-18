@@ -757,6 +757,74 @@ stated requirement driving it. If Dave wants a sticky skip later, that's
 a small, additive change on top of this (a `dismissed_diff_keys` list
 checked by the diff engine) — not a redesign.
 
+## C14 — An operator's correction either takes effect or is visibly, actionably reported as failed — never silently lost ⚠️ (2026-07-16, incident, PP-LISTEDITOR-001)
+
+**Rule:** when an operator submits a change to any stored field (clearing,
+editing, correcting), the system must guarantee one of exactly two
+outcomes — the change is durably applied and reflected back to the
+operator, or its failure is surfaced as an actionable, specific finding.
+A third outcome — the submission is silently accepted (200 OK) but the
+value never actually changes anywhere the operator can see — is
+forbidden. This is Prime Directive 1's "never discard... data" read
+together with the operator-gate principle (C9/C10): the gate only works
+if pressing it does something truthful.
+
+**Why — live incident, 2026-07-16:** an operator (Dave) repeatedly
+cleared `item_attributes`/`draft_listing.item_specifics.Material` on
+`tgw202605040949058` (live, listed as "Sterling Silver and Gold") through
+the item-detail aspects form. Each attempt reported "✓ Saved." The value
+never changed, with no error, no indication, nothing to click that would
+have told the operator the correction hadn't landed. The wrong material
+claim stayed live and uncorrectable through the UI until root-caused same
+day — the listing had to be manually ended on eBay as the only available
+remedy. Root causes found, in order of discovery, each one a distinct way
+this invariant was silently violated:
+1. `saveEbayDraft()`'s aspects-collection loop only included a field in
+   the save payload `if(v)` (non-empty) — a cleared field's key was
+   dropped entirely, so the backend never even saw an attempted change
+   (fixed, todo #1461).
+2. Once (1) was fixed and an empty value did reach eBay, eBay's Inventory
+   API rejected it outright with a garbled generic error dumping the
+   entire aspects dict — `_build_offer_bodies()` had no rule for
+   translating "operator cleared this" into eBay's own "omit the aspect
+   key" convention (fixed, todo #1462).
+3. The item-detail page's pipeline-error box could dismiss ("Clear
+   error") a failed push but had no operator-initiated retry — and
+   neither did the "Needs attention"/"Retry" action-line buttons, which
+   only scroll to the error, they don't re-run anything (open, todo
+   #1461/#1462 follow-up, not yet built).
+4. `ebay_stage` (the worker behind the far more common "Update Listing"
+   button on an already-live item) never refreshed the local `ebay_live`
+   mirror after a successful push — only `ebay_publish` did, and only
+   after being fixed same day (todo #1445). This is the mechanism behind
+   "why do we keep having to manually re-sync" (Dave, 2026-07-16): the
+   worker that runs on nearly every real edit never told the local record
+   what actually landed (fix in progress, `tgw.ebay.sync.
+   enqueue_post_push_sync()`, shared by both workers).
+5. Separately, Tigwa's same-day field-set-boundary audit found the
+   generic `PATCH /api/items/{sku}` endpoint still accepts a full Set A/
+   Set B envelope from an authenticated caller — a live violation of C12's
+   "no generic PATCH passthrough" rule, a different but adjacent way wrong
+   data could enter either set outside its accessor (open, todo #1464).
+
+**Status: ⚠️ open, not a built invariant with a detector yet.** Items 1
+and 2 above are fixed and tested (offline suite green). Items 3, 4, 5 are
+filed but not yet built. This invariant is being written down NOW,
+concurrent with the incident, per Prime Directive 5 — not retroactively
+after full enforcement exists, so it isn't lost the way the underlying
+gap was for however long it predated today.
+
+**What "detector" should mean once this is fully built** — not yet
+implemented, captured here as the target: every operator-facing save path
+needs a round-trip test proving a *cleared* value (not just a changed
+one) actually persists and is reflected in the next read/render, the same
+shape as the two regression tests `test_draft_specifics.py` and
+`tests/test_http_server.py` gained today for the aspects form
+specifically. A fleet-wide, path-by-path version of that check — rather
+than one path fixed reactively per incident — is the real fix for "this
+keeps happening in a new field/form every time," not yet scoped as its
+own todo.
+
 ## E8 — The Google free tier is the operator emergency reserve ✅ (2026-07-04, session 45) — SUPERSEDED for background use 2026-07-08
 
 **Original rule (free-tier era):** Background jobs never spend the Google
@@ -874,3 +942,47 @@ forces a push/pull or alerts on the gap.
   commit threshold, the same way `thermal.status` is checked independent of any session
   choosing to look. Tracked under PP-AGENT-DISCIPLINE-001, todo #1444's follow-up (not
   filed as its own todo yet — file one before considering this invariant ✅).
+
+## E11 — An agent's role restrictions are locked in by tool permissions and hooks, not by its own system-prompt prose ⚠️ (2026-07-16, PP-AGENT-DISCIPLINE-001)
+
+**Rule:** every "must"/"never" rule in a `.claude/agents/*.md` profile is a candidate for
+mechanical enforcement (scoped `tools:`, a `PreToolUse`/`SessionStart` hook, or a harness
+feature like worktree isolation) before it is trusted as prose alone. Prose-only rules are
+acceptable only where no mechanical equivalent exists yet — and that gap should be named
+explicitly, not silently assumed covered by "the agent will read and follow it."
+
+**Why:** the same session that built E10/the PreToolUse flake-guard hook (this same day)
+skipped CLAUDE.md's own startup ritual again hours later — a written instruction, restated
+even more forcefully, still depends on the model choosing to comply, and that already
+failed twice. Dave's generalization, same day: "we should use a similar pattern when
+configuring any agent to lock them into their role" — the CLAUDE.md fix (a `SessionStart`
+hook, see below) is one instance of a pattern that applies to every custom agent profile in
+`.claude/agents/`, not just the main session.
+
+**Enforcement, by example (audited 2026-07-16):**
+- ✅ CLAUDE.md's own startup ritual — `SessionStart` hook
+  (`.claude/hooks/session-start-briefing.py`) now injects inbox/suggestions/plan-check state
+  automatically; no longer depends on the model noticing it should look.
+- ⚠️ `nix-flake-maintainer`'s "narrow, procedure-gated" mutation list — the `PreToolUse`
+  flake-guard hook (`.claude/hooks/flake-guard.py`) mechanically gates `nixos-rebuild
+  switch`/`test` and any `git commit`/`push` naming `tgw-flake`, **but only when those run
+  as Bash commands** — it does not see a raw `Edit`/`Write` tool call landing directly on a
+  file inside `~/tgw-flake`, which the agent's own doc lists as equally gated. Real gap:
+  the hook's matcher is `Bash` only.
+- ❌ `tgw-coder`'s worktree-isolation contract (`.claude/agents/tgw-coder.md` §2) — "never
+  `git checkout` the shared repo checkout," "never `Write`/`Edit` outside your assigned
+  worktree," "never mark the todo `--done`," "never push/merge without explicit
+  authorization" are all still pure prose today, enforced only by the executor reading and
+  complying. The agent's own doc records a near-miss from this exact gap (pilot run 9:
+  a breadcrumb written straight into the shared checkout, caught only by luck). Claude
+  Code's own `settings.worktree.bgIsolation` ("worktree" is the default) is documented to
+  block `Edit`/`Write` in the main checkout until `EnterWorktree` is called, for background
+  sessions *and* agent isolation — plausible existing mechanism, not yet evaluated against
+  whether it actually covers `tgw-coder`'s manual `git worktree add` pattern or conflicts
+  with it. Not yet investigated or built.
+
+**Not yet done:** decide, per gap above, whether to (a) extend `flake-guard.py`'s matcher to
+also cover `Edit`/`Write` tool calls under `~/tgw-flake`, and (b) evaluate whether
+`bgIsolation` already covers `tgw-coder`'s worktree contract or needs a dedicated
+`PreToolUse` hook on `Edit`/`Write`/`Bash` scoped to the assigned worktree path. Both are
+concrete, scoped follow-ups — file todos before considering this invariant ✅.
