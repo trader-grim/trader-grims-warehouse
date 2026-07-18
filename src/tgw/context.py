@@ -5,8 +5,15 @@ Replaces the legacy tgwset/tgw_sku shell functions in tgw.source.
 Primary store: runtime/state/current-item.json  {sku, set_at, set_by}
 Compat view:   /opt/TGW/CurrentItem  →  ItemData/<SKU>/
                /opt/TGW/CurrentItem.json  →  ItemData/<SKU>/<SKU>.json
-Both symlinks are maintained atomically on every set/clear so existing
+               /opt/TGW/CurrentLocation  →  ItemCatalog/by-location/<location>
+All three symlinks are maintained atomically on every set/clear so existing
 MC/shell consumers keep working during the tgw.source retirement.
+CurrentLocation mirrors the old tgwset() shell function's
+`ln -sf $catalogpath/$(tgw_location) $tgwpath/CurrentLocation` behavior
+(todo #1324 — restored after being silently dropped by PP-CONTEXT-001).
+Only created when the item's JSON has a non-empty `location` field; not
+an error if it doesn't (matches the old shell function's silent no-op on
+an empty `tgw_location` result).
 """
 
 from __future__ import annotations
@@ -18,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from .config import context_state_path, sku_dir, sku_json
+from .config import context_state_path, location_dir, sku_dir, sku_json
 
 _SKU_RE = re.compile(r"^tgw\d{15,}")
 
@@ -26,6 +33,7 @@ _SKU_RE = re.compile(r"^tgw\d{15,}")
 # so existing shell consumers don't need to know about config.
 _COMPAT_CURRENT_ITEM      = Path("/opt/TGW/CurrentItem")
 _COMPAT_CURRENT_ITEM_JSON = Path("/opt/TGW/CurrentItem.json")
+_COMPAT_CURRENT_LOCATION  = Path("/opt/TGW/CurrentLocation")
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +91,7 @@ def clear_context(cfg: Dict[str, Any]) -> Dict[str, Any]:
         state_path.unlink()
         changed = True
 
-    for link in (_COMPAT_CURRENT_ITEM, _COMPAT_CURRENT_ITEM_JSON):
+    for link in (_COMPAT_CURRENT_ITEM, _COMPAT_CURRENT_ITEM_JSON, _COMPAT_CURRENT_LOCATION):
         if link.is_symlink():
             link.unlink()
             changed = True
@@ -122,13 +130,57 @@ def _write_state(path: Path, state: Dict[str, Any]) -> None:
 
 
 def _update_compat_symlinks(cfg: Dict[str, Any], sku: str) -> None:
-    """Atomically update /opt/TGW/CurrentItem and CurrentItem.json."""
+    """Atomically update /opt/TGW/CurrentItem, CurrentItem.json, and CurrentLocation."""
     target_dir  = sku_dir(cfg, sku)
     target_json = sku_json(cfg, sku)
 
     _atomic_symlink(target_dir, _COMPAT_CURRENT_ITEM)
     if target_json.exists():
         _atomic_symlink(target_json, _COMPAT_CURRENT_ITEM_JSON)
+
+    _update_current_location_symlink(cfg, target_json)
+
+
+def _update_current_location_symlink(cfg: Dict[str, Any], item_json_path: Path) -> None:
+    """Restore CurrentLocation → ItemCatalog/by-location/<location> (todo #1324).
+
+    Mirrors the old tgwset() shell function's
+    `ln -sf $catalogpath/$(tgw_location) $tgwpath/CurrentLocation`, where
+    tgw_location read the item JSON's .location field. If the item has no
+    location set, or the location's catalog directory doesn't exist (e.g.
+    catalog rebuild hasn't run yet), silently skip — matches the old
+    shell function's silent no-op, not an error condition.
+    """
+    location = _item_location(item_json_path)
+    if not location:
+        return
+
+    try:
+        target = location_dir(cfg, location)
+    except (ValueError, KeyError):
+        return
+
+    if not target.is_dir():
+        return
+
+    _atomic_symlink(target, _COMPAT_CURRENT_LOCATION)
+
+
+def _item_location(item_json_path: Path) -> Optional[str]:
+    """Read the .location field out of an item JSON file, or None."""
+    if not item_json_path.exists():
+        return None
+    try:
+        data = json.loads(item_json_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    location = data.get("location")
+    if location is None:
+        return None
+    location = str(location).strip()
+    return location or None
 
 
 def _atomic_symlink(target: Path, link: Path) -> None:
