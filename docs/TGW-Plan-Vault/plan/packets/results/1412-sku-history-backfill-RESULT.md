@@ -99,3 +99,25 @@ independently).
 
 - #1509 (PP-ADD-005) — Dave's review/apply decision for the backfill
   script's real INSERT.
+
+## Re-verification pass (2026-07-17, fresh session)
+
+This todo was re-dispatched under the belief the prior run had been
+interrupted mid-task; on inspection the branch already carried a complete,
+committed investigation + script + tests + this manifest, and todo #1509
+was already filed and open. Re-verified everything live rather than trust
+the stale claim:
+
+- `sku_history` row count (live, `sudo -u tgw psql`): still exactly 3,305
+  rows, same `changed_at` range (2026-06-24 20:13 → 2026-06-29 06:13 UTC)
+  — matches the original finding, no drift since.
+- Re-ran `scripts/backfill_sku_history_1412.py` (dry-run, no `--apply`):
+  identical output — 26,652 candidate rows, 26,652 confirmed on disk, 0
+  unconfirmed, 0 overlap with existing rows, 26,652 to insert.
+- Re-ran full `pytest -q` in this worktree: `2470 passed, 1 skipped` —
+  identical to the original run.
+- Confirmed todo #1509 exists and is open, correctly describing this
+  branch and the pending `--apply` decision.
+- No code changes made this pass — the prior session's work stands as-is.
+  Still no real `--apply` INSERT performed; that remains #1509's decision,
+  not this executor's to make.
