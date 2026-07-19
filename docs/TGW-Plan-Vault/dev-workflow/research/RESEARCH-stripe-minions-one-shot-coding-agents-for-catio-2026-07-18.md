@@ -23,6 +23,8 @@ The article is relevant to the Catio development framework because it is first-p
 
 **Dave’s provisional assessment (2026-07-18):** the two-part series both validates Catio’s existing state-machine/workflow-enforcement direction and is a useful source of further design ideas. Treat it as comparative evidence and an idea source, not as an adoption mandate.
 
+**Development timeline (Dave, 2026-07-18):** the underlying idea was conceived roughly three months earlier and active building began about two-and-a-half months earlier. Its state-machine framing was first developed in Perplexity chat; when the work outgrew that interaction model, Dave moved it into Claude. Tigwa joined only the prior week. This is retained as project-origin context for the unusually rapid progression, not as a claim that the design is finished.
+
 For Catio, “one-shot” must not mean an unconstrained free-running agent. A prepared task should enter named states with explicit allowed transitions and durable evidence: for example `prepared → isolated_execution → verification → review_pending → accepted | rejected | remediation_required`. The state machine, rather than an agent narrative or a successful command exit alone, determines whether an action may advance, what evidence is required, and which human gate remains mandatory.
 
 ## Source-grounded Catio relevance — Parts 1 and 2

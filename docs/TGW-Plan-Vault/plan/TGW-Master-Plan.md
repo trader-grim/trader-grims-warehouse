@@ -314,6 +314,42 @@ doesn't design it for her), Claude reviews and approves/comments, same
 review shape as the rest of PP-HR-001. Request:
 `inbox/tigwa/CLAUDE-REQUEST-credential-scoping-2026-07-16.md`.
 
+**Dave's decisions on #1459 scoping + eBay connector #1513, 2026-07-18
+(via Tigwa relay, `TIGWA-RESPONSE-dave-scope-and-process-discussion-2026-07-18.md`):**
+new dedicated remote read identity named **`tigwa-observe`** (over a
+"t-lite"-derived name — "Tigwa-lite" already means the monitor/gateway
+role, would collide); read-only first cut, does not reuse the existing
+local `tigwa` service identity; Dave is sole initial break-glass owner
+(documented manual recovery only, never standing agent bypass authority);
+no tracker-write capability approved. **#1513 eBay read-only connector
+approved to proceed independently of SSH scoping** — narrow API/MCP
+surface, no token-file/credential-file/refresh/marketplace-mutation
+access; exposes non-secret token availability/expiry-or-age +
+`ebay_token_unavailable` failure result, optionally refresh-worker
+health evidence — never token material itself. Issue-resolution loop
+pattern confirmed "not a contract" but retained as comparative evidence
+only, not promoted to normative policy. Follow-up work request (tracker-
+management boundary proposal) filed as its own inbox item, see below.
+
+**Tracker-management boundary proposal — Dave's decisions, 2026-07-18
+(via `TIGWA-RESPONSE-tracker-boundary-decisions-2026-07-18.md`):** proposal
+(`CLAUDE-PROPOSAL-tracker-management-boundary-2026-07-18.md`) confirmed to
+cover Tigwa's actual needs. Lane 1: do **not** pin `tigwa-observe` to
+`agent="tigwa"` only — shared cross-agent visibility stays, since Tigwa
+uses it to notice linked issues/dependencies a narrowly self-assigned
+queue would hide; `tgw_get_todo` stays the only surface (fixed-column,
+parameterized, no raw SQL/CLI passthrough/shell fallback/task-write).
+Lane 2: `RECEIPT` approved as the mailbox `msg_type` for operational
+status/receipts, minimum fields (what ran, when, outcome, linked
+todo/PP), stays separate from canonical `todo_items`. Lane 3: the
+review-first proposal shape (mailbox `PROPOSAL` → human/reviewing-actor
+canonical mutation) confirmed correct direction, **still not authorized
+to build**. **Remaining gate, explicit:** implementation stays stopped
+until `tigwa-observe`'s transport identity and least-privilege boundary
+are separately verified under #1459's own scope — a shared read-only
+tracker view must never end up backed by a general shell/sudo-equivalent
+recovery path.
+
 **Tigwa's Aider contract cross-verification, 2026-07-16 (read-only, no
 mutation):** confirms `bin/tgw-aider`'s intended shell path (spec →
 `task/<id>-<slug>` worktree at `/opt/TGW/var/worktrees/<id>-<slug>`, live
@@ -341,6 +377,25 @@ retry under `db` hit the live Anthropic 529-overloaded outage instead, so
 this is still an open verification, not a resolved one. Tracked as new
 todo (see below) rather than folding into #1358, which covers the worktree
 *wiring* already done, not this preflight/enforcement gap.
+
+## PP-OUTBOX-001 — agent instruction outbox / prompt-improvement interface — NEW 2026-07-18
+
+**Design evaluation only, not implementation-authorized.** Dave's concept
+(captured/structured by Tigwa,
+`DAVE-CONCEPT-agent-instruction-outbox-2026-07-18.md`): a personal, agent-aware
+instruction outbox — capture rough intent, Tigwa proposes a clearer
+target-appropriate rendering, Dave chooses/edits/defers, a checker flags gaps,
+only an explicit Dave send action delivers it. Distinct from a todo list
+(communication lifecycle, not work lifecycle) and from the mailbox (mailbox is
+the delivery channel this reuses, not a replacement for it). Claude's response
+to Dave's 5 questions: reuse the existing mailbox mechanism as the delivery
+channel (no new send infra); a thin new `instruction_cards` Postgres table for
+pre-send staging only, no pipeline/work authority of its own; recommend piloting
+with a zero-code v0 (a scratch doc + manual Tigwa review/send) before building
+any table or UI; checker/draft authority never extends to actual delivery — only
+Dave's explicit send does; 5 open decisions (v0-vs-v1 first, send authority,
+draft-iteration cap, stale-card surfacing, target-agent list growth) flagged for
+Dave before any build packet. Full evaluation: `pp/PP-OUTBOX-001.md`.
 
 ## PP-HR-001 — the "HR department" for AI agents/personas — NEW 2026-07-16
 
@@ -466,8 +521,128 @@ the census periodically rather than trusting today's zero-duplicates
 result forever. No code changed by the scoping pass — ready to slice into
 ordinary todos whenever Dave prioritizes. Full writeup: `pp/PP-EBAY-MOTORS-001.md`.
 
+**Greenlit 2026-07-18 (Dave): "we need it... one day it will pay off."** All
+5 steps filed as todos: #1552-#1556.
+
 - Scoping summary filed → reference/PP-EBAY-MOTORS-001-scoping-summary.md
-## PP-CATALOG-INCR-001 — incremental catalog update (PROPOSAL, not yet built)
+
+## PP-EBAY-ACCOUNT2-001 — second eBay account: Seller Hub audit sandbox + multi-marketplace — NEW 2026-07-18
+**Proposal, not yet scoped.** Two motivations: (1) a safe sandbox to run
+PP-SELLERHUB-001's still-unscoped Gemini Seller Hub audit without touching
+live production listings, (2) Dave's own suggestion to also use it for
+multi-marketplace capability building/testing — distinct from
+PP-EBAY-MOTORS-001's marketplace-on-the-existing-account work. Dave
+registers the account himself (eBay signup isn't a TGW action); Claude
+wires credentials into the existing secrets facility once handed over. No
+account exists yet, no todo filed — real design work (config shape for a
+second account identity, clarifying which motivation is primary) waits
+until credentials are in hand. Full writeup: `pp/PP-EBAY-ACCOUNT2-001.md`.
+
+## PP-CATALOG-INCR-001 — incremental catalog update
+
+**Greenlit 2026-07-18** — surfaced by the recurring "Needs Review" stale-badge symptom
+(catalog_rebuild worker deliberately stopped since this exact resource-cost finding;
+`ebay_publish` correctly enqueues a rebuild job every publish but nothing was consuming
+the queue, so a manual `tgw build-all` was needed twice in one session before Dave asked
+for the real fix). Two open design questions resolved: reconciliation timer **hourly**;
+CI-2's SQLite upsert **synchronous** in the fence write path. Todos filed: #1548 (CI-1
+fence mutation hook), #1549 (CI-2 SQLite upsert-on-write), #1550 (CI-3 thumbnail
+triggering condition), #1551 (CI-4 timer cutover). CI-5 (JSON catalog fate) stays
+deferred. Full design: `pp/PP-CATALOG-INCR-001.md`.
+
+**CI-1 done same day (#1548):** `publish_mutation` wired into `_apply_patch` and
+`_apply_ebay_write` in `http_server.py` (the real fence, both real write paths) —
+closes the PP-AIOPS-001 Phase 1 coverage gap the design doc flagged (audit stream was
+only fed from `items.py`'s CLI-only path before). Fire-and-forget per changed field,
+matching `items.py`'s existing pattern. Full test suite green (2,580 passed) after
+fixing one real regression caught along the way — the store-category dropdown's
+fallback path was accidentally routed through `.ebay.pricing`'s cached `_load_groups`
+instead of reading `category-groups.json` fresh, breaking test isolation and (in
+production) risking a stale cross-request cache that didn't exist before — and
+refreshing the C12 line-number allowlist (`tests/test_invariant_c12_field_set_
+accessors.py`) for the line shifts this packet + the earlier Lens-removal/dropdown-fix
+edits caused. `tgw-http.service` restarted clean, `tgw health` shows only the 2
+pre-existing unrelated failures. **CI-2 done same day (#1549):** `sqlite_catalog.upsert_catalog_row(cfg, doc)` — atomic
+per-SKU `INSERT ... ON CONFLICT(sku) DO UPDATE`, called synchronously from both fence
+write paths right after `atomic_write_json` (same two call sites as CI-1). The
+inventory webui's SQLite data source now stays live-accurate on every write, without
+waiting for a full rebuild — this is the actual permanent fix for the recurring stale
+"Needs Review" badge symptom that surfaced today (`catalog_rebuild` worker is still
+stopped; CI-4's hourly timer will be the reconciliation backstop, not the primary
+update path anymore). Verified: isolated function-level test against a throwaway
+SQLite file confirmed insert + update-in-place both work correctly; full test suite
+(2,580 tests) green, including the many existing tests that already exercise
+`_apply_patch`/`_apply_ebay_write`. `tgw-http.service` restarted clean, `tgw health`
+unchanged. C12 allowlist refreshed again for line shifts (2nd refresh today — expected,
+per the detector's own documented tradeoff). CI-3 (thumbnail triggering condition) and
+CI-4 (hourly timer cutover) remain.
+
+**CI-3 done same day (#1550):** found the real gap was narrower and worse than the
+design doc assumed — `thumbnail_gen` wasn't being over-triggered on every write, it
+was **only ever enqueued once, at initial `bundle_intake`**. A later photo reorder
+(`POST /api/items/{sku}/photo-order`) or photo delete never refreshed the thumbnail at
+all. Added `_enqueue_thumbnail_gen()` wired into `_apply_patch`'s fence hook, firing
+only when a write's changed keys include `image` or `photo_order` — both existing
+call sites (photo-order save, photo delete) get this automatically since they already
+route through `_apply_patch`, no per-call-site duplication needed. Stamped
+`origin: "operator"` per invariant C10 (caught by
+`test_operator_origin_sourcescan.py`, which is exactly what it's for). Full test
+suite green (2,580 passed) after updating `test_photo_order_enqueues_via_shared_helper`
+for the now-correct 2-enqueue behavior and a 3rd same-day C12 allowlist refresh.
+`tgw-http.service` restarted clean, `tgw health` unchanged. CI-4 (hourly timer
+cutover) is the last packet.
+
+**CI-4 done same day (#1551), code portion; timer install pending Dave's direct
+switch confirmation.** `state_machine.enqueue_catalog_rebuild()` is now a no-op
+(single point of control — all ~35 call sites across http_server.py and every
+worker still call it safely, it just does nothing now, no per-call-site editing
+needed). Found and closed a real gap surfaced while verifying CI-4's own premise
+("SQLite catalog stays live for every caller"): CI-2's upsert had only been wired
+into http_server.py's HTTP fence, but `items.py`'s CLI-path write functions
+(`_write_field`, `set_fields` — used by `bulk_edit`, backfill/scrub scripts) are a
+**separate** write surface that don't route through that fence at all. Added the
+same `upsert_catalog_row` call to both, plus to `create_item_endpoint` directly
+(a brand-new item needs its first catalog row immediately, not after an hour).
+Also removed a now-dead C11 guard in `discard_revision` (persisted a finding on
+catalog_rebuild-enqueue-failure — impossible now that enqueue never fails,
+since it never does anything). Full test suite green (2,579 passed) after
+updating ~14 test assertions across `test_http_server.py`, `test_fence.py`,
+`test_bulk_edit.py`, `test_audit1143_workers_cohesion.py`,
+`test_invariants_pricing.py`, `test_invariants_stage_guards.py` (all previously
+asserted the old per-write enqueue happened; now assert it doesn't, or in
+`test_photo_order_enqueues_via_shared_helper`'s case, that only CI-3's
+thumbnail_gen enqueue remains) plus a 4th same-day C12 allowlist refresh.
+`tgw-http.service` **and all 13 running workers** restarted (workers import
+`items.py`/`state_machine.py` directly, so needed the restart too — easy to
+miss). `tgw health` clean throughout. **`tgw-catalog-rebuild-hourly` timer
+still NOT live as of this writing** — commit `780d02c` pushed, `flake check`/
+`dry-activate` clean, Dave gave direct in-session confirmation to switch (after
+the relay-authorization gate correctly refused a paraphrased one first), the
+`nixos-rebuild switch` command itself was then interrupted before completing
+and the session moved on to other work — confirmed live via `systemctl
+list-units 'tgw-catalog-rebuild-hourly*'` (0 units loaded). Still pending.
+
+**Full-diff code review, 2026-07-19 (Dave: "we need to review and merge all of
+those changes we made outside the process"):** workflow-backed `/code-review`
+at high effort over the full day's uncommitted diff (27 files) found 6
+CONFIRMED correctness/cleanup findings, all fixed same pass: (1) `_apply_patch`
+was popping `draft_listing`/`item_attributes` out of `fields` before computing
+`_changed_keys`, so those writes never reached CI-1's audit stream or the PATCH
+response's `updated` list — fixed by capturing the original key set before the
+pop; (2) `discard_revision`'s deleted C11 guard left catalog-upsert failures
+completely unenforced — fixed at the root: `_apply_patch`/`_apply_ebay_write`
+now persist a C11 finding on upsert failure themselves, not just log a
+warning; (3)/(4) `items.py`'s `verifiedupdate`/`strip_fields` bypassed CI-2's
+upsert entirely (direct `atomic_write_json`, not through `_write_field`) —
+both now call it too; (5) `items.py` had no logger at all, silently swallowing
+every upsert failure — added one; (6) `upsert_catalog_row` re-ran the full
+schema script on every call including inside bulk-edit loops — now cached
+per-process. **Self-caught 7th regression while fixing #2**: the C11 fix's
+recursive `_persist_finding` call was clobbering `catalog_verified` on the
+outer write via the same "not in fields → clear it" logic — caught by the
+full test suite before reaching anything live, fixed in the same pass. Full
+suite green (2,579 tests) after 3 more same-day C12 allowlist refreshes.
+`tgw-http.service` + all 13 workers restarted again, `tgw health` clean.
 **Opened s43 (2026-07-03).** Dave's original design, recovered from an unprocessed
 inbox transcript (`inbox/hermes-out-of-flake-portable-catalog-concept.md`) after he
 flagged `catalog_rebuild`'s full 55,419-item disk scan on every single write as the
@@ -848,6 +1023,42 @@ group-shortlist-first picker UI/logic) remains FROZEN until R1 drains. Memory:
 project-smart-category-picker.
 
 ## PP-SELLERHUB-001 — TGW as a full Seller Hub replacement — NEW 2026-07-11
+
+**Both authority gaps from the triage fixed same day, 2026-07-18 (#1546/#1547):** Store
+Category dropdown now sourced from `_live_store_categories()` (live `get_store_categories()`
+GetStore call, TTL-cached 15min, `http_server.py`), falling back to the old
+`category-groups.json` list only if the live call itself raises — verified live: 59 categories
+fetched from the real account, no fallback triggered. Fulfillment-policy dropdown now sourced
+from a new `get_fulfillment_policies_full()` (`ebay/sync.py`, live `/sell/account/v1/
+fulfillment_policy` call) via `_live_fulfillment_policies()`, same TTL-cache-with-fallback
+shape — verified live: 31 policies fetched. Both surface a visible "⚠ local list/cache, live
+fetch failed" warning next to the dropdown if the fallback path is used, so a stale/wrong list
+is never presented as authoritative without saying so (C14 principle). Return-policy dropdown
+intentionally left on the static cache — not flagged in the original triage. `tgw-http.service`
+restarted, `tgw health` clean (same 2 pre-existing unrelated failures: `backups`,
+`ebay_sync_fallback`/#1077).
+
+**UI authority triage delivered 2026-07-18 (#1543):** read-only current-state
+triage of the 4 anchor findings from `TIGWA-NOTE-seller-hub-ui-authority-
+findings-2026-07-18.md` (Store Category dropdown, fulfillment-policy
+dropdown, category + dependent controls, supporting-data linkage) plus 5
+related parity incidents. Result: conditions metadata, aspects metadata
+(Taxonomy API), Best Offer control, custom-aspect visibility, and
+category-change data-preservation design all classify **resolved**. Two
+**open** gaps found (net-new, not previously documented): (1) the Store
+Category dropdown's option list comes from local `category-groups.json`,
+not the live `get_store_categories()` GetStore call TGW already has
+working code for (only used at push time, not to populate the picker);
+(2) the fulfillment-policy dropdown is driven by a static
+`ebay-fulfillment-policies.json` cache, not a live pre-selection Account
+API call — a live reconciliation net catches drift only *after* push. C14
+classifies **partial**: detector built 2026-07-18 (#1468) and green for
+item-detail/aspects/bulk-edit/`accept_proposals`, but two new C14-class
+bugs surfaced while building it remain open (#1522: unlocked
+title/description silently reverted by padlock auto-sync; a second
+instance noted but not fully re-read, needs a direct follow-up).
+Full triage: `inbox/tigwa/CLAUDE-TRIAGE-sellerhub-ui-authority-2026-07-18.md`.
+
 **Dave: "our app needs to be able to do everything eBay Seller Hub does,
 but better."** Surfaced while triaging a homeless todo (#895) — not a
 one-off config gap, a previously-unstated principle. Scope deliberately

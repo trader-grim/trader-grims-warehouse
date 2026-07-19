@@ -1,5 +1,10 @@
 # PP-VISION-001 — vision-matching capability
 
+**Deferred 2026-07-18 (Dave):** "not going to work on that — a lot to buy before a
+GPU — will revaluate if I happen across one." Phase 1 (the CPU-only pilot, no GPU
+needed) stays fully spec'd below and shovel-ready — this isn't a design gap, it's a
+priority/timing call. Revisit when a GPU is acquired or opportunistically found.
+
 **Status: PLANNED 2026-07-16.** Elevated from pointer-only stub (since
 2026-07-11) per Dave's 2026-07-16 direction. Unlike PP-STORAGE-001 and
 PP-WHISPER-001, Dave's own framing here was explicit priority, not a

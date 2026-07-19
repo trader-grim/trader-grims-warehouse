@@ -94,6 +94,16 @@ near-generic items. This validates the research's core thesis: **don't let a
 model invent prices from scratch; comp retrieval + human supervision beats
 model-grounded search.**
 
+**Dave, 2026-07-18: "want it, make it surface in the next planning round."**
+Not a build-now green light — a durable flag so this doesn't get lost between
+now and the next dedicated planning session. Open questions before it can be
+sliced into todos: go/no-go + priority against the rest of the plan; whether
+the comp pane attaches to PP-EDITOR-001's existing item-detail view or gets
+its own route; whether v1 needs a real embedded browser webview or "open
+Product Research in a new tab, paste back the numbers" is good enough to
+start. Cross-referenced from `plan/FUTURE-IDEAS.md` so the next planning
+session's normal sweep surfaces it.
+
 **Core idea — supervised hybrid, not autonomous scraping:** operator opens
 eBay Seller Hub Product Research (Terapeak) inside a browser pane, reviews
 comps like they already do, then hits "Capture snapshot" — the system stores

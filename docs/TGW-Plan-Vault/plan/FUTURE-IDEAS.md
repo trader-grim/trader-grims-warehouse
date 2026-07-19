@@ -16,6 +16,15 @@ review future ideas. Do NOT scan or process this file at routine session start.
 
 ---
 
+**PP-PRICING-001 Phase 0 (3-pane comp-research tool) — flagged for next planning
+round, 2026-07-18.** Dave: "want it, make it surface in the next planning round."
+Design already fully drafted (`plan/pp/PP-PRICING-001.md`, "Proposed UI: 3-pane
+web editor" section) — this is a promotion-ready item, not a stub; open
+questions before slicing into todos are recorded in the PP doc itself
+(go/no-go + priority, item-detail attachment point, v1 browser-pane scope).
+
+---
+
 **PP-CODEGRAPH-001 promoted to active PP 2026-07-14** — Dave confirmed he's
 building the full stack (FalkorDB + Z3 + DuckDB + MCP unification),
 hosted on a1131, and is bringing additional research before the build

@@ -303,6 +303,21 @@ untouched, pending that decision (an attempt to cancel them was correctly
 blocked by the session's auto-mode guard as a shared-queue mutation needing
 explicit authorization — did not attempt to work around it).
 
+**✅ DONE 2026-07-18 (todo #1558).** Dave: install, don't retire — "the queue
+stops being an orphan trap." `tgw-worker@ebay_repush.service` added via
+`~/tgw-flake` (`nix/tgw.nix` `workerScripts` entry + `nix/hosts/tgw-prod.nix`
+`services.tgw.workers` entry), commit `b613299`, `nixos-rebuild switch` run
+live on tgw-prod. Worker confirmed running and consuming the queue: 13 jobs
+had accumulated (not just the original 2 — the queue kept silently growing
+the whole time it was orphaned) — 1 succeeded, 12 dead-lettered with a
+consistent, legitimate precondition reason (`no ebay_submitted.inventory_item
+— run ebay_stage first`), not a worker defect. `tgw health` clean (same 2
+pre-existing unrelated failures). The 12 dead-lettered jobs are a new,
+smaller finding for a future session: those SKUs need `ebay_stage` re-run
+before repush can act on them — not re-triaged here, just surfaced per
+invariant C11 (dead-letter's error_code/error_detail already persists the
+finding durably, queryable via `tgw dead-letter`).
+
 ### P7 = todo #1123 — truth-audit rules (the liar detector) ✅ DONE 2026-07-03
 4 new rules live in `_verify_item`/`cmd_catalog_verify` (`photos_short_on_ebay`,
 `photo_verify_stale`, `submitted_live_drift`, `success_count_contradiction` — the

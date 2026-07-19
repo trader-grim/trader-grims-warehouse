@@ -1,5 +1,18 @@
 # PP-STORAGE-001 — semi-chaotic storage: size_class as a size/weight signal
 
+**Scope revised 2026-07-18 (Dave):** "I could make a csv, but the tool has to be
+able to accommodate not only what is there now but editing and adding new
+shipping profile classes. Even when I give the data to start with it will need
+to be tweaked over time." The deliverable is a small admin config-editing tool
+(list/edit/add size_class ranges), not a one-time CSV import. `flat`/`packet`/
+`small_box` are today's 3 classes but the tool must support adding a 4th, 5th,
+etc. going forward — same "small owned-config admin surface" pattern as the
+Store Category / fulfillment-policy dropdowns just wired to live data this
+session (different problem, same shape). This doesn't change the underlying
+`size_class_ranges` config design below, only the delivery mechanism: build
+the edit UI first, let Dave populate/tweak the real numbers through it, rather
+than Claude round-tripping a CSV.
+
 **Status: PLANNED 2026-07-16, ready to slice into todos.** Elevated from
 pointer-only stub (since 2026-07-12) per Dave's 2026-07-16 direction: "we
 plan them or change our mind then, we are ready to produce code." Direction
