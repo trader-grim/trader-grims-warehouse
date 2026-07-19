@@ -70,18 +70,24 @@ _ALLOWLIST = {
     # fragile against unrelated edits shifting the file — that's a known,
     # accepted tradeoff of this detector's design (see module docstring),
     # not a defect; expect to refresh this list again after future edits.
+    # Refreshed again 2026-07-18 (PP-CATALOG-INCR-001 CI-1+CI-2+CI-3 packets:
+    # Google Lens context-menu removal, live store-category/fulfillment-policy
+    # dropdown fetch helpers, and _apply_patch/_apply_ebay_write's new
+    # publish_mutation + sqlite upsert-on-write + thumbnail-gen fence hooks —
+    # all shifted every line below by varying amounts; re-verified against
+    # current HEAD).
     (_SRC / "tgw" / "http_server.py", 771),               # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
     (_SRC / "tgw" / "http_server.py", 780),               # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
-    (_SRC / "tgw" / "http_server.py", 1166),              # (a) accessor patch write
-    (_SRC / "tgw" / "http_server.py", 1187),              # (a) accessor patch write (todo #1416, draft_listing.item_specifics)
-    (_SRC / "tgw" / "http_server.py", 1192),              # (a) accessor output (full envelope) moving onward
-    (_SRC / "tgw" / "http_server.py", 1205),              # (a) accessor patch write — padlock auto-sync (todo #1406/2026-07-18, inventory_record.sync_from_draft's patch)
-    (_SRC / "tgw" / "http_server.py", 1725),              # (b) revision_draft.delta — line shifted +15 by todo #1522's padlock base-field/draft mirror fix
-    (_SRC / "tgw" / "http_server.py", 1727),              # (b) revision_draft.delta — line shifted +15 by todo #1522's padlock base-field/draft mirror fix
-    (_SRC / "tgw" / "http_server.py", 1733),              # (a) accessor patch write (todo #1416) — line shifted +15 by todo #1522's padlock base-field/draft mirror fix
-    (_SRC / "tgw" / "http_server.py", 2766),              # (a) accessor output (inventory_diff.apply_inventory_diff's patch) onward into _apply_patch (#1417) — shifted +15 by #1522
-    (_SRC / "tgw" / "http_server.py", 2825),              # (a) category_aspect_migration's patch moving onward into _apply_patch (#1471) — shifted +15 by #1522
-    (_SRC / "tgw" / "http_server.py", 5668),              # (b) revision_draft.delta — line shifted +15 by todo #1522's padlock base-field/draft mirror fix
+    (_SRC / "tgw" / "http_server.py", 1214),              # (a) accessor patch write
+    (_SRC / "tgw" / "http_server.py", 1235),              # (a) accessor patch write (todo #1416, draft_listing.item_specifics)
+    (_SRC / "tgw" / "http_server.py", 1240),              # (a) accessor output (full envelope) moving onward
+    (_SRC / "tgw" / "http_server.py", 1253),              # (a) accessor patch write — padlock auto-sync (todo #1406/2026-07-18, inventory_record.sync_from_draft's patch)
+    (_SRC / "tgw" / "http_server.py", 1859),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 1861),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 1867),              # (a) accessor patch write (todo #1416)
+    (_SRC / "tgw" / "http_server.py", 2984),              # (a) accessor output (inventory_diff.apply_inventory_diff's patch) onward into _apply_patch (#1417)
+    (_SRC / "tgw" / "http_server.py", 3043),              # (a) category_aspect_migration's patch moving onward into _apply_patch (#1471)
+    (_SRC / "tgw" / "http_server.py", 5827),              # (b) revision_draft.delta
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 114),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 121),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 124),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)

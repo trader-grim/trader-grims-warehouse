@@ -195,24 +195,30 @@ def enqueue_job(
 
 
 def enqueue_catalog_rebuild(reason: str, delay_seconds: float = 30.0) -> str:
-    """Coalesced catalog_rebuild enqueue — the one place this pattern lives.
+    """No-op as of PP-CATALOG-INCR-001 CI-4 (2026-07-18).
 
-    Debounced: a burst of writes extends the single pending job's
-    not_before forward instead of each write re-arming a fresh job the
-    instant the previous one finishes (that fixed-offset behavior turned a
-    sustained write burst into one full rebuild roughly every
-    rebuild-duration + delay_seconds, nonstop, for the burst's whole
-    length — see PP-NIXOS-001 2026-07-12 incident).
+    Was: coalesced per-write catalog_rebuild enqueue — the one place that
+    pattern lived, debounced so a write burst extended one pending job's
+    not_before instead of each write re-arming a fresh one (PP-NIXOS-001
+    2026-07-12 incident). Superseded: CI-2's synchronous per-item SQLite
+    upsert (sqlite_catalog.upsert_catalog_row, called from every fence write
+    in http_server.py's _apply_patch/_apply_ebay_write) already keeps the
+    SQLite catalog — the one the inventory webui and every operator-facing
+    query reads — live-accurate on every write, through every caller
+    (workers included: all worker writes route through tgw.apis.fence's
+    HTTP client into the same two fence functions). The remaining 3
+    artifacts (full_catalog/search_catalog JSON, location_tree) are still
+    full-rebuild-only (CI-5 deferred) and are now refreshed by an hourly
+    systemd timer instead of a per-write trigger — see
+    docs/TGW-Plan-Vault/plan/pp/PP-CATALOG-INCR-001.md. `tgw build-all` /
+    `tgw catalog-rebuild` remain available for an on-demand full rebuild.
+
+    Kept as a no-op function (not deleted) so none of this codebase's ~35
+    call sites need editing — every one of them still calls this safely,
+    it now simply does nothing. Returns '' instead of a job_id since no job
+    is created.
     """
-    import time as _time
-    return enqueue_job(
-        queue_name='catalog_rebuild',
-        payload={'reason': reason},
-        dedupe_key='catalog_rebuild:pending',
-        not_before=_time.time() + delay_seconds,
-        max_attempts=3,
-        debounce=True,
-    )
+    return ''
 
 
 def claim_queue_jobs(

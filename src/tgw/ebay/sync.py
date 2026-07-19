@@ -212,6 +212,24 @@ def _get_policies(cfg: Dict[str, Any], marketplace_id: str = MARKETPLACE_ID) -> 
     return policies
 
 
+def get_fulfillment_policies_full(cfg: Dict[str, Any],
+                                   marketplace_id: str = MARKETPLACE_ID) -> List[Dict[str, str]]:
+    """Live full list of the account's fulfillment (shipping) policies for
+    *marketplace_id* — [{id, name}]. Unlike _get_policies (which only keeps
+    the first policy as a push-time fallback default), this is the
+    operator-facing dropdown's authoritative option source (PP-SELLERHUB-001,
+    todo #1547 — the dropdown used to be driven solely by a static
+    ebay-fulfillment-policies.json cache with no live refresh path)."""
+    account_marketplace_id = _ACCOUNT_API_MARKETPLACE_ID.get(marketplace_id, marketplace_id)
+    data = ebay_get(cfg, '/sell/account/v1/fulfillment_policy',
+                     params={'marketplace_id': account_marketplace_id})
+    return [
+        {'id': p['fulfillmentPolicyId'], 'name': p.get('name', p['fulfillmentPolicyId'])}
+        for p in data.get('fulfillmentPolicies', [])
+        if p.get('fulfillmentPolicyId')
+    ]
+
+
 def _get_merchant_location(cfg: Dict[str, Any]) -> str:
     """Return the first enabled merchant location key for the account."""
     global _location_cache

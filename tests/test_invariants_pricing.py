@@ -337,10 +337,11 @@ def test_chain_enqueued_price_skips_when_operator_set_last(price_worker, tmp_pat
     assert result['ebay_offer']['price_guard_skipped']['reason'] == 'operator_price_history'
     assert result['ebay_offer']['price_guard_skipped']['operator_price'] == 42.0
     assert all(kw['queue_name'] != 'ebay_stage' for kw in price_worker._enqueued)
-    # code-review follow-up: the price_guard_skipped write above is a real
-    # item mutation (invariant A7) -- must still enqueue catalog_rebuild
-    # even though the early return skips the rest of the function.
-    assert any(kw['queue_name'] == 'catalog_rebuild' for kw in price_worker._enqueued)
+    # PP-CATALOG-INCR-001 CI-4 (2026-07-18): catalog_rebuild's enqueue is now
+    # a no-op — the price_guard_skipped write's SQLite catalog row is kept
+    # live by CI-2's synchronous fence-write upsert instead (invariant A7's
+    # "real mutation" concern is satisfied by that, not a queue job).
+    assert all(kw['queue_name'] != 'catalog_rebuild' for kw in price_worker._enqueued)
 
 
 def test_operator_origin_reprice_overrides_operator_history(price_worker, tmp_path, monkeypatch):

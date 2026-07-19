@@ -239,7 +239,13 @@ def test_itemdata_scrub_resolves_old_sku_via_sku_old_fallback(tmp_path):
 # photo_history_recovery.py -- catalog_rebuild enqueue after real copies
 # ---------------------------------------------------------------------------
 
-def test_photo_history_recovery_enqueues_catalog_rebuild_on_copy(tmp_path, monkeypatch, capsys):
+def test_photo_history_recovery_no_longer_enqueues_catalog_rebuild_on_copy(tmp_path, monkeypatch, capsys):
+    """PP-CATALOG-INCR-001 CI-4 (2026-07-18): enqueue_catalog_rebuild() is now
+    a no-op — the per-item SQLite catalog stays live via CI-2's synchronous
+    fence-write upsert, and the remaining JSON artifacts are refreshed by an
+    hourly timer instead of a per-write trigger. This still calls
+    state_machine.enqueue_catalog_rebuild() internally (harmless no-op, no
+    call site needed editing), so no enqueue_job call should be recorded."""
     import tgw.workers.photo_history_recovery as phr_mod
 
     itemdata_root = tmp_path / "ItemData"
@@ -272,10 +278,7 @@ def test_photo_history_recovery_enqueues_catalog_rebuild_on_copy(tmp_path, monke
 
     assert rc == 0
     enqueue_calls = [c for c in calls if c[0] == "enqueue"]
-    assert len(enqueue_calls) == 1
-    kwargs = enqueue_calls[0][1]
-    assert kwargs["queue_name"] == "catalog_rebuild"
-    assert kwargs["dedupe_key"] == "catalog_rebuild:pending"
+    assert len(enqueue_calls) == 0
 
 
 def test_photo_history_recovery_dry_run_does_not_enqueue(tmp_path, monkeypatch):

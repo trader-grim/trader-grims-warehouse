@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextvars
 import datetime
 import json
+import logging
 import os
 import tempfile
 import time
@@ -22,6 +23,8 @@ from typing import Any, Dict, List, Optional, Set
 
 from .config import location_dir, sku_dir, sku_json
 from .resolver import load_item_doc, resolve
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Mutation source tracking (PP-AIOPS-001)
@@ -243,6 +246,21 @@ def _write_field(cfg: Dict[str, Any], sku: str, field: str,
     if field != 'catalog_verified':
         doc.pop('catalog_verified', None)
     atomic_write_json(path, doc, pretty=True, archive_root=cfg.get('archive_root'))
+    # Atomic per-item SQLite catalog upsert (PP-CATALOG-INCR-001 CI-2/CI-4,
+    # 2026-07-18) — this is the CLI-side write path (bulk_edit, backfills,
+    # scrub scripts), separate from http_server.py's HTTP fence, which
+    # already got this in CI-2. Needed here too: CI-4 removed the per-write
+    # catalog_rebuild enqueue on the premise the SQLite catalog stays live
+    # through every caller — that premise only holds if this path keeps it
+    # live as well.
+    try:
+        from .sqlite_catalog import upsert_catalog_row
+        upsert_catalog_row(cfg, doc)
+    except Exception:
+        # C11: log, don't silently swallow — code-review finding, 2026-07-18
+        # (this file previously had no logger at all, so every upsert
+        # failure here was invisible).
+        log.warning("sqlite catalog upsert failed for %s", sku, exc_info=True)
     # Publish to audit stream (PP-AIOPS-001 Phase 1) — fire-and-forget
     try:
         from .apis.nats_client import publish_mutation
@@ -283,6 +301,19 @@ def strip_fields(cfg: Dict[str, Any], sku: str, fields: List[str],
     doc.pop('catalog_verified', None)
     atomic_write_json(path, doc, pretty=cfg.get('pretty', True),
                       archive_root=cfg.get('archive_root'))
+    # SQLite catalog upsert — see _write_field's identical block
+    # (PP-CATALOG-INCR-001 CI-2/CI-4). Code-review finding, 2026-07-18: this
+    # write path was missed when the upsert was added to _write_field/
+    # set_fields, so legacy-field scrub writes (data_scrub_magento.py,
+    # data_scrub_legacy_ebay_fields.py) never refreshed the SQLite catalog.
+    try:
+        from .sqlite_catalog import upsert_catalog_row
+        upsert_catalog_row(cfg, doc)
+    except Exception:
+        # C11: log, don't silently swallow — code-review finding, 2026-07-18
+        # (this file previously had no logger at all, so every upsert
+        # failure here was invisible).
+        log.warning("sqlite catalog upsert failed for %s", sku, exc_info=True)
     return {'ok': True, 'sku': sku, 'removed': present}
 
 
@@ -313,6 +344,15 @@ def set_fields(cfg: Dict[str, Any], sku: str, fields: Dict[str, Any],
     doc.pop('catalog_verified', None)
     atomic_write_json(path, doc, pretty=cfg.get('pretty', True),
                       archive_root=cfg.get('archive_root'))
+    # SQLite catalog upsert — see _write_field's identical block (PP-CATALOG-INCR-001 CI-2/CI-4).
+    try:
+        from .sqlite_catalog import upsert_catalog_row
+        upsert_catalog_row(cfg, doc)
+    except Exception:
+        # C11: log, don't silently swallow — code-review finding, 2026-07-18
+        # (this file previously had no logger at all, so every upsert
+        # failure here was invisible).
+        log.warning("sqlite catalog upsert failed for %s", sku, exc_info=True)
     # Publish to audit stream (PP-AIOPS-001 Phase 1) — fire-and-forget.
     # Code-review fix: this was missing entirely, making bulk backfill
     # writes (e.g. the category-recompile pass) invisible to the
@@ -447,6 +487,19 @@ def verifiedupdate(cfg: Dict[str, Any], sku: str, value: str,
     doc['#STATUS'] = 'In Stock'
     doc.pop('catalog_verified', None)
     atomic_write_json(path, doc, pretty=True, archive_root=cfg.get('archive_root'))
+    # SQLite catalog upsert — see _write_field's identical block
+    # (PP-CATALOG-INCR-001 CI-2/CI-4). Code-review finding, 2026-07-18: this
+    # write path was missed when the upsert was added to _write_field/
+    # set_fields; without it, `tgw update-verified` never refreshed the
+    # SQLite catalog's status column until the hourly timer.
+    try:
+        from .sqlite_catalog import upsert_catalog_row
+        upsert_catalog_row(cfg, doc)
+    except Exception:
+        # C11: log, don't silently swallow — code-review finding, 2026-07-18
+        # (this file previously had no logger at all, so every upsert
+        # failure here was invisible).
+        log.warning("sqlite catalog upsert failed for %s", sku, exc_info=True)
     return {'ok': True, 'sku': sku, 'field': 'verified', 'value': value}
 
 

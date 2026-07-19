@@ -1117,6 +1117,31 @@ def _enqueue_catalog_rebuild(reason: str) -> None:
         pass
 
 
+def _enqueue_thumbnail_gen(sku: str, reason: str) -> None:
+    """Thumbnail regen — same enqueue shape as bundle_intake's initial-intake
+    call (PP-CATALOG-INCR-001 CI-3). Only call this when a write actually
+    touched image/photo_order — before this packet, thumbnail_gen was ONLY
+    ever enqueued once at initial bundle_intake, so a later photo reorder or
+    primary-photo change through the fence never refreshed the thumbnail at
+    all (a real latent gap, not just an over-triggering one)."""
+    try:
+        state_machine.enqueue_job(
+            queue_name='thumbnail_gen',
+            # C10 stamp — this fires from the HTTP fence in response to a
+            # write, same class as every other operator-adjacent enqueue in
+            # this file (invariant C10, test_operator_origin_sourcescan.py).
+            payload={'sku': sku, 'origin': 'operator'},
+            entity_type='item',
+            entity_id=sku,
+            dedupe_key=f'thumbnail_gen:{sku}',
+            max_attempts=3,
+        )
+    except psycopg2.errors.UniqueViolation:
+        pass  # already queued, coalescing
+    except Exception:
+        log.warning("thumbnail_gen enqueue failed for %s (%s)", sku, reason)
+
+
 def _persist_finding(json_path: "Path", sku: str, code: str, detail: str, source: str) -> None:
     """Write a C11 guard finding to pipeline_error — a persisted, queryable
     reason the pipeline skipped/failed something, never just a log line.
@@ -1124,6 +1149,12 @@ def _persist_finding(json_path: "Path", sku: str, code: str, detail: str, source
     workers/ebay_stage.py, workers/ebay_publish.py). Best-effort: if the
     persist itself fails, that failure is only a log line — there is nowhere
     lower to record it.
+
+    _skip_catalog_upsert=True on the inner _apply_patch call: this write
+    must never be the trigger for its own recursive catalog-upsert-failure
+    finding (see _apply_patch's identical parameter) — a pipeline_error
+    write being one cycle behind in the SQLite catalog is low-stakes
+    compared to an infinite recursion if the upsert is persistently broken.
     """
     try:
         _apply_patch(json_path, {"pipeline_error": {
@@ -1131,19 +1162,36 @@ def _persist_finding(json_path: "Path", sku: str, code: str, detail: str, source
             "detail": detail,
             "ts": datetime.now(timezone.utc).isoformat(),
             "source": source,
-        }})
+        }}, _skip_catalog_upsert=True)
     except Exception:
         log.exception("failed to persist %s finding for %s", code, sku)
 
 
-def _apply_patch(json_path: "Path", fields: Dict[str, Any]) -> List[str]:
+def _apply_patch(json_path: "Path", fields: Dict[str, Any], _skip_catalog_upsert: bool = False) -> List[str]:
     """Core item patch: deep-merge dict fields, write atomically, schedule rebuild.
 
     Fields with value None are deleted from the document.
     Returns the list of keys that were written or deleted.
+
+    _skip_catalog_upsert: True only for _persist_finding's own internal
+    {"pipeline_error": ...}-only recursive call — skips both the SQLite
+    upsert (avoiding infinite recursion if the upsert is persistently
+    broken) AND the implicit catalog_verified invalidation below (an
+    internal side-record write must never have field-presence side effects
+    on the caller's actual edit).
     """
     fields = dict(fields)
+    # Captured before the dmk-pop loop below removes draft_listing/
+    # item_attributes from `fields` — those two keys are still real changed
+    # keys for _changed_keys' purposes (audit-publish, thumbnail trigger)
+    # even though they're routed through the accessor path below instead of
+    # the plain doc.update(fields) merge. Code-review finding, 2026-07-18:
+    # using post-pop fields.keys() here silently dropped draft_listing/
+    # item_attributes edits from both the PATCH response's "updated" list
+    # and CI-1's mutation-audit stream.
+    _original_field_keys = list(fields.keys())
     doc = load_item_doc(json_path)
+    _before_doc = dict(doc)
     for dmk in ("draft_listing", "item_attributes"):
         if dmk in fields and isinstance(fields[dmk], dict):
             existing = doc.get(dmk) or {}
@@ -1229,7 +1277,16 @@ def _apply_patch(json_path: "Path", fields: Dict[str, Any]) -> List[str]:
         doc.pop(k, None)
         fields.pop(k)
     doc.update(fields)
-    if "catalog_verified" not in fields:
+    # Code-review fix, 2026-07-19: skip the implicit catalog_verified
+    # invalidation for internal side-record writes (_persist_finding's own
+    # {"pipeline_error": ...}-only recursive call). Without this guard, any
+    # ordinary field patch that happened to trigger a finding-persist (e.g.
+    # a failed sqlite upsert) would have its own catalog_verified value
+    # silently clobbered moments later by the unrelated internal write —
+    # exactly the "correction takes effect but a follow-up write silently
+    # reverts it" failure class invariant C14 exists to prevent, just
+    # self-inflicted by this function instead of a separate caller.
+    if not _skip_catalog_upsert and "catalog_verified" not in fields:
         doc.pop("catalog_verified", None)
 
     # todo #1522 / invariant C14: an operator's direct edit (including a
@@ -1247,7 +1304,52 @@ def _apply_patch(json_path: "Path", fields: Dict[str, Any]) -> List[str]:
             if _base_key in fields:
                 doc["draft_listing"][_base_key] = fields[_base_key]
     atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True), archive_root=_cfg.get("archive_root"))
-    return list(fields.keys()) + to_delete
+    _sku_for_mutation = doc.get("sku") or json_path.stem
+    # Atomic per-item SQLite catalog upsert (PP-CATALOG-INCR-001 CI-2) — keeps
+    # the inventory webui's data source live-accurate without waiting for the
+    # periodic full rebuild. Best-effort: a catalog-projection hiccup must
+    # never fail a write that already succeeded against the source of truth.
+    # Code-review finding, 2026-07-18: a discard_revision-specific C11 guard
+    # was deleted on the premise this upsert made it redundant, but the
+    # upsert's own failure path was log-only — the invariant went
+    # unenforced. Fixed at the root here instead of restoring the
+    # endpoint-specific guard: any _apply_patch caller's upsert failure now
+    # persists a C11 finding (unless _skip_catalog_upsert, which also skips
+    # the finding-persist recursion guard's own inner call).
+    if not _skip_catalog_upsert:
+        try:
+            from .sqlite_catalog import upsert_catalog_row
+
+            upsert_catalog_row(_cfg, doc)
+        except Exception as _uc_exc:
+            log.warning("sqlite catalog upsert failed for %s: %s", _sku_for_mutation, _uc_exc)
+            _persist_finding(
+                json_path, _sku_for_mutation, "sqlite_catalog_upsert_failed",
+                f"SQLite catalog upsert failed after write: {_uc_exc}",
+                "apply_patch",
+            )
+    _changed_keys = _original_field_keys
+    # Publish to audit stream (PP-AIOPS-001 Phase 1 / PP-CATALOG-INCR-001 CI-1) —
+    # fire-and-forget. This is the real fence choke point essentially all write
+    # traffic (worker patches, bulk edits) goes through; items.py's _write_field
+    # already fed the stream for the CLI-only path, this closes the gap for the
+    # HTTP path, which is the one that matters for the incremental catalog design.
+    try:
+        from .apis.nats_client import publish_mutation
+
+        for _ck in _changed_keys:
+            publish_mutation(
+                sku=_sku_for_mutation, field=_ck,
+                old_value=_before_doc.get(_ck), new_value=doc.get(_ck),
+                source="http_patch",
+            )
+    except Exception:
+        pass
+    # Thumbnail regen (PP-CATALOG-INCR-001 CI-3) — only on the fields that
+    # actually affect what the thumbnail shows, not on every write.
+    if "image" in _changed_keys or "photo_order" in _changed_keys:
+        _enqueue_thumbnail_gen(_sku_for_mutation, reason=f"http_patch:{','.join(_changed_keys)}")
+    return _changed_keys
 
 
 def _apply_ebay_write(
@@ -1277,6 +1379,7 @@ def _apply_ebay_write(
         "ebay_live": ebay_live,
     }
     doc = load_item_doc(json_path)
+    _before_doc = dict(doc)
     changed: List[str] = []
     for block_key, incoming_block in incoming.items():
         if incoming_block is None:
@@ -1302,6 +1405,30 @@ def _apply_ebay_write(
         doc[block_key] = merged
         changed.append(block_key)
     atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True), archive_root=_cfg.get("archive_root"))
+    # SQLite catalog upsert — see _apply_patch's identical block (PP-CATALOG-INCR-001 CI-2/C11 fix).
+    try:
+        from .sqlite_catalog import upsert_catalog_row
+
+        upsert_catalog_row(_cfg, doc)
+    except Exception as _uc_exc:
+        log.warning("sqlite catalog upsert failed for %s: %s", sku, _uc_exc)
+        _persist_finding(
+            json_path, sku, "sqlite_catalog_upsert_failed",
+            f"SQLite catalog upsert failed after write: {_uc_exc}",
+            "apply_ebay_write",
+        )
+    # Publish to audit stream — see _apply_patch's identical block (PP-CATALOG-INCR-001 CI-1).
+    try:
+        from .apis.nats_client import publish_mutation
+
+        for _ck in changed:
+            publish_mutation(
+                sku=sku, field=_ck,
+                old_value=_before_doc.get(_ck), new_value=doc.get(_ck),
+                source="http_ebay_write",
+            )
+    except Exception:
+        pass
     return changed
 
 
@@ -1324,10 +1451,17 @@ def create_item_endpoint(body: CreateItemBody) -> Dict[str, Any]:
     except FileExistsError:
         raise HTTPException(status_code=409, detail=f"sku already exists: {body.sku}")
 
+    # Atomic per-item SQLite catalog upsert (PP-CATALOG-INCR-001 CI-4,
+    # 2026-07-18) — a brand-new item needs its first catalog row immediately,
+    # not after the hourly reconciliation timer; items.create_item() has no
+    # publish_mutation/upsert hook of its own (pre-existing gap, out of scope
+    # here), so this endpoint does it directly.
     try:
-        state_machine.enqueue_catalog_rebuild(f"create:{body.sku}")
-    except Exception:
-        pass
+        from .sqlite_catalog import upsert_catalog_row
+
+        upsert_catalog_row(_cfg, load_item_doc(json_path))
+    except Exception as _uc_exc:
+        log.warning("sqlite catalog upsert failed for new item %s: %s", body.sku, _uc_exc)
 
     return {"ok": True, "sku": body.sku, "path": str(json_path)}
 
@@ -2507,28 +2641,112 @@ def ebay_category_children(parent_id: str = "") -> Dict[str, Any]:
 
 
 # GET /api/ebay/store-categories
-# Returns store categories from category-groups.json, sorted by name.
+# Live-authoritative eBay store custom categories (GetStore), TTL-cached;
+# falls back to category-groups.json's set only if the live call itself
+# raises (network/auth failure) — an empty live response is trusted as-is,
+# since a genuinely empty store has no custom categories to offer. Fixes
+# the store-category dropdown authority gap found in the 2026-07-18
+# Seller Hub UI triage: the option list used to come only from
+# category-groups.json, a local/config-assembled list never checked
+# against the live account (PP-SELLERHUB-001, todo #1546).
 # ---------------------------------------------------------------------------
+
+_LIVE_STORE_CATS_CACHE: Dict[str, Any] = {"data": None, "at": 0.0}
+_LIVE_STORE_CATS_TTL = 900  # 15 min — bounds live-call frequency without letting the list go stale for long
+
+
+def _store_categories_from_groups(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Read category-groups.json fresh (no caching) — this is the fallback
+    path used only when the live GetStore call fails, so it must reflect
+    the file as it stands right now, not a possibly-stale in-process cache."""
+    seen: Dict[str, Any] = {}
+    try:
+        cg_path = cfg.get("category_groups_path")
+        if cg_path and Path(cg_path).exists():
+            cg = json.loads(Path(cg_path).read_text())
+            for grp in cg.get("groups", cg).values():
+                name = grp.get("store_category") or grp.get("store_category_name") or ""
+                sid = grp.get("store_category_id")
+                if name and name not in seen:
+                    seen[name] = sid
+    except Exception:
+        pass
+    return sorted([{"id": v, "name": k} for k, v in seen.items()], key=lambda x: x["name"])
+
+
+def _live_store_categories(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], bool]:
+    """Return (results, used_fallback)."""
+    now = time.time()
+    cached = _LIVE_STORE_CATS_CACHE["data"]
+    if cached is not None and (now - _LIVE_STORE_CATS_CACHE["at"]) < _LIVE_STORE_CATS_TTL:
+        return cached, False
+    try:
+        from .apis.ebay.trading import get_store_categories
+
+        live = get_store_categories(cfg)
+        results = sorted(
+            [{"id": c["id"], "name": c["name"]} for c in live if c.get("id") and c.get("name")],
+            key=lambda x: x["name"],
+        )
+        _LIVE_STORE_CATS_CACHE["data"] = results
+        _LIVE_STORE_CATS_CACHE["at"] = now
+        return results, False
+    except Exception as exc:
+        log.warning("live store-categories fetch failed, falling back to category-groups.json: %s", exc)
+        # Don't update the cache/timestamp on failure — next call retries live
+        # rather than getting pinned to the fallback for the full TTL.
+        return _store_categories_from_groups(cfg), True
 
 
 @app.get("/api/ebay/store-categories", dependencies=[AUTH])
 def ebay_store_categories() -> Dict[str, Any]:
     try:
-        from .ebay.pricing import _groups_cache, _load_groups
-
-        _load_groups(_cfg)
-        groups = (_groups_cache or {}).get("groups", {})
-        seen: Dict[str, Any] = {}
-        for grp in groups.values():
-            name = grp.get("store_category") or grp.get("store_category_name") or ""
-            sid = grp.get("store_category_id")
-            if name and name not in seen:
-                seen[name] = sid
-        results = sorted([{"id": v, "name": k} for k, v in seen.items()], key=lambda x: x["name"])
-        return {"ok": True, "results": results}
+        results, fallback = _live_store_categories(_cfg)
+        return {"ok": True, "results": results, "fallback": fallback}
     except Exception as exc:
         log.warning("store-categories error: %s", exc)
         return {"ok": False, "detail": str(exc), "results": []}
+
+
+# ---------------------------------------------------------------------------
+# Live-authoritative fulfillment (shipping) policies — TTL-cached, falling
+# back to the static ebay-fulfillment-policies.json cache only if the live
+# call fails. Fixes the fulfillment-policy dropdown authority gap found in
+# the 2026-07-18 Seller Hub UI triage: the dropdown used to be driven only
+# by that static cache file, refreshed by nothing (PP-SELLERHUB-001, #1547).
+# ---------------------------------------------------------------------------
+
+_LIVE_FULFILLMENT_POLICIES_CACHE: Dict[str, Any] = {"data": None, "at": 0.0}
+_LIVE_FULFILLMENT_POLICIES_TTL = 900  # 15 min
+
+
+def _live_fulfillment_policies(cfg: Dict[str, Any]) -> Tuple[Dict[str, str], bool]:
+    """Return ({policy_id: name}, used_fallback)."""
+    now = time.time()
+    cached = _LIVE_FULFILLMENT_POLICIES_CACHE["data"]
+    if cached is not None and (now - _LIVE_FULFILLMENT_POLICIES_CACHE["at"]) < _LIVE_FULFILLMENT_POLICIES_TTL:
+        return cached, False
+    try:
+        from .ebay.sync import get_fulfillment_policies_full
+
+        live = get_fulfillment_policies_full(cfg)
+        results = {p["id"]: p["name"] for p in live if p.get("id")}
+        if not results:
+            raise RuntimeError("live fulfillment-policy fetch returned no policies")
+        _LIVE_FULFILLMENT_POLICIES_CACHE["data"] = results
+        _LIVE_FULFILLMENT_POLICIES_CACHE["at"] = now
+        return results, False
+    except Exception as exc:
+        log.warning("live fulfillment-policy fetch failed, falling back to static cache: %s", exc)
+        cat_root = cfg.get("catalog_root")
+        pol_cache = (cat_root / "ebay-fulfillment-policies.json") if cat_root else None
+        fallback_opts: Dict[str, str] = {}
+        if pol_cache and pol_cache.exists():
+            try:
+                fallback_opts = json.loads(pol_cache.read_text()).get("fulfillment", {})
+            except Exception:
+                pass
+        return fallback_opts, True
 
 
 # ---------------------------------------------------------------------------
@@ -3142,64 +3360,6 @@ function initCatSearch2(){
 
 # Module-level constant — avoids nested quote hell in f-string script blocks
 _CATEGORY_CONTEXT_IIFE = "function loadCatCtx(catId){\n  var prefill=window._DL_PREFILL||{};\n  var loading=document.getElementById('aspects-loading');\n  var form=document.getElementById('aspects-form');\n  if(!catId){if(loading)loading.textContent='No category.';return;}\n  var curCondSel=document.getElementById('dl-condition-select');\n  var curCondQ=curCondSel&&curCondSel.value?'?current_condition='+encodeURIComponent(curCondSel.value):'';\n  fetch('/api/ebay/category-context/'+encodeURIComponent(catId)+curCondQ,{headers:authHeaders()})\n  .then(function(r){return r.json();}).then(function(d){\n    if(!d||!d.ok){if(loading)loading.textContent='Context load failed.';return;}\n    window._CAT_CTX=d;\n    var sel=document.getElementById('dl-condition-select');\n    if(sel&&d.conditions&&d.conditions.length){\n      var curVal=sel.value;\n      var stillValid=d.conditions.some(function(c){return c.enum===curVal;});\n      var html='';\n      if(!curVal)html+='<option value=\"\" selected disabled>\\u2014 select \\u2014</option>';\n      d.conditions.forEach(function(c){\n        html+='<option value=\"'+c.enum+'\"'+(c.enum===curVal?' selected':'')+'>'+c.label+'</option>';\n      });\n      if(curVal&&!stillValid){\n        if(d.condition_remap){\n          curVal=d.condition_remap.enum;\n          html=html.replace('<option value=\"'+curVal+'\"','<option value=\"'+curVal+'\" selected');\n        }else{\n          html+='<option value=\"'+curVal+'\" selected>'+curVal+' \\u2014 not valid for this category, please fix</option>';\n        }\n      }\n      sel.innerHTML=html;\n      if(d.condition_remap&&curVal===d.condition_remap.enum){\n        fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',\n          headers:authHeaders({'Content-Type':'application/json'}),\n          body:JSON.stringify({fields:{draft_listing:{condition_enum:curVal}}})});\n      }\n      var cn=document.getElementById('condition-policy-note');\n      var nl=d.conditions.length;\n      if(cn)cn.textContent=nl+(nl===1?' condition':' conditions')+' allowed'+(d.condition_remap?' \\u2014 category changed, condition auto-matched to nearest same-or-worse: '+d.condition_remap.label:'')+((curVal&&!stillValid&&!d.condition_remap)?' \\u2014 current value invalid, please re-select':'');\n    }\n    if(d.fulfillment_policy_id){\n      var fsel=document.getElementById('dl-ship-input');\n      var fhint=document.getElementById('dl-ship-hint');\n      if(fsel&&!fsel.value){\n        for(var fi=0;fi<fsel.options.length;fi++){\n          if(fsel.options[fi].value===d.fulfillment_policy_id){fsel.value=d.fulfillment_policy_id;break;}\n        }\n        if(fsel.value){\n          fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',\n            headers:authHeaders({'Content-Type':'application/json'}),\n            body:JSON.stringify({fields:{draft_listing:{shipping_profile:fsel.value}}})});\n        }\n      }\n      if(fhint&&!fsel.value)fhint.textContent='suggested: '+d.fulfillment_policy_id;\n    }\n    if(d.store_category){\n      var sch=document.getElementById('store-cat-hint');\n      if(sch)sch.textContent='suggested: '+d.store_category;\n    }\n    if(d.group_name){\n      var gh=document.getElementById('category-group-hint');\n      if(gh){\n        var pt=d.pricing&&d.pricing.typical_used?' · typical $'+d.pricing.typical_used.toFixed(2):'';\n        var pf=d.pricing&&d.pricing.floor?' · floor $'+d.pricing.floor.toFixed(2):'';\n        gh.textContent='group: '+d.group_name+pf+pt;\n      }\n    }\n    if(loading)loading.style.display='none';\n    if(!form)return;\n    if(!d.aspects||!d.aspects.length){\n      form.innerHTML=d.aspects_error\n        ?'<span style=\"color:#e88;font-size:.82em\">Item specifics lookup failed (\\u2018'+d.aspects_error+'\\u2019) \\u2014 every eBay category has specifics; this is a lookup error, not an empty category. <a href=\"#\" onclick=\"loadCatCtx(\\''+catId+'\\');return false\" style=\"color:#8ac\">Retry</a></span>'\n        :'<span style=\"color:#556;font-size:.82em\">No specifics returned for this category \\u2014 unexpected, please verify manually</span>';\n      return;\n    }\n    var html='';\n    d.aspects.forEach(function(asp){\n      var badge=asp.required\n        ?'<span style=\"font-size:.7em;background:#3a1a1a;color:#c44;border-radius:3px;padding:1px 5px;margin-left:4px\">REQ</span>'\n        :'<span style=\"font-size:.7em;background:#2a2a0a;color:#aa0;border-radius:3px;padding:1px 5px;margin-left:4px\">REC</span>';\n      // Three-layer merge: operator edits (blue) > proposed (yellow) > live (baseline)\n      var liveVal=(window._LIVE_ASPECTS&&window._LIVE_ASPECTS[asp.name]!==undefined?(window._LIVE_ASPECTS[asp.name]||'').toString():'');\n      var proposedVal=(window._PROPOSED_ASPECTS&&window._PROPOSED_ASPECTS[asp.name]!==undefined?(window._PROPOSED_ASPECTS[asp.name]||'').toString():'');\n      var editVal=(prefill[asp.name]!==undefined?(prefill[asp.name]||'').toString():'');\n      var cur,layer;\n      if(editVal){cur=editVal;layer=(editVal!==liveVal)?'edit':'same';}\n      else if(proposedVal){cur=proposedVal;layer=(proposedVal!==liveVal)?'proposed':'same';}\n      else{cur=liveVal;layer=liveVal?'live':'empty';}\n      cur=cur.replace(/\"/g,'&quot;');\n      var reqEmpty=asp.required&&!cur;\n      // Colours by layer\n      var bord=reqEmpty?'#c44':(layer==='edit'?'#44c':(layer==='proposed'?'#884':'#444'));\n      var bg=reqEmpty?'#1a0a0a':(layer==='edit'?'#0a0a1a':(layer==='proposed'?'#1a1a00':'#1a1a1a'));\n      // Hint: show live value when overridden or proposed differs\n      var liveHint=(layer==='edit'||layer==='proposed')&&liveVal\n        ?'<div style=\"font-size:.7em;color:#445;margin-top:1px\">live: '+liveVal.replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>'\n        :'';\n      var inp;\n      if(asp.allowed_values&&asp.allowed_values.length&&asp.mode==='SELECTION_ONLY'){\n        var offList=cur&&asp.allowed_values.indexOf(cur)===-1;\n        var opts=asp.allowed_values.map(function(v){\n          return '<option value=\"'+v+'\"'+(v===cur?' selected':'')+'>'+v+'</option>';\n        }).join('');\n        if(offList)opts='<option value=\"'+cur+'\" selected>'+cur+' \\u2014 not in this category\\u2019s list, please verify</option>'+opts;\n        inp='<select data-aspect=\"'+asp.name+'\" data-initial=\"'+cur+'\" style=\"background:'+bg+';color:#eee;border:1px solid '+(offList?'#c84':bord)+';border-radius:3px;padding:2px 5px;font-size:.85em\"><option value=\"\">—</option>'+opts+'</select>';\n      }else{\n        var dlid='dl-asp-'+asp.name.replace(/[^a-zA-Z0-9]/g,'-');\n        var dlopts=asp.allowed_values&&asp.allowed_values.length\n          ?'<datalist id=\"'+dlid+'\">'+asp.allowed_values.map(function(v){return '<option value=\"'+v+'\"></option>';}).join('')+'</datalist>'\n          :'';\n        inp='<input type=\"text\"'+(dlopts?' list=\"'+dlid+'\"':'')+' data-aspect=\"'+asp.name+'\" data-initial=\"'+cur+'\" value=\"'+cur+'\"'\n           +' style=\"background:'+bg+';color:#eee;border:1px solid '+bord+';border-radius:3px;padding:2px 5px;font-size:.85em;width:200px\">'\n           +dlopts;\n      }\n      html+='<div class=\"frow\"'+(reqEmpty?' style=\"border-left:2px solid #944;padding-left:4px\"':'')+'>  <span class=\"fn\" style=\"font-size:.82em\">'+asp.name+badge+'</span><span class=\"fv\">'+inp+liveHint+'</span></div>';\n    });\n    var covered={};\n    d.aspects.forEach(function(asp){covered[asp.name]=true;});\n    Object.keys(prefill).forEach(function(name){\n      if(covered[name])return;\n      var xcur=(prefill[name]||'').toString().replace(/\"/g,'&quot;');\n      var xkey=name.replace(/\"/g,'&quot;');\n      var xbadge='<span style=\"font-size:.7em;background:#1a2a3a;color:#8ac;border-radius:3px;padding:1px 5px;margin-left:4px\" title=\"A seller-defined custom aspect \u2014 not in this category\u2019s standard list, but a real eBay field, pushed live like any other\">CUSTOM ASPECT</span>';\n      var xcb='<input type=\"checkbox\" class=\"aspect-keep-cb\" data-aspect-key=\"'+xkey+'\" checked title=\"Checked = keep on this eBay listing. Uncheck = discard at Save (moved to the Inventory Record as a superset, never deleted).\" style=\"margin-right:4px;vertical-align:middle\">';\n      var xinp='<input type=\"text\" data-aspect=\"'+name+'\" data-initial=\"'+xcur+'\" value=\"'+xcur+'\" style=\"background:#1a1a2a;color:#eee;border:1px solid #446;border-radius:3px;padding:2px 5px;font-size:.85em;width:200px\">';\n      html+='<div class=\"frow\"><span class=\"fn\" style=\"font-size:.82em\">'+xcb+name+xbadge+'</span><span class=\"fv\">'+xinp+'</span></div>';\n    });\n\n    var missingReq=d.aspects.filter(function(a){return a.required&&!(prefill[a.name]||'');}).length;if(missingReq>0){html='<div style=\"margin-bottom:8px;padding:5px 8px;background:#1a0808;border:1px solid #844;border-radius:3px;font-size:.78em;color:#e88\">'+missingReq+' required aspect'+(missingReq===1?'':'s')+' missing values — fill before staging</div>'+html;}form.innerHTML=html;\n  }).catch(function(){\n    if(loading)loading.textContent='Category context load failed.';\n  });\n}\ndocument.addEventListener('DOMContentLoaded',function(){\n  if(window._DL_CAT_ID)loadCatCtx(window._DL_CAT_ID);\n  if(typeof initCatSearch==='function')initCatSearch();\n  if(typeof initCatSearch2==='function')initCatSearch2();\n  if(typeof loadInventoryDiff==='function')loadInventoryDiff();\n});\n"
-
-# Custom context menu for gallery images — fetches bytes locally then POSTs to
-# Google Lens upload so the LAN-only URL is never sent to Google directly.
-_LENS_CTX_MENU_JS = """\
-(function(){
-  var menu=document.createElement('div');
-  menu.id='img-ctx-menu';
-  menu.style.cssText='display:none;position:fixed;z-index:9999;background:#1e1e1e;border:1px solid #444;border-radius:4px;padding:4px 0;min-width:200px;box-shadow:0 2px 8px rgba(0,0,0,.6);font-size:13px;';
-  function addItem(label,fn){
-    var d=document.createElement('div');
-    d.textContent=label;
-    d.style.cssText='padding:6px 14px;cursor:pointer;color:#ddd;';
-    d.onmouseenter=function(){this.style.background='#333';};
-    d.onmouseleave=function(){this.style.background='';};
-    d.onclick=function(){hide();fn();};
-    menu.appendChild(d);
-  }
-  var _src='';
-  function hide(){menu.style.display='none';}
-  async function lensSearch(){
-    try{
-      var resp=await fetch(_src);
-      var blob=await resp.blob();
-      var file=new File([blob],'photo.jpg',{type:blob.type||'image/jpeg'});
-      var form=document.createElement('form');
-      form.method='POST';
-      form.action='https://lens.google.com/upload';
-      form.enctype='multipart/form-data';
-      form.target='_blank';
-      var inp=document.createElement('input');
-      inp.type='file';
-      inp.name='encoded_image';
-      var dt=new DataTransfer();
-      dt.items.add(file);
-      inp.files=dt.files;
-      form.appendChild(inp);
-      document.body.appendChild(form);
-      form.submit();
-      document.body.removeChild(form);
-    }catch(e){alert('Lens search failed: '+e);}
-  }
-  addItem('Search with Google Lens',lensSearch);
-  document.body.appendChild(menu);
-  document.addEventListener('contextmenu',function(e){
-    var img=e.target.closest('img.main-photo,#lb-img,.strip img');
-    if(!img){hide();return;}
-    var src=img.src;
-    if(!src||src==='data:,'||src.startsWith('data:'))return;
-    e.preventDefault();
-    _src=src;
-    menu.style.left=Math.min(e.clientX,window.innerWidth-220)+'px';
-    menu.style.top=Math.min(e.clientY,window.innerHeight-60)+'px';
-    menu.style.display='block';
-  });
-  document.addEventListener('click',hide);
-  document.addEventListener('scroll',hide,{passive:true});
-})();
-"""
 
 # ---------------------------------------------------------------------------
 # GET /form/intake — intake landing page (HTML)
@@ -4993,7 +5153,6 @@ def _render_item_detail_html(
             f"}}"
             f"</script>"
         )
-        gallery_html += "<script>" + _LENS_CTX_MENU_JS + "</script>"
     else:
         gallery_html = '<div style="color:#555;padding:30px;text-align:center">No photos</div>'
 
@@ -5727,23 +5886,15 @@ def _render_item_detail_html(
     _dl_store_cat2_id = str((dl or {}).get("secondary_store_category_id") or "")
     _dl_cat2_id_v = h(str((dl or {}).get("secondary_category_id") or ""))
     _dl_cat2_name = h(str((dl or {}).get("secondary_category_name") or ""))
-    _sc_list: list = []
+    # Live-authoritative store categories (GetStore), TTL-cached, falling back
+    # to category-groups.json only if the live call fails — see
+    # _live_store_categories (PP-SELLERHUB-001, todo #1546).
     try:
-        import json as _json_sc
-
-        _cg_path_sc = _cfg.get("category_groups_path")
-        if _cg_path_sc and Path(_cg_path_sc).exists():
-            _cg_sc = _json_sc.loads(Path(_cg_path_sc).read_text())
-            _seen_sc: set = set()
-            for _grp_sc in _cg_sc.get("groups", _cg_sc).values():
-                _sn = _grp_sc.get("store_category") or _grp_sc.get("store_category_name") or ""
-                _si = str(_grp_sc.get("store_category_id") or "")
-                if _sn and _si and _si not in _seen_sc:
-                    _seen_sc.add(_si)
-                    _sc_list.append((_sn, _si))
-            _sc_list.sort(key=lambda x: x[0])
+        _sc_results, _sc_fallback = _live_store_categories(_cfg)
+        _sc_list = [(r["name"], str(r["id"])) for r in _sc_results]
     except Exception:
         _sc_list = []
+        _sc_fallback = True
 
     def _store_cat_options_html(selected_id: str) -> str:
         opts = '<option value="">— not set —</option>'
@@ -5755,23 +5906,36 @@ def _render_item_detail_html(
 
     _store_cat_opts_html = _store_cat_options_html(_dl_store_cat_id)
     _store_cat2_opts_html = _store_cat_options_html(_dl_store_cat2_id)
+    _store_cat_fallback_html = (
+        '<span style="font-size:.7em;color:#c84;margin-left:6px" '
+        'title="Live eBay store-category fetch failed — showing the last known local list, may be stale or incomplete">'
+        '⚠ local list, live fetch failed</span>'
+        if _sc_fallback else ""
+    )
     import json as _json2
 
     _cat_root = _cfg.get("catalog_root")
     _pol_cache = (_cat_root / "ebay-fulfillment-policies.json") if _cat_root else None
-    _fulfillment_opts: dict = {}
     _return_opts: dict = {}
     if _pol_cache and _pol_cache.exists():
         try:
             _pd = _json2.loads(_pol_cache.read_text())
-            _fulfillment_opts = _pd.get("fulfillment", {})
             _return_opts = _pd.get("return", {})
             if not _dl_return_val and _return_opts:
                 _dl_return_val = next(iter(_return_opts))
         except Exception:
             pass
+    # Fulfillment (shipping) policy options: live-authoritative, TTL-cached,
+    # falling back to the static cache only if the live call fails.
+    _fulfillment_opts, _fo_fallback = _live_fulfillment_policies(_cfg)
     _ship_opts_html = "".join(
         f'<option value="{pid}"{" selected" if pid == _dl_ship_val else ""}>{h(name)} ({pid[:8]}…)</option>' for pid, name in sorted(_fulfillment_opts.items(), key=lambda kv: kv[1])
+    )
+    _fo_fallback_html = (
+        '<span style="font-size:.7em;color:#c84;margin-left:6px" '
+        'title="Live eBay fulfillment-policy fetch failed — showing the last known local cache, may be stale or incomplete">'
+        '⚠ local cache, live fetch failed</span>'
+        if _fo_fallback else ""
     )
     # Live fulfillment policy beside the selector (session 42: the selector kept
     # showing the operator's FC4 while eBay actually had FC8 — the divergence was
@@ -6154,6 +6318,7 @@ def _render_item_detail_html(
         f'<select id="dl-store-cat-select" '
         f'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px;font-size:.88em">' + _store_cat_opts_html + "</select>"
         '<span id="store-cat-hint" style="font-size:.72em;color:#445;margin-left:8px"></span>'
+        + _store_cat_fallback_html +
         "</span></div>"
         # Secondary store category
         '<div class="frow" id="dl-store-category2">'
@@ -6275,6 +6440,7 @@ def _render_item_detail_html(
         f"{_ship_opts_html}"
         f"</select>"
         f'<span id="dl-ship-hint" style="font-size:.72em;color:#445;margin-left:8px"></span>'
+        f"{_fo_fallback_html}"
         f"{_live_ship_html}"
         f"</span></div>"
         f'<div class="frow" id="dl-returns">'
@@ -7920,23 +8086,12 @@ def discard_revision(sku: str) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"read error: {exc}")
     if "revision_draft" not in doc:
         return {"ok": True, "sku": sku, "note": "no revision_draft present"}
+    # PP-CATALOG-INCR-001 CI-4 (2026-07-18): the catalog_rebuild enqueue +
+    # C11 not-queued guard that used to live here is now dead weight —
+    # _apply_patch above already synchronously upserts this SKU's SQLite
+    # catalog row (CI-2), so there is no longer a "did the rebuild get
+    # queued" question to guard against for this endpoint.
     _apply_patch(json_path, {"revision_draft": None})
-    try:
-        state_machine.enqueue_catalog_rebuild(f"revision_discard:{sku}")
-    except Exception as exc:
-        # invariant C11: a skipped rebuild is a finding, not a swallowed
-        # exception — otherwise the catalog goes stale after a discard with
-        # no queryable trace of why.
-        if "unique" not in str(exc).lower() and "duplicate" not in str(exc).lower():
-            log.warning(
-                "failed to enqueue catalog_rebuild after revision discard for %s: %s",
-                sku, exc,
-            )
-            _persist_finding(
-                json_path, sku, "revision_discard_rebuild_not_queued",
-                f"catalog_rebuild enqueue failed after revision discard: {exc}",
-                "discard_revision",
-            )
     return {"ok": True, "sku": sku, "discarded": True}
 
 

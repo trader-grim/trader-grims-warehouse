@@ -873,19 +873,19 @@ def test_patch_location_syncs_tree(env, enqueue_calls):
     assert link.is_symlink() or link.exists()
 
 
-def test_patch_enqueues_coalesced_catalog_rebuild(env, enqueue_calls):
+def test_patch_no_longer_enqueues_catalog_rebuild(env, enqueue_calls):
+    """PP-CATALOG-INCR-001 CI-4 (2026-07-18): enqueue_catalog_rebuild() is
+    now a no-op — CI-2's synchronous SQLite upsert (inside _apply_patch,
+    called just before this point) keeps the catalog live instead. A title
+    change doesn't touch image/photo_order, so CI-3's thumbnail trigger
+    doesn't fire either — no enqueue calls at all for this write."""
     r = env["client"].patch(
         f"/api/items/{SKU_A}",
         json={"fields": {"title": "Rebuild me"}},
         headers=AUTH_HEADERS,
     )
     assert r.status_code == 200
-    assert len(enqueue_calls) == 1
-    kw = enqueue_calls[0]["kwargs"]
-    assert kw["queue_name"] == "catalog_rebuild"
-    assert kw["dedupe_key"] == "catalog_rebuild:pending"
-    assert kw["payload"] == {"reason": f"http_patch:{SKU_A}"}
-    assert kw["max_attempts"] == 3
+    assert enqueue_calls == []
 
 
 def test_patch_succeeds_even_if_enqueue_raises(env, monkeypatch):
@@ -1181,8 +1181,10 @@ def test_create_item_endpoint_writes_via_fence(env, enqueue_calls):
     doc = json.loads((env["itemdata_root"] / NEW_SKU / f"{NEW_SKU}.json").read_text())
     assert doc["title"] == "Fence-Created Item"
     assert doc["sku"] == NEW_SKU
-    # catalog_rebuild still enqueued (untouched behavior)
-    assert any(c["kwargs"].get("queue_name") == "catalog_rebuild" for c in enqueue_calls)
+    # PP-CATALOG-INCR-001 CI-4 (2026-07-18): catalog_rebuild's enqueue is now
+    # a no-op — the endpoint upserts the new SKU's SQLite catalog row
+    # directly instead, so no catalog_rebuild enqueue is expected here.
+    assert not any(c["kwargs"].get("queue_name") == "catalog_rebuild" for c in enqueue_calls)
 
 
 def test_create_item_endpoint_duplicate_sku_409(env):
@@ -1261,8 +1263,10 @@ def test_bulk_apply_writes_and_enqueues(env, enqueue_calls):
     # written to disk
     doc = json.loads((env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text())
     assert doc["title"] == "Bulk Renamed"
-    # coalesced catalog_rebuild enqueued
-    assert any(c["kwargs"].get("queue_name") == "catalog_rebuild" for c in enqueue_calls)
+    # PP-CATALOG-INCR-001 CI-4 (2026-07-18): catalog_rebuild's enqueue is now
+    # a no-op — items.py's bulk_edit -> _write_field upserts the SQLite
+    # catalog row directly on write instead (CI-2/CI-4).
+    assert not any(c["kwargs"].get("queue_name") == "catalog_rebuild" for c in enqueue_calls)
 
 
 def test_bulk_apply_invalid_field(client):
@@ -1433,7 +1437,9 @@ def test_bulk_action_mark_sold_writes_status(env, enqueue_calls):
     assert body["count"] == 1
     doc = json.loads((env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text())
     assert doc["status"] == "Sold"
-    assert any(c["kwargs"].get("queue_name") == "catalog_rebuild" for c in enqueue_calls)
+    # PP-CATALOG-INCR-001 CI-4 (2026-07-18): catalog_rebuild's enqueue is now
+    # a no-op — see test_bulk_apply_writes_and_enqueues's identical note.
+    assert not any(c["kwargs"].get("queue_name") == "catalog_rebuild" for c in enqueue_calls)
 
 
 def test_bulk_action_mark_sold_decrements_multi_qty_instead_of_sold(env, enqueue_calls):
@@ -3277,7 +3283,15 @@ def test_photo_order_enqueues_via_shared_helper(client, enqueue_calls):
     """audit#1143 (#1198): set_photo_order used to duplicate the
     catalog_rebuild enqueue inline instead of calling
     _enqueue_catalog_rebuild(); verify it now goes through the shared
-    helper (same dedupe key, same coalescing behavior)."""
+    helper (same dedupe key, same coalescing behavior).
+
+    PP-CATALOG-INCR-001 CI-3 (2026-07-18): a photo_order write also enqueues
+    thumbnail_gen via _apply_patch's new conditional trigger (only fires
+    when the write touches image/photo_order).
+
+    PP-CATALOG-INCR-001 CI-4 (2026-07-18): catalog_rebuild's enqueue is now
+    a no-op (SQLite catalog stays live via CI-2's synchronous upsert
+    instead), so only the thumbnail_gen call remains."""
     r = client.post(
         f"/api/items/{SKU_A}/photo-order",
         json={"order": ["a.jpg"]},
@@ -3285,10 +3299,10 @@ def test_photo_order_enqueues_via_shared_helper(client, enqueue_calls):
     )
     assert r.status_code == 200
     assert len(enqueue_calls) == 1
-    kwargs = enqueue_calls[0]["kwargs"]
-    assert kwargs["queue_name"] == "catalog_rebuild"
-    assert kwargs["dedupe_key"] == "catalog_rebuild:pending"
-    assert kwargs["payload"]["reason"] == f"photo_order:{SKU_A}"
+    tg_kwargs = enqueue_calls[0]["kwargs"]
+    assert tg_kwargs["queue_name"] == "thumbnail_gen"
+    assert tg_kwargs["dedupe_key"] == f"thumbnail_gen:{SKU_A}"
+    assert tg_kwargs["payload"]["sku"] == SKU_A
 
 
 # ---------------------------------------------------------------------------
@@ -3472,23 +3486,12 @@ def test_discard_revision_removes_draft(env):
     assert "revision_draft" not in saved
 
 
-def test_discard_revision_persists_finding_when_rebuild_enqueue_fails(env, monkeypatch):
-    """code-review follow-up: discard_revision's comment claimed a C11
-    finding was persisted on a failed catalog_rebuild enqueue, but the code
-    only logged a warning -- fix must actually write pipeline_error."""
-    _write_item_with_revision(env["itemdata_root"], SKU_A, _REVISION_DRAFT)
-    client = env["client"]
-
-    def _boom(*a, **k):
-        raise RuntimeError("postgres unavailable")
-
-    monkeypatch.setattr(http_server.state_machine, "enqueue_job", _boom)
-
-    r = client.delete(f"/api/items/{SKU_A}/revision", headers=AUTH_HEADERS)
-    assert r.status_code == 200
-
-    saved = json.loads((env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text())
-    assert saved["pipeline_error"]["code"] == "revision_discard_rebuild_not_queued"
+# test_discard_revision_persists_finding_when_rebuild_enqueue_fails removed
+# 2026-07-18 (PP-CATALOG-INCR-001 CI-4): the catalog_rebuild-enqueue + C11
+# not-queued guard it exercised was deleted from discard_revision — CI-2's
+# synchronous SQLite upsert (already run by the _apply_patch just above it)
+# makes that guard dead weight, so there's no longer a queue-enqueue-failure
+# path in this endpoint to test.
 
 
 def test_discard_revision_noop_when_absent(env):

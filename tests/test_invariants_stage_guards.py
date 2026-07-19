@@ -164,7 +164,10 @@ def test_successful_stage_is_unpublished_and_preserves_comps(stage, tmp_path):
     assert offer['staged_at']
     assert offer['price_comps'] == {'count': 3, 'p25': 9.99}  # merge, not replace
     assert 'ebay_listing' not in after                        # never published
-    assert any(kw['queue_name'] == 'catalog_rebuild' for kw in stage._enqueued)
+    # PP-CATALOG-INCR-001 CI-4 (2026-07-18): catalog_rebuild's enqueue is now
+    # a no-op — the SQLite catalog stays live via CI-2's synchronous
+    # fence-write upsert instead.
+    assert all(kw['queue_name'] != 'catalog_rebuild' for kw in stage._enqueued)
 
 # ---------------------------------------------------------------------------
 # C5-extended — never-raise clamp on force re-stage (session 42 incident)
