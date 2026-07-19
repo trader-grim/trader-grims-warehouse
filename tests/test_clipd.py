@@ -159,6 +159,54 @@ def test_process_change_records_selection(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# process_change — sensitive-content exclusion (todo #1565/PP-CLIP-001)
+# ---------------------------------------------------------------------------
+
+def test_process_change_skips_password_hint(tmp_path):
+    db = tmp_path / 'h.db'
+    reg = clipd._SubscriberRegistry()
+    result = clipd.process_change('hunter2', 'clipboard', reg, db_path=db, password_hint=True)
+    assert result == {'ok': True, 'skipped': True, 'reason': 'password_hint'}
+    assert list_history(db_path=db) == []
+
+
+def test_process_change_password_hint_still_updates_dedup(tmp_path):
+    """A password-hinted copy is not persisted, but dedup tracking still
+    advances — a real subsequent non-sensitive copy is not itself treated as
+    a duplicate of the (unpersisted) password content."""
+    db = tmp_path / 'h.db'
+    reg = clipd._SubscriberRegistry()
+    clipd.process_change('hunter2', 'clipboard', reg, db_path=db, password_hint=True)
+    result = clipd.process_change('normal text', 'clipboard', reg, db_path=db)
+    assert result['ok'] is True
+    assert result.get('skipped') is not True
+    rows = list_history(db_path=db)
+    assert len(rows) == 1
+    assert rows[0]['content'] == 'normal text'
+
+
+def test_process_change_no_password_hint_persists_normally(tmp_path):
+    db = tmp_path / 'h.db'
+    reg = clipd._SubscriberRegistry()
+    result = clipd.process_change('ordinary clip text', 'clipboard', reg, db_path=db,
+                                   password_hint=False)
+    assert result['ok'] is True
+    assert result.get('skipped') is not True
+    rows = list_history(db_path=db)
+    assert len(rows) == 1
+    assert rows[0]['content'] == 'ordinary clip text'
+
+
+def test_process_change_skips_secret_shaped_content(tmp_path):
+    db = tmp_path / 'h.db'
+    reg = clipd._SubscriberRegistry()
+    secret = 'ghp_' + 'aB3xQ9zT1kLmN7pR5sV8wY0cD2fH4jK6' * 1  # ghp_-prefixed token shape
+    result = clipd.process_change(secret, 'clipboard', reg, db_path=db)
+    assert result == {'ok': True, 'skipped': True, 'reason': 'secret_pattern'}
+    assert list_history(db_path=db) == []
+
+
+# ---------------------------------------------------------------------------
 # handle_command
 # ---------------------------------------------------------------------------
 
@@ -345,14 +393,15 @@ def test_wayland_backend_processes_clipboard_line(tmp_path):
     proc = _make_proc(['tgw202601011200000\n'])
     changes = []
 
-    def fake_process_change(content, selection, subscribers, db_path=None):
+    def fake_process_change(content, selection, subscribers, db_path=None, password_hint=False):
         changes.append((content, selection))
         stop.set()  # prevent restart loop
         return {'ok': True, 'is_sku': True, 'sku': content}
 
     with patch.object(backend, '_spawn', return_value=proc):
-        with patch.object(clipd, 'process_change', side_effect=fake_process_change):
-            backend._run_watcher('clipboard')
+        with patch.object(backend, '_has_password_hint', return_value=False):
+            with patch.object(clipd, 'process_change', side_effect=fake_process_change):
+                backend._run_watcher('clipboard')
 
     assert changes == [('tgw202601011200000', 'clipboard')]
 
@@ -430,6 +479,132 @@ def test_wayland_backend_handles_missing_executable(tmp_path):
 
     with patch.object(backend, '_spawn', side_effect=FileNotFoundError('wl-paste')):
         backend._run_watcher('clipboard')  # must return cleanly
+
+
+# ---------------------------------------------------------------------------
+# WaylandBackend._has_password_hint (todo #1565/PP-CLIP-001)
+# ---------------------------------------------------------------------------
+
+def test_wayland_has_password_hint_true_when_offered():
+    reg = clipd._SubscriberRegistry()
+    backend = clipd.WaylandBackend(reg)
+
+    result = MagicMock()
+    result.returncode = 0
+    result.stdout = 'text/plain\nx-kde-passwordManagerHint\n'
+
+    with patch('tgw.clipd.subprocess.run', return_value=result) as mock_run:
+        assert backend._has_password_hint('clipboard') is True
+
+    args = mock_run.call_args[0][0]
+    assert args == ['wl-paste', '--list-types']
+
+
+def test_wayland_has_password_hint_false_when_absent():
+    reg = clipd._SubscriberRegistry()
+    backend = clipd.WaylandBackend(reg)
+
+    result = MagicMock()
+    result.returncode = 0
+    result.stdout = 'text/plain\nUTF8_STRING\n'
+
+    with patch('tgw.clipd.subprocess.run', return_value=result):
+        assert backend._has_password_hint('clipboard') is False
+
+
+def test_wayland_has_password_hint_uses_primary_flag():
+    reg = clipd._SubscriberRegistry()
+    backend = clipd.WaylandBackend(reg)
+
+    result = MagicMock()
+    result.returncode = 0
+    result.stdout = 'x-kde-passwordManagerHint\n'
+
+    with patch('tgw.clipd.subprocess.run', return_value=result) as mock_run:
+        assert backend._has_password_hint('primary') is True
+
+    args = mock_run.call_args[0][0]
+    assert args == ['wl-paste', '--list-types', '--primary']
+
+
+def test_wayland_has_password_hint_false_on_missing_executable():
+    reg = clipd._SubscriberRegistry()
+    backend = clipd.WaylandBackend(reg)
+
+    with patch('tgw.clipd.subprocess.run', side_effect=FileNotFoundError('wl-paste')):
+        assert backend._has_password_hint('clipboard') is False
+
+
+def test_wayland_run_watcher_skips_persisting_password_hinted_content(tmp_path):
+    """End-to-end: a password-hinted copy reaches _run_watcher and is not
+    persisted, while a normal copy in the same stream still is."""
+    db = tmp_path / 'h.db'
+    reg = clipd._SubscriberRegistry()
+    stop = threading.Event()
+    backend = clipd.WaylandBackend(reg, db_path=db, stop_event=stop, restart_delay=0)
+
+    proc = _make_proc(['hunter2\n', 'normal text\n'])
+
+    hint_result = MagicMock()
+    hint_result.returncode = 0
+    hint_result.stdout = 'x-kde-passwordManagerHint\n'
+
+    call_count = [0]
+
+    def fake_run(args, **kw):
+        call_count[0] += 1
+        if call_count[0] == 2:  # after 'normal text' triggers stop
+            stop.set()
+        return hint_result if call_count[0] == 1 else MagicMock(returncode=0, stdout='')
+
+    with patch.object(backend, '_spawn', return_value=proc):
+        with patch('tgw.clipd.subprocess.run', side_effect=fake_run):
+            backend._run_watcher('clipboard')
+
+    rows = list_history(db_path=db)
+    assert len(rows) == 1
+    assert rows[0]['content'] == 'normal text'
+
+
+# ---------------------------------------------------------------------------
+# X11Backend._has_password_hint (todo #1565/PP-CLIP-001)
+# ---------------------------------------------------------------------------
+
+def test_x11_has_password_hint_true_when_offered():
+    reg = clipd._SubscriberRegistry()
+    backend = clipd.X11Backend(reg)
+
+    result = MagicMock()
+    result.returncode = 0
+    result.stdout = 'TARGETS\nx-kde-passwordManagerHint\nUTF8_STRING\n'
+
+    with patch('tgw.clipd.subprocess.run', return_value=result) as mock_run:
+        assert backend._has_password_hint('clipboard') is True
+
+    args = mock_run.call_args[0][0]
+    assert 'xclip' in args
+    assert 'TARGETS' in args
+    assert 'clipboard' in args
+
+
+def test_x11_has_password_hint_false_when_absent():
+    reg = clipd._SubscriberRegistry()
+    backend = clipd.X11Backend(reg)
+
+    result = MagicMock()
+    result.returncode = 0
+    result.stdout = 'TARGETS\nUTF8_STRING\n'
+
+    with patch('tgw.clipd.subprocess.run', return_value=result):
+        assert backend._has_password_hint('clipboard') is False
+
+
+def test_x11_has_password_hint_false_on_missing_executable():
+    reg = clipd._SubscriberRegistry()
+    backend = clipd.X11Backend(reg)
+
+    with patch('tgw.clipd.subprocess.run', side_effect=FileNotFoundError('xclip')):
+        assert backend._has_password_hint('clipboard') is False
 
 
 # ---------------------------------------------------------------------------

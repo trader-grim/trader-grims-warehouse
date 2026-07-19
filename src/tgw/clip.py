@@ -16,8 +16,10 @@ DB: ~/.local/share/tgw-clip/history.db
 """
 from __future__ import annotations
 
+import math
 import re
 import sqlite3
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -27,6 +29,86 @@ _SKU_RE = re.compile(r'^tgw(?:\d{15}|\d{17})$')  # 15 = legacy (no ms), 17 = cur
 
 _RETENTION = 2000  # keep at most this many rows; prune oldest on insert
 _RETENTION_DAYS = 14  # prune rows older than this many days on insert
+
+# ---------------------------------------------------------------------------
+# Secret-shaped content heuristic (todo #1565/PP-CLIP-001) — best-effort,
+# defense-in-depth ONLY. This is not a security boundary: it cannot catch
+# every secret shape (multi-word passphrases, secrets embedded in longer
+# text, unusual/custom token formats). It exists to keep the *common* case —
+# a bare API key or token copied verbatim — out of the persistent history,
+# not to guarantee no secret ever lands there.
+# ---------------------------------------------------------------------------
+
+# Well-known provider key/token prefixes. Not exhaustive by design (see
+# module docstring above) — a short, maintainable allowlist.
+_SECRET_PREFIXES = (
+    'sk-ant-',      # Anthropic
+    'sk-',          # OpenAI and others
+    'ghp_',         # GitHub personal access token
+    'gho_',         # GitHub OAuth token
+    'github_pat_',  # GitHub fine-grained PAT
+    'AIza',         # Google API key
+    'xoxb-',        # Slack bot token
+    'xoxp-',        # Slack user token
+    'xoxa-',        # Slack app token
+    'xoxs-',        # Slack workspace token
+    'AKIA',         # AWS access key id
+    'ASIA',         # AWS temporary access key id
+    'glpat-',       # GitLab personal access token
+)
+
+# A single-line token with no whitespace, 20-200 chars, drawn from a
+# base64/hex-ish alphabet — the shape most raw secrets take when copied
+# verbatim (as opposed to prose, URLs, or SKUs which use other characters).
+_TOKEN_SHAPE_RE = re.compile(r'^[A-Za-z0-9+/=_.-]{20,200}$')
+
+# Shannon entropy threshold (bits/char) above which a token-shaped string is
+# treated as secret-like rather than ordinary text/identifiers. 4.0 is a
+# starting point per the spec — tune here if it's over/under-triggering.
+_ENTROPY_THRESHOLD = 4.0
+
+
+def _shannon_entropy(s: str) -> float:
+    """Shannon entropy in bits/char of string *s*. Empty string -> 0.0."""
+    if not s:
+        return 0.0
+    length = len(s)
+    counts = Counter(s)
+    return -sum((n / length) * math.log2(n / length) for n in counts.values())
+
+
+def looks_like_secret(content: str) -> bool:
+    """Best-effort heuristic: True if *content* looks like an API key/token/secret.
+
+    Rules (in order):
+      1. Never flags a classified TGW SKU (see classify_sku), even though
+         SKUs are long alphanumeric strings that would otherwise resemble a
+         token.
+      2. Multi-line or content containing whitespace is never flagged by
+         this heuristic — it only targets a single bare token copied
+         verbatim, not a token embedded within prose.
+      3. Known provider key/token prefixes (see _SECRET_PREFIXES) are always
+         flagged.
+      4. Otherwise, a single-line 20-200 char token drawn from a
+         base64/hex-ish alphabet is flagged if its Shannon entropy exceeds
+         _ENTROPY_THRESHOLD bits/char.
+
+    Defense-in-depth only — see module comment above. Not a security
+    boundary Dave should rely on exclusively.
+    """
+    s = (content or '').strip()
+    if not s:
+        return False
+    if classify_sku(s):
+        return False
+    if '\n' in s or ' ' in s or '\t' in s:
+        return False
+    for prefix in _SECRET_PREFIXES:
+        if s.startswith(prefix):
+            return True
+    if _TOKEN_SHAPE_RE.match(s) and _shannon_entropy(s) > _ENTROPY_THRESHOLD:
+        return True
+    return False
 
 
 def _default_db_path() -> Path:

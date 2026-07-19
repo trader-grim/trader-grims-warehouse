@@ -36,7 +36,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from tgw.clip import last_sku, list_history, record_clip
+from tgw.clip import last_sku, list_history, looks_like_secret, record_clip
 
 log = logging.getLogger(__name__)
 
@@ -112,18 +112,37 @@ def process_change(
     selection: str,
     subscribers: _SubscriberRegistry,
     db_path: Optional[Path] = None,
+    password_hint: bool = False,
 ) -> Dict[str, Any]:
     """Record a clipboard change and push an event to all subscribers.
 
     Deduplicates: skips if content is identical to the last recorded entry
     (prevents dual-backend double-writes when both X11 and Wayland fire for the
     same clipboard event in a mixed XWayland session).
+
+    Sensitive-content exclusion (todo #1565/PP-CLIP-001) — never persists to
+    the durable history (never calls record_clip()) when either:
+      - *password_hint* is True: the caller detected the standard
+        `x-kde-passwordManagerHint` MIME type on this selection (set by
+        KeePassXC/Bitwarden/KWallet when copying a password).
+      - the content looks like an API key/secret/token per
+        tgw.clip.looks_like_secret() (best-effort heuristic, not a security
+        boundary — see that function's docstring).
+    Both checks happen AFTER the dedup update, so dedup tracking still
+    reflects the real clipboard state (a subsequent non-sensitive copy is
+    correctly detected as a change) even though nothing was persisted.
     """
     global _last_content
     with _last_content_lock:
         if content == _last_content:
             return {'ok': True, 'skipped': True}
         _last_content = content
+    if password_hint:
+        log.info('clip: skipped persisting — password-manager hint (selection=%s)', selection)
+        return {'ok': True, 'skipped': True, 'reason': 'password_hint'}
+    if looks_like_secret(content):
+        log.info('clip: skipped persisting — secret-shaped content (selection=%s)', selection)
+        return {'ok': True, 'skipped': True, 'reason': 'secret_pattern'}
     result = record_clip(content, selection=selection, db_path=db_path)
     subscribers.push({
         'event': 'clip',
@@ -333,6 +352,31 @@ class X11Backend:
             pass
         return None
 
+    def _has_password_hint(self, selection: str) -> bool:
+        """True if the password-manager MIME hint (x-kde-passwordManagerHint) is
+        among the targets currently offered for this X11 selection.
+
+        Mirrors WaylandBackend._has_password_hint (todo #1565/PP-CLIP-001),
+        via `xclip -o -t TARGETS` (lists offered target atoms by name) rather
+        than a native Xlib ConvertSelection/SelectionNotify round-trip —
+        reusing the same xclip subprocess pattern already used by
+        _read_selection_content, since the native-atom route would be
+        substantially more invasive for the same result. Best-effort: any
+        failure (missing xclip, timeout, non-zero exit) is treated as
+        'no hint' rather than blocking capture.
+        """
+        sel_arg = 'primary' if selection == 'primary' else 'clipboard'
+        try:
+            r = subprocess.run(
+                ['xclip', '-o', '-selection', sel_arg, '-t', 'TARGETS'],
+                capture_output=True, text=True, timeout=2.0,
+            )
+            if r.returncode == 0:
+                return 'x-kde-passwordManagerHint' in r.stdout.splitlines()
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+        return False
+
     def run(self) -> None:
         """Block until stop_event, processing XFixes SelectionOwner events."""
         import select as _select
@@ -383,7 +427,11 @@ class X11Backend:
                     continue
                 content = self._read_selection_content(selection)
                 if content is not None:
-                    process_change(content, selection, self._subscribers, self._db_path)
+                    password_hint = self._has_password_hint(selection)
+                    process_change(
+                        content, selection, self._subscribers, self._db_path,
+                        password_hint=password_hint,
+                    )
 
         dpy.close()
         log.info('X11/XFixes backend stopped')
@@ -414,6 +462,27 @@ class WaylandBackend:
 
     def _spawn(self, args: list, **kwargs) -> subprocess.Popen:
         return subprocess.Popen(args, **kwargs)
+
+    def _has_password_hint(self, selection: str) -> bool:
+        """True if the password-manager MIME hint (x-kde-passwordManagerHint) is
+        among the types currently offered for this Wayland selection.
+
+        Queried via `wl-paste --list-types` (add `--primary` for the primary
+        selection) — a real, standard convention set by KeePassXC/Bitwarden
+        desktop/KWallet when copying a password (todo #1565/PP-CLIP-001).
+        Best-effort: any failure (missing wl-paste, timeout, non-zero exit)
+        is treated as 'no hint' rather than blocking capture.
+        """
+        args = ['wl-paste', '--list-types']
+        if selection == 'primary':
+            args.append('--primary')
+        try:
+            r = subprocess.run(args, capture_output=True, text=True, timeout=2.0)
+            if r.returncode == 0:
+                return 'x-kde-passwordManagerHint' in r.stdout.splitlines()
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+        return False
 
     def _run_watcher(self, selection: str) -> None:
         """Watch one selection in a loop; restart if the process exits."""
@@ -448,7 +517,11 @@ class WaylandBackend:
                         raw, buf = buf.split(b'\x00', 1)
                         content = raw.decode('utf-8', errors='replace').rstrip('\n')
                         if content.strip():
-                            process_change(content, selection, self._subscribers, self._db_path)
+                            password_hint = self._has_password_hint(selection)
+                            process_change(
+                                content, selection, self._subscribers, self._db_path,
+                                password_hint=password_hint,
+                            )
             except OSError:
                 pass
             finally:
