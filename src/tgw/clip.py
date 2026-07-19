@@ -48,10 +48,21 @@ def _connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
             selection   TEXT NOT NULL DEFAULT 'clipboard',
             is_sku      INTEGER NOT NULL DEFAULT 0,
             sku         TEXT,
-            captured_at TEXT NOT NULL DEFAULT (datetime('now'))
+            captured_at TEXT NOT NULL DEFAULT (datetime('now')),
+            origin      TEXT NOT NULL DEFAULT 'clipboard',
+            label       TEXT
         )
         """
     )
+    # SQLite has no `ADD COLUMN IF NOT EXISTS`; guard additive migrations for
+    # DBs created before origin/label existed (PP-CLIP-001 clipboard-agent-
+    # delivery Phase 0). Idempotent + safe against pre-existing rows: new
+    # columns are nullable/defaulted, existing rows are untouched.
+    existing_cols = {row[1] for row in con.execute('PRAGMA table_info(clip_history)').fetchall()}
+    if 'origin' not in existing_cols:
+        con.execute("ALTER TABLE clip_history ADD COLUMN origin TEXT NOT NULL DEFAULT 'clipboard'")
+    if 'label' not in existing_cols:
+        con.execute('ALTER TABLE clip_history ADD COLUMN label TEXT')
     con.execute('CREATE INDEX IF NOT EXISTS idx_sku ON clip_history(sku)')
     con.execute('CREATE INDEX IF NOT EXISTS idx_captured ON clip_history(captured_at)')
     con.commit()
@@ -94,11 +105,47 @@ def record_clip(content: str, selection: str = 'clipboard',
         con.close()
 
 
+def deliver_clip(content: str, label: Optional[str] = None,
+                 db_path: Optional[Path] = None) -> Dict[str, Any]:
+    """Record agent-delivered content (origin='agent'). Same shape as record_clip().
+
+    Request-initiated only (Dave never pushed to unsolicited) — the caller
+    (CLI verb / MCP tool) is responsible for only calling this when Dave has
+    actually asked for the content to be delivered.
+    """
+    content = content or ''
+    sku = classify_sku(content)
+    con = _connect(db_path)
+    try:
+        cur = con.execute(
+            'INSERT INTO clip_history (content, selection, is_sku, sku, origin, label) '
+            'VALUES (?, ?, ?, ?, ?, ?)',
+            (content, 'clipboard', 1 if sku else 0, sku or None, 'agent', label),
+        )
+        rowid = cur.lastrowid
+        # Retention: prune oldest beyond the cap.
+        con.execute(
+            'DELETE FROM clip_history WHERE id NOT IN '
+            '(SELECT id FROM clip_history ORDER BY id DESC LIMIT ?)',
+            (_RETENTION,),
+        )
+        # Retention: prune rows older than the TTL.
+        con.execute(
+            "DELETE FROM clip_history WHERE captured_at < datetime('now', ?)",
+            (f'-{_RETENTION_DAYS} days',),
+        )
+        con.commit()
+        return {'ok': True, 'id': rowid, 'is_sku': bool(sku), 'sku': sku or None,
+                'origin': 'agent', 'label': label}
+    finally:
+        con.close()
+
+
 def list_history(limit: int = 20, sku_only: bool = False,
                  db_path: Optional[Path] = None) -> List[Dict[str, Any]]:
     con = _connect(db_path)
     try:
-        sql = 'SELECT id, content, selection, is_sku, sku, captured_at FROM clip_history'
+        sql = 'SELECT id, content, selection, is_sku, sku, captured_at, origin, label FROM clip_history'
         if sku_only:
             sql += ' WHERE is_sku = 1'
         sql += ' ORDER BY id DESC LIMIT ?'
@@ -124,7 +171,7 @@ def search(pattern: str, limit: int = 20,
     con = _connect(db_path)
     try:
         rows = con.execute(
-            'SELECT id, content, selection, is_sku, sku, captured_at '
+            'SELECT id, content, selection, is_sku, sku, captured_at, origin, label '
             'FROM clip_history WHERE content LIKE ? ORDER BY id DESC LIMIT ?',
             (f'%{pattern}%', limit),
         ).fetchall()
@@ -144,10 +191,23 @@ def wipe_nonsku(db_path: Optional[Path] = None) -> int:
         con.close()
 
 
+def _display_line(r: Dict[str, Any]) -> str:
+    """Format one row's preview text, tagging agent-delivered entries and
+    preferring their label over the raw content preview when present."""
+    tag = 'AGENT' if r.get('origin') == 'agent' else ('SKU' if r['is_sku'] else '   ')
+    if r.get('origin') == 'agent' and r.get('label'):
+        body = f'{r["label"]} — {r["content"][:60]}'
+    else:
+        body = r['content'][:80]
+    return f'{r["captured_at"]}  [{tag}]  {body}'
+
+
 def cmd_clip(action: str, *, pattern: str = '', limit: int = 20,
              sku_only: bool = False, clip_id: Optional[int] = None,
-             copy: bool = False, db_path: Optional[Path] = None) -> Dict[str, Any]:
-    """CLI handler for `tgw clip {list,last-sku,search,wipe,get}`."""
+             copy: bool = False, label: Optional[str] = None,
+             requested_by: str = 'claude',
+             db_path: Optional[Path] = None) -> Dict[str, Any]:
+    """CLI handler for `tgw clip {list,last-sku,search,wipe,get,deliver}`."""
     if action == 'last-sku':
         sku = last_sku(db_path)
         if sku:
@@ -157,15 +217,20 @@ def cmd_clip(action: str, *, pattern: str = '', limit: int = 20,
     if action == 'list':
         rows = list_history(limit=limit, sku_only=sku_only, db_path=db_path)
         for r in rows:
-            tag = 'SKU' if r['is_sku'] else '   '
-            print(f'{r["captured_at"]}  [{tag}]  {r["content"][:80]}')
+            print(_display_line(r))
         return {'ok': True, 'count': len(rows), 'rows': rows}
 
     if action == 'search':
         rows = search(pattern, limit=limit, db_path=db_path)
         for r in rows:
-            print(f'{r["captured_at"]}  {r["content"][:80]}')
+            print(_display_line(r))
         return {'ok': True, 'count': len(rows), 'rows': rows}
+
+    if action == 'deliver':
+        if not pattern:
+            return {'ok': False, 'error': 'deliver requires content (positional argument)'}
+        result = deliver_clip(pattern, label=label, db_path=db_path)
+        return result
 
     if action == 'wipe':
         n = wipe_nonsku(db_path)
@@ -178,7 +243,8 @@ def cmd_clip(action: str, *, pattern: str = '', limit: int = 20,
         con = _connect(db_path)
         try:
             row = con.execute(
-                'SELECT id, content, selection, is_sku, sku, captured_at FROM clip_history WHERE id = ?',
+                'SELECT id, content, selection, is_sku, sku, captured_at, origin, label '
+                'FROM clip_history WHERE id = ?',
                 (clip_id,),
             ).fetchone()
         finally:

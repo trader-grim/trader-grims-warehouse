@@ -644,13 +644,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--launch", action="store_true", help="exec claude now (default: print the command)")
 
     p = sub.add_parser("clip", help="TGW clipboard history store/query (PP-CLIP-001)")
-    p.add_argument("clip_action", choices=["list", "last-sku", "search", "wipe", "get"])
-    p.add_argument("pattern", nargs="?", default="", help="search pattern (for search)")
+    p.add_argument("clip_action", choices=["list", "last-sku", "search", "wipe", "get", "deliver"])
+    p.add_argument("pattern", nargs="?", default="",
+                   help="search pattern (for search) / content to deliver (for deliver)")
     p.add_argument("--limit", type=int, default=20, help="max rows (list/search)")
     p.add_argument("--sku-only", action="store_true", help="list: SKU clips only")
     p.add_argument("--id", type=int, default=None, metavar="ID",
                    help="get: clip entry ID to retrieve (prints full content)")
     p.add_argument("--copy", action="store_true", help="get: also copy content back to clipboard")
+    p.add_argument("--label", default=None, help="deliver: optional short human-readable description")
+    p.add_argument("--requested-by", default="claude", dest="requested_by",
+                   help="deliver: who requested the delivery (claude|tigwa); not yet persisted to schema")
 
     p = sub.add_parser("catlocmvall", help="(deprecated) move all items from one location to another — use mvitems")
     p.add_argument("from_location")
@@ -4298,7 +4302,12 @@ def main() -> int:
         elif args.op == "clip":
             from .clip import cmd_clip
 
-            result = cmd_clip(args.clip_action, pattern=args.pattern, limit=args.limit, sku_only=args.sku_only, clip_id=getattr(args, "id", None), copy=getattr(args, "copy", False))
+            result = cmd_clip(
+                args.clip_action, pattern=args.pattern, limit=args.limit,
+                sku_only=args.sku_only, clip_id=getattr(args, "id", None),
+                copy=getattr(args, "copy", False), label=getattr(args, "label", None),
+                requested_by=getattr(args, "requested_by", "claude"),
+            )
 
         elif args.op == "catlocmvall":
             result = catlocmvall(cfg, args.from_location, args.to_location, check_only=check)

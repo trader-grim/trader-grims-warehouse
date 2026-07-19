@@ -155,18 +155,41 @@ def handle_command(cmd: Dict[str, Any], db_path: Optional[Path] = None) -> Dict[
     return {'ok': False, 'error': f'unknown command: {action!r}'}
 
 def launch_rofi_picker(db_path: Path) -> Optional[str]:
-    """Launch rofi to pick from clipboard history. Returns selected content or None."""
+    """Launch rofi to pick from clipboard history. Returns selected content or None.
+
+    Selection is keyed by row `id`, not by a truncated-content prefix match
+    (todo #1563/PP-CLIP-001 clipboard-agent-delivery Phase 0 — the old
+    `content LIKE '<truncated>%'` reverse lookup collided whenever two rows
+    shared a 120-char prefix, silently returning the wrong or truncated full
+    content; this was very likely the cause of Dave's recurring paste-
+    corruption symptom). Each rofi row is fed as `f"{id}\\t{display_text}"`;
+    after selection we split on the first tab and look up the full content by
+    id directly.
+    """
     import sqlite3
-    
+
     try:
         conn = sqlite3.connect(str(db_path))
         cursor = conn.cursor()
-        cursor.execute('SELECT content FROM clip_history ORDER BY id DESC LIMIT 200')
-        items = [row[0][:120] for row in cursor.fetchall()]
+        cursor.execute(
+            'SELECT id, content, origin, label FROM clip_history ORDER BY id DESC LIMIT 200'
+        )
+        rows = cursor.fetchall()
         conn.close()
 
-        if not items:
+        if not rows:
             return None
+
+        lines = []
+        for row_id, content, origin, label in rows:
+            if origin == 'agent':
+                tag = '[AGENT] '
+                preview = f'{label} — {content[:100]}' if label else content[:120]
+            else:
+                tag = ''
+                preview = content[:120]
+            display_text = f'{tag}{preview}'.replace('\t', ' ').replace('\n', ' ')
+            lines.append(f'{row_id}\t{display_text}')
 
         proc = subprocess.Popen(
             ['rofi', '-dmenu', '-p', 'Clip', '-i'],
@@ -175,25 +198,28 @@ def launch_rofi_picker(db_path: Path) -> Optional[str]:
             text=True,
         )
         assert proc.stdin is not None
-        proc.stdin.write('\n'.join(items))
+        proc.stdin.write('\n'.join(lines))
         proc.stdin.close()
-        
+
         selected = proc.stdout.read().strip() if proc.stdout else None
         proc.wait()
         if not selected:
             return None
 
-        # Look up full content (not truncated) from db
+        selected_id_str, _, _ = selected.partition('\t')
+        try:
+            selected_id = int(selected_id_str)
+        except ValueError:
+            log.warning('rofi picker: unparseable selection id %r', selected_id_str)
+            return None
+
+        # Look up full content by id (never by content-prefix matching).
         conn = sqlite3.connect(str(db_path))
         cursor = conn.cursor()
-        cursor.execute(
-            'SELECT content FROM clip_history WHERE content LIKE ? LIMIT 1',
-            (f'{selected}%',)
-        )
+        cursor.execute('SELECT content FROM clip_history WHERE id = ?', (selected_id,))
         row = cursor.fetchone()
-        full_content = row[0] if row else selected
         conn.close()
-        return full_content
+        return row[0] if row else None
 
     except Exception as e:
         log.warning('rofi picker failed: %s', e)

@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import tgw.clipd as clipd
-from tgw.clip import list_history, record_clip
+from tgw.clip import deliver_clip, list_history, record_clip
 
 # ---------------------------------------------------------------------------
 # detect_backend
@@ -501,6 +501,14 @@ def test_x11_read_selection_returns_none_on_timeout():
 # launch_rofi_picker (todo #1292/#1293 — queried nonexistent 'clips' table
 # and double cursor.fetchone() call; regression coverage against the real
 # clip_history schema)
+#
+# todo #1563/PP-CLIP-001 clipboard-agent-delivery Phase 0 — selection is now
+# keyed by row id (fed as f"{id}\t{display_text}" into rofi, looked up by id
+# after selection), not by a truncated-content-prefix LIKE match. The old
+# prefix match silently returned the wrong/truncated content whenever two
+# rows shared a 120-char prefix — very likely the cause of Dave's recurring
+# paste-corruption symptom. These tests now select by id, matching the real
+# rofi contract.
 # ---------------------------------------------------------------------------
 
 def _fake_rofi_process(select_value):
@@ -517,33 +525,76 @@ def test_launch_rofi_picker_returns_full_content_not_truncated(tmp_path):
     db_path = tmp_path / 'history.db'
     long_content = 'A' * 500 + ' END-OF-CONTENT-MARKER'
     record_clip('short one', db_path=db_path)
-    record_clip(long_content, db_path=db_path)  # most recent -> first in ORDER BY id DESC
+    result_id = record_clip(long_content, db_path=db_path)['id']  # most recent -> first in ORDER BY id DESC
 
-    truncated_selection = long_content[:120]
-    with patch('tgw.clipd.subprocess.Popen', return_value=_fake_rofi_process(truncated_selection)):
+    selection = f'{result_id}\t{long_content[:120]}'
+    with patch('tgw.clipd.subprocess.Popen', return_value=_fake_rofi_process(selection)):
         result = clipd.launch_rofi_picker(db_path)
 
     assert result == long_content
 
 
-def test_launch_rofi_picker_falls_back_to_raw_selection_on_no_match(tmp_path):
+def test_launch_rofi_picker_returns_none_on_unparseable_id(tmp_path):
     db_path = tmp_path / 'history.db'
     record_clip('something else entirely', db_path=db_path)
 
-    with patch('tgw.clipd.subprocess.Popen', return_value=_fake_rofi_process('NO-MATCH-XYZ')):
+    with patch('tgw.clipd.subprocess.Popen', return_value=_fake_rofi_process('NOT-AN-ID\tsome text')):
         result = clipd.launch_rofi_picker(db_path)
 
-    assert result == 'NO-MATCH-XYZ'
+    assert result is None
 
 
 def test_launch_rofi_picker_queries_clip_history_table(tmp_path):
     db_path = tmp_path / 'history.db'
-    record_clip('a clip', db_path=db_path)
+    result_id = record_clip('a clip', db_path=db_path)['id']
 
     # No mocking of Popen internals needed beyond stdout/stdin — this just
     # proves the SELECT against clip_history (not the nonexistent 'clips'
     # table) succeeds instead of being swallowed by the except-and-return-None.
-    with patch('tgw.clipd.subprocess.Popen', return_value=_fake_rofi_process('a clip')):
+    with patch('tgw.clipd.subprocess.Popen', return_value=_fake_rofi_process(f'{result_id}\ta clip')):
         result = clipd.launch_rofi_picker(db_path)
 
     assert result == 'a clip'
+
+
+def test_launch_rofi_picker_id_based_lookup_resolves_shared_prefix_collision(tmp_path):
+    """Regression test for the actual paste-corruption bug: two rows sharing
+    an identical 120+ char prefix must each resolve to THEIR OWN full content
+    when selected by id, never the other's (todo #1563)."""
+    db_path = tmp_path / 'history.db'
+    shared_prefix = 'X' * 150
+    content_a = shared_prefix + ' — variant A tail'
+    content_b = shared_prefix + ' — variant B tail'
+    id_a = record_clip(content_a, db_path=db_path)['id']
+    id_b = record_clip(content_b, db_path=db_path)['id']
+
+    with patch('tgw.clipd.subprocess.Popen',
+               return_value=_fake_rofi_process(f'{id_a}\t{shared_prefix[:120]}')):
+        result_a = clipd.launch_rofi_picker(db_path)
+    with patch('tgw.clipd.subprocess.Popen',
+               return_value=_fake_rofi_process(f'{id_b}\t{shared_prefix[:120]}')):
+        result_b = clipd.launch_rofi_picker(db_path)
+
+    assert result_a == content_a
+    assert result_b == content_b
+    assert result_a != result_b
+
+
+def test_launch_rofi_picker_agent_rows_tagged_and_labeled(tmp_path):
+    db_path = tmp_path / 'history.db'
+    delivered_id = deliver_clip('the actual ticket text', label='eBay support ticket', db_path=db_path)['id']
+
+    captured = {}
+
+    def _capture_popen(*args, **kwargs):
+        proc = _fake_rofi_process(f'{delivered_id}\tignored')
+        captured['stdin_write'] = proc.stdin.write
+        return proc
+
+    with patch('tgw.clipd.subprocess.Popen') as mock_popen:
+        mock_popen.return_value = _fake_rofi_process(f'{delivered_id}\tignored')
+        clipd.launch_rofi_picker(db_path)
+        fed_text = mock_popen.return_value.stdin.write.call_args[0][0]
+
+    assert '[AGENT]' in fed_text
+    assert 'eBay support ticket' in fed_text

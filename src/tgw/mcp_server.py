@@ -411,6 +411,42 @@ if not _READONLY:
 
 
 # ---------------------------------------------------------------------------
+# tgw_clip_deliver — deliver agent-prepared content into Dave's local clip
+# history (PP-CLIP-001 clipboard-agent-delivery Phase 0)
+# ---------------------------------------------------------------------------
+
+def tgw_clip_deliver(
+    content: Annotated[str, alias_field('content')],
+    label: Annotated[str, alias_field('label')] = '',
+) -> str:
+    """Deliver agent-prepared content into Dave's local clipboard history.
+
+    Request-initiated only — call this only when Dave has actually asked for
+    something to be delivered (never unsolicited). The content lands as a
+    discrete, addressable entry in the existing `tgw clip` history, tagged
+    [AGENT], for Dave to select via the rofi picker when he's ready — this
+    never writes directly onto the live OS clipboard.
+
+    Args:
+        content: The prepared text to deliver.
+        label: Optional short human-readable description (e.g. "eBay support
+            ticket text + attachments").
+
+    Returns ok/id on success.
+    """
+    from tgw.clip import deliver_clip
+    try:
+        result = deliver_clip(content, label=label or None)
+        return json.dumps(result)
+    except Exception as exc:
+        return json.dumps({'ok': False, 'error': str(exc)})
+
+
+if not _READONLY:
+    mcp.tool()(tgw_clip_deliver)
+
+
+# ---------------------------------------------------------------------------
 # tgw_dead_letter — inspect dead_letter jobs
 # ---------------------------------------------------------------------------
 

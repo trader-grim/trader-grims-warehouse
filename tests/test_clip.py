@@ -142,3 +142,137 @@ def test_cmd_clip_unknown_action(tmp_path):
     out = clip.cmd_clip("bogus", db_path=_db(tmp_path))
     assert out["ok"] is False
     assert "unknown clip action" in out["error"]
+
+
+# ---------------------------------------------------------------------------
+# origin/label columns + deliver_clip (todo #1563/PP-CLIP-001
+# clipboard-agent-delivery Phase 0)
+# ---------------------------------------------------------------------------
+
+def test_deliver_clip_inserts_with_origin_agent(tmp_path):
+    db = _db(tmp_path)
+    out = clip.deliver_clip("prepared content", label="a label", db_path=db)
+    assert out["ok"] is True
+    assert out["origin"] == "agent"
+    assert out["label"] == "a label"
+
+    rows = clip.list_history(db_path=db)
+    assert len(rows) == 1
+    assert rows[0]["origin"] == "agent"
+    assert rows[0]["label"] == "a label"
+    assert rows[0]["content"] == "prepared content"
+
+
+def test_deliver_clip_classifies_sku_same_as_record_clip(tmp_path):
+    db = _db(tmp_path)
+    out = clip.deliver_clip("tgw202601011200000", db_path=db)
+    assert out["is_sku"] is True
+    assert out["sku"] == "tgw202601011200000"
+
+
+def test_regular_record_clip_defaults_origin_clipboard(tmp_path):
+    db = _db(tmp_path)
+    clip.record_clip("plain clipboard content", db_path=db)
+    rows = clip.list_history(db_path=db)
+    assert rows[0]["origin"] == "clipboard"
+    assert rows[0]["label"] is None
+
+
+def test_schema_migration_is_idempotent_on_preexisting_old_schema_db(tmp_path):
+    """Simulate a real pre-migration DB (no origin/label columns) and confirm
+    _connect() adds the columns additively, with no data loss and correct
+    defaults on the old rows — and that running it twice is safe."""
+    db = _db(tmp_path)
+    # Build the OLD schema directly (pre-#1563), seed some real rows.
+    con = sqlite3.connect(str(db))
+    con.execute(
+        """
+        CREATE TABLE clip_history (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            content     TEXT NOT NULL,
+            selection   TEXT NOT NULL DEFAULT 'clipboard',
+            is_sku      INTEGER NOT NULL DEFAULT 0,
+            sku         TEXT,
+            captured_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    con.execute(
+        "INSERT INTO clip_history (content, selection, is_sku, sku) VALUES (?, ?, ?, ?)",
+        ("pre-existing old-schema row", "clipboard", 0, None),
+    )
+    con.execute(
+        "INSERT INTO clip_history (content, selection, is_sku, sku) VALUES (?, ?, ?, ?)",
+        ("tgw202601011200000", "clipboard", 1, "tgw202601011200000"),
+    )
+    con.commit()
+    con.close()
+
+    # First _connect() call runs the migration.
+    con1 = clip._connect(db)
+    con1.close()
+    # Second call must be a no-op (idempotent, no error, no duplicate columns).
+    con2 = clip._connect(db)
+    con2.close()
+
+    rows = clip.list_history(limit=10, db_path=db)
+    assert len(rows) == 2
+    contents = {r["content"] for r in rows}
+    assert contents == {"pre-existing old-schema row", "tgw202601011200000"}
+    for r in rows:
+        assert r["origin"] == "clipboard"
+        assert r["label"] is None
+
+    # New writes onto the migrated DB still work correctly.
+    clip.deliver_clip("new agent content", label="new", db_path=db)
+    rows = clip.list_history(limit=10, db_path=db)
+    assert len(rows) == 3
+    agent_rows = [r for r in rows if r["origin"] == "agent"]
+    assert len(agent_rows) == 1
+    assert agent_rows[0]["label"] == "new"
+
+
+def test_list_history_surfaces_origin_and_label(tmp_path):
+    db = _db(tmp_path)
+    clip.record_clip("regular clip", db_path=db)
+    clip.deliver_clip("delivered content", label="the label", db_path=db)
+    rows = clip.list_history(db_path=db)
+    by_content = {r["content"]: r for r in rows}
+    assert by_content["regular clip"]["origin"] == "clipboard"
+    assert by_content["regular clip"]["label"] is None
+    assert by_content["delivered content"]["origin"] == "agent"
+    assert by_content["delivered content"]["label"] == "the label"
+
+
+def test_search_surfaces_origin_and_label(tmp_path):
+    db = _db(tmp_path)
+    clip.deliver_clip("blue ceramic vase delivered", label="vase note", db_path=db)
+    hits = clip.search("ceramic", db_path=db)
+    assert len(hits) == 1
+    assert hits[0]["origin"] == "agent"
+    assert hits[0]["label"] == "vase note"
+
+
+def test_cmd_clip_deliver_returns_ok_with_id(tmp_path):
+    db = _db(tmp_path)
+    out = clip.cmd_clip("deliver", pattern="test content", label="test", db_path=db)
+    assert out["ok"] is True
+    assert isinstance(out["id"], int)
+    assert out["origin"] == "agent"
+    assert out["label"] == "test"
+
+
+def test_cmd_clip_deliver_requires_content(tmp_path):
+    db = _db(tmp_path)
+    out = clip.cmd_clip("deliver", pattern="", db_path=db)
+    assert out["ok"] is False
+    assert "content" in out["error"]
+
+
+def test_cmd_clip_list_shows_agent_tag(tmp_path, capsys):
+    db = _db(tmp_path)
+    clip.deliver_clip("delivered content", label="a label", db_path=db)
+    clip.cmd_clip("list", db_path=db)
+    out = capsys.readouterr().out
+    assert "[AGENT]" in out
+    assert "a label" in out

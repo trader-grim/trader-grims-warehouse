@@ -88,7 +88,7 @@ EXPECTED_TOOLS = {
     "tgw_get_item", "tgw_search_items", "tgw_search_full", "tgw_queue_status",
     "tgw_health", "tgw_enqueue", "tgw_get_todo", "tgw_add_suggest",
     "tgw_dead_letter", "tgw_hint_trail", "tgw_catalog_verify",
-    "tgw_mailbox_send", "tgw_get_plan_brief",
+    "tgw_mailbox_send", "tgw_get_plan_brief", "tgw_clip_deliver",
 }
 
 
@@ -96,7 +96,7 @@ def test_exactly_ten_tools_present():
     present = {n for n in dir(mcp_server)
               if n.startswith("tgw_") and callable(getattr(mcp_server, n))}
     assert present == EXPECTED_TOOLS
-    assert len(present) == 13
+    assert len(present) == 14
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +396,97 @@ def test_add_suggest_accepts_capitalized_text_argument(cfg, monkeypatch):
     out = json.loads(asyncio.run(tool.run({"Text": "remember this"})))
     assert out["ok"] is True
     assert seen["text"] == "remember this"
+
+
+# ---------------------------------------------------------------------------
+# tgw_clip_deliver (todo #1563/PP-CLIP-001 clipboard-agent-delivery Phase 0)
+# ---------------------------------------------------------------------------
+
+def test_clip_deliver_delegates_to_deliver_clip(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_deliver(content, label=None, db_path=None):
+        seen.update(content=content, label=label)
+        return {"ok": True, "id": 7, "origin": "agent", "label": label}
+
+    monkeypatch.setattr("tgw.clip.deliver_clip", fake_deliver)
+    out = json.loads(mcp_server.tgw_clip_deliver("prepared text", "a label"))
+    assert out["ok"] is True
+    assert out["id"] == 7
+    assert seen["content"] == "prepared text"
+    assert seen["label"] == "a label"
+
+
+def test_clip_deliver_no_label_passes_none(monkeypatch):
+    seen = {}
+
+    def fake_deliver(content, label=None, db_path=None):
+        seen.update(label=label)
+        return {"ok": True, "id": 1}
+
+    monkeypatch.setattr("tgw.clip.deliver_clip", fake_deliver)
+    mcp_server.tgw_clip_deliver("prepared text")
+    assert seen["label"] is None
+
+
+def test_clip_deliver_accepts_capitalized_arguments(monkeypatch):
+    monkeypatch.setattr("tgw.clip.deliver_clip",
+                        lambda content, label=None, db_path=None: {"ok": True, "id": 3})
+    tool = mcp_server.mcp._tool_manager._tools["tgw_clip_deliver"]
+    out = json.loads(asyncio.run(tool.run({"Content": "prepared text", "Label": "x"})))
+    assert out["ok"] is True
+
+
+def test_clip_deliver_surfaces_error_on_exception(monkeypatch):
+    def _raise(*a, **k):
+        raise RuntimeError("db locked")
+
+    monkeypatch.setattr("tgw.clip.deliver_clip", _raise)
+    out = json.loads(mcp_server.tgw_clip_deliver("prepared text"))
+    assert out["ok"] is False
+    assert "db locked" in out["error"]
+
+
+def test_clip_deliver_registered_when_not_readonly():
+    """Mirrors the same-shape READONLY-registration behavior as tgw_enqueue/
+    tgw_add_suggest (todo #1563) — reload the module with TGW_MCP_READONLY
+    unset/0 and confirm tgw_clip_deliver IS registered."""
+    import importlib
+    import os as _os
+
+    old = _os.environ.pop("TGW_MCP_READONLY", None)
+    try:
+        reloaded = importlib.reload(mcp_server)
+        assert "tgw_clip_deliver" in reloaded.mcp._tool_manager._tools
+        assert hasattr(reloaded, "tgw_clip_deliver")
+    finally:
+        if old is not None:
+            _os.environ["TGW_MCP_READONLY"] = old
+        importlib.reload(mcp_server)  # restore module state for later tests
+
+
+def test_clip_deliver_not_registered_when_readonly():
+    """Same class of write as tgw_enqueue/tgw_add_suggest — must inherit
+    their READONLY exclusion so Tigwa's current training-mode restriction
+    (TGW_MCP_READONLY=1) covers it automatically, not by omission."""
+    import importlib
+    import os as _os
+
+    old = _os.environ.get("TGW_MCP_READONLY")
+    _os.environ["TGW_MCP_READONLY"] = "1"
+    try:
+        reloaded = importlib.reload(mcp_server)
+        assert "tgw_clip_deliver" not in reloaded.mcp._tool_manager._tools
+        # the function itself still exists (module-level def), it's just not
+        # registered as an MCP tool — same pattern as tgw_enqueue/tgw_add_suggest.
+        assert "tgw_enqueue" not in reloaded.mcp._tool_manager._tools
+        assert "tgw_add_suggest" not in reloaded.mcp._tool_manager._tools
+    finally:
+        if old is None:
+            _os.environ.pop("TGW_MCP_READONLY", None)
+        else:
+            _os.environ["TGW_MCP_READONLY"] = old
+        importlib.reload(mcp_server)  # restore module state for later tests
 
 
 # ---------------------------------------------------------------------------
