@@ -76,18 +76,24 @@ _ALLOWLIST = {
     # publish_mutation + sqlite upsert-on-write + thumbnail-gen fence hooks —
     # all shifted every line below by varying amounts; re-verified against
     # current HEAD).
+    # Refreshed 2026-07-19 (PP-CONDITION-ENUM-001 / todo #1562): the
+    # condition_enum PATCH-validation block added before _apply_patch, plus
+    # the flagFieldInvalid()/pipeline_error.field wiring in
+    # _render_item_detail_html, shifted every line below by varying
+    # amounts — re-verified against current HEAD, no accessor-routing
+    # behavior changed, only positions.
     (_SRC / "tgw" / "http_server.py", 771),               # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
     (_SRC / "tgw" / "http_server.py", 780),               # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
-    (_SRC / "tgw" / "http_server.py", 1214),              # (a) accessor patch write
-    (_SRC / "tgw" / "http_server.py", 1235),              # (a) accessor patch write (todo #1416, draft_listing.item_specifics)
-    (_SRC / "tgw" / "http_server.py", 1240),              # (a) accessor output (full envelope) moving onward
-    (_SRC / "tgw" / "http_server.py", 1253),              # (a) accessor patch write — padlock auto-sync (todo #1406/2026-07-18, inventory_record.sync_from_draft's patch)
-    (_SRC / "tgw" / "http_server.py", 1859),              # (b) revision_draft.delta
-    (_SRC / "tgw" / "http_server.py", 1861),              # (b) revision_draft.delta
-    (_SRC / "tgw" / "http_server.py", 1867),              # (a) accessor patch write (todo #1416)
-    (_SRC / "tgw" / "http_server.py", 2984),              # (a) accessor output (inventory_diff.apply_inventory_diff's patch) onward into _apply_patch (#1417)
-    (_SRC / "tgw" / "http_server.py", 3043),              # (a) category_aspect_migration's patch moving onward into _apply_patch (#1471)
-    (_SRC / "tgw" / "http_server.py", 5827),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 1237),              # (a) accessor patch write
+    (_SRC / "tgw" / "http_server.py", 1258),              # (a) accessor patch write (todo #1416, draft_listing.item_specifics)
+    (_SRC / "tgw" / "http_server.py", 1263),              # (a) accessor output (full envelope) moving onward
+    (_SRC / "tgw" / "http_server.py", 1276),              # (a) accessor patch write — padlock auto-sync (todo #1406/2026-07-18, inventory_record.sync_from_draft's patch)
+    (_SRC / "tgw" / "http_server.py", 1882),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 1884),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 1890),              # (a) accessor patch write (todo #1416)
+    (_SRC / "tgw" / "http_server.py", 3007),              # (a) accessor output (inventory_diff.apply_inventory_diff's patch) onward into _apply_patch (#1417)
+    (_SRC / "tgw" / "http_server.py", 3066),              # (a) category_aspect_migration's patch moving onward into _apply_patch (#1471)
+    (_SRC / "tgw" / "http_server.py", 5855),              # (b) revision_draft.delta
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 114),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 121),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 124),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)

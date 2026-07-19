@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -80,6 +81,63 @@ def format_ebay_error(body: str, status: int) -> str:
     except Exception:
         pass
     return f'HTTP {status}: {body[:300]}'
+
+
+# eBay's error text names ITS OWN field ("condition"), not our
+# draft_listing key ("condition_enum") — map the handful we know about so
+# the client's shared flagFieldInvalid() can target the right rendered
+# element. An unmapped eBay field name is still returned verbatim (better
+# than dropping the info) — this is not meant to be an exhaustive registry.
+_EBAY_FIELD_TO_DRAFT_FIELD: Dict[str, str] = {
+    'condition': 'condition_enum',
+}
+
+
+def extract_ebay_error_field(body: str) -> Optional[str]:
+    """Best-effort extraction of the errant field name from an eBay error body.
+
+    PP-CONDITION-ENUM-001 / todo #1562 — live incident: tgw202605051124483
+    dead-lettered at ebay_stage with only the generic "The request has
+    errors" wrapper text surfaced; the actual reason
+    ("Could not serialize field [condition]") was sitting unused in
+    errors[0].parameters[0] = {"name": "reason", "value": "Could not
+    serialize field [condition]"}.
+
+    Two sources, in priority order:
+    1. A structured errors[].parameters[] entry whose name is itself a
+       field reference (`fieldName`/`field`), or whose value contains a
+       `[fieldname]`-shaped reference (this incident's actual shape, under
+       a generic `name: "reason"` parameter).
+    2. A regex fallback (``\\[(\\w+)\\]``) against errors[].longMessage/
+       message when no structured parameter carries it.
+
+    Returns the mapped tgw draft_listing key where known, the raw eBay
+    field name otherwise, or None when nothing can be determined. Never
+    raises — this is a best-effort diagnostic, not a required field; a bad
+    guess is worse than none, so ambiguous/absent matches return None
+    rather than force one.
+    """
+    try:
+        errs = json.loads(body).get('errors', [])
+    except Exception:
+        return None
+    _bracket_re = re.compile(r'\[(\w+)\]')
+    for e in errs:
+        for p in (e.get('parameters') or []):
+            pname = (p.get('name') or '').lower()
+            pval = p.get('value') or ''
+            if pname in ('fieldname', 'field') and pval:
+                return _EBAY_FIELD_TO_DRAFT_FIELD.get(pval, pval)
+            m = _bracket_re.search(pval)
+            if m:
+                found = m.group(1)
+                return _EBAY_FIELD_TO_DRAFT_FIELD.get(found, found)
+        for key in ('longMessage', 'message'):
+            m = _bracket_re.search(e.get(key) or '')
+            if m:
+                found = m.group(1)
+                return _EBAY_FIELD_TO_DRAFT_FIELD.get(found, found)
+    return None
 
 
 class AmbiguousOfferError(RuntimeError):

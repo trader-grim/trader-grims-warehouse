@@ -802,6 +802,43 @@ def test_patch_unknown_sku_404(client):
     assert r.status_code == 404
 
 
+def test_patch_rejects_invalid_condition_enum(env, enqueue_calls):
+    """PP-CONDITION-ENUM-001 / todo #1562 — live incident regression test:
+    a draft_listing.condition_enum PATCH set to a raw human label (not a
+    real Inventory API enum) must be REJECTED with a field-tagged error,
+    never silently written — this is the actual bug that dead-lettered
+    tgw202605051124483 at ebay_stage ("Could not serialize field
+    [condition]")."""
+    r = env["client"].patch(
+        f"/api/items/{SKU_A}",
+        json={"fields": {"draft_listing": {"condition_enum": "Very Good"}}},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 422
+    body = r.json()
+    assert body["ok"] is False
+    assert body["field"] == "condition_enum"
+
+    # The bad value must never have reached disk.
+    doc = json.loads(
+        (env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text(encoding="utf-8")
+    )
+    assert (doc.get("draft_listing") or {}).get("condition_enum") != "Very Good"
+
+
+def test_patch_accepts_valid_condition_enum(env, enqueue_calls):
+    r = env["client"].patch(
+        f"/api/items/{SKU_A}",
+        json={"fields": {"draft_listing": {"condition_enum": "USED_VERY_GOOD"}}},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    doc = json.loads(
+        (env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text(encoding="utf-8")
+    )
+    assert doc["draft_listing"]["condition_enum"] == "USED_VERY_GOOD"
+
+
 def test_patch_multi_field_merge(env, enqueue_calls):
     r = env["client"].patch(
         f"/api/items/{SKU_A}",
