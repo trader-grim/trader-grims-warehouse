@@ -615,12 +615,12 @@ thumbnail_gen enqueue remains) plus a 4th same-day C12 allowlist refresh.
 `tgw-http.service` **and all 13 running workers** restarted (workers import
 `items.py`/`state_machine.py` directly, so needed the restart too — easy to
 miss). `tgw health` clean throughout. **`tgw-catalog-rebuild-hourly` timer
-still NOT live as of this writing** — commit `780d02c` pushed, `flake check`/
-`dry-activate` clean, Dave gave direct in-session confirmation to switch (after
-the relay-authorization gate correctly refused a paraphrased one first), the
-`nixos-rebuild switch` command itself was then interrupted before completing
-and the session moved on to other work — confirmed live via `systemctl
-list-units 'tgw-catalog-rebuild-hourly*'` (0 units loaded). Still pending.
+switched live 2026-07-19** — `nixos-rebuild switch` run (Dave's direct
+confirmation, after an earlier attempt was correctly interrupted mid-command
+and a relay-paraphrased confirmation was correctly refused first), new
+generation `...p40344gg3hh8mkdaqdkz95frlfsisc7l...` active, timer confirmed
+loaded/waiting via `systemctl list-timers` (next fire ~15 min out at
+switch-time). **PP-CATALOG-INCR-001 is now fully live, all 4 packets + timer.**
 
 **Full-diff code review, 2026-07-19 (Dave: "we need to review and merge all of
 those changes we made outside the process"):** workflow-backed `/code-review`
