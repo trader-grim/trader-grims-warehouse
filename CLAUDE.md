@@ -70,16 +70,25 @@ code exists.
   is PP-CATIONIX-001's crypto-lock endgame — the same idea, still being
   built, not yet live.
 - **Agent role restrictions are locked in mechanically, not left as prose
-  (Dave, 2026-07-16, invariant E11)** — every custom agent profile in
-  `.claude/agents/*.md` has "must"/"never" rules; each one is a candidate
-  for a scoped `tools:` list, a `PreToolUse`/`SessionStart` hook, or a
-  harness feature (e.g. `settings.worktree.bgIsolation`) before it's
-  trusted as prose the agent reads and complies with. Same lesson as the
-  `SessionStart` briefing hook, generalized: a written rule depends on the
-  model choosing to follow it every time; a hook doesn't ask. See
-  `reference/invariants.md` E11 for the audited gap list (flake-guard hook
-  only matches `Bash`, not raw `Edit`/`Write` on flake files;
-  `tgw-coder`'s worktree isolation is still 100% prose).
+  (Dave, 2026-07-16, invariant E11 — ✅ closed 2026-07-18)** — every custom
+  agent profile in `.claude/agents/*.md` has "must"/"never" rules; each one
+  is a candidate for a scoped `tools:` list, a `PreToolUse`/`SessionStart`
+  hook, or a harness feature (e.g. `settings.worktree.bgIsolation`) before
+  it's trusted as prose the agent reads and complies with. Same lesson as
+  the `SessionStart` briefing hook, generalized: a written rule depends on
+  the model choosing to follow it every time; a hook doesn't ask. Both
+  originally-flagged gaps are now closed: `flake-guard.py` covers
+  `Bash|Edit|Write`; `worktree-guard.py` mechanically enforces `tgw-coder`'s
+  worktree isolation. See `reference/invariants.md` E11.
+- **Diagnose freely, execute through the agent — troubleshooting sessions
+  route scoped fixes to `tgw-coder`, same as flake work routes to
+  nix-flake-maintainer (Dave, 2026-07-18, invariant E12)** — reading/
+  grepping/root-causing in the main session is fine; once a fix is scoped,
+  the actual code change is a todo/packet dispatched to `tgw-coder`'s
+  isolated worktree+branch, not a direct `Edit` in the shared checkout.
+  Mechanically nudged by `.claude/hooks/app-code-guard.py` (`PreToolUse`
+  on `Edit|Write` under `src/tgw/`/`tests/`, `agent_type != "tgw-coder"`).
+  See `reference/invariants.md` E12.
 
 Reference: Ankit Jain, "How to Kill the Code Review" (thenewstack.io /
 latent.space, 2026-07-07) — named/systematized a pattern Dave already

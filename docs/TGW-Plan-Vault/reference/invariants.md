@@ -988,7 +988,7 @@ forces a push/pull or alerts on the gap.
   choosing to look. Tracked under PP-AGENT-DISCIPLINE-001, todo #1444's follow-up (not
   filed as its own todo yet — file one before considering this invariant ✅).
 
-## E11 — An agent's role restrictions are locked in by tool permissions and hooks, not by its own system-prompt prose ⚠️ (2026-07-16, PP-AGENT-DISCIPLINE-001)
+## E11 — An agent's role restrictions are locked in by tool permissions and hooks, not by its own system-prompt prose ✅ (2026-07-16, PP-AGENT-DISCIPLINE-001; both gaps below closed 2026-07-18)
 
 **Rule:** every "must"/"never" rule in a `.claude/agents/*.md` profile is a candidate for
 mechanical enforcement (scoped `tools:`, a `PreToolUse`/`SessionStart` hook, or a harness
@@ -1004,30 +1004,56 @@ configuring any agent to lock them into their role" — the CLAUDE.md fix (a `Se
 hook, see below) is one instance of a pattern that applies to every custom agent profile in
 `.claude/agents/`, not just the main session.
 
-**Enforcement, by example (audited 2026-07-16):**
+**Enforcement, by example (audited 2026-07-16, both remaining gaps closed 2026-07-18 per
+todo #1389/#1450):**
 - ✅ CLAUDE.md's own startup ritual — `SessionStart` hook
   (`.claude/hooks/session-start-briefing.py`) now injects inbox/suggestions/plan-check state
   automatically; no longer depends on the model noticing it should look.
-- ⚠️ `nix-flake-maintainer`'s "narrow, procedure-gated" mutation list — the `PreToolUse`
-  flake-guard hook (`.claude/hooks/flake-guard.py`) mechanically gates `nixos-rebuild
-  switch`/`test` and any `git commit`/`push` naming `tgw-flake`, **but only when those run
-  as Bash commands** — it does not see a raw `Edit`/`Write` tool call landing directly on a
-  file inside `~/tgw-flake`, which the agent's own doc lists as equally gated. Real gap:
-  the hook's matcher is `Bash` only.
-- ❌ `tgw-coder`'s worktree-isolation contract (`.claude/agents/tgw-coder.md` §2) — "never
-  `git checkout` the shared repo checkout," "never `Write`/`Edit` outside your assigned
-  worktree," "never mark the todo `--done`," "never push/merge without explicit
-  authorization" are all still pure prose today, enforced only by the executor reading and
-  complying. The agent's own doc records a near-miss from this exact gap (pilot run 9:
-  a breadcrumb written straight into the shared checkout, caught only by luck). Claude
-  Code's own `settings.worktree.bgIsolation` ("worktree" is the default) is documented to
-  block `Edit`/`Write` in the main checkout until `EnterWorktree` is called, for background
-  sessions *and* agent isolation — plausible existing mechanism, not yet evaluated against
-  whether it actually covers `tgw-coder`'s manual `git worktree add` pattern or conflicts
-  with it. Not yet investigated or built.
+- ✅ `nix-flake-maintainer`'s "narrow, procedure-gated" mutation list — `flake-guard.py`
+  (`.claude/hooks/flake-guard.py`) now covers both Bash (`nixos-rebuild switch`/`test`,
+  `git commit`/`push` naming `tgw-flake`) AND raw `Edit`/`Write` tool calls landing directly
+  on a file inside `~/tgw-flake` (matcher extended to `Bash|Edit|Write`).
+- ✅ `tgw-coder`'s worktree-isolation contract (`.claude/agents/tgw-coder.md` §2) — a
+  dedicated `PreToolUse` hook, `.claude/hooks/worktree-guard.py` (matcher `Edit|Write`),
+  mechanically blocks any Edit/Write outside `/opt/TGW/var/worktrees/<id>-<slug>` or
+  `/home/db/tgw-worktrees/<id>-<slug>` when `agent_type == "tgw-coder"` — including a
+  dedicated check for the harness's own auto-provisioned `.claude/worktrees/agent-<id>/`
+  path (the exact conflict #1450 found live). Companion change:
+  `settings.worktree.bgIsolation: "none"` so the harness's own competing background-
+  isolation mechanism never auto-provisions a second worktree underneath the agent.
 
-**Not yet done:** decide, per gap above, whether to (a) extend `flake-guard.py`'s matcher to
-also cover `Edit`/`Write` tool calls under `~/tgw-flake`, and (b) evaluate whether
-`bgIsolation` already covers `tgw-coder`'s worktree contract or needs a dedicated
-`PreToolUse` hook on `Edit`/`Write`/`Bash` scoped to the assigned worktree path. Both are
-concrete, scoped follow-ups — file todos before considering this invariant ✅.
+## E12 — Live-troubleshooting sessions diagnose freely but execute application-code fixes through tgw-coder, not direct edits ✅ (2026-07-18, Dave)
+
+**Rule:** the main session (and any non-`tgw-coder` agent) may read, grep, and reason about
+`src/tgw/`/`tests/` freely during root-cause diagnosis — that part is inherently exploratory
+and can't be packet-scoped before the root cause is known. But the actual code *change*, once
+a fix is scoped, is a todo/packet dispatched to `tgw-coder`'s isolated worktree+branch — the
+same split nix-flake-maintainer already enforces for `~/tgw-flake` (diagnose live, but every
+gated mutation goes through the agent's procedure).
+
+**Why:** Dave, 2026-07-18, after a multi-session troubleshooting run (root-causing a stale
+inventory badge, then landing all 4 packets of PP-CATALOG-INCR-001) happened entirely as
+direct `Edit` calls on `http_server.py`/`items.py`/`sqlite_catalog.py`/`state_machine.py`
+and several test files in the shared checkout, never handed to `tgw-coder`: "we seem to be
+running these fixes outside our new process. How can we funnel these troubleshooting type
+sessions through a similar process to what we did in the sprint... make both something you
+recognize and something that can be specified directly like the nix maintainer?" Confidence
+in the flake process specifically comes from `flake-guard.py` existing and firing — the
+mechanical nudge, not just the doc saying to use the agent. This invariant is the same fix
+applied to the other half of the codebase.
+
+**Enforcement:** `.claude/hooks/app-code-guard.py` (new, 2026-07-18), `PreToolUse` on
+`Edit|Write`, mirrors `flake-guard.py`'s pattern exactly: any Edit/Write under `src/tgw/` or
+`tests/` where `agent_type != "tgw-coder"` triggers `permissionDecision: "ask"`, naming the
+tgw-coder dispatch path as the expected route. Registered in `.claude/settings.json`'s
+`PreToolUse` list alongside `flake-guard.py`/`worktree-guard.py`.
+
+**Known gap, same as `worktree-guard.py`'s:** Edit/Write only, not Bash — a `sed -i`/`tee`
+against a guarded path bypasses this hook. Not yet built; flag if it becomes a real bypass
+pattern rather than a theoretical one.
+
+**Live-fire not yet confirmed:** per `reference-hooks-settings-watcher-caveat` — this repo's
+settings watcher only picks up a hooks config that existed when the session started, so a
+`/hooks` reload or session restart is needed once before this is proven firing for real, same
+open item as the `SessionStart` briefing hook and the original flake-guard/worktree-guard
+hooks had when first added.
