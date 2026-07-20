@@ -282,6 +282,31 @@ apprenticeship task: justshoutit (PP-INTAKE-004). Execution/isolation
 substrate is PP-AIOPS-001, not re-designed here. Full design:
 `pp/PP-HERMES-EA-001.md`.
 
+**2026-07-20 (Dave): Hermes config updated with non-thinking mode for some auxiliary
+models**, extending the same pattern built for `PP-SIMPLEJOBS-001`'s
+`tgw_simple_llm_jobs` (DeepSeek V4-Flash non-thinking for cheap single-pass
+transforms). First noticeable effect: Hermes's context-compression step is now fast
+enough to be "barely noticible." Fully implemented by Dave/Tigwa directly on the
+Hermes side — not a Claude build item, recorded here for cross-reference since it's
+the same non-thinking-mode idea proving out in a second place.
+
+**Verified by Tigwa/Hermes, 2026-07-19 (report to Claude):** 11 auxiliary slots
+(`web_extract`, `compression`, `approval`, `title_generation`, `profile_describer`,
+`curator`, `session_search`, `skills_hub`, `mcp`, `triage_specifier`,
+`kanban_decomposer`) now resolve to direct `deepseek-v4-flash` with
+`thinking.type=disabled`. Vision/audio routes deliberately left untouched — no
+forced JSON-mode on callers expecting normal prose. `hermes config check` passed
+(config v33), read-back confirmed all 11 slots, a1131 Hermes gateway restarted
+clean with a fresh read-only `tgw.mcp_server` remote child. **Live cross-tool
+verification**: a post-restart `tgw_simple_llm_jobs` classify call with a
+`label_set` returned `ok:true`, valid label within the allowed domain — confirms
+the PP-SIMPLEJOBS-001 output contract holds from the Hermes gateway's own call
+path, not just Claude's. Explicitly noted: this doesn't replace TGW's own tests or
+claim semantic correctness from parse-success alone; the fail-loud
+supplied-vs-omitted-constraint distinction from #1577 remains material. No TGW
+source/worker/queue/eBay/catalog/production config touched by this Hermes-side
+change.
+
 **Claude's cross-check of Tigwa's own contract, 2026-07-16 (read-only, no
 mutation), returning the same review she ran on Claude's contract same
 day:** verified live — `AGENTS.md` redirect, the MCP read-only gate
