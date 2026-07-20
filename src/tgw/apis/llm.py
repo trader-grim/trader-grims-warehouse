@@ -48,12 +48,28 @@ def get_task_model(cfg: Dict[str, Any], task: str) -> tuple[str, str]:
     """Return (provider, model) for *task* from cfg['models'][task] — the
     ONLY source; see /opt/TGW/config/tgw-models.json. Raises KeyError with a
     clear message if the task isn't configured there — a task's model must
-    never be a silent code-level guess (Dave, 2026-07-09)."""
+    never be a silent code-level guess (Dave, 2026-07-09).
+
+    An entry is either a full explicit {'provider', 'model'} override, or a
+    {'use_default': '<name>'} pointer into cfg['models']['defaults'] (invariant
+    E15, 2026-07-20) — never both, no partial merge. This stays a simple
+    two-branch lookup, not a config-merging engine."""
     entry = cfg.get('models', {}).get(task)
+    if entry and 'use_default' in entry:
+        default_name = entry['use_default']
+        default_entry = cfg.get('models', {}).get('defaults', {}).get(default_name)
+        if not default_entry or 'provider' not in default_entry or 'model' not in default_entry:
+            raise KeyError(
+                f"models[{task!r}]['use_default'] names {default_name!r}, which "
+                f"has no entry in tgw-models.json's 'defaults' block (need "
+                f"{{'provider': ..., 'model': ...}}) — see TGW-Config-Reference.md"
+            )
+        return default_entry['provider'], default_entry['model']
     if not entry or 'provider' not in entry or 'model' not in entry:
         raise KeyError(
             f"No models[{task!r}] entry in tgw-models.json (need "
-            f"{{'provider': ..., 'model': ...}}) — see TGW-Config-Reference.md"
+            f"{{'provider': ..., 'model': ...}} or {{'use_default': ...}}) — "
+            f"see TGW-Config-Reference.md"
         )
     return entry['provider'], entry['model']
 
@@ -70,6 +86,14 @@ def get_task_generation_config(cfg: Dict[str, Any], task: str) -> Dict[str, Any]
     'thinking' budget was silently consuming the entire output token
     budget before any visible text was emitted, causing genuine
     mid-generation truncation of bulk_classify's JSON responses).
+
+    NOTE (2026-07-20, invariant E15 pass): a task pointing at a 'use_default'
+    profile does NOT inherit a 'generation' block from that default profile —
+    generation knobs stay per-task-only, deliberately, to keep this a simple
+    single-entry lookup rather than a config-merging engine. A task that
+    needs custom generation knobs must set its own 'generation' key alongside
+    its 'use_default' pointer (or use a full explicit {'provider', 'model'}
+    entry).
     """
     entry = cfg.get('models', {}).get(task) or {}
     gen = entry.get('generation')

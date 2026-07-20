@@ -996,8 +996,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="generate alt_text + seo_caption via vision model; rename primary image to <sku>-alt.jpg and archive original to history",
     )
     p.add_argument("sku", nargs="?", default=None, help="SKU to process (omit with --batch)")
-    p.add_argument("--model", default=None, help="vision model ID (default: google/gemini-2.5-flash)")
-    p.add_argument("--provider", default=None, choices=["openrouter", "ollama"], help="provider (default: openrouter)")
+    p.add_argument("--model", default=None, help="vision model ID (default: from tgw-models.json's 'alt_text' task config)")
+    p.add_argument("--provider", default=None, choices=["openrouter", "ollama"], help="provider (default: from tgw-models.json's 'alt_text' task config)")
     p.add_argument("--dry-run", action="store_true", help="show what would happen without calling the model or writing files")
     p.add_argument("--batch", action="store_true", help="run all eligible items directly with rate-limiting (OpenRouter free ~20 req/min)")
     p.add_argument("--limit", type=int, default=0, metavar="N", help="max items to process in --batch mode (0 = all eligible)")
