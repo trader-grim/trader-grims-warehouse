@@ -1,9 +1,10 @@
-# DRAFT — eBay Developer Support follow-up: hold them to "alternative options" (todo #1590)
+# DRAFT — eBay Developer Support NEW ticket: unresolved items from closed case (todo #1590)
 
 **Not submitted — this is a draft for Dave to review/edit/submit.** eBay
 Developer Support tickets go through Dave's account; I can't submit this
-on his behalf. Follow-up within the same active case
-(`EBAY-DS-260605-000035`), per `EXTERNAL-SUPPORT-TICKET-REGISTER.md`.
+on his behalf. This is a **new ticket**, not a reply within case
+`EBAY-DS-260605-000035` — that case was closed by eBay upon their
+Marketplace Insights response, per `EXTERNAL-SUPPORT-TICKET-REGISTER.md`.
 
 ## What prompted this
 
@@ -14,31 +15,42 @@ eBay's Marketplace Insights denial (received 2026-07-20) closed with:
 > use case. Please feel free to reach out to our technical support team
 > through your eBay developer account for any API-related queries."
 
-Dave, same day: "They are full of great ways to make life difficult...
-this is why we have proactivity as part of our work ethic, so we do not
-become one of those sloths... [they cannot fool me]." The read here:
-that closing line is a standard deflection unless we actually take it up
-and make them name something concrete — this draft does that, on the
-record, in writing, in the same case.
+**Dave, 2026-07-20 — the actual mechanism at work here:** case
+`260605-000035` bundled two requests (`buy.marketplace_insights` scope
++ the EPS rate-limit increase, per the register). eBay answered only the
+Marketplace Insights half and **permanently closed the whole case** —
+the EPS half was never addressed, and Dave had to live-verify the limit
+himself (below) precisely because the closure gave no indication either
+way. Dave's read: eBay support reps get credited per ticket closed, so
+bundling two asks into one case and closing it after answering only one
+of them effectively converts one real resolution into eBay's internal
+credit for closing 2 (potentially 3, if this new ticket suffers the same
+fate) tickets, none of which actually resolved the EPS ask. This ticket
+is written as a **new, standalone ticket** specifically so the EPS
+request can't be silently closed-by-association with an unrelated
+answer again — and to name, on the record, that the prior case was
+closed without addressing it.
 
 **Also live-verified same session:** eBay has NOT silently raised the EPS
 (`UploadSiteHostedPictures`) daily call limit — confirmed via a real
-`getRateLimits` call just now: still exactly `limit: 5000`/day, unchanged
-since the 2026-07-02 baseline. The rate-limit-increase half of this case
-(todo #1076, bundled in per the register) never got its own answer —
-Developer Support's reply only addressed Marketplace Insights.
+`getRateLimits` call: still exactly `limit: 5000`/day, unchanged since
+the 2026-07-02 baseline. The EPS request was never actually answered —
+only closed alongside an unrelated answer.
 
 ## Suggested ticket text
 
-> **Subject:** Follow-up on case 260605-000035 — requesting the
-> alternative options mentioned, and status on the EPS limit increase
+> **Subject:** Two unresolved items from closed case 260605-000035 —
+> requesting the alternative options mentioned, and the EPS limit
+> increase that was never actually addressed
 >
 > **Account:** DaveBuko-Webkulap
 >
-> Thank you for the update on Marketplace Insights. Your response
+> I'm opening this as a new ticket because case 260605-000035 was closed
+> after your reply addressed only one of the two requests it contained.
+>
+> **1) Alternative options.** Your Marketplace Insights response
 > mentioned your team is available to discuss "alternative options that
 > might fit your use case" — I'd like to take you up on that directly.
->
 > Our use case: pricing our ~55,000-item catalog competitively requires
 > visibility into actual recent sold prices for comparable items, not
 > just active-listing prices. Marketplace Insights was the path we
@@ -48,11 +60,11 @@ Developer Support's reply only addressed Marketplace Insights.
 > usefulness? A named API, report, or program — not a general pointer
 > back to developer support — is what we're asking for here.
 >
-> Separately: this same case also included a request to increase our
-> EPS (`UploadSiteHostedPictures`) daily call limit (see our prior
-> message in this thread, and case reference on file). That request
-> hasn't received a response yet — could you confirm its status, or let
-> us know if it needs to be resubmitted as its own case?
+> **2) EPS call-limit increase.** The same case 260605-000035 also
+> included a request to increase our EPS (`UploadSiteHostedPictures`)
+> daily call limit. That request was never addressed before the case was
+> closed. Could you please respond to it directly in this new ticket,
+> rather than closing without a substantive answer again?
 
 ## Context for Dave
 
@@ -75,8 +87,11 @@ Developer Support's reply only addressed Marketplace Insights.
 - Live-verified EPS limit is unchanged (5,000/day, checked just now via
   `getRateLimits`) — cited in the ticket so they can't claim it was
   already addressed.
-- Register (`EXTERNAL-SUPPORT-TICKET-REGISTER.md`) should be updated with
-  this follow-up once sent — new "prepared" artifact, case stays the same
-  (`260605-000035`), state moves to whatever's accurate once you send it.
+- Register (`EXTERNAL-SUPPORT-TICKET-REGISTER.md`) needs a **new local
+  key** for this ticket once eBay issues its own case number (this is
+  not `260605-000035`'s continuation — that case is closed) — record it
+  as a fresh row, cross-referenced back to `260605-000035` as the
+  originating case, per the register's own instructions for a provider
+  closing a case with a request still unresolved.
 - No further action from me here — needs your review/edit and your own
   submission through Developer Support's ticket system.
