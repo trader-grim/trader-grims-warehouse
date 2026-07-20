@@ -912,6 +912,29 @@ cross-verification (2026-07-16) confirmed both real; one gap reconfirmed still o
 (extend flake-guard's matcher), #1450 (evaluate `settings.worktree.bgIsolation` as a
 `tgw-coder` isolation replacement). Full detail: `pp/PP-AGENT-DISCIPLINE-001.md`.
 
+**Flake approval-prompt consolidation, 2026-07-20 (Dave: "every flake change
+requires 5 approvals... pare that to one with a description of all actions").**
+Root cause: each Bash tool call inside `nix-flake-maintainer`'s Step 2 procedure
+(status/diff, commit, flake check, dry-activate, switch, list-generations, per-host
+repeats) was hitting the auto-mode classifier independently, fragmenting one logical
+flake change into 5+ separate approval clicks. Two-part fix, both live same session:
+1. `.claude/settings.json` — new `autoMode.allow` entries for the steps already
+   documented in the agent's own "wide, standing, no gate needed" read/write boundary
+   (`git status/diff/log/fetch`, `nix flake check`, `dry-activate`, `list-generations`,
+   read-only SSH diagnostics) — these no longer prompt at all.
+2. `.claude/agents/nix-flake-maintainer.md` — new instruction to batch the genuinely
+   mutating steps (commit+push as one `&&`-chained Bash call per host, dry-activate+
+   switch+verify as one `&&`-chained call per host) instead of issuing each numbered
+   sub-step as its own tool call. Each compound command's echoed stage labels serve as
+   the "description of all actions" Dave asked for. Deliberately kept per-host switches
+   as separate calls (not one cross-host mega-chain) so a partial failure stays easy to
+   diagnose. Target: ~2 prompts for a single-host change, ~4 for a two-host change
+   (down from 5-10+) — not literally always 1, since touching two independent live
+   systems inherently needs at least one confirmation per host.
+Caveat: the settings-watcher only picks up config present when a session started
+(same caveat as the session-start-briefing hook above) — doesn't apply retroactively
+to an already-running agent instance.
+
 
 ## PP-POSTGRES-001 — PostgreSQL item source-of-truth migration — NEW 2026-07-13
 **PROPOSAL — design doc only, nothing built.** Dave, same session as the
@@ -1731,6 +1754,77 @@ a category group (not just the single assigned category); no new schema needed,
 computed live via existing taxonomy calls. Needs a cost/token-budget check against
 `LLM-Providers-Quotas.md` before shipping.
 
+
+## PP-AGENTTRACE-001 — agent trace logging & review UI — NEW 2026-07-20
+
+**Opened 2026-07-20, Dave:** "I want to implement trace logging for all agents... It
+needs to save run logs. It should be a skill all agents can use across the board. I
+will need access to them via Obsidian and a simple UI to view runs at a glance."
+Motivation: reading agent activity logs is how Dave learns what needs fixing in the
+system — this is meant to be a durable, cross-cutting capability, not a one-off.
+Dave: "This could be our best tool for lasting improvements" — treat as a real
+initiative with a full spec, not a quick add.
+
+**The core framing (Dave, confirmed):** this is the Data Charter's raw/derived split
+applied to agent activity — raw transcripts are permanent, everything else (index,
+Obsidian render, UI) is derived/recomputable. Today agent transcripts are scattered and
+some genuinely ephemeral (Claude session JSONL under session dirs, Workflow's
+`journal.jsonl` per run, subagent `.output` files under `/tmp/...`, Aider's diff/log) —
+a live Prime-Directive-1 gap, not just a nice-to-have.
+
+**"A skill all agents can use across the board" (Dave's framing, referencing how
+Anthropic's own engineers use trace logging on this tool):** per the E11/E12 lesson
+already applied elsewhere in this project (a written rule depends on the model
+choosing to comply; a hook doesn't ask), this is NOT literally one skill file every
+agent remembers to invoke by name. It's one shared *contract* — mechanically
+propagated per agent type: hooks for Claude Code sessions/subagents (SessionStart/Stop,
+same pattern as `session-start-briefing.py`), a `tgw trace start`/`tgw trace end` CLI
+wrapper baked into `tgw-coder`/`nix-flake-maintainer`/`aider_run_task` dispatch for
+non-Claude-Code agents, with a `.claude/skills/tgw-trace/SKILL.md` documenting the
+contract + serving as the manual-invocation fallback for anything not yet covered by a
+hook.
+
+**Architecture (4 layers, researched against existing patterns 2026-07-20):**
+1. **Raw capture** — `/opt/TGW/var/agent-traces/<YYYY-MM-DD>/<run_id>.jsonl`, `tgw`-owned,
+   same atomic-write/archive-before-overwrite discipline (E5) as ItemData. Transcript
+   copied/symlinked at run **start**, not just completion, so a killed/stalled run still
+   leaves a partial trace (recurring stall pattern already in memory).
+2. **Metadata index** — new `agent_runs` table in `state_machine` Postgres (extends the
+   existing "Postgres is the work ledger" architecture): `run_id`, `parent_run_id` (nested
+   subagents), `agent_type`, `todo_id`/`pp_ref`, `host`, `git_branch`, `started_at`,
+   `ended_at`, `status`, `summary`, `transcript_path`.
+3. **Capture mechanism** — `tgw_logging.announce_script_run()` (E9) is NOT a durable
+   tracking mechanism to extend — confirmed it's just a `log_event()` one-liner, no DB
+   row, no run ID, no completion tracking. The new `agent_runs` work is a genuine
+   superset, not a duplicate; keep `log_event()` as the underlying emission primitive for
+   log-grep parity. Schema gotcha found in research: `schema.sql` and in-code DDL
+   (`state_machine.py`'s `_ensure_ai_usage_table()`) are already two independent,
+   drifted sources of truth for `ai_usage` — `agent_runs` DDL goes in-code (primary,
+   `_ensure_agent_runs_table()` self-apply pattern) with a `schema.sql` copy for
+   bootstrap docs only; flag the drift risk explicitly rather than silently repeating it.
+4. **Two view surfaces** — Obsidian: `TGW-Agent-Runs.md`, exact `plan_render` pattern
+   (pure `build_agent_runs_doc()` + impure `render_agent_runs()` atomic-write, queue-
+   triggered + coalesced via `dedupe_key`/`not_before`, same as `catalog_rebuild`/
+   `plan_render` itself). UI: new `/form/runs` page on `tgw-http` — session-cookie auth
+   via the existing global `_session_guard` middleware (NOT `/api/` Bearer-token style),
+   matching `/form/todos`'s query→render→atomic-200-even-on-DB-error shape, reusing
+   shared `_STATIC_HEAD`/`_STATIC_FOOT` dark theme.
+
+**Rollout order (Dave, 2026-07-20):** Claude Code sessions/subagents first (hook
+infrastructure already exists), then extend to Aider/Tigwa/Hermes via the CLI wrapper.
+**Retention:** permanent, per Prime Directive 1 default — no TTL/archive policy unless
+volume becomes a real problem later.
+
+**Phased execution (todos filed 2026-07-20, all `tgw-coder` unless noted):**
+- Phase 1 (#1580): `agent_runs` Postgres table + `tgw trace start`/`tgw trace end` CLI +
+  `tgw_logging` integration + unit tests. Foundation — everything else depends on this.
+- Phase 2 (#1581, depends on Phase 1): Obsidian renderer — `TGW-Agent-Runs.md` via the
+  `plan_render` pattern, `agent_run_render` queue-triggered worker.
+- Phase 3 (#1582, depends on Phase 1): `/form/runs` HTTP UI page.
+- Phase 4 (#1583, depends on Phase 1): Claude Code SessionStart/Stop hooks + raw
+  transcript capture wiring + `.claude/skills/tgw-trace/SKILL.md` — this leg is hook/
+  skill config, not `src/tgw/`/`tests/` app code, so it's main-session work (like the
+  E9/E11/E12 hooks before it), not a `tgw-coder` dispatch.
 
 ## Session protocol
 

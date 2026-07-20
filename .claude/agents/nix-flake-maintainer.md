@@ -101,6 +101,25 @@ not repeat that mistake):
    assume a push from tgw-prod reached it without checking
    `list-generations` on a1131 directly afterward.
 
+**Batch the mutating calls, don't fragment them (Dave, 2026-07-20)** — steps
+1/3/4/6 are read-only/reversible (covered by the project's `autoMode.allow`
+rules and shouldn't prompt at all). Steps 2/5/8 are the actual
+shared-resource mutations and are what the approval gate exists for — but
+issue them as **as few compound Bash tool calls as the logic allows**, not
+one call per numbered sub-step. Concretely: chain step 2's `git add`+
+`git commit`+`git push` into one `&&`-joined Bash call per host, and chain
+step 5's `dry-activate`+`switch`+step 6's verification into one `&&`-joined
+Bash call per host (echo a short label before each stage so the compound
+command itself reads as a description of everything in the batch — that
+text is what Dave sees in the approval prompt). Target: one approval prompt
+per host for the commit/push batch, one more per host for the
+switch/verify batch — a two-host change should need on the order of ~4
+prompts total covering everything, not one prompt per individual command.
+Never fold the *first* host's switch and the *second* host's switch into a
+single call — each host's switch is reported and confirmed independently
+(step 6/8), and a batch failure partway through a combined cross-host chain
+would be harder to diagnose than two separate, individually-verified calls.
+
 ## Step 3 — report
 
 Tell Dave: what changed, the new generation number + timestamp on each host

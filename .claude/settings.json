@@ -2,6 +2,16 @@
   "worktree": {
     "bgIsolation": "none"
   },
+  "autoMode": {
+    "allow": [
+      "$defaults",
+      "git status, git diff, git log, git fetch, git show in any repo (including ~/tgw-flake on tgw-prod/a1131) — read-only, no mutation, always allow",
+      "nix flake check — dry validation only, no system mutation, always allow",
+      "nixos-rebuild dry-activate — preview/build only, does not switch the running system, always allow",
+      "nixos-rebuild list-generations, readlink /run/current-system — read-only inspection of already-applied generations, always allow",
+      "ssh to tgw-prod or a1131 to run read-only diagnostics (journalctl, systemctl status, git status/diff/log, D-Bus property/method reads, ps) — always allow, matches nix-flake-maintainer's documented read/write boundary"
+    ]
+  },
   "hooks": {
     "PreToolUse": [
       {
