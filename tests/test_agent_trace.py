@@ -48,10 +48,11 @@ def test_start_agent_run_inserts_and_returns_run_id():
     sm._agent_runs_table_ready = True
 
     with patch('tgw.queue.state_machine._conn', return_value=mock_con):
-        run_id = sm.start_agent_run(
-            'tgw-coder', todo_id=1580, pp_ref='PP-AGENTTRACE-001',
-            host='tgw-prod', git_branch='todo/1580-agent-trace-phase1',
-        )
+        with patch('tgw.queue.state_machine._enqueue_agent_run_render'):
+            run_id = sm.start_agent_run(
+                'tgw-coder', todo_id=1580, pp_ref='PP-AGENTTRACE-001',
+                host='tgw-prod', git_branch='todo/1580-agent-trace-phase1',
+            )
 
     assert isinstance(run_id, str)
     assert len(run_id) == 32  # uuid4().hex
@@ -74,10 +75,11 @@ def test_end_agent_run_updates_row():
     sm._agent_runs_table_ready = True
 
     with patch('tgw.queue.state_machine._conn', return_value=mock_con):
-        sm.end_agent_run(
-            'deadbeef' * 4, status='completed', summary='ok',
-            transcript_path='/opt/TGW/var/agent-traces/2026-07-20/deadbeef.jsonl',
-        )
+        with patch('tgw.queue.state_machine._enqueue_agent_run_render'):
+            sm.end_agent_run(
+                'deadbeef' * 4, status='completed', summary='ok',
+                transcript_path='/opt/TGW/var/agent-traces/2026-07-20/deadbeef.jsonl',
+            )
 
     mock_cur.execute.assert_called_once()
     sql, params = mock_cur.execute.call_args[0]
@@ -118,6 +120,129 @@ def test_get_agent_run_returns_none_when_missing():
         row = sm.get_agent_run('does-not-exist')
 
     assert row is None
+
+
+def test_start_agent_run_enqueues_coalesced_render_job():
+    """PP-AGENTTRACE-001 Phase 2: a successful start_agent_run() enqueues a
+    coalesced agent_run_render job, same shape as todo.py's
+    _enqueue_plan_render (dedupe_key + 30s not_before), and never lets a
+    queue problem break the trace-recording operation itself."""
+    from tgw.queue import state_machine as sm
+
+    mock_con, mock_cur = _mock_conn_cursor()
+    sm._agent_runs_table_ready = True
+
+    with patch('tgw.queue.state_machine._conn', return_value=mock_con):
+        with patch('tgw.queue.state_machine.enqueue_job') as mock_enqueue:
+            sm.start_agent_run('tgw-coder')
+
+    mock_enqueue.assert_called_once()
+    _, kwargs = mock_enqueue.call_args
+    assert kwargs['queue_name'] == 'agent_run_render'
+    assert kwargs['dedupe_key'] == 'agent_run_render:pending'
+    assert kwargs['max_attempts'] == 3
+    assert kwargs['not_before'] > 0
+
+
+def test_start_agent_run_survives_enqueue_failure():
+    """A queue problem must never break the actual trace-recording call."""
+    from tgw.queue import state_machine as sm
+
+    mock_con, mock_cur = _mock_conn_cursor()
+    sm._agent_runs_table_ready = True
+
+    with patch('tgw.queue.state_machine._conn', return_value=mock_con):
+        with patch('tgw.queue.state_machine.enqueue_job', side_effect=RuntimeError('queue down')):
+            run_id = sm.start_agent_run('tgw-coder')  # must not raise
+
+    assert isinstance(run_id, str)
+
+
+def test_end_agent_run_enqueues_coalesced_render_job():
+    from tgw.queue import state_machine as sm
+
+    mock_con, mock_cur = _mock_conn_cursor()
+    mock_cur.rowcount = 1
+    sm._agent_runs_table_ready = True
+
+    with patch('tgw.queue.state_machine._conn', return_value=mock_con):
+        with patch('tgw.queue.state_machine.enqueue_job') as mock_enqueue:
+            sm.end_agent_run('some-id', status='completed')
+
+    mock_enqueue.assert_called_once()
+    _, kwargs = mock_enqueue.call_args
+    assert kwargs['queue_name'] == 'agent_run_render'
+    assert kwargs['dedupe_key'] == 'agent_run_render:pending'
+
+
+def test_end_agent_run_does_not_enqueue_on_unknown_run_id():
+    """end_agent_run raises ValueError before ever reaching the enqueue call
+    when the UPDATE matched zero rows — a failed correction must not also
+    look like a real render trigger."""
+    from tgw.queue import state_machine as sm
+
+    mock_con, mock_cur = _mock_conn_cursor()
+    mock_cur.rowcount = 0
+    sm._agent_runs_table_ready = True
+
+    with patch('tgw.queue.state_machine._conn', return_value=mock_con):
+        with patch('tgw.queue.state_machine.enqueue_job') as mock_enqueue:
+            with pytest.raises(ValueError):
+                sm.end_agent_run('does-not-exist', status='completed')
+
+    mock_enqueue.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# list_agent_runs — PP-AGENTTRACE-001 Phase 2
+# ---------------------------------------------------------------------------
+
+def test_list_agent_runs_returns_rows_most_recent_first():
+    from tgw.queue import state_machine as sm
+
+    fake_rows = [
+        {'run_id': 'b', 'agent_type': 'tgw-coder'},
+        {'run_id': 'a', 'agent_type': 'aider'},
+    ]
+    mock_con, mock_cur = _mock_conn_cursor()
+    mock_cur.fetchall = MagicMock(return_value=fake_rows)
+    sm._agent_runs_table_ready = True
+
+    with patch('tgw.queue.state_machine._conn', return_value=mock_con):
+        rows = sm.list_agent_runs()
+
+    assert rows == fake_rows
+    sql, params = mock_cur.execute.call_args[0]
+    assert 'ORDER BY started_at DESC' in sql
+    assert 'LIMIT %s' in sql
+    assert params == (200,)
+
+
+def test_list_agent_runs_respects_custom_limit():
+    from tgw.queue import state_machine as sm
+
+    mock_con, mock_cur = _mock_conn_cursor()
+    mock_cur.fetchall = MagicMock(return_value=[])
+    sm._agent_runs_table_ready = True
+
+    with patch('tgw.queue.state_machine._conn', return_value=mock_con):
+        sm.list_agent_runs(limit=5)
+
+    _, params = mock_cur.execute.call_args[0]
+    assert params == (5,)
+
+
+def test_list_agent_runs_ensures_table_first():
+    from tgw.queue import state_machine as sm
+
+    mock_con, mock_cur = _mock_conn_cursor()
+    mock_cur.fetchall = MagicMock(return_value=[])
+    sm._agent_runs_table_ready = False
+
+    with patch('tgw.queue.state_machine._conn', return_value=mock_con):
+        with patch('tgw.queue.state_machine._ensure_agent_runs_table') as mock_ensure:
+            sm.list_agent_runs()
+            mock_ensure.assert_called_once()
 
 
 def test_start_and_end_ensure_table_first():
