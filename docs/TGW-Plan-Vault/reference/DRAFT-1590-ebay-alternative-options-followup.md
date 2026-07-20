@@ -1,4 +1,12 @@
-# DRAFT — eBay Developer Support NEW ticket: unresolved items from closed case (todo #1590)
+# DRAFT — SUPERSEDED, eBay Developer Support NEW ticket: unresolved items from closed case (todo #1590)
+
+**SUPERSEDED 2026-07-20 — Dave: "let's just play ball. Give them all the
+damned tickets they want. Ask both separately."** Split into
+`DRAFT-1591-eps-growth-check.md` (EPS only) and
+`DRAFT-1592-alternative-options-sold-price.md` (alternative options
+only) — send those instead of this combined draft. Kept here, not
+deleted, as the record of the original combined approach and the
+reasoning for splitting it.
 
 **Not submitted — this is a draft for Dave to review/edit/submit.** eBay
 Developer Support tickets go through Dave's account; I can't submit this
