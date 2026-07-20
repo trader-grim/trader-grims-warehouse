@@ -177,20 +177,41 @@ def test_mark_item_sold_writes_sale_block(tmp_path):
     doc = json.loads(p.read_text(encoding="utf-8"))
     assert doc["status"] == "sold"
     assert doc["ebay_listing"]["status"] == "Sold"
-    assert doc["ebay_sale"] == {
+    # ebay_sale is a LIST of sold-order records (todo #1604 / PP-SOLD-001).
+    assert doc["ebay_sale"] == [{
         "order_id": "O-1", "buyer": "bob", "sale_price": 19.99,
         "quantity": 1, "sale_date": "2026-06-07",
         "synced_at": "2026-06-07T00:00:00Z",
-    }
+    }]
 
 
-def test_mark_item_sold_is_idempotent(tmp_path):
+def test_mark_item_sold_same_order_id_is_idempotent(tmp_path):
+    # Re-delivering the SAME order_id must not duplicate the record.
     p = _sold_item(tmp_path)
     assert pull.mark_item_sold(p, cfg={"api_key": "test-api-key"}, **_SOLD_ARGS) is True
-    # Second call: already sold -> False, no change.
-    assert pull.mark_item_sold(p, cfg={"api_key": "test-api-key"}, **dict(_SOLD_ARGS, order_id="O-2")) is False
+    assert pull.mark_item_sold(p, cfg={"api_key": "test-api-key"}, **_SOLD_ARGS) is False
     doc = json.loads(p.read_text(encoding="utf-8"))
-    assert doc["ebay_sale"]["order_id"] == "O-1"  # not overwritten
+    assert len(doc["ebay_sale"]) == 1
+    assert doc["ebay_sale"][0]["order_id"] == "O-1"
+
+
+def test_mark_item_sold_second_distinct_order_is_never_dropped(tmp_path):
+    # Regression test for todo #1604 / PP-SOLD-001: a genuinely different
+    # order_id for a SKU that is already status=sold must still be recorded
+    # (appended), not silently discarded by the old status=='sold' guard.
+    p = _sold_item(tmp_path)
+    assert pull.mark_item_sold(p, cfg={"api_key": "test-api-key"}, **_SOLD_ARGS) is True
+    second_args = dict(_SOLD_ARGS, order_id="O-2", buyer="alice",
+                        sale_date="2026-06-08", synced_at="2026-06-08T00:00:00Z")
+    assert pull.mark_item_sold(p, cfg={"api_key": "test-api-key"}, **second_args) is True
+
+    doc = json.loads(p.read_text(encoding="utf-8"))
+    assert doc["status"] == "sold"
+    assert len(doc["ebay_sale"]) == 2
+    order_ids = {rec["order_id"] for rec in doc["ebay_sale"]}
+    assert order_ids == {"O-1", "O-2"}
+    second_rec = next(r for r in doc["ebay_sale"] if r["order_id"] == "O-2")
+    assert second_rec["buyer"] == "alice"
 
 
 def test_mark_item_sold_dry_run_does_not_write(tmp_path):

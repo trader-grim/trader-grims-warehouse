@@ -208,22 +208,34 @@ def aggregate_velocity(itemdata_root: Path) -> Dict[str, Any]:
         status = str(item.get('status', '')).lower().strip()
 
         if status == 'sold':
-            sale = item.get('ebay_sale') or {}
-            sale_raw = str(sale.get('sale_date') or '')
-            sale_price = sale.get('sale_price')
-            sale_dt = _parse_date(sale_raw) if sale_raw else None
-            if sale_dt is None:
-                continue
+            # ebay_sale is a list of sold-order records (todo #1604 /
+            # PP-SOLD-001) — a SKU can carry more than one distinct order.
+            # Legacy items written before that fix may still carry a single
+            # dict; normalize rather than dropping the data.
+            raw_sales = item.get('ebay_sale') or []
+            if isinstance(raw_sales, dict):
+                raw_sales = [raw_sales] if raw_sales else []
+            elif not isinstance(raw_sales, list):
+                raw_sales = []
 
-            b = _bucket(cat_id, cat_name)
-            if isinstance(sale_price, (int, float)) and sale_price > 0:
-                b['sold_prices'].append(float(sale_price))
+            for sale in raw_sales:
+                if not isinstance(sale, dict):
+                    continue
+                sale_raw = str(sale.get('sale_date') or '')
+                sale_price = sale.get('sale_price')
+                sale_dt = _parse_date(sale_raw) if sale_raw else None
+                if sale_dt is None:
+                    continue
 
-            b['stages'].append(_sold_stage_label(item, sale_dt))
+                b = _bucket(cat_id, cat_name)
+                if isinstance(sale_price, (int, float)) and sale_price > 0:
+                    b['sold_prices'].append(float(sale_price))
 
-            days = _days_to_sale(item, sale_dt)
-            if days is not None:
-                b['days_list'].append(days)
+                b['stages'].append(_sold_stage_label(item, sale_dt))
+
+                days = _days_to_sale(item, sale_dt)
+                if days is not None:
+                    b['days_list'].append(days)
 
         elif status in ('in stock', 'available', 'active', ''):
             b = _bucket(cat_id, cat_name)
