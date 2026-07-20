@@ -304,6 +304,11 @@ CREATE INDEX IF NOT EXISTS idx_todo_items_open
     WHERE done_at IS NULL;
 
 -- AI usage audit log (PP-MULTIMODEL-001).
+-- NOTE (PP-AGENTTRACE-001, 2026-07-20): this copy has already drifted from
+-- the DDL actually applied at runtime (state_machine.py's _AI_USAGE_DDL /
+-- _ensure_ai_usage_table()) — column names/types differ. Nothing keeps the
+-- two in sync automatically. Named here rather than silently repeated for
+-- agent_runs below.
 CREATE TABLE IF NOT EXISTS ai_usage (
     id          SERIAL PRIMARY KEY,
     ts          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -312,4 +317,25 @@ CREATE TABLE IF NOT EXISTS ai_usage (
     prompt_tokens  INTEGER,
     output_tokens  INTEGER,
     cost_usd    NUMERIC(10,6)
+);
+
+-- Agent run trace ledger (PP-AGENTTRACE-001 Phase 1).
+-- BOOTSTRAP DOCUMENTATION ONLY — the DDL actually applied at runtime lives
+-- in state_machine.py (_AGENT_RUNS_DDL / _ensure_agent_runs_table(), the
+-- self-apply pattern). This copy is not kept in sync automatically; if you
+-- change one, change the other by hand (same known gap as ai_usage above).
+CREATE TABLE IF NOT EXISTS agent_runs (
+    run_id          TEXT PRIMARY KEY,
+    parent_run_id   TEXT REFERENCES agent_runs(run_id),
+    agent_type      TEXT NOT NULL,
+    todo_id         INTEGER,
+    pp_ref          TEXT,
+    host            TEXT,
+    git_branch      TEXT,
+    started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    ended_at        TIMESTAMPTZ,
+    status          TEXT NOT NULL DEFAULT 'running'
+                    CHECK (status IN ('running', 'completed', 'failed', 'killed', 'escalated')),
+    summary         TEXT,
+    transcript_path TEXT
 );

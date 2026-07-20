@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, Generator, List, Optional
@@ -943,3 +944,132 @@ def active_jobs_for_sku(sku: str, queue_names: List[str]) -> List[str]:
                 (sku, queue_names),
             )
             return [r[0] for r in cur.fetchall()]
+
+
+# ---------------------------------------------------------------------------
+# Agent run trace ledger (PP-AGENTTRACE-001 Phase 1)
+# ---------------------------------------------------------------------------
+#
+# Metadata index for every agent run (Claude Code session/subagent, tgw-coder,
+# nix-flake-maintainer, Aider, ...). Raw transcripts are archived separately
+# under /opt/TGW/var/agent-traces/ (see tgw.logging.archive_transcript) — this
+# table is the derived/queryable index per the Data Charter raw/derived split.
+#
+# NOTE on schema.sql drift (same known gap as ai_usage above, named explicitly
+# here instead of silently repeated): this in-code DDL is the one actually
+# applied at runtime (self-apply, guarded by _agent_runs_table_ready). The
+# schema.sql copy of this table is bootstrap documentation only and is NOT
+# kept in sync automatically — if you change one, remember to change the
+# other by hand, same as the pre-existing ai_usage drift.
+
+_AGENT_RUNS_DDL = """
+CREATE TABLE IF NOT EXISTS agent_runs (
+    run_id          TEXT PRIMARY KEY,
+    parent_run_id   TEXT REFERENCES agent_runs(run_id),
+    agent_type      TEXT NOT NULL,
+    todo_id         INTEGER,
+    pp_ref          TEXT,
+    host            TEXT,
+    git_branch      TEXT,
+    started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    ended_at        TIMESTAMPTZ,
+    status          TEXT NOT NULL DEFAULT 'running'
+                    CHECK (status IN ('running', 'completed', 'failed', 'killed', 'escalated')),
+    summary         TEXT,
+    transcript_path TEXT
+)
+"""
+
+_agent_runs_table_ready = False
+
+
+def _ensure_agent_runs_table() -> None:
+    global _agent_runs_table_ready
+    if _agent_runs_table_ready:
+        return
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(_AGENT_RUNS_DDL)
+    _agent_runs_table_ready = True
+
+
+def start_agent_run(
+    agent_type: str,
+    *,
+    parent_run_id: Optional[str] = None,
+    todo_id: Optional[int] = None,
+    pp_ref: Optional[str] = None,
+    host: Optional[str] = None,
+    git_branch: Optional[str] = None,
+) -> str:
+    """Record the start of one agent run.
+
+    Generates and returns a new run_id (uuid4 hex string) — the caller needs
+    this value before the row exists, e.g. to pass as parent_run_id when
+    dispatching a nested subagent. Unlike record_ai_usage(), this does NOT
+    fail-soft: a caller that can't record a run start needs to know, since
+    the returned run_id is the load-bearing handle for everything that
+    follows (tgw trace end, transcript archival, nested runs).
+    """
+    _ensure_agent_runs_table()
+    run_id = uuid.uuid4().hex
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO agent_runs
+                    (run_id, parent_run_id, agent_type, todo_id, pp_ref, host, git_branch)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (run_id, parent_run_id, agent_type, todo_id, pp_ref, host, git_branch),
+            )
+    return run_id
+
+
+def end_agent_run(
+    run_id: str,
+    *,
+    status: str,
+    summary: Optional[str] = None,
+    transcript_path: Optional[str] = None,
+) -> None:
+    """Record the end of one agent run: sets ended_at=NOW(), status, summary,
+    transcript_path. status must be one of the agent_runs CHECK values
+    ('running', 'completed', 'failed', 'killed', 'escalated') — an invalid
+    value raises psycopg2.errors.CheckViolation, it is not swallowed.
+
+    Raises ValueError if run_id does not exist — an UPDATE that matches zero
+    rows must never look like a successful end-of-run (same class of bug as
+    invariant C14: a correction that doesn't take effect must be visibly
+    reported as failed, never silently accepted)."""
+    _ensure_agent_runs_table()
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE agent_runs
+                   SET ended_at = NOW(),
+                       status = %s,
+                       summary = %s,
+                       transcript_path = %s
+                 WHERE run_id = %s
+                """,
+                (status, summary, transcript_path, run_id),
+            )
+            if cur.rowcount == 0:
+                raise ValueError(f"end_agent_run: no agent_runs row found for run_id={run_id!r}")
+
+
+def get_agent_run(run_id: str) -> Optional[Dict[str, Any]]:
+    """Read back one agent_runs row by run_id, or None if not found.
+
+    Not part of the packet's core "two functions" spec, but a minimal read
+    helper is needed for the round-trip unit tests below and is a natural
+    building block for Phase 2/3 (Obsidian render, /form/runs UI) — flagged
+    here rather than added silently."""
+    _ensure_agent_runs_table()
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM agent_runs WHERE run_id = %s", (run_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None

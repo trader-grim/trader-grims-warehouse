@@ -493,7 +493,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
         "admin-file", "classify-suggestions", "picklist", "print-label", "mvitems",
         "suggest", "quiet-check", "perp-run", "whisper-suggest",
         "claude-help", "clip", "suggest-edit", "promo", "nix-bundle-usb",
-        "mailbox",
+        "mailbox", "trace",
     ]),
 ]
 
@@ -1081,6 +1081,23 @@ def _build_parser() -> argparse.ArgumentParser:
     mp.add_argument("--type", dest="msg_type", default="NOTE", metavar="TYPE", help="message type, e.g. NOTE, REQUEST, RESPONSE, REVIEW (default: NOTE)")
     mp.add_argument("--subject", default=None, metavar="TEXT", help="short subject/title; also used to derive the filename slug (default: derived from message text)")
     mp.add_argument("--todo", type=int, default=None, dest="todo_id", metavar="ID", help="related todo id, recorded in the message header")
+
+    p = sub.add_parser("trace", help="agent run trace logging: start/end a tracked run (PP-AGENTTRACE-001)")
+    trace_sub = p.add_subparsers(dest="trace_op", required=True, metavar="TRACE-OP")
+    tp = trace_sub.add_parser("start", help="record the start of an agent run; prints the new run_id to stdout")
+    tp.add_argument("--agent-type", required=True, dest="agent_type", metavar="TYPE",
+                     help="e.g. claude-main, claude-subagent, tgw-coder, nix-flake-maintainer, aider")
+    tp.add_argument("--parent-run-id", default=None, dest="parent_run_id", metavar="ID", help="run_id of the parent run, for nested dispatches")
+    tp.add_argument("--todo", type=int, default=None, dest="todo_id", metavar="ID", help="todo id this run is working")
+    tp.add_argument("--pp", default=None, dest="pp_ref", metavar="PP-REF", help="PP-* plan item this run is working")
+    tp.add_argument("--host", default=None, metavar="HOST", help="host name (default: auto-detected via socket.gethostname())")
+    tp.add_argument("--git-branch", default=None, dest="git_branch", metavar="BRANCH", help="git branch (default: auto-detected via git rev-parse in cwd, best-effort)")
+
+    tp = trace_sub.add_parser("end", help="record the end of an agent run")
+    tp.add_argument("run_id", help="run_id returned by 'tgw trace start'")
+    tp.add_argument("--status", required=True, choices=["completed", "failed", "killed", "escalated"], help="final run status")
+    tp.add_argument("--summary", default=None, help="one-line summary of the run")
+    tp.add_argument("--transcript", default=None, dest="transcript_path", help="path to the archived transcript (see archive_transcript())")
 
     p = sub.add_parser("admin-file", help="scan inbox and enqueue eligible notes for PM-intake (PP-DOCFLOW-001)")
     p.add_argument("--now", action="store_true", help="bypass submission-delay gate (process all files regardless of age)")
@@ -3497,6 +3514,92 @@ def cmd_mailbox_send(
     return {"ok": True, "file": str(dest), "to": to_actor, "from": from_actor}
 
 
+def _detect_host() -> Optional[str]:
+    """Best-effort hostname detection — never raises."""
+    try:
+        import socket
+
+        return socket.gethostname()
+    except Exception:
+        return None
+
+
+def _detect_git_branch() -> Optional[str]:
+    """Best-effort current git branch detection — never raises.
+
+    This is metadata, not the point of `tgw trace start`; a git-detection
+    failure (not a repo, no git installed, detached HEAD) must never block
+    the command."""
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            branch = result.stdout.strip()
+            return branch or None
+    except Exception:
+        pass
+    return None
+
+
+def cmd_trace_start(
+    cfg: Dict[str, Any],
+    agent_type: str,
+    *,
+    parent_run_id: Optional[str] = None,
+    todo_id: Optional[int] = None,
+    pp_ref: Optional[str] = None,
+    host: Optional[str] = None,
+    git_branch: Optional[str] = None,
+) -> Dict[str, Any]:
+    """`tgw trace start` — record the start of one agent run (PP-AGENTTRACE-001).
+
+    Prints (and returns) the new run_id. Never fail-soft: a DB error here
+    is returned as {ok: False, error: ...}, not swallowed — the run_id is
+    the load-bearing handle callers need for `tgw trace end` and nested
+    dispatches.
+    """
+    from tgw.queue import state_machine as sm
+
+    sm.init(cfg.get("postgres_dsn", "dbname=state_machine user=tgw"))
+
+    try:
+        run_id = sm.start_agent_run(
+            agent_type,
+            parent_run_id=parent_run_id,
+            todo_id=todo_id,
+            pp_ref=pp_ref,
+            host=host if host is not None else _detect_host(),
+            git_branch=git_branch if git_branch is not None else _detect_git_branch(),
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "run_id": run_id}
+
+
+def cmd_trace_end(
+    cfg: Dict[str, Any],
+    run_id: str,
+    *,
+    status: str,
+    summary: Optional[str] = None,
+    transcript_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """`tgw trace end` — record the end of one agent run (PP-AGENTTRACE-001)."""
+    from tgw.queue import state_machine as sm
+
+    sm.init(cfg.get("postgres_dsn", "dbname=state_machine user=tgw"))
+
+    try:
+        sm.end_agent_run(run_id, status=status, summary=summary, transcript_path=transcript_path)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "run_id": run_id, "status": status}
+
+
 def cmd_classify_suggestions(
     cfg: Dict[str, Any],
     apply: bool = False,
@@ -4339,6 +4442,38 @@ def main() -> int:
                 )
             else:
                 result = {"ok": False, "error": f"unknown mailbox op: {args.mailbox_op!r}"}
+
+        elif args.op == "trace":
+            if args.trace_op == "start":
+                result = cmd_trace_start(
+                    cfg,
+                    args.agent_type,
+                    parent_run_id=args.parent_run_id,
+                    todo_id=args.todo_id,
+                    pp_ref=args.pp_ref,
+                    host=args.host,
+                    git_branch=args.git_branch,
+                )
+                if result.get("ok"):
+                    print(result["run_id"])
+                else:
+                    print(f"Error: {result.get('error')}", file=sys.stderr)
+                return 0 if result.get("ok") else 1
+            elif args.trace_op == "end":
+                result = cmd_trace_end(
+                    cfg,
+                    args.run_id,
+                    status=args.status,
+                    summary=args.summary,
+                    transcript_path=args.transcript_path,
+                )
+                if result.get("ok"):
+                    print(f"Ended run {result['run_id']}: status={result['status']}")
+                else:
+                    print(f"Error: {result.get('error')}", file=sys.stderr)
+                return 0 if result.get("ok") else 1
+            else:
+                result = {"ok": False, "error": f"unknown trace op: {args.trace_op!r}"}
 
         elif args.op == "admin-file":
             from tgw.workers.pm_intake import cmd_admin_file
