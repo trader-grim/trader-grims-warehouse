@@ -393,9 +393,22 @@ channel (no new send infra); a thin new `instruction_cards` Postgres table for
 pre-send staging only, no pipeline/work authority of its own; recommend piloting
 with a zero-code v0 (a scratch doc + manual Tigwa review/send) before building
 any table or UI; checker/draft authority never extends to actual delivery — only
-Dave's explicit send does; 5 open decisions (v0-vs-v1 first, send authority,
-draft-iteration cap, stale-card surfacing, target-agent list growth) flagged for
-Dave before any build packet. Full evaluation: `pp/PP-OUTBOX-001.md`.
+Dave's explicit send does.
+
+**2026-07-19 decisions (Dave, via Tigwa):** framed as an "action console" —
+translated intent Dave can inspect/redirect/explicitly send, not just
+store/retrieve. Draft-iteration cap resolved (10 min wall-clock OR 8 substantive
+redrafts, whichever first, then paused-awaiting-Dave, never auto-resumed);
+send authority reaffirmed Dave-only + new "I'm feeling lucky" one-click-send
+button; v0-first and fixed target-agent list reaffirmed; stale-card handling
+partially resolved (never auto-archive/delete/send, manual only — precise
+surfacing policy still open); new: pinned/reusable prompts (template preserved,
+each send instance logged separately); new: named gap between mailbox delivery
+and *initial* prompting into an agent's active session (candidate: scoped
+`tmux send-keys`, not yet authorized); new: clipboard-as-handoff direction
+(copy-to-clipboard for Dave to paste, Dave-initiated only, not an ambient
+channel). All still design-only, no implementation authorized. Full evaluation +
+decisions: `pp/PP-OUTBOX-001.md`.
 
 ## PP-HR-001 — the "HR department" for AI agents/personas — NEW 2026-07-16
 
@@ -958,6 +971,29 @@ follow-ups: #1229 (macroboard WAYLAND_DISPLAY hardcode), #1230 (periodic freeze-
 review). Full detail: `pp/PP-NIXOS-001.md`; plan: `PLAN-nixos-migration.md`,
 `nix/CLAUDE-NIX.md`.
 
+**Tailscale, 2026-07-19: DONE, both hosts authenticated, verified live.** Was parked
+on Dave choosing an SSO identity provider (no plain email+password option) —
+resolved same session. `tailscale status` on a1131:
+```
+100.114.8.24    a1131      lakeauctions@   linux   -
+100.107.99.66   tgw-prod   lakeauctions@   linux   -
+```
+Both nodes see each other on the tailnet. No action pending.
+
+
+**2026-07-19, todo #1568 (syncthing-tgw port collision):** diagnosed + fixed live —
+`syncthing-tgw`'s systemd unit only ever set `--gui-address=...:8385`, never the BEP
+listener (22001) or local-discovery (21028) declared in `nix/tgw/platform.nix`'s
+header comment; it's been losing the port-22000 bind race to the `db` instance since
+2026-07-02 on both hosts. Fix ready: `ExecStartPre` config.xml patch (idempotent,
+touches only `<listenAddress>`/`<localAnnouncePort>`, never devices/folders) +
+`network-online.target` ordering on both syncthing units. `nix flake check` clean,
+diff uncommitted at `~/tgw-flake` on tgw-prod. **BLOCKED on invariant E13** (agent
+will not commit/switch without Dave's own words directly, no relay) — needs Dave to
+either do the commit/switch himself, or explicitly say the words to the session.
+**Todo #1567 (extraHosts cross-host resolution fix):** same block — diff already
+committed+pushed (`281185b`), dry-activated clean both hosts, only the switch is
+outstanding.
 
 ## PP-PHOTO-001 — photo pipeline (GDrive → Gemini / eBay)
 Sync infra live. Phase A (GDrive→Gemini multimodal draft) #1064; Phase B
@@ -978,6 +1014,97 @@ PP-EVENTD-001** — `lan-mouse enter_hook` calls `clip-route --target`
 directly; `clip-route` reads the clipboard itself, never routes through
 tgw-clipd. Design: `pp/PP-CLIP-001.md`. Full #1086 analysis:
 `docs/ai-plans/clipboard-concept.md` / `CLIPBOARD-CONCEPT-PLANNING-1086.md`.
+
+**Elevated vision, 2026-07-19 (Dave, via PP-OUTBOX-001 design session):** "What
+ends up being floatable and a seriously useful operations interface is the
+clipboard altogether." `tgw-clipd`/the rofi picker is being reframed as TGW's
+general-purpose floatable operations surface — typed entries (SKU, URL,
+prompt, combined-buffer), each a discrete handler sharing one interface,
+inline per-entry mini-apps instead of separate app windows. PP-OUTBOX-001's
+instruction outbox is the first serious application of this surface, not a
+separate feature. Design-only, not yet build-authorized — full discussion in
+`pp/PP-OUTBOX-001.md`.
+
+**SUPERSEDED same day, 2026-07-19 (see PP-RADAR-001):** the "primary interface"
+framing above is superseded — Radar (server-based, encrypted, explicit-recipient
+delivery) is now the intended proper replacement for network clipboard sharing.
+`tgw-clipd`'s local-only Phase 1/2 work stays valid (nothing built here is being
+undone), but it's no longer the target primary surface; it may persist only as a
+local input/output adapter into Radar. Design context only, not build-authorized.
+
+**2026-07-19, todo #1563/#1565 DONE:** `deliver_clip()` + `tgw clip deliver` CLI verb +
+`tgw_clip_deliver` MCP tool (READONLY-gated, same pattern as `tgw_enqueue`), origin/label
+columns on `clip_history`, rofi picker id-based-lookup bugfix, and `tgw-clipd` secret
+exclusion (x-kde-passwordManagerHint MIME check + entropy/prefix heuristic in
+`process_change()` keep password-manager/API-key-shaped content out of persistent
+history). Reviewed, merged, pushed to `origin/master`, `tgw-clipd` restarted live.
+
+## PP-RADAR-001 — current-entry heads-up panel (Dave direction, 2026-07-19)
+Todo #1573 (Tigwa): turn Dave's current-entry heads-up-panel direction into a
+decision-ready design. Split out from PP-EVENTD-001/PP-CLIP-001's floatable-surface
+work — not yet designed. Owner: Tigwa.
+
+**Sequencing, per Dave (2026-07-19):** Radar (the "precognition"/anticipation layer —
+showing applicable context before a request) is the **second** event surface, scoped
+to whatever data is actually available to disseminate at the time it's built. **The
+tool comes first** — PP-EVENTD-001's `clip-route` daemon (the first event surface) has
+to exist and be feeding real data before Radar's anticipation layer has anything to
+scope against. Don't design PP-RADAR-001 ahead of PP-EVENTD-001 landing.
+
+**Settled direction, 2026-07-19 (Dave, via Tigwa heads-up, #1573):** Radar is to become
+the proper replacement for insecure network clipboard sharing — server-based,
+encrypted, delivered directly to a selected named host/device, in the interaction
+spirit of `kdeconnect-cli`. No ambient OS-clipboard capture, mirroring, sniffing,
+broadcast, or persistent network spew — networked clipboard movement happens only
+through explicit Radar `copy`/`send`/`pick` operations addressed to a recipient, each
+with authenticated/encrypted transport, a receipt/audit record, expiry/cleanup, secret
+exclusion, and local-recipient insertion gated by an approved action contract. **This
+supersedes `tgw-clipd`'s earlier "primary interface" framing** (see PP-CLIP-001) — a
+clipboard-linked adapter may exist later, but only as a deliberate local input/output
+boundary into Radar, not the primary surface.
+
+Radar itself is the librarian/operator layer, not a TGW-substrate redesign — built on
+git-annex (file identity/hashes/versions/redelivery), Syncthing (selected artifact-view
+distribution incl. Android), Flutter (operator UI), Tailscale (private reachability),
+Recoll + NATS JetStream (retrieval/event substrate). It compiles current-entry context
+server-side from authoritative sources and returns only the relevant context/tools to
+clients (for a SKU: title/price + direct Flutter/eBay/history/solds/Complete-Toolkit
+links), not broad client-side scraping. Files/charts route through annex+Syncthing, not
+forced through entry text.
+
+**Explicitly design context / not build authorization** — do not build, change
+services, or (re)configure Syncthing/KDE Connect from this note alone. Tigwa's #1573
+proposal brings the precise data/action/transport contract for Dave's review next.
+
+**Dave confirmed direction, 2026-07-19 (same session):** "I believe it is the correct
+direction due to security and database access." Rationale: ambient/broadcast clipboard
+sharing is an open security surface (no auth, no audit, no scoping to a database
+access boundary) — Radar's explicit-recipient, encrypted, audited delivery model closes
+that gap by construction. **Status: BUILD-AUTHORIZED, 2026-07-19 (Dave: "make it so")** — the direction itself
+(server-based, encrypted, explicit-recipient, kdeconnect-cli-style delivery,
+superseding ambient clipboard sharing) is cleared to build once a concrete spec
+exists. This authorizes the *direction*, not a blank check to build without one:
+Tigwa's #1573 proposal (data/action/transport contract) is still the artifact that
+turns this into an actual work packet — once it lands, it can move to implementation
+without another round-trip on whether the direction itself is right.
+
+**Staged sequencing, clarified 2026-07-19 (Tigwa relaying Dave, correcting a possible
+misread):** #1573 is NOT a gate on today's `clip-route` work — do not present it as
+the sole blocker to Radar-lineage progress. The actual order:
+1. **Build PP-EVENTD-001 / Go `clip-route` now** — design complete, PP unfrozen,
+   PP-CLIP-001 Phase 2 done, already unblocked; this is the recognized-input/
+   active-context foundation and needs no further sign-off to start.
+2. **Feed and observe real data from `clip-route`** — establishes what current-entry
+   context is actually available, instead of #1573 inventing a Radar contract from
+   assumptions.
+3. **Then Tigwa completes #1573** — translates that real surface into the concrete
+   Radar data/action/transport contract (anticipatory heads-up layer, explicit-
+   recipient encrypted clipboard replacement, artifact lifecycle integration).
+4. **Then build PP-RADAR-001 against that proven surface** — the direction is already
+   settled/build-authorized (above); #1573 supplies what to build it against.
+Do not build the full Radar heads-up/clipboard-replacement layer prematurely or as a
+parallel design based on imagined event data — but equally, don't hold `clip-route`
+waiting on #1573.
 
 ## PP-EVENTD-001 — event server ("Radar") — UNFROZEN 2026-07-11, #1086 gate cleared
 **Go `clip-route` daemon, design complete (2026-06-29), not yet built.**
@@ -1425,6 +1552,140 @@ operator-complete (queue chips visually identical to status chips; AI-drafted qu
 have no discover/create/edit UI yet — matches stated scope). Full review detail:
 `pp/PP-OPERATOR-QUEUES-001.md`.
 
+
+## PP-CONDITION-ENUM-001 — generic field-error flagging + save-error field contract — NEW 2026-07-19
+**Opened from a live incident (Dave, 2026-07-19):** `tgw202605051124483` dead-lettered at
+`ebay_stage` with eBay's generic wrapper text ("The request has errors. For help, see the
+documentation for this API."). Real reason was buried in `pipeline_error.raw` and never
+surfaced: eBay's actual complaint was `"Could not serialize field [condition]"`. Root cause:
+`draft_listing.condition_enum` held the literal human label `"Very Good"` instead of a valid
+Inventory API enum (`USED_VERY_GOOD`) — `best_condition()` initially failed to resolve a
+granular grade for the category (left `condition_id/label/enum = None`, correctly signaling
+"needs manual review"), but the Draft Editor's condition dropdown
+(`_build_condition_options`/`loadCatCtx()`, `http_server.py`) fell back to displaying the raw
+`condition` string as if it were the current enum, pre-selected it, and a round-tripped
+PATCH save wrote that raw string back into `condition_enum` with zero enum validation —
+worse than staying `None`, since a truthy `condition_enum` bypasses `ebay_stage.py`'s safe
+legacy `_map_condition()` fallback (which would have correctly resolved "Very Good" →
+`USED_VERY_GOOD`). Item fixed live: Dave corrected the condition, staging + the
+already-dead-lettered `ebay_publish` job (requeued) both succeeded —
+https://www.ebay.com/itm/327268460460.
+
+**Scope, per Dave (2026-07-19): generalize, don't patch one field.**
+1. One reusable client-side function for "flag this field red when invalid" — today only
+   the title-length check (`updateCharCount`, `http_server.py:6966`) does this, via
+   `border-color:#c44`. Condition (and every other draft field) should call the *same*
+   function, not grow its own bespoke check.
+2. Save-error contract: any PATCH/save failure — local validation (e.g. enum not in the
+   category's allowed set) or an eBay rejection bounced back through `ebay_stage`/
+   `ebay_publish` — must identify *which key* was errant (`{"field": "condition_enum", ...}`),
+   derived from eBay's own `parameters[].name/.value` where available (eBay literally named
+   `[condition]` in this incident). The client's field-flagging function then targets exactly
+   that field, for any field, from any error source — not just condition, not just eBay
+   rejections.
+3. Server-side: PATCH on `draft_listing.condition_enum` (and same class of field) must
+   validate against the known enum vocabulary before persisting — an operator's correction
+   must not silently corrupt a field to something worse than what it replaced (same class as
+   invariant C14).
+
+Dispatched to `tgw-coder` as todo #1562. **2026-07-19: branch reviewed and ready
+(own worktree, committed) — not yet stitched/merged.** Same runner-review + merge
+process as #1563/#1565, just hasn't been run.
+
+## PP-SIMPLEJOBS-001 — `tgw_simple_llm_jobs` MCP tool (DeepSeek V4-Flash non-thinking) — NEW 2026-07-19
+**Opened from Dave's Perplexity research (2026-07-19):** DeepSeek V4-Flash's
+non-thinking mode is a strong fit for cheap single-pass text transforms — direct
+response, no chain-of-thought, 1M context, ~$0.14/M tokens, undercutting GPT-4.1 mini/
+Gemini Flash/Claude Haiku on cost for this class of task. Full research + a concrete
+tool schema: `inbox/archive/DAVE-RESEARCH-text-processor-mcp-2026-07-19.md`.
+
+**Scope:** one new generic MCP tool, `tgw_simple_llm_jobs`, backed by
+`deepseek-v4-flash` via the existing `tgw.apis.llm` facility (`get_task_model()` +
+`call_model()`/`_call_deepseek_direct()` in `src/tgw/apis/llm.py` — same pattern as
+`pm_intake`/`suggestions_classify`/`pricing_comp_filter`, already `deepseek_direct` in
+`tgw-models.json`). Operations: `summarize`, `compress_context`, `extract_fields`,
+`classify`, `rewrite`, `rank_snippets`, `log_summary` — one tool, an `operation` enum
+argument, JSON-structured output, per the schema in the research doc.
+
+**Distinct from the existing `tgw-aider` DeepSeek tier** — that's a mechanical
+Python-coding execution tier (busywork/monitoring), this is a text-transform tool
+agents/workers call directly for cheap summarization/extraction/classification, not
+code edits.
+
+**Verified live 2026-07-19 (planning pre-flight):** `_call_deepseek_direct()`
+(`src/tgw/apis/llm.py`) does not currently support `thinking`-disabled or
+`response_format` params in its request payload — only `model`+`messages`. `deepseek_direct`
+is already wired direct-primary with OpenRouter fallback (2026-07-08 decision, see
+Settled Architecture). No `llm_deepseek` quota_budget entry found in
+`tgw-api-config.json` at time of writing — runner should confirm current state, not
+assume.
+
+**Not build-authorized as a blank check** — Dave confirmed the direction/tool concept
+is clear and asked that this proceed (2026-07-19: "I figured you have it from here").
+Todo + packet to follow, dispatched to `tgw-coder` per the usual branch-per-task
+contract (PP-HERMES-EA-001).
+
+**2026-07-19: tgw-coder DONE except one config step (Status: partial).** Branch
+`todo/1574-simple-llm-jobs-mcp-tool` (commit `24674d1`), worktree
+`/opt/TGW/var/worktrees/1574-simple-llm-jobs-mcp-tool` — reviewed, ready to stitch
+once the blocker below clears. `tgw_simple_llm_jobs` MCP tool built (all 7
+operations), 11 new tests, 2641 passed/1 skipped full suite. **Live-verified**: real
+DeepSeek V4-Flash calls for `summarize`/`extract_fields`/`classify` against a real
+item description, all clean JSON, no reasoning leakage — confirms `_call_deepseek_direct()`'s
+existing bare payload already behaves non-thinking for this model, so **no code change
+needed for spec step 4** (verified by observation, not assumed). Quota attribution
+confirmed via `ai_usage` table + `quota-state.json` — landing in the shared
+`llm_deepseek` pool, ~$0.00007/call.
+
+**Blocker (only thing outstanding):** `/opt/TGW/config/tgw-models.json` needs one new
+entry (live shared config, outside the git repo — `worktree-guard` correctly declined
+to let the agent touch it):
+```json
+"simple_llm_jobs": { "provider": "deepseek_direct", "model": "deepseek-v4-flash" }
+```
+Insert after the `pricing_comp_filter` entry. Until this lands, the tool raises
+`KeyError` when actually invoked (fail-loud by design, not a bug). Needs Dave (or
+someone with edit authority on that live file) to apply this one line, then the
+branch can stitch.
+
+Also flagged, not silently dropped: `max_output_tokens` is accepted by the tool's
+schema but not yet wired into `_call_deepseek_direct()` (that function has no
+`max_tokens` param at all) — left advisory-only per the packet's out-of-scope
+boundary (don't touch the shared function beyond the thinking-mode question). Follow-up
+if Dave wants it enforced, not automatic.
+
+**Todo #1576, DONE 2026-07-19 — output-contract validation.** Dave's own review:
+"it does not have a brain" — the tool was trusting any JSON-shaped model response as
+`ok: True` even when it violated what the caller asked (same bug class as the
+condition-enum incident: success reported despite an invalid value). Fix, same branch
+(commit `7c9df31`): `classify` now verifies the returned label is a member of the
+caller's `label_set`; `extract_fields` now verifies every requested `schema` key is
+present in the result (extra keys allowed, missing ones are not). Either violation now
+returns `{ok: False, error, raw}` instead of silently passing through. Both checks are
+skipped when the caller didn't supply the corresponding constraint (`label_set`/
+`schema`) — nothing to validate against. 7 new tests, full suite 2648 passed/1
+skipped. Sent to Tigwa for independent peer review of the design boundary itself. The
+other 5 operations (`summarize`/`compress_context`/`rewrite`/`rank_snippets`/
+`log_summary`) have no caller-supplied constraint to check against and were
+deliberately left without an equivalent contract.
+
+**Tigwa's peer review, 2026-07-20: verdict CONFIRMED, one bug found.** Design boundary
+is correct as the minimum fail-loud contract — label-membership + key-presence, fail
+`ok:false` on violation, don't invent contracts for operations with no caller-supplied
+constraint (agreed the other 5 correctly have none). **Real bug found:** the code used
+`if label_set:` (truthiness) — an explicit `label_set=[]` was silently treated the same
+as not-supplied, skipping the check exactly when it matters (an empty allowed-label set
+can never yield a valid classification). **Fixed as todo #1577, DONE 2026-07-19,** same
+branch (commit `22b892b`): `label_set is None` → open-ended, no check; `label_set == []`
+→ reject fail-loud *before* calling the model at all (no wasted DeepSeek call); non-empty
+→ validate membership as before. 3 new tests, full suite now 2651 passed/1 skipped.
+Tigwa also named a future (not-blocking) idea: `rank_snippets` has a checkable input
+domain (returned indexes within `0..len(items)-1`, non-duplicated) that could get its
+own bounded contract later — explicitly separate follow-on, not part of this work.
+
+**Branch `todo/1574-simple-llm-jobs-mcp-tool` is now fully reviewed and ready to
+stitch** — the only remaining blocker for the whole PP is the `tgw-models.json` config
+line noted above (needs Dave or someone with edit authority on that live file).
 
 ## PP-FIELDCOMPLETE-001 — category-group attribute completeness, "better than any other eBayer"
 **Opened 2026-07-16.** Dave: fill every category-group field during `ai_identify` so

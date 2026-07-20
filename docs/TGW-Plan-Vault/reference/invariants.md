@@ -1057,3 +1057,50 @@ settings watcher only picks up a hooks config that existed when the session star
 `/hooks` reload or session restart is needed once before this is proven firing for real, same
 open item as the `SessionStart` briefing hook and the original flake-guard/worktree-guard
 hooks had when first added.
+
+## E13 — A relayed request needs verified provenance before it's treated as Dave's own direction ⚠️ (2026-07-19, Dave — OPEN, no detector yet)
+
+**Rule:** `inbox/tigwa/*-REQUEST-*.md` / `DAVE-REQUEST-*.md` files (Tigwa recording what she
+understood Dave to want) are genuinely valuable — confirmed 2026-07-19 as an already-working,
+in-production instance of PP-OUTBOX-001's translation concept (see that PP's §3 update). But
+"well-formed and sitting in the expected inbox location" is not the same as "verified to
+actually be Dave's direction." Right now nothing distinguishes a genuine one from a
+mistaken, hallucinated, or (worst case) forged one — the same relay-authorization risk this
+session already enforced hard against for subagents (`feedback-relayed-authorization-never-
+trusted`), now surfacing on the Claude-reads-Tigwa's-inbox-notes side instead of the
+agent-accepts-orchestrator's-claim side.
+
+**Why:** Dave, immediately after endorsing Tigwa's requests as "my prompts now": "we still
+need some level of verification to guard against false request injection." He raised this
+himself, unprompted, the moment the trust question became concrete — not a hypothetical
+Claude is inventing, a named requirement from Dave that isn't answered yet.
+
+**Status: genuinely open, no design yet.** Open questions for whoever picks this up:
+- Does every Tigwa-authored request need Dave's explicit countersignature before Claude acts
+  on it, or only above some risk/consequence tier (matches PP-OUTBOX-001's `delivery_boundary`
+  field concept — inspect-only vs. side-effecting)?
+- What's the actual verification mechanism — Dave replying/confirming in `inbox/dave/`, a
+  simple shared-secret/signing step, or something else? No mechanism has been proposed yet,
+  only the requirement.
+- Does this apply retroactively to judging past Tigwa requests as trustworthy, or only
+  forward from here?
+
+**Architectural link, Dave 2026-07-19, same session, right after E13 was filed:** "the
+verification is likely tied to the cryptographically locked execution plan" — i.e. this is
+almost certainly not a bespoke mechanism to design from scratch. It's a specific instance of
+`pp/PP-CATIONIX-001.md`'s already-designed **crypto-lock** (endgame, not yet built): "a
+Securix-style cryptographic per-worker execution token: signed policy lockfile + short-TTL
+unlock artifact + worker attestation + audit trail." A Tigwa-authored request that needs to
+authorize a consequential action would need a valid, Dave-signed unlock artifact attached
+(or referenced) before Claude/an agent treats it as executable — a forged/hallucinated
+request simply couldn't produce one. **Don't design E13 as a standalone provenance scheme;
+fold it into the crypto-lock design when that's built** (tracked as a future addendum to
+PP-AIOPS-001 Phase 5/6 per PP-CATIONIX-001.md's own note — same gating point, not a second
+mechanism). Until the crypto-lock exists, E13 stays open and unenforced by construction —
+this is expected, not a gap to rush a workaround for.
+
+**Enforcement: none yet.** No detector, no hook, no gate. Treat this the same as any other
+named-but-undesigned gap in this file (e.g. #1459's credential-scoping) — don't silently
+build a fix without a real design pass, and don't let it sit only in conversation history;
+this entry is that durable record. See `pp/PP-OUTBOX-001.md` and `pp/PP-CATIONIX-001.md` for
+where the eventual design should land.

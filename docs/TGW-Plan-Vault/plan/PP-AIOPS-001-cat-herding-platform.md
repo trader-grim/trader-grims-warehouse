@@ -545,6 +545,22 @@ for nspawn. Rejected for now; revisit if untrusted code execution becomes a conc
   data-mutation litterbox (same shape, different target: task-branch
   fidelity vs. ItemData/queue anomalies) — still open here for the
   data-mutation case specifically.
+  **Second data point, 2026-07-19, from live friction (agent-dispatched
+  NixOS flake work, not data-mutation, but same shape question):** Dave
+  counted ~4 separate approvals needed for one flake change today (dispatch,
+  diff review, dry-activate, switch) and named it too much — "about 4
+  approvals per update. I was going to let it go on for a while, but on OK
+  should get us there, maybe a confirmation." His stated model, rooted in a
+  broader design epistemology ("there is nothing but an idea until you have
+  built something you can make work" — see `user-profile` memory): **one
+  approval should carry a scoped task through the full diagnose-build-verify
+  chain, with a single confirmation checkpoint right before the actual
+  irreversible/live step** (e.g. `nixos-rebuild switch`, a real data mutation),
+  not a fresh approval at every intermediate stage. This directly matches
+  and reinforces the "conservative default" already written above (auto-act
+  through info/warning, hold at the point of real consequence) — Dave's own
+  words now on record as confirming that shape is right, not just a
+  reasonable-sounding default nobody had checked with him.
 
 - **Phase 5 timing:** Phase 5 gates on PP-NIXOS-001. Is there value in a lightweight
   Phase 5 prototype on MX Linux (manual nspawn invocation, no NixOS module) to validate
