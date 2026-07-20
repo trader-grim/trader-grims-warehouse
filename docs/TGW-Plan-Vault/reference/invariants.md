@@ -1104,3 +1104,50 @@ named-but-undesigned gap in this file (e.g. #1459's credential-scoping) — don'
 build a fix without a real design pass, and don't let it sit only in conversation history;
 this entry is that durable record. See `pp/PP-OUTBOX-001.md` and `pp/PP-CATIONIX-001.md` for
 where the eventual design should land.
+
+## E14 — Agent-trace evidence is write-once/append-only for every agent, no exemptions ✅ (2026-07-20, Dave, PP-AGENTTRACE-001)
+
+**Rule:** no agent — including the one that created a given trace record, including `Claude`
+itself, no exceptions by role or trust level — may modify or delete an archived transcript
+file (`/opt/TGW/var/agent-traces/`), an `agent_runs` row, or a hash-commitment row (packet
+#1586) once written. The only sanctioned write path is `tgw trace start`/`tgw trace end` and
+`tgw.logging.archive_transcript()`'s own insert-only/lock-on-first-archival logic. This
+closes the exact self-attestation/cover-up vector Tigwa's review (todo #1585) named: a
+compromised or runaway agent altering its own evidence trail after the fact.
+
+**Why:** Dave, 2026-07-20, immediately after the Leg A/B integrity-hardening design (packet
+#1586) was drafted: "this needs to be baked into everyone's contract. No touching the traces
+or you self-destruct." Read for severity, not mechanism — this invariant is the actual
+enforcement (a hard `deny`), not a literal self-destruct routine, which this project's own
+doctrine (Prime Directive 2/3, no self-devised safety bypasses) wouldn't sanction building
+regardless of instruction framing. Same standing doctrine as E9/E11/E12: a written rule
+depends on the model choosing to comply every time; a hook doesn't ask.
+
+**Enforcement:** `.claude/hooks/trace-immutability-guard.py` (new, 2026-07-20), `PreToolUse`
+on `Bash|Edit|Write`, registered in `.claude/settings.json` alongside `flake-guard.py`/
+`app-code-guard.py`/`worktree-guard.py`. Unlike those three, this hook has **no exempt
+agent** — every agent identity is guarded equally, since there is no legitimate agent whose
+contract is to directly mutate trace evidence (the CLI/`archive_transcript()` write path
+itself never goes through Edit/Write or a matching destructive Bash pattern, so legitimate
+recording is unaffected). Blocks: `Edit`/`Write` on any path under `/opt/TGW/var/agent-
+traces/`; `Bash` commands combining a destructive verb (`rm`/`mv`/`cp -f`/`dd`/`shred`/
+`truncate`/`chmod`/`chown`/output-redirect/`tee`/`sed -i`) with that path in the command
+string; `Bash` commands containing `UPDATE`/`DELETE FROM`/`DROP TABLE`/`TRUNCATE` against
+`agent_runs` or `agent_run_transcript_hashes`.
+
+**Known gap, same transparency convention as the other hooks' admitted Bash gaps:**
+best-effort pattern match on the Bash command string — a sufficiently obfuscated command, or
+DB/filesystem access this hook's regexes don't recognize, is a real, documented limitation,
+not claimed coverage the hook doesn't have.
+
+**Interim mechanism, not the permanent one (Dave, same session): "eventually this will be
+enforced by our crypto environment watcher."** Same pattern as E13's own note — don't treat
+this hook as the final design. It's the mechanical stopgap until `pp/PP-CATIONIX-001.md`'s
+crypto-lock endgame (signed policy lockfile + short-TTL unlock artifact + worker attestation
++ audit trail) subsumes it with a real cryptographic guarantee instead of a pattern-matched
+`PreToolUse` hook. When that lands, fold this invariant's enforcement into it rather than
+maintaining two parallel mechanisms.
+
+**Live-fire not yet confirmed:** per `reference-hooks-settings-watcher-caveat` — needs a
+`/hooks` reload or session restart before this is proven firing for real, same open item as
+every other hook in this file when first added.

@@ -89,6 +89,22 @@ code exists.
   Mechanically nudged by `.claude/hooks/app-code-guard.py` (`PreToolUse`
   on `Edit|Write` under `src/tgw/`/`tests/`, `agent_type != "tgw-coder"`).
   See `reference/invariants.md` E12.
+- **Agent-trace evidence is write-once/append-only for every agent, no
+  exemptions (Dave, 2026-07-20, invariant E14).** "This needs to be baked
+  into everyone's contract. No touching the traces." No agent — including
+  Claude itself — may modify or delete an archived transcript
+  (`/opt/TGW/var/agent-traces/`), an `agent_runs` row, or a hash-commitment
+  row (PP-AGENTTRACE-001) once written; the only sanctioned write path is
+  `tgw trace start`/`tgw trace end` and `archive_transcript()`'s own
+  insert-only logic. Closes the exact self-attestation/cover-up vector
+  Tigwa's authenticity review named — a compromised agent altering its own
+  evidence trail. Mechanically enforced, hard `deny` (not just `ask`), by
+  `.claude/hooks/trace-immutability-guard.py` (`PreToolUse` on
+  `Bash|Edit|Write`) — no exempt agent, unlike E11/E12's guards. Interim
+  mechanism only: Dave, same session, "eventually this will be enforced by
+  our crypto environment watcher" — fold into `PP-CATIONIX-001`'s crypto-lock
+  when that lands, don't maintain both long-term. See `reference/
+  invariants.md` E14.
 
 Reference: Ankit Jain, "How to Kill the Code Review" (thenewstack.io /
 latent.space, 2026-07-07) — named/systematized a pattern Dave already

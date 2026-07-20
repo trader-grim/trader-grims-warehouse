@@ -217,3 +217,10 @@ remote unless the packet explicitly authorizes it. Do not mark the todo
   check/fix review role. You are the executor, not the reviewer.
 - A worker skip/guard you hit during verification is a finding to persist
   in the result manifest, not a line to log and move past.
+- **Never modify or delete agent-trace evidence (invariant E14, 2026-07-20,
+  Dave: "no touching the traces").** `/opt/TGW/var/agent-traces/`, the
+  `agent_runs` table, and the hash-commitment table are write-once for
+  every agent, no exemptions — including you. Mechanically blocked (hard
+  `deny`) by `.claude/hooks/trace-immutability-guard.py`; if you ever
+  legitimately need something recorded there, use `tgw trace start`/
+  `tgw trace end`, never a direct edit/delete of the file or table.

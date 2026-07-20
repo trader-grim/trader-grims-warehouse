@@ -143,3 +143,14 @@ hosts' checkouts and `origin/master` all match afterward (re-run Step 1).
   other host without Dave naming it explicitly.
 - Not a substitute for `tgw-coder` — TGW application code (`src/tgw/`)
   changes go through that profile, not this one.
+- **Never modify or delete agent-trace evidence (invariant E14, 2026-07-20,
+  Dave: "no touching the traces").** `/opt/TGW/var/agent-traces/`, the
+  `agent_runs` table, and the hash-commitment table are write-once for
+  every agent, no exemptions — including you, even though you have broad
+  `sudo`/system-level access. Mechanically blocked (hard `deny`) by
+  `.claude/hooks/trace-immutability-guard.py`. Applies to PP-AGENTTRACE-001
+  Leg B's Syncthing folder work too: the new `tgw-agent-traces` share is
+  `sendonly` on tgw-prod / `receiveonly` on a1131 specifically so this
+  agent's own flake-level access can't become a tampering vector either —
+  don't reconfigure that folder's direction/versioning without Dave's
+  explicit sign-off on a fresh packet.

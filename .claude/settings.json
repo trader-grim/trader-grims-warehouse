@@ -46,6 +46,17 @@
             "statusMessage": "Checking app-code branch-per-task guardrail..."
           }
         ]
+      },
+      {
+        "matcher": "Bash|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /opt/TGW/src/trader-grims-warehouse/.claude/hooks/trace-immutability-guard.py",
+            "timeout": 10,
+            "statusMessage": "Checking trace-immutability guardrail..."
+          }
+        ]
       }
     ],
     "SessionStart": [

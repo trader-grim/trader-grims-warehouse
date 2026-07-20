@@ -1826,6 +1826,71 @@ volume becomes a real problem later.
   skill config, not `src/tgw/`/`tests/` app code, so it's main-session work (like the
   E9/E11/E12 hooks before it), not a `tgw-coder` dispatch.
 
+**Progress, 2026-07-20:** Phase 1 (#1580) merged (`f0907f4`) and runner-reviewed
+clean — `agent_runs` table + `tgw trace start`/`end` CLI + `archive_transcript()`
+live. Phase 2 (#1581) executed by `tgw-coder` (`list_agent_runs()`, coalesced
+`agent_run_render` worker, `TGW-Agent-Runs.md` render), awaiting runner-review.
+Phase 3 (#1582) packet spec written, queued behind Phase 2's review/merge (depends
+on `list_agent_runs()`).
+
+**Phase 4 PAUSED — authenticity/anti-cover-up review (Tigwa → Dave, 2026-07-20).**
+Before Phase 4's SessionStart/Stop hooks went live, Tigwa filed a review request
+(`CLAUDE-REQUEST-agent-trace-authenticity-review-2026-07-20.md`, archived) naming a
+real gap: the trace system as designed is pure self-attestation — a compromised/
+runaway agent could omit a run, truncate/replace its transcript, or claim a false
+end state, and nothing today detects it. Concrete finding: `archive_transcript()`'s
+own re-entrancy ("idempotent re-archival" for legitimate retries) is exactly the
+mechanism a compromised agent could exploit to swap evidence after the fact — the
+single sharpest gap. Claude's response (todo #1585, sent to Tigwa's inbox): gap
+analysis confirmed, proposed a minimum viable integrity contract (content hash +
+lock-on-first-successful-archival, `parent_run_id` running-status validation),
+explicitly recommending this land before Phase 4 hooks are wired live.
+
+**Dave's refinement, same session:** two additions, both folded into a new draft
+packet (**#1586, PP-AGENTTRACE-001 Phase 1b, `docs/TGW-Plan-Vault/plan/packets/
+1586-agent-trace-integrity-hardening.md` — DESIGN ONLY, not authorized for build**):
+1. Small, hash-verified writes — a separate insert-only hash-commitment table
+   (sha256 + committed_at per run_id), rejecting a second commitment for the same
+   run_id outright (the actual lock), verifiable later by re-hashing and comparing.
+2. Syncthing versioning to an external write-only-from-the-agent's-perspective
+   copy — since Syncthing already runs dual-instance on tgw-prod/a1131, a new
+   `agent-traces/` folder (Send Only on tgw-prod, Receive Only + Staggered
+   versioning on a1131) gives a real independent-witness property: the traced
+   agent has no credentials to reach a1131's filesystem/Syncthing config, so even a
+   compromised overwrite/delete on tgw-prod propagating to a1131 leaves the
+   original content recoverable in a1131's `.stversions/`. This leg is a
+   `~/tgw-flake` change — `nix-flake-maintainer`'s to execute, separately
+   authorized from the Python/DB leg, not `tgw-coder`'s.
+3. **Monitoring by Tigwa-lite (Dave, 2026-07-20)** — handed to Tigwa as a
+   requirement, not designed by Claude: periodic notify-only reconciliation over
+   `agent_runs` + the hash-commitment table (stale/unclosed runs, hash mismatches,
+   missing commitments), same cadence pattern as her existing scheduled plan
+   review, same no-mutation-authority pattern as her thermal-monitoring role.
+   Scoping/building is hers per the established HR-001 senior-architect-consult
+   pattern (she designs, Claude/Dave review after). Sent to her inbox alongside
+   the hardening design.
+
+Packet #1586 is explicitly **not dispatched** to any executor — Dave's sign-off on
+the concrete diff (and its named tradeoff: locking archival on first write means a
+later *legitimate* correction needs its own logged path, not a silent re-run) is
+required first. Phase 4 stays paused until Leg A of #1586 lands.
+
+**Leg B concrete spec added, 2026-07-20 (Dave: "tgw-prod's syncthing is now under
+the control of the nix maintainer and we need a spec for the required shares and
+config options").** Verified live: the `tgw` Syncthing instance
+(`nix/tgw/platform.nix`) has NO declarative folder/device config today — unlike
+the `db` instance, it isn't even using the standard `services.syncthing` module,
+just a raw systemd unit with one narrow idempotent config.xml patch script
+(`syncthingTgwFixPorts`, ports only, explicitly untouches `<device>`/`<folder>`).
+Packet #1586's Leg B now specifies: new folder `tgw-agent-traces` (name TBD-
+confirm-live), `sendonly` on tgw-prod / `receiveonly` + `staggered`
+(`cleanoutDays=0`) on a1131, enforced by extending the *same* surgical-patch
+technique already proven for the port fix — not a global `overrideFolders=true`
+flip, which would also wipe the plan-vault folder's GUI-managed state (not what
+was asked). Device pairing, exact live folder list, and a1131 disk headroom are
+flagged as nix-flake-maintainer's live-verification steps before writing the
+actual diff, not assumed by this spec.
+
 ## Session protocol
 
 Start: thermal → inbox → SESSION-BRIEF/this plan → `tgw plan check` + `tgw ops-digest`
