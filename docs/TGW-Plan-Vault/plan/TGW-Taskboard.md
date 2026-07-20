@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-07-20 15:56 UTC — 161 open, 198 done in the last 7 days._
+_Rendered 2026-07-20 16:12 UTC — 160 open, 199 done in the last 7 days._
 
 ## admin (17 open)
 
@@ -35,7 +35,7 @@ _Rendered 2026-07-20 15:56 UTC — 161 open, 198 done in the last 7 days._
 | 145 | 45 |  | AI Studio: ItemArchive resurrection triage — feed full GEMINI-007 archive folder inventory (ItemArchive/ 163G, 54K zips, only 40% indexed) into 1M-context window; identify highest-value zips to index first by SKU prefix/date range; output prioritized ingestion plan to inbox/ | [[TGW-Master-Plan#PP-KNOWLEDGE-001 — the knowledge & translation hub — 6-LAYER UMBRELLA, extended 2026-07-11\|PP-KNOWLEDGE-001]] |  |
 | 144 | 65 |  | AI Studio: full alt-text batch via Gemini Batch API — upload itemdata image manifest to AI Studio, run gemini-2.5-flash-lite batch job across all ~8350 SKU folders; structured JSON output per item; feeds alt_text ledger. Reference todo #137 for batch architecture spec. Use when Batch API quota allows | [[TGW-Master-Plan#PP-DATALEARN-001 — alt-text / vision data pipeline\|PP-DATALEARN-001]] |  |
 
-## claude (110 open)
+## claude (109 open)
 
 | ID | Pri | Size | Task | Plan | Blockers |
 |---:|----:|:----:|------|------|----------|
@@ -82,7 +82,6 @@ _Rendered 2026-07-20 15:56 UTC — 161 open, 198 done in the last 7 days._
 | 1553 | 40 |  | PP-EBAY-MOTORS-001 step 2: add marketplace_id schema field + wire ebay_stage population going forward | [[TGW-Master-Plan#PP-EBAY-MOTORS-001 — eBay Motors, now scoped (was URGENT/unscoped)\|PP-EBAY-MOTORS-001]] |  |
 | 1554 | 40 |  | PP-EBAY-MOTORS-001 step 3: thread site_id through trading_call() once marketplace_id field exists (step 2) | [[TGW-Master-Plan#PP-EBAY-MOTORS-001 — eBay Motors, now scoped (was URGENT/unscoped)\|PP-EBAY-MOTORS-001]] |  |
 | 1579 | 40 |  | tgw-prod + a1131: register Kate as MIME default for text/markdown, application/json, text/x-yaml, text/x-log, text/x-python (currently zero registered handlers on both hosts). Dave, 2026-07-20: 'yes apply on both boxes.' Diff proposed via nix-flake-maintainer investigation, needs commit+switch. | `PP-HM-001` |  |
-| 1581 | 40 |  | PP-AGENTTRACE-001 Phase 2: Obsidian view — TGW-Agent-Runs.md auto-rendered via the plan_render pattern (pure build_agent_runs_doc() + impure render_agent_runs() atomic-write), agent_run_render queue-triggered worker (coalesced via dedupe_key/not_before, same as plan_render/catalog_rebuild). Depends on Phase 1's agent_runs table. | [[TGW-Master-Plan#PP-AGENTTRACE-001 — agent trace logging & review UI — NEW 2026-07-20\|PP-AGENTTRACE-001]] |  |
 | 1582 | 40 |  | PP-AGENTTRACE-001 Phase 3: /form/runs HTTP UI page on tgw-http — session-cookie auth via existing _session_guard middleware (not /api/ Bearer style), match /form/todos's query->render->200-even-on-DB-error shape, reuse shared _STATIC_HEAD/_STATIC_FOOT dark theme, filterable by agent_type/status/date/pp_ref, links to raw transcript. Depends on Phase 1's agent_runs table. | [[TGW-Master-Plan#PP-AGENTTRACE-001 — agent trace logging & review UI — NEW 2026-07-20\|PP-AGENTTRACE-001]] |  |
 | 1583 | 40 |  | PP-AGENTTRACE-001 Phase 4: Claude Code SessionStart/Stop hooks (same pattern as session-start-briefing.py) calling 'tgw trace start'/'tgw trace end', wired to copy the session's transcript_path (available in Stop hook input) into the durable /opt/TGW/var/agent-traces/ location. Plus .claude/skills/tgw-trace/SKILL.md documenting the shared contract + manual-invocation fallback for agents not yet hook-covered (Aider/Tigwa/Hermes come later via the CLI wrapper, not this phase). Hook/skill config, not src/tgw//tests app code -- main-session work, not tgw-coder. Depends on Phase 1's CLI existing. | [[TGW-Master-Plan#PP-AGENTTRACE-001 — agent trace logging & review UI — NEW 2026-07-20\|PP-AGENTTRACE-001]] |  |
 | 1589 | 40 |  | Tigwa preparing PP-EVIDENCE-001 proposal (review-only umbrella PP for cross-cutting evidence/recovery integrity): audit-only live asset/trust register, staged controls, residual-risk labels, bounded recovery-drill acceptance test. Plus a review-gate convention + SessionStart briefing signal for pending review-gated artifacts. Awaiting her proposal back for Dave/Claude review. | [[TGW-Master-Plan#PP-AGENTTRACE-001 — agent trace logging & review UI — NEW 2026-07-20\|PP-AGENTTRACE-001]] |  |
@@ -197,10 +196,11 @@ _Rendered 2026-07-20 15:56 UTC — 161 open, 198 done in the last 7 days._
 | 1536 | 50 |  | Use existing git history/commit data (TGW-Master-Plan.md commit log + the new archive-in-place convention) to produce a real changelog for the plan | [[TGW-Master-Plan#PP-PLANDB-001 — plan/tracker tooling\|PP-PLANDB-001]] |  |
 | 15 | 60 |  | Second keyboard wired up as macroboard (see etc/interfaces/keyd/tgw-macroboard.conf) | [[TGW-Master-Plan#PP-MACRO-001 — macroboard hardware (#15)\|PP-MACRO-001]] |  |
 
-## Done this week (198)  — showing 15 most recent
+## Done this week (199)  — showing 15 most recent
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 1581 | claude | 2026-07-20 | PP-AGENTTRACE-001 Phase 2: Obsidian view — TGW-Agent-Runs.md auto-rendered via the plan_render pattern (pure build_agent_runs_doc() + impure render_agent_runs() atomic-write), agent_run_render queue-triggered worker (coalesced via dedupe_key/not_before, same as plan_render/catalog_rebuild). Depends on Phase 1's agent_runs table. |
 | 1588 | claude | 2026-07-20 | Respond to Tigwa's archive/library integrity-fence sinkhole review request (inbox/claude/TIGWA-REQUEST-archive-library-integrity-fence-review-2026-07-20.md): cross-cutting evidence/recovery contract spanning ItemData, Plan Vault, backups, traces, research artifacts. Design review only, no implementation. |
 | 1585 | claude | 2026-07-20 | Respond to Tigwa's agent-trace authenticity review request (inbox/claude/CLAUDE-REQUEST-agent-trace-authenticity-review-2026-07-20.md): gap analysis of Phase 1's self-attestation vulnerabilities, minimum viable integrity contract proposal, before Phase 4 (hooks) proceeds. |
 | 1580 | claude | 2026-07-20 | PP-AGENTTRACE-001 Phase 1 (foundation): agent_runs Postgres table (self-apply DDL in state_machine.py per _ensure_ai_usage_table() pattern, schema.sql copy for bootstrap docs) + 'tgw trace start'/'tgw trace end' CLI (run_id, parent_run_id, agent_type, todo_id/pp_ref, host, git_branch, started_at/ended_at, status, summary, transcript_path) + tgw_logging integration (keep log_event() emission for grep parity). Raw transcript archival to /opt/TGW/var/agent-traces/{date}/{run_id}.jsonl, tgw-owned, atomic-write/archive-before-overwrite (E5). Unit tests required. Everything else in PP-AGENTTRACE-001 depends on this landing first. |
@@ -215,5 +215,4 @@ _Rendered 2026-07-20 15:56 UTC — 161 open, 198 done in the last 7 days._
 | 1576 | claude | 2026-07-20 | Add output-contract validation to tgw_simple_llm_jobs (todo #1574 follow-up): classify must verify returned label is in the caller's label_set; extract_fields must verify returned keys match the caller's schema. Flip to {ok:false, error, raw} instead of ok:true when the model's output violates what was asked, rather than trusting any JSON-shaped response as success (same bug class as the condition-enum incident: success reported despite an invalid/corrupted value). |
 | 1572 | tigwa | 2026-07-19 | Inspect rclone backup loop/stamp semantics after outage: distinguish actively converging sync from missing completion evidence. |
 | 1571 | tigwa | 2026-07-19 | Post-power-outage: inspect stale TGW snapshot tree and backup evidence; report exact latest entries, freshness, and recovery implications. |
-| 1565 | claude | 2026-07-19 | tgw-clipd: exclude password-manager-hinted (x-kde-passwordManagerHint MIME) and API-key/secret-shaped content from persistent clip history |
-| … | | | _…and 183 more — run `tgw todo --all` to see everything_ |
+| … | | | _…and 184 more — run `tgw todo --all` to see everything_ |
