@@ -20,6 +20,7 @@ import json
 import sqlite3
 import time
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import psycopg2.errors
@@ -1741,6 +1742,172 @@ def test_todos_form_escapes_html(client, monkeypatch):
     assert r.status_code == 200
     assert "<script>alert" not in r.text          # raw tag must not appear
     assert "&lt;script&gt;" in r.text             # escaped form present
+
+
+# ---------------------------------------------------------------------------
+# PP-AGENTTRACE-001 Phase 3 — GET /form/runs (#1582), no Bearer (network trust)
+# ---------------------------------------------------------------------------
+
+_RUN_ROWS = [
+    {
+        "run_id": "abcdef0123456789",
+        "parent_run_id": None,
+        "agent_type": "tgw-coder",
+        "todo_id": 1580,
+        "pp_ref": "PP-AGENTTRACE-001",
+        "host": "tgw-prod",
+        "git_branch": "todo/1580-agent-trace-phase1",
+        "started_at": datetime(2026, 7, 20, 10, 0, tzinfo=timezone.utc),
+        "ended_at": datetime(2026, 7, 20, 10, 5, tzinfo=timezone.utc),
+        "status": "completed",
+        "summary": "Phase 1 built + merged",
+        "transcript_path": "/opt/TGW/var/agent-traces/2026-07-20/abcdef0123456789.jsonl",
+    },
+    {
+        "run_id": "fedcba9876543210",
+        "parent_run_id": None,
+        "agent_type": "claude-session",
+        "todo_id": None,
+        "pp_ref": None,
+        "host": "tgw-prod",
+        "git_branch": "catio-nix-0.0.1-alpha",
+        "started_at": datetime(2026, 7, 20, 11, 0, tzinfo=timezone.utc),
+        "ended_at": None,
+        "status": "running",
+        "summary": "",
+        "transcript_path": None,
+    },
+    {
+        "run_id": "1122334455667788",
+        "parent_run_id": None,
+        "agent_type": "aider",
+        "todo_id": 1577,
+        "pp_ref": "PP-SIMPLEJOBS-001",
+        "host": "tgw-prod",
+        "git_branch": "todo/1577-fix",
+        "started_at": datetime(2026, 7, 19, 9, 0, tzinfo=timezone.utc),
+        "ended_at": datetime(2026, 7, 19, 9, 2, tzinfo=timezone.utc),
+        "status": "failed",
+        "summary": "<b>bad</b> exit",
+        "transcript_path": "/opt/TGW/var/agent-traces/2026-07-19/1122334455667788.jsonl",
+    },
+]
+
+
+def test_runs_form_renders_rows(client, monkeypatch):
+    _login(client)
+    from tgw.queue import state_machine
+    monkeypatch.setattr(state_machine, "list_agent_runs", lambda *a, **k: list(_RUN_ROWS))
+    r = client.get("/form/runs")  # no auth header — network trust
+    assert r.status_code == 200
+    text = r.text
+    assert "Agent Runs" in text
+    assert "tgw-coder" in text and "claude-session" in text and "aider" in text
+    assert "3 run(s)" in text
+    assert "PP-AGENTTRACE-001" in text
+    assert "#1580" in text
+
+
+def test_runs_form_empty_all_clear(client, monkeypatch):
+    _login(client)
+    from tgw.queue import state_machine
+    monkeypatch.setattr(state_machine, "list_agent_runs", lambda *a, **k: [])
+    r = client.get("/form/runs")
+    assert r.status_code == 200
+    assert "No agent runs recorded" in r.text
+
+
+def test_runs_form_db_error_still_200(client, monkeypatch):
+    _login(client)
+    from tgw.queue import state_machine
+
+    def _boom(*a, **k):
+        raise RuntimeError("pg down")
+
+    monkeypatch.setattr(state_machine, "list_agent_runs", _boom)
+    r = client.get("/form/runs")
+    assert r.status_code == 200
+    assert "unavailable" in r.text.lower()
+
+
+def test_runs_form_requires_session(client):
+    r = client.get("/form/runs", follow_redirects=False)
+    assert r.status_code == 303
+    assert "/login" in r.headers["location"]
+
+
+def test_runs_form_escapes_html(client, monkeypatch):
+    _login(client)
+    from tgw.queue import state_machine
+    rows = [dict(_RUN_ROWS[2])]
+    monkeypatch.setattr(state_machine, "list_agent_runs", lambda *a, **k: rows)
+    r = client.get("/form/runs")
+    assert r.status_code == 200
+    assert "<b>bad</b>" not in r.text
+    assert "&lt;b&gt;bad&lt;/b&gt;" in r.text
+
+
+def test_runs_form_status_color_coding(client, monkeypatch):
+    _login(client)
+    from tgw.queue import state_machine
+    monkeypatch.setattr(state_machine, "list_agent_runs", lambda *a, **k: list(_RUN_ROWS))
+    r = client.get("/form/runs")
+    assert 'st-completed">completed' in r.text
+    assert 'st-failed">failed' in r.text
+    assert 'st-running">running' in r.text
+
+
+def test_runs_form_has_filter_controls(client, monkeypatch):
+    _login(client)
+    from tgw.queue import state_machine
+    monkeypatch.setattr(state_machine, "list_agent_runs", lambda *a, **k: list(_RUN_ROWS))
+    r = client.get("/form/runs")
+    assert 'id="runs-agent-sel"' in r.text
+    assert 'id="runs-status-sel"' in r.text
+    assert 'id="runs-search"' in r.text
+
+
+def test_runs_form_transcript_path_shown_as_text(client, monkeypatch):
+    """Transcript paths render as escaped text, not a clickable link — no
+    file-serving route exists for /opt/TGW/var/agent-traces/ (packet spec
+    item 4, flagged limitation)."""
+    _login(client)
+    from tgw.queue import state_machine
+    monkeypatch.setattr(state_machine, "list_agent_runs", lambda *a, **k: list(_RUN_ROWS))
+    r = client.get("/form/runs")
+    assert "/opt/TGW/var/agent-traces/2026-07-20/abcdef0123456789.jsonl" in r.text
+    assert '<a href="/opt/TGW/var/agent-traces' not in r.text
+
+
+def test_runs_form_uses_static_css(client, monkeypatch):
+    _login(client)
+    from tgw.queue import state_machine
+    monkeypatch.setattr(state_machine, "list_agent_runs", lambda *a, **k: list(_RUN_ROWS))
+    r = client.get("/form/runs")
+    assert '/static/tgw.css' in r.text
+    assert '/static/nav.css' in r.text
+    assert '/static/tgw.js' in r.text
+    assert '/static/nav.js' in r.text
+
+
+def test_render_runs_html_pure():
+    """Direct unit test of _render_runs_html() with synthetic rows — pure
+    enough to test without the HTTP layer, per packet acceptance item 5."""
+    from tgw.http_server import _render_runs_html
+
+    html_out = _render_runs_html(list(_RUN_ROWS))
+    assert "Agent Runs" in html_out
+    assert "3 run(s)" in html_out
+    assert "abcdef012345" in html_out  # truncated run id (12 chars)
+    assert '<b>bad</b>' not in html_out
+    assert '&lt;b&gt;bad&lt;/b&gt;' in html_out
+
+
+def test_render_runs_html_empty():
+    from tgw.http_server import _render_runs_html
+
+    html_out = _render_runs_html([])
+    assert "No agent runs recorded" in html_out
 
 
 # ---------------------------------------------------------------------------
