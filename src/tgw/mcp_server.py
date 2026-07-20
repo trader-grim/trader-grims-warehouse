@@ -771,6 +771,12 @@ def tgw_simple_llm_jobs(
             'error': f'invalid operation {operation!r}; valid: {sorted(_SIMPLE_LLM_JOBS_OPERATIONS)}',
         })
 
+    if operation == 'classify' and label_set is not None and len(label_set) == 0:
+        return json.dumps({
+            'ok': False,
+            'error': 'label_set is empty — no valid classification is possible',
+        })
+
     cfg = _get_cfg()
     from tgw.apis.llm import call_model
     from tgw.apis.ollama import extract_json
@@ -794,7 +800,14 @@ def tgw_simple_llm_jobs(
     # the caller actually asked for. Only the two operations with an
     # explicit caller-supplied contract (label_set / schema) are checked;
     # the rest have no equivalent contract to validate against.
-    if operation == 'classify' and label_set:
+    #
+    # label_set uses explicit None/length checks, not truthiness (todo
+    # #1577, Tigwa peer review of #1576): label_set is None means
+    # open-ended classification (no check); label_set == [] is rejected
+    # fail-loud above, before the model call; non-empty label_set is
+    # validated here. `if label_set:` would have silently treated an
+    # explicit empty list the same as "not supplied".
+    if operation == 'classify' and label_set is not None and len(label_set) > 0:
         label = result.get('label') if isinstance(result, dict) else None
         if label not in label_set:
             return json.dumps({

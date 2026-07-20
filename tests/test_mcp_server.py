@@ -954,6 +954,54 @@ def test_simple_llm_jobs_classify_without_label_set_skips_check(cfg, monkeypatch
     assert out["result"]["label"] == "ANYTHING"
 
 
+def test_simple_llm_jobs_classify_empty_label_set_rejected_before_model_call(cfg, monkeypatch):
+    """todo #1577 (Tigwa peer review of #1576): an explicit label_set=[] must
+    be rejected fail-loud, before the model is even called — an empty
+    allowed-label domain can never yield a valid classification, so the
+    prior 'if label_set:' truthiness check silently skipped validation in
+    exactly this case instead of failing loud."""
+    calls = []
+    monkeypatch.setattr(
+        "tgw.apis.llm.call_model",
+        lambda *a, **k: calls.append(1) or '{"label": "ANYTHING", "confidence": 0.5}',
+    )
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(
+        operation="classify", text="a description", label_set=[],
+    ))
+    assert out["ok"] is False
+    assert "empty" in out["error"]
+    assert calls == []  # model must never be called for an impossible request
+
+
+def test_simple_llm_jobs_classify_none_label_set_is_open_ended(cfg, monkeypatch):
+    """todo #1577: label_set=None (not supplied) is the open-ended case —
+    distinct from label_set=[] — and must NOT be rejected."""
+    monkeypatch.setattr(
+        "tgw.apis.llm.call_model",
+        lambda *a, **k: '{"label": "ANYTHING", "confidence": 0.5}',
+    )
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(
+        operation="classify", text="a description", label_set=None,
+    ))
+    assert out["ok"] is True
+    assert out["result"]["label"] == "ANYTHING"
+
+
+def test_simple_llm_jobs_classify_nonempty_label_set_still_validates(cfg, monkeypatch):
+    """todo #1577: non-empty label_set keeps the membership-check behavior
+    from #1576 unchanged (this must still fail for an out-of-set label)."""
+    monkeypatch.setattr(
+        "tgw.apis.llm.call_model",
+        lambda *a, **k: '{"label": "REFURBISHED", "confidence": 0.6}',
+    )
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(
+        operation="classify", text="a description",
+        label_set=["NEW", "USED_GOOD"],
+    ))
+    assert out["ok"] is False
+    assert "not in label_set" in out["error"]
+
+
 def test_simple_llm_jobs_extract_fields_all_keys_present_still_ok(cfg, monkeypatch):
     """Regression check: normal case (model returns all requested schema
     keys) still returns ok: True (todo #1576)."""
