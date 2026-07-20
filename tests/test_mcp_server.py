@@ -89,6 +89,7 @@ EXPECTED_TOOLS = {
     "tgw_health", "tgw_enqueue", "tgw_get_todo", "tgw_add_suggest",
     "tgw_dead_letter", "tgw_hint_trail", "tgw_catalog_verify",
     "tgw_mailbox_send", "tgw_get_plan_brief", "tgw_clip_deliver",
+    "tgw_simple_llm_jobs",
 }
 
 
@@ -96,7 +97,7 @@ def test_exactly_ten_tools_present():
     present = {n for n in dir(mcp_server)
               if n.startswith("tgw_") and callable(getattr(mcp_server, n))}
     assert present == EXPECTED_TOOLS
-    assert len(present) == 14
+    assert len(present) == 15
 
 
 # ---------------------------------------------------------------------------
@@ -778,3 +779,296 @@ def test_get_plan_brief_accepts_all_caps_pp_alias(tmp_path, monkeypatch):
     assert out["ok"] is True
     assert out["query"]["pp"] == "PP-DELTA-004"
     assert out["section"]["heading"] == "PP-DELTA-004 Delta work"
+
+
+# ---------------------------------------------------------------------------
+# tgw_simple_llm_jobs (PP-SIMPLEJOBS-001, todo #1574)
+# ---------------------------------------------------------------------------
+
+def test_simple_llm_jobs_invalid_operation(cfg):
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(operation="nope", text="hi"))
+    assert out["ok"] is False
+    assert "invalid operation" in out["error"]
+
+
+def test_simple_llm_jobs_summarize_calls_call_model_and_parses_json(cfg, monkeypatch):
+    calls = {}
+
+    def fake_call_model(task, system_prompt, user_prompt, cfg_arg):
+        calls.update(task=task, system_prompt=system_prompt, user_prompt=user_prompt)
+        return '{"summary": "short summary", "key_points": ["a", "b"]}'
+
+    monkeypatch.setattr("tgw.apis.llm.call_model", fake_call_model)
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(
+        operation="summarize", text="long text here", instructions="be brief",
+    ))
+    assert out["ok"] is True
+    assert out["operation"] == "summarize"
+    assert out["result"] == {"summary": "short summary", "key_points": ["a", "b"]}
+    assert calls["task"] == "simple_llm_jobs"
+    assert "long text here" in calls["user_prompt"]
+    assert "be brief" in calls["user_prompt"]
+
+
+def test_simple_llm_jobs_extract_fields_embeds_schema_in_system_prompt(cfg, monkeypatch):
+    calls = {}
+
+    def fake_call_model(task, system_prompt, user_prompt, cfg_arg):
+        calls["system_prompt"] = system_prompt
+        return '{"brand": "Kenmore", "condition": "used"}'
+
+    monkeypatch.setattr("tgw.apis.llm.call_model", fake_call_model)
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(
+        operation="extract_fields", text="a description",
+        schema={"brand": "string", "condition": "string"},
+    ))
+    assert out["ok"] is True
+    assert out["result"]["brand"] == "Kenmore"
+    assert '"brand": "string"' in calls["system_prompt"]
+
+
+def test_simple_llm_jobs_classify_embeds_label_set(cfg, monkeypatch):
+    calls = {}
+
+    def fake_call_model(task, system_prompt, user_prompt, cfg_arg):
+        calls["system_prompt"] = system_prompt
+        return '{"label": "USED_GOOD", "confidence": 0.8, "reason": "worn"}'
+
+    monkeypatch.setattr("tgw.apis.llm.call_model", fake_call_model)
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(
+        operation="classify", text="a description",
+        label_set=["NEW", "USED_GOOD", "USED_ACCEPTABLE"],
+    ))
+    assert out["ok"] is True
+    assert out["result"]["label"] == "USED_GOOD"
+    assert "USED_GOOD" in calls["system_prompt"]
+    assert "USED_ACCEPTABLE" in calls["system_prompt"]
+
+
+def test_simple_llm_jobs_rank_snippets_embeds_indexed_items(cfg, monkeypatch):
+    calls = {}
+
+    def fake_call_model(task, system_prompt, user_prompt, cfg_arg):
+        calls["user_prompt"] = user_prompt
+        return '{"ranked": [{"index": 1, "score": 0.9}, {"index": 0, "score": 0.4}]}'
+
+    monkeypatch.setattr("tgw.apis.llm.call_model", fake_call_model)
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(
+        operation="rank_snippets", text="query text",
+        items=["candidate zero", "candidate one"],
+    ))
+    assert out["ok"] is True
+    assert out["result"]["ranked"][0]["index"] == 1
+    assert "0: candidate zero" in calls["user_prompt"]
+    assert "1: candidate one" in calls["user_prompt"]
+
+
+def test_simple_llm_jobs_strips_markdown_fence(cfg, monkeypatch):
+    monkeypatch.setattr("tgw.apis.llm.call_model",
+                        lambda *a, **k: '```json\n{"summary": "x"}\n```')
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(operation="summarize", text="hi"))
+    assert out["ok"] is True
+    assert out["result"] == {"summary": "x"}
+
+
+def test_simple_llm_jobs_non_json_response_surfaces_raw(cfg, monkeypatch):
+    monkeypatch.setattr("tgw.apis.llm.call_model", lambda *a, **k: "not json at all")
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(operation="summarize", text="hi"))
+    assert out["ok"] is False
+    assert out["raw"] == "not json at all"
+    assert "not valid JSON" in out["error"]
+
+
+def test_simple_llm_jobs_call_model_exception_is_caught(cfg, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("deepseek unavailable")
+
+    monkeypatch.setattr("tgw.apis.llm.call_model", boom)
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(operation="summarize", text="hi"))
+    assert out["ok"] is False
+    assert "deepseek unavailable" in out["error"]
+
+
+def test_simple_llm_jobs_registered_even_when_readonly():
+    """Read-only-safe by nature (no ItemData/eBay/queue writes) — must stay
+    registered under TGW_MCP_READONLY=1, same as tgw_search_full (packet
+    step 6: match the closest analogous read-only tool, not the write-gated
+    tgw_enqueue/tgw_add_suggest/tgw_clip_deliver/tgw_mailbox_send group)."""
+    import importlib
+    import os as _os
+
+    old = _os.environ.get("TGW_MCP_READONLY")
+    _os.environ["TGW_MCP_READONLY"] = "1"
+    try:
+        reloaded = importlib.reload(mcp_server)
+        assert "tgw_simple_llm_jobs" in reloaded.mcp._tool_manager._tools
+    finally:
+        if old is None:
+            _os.environ.pop("TGW_MCP_READONLY", None)
+        else:
+            _os.environ["TGW_MCP_READONLY"] = old
+        importlib.reload(mcp_server)  # restore module state for later tests
+
+
+def test_simple_llm_jobs_classify_valid_label_still_ok(cfg, monkeypatch):
+    """Regression check: normal case (model picks a label in label_set)
+    still returns ok: True (todo #1576)."""
+    monkeypatch.setattr(
+        "tgw.apis.llm.call_model",
+        lambda *a, **k: '{"label": "USED_GOOD", "confidence": 0.8, "reason": "worn"}',
+    )
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(
+        operation="classify", text="a description",
+        label_set=["NEW", "USED_GOOD", "USED_ACCEPTABLE"],
+    ))
+    assert out["ok"] is True
+    assert out["result"]["label"] == "USED_GOOD"
+
+
+def test_simple_llm_jobs_classify_label_outside_label_set_fails(cfg, monkeypatch):
+    """todo #1576: a JSON-shaped response with a label outside label_set is
+    a contract violation, not ok: True."""
+    monkeypatch.setattr(
+        "tgw.apis.llm.call_model",
+        lambda *a, **k: '{"label": "REFURBISHED", "confidence": 0.6, "reason": "unclear"}',
+    )
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(
+        operation="classify", text="a description",
+        label_set=["NEW", "USED_GOOD", "USED_ACCEPTABLE"],
+    ))
+    assert out["ok"] is False
+    assert "REFURBISHED" in out["error"]
+    assert "not in label_set" in out["error"]
+    assert out["raw"]["label"] == "REFURBISHED"
+
+
+def test_simple_llm_jobs_classify_without_label_set_skips_check(cfg, monkeypatch):
+    """No label_set supplied → open-ended classification, nothing to
+    validate against — any label is accepted (todo #1576)."""
+    monkeypatch.setattr(
+        "tgw.apis.llm.call_model",
+        lambda *a, **k: '{"label": "ANYTHING", "confidence": 0.5}',
+    )
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(operation="classify", text="a description"))
+    assert out["ok"] is True
+    assert out["result"]["label"] == "ANYTHING"
+
+
+def test_simple_llm_jobs_classify_empty_label_set_rejected_before_model_call(cfg, monkeypatch):
+    """todo #1577 (Tigwa peer review of #1576): an explicit label_set=[] must
+    be rejected fail-loud, before the model is even called — an empty
+    allowed-label domain can never yield a valid classification, so the
+    prior 'if label_set:' truthiness check silently skipped validation in
+    exactly this case instead of failing loud."""
+    calls = []
+    monkeypatch.setattr(
+        "tgw.apis.llm.call_model",
+        lambda *a, **k: calls.append(1) or '{"label": "ANYTHING", "confidence": 0.5}',
+    )
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(
+        operation="classify", text="a description", label_set=[],
+    ))
+    assert out["ok"] is False
+    assert "empty" in out["error"]
+    assert calls == []  # model must never be called for an impossible request
+
+
+def test_simple_llm_jobs_classify_none_label_set_is_open_ended(cfg, monkeypatch):
+    """todo #1577: label_set=None (not supplied) is the open-ended case —
+    distinct from label_set=[] — and must NOT be rejected."""
+    monkeypatch.setattr(
+        "tgw.apis.llm.call_model",
+        lambda *a, **k: '{"label": "ANYTHING", "confidence": 0.5}',
+    )
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(
+        operation="classify", text="a description", label_set=None,
+    ))
+    assert out["ok"] is True
+    assert out["result"]["label"] == "ANYTHING"
+
+
+def test_simple_llm_jobs_classify_nonempty_label_set_still_validates(cfg, monkeypatch):
+    """todo #1577: non-empty label_set keeps the membership-check behavior
+    from #1576 unchanged (this must still fail for an out-of-set label)."""
+    monkeypatch.setattr(
+        "tgw.apis.llm.call_model",
+        lambda *a, **k: '{"label": "REFURBISHED", "confidence": 0.6}',
+    )
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(
+        operation="classify", text="a description",
+        label_set=["NEW", "USED_GOOD"],
+    ))
+    assert out["ok"] is False
+    assert "not in label_set" in out["error"]
+
+
+def test_simple_llm_jobs_extract_fields_all_keys_present_still_ok(cfg, monkeypatch):
+    """Regression check: normal case (model returns all requested schema
+    keys) still returns ok: True (todo #1576)."""
+    monkeypatch.setattr(
+        "tgw.apis.llm.call_model",
+        lambda *a, **k: '{"brand": "Kenmore", "condition": "used"}',
+    )
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(
+        operation="extract_fields", text="a description",
+        schema={"brand": "string", "condition": "string"},
+    ))
+    assert out["ok"] is True
+    assert out["result"]["brand"] == "Kenmore"
+
+
+def test_simple_llm_jobs_extract_fields_missing_key_fails(cfg, monkeypatch):
+    """todo #1576: a requested schema key absent from the model's response
+    is a contract violation, not ok: True."""
+    monkeypatch.setattr(
+        "tgw.apis.llm.call_model",
+        lambda *a, **k: '{"brand": "Kenmore"}',
+    )
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(
+        operation="extract_fields", text="a description",
+        schema={"brand": "string", "condition": "string"},
+    ))
+    assert out["ok"] is False
+    assert "condition" in out["error"]
+    assert "missing requested field" in out["error"]
+    assert out["raw"]["brand"] == "Kenmore"
+
+
+def test_simple_llm_jobs_extract_fields_extra_keys_beyond_schema_still_ok(cfg, monkeypatch):
+    """Extra keys beyond schema are fine — only missing keys are a
+    violation (todo #1576)."""
+    monkeypatch.setattr(
+        "tgw.apis.llm.call_model",
+        lambda *a, **k: '{"brand": "Kenmore", "condition": "used", "color": "white"}',
+    )
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(
+        operation="extract_fields", text="a description",
+        schema={"brand": "string", "condition": "string"},
+    ))
+    assert out["ok"] is True
+    assert out["result"]["color"] == "white"
+
+
+def test_simple_llm_jobs_extract_fields_without_schema_skips_check(cfg, monkeypatch):
+    """No schema supplied → nothing to validate against (todo #1576)."""
+    monkeypatch.setattr(
+        "tgw.apis.llm.call_model",
+        lambda *a, **k: '{"anything": "goes"}',
+    )
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(operation="extract_fields", text="a description"))
+    assert out["ok"] is True
+    assert out["result"]["anything"] == "goes"
+
+
+def test_simple_llm_jobs_accepts_capitalized_arguments(cfg, monkeypatch):
+    calls = {}
+
+    def fake_call_model(task, system_prompt, user_prompt, cfg_arg):
+        calls.update(user_prompt=user_prompt)
+        return '{"summary": "x"}'
+
+    monkeypatch.setattr("tgw.apis.llm.call_model", fake_call_model)
+    tool = mcp_server.mcp._tool_manager._tools["tgw_simple_llm_jobs"]
+    out = json.loads(asyncio.run(tool.run({"Operation": "summarize", "Text": "hello"})))
+    assert out["ok"] is True
+    assert "hello" in calls["user_prompt"]

@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Annotated, Any, Dict
+from typing import Annotated, Any, Dict, List, Optional
 
 from mcp.server import FastMCP
 from pydantic import AliasChoices, Field
@@ -636,6 +636,196 @@ def tgw_get_plan_brief(pp: Annotated[str, alias_field('pp', 'PP')]) -> str:
     from tgw.plan_render import plan_brief
     cfg = _get_cfg()
     return json.dumps(plan_brief(cfg, pp), ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# tgw_simple_llm_jobs — generic DeepSeek V4-Flash cheap text-transform tool
+# (PP-SIMPLEJOBS-001, todo #1574). Backed by the existing tgw.apis.llm
+# facility (get_task_model()/call_model() — same 'simple_llm_jobs' task-key
+# pattern as pm_intake/suggestions_classify/pricing_comp_filter, all
+# deepseek_direct in tgw-models.json). Read-only/no side effects (pure text
+# transform, no ItemData/eBay/queue writes) — registered unconditionally,
+# same as tgw_search_full, not gated by TGW_MCP_READONLY.
+# ---------------------------------------------------------------------------
+
+_SIMPLE_LLM_JOBS_OPERATIONS = {
+    'summarize', 'compress_context', 'extract_fields', 'classify',
+    'rewrite', 'rank_snippets', 'log_summary',
+}
+
+
+def _simple_llm_jobs_system_prompt(
+    operation: str,
+    schema: Optional[Dict[str, Any]],
+    label_set: Optional[List[str]],
+) -> str:
+    """Per-operation system prompt — always demands a single JSON object,
+    with a worked example so DeepSeek's JSON mode has a concrete shape to
+    match (research doc's build_system_prompt sketch)."""
+    if operation == 'summarize':
+        return (
+            "You are a fast, low-cost summarization engine for Trader Grim's Warehouse.\n"
+            "Always respond with a single JSON object, no other text.\n"
+            'Example: {"summary": "short summary here", "key_points": ["point 1", "point 2"]}'
+        )
+    if operation == 'compress_context':
+        return (
+            "You compress long context into a compact representation that preserves "
+            "key facts, entities, and relationships.\n"
+            "Respond as a single JSON object, no other text.\n"
+            'Example: {"entities": [{"name": "...", "type": "..."}], '
+            '"facts": ["...", "..."], "summary": "..."}'
+        )
+    if operation == 'extract_fields':
+        schema_json = json.dumps(schema or {}, ensure_ascii=False)
+        return (
+            "You extract structured fields from unstructured text.\n"
+            "Respond with a single JSON object matching this schema/example, no other text:\n"
+            f"{schema_json}\n"
+            "Do not add extra fields. Do not include explanations."
+        )
+    if operation == 'classify':
+        labels_str = ', '.join(label_set or [])
+        return (
+            "You perform text classification into exactly one of the allowed labels.\n"
+            f"Allowed labels: {labels_str}\n"
+            "Respond as a single JSON object, no other text.\n"
+            'Example: {"label": "USED", "confidence": 0.92, "reason": "short rationale"}'
+        )
+    if operation == 'rewrite':
+        return (
+            "You rewrite text according to instructions.\n"
+            "Respond as a single JSON object, no other text.\n"
+            'Example: {"rewritten": "new text", "notes": "optional notes"}'
+        )
+    if operation == 'rank_snippets':
+        return (
+            "You rank candidate snippets by relevance to a query.\n"
+            "Respond as a single JSON object, no other text.\n"
+            'Example: {"ranked": [{"index": 0, "score": 0.93}, {"index": 2, "score": 0.71}]}'
+        )
+    if operation == 'log_summary':
+        return (
+            "You summarize logs into a compact diagnostic view.\n"
+            "Respond as a single JSON object, no other text.\n"
+            'Example: {"summary": "high-level description", "errors": ["error 1"], '
+            '"suggested_actions": ["action 1"]}'
+        )
+    raise ValueError(f'unknown operation: {operation!r}')  # pragma: no cover — validated by caller
+
+
+def _simple_llm_jobs_user_prompt(
+    operation: str,
+    text: str,
+    instructions: str,
+    items: Optional[List[str]],
+) -> str:
+    if operation == 'rank_snippets':
+        items_block = '\n'.join(f'{i}: {s}' for i, s in enumerate(items or []))
+        return (
+            f"Operation: rank_snippets\n"
+            f"Additional instructions: {instructions}\n\n"
+            "Query text:\n```text\n" + text + "\n```\n\n"
+            "Candidate snippets (indexed):\n```text\n" + items_block + "\n```"
+        )
+    return (
+        f"Operation: {operation}\n"
+        f"Additional instructions: {instructions}\n\n"
+        "Input text:\n```text\n" + text + "\n```"
+    )
+
+
+@mcp.tool()
+def tgw_simple_llm_jobs(
+    operation: Annotated[str, alias_field('operation')],
+    text: Annotated[str, alias_field('text')],
+    instructions: Annotated[str, alias_field('instructions')] = '',
+    schema: Annotated[Optional[Dict[str, Any]], alias_field('schema')] = None,
+    label_set: Annotated[Optional[List[str]], alias_field('label_set')] = None,
+    items: Annotated[Optional[List[str]], alias_field('items')] = None,
+    max_output_tokens: Annotated[Optional[int], alias_field('max_output_tokens')] = None,
+) -> str:
+    """Fast, low-cost DeepSeek V4-Flash text-transform tool: summarize,
+    compress_context, extract_fields, classify, rewrite, rank_snippets,
+    log_summary. Read-only — no ItemData/eBay/queue writes.
+
+    Args:
+        operation: One of summarize, compress_context, extract_fields,
+            classify, rewrite, rank_snippets, log_summary
+        text: Input text to transform (for rank_snippets, the query text)
+        instructions: Optional extra guidance for the operation
+        schema: Optional field spec (JSON object) for extract_fields
+        label_set: Optional allowed labels for classify
+        items: Optional candidate snippets for rank_snippets
+        max_output_tokens: Optional cap on model output length (currently
+            advisory only — not yet wired into DeepSeek's request payload;
+            see get_task_generation_config for the config-level equivalent)
+
+    Returns a JSON string: {ok, operation, result} on success (result is the
+    parsed JSON object the model returned), or {ok: False, error, raw} if
+    the model's response wasn't valid JSON.
+    """
+    if operation not in _SIMPLE_LLM_JOBS_OPERATIONS:
+        return json.dumps({
+            'ok': False,
+            'error': f'invalid operation {operation!r}; valid: {sorted(_SIMPLE_LLM_JOBS_OPERATIONS)}',
+        })
+
+    if operation == 'classify' and label_set is not None and len(label_set) == 0:
+        return json.dumps({
+            'ok': False,
+            'error': 'label_set is empty — no valid classification is possible',
+        })
+
+    cfg = _get_cfg()
+    from tgw.apis.llm import call_model
+    from tgw.apis.ollama import extract_json
+
+    system_prompt = _simple_llm_jobs_system_prompt(operation, schema, label_set)
+    user_prompt = _simple_llm_jobs_user_prompt(operation, text, instructions, items)
+
+    try:
+        raw = call_model('simple_llm_jobs', system_prompt, user_prompt, cfg)
+    except Exception as exc:
+        return json.dumps({'ok': False, 'error': str(exc)})
+
+    try:
+        result = extract_json(raw)
+    except Exception as exc:
+        return json.dumps({'ok': False, 'error': f'model response was not valid JSON: {exc}',
+                            'raw': raw})
+
+    # Output-contract validation (todo #1576, PP-SIMPLEJOBS-001 follow-up):
+    # a JSON-shaped response isn't automatically a response that honors what
+    # the caller actually asked for. Only the two operations with an
+    # explicit caller-supplied contract (label_set / schema) are checked;
+    # the rest have no equivalent contract to validate against.
+    #
+    # label_set uses explicit None/length checks, not truthiness (todo
+    # #1577, Tigwa peer review of #1576): label_set is None means
+    # open-ended classification (no check); label_set == [] is rejected
+    # fail-loud above, before the model call; non-empty label_set is
+    # validated here. `if label_set:` would have silently treated an
+    # explicit empty list the same as "not supplied".
+    if operation == 'classify' and label_set is not None and len(label_set) > 0:
+        label = result.get('label') if isinstance(result, dict) else None
+        if label not in label_set:
+            return json.dumps({
+                'ok': False,
+                'error': f'model returned label {label!r} not in label_set',
+                'raw': result,
+            }, default=str)
+
+    if operation == 'extract_fields' and schema:
+        missing = [k for k in schema if not isinstance(result, dict) or k not in result]
+        if missing:
+            return json.dumps({
+                'ok': False,
+                'error': f'model response missing requested field(s): {sorted(missing)}',
+                'raw': result,
+            }, default=str)
+
+    return json.dumps({'ok': True, 'operation': operation, 'result': result}, default=str)
 
 
 # ---------------------------------------------------------------------------
