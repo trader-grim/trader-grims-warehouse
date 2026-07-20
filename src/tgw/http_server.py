@@ -4159,6 +4159,192 @@ def todos_form(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# GET /form/runs — agent run trace dashboard (PP-AGENTTRACE-001 Phase 3, #1582)
+# ---------------------------------------------------------------------------
+
+_RUNS_EXTRA_CSS = """
+table.runs{width:100%;border-collapse:collapse;margin-top:10px}
+table.runs th,table.runs td{text-align:left;padding:8px 6px;border-bottom:1px solid #333;font-size:.85em;vertical-align:top}
+table.runs th{color:#aaa;font-size:.72em;text-transform:uppercase;letter-spacing:.04em}
+td.run-id{color:#4a8ade;font-family:monospace;font-size:.85em;white-space:nowrap}
+td.transcript{color:#666;font-size:.78em;word-break:break-all;max-width:260px}
+.st-badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:.78em}
+.st-completed{background:#1a3a1a;color:#7f7;border:1px solid #2a5a2a}
+.st-failed,.st-killed{background:#2a1a1a;color:#f77;border:1px solid #5a2a2a}
+.st-running,.st-escalated{background:#3a2a0a;color:#fb7;border:1px solid #6a4a1a}
+.runs-ctrl{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+.runs-ctrl label{font-size:.85em;color:#aaa;margin:0}
+.runs-ctrl select{width:auto;padding:6px 10px;font-size:.85em}
+.runs-ctrl input[type=search]{padding:6px 10px;font-size:.85em;min-width:220px}
+.runs-total{font-size:.82em;color:#999;margin-bottom:6px}
+"""
+
+_RUNS_JS = """
+<script>
+(function() {
+  var agentSel = document.getElementById('runs-agent-sel');
+  var statusSel = document.getElementById('runs-status-sel');
+  var search = document.getElementById('runs-search');
+
+  function applyFilters() {
+    var agent = agentSel ? agentSel.value : '';
+    var st = statusSel ? statusSel.value : '';
+    var q = search ? search.value.trim().toLowerCase() : '';
+    document.querySelectorAll('tr[data-run-id]').forEach(function(row) {
+      var okAgent = (agent === '' || row.dataset.agent === agent);
+      var okStatus = (st === '' || row.dataset.status === st);
+      var okSearch = (q === '' || (row.dataset.search || '').indexOf(q) !== -1);
+      row.style.display = (okAgent && okStatus && okSearch) ? '' : 'none';
+    });
+  }
+
+  if (agentSel) agentSel.addEventListener('change', applyFilters);
+  if (statusSel) statusSel.addEventListener('change', applyFilters);
+  if (search) search.addEventListener('input', applyFilters);
+})();
+</script>
+"""
+
+
+def _runs_status_class(status: str) -> str:
+    status = (status or "").lower()
+    if status in ("completed",):
+        return "st-completed"
+    if status in ("failed", "killed"):
+        return "st-failed"
+    if status in ("running", "escalated"):
+        return "st-running"
+    return ""
+
+
+def _render_runs_html(rows) -> str:
+    """Build the agent-runs dashboard HTML (PP-AGENTTRACE-001 Phase 3).
+
+    Matches _render_todos_html()'s structure: _STATIC_HEAD/_STATIC_FOOT shared
+    dark theme, client-side filtering, escaped cells. Reuses
+    agent_trace_render's pure helpers (_short_run_id/_duration_cell) for
+    display-format parity with the Obsidian render (Phase 2)."""
+    import html as _html
+    from datetime import datetime, timezone
+
+    from tgw.agent_trace_render import _duration_cell, _short_run_id
+
+    head = (
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        "<title>TGW Agent Runs</title>" + _STATIC_HEAD + "<style>" + _RUNS_EXTRA_CSS + "</style>"
+        "</head><body>"
+        "<h2>Agent Runs</h2>"
+    )
+    if not rows:
+        return (
+            head
+            + '<div class="allclear">✓ No agent runs recorded yet.</div>'
+            + _STATIC_FOOT
+            + "</body></html>"
+        )
+
+    agent_types = sorted({str(r.get("agent_type", "")) for r in rows if r.get("agent_type")})
+    statuses = sorted({str(r.get("status", "")) for r in rows if r.get("status")})
+
+    agent_opts = '<option value="">All agent types</option>' + "".join(
+        f'<option value="{_html.escape(a)}">{_html.escape(a)}</option>' for a in agent_types
+    )
+    status_opts = '<option value="">All statuses</option>' + "".join(
+        f'<option value="{_html.escape(s)}">{_html.escape(s)}</option>' for s in statuses
+    )
+
+    now = datetime.now(tz=timezone.utc)
+
+    parts = [
+        head,
+        '<div class="runs-ctrl">'
+        f'<label for="runs-agent-sel">Agent:</label><select id="runs-agent-sel">{agent_opts}</select>'
+        f'<label for="runs-status-sel">Status:</label><select id="runs-status-sel">{status_opts}</select>'
+        '<label for="runs-search">Search:</label>'
+        '<input type="search" id="runs-search" placeholder="pp_ref / todo_id / summary">'
+        "</div>",
+        f'<div class="runs-total">{len(rows)} run(s)</div>',
+        '<table class="runs"><tr>'
+        "<th>Run ID</th><th>Agent Type</th><th>PP/Todo</th><th>Host</th>"
+        "<th>Status</th><th>Started</th><th>Duration</th><th>Summary</th><th>Transcript</th>"
+        "</tr>",
+    ]
+
+    for row in rows:
+        run_id = str(row.get("run_id", ""))
+        agent_type = str(row.get("agent_type", ""))
+        status = str(row.get("status", ""))
+        pp_ref = row.get("pp_ref") or ""
+        todo_id = row.get("todo_id")
+        host = str(row.get("host", "") or "")
+        summary = str(row.get("summary", "") or "")
+        transcript_path = str(row.get("transcript_path", "") or "")
+        started = row.get("started_at")
+        started_str = started.strftime("%Y-%m-%d %H:%M UTC") if started else ""
+
+        ref_bits = []
+        if pp_ref:
+            ref_bits.append(
+                f'<a class="pp-badge" href="/docs/plan/TGW-Master-Plan.md" title="{_html.escape(pp_ref)}">{_html.escape(pp_ref)}</a>'
+            )
+        if todo_id is not None:
+            ref_bits.append(f"#{_html.escape(str(todo_id))}")
+        ref_cell = " ".join(ref_bits)
+
+        search_blob = " ".join(
+            str(x) for x in (pp_ref, todo_id if todo_id is not None else "", summary)
+        ).lower()
+
+        status_cls = _runs_status_class(status)
+
+        parts.append(
+            f'<tr data-run-id="{_html.escape(run_id)}" data-agent="{_html.escape(agent_type)}" '
+            f'data-status="{_html.escape(status)}" data-search="{_html.escape(search_blob)}">'
+            f'<td class="run-id" title="{_html.escape(run_id)}">{_html.escape(_short_run_id(run_id))}</td>'
+            f"<td>{_html.escape(agent_type)}</td>"
+            f"<td>{ref_cell}</td>"
+            f"<td>{_html.escape(host)}</td>"
+            f'<td><span class="st-badge {status_cls}">{_html.escape(status)}</span></td>'
+            f"<td>{_html.escape(started_str)}</td>"
+            f"<td>{_html.escape(_duration_cell(row, now))}</td>"
+            f"<td>{_html.escape(summary)}</td>"
+            f'<td class="transcript">{_html.escape(transcript_path)}</td>'
+            "</tr>"
+        )
+
+    parts.append("</table>")
+    parts.append(_STATIC_FOOT)
+    parts.append(_RUNS_JS)
+    parts.append("</body></html>")
+    return "".join(parts)
+
+
+@app.get("/form/runs")
+def runs_form(request: Request):
+    """Agent run trace dashboard — no Bearer auth (network trust via
+    _session_guard middleware), like /form/todos. Read-only view of the
+    agent_runs table (PP-AGENTTRACE-001 Phase 1/2)."""
+    from fastapi.responses import HTMLResponse
+
+    from tgw.queue import state_machine
+
+    try:
+        rows = state_machine.list_agent_runs()
+    except Exception as exc:  # DB down -> still render a page, don't 500
+        body = (
+            '<!DOCTYPE html><html><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            "<title>TGW Agent Runs</title>" + _STATIC_HEAD + "<style>" + _RUNS_EXTRA_CSS + "</style>"
+            "</head><body>"
+            "<h2>Agent Runs</h2>"
+            f'<div class="msg err" style="display:block">agent_runs tracker unavailable: {exc}</div>' + _STATIC_FOOT + "</body></html>"
+        )
+        return HTMLResponse(body, status_code=200)
+    return HTMLResponse(_render_runs_html(rows))
+
+
+# ---------------------------------------------------------------------------
 # GET /form/search — full-text (recoll) search bar (PP-KNOWLEDGE-001 R2, #1147)
 # ---------------------------------------------------------------------------
 
