@@ -1683,9 +1683,16 @@ Tigwa also named a future (not-blocking) idea: `rank_snippets` has a checkable i
 domain (returned indexes within `0..len(items)-1`, non-duplicated) that could get its
 own bounded contract later — explicitly separate follow-on, not part of this work.
 
-**Branch `todo/1574-simple-llm-jobs-mcp-tool` is now fully reviewed and ready to
-stitch** — the only remaining blocker for the whole PP is the `tgw-models.json` config
-line noted above (needs Dave or someone with edit authority on that live file).
+**DONE, 2026-07-20 — merged and live.** `tgw-models.json` config entry applied and
+verified live (real `tgw_simple_llm_jobs` call via the merged worktree code, real
+DeepSeek response, before merging). Merged `todo/1574-simple-llm-jobs-mcp-tool` into
+`catio-nix-0.0.1-alpha` (merge commit `862764f`; one trivial add/add conflict on the
+now-stale INPROGRESS breadcrumb, resolved by removing it — its job was done). Full
+suite re-confirmed post-merge: 2651 passed/1 skipped. `tgw health`: clean except
+pre-existing `backups`/`ebay_sync_fallback` (unrelated to this work). Worktree and
+branch removed — everything's in `catio-nix-0.0.1-alpha` now. Todos #1574/#1576/#1577
+all closed. PP-SIMPLEJOBS-001 is complete; `tgw_simple_llm_jobs` is live for the next
+MCP session.
 
 ## PP-FIELDCOMPLETE-001 — category-group attribute completeness, "better than any other eBayer"
 **Opened 2026-07-16.** Dave: fill every category-group field during `ai_identify` so
