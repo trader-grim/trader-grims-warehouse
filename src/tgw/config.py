@@ -195,8 +195,6 @@ def load_config(path: Path) -> Dict[str, Any]:
         "ebay_credentials_path": ebay_credentials_path,
         "ebay_draft_csv_path": ebay_draft_csv_path,
         "api_key": _api_key,
-        "alt_text_provider": raw.get("alt_text_provider", "openrouter"),
-        "alt_text_model": raw.get("alt_text_model", "google/gemini-2.5-flash"),
         "postgres_dsn": postgres_dsn,
         "itemdata_root": itemdata_root,
         "catalog_root": catalog_root,
