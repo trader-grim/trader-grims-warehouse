@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -993,6 +994,24 @@ def _ensure_agent_runs_table() -> None:
     _agent_runs_table_ready = True
 
 
+def _enqueue_agent_run_render() -> None:
+    """Coalesced Obsidian re-render on any agent_runs mutation (PP-AGENTTRACE-001
+    Phase 2). Same pattern as todo.py's _enqueue_plan_render(): dedupe_key +
+    30s not_before so rapid successive start/end calls collapse into one
+    render. Never lets a queue problem break the actual trace-recording
+    operation (start_agent_run/end_agent_run)."""
+    try:
+        enqueue_job(
+            queue_name='agent_run_render',
+            payload={'reason': 'agent_run_mutation'},
+            dedupe_key='agent_run_render:pending',
+            not_before=time.time() + 30,
+            max_attempts=3,
+        )
+    except Exception:
+        pass
+
+
 def start_agent_run(
     agent_type: str,
     *,
@@ -1023,6 +1042,7 @@ def start_agent_run(
                 """,
                 (run_id, parent_run_id, agent_type, todo_id, pp_ref, host, git_branch),
             )
+    _enqueue_agent_run_render()
     return run_id
 
 
@@ -1058,6 +1078,7 @@ def end_agent_run(
             )
             if cur.rowcount == 0:
                 raise ValueError(f"end_agent_run: no agent_runs row found for run_id={run_id!r}")
+    _enqueue_agent_run_render()
 
 
 def get_agent_run(run_id: str) -> Optional[Dict[str, Any]]:
@@ -1073,3 +1094,23 @@ def get_agent_run(run_id: str) -> Optional[Dict[str, Any]]:
             cur.execute("SELECT * FROM agent_runs WHERE run_id = %s", (run_id,))
             row = cur.fetchone()
             return dict(row) if row else None
+
+
+def list_agent_runs(limit: int = 200) -> List[Dict[str, Any]]:
+    """List agent_runs rows, most-recently-started first, capped at `limit`.
+
+    This is a "recent activity" view for the Obsidian render (PP-AGENTTRACE-001
+    Phase 2), NOT a full historical dump — `limit` defaults to 200 and callers
+    should not assume this returns every run ever recorded. If the true row
+    count exceeds `limit`, older rows are silently excluded from the returned
+    list (by design, not a bug) — a future need for full history should use a
+    dedicated paginated/date-ranged query, not a larger limit on this one.
+    """
+    _ensure_agent_runs_table()
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM agent_runs ORDER BY started_at DESC LIMIT %s",
+                (limit,),
+            )
+            return [dict(row) for row in cur.fetchall()]
