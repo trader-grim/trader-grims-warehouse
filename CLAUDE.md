@@ -292,6 +292,16 @@ Plain Markdown; open in Obsidian for interactive mind map view where noted.
   to change models?" — `tgw.apis.llm.get_task_model()` has no hardcoded
   per-task fallback and raises if a task isn't configured there. Changing a
   task's provider/model is always a config edit.
+  **Extended 2026-07-20 (Dave, invariant E15, ⚠️ open):** no model ID may
+  appear as a literal anywhere in `src/` outside `tgw-models.json` — not
+  even a dead/unused default or CLI help text ("everything could change
+  tomorrow"). `tgw-models.json` gets a `defaults` block (named default
+  profiles, e.g. `default` / `default_deepseek_nonthinking`); most tasks
+  point at a default via `{"use_default": "<name>"}` instead of repeating
+  `{"provider", "model"}`, so changing the model most tasks use is one
+  config edit, not N. See `reference/invariants.md` E15 for the full design
+  and the still-hardcoded fallback-provider-chain gap it explicitly does
+  NOT fix yet.
 - **Catalog rebuild is always a job** — never call `build_all_catalogs()` inline
 - **SKU format** — `tgwYYYYMMDDHHMMSSmmm`
 - **A worker's skip/guard is a finding, not a log line (invariant C11)** — when

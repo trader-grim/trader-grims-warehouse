@@ -1462,6 +1462,27 @@ since been promoted into eBay's business-division decision leadership. No
 action available on TGW's side — external, waiting on eBay.
 
 Snapshot baseline completed (19,486 SKUs) — unblocks #1131 Motors census; drift detection baseline set.
+
+**Standing Growth Check strategy (Dave, 2026-07-20):** "when we note an api
+lapse because of legitimate requests we soon after initiate a request for a
+rate increase... we will Application Growth Check them to death. This is
+how they improve their system? We will follow to the letter." Going
+forward: whenever a real, legitimate workload hits a rate ceiling (an
+actual queue backing up against a documented limit — not a self-imposed
+throttle, not manufactured volume), that lapse itself becomes the evidence
+for a fresh Growth Check / rate-increase request through eBay Developer
+Support, filed promptly rather than left to accumulate. Follow eBay's
+stated Growth Check process exactly as published (app must be live with
+real usage, `MARKETPLACE_ACCOUNT_DELETION` subscription required first,
+forecasted daily volume, app URL, EPN publisher ID if applicable) — no
+invented volume, no gaming the review. Dave is having Tigwa obtain a copy
+of the actual Growth Check request form so future requests are prepared
+in advance rather than drafted from scratch each time. See
+`EXTERNAL-SUPPORT-TICKET-REGISTER.md` for the live ticket log (`EBAY-DS-*`
+rows) and the still-open `MARKETPLACE_ACCOUNT_DELETION` webhook gap (spec
+exists at `reference/ISS-005-REST-Signature-Verification.md`, never
+implemented — blocks any Growth Check submission until built).
+
 ## PP-RECOVERY-001 — web UI regression audit
 **CLOSED 2026-07-16 — confirmed obsolete, already resolved via later work.**
 Dave asked to check whether this had already been triaged over rather than
@@ -1890,6 +1911,47 @@ flip, which would also wipe the plan-vault folder's GUI-managed state (not what
 was asked). Device pairing, exact live folder list, and a1131 disk headroom are
 flagged as nix-flake-maintainer's live-verification steps before writing the
 actual diff, not assumed by this spec.
+
+## PP-EVIDENCE-001 — research-intake operator acceptance gate — proposal stage, 2026-07-20
+
+**Not yet a built system — retained design clarifications only, no implementation
+authorized.** Dave (via Tigwa) named a research-intake lifecycle that applies to
+*all* research submissions (guided Perplexity sessions, MCP/API output, manual
+capture, agent-authored inventories/syntheses, future providers), not just guided
+Perplexity: `guided-session-active → capture-staged → operator-accepted →
+reviewed-synthesis → implementation-authorized`. Everything lands as staged
+external evidence first; only Dave's explicit acceptance selects a named
+destination/role. Syncthing is transport/recovery substrate only — arrival,
+sync, or checksum match never promotes a capture; the acceptance gate lives at
+the authoritative library. A companion principle note frames this as one leg of
+a standing, non-terminal verification/fortification loop (learn what's
+verifiable → record the boundary → fortify the highest-value weakness → verify
+→ repeat), explicitly warning against mistaking a hash alone, a synced copy, or
+a one-time pass for durable assurance.
+
+Retained research: `dev-workflow/research/RESEARCH-perplexity-guided-and-
+governed-research-integration-2026-07-20.md`,
+`RESEARCH-perplexity-guided-research-operator-acceptance-gate-2026-07-20.md`,
+`RESEARCH-all-research-submissions-operator-acceptance-gate-2026-07-20.md`,
+`RESEARCH-research-intake-syncthing-transport-library-gate-2026-07-20.md`,
+`RESEARCH-evidence-fortification-continuous-verification-principle-2026-07-20.md`.
+
+**Claude's independent review sent 2026-07-20** (todo #1594, full text in
+`inbox/tigwa/CLAUDE-REVIEW-research-acceptance-gate-review-2026-07-20.md`): no
+unsafe transition found that lets staged material silently become canonical as
+designed. Additions flagged, not corrections: an explicit `declined` state
+distinct from not-yet-reviewed; version/supersede accepted artifacts instead of
+editing in place (same append-only shape as invariant E14); a closed
+`artifact_kind` enum; link agent-authored submissions to their
+`agent_runs.run_id` (PP-AGENTTRACE-001) rather than a second identity notion;
+enforce the accept-boundary mechanically (a canonical row require a non-null
+`accepted_by`/`accepted_at`, not just documented discipline — same fix shape as
+`trace-immutability-guard.py`); reuse PP-AGENTTRACE-001's #1586 Leg A
+hash-commitment shape here instead of a second bespoke one, once that lands.
+
+**Still open:** Tigwa's Stage 0 audit (read-only asset/trust register) is in
+progress on her side — todo #1589 tracks waiting on her proposal. This section
+stays proposal-only until that lands and Dave authorizes a concrete design.
 
 ## Session protocol
 

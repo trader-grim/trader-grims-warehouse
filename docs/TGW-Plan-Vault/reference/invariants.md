@@ -408,6 +408,89 @@ Companion test files added by this review:
 
 ---
 
+## E15 — Model IDs are never hardcoded, anywhere — config is the only source, including fallback chains and shared defaults ⚠️ (2026-07-20, Dave — OPEN, no detector yet)
+
+**Statement:** no provider/model string may appear as a literal in `src/`
+outside `tgw-models.json` itself — not as a working default, not as a dead
+fallback nobody reads, not in CLI help text, not in a code comment claiming
+"the current model is X." `get_task_model()` (E8/2026-07-09's rule) already
+established config as the only source for a task's *primary* provider/model;
+this extends the same rule to (a) code that never actually executes but
+still names a model, and (b) the *shape* of fallback/default resolution
+itself.
+
+**Why (Dave, 2026-07-20):** triggered by finding two dead, stale
+hardcoded strings (`config.py`'s unused `alt_text_model`/`alt_text_provider`
+keys defaulting to `"google/gemini-2.5-flash"`; `api.py`'s `tgw alt-text`
+CLI help text repeating the same string) — both inert, but exactly the kind
+of drift the 2026-07-09 rule was written to prevent, and both named a model
+generation (`gemini-2.5-flash`, no `-lite`) that is being deprecated
+upstream. Dave: "models cannot be hardcoded... primary and even multiple
+fallback paths, but they need to be configurable. This is clearly not a
+static part of the design. Everything could change tomorrow."
+
+**Sharper motivation, same session:** not primarily about cost or outage
+resilience (see the fallback-chain non-urgency note below) — "not
+unknowingly draining our reserve too. I monitor it for usage for this
+reason more than for the cost. Nip it in the bud so it doesn't stick you
+later when we are going full throttle." OpenRouter is the current fail-soft
+reserve behind all three direct providers (E8, 2026-07-08 supersession). A
+stale hardcoded `provider: openrouter` default — even inert today — is
+exactly the kind of thing that silently starts executing once usage
+patterns shift (e.g. a code path that currently never hits its fallback
+branch starts hitting it under the higher-throughput load this whole
+eBay-API-unblock effort is aiming for), draining the reserve without
+tripping any obvious alarm since Dave's monitoring is watching for exactly
+this pattern already. Fix stale/dead model references while they're cheap
+to fix, before real throughput exercises code paths that were never
+verified live.
+
+**Design (Dave, same session): a `defaults` block in `tgw-models.json`.**
+Most tasks don't need a bespoke provider/model — they should point at a
+named default profile so changing "the" model for most tasks is a one-place
+config edit, not N task-entry edits:
+
+```json
+{
+  "defaults": {
+    "default":                      {"provider": "google_direct",   "model": "gemini-2.5-flash-lite"},
+    "default_deepseek_nonthinking": {"provider": "deepseek_direct",  "model": "deepseek-v4-flash"}
+  },
+  "ai_identify":   {"use_default": "default"},
+  "alt_text":      {"use_default": "default"},
+  "bulk_classify": {"use_default": "default"},
+  "ebay_draft":    {"provider": "google_direct", "model": "gemini-3.1-pro-preview"},
+  "pm_intake":     {"use_default": "default_deepseek_nonthinking"}
+}
+```
+
+A task entry is either a full explicit `{"provider", "model"}` override
+(e.g. `ebay_draft`, which deliberately runs a bigger model) or a
+`{"use_default": "<name>"}` pointer — not both, no partial-merge — keeping
+`get_task_model()` a two-branch lookup instead of a config-merging engine.
+
+**Fallback chains stay config-shaped too:** `call_model()`'s existing
+direct→OpenRouter fail-soft pattern (E8) already derives the OpenRouter
+fallback model from the *same* `model` string via prefix transformation
+(`f'google/{model}'` etc.) rather than a second hardcoded string — so a
+config-only model change already propagates through the fallback
+automatically. What's still hardcoded is *which provider is whose
+fallback* (fixed elif-branches in `call_model()`). Not being changed in
+this pass — flagged as a possible future gap, **not urgent** (Dave,
+2026-07-20, same session: "technically we are small enough to handle some
+outages. We have worse issues with cellular interference than real api
+timeouts. We will just monitor and retry.") — provider-outage resilience
+isn't TGW's actual failure mode at this scale; don't chase configurable
+fallback *chains* as unprompted future work. The E15 fix in this pass
+(no hardcoded model IDs, `defaults`/`use_default`) stands on its own merit
+independent of this — it's about config-vs-code hygiene and deprecation
+risk, not outage resilience.
+
+**Detector:** none yet — recommend a `tests/test_no_hardcoded_models.py`
+that greps `src/tgw/**/*.py` for known current/deprecated model-id
+substrings (`gemini-2.5-flash"`, i.e. without `-lite`, `gemini-1.5-`, etc.)
+outside `tgw-models.json`-reading code paths, failing the build on a match.
+
 ## Resolution log
 
 **2026-06-10** — all gaps from the initial review fixed (operator decision: C4 resolved

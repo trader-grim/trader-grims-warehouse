@@ -4,7 +4,7 @@
 > `tgw plan render` / the `plan_render` worker (PP-PLANDB-001 Phase 2).
 > Edit tasks with `tgw todo …` — manual edits here are overwritten.
 
-_Rendered 2026-07-20 17:43 UTC — 157 open, 203 done in the last 7 days._
+_Rendered 2026-07-20 20:22 UTC — 157 open, 192 done in the last 7 days._
 
 ## admin (17 open)
 
@@ -193,10 +193,17 @@ _Rendered 2026-07-20 17:43 UTC — 157 open, 203 done in the last 7 days._
 | 1536 | 50 |  | Use existing git history/commit data (TGW-Master-Plan.md commit log + the new archive-in-place convention) to produce a real changelog for the plan | [[TGW-Master-Plan#PP-PLANDB-001 — plan/tracker tooling\|PP-PLANDB-001]] |  |
 | 15 | 60 |  | Second keyboard wired up as macroboard (see etc/interfaces/keyd/tgw-macroboard.conf) | [[TGW-Master-Plan#PP-MACRO-001 — macroboard hardware (#15)\|PP-MACRO-001]] |  |
 
-## Done this week (203)  — showing 15 most recent
+## Done this week (192)  — showing 15 most recent
 
 | ID | Agent | Done | Task |
 |---:|-------|------|------|
+| 1600 | claude | 2026-07-20 | Independent review: TGW monetization/funding hypotheses (camera app, clipboard-event-server/Cryptboard, Catio productization, career-consulting path, nonprofit/funding candidates) — Tigwa/Dave request 2026-07-20 |
+| 1599 | claude | 2026-07-20 | tgw alt-text --provider CLI arg only allows choices=[openrouter, ollama], missing google_direct/deepseek_direct/anthropic_direct — can't override to a direct provider from CLI (found during PP-MULTIMODEL-001/#1597 E15 pass, out of scope for that packet) |
+| 1598 | claude | 2026-07-20 | Full sweep for hardcoded model/provider values incl. fallback defaults: alt_text.py _BATCH_DEFAULT_MODEL, ai_identify.py _OLLAMA_FALLBACK_MODEL, api.py --provider choices missing google_direct, google_genai.py default param, quota.py pricing-table staleness risk. Migrate to config per invariant E15. Sequence after #1597 (touches api.py too). |
+| 1597 | claude | 2026-07-20 | Add 'defaults' block to tgw-models.json (named default provider/model profiles, tasks use {use_default: name}); update get_task_model() to resolve it; delete the two dead hardcoded model strings (config.py alt_text_model/alt_text_provider, api.py CLI help text) — invariant E15, Dave 2026-07-20: no hardcoded model IDs anywhere |
+| 1596 | claude | 2026-07-20 | Planning session: full eBay API unblock epic (MARKETPLACE_ACCOUNT_DELETION webhook, Growth Check strategy, EBAY-DS-1077/25707 escalation, ebay_legacy_sync #1248 root-cause, EPS/keyset requests) — Dave 2026-07-20: 'the brakes are off' |
+| 1595 | claude | 2026-07-20 | Restore ebay_sync systemd unit in tgw-flake (dropped from declarative config) + nixos-rebuild switch — Dave: eBay Growth Check requires live production usage, move ebay_sync back into production |
+| 1594 | claude | 2026-07-20 | Independent review: guided research operator acceptance gate + all-submissions gate + Syncthing transport-vs-authority + evidence-fortification principle (Tigwa/Dave request, 2026-07-20) |
 | 1587 | claude | 2026-07-20 | PP-AGENTTRACE-001 invariant E14: agent-trace evidence write-once/append-only for every agent, no exemptions (Dave, 2026-07-20). Mechanically enforced for Claude Code agents via .claude/hooks/trace-immutability-guard.py (hard deny, PreToolUse Bash\|Edit\|Write, no exempt agent) + CLAUDE.md + invariants.md E14 + tgw-coder.md/nix-flake-maintainer.md contract updates. Interim mechanism -- folds into PP-CATIONIX-001 crypto-lock when built. Tigwa notified to bake equivalent into her own contract since her process isn't covered by this repo's Claude Code hooks. |
 | 1579 | claude | 2026-07-20 | tgw-prod + a1131: register Kate as MIME default for text/markdown, application/json, text/x-yaml, text/x-log, text/x-python (currently zero registered handlers on both hosts). Dave, 2026-07-20: 'yes apply on both boxes.' Diff proposed via nix-flake-maintainer investigation, needs commit+switch. |
 | 1590 | claude | 2026-07-20 | SUPERSEDED 2026-07-20: Dave decided to split into 3 separate tickets instead (play-ball approach) -- see #1591/#1592/#1593. Draft kept for record, not sent. |
@@ -205,11 +212,4 @@ _Rendered 2026-07-20 17:43 UTC — 157 open, 203 done in the last 7 days._
 | 1591 | claude | 2026-07-20 | Draft eBay ticket: standalone new Application Growth Check for EPS (UploadSiteHostedPictures) rate-limit increase only -- clean/fresh ask, no reference to prior case closure. Dave: 'play ball, give them all the tickets they want, ask both separately.' |
 | 1582 | claude | 2026-07-20 | PP-AGENTTRACE-001 Phase 3: /form/runs HTTP UI page on tgw-http — session-cookie auth via existing _session_guard middleware (not /api/ Bearer style), match /form/todos's query->render->200-even-on-DB-error shape, reuse shared _STATIC_HEAD/_STATIC_FOOT dark theme, filterable by agent_type/status/date/pp_ref, links to raw transcript. Depends on Phase 1's agent_runs table. |
 | 1581 | claude | 2026-07-20 | PP-AGENTTRACE-001 Phase 2: Obsidian view — TGW-Agent-Runs.md auto-rendered via the plan_render pattern (pure build_agent_runs_doc() + impure render_agent_runs() atomic-write), agent_run_render queue-triggered worker (coalesced via dedupe_key/not_before, same as plan_render/catalog_rebuild). Depends on Phase 1's agent_runs table. |
-| 1588 | claude | 2026-07-20 | Respond to Tigwa's archive/library integrity-fence sinkhole review request (inbox/claude/TIGWA-REQUEST-archive-library-integrity-fence-review-2026-07-20.md): cross-cutting evidence/recovery contract spanning ItemData, Plan Vault, backups, traces, research artifacts. Design review only, no implementation. |
-| 1585 | claude | 2026-07-20 | Respond to Tigwa's agent-trace authenticity review request (inbox/claude/CLAUDE-REQUEST-agent-trace-authenticity-review-2026-07-20.md): gap analysis of Phase 1's self-attestation vulnerabilities, minimum viable integrity contract proposal, before Phase 4 (hooks) proceeds. |
-| 1580 | claude | 2026-07-20 | PP-AGENTTRACE-001 Phase 1 (foundation): agent_runs Postgres table (self-apply DDL in state_machine.py per _ensure_ai_usage_table() pattern, schema.sql copy for bootstrap docs) + 'tgw trace start'/'tgw trace end' CLI (run_id, parent_run_id, agent_type, todo_id/pp_ref, host, git_branch, started_at/ended_at, status, summary, transcript_path) + tgw_logging integration (keep log_event() emission for grep parity). Raw transcript archival to /opt/TGW/var/agent-traces/{date}/{run_id}.jsonl, tgw-owned, atomic-write/archive-before-overwrite (E5). Unit tests required. Everything else in PP-AGENTTRACE-001 depends on this landing first. |
-| 1584 | claude | 2026-07-20 | Consolidate flake-change approval prompts from 5+ down to ~1-2 per host: autoMode.allow entries in .claude/settings.json for already-documented read-only nix-flake-maintainer steps (git status/diff/log/fetch, nix flake check, dry-activate, list-generations, read-only SSH diagnostics), plus nix-flake-maintainer.md instruction to batch the genuinely mutating steps (commit+push, dry-activate+switch+verify) into compound &&-chained Bash calls per host instead of one call per sub-step. Dave, 2026-07-20. |
-| 1562 | claude | 2026-07-20 | PP-CONDITION-ENUM-001: generic field-error flagging (red-border fn) + save-error contract identifying errant key; fixes silent invalid condition_enum write that broke staging on tgw202605051124483 |
-| 1578 | claude | 2026-07-20 | DUPLICATE of #1534 (same flake.lock/ACL root cause, confirmed live there already). Closing — see #1534 for the tracked fix. |
-| 1575 | claude | 2026-07-20 | Dave confirmed directly in-session 2026-07-20: 'yes, commit and switch the flake' / 'yes do 1575 also.' E13 satisfied — dispatching to nix-flake-maintainer. |
-| … | | | _…and 188 more — run `tgw todo --all` to see everything_ |
+| … | | | _…and 177 more — run `tgw todo --all` to see everything_ |
