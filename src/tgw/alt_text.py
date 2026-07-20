@@ -526,8 +526,6 @@ def cmd_alt_text_batch(
 # ---------------------------------------------------------------------------
 # Gemini Batch API path (tgw alt-text --batch --api-mode batch)
 # ---------------------------------------------------------------------------
-
-_BATCH_DEFAULT_MODEL = "gemini-2.5-flash-lite"
 _BATCH_POLL_INTERVAL_S = 60
 _BATCH_TIMEOUT_S = 3600 * 4
 
@@ -695,7 +693,25 @@ def cmd_alt_text_gemini_batch(
     """
     from tgw.image_hash import compute_dhash, lookup_hash
 
-    effective_model = model or _BATCH_DEFAULT_MODEL
+    if model is not None:
+        effective_model = model
+    else:
+        # Invariant E15 (2026-07-20): the model comes from tgw-models.json,
+        # never a module-level constant. Gemini's Batch API is Google's own
+        # async endpoint (not something OpenRouter/Ollama offer), so this
+        # mode only works when the configured 'alt_text' task resolves to
+        # google_direct — raise a clear error rather than silently using a
+        # model id shaped for the wrong provider.
+        resolved_provider, resolved_model = get_task_model(cfg, "alt_text")
+        if resolved_provider != "google_direct":
+            raise ValueError(
+                f"tgw alt-text --batch --api-mode batch requires the 'alt_text' "
+                f"task in tgw-models.json to resolve to provider 'google_direct' "
+                f"(Gemini Batch API is Google-only); it currently resolves to "
+                f"{resolved_provider!r} (model {resolved_model!r}). Pass "
+                f"--model explicitly to override, or update tgw-models.json."
+            )
+        effective_model = resolved_model
     state_path = _batch_state_path(cfg)
     itemdata_root = Path(cfg["itemdata_root"])
 

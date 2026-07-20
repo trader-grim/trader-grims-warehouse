@@ -1,9 +1,13 @@
 """
 tgw.workers.ai_identify — Vision-model item identification worker.
 
-Provider and model are configured in tgw-models.json under the "ai_identify" key.
-Defaults: openrouter / google/gemini-2.5-flash-lite (fast, cheap).
-Ollama fallback: qwen2.5vl:7b (CPU-only, slow).
+Provider and model are configured ONLY in tgw-models.json under the
+"ai_identify" key (invariant E15, 2026-07-20) — see that file's own
+'_comment' and 'defaults' block for the current live provider/model,
+including the Ollama fallback if one is configured there. Do not add a
+hardcoded model id here, even as an inert "fallback" constant — this
+module previously carried a dead `_OLLAMA_FALLBACK_MODEL` constant that
+was never actually read by any code path (removed 2026-07-20).
 
 Results are written only if the item still has an empty ai_identified flag — safe
 to re-run; will not overwrite unless ai_reidentify is set.
@@ -36,7 +40,6 @@ from tgw.queue.worker_base import HardFailure, QueueWorker
 log = logging.getLogger(__name__)
 
 QUEUE_NAME = "ai_identify"
-_OLLAMA_FALLBACK_MODEL = "qwen2.5vl:7b"
 
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"}
 _VISION_MAX_PX = 512  # Ollama CPU path — keep small

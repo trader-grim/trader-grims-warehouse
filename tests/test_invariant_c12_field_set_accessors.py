@@ -59,9 +59,9 @@ _MIGRATION_SCRIPT = _SCRIPTS / "migrate_field_set_envelope.py"
 # A new entry here must be justified the same way, in code review.
 _ALLOWLIST = {
     (_SRC / "tgw" / "draft_sync.py", 90),
-    (_SRC / "tgw" / "workers" / "ai_identify.py", 273),   # (b) AI model response
-    (_SRC / "tgw" / "workers" / "ai_identify.py", 333),   # (a) accessor patch write
-    (_SRC / "tgw" / "workers" / "ai_identify.py", 428),   # (a) accessor patch write
+    (_SRC / "tgw" / "workers" / "ai_identify.py", 276),   # (b) AI model response
+    (_SRC / "tgw" / "workers" / "ai_identify.py", 336),   # (a) accessor patch write
+    (_SRC / "tgw" / "workers" / "ai_identify.py", 431),   # (a) accessor patch write
     # Refreshed 2026-07-18 (this packet — todo #1499/#1500/#1506/#1507, the
     # same stale-line-numbers report independently rediscovered 4 times by
     # different tgw-coder packets today, each correctly declining to fix an
@@ -103,6 +103,10 @@ _ALLOWLIST = {
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 124),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "inventory_diff.py", 159),   # (a) accessor patch output moving onward (todo #1417 apply_inventory_diff)
     (_SRC / "tgw" / "ebay" / "inventory_diff.py", 163),   # (a) accessor patch output moving onward (todo #1417 apply_inventory_diff)
+    # Refreshed 2026-07-20 (todo #1598, PP-MULTIMODEL-001 / invariant E15
+    # sweep): removed a dead `_OLLAMA_FALLBACK_MODEL` module constant + docstring
+    # rewrite in ai_identify.py, net +3 lines before these entries — shifted
+    # from 273/333/428 to 276/336/431. No accessor-routing behavior changed.
 }
 
 

@@ -128,9 +128,26 @@ def estimate_cost_usd(model: str, prompt_tokens: Optional[int],
                        completion_tokens: Optional[int]) -> Optional[float]:
     """USD cost estimate for one call from real token counts, or None if
     *model* has no pricing entry or token counts are missing (e.g. a
-    provider that doesn't return usage, or a failed call)."""
+    provider that doesn't return usage, or a failed call).
+
+    Fail-open by design, matching this module's other accounting calls
+    (never crash a job over a cost estimate) — but a missing pricing entry
+    for a model that DID return real token counts is a staleness signal
+    worth surfacing (invariant E15 sweep, 2026-07-20: a tgw-models.json
+    edit that introduces a new model id without a matching
+    `_PRICING_USD_PER_1M` entry would otherwise silently and permanently
+    zero out that model's cost tracking with no visible trace)."""
     price = _PRICING_USD_PER_1M.get(model)
-    if price is None or prompt_tokens is None or completion_tokens is None:
+    if price is None:
+        if prompt_tokens is not None and completion_tokens is not None:
+            log.warning(
+                "estimate_cost_usd: no pricing entry for model %r — cost "
+                "tracking for this model is silently untracked; add it to "
+                "_PRICING_USD_PER_1M in quota.py if it's now in active use",
+                model,
+            )
+        return None
+    if prompt_tokens is None or completion_tokens is None:
         return None
     return ((prompt_tokens / 1_000_000) * price['input']
             + (completion_tokens / 1_000_000) * price['output'])
