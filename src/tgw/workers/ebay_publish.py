@@ -30,6 +30,7 @@ from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.draft_sync import baseline_fields
 from tgw.ebay.pricing import to_99
 from tgw.ebay.sync import enqueue_post_push_sync, publish_offer
+from tgw.ebay.sync import extract_ebay_error_field as _extract_ebay_error_field
 from tgw.ebay.sync import format_ebay_error as _format_ebay_error
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
@@ -289,6 +290,9 @@ class EbayPublishWorker(QueueWorker):
                         'raw':    body_text[:800],
                         'ts':     datetime.now(timezone.utc).isoformat(),
                         'source': 'ebay_publish',
+                        # PP-CONDITION-ENUM-001 / todo #1562 — see ebay_stage.py's
+                        # identical field for rationale.
+                        'field':  _extract_ebay_error_field(body_text),
                     }
                     fence_patch_item(self.config, sku, {'pipeline_error': pipeline_error})
                     raise HardFailure(f'{sku}: eBay rejected publish: {msg}') from exc

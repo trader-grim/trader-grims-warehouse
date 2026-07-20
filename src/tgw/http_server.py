@@ -832,6 +832,29 @@ def patch_item(sku: str, body: PatchBody, request: Request) -> Dict[str, Any]:
         _item_for_desc = {**doc_before, "draft_listing": _merged_dl_for_desc}
         _new_dl_fields["listing_description"] = build_listing_description(_item_for_desc, _cfg)
 
+    # PP-CONDITION-ENUM-001 / todo #1562: draft_listing.condition_enum is a
+    # known-vocabulary field (10 Inventory API enum strings) — a caller
+    # sending anything else (e.g. the raw human-readable "condition" label,
+    # which is exactly the corruption path that dead-lettered
+    # tgw202605051124483 at ebay_stage) must be REJECTED, not silently
+    # shallow-merged in by _apply_patch. Checked before _apply_patch runs so
+    # the bad value never reaches disk. Global-vocabulary check only (not
+    # narrowed to the item's category's allowed subset) — deliberately
+    # conservative: a value that isn't even a real enum is always wrong,
+    # while a real-but-category-mismatched enum is a softer case the
+    # Draft Editor's dropdown already surfaces for operator review.
+    if isinstance(_new_dl_fields, dict) and "condition_enum" in _new_dl_fields:
+        _ce = _new_dl_fields.get("condition_enum")
+        from .apis.ebay.conditions import is_known_condition_enum
+        if _ce and not is_known_condition_enum(_ce):
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=422, content={
+                "ok": False,
+                "error": f"condition_enum {_ce!r} is not a valid eBay Inventory "
+                         f"API condition enum — rejected, not saved",
+                "field": "condition_enum",
+            })
+
     updated_keys = _apply_patch(json_path, body.fields)
 
     # Price edits leave a history trail (session 42): manual/UI price changes
@@ -3359,7 +3382,7 @@ function initCatSearch2(){
 """
 
 # Module-level constant — avoids nested quote hell in f-string script blocks
-_CATEGORY_CONTEXT_IIFE = "function loadCatCtx(catId){\n  var prefill=window._DL_PREFILL||{};\n  var loading=document.getElementById('aspects-loading');\n  var form=document.getElementById('aspects-form');\n  if(!catId){if(loading)loading.textContent='No category.';return;}\n  var curCondSel=document.getElementById('dl-condition-select');\n  var curCondQ=curCondSel&&curCondSel.value?'?current_condition='+encodeURIComponent(curCondSel.value):'';\n  fetch('/api/ebay/category-context/'+encodeURIComponent(catId)+curCondQ,{headers:authHeaders()})\n  .then(function(r){return r.json();}).then(function(d){\n    if(!d||!d.ok){if(loading)loading.textContent='Context load failed.';return;}\n    window._CAT_CTX=d;\n    var sel=document.getElementById('dl-condition-select');\n    if(sel&&d.conditions&&d.conditions.length){\n      var curVal=sel.value;\n      var stillValid=d.conditions.some(function(c){return c.enum===curVal;});\n      var html='';\n      if(!curVal)html+='<option value=\"\" selected disabled>\\u2014 select \\u2014</option>';\n      d.conditions.forEach(function(c){\n        html+='<option value=\"'+c.enum+'\"'+(c.enum===curVal?' selected':'')+'>'+c.label+'</option>';\n      });\n      if(curVal&&!stillValid){\n        if(d.condition_remap){\n          curVal=d.condition_remap.enum;\n          html=html.replace('<option value=\"'+curVal+'\"','<option value=\"'+curVal+'\" selected');\n        }else{\n          html+='<option value=\"'+curVal+'\" selected>'+curVal+' \\u2014 not valid for this category, please fix</option>';\n        }\n      }\n      sel.innerHTML=html;\n      if(d.condition_remap&&curVal===d.condition_remap.enum){\n        fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',\n          headers:authHeaders({'Content-Type':'application/json'}),\n          body:JSON.stringify({fields:{draft_listing:{condition_enum:curVal}}})});\n      }\n      var cn=document.getElementById('condition-policy-note');\n      var nl=d.conditions.length;\n      if(cn)cn.textContent=nl+(nl===1?' condition':' conditions')+' allowed'+(d.condition_remap?' \\u2014 category changed, condition auto-matched to nearest same-or-worse: '+d.condition_remap.label:'')+((curVal&&!stillValid&&!d.condition_remap)?' \\u2014 current value invalid, please re-select':'');\n    }\n    if(d.fulfillment_policy_id){\n      var fsel=document.getElementById('dl-ship-input');\n      var fhint=document.getElementById('dl-ship-hint');\n      if(fsel&&!fsel.value){\n        for(var fi=0;fi<fsel.options.length;fi++){\n          if(fsel.options[fi].value===d.fulfillment_policy_id){fsel.value=d.fulfillment_policy_id;break;}\n        }\n        if(fsel.value){\n          fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',\n            headers:authHeaders({'Content-Type':'application/json'}),\n            body:JSON.stringify({fields:{draft_listing:{shipping_profile:fsel.value}}})});\n        }\n      }\n      if(fhint&&!fsel.value)fhint.textContent='suggested: '+d.fulfillment_policy_id;\n    }\n    if(d.store_category){\n      var sch=document.getElementById('store-cat-hint');\n      if(sch)sch.textContent='suggested: '+d.store_category;\n    }\n    if(d.group_name){\n      var gh=document.getElementById('category-group-hint');\n      if(gh){\n        var pt=d.pricing&&d.pricing.typical_used?' · typical $'+d.pricing.typical_used.toFixed(2):'';\n        var pf=d.pricing&&d.pricing.floor?' · floor $'+d.pricing.floor.toFixed(2):'';\n        gh.textContent='group: '+d.group_name+pf+pt;\n      }\n    }\n    if(loading)loading.style.display='none';\n    if(!form)return;\n    if(!d.aspects||!d.aspects.length){\n      form.innerHTML=d.aspects_error\n        ?'<span style=\"color:#e88;font-size:.82em\">Item specifics lookup failed (\\u2018'+d.aspects_error+'\\u2019) \\u2014 every eBay category has specifics; this is a lookup error, not an empty category. <a href=\"#\" onclick=\"loadCatCtx(\\''+catId+'\\');return false\" style=\"color:#8ac\">Retry</a></span>'\n        :'<span style=\"color:#556;font-size:.82em\">No specifics returned for this category \\u2014 unexpected, please verify manually</span>';\n      return;\n    }\n    var html='';\n    d.aspects.forEach(function(asp){\n      var badge=asp.required\n        ?'<span style=\"font-size:.7em;background:#3a1a1a;color:#c44;border-radius:3px;padding:1px 5px;margin-left:4px\">REQ</span>'\n        :'<span style=\"font-size:.7em;background:#2a2a0a;color:#aa0;border-radius:3px;padding:1px 5px;margin-left:4px\">REC</span>';\n      // Three-layer merge: operator edits (blue) > proposed (yellow) > live (baseline)\n      var liveVal=(window._LIVE_ASPECTS&&window._LIVE_ASPECTS[asp.name]!==undefined?(window._LIVE_ASPECTS[asp.name]||'').toString():'');\n      var proposedVal=(window._PROPOSED_ASPECTS&&window._PROPOSED_ASPECTS[asp.name]!==undefined?(window._PROPOSED_ASPECTS[asp.name]||'').toString():'');\n      var editVal=(prefill[asp.name]!==undefined?(prefill[asp.name]||'').toString():'');\n      var cur,layer;\n      if(editVal){cur=editVal;layer=(editVal!==liveVal)?'edit':'same';}\n      else if(proposedVal){cur=proposedVal;layer=(proposedVal!==liveVal)?'proposed':'same';}\n      else{cur=liveVal;layer=liveVal?'live':'empty';}\n      cur=cur.replace(/\"/g,'&quot;');\n      var reqEmpty=asp.required&&!cur;\n      // Colours by layer\n      var bord=reqEmpty?'#c44':(layer==='edit'?'#44c':(layer==='proposed'?'#884':'#444'));\n      var bg=reqEmpty?'#1a0a0a':(layer==='edit'?'#0a0a1a':(layer==='proposed'?'#1a1a00':'#1a1a1a'));\n      // Hint: show live value when overridden or proposed differs\n      var liveHint=(layer==='edit'||layer==='proposed')&&liveVal\n        ?'<div style=\"font-size:.7em;color:#445;margin-top:1px\">live: '+liveVal.replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>'\n        :'';\n      var inp;\n      if(asp.allowed_values&&asp.allowed_values.length&&asp.mode==='SELECTION_ONLY'){\n        var offList=cur&&asp.allowed_values.indexOf(cur)===-1;\n        var opts=asp.allowed_values.map(function(v){\n          return '<option value=\"'+v+'\"'+(v===cur?' selected':'')+'>'+v+'</option>';\n        }).join('');\n        if(offList)opts='<option value=\"'+cur+'\" selected>'+cur+' \\u2014 not in this category\\u2019s list, please verify</option>'+opts;\n        inp='<select data-aspect=\"'+asp.name+'\" data-initial=\"'+cur+'\" style=\"background:'+bg+';color:#eee;border:1px solid '+(offList?'#c84':bord)+';border-radius:3px;padding:2px 5px;font-size:.85em\"><option value=\"\">—</option>'+opts+'</select>';\n      }else{\n        var dlid='dl-asp-'+asp.name.replace(/[^a-zA-Z0-9]/g,'-');\n        var dlopts=asp.allowed_values&&asp.allowed_values.length\n          ?'<datalist id=\"'+dlid+'\">'+asp.allowed_values.map(function(v){return '<option value=\"'+v+'\"></option>';}).join('')+'</datalist>'\n          :'';\n        inp='<input type=\"text\"'+(dlopts?' list=\"'+dlid+'\"':'')+' data-aspect=\"'+asp.name+'\" data-initial=\"'+cur+'\" value=\"'+cur+'\"'\n           +' style=\"background:'+bg+';color:#eee;border:1px solid '+bord+';border-radius:3px;padding:2px 5px;font-size:.85em;width:200px\">'\n           +dlopts;\n      }\n      html+='<div class=\"frow\"'+(reqEmpty?' style=\"border-left:2px solid #944;padding-left:4px\"':'')+'>  <span class=\"fn\" style=\"font-size:.82em\">'+asp.name+badge+'</span><span class=\"fv\">'+inp+liveHint+'</span></div>';\n    });\n    var covered={};\n    d.aspects.forEach(function(asp){covered[asp.name]=true;});\n    Object.keys(prefill).forEach(function(name){\n      if(covered[name])return;\n      var xcur=(prefill[name]||'').toString().replace(/\"/g,'&quot;');\n      var xkey=name.replace(/\"/g,'&quot;');\n      var xbadge='<span style=\"font-size:.7em;background:#1a2a3a;color:#8ac;border-radius:3px;padding:1px 5px;margin-left:4px\" title=\"A seller-defined custom aspect \u2014 not in this category\u2019s standard list, but a real eBay field, pushed live like any other\">CUSTOM ASPECT</span>';\n      var xcb='<input type=\"checkbox\" class=\"aspect-keep-cb\" data-aspect-key=\"'+xkey+'\" checked title=\"Checked = keep on this eBay listing. Uncheck = discard at Save (moved to the Inventory Record as a superset, never deleted).\" style=\"margin-right:4px;vertical-align:middle\">';\n      var xinp='<input type=\"text\" data-aspect=\"'+name+'\" data-initial=\"'+xcur+'\" value=\"'+xcur+'\" style=\"background:#1a1a2a;color:#eee;border:1px solid #446;border-radius:3px;padding:2px 5px;font-size:.85em;width:200px\">';\n      html+='<div class=\"frow\"><span class=\"fn\" style=\"font-size:.82em\">'+xcb+name+xbadge+'</span><span class=\"fv\">'+xinp+'</span></div>';\n    });\n\n    var missingReq=d.aspects.filter(function(a){return a.required&&!(prefill[a.name]||'');}).length;if(missingReq>0){html='<div style=\"margin-bottom:8px;padding:5px 8px;background:#1a0808;border:1px solid #844;border-radius:3px;font-size:.78em;color:#e88\">'+missingReq+' required aspect'+(missingReq===1?'':'s')+' missing values — fill before staging</div>'+html;}form.innerHTML=html;\n  }).catch(function(){\n    if(loading)loading.textContent='Category context load failed.';\n  });\n}\ndocument.addEventListener('DOMContentLoaded',function(){\n  if(window._DL_CAT_ID)loadCatCtx(window._DL_CAT_ID);\n  if(typeof initCatSearch==='function')initCatSearch();\n  if(typeof initCatSearch2==='function')initCatSearch2();\n  if(typeof loadInventoryDiff==='function')loadInventoryDiff();\n});\n"
+_CATEGORY_CONTEXT_IIFE = "function loadCatCtx(catId){\n  var prefill=window._DL_PREFILL||{};\n  var loading=document.getElementById('aspects-loading');\n  var form=document.getElementById('aspects-form');\n  if(!catId){if(loading)loading.textContent='No category.';return;}\n  var curCondSel=document.getElementById('dl-condition-select');\n  var curCondQ=curCondSel&&curCondSel.value?'?current_condition='+encodeURIComponent(curCondSel.value):'';\n  fetch('/api/ebay/category-context/'+encodeURIComponent(catId)+curCondQ,{headers:authHeaders()})\n  .then(function(r){return r.json();}).then(function(d){\n    if(!d||!d.ok){if(loading)loading.textContent='Context load failed.';return;}\n    window._CAT_CTX=d;\n    var sel=document.getElementById('dl-condition-select');\n    if(sel&&d.conditions&&d.conditions.length){\n      var curVal=sel.value;\n      var stillValid=d.conditions.some(function(c){return c.enum===curVal;});\n      var html='';\n      if(!curVal)html+='<option value=\"\" selected disabled>\\u2014 select \\u2014</option>';\n      d.conditions.forEach(function(c){\n        html+='<option value=\"'+c.enum+'\"'+(c.enum===curVal?' selected':'')+'>'+c.label+'</option>';\n      });\n      if(curVal&&!stillValid){\n        if(d.condition_remap){\n          curVal=d.condition_remap.enum;\n          html=html.replace('<option value=\"'+curVal+'\"','<option value=\"'+curVal+'\" selected');\n        }else{\n          html+='<option value=\"'+curVal+'\" selected>'+curVal+' \\u2014 not valid for this category, please fix</option>';\n        }\n      }\n      sel.innerHTML=html;\n      flagFieldInvalid(sel,!!(curVal&&!stillValid&&!d.condition_remap));\n      if(d.condition_remap&&curVal===d.condition_remap.enum){\n        fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',\n          headers:authHeaders({'Content-Type':'application/json'}),\n          body:JSON.stringify({fields:{draft_listing:{condition_enum:curVal}}})});\n      }\n      var cn=document.getElementById('condition-policy-note');\n      var nl=d.conditions.length;\n      if(cn)cn.textContent=nl+(nl===1?' condition':' conditions')+' allowed'+(d.condition_remap?' \\u2014 category changed, condition auto-matched to nearest same-or-worse: '+d.condition_remap.label:'')+((curVal&&!stillValid&&!d.condition_remap)?' \\u2014 current value invalid, please re-select':'');\n    }\n    if(d.fulfillment_policy_id){\n      var fsel=document.getElementById('dl-ship-input');\n      var fhint=document.getElementById('dl-ship-hint');\n      if(fsel&&!fsel.value){\n        for(var fi=0;fi<fsel.options.length;fi++){\n          if(fsel.options[fi].value===d.fulfillment_policy_id){fsel.value=d.fulfillment_policy_id;break;}\n        }\n        if(fsel.value){\n          fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',\n            headers:authHeaders({'Content-Type':'application/json'}),\n            body:JSON.stringify({fields:{draft_listing:{shipping_profile:fsel.value}}})});\n        }\n      }\n      if(fhint&&!fsel.value)fhint.textContent='suggested: '+d.fulfillment_policy_id;\n    }\n    if(d.store_category){\n      var sch=document.getElementById('store-cat-hint');\n      if(sch)sch.textContent='suggested: '+d.store_category;\n    }\n    if(d.group_name){\n      var gh=document.getElementById('category-group-hint');\n      if(gh){\n        var pt=d.pricing&&d.pricing.typical_used?' · typical $'+d.pricing.typical_used.toFixed(2):'';\n        var pf=d.pricing&&d.pricing.floor?' · floor $'+d.pricing.floor.toFixed(2):'';\n        gh.textContent='group: '+d.group_name+pf+pt;\n      }\n    }\n    if(loading)loading.style.display='none';\n    if(!form)return;\n    if(!d.aspects||!d.aspects.length){\n      form.innerHTML=d.aspects_error\n        ?'<span style=\"color:#e88;font-size:.82em\">Item specifics lookup failed (\\u2018'+d.aspects_error+'\\u2019) \\u2014 every eBay category has specifics; this is a lookup error, not an empty category. <a href=\"#\" onclick=\"loadCatCtx(\\''+catId+'\\');return false\" style=\"color:#8ac\">Retry</a></span>'\n        :'<span style=\"color:#556;font-size:.82em\">No specifics returned for this category \\u2014 unexpected, please verify manually</span>';\n      return;\n    }\n    var html='';\n    d.aspects.forEach(function(asp){\n      var badge=asp.required\n        ?'<span style=\"font-size:.7em;background:#3a1a1a;color:#c44;border-radius:3px;padding:1px 5px;margin-left:4px\">REQ</span>'\n        :'<span style=\"font-size:.7em;background:#2a2a0a;color:#aa0;border-radius:3px;padding:1px 5px;margin-left:4px\">REC</span>';\n      // Three-layer merge: operator edits (blue) > proposed (yellow) > live (baseline)\n      var liveVal=(window._LIVE_ASPECTS&&window._LIVE_ASPECTS[asp.name]!==undefined?(window._LIVE_ASPECTS[asp.name]||'').toString():'');\n      var proposedVal=(window._PROPOSED_ASPECTS&&window._PROPOSED_ASPECTS[asp.name]!==undefined?(window._PROPOSED_ASPECTS[asp.name]||'').toString():'');\n      var editVal=(prefill[asp.name]!==undefined?(prefill[asp.name]||'').toString():'');\n      var cur,layer;\n      if(editVal){cur=editVal;layer=(editVal!==liveVal)?'edit':'same';}\n      else if(proposedVal){cur=proposedVal;layer=(proposedVal!==liveVal)?'proposed':'same';}\n      else{cur=liveVal;layer=liveVal?'live':'empty';}\n      cur=cur.replace(/\"/g,'&quot;');\n      var reqEmpty=asp.required&&!cur;\n      // Colours by layer\n      var bord=reqEmpty?'#c44':(layer==='edit'?'#44c':(layer==='proposed'?'#884':'#444'));\n      var bg=reqEmpty?'#1a0a0a':(layer==='edit'?'#0a0a1a':(layer==='proposed'?'#1a1a00':'#1a1a1a'));\n      // Hint: show live value when overridden or proposed differs\n      var liveHint=(layer==='edit'||layer==='proposed')&&liveVal\n        ?'<div style=\"font-size:.7em;color:#445;margin-top:1px\">live: '+liveVal.replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>'\n        :'';\n      var inp;\n      if(asp.allowed_values&&asp.allowed_values.length&&asp.mode==='SELECTION_ONLY'){\n        var offList=cur&&asp.allowed_values.indexOf(cur)===-1;\n        var opts=asp.allowed_values.map(function(v){\n          return '<option value=\"'+v+'\"'+(v===cur?' selected':'')+'>'+v+'</option>';\n        }).join('');\n        if(offList)opts='<option value=\"'+cur+'\" selected>'+cur+' \\u2014 not in this category\\u2019s list, please verify</option>'+opts;\n        inp='<select data-aspect=\"'+asp.name+'\" data-initial=\"'+cur+'\" style=\"background:'+bg+';color:#eee;border:1px solid '+(offList?'#c84':bord)+';border-radius:3px;padding:2px 5px;font-size:.85em\"><option value=\"\">—</option>'+opts+'</select>';\n      }else{\n        var dlid='dl-asp-'+asp.name.replace(/[^a-zA-Z0-9]/g,'-');\n        var dlopts=asp.allowed_values&&asp.allowed_values.length\n          ?'<datalist id=\"'+dlid+'\">'+asp.allowed_values.map(function(v){return '<option value=\"'+v+'\"></option>';}).join('')+'</datalist>'\n          :'';\n        inp='<input type=\"text\"'+(dlopts?' list=\"'+dlid+'\"':'')+' data-aspect=\"'+asp.name+'\" data-initial=\"'+cur+'\" value=\"'+cur+'\"'\n           +' style=\"background:'+bg+';color:#eee;border:1px solid '+bord+';border-radius:3px;padding:2px 5px;font-size:.85em;width:200px\">'\n           +dlopts;\n      }\n      html+='<div class=\"frow\"'+(reqEmpty?' style=\"border-left:2px solid #944;padding-left:4px\"':'')+'>  <span class=\"fn\" style=\"font-size:.82em\">'+asp.name+badge+'</span><span class=\"fv\">'+inp+liveHint+'</span></div>';\n    });\n    var covered={};\n    d.aspects.forEach(function(asp){covered[asp.name]=true;});\n    Object.keys(prefill).forEach(function(name){\n      if(covered[name])return;\n      var xcur=(prefill[name]||'').toString().replace(/\"/g,'&quot;');\n      var xkey=name.replace(/\"/g,'&quot;');\n      var xbadge='<span style=\"font-size:.7em;background:#1a2a3a;color:#8ac;border-radius:3px;padding:1px 5px;margin-left:4px\" title=\"A seller-defined custom aspect \u2014 not in this category\u2019s standard list, but a real eBay field, pushed live like any other\">CUSTOM ASPECT</span>';\n      var xcb='<input type=\"checkbox\" class=\"aspect-keep-cb\" data-aspect-key=\"'+xkey+'\" checked title=\"Checked = keep on this eBay listing. Uncheck = discard at Save (moved to the Inventory Record as a superset, never deleted).\" style=\"margin-right:4px;vertical-align:middle\">';\n      var xinp='<input type=\"text\" data-aspect=\"'+name+'\" data-initial=\"'+xcur+'\" value=\"'+xcur+'\" style=\"background:#1a1a2a;color:#eee;border:1px solid #446;border-radius:3px;padding:2px 5px;font-size:.85em;width:200px\">';\n      html+='<div class=\"frow\"><span class=\"fn\" style=\"font-size:.82em\">'+xcb+name+xbadge+'</span><span class=\"fv\">'+xinp+'</span></div>';\n    });\n\n    var missingReq=d.aspects.filter(function(a){return a.required&&!(prefill[a.name]||'');}).length;if(missingReq>0){html='<div style=\"margin-bottom:8px;padding:5px 8px;background:#1a0808;border:1px solid #844;border-radius:3px;font-size:.78em;color:#e88\">'+missingReq+' required aspect'+(missingReq===1?'':'s')+' missing values — fill before staging</div>'+html;}form.innerHTML=html;\n  }).catch(function(){\n    if(loading)loading.textContent='Category context load failed.';\n  });\n}\ndocument.addEventListener('DOMContentLoaded',function(){\n  if(window._DL_CAT_ID)loadCatCtx(window._DL_CAT_ID);\n  if(typeof initCatSearch==='function')initCatSearch();\n  if(typeof initCatSearch2==='function')initCatSearch2();\n  if(typeof loadInventoryDiff==='function')loadInventoryDiff();\n});\n"
 
 # ---------------------------------------------------------------------------
 # GET /form/intake — intake landing page (HTML)
@@ -4994,7 +5017,7 @@ _GENERIC_CONDITION_FALLBACK: List[Tuple[str, str]] = [
 ]
 
 
-def _build_condition_options(current_enum: str, category_id: str = "") -> str:
+def _build_condition_options(current_enum: str, category_id: str = "") -> Tuple[str, bool]:
     """Return <option> tags for eBay condition enum dropdown.
 
     Sourced from the item's real per-category eBay condition policy (Metadata API
@@ -5029,7 +5052,12 @@ def _build_condition_options(current_enum: str, category_id: str = "") -> str:
     # If the currently-saved enum isn't in the allowed set (e.g. a stale value from
     # before this fix, or the category changed since it was set), surface it anyway
     # so the operator sees and corrects it rather than have it silently vanish.
-    if current_enum and current_enum not in {v for v, _ in conds}:
+    # PP-CONDITION-ENUM-001 / todo #1562: this is also the invalid-flag signal
+    # the caller uses to redden the <select> border on initial page render —
+    # same shared flagFieldInvalid() treatment the dynamic loadCatCtx() JS
+    # re-render path already applies via its own `stillValid` check.
+    is_invalid = bool(current_enum) and current_enum not in {v for v, _ in conds}
+    if is_invalid:
         conds = [(current_enum, f"{current_enum} — not valid for this category, please fix")] + conds
 
     opts = []
@@ -5038,7 +5066,7 @@ def _build_condition_options(current_enum: str, category_id: str = "") -> str:
     for val, lbl in conds:
         sel = " selected" if val == current_enum else ""
         opts.append(f'<option value="{val}"{sel}>{lbl}</option>')
-    return "".join(opts)
+    return "".join(opts), is_invalid
 
 
 def _render_item_detail_html(
@@ -5978,6 +6006,7 @@ def _render_item_detail_html(
                 "raw": _pe.get("raw", ""),
                 "at": _pe.get("at"),
                 "code": _pe.get("code"),
+                "field": _pe.get("field"),
             }
         elif _pe.get("detail") or _pe.get("code"):
             _pe_code = _pe.get("code")
@@ -5990,6 +6019,7 @@ def _render_item_detail_html(
                 "raw": _pe.get("raw", ""),
                 "at": _pe.get("ts"),
                 "code": _pe_code,
+                "field": _pe.get("field"),
             }
     if _pe_norm:
         _pe_when = _local_ts(_pe_norm["at"])
@@ -6012,7 +6042,20 @@ def _render_item_detail_html(
             f'<pre id="pipeline-error-raw" style="display:none;margin-top:8px;font-size:.75em;'
             f'color:#a77;white-space:pre-wrap;word-break:break-all;max-height:160px;overflow:auto">'
             f"</pre></div>"
-            f"<script>var _PE_RAW={_pe_raw_js};</script>"
+            # PP-CONDITION-ENUM-001 / todo #1562: when the persisted
+            # pipeline_error names the errant draft field (e.g. eBay's own
+            # "Could not serialize field [condition]" resolved to
+            # "condition_enum"), flag that field red on page load using the
+            # same shared flagFieldInvalid() the two condition-select render
+            # paths use — the operator sees the problem the moment the item
+            # opens, not just after touching the field. Only fields with a
+            # known rendered element are wired here; an unmapped field name
+            # (or none) is a no-op, not an error.
+            f"<script>var _PE_RAW={_pe_raw_js};var _PE_FIELD={_json.dumps(_pe_norm.get('field'))};"
+            f"document.addEventListener('DOMContentLoaded',function(){{"
+            f"  var _peFieldEls={{condition_enum:'dl-condition-select',title:'dl-title-input'}};"
+            f"  if(_PE_FIELD&&_peFieldEls[_PE_FIELD])flagFieldInvalid(_peFieldEls[_PE_FIELD],true);"
+            f"}});</script>"
         )
     else:
         _pipeline_error_html = ""
@@ -6247,6 +6290,14 @@ def _render_item_detail_html(
             f"</div></div>"
         )
 
+    # PP-CONDITION-ENUM-001 / todo #1562: computed before the big f-string
+    # block below so the initial server-rendered <select> can be flagged red
+    # on first paint (via inline JS calling the shared flagFieldInvalid())
+    # the same way loadCatCtx()'s dynamic re-render already flags it —
+    # both render paths must use the one shared visual-flag mechanism.
+    _cond_opts_html, _cond_is_invalid = _build_condition_options(
+        (dl or {}).get("condition_enum") or (dl or {}).get("condition") or "", _cat_id_for_aspects)
+
     _ebay_draft_editor = (
         '<div id="dl-section" class="dsec">'
         "<h3>Listing</h3>" + f'<div class="frow" id="dl-title">'
@@ -6351,9 +6402,10 @@ def _render_item_detail_html(
         '<div class="frow" id="dl-condition">'
         '<span class="fn">Condition</span>'
         '<span class="fv">'
-        '<select id="dl-condition-select" '
-        'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px">'
-        + _build_condition_options((dl or {}).get("condition_enum") or (dl or {}).get("condition") or "", _cat_id_for_aspects)
+        f'<select id="dl-condition-select" '
+        f'style="background:#1a1a1a;color:#eee;border:1px solid '
+        f'{"#c44" if _cond_is_invalid else "#444"};border-radius:4px;padding:3px 6px">'
+        + _cond_opts_html
         + f"</select>"
         f'<span id="condition-policy-note" style="font-size:.72em;color:#445;margin-left:8px"></span>'
         f"</span></div>"
@@ -6962,11 +7014,23 @@ def _render_item_detail_html(
         f"    inp.addEventListener('blur',function(){{if(!inp.disabled)commit();}});"
         f"  }});"
         f"}});"
+        # ── flagFieldInvalid — PP-CONDITION-ENUM-001 / todo #1562 ──────────────
+        # One shared function for "flag this field red when invalid," so every
+        # draft field (title length, condition enum, and any future
+        # save-error-tagged field) gets the same visible treatment instead of
+        # each growing its own bespoke border-color check. Callable from
+        # inline onload code (no element handle needed — pass an id) or with
+        # an element reference directly.
+        f"function flagFieldInvalid(elOrId,isInvalid){{"
+        f"  var el=(typeof elOrId==='string')?document.getElementById(elOrId):elOrId;"
+        f"  if(!el)return;"
+        f"  el.style.borderColor=isInvalid?'#c44':'#444';"
+        f"}}"
         # ── updateCharCount ───────────────────────────────────────────────────
         f"function updateCharCount(inp,max,countId){{"
         f"  var n=inp.value.length;"
         f"  var el=document.getElementById(countId);"
-        f"  inp.style.borderColor=n>max?'#c44':'#444';"
+        f"  flagFieldInvalid(inp,n>max);"
         f"  if(!el)return;"
         f"  el.textContent=n+'/'+max;"
         f"  el.style.color=n>max?'#c44':(n>max*0.9?'#aa0':'#556');"

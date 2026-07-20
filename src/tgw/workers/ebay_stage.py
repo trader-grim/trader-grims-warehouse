@@ -34,6 +34,7 @@ from tgw.apis.fence import ebay_write as fence_ebay_write
 from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.ebay.sync import enqueue_post_push_sync, stage_draft
+from tgw.ebay.sync import extract_ebay_error_field as _extract_ebay_error_field
 from tgw.ebay.sync import format_ebay_error as _format_ebay_error
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
@@ -362,6 +363,13 @@ class EbayStageWorker(QueueWorker):
                     'raw':    raw[:800],
                     'ts':     datetime.now(timezone.utc).isoformat(),
                     'source': 'ebay_stage',
+                    # PP-CONDITION-ENUM-001 / todo #1562: best-effort field
+                    # attribution (e.g. "condition_enum") so the item detail
+                    # page can flag exactly the offending draft field red on
+                    # load instead of leaving the operator to guess from the
+                    # generic wrapper text. None when eBay's body doesn't
+                    # name a field — never forced.
+                    'field':  _extract_ebay_error_field(raw),
                 }
                 fence_patch_item(self.config, sku, {'pipeline_error': pipeline_error})
                 raise HardFailure(f'{sku}: eBay rejected staging: {msg}') from exc
