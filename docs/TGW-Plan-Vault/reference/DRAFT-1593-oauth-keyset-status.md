@@ -16,40 +16,35 @@ App ID/Cert ID/Dev ID, re-run OAuth against the new keyset, restart
 workers. No resolution note exists anywhere in the vault — it simply
 stopped being tracked when the plan was compressed/archived.
 
-**Open question this ticket needs to resolve:** is this a self-service
-action that should have completed instantly (in which case checking the
-developer.ebay.com portal directly, not a support ticket, is the right
-first move), or did it require the same Developer Support approval path
-as the scope/Growth-Check requests? The draft below assumes the latter
-(a ticket makes sense) since the account's live App ID as of 2026-06-05
-was still the original (`DaveBuko-DaveBuko-P-66170566`), suggesting the
-new keyset was never actually issued/activated.
+**Confirmed by Dave, 2026-07-20 (checked developer.ebay.com directly):**
+the new keyset request is itself gated by the same Application Growth
+Check process as the scope and EPS requests — not a plain self-service
+action that should have completed instantly. So this is genuinely the
+third facet of the same underlying gate: three separately-formatted,
+properly-submitted requests (scope, EPS, keyset), all routed through one
+review process that eBay can — and per the `260605-000035` closure,
+did — treat as satisfied by answering only one facet.
 
 ## Suggested ticket text
 
-> **Subject:** Status of new application keyset requested 2026-06-05
+> **Subject:** Application Growth Check — status of new application
+> keyset requested 2026-06-05
 >
 > **Account:** DaveBuko-Webkulap
 >
-> On 2026-06-05 I created a new application keyset via the Developer
-> Program portal, requesting a full set of scopes for our automated
-> inventory application. I never received confirmation that this new
-> keyset was approved/issued, and our production credentials are
-> currently still the original keyset. Could you confirm the status of
-> that request — was it approved, is it still pending, or does it need
-> to be resubmitted? If resubmission is needed, please let me know what
-> additional information you require.
+> On 2026-06-05 I submitted an Application Growth Check requesting a new
+> application keyset with an expanded set of scopes for our inventory
+> application. I never received confirmation that this request was
+> approved, denied, or is still pending — our production credentials are
+> currently still the original keyset. Could you confirm the current
+> status of that specific request? If it needs to be resubmitted, please
+> let me know what additional information is required.
 
 ## Context for Dave
 
-- **Before sending this, worth a quick direct check of
-  developer.ebay.com's Application Keys page yourself** — if a second
-  keyset already exists there (approved but never noticed/adopted), this
-  ticket is unnecessary and the actual next step is just updating
-  `secrets_root/ebay-credentials.json` and re-running
-  `get_access_token.py` against it, not a support ticket at all. I can't
-  check the portal myself (it's account-management UI, not an API this
-  session can reach) — flagging so this doesn't turn into an unnecessary
-  ticket if the answer is already sitting in your account.
+- Confirmed 2026-07-20 (you checked the portal directly): this is not a
+  plain self-service action, it's Growth-Check-gated like the other two
+  — the "check the portal first, might be unnecessary" framing in the
+  earlier draft of this note was wrong, removed.
 - No internal architecture/automation detail included — states the fact
-  (keyset requested, no confirmation received) and asks for status.
+  (request submitted, no confirmation received) and asks for status.
