@@ -97,6 +97,26 @@ class TestCostEstimate:
     def test_estimate_cost_usd_missing_tokens_returns_none(self):
         assert quota.estimate_cost_usd('gemini-2.5-flash-lite', None, None) is None
 
+    def test_estimate_cost_usd_unknown_model_with_real_tokens_warns(self, caplog):
+        """Invariant E15 sweep (2026-07-20): a new tgw-models.json model with
+        no matching pricing entry must be a visible staleness signal, not a
+        silent zero — real token counts + unpriced model should log a
+        warning naming the model."""
+        with caplog.at_level("WARNING", logger="tgw.quota"):
+            cost = quota.estimate_cost_usd('some-new-unpriced-model', 100, 100)
+        assert cost is None
+        assert any(
+            "some-new-unpriced-model" in rec.message for rec in caplog.records
+        )
+
+    def test_estimate_cost_usd_unknown_model_no_tokens_does_not_warn(self, caplog):
+        """No token counts (failed/no-usage call) is the expected/common
+        case, not a staleness signal — must not warn."""
+        with caplog.at_level("WARNING", logger="tgw.quota"):
+            cost = quota.estimate_cost_usd('some-unlisted-model', None, None)
+        assert cost is None
+        assert not caplog.records
+
     def test_today_cost_usd_by_provider_sums_real_token_rows(self):
         rows = [
             {'provider': 'google_direct', 'model': 'gemini-2.5-flash-lite',

@@ -997,7 +997,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("sku", nargs="?", default=None, help="SKU to process (omit with --batch)")
     p.add_argument("--model", default=None, help="vision model ID (default: from tgw-models.json's 'alt_text' task config)")
-    p.add_argument("--provider", default=None, choices=["openrouter", "ollama"], help="provider (default: from tgw-models.json's 'alt_text' task config)")
+    p.add_argument(
+        "--provider", default=None,
+        choices=["openrouter", "ollama", "google_direct", "deepseek_direct", "anthropic_direct"],
+        help="provider (default: from tgw-models.json's 'alt_text' task config)",
+    )
     p.add_argument("--dry-run", action="store_true", help="show what would happen without calling the model or writing files")
     p.add_argument("--batch", action="store_true", help="run all eligible items directly with rate-limiting (OpenRouter free ~20 req/min)")
     p.add_argument("--limit", type=int, default=0, metavar="N", help="max items to process in --batch mode (0 = all eligible)")

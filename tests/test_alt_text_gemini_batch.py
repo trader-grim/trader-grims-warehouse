@@ -29,6 +29,14 @@ def _make_cfg(tmp_path: Path, runtime_root: Optional[Path] = None) -> Dict[str, 
         "pretty": False,
         "secrets_root": tmp_path / "secrets",
         "raw": {"runtime_root": str(rt)},
+        # Mirrors tgw-models.json's real shape (invariant E15) — the batch
+        # path resolves its model from here, not a module-level constant.
+        "models": {
+            "defaults": {
+                "default": {"provider": "google_direct", "model": "gemini-2.5-flash-lite"},
+            },
+            "alt_text": {"use_default": "default"},
+        },
     }
 
 
@@ -63,7 +71,7 @@ class TestBuildAltTextTask:
         assert task["generation_config"]["response_mime_type"] == "application/json"
 
     def test_inline_data_present_for_each_image(self):
-        task = build_alt_text_task(["IMG1==", "IMG2==", "IMG3=="])
+        task = build_alt_text_task(["IMG1==", "IMG2==", "IMG3=="], model="gemini-2.5-flash-lite")
         parts = task["contents"][0]["parts"]
         # First N parts are images, last part is text prompt
         image_parts = [p for p in parts if "inline_data" in p]
@@ -71,7 +79,7 @@ class TestBuildAltTextTask:
         assert image_parts[0]["inline_data"]["data"] == "IMG1=="
 
     def test_text_prompt_mentions_count(self):
-        task = build_alt_text_task(["A==", "B=="])
+        task = build_alt_text_task(["A==", "B=="], model="gemini-2.5-flash-lite")
         text_parts = [p["text"] for p in task["contents"][0]["parts"] if "text" in p]
         assert any("2" in t for t in text_parts)
 
@@ -80,13 +88,13 @@ class TestBuildAltTextTask:
         assert task["model"] == "models/gemini-2.5-flash-lite"
 
     def test_system_instruction_present(self):
-        task = build_alt_text_task(["A=="])
+        task = build_alt_text_task(["A=="], model="gemini-2.5-flash-lite")
         assert "system_instruction" in task
         parts = task["system_instruction"]["parts"]
         assert any(p.get("text") for p in parts)
 
     def test_temperature_is_zero(self):
-        task = build_alt_text_task(["A=="])
+        task = build_alt_text_task(["A=="], model="gemini-2.5-flash-lite")
         assert task["generation_config"]["temperature"] == 0.0
 
 
@@ -99,7 +107,7 @@ class TestWriteBatchJsonl:
         assert len(lines) == 2
 
     def test_each_line_is_valid_json(self, tmp_path):
-        tasks = [build_alt_text_task(["AABB=="]), build_alt_text_task(["CCDD=="])]
+        tasks = [build_alt_text_task(["AABB=="], model="gemini-2.5-flash-lite"), build_alt_text_task(["CCDD=="], model="gemini-2.5-flash-lite")]
         path = tmp_path / "out.jsonl"
         write_batch_jsonl(tasks, path)
         for line in path.read_text().splitlines():
@@ -280,6 +288,32 @@ class TestCmdAltTextGeminiBatch:
         result = cmd_alt_text_gemini_batch(cfg)
         assert result["ok"] is True
         assert result["eligible"] == 0
+
+    def test_non_google_direct_provider_raises(self, tmp_path):
+        """Invariant E15: batch mode requires 'alt_text' -> google_direct in
+        tgw-models.json when no --model override is given; Gemini Batch API
+        has no OpenRouter/Ollama equivalent."""
+        from tgw.alt_text import cmd_alt_text_gemini_batch
+
+        cfg = _make_cfg(tmp_path)
+        Path(cfg["itemdata_root"]).mkdir(parents=True, exist_ok=True)
+        cfg["models"]["alt_text"] = {"provider": "openrouter", "model": "some/model"}
+
+        with pytest.raises(ValueError, match="google_direct"):
+            cmd_alt_text_gemini_batch(cfg)
+
+    def test_explicit_model_override_skips_provider_check(self, tmp_path):
+        """Passing --model explicitly bypasses the provider check entirely
+        (operator override), matching existing `model or ...` semantics."""
+        from tgw.alt_text import cmd_alt_text_gemini_batch
+
+        cfg = _make_cfg(tmp_path)
+        Path(cfg["itemdata_root"]).mkdir(parents=True, exist_ok=True)
+        cfg["models"]["alt_text"] = {"provider": "openrouter", "model": "some/model"}
+
+        result = cmd_alt_text_gemini_batch(cfg, model="gemini-2.5-flash-lite")
+        assert result["ok"] is True
+        assert result["model"] == "gemini-2.5-flash-lite"
 
     def test_skips_items_with_existing_alt_text(self, tmp_path, monkeypatch):
         from tgw.alt_text import cmd_alt_text_gemini_batch

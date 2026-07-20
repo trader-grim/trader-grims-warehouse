@@ -70,9 +70,14 @@ def _require_genai():
 
 def build_alt_text_task(
     images_b64: List[str],
-    model: str = "gemini-2.5-flash-lite",
+    model: str,
 ) -> Dict[str, Any]:
     """Build one Gemini Batch JSONL task dict for N images.
+
+    `model` is required, not defaulted (invariant E15, 2026-07-20) — the
+    only caller (tgw.alt_text.cmd_alt_text_gemini_batch) always resolves it
+    from tgw-models.json first; a module-level default here would be a dead
+    literal nobody reads until it silently isn't.
 
     The model is instructed to return a JSON array with one object per image
     in submission order: [{"index": 0, "alt_text": "...", "seo_caption": "..."}, ...]
