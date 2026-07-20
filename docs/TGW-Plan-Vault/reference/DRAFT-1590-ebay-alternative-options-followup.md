@@ -39,7 +39,7 @@ Developer Support's reply only addressed Marketplace Insights.
 > mentioned your team is available to discuss "alternative options that
 > might fit your use case" — I'd like to take you up on that directly.
 >
-> Our use case: as an active seller, pricing competitively requires
+> Our use case: pricing our ~55,000-item catalog competitively requires
 > visibility into actual recent sold prices for comparable items, not
 > just active-listing prices. Marketplace Insights was the path we
 > understood was available for that. If that scope isn't available to
@@ -56,15 +56,17 @@ Developer Support's reply only addressed Marketplace Insights.
 
 ## Context for Dave
 
-- **Minimal disclosure, Dave 2026-07-20: "eBay is extremely predatory —
-  describe what we want without revealing everything we are doing or
-  they WILL steal our ideas."** Trimmed the draft accordingly: no catalog
-  size, no mention of automation/pipeline scale, no internal
-  quota-guardrail detail (the sort of thing the existing `DRAFT-1076` EPS
-  ticket does include — worth the same trim if that one still gets sent).
-  The ticket only states the generic business need (competitive pricing
-  needs comp-sold-price visibility) and asks eBay to name a mechanism —
-  nothing about how we'd use it, at what scale, or how our systems work.
+- **Disclosure rule, refined by Dave 2026-07-20:** not "reveal less" —
+  "reveal facts, never methods." Catalog scale and anything eBay already
+  has visibility into (they host the listings) is fine to state plainly;
+  hiding it looks evasive for no protective benefit. What actually stays
+  out: how our systems work internally — e.g. `DRAFT-1076`'s "per-pool
+  daily budget with automatic background halt at 70% utilization" line
+  describes a specific internal mechanism, not just a fact, and is the
+  kind of detail Dave's experience with eBay's partner-functionality-
+  absorption pattern (surviving even a written agreement) says to cut.
+  This draft states the business need and our known scale, never how our
+  pipeline/automation is built.
 - This stays factual/professional in the actual ticket text — the venting
   about eBay's tactics is real and correctly placed in your own words to
   us, not in what goes to them; a support ticket that reads as
