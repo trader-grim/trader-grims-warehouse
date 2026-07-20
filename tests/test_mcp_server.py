@@ -910,6 +910,108 @@ def test_simple_llm_jobs_registered_even_when_readonly():
         importlib.reload(mcp_server)  # restore module state for later tests
 
 
+def test_simple_llm_jobs_classify_valid_label_still_ok(cfg, monkeypatch):
+    """Regression check: normal case (model picks a label in label_set)
+    still returns ok: True (todo #1576)."""
+    monkeypatch.setattr(
+        "tgw.apis.llm.call_model",
+        lambda *a, **k: '{"label": "USED_GOOD", "confidence": 0.8, "reason": "worn"}',
+    )
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(
+        operation="classify", text="a description",
+        label_set=["NEW", "USED_GOOD", "USED_ACCEPTABLE"],
+    ))
+    assert out["ok"] is True
+    assert out["result"]["label"] == "USED_GOOD"
+
+
+def test_simple_llm_jobs_classify_label_outside_label_set_fails(cfg, monkeypatch):
+    """todo #1576: a JSON-shaped response with a label outside label_set is
+    a contract violation, not ok: True."""
+    monkeypatch.setattr(
+        "tgw.apis.llm.call_model",
+        lambda *a, **k: '{"label": "REFURBISHED", "confidence": 0.6, "reason": "unclear"}',
+    )
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(
+        operation="classify", text="a description",
+        label_set=["NEW", "USED_GOOD", "USED_ACCEPTABLE"],
+    ))
+    assert out["ok"] is False
+    assert "REFURBISHED" in out["error"]
+    assert "not in label_set" in out["error"]
+    assert out["raw"]["label"] == "REFURBISHED"
+
+
+def test_simple_llm_jobs_classify_without_label_set_skips_check(cfg, monkeypatch):
+    """No label_set supplied → open-ended classification, nothing to
+    validate against — any label is accepted (todo #1576)."""
+    monkeypatch.setattr(
+        "tgw.apis.llm.call_model",
+        lambda *a, **k: '{"label": "ANYTHING", "confidence": 0.5}',
+    )
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(operation="classify", text="a description"))
+    assert out["ok"] is True
+    assert out["result"]["label"] == "ANYTHING"
+
+
+def test_simple_llm_jobs_extract_fields_all_keys_present_still_ok(cfg, monkeypatch):
+    """Regression check: normal case (model returns all requested schema
+    keys) still returns ok: True (todo #1576)."""
+    monkeypatch.setattr(
+        "tgw.apis.llm.call_model",
+        lambda *a, **k: '{"brand": "Kenmore", "condition": "used"}',
+    )
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(
+        operation="extract_fields", text="a description",
+        schema={"brand": "string", "condition": "string"},
+    ))
+    assert out["ok"] is True
+    assert out["result"]["brand"] == "Kenmore"
+
+
+def test_simple_llm_jobs_extract_fields_missing_key_fails(cfg, monkeypatch):
+    """todo #1576: a requested schema key absent from the model's response
+    is a contract violation, not ok: True."""
+    monkeypatch.setattr(
+        "tgw.apis.llm.call_model",
+        lambda *a, **k: '{"brand": "Kenmore"}',
+    )
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(
+        operation="extract_fields", text="a description",
+        schema={"brand": "string", "condition": "string"},
+    ))
+    assert out["ok"] is False
+    assert "condition" in out["error"]
+    assert "missing requested field" in out["error"]
+    assert out["raw"]["brand"] == "Kenmore"
+
+
+def test_simple_llm_jobs_extract_fields_extra_keys_beyond_schema_still_ok(cfg, monkeypatch):
+    """Extra keys beyond schema are fine — only missing keys are a
+    violation (todo #1576)."""
+    monkeypatch.setattr(
+        "tgw.apis.llm.call_model",
+        lambda *a, **k: '{"brand": "Kenmore", "condition": "used", "color": "white"}',
+    )
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(
+        operation="extract_fields", text="a description",
+        schema={"brand": "string", "condition": "string"},
+    ))
+    assert out["ok"] is True
+    assert out["result"]["color"] == "white"
+
+
+def test_simple_llm_jobs_extract_fields_without_schema_skips_check(cfg, monkeypatch):
+    """No schema supplied → nothing to validate against (todo #1576)."""
+    monkeypatch.setattr(
+        "tgw.apis.llm.call_model",
+        lambda *a, **k: '{"anything": "goes"}',
+    )
+    out = json.loads(mcp_server.tgw_simple_llm_jobs(operation="extract_fields", text="a description"))
+    assert out["ok"] is True
+    assert out["result"]["anything"] == "goes"
+
+
 def test_simple_llm_jobs_accepts_capitalized_arguments(cfg, monkeypatch):
     calls = {}
 

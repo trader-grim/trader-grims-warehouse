@@ -789,6 +789,29 @@ def tgw_simple_llm_jobs(
         return json.dumps({'ok': False, 'error': f'model response was not valid JSON: {exc}',
                             'raw': raw})
 
+    # Output-contract validation (todo #1576, PP-SIMPLEJOBS-001 follow-up):
+    # a JSON-shaped response isn't automatically a response that honors what
+    # the caller actually asked for. Only the two operations with an
+    # explicit caller-supplied contract (label_set / schema) are checked;
+    # the rest have no equivalent contract to validate against.
+    if operation == 'classify' and label_set:
+        label = result.get('label') if isinstance(result, dict) else None
+        if label not in label_set:
+            return json.dumps({
+                'ok': False,
+                'error': f'model returned label {label!r} not in label_set',
+                'raw': result,
+            }, default=str)
+
+    if operation == 'extract_fields' and schema:
+        missing = [k for k in schema if not isinstance(result, dict) or k not in result]
+        if missing:
+            return json.dumps({
+                'ok': False,
+                'error': f'model response missing requested field(s): {sorted(missing)}',
+                'raw': result,
+            }, default=str)
+
     return json.dumps({'ok': True, 'operation': operation, 'result': result}, default=str)
 
 
