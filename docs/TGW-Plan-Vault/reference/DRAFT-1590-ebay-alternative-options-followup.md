@@ -37,6 +37,20 @@ closed without addressing it.
 the 2026-07-02 baseline. The EPS request was never actually answered —
 only closed alongside an unrelated answer.
 
+**Dave probed further, same session — an AI-generated eBay support reply
+(not the formal ticket system) confirms both threads:** on sold-price
+data, it stated flatly there is no API/report delivering item-level sold
+price data for independent sellers — Marketplace Insights genuinely has
+no substitute, the denial's "alternative options" line was empty. On EPS,
+it stated the **Application Growth Check is the only documented path**
+to a limit increase, and suggested one hadn't been completed — but one
+had: case `260605-000035` **was** an Application Growth Check, with the
+EPS ask bundled into it. This is either the bot lacking case-history
+context, or further confirmation that only the Marketplace Insights half
+of that check was actually processed. The ticket text below now states
+plainly that the check was already done under that case number, so
+support can't redirect us to restart the process from scratch.
+
 ## Suggested ticket text
 
 > **Subject:** Two unresolved items from closed case 260605-000035 —
@@ -60,11 +74,16 @@ only closed alongside an unrelated answer.
 > usefulness? A named API, report, or program — not a general pointer
 > back to developer support — is what we're asking for here.
 >
-> **2) EPS call-limit increase.** The same case 260605-000035 also
-> included a request to increase our EPS (`UploadSiteHostedPictures`)
-> daily call limit. That request was never addressed before the case was
-> closed. Could you please respond to it directly in this new ticket,
-> rather than closing without a substantive answer again?
+> **2) EPS call-limit increase.** Case 260605-000035 was itself an
+> Application Growth Check, and it included a request to increase our
+> EPS (`UploadSiteHostedPictures`) daily call limit as part of that
+> check. That request was never addressed before the case was closed —
+> the Growth Check was completed, but only the Marketplace Insights
+> portion received a substantive answer. I'm not asking to restart the
+> Growth Check process; I'm asking for the EPS decision from the check
+> that already happened under case 260605-000035. Could you please
+> respond to it directly in this new ticket, rather than closing without
+> a substantive answer again?
 
 ## Context for Dave
 
