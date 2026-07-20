@@ -7,41 +7,35 @@ convention as `handoff-v5-2026-07-02-preredraw.md`) and gets replaced —
 never appended to, never rotated piecemeal into `SESSION-LOG.md`. Keep it to
 what's needed to pick up right now: the one open thread, not a running
 history. Target: a few sentences, not pages. Prior full snapshot:
-`archive/handoff-2026-07-20-simplejobs-merged.md`; running per-session
-narrative log (unaffected by this rule, still flat-append):
+`archive/handoff-2026-07-20-radar-and-flake-fixes-actioned.md`; running
+per-session narrative log (unaffected by this rule, still flat-append):
 `archive/SESSION-LOG.md`.
 
 ---
 
-**Session closed out 2026-07-20.** `PP-SIMPLEJOBS-001` (`tgw_simple_llm_jobs`
-MCP tool) built, peer-reviewed by Tigwa (caught a real bug), merged into
-`catio-nix-0.0.1-alpha`, live and tested. Tailscale authenticated on both
-hosts. Full detail: `inbox/DONE-2026-07-19-20-simple-llm-jobs-and-radar-
-direction.md`.
-
-**NEXT BIG PLANNING SESSION — lead item (Dave): PP-RADAR-001, "my control
-panel."** Direction is settled/build-authorized (server-based, encrypted,
-explicit-recipient clipboard replacement + current-entry heads-up layer),
-staged behind `clip-route` (PP-EVENTD-001, todo #1329) landing first so
-Tigwa's #1573 contract is built from real data, not assumptions. Full
-direction/rationale in the master plan's `PP-RADAR-001`/`PP-EVENTD-001`
-sections — start there.
+**Session closed out 2026-07-20.** `PP-AGENTTRACE-001` Phases 1-3 built,
+reviewed, merged (agent trace logging: Postgres table, `tgw trace` CLI,
+Obsidian render, `/form/runs` UI — all live). Invariant E14 (agent-trace
+evidence write-once, no exemptions) built and wired. Full detail:
+`inbox/claude/INPROGRESS-2026-07-20-agenttrace-evidence-ebay-session.md`.
 
 **Open now, needs Dave, in priority order:**
-1. **Three flake fixes built/validated, stuck on the same process gap**
-   (invariant E13 — agent won't accept relayed authorization for the final
-   `git commit`/`nixos-rebuild switch`, even quoted verbatim, no direct
-   channel to it exists yet): syncthing-tgw port fix (#1568), extraHosts fix
-   (#1567, already committed+pushed), and the fish→bash shell switch (#1575,
-   diff ready both hosts). Needs Dave to pick how to finish these (do it
-   himself, let Claude do it directly, or resolve E13 itself) — see master
-   plan's `PP-NIXOS-001` section for each diff's exact state.
-2. Todo #1562 (`PP-CONDITION-ENUM-001`) — branch reviewed, ready, not yet
-   stitched.
-3. tgw-prod missing MIME/editor registration — needs Dave's pick between two
-   proposed fixes.
-4. Todo #1573 (`PP-RADAR-001`) — Tigwa's to complete next, once `clip-route`
-   produces real data to design against.
+1. **PP-AGENTTRACE-001 Phase 4 + integrity-hardening packet #1586 paused**
+   on Tigwa's authenticity/anti-cover-up review — needs Dave's sign-off on
+   the hardening design (content hash-commitment lock, Syncthing folder
+   spec) before either goes to an executor. Tigwa's own `PP-EVIDENCE-001`
+   Stage 0 audit (broader — spans ItemData/Plan Vault/backups/git history
+   too) is in progress on her side; todo #1589 tracks it.
+2. **Three eBay Developer Support tickets drafted, none sent** — case
+   `260605-000035` was closed after eBay answered only 1 of 3 bundled
+   asks. `DRAFT-1591` (EPS increase), `DRAFT-1592` (alternative options
+   for sold-price data), `DRAFT-1593` (new-keyset status, confirmed
+   Growth-Check-gated) all sit in `docs/TGW-Plan-Vault/reference/` for
+   Dave's review/edit/submission. Tigwa briefed and asked to help track
+   follow-through.
+3. **Unread Tigwa thread, never reached this session** — a "guided
+   research acceptance gate" review request + two addenda, sitting in
+   `inbox/claude/` since earlier today. Pick up next session.
 
 No other standing risk carried forward — check `tgw plan status` / `tgw
 health` fresh each session rather than trusting a stale note here.
