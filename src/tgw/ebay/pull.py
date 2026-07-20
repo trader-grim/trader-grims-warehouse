@@ -331,26 +331,51 @@ def mark_item_sold(json_path: Path, order_id: str, buyer: str,
     """
     Decrement inventory quantity by the sold quantity.
     Marks status=sold + ebay_listing.status=Sold only when remaining qty reaches 0.
-    Idempotent — returns False if already sold or order already recorded.
+
+    `ebay_sale` is a LIST of sold-order records (not a single dict) — a SKU can
+    receive more than one distinct order (multi-qty listings, or an "oversold"
+    case where a further order lands after the item is already sold out).
+    Idempotency keys on `order_id` membership in that list, NEVER on
+    `status == 'sold'` — the latter can't distinguish "this exact order was
+    already processed" from "a genuinely new order came in after sellout", and
+    doing so silently dropped real sale data (todo #1604 / PP-SOLD-001, live
+    incident 2026-07-20).
+
+    Note: once `status` is already 'sold' (remaining had already hit 0), a
+    further distinct order is still recorded (appended) even though physical
+    quantity can't go negative — this is the "oversold" case. Whether that
+    needs its own flag/code path is a separate business question, out of
+    scope here; it is NOT silently dropped.
     """
     item = json.loads(json_path.read_text(encoding='utf-8'))
-    if item.get('status') == 'sold':
+    existing_sales = item.get('ebay_sale')
+    if isinstance(existing_sales, dict):
+        # legacy single-dict shape (pre-#1604) — normalize to a list for the
+        # order_id membership check below
+        existing_sales = [existing_sales] if existing_sales else []
+    elif not isinstance(existing_sales, list):
+        existing_sales = []
+
+    # Idempotency: skip only if this EXACT order_id was already recorded.
+    if any(rec.get('order_id') == order_id for rec in existing_sales if isinstance(rec, dict)):
         return False
-    # Idempotency for multi-qty: skip if this order was already recorded
-    if item.get('ebay_sale', {}).get('order_id') == order_id:
-        return False
+
     sku = json_path.parent.name
+    already_sold_out = item.get('status') == 'sold'
 
     current_qty = int(item.get('draft_listing', {}).get('quantity') or 1)
     remaining = max(0, current_qty - quantity)
 
     if dry_run:
-        action = 'sold out' if remaining == 0 else f'qty {current_qty} → {remaining}'
+        if already_sold_out:
+            action = 'additional order on already-sold-out item (oversold)'
+        else:
+            action = 'sold out' if remaining == 0 else f'qty {current_qty} → {remaining}'
         log.info('[dry-run] %s sold order=%s price=$%s qty_sold=%d (%s)',
                  sku, order_id, sale_price, quantity, action)
         return True
 
-    ebay_sale = {
+    new_sale = {
         'order_id':   order_id,
         'buyer':      buyer,
         'sale_price': sale_price,
@@ -358,12 +383,24 @@ def mark_item_sold(json_path: Path, order_id: str, buyer: str,
         'sale_date':  sale_date,
         'synced_at':  synced_at,
     }
+    ebay_sale_list = existing_sales + [new_sale]
 
-    if remaining == 0:
+    if already_sold_out:
+        # Oversold case: item was already fully sold, but a further distinct
+        # order came in. Record it — never drop it — quantity stays at 0.
+        fence_patch_item(cfg, sku, {
+            'ebay_sale': ebay_sale_list,
+        })
+        log.warning('ebay_pull: OVERSOLD %s order=%s price=$%s recorded on already-sold-out item',
+                    sku, order_id, sale_price)
+        tgw_logging.log_event('ebay_item_sold', sku=sku,
+                              order_id=order_id, sale_price=sale_price, sold_out=True,
+                              oversold=True)
+    elif remaining == 0:
         fence_ebay_write(cfg, sku, ebay_listing={'status': 'Sold'})
         fence_patch_item(cfg, sku, {
             'status': 'sold',
-            'ebay_sale': ebay_sale,
+            'ebay_sale': ebay_sale_list,
             'draft_listing': {'quantity': 0},
         })
         log.info('ebay_pull: sold out %s order=%s price=$%s', sku, order_id, sale_price)
@@ -371,7 +408,7 @@ def mark_item_sold(json_path: Path, order_id: str, buyer: str,
                               order_id=order_id, sale_price=sale_price, sold_out=True)
     else:
         fence_patch_item(cfg, sku, {
-            'ebay_sale': ebay_sale,
+            'ebay_sale': ebay_sale_list,
             'draft_listing': {'quantity': remaining},
         })
         log.info('ebay_pull: partial sale %s order=%s price=$%s qty %d→%d',
