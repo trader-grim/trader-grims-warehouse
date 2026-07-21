@@ -1,11 +1,15 @@
-"""PP-STATEMACHINE-001 (todo #1608) — job manifest contract tests.
+"""PP-STATEMACHINE-001 (todo #1608, #1618) — job manifest contract tests.
 
 All DB calls are mocked (same convention as tests/test_agent_trace.py /
 tests/test_ai_usage.py) — no real PostgreSQL connection needed.
 
 Covers:
-  - Phase 1: a duplicate `_reschedule()`-style debounce call collapses into
-    ON CONFLICT DO UPDATE against the same dedupe_key (not two INSERTs).
+  - Phase 1: a duplicate `_reschedule()`-style debounce call collapses onto
+    the same pending row via explicit read-then-write (UPDATE), not two
+    INSERTs. (todo #1618 rewrote this from INSERT ... ON CONFLICT DO
+    UPDATE — see enqueue_job()'s docstring "Fix actually used" section for
+    why; live-DB-verified coverage of the actual bug this replaced is in
+    tests/test_debounce_selfcollision_live.py, skipped if no test DB.)
   - Phase 2: resolve_priority() config lookup, including fallback to
     'normal' when no config entry / no config file exists.
   - Phase 3: supersede=True atomically cancels the existing pending row
@@ -40,23 +44,33 @@ def _mock_conn_cursor():
 
 # ---------------------------------------------------------------------------
 # Phase 1 — debounce collapse (SQL shape, not a live-DB integration test:
-# the ON CONFLICT ... DO UPDATE clause IS the collapse mechanism, so
-# asserting it's present + wired to the right dedupe_key is the correct
-# offline proxy for "two calls collapse into one row").
+# explicit read-then-write IS the collapse mechanism now — todo #1618 —
+# so asserting the right statements run in the right order, serialized by
+# a per-dedupe_key advisory lock, is the correct offline proxy for "two
+# calls collapse into one row" / "a self-collision creates a distinct row".
 # ---------------------------------------------------------------------------
 
-def test_debounce_reschedule_uses_on_conflict_same_key():
+def test_debounce_reschedule_coalesces_onto_existing_pending_row():
+    """Second debounce call finds the first call's row still pending
+    (queued) and UPDATEs it (GREATEST not_before) instead of inserting."""
     from tgw.queue import state_machine as sm
 
     mock_con, mock_cur = _mock_conn_cursor()
+    mock_cur.fetchone.side_effect = [
+        None,                 # call 1: SELECT pending -> none yet
+        None,                 # call 1: SELECT active (leased/running) -> none
+        ('job-id-123',),      # call 1: INSERT ... RETURNING
+        ('job-id-123',),      # call 2: SELECT pending -> found (call 1's row)
+        ('job-id-123',),      # call 2: UPDATE ... RETURNING
+    ]
     with patch.object(sm, '_conn', return_value=mock_con):
-        sm.enqueue_job(
+        jid1 = sm.enqueue_job(
             queue_name='ebay_legacy_sync',
             payload={'reason': 'startup'},
             dedupe_key='ebay_legacy_sync:pending',
             debounce=True,
         )
-        sm.enqueue_job(
+        jid2 = sm.enqueue_job(
             queue_name='ebay_legacy_sync',
             payload={'reason': 'scheduled'},
             not_before=123456.0,
@@ -64,13 +78,55 @@ def test_debounce_reschedule_uses_on_conflict_same_key():
             debounce=True,
         )
 
-    assert mock_cur.execute.call_count == 2
-    for call in mock_cur.execute.call_args_list:
-        sql, params = call.args
-        assert 'ON CONFLICT (dedupe_key)' in sql
-        assert 'DO UPDATE' in sql
-        assert 'GREATEST' in sql
-        assert params[8] == 'ebay_legacy_sync:pending'  # dedupe_key positional slot
+    assert jid1 == jid2 == 'job-id-123'
+    calls = mock_cur.execute.call_args_list
+    # call 1: advisory lock, select pending, select active, insert (4 execs)
+    assert 'pg_advisory_xact_lock' in calls[0].args[0]
+    assert calls[0].args[1] == ('ebay_legacy_sync:pending',)
+    assert 'queued' in calls[1].args[0] and 'retry_wait' in calls[1].args[0]
+    assert 'leased' in calls[2].args[0] and 'running' in calls[2].args[0]
+    assert 'INSERT INTO queue_jobs' in calls[3].args[0]
+    assert 'ON CONFLICT' not in calls[3].args[0]
+    # call 2: advisory lock, select pending (found), update (3 execs)
+    assert 'pg_advisory_xact_lock' in calls[4].args[0]
+    assert 'SELECT job_id' in calls[5].args[0]
+    update_sql, update_params = calls[6].args
+    assert 'UPDATE queue_jobs' in update_sql
+    assert 'GREATEST' in update_sql
+    assert update_params[2] == 'job-id-123'  # UPDATE ... WHERE job_id = %s
+
+
+def test_debounce_self_collision_creates_distinct_row_with_null_dedupe_key():
+    """todo #1618 — the actual bug: a worker's own leased/running row must
+    never be corrupted by its own mid-handle() debounce reschedule call.
+    No pending row exists yet (the caller's own job is the only row, and
+    it's active, not pending) — must fall through to INSERT a fresh,
+    distinct row with dedupe_key=NULL, never touch the active row."""
+    from tgw.queue import state_machine as sm
+
+    mock_con, mock_cur = _mock_conn_cursor()
+    mock_cur.fetchone.side_effect = [
+        None,                  # SELECT pending -> none (caller's own row is 'running', not pending)
+        (1,),                  # SELECT active (leased/running) -> found (the caller's own row)
+        ('new-job-id-456',),   # INSERT ... RETURNING
+    ]
+    with patch.object(sm, '_conn', return_value=mock_con):
+        jid = sm.enqueue_job(
+            queue_name='token_refresh',
+            payload={'reason': 'self-reschedule'},
+            dedupe_key='token_refresh:pending',
+            not_before=999999999.0,
+            debounce=True,
+        )
+
+    assert jid == 'new-job-id-456'
+    insert_sql, insert_params = mock_cur.execute.call_args_list[-1].args
+    assert 'INSERT INTO queue_jobs' in insert_sql
+    assert 'ON CONFLICT' not in insert_sql
+    # dedupe_key positional slot (8) must be None, not the real key — this
+    # is what lets the fresh row coexist with the still-active original
+    # instead of colliding with it via uq_queue_jobs_dedupe_key_active.
+    assert insert_params[8] is None
 
 
 def test_non_debounce_call_has_no_on_conflict():

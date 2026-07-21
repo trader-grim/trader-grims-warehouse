@@ -559,6 +559,20 @@ CREATE UNIQUE INDEX uq_queue_jobs_dedupe_key_active ON public.queue_jobs USING b
 
 
 --
+-- Name: uq_queue_jobs_dedupe_key_pending; Type: INDEX; Schema: public; Owner: -
+--
+-- todo #1618 / PP-STATEMACHINE-001: narrower arbiter for enqueue_job()'s
+-- debounce=True ON CONFLICT path — see schema.sql for the full rationale
+-- (self-rescheduling worker colliding with its own leased/running row).
+-- NOT YET APPLIED to the live production database as of this commit — see
+-- the #1618 result manifest; applying it is the stitch/merge step's job,
+-- not this commit's.
+--
+
+CREATE UNIQUE INDEX uq_queue_jobs_dedupe_key_pending ON public.queue_jobs USING btree (dedupe_key) WHERE (dedupe_key IS NOT NULL AND state IN ('queued', 'retry_wait'));
+
+
+--
 -- Name: queue_jobs trg_queue_jobs_history; Type: TRIGGER; Schema: public; Owner: -
 --
 

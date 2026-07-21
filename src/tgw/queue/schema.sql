@@ -59,6 +59,22 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_queue_jobs_dedupe_key_active
     WHERE dedupe_key IS NOT NULL
       AND state NOT IN ('succeeded','failed','dead_letter','cancelled');
 
+-- todo #1618 / PP-STATEMACHINE-001: narrower arbiter for enqueue_job()'s
+-- debounce=True ON CONFLICT path. The broad index above also covers
+-- 'leased'/'running', which lets a self-rescheduling worker's own in-flight
+-- job collide with its own reschedule call (dedupe_key finds the caller's
+-- OWN currently-executing row as the only match) — mark_succeeded() then
+-- finalizes that corrupted row, permanently orphaning the reschedule. This
+-- index covers only genuinely pending (not yet started) states, so a
+-- debounce call made while the only existing row under a dedupe_key is
+-- leased/running falls through to a fresh INSERT instead of corrupting the
+-- in-flight row. Do NOT widen this to match the broad index above — the
+-- narrower predicate is the fix, not an oversight. See uq_queue_jobs_dedupe_key_active.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_queue_jobs_dedupe_key_pending
+    ON queue_jobs(dedupe_key)
+    WHERE dedupe_key IS NOT NULL
+      AND state IN ('queued', 'retry_wait');
+
 CREATE INDEX IF NOT EXISTS idx_queue_jobs_runnable
     ON queue_jobs(queue_name, priority, run_at, created_at)
     WHERE state = 'queued';
