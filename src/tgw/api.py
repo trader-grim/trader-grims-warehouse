@@ -493,7 +493,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
         "admin-file", "classify-suggestions", "picklist", "print-label", "mvitems",
         "suggest", "quiet-check", "perp-run", "whisper-suggest",
         "claude-help", "clip", "suggest-edit", "promo", "nix-bundle-usb",
-        "mailbox", "trace",
+        "mailbox", "trace", "flake",
     ]),
 ]
 
@@ -1102,6 +1102,32 @@ def _build_parser() -> argparse.ArgumentParser:
     tp.add_argument("--status", required=True, choices=["completed", "failed", "killed", "escalated"], help="final run status")
     tp.add_argument("--summary", default=None, help="one-line summary of the run")
     tp.add_argument("--transcript", default=None, dest="transcript_path", help="path to the archived transcript (see archive_transcript())")
+
+    p = sub.add_parser("flake", help="flake-mutation push/switch request gate (PP-FLAKEGATE-001) — agents request, only a human's mark-executed closes the loop")
+    flake_sub = p.add_subparsers(dest="flake_op", required=True, metavar="FLAKE-OP")
+
+    fp = flake_sub.add_parser("request-push", help="enqueue a request for a human to git push a flake commit; never touches git itself")
+    fp.add_argument("--repo", required=True, help="local flake checkout path, e.g. ~/tgw-flake")
+    fp.add_argument("--host", required=True, help="host the checkout lives on, e.g. tgw-prod / a1131")
+    fp.add_argument("--commit", required=True, help="commit sha to be pushed")
+    fp.add_argument("--summary", required=True, help="one-line description of the change")
+
+    fp = flake_sub.add_parser("request-switch", help="enqueue a request for a human to nixos-rebuild switch; never touches nixos-rebuild itself")
+    fp.add_argument("--host", required=True, help="host to switch, e.g. tgw-prod / a1131")
+    fp.add_argument("--commit", required=True, help="commit sha being activated")
+    fp.add_argument("--summary", required=True, help="one-line description of the change")
+
+    flake_sub.add_parser("queue", help="list flake_mutation jobs still queued (pending a human decision)")
+
+    fp = flake_sub.add_parser("show", help="full detail of one flake_mutation job")
+    fp.add_argument("job_id", help="job_id (UUID) from 'tgw flake queue'/'request-push'/'request-switch'")
+
+    fp = flake_sub.add_parser("mark-executed", help="record that a human ran the real push/switch by hand — the ONLY command that closes a flake_mutation job; never executes anything")
+    fp.add_argument("job_id", help="job_id (UUID) to mark executed")
+    fp.add_argument("--by", default=None, dest="executed_by", help="name of the human who ran it (recorded in queue_job_history)")
+
+    fp = flake_sub.add_parser("audit", help="detective backstop: flag origin/master commits with no matching executed flake_mutation push record")
+    fp.add_argument("--repo", default="~/tgw-flake", help="flake checkout path to audit (default: %(default)s)")
 
     p = sub.add_parser("admin-file", help="scan inbox and enqueue eligible notes for PM-intake (PP-DOCFLOW-001)")
     p.add_argument("--now", action="store_true", help="bypass submission-delay gate (process all files regardless of age)")
@@ -4478,6 +4504,65 @@ def main() -> int:
                 return 0 if result.get("ok") else 1
             else:
                 result = {"ok": False, "error": f"unknown trace op: {args.trace_op!r}"}
+
+        elif args.op == "flake":
+            from tgw import flake_gate
+
+            if args.flake_op == "request-push":
+                result = flake_gate.request_push(args.repo, args.host, args.commit, args.summary)
+                if result.get("ok"):
+                    print(result["job_id"])
+                else:
+                    print(f"Error: {result.get('error')}", file=sys.stderr)
+                return 0 if result.get("ok") else 1
+            elif args.flake_op == "request-switch":
+                result = flake_gate.request_switch(args.host, args.commit, args.summary)
+                if result.get("ok"):
+                    print(result["job_id"])
+                else:
+                    print(f"Error: {result.get('error')}", file=sys.stderr)
+                return 0 if result.get("ok") else 1
+            elif args.flake_op == "queue":
+                result = flake_gate.queue_table()
+                jobs = result.get("jobs", [])
+                if jobs:
+                    print(f"{'JOB_ID':<38} {'KIND':<8} {'HOST':<10} {'COMMIT':<14} {'REQUESTED_AT':<20} SUMMARY")
+                    for j in jobs:
+                        print(f"{j['job_id']:<38} {j['kind']:<8} {(j['host'] or ''):<10} "
+                              f"{j['commit']:<14} {str(j['requested_at']):<20} {j['summary']}")
+                else:
+                    print("(no flake_mutation jobs pending)")
+                return 0
+            elif args.flake_op == "show":
+                result = flake_gate.show_job(args.job_id)
+                if not result.get("ok"):
+                    print(f"Error: {result.get('error')}", file=sys.stderr)
+                    return 1
+                print(json.dumps(result["job"], ensure_ascii=False, indent=2, default=str))
+                return 0
+            elif args.flake_op == "mark-executed":
+                result = flake_gate.mark_executed(args.job_id, executed_by=args.executed_by)
+                if not result.get("ok"):
+                    print(f"Error: {result.get('error')}", file=sys.stderr)
+                    return 1
+                print(f"Marked executed: {result['job']['job_id']} (state={result['job']['state']})")
+                return 0
+            elif args.flake_op == "audit":
+                result = flake_gate.audit(args.repo)
+                if not result.get("ok"):
+                    print(f"Error: {result.get('error')}", file=sys.stderr)
+                    return 1
+                findings = result.get("findings", [])
+                print(f"Checked {result['commits_checked']} commits on origin/master ({result['repo']}).")
+                if findings:
+                    print(f"FINDINGS: {len(findings)} commit(s) with no matching executed flake_mutation push record:")
+                    for f in findings:
+                        print(f"  {f['sha']}  {f['date']}")
+                else:
+                    print("No findings — every post-rollout commit has a matching executed push record.")
+                return 0  # detective backstop only, never blocks — see module docstring
+            else:
+                result = {"ok": False, "error": f"unknown flake op: {args.flake_op!r}"}
 
         elif args.op == "admin-file":
             from tgw.workers.pm_intake import cmd_admin_file
