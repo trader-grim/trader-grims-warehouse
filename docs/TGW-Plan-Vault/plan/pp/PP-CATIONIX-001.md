@@ -263,6 +263,19 @@ and Dave upgrade":
   sandbox commit/rollback flow (the unlock token would gate a session's
   ability to promote its snapshot to live). Not a separate PP — track as a
   future addendum to PP-AIOPS-001 Phase 5/6 when that phase is reached.
+  **Concrete gap this closes, named 2026-07-21 (PP-STATEMACHINE-001
+  conversation):** `state_machine.enqueue_job()`'s E16 manifest enforcer
+  validates that a job's manifest is *complete* (dedupe_key, entity_id,
+  priority) — it does not validate that the *caller* is authorized to
+  submit to that queue. All workers share one `tgw` DB role today, so any
+  worker's code (compromised or buggy) could call `enqueue_job(queue_name=
+  'ebay_publish', ...)` directly and bypass the pipeline's own approval
+  gates — nothing in the enforcer stops it. Dave, same conversation:
+  "yes we will need containers and cryptographic locking to finish this" —
+  confirms this specific gap is exactly what the crypto-lock endgame above
+  is for (per-worker signed policy scoping *which* queues a given worker's
+  execution token may enqueue into), not a new problem needing its own
+  design. Not actionable until crypto-lock phase is reached.
 
 ### 2. Dev team (the Hermes/Tigwa/Leotha AI workforce)
 See **PP-HERMES-EA-001** (new doc) for the full persona design. Summary:

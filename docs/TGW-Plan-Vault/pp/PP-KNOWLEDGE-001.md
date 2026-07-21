@@ -190,4 +190,43 @@ durable write-ahead step. Real design work, candidate for "model the
 worker in Hermes first" (PP-HERMES-EA-001) before it touches the live
 `items.py` write path.
 
+**Concrete instance surfaced 2026-07-21 — `alt_text`'s history-archive step
+is exactly this hand-off, currently built wrong.** Today's implementation
+(#1407/#1408, `_history_root_reachable()` guard) still writes directly to
+the `history` symlink onto the removable `MasterArchive` drive, and only
+fails soft (defer + C11 finding) when that drive happens to be unmounted —
+i.e. the per-item worker still couples to external mount state, just
+non-fatally. Dave's correction, same conversation: **wrong strategy, not
+just an incomplete one.** Reframed per this section's own "separation with
+continuation and resolution" pattern (Dave's own physical-archive workflow,
+applied here) —
+1. **Separation** — `alt_text` (and anything else archiving to `history`)
+   writes to a local, always-available staging area, never touches the
+   removable drive directly. No unmounted-drive branch to maintain, because
+   the per-item write never depends on it.
+2. **Continuation** — the pipeline always proceeds the same way regardless
+   of archive-drive mount state; today's `archive_target_unmounted`
+   deferred/C11 finding path goes away entirely, not just gets more robust.
+3. **Resolution** — a separate, later, idempotent job (the librarian/
+   archivist hand-off this section already names) sweeps staging into the
+   real library whenever the target is available, then clears staging.
+   **Distinct from item-archive's existing zip-merge (E5/#1104):** for this
+   data class, resolution is **hash, then archive** — content-addressed,
+   not zip-bundled (`alt_text.py` already computes an image hash for its
+   `store_hash`/`lookup_hash` dedup cache, so the hash is available at
+   staging time, not something new to compute).
+This is the `alt_text` case specifically of the general archive/log/index/
+place hand-off above — not a new pattern, a concrete example of it, and
+should be designed/built together with the general hand-off rather than as
+its own one-off fix to #1407/#1408. Not yet scoped into a packet.
+
+**Interim guidance, Dave 2026-07-21: "the important part for now is don't
+write to a symlink and you'll be ok for a while."** Don't wait for the full
+Resolution-step design (hash-then-archive into the real library) before
+fixing anything — the minimum near-term fix is just Step 1 (Separation):
+stop `alt_text.py` from writing through the `history` symlink at all, land
+the copy in a local staging directory instead. That alone removes the
+unmounted-drive coupling and holds until the full archivist hand-off is
+designed/built. Small, well-scoped, hasn't been dispatched yet.
+
 

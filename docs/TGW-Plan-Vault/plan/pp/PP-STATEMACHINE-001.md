@@ -50,6 +50,32 @@ not in something that fails loudly).
    and inserts a fresh, immediately-eligible one instead. This is the fix for the
    `restart-ebay-token` CLI's "force now" need (flagged as item D.1 in #1607's audit) —
    folded in here as a manifest property, not a one-off special case.
+5. **`depends_on`** (new, NOT YET BUILT — design captured 2026-07-21) — for job
+   sequences (e.g. a 3-part draft→upload→publish chain, or any multi-step operation)
+   where job N+1 must not become claimable until job N has actually completed, not
+   merely been ordered ahead of it. `priority` alone only fixes *claim order* among
+   ready jobs in a single-worker queue — it says nothing about completion. Dave,
+   2026-07-20/21 (Perplexity-adjacent design conversation): "I was thinking a job is
+   registered when submitted, manifest hashed for id, and excluded when completed."
+   Design, reusing existing infrastructure rather than adding a parallel one:
+   - A job's identity for dependency purposes is its own `dedupe_key` — no new hash/ID
+     needed, since `dedupe_key` is already a deterministic manifest-derived string and
+     is exactly what's already unique-indexed per active state (`uq_queue_jobs_dedupe_
+     key_active`, active-state-only per the #1608 build).
+   - A dependent job is submitted with `depends_on=<precursor's dedupe_key>`.
+   - At claim time, `claim_queue_jobs()` skips any row whose `depends_on` still matches
+     an active-state (`queued`/`retry_wait`/`leased`/`running`) row elsewhere in
+     `queue_jobs`. Once the precursor reaches a terminal state (`succeeded`, or
+     `failed`/`dead_letter` if that's an acceptable unblock condition — needs a
+     decision), it drops out of the active set and the dependent becomes claimable.
+   - No new state, no new table — a claim-time `NOT EXISTS` check against the existing
+     `dedupe_key`/`state` columns.
+   - Cross-queue safe by construction (`dedupe_key` isn't queue-scoped), which matters
+     for chains that span different workers (draft → upload → publish are 3 different
+     `tgw-worker@` units).
+   Related to the still-open #1609 (run-once semantics) but distinct: #1609 is about
+   blocking *re*-enqueue after completion; this is about blocking *initial* eligibility
+   before a precursor completes.
 
 ## Why this shape (not a separate validation layer)
 
@@ -97,6 +123,35 @@ harmless, template-hygiene note only). Order:
 
 ## Status
 
-Design captured 2026-07-20. Invariant **E16** to be written alongside (rule + why +
-enforcement, matching the E9-E15 template) once the first implementation packet lands.
-Not yet built.
+**Manifest items 1-4 (`dedupe_key`, `priority`, `entity_id`/`entity_type`, `supersede`)
+built, tested, reviewed, merged, and live as of 2026-07-20** (#1608, all 4 phases;
+`tgw-queue-priorities.json` deployed). Invariant **E16** written. Still open from that
+build: #1609 (run-once semantics + gate-passing observability) and the actual
+lease-heartbeat-renewal structural fix (#1607's remaining scope, currently only
+mitigated via the `lease_seconds` 300→600s bump).
+
+**Manifest item 5 (`depends_on`) is design-only, not yet built** (captured
+2026-07-21) — needs its own todo/packet once Dave names a concrete use case to
+build against. Terminal-state unblock question answered, Dave 2026-07-21: only
+`succeeded` unblocks a dependent — `failed`/`dead_letter` on the precursor fails
+the whole sequence (the dependent stays blocked indefinitely, not auto-cancelled
+or auto-skipped). "I think dead letters fail the whole sequence or we have
+unexplained orphans." No automatic resurrection/retry-the-sequence mechanism for
+now, "if at all" — a stuck-sequence dependent is a finding for `PP-DEADLETTER-001`
+triage to surface (same "skip/guard is a finding, not a log line" pattern as
+invariant C11), not something the state machine auto-recovers on its own.
+
+**Correction, same conversation — Dave: "don't we already have on in our intake
+path?"** Yes, and it's actually a cleaner solution than `depends_on` for the case
+it covers: `TGW-Pipeline-Flow.md`'s whole intake/listing chain (`bundle_intake` →
+`ai_identify` → `ebay_draft` → `ebay_upload`/`ebay_price` → `ebay_stage` →
+`ebay_publish`) already does completion-gated sequencing today — each worker
+enqueues the *next* stage only from its own success path. Job N+1 isn't submitted-
+then-blocked; it simply doesn't exist until job N succeeds. No claim-time check
+needed, no new manifest field needed, for any sequence that's fixed at worker-code
+authoring time. **`depends_on` only earns its keep for a narrower case: an ad-hoc
+sequence composed at submission time**, across workers that don't already know
+about each other in code — e.g. an operator or agent issuing an arbitrary N-step
+chain as one batch, not a new pipeline stage being added to existing worker
+source. Until a concrete need like that shows up, this stays a named-but-unbuilt
+idea, not a gap in the current pipeline.
