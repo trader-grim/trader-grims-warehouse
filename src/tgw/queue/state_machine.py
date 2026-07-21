@@ -1328,3 +1328,153 @@ def list_agent_runs(limit: int = 200) -> List[Dict[str, Any]]:
                 (limit,),
             )
             return [dict(row) for row in cur.fetchall()]
+
+
+# ---------------------------------------------------------------------------
+# Flake mutation gate (PP-FLAKEGATE-001, todo #1621, invariant E17)
+# ---------------------------------------------------------------------------
+#
+# `nix-flake-maintainer` never runs `git push` / `nixos-rebuild switch`
+# directly on ~/tgw-flake any more — it enqueues a `queue_jobs` row here
+# (queue_name='flake_mutation') describing the push/switch it wants done,
+# and stops. No worker ever claims/leases this queue (there is no
+# `tgw-worker@flake_mutation.service` unit, deliberately) — the only thing
+# that ever closes a flake_mutation job is a *human*, by hand, after they
+# have actually run the real git push / nixos-rebuild switch themselves,
+# calling `tgw flake mark-executed <job-id>`. This module never shells out
+# to git or nixos-rebuild anywhere — that's the entire point of the gate.
+
+FLAKE_MUTATION_QUEUE = 'flake_mutation'
+
+
+def list_flake_mutation_jobs(state: str = 'queued', limit: int = 200) -> List[Dict[str, Any]]:
+    """List flake_mutation jobs in a given state (default 'queued' — the
+    still-pending-a-human-decision set Dave looks at via `tgw flake queue`).
+    Pass state='' to list all states."""
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if state:
+                cur.execute(
+                    """
+                    SELECT job_id::text, entity_id, operation, payload_json,
+                           state, created_at, updated_at, finished_at
+                      FROM queue_jobs
+                     WHERE queue_name = %s AND state = %s
+                     ORDER BY created_at DESC
+                     LIMIT %s
+                    """,
+                    (FLAKE_MUTATION_QUEUE, state, limit),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT job_id::text, entity_id, operation, payload_json,
+                           state, created_at, updated_at, finished_at
+                      FROM queue_jobs
+                     WHERE queue_name = %s
+                     ORDER BY created_at DESC
+                     LIMIT %s
+                    """,
+                    (FLAKE_MUTATION_QUEUE, limit),
+                )
+            return [dict(row) for row in cur.fetchall()]
+
+
+def get_flake_mutation_job(job_id: str) -> Optional[Dict[str, Any]]:
+    """Full detail of one flake_mutation job, or None if not found (or not a
+    flake_mutation job — `tgw flake show` only ever shows this queue's own
+    rows, never any other queue's, even if a job_id UUID happens to match
+    something else)."""
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT job_id::text, entity_type, entity_id, operation,
+                       handler_family, queue_name, priority, state,
+                       payload_json, dedupe_key, attempt_count, max_attempts,
+                       created_at, updated_at, started_at, finished_at
+                  FROM queue_jobs
+                 WHERE job_id = %s AND queue_name = %s
+                """,
+                (job_id, FLAKE_MUTATION_QUEUE),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def mark_flake_mutation_executed(job_id: str, executed_by: Optional[str] = None) -> Dict[str, Any]:
+    """Record that a human has actually run the real `git push` /
+    `nixos-rebuild switch` themselves, by hand, outside this tool, for one
+    flake_mutation job. This is the ONLY function that ever closes a
+    flake_mutation job — it does not execute anything itself.
+
+    Transitions queued -> succeeded (reusing existing queue_jobs state
+    semantics rather than inventing a parallel status field — there is no
+    worker lease cycle for this queue, so the normal running -> succeeded
+    path used by mark_succeeded() doesn't apply; queued -> succeeded is the
+    direct human-attested equivalent for a job no worker ever claims).
+
+    `executed_by` (if given) is recorded via the `tgw.worker_id` session
+    setting so the existing `queue_job_history`/`trg_queue_jobs_history`
+    trigger captures it on the transition row for free, with no new column
+    — `tgw flake show` surfaces it back out of queue_job_history.
+
+    Raises ValueError if no matching job_id is found in queue_name
+    'flake_mutation' state 'queued' — an update that matches zero rows must
+    never look like a successful close-out (same class as invariant C14 /
+    end_agent_run()'s rowcount check)."""
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # set_config(..., is_local=true), not `SET LOCAL ... = %s` —
+            # Postgres's SET statement grammar does not accept a bound
+            # parameter on the right-hand side; set_config() is a plain SQL
+            # function call and does.
+            if executed_by:
+                cur.execute("SELECT set_config('tgw.worker_id', %s, true)", (executed_by,))
+            cur.execute("SELECT set_config('tgw.queue_transition', %s, true)", ('flake_mark_executed',))
+            cur.execute(
+                """
+                UPDATE queue_jobs
+                   SET state = 'succeeded',
+                       finished_at = NOW()
+                 WHERE job_id = %s AND queue_name = %s AND state = 'queued'
+                RETURNING job_id::text, entity_id, operation, payload_json,
+                          state, finished_at
+                """,
+                (job_id, FLAKE_MUTATION_QUEUE),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise ValueError(
+                    f"mark_flake_mutation_executed: no queued flake_mutation "
+                    f"job found for job_id={job_id!r} (already executed, "
+                    f"cancelled, or does not exist)"
+                )
+            return dict(row)
+
+
+def list_executed_flake_push_shas(host: Optional[str] = None) -> List[str]:
+    """All commit shas (entity_id) recorded as an executed ('succeeded')
+    flake_mutation push job, optionally filtered to one host. Used by
+    `tgw flake audit` to check a live `git log origin/master` against what
+    this mechanism actually has a human-attested record of."""
+    with _conn() as con:
+        with con.cursor() as cur:
+            if host:
+                cur.execute(
+                    """
+                    SELECT entity_id FROM queue_jobs
+                     WHERE queue_name = %s AND operation = 'push' AND state = 'succeeded'
+                       AND payload_json->>'host' = %s
+                    """,
+                    (FLAKE_MUTATION_QUEUE, host),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT entity_id FROM queue_jobs
+                     WHERE queue_name = %s AND operation = 'push' AND state = 'succeeded'
+                    """,
+                    (FLAKE_MUTATION_QUEUE,),
+                )
+            return [r[0] for r in cur.fetchall()]

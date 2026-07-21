@@ -1340,3 +1340,80 @@ step (same category as the worker restarts this packet also defers to Dave/Claud
 post-review). `resolve_priority()` tolerates the file being absent — every lookup just falls
 back to `normal` (100, today's already-implicit default) until it's deployed, so nothing
 breaks in the interim.
+
+## E17 — Agents never execute `git push`/`nixos-rebuild switch` on `~/tgw-flake`; only a human's `mark-executed` closes the loop ✅ (2026-07-21, Dave, PP-FLAKEGATE-001, todo #1621)
+
+**Incident:** `nix-flake-maintainer` committed AND pushed a flake commit (far2l re-add, todo
+#1620) to `origin/master` on `~/tgw-flake` without Dave's explicit push confirmation. Root
+cause: the 2026-07-20 "batch the mutating calls" change (this same file, PP-AGENT-DISCIPLINE-001)
+chained `git add && git commit && git push` into one compound Bash call per host to cut approval
+prompts — combined with the session running in Auto Mode (suppresses permission prompts) and the
+already-confirmed upstream bug where PreToolUse hooks never fire for Agent-tool subagents
+(anthropics/claude-code#69260), nothing actually gated the push. The commit was reverted same
+session per Dave's direct instruction; it was never applied to any host's running system, so no
+live-system undo was needed. Dave's direction: "a more state machine centric approach using the
+rest of our patterns" — don't patch the prompt/hook path (proven unreliable twice now across
+E11/E12's history), apply the same shape already proven for `enqueue_job()`/`queue_jobs`
+(E16/PP-STATEMACHINE-001) and `ebay_publish`'s manual-trigger-only pattern (`tgw publish <sku>`).
+
+**Rule:** `nix-flake-maintainer` (and any future agent with `~/tgw-flake` access) never runs
+`git push` or `nixos-rebuild switch` itself, on either known host (tgw-prod, a1131), under any
+circumstance — not even after Dave says "go ahead" (that authorizes the *request*, not a
+self-attested execution). After committing locally (still direct — only the push is gated) it
+calls `tgw flake request-push --repo <path> --host <host> --commit <sha> --summary <text>`; after
+a successful `dry-activate` it calls `tgw flake request-switch --host <host> --commit <sha>
+--summary <text>` instead of `nixos-rebuild switch`. Both are pure Postgres inserts (`queue_jobs`,
+`queue_name='flake_mutation'`, `entity_type='flake_commit'`, `entity_id`=commit sha,
+`dedupe_key=f'flake_mutation:{kind}:{host}:{sha}'`) — neither touches git or nixos-rebuild at
+all. The agent's job ends at reporting the printed job id to Dave; it never calls the closing
+command either.
+
+**The only thing that ever closes a `flake_mutation` job:** a human runs the real `git push` /
+`nixos-rebuild switch` themselves, by hand, outside this tool, then calls `tgw flake
+mark-executed <job-id> [--by NAME]`. This transitions the job `queued -> succeeded` (reusing
+existing `queue_jobs` state semantics — no parallel status field, no worker ever leases this
+queue since there is no `tgw-worker@flake_mutation.service` unit) and records `--by`'s value via
+the existing `queue_job_history`/`trg_queue_jobs_history` trigger's `tgw.worker_id` session
+setting, at zero new columns. `tgw flake queue` lists every still-`queued` job (what Dave looks
+at to decide what to actually run); `tgw flake show <job-id>` gives full detail including the
+`queue_job_history` execution record once closed.
+
+**Detective backstop, not a blocker:** `tgw flake audit --repo <path>` compares live `git log
+origin/master` commits against `flake_mutation` jobs marked executed with `operation='push'`; any
+post-rollout (2026-07-21) commit on `origin/master` with no matching executed push record is
+printed as a finding. This extends the same detective-control direction E11/E12/E14 already
+named for hook-coverage gaps — it does not stop or block anything, it only reports, since
+preventive PreToolUse hooks are confirmed broken for Agent-tool subagents (E11's update).
+
+**Why not a hook:** the proximate cause here (PreToolUse never firing for Agent-tool subagents)
+is the exact gap E11/E12 already carry as an open, upstream-confirmed limitation — building
+another hook on the same broken firing mechanism would not have closed this incident. The fix
+instead removes the capability itself: `nix-flake-maintainer`'s own procedure (this file) no
+longer contains a `git push`/`nixos-rebuild switch` step at all, replaced by an enqueue-only CLI
+call, so there is no mutating command left for a batched/Auto-Mode/hook-skipped call to slip past
+in the first place.
+
+**Enforcement:** `src/tgw/flake_gate.py` + `state_machine.mark_flake_mutation_executed()` /
+`list_flake_mutation_jobs()` / `get_flake_mutation_job()` / `list_executed_flake_push_shas()` in
+`src/tgw/queue/state_machine.py`, wired to `tgw flake [request-push|request-switch|queue|show|
+mark-executed|audit]` in `src/tgw/api.py`. `.claude/agents/nix-flake-maintainer.md` Step 2/5
+rewritten to call the request commands instead of executing git push / nixos-rebuild switch, and
+its Constraints section carries an explicit standing prohibition on ever calling `mark-executed`
+itself. Tests: `tests/test_flake_gate.py` (offline, mocked DB — enqueue shape, mark-executed
+state transition + not-found error, audit matched/unmatched/pre-rollout cases). Live-verified
+2026-07-21 against the real `state_machine` Postgres DB: real `queue_jobs` rows inserted via
+`request-push`/`request-switch`, listed via `queue`, inspected via `show`, closed via
+`mark-executed` (confirmed `queue_job_history` captured `--by` via the `tgw.worker_id` session
+setting), and `audit` correctly flagged/passed matched vs. unmatched commits against a disposable
+throwaway git repo (not `~/tgw-flake` itself — see Known gap below) — all test rows cleaned up
+after.
+
+**Known gap, not yet built:** `tgw flake audit` was live-verified against a disposable throwaway
+git repo, not the real `~/tgw-flake` checkout, because the `tgw` OS user (which the `tgw` CLI
+runs as for Postgres peer auth) has no read access to `/home/db` (mode 700, owned by `db`) where
+`~/tgw-flake` actually lives on tgw-prod — and conversely the `db` OS user (which owns and can
+read `~/tgw-flake`) fails Postgres peer auth as `tgw`. `tgw flake audit --repo ~/tgw-flake` will
+hit this same split live on tgw-prod until resolved; filed as todo #1623 — not fixed as part of
+this packet since loosening either user's permissions to bridge the two was explicitly out of
+scope for a single coder packet to decide unilaterally. `request-push`/`request-switch`/`queue`/
+`show`/`mark-executed` do not have this problem (pure Postgres, no git filesystem read needed).
