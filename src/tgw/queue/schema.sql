@@ -59,17 +59,24 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_queue_jobs_dedupe_key_active
     WHERE dedupe_key IS NOT NULL
       AND state NOT IN ('succeeded','failed','dead_letter','cancelled');
 
--- todo #1618 / PP-STATEMACHINE-001: narrower arbiter for enqueue_job()'s
--- debounce=True ON CONFLICT path. The broad index above also covers
--- 'leased'/'running', which lets a self-rescheduling worker's own in-flight
--- job collide with its own reschedule call (dedupe_key finds the caller's
--- OWN currently-executing row as the only match) — mark_succeeded() then
--- finalizes that corrupted row, permanently orphaning the reschedule. This
--- index covers only genuinely pending (not yet started) states, so a
--- debounce call made while the only existing row under a dedupe_key is
--- leased/running falls through to a fresh INSERT instead of corrupting the
--- in-flight row. Do NOT widen this to match the broad index above — the
--- narrower predicate is the fix, not an oversight. See uq_queue_jobs_dedupe_key_active.
+-- todo #1618 / PP-STATEMACHINE-001: independent DB-level backstop —
+-- "at most one queued/retry_wait row per dedupe_key". NOT used as an
+-- ON CONFLICT arbiter: enqueue_job()'s debounce=True path does NOT use
+-- INSERT ... ON CONFLICT at all (see state_machine.py's enqueue_job()
+-- docstring, "Fix actually used" — a real Postgres 17 arbiter-inference
+-- gotcha, verified live, made that approach unworkable: ON CONFLICT
+-- accepts any unique index whose predicate is *implied by* the specified
+-- WHERE clause as an eligible arbiter, so the broad index above stayed
+-- eligible too and kept silently corrupting a self-rescheduling worker's
+-- own in-flight leased/running row regardless of which index the ON
+-- CONFLICT clause named). The debounce path instead does an explicit
+-- pg_advisory_xact_lock-guarded read-then-write in Python: look up any
+-- existing queued/retry_wait row and UPDATE it if found, else INSERT a
+-- fresh row (with dedupe_key=NULL if a leased/running row already holds
+-- the real key, so it can't collide with the broad index above). This
+-- index exists purely as a real DB-level safety net for that same
+-- invariant, independent of the application logic. Do NOT widen this to
+-- match the broad index above. See uq_queue_jobs_dedupe_key_active.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_queue_jobs_dedupe_key_pending
     ON queue_jobs(dedupe_key)
     WHERE dedupe_key IS NOT NULL

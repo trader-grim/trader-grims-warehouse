@@ -194,6 +194,20 @@ this area and this is a narrow, easily-worked-around instance of it.
    accepted, narrow limitation (loses coalescing only for the rare case of
    a second debounce call arriving for the same key while the first
    reschedule is still queued and the *original* job is still running).
+4. **Doc-only fix, post-review (2026-07-21):** review caught that the
+   comment blocks above `uq_queue_jobs_dedupe_key_pending` in both
+   `schema.sql` and `live_schema.sql` still described the index as the
+   `debounce=True` path's `ON CONFLICT` arbiter and said a colliding
+   debounce call "falls through to a fresh INSERT" via that mechanism —
+   stale text left over from the original (unworkable) design, never
+   updated after the pivot to explicit advisory-lock-guarded read-then-
+   write documented above. A reader of the schema files alone (without
+   also reading `state_machine.py`'s docstring) would have gotten the
+   wrong mental model of how the debounce path actually works. Corrected
+   both comment blocks to describe the index as an independent DB-level
+   backstop, not an active arbiter — index definitions themselves
+   unchanged, no functional/behavioral difference from the "done" state
+   above.
 
 ## Out-of-scope findings filed
 
