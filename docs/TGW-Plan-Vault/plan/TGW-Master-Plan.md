@@ -1451,6 +1451,37 @@ confirmed. Full writeup: `pp/PP-AMAZON-001.md`.
 Code done. BLOCKED: webhook infra (#16) gated on ISS-005 signature verification
 (invariant C8) — forged notifications could mark items sold.
 
+**2026-07-20 incident chain:** live double-sale report on tgw202404031105366 led to
+finding + fixing a real data-loss bug (#1604, `mark_item_sold()` silently dropped a
+second distinct order once an item sold out — merged, `ebay_sale` now a list). Chasing
+why the sale went unrecorded found `tgw-worker@ebay_legacy_sync.service` didn't exist
+as a systemd unit at all (#1605) — root-caused to a queue lease-expiry race (#1607, not
+the #1077 orphaned-offer issue the old exclusion comment blamed): `handle()`'s ~6min
+runtime exceeded the 300s lease with no renewal, another worker's routine sweep
+reclaimed the still-running job, and `mark_succeeded()`'s unchecked-rowcount UPDATE
+silently no-op'd. Mitigated live: `queue.lease_seconds` 300s→600s (global), worker
+restored, then immediately generated a 451-row duplicate backlog (zero SKU data, pure
+empty `{"reason":"scheduled"}` tokens) because `_reschedule()` had no `dedupe_key` —
+caught within ~4min, worker stopped, backlog cancelled (216 dead_letter + 235
+queued/running). Worker stays stopped pending PP-STATEMACHINE-001's dedupe_key fix.
+Audit (#1607) found the same missing-dedupe_key hole in 7 other self-rescheduling
+workers — see PP-STATEMACHINE-001 for the general fix this incident produced.
+
+## PP-STATEMACHINE-001 — job manifest contract, enforced by the state machine itself — NEW 2026-07-20
+`state_machine.enqueue_job()` is the single entry point every queue job goes through.
+Defines the manifest every job must declare (`dedupe_key` required; `priority` required
+in effect but config-defaultable via new `tgw-queue-priorities.json`, same `defaults`/
+`use_default` shape as `tgw-models.json`; `entity_id`/`entity_type` required for
+per-item jobs — already a known docstring-only gap; new `supersede` flag for
+force-eligible-now jobs, e.g. `restart-ebay-token`'s "run now" need) and makes
+`enqueue_job()` itself the enforcer — reject incomplete manifests at call time, not a
+passive audit. Enforcement lives in our own Python, not a Claude Code harness hook —
+no dependency on the hook-firing bug found the same session (todo #1531,
+invariants.md E11/E12). Sequencing: fix all 15+ call sites the #1607 audit found
+missing a dedupe_key first, ship the priority config + supersede path, only then flip
+enforcement on. Invariant E16 to be written alongside the first implementation packet.
+Full design: `pp/PP-STATEMACHINE-001.md`.
+
 ## PP-EBAY-SNAPSHOT-001 — submitted-payload capture + re-push
 Phases 1–3 done. Phase 4 `tgw ebay re-push` + plan documentation #896. Overlaps with
 eBayCapture — reassess scope at next touch. Design: `pp/PP-EBAY-SNAPSHOT-001.md`.

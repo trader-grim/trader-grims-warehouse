@@ -1071,7 +1071,43 @@ forces a push/pull or alerts on the gap.
   choosing to look. Tracked under PP-AGENT-DISCIPLINE-001, todo #1444's follow-up (not
   filed as its own todo yet — file one before considering this invariant ✅).
 
-## E11 — An agent's role restrictions are locked in by tool permissions and hooks, not by its own system-prompt prose ✅ (2026-07-16, PP-AGENT-DISCIPLINE-001; both gaps below closed 2026-07-18)
+## E11 — An agent's role restrictions are locked in by tool permissions and hooks, not by its own system-prompt prose ⚠️ (2026-07-16, PP-AGENT-DISCIPLINE-001; mechanism confirmed BROKEN UPSTREAM 2026-07-20, todo #1531)
+
+**CRITICAL UPDATE, 2026-07-20 (todo #1531):** live re-verification found `worktree-guard.py`
+and `app-code-guard.py` (E11/E12's enforcement) do **not fire at all** on real `Edit`/`Write`
+tool calls, in either the main session or a spawned `tgw-coder` subagent — confirmed
+reproducing twice (before and after an explicit `/hooks` reload, which correctly showed all
+four hooks registered). The hook scripts themselves are logically correct (verified via direct
+`echo ... | python3 hook.py` piping, which does produce the expected `ask` JSON). This is not a
+local misconfiguration — it matches three confirmed, currently-open upstream Claude Code bugs
+(installed version 2.1.205, matches the affected range in all three reports):
+- **anthropics/claude-code#74942** — `PreToolUse` hooks matched on `Edit|Write` are silently
+  never invoked for an entire session under `bypassPermissions`/auto-mode-style permission
+  modes, while `Bash`-matched hooks in the same session fire normally.
+- **anthropics/claude-code#69260** — `PreToolUse` hooks don't fire for subagents spawned via
+  the `Agent` tool at all, regardless of matcher.
+- **anthropics/claude-code#77212** — even when a hook does run, an `ask` decision is silently
+  auto-approved (not surfaced to the user) under `bypassPermissions`.
+
+**Practical consequence:** every hook-mechanized rule in this file (E10's flake-guard Bash
+coverage may be partially intact per #74942's Bash-vs-Edit|Write split, but E11/E12/E14's
+Edit/Write coverage and *all* subagent coverage regardless of matcher should be treated as
+**non-enforcing** until Anthropic ships a fix) is running as prose-only right now, exactly the
+failure mode E11 itself was built to eliminate. Do not cite E11/E12/E14 as "mechanically
+enforced" in status reporting until this is independently re-verified working (`git status`
+clean before/after a real Edit/Write probe on a guarded path, from both the main session and a
+`tgw-coder` subagent) — see #1531 for the exact repro steps used.
+
+**No local fix exists.** This is a client-side harness bug, not something `worktree-guard.py`/
+`app-code-guard.py` can be rewritten to route around for Edit/Write specifically (Bash-matched
+hooks are the one channel confirmed still firing per #74942 — not a substitute, since the
+actual risk is Edit/Write calls). Compensating control until upstream fixes this: fall back to
+**detective**, not preventive — a periodic scan (e.g. extend `tgw-runner-review`/`check_review_
+md.py --scan-branches` or a standalone check) for commits/edits that landed outside a
+`tgw-coder` worktree or outside a `todo/<id>-<slug>` branch, so violations are caught and
+flagged promptly after the fact even though they can no longer be blocked before the fact. Not
+yet built — tracked under todo #1601 (invariants/contract audit) alongside the broader
+redundancy review Dave asked for.
 
 **Rule:** every "must"/"never" rule in a `.claude/agents/*.md` profile is a candidate for
 mechanical enforcement (scoped `tools:`, a `PreToolUse`/`SessionStart` hook, or a harness
@@ -1105,7 +1141,7 @@ todo #1389/#1450):**
   `settings.worktree.bgIsolation: "none"` so the harness's own competing background-
   isolation mechanism never auto-provisions a second worktree underneath the agent.
 
-## E12 — Live-troubleshooting sessions diagnose freely but execute application-code fixes through tgw-coder, not direct edits ✅ (2026-07-18, Dave)
+## E12 — Live-troubleshooting sessions diagnose freely but execute application-code fixes through tgw-coder, not direct edits ⚠️ (2026-07-18, Dave; enforcement confirmed BROKEN UPSTREAM 2026-07-20, see E11's update)
 
 **Rule:** the main session (and any non-`tgw-coder` agent) may read, grep, and reason about
 `src/tgw/`/`tests/` freely during root-cause diagnosis — that part is inherently exploratory
@@ -1188,7 +1224,7 @@ build a fix without a real design pass, and don't let it sit only in conversatio
 this entry is that durable record. See `pp/PP-OUTBOX-001.md` and `pp/PP-CATIONIX-001.md` for
 where the eventual design should land.
 
-## E14 — Agent-trace evidence is write-once/append-only for every agent, no exemptions ✅ (2026-07-20, Dave, PP-AGENTTRACE-001)
+## E14 — Agent-trace evidence is write-once/append-only for every agent, no exemptions ⚠️ (2026-07-20, Dave, PP-AGENTTRACE-001; Edit/Write coverage confirmed BROKEN UPSTREAM same day, see E11's update — Bash-matched coverage may be partially intact per #74942, not independently re-verified)
 
 **Rule:** no agent — including the one that created a given trace record, including `Claude`
 itself, no exceptions by role or trust level — may modify or delete an archived transcript
