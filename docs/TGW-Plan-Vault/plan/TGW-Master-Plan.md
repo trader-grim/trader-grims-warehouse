@@ -2046,6 +2046,64 @@ hash-commitment shape here instead of a second bespoke one, once that lands.
 progress on her side — todo #1589 tracks waiting on her proposal. This section
 stays proposal-only until that lands and Dave authorizes a concrete design.
 
+## PP-FLAKEGATE-001 — agent push/switch authority as a state-machine gate, NEW 2026-07-21
+
+**Incident:** `nix-flake-maintainer` committed and pushed `4adb145` (far2l,
+todo #1620) to `origin/master` on `~/tgw-flake` without Dave's explicit push
+confirmation. Root cause: the 2026-07-20 "batch the mutating calls" change
+(`PP-AGENT-DISCIPLINE-001`, chaining `git add && git commit && git push`
+into one compound call per host to cut prompt fatigue) removed the last
+point where a push got its own gate — combined with the session running in
+Auto Mode (suppresses permission prompts) and the already-confirmed
+upstream bug where PreToolUse hooks never fire for Agent-tool subagents
+(`anthropics/claude-code#69260`), nothing actually stopped the push. Far2l
+itself was reverted same session (revert commit, pushed to `origin/master`
+per Dave's direct instruction) — it was never applied to a1131's running
+system, so no live-system undo was needed.
+
+**Dave's direction, 2026-07-21: "a more state machine centric approach
+using the rest of our patterns."** Don't rely on a hook (broken for
+subagents) or on written-procedure compliance (tonight's actual failure
+mode) — apply the same shape already proven twice elsewhere this project
+(`enqueue_job()`/`queue_jobs` as the manifest enforcer, PP-STATEMACHINE-001;
+`ebay_publish`'s manual-trigger-only pattern, `tgw publish <sku>` /
+`src/tgw/api.py:751`) to git push and `nixos-rebuild switch` themselves:
+
+- `nix-flake-maintainer` commits locally, then calls a new CLI command
+  (`tgw flake request-push` / `tgw flake request-switch`) that enqueues a
+  `queue_jobs` row (`queue_name='flake_mutation'`, `entity_id`=commit sha,
+  payload `{repo, host, kind, summary}`) — it never runs `git push` or
+  `nixos-rebuild switch` directly again.
+- **Built version, corrected from this section's original write-up:** the
+  tgw CLI never executes the push/switch itself, under any command name. A
+  human runs the real `git push`/`nixos-rebuild switch` themselves, by
+  hand, then calls `tgw flake mark-executed <job-id>` purely to record that
+  it happened (`queued -> succeeded`, no side effects). This is safer than
+  an executing `tgw flake push/switch <id>` command would have been — that
+  shape still leaves a callable code path an agent (or a future automated
+  wrapper) could invoke; a record-only closing command has none. Deviation
+  flagged and reconciled by the executing coder session (todo #1621
+  result manifest) — this text originally described the executing shape;
+  corrected here to match what was actually built and judged correct.
+- `.claude/agents/nix-flake-maintainer.md` Step 2/5 rewritten to request
+  instead of execute; direct `git push`/`nixos-rebuild switch` removed from
+  its narrow-mutation list entirely; standing prohibition added on ever
+  calling `mark-executed` itself.
+- New invariant E17 + detector (`tgw flake audit`): any push on
+  `~/tgw-flake` not backed by a matching executed `flake_mutation` job
+  record is a finding (extends the #1602 detective-control direction
+  already named for E11/E12/E14). Known gap: `audit`'s live test ran
+  against a disposable repo, not `~/tgw-flake` itself, due to a `tgw`/`db`
+  OS-user Postgres-peer-auth-vs-filesystem-permission split — todo #1623.
+
+**First live test case:** re-adding far2l to a1131 through this new path,
+end to end, verified live (`far2l --version` on a1131 post-switch) — not
+yet run as of this writeup.
+
+Todo #1621 — **built, live-verified against the real `state_machine`
+Postgres DB, cleared for stitch** (`packets/results/1621-flakegate-RESULT.md`).
+Not yet merged to `catio-nix-0.0.1-alpha`.
+
 ## Session protocol
 
 Start: thermal → inbox → SESSION-BRIEF/this plan → `tgw plan check` + `tgw ops-digest`
