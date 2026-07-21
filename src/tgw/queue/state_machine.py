@@ -206,7 +206,59 @@ def enqueue_job(
     existing pending job's not_before forward via GREATEST(). Use this only
     for batch-coalescing keys (e.g. catalog_rebuild:pending) where the goal
     is one job fired after writes go quiet, not one fired at a fixed offset
-    from the first write in a sustained burst. See uq_queue_jobs_dedupe_key_active.
+    from the first write in a sustained burst.
+
+    todo #1618 / PP-STATEMACHINE-001 (LIVE INCIDENT fix): this does NOT use
+    `INSERT ... ON CONFLICT DO UPDATE` — an earlier version of this fix did,
+    targeting a new narrower `uq_queue_jobs_dedupe_key_pending` (queued/
+    retry_wait only) partial index as the ON CONFLICT arbiter, intending to
+    stop a self-rescheduling worker's own leased/running row from being the
+    collision target of its own mid-handle() reschedule call. That approach
+    does NOT work: verified live against a real PostgreSQL 17 instance,
+    Postgres's ON CONFLICT arbiter inference accepts ANY unique index whose
+    predicate is *implied by* the specified WHERE clause, not just an exact
+    match — and 'state IN (queued,retry_wait)' unavoidably implies the
+    broader uq_queue_jobs_dedupe_key_active index's 'state NOT IN
+    (terminal)' predicate (queued/retry_wait rows are always non-terminal),
+    so BOTH indexes become simultaneous arbiters. A conflict detected via
+    EITHER — including the caller's own in-flight leased/running row via
+    the broad index — silently triggers DO UPDATE, with no error raised.
+    This reproduces the exact original bug: same job_id returned, running
+    row's not_before corrupted, mark_succeeded() orphans it. See the #1618
+    result manifest for the live reproduction.
+
+    Narrowing/splitting uq_queue_jobs_dedupe_key_active itself was also
+    rejected: it's relied on by the plain (non-debounce) reject-INSERT path
+    to block a duplicate enqueue while ANY non-terminal (incl. leased/
+    running) row already exists under a dedupe_key (e.g. `ebay_stage:
+    {sku}`) — splitting it into disjoint pending/active indexes verified
+    live to silently let a duplicate 'queued' row past while a 'leased' row
+    for the same key exists, a real regression, and touching that path is
+    explicitly out of this packet's scope.
+
+    Fix actually used: explicit read-then-write, serialized per dedupe_key
+    with `pg_advisory_xact_lock` (held for the transaction) instead of
+    leaning on ON CONFLICT inference at all:
+      1. Look for an existing pending (queued/retry_wait) row under this
+         dedupe_key — if found, UPDATE it (GREATEST() not_before, fresh
+         payload) — this is the coalescing case (e.g. catalog_rebuild:
+         pending's write-burst collapse), unchanged in effect.
+      2. Otherwise, check whether a leased/running row holds this
+         dedupe_key (the todo #1618 self-collision case). If so, insert the
+         fresh row with dedupe_key=NULL — a distinct, valid, immediately
+         claimable row that cannot corrupt or be corrupted by the in-flight
+         one. It won't be found by a *future* coalescing lookup while the
+         original job is still running (a rare, narrow gap vs. the
+         semantic key remaining coalescable — logged as a known limitation,
+         not a correctness bug: worst case is one extra distinct row, never
+         a lost/orphaned one).
+      3. Otherwise (no pending, no active row) insert the fresh row with
+         its real dedupe_key — the common, unremarkable first-schedule
+         case, fully coalescable going forward.
+    uq_queue_jobs_dedupe_key_pending still exists in the schema as a real,
+    independently-useful DB-level backstop ("at most one queued/retry_wait
+    row per dedupe_key") even though it's no longer used as an ON CONFLICT
+    arbiter.
 
     entity_id — ALWAYS pass this explicitly (entity_type='item', entity_id=sku)
     for any per-item job. The `entity_id or queue_name` fallback below exists
@@ -291,6 +343,43 @@ def enqueue_job(
                     (dedupe_key,),
                 )
             if debounce:
+                # todo #1618 — see the enqueue_job() docstring's "Fix
+                # actually used" section for why this is explicit
+                # read-then-write instead of INSERT ... ON CONFLICT.
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (dedupe_key,),
+                )
+                cur.execute(
+                    """
+                    SELECT job_id::text FROM queue_jobs
+                     WHERE dedupe_key = %s AND state IN ('queued', 'retry_wait')
+                    """,
+                    (dedupe_key,),
+                )
+                pending_row = cur.fetchone()
+                if pending_row is not None:
+                    cur.execute(
+                        """
+                        UPDATE queue_jobs
+                           SET not_before = GREATEST(not_before, %s),
+                               payload_json = %s,
+                               updated_at = NOW()
+                         WHERE job_id = %s::uuid
+                        RETURNING job_id::text
+                        """,
+                        (nb, json.dumps(payload), pending_row[0]),
+                    )
+                    return cur.fetchone()[0]
+                cur.execute(
+                    """
+                    SELECT 1 FROM queue_jobs
+                     WHERE dedupe_key = %s AND state IN ('leased', 'running')
+                    """,
+                    (dedupe_key,),
+                )
+                active_collision = cur.fetchone() is not None
+                insert_dedupe_key = None if active_collision else dedupe_key
                 cur.execute(
                     """
                     INSERT INTO queue_jobs
@@ -298,18 +387,11 @@ def enqueue_job(
                          handler_family, priority, payload_json,
                          not_before, dedupe_key, max_attempts)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (dedupe_key)
-                        WHERE dedupe_key IS NOT NULL
-                          AND state NOT IN ('succeeded','failed','dead_letter','cancelled')
-                    DO UPDATE SET
-                        not_before = GREATEST(queue_jobs.not_before, EXCLUDED.not_before),
-                        payload_json = EXCLUDED.payload_json,
-                        updated_at = NOW()
                     RETURNING job_id::text
                     """,
                     (queue_name, entity_type, entity_id, operation,
                      handler_family, priority, json.dumps(payload),
-                     nb, dedupe_key, max_attempts),
+                     nb, insert_dedupe_key, max_attempts),
                 )
             else:
                 cur.execute(

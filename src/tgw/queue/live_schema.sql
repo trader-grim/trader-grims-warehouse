@@ -559,6 +559,26 @@ CREATE UNIQUE INDEX uq_queue_jobs_dedupe_key_active ON public.queue_jobs USING b
 
 
 --
+-- Name: uq_queue_jobs_dedupe_key_pending; Type: INDEX; Schema: public; Owner: -
+--
+-- todo #1618 / PP-STATEMACHINE-001: independent DB-level backstop — "at
+-- most one queued/retry_wait row per dedupe_key". NOT used as an ON
+-- CONFLICT arbiter — enqueue_job()'s debounce=True path does not use
+-- INSERT ... ON CONFLICT at all (a real Postgres arbiter-inference gotcha,
+-- verified live, made that approach unworkable — see schema.sql for the
+-- full rationale, and state_machine.py's enqueue_job() docstring "Fix
+-- actually used"). The debounce path instead does an explicit
+-- pg_advisory_xact_lock-guarded read-then-write in Python; this index is
+-- just a real DB-level safety net for the same invariant.
+-- NOT YET APPLIED to the live production database as of this commit — see
+-- the #1618 result manifest; applying it is the stitch/merge step's job,
+-- not this commit's.
+--
+
+CREATE UNIQUE INDEX uq_queue_jobs_dedupe_key_pending ON public.queue_jobs USING btree (dedupe_key) WHERE (dedupe_key IS NOT NULL AND state IN ('queued', 'retry_wait'));
+
+
+--
 -- Name: queue_jobs trg_queue_jobs_history; Type: TRIGGER; Schema: public; Owner: -
 --
 
