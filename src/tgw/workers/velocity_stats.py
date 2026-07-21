@@ -17,6 +17,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict
 
+import psycopg2.errors
+
 import tgw.logging as tgw_logging
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.queue import state_machine
@@ -43,6 +45,8 @@ class VelocityStatsWorker(QueueWorker):
                     queue_name=QUEUE_NAME,
                     payload={'reason': 'startup'},
                     max_attempts=3,
+                    dedupe_key=f'{QUEUE_NAME}:pending',
+                    debounce=True,
                 )
                 log.info('velocity_stats: enqueued startup job')
         except Exception as exc:
@@ -83,12 +87,17 @@ class VelocityStatsWorker(QueueWorker):
 
     def _reschedule(self) -> None:
         next_run = time.time() + RUN_INTERVAL_S
-        jid = state_machine.enqueue_job(
-            queue_name=QUEUE_NAME,
-            payload={'reason': 'scheduled'},
-            not_before=next_run,
-            max_attempts=3,
-        )
+        try:
+            jid = state_machine.enqueue_job(
+                queue_name=QUEUE_NAME,
+                payload={'reason': 'scheduled'},
+                not_before=next_run,
+                max_attempts=3,
+                dedupe_key=f'{QUEUE_NAME}:pending',
+                debounce=True,
+            )
+        except psycopg2.errors.UniqueViolation:
+            jid = None
         log.info('velocity_stats: next run in %dh (job %s)',
                  RUN_INTERVAL_S // 3600, jid)
         tgw_logging.log_event('velocity_stats_rescheduled',

@@ -1270,3 +1270,73 @@ maintaining two parallel mechanisms.
 **Live-fire not yet confirmed:** per `reference-hooks-settings-watcher-caveat` — needs a
 `/hooks` reload or session restart before this is proven firing for real, same open item as
 every other hook in this file when first added.
+
+---
+
+## E16 — Every queue job declares a complete manifest (dedupe_key, entity_id for per-item work); `enqueue_job()` is the enforcer, not a passive audit ✅ (2026-07-20, todo #1608, PP-STATEMACHINE-001)
+
+**Rule:** every call to `state_machine.enqueue_job()` must supply a non-empty `dedupe_key`
+(reject semantics by default; `debounce=True` extend semantics for singleton/batch-coalescing
+triggers) unless it explicitly passes `dedupe_key_exempt=True` — a deliberate, reviewed,
+code-commented exception, never a silent way to dodge the contract. Any call with
+`entity_type='item'` must supply a non-empty `entity_id` — no opt-out for this one; a
+per-item job's `entity_id` is always knowable at the call site. `enqueue_job()` raises
+`state_machine.MissingManifestFieldError` (a `ValueError` subclass) at call time when either
+requirement isn't met, instead of silently accepting an incomplete job the way it did before
+this packet. `priority` is required in effect but config-defaultable: an omitted `priority=`
+resolves via `resolve_priority(queue_name, operation)` against
+`/opt/TGW/config/tgw-queue-priorities.json` (same `defaults`/`use_default` shape/convention as
+`tgw-models.json`), falling back to 100 (`normal`) if no entry exists — an unmapped queue is
+not an error. `supersede=True` is the manifest's "force this job eligible right now" property:
+atomically cancels any existing non-terminal row under the same `dedupe_key` before inserting
+the fresh one, for the case `debounce=True`'s `GREATEST(not_before)` collision handling can't
+express (it can only push a pending job's schedule *later*, never earlier).
+
+**Why:** surfaced during PP-SOLD-001's #1604/#1605/#1607 incident chain (multi-order
+data-loss bug, `ebay_legacy_sync` restore, lease-expiry race, 451-row duplicate-job
+backlog). The #1607 audit found the same missing-`dedupe_key` hole in **8** self-rescheduling
+workers (`ebay_legacy_sync`, `ebay_sync`, `token_refresh`, `velocity_stats`,
+`ebay_price_reducer`, `ebay_sku_migrate`, `ebay_dole`, `sync_conflict`) — not the 5 originally
+suspected — plus `ebay_upload.py`'s quota-retry path and two `ebay_sync` per-sku manual
+trigger sites in `http_server.py` that needed their own key distinct from the singleton's.
+Dave, 2026-07-20, after the audit: "not missing, just missed by the second coder" — the fix
+had to be structural, not a per-call-site patch the next new worker could just as easily
+skip. "This is state machine, not job contracts... we can call it and handle it as a manifest
+but the state machine is the enforcer." Same shape of risk `dedupe_key` already had before
+E-numbered enforcement: a rule that lived only in a docstring warning
+(`enqueue_job()`'s own `entity_id` paragraph pre-dates this packet and had already shipped a
+~300k-row breakage once, todo #1406/PP-DEADLETTER-001, before this same enforcement pattern
+closed that hole too).
+
+**Enforcement:** `state_machine.enqueue_job()` itself, in `src/tgw/queue/state_machine.py` —
+no external hook, no separate validation layer, no dependency on the Claude Code
+harness-hook-firing bug found the same session (todo #1531, E11/E12's known gap). It fires on
+every call, unconditionally, by construction — the same reasoning the PP doc gives for not
+building this as a bolted-on layer: `state_machine` is already this codebase's established
+name for the whole queue/job subsystem (the Postgres database is literally named
+`state_machine`).
+
+**Sequencing (why this shipped as one packet, all 4 phases, not enforcement-first):** flipping
+`enqueue_job()`'s enforcement on before every real call site had a `dedupe_key` would have
+broken `ebay_sync`/`ebay_legacy_sync`'s live production loops immediately. Order followed:
+(1) fix all 15+ call sites the #1607 audit found — 8 workers × 2 sites (startup enqueue +
+`_reschedule()`, sharing one `'<queue_name>:pending'` debounce key), `ebay_upload.py:186`'s
+quota-retry (`dedupe_key=f'ebay_upload:{sku}'`, reject semantics), and `http_server.py`'s two
+per-sku `ebay_sync` manual-trigger sites (`f'ebay_sync:sku:{sku}'`, deliberately distinct from
+the singleton's `'ebay_sync:pending'` key so one queue_name's two job shapes don't collide);
+(2) ship `tgw-queue-priorities.json` + `resolve_priority()`; (3) ship `supersede` + wire `tgw
+restart-ebay-token` to it (the exact "force now regardless of pending schedule" need #1607
+flagged as item D.1); (4) only then flip the `MissingManifestFieldError` raise on, after a
+full fresh codebase-wide AST re-grep (not just trusting the original #1607 audit) confirmed
+every real `enqueue_job()` call site — src/tgw/ and scripts/ — already supplied a `dedupe_key`,
+zero holdouts found, `dedupe_key_exempt=True` shipped but unused as of this packet landing.
+
+**Known gap, not yet built:** `tgw-queue-priorities.json` was authored and reviewed as part of
+this packet but is a live-only deploy artifact (like `tgw-models.json`, not git-tracked) —
+`tgw-coder`'s worktree-isolation contract means it couldn't be landed directly into
+`/opt/TGW/config/` from the branch; the reviewed content sits at
+`docs/TGW-Plan-Vault/plan/packets/results/1608-tgw-queue-priorities.json` pending a live-deploy
+step (same category as the worker restarts this packet also defers to Dave/Claude,
+post-review). `resolve_priority()` tolerates the file being absent — every lookup just falls
+back to `normal` (100, today's already-implicit default) until it's deployed, so nothing
+breaks in the interim.
