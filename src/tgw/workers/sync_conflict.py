@@ -46,6 +46,8 @@ class SyncConflictWorker(QueueWorker):
                     queue_name=QUEUE_NAME,
                     payload={'reason': 'startup'},
                     max_attempts=3,
+                    dedupe_key=f'{QUEUE_NAME}:pending',
+                    debounce=True,
                 )
                 log.info('sync_conflict: enqueued startup job')
         except Exception as exc:
@@ -92,6 +94,8 @@ class SyncConflictWorker(QueueWorker):
                 payload={'reason': 'scheduled'},
                 not_before=not_before,
                 max_attempts=3,
+                dedupe_key=f'{QUEUE_NAME}:pending',
+                debounce=True,
             )
             log.info('sync_conflict: rescheduled in %dh', interval // 3600)
         except Exception as exc:

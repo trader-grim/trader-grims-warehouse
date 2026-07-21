@@ -183,15 +183,19 @@ class EbayUploadWorker(QueueWorker):
                                   quota_retries=quota_retries, uploaded_so_far=len(uploaded))
             # Requeue for 6 hours from now (EPS resets daily at midnight eBay time).
             # Invariant C10: the requeue keeps the job's operator provenance.
-            state_machine.enqueue_job(
-                queue_name=QUEUE_NAME,
-                payload={'sku': sku, 'reason': 'quota_retry',
-                         'quota_retries': quota_retries, **_origin},
-                entity_type='item',
-                entity_id=sku,
-                not_before=time.time() + 6 * 3600,
-                max_attempts=3,
-            )
+            try:
+                state_machine.enqueue_job(
+                    queue_name=QUEUE_NAME,
+                    payload={'sku': sku, 'reason': 'quota_retry',
+                             'quota_retries': quota_retries, **_origin},
+                    entity_type='item',
+                    entity_id=sku,
+                    not_before=time.time() + 6 * 3600,
+                    max_attempts=3,
+                    dedupe_key=f'ebay_upload:{sku}',
+                )
+            except psycopg2.errors.UniqueViolation:
+                pass
             return
 
         if errors:

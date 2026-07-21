@@ -62,6 +62,8 @@ class EbaySyncWorker(QueueWorker):
                     queue_name=QUEUE_NAME,
                     payload={"reason": "startup"},
                     max_attempts=3,
+                    dedupe_key=f"{QUEUE_NAME}:pending",
+                    debounce=True,
                 )
                 log.info("ebay_sync: enqueued startup sync job")
         except Exception as exc:
@@ -591,12 +593,17 @@ class EbaySyncWorker(QueueWorker):
 
     def _reschedule(self) -> None:
         next_run = time.time() + SYNC_INTERVAL_S
-        jid = state_machine.enqueue_job(
-            queue_name=QUEUE_NAME,
-            payload={"reason": "scheduled"},
-            not_before=next_run,
-            max_attempts=3,
-        )
+        try:
+            jid = state_machine.enqueue_job(
+                queue_name=QUEUE_NAME,
+                payload={"reason": "scheduled"},
+                not_before=next_run,
+                max_attempts=3,
+                dedupe_key=f"{QUEUE_NAME}:pending",
+                debounce=True,
+            )
+        except psycopg2.errors.UniqueViolation:
+            jid = None
         log.info("ebay_sync: next sync in %dh (job %s)", SYNC_INTERVAL_S // 3600, jid)
         tgw_logging.log_event("ebay_sync_rescheduled", next_run_in_hours=SYNC_INTERVAL_S // 3600, next_job_id=jid)
 

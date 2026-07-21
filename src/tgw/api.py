@@ -5662,10 +5662,19 @@ def main() -> int:
 
             _sm.init(cfg["postgres_dsn"])
             cleared = _sm.clear_dead_letter(queue_name="token_refresh")
+            # PP-STATEMACHINE-001 Phase 3 (todo #1608): supersede=True is the
+            # "force now regardless of pending schedule" case — without it, a
+            # future-dated 'token_refresh:pending' row (from the singleton
+            # debounce key added in Phase 1) would silently win over this
+            # manual restart via debounce's GREATEST(not_before) rule, making
+            # this command appear to succeed while doing nothing until the
+            # original schedule anyway (flagged as #1607 audit item D.1).
             jid = _sm.enqueue_job(
                 queue_name="token_refresh",
                 payload={"reason": "manual_restart"},
                 max_attempts=3,
+                dedupe_key="token_refresh:pending",
+                supersede=True,
             )
             result = {
                 "ok": True,

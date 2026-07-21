@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import psycopg2
+import psycopg2.errors
 import psycopg2.extras
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request, Security, UploadFile, status
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -2002,11 +2003,17 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
             }
 
         elif action == "sync_from_ebay":
-            job_id = state_machine.enqueue_job(
-                queue_name="ebay_sync",
-                payload={"sku": sku, "reason": "manual", "origin": "operator"},
-                max_attempts=2,
-            )
+            try:
+                job_id = state_machine.enqueue_job(
+                    queue_name="ebay_sync",
+                    payload={"sku": sku, "reason": "manual", "origin": "operator"},
+                    entity_type="item",
+                    entity_id=sku,
+                    max_attempts=2,
+                    dedupe_key=f"ebay_sync:sku:{sku}",
+                )
+            except psycopg2.errors.UniqueViolation:
+                job_id = None
             return {"ok": True, "sku": sku, "action": "sync_from_ebay", "job_id": job_id}
 
         elif action == "reset_draft_from_live":
@@ -8309,8 +8316,15 @@ def apply_revision(sku: str, body: RevisionApplyBody) -> Dict[str, Any]:
             result["sync_job_id"] = state_machine.enqueue_job(
                 queue_name="ebay_sync",
                 payload={"sku": sku, "reason": "revision_apply", "origin": "operator"},
+                entity_type="item",
+                entity_id=sku,
                 max_attempts=2,
+                dedupe_key=f"ebay_sync:sku:{sku}",
             )
+        except psycopg2.errors.UniqueViolation:
+            # A sync for this sku is already pending — not an error, the
+            # existing job already covers this revision_apply follow-up.
+            result["sync_job_id"] = None
         except Exception as exc:
             log.exception("failed to enqueue post-revision ebay_sync for %s", sku)
             result["sync_job_id"] = None

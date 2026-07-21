@@ -6,6 +6,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
 import psycopg2
@@ -15,6 +16,65 @@ log = logging.getLogger(__name__)
 
 # Module-level DSN — set by init() before any worker starts.
 _DSN: str = 'dbname=state_machine user=tgw'
+
+# PP-STATEMACHINE-001 Phase 2 (todo #1608) — queue-priority config, same
+# 'defaults'/'use_default' shape/convention as tgw-models.json. Loaded lazily
+# and cached; missing file is NOT an error (every lookup just falls back to
+# the 'normal' tier, today's implicit hardcoded default) since this file is
+# a live-only deploy artifact (like tgw-models.json, not git-tracked) that
+# may not exist yet in every environment.
+_QUEUE_PRIORITIES_PATH = Path('/opt/TGW/config/tgw-queue-priorities.json')
+_queue_priorities_cache: Optional[Dict[str, Any]] = None
+
+
+def _load_queue_priorities() -> Dict[str, Any]:
+    global _queue_priorities_cache
+    if _queue_priorities_cache is not None:
+        return _queue_priorities_cache
+    cfg: Dict[str, Any] = {}
+    try:
+        if _QUEUE_PRIORITIES_PATH.exists():
+            raw = json.loads(_QUEUE_PRIORITIES_PATH.read_text(encoding='utf-8'))
+            cfg = {k: v for k, v in raw.items() if not k.startswith('_')}
+    except Exception:
+        log.warning('failed to load %s — falling back to normal priority for '
+                     'every queue', _QUEUE_PRIORITIES_PATH, exc_info=True)
+        cfg = {}
+    _queue_priorities_cache = cfg
+    return cfg
+
+
+def _reset_queue_priorities_cache() -> None:
+    """Test hook — clear the module-level cache so a test can point at a
+    fresh fixture path / monkeypatched file content."""
+    global _queue_priorities_cache
+    _queue_priorities_cache = None
+
+
+def resolve_priority(queue_name: str, operation: str) -> int:
+    """Resolve the priority tier for queue_name:operation from
+    tgw-queue-priorities.json. Falls back to 100 ('normal') if the file is
+    missing, the key isn't present, or the entry is malformed — an
+    unmapped queue is not an error (see PP-STATEMACHINE-001)."""
+    cfg = _load_queue_priorities()
+    key = f'{queue_name}:{operation}'
+    entry = cfg.get(key)
+    if entry is None:
+        return 100
+    if isinstance(entry, int):
+        return entry
+    if isinstance(entry, dict) and 'use_default' in entry:
+        default_name = entry['use_default']
+        tier_value = cfg.get('defaults', {}).get(default_name)
+        if isinstance(tier_value, int):
+            return tier_value
+        log.warning("tgw-queue-priorities.json[%r]['use_default'] names %r, "
+                    "which has no int entry in 'defaults' — falling back to "
+                    "normal", key, default_name)
+        return 100
+    log.warning('tgw-queue-priorities.json[%r] is malformed (%r) — falling '
+                'back to normal', key, entry)
+    return 100
 
 
 def init(dsn: str) -> None:
@@ -114,6 +174,13 @@ def next_failure_state(attempt_count: int, max_attempts: int) -> str:
 # Database operations
 # ---------------------------------------------------------------------------
 
+class MissingManifestFieldError(ValueError):
+    """PP-STATEMACHINE-001 Phase 4 (todo #1608) — raised by enqueue_job() when
+    a call is missing a required manifest field (dedupe_key, or entity_id for
+    an entity_type='item' job) and hasn't declared an explicit, named
+    opt-out. See invariant E16."""
+
+
 def enqueue_job(
     queue_name: str,
     payload: Dict[str, Any],
@@ -122,11 +189,13 @@ def enqueue_job(
     entity_id: str = '',
     operation: str = 'run',
     handler_family: str = '',
-    priority: int = 100,
+    priority: Optional[int] = None,
     not_before: Optional[float] = None,
     dedupe_key: Optional[str] = None,
     max_attempts: int = 5,
     debounce: bool = False,
+    supersede: bool = False,
+    dedupe_key_exempt: bool = False,
 ) -> str:
     """Insert a new queued job. Returns the job_id (UUID string).
 
@@ -149,15 +218,78 @@ def enqueue_job(
     PP-DEADLETTER-001) before every internal pipeline enqueue_job() caller
     was audited and fixed to pass entity_id=sku. Do not let a new caller
     regress it.
+
+    priority — PP-STATEMACHINE-001 Phase 2 (todo #1608): if omitted (None),
+    resolved from tgw-queue-priorities.json via resolve_priority(queue_name,
+    operation), falling back to 100 ('normal') if no config entry exists. An
+    explicit priority= argument always overrides the config lookup.
+
+    supersede=True (PP-STATEMACHINE-001 Phase 3, todo #1608) — for the
+    "force this job eligible right now" case (e.g. `tgw restart-ebay-token`)
+    that debounce=True's GREATEST() can't express (it can only push a
+    pending job's not_before LATER, never earlier). Only meaningful together
+    with a dedupe_key: before inserting, atomically cancels (state →
+    'cancelled') any existing non-terminal row under the same dedupe_key,
+    then inserts the fresh row with plain reject semantics (no ON CONFLICT
+    needed — the collision was just cleared in the same transaction).
+    supersede=True with debounce=True is not a supported combination — pick
+    one collision-handling mode.
+
+    Enforcement (PP-STATEMACHINE-001 Phase 4, todo #1608, invariant E16):
+    every call must supply a non-empty dedupe_key, unless it explicitly
+    passes dedupe_key_exempt=True (a code comment at the call site must
+    explain why — this is a deliberate, reviewed exception, not a way to
+    silently dodge the manifest contract). Any entity_type='item' call must
+    supply a non-empty entity_id — no opt-out for this one; the 2026-07-20
+    codebase-wide re-audit found no genuine holdout that needs it, and a
+    per-item job's entity_id is always knowable at the call site.
     """
+    if debounce and supersede:
+        raise ValueError(
+            "enqueue_job: debounce=True and supersede=True are mutually "
+            "exclusive collision-handling modes — pick one."
+        )
+    if entity_type == 'item' and not entity_id:
+        raise MissingManifestFieldError(
+            f"enqueue_job(queue_name={queue_name!r}): entity_type='item' "
+            "requires a non-empty entity_id (see invariant E16 / "
+            "PP-STATEMACHINE-001) — pass entity_id=<sku> explicitly."
+        )
+    if not dedupe_key and not dedupe_key_exempt:
+        raise MissingManifestFieldError(
+            f"enqueue_job(queue_name={queue_name!r}): missing dedupe_key "
+            "(see invariant E16 / PP-STATEMACHINE-001) — pass an explicit "
+            "dedupe_key=, or dedupe_key_exempt=True with a code comment "
+            "explaining why this call is a genuine, reviewed exception."
+        )
     handler_family = handler_family or queue_name
     entity_id = entity_id or queue_name
+    if priority is None:
+        priority = resolve_priority(queue_name, operation)
     nb = None
     if not_before is not None:
         from datetime import datetime, timezone
         nb = datetime.fromtimestamp(not_before, tz=timezone.utc)
     with _conn() as con:
         with con.cursor() as cur:
+            if supersede and dedupe_key:
+                # Only preempt rows that are genuinely still *pending* —
+                # 'queued' (incl. future not_before) and 'retry_wait' are the
+                # cases debounce=True's GREATEST() can only push later, plus
+                # 'failed'/'dead_letter' (a stalled prior attempt under this
+                # key that would otherwise just sit there). Deliberately
+                # excludes 'leased'/'running': a job actively being worked
+                # right now is not superseded by a fresh enqueue, it's left
+                # to finish (or dead-letter/retry on its own).
+                cur.execute(
+                    """
+                    UPDATE queue_jobs
+                    SET state = 'cancelled', updated_at = NOW()
+                    WHERE dedupe_key = %s
+                      AND state IN ('queued', 'retry_wait', 'failed', 'dead_letter')
+                    """,
+                    (dedupe_key,),
+                )
             if debounce:
                 cur.execute(
                     """

@@ -82,22 +82,26 @@ _ALLOWLIST = {
     # _render_item_detail_html, shifted every line below by varying
     # amounts — re-verified against current HEAD, no accessor-routing
     # behavior changed, only positions.
-    (_SRC / "tgw" / "http_server.py", 771),               # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
-    (_SRC / "tgw" / "http_server.py", 780),               # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
-    (_SRC / "tgw" / "http_server.py", 1237),              # (a) accessor patch write
-    (_SRC / "tgw" / "http_server.py", 1258),              # (a) accessor patch write (todo #1416, draft_listing.item_specifics)
-    (_SRC / "tgw" / "http_server.py", 1263),              # (a) accessor output (full envelope) moving onward
-    (_SRC / "tgw" / "http_server.py", 1276),              # (a) accessor patch write — padlock auto-sync (todo #1406/2026-07-18, inventory_record.sync_from_draft's patch)
-    (_SRC / "tgw" / "http_server.py", 1882),              # (b) revision_draft.delta
-    (_SRC / "tgw" / "http_server.py", 1884),              # (b) revision_draft.delta
-    (_SRC / "tgw" / "http_server.py", 1890),              # (a) accessor patch write (todo #1416)
-    (_SRC / "tgw" / "http_server.py", 3007),              # (a) accessor output (inventory_diff.apply_inventory_diff's patch) onward into _apply_patch (#1417)
-    (_SRC / "tgw" / "http_server.py", 3066),              # (a) category_aspect_migration's patch moving onward into _apply_patch (#1471)
+    # Refreshed 2026-07-20 (todo #1608, PP-STATEMACHINE-001): added
+    # `import psycopg2.errors` near the top of http_server.py, shifting
+    # every line below by +1 — re-verified against current HEAD, no
+    # accessor-routing behavior changed, only position.
+    (_SRC / "tgw" / "http_server.py", 772),               # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
+    (_SRC / "tgw" / "http_server.py", 781),               # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
+    (_SRC / "tgw" / "http_server.py", 1238),              # (a) accessor patch write
+    (_SRC / "tgw" / "http_server.py", 1259),              # (a) accessor patch write (todo #1416, draft_listing.item_specifics)
+    (_SRC / "tgw" / "http_server.py", 1264),              # (a) accessor output (full envelope) moving onward
+    (_SRC / "tgw" / "http_server.py", 1277),              # (a) accessor patch write — padlock auto-sync (todo #1406/2026-07-18, inventory_record.sync_from_draft's patch)
+    (_SRC / "tgw" / "http_server.py", 1883),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 1885),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 1891),              # (a) accessor patch write (todo #1416)
+    (_SRC / "tgw" / "http_server.py", 3014),              # (a) accessor output (inventory_diff.apply_inventory_diff's patch) onward into _apply_patch (#1417)
+    (_SRC / "tgw" / "http_server.py", 3073),              # (a) category_aspect_migration's patch moving onward into _apply_patch (#1471)
     # Refreshed 2026-07-20 (todo #1582, PP-AGENTTRACE-001 Phase 3): the new
     # /form/runs route + _render_runs_html() inserted ~186 lines before this
     # entry, shifting it from 5855 to 6041 — re-verified against current
     # HEAD, no accessor-routing behavior changed, only position.
-    (_SRC / "tgw" / "http_server.py", 6041),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 6048),              # (b) revision_draft.delta
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 114),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 121),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 124),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
