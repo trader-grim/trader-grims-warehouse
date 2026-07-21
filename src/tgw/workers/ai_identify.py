@@ -49,12 +49,28 @@ _MAX_PHOTOS_CLOUD = 6  # max images per call for cloud providers
 _SYSTEM_PROMPT = """\
 You are an inventory cataloguing assistant. You will be shown a photo of an item.
 Extract every field you can observe or reasonably infer. Use null for fields you cannot determine.
+
+CRITICAL RULE — never overclaim material authenticity: this is secondhand/thrift
+inventory, almost all of it is costume jewelry and base-metal goods, not fine
+jewelry. Default assumption for ANY metal item is base/plated metal, and for ANY
+faceted/sparkly stone is glass, rhinestone, or simulated material — NOT gold,
+silver, or a genuine gemstone. Only state a precious metal (gold/silver/sterling)
+or a genuine/natural gemstone, or give a carat weight, if you can see an actual
+hallmark, stamp, or certification in the photo. If you cannot see one, leave that
+field null/blank rather than guessing a plausible-sounding value. This rule
+overrides any instinct to fill in every field — an accurate blank beats a
+confident, unverifiable guess.
+
 Respond with valid JSON only — no prose, no markdown fences.
 """
 
 _ITEM_FIELDS_SCHEMA = """\
 {
-  "title": "concise descriptive title under 80 chars, include brand and model if visible",
+  "title": "concise descriptive title under 80 chars — lead with the most \
+specific searchable noun (brand name, or the exact product/model type) in \
+the first 3-4 words; do NOT open with a generic word like 'Vintage', \
+'Antique', 'Unbranded', or 'Old' — put specificity first, descriptive \
+words after; include brand and model if visible",
   "category": "plain English category name (e.g. Board Games, Action Figures, Vintage Electronics)",
   "description": "2-4 sentences describing what the item is, what is visible, notable features",
   "condition": "one of: New, Like New, Very Good, Good, Acceptable",
@@ -62,11 +78,35 @@ _ITEM_FIELDS_SCHEMA = """\
   "model": "specific model name or number if visible, else null",
   "manufacturer": "full manufacturer name if different from brand or more specific, else null",
   "mpn": "model/part number printed on item if visible, else null",
-  "color": "primary color or color description, else null",
-  "material": "primary material (e.g. plastic, metal, fabric, ceramic, paper), else null",
+  "color": "primary color or color description — 'Gold'/'Silver' is a \
+normal, legitimate color descriptor for a gold- or silver-toned item, use \
+it freely, else null",
+  "material": "primary material composition (e.g. plastic, metal, fabric, \
+ceramic, paper) — for metal items, default to 'metal' or 'base metal'; \
+only claim a precious metal ('gold', 'silver', 'sterling silver', \
+'gold-plated') if a visible hallmark or stamp (e.g. '925', '14K', \
+'sterling') confirms actual precious-metal content — a gold- or \
+silver-COLORED item without a hallmark is still 'metal', not \
+'gold'/'silver' (that's a composition claim, not a color one — color \
+goes in the color field instead), else null",
   "country_of_manufacture": "country if visible on item or packaging, else null",
   "upc": "barcode number if clearly legible, else null",
-  "item_specifics": "object of any other notable key-value attributes visible on the item (e.g. {\"Size\": \"Large\", \"Style\": \"Vintage\"}), or empty object"
+  "item_specifics": "object of any other notable key-value attributes \
+visible on the item (e.g. {\"Size\": \"Large\", \"Style\": \"Vintage\"}), \
+or empty object — this includes eBay jewelry-style aspects like 'Metal', \
+'Metal Purity', 'Base Metal': the SAME rule as the material field above \
+applies — leave these empty/blank unless a visible hallmark or stamp \
+confirms actual precious-metal content, never infer them from color or \
+shine alone. SAME RULE for any stone/gem aspect ('Main Stone', 'Main \
+Stone Creation', 'Main Stone Treatment', 'Gemstone', 'Total Carat \
+Weight'): a sparkly/clear faceted stone is 'Simulated'/'Glass'/ \
+'Rhinestone'/'Crystal' by default — only set 'Main Stone Creation' to \
+'Natural' or name a specific gemstone (diamond, ruby, etc.) if there is \
+a visible certification, marking, or the piece is clearly fine jewelry \
+construction, not costume jewelry; do not populate 'Total Carat Weight' \
+or any stone-authenticity field at all unless you have real evidence, \
+leave those keys out entirely rather than guessing a plausible-sounding \
+value"
 }"""
 
 _USER_PROMPT = f"""\

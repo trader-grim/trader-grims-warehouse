@@ -736,12 +736,58 @@ parity audit, reassigned to Tigwa with vision-model browser testing). All 3 flag
 `field_set_drift` SKUs now live-confirmed. Full incident timeline, code detail, and
 test counts: `pp/PP-LISTEDITOR-001.md`.
 
+**Reidentify-as-full-redraft, design captured 2026-07-20 (Dave), not built.**
+Surfaced while testing the Gemini/DeepSeek model migration: `ebay_draft.py`'s
+description-rewrite call is gated behind `pl_description` (product-lookup data)
+existing with 20+ words — meaning "reidentify" today can silently do nothing for
+most items, since most never got a product-lookup match. Dave's actual intent is
+broader: **"all reidentify should do is fill the fields, just like ai_identify.
+Maybe an option to discard or use existing data as hints, but regenerate the
+whole draft as an update candidate."** Three pieces:
+1. Reidentify/redraft should be a full-field refill (title, description,
+   category, aspects, condition), same shape as `ai_identify`'s own
+   `ai_reidentify` flag — not gated behind one upstream data source happening
+   to exist.
+2. Operator choice: discard existing fields entirely (fresh generation) vs. feed
+   them back in as hints (matches `ai_identify`'s existing `_USER_PROMPT_HINTED`
+   pattern, already built) — a mode toggle, not a new mechanism.
+3. **The regenerated result becomes an update candidate, not a direct
+   overwrite** — this is the SAME shape as R1.1's drift-gated apply path above
+   (currently price-only), extended to the whole draft. Reuse that mechanism
+   rather than building a second one.
+Dave, same breath: **"this is where transactional logging would be a player"**
+— the propose→review→accept/discard cycle should be logged transactionally
+(what was regenerated, from what source, whether accepted), connecting to
+[[PP-STATEMACHINE-001]]'s job-manifest work and the evening's broader
+"everything runs in a logging terminal" discussion (journalctl + agent-traces
+already deliver this for workers/agents; this would be the operator-facing
+analog for draft regeneration specifically). Design only — not scoped into a
+todo/packet yet, needs its own session given the size (full-draft candidate
+generation + discard/hint toggle + drift-gated whole-draft apply + transactional
+logging is a real feature, not a quick fix).
+
 
 ## PP-ACTIONCONSOLE-001 — state-driven item action console
 Built s40 (state-driven action line, Editor/Live tabs). **Gate: Dave's operator test
 R1.2.** Principle settled: state drives interface; controls are indicators;
 platform-wide style. Todo #1085. Troubleshooting buttons removed with no new home yet
 — ops surface to design.
+
+**Operational console idea captured 2026-07-20 (Dave, urgent capture, not designed
+yet):** "a choose-best-route-for-prompt button that can decide whether to
+interrupt or wait, like a turbo." Context: this whole session, Dave sent many
+mid-turn messages while Claude was actively working (tool calls in flight) —
+today that's an implicit chat-interface behavior (message queues, surfaces at
+the next tool result). The idea: make that an EXPLICIT operator control on the
+console — when submitting a new instruction to an in-progress agent session,
+choose the routing: interrupt now (a "turbo" fast-track, for genuinely urgent
+input) vs. queue and wait for a natural stopping point (routine follow-up,
+doesn't need to break current work). Same underlying concept as tonight's
+`PP-STATEMACHINE-001` priority-tier work (urgent vs. normal jobs), just applied
+to operator-to-agent interaction instead of worker job queues — worth
+designing them with the same vocabulary/mental model rather than two unrelated
+mechanisms. Not scoped into a todo yet beyond this capture — needs its own
+design pass alongside the rest of the operational-console vision.
 
 ## PP-EDITOR-001 — web UI (listing pipeline, editor, dashboard)
 **Given its own heading 2026-07-11** — previously only a bare "Done" rollup
@@ -1285,6 +1331,22 @@ dependency now explicit (`depends_on=[1250]`), not just discoverable by
 re-reading the comment. Also needs confirming `deepseek-v4-flash` and
 `claude-haiku-4-5-20251001` are still the correct/current direct-API model
 ids after a few days of real traffic.
+
+**Gemini 2.5→3.1 migration DONE 2026-07-20 (todo #1610)** — Dave had asked
+for this multiple times across prior sessions; never landed because it was
+never written down anywhere durable, only said in conversation (exactly the
+failure mode Prime Directive 5 exists to prevent). `gemini-2.5-*` models are
+being deprecated by Google. Live-verified (not assumed) against the real
+Google API before changing anything: fetched the actual model list
+(`gemini-3.1-flash-lite` confirmed present, non-preview/stable), ran a real
+text inference call, ran a real vision inference call against an actual item
+photo (correctly identified a magazine cover) — all three passed. `tgw-
+models.json`'s `defaults.default` profile (used by `ai_identify`/`alt_text`/
+`bulk_classify` via `use_default`) updated `gemini-2.5-flash-lite` →
+`gemini-3.1-flash-lite`. `ebay_draft`'s explicit override was already on
+`gemini-3.1-pro-preview`, unaffected. Workers restarted to pick up the
+change. If Gemini 2.5 models get fully sunset by Google later, this is
+already ahead of it.
 
 ## PP-MACRO-001 — macroboard hardware (#15)
 **Given its own heading 2026-07-11** — was a bare Frozen-list mention.
