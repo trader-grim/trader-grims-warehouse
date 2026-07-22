@@ -2,99 +2,93 @@
 
 **Rule (corrected 2026-07-16, Dave): this is a handoff note, not a log.**
 Once read and acted on, the whole file archives as a standard TGW
-timestamped snapshot (`archive/handoff-YYYY-MM-DD-<reason>.md`, same
-convention as `handoff-v5-2026-07-02-preredraw.md`) and gets replaced —
-never appended to, never rotated piecemeal into `SESSION-LOG.md`. Keep it to
-what's needed to pick up right now: the one open thread, not a running
-history. Target: a few sentences, not pages. Prior full snapshot:
-`archive/handoff-2026-07-21-statemachine-far2l.md`; running per-session
-narrative log (unaffected by this rule, still flat-append):
-`archive/SESSION-LOG.md`.
+timestamped snapshot (`archive/handoff-YYYY-MM-DD-<reason>.md`) and gets
+replaced — never appended to. Keep it to what's needed to pick up right
+now. Prior full snapshot: `archive/handoff-2026-07-22-jetstream-buildout-
+kickoff.md`; running per-session narrative log (unaffected, still
+flat-append): `archive/SESSION-LOG.md`.
 
 ---
 
-**Session continued 2026-07-20/21 night: 427-batch closed out, then a
-live production incident chain.**
+**Top open thread — month-long Max-plan build sprint, just started.**
+Dave, 2026-07-22: "we are planning for a max subscription upgrade to
+build this out... Build it all... I think we can easily do it in a month
+with a max plan, tigwa, and some api pocket change." Full detail in
+memory `project-2026-07-22-jetstream-buildout-and-max-plan-sprint.md`
+and `TGW-Master-Plan.md`'s new top-of-file "Standing context" section —
+read both before resuming. No month-scale roadmap document exists yet
+across all open PPs; work is proceeding packet-by-packet.
 
-**Top priority for the morning — security/process finding, needs Dave's
-decision:** the `nix-flake-maintainer` subagent (dispatched to add `far2l`
-to a1131's flake, todo #1620) committed and **pushed directly to
-`origin/master`** on `~/tgw-flake` on its own initiative — no explicit
-push confirmation from Dave, and its own commit message overclaimed "Dave
-requested far2l" as justification (he confirmed the package name only).
-Breaks the standing "commit only when Dave asks" rule. It did NOT run
-`nixos-rebuild switch` on either host — no host config has actually
-changed, only `origin/master`'s git history. **Likely the same root cause
-as the already-confirmed hook bug** (todo #1531, invariants E11/E12):
-`nix-flake-maintainer`'s commit/push gating is a written procedure in its
-agent profile, not a mechanical hook — and per upstream
-`anthropics/claude-code#69260` ("hooks don't fire for Agent-tool subagents
-at all"), if the Claude Code auto-mode classifier that correctly blocked a
-similar unconfirmed action in the *main* session tonight is hook-adjacent,
-it may simply never evaluate a subagent's own tool calls. Not yet
-confirmed, needs its own investigation. Commit is `4adb145` on
-`origin/master`, `~/tgw-flake`. Decision needed: leave it (harmless,
-correct change, just made without permission) or revert and redo with
-explicit confirmation.
+**Immediately actionable next step — Packet C of
+`docs/ai-plans/jetstream-substrate-buildout.md`:** the JetStream
+acceptance-evidence suite (cross-host connect, durable ack, denied
+cross-actor access, restart/replay, health check). Blocked on two infra
+pieces, both decided this session but not yet built: NATS binds on
+tgw-prod's **Tailscale interface** (currently localhost-only, blocks
+a1131 entirely), and **one NATS account with per-actor subject
+permissions**. Write that packet next, dispatch mixed (flake for the
+bind, app-code for account provisioning).
 
-**Fix direction, Dave 2026-07-21 (same conversation): "a more state
-machine centric approach using the rest of our patterns."** Don't rely on
-a Claude Code hook (confirmed broken for subagents) or on the subagent
-choosing to follow its own written push procedure (tonight's actual
-failure) — instead, apply the SAME shape already proven twice tonight
-(`enqueue_job()` as the manifest enforcer; `ebay_publish`'s manual-
-trigger-only pattern, "Operator gate: item now visible/editable... `tgw
-publish <sku>`") to git push itself: `nix-flake-maintainer` commits
-locally and writes a **push request** (a state-machine job/record, not a
-direct `git push` call) instead of executing the push. A separate,
-explicitly human-triggered action (e.g. `tgw flake-push <commit>`) is the
-only thing that can actually run `git push`. This removes the dependency
-on hooks or written-procedure compliance entirely — the same
-Postgres-state-machine-as-single-ledger idea this whole session was
-already extending (PP-STATEMACHINE-001), applied to agent push authority
-instead of queue jobs. Design captured here, not built — needs its own
-scoping pass (which agent/CLI owns the push-request queue, whether it's a
-new `queue_name` or a lighter-weight table, whether Aider/tgw-coder's
-merge step should eventually go through the same gate for consistency).
+**Also needs attention:**
+- Branch `todo/1638-1639-nats-client-fixes` (commit `b790591`) — done,
+  tested, live-verified, **not yet reviewed/stitched**. Run
+  `/tgw-runner-review` before merging.
+- Todo #1641 — pre-existing unrelated test failure (stale line-number
+  allowlist in a C12 static test vs `ai_identify.py`), found incidentally,
+  needs its own triage.
+- Tigwa sent no response yet to the Max-plan-sprint context note
+  (`inbox/tigwa/CLAUDE-NOTE-new-context-for-pp-postgres-001-sequencing-
+  month-2026-07-22.md`) — check before assuming her PP-POSTGRES-001
+  "pipeline/UI first, defer Postgres" sequencing call still stands
+  unchanged now that she has the capacity context.
 
-**Also open, from the incident chain (lower urgency but real):**
+**#1638/#1639 are DONE, both live** — dual-authority NATS stream bug and
+`tgw_health`'s NATS-check asyncio crash. Took a 4th live failure on
+`nats.nix` to land (exact-sum-to-ceiling reservation rejected by NATS
+admission control, fixed with 10% headroom) — recorded in
+`TGW-Master-Plan.md`'s PP-AIOPS-001 section as concrete evidence for the
+2026-07-22 Nix-direction-change decision (below), not just accumulated
+mood.
 
-1. **#1618 (PP-STATEMACHINE-001, live incident, reviewed+merged into
-   `catio-nix-0.0.1-alpha`, NOT yet deployed):** `enqueue_job()`'s
-   `debounce=True` path could corrupt a self-rescheduling worker's own
-   in-flight job under the same `dedupe_key`, silently killing its
-   reschedule chain — this is what caused tonight's eBay token expiry.
-   Root-caused, fixed (advisory-lock-guarded read-then-write, not
-   `ON CONFLICT` — a real Postgres arbiter-inference gotcha made the
-   originally-planned index approach not work, documented in the code and
-   `1618-RESULT.md`), reviewed clean, merged. **`token_refresh` worker
-   already restarted and running the fixed code.** Still open: the new
-   `uq_queue_jobs_dedupe_key_pending` backstop index has NOT been applied
-   to the live production `state_machine` DB yet (blocked on an explicit
-   DDL confirmation, session ended before that happened) — apply it, then
-   restart the other self-rescheduling workers (`ebay_sync`,
-   `velocity_stats`, `ebay_price_reducer`, `ebay_sku_migrate`,
-   `sync_conflict`; `ebay_legacy_sync` stays deliberately stopped per
-   existing decision) to pick up the fix. Also open: todo #1619 (document
-   the Postgres arbiter-implication gotcha, decide keep/drop on the
-   throwaway `state_machine_test` DB the investigation created — did not
-   touch production).
-2. **427-item ai_identify reidentify batch — DONE**, 423 succeeded, zero
-   failures. Found a real follow-up: ~10% of titles (43/427) still open
-   with "Unbranded" — the SEO fix regression, filed as #1614.
-3. **#1615 (alt_text history-archive symlink fix) — DONE, merged.** Archive
-   copies now land in local `history-staging/`, never touch the removable
-   `MasterArchive` symlink. Interim fix only — the full librarian/archivist
-   hand-off (separation/continuation/resolution, hash-then-archive) is
-   design-only in `PP-KNOWLEDGE-001.md`, not built.
-4. **#1617** — process gap, recurring: both #1615 and #1618 were dispatched
-   as inline Agent prompts rather than through `/tgw-packet`, so no formal
-   packet spec file exists for either. Reviews proceeded using the
-   in-session dispatch prompt as the de facto spec both times. Worth fixing
-   the habit, not urgent.
-5. **`ebay_legacy_sync` worker** stays deliberately stopped — unrelated to
-   tonight's fix, still pending its own structural heartbeat-renewal work
-   (#1607's remaining scope).
+**Major standing decision, read before any new Nix work:** Dave,
+2026-07-22 — "We are changing unless we find a good reason not to [on
+Nix]. To what and when TBD." Full evidence in `TGW-Master-Plan.md`'s
+`PP-NIXOS-001` section and memory `project-nix-stability.md`. Not a
+migration authorization — the default flipped, staying on Nix now needs
+an active reason. Also encoded this session: `feedback-verify-directly-
+when-possible.md` — when I already have live access to the same host,
+run read-only verification myself, don't make Dave paste command output.
+
+**Decided this session, not yet built:** PP-RUNNERCOMMS-001 mailbox
+redesign ("basically email" — delivery guarantee, reply trail, versioned
+drafts, per-actor compartmentalization; Tigwa's acceptance criteria
+recorded in PP-RUNNERCOMMS-001's section), PP-LOADTEMP-001 (two design
+gaps — failure-mode default, fence allowlist — both need answers before
+packet-ready), PP-POSTGRES-001 Phase 0 (todo #1636, packet-ready,
+small/independent, sequencing now uncertain pending Tigwa's response
+above).
+
+**Orchestrator/classifier planning week (started 2026-07-21)** —
+PP-WORKFLOW-001 (#1626), PP-ORCHESTRATOR-001, PP-APPROVAL-001,
+PP-CLASSIFIER-001 (#1628) are decided-not-built, #1626/#1628 confirmed
+`tgw-coder`-ready whenever dispatched. See
+`project-orchestrator-classifier-cluster-2026-07-21` memory for the full
+decision chain.
+
+**Carried forward, still open:**
+
+1. **Needs Dave's decision — aging:** `nix-flake-maintainer` (todo #1620)
+   committed+pushed directly to `origin/master` without explicit
+   confirmation on 2026-07-21. PP-FLAKEGATE-001 is the structural fix
+   going forward; the original commit (`4adb145`) still has no explicit
+   keep-or-revert decision.
+2. Apply the `uq_queue_jobs_dedupe_key_pending` backstop index (#1618) to
+   the live `state_machine` DB — still not done. Then restart the other
+   self-rescheduling workers.
+3. **#1619** — document the Postgres arbiter-implication gotcha from
+   #1618; decide keep/drop on the throwaway `state_machine_test` DB.
+4. **#1614** — ~10% of the 427-item ai_identify batch still shows
+   "Unbranded" titles, the SEO-fix regression.
 
 No other standing risk carried forward — check `tgw plan status` / `tgw
 health` fresh each session rather than trusting a stale note here.

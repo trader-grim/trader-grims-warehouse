@@ -360,6 +360,16 @@ notes — not deleted, just relocated out of the future-ideas holding pen.
 
 ---
 
+## How tied are we to Nix, really — PROMOTED 2026-07-22, see TGW-Master-Plan.md's PP-NIXOS-001 section
+
+**No longer a "mull, not decide" item.** Dave, 2026-07-22: "We are
+changing unless we find a good reason not to. To what and when TBD." Full
+entry (both this 2026-07-14 evidence and the 2026-07-22 evidence that
+tipped it) moved to the master plan's `PP-NIXOS-001` section, kept intact
+rather than re-summarized — read it there, not here. This file's copy
+below is left as-is for historical record only; the master plan is now
+the live version.
+
 ## How tied are we to Nix, really — a reality check Dave wants to mull, not decide (2026-07-14)
 
 **Dave's own framing, the actual thing driving this:** "NIX is great and it
@@ -394,6 +404,31 @@ reality):**
   security hardening, filesystems all live here. No app-code dependency
   on Nix specifically, but real depth of commitment at the provisioning
   layer.
+
+**Second concrete evidence entry, 2026-07-22 — Dave: "I did not decide on
+Nix lightly. I expected friction. But once again, look how much time we
+spend installing a couple of apps today."** Not a reversal of the
+2026-07-14 "not ready for a decision" stance — a second data point for
+whenever he does mull it. What was, on paper, "install NATS, declare a
+Syncthing folder" (two small, well-scoped changes) actually cost, in one
+session: three separate failed fix attempts on the same file before a
+live-verified NATS retention config worked (a flag-parsing bug, then a
+unit-suffix parser mismatch nats-server/natscli disagreed on even with
+matching literal text, then a real disk-size miscalculation caught only
+by checking actual free space); a pre-existing, previously-undiscovered
+Syncthing folder-loss bug traced back to the same NixOS module's
+override-stomping default; a live desktop-input disruption (lan-mouse/
+window-switching froze) from the switch's "reloading user units" side
+effect; and a still-unresolved dual-authority NATS bug (`nats_client.py`
+vs. the new declarative provisioning) found only because the first three
+fixes kept failing for reasons that turned out to be a fourth, unrelated
+cause. None of this was Nix syntax friction specifically — `nixos-rebuild
+dry-activate` passed clean on every one of the three failed attempts,
+because the failures were all in what got declared, not whether Nix could
+parse it. Worth weighing against the "OS/host layer — deeply tied, by
+design" assessment above the next time this gets mulled for real: the
+real cost tonight was investigation/verification time on live systemd
+services after each "successful" build, not the flake language itself.
 
 **The proposed-system tie-in Dave specifically recalled:** PP-AIOPS-001
 Phase 5 (AI session isolation — the actual technical substrate for

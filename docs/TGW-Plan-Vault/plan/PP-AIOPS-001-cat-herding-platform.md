@@ -335,7 +335,15 @@ Claude and Aider full visibility into what changed during any session.
 
 ---
 
-### Phase 5 — AI Session Isolation (nspawn + Btrfs)
+### Phase 5 — AI Session Isolation (nspawn + Btrfs) — SUPERSEDED 2026-07-22, kept for record
+**Superseded by "Phase 5 REVISED" below** — nspawn+Btrfs was Nix-coupled
+(explicitly gated on PP-NIXOS-001) and conflicted with PP-CATIONIX-001's
+standing "build portable, independent of the Nix decision" requirement
+(2026-07-14). Not deleted — the cgroup/telemetry supervisor design and the
+commit/rollback command shape below are still useful reference even though
+the container runtime underneath them changes. Do not build against this
+version; see Phase 5 REVISED.
+
 **Gate:** PP-NIXOS-001 Phase 3 complete (NixOS running on spare hardware); Phase 4 done.
 **Size:** L–XL (2–4 sessions + operator validation)
 
@@ -381,6 +389,94 @@ a thin wrapper around `sandbox-run`. Every Aider task automatically gets a sandb
 **Output:** AI agent changes are isolated until explicitly committed. Bad sessions can be
 rolled back in one command. The "photo rename disaster" class of problem is structurally
 prevented — the change is staged in the sandbox and validated before committing.
+
+---
+
+### Phase 5 REVISED — Bubblewrap isolation, extended to the full worker fleet
+**Decided 2026-07-22 (Dave: "plan the bubblewrapping of all of the workers").**
+Runtime changes from systemd-nspawn+Btrfs to **bubblewrap** (portable
+standing candidate per PP-CATIONIX-001's "build portable" requirement,
+already deployed on a1131 for Codex CLI's own `--sandbox` mode — no new
+tooling to introduce). Scope widens from "AI coding session isolation
+only" to **every `tgw-worker@<queue>` systemd unit**, not just Aider/
+tgw-coder sessions — same mechanism, much broader blast-radius reduction.
+
+**Why this is bigger than it looks:** the settled architecture already
+says "workers are thin — ask tgw-api, never construct paths directly."
+Today that's an unenforced written rule. A bubblewrap profile that
+genuinely can't see `/opt/TGW/data` unless explicitly bound turns that
+rule into a mechanical boundary — the same "written rule → hook/mechanism"
+pattern already used for E11/E12 (worktree/app-code guards). A worker that
+tries to bypass the fence fails immediately in testing instead of quietly
+working today and only being a "should not" in CLAUDE.md.
+
+**Trust-tiered isolation, reusing the design from the specialist-roster
+discussion earlier this session:** bubblewrap is the steady-state runtime
+for the ordinary worker fleet and for coding specialists once trusted
+(tgw-coder today). **gVisor (`runsc`)** is the answer for anything in a
+probationary/not-yet-trusted state (a brand-new specialist's first runs,
+anything from outside our own vetted set) — stronger syscall-level
+isolation, still fully portable (OCI-standard runtime, no Nix-specific
+config), no VM boot/RAM overhead. Neither tier touches Firecracker/
+microvm.nix — that idea is dropped, see the "fewer Nix lock-ins" thread
+above.
+
+**Known gap, not solved by this plan:** bubblewrap has no built-in
+network-level ACL — it's share-the-host-network-namespace or nothing,
+there's no "allow only tgw-http + eBay's API host" primitive inside
+bubblewrap itself. This phase only closes the **filesystem** side of the
+fence (which is the side the "never construct paths directly" rule
+actually cares about). Real network containment (a local egress proxy,
+nftables per-cgroup rules) would be a separate, later effort — named here
+so it isn't silently assumed solved.
+
+**Phased rollout — survey before any code changes, then one worker at a
+time, ordered by risk, same "prove trust before adding" discipline as the
+specialist roster:**
+
+1. **Phase A — Survey (no changes).** For each of the ~15
+   `tgw-worker@<queue>` units (`token_refresh`, `bundle_intake`,
+   `multi_intake`, `ai_identify`, `catalog_rebuild`, `plan_render`,
+   `thumbnail_gen`, `ebay_draft`, `ebay_upload`, `ebay_price`,
+   `ebay_stage`, `ebay_publish`, `ebay_sync`, `ebay_legacy_sync`, `echo`,
+   plus the currently-unit-less `ebay_dole`), record: what filesystem
+   paths it actually touches and whether read-only or read-write (config,
+   secrets_root, ItemData, logs, thumbnails/photos), what network
+   endpoints it calls (tgw-http, Postgres socket, eBay API, LLM provider
+   APIs), and whether it reaches ItemData directly or only through
+   `tgw-api`/the shared client library. **Flag any direct-path-
+   construction found as a bonus finding regardless of this plan** — that
+   would be a pre-existing fence violation worth its own fix.
+2. **Phase B — Baseline profile + per-worker overrides.** One shared
+   bubblewrap baseline (read-only `/nix/store` + `/opt/TGW/src`, read-only
+   config, Postgres unix socket bind, log dir read-write) with per-queue
+   overrides layered on top from Phase A's findings — e.g. `token_refresh`
+   needs `secrets_root` read-write, `thumbnail_gen`/`bundle_intake` need
+   photo paths read-write, most eBay-facing workers need neither.
+3. **Phase C — Pilot on `echo`.** It's already CLAUDE.md's designated
+   reference/testbed worker ("Starting point when writing a new worker")
+   — no real business impact if the sandbox is misconfigured, minimal I/O
+   footprint. Wrap it, verify live (`tgw health`, `journalctl`, confirm it
+   still drains its queue), before touching anything with real stakes.
+4. **Phase D — Roll out sequentially, risk-ordered:** low-risk/read-mostly
+   next (`velocity_stats`, `plan_render`), then read-write-but-contained
+   (`thumbnail_gen`, `bundle_intake`, `multi_intake`, `ai_identify`), then
+   the eBay-API-touching workers (`ebay_draft`, `ebay_upload`,
+   `ebay_price`, `ebay_publish`, `ebay_stage`, `ebay_sync`,
+   `ebay_legacy_sync`, `ebay_sku_migrate`, `ebay_price_reducer`,
+   `ebay_repush`, `ebay_dole`) most carefully — real external-API blast
+   radius if a profile is subtly wrong. **`token_refresh` last of all** —
+   every eBay-touching worker's auth cascades from it, so it gets the most
+   scrutiny and the most reps of the pattern working elsewhere first.
+5. **Phase E — same treatment for coding specialists** (`tgw-coder`
+   today, Aider once it joins per PP-ORCHESTRATOR-001's roster sequence)
+   — bubblewrap once trusted, gVisor during the probationary window,
+   converging this phase with the AI-session-isolation goal Phase 5
+   originally had, now on portable tooling instead of nspawn+Btrfs.
+
+**Not yet started.** This is the plan, not the build — Phase A (survey)
+is the only piece that's actually next-actionable; everything after it
+depends on what the survey finds.
 
 ---
 

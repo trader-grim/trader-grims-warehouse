@@ -191,3 +191,56 @@ audit trail for every real fence write (not gated on the Postgres
 migration being designed, let alone built), and directly prevents a repeat
 of "reconstruct what changed by diffing archive zips by hand." Everything
 else in this doc needs a dedicated planning session before any code moves.
+
+## Phased build plan — Dave, 2026-07-22: "plan both. This is our
+## opportunity for those big projects. This is the justification."
+
+Tonight's confirmed-live `#1377` bypass (`items.py`'s `verifiedupdate()`
+hand-rolling its own write instead of calling `_write_field()`) is the
+concrete case this migration exists to make structurally impossible, not
+just harder. Sequenced so each phase ships independent value and none
+requires the next to already exist:
+
+1. **Phase 0 (packet-ready today)** — the "Recommended immediate next
+   step" above: wire `publish_mutation()` into `http_server.py`'s real
+   fence. Zero schema risk, immediate audit-trail value, works whether or
+   not the rest of this migration ever happens.
+2. **Phase 1 — schema + dual-write.** Design the normalized-columns-vs-
+   jsonb split (against `TGW-Item-JSON-Schema.md`, not from the Perplexity
+   conversation's guess), stand up the Postgres tables (same instance as
+   `state_machine` unless Phase 1's own design work concludes isolation is
+   worth the operational cost — still an open question above, resolve
+   here not before). `_write_field()`/`update_item()` write to BOTH
+   Postgres and the existing JSON files during this phase — Postgres is
+   not yet authoritative, this is the rollback/dual-read safety net the
+   "explicitly not decided yet" section above calls for, built in from the
+   start rather than bolted on after a bad one-way migration (which is
+   exactly how today's `#1377`-class incidents keep happening).
+3. **Phase 2 — backfill + verify.** Migrate all 55k+ existing items into
+   the new schema, dual-read verification (Postgres value vs. JSON value
+   must agree for every migrated item before cutover) — same spirit as
+   invariant C12's migration note (old and new shapes coexist correctly
+   for as long as the transition takes, not a flag day).
+4. **Phase 3 — cutover: Postgres becomes authoritative, JSON becomes
+   export.** `_write_field()` writes to Postgres only; JSON export job
+   (cadence TBD per the open question above) generates the files existing
+   tooling (recoll, `tgw-view-image.sh`, MC extfs, manual grep/rsync
+   workflows) still depends on. This is the phase that actually removes
+   today's `atomic_write_json`-anywhere bypass surface, by construction —
+   there's no longer a live JSON write path for a bug to reimplement.
+5. **Phase 4 — the actual unbypassable fence: column-level `GRANT`/
+   `REVOKE`.** The concrete requirement from tonight's discussion: the
+   application's default DB role gets no `UPDATE` privilege on canonical
+   status/location/workflow-state columns; only a dedicated fence
+   role/function (`_write_field()`'s Postgres-side equivalent) can write
+   them. This is the phase that makes bypass not just "structurally
+   inconvenient" (Phase 3) but literally refused by the database engine
+   regardless of how a future bug tries to construct the write — the
+   actual "fence that cannot be crossed." Sequenced last because it's the
+   least useful without Phases 1-3 already making Postgres the real
+   target worth protecting.
+
+Each phase is independently valuable and independently stoppable — this
+is the justification for treating PP-POSTGRES-001 as real, sequenced work
+rather than a someday-proposal, not a commitment to build all 5 phases in
+one push.

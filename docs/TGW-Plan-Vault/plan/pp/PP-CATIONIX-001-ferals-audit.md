@@ -17,6 +17,20 @@ and `.../TIGWA-REQUEST-1333-openai-codex-addendum.md` — this file is the
 reconciled summary, not a replacement for reading the originals if a
 routing decision needs the full evidence trail.
 
+## Naming convention, 2026-07-21 (Dave): resumes vs. job descriptions
+
+"Ferals have resumes. Housecats have resumes and job descriptions." Every
+resource in this audit gets a **resume** — a capability/track-record
+description (what it can do, quotas, quirks) — the moment it's discovered,
+whether or not it's ever used. A resource only gets a **job description**
+too once it clears the admission checklist below and is actually assigned
+a role (e.g. tgw-coder = specialist #1's job description; Agnes AI's
+pending orchestrator/policy-brain role, once its own checklist runs). This
+is the same distinction the routing-class column already implied
+informally — naming it explicitly so future entries (and
+PP-ORCHESTRATOR-001's model-selection/routing layer, which will need to
+read both fields) don't have to re-derive it.
+
 ## Governance principle (the actual finding)
 
 The important boundary isn't provider-by-provider, it's **account, ledger,
@@ -52,6 +66,37 @@ supporting Tigwa's core role, not unclaimed capacity waiting to be found:
   OpenAI Platform API key — a paid ChatGPT plan does not include API
   credit. Any future OpenAI Platform API route needs its own owner/budget/
   acceptance, same as any other new feral would.
+
+## Stale as of 2026-07-21 — refresh in progress
+
+Dave, 2026-07-21: this table predates two new resources and needs a pass,
+not a full re-audit — the governance principle/admission checklist above is
+unchanged.
+
+- **Agnes AI — key now in hand (2026-07-21).** Not present in the original
+  2026-07-13/16 audit at all (didn't exist in our arsenal yet). OpenAI-
+  compatible gateway, `agnes-2.5-flash` (gray-release, 512K context/65.5K
+  max output) + `agnes-2.0-flash` (GA fallback), `https://apihub.agnes-
+  ai.com/v1`. Free during gray release; free-tier RPM caps apply (per
+  `TIGWA-RESEARCH-orchestrator-dag-2026-07-21.md`'s findings — 20 RPM base
+  plan, higher on a Token Plan). Same session, 2026-07-21 design decision:
+  slated as the swappable orchestrator/policy-brain model for the
+  in-progress custom-harness build (model selection + budgeting + feral-
+  routing-once-tamed), not just generic cheap inference — a more specific
+  role than this audit's existing routing classes (A/B/D/E) capture. First-
+  pass status: CONFIRMED-Dave (key held), routing class **pending its own
+  entry** — needs the 10-point admission checklist run explicitly given the
+  orchestrator role is higher-trust than a bounded-inference feral.
+- **OpenCode — key incoming, not yet in hand.** Dave, 2026-07-21: "will add
+  opencode key." Purpose/role not yet specified — flagging as CANDIDATE
+  only; do not assume a routing class or capability until Dave confirms
+  what this unlocks and the key is actually provisioned. Distinct from
+  todo #1332's `opencode-openai-codex-auth` OAuth-wiring survey (a
+  different, already-tracked thread) unless Dave says otherwise.
+
+Both entries need the admission checklist (source draft §7) run before
+either is treated as tame/routable — same standing rule as every other row
+below, no shortcut for being newly acquired.
 
 ## Genuine ferals (unclaimed or under-routed capacity)
 
