@@ -3,10 +3,11 @@ Tests for tgw.apis.nats_client and the mutation audit wiring in items.py.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any, Dict
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -127,6 +128,84 @@ class TestNatsClientPublish:
         finally:
             nats_client._loop = original_loop
             nats_client._async_queue = original_queue
+
+
+# ---------------------------------------------------------------------------
+# _ensure_streams: read-only, single-authority (todo #1638)
+# ---------------------------------------------------------------------------
+
+class TestEnsureStreamsReadOnly:
+    """_ensure_streams() must never create/edit stream config — that's
+    nats.nix's declarative job now. It only checks and logs."""
+
+    def test_ensure_streams_never_calls_add_stream_when_present(self):
+        from tgw.apis import nats_client
+
+        js = MagicMock()
+        js.stream_info = AsyncMock(return_value=MagicMock())
+        js.add_stream = AsyncMock()
+
+        asyncio.run(nats_client._ensure_streams(js))
+
+        assert js.stream_info.await_count == 2
+        js.add_stream.assert_not_awaited()
+
+    def test_ensure_streams_never_calls_add_stream_when_missing(self, caplog):
+        """Even if stream_info fails (stream missing), no add_stream call —
+        just a log.error, per #1638 single-authority spec."""
+        from tgw.apis import nats_client
+
+        js = MagicMock()
+        js.stream_info = AsyncMock(side_effect=Exception("stream not found"))
+        js.add_stream = AsyncMock()
+
+        with caplog.at_level("ERROR"):
+            asyncio.run(nats_client._ensure_streams(js))
+
+        js.add_stream.assert_not_awaited()
+        assert any("not found" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# check_nats / query_mutations: work from inside a running event loop (#1639)
+# ---------------------------------------------------------------------------
+
+class TestRunIsolated:
+    """check_nats()/query_mutations() must not raise
+    'asyncio.run() cannot be called from a running event loop' when called
+    from a caller thread that already has a loop running (the MCP path)."""
+
+    def test_check_nats_from_running_loop_does_not_raise(self):
+        from tgw.apis import nats_client
+
+        async def _main():
+            # Simulates FastMCP's already-running event loop calling into
+            # check_nats() synchronously.
+            return nats_client.check_nats(url="nats://127.0.0.1:1")
+
+        result = asyncio.run(_main())
+        assert isinstance(result, dict)
+        assert "ok" in result
+
+    def test_query_mutations_from_running_loop_does_not_raise(self):
+        from tgw.apis import nats_client
+
+        async def _main():
+            return nats_client.query_mutations(
+                "tgw123", url="nats://127.0.0.1:1"
+            )
+
+        result = asyncio.run(_main())
+        assert isinstance(result, dict)
+        assert "ok" in result
+
+    def test_run_isolated_returns_coro_result(self):
+        from tgw.apis import nats_client
+
+        async def _coro():
+            return {"value": 42}
+
+        assert nats_client._run_isolated(_coro) == {"value": 42}
 
 
 # ---------------------------------------------------------------------------
