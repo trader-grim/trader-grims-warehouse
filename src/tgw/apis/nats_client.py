@@ -139,22 +139,45 @@ def _bg_thread_main(url: str) -> None:
 
 
 async def _ensure_streams(js: Any) -> None:
-    """Create JetStream streams if they don't exist yet."""
-    # max_age in nats-py is seconds (float); max_bytes -1 = server-side limit from nats-server.conf
-    streams = [
-        {"name": STREAM_MUTATIONS, "subjects": ["itemdata.>"], "max_age": 90 * 86400.0},
-        {"name": STREAM_TRANSITIONS, "subjects": ["queue.>"], "max_age": 30 * 86400.0},
-    ]
-    for s in streams:
+    """Verify JetStream streams exist. Read-only — does NOT create or edit
+    stream config.
+
+    Stream creation/configuration (subjects, max_age, max_bytes) is owned
+    exclusively by nats.nix's declarative nats-stream-init systemd oneshot
+    (see todo #1638 — two independent uncoordinated provisioning paths for
+    the same streams caused a real "insufficient storage resources (10047)"
+    outage; nats_client.py must never create/edit stream config again).
+    A missing stream here means declarative provisioning never ran — a
+    real operational problem, not a quiet first-boot condition.
+    """
+    for name in (STREAM_MUTATIONS, STREAM_TRANSITIONS):
         try:
-            await js.stream_info(s["name"])
-        except Exception:
-            try:
-                await js.add_stream(name=s["name"], subjects=s["subjects"],
-                                    max_age=s["max_age"])
-                log.info("nats: created stream %s", s["name"])
-            except Exception as e:
-                log.warning("nats: could not create stream %s: %s", s["name"], e)
+            await js.stream_info(name)
+        except Exception as e:
+            log.error("nats: stream %s not found (declarative provisioning "
+                      "did not run?): %s", name, e)
+
+
+def _run_isolated(coro_fn):
+    """Run an async probe/query on its own thread+loop, regardless of
+    whether the calling thread already has one running.
+
+    check_nats()/query_mutations() are called both from plain sync
+    contexts (CLI, no event loop) and from inside FastMCP's already-running
+    event loop (mcp_server.py's tgw_health() tool). A bare asyncio.run()
+    raises RuntimeError in the latter case ("asyncio.run() cannot be
+    called from a running event loop") — see todo #1639. Running on a
+    dedicated thread sidesteps that regardless of caller context.
+    """
+    result: Dict[str, Any] = {}
+
+    def _worker():
+        result["value"] = asyncio.run(coro_fn())
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join()
+    return result["value"]
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +311,7 @@ def check_nats(url: Optional[str] = None) -> Dict[str, Any]:
             return {"ok": False, "url": target, "error": str(e)}
 
     try:
-        return asyncio.run(_probe())
+        return _run_isolated(_probe)
     except Exception as e:
         return {"ok": False, "url": target, "error": str(e)}
 
@@ -342,6 +365,6 @@ def query_mutations(
             return {"ok": False, "error": str(e)}
 
     try:
-        return asyncio.run(_fetch())
+        return _run_isolated(_fetch)
     except Exception as e:
         return {"ok": False, "error": str(e)}
