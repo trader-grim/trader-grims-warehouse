@@ -170,3 +170,80 @@ but not phased; revisit after Phase A proves the core model out.
   built the same way, for the camera app.
 - `SUGGESTIONS.md:209-210` — the documented precedent for this feature's
   "marked done without verification" failure.
+
+---
+
+## Reconciled with a diverged duplicate copy, 2026-07-22 — RESOLVED since
+
+A second, older copy existed at `docs/TGW-Plan-Vault/pp/
+PP-PORTABLE-CATALOG-001.md` (pre-migration location). Unlike the other
+reconciled duplicates, this one had genuinely newer content (2026-07-17)
+than this canonical doc's original 2026-07-11 content: Dave's correction
+that the real problem was more basic than the Phase A/B/C plan above —
+"these two known devices are sitting right next to each other and I have
+never even seen it fire up a single time" — plus the discovery of an
+undocumented Tigwa-built wrapper reaching `tgw` from a1131.
+
+**Both are now resolved, checked live before merging:**
+- The wrapper is documented: `reference/TGW-a1131-CLI-Wrapper.md`
+  (rediscovered/written up via todo #1492, 2026-07-17/18).
+- **The "does it even start" blocker is cleared** — todo #1492's result
+  (`plan/packets/results/1492-RESULT.md`): the Flutter app launched
+  cleanly and connected live on tgw-prod's Sway desktop, Dave's actual
+  first-ever look at it working — home screen, ONLINE badge, live
+  per-queue job-state grid, cross-checked against real `queue_jobs`
+  counts, not just "looks plausible." Screenshot:
+  `plan/packets/results/evidence/1492-tgw-app-launched-online.png`.
+  **The master plan's own PP-PORTABLE-CATALOG-001 section was itself
+  stale** (still said "next session should start by verifying the launch
+  path" despite #1492 already having done exactly that) — corrected in
+  the same pass as this reconciliation.
+
+**Consequence for this doc's own Remediation plan above**: the launch/
+connect blocker that superseded Phase A/B/C is gone — Phase A (harden the
+existing manual model) is the next actual next step whenever this PP is
+picked back up, not a fresh "does it even start" investigation.
+
+Old copy at `pp/PP-PORTABLE-CATALOG-001.md` renamed to
+`pp/ARCHIVED-2026-07-22-PP-PORTABLE-CATALOG-001.md` (preserved, not
+deleted). This file remains the sole canonical copy.
+
+
+## Deployment image and infrastructure boundary — Dave decision 2026-07-25
+
+The portable fleet is intentionally built as a maintainable two-layer system,
+not as one maximally minimal image forced to serve every role.
+
+1. **Helicrew is the development/reference image now.** Its MX Snapshot is a
+   practical integration and recovery source while the portable-client path is
+   proven. It may carry heavyweight or experimental development tools (for
+   example Waydroid) and therefore is explicitly **not** the final production
+   or shipping image.
+2. **The production/satellite platform is a separate lean baseline.** The
+   shipping computer may use that genuine platform image directly, including a
+   from-scratch build when that is the cleaner route. Other catalog, capture,
+   and fulfillment satellites start from the same production contract but may
+   have distinct documented role overlays.
+3. **Nix is deliberately bounded to stable infrastructure.** It owns the
+   reproducible invariants: machine/account identity, SSH and non-secret
+   shared-output posture, required TGW/Hermes runtime dependencies, local
+   state locations, allowed role services/actions, and the prohibition on a
+   second production ledger, worker fleet, or eBay actor. It does not attempt
+   to model every desktop preference or optional workstation application.
+4. **The image/overlay lane owns the workstation experience.** MX Snapshot or
+   a later platform-image builder owns OS capture/restore, desktop and
+   hardware choices, and optional role/development applications. Approved
+   additions are a small, documented overlay rather than hidden changes to a
+   one-off machine.
+5. **The repeatable lifecycle is:** production base image → explicit device
+   role enrolment → post-boot provision of per-device secrets (never baked
+   into the image) → approved role/development overlay → verification. Once
+   the production baseline is accepted, reimage Helicrew from that same base
+   and add back only its declared development/recovery overlay. That makes
+   Helicrew a production satellite plus a controlled development overlay, not
+   a snowflake.
+
+Current scope: capture and harden Helicrew after its dist-upgrade as a
+**development** baseline; separately design and verify the lean production
+platform. This decision does not authorise a final ISO, Nix/flake mutation,
+service deployment, secret copy, or production authority change.

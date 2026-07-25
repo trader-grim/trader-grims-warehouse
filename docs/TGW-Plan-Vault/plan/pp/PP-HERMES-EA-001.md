@@ -495,6 +495,51 @@ the `tigwa` account with NOPASSWD root-equivalent sudo on a1131 itself,
 but worth knowing if narrower scoping (forced `rsync`/`scp`-only command,
 read-only) is preferred later.
 
+### Laptop-side Hindsight memory upgrade — settled architecture, 2026-07-24/25
+
+Dave chose **Hindsight**, after the laptop move-in, as the long-term memory
+upgrade for the primary Tigwa/Hermes executive-assistant profile. It is a
+laptop-local, durable memory service, not a replacement authority for the
+Plan Vault and not a copy of TGW's operational database.
+
+**Target boundary:**
+
+```text
+Helicrew primary Hermes/Tigwa profile
+  → Hindsight provider in local_external mode
+  → self-hosted Hindsight API bound locally by default
+  → dedicated PostgreSQL database + restricted Hindsight role + pgvector
+```
+
+- Do not use Hindsight's disposable embedded `pg0` path for the durable
+  laptop installation.
+- Do not mix Hindsight tables, role, schema, backup scope, or migrations
+  with TGW application PostgreSQL. Hindsight observations, graph state, and
+  vector indexes are non-authoritative assistant memory only.
+- Keep built-in curated `MEMORY.md` / `USER.md` enabled as compact,
+  human-readable routing/fallback context. The external provider augments
+  them; it does not turn Plan Vault evidence, credentials, or raw library
+  material into unreviewed agent memory.
+- Hindsight API exposure is local by default. Any future Tailscale or
+  cross-device access needs its own authenticated, least-privilege design;
+  moving the laptop to a better network is not permission to expose its
+  memory service.
+- Retained content must stay secret-redacted. Credentials, token material,
+  and raw secret-bearing tool output do not belong in the Hindsight bank.
+
+**Move-in acceptance evidence (before reliance):** dedicated database/role
+and pgvector verification; Hindsight schema/API health; a small controlled
+import of approved curated facts; database-aware backup; restore to an empty
+test database; Hindsight index/repair check if required; known-fact recall
+through a restarted Hermes session; and a recorded rollback/disable path to
+the built-in memory files. Back up Hindsight database state and non-secret
+provider configuration separately; never treat a live PostgreSQL data
+folder as a file-copy backup.
+
+This is an approved architecture and post-move-in implementation target. It
+does **not** authorise installation before the laptop move, a production
+TGW database change, secrets, remote service exposure, or a flake mutation.
+
 ### Wake-trigger structure — reuse existing monitoring, don't rebuild it
 
 Dave's instruction (2026-07-12): base the wake decision on what session
@@ -985,3 +1030,30 @@ before dispatch. Dave's same-session direction after this: move into
 actually exercising the pipeline live (packets → runners → review →
 stitch) and improve the rubric from what that surfaces, rather than
 refine process on paper indefinitely.
+
+---
+
+## Reconciled with a diverged duplicate copy, 2026-07-22
+
+A second, older copy of this file existed at `docs/TGW-Plan-Vault/pp/
+PP-HERMES-EA-001.md` (pre-migration location, 4.6KB vs. this file's much
+larger canonical content). Checked before archiving it: its content is
+NOT a lost/orphaned fork — the 2026-07-16 contract cross-verification
+work it recorded (Claude's read-only cross-check of Tigwa's own contract,
+finding the `tigwa@a1131` SSH-key + `db`'s `NOPASSWD: ALL` sudo
+combination gives Tigwa the exact thermal-shutdown authority her contract
+explicitly forbids; the Aider contract cross-verification finding two
+real gaps — no preflight seam, `task_slug=''` silently falling through to
+the shared checkout with auto-commit on) **already lives in
+`TGW-Master-Plan.md`'s own PP-HERMES-EA-001 section** (search that file
+for "todo #1459" / "credential-scoping"), just never cross-referenced
+from this detail doc. **Todo #1459 is still open** (checked live,
+2026-07-22) — the credential-scoping gap it names has not been fixed;
+delegated to Tigwa per PP-HR-001's job-contract-review process, she
+proposes the fix for her own role, still pending.
+
+Old copy at `pp/PP-HERMES-EA-001.md` renamed to
+`pp/ARCHIVED-2026-07-22-PP-HERMES-EA-001.md` (preserved, not deleted —
+its content is redundant with the master plan, not unique, but Prime
+Directive 1 still applies). This file remains the sole canonical detail
+doc.

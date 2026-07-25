@@ -54,3 +54,52 @@ track grows.
 - PP-DRIVE-INDEX-001 — leg 2's recovery mechanism rides its Phase 1 survey.
 - PP-EDITOR-001 — absorbed the now-defunct PP-UIPIPE-001 broker-rule role
   this doc originally cited.
+
+## Reconciled with a diverged duplicate copy, 2026-07-22 — STILL-LIVE BUG FOUND
+
+A second, older copy of this file existed at `docs/TGW-Plan-Vault/pp/
+PP-DATAINTEGRITY-001.md` (pre-migration location) carrying content this
+canonical copy was missing entirely: **the `status` vs `#STATUS`
+write-path bug (todo #1377's root cause, 2026-07-13).** #1377 itself is
+closed (2026-07-14, tagged PP-COHESION-001) — but that todo only fixed
+the narrow symptom (the web UI's Eligible filter silently excluding
+blank-status items). **The deeper root cause was never fixed and is
+confirmed still live right now** (checked `src/tgw/items.py` directly,
+2026-07-22): `verifiedupdate()` still writes `doc['#STATUS'] = 'In
+Stock'`, and `statusupdate()`'s own docstring literally reads "legacy
+name; rename pending in data scrub pass 2" — the rename never happened.
+
+**What this means concretely:** `status` (lowercase) was confirmed by
+Dave (2026-07-13) as the real canonical field; `#STATUS` was a manual
+convenience alias, "sometimes not updated." But `items.statusupdate()`,
+`items.verifiedupdate()`, and `bulk_edit`'s status field
+(`BULK_FIELD_KEYS['status'] = '#STATUS'`) have **always written to the
+wrong key** — every operator status update via `tgw update-verified` or
+the bulk editor has been silently landing on the stale/legacy field, not
+the canonical one, this whole time, including today. As of the
+2026-07-13 check: 5,118 items had neither key set (810 genuinely
+unlisted/unsold, the rest already resolved via `ebay_listing`/
+`ebay_offer`) — that count has not been re-checked since and is likely
+stale in the other direction (more items affected by now, not fewer).
+
+**Needs, none done yet:** (1) write-path fix — point `statusupdate()`/
+`verifiedupdate()`/`bulk_edit` at `status`, stop writing `#STATUS`; (2)
+`data_scrub_legacy_ebay_fields.py` either drops `#STATUS` from
+`FIELDS_TO_CHECK` entirely or gets the same promotion-first guard already
+built for legacy category fields (#1209/#1252); (3) `items.create_item()`
+still has no default `status` for intake paths that omit it; (4) a real
+reconciliation pass across all items with any status signal, once scoped.
+Dave, 2026-07-13: "this is a big fix" — this PP is now that fix's owning
+home, going forward, since it was never actually filed as a todo.
+
+**Also preserved from the old copy**: the framing that this PP's own
+reconciliation work (photo-integrity legs, this status bug) is Tigwa's
+concrete starting scope for the knowledgebase buildout (PP-KNOWLEDGE-001)
+— archive-snapshot diffing and write-path history tracing (exactly how
+#1377's root cause was found: "ItemArchive snapshot diffs +
+`data-scrub-1053-report.json`") is precisely the kind of search a mature
+knowledgebase should make trivial instead of manual archaeology.
+
+Old copy at `pp/PP-DATAINTEGRITY-001.md` renamed to
+`pp/ARCHIVED-2026-07-22-PP-DATAINTEGRITY-001.md` (preserved, not
+deleted). This file is now the sole canonical copy.

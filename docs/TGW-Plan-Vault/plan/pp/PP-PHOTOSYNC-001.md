@@ -485,3 +485,18 @@ is LIVE ON PROD and **committed+pushed: `ae9b1e6` on `catio-nix-0.0.1-alpha`**
 (s42+s43 combined, 108 files). Packet diffs layer on a clean tree. PR to main is
 deliberately DEFERRED until P1 (#1115) lands and verifies — then `/tgw-pr-review`
 and merge from a coherent, incident-closed state.
+
+---
+
+## Reconciled with a diverged duplicate copy, 2026-07-22
+
+A second, older copy existed at `docs/TGW-Plan-Vault/pp/PP-PHOTOSYNC-001.md`
+(2.7KB, pre-migration location). Checked all of its distinct content
+(P6 orphan-queue finding, P8 canary probe completion, P9 Feed API audit
+result, P2 digest-liability shipment, P9-follow-up #1127) against this
+canonical copy — **everything is already present here**, in more detail.
+Unlike PP-DATAINTEGRITY-001's reconciliation (which found genuinely
+unique, still-unfixed content), this old copy was a superseded snapshot,
+not a fork with lost information. Old copy renamed to
+`pp/ARCHIVED-2026-07-22-PP-PHOTOSYNC-001.md` (preserved, not deleted).
+This file remains the sole canonical copy.

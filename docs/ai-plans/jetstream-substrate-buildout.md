@@ -214,6 +214,122 @@ have answers.
 - [ ] Packet E: both design gaps have a written answer Dave has approved
       before any code is dispatched.
 
+## Packet C technical deep-dive (2026-07-22, per Dave's "unfold" direction)
+
+**Critical live finding, checked directly before designing this**: the
+broker today has **zero authentication** — no `authorization` block in
+`nats.nix` at all, confirmed live (`nats pub` from a bare unauthenticated
+client succeeded against `127.0.0.1:4222`). This is contained only
+because the broker is bound to localhost. **This sets a hard sequencing
+constraint not previously written down: the per-actor account/permission
+work below MUST land in the same change as the Tailscale bind, never
+split across two separate dispatches with the bind landing first** — a
+bind-then-auth order would create a real window where the broker is
+reachable from the whole Tailscale network with no authentication at all.
+
+### Per-actor subject-permission design (the "one account, per-actor
+permissions" decision, made concrete)
+
+NATS's `authorization` block (not full multi-tenant `accounts`, matching
+the already-decided simpler model) supports per-user `permissions` within
+one account — this is a direct, native fit, no custom mechanism needed:
+
+```json
+"authorization": {
+  "users": [
+    { "user": "claude", "password": "$2a$11$<bcrypt-hash>",
+      "permissions": {
+        "publish":   {"allow": ["tgw.mailbox.claude.>", "itemdata.>"]},
+        "subscribe": {"allow": ["tgw.mailbox.claude.>", "itemdata.>", "queue.>", "$JS.API.>"]}
+      }},
+    { "user": "tigwa", "password": "$2a$11$<bcrypt-hash>",
+      "permissions": {
+        "publish":   {"allow": ["tgw.mailbox.tigwa.>", "itemdata.>"]},
+        "subscribe": {"allow": ["tgw.mailbox.tigwa.>", "itemdata.>", "queue.>", "$JS.API.>"]}
+      }},
+    { "user": "tgw_worker", "password": "$2a$11$<bcrypt-hash>",
+      "permissions": {
+        "publish":   {"allow": ["itemdata.>", "queue.>"]},
+        "subscribe": {"allow": ["itemdata.>", "queue.>", "$JS.API.>"]}
+      }}
+  ]
+}
+```
+
+**Credential custody, per the existing single-facility rule** (CLAUDE.md:
+"secrets from `secrets_root`, no hardcoded paths in `src/`"): the
+plaintext NATS passwords live in `secrets_root/tgw.env`
+(`NATS_PASSWORD_CLAUDE`, `NATS_PASSWORD_TIGWA`, `NATS_PASSWORD_WORKER`),
+read via `tgw.apis.secrets.get_api_key()` on the client side — same
+pattern as every other provider key. **Only the bcrypt hashes go into
+`nats.nix`** (git-committed, effectively public within the repo) — this
+is exactly why NATS supports bcrypt config-side in the first place, not a
+TGW-specific workaround. `nats-server --bcrypt` (or `natscli`'s bcrypt
+helper) generates the hash from the plaintext once; the plaintext itself
+never touches the flake.
+
+`tgw_worker` is a genuinely new credential — today's workers connect with
+no credential at all (matches the zero-auth finding above). Every worker
+process picks up `NATS_PASSWORD_WORKER` the same way it already picks up
+other secrets.
+
+### The Tailscale bind
+
+```nix
+services.nats.settings.host = "100.x.x.x";  # tgw-prod's Tailscale IP, exact value TBD at dispatch time
+```
+
+Straightforward once auth lands — the constraint above is entirely about
+*sequencing*, not the bind's own mechanics. `nats.nix`'s existing header
+comment ("no cross-host NATS traffic is part of this design") is now
+stale relative to the 2026-07-22 Tailscale-bind decision — gets corrected
+in the same dispatch, not left contradicting the live config.
+
+### Acceptance-suite test procedures (concrete, per sub-check)
+
+1. **Cross-host connect/inspect** — from a1131:
+   `nats --server nats://claude:$NATS_PASSWORD_CLAUDE@<tailscale-ip>:4222 stream info ITEMDATA_MUTATIONS --json`
+   — compare byte-for-byte against the same command run on tgw-prod.
+2. **Durable publish + consumer ack** — `nats consumer add ITEMDATA_MUTATIONS test-c2 --pull`,
+   publish one throwaway message, `nats consumer next ITEMDATA_MUTATIONS test-c2`,
+   confirm `num_ack_pending` drops to 0 after ack, not just that publish returned success.
+3. **Denied cross-actor access** — connect as `tigwa`, attempt
+   `nats pub tgw.mailbox.claude.inbox.test "should be denied" --server nats://tigwa:$NATS_PASSWORD_TIGWA@<host>:4222`,
+   confirm the broker itself returns a permissions-violation error (visible
+   in `nats-server`'s own log as an `authorization violation`, not merely
+   "the app never sends this by convention").
+4. **Restart/replay** — `systemctl restart nats.service`, re-run check 1;
+   confirm stream message count unchanged (JetStream file storage should
+   just work, but per Prime Directive 4 this needs to be observed live on
+   this actual host, not assumed from NATS's general documentation).
+5. **Repaired health check** — `tgw_health` via both CLI and MCP paths
+   (todo #1639's fix, already landed) reports real broker state.
+
+Every throwaway artifact (`test-c2` consumer, `TEST_UNITBYTES`-style
+streams if any) gets deleted after — same discipline the earlier
+retention-fix investigation already used, not new.
+
+### Dispatch shape
+
+Two packets, matching the mixed-boundary rule (invariant E11/E12):
+- **`nix-flake-maintainer`**: `nats.nix` — add the `authorization` block
+  (bcrypt hashes only) + Tailscale bind, in one commit (never split per
+  the sequencing constraint above). Local commit + dry-activate +
+  `tgw flake request-push`/`request-switch`, human executes.
+- **`tgw-coder`**: issue the four `NATS_PASSWORD_*` secrets into
+  `secrets_root/tgw.env`, update any client code that connects without
+  credentials today (`nats_client.py` and worker connection setup) to
+  read and pass them, write the acceptance-suite test script (checks 1-5
+  above) under `tests/` or as an announced one-off script.
+
+**No-go condition**: if the flake dispatch lands the Tailscale bind
+before the `nix-flake-maintainer` step confirms the `authorization` block
+is active in the same `nixos-rebuild switch`, treat it as a live incident
+per Prime Directive 2 — an unauthenticated broker reachable from Tailscale
+is exactly the kind of exposure this project's own security findings
+(PP-COHESION-001's Syncthing/NFS exposure items) already treat as
+serious.
+
 ## Open questions
 
 - **Per-actor NATS accounts don't exist yet** — Packet C step 3 and all

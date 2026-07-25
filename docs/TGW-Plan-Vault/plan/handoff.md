@@ -4,91 +4,77 @@
 Once read and acted on, the whole file archives as a standard TGW
 timestamped snapshot (`archive/handoff-YYYY-MM-DD-<reason>.md`) and gets
 replaced — never appended to. Keep it to what's needed to pick up right
-now. Prior full snapshot: `archive/handoff-2026-07-22-jetstream-buildout-
-kickoff.md`; running per-session narrative log (unaffected, still
+now. Prior full snapshot: `archive/handoff-2026-07-22-plan-sweep-and-
+godconsole.md`; running per-session narrative log (unaffected, still
 flat-append): `archive/SESSION-LOG.md`.
 
 ---
 
-**Top open thread — month-long Max-plan build sprint, just started.**
-Dave, 2026-07-22: "we are planning for a max subscription upgrade to
-build this out... Build it all... I think we can easily do it in a month
-with a max plan, tigwa, and some api pocket change." Full detail in
-memory `project-2026-07-22-jetstream-buildout-and-max-plan-sprint.md`
-and `TGW-Master-Plan.md`'s new top-of-file "Standing context" section —
-read both before resuming. No month-scale roadmap document exists yet
-across all open PPs; work is proceeding packet-by-packet.
+**Top open thread — month-long Max-plan build sprint, "plan until
+nothing material left to plan," still in the planning phase.** Full
+detail in memory `project-2026-07-22-jetstream-buildout-and-max-plan-
+sprint.md` and `TGW-Master-Plan.md`'s top-of-file "Standing context" +
+"Doctrine for this whole sweep" sections — read both before resuming.
+2026-07-22's session ran a full sweep across ~65 PP sections looking for
+stale/contradictory/broken-link/undesigned-gap content; most came back
+clean. Fixes made: PP-QUOTA-001 (garbled edit artifact), PP-FLAKEGATE-001
+(self-contradicting sentence), PP-HR-001 (dangling citation to a deleted
+note, content already preserved inline), PP-NIXOS-001 (`nix/CLAUDE-
+NIX.md` confirmed genuinely missing — flagged for nix-flake-maintainer,
+not authored blind).
 
-**Immediately actionable next step — Packet C of
-`docs/ai-plans/jetstream-substrate-buildout.md`:** the JetStream
-acceptance-evidence suite (cross-host connect, durable ack, denied
-cross-actor access, restart/replay, health check). Blocked on two infra
-pieces, both decided this session but not yet built: NATS binds on
-tgw-prod's **Tailscale interface** (currently localhost-only, blocks
-a1131 entirely), and **one NATS account with per-actor subject
-permissions**. Write that packet next, dispatch mixed (flake for the
-bind, app-code for account provisioning).
+**Immediately actionable next step, morning priority #1 — reconcile
+PP-GODCONSOLE-001 (new tonight) against 6 same-night Tigwa notes on the
+identical topic.** Dave asked for "my inbox interface, the human facing
+one... a console to see all of the inboxes" — designed live tonight:
+Part A (personal inbox reader, tgw-http), Part B ("god console" —
+all-actor visibility + halt authority, feed-shaped UI, "not too easy to
+stop but possible pretty quick" friction bar). Full design in
+`TGW-Master-Plan.md`'s new PP-GODCONSOLE-001 section; todo #1661 (open,
+correctly — halt mechanism + file-vs-JetStream data source still need
+Dave's call). **Before touching #1661 further**: 6 of the 7 files
+sitting unread in `inbox/claude/` tonight are Tigwa independently
+designing the exact same human-inbox/ntfy/Flutter/KFMAWI territory —
+`TIGWA-NOTE-ntfy-human-inbox-connection`, `TIGWA-ADDENDUM-ntfy-flutter-
+human-inbox-reconciliation`, `TIGWA-CLARIFICATION-human-in-the-loop-
+message-monitoring`, `TIGWA-CLARIFICATION-practical-security-baseline-
+human-inbox`, `TIGWA-CLARIFICATION-kfmawi-intentional-unplug-clear`,
+`TIGWA-DECISION-kfmawi-outward-communications-surface`. Titles only
+skimmed, not cross-read against PP-GODCONSOLE-001 as of session end —
+this is a `feedback-design-reconvergence` pattern (memory), process
+these first thing, they likely sharpen or partially answer PP-GODCONSOLE-
+001's open questions rather than being unrelated. (7th file,
+`TIGWA-PROVISIONAL-RESOURCE-CARD-cisco-antares`, is unrelated ferals-
+audit business — process separately, lower priority.)
 
-**Also needs attention:**
+**Continuing the plan-unfolding sweep:** Dave's instruction tonight —
+"we will keep searching for gold. Found a lot today." The ~65-PP sweep
+found real issues at a decent hit rate; worth another pass once the
+GODCONSOLE/Tigwa reconciliation above is done. No specific next-PP target
+named — pick up wherever `tgw plan status`/a fresh grep for staleness
+markers points, same discipline as tonight (verify live before editing,
+don't invent designs owned by Tigwa/Dave).
+
+**Also needs attention, carried forward (not reverified tonight — check
+fresh, don't trust blindly):**
+- Todo #1658 — live, confirmed-still-active `status`/`#STATUS` write-path
+  bug (`items.py` `verifiedupdate()`/`statusupdate()`/`bulk_edit` all
+  write the wrong key). Documented, not yet dispatched for a fix.
+- Todo #1527 — a1131 has no Flutter SDK/toolchain at all; needs Dave's
+  device decision before #1630 (Flutter launch/connect on a1131) can be
+  usefully re-scoped.
 - Branch `todo/1638-1639-nats-client-fixes` (commit `b790591`) — done,
   tested, live-verified, **not yet reviewed/stitched**. Run
-  `/tgw-runner-review` before merging.
-- Todo #1641 — pre-existing unrelated test failure (stale line-number
-  allowlist in a C12 static test vs `ai_identify.py`), found incidentally,
-  needs its own triage.
-- Tigwa sent no response yet to the Max-plan-sprint context note
-  (`inbox/tigwa/CLAUDE-NOTE-new-context-for-pp-postgres-001-sequencing-
-  month-2026-07-22.md`) — check before assuming her PP-POSTGRES-001
-  "pipeline/UI first, defer Postgres" sequencing call still stands
-  unchanged now that she has the capacity context.
-
-**#1638/#1639 are DONE, both live** — dual-authority NATS stream bug and
-`tgw_health`'s NATS-check asyncio crash. Took a 4th live failure on
-`nats.nix` to land (exact-sum-to-ceiling reservation rejected by NATS
-admission control, fixed with 10% headroom) — recorded in
-`TGW-Master-Plan.md`'s PP-AIOPS-001 section as concrete evidence for the
-2026-07-22 Nix-direction-change decision (below), not just accumulated
-mood.
-
-**Major standing decision, read before any new Nix work:** Dave,
-2026-07-22 — "We are changing unless we find a good reason not to [on
-Nix]. To what and when TBD." Full evidence in `TGW-Master-Plan.md`'s
-`PP-NIXOS-001` section and memory `project-nix-stability.md`. Not a
-migration authorization — the default flipped, staying on Nix now needs
-an active reason. Also encoded this session: `feedback-verify-directly-
-when-possible.md` — when I already have live access to the same host,
-run read-only verification myself, don't make Dave paste command output.
-
-**Decided this session, not yet built:** PP-RUNNERCOMMS-001 mailbox
-redesign ("basically email" — delivery guarantee, reply trail, versioned
-drafts, per-actor compartmentalization; Tigwa's acceptance criteria
-recorded in PP-RUNNERCOMMS-001's section), PP-LOADTEMP-001 (two design
-gaps — failure-mode default, fence allowlist — both need answers before
-packet-ready), PP-POSTGRES-001 Phase 0 (todo #1636, packet-ready,
-small/independent, sequencing now uncertain pending Tigwa's response
-above).
-
-**Orchestrator/classifier planning week (started 2026-07-21)** —
-PP-WORKFLOW-001 (#1626), PP-ORCHESTRATOR-001, PP-APPROVAL-001,
-PP-CLASSIFIER-001 (#1628) are decided-not-built, #1626/#1628 confirmed
-`tgw-coder`-ready whenever dispatched. See
-`project-orchestrator-classifier-cluster-2026-07-21` memory for the full
-decision chain.
-
-**Carried forward, still open:**
-
-1. **Needs Dave's decision — aging:** `nix-flake-maintainer` (todo #1620)
-   committed+pushed directly to `origin/master` without explicit
-   confirmation on 2026-07-21. PP-FLAKEGATE-001 is the structural fix
-   going forward; the original commit (`4adb145`) still has no explicit
-   keep-or-revert decision.
-2. Apply the `uq_queue_jobs_dedupe_key_pending` backstop index (#1618) to
-   the live `state_machine` DB — still not done. Then restart the other
-   self-rescheduling workers.
-3. **#1619** — document the Postgres arbiter-implication gotcha from
-   #1618; decide keep/drop on the throwaway `state_machine_test` DB.
-4. **#1614** — ~10% of the 427-item ai_identify batch still shows
-   "Unbranded" titles, the SEO-fix regression.
+  `/tgw-runner-review` before merging, if not already done.
+- `nix-flake-maintainer` todo #1620 (far2l) — still has no explicit
+  keep-or-revert decision from Dave on the original unconfirmed push;
+  PP-FLAKEGATE-001 (#1625, in progress under `tgw-coder`) is the
+  structural fix for future pushes but doesn't retroactively resolve
+  this one.
+- Tigwa's response (if any) to the Max-plan-sprint context note is still
+  unconfirmed — check whether her PP-POSTGRES-001 "pipeline/UI first,
+  defer Postgres" sequencing call has been revisited now that she has
+  the capacity context.
 
 No other standing risk carried forward — check `tgw plan status` / `tgw
 health` fresh each session rather than trusting a stale note here.

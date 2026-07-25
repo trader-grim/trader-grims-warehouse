@@ -91,3 +91,42 @@ scale).
 - `PP-KNOWLEDGE-001` / `PP-ANNEX-001` — the specific "where does this data
   live" question above.
 - [[project-ai-cost-budget]], [[project-scale-context]] (memory).
+
+## Reconciled with a diverged duplicate copy, 2026-07-22
+
+Found a second, older copy of this file at `docs/TGW-Plan-Vault/pp/
+PP-HARDWARE-001.md` (pre-migration location) carrying a specific live
+drive-fleet inventory (device letters, models, power-tier classification)
+from 2026-07-04 that this canonical copy only referenced abstractly
+("sdc/sdi = bus-powered tier; sdd/sdh = powered-dock tier"). **Did not
+merge those device letters forward** — checked live before merging
+(`lsblk`, `df -h`) and found the fleet has materially changed since:
+`sdb` (465.8G Toshiba USB) is present again (the old doc recorded it as
+absent), and there is no `sdi`/`sdh` in the current device list at all —
+device-letter reassignment across reboots/hotplugs, an already-known risk
+class for this project. Copying stale letters forward would have been
+actively misleading, not just outdated.
+
+**Current live state (checked 2026-07-22, supersedes both the 2026-07-04
+snapshot and the old doc's inventory):**
+```
+nvme0n1 (476.9G NVMe, internal) — /boot, LVM (root/home/nix/postgres/swap), /opt/TGW
+sda (931.5G SATA, internal, WDC WD10EZEX) — snapshot volume
+sdb (465.8G USB, Toshiba MQ01ABD050) — unmounted at check time
+sdc (698.6G USB, Toshiba MQ01ABD075) — tgw-db-backup / tgw-itemdata-snap / tgw-itemarchive (the 3 backup mounts)
+sdd (28.6G USB stick, "Ultra")
+sde (14.6G USB stick, Cruzer Glide)
+```
+**`/opt/TGW` is at 89% used, 32G free** — worse than the 2026-07-04
+snapshot's 83%/48G, confirming the pressure trend is real and ongoing, not
+a one-time reading. The "real analysis of what we need" this PP names as
+not-yet-done is now more urgent than when either prior snapshot was taken,
+not less. **Old doc's genuinely still-valid content** (the power-tier
+*philosophy* — bus-powered USB drives as the always-on tier, dock-powered
+drives connected only when syncing, matches PP-BACKUP-001 A7's rotating-
+tier design) is preserved above in this reconciled version; only the
+specific stale device letters were deliberately dropped, not the concept.
+Old copy at `pp/PP-HARDWARE-001.md` renamed to
+`pp/ARCHIVED-2026-07-22-PP-HARDWARE-001.md` (preserved per Prime
+Directive 1, not deleted) — this file (`plan/pp/PP-HARDWARE-001.md`) is
+now the sole canonical copy going forward.
