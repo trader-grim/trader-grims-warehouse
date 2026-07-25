@@ -36,12 +36,12 @@ _MIME = {
     '.tiff': 'image/tiff',
 }
 
-# eBay's UploadSiteHostedPictures rejects any image with either dimension
-# over this many pixels ("File dimension limit exceeds 15000 pixels." —
-# live dead-letter text, todo #1398/PP-DEADLETTER-001, 10 SKUs). This is
-# eBay's own enforced limit taken verbatim from the live error, not a
-# separately published constant found elsewhere in eBay's docs.
+# UploadSiteHostedPictures limits the *sum* of image width and height to
+# 15000px. Its error says only "File dimension limit exceeds 15000 pixels",
+# which is easily—but incorrectly—read as a per-axis limit. Keep one-pixel
+# headroom because eBay documents the boundary as strictly less than 15000.
 _MAX_DIMENSION_PX = 15000
+_MAX_UPLOAD_DIMENSION_SUM_PX = _MAX_DIMENSION_PX - 1
 
 _PIL_FORMAT_BY_SUFFIX = {
     '.jpg':  'JPEG',
@@ -68,7 +68,7 @@ def _prepare_upload_bytes(photo_path: Path) -> bytes:
     bytes unchanged — no re-encoding, no quality loss, byte-identical to
     the stored file.
 
-    Oversized case (either dimension > _MAX_DIMENSION_PX): downscales a
+    Oversized case (combined width and height >= the EPS limit): downscales a
     temporary in-memory copy to fit within the limit, preserving aspect
     ratio. The original file on disk is never opened for writing and is
     never touched (Prime Directive 1 — raw is permanent, derived is
@@ -91,10 +91,10 @@ def _prepare_upload_bytes(photo_path: Path) -> bytes:
     try:
         with Image.open(io.BytesIO(raw)) as img:
             width, height = img.size
-            if width <= _MAX_DIMENSION_PX and height <= _MAX_DIMENSION_PX:
+            if width + height <= _MAX_UPLOAD_DIMENSION_SUM_PX:
                 return raw
 
-            scale = _MAX_DIMENSION_PX / float(max(width, height))
+            scale = _MAX_UPLOAD_DIMENSION_SUM_PX / float(width + height)
             new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
             img_format = img.format or _PIL_FORMAT_BY_SUFFIX.get(
                 photo_path.suffix.lower(), 'JPEG')

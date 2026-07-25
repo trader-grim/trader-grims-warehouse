@@ -6023,3 +6023,44 @@ def test_c14_unlocked_description_clear_reverted_by_unrelated_draft_save(env):
         "stale draft_listing.description value by the next unrelated "
         "draft_listing save — invariant C14"
     )
+
+
+def test_item_detail_shows_list_action_after_successful_stage_supersedes_dead_letter():
+    """A successfully re-staged UNPUBLISHED offer must remain operator-listable.
+
+    The failed stage stays in the audit ledger, but cannot mask the normal
+    List on eBay action after a later stage job for the same offer succeeds.
+    """
+    from tgw.http_server import _render_item_detail_html
+
+    item = {
+        "sku": "tgw1",
+        "title": "Recovered staged item",
+        "status": "In Stock",
+        "draft_listing": {"title": "Recovered staged item", "price": 16.99},
+        "ebay_offer": {"status": "UNPUBLISHED", "price": 16.99},
+    }
+    jobs = [
+        {
+            "queue_name": "ebay_stage",
+            "state": "dead_letter",
+            "job_id": "failed-stage",
+            "error_detail": "Offer entity already exists.",
+            "created_at": "2026-07-25T00:28:45+00:00",
+            "updated_at": "2026-07-25T00:29:18+00:00",
+            "finished_at": "2026-07-25T00:29:18+00:00",
+        },
+        {
+            "queue_name": "ebay_stage",
+            "state": "succeeded",
+            "job_id": "recovered-stage",
+            "created_at": "2026-07-25T00:32:21+00:00",
+            "updated_at": "2026-07-25T00:32:25+00:00",
+            "finished_at": "2026-07-25T00:32:25+00:00",
+        },
+    ]
+
+    html = _render_item_detail_html("tgw1", item, [], [], jobs)
+
+    assert "List on eBay" in html
+    assert 'onclick="retryPipeline()"' not in html

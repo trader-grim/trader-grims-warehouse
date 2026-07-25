@@ -40,6 +40,8 @@ def test_oversized_image_gets_resized_within_limit(tmp_path):
         w, h = img.size
     assert w <= _MAX_DIMENSION_PX
     assert h <= _MAX_DIMENSION_PX
+    # EPS limits the sum of dimensions, not each dimension individually.
+    assert w + h < _MAX_DIMENSION_PX
     # Aspect ratio preserved (within integer-rounding tolerance).
     assert abs((w / h) - (20 / 15005)) < 0.001
 
@@ -54,6 +56,21 @@ def test_normal_image_is_byte_identical_no_reencode(tmp_path):
     result_bytes = _prepare_upload_bytes(normal)
 
     assert result_bytes == raw
+
+
+def test_dimension_sum_at_nominal_limit_gets_headroom(tmp_path):
+    """EPS limits width plus height to below 15000px, so a boundary image
+    must be re-encoded below that sum rather than sent unchanged."""
+    boundary = tmp_path / 'boundary.jpg'
+    raw = _make_jpeg_bytes((20, _MAX_DIMENSION_PX))
+    boundary.write_bytes(raw)
+
+    result_bytes = _prepare_upload_bytes(boundary)
+
+    from PIL import Image
+    with Image.open(io.BytesIO(result_bytes)) as img:
+        assert sum(img.size) < _MAX_DIMENSION_PX
+    assert result_bytes != raw
 
 
 def test_original_file_on_disk_untouched(tmp_path):

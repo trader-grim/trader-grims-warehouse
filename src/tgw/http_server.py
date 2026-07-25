@@ -6271,19 +6271,47 @@ def _render_item_detail_html(
     # is no longer an actionable state. Newer dead_letters are live failures.
     _baseline_at = item.get("baseline_at")
 
+    def _job_finished_at(j: Dict[str, Any]) -> Optional[datetime]:
+        """Best available terminal timestamp for comparing related jobs."""
+        ts = j.get("finished_at") or j.get("updated_at") or j.get("created_at")
+        if not ts:
+            return None
+        try:
+            return datetime.fromisoformat(ts)
+        except (ValueError, TypeError):
+            return None
+
     def _after_baseline(j: Dict[str, Any]) -> bool:
         if not _baseline_at:
             return True
-        ts = j.get("finished_at") or j.get("updated_at") or j.get("created_at")
-        if not ts:
+        job_at = _job_finished_at(j)
+        if job_at is None:
             return True
         try:
-            return datetime.fromisoformat(ts) > datetime.fromisoformat(_baseline_at)
+            return job_at > datetime.fromisoformat(_baseline_at)
         except (ValueError, TypeError):
             return True
 
+    def _superseded_by_success(j: Dict[str, Any]) -> bool:
+        """Keep terminal failures in history, but do not make an older failure
+        actionable after the same SKU's later successful queue step."""
+        failed_at = _job_finished_at(j)
+        queue_name = j.get("queue_name")
+        if failed_at is None or not queue_name:
+            return False
+        return any(
+            other.get("queue_name") == queue_name
+            and other.get("state") == "succeeded"
+            and (other_at := _job_finished_at(other)) is not None
+            and other_at > failed_at
+            for other in jobs
+        )
+
     _has_error = bool(_pe_norm) or any(
-        j.get("state") == "dead_letter" and _after_baseline(j) for j in jobs
+        j.get("state") == "dead_letter"
+        and _after_baseline(j)
+        and not _superseded_by_success(j)
+        for j in jobs
     )
     _needs_price = bool(_pe_norm and _pe_norm.get("code") == "no_price_set")
     # Also catches pre-existing findings written by the OLD path (an actual
