@@ -2910,14 +2910,51 @@ no ambient camera/clipboard collection, no bulk device enrollment without
 inventory, no eBay/listing authority on a new device, no background
 worker/agent activation merely because a device joins Tailscale.
 
-**Immediate blockers, as of 2026-07-25:** a1131 and tgw-prod are the only
-currently-visible healthy tailnet nodes — no laptop, shipping laptop,
-tablet, or camera node is yet enrolled. Device enrollment requires
-physical-device access and an authenticated Tailscale enrollment action;
-auth keys/account secrets never go in chat or Plan Vault. Flutter app,
-native intake app, and shipping workflow need a named first pilot device
-and its actual OS/hardware facts before installation commands or
-permissions are selected.
+**Immediate blockers, as of 2026-07-25 (partially superseded same day —
+see laptop-cohort prototype below):** a1131 and tgw-prod were the only
+currently-visible healthy tailnet nodes as of the morning of 2026-07-25 —
+no laptop, shipping laptop, tablet, or camera node was yet enrolled.
+Device enrollment requires physical-device access and an authenticated
+Tailscale enrollment action; auth keys/account secrets never go in chat
+or Plan Vault. Flutter app, native intake app, and shipping workflow need
+a named first pilot device and its actual OS/hardware facts before
+installation commands or permissions are selected.
+
+**Laptop-cohort prototype underway, 2026-07-25 — "Helicrew" (Dave's own
+laptop), verified snapshot from Tigwa/Hermes:** a named, revocable
+Tailscale client of tgw-prod, explicitly not a second TGW authority.
+Confirms the two-entity direction above: native OS (Debian 13/trixie,
+kernel 6.12.96, apt/dpkg), Tailscale 1.98.9 active, **no Nix or Lix
+installed, `/nix` absent** — evidence for the native-OS/lighter-client
+direction, not evidence a Lix/Nix client layer has been designed yet.
+Current OS-level facilities: core dev/operator utilities (git, curl,
+wget, ripgrep, sqlite3, tree, tmux, htop, jq); development/reference
+desktop facilities (Waydroid 1.6.2, KDE Connect 25.04.2, Syncthing
+1.29.5); a local-only exception, PostgreSQL 17 + pgvector 0.8.0, used
+solely by a loopback-bound Hindsight memory service (not a TGW catalog
+DB, worker fleet, or queue authority). Tigwa-owned user-local tools live
+under `/home/tigwa/.local/bin/` (Hermes Agent, Claude Code, OpenAI Codex
+CLI, AGY), state kept under her home rather than `/opt/TGW`. **Explicit
+exclusions, stated by Tigwa:** no TGW production Postgres/catalog
+authority, no worker fleet/queue authority/eBay actor, no copied
+production secrets/eBay tokens, no general remote-desktop-bypass
+operating model, no assumed NixOS reimage or Lix/Nix rollout, no claim
+every Helicrew dev package belongs in a shipping image — this
+snapshot is not yet a final fleet declaration, Nix/Lix module, or
+production-image spec.
+
+**Tigwa's recommended three-layer split for this PP, not yet actioned:**
+(1) production/server declaration — tgw-prod authority, increasingly
+declarative NixOS/Lix-managed coverage; (2) portable-client minimum —
+native OS, Tailscale, scoped client/app/browser access, declared user/
+runtime paths, no competing authority; (3) Helicrew development overlay
+— Waydroid/KDE Connect/Syncthing/experimental tools/local Hindsight and
+other explicitly justified dev-only facilities, not part of the shipping
+client minimum. Next planning action per Tigwa: turn the portable-client
+minimum into a small role/package manifest with exact remote interfaces
+and acceptance checks — not yet done. This snapshot does not authorize a
+flake edit, Lix install, OS reimage, secret enrollment, service cutover,
+or replication.
 
 **First concrete deliverable — a1131 production state-machine client
 (`CLAUDE-ADDENDUM-2026-07-25-a1131-production-state-machine-client.md`):**
