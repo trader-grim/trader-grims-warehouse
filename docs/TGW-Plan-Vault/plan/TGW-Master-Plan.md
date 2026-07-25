@@ -2402,10 +2402,27 @@ conventional Linux base OS. Reproducible dev-shell/package tooling
 running NixOS; a host can keep its native OS and just get Lix installed
 for the TGW facility set. Directly relevant to the portable-fleet program
 (`PP-PORTABLEFLEET-001` below) — a laptop/tablet joining the fleet
-would not need a full NixOS reinstall, just Lix. Still open: whether/when
-to actually adopt Lix over Nix itself, and whether tgw-prod/a1131 (already
-full NixOS hosts) would ever convert — not decided here, just the
-base-OS constraint being lifted.
+would not need a full NixOS reinstall, just Lix.
+
+**Two-entity shape, confirmed 2026-07-25 (Dave, direct):** "We retain the
+best of Nix and get away from the userspace difficulties... move toward
+the server being as close to a fully declared entity as possible, and the
+portable version being its own entity, similar but oriented as a remote to
+the server." Concretely: **the server (tgw-prod) moves toward MORE
+declarative coverage, not less** — Lix is the mechanism for reducing the
+maintenance/approval-round friction that drove the 2026-07-22 "spent more
+time maintaining a maintainer" complaint, not a reason to declare less of
+the host. **The portable fleet is a separate, lighter declared entity**,
+architected as a client/remote to the server rather than a full mirror of
+it — this is the actual resolution of the "migrate off Nix, target TBD"
+tension: not abandoning declarative infra, running two differently-scoped
+declared entities. **First prototype now in progress on Dave's own
+laptop** (2026-07-25) — this is PP-PORTABLEFLEET-001's real first
+concrete build, ahead of the a1131 state-machine-client deliverable
+described there. **Tigwa holds the OS-level app inventory detail for the
+portable fleet** (Dave: "check with tigwa if you want details on which
+os level apps we are using") — Claude does not have that inventory yet,
+coordinate with her rather than assume it.
 
 **Standing direction changed, 2026-07-22 — promoted from FUTURE-IDEAS.md's
 "mull, not decide" entry (parked 2026-07-14), which this replaces (full
