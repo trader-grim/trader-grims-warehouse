@@ -3,78 +3,54 @@
 **Rule (corrected 2026-07-16, Dave): this is a handoff note, not a log.**
 Once read and acted on, the whole file archives as a standard TGW
 timestamped snapshot (`archive/handoff-YYYY-MM-DD-<reason>.md`) and gets
-replaced — never appended to. Keep it to what's needed to pick up right
-now. Prior full snapshot: `archive/handoff-2026-07-22-plan-sweep-and-
-godconsole.md`; running per-session narrative log (unaffected, still
-flat-append): `archive/SESSION-LOG.md`.
+replaced — never appended to. Prior full snapshot: `archive/handoff-2026-07-22-
+plan-sweep-and-godconsole.md`; running per-session narrative log (unaffected,
+still flat-append): `archive/SESSION-LOG.md`.
 
 ---
 
-**Top open thread — month-long Max-plan build sprint, "plan until
-nothing material left to plan," still in the planning phase.** Full
-detail in memory `project-2026-07-22-jetstream-buildout-and-max-plan-
-sprint.md` and `TGW-Master-Plan.md`'s top-of-file "Standing context" +
-"Doctrine for this whole sweep" sections — read both before resuming.
-2026-07-22's session ran a full sweep across ~65 PP sections looking for
-stale/contradictory/broken-link/undesigned-gap content; most came back
-clean. Fixes made: PP-QUOTA-001 (garbled edit artifact), PP-FLAKEGATE-001
-(self-contradicting sentence), PP-HR-001 (dangling citation to a deleted
-note, content already preserved inline), PP-NIXOS-001 (`nix/CLAUDE-
-NIX.md` confirmed genuinely missing — flagged for nix-flake-maintainer,
-not authored blind).
+**2026-07-25 session — git cleanup + full inbox/claude backlog processed.**
+Picked up an interrupted prior session: working tree had 24 pending
+inbox/claude/ files plus uncommitted completed work (07-22 plan
+reconciliation, eBay upload dimension-sum fix, http_server dead_letter-
+supersede fix). All committed in 5 commits (`25adc38` `87d1c1f` `d43eec0`
+`57ea1f1` `243fd1b` `da26c86`). `tgw plan check` — all clear (was 1 warning
+at session start, fixed the pre-existing missing_pp_ref backlog too:
+#1674/#1678/#1679/#1680/#1681 now tagged).
 
-**Immediately actionable next step, morning priority #1 — reconcile
-PP-GODCONSOLE-001 (new tonight) against 6 same-night Tigwa notes on the
-identical topic.** Dave asked for "my inbox interface, the human facing
-one... a console to see all of the inboxes" — designed live tonight:
-Part A (personal inbox reader, tgw-http), Part B ("god console" —
-all-actor visibility + halt authority, feed-shaped UI, "not too easy to
-stop but possible pretty quick" friction bar). Full design in
-`TGW-Master-Plan.md`'s new PP-GODCONSOLE-001 section; todo #1661 (open,
-correctly — halt mechanism + file-vs-JetStream data source still need
-Dave's call). **Before touching #1661 further**: 6 of the 7 files
-sitting unread in `inbox/claude/` tonight are Tigwa independently
-designing the exact same human-inbox/ntfy/Flutter/KFMAWI territory —
-`TIGWA-NOTE-ntfy-human-inbox-connection`, `TIGWA-ADDENDUM-ntfy-flutter-
-human-inbox-reconciliation`, `TIGWA-CLARIFICATION-human-in-the-loop-
-message-monitoring`, `TIGWA-CLARIFICATION-practical-security-baseline-
-human-inbox`, `TIGWA-CLARIFICATION-kfmawi-intentional-unplug-clear`,
-`TIGWA-DECISION-kfmawi-outward-communications-surface`. Titles only
-skimmed, not cross-read against PP-GODCONSOLE-001 as of session end —
-this is a `feedback-design-reconvergence` pattern (memory), process
-these first thing, they likely sharpen or partially answer PP-GODCONSOLE-
-001's open questions rather than being unrelated. (7th file,
-`TIGWA-PROVISIONAL-RESOURCE-CARD-cisco-antares`, is unrelated ferals-
-audit business — process separately, lower priority.)
+**Live bug found and fixed same session:** independent review
+(`HERMES-INDEPENDENT-REVIEW-2026-07-25-yesterday-fixes.md`) caught a
+mixed tz-aware/naive datetime `TypeError` crash in the just-committed
+`_superseded_by_success()`/`_after_baseline()` (item detail page). Verified
+the repro myself, dispatched the fix through `tgw-coder` per E12 (todo
+#1683, branch `todo/1683-tz-normalize-fix`), reviewed the diff, merged,
+done. This is the value of the independent-review discipline working as
+designed — don't skip it.
 
-**Continuing the plan-unfolding sweep:** Dave's instruction tonight —
-"we will keep searching for gold. Found a lot today." The ~65-PP sweep
-found real issues at a decent hit rate; worth another pass once the
-GODCONSOLE/Tigwa reconciliation above is done. No specific next-PP target
-named — pick up wherever `tgw plan status`/a fresh grep for staleness
-markers points, same discipline as tonight (verify live before editing,
-don't invent designs owned by Tigwa/Dave).
+**24 inbox/claude files → all processed:**
+- Folded into master plan (commit `57ea1f1`): new **PP-PORTABLEFLEET-001**
+  (portable fleet buildout program), new **PP-UHHUH-001** (thought-capture
+  mode), 2026-07-25 consolidated Nix batch inventory under PP-NIXOS-001,
+  workflow-ordering doctrine under PP-WORKFLOW-001, and a correction to
+  PP-CATIONIX-001's "#1671 built and verified live" claim (real post-build
+  blockers found, not yet closed).
+- New todos filed and pp_ref-tagged: **#1684-1691** (nix-request-packetizer
+  observation pass, PP-NIXOS-001 boundary review answers, hermaroid-cua-stop
+  PID/rollback/evidence fixes, OpenRouter-attribution reply to Tigwa,
+  Dave↔Tigwa shared-access packet, workflow-capability audit, alt-text
+  full-workflow scope, bulk-listing queue-builder capability matrix).
+- All 24 files archived to `inbox/archive/DONE-2026-07-25-*`.
 
-**Also needs attention, carried forward (not reverified tonight — check
-fresh, don't trust blindly):**
-- Todo #1658 — live, confirmed-still-active `status`/`#STATUS` write-path
-  bug (`items.py` `verifiedupdate()`/`statusupdate()`/`bulk_edit` all
-  write the wrong key). Documented, not yet dispatched for a fix.
-- Todo #1527 — a1131 has no Flutter SDK/toolchain at all; needs Dave's
-  device decision before #1630 (Flutter launch/connect on a1131) can be
-  usefully re-scoped.
-- Branch `todo/1638-1639-nats-client-fixes` (commit `b790591`) — done,
-  tested, live-verified, **not yet reviewed/stitched**. Run
-  `/tgw-runner-review` before merging, if not already done.
-- `nix-flake-maintainer` todo #1620 (far2l) — still has no explicit
-  keep-or-revert decision from Dave on the original unconfirmed push;
-  PP-FLAKEGATE-001 (#1625, in progress under `tgw-coder`) is the
-  structural fix for future pushes but doesn't retroactively resolve
-  this one.
-- Tigwa's response (if any) to the Max-plan-sprint context note is still
-  unconfirmed — check whether her PP-POSTGRES-001 "pipeline/UI first,
-  defer Postgres" sequencing call has been revisited now that she has
-  the capacity context.
+**Still open, carried forward (not this session's to resolve):**
+- Todo #1527 — a1131 has no Flutter SDK; needs Dave's device decision.
+- Todo #1620 (far2l) — still no explicit keep-or-revert decision from Dave.
+- `nix-flake-maintainer` should pick up #1684/#1685/#1688 next (all
+  PP-NIXOS-001, all require live host work this session didn't touch).
+- Pre-existing `tgw health` failures, not new: `backups` (rclone/snapshot
+  staleness, PP-BACKUP-001), `ebay_sync_fallback` (841 consecutive
+  fallback runs, todo #1077, eBay Dev Support ticket still the only path).
+- Pre-existing test failures, not new: `test_invariant_c12_field_set_accessors.py`
+  allowlist stale (already flagged in `tgw plan status`, PP-ADD-005).
 
 No other standing risk carried forward — check `tgw plan status` / `tgw
 health` fresh each session rather than trusting a stale note here.
