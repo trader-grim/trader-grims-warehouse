@@ -81,6 +81,21 @@ of Dave's corrections in sequence, both processed from `inbox/claude/`):**
    packets → (5) verify actual completion against the plan, replan when
    evidence changes. This sweep is currently in step 1.
 
+**Doctrine addition, 2026-07-25 (Dave, via Uh-huh thought mode,
+`HERMES-EXECUTION-PLAN-DELTA-2026-07-25.md` item 1) — Claude's own plan
+authorship gets an evidence-first independent second opinion, never
+self-accepted.** Claude authored this plan and may naturally favor its own
+existing implementation choices; a review of Claude's plan/design work
+therefore needs an independent reviewer that does not defer to Claude's
+conclusions — reviewing operator workflow, dependencies, recovery,
+performance, authority, and claimed-versus-actually-usable tools, then
+reporting confirmed findings, evidence gaps, alternatives, and a
+Dave-visible decision table. This is the same "spec/invariant is the
+determinator, adversarial verification is how correctness gets checked"
+doctrine already stated above, extended explicitly to cover Claude's own
+planning output, not just code diffs — Claude is not exempt from the
+review discipline it applies to everyone else's work.
+
 ## KNOWN ISSUE — 5 PP docs exist as genuinely diverged duplicates, found 2026-07-22
 
 Found while fixing broken `pp/PP-XXX.md` links (12 of them, now fixed above
@@ -411,6 +426,46 @@ Tigwa's own connection to the socket) is explicitly her own configuration
 work, not built here** — she reviews the system-side contract next, then
 wires her own client via her self-configuration process.
 
+**Correction/addendum, 2026-07-22 (Tigwa's follow-up review,
+`TIGWA-REVIEW-packet-1671-system-contract-follow-up-blockers-2026-07-22.md`)
+— the "built and verified live" claim above is about the build itself and
+stands; real unresolved post-build blockers were found afterward and are
+not yet closed.** Tigwa independently read the installed client
+document/wrapper/lifecycle scripts on a1131 and confirmed the socket
+location, Xauthority lifecycle, wrapper `manifest` handling, standard-mode
+requirement, and absent live hermaroid session are consistent with the
+intended boundary — but client configuration must remain stopped pending
+these corrections/evidence:
+1. **Unsafe PID teardown (blocker):** `hermaroid-cua-stop` kills a pidfile's
+   PID merely because it's alive; a reused PID could cause root to kill an
+   unrelated process. Needs PID-identity verification (owned by
+   `hermaroid`, matching expected executable/arguments, ideally recorded
+   process start time) before signaling, same discipline for crash
+   handling.
+2. **Rollback overreach (blocker):** the documented rollback deletes all of
+   `/home/hermaroid/.local`, broader than bridge-owned state and able to
+   remove unrelated hermaroid user data. Must limit removal to a
+   bridge-owned binary/state directory or prove the account/location is
+   dedicated and empty by contract.
+3. **Unproven `HERMES_CUA_DRIVER_CMD` coexistence boundary (client gate):**
+   this env var applies to the whole Hermes process, not one action — the
+   client procedure must confirm it's used only by a dedicated
+   guided-session profile/process, never silently replaces Tigwa's normal
+   desktop driver, and is removed/restarted on bridge stop; a real,
+   currently-running normal Tigwa CUA MCP process confirms this is a real
+   coexistence boundary, not theoretical.
+4. **No retained raw evidence bundle (evidence gate):** `/opt/hermaroid-cua/`
+   has implementation/doc artifacts but no manifest/log bundle for the
+   eight required live checks (including the wrapper's `manifest` and MCP
+   invocation proof) — a correspondence summary is not the raw command/log
+   evidence the packet requires.
+
+**Todo #1686 now tracks the fix; client configuration is gated until it
+closes.** These are implementation/evidence corrections, not a request for
+broader authority — established exclusions stand unchanged (no flake
+change, no Dave-session access, no unattended trigger, no
+`--dangerously-*` flags).
+
 **The end state, stated plainly, 2026-07-16 (Dave):** "monitoring, watching,
 fixing, then giving more responsibility. It's not babysitting, it is
 development. When we are done we will have both lightened your burden and
@@ -429,6 +484,15 @@ PP-AIOPS-001 Phase 5: bubblewrap vs. nspawn+Btrfs reconciliation now leans
 portable-by-default. Full writeup in `pp/PP-CATIONIX-001.md`'s new
 standing-requirement section; broader Nix-or-not question stays parked in
 `FUTURE-IDEAS.md`, unaffected by this.
+
+**Cross-reference, 2026-07-25:** the "build portable" standing requirement
+above is now a full program, **PP-PORTABLEFLEET-001** (below) — foundation/
+Nix batch → laptop cohort → tablet pilot → capture cohort → expansion, each
+device enrolled/accepted under a named Tailscale identity and least-
+privilege policy. Same "monitoring, watching, fixing, then giving more
+responsibility" capability-building arc this PP already names, applied to
+physical/portable devices rather than agent personas — not a competing
+design.
 
 ## PP-HERMES-EA-001 — Tigwa & Leotha personas (the "dev team" upgrade)
 **New 2026-07-11.** Two personas on one Hermes instance — Tigwa
@@ -653,6 +717,101 @@ redirects/defers/approves send — no `instruction_cards` table or
 `/form/outbox` UI yet; review actual v0 use (draft usefulness, interruption
 behavior, stale-card reminders, send/audit clarity) before any v1. Full
 evaluation + decisions: `pp/PP-OUTBOX-001.md`.
+
+## PP-UHHUH-001 — thought-capture/deferred-response mode — NEW 2026-07-25
+
+**Requested by Dave Buko, 2026-07-25.** Genuinely new tooling, not represented
+anywhere else in the plan: `UH-HUH-TOOL-PROPOSAL-2026-07-25.md` (contract,
+safety rules, acceptance scenarios, non-goals) plus a staged addendum,
+`UH-HUH-TOOL-PROPOSAL-2026-07-25-v2.md`, that adds only a 3-stage cost design
+on top of v1 — v1's contract/acceptance/safety/non-goals sections still stand.
+
+**Purpose.** "Uh-huh" is a deliberate listening mode for when Dave is working
+through a complete thought aloud — operational, architectural, or personal.
+The agent stays present, records the thread faithfully, does not interrupt
+with premature analysis, and responds coherently only when Dave releases the
+floor. Explicitly not fake inattentiveness: the tool must never pretend to
+have lost the thread, sleep, or understand something it did not capture.
+
+**Trigger (start).** Any clear equivalent of "Uh-huh," "start Uh-huh," "hold
+comments while I think this through," "listen; I am not done." The assistant
+confirms once: "Uh-huh mode is on. I will capture the thread and wait for
+your release."
+
+**While active.** Each ordinary continuation gets only a minimal
+acknowledgement (`uh-huh`, `mm-hm`, `following`) — no questions,
+interpretation, correction, or plan expansion. No tool invocation, file
+change, message send, task creation, or delegation merely because content
+mentions a possible action; those ideas queue for the eventual response.
+
+**Release/handoff.** On a clear release phrase ("done," "your turn," "what do
+you think?," "wrap that," "leave Uh-huh mode"), the assistant responds in
+order: (1) a concise faithful restatement of the complete thought, (2)
+explicit decisions/preferences Dave stated, (3) candidate actions/questions
+clearly marked as proposals, (4) only then requested analysis or tool work.
+If the intended end is ambiguous, it stays in Uh-huh mode rather than
+prematurely taking over.
+
+**Safety/non-goal rules (v1, still standing):**
+- Deferred response, not inattentive response — must accurately retain and
+  later distinguish what Dave said from the agent's own inference.
+- Normal safety constraints stay active — cannot accept secrets, authorize
+  unsafe side effects, or conceal urgent safety issues; an explicit
+  immediate-action command overrides the hold (the assistant states it is
+  leaving/pausing Uh-huh mode for that command before acting).
+- No external sharing, memory write, task creation, or durable transcript
+  export without Dave's explicit request after release.
+- Final synthesis must identify ambiguity/contradiction/missing context
+  instead of filling it with plausible assumptions.
+- Non-goals: simulating sleep/distraction/fake comprehension; recording or
+  exporting a hidden private transcript; replacing a task system, meeting
+  recorder, or durable decision log; performing background work while
+  claiming to only listen; treating a single acknowledgement phrase as
+  consent to execute queued work.
+
+**3-stage cost design (v2 addendum, 2026-07-25):** Dave's clarified goal —
+make the early listening/capture phase cheap, spend primary reasoning on the
+complete picture.
+- **Stage 0 — presence acknowledgement (near-zero cost):** fixed minimal
+  reply per continuation, no normal answer generation/tool routing/planning/
+  analysis; avoid an LLM call entirely where the surface/session
+  implementation permits a fixed response.
+- **Stage 1 — faithful capture + interim intake formatting (low cost):**
+  append each user turn to an ordered raw buffer; at release (or a
+  user-visible checkpoint for a long monologue), run a low-cost,
+  non-authoritative formatter that produces an intake sheet (not a
+  conclusion) — ordered assertions/observations, stated preferences/
+  decisions/constraints/examples, named systems/files/hosts/tasks, candidate
+  questions/actions/risks/dependencies, ambiguity/contradiction/terms needing
+  verification, a raw-turn reference per entry. Must not invent facts,
+  choose priorities, recommend, call tools, mutate state, or discard the raw
+  buffer — writes `unclear` rather than completing the thought.
+- **Stage 2 — primary reasoning (expensive/deliberate):** the primary
+  reasoning model gets both the raw ordered transcript and the labeled
+  intake sheet; raw turns are authoritative on conflict. Synthesizes only
+  after release, separating Dave's stated content, verified/source-backed
+  facts, uncertainty/required lookup, agent analysis/proposals, and actions
+  needing explicit approval. Raw text is kept until Dave explicitly
+  releases/saves/discards the capture — never replaced by its formatted
+  representation; the intake sheet must be inspectable/correctable before
+  consequential tool work.
+
+**Suggested implementation shape (v1):** session-scoped state (`mode =
+normal | uh_huh`, `captured_turns`, `started_at`/`released_at`,
+`release_reason`), not a model prompt trick — parse explicit start/pause/
+resume/release phrases before normal response generation; surface mode
+visibly across CLI/TUI/desktop/messaging interfaces so Dave can tell whether
+the agent is listening or acting.
+
+**Open design choices, not yet resolved:** exact command grammar (whether
+slash commands are needed alongside natural-language triggers); whether the
+listening buffer survives a context compaction/session reconnect and how
+that's made visible; how long an inactive Uh-huh state stays open before
+asking Dave whether to keep it open; whether a post-release "save this
+thought" control should create an explicitly user-approved library/intake
+artifact.
+
+**Status: proposal, staged for review — not implementation-authorized.**
 
 ## PP-HR-001 — the "HR department" for AI agents/personas — NEW 2026-07-16
 
@@ -2349,6 +2508,93 @@ either do the commit/switch himself, or explicitly say the words to the session.
 committed+pushed (`281185b`), dry-activated clean both hosts, only the switch is
 outstanding.
 
+**2026-07-25 consolidated Nix batch (Dave, `CLAUDE-REQUEST-2026-07-25-
+consolidated-nix-flake-batch.md`; technical detail superseded/corrected by
+`CLAUDE-CLARIFICATION-2026-07-25-consolidated-nix-batch-technical-inventory.md`,
+which supersedes only the request's technical detail, not its one-batch
+decision; ordering by `CLAUDE-DELTA-2026-07-25-nix-batch-ordering-and-
+maintenance-worker.md`).** Decision: combine all currently known necessary
+flake-owned changes into one task, one flake-owned branch, one review/build
+evidence set, one deliberate host-switch/rollback window — do not create
+incidental one-off flake edits.
+
+**Exact inventory (corrected/verified detail):**
+1. `python-multipart` is a real application dependency, not merely a test
+   helper — `src/tgw/http_server.py` declares FastAPI `Form(...)` endpoints,
+   and FastAPI requires `python-multipart` at route registration; it is
+   absent from `pyproject.toml` and from the flake Python package
+   dependency list/dev shell. Include its source dependency declaration and
+   Nix package/runtime/dev-shell closure in this batch.
+2. `mistune` is an application dependency already represented in the
+   flake's `tgwPackage` dependencies and `pyproject.toml`, but omitted from
+   `devShells.default`, causing eight `/docs` tests to fail. Add it to the
+   dev-shell dependency set. **Independently corroborated** by a second
+   reviewer, `HERMES-INDEPENDENT-REVIEW-2026-07-25-yesterday-fixes.md`:
+   through the separate owner flake at `/home/db/tgw-flake` (which does
+   evaluate), `tests/test_http_server.py` ran 328 passed/8 failed with
+   `python-multipart` temporarily added only to the test invocation — the
+   eight failures are the same missing-`mistune` `/docs` tests; without the
+   temporary `python-multipart` addition, collection fails before any tests
+   run at all, confirming both packages are genuinely absent from the
+   declared dev shell (temporary additions were ephemeral audit inputs
+   only, no flake/production config changed).
+3. The source checkout's flake evaluation failure is a committed absolute
+   symlink, not a declared `home` input:
+   `/opt/TGW/src/trader-grims-warehouse/flake.nix` is a tracked symlink
+   whose content is `/home/db/tgw-flake/flake.nix`; from the source Git
+   checkout, Nix rejects that external path with `Path 'home' does not
+   exist in Git repository`. The batch must choose and implement one
+   canonical/reproducible source-to-flake relationship — not retain an
+   absolute home-directory symlink as a tracked repository contract, while
+   preserving Dave's flake ownership and avoiding copying/diverging flake
+   authority.
+4. a1131 persistent access gap: tgw-prod already declares `db` in group
+   `tigwa`; a1131 currently declares `db.extraGroups = [ "hermaroid" ]` only
+   — it lacks `tigwa` membership. Add the approved host-local extension and
+   the reviewed non-secret shared-output-root mechanism in the same batch.
+
+**Ordering decision:** this batch is the first executable flake task after
+the completed tgw-prod Btrfs recovery snapshot and read-only git baseline —
+it removes the current reproducible-test blockage, establishes the shared
+evidence/access substrate, and prevents repeated one-off Nix investigations
+and context/token drain while regular development proceeds. Read-only
+reconciliation, code review, workflow mapping, and other investigation may
+continue in parallel; source-fix acceptance, host-dependent feature work,
+and all additional flake changes remain gated on this batch's evaluation/
+build evidence, Dave/flake-owner review, controlled switch decision, and
+post-switch verification.
+
+**Standing destination:** a steady-state flake-maintenance worker replaces
+interruption-driven Nix work. Its bounded role: collect requests, maintain
+the next-batch inventory, obtain reproducibility/build evidence, prepare
+review/rollback receipts, and verify stated results after an approved
+switch — no unilateral authority to edit the flake or switch hosts. New
+Nix requirements join the next bounded maintenance batch rather than
+stalling unrelated development or reopening full planning context each
+time.
+
+**Parked note, 2026-07-22 (Tigwa relaying Dave,
+`TIGWA-NOTE-hermes-desktop-nixos-runtime-defer-2026-07-22.md`) — Hermes
+Desktop node-pty/Electron-under-nix-ld issue, explicitly deferred, not a
+todo.** During a Hermes Desktop update, npm failed rebuilding `node-pty`
+(`gyp ERR! stack Error: not found: make`), leaving no packaged Desktop
+artifact. Tigwa rebuilt it using temporary Nix build inputs (`gnumake`,
+`gcc`, `pkg-config`), restoring
+`/home/tigwa/.hermes/hermes-agent/apps/desktop/release/linux-unpacked/Hermes`
+with `node-pty` staged successfully. Remaining finding: a direct launch of
+the packaged Electron binary on this NixOS host lacks required runtime
+shared libraries (GLib/GTK/NSS) under the current `nix-ld` library set;
+supplying an Electron runtime library path clears the loader failure, and
+the subsequent missing-display error is expected from Tigwa's
+non-graphical session, not a package-build failure. **Dave's direction:
+defer the durable Nix/runtime decision until Dave verifies the new Nix
+maintainer** — do not edit the flake, alter `nix-ld`, add a wrapper, change
+Hermes runtime configuration, restart services, or treat the temporary
+rebuild environment as permanent. When authorized, the decision should
+compare a narrow host-level `nix-ld` library declaration against a
+Hermes-specific launch wrapper, with an actual graphical-session launch
+test and rollback evidence. Parked, not urgent.
+
 ## PP-PHOTO-001 — photo pipeline (GDrive → Gemini / eBay)
 Sync infra live. Phase A (GDrive→Gemini multimodal draft) #1064; Phase B
 (zero-bandwidth EPS upload) #1065. FROZEN until R1 drains.
@@ -2533,6 +2779,158 @@ is reimaged from it and receives only its declared developer/recovery overlay.
 No device gains a second production ledger/worker authority. This records
 architecture and sequencing only; it does not authorise a final ISO build,
 a host switch, flake change, or credential deployment.
+
+**Cross-reference, 2026-07-25:** this PP is now one of three separate-app
+tracks under the new parent program **PP-PORTABLEFLEET-001** (below) — the
+Flutter catalog app specifically (tablet pilot cohort), alongside the `tgw`
+state-machine client and the native Kotlin camera/intake app. See that PP
+for the full-program buildout order and per-device enrollment/acceptance
+contract.
+
+**Nix change lane for this PP, Dave 2026-07-25 (`HERMES-EXECUTION-PLAN-
+DELTA-2026-07-25.md` item 2) — the required workflow shape for any Nix
+package-manager change this PP needs, not a general Nix process:** intent →
+host/package/module inventory → reproducibility policy → evaluation/build
+evidence → Dave/flake-owner review → batchable rebuild/rollback →
+post-switch verification. No convenience package install or flake change
+by an agent outside this lane.
+
+## PP-PORTABLEFLEET-001 — portable fleet buildout program — NEW 2026-07-25
+
+**Decision, Dave, 2026-07-25 (`CLAUDE-REQUEST-2026-07-25-portable-fleet-
+buildout-program.md`): begin the full portable buildout.** The portable
+fleet is a product/operations program, not a collection of independently
+installed apps. New parent PP — cross-links **PP-PORTABLE-CATALOG-001**
+(the Flutter catalog app, one of the three separate-app tracks below) and
+**PP-CATIONIX-001** (the broader agent-confinement/"dev team" platform this
+program's per-device least-privilege/revocation contract mirrors).
+
+**Authority and architecture:**
+- **One production authority:** tgw-prod retains the canonical PostgreSQL
+  `state_machine`, catalog, workers, external-action authority, and
+  evidence library.
+- **Portable clients:** laptops, tablets, and capture devices receive
+  scoped packages/apps and talk through approved APIs/configuration — they
+  never start a competing production PostgreSQL, worker, or eBay
+  authority.
+- **Private-network substrate:** every fleet device gets a named Tailscale
+  identity, defined role, least-privilege policy, owner/custodian,
+  lifecycle/revocation record, and verification receipt.
+- **Separate apps, shared contracts — do not collapse these three:**
+  1. `tgw` state-machine/operations client — first Nix-installed portable
+     capability, landing on a1131 then later laptops.
+  2. Flutter Portable Catalog — browse/edit/offline-cache + controlled
+     outbox workflow (PP-PORTABLE-CATALOG-001).
+  3. Native Kotlin Camera/Intake app — barcode/photo/video/location/
+     attribute capture (PP-INTAKE-004), standalone first, event-bus
+     participation later.
+
+**Fleet cohorts and delivery order:**
+1. **Foundation/Nix batch** — resolve source/flake reproducibility,
+   dependencies, shared non-secret output path; install the Nix-built
+   `tgw` client on a1131 against canonical tgw-prod state (first concrete
+   deliverable, below).
+2. **Laptop cohort** — Dave laptop and shipping laptop: enroll Tailscale,
+   record device identity/role, install the client package, prove
+   authenticated read-only state-machine access, define shipping-only
+   permissions/workflow separately from general administration.
+3. **Catalog tablet pilot** — one named tablet: install/test the Flutter
+   catalog app against the real but scoped service; prove online browse,
+   offline cached browse with a visible freshness marker, and a
+   controlled outbox/reconnect scenario before broad tablet rollout.
+4. **Capture cohort** — camera/other tablets: one designated capture
+   device first, verify the native intake app's standalone capture path
+   before event-bus/remote-control additions; preserve raw capture
+   provenance and explicit operator acceptance for state-changing intake.
+5. **Expansion** — remaining tablets/cameras added only from a verified
+   cohort template, each device with its own enrollment and acceptance
+   receipt.
+
+Every cohort step shares one **per-device enrollment record and
+acceptance gate**: human-friendly name, stable Tailscale node/device
+identity, owner/custodian, physical role/location, OS/version, app/
+package versions, permitted services/actions, data classification/cache
+policy, offline behavior, revocation/loss procedure, last verification
+time. Required acceptance before a device is called operational: appears
+in the approved tailnet under its intended name/least-privilege policy;
+reaches only its approved TGW service surface over Tailscale; has the
+correct client/app from the approved package/release path; demonstrates
+its role with a bounded fixture or read-only production check;
+demonstrates offline/degraded behavior where applicable; has documented
+revoke/wipe/replace recovery.
+
+**Non-goals for the first cohort:** no second production state machine,
+no ambient camera/clipboard collection, no bulk device enrollment without
+inventory, no eBay/listing authority on a new device, no background
+worker/agent activation merely because a device joins Tailscale.
+
+**Immediate blockers, as of 2026-07-25:** a1131 and tgw-prod are the only
+currently-visible healthy tailnet nodes — no laptop, shipping laptop,
+tablet, or camera node is yet enrolled. Device enrollment requires
+physical-device access and an authenticated Tailscale enrollment action;
+auth keys/account secrets never go in chat or Plan Vault. Flutter app,
+native intake app, and shipping workflow need a named first pilot device
+and its actual OS/hardware facts before installation commands or
+permissions are selected.
+
+**First concrete deliverable — a1131 production state-machine client
+(`CLAUDE-ADDENDUM-2026-07-25-a1131-production-state-machine-client.md`):**
+verified current state — a1131's flake host is deliberately
+`bases/portable.nix`, TGW module enabled but `workers = []`,
+`enableHttp = false`, `enablePostgres = false`; the full `nix/tgw.nix`
+state-machine/PostgreSQL/worker module exists but its package option isn't
+wired yet, and a1131's current runtime uses an out-of-band venv path with
+no `tgw` Nix package installed. First-batch addition: install the
+flake-built `tgw`/state-machine **client** package declaratively on
+a1131, proving it can read the canonical tgw-prod `state_machine` ledger
+through the approved configuration/auth path. This means "production
+state machine on the laptop" as the *same production code and protocol*
+pointed at the *one* authoritative production ledger — explicitly **not**
+a second local PostgreSQL database, worker fleet, or competing queue
+authority (that would need separate replication/conflict/recovery/
+authority decisions, out of scope for this batch). Required verification:
+package arrives via the reviewed flake switch, not `pip`/a one-off Nix
+profile install; `tgw` is available to the intended user; a bounded
+read-only state-machine query against tgw-prod succeeds; no a1131
+PostgreSQL service, TGW worker, HTTP service, or external-action
+capability starts as a side effect; configuration/auth material stays
+least-privilege with non-secret output paths kept separate.
+
+**Success bar — Dave's "morning coffee" functional equivalence
+(`CLAUDE-CLARIFICATION-2026-07-25-portable-fleet-morning-coffee-operator-
+goal.md`):** with his laptop over morning coffee, Dave can operate TGW as
+though seated at the primary system — not merely VPN reachability or a
+remote shell. Through approved Tailscale-connected interfaces he must be
+able to: (1) see current truthful system health, queue/work state,
+blocked work, and next eligible work; (2) search and inspect inventory,
+photos, listing/pipeline evidence, and relevant history; (3) create,
+resume, reorder, pause, and work a human or AI-assisted work queue
+continuously, including the Next Item handoff; (4) inspect and correct
+authorized operational data with field-level error/recovery guidance;
+(5) take an explicitly authorized action (including an external action
+only after its named confirmation/gate) and see the durable resulting
+state and next work; (6) reach the same authoritative evidence and
+decision paths without scavenger-hunting among hosts, terminals, or stale
+replicas.
+
+**V1 acceptance — Laptop Coffee Console:** the first laptop cohort is
+complete only when a named laptop can, over Tailscale: launch the
+Nix-managed `tgw` client and approved browser/app surface; query the
+canonical tgw-prod state-machine read model and current health/queue
+summary; open a selected item and its history/evidence; complete one
+bounded, non-external workflow item and receive the next eligible item
+with context; show an intentionally held/blocked item and its
+prerequisite rather than hiding it; preserve all actions/outcomes in the
+canonical ledger; lose/recover connectivity with clear degraded state and
+no silent local authority. Boundary: functional equivalence does not
+create a second production database, worker fleet, secret store, or
+broad remote-desktop bypass — the portable device remains a named,
+revocable, least-privilege client of tgw-prod; camera capture and tablet
+workflows extend the same contract only after the laptop path proves it.
+
+**Status: program decision + first-deliverable spec recorded, nothing
+built yet.** Foundation/Nix batch is gated on PP-NIXOS-001's consolidated
+Nix batch (see that PP's 2026-07-25 sub-entry) landing first.
 
 ## PP-REMOTEOPS-001 — device/communications fleet architecture — NEW 2026-07-21
 Surfaced from a real operational pain, not a hypothetical: Dave is doing live
@@ -4193,6 +4591,54 @@ as a side effect.
 **Dependency**: none — purely additive, can start any time.
 **Owner**: `tgw-coder` dispatch once filed as a todo/packet (not yet
 filed — this section is the design).
+
+### Workflow-ordering doctrine correction, 2026-07-25 (Dave/Hermes,
+`HERMES-WORKFLOW-ORDERING-DELTA-2026-07-25.md`)
+
+**Purpose:** correct the queue/workflow model so that continuity and
+priority do not let work occur in the wrong process position — folded in
+here since it corrects the exact priority/dependency model this PP designs.
+
+**Rule.** A queue is not merely a prioritized list. It is a durable
+work-continuity structure whose items move through an explicit process
+state:
+
+`candidate → classify/assign authority → prerequisites/evidence → ready →
+active → verify outcome → completed | corrective/blocked follow-up`
+
+Human-created, filter-created, system-created, and AI-proposed items all
+use the same state model.
+
+**Priority rule.** Rank only work that is **ready**. Keep blocked
+high-impact work visible, with its blocking prerequisite and owner, but do
+not allow it to bypass the prerequisite simply because it is urgent, next
+in insertion order, or AI-selected. Priority inputs should be inspectable:
+operational harm, customer/revenue impact, deadline, dependency-unblocking
+value, evidence confidence, cost/quota, age, and an explicit Dave override.
+
+**Next Item rule.** After a recorded terminal outcome, Next Item selects
+the highest-priority eligible ready item — or, when the selected priority
+item is blocked, the next prerequisite job that unblocks it. It hands the
+person or AI the shared queue context, prior outcome, evidence, gate state,
+and required action. It does not execute the new item.
+
+**Applied current example (2026-07-25):** the listing-surface repair
+cannot proceed to acceptance/deployment after its focused test passes — the
+declared Nix development environment first has to run the reproducible
+test command without ephemeral packages. Missing `python-multipart` and
+`mistune` (see PP-NIXOS-001's 2026-07-25 consolidated Nix batch entry) are
+therefore upstream package-manager workflow jobs that block final
+source-fix acceptance, not unrelated cleanup to defer — a concrete instance
+of the priority rule above (ready-but-blocked work stays visible with its
+real prerequisite, not silently deferred or force-ranked past it).
+
+**Required queue item fields:** `source/creator`, `authority`, `priority
+rationale`, `dependencies`, `required gates`, `state`, `assignee`,
+`continuity context`, `evidence links`, `outcome`, `next-action/stop
+condition`. These map onto this PP's own `depends_on`/`handler_family`
+design above (the `state` enumerated here is a refinement of
+`queue_jobs`' existing state column; the other fields are candidate columns/
+metadata for whichever Phase adopts explicit dependency-ordered packets).
 
 ## PP-ORCHESTRATOR-001 — the custom coding harness's orchestrator, proposal only, NEW 2026-07-21
 
