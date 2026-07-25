@@ -6271,15 +6271,30 @@ def _render_item_detail_html(
     # is no longer an actionable state. Newer dead_letters are live failures.
     _baseline_at = item.get("baseline_at")
 
+    def _parse_ts(ts: str) -> Optional[datetime]:
+        """Parse a queue_jobs/item timestamp, normalizing to tz-aware UTC.
+
+        queue_jobs timestamps are stored in mixed shapes — some offset-aware
+        (e.g. '2026-07-25T00:29:18+00:00'), some offset-naive (e.g.
+        '2026-07-25T00:32:25') — but naive ones are already UTC in this
+        system. Comparing a naive and an aware datetime directly raises
+        TypeError, so every parsed value is normalized to aware-UTC here
+        before it's ever compared.
+        """
+        try:
+            dt = datetime.fromisoformat(ts)
+        except (ValueError, TypeError):
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
     def _job_finished_at(j: Dict[str, Any]) -> Optional[datetime]:
         """Best available terminal timestamp for comparing related jobs."""
         ts = j.get("finished_at") or j.get("updated_at") or j.get("created_at")
         if not ts:
             return None
-        try:
-            return datetime.fromisoformat(ts)
-        except (ValueError, TypeError):
-            return None
+        return _parse_ts(ts)
 
     def _after_baseline(j: Dict[str, Any]) -> bool:
         if not _baseline_at:
@@ -6287,10 +6302,10 @@ def _render_item_detail_html(
         job_at = _job_finished_at(j)
         if job_at is None:
             return True
-        try:
-            return job_at > datetime.fromisoformat(_baseline_at)
-        except (ValueError, TypeError):
+        baseline_dt = _parse_ts(_baseline_at)
+        if baseline_dt is None:
             return True
+        return job_at > baseline_dt
 
     def _superseded_by_success(j: Dict[str, Any]) -> bool:
         """Keep terminal failures in history, but do not make an older failure

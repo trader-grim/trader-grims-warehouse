@@ -6064,3 +6064,101 @@ def test_item_detail_shows_list_action_after_successful_stage_supersedes_dead_le
 
     assert "List on eBay" in html
     assert 'onclick="retryPipeline()"' not in html
+
+
+def test_item_detail_handles_mixed_tz_aware_dead_letter_naive_succeeded():
+    """Regression: aware dead_letter timestamp + naive succeeded timestamp
+    must not raise TypeError when compared (todo #1683)."""
+    from tgw.http_server import _render_item_detail_html
+
+    item = {
+        "sku": "tgw1",
+        "title": "Recovered staged item",
+        "status": "In Stock",
+        "draft_listing": {"title": "Recovered staged item", "price": 16.99},
+        "ebay_offer": {"status": "UNPUBLISHED", "price": 16.99},
+    }
+    jobs = [
+        {
+            "queue_name": "ebay_stage",
+            "state": "dead_letter",
+            "job_id": "failed-stage",
+            "error_detail": "Offer entity already exists.",
+            "finished_at": "2026-07-25T00:29:18+00:00",  # aware
+        },
+        {
+            "queue_name": "ebay_stage",
+            "state": "succeeded",
+            "job_id": "recovered-stage",
+            "finished_at": "2026-07-25T00:32:25",  # naive
+        },
+    ]
+
+    html = _render_item_detail_html("tgw1", item, [], [], jobs)
+
+    assert "List on eBay" in html
+    assert 'onclick="retryPipeline()"' not in html
+
+
+def test_item_detail_handles_mixed_tz_naive_dead_letter_aware_succeeded():
+    """Regression: naive dead_letter timestamp + aware succeeded timestamp
+    must not raise TypeError when compared (todo #1683)."""
+    from tgw.http_server import _render_item_detail_html
+
+    item = {
+        "sku": "tgw1",
+        "title": "Recovered staged item",
+        "status": "In Stock",
+        "draft_listing": {"title": "Recovered staged item", "price": 16.99},
+        "ebay_offer": {"status": "UNPUBLISHED", "price": 16.99},
+    }
+    jobs = [
+        {
+            "queue_name": "ebay_stage",
+            "state": "dead_letter",
+            "job_id": "failed-stage",
+            "error_detail": "Offer entity already exists.",
+            "finished_at": "2026-07-25T00:29:18",  # naive
+        },
+        {
+            "queue_name": "ebay_stage",
+            "state": "succeeded",
+            "job_id": "recovered-stage",
+            "finished_at": "2026-07-25T00:32:25+00:00",  # aware
+        },
+    ]
+
+    html = _render_item_detail_html("tgw1", item, [], [], jobs)
+
+    assert "List on eBay" in html
+    assert 'onclick="retryPipeline()"' not in html
+
+
+def test_item_detail_handles_mixed_tz_baseline_at_and_job_timestamp():
+    """Regression: _after_baseline()'s own fromisoformat comparison must also
+    tolerate mixed aware/naive timestamps between item['baseline_at'] and a
+    job's finished_at (todo #1683)."""
+    from tgw.http_server import _render_item_detail_html
+
+    item = {
+        "sku": "tgw1",
+        "title": "Recovered staged item",
+        "status": "In Stock",
+        "baseline_at": "2026-07-25T00:00:00",  # naive baseline
+        "draft_listing": {"title": "Recovered staged item", "price": 16.99},
+        "ebay_offer": {"status": "UNPUBLISHED", "price": 16.99},
+    }
+    jobs = [
+        {
+            "queue_name": "ebay_stage",
+            "state": "dead_letter",
+            "job_id": "failed-stage",
+            "error_detail": "Offer entity already exists.",
+            "finished_at": "2026-07-25T00:29:18+00:00",  # aware, after baseline
+        },
+    ]
+
+    # Must not raise; a dead_letter after baseline with no later success is a
+    # real actionable error, so it should surface (not "List on eBay").
+    html = _render_item_detail_html("tgw1", item, [], [], jobs)
+    assert html
