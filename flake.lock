@@ -89,11 +89,11 @@
         "tgw-src": "tgw-src"
       },
       "locked": {
-        "lastModified": 1785000835,
-        "narHash": "sha256-IgJybucijjkxPJ15kGz0SC5syd1XdmA3VyRkzYHZzMM=",
+        "lastModified": 1785001133,
+        "narHash": "sha256-A6brfwBtQlvPXm8B3gkRrCv1Ozasbn8A4bKjooHTZE8=",
         "ref": "todo/consolidated-nix-fleet-20260725",
-        "rev": "46c14b95b3571dd3aff4085cee539f28dbebe698",
-        "revCount": 74,
+        "rev": "b78ed90ad03fe8fe4103ab2fe70649018af1e97d",
+        "revCount": 75,
         "type": "git",
         "url": "ssh://git@github.com/trader-grim/tgw-flake.git"
       },
@@ -106,15 +106,16 @@
     "tgw-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1783698459,
-        "narHash": "sha256-OHVLtR0QJqVUwZPmMkaFItOce43CBqZF/BvjTgV0Sho=",
-        "ref": "refs/heads/main",
-        "rev": "6f2d7ef579d6638c7b93ea53cd06e9674e6c08ad",
-        "revCount": 430,
+        "lastModified": 1785000933,
+        "narHash": "sha256-nRdcI6+J0fsHtgTwtM3akNnf8De/x/CZu/ro/NpooOw=",
+        "ref": "todo/consolidated-nix-source-20260725",
+        "rev": "b29a6a834c691710085b376a37c01b294eb8c911",
+        "revCount": 800,
         "type": "git",
         "url": "ssh://git@github.com/trader-grim/trader-grims-warehouse.git"
       },
       "original": {
+        "ref": "todo/consolidated-nix-source-20260725",
         "type": "git",
         "url": "ssh://git@github.com/trader-grim/trader-grims-warehouse.git"
       }
