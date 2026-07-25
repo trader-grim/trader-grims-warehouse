@@ -2394,6 +2394,19 @@ authorize a flake edit, or authorize host migration/cutover. Flake changes
 remain the maintainer's batched, reviewed work with `nix flake check` and
 host-level verification.
 
+**Loosens the "migrate off Nix, target TBD" tension below, 2026-07-25
+(Dave, direct):** TGW is not tied to NixOS as the base OS — **Lix**, the
+Nix-compatible package-manager fork, installs standalone on any
+conventional Linux base OS. Reproducible dev-shell/package tooling
+(the 2026-07-24 decision above) does not require the whole machine
+running NixOS; a host can keep its native OS and just get Lix installed
+for the TGW facility set. Directly relevant to the portable-fleet program
+(`PP-PORTABLEFLEET-001` below) — a laptop/tablet joining the fleet
+would not need a full NixOS reinstall, just Lix. Still open: whether/when
+to actually adopt Lix over Nix itself, and whether tgw-prod/a1131 (already
+full NixOS hosts) would ever convert — not decided here, just the
+base-OS constraint being lifted.
+
 **Standing direction changed, 2026-07-22 — promoted from FUTURE-IDEAS.md's
 "mull, not decide" entry (parked 2026-07-14), which this replaces (full
 prior evidence trail kept there, not deleted).** Dave: "We are changing
@@ -2552,6 +2565,22 @@ incidental one-off flake edits.
    `tigwa`; a1131 currently declares `db.extraGroups = [ "hermaroid" ]` only
    — it lacks `tigwa` membership. Add the approved host-local extension and
    the reviewed non-secret shared-output-root mechanism in the same batch.
+
+**Items 1-3 superseded, verified 2026-07-25 (Claude) — Dave already built
+the fix, on an unmerged branch this session didn't know about yet.**
+`todo/consolidated-nix-source-20260725` (2 commits, also on `origin`,
+authored by Dave 2026-07-25 10:35/10:39, predating this inventory being
+written) replaces the tracked absolute symlink with a proper source-adapter
+`flake.nix` (13 lines, pins `tgw-flake` as a `git+ssh` input) and adds
+`python-multipart` to `pyproject.toml`. Verified directly: `nix flake show`
+now evaluates cleanly from the source checkout, and both `python-multipart`
+and `mistune` import fine in the resulting dev shell. **Not yet merged into
+`catio-nix-0.0.1-alpha`.** One gap found during verification, not yet
+resolved: a bare `nix develop -c pytest` in that branch's worktree fails
+all test collection with `ModuleNotFoundError: No module named 'tgw'` — the
+new dev shell doesn't put `src/` on `PYTHONPATH` or do an editable install.
+Item 4 (a1131 group gap) is unaffected by this branch and still open —
+tracked as todo #1688.
 
 **Ordering decision:** this batch is the first executable flake task after
 the completed tgw-prod Btrfs recovery snapshot and read-only git baseline —
