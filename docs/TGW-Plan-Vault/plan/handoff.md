@@ -9,43 +9,61 @@ still flat-append): `archive/SESSION-LOG.md`.
 
 ---
 
-**2026-07-25 session — git cleanup + full inbox/claude backlog processed.**
-Picked up an interrupted prior session: working tree had 24 pending
-inbox/claude/ files plus uncommitted completed work (07-22 plan
-reconciliation, eBay upload dimension-sum fix, http_server dead_letter-
-supersede fix). All committed in 5 commits (`25adc38` `87d1c1f` `d43eec0`
-`57ea1f1` `243fd1b` `da26c86`). `tgw plan check` — all clear (was 1 warning
-at session start, fixed the pre-existing missing_pp_ref backlog too:
-#1674/#1678/#1679/#1680/#1681 now tagged).
+**2026-07-25/26 session — git cleanup, full inbox backlog, Lix/portable-fleet
+direction confirmed, Helicrew cutover.** Started by recovering an interrupted
+prior session (24 pending inbox/claude/ files + uncommitted completed work).
+`tgw plan check` — all clear.
 
-**Live bug found and fixed same session:** independent review
-(`HERMES-INDEPENDENT-REVIEW-2026-07-25-yesterday-fixes.md`) caught a
-mixed tz-aware/naive datetime `TypeError` crash in the just-committed
-`_superseded_by_success()`/`_after_baseline()` (item detail page). Verified
-the repro myself, dispatched the fix through `tgw-coder` per E12 (todo
-#1683, branch `todo/1683-tz-normalize-fix`), reviewed the diff, merged,
-done. This is the value of the independent-review discipline working as
-designed — don't skip it.
-
-**24 inbox/claude files → all processed:**
-- Folded into master plan (commit `57ea1f1`): new **PP-PORTABLEFLEET-001**
-  (portable fleet buildout program), new **PP-UHHUH-001** (thought-capture
-  mode), 2026-07-25 consolidated Nix batch inventory under PP-NIXOS-001,
-  workflow-ordering doctrine under PP-WORKFLOW-001, and a correction to
-  PP-CATIONIX-001's "#1671 built and verified live" claim (real post-build
-  blockers found, not yet closed).
-- New todos filed and pp_ref-tagged: **#1684-1691** (nix-request-packetizer
-  observation pass, PP-NIXOS-001 boundary review answers, hermaroid-cua-stop
-  PID/rollback/evidence fixes, OpenRouter-attribution reply to Tigwa,
-  Dave↔Tigwa shared-access packet, workflow-capability audit, alt-text
-  full-workflow scope, bulk-listing queue-builder capability matrix).
-- All 24 files archived to `inbox/archive/DONE-2026-07-25-*`.
+**What changed:**
+- Committed prior session's work + a live bug fix: mixed tz-aware/naive
+  datetime crash in `_superseded_by_success()`/`_after_baseline()`, caught by
+  independent review, fixed via `tgw-coder` (todo #1683, merged).
+- All 24 inbox/claude files processed: 2 new PP sections
+  (**PP-PORTABLEFLEET-001**, **PP-UHHUH-001**), Nix batch inventory folded
+  into PP-NIXOS-001, workflow-ordering doctrine into PP-WORKFLOW-001,
+  PP-CATIONIX-001's "#1671 built and verified live" claim corrected with
+  real post-build blockers. 8 todos filed (#1684-1691), pre-existing
+  missing_pp_ref backlog fixed (#1674/1678-1681).
+- **Dave confirmed the Lix/two-entity architecture direction directly**:
+  tgw-prod moves toward MORE declarative Nix coverage (Lix cuts the
+  approval-round friction, isn't a reason to declare less); the portable
+  fleet is a separate, lighter client/remote entity. First prototype is
+  **Helicrew** (Dave's laptop) — Tigwa supplied a verified OS/app inventory
+  (Debian 13, no Nix/Lix yet, Tailscale-joined), folded into
+  PP-PORTABLEFLEET-001, todo #1693 filed (role/package manifest next step).
+  Full detail: master plan `PP-NIXOS-001` + `PP-PORTABLEFLEET-001`; memory
+  `project-nix-stability.md`'s top entry.
+- **Todo #1692 (dev-shell src-on-PYTHONPATH gate)** — confirmed as a real
+  merge-blocking defect independently by Claude and Tigwa, fixed by
+  `nix-flake-maintainer` per PP-FLAKEGATE-001/E17 (commit `a692acb` on
+  `~/tgw-flake` branch `todo/consolidated-nix-fleet-20260725`, local only,
+  verified 2756 passed / zero collection errors). **Push request queued
+  (`4cd3a02f-529d-465f-9947-62b119222b87`), waiting on Dave** to run the
+  actual `git push` + `tgw flake mark-executed` — exact commands already
+  given directly to Dave (corrected once after Tigwa caught a fragile-PATH
+  issue in the first version).
+- **Helicrew cutover to primary Tigwa/Hermes seat, verified live 2026-07-26
+  00:05 UTC** (Tigwa's own checkpoint): Hindsight/dashboard/gateway services
+  active under `tigwa`, default gateways disabled on tgw-prod/a1131. Folded
+  into PP-HERMES-EA-001. Telegram adapter unconfirmed since cutover — open,
+  not urgent (Dave: chase only if still broken).
 
 **Still open, carried forward (not this session's to resolve):**
+- Todo #1692's actual push/mark-executed — Dave's action, commands given,
+  not yet confirmed done as of session close.
+- Once pushed: source-adapter branch (`todo/consolidated-nix-source-20260725`)
+  needs its `tgw-flake` lock updated, then a fresh independent merge/test
+  review before it can merge into `catio-nix-0.0.1-alpha`.
 - Todo #1527 — a1131 has no Flutter SDK; needs Dave's device decision.
 - Todo #1620 (far2l) — still no explicit keep-or-revert decision from Dave.
-- `nix-flake-maintainer` should pick up #1684/#1685/#1688 next (all
-  PP-NIXOS-001, all require live host work this session didn't touch).
+- 8 new todos from the inbox sweep (#1684-1691) plus #1693 — filed, not
+  yet worked. `nix-flake-maintainer` should pick up the PP-NIXOS-001 ones
+  (#1684/#1685/#1688) next.
+- Telegram adapter on Helicrew — open per Tigwa's checkpoint, low urgency.
+- Stale breadcrumb `docs/TGW-Plan-Vault/inbox/INPROGRESS-1631-tgw-app-
+  dropdown-initialvalue.md` sitting in `inbox/` root (not `inbox/claude/`) —
+  todo #1631 is long since merged (`b127f15`); never cleaned up by whatever
+  session wrote it. Not touched this session, flagging for next inbox pass.
 - Pre-existing `tgw health` failures, not new: `backups` (rclone/snapshot
   staleness, PP-BACKUP-001), `ebay_sync_fallback` (841 consecutive
   fallback runs, todo #1077, eBay Dev Support ticket still the only path).
