@@ -520,6 +520,26 @@ a restarted Hermes session. No Hindsight installation, final service
 exposure, secret provisioning, or flake change is authorised by this
 record alone. Full contract is in this PP detail's Hindsight section.
 
+**Cutover executed, verified live, 2026-07-26T00:05 UTC (Tigwa's own
+`tgw-exit`-equivalent checkpoint) — Helicrew is now the primary Tigwa
+seat.** `hindsight.service`, `hermes-dashboard.service`,
+`hermes-gateway.service`, `ydotool.service` all enabled/active under the
+`tigwa` user with `Linger=yes`. Hindsight health-checked
+(`{"status":"healthy","database":"connected"}`); dashboard verified
+locally at `http://127.0.0.1:9119` (HTTP 200) — Node 22.23.1 installed
+under `~/.local` only, to build the dashboard, no host/Nix change. A new
+dedicated Helicrew SSH identity authenticated live to both `db@tgw-prod`
+and `tigwa@a1131`. The default `hermes-gateway.service` on tgw-prod and
+a1131 were **disabled** as part of this same cutover (a1131's separate
+`hermes-gateway-t-lite.service` was left untouched). Hermes durable memory
+now records Helicrew as the primary seat in the fleet topology. **Open
+risk, not yet closed:** the Telegram adapter has not logged a successful
+connection since cutover (direct HTTPS reachability to
+`api.telegram.org` confirmed, so this isn't a network block) — Dave
+elected to only chase this further if it's still failing post-cutover;
+don't treat Telegram as the sole move-confirmation channel until a live
+message round-trips.
+
 **pm_intake replacement direction approved, 2026-07-22 (Dave, without
 waiting on staged-artifact resend):** Tigwa's supervised PM-intake/
 librarian workflow v1 proposal (#1434, PP-KNOWLEDGE-001) is approved on
