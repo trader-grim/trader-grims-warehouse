@@ -89,11 +89,11 @@
         "tgw-src": "tgw-src"
       },
       "locked": {
-        "lastModified": 1785001133,
-        "narHash": "sha256-A6brfwBtQlvPXm8B3gkRrCv1Ozasbn8A4bKjooHTZE8=",
+        "lastModified": 1785023253,
+        "narHash": "sha256-hQW7WCdoJVsDeN7d0l2xZaYVi7Md2e6sH/1lZhvODOQ=",
         "ref": "todo/consolidated-nix-fleet-20260725",
-        "rev": "b78ed90ad03fe8fe4103ab2fe70649018af1e97d",
-        "revCount": 75,
+        "rev": "a692acbbdd99808dec50cc425c1f06a7f5c339e7",
+        "revCount": 76,
         "type": "git",
         "url": "ssh://git@github.com/trader-grim/tgw-flake.git"
       },
