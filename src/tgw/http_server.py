@@ -2686,22 +2686,29 @@ _LIVE_STORE_CATS_TTL = 900  # 15 min — bounds live-call frequency without lett
 
 
 def _store_categories_from_groups(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Read category-groups.json fresh (no caching) — this is the fallback
-    path used only when the live GetStore call fails, so it must reflect
-    the file as it stands right now, not a possibly-stale in-process cache."""
-    seen: Dict[str, Any] = {}
+    """Build valid Store Category options from the configured local groups.
+
+    Item editing uses this local source so its category selectors do not depend
+    on GetStore. The live adapter may use the same helper only as its fallback.
+    Preserve distinct category IDs even if their display names match, and never
+    emit an empty/``None`` ID as a selectable value.
+    """
+    seen: Dict[str, str] = {}
     try:
         cg_path = cfg.get("category_groups_path")
         if cg_path and Path(cg_path).exists():
             cg = json.loads(Path(cg_path).read_text())
             for grp in cg.get("groups", cg).values():
-                name = grp.get("store_category") or grp.get("store_category_name") or ""
-                sid = grp.get("store_category_id")
-                if name and name not in seen:
-                    seen[name] = sid
+                name = str(grp.get("store_category") or grp.get("store_category_name") or "").strip()
+                raw_sid = grp.get("store_category_id")
+                if raw_sid is None:
+                    continue
+                sid = str(raw_sid).strip()
+                if name and sid and sid not in seen:
+                    seen[sid] = name
     except Exception:
         pass
-    return sorted([{"id": v, "name": k} for k, v in seen.items()], key=lambda x: x["name"])
+    return [{"id": sid, "name": name} for sid, name in sorted(seen.items(), key=lambda item: (item[1].casefold(), item[0]))]
 
 
 def _live_store_categories(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], bool]:
@@ -6107,15 +6114,12 @@ def _render_item_detail_html(
     _dl_store_cat2_id = str((dl or {}).get("secondary_store_category_id") or "")
     _dl_cat2_id_v = h(str((dl or {}).get("secondary_category_id") or ""))
     _dl_cat2_name = h(str((dl or {}).get("secondary_category_name") or ""))
-    # Live-authoritative store categories (GetStore), TTL-cached, falling back
-    # to category-groups.json only if the live call fails — see
-    # _live_store_categories (PP-SELLERHUB-001, todo #1546).
-    try:
-        _sc_results, _sc_fallback = _live_store_categories(_cfg)
-        _sc_list = [(r["name"], str(r["id"])) for r in _sc_results]
-    except Exception:
-        _sc_list = []
-        _sc_fallback = True
+    # Item editing must remain usable if eBay is unavailable. Read the configured
+    # local group mapping only; reconciliation belongs to an explicit action,
+    # never to page rendering (PP-SELLERHUB-001 / #1696).
+    _sc_results = _store_categories_from_groups(_cfg)
+    _sc_list = [(r["name"], str(r["id"])) for r in _sc_results]
+    _sc_fallback = False
 
     def _store_cat_options_html(selected_id: str) -> str:
         opts = '<option value="">— not set —</option>'
