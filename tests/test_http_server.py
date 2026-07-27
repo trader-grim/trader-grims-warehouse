@@ -5664,6 +5664,66 @@ def test_item_detail_store_category_dropdowns_populate_and_select(env):
     assert 'value="222" data-name="Electronics" selected' in text
 
 
+def test_item_detail_store_categories_do_not_fetch_ebay_during_render(env, monkeypatch):
+    """A normal item page must retain locally configured category choices even
+    when GetStore is unavailable; rendering must not call the live adapter."""
+    groups_path = env["groups_path"]
+    groups_path.write_text(
+        json.dumps({"groups": {
+            "books": {
+                "name": "Books",
+                "store_category": "Books & Media",
+                "store_category_id": "111",
+            },
+            "electronics": {
+                "name": "Electronics",
+                "store_category": "Electronics",
+                "store_category_id": "222",
+            },
+        }}),
+        encoding="utf-8",
+    )
+    sku = "tgw20260701000000079"
+    _write_item(env["itemdata_root"], sku, {"sku": sku, "title": "No Live Store Fetch"})
+    monkeypatch.setattr(
+        http_server,
+        "_live_store_categories",
+        lambda _cfg: (_ for _ in ()).throw(AssertionError("item rendering called GetStore")),
+    )
+    _login(env["client"])
+    response = env["client"].get(f"/form/items/{sku}")
+    assert response.status_code == 200
+    assert 'value="111" data-name="Books &amp; Media"' in response.text
+    assert 'value="222" data-name="Electronics"' in response.text
+
+
+def test_item_detail_store_categories_keep_distinct_ids_and_drop_invalid_values(env):
+    """Configured groups may reuse a display name; preserve their distinct
+    stored IDs and never expose a value that can overwrite a draft as None."""
+    env["groups_path"].write_text(
+        json.dumps({"groups": {
+            "first": {"store_category": "Books", "store_category_id": "111"},
+            "second": {"store_category": "Books", "store_category_id": "222"},
+            "missing": {"store_category": "Broken", "store_category_id": None},
+            "blank": {"store_category": "Also Broken", "store_category_id": "  "},
+        }}),
+        encoding="utf-8",
+    )
+    sku = "tgw20260701000000080"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Keep Stored Category IDs",
+        "draft_listing": {"store_category_id": "222", "secondary_store_category_id": "111"},
+    })
+    _login(env["client"])
+    response = env["client"].get(f"/form/items/{sku}")
+    assert response.status_code == 200
+    assert 'value="111" data-name="Books" selected' in response.text
+    assert 'value="222" data-name="Books" selected' in response.text
+    assert 'value="None"' not in response.text
+    assert 'value="  "' not in response.text
+
+
 def test_item_detail_best_offer_control_reflects_state(env):
     """todo #1256 (+ code-review follow-up): per-item Best Offer control
     (offer.listingPolicies.bestOfferTerms) -- tri-state select (not a
