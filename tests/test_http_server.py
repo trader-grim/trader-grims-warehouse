@@ -5697,6 +5697,268 @@ def test_item_detail_store_categories_do_not_fetch_ebay_during_render(env, monke
     assert 'value="222" data-name="Electronics"' in response.text
 
 
+def test_item_detail_store_categories_render_complete_ebay_snapshot_without_live_fetch(env, monkeypatch):
+    """Routine rendering uses the complete last-known-good eBay snapshot, not
+    the smaller category-group mapping and not a synchronous GetStore call."""
+    env["groups_path"].write_text(
+        json.dumps({"groups": {
+            "mapped": {"store_category": "Mapped only", "store_category_id": "111"},
+        }}),
+        encoding="utf-8",
+    )
+    catalog_root = env["groups_path"].parent / "catalog"
+    catalog_root.mkdir()
+    env["cfg"]["catalog_root"] = catalog_root
+    snapshot = catalog_root / "ebay-store-categories.json"
+    snapshot.write_text(json.dumps({
+        "source": "ebay_get_store",
+        "refreshed_at": "2026-07-28T12:00:00Z",
+        "results": [
+            {"id": "111", "name": "Books"},
+            {"id": "222", "name": "Electronics"},
+            {"id": "333", "name": "Unmapped but real"},
+        ],
+    }), encoding="utf-8")
+    sku = "tgw20260701000000081"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Snapshot-backed categories",
+        "draft_listing": {"store_category_id": "333"},
+    })
+    monkeypatch.setattr(
+        http_server,
+        "_live_store_categories",
+        lambda _cfg: (_ for _ in ()).throw(AssertionError("item rendering called GetStore")),
+    )
+    _login(env["client"])
+    response = env["client"].get(f"/form/items/{sku}")
+    assert response.status_code == 200
+    assert 'value="111" data-name="Books"' in response.text
+    assert 'value="222" data-name="Electronics"' in response.text
+    assert 'value="333" data-name="Unmapped but real" selected' in response.text
+    assert "eBay snapshot: 3 categories" in response.text
+
+
+def test_store_category_refresh_persists_and_preserves_last_known_good(env, monkeypatch):
+    """A successful explicit refresh atomically replaces the snapshot; a later
+    provider failure returns and preserves that same last-known-good data."""
+    from tgw.apis.ebay import trading
+
+    catalog_root = env["groups_path"].parent / "catalog-refresh"
+    catalog_root.mkdir()
+    env["cfg"]["catalog_root"] = catalog_root
+    expected = [
+        {"id": "111", "name": "Books"},
+        {"id": "222", "name": "Electronics"},
+    ]
+    monkeypatch.setattr(trading, "get_store_categories", lambda _cfg: expected)
+    http_server._LIVE_STORE_CATS_CACHE.update({"data": None, "at": 0.0})
+
+    refreshed, fallback = http_server._live_store_categories(env["cfg"])
+    assert refreshed == expected
+    assert fallback is False
+    snapshot = catalog_root / "ebay-store-categories.json"
+    before = json.loads(snapshot.read_text())
+    assert before["results"] == expected
+    assert before["source"] == "ebay_get_store"
+    assert before["refreshed_at"]
+
+    monkeypatch.setattr(trading, "get_store_categories", lambda _cfg: [{"id": "333", "name": ""}])
+    http_server._LIVE_STORE_CATS_CACHE.update({"data": None, "at": 0.0})
+    retained, fallback = http_server._live_store_categories(env["cfg"])
+    assert retained == expected
+    assert fallback is True
+    assert json.loads(snapshot.read_text()) == before
+
+    monkeypatch.setattr(trading, "get_store_categories", lambda _cfg: [{"id": 333, "name": "Books"}])
+    http_server._LIVE_STORE_CATS_CACHE.update({"data": None, "at": 0.0})
+    retained, fallback = http_server._live_store_categories(env["cfg"])
+    assert retained == expected
+    assert fallback is True
+    assert json.loads(snapshot.read_text()) == before
+
+    monkeypatch.setattr(trading, "get_store_categories", lambda _cfg: (_ for _ in ()).throw(RuntimeError("offline")))
+    http_server._LIVE_STORE_CATS_CACHE.update({"data": None, "at": 0.0})
+    retained, fallback = http_server._live_store_categories(env["cfg"])
+    assert retained == expected
+    assert fallback is True
+    assert json.loads(snapshot.read_text()) == before
+
+
+def test_item_detail_fulfillment_policies_render_snapshot_without_live_fetch(env, monkeypatch):
+    """Routine item rendering reads the last-known-good policy snapshot and
+    never synchronously calls the eBay Account API."""
+    catalog_root = env["groups_path"].parent / "policy-catalog"
+    catalog_root.mkdir()
+    env["cfg"]["catalog_root"] = catalog_root
+    (catalog_root / "ebay-fulfillment-policies.json").write_text(json.dumps({
+        "source": "ebay_account_api",
+        "refreshed_at": "2026-07-28T12:00:00Z",
+        "fulfillment": {"POLICY-1": "Small parcel", "POLICY-2": "Large parcel"},
+        "return": {},
+    }), encoding="utf-8")
+    sku = "tgw20260701000000082"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Snapshot-backed shipping",
+        "draft_listing": {"shipping_profile": "POLICY-2"},
+    })
+    monkeypatch.setattr(
+        http_server,
+        "_live_fulfillment_policies",
+        lambda _cfg: (_ for _ in ()).throw(AssertionError("item rendering called Account API")),
+    )
+    _login(env["client"])
+    response = env["client"].get(f"/form/items/{sku}")
+    assert response.status_code == 200
+    assert 'value="POLICY-1"' in response.text
+    assert 'value="POLICY-2" selected' in response.text
+    assert "eBay snapshot: 2 fulfillment policies" in response.text
+
+    (catalog_root / "ebay-fulfillment-policies.json").write_text(json.dumps({
+        "source": "ebay_account_api",
+        "refreshed_at": "2026-07-28T12:00:00Z",
+        "fulfillment": {"POLICY-1": ["not", "a", "name"]},
+    }), encoding="utf-8")
+    policies, refreshed_at, error = http_server._fulfillment_policies_snapshot(env["cfg"])
+    assert policies == {}
+    assert refreshed_at is None
+    assert "valid" in error
+
+
+def test_fulfillment_refresh_persists_and_preserves_last_known_good(env, monkeypatch):
+    """Policy refresh updates only the fulfillment section and never destroys a
+    usable snapshot when the Account API later fails."""
+    from tgw.ebay import sync
+
+    catalog_root = env["groups_path"].parent / "policy-refresh"
+    catalog_root.mkdir()
+    env["cfg"]["catalog_root"] = catalog_root
+    snapshot = catalog_root / "ebay-fulfillment-policies.json"
+    snapshot.write_text(json.dumps({"return": {"RETURN-1": "Returns"}}), encoding="utf-8")
+    expected_rows = [
+        {"id": "POLICY-1", "name": "Small parcel"},
+        {"id": "POLICY-2", "name": "Large parcel"},
+    ]
+    monkeypatch.setattr(sync, "get_fulfillment_policies_full", lambda _cfg: expected_rows)
+    http_server._LIVE_FULFILLMENT_POLICIES_CACHE.update({"data": None, "at": 0.0})
+
+    refreshed, fallback = http_server._live_fulfillment_policies(env["cfg"])
+    assert refreshed == {"POLICY-1": "Small parcel", "POLICY-2": "Large parcel"}
+    assert fallback is False
+    before = json.loads(snapshot.read_text())
+    assert before["return"] == {"RETURN-1": "Returns"}
+    assert before["fulfillment"] == refreshed
+    assert before["refreshed_at"]
+
+    monkeypatch.setattr(sync, "get_fulfillment_policies_full", lambda _cfg: [{"id": "POLICY-3", "name": ""}])
+    http_server._LIVE_FULFILLMENT_POLICIES_CACHE.update({"data": None, "at": 0.0})
+    retained, fallback = http_server._live_fulfillment_policies(env["cfg"])
+    assert retained == refreshed
+    assert fallback is True
+    assert json.loads(snapshot.read_text()) == before
+
+    monkeypatch.setattr(sync, "get_fulfillment_policies_full", lambda _cfg: [{"id": ["POLICY-3"], "name": "Bad"}])
+    http_server._LIVE_FULFILLMENT_POLICIES_CACHE.update({"data": None, "at": 0.0})
+    retained, fallback = http_server._live_fulfillment_policies(env["cfg"])
+    assert retained == refreshed
+    assert fallback is True
+    assert json.loads(snapshot.read_text()) == before
+
+    monkeypatch.setattr(sync, "get_fulfillment_policies_full", lambda _cfg: (_ for _ in ()).throw(RuntimeError("offline")))
+    http_server._LIVE_FULFILLMENT_POLICIES_CACHE.update({"data": None, "at": 0.0})
+    retained, fallback = http_server._live_fulfillment_policies(env["cfg"])
+    assert retained == refreshed
+    assert fallback is True
+    assert json.loads(snapshot.read_text()) == before
+
+
+def test_store_categories_get_reads_snapshot_without_live_fetch(env, monkeypatch):
+    catalog_root = env["groups_path"].parent / "store-get-catalog"
+    catalog_root.mkdir()
+    env["cfg"]["catalog_root"] = catalog_root
+    (catalog_root / "ebay-store-categories.json").write_text(json.dumps({
+        "source": "ebay_get_store",
+        "refreshed_at": "2026-07-28T12:00:00Z",
+        "results": [{"id": "111", "name": "Books"}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(
+        http_server,
+        "_live_store_categories",
+        lambda _cfg: (_ for _ in ()).throw(AssertionError("GET crossed eBay boundary")),
+    )
+    _login(env["client"])
+    response = env["client"].get("/api/ebay/store-categories")
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "results": [{"id": "111", "name": "Books"}],
+        "source": "snapshot",
+        "refreshed_at": "2026-07-28T12:00:00Z",
+        "error": None,
+    }
+
+    (catalog_root / "ebay-store-categories.json").write_text(json.dumps({
+        "source": "ebay_get_store",
+        "refreshed_at": "2026-07-28T12:00:00Z",
+        "results": [{"id": 111, "name": "Books"}],
+    }), encoding="utf-8")
+    response = env["client"].get("/api/ebay/store-categories")
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+    assert response.json()["source"] == "local_mapping"
+    assert "valid" in response.json()["error"]
+
+
+def test_reference_data_refresh_endpoint_reconciles_both_snapshots_once(env, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        http_server,
+        "_live_store_categories",
+        lambda _cfg: (calls.append("store") or ([{"id": "111", "name": "Books"}], False)),
+    )
+    monkeypatch.setattr(
+        http_server,
+        "_live_fulfillment_policies",
+        lambda _cfg: (calls.append("fulfillment") or ({"POLICY-1": "Small parcel"}, False)),
+    )
+    _login(env["client"])
+    response = env["client"].post("/api/ebay/reference-data/refresh")
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "store_categories": {"count": 1, "preserved_snapshot": False},
+        "fulfillment_policies": {"count": 1, "preserved_snapshot": False},
+    }
+    assert calls == ["store", "fulfillment"]
+
+
+def test_item_detail_preserves_stored_selector_ids_when_snapshot_unavailable(env):
+    """An unavailable snapshot must not make an ordinary Save silently clear
+    stored primary/secondary Store IDs or the shipping-policy ID."""
+    catalog_root = env["groups_path"].parent / "missing-reference-data"
+    catalog_root.mkdir()
+    env["cfg"]["catalog_root"] = catalog_root
+    env["groups_path"].write_text(json.dumps({"groups": {}}), encoding="utf-8")
+    sku = "tgw20260701000000083"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Preserve stored IDs",
+        "draft_listing": {
+            "store_category_id": "STORE-1",
+            "secondary_store_category_id": "STORE-2",
+            "shipping_profile": "POLICY-9",
+        },
+    })
+    _login(env["client"])
+    response = env["client"].get(f"/form/items/{sku}")
+    assert response.status_code == 200
+    assert 'value="STORE-1" data-name="Stored category STORE-1" selected' in response.text
+    assert 'value="STORE-2" data-name="Stored category STORE-2" selected' in response.text
+    assert 'value="POLICY-9" selected' in response.text
+    assert "not in current snapshot" in response.text
+
+
 def test_item_detail_store_categories_keep_distinct_ids_and_drop_invalid_values(env):
     """Configured groups may reuse a display name; preserve their distinct
     stored IDs and never expose a value that can overwrite a draft as None."""

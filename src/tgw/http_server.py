@@ -2711,6 +2711,48 @@ def _store_categories_from_groups(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [{"id": sid, "name": name} for sid, name in sorted(seen.items(), key=lambda item: (item[1].casefold(), item[0]))]
 
 
+def _store_categories_snapshot(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, str]], Optional[str], Optional[str]]:
+    """Load the validated last-known-good GetStore snapshot for page rendering.
+
+    Returns (results, refreshed_at, error). A missing/corrupt snapshot is kept
+    distinct from a legitimate, successfully refreshed empty eBay result.
+    """
+    catalog_root = cfg.get("catalog_root")
+    path = (Path(catalog_root) / "ebay-store-categories.json") if catalog_root else None
+    if not path or not path.exists():
+        return [], None, "eBay Store category snapshot unavailable"
+    try:
+        payload = json.loads(path.read_text())
+        raw_results = payload["results"]
+        if not isinstance(raw_results, list):
+            raise ValueError("results is not a list")
+        seen: Dict[str, str] = {}
+        for row in raw_results:
+            if not isinstance(row, dict):
+                raise ValueError("result is not an object")
+            raw_id = row.get("id")
+            raw_name = row.get("name")
+            if not isinstance(raw_id, str) or not isinstance(raw_name, str):
+                raise ValueError("result id and name must be strings")
+            sid = raw_id.strip()
+            name = raw_name.strip()
+            if not sid or not name:
+                raise ValueError("result has a blank id or name")
+            if sid in seen and seen[sid] != name:
+                raise ValueError(f"duplicate id {sid!r} has conflicting names")
+            seen[sid] = name
+        results = [
+            {"id": sid, "name": name}
+            for sid, name in sorted(seen.items(), key=lambda item: (item[1].casefold(), item[0]))
+        ]
+        raw_refreshed_at = payload.get("refreshed_at")
+        if raw_refreshed_at is not None and not isinstance(raw_refreshed_at, str):
+            raise ValueError("refreshed_at must be a string or null")
+        return results, (raw_refreshed_at or "").strip() or None, None
+    except Exception as exc:
+        return [], None, f"eBay Store category snapshot invalid: {exc}"
+
+
 def _live_store_categories(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], bool]:
     """Return (results, used_fallback)."""
     now = time.time()
@@ -2721,28 +2763,72 @@ def _live_store_categories(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], b
         from .apis.ebay.trading import get_store_categories
 
         live = get_store_categories(cfg)
-        results = sorted(
-            [{"id": c["id"], "name": c["name"]} for c in live if c.get("id") and c.get("name")],
-            key=lambda x: x["name"],
+        if not isinstance(live, list):
+            raise ValueError("GetStore response is not a category list")
+        seen: Dict[str, str] = {}
+        for category in live:
+            if not isinstance(category, dict):
+                raise ValueError("GetStore category is not an object")
+            raw_id = category.get("id")
+            raw_name = category.get("name")
+            if not isinstance(raw_id, str) or not isinstance(raw_name, str):
+                raise ValueError("GetStore category id and name must be strings")
+            sid = raw_id.strip()
+            name = raw_name.strip()
+            if not sid or not name:
+                raise ValueError("GetStore category has a blank id or name")
+            if sid in seen and seen[sid] != name:
+                raise ValueError(f"duplicate Store category id {sid!r} has conflicting names")
+            seen[sid] = name
+        results = [
+            {"id": sid, "name": name}
+            for sid, name in sorted(seen.items(), key=lambda item: (item[1].casefold(), item[0]))
+        ]
+        catalog_root = cfg.get("catalog_root")
+        if not catalog_root:
+            raise RuntimeError("catalog_root is not configured; cannot persist Store category snapshot")
+        atomic_write_json(
+            Path(catalog_root) / "ebay-store-categories.json",
+            {
+                "source": "ebay_get_store",
+                "refreshed_at": datetime.now(timezone.utc).isoformat(),
+                "results": results,
+            },
         )
         _LIVE_STORE_CATS_CACHE["data"] = results
         _LIVE_STORE_CATS_CACHE["at"] = now
         return results, False
     except Exception as exc:
-        log.warning("live store-categories fetch failed, falling back to category-groups.json: %s", exc)
-        # Don't update the cache/timestamp on failure — next call retries live
-        # rather than getting pinned to the fallback for the full TTL.
-        return _store_categories_from_groups(cfg), True
+        snapshot, _refreshed_at, snapshot_error = _store_categories_snapshot(cfg)
+        if snapshot_error:
+            log.warning("live store-categories fetch failed and no valid eBay snapshot exists; using local mapping: %s", exc)
+            return _store_categories_from_groups(cfg), True
+        log.warning("live store-categories fetch failed; preserving last-known-good eBay snapshot: %s", exc)
+        # Never update the snapshot/cache timestamp on failure: the prior eBay
+        # observation remains intact and the next explicit refresh retries live.
+        return snapshot, True
 
 
 @app.get("/api/ebay/store-categories", dependencies=[AUTH])
 def ebay_store_categories() -> Dict[str, Any]:
-    try:
-        results, fallback = _live_store_categories(_cfg)
-        return {"ok": True, "results": results, "fallback": fallback}
-    except Exception as exc:
-        log.warning("store-categories error: %s", exc)
-        return {"ok": False, "detail": str(exc), "results": []}
+    """Return local Store-category reference data without crossing eBay."""
+    results, refreshed_at, error = _store_categories_snapshot(_cfg)
+    if error:
+        results = _store_categories_from_groups(_cfg)
+        return {
+            "ok": False,
+            "results": results,
+            "source": "local_mapping",
+            "refreshed_at": None,
+            "error": error,
+        }
+    return {
+        "ok": True,
+        "results": results,
+        "source": "snapshot",
+        "refreshed_at": refreshed_at,
+        "error": None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2757,6 +2843,34 @@ _LIVE_FULFILLMENT_POLICIES_CACHE: Dict[str, Any] = {"data": None, "at": 0.0}
 _LIVE_FULFILLMENT_POLICIES_TTL = 900  # 15 min
 
 
+def _fulfillment_policies_snapshot(cfg: Dict[str, Any]) -> Tuple[Dict[str, str], Optional[str], Optional[str]]:
+    """Load the validated last-known-good Account API fulfillment snapshot."""
+    catalog_root = cfg.get("catalog_root")
+    path = (Path(catalog_root) / "ebay-fulfillment-policies.json") if catalog_root else None
+    if not path or not path.exists():
+        return {}, None, "eBay fulfillment-policy snapshot unavailable"
+    try:
+        payload = json.loads(path.read_text())
+        raw = payload["fulfillment"]
+        if not isinstance(raw, dict):
+            raise ValueError("fulfillment is not an object")
+        results: Dict[str, str] = {}
+        for raw_id, raw_name in raw.items():
+            if not isinstance(raw_id, str) or not isinstance(raw_name, str):
+                raise ValueError("policy id and name must be strings")
+            policy_id = raw_id.strip()
+            name = raw_name.strip()
+            if not policy_id or not name:
+                raise ValueError("policy has a blank id or name")
+            results[policy_id] = name
+        raw_refreshed_at = payload.get("refreshed_at")
+        if raw_refreshed_at is not None and not isinstance(raw_refreshed_at, str):
+            raise ValueError("refreshed_at must be a string or null")
+        return results, (raw_refreshed_at or "").strip() or None, None
+    except Exception as exc:
+        return {}, None, f"eBay fulfillment-policy snapshot invalid: {exc}"
+
+
 def _live_fulfillment_policies(cfg: Dict[str, Any]) -> Tuple[Dict[str, str], bool]:
     """Return ({policy_id: name}, used_fallback)."""
     now = time.time()
@@ -2767,23 +2881,71 @@ def _live_fulfillment_policies(cfg: Dict[str, Any]) -> Tuple[Dict[str, str], boo
         from .ebay.sync import get_fulfillment_policies_full
 
         live = get_fulfillment_policies_full(cfg)
-        results = {p["id"]: p["name"] for p in live if p.get("id")}
-        if not results:
-            raise RuntimeError("live fulfillment-policy fetch returned no policies")
+        if not isinstance(live, list):
+            raise ValueError("Account API response is not a fulfillment-policy list")
+        results: Dict[str, str] = {}
+        for policy in live:
+            if not isinstance(policy, dict):
+                raise ValueError("fulfillment policy is not an object")
+            raw_id = policy.get("id")
+            raw_name = policy.get("name")
+            if not isinstance(raw_id, str) or not isinstance(raw_name, str):
+                raise ValueError("fulfillment policy id and name must be strings")
+            policy_id = raw_id.strip()
+            name = raw_name.strip()
+            if not policy_id or not name:
+                raise ValueError("fulfillment policy has a blank id or name")
+            if policy_id in results and results[policy_id] != name:
+                raise ValueError(f"duplicate fulfillment policy id {policy_id!r} has conflicting names")
+            results[policy_id] = name
+        catalog_root = cfg.get("catalog_root")
+        if not catalog_root:
+            raise RuntimeError("catalog_root is not configured; cannot persist fulfillment-policy snapshot")
+        path = Path(catalog_root) / "ebay-fulfillment-policies.json"
+        payload: Dict[str, Any] = {}
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text())
+                if isinstance(existing, dict):
+                    payload = existing
+            except Exception:
+                pass
+        payload.update({
+            "source": "ebay_account_api",
+            "refreshed_at": datetime.now(timezone.utc).isoformat(),
+            "fulfillment": results,
+        })
+        atomic_write_json(path, payload)
         _LIVE_FULFILLMENT_POLICIES_CACHE["data"] = results
         _LIVE_FULFILLMENT_POLICIES_CACHE["at"] = now
         return results, False
     except Exception as exc:
-        log.warning("live fulfillment-policy fetch failed, falling back to static cache: %s", exc)
-        cat_root = cfg.get("catalog_root")
-        pol_cache = (cat_root / "ebay-fulfillment-policies.json") if cat_root else None
-        fallback_opts: Dict[str, str] = {}
-        if pol_cache and pol_cache.exists():
-            try:
-                fallback_opts = json.loads(pol_cache.read_text()).get("fulfillment", {})
-            except Exception:
-                pass
-        return fallback_opts, True
+        snapshot, _refreshed_at, snapshot_error = _fulfillment_policies_snapshot(cfg)
+        if snapshot_error:
+            log.warning("live fulfillment-policy fetch failed and no valid snapshot exists: %s", exc)
+            return {}, True
+        log.warning("live fulfillment-policy fetch failed; preserving last-known-good snapshot: %s", exc)
+        return snapshot, True
+
+
+@app.post("/api/ebay/reference-data/refresh", dependencies=[AUTH])
+def refresh_ebay_reference_data() -> Dict[str, Any]:
+    """Explicitly reconcile stable eBay selector data into local snapshots."""
+    _LIVE_STORE_CATS_CACHE.update({"data": None, "at": 0.0})
+    _LIVE_FULFILLMENT_POLICIES_CACHE.update({"data": None, "at": 0.0})
+    store_categories, store_preserved = _live_store_categories(_cfg)
+    fulfillment_policies, fulfillment_preserved = _live_fulfillment_policies(_cfg)
+    return {
+        "ok": not (store_preserved or fulfillment_preserved),
+        "store_categories": {
+            "count": len(store_categories),
+            "preserved_snapshot": store_preserved,
+        },
+        "fulfillment_policies": {
+            "count": len(fulfillment_policies),
+            "preserved_snapshot": fulfillment_preserved,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -6114,29 +6276,42 @@ def _render_item_detail_html(
     _dl_store_cat2_id = str((dl or {}).get("secondary_store_category_id") or "")
     _dl_cat2_id_v = h(str((dl or {}).get("secondary_category_id") or ""))
     _dl_cat2_name = h(str((dl or {}).get("secondary_category_name") or ""))
-    # Item editing must remain usable if eBay is unavailable. Read the configured
-    # local group mapping only; reconciliation belongs to an explicit action,
-    # never to page rendering (PP-SELLERHUB-001 / #1696).
-    _sc_results = _store_categories_from_groups(_cfg)
+    # Item editing renders the validated last-known-good eBay snapshot. A
+    # missing/corrupt snapshot falls back to the local mapping only to preserve
+    # existing editability, and is visibly not represented as complete eBay data.
+    _sc_results, _sc_refreshed_at, _sc_error = _store_categories_snapshot(_cfg)
+    if _sc_error:
+        _sc_results = _store_categories_from_groups(_cfg)
     _sc_list = [(r["name"], str(r["id"])) for r in _sc_results]
-    _sc_fallback = False
 
     def _store_cat_options_html(selected_id: str) -> str:
         opts = '<option value="">— not set —</option>'
+        known_ids = {store_id for _name, store_id in _sc_list}
+        if selected_id and selected_id not in known_ids:
+            stored_name = f"Stored category {selected_id}"
+            opts += (
+                f'<option value="{h(selected_id)}" data-name="{h(stored_name)}" selected>'
+                f'{h(stored_name)} — not in current snapshot</option>'
+            )
         opts += "".join(
-            f'<option value="{_si}" data-name="{h(_sn)}"{" selected" if _si == selected_id else ""}>{h(_sn)} ({_si})</option>'
+            f'<option value="{h(_si)}" data-name="{h(_sn)}"{" selected" if _si == selected_id else ""}>{h(_sn)} ({h(_si)})</option>'
             for _sn, _si in _sc_list
         )
         return opts
 
     _store_cat_opts_html = _store_cat_options_html(_dl_store_cat_id)
     _store_cat2_opts_html = _store_cat_options_html(_dl_store_cat2_id)
-    _store_cat_fallback_html = (
-        '<span style="font-size:.7em;color:#c84;margin-left:6px" '
-        'title="Live eBay store-category fetch failed — showing the last known local list, may be stale or incomplete">'
-        '⚠ local list, live fetch failed</span>'
-        if _sc_fallback else ""
-    )
+    if _sc_error:
+        _store_cat_fallback_html = (
+            f'<span style="font-size:.7em;color:#c84;margin-left:6px" title="{h(_sc_error)}">'
+            f'⚠ local mapping only; eBay snapshot unavailable ({len(_sc_list)} mapped)</span>'
+        )
+    else:
+        _store_cat_fallback_html = (
+            f'<span style="font-size:.7em;color:#585;margin-left:6px" '
+            f'title="last successful GetStore refresh: {h(_sc_refreshed_at or "timestamp unavailable")}">'
+            f'eBay snapshot: {len(_sc_list)} categories</span>'
+        )
     import json as _json2
 
     _cat_root = _cfg.get("catalog_root")
@@ -6150,18 +6325,29 @@ def _render_item_detail_html(
                 _dl_return_val = next(iter(_return_opts))
         except Exception:
             pass
-    # Fulfillment (shipping) policy options: live-authoritative, TTL-cached,
-    # falling back to the static cache only if the live call fails.
-    _fulfillment_opts, _fo_fallback = _live_fulfillment_policies(_cfg)
-    _ship_opts_html = "".join(
-        f'<option value="{pid}"{" selected" if pid == _dl_ship_val else ""}>{h(name)} ({pid[:8]}…)</option>' for pid, name in sorted(_fulfillment_opts.items(), key=lambda kv: kv[1])
+    # Fulfillment selectors render only the validated last-known-good Account
+    # API snapshot. Reconciliation is explicit and never coupled to page load.
+    _fulfillment_opts, _fo_refreshed_at, _fo_error = _fulfillment_policies_snapshot(_cfg)
+    _ship_opts_html = ""
+    if _dl_ship_val and _dl_ship_val not in _fulfillment_opts:
+        _ship_opts_html += (
+            f'<option value="{h(_dl_ship_val)}" selected>'
+            f'{h(_dl_ship_val)} — not in current snapshot</option>'
+        )
+    _ship_opts_html += "".join(
+        f'<option value="{h(pid)}"{" selected" if pid == _dl_ship_val else ""}>{h(name)} ({h(pid[:8])}…)</option>' for pid, name in sorted(_fulfillment_opts.items(), key=lambda kv: (kv[1].casefold(), kv[0]))
     )
-    _fo_fallback_html = (
-        '<span style="font-size:.7em;color:#c84;margin-left:6px" '
-        'title="Live eBay fulfillment-policy fetch failed — showing the last known local cache, may be stale or incomplete">'
-        '⚠ local cache, live fetch failed</span>'
-        if _fo_fallback else ""
-    )
+    if _fo_error:
+        _fo_fallback_html = (
+            f'<span style="font-size:.7em;color:#c84;margin-left:6px" title="{h(_fo_error)}">'
+            '⚠ eBay fulfillment-policy snapshot unavailable</span>'
+        )
+    else:
+        _fo_fallback_html = (
+            f'<span style="font-size:.7em;color:#585;margin-left:6px" '
+            f'title="last successful Account API refresh: {h(_fo_refreshed_at or "timestamp unavailable")}">'
+            f'eBay snapshot: {len(_fulfillment_opts)} fulfillment policies</span>'
+        )
     # Live fulfillment policy beside the selector (session 42: the selector kept
     # showing the operator's FC4 while eBay actually had FC8 — the divergence was
     # invisible). Mirrored home by ebay_sync; red when it disagrees with the draft.
