@@ -10,30 +10,42 @@ notice AFTER a corrupting write has already happened. See
 `reference/invariants.md` C12 and `tgw.inventory_record` /
 `tgw.ebay.draft_specifics`'s banner comments for the full "why."
 
-This is necessarily a grep-based heuristic, not full dataflow analysis —
-plenty of legitimate code touches keys named 'item_attributes'/
-'item_specifics' that are NOT the item document's own envelope (an AI
-model's raw JSON response, a `revision_draft.delta` dict, or the sanctioned
-accessors' own *return values* being assigned onward). Rather than try to
-be "smart" about that distinction with a fragile regex, this test pins an
-explicit, reviewed ALLOWLIST of every current hit outside the accessor
-modules — any NEW hit that isn't in the allowlist fails the test, forcing
-a human decision (route through the accessor, or extend the allowlist with
-a one-line justification in code review) instead of a silent, unnoticed
-regression.
+This is necessarily a heuristic, not full dataflow analysis — plenty of
+legitimate code touches keys named 'item_attributes'/'item_specifics' that
+are NOT the item document's own envelope (an AI model's raw JSON response,
+a `revision_draft.delta` dict, or the sanctioned accessors' own *return
+values* being assigned onward). Rather than try to be "smart" about that
+distinction, this test pins an explicit, reviewed ALLOWLIST of every
+current hit outside the accessor modules — any NEW hit that isn't in the
+allowlist fails the test, forcing a human decision (route through the
+accessor, or extend the allowlist with a one-line justification in code
+review) instead of a silent, unnoticed regression.
+
+Todo #1706 (this revision): the allowlist identity used to be raw
+`(path, line_number)`. That made the whole suite brittle to any unrelated
+edit anywhere earlier in the file shifting every line below it — refreshed
+5+ times already (2026-07-18 x2, 07-19, 07-20 x2), each refresh itself a
+"trust me, I re-verified" manual step. This revision replaces line-number
+identity with a *semantic* identity parsed from the AST:
+(repo-relative path, enclosing scope, access kind, key, normalized
+containing-expression) — see `_extract_hits` below. Ordinary comments,
+blank lines, imports, or unrelated statements inserted before a reviewed
+hit no longer change its identity (spec point 7). Multiplicity is
+preserved via `Counter`, not `set` — two syntactically-identical allowed
+accesses in the same scope are two separate items, and a THIRD copy is a
+detected violation, not silently collapsed (spec point 3).
 """
 
-import re
+import ast
+from collections import Counter
 from pathlib import Path
+from typing import List, Tuple
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SRC = _REPO_ROOT / "src"
 _SCRIPTS = _REPO_ROOT / "scripts"
 
-_PATTERN = re.compile(
-    r'''\.get\(\s*["'](item_attributes|item_specifics)["']|'''
-    r'''\[["'](item_attributes|item_specifics)["']\]'''
-)
+_KEYS = {"item_attributes", "item_specifics"}
 
 # The two sanctioned accessor modules — direct access is their whole job.
 _ACCESSOR_MODULES = {
@@ -48,109 +60,377 @@ _ACCESSOR_MODULES = {
 # by name to detect what needs wrapping.
 _MIGRATION_SCRIPT = _SCRIPTS / "migrate_field_set_envelope.py"
 
-# Every remaining hit as of this packet landing, reviewed line-by-line —
-# none of these read the item document's OWN item_attributes/item_specifics
-# CONTENTS as a flat dict; each is one of:
-#   (a) writing the accessor's own returned patch dict onward
-#       (e.g. `doc["item_attributes"] = patch["item_attributes"]`), or
-#   (b) a *different* dict that happens to share the key name (an AI
-#       model's raw JSON response, or a revision_draft.delta proposal —
-#       neither is the item's envelope).
-# A new entry here must be justified the same way, in code review.
-_ALLOWLIST = {
-    (_SRC / "tgw" / "draft_sync.py", 90),
-    (_SRC / "tgw" / "workers" / "ai_identify.py", 276),   # (b) AI model response
-    (_SRC / "tgw" / "workers" / "ai_identify.py", 336),   # (a) accessor patch write
-    (_SRC / "tgw" / "workers" / "ai_identify.py", 431),   # (a) accessor patch write
-    # Refreshed 2026-07-18 (this packet — todo #1499/#1500/#1506/#1507, the
-    # same stale-line-numbers report independently rediscovered 4 times by
-    # different tgw-coder packets today, each correctly declining to fix an
-    # unrelated file out-of-scope): every line below re-verified against
-    # current HEAD. Position-independent line-number pinning is inherently
-    # fragile against unrelated edits shifting the file — that's a known,
-    # accepted tradeoff of this detector's design (see module docstring),
-    # not a defect; expect to refresh this list again after future edits.
-    # Refreshed again 2026-07-18 (PP-CATALOG-INCR-001 CI-1+CI-2+CI-3 packets:
-    # Google Lens context-menu removal, live store-category/fulfillment-policy
-    # dropdown fetch helpers, and _apply_patch/_apply_ebay_write's new
-    # publish_mutation + sqlite upsert-on-write + thumbnail-gen fence hooks —
-    # all shifted every line below by varying amounts; re-verified against
-    # current HEAD).
-    # Refreshed 2026-07-19 (PP-CONDITION-ENUM-001 / todo #1562): the
-    # condition_enum PATCH-validation block added before _apply_patch, plus
-    # the flagFieldInvalid()/pipeline_error.field wiring in
-    # _render_item_detail_html, shifted every line below by varying
-    # amounts — re-verified against current HEAD, no accessor-routing
-    # behavior changed, only positions.
-    # Refreshed 2026-07-20 (todo #1608, PP-STATEMACHINE-001): added
-    # `import psycopg2.errors` near the top of http_server.py, shifting
-    # every line below by +1 — re-verified against current HEAD, no
-    # accessor-routing behavior changed, only position.
-    (_SRC / "tgw" / "http_server.py", 772),               # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
-    (_SRC / "tgw" / "http_server.py", 781),               # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
-    (_SRC / "tgw" / "http_server.py", 1238),              # (a) accessor patch write
-    (_SRC / "tgw" / "http_server.py", 1259),              # (a) accessor patch write (todo #1416, draft_listing.item_specifics)
-    (_SRC / "tgw" / "http_server.py", 1264),              # (a) accessor output (full envelope) moving onward
-    (_SRC / "tgw" / "http_server.py", 1277),              # (a) accessor patch write — padlock auto-sync (todo #1406/2026-07-18, inventory_record.sync_from_draft's patch)
-    (_SRC / "tgw" / "http_server.py", 1883),              # (b) revision_draft.delta
-    (_SRC / "tgw" / "http_server.py", 1885),              # (b) revision_draft.delta
-    (_SRC / "tgw" / "http_server.py", 1891),              # (a) accessor patch write (todo #1416)
-    (_SRC / "tgw" / "http_server.py", 3014),              # (a) accessor output (inventory_diff.apply_inventory_diff's patch) onward into _apply_patch (#1417)
-    (_SRC / "tgw" / "http_server.py", 3073),              # (a) category_aspect_migration's patch moving onward into _apply_patch (#1471)
-    # Refreshed 2026-07-20 (todo #1582, PP-AGENTTRACE-001 Phase 3): the new
-    # /form/runs route + _render_runs_html() inserted ~186 lines before this
-    # entry, shifting it from 5855 to 6041 — re-verified against current
-    # HEAD, no accessor-routing behavior changed, only position.
-    (_SRC / "tgw" / "http_server.py", 6048),              # (b) revision_draft.delta
-    (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 114),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
-    (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 121),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
-    (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 124),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
-    (_SRC / "tgw" / "ebay" / "inventory_diff.py", 159),   # (a) accessor patch output moving onward (todo #1417 apply_inventory_diff)
-    (_SRC / "tgw" / "ebay" / "inventory_diff.py", 163),   # (a) accessor patch output moving onward (todo #1417 apply_inventory_diff)
-    # Refreshed 2026-07-20 (todo #1598, PP-MULTIMODEL-001 / invariant E15
-    # sweep): removed a dead `_OLLAMA_FALLBACK_MODEL` module constant + docstring
-    # rewrite in ai_identify.py, net +3 lines before these entries — shifted
-    # from 273/333/428 to 276/336/431. No accessor-routing behavior changed.
-}
+# A single semantic identity: (repo-relative path, enclosing scope,
+# access kind ["get" | "subscript"], key, normalized expression).
+_Identity = Tuple[str, str, str, str, str]
 
 
-def _scan() -> set:
-    hits = set()
+class MalformedSourceError(Exception):
+    """Raised when a scanned file fails to parse as Python — fail closed
+    (spec point 6d) rather than silently skip an unscannable file."""
+
+
+class _FieldSetAccessVisitor(ast.NodeVisitor):
+    """Walks a parsed module, recording every direct item_attributes/
+    item_specifics `.get(...)` call or `[...]` subscript, as a semantic
+    identity: enclosing function/class scope + access kind + key + a
+    normalized unparse of the whole access expression. Deliberately
+    excludes line/column so unrelated line insertions elsewhere in the
+    file never change an existing hit's identity."""
+
+    def __init__(self, rel_path: str):
+        self.rel_path = rel_path
+        self._scope_stack: List[str] = ["<module>"]
+        self.hits: List[_Identity] = []
+
+    def _scope(self) -> str:
+        return ".".join(self._scope_stack)
+
+    def _visit_scoped(self, node) -> None:
+        self._scope_stack.append(node.name)
+        self.generic_visit(node)
+        self._scope_stack.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_scoped(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_scoped(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self._visit_scoped(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value in _KEYS
+        ):
+            self.hits.append((
+                self.rel_path,
+                self._scope(),
+                "get",
+                node.args[0].value,
+                ast.unparse(node),
+            ))
+        self.generic_visit(node)
+
+    def visit_Subscript(self, node: ast.Subscript) -> None:
+        sl = node.slice
+        if isinstance(sl, ast.Constant) and sl.value in _KEYS:
+            self.hits.append((
+                self.rel_path,
+                self._scope(),
+                "subscript",
+                sl.value,
+                ast.unparse(node),
+            ))
+        self.generic_visit(node)
+
+
+def _extract_hits(text: str, rel_path: str) -> List[_Identity]:
+    """Parse `text` (a Python module's source) and return every direct
+    item_attributes/item_specifics access as a semantic identity tuple.
+    Raises MalformedSourceError on invalid Python — never silently skips
+    (spec point 6d)."""
+    try:
+        tree = ast.parse(text, filename=rel_path)
+    except SyntaxError as exc:
+        raise MalformedSourceError(
+            f"C12 detector: {rel_path} failed to parse as Python — fix the "
+            f"file, it cannot be scanned for field-set access: {exc}"
+        ) from exc
+    visitor = _FieldSetAccessVisitor(rel_path)
+    visitor.visit(tree)
+    return visitor.hits
+
+
+def _diff_against_allowlist(
+    hits: Counter, allowlist: Counter
+) -> Tuple[Counter, Counter]:
+    """Multiset-aware comparison (spec point 3/6):
+    - `extra`  = hits present beyond what the allowlist sanctions — a new
+      unauthorized access, OR an extra duplicate of an already-allowed one.
+    - `missing` = allowlisted entries no longer matched by any real hit —
+      the access was removed, or its expression/scope changed underneath
+      the allowlist entry (a semantic change), so it no longer matches.
+    `Counter` subtraction is itself multiset-aware (keeps only positive
+    remainders), which is exactly the count-aware comparison spec point 3
+    asks for."""
+    extra = hits - allowlist
+    missing = allowlist - hits
+    return extra, missing
+
+
+def _scan() -> Counter:
+    counter: Counter = Counter()
     for root in (_SRC, _SCRIPTS):
-        for path in root.rglob("*.py"):
+        for path in sorted(root.rglob("*.py")):
             if path in _ACCESSOR_MODULES or path == _MIGRATION_SCRIPT:
                 continue
+            rel = str(path.relative_to(_REPO_ROOT))
             text = path.read_text(encoding="utf-8", errors="replace")
-            for lineno, line in enumerate(text.splitlines(), start=1):
-                if _PATTERN.search(line):
-                    hits.add((path, lineno))
-    return hits
+            counter.update(_extract_hits(text, rel))
+    return counter
+
+
+def _fmt(counter: Counter) -> str:
+    return ", ".join(
+        f"{path}::{scope} {kind}[{key}] `{expr}`" + (f" x{n}" if n > 1 else "")
+        for (path, scope, kind, key, expr), n in sorted(counter.items())
+    )
+
+
+# Every remaining hit as of this packet (todo #1706), reviewed line-by-line
+# and re-derived directly from the semantic scanner above — none of these
+# read the item document's OWN item_attributes/item_specifics CONTENTS as
+# a flat dict; each is one of:
+#   (a) writing the accessor's own returned patch dict onward
+#       (e.g. `doc["item_attributes"] = patch["item_attributes"]`);
+#   (b) a *different* dict that happens to share the key name (an AI
+#       model's raw JSON response, or a revision_draft.delta proposal —
+#       neither is the item's envelope); or
+#   (c) an envelope-SHAPE gate (is_envelope() check) that never reads the
+#       envelope's contents.
+# Counts >1 are real: the same normalized expression appears more than
+# once in the same scope (e.g. once assembling a working dict, once in the
+# return value) — each occurrence still requires this same review, per
+# spec point 3, so it is counted rather than collapsed.
+# A new entry here must be justified the same way, in code review.
+_ALLOWLIST: Counter = Counter({
+    ("src/tgw/draft_sync.py", "<module>.pin_draft_to_live", "subscript",
+     "item_specifics", "dl['item_specifics']"): 1,
+    # (a) full re-pin of the Set B envelope to the eBay live mirror
+    # (M4/S1) via wrap_ebay_specifics — the live mirror IS the new
+    # baseline, no accessor diff needed.
+
+    ("src/tgw/ebay/category_aspect_migration.py",
+     "<module>.apply_category_aspect_migration", "subscript",
+     "item_attributes", "working_item['item_attributes']"): 1,
+    # (a) accessor patch output moving onward into working_item, so
+    # remove_ebay_aspects() sees Set A's already-applied change.
+
+    ("src/tgw/ebay/category_aspect_migration.py",
+     "<module>.apply_category_aspect_migration", "subscript",
+     "item_attributes", "inv_patch['item_attributes']"): 2,
+    # (a) accessor patch output — once assembled into working_item, once
+    # returned to the caller.
+
+    ("src/tgw/ebay/category_aspect_migration.py",
+     "<module>.apply_category_aspect_migration", "subscript",
+     "item_specifics", "ebay_patch['item_specifics']"): 1,
+    # (a) accessor patch output (remove_ebay_aspects' return value) moving
+    # onward into the function's own return dict.
+
+    ("src/tgw/ebay/inventory_diff.py", "<module>.apply_inventory_diff",
+     "subscript", "item_attributes", "working_item['item_attributes']"): 2,
+    # (a) accessor patch output re-fed into the next diff-source-group's
+    # input, and returned to the caller.
+
+    ("src/tgw/ebay/inventory_diff.py", "<module>.apply_inventory_diff",
+     "subscript", "item_attributes", "patch['item_attributes']"): 1,
+    # (a) accessor patch output moving onward into working_item.
+
+    ("src/tgw/http_server.py", "<module>.patch_item", "get",
+     "item_attributes", "body.fields.get('item_attributes')"): 1,
+    # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a
+    # contents read.
+
+    ("src/tgw/http_server.py", "<module>.patch_item", "get",
+     "item_specifics", "_dl_for_gate.get('item_specifics')"): 1,
+    # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a
+    # contents read.
+
+    ("src/tgw/http_server.py", "<module>._apply_patch", "subscript",
+     "item_attributes", "doc['item_attributes']"): 2,
+    # (a) accessor patch write — once for the plain-dict (non-envelope)
+    # branch, once for the padlock auto-sync branch (todo #1406/07-18).
+
+    ("src/tgw/http_server.py", "<module>._apply_patch", "subscript",
+     "item_attributes", "patch['item_attributes']"): 1,
+    # (a) accessor patch write (inventory_record.set_inventory_fields'
+    # patch, non-envelope branch).
+
+    ("src/tgw/http_server.py", "<module>._apply_patch", "subscript",
+     "item_specifics", "existing['item_specifics']"): 2,
+    # (a) accessor patch write into the draft_listing envelope — the
+    # sanctioned Set B accessor's branch, and the already-envelope
+    # passthrough branch (todo #1416 point 3).
+
+    ("src/tgw/http_server.py", "<module>._apply_patch", "subscript",
+     "item_specifics", "sp_patch['item_specifics']"): 1,
+    # (a) accessor patch write (set_ebay_aspects' patch, todo #1416).
+
+    ("src/tgw/http_server.py", "<module>._apply_patch", "subscript",
+     "item_attributes", "_ia_sync['item_attributes']"): 1,
+    # (a) accessor patch write — padlock auto-sync
+    # (inventory_record.sync_from_draft's patch, todo #1406/2026-07-18).
+
+    ("src/tgw/http_server.py", "<module>.item_action", "subscript",
+     "item_specifics", "delta['item_specifics']"): 2,
+    # (b) revision_draft.delta — presence check and value read, both for
+    # accept_proposals (todo #1416 point 4).
+
+    ("src/tgw/http_server.py", "<module>.item_action", "subscript",
+     "item_specifics", "dl2['item_specifics']"): 1,
+    # (a) accessor patch write onto the draft_listing dict being staged
+    # (todo #1416).
+
+    ("src/tgw/http_server.py", "<module>.item_action", "subscript",
+     "item_specifics", "dl_patch['item_specifics']"): 1,
+    # (a) accessor output (set_ebay_aspects' patch) moving onward.
+
+    ("src/tgw/http_server.py", "<module>.apply_inventory_diff_endpoint",
+     "subscript", "item_attributes", "patch['item_attributes']"): 1,
+    # (a) accessor output (apply_inventory_diff's patch) moving onward
+    # into _apply_patch (#1417).
+
+    ("src/tgw/http_server.py",
+     "<module>.apply_category_aspect_migration_endpoint", "subscript",
+     "item_attributes", "patch['item_attributes']"): 1,
+    # (a) category_aspect_migration's patch moving onward into
+    # _apply_patch (#1471).
+
+    ("src/tgw/http_server.py", "<module>._render_item_detail_html", "get",
+     "item_specifics", "_rev_delta.get('item_specifics')"): 1,
+    # (b) revision_draft.delta, read-only prefill of proposed aspects.
+
+    ("src/tgw/workers/ai_identify.py",
+     "<module>.AIIdentifyWorker.handle", "get", "item_specifics",
+     "result.get('item_specifics')"): 1,
+    # (b) AI model's raw JSON response, not the item's own envelope.
+
+    ("src/tgw/workers/ai_identify.py",
+     "<module>.AIIdentifyWorker.handle", "subscript", "item_attributes",
+     "item['item_attributes']"): 1,
+    # (a) accessor patch write onto the in-memory item dict.
+
+    ("src/tgw/workers/ai_identify.py",
+     "<module>.AIIdentifyWorker.handle", "subscript", "item_attributes",
+     "_ia_patch['item_attributes']"): 2,
+    # (a) accessor patch output — written onto `item`, and forwarded into
+    # fence_fields for the fence PATCH call.
+
+    ("src/tgw/workers/ai_identify.py",
+     "<module>.AIIdentifyWorker.handle", "subscript", "item_attributes",
+     "fence_fields['item_attributes']"): 1,
+    # (a) accessor patch output forwarded through the fence write.
+})
 
 
 def test_no_new_direct_field_set_access_outside_accessors():
     hits = _scan()
-    unexpected = hits - _ALLOWLIST
-    assert not unexpected, (
+    extra, _missing = _diff_against_allowlist(hits, _ALLOWLIST)
+    assert not extra, (
         "Invariant C12 violation: direct item_attributes/item_specifics "
-        "dict access found outside the sanctioned accessor modules "
-        "(tgw.inventory_record / tgw.ebay.draft_specifics). Route through "
-        "the accessor, or if this is a genuinely different dict that just "
-        "shares the key name, add it to _ALLOWLIST with a one-line reason: "
-        f"{sorted((str(p), n) for p, n in unexpected)}"
+        "access found outside the sanctioned accessor modules "
+        "(tgw.inventory_record / tgw.ebay.draft_specifics) beyond what's "
+        "reviewed — either a brand-new unauthorized access, or an extra "
+        "duplicate of an already-allowlisted one. Route through the "
+        "accessor, or if this is a genuinely different dict that just "
+        "shares the key name, add/increment it in _ALLOWLIST with a "
+        f"one-line reason: {_fmt(extra)}"
     )
 
 
 def test_allowlist_has_no_stale_entries():
-    """Catches the opposite drift: an allowlisted line that moved/was
-    removed, so the allowlist itself doesn't silently rot into meaninglessness."""
+    """Catches the opposite drift: an allowlisted access that moved,
+    changed, or was removed, so the allowlist itself doesn't silently rot
+    into meaninglessness."""
     hits = _scan()
-    stale = _ALLOWLIST - hits
-    assert not stale, (
-        f"C12 allowlist entries no longer match any real hit (code moved or "
-        f"was removed) — update _ALLOWLIST in this test: {sorted((str(p), n) for p, n in stale)}"
+    _extra, missing = _diff_against_allowlist(hits, _ALLOWLIST)
+    assert not missing, (
+        "C12 allowlist entries no longer match any real hit — code was "
+        "removed, or an allowlisted access's expression/scope changed "
+        f"underneath it — update _ALLOWLIST in this test: {_fmt(missing)}"
     )
 
 
 def test_accessor_modules_exist():
     for path in _ACCESSOR_MODULES:
         assert path.exists(), f"expected accessor module missing: {path}"
+
+
+# --- Regression tests (todo #1706) ------------------------------------------
+
+
+def _make_source_with_prefix(prefix_lines: int) -> str:
+    prefix = "\n".join(f"# unrelated comment {i}" for i in range(prefix_lines))
+    return f'''{prefix}
+
+def handler(item):
+    return item.get("item_specifics")
+'''
+
+
+def test_semantic_identity_stable_across_unrelated_line_insertion():
+    """Spec point 7: comments/blank lines/imports inserted before a
+    reviewed hit must not change its identity."""
+    base_hits = _extract_hits(_make_source_with_prefix(0), "synthetic.py")
+    shifted_hits = _extract_hits(_make_source_with_prefix(7), "synthetic.py")
+    assert base_hits, "expected at least one hit in the synthetic source"
+    assert base_hits == shifted_hits
+
+
+def test_unauthorized_new_access_is_flagged():
+    hits = _extract_hits(
+        'def f(item):\n    return item["item_attributes"]\n', "synthetic.py"
+    )
+    extra, missing = _diff_against_allowlist(Counter(hits), Counter())
+    assert extra
+    assert not missing
+
+
+def test_stale_allowed_access_is_flagged():
+    identity = ("synthetic.py", "<module>.f", "subscript",
+                "item_attributes", "item['item_attributes']")
+    allowlist = Counter({identity: 1})
+    extra, missing = _diff_against_allowlist(Counter(), allowlist)
+    assert missing
+    assert not extra
+
+
+def test_duplicate_access_beyond_allowed_count_is_flagged():
+    """Spec point 3/6c: a second, otherwise-identical allowed access in
+    the same scope must be caught, not collapsed by a set."""
+    src = (
+        'def f(item):\n'
+        '    a = item["item_attributes"]\n'
+        '    b = item["item_attributes"]\n'
+    )
+    hits = _extract_hits(src, "synthetic.py")
+    identity = ("synthetic.py", "<module>.f", "subscript",
+                "item_attributes", "item['item_attributes']")
+    allowlist = Counter({identity: 1})
+    extra, missing = _diff_against_allowlist(Counter(hits), allowlist)
+    assert extra
+    assert not missing
+
+
+def test_duplicate_access_matching_allowed_count_is_not_flagged():
+    """Sanity complement: exactly as many occurrences as allowlisted is
+    fine — only an EXTRA duplicate beyond the reviewed count is a
+    violation."""
+    src = (
+        'def f(item):\n'
+        '    a = item["item_attributes"]\n'
+        '    b = item["item_attributes"]\n'
+    )
+    hits = _extract_hits(src, "synthetic.py")
+    identity = ("synthetic.py", "<module>.f", "subscript",
+                "item_attributes", "item['item_attributes']")
+    allowlist = Counter({identity: 2})
+    extra, missing = _diff_against_allowlist(Counter(hits), allowlist)
+    assert not extra
+    assert not missing
+
+
+def test_malformed_python_fails_closed():
+    """Spec point 6d: malformed Python must raise, never be silently
+    skipped."""
+    import pytest
+
+    with pytest.raises(MalformedSourceError):
+        _extract_hits("def broken(:\n    pass\n", "synthetic.py")
