@@ -193,6 +193,8 @@ def _prompt_for_item(
             )
             return prompt
         aspects = get_category_group_aspects(cfg, category_ids)
+    except quota.QuotaBudgetExceeded:
+        raise
     except Exception as exc:
         log.warning(
             "ai_identify: Set A aspect targets unavailable for category group %r: %s",

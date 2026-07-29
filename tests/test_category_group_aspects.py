@@ -8,6 +8,7 @@ import pytest
 import tgw.apis.ebay.taxonomy as taxonomy
 import tgw.apis.lookup as lookup
 import tgw.image_hash as image_hash
+import tgw.quota as quota
 from tgw.apis.ebay import specifics
 from tgw.workers import ai_identify
 
@@ -239,6 +240,31 @@ def test_ai_identify_degrades_to_freeform_when_group_lookup_fails(tmp_path, capl
     assert "item_specifics" in prompt
     assert "Set A category-group target aspects" not in prompt
     assert "taxonomy unavailable" in caplog.text
+
+
+def test_ai_identify_propagates_quota_from_group_lookup(tmp_path, monkeypatch):
+    groups_path = tmp_path / "category-groups.json"
+    groups_path.write_text(
+        json.dumps(
+            {"groups": {"appliances": {"category_candidates": ["20673", "12345"]}}}
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        ai_identify,
+        "get_category_group_aspects",
+        lambda _cfg, _ids: (_ for _ in ()).throw(
+            quota.QuotaBudgetExceeded("taxonomy quota exhausted")
+        ),
+    )
+
+    with pytest.raises(quota.QuotaBudgetExceeded, match="taxonomy quota exhausted"):
+        ai_identify._prompt_for_item(
+            {"category_group": "appliances"},
+            {"category_groups_path": str(groups_path)},
+            hint="",
+            product_context="",
+        )
 
 
 @pytest.mark.parametrize(
