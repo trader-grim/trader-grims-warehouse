@@ -27,7 +27,9 @@ _RAW_ASPECTS = {
             'aspectValues': [{'localizedValue': 'Red'}, {'localizedValue': 'Blue'}],
         },
         {
-            'localizedAspectName': 'MPN',  # in _SKIP_ASPECTS — should be filtered
+            # todo #1711: MPN used to be in _SKIP_ASPECTS and get filtered out
+            # here — now a real aspect like any other, must survive structuring.
+            'localizedAspectName': 'MPN',
             'aspectConstraint': {'aspectRequired': False, 'aspectMode': 'FREE_TEXT'},
             'aspectValues': [],
         },
@@ -47,15 +49,72 @@ class TestGetAspectsCaching:
     def setup_method(self):
         _reset_cache()
 
-    def test_filters_skip_list_and_structures_result(self, tmp_path):
+    def test_structures_result_with_no_names_filtered(self, tmp_path):
         cfg = _cfg(tmp_path)
         with patch.object(specifics, 'get_category_tree_id', return_value='0'), \
              patch.object(specifics, 'ebay_get', return_value=_RAW_ASPECTS):
             result = specifics.get_aspects(cfg, '12345')
         names = {a['name'] for a in result}
-        assert names == {'Brand', 'Color'}
+        assert names == {'Brand', 'Color', 'MPN'}
         color = next(a for a in result if a['name'] == 'Color')
         assert color['allowed_values'] == ['Red', 'Blue']
+
+    def test_model_and_related_aspects_reach_editor_not_globally_skipped(self, tmp_path):
+        """Regression, todo #1711 (item tgw202605031215465, eBay category 20673
+        'Food Processors'; model EV-11PC9 / model_number 'U IB-8063'): the
+        listing editor's Item Specifics form is built entirely from
+        get_aspects()'s return value (via /api/ebay/category-context and
+        /api/ebay/aspects) -- it has no other source for which standard
+        fields exist to edit. _SKIP_ASPECTS used to drop MPN, Model, Unit
+        Quantity, and Unit Type before they ever reached that response, so
+        the editor had no Model field at all, for any category that defines
+        one as a real item specific.
+
+        These four were skipped on the theory that "operator/product-lookup
+        handles these" elsewhere -- but the one mechanism that was supposed
+        to do that (workers/ebay_draft.py's _PL_ASPECT_MAP, which maps
+        product_lookup['mpn'] onto the 'MPN'/'Model' aspects) can only fill
+        an aspect name that's actually present in `aspects` in the first
+        place, so it silently never fired for these four names either. There
+        is no other first-class editor field that is both rendered in the
+        eBay Item Specifics form AND actually populated back into
+        draft_listing.item_specifics for any of them (item['model'] /
+        item['model_number'] are read-only fields pull.py copies FROM a
+        already-live eBay listing's aspects -- there is no path the other
+        direction). With no genuine equivalent covering them, they must
+        reach the editor like any other category aspect.
+        """
+        raw = {
+            'aspects': [
+                {
+                    'localizedAspectName': 'Model',
+                    'aspectConstraint': {'aspectRequired': False, 'aspectMode': 'FREE_TEXT'},
+                    'aspectValues': [],
+                },
+                {
+                    'localizedAspectName': 'MPN',
+                    'aspectConstraint': {'aspectRequired': False, 'aspectMode': 'FREE_TEXT'},
+                    'aspectValues': [],
+                },
+                {
+                    'localizedAspectName': 'Unit Quantity',
+                    'aspectConstraint': {'aspectRequired': False, 'aspectMode': 'FREE_TEXT'},
+                    'aspectValues': [],
+                },
+                {
+                    'localizedAspectName': 'Unit Type',
+                    'aspectConstraint': {'aspectRequired': False, 'aspectMode': 'FREE_TEXT'},
+                    'aspectValues': [],
+                },
+            ],
+        }
+        cfg = _cfg(tmp_path)
+        with patch.object(specifics, 'get_category_tree_id', return_value='0'), \
+             patch.object(specifics, 'ebay_get', return_value=raw):
+            result = specifics.get_aspects(cfg, '20673')
+        names = {a['name'] for a in result}
+        assert names == {'Model', 'MPN', 'Unit Quantity', 'Unit Type'}
+        assert not hasattr(specifics, '_SKIP_ASPECTS')
 
     def test_california_prop_65_no_longer_filtered(self, tmp_path):
         """Session 39, item tgw202605060201087: Prop 65 was wrongly treated as
@@ -100,7 +159,7 @@ class TestGetAspectsCaching:
         _reset_cache()  # simulate a new process — memory cache gone, disk remains
         with patch.object(specifics, 'ebay_get', side_effect=AssertionError('must not hit live API')):
             result = specifics.get_aspects(cfg, '12345')
-        assert {a['name'] for a in result} == {'Brand', 'Color'}
+        assert {a['name'] for a in result} == {'Brand', 'Color', 'MPN'}
 
     def test_different_categories_cached_independently(self, tmp_path):
         cfg = _cfg(tmp_path)
@@ -112,7 +171,7 @@ class TestGetAspectsCaching:
             r1 = specifics.get_aspects(cfg, '111')
             r2 = specifics.get_aspects(cfg, '222')
         assert mock_get.call_count == 2
-        assert {a['name'] for a in r1} == {'Brand', 'Color'}
+        assert {a['name'] for a in r1} == {'Brand', 'Color', 'MPN'}
         assert {a['name'] for a in r2} == {'Size'}
 
     def test_old_disk_cache_is_permanent_no_refetch(self, tmp_path):
