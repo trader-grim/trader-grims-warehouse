@@ -83,7 +83,7 @@ fi
 
 log "bundling flake repo → flake/tgw.bundle"
 run mkdir -p "$MOUNT_DIR/flake"
-run git -C "$REPO" bundle create "$MOUNT_DIR/flake/tgw.bundle" --all
+run git -c safe.directory="$REPO" -C "$REPO" bundle create "$MOUNT_DIR/flake/tgw.bundle" --all
 
 # ── sync and report ──────────────────────────────────────────────────────────
 
