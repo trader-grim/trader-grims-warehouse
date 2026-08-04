@@ -75,6 +75,17 @@ def evaluate(
     evaluator_version: str,
 ) -> RuntimeWorkGraph:
     """Evaluate only supplied values; no ambient state is read or changed."""
+    treatment_keys: set[tuple[str, str]] = set()
+    duplicate_keys: set[tuple[str, str]] = set()
+    for treatment in treatments:
+        key = (treatment.identity, treatment.version)
+        if key in treatment_keys:
+            duplicate_keys.add(key)
+        treatment_keys.add(key)
+    if duplicate_keys:
+        detail = ", ".join(f"{identity}@{version}" for identity, version in sorted(duplicate_keys))
+        raise ValueError(f"duplicate treatment identity/version: {detail}")
+
     condition_ids = set(goal.required)
     for treatment in treatments:
         condition_ids.update(requirement.condition_id for requirement in treatment.requires)

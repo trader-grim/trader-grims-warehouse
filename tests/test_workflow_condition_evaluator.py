@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from tgw.workflow import (  # noqa: E402
@@ -184,6 +186,47 @@ def test_disjoint_treatments_coexist_and_overlapping_ownership_is_exposed():
     assert [item.treatment_id for item in disjoint.eligible_treatments] == ["document", "repair"]
     assert disjoint.ownership_conflicts == ()
     assert overlapping.ownership_conflicts == (("competing-repair", "repair", ("record.format",)),)
+
+
+def test_duplicate_treatment_identity_version_is_rejected_regardless_of_order():
+    assertions = (
+        _assertion("valid", FingerprintResult.FALSE),
+        _assertion("documented", FingerprintResult.FALSE),
+    )
+    first = _treatment("duplicate", "valid", (FingerprintResult.FALSE,), "owner.a")
+    second = _treatment(
+        "duplicate", "documented", (FingerprintResult.FALSE,), "owner.b"
+    )
+
+    for treatments in ((first, second), (second, first)):
+        with pytest.raises(
+            ValueError,
+            match=r"^duplicate treatment identity/version: duplicate@1$",
+        ):
+            _evaluate(assertions, treatments)
+
+
+def test_multiple_versions_of_one_treatment_do_not_create_false_conflicts():
+    assertions = (
+        _assertion("valid", FingerprintResult.FALSE),
+        _assertion("documented", FingerprintResult.FALSE),
+    )
+    repair_v1 = _treatment(
+        "repair", "valid", (FingerprintResult.FALSE,), "record.v1", version="1"
+    )
+    repair_v2 = _treatment(
+        "repair", "documented", (FingerprintResult.FALSE,), "record.v2", version="2"
+    )
+
+    graph = _evaluate(assertions, (repair_v2, repair_v1))
+    reordered = _evaluate(assertions, (repair_v1, repair_v2))
+
+    assert graph == reordered
+    assert [
+        (item.treatment_id, item.treatment_version)
+        for item in graph.eligible_treatments
+    ] == [("repair", "1"), ("repair", "2")]
+    assert graph.ownership_conflicts == ()
 
 
 def test_ownership_conflicts_use_the_matching_treatment_version():
