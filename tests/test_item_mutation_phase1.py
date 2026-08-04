@@ -4,7 +4,6 @@ import json
 import multiprocessing
 import os
 import sqlite3
-import time
 import threading
 import zipfile
 from pathlib import Path
@@ -144,7 +143,8 @@ def _operation_worker(c, start, out, sku, op, prior_barrier=None):
 
 
 def test_finding_1_post_publication_failure_never_aborted(tmp_path, monkeypatch):
-    c = cfg(tmp_path); p = write_item(c, title="old")
+    c = cfg(tmp_path)
+    p = write_item(c, title="old")
     original = item_mutation._append
     fired = False
     def fail_after_publish(config, event):
@@ -162,10 +162,12 @@ def test_finding_1_post_publication_failure_never_aborted(tmp_path, monkeypatch)
 
 
 def test_finding_2_exact_retry_resumes_unfinished_intent(tmp_path):
-    c = cfg(tmp_path); p = write_item(c, title="old", location="A")
+    c = cfg(tmp_path)
+    p = write_item(c, title="old", location="A")
     g = item_mutation.generation_for_path(p)
     child = multiprocessing.Process(target=_crash_worker, args=(c, "canonical", g))
-    child.start(); child.join(10)
+    child.start()
+    child.join(10)
     assert child.exitcode == 86
     mismatch = item_mutation.mutate_item(c, "crash-canonical", "other-sku", "set", g,
                                          {"fields": {"title": "poison"}})
@@ -177,26 +179,37 @@ def test_finding_2_exact_retry_resumes_unfinished_intent(tmp_path):
 
 
 def test_finding_3_operation_id_global_collision_and_positive_concurrency(tmp_path):
-    c = cfg(tmp_path); start = multiprocessing.Event(); out = multiprocessing.Queue()
+    c = cfg(tmp_path)
+    start = multiprocessing.Event()
+    out = multiprocessing.Queue()
     prior_barrier = multiprocessing.Barrier(2)
     ps = [multiprocessing.Process(target=_operation_worker,
             args=(c, start, out, sku, "same-op", prior_barrier)) for sku in ("skuA", "skuB")]
-    for process in ps: process.start()
+    for process in ps:
+        process.start()
     start.set()
-    for process in ps: process.join(10)
+    for process in ps:
+        process.join(10)
     assert sorted(status for _, status in (out.get() for _ in ps)) == ["COMMITTED", "CONFLICT"]
-    c2 = cfg(tmp_path / "positive"); start = multiprocessing.Event(); out = multiprocessing.Queue()
+    c2 = cfg(tmp_path / "positive")
+    start = multiprocessing.Event()
+    out = multiprocessing.Queue()
     ps = [multiprocessing.Process(target=_operation_worker,
             args=(c2, start, out, sku, "op-" + sku)) for sku in ("skuA", "skuB")]
-    for process in ps: process.start()
+    for process in ps:
+        process.start()
     start.set()
-    for process in ps: process.join(10)
+    for process in ps:
+        process.join(10)
     assert sorted(out.get()[1] for _ in ps) == ["COMMITTED", "COMMITTED"]
 
 
 def test_finding_4_receipt_symlink_and_nonregular_rejected(tmp_path):
-    c = cfg(tmp_path); root = c["item_mutation_root"]; root.mkdir(parents=True)
-    victim = tmp_path / "victim"; victim.write_text("safe")
+    c = cfg(tmp_path)
+    root = c["item_mutation_root"]
+    root.mkdir(parents=True)
+    victim = tmp_path / "victim"
+    victim.write_text("safe")
     os.symlink(victim, root / "receipts.jsonl")
     with pytest.raises(OSError):
         item_mutation.mutate_item(c, "symlink", "x", "create", "absent", {"data": {}})
@@ -204,18 +217,21 @@ def test_finding_4_receipt_symlink_and_nonregular_rejected(tmp_path):
 
 
 def test_finding_5_short_write_completed_and_interrupted_tail_recovered(tmp_path, monkeypatch):
-    c = cfg(tmp_path); real_write = os.write
+    c = cfg(tmp_path)
+    real_write = os.write
     monkeypatch.setattr(os, "write", lambda fd, data: real_write(fd, data[:max(1, len(data)//3)]))
     result = item_mutation.mutate_item(c, "short", "x", "create", "absent", {"data": {}})
     assert result["status"] == "COMMITTED"
     monkeypatch.undo()
     journal = c["item_mutation_root"] / "receipts.jsonl"
-    with journal.open("ab") as stream: stream.write(b'{"interrupted":')
+    with journal.open("ab") as stream:
+        stream.write(b'{"interrupted":')
     assert item_mutation.mutate_item(c, "tail", "y", "create", "absent", {"data": {}})["status"] == "COMMITTED"
 
 
 def test_finding_6_archive_gap_reconciliation_does_not_duplicate(tmp_path):
-    c = cfg(tmp_path); p = write_item(c, title="before")
+    c = cfg(tmp_path)
+    p = write_item(c, title="before")
     def gap_worker():
         original = item_mutation._archive_once
         def archive_then_die(*args):
@@ -225,16 +241,21 @@ def test_finding_6_archive_gap_reconciliation_does_not_duplicate(tmp_path):
         item_mutation.mutate_item(c, "archive-gap", "tgw1", "set",
                 item_mutation.generation_for_path(p), {"fields": {"title": "after"}})
     child = multiprocessing.Process(target=gap_worker)
-    child.start(); child.join(10); assert child.exitcode == 87
+    child.start()
+    child.join(10)
+    assert child.exitcode == 87
     archive = c["archive_root"] / "tgw1.zip"
-    with zipfile.ZipFile(archive) as zf: before = len(zf.namelist())
+    with zipfile.ZipFile(archive) as zf:
+        before = len(zf.namelist())
     item_mutation.reconcile_pending(c)
-    with zipfile.ZipFile(archive) as zf: after = len(zf.namelist())
+    with zipfile.ZipFile(archive) as zf:
+        after = len(zf.namelist())
     assert (before, after) == (1, 1)
 
 
 def test_finding_7_projection_helpers_are_verified_from_persisted_state(tmp_path, monkeypatch):
-    c = cfg(tmp_path); p = write_item(c, title="old", location="A")
+    c = cfg(tmp_path)
+    p = write_item(c, title="old", location="A")
     monkeypatch.setattr(item_mutation, "_project_sqlite", lambda *_: None)
     monkeypatch.setattr(item_mutation, "_project_location", lambda *_: None)
     result = item_mutation.mutate_item(c, "lying-projections", "tgw1", "set",
@@ -292,7 +313,8 @@ def test_finding_7_absent_location_rejects_stale_old_link(tmp_path, monkeypatch)
 
 
 def test_finding_8_operation_kind_presence_preconditions(tmp_path):
-    c = cfg(tmp_path); p = write_item(c, title="original")
+    c = cfg(tmp_path)
+    p = write_item(c, title="original")
     create = item_mutation.mutate_item(c, "create-existing", "tgw1", "create",
             item_mutation.generation_for_path(p), {"data": {"title": "replacement"}})
     set_absent = item_mutation.mutate_item(c, "set-absent", "missing", "set",
@@ -308,9 +330,11 @@ def test_concurrent_create_has_one_winner_across_processes(tmp_path):
     out = multiprocessing.Queue()
     ps = [multiprocessing.Process(target=_create_worker, args=(c, start, out, f"op-{i}"))
           for i in range(2)]
-    for p in ps: p.start()
+    for p in ps:
+        p.start()
     start.set()
-    for p in ps: p.join(10)
+    for p in ps:
+        p.join(10)
     assert sorted(out.get() for _ in ps) == ["COMMITTED", "CONFLICT"]
 
 
@@ -349,11 +373,13 @@ def test_fresh_process_reconciles_every_crash_prefix_twice(tmp_path, boundary):
     assert child.exitcode == 86
     out = multiprocessing.Queue()
     reconciler = multiprocessing.Process(target=_reconcile_worker, args=(c, out))
-    reconciler.start(); reconciler.join(10)
+    reconciler.start()
+    reconciler.join(10)
     assert reconciler.exitcode == 0
     first = out.get()
     again = multiprocessing.Process(target=_reconcile_worker, args=(c, out))
-    again.start(); again.join(10)
+    again.start()
+    again.join(10)
     assert again.exitcode == 0
     second = out.get()
     assert first == [{**first[0], "status": "COMMITTED"}]

@@ -155,8 +155,10 @@ def create_item(cfg: Dict[str, Any], sku: str, data: Dict[str, Any]) -> Path:
     Write a new item JSON. Raises if the item already exists.
     Returns the path written.
     """
-    from .item_mutation import ABSENT_GENERATION, mutate_item
     import uuid
+
+    from .item_mutation import ABSENT_GENERATION, mutate_item
+
     path = sku_json(cfg, sku)
     result = mutate_item(cfg, 'legacy-' + uuid.uuid4().hex, sku, 'create',
                          ABSENT_GENERATION, {'data': data})
@@ -312,7 +314,6 @@ def set_fields(cfg: Dict[str, Any], sku: str, fields: Dict[str, Any],
         return {'ok': True, 'sku': sku, 'would_set': to_set, 'check_only': True}
     if not to_set:
         return {'ok': True, 'sku': sku, 'set': {}}
-    before = {f: doc.get(f) for f in to_set}
     from .item_mutation import legacy_mutate
     delete_fields = ['catalog_verified'] if 'catalog_verified' in doc else []
     result = legacy_mutate(cfg, sku, 'set',
