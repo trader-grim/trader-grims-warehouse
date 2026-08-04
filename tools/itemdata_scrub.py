@@ -26,6 +26,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
 
+from tgw.logging import announce_script_run
+
 log = logging.getLogger('itemdata_scrub')
 
 # ---------------------------------------------------------------------------
@@ -279,6 +281,13 @@ def main() -> int:
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format='%(asctime)s %(levelname)s %(name)s: %(message)s',
+    )
+
+    announce_script_run(
+        'itemdata_scrub.py',
+        'merge/remove denylisted ItemData keys per scrub rules (tools/ standalone variant)',
+        write=args.write, config=args.config, rules=args.rules,
+        sku=args.sku, limit=args.limit,
     )
 
     # Load configs

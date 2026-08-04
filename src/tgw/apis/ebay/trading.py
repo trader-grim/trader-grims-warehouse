@@ -18,6 +18,7 @@ import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import Any, Dict, Generator, List, Optional
+from xml.sax.saxutils import escape as _xml_escape
 
 import requests
 
@@ -363,8 +364,8 @@ def end_item(cfg: Dict[str, Any], listing_id: str,
     xml_body = (
         f'<?xml version="1.0" encoding="utf-8"?>\n'
         f'<EndFixedPriceItemRequest xmlns="{_NS}">\n'
-        f'  <ItemID>{listing_id}</ItemID>\n'
-        f'  <EndingReason>{reason}</EndingReason>\n'
+        f'  <ItemID>{_xml_escape(listing_id)}</ItemID>\n'
+        f'  <EndingReason>{_xml_escape(reason)}</EndingReason>\n'
         f'</EndFixedPriceItemRequest>'
     )
     trading_call(cfg, 'EndFixedPriceItem', xml_body, timeout=30,
@@ -386,8 +387,8 @@ def revise_item_sku(cfg: Dict[str, Any], listing_id: str, new_sku: str,
     xml_body = f'''<?xml version="1.0" encoding="utf-8"?>
 <ReviseFixedPriceItemRequest xmlns="{_NS}">
   <Item>
-    <ItemID>{listing_id}</ItemID>
-    <SKU>{new_sku}</SKU>
+    <ItemID>{_xml_escape(listing_id)}</ItemID>
+    <SKU>{_xml_escape(new_sku)}</SKU>
   </Item>
 </ReviseFixedPriceItemRequest>'''
     trading_call(cfg, 'ReviseFixedPriceItem', xml_body,
@@ -413,11 +414,11 @@ def revise_item_pictures(cfg: Dict[str, Any], listing_id: str,
     *marketplace_id* (e.g. 'EBAY_MOTORS') selects the Trading API SiteID for
     *listing_id*'s actual marketplace; defaults to EBAY_US (todo #1214 follow-up).
     """
-    pics = ''.join(f'<PictureURL>{u}</PictureURL>' for u in image_urls)
+    pics = ''.join(f'<PictureURL>{_xml_escape(u)}</PictureURL>' for u in image_urls)
     xml_body = f'''<?xml version="1.0" encoding="utf-8"?>
 <ReviseFixedPriceItemRequest xmlns="{_NS}">
   <Item>
-    <ItemID>{listing_id}</ItemID>
+    <ItemID>{_xml_escape(listing_id)}</ItemID>
     <PictureDetails>
       {pics}
     </PictureDetails>
@@ -613,9 +614,9 @@ def respond_to_best_offer(
     xml_body = (
         f'<?xml version="1.0" encoding="utf-8"?>\n'
         f'<RespondToBestOfferRequest xmlns="{_NS}">\n'
-        f'  <ItemID>{listing_id}</ItemID>\n'
-        f'  <BestOfferID>{offer_id}</BestOfferID>\n'
-        f'  <Action>{action}</Action>\n'
+        f'  <ItemID>{_xml_escape(listing_id)}</ItemID>\n'
+        f'  <BestOfferID>{_xml_escape(offer_id)}</BestOfferID>\n'
+        f'  <Action>{_xml_escape(action)}</Action>\n'
         f'{counter_block}'
         f'</RespondToBestOfferRequest>'
     )

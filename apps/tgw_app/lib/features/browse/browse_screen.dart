@@ -268,7 +268,7 @@ class _BrowseScreenState extends ConsumerState<BrowseScreen> {
                         contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 0),
                         border: OutlineInputBorder(),
                       ),
-                      initialValue: _selectedLocation,
+                      value: _selectedLocation,
                       items: [
                         const DropdownMenuItem(value: null, child: Text('All')),
                         ...?(snapshot.data?.map((l) => DropdownMenuItem(value: l, child: Text(l)))),
@@ -289,7 +289,7 @@ class _BrowseScreenState extends ConsumerState<BrowseScreen> {
                     contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 0),
                     border: OutlineInputBorder(),
                   ),
-                  initialValue: _selectedStatus,
+                  value: _selectedStatus,
                   items: const [
                     DropdownMenuItem(value: null, child: Text('All')),
                     DropdownMenuItem(value: 'In Stock', child: Text('In Stock')),

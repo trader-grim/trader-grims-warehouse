@@ -1,0 +1,75 @@
+{
+  "worktree": {
+    "bgIsolation": "none"
+  },
+  "autoMode": {
+    "allow": [
+      "$defaults",
+      "git status, git diff, git log, git fetch, git show in any repo (including ~/tgw-flake on tgw-prod/a1131) — read-only, no mutation, always allow",
+      "nix flake check — dry validation only, no system mutation, always allow",
+      "nixos-rebuild dry-activate — preview/build only, does not switch the running system, always allow",
+      "nixos-rebuild list-generations, readlink /run/current-system — read-only inspection of already-applied generations, always allow",
+      "ssh to tgw-prod or a1131 to run read-only diagnostics (journalctl, systemctl status, git status/diff/log, D-Bus property/method reads, ps) — always allow, matches nix-flake-maintainer's documented read/write boundary"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /opt/TGW/src/trader-grims-warehouse/.claude/hooks/flake-guard.py",
+            "timeout": 10,
+            "statusMessage": "Checking flake-mutation guardrail..."
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /opt/TGW/src/trader-grims-warehouse/.claude/hooks/worktree-guard.py",
+            "timeout": 10,
+            "statusMessage": "Checking worktree-isolation guardrail..."
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /opt/TGW/src/trader-grims-warehouse/.claude/hooks/app-code-guard.py",
+            "timeout": 10,
+            "statusMessage": "Checking app-code branch-per-task guardrail..."
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /opt/TGW/src/trader-grims-warehouse/.claude/hooks/trace-immutability-guard.py",
+            "timeout": 10,
+            "statusMessage": "Checking trace-immutability guardrail..."
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /opt/TGW/src/trader-grims-warehouse/.claude/hooks/session-start-briefing.py",
+            "timeout": 30,
+            "statusMessage": "Collecting startup-ritual briefing (inbox/suggestions/plan check)..."
+          }
+        ]
+      }
+    ]
+  }
+}

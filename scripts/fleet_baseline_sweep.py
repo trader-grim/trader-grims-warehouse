@@ -35,6 +35,7 @@ import requests
 
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.draft_sync import pin_draft_to_live
+from tgw.logging import announce_script_run, setup_logging
 
 _cfg = load_config(DEFAULT_CONFIG)
 ITEMDATA = Path(_cfg["itemdata_root"])
@@ -57,6 +58,19 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--limit", type=int, default=0, help="stop after N pins (0 = all)")
     args = ap.parse_args()
+
+    # No prior logging configuration in this script (verified live, todo
+    # #1369) — without it, announce_script_run()'s event is silently
+    # dropped (default root level WARNING, no handlers).
+    try:
+        setup_logging('tgw.fleet_baseline_sweep')
+    except OSError:
+        pass  # no writable log root (e.g. CI/test env) — announce still attempted below
+    announce_script_run(
+        'fleet_baseline_sweep.py',
+        'pin every mirrored item draft to live (baseline broker B5a) via the fence',
+        dry_run=args.dry_run, limit=args.limit,
+    )
 
     stats = {
         "started": datetime.now(timezone.utc).isoformat(),

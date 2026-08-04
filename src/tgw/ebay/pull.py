@@ -11,6 +11,7 @@ Public API:
     sync_sold_orders(cfg, listing_index, ...)                   → stats dict
     sync_inventory_api(cfg, itemdata_root, ...)                 → stats dict
     backfill_draft_from_live(item, cfg)                         → bool (True if draft written)
+    record_orphan_listings(orphans, synced_at, full_scan)       → None (persists to ORPHAN_REGISTRY)
 """
 
 from __future__ import annotations
@@ -30,11 +31,33 @@ from tgw.apis.ebay.client import ebay_get
 from tgw.apis.ebay.trading import get_my_ebay_selling, get_orders
 from tgw.apis.fence import ebay_write as fence_ebay_write
 from tgw.apis.fence import patch_item as fence_patch_item
+from tgw.ebay.draft_specifics import wrap_ebay_specifics
 
 log = logging.getLogger(__name__)
 
-SOLD_INITIAL_LOOKBACK_DAYS = 365
+_DEFAULT_SOLD_ORDER_GAP_LOG = '/opt/TGW/var/log/sold-order-history-gaps.jsonl'
+
+# invariant C11 — a skip/guard (here: an unreconcilable active listing) is a
+# finding, not a log line. Orphaned listings have no ItemData record to carry
+# a field, so (following the migrate-blocked.json precedent in
+# workers/ebay_sku_migrate.py) they get a standalone durable JSON registry,
+# keyed by listing_id, that an operator/catalog-verify-style check can read
+# later instead of a discarded in-memory count.
+ORPHAN_REGISTRY = Path('/opt/TGW/var/ebay-orphan-listings.json')
+
 SOLD_ORDERS_WINDOW_DAYS    = 90    # GetOrders API max per call
+# GetOrders' real constraint is a rolling one: CreateTimeFrom can never be
+# more than 90 days before *now*, no matter the window width (audit#1143
+# #1153 -- a prior SOLD_INITIAL_LOOKBACK_DAYS=365 constant fed a scan_from
+# far outside that boundary straight into the first 90-day chunk, so the
+# very first call failed with "Invalid dates in CreateTimeFrom -- orders
+# older than 90 days cannot be retrieved"; chunking the window narrower
+# doesn't help since the START date was already too old — a real backfill
+# beyond this ceiling is not achievable via GetOrders at all, so a separate
+# "look back 365 days" constant was never anything but misleading. 89, not
+# 90, for a one-day safety margin. code-review follow-up (2026-07-10):
+# collapsed the two contradictory constants into this one source of truth.
+_MAX_ORDER_LOOKBACK_DAYS = 89
 
 _TITLE_STOPWORDS = frozenset({
     'a', 'an', 'the', 'and', 'or', 'of', 'in', 'for',
@@ -308,26 +331,51 @@ def mark_item_sold(json_path: Path, order_id: str, buyer: str,
     """
     Decrement inventory quantity by the sold quantity.
     Marks status=sold + ebay_listing.status=Sold only when remaining qty reaches 0.
-    Idempotent — returns False if already sold or order already recorded.
+
+    `ebay_sale` is a LIST of sold-order records (not a single dict) — a SKU can
+    receive more than one distinct order (multi-qty listings, or an "oversold"
+    case where a further order lands after the item is already sold out).
+    Idempotency keys on `order_id` membership in that list, NEVER on
+    `status == 'sold'` — the latter can't distinguish "this exact order was
+    already processed" from "a genuinely new order came in after sellout", and
+    doing so silently dropped real sale data (todo #1604 / PP-SOLD-001, live
+    incident 2026-07-20).
+
+    Note: once `status` is already 'sold' (remaining had already hit 0), a
+    further distinct order is still recorded (appended) even though physical
+    quantity can't go negative — this is the "oversold" case. Whether that
+    needs its own flag/code path is a separate business question, out of
+    scope here; it is NOT silently dropped.
     """
     item = json.loads(json_path.read_text(encoding='utf-8'))
-    if item.get('status') == 'sold':
+    existing_sales = item.get('ebay_sale')
+    if isinstance(existing_sales, dict):
+        # legacy single-dict shape (pre-#1604) — normalize to a list for the
+        # order_id membership check below
+        existing_sales = [existing_sales] if existing_sales else []
+    elif not isinstance(existing_sales, list):
+        existing_sales = []
+
+    # Idempotency: skip only if this EXACT order_id was already recorded.
+    if any(rec.get('order_id') == order_id for rec in existing_sales if isinstance(rec, dict)):
         return False
-    # Idempotency for multi-qty: skip if this order was already recorded
-    if item.get('ebay_sale', {}).get('order_id') == order_id:
-        return False
+
     sku = json_path.parent.name
+    already_sold_out = item.get('status') == 'sold'
 
     current_qty = int(item.get('draft_listing', {}).get('quantity') or 1)
     remaining = max(0, current_qty - quantity)
 
     if dry_run:
-        action = 'sold out' if remaining == 0 else f'qty {current_qty} → {remaining}'
+        if already_sold_out:
+            action = 'additional order on already-sold-out item (oversold)'
+        else:
+            action = 'sold out' if remaining == 0 else f'qty {current_qty} → {remaining}'
         log.info('[dry-run] %s sold order=%s price=$%s qty_sold=%d (%s)',
                  sku, order_id, sale_price, quantity, action)
         return True
 
-    ebay_sale = {
+    new_sale = {
         'order_id':   order_id,
         'buyer':      buyer,
         'sale_price': sale_price,
@@ -335,12 +383,24 @@ def mark_item_sold(json_path: Path, order_id: str, buyer: str,
         'sale_date':  sale_date,
         'synced_at':  synced_at,
     }
+    ebay_sale_list = existing_sales + [new_sale]
 
-    if remaining == 0:
+    if already_sold_out:
+        # Oversold case: item was already fully sold, but a further distinct
+        # order came in. Record it — never drop it — quantity stays at 0.
+        fence_patch_item(cfg, sku, {
+            'ebay_sale': ebay_sale_list,
+        })
+        log.warning('ebay_pull: OVERSOLD %s order=%s price=$%s recorded on already-sold-out item',
+                    sku, order_id, sale_price)
+        tgw_logging.log_event('ebay_item_sold', sku=sku,
+                              order_id=order_id, sale_price=sale_price, sold_out=True,
+                              oversold=True)
+    elif remaining == 0:
         fence_ebay_write(cfg, sku, ebay_listing={'status': 'Sold'})
         fence_patch_item(cfg, sku, {
             'status': 'sold',
-            'ebay_sale': ebay_sale,
+            'ebay_sale': ebay_sale_list,
             'draft_listing': {'quantity': 0},
         })
         log.info('ebay_pull: sold out %s order=%s price=$%s', sku, order_id, sale_price)
@@ -348,7 +408,7 @@ def mark_item_sold(json_path: Path, order_id: str, buyer: str,
                               order_id=order_id, sale_price=sale_price, sold_out=True)
     else:
         fence_patch_item(cfg, sku, {
-            'ebay_sale': ebay_sale,
+            'ebay_sale': ebay_sale_list,
             'draft_listing': {'quantity': remaining},
         })
         log.info('ebay_pull: partial sale %s order=%s price=$%s qty %d→%d',
@@ -357,6 +417,74 @@ def mark_item_sold(json_path: Path, order_id: str, buyer: str,
                               order_id=order_id, sale_price=sale_price, sold_out=False,
                               remaining_qty=remaining)
     return True
+
+
+# ---------------------------------------------------------------------------
+# Orphaned-listing registry (invariant C11)
+# ---------------------------------------------------------------------------
+
+def _load_orphan_registry() -> Dict[str, Any]:
+    try:
+        if ORPHAN_REGISTRY.exists():
+            return json.loads(ORPHAN_REGISTRY.read_text(encoding='utf-8'))
+    except Exception as exc:
+        log.warning('ebay_pull: could not read orphan registry: %s', exc)
+    return {}
+
+
+def _save_orphan_registry(registry: Dict[str, Any]) -> None:
+    try:
+        ORPHAN_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+        tmp = ORPHAN_REGISTRY.with_suffix('.tmp')
+        tmp.write_text(json.dumps(registry, indent=2, ensure_ascii=False, sort_keys=True),
+                       encoding='utf-8')
+        tmp.replace(ORPHAN_REGISTRY)
+    except Exception as exc:
+        log.warning('ebay_pull: could not write orphan registry: %s', exc)
+
+
+def record_orphan_listings(orphans: List[Dict[str, Any]], synced_at: str,
+                            full_scan: bool = True) -> None:
+    """
+    Persist findings from the active-listing reconciliation (invariant C11):
+    active eBay listings with no `custom_label`, or a `custom_label` that has
+    no matching local ItemData record. These have no ItemData to attach a
+    field to, so they get a standalone JSON registry keyed by listing_id
+    (same shape/pattern as workers/ebay_sku_migrate.py's migrate-blocked.json)
+    instead of being counted and discarded.
+
+    full_scan: True when this call covered every active listing (no
+    sku_filter) — in that case listing_ids no longer reported as orphans are
+    pruned from the registry (resolved: matched, delisted, or SKU fixed).
+    A filtered/partial run only adds/refreshes entries, never prunes.
+    """
+    registry = _load_orphan_registry()
+    seen_ids = set()
+
+    for listing in orphans:
+        listing_id = str(listing.get('listing_id') or '')
+        if not listing_id:
+            continue
+        seen_ids.add(listing_id)
+        existing = registry.get(listing_id, {})
+        registry[listing_id] = {
+            'listing_id':   listing_id,
+            'custom_label': listing.get('custom_label', ''),
+            'title':        listing.get('title', ''),
+            'status':       listing.get('status'),
+            'live_price':   listing.get('live_price'),
+            'listing_url':  listing.get('listing_url'),
+            'first_seen':   existing.get('first_seen', synced_at),
+            'last_seen':    synced_at,
+            'seen_count':   existing.get('seen_count', 0) + 1,
+        }
+
+    if full_scan:
+        for listing_id in list(registry.keys()):
+            if listing_id not in seen_ids:
+                registry.pop(listing_id, None)
+
+    _save_orphan_registry(registry)
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +526,11 @@ def sync_active_listings(cfg: Dict[str, Any], itemdata_root: Path,
         except Exception:
             log.exception('ebay_pull: error on listing %s', listing.get('listing_id'))
             stats['errors'] += 1
+
+    # invariant C11 — persist orphan findings durably; a full unfiltered scan
+    # is authoritative and prunes stale registry entries, a sku_filter'd run
+    # only adds/refreshes what it actually saw.
+    record_orphan_listings(stats['orphans'], synced_at, full_scan=sku_filter is None)
 
     return stats
 
@@ -540,6 +673,36 @@ def _apply_active_listing(listing: Dict[str, Any], itemdata_root: Path,
 # Sold orders sync
 # ---------------------------------------------------------------------------
 
+def _record_sold_order_gap(cfg: Dict[str, Any], requested_from: datetime,
+                           clamped_from: datetime, now: datetime) -> None:
+    """A real, PERMANENT sold-order history gap (audit#1143 #1270,
+    code-review follow-up on #1153): GetOrders cannot see further back than
+    _MAX_ORDER_LOOKBACK_DAYS no matter what, so any incremental resume whose
+    last sync predates that window loses that history irrecoverably — not
+    "weather," an incident, same class as quota.record_429 (invariant C11:
+    durable, queryable, never just a log line). Only called for the
+    incremental-resume path; a first-ever sync clamping to the ceiling is
+    expected/routine, not a loss of anything previously tracked."""
+    gap_days = (clamped_from - requested_from).days
+    record = {
+        'ts': now.isoformat(),
+        'requested_from': requested_from.isoformat(),
+        'clamped_from': clamped_from.isoformat(),
+        'gap_days': gap_days,
+    }
+    log.error('SOLD-ORDER HISTORY GAP: %d days of sold-order history unrecoverable '
+              '(requested from %s, GetOrders can only see back to %s)',
+              gap_days, requested_from.date(), clamped_from.date())
+    try:
+        raw = cfg.get('raw', {}) if isinstance(cfg.get('raw'), dict) else {}
+        gap_log_path = Path(raw.get('sold_order_gap_log', _DEFAULT_SOLD_ORDER_GAP_LOG))
+        gap_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(gap_log_path, 'a', encoding='utf-8') as fh:
+            fh.write(json.dumps(record) + '\n')
+    except OSError as exc:
+        log.warning('sold-order-gap incident log write failed: %s', exc)
+
+
 def sync_sold_orders(cfg: Dict[str, Any], listing_index: Dict[str, Path],
                      synced_at: str, state_path: Path,
                      dry_run: bool = False) -> Dict[str, Any]:
@@ -551,13 +714,23 @@ def sync_sold_orders(cfg: Dict[str, Any], listing_index: Dict[str, Path],
     stats: Dict[str, Any] = {'orders_fetched': 0, 'sold_marked': 0, 'errors': 0}
     now = datetime.now(timezone.utc)
 
+    # GetOrders can never see further back than _MAX_ORDER_LOOKBACK_DAYS from
+    # now, no matter what triggered this sync (first-ever run or a
+    # long-stale incremental resume) — this is the ceiling on both paths,
+    # not a fallback clamp on top of a separate "ideal" lookback.
+    earliest_allowed = now - timedelta(days=_MAX_ORDER_LOOKBACK_DAYS)
+
     if state_path.exists():
         state = json.loads(state_path.read_text())
         scan_from = datetime.fromisoformat(state['last_synced_at']) - timedelta(hours=2)
+        if scan_from < earliest_allowed:
+            _record_sold_order_gap(cfg, scan_from, earliest_allowed, now)
+            scan_from = earliest_allowed
     else:
-        scan_from = now - timedelta(days=SOLD_INITIAL_LOOKBACK_DAYS)
-        log.info('ebay_pull: first sold sync — looking back %d days',
-                 SOLD_INITIAL_LOOKBACK_DAYS)
+        scan_from = earliest_allowed
+        log.info('ebay_pull: first sold sync — looking back %d days '
+                 '(GetOrders cannot see further back than this)',
+                 _MAX_ORDER_LOOKBACK_DAYS)
 
     orders: List[Dict[str, Any]] = []
     window_start = scan_from
@@ -770,7 +943,10 @@ def backfill_draft_from_live(item: Dict[str, Any], cfg: Dict[str, Any]) -> bool:
         'format':           'FixedPrice',
         'quantity':         qty_avail,
         'price':            price,
-        'item_specifics':   item_specifics,
+        # todo #1418: Set B envelope, written via tgw.ebay.draft_specifics (no
+        # prior draft.item_specifics to diff against on this code path — this
+        # only fires when creating a fresh 'ebay_live'-sourced draft).
+        'item_specifics':   wrap_ebay_specifics(item_specifics),
         'description':      listing_desc_text,
         'listing_description': listing_desc_html,
         'imageUrls':        image_urls,

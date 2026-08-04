@@ -41,6 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import psycopg2.errors
 import requests
 
 import tgw.logging as tgw_logging
@@ -780,7 +781,7 @@ class EbaySkuMigrateWorker(QueueWorker):
         log.info('ebay_sku_migrate worker started: owner=%s', self.owner)
 
         migrate_cfg = self.config.get('ebay_sku_migrate', {})
-        if not migrate_cfg.get('enabled', True):
+        if not migrate_cfg.get('enabled', False):
             log.info('ebay_sku_migrate: disabled in config — exiting')
             return
 
@@ -791,6 +792,8 @@ class EbaySkuMigrateWorker(QueueWorker):
                     queue_name=QUEUE_NAME,
                     payload={'reason': 'startup'},
                     max_attempts=3,
+                    dedupe_key=f'{QUEUE_NAME}:pending',
+                    debounce=True,
                 )
                 log.info('ebay_sku_migrate: enqueued startup job')
         except Exception as exc:
@@ -925,12 +928,17 @@ class EbaySkuMigrateWorker(QueueWorker):
 
     def _reschedule(self, interval_hours: float) -> None:
         next_run = time.time() + interval_hours * 3600
-        jid = state_machine.enqueue_job(
-            queue_name=QUEUE_NAME,
-            payload={'reason': 'scheduled'},
-            not_before=next_run,
-            max_attempts=3,
-        )
+        try:
+            jid = state_machine.enqueue_job(
+                queue_name=QUEUE_NAME,
+                payload={'reason': 'scheduled'},
+                not_before=next_run,
+                max_attempts=3,
+                dedupe_key=f'{QUEUE_NAME}:pending',
+                debounce=True,
+            )
+        except psycopg2.errors.UniqueViolation:
+            jid = None
         log.info('ebay_sku_migrate: next run in %.1fh (job %s)', interval_hours, jid)
         tgw_logging.log_event('ebay_sku_migrate_rescheduled',
                               next_run_in_hours=interval_hours)

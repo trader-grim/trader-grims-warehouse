@@ -113,7 +113,14 @@ def enhance_title(
         if len(candidate) <= _MAX_TITLE:
             enhanced = candidate
 
-    # Length flags
+    # Length flags — deliberately does NOT auto-truncate (Dave, 2026-07-10):
+    # eBay's own bulk-CSV editor loads the full oversized title into the edit
+    # field and lets the operator double-click-delete words down to size —
+    # faster and more accurate than an automated word-boundary chop picking
+    # what to discard. The full, untruncated title stays in draft_listing so
+    # the editor can offer that same workflow (see ebay_stage.py's
+    # title_too_long guard, which blocks staging on this flag instead of
+    # letting eBay's own 80-char rejection burn an API round-trip).
     if len(enhanced) < _MIN_TITLE:
         flags.append('title_too_short')
     if len(enhanced) > _MAX_TITLE:

@@ -8,6 +8,7 @@ rather than calling this directly.
 
 from __future__ import annotations
 
+import io
 import logging
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -35,6 +36,113 @@ _MIME = {
     '.tiff': 'image/tiff',
 }
 
+# UploadSiteHostedPictures limits the *sum* of image width and height to
+# 15000px. Its error says only "File dimension limit exceeds 15000 pixels",
+# which is easily—but incorrectly—read as a per-axis limit. Keep one-pixel
+# headroom because eBay documents the boundary as strictly less than 15000.
+_MAX_DIMENSION_PX = 15000
+_MAX_UPLOAD_DIMENSION_SUM_PX = _MAX_DIMENSION_PX - 1
+
+_PIL_FORMAT_BY_SUFFIX = {
+    '.jpg':  'JPEG',
+    '.jpeg': 'JPEG',
+    '.png':  'PNG',
+    '.gif':  'GIF',
+    '.tif':  'TIFF',
+    '.tiff': 'TIFF',
+}
+
+
+class PhotoResizeError(RuntimeError):
+    """Raised when a photo needed a pre-upload resize but couldn't be
+    processed (e.g. corrupt/unreadable image) — distinct from a plain
+    upload failure so it doesn't get masked as an eBay-side rejection
+    (packet #1398 spec item 3)."""
+
+
+def _prepare_upload_bytes(photo_path: Path) -> bytes:
+    """
+    Return the bytes to POST for *photo_path*.
+
+    Normal case (within eBay's dimension limit): reads the file's raw
+    bytes unchanged — no re-encoding, no quality loss, byte-identical to
+    the stored file.
+
+    Oversized case (combined width and height >= the EPS limit): downscales a
+    temporary in-memory copy to fit within the limit, preserving aspect
+    ratio. The original file on disk is never opened for writing and is
+    never touched (Prime Directive 1 — raw is permanent, derived is
+    recomputable; this resized copy is upload-time-only, never persisted
+    back to ItemData).
+    """
+    raw = photo_path.read_bytes()
+
+    try:
+        from PIL import Image
+    except ImportError:
+        # No Pillow available — fall back to raw bytes; eBay will reject an
+        # oversized image with the same error as before this fix, no worse
+        # than pre-#1398 behavior.
+        log.warning('Pillow not installed — skipping dimension pre-flight for %s',
+                    photo_path.name)
+        return raw
+
+    width = height = None
+    try:
+        with Image.open(io.BytesIO(raw)) as img:
+            width, height = img.size
+            if width + height <= _MAX_UPLOAD_DIMENSION_SUM_PX:
+                return raw
+
+            scale = _MAX_UPLOAD_DIMENSION_SUM_PX / float(width + height)
+            new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
+            img_format = img.format or _PIL_FORMAT_BY_SUFFIX.get(
+                photo_path.suffix.lower(), 'JPEG')
+            resized = img.resize(new_size, Image.LANCZOS)
+            buf = io.BytesIO()
+            save_kwargs: Dict[str, Any] = {}
+            if img_format == 'JPEG':
+                if resized.mode not in ('RGB', 'L'):
+                    resized = resized.convert('RGB')
+                save_kwargs['quality'] = 90
+            resized.save(buf, format=img_format, **save_kwargs)
+            resized_bytes = buf.getvalue()
+    except Exception as exc:
+        # Distinct exception type so the caller (and dead-letter triage) can
+        # tell "resize itself failed / corrupt image" apart from a plain
+        # upload failure (packet #1398 spec item 3 — may overlap with
+        # PP-DATAINTEGRITY-001's corrupt-photo detection; noted separately,
+        # not silently merged into this fix).
+        dims = f'{width}x{height}' if width is not None else 'unknown'
+        raise PhotoResizeError(
+            f'failed to resize oversized photo {photo_path.name} ({dims}): {exc}') from exc
+
+    log.info('resized oversized photo %s: %dx%d -> %dx%d (exceeds %dpx limit)',
+             photo_path.name, width, height, new_size[0], new_size[1],
+             _MAX_DIMENSION_PX)
+    from tgw import logging as tgw_logging
+    tgw_logging.log_event('ebay_upload_photo_resized', photo=photo_path.name,
+                          original_dimensions=f'{width}x{height}',
+                          resized_dimensions=f'{new_size[0]}x{new_size[1]}',
+                          max_dimension_px=_MAX_DIMENSION_PX)
+    return resized_bytes
+
+
+def _build_upload_payload(picture_name: str) -> str:
+    """
+    Build the UploadSiteHostedPicturesRequest XML body.
+
+    *picture_name* (typically a photo's filename stem) is placed as element
+    text content via ElementTree, which XML-escapes it automatically --
+    unlike raw f-string interpolation, this is safe for names containing
+    `&`, `<`, `>`, etc.
+    """
+    root = ET.Element('UploadSiteHostedPicturesRequest', xmlns=_NS)
+    ET.SubElement(root, 'PictureName').text = picture_name
+    ET.SubElement(root, 'PictureSet').text = 'Supersize'
+    body = ET.tostring(root, encoding='unicode')
+    return f'<?xml version="1.0" encoding="utf-8"?>{body}'
+
 
 def upload_photo(cfg: Dict[str, Any], photo_path: Path) -> str:
     """
@@ -50,13 +158,7 @@ def upload_photo(cfg: Dict[str, Any], photo_path: Path) -> str:
     token = load_token(cfg)
     mime = _MIME.get(photo_path.suffix.lower(), 'image/jpeg')
 
-    xml_payload = (
-        '<?xml version="1.0" encoding="utf-8"?>'
-        f'<UploadSiteHostedPicturesRequest xmlns="{_NS}">'
-        f'<PictureName>{photo_path.stem}</PictureName>'
-        '<PictureSet>Supersize</PictureSet>'
-        '</UploadSiteHostedPicturesRequest>'
-    )
+    xml_payload = _build_upload_payload(photo_path.stem)
 
     headers = {
         'X-EBAY-API-IAF-TOKEN':          token,
@@ -65,10 +167,15 @@ def upload_photo(cfg: Dict[str, Any], photo_path: Path) -> str:
         'X-EBAY-API-SITEID':             _SITE_ID,
     }
 
+    # Pre-flight dimension check/downscale (todo #1398/PP-DEADLETTER-001):
+    # eBay's UploadSiteHostedPictures rejects images over 15000px on a side.
+    # Operates on an in-memory copy only — never touches the stored original.
+    image_bytes = _prepare_upload_bytes(photo_path)
+
     # requests builds multipart/form-data automatically from the files dict
     files = {
         'XML Payload': ('', xml_payload.encode('utf-8'), 'text/xml;charset=utf-8'),
-        'image':       (photo_path.name, photo_path.read_bytes(), mime),
+        'image':       (photo_path.name, image_bytes, mime),
     }
 
     quota.precheck(cfg, 'ebay_eps')

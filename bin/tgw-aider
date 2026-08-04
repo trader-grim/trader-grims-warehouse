@@ -1,61 +1,83 @@
 #!/usr/bin/env bash
-# tgw-aider — Aider wrapper that auto-creates a task branch from the spec file.
+# tgw-aider — Aider wrapper that auto-creates an isolated worktree+branch per
+# task, matching the mandatory worktree-per-task contract (PP-HERMES-EA-001,
+# 2026-07-13) that tgw-coder already follows. Fixes todo #1358: prior to this,
+# tgw-aider branched inside the SHARED checkout — unsafe for concurrent tasks
+# and inconsistent with every other executor of this contract.
 #
 # Usage (mirrors aider's own flags):
 #   tgw-aider [--architect] --message-file aider/spec-<id>-<slug>.md <files...>
 #   tgw-aider [--architect] -m "inline prompt" <files...>
 #
-# Branch behaviour:
-#   - Spec file aider/spec-<id>-<slug>.md  →  branch task/<id>-<slug>
-#   - Inline prompt (-m / --message)        →  branch task/aider-<timestamp>
-#   - Already on a task/* branch            →  no new branch (continues in place)
-#   - main or other branch                  →  creates + checks out new branch
+# Worktree/branch behaviour:
+#   - Spec file spec-<id>-<slug>.md  →  branch task/<id>-<slug>,
+#     worktree /opt/TGW/var/worktrees/<id>-<slug> (same path convention as
+#     tgw-coder — see .claude/agents/tgw-coder.md step 2)
+#   - Inline prompt (-m / --message) →  branch/worktree task/aider-<timestamp>
+#   - Worktree already exists        →  no new worktree, continue in place
+#   - Base branch is verified LIVE (git branch --show-current), never
+#     hardcoded — main is a stale ancestor of the real working branch here.
 
 set -euo pipefail
 
 AIDER="${AIDER_BIN:-aider}"
+CALLER_PWD="$(pwd)"
 REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+WORKTREES_ROOT="/opt/TGW/var/worktrees"
 
-# ── Determine branch name ────────────────────────────────────────────────────
+base_branch="$(git -C "$REPO_ROOT" branch --show-current)"
 
-current_branch="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)"
-target_branch=""
+# ── Determine target slug/branch, resolving --message-file to an absolute
+#    path BEFORE any cwd change (it may be relative to the caller's shell,
+#    not the repo root or the worktree). ──────────────────────────────────
 
-# Scan args for --message-file / -f
-spec_file=""
+target_slug=""
 args=("$@")
 for i in "${!args[@]}"; do
     case "${args[$i]}" in
         --message-file|-f)
             next="${args[$((i+1))]}"
-            basename="${next##*/}"          # strip directory
-            basename="${basename%.md}"      # strip .md
-            # spec-<id>-<slug> → task/<id>-<slug>
-            if [[ "$basename" =~ ^spec-([0-9]+-[a-z0-9_-]+)$ ]]; then
-                target_branch="task/${BASH_REMATCH[1]}"
+            if [[ "$next" != /* ]]; then
+                next="$CALLER_PWD/$next"
             fi
-            spec_file="$next"
+            base="$(basename "$next")"
+            base="${base%.md}"
+            base="${base#spec-}"
+            if [[ "$base" =~ ^([0-9]+-[a-z0-9_-]+)$ ]]; then
+                target_slug="${BASH_REMATCH[1]}"
+            fi
+            args[$i+1]="$next"
             ;;
     esac
 done
 
-# Fall back to timestamp branch for inline prompts
-if [[ -z "$target_branch" ]]; then
-    target_branch="task/aider-$(date +%Y%m%d%H%M%S)"
+if [[ -z "$target_slug" ]]; then
+    target_slug="aider-$(date +%Y%m%d%H%M%S)"
 fi
 
-# ── Branch management ────────────────────────────────────────────────────────
+target_branch="task/${target_slug}"
+worktree_dir="${WORKTREES_ROOT}/${target_slug}"
 
-if [[ "$current_branch" == task/* ]]; then
-    echo "tgw-aider: already on branch '$current_branch' — continuing in place"
+# ── Worktree management — isolated per task, never the shared checkout ─────
+
+if [[ -d "$worktree_dir" ]]; then
+    echo "tgw-aider: worktree '$worktree_dir' exists — continuing in place"
 elif git -C "$REPO_ROOT" show-ref --quiet "refs/heads/$target_branch"; then
-    echo "tgw-aider: branch '$target_branch' exists — checking out"
-    git -C "$REPO_ROOT" checkout "$target_branch"
+    echo "tgw-aider: branch '$target_branch' exists but worktree is missing — attaching"
+    git -C "$REPO_ROOT" worktree add "$worktree_dir" "$target_branch"
 else
-    echo "tgw-aider: creating branch '$target_branch' from '$current_branch'"
-    git -C "$REPO_ROOT" checkout -b "$target_branch"
+    echo "tgw-aider: creating worktree '$worktree_dir' on branch '$target_branch' from '$base_branch'"
+    git -C "$REPO_ROOT" worktree add -b "$target_branch" "$worktree_dir" "$base_branch"
 fi
 
-# ── Run Aider ────────────────────────────────────────────────────────────────
+# ── Run Aider inside the worktree, not the shared checkout ─────────────────
+# PYTHONPATH/LD_LIBRARY_PATH overrides match tgw-coder's documented worktree
+# gotchas (todo #1374): the tgw venv's editable install and psycopg2's
+# libz.so.1 both need this or a worktree test run silently validates the
+# wrong copy of the code / fails to import.
 
-exec "$AIDER" "$@"
+cd "$worktree_dir"
+export PYTHONPATH="${worktree_dir}/src:${PYTHONPATH:-}"
+export LD_LIBRARY_PATH="${NIX_LD_LIBRARY_PATH:-}:${LD_LIBRARY_PATH:-}"
+
+exec "$AIDER" "${args[@]}"

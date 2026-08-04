@@ -7,7 +7,7 @@ Defaults: openrouter / google/gemini-2.5-flash-lite.
 Workflow (serial live-API mode):
   1. Find primary image in ItemData/<sku>/
   2. Call vision model → parse {alt_text, seo_caption}
-  3. Archive original image to data/history/ItemData/<sku>/ if not already there
+  3. Archive original image to data/history-staging/<sku>/ if not already there
   4. Rename production image to <sku>-alt.jpg
   5. Write alt_text + seo_caption to item['draft_listing']
 
@@ -28,6 +28,7 @@ import io
 import json
 import shutil
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -107,10 +108,23 @@ def _encode_resized(img_path: Path, max_px: int = _VISION_MAX_PX) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def _history_sku_dir(cfg: Dict[str, Any], sku: str) -> Path:
-    """Return /opt/TGW/data/history/ItemData/<sku>/ derived from itemdata_root."""
+def _history_staging_sku_dir(cfg: Dict[str, Any], sku: str) -> Path:
+    """Return /opt/TGW/data/history-staging/<sku>/ derived from itemdata_root.
+
+    todo #1615 / PP-DATALEARN-001: the archive copy used to be written
+    through ``itemdata_root.parent / "history"``, which is a symlink onto
+    the removable MasterArchive cold-archive drive
+    (`/media/tgw/MasterArchive/history`) — a write that silently failed or
+    had to be deferred whenever that drive wasn't mounted (see the now-
+    removed ``_history_root_reachable`` pre-flight guard, todo #1407/#1408).
+    Per Dave's 2026-07-21 direction ("dont writ[e] to a symlink"), the
+    per-item archive copy now always lands on always-local disk instead —
+    a later sweep/merge job (out of scope here; see PP-KNOWLEDGE-001's
+    PP-ANNEX-001 section) is responsible for moving staged copies into the
+    real library.
+    """
     itemdata_root = Path(cfg["itemdata_root"])
-    return itemdata_root.parent / "history" / "ItemData" / sku
+    return itemdata_root.parent / "history-staging" / sku
 
 
 def repair_renamed_originals(item_data_root: Path) -> list[str]:
@@ -234,7 +248,7 @@ def cmd_alt_text(
         candidate_photos = [img_path]
 
     if dry_run:
-        history_sku_dir = _history_sku_dir(cfg, sku)
+        history_sku_dir = _history_staging_sku_dir(cfg, sku)
         history_path = history_sku_dir / img_path.name
         return {
             "ok": True,
@@ -257,6 +271,8 @@ def cmd_alt_text(
     img_hash = compute_dhash(img_path)
     use_cache = len(candidate_photos) == 1
     cached = lookup_hash(img_hash, "alt_text") if (img_hash and use_cache) else None
+
+    raw: Optional[str] = None  # raw LLM response, only set on an actual (non-cached) call
 
     if cached is not None:
         result = cached
@@ -289,8 +305,17 @@ def cmd_alt_text(
     if not alt_text:
         return {"ok": False, "error": "model returned empty alt_text"}
 
-    # Archive original to history before creating companion
-    history_sku_dir = _history_sku_dir(cfg, sku)
+    # Archive original to local history-staging before creating companion.
+    #
+    # todo #1615 / PP-DATALEARN-001: this used to write through a symlink
+    # onto the removable MasterArchive cold-archive drive, guarded by a
+    # pre-flight "is the drive mounted" check (todo #1407) because a broken
+    # symlink's mkdir(exist_ok=True) still raises FileExistsError. Per
+    # Dave's 2026-07-21 direction, the archive copy now always lands on
+    # always-local disk (history-staging/), so there's nothing left that
+    # can be unreachable — the guard and its deferred-finding branch are
+    # gone.
+    history_sku_dir = _history_staging_sku_dir(cfg, sku)
     history_path = history_sku_dir / img_path.name
     if not history_path.exists():
         history_sku_dir.mkdir(parents=True, exist_ok=True)
@@ -310,7 +335,28 @@ def cmd_alt_text(
     item["draft_listing"]["alt_text"] = alt_text
     item["draft_listing"]["seo_caption"] = seo_caption
 
-    atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
+    # Data Charter raw-preservation rule (Prime Directive 1): the raw LLM
+    # response is the permanent asset, the parsed alt_text/seo_caption are
+    # recomputable derivations of it. Mirrors ai_identify's vision_results[]
+    # pattern — append-only, one record per actual (non-cached) model call,
+    # never overwritten. A cache hit reuses a prior call's already-recorded
+    # raw response, so nothing new to append here.
+    if raw is not None:
+        alt_text_results: List[Dict[str, Any]] = item.get("alt_text_results") or []
+        alt_text_results.append({
+            "photo": img_path.name,
+            "photos": [p.name for p in candidate_photos],
+            "photo_count": len(candidate_photos),
+            "photo_hash": img_hash or "",
+            "provider": provider,
+            "model": model,
+            "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "extracted": {"alt_text": alt_text, "seo_caption": seo_caption},
+            "raw_response": raw,
+        })
+        item["alt_text_results"] = alt_text_results
+
+    atomic_write_json(json_path, item, pretty=cfg.get("pretty", True), archive_root=cfg.get("archive_root"))
 
     return {
         "ok": True,
@@ -429,8 +475,6 @@ def cmd_alt_text_batch(
 # ---------------------------------------------------------------------------
 # Gemini Batch API path (tgw alt-text --batch --api-mode batch)
 # ---------------------------------------------------------------------------
-
-_BATCH_DEFAULT_MODEL = "gemini-2.5-flash-lite"
 _BATCH_POLL_INTERVAL_S = 60
 _BATCH_TIMEOUT_S = 3600 * 4
 
@@ -449,12 +493,23 @@ def _apply_alt_text_result(
     seo_caption: str,
     img_path: Path,
     img_hash: str,
+    *,
+    model: str = "",
+    raw_response: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Write one batch result back through the alt_text ledger.
 
     Mirrors cmd_alt_text's write path: archive original, rename to -alt.jpg,
     write draft_listing fields, store hash.  Idempotent.
+
+    Data Charter raw-preservation rule (Prime Directive 1): when raw_response
+    is given (an actual, non-cached Batch API call), append an
+    alt_text_results[] record mirroring cmd_alt_text's pattern — a cache hit
+    (raw_response is None) reuses a prior call's already-recorded raw
+    response, so nothing new to append.
     """
+    from datetime import datetime, timezone
+
     from .items import atomic_write_json
 
     itemdata_root = Path(cfg["itemdata_root"])
@@ -470,8 +525,17 @@ def _apply_alt_text_result(
     if not alt_text_str:
         return {"ok": False, "sku": sku, "error": "batch result has empty alt_text"}
 
-    # Archive original before creating companion
-    history_sku_dir = _history_sku_dir(cfg, sku)
+    # Archive original to local history-staging before creating companion.
+    #
+    # todo #1615 / PP-DATALEARN-001 (mirrors cmd_alt_text's same fix): this
+    # used to write through a symlink onto the removable MasterArchive
+    # cold-archive drive, guarded by a pre-flight "is the drive mounted"
+    # check (todo #1408) because a broken symlink's mkdir(exist_ok=True)
+    # still raises FileExistsError. Per Dave's 2026-07-21 direction, the
+    # archive copy now always lands on always-local disk (history-staging/),
+    # so there's nothing left that can be unreachable — the guard and its
+    # deferred-finding branch are gone.
+    history_sku_dir = _history_staging_sku_dir(cfg, sku)
     history_path = history_sku_dir / img_path.name
     if not history_path.exists():
         history_sku_dir.mkdir(parents=True, exist_ok=True)
@@ -491,7 +555,22 @@ def _apply_alt_text_result(
     item["draft_listing"]["alt_text"] = alt_text_str
     item["draft_listing"]["seo_caption"] = seo_caption.strip()
 
-    atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
+    if raw_response is not None:
+        alt_text_results: List[Dict[str, Any]] = item.get("alt_text_results") or []
+        alt_text_results.append({
+            "photo": img_path.name,
+            "photos": [img_path.name],
+            "photo_count": 1,
+            "photo_hash": img_hash or "",
+            "provider": "google_direct",
+            "model": model,
+            "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "extracted": {"alt_text": alt_text_str, "seo_caption": seo_caption.strip()},
+            "raw_response": raw_response,
+        })
+        item["alt_text_results"] = alt_text_results
+
+    atomic_write_json(json_path, item, pretty=cfg.get("pretty", True), archive_root=cfg.get("archive_root"))
 
     # Cache result
     if img_hash:
@@ -527,7 +606,25 @@ def cmd_alt_text_gemini_batch(
     """
     from tgw.image_hash import compute_dhash, lookup_hash
 
-    effective_model = model or _BATCH_DEFAULT_MODEL
+    if model is not None:
+        effective_model = model
+    else:
+        # Invariant E15 (2026-07-20): the model comes from tgw-models.json,
+        # never a module-level constant. Gemini's Batch API is Google's own
+        # async endpoint (not something OpenRouter/Ollama offer), so this
+        # mode only works when the configured 'alt_text' task resolves to
+        # google_direct — raise a clear error rather than silently using a
+        # model id shaped for the wrong provider.
+        resolved_provider, resolved_model = get_task_model(cfg, "alt_text")
+        if resolved_provider != "google_direct":
+            raise ValueError(
+                f"tgw alt-text --batch --api-mode batch requires the 'alt_text' "
+                f"task in tgw-models.json to resolve to provider 'google_direct' "
+                f"(Gemini Batch API is Google-only); it currently resolves to "
+                f"{resolved_provider!r} (model {resolved_model!r}). Pass "
+                f"--model explicitly to override, or update tgw-models.json."
+            )
+        effective_model = resolved_model
     state_path = _batch_state_path(cfg)
     itemdata_root = Path(cfg["itemdata_root"])
 
@@ -745,12 +842,16 @@ def cmd_alt_text_gemini_batch(
 
             alt_text_val = str(result_item.get("alt_text", "")).strip()
             seo_caption_val = str(result_item.get("seo_caption", "")).strip()
+            raw_response_val = result_item.get("raw_response")
 
             if not alt_text_val:
                 error_details.append({"sku": sku, "error": "model returned empty alt_text"})
                 continue
 
-            write_result = _apply_alt_text_result(cfg, sku, alt_text_val, seo_caption_val, img_path, img_hash)
+            write_result = _apply_alt_text_result(
+                cfg, sku, alt_text_val, seo_caption_val, img_path, img_hash,
+                model=effective_model, raw_response=raw_response_val,
+            )
             if write_result.get("ok"):
                 processed += 1
             else:

@@ -27,6 +27,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
+from tgw.logging import announce_script_run
+
 log = logging.getLogger('photo_recovery')
 
 IMAGE_SUFFIXES = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.tiff', '.bmp'}
@@ -176,10 +178,16 @@ def recover_item(item_dir: Path,
         src = ranked[0]
 
         if write:
+            tmp_dest = dest.with_name(dest.name + f'.tmp{os.getpid()}')
             try:
-                shutil.copy2(src, dest)
+                shutil.copy2(src, tmp_dest)
+                os.replace(tmp_dest, dest)
                 action = 'copied'
             except Exception as e:
+                try:
+                    tmp_dest.unlink(missing_ok=True)
+                except Exception:
+                    pass
                 rows.append({'sku': sku, 'ref': ref, 'action': 'error',
                              'source': str(src), 'dest': str(dest),
                              'error': str(e)})
@@ -249,6 +257,13 @@ def main() -> int:
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format='%(asctime)s %(levelname)s %(name)s: %(message)s',
+    )
+
+    announce_script_run(
+        'photo_history_recovery.py',
+        'recover missing item photos from history archives into ItemData (tools/ standalone variant)',
+        write=args.write, config=args.config, all_items=args.all_items,
+        sku=args.sku, limit=args.limit,
     )
 
     api_cfg = load_json(Path(args.config))

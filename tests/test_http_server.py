@@ -19,8 +19,11 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
+import psycopg2.errors
 import pytest
 
 # TestClient (starlette) requires httpx at import/use time. If httpx is not
@@ -32,7 +35,8 @@ httpx = pytest.importorskip(
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from tgw import http_server  # noqa: E402
+from tgw import http_server, inventory_record  # noqa: E402
+from tgw.ebay import draft_specifics  # noqa: E402
 
 API_KEY = "test-key-abc123"
 WEB_KEY = "test-web-key-xyz"  # browser login password (checked against _web_password)
@@ -107,8 +111,9 @@ def _make_catalog(db_path: Path, rows):
     con = sqlite3.connect(str(db_path))
     con.execute(
         "CREATE TABLE catalog ("
-        "sku TEXT, title TEXT, location TEXT, status TEXT, "
-        "price REAL, qty INTEGER, image TEXT, attribute_set TEXT, data TEXT)"
+        "sku TEXT PRIMARY KEY, title TEXT, location TEXT, status TEXT, "
+        "price REAL, qty INTEGER, image TEXT, attribute_set TEXT, data TEXT, "
+        "updated_at TEXT DEFAULT (datetime('now')))"
     )
     con.executemany(
         "INSERT INTO catalog (sku, title, location, status, price, qty, image, data) "
@@ -265,6 +270,94 @@ def client(env):
 
 
 # ---------------------------------------------------------------------------
+# GET /api/queue/daily_stats — PP-QUEUESTATS-001 date-scoped daily stats
+# ---------------------------------------------------------------------------
+
+
+def test_queue_daily_stats_requires_auth(client):
+    r = client.get("/api/queue/daily_stats")
+    assert r.status_code in (401, 403)
+
+
+def test_queue_daily_stats_rejects_bad_date(client):
+    r = client.get("/api/queue/daily_stats", params={"date": "not-a-date"},
+                    headers=AUTH_HEADERS)
+    assert r.status_code == 400
+
+
+def test_queue_daily_stats_returns_date_scoped_per_queue_counts(client, queue_rows):
+    import datetime as _dt
+
+    hour = _dt.datetime(2026, 7, 17, 9, 0, 0)
+    queue_rows.extend([
+        {"queue_name": "ebay_upload", "stat_hour": hour, "state": "succeeded", "job_count": 12},
+        {"queue_name": "ebay_upload", "stat_hour": hour, "state": "failed", "job_count": 1},
+        {"queue_name": "ebay_upload", "stat_hour": hour, "state": "dead_letter", "job_count": 2},
+        {"queue_name": "ebay_draft", "stat_hour": hour, "state": "succeeded", "job_count": 5},
+    ])
+    r = client.get("/api/queue/daily_stats", params={"date": "2026-07-17"},
+                    headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is True
+    assert data["date"] == "2026-07-17"
+    assert data["tz"] == "America/Los_Angeles"
+    assert data["queues"]["ebay_upload"]["succeeded"] == 12
+    assert data["queues"]["ebay_upload"]["failed"] == 1
+    assert data["queues"]["ebay_upload"]["dead_letter"] == 2
+    # Per-hour breakdown is kept, not collapsed — groundwork for future
+    # surge/anomaly detection per PP-QUEUESTATS-001.
+    assert len(data["queues"]["ebay_upload"]["by_hour"]) == 3
+    assert data["queues"]["ebay_draft"]["succeeded"] == 5
+    assert data["queues"]["ebay_draft"]["failed"] == 0
+
+
+def test_queue_daily_stats_defaults_to_today_when_no_date_given(client, queue_rows, monkeypatch):
+    captured = {}
+
+    class _CapturingCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, sql, params=None):
+            captured["params"] = params
+
+        def fetchall(self):
+            return []
+
+    class _CapturingConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def cursor(self, *a, **k):
+            return _CapturingCursor()
+
+    monkeypatch.setattr(http_server.psycopg2, "connect", lambda *a, **k: _CapturingConn())
+    r = client.get("/api/queue/daily_stats", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    assert captured["params"][0] == http_server.datetime.now(http_server._DISPLAY_TZ).date()
+
+
+def test_pipeline_page_shows_date_scoped_column_labels(client):
+    """The old 'Done today'/'Failed/DL' pairing collapsed a lifetime count
+    under a daily label (PP-QUEUESTATS-001). The rebuilt page must be
+    explicit about which columns are date-scoped vs. lifetime."""
+    _login(client)
+    r = client.get("/form/pipeline")
+    assert r.status_code == 200
+    assert "Done today" in r.text
+    assert "Failed today" in r.text
+    assert "DL backlog" in r.text
+    assert "/api/queue/daily_stats" in r.text
+
+
+# ---------------------------------------------------------------------------
 # Auth (HTTPBearer) — bad/missing token
 # ---------------------------------------------------------------------------
 
@@ -280,6 +373,29 @@ def test_missing_token_rejected(client):
     # (older versions returned 403); accept either to stay version-robust.
     r = client.get("/api/items")
     assert r.status_code in (401, 403)
+
+
+def test_bearer_auth_uses_constant_time_compare(client, monkeypatch):
+    """#1282 — bearer-token check must use secrets.compare_digest, not `==`,
+    to close the timing side-channel the password check already avoided."""
+    calls = []
+    real_compare_digest = http_server.secrets.compare_digest
+
+    def spy(a, b):
+        calls.append((a, b))
+        return real_compare_digest(a, b)
+
+    monkeypatch.setattr(http_server.secrets, "compare_digest", spy)
+
+    r = client.get("/api/items", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    assert calls, "secrets.compare_digest was never called for bearer auth"
+    assert calls[0] == (API_KEY.encode(), API_KEY.encode())
+
+    calls.clear()
+    r = client.get("/api/items", headers={"Authorization": "Bearer wrong"})
+    assert r.status_code == 401
+    assert calls == [(b"wrong", API_KEY.encode())]
 
 
 # ---------------------------------------------------------------------------
@@ -458,6 +574,8 @@ def test_eligible_filter_status_and_ebay_state(tmp_path, monkeypatch):
     sku_instock_ended_relistable = "tgw20260201000000004"
     sku_sold = "tgw20260201000000005"
     sku_staged_not_eligible_status = "tgw20260201000000006"
+    sku_blank_never_listed = "tgw20260201000000007"
+    sku_blank_active = "tgw20260201000000008"
 
     _make_catalog_with_data(catalog_path, [
         (sku_new_never_listed, "A", "A1", "new", 9.99, 1, "", "{}"),
@@ -469,6 +587,14 @@ def test_eligible_filter_status_and_ebay_state(tmp_path, monkeypatch):
          json.dumps({"ebay_listing": {"status": "Ended"}})),
         (sku_sold, "E", "A5", "Sold", 9.99, 1, "", "{}"),
         (sku_staged_not_eligible_status, "F", "A6", "Staged", 9.99, 1, "", "{}"),
+        # todo #1377: items the intake pipeline never stamped with a status
+        # at all (blank/NULL) are a real, common case — not a data error —
+        # and must count as eligible when not listed/published, matching
+        # how the default "All" view already treats blank status as
+        # active/non-terminal.
+        (sku_blank_never_listed, "G", "A7", "", 9.99, 1, "", "{}"),
+        (sku_blank_active, "H", "A8", "", 9.99, 1, "",
+         json.dumps({"ebay_listing": {"status": "Active"}})),
     ])
 
     cfg = {
@@ -500,6 +626,8 @@ def test_eligible_filter_status_and_ebay_state(tmp_path, monkeypatch):
     assert sku_instock_published_offer not in skus  # PUBLISHED offer blocks it
     assert sku_sold not in skus                  # status excluded outright
     assert sku_staged_not_eligible_status not in skus  # not new/In Stock
+    assert sku_blank_never_listed in skus        # blank status = never stamped, still eligible (#1377)
+    assert sku_blank_active not in skus          # blank status but already Active still excluded
 
 
 # ---------------------------------------------------------------------------
@@ -676,6 +804,43 @@ def test_patch_unknown_sku_404(client):
     assert r.status_code == 404
 
 
+def test_patch_rejects_invalid_condition_enum(env, enqueue_calls):
+    """PP-CONDITION-ENUM-001 / todo #1562 — live incident regression test:
+    a draft_listing.condition_enum PATCH set to a raw human label (not a
+    real Inventory API enum) must be REJECTED with a field-tagged error,
+    never silently written — this is the actual bug that dead-lettered
+    tgw202605051124483 at ebay_stage ("Could not serialize field
+    [condition]")."""
+    r = env["client"].patch(
+        f"/api/items/{SKU_A}",
+        json={"fields": {"draft_listing": {"condition_enum": "Very Good"}}},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 422
+    body = r.json()
+    assert body["ok"] is False
+    assert body["field"] == "condition_enum"
+
+    # The bad value must never have reached disk.
+    doc = json.loads(
+        (env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text(encoding="utf-8")
+    )
+    assert (doc.get("draft_listing") or {}).get("condition_enum") != "Very Good"
+
+
+def test_patch_accepts_valid_condition_enum(env, enqueue_calls):
+    r = env["client"].patch(
+        f"/api/items/{SKU_A}",
+        json={"fields": {"draft_listing": {"condition_enum": "USED_VERY_GOOD"}}},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    doc = json.loads(
+        (env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text(encoding="utf-8")
+    )
+    assert doc["draft_listing"]["condition_enum"] == "USED_VERY_GOOD"
+
+
 def test_patch_multi_field_merge(env, enqueue_calls):
     r = env["client"].patch(
         f"/api/items/{SKU_A}",
@@ -747,19 +912,19 @@ def test_patch_location_syncs_tree(env, enqueue_calls):
     assert link.is_symlink() or link.exists()
 
 
-def test_patch_enqueues_coalesced_catalog_rebuild(env, enqueue_calls):
+def test_patch_no_longer_enqueues_catalog_rebuild(env, enqueue_calls):
+    """PP-CATALOG-INCR-001 CI-4 (2026-07-18): enqueue_catalog_rebuild() is
+    now a no-op — CI-2's synchronous SQLite upsert (inside _apply_patch,
+    called just before this point) keeps the catalog live instead. A title
+    change doesn't touch image/photo_order, so CI-3's thumbnail trigger
+    doesn't fire either — no enqueue calls at all for this write."""
     r = env["client"].patch(
         f"/api/items/{SKU_A}",
         json={"fields": {"title": "Rebuild me"}},
         headers=AUTH_HEADERS,
     )
     assert r.status_code == 200
-    assert len(enqueue_calls) == 1
-    kw = enqueue_calls[0]["kwargs"]
-    assert kw["queue_name"] == "catalog_rebuild"
-    assert kw["dedupe_key"] == "catalog_rebuild:pending"
-    assert kw["payload"] == {"reason": f"http_patch:{SKU_A}"}
-    assert kw["max_attempts"] == 3
+    assert enqueue_calls == []
 
 
 def test_patch_succeeds_even_if_enqueue_raises(env, monkeypatch):
@@ -833,6 +998,59 @@ def test_worker_write_to_live_draft_does_not_auto_enqueue(env, enqueue_calls):
     assert "ebay_draft" not in queue_names
 
 
+def test_ebay_update_action_uses_same_dedupe_key_as_patch_auto_push(env, enqueue_calls):
+    """Todo #1469 (live incident, 2026-07-16, Dave: 'why is every item
+    staging twice... not even close to the same as ui'): the 'Update
+    Listing' button calls saveEbayDraft() (PATCH draft_listing, which
+    auto-enqueues ebay_stage under dedupe_key f"ebay_stage:{sku}") and then
+    fires the ebay_update action as its own success callback — which used
+    to enqueue a SECOND, unguarded ebay_stage job with no dedupe_key,
+    racing the first. Both enqueue call sites must now share the exact
+    same dedupe_key so the redundant attempt coalesces."""
+    sku = "tgw20260401000000012"
+    _seed_live_item(env, sku)
+
+    patch_r = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"draft_listing": {"title": "Operator edit"}}},
+        headers=AUTH_HEADERS,
+    )
+    assert patch_r.status_code == 200
+
+    action_r = env["client"].post(
+        f"/api/items/{sku}/action",
+        json={"action": "ebay_update"},
+        headers=AUTH_HEADERS,
+    )
+    assert action_r.status_code == 200
+
+    stage_calls = [c for c in enqueue_calls if c["kwargs"].get("queue_name") == "ebay_stage"]
+    assert len(stage_calls) == 2  # one from the PATCH auto-push, one from the action
+    dedupe_keys = {c["kwargs"].get("dedupe_key") for c in stage_calls}
+    assert dedupe_keys == {f"ebay_stage:{sku}"}  # both share the SAME key — real Postgres would coalesce these
+
+
+def test_ebay_update_action_survives_dedupe_collision(env, monkeypatch):
+    """If the auto-push's job is still active when this action's own
+    enqueue attempt hits the shared dedupe_key, Postgres raises
+    UniqueViolation — the action must degrade to job_id=None, not a 500."""
+    sku = "tgw20260401000000013"
+    _seed_live_item(env, sku)
+
+    def _raise_unique_violation(**kwargs):
+        raise psycopg2.errors.UniqueViolation("duplicate dedupe_key")
+
+    monkeypatch.setattr(http_server.state_machine, "enqueue_job", _raise_unique_violation)
+
+    r = env["client"].post(
+        f"/api/items/{sku}/action",
+        json={"action": "ebay_update"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "sku": sku, "action": "ebay_update", "job_id": None}
+
+
 def test_operator_edit_to_not_yet_live_draft_does_not_auto_enqueue(env, enqueue_calls):
     """No offer_id yet — nothing to push to, so no auto-enqueue at all
     (unchanged pre-#1114 behavior for pre-publish items)."""
@@ -870,6 +1088,43 @@ def test_bare_top_level_title_edit_does_not_auto_enqueue(env, enqueue_calls):
     queue_names = [c["kwargs"].get("queue_name") for c in enqueue_calls]
     assert "ebay_stage" not in queue_names
     assert "ebay_draft" not in queue_names
+
+
+def test_saveebaydraft_shaped_patch_routes_item_specifics_through_accessor(env, enqueue_calls):
+    """todo #1416 point 3: saveEbayDraft() now nests aspect edits inside
+    draft_listing.item_specifics (matching every other Draft Editor
+    field), matching the PATCH shape at http_server.py's saveEbayDraft().
+    _apply_patch must route a bare partial item_specifics dict through
+    the sanctioned tgw.ebay.draft_specifics accessor (preserving the
+    envelope + provenance history), not shallow-merge it directly, and
+    the existing auto-push-on-draft_listing-change behavior must still
+    fire (no new trigger-set change needed, per the packet spec)."""
+    sku = "tgw20260401000000014"
+    _seed_live_item(env, sku, extra_fields={
+        "draft_listing": {
+            "title": "Live Widget", "price": "9.99",
+            "item_specifics": {"Type": "Lapel Pin"},
+        },
+    })
+
+    r = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"draft_listing": {"item_specifics": {"Type": "Brooch"}}}},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+
+    doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
+    assert draft_specifics.get_ebay_aspects(doc)["Type"] == "Brooch"
+    assert doc["draft_listing"]["item_specifics"]["_set"] == "ebay_draft"
+    assert len(doc["draft_listing"]["item_specifics_history"]) == 1
+    assert doc["draft_listing"]["item_specifics_history"][0]["previous_value"] == "Lapel Pin"
+    # Sibling draft_listing fields (title, price) must survive the merge.
+    assert doc["draft_listing"]["title"] == "Live Widget"
+    assert doc["draft_listing"]["price"] == "9.99"
+    # Auto-push must still fire — this is just a normal draft_listing edit.
+    queue_names = [c["kwargs"].get("queue_name") for c in enqueue_calls]
+    assert "ebay_stage" in queue_names
 
 
 def test_operator_edit_to_live_draft_uses_dedupe_key(env, enqueue_calls):
@@ -944,6 +1199,60 @@ def test_category_groups_requires_auth(client):
 
 
 # ---------------------------------------------------------------------------
+# POST /api/items — create_item_endpoint (todo #1311: routed through the
+# tgw.items.create_item fence instead of duplicating its path-construction
+# logic inline)
+# ---------------------------------------------------------------------------
+
+NEW_SKU = "tgw20260401000000009"
+
+
+def test_create_item_endpoint_writes_via_fence(env, enqueue_calls):
+    client = env["client"]
+    r = client.post(
+        "/api/items", headers=AUTH_HEADERS,
+        json={"sku": NEW_SKU, "data": {"title": "Fence-Created Item"}},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["sku"] == NEW_SKU
+    doc = json.loads((env["itemdata_root"] / NEW_SKU / f"{NEW_SKU}.json").read_text())
+    assert doc["title"] == "Fence-Created Item"
+    assert doc["sku"] == NEW_SKU
+    # PP-CATALOG-INCR-001 CI-4 (2026-07-18): catalog_rebuild's enqueue is now
+    # a no-op — the endpoint upserts the new SKU's SQLite catalog row
+    # directly instead, so no catalog_rebuild enqueue is expected here.
+    assert not any(c["kwargs"].get("queue_name") == "catalog_rebuild" for c in enqueue_calls)
+
+
+def test_create_item_endpoint_duplicate_sku_409(env):
+    client = env["client"]
+    r1 = client.post(
+        "/api/items", headers=AUTH_HEADERS,
+        json={"sku": NEW_SKU, "data": {"title": "First"}},
+    )
+    assert r1.status_code == 200
+    r2 = client.post(
+        "/api/items", headers=AUTH_HEADERS,
+        json={"sku": NEW_SKU, "data": {"title": "Second"}},
+    )
+    assert r2.status_code == 409
+    assert NEW_SKU in r2.json()["detail"]
+    # original doc unchanged
+    doc = json.loads((env["itemdata_root"] / NEW_SKU / f"{NEW_SKU}.json").read_text())
+    assert doc["title"] == "First"
+
+
+def test_create_item_endpoint_bad_sku_format_400(client):
+    r = client.post(
+        "/api/items", headers=AUTH_HEADERS,
+        json={"sku": "not-a-sku", "data": {"title": "x"}},
+    )
+    assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
 # PP-BULKEDIT-001 — /form/bulk + /api/bulk/preview + /api/bulk/apply
 # ---------------------------------------------------------------------------
 
@@ -993,8 +1302,10 @@ def test_bulk_apply_writes_and_enqueues(env, enqueue_calls):
     # written to disk
     doc = json.loads((env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text())
     assert doc["title"] == "Bulk Renamed"
-    # coalesced catalog_rebuild enqueued
-    assert any(c["kwargs"].get("queue_name") == "catalog_rebuild" for c in enqueue_calls)
+    # PP-CATALOG-INCR-001 CI-4 (2026-07-18): catalog_rebuild's enqueue is now
+    # a no-op — items.py's bulk_edit -> _write_field upserts the SQLite
+    # catalog row directly on write instead (CI-2/CI-4).
+    assert not any(c["kwargs"].get("queue_name") == "catalog_rebuild" for c in enqueue_calls)
 
 
 def test_bulk_apply_invalid_field(client):
@@ -1045,6 +1356,94 @@ def test_bulk_action_ai_identify_enqueues(env, enqueue_calls):
     assert queued_names.count("ai_identify") == 2
 
 
+# ---------------------------------------------------------------------------
+# POST /api/items/{sku}/append — PP-INTAKE-004 Phase 1a incremental-ID trigger
+# ---------------------------------------------------------------------------
+
+def _append_photo(client, sku, name):
+    return client.post(
+        f"/api/items/{sku}/append", headers=AUTH_HEADERS,
+        json={"op": "photo", "data": {"filename": name}},
+    )
+
+
+def test_append_photo_below_threshold_does_not_enqueue_ai_identify(env, enqueue_calls):
+    client = env["client"]
+    for i in range(5):  # below _MAX_PHOTOS_CLOUD (6)
+        r = _append_photo(client, SKU_A, f"p{i}.jpg")
+        assert r.status_code == 200
+    queued_names = [c["kwargs"]["queue_name"] for c in enqueue_calls]
+    assert "ai_identify" not in queued_names
+
+
+def test_append_photo_crossing_threshold_enqueues_ai_identify_once(env, enqueue_calls):
+    client = env["client"]
+    for i in range(6):  # crosses _MAX_PHOTOS_CLOUD (6) on the 6th append
+        r = _append_photo(client, SKU_A, f"p{i}.jpg")
+        assert r.status_code == 200
+    queued_names = [c["kwargs"]["queue_name"] for c in enqueue_calls]
+    assert queued_names.count("ai_identify") == 1
+    ai_calls = [c for c in enqueue_calls if c["kwargs"]["queue_name"] == "ai_identify"]
+    assert ai_calls[0]["kwargs"]["payload"]["sku"] == SKU_A
+    assert ai_calls[0]["kwargs"]["dedupe_key"] == f"ai_identify:{SKU_A}"
+
+
+def test_append_photo_does_not_refire_once_already_identified(env, enqueue_calls):
+    client = env["client"]
+    itemdata_root = env["itemdata_root"]
+    doc_path = itemdata_root / SKU_A / f"{SKU_A}.json"
+    doc = json.loads(doc_path.read_text())
+    doc["ai_identified"] = True
+    doc_path.write_text(json.dumps(doc))
+
+    for i in range(7):  # already past threshold, already identified
+        r = _append_photo(client, SKU_A, f"p{i}.jpg")
+        assert r.status_code == 200
+    queued_names = [c["kwargs"]["queue_name"] for c in enqueue_calls]
+    assert "ai_identify" not in queued_names
+
+
+def test_session_complete_sets_ai_reidentify_when_already_identified(env, enqueue_calls):
+    client = env["client"]
+    itemdata_root = env["itemdata_root"]
+    doc_path = itemdata_root / SKU_A / f"{SKU_A}.json"
+    doc = json.loads(doc_path.read_text())
+    doc["ai_identified"] = True
+    doc_path.write_text(json.dumps(doc))
+
+    r = client.post(
+        f"/api/items/{SKU_A}/append", headers=AUTH_HEADERS,
+        json={"op": "photo", "data": {"filename": "last.jpg"}, "session_complete": True},
+    )
+    assert r.status_code == 200
+    doc_after = json.loads(doc_path.read_text())
+    assert doc_after.get("ai_reidentify") is True
+    # refinement is a flag-set, not a direct re-enqueue of ai_identify itself
+    queued_names = [c["kwargs"]["queue_name"] for c in enqueue_calls]
+    assert "ai_identify" not in queued_names
+
+
+def test_session_complete_fallback_enqueues_ai_identify_when_never_run(env, enqueue_calls):
+    client = env["client"]
+    # only 2 photos — never crosses the early-fire threshold
+    for i in range(2):
+        r = _append_photo(client, SKU_A, f"p{i}.jpg")
+        assert r.status_code == 200
+    queued_names = [c["kwargs"]["queue_name"] for c in enqueue_calls]
+    assert "ai_identify" not in queued_names
+
+    r = client.post(
+        f"/api/items/{SKU_A}/append", headers=AUTH_HEADERS,
+        json={"op": "photo", "data": {"filename": "last.jpg"}, "session_complete": True},
+    )
+    assert r.status_code == 200
+    queued_names = [c["kwargs"]["queue_name"] for c in enqueue_calls]
+    assert queued_names.count("ai_identify") == 1
+    itemdata_root = env["itemdata_root"]
+    doc = json.loads((itemdata_root / SKU_A / f"{SKU_A}.json").read_text())
+    assert doc.get("ai_reidentify") is not True  # fallback path is enqueue, not the reidentify flag
+
+
 def test_bulk_action_ebay_price_enqueues(env, enqueue_calls):
     client = env["client"]
     r = client.post("/api/bulk/action", headers=AUTH_HEADERS,
@@ -1077,7 +1476,9 @@ def test_bulk_action_mark_sold_writes_status(env, enqueue_calls):
     assert body["count"] == 1
     doc = json.loads((env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text())
     assert doc["status"] == "Sold"
-    assert any(c["kwargs"].get("queue_name") == "catalog_rebuild" for c in enqueue_calls)
+    # PP-CATALOG-INCR-001 CI-4 (2026-07-18): catalog_rebuild's enqueue is now
+    # a no-op — see test_bulk_apply_writes_and_enqueues's identical note.
+    assert not any(c["kwargs"].get("queue_name") == "catalog_rebuild" for c in enqueue_calls)
 
 
 def test_bulk_action_mark_sold_decrements_multi_qty_instead_of_sold(env, enqueue_calls):
@@ -1122,6 +1523,67 @@ def test_bulk_action_mark_sold_reads_item_doc_exactly_once(env, enqueue_calls, m
                     json={"skus": [SKU_A], "action": "mark_sold"})
     assert r.status_code == 200
     assert len(calls) == 1
+
+
+def test_ebay_sold_webhook_marks_item_sold(env, enqueue_calls, monkeypatch):
+    """todo #1378: the sold-notification webhook imported two functions that
+    don't exist in tgw.workers.ebay_legacy_sync (_mark_item_sold,
+    _build_listing_index -- both live in tgw.ebay.pull under different
+    names) -- every real eBay sold webhook call has 500'd since 2026-06-04
+    (commit 429ebc5), before ever reaching the try/except. This drives the
+    real endpoint end-to-end (signature check stubbed, everything else
+    real) so an import regression fails loudly instead of silently."""
+    import tgw.apis.ebay.notifications as notifications
+    import tgw.ebay.pull as pull
+    from tgw.http_server import _listing_index_built_at_reset
+
+    monkeypatch.setattr(notifications, "verify_notification_signature", lambda body, cfg: True)
+    _listing_index_built_at_reset()
+
+    mark_calls = []
+
+    def _fake_mark_item_sold(json_path, **kwargs):
+        mark_calls.append((json_path, kwargs))
+        return True
+
+    monkeypatch.setattr(pull, "mark_item_sold", _fake_mark_item_sold)
+
+    doc_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+    doc = json.loads(doc_path.read_text())
+    doc["draft_listing"] = {"quantity": 1}
+    doc["ebay_listing"] = {"listing_id": "998877"}
+    doc_path.write_text(json.dumps(doc))
+
+    ns = "urn:ebay:apis:eBLBaseComponents"
+    xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <GetItemTransactionsResponse xmlns="{ns}">
+      <Timestamp>2026-07-13T00:00:00.000Z</Timestamp>
+      <TransactionArray><Transaction>
+        <Item><ItemID>998877</ItemID></Item>
+        <TransactionPrice>9.99</TransactionPrice>
+        <QuantityPurchased>1</QuantityPurchased>
+        <CreatedDate>2026-07-13T00:00:00.000Z</CreatedDate>
+        <Buyer><UserID>someone</UserID></Buyer>
+        <TransactionID>tx-1</TransactionID>
+      </Transaction></TransactionArray>
+      <OrderID>order-1</OrderID>
+    </GetItemTransactionsResponse>
+  </soap:Body>
+</soap:Envelope>"""
+
+    client = env["client"]
+    r = client.post("/webhooks/ebay/notification", headers=AUTH_HEADERS,
+                    content=xml.encode("utf-8"))
+    assert r.status_code == 200
+    assert r.json() == {"ack": "Success"}
+
+    assert len(mark_calls) == 1
+    called_path, kwargs = mark_calls[0]
+    assert called_path == doc_path
+    assert kwargs["order_id"] == "order-1"
+    assert kwargs["quantity"] == 1
 
 
 def test_bulk_action_delete_writes_status(env, enqueue_calls):
@@ -1281,6 +1743,172 @@ def test_todos_form_escapes_html(client, monkeypatch):
     assert r.status_code == 200
     assert "<script>alert" not in r.text          # raw tag must not appear
     assert "&lt;script&gt;" in r.text             # escaped form present
+
+
+# ---------------------------------------------------------------------------
+# PP-AGENTTRACE-001 Phase 3 — GET /form/runs (#1582), no Bearer (network trust)
+# ---------------------------------------------------------------------------
+
+_RUN_ROWS = [
+    {
+        "run_id": "abcdef0123456789",
+        "parent_run_id": None,
+        "agent_type": "tgw-coder",
+        "todo_id": 1580,
+        "pp_ref": "PP-AGENTTRACE-001",
+        "host": "tgw-prod",
+        "git_branch": "todo/1580-agent-trace-phase1",
+        "started_at": datetime(2026, 7, 20, 10, 0, tzinfo=timezone.utc),
+        "ended_at": datetime(2026, 7, 20, 10, 5, tzinfo=timezone.utc),
+        "status": "completed",
+        "summary": "Phase 1 built + merged",
+        "transcript_path": "/opt/TGW/var/agent-traces/2026-07-20/abcdef0123456789.jsonl",
+    },
+    {
+        "run_id": "fedcba9876543210",
+        "parent_run_id": None,
+        "agent_type": "claude-session",
+        "todo_id": None,
+        "pp_ref": None,
+        "host": "tgw-prod",
+        "git_branch": "catio-nix-0.0.1-alpha",
+        "started_at": datetime(2026, 7, 20, 11, 0, tzinfo=timezone.utc),
+        "ended_at": None,
+        "status": "running",
+        "summary": "",
+        "transcript_path": None,
+    },
+    {
+        "run_id": "1122334455667788",
+        "parent_run_id": None,
+        "agent_type": "aider",
+        "todo_id": 1577,
+        "pp_ref": "PP-SIMPLEJOBS-001",
+        "host": "tgw-prod",
+        "git_branch": "todo/1577-fix",
+        "started_at": datetime(2026, 7, 19, 9, 0, tzinfo=timezone.utc),
+        "ended_at": datetime(2026, 7, 19, 9, 2, tzinfo=timezone.utc),
+        "status": "failed",
+        "summary": "<b>bad</b> exit",
+        "transcript_path": "/opt/TGW/var/agent-traces/2026-07-19/1122334455667788.jsonl",
+    },
+]
+
+
+def test_runs_form_renders_rows(client, monkeypatch):
+    _login(client)
+    from tgw.queue import state_machine
+    monkeypatch.setattr(state_machine, "list_agent_runs", lambda *a, **k: list(_RUN_ROWS))
+    r = client.get("/form/runs")  # no auth header — network trust
+    assert r.status_code == 200
+    text = r.text
+    assert "Agent Runs" in text
+    assert "tgw-coder" in text and "claude-session" in text and "aider" in text
+    assert "3 run(s)" in text
+    assert "PP-AGENTTRACE-001" in text
+    assert "#1580" in text
+
+
+def test_runs_form_empty_all_clear(client, monkeypatch):
+    _login(client)
+    from tgw.queue import state_machine
+    monkeypatch.setattr(state_machine, "list_agent_runs", lambda *a, **k: [])
+    r = client.get("/form/runs")
+    assert r.status_code == 200
+    assert "No agent runs recorded" in r.text
+
+
+def test_runs_form_db_error_still_200(client, monkeypatch):
+    _login(client)
+    from tgw.queue import state_machine
+
+    def _boom(*a, **k):
+        raise RuntimeError("pg down")
+
+    monkeypatch.setattr(state_machine, "list_agent_runs", _boom)
+    r = client.get("/form/runs")
+    assert r.status_code == 200
+    assert "unavailable" in r.text.lower()
+
+
+def test_runs_form_requires_session(client):
+    r = client.get("/form/runs", follow_redirects=False)
+    assert r.status_code == 303
+    assert "/login" in r.headers["location"]
+
+
+def test_runs_form_escapes_html(client, monkeypatch):
+    _login(client)
+    from tgw.queue import state_machine
+    rows = [dict(_RUN_ROWS[2])]
+    monkeypatch.setattr(state_machine, "list_agent_runs", lambda *a, **k: rows)
+    r = client.get("/form/runs")
+    assert r.status_code == 200
+    assert "<b>bad</b>" not in r.text
+    assert "&lt;b&gt;bad&lt;/b&gt;" in r.text
+
+
+def test_runs_form_status_color_coding(client, monkeypatch):
+    _login(client)
+    from tgw.queue import state_machine
+    monkeypatch.setattr(state_machine, "list_agent_runs", lambda *a, **k: list(_RUN_ROWS))
+    r = client.get("/form/runs")
+    assert 'st-completed">completed' in r.text
+    assert 'st-failed">failed' in r.text
+    assert 'st-running">running' in r.text
+
+
+def test_runs_form_has_filter_controls(client, monkeypatch):
+    _login(client)
+    from tgw.queue import state_machine
+    monkeypatch.setattr(state_machine, "list_agent_runs", lambda *a, **k: list(_RUN_ROWS))
+    r = client.get("/form/runs")
+    assert 'id="runs-agent-sel"' in r.text
+    assert 'id="runs-status-sel"' in r.text
+    assert 'id="runs-search"' in r.text
+
+
+def test_runs_form_transcript_path_shown_as_text(client, monkeypatch):
+    """Transcript paths render as escaped text, not a clickable link — no
+    file-serving route exists for /opt/TGW/var/agent-traces/ (packet spec
+    item 4, flagged limitation)."""
+    _login(client)
+    from tgw.queue import state_machine
+    monkeypatch.setattr(state_machine, "list_agent_runs", lambda *a, **k: list(_RUN_ROWS))
+    r = client.get("/form/runs")
+    assert "/opt/TGW/var/agent-traces/2026-07-20/abcdef0123456789.jsonl" in r.text
+    assert '<a href="/opt/TGW/var/agent-traces' not in r.text
+
+
+def test_runs_form_uses_static_css(client, monkeypatch):
+    _login(client)
+    from tgw.queue import state_machine
+    monkeypatch.setattr(state_machine, "list_agent_runs", lambda *a, **k: list(_RUN_ROWS))
+    r = client.get("/form/runs")
+    assert '/static/tgw.css' in r.text
+    assert '/static/nav.css' in r.text
+    assert '/static/tgw.js' in r.text
+    assert '/static/nav.js' in r.text
+
+
+def test_render_runs_html_pure():
+    """Direct unit test of _render_runs_html() with synthetic rows — pure
+    enough to test without the HTTP layer, per packet acceptance item 5."""
+    from tgw.http_server import _render_runs_html
+
+    html_out = _render_runs_html(list(_RUN_ROWS))
+    assert "Agent Runs" in html_out
+    assert "3 run(s)" in html_out
+    assert "abcdef012345" in html_out  # truncated run id (12 chars)
+    assert '<b>bad</b>' not in html_out
+    assert '&lt;b&gt;bad&lt;/b&gt;' in html_out
+
+
+def test_render_runs_html_empty():
+    from tgw.http_server import _render_runs_html
+
+    html_out = _render_runs_html([])
+    assert "No agent runs recorded" in html_out
 
 
 # ---------------------------------------------------------------------------
@@ -1693,6 +2321,18 @@ def test_item_detail_uses_static_css(env):
     assert '/static/tgw.js' in r.text
     assert '/static/nav.js' in r.text
     assert 'font-family:system-ui' not in r.text
+
+
+def test_item_detail_no_stale_dole_cycle_claim(env):
+    """audit#1143 #1113: approveForListing() was dead code (never called --
+    the checkbox uses toggleApprove()) still shipping a confirm() dialog
+    that falsely claimed items 'will go live at the next dole cycle' even
+    though the ebay_dole worker was never installed. Removed."""
+    _login(env["client"])
+    r = env["client"].get(f"/form/items/{SKU_A}")
+    assert r.status_code == 200
+    assert "next dole cycle" not in r.text
+    assert "approveForListing" not in r.text
 
 
 # ---------------------------------------------------------------------------
@@ -2848,7 +3488,15 @@ def test_photo_order_enqueues_via_shared_helper(client, enqueue_calls):
     """audit#1143 (#1198): set_photo_order used to duplicate the
     catalog_rebuild enqueue inline instead of calling
     _enqueue_catalog_rebuild(); verify it now goes through the shared
-    helper (same dedupe key, same coalescing behavior)."""
+    helper (same dedupe key, same coalescing behavior).
+
+    PP-CATALOG-INCR-001 CI-3 (2026-07-18): a photo_order write also enqueues
+    thumbnail_gen via _apply_patch's new conditional trigger (only fires
+    when the write touches image/photo_order).
+
+    PP-CATALOG-INCR-001 CI-4 (2026-07-18): catalog_rebuild's enqueue is now
+    a no-op (SQLite catalog stays live via CI-2's synchronous upsert
+    instead), so only the thumbnail_gen call remains."""
     r = client.post(
         f"/api/items/{SKU_A}/photo-order",
         json={"order": ["a.jpg"]},
@@ -2856,10 +3504,10 @@ def test_photo_order_enqueues_via_shared_helper(client, enqueue_calls):
     )
     assert r.status_code == 200
     assert len(enqueue_calls) == 1
-    kwargs = enqueue_calls[0]["kwargs"]
-    assert kwargs["queue_name"] == "catalog_rebuild"
-    assert kwargs["dedupe_key"] == "catalog_rebuild:pending"
-    assert kwargs["payload"]["reason"] == f"photo_order:{SKU_A}"
+    tg_kwargs = enqueue_calls[0]["kwargs"]
+    assert tg_kwargs["queue_name"] == "thumbnail_gen"
+    assert tg_kwargs["dedupe_key"] == f"thumbnail_gen:{SKU_A}"
+    assert tg_kwargs["payload"]["sku"] == SKU_A
 
 
 # ---------------------------------------------------------------------------
@@ -3043,23 +3691,12 @@ def test_discard_revision_removes_draft(env):
     assert "revision_draft" not in saved
 
 
-def test_discard_revision_persists_finding_when_rebuild_enqueue_fails(env, monkeypatch):
-    """code-review follow-up: discard_revision's comment claimed a C11
-    finding was persisted on a failed catalog_rebuild enqueue, but the code
-    only logged a warning -- fix must actually write pipeline_error."""
-    _write_item_with_revision(env["itemdata_root"], SKU_A, _REVISION_DRAFT)
-    client = env["client"]
-
-    def _boom(*a, **k):
-        raise RuntimeError("postgres unavailable")
-
-    monkeypatch.setattr(http_server.state_machine, "enqueue_job", _boom)
-
-    r = client.delete(f"/api/items/{SKU_A}/revision", headers=AUTH_HEADERS)
-    assert r.status_code == 200
-
-    saved = json.loads((env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text())
-    assert saved["pipeline_error"]["code"] == "revision_discard_rebuild_not_queued"
+# test_discard_revision_persists_finding_when_rebuild_enqueue_fails removed
+# 2026-07-18 (PP-CATALOG-INCR-001 CI-4): the catalog_rebuild-enqueue + C11
+# not-queued guard it exercised was deleted from discard_revision — CI-2's
+# synchronous SQLite upsert (already run by the _apply_patch just above it)
+# makes that guard dead weight, so there's no longer a queue-enqueue-failure
+# path in this endpoint to test.
 
 
 def test_discard_revision_noop_when_absent(env):
@@ -3240,6 +3877,859 @@ def test_approve_action_404_on_missing_sku(client):
 def test_approve_action_requires_auth(client):
     r = client.post(f"/api/items/{SKU_A}/action", json={"action": "approve"})
     assert r.status_code in (401, 403)
+
+
+def test_accept_proposals_persists_item_specifics_edit(env, monkeypatch):
+    """POST action=accept_proposals actually writes accepted item_specifics
+    into draft_listing.item_specifics (Set B) on disk when item_specifics
+    already existed.
+
+    todo #1416 point 4: this used to write into item_attributes (Set A) —
+    a boundary bug, since sync.py's actual eBay push (_build_offer_bodies)
+    reads ONLY draft_listing.item_specifics. Regression test for #1291
+    (an identity-comparison bug on a mutated-in-place dict silently
+    discarded this edit) is preserved by asserting the write actually
+    lands, now against the corrected target set."""
+    monkeypatch.setattr(http_server.state_machine, "enqueue_job", lambda *a, **k: "job-fake")
+
+    draft = dict(_DRAFT_LISTING)
+    draft["item_specifics"] = {"Brand": "OldBrand", "Color": "Red"}
+    _write_item_with_draft(
+        env["itemdata_root"], SKU_A, draft,
+        extra={
+            "revision_draft": {
+                "delta": {"item_specifics": {"Brand": "NewBrand", "Size": "Large"}}
+            },
+        },
+    )
+
+    client = env["client"]
+    r = client.post(
+        f"/api/items/{SKU_A}/action",
+        json={"action": "accept_proposals"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+
+    json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    # todo #1416: Set B envelope — read via the sanctioned accessor, not
+    # the bare dict directly.
+    isp_fields = draft_specifics.get_ebay_aspects(doc)
+    assert isp_fields["Brand"] == "NewBrand"
+    assert isp_fields["Color"] == "Red"
+    assert isp_fields["Size"] == "Large"
+    assert doc["draft_listing"]["item_specifics"]["_set"] == "ebay_draft"
+    assert len(doc["draft_listing"]["item_specifics_history"]) >= 1
+    # Padlock auto-sync (Dave, 2026-07-18) supersedes this test's original
+    # assertion: any draft_listing save now pushes unlocked keys into
+    # item_attributes by design (see inventory_record.sync_from_draft),
+    # so the accepted values SHOULD land there too — nothing here is locked.
+    ia_fields = inventory_record.get_inventory_fields(doc)
+    assert ia_fields["Brand"] == "NewBrand"
+    assert ia_fields["Size"] == "Large"
+    assert doc.get("revision_draft") is None
+
+
+def test_accept_proposals_persists_draft_listing_title_description(env, monkeypatch):
+    """Same regression as above, for draft_listing title/description edits."""
+    monkeypatch.setattr(http_server.state_machine, "enqueue_job", lambda *a, **k: "job-fake")
+
+    _write_item_with_draft(
+        env["itemdata_root"], SKU_A, dict(_DRAFT_LISTING),
+        extra={
+            "revision_draft": {
+                "delta": {
+                    "title": "Corrected Title",
+                    "description": "Corrected description text.",
+                }
+            },
+        },
+    )
+
+    client = env["client"]
+    r = client.post(
+        f"/api/items/{SKU_A}/action",
+        json={"action": "accept_proposals"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+    json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert doc["draft_listing"]["title"] == "Corrected Title"
+    assert doc["draft_listing"]["description"] == "Corrected description text."
+    # Runner-review regression (todo #1416): accept_proposals is a separate
+    # endpoint from patch_item() — the #1415 fix (regenerate
+    # listing_description whenever description changes) lives only in
+    # patch_item(), so accept_proposals must regenerate it independently or
+    # the exact stale-push bug #1415 fixed comes back through this door.
+    assert "Corrected description text." in doc["draft_listing"]["listing_description"]
+    # Original draft_listing fields untouched by the merge
+    assert doc["draft_listing"]["price"] == _DRAFT_LISTING["price"]
+    assert doc.get("revision_draft") is None
+
+
+def test_accept_proposals_item_specifics_absent_before(env, monkeypatch):
+    """When draft_listing.item_specifics did not exist before, accept_proposals
+    still creates it correctly (Set B, not Set A)."""
+    monkeypatch.setattr(http_server.state_machine, "enqueue_job", lambda *a, **k: "job-fake")
+
+    _write_item_with_draft(
+        env["itemdata_root"], SKU_A, _DRAFT_LISTING,
+        extra={
+            "revision_draft": {
+                "delta": {"item_specifics": {"Brand": "FreshBrand"}}
+            },
+        },
+    )
+
+    client = env["client"]
+    r = client.post(
+        f"/api/items/{SKU_A}/action",
+        json={"action": "accept_proposals"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+    json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert draft_specifics.get_ebay_aspects(doc)["Brand"] == "FreshBrand"
+    # Padlock auto-sync (Dave, 2026-07-18): unlocked keys now follow the
+    # draft into item_attributes on every save — supersedes this test's
+    # original "must not land in Set A" assertion.
+    assert inventory_record.get_inventory_fields(doc)["Brand"] == "FreshBrand"
+
+
+def test_item_detail_inventory_record_panel_shows_set_a_unblended(env):
+    """todo #1416 point 5: the Inventory Record panel ("Canonical TGW
+    data — never overwritten by marketplace sync") must show Set A
+    (item_attributes) values unblended with Set B — no single displayed
+    value may be ambiguous about which set it came from."""
+    _login(env["client"])
+    sku = "tgw20260615110000020"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Drift Test Widget",
+        "location": "X9",
+        "item_attributes": {"Type": "Lapel Pin", "Brand": "Unbranded"},
+        "draft_listing": {
+            "item_specifics": {"Type": "Brooch", "Brand": "Unbranded"},
+        },
+    })
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    # Set A's own value ("Lapel Pin") is shown as the primary value.
+    assert "Lapel Pin" in r.text
+    # The differing Set B value is shown as a clearly-labeled secondary
+    # line, never silently overwritten or blended into the same key.
+    assert "eBay value: Brooch" in r.text
+    # An overlapping key that AGREES between the two sets must not print
+    # a redundant "eBay value:" line (only genuine drift is called out).
+    assert "eBay value: Unbranded" not in r.text
+
+
+def test_item_detail_inventory_record_panel_offers_add_to_listing_for_set_a_only_keys(env):
+    """Todo #1475 (Dave, 2026-07-16): "the initial item draft view after
+    import should show all filled fields, not just the ones the eBay
+    category requires or recommends... gives the operator all the data we
+    have to choose from." A Set A key with no Set B counterpart gets a
+    "+ Add to listing" button wired to addFromInventory(); a key already
+    present in Set B (whether it agrees or differs) does not."""
+    _login(env["client"])
+    sku = "tgw20260615110000057"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Add To Listing Button Test",
+        "location": "X9",
+        "item_attributes": {"Type": "Lapel Pin", "Brand": "Unbranded", "Era": "1980s"},
+        "draft_listing": {
+            "item_specifics": {"Type": "Brooch", "Brand": "Unbranded"},
+        },
+    })
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    # "Era" has no Set B counterpart -> gets the add-to-listing button.
+    assert 'addFromInventory("Era","1980s",this)' in r.text
+    # "Type"/"Brand" already exist in Set B (whether differing or agreeing)
+    # -> no button for either.
+    assert 'addFromInventory("Type"' not in r.text
+    assert 'addFromInventory("Brand"' not in r.text
+    assert "function addFromInventory(" in r.text
+    assert "function buildAspectRow(" in r.text
+
+
+def test_item_detail_aspects_form_prefills_from_set_b_not_set_a(env):
+    """todo #1416 point 3: the eBay Draft Editor's aspects form
+    (window._DL_PREFILL) must prefill from draft_listing.item_specifics
+    (Set B) — NOT item_attributes (Set A). Before this fix, an operator's
+    typed edit in this form silently wrote to item_attributes and never
+    reached the eBay push path."""
+    _login(env["client"])
+    sku = "tgw20260615110000021"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Prefill Test Widget",
+        "location": "X9",
+        "item_attributes": {"Type": "Lapel Pin"},
+        "draft_listing": {"item_specifics": {"Type": "Brooch"}},
+    })
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    assert 'window._DL_PREFILL = {"Type": "Brooch"}' in r.text
+    assert "Lapel Pin" not in r.text.split("window._DL_PREFILL")[1][:200]
+
+
+def test_item_detail_js_renders_stored_aspects_outside_category_list(env):
+    """Todo #1470: the aspects form used to render inputs ONLY for the
+    fields the CURRENT category's official aspect list defines — any
+    stored draft_listing.item_specifics field NOT in that list was
+    completely invisible/uneditable, even though _build_offer_bodies()
+    pushes it to eBay unconditionally regardless of category-schema
+    membership (confirmed live: 18 of 20 real live aspects on a real item
+    were hidden this way, following a category change that left
+    now-mismatched aspects stranded). This locks in that the served page's
+    JS contains the "render every remaining prefill key too" loop.
+
+    Revised per Dave's correction, same day: these fields are eBay's own
+    legitimate "custom aspect" capability, not just category-mismatch
+    debris — badge reads "CUSTOM ASPECT", not an error-sounding label, and
+    a real "add custom aspect" control exists so an operator can create one
+    on purpose going forward, not just inherit stray ones by accident."""
+    _login(env["client"])
+    sku = "tgw20260615110000044"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Extra Aspects Widget", "location": "X9",
+        "draft_listing": {"item_specifics": {"Material": "Porcelain", "Color": "Orange"}},
+    })
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    assert "CUSTOM ASPECT" in r.text
+    assert "NOT IN CATEGORY" not in r.text
+    assert "Object.keys(prefill).forEach(function(name){" in r.text
+    assert "if(covered[name])return;" in r.text
+    assert 'id="new-aspect-name"' in r.text
+    assert 'id="new-aspect-value"' in r.text
+    assert "function addCustomAspect(){" in r.text
+
+
+def test_item_detail_save_ebay_draft_js_sends_cleared_aspects(env):
+    """Todo #1461: saveEbayDraft() used to gate aspect inclusion on
+    `if(v)` — clearing a field's value produced v==='' which was silently
+    dropped from the save payload, so the backend never saw the attempted
+    change and the old value stuck forever (Dave, live: "I have repeatedly
+    deleted material... that field reverts every time"). Fix compares each
+    input's current value against its `data-initial` (rendered value) and
+    sends the key whenever it changed, including a change to empty. This
+    locks in that the served page no longer contains the old silent-drop
+    pattern and does contain the fixed comparison."""
+    _login(env["client"])
+    sku = "tgw20260615110000032"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Aspect Clear Test Widget", "location": "X9",
+        "draft_listing": {"item_specifics": {"Material": "Silver"}},
+    })
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    assert "if(v!==init)attrs[k]=v;" in r.text
+    assert "if(v)attrs[k]=v;" not in r.text
+    assert "data-initial=" in r.text  # rendered by loadCatCtx(), not this response, but the setter must exist
+
+
+def test_category_context_js_shows_off_list_selection_value():
+    """Todo #1467 (Dave, 2026-07-16): a filled-in, normal ('same' layer,
+    not custom/orphaned) aspect that uses a SELECTION_ONLY control (a
+    `<select>`) rendered with NO `<option>` marked selected whenever its
+    stored value wasn't among the CURRENT category's allowed_values (e.g.
+    after a category change narrowed the option list) — real live case:
+    Material="Cloisonne" on tgw202605051207245, category "Porcelain" only
+    allows Material="Porcelain". With no <option selected>, the browser
+    silently falls back to the first/blank option, so a genuinely filled
+    field rendered indistinguishable from an empty one ("Dave initially
+    didn't see it was filled"). Not a data bug — the stored value was
+    correct throughout, only the <select>'s rendering discarded it.
+
+    Fix mirrors the pre-existing `dl-condition-select` "not valid for this
+    category, please fix" fallback-option pattern a few lines above this
+    exact code in `_CATEGORY_CONTEXT_IIFE`: when the current value isn't in
+    allowed_values, prepend an extra selected <option> carrying the real
+    value (with a "not in this category's list" hint) instead of silently
+    dropping it. This locks in that the served JS contains that fallback."""
+    src = http_server._CATEGORY_CONTEXT_IIFE
+    assert "SELECTION_ONLY" in src
+    assert "var offList=cur&&asp.allowed_values.indexOf(cur)===-1;" in src
+    assert "if(offList)opts=" in src
+    assert "not in this category" in src
+
+
+# ---------------------------------------------------------------------------
+# Todo #1464 (Tigwa's field-set-boundary audit, invariant C12/C14): the
+# generic PATCH endpoint must not accept a caller-supplied full Set A/Set B
+# envelope from a non-machine caller — that bypasses the sanctioned
+# accessor's own diff/provenance logic entirely. A bare partial dict must
+# keep working exactly as before (that's #1461's aspects-form save path).
+# ---------------------------------------------------------------------------
+
+
+def test_patch_rejects_bare_envelope_item_attributes_from_operator(env):
+    sku = "tgw20260615110000040"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Envelope Guard Widget", "location": "X9",
+        "item_attributes": {"Type": "Brooch"},
+    })
+    forged_envelope = {
+        "_set": "inventory_record", "version": 1,
+        "updated_at": "2026-01-01T00:00:00+00:00",
+        "fields": {"Type": "SOMETHING ELSE ENTIRELY"},
+    }
+    r = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"item_attributes": forged_envelope}},
+        headers=AUTH_HEADERS,  # no X-TGW-Caller — operator/browser-shaped request
+    )
+    assert r.status_code == 422
+    doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
+    assert doc["item_attributes"] == {"Type": "Brooch"}  # untouched
+
+
+def test_patch_rejects_bare_envelope_item_specifics_from_operator(env):
+    sku = "tgw20260615110000041"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Envelope Guard Widget B", "location": "X9",
+        "draft_listing": {"item_specifics": {"Material": "Silver"}},
+    })
+    forged_envelope = {
+        "_set": "ebay_draft", "version": 1,
+        "updated_at": "2026-01-01T00:00:00+00:00",
+        "fields": {"Material": "SOMETHING ELSE ENTIRELY"},
+    }
+    r = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"draft_listing": {"item_specifics": forged_envelope}}},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 422
+    doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
+    assert doc["draft_listing"]["item_specifics"] == {"Material": "Silver"}  # untouched
+
+
+def test_patch_allows_envelope_item_attributes_from_machine_caller(env):
+    """ai_identify.py builds the envelope itself via set_inventory_fields()
+    before ever reaching HTTP — the fence PATCH is just transport for an
+    already-sanctioned write. Must keep working."""
+    sku = "tgw20260615110000042"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Machine Envelope Widget", "location": "X9",
+        "item_attributes": {"Type": "Lapel Pin"},
+    })
+    real_envelope = {
+        "_set": "inventory_record", "version": 1,
+        "updated_at": "2026-07-16T00:00:00+00:00",
+        "updated_at_backfilled": False,
+        "fields": {"Type": "Brooch"},
+    }
+    r = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"item_attributes": real_envelope}},
+        headers={**AUTH_HEADERS, "X-TGW-Caller": "background:worker:ai_identify"},
+    )
+    assert r.status_code == 200
+    doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
+    assert doc["item_attributes"]["fields"] == {"Type": "Brooch"}
+
+
+def test_patch_still_allows_bare_partial_item_specifics_from_operator(env):
+    """The eBay Draft Editor's normal save path (#1461) sends a bare
+    partial dict, not an envelope — must be completely unaffected by the
+    new envelope gate."""
+    sku = "tgw20260615110000043"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Bare Dict Still Works Widget", "location": "X9",
+        "draft_listing": {"item_specifics": {"Material": "Silver"}},
+    })
+    r = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"draft_listing": {"item_specifics": {"Material": ""}}}},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
+    assert doc["draft_listing"]["item_specifics"]["fields"]["Material"] == ""
+
+
+# ---------------------------------------------------------------------------
+# todo #1417: eBay Draft -> Inventory Record reverse-flow endpoints. A
+# DIFFERENT code path from accept_proposals above (different data source
+# Set B -> different destination Set A, own button, no shared action name
+# — spec point 6/3) — verified as real, separate HTTP endpoints, not a
+# unit test of internal functions in isolation.
+# ---------------------------------------------------------------------------
+
+def test_inventory_diff_get_surfaces_mismatch(env):
+    sku = "tgw20260615110000030"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Diff Test Widget", "location": "X9",
+        "item_attributes": {"Type": "Lapel Pin", "Brand": "Unbranded"},
+        "draft_listing": {
+            "item_specifics": {"Type": "Brooch", "Brand": "Unbranded", "Metal": "Silver"},
+        },
+    })
+    r = env["client"].get(f"/api/items/{sku}/inventory-diff", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    keys = {d["key"] for d in body["diffs"]}
+    assert keys == {"Type", "Metal"}
+    type_diff = next(d for d in body["diffs"] if d["key"] == "Type")
+    assert type_diff["inventory_value"] == "Lapel Pin"
+    assert type_diff["ebay_value"] == "Brooch"
+    metal_diff = next(d for d in body["diffs"] if d["key"] == "Metal")
+    assert metal_diff["inventory_value"] is None  # new fact, not a correction
+
+
+def test_inventory_diff_get_requires_auth(client):
+    sku = "tgw20260615110000031"
+    r = client.get(f"/api/items/{sku}/inventory-diff")
+    assert r.status_code in (401, 403)
+
+
+def test_inventory_diff_get_404_unknown_sku(env):
+    r = env["client"].get("/api/items/tgw99999999999999999/inventory-diff", headers=AUTH_HEADERS)
+    assert r.status_code == 404
+
+
+def test_inventory_diff_get_read_only_no_mutation(env):
+    """Spec point 2: the GET endpoint never mutates anything, callable any
+    time."""
+    sku = "tgw20260615110000032"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Read Only Test", "location": "X9",
+        "item_attributes": {"Type": "Lapel Pin"},
+        "draft_listing": {"item_specifics": {"Type": "Brooch"}},
+    })
+    json_path = env["itemdata_root"] / sku / f"{sku}.json"
+    before = json_path.read_text(encoding="utf-8")
+    r = env["client"].get(f"/api/items/{sku}/inventory-diff", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    after = json_path.read_text(encoding="utf-8")
+    assert before == after
+
+
+def test_inventory_diff_apply_writes_only_checked_keys(env, monkeypatch):
+    """Acceptance item 2: uncheck one field, submit, confirm only the
+    checked field landed in item_attributes with provenance, and the
+    unchecked one still shows as an open diff afterward."""
+    monkeypatch.setattr(http_server, "_enqueue_catalog_rebuild", lambda *a, **k: None)
+    sku = "tgw20260615110000033"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Apply Test Widget", "location": "X9",
+        "item_attributes": {"Type": "Lapel Pin"},
+        "draft_listing": {
+            "item_specifics": {"Type": "Brooch", "Metal": "Silver"},
+            "item_specifics_history": [
+                {"ts": "2026-07-01T00:00:00+00:00", "key": "Type",
+                 "value": "Brooch", "previous_value": "Lapel Pin",
+                 "source": "ebay_draft", "applied_by": "system"},
+                {"ts": "2026-07-01T00:00:00+00:00", "key": "Metal",
+                 "value": "Silver", "previous_value": None,
+                 "source": "ebay_draft", "applied_by": "system"},
+            ],
+        },
+    })
+
+    client = env["client"]
+    # Operator unchecked "Metal" in the UI — only "Type" submitted.
+    r = client.post(
+        f"/api/items/{sku}/inventory-diff/apply",
+        json={"keys": ["Type"]},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["applied"] == ["Type"]
+
+    json_path = env["itemdata_root"] / sku / f"{sku}.json"
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    ia_fields = inventory_record.get_inventory_fields(doc)
+    assert ia_fields["Type"] == "Brooch"
+    assert "Metal" not in ia_fields  # not checked, not applied
+    hist = doc["item_attributes_history"]
+    assert hist[-1]["key"] == "Type"
+    assert hist[-1]["source"] == "ebay_draft"
+    assert hist[-1]["applied_by"] == "operator"
+    assert hist[-1]["detected_at"] == "2026-07-01T00:00:00+00:00"
+
+    # The un-checked/skipped key still shows as an open diff — no sticky
+    # dismissed state (spec point 5).
+    r2 = client.get(f"/api/items/{sku}/inventory-diff", headers=AUTH_HEADERS)
+    remaining_keys = {d["key"] for d in r2.json()["diffs"]}
+    assert remaining_keys == {"Metal"}
+
+
+def test_inventory_diff_apply_does_not_touch_draft_listing_or_revision_draft(env, monkeypatch):
+    """Spec point 6: this packet's apply action shares no write path with
+    accept_proposals/revision_draft — draft_listing must be untouched."""
+    monkeypatch.setattr(http_server, "_enqueue_catalog_rebuild", lambda *a, **k: None)
+    sku = "tgw20260615110000034"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Isolation Test Widget", "location": "X9",
+        "item_attributes": {"Type": "Lapel Pin"},
+        "draft_listing": {"item_specifics": {"Type": "Brooch"}, "price": 14.99},
+        "revision_draft": {"delta": {"title": "Unrelated pipeline proposal"}},
+    })
+    client = env["client"]
+    r = client.post(
+        f"/api/items/{sku}/inventory-diff/apply",
+        json={"keys": ["Type"]},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    json_path = env["itemdata_root"] / sku / f"{sku}.json"
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert doc["draft_listing"]["price"] == 14.99
+    assert draft_specifics.get_ebay_aspects(doc)["Type"] == "Brooch"  # Set B untouched
+    assert doc["revision_draft"]["delta"]["title"] == "Unrelated pipeline proposal"
+
+
+def test_inventory_diff_apply_idempotent_no_op_when_stale(env, monkeypatch):
+    """A key requested that is no longer an active diff (Set A/Set B
+    already agree by the time of the call) is a silent no-op, not an
+    error — re-diffing live, never trusting caller-supplied values."""
+    monkeypatch.setattr(http_server, "_enqueue_catalog_rebuild", lambda *a, **k: None)
+    sku = "tgw20260615110000035"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Stale Apply Test", "location": "X9",
+        "item_attributes": {"Type": "Brooch"},
+        "draft_listing": {"item_specifics": {"Type": "Brooch"}},
+    })
+    client = env["client"]
+    r = client.post(
+        f"/api/items/{sku}/inventory-diff/apply",
+        json={"keys": ["Type"]},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["applied"] == []
+
+
+def test_inventory_diff_apply_requires_auth(client):
+    sku = "tgw20260615110000036"
+    r = client.post(f"/api/items/{sku}/inventory-diff/apply", json={"keys": ["Type"]})
+    assert r.status_code in (401, 403)
+
+
+def test_draft_save_auto_syncs_unlocked_key_to_inventory_record(env, enqueue_calls):
+    """Padlock design (Dave, 2026-07-18): saving a draft_listing edit
+    pushes unlocked keys into item_attributes automatically — no separate
+    diff-review step needed for the common case."""
+    sku = "tgw20260615110000040"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Elephant Widget", "location": "X9",
+        "item_attributes": {"_set": "inventory_record", "version": 1,
+                             "updated_at": "2026-07-01T00:00:00+00:00",
+                             "updated_at_backfilled": False,
+                             "fields": {"Type": "Elephant Figurine"}},
+        "draft_listing": {"title": "Elephant Widget",
+                           "item_specifics": {"Type": "Elephant Figurine"}},
+    })
+    r = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"draft_listing": {"item_specifics": {"Type": "Mouse Figurine"}}}},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
+    ia = inventory_record.get_inventory_fields(doc)
+    assert ia["Type"] == "Mouse Figurine"
+
+
+def test_draft_save_auto_syncs_title_and_description_top_level(env, enqueue_calls):
+    """Second live bug (Dave, 2026-07-18): the padlock sync only reached
+    item_attributes aspects, not the top-level title/description fields
+    the page header and fields panel actually display. Both now sync the
+    same way, keyed by "title"/"description" in the shared locked_keys list."""
+    sku = "tgw20260615110000044"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Elephant Thimble", "description": "An elephant.",
+        "location": "X9",
+        "draft_listing": {"title": "Elephant Thimble", "description": "An elephant."},
+    })
+    r = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"draft_listing": {
+            "title": "Mouse Thimble", "description": "A mouse.",
+        }}},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
+    assert doc["title"] == "Mouse Thimble"
+    assert doc["description"] == "A mouse."
+
+
+def test_locked_title_does_not_auto_sync_from_draft_save(env, enqueue_calls):
+    """Locking "title" freezes the top-level field even though it isn't
+    an item_attributes aspect — same shared locked_keys mechanism."""
+    sku = "tgw20260615110000045"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Elephant Thimble", "location": "X9",
+        "item_attributes": {"_set": "inventory_record", "version": 1,
+                             "updated_at": "2026-07-01T00:00:00+00:00",
+                             "updated_at_backfilled": False,
+                             "fields": {}, "locked_keys": ["title"]},
+        "draft_listing": {"title": "Elephant Thimble"},
+    })
+    r = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"draft_listing": {"title": "Mouse Thimble"}}},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
+    assert doc["draft_listing"]["title"] == "Mouse Thimble"
+    assert doc["title"] == "Elephant Thimble"
+
+
+def test_locked_key_does_not_auto_sync_from_draft_save(env, enqueue_calls):
+    """A locked key stays frozen at its current value even when the draft
+    changes — the padlock is the only way a key stops following eBay."""
+    sku = "tgw20260615110000041"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Widget", "location": "X9",
+        "item_attributes": {"_set": "inventory_record", "version": 1,
+                             "updated_at": "2026-07-01T00:00:00+00:00",
+                             "updated_at_backfilled": False,
+                             "fields": {"Type": "Brooch"},
+                             "locked_keys": ["Type"]},
+        "draft_listing": {"item_specifics": {"Type": "Brooch"}},
+    })
+    r = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"draft_listing": {"item_specifics": {"Type": "Pendant"}}}},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
+    # Set B (the actual eBay draft) still updates normally...
+    assert draft_specifics.get_ebay_aspects(doc)["Type"] == "Pendant"
+    # ...but the locked Set A key stays frozen at its old value.
+    assert inventory_record.get_inventory_fields(doc)["Type"] == "Brooch"
+
+
+def test_inventory_lock_toggle_endpoint(env):
+    sku = "tgw20260615110000042"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Widget", "location": "X9",
+        "item_attributes": {"_set": "inventory_record", "version": 1,
+                             "updated_at": "2026-07-01T00:00:00+00:00",
+                             "updated_at_backfilled": False,
+                             "fields": {"Type": "Brooch"}},
+    })
+    r = env["client"].post(
+        f"/api/items/{sku}/inventory-lock",
+        json={"key": "Type", "locked": True},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
+    assert inventory_record.is_locked(doc, "Type") is True
+    # Locking never appends to item_attributes_history — it's metadata
+    # about sync behavior, not a fact about the item.
+    assert not doc.get("item_attributes_history")
+
+    r2 = env["client"].post(
+        f"/api/items/{sku}/inventory-lock",
+        json={"key": "Type", "locked": False},
+        headers=AUTH_HEADERS,
+    )
+    assert r2.status_code == 200
+    doc2 = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
+    assert inventory_record.is_locked(doc2, "Type") is False
+
+
+def test_inventory_lock_requires_auth(client):
+    sku = "tgw20260615110000043"
+    r = client.post(f"/api/items/{sku}/inventory-lock", json={"key": "Type", "locked": True})
+    assert r.status_code in (401, 403)
+
+
+def test_item_detail_page_renders_inv_diff_panel_container(env):
+    """Acceptance item 3: the reverse-flow panel is a distinct, separately
+    labeled panel from the forward "Pipeline proposed changes" banner —
+    both present on the same test item, never sharing an action name."""
+    _login(env["client"])
+    sku = "tgw20260615110000037"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Both Panels Test Widget", "location": "X9",
+        "item_attributes": {"Type": "Lapel Pin"},
+        "draft_listing": {"item_specifics": {"Type": "Brooch"}},
+        "revision_draft": {"delta": {"title": "Some pipeline title proposal"}},
+    })
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    # The reverse-flow panel container + its own distinct button/label.
+    assert 'id="inv-diff-panel"' in r.text
+    assert "eBay &rarr; Inventory Record sync" in r.text or "eBay → Inventory Record sync" in r.text
+    assert "applyInventoryDiff()" in r.text
+    assert "Apply Checked to Inventory Record" in r.text
+    # The forward banner is also present and uses a DIFFERENT button/action.
+    assert "Pipeline proposed changes" in r.text
+    assert "acceptProposals()" in r.text
+    assert "Accept All Proposals" in r.text
+    # No shared action name between the two.
+    assert "applyInventoryDiff" != "acceptProposals"
+
+
+# ---------------------------------------------------------------------------
+# todo #1471: category-aspect migration endpoints. A category change can
+# strand Set B aspects the CURRENT category no longer recognizes — eBay's
+# own Seller Hub discards those; TGW's push doesn't (todo #1470's companion
+# finding). This matches eBay's discard-as-default WITHOUT deleting data —
+# checked keys move to item_attributes (Set A), unchecked stay on eBay.
+# Deliberately its own code path from inventory-diff above (spec point 6).
+# ---------------------------------------------------------------------------
+
+def _mock_category_aspects(monkeypatch, names):
+    import tgw.ebay.category_aspect_migration as cam_mod
+    monkeypatch.setattr(cam_mod, "get_aspects",
+                        lambda cfg, category_id: [{"name": n} for n in names])
+
+
+def test_category_aspect_migration_get_surfaces_orphans(env, monkeypatch):
+    _mock_category_aspects(monkeypatch, ["Material"])
+    sku = "tgw20260615110000050"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Orphan Test Widget", "location": "X9",
+        "draft_listing": {
+            "category_id": "38064",
+            "item_specifics": {"Material": "Porcelain", "Color": "Orange", "Type": "Figurine"},
+        },
+    })
+    r = env["client"].get(f"/api/items/{sku}/category-aspect-migration", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert {o["key"] for o in body["orphaned"]} == {"Color", "Type"}
+
+
+def test_category_aspect_migration_get_requires_auth(client):
+    sku = "tgw20260615110000051"
+    r = client.get(f"/api/items/{sku}/category-aspect-migration")
+    assert r.status_code in (401, 403)
+
+
+def test_category_aspect_migration_get_404_unknown_sku(env):
+    r = env["client"].get(
+        "/api/items/tgw99999999999999999/category-aspect-migration", headers=AUTH_HEADERS)
+    assert r.status_code == 404
+
+
+def test_category_aspect_migration_get_read_only_no_mutation(env, monkeypatch):
+    _mock_category_aspects(monkeypatch, ["Material"])
+    sku = "tgw20260615110000052"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Read Only Migration Test", "location": "X9",
+        "draft_listing": {"category_id": "38064", "item_specifics": {"Color": "Orange"}},
+    })
+    json_path = env["itemdata_root"] / sku / f"{sku}.json"
+    before = json_path.read_text(encoding="utf-8")
+    r = env["client"].get(f"/api/items/{sku}/category-aspect-migration", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    assert json_path.read_text(encoding="utf-8") == before
+
+
+def test_category_aspect_migration_apply_moves_checked_keys(env, monkeypatch):
+    """Move Color to Set A, leave Type on eBay (not checked) — same
+    checked-subset discipline as the inventory-diff apply endpoint."""
+    monkeypatch.setattr(http_server, "_enqueue_catalog_rebuild", lambda *a, **k: None)
+    _mock_category_aspects(monkeypatch, ["Material"])
+    sku = "tgw20260615110000053"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Apply Migration Test Widget", "location": "X9",
+        "draft_listing": {
+            "category_id": "38064",
+            "item_specifics": {"Material": "Porcelain", "Color": "Orange", "Type": "Figurine"},
+        },
+    })
+    client = env["client"]
+    r = client.post(
+        f"/api/items/{sku}/category-aspect-migration/apply",
+        json={"keys": ["Color"]},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["migrated"] == ["Color"]
+
+    json_path = env["itemdata_root"] / sku / f"{sku}.json"
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    ia_fields = inventory_record.get_inventory_fields(doc)
+    assert ia_fields["Color"] == "Orange"
+    ebay_fields = draft_specifics.get_ebay_aspects(doc)
+    assert "Color" not in ebay_fields  # removed from Set B
+    assert ebay_fields == {"Material": "Porcelain", "Type": "Figurine"}  # untouched otherwise
+
+    # Removed key no longer shows as an orphan afterward — re-detected live.
+    r2 = client.get(f"/api/items/{sku}/category-aspect-migration", headers=AUTH_HEADERS)
+    remaining = {o["key"] for o in r2.json()["orphaned"]}
+    assert remaining == {"Type"}
+
+
+def test_category_aspect_migration_apply_idempotent_no_op_when_stale(env, monkeypatch):
+    monkeypatch.setattr(http_server, "_enqueue_catalog_rebuild", lambda *a, **k: None)
+    _mock_category_aspects(monkeypatch, ["Material", "Color"])
+    sku = "tgw20260615110000054"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Stale Migration Test", "location": "X9",
+        "draft_listing": {
+            "category_id": "38064",
+            "item_specifics": {"Material": "Porcelain", "Color": "Orange"},
+        },
+    })
+    r = env["client"].post(
+        f"/api/items/{sku}/category-aspect-migration/apply",
+        json={"keys": ["Color"]},  # Color is NOT actually orphaned (in the mocked list)
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["migrated"] == []
+
+
+def test_category_aspect_migration_apply_requires_auth(client):
+    sku = "tgw20260615110000055"
+    r = client.post(f"/api/items/{sku}/category-aspect-migration/apply", json={"keys": ["Color"]})
+    assert r.status_code in (401, 403)
+
+
+def test_item_detail_page_renders_inline_aspect_keep_checkbox_wiring(env):
+    """Todo #1472 (Dave, 2026-07-16): the old standalone migration panel is
+    retired — checkbox-to-discard for non-official aspects now lives inline
+    in #aspects-form and is driven by one Save Draft click, not a separate
+    always-checked confirm()+immediate-apply panel."""
+    _login(env["client"])
+    sku = "tgw20260615110000056"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku, "title": "Migration Panel Container Test", "location": "X9",
+        "draft_listing": {"category_id": "38064", "item_specifics": {"Color": "Orange"}},
+    })
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    assert 'id="cat-aspect-migration-panel"' not in r.text
+    assert "applyCategoryAspectMigration" not in r.text
+    assert "loadCategoryAspectMigration" not in r.text
+    assert "aspect-keep-cb" in r.text
+    assert "/category-aspect-migration/apply" in r.text
 
 
 def test_form_review_renders(client):
@@ -4173,3 +5663,825 @@ def test_item_detail_store_category_dropdowns_populate_and_select(env):
     # primary dropdown selects 111, secondary selects 222
     assert 'value="111" data-name="Books &amp; Media" selected' in text
     assert 'value="222" data-name="Electronics" selected' in text
+
+
+def test_item_detail_store_categories_do_not_fetch_ebay_during_render(env, monkeypatch):
+    """A normal item page must retain locally configured category choices even
+    when GetStore is unavailable; rendering must not call the live adapter."""
+    groups_path = env["groups_path"]
+    groups_path.write_text(
+        json.dumps({"groups": {
+            "books": {
+                "name": "Books",
+                "store_category": "Books & Media",
+                "store_category_id": "111",
+            },
+            "electronics": {
+                "name": "Electronics",
+                "store_category": "Electronics",
+                "store_category_id": "222",
+            },
+        }}),
+        encoding="utf-8",
+    )
+    sku = "tgw20260701000000079"
+    _write_item(env["itemdata_root"], sku, {"sku": sku, "title": "No Live Store Fetch"})
+    monkeypatch.setattr(
+        http_server,
+        "_live_store_categories",
+        lambda _cfg: (_ for _ in ()).throw(AssertionError("item rendering called GetStore")),
+    )
+    _login(env["client"])
+    response = env["client"].get(f"/form/items/{sku}")
+    assert response.status_code == 200
+    assert 'value="111" data-name="Books &amp; Media"' in response.text
+    assert 'value="222" data-name="Electronics"' in response.text
+
+
+def test_item_detail_store_categories_render_complete_ebay_snapshot_without_live_fetch(env, monkeypatch):
+    """Routine rendering uses the complete last-known-good eBay snapshot, not
+    the smaller category-group mapping and not a synchronous GetStore call."""
+    env["groups_path"].write_text(
+        json.dumps({"groups": {
+            "mapped": {"store_category": "Mapped only", "store_category_id": "111"},
+        }}),
+        encoding="utf-8",
+    )
+    catalog_root = env["groups_path"].parent / "catalog"
+    catalog_root.mkdir()
+    env["cfg"]["catalog_root"] = catalog_root
+    snapshot = catalog_root / "ebay-store-categories.json"
+    snapshot.write_text(json.dumps({
+        "source": "ebay_get_store",
+        "refreshed_at": "2026-07-28T12:00:00Z",
+        "results": [
+            {"id": "111", "name": "Books"},
+            {"id": "222", "name": "Electronics"},
+            {"id": "333", "name": "Unmapped but real"},
+        ],
+    }), encoding="utf-8")
+    sku = "tgw20260701000000081"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Snapshot-backed categories",
+        "draft_listing": {"store_category_id": "333"},
+    })
+    monkeypatch.setattr(
+        http_server,
+        "_live_store_categories",
+        lambda _cfg: (_ for _ in ()).throw(AssertionError("item rendering called GetStore")),
+    )
+    _login(env["client"])
+    response = env["client"].get(f"/form/items/{sku}")
+    assert response.status_code == 200
+    assert 'value="111" data-name="Books"' in response.text
+    assert 'value="222" data-name="Electronics"' in response.text
+    assert 'value="333" data-name="Unmapped but real" selected' in response.text
+    assert "eBay snapshot: 3 categories" in response.text
+
+
+def test_store_category_refresh_persists_and_preserves_last_known_good(env, monkeypatch):
+    """A successful explicit refresh atomically replaces the snapshot; a later
+    provider failure returns and preserves that same last-known-good data."""
+    from tgw.apis.ebay import trading
+
+    catalog_root = env["groups_path"].parent / "catalog-refresh"
+    catalog_root.mkdir()
+    env["cfg"]["catalog_root"] = catalog_root
+    expected = [
+        {"id": "111", "name": "Books"},
+        {"id": "222", "name": "Electronics"},
+    ]
+    monkeypatch.setattr(trading, "get_store_categories", lambda _cfg: expected)
+    http_server._LIVE_STORE_CATS_CACHE.update({"data": None, "at": 0.0})
+
+    refreshed, fallback = http_server._live_store_categories(env["cfg"])
+    assert refreshed == expected
+    assert fallback is False
+    snapshot = catalog_root / "ebay-store-categories.json"
+    before = json.loads(snapshot.read_text())
+    assert before["results"] == expected
+    assert before["source"] == "ebay_get_store"
+    assert before["refreshed_at"]
+
+    monkeypatch.setattr(trading, "get_store_categories", lambda _cfg: [{"id": "333", "name": ""}])
+    http_server._LIVE_STORE_CATS_CACHE.update({"data": None, "at": 0.0})
+    retained, fallback = http_server._live_store_categories(env["cfg"])
+    assert retained == expected
+    assert fallback is True
+    assert json.loads(snapshot.read_text()) == before
+
+    monkeypatch.setattr(trading, "get_store_categories", lambda _cfg: [{"id": 333, "name": "Books"}])
+    http_server._LIVE_STORE_CATS_CACHE.update({"data": None, "at": 0.0})
+    retained, fallback = http_server._live_store_categories(env["cfg"])
+    assert retained == expected
+    assert fallback is True
+    assert json.loads(snapshot.read_text()) == before
+
+    monkeypatch.setattr(trading, "get_store_categories", lambda _cfg: (_ for _ in ()).throw(RuntimeError("offline")))
+    http_server._LIVE_STORE_CATS_CACHE.update({"data": None, "at": 0.0})
+    retained, fallback = http_server._live_store_categories(env["cfg"])
+    assert retained == expected
+    assert fallback is True
+    assert json.loads(snapshot.read_text()) == before
+
+
+def test_item_detail_fulfillment_policies_render_snapshot_without_live_fetch(env, monkeypatch):
+    """Routine item rendering reads the last-known-good policy snapshot and
+    never synchronously calls the eBay Account API."""
+    catalog_root = env["groups_path"].parent / "policy-catalog"
+    catalog_root.mkdir()
+    env["cfg"]["catalog_root"] = catalog_root
+    (catalog_root / "ebay-fulfillment-policies.json").write_text(json.dumps({
+        "source": "ebay_account_api",
+        "refreshed_at": "2026-07-28T12:00:00Z",
+        "fulfillment": {"POLICY-1": "Small parcel", "POLICY-2": "Large parcel"},
+        "return": {},
+    }), encoding="utf-8")
+    sku = "tgw20260701000000082"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Snapshot-backed shipping",
+        "draft_listing": {"shipping_profile": "POLICY-2"},
+    })
+    monkeypatch.setattr(
+        http_server,
+        "_live_fulfillment_policies",
+        lambda _cfg: (_ for _ in ()).throw(AssertionError("item rendering called Account API")),
+    )
+    _login(env["client"])
+    response = env["client"].get(f"/form/items/{sku}")
+    assert response.status_code == 200
+    assert 'value="POLICY-1"' in response.text
+    assert 'value="POLICY-2" selected' in response.text
+    assert "eBay snapshot: 2 fulfillment policies" in response.text
+
+    (catalog_root / "ebay-fulfillment-policies.json").write_text(json.dumps({
+        "source": "ebay_account_api",
+        "refreshed_at": "2026-07-28T12:00:00Z",
+        "fulfillment": {"POLICY-1": ["not", "a", "name"]},
+    }), encoding="utf-8")
+    policies, refreshed_at, error = http_server._fulfillment_policies_snapshot(env["cfg"])
+    assert policies == {}
+    assert refreshed_at is None
+    assert "valid" in error
+
+
+def test_fulfillment_refresh_persists_and_preserves_last_known_good(env, monkeypatch):
+    """Policy refresh updates only the fulfillment section and never destroys a
+    usable snapshot when the Account API later fails."""
+    from tgw.ebay import sync
+
+    catalog_root = env["groups_path"].parent / "policy-refresh"
+    catalog_root.mkdir()
+    env["cfg"]["catalog_root"] = catalog_root
+    snapshot = catalog_root / "ebay-fulfillment-policies.json"
+    snapshot.write_text(json.dumps({"return": {"RETURN-1": "Returns"}}), encoding="utf-8")
+    expected_rows = [
+        {"id": "POLICY-1", "name": "Small parcel"},
+        {"id": "POLICY-2", "name": "Large parcel"},
+    ]
+    monkeypatch.setattr(sync, "get_fulfillment_policies_full", lambda _cfg: expected_rows)
+    http_server._LIVE_FULFILLMENT_POLICIES_CACHE.update({"data": None, "at": 0.0})
+
+    refreshed, fallback = http_server._live_fulfillment_policies(env["cfg"])
+    assert refreshed == {"POLICY-1": "Small parcel", "POLICY-2": "Large parcel"}
+    assert fallback is False
+    before = json.loads(snapshot.read_text())
+    assert before["return"] == {"RETURN-1": "Returns"}
+    assert before["fulfillment"] == refreshed
+    assert before["refreshed_at"]
+
+    monkeypatch.setattr(sync, "get_fulfillment_policies_full", lambda _cfg: [{"id": "POLICY-3", "name": ""}])
+    http_server._LIVE_FULFILLMENT_POLICIES_CACHE.update({"data": None, "at": 0.0})
+    retained, fallback = http_server._live_fulfillment_policies(env["cfg"])
+    assert retained == refreshed
+    assert fallback is True
+    assert json.loads(snapshot.read_text()) == before
+
+    monkeypatch.setattr(sync, "get_fulfillment_policies_full", lambda _cfg: [{"id": ["POLICY-3"], "name": "Bad"}])
+    http_server._LIVE_FULFILLMENT_POLICIES_CACHE.update({"data": None, "at": 0.0})
+    retained, fallback = http_server._live_fulfillment_policies(env["cfg"])
+    assert retained == refreshed
+    assert fallback is True
+    assert json.loads(snapshot.read_text()) == before
+
+    monkeypatch.setattr(sync, "get_fulfillment_policies_full", lambda _cfg: (_ for _ in ()).throw(RuntimeError("offline")))
+    http_server._LIVE_FULFILLMENT_POLICIES_CACHE.update({"data": None, "at": 0.0})
+    retained, fallback = http_server._live_fulfillment_policies(env["cfg"])
+    assert retained == refreshed
+    assert fallback is True
+    assert json.loads(snapshot.read_text()) == before
+
+
+def test_store_categories_get_reads_snapshot_without_live_fetch(env, monkeypatch):
+    catalog_root = env["groups_path"].parent / "store-get-catalog"
+    catalog_root.mkdir()
+    env["cfg"]["catalog_root"] = catalog_root
+    (catalog_root / "ebay-store-categories.json").write_text(json.dumps({
+        "source": "ebay_get_store",
+        "refreshed_at": "2026-07-28T12:00:00Z",
+        "results": [{"id": "111", "name": "Books"}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(
+        http_server,
+        "_live_store_categories",
+        lambda _cfg: (_ for _ in ()).throw(AssertionError("GET crossed eBay boundary")),
+    )
+    _login(env["client"])
+    response = env["client"].get("/api/ebay/store-categories")
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "results": [{"id": "111", "name": "Books"}],
+        "source": "snapshot",
+        "refreshed_at": "2026-07-28T12:00:00Z",
+        "error": None,
+    }
+
+    (catalog_root / "ebay-store-categories.json").write_text(json.dumps({
+        "source": "ebay_get_store",
+        "refreshed_at": "2026-07-28T12:00:00Z",
+        "results": [{"id": 111, "name": "Books"}],
+    }), encoding="utf-8")
+    response = env["client"].get("/api/ebay/store-categories")
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+    assert response.json()["source"] == "local_mapping"
+    assert "valid" in response.json()["error"]
+
+
+def test_reference_data_refresh_endpoint_reconciles_both_snapshots_once(env, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        http_server,
+        "_live_store_categories",
+        lambda _cfg: (calls.append("store") or ([{"id": "111", "name": "Books"}], False)),
+    )
+    monkeypatch.setattr(
+        http_server,
+        "_live_fulfillment_policies",
+        lambda _cfg: (calls.append("fulfillment") or ({"POLICY-1": "Small parcel"}, False)),
+    )
+    _login(env["client"])
+    response = env["client"].post("/api/ebay/reference-data/refresh")
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "store_categories": {"count": 1, "preserved_snapshot": False},
+        "fulfillment_policies": {"count": 1, "preserved_snapshot": False},
+    }
+    assert calls == ["store", "fulfillment"]
+
+
+def test_item_detail_preserves_stored_selector_ids_when_snapshot_unavailable(env):
+    """An unavailable snapshot must not make an ordinary Save silently clear
+    stored primary/secondary Store IDs or the shipping-policy ID."""
+    catalog_root = env["groups_path"].parent / "missing-reference-data"
+    catalog_root.mkdir()
+    env["cfg"]["catalog_root"] = catalog_root
+    env["groups_path"].write_text(json.dumps({"groups": {}}), encoding="utf-8")
+    sku = "tgw20260701000000083"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Preserve stored IDs",
+        "draft_listing": {
+            "store_category_id": "STORE-1",
+            "secondary_store_category_id": "STORE-2",
+            "shipping_profile": "POLICY-9",
+        },
+    })
+    _login(env["client"])
+    response = env["client"].get(f"/form/items/{sku}")
+    assert response.status_code == 200
+    assert 'value="STORE-1" data-name="Stored category STORE-1" selected' in response.text
+    assert 'value="STORE-2" data-name="Stored category STORE-2" selected' in response.text
+    assert 'value="POLICY-9" selected' in response.text
+    assert "not in current snapshot" in response.text
+
+
+def test_item_detail_store_categories_keep_distinct_ids_and_drop_invalid_values(env):
+    """Configured groups may reuse a display name; preserve their distinct
+    stored IDs and never expose a value that can overwrite a draft as None."""
+    env["groups_path"].write_text(
+        json.dumps({"groups": {
+            "first": {"store_category": "Books", "store_category_id": "111"},
+            "second": {"store_category": "Books", "store_category_id": "222"},
+            "missing": {"store_category": "Broken", "store_category_id": None},
+            "blank": {"store_category": "Also Broken", "store_category_id": "  "},
+        }}),
+        encoding="utf-8",
+    )
+    sku = "tgw20260701000000080"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Keep Stored Category IDs",
+        "draft_listing": {"store_category_id": "222", "secondary_store_category_id": "111"},
+    })
+    _login(env["client"])
+    response = env["client"].get(f"/form/items/{sku}")
+    assert response.status_code == 200
+    assert 'value="111" data-name="Books" selected' in response.text
+    assert 'value="222" data-name="Books" selected' in response.text
+    assert 'value="None"' not in response.text
+    assert 'value="  "' not in response.text
+
+
+def test_item_detail_best_offer_control_reflects_state(env):
+    """todo #1256 (+ code-review follow-up): per-item Best Offer control
+    (offer.listingPolicies.bestOfferTerms) -- tri-state select (not a
+    checkbox: "not set" must be a real, distinct, selectable option, not
+    conflated with "disabled") reflects draft_listing.best_offer_enabled;
+    auto-accept/decline prices prefill from draft_listing."""
+    sku = "tgw20260701000000078"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Best Offer Test Item",
+        "draft_listing": {
+            "best_offer_enabled": True,
+            "best_offer_auto_accept_price": 45.0,
+            "best_offer_auto_decline_price": 20,
+        },
+    })
+    _login(env["client"])
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    text = r.text
+    assert '<option value="true" selected>Enabled</option>' in text
+    assert 'id="dl-best-offer-accept" placeholder="auto-accept $" value="45.0"' in text
+    assert 'id="dl-best-offer-decline" placeholder="auto-decline $" value="20"' in text
+
+
+def test_item_detail_best_offer_control_not_set_when_unset(env):
+    """The unset state must render as its own selected option ("not set"),
+    never silently coerced to the "Disabled" option -- that's exactly the
+    bug where saving any unrelated field forced best_offer_enabled=false."""
+    sku = "tgw20260701000000079"
+    _write_item(env["itemdata_root"], sku, {"sku": sku, "title": "No Best Offer Item"})
+    _login(env["client"])
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    text = r.text
+    assert '<option value="" selected>' in text
+    assert '<option value="false" selected>' not in text
+    assert '<option value="true" selected>' not in text
+
+
+def test_item_detail_best_offer_control_disabled_when_explicitly_false(env):
+    """False is a real, meaningful, distinct choice from unset -- must
+    render as the "Disabled" option selected, not fall back to "not set"."""
+    sku = "tgw20260701000000080"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Best Offer Disabled Item",
+        "draft_listing": {"best_offer_enabled": False},
+    })
+    _login(env["client"])
+    r = env["client"].get(f"/form/items/{sku}")
+    assert r.status_code == 200
+    text = r.text
+    assert '<option value="false" selected>' in text
+    assert '<option value="" selected>' not in text
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/items/{sku}/assets/{filename} — archive-before-delete (#1310,
+# invariant E5, PP-COHESION-001)
+# ---------------------------------------------------------------------------
+
+def test_delete_asset_archives_before_unlink(env):
+    """When archive_root is configured, deleting a photo must zip its bytes
+    into archive_root before the file is unlinked from disk."""
+    sku = SKU_B
+    item_dir = env["itemdata_root"] / sku
+    photo = item_dir / "front.jpg"
+    original_bytes = photo.read_bytes()
+
+    archive_root = env["cfg"]["itemdata_root"].parent / "archive"
+    env["cfg"]["archive_root"] = archive_root
+
+    r = env["client"].delete(f"/api/items/{sku}/assets/front.jpg", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"ok": True, "sku": sku, "deleted": "front.jpg"}
+
+    # (a) the photo file is gone from the SKU dir
+    assert not photo.exists()
+
+    # (b) a zip matching the photo's stem exists in archive_root and
+    # contains the original photo bytes
+    zpath = archive_root / "front.zip"
+    assert zpath.exists()
+    with zipfile.ZipFile(zpath, "r") as zf:
+        names = zf.namelist()
+        assert len(names) == 1
+        assert names[0].startswith("front.jpg.")
+        assert zf.read(names[0]) == original_bytes
+
+
+def test_delete_asset_no_archive_root_still_deletes(env):
+    """With archive_root unset/None, delete must still succeed with no
+    exception and no archive step attempted (null-safe guard, matching
+    atomic_write_json's own pattern)."""
+    sku = SKU_B
+    item_dir = env["itemdata_root"] / sku
+    photo = item_dir / "back.PNG"
+    assert photo.exists()
+    assert "archive_root" not in env["cfg"]
+
+    r = env["client"].delete(f"/api/items/{sku}/assets/back.PNG", headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"ok": True, "sku": sku, "deleted": "back.PNG"}
+
+    assert not photo.exists()
+    # No archive directory should have been created anywhere under tmp_path
+    # as a side effect of this delete.
+    assert not (env["itemdata_root"].parent / "archive").exists()
+
+
+def test_item_detail_pipeline_log_distinguishes_retry_wait_from_dead_letter():
+    """Dave, 2026-07-14: retry_wait (transient, will retry itself) was
+    rendered in the same red color as dead_letter/failed (fatal, needs a
+    human) in the item-detail page's pipeline-jobs log -- the CSS class
+    names didn't even match the real queue_jobs.state values, and the
+    error-detail text color was hardcoded red regardless of state. Fixed
+    to a distinct warning color for retry_wait."""
+    from tgw.http_server import _render_item_detail_html
+
+    item = {"sku": "tgw1", "title": "Test Item"}
+    jobs = [
+        {
+            "queue_name": "ebay_draft",
+            "state": "retry_wait",
+            "error_detail": "rate limited, will retry",
+            "job_id": "j1",
+            "updated_at": None,
+            "finished_at": None,
+            "created_at": None,
+        },
+        {
+            "queue_name": "ebay_upload",
+            "state": "dead_letter",
+            "error_detail": "fatal upload error",
+            "job_id": "j2",
+            "updated_at": None,
+            "finished_at": None,
+            "created_at": None,
+        },
+    ]
+
+    html = _render_item_detail_html("tgw1", item, [], [], jobs)
+
+    # CSS class names match the real state strings (previously js-done/
+    # js-pending never matched any actual queue_jobs.state value).
+    assert 'class="js-retry-wait"' in html
+    assert 'class="js-dead-letter"' in html
+
+    # retry_wait's error text uses the warning color, not the critical one.
+    retry_wait_pos = html.index("rate limited, will retry")
+    dead_letter_pos = html.index("fatal upload error")
+    retry_wait_row = html[:retry_wait_pos]
+    dead_letter_row = html[retry_wait_pos:dead_letter_pos]
+
+    assert "#fd8" in retry_wait_row[-600:]
+    assert "#f99" in dead_letter_row
+
+
+# ---------------------------------------------------------------------------
+# Invariant C14 fleet-wide clear-value round-trip detector (todo #1468,
+# PP-LISTEDITOR-001).
+#
+# The 2026-07-16 Material incident (see reference/invariants.md C14) found
+# ONE save path (the aspects form) silently dropping an operator's CLEARED
+# value. This section is the general check: for every operator-facing save
+# path this file exposes, prove the round trip set -> save -> clear -> save
+# -> re-read actually reflects the clear, not just a changed value. A save
+# path with no test here either doesn't accept operator field corrections
+# (read-only / pipeline-action endpoints) or moves data between sets rather
+# than clearing an operator-supplied value (inventory-diff/apply,
+# category-aspect-migration/apply, set-template) — see this todo's result
+# manifest for the full path inventory and why each one is or isn't covered.
+# ---------------------------------------------------------------------------
+
+def test_c14_patch_item_top_level_field_clear_roundtrip(env):
+    """Item-detail direct-edit path (the dblclick-to-edit fields panel,
+    saveInlineField's commit()) — PATCHes {fields: {field: newVal}}
+    unconditionally, including newVal==''. Confirms the simple case: no
+    other save intervenes between the clear and the re-read."""
+    client = env["client"]
+    json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+
+    r = client.patch(f"/api/items/{SKU_A}", json={"fields": {"brand": "Acme"}},
+                     headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert doc["brand"] == "Acme"
+
+    r = client.patch(f"/api/items/{SKU_A}", json={"fields": {"brand": ""}},
+                     headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert doc["brand"] == "", (
+        "operator cleared 'brand' via the item-detail field editor and the "
+        "save reported ok, but the cleared value was not actually persisted "
+        "— invariant C14"
+    )
+
+
+def test_c14_patch_item_aspects_form_clear_roundtrip(env):
+    """eBay Draft Editor aspects form (saveEbayDraft()) — bare
+    draft_listing.item_specifics dict PATCH, routed through
+    set_ebay_aspects(). This is the exact HTTP-level path #1461 fixed; a
+    prior test (test_draft_specifics.py) covers the accessor directly, this
+    covers the full endpoint round trip an operator's browser actually
+    exercises."""
+    client = env["client"]
+    json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+
+    r = client.patch(
+        f"/api/items/{SKU_A}",
+        json={"fields": {"draft_listing": {"item_specifics": {"Material": "Silver"}}}},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert draft_specifics.get_ebay_aspects(doc)["Material"] == "Silver"
+
+    r = client.patch(
+        f"/api/items/{SKU_A}",
+        json={"fields": {"draft_listing": {"item_specifics": {"Material": ""}}}},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert draft_specifics.get_ebay_aspects(doc)["Material"] == "", (
+        "operator cleared the Material aspect via the aspects form and the "
+        "save reported ok, but the cleared value was not actually persisted "
+        "— the exact 2026-07-16 live incident, invariant C14"
+    )
+
+
+def test_c14_bulk_apply_title_clear_roundtrip(env, enqueue_calls):
+    """Bulk editor (/api/bulk/apply) — BulkBody.value is a plain str, so an
+    empty string is a legitimate 'clear this field across N items' request.
+    Confirms the same round trip for the fleet-edit path, not just the
+    single-item editor."""
+    client = env["client"]
+    json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+
+    r = client.post("/api/bulk/apply", headers=AUTH_HEADERS,
+                    json={"field": "ai_hint", "value": "vintage brooch", "skus": [SKU_A]})
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert doc["ai_hint"] == "vintage brooch"
+
+    r = client.post("/api/bulk/apply", headers=AUTH_HEADERS,
+                    json={"field": "ai_hint", "value": "", "skus": [SKU_A]})
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert doc["ai_hint"] == "", (
+        "bulk-apply cleared 'ai_hint' to '' and reported ok, but the "
+        "cleared value was not actually persisted — invariant C14"
+    )
+
+
+def test_c14_accept_proposals_clear_roundtrip(env, monkeypatch):
+    """POST /api/items/{sku}/action action=accept_proposals — a revision
+    proposal delta can itself propose clearing an aspect (e.g. an AI-drafted
+    correction that a previously-set aspect is wrong and should be blank).
+    Confirms the accept path actually writes the empty value into Set B,
+    not just non-empty proposed values (the existing #1416-era tests here
+    only ever assert non-empty accepted values)."""
+    monkeypatch.setattr(http_server.state_machine, "enqueue_job", lambda *a, **k: "job-fake")
+
+    draft = dict(_DRAFT_LISTING)
+    draft["item_specifics"] = {"Material": "Silver"}
+    _write_item_with_draft(
+        env["itemdata_root"], SKU_A, draft,
+        extra={"revision_draft": {"delta": {"item_specifics": {"Material": ""}}}},
+    )
+
+    client = env["client"]
+    r = client.post(f"/api/items/{SKU_A}/action", json={"action": "accept_proposals"},
+                    headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+    json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert draft_specifics.get_ebay_aspects(doc)["Material"] == "", (
+        "an accepted revision proposal cleared 'Material' but the cleared "
+        "value was not actually persisted into draft_listing.item_specifics "
+        "— invariant C14"
+    )
+
+
+def test_c14_locked_top_level_field_clear_survives_unrelated_draft_save(env):
+    """Control case: the padlock lock (set_locked / toggleInventoryLock)
+    is the documented mitigation for the base-data auto-sync below — a
+    LOCKED field's clear must survive an unrelated draft_listing save.
+    Passes today; kept alongside the unlocked-case regression below so a
+    future change to the lock check itself gets caught."""
+    client = env["client"]
+    json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+
+    _write_item(env["itemdata_root"], SKU_A, {
+        "sku": SKU_A, "title": "Widget", "location": "A1",
+        "description": "Old description text",
+        "draft_listing": {"description": "Old description text"},
+    })
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    lock_patch = inventory_record.set_locked(doc, "description", True)
+    http_server._apply_patch(json_path, lock_patch)
+
+    r = client.patch(f"/api/items/{SKU_A}", json={"fields": {"description": ""}},
+                     headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert doc["description"] == ""
+
+    # Unrelated draft_listing save (e.g. a price edit via the aspects form).
+    r = client.patch(f"/api/items/{SKU_A}",
+                     json={"fields": {"draft_listing": {"price": 12.34}}},
+                     headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert doc["description"] == "", (
+        "a LOCKED top-level field's clear should survive an unrelated "
+        "draft_listing save — if this fails, the padlock mitigation itself "
+        "has regressed"
+    )
+
+
+def test_c14_unlocked_description_clear_reverted_by_unrelated_draft_save(env):
+    client = env["client"]
+    json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+
+    _write_item(env["itemdata_root"], SKU_A, {
+        "sku": SKU_A, "title": "Widget", "location": "A1",
+        "description": "Old description text",
+        "draft_listing": {"description": "Old description text"},
+    })
+
+    # Operator clears the top-level description via the item-detail
+    # dblclick-to-edit field (unlocked — the default state).
+    r = client.patch(f"/api/items/{SKU_A}", json={"fields": {"description": ""}},
+                     headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert doc["description"] == ""
+
+    # Later, the operator saves an unrelated field on the aspects form
+    # (e.g. price) — any draft_listing PATCH triggers the padlock sync.
+    r = client.patch(f"/api/items/{SKU_A}",
+                     json={"fields": {"draft_listing": {"price": 12.34}}},
+                     headers=AUTH_HEADERS)
+    assert r.status_code == 200
+    doc = json.loads(json_path.read_text(encoding="utf-8"))
+    assert doc["description"] == "", (
+        "operator's cleared 'description' was silently restored to the "
+        "stale draft_listing.description value by the next unrelated "
+        "draft_listing save — invariant C14"
+    )
+
+
+def test_item_detail_shows_list_action_after_successful_stage_supersedes_dead_letter():
+    """A successfully re-staged UNPUBLISHED offer must remain operator-listable.
+
+    The failed stage stays in the audit ledger, but cannot mask the normal
+    List on eBay action after a later stage job for the same offer succeeds.
+    """
+    from tgw.http_server import _render_item_detail_html
+
+    item = {
+        "sku": "tgw1",
+        "title": "Recovered staged item",
+        "status": "In Stock",
+        "draft_listing": {"title": "Recovered staged item", "price": 16.99},
+        "ebay_offer": {"status": "UNPUBLISHED", "price": 16.99},
+    }
+    jobs = [
+        {
+            "queue_name": "ebay_stage",
+            "state": "dead_letter",
+            "job_id": "failed-stage",
+            "error_detail": "Offer entity already exists.",
+            "created_at": "2026-07-25T00:28:45+00:00",
+            "updated_at": "2026-07-25T00:29:18+00:00",
+            "finished_at": "2026-07-25T00:29:18+00:00",
+        },
+        {
+            "queue_name": "ebay_stage",
+            "state": "succeeded",
+            "job_id": "recovered-stage",
+            "created_at": "2026-07-25T00:32:21+00:00",
+            "updated_at": "2026-07-25T00:32:25+00:00",
+            "finished_at": "2026-07-25T00:32:25+00:00",
+        },
+    ]
+
+    html = _render_item_detail_html("tgw1", item, [], [], jobs)
+
+    assert "List on eBay" in html
+    assert 'onclick="retryPipeline()"' not in html
+
+
+def test_item_detail_handles_mixed_tz_aware_dead_letter_naive_succeeded():
+    """Regression: aware dead_letter timestamp + naive succeeded timestamp
+    must not raise TypeError when compared (todo #1683)."""
+    from tgw.http_server import _render_item_detail_html
+
+    item = {
+        "sku": "tgw1",
+        "title": "Recovered staged item",
+        "status": "In Stock",
+        "draft_listing": {"title": "Recovered staged item", "price": 16.99},
+        "ebay_offer": {"status": "UNPUBLISHED", "price": 16.99},
+    }
+    jobs = [
+        {
+            "queue_name": "ebay_stage",
+            "state": "dead_letter",
+            "job_id": "failed-stage",
+            "error_detail": "Offer entity already exists.",
+            "finished_at": "2026-07-25T00:29:18+00:00",  # aware
+        },
+        {
+            "queue_name": "ebay_stage",
+            "state": "succeeded",
+            "job_id": "recovered-stage",
+            "finished_at": "2026-07-25T00:32:25",  # naive
+        },
+    ]
+
+    html = _render_item_detail_html("tgw1", item, [], [], jobs)
+
+    assert "List on eBay" in html
+    assert 'onclick="retryPipeline()"' not in html
+
+
+def test_item_detail_handles_mixed_tz_naive_dead_letter_aware_succeeded():
+    """Regression: naive dead_letter timestamp + aware succeeded timestamp
+    must not raise TypeError when compared (todo #1683)."""
+    from tgw.http_server import _render_item_detail_html
+
+    item = {
+        "sku": "tgw1",
+        "title": "Recovered staged item",
+        "status": "In Stock",
+        "draft_listing": {"title": "Recovered staged item", "price": 16.99},
+        "ebay_offer": {"status": "UNPUBLISHED", "price": 16.99},
+    }
+    jobs = [
+        {
+            "queue_name": "ebay_stage",
+            "state": "dead_letter",
+            "job_id": "failed-stage",
+            "error_detail": "Offer entity already exists.",
+            "finished_at": "2026-07-25T00:29:18",  # naive
+        },
+        {
+            "queue_name": "ebay_stage",
+            "state": "succeeded",
+            "job_id": "recovered-stage",
+            "finished_at": "2026-07-25T00:32:25+00:00",  # aware
+        },
+    ]
+
+    html = _render_item_detail_html("tgw1", item, [], [], jobs)
+
+    assert "List on eBay" in html
+    assert 'onclick="retryPipeline()"' not in html
+
+
+def test_item_detail_handles_mixed_tz_baseline_at_and_job_timestamp():
+    """Regression: _after_baseline()'s own fromisoformat comparison must also
+    tolerate mixed aware/naive timestamps between item['baseline_at'] and a
+    job's finished_at (todo #1683)."""
+    from tgw.http_server import _render_item_detail_html
+
+    item = {
+        "sku": "tgw1",
+        "title": "Recovered staged item",
+        "status": "In Stock",
+        "baseline_at": "2026-07-25T00:00:00",  # naive baseline
+        "draft_listing": {"title": "Recovered staged item", "price": 16.99},
+        "ebay_offer": {"status": "UNPUBLISHED", "price": 16.99},
+    }
+    jobs = [
+        {
+            "queue_name": "ebay_stage",
+            "state": "dead_letter",
+            "job_id": "failed-stage",
+            "error_detail": "Offer entity already exists.",
+            "finished_at": "2026-07-25T00:29:18+00:00",  # aware, after baseline
+        },
+    ]
+
+    # Must not raise; a dead_letter after baseline with no later success is a
+    # real actionable error, so it should surface (not "List on eBay").
+    html = _render_item_detail_html("tgw1", item, [], [], jobs)
+    assert html

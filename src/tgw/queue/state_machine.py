@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
 import psycopg2
@@ -13,6 +16,65 @@ log = logging.getLogger(__name__)
 
 # Module-level DSN — set by init() before any worker starts.
 _DSN: str = 'dbname=state_machine user=tgw'
+
+# PP-STATEMACHINE-001 Phase 2 (todo #1608) — queue-priority config, same
+# 'defaults'/'use_default' shape/convention as tgw-models.json. Loaded lazily
+# and cached; missing file is NOT an error (every lookup just falls back to
+# the 'normal' tier, today's implicit hardcoded default) since this file is
+# a live-only deploy artifact (like tgw-models.json, not git-tracked) that
+# may not exist yet in every environment.
+_QUEUE_PRIORITIES_PATH = Path('/opt/TGW/config/tgw-queue-priorities.json')
+_queue_priorities_cache: Optional[Dict[str, Any]] = None
+
+
+def _load_queue_priorities() -> Dict[str, Any]:
+    global _queue_priorities_cache
+    if _queue_priorities_cache is not None:
+        return _queue_priorities_cache
+    cfg: Dict[str, Any] = {}
+    try:
+        if _QUEUE_PRIORITIES_PATH.exists():
+            raw = json.loads(_QUEUE_PRIORITIES_PATH.read_text(encoding='utf-8'))
+            cfg = {k: v for k, v in raw.items() if not k.startswith('_')}
+    except Exception:
+        log.warning('failed to load %s — falling back to normal priority for '
+                     'every queue', _QUEUE_PRIORITIES_PATH, exc_info=True)
+        cfg = {}
+    _queue_priorities_cache = cfg
+    return cfg
+
+
+def _reset_queue_priorities_cache() -> None:
+    """Test hook — clear the module-level cache so a test can point at a
+    fresh fixture path / monkeypatched file content."""
+    global _queue_priorities_cache
+    _queue_priorities_cache = None
+
+
+def resolve_priority(queue_name: str, operation: str) -> int:
+    """Resolve the priority tier for queue_name:operation from
+    tgw-queue-priorities.json. Falls back to 100 ('normal') if the file is
+    missing, the key isn't present, or the entry is malformed — an
+    unmapped queue is not an error (see PP-STATEMACHINE-001)."""
+    cfg = _load_queue_priorities()
+    key = f'{queue_name}:{operation}'
+    entry = cfg.get(key)
+    if entry is None:
+        return 100
+    if isinstance(entry, int):
+        return entry
+    if isinstance(entry, dict) and 'use_default' in entry:
+        default_name = entry['use_default']
+        tier_value = cfg.get('defaults', {}).get(default_name)
+        if isinstance(tier_value, int):
+            return tier_value
+        log.warning("tgw-queue-priorities.json[%r]['use_default'] names %r, "
+                    "which has no int entry in 'defaults' — falling back to "
+                    "normal", key, default_name)
+        return 100
+    log.warning('tgw-queue-priorities.json[%r] is malformed (%r) — falling '
+                'back to normal', key, entry)
+    return 100
 
 
 def init(dsn: str) -> None:
@@ -112,6 +174,13 @@ def next_failure_state(attempt_count: int, max_attempts: int) -> str:
 # Database operations
 # ---------------------------------------------------------------------------
 
+class MissingManifestFieldError(ValueError):
+    """PP-STATEMACHINE-001 Phase 4 (todo #1608) — raised by enqueue_job() when
+    a call is missing a required manifest field (dedupe_key, or entity_id for
+    an entity_type='item' job) and hasn't declared an explicit, named
+    opt-out. See invariant E16."""
+
+
 def enqueue_job(
     queue_name: str,
     payload: Dict[str, Any],
@@ -120,34 +189,252 @@ def enqueue_job(
     entity_id: str = '',
     operation: str = 'run',
     handler_family: str = '',
-    priority: int = 100,
+    priority: Optional[int] = None,
     not_before: Optional[float] = None,
     dedupe_key: Optional[str] = None,
     max_attempts: int = 5,
+    debounce: bool = False,
+    supersede: bool = False,
+    dedupe_key_exempt: bool = False,
 ) -> str:
-    """Insert a new queued job. Returns the new job_id (UUID string)."""
+    """Insert a new queued job. Returns the job_id (UUID string).
+
+    debounce=True changes dedupe_key collision handling from reject (the
+    default — raises psycopg2.errors.UniqueViolation, correct for per-SKU
+    pipeline dedup like `ebay_stage:{sku}` where a second enqueue must be a
+    no-op, never a delay) to extend: a colliding insert instead pushes the
+    existing pending job's not_before forward via GREATEST(). Use this only
+    for batch-coalescing keys (e.g. catalog_rebuild:pending) where the goal
+    is one job fired after writes go quiet, not one fired at a fixed offset
+    from the first write in a sustained burst.
+
+    todo #1618 / PP-STATEMACHINE-001 (LIVE INCIDENT fix): this does NOT use
+    `INSERT ... ON CONFLICT DO UPDATE` — an earlier version of this fix did,
+    targeting a new narrower `uq_queue_jobs_dedupe_key_pending` (queued/
+    retry_wait only) partial index as the ON CONFLICT arbiter, intending to
+    stop a self-rescheduling worker's own leased/running row from being the
+    collision target of its own mid-handle() reschedule call. That approach
+    does NOT work: verified live against a real PostgreSQL 17 instance,
+    Postgres's ON CONFLICT arbiter inference accepts ANY unique index whose
+    predicate is *implied by* the specified WHERE clause, not just an exact
+    match — and 'state IN (queued,retry_wait)' unavoidably implies the
+    broader uq_queue_jobs_dedupe_key_active index's 'state NOT IN
+    (terminal)' predicate (queued/retry_wait rows are always non-terminal),
+    so BOTH indexes become simultaneous arbiters. A conflict detected via
+    EITHER — including the caller's own in-flight leased/running row via
+    the broad index — silently triggers DO UPDATE, with no error raised.
+    This reproduces the exact original bug: same job_id returned, running
+    row's not_before corrupted, mark_succeeded() orphans it. See the #1618
+    result manifest for the live reproduction.
+
+    Narrowing/splitting uq_queue_jobs_dedupe_key_active itself was also
+    rejected: it's relied on by the plain (non-debounce) reject-INSERT path
+    to block a duplicate enqueue while ANY non-terminal (incl. leased/
+    running) row already exists under a dedupe_key (e.g. `ebay_stage:
+    {sku}`) — splitting it into disjoint pending/active indexes verified
+    live to silently let a duplicate 'queued' row past while a 'leased' row
+    for the same key exists, a real regression, and touching that path is
+    explicitly out of this packet's scope.
+
+    Fix actually used: explicit read-then-write, serialized per dedupe_key
+    with `pg_advisory_xact_lock` (held for the transaction) instead of
+    leaning on ON CONFLICT inference at all:
+      1. Look for an existing pending (queued/retry_wait) row under this
+         dedupe_key — if found, UPDATE it (GREATEST() not_before, fresh
+         payload) — this is the coalescing case (e.g. catalog_rebuild:
+         pending's write-burst collapse), unchanged in effect.
+      2. Otherwise, check whether a leased/running row holds this
+         dedupe_key (the todo #1618 self-collision case). If so, insert the
+         fresh row with dedupe_key=NULL — a distinct, valid, immediately
+         claimable row that cannot corrupt or be corrupted by the in-flight
+         one. It won't be found by a *future* coalescing lookup while the
+         original job is still running (a rare, narrow gap vs. the
+         semantic key remaining coalescable — logged as a known limitation,
+         not a correctness bug: worst case is one extra distinct row, never
+         a lost/orphaned one).
+      3. Otherwise (no pending, no active row) insert the fresh row with
+         its real dedupe_key — the common, unremarkable first-schedule
+         case, fully coalescable going forward.
+    uq_queue_jobs_dedupe_key_pending still exists in the schema as a real,
+    independently-useful DB-level backstop ("at most one queued/retry_wait
+    row per dedupe_key") even though it's no longer used as an ON CONFLICT
+    arbiter.
+
+    entity_id — ALWAYS pass this explicitly (entity_type='item', entity_id=sku)
+    for any per-item job. The `entity_id or queue_name` fallback below exists
+    only for genuinely queue-level jobs (self-rescheduling maintenance runs
+    with no single entity, e.g. token_refresh/ebay_sync's own reschedule).
+    Forgetting to pass entity_id on a per-SKU cross-enqueue silently breaks
+    `tgw queue-history --sku <sku>` (job_history()'s `WHERE entity_id = %s`)
+    with no error — this exact bug shipped for ~300k rows (todo #1406,
+    PP-DEADLETTER-001) before every internal pipeline enqueue_job() caller
+    was audited and fixed to pass entity_id=sku. Do not let a new caller
+    regress it.
+
+    priority — PP-STATEMACHINE-001 Phase 2 (todo #1608): if omitted (None),
+    resolved from tgw-queue-priorities.json via resolve_priority(queue_name,
+    operation), falling back to 100 ('normal') if no config entry exists. An
+    explicit priority= argument always overrides the config lookup.
+
+    supersede=True (PP-STATEMACHINE-001 Phase 3, todo #1608) — for the
+    "force this job eligible right now" case (e.g. `tgw restart-ebay-token`)
+    that debounce=True's GREATEST() can't express (it can only push a
+    pending job's not_before LATER, never earlier). Only meaningful together
+    with a dedupe_key: before inserting, atomically cancels (state →
+    'cancelled') any existing non-terminal row under the same dedupe_key,
+    then inserts the fresh row with plain reject semantics (no ON CONFLICT
+    needed — the collision was just cleared in the same transaction).
+    supersede=True with debounce=True is not a supported combination — pick
+    one collision-handling mode.
+
+    Enforcement (PP-STATEMACHINE-001 Phase 4, todo #1608, invariant E16):
+    every call must supply a non-empty dedupe_key, unless it explicitly
+    passes dedupe_key_exempt=True (a code comment at the call site must
+    explain why — this is a deliberate, reviewed exception, not a way to
+    silently dodge the manifest contract). Any entity_type='item' call must
+    supply a non-empty entity_id — no opt-out for this one; the 2026-07-20
+    codebase-wide re-audit found no genuine holdout that needs it, and a
+    per-item job's entity_id is always knowable at the call site.
+    """
+    if debounce and supersede:
+        raise ValueError(
+            "enqueue_job: debounce=True and supersede=True are mutually "
+            "exclusive collision-handling modes — pick one."
+        )
+    if entity_type == 'item' and not entity_id:
+        raise MissingManifestFieldError(
+            f"enqueue_job(queue_name={queue_name!r}): entity_type='item' "
+            "requires a non-empty entity_id (see invariant E16 / "
+            "PP-STATEMACHINE-001) — pass entity_id=<sku> explicitly."
+        )
+    if not dedupe_key and not dedupe_key_exempt:
+        raise MissingManifestFieldError(
+            f"enqueue_job(queue_name={queue_name!r}): missing dedupe_key "
+            "(see invariant E16 / PP-STATEMACHINE-001) — pass an explicit "
+            "dedupe_key=, or dedupe_key_exempt=True with a code comment "
+            "explaining why this call is a genuine, reviewed exception."
+        )
     handler_family = handler_family or queue_name
     entity_id = entity_id or queue_name
+    if priority is None:
+        priority = resolve_priority(queue_name, operation)
     nb = None
     if not_before is not None:
         from datetime import datetime, timezone
         nb = datetime.fromtimestamp(not_before, tz=timezone.utc)
     with _conn() as con:
         with con.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO queue_jobs
+            if supersede and dedupe_key:
+                # Only preempt rows that are genuinely still *pending* —
+                # 'queued' (incl. future not_before) and 'retry_wait' are the
+                # cases debounce=True's GREATEST() can only push later, plus
+                # 'failed'/'dead_letter' (a stalled prior attempt under this
+                # key that would otherwise just sit there). Deliberately
+                # excludes 'leased'/'running': a job actively being worked
+                # right now is not superseded by a fresh enqueue, it's left
+                # to finish (or dead-letter/retry on its own).
+                cur.execute(
+                    """
+                    UPDATE queue_jobs
+                    SET state = 'cancelled', updated_at = NOW()
+                    WHERE dedupe_key = %s
+                      AND state IN ('queued', 'retry_wait', 'failed', 'dead_letter')
+                    """,
+                    (dedupe_key,),
+                )
+            if debounce:
+                # todo #1618 — see the enqueue_job() docstring's "Fix
+                # actually used" section for why this is explicit
+                # read-then-write instead of INSERT ... ON CONFLICT.
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (dedupe_key,),
+                )
+                cur.execute(
+                    """
+                    SELECT job_id::text FROM queue_jobs
+                     WHERE dedupe_key = %s AND state IN ('queued', 'retry_wait')
+                    """,
+                    (dedupe_key,),
+                )
+                pending_row = cur.fetchone()
+                if pending_row is not None:
+                    cur.execute(
+                        """
+                        UPDATE queue_jobs
+                           SET not_before = GREATEST(not_before, %s),
+                               payload_json = %s,
+                               updated_at = NOW()
+                         WHERE job_id = %s::uuid
+                        RETURNING job_id::text
+                        """,
+                        (nb, json.dumps(payload), pending_row[0]),
+                    )
+                    return cur.fetchone()[0]
+                cur.execute(
+                    """
+                    SELECT 1 FROM queue_jobs
+                     WHERE dedupe_key = %s AND state IN ('leased', 'running')
+                    """,
+                    (dedupe_key,),
+                )
+                active_collision = cur.fetchone() is not None
+                insert_dedupe_key = None if active_collision else dedupe_key
+                cur.execute(
+                    """
+                    INSERT INTO queue_jobs
+                        (queue_name, entity_type, entity_id, operation,
+                         handler_family, priority, payload_json,
+                         not_before, dedupe_key, max_attempts)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING job_id::text
+                    """,
                     (queue_name, entity_type, entity_id, operation,
-                     handler_family, priority, payload_json,
-                     not_before, dedupe_key, max_attempts)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING job_id::text
-                """,
-                (queue_name, entity_type, entity_id, operation,
-                 handler_family, priority, json.dumps(payload),
-                 nb, dedupe_key, max_attempts),
-            )
+                     handler_family, priority, json.dumps(payload),
+                     nb, insert_dedupe_key, max_attempts),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO queue_jobs
+                        (queue_name, entity_type, entity_id, operation,
+                         handler_family, priority, payload_json,
+                         not_before, dedupe_key, max_attempts)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING job_id::text
+                    """,
+                    (queue_name, entity_type, entity_id, operation,
+                     handler_family, priority, json.dumps(payload),
+                     nb, dedupe_key, max_attempts),
+                )
             return cur.fetchone()[0]
+
+
+def enqueue_catalog_rebuild(reason: str, delay_seconds: float = 30.0) -> str:
+    """No-op as of PP-CATALOG-INCR-001 CI-4 (2026-07-18).
+
+    Was: coalesced per-write catalog_rebuild enqueue — the one place that
+    pattern lived, debounced so a write burst extended one pending job's
+    not_before instead of each write re-arming a fresh one (PP-NIXOS-001
+    2026-07-12 incident). Superseded: CI-2's synchronous per-item SQLite
+    upsert (sqlite_catalog.upsert_catalog_row, called from every fence write
+    in http_server.py's _apply_patch/_apply_ebay_write) already keeps the
+    SQLite catalog — the one the inventory webui and every operator-facing
+    query reads — live-accurate on every write, through every caller
+    (workers included: all worker writes route through tgw.apis.fence's
+    HTTP client into the same two fence functions). The remaining 3
+    artifacts (full_catalog/search_catalog JSON, location_tree) are still
+    full-rebuild-only (CI-5 deferred) and are now refreshed by an hourly
+    systemd timer instead of a per-write trigger — see
+    docs/TGW-Plan-Vault/plan/pp/PP-CATALOG-INCR-001.md. `tgw build-all` /
+    `tgw catalog-rebuild` remain available for an on-demand full rebuild.
+
+    Kept as a no-op function (not deleted) so none of this codebase's ~35
+    call sites need editing — every one of them still calls this safely,
+    it now simply does nothing. Returns '' instead of a job_id since no job
+    is created.
+    """
+    return ''
 
 
 def claim_queue_jobs(
@@ -871,4 +1158,323 @@ def active_jobs_for_sku(sku: str, queue_names: List[str]) -> List[str]:
                       AND state IN ('queued', 'running', 'leased')""",
                 (sku, queue_names),
             )
+            return [r[0] for r in cur.fetchall()]
+
+
+# ---------------------------------------------------------------------------
+# Agent run trace ledger (PP-AGENTTRACE-001 Phase 1)
+# ---------------------------------------------------------------------------
+#
+# Metadata index for every agent run (Claude Code session/subagent, tgw-coder,
+# nix-flake-maintainer, Aider, ...). Raw transcripts are archived separately
+# under /opt/TGW/var/agent-traces/ (see tgw.logging.archive_transcript) — this
+# table is the derived/queryable index per the Data Charter raw/derived split.
+#
+# NOTE on schema.sql drift (same known gap as ai_usage above, named explicitly
+# here instead of silently repeated): this in-code DDL is the one actually
+# applied at runtime (self-apply, guarded by _agent_runs_table_ready). The
+# schema.sql copy of this table is bootstrap documentation only and is NOT
+# kept in sync automatically — if you change one, remember to change the
+# other by hand, same as the pre-existing ai_usage drift.
+
+_AGENT_RUNS_DDL = """
+CREATE TABLE IF NOT EXISTS agent_runs (
+    run_id          TEXT PRIMARY KEY,
+    parent_run_id   TEXT REFERENCES agent_runs(run_id),
+    agent_type      TEXT NOT NULL,
+    todo_id         INTEGER,
+    pp_ref          TEXT,
+    host            TEXT,
+    git_branch      TEXT,
+    started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    ended_at        TIMESTAMPTZ,
+    status          TEXT NOT NULL DEFAULT 'running'
+                    CHECK (status IN ('running', 'completed', 'failed', 'killed', 'escalated')),
+    summary         TEXT,
+    transcript_path TEXT
+)
+"""
+
+_agent_runs_table_ready = False
+
+
+def _ensure_agent_runs_table() -> None:
+    global _agent_runs_table_ready
+    if _agent_runs_table_ready:
+        return
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(_AGENT_RUNS_DDL)
+    _agent_runs_table_ready = True
+
+
+def _enqueue_agent_run_render() -> None:
+    """Coalesced Obsidian re-render on any agent_runs mutation (PP-AGENTTRACE-001
+    Phase 2). Same pattern as todo.py's _enqueue_plan_render(): dedupe_key +
+    30s not_before so rapid successive start/end calls collapse into one
+    render. Never lets a queue problem break the actual trace-recording
+    operation (start_agent_run/end_agent_run)."""
+    try:
+        enqueue_job(
+            queue_name='agent_run_render',
+            payload={'reason': 'agent_run_mutation'},
+            dedupe_key='agent_run_render:pending',
+            not_before=time.time() + 30,
+            max_attempts=3,
+        )
+    except Exception:
+        pass
+
+
+def start_agent_run(
+    agent_type: str,
+    *,
+    parent_run_id: Optional[str] = None,
+    todo_id: Optional[int] = None,
+    pp_ref: Optional[str] = None,
+    host: Optional[str] = None,
+    git_branch: Optional[str] = None,
+) -> str:
+    """Record the start of one agent run.
+
+    Generates and returns a new run_id (uuid4 hex string) — the caller needs
+    this value before the row exists, e.g. to pass as parent_run_id when
+    dispatching a nested subagent. Unlike record_ai_usage(), this does NOT
+    fail-soft: a caller that can't record a run start needs to know, since
+    the returned run_id is the load-bearing handle for everything that
+    follows (tgw trace end, transcript archival, nested runs).
+    """
+    _ensure_agent_runs_table()
+    run_id = uuid.uuid4().hex
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO agent_runs
+                    (run_id, parent_run_id, agent_type, todo_id, pp_ref, host, git_branch)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (run_id, parent_run_id, agent_type, todo_id, pp_ref, host, git_branch),
+            )
+    _enqueue_agent_run_render()
+    return run_id
+
+
+def end_agent_run(
+    run_id: str,
+    *,
+    status: str,
+    summary: Optional[str] = None,
+    transcript_path: Optional[str] = None,
+) -> None:
+    """Record the end of one agent run: sets ended_at=NOW(), status, summary,
+    transcript_path. status must be one of the agent_runs CHECK values
+    ('running', 'completed', 'failed', 'killed', 'escalated') — an invalid
+    value raises psycopg2.errors.CheckViolation, it is not swallowed.
+
+    Raises ValueError if run_id does not exist — an UPDATE that matches zero
+    rows must never look like a successful end-of-run (same class of bug as
+    invariant C14: a correction that doesn't take effect must be visibly
+    reported as failed, never silently accepted)."""
+    _ensure_agent_runs_table()
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE agent_runs
+                   SET ended_at = NOW(),
+                       status = %s,
+                       summary = %s,
+                       transcript_path = %s
+                 WHERE run_id = %s
+                """,
+                (status, summary, transcript_path, run_id),
+            )
+            if cur.rowcount == 0:
+                raise ValueError(f"end_agent_run: no agent_runs row found for run_id={run_id!r}")
+    _enqueue_agent_run_render()
+
+
+def get_agent_run(run_id: str) -> Optional[Dict[str, Any]]:
+    """Read back one agent_runs row by run_id, or None if not found.
+
+    Not part of the packet's core "two functions" spec, but a minimal read
+    helper is needed for the round-trip unit tests below and is a natural
+    building block for Phase 2/3 (Obsidian render, /form/runs UI) — flagged
+    here rather than added silently."""
+    _ensure_agent_runs_table()
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM agent_runs WHERE run_id = %s", (run_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def list_agent_runs(limit: int = 200) -> List[Dict[str, Any]]:
+    """List agent_runs rows, most-recently-started first, capped at `limit`.
+
+    This is a "recent activity" view for the Obsidian render (PP-AGENTTRACE-001
+    Phase 2), NOT a full historical dump — `limit` defaults to 200 and callers
+    should not assume this returns every run ever recorded. If the true row
+    count exceeds `limit`, older rows are silently excluded from the returned
+    list (by design, not a bug) — a future need for full history should use a
+    dedicated paginated/date-ranged query, not a larger limit on this one.
+    """
+    _ensure_agent_runs_table()
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM agent_runs ORDER BY started_at DESC LIMIT %s",
+                (limit,),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+
+# ---------------------------------------------------------------------------
+# Flake mutation gate (PP-FLAKEGATE-001, todo #1621, invariant E17)
+# ---------------------------------------------------------------------------
+#
+# `nix-flake-maintainer` never runs `git push` / `nixos-rebuild switch`
+# directly on ~/tgw-flake any more — it enqueues a `queue_jobs` row here
+# (queue_name='flake_mutation') describing the push/switch it wants done,
+# and stops. No worker ever claims/leases this queue (there is no
+# `tgw-worker@flake_mutation.service` unit, deliberately) — the only thing
+# that ever closes a flake_mutation job is a *human*, by hand, after they
+# have actually run the real git push / nixos-rebuild switch themselves,
+# calling `tgw flake mark-executed <job-id>`. This module never shells out
+# to git or nixos-rebuild anywhere — that's the entire point of the gate.
+
+FLAKE_MUTATION_QUEUE = 'flake_mutation'
+
+
+def list_flake_mutation_jobs(state: str = 'queued', limit: int = 200) -> List[Dict[str, Any]]:
+    """List flake_mutation jobs in a given state (default 'queued' — the
+    still-pending-a-human-decision set Dave looks at via `tgw flake queue`).
+    Pass state='' to list all states."""
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if state:
+                cur.execute(
+                    """
+                    SELECT job_id::text, entity_id, operation, payload_json,
+                           state, created_at, updated_at, finished_at
+                      FROM queue_jobs
+                     WHERE queue_name = %s AND state = %s
+                     ORDER BY created_at DESC
+                     LIMIT %s
+                    """,
+                    (FLAKE_MUTATION_QUEUE, state, limit),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT job_id::text, entity_id, operation, payload_json,
+                           state, created_at, updated_at, finished_at
+                      FROM queue_jobs
+                     WHERE queue_name = %s
+                     ORDER BY created_at DESC
+                     LIMIT %s
+                    """,
+                    (FLAKE_MUTATION_QUEUE, limit),
+                )
+            return [dict(row) for row in cur.fetchall()]
+
+
+def get_flake_mutation_job(job_id: str) -> Optional[Dict[str, Any]]:
+    """Full detail of one flake_mutation job, or None if not found (or not a
+    flake_mutation job — `tgw flake show` only ever shows this queue's own
+    rows, never any other queue's, even if a job_id UUID happens to match
+    something else)."""
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT job_id::text, entity_type, entity_id, operation,
+                       handler_family, queue_name, priority, state,
+                       payload_json, dedupe_key, attempt_count, max_attempts,
+                       created_at, updated_at, started_at, finished_at
+                  FROM queue_jobs
+                 WHERE job_id = %s AND queue_name = %s
+                """,
+                (job_id, FLAKE_MUTATION_QUEUE),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def mark_flake_mutation_executed(job_id: str, executed_by: Optional[str] = None) -> Dict[str, Any]:
+    """Record that a human has actually run the real `git push` /
+    `nixos-rebuild switch` themselves, by hand, outside this tool, for one
+    flake_mutation job. This is the ONLY function that ever closes a
+    flake_mutation job — it does not execute anything itself.
+
+    Transitions queued -> succeeded (reusing existing queue_jobs state
+    semantics rather than inventing a parallel status field — there is no
+    worker lease cycle for this queue, so the normal running -> succeeded
+    path used by mark_succeeded() doesn't apply; queued -> succeeded is the
+    direct human-attested equivalent for a job no worker ever claims).
+
+    `executed_by` (if given) is recorded via the `tgw.worker_id` session
+    setting so the existing `queue_job_history`/`trg_queue_jobs_history`
+    trigger captures it on the transition row for free, with no new column
+    — `tgw flake show` surfaces it back out of queue_job_history.
+
+    Raises ValueError if no matching job_id is found in queue_name
+    'flake_mutation' state 'queued' — an update that matches zero rows must
+    never look like a successful close-out (same class as invariant C14 /
+    end_agent_run()'s rowcount check)."""
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # set_config(..., is_local=true), not `SET LOCAL ... = %s` —
+            # Postgres's SET statement grammar does not accept a bound
+            # parameter on the right-hand side; set_config() is a plain SQL
+            # function call and does.
+            if executed_by:
+                cur.execute("SELECT set_config('tgw.worker_id', %s, true)", (executed_by,))
+            cur.execute("SELECT set_config('tgw.queue_transition', %s, true)", ('flake_mark_executed',))
+            cur.execute(
+                """
+                UPDATE queue_jobs
+                   SET state = 'succeeded',
+                       finished_at = NOW()
+                 WHERE job_id = %s AND queue_name = %s AND state = 'queued'
+                RETURNING job_id::text, entity_id, operation, payload_json,
+                          state, finished_at
+                """,
+                (job_id, FLAKE_MUTATION_QUEUE),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise ValueError(
+                    f"mark_flake_mutation_executed: no queued flake_mutation "
+                    f"job found for job_id={job_id!r} (already executed, "
+                    f"cancelled, or does not exist)"
+                )
+            return dict(row)
+
+
+def list_executed_flake_push_shas(host: Optional[str] = None) -> List[str]:
+    """All commit shas (entity_id) recorded as an executed ('succeeded')
+    flake_mutation push job, optionally filtered to one host. Used by
+    `tgw flake audit` to check a live `git log origin/master` against what
+    this mechanism actually has a human-attested record of."""
+    with _conn() as con:
+        with con.cursor() as cur:
+            if host:
+                cur.execute(
+                    """
+                    SELECT entity_id FROM queue_jobs
+                     WHERE queue_name = %s AND operation = 'push' AND state = 'succeeded'
+                       AND payload_json->>'host' = %s
+                    """,
+                    (FLAKE_MUTATION_QUEUE, host),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT entity_id FROM queue_jobs
+                     WHERE queue_name = %s AND operation = 'push' AND state = 'succeeded'
+                    """,
+                    (FLAKE_MUTATION_QUEUE,),
+                )
             return [r[0] for r in cur.fetchall()]

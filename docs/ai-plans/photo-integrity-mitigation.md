@@ -1,7 +1,12 @@
 # photo-integrity-mitigation: fleet-wide damaged-photo detection, archive-drive recovery, ingest-verification prevention
 
 **Status:** Draft — 2026-07-04 (session 45; detection sweep launched same night)
-**PP ref:** PP-UIPIPE-001 (broker rule) + PP-DRIVE-INDEX-001 (recovery) + PP-ANNEX-001 (prevention)
+**PP ref: PP-DATAINTEGRITY-001** (2026-07-11 — was split across 3 PPs with
+no single owner, which is exactly why legs 2/3 sat untagged; consolidated
+under one PP. PP-UIPIPE-001 no longer exists as its own PP either, folded
+into PP-EDITOR-001 same session.) Recovery still rides PP-DRIVE-INDEX-001
+Phase 1; prevention's endgame still depends on PP-ANNEX-001 — those
+relationships are unchanged, just no longer the *owning* PP designation.
 
 ## Problem / motivation
 

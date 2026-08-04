@@ -21,6 +21,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict
 
+import psycopg2.errors
+
 import tgw.logging as tgw_logging
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.queue import state_machine
@@ -46,6 +48,8 @@ class EbayDoleWorker(QueueWorker):
                     queue_name=QUEUE_NAME,
                     payload={'reason': 'startup'},
                     max_attempts=3,
+                    dedupe_key=f'{QUEUE_NAME}:pending',
+                    debounce=True,
                 )
                 log.info('ebay_dole: enqueued startup job')
         except Exception as exc:
@@ -94,12 +98,17 @@ class EbayDoleWorker(QueueWorker):
 
     def _reschedule(self) -> None:
         interval_s = int(self.config.get('dole_interval_s', 3600))
-        jid = state_machine.enqueue_job(
-            queue_name=QUEUE_NAME,
-            payload={'reason': 'scheduled'},
-            not_before=time.time() + interval_s,
-            max_attempts=3,
-        )
+        try:
+            jid = state_machine.enqueue_job(
+                queue_name=QUEUE_NAME,
+                payload={'reason': 'scheduled'},
+                not_before=time.time() + interval_s,
+                max_attempts=3,
+                dedupe_key=f'{QUEUE_NAME}:pending',
+                debounce=True,
+            )
+        except psycopg2.errors.UniqueViolation:
+            jid = None
         log.info('ebay_dole: next cycle in %dmin (job %s)', interval_s // 60, jid)
 
 

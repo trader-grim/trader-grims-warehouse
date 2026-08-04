@@ -188,11 +188,64 @@ def test_itemdata_scrub_still_processes_valid_sku_from_job_content(tmp_path):
     assert "junk" not in updated
 
 
+def test_itemdata_scrub_uses_canonical_sku_json_path_helper(tmp_path):
+    """derive_item_path() must delegate to config.sku_json() rather than
+    hand-join path components (audit#COHESION-2026-07 #1305) -- confirm
+    byte-identical output to the old hand-built path for a normal sku."""
+    from tgw import config as tgw_config
+    from tgw.workers.itemdata_scrub import derive_item_path
+
+    root = tmp_path / "ItemData"
+    sku = "tgw20260101120000009"
+    expected = tgw_config.sku_json({"itemdata_root": root}, sku)
+    assert derive_item_path(root, sku) == expected
+    assert derive_item_path(root, sku) == root / sku / f"{sku}.json"
+
+
+def test_itemdata_scrub_resolves_old_sku_via_sku_old_fallback(tmp_path):
+    """A queue job referencing a renamed item's OLD sku must resolve via
+    the fence's find_current_sku() alias index instead of failing 'not
+    found' (audit#COHESION-2026-07 #1305, mirrors revision.py #1313/#1316
+    and mcp_server.py #1312 in the same cohesion batch)."""
+    import tgw.resolver as resolver_mod
+    from tgw.workers.itemdata_scrub import ScrubRules, process_queue_job
+
+    resolver_mod._sku_old_index = None  # reset process-level cache
+
+    default_root = tmp_path / "ItemData"
+    default_root.mkdir()
+    new_sku = "tgw20260101120000010"
+    old_sku = "tgw001old"
+    item_dir = default_root / new_sku
+    item_dir.mkdir()
+    (item_dir / f"{new_sku}.json").write_text(
+        json.dumps({"sku": new_sku, "sku_old": old_sku, "junk": 1}),
+        encoding="utf-8",
+    )
+
+    job_file = tmp_path / "job5"
+    job_file.write_text(json.dumps({"sku": old_sku}), encoding="utf-8")
+
+    rules = ScrubRules(remove_keys=("junk",))
+    ok = process_queue_job(job_file, rules, default_root)
+    assert ok is True
+    updated = json.loads((item_dir / f"{new_sku}.json").read_text())
+    assert "junk" not in updated
+
+    resolver_mod._sku_old_index = None  # leave cache clean for other tests
+
+
 # ---------------------------------------------------------------------------
 # photo_history_recovery.py -- catalog_rebuild enqueue after real copies
 # ---------------------------------------------------------------------------
 
-def test_photo_history_recovery_enqueues_catalog_rebuild_on_copy(tmp_path, monkeypatch, capsys):
+def test_photo_history_recovery_no_longer_enqueues_catalog_rebuild_on_copy(tmp_path, monkeypatch, capsys):
+    """PP-CATALOG-INCR-001 CI-4 (2026-07-18): enqueue_catalog_rebuild() is now
+    a no-op — the per-item SQLite catalog stays live via CI-2's synchronous
+    fence-write upsert, and the remaining JSON artifacts are refreshed by an
+    hourly timer instead of a per-write trigger. This still calls
+    state_machine.enqueue_catalog_rebuild() internally (harmless no-op, no
+    call site needed editing), so no enqueue_job call should be recorded."""
     import tgw.workers.photo_history_recovery as phr_mod
 
     itemdata_root = tmp_path / "ItemData"
@@ -225,10 +278,7 @@ def test_photo_history_recovery_enqueues_catalog_rebuild_on_copy(tmp_path, monke
 
     assert rc == 0
     enqueue_calls = [c for c in calls if c[0] == "enqueue"]
-    assert len(enqueue_calls) == 1
-    kwargs = enqueue_calls[0][1]
-    assert kwargs["queue_name"] == "catalog_rebuild"
-    assert kwargs["dedupe_key"] == "catalog_rebuild:pending"
+    assert len(enqueue_calls) == 0
 
 
 def test_photo_history_recovery_dry_run_does_not_enqueue(tmp_path, monkeypatch):

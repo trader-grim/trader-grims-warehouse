@@ -24,12 +24,17 @@ from pathlib import Path
 from tgw import quota
 from tgw.apis.ebay.client import ebay_get
 from tgw.config import load_config
+from tgw.logging import announce_script_run
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger('ebay_snapshot_all')
 
 
 def main() -> int:
+    announce_script_run(
+        'ebay_snapshot_all.py',
+        'full eBay dataset snapshot (every inventory item + offer) through the capture fence (R1.8)',
+    )
     cfg = load_config(Path('/opt/TGW/config/tgw-api-config.json'))
     quota.set_context('background', 'r1.8-snapshot')
 

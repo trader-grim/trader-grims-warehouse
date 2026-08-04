@@ -70,9 +70,14 @@ def _require_genai():
 
 def build_alt_text_task(
     images_b64: List[str],
-    model: str = "gemini-2.5-flash-lite",
+    model: str,
 ) -> Dict[str, Any]:
     """Build one Gemini Batch JSONL task dict for N images.
+
+    `model` is required, not defaulted (invariant E15, 2026-07-20) — the
+    only caller (tgw.alt_text.cmd_alt_text_gemini_batch) always resolves it
+    from tgw-models.json first; a module-level default here would be a dead
+    literal nobody reads until it silently isn't.
 
     The model is instructed to return a JSON array with one object per image
     in submission order: [{"index": 0, "alt_text": "...", "seo_caption": "..."}, ...]
@@ -226,7 +231,11 @@ def parse_batch_results(
 
     Each output line corresponds to one submitted task in order.
     Returns a list of the same length as the input tasks:
-      - list[dict] with {index, alt_text, seo_caption} on success
+      - list[dict] with {index, alt_text, seo_caption, raw_response} on
+        success — raw_response is the verbatim per-task model response text
+        (Data Charter raw-preservation rule, Prime Directive 1); every image
+        parsed out of one task shares that task's raw_response since one
+        Batch API call covers all images in the task.
       - None on error / unparseable line
     """
     parsed: List[Optional[List[Dict[str, Any]]]] = []
@@ -258,6 +267,13 @@ def parse_batch_results(
                     items = items["items"]
                 else:
                     items = [items]
+            # Data Charter raw-preservation rule (Prime Directive 1): keep the
+            # verbatim per-task model response text alongside the parsed
+            # fields — one Batch API call covers N images, so every image
+            # parsed out of this task shares the same raw response text.
+            for entry in items:
+                if isinstance(entry, dict):
+                    entry["raw_response"] = text
             parsed.append(items)
         except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
             log.warning("Result line %d: parse error: %s", i, exc)

@@ -37,6 +37,41 @@ environment by `tgw.config.load_config()`. Every direct-call function reads
 its key via `tgw.apis.secrets.get_api_key(provider)` — see
 `TGW-Config-Reference.md`'s Secrets Reference section.
 
+## Gemini 2.5 series deprecation (2026-07-14)
+
+**All Gemini 2.5 GA models (Pro, Flash, Flash-Lite) share the same shutdown
+date: October 16, 2026** (confirmed live against Google's official
+`ai.google.dev/gemini-api/docs/deprecations` page — an aggregator site
+initially returned a wrong earlier date for a preview variant, don't trust
+secondary sources for this, always check the official page). Replacements:
+`gemini-2.5-flash` → `gemini-3.5-flash`; `gemini-2.5-flash-lite` →
+`gemini-3.1-flash-lite`; `gemini-2.5-pro` → `gemini-3.1-pro-preview`
+(TGW does not use any Pro variant for any task — confirmed via
+`grep pro tgw-models.json`, zero matches).
+
+**Which TGW tasks are affected, and which actually need vision:**
+`ai_identify`, `alt_text`, `bulk_classify` (the aspect-fill sub-call inside
+`ebay_draft.py`) all pass photos (`img_b64_list`) — genuinely vision tasks.
+**`ebay_draft`'s own top-level call** (`ebay_draft.py:545`, writing the
+listing description/title) passes **no images at all** — text-only, despite
+living inside a worker named `ebay_draft`. Don't assume every
+`google_direct` task needs a vision-capable model; check the call site.
+
+**2026-07-14, Dave: experimenting with a different model for `ebay_draft`
+specifically** — motivation is two-fold: (1) it's text-only, so it doesn't
+need Flash/Flash-Lite's vision-optimized tradeoffs, and (2) Dave wants to
+taste-test whether a different model writes better-nuanced descriptions/
+titles. First pick: `gemini-3.1-pro-preview` (flagship quality, still
+**preview status** — Google can change/pull preview models with less
+notice than a stable release, worth rechecking before relying on it
+long-term). Dave plans to swap this a couple more times himself to compare
+— if `ebay_draft`'s configured model differs from this note by the time
+you read it, that's Dave's own iteration, not a stale doc; check
+`tgw-models.json` for the live value. The other three (`ai_identify`,
+`alt_text`, `bulk_classify`) are still on `gemini-2.5-flash-lite` as of
+this note — not yet migrated, no urgency before October but worth planning
+before the deadline.
+
 ## The Google free tier — what is actually true
 
 1. **Published limits are a ceiling, not a grant.** Google's docs advertise

@@ -34,10 +34,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import httpx
-
 from tgw.apis.ebay.client import ebay_get
-from tgw.apis.secrets import get_api_key
+from tgw.apis.llm import call_model
+from tgw.apis.ollama import extract_json
 
 log = logging.getLogger(__name__)
 
@@ -362,25 +361,25 @@ def _iqr_mark_and_filter(
     return cleaned, len(prices) - len(cleaned)
 
 
+_COMP_FILTER_SYSTEM_PROMPT = (
+    'You are a price-comparison relevance filter for an eBay reseller. '
+    'Evaluate whether each listed comp is genuinely comparable to the item '
+    'being priced, and rate overall confidence in the resulting comp set.'
+)
+
+
 def _llm_filter_comps(
     cfg: Dict[str, Any],
     item_title: str,
     summaries: List[Dict[str, Any]],
     item_rank: Optional[int],
 ) -> Tuple[List[float], str]:
-    """Filter comps with gpt-4o-mini via OpenRouter. Returns (kept prices, confidence).
+    """Filter comps via the configured pricing_comp_filter model
+    (tgw-models.json). Returns (kept prices, confidence).
     Falls back to all non-outlier prices + 'medium' on any error."""
     fallback_prices, _ = _best_prices(
         [s for s in summaries if not s.get('_outlier')], item_rank
     )
-    try:
-        api_key = get_api_key('openrouter')
-    except RuntimeError as exc:
-        log.warning('pricing: could not load openrouter key: %s', exc)
-        for s in summaries:
-            s.setdefault('_llm_dropped', False)
-            s.setdefault('_llm_reason', '')
-        return fallback_prices, 'medium'
 
     candidates = [s for s in summaries if not s.get('_outlier')]
     if not candidates:
@@ -400,7 +399,7 @@ def _llm_filter_comps(
             cond = cond.get('conditionDisplayName', '')
         lines.append(f'{i}: ${p:.2f} [{cond}] — {s.get("title", "")[:80]}')
 
-    prompt = (
+    user_prompt = (
         'We are selling: ' + item_title[:100] + '\n\n'
         'Evaluate these active eBay listings as price comps:\n'
         + '\n'.join(lines)
@@ -413,26 +412,8 @@ def _llm_filter_comps(
     )
 
     try:
-        resp = httpx.post(
-            'https://openrouter.ai/api/v1/chat/completions',
-            headers={
-                'Authorization': 'Bearer ' + api_key,
-                'Content-Type': 'application/json',
-                'HTTP-Referer': 'https://tgw.local',
-            },
-            json={
-                'model': 'openai/gpt-4o-mini',
-                'messages': [{'role': 'user', 'content': prompt}],
-                'max_tokens': 700,
-                'temperature': 0.1,
-            },
-            timeout=25.0,
-        )
-        resp.raise_for_status()
-        raw = resp.json()['choices'][0]['message']['content'].strip()
-        if raw.startswith('```'):
-            raw = raw.split('```')[1].lstrip('json').strip()
-        result = json.loads(raw)
+        raw = call_model('pricing_comp_filter', _COMP_FILTER_SYSTEM_PROMPT, user_prompt, cfg)
+        result = extract_json(raw)
     except Exception as exc:
         log.warning('pricing: LLM comp filter error: %s', exc)
         for s in summaries:

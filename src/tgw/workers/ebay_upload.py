@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Set
 
@@ -90,8 +91,23 @@ class EbayUploadWorker(QueueWorker):
         photos: List[Path] = all_photos
 
         if not photos:
+            # Invariant C11 (session 43): a skip/guard is a finding, not a log
+            # line. Without photos on disk, this job used to just log+return
+            # SUCCEEDED, leaving the item silently stalled forever with no
+            # record anywhere that anything is wrong. Persist durably —
+            # mirrors ebay_stage.py's legacy_listing_blocked pattern — so
+            # catalog-verify can surface and an operator can find/repair it.
+            # Job status itself stays SUCCEEDED (matches ebay_stage's
+            # equivalent guard: this is a recognized, recorded stall, not a
+            # transient failure worth retry/backoff churn).
             log.warning('no uploadable photos found for %s — skipping upload', sku)
             tgw_logging.log_event('ebay_upload_no_photos', sku=sku)
+            fence_patch_item(self.config, sku, {
+                'ebay_upload_blocked': {
+                    'reason': 'no_photos_on_disk',
+                    'detected_at': datetime.now(timezone.utc).isoformat(),
+                },
+            })
             return
 
         expected_total = len(photos)
@@ -167,13 +183,19 @@ class EbayUploadWorker(QueueWorker):
                                   quota_retries=quota_retries, uploaded_so_far=len(uploaded))
             # Requeue for 6 hours from now (EPS resets daily at midnight eBay time).
             # Invariant C10: the requeue keeps the job's operator provenance.
-            state_machine.enqueue_job(
-                queue_name=QUEUE_NAME,
-                payload={'sku': sku, 'reason': 'quota_retry',
-                         'quota_retries': quota_retries, **_origin},
-                not_before=time.time() + 6 * 3600,
-                max_attempts=3,
-            )
+            try:
+                state_machine.enqueue_job(
+                    queue_name=QUEUE_NAME,
+                    payload={'sku': sku, 'reason': 'quota_retry',
+                             'quota_retries': quota_retries, **_origin},
+                    entity_type='item',
+                    entity_id=sku,
+                    not_before=time.time() + 6 * 3600,
+                    max_attempts=3,
+                    dedupe_key=f'ebay_upload:{sku}',
+                )
+            except psycopg2.errors.UniqueViolation:
+                pass
             return
 
         if errors:
@@ -191,6 +213,13 @@ class EbayUploadWorker(QueueWorker):
 
         reordered = self._persist_partial(sku, uploaded, photos)
 
+        # Self-healing: a full success means photos are no longer missing —
+        # clear any prior no-photos finding so catalog-verify stops flagging
+        # an item that's since been repaired (mirrors legacy_listing_resolved
+        # suppressing legacy_listing_unrepaired once dealt with).
+        if item.get('ebay_upload_blocked'):
+            fence_patch_item(self.config, sku, {'ebay_upload_blocked': None})
+
         new_count = len(uploaded) - len(existing)
         log.info('ebay_upload complete for %s: %d total (%d new)',
                  sku, len(reordered), new_count)
@@ -203,13 +232,7 @@ class EbayUploadWorker(QueueWorker):
                               to_attempt=to_attempt)
 
         try:
-            state_machine.enqueue_job(
-                queue_name='catalog_rebuild',
-                payload={'reason': f'ebay_upload:{sku}'},
-                dedupe_key='catalog_rebuild:pending',
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
+            state_machine.enqueue_catalog_rebuild(f'ebay_upload:{sku}')
         except psycopg2.errors.UniqueViolation:
             pass
 

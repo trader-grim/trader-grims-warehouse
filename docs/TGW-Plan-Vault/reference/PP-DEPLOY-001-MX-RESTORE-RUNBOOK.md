@@ -1,5 +1,20 @@
 # PP-DEPLOY-001 — MX Snapshot Restore Image Runbook
 
+> **⚠️ APPLICABILITY — historical, pre-NixOS. Not routine current-host
+> operations.** Triaged 2026-07-18 (todo #1529/PP-RUNBOOK-001, report gap
+> #10). The production host has already migrated to NixOS
+> (`nixos-prod-cutover-runbook.md`, executed 2026-06-23) — this document
+> describes the MX Linux era that migration replaced. Its `apt`/MX Snapshot
+> commands will not work on the current host. Kept as historical
+> disaster-recovery reference (Prime Directive 1 — never discard), not as
+> an active procedure. **Also stale (report gap #11):** every command below
+> referencing rclone remote `dbukove:` will fail outright — that remote no
+> longer exists in the live config (verified live 2026-07-18:
+> `sudo -u tgw rclone.conf` on tgw-prod defines only `[tgw-gdrive]`, no
+> `[dbukove]`). If a genuine MX-era restore is ever needed, replace every
+> `dbukove:` reference with the current `tgw-gdrive:` remote and re-verify
+> paths before running anything.
+
 **Operator runbook.** Bake one final bootable MX Linux restore image of the
 current working TGW system as a safety net **before** the NixOS migration
 (PP-NIXOS-001). If anything goes wrong during/after cutover, this image restores

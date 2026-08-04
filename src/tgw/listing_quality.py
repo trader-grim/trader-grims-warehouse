@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from tgw.ebay.draft_specifics import get_ebay_aspects
+
 _GENERIC_BRANDS = frozenset({
     'unbranded', 'does not apply', 'n/a', 'na', 'generic', '',
     'does not apply', 'not applicable',
@@ -97,7 +99,8 @@ def score_draft(
         flags.append('title_too_long')
 
     # ── Brand in title (25 pts) ────────────────────────────────────────────
-    specs      = draft.get('item_specifics') or {}
+    # todo #1418: Set B read via tgw.ebay.draft_specifics (the sanctioned accessor)
+    specs      = get_ebay_aspects(item)
     spec_brand = str(specs.get('Brand') or specs.get('brand') or '').strip()
     pl_brand   = str(pl.get('brand') or '').strip()
 

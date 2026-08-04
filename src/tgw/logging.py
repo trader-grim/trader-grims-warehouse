@@ -30,7 +30,10 @@ import json
 import logging
 import logging.handlers
 import os
+import shutil
+import tempfile
 import time
+from datetime import date
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -146,7 +149,11 @@ def setup_logging(
 
     # --- Structured JSON file handler (optional) ---
     if json_file:
-        json_path = log_root / (filename.replace('.log', '.jsonl') or 'tgw.jsonl')
+        if filename.endswith('.log'):
+            json_filename = filename[:-len('.log')] + '.jsonl'
+        else:
+            json_filename = 'tgw.jsonl'
+        json_path = log_root / json_filename
         jh = logging.handlers.RotatingFileHandler(
             json_path,
             maxBytes=max_bytes,
@@ -217,6 +224,67 @@ def announce_script_run(script_name: str, purpose: str, **fields: Any) -> None:
         )
     """
     log_event('script_run_start', script=script_name, purpose=purpose, **fields)
+
+
+# ---------------------------------------------------------------------------
+# Agent run raw transcript archival (PP-AGENTTRACE-001 Phase 1)
+# ---------------------------------------------------------------------------
+
+DEFAULT_AGENT_TRACES_ROOT = Path('/opt/TGW/var/agent-traces')
+
+
+def archive_transcript(
+    run_id: str,
+    source_path: 'os.PathLike[str] | str',
+    *,
+    traces_root: Path = DEFAULT_AGENT_TRACES_ROOT,
+    today: Optional[date] = None,
+) -> str:
+    """Copy a raw agent-run transcript into permanent archival storage.
+
+    Destination: ``<traces_root>/<YYYY-MM-DD>/<run_id>.jsonl`` — dated by
+    *today* (the date the archival happens, defaulting to the real current
+    date; overridable for tests). The date directory is created if missing.
+
+    Follows the same atomic-write discipline used for ItemData (invariant
+    E5): the source file is copied into a temp file in the *same target
+    directory*, then moved into place with ``os.replace()`` — never a
+    partial write left in the final path if the copy is interrupted.
+
+    Raw transcripts are a permanent asset (Prime Directive 1 / Data Charter
+    raw layer) — this function does not prune, rotate, or overwrite an
+    existing transcript for a different run_id; each run_id gets its own
+    file, and calling this twice for the *same* run_id atomically replaces
+    that run's own copy (idempotent re-archival), never another run's file.
+
+    Returns the final absolute path as a string (for ``tgw trace end
+    --transcript``). Raises FileNotFoundError if source_path doesn't exist —
+    a missing source is a real error here, never a silent no-op.
+    """
+    source_path = Path(source_path)
+    if not source_path.is_file():
+        raise FileNotFoundError(f"archive_transcript: source not found: {source_path}")
+
+    day = today or date.today()
+    dest_dir = Path(traces_root) / day.isoformat()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = dest_dir / f'{run_id}.jsonl'
+
+    fd, tmp_name = tempfile.mkstemp(dir=dest_dir, prefix=f'.{run_id}.', suffix='.tmp')
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, 'wb') as tmp_f:
+            with open(source_path, 'rb') as src_f:
+                shutil.copyfileobj(src_f, tmp_f)
+            tmp_f.flush()
+            os.fsync(tmp_f.fileno())
+        os.chmod(tmp_path, 0o660)
+        os.replace(tmp_path, dest_path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+    return str(dest_path)
 
 
 # ---------------------------------------------------------------------------

@@ -48,14 +48,56 @@ def get_task_model(cfg: Dict[str, Any], task: str) -> tuple[str, str]:
     """Return (provider, model) for *task* from cfg['models'][task] — the
     ONLY source; see /opt/TGW/config/tgw-models.json. Raises KeyError with a
     clear message if the task isn't configured there — a task's model must
-    never be a silent code-level guess (Dave, 2026-07-09)."""
+    never be a silent code-level guess (Dave, 2026-07-09).
+
+    An entry is either a full explicit {'provider', 'model'} override, or a
+    {'use_default': '<name>'} pointer into cfg['models']['defaults'] (invariant
+    E15, 2026-07-20) — never both, no partial merge. This stays a simple
+    two-branch lookup, not a config-merging engine."""
     entry = cfg.get('models', {}).get(task)
+    if entry and 'use_default' in entry:
+        default_name = entry['use_default']
+        default_entry = cfg.get('models', {}).get('defaults', {}).get(default_name)
+        if not default_entry or 'provider' not in default_entry or 'model' not in default_entry:
+            raise KeyError(
+                f"models[{task!r}]['use_default'] names {default_name!r}, which "
+                f"has no entry in tgw-models.json's 'defaults' block (need "
+                f"{{'provider': ..., 'model': ...}}) — see TGW-Config-Reference.md"
+            )
+        return default_entry['provider'], default_entry['model']
     if not entry or 'provider' not in entry or 'model' not in entry:
         raise KeyError(
             f"No models[{task!r}] entry in tgw-models.json (need "
-            f"{{'provider': ..., 'model': ...}}) — see TGW-Config-Reference.md"
+            f"{{'provider': ..., 'model': ...}} or {{'use_default': ...}}) — "
+            f"see TGW-Config-Reference.md"
         )
     return entry['provider'], entry['model']
+
+
+def get_task_generation_config(cfg: Dict[str, Any], task: str) -> Dict[str, Any]:
+    """Return the optional `generation` sub-dict for *task* from
+    cfg['models'][task]['generation'], or {} if absent/not configured.
+
+    General per-task generation knobs (max_output_tokens, thinking_budget,
+    ...) — any task entry may set these; absence means "provider default,
+    unchanged behavior". This is NOT a bulk_classify-only special case —
+    every provider path that supports these knobs reads the same field
+    (PP-DEADLETTER-001, 2026-07-17: gemini-2.5-flash-lite's default
+    'thinking' budget was silently consuming the entire output token
+    budget before any visible text was emitted, causing genuine
+    mid-generation truncation of bulk_classify's JSON responses).
+
+    NOTE (2026-07-20, invariant E15 pass): a task pointing at a 'use_default'
+    profile does NOT inherit a 'generation' block from that default profile —
+    generation knobs stay per-task-only, deliberately, to keep this a simple
+    single-entry lookup rather than a config-merging engine. A task that
+    needs custom generation knobs must set its own 'generation' key alongside
+    its 'use_default' pointer (or use a full explicit {'provider', 'model'}
+    entry).
+    """
+    entry = cfg.get('models', {}).get(task) or {}
+    gen = entry.get('generation')
+    return gen if isinstance(gen, dict) else {}
 
 
 def call_model(
@@ -122,8 +164,11 @@ def call_model(
                 google_exc = exc
             if google_exc is None:
                 try:
+                    gen_cfg = get_task_generation_config(cfg, task)
                     text, usage = _call_google_direct(
                         model, system_prompt, user_prompt, cfg, img_b64_list=_images,
+                        max_output_tokens=gen_cfg.get('max_output_tokens'),
+                        thinking_budget=gen_cfg.get('thinking_budget'),
                     )
                 except Exception as exc:
                     google_exc = exc
@@ -218,9 +263,12 @@ def call_model(
                         'emergency reserve: google_direct/%s: %s',
                         task, model, reserve_model, exc,
                     )
+                    gen_cfg = get_task_generation_config(cfg, task)
                     text, usage = _call_google_direct(
                         reserve_model, system_prompt, user_prompt, cfg,
                         img_b64_list=_images,
+                        max_output_tokens=gen_cfg.get('max_output_tokens'),
+                        thinking_budget=gen_cfg.get('thinking_budget'),
                     )
                 else:
                     raise
@@ -284,6 +332,8 @@ def _call_google_direct(
     cfg: Dict[str, Any],
     img_b64_list: Optional[List[str]] = None,
     max_retries: int = 3,
+    max_output_tokens: Optional[int] = None,
+    thinking_budget: Optional[int] = None,
 ) -> tuple:
     """Call Gemini directly via the google-genai SDK — no OpenRouter markup.
 
@@ -291,6 +341,17 @@ def _call_google_direct(
     'google/...' OpenRouter form. Raises on any failure (missing SDK, missing
     key, quota, network) — call_model() catches and falls back to OpenRouter.
     Returns (text, usage_dict).
+
+    max_output_tokens/thinking_budget are optional per-task generation knobs
+    (see get_task_generation_config / tgw-models.json's per-task
+    "generation" field) — None means "leave the SDK/model default alone".
+    PP-DEADLETTER-001 (2026-07-17): before this plumbing existed, every
+    google_direct call left Gemini's "thinking" budget unset, which for
+    gemini-2.5-flash-lite can consume the entire output token budget on
+    its internal reasoning before emitting any visible text — producing
+    genuine, silent mid-JSON truncation with no error from the SDK. Setting
+    thinking_budget=0 for tasks that need bare structured-output (no
+    visible reasoning) is a config-only fix once this plumbing exists.
     """
     from tgw.apis.google_genai import _require_genai, load_google_key
 
@@ -306,6 +367,12 @@ def _call_google_direct(
 
     model_ref = model if model.startswith('models/') else f'models/{model}'
 
+    generation_config: Dict[str, Any] = {'system_instruction': system_prompt}
+    if max_output_tokens is not None:
+        generation_config['max_output_tokens'] = max_output_tokens
+    if thinking_budget is not None:
+        generation_config['thinking_config'] = {'thinking_budget': thinking_budget}
+
     from tgw import quota
 
     last_exc: Optional[Exception] = None
@@ -314,7 +381,7 @@ def _call_google_direct(
             response = client.models.generate_content(
                 model=model_ref,
                 contents=[{'role': 'user', 'parts': parts}],
-                config={'system_instruction': system_prompt},
+                config=generation_config,
             )
             quota.record(cfg, 'llm_google')
             break
@@ -322,11 +389,23 @@ def _call_google_direct(
             last_exc = exc
             quota.record(cfg, 'llm_google')
             status = getattr(getattr(exc, 'response', None), 'status_code', None)
-            if status == 429 or 'RESOURCE_EXHAUSTED' in str(exc):
-                quota.record_429(cfg, 'llm_google', f'{model}: {str(exc)[:150]}')
-            if status == 429 and attempt < max_retries - 1:
-                time.sleep(15 * (attempt + 1))
-                continue
+            exc_str = str(exc)
+            is_quota_exhausted = status == 429 or 'RESOURCE_EXHAUSTED' in exc_str
+            # 503/UNAVAILABLE ("high demand... temporary... try again later") is
+            # Google's own transient-overload signal, not quota exhaustion --
+            # don't feed it into the quota circuit breaker (record_429), just
+            # retry with a short backoff (2026-07-14, Dave: saw a bare 503 fall
+            # straight to the OpenRouter fallback with zero retry).
+            is_transient_overload = status == 503 or 'UNAVAILABLE' in exc_str
+            if is_quota_exhausted:
+                quota.record_429(cfg, 'llm_google', f'{model}: {exc_str[:150]}')
+            if attempt < max_retries - 1:
+                if is_quota_exhausted:
+                    time.sleep(15 * (attempt + 1))
+                    continue
+                if is_transient_overload:
+                    time.sleep(2 * (attempt + 1))
+                    continue
             raise
     else:
         raise last_exc  # pragma: no cover — loop always breaks or raises

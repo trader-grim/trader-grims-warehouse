@@ -1,10 +1,18 @@
-"""Tests for tgw.plan_render — generated taskboard + plan check (PP-PLANDB-001)."""
+"""Tests for tgw.plan_render — generated taskboard + plan check (PP-PLANDB-001).
+
+plan_brief() coverage (PP-KNOWLEDGE-001 / todo #1439, #1520 follow-up
+refactor) lives here per item 5 of Tigwa's reviewed v1 submission — the
+deterministic parser/retrieval logic moved out of tgw.mcp_server into this
+module; tests/test_mcp_server.py retains only FastMCP-boundary coverage.
+"""
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from tgw.plan_render import (
+    PLAN_BRIEF_MAX_SOURCE_BYTES,
     _fmt_ids,
     _parse_plan_sections,
     _parse_size,
@@ -12,6 +20,7 @@ from tgw.plan_render import (
     build_taskboard,
     format_plan_check,
     format_plan_status,
+    plan_brief,
     plan_check,
     plan_status,
     render_taskboard,
@@ -526,3 +535,170 @@ def test_format_plan_status_truncates_long_body():
     ]
     text = format_plan_status({'ok': True, 'rows': rows})
     assert '…' in text
+
+
+# ---------------------------------------------------------------------------
+# plan_brief — bounded, exact-source Master Plan retrieval
+# (PP-KNOWLEDGE-001 / todo #1439, #1520 follow-up refactor)
+# ---------------------------------------------------------------------------
+
+def _brief_cfg(tmp_path):
+    vault = tmp_path / 'plan-vault'
+    return {
+        'plan_vault_path': vault,
+        'plan_master_path': vault / 'plan' / 'TGW-Master-Plan.md',
+    }
+
+
+def _write_plan(cfg, text):
+    path = cfg['plan_master_path']
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding='utf-8')
+    return path
+
+
+def test_plan_brief_invalid_pp_identifier(tmp_path):
+    cfg = _brief_cfg(tmp_path)
+    out = plan_brief(cfg, 'not-a-pp')
+    assert out['ok'] is False
+    assert out['code'] == 'invalid_pp_identifier'
+
+
+def test_plan_brief_canonical_plan_unavailable(tmp_path):
+    cfg = _brief_cfg(tmp_path)
+    # No plan file written — plan_master_path does not exist.
+    out = plan_brief(cfg, 'PP-ALPHA-001')
+    assert out['ok'] is False
+    assert out['code'] == 'canonical_plan_unavailable'
+
+
+def test_plan_brief_pp_not_found(tmp_path):
+    cfg = _brief_cfg(tmp_path)
+    _write_plan(cfg, '## PP-BETA-002 Beta work\nbeta source\n')
+    out = plan_brief(cfg, 'PP-ALPHA-001')
+    assert out['ok'] is False
+    assert out['code'] == 'pp_not_found'
+    assert out['canonical_source']['path'] == str(cfg['plan_master_path'])
+
+
+def test_plan_brief_ambiguous_pp(tmp_path):
+    cfg = _brief_cfg(tmp_path)
+    _write_plan(
+        cfg,
+        '## PP-ALPHA-001 First section\none\n\n## PP-ALPHA-001 Second section\ntwo\n',
+    )
+    out = plan_brief(cfg, 'PP-ALPHA-001')
+    assert out['ok'] is False
+    assert out['code'] == 'ambiguous_pp'
+    assert len(out['matches']) == 2
+
+
+def test_plan_brief_exact_section_boundaries_and_hashes(tmp_path):
+    cfg = _brief_cfg(tmp_path)
+    text = (
+        '# TGW Master Plan\n\n'
+        '## PP-ALPHA-001 Alpha work\n'
+        'alpha line 1\n'
+        'alpha line 2\n\n'
+        '## PP-BETA-002 Beta work\n'
+        'beta source\n'
+    )
+    _write_plan(cfg, text)
+
+    out = plan_brief(cfg, 'PP-ALPHA-001')
+
+    assert out['ok'] is True
+    section = out['section']
+    expected_content = '## PP-ALPHA-001 Alpha work\nalpha line 1\nalpha line 2\n\n'
+    assert section['content'] == expected_content
+    assert section['heading'] == 'PP-ALPHA-001 Alpha work'
+    # line_start/line_end are 1-indexed, half-open at end (excludes next heading)
+    assert section['line_start'] == 3
+    assert section['line_end'] == 6
+    assert section['sha256'] == hashlib.sha256(expected_content.encode('utf-8')).hexdigest()
+    assert out['canonical_source']['sha256'] == hashlib.sha256(text.encode('utf-8')).hexdigest()
+    assert out['canonical_source']['bytes'] == len(text.encode('utf-8'))
+    # section byte range is a slice of the canonical source bytes
+    raw = text.encode('utf-8')
+    assert raw[section['byte_start']:section['byte_end']] == expected_content.encode('utf-8')
+
+
+def test_plan_brief_lowercase_pp_normalizes_to_uppercase(tmp_path):
+    cfg = _brief_cfg(tmp_path)
+    _write_plan(cfg, '## PP-ALPHA-001 Alpha work\nalpha source\n')
+    out = plan_brief(cfg, 'pp-alpha-001')
+    assert out['ok'] is True
+    assert out['query']['pp'] == 'PP-ALPHA-001'
+
+
+def test_plan_brief_cross_reference_heading_is_not_a_second_match(tmp_path):
+    # Regression: a heading that merely says another PP was folded into the
+    # requested PP must never compete with the canonical section (the
+    # false-ambiguity case from Tigwa's original v1 submission).
+    cfg = _brief_cfg(tmp_path)
+    _write_plan(
+        cfg,
+        '## PP-ALPHA-001 Canonical work\nalpha source\n\n'
+        '## PP-OLD-001 Folded into PP-ALPHA-001\nold source\n',
+    )
+    out = plan_brief(cfg, 'PP-ALPHA-001')
+    assert out['ok'] is True
+    assert out['section']['heading'] == 'PP-ALPHA-001 Canonical work'
+
+
+def test_plan_brief_section_too_large(tmp_path):
+    cfg = _brief_cfg(tmp_path)
+    huge = 'x' * (PLAN_BRIEF_MAX_SOURCE_BYTES + 100)
+    _write_plan(cfg, f'## PP-ALPHA-001 Alpha work\n{huge}\n')
+    out = plan_brief(cfg, 'PP-ALPHA-001')
+    assert out['ok'] is False
+    assert out['code'] == 'section_too_large'
+    assert 'content' not in out['section']
+
+
+def test_plan_brief_linked_detail_absent(tmp_path):
+    cfg = _brief_cfg(tmp_path)
+    _write_plan(cfg, '## PP-ALPHA-001 Alpha work\nalpha source\n')
+    out = plan_brief(cfg, 'PP-ALPHA-001')
+    assert out['ok'] is True
+    assert out['linked_pp_detail']['status'] == 'absent'
+    assert 'content' not in out['linked_pp_detail']
+
+
+def test_plan_brief_linked_detail_is_metadata_only_never_inlined(tmp_path):
+    # Item 4: linked PP documents are metadata-only (path/status/hash/size);
+    # content is never inlined even when well under the packet cap.
+    cfg = _brief_cfg(tmp_path)
+    _write_plan(cfg, '## PP-ALPHA-001 Alpha work\nalpha source\n')
+    detail_path = cfg['plan_vault_path'] / 'plan' / 'pp' / 'PP-ALPHA-001.md'
+    detail_path.parent.mkdir(parents=True)
+    detail_bytes = b'# PP-ALPHA-001\nSmall detail doc, well under the cap.\n'
+    detail_path.write_bytes(detail_bytes)
+
+    out = plan_brief(cfg, 'PP-ALPHA-001')
+
+    assert out['ok'] is True
+    detail = out['linked_pp_detail']
+    assert detail['status'] == 'present'
+    assert detail['path'] == str(detail_path)
+    assert detail['sha256'] == hashlib.sha256(detail_bytes).hexdigest()
+    assert detail['bytes'] == len(detail_bytes)
+    assert 'content' not in detail
+
+
+def test_plan_brief_never_writes_anything(tmp_path):
+    cfg = _brief_cfg(tmp_path)
+    plan_path = _write_plan(cfg, '## PP-ALPHA-001 Alpha work\nalpha source\n')
+    before = plan_path.read_bytes()
+    before_mtime = plan_path.stat().st_mtime
+
+    plan_brief(cfg, 'PP-ALPHA-001')
+    plan_brief(cfg, 'PP-MISSING-999')  # not_found path
+    plan_brief(cfg, 'not-a-pp')  # invalid path
+
+    # No new files anywhere under the plan vault (read-only guarantee).
+    vault = cfg['plan_vault_path']
+    all_files = sorted(p for p in vault.rglob('*') if p.is_file())
+    assert all_files == [plan_path]
+    assert plan_path.read_bytes() == before
+    assert plan_path.stat().st_mtime == before_mtime

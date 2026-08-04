@@ -6,10 +6,10 @@ import json
 import logging
 import os
 import shutil
-import time
 from pathlib import Path
 from typing import Iterable
 
+from tgw.logging import announce_script_run, setup_logging
 from tgw.queue import state_machine
 
 
@@ -94,7 +94,24 @@ def ensure_copy(src: Path, dst: Path, overwrite: bool = False, write: bool = Fal
     if not write:
         return 'would_copy'
     dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dst)
+    # todo #1307 / audit#COHESION-2026-07: previously shutil.copy2(src, dst)
+    # wrote straight to the live destination path — a reader (thumbnail_gen,
+    # ebay_upload, catalog_rebuild) could observe a partial/corrupt photo if
+    # the process was interrupted mid-copy. Mirror the same temp-file +
+    # os.replace atomicity items.atomic_write_json()/context.py use for JSON
+    # and symlinks (invariants.md A1/A8) — write to a temp file in the same
+    # destination directory (guarantees os.replace stays on one filesystem),
+    # then atomically rename onto the final path.
+    tmp_dst = dst.with_name(dst.name + f'.tmp{os.getpid()}')
+    try:
+        shutil.copy2(src, tmp_dst)
+        os.replace(tmp_dst, dst)
+    except BaseException:
+        try:
+            tmp_dst.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
     return 'copied'
 
 
@@ -164,6 +181,20 @@ def main() -> int:
 
     config_path = Path(args.config)
 
+    # No prior logging configuration in this script (verified live, todo
+    # #1369 — the same gap existed in this file's #1308 fix too: the
+    # announce_script_run() call was present but silently a no-op without
+    # a handler on the 'tgw' logger, default root level WARNING).
+    try:
+        setup_logging('tgw.photo_history_recovery')
+    except OSError:
+        pass  # no writable log root (e.g. CI/test env) — announce still attempted below
+    announce_script_run(
+        'photo_history_recovery.py',
+        'recover missing item photos from history archives into ItemData',
+        write=args.write, config=str(config_path), itemdata=args.itemdata,
+    )
+
     cfg = load_config(config_path)
     mode = 'WRITE' if args.write else 'DRY-RUN'
     logging.info('photo_history_recovery: starting — mode=%s', mode)
@@ -187,13 +218,7 @@ def main() -> int:
         # other writer uses (A7).
         try:
             state_machine.init(cfg.get('postgres_dsn', 'dbname=state_machine user=tgw'))
-            state_machine.enqueue_job(
-                queue_name='catalog_rebuild',
-                payload={'reason': 'photo_history_recovery'},
-                dedupe_key='catalog_rebuild:pending',
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
+            state_machine.enqueue_catalog_rebuild('photo_history_recovery')
             logging.info('photo_history_recovery: enqueued catalog_rebuild after %d copies', copied)
         except Exception as exc:
             logging.warning('photo_history_recovery: could not enqueue catalog_rebuild: %s', exc)

@@ -33,9 +33,13 @@ from __future__ import annotations
 import gzip
 import json
 import logging
+import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+import requests
 
 from tgw.apis.ebay._cache_io import locked_merge_cache_json
 from tgw.apis.ebay.client import ebay_get, ebay_get_bytes
@@ -44,13 +48,56 @@ from tgw.catalog import atomic_write_json as _atomic_write_cache_json
 
 log = logging.getLogger(__name__)
 
-# Aspects we skip — not useful for AI to fill (operator/product-lookup handles these)
-# California Prop 65 Warning was previously skipped as "legal boilerplate" but Dave
-# flagged (session 39, item tgw202605060201087) that it's a real, near-universal
-# aspect that must be shown/filled like any other — removed from the skip list.
-_SKIP_ASPECTS = {'MPN', 'Model', 'Unit Quantity', 'Unit Type'}
+# Todo #1711 removed the former global aspect-name skip list. Model, MPN,
+# Unit Quantity, Unit Type, and every other ordinary taxonomy aspect belong
+# according to the Set A category-group union or Set B selected-category
+# contract, never according to a process-global exception list.
 
-_aspects_mem_cache: Dict[str, List[Dict[str, Any]]] = {}
+_ASPECTS_MEM_CACHE_MAX = 256
+_aspects_mem_cache: "OrderedDict[Tuple[str, str], List[Dict[str, Any]]]" = OrderedDict()
+_aspects_mem_cache_lock = threading.RLock()
+
+
+def _aspects_mem_key(
+    cfg: Dict[str, Any], category_id: str
+) -> Optional[Tuple[str, str]]:
+    """Return a stable cache key, or disable memory caching for rootless configs."""
+    root = cfg.get("catalog_root")
+    if not root:
+        return None
+    return str(Path(root).resolve()), category_id
+
+
+def _cached_aspects(
+    key: Optional[Tuple[str, str]],
+) -> Optional[List[Dict[str, Any]]]:
+    if key is None:
+        return None
+    with _aspects_mem_cache_lock:
+        if key not in _aspects_mem_cache:
+            return None
+        _aspects_mem_cache.move_to_end(key)
+        return _aspects_mem_cache[key]
+
+
+def _remember_aspects(
+    key: Optional[Tuple[str, str]], aspects: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    if key is None:
+        return aspects
+    with _aspects_mem_cache_lock:
+        _aspects_mem_cache[key] = aspects
+        _aspects_mem_cache.move_to_end(key)
+        while len(_aspects_mem_cache) > _ASPECTS_MEM_CACHE_MAX:
+            _aspects_mem_cache.popitem(last=False)
+    return aspects
+
+
+def _aspects_are_memory_cached(key: Optional[Tuple[str, str]]) -> bool:
+    if key is None:
+        return False
+    with _aspects_mem_cache_lock:
+        return key in _aspects_mem_cache
 
 
 def _aspects_cache_path(cfg: Dict[str, Any]) -> Optional[Path]:
@@ -69,13 +116,11 @@ def _load_aspects_disk_cache(cache_path: Optional[Path]) -> Dict[str, Dict[str, 
 
 
 def _structure_aspects(raw_aspects: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Filter + flatten eBay's aspect metadata into the TGW structured form.
+    """Flatten eBay's aspect metadata into the TGW structured form.
     Shared by the live per-category fetch and the bulk download (same shape)."""
     results = []
     for aspect in raw_aspects:
         name = aspect.get('localizedAspectName', '')
-        if name in _SKIP_ASPECTS:
-            continue
         constraint = aspect.get('aspectConstraint', {})
         allowed = [v.get('localizedValue', '')
                    for v in aspect.get('aspectValues', [])
@@ -89,14 +134,50 @@ def _structure_aspects(raw_aspects: List[Dict[str, Any]]) -> List[Dict[str, Any]
     return results
 
 
-def _fetch_aspects_live(cfg: Dict[str, Any], category_id: str) -> List[Dict[str, Any]]:
+# Live per-category calls (todo #1394 / PP-DEADLETTER-001): the Taxonomy API's
+# get_item_aspects_for_category was falling straight to dead_letter on a bare
+# 429 with zero retry -- same bug *shape* fixed the same day in
+# llm.py::_call_google_direct() for Gemini's 429/503, but this is a different
+# API (eBay REST via requests, not an LLM SDK) with different status
+# semantics: only 429 is rate-limiting here, there's no 503-equivalent
+# transient-overload case to distinguish, so this is a single retry path, not
+# two. Scoped local to this one call site (not shared ebay_get()) -- ebay_get
+# has ~15 other call sites across sync/publish/sku_migrate/etc. with their own
+# established fail-fast-to-dead-letter behavior; changing that shared
+# function's semantics for everyone was out of scope for a single-endpoint bug.
+_AAC_MAX_RETRIES = 3
+_AAC_BACKOFF_SECONDS = 5  # fixed multiplier per attempt, matches Retry-After fallback
+
+
+def _fetch_aspects_live(cfg: Dict[str, Any], category_id: str,
+                        max_retries: int = _AAC_MAX_RETRIES) -> List[Dict[str, Any]]:
     tree_id = get_category_tree_id(cfg)
-    data = ebay_get(
-        cfg,
-        f'/commerce/taxonomy/v1/category_tree/{tree_id}/get_item_aspects_for_category',
-        params={'category_id': category_id},
-    )
-    return _structure_aspects(data.get('aspects', []))
+    path = f'/commerce/taxonomy/v1/category_tree/{tree_id}/get_item_aspects_for_category'
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_retries):
+        try:
+            data = ebay_get(cfg, path, params={'category_id': category_id})
+            return _structure_aspects(data.get('aspects', []))
+        except requests.exceptions.HTTPError as exc:
+            resp = exc.response
+            status = getattr(resp, 'status_code', None)
+            if status != 429 or attempt >= max_retries - 1:
+                raise
+            last_exc = exc
+            wait = _AAC_BACKOFF_SECONDS * (attempt + 1)
+            retry_after = resp.headers.get('Retry-After') if resp is not None else None
+            if retry_after:
+                try:
+                    wait = max(wait, float(retry_after))
+                except ValueError:
+                    pass
+            log.warning(
+                'Taxonomy API 429 on get_item_aspects_for_category (category %s, '
+                'attempt %d/%d) -- retrying in %.0fs',
+                category_id, attempt + 1, max_retries, wait,
+            )
+            time.sleep(wait)
+    raise last_exc  # pragma: no cover — loop always returns or raises above
 
 
 def _bulk_dir(cfg: Dict[str, Any]) -> Optional[Path]:
@@ -178,23 +259,23 @@ def get_aspects(cfg: Dict[str, Any], category_id: str) -> List[Dict[str, Any]]:
     warm-ebay-aspects`) — no auto-expiry, matching the category-tree policy.
     """
     category_id = str(category_id)
-    if category_id in _aspects_mem_cache:
-        return _aspects_mem_cache[category_id]
+    mem_key = _aspects_mem_key(cfg, category_id)
+    cached = _cached_aspects(mem_key)
+    if cached is not None:
+        return cached
 
     cache_path = _aspects_cache_path(cfg)
     disk_cache = _load_aspects_disk_cache(cache_path)
     entry = disk_cache.get(category_id)
     if entry and 'aspects' in entry:
-        _aspects_mem_cache[category_id] = entry['aspects']
-        return entry['aspects']
+        return _remember_aspects(mem_key, entry['aspects'])
 
     shard = _load_bulk_shard(cfg, category_id)
     if shard is not None:
-        _aspects_mem_cache[category_id] = shard
-        return shard
+        return _remember_aspects(mem_key, shard)
 
     results = _fetch_aspects_live(cfg, category_id)
-    _aspects_mem_cache[category_id] = results
+    _remember_aspects(mem_key, results)
     if cache_path:
         # audit#1143 #1239: previously read-modify-wrote the whole disk_cache
         # dict with a plain write_text — unlocked, so two concurrent
@@ -213,6 +294,34 @@ def get_aspects(cfg: Dict[str, Any], category_id: str) -> List[Dict[str, Any]]:
         except OSError as exc:
             log.warning('could not write aspects cache: %s', exc)
     return results
+
+
+def get_category_group_aspects(
+    cfg: Dict[str, Any], category_ids: Iterable[Any]
+) -> List[Dict[str, Any]]:
+    """Return the deterministic union of official aspects for a category group.
+
+    Category IDs are normalized, deduplicated, and sorted before lookup so the
+    same group produces the same target order regardless of JSON ordering.
+    Aspect metadata from the lowest category ID wins when a name occurs in
+    multiple categories. A failed lookup propagates: callers may explicitly
+    degrade to their existing freeform behavior, but this helper never returns
+    a silently partial Set A target.
+    """
+    normalized_ids = sorted(
+        {
+            str(category_id).strip()
+            for category_id in category_ids
+            if str(category_id or "").strip()
+        }
+    )
+    union: Dict[str, Dict[str, Any]] = {}
+    for category_id in normalized_ids:
+        for aspect in get_aspects(cfg, category_id):
+            name = str(aspect.get("name") or "").strip()
+            if name and name not in union:
+                union[name] = aspect
+    return list(union.values())
 
 
 def warm_missing_aspects(cfg: Dict[str, Any], category_ids: List[str],
@@ -242,7 +351,7 @@ def warm_missing_aspects(cfg: Dict[str, Any], category_ids: List[str],
         if not cid or cid in seen:
             continue
         seen.add(cid)
-        if cid in _aspects_mem_cache:
+        if _aspects_are_memory_cached(_aspects_mem_key(cfg, cid)):
             continue
         entry = disk_cache.get(cid)
         if entry and 'aspects' in entry:

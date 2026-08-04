@@ -561,6 +561,84 @@ build) properly instead of by deletion:
    spare-promotion cutover path with the keychain as its input. One artifact, drilled
    on real hardware, that answers "everything burned — now what?" with "this keyring."
 
+## 5.5. A3 redesign — automate bundle *distribution*, not custody (2026-07-18)
+
+**Promoted from `FUTURE-IDEAS.md`.** Dave, 2026-07-18: "Previously we have
+been looking at secrets and disaster recovery in too old fashioned of a
+manner. Sneakernets and usb fobs, when we have the google drive and phones
+and tablets and an existing synchronization infrastructure. Let's take my
+frail human tendencies out of the recovery loop."
+
+**Scope, confirmed narrow (2026-07-18):** the identity/passphrase itself is
+Dave's personal custody — already stored in two separate, undisclosed
+physical locations by him directly. **Not a design question, not TGW's to
+document or automate, out of scope entirely.** The only thing being
+redesigned is how the *encrypted bundle* (ciphertext, safe to replicate
+anywhere) gets distributed, replacing the monthly manual USB-fob swap.
+
+### The redesign
+
+The existing `tgw-secrets-backup` timer is unchanged — it still produces
+the age-encrypted bundle monthly. What changes is fan-out:
+
+1. **GDrive (`tgw-gdrive:`) leg — unchanged, already automated.** Keep as
+   one leg of several, not the sole off-site copy.
+2. **New Syncthing folder, `TGW-Secrets-Bundle`** — read-only share from
+   tgw-prod to a1131 (already Syncthing-linked for the Plan Vault). Gives
+   an automatic, no-human-action copy on a genuinely different host/disk/
+   power domain the moment the monthly bundle is produced.
+3. **USB fobs — kept, but demoted from load-bearing to supplementary.**
+   The existing mount-trigger sync (whichever fob happens to be plugged in
+   gets updated) stays as-is — it's already automatic when a fob is
+   present. What's removed is the *dependency* on Dave remembering to swap
+   fobs monthly for the off-site copy to stay current; that job now
+   belongs to legs 1+2. The fob becomes a bonus true-air-gap copy (no
+   network dependency at all, immune to any credential/cloud compromise)
+   rather than the mechanism the whole off-site story rests on.
+4. **Phone-mediated fob refresh (Dave, 2026-07-18) — closes the genuine-
+   offsite gap below.** Dave: "the usb key can be brought up to date from
+   the phone. I'll create a tasker script for it." The phone (which
+   travels with Dave, unlike a1131) pulls the current bundle and writes it
+   to the USB fob when connected — this is the missing "a device that
+   actually leaves the premises" leg, built on Dave's own phone/Tasker side
+   rather than needing a tablet-Syncthing arrangement. **Operator-built,
+   not a TGW code task** — no packet needed for this leg specifically,
+   same pattern as other Tasker-side automation Dave owns directly.
+
+### Honest 3-2-1 check (criteria #4 from the original future-idea entry)
+
+**This does not fully close the gap by itself — flagging plainly rather than
+overclaiming:**
+- **3 copies:** tgw-prod (source) + GDrive + a1131 ✓
+- **2+ media/infrastructure:** local NVMe, Google's cloud storage, a1131's
+  own disk ✓
+- **1 genuinely off-site:** **GDrive, plus the phone-mediated fob refresh
+  (leg 4 above) once built.** a1131 is on the same LAN/site as tgw-prod
+  (per `reference-desktop-setup-rationale` memory — same premises) — it
+  protects against single-host hardware failure, **not** against a
+  site-level disaster (fire/flood/theft/power event affecting the whole
+  location). The USB fob, kept current via Dave's phone/Tasker (leg 4),
+  is the device that actually travels — that closes the genuine-off-site
+  gap without needing a tablet-Syncthing arrangement. Until leg 4 is
+  built, GDrive remains the only genuinely off-site copy — don't read the
+  a1131 automation alone as closing the disaster-recovery gap.
+
+### A7 scope — stays separate (criteria #5)
+
+Recommend NOT folding A7 (the 7×500GB rotating physical-drive tier for bulk
+ItemData/archive, not secrets) into this redesign. Different tier, different
+purpose, different cadence (weekly/monthly manual drive rotation for
+hundreds of GB vs. a small encrypted secrets bundle) — tying the two
+together would slow the lightweight secrets fix to the bulk-data rotation's
+pace for no benefit.
+
+### Status
+
+Design only — no code/config/timer change made. Ready for a normal work
+packet (new Syncthing folder share + `tgw-secrets-backup` script extended
+to write into it) once Dave confirms the tablet-device question above, or
+decides GDrive+a1131 is sufficient progress for now without waiting on that.
+
 ## 6. Risks
 
 | # | Risk | Mitigation |

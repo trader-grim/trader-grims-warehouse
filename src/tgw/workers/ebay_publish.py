@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -30,8 +29,9 @@ from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.draft_sync import baseline_fields
 from tgw.ebay.pricing import to_99
+from tgw.ebay.sync import enqueue_post_push_sync, publish_offer
+from tgw.ebay.sync import extract_ebay_error_field as _extract_ebay_error_field
 from tgw.ebay.sync import format_ebay_error as _format_ebay_error
-from tgw.ebay.sync import publish_offer
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
@@ -158,6 +158,7 @@ class EbayPublishWorker(QueueWorker):
             if photo_verify is not None:
                 existing_listing['photo_verify'] = photo_verify
                 fence_ebay_write(self.config, sku, ebay_listing=existing_listing)
+            enqueue_post_push_sync(sku)
             return
 
         ebay_offer = item.get('ebay_offer', {})
@@ -191,6 +192,8 @@ class EbayPublishWorker(QueueWorker):
                         payload={'sku': sku, 'force': True,
                                  **({'origin': 'operator'}
                                     if payload.get('origin') == 'operator' else {})},
+                        entity_type='item',
+                        entity_id=sku,
                         dedupe_key=f'ebay_stage:force:{sku}',
                         max_attempts=3,
                     )
@@ -287,6 +290,9 @@ class EbayPublishWorker(QueueWorker):
                         'raw':    body_text[:800],
                         'ts':     datetime.now(timezone.utc).isoformat(),
                         'source': 'ebay_publish',
+                        # PP-CONDITION-ENUM-001 / todo #1562 — see ebay_stage.py's
+                        # identical field for rationale.
+                        'field':  _extract_ebay_error_field(body_text),
                     }
                     fence_patch_item(self.config, sku, {'pipeline_error': pipeline_error})
                     raise HardFailure(f'{sku}: eBay rejected publish: {msg}') from exc
@@ -369,15 +375,11 @@ class EbayPublishWorker(QueueWorker):
                               listing_url=result['listing_url'])
 
         try:
-            state_machine.enqueue_job(
-                queue_name='catalog_rebuild',
-                payload={'reason': f'ebay_publish:{sku}'},
-                dedupe_key='catalog_rebuild:pending',
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
+            state_machine.enqueue_catalog_rebuild(f'ebay_publish:{sku}')
         except psycopg2.errors.UniqueViolation:
             pass
+
+        enqueue_post_push_sync(sku)
 
 
 def main() -> int:

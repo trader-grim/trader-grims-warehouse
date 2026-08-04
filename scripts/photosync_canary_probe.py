@@ -38,7 +38,9 @@ from typing import Any, Dict, List, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 from tgw.config import DEFAULT_CONFIG, load_config  # noqa: E402
+from tgw.ebay.draft_specifics import get_ebay_aspects  # noqa: E402
 from tgw.items import load_item_doc  # noqa: E402
+from tgw.logging import announce_script_run, setup_logging  # noqa: E402
 from tgw.notify import notify  # noqa: E402
 from tgw.queue import state_machine  # noqa: E402
 
@@ -81,7 +83,8 @@ def _intent_snapshot(item: Dict[str, Any]) -> Dict[str, Any]:
         'title': dl.get('title') or item.get('title'),
         'price': dl.get('price') or item.get('price'),
         'photo_count': len(dl.get('imageUrls') or []),
-        'aspects': dl.get('item_specifics') or {},
+        # todo #1418: Set B read via tgw.ebay.draft_specifics (the sanctioned accessor)
+        'aspects': get_ebay_aspects(item),
     }
 
 
@@ -173,6 +176,19 @@ def main() -> int:
     parser.add_argument('--journal-window-s', type=int, default=300)
     parser.add_argument('--base-url', default='http://127.0.0.1:7373')
     args = parser.parse_args()
+
+    # No prior logging configuration in this script (verified live, todo
+    # #1369) — without it, announce_script_run()'s event is silently
+    # dropped (default root level WARNING, no handlers).
+    try:
+        setup_logging('tgw.photosync_canary_probe')
+    except OSError:
+        pass  # no writable log root (e.g. CI/test env) — announce still attempted below
+    announce_script_run(
+        'photosync_canary_probe.py',
+        'PP-PHOTOSYNC-001 P8 daily canary — exercise the real operator HTTP action surface on one designated SKU and diff against eBay',
+        sku=args.sku, actions=args.actions, timeout=args.timeout,
+    )
 
     cfg = load_config(DEFAULT_CONFIG)
     api_key_path = cfg['secrets_root'] / 'tgw-api-key.json'

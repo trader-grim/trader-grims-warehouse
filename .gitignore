@@ -55,6 +55,16 @@ docs/TGW-Plan-Vault/inbox/queued/
 *.bak-[0-9]*
 .aider*
 !.aider.conf.yml
+# .aiderignore is deliberately tracked (todo #1424): it's how aider's
+# built-in mention-auto-add scan (get_tracked_files() -> ignored_file())
+# is kept from ever offering nix/flake.nix/flake.lock (git-tracked
+# symlinks into /home/db/tgw-flake, unreadable by tgw -- todo #1365) as
+# addable chat files. If it stayed untracked, `git worktree add` (the
+# isolation contract every aider_run_task call with a task_slug uses)
+# would silently omit it from every fresh worktree, and the protection
+# would only ever exist in the one checkout someone happened to hand-edit
+# it in.
+!.aiderignore
 
 # Vendored Flutter SDK (local toolchain, 2.3GB clone of flutter/flutter @ 3.44.1) — never commit
 flutter/
@@ -73,3 +83,8 @@ docs/TGW-Plan-Vault/.obsidian/themes/
 
 # Ruff cache (owned by tgw:tgw — not readable by db; breaks nix flake path: eval)
 .ruff_cache/
+
+# PP-VISION-001 Phase 1 pilot — scoped local venv + downloaded model weights + sample cache,
+# never committed (see docs/TGW-Plan-Vault/plan/packets/results/1481-RESULT.md)
+.pilot-venv/
+scripts/pilot_1481_out/

@@ -21,7 +21,11 @@ and significantly improve identification accuracy for unknown items.
   }
   ```
 - Integration: `suggest_price()` Stage 1.5 — use `shopping_search.p25` alongside Browse API p25
-- Key: `secrets_root/serpapi-credentials.json` → `{"api_key": "..."}`
+- Key: `secrets_root/tgw.env` (`SERPAPI=...`), read via
+  `tgw.apis.secrets.get_api_key("serpapi")` — **not** a new
+  `serpapi-credentials.json` (corrected 2026-07-12, Fable independent review
+  #1338: this doc still pointed at the per-provider-JSON pattern banned
+  2026-07-09/todo #1252, see CLAUDE.md settled architecture)
 - Cost: ~$0.001/item (SerpApi pro plan); free tier 100 searches/month
 - Graceful skip if key absent (same pattern as `igdb.py`, `discogs.py`)
 
@@ -45,7 +49,9 @@ and significantly improve identification accuracy for unknown items.
   ```
 - If Bing's identified title confidence exceeds Ollama's: write to `ai_identify_result.lens_title`
   (stored alongside `ai_identify_result.title`; operator sees both in review queue)
-- Key: `secrets_root/bing-search-credentials.json` → `{"subscription_key": "..."}`
+- Key: `secrets_root/tgw.env` (`BING_SEARCH=...`), read via
+  `tgw.apis.secrets.get_api_key("bing_search")` — not a per-provider JSON file
+  (same correction as the SerpApi key above)
 - Graceful skip if key absent
 
 #### Integration in `ai_identify` worker
@@ -71,7 +77,8 @@ and significantly improve identification accuracy for unknown items.
 
 - [ ] Sign up for SerpApi (serpapi.com) — free tier is enough for evaluation
 - [ ] Create Azure Cognitive Services resource → get Bing Search V7 subscription key
-- [ ] Write keys to `secrets_root/` (chmod 600)
+- [ ] Write keys to `secrets_root/tgw.env` (`KEY=value`, chmod 600) — never a new
+      per-provider `<name>-credentials.json`
 - [ ] Restart `ai_identify` worker after keys land
 
 ---
@@ -86,6 +93,16 @@ the existing free Browse comps signal (45.3% vs 30.4% mean abs error against
 near-generic items. This validates the research's core thesis: **don't let a
 model invent prices from scratch; comp retrieval + human supervision beats
 model-grounded search.**
+
+**Dave, 2026-07-18: "want it, make it surface in the next planning round."**
+Not a build-now green light — a durable flag so this doesn't get lost between
+now and the next dedicated planning session. Open questions before it can be
+sliced into todos: go/no-go + priority against the rest of the plan; whether
+the comp pane attaches to PP-EDITOR-001's existing item-detail view or gets
+its own route; whether v1 needs a real embedded browser webview or "open
+Product Research in a new tab, paste back the numbers" is good enough to
+start. Cross-referenced from `plan/FUTURE-IDEAS.md` so the next planning
+session's normal sweep surfaces it.
 
 **Core idea — supervised hybrid, not autonomous scraping:** operator opens
 eBay Seller Hub Product Research (Terapeak) inside a browser pane, reviews

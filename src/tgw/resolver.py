@@ -21,11 +21,14 @@ Selectors are combined with AND when multiple are given.
 
 from __future__ import annotations
 
+import logging
 import re  # remove: import os
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Set
 
 from .config import location_dir, sku_json
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # SKU iteration — filesystem only, no JSON
@@ -215,9 +218,8 @@ def resolve(cfg: Dict[str, Any], **selectors: Any) -> Set[str]:
         if (root / q).is_dir():
             narrow({q})
         else:
-            prefix18 = q[:18]
             if len(q) <= 18 and q.lower().startswith('tgw') and len(q) >= 14:
-                narrow({s for s in iter_all_skus(cfg) if s[:18] == prefix18})
+                narrow({s for s in iter_all_skus(cfg) if s[:len(q)] == q})
             else:
                 narrow({q})
 
@@ -262,7 +264,11 @@ def resolve(cfg: Dict[str, Any], **selectors: Any) -> Set[str]:
         for sku in pool:
             try:
                 doc = load_item_doc_by_sku(cfg, sku)
-            except Exception:
+            except Exception as exc:
+                log.warning(
+                    'resolve(): skipping sku %s — failed to load item JSON: %s',
+                    sku, exc,
+                )
                 continue
             if status:
                 item_status = str(doc.get('#STATUS', doc.get('status', ''))).strip()

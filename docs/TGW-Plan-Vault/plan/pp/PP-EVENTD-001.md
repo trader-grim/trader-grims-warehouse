@@ -1,7 +1,13 @@
 ## PP-EVENTD-001 — TGW Event Server
 
-**Status:** Design research complete 2026-06-29. Future item — do not implement until
-PP-CLIP-001 Phase 3 (simple hook sync) is running and the truncation bug is resolved.
+**Status: UNFROZEN 2026-07-11, #1086 gate cleared** (corrected 2026-07-12,
+Fable independent review #1338 — this stub still said frozen pending
+PP-CLIP-001 Phase 3, but Phase 3 was retired the same session this was
+meant to be unfrozen in). PP-CLIP-001 Phase 3 (cross-machine hook sync) is
+RETIRED, not a prerequisite — its scope moved entirely into this PP. Phase 1
+here is unblocked now that PP-CLIP-001 Phase 2 (rofi picker) is DONE. See
+`reference/PP-EVENTD-001-design.md` for the current, authoritative design —
+this stub is history/background only, do not treat it as current status.
 
 Full design: `reference/PP-EVENTD-001-design.md`
 

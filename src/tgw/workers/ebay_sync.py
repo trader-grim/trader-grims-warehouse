@@ -62,6 +62,8 @@ class EbaySyncWorker(QueueWorker):
                     queue_name=QUEUE_NAME,
                     payload={"reason": "startup"},
                     max_attempts=3,
+                    dedupe_key=f"{QUEUE_NAME}:pending",
+                    debounce=True,
                 )
                 log.info("ebay_sync: enqueued startup sync job")
         except Exception as exc:
@@ -102,15 +104,7 @@ class EbaySyncWorker(QueueWorker):
                 updated = 0
             if updated:
                 try:
-                    import time as _time
-
-                    state_machine.enqueue_job(
-                        queue_name="catalog_rebuild",
-                        payload={"reason": "ebay_sync_targeted"},
-                        dedupe_key="catalog_rebuild:pending",
-                        not_before=_time.time() + 5,
-                        max_attempts=3,
-                    )
+                    state_machine.enqueue_catalog_rebuild("ebay_sync_targeted", delay_seconds=5.0)
                 except Exception:
                     pass
             log.info("ebay_sync: targeted sync %s → %s", target_sku, "updated" if updated else "no change")
@@ -132,6 +126,7 @@ class EbaySyncWorker(QueueWorker):
                     errs = exc.response.json().get('errors', [])
                     eids = {int(e.get('errorId', 0)) for e in errs}
                 except Exception:
+                    errs = []
                     eids = set()
                 if 25707 in eids:
                     consecutive = self._record_fallback_state(used_fallback=True)
@@ -163,6 +158,26 @@ class EbaySyncWorker(QueueWorker):
                     offers = self._fetch_offers_by_local_skus()
                     self._mark_fallback_executed()
                 else:
+                    # Unrecognized 400 — not the known 25707 orphaned-SKU class.
+                    # fetch_all_offers() already logs the raw eBay error IDs/messages
+                    # before re-raising when it can parse the response body, but log
+                    # again here (with the eids this handler independently parsed) so
+                    # triage of "yet another eBay error ID we don't handle" never
+                    # depends solely on that inner log line surviving unbroken up the
+                    # call chain (todo #1397/PP-DEADLETTER-001).
+                    if errs:
+                        for e in errs:
+                            log.error(
+                                "ebay_sync: unrecognized eBay 400 on bulk offer list — "
+                                "errorId=%s message=%s",
+                                e.get('errorId'), e.get('message', ''),
+                            )
+                    else:
+                        log.error(
+                            "ebay_sync: unrecognized eBay 400 on bulk offer list — "
+                            "unparseable/empty error body: %s",
+                            exc.response.text[:300] if exc.response is not None else '',
+                        )
                     raise
             else:
                 raise
@@ -216,13 +231,7 @@ class EbaySyncWorker(QueueWorker):
 
         if updated:
             try:
-                state_machine.enqueue_job(
-                    queue_name="catalog_rebuild",
-                    payload={"reason": "ebay_sync"},
-                    dedupe_key="catalog_rebuild:pending",
-                    not_before=time.time() + 30,
-                    max_attempts=3,
-                )
+                state_machine.enqueue_catalog_rebuild("ebay_sync")
             except psycopg2.errors.UniqueViolation:
                 pass
 
@@ -565,6 +574,8 @@ class EbaySyncWorker(QueueWorker):
                 state_machine.enqueue_job(
                     queue_name="ebay_repush",
                     payload={"sku": sku},
+                    entity_type="item",
+                    entity_id=sku,
                     dedupe_key=f"ebay_repush:{sku}",
                     max_attempts=3,
                 )
@@ -582,12 +593,17 @@ class EbaySyncWorker(QueueWorker):
 
     def _reschedule(self) -> None:
         next_run = time.time() + SYNC_INTERVAL_S
-        jid = state_machine.enqueue_job(
-            queue_name=QUEUE_NAME,
-            payload={"reason": "scheduled"},
-            not_before=next_run,
-            max_attempts=3,
-        )
+        try:
+            jid = state_machine.enqueue_job(
+                queue_name=QUEUE_NAME,
+                payload={"reason": "scheduled"},
+                not_before=next_run,
+                max_attempts=3,
+                dedupe_key=f"{QUEUE_NAME}:pending",
+                debounce=True,
+            )
+        except psycopg2.errors.UniqueViolation:
+            jid = None
         log.info("ebay_sync: next sync in %dh (job %s)", SYNC_INTERVAL_S // 3600, jid)
         tgw_logging.log_event("ebay_sync_rescheduled", next_run_in_hours=SYNC_INTERVAL_S // 3600, next_job_id=jid)
 

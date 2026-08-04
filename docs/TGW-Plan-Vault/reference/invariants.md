@@ -408,6 +408,89 @@ Companion test files added by this review:
 
 ---
 
+## E15 — Model IDs are never hardcoded, anywhere — config is the only source, including fallback chains and shared defaults ⚠️ (2026-07-20, Dave — OPEN, no detector yet)
+
+**Statement:** no provider/model string may appear as a literal in `src/`
+outside `tgw-models.json` itself — not as a working default, not as a dead
+fallback nobody reads, not in CLI help text, not in a code comment claiming
+"the current model is X." `get_task_model()` (E8/2026-07-09's rule) already
+established config as the only source for a task's *primary* provider/model;
+this extends the same rule to (a) code that never actually executes but
+still names a model, and (b) the *shape* of fallback/default resolution
+itself.
+
+**Why (Dave, 2026-07-20):** triggered by finding two dead, stale
+hardcoded strings (`config.py`'s unused `alt_text_model`/`alt_text_provider`
+keys defaulting to `"google/gemini-2.5-flash"`; `api.py`'s `tgw alt-text`
+CLI help text repeating the same string) — both inert, but exactly the kind
+of drift the 2026-07-09 rule was written to prevent, and both named a model
+generation (`gemini-2.5-flash`, no `-lite`) that is being deprecated
+upstream. Dave: "models cannot be hardcoded... primary and even multiple
+fallback paths, but they need to be configurable. This is clearly not a
+static part of the design. Everything could change tomorrow."
+
+**Sharper motivation, same session:** not primarily about cost or outage
+resilience (see the fallback-chain non-urgency note below) — "not
+unknowingly draining our reserve too. I monitor it for usage for this
+reason more than for the cost. Nip it in the bud so it doesn't stick you
+later when we are going full throttle." OpenRouter is the current fail-soft
+reserve behind all three direct providers (E8, 2026-07-08 supersession). A
+stale hardcoded `provider: openrouter` default — even inert today — is
+exactly the kind of thing that silently starts executing once usage
+patterns shift (e.g. a code path that currently never hits its fallback
+branch starts hitting it under the higher-throughput load this whole
+eBay-API-unblock effort is aiming for), draining the reserve without
+tripping any obvious alarm since Dave's monitoring is watching for exactly
+this pattern already. Fix stale/dead model references while they're cheap
+to fix, before real throughput exercises code paths that were never
+verified live.
+
+**Design (Dave, same session): a `defaults` block in `tgw-models.json`.**
+Most tasks don't need a bespoke provider/model — they should point at a
+named default profile so changing "the" model for most tasks is a one-place
+config edit, not N task-entry edits:
+
+```json
+{
+  "defaults": {
+    "default":                      {"provider": "google_direct",   "model": "gemini-2.5-flash-lite"},
+    "default_deepseek_nonthinking": {"provider": "deepseek_direct",  "model": "deepseek-v4-flash"}
+  },
+  "ai_identify":   {"use_default": "default"},
+  "alt_text":      {"use_default": "default"},
+  "bulk_classify": {"use_default": "default"},
+  "ebay_draft":    {"provider": "google_direct", "model": "gemini-3.1-pro-preview"},
+  "pm_intake":     {"use_default": "default_deepseek_nonthinking"}
+}
+```
+
+A task entry is either a full explicit `{"provider", "model"}` override
+(e.g. `ebay_draft`, which deliberately runs a bigger model) or a
+`{"use_default": "<name>"}` pointer — not both, no partial-merge — keeping
+`get_task_model()` a two-branch lookup instead of a config-merging engine.
+
+**Fallback chains stay config-shaped too:** `call_model()`'s existing
+direct→OpenRouter fail-soft pattern (E8) already derives the OpenRouter
+fallback model from the *same* `model` string via prefix transformation
+(`f'google/{model}'` etc.) rather than a second hardcoded string — so a
+config-only model change already propagates through the fallback
+automatically. What's still hardcoded is *which provider is whose
+fallback* (fixed elif-branches in `call_model()`). Not being changed in
+this pass — flagged as a possible future gap, **not urgent** (Dave,
+2026-07-20, same session: "technically we are small enough to handle some
+outages. We have worse issues with cellular interference than real api
+timeouts. We will just monitor and retry.") — provider-outage resilience
+isn't TGW's actual failure mode at this scale; don't chase configurable
+fallback *chains* as unprompted future work. The E15 fix in this pass
+(no hardcoded model IDs, `defaults`/`use_default`) stands on its own merit
+independent of this — it's about config-vs-code hygiene and deprecation
+risk, not outage resilience.
+
+**Detector:** none yet — recommend a `tests/test_no_hardcoded_models.py`
+that greps `src/tgw/**/*.py` for known current/deprecated model-id
+substrings (`gemini-2.5-flash"`, i.e. without `-lite`, `gemini-1.5-`, etc.)
+outside `tgw-models.json`-reading code paths, failing the build on a match.
+
 ## Resolution log
 
 **2026-06-10** — all gaps from the initial review fixed (operator decision: C4 resolved
@@ -622,6 +705,254 @@ catalog-verify rule `legacy_listing_unrepaired` is the "regularly check"
 detector. Tests: `tests/test_invariants_stage_guards.py`,
 `tests/test_resolve_legacy_duplicate_check.py`.
 
+**Second instance (todo #1304, 2026-07-13):** `multi_intake.py`'s
+derived-child-SKU-collision guard had the same gap — collision with an
+existing ItemData record was only `log_event`/`notify`'d, never persisted.
+Fixed the same way: persists `sku_collision_blocked` (colliding_sku,
+base_sku, detected_at) on the colliding item via `fence_patch_item` on every
+hit, additive alongside the existing transient log/notify. New catalog-verify
+rule `sku_collision_unrepaired` mirrors `legacy_listing_unrepaired`. Test:
+`tests/test_multi_intake.py`.
+
+## C12 — Item field-sets are self-describing envelopes, read/written only through their named accessor ✅ (2026-07-15, todo #1418, PP-LISTEDITOR-001)
+
+**Rule:** `item_attributes` (Set A — "Inventory Record": universal,
+marketplace-agnostic facts) and `draft_listing.item_specifics` (Set B —
+"eBay Draft": the eBay-specific, category-mapped values actually pushed to
+eBay's Inventory API) — and any future marketplace-specific set — are
+self-describing envelopes (`{_set, version, updated_at, fields}` + an
+append-only provenance history array), never bare dicts. They are read and
+written ONLY through their named accessor module: `tgw.inventory_record`
+for Set A, `tgw.ebay.draft_specifics` for Set B. No other file may index
+directly into either dict's contents (`item.get("item_attributes")[...]`,
+`draft_listing["item_specifics"][...]`, etc.) — and no code may move data
+between the two sets via a per-key merge, prefill fallback, or `{**a, **b}`
+spread performed locally; that belongs in one explicit, named translation
+function (see #1416/#1417) built on top of the accessors, never ad hoc.
+
+**Why:** Dave, this session: "The problem is you are considering keys
+individually... They are sets of data. If you don't look at it that way
+you will keep mixing them up." Confirmed live: two prior sessions (#1291,
+2026-07-13; #1313/#1316, 2026-07-13) each fixed a real, well-tested bug in
+this exact territory without ever noticing the set-boundary problem
+underneath, because the old bare-dict shape had no self-identifying
+marker — indistinguishable at a glance from any other dict in the item
+JSON. `item_attributes` was also entirely undocumented in
+`TGW-Item-JSON-Schema.md` before this packet (confirmed: zero grep hits).
+A full codebase audit (todo #1416's investigation) found FOUR independent
+code paths that had each separately reinvented a (wrong) use for
+`item_attributes`, including one whose own UI banner text contradicted
+what the code actually did.
+
+**Enforcement:** `tgw.inventory_record` (Set A) and `tgw.ebay.draft_specifics`
+(Set B) are the sole sanctioned accessor modules — see their banner
+comments for the full two-set explanation, cross-referencing this
+invariant and todo #1418/#1416/#1417. Detector: a static, commit-time
+grep-based check (`tests/test_invariant_c12_field_set_accessors.py`),
+chosen over a catalog-verify (data-scan) detector because a static check
+catches a violation the moment the code is written, before it ever
+touches live data — a data-scan detector can only ever notice AFTER a
+corrupting write has already happened. The test pins an explicit,
+reviewed allowlist of every legitimate non-accessor hit (accessor output
+being written onward, or an unrelated dict — e.g. an AI model response or
+a `revision_draft.delta` proposal — that happens to share a key name); any
+new, unreviewed hit fails the test. `#1416`'s drift detector (catalog-verify
+rule `field_set_drift`, `tgw.api._verify_item`) is the complementary
+"regularly check and repair" half, for DATA drift rather than CODE drift —
+landed 2026-07-15, flags any item with a live `ebay_offer.offer_id` where
+Set A and Set B disagree on an overlapping key (severity: warning; dry-run
+by default, matching every other catalog-verify rule — no auto-repair).
+Spot-checked live against `tgw202605040949058` (the item cited in #1416's
+own investigation), which shows the real, confirmed drift
+(`Type: "Lapel Pin"` vs `"Brooch"`) at the time #1416 landed.
+
+**Migration note:** the envelope shape landed via
+`scripts/migrate_field_set_envelope.py` (dry-run + accessor back-compat
+for both shapes — pre-migration bare dicts are read transparently by the
+accessors). The full 55k-item catalog migration is a separate, explicit
+go/no-go decision, not bundled into this invariant landing — both the old
+bare-dict shape and the new envelope shape must (and do) coexist correctly
+for as long as that transition takes.
+
+## C13 — Set A writes are gated, provenance-recorded, operator-reviewed proposals — never a silent auto-promotion ✅ (2026-07-15, todo #1417, PP-LISTEDITOR-001)
+
+**Rule:** `item_attributes` (Set A) may be written by an eBay-draft-discovered
+value ONLY through an explicit, named, provenance-recording write path —
+`tgw.ebay.inventory_diff.apply_inventory_diff()` — never a generic PATCH
+passthrough, and never silently/automatically (no confidence-threshold
+auto-promotion). Every promotion is an explicit operator submit against a
+default-checked diff (Dave, 2026-07-15: "presenting a selectable diff
+offering to update the inventory record, all differences checked by
+default, operator can uncheck or skip altogether. Gated automatic
+update."). This is C12's write-discipline extended specifically to the
+REVERSE (Set B -> Set A) direction; C12 itself already covers "read/write
+only through the named accessor" for both sets and both directions.
+
+**Why:** #1416's investigation (see C12 above) found no reverse-flow
+mechanism existed at all — an eBay-draft-discovered correction (e.g. an
+AI-vision-resolved "Brooch" vs the stale universal "Lapel Pin") had no
+path back into the universal inventory record, confirmed by absence, not
+a bug to locate. Building that path without a review gate would have
+violated the operator-gate-is-the-design precedent (C9/C10) the same way
+a silent forward auto-write would have.
+
+**Enforcement:**
+- *Code level*: `tgw.ebay.inventory_diff.apply_inventory_diff()` is the
+  sole sanctioned reverse-flow write function, built on
+  `tgw.inventory_record.set_inventory_fields()` (never a raw dict merge).
+  It re-diffs live against the item at call time rather than trusting
+  caller-supplied values — a stale/no-longer-true diff key requested by a
+  client is silently skipped (idempotent no-op), never force-written.
+  Covered by the same C12 static allowlist detector
+  (`tests/test_invariant_c12_field_set_accessors.py`) since it's built on
+  the same accessor.
+- *UI level*: `GET /api/items/{sku}/inventory-diff` (read-only, safe to
+  call any time) + `POST /api/items/{sku}/inventory-diff/apply` (writes
+  ONLY the checked subset) are a separate, distinctly-labeled panel
+  ("eBay → Inventory Record sync") from the FORWARD `accept_proposals`
+  banner ("Pipeline proposed changes") — no shared action name, no shared
+  write path, so an operator can never confuse "accept this eBay-side
+  proposal" (Set A -> Set B) with "accept this inventory-record-bound
+  diff" (Set B -> Set A).
+- *Data level*: catalog-verify rule `inventory_diff_unresolved_stale`
+  (`tgw.api._verify_item`) flags any item where
+  `tgw.ebay.inventory_diff.diff_ebay_draft_to_inventory()` finds a key
+  that has disagreed for 30+ days with a known `detected_at` (never
+  fabricates an age for a legacy item with no timestamp — Prime Directive
+  1). Unlike `field_set_drift` (C12's data detector), this is NOT gated on
+  a live `ebay_offer.offer_id` — an unresolved reverse-flow diff matters
+  for a pre-publish draft too, since Dave's design intent here is routine
+  review cadence, not just live-listing correctness. The 30-day threshold
+  is the packet spec's proposed default, flagged as worth confirming with
+  Dave rather than silently settled.
+
+**Idempotency / re-diffing (spec point 5, confirmed design choice — see
+todo #1417's result manifest for the full reasoning):** an unapplied/
+unchecked diff has NO stored "dismissed" state — it simply reappears on
+the next `GET /inventory-diff` call because Set A and Set B still
+genuinely disagree, which is correct (the disagreement is still true).
+Chosen over a sticky-skip because (a) the packet spec's own default
+reasoning is "no stored dismissed state needed... an unapplied diff just
+reappears... which is correct," and (b) a sticky-skip would need its own
+new persisted state (a fourth thing to track per key, when C12/C13 are
+already working to keep the two field-sets' bookkeeping minimal) with no
+stated requirement driving it. If Dave wants a sticky skip later, that's
+a small, additive change on top of this (a `dismissed_diff_keys` list
+checked by the diff engine) — not a redesign.
+
+## C14 — An operator's correction either takes effect or is visibly, actionably reported as failed — never silently lost ⚠️ (2026-07-16, incident, PP-LISTEDITOR-001)
+
+**Rule:** when an operator submits a change to any stored field (clearing,
+editing, correcting), the system must guarantee one of exactly two
+outcomes — the change is durably applied and reflected back to the
+operator, or its failure is surfaced as an actionable, specific finding.
+A third outcome — the submission is silently accepted (200 OK) but the
+value never actually changes anywhere the operator can see — is
+forbidden. This is Prime Directive 1's "never discard... data" read
+together with the operator-gate principle (C9/C10): the gate only works
+if pressing it does something truthful.
+
+**Why — live incident, 2026-07-16:** an operator (Dave) repeatedly
+cleared `item_attributes`/`draft_listing.item_specifics.Material` on
+`tgw202605040949058` (live, listed as "Sterling Silver and Gold") through
+the item-detail aspects form. Each attempt reported "✓ Saved." The value
+never changed, with no error, no indication, nothing to click that would
+have told the operator the correction hadn't landed. The wrong material
+claim stayed live and uncorrectable through the UI until root-caused same
+day — the listing had to be manually ended on eBay as the only available
+remedy. Root causes found, in order of discovery, each one a distinct way
+this invariant was silently violated:
+1. `saveEbayDraft()`'s aspects-collection loop only included a field in
+   the save payload `if(v)` (non-empty) — a cleared field's key was
+   dropped entirely, so the backend never even saw an attempted change
+   (fixed, todo #1461).
+2. Once (1) was fixed and an empty value did reach eBay, eBay's Inventory
+   API rejected it outright with a garbled generic error dumping the
+   entire aspects dict — `_build_offer_bodies()` had no rule for
+   translating "operator cleared this" into eBay's own "omit the aspect
+   key" convention (fixed, todo #1462).
+3. The item-detail page's pipeline-error box could dismiss ("Clear
+   error") a failed push but had no operator-initiated retry — and
+   neither did the "Needs attention"/"Retry" action-line buttons, which
+   only scroll to the error, they don't re-run anything (open, todo
+   #1461/#1462 follow-up, not yet built).
+4. `ebay_stage` (the worker behind the far more common "Update Listing"
+   button on an already-live item) never refreshed the local `ebay_live`
+   mirror after a successful push — only `ebay_publish` did, and only
+   after being fixed same day (todo #1445). This is the mechanism behind
+   "why do we keep having to manually re-sync" (Dave, 2026-07-16): the
+   worker that runs on nearly every real edit never told the local record
+   what actually landed (fix in progress, `tgw.ebay.sync.
+   enqueue_post_push_sync()`, shared by both workers).
+5. Separately, Tigwa's same-day field-set-boundary audit found the
+   generic `PATCH /api/items/{sku}` endpoint still accepts a full Set A/
+   Set B envelope from an authenticated caller — a live violation of C12's
+   "no generic PATCH passthrough" rule, a different but adjacent way wrong
+   data could enter either set outside its accessor (open, todo #1464).
+
+**Status: ⚠️ open, not a built invariant with a detector yet.** Items 1
+and 2 above are fixed and tested (offline suite green). Items 3, 4, 5 are
+filed but not yet built. This invariant is being written down NOW,
+concurrent with the incident, per Prime Directive 5 — not retroactively
+after full enforcement exists, so it isn't lost the way the underlying
+gap was for however long it predated today.
+
+**What "detector" should mean once this is fully built** — not yet
+implemented, captured here as the target: every operator-facing save path
+needs a round-trip test proving a *cleared* value (not just a changed
+one) actually persists and is reflected in the next read/render, the same
+shape as the two regression tests `test_draft_specifics.py` and
+`tests/test_http_server.py` gained today for the aspects form
+specifically. A fleet-wide, path-by-path version of that check — rather
+than one path fixed reactively per incident — is the real fix for "this
+keeps happening in a new field/form every time," not yet scoped as its
+own todo.
+
+**Detector built, 2026-07-18 (todo #1468, PP-LISTEDITOR-001).** A
+fleet-wide, path-by-path round-trip suite now exists — `tests/
+test_http_server.py`'s `test_c14_*` section and `tests/test_revision.py`'s
+`TestLiveApply::test_c14_*`. Every operator-facing save path in
+`http_server.py` was inventoried; each path either got a set→save→clear→
+save→re-read round-trip test, or is explicitly excluded with a stated
+reason (see the section header comment in `test_http_server.py` and this
+todo's result manifest, `plan/packets/results/1468-RESULT.md`, for the
+full inventory). Currently GREEN (cleared value verified to persist):
+item-detail direct field edit (`PATCH /api/items/{sku}`, bare top-level
+field), the aspects form (`draft_listing.item_specifics` via the same
+endpoint), bulk edit (`POST /api/bulk/apply`), and `accept_proposals`
+(`POST /api/items/{sku}/action`). Excluded with reason (not a "clear an
+operator-supplied value" path): `inventory-diff/apply` and
+`category-aspect-migration/apply` (move data between Set A/Set B, never
+discard it), `set-template` (additive only), `photo-order`/`inventory-
+lock`/`remove-comp` (not field-value corrections).
+
+**Two NEW live instances of the C14 bug class found while building this
+detector, not yet fixed (both filed same day):**
+1. **Todo #1522** — the base-data "padlock" auto-sync
+   (`_apply_patch`'s `draft_listing` branch, the 2026-07-18 padlock
+   design) silently reverts an UNLOCKED top-level `title`/`description`
+   field's clear the next time *any* unrelated `draft_listing` field is
+   saved (e.g. a price edit) — it resyncs the base field from the stale
+   `draft_listing.description`/`.title` value with no error. Locking the
+   field first is the only workaround and is not the default state.
+   Regression test (currently `xfail`, will flip green once fixed):
+   `test_c14_unlocked_description_clear_reverted_by_unrelated_draft_save`
+   in `tests/test_http_server.py`. A control test alongside it,
+   `test_c14_locked_top_level_field_clear_survives_unrelated_draft_save`,
+   confirms locking IS an effective (if non-default) mitigation today.
+2. **Todo #1523** — `tgw/revision.py`'s `_place_delta_in_bodies` (the
+   live-push body-builder behind `POST /api/items/{sku}/revision/apply`)
+   never received the #1462 fix that made `sync.py`'s
+   `_build_offer_bodies` omit a cleared aspect key entirely rather than
+   sending an explicit blank value — eBay's Inventory API rejects an
+   empty aspect value outright per this invariant's own incident
+   narrative above. A revision-apply delta clearing an aspect sends
+   `{"Brand": [""]}` straight to eBay instead of omitting `Brand`, the
+   exact push-boundary bug #1462 fixed for the *other* push path.
+   Regression test (currently `xfail`):
+   `TestLiveApply::test_c14_aspects_delta_clear_omits_key_not_blank_value`
+   in `tests/test_revision.py`.
+
 ## E8 — The Google free tier is the operator emergency reserve ✅ (2026-07-04, session 45) — SUPERSEDED for background use 2026-07-08
 
 **Original rule (free-tier era):** Background jobs never spend the Google
@@ -711,3 +1042,378 @@ callers at the threshold and surfaces spend in the `quota` health check.
 Tests: `tests/test_llm_google_direct.py`
 (TestOperatorEmergencyReserve, TestGoogleStandDown),
 `tests/test_quota.py::TestEnforcement::test_llm_google_default_budget_halts_background`.
+
+## E10 — Every host's flake checkout stays in sync with `origin/master` ⚠️ (2026-07-16, incident)
+
+**Rule:** No host's local `~/tgw-flake` checkout may sit ahead of or diverged from
+`origin/master` for an extended period without it being surfaced. A host-local commit is
+fine as a transient working state; it becomes a violation once it persists unpushed/
+unpulled across sessions with nothing watching for it.
+
+**Why:** Dave, 2026-07-16 (`INCIDENT-2026-07-16-kdeconnect-clipboard-triage-failure.md`):
+a1131's local flake checkout had accumulated **15 commits** ahead of `origin/master` —
+including 2 (`ae13f50`, `61e9a3f`, todo #1427) that existed nowhere else — for an unknown
+period, silently. tgw-prod's own checkout was independently 2 commits ahead
+(`b60508a`/`7121049`) with no relation to a1131's drift. Neither divergence was visible
+until a live incident forced a manual `git log`/`merge-base` comparison across both hosts.
+This is a structural gap, not an agent-discipline gap alone: even a perfectly disciplined
+session working on one host in isolation will eventually hit this if nothing external ever
+forces a push/pull or alerts on the gap.
+
+**Enforcement:**
+- `nix-flake-maintainer` agent (`.claude/agents/nix-flake-maintainer.md`) treats "diff
+  every known host's checkout against `origin/master` and against each other" as its
+  mandatory first step before any flake mutation — not conditional on suspicion.
+- **Gap, not yet built:** a standing, agent-independent detector (cron/systemd-timer script,
+  or folded into Tigwa's existing scheduled plan-review cadence) that checks each known
+  host's `HEAD` against `origin/master` on its own schedule and surfaces drift past a small
+  commit threshold, the same way `thermal.status` is checked independent of any session
+  choosing to look. Tracked under PP-AGENT-DISCIPLINE-001, todo #1444's follow-up (not
+  filed as its own todo yet — file one before considering this invariant ✅).
+
+## E11 — An agent's role restrictions are locked in by tool permissions and hooks, not by its own system-prompt prose ⚠️ (2026-07-16, PP-AGENT-DISCIPLINE-001; mechanism confirmed BROKEN UPSTREAM 2026-07-20, todo #1531)
+
+**CRITICAL UPDATE, 2026-07-20 (todo #1531):** live re-verification found `worktree-guard.py`
+and `app-code-guard.py` (E11/E12's enforcement) do **not fire at all** on real `Edit`/`Write`
+tool calls, in either the main session or a spawned `tgw-coder` subagent — confirmed
+reproducing twice (before and after an explicit `/hooks` reload, which correctly showed all
+four hooks registered). The hook scripts themselves are logically correct (verified via direct
+`echo ... | python3 hook.py` piping, which does produce the expected `ask` JSON). This is not a
+local misconfiguration — it matches three confirmed, currently-open upstream Claude Code bugs
+(installed version 2.1.205, matches the affected range in all three reports):
+- **anthropics/claude-code#74942** — `PreToolUse` hooks matched on `Edit|Write` are silently
+  never invoked for an entire session under `bypassPermissions`/auto-mode-style permission
+  modes, while `Bash`-matched hooks in the same session fire normally.
+- **anthropics/claude-code#69260** — `PreToolUse` hooks don't fire for subagents spawned via
+  the `Agent` tool at all, regardless of matcher.
+- **anthropics/claude-code#77212** — even when a hook does run, an `ask` decision is silently
+  auto-approved (not surfaced to the user) under `bypassPermissions`.
+
+**Practical consequence:** every hook-mechanized rule in this file (E10's flake-guard Bash
+coverage may be partially intact per #74942's Bash-vs-Edit|Write split, but E11/E12/E14's
+Edit/Write coverage and *all* subagent coverage regardless of matcher should be treated as
+**non-enforcing** until Anthropic ships a fix) is running as prose-only right now, exactly the
+failure mode E11 itself was built to eliminate. Do not cite E11/E12/E14 as "mechanically
+enforced" in status reporting until this is independently re-verified working (`git status`
+clean before/after a real Edit/Write probe on a guarded path, from both the main session and a
+`tgw-coder` subagent) — see #1531 for the exact repro steps used.
+
+**No local fix exists.** This is a client-side harness bug, not something `worktree-guard.py`/
+`app-code-guard.py` can be rewritten to route around for Edit/Write specifically (Bash-matched
+hooks are the one channel confirmed still firing per #74942 — not a substitute, since the
+actual risk is Edit/Write calls). Compensating control until upstream fixes this: fall back to
+**detective**, not preventive — a periodic scan (e.g. extend `tgw-runner-review`/`check_review_
+md.py --scan-branches` or a standalone check) for commits/edits that landed outside a
+`tgw-coder` worktree or outside a `todo/<id>-<slug>` branch, so violations are caught and
+flagged promptly after the fact even though they can no longer be blocked before the fact. Not
+yet built — tracked under todo #1601 (invariants/contract audit) alongside the broader
+redundancy review Dave asked for.
+
+**Rule:** every "must"/"never" rule in a `.claude/agents/*.md` profile is a candidate for
+mechanical enforcement (scoped `tools:`, a `PreToolUse`/`SessionStart` hook, or a harness
+feature like worktree isolation) before it is trusted as prose alone. Prose-only rules are
+acceptable only where no mechanical equivalent exists yet — and that gap should be named
+explicitly, not silently assumed covered by "the agent will read and follow it."
+
+**Why:** the same session that built E10/the PreToolUse flake-guard hook (this same day)
+skipped CLAUDE.md's own startup ritual again hours later — a written instruction, restated
+even more forcefully, still depends on the model choosing to comply, and that already
+failed twice. Dave's generalization, same day: "we should use a similar pattern when
+configuring any agent to lock them into their role" — the CLAUDE.md fix (a `SessionStart`
+hook, see below) is one instance of a pattern that applies to every custom agent profile in
+`.claude/agents/`, not just the main session.
+
+**Enforcement, by example (audited 2026-07-16, both remaining gaps closed 2026-07-18 per
+todo #1389/#1450):**
+- ✅ CLAUDE.md's own startup ritual — `SessionStart` hook
+  (`.claude/hooks/session-start-briefing.py`) now injects inbox/suggestions/plan-check state
+  automatically; no longer depends on the model noticing it should look.
+- ✅ `nix-flake-maintainer`'s "narrow, procedure-gated" mutation list — `flake-guard.py`
+  (`.claude/hooks/flake-guard.py`) now covers both Bash (`nixos-rebuild switch`/`test`,
+  `git commit`/`push` naming `tgw-flake`) AND raw `Edit`/`Write` tool calls landing directly
+  on a file inside `~/tgw-flake` (matcher extended to `Bash|Edit|Write`).
+- ✅ `tgw-coder`'s worktree-isolation contract (`.claude/agents/tgw-coder.md` §2) — a
+  dedicated `PreToolUse` hook, `.claude/hooks/worktree-guard.py` (matcher `Edit|Write`),
+  mechanically blocks any Edit/Write outside `/opt/TGW/var/worktrees/<id>-<slug>` or
+  `/home/db/tgw-worktrees/<id>-<slug>` when `agent_type == "tgw-coder"` — including a
+  dedicated check for the harness's own auto-provisioned `.claude/worktrees/agent-<id>/`
+  path (the exact conflict #1450 found live). Companion change:
+  `settings.worktree.bgIsolation: "none"` so the harness's own competing background-
+  isolation mechanism never auto-provisions a second worktree underneath the agent.
+
+## E12 — Live-troubleshooting sessions diagnose freely but execute application-code fixes through tgw-coder, not direct edits ⚠️ (2026-07-18, Dave; enforcement confirmed BROKEN UPSTREAM 2026-07-20, see E11's update)
+
+**Rule:** the main session (and any non-`tgw-coder` agent) may read, grep, and reason about
+`src/tgw/`/`tests/` freely during root-cause diagnosis — that part is inherently exploratory
+and can't be packet-scoped before the root cause is known. But the actual code *change*, once
+a fix is scoped, is a todo/packet dispatched to `tgw-coder`'s isolated worktree+branch — the
+same split nix-flake-maintainer already enforces for `~/tgw-flake` (diagnose live, but every
+gated mutation goes through the agent's procedure).
+
+**Why:** Dave, 2026-07-18, after a multi-session troubleshooting run (root-causing a stale
+inventory badge, then landing all 4 packets of PP-CATALOG-INCR-001) happened entirely as
+direct `Edit` calls on `http_server.py`/`items.py`/`sqlite_catalog.py`/`state_machine.py`
+and several test files in the shared checkout, never handed to `tgw-coder`: "we seem to be
+running these fixes outside our new process. How can we funnel these troubleshooting type
+sessions through a similar process to what we did in the sprint... make both something you
+recognize and something that can be specified directly like the nix maintainer?" Confidence
+in the flake process specifically comes from `flake-guard.py` existing and firing — the
+mechanical nudge, not just the doc saying to use the agent. This invariant is the same fix
+applied to the other half of the codebase.
+
+**Enforcement:** `.claude/hooks/app-code-guard.py` (new, 2026-07-18), `PreToolUse` on
+`Edit|Write`, mirrors `flake-guard.py`'s pattern exactly: any Edit/Write under `src/tgw/` or
+`tests/` where `agent_type != "tgw-coder"` triggers `permissionDecision: "ask"`, naming the
+tgw-coder dispatch path as the expected route. Registered in `.claude/settings.json`'s
+`PreToolUse` list alongside `flake-guard.py`/`worktree-guard.py`.
+
+**Known gap, same as `worktree-guard.py`'s:** Edit/Write only, not Bash — a `sed -i`/`tee`
+against a guarded path bypasses this hook. Not yet built; flag if it becomes a real bypass
+pattern rather than a theoretical one.
+
+**Live-fire not yet confirmed:** per `reference-hooks-settings-watcher-caveat` — this repo's
+settings watcher only picks up a hooks config that existed when the session started, so a
+`/hooks` reload or session restart is needed once before this is proven firing for real, same
+open item as the `SessionStart` briefing hook and the original flake-guard/worktree-guard
+hooks had when first added.
+
+## E13 — A relayed request needs verified provenance before it's treated as Dave's own direction ⚠️ (2026-07-19, Dave — OPEN, no detector yet)
+
+**Rule:** `inbox/tigwa/*-REQUEST-*.md` / `DAVE-REQUEST-*.md` files (Tigwa recording what she
+understood Dave to want) are genuinely valuable — confirmed 2026-07-19 as an already-working,
+in-production instance of PP-OUTBOX-001's translation concept (see that PP's §3 update). But
+"well-formed and sitting in the expected inbox location" is not the same as "verified to
+actually be Dave's direction." Right now nothing distinguishes a genuine one from a
+mistaken, hallucinated, or (worst case) forged one — the same relay-authorization risk this
+session already enforced hard against for subagents (`feedback-relayed-authorization-never-
+trusted`), now surfacing on the Claude-reads-Tigwa's-inbox-notes side instead of the
+agent-accepts-orchestrator's-claim side.
+
+**Why:** Dave, immediately after endorsing Tigwa's requests as "my prompts now": "we still
+need some level of verification to guard against false request injection." He raised this
+himself, unprompted, the moment the trust question became concrete — not a hypothetical
+Claude is inventing, a named requirement from Dave that isn't answered yet.
+
+**Status: genuinely open, no design yet.** Open questions for whoever picks this up:
+- Does every Tigwa-authored request need Dave's explicit countersignature before Claude acts
+  on it, or only above some risk/consequence tier (matches PP-OUTBOX-001's `delivery_boundary`
+  field concept — inspect-only vs. side-effecting)?
+- What's the actual verification mechanism — Dave replying/confirming in `inbox/dave/`, a
+  simple shared-secret/signing step, or something else? No mechanism has been proposed yet,
+  only the requirement.
+- Does this apply retroactively to judging past Tigwa requests as trustworthy, or only
+  forward from here?
+
+**Architectural link, Dave 2026-07-19, same session, right after E13 was filed:** "the
+verification is likely tied to the cryptographically locked execution plan" — i.e. this is
+almost certainly not a bespoke mechanism to design from scratch. It's a specific instance of
+`pp/PP-CATIONIX-001.md`'s already-designed **crypto-lock** (endgame, not yet built): "a
+Securix-style cryptographic per-worker execution token: signed policy lockfile + short-TTL
+unlock artifact + worker attestation + audit trail." A Tigwa-authored request that needs to
+authorize a consequential action would need a valid, Dave-signed unlock artifact attached
+(or referenced) before Claude/an agent treats it as executable — a forged/hallucinated
+request simply couldn't produce one. **Don't design E13 as a standalone provenance scheme;
+fold it into the crypto-lock design when that's built** (tracked as a future addendum to
+PP-AIOPS-001 Phase 5/6 per PP-CATIONIX-001.md's own note — same gating point, not a second
+mechanism). Until the crypto-lock exists, E13 stays open and unenforced by construction —
+this is expected, not a gap to rush a workaround for.
+
+**Enforcement: none yet.** No detector, no hook, no gate. Treat this the same as any other
+named-but-undesigned gap in this file (e.g. #1459's credential-scoping) — don't silently
+build a fix without a real design pass, and don't let it sit only in conversation history;
+this entry is that durable record. See `pp/PP-OUTBOX-001.md` and `pp/PP-CATIONIX-001.md` for
+where the eventual design should land.
+
+## E14 — Agent-trace evidence is write-once/append-only for every agent, no exemptions ⚠️ (2026-07-20, Dave, PP-AGENTTRACE-001; Edit/Write coverage confirmed BROKEN UPSTREAM same day, see E11's update — Bash-matched coverage may be partially intact per #74942, not independently re-verified)
+
+**Rule:** no agent — including the one that created a given trace record, including `Claude`
+itself, no exceptions by role or trust level — may modify or delete an archived transcript
+file (`/opt/TGW/var/agent-traces/`), an `agent_runs` row, or a hash-commitment row (packet
+#1586) once written. The only sanctioned write path is `tgw trace start`/`tgw trace end` and
+`tgw.logging.archive_transcript()`'s own insert-only/lock-on-first-archival logic. This
+closes the exact self-attestation/cover-up vector Tigwa's review (todo #1585) named: a
+compromised or runaway agent altering its own evidence trail after the fact.
+
+**Why:** Dave, 2026-07-20, immediately after the Leg A/B integrity-hardening design (packet
+#1586) was drafted: "this needs to be baked into everyone's contract. No touching the traces
+or you self-destruct." Read for severity, not mechanism — this invariant is the actual
+enforcement (a hard `deny`), not a literal self-destruct routine, which this project's own
+doctrine (Prime Directive 2/3, no self-devised safety bypasses) wouldn't sanction building
+regardless of instruction framing. Same standing doctrine as E9/E11/E12: a written rule
+depends on the model choosing to comply every time; a hook doesn't ask.
+
+**Enforcement:** `.claude/hooks/trace-immutability-guard.py` (new, 2026-07-20), `PreToolUse`
+on `Bash|Edit|Write`, registered in `.claude/settings.json` alongside `flake-guard.py`/
+`app-code-guard.py`/`worktree-guard.py`. Unlike those three, this hook has **no exempt
+agent** — every agent identity is guarded equally, since there is no legitimate agent whose
+contract is to directly mutate trace evidence (the CLI/`archive_transcript()` write path
+itself never goes through Edit/Write or a matching destructive Bash pattern, so legitimate
+recording is unaffected). Blocks: `Edit`/`Write` on any path under `/opt/TGW/var/agent-
+traces/`; `Bash` commands combining a destructive verb (`rm`/`mv`/`cp -f`/`dd`/`shred`/
+`truncate`/`chmod`/`chown`/output-redirect/`tee`/`sed -i`) with that path in the command
+string; `Bash` commands containing `UPDATE`/`DELETE FROM`/`DROP TABLE`/`TRUNCATE` against
+`agent_runs` or `agent_run_transcript_hashes`.
+
+**Known gap, same transparency convention as the other hooks' admitted Bash gaps:**
+best-effort pattern match on the Bash command string — a sufficiently obfuscated command, or
+DB/filesystem access this hook's regexes don't recognize, is a real, documented limitation,
+not claimed coverage the hook doesn't have.
+
+**Interim mechanism, not the permanent one (Dave, same session): "eventually this will be
+enforced by our crypto environment watcher."** Same pattern as E13's own note — don't treat
+this hook as the final design. It's the mechanical stopgap until `pp/PP-CATIONIX-001.md`'s
+crypto-lock endgame (signed policy lockfile + short-TTL unlock artifact + worker attestation
++ audit trail) subsumes it with a real cryptographic guarantee instead of a pattern-matched
+`PreToolUse` hook. When that lands, fold this invariant's enforcement into it rather than
+maintaining two parallel mechanisms.
+
+**Live-fire not yet confirmed:** per `reference-hooks-settings-watcher-caveat` — needs a
+`/hooks` reload or session restart before this is proven firing for real, same open item as
+every other hook in this file when first added.
+
+---
+
+## E16 — Every queue job declares a complete manifest (dedupe_key, entity_id for per-item work); `enqueue_job()` is the enforcer, not a passive audit ✅ (2026-07-20, todo #1608, PP-STATEMACHINE-001)
+
+**Rule:** every call to `state_machine.enqueue_job()` must supply a non-empty `dedupe_key`
+(reject semantics by default; `debounce=True` extend semantics for singleton/batch-coalescing
+triggers) unless it explicitly passes `dedupe_key_exempt=True` — a deliberate, reviewed,
+code-commented exception, never a silent way to dodge the contract. Any call with
+`entity_type='item'` must supply a non-empty `entity_id` — no opt-out for this one; a
+per-item job's `entity_id` is always knowable at the call site. `enqueue_job()` raises
+`state_machine.MissingManifestFieldError` (a `ValueError` subclass) at call time when either
+requirement isn't met, instead of silently accepting an incomplete job the way it did before
+this packet. `priority` is required in effect but config-defaultable: an omitted `priority=`
+resolves via `resolve_priority(queue_name, operation)` against
+`/opt/TGW/config/tgw-queue-priorities.json` (same `defaults`/`use_default` shape/convention as
+`tgw-models.json`), falling back to 100 (`normal`) if no entry exists — an unmapped queue is
+not an error. `supersede=True` is the manifest's "force this job eligible right now" property:
+atomically cancels any existing non-terminal row under the same `dedupe_key` before inserting
+the fresh one, for the case `debounce=True`'s `GREATEST(not_before)` collision handling can't
+express (it can only push a pending job's schedule *later*, never earlier).
+
+**Why:** surfaced during PP-SOLD-001's #1604/#1605/#1607 incident chain (multi-order
+data-loss bug, `ebay_legacy_sync` restore, lease-expiry race, 451-row duplicate-job
+backlog). The #1607 audit found the same missing-`dedupe_key` hole in **8** self-rescheduling
+workers (`ebay_legacy_sync`, `ebay_sync`, `token_refresh`, `velocity_stats`,
+`ebay_price_reducer`, `ebay_sku_migrate`, `ebay_dole`, `sync_conflict`) — not the 5 originally
+suspected — plus `ebay_upload.py`'s quota-retry path and two `ebay_sync` per-sku manual
+trigger sites in `http_server.py` that needed their own key distinct from the singleton's.
+Dave, 2026-07-20, after the audit: "not missing, just missed by the second coder" — the fix
+had to be structural, not a per-call-site patch the next new worker could just as easily
+skip. "This is state machine, not job contracts... we can call it and handle it as a manifest
+but the state machine is the enforcer." Same shape of risk `dedupe_key` already had before
+E-numbered enforcement: a rule that lived only in a docstring warning
+(`enqueue_job()`'s own `entity_id` paragraph pre-dates this packet and had already shipped a
+~300k-row breakage once, todo #1406/PP-DEADLETTER-001, before this same enforcement pattern
+closed that hole too).
+
+**Enforcement:** `state_machine.enqueue_job()` itself, in `src/tgw/queue/state_machine.py` —
+no external hook, no separate validation layer, no dependency on the Claude Code
+harness-hook-firing bug found the same session (todo #1531, E11/E12's known gap). It fires on
+every call, unconditionally, by construction — the same reasoning the PP doc gives for not
+building this as a bolted-on layer: `state_machine` is already this codebase's established
+name for the whole queue/job subsystem (the Postgres database is literally named
+`state_machine`).
+
+**Sequencing (why this shipped as one packet, all 4 phases, not enforcement-first):** flipping
+`enqueue_job()`'s enforcement on before every real call site had a `dedupe_key` would have
+broken `ebay_sync`/`ebay_legacy_sync`'s live production loops immediately. Order followed:
+(1) fix all 15+ call sites the #1607 audit found — 8 workers × 2 sites (startup enqueue +
+`_reschedule()`, sharing one `'<queue_name>:pending'` debounce key), `ebay_upload.py:186`'s
+quota-retry (`dedupe_key=f'ebay_upload:{sku}'`, reject semantics), and `http_server.py`'s two
+per-sku `ebay_sync` manual-trigger sites (`f'ebay_sync:sku:{sku}'`, deliberately distinct from
+the singleton's `'ebay_sync:pending'` key so one queue_name's two job shapes don't collide);
+(2) ship `tgw-queue-priorities.json` + `resolve_priority()`; (3) ship `supersede` + wire `tgw
+restart-ebay-token` to it (the exact "force now regardless of pending schedule" need #1607
+flagged as item D.1); (4) only then flip the `MissingManifestFieldError` raise on, after a
+full fresh codebase-wide AST re-grep (not just trusting the original #1607 audit) confirmed
+every real `enqueue_job()` call site — src/tgw/ and scripts/ — already supplied a `dedupe_key`,
+zero holdouts found, `dedupe_key_exempt=True` shipped but unused as of this packet landing.
+
+**Known gap, not yet built:** `tgw-queue-priorities.json` was authored and reviewed as part of
+this packet but is a live-only deploy artifact (like `tgw-models.json`, not git-tracked) —
+`tgw-coder`'s worktree-isolation contract means it couldn't be landed directly into
+`/opt/TGW/config/` from the branch; the reviewed content sits at
+`docs/TGW-Plan-Vault/plan/packets/results/1608-tgw-queue-priorities.json` pending a live-deploy
+step (same category as the worker restarts this packet also defers to Dave/Claude,
+post-review). `resolve_priority()` tolerates the file being absent — every lookup just falls
+back to `normal` (100, today's already-implicit default) until it's deployed, so nothing
+breaks in the interim.
+
+## E17 — Agents never execute `git push`/`nixos-rebuild switch` on `~/tgw-flake`; only a human's `mark-executed` closes the loop ✅ (2026-07-21, Dave, PP-FLAKEGATE-001, todo #1621)
+
+**Incident:** `nix-flake-maintainer` committed AND pushed a flake commit (far2l re-add, todo
+#1620) to `origin/master` on `~/tgw-flake` without Dave's explicit push confirmation. Root
+cause: the 2026-07-20 "batch the mutating calls" change (this same file, PP-AGENT-DISCIPLINE-001)
+chained `git add && git commit && git push` into one compound Bash call per host to cut approval
+prompts — combined with the session running in Auto Mode (suppresses permission prompts) and the
+already-confirmed upstream bug where PreToolUse hooks never fire for Agent-tool subagents
+(anthropics/claude-code#69260), nothing actually gated the push. The commit was reverted same
+session per Dave's direct instruction; it was never applied to any host's running system, so no
+live-system undo was needed. Dave's direction: "a more state machine centric approach using the
+rest of our patterns" — don't patch the prompt/hook path (proven unreliable twice now across
+E11/E12's history), apply the same shape already proven for `enqueue_job()`/`queue_jobs`
+(E16/PP-STATEMACHINE-001) and `ebay_publish`'s manual-trigger-only pattern (`tgw publish <sku>`).
+
+**Rule:** `nix-flake-maintainer` (and any future agent with `~/tgw-flake` access) never runs
+`git push` or `nixos-rebuild switch` itself, on either known host (tgw-prod, a1131), under any
+circumstance — not even after Dave says "go ahead" (that authorizes the *request*, not a
+self-attested execution). After committing locally (still direct — only the push is gated) it
+calls `tgw flake request-push --repo <path> --host <host> --commit <sha> --summary <text>`; after
+a successful `dry-activate` it calls `tgw flake request-switch --host <host> --commit <sha>
+--summary <text>` instead of `nixos-rebuild switch`. Both are pure Postgres inserts (`queue_jobs`,
+`queue_name='flake_mutation'`, `entity_type='flake_commit'`, `entity_id`=commit sha,
+`dedupe_key=f'flake_mutation:{kind}:{host}:{sha}'`) — neither touches git or nixos-rebuild at
+all. The agent's job ends at reporting the printed job id to Dave; it never calls the closing
+command either.
+
+**The only thing that ever closes a `flake_mutation` job:** a human runs the real `git push` /
+`nixos-rebuild switch` themselves, by hand, outside this tool, then calls `tgw flake
+mark-executed <job-id> [--by NAME]`. This transitions the job `queued -> succeeded` (reusing
+existing `queue_jobs` state semantics — no parallel status field, no worker ever leases this
+queue since there is no `tgw-worker@flake_mutation.service` unit) and records `--by`'s value via
+the existing `queue_job_history`/`trg_queue_jobs_history` trigger's `tgw.worker_id` session
+setting, at zero new columns. `tgw flake queue` lists every still-`queued` job (what Dave looks
+at to decide what to actually run); `tgw flake show <job-id>` gives full detail including the
+`queue_job_history` execution record once closed.
+
+**Detective backstop, not a blocker:** `tgw flake audit --repo <path>` compares live `git log
+origin/master` commits against `flake_mutation` jobs marked executed with `operation='push'`; any
+post-rollout (2026-07-21) commit on `origin/master` with no matching executed push record is
+printed as a finding. This extends the same detective-control direction E11/E12/E14 already
+named for hook-coverage gaps — it does not stop or block anything, it only reports, since
+preventive PreToolUse hooks are confirmed broken for Agent-tool subagents (E11's update).
+
+**Why not a hook:** the proximate cause here (PreToolUse never firing for Agent-tool subagents)
+is the exact gap E11/E12 already carry as an open, upstream-confirmed limitation — building
+another hook on the same broken firing mechanism would not have closed this incident. The fix
+instead removes the capability itself: `nix-flake-maintainer`'s own procedure (this file) no
+longer contains a `git push`/`nixos-rebuild switch` step at all, replaced by an enqueue-only CLI
+call, so there is no mutating command left for a batched/Auto-Mode/hook-skipped call to slip past
+in the first place.
+
+**Enforcement:** `src/tgw/flake_gate.py` + `state_machine.mark_flake_mutation_executed()` /
+`list_flake_mutation_jobs()` / `get_flake_mutation_job()` / `list_executed_flake_push_shas()` in
+`src/tgw/queue/state_machine.py`, wired to `tgw flake [request-push|request-switch|queue|show|
+mark-executed|audit]` in `src/tgw/api.py`. `.claude/agents/nix-flake-maintainer.md` Step 2/5
+rewritten to call the request commands instead of executing git push / nixos-rebuild switch, and
+its Constraints section carries an explicit standing prohibition on ever calling `mark-executed`
+itself. Tests: `tests/test_flake_gate.py` (offline, mocked DB — enqueue shape, mark-executed
+state transition + not-found error, audit matched/unmatched/pre-rollout cases). Live-verified
+2026-07-21 against the real `state_machine` Postgres DB: real `queue_jobs` rows inserted via
+`request-push`/`request-switch`, listed via `queue`, inspected via `show`, closed via
+`mark-executed` (confirmed `queue_job_history` captured `--by` via the `tgw.worker_id` session
+setting), and `audit` correctly flagged/passed matched vs. unmatched commits against a disposable
+throwaway git repo (not `~/tgw-flake` itself — see Known gap below) — all test rows cleaned up
+after.
+
+**Known gap, not yet built:** `tgw flake audit` was live-verified against a disposable throwaway
+git repo, not the real `~/tgw-flake` checkout, because the `tgw` OS user (which the `tgw` CLI
+runs as for Postgres peer auth) has no read access to `/home/db` (mode 700, owned by `db`) where
+`~/tgw-flake` actually lives on tgw-prod — and conversely the `db` OS user (which owns and can
+read `~/tgw-flake`) fails Postgres peer auth as `tgw`. `tgw flake audit --repo ~/tgw-flake` will
+hit this same split live on tgw-prod until resolved; filed as todo #1623 — not fixed as part of
+this packet since loosening either user's permissions to bridge the two was explicitly out of
+scope for a single coder packet to decide unilaterally. `request-push`/`request-switch`/`queue`/
+`show`/`mark-executed` do not have this problem (pure Postgres, no git filesystem read needed).

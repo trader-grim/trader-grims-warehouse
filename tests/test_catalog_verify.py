@@ -135,6 +135,135 @@ def test_verify_invalid_category_id(tmp_path):
     assert 'invalid_ebay_category' in rules
 
 
+# ---------------------------------------------------------------------------
+# invariant C12 (todo #1416): field_set_drift detector — the "regularly
+# check and repair" data-drift half, complementing the static code-level
+# detector (tests/test_invariant_c12_field_set_accessors.py).
+# ---------------------------------------------------------------------------
+
+def test_verify_field_set_drift_flagged_when_live_offer_present(tmp_path):
+    sku = 'tgw202601010000030'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'E5',
+        'item_attributes': {'Type': 'Lapel Pin', 'Brand': 'Unbranded'},
+        'draft_listing': {'item_specifics': {'Type': 'Brooch', 'Brand': 'Unbranded'}},
+        'ebay_offer': {'offer_id': '266061679018'},
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    viols = {v['rule']: v for v in _verify_item(sku, item_dir, doc)}
+    assert 'field_set_drift' in viols
+    assert 'Type' in viols['field_set_drift']['detail']
+    assert 'Brand' not in viols['field_set_drift']['detail']
+
+
+def test_verify_field_set_drift_not_flagged_without_live_offer(tmp_path):
+    """A never-published draft's Set A/Set B disagreeing is normal
+    pre-publish churn, not a finding — only live items are checked."""
+    sku = 'tgw202601010000031'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'E5',
+        'item_attributes': {'Type': 'Lapel Pin'},
+        'draft_listing': {'item_specifics': {'Type': 'Brooch'}},
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'field_set_drift' not in rules
+
+
+def test_verify_field_set_drift_clean_when_sets_agree(tmp_path):
+    sku = 'tgw202601010000032'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'E5',
+        'item_attributes': {'Type': 'Brooch'},
+        'draft_listing': {'item_specifics': {'Type': 'Brooch'}},
+        'ebay_offer': {'offer_id': '266061679018'},
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'field_set_drift' not in rules
+
+
+# ---------------------------------------------------------------------------
+# invariant C13 (todo #1417): inventory_diff_unresolved_stale detector —
+# the "regularly check and repair" data-drift half for the REVERSE
+# (eBay Draft -> Inventory Record) direction. Not gated on a live
+# ebay_offer.offer_id, unlike field_set_drift (see api.py comment).
+# ---------------------------------------------------------------------------
+
+def test_verify_inventory_diff_stale_flagged_past_threshold(tmp_path):
+    sku = 'tgw202601010000040'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'F6',
+        'item_attributes': {'Type': 'Lapel Pin'},
+        'draft_listing': {
+            'item_specifics': {'Type': 'Brooch'},
+            'item_specifics_history': [
+                {'ts': '2026-01-01T00:00:00+00:00', 'key': 'Type',
+                 'value': 'Brooch', 'previous_value': 'Lapel Pin',
+                 'source': 'ebay_draft', 'applied_by': 'system'},
+            ],
+        },
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    viols = {v['rule']: v for v in _verify_item(sku, item_dir, doc)}
+    assert 'inventory_diff_unresolved_stale' in viols
+    assert 'Type' in viols['inventory_diff_unresolved_stale']['detail']
+
+
+def test_verify_inventory_diff_stale_not_flagged_when_recent(tmp_path):
+    from datetime import datetime, timezone
+    recent = datetime.now(timezone.utc).isoformat()
+    sku = 'tgw202601010000041'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'F6',
+        'item_attributes': {'Type': 'Lapel Pin'},
+        'draft_listing': {
+            'item_specifics': {'Type': 'Brooch'},
+            'item_specifics_history': [
+                {'ts': recent, 'key': 'Type', 'value': 'Brooch',
+                 'previous_value': 'Lapel Pin', 'source': 'ebay_draft',
+                 'applied_by': 'system'},
+            ],
+        },
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'inventory_diff_unresolved_stale' not in rules
+
+
+def test_verify_inventory_diff_stale_not_flagged_when_no_timestamp(tmp_path):
+    """Legacy bare-dict item_specifics with no history/timestamp —
+    Prime Directive 1: never claim a fabricated age."""
+    sku = 'tgw202601010000042'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'F6',
+        'item_attributes': {'Type': 'Lapel Pin'},
+        'draft_listing': {'item_specifics': {'Type': 'Brooch'}},
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'inventory_diff_unresolved_stale' not in rules
+
+
+def test_verify_inventory_diff_stale_clean_when_resolved(tmp_path):
+    sku = 'tgw202601010000043'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'F6',
+        'item_attributes': {'Type': 'Brooch'},
+        'draft_listing': {
+            'item_specifics': {'Type': 'Brooch'},
+            'item_specifics_history': [
+                {'ts': '2026-01-01T00:00:00+00:00', 'key': 'Type',
+                 'value': 'Brooch', 'previous_value': 'Lapel Pin',
+                 'source': 'ebay_draft', 'applied_by': 'system'},
+            ],
+        },
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'inventory_diff_unresolved_stale' not in rules
+
+
 def test_verify_no_location(tmp_path):
     sku = 'tgw202601010000007'
     doc = {'sku': sku, 'title': 'Valid Title For Testing Here', 'location': ''}
@@ -931,6 +1060,38 @@ def test_legacy_listing_resolved_suppresses_rule(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# todo #1303 / invariant C11 — ebay_upload_blocked (no-photos-on-disk guard
+# now persists a durable finding instead of a log-only skip).
+# ---------------------------------------------------------------------------
+
+def test_ebay_upload_no_photos_blocked_is_critical(tmp_path):
+    sku = 'tgw202601010000023'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'G5',
+        'ebay_upload_blocked': {
+            'reason': 'no_photos_on_disk',
+            'detected_at': '2026-07-13T00:00:00+00:00',
+        },
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'ebay_upload_no_photos_unrepaired' in rules
+
+
+def test_ebay_upload_no_photos_cleared_suppresses_rule(tmp_path):
+    """The worker clears ebay_upload_blocked to None on a subsequent full
+    success — the rule must not keep nagging after that."""
+    sku = 'tgw202601010000024'
+    doc = {
+        'sku': sku, 'title': 'Valid Title For Testing', 'location': 'G6',
+        'ebay_upload_blocked': None,
+    }
+    item_dir, _ = _make_item(tmp_path, sku, doc)
+    rules = {v['rule'] for v in _verify_item(sku, item_dir, doc)}
+    assert 'ebay_upload_no_photos_unrepaired' not in rules
+
+
+# ---------------------------------------------------------------------------
 # PP-PHOTOSYNC-001 P9 follow-up (todo #1127) — _load_live_photo_index
 # ---------------------------------------------------------------------------
 
@@ -984,3 +1145,120 @@ def test_load_live_photo_index_missing_root_returns_none(tmp_path):
     index, age_h = _load_live_photo_index(cfg)
     assert index is None
     assert age_h is None
+
+
+# ---------------------------------------------------------------------------
+# photo_files_readable rule (todo #1154, photo-integrity mitigation leg 1)
+# ---------------------------------------------------------------------------
+
+def _write_real_jpeg(path: Path) -> None:
+    from PIL import Image
+    Image.new("RGB", (8, 8), color="red").save(path, format="JPEG")
+
+
+def test_photo_decode_check_off_by_default(tmp_path):
+    """Every pre-existing caller/test passes no photo_decode_cache -- the
+    rule must not fire (existing fixtures use empty-byte .jpg files)."""
+    item_dir, doc = _make_item(tmp_path, 'tgw1', {'title': 'Widget', 'location': 'A1'}, photos=1)
+    viols = _verify_item('tgw1', item_dir, doc)
+    assert 'photo_files_readable' not in {v['rule'] for v in viols}
+
+
+def test_photo_decode_check_flags_corrupt_file(tmp_path):
+    item_dir, doc = _make_item(tmp_path, 'tgw2', {'title': 'Widget', 'location': 'A1'}, photos=0)
+    (item_dir / 'photo0.jpg').write_bytes(b'not a real jpeg')
+    cache: dict = {}
+    viols = _verify_item('tgw2', item_dir, doc, photo_decode_cache=cache)
+    rules = {v['rule'] for v in viols}
+    assert 'photo_files_readable' in rules
+    assert cache  # populated
+
+
+def test_photo_decode_check_passes_real_jpeg(tmp_path):
+    item_dir, doc = _make_item(tmp_path, 'tgw3', {'title': 'Widget', 'location': 'A1'}, photos=0)
+    _write_real_jpeg(item_dir / 'photo0.jpg')
+    cache: dict = {}
+    viols = _verify_item('tgw3', item_dir, doc, photo_decode_cache=cache)
+    assert 'photo_files_readable' not in {v['rule'] for v in viols}
+
+
+def test_photo_decode_cache_skips_pil_on_unchanged_file(tmp_path, monkeypatch):
+    """A second check of the SAME (size,mtime) file must not touch PIL at
+    all -- the whole point of the cache is to make repeat catalog-verify
+    passes cheap."""
+    from tgw.api import _check_photo_readable
+
+    photo_path = tmp_path / 'photo.jpg'
+    _write_real_jpeg(photo_path)
+    cache: dict = {}
+
+    assert _check_photo_readable(photo_path, cache) is None  # first call: real decode
+
+    opens = {'n': 0}
+    real_open = __import__('PIL.Image', fromlist=['Image']).open
+
+    def _counting_open(*a, **k):
+        opens['n'] += 1
+        return real_open(*a, **k)
+
+    monkeypatch.setattr('PIL.Image.open', _counting_open)
+    assert _check_photo_readable(photo_path, cache) is None  # cache hit
+    assert opens['n'] == 0
+
+
+def test_photo_decode_cache_redecodes_when_file_changes(tmp_path):
+    from tgw.api import _check_photo_readable
+
+    photo_path = tmp_path / 'photo.jpg'
+    _write_real_jpeg(photo_path)
+    cache: dict = {}
+    assert _check_photo_readable(photo_path, cache) is None
+
+    # overwrite with corrupt bytes but keep checking the SAME path -- size
+    # and/or mtime must change for the cache to notice and re-decode
+    import time
+    time.sleep(0.01)
+    photo_path.write_bytes(b'corrupt now')
+    error = _check_photo_readable(photo_path, cache)
+    assert error is not None
+
+
+def test_cmd_catalog_verify_check_photos_flag(tmp_path):
+    itemdata_root = tmp_path / 'ItemData'
+    itemdata_root.mkdir()
+    catalog_root = tmp_path / 'catalog'
+    item_dir = itemdata_root / 'tgw5'
+    item_dir.mkdir()
+    (item_dir / 'tgw5.json').write_text(json.dumps({'title': 'Widget', 'location': 'A1'}), encoding='utf-8')
+    (item_dir / 'photo0.jpg').write_bytes(b'not a real jpeg')
+
+    cfg = {'itemdata_root': itemdata_root, 'catalog_root': catalog_root, 'raw': {}}
+
+    result_off = cmd_catalog_verify(cfg, min_severity='critical', check_photos=False)
+    assert 'photo_files_readable' not in result_off['by_rule']
+
+    result_on = cmd_catalog_verify(cfg, min_severity='critical', check_photos=True)
+    assert result_on['by_rule'].get('photo_files_readable') == 1
+    assert (catalog_root / 'photo-decode-cache.json').exists()
+
+
+def test_save_photo_decode_cache_merges_not_overwrites(tmp_path):
+    """code-review follow-up: _save_photo_decode_cache used to be a plain
+    write_text -- a concurrent writer's entries (or entries from an earlier
+    run not present in this process's in-memory dict) would be silently
+    dropped. Must merge onto whatever's on disk, like the other eBay disk
+    caches (locked_merge_cache_json)."""
+    from tgw.api import _load_photo_decode_cache, _save_photo_decode_cache
+
+    catalog_root = tmp_path / 'catalog'
+    cfg = {'catalog_root': catalog_root}
+
+    _save_photo_decode_cache(cfg, {'/a/1.jpg': {'fingerprint': [1, 1.0], 'error': None}})
+    # a second, independent save with a DIFFERENT key -- simulates either a
+    # concurrent writer or a fresh in-memory cache that didn't inherit the
+    # first entry (e.g. two separate cmd_catalog_verify runs)
+    _save_photo_decode_cache(cfg, {'/b/2.jpg': {'fingerprint': [2, 2.0], 'error': 'bad'}})
+
+    on_disk = _load_photo_decode_cache(cfg)
+    assert '/a/1.jpg' in on_disk
+    assert '/b/2.jpg' in on_disk

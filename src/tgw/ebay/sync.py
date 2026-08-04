@@ -24,13 +24,46 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 import requests
 
 from tgw.apis.ebay.client import ebay_get, ebay_post, ebay_put
+from tgw.ebay.draft_specifics import get_ebay_aspects
+from tgw.queue import state_machine
 
 log = logging.getLogger(__name__)
+
+
+def enqueue_post_push_sync(sku: str) -> None:
+    """Todo #1445/#1467: every worker that actually pushes a change to
+    eBay's live state (`ebay_stage` for offer/inventory-item upserts,
+    `ebay_publish` for the publish transition) must refresh the local
+    `ebay_live` mirror afterward, or it goes stale until some unrelated
+    periodic sync happens to catch it — the exact mechanism behind
+    "why do we keep having to manually re-sync" (Dave, 2026-07-16).
+    `ebay_stage` had never enqueued this at all; `ebay_publish` got its own
+    copy of this same call earlier the same day (#1445) before the
+    duplication was noticed and pulled up into this shared home, following
+    the same precedent as `format_ebay_error` above.
+
+    Targeted per-SKU sync (`ebay_sync.handle()` supports `payload['sku']`),
+    deduped per SKU so a burst of pushes for one SKU coalesces into one
+    sync rather than piling up the queue (`uq_queue_jobs_dedupe_key_active`
+    only blocks while a job with this key is still active). Non-fatal —
+    a failed enqueue here must never turn a successful stage/publish into
+    a failed job.
+    """
+    try:
+        state_machine.enqueue_job(
+            queue_name='ebay_sync',
+            payload={'sku': sku, 'reason': 'post_push'},
+            dedupe_key=f'ebay_sync:post_push:{sku}',
+            max_attempts=3,
+        )
+    except Exception as exc:
+        log.warning('%s: post-push ebay_sync enqueue failed (non-fatal): %s', sku, exc)
 
 
 def format_ebay_error(body: str, status: int) -> str:
@@ -48,6 +81,63 @@ def format_ebay_error(body: str, status: int) -> str:
     except Exception:
         pass
     return f'HTTP {status}: {body[:300]}'
+
+
+# eBay's error text names ITS OWN field ("condition"), not our
+# draft_listing key ("condition_enum") — map the handful we know about so
+# the client's shared flagFieldInvalid() can target the right rendered
+# element. An unmapped eBay field name is still returned verbatim (better
+# than dropping the info) — this is not meant to be an exhaustive registry.
+_EBAY_FIELD_TO_DRAFT_FIELD: Dict[str, str] = {
+    'condition': 'condition_enum',
+}
+
+
+def extract_ebay_error_field(body: str) -> Optional[str]:
+    """Best-effort extraction of the errant field name from an eBay error body.
+
+    PP-CONDITION-ENUM-001 / todo #1562 — live incident: tgw202605051124483
+    dead-lettered at ebay_stage with only the generic "The request has
+    errors" wrapper text surfaced; the actual reason
+    ("Could not serialize field [condition]") was sitting unused in
+    errors[0].parameters[0] = {"name": "reason", "value": "Could not
+    serialize field [condition]"}.
+
+    Two sources, in priority order:
+    1. A structured errors[].parameters[] entry whose name is itself a
+       field reference (`fieldName`/`field`), or whose value contains a
+       `[fieldname]`-shaped reference (this incident's actual shape, under
+       a generic `name: "reason"` parameter).
+    2. A regex fallback (``\\[(\\w+)\\]``) against errors[].longMessage/
+       message when no structured parameter carries it.
+
+    Returns the mapped tgw draft_listing key where known, the raw eBay
+    field name otherwise, or None when nothing can be determined. Never
+    raises — this is a best-effort diagnostic, not a required field; a bad
+    guess is worse than none, so ambiguous/absent matches return None
+    rather than force one.
+    """
+    try:
+        errs = json.loads(body).get('errors', [])
+    except Exception:
+        return None
+    _bracket_re = re.compile(r'\[(\w+)\]')
+    for e in errs:
+        for p in (e.get('parameters') or []):
+            pname = (p.get('name') or '').lower()
+            pval = p.get('value') or ''
+            if pname in ('fieldname', 'field') and pval:
+                return _EBAY_FIELD_TO_DRAFT_FIELD.get(pval, pval)
+            m = _bracket_re.search(pval)
+            if m:
+                found = m.group(1)
+                return _EBAY_FIELD_TO_DRAFT_FIELD.get(found, found)
+        for key in ('longMessage', 'message'):
+            m = _bracket_re.search(e.get(key) or '')
+            if m:
+                found = m.group(1)
+                return _EBAY_FIELD_TO_DRAFT_FIELD.get(found, found)
+    return None
 
 
 class AmbiguousOfferError(RuntimeError):
@@ -178,6 +268,24 @@ def _get_policies(cfg: Dict[str, Any], marketplace_id: str = MARKETPLACE_ID) -> 
     _policies_cache[marketplace_id] = policies
     log.info('eBay account policies for %s: %s', marketplace_id, policies)
     return policies
+
+
+def get_fulfillment_policies_full(cfg: Dict[str, Any],
+                                   marketplace_id: str = MARKETPLACE_ID) -> List[Dict[str, str]]:
+    """Live full list of the account's fulfillment (shipping) policies for
+    *marketplace_id* — [{id, name}]. Unlike _get_policies (which only keeps
+    the first policy as a push-time fallback default), this is the
+    operator-facing dropdown's authoritative option source (PP-SELLERHUB-001,
+    todo #1547 — the dropdown used to be driven solely by a static
+    ebay-fulfillment-policies.json cache with no live refresh path)."""
+    account_marketplace_id = _ACCOUNT_API_MARKETPLACE_ID.get(marketplace_id, marketplace_id)
+    data = ebay_get(cfg, '/sell/account/v1/fulfillment_policy',
+                     params={'marketplace_id': account_marketplace_id})
+    return [
+        {'id': p['fulfillmentPolicyId'], 'name': p.get('name', p['fulfillmentPolicyId'])}
+        for p in data.get('fulfillmentPolicies', [])
+        if p.get('fulfillmentPolicyId')
+    ]
 
 
 def _get_merchant_location(cfg: Dict[str, Any]) -> str:
@@ -438,8 +546,24 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
     if not image_urls:
         raise ValueError(f'{sku}: no eBay photo URLs — run ebay_upload first')
 
+    # todo #1418: Set B read via tgw.ebay.draft_specifics (the sanctioned accessor) —
+    # this is the ONE code path that pushes aspects to eBay's live Inventory API.
+    #
+    # Todo #1462: an operator-cleared aspect is stored internally as an
+    # explicit "" (see draft_specifics.set_ebay_aspects — "" is a real
+    # value, distinct from None which is a deliberate no-op) — that's the
+    # correct record of intent locally. But eBay's Inventory API rejects an
+    # empty-string aspect value outright, with a garbled generic errorId
+    # 25002 whose message dumps the entire aspects dict rather than naming
+    # the actual offending field (confirmed live 2026-07-16 on
+    # tgw202605040949058 right after #1461 started correctly sending
+    # cleared fields). This PUT is a full replace of product.aspects, so
+    # omitting the key entirely achieves the intended "clear this aspect on
+    # eBay" outcome — the fix belongs here, at the push boundary, not in
+    # the internal record (which must keep recording "" as a real cleared
+    # value for its own history/diff purposes).
     aspects: Dict[str, List[str]] = {
-        k: [str(v)] for k, v in draft.get('item_specifics', {}).items()
+        k: [str(v)] for k, v in get_ebay_aspects(item).items() if v not in (None, '')
     }
 
     # Prefer the pre-resolved condition_enum written by ebay_draft (already
@@ -497,6 +621,25 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
     if draft.get('return_policy_id'):
         policies = dict(policies)
         policies['returnPolicyId'] = str(draft['return_policy_id'])
+
+    # PP-OFFER-001 follow-up (todo #1256): offer.listingPolicies.bestOfferTerms
+    # is a per-item Inventory API field, not an account default — only send it
+    # when the operator has made an explicit choice (draft_listing.best_offer_enabled
+    # is not None); leaving it unset means "don't touch, let eBay use whatever
+    # the category default is" rather than silently forcing it off.
+    if draft.get('best_offer_enabled') is not None:
+        policies = dict(policies)
+        best_offer_terms: Dict[str, Any] = {
+            'bestOfferEnabled': bool(draft['best_offer_enabled']),
+        }
+        auto_accept = draft.get('best_offer_auto_accept_price')
+        if auto_accept not in (None, ''):
+            best_offer_terms['autoAcceptPrice'] = {'currency': 'USD', 'value': f'{float(auto_accept):.2f}'}
+        auto_decline = draft.get('best_offer_auto_decline_price')
+        if auto_decline not in (None, ''):
+            best_offer_terms['autoDeclinePrice'] = {'currency': 'USD', 'value': f'{float(auto_decline):.2f}'}
+        policies['bestOfferTerms'] = best_offer_terms
+
     location_key = _get_merchant_location(cfg)
     qty          = draft.get('quantity', 1)
 
@@ -739,9 +882,16 @@ def fetch_all_offers(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                 if eids and eids.issubset(_NO_OFFERS_IDS):
                     log.debug('fetch_all_offers: 400/%s — no offers (graceful empty)', eids)
                     break
-                for e in errors:
-                    log.warning('fetch_all_offers: eBay error %s: %s',
-                                e.get('errorId'), e.get('message', ''))
+                if errors:
+                    for e in errors:
+                        log.warning('fetch_all_offers: eBay error %s: %s',
+                                    e.get('errorId'), e.get('message', ''))
+                else:
+                    # Parsed OK but the 'errors' list itself was empty — still worth
+                    # a log line before re-raising so this doesn't silently look like
+                    # a no-op 400 in triage (todo #1397/PP-DEADLETTER-001).
+                    log.warning('fetch_all_offers: 400 with empty errors list — %s',
+                                exc.response.text[:200] if exc.response else '')
                 raise
             raise
         batch = data.get('offers', [])

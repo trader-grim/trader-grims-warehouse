@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict
 
+import psycopg2.errors
 import requests
 
 import tgw.logging as tgw_logging
@@ -118,12 +119,17 @@ class TokenRefreshWorker(QueueWorker):
         next_run = max(next_run, time.time() + 300)
         wait_min = int((next_run - time.time()) // 60)
 
-        jid = state_machine.enqueue_job(
-            queue_name=QUEUE_NAME,
-            payload={'reason': 'scheduled'},
-            not_before=next_run,
-            max_attempts=3,
-        )
+        try:
+            jid = state_machine.enqueue_job(
+                queue_name=QUEUE_NAME,
+                payload={'reason': 'scheduled'},
+                not_before=next_run,
+                max_attempts=3,
+                dedupe_key=f'{QUEUE_NAME}:pending',
+                debounce=True,
+            )
+        except psycopg2.errors.UniqueViolation:
+            jid = None
         log.info('next token check in %dm (job %s)', wait_min, jid)
         tgw_logging.log_event('ebay_token_rescheduled',
                               next_run_in_minutes=wait_min,

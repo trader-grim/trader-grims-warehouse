@@ -13,7 +13,7 @@ Sold sync (PP-SOLD-001):
   Builds a listing_id → item_path index from ItemData, then for each order
   transaction marks the matched item status=sold and writes ebay_sale block.
   Tracks last sync timestamp in SOLD_STATE_FILE; initial run looks back
-  SOLD_INITIAL_LOOKBACK_DAYS days in 90-day windows (GetOrders limit).
+  pull._MAX_ORDER_LOOKBACK_DAYS days (GetOrders' hard rolling-90-day limit).
 
 Self-scheduling: runs daily. Queue name: ebay_legacy_sync
 """
@@ -59,6 +59,8 @@ class EbayLegacySyncWorker(QueueWorker):
                     queue_name=QUEUE_NAME,
                     payload={'reason': 'startup'},
                     max_attempts=3,
+                    dedupe_key=f'{QUEUE_NAME}:pending',
+                    debounce=True,
                 )
                 log.info('ebay_legacy_sync: enqueued startup sync job')
         except Exception as exc:
@@ -117,13 +119,7 @@ class EbayLegacySyncWorker(QueueWorker):
 
         if active_stats.get('updated', 0) or sold_stats.get('sold_marked', 0):
             try:
-                state_machine.enqueue_job(
-                    queue_name='catalog_rebuild',
-                    payload={'reason': 'ebay_legacy_sync'},
-                    dedupe_key='catalog_rebuild:pending',
-                    not_before=time.time() + 30,
-                    max_attempts=3,
-                )
+                state_machine.enqueue_catalog_rebuild('ebay_legacy_sync')
             except psycopg2.errors.UniqueViolation:
                 pass
 
@@ -135,12 +131,17 @@ class EbayLegacySyncWorker(QueueWorker):
 
     def _reschedule(self) -> None:
         next_run = time.time() + SYNC_INTERVAL_S
-        jid = state_machine.enqueue_job(
-            queue_name=QUEUE_NAME,
-            payload={'reason': 'scheduled'},
-            not_before=next_run,
-            max_attempts=3,
-        )
+        try:
+            jid = state_machine.enqueue_job(
+                queue_name=QUEUE_NAME,
+                payload={'reason': 'scheduled'},
+                not_before=next_run,
+                max_attempts=3,
+                dedupe_key=f'{QUEUE_NAME}:pending',
+                debounce=True,
+            )
+        except psycopg2.errors.UniqueViolation:
+            jid = None
         log.info('ebay_legacy_sync: next run in %dh (job %s)',
                  SYNC_INTERVAL_S // 3600, jid)
         tgw_logging.log_event('ebay_legacy_sync_rescheduled',

@@ -1,0 +1,13 @@
+[0;1;32m●[0m wayland-clip-bridge.service - Mirror Wayland clipboard → X11 for Input Leap
+     Loaded: loaded (]8;;file://a1131/etc/systemd/user/wayland-clip-bridge.service\/etc/systemd/user/wayland-clip-bridge.service]8;;\; [0;1;32menabled[0m; preset: ignored)
+     Active: [0;1;32mactive (running)[0m since Sat 2026-06-27 20:09:13 PDT; 9min ago
+ Invocation: 611c1b5fcdc84927825c8cb4b999ffc1
+   Main PID: 2094 (wl-paste)
+      Tasks: 2[0;38;5;245m (limit: 23874)[0m
+     Memory: 1.5M (peak: 3.3M)
+        CPU: 7min 6.819s
+     CGroup: /user.slice/user-1000.slice/user@1000.service/app.slice/wayland-clip-bridge.service
+             ├─[0;38;5;245m  2094 /nix/store/b4w48lb3p8qi6r3gm22ymxd6v4ffqz8d-wl-clipboard-2.2.1/bin/wl-paste --watch /nix/store/284qczxb82jzpk6a8d1wzq6630hlk7g7-xclip-0.13/bin/xclip -selection clipboard -i[0m
+             └─[0;38;5;245m320287 /nix/store/284qczxb82jzpk6a8d1wzq6630hlk7g7-xclip-0.13/bin/xclip -selection clipboard -i[0m
+
+Jun 27 20:09:13 a1131 systemd[1757]: Started Mirror Wayland clipboard → X11 for Input Leap.

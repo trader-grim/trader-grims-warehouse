@@ -5,7 +5,7 @@ Storage: PostgreSQL table ``todo_items`` in ``state_machine`` DB.
 CLI entry point: ``tgw todo [agent] [--add TEXT] [--done ID] [--seed]``
                  ``tgw todo brief <id>`` — self-contained per-agent task spec
 
-Agents: claude, admin, gemini, db  (open-ended — any string is valid)
+Agents: claude, admin, gemini, db, tigwa  (open-ended — any string is valid)
 Priority: integer, lower = higher priority (50 = default, 10 = urgent, 90 = someday)
 
 PP-PLANDB-001 Phase 1 columns (migration, applied 2026-06-12)::
@@ -57,6 +57,27 @@ def _ensure_reasoning_column() -> None:
         log.warning('_ensure_reasoning_column: migration skipped — %s', exc)
 
 
+def _ensure_status_note_column() -> None:
+    """Idempotent migration: add status_note column to todo_items if absent.
+
+    Separate from ``body`` so a dispatch step (e.g. tgw-coder marking
+    in-progress) can record a status without destroying the original
+    finding text — see todo #1384.
+    """
+    sql = """
+    DO $$ BEGIN
+        ALTER TABLE todo_items ADD COLUMN status_note TEXT;
+    EXCEPTION WHEN duplicate_column THEN NULL;
+    END $$;
+    """
+    try:
+        with _conn() as con:
+            with con.cursor() as cur:
+                cur.execute(sql)
+    except Exception as exc:
+        log.warning('_ensure_status_note_column: migration skipped — %s', exc)
+
+
 def _push_clipboard(text: str) -> bool:
     """Push text to the system clipboard via pyperclip."""
     try:
@@ -81,6 +102,7 @@ def _conn() -> Generator:
 
 
 _ensure_reasoning_column()
+_ensure_status_note_column()
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +217,7 @@ def todo_list(agent: Optional[str] = None, show_all: bool = False) -> List[Dict[
             where = ('WHERE ' + ' AND '.join(parts)) if parts else ''
             cur.execute(
                 f'SELECT id, agent, priority, body, source, added_at, done_at, '
-                f'pp_ref, depends_on, plan_anchor, reasoning '
+                f'pp_ref, depends_on, plan_anchor, reasoning, status_note '
                 f'FROM todo_items {where} ORDER BY agent, priority, id',
                 params,
             )
@@ -208,7 +230,7 @@ def todo_get(item_id: int) -> Optional[Dict[str, Any]]:
         with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 'SELECT id, agent, priority, body, source, added_at, done_at, '
-                'pp_ref, depends_on, plan_anchor, reasoning FROM todo_items WHERE id = %s',
+                'pp_ref, depends_on, plan_anchor, reasoning, status_note FROM todo_items WHERE id = %s',
                 (item_id,),
             )
             row = cur.fetchone()
@@ -240,6 +262,24 @@ def todo_update(item_id: int, body: str) -> Dict[str, Any]:
         return {'ok': False, 'error': f'item {item_id} not found or already done'}
     _enqueue_plan_render('todo_update')
     return {'ok': True, 'id': row[0], 'agent': row[1], 'body': body}
+
+
+def todo_set_status_note(item_id: int, note: str) -> Dict[str, Any]:
+    """Record a progress/dispatch note without touching ``body`` (todo #1384:
+    the tgw-coder dispatch step was overwriting the original finding text
+    with a generic 'in progress: tgw-coder' placeholder via todo_update)."""
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                "UPDATE todo_items SET status_note = %s WHERE id = %s AND done_at IS NULL "
+                "RETURNING id, agent, body",
+                (note, item_id),
+            )
+            row = cur.fetchone()
+    if row is None:
+        return {'ok': False, 'error': f'item {item_id} not found or already done'}
+    _enqueue_plan_render('todo_set_status_note')
+    return {'ok': True, 'id': row[0], 'agent': row[1], 'body': row[2], 'status_note': note}
 
 
 def todo_delegate(item_id: int, new_agent: str) -> Dict[str, Any]:
@@ -405,6 +445,8 @@ def todo_brief(item_id: int, plan_path: Path) -> Dict[str, Any]:
     reasoning = item.get('reasoning', 'normal')
     if reasoning and reasoning != 'normal':
         parts += [f'**Reasoning:** {reasoning}', '']
+    if item.get('status_note'):
+        parts += [f'**Status:** {item["status_note"]}', '']
     if item.get('pp_ref'):
         parts += [f'**Plan item:** {item["pp_ref"]}'
                   + (f' — see master-plan section "{item["plan_anchor"]}"' if item.get('plan_anchor') else ''),
@@ -667,6 +709,18 @@ def cmd_todo(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
             print(f"Error: {result['error']}")
         return result
 
+    if getattr(args, 'note', None) is not None:
+        item_id, note = args.note[0], ' '.join(args.note[1:])
+        if not note:
+            print('Error: --note requires ID and text')
+            return {'ok': False, 'error': 'missing text'}
+        result = todo_set_status_note(int(item_id), note)
+        if result['ok']:
+            print(f"Noted #{result['id']} [{result['agent']}]: {note[:60]}")
+        else:
+            print(f"Error: {result['error']}")
+        return result
+
     if args.delegate is not None:
         item_id, new_agent = args.delegate
         result = todo_delegate(int(item_id), new_agent)
@@ -697,24 +751,47 @@ def cmd_todo(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
     all_deps = sorted({d for item in items for d in (item.get('depends_on') or [])})
     still_open = open_ids(all_deps)
 
-    current_agent = None
-    for item in items:
-        ag = item['agent']
-        if ag != current_agent:
-            print(f'\n── {ag} ──')
-            current_agent = ag
-        done_mark = '✓' if item['done_at'] else ' '
-        badges = ''
-        if item.get('pp_ref'):
-            badges += f' [{item["pp_ref"]}]'
-        blockers = [d for d in (item.get('depends_on') or []) if d in still_open]
-        if blockers:
-            badges += ' ⛔' + ','.join(f'#{d}' for d in blockers)
-        r = item.get('reasoning', 'normal')
-        if r and r != 'normal':
-            badges += f' [{r}]'
-        body_preview = item['body'][:80] + ('…' if len(item['body']) > 80 else '')
-        print(f'  [{done_mark}] #{item["id"]:3d} p{item["priority"]:2d} {badges} {body_preview}')
+    if getattr(args, 'by_pp', False):
+        by_pp: Dict[str, List[Dict[str, Any]]] = {}
+        for item in items:
+            by_pp.setdefault(item.get('pp_ref') or '(no pp_ref)', []).append(item)
+        # tagged PP groups first (the useful part), untagged noise bucket last
+        group_order = sorted(k for k in by_pp if k != '(no pp_ref)')
+        if '(no pp_ref)' in by_pp:
+            group_order.append('(no pp_ref)')
+        grouped_items = [(pp, sorted(by_pp[pp], key=lambda i: (i['priority'], i['id']))) for pp in group_order]
+    else:
+        grouped_items = []
+        current_agent = None
+        bucket: List[Dict[str, Any]] = []
+        for item in items:
+            ag = item['agent']
+            if ag != current_agent:
+                if bucket:
+                    grouped_items.append((current_agent, bucket))
+                bucket = []
+                current_agent = ag
+            bucket.append(item)
+        if bucket:
+            grouped_items.append((current_agent, bucket))
+
+    for label, group in grouped_items:
+        print(f'\n── {label} ──')
+        for item in group:
+            done_mark = '✓' if item['done_at'] else ' '
+            badges = ''
+            if item.get('pp_ref') and not getattr(args, 'by_pp', False):
+                badges += f' [{item["pp_ref"]}]'
+            blockers = [d for d in (item.get('depends_on') or []) if d in still_open]
+            if blockers:
+                badges += ' ⛔' + ','.join(f'#{d}' for d in blockers)
+            r = item.get('reasoning', 'normal')
+            if r and r != 'normal':
+                badges += f' [{r}]'
+            if item.get('status_note'):
+                badges += f' ({item["status_note"][:30]})'
+            body_preview = item['body'][:80] + ('…' if len(item['body']) > 80 else '')
+            print(f'  [{done_mark}] #{item["id"]:3d} p{item["priority"]:2d} {badges} {body_preview}')
 
     print(f'\n{len(items)} item(s).')
     return {'ok': True, 'count': len(items)}

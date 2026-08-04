@@ -3,10 +3,11 @@ Tests for tgw.apis.nats_client and the mutation audit wiring in items.py.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any, Dict
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -130,6 +131,84 @@ class TestNatsClientPublish:
 
 
 # ---------------------------------------------------------------------------
+# _ensure_streams: read-only, single-authority (todo #1638)
+# ---------------------------------------------------------------------------
+
+class TestEnsureStreamsReadOnly:
+    """_ensure_streams() must never create/edit stream config — that's
+    nats.nix's declarative job now. It only checks and logs."""
+
+    def test_ensure_streams_never_calls_add_stream_when_present(self):
+        from tgw.apis import nats_client
+
+        js = MagicMock()
+        js.stream_info = AsyncMock(return_value=MagicMock())
+        js.add_stream = AsyncMock()
+
+        asyncio.run(nats_client._ensure_streams(js))
+
+        assert js.stream_info.await_count == 2
+        js.add_stream.assert_not_awaited()
+
+    def test_ensure_streams_never_calls_add_stream_when_missing(self, caplog):
+        """Even if stream_info fails (stream missing), no add_stream call —
+        just a log.error, per #1638 single-authority spec."""
+        from tgw.apis import nats_client
+
+        js = MagicMock()
+        js.stream_info = AsyncMock(side_effect=Exception("stream not found"))
+        js.add_stream = AsyncMock()
+
+        with caplog.at_level("ERROR"):
+            asyncio.run(nats_client._ensure_streams(js))
+
+        js.add_stream.assert_not_awaited()
+        assert any("not found" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# check_nats / query_mutations: work from inside a running event loop (#1639)
+# ---------------------------------------------------------------------------
+
+class TestRunIsolated:
+    """check_nats()/query_mutations() must not raise
+    'asyncio.run() cannot be called from a running event loop' when called
+    from a caller thread that already has a loop running (the MCP path)."""
+
+    def test_check_nats_from_running_loop_does_not_raise(self):
+        from tgw.apis import nats_client
+
+        async def _main():
+            # Simulates FastMCP's already-running event loop calling into
+            # check_nats() synchronously.
+            return nats_client.check_nats(url="nats://127.0.0.1:1")
+
+        result = asyncio.run(_main())
+        assert isinstance(result, dict)
+        assert "ok" in result
+
+    def test_query_mutations_from_running_loop_does_not_raise(self):
+        from tgw.apis import nats_client
+
+        async def _main():
+            return nats_client.query_mutations(
+                "tgw123", url="nats://127.0.0.1:1"
+            )
+
+        result = asyncio.run(_main())
+        assert isinstance(result, dict)
+        assert "ok" in result
+
+    def test_run_isolated_returns_coro_result(self):
+        from tgw.apis import nats_client
+
+        async def _coro():
+            return {"value": 42}
+
+        assert nats_client._run_isolated(_coro) == {"value": 42}
+
+
+# ---------------------------------------------------------------------------
 # items._write_field mutation publish wiring
 # ---------------------------------------------------------------------------
 
@@ -190,3 +269,58 @@ class TestWriteFieldPublish:
             _write_field(cfg, sku, "qty", 2)
 
         assert captured_source == ["worker:test_worker"]
+
+    def test_set_fields_publishes_each_committed_mutation(self, tmp_path):
+        """The transactional multi-field path preserves the audit contract."""
+        sku = "tgw20260101000000003"
+        _make_item_dir(tmp_path, sku, {"sku": sku, "title": "old", "qty": 1})
+        cfg = _make_cfg(tmp_path, sku)
+
+        published = []
+
+        def _capture(sku, field, old_value, new_value, source, session_id=None):
+            published.append((field, old_value, new_value, source))
+
+        with patch("tgw.apis.nats_client.publish_mutation", _capture):
+            from tgw.items import set_fields, set_mutation_context
+            set_mutation_context("worker:bulk")
+            result = set_fields(
+                cfg, sku, {"title": "new", "qty": 2}, only_if_absent=False
+            )
+
+        assert result["ok"] is True
+        assert published == [
+            ("title", "old", "new", "worker:bulk"),
+            ("qty", 1, 2, "worker:bulk"),
+        ]
+
+    def test_set_fields_audit_failure_does_not_suppress_later_fields(self, tmp_path):
+        """A failed audit attempt must not suppress later committed fields."""
+        sku = "tgw20260101000000004"
+        _make_item_dir(tmp_path, sku, {"sku": sku})
+        cfg = _make_cfg(tmp_path, sku)
+        attempts = []
+
+        def _publish(sku, field, old_value, new_value, source, session_id=None):
+            attempts.append(field)
+            if field == "b":
+                raise RuntimeError("audit failure for b")
+
+        with patch("tgw.apis.nats_client.publish_mutation", _publish):
+            from tgw.items import set_fields
+            result = set_fields(
+                cfg, sku, {"a": 1, "b": 2, "c": 3}, only_if_absent=False
+            )
+
+        assert result == {
+            "ok": True,
+            "sku": sku,
+            "set": {"a": 1, "b": 2, "c": 3},
+        }
+        data = json.loads((tmp_path / sku / f"{sku}.json").read_text())
+        assert {field: data[field] for field in ("a", "b", "c")} == {
+            "a": 1,
+            "b": 2,
+            "c": 3,
+        }
+        assert attempts == ["a", "b", "c"]

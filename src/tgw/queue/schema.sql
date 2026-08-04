@@ -59,6 +59,29 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_queue_jobs_dedupe_key_active
     WHERE dedupe_key IS NOT NULL
       AND state NOT IN ('succeeded','failed','dead_letter','cancelled');
 
+-- todo #1618 / PP-STATEMACHINE-001: independent DB-level backstop —
+-- "at most one queued/retry_wait row per dedupe_key". NOT used as an
+-- ON CONFLICT arbiter: enqueue_job()'s debounce=True path does NOT use
+-- INSERT ... ON CONFLICT at all (see state_machine.py's enqueue_job()
+-- docstring, "Fix actually used" — a real Postgres 17 arbiter-inference
+-- gotcha, verified live, made that approach unworkable: ON CONFLICT
+-- accepts any unique index whose predicate is *implied by* the specified
+-- WHERE clause as an eligible arbiter, so the broad index above stayed
+-- eligible too and kept silently corrupting a self-rescheduling worker's
+-- own in-flight leased/running row regardless of which index the ON
+-- CONFLICT clause named). The debounce path instead does an explicit
+-- pg_advisory_xact_lock-guarded read-then-write in Python: look up any
+-- existing queued/retry_wait row and UPDATE it if found, else INSERT a
+-- fresh row (with dedupe_key=NULL if a leased/running row already holds
+-- the real key, so it can't collide with the broad index above). This
+-- index exists purely as a real DB-level safety net for that same
+-- invariant, independent of the application logic. Do NOT widen this to
+-- match the broad index above. See uq_queue_jobs_dedupe_key_active.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_queue_jobs_dedupe_key_pending
+    ON queue_jobs(dedupe_key)
+    WHERE dedupe_key IS NOT NULL
+      AND state IN ('queued', 'retry_wait');
+
 CREATE INDEX IF NOT EXISTS idx_queue_jobs_runnable
     ON queue_jobs(queue_name, priority, run_at, created_at)
     WHERE state = 'queued';
@@ -168,6 +191,34 @@ SELECT h.history_id, h.job_id,
   FROM queue_job_history h
   JOIN queue_jobs j USING (job_id);
 
+-- PP-QUEUESTATS-001: real date-scoped per-queue outcome stats, sourced from
+-- queue_job_history (an append-only, never-reset ledger of every state
+-- transition — unlike queue_jobs.finished_at, which requeue_with_backoff()
+-- clears back to NULL on retry, so it cannot answer "how many succeeded
+-- *today*" once a job has been retried). Day boundary is midnight
+-- America/Los_Angeles, matching quota.py's existing eBay-reset convention.
+-- Grouped by hour (not collapsed to a single daily number) so this can serve
+-- as the baseline data for future per-queue surge/anomaly detection
+-- (Dave, 2026-07-14) without a schema change when that's built — see
+-- TGW-Master-Plan.md PP-QUEUESTATS-001. Only terminal-ish outcome states
+-- (succeeded/failed/dead_letter) are counted; queued/leased/running/
+-- retry_wait are current-state counts (queue_status()), not historical
+-- events, and stay out of this view on purpose.
+CREATE INDEX IF NOT EXISTS idx_queue_job_history_created_at
+    ON queue_job_history (created_at);
+
+CREATE OR REPLACE VIEW queue_daily_stats AS
+SELECT
+    j.queue_name,
+    (h.created_at AT TIME ZONE 'America/Los_Angeles')::date            AS stat_date,
+    date_trunc('hour', h.created_at AT TIME ZONE 'America/Los_Angeles') AS stat_hour,
+    h.new_state                                                         AS state,
+    COUNT(*)::bigint                                                    AS job_count
+  FROM queue_job_history h
+  JOIN queue_jobs j ON j.job_id = h.job_id
+ WHERE h.new_state IN ('succeeded', 'failed', 'dead_letter')
+ GROUP BY j.queue_name, stat_date, stat_hour, h.new_state;
+
 -- Claim next runnable jobs using FOR UPDATE SKIP LOCKED.
 CREATE OR REPLACE FUNCTION claim_queue_jobs(
     p_worker_id TEXT,
@@ -276,6 +327,11 @@ CREATE INDEX IF NOT EXISTS idx_todo_items_open
     WHERE done_at IS NULL;
 
 -- AI usage audit log (PP-MULTIMODEL-001).
+-- NOTE (PP-AGENTTRACE-001, 2026-07-20): this copy has already drifted from
+-- the DDL actually applied at runtime (state_machine.py's _AI_USAGE_DDL /
+-- _ensure_ai_usage_table()) — column names/types differ. Nothing keeps the
+-- two in sync automatically. Named here rather than silently repeated for
+-- agent_runs below.
 CREATE TABLE IF NOT EXISTS ai_usage (
     id          SERIAL PRIMARY KEY,
     ts          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -284,4 +340,25 @@ CREATE TABLE IF NOT EXISTS ai_usage (
     prompt_tokens  INTEGER,
     output_tokens  INTEGER,
     cost_usd    NUMERIC(10,6)
+);
+
+-- Agent run trace ledger (PP-AGENTTRACE-001 Phase 1).
+-- BOOTSTRAP DOCUMENTATION ONLY — the DDL actually applied at runtime lives
+-- in state_machine.py (_AGENT_RUNS_DDL / _ensure_agent_runs_table(), the
+-- self-apply pattern). This copy is not kept in sync automatically; if you
+-- change one, change the other by hand (same known gap as ai_usage above).
+CREATE TABLE IF NOT EXISTS agent_runs (
+    run_id          TEXT PRIMARY KEY,
+    parent_run_id   TEXT REFERENCES agent_runs(run_id),
+    agent_type      TEXT NOT NULL,
+    todo_id         INTEGER,
+    pp_ref          TEXT,
+    host            TEXT,
+    git_branch      TEXT,
+    started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    ended_at        TIMESTAMPTZ,
+    status          TEXT NOT NULL DEFAULT 'running'
+                    CHECK (status IN ('running', 'completed', 'failed', 'killed', 'escalated')),
+    summary         TEXT,
+    transcript_path TEXT
 );

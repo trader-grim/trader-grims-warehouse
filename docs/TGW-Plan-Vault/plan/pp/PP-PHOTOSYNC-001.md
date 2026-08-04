@@ -303,6 +303,21 @@ untouched, pending that decision (an attempt to cancel them was correctly
 blocked by the session's auto-mode guard as a shared-queue mutation needing
 explicit authorization — did not attempt to work around it).
 
+**✅ DONE 2026-07-18 (todo #1558).** Dave: install, don't retire — "the queue
+stops being an orphan trap." `tgw-worker@ebay_repush.service` added via
+`~/tgw-flake` (`nix/tgw.nix` `workerScripts` entry + `nix/hosts/tgw-prod.nix`
+`services.tgw.workers` entry), commit `b613299`, `nixos-rebuild switch` run
+live on tgw-prod. Worker confirmed running and consuming the queue: 13 jobs
+had accumulated (not just the original 2 — the queue kept silently growing
+the whole time it was orphaned) — 1 succeeded, 12 dead-lettered with a
+consistent, legitimate precondition reason (`no ebay_submitted.inventory_item
+— run ebay_stage first`), not a worker defect. `tgw health` clean (same 2
+pre-existing unrelated failures). The 12 dead-lettered jobs are a new,
+smaller finding for a future session: those SKUs need `ebay_stage` re-run
+before repush can act on them — not re-triaged here, just surfaced per
+invariant C11 (dead-letter's error_code/error_detail already persists the
+finding durably, queryable via `tgw dead-letter`).
+
 ### P7 = todo #1123 — truth-audit rules (the liar detector) ✅ DONE 2026-07-03
 4 new rules live in `_verify_item`/`cmd_catalog_verify` (`photos_short_on_ebay`,
 `photo_verify_stale`, `submitted_live_drift`, `success_count_contradiction` — the
@@ -470,3 +485,18 @@ is LIVE ON PROD and **committed+pushed: `ae9b1e6` on `catio-nix-0.0.1-alpha`**
 (s42+s43 combined, 108 files). Packet diffs layer on a clean tree. PR to main is
 deliberately DEFERRED until P1 (#1115) lands and verifies — then `/tgw-pr-review`
 and merge from a coherent, incident-closed state.
+
+---
+
+## Reconciled with a diverged duplicate copy, 2026-07-22
+
+A second, older copy existed at `docs/TGW-Plan-Vault/pp/PP-PHOTOSYNC-001.md`
+(2.7KB, pre-migration location). Checked all of its distinct content
+(P6 orphan-queue finding, P8 canary probe completion, P9 Feed API audit
+result, P2 digest-liability shipment, P9-follow-up #1127) against this
+canonical copy — **everything is already present here**, in more detail.
+Unlike PP-DATAINTEGRITY-001's reconciliation (which found genuinely
+unique, still-unfixed content), this old copy was a superseded snapshot,
+not a fork with lost information. Old copy renamed to
+`pp/ARCHIVED-2026-07-22-PP-PHOTOSYNC-001.md` (preserved, not deleted).
+This file remains the sole canonical copy.

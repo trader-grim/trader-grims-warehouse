@@ -1,5 +1,19 @@
 # PP-EBAY-MOTORS-001 — eBay Motors is not accounted for anywhere (URGENT)
 
+**Framing locked 2026-07-18 (Dave):** "Motors needs to be available for every
+eBay account. It is a barnacle marketplace. We just have to accommodate it."
+Motors isn't an opt-in feature scoped to one account — any listing on any eBay
+seller account can end up marketplace-tagged EBAY_MOTORS regardless of intent
+(that's how it surfaced here in the first place, on the primary account).
+The fix (`marketplace_id` field, `site_id` threaded through `trading_call()`)
+is therefore **account-agnostic infrastructure**, not primary-account-specific
+work — it must hold for the primary account today and for
+[[PP-EBAY-ACCOUNT2-001]]'s future second account the same way, with no
+per-account special-casing. This resolves PP-EBAY-ACCOUNT2-001's open
+"does multi-marketplace mean Motors-on-existing-account or something
+second-account-specific" question: Motors accommodation is shared plumbing
+both accounts ride on, not a second-account feature.
+
 **Opened:** 2026-07-04 (session 43, surfaced live during PP-PHOTOSYNC-001 P10).
 **Status: URGENT PLANNING REQUEST — needs scoping before any fix work.** Dave: "we
 do not have ebay motors accounted for anywhere... please add that as an urgent

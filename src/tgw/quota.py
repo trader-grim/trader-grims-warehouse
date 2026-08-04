@@ -72,6 +72,158 @@ _DEFAULT_BUDGETS: Dict[str, Optional[int]] = {
 
 _DEFAULT_HALT_FRACTION = 0.70
 
+# ---------------------------------------------------------------------------
+# PP-QUOTA-001 / todo #1337 — real balance / spend-estimate layer
+#
+# Research (live-verified 2026-07-17, see LLM-Providers-Quotas.md): of the
+# three direct-LLM providers, only DeepSeek exposes a real live account
+# balance via API (`GET /user/balance`, confirmed live against the real
+# key: returned an actual USD balance). Google's Gemini API key has no
+# balance/spend endpoint at all — its only billing surface is the separate
+# GCP Cloud Billing API, which needs project-level OAuth this key doesn't
+# have; this is a permanent gap, not a bug to fix here. Anthropic's
+# `/v1/organizations/usage_report/*` needs a separate Admin API key
+# (confirmed live: the regular ANTHROPIC_API_KEY gets `authentication_error`
+# on it) — not provisioned in secrets_root/tgw.env today; fixable later if
+# Dave provisions one, but out of reach right now.
+#
+# For the two providers with no reachable balance signal, this layer
+# hardens the existing call-count budget into an actual USD estimate using
+# each provider's own published per-token pricing (checked live against
+# each provider's own pricing page 2026-07-17) applied to the real token
+# counts already recorded per call in the `ai_usage` table — turning "300
+# calls used" into "~$X spent today", which is what actually matters for a
+# low-balance warning. This does NOT know the account's real balance for
+# Google/Anthropic (impossible without an endpoint) — it estimates SPEND,
+# which is the best available proxy improvement.
+# ---------------------------------------------------------------------------
+
+# USD per 1,000,000 tokens, keyed by the bare model id as configured in
+# tgw-models.json. Update whenever a task's model changes there. DeepSeek's
+# entry is kept for documentation/cross-check only — check_deepseek_balance()
+# below is the authoritative live signal for that provider, not this table.
+_PRICING_USD_PER_1M: Dict[str, Dict[str, float]] = {
+    'gemini-2.5-flash-lite':     {'input': 0.10, 'output': 0.40},
+    'gemini-3.1-pro-preview':    {'input': 2.00, 'output': 12.00},
+    'deepseek-v4-flash':         {'input': 0.14, 'output': 0.28},
+    'claude-haiku-4-5-20251001': {'input': 1.00, 'output': 5.00},
+}
+
+# Warn when today's estimated spend for a pricing-only pool (no live
+# balance API) crosses this many dollars. Provisional default, same spirit
+# as quota.py's other PROVISIONAL SAFETY CAPS above — override per-pool via
+# `quota_cost_warn_usd` in tgw-api-config.json.
+_DEFAULT_COST_WARN_USD: Dict[str, float] = {
+    'llm_google': 3.00,
+    'llm_anthropic': 3.00,
+}
+
+# DeepSeek is a paid pay-as-you-go balance (confirmed live: $9.83 remaining
+# 2026-07-17) — warn well before it hits $0 and calls start failing.
+# Override via `quota_deepseek_low_balance_usd` in tgw-api-config.json.
+_DEFAULT_DEEPSEEK_LOW_BALANCE_USD = 2.00
+
+
+def estimate_cost_usd(model: str, prompt_tokens: Optional[int],
+                       completion_tokens: Optional[int]) -> Optional[float]:
+    """USD cost estimate for one call from real token counts, or None if
+    *model* has no pricing entry or token counts are missing (e.g. a
+    provider that doesn't return usage, or a failed call).
+
+    Fail-open by design, matching this module's other accounting calls
+    (never crash a job over a cost estimate) — but a missing pricing entry
+    for a model that DID return real token counts is a staleness signal
+    worth surfacing (invariant E15 sweep, 2026-07-20: a tgw-models.json
+    edit that introduces a new model id without a matching
+    `_PRICING_USD_PER_1M` entry would otherwise silently and permanently
+    zero out that model's cost tracking with no visible trace)."""
+    price = _PRICING_USD_PER_1M.get(model)
+    if price is None:
+        if prompt_tokens is not None and completion_tokens is not None:
+            log.warning(
+                "estimate_cost_usd: no pricing entry for model %r — cost "
+                "tracking for this model is silently untracked; add it to "
+                "_PRICING_USD_PER_1M in quota.py if it's now in active use",
+                model,
+            )
+        return None
+    if prompt_tokens is None or completion_tokens is None:
+        return None
+    return ((prompt_tokens / 1_000_000) * price['input']
+            + (completion_tokens / 1_000_000) * price['output'])
+
+
+def today_cost_usd_by_provider(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
+    """USD spend estimate for today, summed per provider, from real
+    `ai_usage` token counts x _PRICING_USD_PER_1M. Fail-open: returns {} on
+    any DB error (mirrors this module's other fail-open accounting calls).
+
+    Note on precision: `ai_usage.recorded_at` is queried on a rolling
+    24h/UTC-day basis (query_ai_usage's existing bucketing), while this
+    module's other day-boundary logic (_day_key) uses Pacific midnight —
+    this is an estimate for operator visibility, not exact provider
+    billing, and that mismatch is small enough not to matter for a warning
+    signal. Documented here so it's not mistaken for a bug later.
+    """
+    try:
+        from tgw.queue.state_machine import query_ai_usage
+        rows = query_ai_usage(since_days=1)
+    except Exception as exc:  # noqa: BLE001 — fail-open
+        log.warning('today_cost_usd_by_provider: ai_usage query failed: %s', exc)
+        return {}
+    out: Dict[str, float] = {}
+    for row in rows:
+        cost = estimate_cost_usd(row.get('model') or '', row.get('prompt_tokens'),
+                                  row.get('completion_tokens'))
+        if cost is None:
+            continue
+        provider = row.get('provider')
+        out[provider] = out.get(provider, 0.0) + cost
+    return out
+
+
+def check_deepseek_balance(cfg: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """Live remaining USD balance from DeepSeek's own `/user/balance`
+    endpoint (confirmed live 2026-07-17) — the only one of the three
+    direct-LLM providers that exposes a real account balance via API; see
+    LLM-Providers-Quotas.md. Returns None on any failure or missing key —
+    a nice-to-have signal, never a reason to block a call (mirrors
+    `health._openrouter_key_limit`'s fail-open contract)."""
+    try:
+        import requests
+
+        from tgw.apis.secrets import get_api_key
+        try:
+            key = get_api_key('deepseek')
+        except RuntimeError:
+            return None
+        if not key:
+            return None
+        resp = requests.get(
+            'https://api.deepseek.com/user/balance',
+            headers={'Authorization': f'Bearer {key}'}, timeout=5,
+        )
+        resp.raise_for_status()
+        d = resp.json()
+        infos = d.get('balance_infos') or []
+        usd = next((b for b in infos if b.get('currency') == 'USD'),
+                   infos[0] if infos else {})
+        total = float(usd.get('total_balance', 0) or 0)
+        raw = (cfg or {}).get('raw', cfg or {})
+        threshold = float(raw.get('quota_deepseek_low_balance_usd',
+                                   _DEFAULT_DEEPSEEK_LOW_BALANCE_USD))
+        return {
+            'total_balance_usd': total,
+            'currency': usd.get('currency', 'USD'),
+            'is_available': d.get('is_available'),
+            'low': total < threshold,
+            'threshold_usd': threshold,
+        }
+    except Exception as exc:  # noqa: BLE001 — fail-open, nice-to-have signal
+        log.warning('check_deepseek_balance failed (fail-open): %s', exc)
+        return None
+
+
 # After any 429 on a pool, background callers stand down for this long. The
 # spend counter only knows calls made since this layer existed — a 429 is
 # ground truth that the pool is exhausted regardless of what we counted.
@@ -280,3 +432,51 @@ def status(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
                 'last_429': p.get('last_429'),
             }
     return out
+
+
+def _cost_warn_usd(cfg: Optional[Dict[str, Any]]) -> Dict[str, float]:
+    raw = (cfg or {}).get('raw', cfg or {})
+    merged = dict(_DEFAULT_COST_WARN_USD)
+    merged.update(raw.get('quota_cost_warn_usd', {}) or {})
+    return merged
+
+
+def balance_status(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Proactive low-balance signal for the three direct-LLM providers
+    (todo #1337 / PP-QUOTA-001).
+
+    Returns::
+
+        {'deepseek': {...} | None,       # check_deepseek_balance() — real balance
+         'estimated_cost_usd': {'llm_google': 1.23, 'llm_anthropic': 0.01},
+         'cost_warn': {'llm_google': False, 'llm_anthropic': False},
+         'low_balance': bool}            # True if ANY provider is in warn state
+
+    'deepseek' is None if the live balance call failed/key missing (see
+    check_deepseek_balance — fail-open, not itself a warning). Google and
+    Anthropic have no balance API (see module docstring above) — their
+    entries are estimated spend-today from real ai_usage token counts x
+    published pricing, which is the best signal available without a
+    provider endpoint that doesn't exist.
+    """
+    ds = check_deepseek_balance(cfg)
+    cost_by_provider = today_cost_usd_by_provider(cfg)
+    warn_usd = _cost_warn_usd(cfg)
+
+    provider_to_pool = {'google_direct': 'llm_google', 'anthropic_direct': 'llm_anthropic'}
+    est_cost: Dict[str, float] = {}
+    cost_warn: Dict[str, bool] = {}
+    for provider, pool in provider_to_pool.items():
+        amount = round(cost_by_provider.get(provider, 0.0), 4)
+        est_cost[pool] = amount
+        threshold = warn_usd.get(pool)
+        cost_warn[pool] = bool(threshold is not None and amount >= threshold)
+
+    low_balance = bool((ds and ds.get('low')) or any(cost_warn.values()))
+
+    return {
+        'deepseek': ds,
+        'estimated_cost_usd': est_cost,
+        'cost_warn': cost_warn,
+        'low_balance': low_balance,
+    }

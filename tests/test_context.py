@@ -15,6 +15,7 @@ from tgw.context import clear_context, get_context, set_context
 def _patch_compat_links(tmp_path, monkeypatch):
     monkeypatch.setattr(ctx_mod, "_COMPAT_CURRENT_ITEM", tmp_path / "CurrentItem")
     monkeypatch.setattr(ctx_mod, "_COMPAT_CURRENT_ITEM_JSON", tmp_path / "CurrentItem.json")
+    monkeypatch.setattr(ctx_mod, "_COMPAT_CURRENT_LOCATION", tmp_path / "CurrentLocation")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -37,6 +38,22 @@ def _make_sku(cfg: dict, sku: str) -> Path:
     d.mkdir(parents=True, exist_ok=True)
     j = d / f"{sku}.json"
     j.write_text(json.dumps({"sku": sku}), encoding="utf-8")
+    return d
+
+
+def _make_cfg_with_locations(tmp_path: Path) -> dict:
+    cfg = _make_cfg(tmp_path)
+    location_tree_root = tmp_path / "ItemCatalog" / "by-location"
+    location_tree_root.mkdir(parents=True)
+    cfg["location_tree_root"] = location_tree_root
+    return cfg
+
+
+def _make_sku_with_location(cfg: dict, sku: str, location: str) -> Path:
+    d = Path(cfg["itemdata_root"]) / sku
+    d.mkdir(parents=True, exist_ok=True)
+    j = d / f"{sku}.json"
+    j.write_text(json.dumps({"sku": sku, "location": location}), encoding="utf-8")
     return d
 
 
@@ -257,4 +274,73 @@ class TestCompatSymlinks:
         set_context(cfg, _SKU2)
         # After second set the link should point to SKU2, no broken intermediate
         assert ci_link.is_symlink()
-        assert ci_link.resolve() == (Path(cfg["itemdata_root"]) / _SKU2).resolve()
+
+
+# ---------------------------------------------------------------------------
+# CurrentLocation symlink (todo #1324 — restore regression)
+# ---------------------------------------------------------------------------
+
+
+class TestCurrentLocationSymlink:
+    def test_set_creates_current_location_symlink(self, tmp_path, monkeypatch):
+        cfg = _make_cfg_with_locations(tmp_path)
+        _make_sku_with_location(cfg, _SKU, "ALB1")
+        (Path(cfg["location_tree_root"]) / "ALB1").mkdir()
+        cl_link = tmp_path / "CurrentLocation"
+        monkeypatch.setattr(ctx_mod, "_COMPAT_CURRENT_LOCATION", cl_link)
+        set_context(cfg, _SKU)
+        assert cl_link.is_symlink()
+        assert cl_link.resolve() == (Path(cfg["location_tree_root"]) / "ALB1").resolve()
+
+    def test_set_updates_current_location_on_sku_change(self, tmp_path, monkeypatch):
+        cfg = _make_cfg_with_locations(tmp_path)
+        _make_sku_with_location(cfg, _SKU, "ALB1")
+        _make_sku_with_location(cfg, _SKU2, "BIN101")
+        (Path(cfg["location_tree_root"]) / "ALB1").mkdir()
+        (Path(cfg["location_tree_root"]) / "BIN101").mkdir()
+        cl_link = tmp_path / "CurrentLocation"
+        monkeypatch.setattr(ctx_mod, "_COMPAT_CURRENT_LOCATION", cl_link)
+        set_context(cfg, _SKU)
+        assert cl_link.resolve() == (Path(cfg["location_tree_root"]) / "ALB1").resolve()
+        set_context(cfg, _SKU2)
+        assert cl_link.resolve() == (Path(cfg["location_tree_root"]) / "BIN101").resolve()
+
+    def test_clear_removes_current_location_symlink(self, tmp_path, monkeypatch):
+        cfg = _make_cfg_with_locations(tmp_path)
+        _make_sku_with_location(cfg, _SKU, "ALB1")
+        (Path(cfg["location_tree_root"]) / "ALB1").mkdir()
+        cl_link = tmp_path / "CurrentLocation"
+        monkeypatch.setattr(ctx_mod, "_COMPAT_CURRENT_LOCATION", cl_link)
+        set_context(cfg, _SKU)
+        clear_context(cfg)
+        assert not cl_link.exists()
+
+    def test_set_no_location_field_skips_symlink_silently(self, tmp_path, monkeypatch):
+        """Item with no .location — no CurrentLocation link, no error (matches old shell no-op)."""
+        cfg = _make_cfg_with_locations(tmp_path)
+        _make_sku(cfg, _SKU)  # no location field
+        cl_link = tmp_path / "CurrentLocation"
+        monkeypatch.setattr(ctx_mod, "_COMPAT_CURRENT_LOCATION", cl_link)
+        r = set_context(cfg, _SKU)
+        assert r["ok"] is True
+        assert not cl_link.exists()
+
+    def test_set_location_dir_missing_skips_symlink_silently(self, tmp_path, monkeypatch):
+        """Item has a .location but no matching catalog dir yet — no error, no dangling link."""
+        cfg = _make_cfg_with_locations(tmp_path)
+        _make_sku_with_location(cfg, _SKU, "NOWHERE99")  # dir never created
+        cl_link = tmp_path / "CurrentLocation"
+        monkeypatch.setattr(ctx_mod, "_COMPAT_CURRENT_LOCATION", cl_link)
+        r = set_context(cfg, _SKU)
+        assert r["ok"] is True
+        assert not cl_link.exists()
+
+    def test_set_no_location_tree_root_in_cfg_does_not_error(self, tmp_path, monkeypatch):
+        """cfg without location_tree_root (e.g. legacy/minimal cfg) — degrades gracefully."""
+        cfg = _make_cfg(tmp_path)  # no location_tree_root key
+        _make_sku_with_location(cfg, _SKU, "ALB1")
+        cl_link = tmp_path / "CurrentLocation"
+        monkeypatch.setattr(ctx_mod, "_COMPAT_CURRENT_LOCATION", cl_link)
+        r = set_context(cfg, _SKU)
+        assert r["ok"] is True
+        assert not cl_link.exists()

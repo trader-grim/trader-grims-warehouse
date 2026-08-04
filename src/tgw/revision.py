@@ -29,6 +29,7 @@ from typing import Any, Dict, List
 
 from tgw.config import sku_json
 from tgw.items import atomic_write_json
+from tgw.resolver import find_current_sku, load_item_doc
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -189,12 +190,15 @@ def cmd_revise(
         return {"ok": False, "error": str(exc)}
 
     json_path = sku_json(cfg, sku)
-
     if not json_path.exists():
-        return {"ok": False, "error": f"item JSON not found: {json_path}"}
+        current = find_current_sku(cfg, sku)
+        if current:
+            json_path = sku_json(cfg, current)
+        else:
+            return {"ok": False, "error": f"item JSON not found: {json_path}"}
 
     try:
-        item = json.loads(json_path.read_text(encoding="utf-8"))
+        item = load_item_doc(json_path)
     except Exception as exc:
         return {"ok": False, "error": f"failed to read item JSON: {exc}"}
 
@@ -227,7 +231,8 @@ def cmd_revise(
 
     # Only revision_draft is written — all other item fields are untouched
     item["revision_draft"] = revision_draft
-    atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
+    atomic_write_json(json_path, item, pretty=cfg.get("pretty", True),
+                       archive_root=cfg.get("archive_root"))
 
     return {
         "ok": True,
@@ -280,8 +285,20 @@ def _place_delta_in_bodies(
             inv_body["condition"] = str(val)
             inv_changed = True
         elif field in ("item_specifics", "aspects") and isinstance(val, dict):
+            # Invariant C14 / todo #1462: a cleared aspect is recorded
+            # internally as an explicit "" — a real value for local
+            # diff/history purposes. But eBay's Inventory API rejects an
+            # empty-string aspect value outright (garbled errorId 25002
+            # dumping the whole aspects dict rather than naming the
+            # offending field). This PUT is a full replace of
+            # product.aspects, so omitting the key entirely achieves the
+            # intended "clear this aspect on eBay" outcome. Mirrors
+            # sync.py's _build_offer_bodies — the fix belongs at this push
+            # boundary, not in the internal record. See #1523/todo #1468.
             product["aspects"] = {
-                k: (v if isinstance(v, list) else [str(v)]) for k, v in val.items()
+                k: (v if isinstance(v, list) else [str(v)])
+                for k, v in val.items()
+                if v not in (None, "")
             }
             inv_changed = True
         elif field == "imageUrls" and isinstance(val, list):
@@ -442,10 +459,14 @@ def cmd_revise_apply(
     """
     json_path = sku_json(cfg, sku)
     if not json_path.exists():
-        return {"ok": False, "error": f"item JSON not found: {json_path}"}
+        current = find_current_sku(cfg, sku)
+        if current:
+            json_path = sku_json(cfg, current)
+        else:
+            return {"ok": False, "error": f"item JSON not found: {json_path}"}
 
     try:
-        item = json.loads(json_path.read_text(encoding="utf-8"))
+        item = load_item_doc(json_path)
     except Exception as exc:
         return {"ok": False, "error": f"failed to read item JSON: {exc}"}
 
@@ -524,7 +545,8 @@ def cmd_revise_apply(
         })
         item["revision_history"] = history
         item.pop("revision_draft", None)
-        atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
+        atomic_write_json(json_path, item, pretty=cfg.get("pretty", True),
+                           archive_root=cfg.get("archive_root"))
 
     return {
         "ok": True,

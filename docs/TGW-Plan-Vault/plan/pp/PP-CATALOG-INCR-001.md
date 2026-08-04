@@ -124,12 +124,16 @@ efficiency. Nothing here blocks P1–P9 correctness in either direction.
   future incremental) — a decision packet, not a build packet, deferred until CI-1–4
   prove out.
 
-## Open questions for Dave before filing todos
+## Decisions (Dave, 2026-07-18 — greenlit, resolving both open questions)
 
-- Reconciliation timer cadence: hourly? Every 4h? Once daily? (affects how stale
-  full_catalog/search_catalog/location_tree can get between reconciliations)
-- Should CI-2's SQLite upsert run synchronously inside the fence's HTTP request, or
-  fire-and-forget async (matching `publish_mutation`'s non-blocking guarantee)? The
-  original design says "atomically" — recommend synchronous, since SQLite upsert of
-  one row is sub-millisecond and keeping it in the same request means the search
-  catalog is never even briefly stale after a confirmed write.
+- **Reconciliation timer cadence: hourly.** Full 4-artifact rebuild via systemd timer,
+  ~24/day vs. today's ~1,361/33h (~990/day) pattern — over 40x reduction, plus the
+  incremental path means the hourly rebuild is now purely a drift/orphan catch-all,
+  not the primary update mechanism.
+- **CI-2's SQLite upsert runs synchronously**, inside the same HTTP request as the
+  write, per the design doc's own recommendation — matches Dave's original
+  "atomically" wording; sub-millisecond single-row upsert cost, no staleness window.
+
+Todos filed 2026-07-18: #1548 (CI-1), #1549 (CI-2), #1550 (CI-3), #1551 (CI-4).
+CI-5 stays deferred (decision packet, not build packet, per the doc — revisit once
+CI-1–4 prove out).

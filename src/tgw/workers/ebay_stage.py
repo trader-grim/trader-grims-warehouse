@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
@@ -34,8 +33,9 @@ import tgw.logging as tgw_logging
 from tgw.apis.fence import ebay_write as fence_ebay_write
 from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.config import DEFAULT_CONFIG, load_config
+from tgw.ebay.sync import enqueue_post_push_sync, stage_draft
+from tgw.ebay.sync import extract_ebay_error_field as _extract_ebay_error_field
 from tgw.ebay.sync import format_ebay_error as _format_ebay_error
-from tgw.ebay.sync import stage_draft
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
@@ -196,6 +196,35 @@ class EbayStageWorker(QueueWorker):
                 f'{sku}: no draft_listing yet — waiting for pipeline to complete'
             )
 
+        # Non-leaf category guard (todo #1395 / PP-DEADLETTER-001): ebay_draft
+        # falls back to category_id '99' ("Everything Else") when it can't
+        # resolve a real category — that fallback is explicitly non-leaf
+        # (ebay_draft.py comment: "eBay will prompt"). eBay's Inventory API
+        # unconditionally rejects createOrReplaceOffer/publish for a non-leaf
+        # category ("The category selected is not a leaf category."), so
+        # staging with '99' always burns a live API call for a guaranteed
+        # HardFailure and lands in dead_letter with no actionable trail (17
+        # confirmed instances, 2026-07-05 batch). Block it here — before the
+        # API call — and persist a durable, queryable finding (invariant
+        # C11) instead, same shape as the price/title guards below.
+        category_id = draft.get('category_id')
+        if category_id == '99':
+            fence_patch_item(self.config, sku, {'pipeline_error': {
+                'code':   'category_not_leaf',
+                'detail': ("draft_listing.category_id is the '99' Everything "
+                           "Else fallback (non-leaf) — eBay always rejects "
+                           "staging/publishing with it. Operator must select "
+                           "a real leaf category in the editor before listing."),
+                'ts':     datetime.now(timezone.utc).isoformat(),
+                'source': 'ebay_stage',
+            }})
+            tgw_logging.log_event('ebay_stage_category_not_leaf', sku=sku)
+            raise HardFailure(
+                f"{sku}: draft_listing.category_id is fallback '99' (Everything "
+                f"Else, non-leaf) — operator must select a leaf category "
+                f"before staging"
+            )
+
         # Price must be set in draft_listing — the operator-reviewed surface.
         # Session 45 (tgw202605052336026): the old fallback to ebay_offer.price
         # published a STALE machine price ($40.99, browse-comps, stamped weeks
@@ -228,6 +257,32 @@ class EbayStageWorker(QueueWorker):
             # Background chain — ebay_price may still be running
             raise RuntimeError(
                 f'{sku}: no price yet — waiting for ebay_price or manual price set'
+            )
+
+        # Title length guard (2026-07-10): eBay rejects any title over 80 chars
+        # outright (errorId 25718, "title should be between 1 and 80
+        # characters"). tgw202605051752520/051913468/051936445 all reached
+        # eBay's API before finding this out, dead-lettering after burning a
+        # real API call for something knowable locally. seo/title.py's
+        # enhance_title() deliberately does NOT auto-truncate (Dave: eBay's
+        # own bulk-CSV editor loads the full title and lets the operator
+        # trim it by double-click-deleting words — faster and more accurate
+        # than an automated word-boundary chop) — the full title stays in
+        # draft_listing.title so the editor can offer exactly that. This
+        # guard is what actually stops the wasted API round-trip: same
+        # C11/no_price_set shape, blocks staging until the operator trims it.
+        title = draft.get('title') or ''
+        if len(title) > 80:
+            fence_patch_item(self.config, sku, {'pipeline_error': {
+                'code':   'title_too_long',
+                'detail': (f'draft_listing.title is {len(title)} chars — eBay '
+                           f'allows at most 80. Trim it in the editor before listing.'),
+                'ts':     datetime.now(timezone.utc).isoformat(),
+                'source': 'ebay_stage',
+            }})
+            raise HardFailure(
+                f'{sku}: title is {len(title)} chars, over eBay\'s 80-char limit — '
+                f'operator must trim it in the editor'
             )
 
         # Never-raise guard (invariant C5 extended, session 42 incident): a force
@@ -308,6 +363,13 @@ class EbayStageWorker(QueueWorker):
                     'raw':    raw[:800],
                     'ts':     datetime.now(timezone.utc).isoformat(),
                     'source': 'ebay_stage',
+                    # PP-CONDITION-ENUM-001 / todo #1562: best-effort field
+                    # attribution (e.g. "condition_enum") so the item detail
+                    # page can flag exactly the offending draft field red on
+                    # load instead of leaving the operator to guess from the
+                    # generic wrapper text. None when eBay's body doesn't
+                    # name a field — never forced.
+                    'field':  _extract_ebay_error_field(raw),
                 }
                 fence_patch_item(self.config, sku, {'pipeline_error': pipeline_error})
                 raise HardFailure(f'{sku}: eBay rejected staging: {msg}') from exc
@@ -343,15 +405,19 @@ class EbayStageWorker(QueueWorker):
                               offer_id=result['offer_id'])
 
         try:
-            state_machine.enqueue_job(
-                queue_name='catalog_rebuild',
-                payload={'reason': f'ebay_stage:{sku}'},
-                dedupe_key='catalog_rebuild:pending',
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
+            state_machine.enqueue_catalog_rebuild(f'ebay_stage:{sku}')
         except psycopg2.errors.UniqueViolation:
             pass
+
+        # Invariant C14 (2026-07-16 incident): this worker runs on nearly
+        # every real operator edit ("Update Listing" on an already-live
+        # item enqueues ebay_stage directly, never ebay_publish) yet never
+        # refreshed the local ebay_live mirror itself — only ebay_publish
+        # did (todo #1445), and only when this worker's own already-live
+        # republish trigger below happens to fire. Call it unconditionally
+        # here so the mirror refreshes on every successful stage, not just
+        # the subset that also happens to republish.
+        enqueue_post_push_sync(sku)
 
         # If the item was previously published, republish after staging.
         # eBay sets the offer back to UNPUBLISHED on any updateOffer call
@@ -364,6 +430,8 @@ class EbayStageWorker(QueueWorker):
                     payload={'sku': sku,
                              **({'origin': 'operator'}
                                 if payload.get('origin') == 'operator' else {})},
+                    entity_type='item',
+                    entity_id=sku,
                     dedupe_key=f'ebay_publish:{sku}',
                     max_attempts=3,
                 )

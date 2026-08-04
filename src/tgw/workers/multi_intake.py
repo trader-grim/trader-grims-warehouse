@@ -19,16 +19,18 @@ import json
 import logging
 import shutil
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
 import tgw.logging as tgw_logging
-from tgw.config import DEFAULT_CONFIG, load_config
 
 # PP-FENCE-001: atomic_write_json kept for one remaining gap not yet in fence:
 #   Stub writes go to newitems_path (not itemdata_root) — outside fence scope.
 # (The second gap — a direct ItemData key-deletion write — was removed in
 # session 48; see the SKU-collision handling below.)
+from tgw.apis.fence import patch_item as fence_patch_item
+from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.items import atomic_write_json
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
@@ -65,7 +67,6 @@ def _record_notified_collision(sku: str, base_sku: str) -> None:
         registry: Dict[str, Any] = {}
         if _COLLISION_NOTIFY_REGISTRY.exists():
             registry = json.loads(_COLLISION_NOTIFY_REGISTRY.read_text(encoding='utf-8'))
-        from datetime import datetime, timezone
         registry[sku] = {'base_sku': base_sku, 'notified_at': datetime.now(timezone.utc).isoformat()}
         _COLLISION_NOTIFY_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
         tmp = _COLLISION_NOTIFY_REGISTRY.with_suffix('.tmp')
@@ -215,6 +216,34 @@ class MultiIntakeWorker(QueueWorker):
                     tgw_logging.log_event(
                         'multi_intake_sku_collision', sku=sku, base_sku=base_sku,
                     )
+                    # todo #1304 / invariant C11 (docs/invariants.md): a
+                    # log_event()/notify() hit is transient (journald rots,
+                    # notify channel is fire-and-forget) — it is not
+                    # queryable later as "which items currently have an
+                    # unresolved SKU collision from intake". Persist a
+                    # durable finding on the colliding item itself, mirroring
+                    # ebay_stage.py's `legacy_listing_blocked` pattern, so
+                    # catalog-verify's `sku_collision_unrepaired` rule can
+                    # surface + track it until an operator resolves it.
+                    now_iso = datetime.now(timezone.utc).isoformat()
+                    try:
+                        fence_patch_item(self.config, sku, {
+                            'sku_collision_blocked': {
+                                'colliding_sku': sku,
+                                'base_sku':      base_sku,
+                                'detected_at':   now_iso,
+                            },
+                        })
+                    except Exception as exc:
+                        # Best-effort: a fence-write failure must not abort
+                        # the whole multi-intake split (the transient
+                        # log_event/notify above already ran and the
+                        # newitems_dir path is unaffected either way).
+                        log.warning(
+                            'multi_intake: could not persist sku_collision_blocked '
+                            'finding for %s: %s', sku, exc,
+                        )
+
                     # audit#1143 #1246 (deferred #1245 finding): the durable
                     # per-item finding (log line + log_event above) always
                     # records every hit, but the external notify() channel

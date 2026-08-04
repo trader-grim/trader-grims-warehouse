@@ -16,6 +16,71 @@ review future ideas. Do NOT scan or process this file at routine session start.
 
 ---
 
+**PP-PRICING-001 Phase 0 (3-pane comp-research tool) — flagged for next planning
+round, 2026-07-18.** Dave: "want it, make it surface in the next planning round."
+Design already fully drafted (`plan/pp/PP-PRICING-001.md`, "Proposed UI: 3-pane
+web editor" section) — this is a promotion-ready item, not a stub; open
+questions before slicing into todos are recorded in the PP doc itself
+(go/no-go + priority, item-detail attachment point, v1 browser-pane scope).
+
+---
+
+**PP-CODEGRAPH-001 promoted to active PP 2026-07-14** — Dave confirmed he's
+building the full stack (FalkorDB + Z3 + DuckDB + MCP unification),
+hosted on a1131, and is bringing additional research before the build
+session. Full entry moved to `TGW-Master-Plan.md`; infrastructure-
+establishment planning doc at
+`docs/ai-plans/pp-codegraph-001-a1131-infrastructure.md`. Not a case of
+this file's usual promotion criteria being met on schedule — Dave's
+direct decision superseded the deferred framing outright (see memory
+`feedback-take-care-before-discarding-ideas` for why the original
+deferral was too cautious).
+
+---
+
+## Generic wake-a-helper-node skill (Wake-on-LAN, reusable)
+
+**Filed:** 2026-07-13
+**Source:** Tigwa's `#1347` wake-path request (`TIGWA-REQUEST-1347-a1131-wake-path.md`,
+archived) — superseded before being built when Dave decided a1131 stays
+always-on (`reference-desktop-setup-rationale` memory, "this adds too much
+value" to keep sleeping it).
+
+### Why deferred, not built now
+Two blockers, both circumstantial rather than a rejection of the idea:
+1. a1131 no longer sleeps, so there's no everyday wake cycle to build
+   against — the one concrete use case that prompted this request is gone.
+2. Even setting that aside, **a1131 isn't a good testbed for WoL** (Dave,
+   2026-07-13) — single always-on-adjacent desktop machine, no fleet to
+   validate wake/readiness/idempotence patterns against.
+
+### The actual future shape
+Dave's framing: once there's more than one GPU-capable machine processing
+jobs, a generic "wake a helper node" skill becomes genuinely useful — a
+job scheduler or operator wakes a sleeping compute node on demand rather
+than keeping every machine powered all the time. This is a fleet-scale
+job-dispatch pattern, not a single-desktop convenience.
+
+### What to reuse when this is picked back up
+Tigwa's original request (archived `inbox/archive/`) already scoped the
+hard parts worth not re-deriving:
+- Readiness staging (host responds on LAN → SSH available → target
+  service/session ready → handoff)
+- Idempotence when the target is already awake
+- Retry/timeout/backoff behavior
+- Authority boundary: wake-only, never suspend/sleep/shutdown a target
+  node remotely (matches the standing a1131 rule: waking is the agent's
+  job, sleeping is the owning host's power management, never reversed)
+- Audit logging: trigger, command, retries, readiness, outcome, elapsed time
+
+### Promotion criteria
+Promote to an active PP (e.g. a generic `wake-helper` skill or `tgw`
+subcommand) once TGW has **two or more GPU/compute-capable machines** in
+rotation for job processing — at that point the wake/readiness contract
+above is worth building generically rather than re-deriving per-host.
+
+---
+
 ## PP-NIXSTORE-001 — Move /nix to HDD + LVM Cache (lvmcache/dm-cache)
 
 **Filed:** 2026-06-26  
@@ -114,125 +179,19 @@ swapoff /dev/vg_tgw/swap && mkswap /dev/vg_tgw/swap && swapon /dev/vg_tgw/swap
 ### Promotion criteria
 Ready to promote when: Dave explicitly approves the plan, sda5 decision is made, and a maintenance window is available (requires reboot). Reference: `inbox/archive/20260626-lvm-nix-cache-research.md`.
 
+**Hold, 2026-07-18 (Dave):** intends to get a SATA-to-NGFF adapter and swap
+the internal HDD for an equal-size SSD soon, then replan storage from that
+new baseline. Don't promote/build this plan as drafted — the disk topology
+it's based on (sda5/sda6/sda7 on a spinning HDD) is about to change. Revisit
+after the hardware swap lands.
+
 ---
 
-## PP-CATIONIX-001 — CatioNIX: TGW Platform as Standalone AI Operational Safety Platform
-
-**Also referred to as:** Catio  
-**Filed:** 2026-06-20  
-**Deferral trigger:** Revisit after PP-AIOPS-001 Phase 4 (litterbox worker) is complete and
-the pattern is proven end-to-end on TGW. Phase 4 is the proof-of-concept for the core
-differentiator.
-
-### Concept
-
-Extract the TGW base platform into a standalone, general-purpose AI operational safety
-platform called **CatioNIX** (short: Catio).
-
-**The key distinction from Sécurix:** Sécurix confines human government employees.
-CatioNIX confines AI agents. The "users" of the platform are AI processes, not people.
-Any system where AI agents take real-world actions (file writes, API calls, order
-placement, code commits) benefits from this safety envelope.
-
-Components that would form the extractable platform:
-- **CatioNIX OS layer** — NixOS service topology: declarative, reproducible, immutable base.
-  Already being built in `nix/os/`. TGW-agnostic. Would be the same for any application.
-- **Agent user pattern** — service accounts as confined AI agents: `isSystemUser=true`,
-  home under `/opt/<agent>`, no login shell, specific UID range, `createHome=false` (tmpfiles
-  owns tree). Currently in `nix/tgw/users.nix`. Future: `catio.agents` module option.
-- **PostgreSQL work ledger** — `state_machine` DB, `QueueWorker` base class, job lifecycle
-- **NATS JetStream audit stream** — `ITEMDATA_MUTATIONS` + `QUEUE_TRANSITIONS` (PP-AIOPS-001)
-- **QueueWorker base class** — thin worker pattern, queue-in / queue-out / dead-letter
-- **Litterbox pattern** — auto-fix for INFO/WARN anomalies; queue CRITICAL for operator ack
-  with human-in-the-loop gating (PP-AIOPS-001 Phase 4)
-- **Anomaly detection layer** — rule library over audit stream (PP-AIOPS-001 Phase 3)
-- **Session isolation** — Btrfs CoW snapshot per agent session; bad sessions roll back in one
-  command (PP-AIOPS-001 Phase 5)
-
-### Differentiator
-
-The crowded "AI safety" space focuses on model alignment and output filtering. CatioNIX
-targets **operational safety**: the environment in which AI agents run, not the models
-themselves. Key properties:
-- Audit trail: every data change timestamped + attributed, observable after the fact
-- Anomaly detection: bad patterns surface within seconds, not by operator discovery
-- Human-in-the-loop gating: CRITICAL anomalies require operator ack before proceeding
-- Automated remediation with escalation: litterbox auto-fixes known-safe patterns;
-  unknown patterns escalate rather than guess
-- Session isolation: bad agent sessions roll back in one command
-
-TGW is already building all of this for itself. CatioNIX is what it looks like when
-the TGW-specific parts are extracted and the platform is offered generically.
-
-### Current module structure (layer separation progress)
-
-The `nix/` tree is already structured with the CatioNIX/TGW boundary in mind:
-
-```
-nix/os/          ← CatioNIX layer (TGW-agnostic)
-  base.nix         OS config any CatioNIX host would have (SSH, tailscale, syncthing, admin tools)
-  users.nix        Human operator account (db, uid 1000) — NOT TGW-specific
-  desktop.nix      Opt-in GUI layer (X11+Qtile, KDE Connect, bluetooth, desktop apps)
-
-nix/tgw/         ← TGW application layer (CatioNIX implementation)
-  users.nix        tgw service account (uid 900, isSystemUser) — the first CatioNIX "agent user"
-  platform.nix     TGW tools + syncthing folders + tgw-rebuild alias
-  desktop.nix      TGW Qtile config (extraPackages, config.py symlinks)
-  usb-sync.nix     TGW install bundle → USB via Syncthing markerName
-```
-
-**Separation test applied to `nix/os/base.nix`:** As of 2026-06-21, cleaned out TGW-specific
-packages that had leaked in (`ffmpeg`, `imagemagick`, `exiftool`, `chafa`, `gh`, `ydotool`,
-`thefuck`) and moved them to `nix/tgw/platform.nix`. CatioNIX base now passes the test: it
-would work identically on a host running a different application.
-
-**Future abstraction (`catio.agents` option):** When CatioNIX is separated as its own project,
-`nix/tgw/users.nix` becomes the model for how any application declares its agent users:
-```nix
-# Future CatioNIX module option (not yet built)
-catio.agents.tgw = {
-  uid  = 900;
-  home = "/opt/TGW";
-  description = "Trader Grim's Warehouse service account";
-};
-```
-The current manual declaration in `nix/tgw/users.nix` is already the right shape; the
-abstraction is added without restructuring when separation happens.
-
-### Related research
-
-**Sécurix (DINUM / French government):** A NixOS-based hardened OS for confining users.
-Directly relevant as architecture reference — adapt for AI agents as the confined entities.
-- Open source: `github.com/cloud-gouv/securix`
-- Key properties: declarative immutability (state defined in Nix → no config drift),
-  TPM2 + LUKS FIDO2 hardware interlocking, Secure Boot with custom-keyed authority,
-  instant reinstantiation when state diverges from baseline
-- **Bureautix** shows how to fork and re-key for an alternate authoritative entity —
-  same pattern CatioNIX would use to let other operators key their own deployments
-- Architecture for AI agent confinement Dave noted:
-  ```
-  [ AI Agent Action ] → Modifies Files / Runs Malware → [ Local Ephemeral State ]
-                                                              │
-                                                 (Reboot / Agent Reset)
-                                                              ▼
-  [ Pure NixOS Baseline ] ◄═══ Cryptographic Lock ═══ [ Hardware TPM2 / Key ]
-  ```
-- Full research: `docs/TGW-Plan-Vault/inbox/archive/20260620T092933-securix-borgbackup.md`
-
-### Relationship to current PP items
-
-- **PP-NIXOS-001**: Builds the CatioNIX OS layer (`nix/os/`). Every session on this is
-  progress toward a clean CatioNIX separation.
-- **PP-AIOPS-001**: Builds the audit stream + litterbox — the platform's core safety
-  components. Phase 4 (litterbox) is the concrete proof that the pattern is extractable.
-- **TGW = first CatioNIX application**: `nix/tgw/` declares TGW as one implementation.
-
-### Promotion criteria
-
-Ready to promote to active PP item when:
-- [ ] PP-AIOPS-001 Phase 4 (litterbox) is complete and proven on TGW
-- [ ] PP-NIXOS-001 migration is stable on production
-- [ ] Dave decides to pursue CatioNIX as a separate product/project
+**PP-CATIONIX-001 promoted to active PP 2026-07-11** — full content moved to
+`plan/pp/PP-CATIONIX-001.md`. Dave's direct decision, ahead of its own
+originally-stated promotion criteria (litterbox complete + NixOS stable) —
+see that doc's "Promotion — advanced ahead of schedule" section for why this
+isn't a silent contradiction of the criteria below.
 
 ---
 
@@ -289,100 +248,297 @@ than replacing it.
 
 ---
 
-## PP-ANNEX-001: git-annex photo store with tiered GDrive remotes
+## PP-MASTERDB-001 — Master ItemData in Postgres, JSON as export/backup (not primary)
 
-**Architectural grounding (2026-06-28):** git-annex is a concrete application of the
-**control-plane / data-plane separation** principle settled in the master plan architecture
-section. git is the control plane — it tracks what files exist, their SHA keys, and where they
-are stored, without holding the bytes. The annex special remote system is the data plane —
-it transfers actual content on demand. The same principle governs lan-mouse (focus signals vs.
-input events), Wayland clipboard (ownership notification vs. content transfer), and the TGW
-event server (NATS notification vs. PostgreSQL payload fetch). Where these planes are decoupled,
-failures are isolated; where they are coupled (old Input Leap, X11 clipboard in Qtile), a
-data-plane failure hangs the control channel.
+**Filed:** 2026-07-12
+**Source:** Dave, in conversation ("that is our horizon... a database would be better when it
+gets busy")
+**Status:** Deferred pending discussion, but Dave raised its priority 2026-07-12 given the
+drive-space rationale below overlaps a currently-live pressure (PP-NIXSTORE-001: NVMe was down
+to 0.09GB free during the 2026-06-26 OOM event). Still not a PP item — promotion still needs
+the dedicated discussion — but this should surface earlier at planning time than a typical
+future-idea, not wait for routine "someday" review.
 
-**Concept:** Replace direct filesystem photo copy in intake workers with git-annex
-content-addressed object store. Photos become annex objects (SHA256-keyed), tracked by
-symlinks in git. `git-annex-remote-googledrive` (Lykos153) handles GDrive sync via
-native Drive API — faster than rclone's abstraction layer, truly resumable uploads.
+### The idea
 
-**Tiered remotes:**
-- `gdrive-active` — items listed on eBay, last 12 months
-- `gdrive-archive-YYYY` — sold/delisted items, date-partitioned (one remote per year or
-  per N items to stay under GDrive's 500k-items-per-folder limit)
-- `nas-local` — full local copy (directory special remote)
-- Cold backup tier (B2 or second GDrive account)
+This is TGW's own long-term direction, not a reference to an external system — Dave hadn't
+raised it before "to avoid confusion." The idea: master dataset lives in the database as the
+source of truth, with flat-file exports used for backup/portability rather than the reverse.
+Originally framed as gated purely on business volume ("would be better when it gets busy");
+the drive-space rationale below means part of the case is relevant now, not only at scale.
 
-`git annex move --to gdrive-archive-YYYY --metadata status=sold` handles migration.
-`numcopies = 2` enforces no single-copy objects.
+### Dave's stated rationale
 
-**Design constraints to carry forward:**
-- Archive remotes must be date/count-partitioned from the start — resharding later is
-  painful. New remote = one config line.
-- Fence API is already SKU-addressed, not path-addressed — scales cleanly regardless of
-  storage tier changes.
-- Intake must be queue-parallelisable: the current one-item ZIP drop model is the
-  throughput ceiling; the fence + annex design should batch from day one.
+Explicitly not "replace JSON, dislike it" — "I still like my json data." The case for DB-primary
+is technical, at scale:
 
-**Scale context:** Current 55k catalog / 19k active listings is complete stagnation —
-floor, not ceiling. When the pipeline is fully automated, item and photo volume will be
-significantly higher. Every design decision here must hold at 10x current scale.
+- **Filesystem is slow, database is fast** — at higher item/write volume, the current
+  read-JSON/atomic-write-JSON-per-SKU path doesn't scale the way DB reads/writes do.
+- **Multi-user locking "itself without our help"** — Postgres has real concurrency control
+  built in; the current fence (`atomic_write_json`, per-item file locking) has to hand-build
+  what a DB gives for free. As more concurrent writers show up (more workers, Tigwa, a1131,
+  eventually more human operators), that hand-built locking is the part most likely to need
+  ongoing engineering attention if it stays file-based.
+- **Less SSD wear/heat** — Dave's observation, concretely evidenced by the same-day incident
+  above this entry (catalog_rebuild loop): a single resurrected worker wrote 60.8G to disk in
+  ~9 hours doing full-file JSON/SQLite rewrites for a change set that, as DB row
+  updates + WAL, would have been a small fraction of that I/O. Full-file rewrite (whole
+  catalog, or even a whole item JSON for a one-field change) is inherently more
+  write-amplifying than in-place row updates — this compounds with tgw-prod's existing
+  thermal sensitivity (see CLAUDE.md thermal-watchdog notes).
+- **Lighter-weight backup** — a `pg_dump` is one coherent, consistent point-in-time export in
+  a single operation. The current file-based approach needs a btrfs snapshot (and the
+  coordination dance around it) to get the same all-or-nothing consistency guarantee across
+  tens of thousands of individual per-SKU JSON files. Relevant given the `backups` health
+  check is currently one of the standing failed checks (rclone sync incomplete, snapshot tree
+  stale — see PP-BACKUP-001).
+- **Frees drive space** — Dave's addition, and the reason this entry's priority was raised:
+  the master ItemData JSON tree + full-rebuild catalog artifacts (master-catalog.json,
+  search-catalog.json, tgwcatalog.db, location-tree symlinks) all live on the same NVMe
+  volume that ran to 0.09GB free during the 2026-06-26 OOM event (PP-NIXSTORE-001, this same
+  file). A DB-primary model with on-demand/periodic JSON export, rather than permanently
+  keeping both the full JSON tree and every derived full-rebuild artifact on disk at once,
+  directly relieves that pressure — this is the one rationale point that isn't gated on
+  "when it gets busy."
 
-**Promotion criteria:**
-- PP-FENCE-001 complete (workers can't write ItemData directly)
-- Intake worker redesign underway
-- Dave ready to invest in git-annex learning curve and NixOS annex packaging
+This reframes the promotion question: it's not "is DB nicer in the abstract," it's "at what
+write-concurrency/volume does file-based locking start costing more engineering time than a
+DB migration would."
+
+Dave also notes: JSON-as-primary was his own deliberate original call, not an imposed
+constraint or a gap someone else should route around — and he already expects the eventual
+switch to a purpose-built database to be the right call at some point. This isn't a case that
+needs to be made to him later; it's already agreed in principle, just gated on timing/scale
+rather than on convincing him DB is better.
+
+### Why this is a bigger decision than it sounds
+
+This is NOT the same as todo #1351 (moving the *derived catalog* — search index, location
+tree, portable SQLite export — into incremental Postgres rows for cheaper rebuilds). That one
+leaves ItemData JSON as the permanent raw record and only changes how *derived* artifacts are
+built. This idea is different in kind: it proposes flipping which side is authoritative —
+Postgres becomes primary, JSON becomes the derived/exported copy.
+
+That's a direct hit on Prime Directive 1 and the settled architecture documented in
+`reference/TGW-Data-Charter.md` and CLAUDE.md ("One folder per SKU —
+`ItemData/<SKU>/<SKU>.json`... raw is permanent, derived is recomputable"). Before this can be
+adopted, at minimum needs an explicit answer to:
+
+- What "raw" means once the primary store isn't a flat file per item anymore — the Data
+  Charter's asset-preservation guarantees were written assuming JSON-on-disk is the
+  permanent record (Syncthing-replicated, git-history-style recoverability, human-readable,
+  directly grep/recoll-able without a running DB).
+  A DB-primary model needs its own answer to "how do we never lose data" that's at least as
+  strong — schema migrations, backup verification, and point-in-time recovery all get harder
+  to reason about than "the file is still there" once Postgres is the source of truth.
+- How live JSON export from the DB would actually work for backup — is it still one-file-
+  per-SKU (preserving recoll indexing, MC browsing, Syncthing replication of individual
+  items) or a different shape entirely?
+- Relationship to #1351 (derived catalog into Postgres) — likely the same underlying Postgres
+  investment could serve both, but the *master* dataset move is the one that needs Dave's
+  explicit sign-off given Prime Directive 1's weight, not something to bundle in silently.
+
+### Promotion criteria
+
+- [ ] Dedicated discussion with Dave about what "raw is permanent" means under a DB-primary
+      model, and whether it still holds
+- [ ] #1351 (derived catalog → Postgres) implemented and living, as a smaller proof of the
+      same underlying pattern
+- [ ] Concrete backup/export design reviewed (JSON-from-DB shape, recovery drill)
 
 ---
 
-## PP-SEARCH-001: recoll universal index — all TGW data searchable
+**PP-ANNEX-001 and PP-SEARCH-001 promoted** — both now live under
+`PP-KNOWLEDGE-001` in the master plan (the 5-layer knowledge hub umbrella,
+extended 2026-07-11). PP-SEARCH-001 has been LIVE since s45 (441K docs
+indexed). PP-ANNEX-001's full design lives in
+`docs/ai-plans/recoll-annex-jetstream.md` (Track A, packets A0-A5) plus the
+"archivist" reframe in `PP-KNOWLEDGE-001`'s master-plan entry. Original
+research content (control-plane/data-plane grounding, tiered-remote design,
+scale context) is preserved in that design doc and this session's plan
+notes — not deleted, just relocated out of the future-ideas holding pen.
 
-**Design principle (2026-06-28):** ALL data in the TGW ecosystem shall be included in
-the index. This is not just a convenience feature — it is a recovery and audit tool.
-Today's investigation (49 missing item JSONs recovered from ItemArchive) took hours of
-manual searching across zip files, CSVs, and catalogs. With recoll it would have been
-one query in seconds.
+---
 
-**Scope — everything goes in:**
+## How tied are we to Nix, really — PROMOTED 2026-07-22, see TGW-Master-Plan.md's PP-NIXOS-001 section
 
-- **ItemData/** — item JSONs (title, description, aspects, AI draft, raw LLM
-  prompt/response once PP-FENCE-001 captures them, price history, ebay blocks)
-- **ItemData/ photos** — via Tesseract OCR plugin: serial numbers, labels, model
-  numbers, barcodes visible in photos become searchable
-- **ItemArchive/** — zip contents indexed including historical JSON versions and
-  source-change records; makes archive recovery instant instead of manual
-- **masterarchive/history/** — eBay download CSVs, all_skus_locations.csv,
-  draft-listing-import CSVs, active-inventory reports; cross-reference in one query
-- **ItemCatalog/** — historical-master-catalog.json, historical-tgwcatalog.json,
-  by-location index
-- **docs/TGW-Plan-Vault/** — plan, reference, inbox, suggestions; searchable alongside
-  item data so "what does the plan say about X" and "which items are in location X"
-  are the same search
-- **git-annex metadata tags** — status, category, size_class, listed_at
+**No longer a "mull, not decide" item.** Dave, 2026-07-22: "We are
+changing unless we find a good reason not to. To what and when TBD." Full
+entry (both this 2026-07-14 evidence and the 2026-07-22 evidence that
+tipped it) moved to the master plan's `PP-NIXOS-001` section, kept intact
+rather than re-summarized — read it there, not here. This file's copy
+below is left as-is for historical record only; the master plan is now
+the live version.
 
-**Queries this enables that took hours manually today:**
-- "find any record containing SKU tgw202105091454567" → instant across all sources
-- "find all items at location PB1061 across current and archive"
-- "find items where AI identified 'Atari' in raw response"
-- "find items with a visible serial number in any photo"
-- "find all eBay download reports mentioning listing ID 326340608480"
-- "find items where description contains a specific model number or ISBN"
+## How tied are we to Nix, really — a reality check Dave wants to mull, not decide (2026-07-14)
 
-**Integration points:**
-- recoll daemon watches all index roots for changes (inotify)
-- `tgw search` CLI gets a `--full-text` flag hitting recoll's REST/Python API
-- Web UI search bar gains full-text capability alongside existing SKU/title lookup
-- ItemArchive zip contents: recoll has a zip/archive filter that indexes inside zips
-  without extracting — archive stays compressed, content is searchable
-- NixOS: recoll + tesseract in nixpkgs; add to tgw-prod config with index paths
+**Dave's own framing, the actual thing driving this:** "NIX is great and it
+is also a pain in the ass. In my experience even Gentoo was easier to
+maintain... I do not like being afraid updating my system can make it
+unusable." Not a syntax complaint — a real operational fear about update
+risk. Explicitly **not ready for a decision** ("I will mull a while") —
+this entry exists so the reality check doesn't evaporate before he's ready
+to act on it, not to propose a migration.
 
-**Designed alongside PP-ANNEX-001** — git-annex is the prerequisite (photos accessible
-as files for OCR; annex metadata becomes recoll field tags). But the index scope is
-independent of git-annex — ItemArchive and masterarchive can be indexed immediately.
+**Same-day concrete evidence feeding the question:** a per-user imperative
+`nix profile install` of hermes-agent (immutable `/nix/store` path, no
+declarative tracking) broke `hermes update` on two hosts, discovered only
+because Dave hit the error directly on a1131. Real cost paid today:
+backup, uninstall, official-reinstall, verify, on tigwa's account, plus
+the same root cause confirmed present on tgw-prod's `db` account too.
+Also this project's own repeated history: "wrangling the flake has been
+consuming disproportionate usage — whole day-budgets spent... against
+tasks that should be ordinary coding" (the standing rule that pulled
+Hermes/Aider out of the flake in the first place, 2026-07-06, reinforced
+again today).
 
-**Promotion criteria:**
-- PP-FENCE-001 complete (raw LLM responses captured — makes index much richer)
-- PP-ANNEX-001 underway (git-annex managing photos locally)
-- Dave ready to configure recoll index paths and OCR pipeline on tgw-prod
-- Phase 0 (no git-annex required): index ItemArchive + masterarchive/history + catalogs
-  alone — already useful for recovery and audit without any other PP complete
+**Coupling assessment, as it actually stands (not proposed, current
+reality):**
+- **Application layer — barely tied at all.** `src/tgw/` runs as a plain
+  Python venv (`/opt/TGW/.venvironments/tgw`) deployed via git + systemd
+  restarts. Every code fix this whole session took effect with zero
+  `nixos-rebuild` involved — this is portable to any Linux distro today.
+- **OS/host layer — deeply tied, by design.** NixOS is the actual
+  operating system on tgw-prod and a1131. Leaving means an OS reinstall,
+  not a package-manager swap. Declarative system config, users, network,
+  security hardening, filesystems all live here. No app-code dependency
+  on Nix specifically, but real depth of commitment at the provisioning
+  layer.
+
+**Second concrete evidence entry, 2026-07-22 — Dave: "I did not decide on
+Nix lightly. I expected friction. But once again, look how much time we
+spend installing a couple of apps today."** Not a reversal of the
+2026-07-14 "not ready for a decision" stance — a second data point for
+whenever he does mull it. What was, on paper, "install NATS, declare a
+Syncthing folder" (two small, well-scoped changes) actually cost, in one
+session: three separate failed fix attempts on the same file before a
+live-verified NATS retention config worked (a flag-parsing bug, then a
+unit-suffix parser mismatch nats-server/natscli disagreed on even with
+matching literal text, then a real disk-size miscalculation caught only
+by checking actual free space); a pre-existing, previously-undiscovered
+Syncthing folder-loss bug traced back to the same NixOS module's
+override-stomping default; a live desktop-input disruption (lan-mouse/
+window-switching froze) from the switch's "reloading user units" side
+effect; and a still-unresolved dual-authority NATS bug (`nats_client.py`
+vs. the new declarative provisioning) found only because the first three
+fixes kept failing for reasons that turned out to be a fourth, unrelated
+cause. None of this was Nix syntax friction specifically — `nixos-rebuild
+dry-activate` passed clean on every one of the three failed attempts,
+because the failures were all in what got declared, not whether Nix could
+parse it. Worth weighing against the "OS/host layer — deeply tied, by
+design" assessment above the next time this gets mulled for real: the
+real cost tonight was investigation/verification time on live systemd
+services after each "successful" build, not the flake language itself.
+
+**The proposed-system tie-in Dave specifically recalled:** PP-AIOPS-001
+Phase 5 (AI session isolation — the actual technical substrate for
+PP-CATIONIX-001's crypto-lock cage) is designed around **systemd-nspawn +
+Btrfs CoW snapshots**, explicitly gated on PP-NIXOS-001, with the sandbox
+container definition meant to be "reproducible and versionable in the
+flake" (`plan/PP-AIOPS-001-cat-herding-platform.md`). Docker/Podman were
+compared and rejected in that doc — nspawn's argued advantage is sharing
+the host's `/nix/store` with zero overhead, itself a Nix-specific
+argument. **Bubblewrap was never in that comparison.**
+
+**The "better non-nix solution" Dave believes we already found:**
+bubblewrap — added to a1131's flake 2026-07-12 for Codex CLI's own
+`--sandbox` mode (command isolation via plain Linux user namespaces, no
+NixOS module or flake dependency, portable to any distro). It solves the
+same *class* of problem (isolate an AI agent's file/process access) that
+PP-AIOPS-001 Phase 5 wants nspawn for. **Not yet reconciled** — bubblewrap
+is only logged as serving Codex's own sandboxing today; the AIOPS Phase 5
+design doc still says nspawn+Btrfs and still gates on PP-NIXOS-001. If
+bubblewrap is meant to replace nspawn as the crypto-lock cage's actual
+mechanism, that pivot hasn't been evaluated (session isolation guarantees,
+Btrfs CoW rollback story bubblewrap doesn't natively give, GPU passthrough
+considerations noted in the original doc) — worth real scrutiny before
+assuming it's a drop-in swap, not just "it's not Nix so it's simpler."
+
+**What this entry is NOT:** a recommendation to migrate off Nix, drop
+PP-NIXOS-001, or rewrite PP-AIOPS-001 Phase 5. It's a faithful capture of
+where the coupling actually is today plus the specific pivot Dave flagged,
+so the next time he's ready to think about it, the reality check doesn't
+need to be re-derived from scratch.
+
+**Partial resolution, same day (2026-07-14) — does NOT close this entry:**
+Dave decided the Catio buildout itself should be built portable "even if
+we decide to keep Nix, temporarily or permanently" — see
+`pp/PP-CATIONIX-001.md`'s new standing-requirement section. That's a
+narrower, decided question ("should *new Catio infrastructure* avoid
+unnecessary Nix coupling" — yes) layered on top of this still-undecided
+one ("should TGW leave Nix generally" — still parked, still Dave's to
+mull). The bubblewrap-vs-nspawn promotion criterion below is now also
+tracked as a live standing requirement in PP-CATIONIX-001, not just a
+hypothetical here — but don't read that as the broader question being
+resolved.
+
+### Promotion criteria
+
+- [ ] Dave decides he's ready to have the "gripe and options" session —
+      this entry is explicitly parked pending that, not a queued task
+- [ ] If revisited: reconcile bubblewrap vs. nspawn+Btrfs for PP-AIOPS-001
+      Phase 5 specifically — does bubblewrap's isolation model actually
+      satisfy the same guarantees, or is Btrfs CoW rollback load-bearing
+      for something bubblewrap can't give
+- [ ] If revisited: does "OS/host layer stays Nix" remain acceptable once
+      the actual pain point (fear of an update breaking the system) is
+      named explicitly, or does that fear point at NixOS itself, not just
+      the flake-surface-creep the 2026-07-06 standing rule already
+      addressed
+
+## Second Aider "brain" — Google/Gemini-ecosystem model profile
+
+**New 2026-07-15**, Dave, while setting Aider's default model to
+deepseek-v4-flash for the busywork tier: "if a project can benefit from
+tool or Google ecosphere use we can create a gemini brain version." Not
+a request to build now — a conditional idea to reach for if/when a
+specific task genuinely needs Google-ecosystem tool integration (e.g.
+Gemini's native tool-calling to Google services, or a task where Google's
+context/vision handling beats DeepSeek's) rather than just "another
+cheap model."
+
+Shape if promoted: a second `.aider.conf.yml`-equivalent (or a
+`--model`/`--config` override invoked per-task, same pattern as the
+existing Flutter/Dart Gemini-3.1-Flash-Lite override already in
+`.aider.conf.yml`) rather than replacing the deepseek-v4-flash default —
+this is an *additional* profile for a specific class of task, not a
+model swap.
+
+### Promotion criteria
+
+- [ ] A concrete task surfaces that needs Google-ecosystem tool access
+      Aider can't get through the deepseek-v4-flash default (name the
+      task, not "might be useful someday")
+- [ ] Confirm which Google API key/quota this would draw from — same
+      `secrets_root` facility, `google_direct` provider already exists
+      for other TGW LLM tasks (see `reference/LLM-Providers-Quotas.md`)
+      — before assuming a new key is needed
+
+## Store SKU in eBay's Custom Label field, not just the picklist line in the description
+
+**Dave, 2026-07-16, aside during the todo #1471 custom-aspects discussion — explicitly
+flagged "not necessary now."** Currently the SKU round-trips to eBay only embedded in the
+listing description's picklist line (`tgw-pl::=::<location>:=:<title>:=:<sku>:=:<listing_id>`,
+see `build_listing_description()`). Dave's preference: also (or instead) put the SKU in
+eBay's own Custom Label field — his stated reason is that eBay's Custom Label is easy for an
+operator to edit directly in Seller Hub, unlike text buried in a description string. No
+design work done, no decision on whether Custom Label would replace or supplement the
+picklist-line mechanism, and no check yet on whether Custom Label is exposed via the
+Inventory API `sku`/offer fields TGW already sends, or needs its own new field mapping.
+
+### Promotion criteria
+
+- [ ] Dave revisits this (he explicitly said not needed now)
+- [ ] Confirm whether eBay's Inventory API even exposes a settable Custom Label distinct
+      from the SKU we already send, or whether "Custom Label" is Trading-API-era
+      terminology that maps onto something else in the Inventory API
+- [ ] Decide replace-vs-supplement relative to the existing picklist-line mechanism before
+      touching `build_listing_description()`
+
+**PP-BACKUP-001 A3 redesign — promoted 2026-07-18.** Full design (bundle-
+distribution automation via a new Syncthing leg to a1131 + existing GDrive
+leg, USB fobs demoted to supplementary air-gap tier, honest 3-2-1 check,
+open tablet-device question, A7 kept separate) moved to
+`PLAN-backup-dr.md` §5.5. Passphrase/identity custody question resolved
+same day — it's Dave's personal custody, already in two undisclosed
+locations, out of scope for automation entirely (not a design question).

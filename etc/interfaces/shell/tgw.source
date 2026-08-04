@@ -1387,8 +1387,8 @@ done
 alias ic_current_dir=tgwset_selected
 tgwset_selected () {
 #set the selected sku as current
-#xdotool key Ctrl+Shift+C Ctrl+C;tgw tgwset "`xsel -o`"
-tgw tgwset "`xsel -o``wl-paste --primary`"
+#xdotool key Ctrl+Shift+C Ctrl+C;tgw set-context "`xsel -o`"
+tgw set-context "`xsel -o``wl-paste --primary`"
 }
 #ic_current_dir () {
 #tgwset_selected
