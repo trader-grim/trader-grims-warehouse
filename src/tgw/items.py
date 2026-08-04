@@ -155,12 +155,15 @@ def create_item(cfg: Dict[str, Any], sku: str, data: Dict[str, Any]) -> Path:
     Write a new item JSON. Raises if the item already exists.
     Returns the path written.
     """
+    from .item_mutation import ABSENT_GENERATION, mutate_item
+    import uuid
     path = sku_json(cfg, sku)
-    if path.exists():
+    result = mutate_item(cfg, 'legacy-' + uuid.uuid4().hex, sku, 'create',
+                         ABSENT_GENERATION, {'data': data})
+    if result['status'] == 'CONFLICT':
         raise FileExistsError(f'item already exists: {path}')
-    path.parent.mkdir(parents=True, exist_ok=True)
-    record = {'sku': sku, **data}
-    atomic_write_json(path, record, pretty=cfg.get('pretty', True))
+    if result['status'] != 'COMMITTED':
+        raise RuntimeError(f"item create {result['status']}: {result.get('reason') or result.get('failures')}")
     return path
 
 
@@ -242,37 +245,17 @@ def _write_field(cfg: Dict[str, Any], sku: str, field: str,
             raise ValueError(f'qty cannot be negative: {value!r}')
     doc = load_item_doc(path)
     before = doc.get(field)
-    doc[field] = value
-    if field != 'catalog_verified':
-        doc.pop('catalog_verified', None)
-    atomic_write_json(path, doc, pretty=True, archive_root=cfg.get('archive_root'))
-    # Atomic per-item SQLite catalog upsert (PP-CATALOG-INCR-001 CI-2/CI-4,
-    # 2026-07-18) — this is the CLI-side write path (bulk_edit, backfills,
-    # scrub scripts), separate from http_server.py's HTTP fence, which
-    # already got this in CI-2. Needed here too: CI-4 removed the per-write
-    # catalog_rebuild enqueue on the premise the SQLite catalog stays live
-    # through every caller — that premise only holds if this path keeps it
-    # live as well.
-    try:
-        from .sqlite_catalog import upsert_catalog_row
-        upsert_catalog_row(cfg, doc)
-    except Exception:
-        # C11: log, don't silently swallow — code-review finding, 2026-07-18
-        # (this file previously had no logger at all, so every upsert
-        # failure here was invisible).
-        log.warning("sqlite catalog upsert failed for %s", sku, exc_info=True)
-    # Publish to audit stream (PP-AIOPS-001 Phase 1) — fire-and-forget
-    try:
-        from .apis.nats_client import publish_mutation
-        publish_mutation(
-            sku=sku, field=field,
-            old_value=before, new_value=value,
-            source=_mutation_source.get(),
-            session_id=_session_id.get(),
-        )
-    except Exception:
-        pass
-    return {'sku': sku, 'field': field, 'before': before, 'after': value}
+    fields = {field: value}
+    delete_fields = (['catalog_verified']
+                     if field != 'catalog_verified' and 'catalog_verified' in doc else [])
+    from .item_mutation import legacy_mutate
+    result = legacy_mutate(cfg, sku, 'set',
+                           {'fields': fields, 'delete_fields': delete_fields})
+    if result['status'] != 'COMMITTED':
+        raise RuntimeError(f"item mutation {result['status']}: {result.get('failures') or result.get('reason')}")
+    # Preserve the old compatibility shape while exposing transaction truth.
+    return {'sku': sku, 'field': field, 'before': before, 'after': value,
+            'status': 'COMMITTED'}
 
 
 def strip_fields(cfg: Dict[str, Any], sku: str, fields: List[str],
@@ -296,24 +279,14 @@ def strip_fields(cfg: Dict[str, Any], sku: str, fields: List[str],
         return {'ok': True, 'sku': sku, 'removed': present, 'check_only': True}
     if not present:
         return {'ok': True, 'sku': sku, 'removed': []}
-    for f in present:
-        doc.pop(f, None)
-    doc.pop('catalog_verified', None)
-    atomic_write_json(path, doc, pretty=cfg.get('pretty', True),
-                      archive_root=cfg.get('archive_root'))
-    # SQLite catalog upsert — see _write_field's identical block
-    # (PP-CATALOG-INCR-001 CI-2/CI-4). Code-review finding, 2026-07-18: this
-    # write path was missed when the upsert was added to _write_field/
-    # set_fields, so legacy-field scrub writes (data_scrub_magento.py,
-    # data_scrub_legacy_ebay_fields.py) never refreshed the SQLite catalog.
-    try:
-        from .sqlite_catalog import upsert_catalog_row
-        upsert_catalog_row(cfg, doc)
-    except Exception:
-        # C11: log, don't silently swallow — code-review finding, 2026-07-18
-        # (this file previously had no logger at all, so every upsert
-        # failure here was invisible).
-        log.warning("sqlite catalog upsert failed for %s", sku, exc_info=True)
+    from .item_mutation import legacy_mutate
+    remove = list(present)
+    if 'catalog_verified' in doc:
+        remove.append('catalog_verified')
+    result = legacy_mutate(cfg, sku, 'delete', {'fields': remove})
+    if result['status'] != 'COMMITTED':
+        return {'ok': False, 'sku': sku, 'status': result['status'],
+                'error': result.get('failures') or result.get('reason')}
     return {'ok': True, 'sku': sku, 'removed': present}
 
 
@@ -340,35 +313,13 @@ def set_fields(cfg: Dict[str, Any], sku: str, fields: Dict[str, Any],
     if not to_set:
         return {'ok': True, 'sku': sku, 'set': {}}
     before = {f: doc.get(f) for f in to_set}
-    doc.update(to_set)
-    doc.pop('catalog_verified', None)
-    atomic_write_json(path, doc, pretty=cfg.get('pretty', True),
-                      archive_root=cfg.get('archive_root'))
-    # SQLite catalog upsert — see _write_field's identical block (PP-CATALOG-INCR-001 CI-2/CI-4).
-    try:
-        from .sqlite_catalog import upsert_catalog_row
-        upsert_catalog_row(cfg, doc)
-    except Exception:
-        # C11: log, don't silently swallow — code-review finding, 2026-07-18
-        # (this file previously had no logger at all, so every upsert
-        # failure here was invisible).
-        log.warning("sqlite catalog upsert failed for %s", sku, exc_info=True)
-    # Publish to audit stream (PP-AIOPS-001 Phase 1) — fire-and-forget.
-    # Code-review fix: this was missing entirely, making bulk backfill
-    # writes (e.g. the category-recompile pass) invisible to the
-    # mutation stream that single-field update_item() writes already
-    # feed. One event per field, matching _write_field()'s shape.
-    try:
-        from .apis.nats_client import publish_mutation
-        for f, v in to_set.items():
-            publish_mutation(
-                sku=sku, field=f,
-                old_value=before.get(f), new_value=v,
-                source=_mutation_source.get(),
-                session_id=_session_id.get(),
-            )
-    except Exception:
-        pass
+    from .item_mutation import legacy_mutate
+    delete_fields = ['catalog_verified'] if 'catalog_verified' in doc else []
+    result = legacy_mutate(cfg, sku, 'set',
+                           {'fields': to_set, 'delete_fields': delete_fields})
+    if result['status'] != 'COMMITTED':
+        return {'ok': False, 'sku': sku, 'status': result['status'],
+                'error': result.get('failures') or result.get('reason')}
     return {'ok': True, 'sku': sku, 'set': to_set}
 
 
@@ -464,12 +415,16 @@ def locationupdate(cfg: Dict[str, Any], sku: str, new_location: str,
         return {'ok': True, 'sku': sku, 'old_location': old_location,
                 'new_location': new_location, 'check_only': True}
     try:
-        _write_field(cfg, sku, 'location', new_location)
-        if old_location and old_location != new_location:
-            _remove_location_link(cfg, sku, old_location)
-        _rebuild_location_link(cfg, sku, new_location)
+        from .item_mutation import legacy_mutate
+        result = legacy_mutate(cfg, sku, 'set',
+                               {'fields': {'location': new_location},
+                                'delete_fields': (['catalog_verified']
+                                                  if 'catalog_verified' in doc else [])})
+        if result['status'] != 'COMMITTED':
+            return {'ok': False, 'sku': sku, 'status': result['status'],
+                    'error': result.get('failures') or result.get('reason')}
         return {'ok': True, 'sku': sku, 'old_location': old_location,
-                'new_location': new_location}
+                'new_location': new_location, 'status': result['status']}
     except Exception as e:
         return {'ok': False, 'sku': sku, 'error': str(e)}
 
@@ -483,24 +438,17 @@ def verifiedupdate(cfg: Dict[str, Any], sku: str, value: str,
     if check_only:
         return {'ok': True, 'sku': sku, 'value': value, 'check_only': True}
     doc = load_item_doc(path)
-    doc['verified'] = value
-    doc['#STATUS'] = 'In Stock'
-    doc.pop('catalog_verified', None)
-    atomic_write_json(path, doc, pretty=True, archive_root=cfg.get('archive_root'))
-    # SQLite catalog upsert — see _write_field's identical block
-    # (PP-CATALOG-INCR-001 CI-2/CI-4). Code-review finding, 2026-07-18: this
-    # write path was missed when the upsert was added to _write_field/
-    # set_fields; without it, `tgw update-verified` never refreshed the
-    # SQLite catalog's status column until the hourly timer.
-    try:
-        from .sqlite_catalog import upsert_catalog_row
-        upsert_catalog_row(cfg, doc)
-    except Exception:
-        # C11: log, don't silently swallow — code-review finding, 2026-07-18
-        # (this file previously had no logger at all, so every upsert
-        # failure here was invisible).
-        log.warning("sqlite catalog upsert failed for %s", sku, exc_info=True)
-    return {'ok': True, 'sku': sku, 'field': 'verified', 'value': value}
+    from .item_mutation import legacy_mutate
+    result = legacy_mutate(cfg, sku, 'set',
+                           {'fields': {'verified': value, '#STATUS': 'In Stock'},
+                            'delete_fields': (['catalog_verified']
+                                              if 'catalog_verified' in doc else [])})
+    if result['status'] != 'COMMITTED':
+        return {'ok': False, 'sku': sku, 'field': 'verified', 'value': value,
+                'status': result['status'],
+                'error': result.get('failures') or result.get('reason')}
+    return {'ok': True, 'sku': sku, 'field': 'verified', 'value': value,
+            'status': result['status']}
 
 
 def statusupdate(cfg: Dict[str, Any], sku: str, value: str,
