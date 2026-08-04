@@ -43,6 +43,7 @@ def _run_sync(fake_bin: Path, mount_base: Path) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env["PATH"] = str(fake_bin) + ":" + env.get("PATH", "")
     env["TGW_OFFLINE_MOUNT_BASE"] = str(mount_base)
+    env["TGW_OFFLINE_LOG"] = str(mount_base / "offline-sync.log")
     return subprocess.run(
         ["bash", str(SCRIPT), _TEST_LABEL],
         env=env,
@@ -69,6 +70,7 @@ class TestStampPlacement:
         assert not (mount / ".tgw-sync-stamp").exists(), (
             "Stamp must NOT be at mount root for btrfs layout"
         )
+        assert (tmp_path / "offline-sync.log").exists()
 
     def test_legacy_layout_stamp_at_mount_root(self, tmp_path: Path) -> None:
         """Legacy flat layout (no @data subvolume): stamp stays at mount root."""
@@ -83,3 +85,4 @@ class TestStampPlacement:
             "Stamp must be at mount root for legacy layout"
         )
         assert not (mount / "@data" / ".tgw-sync-stamp").exists()
+        assert (tmp_path / "offline-sync.log").exists()
