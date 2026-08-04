@@ -255,6 +255,16 @@ def _write_field(cfg: Dict[str, Any], sku: str, field: str,
                            {'fields': fields, 'delete_fields': delete_fields})
     if result['status'] != 'COMMITTED':
         raise RuntimeError(f"item mutation {result['status']}: {result.get('failures') or result.get('reason')}")
+    # Preserve the established audit-stream side effect after the durable
+    # transaction commits. Publishing remains best-effort and cannot undo it.
+    try:
+        from .apis.nats_client import publish_mutation
+        publish_mutation(
+            sku=sku, field=field, old_value=before, new_value=value,
+            source=_mutation_source.get(), session_id=_session_id.get(),
+        )
+    except Exception:
+        pass
     # Preserve the old compatibility shape while exposing transaction truth.
     return {'sku': sku, 'field': field, 'before': before, 'after': value,
             'status': 'COMMITTED'}
@@ -314,6 +324,7 @@ def set_fields(cfg: Dict[str, Any], sku: str, fields: Dict[str, Any],
         return {'ok': True, 'sku': sku, 'would_set': to_set, 'check_only': True}
     if not to_set:
         return {'ok': True, 'sku': sku, 'set': {}}
+    before = {field: doc.get(field) for field in to_set}
     from .item_mutation import legacy_mutate
     delete_fields = ['catalog_verified'] if 'catalog_verified' in doc else []
     result = legacy_mutate(cfg, sku, 'set',
@@ -321,6 +332,15 @@ def set_fields(cfg: Dict[str, Any], sku: str, fields: Dict[str, Any],
     if result['status'] != 'COMMITTED':
         return {'ok': False, 'sku': sku, 'status': result['status'],
                 'error': result.get('failures') or result.get('reason')}
+    try:
+        from .apis.nats_client import publish_mutation
+        for field, value in to_set.items():
+            publish_mutation(
+                sku=sku, field=field, old_value=before[field], new_value=value,
+                source=_mutation_source.get(), session_id=_session_id.get(),
+            )
+    except Exception:
+        pass
     return {'ok': True, 'sku': sku, 'set': to_set}
 
 

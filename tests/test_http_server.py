@@ -111,8 +111,9 @@ def _make_catalog(db_path: Path, rows):
     con = sqlite3.connect(str(db_path))
     con.execute(
         "CREATE TABLE catalog ("
-        "sku TEXT, title TEXT, location TEXT, status TEXT, "
-        "price REAL, qty INTEGER, image TEXT, attribute_set TEXT, data TEXT)"
+        "sku TEXT PRIMARY KEY, title TEXT, location TEXT, status TEXT, "
+        "price REAL, qty INTEGER, image TEXT, attribute_set TEXT, data TEXT, "
+        "updated_at TEXT DEFAULT (datetime('now')))"
     )
     con.executemany(
         "INSERT INTO catalog (sku, title, location, status, price, qty, image, data) "

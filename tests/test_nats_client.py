@@ -269,3 +269,27 @@ class TestWriteFieldPublish:
             _write_field(cfg, sku, "qty", 2)
 
         assert captured_source == ["worker:test_worker"]
+
+    def test_set_fields_publishes_each_committed_mutation(self, tmp_path):
+        """The transactional multi-field path preserves the audit contract."""
+        sku = "tgw20260101000000003"
+        _make_item_dir(tmp_path, sku, {"sku": sku, "title": "old", "qty": 1})
+        cfg = _make_cfg(tmp_path, sku)
+
+        published = []
+
+        def _capture(sku, field, old_value, new_value, source, session_id=None):
+            published.append((field, old_value, new_value, source))
+
+        with patch("tgw.apis.nats_client.publish_mutation", _capture):
+            from tgw.items import set_fields, set_mutation_context
+            set_mutation_context("worker:bulk")
+            result = set_fields(
+                cfg, sku, {"title": "new", "qty": 2}, only_if_absent=False
+            )
+
+        assert result["ok"] is True
+        assert published == [
+            ("title", "old", "new", "worker:bulk"),
+            ("qty", 1, 2, "worker:bulk"),
+        ]
