@@ -293,3 +293,34 @@ class TestWriteFieldPublish:
             ("title", "old", "new", "worker:bulk"),
             ("qty", 1, 2, "worker:bulk"),
         ]
+
+    def test_set_fields_audit_failure_does_not_suppress_later_fields(self, tmp_path):
+        """A failed audit attempt must not suppress later committed fields."""
+        sku = "tgw20260101000000004"
+        _make_item_dir(tmp_path, sku, {"sku": sku})
+        cfg = _make_cfg(tmp_path, sku)
+        attempts = []
+
+        def _publish(sku, field, old_value, new_value, source, session_id=None):
+            attempts.append(field)
+            if field == "b":
+                raise RuntimeError("audit failure for b")
+
+        with patch("tgw.apis.nats_client.publish_mutation", _publish):
+            from tgw.items import set_fields
+            result = set_fields(
+                cfg, sku, {"a": 1, "b": 2, "c": 3}, only_if_absent=False
+            )
+
+        assert result == {
+            "ok": True,
+            "sku": sku,
+            "set": {"a": 1, "b": 2, "c": 3},
+        }
+        data = json.loads((tmp_path / sku / f"{sku}.json").read_text())
+        assert {field: data[field] for field in ("a", "b", "c")} == {
+            "a": 1,
+            "b": 2,
+            "c": 3,
+        }
+        assert attempts == ["a", "b", "c"]

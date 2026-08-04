@@ -335,10 +335,13 @@ def set_fields(cfg: Dict[str, Any], sku: str, fields: Dict[str, Any],
     try:
         from .apis.nats_client import publish_mutation
         for field, value in to_set.items():
-            publish_mutation(
-                sku=sku, field=field, old_value=before[field], new_value=value,
-                source=_mutation_source.get(), session_id=_session_id.get(),
-            )
+            try:
+                publish_mutation(
+                    sku=sku, field=field, old_value=before[field], new_value=value,
+                    source=_mutation_source.get(), session_id=_session_id.get(),
+                )
+            except Exception:
+                pass
     except Exception:
         pass
     return {'ok': True, 'sku': sku, 'set': to_set}
