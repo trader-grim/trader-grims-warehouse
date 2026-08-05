@@ -326,6 +326,13 @@ class EbayPublishWorker(QueueWorker):
                 s['due_at']  = now.isoformat()
         item['reprice_schedule'] = schedule
 
+        return {
+            "treatment_id": "ebay-publish",
+            "outcome": "satisfied",
+            "established_conditions": ("published",),
+            "artifacts": (f"item:{sku}",),
+        }
+
         # Record the publish price as the first price_history entry so the full
         # price trail is complete and auditable. Session 42 fix: record the
         # price that is ACTUALLY live on eBay (staged_price), not the schedule's

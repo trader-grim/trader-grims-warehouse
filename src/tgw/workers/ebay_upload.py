@@ -231,10 +231,13 @@ class EbayUploadWorker(QueueWorker):
                               total=len(reordered), new=new_count,
                               to_attempt=to_attempt)
 
-        try:
-            state_machine.enqueue_catalog_rebuild(f'ebay_upload:{sku}')
-        except psycopg2.errors.UniqueViolation:
-            pass
+
+        return {
+            "treatment_id": "ebay-upload",
+            "outcome": "satisfied",
+            "established_conditions": ("photos_uploaded",),
+            "artifacts": (f"item:{sku}",),
+        }
 
 
 def main() -> int:

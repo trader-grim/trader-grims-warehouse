@@ -26,7 +26,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
-import psycopg2.errors
 import requests
 
 import tgw.logging as tgw_logging
@@ -404,40 +403,14 @@ class EbayStageWorker(QueueWorker):
         tgw_logging.log_event('ebay_stage_complete', sku=sku,
                               offer_id=result['offer_id'])
 
-        try:
-            state_machine.enqueue_catalog_rebuild(f'ebay_stage:{sku}')
-        except psycopg2.errors.UniqueViolation:
-            pass
-
-        # Invariant C14 (2026-07-16 incident): this worker runs on nearly
-        # every real operator edit ("Update Listing" on an already-live
-        # item enqueues ebay_stage directly, never ebay_publish) yet never
-        # refreshed the local ebay_live mirror itself — only ebay_publish
-        # did (todo #1445), and only when this worker's own already-live
-        # republish trigger below happens to fire. Call it unconditionally
-        # here so the mirror refreshes on every successful stage, not just
-        # the subset that also happens to republish.
         enqueue_post_push_sync(sku)
 
-        # If the item was previously published, republish after staging.
-        # eBay sets the offer back to UNPUBLISHED on any updateOffer call
-        # (including category changes), so we must re-publish to restore live status.
-        if item.get('ebay_listing', {}).get('listing_id'):
-            try:
-                # Invariant C10: propagate operator provenance down the chain.
-                state_machine.enqueue_job(
-                    queue_name='ebay_publish',
-                    payload={'sku': sku,
-                             **({'origin': 'operator'}
-                                if payload.get('origin') == 'operator' else {})},
-                    entity_type='item',
-                    entity_id=sku,
-                    dedupe_key=f'ebay_publish:{sku}',
-                    max_attempts=3,
-                )
-                log.info('%s: was published — queued ebay_publish to restore live status', sku)
-            except psycopg2.errors.UniqueViolation:
-                pass
+        return {
+            "treatment_id": "ebay-stage",
+            "outcome": "satisfied",
+            "established_conditions": ("staged",),
+            "artifacts": (f"item:{sku}",),
+        }
 
 
 def main() -> int:

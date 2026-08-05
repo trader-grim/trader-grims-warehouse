@@ -249,27 +249,16 @@ class EbayPriceWorker(QueueWorker):
             top_level_patch['free_shipping'] = True
         fence_patch_item(self.config, sku, top_level_patch)
 
-        try:
-            state_machine.enqueue_catalog_rebuild(f'ebay_price:{sku}')
-        except psycopg2.errors.UniqueViolation:
-            pass
+
 
         # Only stage when we have a price — no point creating an offer with no price
-        if suggested is not None:
-            try:
-                # Invariant C10: propagate operator provenance down the chain.
-                state_machine.enqueue_job(
-                    queue_name='ebay_stage',
-                    payload={'sku': sku,
-                             **({'origin': 'operator'}
-                                if payload.get('origin') == 'operator' else {})},
-                    entity_type='item',
-                    entity_id=sku,
-                    dedupe_key=f'ebay_stage:{sku}',
-                    max_attempts=5,
-                )
-            except psycopg2.errors.UniqueViolation:
-                pass
+
+        return {
+            "treatment_id": "ebay-price",
+            "outcome": "satisfied",
+            "established_conditions": ("priced",),
+            "artifacts": (f"item:{sku}",),
+        }
 
 
 def main() -> int:

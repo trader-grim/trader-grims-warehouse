@@ -20,7 +20,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import psycopg2.errors
 import requests
 
 import tgw.logging as tgw_logging
@@ -37,7 +36,6 @@ from tgw.config import sku_json as _cfg_sku_json
 from tgw.ebay.aspect_translation import translate_inventory_to_ebay_draft
 from tgw.ebay.description import build_listing_description
 from tgw.ebay.draft_specifics import set_ebay_aspects, wrap_ebay_specifics
-from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
 log = logging.getLogger(__name__)
@@ -712,37 +710,6 @@ class EbayDraftWorker(QueueWorker):
                               specifics_filled=len(item_specifics),
                               item_specifics=item_specifics)
 
-        try:
-            state_machine.enqueue_catalog_rebuild(f'ebay_draft:{sku}')
-        except psycopg2.errors.UniqueViolation:
-            pass
-
-        # Invariant C10: operator provenance travels the whole chain — a draft
-        # job the operator pressed for hands its origin to price and upload.
-        _origin = {'origin': 'operator'} if payload.get('origin') == 'operator' else {}
-        try:
-            state_machine.enqueue_job(
-                queue_name='ebay_price',
-                payload={'sku': sku, **_origin},
-                entity_type='item',
-                entity_id=sku,
-                dedupe_key=f'ebay_price:{sku}',
-                max_attempts=5,
-            )
-        except psycopg2.errors.UniqueViolation:
-            pass
-
-        try:
-            state_machine.enqueue_job(
-                queue_name='ebay_upload',
-                payload={'sku': sku, **_origin},
-                entity_type='item',
-                entity_id=sku,
-                dedupe_key=f'ebay_upload:{sku}',
-                max_attempts=5,
-            )
-        except psycopg2.errors.UniqueViolation:
-            pass
 
         # If the item is already staged/live on eBay, the regenerated draft is
         # NOT pushed automatically. Dave's rule (session 42): "we cannot have
@@ -755,6 +722,15 @@ class EbayDraftWorker(QueueWorker):
                      '(NOT auto-pushed to the existing offer)', sku)
             tgw_logging.log_event('ebay_draft_live_update_pending', sku=sku,
                                   offer_id=item['ebay_offer']['offer_id'])
+
+        return {
+            "treatment_id": "ebay-draft",
+            "outcome": "satisfied",
+            "established_conditions": ("draft_generated",),
+            "artifacts": (f"item:{sku}",),
+        }
+
+
 
 
 def main() -> int:
