@@ -26,6 +26,7 @@
     '<div class="nav-dropdown">' +
       '<button class="nav-dropdown-toggle">Admin &#9662;</button>' +
       '<div class="nav-dropdown-menu">' +
+        '<a href="/form/size-classes">Size Classes</a>' +
         '<a href="/form/todos">Todos</a>' +
         '<a href="/form/runs">Agent Runs</a>' +
       '</div>' +
