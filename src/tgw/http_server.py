@@ -11162,3 +11162,31 @@ async def ebay_notification_webhook(request: Request) -> Dict[str, Any]:
         log.error("ebay_webhook: mark failed listing_id=%s: %s", listing_id, exc)
 
     return {"ack": "Success"}
+
+
+@app.post("/api/cli", dependencies=[AUTH])
+async def api_cli(request: Request):
+    import subprocess
+    body = await request.json()
+    cmd = body.get("command", "")
+    args = body.get("args", [])
+    BLOCKED = {"update","update-where","update-title","update-location",
+        "update-verified","update-status","set-shipping","bulk",
+        "price-freeship","hint","data-scrub","revise","alt-text",
+        "enqueue-sku","requeue-identify","resolve-legacy","ready",
+        "publish","alt-text-batch","ebay-pull","import-sold-csv",
+        "sku-migrate","migrate-unblock","migrate-restore",
+        "restart-workers","restart-ebay-token","nix-bundle-usb",
+        "set-context","clear-context","set-template","create-item",
+        "serve","flake"}
+    if cmd in BLOCKED:
+        return {"ok": False, "error": f"{cmd} is write-protected"}
+    fc = ["/opt/TGW/.venvironments/tgw/bin/tgw", cmd] + [str(a) for a in args]
+    try:
+        p = subprocess.run(fc, capture_output=True, text=True, timeout=30)
+        return {"ok": True, "command": cmd, "exit_code": p.returncode,
+                "stdout": p.stdout[:50000], "stderr": p.stderr[:5000]}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "timed out"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
