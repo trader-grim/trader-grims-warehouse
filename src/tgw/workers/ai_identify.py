@@ -23,10 +23,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import psycopg2.errors
-
 import tgw.logging as tgw_logging
 from tgw import inventory_record, quota
+from tgw.apis.ebay.specifics import get_category_group_aspects
 from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.apis.llm import CLOUD_PROVIDERS, call_model, get_task_model
 from tgw.apis.ollama import extract_json, is_available
@@ -34,7 +33,6 @@ from tgw.assets import ordered_photos as _asset_ordered_photos
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.config import sku_dir as _cfg_sku_dir
 from tgw.items import append_history_event
-from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
 log = logging.getLogger(__name__)
@@ -145,6 +143,77 @@ Respond with JSON matching this schema (null for any field you cannot determine)
 )
 
 
+def _prompt_for_item(
+    item: Dict[str, Any],
+    cfg: Dict[str, Any],
+    *,
+    hint: str,
+    product_context: str,
+) -> str:
+    """Build the identify prompt, adding the category-group Set A targets.
+
+    The ordinary ``item_specifics`` catch-all stays in the schema. If group
+    metadata or taxonomy is unavailable, identification keeps that established
+    freeform behavior and records the degradation instead of using a partial
+    union or borrowing the selected-category Set B definition.
+    """
+    if product_context:
+        prompt = _USER_PROMPT_ENRICHED.replace("{product_context}", product_context)
+    elif hint:
+        prompt = _USER_PROMPT_HINTED.replace("{hint}", hint)
+    else:
+        prompt = _USER_PROMPT
+
+    group_name = str(item.get("category_group") or "").strip()
+    groups_path = cfg.get("category_groups_path")
+    if not group_name or not groups_path:
+        return prompt
+
+    try:
+        groups = json.loads(Path(groups_path).read_text(encoding="utf-8"))
+        group = groups.get("groups", {}).get(group_name)
+        if group is None:
+            log.warning(
+                "ai_identify: Set A aspect targets unavailable for category "
+                "group %r: missing metadata",
+                group_name,
+            )
+            return prompt
+        category_ids = group.get("ebay_categories")
+        if category_ids is None:
+            category_ids = group.get("category_candidates", [])
+        if not category_ids:
+            log.warning(
+                "ai_identify: Set A aspect targets unavailable for category "
+                "group %r: empty category list",
+                group_name,
+            )
+            return prompt
+        aspects = get_category_group_aspects(cfg, category_ids)
+    except quota.QuotaBudgetExceeded:
+        raise
+    except Exception as exc:
+        log.warning(
+            "ai_identify: Set A aspect targets unavailable for category group %r: %s",
+            group_name,
+            exc,
+        )
+        return prompt
+
+    names = [str(aspect["name"]) for aspect in aspects if aspect.get("name")]
+    if not names:
+        return prompt
+    return (
+        f"{prompt}\n"
+        "Set A category-group target aspects (official eBay aspect-name union "
+        "across every category in this group):\n"
+        f"{json.dumps(names, ensure_ascii=False)}\n"
+        "Include every grounded value for these names in item_specifics. "
+        "Keep using item_specifics for other notable observable attributes too; "
+        "do not guess values merely to fill the target list.\n"
+    )
+
+
 def _encode_resized(img_path: Path, max_px: int = _VISION_MAX_PX) -> tuple[str, int, int]:
     """Return (base64_str, orig_kb, resized_kb) with image resized to max_px longest edge."""
     try:
@@ -228,13 +297,12 @@ class AIIdentifyWorker(QueueWorker):
 
         provider, model = get_task_model(self.config, "ai_identify")
 
-        if product_context:
-            # Use replace() not format() — the schema contains literal {} JSON braces
-            prompt = _USER_PROMPT_ENRICHED.replace('{product_context}', product_context)
-        elif hint:
-            prompt = _USER_PROMPT_HINTED.replace('{hint}', hint)
-        else:
-            prompt = _USER_PROMPT
+        prompt = _prompt_for_item(
+            item,
+            self.config,
+            hint=hint,
+            product_context=product_context,
+        )
 
         # Select photos — cloud providers get multiple images; Ollama gets one
         all_photos = _asset_ordered_photos(item, sku_dir)
@@ -255,9 +323,12 @@ class AIIdentifyWorker(QueueWorker):
 
         img_hash = compute_dhash(img_path)
         import hashlib
+        cache_context = prompt if "Set A category-group target aspects" in prompt else (
+            product_context or hint or ""
+        )
         context_sig = hashlib.sha256(
-            (product_context or hint or "").encode("utf-8")
-        ).hexdigest()[:16] if (product_context or hint) else "no_context"
+            cache_context.encode("utf-8")
+        ).hexdigest()[:16] if cache_context else "no_context"
         cache_key = f"{img_hash}:{context_sig}" if img_hash else None
         # Only use cache for single-photo calls — multi-photo gives richer results
         use_cache = len(candidate_photos) == 1
@@ -477,37 +548,17 @@ class AIIdentifyWorker(QueueWorker):
             "ai_identify_complete", sku=sku, title=title, category=category, condition=condition, hint=hint or None, ebay_category_id=ebay_category_id, ebay_category_name=ebay_category_name
         )
 
-        # Enqueue ebay_draft and alt_text unless this was a catalog-only run
-        catalog_only = bool(payload.get("catalog_only"))
-        if not catalog_only:
-            try:
-                state_machine.enqueue_job(
-                    queue_name="ebay_draft",
-                    payload={"sku": sku},
-                    entity_type="item",
-                    entity_id=sku,
-                    dedupe_key=f"ebay_draft:{sku}",
-                    max_attempts=3,
-                )
-            except psycopg2.errors.UniqueViolation:
-                pass
-            try:
-                state_machine.enqueue_job(
-                    queue_name="alt_text",
-                    payload={"sku": sku},
-                    entity_type="item",
-                    entity_id=sku,
-                    dedupe_key=f"alt_text:{sku}",
-                    max_attempts=3,
-                )
-            except psycopg2.errors.UniqueViolation:
-                pass
-
-        # Enqueue downstream rebuild
-        try:
-            state_machine.enqueue_catalog_rebuild(f"ai_identify:{sku}")
-        except psycopg2.errors.UniqueViolation:
-            pass
+        # Phase 4: return a structured receipt instead of hardcoding successor
+        # enqueue. The scheduler reads this receipt and re-evaluates the item
+        # to pick the next eligible treatment (ebay-draft, alt-text, etc.).
+        return {
+            "treatment_id": "ai-identify",
+            "treatment_version": "1",
+            "graph_id": None,  # filled by scheduler at dispatch time
+            "outcome": "satisfied",
+            "established_conditions": ("ai_identified",),
+            "artifacts": (f"item:{sku}",),
+        }
 
 
 def main() -> int:
