@@ -494,6 +494,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
         "suggest", "quiet-check", "perp-run", "whisper-suggest",
         "claude-help", "clip", "suggest-edit", "promo", "nix-bundle-usb",
         "mailbox", "trace", "flake",
+        "coding",
     ]),
 ]
 
@@ -1038,6 +1039,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--depends", default=None, metavar="IDS", help="comma-separated todo ids this item depends on (for --add / --set-meta)")
     p.add_argument("--anchor", default=None, metavar="HEADING", help="master-plan heading text the item links to (for --add / --set-meta)")
     p.add_argument("--set-meta", type=int, default=None, metavar="ID", dest="set_meta", help="set --pp/--depends/--anchor on an existing item")
+    p.add_argument("--status-note", default=None, metavar="TEXT", help="progress metadata for --set-meta (for example an in-progress worktree)")
     p.add_argument("--clip", action="store_true", help="copy brief output to clipboard (brief mode only)")
     p.add_argument("--next", action="store_true", dest="next_task",
                    help="shorthand: top open task for AGENT, print brief + copy to clipboard; "
@@ -1045,6 +1047,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--nextloop", action="store_true", dest="nextloop",
                    help="loop --next continuously until tasks are exhausted or user quits (y=done/s=skip/q=quit)")
     p.add_argument("--agent", default=None, metavar="AGENT", dest="next_agent", help="agent name for --next / --nextloop (e.g. claude, gemini, admin, tigwa)")
+
+    p = sub.add_parser("coding", help="manage Codex workers and worktrees on tgw-lib")
+    coding_sub = p.add_subparsers(dest="coding_op", required=True)
+    cp = coding_sub.add_parser("start", help="create a todo worktree for Foreman")
+    cp.add_argument("todo_id", type=int, metavar="TODO-ID")
+    coding_sub.add_parser("status", help="show running Codex workers")
+    cp = coding_sub.add_parser("stop", help="stop a Codex worker and keep its worktree")
+    cp.add_argument("worker_id", type=int, metavar="WORKER-ID")
+    cp = coding_sub.add_parser("log", help="show a Codex worker receipt or stdout")
+    cp.add_argument("worker_id", type=int, metavar="WORKER-ID")
 
     p = sub.add_parser("plan", help="plan/taskboard operations (PP-PLANDB-001)")
     p.add_argument(
@@ -5639,6 +5651,11 @@ def main() -> int:
             result = cmd_todo(cfg, args)
             # cmd_todo handles its own printing; skip the generic JSON dump
             return 0 if result.get("ok", True) else 1
+
+        elif args.op == "coding":
+            from tgw.coding_cli import run as run_coding
+
+            return run_coding(args)
 
         elif args.op == "plan":
             if args.plan_op == "render":
