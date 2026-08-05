@@ -209,7 +209,7 @@ class QueueWorker:
 
         try:
             state_machine.mark_running(job_id, self.owner)
-            self.handle(job)
+            _handle_result = self.handle(job)
         except HardFailure as exc:
             log.error('job %s hard failure (dead_letter): %s', job_id, exc)
             state_machine.mark_dead_letter(job_id, self.owner, repr(exc))
@@ -268,7 +268,8 @@ class QueueWorker:
                 )
                 self._on_terminal_failure(job, error_text)
         else:
-            state_machine.mark_succeeded(job_id, self.owner)
+            receipt = _handle_result if isinstance(_handle_result, dict) else None
+            state_machine.mark_succeeded(job_id, self.owner, result=receipt)
             tgw_logging.log_event('job_succeeded', job_id=job_id)
             log.info('job %s succeeded', job_id)
         finally:

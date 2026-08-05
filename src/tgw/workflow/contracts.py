@@ -107,3 +107,14 @@ class RuntimeWorkGraph:
     reconciliation_gates: tuple[str, ...]
     next_event_classes: tuple[str, ...]
     retry_requested: bool = False
+
+
+@dataclass(frozen=True)
+class TreatmentReceipt:
+    treatment_id: str
+    treatment_version: str
+    graph_id: str
+    outcome: str
+    established_conditions: tuple[str, ...]
+    artifacts: tuple[str, ...]
+    error_detail: str = ""

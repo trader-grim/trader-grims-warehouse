@@ -468,23 +468,47 @@ def mark_running(job_id: str, lease_owner: str) -> None:
 
 
 def mark_succeeded(job_id: str, lease_owner: str, result: Optional[Dict[str, Any]] = None) -> None:
-    """Transition running → succeeded."""
+    """Transition running → succeeded.
+
+    When *result* is supplied, it is persisted into ``payload_json.result``
+    via PostgreSQL jsonb merge so downstream evaluators can reconstruct a
+    :class:`tgw.workflow.contracts.TreatmentReceipt` directly from the queue
+    row without re-executing the worker.
+    """
     with _conn() as con:
         with con.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE queue_jobs
-                   SET state = 'succeeded',
-                       finished_at = NOW(),
-                       lease_owner = NULL,
-                       lease_token = NULL,
-                       lease_expires_at = NULL,
-                       error_code = NULL,
-                       error_detail = NULL
-                 WHERE job_id = %s AND state = 'running' AND lease_owner = %s
-                """,
-                (job_id, lease_owner),
-            )
+            if result is not None:
+                cur.execute(
+                    """
+                    UPDATE queue_jobs
+                       SET state = 'succeeded',
+                           finished_at = NOW(),
+                           lease_owner = NULL,
+                           lease_token = NULL,
+                           lease_expires_at = NULL,
+                           error_code = NULL,
+                           error_detail = NULL,
+                           payload_json = COALESCE(payload_json, '{}'::jsonb)
+                                          || jsonb_build_object('result', %s::jsonb)
+                     WHERE job_id = %s AND state = 'running' AND lease_owner = %s
+                    """,
+                    (json.dumps(result), job_id, lease_owner),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE queue_jobs
+                       SET state = 'succeeded',
+                           finished_at = NOW(),
+                           lease_owner = NULL,
+                           lease_token = NULL,
+                           lease_expires_at = NULL,
+                           error_code = NULL,
+                           error_detail = NULL
+                     WHERE job_id = %s AND state = 'running' AND lease_owner = %s
+                    """,
+                    (job_id, lease_owner),
+                )
 
 
 def mark_failed(job_id: str, lease_owner: str, error: str) -> str:
