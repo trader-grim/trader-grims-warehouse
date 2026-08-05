@@ -8,6 +8,26 @@ Auth: Bearer <api_key> — key stored in secrets_root/tgw-api-key.json
 """
 
 from __future__ import annotations
+# ---------------------------------------------------------------------------
+    full_cmd = [tgw_bin, cmd] + [str(a) for a in args]
+
+    try:
+        proc = subprocess.run(
+            full_cmd, capture_output=True, text=True, timeout=30,
+            env={"PATH": "/usr/bin:/bin", "HOME": "/tmp"},
+        )
+        return {
+            "ok": True,
+            "command": cmd,
+            "exit_code": proc.returncode,
+            "stdout": proc.stdout[:50000],
+            "stderr": proc.stderr[:5000],
+        }
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "command timed out"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
 
 import json
 import logging
@@ -2243,6 +2263,43 @@ def queue_status() -> Dict[str, Any]:
 
 # ---------------------------------------------------------------------------
 # GET /api/queue/daily_stats — date-scoped per-queue outcome counts
+# ---------------------------------------------------------------------------
+# GET /api/todos — list open todos (read-only operator access)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/todos", dependencies=[AUTH])
+def api_todos(agent: str = ""):
+    """Return open todos from the todo_items table."""
+    try:
+        with psycopg2.connect(_cfg["postgres_dsn"]) as con:
+            with con.cursor() as cur:
+                if agent:
+                    cur.execute(
+                        "SELECT id, agent, priority, body, added_at "
+                        "FROM todo_items WHERE state = %s AND agent = %s "
+                        "ORDER BY priority DESC, id",
+                        ("open", agent),
+                    )
+                else:
+                    cur.execute(
+                        "SELECT id, agent, priority, body, added_at "
+                        "FROM todo_items WHERE state = %s "
+                        "ORDER BY priority DESC, id",
+                        ("open",),
+                    )
+                rows = cur.fetchall()
+        items = [
+            {
+                "id": r[0], "agent": r[1], "priority": r[2],
+                "title": (r[3] or "")[:200], "added": str(r[4]) if r[4] else "",
+            }
+            for r in rows
+        ]
+        return {"ok": True, "count": len(items), "items": items}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
 # (PP-QUEUESTATS-001: queue_status() above is lifetime-cumulative and cannot
 #  answer "how many succeeded/failed TODAY" — this reads queue_daily_stats,
 #  a Postgres view over the append-only queue_job_history ledger, so retried
