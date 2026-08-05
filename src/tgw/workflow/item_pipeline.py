@@ -10,7 +10,6 @@ process_item() handles one item JSON; process_items() scans a directory.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,11 +20,10 @@ from .contracts import (
     GoalProfile,
     ObjectSnapshot,
     TreatmentContract,
-    TreatmentDisposition,
+    TreatmentReceipt,
 )
 from .evaluator import evaluate
 from .item_snapshot import build_item_snapshot
-from .receipt import TreatmentReceipt
 from .scheduler import DispatchResult, dispatch_treatment
 
 log = logging.getLogger(__name__)
@@ -291,10 +289,6 @@ def evaluate_and_dispatch(
 
 def _all_requirements_satisfied(graph, snapshot):
     """Check if all required goal conditions are satisfied."""
-    required = set(graph.satisfied_requirements) | set(
-        r for r, f in graph.explicit_requirements
-        if f in {FingerprintResult.TRUE, FingerprintResult.NOT_APPLICABLE}
-    )
     unmet = set(graph.unmet_requirements)
     explicit_unmet = {
         r for r, f in graph.explicit_requirements

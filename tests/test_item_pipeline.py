@@ -11,27 +11,21 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from tgw.workflow.contracts import (  # noqa: E402
     EffectClass,
-    EvidenceAssertion,
-    EvidenceReference,
     FingerprintResult,
     GoalProfile,
-    ObjectSnapshot,
     Requirement,
     TreatmentContract,
     TreatmentDisposition,
+    TreatmentReceipt,  # noqa: E402
 )
 from tgw.workflow.evaluator import evaluate  # noqa: E402
 from tgw.workflow.item_pipeline import (  # noqa: E402
-    ItemResult,
-    PipelineSummary,
     evaluate_and_dispatch,
     process_item,
     process_items,
 )
 from tgw.workflow.item_snapshot import build_item_snapshot  # noqa: E402
-from tgw.workflow.receipt import TreatmentReceipt  # noqa: E402
-from tgw.workflow.scheduler import DispatchResult, dispatch_treatment  # noqa: E402
-
+from tgw.workflow.scheduler import dispatch_treatment  # noqa: E402
 
 # ────────────────────────────────────────────────────────────────────────────
 # Fixtures

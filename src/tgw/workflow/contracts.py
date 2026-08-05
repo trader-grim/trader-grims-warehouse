@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+import json
+from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 
 class FingerprintResult(str, Enum):
@@ -107,3 +110,79 @@ class RuntimeWorkGraph:
     reconciliation_gates: tuple[str, ...]
     next_event_classes: tuple[str, ...]
     retry_requested: bool = False
+
+
+# ── Phase 3+4: TreatmentReceipt ───────────────────────────────────────────
+
+@dataclass(frozen=True)
+class TreatmentReceipt:
+    """A receipt emitted by a worker after completing a treatment.
+
+    Carried through QueueWorker._process() after handle() returns.
+    The scheduler reads this to re-evaluate the item and enqueue the
+    next eligible treatment.
+    """
+
+    treatment_id: str
+    treatment_version: str
+    graph_id: str | None = None
+    outcome: str = "satisfied"
+    established_conditions: tuple[str, ...] = ()
+    artifacts: tuple[str, ...] = ()
+    error_detail: str = ""
+    evidence: dict[str, Any] = field(default_factory=dict)
+    receipt_schema_id: str = "treatment-receipt/v1"
+
+    @property
+    def fingerprint(self) -> str:
+        """Deterministic receipt fingerprint."""
+        payload = {
+            "treatment_id": self.treatment_id,
+            "treatment_version": self.treatment_version,
+            "graph_id": self.graph_id,
+            "outcome": self.outcome,
+            "established_conditions": sorted(self.established_conditions),
+            "artifacts": sorted(self.artifacts),
+            "receipt_schema_id": self.receipt_schema_id,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True).encode()
+        ).hexdigest()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "treatment_id": self.treatment_id,
+            "treatment_version": self.treatment_version,
+            "graph_id": self.graph_id,
+            "outcome": self.outcome,
+            "established_conditions": list(self.established_conditions),
+            "artifacts": list(self.artifacts),
+            "error_detail": self.error_detail,
+            "evidence": self.evidence,
+            "receipt_schema_id": self.receipt_schema_id,
+            "fingerprint": self.fingerprint,
+        }
+
+    @classmethod
+    def from_worker_return(cls, data: dict[str, Any]) -> TreatmentReceipt:
+        """Construct a receipt from a worker's return dict."""
+        return cls(
+            treatment_id=str(data.get("treatment_id", "")),
+            treatment_version=str(data.get("treatment_version", "1")),
+            graph_id=data.get("graph_id"),
+            outcome=str(data.get("outcome", "satisfied")),
+            established_conditions=tuple(data.get("established_conditions", ())),
+            artifacts=tuple(data.get("artifacts", ())),
+            error_detail=str(data.get("error_detail", "")),
+            evidence=data.get("evidence", {}),
+            receipt_schema_id=str(
+                data.get("receipt_schema_id", "treatment-receipt/v1")
+            ),
+        )
+
+
+# Outcomes
+OUTCOME_SATISFIED = "satisfied"
+OUTCOME_FAILED = "failed"
+OUTCOME_PARTIAL = "partial"
+OUTCOME_CONFLICT = "conflict"
