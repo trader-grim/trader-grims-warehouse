@@ -78,6 +78,7 @@ def evaluate(
     condition_ids = set(goal.required)
     for treatment in treatments:
         condition_ids.update(requirement.condition_id for requirement in treatment.requires)
+        condition_ids.update(treatment.may_establish)
     fingerprints = tuple(_derive_fingerprint(item, snapshot.assertions) for item in sorted(condition_ids))
     by_id = {item.condition_id: item for item in fingerprints}
 
@@ -99,6 +100,18 @@ def evaluate(
         elif unmet_requirements:
             reasons = tuple(_reason(by_id[item.condition_id]) for item in unmet_requirements)
             waiting.append(TreatmentDisposition(treatment.identity, treatment.version, reasons))
+        elif treatment.may_establish and all(
+            by_id[condition_id].result
+            in {FingerprintResult.TRUE, FingerprintResult.NOT_APPLICABLE}
+            for condition_id in treatment.may_establish
+        ):
+            waiting.append(
+                TreatmentDisposition(
+                    treatment.identity,
+                    treatment.version,
+                    ("all treatment conditions already established",),
+                )
+            )
         else:
             reasons = tuple(_reason(by_id[item.condition_id]) for item in treatment.requires)
             eligible.append(TreatmentDisposition(treatment.identity, treatment.version, reasons))

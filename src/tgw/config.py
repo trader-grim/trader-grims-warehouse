@@ -245,6 +245,10 @@ def load_config(path: Path) -> Dict[str, Any]:
         "backup_snapshot_root": backup_snapshot_root,
         "backup_secrets_dir": backup_secrets_dir,
         "backup_rclone_stamp": backup_rclone_stamp,
+        # Coding workers consume this normalized section directly.  Retain
+        # ``raw`` below for compatibility with callers needing other custom
+        # configuration.
+        "coding": raw.get("coding", {}),
         "raw": raw,
     }
 

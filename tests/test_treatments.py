@@ -261,11 +261,11 @@ def test_claude_review_requires_three_true_conditions():
         assert FingerprintResult.TRUE in req.accepted_results
 
 
-def test_hermes_stitch_requires_controller_verified_true():
-    """hermes-stitch gates on controller_verified:TRUE."""
-    req = HERMES_STITCH.requires[0]
-    assert req.condition_id == "controller_verified"
-    assert FingerprintResult.TRUE in req.accepted_results
+def test_hermes_stitch_requires_human_admission_before_committing():
+    """Stitch is post-admission work and cannot establish admission itself."""
+    conditions = {req.condition_id for req in HERMES_STITCH.requires}
+    assert conditions == {"reviewed", "controller_verified", "admitted"}
+    assert HERMES_STITCH.may_establish == ("committed",)
 
 
 def test_operator_admit_requires_reviewed_and_controller_verified():
@@ -333,7 +333,7 @@ def test_coding_pipeline_evaluate_with_all_treatments():
     eligible = {e.treatment_id for e in g2.eligible_treatments}
     assert eligible == {"claude-review", "controller-verify"}
 
-    # Phase 3: reviewed + controller_verified — all four eligible.
+    # Phase 3: receipts suppress already-complete review/verify; advance.
     g3 = _evaluate(
         (
             _assertion("implemented", FingerprintResult.TRUE),
@@ -345,7 +345,21 @@ def test_coding_pipeline_evaluate_with_all_treatments():
         CODING_TREATMENTS,
     )
     eligible = {e.treatment_id for e in g3.eligible_treatments}
-    assert eligible == {"claude-review", "controller-verify", "hermes-stitch", "operator-admit"}
+    assert eligible == {"operator-admit"}
+
+    # The operator-established admission is the only route to stitching.
+    g4 = _evaluate(
+        (
+            _assertion("implemented", FingerprintResult.TRUE),
+            _assertion("tested", FingerprintResult.TRUE),
+            _assertion("linted", FingerprintResult.TRUE),
+            _assertion("reviewed", FingerprintResult.TRUE),
+            _assertion("controller_verified", FingerprintResult.TRUE),
+            _assertion("admitted", FingerprintResult.TRUE),
+        ),
+        CODING_TREATMENTS,
+    )
+    assert {e.treatment_id for e in g4.eligible_treatments} == {"hermes-stitch"}
 
 
 def test_tgw_pipeline_evaluate_with_all_treatments():
@@ -383,7 +397,7 @@ def test_tgw_pipeline_evaluate_with_all_treatments():
     )
     eligible = {e.treatment_id for e in g3.eligible_treatments}
     assert "ebay-stage" in eligible
-    assert "ebay-draft" in eligible
+    assert "ebay-draft" not in eligible
 
     # Phase 4: staged — ebay-publish eligible.
     g4 = _evaluate(
@@ -399,4 +413,4 @@ def test_tgw_pipeline_evaluate_with_all_treatments():
     )
     eligible = {e.treatment_id for e in g4.eligible_treatments}
     assert "ebay-publish" in eligible
-    assert "ebay-stage" in eligible
+    assert "ebay-stage" not in eligible

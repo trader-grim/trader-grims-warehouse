@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 # Ensure src/ is on the path so we can import tgw.workflow
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -17,6 +18,7 @@ from tgw.workflow import (  # noqa: E402
 )
 from tgw.workflow.coding_snapshot import (  # noqa: E402
     _CHECKERS,
+    CONTROLLER_PYTHON,
     _check_admitted,
     _check_committed,
     _check_implemented,
@@ -27,6 +29,17 @@ from tgw.workflow.coding_snapshot import (  # noqa: E402
     _git_rev_parse,
     build_coding_snapshot,
 )
+
+
+def test_test_and_lint_checks_use_controller_python(tmp_path):
+    """Coding snapshots must not depend on an arbitrary PATH python."""
+    completed = subprocess.CompletedProcess([], 0, "", "")
+    with patch("tgw.workflow.coding_snapshot.subprocess.run", return_value=completed) as run:
+        _CHECKERS["tested"](tmp_path)
+        _CHECKERS["linted"](tmp_path)
+
+    assert run.call_args_list[0].args[0][:2] == [CONTROLLER_PYTHON, "-m"]
+    assert run.call_args_list[1].args[0][:2] == [CONTROLLER_PYTHON, "-m"]
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -260,17 +273,17 @@ class TestCheckReceipt:
 
     def test_true_when_pass(self, tmp_path):
         (tmp_path / "review-receipt.json").write_text(
-            json.dumps({"status": "PASS", "reviewer": "alice"})
+            json.dumps({"status": "PASS", "outcome": "satisfied", "established_conditions": ["reviewed"], "graph_id": "g", "object_id": "o", "object_generation": "x"})
         )
-        result, reasons, _ = _check_receipt(tmp_path, "reviewed")
+        result, reasons, _ = _check_receipt(tmp_path, "reviewed", "o", "x")
         assert result is FingerprintResult.TRUE
         assert any("PASS" in r for r in reasons)
 
     def test_false_when_fail(self, tmp_path):
         (tmp_path / "review-receipt.json").write_text(
-            json.dumps({"status": "FAIL", "issues": ["bad code"]})
+            json.dumps({"status": "FAIL", "issues": ["bad code"], "graph_id": "g", "object_id": "o", "object_generation": "x"})
         )
-        result, reasons, _ = _check_receipt(tmp_path, "reviewed")
+        result, reasons, _ = _check_receipt(tmp_path, "reviewed", "o", "x")
         assert result is FingerprintResult.FALSE
         assert any("FAIL" in r for r in reasons)
 
@@ -280,16 +293,16 @@ class TestCheckReceipt:
 
     def test_deployment_receipt(self, tmp_path):
         (tmp_path / "deployment-receipt.json").write_text(
-            json.dumps({"status": "PASS", "env": "production"})
+            json.dumps({"status": "PASS", "outcome": "satisfied", "established_conditions": ["deployed"], "graph_id": "g", "object_id": "o", "object_generation": "x"})
         )
-        result, reasons, _ = _check_receipt(tmp_path, "deployed")
+        result, reasons, _ = _check_receipt(tmp_path, "deployed", "o", "x")
         assert result is FingerprintResult.TRUE
 
     def test_controller_harness_receipt(self, tmp_path):
         (tmp_path / "controller-harness-receipt.json").write_text(
-            json.dumps({"status": "PASS"})
+            json.dumps({"status": "PASS", "outcome": "satisfied", "established_conditions": ["controller_verified"], "graph_id": "g", "object_id": "o", "object_generation": "x"})
         )
-        result, reasons, _ = _check_receipt(tmp_path, "controller_verified")
+        result, reasons, _ = _check_receipt(tmp_path, "controller_verified", "o", "x")
         assert result is FingerprintResult.TRUE
 
 
@@ -326,10 +339,13 @@ class TestBuildCodingSnapshot:
         _git_commit(tmp_path, "initial", allow_empty=True)
         _git_checkout_b(tmp_path, "feature/x")
         _git_write_file(tmp_path, "src.py", "def f(): pass")
-        (tmp_path / "review-receipt.json").write_text(
-            json.dumps({"status": "PASS"})
-        )
-        _git_commit(tmp_path, "add feature + receipt")
+        _git_commit(tmp_path, "add feature")
+        unbound = build_coding_snapshot(tmp_path, _goal("implemented"))
+        (tmp_path / "review-receipt.json").write_text(json.dumps({
+            "status": "PASS", "graph_id": "g", "object_id": str(tmp_path.resolve()),
+            "object_generation": unbound.generation, "outcome": "satisfied",
+            "established_conditions": ["reviewed"],
+        }))
 
         snapshot = build_coding_snapshot(
             tmp_path,
@@ -340,6 +356,30 @@ class TestBuildCodingSnapshot:
         assert by_id["implemented"].result is FingerprintResult.TRUE
         assert by_id["committed"].result is FingerprintResult.TRUE
         assert by_id["reviewed"].result is FingerprintResult.TRUE
+
+    def test_stale_receipt_does_not_establish_conditions_after_source_change(self, tmp_path):
+        _git_init(tmp_path)
+        _git_commit(tmp_path, "initial", allow_empty=True)
+        _git_checkout_b(tmp_path, "feature/x")
+        _git_write_file(tmp_path, "x.py", "x = 1")
+        _git_commit(tmp_path, "feature")
+        first = build_coding_snapshot(tmp_path, _goal("reviewed", "controller_verified"))
+        receipt = {"status": "PASS", "graph_id": "g", "object_id": str(tmp_path.resolve()), "object_generation": first.generation, "outcome": "satisfied"}
+        (tmp_path / "review-receipt.json").write_text(json.dumps({**receipt, "established_conditions": ["reviewed"]}))
+        (tmp_path / "controller-harness-receipt.json").write_text(json.dumps({**receipt, "established_conditions": ["controller_verified"]}))
+        assert all(a.result is FingerprintResult.TRUE for a in build_coding_snapshot(tmp_path, _goal("reviewed", "controller_verified")).assertions)
+        _git_write_file(tmp_path, "x.py", "x = 2")
+        stale = build_coding_snapshot(tmp_path, _goal("reviewed", "controller_verified"))
+        assert all(a.result is FingerprintResult.STALE for a in stale.assertions)
+
+    def test_stitch_receipt_does_not_dirty_or_change_generation(self, tmp_path):
+        _git_init(tmp_path)
+        _git_commit(tmp_path, "initial", allow_empty=True)
+        before = build_coding_snapshot(tmp_path, _goal("committed"))
+        (tmp_path / "stitch-receipt.json").write_text('{"status":"PASS"}')
+        after = build_coding_snapshot(tmp_path, _goal("committed"))
+        assert after.generation == before.generation
+        assert after.assertions[0].result is FingerprintResult.TRUE
 
     def test_unknown_condition_is_unknown(self, tmp_path):
         """A condition with no checker returns UNKNOWN."""

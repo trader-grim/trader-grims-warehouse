@@ -8,9 +8,14 @@ queue worker enqueue calls, and returns structured DispatchResult.
 
 from __future__ import annotations
 
+import importlib
+import json
 import logging
-from dataclasses import dataclass
+import os
+from dataclasses import asdict, dataclass
 from typing import Any, Optional
+
+from tgw.workers.coding import validated_coding_worktree
 
 from .contracts import (
     GoalProfile,
@@ -36,6 +41,8 @@ class DispatchResult:
     entity_id: str
     enqueued: bool
     job_id: str = ""
+    outcome: str = "dispatched"
+    action_card_required: bool = False
 
 
 # ── Phase 4: treatment-to-queue mapping ────────────────────────────────────
@@ -50,6 +57,52 @@ _TREATMENT_QUEUE_MAP: dict[str, str] = {
     "alt-text": "alt_text",
     "catalog-rebuild": "catalog_rebuild",
 }
+
+_OPERATOR_ADMIT_PENDING = "operator-admit-pending.json"
+
+
+def _materialize_operator_admission(
+    *, entity_id: str, graph: RuntimeWorkGraph | None, payload_extra: dict[str, Any] | None,
+    coding_config: dict[str, Any] | None = None,
+) -> bool:
+    """Create one durable operator-facing approval request for a graph.
+
+    The notification subsystem is TGW's supported operator Action Console
+    seam: its file backend keeps a durable, structured record and configured
+    desktop/webhook/email backends surface it.  The worktree marker prevents
+    repeated foreman ticks from re-notifying for the same graph.
+    """
+    if graph is None:
+        raise ValueError("operator admission requires its authorizing graph")
+    worktree = validated_coding_worktree(entity_id, graph.object_id, coding_config)
+    marker = worktree / _OPERATOR_ADMIT_PENDING
+    record = {
+        "schema_id": "tgw-action-card/operator-admit/v1",
+        "state": "pending_approval",
+        "treatment_id": "operator-admit",
+        "graph_id": graph.graph_id,
+        "object_id": graph.object_id,
+        "object_generation": graph.object_generation,
+        "todo_id": (payload_extra or {}).get("todo_id"),
+    }
+    try:
+        existing = json.loads(marker.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        existing = None
+    except (OSError, json.JSONDecodeError):
+        existing = None
+    if existing == record:
+        return False
+    temporary = marker.with_suffix(marker.suffix + ".tmp")
+    temporary.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, marker)
+    from tgw.notify import notify
+    notify(
+        "Coding admission required",
+        f"Todo {record['todo_id']} requires operator admission for {entity_id} (graph {graph.graph_id}).",
+        level="warning",
+    )
+    return True
 
 
 def _treatment_to_queue(treatment_id: str) -> str:
@@ -150,6 +203,12 @@ def _dispatch_treatment_v2(
         )
         return None
 
+    # Operator admission is an explicit human authority boundary, not a
+    # queue-backed worker.  It may be eligible, but it must never be enqueued.
+    if chosen.treatment_id == "operator-admit":
+        log.info("operator-admit eligible for graph_id=%s; Action Card required", graph.graph_id)
+        return None
+
     payload: dict[str, object] = {
         "graph_id": graph.graph_id,
         "object_id": snapshot.object_id,
@@ -161,7 +220,7 @@ def _dispatch_treatment_v2(
         "evaluator_version": graph.evaluator_version,
     }
 
-    from tgw.queue import state_machine
+    state_machine = importlib.import_module("tgw.queue.state_machine")
 
     try:
         job_id = state_machine.enqueue_job(
@@ -205,11 +264,37 @@ def _dispatch_treatment_v4(
     *,
     disposition: TreatmentDisposition,
     entity_id: str,
+    graph: RuntimeWorkGraph | None = None,
     payload_extra: dict[str, Any] | None = None,
     enqueue_fn: Any = None,
+    coding_config: dict[str, Any] | None = None,
 ) -> DispatchResult:
-    """Phase 4: dispatch one eligible treatment by enqueuing its worker."""
+    """Phase 4: dispatch one eligible treatment by enqueuing its worker.
+
+    When supplied, *graph* is the evaluator result that authorized the
+    dispatch.  Its generation binding and fingerprints travel with the job so
+    workers and reviewers can explain why this treatment was selected without
+    re-reading mutable ambient state.
+    """
     queue_name = _treatment_to_queue(disposition.treatment_id)
+
+    if disposition.treatment_id == "operator-admit":
+        # Keep the pure/legacy scheduler call usable; production foreman
+        # always supplies graph and therefore materializes the durable card.
+        created = graph is not None and _materialize_operator_admission(
+            entity_id=entity_id, graph=graph, payload_extra=payload_extra,
+            coding_config=coding_config,
+        )
+        log.info("operator-admit eligible for %s; Action Card required", entity_id)
+        return DispatchResult(
+            treatment_id=disposition.treatment_id,
+            treatment_version=disposition.treatment_version,
+            queue_name="",
+            entity_id=entity_id,
+            enqueued=False,
+            outcome="action_card_created" if created else "waiting_action_card_required",
+            action_card_required=True,
+        )
 
     if enqueue_fn is None:
         # Lazily import to avoid DB dependency in pure tests
@@ -217,17 +302,47 @@ def _dispatch_treatment_v4(
 
         enqueue_fn = enqueue_job
 
-    payload = {"entity_id": entity_id}
+    payload: dict[str, Any] = {
+        "entity_id": entity_id,
+        "treatment_id": disposition.treatment_id,
+        "treatment_version": disposition.treatment_version,
+        "eligibility_reasons": list(disposition.reasons),
+    }
+    if graph is not None:
+        payload.update(
+            {
+                "graph_id": graph.graph_id,
+                "object_id": graph.object_id,
+                "object_generation": graph.object_generation,
+                "goal_profile_id": graph.goal_profile_id,
+                "goal_profile_version": graph.goal_profile_version,
+                "evaluator_version": graph.evaluator_version,
+                "fingerprints": [
+                    {
+                        "condition_id": fingerprint.condition_id,
+                        "result": fingerprint.result.value,
+                        "reasons": list(fingerprint.reasons),
+                        "evidence": [asdict(item) for item in fingerprint.evidence],
+                    }
+                    for fingerprint in graph.fingerprints
+                ],
+            }
+        )
     if payload_extra:
         payload.update(payload_extra)
 
     try:
         job_id = enqueue_fn(
             queue_name=queue_name,
+            handler_family=queue_name,
             payload=payload,
-            entity_type="item",
+            entity_type="coding_task" if graph is not None else "item",
             entity_id=entity_id,
-            dedupe_key=f"{queue_name}:{entity_id}",
+            dedupe_key=(
+                graph.graph_id
+                if graph is not None
+                else f"{queue_name}:{entity_id}"
+            ),
             max_attempts=3,
         )
         log.info(
@@ -244,7 +359,17 @@ def _dispatch_treatment_v4(
             enqueued=True,
             job_id=job_id,
         )
-    except Exception:
+    except Exception as exc:
+        if _is_duplicate_key(exc):
+            log.info("dispatch dedupe collision for %s; treating as already dispatched", disposition.treatment_id)
+            return DispatchResult(
+                treatment_id=disposition.treatment_id,
+                treatment_version=disposition.treatment_version,
+                queue_name=queue_name,
+                entity_id=entity_id,
+                enqueued=False,
+                outcome="already_dispatched",
+            )
         log.exception(
             "failed to dispatch %s → %s",
             disposition.treatment_id,

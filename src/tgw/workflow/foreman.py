@@ -10,13 +10,16 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Any
 
+from tgw.workers.coding import validated_coding_worktree
 from tgw.workflow.coding_snapshot import build_coding_snapshot
 from tgw.workflow.contracts import (
     GoalProfile,
+    RuntimeWorkGraph,
     TreatmentContract,
+    TreatmentDisposition,
 )
 from tgw.workflow.evaluator import evaluate
 from tgw.workflow.profiles import CODING_READY_FOR_IMPLEMENTATION
@@ -29,7 +32,7 @@ EVALUATOR_VERSION = "foreman/v1"
 
 # Active job states — if a job for the same graph_id is in any of these
 # states, the todo should be skipped (already dispatched).
-_ACTIVE_JOB_STATES = frozenset({"queued", "leased", "running"})
+_ACTIVE_JOB_STATES = frozenset({"queued", "leased", "running", "retry_wait"})
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +53,9 @@ class ForemanConfig:
     goal_profile: GoalProfile = CODING_READY_FOR_IMPLEMENTATION
     treatments: tuple[TreatmentContract, ...] = CODING_TREATMENTS
     evaluator_version: str = EVALUATOR_VERSION
+    # The worker and foreman must apply the same canonical-root proof before
+    # executing project checks, writing Action Cards, or dispatching a job.
+    coding_config: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +77,7 @@ class TodoRecord:
 
     todo_id: int
     agent: str
-    priority: int
+    priority: int | None
     body: str
     worktree: str = ""
 
@@ -101,7 +107,17 @@ class TickResult:
     skipped_conflict: int = 0
     skipped_active: int = 0
     skipped_no_worktree: int = 0
+    skipped_terminal: int = 0
     errors: int = 0
+
+
+@dataclass(frozen=True)
+class _EligibleTreatment:
+    """An evaluated treatment plus the todo metadata used for admission."""
+
+    todo: TodoRecord
+    graph: RuntimeWorkGraph
+    disposition: TreatmentDisposition
 
 
 # ---------------------------------------------------------------------------
@@ -130,10 +146,10 @@ def _has_active_job(
                 """
                     SELECT 1 FROM queue_jobs
                      WHERE dedupe_key = %s
-                       AND state IN ('queued', 'leased', 'running')
+                       AND state = ANY(%s)
                      LIMIT 1
                     """,
-                (graph_id,),
+                (graph_id, list(_ACTIVE_JOB_STATES)),
             )
             return cur.fetchone() is not None
     except Exception:
@@ -142,6 +158,32 @@ def _has_active_job(
             graph_id,
             exc_info=True,
         )
+        return False
+
+
+def _has_terminal_job(
+    graph_id: str,
+    check_terminal_fn: Callable[[str], bool] | None = None,
+) -> bool:
+    """Return whether this unchanged graph already reached a durable terminal state."""
+    if check_terminal_fn is not None:
+        return check_terminal_fn(graph_id)
+    from tgw.queue.state_machine import _conn
+
+    try:
+        with _conn() as con, con.cursor() as cur:
+            cur.execute(
+                """
+                    SELECT 1 FROM queue_jobs
+                     WHERE dedupe_key = %s
+                       AND state = ANY(%s)
+                     LIMIT 1
+                """,
+                (graph_id, ["succeeded", "failed", "dead_letter"]),
+            )
+            return cur.fetchone() is not None
+    except Exception:
+        log.warning("failed to check terminal jobs for graph_id=%s", graph_id, exc_info=True)
         return False
 
 
@@ -167,7 +209,7 @@ def _default_fetch_open_todos() -> list[TodoRecord]:
                     SELECT id, agent, priority, body
                       FROM todo_items
                      WHERE state = 'open'
-                     ORDER BY priority DESC, id
+                     ORDER BY COALESCE(priority, 999), id
                     """
             )
             for row in cur.fetchall():
@@ -177,7 +219,7 @@ def _default_fetch_open_todos() -> list[TodoRecord]:
                     TodoRecord(
                         todo_id=todo_id,
                         agent=agent or "",
-                        priority=priority or 0,
+                        priority=priority,
                         body=body or "",
                         worktree=worktree,
                     )
@@ -221,6 +263,7 @@ def tick(
     limit: int | None = None,
     fetch_todos: Callable[[], list[TodoRecord]] | None = None,
     check_active_fn: Callable[[str], bool] | None = None,
+    check_terminal_fn: Callable[[str], bool] | None = None,
     enqueue_fn: Any = None,
 ) -> TickResult:
     """Run one foreman tick.
@@ -257,6 +300,7 @@ def tick(
         log.exception("todo fetch failed")
         return TickResult(errors=1)
 
+    eligible: list[_EligibleTreatment] = []
     processed = 0
     for todo in todos:
         if limit is not None and processed >= limit:
@@ -264,33 +308,29 @@ def tick(
 
         processed += 1
         if not todo.worktree:
-            result = TickResult(
-                dispatched=result.dispatched,
-                skipped_waiting=result.skipped_waiting,
-                skipped_conflict=result.skipped_conflict,
-                skipped_active=result.skipped_active,
-                skipped_no_worktree=result.skipped_no_worktree + 1,
-                errors=result.errors,
-            )
+            result = replace(result, skipped_no_worktree=result.skipped_no_worktree + 1)
             continue
 
         try:
-            snapshot = build_coding_snapshot(todo.worktree, cfg.goal_profile)
+            # This proof must precede all snapshot work: snapshot checks run
+            # pytest/ruff in the candidate directory, and Action Cards write
+            # there.  Never trust the free-text todo path.
+            worktree = validated_coding_worktree(
+                todo.worktree, todo.worktree, cfg.coding_config,
+            )
+            snapshot = build_coding_snapshot(
+                worktree, cfg.goal_profile, cfg.treatments,
+            )
         except Exception:
             log.exception(
-                "failed to build snapshot for todo %d at %s",
+                "failed canonical worktree preflight or snapshot for todo %d at %s",
                 todo.todo_id,
                 todo.worktree,
             )
-            result = TickResult(
-                dispatched=result.dispatched,
-                skipped_waiting=result.skipped_waiting,
-                skipped_conflict=result.skipped_conflict,
-                skipped_active=result.skipped_active,
-                skipped_no_worktree=result.skipped_no_worktree,
-                errors=result.errors + 1,
-            )
+            result = replace(result, errors=result.errors + 1)
             continue
+
+        canonical_todo = replace(todo, worktree=str(worktree))
 
         try:
             graph = evaluate(
@@ -303,26 +343,19 @@ def tick(
             log.exception(
                 "evaluate failed for todo %d", todo.todo_id,
             )
-            result = TickResult(
-                dispatched=result.dispatched,
-                skipped_waiting=result.skipped_waiting,
-                skipped_conflict=result.skipped_conflict,
-                skipped_active=result.skipped_active,
-                skipped_no_worktree=result.skipped_no_worktree,
-                errors=result.errors + 1,
-            )
+            result = replace(result, errors=result.errors + 1)
             continue
 
         # Generation-stable dedupe: skip if an active job already exists.
         if _has_active_job(graph.graph_id, check_active_fn):
-            result = TickResult(
-                dispatched=result.dispatched,
-                skipped_waiting=result.skipped_waiting,
-                skipped_conflict=result.skipped_conflict,
-                skipped_active=result.skipped_active + 1,
-                skipped_no_worktree=result.skipped_no_worktree,
-                errors=result.errors,
-            )
+            result = replace(result, skipped_active=result.skipped_active + 1)
+            continue
+
+        # An unchanged graph which already completed, failed, or dead-lettered
+        # is durable terminal evidence.  A source/evidence change produces a
+        # new graph id and is therefore eligible for a fresh attempt.
+        if _has_terminal_job(graph.graph_id, check_terminal_fn):
+            result = replace(result, skipped_terminal=result.skipped_terminal + 1)
             continue
 
         # If no eligible treatments, record waiting reason.
@@ -338,14 +371,7 @@ def tick(
                         for w in graph.waiting_treatments
                     ],
                 )
-            result = TickResult(
-                dispatched=result.dispatched,
-                skipped_waiting=result.skipped_waiting + 1,
-                skipped_conflict=result.skipped_conflict,
-                skipped_active=result.skipped_active,
-                skipped_no_worktree=result.skipped_no_worktree,
-                errors=result.errors,
-            )
+            result = replace(result, skipped_waiting=result.skipped_waiting + 1)
             continue
 
         # Ownership conflicts → skip.
@@ -356,63 +382,97 @@ def tick(
                 graph.object_id,
                 graph.ownership_conflicts,
             )
-            result = TickResult(
-                dispatched=result.dispatched,
-                skipped_waiting=result.skipped_waiting,
-                skipped_conflict=result.skipped_conflict + 1,
-                skipped_active=result.skipped_active,
-                skipped_no_worktree=result.skipped_no_worktree,
-                errors=result.errors,
-            )
+            result = replace(result, skipped_conflict=result.skipped_conflict + 1)
             continue
 
-        # Dispatch exactly one eligible treatment (deterministic — first in
-        # sorted order, as the evaluator guarantees sorted output).
-        best = graph.eligible_treatments[0]
+        for disposition in graph.eligible_treatments:
+            eligible.append(
+                _EligibleTreatment(
+                    todo=canonical_todo,
+                    graph=graph,
+                    disposition=disposition,
+                )
+            )
+
+    if not eligible:
+        return result
+
+    # A human gate is materialized below, but never claims this tick's one
+    # worker-dispatch slot.  That prevents a pending approval from starving
+    # unrelated executable work.
+    action_cards = [item for item in eligible if item.disposition.treatment_id == "operator-admit"]
+    runnable = [item for item in eligible if item.disposition.treatment_id != "operator-admit"]
+    for action_card in action_cards:
+        try:
+            dispatch_treatment(
+                disposition=action_card.disposition,
+                entity_id=action_card.graph.object_id,
+                graph=action_card.graph,
+                payload_extra={
+                    "todo_id": action_card.todo.todo_id,
+                    "todo_priority": action_card.todo.priority,
+                    "todo_agent": action_card.todo.agent,
+                    "worktree": action_card.todo.worktree,
+                },
+                enqueue_fn=enqueue_fn,
+                coding_config=cfg.coding_config,
+            )
+        except Exception:
+            log.exception("failed to materialize operator admission for todo %d", action_card.todo.todo_id)
+            result = TickResult(**{**result.__dict__, "errors": result.errors + 1})
+
+    if not runnable:
+        return replace(result, skipped_waiting=result.skipped_waiting + len(action_cards))
+
+    # Admission is global for worker dispatch: lower todo priority is more urgent,
+    # then todo and treatment identities provide stable tie-breakers.
+    runnable = sorted(
+        runnable,
+        key=lambda x: (
+            x.todo.priority if x.todo.priority is not None else 999,
+            x.todo.todo_id,
+            x.disposition.treatment_id,
+        ),
+    )
+    # One *enqueued* job per tick is the rate limit, not one attempted
+    # candidate.  Idempotent outcomes and failures must not starve later work.
+    for chosen in runnable:
         try:
             dispatch_result: DispatchResult = dispatch_treatment(
-                disposition=best,
-                entity_id=graph.object_id,
-                payload_extra={"graph_id": graph.graph_id},
+                disposition=chosen.disposition,
+                entity_id=chosen.graph.object_id,
+                graph=chosen.graph,
+                payload_extra={
+                    "todo_id": chosen.todo.todo_id,
+                    "todo_priority": chosen.todo.priority,
+                    "todo_agent": chosen.todo.agent,
+                    "worktree": chosen.todo.worktree,
+                },
                 enqueue_fn=enqueue_fn,
+                coding_config=cfg.coding_config,
             )
-            if dispatch_result.enqueued:
-                result = TickResult(
-                    dispatched=result.dispatched + 1,
-                    skipped_waiting=result.skipped_waiting,
-                    skipped_conflict=result.skipped_conflict,
-                    skipped_active=result.skipped_active,
-                    skipped_no_worktree=result.skipped_no_worktree,
-                    errors=result.errors,
-                )
-                log.info(
-                    "dispatched %s for todo %d → job %s",
-                    best.treatment_id,
-                    todo.todo_id,
-                    dispatch_result.job_id,
-                )
-            else:
-                result = TickResult(
-                    dispatched=result.dispatched,
-                    skipped_waiting=result.skipped_waiting,
-                    skipped_conflict=result.skipped_conflict,
-                    skipped_active=result.skipped_active,
-                    skipped_no_worktree=result.skipped_no_worktree,
-                    errors=result.errors + 1,
-                )
         except Exception:
             log.exception(
                 "dispatch failed for todo %d treatment %s",
-                todo.todo_id,
-                best.treatment_id,
+                chosen.todo.todo_id,
+                chosen.disposition.treatment_id,
             )
-            result = TickResult(
-                dispatched=result.dispatched,
-                skipped_waiting=result.skipped_waiting,
-                skipped_conflict=result.skipped_conflict,
-                skipped_active=result.skipped_active,
-                skipped_no_worktree=result.skipped_no_worktree,
-                errors=result.errors + 1,
+            result = replace(result, errors=result.errors + 1)
+            continue
+        if dispatch_result.enqueued:
+            log.info(
+                "dispatched %s for todo %d → job %s; evaluator graph %s "
+                "recorded in queue payload",
+                chosen.disposition.treatment_id,
+                chosen.todo.todo_id,
+                dispatch_result.job_id,
+                chosen.graph.graph_id,
             )
-
+            return replace(result, dispatched=result.dispatched + 1)
+        if dispatch_result.outcome == "already_dispatched":
+            result = replace(result, skipped_active=result.skipped_active + 1)
+        elif dispatch_result.action_card_required:
+            result = replace(result, skipped_waiting=result.skipped_waiting + 1)
+        else:
+            result = replace(result, errors=result.errors + 1)
     return result

@@ -20,6 +20,7 @@ from .contracts import (
     FingerprintResult,
     GoalProfile,
     ObjectSnapshot,
+    TreatmentContract,
 )
 
 # ---------------------------------------------------------------------------
@@ -30,10 +31,17 @@ from .contracts import (
 CANONICAL_BRANCHES = frozenset({"main", "master"})
 
 _RECEIPT_PATHS: dict[str, str] = {
+    "implemented": "implementation-receipt.json",
     "reviewed": "review-receipt.json",
     "controller_verified": "controller-harness-receipt.json",
     "deployed": "deployment-receipt.json",
+    # Stitch emits an audit receipt too.  It is evidence, not source, and
+    # must therefore be ignored by both cleanliness and generation checks.
+    "stitched": "stitch-receipt.json",
+    "operator_admission_pending": "operator-admit-pending.json",
 }
+
+CONTROLLER_PYTHON = "/opt/TGW/.venvs/controller/bin/python"
 
 
 def _git(
@@ -74,7 +82,33 @@ def _git_is_clean(worktree: Path) -> Optional[bool]:
     code, out, _ = _git(worktree, "status", "--porcelain")
     if code != 0:
         return None
-    return out == ""
+    receipt_names = set(_RECEIPT_PATHS.values())
+    changes = [line for line in out.splitlines() if line[3:] not in receipt_names]
+    return not changes
+
+
+def _git_source_fingerprint(worktree: Path) -> str:
+    """Hash mutable source state while excluding workflow receipt evidence."""
+    receipt_names = set(_RECEIPT_PATHS.values())
+    # Exclude receipts from tracked changes too: an operator may have added a
+    # receipt path to Git in an old worktree, and that must not make evidence
+    # alter the source generation it attests.
+    pathspecs = (".", *(f":(exclude){name}" for name in sorted(receipt_names)))
+    _, tracked_diff, _ = _git(worktree, "diff", "--binary", "HEAD", "--", *pathspecs)
+    _, untracked, _ = _git(worktree, "ls-files", "--others", "--exclude-standard")
+    untracked_content: list[str] = []
+    for relative in untracked.splitlines():
+        if relative in receipt_names:
+            continue
+        candidate = worktree / relative
+        if candidate.is_file():
+            try:
+                untracked_content.append(f"{relative}:{candidate.read_bytes().hex()}")
+            except OSError:
+                untracked_content.append(f"{relative}:unreadable")
+    return hashlib.sha256(
+        (tracked_diff + "|" + "|".join(sorted(untracked_content))).encode()
+    ).hexdigest()
 
 
 def _git_merge_base(worktree: Path, ref_a: str, ref_b: str) -> Optional[str]:
@@ -206,7 +240,7 @@ def _check_tested(
     """Pytest passes."""
     try:
         proc = subprocess.run(
-            ["python", "-m", "pytest", "-q", "--tb=short"],
+            [CONTROLLER_PYTHON, "-m", "pytest", "-q", "--tb=short"],
             capture_output=True,
             text=True,
             timeout=120,
@@ -257,7 +291,7 @@ def _check_linted(
     """Ruff passes."""
     try:
         proc = subprocess.run(
-            ["python", "-m", "ruff", "check", "."],
+            [CONTROLLER_PYTHON, "-m", "ruff", "check", "."],
             capture_output=True,
             text=True,
             timeout=60,
@@ -294,7 +328,8 @@ def _check_linted(
 
 
 def _check_receipt(
-    worktree: Path, condition_id: str
+    worktree: Path, condition_id: str, object_id: str | None = None,
+    object_generation: str | None = None,
 ) -> tuple[FingerprintResult, tuple[str, ...], tuple[EvidenceReference, ...]]:
     """Check for a receipt file containing PASS status."""
     receipt_rel = _RECEIPT_PATHS.get(condition_id)
@@ -322,7 +357,21 @@ def _check_receipt(
     status = data.get("status", "").upper()
     identity = hashlib.sha256(content.encode()).hexdigest()[:16]
 
-    if status == "PASS":
+    bound = (
+        isinstance(data.get("graph_id"), str)
+        and bool(data.get("graph_id"))
+        and data.get("object_id") == object_id
+        and data.get("object_generation") == object_generation
+    )
+    outcome = data.get("outcome")
+    established = data.get("established_conditions")
+    valid_outcome = outcome == "satisfied"
+    establishes_condition = (
+        isinstance(established, list)
+        and all(isinstance(item, str) for item in established)
+        and condition_id in established
+    )
+    if status == "PASS" and bound and valid_outcome and establishes_condition:
         return FingerprintResult.TRUE, (
             f"{condition_id} receipt: PASS",
         ), (
@@ -332,9 +381,9 @@ def _check_receipt(
                 source_generation=receipt_rel,
             ),
         )
-    else:
-        return FingerprintResult.FALSE, (
-            f"{condition_id} receipt: {status} (expected PASS)",
+    if not bound:
+        return FingerprintResult.STALE, (
+            f"{condition_id} receipt is not bound to this worktree generation",
         ), (
             EvidenceReference(
                 identity=identity,
@@ -342,6 +391,20 @@ def _check_receipt(
                 source_generation=receipt_rel,
             ),
         )
+    details: list[str] = []
+    if status != "PASS":
+        details.append(f"status {status or 'missing'} (expected PASS)")
+    if not valid_outcome:
+        details.append(f"outcome {outcome!r} (expected 'satisfied')")
+    if not establishes_condition:
+        details.append(f"does not establish {condition_id}")
+    return FingerprintResult.FALSE, (f"{condition_id} receipt: {'; '.join(details)}",), (
+        EvidenceReference(
+            identity=identity,
+            source_class="receipt",
+            source_generation=receipt_rel,
+        ),
+    )
 
 
 def _check_admitted(
@@ -428,11 +491,11 @@ _CHECKERS: dict[str, callable] = {
     "implemented": _check_implemented,
     "tested": _check_tested,
     "linted": _check_linted,
-    "reviewed": lambda wp: _check_receipt(wp, "reviewed"),
-    "controller_verified": lambda wp: _check_receipt(wp, "controller_verified"),
+    "reviewed": lambda wp, oid=None, gen=None: _check_receipt(wp, "reviewed", oid, gen),
+    "controller_verified": lambda wp, oid=None, gen=None: _check_receipt(wp, "controller_verified", oid, gen),
     "admitted": _check_admitted,
     "committed": _check_committed,
-    "deployed": lambda wp: _check_receipt(wp, "deployed"),
+    "deployed": lambda wp, oid=None, gen=None: _check_receipt(wp, "deployed", oid, gen),
 }
 
 
@@ -443,11 +506,13 @@ _CHECKERS: dict[str, callable] = {
 def build_coding_snapshot(
     worktree_path: str | Path,
     goal_profile: GoalProfile,
+    treatments: tuple[TreatmentContract, ...] = (),
 ) -> ObjectSnapshot:
     """Build a read-only ObjectSnapshot by checking coding conditions in a
     git worktree.
 
-    For each condition in ``goal_profile.required``, the corresponding
+    For every condition named by ``goal_profile`` or the active treatment
+    graph, the corresponding
     checker runs (git inspection, pytest, ruff, or receipt-file lookup) and
     produces an EvidenceAssertion. No filesystem writes occur.
 
@@ -468,11 +533,20 @@ def build_coding_snapshot(
         diff_content = _git_diff_stat(worktree, canonical, "HEAD") or ""
     else:
         diff_content = ""
-    gen_input = f"{head}|{branch}|{diff_content}".encode()
+    source_fingerprint = _git_source_fingerprint(worktree)
+    # Generation is source state only. Receipts attest this state but must
+    # never change the state they attest (which would make every receipt stale
+    # the instant it is written).
+    gen_input = f"{head}|{branch}|{diff_content}|{source_fingerprint}".encode()
     generation = hashlib.sha256(gen_input).hexdigest()[:16]
 
     assertions: list[EvidenceAssertion] = []
-    for condition_id in sorted(goal_profile.required):
+    condition_ids = set(goal_profile.required)
+    for treatment in treatments:
+        condition_ids.update(requirement.condition_id for requirement in treatment.requires)
+        condition_ids.update(treatment.may_establish)
+
+    for condition_id in sorted(condition_ids):
         checker = _CHECKERS.get(condition_id)
         if checker is None:
             assertions.append(
@@ -486,7 +560,10 @@ def build_coding_snapshot(
             )
             continue
 
-        result, reasons, evidence = checker(worktree)
+        if condition_id in {"reviewed", "controller_verified", "deployed"}:
+            result, reasons, evidence = checker(worktree, object_id, generation)
+        else:
+            result, reasons, evidence = checker(worktree)
         assertions.append(
             EvidenceAssertion(
                 condition_id=condition_id,

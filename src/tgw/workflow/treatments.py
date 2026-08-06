@@ -59,8 +59,14 @@ CONTROLLER_VERIFY = TreatmentContract(
 HERMES_STITCH = TreatmentContract(
     identity="hermes-stitch",
     version="1",
-    requires=(Requirement("controller_verified", (FingerprintResult.TRUE,)),),
-    may_establish=("admitted", "committed"),
+    requires=(
+        Requirement("reviewed", (FingerprintResult.TRUE,)),
+        Requirement("controller_verified", (FingerprintResult.TRUE,)),
+        Requirement("admitted", (FingerprintResult.TRUE,)),
+    ),
+    # Admission is exclusively established by the human Action Card.  Stitch
+    # can only complete the post-admission canonical commit.
+    may_establish=("committed",),
     must_preserve=("source_files",),
     ownership=("code.stitch",),
     effect_class=EffectClass.LOCAL,
