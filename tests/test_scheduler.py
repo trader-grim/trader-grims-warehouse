@@ -1,8 +1,6 @@
 """Tests for Phase 2 scheduler — dispatch_treatment and build_and_dispatch."""
-
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -459,41 +457,3 @@ def test_missing_treatment_contract_returns_none():
 
     assert job_id is None
     mock_sm.enqueue_job.assert_not_called()
-
-
-def test_operator_admit_is_never_enqueued():
-    """The operator gate produces an Action-Card-required result, not a job."""
-    disposition = _disposition("operator-admit")
-    enqueue = MagicMock()
-    result = dispatch_treatment(
-        disposition=disposition, entity_id="/worktree", enqueue_fn=enqueue,
-    )
-    assert result.action_card_required is True
-    assert result.outcome == "waiting_action_card_required"
-    enqueue.assert_not_called()
-
-
-def test_operator_admit_materializes_one_durable_action_card(tmp_path):
-    """The supported notification seam receives one idempotent human gate."""
-    disposition = _disposition("operator-admit")
-    graph = _graph(graph_id="approval-graph", object_id=str(tmp_path))
-    enqueue = MagicMock()
-    with (
-        patch("tgw.notify.notify") as notify,
-        patch("tgw.workflow.scheduler.validated_coding_worktree", return_value=tmp_path),
-    ):
-        first = dispatch_treatment(
-            disposition=disposition, entity_id=str(tmp_path), graph=graph,
-            payload_extra={"todo_id": 1731}, enqueue_fn=enqueue,
-        )
-        second = dispatch_treatment(
-            disposition=disposition, entity_id=str(tmp_path), graph=graph,
-            payload_extra={"todo_id": 1731}, enqueue_fn=enqueue,
-        )
-    marker = json.loads((tmp_path / "operator-admit-pending.json").read_text())
-    assert marker["state"] == "pending_approval"
-    assert marker["graph_id"] == "approval-graph"
-    assert first.outcome == "action_card_created"
-    assert second.outcome == "waiting_action_card_required"
-    notify.assert_called_once()
-    enqueue.assert_not_called()

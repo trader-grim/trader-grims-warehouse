@@ -253,6 +253,22 @@ def load_config(path: Path) -> Dict[str, Any]:
     }
 
 
+def load_coding_worker_config(path: Path) -> Dict[str, Any]:
+    """Return the supported normalized config contract for coding workers.
+
+    Coding workers must not reach back into ``raw``: that compatibility
+    payload is intentionally not a worker configuration interface.  Keeping
+    this small loader beside ``load_config`` makes the contract testable and
+    preserves the validated normalized ``coding`` section.
+    """
+    config = load_config(path)
+    coding = config.get("coding")
+    if not isinstance(coding, dict):
+        raise ValueError("coding configuration must be an object")
+    config["coding"] = dict(coding)
+    return config
+
+
 # ---------------------------------------------------------------------------
 # Canonical path helpers — the only place paths are constructed
 # ---------------------------------------------------------------------------

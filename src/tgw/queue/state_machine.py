@@ -453,6 +453,86 @@ def claim_queue_jobs(
             return [dict(r) for r in cur.fetchall()]
 
 
+def get_job(job_id: str) -> Optional[Dict[str, Any]]:
+    """Return one durable queue row, or ``None`` when it does not exist."""
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute('SELECT * FROM queue_jobs WHERE job_id = %s', (job_id,))
+            row = cur.fetchone()
+            return dict(row) if row is not None else None
+
+
+def claim_job(job_id: str, lease_owner: str, lease_seconds: int = 300) -> Optional[Dict[str, Any]]:
+    """Atomically lease one named queued job and return its receipt token.
+
+    This is deliberately narrower than ``claim_queue_jobs`` for request-addressed
+    workers: a worker must validate its named job's envelope before attempting
+    the conditional queued→leased transition, and cannot accidentally take a
+    neighbouring request from the same queue.
+    """
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                UPDATE queue_jobs
+                   SET state = 'leased', lease_owner = %s, lease_token = gen_random_uuid(),
+                       lease_expires_at = NOW() + make_interval(secs => %s),
+                       last_heartbeat_at = NOW(), started_at = COALESCE(started_at, NOW()),
+                       attempt_count = attempt_count + 1, error_code = NULL, error_detail = NULL
+                 WHERE job_id = %s AND state = 'queued'
+                   AND run_at <= NOW() AND (not_before IS NULL OR not_before <= NOW())
+                 RETURNING *
+                """,
+                (lease_owner, lease_seconds, job_id),
+            )
+            row = cur.fetchone()
+            return dict(row) if row is not None else None
+
+
+def start_claimed_job(job_id: str, lease_owner: str, lease_token: str) -> Dict[str, Any]:
+    """Move a lease to running only when its owner and token still match."""
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute('SELECT * FROM start_job(%s, %s, %s::uuid)', (job_id, lease_owner, lease_token))
+            return dict(cur.fetchone())
+
+
+def succeed_claimed_job(job_id: str, lease_owner: str, lease_token: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist a structured result under the exact durable lease receipt."""
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute('SELECT * FROM succeed_job(%s, %s, %s::uuid, %s::jsonb)',
+                        (job_id, lease_owner, lease_token, json.dumps(result)))
+            return dict(cur.fetchone())
+
+
+def fail_claimed_job(job_id: str, lease_owner: str, lease_token: str, error: str) -> Dict[str, Any]:
+    """Fail a named job under its lease token without a queue-wide side effect."""
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute('SELECT * FROM fail_job(%s, %s, %s::uuid, %s, %s, %s)',
+                        (job_id, lease_owner, lease_token, 'WORKER_EXCEPTION', error[:2000], 0))
+            return dict(cur.fetchone())
+
+
+def cancel_job(job_id: str, message: Optional[str] = None,
+               result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Cancel a named pending job and optionally persist its receipt result."""
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute('SELECT * FROM cancel_job(%s, %s)', (job_id, message))
+            if result is not None:
+                cur.execute(
+                    """UPDATE queue_jobs
+                         SET payload_json = COALESCE(payload_json, '{}'::jsonb)
+                                            || jsonb_build_object('result', %s::jsonb)
+                       WHERE job_id = %s
+                       RETURNING *""",
+                    (json.dumps(result), job_id),
+                )
+            return dict(cur.fetchone())
+
+
 def mark_running(job_id: str, lease_owner: str) -> None:
     """Transition leased → running."""
     with _conn() as con:

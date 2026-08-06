@@ -54,7 +54,7 @@ class ForemanConfig:
     treatments: tuple[TreatmentContract, ...] = CODING_TREATMENTS
     evaluator_version: str = EVALUATOR_VERSION
     # The worker and foreman must apply the same canonical-root proof before
-    # executing project checks, writing Action Cards, or dispatching a job.
+    # executing project checks or dispatching a job.
     coding_config: dict[str, Any] = field(default_factory=dict)
 
 
@@ -261,6 +261,7 @@ def tick(
     config: ForemanConfig | None = None,
     *,
     limit: int | None = None,
+    todo_ids: set[int] | None = None,
     fetch_todos: Callable[[], list[TodoRecord]] | None = None,
     check_active_fn: Callable[[str], bool] | None = None,
     check_terminal_fn: Callable[[str], bool] | None = None,
@@ -303,6 +304,8 @@ def tick(
     eligible: list[_EligibleTreatment] = []
     processed = 0
     for todo in todos:
+        if todo_ids is not None and todo.todo_id not in todo_ids:
+            continue
         if limit is not None and processed >= limit:
             break
 
@@ -313,8 +316,8 @@ def tick(
 
         try:
             # This proof must precede all snapshot work: snapshot checks run
-            # pytest/ruff in the candidate directory, and Action Cards write
-            # there.  Never trust the free-text todo path.
+            # pytest/ruff in the candidate directory.  Never trust the
+            # free-text todo path.
             worktree = validated_coding_worktree(
                 todo.worktree, todo.worktree, cfg.coding_config,
             )
@@ -397,37 +400,11 @@ def tick(
     if not eligible:
         return result
 
-    # A human gate is materialized below, but never claims this tick's one
-    # worker-dispatch slot.  That prevents a pending approval from starving
-    # unrelated executable work.
-    action_cards = [item for item in eligible if item.disposition.treatment_id == "operator-admit"]
-    runnable = [item for item in eligible if item.disposition.treatment_id != "operator-admit"]
-    for action_card in action_cards:
-        try:
-            dispatch_treatment(
-                disposition=action_card.disposition,
-                entity_id=action_card.graph.object_id,
-                graph=action_card.graph,
-                payload_extra={
-                    "todo_id": action_card.todo.todo_id,
-                    "todo_priority": action_card.todo.priority,
-                    "todo_agent": action_card.todo.agent,
-                    "worktree": action_card.todo.worktree,
-                },
-                enqueue_fn=enqueue_fn,
-                coding_config=cfg.coding_config,
-            )
-        except Exception:
-            log.exception("failed to materialize operator admission for todo %d", action_card.todo.todo_id)
-            result = TickResult(**{**result.__dict__, "errors": result.errors + 1})
-
-    if not runnable:
-        return replace(result, skipped_waiting=result.skipped_waiting + len(action_cards))
-
-    # Admission is global for worker dispatch: lower todo priority is more urgent,
-    # then todo and treatment identities provide stable tie-breakers.
+    # An approved Plan/PP/Todo is the authorization for this local coding
+    # sequence.  Review and verification receipts select the next treatment;
+    # they do not introduce an intermediate operator-admission wait.
     runnable = sorted(
-        runnable,
+        eligible,
         key=lambda x: (
             x.todo.priority if x.todo.priority is not None else 999,
             x.todo.todo_id,
@@ -471,8 +448,6 @@ def tick(
             return replace(result, dispatched=result.dispatched + 1)
         if dispatch_result.outcome == "already_dispatched":
             result = replace(result, skipped_active=result.skipped_active + 1)
-        elif dispatch_result.action_card_required:
-            result = replace(result, skipped_waiting=result.skipped_waiting + 1)
         else:
             result = replace(result, errors=result.errors + 1)
     return result

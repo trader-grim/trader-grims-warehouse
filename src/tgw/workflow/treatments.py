@@ -62,31 +62,16 @@ HERMES_STITCH = TreatmentContract(
     requires=(
         Requirement("reviewed", (FingerprintResult.TRUE,)),
         Requirement("controller_verified", (FingerprintResult.TRUE,)),
-        Requirement("admitted", (FingerprintResult.TRUE,)),
     ),
-    # Admission is exclusively established by the human Action Card.  Stitch
-    # can only complete the post-admission canonical commit.
+    # An approved Plan/PP/Todo authorizes the local execution sequence.  The
+    # independent review and controller receipts are evidence gates, not
+    # requests for another human admission.
     may_establish=("committed",),
     must_preserve=("source_files",),
     ownership=("code.stitch",),
     effect_class=EffectClass.LOCAL,
     receipt_schema_id=_RECEIPT,
 )
-
-OPERATOR_ADMIT = TreatmentContract(
-    identity="operator-admit",
-    version="1",
-    requires=(
-        Requirement("reviewed", (FingerprintResult.TRUE,)),
-        Requirement("controller_verified", (FingerprintResult.TRUE,)),
-    ),
-    may_establish=("admitted",),
-    must_preserve=("source_files",),
-    ownership=("code.admit",),
-    effect_class=EffectClass.EXTERNAL,
-    receipt_schema_id=_RECEIPT,
-)
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  TGW treatments
@@ -170,7 +155,6 @@ CODING_TREATMENTS: tuple[TreatmentContract, ...] = (
     CLAUDE_REVIEW,
     CONTROLLER_VERIFY,
     HERMES_STITCH,
-    OPERATOR_ADMIT,
 )
 
 TGW_TREATMENTS: tuple[TreatmentContract, ...] = (

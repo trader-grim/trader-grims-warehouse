@@ -8,26 +8,6 @@ Auth: Bearer <api_key> — key stored in secrets_root/tgw-api-key.json
 """
 
 from __future__ import annotations
-# ---------------------------------------------------------------------------
-    full_cmd = [tgw_bin, cmd] + [str(a) for a in args]
-
-    try:
-        proc = subprocess.run(
-            full_cmd, capture_output=True, text=True, timeout=30,
-            env={"PATH": "/usr/bin:/bin", "HOME": "/tmp"},
-        )
-        return {
-            "ok": True,
-            "command": cmd,
-            "exit_code": proc.returncode,
-            "stdout": proc.stdout[:50000],
-            "stderr": proc.stderr[:5000],
-        }
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "command timed out"}
-    except Exception as exc:
-        return {"ok": False, "error": str(exc)}
-
 
 import json
 import logging
@@ -143,6 +123,12 @@ _LISTING_INDEX_TTL = 600  # rebuild every 10 min
 _pending_offers_cache: Optional[int] = None
 _pending_offers_cache_at: float = 0.0
 _PENDING_OFFERS_TTL = 300
+
+
+class CodingProvisionStart(BaseModel):
+    todo_id: int = Field(gt=0)
+    worktree: str = Field(min_length=1)
+    object_generation: str = Field(min_length=1)
 
 
 def _get_listing_index() -> Dict[str, Path]:
@@ -327,6 +313,48 @@ def _require_auth(
 
 
 AUTH = Depends(_require_auth)
+
+
+@app.post("/api/coding/requests", dependencies=[AUTH])
+def coding_provision_start(body: CodingProvisionStart):
+    """Persist a coding request; execution is reserved for the local worker."""
+    from .coding_provision import create_request
+
+    try:
+        return create_request(_cfg, todo_id=body.todo_id, worktree=body.worktree,
+                              object_generation=body.object_generation)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/coding/requests/{request_id}", dependencies=[AUTH])
+def coding_provision_status(request_id: str):
+    from .coding_provision import get_request
+
+    try:
+        return get_request(_cfg, request_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/coding/requests/{request_id}/stop", dependencies=[AUTH])
+def coding_provision_stop(request_id: str):
+    from .coding_provision import stop_request
+
+    try:
+        return stop_request(_cfg, request_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/coding/access-status", dependencies=[AUTH])
+def coding_access_status(request_id: str | None = None):
+    from .coding_provision import access_status
+
+    try:
+        return access_status(_cfg, request_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.middleware("http")

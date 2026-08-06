@@ -652,52 +652,8 @@ def test_tick_routes_post_implementation_treatments_by_identity():
         assert enqueue.call_args.kwargs["handler_family"] == treatment_id
 
 
-def test_tick_operator_admit_requires_action_card_and_never_enqueues():
-    """The human admission gate is visible but never routed to a worker."""
-    disposition = TreatmentDisposition("operator-admit", "1", ("ready",))
-    enqueue = MagicMock()
-    with (
-        patch("tgw.workflow.foreman.build_coding_snapshot", return_value=_snapshot()),
-        patch("tgw.workflow.foreman.evaluate", return_value=_graph(eligible=(disposition,))),
-        patch("tgw.workflow.foreman.dispatch_treatment", return_value=DispatchResult(
-            "operator-admit", "1", "", "/tmp/worktree-1", False,
-            action_card_required=True,
-        )),
-    ):
-        result = tick(fetch_todos=lambda: [_todo(1731)], check_active_fn=lambda _: False, enqueue_fn=enqueue)
-
-    assert result.dispatched == 0
-    assert result.skipped_waiting == 1
-    assert result.errors == 0
-    enqueue.assert_not_called()
-
-
-def test_operator_admit_does_not_consume_the_worker_dispatch_slot():
-    gate_todo = TodoRecord(1, "test-agent", 10, "", "/tmp/gate")
-    ready_todo = TodoRecord(2, "test-agent", 50, "", "/tmp/ready")
-    gate = TreatmentDisposition("operator-admit", "1", ("ready",))
-    runnable = TreatmentDisposition("codex-implement", "1", ("ready",))
-    enqueue = MagicMock(return_value="job-ready")
-    with (
-        patch("tgw.workflow.foreman.build_coding_snapshot", side_effect=[
-            _snapshot(object_id=gate_todo.worktree), _snapshot(object_id=ready_todo.worktree),
-        ]),
-        patch("tgw.workflow.foreman.evaluate", side_effect=[
-            _graph(graph_id="gate", object_id=gate_todo.worktree, eligible=(gate,)),
-            _graph(graph_id="ready", object_id=ready_todo.worktree, eligible=(runnable,)),
-        ]),
-        patch("tgw.workflow.foreman.dispatch_treatment", side_effect=[
-            DispatchResult("operator-admit", "1", "", gate_todo.worktree, False, action_card_required=True),
-            DispatchResult("codex-implement", "1", "codex-implement", ready_todo.worktree, True, job_id="job-ready"),
-        ]) as dispatch,
-    ):
-        result = tick(fetch_todos=lambda: [gate_todo, ready_todo], check_active_fn=lambda _: False, enqueue_fn=enqueue)
-    assert result.dispatched == 1
-    assert [call.kwargs["disposition"].treatment_id for call in dispatch.call_args_list] == ["operator-admit", "codex-implement"]
-
-
-def test_real_evaluator_keeps_stitch_behind_operator_admission():
-    """The real evaluator never offers stitch while the Action Card is pending."""
+def test_real_evaluator_dispatches_stitch_after_review_and_verification():
+    """Review/verification receipts advance coding without an operator wait."""
     todo = _todo(1731)
     snapshot = _snapshot(
         assertions=(
@@ -706,12 +662,11 @@ def test_real_evaluator_keeps_stitch_behind_operator_admission():
             _assertion("linted", FingerprintResult.TRUE, "linted"),
             _assertion("reviewed", FingerprintResult.TRUE, "reviewed"),
             _assertion("controller_verified", FingerprintResult.TRUE, "verified"),
-            _assertion("admitted", FingerprintResult.FALSE, "pending operator"),
             _assertion("committed", FingerprintResult.FALSE, "not committed"),
         ),
     )
     dispatch = MagicMock(return_value=DispatchResult(
-        "operator-admit", "1", "", todo.worktree, False, action_card_required=True,
+        "hermes-stitch", "1", "hermes-stitch", todo.worktree, True, job_id="stitch-job",
     ))
     with (
         patch("tgw.workflow.foreman.build_coding_snapshot", return_value=snapshot),
@@ -721,8 +676,8 @@ def test_real_evaluator_keeps_stitch_behind_operator_admission():
             fetch_todos=lambda: [todo], check_active_fn=lambda _: False,
             check_terminal_fn=lambda _: False,
         )
-    assert result.dispatched == 0
-    assert [call.kwargs["disposition"].treatment_id for call in dispatch.call_args_list] == ["operator-admit"]
+    assert result.dispatched == 1
+    assert [call.kwargs["disposition"].treatment_id for call in dispatch.call_args_list] == ["hermes-stitch"]
 
 
 def test_tick_dispatch_failure_continues_to_lower_priority_todo():
@@ -788,8 +743,8 @@ def test_tick_terminal_graph_is_durably_skipped_and_does_not_starve_next_todo():
     assert enqueue.call_args.kwargs["dedupe_key"] == "fresh"
 
 
-def test_tick_rejects_outside_root_before_snapshot_or_action_card(tmp_path, monkeypatch):
-    """A todo path cannot execute an attacker conftest or receive an Action Card."""
+def test_tick_rejects_outside_root_before_snapshot_or_dispatch(tmp_path, monkeypatch):
+    """A todo path cannot execute an attacker conftest or reach dispatch."""
     from tgw.workers.coding import validated_coding_worktree
 
     monkeypatch.setattr("tgw.workflow.foreman.validated_coding_worktree", validated_coding_worktree)
@@ -804,7 +759,6 @@ def test_tick_rejects_outside_root_before_snapshot_or_action_card(tmp_path, monk
     )
     assert result.errors == 1
     assert not marker.exists()
-    assert not (evil / "operator-admit-pending.json").exists()
 
 
 # ---------------------------------------------------------------------------

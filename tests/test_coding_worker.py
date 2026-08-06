@@ -165,7 +165,7 @@ def test_real_coding_profile_receipt_advances_the_real_treatment_graph(tmp_path,
     after = build_coding_snapshot(tmp_path, CODING_READY_FOR_IMPLEMENTATION, CODING_TREATMENTS)
     results = {item.condition_id: item.result for item in after.assertions}
     assert after.generation == before.generation
-    assert {"reviewed", "controller_verified", "admitted"}.issubset(results)
+    assert {"reviewed", "controller_verified"}.issubset(results)
     assert results["reviewed"] is FingerprintResult.TRUE
     after_graph = evaluate(snapshot=after, goal=CODING_READY_FOR_IMPLEMENTATION, treatments=CODING_TREATMENTS, evaluator_version="test")
     assert "claude-review" not in {item.treatment_id for item in after_graph.eligible_treatments}
@@ -222,6 +222,42 @@ def test_load_config_normalizes_coding_commands_for_worker(tmp_path):
     config = load_config(config_path)
     assert config["coding"]["commands"]["claude-review"] == ["echo", "ok"]
     assert CodingWorker("claude-review", config)._configured_command("claude-review") == ["echo", "ok"]
+
+
+def test_coding_worker_entrypoint_loads_config_file_and_starts_allowed_local_runner(tmp_path, monkeypatch):
+    """The installed queue entrypoint consumes the coding-worker config contract."""
+    from tgw.workers import coding
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"coding": {
+        "commands": {"claude-review": ["local-runner", "review"]},
+        "allowed_runners": ["local-runner"],
+    }}))
+    run = MagicMock()
+    monkeypatch.setattr(coding.CodingWorker, "run", run)
+    monkeypatch.setattr(
+        "sys.argv", ["tgw-coding-worker", "--queue", "claude-review", "--config", str(config_path)],
+    )
+
+    assert coding.main() == 0
+    run.assert_called_once()
+
+
+def test_invalid_local_runner_writes_mechanical_failure_receipt(tmp_path):
+    _git_worktree(tmp_path)
+    before = build_coding_snapshot(tmp_path, GoalProfile("test", "1", ("reviewed",)))
+    worker = CodingWorker("claude-review", {"coding": {
+        "worktree_root": str(tmp_path.parent), "repository_root": str(tmp_path),
+        "commands": {"claude-review": ["ssh", "host", "review"]},
+    }})
+    with pytest.raises(HardFailure, match="mechanical failure"):
+        worker.handle({"payload_json": {
+            "treatment_id": "claude-review", "graph_id": "g", "worktree": str(tmp_path),
+            "object_id": str(tmp_path.resolve()), "object_generation": before.generation,
+        }})
+    receipt = json.loads(receipt_path_for_treatment(tmp_path, "claude-review").read_text())
+    assert receipt["outcome"] == "failed"
+    assert receipt["artifacts"][0]["kind"] == "mechanical_failure"
 
 
 @pytest.mark.parametrize("worktree,object_id", [("/tmp", "/tmp"), ("worktree", "other")])

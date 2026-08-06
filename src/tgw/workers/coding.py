@@ -58,7 +58,7 @@ def validated_coding_worktree(
     """Prove that a coding worktree is a direct child of the canonical repo.
 
     This is deliberately shared by the foreman and worker: validation must
-    happen before either layer runs project commands or writes an Action Card.
+    happen before either layer runs project commands or writes a receipt.
     """
     config = coding_config or {}
     if not isinstance(config, dict):
@@ -183,6 +183,16 @@ class CodingWorker(QueueWorker):
             raise HardFailure(
                 f"coding.commands.{treatment_id} must be a non-empty argv list"
             )
+        runner = Path(command[0]).name.lower()
+        if runner in {"ssh", "sudo", "sh", "bash"}:
+            raise HardFailure("coding runner must use the configured local argv protocol")
+        allowed = self._coding_config().get("allowed_runners")
+        if allowed is not None and (
+            not isinstance(allowed, list)
+            or not all(isinstance(item, str) and item for item in allowed)
+            or command[0] not in allowed
+        ):
+            raise HardFailure("coding command is not an allowed local runner")
         return command
 
     def _validated_worktree(self, payload: dict[str, Any]) -> Path:
@@ -252,10 +262,30 @@ class CodingWorker(QueueWorker):
             raise HardFailure("coding job has no object_generation")
         worktree = self._validated_worktree(payload)
 
-        launcher_result = self._launcher(treatment_id, payload, worktree)
-        outcome, established, artifacts = self._validated_launcher_result(
-            treatment_id, launcher_result,
-        )
+        try:
+            launcher_result = self._launcher(treatment_id, payload, worktree)
+            outcome, established, artifacts = self._validated_launcher_result(
+                treatment_id, launcher_result,
+            )
+        except (HardFailure, RuntimeError) as exc:
+            # A malformed local runner/config is operational evidence, not an
+            # authority question.  Persist it so the next snapshot can
+            # reevaluate from a durable receipt instead of opening an Action
+            # Card or waiting for an approval.
+            receipt = {
+                "status": "FAIL",
+                "treatment_id": treatment_id,
+                "treatment_version": str(payload.get("treatment_version", "1")),
+                "graph_id": payload.get("graph_id"),
+                "object_id": str(worktree),
+                "object_generation": payload.get("object_generation"),
+                "outcome": OUTCOME_FAILED,
+                "established_conditions": [],
+                "artifacts": [{"kind": "mechanical_failure", "detail": str(exc)}],
+                "receipt_schema_id": "receipt/tgw-workflow/v1",
+            }
+            _write_receipt(receipt_path_for_treatment(worktree, treatment_id), receipt)
+            raise HardFailure(f"coding treatment mechanical failure: {exc}") from exc
         receipt = {
             "status": "PASS" if outcome == OUTCOME_SATISFIED else "FAIL",
             "treatment_id": treatment_id,
@@ -280,13 +310,13 @@ def main() -> int:
     """Run one named coding queue under the ordinary queue-worker contract."""
     import argparse
 
-    from tgw.config import DEFAULT_CONFIG, load_config
+    from tgw.config import DEFAULT_CONFIG, load_coding_worker_config
 
     parser = argparse.ArgumentParser(prog="tgw-coding-worker")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     parser.add_argument("--queue", required=True, choices=sorted(CODING_TREATMENTS))
     args = parser.parse_args()
-    worker = CodingWorker(args.queue, load_config(Path(args.config)))
+    worker = CodingWorker(args.queue, load_coding_worker_config(Path(args.config)))
     # Refuse to start a queue that cannot possibly execute its configured
     # authority command; an absent/malformed spec is never a silent no-op.
     worker._configured_command(args.queue)
@@ -298,12 +328,12 @@ def _main_for_queue(queue_name: str) -> int:
     """Systemd-template entry point for one registered coding queue."""
     import argparse
 
-    from tgw.config import DEFAULT_CONFIG, load_config
+    from tgw.config import DEFAULT_CONFIG, load_coding_worker_config
 
     parser = argparse.ArgumentParser(prog=f"tgw-{queue_name}-worker")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     args = parser.parse_args()
-    worker = CodingWorker(queue_name, load_config(Path(args.config)))
+    worker = CodingWorker(queue_name, load_coding_worker_config(Path(args.config)))
     worker._configured_command(queue_name)
     worker.run()
     return 0

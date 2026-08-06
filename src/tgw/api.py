@@ -494,6 +494,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
         "suggest", "quiet-check", "perp-run", "whisper-suggest",
         "claude-help", "clip", "suggest-edit", "promo", "nix-bundle-usb",
         "mailbox", "trace", "flake",
+        "coding",
     ]),
 ]
 
@@ -1045,6 +1046,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--nextloop", action="store_true", dest="nextloop",
                    help="loop --next continuously until tasks are exhausted or user quits (y=done/s=skip/q=quit)")
     p.add_argument("--agent", default=None, metavar="AGENT", dest="next_agent", help="agent name for --next / --nextloop (e.g. claude, gemini, admin, tigwa)")
+
+    p = sub.add_parser("coding", help="create and inspect receipt-addressed coding provision requests")
+    p.add_argument("coding_op", choices=["start", "status", "log", "stop", "access-status"])
+    p.add_argument("request_id", nargs="?")
+    p.add_argument("--todo-id", type=int)
+    p.add_argument("--worktree")
+    p.add_argument("--object-generation")
+    p.add_argument("--config", default=None, help="TGW client config (uses the configured endpoint and credential)")
+    p.add_argument("--endpoint", help="explicit endpoint override")
+    p.add_argument("--api-key", help="explicit credential override")
 
     p = sub.add_parser("plan", help="plan/taskboard operations (PP-PLANDB-001)")
     p.add_argument(
@@ -5639,6 +5650,14 @@ def main() -> int:
             result = cmd_todo(cfg, args)
             # cmd_todo handles its own printing; skip the generic JSON dump
             return 0 if result.get("ok", True) else 1
+
+        elif args.op == "coding":
+            from tgw.coding_cli import run as run_coding
+            if args.coding_op == "start" and (not args.todo_id or not args.worktree or not args.object_generation):
+                parser.error("coding start requires --todo-id, --worktree, and --object-generation")
+            if args.coding_op in {"status", "log", "stop"} and not args.request_id:
+                parser.error(f"coding {args.coding_op} requires REQUEST_ID")
+            return run_coding(args)
 
         elif args.op == "plan":
             if args.plan_op == "render":
