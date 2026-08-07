@@ -313,25 +313,19 @@ def claim_request(config: dict[str, Any], *, request_id: str, local_host: str, w
     if document["state"] != "queued":
         raise HardFailure("coding provision request is not claimable")
     _validate_service_worker(document, coding, local_host, worker_identity, envelope_hash, location)
-    job = state_machine.claim_job(request_id, worker_identity)
+    execution = _authorize_execution(document, location, snapshot)
+    envelope = {
+        "location": location,
+        "envelope_hash": envelope_hash,
+        "snapshot": snapshot,
+        "execution": execution,
+    }
+    job = state_machine.claim_job_with_envelope(request_id, worker_identity, envelope)
     if job is None:
         raise HardFailure("coding provision request is not claimable")
     token = str(job.get("lease_token") or "")
     if not token:
         raise HardFailure("canonical queue claim returned no lease token")
-    try:
-        execution = _authorize_execution(document, location, snapshot)
-        envelope = {
-            "location": location,
-            "envelope_hash": envelope_hash,
-            "snapshot": snapshot,
-            "execution": execution,
-        }
-        if state_machine.record_claim_envelope(request_id, worker_identity, token, envelope) is None:
-            raise HardFailure("canonical coding execution envelope was not recorded under the lease")
-    except Exception as exc:
-        state_machine.fail_claimed_job(request_id, worker_identity, token, str(exc))
-        raise
     return {"lease_token": token, "request": get_request(config, request_id)}
 
 

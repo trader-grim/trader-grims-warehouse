@@ -48,6 +48,12 @@ class NativeQueue:
         job.update(state="leased", lease_owner=lease_owner, lease_token="lease-token")
         return dict(job)
 
+    def claim_job_with_envelope(self, job_id, lease_owner, envelope, **kwargs):
+        job = self.claim_job(job_id, lease_owner, **kwargs)
+        if job is None:
+            return None
+        return self.record_claim_envelope(job_id, lease_owner, job["lease_token"], envelope)
+
     def record_claim_envelope(self, job_id, lease_owner, lease_token, envelope):
         job = self.jobs[job_id]
         assert (job["lease_owner"], job["lease_token"]) == (lease_owner, lease_token)
@@ -448,7 +454,7 @@ def test_canonical_claim_looks_up_todo_and_derives_contract_bound_envelope(tmp_p
     assert native.jobs[request["request_id"]]["payload_json"]["snapshot"] == _snapshot_claim(envelope)
 
 
-def test_canonical_claim_evaluation_failure_is_durable_not_success(tmp_path, native, envelope, monkeypatch):
+def test_canonical_claim_evaluation_failure_leaves_request_unclaimed(tmp_path, native, envelope, monkeypatch):
     cfg = _config(tmp_path)
     request = coding_provision.create_request(cfg, todo_id=1738, object_generation="gen-a")
     monkeypatch.setattr(coding_provision, "todo_lookup", lambda _todo_id: None)
@@ -464,17 +470,17 @@ def test_canonical_claim_evaluation_failure_is_durable_not_success(tmp_path, nat
             snapshot=_snapshot_claim(envelope),
         )
 
-    failed = coding_provision.get_request(cfg, request["request_id"])
-    assert failed["state"] == "failed"
-    assert "Todo" in failed["error"]
+    pending = coding_provision.get_request(cfg, request["request_id"])
+    assert pending["state"] == "queued"
+    assert pending["receipt"] is None
 
 
 def test_canonical_dispatch_binding_failure_is_durable_not_success(tmp_path, native, envelope, monkeypatch):
     cfg = _config(tmp_path)
     request = coding_provision.create_request(cfg, todo_id=1738, object_generation="gen-a")
-    monkeypatch.setattr(native, "record_claim_envelope", lambda *_args: None)
+    monkeypatch.setattr(native, "claim_job_with_envelope", lambda *_args, **_kwargs: None)
 
-    with pytest.raises(HardFailure, match="not recorded"):
+    with pytest.raises(HardFailure, match="not claimable"):
         coding_provision.claim_request(
             cfg,
             request_id=request["request_id"],
@@ -485,7 +491,7 @@ def test_canonical_dispatch_binding_failure_is_durable_not_success(tmp_path, nat
             snapshot=_snapshot_claim(envelope),
         )
 
-    assert coding_provision.get_request(cfg, request["request_id"])["state"] == "failed"
+    assert coding_provision.get_request(cfg, request["request_id"])["state"] == "queued"
 
 
 def test_authenticated_api_to_native_job_to_local_claim_to_structured_receipt(tmp_path, monkeypatch, native, envelope):
