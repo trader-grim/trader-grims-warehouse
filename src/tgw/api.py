@@ -1051,7 +1051,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("coding_op", choices=["start", "status", "log", "stop", "access-status"])
     p.add_argument("request_id", nargs="?")
     p.add_argument("--todo-id", type=int)
-    p.add_argument("--worktree")
     p.add_argument("--object-generation")
     p.add_argument("--config", default=None, help="TGW client config (uses the configured endpoint and credential)")
     p.add_argument("--endpoint", help="explicit endpoint override")
@@ -5653,8 +5652,8 @@ def main() -> int:
 
         elif args.op == "coding":
             from tgw.coding_cli import run as run_coding
-            if args.coding_op == "start" and (not args.todo_id or not args.worktree or not args.object_generation):
-                parser.error("coding start requires --todo-id, --worktree, and --object-generation")
+            if args.coding_op == "start" and (not args.todo_id or not args.object_generation):
+                parser.error("coding start requires --todo-id and --object-generation")
             if args.coding_op in {"status", "log", "stop"} and not args.request_id:
                 parser.error(f"coding {args.coding_op} requires REQUEST_ID")
             return run_coding(args)

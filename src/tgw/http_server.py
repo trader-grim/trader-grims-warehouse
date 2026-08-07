@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import secrets
 import sqlite3
@@ -127,8 +128,25 @@ _PENDING_OFFERS_TTL = 300
 
 class CodingProvisionStart(BaseModel):
     todo_id: int = Field(gt=0)
-    worktree: str = Field(min_length=1)
     object_generation: str = Field(min_length=1)
+
+
+class CodingWorkerClaim(BaseModel):
+    host: str = Field(min_length=1)
+    envelope_hash: str = Field(min_length=1)
+    location: Dict[str, Any]
+
+
+class CodingWorkerLease(BaseModel):
+    lease_token: str = Field(min_length=1)
+
+
+class CodingWorkerComplete(CodingWorkerLease):
+    result: Dict[str, Any]
+
+
+class CodingWorkerFail(CodingWorkerLease):
+    error: str = Field(min_length=1, max_length=2000)
 
 
 def _get_listing_index() -> Dict[str, Path]:
@@ -315,14 +333,35 @@ def _require_auth(
 AUTH = Depends(_require_auth)
 
 
+def _require_coding_worker(request: Request) -> str:
+    """Authenticate a coding worker with its dedicated referenced secret."""
+    coding = _cfg.get("coding")
+    if not isinstance(coding, dict):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="coding worker is not configured")
+    reference = coding.get("worker_credential_env")
+    supplied = request.headers.get("X-TGW-Worker-Authorization", "")
+    identity = request.headers.get("X-TGW-Worker-Identity", "")
+    expected = os.environ.get(reference) if isinstance(reference, str) and reference else None
+    if not expected or not supplied.startswith("Bearer ") or not identity:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid coding worker credential")
+    if not secrets.compare_digest(supplied.removeprefix("Bearer ").encode(), expected.encode()):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid coding worker credential")
+    if identity != coding.get("worker_identity"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="invalid coding worker identity")
+    return identity
+
+
+WORKER_AUTH = Depends(_require_coding_worker)
+
+
 @app.post("/api/coding/requests", dependencies=[AUTH])
 def coding_provision_start(body: CodingProvisionStart):
-    """Persist a coding request; execution is reserved for the local worker."""
+    """Persist a request-safe coding job; the tgw-lib worker resolves and
+    validates its local worktree envelope after claim."""
     from .coding_provision import create_request
 
     try:
-        return create_request(_cfg, todo_id=body.todo_id, worktree=body.worktree,
-                              object_generation=body.object_generation)
+        return create_request(_cfg, todo_id=body.todo_id, object_generation=body.object_generation)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -355,6 +394,66 @@ def coding_access_status(request_id: str | None = None):
         return access_status(_cfg, request_id)
     except Exception as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/coding/worker/requests/{request_id}")
+def coding_worker_request(request_id: str, worker_identity: str = WORKER_AUTH):
+    from .coding_provision import get_request
+
+    try:
+        document = get_request(_cfg, request_id)
+        if document.get("worker_identity") != worker_identity:
+            raise HTTPException(status_code=403, detail="request is assigned to another worker")
+        return document
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/coding/worker/requests/{request_id}/claim")
+def coding_worker_claim(request_id: str, body: CodingWorkerClaim, worker_identity: str = WORKER_AUTH):
+    from .coding_provision import claim_request
+
+    try:
+        return claim_request(_cfg, request_id=request_id, local_host=body.host,
+                             worker_identity=worker_identity, envelope_hash=body.envelope_hash,
+                             location=body.location)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/coding/worker/requests/{request_id}/start")
+def coding_worker_start(request_id: str, body: CodingWorkerLease, worker_identity: str = WORKER_AUTH):
+    from .coding_provision import start_request
+
+    try:
+        return start_request(_cfg, request_id=request_id, worker_identity=worker_identity,
+                             lease_token=body.lease_token)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/coding/worker/requests/{request_id}/complete")
+def coding_worker_complete(request_id: str, body: CodingWorkerComplete, worker_identity: str = WORKER_AUTH):
+    from .coding_provision import complete_request
+
+    try:
+        return complete_request(_cfg, request_id=request_id, worker_identity=worker_identity,
+                                lease_token=body.lease_token, result=body.result)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/coding/worker/requests/{request_id}/fail")
+def coding_worker_fail(request_id: str, body: CodingWorkerFail, worker_identity: str = WORKER_AUTH):
+    from .coding_provision import fail_request
+
+    try:
+        return fail_request(_cfg, request_id=request_id, worker_identity=worker_identity,
+                            lease_token=body.lease_token, error=body.error)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.middleware("http")

@@ -270,6 +270,73 @@ def load_coding_worker_config(path: Path) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Coding-provision bootstrap configuration validation
+#
+# The service/client request contract and the local worker execution contract
+# are separate.  The canonical tgw-prod service must not require (or validate)
+# the tgw-lib-local filesystem roots merely to accept a request; those roots
+# are validated only where a local worker will actually execute.
+# ---------------------------------------------------------------------------
+
+
+def _require_http_endpoint(coding: Dict[str, Any], field: str) -> None:
+    value = coding.get(field)
+    if not isinstance(value, str) or not value.startswith(("http://", "https://")):
+        raise ValueError(f"coding.{field} must be an http(s) endpoint URL")
+
+
+def _require_non_empty_string(coding: Dict[str, Any], field: str) -> None:
+    value = coding.get(field)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"coding.{field} must be a non-empty string")
+
+
+def _require_path(coding: Dict[str, Any], field: str) -> None:
+    value = coding.get(field)
+    if not isinstance(value, (str, Path)) or not str(value):
+        raise ValueError(f"coding.{field} must be a path")
+
+
+def validate_service_request_config(coding: Any) -> Dict[str, Any]:
+    """Validate the service/client request contract.
+
+    Accepting a request on the canonical service needs only the endpoint, the
+    fixed host, and the worker identity.  The tgw-lib-local filesystem roots
+    (``repository_root``, ``worktree_root``), the worker-facing endpoint, and
+    the worker credential reference are worker execution concerns and are
+    intentionally NOT required here.  Raises ``ValueError`` naming the
+    offending field when a required field is absent or malformed.
+    """
+    if not isinstance(coding, dict):
+        raise ValueError("coding configuration must be an object")
+    _require_http_endpoint(coding, "api_endpoint")
+    _require_non_empty_string(coding, "host")
+    _require_non_empty_string(coding, "worker_identity")
+    return coding
+
+
+def validate_worker_execution_config(coding: Any) -> Dict[str, Any]:
+    """Validate the local worker execution contract.
+
+    Executing on tgw-lib needs the worker-facing endpoint, the credential
+    reference (``worker_credential_env`` — only the name of the runtime
+    environment variable that carries the real credential; never its value),
+    the host/worker identity fence, and the local filesystem roots the worker
+    will reprobe.  Raises ``ValueError`` naming the offending field when a
+    required field is absent or malformed.
+    """
+    if not isinstance(coding, dict):
+        raise ValueError("coding configuration must be an object")
+    _require_http_endpoint(coding, "worker_api_endpoint")
+    _require_non_empty_string(coding, "host")
+    _require_non_empty_string(coding, "worker_identity")
+    _require_non_empty_string(coding, "worker_credential_env")
+    _require_path(coding, "repository_root")
+    _require_path(coding, "worktree_root")
+    return coding
+
+
+# ---------------------------------------------------------------------------
 # Canonical path helpers — the only place paths are constructed
 # ---------------------------------------------------------------------------
 

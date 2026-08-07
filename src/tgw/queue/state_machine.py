@@ -489,6 +489,29 @@ def claim_job(job_id: str, lease_owner: str, lease_seconds: int = 300) -> Option
             return dict(row) if row is not None else None
 
 
+def record_claim_envelope(job_id: str, lease_owner: str, lease_token: str,
+                          envelope: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Persist the worker-validated immutable envelope onto a leased job.
+
+    Only the exact lease (owner + token) may record the envelope; the durable
+    successful receipt later authors from this same recorded value.
+    """
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                UPDATE queue_jobs
+                   SET payload_json = COALESCE(payload_json, '{}'::jsonb) || %s::jsonb
+                 WHERE job_id = %s AND state = 'leased' AND lease_owner = %s
+                   AND lease_token = %s::uuid
+                 RETURNING *
+                """,
+                (json.dumps(envelope), job_id, lease_owner, lease_token),
+            )
+            row = cur.fetchone()
+            return dict(row) if row is not None else None
+
+
 def start_claimed_job(job_id: str, lease_owner: str, lease_token: str) -> Dict[str, Any]:
     """Move a lease to running only when its owner and token still match."""
     with _conn() as con:

@@ -42,6 +42,12 @@ class NativeQueue:
         job.update(state="leased", lease_owner=lease_owner, lease_token="lease-token")
         return dict(job)
 
+    def record_claim_envelope(self, job_id, lease_owner, lease_token, envelope):
+        job = self.jobs[job_id]
+        assert (job["lease_owner"], job["lease_token"]) == (lease_owner, lease_token)
+        job["payload_json"] = {**job["payload_json"], **envelope}
+        return dict(job)
+
     def start_claimed_job(self, job_id, lease_owner, lease_token):
         job = self.jobs[job_id]
         assert (job["lease_owner"], job["lease_token"]) == (lease_owner, lease_token)
@@ -69,8 +75,10 @@ class NativeQueue:
 def _config(tmp_path: Path) -> dict:
     return {"coding": {
         "host": "tgw-lib-local", "worker_identity": "tgw-coding-worker",
-        "api_endpoint": "https://tgw.example", "repository_root": str(tmp_path / "repo"),
+        "api_endpoint": "https://tgw.example", "worker_api_endpoint": "https://tgw.example",
+        "repository_root": str(tmp_path / "repo"),
         "worktree_root": str(tmp_path / "worktrees"), "role": "coding-requester",
+        "worker_credential_env": "TGW_TEST_CODING_WORKER_CREDENTIAL",
     }, "api_key": "coding-test-key"}
 
 
@@ -93,29 +101,115 @@ def envelope(monkeypatch, tmp_path):
     return identity
 
 
+class WorkerServiceClient:
+    """Test transport proving the local worker uses only service HTTP routes."""
+
+    def __init__(self, client: TestClient, credential: str, identity: str) -> None:
+        self.client, self.credential, self.identity = client, credential, identity
+
+    def _headers(self):
+        return {"X-TGW-Worker-Authorization": f"Bearer {self.credential}",
+                "X-TGW-Worker-Identity": self.identity}
+
+    def _call(self, method, path, body=None):
+        response = self.client.request(method, path, headers=self._headers(), json=body)
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    def get(self, request_id):
+        return self._call("GET", f"/api/coding/worker/requests/{request_id}")
+
+    def claim(self, request_id, host, envelope_hash, location):
+        return self._call("POST", f"/api/coding/worker/requests/{request_id}/claim",
+                          {"host": host, "envelope_hash": envelope_hash, "location": location})
+
+    def start(self, request_id, lease_token):
+        return self._call("POST", f"/api/coding/worker/requests/{request_id}/start", {"lease_token": lease_token})
+
+    def complete(self, request_id, lease_token, result):
+        return self._call("POST", f"/api/coding/worker/requests/{request_id}/complete",
+                          {"lease_token": lease_token, "result": result})
+
+    def fail(self, request_id, lease_token, error):
+        return self._call("POST", f"/api/coding/worker/requests/{request_id}/fail",
+                          {"lease_token": lease_token, "error": error})
+
+
 def test_authenticated_api_to_native_job_to_local_claim_to_structured_receipt(tmp_path, monkeypatch, native, envelope):
     cfg = _config(tmp_path)
     monkeypatch.setattr(http_server, "_cfg", cfg)
     monkeypatch.setattr(http_server, "_api_key", "coding-test-key")
+    monkeypatch.setenv("TGW_TEST_CODING_WORKER_CREDENTIAL", "worker-test-key")
     client = TestClient(http_server.app)
-    body = {"todo_id": 1738, "worktree": envelope["worktree"], "object_generation": "gen-a"}
+    body = {"todo_id": 1738, "object_generation": "gen-a"}
 
     assert client.post("/api/coding/requests", json=body).status_code == 401
     response = client.post("/api/coding/requests", headers={"Authorization": "Bearer coding-test-key"}, json=body)
     assert response.status_code == 200
     request_id = response.json()["request_id"]
-    assert native.enqueues[0]["payload"]["location"]["head"] == "a" * 40
+    assert set(native.enqueues[0]["payload"]) == {"kind", "todo_id", "object_generation", "host", "worker_identity"}
+    assert client.get(f"/api/coding/worker/requests/{request_id}", headers={"Authorization": "Bearer coding-test-key"}).status_code == 401
 
-    finished = coding_provision.claim_and_run(
+    finished = coding_provision_worker.claim_and_run(
         cfg, request_id=request_id, local_host="tgw-lib-local", worker_identity="tgw-coding-worker",
         provision=lambda _: {"foreman": {"dispatched": 1}},
+        client=WorkerServiceClient(client, "worker-test-key", "tgw-coding-worker"),
     )
     assert finished["state"] == "succeeded"
     assert finished["receipt"]["worker_identity"] == "tgw-coding-worker"
     assert native.jobs[request_id]["lease_token"] == "lease-token"
+    visible = client.get(f"/api/coding/requests/{request_id}", headers={"Authorization": "Bearer coding-test-key"})
+    assert visible.status_code == 200
+    assert visible.json()["receipt"]["receipt_id"] == finished["receipt"]["receipt_id"]
 
 
-def test_create_request_uses_real_worktree_git_identity_and_reaches_native_enqueue(tmp_path, native):
+def test_create_request_performs_no_git_or_worktree_probing(tmp_path, native, monkeypatch):
+    """The canonical service must accept a request without ever probing Git or
+    a tgw-lib worktree: any location_identity call or subprocess spawn is a
+    forbidden regression, and the enqueued payload is request-safe data only."""
+    def _forbidden(*_args, **_kwargs):
+        raise AssertionError("create_request probed a Git worktree or repository")
+
+    monkeypatch.setattr(coding_provision, "location_identity", _forbidden)
+    monkeypatch.setattr(coding_provision.subprocess, "run", _forbidden)
+    cfg = _config(tmp_path)
+    for field in ("repository_root", "worktree_root", "worker_api_endpoint", "worker_credential_env"):
+        cfg["coding"].pop(field)
+    request = coding_provision.create_request(cfg, todo_id=1738, object_generation="gen-a")
+    assert request["state"] == "queued"
+    assert native.enqueues[0]["payload"] == {
+        "kind": "coding-provision/v1", "todo_id": 1738, "object_generation": "gen-a",
+        "host": "tgw-lib-local", "worker_identity": "tgw-coding-worker",
+    }
+
+
+def test_local_claimed_worker_produces_receipt_with_local_envelope(tmp_path, monkeypatch, native, envelope):
+    """A tgw-lib worker that claims the request validates its local worktree
+    envelope and the durable receipt returned by the service records that same
+    immutable envelope."""
+    cfg = _config(tmp_path)
+    monkeypatch.setattr(http_server, "_cfg", cfg)
+    monkeypatch.setattr(http_server, "_api_key", "coding-test-key")
+    monkeypatch.setenv("TGW_TEST_CODING_WORKER_CREDENTIAL", "worker-test-key")
+    client = TestClient(http_server.app)
+    request = coding_provision.create_request(cfg, todo_id=1738, object_generation="gen-a")
+
+    finished = coding_provision_worker.claim_and_run(
+        cfg, request_id=request["request_id"], local_host="tgw-lib-local",
+        worker_identity="tgw-coding-worker",
+        provision=lambda _: {"foreman": {"dispatched": 1}},
+        client=WorkerServiceClient(client, "worker-test-key", "tgw-coding-worker"),
+    )
+    assert finished["state"] == "succeeded"
+    receipt = finished["receipt"]
+    assert receipt["worker_identity"] == "tgw-coding-worker"
+    assert receipt["location"] == envelope
+    assert receipt["envelope_hash"] == coding_provision._hash(envelope)
+
+
+def test_local_worker_claims_real_git_worktree_envelope_in_durable_receipt(tmp_path, monkeypatch, native):
+    """End-to-end: the worker resolves worktree_root/todo-<id>, validates it as
+    a real Git worktree, and the durable receipt carries that local envelope."""
     repository = tmp_path / "repo"
     worktree_root = tmp_path / "worktrees"
     worktree = worktree_root / "todo-1738"
@@ -129,33 +223,75 @@ def test_create_request_uses_real_worktree_git_identity_and_reaches_native_enque
     subprocess.run(["git", "-C", str(repository), "worktree", "add", "-b", "coding/1738", str(worktree)], check=True, capture_output=True, text=True)
 
     cfg = _config(tmp_path)
-    request = coding_provision.create_request(cfg, todo_id=1738, worktree=str(worktree), object_generation="gen-a")
-    expected_branch = subprocess.run(
-        ["git", "-C", str(worktree), "branch", "--show-current"], check=True, capture_output=True, text=True,
-    ).stdout.strip()
-    expected_head = subprocess.run(
-        ["git", "-C", str(worktree), "rev-parse", "HEAD"], check=True, capture_output=True, text=True,
-    ).stdout.strip()
+    monkeypatch.setattr(http_server, "_cfg", cfg)
+    monkeypatch.setattr(http_server, "_api_key", "coding-test-key")
+    monkeypatch.setenv("TGW_TEST_CODING_WORKER_CREDENTIAL", "worker-test-key")
+    client = TestClient(http_server.app)
+    request = coding_provision.create_request(cfg, todo_id=1738, object_generation="gen-a")
+    assert "location" not in native.enqueues[0]["payload"]
+    finished = coding_provision_worker.claim_and_run(
+        cfg, request_id=request["request_id"], local_host="tgw-lib-local",
+        worker_identity="tgw-coding-worker",
+        provision=lambda _: {"foreman": {"dispatched": 1}},
+        client=WorkerServiceClient(client, "worker-test-key", "tgw-coding-worker"),
+    )
+    assert finished["state"] == "succeeded"
+    receipt = finished["receipt"]
+    location = receipt["location"]
+    assert location["worktree"] == str(worktree.resolve())
+    assert location["branch"] == "coding/1738"
+    assert len(location["head"]) == 40
+    assert location["todo_id"] == 1738
+    assert location["worker_identity"] == "tgw-coding-worker"
+    assert receipt["envelope_hash"] == coding_provision._hash(location)
+    assert native.jobs[request["request_id"]]["payload_json"]["location"] == location
 
-    assert expected_branch == "coding/1738"
-    assert len(expected_head) == 40
-    assert native.enqueues[0]["payload"]["location"] == {
-        "repository_root": str(repository.resolve()), "worktree": str(worktree.resolve()), "todo_id": 1738,
-        "branch": expected_branch, "head": expected_head, "worker_identity": "tgw-coding-worker",
-    }
-    assert request["request_id"] == "job-1"
 
-
-@pytest.mark.parametrize("field,value", [("head", "b" * 40), ("branch", "HEAD"), ("worktree", "/outside")])
-def test_envelope_mismatch_fails_before_native_claim(tmp_path, monkeypatch, native, envelope, field, value):
+def test_worker_identity_fence_fails_before_native_claim(tmp_path, native):
     cfg = _config(tmp_path)
-    request = coding_provision.create_request(cfg, todo_id=1738, worktree=envelope["worktree"], object_generation="gen-a")
-    changed = dict(envelope)
-    changed[field] = value
-    monkeypatch.setattr(coding_provision, "location_identity", lambda *_args: changed)
+    request = coding_provision.create_request(cfg, todo_id=1738, object_generation="gen-a")
 
-    with pytest.raises(HardFailure, match="envelope"):
-        coding_provision.claim_and_run(cfg, request_id=request["request_id"], local_host="tgw-lib-local", worker_identity="tgw-coding-worker")
+    class UnusedService:
+        def get(self, _request_id):
+            return coding_provision.get_request(cfg, request["request_id"])
+
+    with pytest.raises(HardFailure, match="identity"):
+        coding_provision_worker.claim_and_run(
+            cfg, request_id=request["request_id"], local_host="wrong-host",
+            worker_identity="tgw-coding-worker", client=UnusedService(),
+        )
+    assert native.claims == 0
+
+
+@pytest.mark.parametrize("mutate,fragment", [
+    (lambda env: dict(env, todo_id=9999), "todo_id"),
+    (lambda env: dict(env, worker_identity="some-other-worker"), "worker identity"),
+    (lambda env: dict(env, head="x" * 40), "head"),
+])
+def test_claim_rejects_envelope_not_bound_to_request(tmp_path, native, envelope, mutate, fragment):
+    """The service rejects a claimed envelope that is not self-consistent and
+    bound to the exact request, todo, and worker before it grants a lease."""
+    cfg = _config(tmp_path)
+    request = coding_provision.create_request(cfg, todo_id=1738, object_generation="gen-a")
+    shifted = mutate(dict(envelope))
+    with pytest.raises(HardFailure, match=fragment):
+        coding_provision.claim_request(
+            cfg, request_id=request["request_id"], local_host="tgw-lib-local",
+            worker_identity="tgw-coding-worker",
+            envelope_hash=coding_provision._hash(shifted), location=shifted,
+        )
+    assert native.claims == 0
+
+
+def test_claim_rejects_envelope_hash_mismatch(tmp_path, native, envelope):
+    cfg = _config(tmp_path)
+    request = coding_provision.create_request(cfg, todo_id=1738, object_generation="gen-a")
+    with pytest.raises(HardFailure, match="hash"):
+        coding_provision.claim_request(
+            cfg, request_id=request["request_id"], local_host="tgw-lib-local",
+            worker_identity="tgw-coding-worker",
+            envelope_hash="0" * 64, location=dict(envelope),
+        )
     assert native.claims == 0
 
 
@@ -169,9 +305,9 @@ def test_worker_cli_loads_supported_coding_config_contract(tmp_path, monkeypatch
     assert json.loads(capsys.readouterr().out)["config_seen"] == "tgw-lib-local"
 
 
-def test_access_status_and_stop_preserve_receipt_model(tmp_path, native, envelope):
+def test_access_status_and_stop_preserve_receipt_model(tmp_path, native):
     cfg = _config(tmp_path)
-    request = coding_provision.create_request(cfg, todo_id=1738, worktree=envelope["worktree"], object_generation="gen-a")
+    request = coding_provision.create_request(cfg, todo_id=1738, object_generation="gen-a")
     assert coding_provision.access_status(cfg, request["request_id"])["receipt_source"] == "unknown"
     stopped = coding_provision.stop_request(cfg, request["request_id"])
     assert stopped["state"] == "cancelled"
@@ -192,6 +328,38 @@ def test_coding_cli_access_status_optionally_passes_url_encoded_request_id(
     assert coding_cli.run(argparse.Namespace(coding_op="access-status", request_id=request_id)) == 0
     assert paths == [expected_path]
     assert json.loads(capsys.readouterr().out) == {}
+
+
+@pytest.mark.parametrize("field", [
+    "api_endpoint", "host", "worker_identity",
+])
+def test_create_request_fails_clearly_on_incomplete_coding_config(tmp_path, native, field):
+    cfg = _config(tmp_path)
+    del cfg["coding"][field]
+    with pytest.raises(ValueError, match=f"coding\\.{field}"):
+        coding_provision.create_request(cfg, todo_id=1738, object_generation="gen-a")
+
+
+@pytest.mark.parametrize("field", [
+    "worker_api_endpoint", "host", "worker_identity",
+    "repository_root", "worktree_root", "worker_credential_env",
+])
+def test_configured_client_fails_clearly_on_incomplete_coding_config(tmp_path, field):
+    cfg = _config(tmp_path)
+    del cfg["coding"][field]
+    with pytest.raises(ValueError, match=f"coding\\.{field}"):
+        coding_provision_worker.configured_client(cfg)
+
+
+def test_create_request_accepts_config_without_tgw_lib_local_paths(tmp_path, native):
+    """The canonical service must accept a request when the tgw-lib-local
+    filesystem roots (and worker-only fields) are absent from the coding
+    section; those are validated only at the local worker boundary."""
+    cfg = _config(tmp_path)
+    for field in ("repository_root", "worktree_root", "worker_api_endpoint", "worker_credential_env"):
+        cfg["coding"].pop(field)
+    request = coding_provision.create_request(cfg, todo_id=1738, object_generation="gen-a")
+    assert request["state"] == "queued"
 
 
 def test_execution_boundary_accepts_only_local_allowed_argv_runner(tmp_path):

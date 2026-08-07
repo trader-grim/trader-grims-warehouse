@@ -1,0 +1,11 @@
+{
+  "coding": {
+    "api_endpoint": "https://tgw-prod.example",
+    "worker_api_endpoint": "https://tgw-prod.example",
+    "host": "tgw-lib-01",
+    "worker_identity": "tgw-coding-worker",
+    "repository_root": "/srv/tgw/trader-grims-warehouse",
+    "worktree_root": "/srv/tgw/worktrees",
+    "worker_credential_env": "TGW_CODING_WORKER_API_KEY"
+  }
+}

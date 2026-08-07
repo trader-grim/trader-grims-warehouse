@@ -1,8 +1,11 @@
 """Native queue-backed, receipt-addressed coding provision requests.
 
-The queue state machine is the execution authority.  This module only maps
-the HTTP/CLI request shape onto a generation-bound queue job and validates the
-location identity again before a local worker can obtain its lease.
+The queue state machine is the execution authority.  This module maps the
+HTTP/CLI request shape onto a generation-bound queue job of request-safe data
+only — the canonical service never inspects Git or tgw-lib paths.  The
+tgw-lib worker validates/creates its local worktree envelope after claim, the
+service records that envelope under the exact lease, and the durable receipt
+authors from that same immutable envelope.
 """
 
 from __future__ import annotations
@@ -12,12 +15,12 @@ import json
 import subprocess
 import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
+from tgw.config import validate_service_request_config
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure
 from tgw.workers.coding import DEFAULT_REPOSITORY_ROOT, validated_coding_worktree
-from tgw.workflow.foreman import ForemanConfig, tick
 
 QUEUE_NAME = "coding-provision"
 UNKNOWN = "unknown"
@@ -69,6 +72,21 @@ def _location_envelope(todo_id: int, worktree: str, coding: dict[str, Any], work
     return {"location": location, "envelope_hash": _hash(location)}
 
 
+def _resolve_local_envelope(todo_id: int, coding: dict[str, Any], worker_identity: str) -> dict[str, Any]:
+    """Resolve and validate the local tgw-lib worktree envelope for one todo.
+
+    The worker derives the worktree from its configured ``worktree_root`` and
+    ``todo_id``, then ``location_identity`` validates it as a real Git worktree
+    of the configured repository with a real branch/head.  This runs only on
+    tgw-lib, never on the canonical service.
+    """
+    root_value = coding.get("worktree_root")
+    if not isinstance(root_value, (str, Path)) or not str(root_value):
+        raise HardFailure("coding.worktree_root must be a path")
+    worktree = Path(root_value).resolve() / f"todo-{todo_id}"
+    return _location_envelope(todo_id, worktree, coding, worker_identity)
+
+
 def _document(job: dict[str, Any]) -> dict[str, Any]:
     payload = job.get("payload_json")
     if not isinstance(payload, dict) or payload.get("kind") != "coding-provision/v1":
@@ -83,25 +101,30 @@ def _document(job: dict[str, Any]) -> dict[str, Any]:
     return document
 
 
-def create_request(config: dict[str, Any], *, todo_id: int, worktree: str, object_generation: str) -> dict[str, Any]:
-    """Enqueue exactly one generation/location-bound native queue job."""
+def create_request(config: dict[str, Any], *, todo_id: int, object_generation: str) -> dict[str, Any]:
+    """Enqueue exactly one generation-bound queue job of request-safe data.
+
+    The canonical service does not know (and must not probe) any tgw-lib-local
+    worktree or repository; it records only ``todo_id``, the generation, and the
+    target host/worker identity.  The tgw-lib worker resolves and validates its
+    local worktree envelope after claim, and the durable receipt authors from
+    that envelope.
+    """
     coding = _coding(config)
-    host, worker_identity = coding.get("host"), coding.get("worker_identity")
-    if todo_id <= 0 or not isinstance(worktree, str) or not worktree:
-        raise HardFailure("coding provision request needs a positive todo_id and worktree")
+    validate_service_request_config(coding)
+    host, worker_identity = coding["host"], coding["worker_identity"]
+    if todo_id <= 0:
+        raise HardFailure("coding provision request needs a positive todo_id")
     if not isinstance(object_generation, str) or not object_generation:
         raise HardFailure("coding provision request needs object_generation")
-    if not isinstance(host, str) or not host or not isinstance(worker_identity, str) or not worker_identity:
-        raise HardFailure("coding.host and coding.worker_identity must be configured")
-    envelope = _location_envelope(todo_id, worktree, coding, worker_identity)
     payload = {
         "kind": "coding-provision/v1", "todo_id": todo_id, "object_generation": object_generation,
-        "host": host, "worker_identity": worker_identity, **envelope,
+        "host": host, "worker_identity": worker_identity,
     }
     job_id = state_machine.enqueue_job(
         QUEUE_NAME, payload, entity_type="coding_provision", entity_id=str(todo_id),
         handler_family=QUEUE_NAME,
-        dedupe_key=f"coding-provision:{todo_id}:{object_generation}:{envelope['envelope_hash']}",
+        dedupe_key=f"coding-provision:{todo_id}:{object_generation}",
         max_attempts=1,
     )
     return get_request(config, job_id)
@@ -138,44 +161,104 @@ def access_status(config: dict[str, Any], request_id: str | None = None) -> dict
             "receipt_source": receipt_source, "provider_status": UNKNOWN}
 
 
-def _validate_before_claim(document: dict[str, Any], coding: dict[str, Any], local_host: str, worker_identity: str) -> None:
+def _validate_before_claim(document: dict[str, Any], coding: dict[str, Any], local_host: str, worker_identity: str) -> dict[str, Any]:
+    """Fence the local worker and compute its immutable local worktree envelope.
+
+    Returns the ``{location, envelope_hash}`` envelope the worker echoes when it
+    claims; the canonical service cannot probe the tgw-lib worktree itself.
+    """
     if local_host != coding.get("host") or worker_identity != coding.get("worker_identity"):
         raise HardFailure("local coding worker identity does not match configured envelope")
     if document.get("host") != local_host or document.get("worker_identity") != worker_identity:
         raise HardFailure("coding provision request envelope does not match local worker")
-    location = document.get("location")
-    if not isinstance(location, dict) or document.get("envelope_hash") != _hash(location):
+    return _resolve_local_envelope(int(document.get("todo_id", 0)), coding, worker_identity)
+
+
+def _validate_service_worker(document: dict[str, Any], coding: dict[str, Any], local_host: str,
+                             worker_identity: str, envelope_hash: str, location: dict[str, Any]) -> None:
+    """Validate the worker-echoed envelope against request-safe facts only.
+
+    The service never probes (or mounts) the tgw-lib worktree; it proves the
+    envelope is self-consistent and bound to this exact request, todo, and
+    worker.  The worker is the party that validated the local Git identity.
+    """
+    if local_host != coding.get("host") or worker_identity != coding.get("worker_identity"):
+        raise HardFailure("coding worker does not match configured service identity")
+    if document.get("host") != local_host or document.get("worker_identity") != worker_identity:
+        raise HardFailure("coding provision request envelope does not match worker")
+    if not isinstance(envelope_hash, str) or not envelope_hash or not isinstance(location, dict):
+        raise HardFailure("coding provision envelope is invalid")
+    if _hash(location) != envelope_hash:
         raise HardFailure("coding provision envelope hash is invalid")
-    expected = _location_envelope(int(document.get("todo_id", 0)), str(location.get("worktree", "")), coding, worker_identity)
-    if expected != {"location": location, "envelope_hash": document.get("envelope_hash")}:
-        raise HardFailure("coding provision location envelope does not match local worktree")
+    if location.get("todo_id") != document.get("todo_id"):
+        raise HardFailure("coding provision envelope does not match request todo_id")
+    if location.get("worker_identity") != worker_identity:
+        raise HardFailure("coding provision envelope worker identity is invalid")
+    head = location.get("head")
+    branch = location.get("branch")
+    if not isinstance(head, str) or len(head) != 40 or any(c not in "0123456789abcdef" for c in head):
+        raise HardFailure("coding provision envelope head is invalid")
+    if not isinstance(branch, str) or not branch or branch == "HEAD":
+        raise HardFailure("coding provision envelope branch is invalid")
 
 
-def claim_and_run(config: dict[str, Any], *, request_id: str, local_host: str, worker_identity: str,
-                  provision: Callable[[dict[str, Any]], dict[str, Any]] | None = None) -> dict[str, Any]:
-    """Validate before atomically leasing, then finish under the lease token."""
+def claim_request(config: dict[str, Any], *, request_id: str, local_host: str,
+                  worker_identity: str, envelope_hash: str, location: dict[str, Any]) -> dict[str, Any]:
+    """Lease a request and record the worker-validated local envelope.
+
+    The worker validates its local tgw-lib worktree and echoes the immutable
+    envelope; the service records it under the exact lease so the durable
+    receipt later authors from that same envelope.
+    """
     coding = _coding(config)
     document = get_request(config, request_id)
     if document["state"] != "queued":
         raise HardFailure("coding provision request is not claimable")
-    _validate_before_claim(document, coding, local_host, worker_identity)
+    _validate_service_worker(document, coding, local_host, worker_identity, envelope_hash, location)
     job = state_machine.claim_job(request_id, worker_identity)
     if job is None:
         raise HardFailure("coding provision request is not claimable")
     token = str(job.get("lease_token") or "")
     if not token:
-        raise HardFailure("native queue claim returned no lease token")
-    state_machine.start_claimed_job(request_id, worker_identity, token)
-    try:
-        result = provision(document) if provision else {"foreman": tick(ForemanConfig(coding_config=coding), todo_ids={int(document["todo_id"])}).__dict__}
-        if not isinstance(result, dict):
-            raise HardFailure("coding provision returned no structured result")
-        receipt = {"receipt_id": str(uuid.uuid4()), "receipt_source": f"queue-job:{request_id}",
-                   "worker_identity": worker_identity, "location": document["location"],
-                   "envelope_hash": document["envelope_hash"], "object_generation": document["object_generation"],
-                   "outcome": "succeeded", "result": result}
-        state_machine.succeed_claimed_job(request_id, worker_identity, token, {"receipt": receipt})
-        return get_request(config, request_id)
-    except Exception as exc:
-        state_machine.fail_claimed_job(request_id, worker_identity, token, str(exc))
-        raise
+        raise HardFailure("canonical queue claim returned no lease token")
+    envelope = {"location": location, "envelope_hash": envelope_hash}
+    if state_machine.record_claim_envelope(request_id, worker_identity, token, envelope) is None:
+        raise HardFailure("coding provision claim envelope was not recorded under the lease")
+    return {"lease_token": token, "request": get_request(config, request_id)}
+
+
+def start_request(config: dict[str, Any], *, request_id: str, worker_identity: str,
+                  lease_token: str) -> dict[str, Any]:
+    """Start an exact canonical lease; token validation occurs in the queue."""
+    if worker_identity != _coding(config).get("worker_identity") or not lease_token:
+        raise HardFailure("coding worker identity or lease token is invalid")
+    state_machine.start_claimed_job(request_id, worker_identity, lease_token)
+    return get_request(config, request_id)
+
+
+def complete_request(config: dict[str, Any], *, request_id: str, worker_identity: str,
+                     lease_token: str, result: dict[str, Any]) -> dict[str, Any]:
+    """Persist a service-authored receipt under an exact canonical lease."""
+    coding = _coding(config)
+    document = get_request(config, request_id)
+    if worker_identity != coding.get("worker_identity") or not lease_token:
+        raise HardFailure("coding worker identity or lease token is invalid")
+    if not isinstance(result, dict):
+        raise HardFailure("coding provision returned no structured result")
+    receipt = {
+        "receipt_id": str(uuid.uuid4()), "receipt_source": f"queue-job:{request_id}",
+        "worker_identity": worker_identity, "location": document["location"],
+        "envelope_hash": document["envelope_hash"], "object_generation": document["object_generation"],
+        "outcome": "succeeded", "result": result,
+    }
+    state_machine.succeed_claimed_job(request_id, worker_identity, lease_token, {"receipt": receipt})
+    return get_request(config, request_id)
+
+
+def fail_request(config: dict[str, Any], *, request_id: str, worker_identity: str,
+                 lease_token: str, error: str) -> dict[str, Any]:
+    """Fail a canonical lease without giving the worker database access."""
+    if worker_identity != _coding(config).get("worker_identity") or not lease_token:
+        raise HardFailure("coding worker identity or lease token is invalid")
+    state_machine.fail_claimed_job(request_id, worker_identity, lease_token, str(error))
+    return get_request(config, request_id)
