@@ -253,6 +253,36 @@ def get_aspects(cfg: Dict[str, Any], category_id: str) -> List[Dict[str, Any]]:
     return results
 
 
+def get_category_group_aspects(
+    cfg: Dict[str, Any], category_ids: List[str]
+) -> List[Dict[str, Any]]:
+    """Return the stable, name-deduplicated aspect union for a category group.
+
+    Fetch every category before returning so callers never receive a partial
+    group definition when one category lookup fails. The first occurrence of
+    an aspect supplies its metadata and determines the union's stable order.
+    """
+    per_category: List[List[Dict[str, Any]]] = []
+    seen_categories = set()
+    for raw_category_id in category_ids:
+        category_id = str(raw_category_id or '').strip()
+        if not category_id or category_id in seen_categories:
+            continue
+        seen_categories.add(category_id)
+        per_category.append(get_aspects(cfg, category_id))
+
+    union: List[Dict[str, Any]] = []
+    seen_names = set()
+    for aspects in per_category:
+        for aspect in aspects:
+            name = str(aspect.get('name') or '').strip()
+            if not name or name in seen_names:
+                continue
+            seen_names.add(name)
+            union.append(aspect)
+    return union
+
+
 def warm_missing_aspects(cfg: Dict[str, Any], category_ids: List[str],
                          max_new: int = 25) -> int:
     """Opportunistically fill the aspects cache for categories not yet cached

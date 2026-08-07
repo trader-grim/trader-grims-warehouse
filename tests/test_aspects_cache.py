@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from tgw.apis.ebay import specifics
 
 _RAW_ASPECTS = {
@@ -211,3 +213,47 @@ class TestWarmMissingAspects:
             warmed = specifics.warm_missing_aspects(cfg, ['', None, '111'], max_new=5)
         assert warmed == 1
         assert mock_get.call_count == 1
+
+
+class TestCategoryGroupAspects:
+    """Regression coverage for ai_identify's Set A taxonomy helper."""
+
+    def test_returns_stable_name_deduplicated_union(self, monkeypatch):
+        first_brand = {'name': 'Brand', 'required': True,
+                       'mode': 'FREE_TEXT', 'allowed_values': []}
+        responses = {
+            '101': [first_brand, {'name': 'Color', 'required': False,
+                                  'mode': 'FREE_TEXT', 'allowed_values': []}],
+            '202': [{'name': 'Brand', 'required': False,
+                     'mode': 'SELECTION_ONLY', 'allowed_values': ['Other']},
+                    {'name': 'Size', 'required': False,
+                     'mode': 'FREE_TEXT', 'allowed_values': []}],
+        }
+        calls = []
+
+        def fake_get_aspects(cfg, category_id):
+            calls.append(category_id)
+            return responses[category_id]
+
+        monkeypatch.setattr(specifics, 'get_aspects', fake_get_aspects)
+
+        result = specifics.get_category_group_aspects(
+            {}, ['', None, '101', '101', ' 202 ', '202'])
+
+        assert calls == ['101', '202']
+        assert result == [first_brand, responses['101'][1], responses['202'][1]]
+
+    def test_propagates_lookup_failure_instead_of_returning_partial_union(self, monkeypatch):
+        calls = []
+
+        def fake_get_aspects(cfg, category_id):
+            calls.append(category_id)
+            if category_id == '202':
+                raise RuntimeError('taxonomy unavailable')
+            return [{'name': 'Brand'}]
+
+        monkeypatch.setattr(specifics, 'get_aspects', fake_get_aspects)
+
+        with pytest.raises(RuntimeError, match='taxonomy unavailable'):
+            specifics.get_category_group_aspects({}, ['101', '202'])
+        assert calls == ['101', '202']

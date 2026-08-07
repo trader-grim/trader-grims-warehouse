@@ -59,7 +59,6 @@ def _mock_common(monkeypatch, tmp_path, sku):
     monkeypatch.setattr(image_hash_mod, "compute_dhash", lambda p: "fakehash")
     monkeypatch.setattr(image_hash_mod, "lookup_hash", lambda h, task: None)
     monkeypatch.setattr(image_hash_mod, "store_hash", lambda *a, **k: None)
-    monkeypatch.setattr(ai_identify_mod.state_machine, "enqueue_job", lambda **k: "job-1")
 
 
 def test_quota_budget_exceeded_from_best_category_propagates_out_of_handle(tmp_path, monkeypatch):
