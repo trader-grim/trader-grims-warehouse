@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import socket
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
@@ -19,7 +20,10 @@ from urllib.request import Request, urlopen
 from tgw.coding_provision import _coding, _validate_before_claim
 from tgw.config import DEFAULT_CONFIG, load_coding_worker_config, validate_worker_execution_config
 from tgw.queue.worker_base import HardFailure
+from tgw.workflow.coding_snapshot import build_coding_snapshot
 from tgw.workflow.foreman import ForemanConfig, tick
+from tgw.workflow.profiles import CODING_READY_FOR_IMPLEMENTATION
+from tgw.workflow.treatments import CODING_TREATMENTS
 
 
 class CodingProvisionClient:
@@ -42,7 +46,9 @@ class CodingProvisionClient:
         try:
             with urlopen(request, timeout=15) as response:  # nosec: configured operator endpoint
                 value = json.loads(response.read().decode())
-        except (HTTPError, URLError, json.JSONDecodeError) as exc:
+        except HTTPError as exc:
+            raise HardFailure(f"canonical coding service request failed: {exc}: {exc.read().decode('utf-8', 'replace')}") from exc
+        except (URLError, json.JSONDecodeError) as exc:
             raise HardFailure(f"canonical coding service request failed: {exc}") from exc
         if not isinstance(value, dict):
             raise HardFailure("canonical coding service returned a non-object response")
@@ -51,9 +57,9 @@ class CodingProvisionClient:
     def get(self, request_id: str) -> dict[str, Any]:
         return self._call(f"/api/coding/worker/requests/{quote(request_id, safe='')}")
 
-    def claim(self, request_id: str, host: str, envelope_hash: str, location: dict[str, Any]) -> dict[str, Any]:
+    def claim(self, request_id: str, host: str, envelope_hash: str, location: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]:
         return self._call(f"/api/coding/worker/requests/{quote(request_id, safe='')}/claim", "POST",
-                          {"host": host, "envelope_hash": envelope_hash, "location": location})
+                          {"host": host, "envelope_hash": envelope_hash, "location": location, "snapshot": snapshot})
 
     def start(self, request_id: str, lease_token: str) -> dict[str, Any]:
         return self._call(f"/api/coding/worker/requests/{quote(request_id, safe='')}/start", "POST",
@@ -87,7 +93,10 @@ def claim_and_run(config: dict[str, Any], *, request_id: str, local_host: str, w
     if document.get("state") != "queued":
         raise HardFailure("coding provision request is not claimable")
     envelope = _validate_before_claim(document, coding, local_host, worker_identity)
-    claimed = service.claim(request_id, local_host, envelope["envelope_hash"], envelope["location"])
+    snapshot = asdict(build_coding_snapshot(
+        envelope["location"]["worktree"], CODING_READY_FOR_IMPLEMENTATION, CODING_TREATMENTS,
+    ))
+    claimed = service.claim(request_id, local_host, envelope["envelope_hash"], envelope["location"], snapshot)
     lease_token = claimed.get("lease_token")
     if not isinstance(lease_token, str) or not lease_token:
         raise HardFailure("canonical coding service returned no lease token")

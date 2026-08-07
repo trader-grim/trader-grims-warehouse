@@ -6,6 +6,10 @@
     "worker_identity": "tgw-coding-worker",
     "repository_root": "/srv/tgw/trader-grims-warehouse",
     "worktree_root": "/srv/tgw/worktrees",
-    "worker_credential_env": "TGW_CODING_WORKER_API_KEY"
+    "worker_credential_env": "TGW_CODING_WORKER_API_KEY",
+    "commands": {
+      "controller-verify": ["/usr/local/bin/tgw-controller-verify-runner"]
+    },
+    "allowed_runners": ["/usr/local/bin/tgw-controller-verify-runner"]
   }
 }

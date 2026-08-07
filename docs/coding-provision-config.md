@@ -20,7 +20,11 @@ configured endpoint and set that environment variable for `tgw-http` too.
     "worker_identity": "tgw-coding-worker",
     "repository_root": "/srv/tgw/trader-grims-warehouse",
     "worktree_root": "/srv/tgw/worktrees",
-    "worker_credential_env": "TGW_CODING_WORKER_API_KEY"
+    "worker_credential_env": "TGW_CODING_WORKER_API_KEY",
+    "commands": {
+      "controller-verify": ["/usr/local/bin/tgw-controller-verify-runner"]
+    },
+    "allowed_runners": ["/usr/local/bin/tgw-controller-verify-runner"]
   }
 }
 ```
@@ -53,3 +57,9 @@ Contract:
   and envelope hash match the local envelope it validated.
 - The coding runner remains a local argv protocol.  SSH is not a supported
   runner or worker transport.
+- `commands.controller-verify` is required for the controller-verify queue and
+  must be the installed local `tgw-controller-verify-runner` argv above.  Its
+  command path must also appear in `allowed_runners`.  The runner executes
+  `python -m pytest -q` and `python -m ruff check .` in the worker-validated
+  worktree, and establishes `tested`, `linted`, and `controller_verified` only
+  when both checks pass.

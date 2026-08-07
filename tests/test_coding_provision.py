@@ -119,9 +119,10 @@ class WorkerServiceClient:
     def get(self, request_id):
         return self._call("GET", f"/api/coding/worker/requests/{request_id}")
 
-    def claim(self, request_id, host, envelope_hash, location):
+    def claim(self, request_id, host, envelope_hash, location, snapshot):
         return self._call("POST", f"/api/coding/worker/requests/{request_id}/claim",
-                          {"host": host, "envelope_hash": envelope_hash, "location": location})
+                          {"host": host, "envelope_hash": envelope_hash, "location": location,
+                           "snapshot": snapshot})
 
     def start(self, request_id, lease_token):
         return self._call("POST", f"/api/coding/worker/requests/{request_id}/start", {"lease_token": lease_token})

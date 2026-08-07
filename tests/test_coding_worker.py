@@ -224,6 +224,49 @@ def test_load_config_normalizes_coding_commands_for_worker(tmp_path):
     assert CodingWorker("claude-review", config)._configured_command("claude-review") == ["echo", "ok"]
 
 
+def test_controller_verify_runner_emits_attested_success_only_after_pytest_and_ruff(monkeypatch, capsys):
+    """The local runner establishes its full authority only after both checks pass."""
+    from tgw.workers import controller_verify
+
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, stdout="passed\n", stderr="")
+
+    monkeypatch.setattr(controller_verify.subprocess, "run", run)
+
+    assert controller_verify.main() == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "outcome": "satisfied",
+        "established_conditions": ["tested", "linted", "controller_verified"],
+        "artifacts": [
+            {"kind": "check", "name": "pytest", "status": "passed"},
+            {"kind": "check", "name": "ruff", "status": "passed"},
+        ],
+    }
+    assert [command for command, _kwargs in calls] == [
+        [sys.executable, "-m", "pytest", "-q"],
+        [sys.executable, "-m", "ruff", "check", "."],
+    ]
+
+
+def test_controller_verify_runner_does_not_establish_conditions_when_a_check_fails(monkeypatch, capsys):
+    from tgw.workers import controller_verify
+
+    monkeypatch.setattr(
+        controller_verify.subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(command, 1, stdout="failed\n", stderr=""),
+    )
+
+    assert controller_verify.main() == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["outcome"] == "failed"
+    assert result["established_conditions"] == []
+    assert result["artifacts"] == [{"kind": "check", "name": "pytest", "status": "failed", "detail": "failed\n"}]
+
+
 def test_coding_worker_entrypoint_loads_config_file_and_starts_allowed_local_runner(tmp_path, monkeypatch):
     """The installed queue entrypoint consumes the coding-worker config contract."""
     from tgw.workers import coding
