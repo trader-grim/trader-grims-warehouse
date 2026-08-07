@@ -143,7 +143,8 @@ def stop_request(config: dict[str, Any], request_id: str) -> dict[str, Any]:
         receipt = {"receipt_id": str(uuid.uuid4()), "receipt_source": f"queue-job:{request_id}", "outcome": "stopped"}
         state_machine.cancel_job(request_id, "coding provision stopped", {"receipt": receipt})
         document = get_request(config, request_id)
-    document["receipt"] = document["receipt"] or {"receipt_source": f"queue-job:{request_id}", "outcome": "stopped"}
+    if document["state"] == "cancelled":
+        document["receipt"] = document["receipt"] or {"receipt_source": f"queue-job:{request_id}", "outcome": "stopped"}
     return document
 
 

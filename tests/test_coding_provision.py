@@ -314,6 +314,22 @@ def test_access_status_and_stop_preserve_receipt_model(tmp_path, native):
     assert stopped["receipt"]["outcome"] == "stopped"
 
 
+@pytest.mark.parametrize("terminal_state", ["failed", "dead_letter"])
+def test_stop_preserves_failed_and_dead_letter_state_without_fabricating_receipt(
+    tmp_path, native, terminal_state,
+):
+    """A stop on an already failed/dead-lettered request must not fabricate a
+    synthetic ``stopped`` receipt that masks its terminal state, nor change the
+    state — a stop may only fabricate a stopped receipt for a job it actually
+    cancelled or that was already cancelled."""
+    cfg = _config(tmp_path)
+    request = coding_provision.create_request(cfg, todo_id=1738, object_generation="gen-a")
+    native.jobs[request["request_id"]]["state"] = terminal_state
+    stopped = coding_provision.stop_request(cfg, request["request_id"])
+    assert stopped["state"] == terminal_state
+    assert stopped["receipt"] is None
+
+
 @pytest.mark.parametrize(("request_id", "expected_path"), [
     (None, "/api/coding/access-status"),
     ("request id/&?", "/api/coding/access-status?request_id=request+id%2F%26%3F"),
