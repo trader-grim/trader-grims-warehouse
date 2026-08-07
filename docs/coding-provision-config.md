@@ -55,6 +55,21 @@ Contract:
   service-authors the durable receipt from the recorded envelope.  The worker
   rejects a completed response unless its receipt source, identity, location,
   and envelope hash match the local envelope it validated.
+- A provision request is executable only after the canonical Todo lookup,
+  evaluator, and scheduler have attached a bounded execution envelope.  That
+  envelope names an exact `CODING_TREATMENTS` contract, graph/generation, and
+  evaluator evidence hashes.  The local worker runs that registered treatment
+  only; it never imports Foreman or connects to PostgreSQL.  If the service
+  has no executable route capable of issuing this envelope, the worker fails
+  the lease and the request status exposes its structured `failed` state and
+  error instead of fabricating a dispatch success.
+- The worker submits its validated location plus a portable
+  `coding-snapshot/v1` claim to the authenticated worker claim route.  The
+  service verifies the claim is bound to the request generation, looks up the
+  open Todo, evaluates the snapshot with the existing coding contracts, and
+  durably records the selected envelope under the lease.  A missing Todo,
+  malformed/stale snapshot, or no scheduler-eligible treatment fails that
+  lease with its structured error; it never becomes a successful no-op.
 - The coding runner remains a local argv protocol.  SSH is not a supported
   runner or worker transport.
 - `commands.controller-verify` is required for the controller-verify queue and

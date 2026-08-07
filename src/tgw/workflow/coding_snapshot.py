@@ -23,6 +23,80 @@ from .contracts import (
     TreatmentContract,
 )
 
+
+def serialize_snapshot(snapshot: ObjectSnapshot) -> dict[str, object]:
+    """Return the portable, canonical JSON form of a local coding snapshot.
+
+    The provision worker may observe its own worktree, but it cannot choose a
+    treatment.  This representation lets tgw-prod independently evaluate the
+    exact facts the worker claimed without receiving a live filesystem path as
+    an authority channel.
+    """
+    return {
+        "schema_version": "coding-snapshot/v1",
+        "object_id": snapshot.object_id,
+        "generation": snapshot.generation,
+        "assertions": [
+            {
+                "condition_id": assertion.condition_id,
+                "result": assertion.result.value,
+                "reasons": list(assertion.reasons),
+                "evidence": [
+                    {
+                        "identity": evidence.identity,
+                        "source_class": evidence.source_class,
+                        "source_generation": evidence.source_generation,
+                        "freshness_identity": evidence.freshness_identity,
+                        "supersession_identity": evidence.supersession_identity,
+                    }
+                    for evidence in assertion.evidence
+                ],
+            }
+            for assertion in snapshot.assertions
+        ],
+        "external_effect_ambiguities": list(snapshot.external_effect_ambiguities),
+    }
+
+
+def deserialize_snapshot(value: object) -> ObjectSnapshot:
+    """Validate and decode a worker's portable coding snapshot claim."""
+    if not isinstance(value, dict) or value.get("schema_version") != "coding-snapshot/v1":
+        raise ValueError("coding snapshot claim has an unsupported schema")
+    object_id = value.get("object_id")
+    generation = value.get("generation")
+    assertions_value = value.get("assertions")
+    ambiguities = value.get("external_effect_ambiguities", [])
+    if (not isinstance(object_id, str) or not object_id or not isinstance(generation, str)
+            or not generation or not isinstance(assertions_value, list)
+            or not isinstance(ambiguities, list) or not all(isinstance(item, str) for item in ambiguities)):
+        raise ValueError("coding snapshot claim is malformed")
+    assertions: list[EvidenceAssertion] = []
+    for assertion in assertions_value:
+        if not isinstance(assertion, dict):
+            raise ValueError("coding snapshot assertion is malformed")
+        condition_id, result = assertion.get("condition_id"), assertion.get("result")
+        reasons, evidence_value = assertion.get("reasons", []), assertion.get("evidence", [])
+        if (not isinstance(condition_id, str) or not condition_id or not isinstance(result, str)
+                or not isinstance(reasons, list) or not all(isinstance(item, str) for item in reasons)
+                or not isinstance(evidence_value, list)):
+            raise ValueError("coding snapshot assertion is malformed")
+        try:
+            fingerprint_result = FingerprintResult(result)
+        except ValueError as exc:
+            raise ValueError("coding snapshot assertion has an invalid result") from exc
+        evidence: list[EvidenceReference] = []
+        for item in evidence_value:
+            if not isinstance(item, dict) or any(
+                not isinstance(item.get(field, ""), str)
+                for field in ("identity", "source_class", "source_generation", "freshness_identity", "supersession_identity")
+            ):
+                raise ValueError("coding snapshot evidence is malformed")
+            evidence.append(EvidenceReference(**{field: item.get(field, "") for field in (
+                "identity", "source_class", "source_generation", "freshness_identity", "supersession_identity",
+            )}))
+        assertions.append(EvidenceAssertion(condition_id, fingerprint_result, tuple(reasons), tuple(evidence)))
+    return ObjectSnapshot(object_id, generation, tuple(assertions), tuple(ambiguities))
+
 # ---------------------------------------------------------------------------
 # Condition checkers — one function per coding condition.
 # Each returns (FingerprintResult, reasons, evidence_references).

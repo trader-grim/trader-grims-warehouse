@@ -306,6 +306,19 @@ class CodingWorker(QueueWorker):
         return receipt
 
 
+def execute_treatment(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """Execute one already-authorized registered treatment without queue I/O.
+
+    The provision bridge owns no queue lease and never claims a treatment job;
+    tgw-prod has already issued the bounded evaluator/scheduler envelope.  This
+    shares the ordinary ``CodingWorker.handle`` receipt and authority checks.
+    """
+    treatment_id = payload.get("treatment_id")
+    if not isinstance(treatment_id, str) or treatment_id not in CODING_TREATMENTS:
+        raise HardFailure("coding execution envelope has no registered treatment")
+    return CodingWorker(treatment_id, config).handle({"payload_json": payload})
+
+
 def main() -> int:
     """Run one named coding queue under the ordinary queue-worker contract."""
     import argparse

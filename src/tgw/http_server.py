@@ -135,6 +135,7 @@ class CodingWorkerClaim(BaseModel):
     host: str = Field(min_length=1)
     envelope_hash: str = Field(min_length=1)
     location: Dict[str, Any]
+    snapshot: Dict[str, Any]
 
 
 class CodingWorkerLease(BaseModel):
@@ -418,7 +419,7 @@ def coding_worker_claim(request_id: str, body: CodingWorkerClaim, worker_identit
     try:
         return claim_request(_cfg, request_id=request_id, local_host=body.host,
                              worker_identity=worker_identity, envelope_hash=body.envelope_hash,
-                             location=body.location)
+                             location=body.location, snapshot=body.snapshot)
     except Exception as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

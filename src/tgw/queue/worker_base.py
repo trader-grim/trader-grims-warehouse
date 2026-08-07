@@ -25,18 +25,11 @@ import time
 from typing import Any, Dict, Optional
 
 import tgw.logging as tgw_logging
+from tgw.errors import HardFailure
 from tgw.queue import state_machine
 
 log = logging.getLogger(__name__)
 
-
-class HardFailure(Exception):
-    """
-    Raise from handle() to immediately dead-letter the job with no retries.
-
-    Use for failures where retrying cannot help: expired credentials,
-    missing required resources, or any condition that needs human intervention.
-    """
 
 _RECOVER_INTERVAL_S = 60   # how often to call recover_expired_jobs
 

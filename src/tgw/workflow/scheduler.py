@@ -58,6 +58,19 @@ def _treatment_to_queue(treatment_id: str) -> str:
     return _TREATMENT_QUEUE_MAP.get(treatment_id, treatment_id)
 
 
+def select_treatment(graph: RuntimeWorkGraph, treatments: tuple[TreatmentContract, ...]) -> TreatmentContract | None:
+    """Apply scheduler admission semantics without creating a second queue job.
+
+    A caller that owns a different durable transport (such as a provision
+    lease) can reuse the scheduler's ordering and gates while retaining that
+    transport's queue ownership.
+    """
+    if graph.ownership_conflicts or graph.reconciliation_gates or not graph.eligible_treatments:
+        return None
+    chosen = graph.eligible_treatments[0]
+    return _lookup_treatment(chosen.treatment_id, chosen.treatment_version, treatments)
+
+
 # ── dispatch_treatment: unified entry point ────────────────────────────────
 #
 # The function accepts two calling conventions:
