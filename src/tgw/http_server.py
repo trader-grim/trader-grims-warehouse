@@ -128,7 +128,7 @@ _PENDING_OFFERS_TTL = 300
 
 class CodingProvisionStart(BaseModel):
     todo_id: int = Field(gt=0)
-    object_generation: str = Field(min_length=1)
+    object_generation: str | None = None
 
 
 class CodingWorkerClaim(BaseModel):

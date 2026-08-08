@@ -79,7 +79,8 @@ def _authorize_execution(document: dict[str, Any], location: dict[str, Any], sna
         raise HardFailure(f"verified local coding snapshot is invalid: {exc}") from exc
     if snapshot.object_id != location.get("worktree"):
         raise HardFailure("verified local coding snapshot worktree does not match claim")
-    if snapshot.generation != document.get("object_generation"):
+    requested_generation = document.get("object_generation")
+    if requested_generation is not None and snapshot.generation != requested_generation:
         raise HardFailure("verified local coding snapshot generation does not match request")
     graph = evaluate(
         snapshot=snapshot,
@@ -128,7 +129,7 @@ def _validate_treatment_result(document: dict[str, Any], result: dict[str, Any])
         raise HardFailure("coding treatment receipt execution identity does not match claim")
 
 
-def create_request(config: dict[str, Any], *, todo_id: int, object_generation: str) -> dict[str, Any]:
+def create_request(config: dict[str, Any], *, todo_id: int, object_generation: str | None = None) -> dict[str, Any]:
     """Enqueue exactly one generation-bound queue job of request-safe data.
 
     The canonical service does not know (and must not probe) any tgw-lib-local
@@ -142,22 +143,24 @@ def create_request(config: dict[str, Any], *, todo_id: int, object_generation: s
     host, worker_identity = coding["host"], coding["worker_identity"]
     if todo_id <= 0:
         raise HardFailure("coding provision request needs a positive todo_id")
-    if not isinstance(object_generation, str) or not object_generation:
-        raise HardFailure("coding provision request needs object_generation")
+    if object_generation is not None and (not isinstance(object_generation, str) or not object_generation):
+        raise HardFailure("coding provision request object_generation must be a non-empty string when supplied")
     payload = {
         "kind": "coding-provision/v1",
         "todo_id": todo_id,
-        "object_generation": object_generation,
         "host": host,
         "worker_identity": worker_identity,
     }
+    if object_generation is not None:
+        payload["object_generation"] = object_generation
+    generation_key = object_generation or "unbound"
     job_id = state_machine.enqueue_job(
         QUEUE_NAME,
         payload,
         entity_type="coding_provision",
         entity_id=str(todo_id),
         handler_family=QUEUE_NAME,
-        dedupe_key=f"coding-provision:{todo_id}:{object_generation}",
+        dedupe_key=f"coding-provision:{todo_id}:{generation_key}",
         max_attempts=1,
     )
     return get_request(config, job_id)

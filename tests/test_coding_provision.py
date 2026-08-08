@@ -863,6 +863,40 @@ def test_create_request_accepts_config_without_tgw_lib_local_paths(tmp_path, nat
     assert request["state"] == "queued"
 
 
+def test_unbound_request_binds_attested_generation_at_local_claim(tmp_path, native, envelope):
+    """A normal client may request a Todo without knowing tgw-lib's local source hash."""
+    cfg = _config(tmp_path)
+    request = coding_provision.create_request(cfg, todo_id=1738, object_generation=None)
+
+    assert "object_generation" not in native.enqueues[0]["payload"]
+    claimed = coding_provision.claim_request(
+        cfg,
+        request_id=request["request_id"],
+        local_host="tgw-lib-local",
+        worker_identity="tgw-coding-worker",
+        envelope_hash=coding_provision._hash(envelope),
+        location=envelope,
+        snapshot=_snapshot_claim(envelope),
+    )
+    assert claimed["request"]["execution"]["object_generation"] == "gen-a"
+
+
+def test_authenticated_api_accepts_unbound_coding_request(tmp_path, monkeypatch, native):
+    """The ordinary client may enqueue by Todo without a tgw-lib-local hash."""
+    cfg = _config(tmp_path)
+    monkeypatch.setattr(http_server, "_cfg", cfg)
+    monkeypatch.setattr(http_server, "_api_key", "coding-test-key")
+    client = TestClient(http_server.app)
+
+    response = client.post(
+        "/api/coding/requests",
+        headers={"Authorization": "Bearer coding-test-key"},
+        json={"todo_id": 1738},
+    )
+    assert response.status_code == 200
+    assert "object_generation" not in native.enqueues[0]["payload"]
+
+
 def test_execution_boundary_accepts_only_local_allowed_argv_runner(tmp_path):
     worker = CodingWorker(
         "claude-review",
