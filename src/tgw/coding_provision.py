@@ -246,6 +246,10 @@ def claim_request(config: dict[str, Any], *, request_id: str, local_host: str, w
         "envelope_hash": envelope_hash,
         "snapshot": snapshot,
         "execution": execution,
+        # An ordinary request arrives unbound.  Persist the worker-attested
+        # generation at the same atomic claim boundary as its execution proof,
+        # so every later worker transition verifies one durable identity.
+        "object_generation": execution["object_generation"],
     }
     job = state_machine.claim_job_with_envelope(request_id, worker_identity, envelope)
     if job is None:

@@ -879,6 +879,7 @@ def test_unbound_request_binds_attested_generation_at_local_claim(tmp_path, nati
         snapshot=_snapshot_claim(envelope),
     )
     assert claimed["request"]["execution"]["object_generation"] == "gen-a"
+    assert claimed["request"]["object_generation"] == "gen-a"
 
 
 def test_authenticated_api_accepts_unbound_coding_request(tmp_path, monkeypatch, native):
