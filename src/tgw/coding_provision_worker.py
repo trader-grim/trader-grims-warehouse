@@ -43,7 +43,7 @@ def local_location_identity(todo_id: int, worktree_value: str, coding: dict[str,
     repository = Path(coding.get("repository_root", DEFAULT_REPOSITORY_ROOT)).resolve()
     branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=worktree, check=False, text=True, capture_output=True)
     head = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], cwd=worktree, check=False, text=True, capture_output=True)
-    if branch.returncode or head.returncode or branch.stdout.strip() == "HEAD" or len(head.stdout.strip()) != 40:
+    if branch.returncode or head.returncode or len(head.stdout.strip()) != 40:
         raise HardFailure("coding location Git identity is invalid")
     return {"repository_root": str(repository), "worktree": str(worktree), "todo_id": todo_id, "branch": branch.stdout.strip(), "head": head.stdout.strip(), "worker_identity": worker_identity}
 
@@ -52,7 +52,26 @@ def _validate_before_claim(document: dict[str, Any], coding: dict[str, Any], loc
     if local_host != coding.get("host") or worker_identity != coding.get("worker_identity") or document.get("host") != local_host or document.get("worker_identity") != worker_identity:
         raise HardFailure("local coding worker identity does not match configured envelope")
     todo_id = int(document.get("todo_id", 0))
-    worktree = Path(coding.get("worktree_root", "")).resolve() / f"todo-{todo_id}"
+    root_value = coding.get("worktree_root")
+    if not isinstance(root_value, str) or not root_value.strip():
+        raise HardFailure("coding worktree root is not configured")
+    root = Path(root_value).resolve()
+    if not root.is_dir():
+        raise HardFailure(f"coding worktree root is unavailable: {root}")
+    stem = f"todo-{todo_id}"
+    candidates = sorted(
+        candidate
+        for candidate in root.iterdir()
+        if not candidate.is_symlink()
+        and candidate.is_dir()
+        and (candidate.name == stem or candidate.name.startswith(stem + "-"))
+    )
+    if not candidates:
+        raise HardFailure(f"no worktree found for todo {todo_id} in {root}")
+    if len(candidates) != 1:
+        names = ", ".join(str(candidate) for candidate in candidates)
+        raise HardFailure(f"ambiguous worktrees for todo {todo_id}: {names}")
+    worktree = candidates[0]
     location = local_location_identity(todo_id, str(worktree), coding, worker_identity)
     return {"location": location, "envelope_hash": _hash(location)}
 

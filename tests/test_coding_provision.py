@@ -119,6 +119,9 @@ def native(monkeypatch):
 
 @pytest.fixture
 def envelope(monkeypatch, tmp_path):
+    # The local worker discovers the declared worktree before its identity
+    # function is mocked. Keep the fixture aligned with that production fence.
+    (tmp_path / "worktrees" / "todo-1738").mkdir(parents=True)
     identity = {
         "repository_root": str((tmp_path / "repo").resolve()),
         "worktree": str((tmp_path / "worktrees" / "todo-1738").resolve()),
@@ -127,7 +130,6 @@ def envelope(monkeypatch, tmp_path):
         "head": "a" * 40,
         "worker_identity": "tgw-coding-worker",
     }
-    monkeypatch.setattr(coding_provision, "location_identity", lambda *_args: dict(identity))
     monkeypatch.setattr(coding_provision_worker, "local_location_identity", lambda *_args: dict(identity))
     snapshot = serialize_snapshot(
         ObjectSnapshot(
@@ -304,6 +306,61 @@ def test_worker_cannot_execute_without_an_api_issued_envelope(tmp_path, native, 
             client=MissingEnvelopeService(),
         )
     assert coding_provision.get_request(cfg, request["request_id"])["state"] == "failed"
+
+
+def test_worker_discovery_uses_todo_identifier_boundary(tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    root = tmp_path / "worktrees"
+    expected = root / "todo-173"
+    (root / "todo-1738").mkdir(parents=True)
+    expected.mkdir()
+    monkeypatch.setattr(
+        coding_provision_worker,
+        "local_location_identity",
+        lambda todo_id, worktree, _coding, worker_identity: {
+            "todo_id": todo_id,
+            "worktree": worktree,
+            "worker_identity": worker_identity,
+        },
+    )
+    result = coding_provision_worker._validate_before_claim(
+        {"host": "tgw-lib-local", "worker_identity": "tgw-coding-worker", "todo_id": 173},
+        cfg["coding"],
+        "tgw-lib-local",
+        "tgw-coding-worker",
+    )
+    assert result["location"]["worktree"] == str(expected)
+
+
+def test_worker_discovery_rejects_ambiguous_or_missing_roots(tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    document = {"host": "tgw-lib-local", "worker_identity": "tgw-coding-worker", "todo_id": 1738}
+    with pytest.raises(HardFailure, match="root is unavailable"):
+        coding_provision_worker._validate_before_claim(document, cfg["coding"], "tgw-lib-local", "tgw-coding-worker")
+
+    cfg["coding"]["worktree_root"] = ""
+    with pytest.raises(HardFailure, match="root is not configured"):
+        coding_provision_worker._validate_before_claim(document, cfg["coding"], "tgw-lib-local", "tgw-coding-worker")
+
+    cfg["coding"]["worktree_root"] = str(tmp_path / "worktrees")
+    root = tmp_path / "worktrees"
+    (root / "todo-1738").mkdir(parents=True)
+    (root / "todo-1738-retry").mkdir()
+    monkeypatch.setattr(coding_provision_worker, "local_location_identity", lambda *_args: {})
+    with pytest.raises(HardFailure, match="ambiguous worktrees"):
+        coding_provision_worker._validate_before_claim(document, cfg["coding"], "tgw-lib-local", "tgw-coding-worker")
+
+
+def test_worker_discovery_rejects_symlink_worktree(tmp_path):
+    cfg = _config(tmp_path)
+    root = tmp_path / "worktrees"
+    root.mkdir()
+    outside = tmp_path / "outside-worktree"
+    outside.mkdir()
+    (root / "todo-1738").symlink_to(outside, target_is_directory=True)
+    document = {"host": "tgw-lib-local", "worker_identity": "tgw-coding-worker", "todo_id": 1738}
+    with pytest.raises(HardFailure, match="no worktree found"):
+        coding_provision_worker._validate_before_claim(document, cfg["coding"], "tgw-lib-local", "tgw-coding-worker")
 
 
 def test_tgw_lib_provision_worker_has_no_direct_canonical_state_dependencies():
@@ -526,16 +583,11 @@ def test_authenticated_api_to_native_job_to_local_claim_to_structured_receipt(tm
     assert visible.json()["receipt"]["receipt_id"] == finished["receipt"]["receipt_id"]
 
 
-def test_create_request_performs_no_git_or_worktree_probing(tmp_path, native, monkeypatch):
+def test_create_request_performs_no_git_or_worktree_probing(tmp_path, native):
     """The canonical service must accept a request without ever probing Git or
-    a tgw-lib worktree: any location_identity call or subprocess spawn is a
-    forbidden regression, and the enqueued payload is request-safe data only."""
+    a tgw-lib worktree: the enqueued payload is request-safe data only, and
+    missing worktree/repository config must not block enqueueing."""
 
-    def _forbidden(*_args, **_kwargs):
-        raise AssertionError("create_request probed a Git worktree or repository")
-
-    monkeypatch.setattr(coding_provision, "location_identity", _forbidden)
-    monkeypatch.setattr(coding_provision.subprocess, "run", _forbidden)
     cfg = _config(tmp_path)
     for field in ("repository_root", "worktree_root", "worker_api_endpoint", "worker_credential_env"):
         cfg["coding"].pop(field)

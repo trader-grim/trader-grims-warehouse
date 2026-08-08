@@ -12,16 +12,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import subprocess
 import uuid
-from pathlib import Path
 from typing import Any
 
 from tgw.coding_execution import execution_envelope
 from tgw.config import validate_service_request_config
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure
-from tgw.workers.coding import DEFAULT_REPOSITORY_ROOT, validated_coding_worktree
 from tgw.workflow.coding_snapshot import deserialize_snapshot
 from tgw.workflow.evaluator import evaluate
 from tgw.workflow.foreman import EVALUATOR_VERSION
@@ -52,66 +49,6 @@ def _coding(config: dict[str, Any]) -> dict[str, Any]:
 
 def _hash(value: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
-
-def location_identity(todo_id: int, worktree_value: str, coding: dict[str, Any], worker_identity: str) -> dict[str, Any]:
-    """Produce the complete immutable location envelope for one request."""
-    worktree = validated_coding_worktree(worktree_value, worktree_value, coding)
-    repository_value = coding.get("repository_root", DEFAULT_REPOSITORY_ROOT)
-    if not isinstance(repository_value, (str, Path)):
-        raise HardFailure("coding.repository_root must be a path")
-    repository = Path(repository_value).resolve()
-    try:
-        branch_probe = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=worktree,
-            check=False,
-            text=True,
-            capture_output=True,
-        )
-        head_probe = subprocess.run(
-            ["git", "rev-parse", "--verify", "HEAD"],
-            cwd=worktree,
-            check=False,
-            text=True,
-            capture_output=True,
-        )
-    except OSError as exc:
-        raise HardFailure("coding location Git identity is unavailable") from exc
-    branch = branch_probe.stdout.strip()
-    head = head_probe.stdout.strip()
-    if branch_probe.returncode or head_probe.returncode or not branch or len(head) != 40:
-        raise HardFailure("coding location Git identity is invalid")
-    if branch == "HEAD":
-        raise HardFailure("coding location envelope rejects detached worktree")
-    return {
-        "repository_root": str(repository),
-        "worktree": str(worktree),
-        "todo_id": todo_id,
-        "branch": branch,
-        "head": head,
-        "worker_identity": worker_identity,
-    }
-
-
-def _location_envelope(todo_id: int, worktree: str, coding: dict[str, Any], worker_identity: str) -> dict[str, Any]:
-    location = location_identity(todo_id, worktree, coding, worker_identity)
-    return {"location": location, "envelope_hash": _hash(location)}
-
-
-def _resolve_local_envelope(todo_id: int, coding: dict[str, Any], worker_identity: str) -> dict[str, Any]:
-    """Resolve and validate the local tgw-lib worktree envelope for one todo.
-
-    The worker derives the worktree from its configured ``worktree_root`` and
-    ``todo_id``, then ``location_identity`` validates it as a real Git worktree
-    of the configured repository with a real branch/head.  This runs only on
-    tgw-lib, never on the canonical service.
-    """
-    root_value = coding.get("worktree_root")
-    if not isinstance(root_value, (str, Path)) or not str(root_value):
-        raise HardFailure("coding.worktree_root must be a path")
-    worktree = Path(root_value).resolve() / f"todo-{todo_id}"
-    return _location_envelope(todo_id, worktree, coding, worker_identity)
 
 
 def _document(job: dict[str, Any]) -> dict[str, Any]:
@@ -259,19 +196,6 @@ def access_status(config: dict[str, Any], request_id: str | None = None) -> dict
         "receipt_source": receipt_source,
         "provider_status": UNKNOWN,
     }
-
-
-def _validate_before_claim(document: dict[str, Any], coding: dict[str, Any], local_host: str, worker_identity: str) -> dict[str, Any]:
-    """Fence the local worker and compute its immutable local worktree envelope.
-
-    Returns the ``{location, envelope_hash}`` envelope the worker echoes when it
-    claims; the canonical service cannot probe the tgw-lib worktree itself.
-    """
-    if local_host != coding.get("host") or worker_identity != coding.get("worker_identity"):
-        raise HardFailure("local coding worker identity does not match configured envelope")
-    if document.get("host") != local_host or document.get("worker_identity") != worker_identity:
-        raise HardFailure("coding provision request envelope does not match local worker")
-    return _resolve_local_envelope(int(document.get("todo_id", 0)), coding, worker_identity)
 
 
 def _validate_service_worker(document: dict[str, Any], coding: dict[str, Any], local_host: str, worker_identity: str, envelope_hash: str, location: dict[str, Any]) -> None:
