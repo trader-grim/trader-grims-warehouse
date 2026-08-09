@@ -13,7 +13,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from tgw import coding_cli, coding_provision, coding_provision_worker, http_server
+from tgw import coding_cli, coding_execution, coding_provision, coding_provision_worker, http_server
+from tgw.errors import TreatmentFailure
 from tgw.queue.worker_base import HardFailure
 from tgw.workers.coding import CodingWorker
 from tgw.workflow.coding_snapshot import serialize_snapshot
@@ -72,10 +73,10 @@ class NativeQueue:
         job.update(state="succeeded", result=result)
         return dict(job)
 
-    def fail_claimed_job(self, job_id, lease_owner, lease_token, error):
+    def fail_claimed_job(self, job_id, lease_owner, lease_token, error, result=None):
         job = self.jobs[job_id]
         assert (job["lease_owner"], job["lease_token"]) == (lease_owner, lease_token)
-        job.update(state="failed", error_detail=error)
+        job.update(state="failed", error_detail=error, result=result)
         return dict(job)
 
     def cancel_job(self, job_id, _message=None, result=None):
@@ -168,8 +169,11 @@ class WorkerServiceClient:
     def complete(self, request_id, lease_token, result):
         return self._call("POST", f"/api/coding/worker/requests/{request_id}/complete", {"lease_token": lease_token, "result": result})
 
-    def fail(self, request_id, lease_token, error):
-        return self._call("POST", f"/api/coding/worker/requests/{request_id}/fail", {"lease_token": lease_token, "error": error})
+    def fail(self, request_id, lease_token, error, result=None):
+        body = {"lease_token": lease_token, "error": error}
+        if result is not None:
+            body["result"] = result
+        return self._call("POST", f"/api/coding/worker/requests/{request_id}/fail", body)
 
 
 def _execution_envelope() -> dict:
@@ -213,6 +217,54 @@ def _satisfied_receipt(execution: dict | None = None, execution_identity: dict |
     if execution_identity is not None:
         receipt["execution_identity"] = execution_identity
     return receipt
+
+
+def _failed_receipt(execution: dict | None = None) -> dict:
+    execution = execution or _execution_envelope()
+    treatment = next(item for item in CODING_TREATMENTS if item.identity == execution["treatment_id"])
+    return {
+        "treatment_id": execution["treatment_id"],
+        "treatment_version": execution["treatment_version"],
+        "graph_id": execution["graph_id"],
+        "object_generation": execution["object_generation"],
+        "outcome": "failed",
+        "established_conditions": [],
+        "artifacts": [{"kind": "check", "name": "review", "status": "failed"}],
+        "receipt_schema_id": treatment.receipt_schema_id,
+    }
+
+
+def test_structured_unsatisfied_treatment_result_becomes_canonical_failed_receipt(
+    tmp_path, monkeypatch, native, envelope,
+):
+    """A launcher-declared failure keeps its evidence through /fail and into
+    the service-authored terminal receipt, under the claimed lease."""
+    cfg = _config(tmp_path)
+    monkeypatch.setattr(http_server, "_cfg", cfg)
+    monkeypatch.setenv("TGW_TEST_CODING_WORKER_CREDENTIAL", "worker-test-key")
+    client = TestClient(http_server.app)
+    request = coding_provision.create_request(cfg, todo_id=1738, object_generation="gen-a")
+    native.jobs[request["request_id"]]["payload_json"]["execution"] = _execution_envelope()
+
+    def failed_treatment(document):
+        raise TreatmentFailure("coding treatment reported failed", _failed_receipt(document["execution"]))
+
+    with pytest.raises(TreatmentFailure, match="reported failed"):
+        coding_provision_worker.claim_and_run(
+            cfg,
+            request_id=request["request_id"],
+            local_host="tgw-lib-local",
+            worker_identity="tgw-coding-worker",
+            provision=failed_treatment,
+            client=WorkerServiceClient(client, "worker-test-key", "tgw-coding-worker"),
+        )
+
+    failed = coding_provision.get_request(cfg, request["request_id"])
+    assert failed["state"] == "failed"
+    assert failed["receipt"]["receipt_source"] == f"queue-job:{request['request_id']}"
+    assert failed["receipt"]["outcome"] == "failed"
+    assert failed["receipt"]["result"]["outcome"] == "failed"
+    assert failed["receipt"]["result"]["execution_identity"] == envelope
 
 
 def test_worker_cannot_turn_failed_canonical_work_into_succeeded(tmp_path, native, envelope):
@@ -483,6 +535,84 @@ def test_complete_requires_contract_bound_execution_and_receipt_evidence(tmp_pat
         result=_satisfied_receipt(claimed["request"]["execution"], envelope),
     )
     assert completed["state"] == "succeeded"
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        (lambda result, _location: result.update(treatment_id="foreign-treatment"), "treatment_id does not match"),
+        (lambda result, _location: result.update(outcome="satisfied", established_conditions=["reviewed"]), "not a non-satisfied outcome"),
+        (lambda result, location: result.update(execution_identity={**location, "head": "b" * 40}), "execution identity does not match"),
+        (lambda result, _location: result.update(established_conditions=["reviewed"]), "invalid non-satisfied evidence"),
+    ],
+    ids=("mismatched-envelope", "satisfied-outcome", "foreign-execution-identity", "invalid-failed-evidence"),
+)
+def test_failed_result_rejections_leave_claim_running_without_receipt(tmp_path, native, envelope, mutate, match):
+    cfg = _config(tmp_path)
+    request = coding_provision.create_request(cfg, todo_id=1738, object_generation="gen-a")
+    native.jobs[request["request_id"]]["payload_json"]["execution"] = _execution_envelope()
+    claimed = coding_provision.claim_request(
+        cfg,
+        request_id=request["request_id"],
+        local_host="tgw-lib-local",
+        worker_identity="tgw-coding-worker",
+        envelope_hash=coding_provision._hash(envelope),
+        location=envelope,
+        snapshot=_snapshot_claim(envelope),
+    )
+    coding_provision.start_request(
+        cfg,
+        request_id=request["request_id"],
+        worker_identity="tgw-coding-worker",
+        lease_token=claimed["lease_token"],
+    )
+    result = _failed_receipt(claimed["request"]["execution"])
+    result["execution_identity"] = envelope
+    mutate(result, envelope)
+
+    with pytest.raises(HardFailure, match=match):
+        coding_provision.fail_request(
+            cfg,
+            request_id=request["request_id"],
+            worker_identity="tgw-coding-worker",
+            lease_token=claimed["lease_token"],
+            error="failed treatment",
+            result=result,
+        )
+
+    rejected = coding_provision.get_request(cfg, request["request_id"])
+    assert rejected["state"] == "running"
+    assert rejected["receipt"] is None
+
+
+@pytest.mark.parametrize(
+    ("launcher", "match"),
+    [
+        (
+            lambda command: subprocess.CompletedProcess(command, 0, stdout=json.dumps({
+                "outcome": "failed", "established_conditions": [], "artifacts": [{"kind": "check", "status": "failed"}],
+            }), stderr=""),
+            "reported failed",
+        ),
+        (lambda command: subprocess.CompletedProcess(command, 1, stdout="", stderr="boom"), "mechanical failure"),
+    ],
+    ids=("non-satisfied", "mechanical-failure"),
+)
+def test_execute_authorized_treatment_raises_treatment_failure_with_result(tmp_path, monkeypatch, launcher, match):
+    execution = _execution_envelope()
+    monkeypatch.setattr(coding_execution, "_git_identity", lambda path: (path.resolve(), (path / ".git").resolve()))
+    monkeypatch.setattr(coding_execution.subprocess, "run", lambda command, **_kwargs: launcher(command))
+    payload = {**execution, "worktree": str(tmp_path), "object_id": str(tmp_path)}
+    config = {"coding": {
+        "worktree_root": str(tmp_path.parent), "repository_root": str(tmp_path),
+        "commands": {execution["treatment_id"]: ["local-runner"]},
+    }}
+
+    with pytest.raises(TreatmentFailure, match=match) as raised:
+        coding_execution.execute_authorized_treatment(config, payload)
+
+    assert raised.value.result["outcome"] == "failed"
+    assert json.loads(coding_execution.receipt_path_for_treatment(tmp_path, execution["treatment_id"]).read_text()) == raised.value.result
 
 
 def test_canonical_claim_looks_up_todo_and_derives_contract_bound_envelope(tmp_path, native, envelope):

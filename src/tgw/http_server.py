@@ -148,6 +148,7 @@ class CodingWorkerComplete(CodingWorkerLease):
 
 class CodingWorkerFail(CodingWorkerLease):
     error: str = Field(min_length=1, max_length=2000)
+    result: Dict[str, Any] | None = None
 
 
 def _get_listing_index() -> Dict[str, Path]:
@@ -452,7 +453,7 @@ def coding_worker_fail(request_id: str, body: CodingWorkerFail, worker_identity:
 
     try:
         return fail_request(_cfg, request_id=request_id, worker_identity=worker_identity,
-                            lease_token=body.lease_token, error=body.error)
+                            lease_token=body.lease_token, error=body.error, result=body.result)
     except Exception as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

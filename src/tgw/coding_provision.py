@@ -129,6 +129,23 @@ def _validate_treatment_result(document: dict[str, Any], result: dict[str, Any])
         raise HardFailure("coding treatment receipt execution identity does not match claim")
 
 
+def _validate_failed_treatment_result(document: dict[str, Any], result: dict[str, Any]) -> None:
+    """Require a non-satisfied result to be bound to the claimed treatment."""
+    execution = execution_envelope(document)
+    treatment = next(item for item in CODING_TREATMENTS if item.identity == execution["treatment_id"])
+    for field in ("treatment_id", "treatment_version", "graph_id", "object_generation"):
+        if result.get(field) != execution[field]:
+            raise HardFailure(f"coding treatment receipt {field} does not match execution envelope")
+    if result.get("receipt_schema_id") != treatment.receipt_schema_id:
+        raise HardFailure("coding treatment receipt schema does not match treatment contract")
+    if result.get("outcome") not in {"failed", "partial", "conflict"}:
+        raise HardFailure("coding treatment receipt is not a non-satisfied outcome")
+    if result.get("established_conditions") != [] or not isinstance(result.get("artifacts"), list):
+        raise HardFailure("coding treatment receipt has invalid non-satisfied evidence")
+    if result.get("execution_identity") != document.get("location"):
+        raise HardFailure("coding treatment receipt execution identity does not match claim")
+
+
 def create_request(config: dict[str, Any], *, todo_id: int, object_generation: str | None = None) -> dict[str, Any]:
     """Enqueue exactly one generation-bound queue job of request-safe data.
 
@@ -293,9 +310,32 @@ def complete_request(config: dict[str, Any], *, request_id: str, worker_identity
     return get_request(config, request_id)
 
 
-def fail_request(config: dict[str, Any], *, request_id: str, worker_identity: str, lease_token: str, error: str) -> dict[str, Any]:
+def fail_request(
+    config: dict[str, Any], *, request_id: str, worker_identity: str, lease_token: str,
+    error: str, result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Fail a canonical lease without giving the worker database access."""
-    if worker_identity != _coding(config).get("worker_identity") or not lease_token:
+    coding = _coding(config)
+    document = get_request(config, request_id)
+    if worker_identity != coding.get("worker_identity") or not lease_token:
         raise HardFailure("coding worker identity or lease token is invalid")
-    state_machine.fail_claimed_job(request_id, worker_identity, lease_token, str(error))
+    durable_result = None
+    if result is not None:
+        if not isinstance(result, dict):
+            raise HardFailure("coding provision failure result must be an object")
+        _validate_failed_treatment_result(document, result)
+        durable_result = {
+            "receipt": {
+                "receipt_id": str(uuid.uuid4()),
+                "receipt_source": f"queue-job:{request_id}",
+                "worker_identity": worker_identity,
+                "location": document["location"],
+                "envelope_hash": document["envelope_hash"],
+                "object_generation": document["object_generation"],
+                "execution": execution_envelope(document),
+                "outcome": "failed",
+                "result": result,
+            }
+        }
+    state_machine.fail_claimed_job(request_id, worker_identity, lease_token, str(error), durable_result)
     return get_request(config, request_id)

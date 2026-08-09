@@ -12,7 +12,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from tgw.errors import HardFailure
+from tgw.errors import HardFailure, TreatmentFailure
 from tgw.workflow.contracts import OUTCOME_CONFLICT, OUTCOME_FAILED, OUTCOME_PARTIAL, OUTCOME_SATISFIED
 from tgw.workflow.treatments import CODING_TREATMENTS
 
@@ -139,7 +139,7 @@ def execute_authorized_treatment(config: dict[str, Any], payload: dict[str, Any]
             "receipt_schema_id": treatment.receipt_schema_id,
         }
         _write_receipt(receipt_path_for_treatment(worktree, treatment_id), receipt)
-        raise HardFailure(f"coding treatment mechanical failure: {exc}") from exc
+        raise TreatmentFailure(f"coding treatment mechanical failure: {exc}", receipt) from exc
     receipt = {
         "status": "PASS" if outcome == OUTCOME_SATISFIED else "FAIL",
         "treatment_id": treatment_id,
@@ -154,5 +154,5 @@ def execute_authorized_treatment(config: dict[str, Any], payload: dict[str, Any]
     }
     _write_receipt(receipt_path_for_treatment(worktree, treatment_id), receipt)
     if outcome != OUTCOME_SATISFIED:
-        raise HardFailure(f"coding treatment reported {outcome}")
+        raise TreatmentFailure(f"coding treatment reported {outcome}", receipt)
     return receipt

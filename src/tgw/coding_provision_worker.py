@@ -19,7 +19,7 @@ from urllib.request import Request, urlopen
 
 from tgw.coding_execution import DEFAULT_REPOSITORY_ROOT, execute_authorized_treatment, execution_envelope, validated_coding_worktree
 from tgw.config import DEFAULT_CONFIG, load_coding_worker_config, validate_worker_execution_config
-from tgw.errors import HardFailure
+from tgw.errors import HardFailure, TreatmentFailure
 from tgw.workflow.coding_snapshot import build_coding_snapshot, serialize_snapshot
 from tgw.workflow.profiles import CODING_READY_FOR_IMPLEMENTATION
 from tgw.workflow.treatments import CODING_TREATMENTS
@@ -114,8 +114,13 @@ class CodingProvisionClient:
     def complete(self, request_id: str, lease_token: str, result: dict[str, Any]) -> dict[str, Any]:
         return self._call(f"/api/coding/worker/requests/{quote(request_id, safe='')}/complete", "POST", {"lease_token": lease_token, "result": result})
 
-    def fail(self, request_id: str, lease_token: str, error: str) -> dict[str, Any]:
-        return self._call(f"/api/coding/worker/requests/{quote(request_id, safe='')}/fail", "POST", {"lease_token": lease_token, "error": error[:2000]})
+    def fail(
+        self, request_id: str, lease_token: str, error: str, result: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"lease_token": lease_token, "error": error[:2000]}
+        if result is not None:
+            body["result"] = result
+        return self._call(f"/api/coding/worker/requests/{quote(request_id, safe='')}/fail", "POST", body)
 
 
 def configured_client(config: dict[str, Any]) -> CodingProvisionClient:
@@ -196,7 +201,15 @@ def claim_and_run(
         return completed
     except Exception as exc:
         try:
-            service.fail(request_id, lease_token, str(exc))
+            result = None
+            if isinstance(exc, TreatmentFailure):
+                current = locals().get("current")
+                if isinstance(current, dict):
+                    result = {**exc.result, "execution_identity": current}
+            if result is None:
+                service.fail(request_id, lease_token, str(exc))
+            else:
+                service.fail(request_id, lease_token, str(exc), result)
         except Exception:
             pass
         raise

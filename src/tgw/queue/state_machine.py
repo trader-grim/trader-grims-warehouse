@@ -552,13 +552,25 @@ def succeed_claimed_job(job_id: str, lease_owner: str, lease_token: str, result:
             return dict(cur.fetchone())
 
 
-def fail_claimed_job(job_id: str, lease_owner: str, lease_token: str, error: str) -> Dict[str, Any]:
-    """Fail a named job under its lease token without a queue-wide side effect."""
+def fail_claimed_job(job_id: str, lease_owner: str, lease_token: str, error: str,
+                     result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Fail a named job and atomically retain its terminal structured result."""
     with _conn() as con:
         with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute('SELECT * FROM fail_job(%s, %s, %s::uuid, %s, %s, %s)',
                         (job_id, lease_owner, lease_token, 'WORKER_EXCEPTION', error[:2000], 0))
-            return dict(cur.fetchone())
+            failed = dict(cur.fetchone())
+            if result is not None and failed["state"] == "failed":
+                cur.execute(
+                    """UPDATE queue_jobs
+                         SET payload_json = COALESCE(payload_json, '{}'::jsonb)
+                                            || jsonb_build_object('result', %s::jsonb)
+                       WHERE job_id = %s AND state = 'failed'
+                       RETURNING *""",
+                    (json.dumps(result), job_id),
+                )
+                failed = dict(cur.fetchone())
+            return failed
 
 
 def cancel_job(job_id: str, message: Optional[str] = None,
