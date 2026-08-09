@@ -276,13 +276,16 @@ def test_unpriced_item_never_enqueues_stage(price_worker, tmp_path, monkeypatch)
     assert all(kw['queue_name'] != 'ebay_stage' for kw in price_worker._enqueued)
 
 
-def test_priced_item_enqueues_stage(price_worker, tmp_path, monkeypatch):
+def test_priced_item_returns_satisfied_receipt(price_worker, tmp_path, monkeypatch):
     comps = {'count': 3, 'min': 10.0, 'p25': 10.0, 'median': 12.0,
              'p75': 14.0, 'max': 15.0}
     monkeypatch.setattr(ebay_price, 'suggest_price',
                         lambda *a, **k: _suggestion(10.0, comps))
-    _run(price_worker, tmp_path, 'tgw3')
-    assert any(kw['queue_name'] == 'ebay_stage' for kw in price_worker._enqueued)
+    _write_item(tmp_path, 'tgw3')
+    receipt = price_worker.handle({'payload_json': {'sku': 'tgw3'}})
+    assert receipt['outcome'] == 'satisfied'
+    assert receipt['established_conditions'] == ('priced',)
+    assert all(kw['queue_name'] != 'ebay_stage' for kw in price_worker._enqueued)
 
 
 def test_launch_price_at_least_target_price(price_worker, tmp_path, monkeypatch):

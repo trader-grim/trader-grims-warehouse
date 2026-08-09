@@ -49,7 +49,6 @@ def _mock_common(monkeypatch, tmp_path, sku, raw_response):
                         lambda item, sku_dir, provider, **kw: [])
     monkeypatch.setattr(ebay_draft_mod, "_encode_resized", lambda p, max_px=512: ("b64", 1, 1))
     monkeypatch.setattr(ebay_draft_mod, "call_model", lambda *a, **k: raw_response)
-    monkeypatch.setattr(ebay_draft_mod.state_machine, "enqueue_job", lambda **k: "job-1")
 
 
 def test_nonjson_error_message_carries_2000_chars_not_200(monkeypatch, tmp_path):

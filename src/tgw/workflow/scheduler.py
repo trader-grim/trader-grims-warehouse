@@ -8,6 +8,7 @@ queue worker enqueue calls, and returns structured DispatchResult.
 
 from __future__ import annotations
 
+import importlib
 import logging
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -161,7 +162,8 @@ def _dispatch_treatment_v2(
         "evaluator_version": graph.evaluator_version,
     }
 
-    from tgw.queue import state_machine
+    state_machine = importlib.import_module("tgw.queue.state_machine")
+    resolved_entity_id = entity_id or snapshot.object_id
 
     try:
         job_id = state_machine.enqueue_job(
@@ -169,7 +171,7 @@ def _dispatch_treatment_v2(
             handler_family=treatment.identity,
             payload=payload,
             entity_type=entity_type,
-            entity_id=entity_id,
+            entity_id=resolved_entity_id,
             dedupe_key=graph.graph_id,
         )
         log.info(

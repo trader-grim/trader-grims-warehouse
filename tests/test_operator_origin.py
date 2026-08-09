@@ -111,8 +111,6 @@ def test_interactive_context_passes_quota_precheck_at_halt():
 
 
 @pytest.mark.parametrize('module_name', [
-    'tgw.workers.ebay_draft',
-    'tgw.workers.ebay_price',
     'tgw.workers.ebay_stage',
     'tgw.workers.ebay_publish',
     'tgw.workers.ebay_upload',

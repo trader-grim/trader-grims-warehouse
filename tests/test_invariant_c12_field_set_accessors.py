@@ -59,9 +59,9 @@ _MIGRATION_SCRIPT = _SCRIPTS / "migrate_field_set_envelope.py"
 # A new entry here must be justified the same way, in code review.
 _ALLOWLIST = {
     (_SRC / "tgw" / "draft_sync.py", 90),
-    (_SRC / "tgw" / "workers" / "ai_identify.py", 276),   # (b) AI model response
-    (_SRC / "tgw" / "workers" / "ai_identify.py", 336),   # (a) accessor patch write
-    (_SRC / "tgw" / "workers" / "ai_identify.py", 431),   # (a) accessor patch write
+    (_SRC / "tgw" / "workers" / "ai_identify.py", 387),   # (b) AI model response
+    (_SRC / "tgw" / "workers" / "ai_identify.py", 447),   # (a) accessor patch write
+    (_SRC / "tgw" / "workers" / "ai_identify.py", 542),   # (a) accessor patch write
     # Refreshed 2026-07-18 (this packet — todo #1499/#1500/#1506/#1507, the
     # same stale-line-numbers report independently rediscovered 4 times by
     # different tgw-coder packets today, each correctly declining to fix an
@@ -95,13 +95,13 @@ _ALLOWLIST = {
     (_SRC / "tgw" / "http_server.py", 1883),              # (b) revision_draft.delta
     (_SRC / "tgw" / "http_server.py", 1885),              # (b) revision_draft.delta
     (_SRC / "tgw" / "http_server.py", 1891),              # (a) accessor patch write (todo #1416)
-    (_SRC / "tgw" / "http_server.py", 3014),              # (a) accessor output (inventory_diff.apply_inventory_diff's patch) onward into _apply_patch (#1417)
-    (_SRC / "tgw" / "http_server.py", 3073),              # (a) category_aspect_migration's patch moving onward into _apply_patch (#1471)
+    (_SRC / "tgw" / "http_server.py", 3220),              # (a) accessor output (inventory_diff.apply_inventory_diff's patch) onward into _apply_patch (#1417)
+    (_SRC / "tgw" / "http_server.py", 3279),              # (a) category_aspect_migration's patch moving onward into _apply_patch (#1471)
     # Refreshed 2026-07-20 (todo #1582, PP-AGENTTRACE-001 Phase 3): the new
     # /form/runs route + _render_runs_html() inserted ~186 lines before this
     # entry, shifting it from 5855 to 6041 — re-verified against current
     # HEAD, no accessor-routing behavior changed, only position.
-    (_SRC / "tgw" / "http_server.py", 6048),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 6426),              # (b) revision_draft.delta
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 114),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 121),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 124),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
