@@ -180,6 +180,7 @@ def _dispatch_treatment_v2(
     }
 
     state_machine = importlib.import_module("tgw.queue.state_machine")
+    resolved_entity_id = entity_id or snapshot.object_id
 
     try:
         job_id = state_machine.enqueue_job(
@@ -187,7 +188,7 @@ def _dispatch_treatment_v2(
             handler_family=treatment.identity,
             payload=payload,
             entity_type=entity_type,
-            entity_id=entity_id,
+            entity_id=resolved_entity_id,
             dedupe_key=graph.graph_id,
         )
         log.info(

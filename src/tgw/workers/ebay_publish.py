@@ -718,6 +718,13 @@ class EbayPublishWorker(QueueWorker):
         # makes its repair replay provider-idempotent.
         return self._governed_success_receipt(payload, sku)
 
+        return {
+            "treatment_id": "ebay-publish",
+            "outcome": "satisfied",
+            "established_conditions": ("published",),
+            "artifacts": (f"item:{sku}",),
+        }
+
 
 def main() -> int:
     import argparse
