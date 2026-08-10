@@ -100,18 +100,27 @@ def build_item_action_card(
         and (item.get("treatment_id"), item.get("treatment_version")) in contracts
     }
     legal_actions = []
+    provider_contract_gates: set[str] = set()
     for disposition in graph.eligible_treatments:
         contract = contracts[(disposition.treatment_id, disposition.treatment_version)]
         if (disposition.treatment_id, disposition.treatment_version) in active_keys:
             continue
+        if contract.effect_class is EffectClass.EXTERNAL:
+            action = "held_external_contract"
+            provider_contract_gates.add(
+                f"provider_contract_required:{disposition.treatment_id}"
+            )
+        else:
+            action = "dispatch"
         legal_actions.append({
             "treatment_id": disposition.treatment_id,
             "treatment_version": disposition.treatment_version,
             "effect_class": contract.effect_class.value,
-            "action": "dispatch" if contract.effect_class is EffectClass.LOCAL else "operator_authority_required",
+            "action": action,
             "reasons": list(disposition.reasons),
         })
     operator_gates = list(graph.reconciliation_gates)
+    operator_gates.extend(provider_contract_gates)
     operator_gates.extend(
         condition for condition, result in graph.explicit_requirements
         if result in {FingerprintResult.UNKNOWN, FingerprintResult.CONTRADICTORY}

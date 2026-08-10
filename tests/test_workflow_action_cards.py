@@ -26,6 +26,10 @@ def test_projection_exposes_current_graph_evidence_waits_and_legal_actions(tmp_p
                      if action["treatment_id"] == "normalize-condition")
     assert normalize["action"] == "dispatch"
     assert card["blind_retry_allowed"] is False
+    upload = next(action for action in card["legal_actions"]
+                  if action["treatment_id"] == "ebay-upload")
+    assert upload["action"] == "held_external_contract"
+    assert "provider_contract_required:ebay-upload" in card["operator_gates"]
 
 
 def test_attempts_join_results_and_ambiguous_external_effect_becomes_gate(tmp_path):
