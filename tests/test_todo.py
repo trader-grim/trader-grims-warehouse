@@ -81,7 +81,7 @@ def test_todo_add_enqueues_plan_render(_no_render_enqueue):
 
 def test_todo_set_meta_partial_update():
     from tgw.todo import todo_set_meta
-    ctx, cur = _mock_conn(fetchone_return=(7, 'claude', 'PP-X-001', [1, 2], None, 'normal'))
+    ctx, cur = _mock_conn(fetchone_return=(7, 'claude', 'PP-X-001', [1, 2], None, 'normal', None))
     with patch('tgw.todo._conn', ctx):
         result = todo_set_meta(7, pp_ref='PP-X-001', depends_on=[1, 2])
     assert result['ok'] is True
@@ -94,6 +94,17 @@ def test_todo_set_meta_requires_a_field():
     from tgw.todo import todo_set_meta
     result = todo_set_meta(7)
     assert result['ok'] is False
+
+
+def test_todo_set_meta_status_note():
+    from tgw.todo import todo_set_meta
+    note = 'in-progress; worktree: /opt/TGW/var/worktrees/todo-1732-cli'
+    row = (1732, 'claude', 'PP-WORKFLOW-001', [], None, 'normal', note)
+    ctx, cur = _mock_conn(fetchone_return=row)
+    with patch('tgw.todo._conn', ctx):
+        result = todo_set_meta(1732, status_note=note)
+    assert result['status_note'] == note
+    assert 'status_note = %s' in cur.execute.call_args.args[0]
 
 
 def test_todo_set_meta_not_found():
@@ -649,7 +660,7 @@ def test_todo_add_reasoning_high():
 
 def test_todo_set_meta_reasoning():
     from tgw.todo import todo_set_meta
-    ctx, cur = _mock_conn(fetchone_return=(7, 'claude', None, [], None, 'low'))
+    ctx, cur = _mock_conn(fetchone_return=(7, 'claude', None, [], None, 'low', None))
     with patch('tgw.todo._conn', ctx):
         result = todo_set_meta(7, reasoning='low')
     assert result['ok'] is True

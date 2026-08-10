@@ -2311,6 +2311,65 @@ def test_suggest_form_uses_static_css(client):
     assert 'font-family:system-ui' not in r.text
 
 
+def test_size_classes_form_lists_configured_ranges(env, tmp_path):
+    config_path = tmp_path / "tgw-api-config.json"
+    config_path.write_text(json.dumps({
+        "unrelated": {"preserve": True},
+        "size_class_ranges": {
+            "packet": {
+                "weight_oz": [2, 8],
+                "dims_in": {"l": [4, 12], "w": [3, 9], "h": [None, 2]},
+            }
+        },
+    }), encoding="utf-8")
+    env["cfg"]["config_path"] = config_path
+    _login(env["client"])
+
+    r = env["client"].get("/form/size-classes")
+
+    assert r.status_code == 200
+    assert "packet" in r.text
+    assert "Weight min" in r.text
+    assert '/static/tgw.css' in r.text
+
+
+def test_size_classes_form_adds_class_and_preserves_other_config(env, tmp_path):
+    config_path = tmp_path / "tgw-api-config.json"
+    config_path.write_text(json.dumps({"unrelated": [1, 2, 3]}), encoding="utf-8")
+    env["cfg"]["config_path"] = config_path
+    _login(env["client"])
+
+    r = env["client"].post("/form/size-classes", data={
+        "name": "medium_box", "weight_min": "4", "weight_max": "16.5",
+        "length_min": "", "length_max": "14", "width_min": "3",
+        "width_max": "10", "height_min": "2", "height_max": "8",
+    })
+
+    assert r.status_code == 200
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert saved["unrelated"] == [1, 2, 3]
+    assert saved["size_class_ranges"]["medium_box"] == {
+        "weight_oz": [4.0, 16.5],
+        "dims_in": {"l": [None, 14.0], "w": [3.0, 10.0], "h": [2.0, 8.0]},
+    }
+
+
+def test_size_classes_form_rejects_reversed_range_without_writing(env, tmp_path):
+    config_path = tmp_path / "tgw-api-config.json"
+    original = {"size_class_ranges": {"flat": {"weight_oz": [None, None]}}}
+    config_path.write_text(json.dumps(original), encoding="utf-8")
+    env["cfg"]["config_path"] = config_path
+    _login(env["client"])
+
+    r = env["client"].post("/form/size-classes", data={
+        "name": "flat", "weight_min": "9", "weight_max": "2",
+    })
+
+    assert r.status_code == 400
+    assert "minimum cannot exceed maximum" in r.text
+    assert json.loads(config_path.read_text(encoding="utf-8")) == original
+
+
 def test_item_detail_uses_static_css(env):
     _login(env["client"])
     r = env["client"].get(f"/form/items/{SKU_A}")

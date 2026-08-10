@@ -1039,6 +1039,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--depends", default=None, metavar="IDS", help="comma-separated todo ids this item depends on (for --add / --set-meta)")
     p.add_argument("--anchor", default=None, metavar="HEADING", help="master-plan heading text the item links to (for --add / --set-meta)")
     p.add_argument("--set-meta", type=int, default=None, metavar="ID", dest="set_meta", help="set --pp/--depends/--anchor on an existing item")
+    p.add_argument("--status-note", default=None, metavar="TEXT", help="progress metadata for --set-meta (for example an in-progress worktree)")
     p.add_argument("--clip", action="store_true", help="copy brief output to clipboard (brief mode only)")
     p.add_argument("--next", action="store_true", dest="next_task",
                    help="shorthand: top open task for AGENT, print brief + copy to clipboard; "
@@ -1052,7 +1053,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("request_id", nargs="?")
     p.add_argument("--todo-id", type=int)
     p.add_argument("--object-generation")
-    p.add_argument("--config", default=None, help="TGW client config (uses the configured endpoint and credential)")
     p.add_argument("--endpoint", help="explicit endpoint override")
     p.add_argument("--api-key", help="explicit credential override")
 
@@ -5652,8 +5652,8 @@ def main() -> int:
 
         elif args.op == "coding":
             from tgw.coding_cli import run as run_coding
-            if args.coding_op == "start" and (not args.todo_id or not args.object_generation):
-                parser.error("coding start requires --todo-id and --object-generation")
+            if args.coding_op == "start" and not args.todo_id:
+                parser.error("coding start requires --todo-id")
             if args.coding_op in {"status", "log", "stop"} and not args.request_id:
                 parser.error(f"coding {args.coding_op} requires REQUEST_ID")
             return run_coding(args)

@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from tgw import coding_cli, coding_execution, coding_provision, coding_provision_worker, http_server
+from tgw import api, coding_cli, coding_execution, coding_provision, coding_provision_worker, http_server
 from tgw.errors import TreatmentFailure
 from tgw.queue.worker_base import HardFailure
 from tgw.workers.coding import CodingWorker
@@ -1094,6 +1094,18 @@ def test_authenticated_api_accepts_unbound_coding_request(tmp_path, monkeypatch,
     )
     assert response.status_code == 200
     assert "object_generation" not in native.enqueues[0]["payload"]
+
+
+def test_coding_cli_entrypoint_accepts_unbound_start_generation(monkeypatch):
+    """The operator CLI must allow tgw-lib to attest the source generation at claim."""
+    seen = {}
+    monkeypatch.setattr("sys.argv", ["tgw", "coding", "start", "--todo-id", "1738"])
+    monkeypatch.setattr(api, "load_config", lambda _path: {})
+    monkeypatch.setattr(coding_cli, "run", lambda args: seen.update(vars(args)) or 0)
+
+    assert api.main() == 0
+    assert seen["todo_id"] == 1738
+    assert seen["object_generation"] is None
 
 
 def test_execution_boundary_accepts_only_local_allowed_argv_runner(tmp_path):

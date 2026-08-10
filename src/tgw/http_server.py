@@ -4937,6 +4937,178 @@ async def suggest_submit(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# GET/POST /form/size-classes — config-backed shipping size-class editor
+# (PP-STORAGE-001, todo #1557). This only edits size_class_ranges in the main
+# API config; it does not invoke eBay or any listing workflow.
+# ---------------------------------------------------------------------------
+
+
+_SIZE_RANGE_FIELDS = (
+    ("weight_min", "Weight min (oz)", "weight_oz", 0),
+    ("weight_max", "Weight max (oz)", "weight_oz", 1),
+    ("length_min", "Length min (in)", "l", 0),
+    ("length_max", "Length max (in)", "l", 1),
+    ("width_min", "Width min (in)", "w", 0),
+    ("width_max", "Width max (in)", "w", 1),
+    ("height_min", "Height min (in)", "h", 0),
+    ("height_max", "Height max (in)", "h", 1),
+)
+
+
+def _size_class_config_path() -> Path:
+    """Return the exact config file used to start this server."""
+    return Path(_cfg.get("config_path", DEFAULT_CONFIG))
+
+
+def _read_size_class_config() -> tuple[Dict[str, Any], Dict[str, Any]]:
+    """Reload config from disk so the admin page never overwrites newer edits."""
+    from .config import load_json_strict
+
+    path = _size_class_config_path()
+    raw = load_json_strict(path)
+    if not isinstance(raw, dict):
+        raise ValueError("top-level config must be a JSON object")
+    ranges = raw.get("size_class_ranges", {})
+    if not isinstance(ranges, dict):
+        raise ValueError("size_class_ranges must be a JSON object")
+    return raw, ranges
+
+
+def _range_value(entry: Any, key: str, index: int) -> Any:
+    if not isinstance(entry, dict):
+        return None
+    if key == "weight_oz":
+        pair = entry.get(key)
+    else:
+        dims = entry.get("dims_in", {})
+        pair = dims.get(key) if isinstance(dims, dict) else None
+    return pair[index] if isinstance(pair, list) and len(pair) == 2 else None
+
+
+def _render_size_classes_html(
+    ranges: Dict[str, Any], msg: str = "", ok: bool = False
+) -> str:
+    import html as _html
+
+    banner = ""
+    if msg:
+        cls = "ok" if ok else "err"
+        banner = f'<div class="msg {cls}" style="display:block">{_html.escape(msg)}</div>'
+    rows = []
+    for name, entry in ranges.items():
+        values = []
+        for _, _, key, index in _SIZE_RANGE_FIELDS:
+            value = _range_value(entry, key, index)
+            values.append("—" if value is None else _html.escape(str(value)))
+        rows.append(
+            "<tr><td><button class=\"edit-size-class\" type=\"button\" "
+            f"data-name=\"{_html.escape(str(name), quote=True)}\">"
+            f"{_html.escape(str(name))}</button></td>"
+            + "".join(f"<td>{value}</td>" for value in values)
+            + "</tr>"
+        )
+    table_rows = "".join(rows) or '<tr><td colspan="9">No size classes configured yet.</td></tr>'
+    inputs = "".join(
+        f'<label>{label}<input type="number" inputmode="decimal" min="0" step="any" '
+        f'name="{field}" id="{field}" placeholder="unset"></label>'
+        for field, label, _, _ in _SIZE_RANGE_FIELDS
+    )
+    # JSON is embedded in a script element. Escaping every '<' prevents a
+    # pre-existing config string from terminating that element with </script>.
+    ranges_json = json.dumps(ranges).replace("<", "\\u003c")
+    return (
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<title>TGW Size Classes</title>' + _STATIC_HEAD + '''<style>
+.size-table{width:100%;border-collapse:collapse;margin:12px 0 24px;font-size:.85em}
+.size-table th,.size-table td{border:1px solid #333;padding:7px;text-align:right}
+.size-table th:first-child,.size-table td:first-child{text-align:left}
+.edit-size-class{background:none;border:0;color:#8ac;text-decoration:underline;cursor:pointer;padding:0}
+.range-grid{display:grid;grid-template-columns:repeat(2,minmax(130px,1fr));gap:10px}
+@media(min-width:760px){.range-grid{grid-template-columns:repeat(4,minmax(130px,1fr))}}
+.range-grid label{margin:0}.range-grid input{width:100%;box-sizing:border-box}
+</style></head><body><h2>Shipping Size Classes</h2>'''
+        '<p>Blank bounds are saved as <code>null</code>. Click a class name to edit it.</p>'
+        + banner
+        + '<table class="size-table"><thead><tr><th>Class</th><th>Weight min</th><th>Weight max</th>'
+        '<th>Length min</th><th>Length max</th><th>Width min</th><th>Width max</th>'
+        '<th>Height min</th><th>Height max</th></tr></thead><tbody>' + table_rows + '</tbody></table>'
+        '<h3 id="editor-title">Add size class</h3><form method="post" action="/form/size-classes">'
+        '<label>Class name<input name="name" id="class-name" required maxlength="80" '
+        'pattern="[A-Za-z0-9][A-Za-z0-9_.-]*" placeholder="e.g. medium_box"></label>'
+        '<div class="range-grid">' + inputs + '</div>'
+        '<button class="btn" type="submit">Save size class</button> '
+        '<button class="btn" type="button" id="clear-editor">Add another</button></form>'
+        f'<script>const sizeClassRanges={ranges_json};\n'
+        '''function clearEditor(){document.querySelector('form').reset();document.getElementById('class-name').readOnly=false;document.getElementById('editor-title').textContent='Add size class';}
+document.querySelectorAll('.edit-size-class').forEach(function(btn){btn.addEventListener('click',function(){var n=btn.dataset.name,e=sizeClassRanges[n]||{},d=e.dims_in||{};document.getElementById('class-name').value=n;document.getElementById('class-name').readOnly=true;var vals={weight_min:(e.weight_oz||[])[0],weight_max:(e.weight_oz||[])[1],length_min:(d.l||[])[0],length_max:(d.l||[])[1],width_min:(d.w||[])[0],width_max:(d.w||[])[1],height_min:(d.h||[])[0],height_max:(d.h||[])[1]};Object.keys(vals).forEach(function(k){document.getElementById(k).value=vals[k]==null?'':vals[k];});document.getElementById('editor-title').textContent='Edit '+n;document.getElementById('editor-title').scrollIntoView({behavior:'smooth'});});});
+document.getElementById('clear-editor').addEventListener('click',clearEditor);</script>'''
+        + _STATIC_FOOT + '</body></html>'
+    )
+
+
+@app.get("/form/size-classes")
+def size_classes_form():
+    try:
+        _, ranges = _read_size_class_config()
+        return HTMLResponse(_render_size_classes_html(ranges))
+    except Exception as exc:
+        return HTMLResponse(_render_size_classes_html({}, f"config read failed: {exc}"), status_code=500)
+
+
+@app.post("/form/size-classes")
+async def size_classes_submit(request: Request):
+    import math
+
+    form = await request.form()
+    name = str(form.get("name", "")).strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}", name):
+        try:
+            _, ranges = _read_size_class_config()
+        except Exception:
+            ranges = {}
+        return HTMLResponse(_render_size_classes_html(ranges, "invalid class name"), status_code=400)
+
+    parsed: Dict[str, Optional[float]] = {}
+    try:
+        for field, _, _, _ in _SIZE_RANGE_FIELDS:
+            text = str(form.get(field, "")).strip()
+            value = None if not text else float(text)
+            if value is not None and (not math.isfinite(value) or value < 0):
+                raise ValueError(f"{field.replace('_', ' ')} must be a non-negative number")
+            parsed[field] = value
+        for prefix in ("weight", "length", "width", "height"):
+            low, high = parsed[f"{prefix}_min"], parsed[f"{prefix}_max"]
+            if low is not None and high is not None and low > high:
+                raise ValueError(f"{prefix} minimum cannot exceed maximum")
+        raw, ranges = _read_size_class_config()
+        ranges[name] = {
+            "weight_oz": [parsed["weight_min"], parsed["weight_max"]],
+            "dims_in": {
+                "l": [parsed["length_min"], parsed["length_max"]],
+                "w": [parsed["width_min"], parsed["width_max"]],
+                "h": [parsed["height_min"], parsed["height_max"]],
+            },
+        }
+        raw["size_class_ranges"] = ranges
+        atomic_write_json(_size_class_config_path(), raw, pretty=True)
+        _cfg["raw"] = raw
+        return HTMLResponse(_render_size_classes_html(ranges, f"saved {name}", ok=True))
+    except ValueError as exc:
+        try:
+            _, ranges = _read_size_class_config()
+        except Exception:
+            ranges = {}
+        return HTMLResponse(_render_size_classes_html(ranges, str(exc)), status_code=400)
+    except Exception as exc:
+        try:
+            _, ranges = _read_size_class_config()
+        except Exception:
+            ranges = {}
+        return HTMLResponse(_render_size_classes_html(ranges, f"config write failed: {exc}"), status_code=500)
+
+
+# ---------------------------------------------------------------------------
 # POST /api/suggest — JSON suggestion endpoint for the nav popup (no Bearer
 # auth, network trust — same policy as /form/suggest and /form/todos).
 # ---------------------------------------------------------------------------

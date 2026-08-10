@@ -47,6 +47,7 @@ nats = [
 
 [project.scripts]
 tgw                = "tgw.api:main"
+tgw-coding         = "tgw.coding_cli:main"
 tgw-mcp-server     = "tgw.mcp_server:main"
 tgw-aider-mcp-server = "tgw.aider_mcp_server:main"
 tgw-browser        = "tgw.browser:main"

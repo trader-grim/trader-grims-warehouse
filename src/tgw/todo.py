@@ -331,6 +331,7 @@ def todo_set_meta(
     depends_on: Optional[List[int]] = None,
     plan_anchor: Optional[str] = None,
     reasoning: Optional[str] = None,
+    status_note: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Set PP-PLANDB-001 metadata on an existing item. Only passed fields change."""
     sets, params = [], []
@@ -346,14 +347,17 @@ def todo_set_meta(
     if reasoning is not None:
         sets.append('reasoning = %s')
         params.append(reasoning)
+    if status_note is not None:
+        sets.append('status_note = %s')
+        params.append(status_note or None)
     if not sets:
-        return {'ok': False, 'error': 'no metadata given — pass --pp/--depends/--anchor/--reasoning'}
+        return {'ok': False, 'error': 'no metadata given — pass --pp/--depends/--anchor/--reasoning/--status-note'}
     params.append(item_id)
     with _conn() as con:
         with con.cursor() as cur:
             cur.execute(
                 f"UPDATE todo_items SET {', '.join(sets)} WHERE id = %s "
-                f"RETURNING id, agent, pp_ref, depends_on, plan_anchor, reasoning",
+                f"RETURNING id, agent, pp_ref, depends_on, plan_anchor, reasoning, status_note",
                 params,
             )
             row = cur.fetchone()
@@ -361,7 +365,8 @@ def todo_set_meta(
         return {'ok': False, 'error': f'item {item_id} not found'}
     _enqueue_plan_render('todo_set_meta')
     return {'ok': True, 'id': row[0], 'agent': row[1], 'pp_ref': row[2],
-            'depends_on': row[3], 'plan_anchor': row[4], 'reasoning': row[5]}
+            'depends_on': row[3], 'plan_anchor': row[4], 'reasoning': row[5],
+            'status_note': row[6]}
 
 
 # ---------------------------------------------------------------------------
@@ -681,7 +686,8 @@ def cmd_todo(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
                                pp_ref=args.pp,
                                depends_on=_parse_depends(args.depends),
                                plan_anchor=args.anchor,
-                               reasoning=getattr(args, 'reasoning', None))
+                               reasoning=getattr(args, 'reasoning', None),
+                               status_note=getattr(args, 'status_note', None))
         if result['ok']:
             print(f"Meta #{result['id']} [{result['agent']}]: pp_ref={result['pp_ref']} "
                   f"depends_on={result['depends_on']} plan_anchor={result['plan_anchor']}")

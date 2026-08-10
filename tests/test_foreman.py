@@ -821,6 +821,11 @@ def test_extract_worktree_no_match():
     assert _extract_worktree("just a regular todo") == ""
 
 
+def test_extract_worktree_from_coding_status_note():
+    note = "in-progress; worktree: /opt/TGW/var/worktrees/todo-1732-coding-cli"
+    assert _extract_worktree(note) == "/opt/TGW/var/worktrees/todo-1732-coding-cli"
+
+
 # ---------------------------------------------------------------------------
 # Test: ForemanConfig defaults
 # ---------------------------------------------------------------------------

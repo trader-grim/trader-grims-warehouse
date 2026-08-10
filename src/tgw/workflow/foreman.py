@@ -206,15 +206,15 @@ def _default_fetch_open_todos() -> list[TodoRecord]:
         with _conn() as con, con.cursor() as cur:
             cur.execute(
                 """
-                    SELECT id, agent, priority, body
+                    SELECT id, agent, priority, body, status_note
                       FROM todo_items
-                     WHERE state = 'open'
-                     ORDER BY COALESCE(priority, 999), id
+                     WHERE done_at IS NULL
+                     ORDER BY priority, id
                     """
             )
             for row in cur.fetchall():
-                todo_id, agent, priority, body = row
-                worktree = _extract_worktree(body)
+                todo_id, agent, priority, body, status_note = row
+                worktree = _extract_worktree(status_note or "") or _extract_worktree(body)
                 todos.append(
                     TodoRecord(
                         todo_id=todo_id,
