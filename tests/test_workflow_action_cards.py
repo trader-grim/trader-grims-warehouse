@@ -50,6 +50,26 @@ def test_attempts_join_results_and_ambiguous_external_effect_becomes_gate(tmp_pa
     assert not any(action.get("action") == "retry" for action in card["legal_actions"])
 
 
+def test_legacy_unbound_reconciliation_receipt_still_blocks_retry(tmp_path):
+    attempts = [{
+        "job_id": "legacy-publish", "queue_name": "ebay_publish",
+        "state": "dead_letter", "attempt_count": 1, "max_attempts": 3,
+        "payload_json": {
+            "sku": "SKU-1",
+            "result": {
+                "treatment_id": "ebay-publish", "treatment_version": "1",
+                "outcome": "reconciliation_required",
+                "evidence": {"listing_id": "L1"},
+            },
+        },
+    }]
+    card = build_item_action_card(_item(tmp_path, condition="Used"), attempts)
+    row = card["attempts"][0]
+    assert row["treatment_id"] == "ebay-publish"
+    assert row["retry_allowed"] is False
+    assert "listing.publish" in card["reconciliation_gates"]
+
+
 def test_active_attempt_is_visible_separately(tmp_path):
     attempts = [{"job_id": "job-2", "queue_name": "normalize_condition",
                  "state": "running", "attempt_count": 1, "max_attempts": 3,

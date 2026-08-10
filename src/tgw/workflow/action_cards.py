@@ -30,7 +30,13 @@ def build_item_action_card(
     for row in attempts:
         payload = row.get("payload_json") if isinstance(row.get("payload_json"), Mapping) else {}
         result = payload.get("result") if isinstance(payload.get("result"), Mapping) else None
-        treatment_key = (payload.get("treatment_id"), payload.get("treatment_version", "1"))
+        treatment_id = payload.get("treatment_id") or (
+            result.get("treatment_id") if result else None
+        )
+        treatment_version = payload.get("treatment_version") or (
+            result.get("treatment_version") if result else None
+        )
+        treatment_key = (treatment_id, treatment_version or "1")
         contract = contracts.get(treatment_key)
         outcome = result.get("outcome") if result else None
         if contract and contract.effect_class is EffectClass.EXTERNAL and outcome in {
@@ -42,16 +48,21 @@ def build_item_action_card(
             "queue_name": row.get("queue_name"),
             "state": row.get("state"),
             "active": row.get("state") in _ACTIVE,
-            "treatment_id": payload.get("treatment_id"),
-            "treatment_version": payload.get("treatment_version"),
-            "graph_id": payload.get("graph_id"),
+            "treatment_id": treatment_id,
+            "treatment_version": treatment_version,
+            "graph_id": payload.get("graph_id") or (result.get("graph_id") if result else None),
             "object_generation": payload.get("object_generation"),
             "condition_hash": payload.get("condition_hash"),
             "attempt_count": row.get("attempt_count"),
             "max_attempts": row.get("max_attempts"),
             "error_detail": row.get("error_detail"),
             "result": dict(result) if result else None,
-            "retry_allowed": False if payload.get("graph_id") or ambiguities else None,
+            "retry_allowed": False if (
+                payload.get("graph_id") or ambiguities
+                or (result and result.get("outcome") in {
+                    "ambiguous", "reconciliation_required",
+                })
+            ) else None,
             "not_before": _json_value(row.get("not_before")),
             "created_at": _json_value(row.get("created_at")),
             "updated_at": _json_value(row.get("updated_at")),

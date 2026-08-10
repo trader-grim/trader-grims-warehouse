@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 from typing import Any, Dict
+from unittest.mock import patch
 
 import psycopg2.errors
 
@@ -31,6 +32,7 @@ from tgw.workers.ebay_publish import EbayPublishWorker
 def _worker(cfg: Dict[str, Any]) -> EbayPublishWorker:
     w = EbayPublishWorker.__new__(EbayPublishWorker)
     w.config = cfg
+    w.queue_name = 'ebay_publish'
     return w
 
 
@@ -68,6 +70,8 @@ def test_fresh_publish_enqueues_post_publish_sync(tmp_path, monkeypatch):
                         lambda cfg, offer_id: {'listing_id': 'L1', 'listing_url': 'http://x', 'status': 'PUBLISHED'})
     monkeypatch.setattr(ebay_publish_mod, 'fence_ebay_write', lambda *a, **k: {'ok': True})
     monkeypatch.setattr(ebay_publish_mod, 'fence_patch_item', lambda *a, **k: {'ok': True})
+    monkeypatch.setattr(
+        ebay_publish_mod.state_machine, 'enqueue_catalog_rebuild', lambda *a, **k: 'catalog')
 
     worker = _worker(_cfg(tmp_path))
     worker.handle({'payload_json': {'sku': sku}})
@@ -76,6 +80,77 @@ def test_fresh_publish_enqueues_post_publish_sync(tmp_path, monkeypatch):
     assert len(sync_calls) == 1
     assert sync_calls[0]['payload'] == {'sku': sku, 'reason': 'post_push'}
     assert sync_calls[0]['dedupe_key'] == f'ebay_sync:post_push:{sku}'
+
+
+def test_governed_sync_failure_replay_completes_outbox_without_republish(
+    tmp_path, monkeypatch,
+):
+    sku = 'tgw-sync-repair'
+    _write_item(tmp_path, sku, {
+        'sku': sku, 'draft_listing': {'price': 29.99},
+        'ebay_offer': {'offer_id': 'off-1', 'staged_price': 29.99, 'price_comps': {}},
+        'ebay_listing': {},
+    })
+    monkeypatch.setattr(
+        ebay_publish_mod.state_machine, 'active_jobs_for_sku', lambda *a, **k: [])
+    published = []
+    monkeypatch.setattr(
+        ebay_publish_mod, 'publish_offer',
+        lambda cfg, offer_id: published.append(offer_id) or {
+            'listing_id': 'L1', 'listing_url': 'http://x', 'status': 'PUBLISHED'},
+    )
+    from tests.conftest import make_fake_fence_write, make_fake_patch_item
+    monkeypatch.setattr(ebay_publish_mod, 'fence_ebay_write', make_fake_fence_write(tmp_path))
+    monkeypatch.setattr(ebay_publish_mod, 'fence_patch_item', make_fake_patch_item(tmp_path))
+    monkeypatch.setattr(
+        ebay_publish_mod.state_machine, 'enqueue_catalog_rebuild', lambda *a, **k: 'catalog')
+    sync_attempts = 0
+
+    def fail_once(sku):
+        nonlocal sync_attempts
+        sync_attempts += 1
+        if sync_attempts == 1:
+            raise RuntimeError('sync enqueue failed')
+
+    monkeypatch.setattr(ebay_publish_mod, 'enqueue_post_push_sync', fail_once)
+    worker = _worker(_cfg(tmp_path))
+    worker.owner = 'owner'
+    job = {
+        'job_id': 'job-sync', 'queue_name': 'ebay_publish',
+        'entity_type': 'item', 'entity_id': sku,
+        'attempt_count': 1, 'max_attempts': 3,
+        'payload_json': {
+            'sku': sku, 'entity_id': sku, 'object_id': sku,
+            'treatment_id': 'ebay-publish', 'treatment_version': '1',
+            'graph_id': 'graph-sync',
+            'goal_profile_id': 'tgw.ebay_listable',
+            'goal_profile_version': '1', 'object_generation': 'generation-sync',
+        },
+    }
+
+    with patch.object(ebay_publish_mod.state_machine, 'mark_running'), \
+         patch.object(
+             ebay_publish_mod.state_machine, 'mark_failed',
+             return_value='retry_wait',
+         ) as failed, \
+         patch.object(
+             ebay_publish_mod.state_machine,
+             'complete_treatment_and_enqueue_evaluation',
+             return_value='evaluation-sync',
+         ) as atomic, \
+         patch.object(ebay_publish_mod.state_machine, 'mark_succeeded') as ordinary:
+        worker._process(job)
+        atomic.assert_not_called()
+        failed.assert_called_once()
+        worker._process(job)
+
+    assert published == ['off-1']
+    assert sync_attempts == 2
+    receipt = atomic.call_args.args[2]
+    assert receipt['receipt_schema_id'] == 'treatment-receipt/v1'
+    assert receipt['graph_id'] == 'graph-sync'
+    assert receipt['outcome'] == 'satisfied'
+    ordinary.assert_not_called()
 
 
 def test_already_active_skip_still_enqueues_post_publish_sync(tmp_path, monkeypatch):

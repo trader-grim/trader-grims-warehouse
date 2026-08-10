@@ -11,11 +11,13 @@ publish_offer and the lazily-imported description builder are stubbed.
 """
 
 import json
+from unittest.mock import patch
 
 import pytest
 
 import tgw.workers.ebay_publish as publish_mod
 from tgw.ebay.pricing import to_99
+from tgw.errors import TreatmentFailure
 from tgw.queue.worker_base import HardFailure
 
 STAGES = [
@@ -35,6 +37,8 @@ def publisher(tmp_path, monkeypatch):
                         lambda sku, queues: [])
     monkeypatch.setattr(publish_mod.state_machine, 'enqueue_job',
                         lambda **kw: enqueued.append(kw))
+    monkeypatch.setattr(publish_mod.state_machine, 'enqueue_catalog_rebuild',
+                        lambda reason: enqueued.append({'catalog_reason': reason}))
     published = []
 
     def fake_publish_offer(cfg, offer_id):
@@ -86,6 +90,20 @@ def _staged_item(**extra):
 
 def _run(worker, sku):
     worker.handle({'payload_json': {'sku': sku}})
+
+
+def _governed_job(sku):
+    return {
+        'job_id': 'job-1', 'queue_name': 'ebay_publish',
+        'entity_type': 'item', 'entity_id': sku,
+        'attempt_count': 1, 'max_attempts': 3,
+        'payload_json': {
+            'sku': sku, 'entity_id': sku, 'object_id': sku,
+            'treatment_id': 'ebay-publish', 'treatment_version': '1',
+            'graph_id': 'graph-1', 'goal_profile_id': 'tgw.ebay_listable',
+            'goal_profile_version': '1', 'object_generation': 'generation-1',
+        },
+    }
 
 
 def test_already_active_item_is_not_republished(publisher, tmp_path, monkeypatch):
@@ -155,6 +173,150 @@ def test_publish_writes_listing_and_freezes_schedule(publisher, tmp_path):
     assert schedule[0]['done_at'] is not None          # launch stamped at publish
     assert schedule[1]['done_at'] is None
     assert [s['price'] for s in schedule] == [to_99(30.0), 20.0, 10.0]
+
+
+def test_satisfied_receipt_is_after_projection_and_invalidations(
+    publisher, tmp_path, monkeypatch,
+):
+    _write(tmp_path, 'tgw-order', _staged_item())
+    order = []
+    from tests.conftest import make_fake_fence_write, make_fake_patch_item
+    write = make_fake_fence_write(tmp_path)
+    patch_item = make_fake_patch_item(tmp_path)
+
+    def ordered_write(*args, **kwargs):
+        order.append('canonical')
+        return write(*args, **kwargs)
+
+    def ordered_patch(*args, **kwargs):
+        order.append('baseline')
+        return patch_item(*args, **kwargs)
+
+    monkeypatch.setattr(publish_mod, 'fence_ebay_write', ordered_write)
+    monkeypatch.setattr(publish_mod, 'fence_patch_item', ordered_patch)
+    monkeypatch.setattr(
+        publish_mod.state_machine, 'enqueue_catalog_rebuild',
+        lambda reason: order.append('catalog'),
+    )
+    monkeypatch.setattr(
+        publish_mod, 'enqueue_post_push_sync',
+        lambda sku: order.append('sync'),
+    )
+
+    receipt = publisher.handle({'payload_json': {'sku': 'tgw-order'}})
+
+    assert order == ['canonical', 'baseline', 'catalog', 'sync']
+    assert receipt is None  # legacy unbound completion stays non-treatment
+
+
+def test_governed_fresh_publish_completes_through_atomic_evaluation_outbox(
+    publisher, tmp_path,
+):
+    sku = 'tgw-governed-fresh'
+    _write(tmp_path, sku, _staged_item())
+    publisher.owner = 'owner'
+    publisher.queue_name = 'ebay_publish'
+
+    with patch.object(publish_mod.state_machine, 'mark_running'), \
+         patch.object(
+             publish_mod.state_machine,
+             'complete_treatment_and_enqueue_evaluation',
+             return_value='evaluation-1',
+         ) as atomic, \
+         patch.object(publish_mod.state_machine, 'mark_succeeded') as ordinary:
+        publisher._process(_governed_job(sku))
+
+    assert publisher._published == ['OFF1']
+    receipt = atomic.call_args.args[2]
+    assert receipt == {
+        'receipt_schema_id': 'treatment-receipt/v1',
+        'treatment_id': 'ebay-publish', 'treatment_version': '1',
+        'graph_id': 'graph-1', 'outcome': 'satisfied',
+        'established_conditions': ['published'],
+        'artifacts': [f'item:{sku}'],
+    }
+    ordinary.assert_not_called()
+
+
+def test_canonical_projection_failure_requires_reconciliation_not_retry(
+    publisher, tmp_path, monkeypatch,
+):
+    path = _write(tmp_path, 'tgw-projection-failure', _staged_item())
+    monkeypatch.setattr(
+        publish_mod, 'fence_ebay_write',
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError('canonical projection failed')
+        ),
+    )
+
+    with pytest.raises(TreatmentFailure, match='reconciliation required') as caught:
+        publisher.handle({'payload_json': {
+            'sku': 'tgw-projection-failure',
+            'treatment_id': 'ebay-publish', 'treatment_version': '1',
+            'graph_id': 'graph-1', 'origin': 'operator',
+        }})
+
+    assert json.loads(path.read_text()).get('ebay_listing') is None
+    assert publisher._published == ['OFF1']
+    receipt = caught.value.result
+    assert receipt['outcome'] == 'reconciliation_required'
+    assert receipt['graph_id'] == 'graph-1'
+    assert receipt['evidence'] == {
+        'reason_code': 'CANONICAL_PROJECTION_AFTER_PUBLISH_FAILED',
+        'provider': 'ebay',
+        'offer_id': 'OFF1',
+        'listing_id': '110555',
+        'listing_url': 'https://www.ebay.com/itm/110555',
+        'provider_status': 'PUBLISHED',
+        'projection_error': 'RuntimeError: canonical projection failed',
+        'operator_origin': True,
+    }
+
+
+def test_second_projection_failure_and_active_replay_never_false_satisfy(
+    publisher, tmp_path, monkeypatch,
+):
+    sku = 'tgw-second-projection'
+    _write(tmp_path, sku, _staged_item(
+        draft_listing_state='baseline',
+        baseline_at='2026-01-01T00:00:00+00:00',
+    ))
+    publisher.owner = 'owner'
+    publisher.queue_name = 'ebay_publish'
+    from tests.conftest import make_fake_fence_write
+    monkeypatch.setattr(publish_mod, 'fence_ebay_write', make_fake_fence_write(tmp_path))
+    monkeypatch.setattr(
+        publish_mod, 'fence_patch_item',
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError('baseline/history write failed')
+        ),
+    )
+    job = _governed_job(sku)
+
+    with patch.object(publish_mod.state_machine, 'mark_running'), \
+         patch.object(publish_mod.state_machine, 'mark_dead_letter') as dead, \
+         patch.object(
+             publish_mod.state_machine,
+             'complete_treatment_and_enqueue_evaluation',
+         ) as atomic, \
+         patch('tgw.notify.notify'):
+        publisher._process(job)
+        first = dead.call_args.kwargs['result']
+        assert first['outcome'] == 'reconciliation_required'
+        assert first['evidence']['reason_code'] == 'POST_PUBLISH_PROJECTION_FAILED'
+        atomic.assert_not_called()
+
+        # A forced/manual replay sees Active and a stale baseline marker from
+        # before this publish. It must preserve the reconciliation gate, not
+        # publish again or claim success.
+        publisher._process(job)
+        second = dead.call_args.kwargs['result']
+        assert second['outcome'] == 'reconciliation_required'
+        assert second['evidence']['reason_code'] == 'POST_PUBLISH_PROJECTION_INCOMPLETE'
+
+    assert publisher._published == ['OFF1']
+    assert dead.call_count == 2
+    atomic.assert_not_called()
 
 
 def test_replayed_job_after_publish_is_noop(publisher, tmp_path):

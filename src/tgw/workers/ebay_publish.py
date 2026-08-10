@@ -32,6 +32,7 @@ from tgw.ebay.pricing import to_99
 from tgw.ebay.sync import enqueue_post_push_sync, publish_offer
 from tgw.ebay.sync import extract_ebay_error_field as _extract_ebay_error_field
 from tgw.ebay.sync import format_ebay_error as _format_ebay_error
+from tgw.errors import TreatmentFailure
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
@@ -86,6 +87,59 @@ def _build_reprice_schedule(stages: List[Dict[str, Any]],
 
 
 class EbayPublishWorker(QueueWorker):
+
+    @staticmethod
+    def _governed_success_receipt(
+        payload: Dict[str, Any], sku: str,
+    ) -> Dict[str, Any] | None:
+        """Return a workflow-bound receipt, or legacy-compatible ``None``."""
+        required = (
+            'treatment_id', 'treatment_version', 'graph_id',
+            'goal_profile_id', 'goal_profile_version', 'object_generation',
+        )
+        if not all(isinstance(payload.get(key), str) and payload[key].strip()
+                   for key in required):
+            return None
+        return {
+            'receipt_schema_id': 'treatment-receipt/v1',
+            'treatment_id': payload['treatment_id'],
+            'treatment_version': payload['treatment_version'],
+            'graph_id': payload['graph_id'],
+            'outcome': 'satisfied',
+            'established_conditions': ['published'],
+            'artifacts': [f'item:{sku}'],
+        }
+
+    @staticmethod
+    def _projection_reconciliation_failure(
+        payload: Dict[str, Any], sku: str, item: Dict[str, Any],
+        reason_code: str, detail: str,
+    ) -> TreatmentFailure:
+        listing = item.get('ebay_listing') or {}
+        offer = item.get('ebay_offer') or {}
+        return TreatmentFailure(
+            f'{sku}: provider publish confirmed but post-publish projection '
+            f'is incomplete; reconciliation required: {detail}',
+            {
+                'receipt_schema_id': 'treatment-receipt/v1',
+                'treatment_id': payload.get('treatment_id', 'ebay-publish'),
+                'treatment_version': payload.get('treatment_version', '1'),
+                'graph_id': payload.get('graph_id'),
+                'outcome': 'reconciliation_required',
+                'established_conditions': [],
+                'artifacts': [f'item:{sku}'],
+                'evidence': {
+                    'reason_code': reason_code,
+                    'provider': 'ebay',
+                    'offer_id': offer.get('offer_id') or listing.get('offer_id'),
+                    'listing_id': listing.get('listing_id'),
+                    'listing_url': listing.get('listing_url'),
+                    'provider_status': offer.get('status') or listing.get('status'),
+                    'projection_error': detail,
+                    'operator_origin': payload.get('origin') == 'operator',
+                },
+            },
+        )
 
     def _refresh_photo_verify(self, sku: str, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """PP-EBAY-SNAPSHOT-001 Phase 2 / PP-PHOTOSYNC-001 P1: verify photos
@@ -149,6 +203,22 @@ class EbayPublishWorker(QueueWorker):
         # re-publish or overwrite the reprice_schedule (markdown clock).
         existing_listing = item.get('ebay_listing', {})
         if existing_listing.get('status') == 'Active':
+            governed = self._governed_success_receipt(payload, sku) is not None
+            published_at = existing_listing.get('published_at')
+            projection_complete = (
+                item.get('draft_listing_state') == 'baseline'
+                and isinstance(published_at, str)
+                and bool(published_at.strip())
+                and isinstance(item.get('baseline_at'), str)
+                and item['baseline_at'] == published_at
+            )
+            if governed and not projection_complete:
+                raise self._projection_reconciliation_failure(
+                    payload, sku, item,
+                    'POST_PUBLISH_PROJECTION_INCOMPLETE',
+                    'canonical listing is Active but baseline/history projection '
+                    'has no completion marker',
+                )
             log.info('ebay_publish: %s already published (listingId=%s) — skipping',
                      sku, existing_listing.get('listing_id', ''))
             tgw_logging.log_event('ebay_publish_skipped', sku=sku,
@@ -159,7 +229,7 @@ class EbayPublishWorker(QueueWorker):
                 existing_listing['photo_verify'] = photo_verify
                 fence_ebay_write(self.config, sku, ebay_listing=existing_listing)
             enqueue_post_push_sync(sku)
-            return
+            return self._governed_success_receipt(payload, sku)
 
         ebay_offer = item.get('ebay_offer', {})
         offer_id = ebay_offer.get('offer_id')
@@ -326,13 +396,6 @@ class EbayPublishWorker(QueueWorker):
                 s['due_at']  = now.isoformat()
         item['reprice_schedule'] = schedule
 
-        return {
-            "treatment_id": "ebay-publish",
-            "outcome": "satisfied",
-            "established_conditions": ("published",),
-            "artifacts": (f"item:{sku}",),
-        }
-
         # Record the publish price as the first price_history entry so the full
         # price trail is complete and auditable. Session 42 fix: record the
         # price that is ACTUALLY live on eBay (staged_price), not the schedule's
@@ -361,19 +424,55 @@ class EbayPublishWorker(QueueWorker):
         if photo_verify is not None:
             item['ebay_listing']['photo_verify'] = photo_verify
 
-        fence_ebay_write(self.config, sku,
-                         ebay_listing=item.get('ebay_listing'),
-                         ebay_offer=item.get('ebay_offer'))
+        try:
+            fence_ebay_write(self.config, sku,
+                             ebay_listing=item.get('ebay_listing'),
+                             ebay_offer=item.get('ebay_offer'))
+        except Exception as exc:
+            # The provider has confirmed publication, but the canonical Active
+            # guard did not land.  An ordinary worker retry would call publish
+            # again.  Preserve the exact provider evidence as a terminal
+            # reconciliation requirement instead; no blind replay is safe.
+            raise TreatmentFailure(
+                f'{sku}: provider publish confirmed but canonical projection '
+                f'failed; reconciliation required: {exc}',
+                {
+                    'receipt_schema_id': 'treatment-receipt/v1',
+                    'treatment_id': payload.get('treatment_id', 'ebay-publish'),
+                    'treatment_version': payload.get('treatment_version', '1'),
+                    'graph_id': payload.get('graph_id'),
+                    'outcome': 'reconciliation_required',
+                    'established_conditions': [],
+                    'artifacts': [f'item:{sku}'],
+                    'evidence': {
+                        'reason_code': 'CANONICAL_PROJECTION_AFTER_PUBLISH_FAILED',
+                        'provider': 'ebay',
+                        'offer_id': offer_id,
+                        'listing_id': result['listing_id'],
+                        'listing_url': result['listing_url'],
+                        'provider_status': result.get('status', 'PUBLISHED'),
+                        'projection_error': f'{type(exc).__name__}: {exc}',
+                        'operator_origin': payload.get('origin') == 'operator',
+                    },
+                },
+            ) from exc
         # Broker B1a (M1/M2): the draft→offer push is complete — the offer
         # now holds exactly what the draft specified, so the manager marks
         # the draft re-baselined. The next manipulation (AI or operator)
         # starts from a correct base, and drift is detectable again.
-        fence_patch_item(self.config, sku, {
-            'reprice_schedule': item.get('reprice_schedule'),
-            'price_history':    item.get('price_history', []),
-            'draft_listing':    item.get('draft_listing'),
-            **baseline_fields(now),
-        })
+        try:
+            fence_patch_item(self.config, sku, {
+                'reprice_schedule': item.get('reprice_schedule'),
+                'price_history':    item.get('price_history', []),
+                'draft_listing':    item.get('draft_listing'),
+                **baseline_fields(now),
+            })
+        except Exception as exc:
+            raise self._projection_reconciliation_failure(
+                payload, sku, item,
+                'POST_PUBLISH_PROJECTION_FAILED',
+                f'{type(exc).__name__}: {exc}',
+            ) from exc
 
         log.info('published %s → %s', sku, result['listing_url'])
         tgw_logging.log_event('ebay_listing_published', sku=sku,
@@ -387,6 +486,14 @@ class EbayPublishWorker(QueueWorker):
             pass
 
         enqueue_post_push_sync(sku)
+
+        # A provider response alone is not treatment success.  Emit the
+        # satisfied receipt only after the canonical listing/offer projection,
+        # history/baseline projection, and both downstream invalidations have
+        # completed.  Any exception above remains a truthful failed attempt;
+        # once the first canonical write has landed, the already-Active guard
+        # makes its repair replay provider-idempotent.
+        return self._governed_success_receipt(payload, sku)
 
 
 def main() -> int:
