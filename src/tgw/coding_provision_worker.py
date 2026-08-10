@@ -73,13 +73,15 @@ def _git_head(repository: Path) -> str:
     return head
 
 
-def _remove_incomplete_worktree(repository: Path, worktree: Path) -> None:
-    """Remove only a just-created, request-bound directory after a failed add."""
+def _remove_incomplete_worktree(repository: Path, worktree: Path, branch: str) -> None:
+    """Remove only a just-created request-bound worktree and its exact branch."""
     if worktree.is_symlink() or worktree.parent != worktree.parent.resolve():
         return
     subprocess.run(["git", "worktree", "remove", "--force", str(worktree)], cwd=repository, check=False, text=True, capture_output=True)
     if worktree.exists() and worktree.is_dir() and not worktree.is_symlink():
         shutil.rmtree(worktree)
+    if not worktree.exists():
+        subprocess.run(["git", "branch", "--delete", "--force", branch], cwd=repository, check=False, text=True, capture_output=True)
 
 
 def _prepare_request_worktree(document: dict[str, Any], coding: dict[str, Any], worker_identity: str) -> dict[str, Any]:
@@ -131,15 +133,50 @@ def _prepare_request_worktree(document: dict[str, Any], coding: dict[str, Any], 
         return location
     except Exception:
         if created:
-            _remove_incomplete_worktree(repository, worktree)
+            _remove_incomplete_worktree(repository, worktree, branch)
         raise
 
 
 def _validate_before_claim(document: dict[str, Any], coding: dict[str, Any], local_host: str, worker_identity: str) -> dict[str, Any]:
     if local_host != coding.get("host") or worker_identity != coding.get("worker_identity") or document.get("host") != local_host or document.get("worker_identity") != worker_identity:
         raise HardFailure("local coding worker identity does not match configured envelope")
+    root = Path(str(coding.get("worktree_root", ""))).resolve()
+    worktree, _branch = _request_worktree(int(document.get("todo_id", 0)), document.get("request_id"), root)
+    attempt_created = not worktree.exists() and not worktree.is_symlink()
     location = _prepare_request_worktree(document, coding, worker_identity)
-    return {"location": location, "envelope_hash": _hash(location)}
+    return {"location": location, "envelope_hash": _hash(location), "attempt_created": attempt_created}
+
+
+def _remove_proven_unclaimed_attempt(
+    service: Any,
+    request_id: str,
+    envelope: dict[str, Any],
+    coding: dict[str, Any],
+) -> None:
+    """Remove this invocation's new attempt only after durable non-claim proof.
+
+    A claim response can be ambiguous: the service may have committed the lease
+    before the client observed a transport failure.  Preserve the worktree
+    unless a fresh service read proves the request is still queued and unbound.
+    """
+    if not envelope.get("attempt_created"):
+        return
+    try:
+        document = service.get(request_id)
+    except Exception:
+        return
+    if (
+        document.get("state") != "queued"
+        or document.get("object_generation") is not None
+        or document.get("location") is not None
+    ):
+        return
+    repository = Path(str(coding.get("repository_root", DEFAULT_REPOSITORY_ROOT))).resolve()
+    root = Path(str(coding.get("worktree_root", ""))).resolve()
+    expected, branch = _request_worktree(int(document.get("todo_id", 0)), request_id, root)
+    actual = Path(str(envelope.get("location", {}).get("worktree", ""))).resolve()
+    if actual == expected:
+        _remove_incomplete_worktree(repository, actual, branch)
 
 
 class CodingProvisionClient:
@@ -215,7 +252,11 @@ def claim_and_run(
         raise HardFailure("coding provision request is not claimable")
     envelope = _validate_before_claim(document, coding, local_host, worker_identity)
     snapshot = local_snapshot_claim(config, envelope["location"]["worktree"])
-    claimed = service.claim(request_id, local_host, envelope["envelope_hash"], envelope["location"], snapshot)
+    try:
+        claimed = service.claim(request_id, local_host, envelope["envelope_hash"], envelope["location"], snapshot)
+    except Exception:
+        _remove_proven_unclaimed_attempt(service, request_id, envelope, coding)
+        raise
     lease_token = claimed.get("lease_token")
     if not isinstance(lease_token, str) or not lease_token:
         raise HardFailure("canonical coding service returned no lease token")

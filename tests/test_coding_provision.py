@@ -487,6 +487,37 @@ def test_worker_does_not_claim_when_request_worktree_preparation_fails(tmp_path)
     assert not claimed
 
 
+def test_failed_canonical_claim_removes_new_unbound_attempt_and_retry_reaches_claim(tmp_path):
+    """A pre-lease rejection cannot leave an unbound worktree that wedges retries."""
+    _init_coding_repository(tmp_path)
+    cfg = _config(tmp_path)
+    expected = tmp_path / "worktrees" / "todo-1706-request-1706"
+
+    class RejectingService:
+        def __init__(self):
+            self.claims = 0
+
+        def get(self, _request_id):
+            return {**_queued_document(), "state": "queued"}
+
+        def claim(self, *_args):
+            self.claims += 1
+            raise HardFailure("canonical evaluation rejected claim")
+
+    service = RejectingService()
+    for expected_claims in (1, 2):
+        with pytest.raises(HardFailure, match="evaluation rejected"):
+            coding_provision_worker.claim_and_run(
+                cfg,
+                request_id="request-1706",
+                local_host="tgw-lib-local",
+                worker_identity="tgw-coding-worker",
+                client=service,
+            )
+        assert service.claims == expected_claims
+        assert not expected.exists()
+
+
 def test_tgw_lib_provision_worker_has_no_direct_canonical_state_dependencies():
     """The one-shot tgw-lib process is HTTP + local treatment execution only."""
     tree = ast.parse(inspect.getsource(coding_provision_worker))
