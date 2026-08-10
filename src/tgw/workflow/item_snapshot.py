@@ -12,12 +12,14 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .condition_normalization import normalized_condition
 from .contracts import (
     EvidenceAssertion,
     EvidenceReference,
     FingerprintResult,
     GoalProfile,
     ObjectSnapshot,
+    TreatmentContract,
 )
 
 # ---------------------------------------------------------------------------
@@ -170,6 +172,11 @@ def _valid_condition(item: Dict[str, Any]) -> bool:
     return cond.lower() in _KNOWN_CONDITIONS
 
 
+def _condition_normalizable(item: Dict[str, Any]) -> bool:
+    """Condition has one explicit deterministic local alias."""
+    return normalized_condition(item.get("condition")) is not None
+
+
 def _valid_category(item: Dict[str, Any]) -> bool:
     """ebay_category_id is a leaf category (not '99' or empty)."""
     cat = _get_str(item, "ebay_category_id")
@@ -216,6 +223,7 @@ _ITEM_CHECKERS: dict[str, callable] = {
     "staged": _staged,
     "published": _published,
     "valid_condition": _valid_condition,
+    "condition_normalizable": _condition_normalizable,
     "valid_category": _valid_category,
     "title_ok": _title_ok,
 }
@@ -229,6 +237,10 @@ _ITEM_REASONS: dict[str, tuple[str, str]] = {
     "staged": ("offer created", "not staged"),
     "published": ("listing active", "not published"),
     "valid_condition": ("known condition", "unknown or missing condition"),
+    "condition_normalizable": (
+        "condition has deterministic alias",
+        "condition has no deterministic alias",
+    ),
     "valid_category": ("leaf category", "invalid category (99 or missing)"),
     "title_ok": ("title within 80 chars", "title too long or missing"),
 }
@@ -241,6 +253,7 @@ def build_item_snapshot(
     item_json_path: str | Path,
     goal_profile: GoalProfile,
     *,
+    treatments: tuple[TreatmentContract, ...] = (),
     external_effect_ambiguities: tuple[str, ...] = (),
 ) -> ObjectSnapshot:
     """Build an ObjectSnapshot from one item JSON file, scoped to goal_profile.
@@ -264,7 +277,12 @@ def build_item_snapshot(
 
     assertions: List[EvidenceAssertion] = []
 
-    for condition_id in sorted(goal_profile.required):
+    condition_ids = set(goal_profile.required)
+    for treatment in treatments:
+        condition_ids.update(requirement.condition_id for requirement in treatment.requires)
+        condition_ids.update(treatment.may_establish)
+
+    for condition_id in sorted(condition_ids):
         checker = _ITEM_CHECKERS.get(condition_id)
         if checker is None:
             assertions.append(

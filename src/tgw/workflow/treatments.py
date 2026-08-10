@@ -77,7 +77,10 @@ HERMES_STITCH = TreatmentContract(
 NORMALIZE_CONDITION = TreatmentContract(
     identity="normalize-condition",
     version="1",
-    requires=(Requirement("valid_condition", (FingerprintResult.FALSE,)),),
+    requires=(
+        Requirement("valid_condition", (FingerprintResult.FALSE,)),
+        Requirement("condition_normalizable", (FingerprintResult.TRUE,)),
+    ),
     may_establish=("valid_condition",),
     must_preserve=("photos", "draft_listing", "provider_state"),
     ownership=("item.condition",),

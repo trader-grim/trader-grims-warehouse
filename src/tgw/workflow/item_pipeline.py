@@ -111,7 +111,7 @@ def process_item(
 
     try:
         # Step 1: Build snapshot
-        snapshot = build_item_snapshot(str(path), goal_profile)
+        snapshot = build_item_snapshot(str(path), goal_profile, treatments=treatments)
         result.generation = snapshot.generation
 
         # Step 2: Evaluate
@@ -142,6 +142,7 @@ def process_item(
             dispatch_result = dispatch_treatment(
                 disposition=disp,
                 entity_id=snapshot.object_id,
+                graph=graph,
                 payload_extra=payload_extra,
                 enqueue_fn=enqueue_fn,
             )
@@ -270,6 +271,7 @@ def evaluate_and_dispatch(
         result = dispatch_treatment(
             disposition=disp,
             entity_id=entity_id,
+            graph=graph,
             payload_extra=payload_extra,
             enqueue_fn=enqueue_fn,
         )

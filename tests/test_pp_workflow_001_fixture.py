@@ -42,6 +42,7 @@ def _graph(path, *, attempts=(), ambiguities=()):
     snapshot = build_item_snapshot(
         path,
         TGW_EBAY_LISTABLE,
+        treatments=TGW_TREATMENTS,
         external_effect_ambiguities=ambiguities,
     )
     return snapshot, evaluate(
@@ -64,7 +65,7 @@ def test_list_item_goal_skips_fully_satisfied_record(tmp_path):
 
 
 def test_invalid_condition_selects_bounded_local_remediation(tmp_path):
-    _snapshot, graph = _graph(_item(tmp_path, condition="mystery grade"))
+    _snapshot, graph = _graph(_item(tmp_path, condition="pre-owned"))
 
     assert graph.unmet_requirements == ("valid_condition",)
     assert [item.treatment_id for item in graph.eligible_treatments] == [
@@ -72,8 +73,22 @@ def test_invalid_condition_selects_bounded_local_remediation(tmp_path):
     ]
 
 
+def test_unknown_condition_is_waiting_not_guessed(tmp_path):
+    _snapshot, graph = _graph(_item(tmp_path, condition="mystery grade"))
+
+    assert graph.unmet_requirements == ("valid_condition",)
+    assert "normalize-condition" not in {
+        item.treatment_id for item in graph.eligible_treatments
+    }
+    normalize = next(
+        item for item in graph.waiting_treatments
+        if item.treatment_id == "normalize-condition"
+    )
+    assert any("condition_normalizable=false" in reason for reason in normalize.reasons)
+
+
 def test_failed_attempt_is_preserved_and_not_repeated_until_evidence_changes(tmp_path):
-    path = _item(tmp_path, condition="mystery grade")
+    path = _item(tmp_path, condition="pre-owned")
     snapshot, first = _graph(path)
     failed = TreatmentAttempt(
         treatment_id="normalize-condition",
@@ -98,7 +113,7 @@ def test_failed_attempt_is_preserved_and_not_repeated_until_evidence_changes(tmp
     # A relevant record event creates a new generation.  The same bounded
     # remediation is now a legal successor attempt without manual requeue.
     path.write_text(
-        path.read_text(encoding="utf-8").replace("mystery grade", "legacy grade"),
+        path.read_text(encoding="utf-8").replace("pre-owned", "preowned"),
         encoding="utf-8",
     )
     changed_snapshot, changed = _graph(path, attempts=(failed,))
@@ -109,7 +124,7 @@ def test_failed_attempt_is_preserved_and_not_repeated_until_evidence_changes(tmp
 
     # Successful local repair changes authoritative evidence and converges.
     path.write_text(
-        path.read_text(encoding="utf-8").replace("legacy grade", "Used"),
+        path.read_text(encoding="utf-8").replace("preowned", "Used"),
         encoding="utf-8",
     )
     _ready_snapshot, ready = _graph(path, attempts=(failed,))
@@ -118,7 +133,7 @@ def test_failed_attempt_is_preserved_and_not_repeated_until_evidence_changes(tmp
 
 
 def test_only_authoritative_non_success_attempts_suppress_and_invalidate(tmp_path):
-    path = _item(tmp_path, condition="mystery grade")
+    path = _item(tmp_path, condition="pre-owned")
     snapshot, baseline = _graph(path)
 
     def attempt(**changes):
@@ -158,7 +173,7 @@ def test_only_authoritative_non_success_attempts_suppress_and_invalidate(tmp_pat
 def test_disjoint_local_treatments_have_no_ownership_conflict(tmp_path):
     path = _item(
         tmp_path,
-        condition="mystery grade",
+        condition="pre-owned",
         ebay_category_id="",
         product_lookup={},
         draft_listing={},

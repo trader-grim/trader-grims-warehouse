@@ -49,6 +49,7 @@ _TREATMENT_QUEUE_MAP: dict[str, str] = {
     "ebay-upload": "ebay_upload",
     "ebay-stage": "ebay_stage",
     "ebay-publish": "ebay_publish",
+    "normalize-condition": "normalize_condition",
     "alt-text": "alt_text",
     "catalog-rebuild": "catalog_rebuild",
 }
@@ -223,6 +224,7 @@ def _dispatch_treatment_v4(
     payload_extra: dict[str, Any] | None = None,
     enqueue_fn: Any = None,
     coding_config: dict[str, Any] | None = None,
+    entity_type: str = "item",
 ) -> DispatchResult:
     """Phase 4: dispatch one eligible treatment by enqueuing its worker.
 
@@ -273,7 +275,7 @@ def _dispatch_treatment_v4(
             queue_name=queue_name,
             handler_family=queue_name,
             payload=payload,
-            entity_type="coding_task" if graph is not None else "item",
+            entity_type=entity_type,
             entity_id=entity_id,
             dedupe_key=(
                 graph.graph_id

@@ -52,6 +52,7 @@ _TGW_CONDITIONS = frozenset({
     "staged",
     "published",
     "valid_condition",
+    "condition_normalizable",
     "valid_category",
     "title_ok",
 })
