@@ -5,7 +5,11 @@ import pytest
 import requests
 
 from tgw.errors import TreatmentFailure
-from tgw.queue.worker_base import HardFailure, _treatment_receipt_error
+from tgw.queue.worker_base import (
+    HardFailure,
+    _treatment_receipt_error,
+    _waiting_treatment_receipt_error,
+)
 from tgw.workers.ebay_sync import EbaySyncWorker
 from tgw.workflow.evaluator import evaluate
 from tgw.workflow.item_snapshot import build_item_snapshot
@@ -27,7 +31,7 @@ def _worker(tmp_path):
 
 
 def _job():
-    return {"entity_type": "item", "entity_id": "SKU-1", "payload_json": {
+    return {"queue_name": "ebay_sync", "entity_type": "item", "entity_id": "SKU-1", "payload_json": {
         "sku": "SKU-1", "entity_id": "SKU-1", "treatment_id": "ebay-sync-targeted",
         "treatment_version": "1", "graph_id": "graph-1",
         "goal_profile_id": "tgw.ebay_reconciled", "goal_profile_version": "1",
@@ -99,11 +103,13 @@ def test_timeout_and_projection_failure_are_truthful_non_success(tmp_path, monke
     worker, _ = _worker(tmp_path)
     with patch("tgw.item_mutation.item_generation", return_value="generation-1"), \
          _source_effect_ok(), patch("tgw.ebay.sync._find_offer",
-                                    side_effect=requests.Timeout("offline")), \
-         pytest.raises(TreatmentFailure) as caught:
+                                    side_effect=requests.Timeout("offline")):
         job = _job()
-        worker._handle_governed_targeted(job["payload_json"], "SKU-1", job)
-    assert caught.value.result["outcome"] == "transient_backoff"
+        wait = worker._handle_governed_targeted(job["payload_json"], "SKU-1", job)
+    assert wait["outcome"] == "transient_backoff"
+    assert wait["timer"]["payload"]["sync_retry"] == 1
+    assert "effect-1:ebay-sync:1" in wait["timer"]["dedupe_key"]
+    assert _waiting_treatment_receipt_error(wait, job) is None
     monkeypatch.setattr("tgw.sqlite_catalog.upsert_catalog_row",
                         lambda *args: (_ for _ in ()).throw(OSError("disk")))
     with _source_effect_ok(), patch("tgw.ebay.sync._find_offer",
@@ -136,6 +142,19 @@ def test_internal_handler_rejects_treatment_and_entity_before_provider_read(tmp_
     job["payload_json"]["treatment_id"] = "ebay-publish"
     with patch("tgw.ebay.sync._find_offer") as provider_read, pytest.raises(HardFailure):
         worker._handle_governed_targeted(job["payload_json"], "SKU-1", job)
+    provider_read.assert_not_called()
+
+
+@pytest.mark.parametrize("value", [-1, True, "1", 4, 1.0])
+def test_invalid_retry_count_is_rejected_before_ledger_or_provider(tmp_path, value):
+    worker, _ = _worker(tmp_path)
+    job = _job()
+    job["payload_json"]["sync_retry"] = value
+    with patch("tgw.provider_effects.lookup_succeeded_provider_effect") as ledger, \
+         patch("tgw.ebay.sync._find_offer") as provider_read, \
+         pytest.raises(HardFailure):
+        worker._handle_governed_targeted(job["payload_json"], "SKU-1", job)
+    ledger.assert_not_called()
     provider_read.assert_not_called()
     job = _job()
     job["entity_id"] = "OTHER"

@@ -81,6 +81,41 @@ class EbaySyncWorker(QueueWorker):
             },
         }
 
+    def _targeted_wait_receipt(self, payload, sku):
+        retry = int(payload.get("sync_retry", 0)) + 1
+        if retry > 3:
+            raise TreatmentFailure(
+                "targeted sync provider read retry limit reached",
+                self._targeted_receipt(
+                    payload, sku, "reconciliation_required",
+                    "PROVIDER_READ_RETRY_LIMIT", sync_retry=retry - 1,
+                ),
+            )
+        delay = self.config.get("workflow_targeted_sync_retry_seconds", 300)
+        if isinstance(delay, bool) or not isinstance(delay, (int, float)):
+            raise HardFailure("workflow targeted sync retry delay is invalid")
+        delay = float(delay)
+        if not 1 <= delay <= 3600:
+            raise HardFailure("workflow targeted sync retry delay is outside bounds")
+        timer_payload = {**payload, "sync_retry": retry, "reason": "timer_elapsed"}
+        return {
+            **self._targeted_receipt(
+                payload, sku, "transient_backoff", "PROVIDER_READ_TRANSIENT",
+                sync_retry=retry,
+            ),
+            "receipt_schema_id": "treatment-wait-receipt/v1",
+            "timer": {
+                "queue_name": QUEUE_NAME,
+                "not_before": time.time() + delay,
+                "payload": timer_payload,
+                "dedupe_key": (
+                    f"workflow-timer:{payload['graph_id']}:"
+                    f"{payload['provider_effect_id']}:ebay-sync:{retry}"
+                ),
+                "max_attempts": 3,
+            },
+        }
+
     def _handle_governed_targeted(self, payload, sku, job):
         from tgw.item_mutation import item_generation
         from tgw.provider_effects import (
@@ -95,6 +130,10 @@ class EbaySyncWorker(QueueWorker):
                    if not isinstance(payload.get(key), str) or not payload[key].strip()]
         if missing:
             raise HardFailure("workflow targeted sync missing binding: " + ", ".join(missing))
+        sync_retry = payload.get("sync_retry", 0)
+        if (isinstance(sync_retry, bool) or not isinstance(sync_retry, int)
+                or not 0 <= sync_retry <= 3):
+            raise HardFailure("workflow targeted sync retry count is invalid")
         if (payload["treatment_id"] != "ebay-sync-targeted"
                 or payload["treatment_version"] != "1"):
             raise HardFailure("workflow targeted sync treatment binding mismatch")
@@ -120,9 +159,8 @@ class EbaySyncWorker(QueueWorker):
         try:
             offer = _find_offer(self.config, sku)
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
-            raise TreatmentFailure(str(exc), self._targeted_receipt(
-                payload, sku, "transient_backoff", "PROVIDER_READ_TRANSIENT",
-            )) from exc
+            log.warning("targeted sync provider read transient for %s: %s", sku, exc)
+            return self._targeted_wait_receipt(payload, sku)
         if offer is None:
             raise TreatmentFailure("provider offer absent", self._targeted_receipt(
                 payload, sku, "reconciliation_required", "PROVIDER_OFFER_ABSENT",

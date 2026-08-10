@@ -252,9 +252,8 @@ def lookup_authoritative_stage_receipt(
     }
 
 
-def lookup_succeeded_provider_effect(
+def resolve_succeeded_provider_effect(
     *, provider_effect_id: str, sku: str, provider_identity: str,
-    expected_offer_id: str,
     operations: tuple[str, ...] = ("stage-draft", "publish-offer"),
 ) -> tuple[ProviderEffect, str]:
     """Resolve one exact successful source effect for targeted reconciliation."""
@@ -290,8 +289,21 @@ def lookup_succeeded_provider_effect(
                         or (record.result or {}).get("offerId"))
         if corroborated and corroborated != bound_offer_id:
             raise ProviderEffectConflict("publish result contradicts requested offer")
-    if (not isinstance(bound_offer_id, str) or not bound_offer_id.strip()
-            or bound_offer_id != expected_offer_id):
+    if not isinstance(bound_offer_id, str) or not bound_offer_id.strip():
+        raise ProviderEffectConflict("source provider effect offer mismatch")
+    return record, bound_offer_id
+
+
+def lookup_succeeded_provider_effect(
+    *, provider_effect_id: str, sku: str, provider_identity: str,
+    expected_offer_id: str,
+    operations: tuple[str, ...] = ("stage-draft", "publish-offer"),
+) -> tuple[ProviderEffect, str]:
+    record, bound_offer_id = resolve_succeeded_provider_effect(
+        provider_effect_id=provider_effect_id, sku=sku,
+        provider_identity=provider_identity, operations=operations,
+    )
+    if bound_offer_id != expected_offer_id:
         raise ProviderEffectConflict("source provider effect offer mismatch")
     return record, bound_offer_id
 

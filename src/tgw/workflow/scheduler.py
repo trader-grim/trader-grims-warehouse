@@ -49,6 +49,7 @@ _TREATMENT_QUEUE_MAP: dict[str, str] = {
     "ebay-upload": "ebay_upload",
     "ebay-stage": "ebay_stage",
     "ebay-publish": "ebay_publish",
+    "ebay-sync-targeted": "ebay_sync",
     "normalize-condition": "normalize_condition",
     "alt-text": "alt_text",
     "catalog-rebuild": "catalog_rebuild",
