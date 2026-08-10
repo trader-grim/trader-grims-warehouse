@@ -23,6 +23,9 @@ def _job(**payload):
 @dataclass
 class Result:
     status: str
+    operation_id: str = "operation-1"
+    resulting_generation: str | None = "gen-8"
+    changed: bool = True
 
 
 def test_committed_mutation_is_only_success_authority():
@@ -31,9 +34,22 @@ def test_committed_mutation_is_only_success_authority():
                          mutation_fn=lambda **kw: calls.append(kw) or Result("COMMITTED"))
     assert receipt["outcome"] == "satisfied"
     assert receipt["established_conditions"] == ["valid_condition"]
+    assert receipt["evidence"]["changed"] is True
+    assert receipt["evidence"]["resulting_generation"] == "gen-8"
     assert calls == [{"config": {"root": "/data"}, "sku": "TGW-001",
                       "job_id": "job-123", "graph_id": "graph-7",
                       "expected_generation": "gen-7"}]
+
+
+def test_noop_mutation_propagates_exact_changed_false():
+    receipt = handle_job(
+        _job(), {}, mutation_fn=lambda **kw: Result(
+            "COMMITTED", resulting_generation="gen-7", changed=False,
+        ),
+    )
+    assert receipt["outcome"] == "satisfied"
+    assert receipt["evidence"]["changed"] is False
+    assert receipt["evidence"]["resulting_generation"] == "gen-7"
 
 
 def test_operation_id_is_stable_for_job_identity():

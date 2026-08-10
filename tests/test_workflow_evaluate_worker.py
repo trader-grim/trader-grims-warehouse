@@ -6,6 +6,7 @@ import pytest
 from tgw.errors import TreatmentFailure
 from tgw.queue import state_machine
 from tgw.queue.worker_base import QueueWorker
+from tgw.workers.normalize_condition import handle_job
 from tgw.workers.workflow_evaluate import evaluate_event
 
 
@@ -179,6 +180,37 @@ def test_satisfied_no_change_receipt_is_persisted_without_evaluation_event():
     assert cursor.execute.call_count == 1
     persisted = json.loads(cursor.execute.call_args.args[1][0])
     assert persisted["evidence"]["changed"] is False
+
+
+def test_normalize_noop_receipt_suppresses_false_evidence_event():
+    receipt = handle_job(
+        {"job_id": "origin-job", "entity_id": "SKU-1", "payload_json": {
+            "sku": "SKU-1", "entity_id": "SKU-1", "object_generation": "gen-1",
+            "graph_id": "graph-1", "treatment_id": "normalize-condition",
+            "treatment_version": "1",
+        }},
+        {},
+        mutation_fn=lambda **kwargs: {
+            "status": "COMMITTED", "operation_id": "operation-1",
+            "resulting_generation": "gen-1", "changed": False,
+        },
+    )
+    cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
+    cursor.fetchone.return_value = (
+        "SKU-1", {"goal_profile_id": "tgw.ebay_listable", "goal_profile_version": "1",
+                  "graph_id": "graph-1", "object_generation": "gen-1"},
+    )
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value = cursor
+    with patch.object(state_machine, "_conn", return_value=connection):
+        result = state_machine.complete_treatment_and_enqueue_evaluation(
+            "origin-job", "owner", receipt,
+        )
+    assert result == state_machine.EVALUATION_EVENT_NOT_REQUIRED
+    assert cursor.execute.call_count == 1
+    assert receipt["evidence"]["changed"] is False
 
 
 def test_atomic_completion_raises_when_lease_guard_loses():

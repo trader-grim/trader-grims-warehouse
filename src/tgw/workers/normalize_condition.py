@@ -122,8 +122,16 @@ def handle_job(job: Mapping[str, Any], config: Mapping[str, Any], *, mutation_fn
     status = _status(result)
     operation_id = str(getattr(result, "operation_id", "") or
                        (result.get("operation_id", "") if isinstance(result, Mapping) else ""))
+    changed = (result.get("changed") if isinstance(result, Mapping)
+               else getattr(result, "changed", None))
+    resulting_generation = (
+        result.get("resulting_generation") if isinstance(result, Mapping)
+        else getattr(result, "resulting_generation", None)
+    )
     evidence = {"operation_id": operation_id, "mutation_status": status,
-                "object_generation": generation}
+                "object_generation": generation,
+                "changed": changed,
+                "resulting_generation": resulting_generation}
     if status != "COMMITTED":
         return _receipt(graph_id, "failed", detail="item mutation did not report COMMITTED",
                         reason_code="MUTATION_NOT_COMMITTED", **evidence)
