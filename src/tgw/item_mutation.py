@@ -117,6 +117,121 @@ def _record(path: Path, receipt: MutationReceipt) -> MutationReceipt:
     return receipt
 
 
+def _operation_dir(journal_root: Path, operation_id: str) -> Path:
+    return journal_root / "operations" / operation_id[:2] / operation_id
+
+
+def _item_lock_path(journal_root: Path, sku: str) -> Path:
+    return journal_root / "locks" / f"{hashlib.sha256(sku.encode()).hexdigest()}.lock"
+
+
+def _next_attempt_path(operation_dir: Path) -> Path:
+    attempts = operation_dir / "reconciliation-attempts"
+    sequence = max((int(path.stem) for path in attempts.glob("*.json")), default=0) + 1
+    return attempts / f"{sequence:06d}.json"
+
+
+def reconcile_mutation(
+    *,
+    item_path: str | Path,
+    journal_root: str | Path,
+    operation_id: str,
+    project: ProjectionWriter,
+) -> MutationReceipt:
+    """Retry only the projection of a ``REPAIR_REQUIRED`` mutation.
+
+    The original terminal receipt is immutable.  Every reconciliation result
+    is appended under ``reconciliation-attempts``.  Projection is permitted
+    only while the canonical document still has the exact generation written
+    by the original operation.
+    """
+    item_path = Path(item_path)
+    journal_root = Path(journal_root)
+    operation_dir = _operation_dir(journal_root, operation_id)
+    receipt_path = operation_dir / "receipt.json"
+    if not receipt_path.exists():
+        raise FileNotFoundError(f"no mutation receipt for operation {operation_id}")
+    original = MutationReceipt(**_load_json(receipt_path))
+    if original.operation_id != operation_id:
+        raise ValueError("receipt operation_id does not match its journal location")
+    if original.status != "REPAIR_REQUIRED":
+        return original
+
+    lock_path = _item_lock_path(journal_root, original.sku)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        existing_attempts = sorted((operation_dir / "reconciliation-attempts").glob("*.json"))
+        if existing_attempts:
+            latest = MutationReceipt(**_load_json(existing_attempts[-1]))
+            if latest.status == "COMMITTED":
+                return latest
+
+        attempt_path = _next_attempt_path(operation_dir)
+        try:
+            document = _load_json(item_path)
+            if not isinstance(document, dict):
+                raise ValueError("item document must be a JSON object")
+            observed = item_generation(document)
+        except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
+            return _record(
+                attempt_path,
+                _receipt(
+                    operation_id=operation_id,
+                    sku=original.sku,
+                    kind=original.kind,
+                    expected_generation=original.expected_generation,
+                    status="CONFLICT",
+                    observed_generation=None,
+                    resulting_generation=original.resulting_generation,
+                    detail=f"cannot verify canonical item for reconciliation: {type(exc).__name__}: {exc}",
+                ),
+            )
+        if observed != original.resulting_generation:
+            return _record(
+                attempt_path,
+                _receipt(
+                    operation_id=operation_id,
+                    sku=original.sku,
+                    kind=original.kind,
+                    expected_generation=original.expected_generation,
+                    status="CONFLICT",
+                    observed_generation=observed,
+                    resulting_generation=original.resulting_generation,
+                    detail="canonical generation advanced; projection reconciliation refused",
+                ),
+            )
+        try:
+            project(original.sku, document)
+        except Exception as exc:
+            return _record(
+                attempt_path,
+                _receipt(
+                    operation_id=operation_id,
+                    sku=original.sku,
+                    kind=original.kind,
+                    expected_generation=original.expected_generation,
+                    status="REPAIR_REQUIRED",
+                    observed_generation=observed,
+                    resulting_generation=original.resulting_generation,
+                    detail=f"projection reconciliation failed: {type(exc).__name__}: {exc}",
+                ),
+            )
+        return _record(
+            attempt_path,
+            _receipt(
+                operation_id=operation_id,
+                sku=original.sku,
+                kind=original.kind,
+                expected_generation=original.expected_generation,
+                status="COMMITTED",
+                observed_generation=observed,
+                resulting_generation=original.resulting_generation,
+                detail="projection reconciled; original receipt preserved",
+            ),
+        )
+
+
 def mutate_item(
     *,
     item_path: str | Path,
@@ -161,10 +276,10 @@ def mutate_item(
             ),
         )
 
-    operation_dir = journal_root / "operations" / selected_id[:2] / selected_id
+    operation_dir = _operation_dir(journal_root, selected_id)
     intent_path = operation_dir / "intent.json"
     receipt_path = operation_dir / "receipt.json"
-    lock_path = journal_root / "locks" / f"{hashlib.sha256(sku.encode()).hexdigest()}.lock"
+    lock_path = _item_lock_path(journal_root, sku)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+b") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
@@ -199,9 +314,24 @@ def mutate_item(
             intent = {"binding": binding, "recorded_at": datetime.now(UTC).isoformat()}
             _atomic_json(intent_path, intent)
 
-        document = _load_json(item_path)
-        if not isinstance(document, dict):
-            raise ValueError("item document must be a JSON object")
+        try:
+            document = _load_json(item_path)
+            if not isinstance(document, dict):
+                raise ValueError("item document must be a JSON object")
+        except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
+            return _record(
+                receipt_path,
+                _receipt(
+                    operation_id=selected_id,
+                    sku=sku,
+                    kind=kind,
+                    expected_generation=expected_generation,
+                    status="FAILED",
+                    observed_generation=None,
+                    resulting_generation=None,
+                    detail=f"cannot load canonical item: {type(exc).__name__}: {exc}",
+                ),
+            )
         observed = item_generation(document)
         if observed != expected_generation:
             # The process may have stopped after the canonical rename but
