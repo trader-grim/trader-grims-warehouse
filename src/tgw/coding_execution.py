@@ -105,9 +105,20 @@ def execute_authorized_treatment(config: dict[str, Any], payload: dict[str, Any]
     allowed = coding.get("allowed_runners")
     if allowed is not None and (not isinstance(allowed, list) or command[0] not in allowed):
         raise HardFailure("coding command is not an allowed local runner")
+    runner_env = dict(os.environ)
+    worktree_source = str(worktree / "src")
+    inherited_pythonpath = runner_env.get("PYTHONPATH")
+    runner_env["PYTHONPATH"] = (
+        worktree_source + os.pathsep + inherited_pythonpath
+        if inherited_pythonpath
+        else worktree_source
+    )
+    runner_env["PYTHONDONTWRITEBYTECODE"] = "1"
     try:
         completed = subprocess.run(
-            command, cwd=worktree, check=False, text=True, capture_output=True, timeout=int(coding.get("timeout_s", 1800)), env={**os.environ, "TGW_CODING_JOB": json.dumps(payload)}
+            command, cwd=worktree, check=False, text=True, capture_output=True,
+            timeout=int(coding.get("timeout_s", 1800)),
+            env={**runner_env, "TGW_CODING_JOB": json.dumps(payload)},
         )
         if completed.returncode:
             raise RuntimeError(f"coding launcher exited {completed.returncode}: {completed.stderr[-500:]}")

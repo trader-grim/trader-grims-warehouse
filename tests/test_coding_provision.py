@@ -6,6 +6,7 @@ import argparse
 import ast
 import inspect
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -809,6 +810,33 @@ def test_execute_authorized_treatment_raises_treatment_failure_with_result(tmp_p
 
     assert raised.value.result["outcome"] == "failed"
     assert json.loads(coding_execution.receipt_path_for_treatment(tmp_path, execution["treatment_id"]).read_text()) == raised.value.result
+
+
+def test_authorized_treatment_runner_imports_the_claimed_worktree_before_worker_release(tmp_path, monkeypatch):
+    execution = _execution_envelope()
+    monkeypatch.setattr(coding_execution, "_git_identity", lambda path: (path.resolve(), (path / ".git").resolve()))
+    monkeypatch.setenv("PYTHONPATH", "/immutable/worker/release/src")
+    observed = {}
+
+    def launch(command, **kwargs):
+        observed.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps({
+            "outcome": "satisfied",
+            "established_conditions": ["reviewed"],
+            "artifacts": [],
+        }), stderr="")
+
+    monkeypatch.setattr(coding_execution.subprocess, "run", launch)
+    payload = {**execution, "worktree": str(tmp_path), "object_id": str(tmp_path)}
+    config = {"coding": {
+        "worktree_root": str(tmp_path.parent), "repository_root": str(tmp_path),
+        "commands": {execution["treatment_id"]: ["local-runner"]},
+    }}
+
+    coding_execution.execute_authorized_treatment(config, payload)
+
+    assert observed["env"]["PYTHONPATH"] == f"{tmp_path / 'src'}{os.pathsep}/immutable/worker/release/src"
+    assert observed["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
 
 
 def test_canonical_claim_looks_up_todo_and_derives_contract_bound_envelope(tmp_path, native, envelope):
