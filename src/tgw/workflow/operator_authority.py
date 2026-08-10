@@ -76,6 +76,83 @@ def issue_authority(*, operator_identity: str, surface: str, entity_id: str,
     return authority_id
 
 
+def issue_or_reuse_authority(**values: Any) -> tuple[str, bool]:
+    """Idempotently issue one active exact binding, superseding older intent."""
+    connection = values.pop("connection", None)
+    scopes = tuple(sorted(set(values["scopes"])))
+    if not scopes or not set(scopes).issubset(_SCOPES):
+        raise ValueError("invalid authority scopes")
+    if (values["issued_at"].tzinfo is None or values["expires_at"].tzinfo is None
+            or values["expires_at"] <= values["issued_at"]):
+        raise ValueError("authority timestamps must be aware and increasing")
+    with _connection(connection) as con, con.cursor() as cur:
+        logical_key = ":".join((
+            values["operator_identity"], values["surface"], values["entity_id"],
+            values["goal_profile_id"], values["provider_identity"],
+        ))
+        cur.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (logical_key,),
+        )
+        exact = (
+            values["operator_identity"], values["surface"], values["entity_id"],
+            values["goal_profile_id"], values["goal_profile_version"],
+            values["object_generation"], values["pre_authority_condition_hash"],
+            values["content_identity"], values["provider_identity"], list(scopes),
+        )
+        cur.execute(
+            """SELECT authority_id FROM operator_authorities
+                 WHERE operator_identity=%s AND surface=%s AND entity_id=%s
+                   AND goal_profile_id=%s AND goal_profile_version=%s
+                   AND object_generation=%s AND pre_authority_condition_hash=%s
+                   AND content_identity=%s AND provider_identity=%s AND scopes=%s
+                   AND superseded_at IS NULL AND expires_at > NOW()
+                 FOR UPDATE""", exact,
+        )
+        row = cur.fetchone()
+        if row is not None:
+            return str(row[0]), False
+        authority_id = str(uuid.uuid4())
+        cur.execute(
+            """SELECT authority_id FROM operator_authorities
+                 WHERE operator_identity=%s AND surface=%s AND entity_id=%s
+                   AND goal_profile_id=%s AND provider_identity=%s
+                   AND superseded_at IS NULL FOR UPDATE""",
+            (values["operator_identity"], values["surface"],
+             values["entity_id"], values["goal_profile_id"],
+             values["provider_identity"]),
+        )
+        candidates = cur.fetchall()
+        for (candidate_id,) in candidates:
+            cur.execute(
+                """SELECT 1 FROM provider_effects
+                     WHERE authority_json->>'authority_id'=%s
+                       AND state IN
+                           ('dispatched','ambiguous','reconciliation_required')
+                     LIMIT 1""", (str(candidate_id),),
+            )
+            if cur.fetchone() is not None:
+                raise RuntimeError(
+                    "prior operator authority has an unresolved provider effect"
+                )
+            cur.execute(
+                """UPDATE operator_authorities
+                     SET superseded_at=NOW(), superseded_by=%s
+                     WHERE authority_id=%s AND superseded_at IS NULL""",
+                (authority_id, candidate_id),
+            )
+        cur.execute(
+            """INSERT INTO operator_authorities
+              (authority_id, operator_identity, surface, entity_id, goal_profile_id,
+               goal_profile_version, object_generation, pre_authority_condition_hash,
+               content_identity, provider_identity, scopes, issued_at, expires_at)
+              VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (authority_id, *exact[:-1], list(scopes), values["issued_at"],
+             values["expires_at"]),
+        )
+        return authority_id, True
+
+
 def get_authority(authority_id: str, *, connection=None,
                   for_update: bool = False) -> OperatorAuthority | None:
     try:

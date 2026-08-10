@@ -253,6 +253,55 @@ def test_atomic_reservation_returns_exact_rejected_terminal_record():
     validate.assert_not_called()
 
 
+def test_authoritative_stage_receipt_requires_exact_succeeded_ledger_evidence():
+    binding = _binding(
+        operation='stage-draft',
+        request={'sku': 'SKU-1', 'content_identity': 'content-1', 'force': False},
+        authority={'provider_identity': 'ebay:account'},
+    )
+    row = _row(binding, state='succeeded')
+    row['result_json'] = {'offer_id': 'OFF-1', 'inventory_item': {}}
+    cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
+    cursor.fetchone.return_value = row
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value = cursor
+    with patch.object(provider_effects.state_machine, '_conn', return_value=connection):
+        receipt = provider_effects.lookup_authoritative_stage_receipt(
+            sku='SKU-1', provider_effect_id=row['effect_id'],
+            stage_content_identity='content-1', offer_id='OFF-1',
+            expected_provider_identity='ebay:account',
+        )
+    assert receipt == {
+        'receipt_id': row['effect_id'], 'content_identity': 'content-1',
+        'offer_id': 'OFF-1',
+    }
+
+
+def test_authoritative_stage_receipt_rejects_changed_canonical_content():
+    binding = _binding(
+        operation='stage-draft',
+        request={'sku': 'SKU-1', 'content_identity': 'content-1', 'force': False},
+        authority={'provider_identity': 'ebay:account'},
+    )
+    row = _row(binding, state='succeeded')
+    row['result_json'] = {'offer_id': 'OFF-1'}
+    cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
+    cursor.fetchone.return_value = row
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value = cursor
+    with patch.object(provider_effects.state_machine, '_conn', return_value=connection), \
+         pytest.raises(provider_effects.ProviderEffectConflict):
+        provider_effects.lookup_authoritative_stage_receipt(
+            sku='SKU-1', provider_effect_id=row['effect_id'],
+            stage_content_identity='content-changed', offer_id='OFF-1',
+            expected_provider_identity='ebay:account',
+        )
+
+
 def test_schema_sources_include_durable_provider_effect_contract():
     queue_dir = Path(__file__).parents[1] / 'src/tgw/queue'
     for name in ('schema.sql', 'live_schema.sql'):

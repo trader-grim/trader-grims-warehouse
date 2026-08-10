@@ -210,6 +210,48 @@ def validate_succeeded_authorized_effect(
             return record
 
 
+def lookup_authoritative_stage_receipt(
+    *, sku: str, provider_effect_id: str, stage_content_identity: str,
+    offer_id: str, expected_provider_identity: str,
+) -> dict[str, str]:
+    """Return canonical stage evidence only when the exact ledger effect succeeded."""
+    with state_machine._conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM provider_effects WHERE effect_id=%s",
+                (provider_effect_id,),
+            )
+            row = cur.fetchone()
+    if row is None:
+        raise ProviderEffectConflict("stage provider effect absent")
+    record = _record(row)
+    exact_binding = {
+        "provider": record.provider, "operation": record.operation,
+        "entity_type": record.entity_type, "entity_id": record.entity_id,
+        "object_generation": record.object_generation, "graph_id": record.graph_id,
+        "treatment_id": record.treatment_id,
+        "treatment_version": record.treatment_version,
+        "condition_hash": record.condition_hash, "request": record.request,
+        "authority": record.authority,
+    }
+    if effect_identity(**exact_binding) != provider_effect_id:
+        raise ProviderEffectConflict("stage provider effect identity mismatch")
+    if (record.provider != "ebay" or record.operation != "stage-draft"
+            or record.entity_type != "item" or record.entity_id != sku
+            or record.state != "succeeded" or not record.result):
+        raise ProviderEffectConflict("stage provider effect is not exact succeeded evidence")
+    if record.authority.get("provider_identity") != expected_provider_identity:
+        raise ProviderEffectConflict("stage provider identity does not match authority")
+    if (record.request.get("content_identity") != stage_content_identity
+            or record.result.get("offer_id") != offer_id):
+        raise ProviderEffectConflict("canonical stage evidence does not match provider receipt")
+    return {
+        "receipt_id": record.effect_id,
+        "content_identity": stage_content_identity,
+        "offer_id": offer_id,
+    }
+
+
 def _record(row: Mapping[str, Any]) -> ProviderEffect:
     return ProviderEffect(
         effect_id=str(row["effect_id"]), provider=str(row["provider"]),

@@ -5,6 +5,7 @@ from tgw.workflow.operator_authority import (
     OperatorAuthority,
     get_authority,
     issue_authority,
+    issue_or_reuse_authority,
     supersede_authority,
     validate_authority,
     validate_provider_effect_authority,
@@ -12,12 +13,13 @@ from tgw.workflow.operator_authority import (
 
 
 class Cursor:
-    def __init__(self, row=None, rowcount=1):
-        self.row, self.rowcount, self.calls = row, rowcount, []
+    def __init__(self, row=None, rowcount=1, rows=None):
+        self.row, self.rows, self.rowcount, self.calls = row, list(rows or []), rowcount, []
     def __enter__(self): return self
     def __exit__(self, *_): pass
     def execute(self, sql, args): self.calls.append((sql, args))
-    def fetchone(self): return self.row
+    def fetchone(self): return self.rows.pop(0) if self.rows else self.row
+    def fetchall(self): return []
 
 
 class Connection:
@@ -102,3 +104,20 @@ def test_malformed_authority_id_is_rejected_before_database_lookup():
     cursor = Cursor()
     assert get_authority("not-a-uuid", connection=Connection(cursor)) is None
     assert cursor.calls == []
+
+
+def test_repeated_exact_issue_reuses_active_authority_without_insert():
+    cursor = Cursor(rows=[("d88f1d28-59c4-4714-a861-9c30ae0eaa4d",)])
+    now = datetime.now(UTC)
+    authority_id, created = issue_or_reuse_authority(
+        operator_identity="operator:dave", surface="web:item", entity_id="SKU-1",
+        goal_profile_id="tgw.ebay_listable", goal_profile_version="1",
+        object_generation="gen", pre_authority_condition_hash="condition",
+        content_identity="content", provider_identity="ebay:account",
+        scopes=("stage",), issued_at=now, expires_at=now + timedelta(minutes=5),
+        connection=Connection(cursor),
+    )
+    assert authority_id == "d88f1d28-59c4-4714-a861-9c30ae0eaa4d"
+    assert created is False
+    assert "pg_advisory_xact_lock" in cursor.calls[0][0]
+    assert len(cursor.calls) == 2

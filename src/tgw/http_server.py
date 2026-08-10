@@ -323,12 +323,12 @@ def _safe_next_path(path: str) -> str:
 def _require_auth(
     credentials: Optional[HTTPAuthorizationCredentials] = Security(_security),
     request: Request = None,
-) -> None:
+) -> str:
     if credentials and secrets.compare_digest(credentials.credentials.encode(), _api_key.encode()):
-        return
+        return "operator:api-key"
     tok = request.cookies.get(_SESSION_COOKIE) if request else None
     if tok and _sessions.get(tok, 0) > time.time():
-        return
+        return "operator:web-session"
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token")
 
 
@@ -542,6 +542,8 @@ class ActionBody(BaseModel):
 
 class WorkflowGoalBody(BaseModel):
     goal_profile_id: str = "tgw.ebay_listable"
+    scopes: List[str] = Field(default_factory=list)
+    authority_ttl_seconds: int = 300
 
 
 class SetTemplateBody(BaseModel):
@@ -885,10 +887,13 @@ def item_workflow(sku: str) -> Dict[str, Any]:
     return {"ok": True, "workflow": card}
 
 
-@app.post("/api/items/{sku}/workflow-goal", dependencies=[AUTH])
-def request_workflow_goal(sku: str, body: WorkflowGoalBody) -> Dict[str, Any]:
+@app.post("/api/items/{sku}/workflow-goal")
+def request_workflow_goal(
+    sku: str, body: WorkflowGoalBody,
+    operator_identity: str = Depends(_require_auth),
+) -> Dict[str, Any]:
     """Evaluate an operator goal; dispatch at most one local treatment."""
-    from .workflow.listing_migration import request_item_goal
+    from .workflow.listing_migration import authorize_and_request_item_goal
     from .workflow.profiles import get_profile
 
     json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
@@ -900,9 +905,20 @@ def request_workflow_goal(sku: str, body: WorkflowGoalBody) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="unknown workflow goal") from None
     if not goal.identity.startswith("tgw."):
         raise HTTPException(status_code=400, detail="only TGW item goals are accepted")
+    migration = _cfg.get("workflow_migration")
+    if migration is None and isinstance(_cfg.get("raw"), dict):
+        migration = _cfg["raw"].get("workflow_migration")
+    migration = migration if isinstance(migration, dict) else {}
+    provider_identity = migration.get("ebay_provider_identity", "")
+    if not isinstance(provider_identity, str) or not provider_identity.strip():
+        raise HTTPException(status_code=503, detail="provider identity is not configured")
     try:
-        result = request_item_goal(json_path, goal, origin="operator")
-    except RuntimeError as exc:
+        result, authority_id, authority_created = authorize_and_request_item_goal(
+            json_path, goal, operator_identity=operator_identity,
+            surface="http:item-workflow-goal", provider_identity=provider_identity,
+            scopes=tuple(body.scopes), ttl_seconds=body.authority_ttl_seconds,
+        )
+    except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {
         "ok": True,
@@ -914,6 +930,8 @@ def request_workflow_goal(sku: str, body: WorkflowGoalBody) -> Dict[str, Any]:
         "job_id": result.dispatched.job_id if result.dispatched else "",
         "held_external": list(result.held_external),
         "operator_gates": list(result.operator_gates),
+        "authority_id": authority_id,
+        "authority_created": authority_created,
     }
 
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from .condition_normalization import normalized_condition
 from .contracts import (
@@ -258,6 +258,7 @@ def build_item_snapshot(
     external_effect_ambiguities: tuple[str, ...] = (),
     authorized_scopes: tuple[str, ...] = (),
     authority_identity: str = "",
+    stage_receipt_lookup: Callable[[str], Mapping[str, Any] | None] | None = None,
 ) -> ObjectSnapshot:
     """Build an ObjectSnapshot from one item JSON file, scoped to goal_profile.
 
@@ -304,16 +305,27 @@ def build_item_snapshot(
             continue
         if condition_id == "staged_content_current":
             offer_exists = _staged(item)
+            receipt = stage_receipt_lookup(sku) if stage_receipt_lookup else None
             if not offer_exists:
                 result = FingerprintResult.FALSE
                 reason = "item has no staged offer"
+            elif (isinstance(receipt, Mapping)
+                  and receipt.get("content_identity") == current_content_identity
+                  and isinstance(receipt.get("receipt_id"), str)
+                  and receipt["receipt_id"].strip()):
+                result = FingerprintResult.TRUE
+                reason = "authoritative staged content receipt matches current content"
+            elif isinstance(receipt, Mapping) and receipt.get("content_identity"):
+                result = FingerprintResult.STALE
+                reason = "authoritative staged content receipt is stale"
             else:
                 result = FingerprintResult.UNKNOWN
                 reason = "authoritative staged content receipt absent"
+            receipt_id = receipt.get("receipt_id") if isinstance(receipt, Mapping) else None
             assertions.append(EvidenceAssertion(
                 condition_id=condition_id, result=result, reasons=(reason,),
                 evidence=(EvidenceReference(
-                    identity="staged-content-receipt:absent",
+                    identity=receipt_id or "staged-content-receipt:absent",
                     source_class="provider_receipt",
                     source_generation=generation,
                     freshness_identity=current_content_identity,

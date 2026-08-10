@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .contracts import (
@@ -16,12 +17,59 @@ from .contracts import (
 )
 from .evaluator import evaluate
 from .item_snapshot import build_item_snapshot
-from .operator_authority import get_authority, listing_content_identity, validate_authority
+from .operator_authority import (
+    get_authority,
+    issue_or_reuse_authority,
+    listing_content_identity,
+    validate_authority,
+)
 from .profiles import TGW_EBAY_IDENTIFIED
 from .scheduler import DispatchResult, dispatch_treatment
 from .treatments import AI_IDENTIFY, TGW_TREATMENTS
 
 EVALUATOR_VERSION = "pp-workflow-phase3-bundle/v1"
+_GOAL_SCOPE_CEILINGS = {
+    "tgw.ebay_identified": (),
+    "tgw.ebay_staged": ("upload", "stage"),
+    "tgw.ebay_listable": ("upload", "stage", "publish", "force-restage"),
+}
+_GOAL_SCOPE_DEFAULTS = {
+    "tgw.ebay_identified": (),
+    "tgw.ebay_staged": ("upload", "stage"),
+    "tgw.ebay_listable": ("upload", "stage", "publish"),
+}
+
+
+def approved_authority_scopes(goal: GoalProfile, requested: tuple[str, ...]) -> tuple[str, ...]:
+    ceiling = _GOAL_SCOPE_CEILINGS.get(goal.identity, ())
+    chosen = (tuple(sorted(set(requested))) if requested
+              else _GOAL_SCOPE_DEFAULTS.get(goal.identity, ()))
+    if not set(chosen).issubset(ceiling):
+        raise ValueError(f"authority scopes exceed goal ceiling for {goal.identity}")
+    return chosen
+
+
+def _authoritative_stage_lookup(item: dict, provider_identity: str):
+    if not provider_identity:
+        return None
+    from tgw.provider_effects import ProviderEffectConflict, lookup_authoritative_stage_receipt
+    offer = item.get("ebay_offer") if isinstance(item.get("ebay_offer"), dict) else {}
+
+    def lookup(sku):
+        markers = (offer.get("provider_effect_id"),
+                   offer.get("stage_content_identity"), offer.get("offer_id"))
+        if not all(isinstance(value, str) and value.strip() for value in markers):
+            return None
+        try:
+            return lookup_authoritative_stage_receipt(
+                sku=sku, provider_effect_id=markers[0],
+                stage_content_identity=markers[1], offer_id=markers[2],
+                expected_provider_identity=provider_identity,
+            )
+        except ProviderEffectConflict:
+            return None
+
+    return lookup
 
 # Frozen Phase 3 inventory. ``migrate`` entries choose pipeline movement;
 # ``retained-derived`` entries invalidate rebuildable projections;
@@ -131,6 +179,48 @@ class GoalRequestResult:
     operator_gates: tuple[str, ...]
 
 
+def authorize_and_request_item_goal(
+    item_path: str | Path, goal: GoalProfile, *, operator_identity: str,
+    surface: str, provider_identity: str, scopes: tuple[str, ...],
+    ttl_seconds: int = 300, enqueue_fn=None, issuer=issue_or_reuse_authority,
+    authority_lookup=get_authority,
+) -> tuple[GoalRequestResult, str, bool]:
+    """Issue/reuse one authenticated exact authority, then evaluate it."""
+    if not provider_identity.strip():
+        raise ValueError("provider identity is required")
+    if not 30 <= ttl_seconds <= 900:
+        raise ValueError("authority TTL must be between 30 and 900 seconds")
+    scopes = approved_authority_scopes(goal, scopes)
+    if not scopes:
+        return (request_item_goal(item_path, goal, enqueue_fn=enqueue_fn), "", False)
+    item = json.loads(Path(item_path).read_text(encoding="utf-8"))
+    stage_lookup = _authoritative_stage_lookup(item, provider_identity)
+    snapshot = build_item_snapshot(
+        item_path, goal, treatments=TGW_TREATMENTS,
+        stage_receipt_lookup=stage_lookup,
+    )
+    graph = evaluate(
+        snapshot=snapshot, goal=goal, treatments=TGW_TREATMENTS,
+        evaluator_version="pp-workflow-operator-goal/v1",
+    )
+    now = datetime.now(UTC)
+    authority_id, created = issuer(
+        operator_identity=operator_identity, surface=surface,
+        entity_id=snapshot.object_id, goal_profile_id=goal.identity,
+        goal_profile_version=goal.version, object_generation=snapshot.generation,
+        pre_authority_condition_hash=graph.condition_hash,
+        content_identity=listing_content_identity(item),
+        provider_identity=provider_identity, scopes=scopes, issued_at=now,
+        expires_at=now + timedelta(seconds=ttl_seconds),
+    )
+    result = request_item_goal(
+        item_path, goal, enqueue_fn=enqueue_fn, origin="operator",
+        authority_id=authority_id, provider_identity=provider_identity,
+        authority_lookup=authority_lookup, stage_receipt_lookup=stage_lookup,
+    )
+    return result, authority_id, created
+
+
 def request_item_goal(
     item_path: str | Path,
     goal: GoalProfile,
@@ -141,6 +231,7 @@ def request_item_goal(
     authority_id: str | None = None,
     provider_identity: str = "",
     authority_lookup=get_authority,
+    stage_receipt_lookup=None,
 ) -> GoalRequestResult:
     """Evaluate one exact generation and dispatch at most one local treatment.
 
@@ -148,14 +239,17 @@ def request_item_goal(
     remain held until their provider reservation/reconciliation contracts are
     independently admitted.
     """
+    item = json.loads(Path(item_path).read_text(encoding="utf-8"))
+    if stage_receipt_lookup is None and provider_identity:
+        stage_receipt_lookup = _authoritative_stage_lookup(item, provider_identity)
     base_snapshot = build_item_snapshot(
         item_path, goal, treatments=treatments,
+        stage_receipt_lookup=stage_receipt_lookup,
     )
     base_graph = evaluate(
         snapshot=base_snapshot, goal=goal, treatments=treatments,
         evaluator_version="pp-workflow-operator-goal/v1",
     )
-    item = json.loads(Path(item_path).read_text(encoding="utf-8"))
     content_identity = listing_content_identity(item)
     authorized_scopes: list[str] = []
     for scope in ("upload", "stage", "publish", "force-restage"):
@@ -173,6 +267,7 @@ def request_item_goal(
         item_path, goal, treatments=treatments,
         authorized_scopes=tuple(authorized_scopes),
         authority_identity=authority_id or "",
+        stage_receipt_lookup=stage_receipt_lookup,
     )
     graph = evaluate(
         snapshot=snapshot, goal=goal, treatments=treatments,

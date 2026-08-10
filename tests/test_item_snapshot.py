@@ -480,6 +480,30 @@ def test_authoritative_external_effect_ambiguity_is_separate_input(tmp_path):
     assert snap.external_effect_ambiguities == ("listing.publish",)
 
 
+def test_staged_content_current_uses_only_authoritative_receipt_lookup(tmp_path):
+    path = tmp_path / "item.json"
+    item = _make_item(ebay_offer={"offer_id": "offer-1"})
+    path.write_text(json.dumps(item), encoding="utf-8")
+    goal = GoalProfile("staged", "1", ("staged_content_current",))
+    from tgw.workflow.operator_authority import listing_content_identity
+
+    absent = build_item_snapshot(path, goal)
+    assert absent.assertions[0].result == FingerprintResult.UNKNOWN
+    current = build_item_snapshot(
+        path, goal, stage_receipt_lookup=lambda sku: {
+            "receipt_id": "stage-receipt-1",
+            "content_identity": listing_content_identity(item),
+        },
+    )
+    assert current.assertions[0].result == FingerprintResult.TRUE
+    stale = build_item_snapshot(
+        path, goal, stage_receipt_lookup=lambda sku: {
+            "receipt_id": "stage-receipt-old", "content_identity": "old",
+        },
+    )
+    assert stale.assertions[0].result == FingerprintResult.STALE
+
+
 # ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------

@@ -35,6 +35,7 @@ from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.ebay.sync import enqueue_post_push_sync, stage_draft
 from tgw.ebay.sync import extract_ebay_error_field as _extract_ebay_error_field
 from tgw.ebay.sync import format_ebay_error as _format_ebay_error
+from tgw.errors import TreatmentFailure
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
@@ -45,12 +46,150 @@ QUEUE_NAME = 'ebay_stage'
 
 class EbayStageWorker(QueueWorker):
 
+    def _provider_effect_mode(self) -> str:
+        migration = self.config.get('workflow_migration')
+        if migration is None and isinstance(self.config.get('raw'), dict):
+            migration = self.config['raw'].get('workflow_migration')
+        migration = migration if isinstance(migration, dict) else {}
+        mode = migration.get('ebay_stage_provider_effect', 'legacy')
+        if mode not in {'legacy', 'workflow'}:
+            raise HardFailure(
+                f'invalid workflow_migration.ebay_stage_provider_effect mode {mode!r}'
+            )
+        return mode
+
+    def _provider_identity(self) -> str:
+        migration = self.config.get('workflow_migration')
+        if migration is None and isinstance(self.config.get('raw'), dict):
+            migration = self.config['raw'].get('workflow_migration')
+        migration = migration if isinstance(migration, dict) else {}
+        value = migration.get('ebay_provider_identity')
+        return value if isinstance(value, str) else ''
+
+    @staticmethod
+    def _require_provider_binding(payload: Dict[str, Any]) -> None:
+        required = (
+            'treatment_id', 'treatment_version', 'graph_id', 'goal_profile_id',
+            'goal_profile_version', 'object_generation', 'condition_hash',
+            'operator_authority_id', 'pre_authority_condition_hash',
+        )
+        missing = [key for key in required
+                   if not isinstance(payload.get(key), str) or not payload[key].strip()]
+        if missing:
+            raise HardFailure('workflow provider effect missing binding: ' + ', '.join(missing))
+
+    @staticmethod
+    def _receipt(payload: Dict[str, Any], sku: str, *, outcome: str,
+                 effect_id: str, reason_code: str,
+                 result: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return {
+            'receipt_schema_id': 'treatment-receipt/v1',
+            'treatment_id': payload['treatment_id'],
+            'treatment_version': payload['treatment_version'],
+            'graph_id': payload['graph_id'], 'outcome': outcome,
+            'established_conditions': ['staged'] if outcome == 'satisfied' else [],
+            'artifacts': [f'item:{sku}'],
+            'evidence': {'reason_code': reason_code, 'provider': 'ebay',
+                         'provider_effect_id': effect_id,
+                         'provider_result': result},
+        }
+
+    def _stage_with_provider_effect(
+        self, payload: Dict[str, Any], sku: str, item: Dict[str, Any], *, force: bool,
+    ) -> tuple[Dict[str, Any], str, str]:
+        from tgw.provider_effects import (
+            ProviderEffectConflict,
+            ProviderEffectReconciliationRequired,
+            finish_provider_effect,
+            reserve_and_begin_authorized_effect,
+        )
+        from tgw.workflow.operator_authority import listing_content_identity
+
+        content_identity = listing_content_identity(item)
+        try:
+            effect = reserve_and_begin_authorized_effect(
+                authority_id=payload['operator_authority_id'],
+                authority_scope='force-restage' if force else 'stage',
+                authority_binding={
+                    'entity_id': sku, 'goal_profile_id': payload['goal_profile_id'],
+                    'goal_profile_version': payload['goal_profile_version'],
+                    'object_generation': payload['object_generation'],
+                    'pre_authority_condition_hash': payload['pre_authority_condition_hash'],
+                    'content_identity': content_identity,
+                    'provider_identity': self._provider_identity(),
+                }, provider='ebay', operation='stage-draft', entity_type='item',
+                entity_id=sku, object_generation=payload['object_generation'],
+                graph_id=payload['graph_id'], treatment_id=payload['treatment_id'],
+                treatment_version=payload['treatment_version'],
+                condition_hash=payload['condition_hash'],
+                request={'sku': sku, 'content_identity': content_identity,
+                         'force': force},
+            )
+        except ProviderEffectConflict as exc:
+            raise HardFailure(f'{sku}: provider effect admission failed: {exc}') from exc
+        except ProviderEffectReconciliationRequired as exc:
+            raise TreatmentFailure(
+                f'{sku}: prior stage dispatch requires reconciliation',
+                self._receipt(payload, sku, outcome='reconciliation_required',
+                              effect_id=exc.record.effect_id,
+                              reason_code='PROVIDER_EFFECT_UNFINISHED',
+                              result=exc.record.result),
+            ) from exc
+        if effect.state == 'succeeded' and effect.result:
+            return effect.result, effect.effect_id, content_identity
+        if effect.state == 'rejected':
+            raise TreatmentFailure(
+                f'{sku}: prior staging was definitively rejected',
+                self._receipt(payload, sku, outcome='failed',
+                              effect_id=effect.effect_id,
+                              reason_code='PROVIDER_EFFECT_REJECTED'),
+            )
+        try:
+            result = stage_draft(self.config, sku, item)
+        except requests.exceptions.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            terminal = status in (400, 422)
+            state = 'rejected' if terminal else 'ambiguous'
+            finished = finish_provider_effect(
+                effect.effect_id, state=state,
+                error_detail=f'HTTP {status}: {exc}',
+            )
+            raise TreatmentFailure(
+                f'{sku}: provider staging {state}',
+                self._receipt(
+                    payload, sku, outcome='failed' if terminal else 'ambiguous',
+                    effect_id=finished.effect_id,
+                    reason_code=('PROVIDER_EFFECT_REJECTED' if terminal
+                                 else 'PROVIDER_EFFECT_AMBIGUOUS'),
+                ),
+            ) from exc
+        except Exception as exc:
+            finished = finish_provider_effect(
+                effect.effect_id, state='ambiguous',
+                error_detail=f'{type(exc).__name__}: {exc}',
+            )
+            raise TreatmentFailure(
+                f'{sku}: provider staging outcome ambiguous',
+                self._receipt(payload, sku, outcome='ambiguous',
+                              effect_id=finished.effect_id,
+                              reason_code='PROVIDER_EFFECT_AMBIGUOUS'),
+            ) from exc
+        finish_provider_effect(effect.effect_id, state='succeeded', result=result)
+        return result, effect.effect_id, content_identity
+
     def handle(self, job: Dict[str, Any]) -> None:
         payload = job.get('payload_json') or {}
         sku = payload.get('sku', '')
         force = bool(payload.get('force'))  # bypass guards — update a live listing in place
         if not sku:
             raise HardFailure('ebay_stage job missing sku in payload')
+        effect_mode = self._provider_effect_mode()
+        if effect_mode == 'workflow':
+            self._require_provider_binding(payload)
+            if job.get('entity_type') not in (None, 'item'):
+                raise HardFailure('ebay_stage workflow job entity_type must be item')
+            if job.get('entity_id') not in (None, sku):
+                raise HardFailure('ebay_stage workflow job entity_id must equal sku')
 
         json_path = self.config['itemdata_root'] / sku / f'{sku}.json'
         if not json_path.exists():
@@ -67,6 +206,8 @@ class EbayStageWorker(QueueWorker):
                 f'— stage waits for them (will retry)')
 
         item = json.loads(json_path.read_text(encoding='utf-8'))
+        if effect_mode == 'workflow' and item.get('sku') != sku:
+            raise HardFailure('ebay_stage authoritative item sku does not equal requested sku')
         existing_listing = item.get('ebay_listing', {})
 
         # Guard: item was previously listed via Trading API — must not create a
@@ -162,6 +303,13 @@ class EbayStageWorker(QueueWorker):
             log.warning('ebay_stage: %s force-update of LIVE listing blocked — '
                         'no operator origin (uninspected AI content, C9)', sku)
             tgw_logging.log_event('ebay_stage_blocked_uninspected', sku=sku)
+            if effect_mode == 'workflow':
+                raise TreatmentFailure(
+                    f'{sku}: force restage held without operator origin',
+                    self._receipt(
+                        payload, sku, outcome='failed', effect_id='',
+                        reason_code='OPERATOR_ORIGIN_REQUIRED'),
+                )
             return
         if existing_listing.get('status') == 'Active':
             listing_id = existing_listing.get('listing_id', '')
@@ -174,6 +322,13 @@ class EbayStageWorker(QueueWorker):
                 tgw_logging.log_event('ebay_stage_skipped', sku=sku,
                                       reason='already_active_listing',
                                       listing_id=str(listing_id))
+                if effect_mode == 'workflow':
+                    raise TreatmentFailure(
+                        f'{sku}: active listing requires explicit force restage',
+                        self._receipt(
+                            payload, sku, outcome='failed', effect_id='',
+                            reason_code='ACTIVE_LISTING_REQUIRES_FORCE'),
+                    )
                 return
             log.info('ebay_stage: %s is live (listingId=%s) — updating in place (force)',
                      sku, listing_id)
@@ -182,6 +337,60 @@ class EbayStageWorker(QueueWorker):
         # Idempotent: already staged — skip unless force (update)
         existing_offer_id = item.get('ebay_offer', {}).get('offer_id')
         if existing_offer_id and not force:
+            if effect_mode == 'workflow':
+                from tgw.provider_effects import (
+                    ProviderEffectConflict,
+                    ProviderEffectReconciliationRequired,
+                    validate_succeeded_authorized_effect,
+                )
+                from tgw.workflow.operator_authority import listing_content_identity
+
+                offer = item.get('ebay_offer') or {}
+                content_identity = listing_content_identity(item)
+                effect_id = offer.get('provider_effect_id', '')
+                try:
+                    record = validate_succeeded_authorized_effect(
+                        effect_id=effect_id,
+                        authority_id=payload['operator_authority_id'],
+                        authority_scope='stage', authority_binding={
+                            'entity_id': sku,
+                            'goal_profile_id': payload['goal_profile_id'],
+                            'goal_profile_version': payload['goal_profile_version'],
+                            'object_generation': payload['object_generation'],
+                            'pre_authority_condition_hash': payload[
+                                'pre_authority_condition_hash'],
+                            'content_identity': content_identity,
+                            'provider_identity': self._provider_identity(),
+                        }, expected_binding={
+                            'provider': 'ebay', 'operation': 'stage-draft',
+                            'entity_type': 'item', 'entity_id': sku,
+                            'object_generation': payload['object_generation'],
+                            'graph_id': payload['graph_id'],
+                            'treatment_id': payload['treatment_id'],
+                            'treatment_version': payload['treatment_version'],
+                            'condition_hash': payload['condition_hash'],
+                            'request': {'sku': sku,
+                                        'content_identity': content_identity,
+                                        'force': False},
+                        },
+                    )
+                    if (offer.get('stage_content_identity') != content_identity
+                            or record.result.get('offer_id') != existing_offer_id):
+                        raise ProviderEffectConflict('canonical stage evidence mismatch')
+                except (ProviderEffectConflict,
+                        ProviderEffectReconciliationRequired) as exc:
+                    raise TreatmentFailure(
+                        f'{sku}: staged replay requires reconciliation',
+                        self._receipt(
+                            payload, sku, outcome='reconciliation_required',
+                            effect_id=effect_id,
+                            reason_code='PROVIDER_EFFECT_REPLAY_INVALID'),
+                    ) from exc
+                enqueue_post_push_sync(sku)
+                return self._receipt(
+                    payload, sku, outcome='satisfied', effect_id=effect_id,
+                    reason_code='PROVIDER_EFFECT_SUCCEEDED', result=record.result,
+                )
             log.info('ebay_stage: %s already staged (offerId=%s) — skipping',
                      sku, existing_offer_id)
             tgw_logging.log_event('ebay_stage_skipped', sku=sku,
@@ -343,8 +552,15 @@ class EbayStageWorker(QueueWorker):
         log.info('ebay_stage: staging %s as UNPUBLISHED offer (price=$%s)', sku, price)
         tgw_logging.log_event('ebay_stage_start', sku=sku, price=price)
 
+        provider_effect_id = ''
+        stage_content_identity = ''
         try:
-            result = stage_draft(self.config, sku, item)
+            if effect_mode == 'workflow':
+                result, provider_effect_id, stage_content_identity = (
+                    self._stage_with_provider_effect(payload, sku, item, force=force)
+                )
+            else:
+                result = stage_draft(self.config, sku, item)
         except ValueError as exc:
             raise HardFailure(str(exc)) from exc
         except requests.exceptions.HTTPError as exc:
@@ -385,6 +601,9 @@ class EbayStageWorker(QueueWorker):
             ebay_offer['status'] = 'UNPUBLISHED'
         ebay_offer['staged_at']   = datetime.now(timezone.utc).isoformat()
         ebay_offer['staged_price'] = float(price)  # what was actually submitted to eBay
+        if provider_effect_id:
+            ebay_offer['provider_effect_id'] = provider_effect_id
+            ebay_offer['stage_content_identity'] = stage_content_identity
 
         item['ebay_offer'] = ebay_offer
 
@@ -405,6 +624,11 @@ class EbayStageWorker(QueueWorker):
 
         enqueue_post_push_sync(sku)
 
+        if effect_mode == 'workflow':
+            return self._receipt(
+                payload, sku, outcome='satisfied', effect_id=provider_effect_id,
+                reason_code='PROVIDER_EFFECT_SUCCEEDED', result=result,
+            )
         return {
             "treatment_id": "ebay-stage",
             "outcome": "satisfied",
