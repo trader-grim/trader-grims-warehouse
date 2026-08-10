@@ -541,7 +541,6 @@ def mutate_item(
                 )
         else:
             intent = {"binding": binding, "recorded_at": datetime.now(UTC).isoformat()}
-            _atomic_json(intent_path, intent)
 
         try:
             document = _load_json(item_path)
@@ -628,6 +627,9 @@ def mutate_item(
             resulting = item_generation(updated)
             intent["planned_resulting_generation"] = resulting
             intent["planned_document"] = updated
+            # Transform and validation are pure.  Persist the complete,
+            # replayable intent immediately before the first archive effect,
+            # avoiding an unrecoverable half-intent after process death.
             _atomic_json(intent_path, intent)
             archive_marker = operation_dir / "archive.json"
             if not archive_marker.exists():
