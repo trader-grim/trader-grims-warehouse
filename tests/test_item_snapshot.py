@@ -459,6 +459,27 @@ def test_no_external_effect_ambiguities():
     assert snap.external_effect_ambiguities == ()
 
 
+def test_item_data_cannot_manufacture_external_effect_ambiguity(tmp_path):
+    item = _make_item(external_effect_ambiguities=["listing.publish"])
+    snap = _snapshot(item, tmp_path=tmp_path)
+
+    assert snap.external_effect_ambiguities == ()
+
+
+def test_authoritative_external_effect_ambiguity_is_separate_input(tmp_path):
+    path = tmp_path / "item.json"
+    path.write_text(json.dumps(_make_item()), encoding="utf-8")
+    goal = GoalProfile("ready", "1", ("published",))
+
+    snap = build_item_snapshot(
+        path,
+        goal,
+        external_effect_ambiguities=("listing.publish", "listing.publish"),
+    )
+
+    assert snap.external_effect_ambiguities == ("listing.publish",)
+
+
 # ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------

@@ -1,111 +1,195 @@
-"""PP-WORKFLOW-001 first mandatory fixture.
+"""PP-WORKFLOW-001 first mandatory synthetic listing fixture.
 
-Proves the full evaluator → scheduler → receipt → re-evaluate cycle
-with a synthetic coding task. Two chained treatments: implement then review.
+This is observation/evaluator proof.  It deliberately performs no provider
+effect and does not claim production migration or operator acceptance.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
-import tempfile
-from pathlib import Path
 
-SRC = "/opt/TGW/tgw-lib/src/trader-grims-warehouse/src"
-sys.path.insert(0, SRC)
-
-from tgw.workflow.coding_snapshot import build_coding_snapshot
-from tgw.workflow.contracts import (
-    EvidenceAssertion,
-    EvidenceReference,
-    FingerprintResult,
-    GoalProfile,
-    ObjectSnapshot,
-    TreatmentContract,
-)
+from tgw.workflow.contracts import TreatmentAttempt
 from tgw.workflow.evaluator import evaluate
-from tgw.workflow.profiles import CODING_READY_FOR_IMPLEMENTATION, CODING_READY_FOR_REVIEW
-from tgw.workflow.treatments import CODEX_IMPLEMENT, CLAUDE_REVIEW
+from tgw.workflow.item_snapshot import build_item_snapshot
+from tgw.workflow.profiles import TGW_EBAY_LISTABLE
+from tgw.workflow.treatments import TGW_TREATMENTS
 
 
-def test_fixture_full_cycle() -> None:
-    """Synthetic coding task: implement → review → done."""
-    repo = Path("/opt/TGW/var/worktrees/pp-workflow-001-fixture")
+def _item(tmp_path, *, sku="PPWF-001", condition="Used", **changes):
+    value = {
+        "sku": sku,
+        "condition": condition,
+        "image": "photos/one.jpg",
+        "ebay_category_id": "12345",
+        "draft_listing": {
+            "title": "Synthetic PP workflow fixture",
+            "category_id": "12345",
+            "price": 20.0,
+            "imageUrls": ["https://example.invalid/one.jpg"],
+        },
+        "ebay_photos": ["https://example.invalid/one.jpg"],
+        "ebay_offer": {"offer_id": "offer-fixture"},
+        "ebay_listing": {"status": "Active"},
+    }
+    value.update(changes)
+    path = tmp_path / sku / "item.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value), encoding="utf-8")
+    return path
 
-    # Phase 0: Verify worktree exists and is clean
-    assert repo.is_dir(), f"Fixture worktree missing: {repo}"
-    head = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"],
-        capture_output=True, text=True
-    ).stdout.strip()
-    assert head, "No git HEAD in fixture worktree"
 
-    # Phase 1: Evaluate current state — should show implemented=true
-    # (the worktree has actual code committed), tested=true (300 tests pass)
-    snapshot = build_coding_snapshot(str(repo), CODING_READY_FOR_IMPLEMENTATION)
-    assert snapshot.object_id == str(repo)
-
-    graph = evaluate(
+def _graph(path, *, attempts=(), ambiguities=()):
+    snapshot = build_item_snapshot(
+        path,
+        TGW_EBAY_LISTABLE,
+        external_effect_ambiguities=ambiguities,
+    )
+    return snapshot, evaluate(
         snapshot=snapshot,
-        goal=CODING_READY_FOR_IMPLEMENTATION,
-        treatments=(CODEX_IMPLEMENT, CLAUDE_REVIEW),
-        evaluator_version="fixture/v1",
+        goal=TGW_EBAY_LISTABLE,
+        treatments=TGW_TREATMENTS,
+        evaluator_version="pp-workflow-fixture/v1",
+        attempts=attempts,
     )
 
-    fingerprints = {f.condition_id: f.result.value for f in graph.fingerprints}
-    print(f"Phase 1 fingerprints: {json.dumps(fingerprints, indent=2)}")
-    print(f"Eligible treatments: {[t.treatment_id for t in graph.eligible_treatments]}")
-    print(f"Unmet: {graph.unmet_requirements}")
 
-    # The worktree already has code committed, so "implemented" should be true
-    # "tested" may be true if pytest runs, or unknown if pytest not available
-    assert fingerprints.get("implemented") in ("true", "false", "unknown"), \
-        f"Unexpected implemented fingerprint: {fingerprints}"
+def test_list_item_goal_skips_fully_satisfied_record(tmp_path):
+    snapshot, graph = _graph(_item(tmp_path))
 
-    # Phase 2: Verify review eligibility
-    review_snapshot = build_coding_snapshot(str(repo), CODING_READY_FOR_REVIEW)
-    review_graph = evaluate(
-        snapshot=review_snapshot,
-        goal=CODING_READY_FOR_REVIEW,
-        treatments=(CODEX_IMPLEMENT, CLAUDE_REVIEW),
-        evaluator_version="fixture/v1",
+    assert graph.goal_profile_id == "tgw.ebay_listable"
+    assert graph.object_id == snapshot.object_id == "PPWF-001"
+    assert set(graph.satisfied_requirements) == set(TGW_EBAY_LISTABLE.required)
+    assert graph.unmet_requirements == ()
+    assert graph.eligible_treatments == ()
+
+
+def test_invalid_condition_selects_bounded_local_remediation(tmp_path):
+    _snapshot, graph = _graph(_item(tmp_path, condition="mystery grade"))
+
+    assert graph.unmet_requirements == ("valid_condition",)
+    assert [item.treatment_id for item in graph.eligible_treatments] == [
+        "normalize-condition"
+    ]
+
+
+def test_failed_attempt_is_preserved_and_not_repeated_until_evidence_changes(tmp_path):
+    path = _item(tmp_path, condition="mystery grade")
+    snapshot, first = _graph(path)
+    failed = TreatmentAttempt(
+        treatment_id="normalize-condition",
+        treatment_version="1",
+        object_generation=snapshot.generation,
+        condition_hash=first.condition_hash,
+        outcome="failed",
+        receipt_id="receipt-failed-1",
     )
-    review_fps = {f.condition_id: f.result.value for f in review_graph.fingerprints}
-    print(f"\nPhase 2 (review) fingerprints: {json.dumps(review_fps, indent=2)}")
-    print(f"Review eligible: {[t.treatment_id for t in review_graph.eligible_treatments]}")
 
-    # Phase 3: Verify graph_id is deterministic
-    graph2 = evaluate(
-        snapshot=snapshot,
-        goal=CODING_READY_FOR_IMPLEMENTATION,
-        treatments=(CODEX_IMPLEMENT, CLAUDE_REVIEW),
-        evaluator_version="fixture/v1",
+    unchanged_snapshot, unchanged = _graph(path, attempts=(failed,))
+    assert unchanged_snapshot.generation == snapshot.generation
+    assert unchanged.graph_id != first.graph_id
+    assert unchanged.eligible_treatments == ()
+    assert any(
+        "receipt-failed-1" in reason
+        for treatment in unchanged.waiting_treatments
+        if treatment.treatment_id == "normalize-condition"
+        for reason in treatment.reasons
     )
-    assert graph.graph_id == graph2.graph_id, \
-        f"Graph ID not deterministic: {graph.graph_id} vs {graph2.graph_id}"
-    print(f"\nPhase 3: Graph ID is deterministic: {graph.graph_id}")
 
-    # Phase 4: Verify idempotent re-evaluation
-    graph3 = evaluate(
-        snapshot=snapshot,
-        goal=CODING_READY_FOR_IMPLEMENTATION,
-        treatments=(CODEX_IMPLEMENT, CLAUDE_REVIEW),
-        evaluator_version="fixture/v1",
+    # A relevant record event creates a new generation.  The same bounded
+    # remediation is now a legal successor attempt without manual requeue.
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("mystery grade", "legacy grade"),
+        encoding="utf-8",
     )
-    assert graph.graph_id == graph3.graph_id, \
-        f"Graph ID changed on re-evaluation: {graph.graph_id} vs {graph3.graph_id}"
-    print("Phase 4: Re-evaluation is idempotent")
+    changed_snapshot, changed = _graph(path, attempts=(failed,))
+    assert changed_snapshot.generation != snapshot.generation
+    assert [item.treatment_id for item in changed.eligible_treatments] == [
+        "normalize-condition"
+    ]
 
-    print("\n✅ FIXTURE PASS: Full evaluator cycle verified")
-    print(f"   Graph ID: {graph.graph_id}")
-    print(f"   Object: {graph.object_id}")
-    print(f"   Generation: {graph.object_generation}")
-    print(f"   Fingerprints: {len(graph.fingerprints)} conditions")
-    print(f"   Eligible: {len(graph.eligible_treatments)}")
-    print(f"   Waiting: {len(graph.waiting_treatments)}")
+    # Successful local repair changes authoritative evidence and converges.
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("legacy grade", "Used"),
+        encoding="utf-8",
+    )
+    _ready_snapshot, ready = _graph(path, attempts=(failed,))
+    assert ready.unmet_requirements == ()
+    assert ready.eligible_treatments == ()
 
 
-if __name__ == "__main__":
-    test_fixture_full_cycle()
+def test_only_authoritative_non_success_attempts_suppress_and_invalidate(tmp_path):
+    path = _item(tmp_path, condition="mystery grade")
+    snapshot, baseline = _graph(path)
+
+    def attempt(**changes):
+        values = {
+            "treatment_id": "normalize-condition",
+            "treatment_version": "1",
+            "object_generation": snapshot.generation,
+            "condition_hash": baseline.condition_hash,
+            "outcome": "failed",
+            "receipt_id": "receipt-1",
+        }
+        values.update(changes)
+        return TreatmentAttempt(**values)
+
+    irrelevant = (
+        attempt(outcome="satisfied"),
+        attempt(outcome="invented"),
+        attempt(treatment_id="unknown-treatment"),
+        attempt(treatment_version="obsolete"),
+        attempt(receipt_id=""),
+    )
+    _same_snapshot, unchanged = _graph(path, attempts=irrelevant)
+    assert unchanged.graph_id == baseline.graph_id
+    assert [item.treatment_id for item in unchanged.eligible_treatments] == [
+        "normalize-condition"
+    ]
+
+    first = attempt(receipt_id="receipt-a", outcome="partial")
+    second = attempt(receipt_id="receipt-b", outcome="conflict")
+    _one, ordered = _graph(path, attempts=(first, second))
+    _two, reversed_order = _graph(path, attempts=(second, first))
+    assert ordered.graph_id == reversed_order.graph_id
+    assert ordered.evidence_set_hash == reversed_order.evidence_set_hash
+    assert ordered.eligible_treatments == reversed_order.eligible_treatments == ()
+
+
+def test_disjoint_local_treatments_have_no_ownership_conflict(tmp_path):
+    path = _item(
+        tmp_path,
+        condition="mystery grade",
+        ebay_category_id="",
+        product_lookup={},
+        draft_listing={},
+        ebay_offer={},
+        ebay_listing={},
+        ebay_photos=[],
+    )
+    _snapshot, graph = _graph(path)
+    eligible = {item.treatment_id for item in graph.eligible_treatments}
+
+    assert {"ai-identify", "normalize-condition"}.issubset(eligible)
+    assert not any(
+        {left, right} == {"ai-identify", "normalize-condition"}
+        for left, right, _ownership in graph.ownership_conflicts
+    )
+
+
+def test_ambiguous_external_effect_refuses_automatic_retry(tmp_path):
+    path = _item(
+        tmp_path,
+        ebay_listing={},
+    )
+    snapshot, graph = _graph(path, ambiguities=("listing.publish",))
+
+    assert snapshot.external_effect_ambiguities == ("listing.publish",)
+    assert graph.reconciliation_gates == ("listing.publish",)
+    assert "ebay-publish" not in {
+        item.treatment_id for item in graph.eligible_treatments
+    }
+    publish = next(
+        item for item in graph.waiting_treatments
+        if item.treatment_id == "ebay-publish"
+    )
+    assert publish.reasons == ("external effect ambiguous: listing.publish",)

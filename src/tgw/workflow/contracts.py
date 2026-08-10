@@ -89,6 +89,18 @@ class TreatmentDisposition:
 
 
 @dataclass(frozen=True)
+class TreatmentAttempt:
+    """Immutable attempt evidence used to suppress unchanged retries."""
+
+    treatment_id: str
+    treatment_version: str
+    object_generation: str
+    condition_hash: str
+    outcome: str
+    receipt_id: str
+
+
+@dataclass(frozen=True)
 class RuntimeWorkGraph:
     schema_version: str
     graph_id: str

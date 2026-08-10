@@ -8,6 +8,9 @@ from dataclasses import asdict
 from typing import Any
 
 from .contracts import (
+    OUTCOME_CONFLICT,
+    OUTCOME_FAILED,
+    OUTCOME_PARTIAL,
     EffectClass,
     EvidenceAssertion,
     EvidenceReference,
@@ -16,6 +19,7 @@ from .contracts import (
     GoalProfile,
     ObjectSnapshot,
     RuntimeWorkGraph,
+    TreatmentAttempt,
     TreatmentContract,
     TreatmentDisposition,
 )
@@ -73,6 +77,7 @@ def evaluate(
     goal: GoalProfile,
     treatments: tuple[TreatmentContract, ...],
     evaluator_version: str,
+    attempts: tuple[TreatmentAttempt, ...] = (),
 ) -> RuntimeWorkGraph:
     """Evaluate only supplied values; no ambient state is read or changed."""
     condition_ids = set(goal.required)
@@ -81,6 +86,21 @@ def evaluate(
         condition_ids.update(treatment.may_establish)
     fingerprints = tuple(_derive_fingerprint(item, snapshot.assertions) for item in sorted(condition_ids))
     by_id = {item.condition_id: item for item in fingerprints}
+    condition_data = [{"condition_id": item.condition_id, "result": item.result.value, "reasons": list(item.reasons), "evidence": [asdict(ref) for ref in item.evidence]} for item in fingerprints]
+    condition_hash = _hash(condition_data)
+    registered_treatments = {
+        (treatment.identity, treatment.version) for treatment in treatments
+    }
+    suppressing_outcomes = {OUTCOME_FAILED, OUTCOME_PARTIAL, OUTCOME_CONFLICT}
+    relevant_attempts = tuple(
+        attempt for attempt in attempts
+        if attempt.object_generation == snapshot.generation
+        and attempt.condition_hash == condition_hash
+        and (attempt.treatment_id, attempt.treatment_version) in registered_treatments
+        and attempt.outcome in suppressing_outcomes
+        and isinstance(attempt.receipt_id, str)
+        and bool(attempt.receipt_id.strip())
+    )
 
     required = tuple(sorted(set(goal.required)))
     satisfied = tuple(item for item in required if by_id[item].result in {FingerprintResult.TRUE, FingerprintResult.NOT_APPLICABLE})
@@ -94,12 +114,25 @@ def evaluate(
     for treatment in sorted(treatments, key=lambda item: (item.identity, item.version)):
         ambiguity = sorted(ambiguities.intersection(treatment.ownership)) if treatment.effect_class is EffectClass.EXTERNAL else []
         unmet_requirements = [requirement for requirement in treatment.requires if by_id[requirement.condition_id].result not in requirement.accepted_results]
+        unchanged_attempts = tuple(
+            attempt for attempt in relevant_attempts
+            if attempt.treatment_id == treatment.identity
+            and attempt.treatment_version == treatment.version
+        )
         if ambiguity:
             reasons = tuple(f"external effect ambiguous: {item}" for item in ambiguity)
             waiting.append(TreatmentDisposition(treatment.identity, treatment.version, reasons))
         elif unmet_requirements:
             reasons = tuple(_reason(by_id[item.condition_id]) for item in unmet_requirements)
             waiting.append(TreatmentDisposition(treatment.identity, treatment.version, reasons))
+        elif unchanged_attempts:
+            receipts = ", ".join(sorted(attempt.receipt_id for attempt in unchanged_attempts))
+            outcomes = ", ".join(sorted({attempt.outcome for attempt in unchanged_attempts}))
+            waiting.append(TreatmentDisposition(
+                treatment.identity,
+                treatment.version,
+                (f"unchanged non-success attempt already recorded ({outcomes}): {receipts}",),
+            ))
         elif treatment.may_establish and all(
             by_id[condition_id].result
             in {FingerprintResult.TRUE, FingerprintResult.NOT_APPLICABLE}
@@ -127,14 +160,14 @@ def evaluate(
                 conflicts.append((left.treatment_id, right.treatment_id, overlap))
 
     assertion_data = sorted((_assertion_data(item) for item in snapshot.assertions), key=lambda item: _canonical(item))
+    attempt_data = sorted((asdict(item) for item in relevant_attempts), key=lambda item: _canonical(item))
     evidence_set_hash = _hash(
         {
             "assertions": assertion_data,
+            "attempts": attempt_data,
             "external_effect_ambiguities": sorted(ambiguities),
         }
     )
-    condition_data = [{"condition_id": item.condition_id, "result": item.result.value, "reasons": list(item.reasons), "evidence": [asdict(ref) for ref in item.evidence]} for item in fingerprints]
-    condition_hash = _hash(condition_data)
     treatment_registry_hash = _hash(
         sorted((asdict(item) for item in treatments), key=lambda item: _canonical(item))
     )

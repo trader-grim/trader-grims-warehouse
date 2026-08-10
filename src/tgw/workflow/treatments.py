@@ -73,6 +73,18 @@ HERMES_STITCH = TreatmentContract(
     receipt_schema_id=_RECEIPT,
 )
 
+
+NORMALIZE_CONDITION = TreatmentContract(
+    identity="normalize-condition",
+    version="1",
+    requires=(Requirement("valid_condition", (FingerprintResult.FALSE,)),),
+    may_establish=("valid_condition",),
+    must_preserve=("photos", "draft_listing", "provider_state"),
+    ownership=("item.condition",),
+    effect_class=EffectClass.LOCAL,
+    receipt_schema_id=_RECEIPT,
+)
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  TGW treatments
 # ═══════════════════════════════════════════════════════════════════════════
@@ -158,6 +170,7 @@ CODING_TREATMENTS: tuple[TreatmentContract, ...] = (
 )
 
 TGW_TREATMENTS: tuple[TreatmentContract, ...] = (
+    NORMALIZE_CONDITION,
     AI_IDENTIFY,
     EBAY_DRAFT,
     EBAY_PRICE,

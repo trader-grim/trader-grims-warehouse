@@ -10,6 +10,7 @@ from .contracts import (
     ObjectSnapshot,
     Requirement,
     RuntimeWorkGraph,
+    TreatmentAttempt,
     TreatmentContract,
     TreatmentDisposition,
 )
@@ -25,6 +26,7 @@ __all__ = [
     "ObjectSnapshot",
     "Requirement",
     "RuntimeWorkGraph",
+    "TreatmentAttempt",
     "TreatmentContract",
     "TreatmentDisposition",
     "evaluate",

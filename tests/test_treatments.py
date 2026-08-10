@@ -28,6 +28,7 @@ from tgw.workflow.treatments import (
     EBAY_STAGE,
     EBAY_UPLOAD,
     HERMES_STITCH,
+    NORMALIZE_CONDITION,
     TGW_TREATMENTS,
 )
 
@@ -50,6 +51,9 @@ _TGW_CONDITIONS = frozenset({
     "photos_uploaded",
     "staged",
     "published",
+    "valid_condition",
+    "valid_category",
+    "title_ok",
 })
 
 _ALL_KNOWN_CONDITIONS = _CODING_CONDITIONS | _TGW_CONDITIONS
@@ -96,10 +100,10 @@ def _evaluate(assertions, treatments, *, generation="3", ambiguities=()):
 
 
 def test_treatment_count():
-    """10 total treatments: 4 coding + 6 TGW."""
+    """11 total treatments: 4 coding + 7 TGW."""
     assert len(CODING_TREATMENTS) == 4
-    assert len(TGW_TREATMENTS) == 6
-    assert len(ALL_TREATMENTS) == 10
+    assert len(TGW_TREATMENTS) == 7
+    assert len(ALL_TREATMENTS) == 11
 
 
 def test_unique_identity_version_pairs():
@@ -160,6 +164,7 @@ def test_local_treatments_are_local():
         HERMES_STITCH,
         AI_IDENTIFY,
         EBAY_DRAFT,
+        NORMALIZE_CONDITION,
     }
     for t in local:
         assert t.effect_class == EffectClass.LOCAL, (

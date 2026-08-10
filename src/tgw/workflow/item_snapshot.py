@@ -240,6 +240,8 @@ _ITEM_REASONS: dict[str, tuple[str, str]] = {
 def build_item_snapshot(
     item_json_path: str | Path,
     goal_profile: GoalProfile,
+    *,
+    external_effect_ambiguities: tuple[str, ...] = (),
 ) -> ObjectSnapshot:
     """Build an ObjectSnapshot from one item JSON file, scoped to goal_profile.
 
@@ -289,5 +291,12 @@ def build_item_snapshot(
         object_id=sku,
         generation=generation,
         assertions=tuple(assertions),
-        external_effect_ambiguities=(),
+        # Provider-effect ambiguity is a separate evidence class.  Callers
+        # must supply it from their authoritative operation/receipt ledger;
+        # an ItemData field cannot manufacture or clear this gate.
+        external_effect_ambiguities=tuple(sorted({
+            value.strip()
+            for value in external_effect_ambiguities
+            if isinstance(value, str) and value.strip()
+        })),
     )
