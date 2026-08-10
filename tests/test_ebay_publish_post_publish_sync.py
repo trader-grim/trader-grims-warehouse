@@ -20,6 +20,7 @@ completely offline.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import patch
 
@@ -129,6 +130,10 @@ def test_governed_sync_failure_replay_completes_outbox_without_republish(
     }
 
     with patch.object(ebay_publish_mod.state_machine, 'mark_running'), \
+         patch(
+             'tgw.provider_effects.validate_succeeded_authorized_effect',
+             return_value=SimpleNamespace(result={'listing_id': 'L1'}),
+         ), \
          patch.object(
              ebay_publish_mod.state_machine, 'mark_failed',
              return_value='retry_wait',

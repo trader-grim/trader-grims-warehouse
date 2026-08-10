@@ -50,7 +50,11 @@ _TGW_CONDITIONS = frozenset({
     "priced",
     "photos_uploaded",
     "staged",
+    "staged_content_current",
     "published",
+    "operator_authorized_upload",
+    "operator_authorized_stage",
+    "operator_authorized_publish",
     "valid_condition",
     "condition_normalizable",
     "valid_category",
@@ -287,19 +291,19 @@ def test_ebay_draft_requires_ai_identified():
     assert FingerprintResult.TRUE in req.accepted_results
 
 
-def test_ebay_stage_requires_three_prerequisites():
-    """ebay-stage requires draft_generated/priced/photos_uploaded all TRUE."""
+def test_ebay_stage_requires_data_and_operator_authority():
     conditions = {req.condition_id for req in EBAY_STAGE.requires}
-    assert conditions == {"draft_generated", "priced", "photos_uploaded"}
+    assert conditions == {
+        "draft_generated", "priced", "photos_uploaded", "operator_authorized_stage",
+    }
     for req in EBAY_STAGE.requires:
         assert FingerprintResult.TRUE in req.accepted_results
 
 
-def test_ebay_publish_requires_staged():
-    """ebay-publish requires staged:TRUE."""
-    req = EBAY_PUBLISH.requires[0]
-    assert req.condition_id == "staged"
-    assert FingerprintResult.TRUE in req.accepted_results
+def test_ebay_publish_requires_current_stage_and_operator_authority():
+    assert {item.condition_id for item in EBAY_PUBLISH.requires} == {
+        "staged", "staged_content_current", "operator_authorized_publish",
+    }
 
 
 # ── evaluate() integration with real treatments ────────────────────────────
@@ -344,9 +348,12 @@ def test_coding_pipeline_evaluate_with_all_treatments():
 
 def test_tgw_pipeline_evaluate_with_all_treatments():
     """TGW pipeline: photos → identify → draft → price → upload → stage → publish."""
-    # Phase 1: has photos — ai-identify, ebay-upload eligible.
+    # Phase 1: upload is eligible only with exact operator authority.
     g1 = _evaluate(
-        (_assertion("item_has_photos", FingerprintResult.TRUE),),
+        (
+            _assertion("item_has_photos", FingerprintResult.TRUE),
+            _assertion("operator_authorized_upload", FingerprintResult.TRUE),
+        ),
         TGW_TREATMENTS,
     )
     eligible = {e.treatment_id for e in g1.eligible_treatments}
@@ -357,6 +364,7 @@ def test_tgw_pipeline_evaluate_with_all_treatments():
         (
             _assertion("item_has_photos", FingerprintResult.TRUE),
             _assertion("ai_identified", FingerprintResult.TRUE),
+            _assertion("operator_authorized_upload", FingerprintResult.TRUE),
         ),
         TGW_TREATMENTS,
     )
@@ -372,6 +380,7 @@ def test_tgw_pipeline_evaluate_with_all_treatments():
             _assertion("draft_generated", FingerprintResult.TRUE),
             _assertion("priced", FingerprintResult.TRUE),
             _assertion("photos_uploaded", FingerprintResult.TRUE),
+            _assertion("operator_authorized_stage", FingerprintResult.TRUE),
         ),
         TGW_TREATMENTS,
     )
@@ -388,6 +397,8 @@ def test_tgw_pipeline_evaluate_with_all_treatments():
             _assertion("priced", FingerprintResult.TRUE),
             _assertion("photos_uploaded", FingerprintResult.TRUE),
             _assertion("staged", FingerprintResult.TRUE),
+            _assertion("staged_content_current", FingerprintResult.TRUE),
+            _assertion("operator_authorized_publish", FingerprintResult.TRUE),
         ),
         TGW_TREATMENTS,
     )

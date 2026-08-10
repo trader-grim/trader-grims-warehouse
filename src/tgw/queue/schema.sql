@@ -101,6 +101,42 @@ CREATE INDEX IF NOT EXISTS idx_queue_jobs_trace
     ON queue_jobs(trace_id)
     WHERE trace_id IS NOT NULL;
 
+CREATE TABLE IF NOT EXISTS operator_authorities (
+    authority_id UUID PRIMARY KEY,
+    operator_identity TEXT NOT NULL, surface TEXT NOT NULL,
+    entity_id TEXT NOT NULL, goal_profile_id TEXT NOT NULL,
+    goal_profile_version TEXT NOT NULL, object_generation TEXT NOT NULL,
+    pre_authority_condition_hash TEXT NOT NULL, content_identity TEXT NOT NULL,
+    provider_identity TEXT NOT NULL, scopes TEXT[] NOT NULL,
+    issued_at TIMESTAMPTZ NOT NULL, expires_at TIMESTAMPTZ NOT NULL,
+    superseded_at TIMESTAMPTZ, superseded_by TEXT,
+    CHECK (expires_at > issued_at), CHECK (cardinality(scopes) > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_operator_authorities_entity
+    ON operator_authorities(entity_id, issued_at DESC);
+
+CREATE TABLE IF NOT EXISTS provider_effects (
+    effect_id TEXT PRIMARY KEY CHECK (effect_id ~ '^[0-9a-f]{64}$'),
+    provider TEXT NOT NULL, operation TEXT NOT NULL,
+    entity_type TEXT NOT NULL, entity_id TEXT NOT NULL,
+    object_generation TEXT NOT NULL, graph_id TEXT NOT NULL,
+    treatment_id TEXT NOT NULL, treatment_version TEXT NOT NULL,
+    condition_hash TEXT NOT NULL,
+    request_json JSONB NOT NULL, authority_json JSONB NOT NULL,
+    state TEXT NOT NULL CHECK (state IN
+        ('reserved','dispatched','succeeded','rejected','ambiguous','reconciliation_required')),
+    result_json JSONB, error_detail TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    dispatched_at TIMESTAMPTZ, finished_at TIMESTAMPTZ,
+    UNIQUE (provider, operation, entity_type, entity_id, object_generation)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_provider_effects_unresolved_entity
+    ON provider_effects(provider, operation, entity_type, entity_id)
+    WHERE state IN ('reserved','dispatched','ambiguous','reconciliation_required');
+
 CREATE TABLE IF NOT EXISTS queue_workers (
     worker_id TEXT PRIMARY KEY,
     node_class TEXT NOT NULL,

@@ -128,7 +128,10 @@ EBAY_PRICE = TreatmentContract(
 EBAY_UPLOAD = TreatmentContract(
     identity="ebay-upload",
     version="1",
-    requires=(Requirement("item_has_photos", (FingerprintResult.TRUE,)),),
+    requires=(
+        Requirement("item_has_photos", (FingerprintResult.TRUE,)),
+        Requirement("operator_authorized_upload", (FingerprintResult.TRUE,)),
+    ),
     may_establish=("photos_uploaded",),
     must_preserve=("item_data",),
     ownership=("listing.photos",),
@@ -143,8 +146,9 @@ EBAY_STAGE = TreatmentContract(
         Requirement("draft_generated", (FingerprintResult.TRUE,)),
         Requirement("priced", (FingerprintResult.TRUE,)),
         Requirement("photos_uploaded", (FingerprintResult.TRUE,)),
+        Requirement("operator_authorized_stage", (FingerprintResult.TRUE,)),
     ),
-    may_establish=("staged",),
+    may_establish=("staged", "staged_content_current"),
     must_preserve=("item_data",),
     ownership=("listing.stage",),
     effect_class=EffectClass.EXTERNAL,
@@ -154,7 +158,11 @@ EBAY_STAGE = TreatmentContract(
 EBAY_PUBLISH = TreatmentContract(
     identity="ebay-publish",
     version="1",
-    requires=(Requirement("staged", (FingerprintResult.TRUE,)),),
+    requires=(
+        Requirement("staged", (FingerprintResult.TRUE,)),
+        Requirement("staged_content_current", (FingerprintResult.TRUE,)),
+        Requirement("operator_authorized_publish", (FingerprintResult.TRUE,)),
+    ),
     may_establish=("published",),
     must_preserve=("item_data",),
     ownership=("listing.publish",),

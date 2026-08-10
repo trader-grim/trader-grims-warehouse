@@ -92,6 +92,44 @@ CREATE TABLE public.queue_jobs (
     CONSTRAINT queue_jobs_run_mode_check CHECK ((run_mode = ANY (ARRAY['immediate'::text, 'scheduled'::text, 'repeat'::text])))
 );
 
+CREATE TABLE public.operator_authorities (
+    authority_id uuid PRIMARY KEY,
+    operator_identity text NOT NULL, surface text NOT NULL,
+    entity_id text NOT NULL, goal_profile_id text NOT NULL,
+    goal_profile_version text NOT NULL, object_generation text NOT NULL,
+    pre_authority_condition_hash text NOT NULL, content_identity text NOT NULL,
+    provider_identity text NOT NULL, scopes text[] NOT NULL,
+    issued_at timestamptz NOT NULL, expires_at timestamptz NOT NULL,
+    superseded_at timestamptz, superseded_by text,
+    CHECK (expires_at > issued_at), CHECK (cardinality(scopes) > 0)
+);
+
+CREATE INDEX idx_operator_authorities_entity
+    ON public.operator_authorities USING btree (entity_id, issued_at DESC);
+
+CREATE TABLE public.provider_effects (
+    effect_id text PRIMARY KEY CHECK (effect_id ~ '^[0-9a-f]{64}$'),
+    provider text NOT NULL, operation text NOT NULL,
+    entity_type text NOT NULL, entity_id text NOT NULL,
+    object_generation text NOT NULL, graph_id text NOT NULL,
+    treatment_id text NOT NULL, treatment_version text NOT NULL,
+    condition_hash text NOT NULL,
+    request_json jsonb NOT NULL, authority_json jsonb NOT NULL,
+    state text NOT NULL CHECK (state IN
+        ('reserved','dispatched','succeeded','rejected','ambiguous','reconciliation_required')),
+    result_json jsonb, error_detail text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    dispatched_at timestamptz, finished_at timestamptz,
+    UNIQUE (provider, operation, entity_type, entity_id, object_generation)
+);
+
+CREATE UNIQUE INDEX uq_provider_effects_unresolved_entity
+    ON public.provider_effects USING btree
+    (provider, operation, entity_type, entity_id)
+    WHERE (state = ANY (ARRAY['reserved'::text, 'dispatched'::text,
+        'ambiguous'::text, 'reconciliation_required'::text]));
+
 
 --
 -- Name: cancel_job(uuid, text); Type: FUNCTION; Schema: public; Owner: -
@@ -620,4 +658,3 @@ ALTER TABLE ONLY public.queue_jobs
 --
 
 \unrestrict m7vFfl7xFLdqtbYkAY592oojjlNWeqzesQmubOtcNm6rEMz04wEXfTFX1i64XEd
-

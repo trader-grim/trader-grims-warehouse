@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from .contracts import EffectClass, GoalProfile, RuntimeWorkGraph, TreatmentContract, TreatmentDisposition
+from .contracts import (
+    EffectClass,
+    FingerprintResult,
+    GoalProfile,
+    RuntimeWorkGraph,
+    TreatmentContract,
+    TreatmentDisposition,
+)
 from .evaluator import evaluate
 from .item_snapshot import build_item_snapshot
+from .operator_authority import get_authority, listing_content_identity, validate_authority
 from .profiles import TGW_EBAY_IDENTIFIED
 from .scheduler import DispatchResult, dispatch_treatment
 from .treatments import AI_IDENTIFY, TGW_TREATMENTS
@@ -129,6 +138,9 @@ def request_item_goal(
     treatments: tuple[TreatmentContract, ...] = TGW_TREATMENTS,
     enqueue_fn=None,
     origin: str = "operator",
+    authority_id: str | None = None,
+    provider_identity: str = "",
+    authority_lookup=get_authority,
 ) -> GoalRequestResult:
     """Evaluate one exact generation and dispatch at most one local treatment.
 
@@ -136,7 +148,32 @@ def request_item_goal(
     remain held until their provider reservation/reconciliation contracts are
     independently admitted.
     """
-    snapshot = build_item_snapshot(item_path, goal, treatments=treatments)
+    base_snapshot = build_item_snapshot(
+        item_path, goal, treatments=treatments,
+    )
+    base_graph = evaluate(
+        snapshot=base_snapshot, goal=goal, treatments=treatments,
+        evaluator_version="pp-workflow-operator-goal/v1",
+    )
+    item = json.loads(Path(item_path).read_text(encoding="utf-8"))
+    content_identity = listing_content_identity(item)
+    authorized_scopes: list[str] = []
+    for scope in ("upload", "stage", "publish", "force-restage"):
+        valid, _ = validate_authority(
+            authority_id, entity_id=base_snapshot.object_id,
+            goal_profile_id=goal.identity, goal_profile_version=goal.version,
+            object_generation=base_snapshot.generation,
+            pre_authority_condition_hash=base_graph.condition_hash,
+            content_identity=content_identity, provider_identity=provider_identity,
+            scope=scope, lookup=authority_lookup,
+        )
+        if valid:
+            authorized_scopes.append(scope)
+    snapshot = build_item_snapshot(
+        item_path, goal, treatments=treatments,
+        authorized_scopes=tuple(authorized_scopes),
+        authority_identity=authority_id or "",
+    )
     graph = evaluate(
         snapshot=snapshot, goal=goal, treatments=treatments,
         evaluator_version="pp-workflow-operator-goal/v1",
@@ -147,10 +184,21 @@ def request_item_goal(
         if contracts[(disposition.treatment_id, disposition.treatment_version)].effect_class
         is EffectClass.LOCAL
     ]
+    fingerprints = {item.condition_id: item.result for item in graph.fingerprints}
     external = tuple(
-        disposition.treatment_id for disposition in graph.eligible_treatments
-        if contracts[(disposition.treatment_id, disposition.treatment_version)].effect_class
-        is EffectClass.EXTERNAL
+        contract.identity for contract in treatments
+        if contract.effect_class is EffectClass.EXTERNAL
+        and set(contract.may_establish).intersection(goal.required)
+        and not all(
+            fingerprints[condition] in {FingerprintResult.TRUE, FingerprintResult.NOT_APPLICABLE}
+            for condition in contract.may_establish
+        )
+        and all(
+            requirement.condition_id.startswith("operator_authorized_")
+            or requirement.condition_id == "staged_content_current"
+            or fingerprints[requirement.condition_id] in requirement.accepted_results
+            for requirement in contract.requires
+        )
     )
     gates = tuple(sorted({
         *(f"provider_contract_required:{identity}" for identity in external),
@@ -160,7 +208,12 @@ def request_item_goal(
     if local and not graph.ownership_conflicts and not graph.reconciliation_gates:
         dispatched = dispatch_treatment(
             disposition=local[0], entity_id=snapshot.object_id, graph=graph,
-            payload_extra={"origin": origin}, enqueue_fn=enqueue_fn,
+            payload_extra={
+                "origin": origin,
+                "pre_authority_condition_hash": base_graph.condition_hash,
+                **({"operator_authority_id": authority_id} if authority_id else {}),
+            },
+            enqueue_fn=enqueue_fn,
         )
         if not dispatched.enqueued and dispatched.outcome != "already_dispatched":
             raise RuntimeError(

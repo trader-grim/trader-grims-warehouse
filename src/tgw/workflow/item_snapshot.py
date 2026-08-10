@@ -21,6 +21,7 @@ from .contracts import (
     ObjectSnapshot,
     TreatmentContract,
 )
+from .operator_authority import listing_content_identity
 
 # ---------------------------------------------------------------------------
 # Known condition values (canonical eBay condition names, lowercase)
@@ -255,6 +256,8 @@ def build_item_snapshot(
     *,
     treatments: tuple[TreatmentContract, ...] = (),
     external_effect_ambiguities: tuple[str, ...] = (),
+    authorized_scopes: tuple[str, ...] = (),
+    authority_identity: str = "",
 ) -> ObjectSnapshot:
     """Build an ObjectSnapshot from one item JSON file, scoped to goal_profile.
 
@@ -276,6 +279,7 @@ def build_item_snapshot(
     generation = hashlib.sha256(_canonical(item)).hexdigest()
 
     assertions: List[EvidenceAssertion] = []
+    current_content_identity = listing_content_identity(item)
 
     condition_ids = set(goal_profile.required)
     for treatment in treatments:
@@ -283,6 +287,39 @@ def build_item_snapshot(
         condition_ids.update(treatment.may_establish)
 
     for condition_id in sorted(condition_ids):
+        if condition_id.startswith("operator_authorized_"):
+            scope = condition_id.removeprefix("operator_authorized_").replace("_", "-")
+            authorized = scope in authorized_scopes
+            assertions.append(EvidenceAssertion(
+                condition_id=condition_id,
+                result=FingerprintResult.TRUE if authorized else FingerprintResult.FALSE,
+                reasons=(("exact operator authority present" if authorized
+                          else f"operator authority for {scope} absent"),),
+                evidence=(EvidenceReference(
+                    identity=authority_identity or "operator-authority:absent",
+                    source_class="operator_authority",
+                    source_generation=authority_identity or generation,
+                ),),
+            ))
+            continue
+        if condition_id == "staged_content_current":
+            offer_exists = _staged(item)
+            if not offer_exists:
+                result = FingerprintResult.FALSE
+                reason = "item has no staged offer"
+            else:
+                result = FingerprintResult.UNKNOWN
+                reason = "authoritative staged content receipt absent"
+            assertions.append(EvidenceAssertion(
+                condition_id=condition_id, result=result, reasons=(reason,),
+                evidence=(EvidenceReference(
+                    identity="staged-content-receipt:absent",
+                    source_class="provider_receipt",
+                    source_generation=generation,
+                    freshness_identity=current_content_identity,
+                ),),
+            ))
+            continue
         checker = _ITEM_CHECKERS.get(condition_id)
         if checker is None:
             assertions.append(

@@ -46,7 +46,7 @@ def test_rebuilds_new_generation_and_dispatches_evaluator_selected_local_treatme
     assert enqueue.call_args.kwargs["payload"]["graph_id"] == receipt["evidence"]["graph_id"]
 
 
-def test_external_candidates_are_reported_when_no_local_treatment_is_eligible(tmp_path):
+def test_unauthorized_external_candidates_are_not_reported_as_eligible(tmp_path):
     root = tmp_path / "items"
     path = root / "SKU-1" / "SKU-1.json"
     path.parent.mkdir(parents=True)
@@ -59,8 +59,8 @@ def test_external_candidates_are_reported_when_no_local_treatment_is_eligible(tm
     job, cfg = _event(root)
     enqueue = MagicMock()
     receipt = evaluate_event(job, cfg, enqueue_fn=enqueue)
-    assert receipt["evidence"]["dispatch"] == "held_external"
-    assert set(receipt["evidence"]["external_candidates"]) == {"ebay-publish", "ebay-upload"}
+    assert receipt["evidence"]["dispatch"] == "none"
+    assert "external_candidates" not in receipt["evidence"]
     enqueue.assert_not_called()
 
 
@@ -77,7 +77,7 @@ def test_lexically_earlier_external_does_not_block_later_local_treatment(tmp_pat
     job, cfg = _event(root)
     enqueue = MagicMock(return_value="normalize-job")
     receipt = evaluate_event(job, cfg, enqueue_fn=enqueue)
-    assert receipt["evidence"]["eligible"][0] == "ebay-publish"
+    assert receipt["evidence"]["eligible"] == ["normalize-condition"]
     assert receipt["evidence"]["next_treatment"] == "normalize-condition"
     assert receipt["evidence"]["dispatch"] == "enqueued"
     assert enqueue.call_args.kwargs["queue_name"] == "normalize_condition"
