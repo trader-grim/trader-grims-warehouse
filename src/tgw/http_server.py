@@ -2388,6 +2388,59 @@ def item_action(
             )
 
         elif action == "ebay_stage":
+            migration = _cfg.get("workflow_migration")
+            if migration is None and isinstance(_cfg.get("raw"), dict):
+                migration = _cfg["raw"].get("workflow_migration")
+            migration = migration if isinstance(migration, dict) else {}
+            mode = migration.get("item_ebay_stage_fanout", "legacy")
+            if mode not in {"legacy", "workflow"}:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"invalid item_ebay_stage_fanout mode {mode!r}",
+                )
+            if mode == "workflow":
+                from .workflow.listing_migration import authorize_and_request_item_goal
+                from .workflow.profiles import TGW_EBAY_STAGED
+
+                provider_identity = migration.get("ebay_provider_identity", "")
+                result, authority_id, authority_created = (
+                    authorize_and_request_item_goal(
+                        json_path, TGW_EBAY_STAGED,
+                        operator_identity=operator_identity,
+                        surface="http:item-action:ebay-stage",
+                        provider_identity=provider_identity,
+                        scopes=("upload", "stage"),
+                    )
+                )
+                if result.dispatched is None:
+                    already_satisfied = not any((
+                        result.graph.unmet_requirements,
+                        result.graph.explicit_requirements,
+                        result.graph.ownership_conflicts,
+                        result.graph.reconciliation_gates,
+                        result.held_external,
+                        result.operator_gates,
+                    ))
+                    return {
+                        "ok": already_satisfied, "sku": sku, "action": action,
+                        "status": ("already_satisfied" if already_satisfied
+                                   else "held"), "job_id": "",
+                        "graph_id": result.graph.graph_id,
+                        "object_generation": result.graph.object_generation,
+                        "held_external": list(result.held_external),
+                        "operator_gates": list(result.operator_gates),
+                        "authority_id": authority_id,
+                        "authority_created": authority_created,
+                    }
+                job_id = result.dispatched.job_id
+                return {
+                    "ok": True, "sku": sku, "action": action,
+                    "job_id": job_id, "status": "workflow_dispatched",
+                    "graph_id": result.graph.graph_id,
+                    "object_generation": result.graph.object_generation,
+                    "authority_id": authority_id,
+                    "authority_created": authority_created,
+                }
             _doc = load_item_doc(json_path)
             _has_photos = bool(
                 (_doc.get("draft_listing") or {}).get("imageUrls")

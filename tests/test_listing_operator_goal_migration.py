@@ -6,7 +6,11 @@ from fastapi import HTTPException
 
 from tgw import http_server
 from tgw.workflow.listing_migration import approved_authority_scopes, request_item_goal
-from tgw.workflow.profiles import TGW_EBAY_IDENTIFIED, TGW_EBAY_LISTABLE
+from tgw.workflow.profiles import (
+    TGW_EBAY_IDENTIFIED,
+    TGW_EBAY_LISTABLE,
+    TGW_EBAY_STAGED,
+)
 from tgw.workflow.treatments import AI_IDENTIFY, TGW_TREATMENTS
 
 
@@ -348,6 +352,153 @@ def test_item_action_workflow_queue_generation_matches_durable_intent(
     assert calls[0]["payload"]["operator_surface"] == (
         "http:item-action:ai-identify"
     )
+
+
+def test_item_stage_workflow_uses_authorized_goal_without_direct_provider_fanout(
+    tmp_path, monkeypatch,
+):
+    from tgw.workflow import listing_migration
+
+    root, _ = _item(tmp_path)
+    monkeypatch.setattr(http_server, "_cfg", {
+        "itemdata_root": root,
+        "workflow_migration": {
+            "item_ebay_stage_fanout": "workflow",
+            "ebay_provider_identity": "ebay:account",
+        },
+    })
+    captured = {}
+    graph = SimpleNamespace(
+        graph_id="graph-1", object_generation="generation-1",
+        unmet_requirements=("staged",), explicit_requirements=(),
+        ownership_conflicts=(),
+        reconciliation_gates=(),
+    )
+    held = SimpleNamespace(
+        graph=graph, dispatched=None, held_external=("ebay-stage",),
+        operator_gates=("provider_contract_required:ebay-stage",),
+    )
+    monkeypatch.setattr(
+        listing_migration, "authorize_and_request_item_goal",
+        lambda path, goal, **kwargs: captured.update(
+            {"path": path, "goal": goal, **kwargs}
+        ) or (held, "authority-1", True),
+    )
+    direct = []
+    monkeypatch.setattr(http_server.state_machine, "enqueue_job",
+                        lambda **kwargs: direct.append(kwargs))
+
+    response = http_server.item_action(
+        "SKU-1", http_server.ActionBody(action="ebay_stage"),
+        operator_identity="operator:authenticated",
+    )
+
+    assert response["ok"] is False
+    assert response["status"] == "held"
+    assert response["authority_id"] == "authority-1"
+    assert direct == []
+    assert captured["goal"] is TGW_EBAY_STAGED
+    assert captured["operator_identity"] == "operator:authenticated"
+    assert captured["surface"] == "http:item-action:ebay-stage"
+    assert captured["scopes"] == ("upload", "stage")
+
+
+def test_item_stage_no_dispatch_satisfied_graph_is_not_reported_held(
+    tmp_path, monkeypatch,
+):
+    from tgw.workflow import listing_migration
+
+    root, _ = _item(tmp_path)
+    monkeypatch.setattr(http_server, "_cfg", {
+        "itemdata_root": root,
+        "workflow_migration": {
+            "item_ebay_stage_fanout": "workflow",
+            "ebay_provider_identity": "ebay:account",
+        },
+    })
+    graph = SimpleNamespace(
+        graph_id="graph-satisfied", object_generation="generation-1",
+        unmet_requirements=(), explicit_requirements=(), ownership_conflicts=(),
+        reconciliation_gates=(),
+    )
+    satisfied = SimpleNamespace(
+        graph=graph, dispatched=None, held_external=(), operator_gates=(),
+    )
+    monkeypatch.setattr(
+        listing_migration, "authorize_and_request_item_goal",
+        lambda *args, **kwargs: (satisfied, "authority-1", False),
+    )
+
+    response = http_server.item_action(
+        "SKU-1", http_server.ActionBody(action="ebay_stage"),
+        operator_identity="operator:authenticated",
+    )
+
+    assert response["ok"] is True
+    assert response["status"] == "already_satisfied"
+    assert response["authority_id"] == "authority-1"
+
+
+def test_item_stage_explicit_requirement_is_reported_held(tmp_path, monkeypatch):
+    from tgw.workflow import listing_migration
+
+    root, _ = _item(tmp_path)
+    monkeypatch.setattr(http_server, "_cfg", {
+        "itemdata_root": root,
+        "workflow_migration": {
+            "item_ebay_stage_fanout": "workflow",
+            "ebay_provider_identity": "ebay:account",
+        },
+    })
+    graph = SimpleNamespace(
+        graph_id="graph-explicit", object_generation="generation-1",
+        unmet_requirements=(), explicit_requirements=(("staged", "UNKNOWN"),),
+        ownership_conflicts=(), reconciliation_gates=(),
+    )
+    held = SimpleNamespace(
+        graph=graph, dispatched=None, held_external=(), operator_gates=(),
+    )
+    monkeypatch.setattr(
+        listing_migration, "authorize_and_request_item_goal",
+        lambda *args, **kwargs: (held, "authority-1", False),
+    )
+
+    response = http_server.item_action(
+        "SKU-1", http_server.ActionBody(action="ebay_stage"),
+        operator_identity="operator:authenticated",
+    )
+
+    assert response["ok"] is False
+    assert response["status"] == "held"
+
+
+def test_item_stage_defaults_to_exact_legacy_upload_stage_fanout(
+    tmp_path, monkeypatch,
+):
+    root, _ = _item(tmp_path, draft_listing={"title": "A"})
+    monkeypatch.setattr(http_server, "_cfg", {"itemdata_root": root, "raw": {}})
+    calls = []
+    monkeypatch.setattr(
+        http_server.state_machine, "enqueue_job",
+        lambda **kwargs: calls.append(kwargs) or f"job-{len(calls)}",
+    )
+
+    response = http_server.item_action(
+        "SKU-1", http_server.ActionBody(action="ebay_stage"),
+        operator_identity="operator:authenticated",
+    )
+
+    assert response == {
+        "ok": True, "sku": "SKU-1", "action": "ebay_stage", "job_id": "job-2",
+    }
+    assert calls == [
+        {"queue_name": "ebay_upload",
+         "payload": {"sku": "SKU-1", "origin": "operator"},
+         "dedupe_key": "ebay_upload:SKU-1", "max_attempts": 5},
+        {"queue_name": "ebay_stage",
+         "payload": {"sku": "SKU-1", "origin": "operator"},
+         "dedupe_key": "ebay_stage:SKU-1", "max_attempts": 5},
+    ]
 
 
 def test_workflow_goal_endpoint_reports_enqueue_failure(tmp_path, monkeypatch):
