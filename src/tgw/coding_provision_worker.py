@@ -9,6 +9,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import shutil
 import socket
 import subprocess
 from pathlib import Path
@@ -48,31 +50,95 @@ def local_location_identity(todo_id: int, worktree_value: str, coding: dict[str,
     return {"repository_root": str(repository), "worktree": str(worktree), "todo_id": todo_id, "branch": branch.stdout.strip(), "head": head.stdout.strip(), "worker_identity": worker_identity}
 
 
-def _validate_before_claim(document: dict[str, Any], coding: dict[str, Any], local_host: str, worker_identity: str) -> dict[str, Any]:
-    if local_host != coding.get("host") or worker_identity != coding.get("worker_identity") or document.get("host") != local_host or document.get("worker_identity") != worker_identity:
-        raise HardFailure("local coding worker identity does not match configured envelope")
+def _request_worktree(todo_id: int, request_id: str, root: Path) -> tuple[Path, str]:
+    """Return the only worktree and branch a request is permitted to use."""
+    if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", request_id):
+        raise HardFailure("coding provision request id is unsafe for a worktree")
+    token = f"todo-{todo_id}-{request_id}"
+    return root / token, f"coding/{token}"
+
+
+def _git_head(repository: Path) -> str:
+    try:
+        probe = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel", "--verify", "HEAD"],
+            cwd=repository, check=False, text=True, capture_output=True,
+        )
+    except OSError as exc:
+        raise HardFailure("coding repository Git identity is invalid") from exc
+    values = probe.stdout.splitlines()
+    head = values[1] if len(values) == 2 else ""
+    if probe.returncode or len(values) != 2 or Path(values[0]).resolve() != repository or not re.fullmatch(r"[0-9a-f]{40}", head):
+        raise HardFailure("coding repository Git HEAD is invalid")
+    return head
+
+
+def _remove_incomplete_worktree(repository: Path, worktree: Path) -> None:
+    """Remove only a just-created, request-bound directory after a failed add."""
+    if worktree.is_symlink() or worktree.parent != worktree.parent.resolve():
+        return
+    subprocess.run(["git", "worktree", "remove", "--force", str(worktree)], cwd=repository, check=False, text=True, capture_output=True)
+    if worktree.exists() and worktree.is_dir() and not worktree.is_symlink():
+        shutil.rmtree(worktree)
+
+
+def _prepare_request_worktree(document: dict[str, Any], coding: dict[str, Any], worker_identity: str) -> dict[str, Any]:
+    """Create or attest the exact request-bound worktree before a claim."""
     todo_id = int(document.get("todo_id", 0))
+    request_id = document.get("request_id")
     root_value = coding.get("worktree_root")
     if not isinstance(root_value, str) or not root_value.strip():
         raise HardFailure("coding worktree root is not configured")
     root = Path(root_value).resolve()
     if not root.is_dir():
         raise HardFailure(f"coding worktree root is unavailable: {root}")
-    stem = f"todo-{todo_id}"
-    candidates = sorted(
-        candidate
-        for candidate in root.iterdir()
-        if not candidate.is_symlink()
-        and candidate.is_dir()
-        and (candidate.name == stem or candidate.name.startswith(stem + "-"))
-    )
-    if not candidates:
-        raise HardFailure(f"no worktree found for todo {todo_id} in {root}")
-    if len(candidates) != 1:
-        names = ", ".join(str(candidate) for candidate in candidates)
-        raise HardFailure(f"ambiguous worktrees for todo {todo_id}: {names}")
-    worktree = candidates[0]
-    location = local_location_identity(todo_id, str(worktree), coding, worker_identity)
+    repository_value = coding.get("repository_root", DEFAULT_REPOSITORY_ROOT)
+    if not isinstance(repository_value, str) or not repository_value.strip():
+        raise HardFailure("coding repository root is not configured")
+    repository = Path(repository_value).resolve()
+    # Capture the configured repository's actual top-level HEAD before
+    # constructing a fresh child from that exact commit.
+    source_head = _git_head(repository)
+    worktree, branch = _request_worktree(todo_id, request_id, root)
+    created = False
+    try:
+        if worktree.exists() or worktree.is_symlink():
+            if worktree.is_symlink():
+                raise HardFailure("request-bound coding worktree must not be a symlink")
+        else:
+            added = subprocess.run(
+                ["git", "worktree", "add", "-b", branch, str(worktree), source_head],
+                cwd=repository, check=False, text=True, capture_output=True,
+            )
+            if added.returncode:
+                raise HardFailure(f"failed to create request-bound coding worktree: {added.stderr.strip()}")
+            created = True
+        # This validates direct-child placement, common Git dir, and both Git
+        # top levels.  An existing target is resumed only after this attestation.
+        validated_coding_worktree(str(worktree), str(worktree), coding)
+        location = local_location_identity(todo_id, str(worktree), coding, worker_identity)
+        if location["worktree"] != str(worktree) or location["branch"] != branch:
+            raise HardFailure("request-bound coding worktree branch is invalid")
+        if created and location["head"] != source_head:
+            raise HardFailure("new request-bound coding worktree HEAD is invalid")
+        if not created:
+            expected_generation = document.get("object_generation")
+            if not isinstance(expected_generation, str) or not expected_generation:
+                raise HardFailure("existing request-bound coding worktree has no expected object generation")
+            snapshot = local_snapshot_claim({"coding": coding}, str(worktree))
+            if snapshot.get("generation") != expected_generation:
+                raise HardFailure("existing request-bound coding worktree generation does not match request")
+        return location
+    except Exception:
+        if created:
+            _remove_incomplete_worktree(repository, worktree)
+        raise
+
+
+def _validate_before_claim(document: dict[str, Any], coding: dict[str, Any], local_host: str, worker_identity: str) -> dict[str, Any]:
+    if local_host != coding.get("host") or worker_identity != coding.get("worker_identity") or document.get("host") != local_host or document.get("worker_identity") != worker_identity:
+        raise HardFailure("local coding worker identity does not match configured envelope")
+    location = _prepare_request_worktree(document, coding, worker_identity)
     return {"location": location, "envelope_hash": _hash(location)}
 
 

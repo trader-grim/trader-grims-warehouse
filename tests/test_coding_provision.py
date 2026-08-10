@@ -132,6 +132,7 @@ def envelope(monkeypatch, tmp_path):
         "worker_identity": "tgw-coding-worker",
     }
     monkeypatch.setattr(coding_provision_worker, "local_location_identity", lambda *_args: dict(identity))
+    monkeypatch.setattr(coding_provision_worker, "_prepare_request_worktree", lambda *_args: dict(identity))
     snapshot = serialize_snapshot(
         ObjectSnapshot(
             object_id=identity["worktree"],
@@ -360,59 +361,130 @@ def test_worker_cannot_execute_without_an_api_issued_envelope(tmp_path, native, 
     assert coding_provision.get_request(cfg, request["request_id"])["state"] == "failed"
 
 
-def test_worker_discovery_uses_todo_identifier_boundary(tmp_path, monkeypatch):
+def _init_coding_repository(tmp_path):
+    repository = tmp_path / "repo"
+    subprocess.run(["git", "init", str(repository)], check=True, capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(repository), "config", "user.email", "coding-test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(repository), "config", "user.name", "Coding Test"], check=True)
+    (repository / "README").write_text("test\n")
+    subprocess.run(["git", "-C", str(repository), "add", "README"], check=True)
+    subprocess.run(["git", "-C", str(repository), "commit", "-m", "initial"], check=True, capture_output=True, text=True)
+    (tmp_path / "worktrees").mkdir()
+    return repository
+
+
+def _queued_document(request_id="request-1706"):
+    return {"request_id": request_id, "host": "tgw-lib-local", "worker_identity": "tgw-coding-worker", "todo_id": 1706}
+
+
+def test_worker_creates_fresh_request_bound_worktree_from_repository_head(tmp_path):
+    repository = _init_coding_repository(tmp_path)
     cfg = _config(tmp_path)
-    root = tmp_path / "worktrees"
-    expected = root / "todo-173"
-    (root / "todo-1738").mkdir(parents=True)
-    expected.mkdir()
-    monkeypatch.setattr(
-        coding_provision_worker,
-        "local_location_identity",
-        lambda todo_id, worktree, _coding, worker_identity: {
-            "todo_id": todo_id,
-            "worktree": worktree,
-            "worker_identity": worker_identity,
-        },
-    )
+    document = _queued_document()
+    result = coding_provision_worker._validate_before_claim(document, cfg["coding"], "tgw-lib-local", "tgw-coding-worker")
+    expected = tmp_path / "worktrees" / "todo-1706-request-1706"
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repository, check=True, text=True, capture_output=True).stdout.strip()
+    assert result["location"]["worktree"] == str(expected)
+    assert result["location"]["branch"] == "coding/todo-1706-request-1706"
+    assert result["location"]["head"] == head
+
+
+def test_worker_does_not_reuse_historical_todo_prefix_worktree(tmp_path):
+    _init_coding_repository(tmp_path)
+    cfg = _config(tmp_path)
+    historical = tmp_path / "worktrees" / "todo-1706-obsolete"
+    historical.mkdir()
+    result = coding_provision_worker._validate_before_claim(_queued_document(), cfg["coding"], "tgw-lib-local", "tgw-coding-worker")
+    assert result["location"]["worktree"] != str(historical)
+    assert historical.is_dir()
+
+
+def test_worker_resumes_only_the_exact_request_bound_worktree(tmp_path, monkeypatch):
+    repository = _init_coding_repository(tmp_path)
+    cfg = _config(tmp_path)
+    expected = tmp_path / "worktrees" / "todo-1706-request-1706"
+    subprocess.run(["git", "-C", str(repository), "worktree", "add", "-b", "coding/todo-1706-request-1706", str(expected), "HEAD"], check=True, capture_output=True, text=True)
+    monkeypatch.setattr(coding_provision_worker, "local_snapshot_claim", lambda *_args: {"generation": "gen-a"})
     result = coding_provision_worker._validate_before_claim(
-        {"host": "tgw-lib-local", "worker_identity": "tgw-coding-worker", "todo_id": 173},
-        cfg["coding"],
-        "tgw-lib-local",
-        "tgw-coding-worker",
+        {**_queued_document(), "object_generation": "gen-a"}, cfg["coding"], "tgw-lib-local", "tgw-coding-worker",
     )
     assert result["location"]["worktree"] == str(expected)
 
 
-def test_worker_discovery_rejects_ambiguous_or_missing_roots(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("object_generation", "local_generation", "fragment"),
+    [(None, "gen-a", "expected object generation"), ("gen-a", "gen-b", "generation does not match")],
+)
+def test_existing_request_worktree_without_matching_generation_cannot_claim(
+    tmp_path, monkeypatch, object_generation, local_generation, fragment,
+):
+    repository = _init_coding_repository(tmp_path)
     cfg = _config(tmp_path)
-    document = {"host": "tgw-lib-local", "worker_identity": "tgw-coding-worker", "todo_id": 1738}
+    expected = tmp_path / "worktrees" / "todo-1706-request-1706"
+    subprocess.run(["git", "-C", str(repository), "worktree", "add", "-b", "coding/todo-1706-request-1706", str(expected), "HEAD"], check=True, capture_output=True, text=True)
+    monkeypatch.setattr(coding_provision_worker, "local_snapshot_claim", lambda *_args: {"generation": local_generation})
+    claimed = False
+
+    class Service:
+        def get(self, _request_id):
+            document = {**_queued_document(), "state": "queued"}
+            if object_generation is not None:
+                document["object_generation"] = object_generation
+            return document
+
+        def claim(self, *_args):
+            nonlocal claimed
+            claimed = True
+            return {}
+
+    with pytest.raises(HardFailure, match=fragment):
+        coding_provision_worker.claim_and_run(
+            cfg, request_id="request-1706", local_host="tgw-lib-local", worker_identity="tgw-coding-worker", client=Service(),
+        )
+    assert not claimed
+
+
+def test_new_worktree_is_removed_after_post_create_attestation_failure(tmp_path, monkeypatch):
+    _init_coding_repository(tmp_path)
+    cfg = _config(tmp_path)
+    expected = tmp_path / "worktrees" / "todo-1706-request-1706"
+    monkeypatch.setattr(coding_provision_worker, "validated_coding_worktree", lambda *_args: (_ for _ in ()).throw(HardFailure("attestation failed")))
+
+    with pytest.raises(HardFailure, match="attestation failed"):
+        coding_provision_worker._prepare_request_worktree(_queued_document(), cfg["coding"], "tgw-coding-worker")
+    assert not expected.exists()
+
+
+def test_post_create_attestation_failure_never_removes_existing_worktree(tmp_path, monkeypatch):
+    _init_coding_repository(tmp_path)
+    cfg = _config(tmp_path)
+    expected = tmp_path / "worktrees" / "todo-1706-request-1706"
+    expected.mkdir()
+    marker = expected / "preserve-me"
+    marker.write_text("existing\n")
+    monkeypatch.setattr(coding_provision_worker, "validated_coding_worktree", lambda *_args: (_ for _ in ()).throw(HardFailure("attestation failed")))
+
+    with pytest.raises(HardFailure, match="attestation failed"):
+        coding_provision_worker._prepare_request_worktree(_queued_document(), cfg["coding"], "tgw-coding-worker")
+    assert marker.read_text() == "existing\n"
+
+
+def test_worker_does_not_claim_when_request_worktree_preparation_fails(tmp_path):
+    cfg = _config(tmp_path)
+    claimed = False
+
+    class Service:
+        def get(self, _request_id):
+            return {**_queued_document(), "state": "queued"}
+
+        def claim(self, *_args):
+            nonlocal claimed
+            claimed = True
+            return {}
+
     with pytest.raises(HardFailure, match="root is unavailable"):
-        coding_provision_worker._validate_before_claim(document, cfg["coding"], "tgw-lib-local", "tgw-coding-worker")
-
-    cfg["coding"]["worktree_root"] = ""
-    with pytest.raises(HardFailure, match="root is not configured"):
-        coding_provision_worker._validate_before_claim(document, cfg["coding"], "tgw-lib-local", "tgw-coding-worker")
-
-    cfg["coding"]["worktree_root"] = str(tmp_path / "worktrees")
-    root = tmp_path / "worktrees"
-    (root / "todo-1738").mkdir(parents=True)
-    (root / "todo-1738-retry").mkdir()
-    monkeypatch.setattr(coding_provision_worker, "local_location_identity", lambda *_args: {})
-    with pytest.raises(HardFailure, match="ambiguous worktrees"):
-        coding_provision_worker._validate_before_claim(document, cfg["coding"], "tgw-lib-local", "tgw-coding-worker")
-
-
-def test_worker_discovery_rejects_symlink_worktree(tmp_path):
-    cfg = _config(tmp_path)
-    root = tmp_path / "worktrees"
-    root.mkdir()
-    outside = tmp_path / "outside-worktree"
-    outside.mkdir()
-    (root / "todo-1738").symlink_to(outside, target_is_directory=True)
-    document = {"host": "tgw-lib-local", "worker_identity": "tgw-coding-worker", "todo_id": 1738}
-    with pytest.raises(HardFailure, match="no worktree found"):
-        coding_provision_worker._validate_before_claim(document, cfg["coding"], "tgw-lib-local", "tgw-coding-worker")
+        coding_provision_worker.claim_and_run(cfg, request_id="request-1706", local_host="tgw-lib-local", worker_identity="tgw-coding-worker", client=Service())
+    assert not claimed
 
 
 def test_tgw_lib_provision_worker_has_no_direct_canonical_state_dependencies():
@@ -475,7 +547,7 @@ def test_worker_revalidates_worktree_identity_immediately_before_execution(tmp_p
     cfg = _config(tmp_path)
     request = coding_provision.create_request(cfg, todo_id=1738, object_generation="gen-a")
     native.jobs[request["request_id"]]["payload_json"]["execution"] = _execution_envelope()
-    observations = [dict(envelope), dict(envelope, **changed)]
+    observations = [dict(envelope, **changed)]
     monkeypatch.setattr(coding_provision_worker, "local_location_identity", lambda *_: observations.pop(0))
     launched = []
 
@@ -760,11 +832,9 @@ def test_local_claimed_worker_produces_receipt_with_local_envelope(tmp_path, mon
 
 
 def test_local_worker_claims_real_git_worktree_envelope_in_durable_receipt(tmp_path, monkeypatch, native):
-    """End-to-end: the worker resolves worktree_root/todo-<id>, validates it as
-    a real Git worktree, and the durable receipt carries that local envelope."""
+    """End-to-end: the worker creates and attests its request-bound worktree."""
     repository = tmp_path / "repo"
     worktree_root = tmp_path / "worktrees"
-    worktree = worktree_root / "todo-1738"
     subprocess.run(["git", "init", str(repository)], check=True, capture_output=True, text=True)
     subprocess.run(["git", "-C", str(repository), "config", "user.email", "coding-test@example.com"], check=True)
     subprocess.run(["git", "-C", str(repository), "config", "user.name", "Coding Test"], check=True)
@@ -772,15 +842,13 @@ def test_local_worker_claims_real_git_worktree_envelope_in_durable_receipt(tmp_p
     subprocess.run(["git", "-C", str(repository), "add", "README"], check=True)
     subprocess.run(["git", "-C", str(repository), "commit", "-m", "initial"], check=True, capture_output=True, text=True)
     worktree_root.mkdir()
-    subprocess.run(["git", "-C", str(repository), "worktree", "add", "-b", "coding/1738", str(worktree)], check=True, capture_output=True, text=True)
 
     cfg = _config(tmp_path)
     monkeypatch.setattr(http_server, "_cfg", cfg)
     monkeypatch.setattr(http_server, "_api_key", "coding-test-key")
     monkeypatch.setenv("TGW_TEST_CODING_WORKER_CREDENTIAL", "worker-test-key")
     client = TestClient(http_server.app)
-    generation = coding_provision_worker.local_snapshot_claim(cfg, str(worktree))["generation"]
-    request = coding_provision.create_request(cfg, todo_id=1738, object_generation=generation)
+    request = coding_provision.create_request(cfg, todo_id=1738, object_generation=None)
     assert "location" not in native.enqueues[0]["payload"]
     native.jobs[request["request_id"]]["payload_json"]["execution"] = _execution_envelope()
     finished = coding_provision_worker.claim_and_run(
@@ -794,8 +862,8 @@ def test_local_worker_claims_real_git_worktree_envelope_in_durable_receipt(tmp_p
     assert finished["state"] == "succeeded"
     receipt = finished["receipt"]
     location = receipt["location"]
-    assert location["worktree"] == str(worktree.resolve())
-    assert location["branch"] == "coding/1738"
+    assert location["worktree"] == str((worktree_root / "todo-1738-job-1").resolve())
+    assert location["branch"] == "coding/todo-1738-job-1"
     assert len(location["head"]) == 40
     assert location["todo_id"] == 1738
     assert location["worker_identity"] == "tgw-coding-worker"
