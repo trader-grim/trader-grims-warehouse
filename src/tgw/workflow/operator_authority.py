@@ -104,14 +104,34 @@ def supersede_authority(authority_id: str, *, superseded_by: str,
     if not superseded_by.strip():
         raise ValueError("superseding authority identity required")
     with _connection(connection) as con, con.cursor() as cur:
-        cur.execute("""UPDATE operator_authorities
-            SET superseded_at=NOW(), superseded_by=%s
-            WHERE authority_id=%s AND superseded_at IS NULL
-              AND NOT EXISTS (
-                SELECT 1 FROM provider_effects
-                 WHERE authority_json->>'authority_id'=%s
-                   AND state IN ('dispatched','ambiguous','reconciliation_required')
-              )""", (superseded_by, authority_id, authority_id))
+        # Lock in a separate statement. Under READ COMMITTED, a single UPDATE
+        # that waits for this row can retain a statement snapshot from before a
+        # concurrent dispatcher committed its provider_effects row, allowing
+        # both dispatch and supersession to win. Each statement below receives
+        # a fresh snapshot after the row lock has been acquired.
+        cur.execute(
+            "SELECT superseded_at FROM operator_authorities "
+            "WHERE authority_id=%s FOR UPDATE",
+            (authority_id,),
+        )
+        row = cur.fetchone()
+        if row is None or row[0] is not None:
+            return False
+        cur.execute(
+            """SELECT 1 FROM provider_effects
+                WHERE authority_json->>'authority_id'=%s
+                  AND state IN ('dispatched','ambiguous','reconciliation_required')
+                LIMIT 1""",
+            (authority_id,),
+        )
+        if cur.fetchone() is not None:
+            return False
+        cur.execute(
+            """UPDATE operator_authorities
+                SET superseded_at=NOW(), superseded_by=%s
+                WHERE authority_id=%s AND superseded_at IS NULL""",
+            (superseded_by, authority_id),
+        )
         return cur.rowcount == 1
 
 

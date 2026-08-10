@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock
 
 from tgw.workflow.operator_authority import (
     OperatorAuthority,
@@ -85,10 +86,16 @@ def test_provider_worker_uses_same_authoritative_validation_seam():
 
 
 def test_supersede_is_atomic_and_only_succeeds_once():
-    cursor = Cursor(rowcount=1)
+    cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
+    cursor.fetchone.side_effect = [(None,), None]
+    cursor.rowcount = 1
     assert supersede_authority("opaque-id", superseded_by="replacement",
                                connection=Connection(cursor)) is True
-    assert "superseded_at IS NULL" in cursor.calls[0][0]
+    sql = [call.args[0] for call in cursor.execute.call_args_list]
+    assert "FOR UPDATE" in sql[0]
+    assert "provider_effects" in sql[1]
+    assert "superseded_at IS NULL" in sql[2]
 
 
 def test_malformed_authority_id_is_rejected_before_database_lookup():
