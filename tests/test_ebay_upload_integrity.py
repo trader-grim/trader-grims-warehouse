@@ -17,6 +17,7 @@ import json
 import pytest
 
 import tgw.workers.ebay_upload as ebay_upload
+from tgw.errors import TreatmentFailure
 from tgw.queue.worker_base import HardFailure
 from tgw.quota import QuotaBudgetExceeded
 
@@ -119,6 +120,141 @@ def test_quota_retry_preserves_operator_origin(worker, tmp_path, monkeypatch):
     worker.handle(_job(sku, origin='operator'))
 
     assert worker._enqueued[0]['payload']['origin'] == 'operator'
+
+
+def test_workflow_quota_wall_returns_bound_timer_without_self_enqueue(
+    worker, tmp_path, monkeypatch,
+):
+    sku = 'tgwtest-timer'
+    d = _write_item(tmp_path, sku)
+    _make_photos(d, ['1.jpg'])
+    worker.config['workflow_migration'] = {'ebay_upload_quota_timer': 'workflow'}
+    monkeypatch.setattr(ebay_upload.time, 'time', lambda: 1_000.0)
+    monkeypatch.setattr(
+        ebay_upload, 'upload_photo',
+        lambda cfg, photo: (_ for _ in ()).throw(QuotaBudgetExceeded('quota')),
+    )
+    job = _job(
+        sku, origin='operator', treatment_id='ebay-upload',
+        treatment_version='1', graph_id='graph-1', object_generation='gen-1',
+        condition_hash='condition-1',
+    )
+
+    receipt = worker.handle(job)
+
+    assert worker._enqueued == []
+    assert receipt['outcome'] == 'transient_backoff'
+    assert receipt['receipt_schema_id'] == 'treatment-wait-receipt/v1'
+    assert receipt['evidence'] == {
+        'reason_code': 'EBAY_UPLOAD_QUOTA_BLOCKED',
+        'quota_retries': 1,
+        'uploaded_this_attempt': 0,
+        'uploaded_total': 0,
+        'operator_origin': True,
+        'changed': False,
+    }
+    timer = receipt['timer']
+    assert timer['not_before'] == 1_000.0 + 6 * 3600
+    assert timer['payload']['object_generation']
+    assert timer['payload']['condition_hash']
+    assert timer['payload']['origin'] == 'operator'
+    assert timer['dedupe_key'] == (
+        f"workflow-timer:{timer['payload']['graph_id']}:ebay-upload:quota:1"
+    )
+
+
+def test_workflow_quota_timer_requires_generation_bound_dispatch(
+    worker, tmp_path, monkeypatch,
+):
+    sku = 'tgwtest-unbound'
+    d = _write_item(tmp_path, sku)
+    _make_photos(d, ['1.jpg'])
+    worker.config['workflow_migration'] = {'ebay_upload_quota_timer': 'workflow'}
+    provider_calls = []
+    monkeypatch.setattr(ebay_upload, 'upload_photo',
+                        lambda cfg, photo: provider_calls.append(photo))
+    before = _read(tmp_path, sku)
+
+    with pytest.raises(HardFailure, match='missing bound identity'):
+        worker.handle(_job(sku))
+
+    assert provider_calls == []
+    assert _read(tmp_path, sku) == before
+    assert worker._enqueued == []
+
+
+def test_invalid_quota_timer_selector_fails_before_provider_or_item_effect(
+    worker, tmp_path, monkeypatch,
+):
+    sku = 'tgwtest-invalid-mode'
+    d = _write_item(tmp_path, sku)
+    _make_photos(d, ['1.jpg'])
+    worker.config['workflow_migration'] = {'ebay_upload_quota_timer': 'surprise'}
+    provider_calls = []
+    monkeypatch.setattr(ebay_upload, 'upload_photo',
+                        lambda cfg, photo: provider_calls.append(photo))
+    before = _read(tmp_path, sku)
+
+    with pytest.raises(HardFailure, match='invalid workflow_migration'):
+        worker.handle(_job(sku))
+
+    assert provider_calls == []
+    assert _read(tmp_path, sku) == before
+    assert worker._enqueued == []
+
+
+def test_workflow_quota_timer_preserves_partial_progress_and_rebinds_snapshot(
+    worker, tmp_path, monkeypatch,
+):
+    sku = 'tgwtest-partial-timer'
+    d = _write_item(tmp_path, sku)
+    _make_photos(d, ['1.jpg', '2.jpg'])
+    worker.config['workflow_migration'] = {'ebay_upload_quota_timer': 'workflow'}
+
+    def first_then_quota(cfg, photo):
+        if photo.name == '2.jpg':
+            raise QuotaBudgetExceeded('quota')
+        return 'https://x/1.jpg'
+
+    monkeypatch.setattr(ebay_upload, 'upload_photo', first_then_quota)
+    receipt = worker.handle(_job(
+        sku, treatment_id='ebay-upload', treatment_version='1',
+        graph_id='prior-graph', object_generation='prior-generation',
+        condition_hash='prior-condition',
+    ))
+
+    assert len(_read(tmp_path, sku)['ebay_photos']) == 1
+    assert receipt['evidence']['uploaded_this_attempt'] == 1
+    assert receipt['evidence']['changed'] is True
+    assert receipt['timer']['payload']['object_generation'] != 'prior-generation'
+    assert receipt['timer']['payload']['graph_id'] != 'prior-graph'
+
+
+def test_workflow_quota_cap_is_structured_operator_attention(
+    worker, tmp_path, monkeypatch,
+):
+    sku = 'tgwtest-workflow-cap'
+    d = _write_item(tmp_path, sku)
+    _make_photos(d, ['1.jpg'])
+    worker.config['workflow_migration'] = {'ebay_upload_quota_timer': 'workflow'}
+    monkeypatch.setattr(
+        ebay_upload, 'upload_photo',
+        lambda cfg, photo: (_ for _ in ()).throw(QuotaBudgetExceeded('quota')),
+    )
+
+    with pytest.raises(TreatmentFailure) as caught:
+        worker.handle(_job(
+            sku, quota_retries=ebay_upload.QUOTA_RETRY_LIMIT,
+            treatment_id='ebay-upload', treatment_version='1',
+            graph_id='graph-1', object_generation='gen-1',
+            condition_hash='condition-1', origin='operator',
+        ))
+
+    evidence = caught.value.result['evidence']
+    assert evidence['reason_code'] == 'EBAY_UPLOAD_QUOTA_RETRY_LIMIT'
+    assert evidence['operator_attention_required'] is True
+    assert evidence['operator_origin'] is True
+    assert worker._enqueued == []
 
 
 def test_partial_photo_failure_raises_not_silently_succeeds(worker, tmp_path, monkeypatch):

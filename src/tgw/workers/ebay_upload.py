@@ -29,6 +29,7 @@ from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.config import sku_dir as _cfg_sku_dir
 from tgw.config import sku_json as _cfg_sku_json
 from tgw.ebay.upload import upload_photo
+from tgw.errors import TreatmentFailure
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 from tgw.quota import QuotaBudgetExceeded
@@ -46,6 +47,30 @@ QUOTA_RETRY_LIMIT = 3
 
 
 class EbayUploadWorker(QueueWorker):
+
+    def _current_workflow_binding(self, sku: str) -> Dict[str, str]:
+        """Rebuild the authoritative identity after partial progress writes."""
+        from tgw.workflow.evaluator import evaluate
+        from tgw.workflow.item_snapshot import build_item_snapshot
+        from tgw.workflow.profiles import TGW_EBAY_LISTABLE
+        from tgw.workflow.treatments import TGW_TREATMENTS
+
+        snapshot = build_item_snapshot(
+            _cfg_sku_json(self.config, sku), TGW_EBAY_LISTABLE,
+            treatments=TGW_TREATMENTS,
+        )
+        graph = evaluate(
+            snapshot=snapshot, goal=TGW_EBAY_LISTABLE,
+            treatments=TGW_TREATMENTS,
+            evaluator_version='ebay-upload-quota-timer/v1',
+        )
+        return {
+            'graph_id': graph.graph_id,
+            'object_generation': graph.object_generation,
+            'condition_hash': graph.condition_hash,
+            'goal_profile_id': graph.goal_profile_id,
+            'goal_profile_version': graph.goal_profile_version,
+        }
 
     def _persist_partial(self, sku: str, uploaded: List[Dict[str, str]],
                          photos: List[Path]) -> List[Dict[str, str]]:
@@ -70,11 +95,36 @@ class EbayUploadWorker(QueueWorker):
             })
         return reordered
 
-    def handle(self, job: Dict[str, Any]) -> None:
+    def _quota_timer_mode(self) -> str:
+        migration = self.config.get('workflow_migration')
+        if migration is None and isinstance(self.config.get('raw'), dict):
+            migration = self.config['raw'].get('workflow_migration')
+        if migration is None:
+            migration = {}
+        mode = migration.get('ebay_upload_quota_timer', 'legacy') \
+            if isinstance(migration, dict) else 'legacy'
+        if mode not in {'legacy', 'workflow'}:
+            raise HardFailure(
+                f"invalid workflow_migration.ebay_upload_quota_timer mode {mode!r}; "
+                "expected 'legacy' or 'workflow'"
+            )
+        return mode
+
+    def handle(self, job: Dict[str, Any]) -> Dict[str, Any] | None:
         payload = job.get('payload_json') or {}
         sku = payload.get('sku', '')
         if not sku:
             raise HardFailure('ebay_upload job missing sku in payload')
+        quota_timer_mode = self._quota_timer_mode()
+        if quota_timer_mode == 'workflow':
+            required = ('treatment_id', 'treatment_version', 'graph_id',
+                        'object_generation', 'condition_hash')
+            missing = [key for key in required if not payload.get(key)]
+            if missing:
+                raise HardFailure(
+                    'workflow quota timer missing bound identity: '
+                    + ', '.join(missing)
+                )
 
         json_path = _cfg_sku_json(self.config, sku)
         if not json_path.exists():
@@ -173,14 +223,69 @@ class EbayUploadWorker(QueueWorker):
                     f'{len(uploaded) - len(existing)}/{to_attempt} new photos uploaded — {quota_detail[:150]}',
                     level='error',
                 )
-                raise HardFailure(
+                message = (
                     f'{sku}: quota-blocked {quota_retries - 1} times in a row — '
-                    f'dead-lettering instead of re-arming forever (see notify): {quota_detail[:200]}'
+                    f'dead-lettering instead of re-arming forever (see notify): '
+                    f'{quota_detail[:200]}'
                 )
+                if quota_timer_mode == 'workflow':
+                    raise TreatmentFailure(message, {
+                        'receipt_schema_id': 'treatment-receipt/v1',
+                        'treatment_id': payload.get('treatment_id', 'ebay-upload'),
+                        'treatment_version': payload.get('treatment_version', '1'),
+                        'graph_id': payload.get('graph_id'),
+                        'outcome': 'failed',
+                        'established_conditions': [],
+                        'artifacts': [f'item:{sku}'],
+                        'evidence': {
+                            'reason_code': 'EBAY_UPLOAD_QUOTA_RETRY_LIMIT',
+                            'operator_attention_required': True,
+                            'operator_origin': payload.get('origin') == 'operator',
+                            'quota_retries': quota_retries - 1,
+                            'uploaded_this_attempt': len(uploaded) - len(existing),
+                            'uploaded_total': len(uploaded),
+                        },
+                    })
+                raise HardFailure(message)
             log.warning('ebay_upload: %s quota-blocked (retry %d/%d) — saving %d uploaded so far, requeueing remainder',
                         sku, quota_retries, QUOTA_RETRY_LIMIT, len(uploaded))
             tgw_logging.log_event('ebay_upload_quota_blocked', sku=sku,
                                   quota_retries=quota_retries, uploaded_so_far=len(uploaded))
+            if quota_timer_mode == 'workflow':
+                timer_payload = dict(payload)
+                timer_payload.update({
+                    'sku': sku,
+                    'reason': 'quota_timer_elapsed',
+                    'quota_retries': quota_retries,
+                    **self._current_workflow_binding(sku),
+                })
+                return {
+                    'receipt_schema_id': 'treatment-wait-receipt/v1',
+                    'treatment_id': payload['treatment_id'],
+                    'treatment_version': payload['treatment_version'],
+                    'graph_id': payload['graph_id'],
+                    'outcome': 'transient_backoff',
+                    'established_conditions': [],
+                    'artifacts': [f'item:{sku}'],
+                    'evidence': {
+                        'reason_code': 'EBAY_UPLOAD_QUOTA_BLOCKED',
+                        'quota_retries': quota_retries,
+                        'uploaded_this_attempt': len(uploaded) - len(existing),
+                        'uploaded_total': len(uploaded),
+                        'operator_origin': payload.get('origin') == 'operator',
+                        'changed': len(uploaded) != len(existing),
+                    },
+                    'timer': {
+                        'queue_name': QUEUE_NAME,
+                        'not_before': time.time() + 6 * 3600,
+                        'payload': timer_payload,
+                        'dedupe_key': (
+                            f"workflow-timer:{timer_payload['graph_id']}:"
+                            f'ebay-upload:quota:{quota_retries}'
+                        ),
+                        'max_attempts': 3,
+                    },
+                }
             # Requeue for 6 hours from now (EPS resets daily at midnight eBay time).
             # Invariant C10: the requeue keeps the job's operator provenance.
             try:

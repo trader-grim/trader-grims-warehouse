@@ -104,6 +104,28 @@ def test_matching_active_attempt_is_in_progress_not_dispatchable(tmp_path):
     )
 
 
+def test_future_timer_is_active_in_progress_for_exact_current_binding(tmp_path):
+    path = _item(tmp_path, condition="Used")
+    current = build_item_action_card(path)
+    timer = {
+        "job_id": "timer-1", "queue_name": "ebay_upload", "state": "queued",
+        "not_before": "2099-01-01T00:00:00+00:00",
+        "attempt_count": 0, "max_attempts": 3,
+        "payload_json": {
+            "treatment_id": "ebay-upload", "treatment_version": "1",
+            "graph_id": current["graph_id"],
+            "object_generation": current["object_generation"],
+            "condition_hash": current["condition_hash"],
+        },
+    }
+    card = build_item_action_card(path, [timer])
+    assert timer["job_id"] in [row["job_id"] for row in card["active_attempts"]]
+    assert {"treatment_id": "ebay-upload", "treatment_version": "1"} in (
+        card["in_progress_treatments"]
+    )
+    assert card["active_attempts"][0]["not_before"] == timer["not_before"]
+
+
 def test_stale_or_malformed_attempt_remains_history_without_suppression(tmp_path):
     path = _item(tmp_path)
     current = build_item_action_card(path)

@@ -540,6 +540,10 @@ class ActionBody(BaseModel):
     options: Optional[Dict[str, Any]] = None
 
 
+class WorkflowGoalBody(BaseModel):
+    goal_profile_id: str = "tgw.ebay_listable"
+
+
 class SetTemplateBody(BaseModel):
     template_key: str
 
@@ -837,7 +841,8 @@ def _workflow_attempt_rows(sku: str, limit: int = 100) -> List[Dict[str, Any]]:
                 """
                 SELECT job_id::text, queue_name, state, entity_type, entity_id,
                        payload_json, attempt_count, max_attempts,
-                       error_code, error_detail, created_at, updated_at, finished_at
+                       error_code, error_detail, not_before,
+                       created_at, updated_at, finished_at
                   FROM queue_jobs
                  WHERE (entity_type = 'item' AND entity_id = %s)
                     OR payload_json->>'sku' = %s
@@ -878,6 +883,38 @@ def item_workflow(sku: str) -> Dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"workflow projection unavailable: {exc}")
     return {"ok": True, "workflow": card}
+
+
+@app.post("/api/items/{sku}/workflow-goal", dependencies=[AUTH])
+def request_workflow_goal(sku: str, body: WorkflowGoalBody) -> Dict[str, Any]:
+    """Evaluate an operator goal; dispatch at most one local treatment."""
+    from .workflow.listing_migration import request_item_goal
+    from .workflow.profiles import get_profile
+
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+    try:
+        goal = get_profile(body.goal_profile_id)
+    except KeyError:
+        raise HTTPException(status_code=400, detail="unknown workflow goal") from None
+    if not goal.identity.startswith("tgw."):
+        raise HTTPException(status_code=400, detail="only TGW item goals are accepted")
+    try:
+        result = request_item_goal(json_path, goal, origin="operator")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "sku": sku,
+        "goal": {"id": goal.identity, "version": goal.version},
+        "graph_id": result.graph.graph_id,
+        "object_generation": result.graph.object_generation,
+        "dispatched": bool(result.dispatched and result.dispatched.enqueued),
+        "job_id": result.dispatched.job_id if result.dispatched else "",
+        "held_external": list(result.held_external),
+        "operator_gates": list(result.operator_gates),
+    }
 
 
 @app.get("/api/items/{sku}", dependencies=[AUTH])
@@ -5889,7 +5926,9 @@ def _render_item_detail_html(
         active = workflow_card.get("active_attempts") or []
         active_html = "".join(
             f'<li><code>{h(str(attempt.get("treatment_id") or attempt.get("queue_name") or ""))}</code> — '
-            f'{h(str(attempt.get("state", "")))} (job {h(str(attempt.get("job_id", "")))})</li>'
+            f'{h(str(attempt.get("state", "")))}'
+            f'{" until " + h(str(attempt.get("not_before"))) if attempt.get("not_before") else ""} '
+            f'(job {h(str(attempt.get("job_id", "")))})</li>'
             for attempt in active
         ) or "<li>None.</li>"
         gate_html = (

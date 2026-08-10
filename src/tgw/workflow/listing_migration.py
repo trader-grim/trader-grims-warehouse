@@ -5,11 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .contracts import RuntimeWorkGraph, TreatmentDisposition
+from .contracts import EffectClass, GoalProfile, RuntimeWorkGraph, TreatmentContract, TreatmentDisposition
 from .evaluator import evaluate
 from .item_snapshot import build_item_snapshot
 from .profiles import TGW_EBAY_IDENTIFIED
-from .treatments import AI_IDENTIFY
+from .scheduler import DispatchResult, dispatch_treatment
+from .treatments import AI_IDENTIFY, TGW_TREATMENTS
 
 EVALUATOR_VERSION = "pp-workflow-phase3-bundle/v1"
 
@@ -110,4 +111,62 @@ def derive_bundle_downstream(item_path: str | Path) -> BundleDownstreamDecision:
     return BundleDownstreamDecision(
         graph=graph,
         disposition=disposition,
+    )
+
+
+@dataclass(frozen=True)
+class GoalRequestResult:
+    graph: RuntimeWorkGraph
+    dispatched: DispatchResult | None
+    held_external: tuple[str, ...]
+    operator_gates: tuple[str, ...]
+
+
+def request_item_goal(
+    item_path: str | Path,
+    goal: GoalProfile,
+    *,
+    treatments: tuple[TreatmentContract, ...] = TGW_TREATMENTS,
+    enqueue_fn=None,
+    origin: str = "operator",
+) -> GoalRequestResult:
+    """Evaluate one exact generation and dispatch at most one local treatment.
+
+    External treatments are observations only at this migration seam.  They
+    remain held until their provider reservation/reconciliation contracts are
+    independently admitted.
+    """
+    snapshot = build_item_snapshot(item_path, goal, treatments=treatments)
+    graph = evaluate(
+        snapshot=snapshot, goal=goal, treatments=treatments,
+        evaluator_version="pp-workflow-operator-goal/v1",
+    )
+    contracts = {(item.identity, item.version): item for item in treatments}
+    local = [
+        disposition for disposition in graph.eligible_treatments
+        if contracts[(disposition.treatment_id, disposition.treatment_version)].effect_class
+        is EffectClass.LOCAL
+    ]
+    external = tuple(
+        disposition.treatment_id for disposition in graph.eligible_treatments
+        if contracts[(disposition.treatment_id, disposition.treatment_version)].effect_class
+        is EffectClass.EXTERNAL
+    )
+    gates = tuple(sorted({
+        *(f"provider_contract_required:{identity}" for identity in external),
+        *(f"reconciliation_required:{identity}" for identity in graph.reconciliation_gates),
+    }))
+    dispatched = None
+    if local and not graph.ownership_conflicts and not graph.reconciliation_gates:
+        dispatched = dispatch_treatment(
+            disposition=local[0], entity_id=snapshot.object_id, graph=graph,
+            payload_extra={"origin": origin}, enqueue_fn=enqueue_fn,
+        )
+        if not dispatched.enqueued and dispatched.outcome != "already_dispatched":
+            raise RuntimeError(
+                f"failed to dispatch workflow treatment {local[0].treatment_id}"
+            )
+    return GoalRequestResult(
+        graph=graph, dispatched=dispatched, held_external=external,
+        operator_gates=gates,
     )

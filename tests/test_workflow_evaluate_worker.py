@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -135,6 +136,191 @@ def test_unrecognized_dict_keeps_backward_compatible_completion():
         worker._process(job)
     atomic.assert_not_called()
     ordinary.assert_called_once_with("job-1", "owner", result={"ok": True})
+
+
+def test_waiting_receipt_uses_atomic_timer_boundary_not_success_outbox():
+    worker = object.__new__(QueueWorker)
+    worker.queue_name = "ebay_upload"
+    worker.owner = "owner"
+    worker.config = {}
+    payload = {
+        "sku": "SKU-1", "treatment_id": "ebay-upload",
+        "treatment_version": "1", "graph_id": "graph-1",
+        "object_generation": "gen-1", "condition_hash": "condition-1",
+    }
+    receipt = {
+        "receipt_schema_id": "treatment-wait-receipt/v1",
+        "treatment_id": "ebay-upload", "treatment_version": "1",
+        "graph_id": "graph-1", "outcome": "transient_backoff",
+        "timer": {
+            "queue_name": "ebay_upload", "not_before": 1234.0,
+            "payload": {**payload, "quota_retries": 1},
+            "dedupe_key": "workflow-timer:graph-1:ebay-upload:quota:1",
+        },
+    }
+    job = {"job_id": "job-1", "queue_name": "ebay_upload",
+           "entity_type": "item", "entity_id": "SKU-1", "payload_json": payload}
+    worker.handle = MagicMock(return_value=receipt)
+    with patch("tgw.queue.worker_base.time.time", return_value=1000.0), \
+         patch("tgw.queue.worker_base.state_machine.mark_running"), \
+         patch("tgw.queue.worker_base.state_machine.complete_treatment_and_schedule_timer",
+               return_value="timer-1") as timer, \
+         patch("tgw.queue.worker_base.state_machine.mark_succeeded") as ordinary, \
+         patch("tgw.queue.worker_base.state_machine.complete_treatment_and_enqueue_evaluation") as outbox:
+        worker._process(job)
+    timer.assert_called_once_with("job-1", "owner", receipt)
+    ordinary.assert_not_called()
+    outbox.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("not_before", "reason"),
+    [
+        (True, "INVALID_TIMER_NOT_BEFORE"),
+        (float("nan"), "INVALID_TIMER_NOT_BEFORE"),
+        (float("inf"), "INVALID_TIMER_NOT_BEFORE"),
+        (1000.0, "TIMER_NOT_IN_FUTURE"),
+        (1000.5, "TIMER_NOT_IN_FUTURE"),
+        (1000.0 + 7 * 24 * 3600 + 1, "TIMER_WINDOW_EXCEEDED"),
+    ],
+)
+def test_waiting_receipt_rejects_unsafe_timer_window(not_before, reason):
+    from tgw.queue.worker_base import _waiting_treatment_receipt_error
+
+    payload = {
+        "sku": "SKU-1", "treatment_id": "ebay-upload",
+        "treatment_version": "1", "graph_id": "graph-1",
+        "object_generation": "gen-1", "condition_hash": "condition-1",
+    }
+    receipt = {
+        "receipt_schema_id": "treatment-wait-receipt/v1",
+        "treatment_id": "ebay-upload", "treatment_version": "1",
+        "graph_id": "graph-1", "outcome": "transient_backoff",
+        "timer": {
+            "queue_name": "ebay_upload", "not_before": not_before,
+            "payload": payload, "dedupe_key": "timer-1",
+        },
+    }
+    job = {"queue_name": "ebay_upload", "entity_id": "SKU-1",
+           "payload_json": payload}
+    with patch("tgw.queue.worker_base.time.time", return_value=1000.0):
+        assert _waiting_treatment_receipt_error(receipt, job) == reason
+
+
+@pytest.mark.parametrize("max_attempts", [True, 0, 11, 1.5, "3"])
+def test_waiting_receipt_rejects_invalid_timer_attempt_budget(max_attempts):
+    from tgw.queue.worker_base import _waiting_treatment_receipt_error
+
+    payload = {
+        "sku": "SKU-1", "treatment_id": "ebay-upload",
+        "treatment_version": "1", "graph_id": "graph-1",
+        "object_generation": "gen-1", "condition_hash": "condition-1",
+    }
+    receipt = {
+        "receipt_schema_id": "treatment-wait-receipt/v1",
+        "treatment_id": "ebay-upload", "treatment_version": "1",
+        "graph_id": "graph-1", "outcome": "transient_backoff",
+        "timer": {
+            "queue_name": "ebay_upload", "not_before": 2000.0,
+            "payload": payload, "dedupe_key": "timer-1",
+            "max_attempts": max_attempts,
+        },
+    }
+    job = {"queue_name": "ebay_upload", "entity_id": "SKU-1",
+           "payload_json": payload}
+    with patch("tgw.queue.worker_base.time.time", return_value=1000.0):
+        assert _waiting_treatment_receipt_error(receipt, job) == (
+            "INVALID_TIMER_MAX_ATTEMPTS"
+        )
+
+
+def test_atomic_wait_completion_and_future_job_are_one_transaction():
+    cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
+    cursor.fetchone.side_effect = [("item", "SKU-1"), ("timer-job",)]
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value = cursor
+    receipt = {
+        "outcome": "transient_backoff",
+        "timer": {
+            "queue_name": "ebay_upload", "not_before": 1234.0,
+            "payload": {"sku": "SKU-1", "graph_id": "graph-1"},
+            "dedupe_key": "workflow-timer:graph-1:ebay-upload:quota:1",
+            "max_attempts": 3,
+        },
+    }
+    with patch.object(state_machine, "_conn", return_value=connection), \
+         patch.object(state_machine.time, "time", return_value=1000.0):
+        timer_id = state_machine.complete_treatment_and_schedule_timer(
+            "origin-job", "owner", receipt,
+        )
+    assert timer_id == "timer-job"
+    assert cursor.execute.call_count == 2
+    insert_args = cursor.execute.call_args_list[1].args[1]
+    assert insert_args[0] == "ebay_upload"
+    assert insert_args[2] == "SKU-1"
+    assert json.loads(insert_args[5])["graph_id"] == "graph-1"
+
+
+def test_wait_timer_fails_closed_when_running_lease_is_lost():
+    cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
+    cursor.fetchone.return_value = None
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value = cursor
+    receipt = {"timer": {"not_before": 1234.0}}
+    with patch.object(state_machine, "_conn", return_value=connection), \
+         patch.object(state_machine.time, "time", return_value=1000.0):
+        with pytest.raises(RuntimeError, match="lost running lease"):
+            state_machine.complete_treatment_and_schedule_timer(
+                "origin-job", "wrong-owner", receipt,
+            )
+    assert cursor.execute.call_count == 1
+
+
+def test_wait_timer_insert_conflict_rolls_back_receipt_completion():
+    cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
+    cursor.fetchone.return_value = ("item", "SKU-1")
+    cursor.execute.side_effect = [None, RuntimeError("timer identity conflict")]
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value = cursor
+    receipt = {
+        "timer": {
+            "queue_name": "ebay_upload", "not_before": 1234.0,
+            "payload": {"sku": "SKU-1"}, "dedupe_key": "timer-key",
+        },
+    }
+    with patch.object(state_machine, "_conn", return_value=connection), \
+         patch.object(state_machine.time, "time", return_value=1000.0):
+        with pytest.raises(RuntimeError, match="timer identity conflict"):
+            state_machine.complete_treatment_and_schedule_timer(
+                "origin-job", "owner", receipt,
+            )
+    assert connection.__exit__.call_args.args[0] is RuntimeError
+
+
+def test_claim_sql_sources_contractually_gate_future_not_before():
+    cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
+    cursor.fetchone.return_value = None
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value = cursor
+    with patch.object(state_machine, "_conn", return_value=connection):
+        assert state_machine.claim_queue_jobs(
+            "ebay_upload", "fresh-process", limit=1,
+        ) == []
+    assert cursor.execute.call_args.args[0] == (
+        "SELECT * FROM claim_queue_jobs(%s, %s, %s, %s)"
+    )
+    queue_dir = Path(__file__).parents[1] / "src/tgw/queue"
+    for schema_name in ("schema.sql", "live_schema.sql"):
+        schema = (queue_dir / schema_name).read_text()
+        assert "not_before IS NULL OR q.not_before <= NOW()" in schema
 
 
 def test_atomic_completion_writes_receipt_then_durable_event():

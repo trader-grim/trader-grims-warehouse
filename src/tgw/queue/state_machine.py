@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 import uuid
 from contextlib import contextmanager
@@ -726,6 +727,71 @@ def complete_treatment_and_enqueue_evaluation(
                 """,
                 (entity_id, resolve_priority("workflow_evaluate", "evidence_changed"),
                  json.dumps(event_payload), f"workflow-evaluate:{job_id}"),
+            )
+            return cur.fetchone()[0]
+
+
+def complete_treatment_and_schedule_timer(
+    job_id: str, lease_owner: str, result: Dict[str, Any],
+) -> str:
+    """Atomically retain a non-success attempt and schedule its durable timer.
+
+    The worker describes the requested timer in its structured receipt, but
+    only this queue boundary creates it.  Thus a crash cannot leave a
+    completed transport attempt without its future work (or vice versa).
+    ``state='succeeded'`` means only that this one-shot transport invocation
+    finished; the retained business outcome remains ``transient_backoff``.
+    """
+    timer = result["timer"]
+    not_before_value = timer.get("not_before")
+    max_attempts = timer.get("max_attempts", 3)
+    if (isinstance(not_before_value, bool)
+            or not isinstance(not_before_value, (int, float))
+            or not math.isfinite(float(not_before_value))
+            or not 1.0 <= float(not_before_value) - time.time() <= 7 * 24 * 3600.0):
+        raise ValueError("timer not_before is outside the trusted future window")
+    if (isinstance(max_attempts, bool) or not isinstance(max_attempts, int)
+            or not 1 <= max_attempts <= 10):
+        raise ValueError("timer max_attempts must be an integer from 1 through 10")
+    from datetime import datetime, timezone
+    not_before = datetime.fromtimestamp(float(not_before_value), tz=timezone.utc)
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE queue_jobs
+                   SET state = 'succeeded', finished_at = NOW(),
+                       lease_owner = NULL, lease_token = NULL,
+                       lease_expires_at = NULL, error_code = NULL,
+                       error_detail = NULL,
+                       payload_json = COALESCE(payload_json, '{}'::jsonb)
+                                      || jsonb_build_object('result', %s::jsonb)
+                 WHERE job_id = %s AND state = 'running' AND lease_owner = %s
+                 RETURNING entity_type, entity_id
+                """,
+                (json.dumps(result), job_id, lease_owner),
+            )
+            completed = cur.fetchone()
+            if completed is None:
+                raise RuntimeError(
+                    f"lost running lease while scheduling timer for job {job_id}"
+                )
+            entity_type, entity_id = completed
+            cur.execute(
+                """
+                INSERT INTO queue_jobs
+                    (queue_name, entity_type, entity_id, operation,
+                     handler_family, priority, payload_json, not_before,
+                     dedupe_key, max_attempts)
+                VALUES (%s, %s, %s, 'timer_elapsed', %s, %s, %s::jsonb,
+                        %s, %s, %s)
+                RETURNING job_id::text
+                """,
+                (timer["queue_name"], entity_type, entity_id,
+                 timer["queue_name"],
+                 resolve_priority(timer["queue_name"], "timer_elapsed"),
+                 json.dumps(timer["payload"]), not_before,
+                 timer["dedupe_key"], max_attempts),
             )
             return cur.fetchone()[0]
 

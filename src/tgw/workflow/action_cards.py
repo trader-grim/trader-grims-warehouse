@@ -52,6 +52,7 @@ def build_item_action_card(
             "error_detail": row.get("error_detail"),
             "result": dict(result) if result else None,
             "retry_allowed": False if payload.get("graph_id") or ambiguities else None,
+            "not_before": _json_value(row.get("not_before")),
             "created_at": _json_value(row.get("created_at")),
             "updated_at": _json_value(row.get("updated_at")),
             "finished_at": _json_value(row.get("finished_at")),

@@ -18,6 +18,7 @@ STATE TRANSITIONS PER JOB:
 from __future__ import annotations
 
 import logging
+import math
 import os
 import signal
 import socket
@@ -29,6 +30,9 @@ from tgw.errors import HardFailure
 from tgw.queue import state_machine
 
 log = logging.getLogger(__name__)
+
+_TREATMENT_TIMER_MIN_DELAY_S = 1.0
+_TREATMENT_TIMER_MAX_DELAY_S = 7 * 24 * 3600.0
 
 
 def _is_treatment_receipt_candidate(value: Any) -> bool:
@@ -68,6 +72,55 @@ def _treatment_receipt_error(value: Any, job: Dict[str, Any]) -> str | None:
         return "ENTITY_ID_MISMATCH"
     if payload.get("object_id") not in (None, entity_id):
         return "OBJECT_ID_MISMATCH"
+    return None
+
+
+def _waiting_treatment_receipt_error(value: Any, job: Dict[str, Any]) -> str | None:
+    """Validate a worker request for an atomic, scheduler-owned timer."""
+    if not isinstance(value, dict) or value.get("receipt_schema_id") != (
+        "treatment-wait-receipt/v1"
+    ):
+        return "NOT_A_WAITING_TREATMENT_RECEIPT"
+    if value.get("outcome") != "transient_backoff":
+        return "INVALID_WAITING_OUTCOME"
+    payload = job.get("payload_json") or {}
+    if not isinstance(payload, dict):
+        return "INVALID_JOB_PAYLOAD"
+    for key in ("treatment_id", "treatment_version", "graph_id"):
+        if not isinstance(value.get(key), str) or value.get(key) != payload.get(key):
+            return f"{key.upper()}_MISMATCH"
+    timer = value.get("timer")
+    if not isinstance(timer, dict):
+        return "INVALID_TIMER"
+    if timer.get("queue_name") != job.get("queue_name"):
+        return "TIMER_QUEUE_MISMATCH"
+    not_before = timer.get("not_before")
+    if (isinstance(not_before, bool)
+            or not isinstance(not_before, (int, float))
+            or not math.isfinite(float(not_before))):
+        return "INVALID_TIMER_NOT_BEFORE"
+    delay = float(not_before) - time.time()
+    if delay < _TREATMENT_TIMER_MIN_DELAY_S:
+        return "TIMER_NOT_IN_FUTURE"
+    if delay > _TREATMENT_TIMER_MAX_DELAY_S:
+        return "TIMER_WINDOW_EXCEEDED"
+    timer_payload = timer.get("payload")
+    if not isinstance(timer_payload, dict):
+        return "INVALID_TIMER_PAYLOAD"
+    for key in ("treatment_id", "treatment_version"):
+        if timer_payload.get(key) != payload.get(key):
+            return f"TIMER_{key.upper()}_MISMATCH"
+    for key in ("graph_id", "object_generation", "condition_hash"):
+        if not isinstance(timer_payload.get(key), str) or not timer_payload[key]:
+            return f"INVALID_TIMER_{key.upper()}"
+    if timer_payload.get("sku") != job.get("entity_id"):
+        return "TIMER_ENTITY_MISMATCH"
+    if not isinstance(timer.get("dedupe_key"), str) or not timer["dedupe_key"]:
+        return "INVALID_TIMER_DEDUPE"
+    max_attempts = timer.get("max_attempts", 3)
+    if (isinstance(max_attempts, bool) or not isinstance(max_attempts, int)
+            or not 1 <= max_attempts <= 10):
+        return "INVALID_TIMER_MAX_ATTEMPTS"
     return None
 
 
@@ -304,6 +357,21 @@ class QueueWorker:
                 self._on_terminal_failure(job, error_text)
         else:
             receipt = _handle_result if isinstance(_handle_result, dict) else None
+            waiting_error = _waiting_treatment_receipt_error(receipt, job)
+            if waiting_error is None:
+                timer_job_id = state_machine.complete_treatment_and_schedule_timer(
+                    job_id, self.owner, receipt,
+                )
+                if not timer_job_id:
+                    raise RuntimeError(
+                        f"lost lease scheduling treatment timer for job {job_id}"
+                    )
+                tgw_logging.log_event(
+                    "job_waiting", job_id=job_id, timer_job_id=timer_job_id,
+                    outcome=receipt["outcome"],
+                )
+                log.info("job %s waiting on timer %s", job_id, timer_job_id)
+                return
             receipt_error = _treatment_receipt_error(receipt, job)
             if receipt_error is None:
                 event_id = state_machine.complete_treatment_and_enqueue_evaluation(
