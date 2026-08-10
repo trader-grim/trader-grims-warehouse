@@ -412,6 +412,18 @@ class BundleIntakeWorker(QueueWorker):
         fence_create_item(self.config, sku, record)
 
     def _enqueue_downstream(self, sku: str) -> None:
+        migration = self.config.get('workflow_migration')
+        if migration is None and isinstance(self.config.get('raw'), dict):
+            migration = self.config['raw'].get('workflow_migration')
+        if migration is None:
+            migration = {}
+        mode = migration.get('bundle_downstream', 'legacy') if isinstance(migration, dict) else 'legacy'
+        if mode not in {'legacy', 'workflow'}:
+            raise HardFailure(
+                f"invalid workflow_migration.bundle_downstream mode {mode!r}; "
+                "expected 'legacy' or 'workflow'"
+            )
+
         # catalog-rebuild: coalesced 30s delay so rapid intakes batch together
         try:
             state_machine.enqueue_catalog_rebuild(f'bundle_intake:{sku}')
@@ -431,7 +443,37 @@ class BundleIntakeWorker(QueueWorker):
         except psycopg2.errors.UniqueViolation:
             pass
 
-        # ai_identify: vision model identification, immediate
+        # ai_identify: vision model identification, immediate.  The default
+        # legacy mode preserves the old unconditional fanout.  Workflow mode
+        # derives eligibility from the authoritative post-intake item; it does
+        # not dispatch any eBay provider treatment.
+        workflow_decision = None
+        if mode == 'workflow':
+            from tgw.workflow.listing_migration import derive_bundle_downstream
+
+            item_path = _cfg_sku_dir(self.config, sku) / f'{sku}.json'
+            workflow_decision = derive_bundle_downstream(item_path)
+        if workflow_decision is not None and not workflow_decision.enqueue_ai_identify:
+            return
+        if workflow_decision is not None:
+            from tgw.workflow.scheduler import dispatch_treatment
+
+            dispatch = dispatch_treatment(
+                disposition=workflow_decision.disposition,
+                entity_id=sku,
+                graph=workflow_decision.graph,
+                payload_extra={
+                    'sku': sku,
+                    'condition_hash': workflow_decision.graph.condition_hash,
+                },
+                enqueue_fn=state_machine.enqueue_job,
+            )
+            if not dispatch.enqueued and dispatch.outcome != 'already_dispatched':
+                raise RuntimeError(
+                    f'workflow dispatch failed for ai-identify graph '
+                    f'{workflow_decision.graph_id}'
+                )
+            return
         try:
             state_machine.enqueue_job(
                 queue_name='ai_identify',

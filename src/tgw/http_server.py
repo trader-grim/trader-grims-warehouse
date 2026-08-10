@@ -829,6 +829,57 @@ def get_review_queue() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _workflow_attempt_rows(sku: str, limit: int = 100) -> List[Dict[str, Any]]:
+    """Join attempts by canonical entity identity, retaining legacy SKU rows."""
+    with psycopg2.connect(_cfg["postgres_dsn"]) as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT job_id::text, queue_name, state, entity_type, entity_id,
+                       payload_json, attempt_count, max_attempts,
+                       error_code, error_detail, created_at, updated_at, finished_at
+                  FROM queue_jobs
+                 WHERE (entity_type = 'item' AND entity_id = %s)
+                    OR payload_json->>'sku' = %s
+                 ORDER BY created_at DESC
+                 LIMIT %s
+                """,
+                (sku, sku, limit),
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+            for row in rows:
+                payload = row.get("payload_json") or {}
+                result = payload.get("result") if isinstance(payload, dict) else None
+                governed = isinstance(payload, dict) and all(
+                    payload.get(key) for key in ("treatment_id", "graph_id", "object_generation")
+                )
+                ambiguous = isinstance(result, dict) and result.get("outcome") in {
+                    "ambiguous", "reconciliation_required",
+                }
+                row["retry_allowed"] = (
+                    row.get("state") == "dead_letter" and not governed and not ambiguous
+                )
+            return rows
+
+
+@app.get("/api/items/{sku}/workflow", dependencies=[AUTH])
+def item_workflow(sku: str) -> Dict[str, Any]:
+    """Return the current read-only workflow Action Card for one item."""
+    from .workflow.action_cards import build_item_action_card
+
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+    try:
+        attempts = _workflow_attempt_rows(sku)
+        card = build_item_action_card(json_path, attempts)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"workflow projection unavailable: {exc}")
+    return {"ok": True, "workflow": card}
+
+
 @app.get("/api/items/{sku}", dependencies=[AUTH])
 def get_item(sku: str) -> Dict[str, Any]:
     json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
@@ -5806,10 +5857,62 @@ def _render_item_detail_html(
     videos: List[str],
     jobs: List[Dict[str, Any]],
     api_key: str = "",
+    workflow_card: Dict[str, Any] | None = None,
 ) -> str:
     import html as _html
 
     h = _html.escape
+
+    workflow_card_html = ""
+    if workflow_card:
+        goal = workflow_card.get("goal") or {}
+        fingerprints = workflow_card.get("fingerprints") or []
+        fp_html = "".join(
+            f'<li><code>{h(str(fp.get("condition_id", "")))}</code>: '
+            f'{h(str(fp.get("result", "")))} — '
+            f'{h("; ".join(str(reason) for reason in fp.get("reasons", [])))} '
+            f'<small>[{h(", ".join(str(ref.get("identity", "")) for ref in fp.get("evidence", []))) }]</small></li>'
+            for fp in fingerprints
+        )
+        actions = workflow_card.get("legal_actions") or []
+        actions_html = "".join(
+            f'<li><code>{h(str(action.get("treatment_id", "")))}</code> — '
+            f'{h(str(action.get("action", "")))}</li>' for action in actions
+        ) or "<li>None — waiting for evidence, authority, or goal satisfaction.</li>"
+        gates = list(workflow_card.get("operator_gates") or [])
+        waits = workflow_card.get("waiting_treatments") or []
+        waits_html = "".join(
+            f'<li><code>{h(str(wait.get("treatment_id", "")))}</code> — '
+            f'{h("; ".join(str(reason) for reason in wait.get("reasons", [])))}</li>'
+            for wait in waits
+        ) or "<li>None.</li>"
+        active = workflow_card.get("active_attempts") or []
+        active_html = "".join(
+            f'<li><code>{h(str(attempt.get("treatment_id") or attempt.get("queue_name") or ""))}</code> — '
+            f'{h(str(attempt.get("state", "")))} (job {h(str(attempt.get("job_id", "")))})</li>'
+            for attempt in active
+        ) or "<li>None.</li>"
+        gate_html = (
+            '<div style="color:#f99"><strong>Operator gates:</strong> '
+            + h(", ".join(str(gate) for gate in gates)) + "</div>"
+            if gates else ""
+        )
+        workflow_card_html = (
+            '<section id="workflow-action-card" style="border:1px solid #345;'
+            'background:#111a22;border-radius:8px;padding:10px 14px;margin:10px 0">'
+            '<h3 style="margin:0 0 6px">Workflow Action Card</h3>'
+            f'<div>Goal: <code>{h(str(goal.get("id", "")))}</code> '
+            f'v{h(str(goal.get("version", "")))}</div>'
+            f'<div style="font-size:.76em;color:#789">Generation '
+            f'{h(str(workflow_card.get("object_generation", "")))[:12]} · graph '
+            f'{h(str(workflow_card.get("graph_id", "")))[:12]}</div>'
+            f'{gate_html}<details><summary>Fingerprints ({len(fingerprints)})</summary>'
+            f'<ul>{fp_html}</ul></details><details><summary>Waits ({len(waits)})</summary>'
+            f'<ul>{waits_html}</ul></details><div><strong>Legal actions</strong><ul>{actions_html}</ul></div>'
+            f'<details><summary>Active attempts ({len(active)})</summary><ul>{active_html}</ul></details>'
+            f'<div style="font-size:.8em;color:#789">Attempt history: '
+            f'{len(workflow_card.get("attempts") or [])}</div></section>'
+        )
 
     def fv(key: str) -> str:
         v = item.get(key)
@@ -6171,7 +6274,7 @@ def _render_item_detail_html(
             # PP-ACTIONCONSOLE-001: contextual repair — a Retry button appears
             # ONLY on actionable failure states (zero buttons in the happy path).
             _retry_btn = ""
-            if state == "dead_letter" and j.get("job_id"):
+            if state == "dead_letter" and j.get("job_id") and j.get("retry_allowed", True):
                 _retry_btn = (
                     f' <button class="act-btn" style="font-size:.72em;padding:1px 8px;'
                     f'background:#2a0d0d;border-color:#a44;color:#e88" '
@@ -8134,6 +8237,7 @@ def _render_item_detail_html(
         f'<span class="slabel">{h(sku)}</span>'
         f'<span class="stitle">{h(title)}</span>'
         f"</div>\n"
+        f"{workflow_card_html}"
         f"{review_block_html}"
         f'<div class="detail-layout">'
         f'<div class="dleft">{gallery_html}{_left_log_html}</div>'
@@ -8177,29 +8281,24 @@ def item_detail_form(sku: str):
     videos: List[str] = [p.name for p in sorted(sku_dir.iterdir()) if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}]
 
     jobs: List[Dict[str, Any]] = []
+    workflow_card: Dict[str, Any] | None = None
     try:
-        with psycopg2.connect(_cfg["postgres_dsn"]) as con:
-            with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    SELECT job_id, queue_name, state, created_at, updated_at,
-                           finished_at, error_code, error_detail
-                      FROM queue_jobs
-                     WHERE payload_json->>'sku' = %s
-                     ORDER BY created_at DESC LIMIT 10
-                    """,
-                    (sku,),
-                )
-                jobs = [dict(r) for r in cur.fetchall()]
-                for j in jobs:
-                    for k in ("created_at", "updated_at", "finished_at"):
-                        if j[k] is not None:
-                            j[k] = j[k].isoformat()
+        attempts = _workflow_attempt_rows(sku)
+        jobs = attempts[:10]
+        for j in jobs:
+            for k in ("created_at", "finished_at"):
+                if j.get(k) is not None and hasattr(j[k], "isoformat"):
+                    j[k] = j[k].isoformat()
+        from .workflow.action_cards import build_item_action_card
+
+        workflow_card = build_item_action_card(json_path, attempts)
     except Exception as exc:
         log.warning("queue job fetch failed for %s: %s", sku, exc)
 
     return HTMLResponse(
-        _render_item_detail_html(sku, item, images, videos, jobs, ""),
+        _render_item_detail_html(
+            sku, item, images, videos, jobs, "", workflow_card=workflow_card,
+        ),
         headers={"Cache-Control": "no-store, no-cache"},
     )
 

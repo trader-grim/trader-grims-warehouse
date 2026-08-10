@@ -432,6 +432,7 @@ def test_payload_contains_all_expected_fields():
     assert payload["object_generation"] == "gen-7"
     assert payload["goal_profile_id"] == "coding.ready_for_implementation"
     assert payload["goal_profile_version"] == "1"
+    assert payload["condition_hash"] == "condition-hash"
     assert payload["treatment_id"] == "codex-implement"
     assert payload["treatment_version"] == "1"
     assert payload["evaluator_version"] == "test-evaluator/v1"
