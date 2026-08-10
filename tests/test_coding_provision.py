@@ -518,6 +518,99 @@ def test_failed_canonical_claim_removes_new_unbound_attempt_and_retry_reaches_cl
         assert not expected.exists()
 
 
+@pytest.mark.parametrize("claim_response", [{}, None])
+def test_unconfirmed_claim_response_removes_new_unbound_attempt_and_retry_reaches_claim(tmp_path, claim_response):
+    """A malformed response is an unconfirmed claim and gets durable reconciliation."""
+    _init_coding_repository(tmp_path)
+    cfg = _config(tmp_path)
+    expected = tmp_path / "worktrees" / "todo-1706-request-1706"
+
+    class MalformedService:
+        def __init__(self):
+            self.claims = 0
+
+        def get(self, _request_id):
+            return {**_queued_document(), "state": "queued"}
+
+        def claim(self, *_args):
+            self.claims += 1
+            return claim_response
+
+    service = MalformedService()
+    for expected_claims in (1, 2):
+        with pytest.raises(HardFailure, match="returned no lease token"):
+            coding_provision_worker.claim_and_run(
+                cfg,
+                request_id="request-1706",
+                local_host="tgw-lib-local",
+                worker_identity="tgw-coding-worker",
+                client=service,
+            )
+        assert service.claims == expected_claims
+        assert not expected.exists()
+
+
+def test_unconfirmed_claim_response_preserves_attempt_when_durable_claim_committed(tmp_path):
+    """A lost/malformed response cannot erase a durably bound attempt."""
+    _init_coding_repository(tmp_path)
+    cfg = _config(tmp_path)
+    expected = tmp_path / "worktrees" / "todo-1706-request-1706"
+
+    class CommittedService:
+        def __init__(self):
+            self.claim_called = False
+
+        def get(self, _request_id):
+            document = {**_queued_document(), "state": "queued"}
+            if self.claim_called:
+                document.update(state="leased", object_generation="generation", location={"worktree": str(expected)})
+            return document
+
+        def claim(self, *_args):
+            self.claim_called = True
+            return {}
+
+    with pytest.raises(HardFailure, match="returned no lease token"):
+        coding_provision_worker.claim_and_run(
+            cfg,
+            request_id="request-1706",
+            local_host="tgw-lib-local",
+            worker_identity="tgw-coding-worker",
+            client=CommittedService(),
+        )
+    assert expected.is_dir()
+
+
+def test_unconfirmed_claim_response_preserves_attempt_when_reconciliation_read_fails(tmp_path):
+    """Unknown durable state is never grounds for deleting an attempt."""
+    _init_coding_repository(tmp_path)
+    cfg = _config(tmp_path)
+    expected = tmp_path / "worktrees" / "todo-1706-request-1706"
+
+    class UnreadableService:
+        def __init__(self):
+            self.claim_called = False
+
+        def get(self, _request_id):
+            if self.claim_called:
+                raise HardFailure("canonical state unavailable")
+            return {**_queued_document(), "state": "queued"}
+
+        def claim(self, *_args):
+            self.claim_called = True
+            return None
+
+    with pytest.raises(HardFailure, match="returned no lease token"):
+        coding_provision_worker.claim_and_run(
+            cfg,
+            request_id="request-1706",
+            local_host="tgw-lib-local",
+            worker_identity="tgw-coding-worker",
+            client=UnreadableService(),
+        )
+    assert expected.is_dir()
+
+
 def test_tgw_lib_provision_worker_has_no_direct_canonical_state_dependencies():
     """The one-shot tgw-lib process is HTTP + local treatment execution only."""
     tree = ast.parse(inspect.getsource(coding_provision_worker))

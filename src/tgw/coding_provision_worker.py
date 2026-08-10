@@ -254,12 +254,12 @@ def claim_and_run(
     snapshot = local_snapshot_claim(config, envelope["location"]["worktree"])
     try:
         claimed = service.claim(request_id, local_host, envelope["envelope_hash"], envelope["location"], snapshot)
+        lease_token = claimed.get("lease_token") if isinstance(claimed, dict) else None
+        if not isinstance(lease_token, str) or not lease_token:
+            raise HardFailure("canonical coding service returned no lease token")
     except Exception:
         _remove_proven_unclaimed_attempt(service, request_id, envelope, coding)
         raise
-    lease_token = claimed.get("lease_token")
-    if not isinstance(lease_token, str) or not lease_token:
-        raise HardFailure("canonical coding service returned no lease token")
     try:
         authorized = claimed.get("request")
         if not isinstance(authorized, dict):
