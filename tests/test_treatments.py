@@ -59,6 +59,8 @@ _TGW_CONDITIONS = frozenset({
     "condition_normalizable",
     "valid_category",
     "title_ok",
+    "provider_effect_succeeded",
+    "provider_projection_current",
 })
 
 _ALL_KNOWN_CONDITIONS = _CODING_CONDITIONS | _TGW_CONDITIONS
@@ -105,10 +107,10 @@ def _evaluate(assertions, treatments, *, generation="3", ambiguities=()):
 
 
 def test_treatment_count():
-    """11 total treatments: 4 coding + 7 TGW."""
+    """12 total treatments: 4 coding + 8 TGW."""
     assert len(CODING_TREATMENTS) == 4
-    assert len(TGW_TREATMENTS) == 7
-    assert len(ALL_TREATMENTS) == 11
+    assert len(TGW_TREATMENTS) == 8
+    assert len(ALL_TREATMENTS) == 12
 
 
 def test_unique_identity_version_pairs():

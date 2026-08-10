@@ -170,6 +170,17 @@ EBAY_PUBLISH = TreatmentContract(
     receipt_schema_id=_RECEIPT,
 )
 
+EBAY_SYNC_TARGETED = TreatmentContract(
+    identity="ebay-sync-targeted",
+    version="1",
+    requires=(Requirement("provider_effect_succeeded", (FingerprintResult.TRUE,)),),
+    may_establish=("provider_projection_current",),
+    must_preserve=("provider_state",),
+    ownership=("listing.provider_projection",),
+    effect_class=EffectClass.EXTERNAL,
+    receipt_schema_id=_RECEIPT,
+)
+
 
 # ── Grouped access ─────────────────────────────────────────────────────────
 
@@ -188,6 +199,7 @@ TGW_TREATMENTS: tuple[TreatmentContract, ...] = (
     EBAY_UPLOAD,
     EBAY_STAGE,
     EBAY_PUBLISH,
+    EBAY_SYNC_TARGETED,
 )
 
 ALL_TREATMENTS: tuple[TreatmentContract, ...] = CODING_TREATMENTS + TGW_TREATMENTS

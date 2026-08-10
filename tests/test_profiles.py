@@ -167,8 +167,8 @@ class TestTgwCumulative:
 
 
 class TestProfileRegistry:
-    def test_dict_has_nine_entries(self):
-        assert len(PROFILE) == 9
+    def test_dict_has_ten_entries(self):
+        assert len(PROFILE) == 10
 
     def test_all_values_are_goal_profiles(self):
         for p in PROFILE.values():
@@ -197,8 +197,8 @@ class TestGetProfile:
 
 
 class TestAllProfiles:
-    def test_returns_nine(self):
-        assert len(all_profiles()) == 9
+    def test_returns_ten(self):
+        assert len(all_profiles()) == 10
 
     def test_returns_tuples(self):
         assert isinstance(all_profiles(), tuple)
@@ -224,9 +224,9 @@ class TestCodingProfilesHelper:
 
 
 class TestTgwProfilesHelper:
-    def test_returns_five(self):
+    def test_returns_six(self):
         profiles = tgw_profiles()
-        assert len(profiles) == 5
+        assert len(profiles) == 6
 
     def test_all_have_tgw_prefix(self):
         for p in tgw_profiles():
@@ -240,6 +240,7 @@ class TestTgwProfilesHelper:
             "tgw.ebay_priced",
             "tgw.ebay_staged",
             "tgw.ebay_listable",
+            "tgw.ebay_reconciled",
         }
 
 

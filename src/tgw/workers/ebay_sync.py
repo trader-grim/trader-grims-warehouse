@@ -31,8 +31,9 @@ from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.ebay.pull import backfill_canonical_from_live
 from tgw.ebay.sync import fetch_all_offers
+from tgw.errors import TreatmentFailure
 from tgw.queue import state_machine
-from tgw.queue.worker_base import QueueWorker
+from tgw.queue.worker_base import HardFailure, QueueWorker
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +50,100 @@ SYNC_INTERVAL_S = 6 * 3600  # check eBay every 6 hours
 
 
 class EbaySyncWorker(QueueWorker):
+    def _targeted_mode(self) -> str:
+        migration = self.config.get("workflow_migration")
+        if migration is None and isinstance(self.config.get("raw"), dict):
+            migration = self.config["raw"].get("workflow_migration")
+        migration = migration if isinstance(migration, dict) else {}
+        mode = migration.get("ebay_sync_targeted", "legacy")
+        if mode not in {"legacy", "workflow"}:
+            raise HardFailure(f"invalid ebay_sync_targeted mode {mode!r}")
+        return mode
+
+    @staticmethod
+    def _targeted_receipt(payload, sku, outcome, reason, **evidence):
+        return {
+            "receipt_schema_id": "treatment-receipt/v1",
+            "treatment_id": payload["treatment_id"],
+            "treatment_version": payload["treatment_version"],
+            "graph_id": payload["graph_id"], "outcome": outcome,
+            "goal_profile_id": payload["goal_profile_id"],
+            "goal_profile_version": payload["goal_profile_version"],
+            "object_generation": payload["object_generation"],
+            "condition_hash": payload["condition_hash"],
+            "established_conditions": (
+                ["provider_projection_current"] if outcome == "satisfied" else []
+            ),
+            "artifacts": [f"item:{sku}"],
+            "evidence": {
+                "reason_code": reason, "provider_effect_id": payload["provider_effect_id"],
+                "provider_identity": payload["provider_identity"], **evidence,
+            },
+        }
+
+    def _handle_governed_targeted(self, payload, sku, job):
+        from tgw.item_mutation import item_generation
+        from tgw.provider_effects import (
+            ProviderEffectConflict,
+            lookup_succeeded_provider_effect,
+        )
+        required = ("treatment_id", "treatment_version", "graph_id",
+                    "goal_profile_id", "goal_profile_version",
+                    "object_generation", "condition_hash", "provider_effect_id",
+                    "provider_identity", "expected_offer_id")
+        missing = [key for key in required
+                   if not isinstance(payload.get(key), str) or not payload[key].strip()]
+        if missing:
+            raise HardFailure("workflow targeted sync missing binding: " + ", ".join(missing))
+        if (payload["treatment_id"] != "ebay-sync-targeted"
+                or payload["treatment_version"] != "1"):
+            raise HardFailure("workflow targeted sync treatment binding mismatch")
+        if (job.get("entity_type") != "item" or job.get("entity_id") != sku
+                or payload.get("entity_id") != sku):
+            raise HardFailure("workflow targeted sync entity binding mismatch")
+        path = self.config["itemdata_root"] / sku / f"{sku}.json"
+        item = json.loads(path.read_text(encoding="utf-8"))
+        if item_generation(item) != payload["object_generation"]:
+            raise TreatmentFailure("targeted sync generation conflict",
+                self._targeted_receipt(payload, sku, "conflict", "GENERATION_CONFLICT"))
+        try:
+            _source, bound_offer_id = lookup_succeeded_provider_effect(
+                provider_effect_id=payload["provider_effect_id"], sku=sku,
+                provider_identity=payload["provider_identity"],
+                expected_offer_id=payload["expected_offer_id"],
+            )
+        except ProviderEffectConflict as exc:
+            raise TreatmentFailure(str(exc), self._targeted_receipt(
+                payload, sku, "reconciliation_required", "SOURCE_EFFECT_INVALID",
+            )) from exc
+        from tgw.ebay.sync import _find_offer
+        try:
+            offer = _find_offer(self.config, sku)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+            raise TreatmentFailure(str(exc), self._targeted_receipt(
+                payload, sku, "transient_backoff", "PROVIDER_READ_TRANSIENT",
+            )) from exc
+        if offer is None:
+            raise TreatmentFailure("provider offer absent", self._targeted_receipt(
+                payload, sku, "reconciliation_required", "PROVIDER_OFFER_ABSENT",
+            ))
+        if offer.get("offerId") != bound_offer_id:
+            raise TreatmentFailure("provider offer contradiction", self._targeted_receipt(
+                payload, sku, "reconciliation_required", "PROVIDER_OFFER_CONTRADICTION",
+                observed_offer_id=offer.get("offerId"),
+            ))
+        try:
+            changed = bool(self._sync_one(offer, sku))
+            resulting = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise TreatmentFailure(str(exc), self._targeted_receipt(
+                payload, sku, "repair_required", "PROJECTION_WRITE_FAILED",
+            )) from exc
+        return self._targeted_receipt(
+            payload, sku, "satisfied", "PROVIDER_PROJECTION_CURRENT",
+            changed=changed, resulting_generation=item_generation(resulting),
+            observed_offer_id=offer.get("offerId"),
+        )
     def run(self) -> None:
         self.install_signal_handlers()
         tgw_logging.log_event("worker_start", queue=QUEUE_NAME, owner=self.owner)
@@ -80,10 +175,15 @@ class EbaySyncWorker(QueueWorker):
         tgw_logging.log_event("worker_stop", queue=QUEUE_NAME, owner=self.owner)
         log.info("ebay_sync worker stopped")
 
-    def handle(self, job: Dict[str, Any]) -> None:
-        target_sku = (job.get("payload_json") or {}).get("sku")
+    def handle(self, job: Dict[str, Any]) -> Dict[str, Any] | None:
+        payload = job.get("payload_json") or {}
+        target_sku = payload.get("sku")
 
         if target_sku:
+            if self._targeted_mode() == "workflow":
+                raise HardFailure(
+                    "workflow targeted sync is not admitted: projection CAS pending"
+                )
             # Per-SKU sync — fetch just this item's offer from eBay
             log.info("ebay_sync: targeted sync for %s", target_sku)
             tgw_logging.log_event("ebay_sync_start", sku=target_sku)

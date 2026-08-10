@@ -101,6 +101,11 @@ TGW_EBAY_LISTABLE = GoalProfile(
     ),
 )
 
+TGW_EBAY_RECONCILED = GoalProfile(
+    identity="tgw.ebay_reconciled", version="1",
+    required=("provider_projection_current",),
+)
+
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
@@ -117,6 +122,7 @@ PROFILE: dict[str, GoalProfile] = {
         TGW_EBAY_PRICED,
         TGW_EBAY_STAGED,
         TGW_EBAY_LISTABLE,
+        TGW_EBAY_RECONCILED,
     )
 }
 
@@ -187,6 +193,10 @@ PROFILE_META: dict[str, ProfileMeta] = {
             ("published", "TRUE"),
             ("published", "NOT_APPLICABLE"),
         ),
+    ),
+    "tgw.ebay_reconciled": ProfileMeta(
+        description="Provider projection matches one exact successful source effect.",
+        evidence_source_class="provider_effect_receipt",
     ),
 }
 

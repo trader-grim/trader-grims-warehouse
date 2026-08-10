@@ -252,6 +252,50 @@ def lookup_authoritative_stage_receipt(
     }
 
 
+def lookup_succeeded_provider_effect(
+    *, provider_effect_id: str, sku: str, provider_identity: str,
+    expected_offer_id: str,
+    operations: tuple[str, ...] = ("stage-draft", "publish-offer"),
+) -> tuple[ProviderEffect, str]:
+    """Resolve one exact successful source effect for targeted reconciliation."""
+    with state_machine._conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM provider_effects WHERE effect_id=%s",
+                        (provider_effect_id,))
+            row = cur.fetchone()
+    if row is None:
+        raise ProviderEffectConflict("source provider effect absent")
+    record = _record(row)
+    binding = {
+        "provider": record.provider, "operation": record.operation,
+        "entity_type": record.entity_type, "entity_id": record.entity_id,
+        "object_generation": record.object_generation, "graph_id": record.graph_id,
+        "treatment_id": record.treatment_id,
+        "treatment_version": record.treatment_version,
+        "condition_hash": record.condition_hash, "request": record.request,
+        "authority": record.authority,
+    }
+    if effect_identity(**binding) != provider_effect_id:
+        raise ProviderEffectConflict("source provider effect identity mismatch")
+    if (record.provider != "ebay" or record.operation not in operations
+            or record.entity_type != "item" or record.entity_id != sku
+            or record.state != "succeeded"
+            or record.authority.get("provider_identity") != provider_identity):
+        raise ProviderEffectConflict("source provider effect binding mismatch")
+    if record.operation == "stage-draft":
+        bound_offer_id = (record.result or {}).get("offer_id")
+    else:
+        bound_offer_id = record.request.get("offer_id")
+        corroborated = ((record.result or {}).get("offer_id")
+                        or (record.result or {}).get("offerId"))
+        if corroborated and corroborated != bound_offer_id:
+            raise ProviderEffectConflict("publish result contradicts requested offer")
+    if (not isinstance(bound_offer_id, str) or not bound_offer_id.strip()
+            or bound_offer_id != expected_offer_id):
+        raise ProviderEffectConflict("source provider effect offer mismatch")
+    return record, bound_offer_id
+
+
 def _record(row: Mapping[str, Any]) -> ProviderEffect:
     return ProviderEffect(
         effect_id=str(row["effect_id"]), provider=str(row["provider"]),

@@ -261,6 +261,7 @@ def build_item_snapshot(
     authorized_scopes: tuple[str, ...] = (),
     authority_identity: str = "",
     stage_receipt_lookup: Callable[[str], Mapping[str, Any] | None] | None = None,
+    provider_projection_receipt: Mapping[str, Any] | None = None,
 ) -> ObjectSnapshot:
     """Build an ObjectSnapshot from one item JSON file, scoped to goal_profile.
 
@@ -290,6 +291,28 @@ def build_item_snapshot(
         condition_ids.update(treatment.may_establish)
 
     for condition_id in sorted(condition_ids):
+        if condition_id in {"provider_effect_succeeded", "provider_projection_current"}:
+            receipt = provider_projection_receipt
+            effect_id = receipt.get("provider_effect_id") if isinstance(receipt, Mapping) else None
+            if condition_id == "provider_effect_succeeded":
+                met = isinstance(effect_id, str) and bool(effect_id.strip())
+            else:
+                met = (isinstance(receipt, Mapping)
+                       and receipt.get("outcome") == "satisfied"
+                       and receipt.get("resulting_generation") == generation)
+            assertions.append(EvidenceAssertion(
+                condition_id=condition_id,
+                result=FingerprintResult.TRUE if met else FingerprintResult.UNKNOWN,
+                reasons=(("exact provider reconciliation evidence present" if met
+                          else "provider reconciliation evidence absent or stale"),),
+                evidence=(EvidenceReference(
+                    identity=effect_id or "provider-effect:absent",
+                    source_class="provider_effect_receipt",
+                    source_generation=(receipt.get("resulting_generation", generation)
+                                       if isinstance(receipt, Mapping) else generation),
+                ),),
+            ))
+            continue
         if condition_id.startswith("operator_authorized_"):
             scope = condition_id.removeprefix("operator_authorized_").replace("_", "-")
             authorized = scope in authorized_scopes
