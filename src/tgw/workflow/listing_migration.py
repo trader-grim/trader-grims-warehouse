@@ -232,6 +232,8 @@ def request_item_goal(
     provider_identity: str = "",
     authority_lookup=get_authority,
     stage_receipt_lookup=None,
+    operator_identity: str = "",
+    operator_surface: str = "",
 ) -> GoalRequestResult:
     """Evaluate one exact generation and dispatch at most one local treatment.
 
@@ -306,6 +308,10 @@ def request_item_goal(
             payload_extra={
                 "origin": origin,
                 "pre_authority_condition_hash": base_graph.condition_hash,
+                **({"operator_identity": operator_identity}
+                   if operator_identity else {}),
+                **({"operator_surface": operator_surface}
+                   if operator_surface else {}),
                 **({"operator_authority_id": authority_id} if authority_id else {}),
             },
             enqueue_fn=enqueue_fn,

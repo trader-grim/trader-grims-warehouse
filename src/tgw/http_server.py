@@ -2016,8 +2016,11 @@ def get_thumbnail(sku: str):
 # ---------------------------------------------------------------------------
 
 
-@app.post("/api/items/{sku}/action", dependencies=[AUTH])
-def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
+@app.post("/api/items/{sku}/action")
+def item_action(
+    sku: str, body: ActionBody,
+    operator_identity: str = Depends(_require_auth),
+) -> Dict[str, Any]:
     action = body.action
     if action not in PIPELINE_ACTIONS:
         raise HTTPException(
@@ -2326,13 +2329,46 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
             return {"ok": False, "sku": sku, "detail": err}
 
         elif action == "ai_identify":
-            _apply_patch(json_path, {"ai_reidentify": True})
-            job_id = state_machine.enqueue_job(
-                queue_name="ai_identify",
-                payload={"sku": sku, "origin": "operator"},
-                dedupe_key=f"ai_identify:{sku}",
-                max_attempts=3,
-            )
+            migration = _cfg.get("workflow_migration")
+            if migration is None and isinstance(_cfg.get("raw"), dict):
+                migration = _cfg["raw"].get("workflow_migration")
+            migration = migration if isinstance(migration, dict) else {}
+            mode = migration.get("item_ai_identify_fanout", "legacy")
+            if mode not in {"legacy", "workflow"}:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"invalid item_ai_identify_fanout mode {mode!r}",
+                )
+            if mode == "workflow":
+                from .workflow.listing_migration import request_item_goal
+                from .workflow.profiles import TGW_EBAY_IDENTIFIED
+
+                # Durable pending intent: the evaluator and queued treatment
+                # must bind the exact generation visible to a fresh worker.
+                _apply_patch(json_path, {"ai_reidentify": True})
+                result = request_item_goal(
+                    json_path, TGW_EBAY_IDENTIFIED, origin="operator",
+                    operator_identity=operator_identity,
+                    operator_surface="http:item-action:ai-identify",
+                )
+                if result.dispatched is None:
+                    return {
+                        "ok": False, "sku": sku, "action": action,
+                        "status": "held", "job_id": "",
+                        "held_external": list(result.held_external),
+                        "operator_gates": list(result.operator_gates),
+                        "ownership_conflicts": list(result.graph.ownership_conflicts),
+                        "reconciliation_gates": list(result.graph.reconciliation_gates),
+                    }
+                job_id = result.dispatched.job_id
+            else:
+                _apply_patch(json_path, {"ai_reidentify": True})
+                job_id = state_machine.enqueue_job(
+                    queue_name="ai_identify",
+                    payload={"sku": sku, "origin": "operator"},
+                    dedupe_key=f"ai_identify:{sku}",
+                    max_attempts=3,
+                )
 
         elif action == "ebay_price":
             # Clear price sub-fields so the worker runs fresh (load→strip→patch)
@@ -2433,6 +2469,8 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                 dedupe_key=f"{action}:{sku}",
                 max_attempts=5,
             )
+    except HTTPException:
+        raise
     except Exception as e:
         err = str(e)
         if "unique" in err.lower() or "duplicate" in err.lower():

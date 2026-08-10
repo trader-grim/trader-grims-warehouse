@@ -121,6 +121,8 @@ def _photos_uploaded(item: Dict[str, Any]) -> bool:
 
 def _ai_identified(item: Dict[str, Any]) -> bool:
     """ebay_category_id is set or product_lookup dict is non-empty."""
+    if item.get("ai_reidentify") is True:
+        return False
     if _get_str(item, "ebay_category_id"):
         return True
     product_lookup = item.get("product_lookup")

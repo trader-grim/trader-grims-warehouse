@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -173,6 +174,180 @@ def test_goal_request_allows_idempotent_already_dispatched(tmp_path):
     assert result.dispatched is not None
     assert result.dispatched.enqueued is False
     assert result.dispatched.outcome == "already_dispatched"
+
+
+def test_force_reidentify_marker_makes_identified_item_dispatchable(tmp_path):
+    _, path = _item(
+        tmp_path, product_lookup={"brand": "Acme"}, ai_reidentify=True,
+    )
+    calls = []
+    result = request_item_goal(
+        path, TGW_EBAY_IDENTIFIED, treatments=(AI_IDENTIFY,),
+        enqueue_fn=lambda **kwargs: calls.append(kwargs) or "job-force",
+    )
+    assert result.dispatched is not None
+    assert result.dispatched.job_id == "job-force"
+    assert calls[0]["queue_name"] == "ai_identify"
+
+
+def test_item_action_ai_identify_workflow_uses_authenticated_goal_not_direct_fanout(
+    tmp_path, monkeypatch,
+):
+    from tgw.workflow import listing_migration
+
+    root, path = _item(tmp_path, product_lookup={"brand": "Acme"})
+    monkeypatch.setattr(http_server, "_cfg", {
+        "itemdata_root": root,
+        "workflow_migration": {
+            "item_ai_identify_fanout": "workflow",
+            "ebay_provider_identity": "ebay:account",
+        },
+    })
+    captured = {}
+    dispatched = SimpleNamespace(job_id="job-workflow")
+    goal_result = SimpleNamespace(dispatched=dispatched)
+    monkeypatch.setattr(
+        listing_migration, "request_item_goal",
+        lambda *args, **kwargs: captured.update(kwargs) or goal_result,
+    )
+    direct = []
+    monkeypatch.setattr(http_server.state_machine, "enqueue_job",
+                        lambda **kwargs: direct.append(kwargs))
+
+    response = http_server.item_action(
+        "SKU-1", http_server.ActionBody(action="ai_identify"),
+        operator_identity="operator:test",
+    )
+
+    assert response["job_id"] == "job-workflow"
+    assert direct == []
+    assert captured["origin"] == "operator"
+    assert captured["operator_identity"] == "operator:test"
+    assert captured["operator_surface"] == "http:item-action:ai-identify"
+    assert json.loads(path.read_text())["ai_reidentify"] is True
+
+
+def test_item_action_ai_identify_defaults_to_exact_legacy_fanout(tmp_path, monkeypatch):
+    root, _ = _item(tmp_path)
+    monkeypatch.setattr(http_server, "_cfg", {"itemdata_root": root, "raw": {}})
+    calls = []
+    monkeypatch.setattr(
+        http_server.state_machine, "enqueue_job",
+        lambda **kwargs: calls.append(kwargs) or "job-legacy",
+    )
+
+    response = http_server.item_action(
+        "SKU-1", http_server.ActionBody(action="ai_identify"),
+        operator_identity="operator:test",
+    )
+
+    assert response["job_id"] == "job-legacy"
+    assert calls == [{
+        "queue_name": "ai_identify",
+        "payload": {"sku": "SKU-1", "origin": "operator"},
+        "dedupe_key": "ai_identify:SKU-1", "max_attempts": 3,
+    }]
+
+
+def test_item_action_workflow_dispatch_failure_preserves_pending_intent(
+    tmp_path, monkeypatch,
+):
+    from tgw.workflow import listing_migration
+
+    root, path = _item(tmp_path, product_lookup={"brand": "Acme"})
+    monkeypatch.setattr(http_server, "_cfg", {
+        "itemdata_root": root,
+        "workflow_migration": {"item_ai_identify_fanout": "workflow"},
+    })
+    monkeypatch.setattr(
+        listing_migration, "request_item_goal",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("dispatch failed")),
+    )
+    with pytest.raises(HTTPException) as caught:
+        http_server.item_action(
+            "SKU-1", http_server.ActionBody(action="ai_identify"),
+            operator_identity="operator:test",
+        )
+    assert caught.value.status_code == 500
+    assert json.loads(path.read_text())["ai_reidentify"] is True
+
+
+def test_item_action_workflow_held_is_truthful_and_preserves_pending_intent(
+    tmp_path, monkeypatch,
+):
+    from tgw.workflow import listing_migration
+
+    root, path = _item(tmp_path)
+    monkeypatch.setattr(http_server, "_cfg", {
+        "itemdata_root": root,
+        "workflow_migration": {"item_ai_identify_fanout": "workflow"},
+    })
+    held = SimpleNamespace(
+        dispatched=None, held_external=("external",), operator_gates=("gate",),
+        graph=SimpleNamespace(ownership_conflicts=("owner",),
+                              reconciliation_gates=("reconcile",)),
+    )
+    monkeypatch.setattr(listing_migration, "request_item_goal",
+                        lambda *args, **kwargs: held)
+    response = http_server.item_action(
+        "SKU-1", http_server.ActionBody(action="ai_identify"),
+        operator_identity="operator:test",
+    )
+    assert response["ok"] is False
+    assert response["status"] == "held"
+    assert response["operator_gates"] == ["gate"]
+    assert json.loads(path.read_text())["ai_reidentify"] is True
+
+
+def test_item_action_invalid_selector_preserves_503_and_does_not_mutate(
+    tmp_path, monkeypatch,
+):
+    root, path = _item(tmp_path)
+    before = path.read_text()
+    monkeypatch.setattr(http_server, "_cfg", {
+        "itemdata_root": root,
+        "workflow_migration": {"item_ai_identify_fanout": "invalid"},
+    })
+    with pytest.raises(HTTPException) as caught:
+        http_server.item_action(
+            "SKU-1", http_server.ActionBody(action="ai_identify"),
+            operator_identity="operator:test",
+        )
+    assert caught.value.status_code == 503
+    assert path.read_text() == before
+
+
+def test_item_action_workflow_queue_generation_matches_durable_intent(
+    tmp_path, monkeypatch,
+):
+    from tgw.workflow.item_snapshot import build_item_snapshot
+
+    root, path = _item(tmp_path, product_lookup={"brand": "Acme"})
+    monkeypatch.setattr(http_server, "_cfg", {
+        "itemdata_root": root,
+        "workflow_migration": {"item_ai_identify_fanout": "workflow"},
+    })
+    calls = []
+    monkeypatch.setattr(
+        http_server.state_machine, "enqueue_job",
+        lambda **kwargs: calls.append(kwargs) or "job-generation",
+    )
+
+    response = http_server.item_action(
+        "SKU-1", http_server.ActionBody(action="ai_identify"),
+        operator_identity="operator:authenticated",
+    )
+
+    snapshot = build_item_snapshot(path, TGW_EBAY_IDENTIFIED,
+                                   treatments=(AI_IDENTIFY,))
+    assert response["job_id"] == "job-generation"
+    assert calls[0]["payload"]["object_generation"] == snapshot.generation
+    assert calls[0]["payload"]["operator_identity"] == (
+        "operator:authenticated"
+    )
+    assert calls[0]["payload"]["operator_surface"] == (
+        "http:item-action:ai-identify"
+    )
 
 
 def test_workflow_goal_endpoint_reports_enqueue_failure(tmp_path, monkeypatch):
