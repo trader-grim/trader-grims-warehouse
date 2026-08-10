@@ -44,7 +44,7 @@ def test_rebuilds_new_generation_and_dispatches_evaluator_selected_local_treatme
     assert enqueue.call_args.kwargs["payload"]["graph_id"] == receipt["evidence"]["graph_id"]
 
 
-def test_external_next_treatment_is_reported_but_not_dispatched(tmp_path):
+def test_external_candidates_are_reported_when_no_local_treatment_is_eligible(tmp_path):
     root = tmp_path / "items"
     path = root / "SKU-1" / "SKU-1.json"
     path.parent.mkdir(parents=True)
@@ -58,8 +58,27 @@ def test_external_next_treatment_is_reported_but_not_dispatched(tmp_path):
     enqueue = MagicMock()
     receipt = evaluate_event(job, cfg, enqueue_fn=enqueue)
     assert receipt["evidence"]["dispatch"] == "held_external"
-    assert receipt["evidence"]["next_treatment"] in {"ebay-publish", "ebay-upload"}
+    assert set(receipt["evidence"]["external_candidates"]) == {"ebay-publish", "ebay-upload"}
     enqueue.assert_not_called()
+
+
+def test_lexically_earlier_external_does_not_block_later_local_treatment(tmp_path):
+    root = tmp_path / "items"
+    path = root / "SKU-1" / "SKU-1.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({
+        "sku": "SKU-1", "condition": "pre-owned", "image": "a.jpg",
+        "product_lookup": {"title": "known"}, "ebay_category_id": "123",
+        "draft_listing": {"title": "Ready", "category_id": "123", "price": 10},
+        "ebay_offer": {"offer_id": "offer-1"},
+    }), encoding="utf-8")
+    job, cfg = _event(root)
+    enqueue = MagicMock(return_value="normalize-job")
+    receipt = evaluate_event(job, cfg, enqueue_fn=enqueue)
+    assert receipt["evidence"]["eligible"][0] == "ebay-publish"
+    assert receipt["evidence"]["next_treatment"] == "normalize-condition"
+    assert receipt["evidence"]["dispatch"] == "enqueued"
+    assert enqueue.call_args.kwargs["queue_name"] == "normalize_condition"
 
 
 @pytest.mark.parametrize(
@@ -138,6 +157,28 @@ def test_atomic_completion_writes_receipt_then_durable_event():
     inserted = json.loads(cursor.execute.call_args_list[1].args[1][2])
     assert inserted["origin_receipt"] == receipt
     assert inserted["prior_object_generation"] == "gen-1"
+
+
+def test_satisfied_no_change_receipt_is_persisted_without_evaluation_event():
+    cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
+    cursor.fetchone.return_value = (
+        "SKU-1", {"goal_profile_id": "tgw.ebay_listable", "goal_profile_version": "1",
+                  "graph_id": "graph-1", "object_generation": "gen-1"},
+    )
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value = cursor
+    receipt = {"outcome": "satisfied", "graph_id": "graph-1",
+               "evidence": {"changed": False}}
+    with patch.object(state_machine, "_conn", return_value=connection):
+        result = state_machine.complete_treatment_and_enqueue_evaluation(
+            "origin-job", "owner", receipt,
+        )
+    assert result == state_machine.EVALUATION_EVENT_NOT_REQUIRED
+    assert cursor.execute.call_count == 1
+    persisted = json.loads(cursor.execute.call_args.args[1][0])
+    assert persisted["evidence"]["changed"] is False
 
 
 def test_atomic_completion_raises_when_lease_guard_loses():

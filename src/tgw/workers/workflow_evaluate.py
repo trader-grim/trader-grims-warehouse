@@ -83,16 +83,20 @@ def evaluate_event(
         evidence["dispatch"] = "none"
         return _receipt("satisfied", **evidence)
 
-    disposition = graph.eligible_treatments[0]
-    treatment = next(
-        item for item in TGW_TREATMENTS
-        if (item.identity, item.version) ==
-        (disposition.treatment_id, disposition.treatment_version)
-    )
-    if treatment.effect_class.value != "local":
+    contracts = {(item.identity, item.version): item for item in TGW_TREATMENTS}
+    local_dispositions = [
+        disposition for disposition in graph.eligible_treatments
+        if contracts[(disposition.treatment_id, disposition.treatment_version)].effect_class.value
+        == "local"
+    ]
+    if not local_dispositions:
+        external_candidates = [
+            disposition.treatment_id for disposition in graph.eligible_treatments
+        ]
         evidence["dispatch"] = "held_external"
-        evidence["next_treatment"] = disposition.treatment_id
+        evidence["external_candidates"] = external_candidates
         return _receipt("satisfied", **evidence)
+    disposition = local_dispositions[0]
     dispatched = dispatch_treatment(
         disposition=disposition, entity_id=entity_id, graph=graph,
         enqueue_fn=enqueue_fn,

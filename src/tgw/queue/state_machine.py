@@ -14,6 +14,8 @@ import psycopg2.extras
 
 log = logging.getLogger(__name__)
 
+EVALUATION_EVENT_NOT_REQUIRED = "evaluation-event-not-required"
+
 # Module-level DSN — set by init() before any worker starts.
 _DSN: str = 'dbname=state_machine user=tgw'
 
@@ -700,6 +702,9 @@ def complete_treatment_and_enqueue_evaluation(
                     f"lost running lease while completing treatment job {job_id}"
                 )
             entity_id, payload = completed
+            evidence = result.get("evidence")
+            if isinstance(evidence, dict) and evidence.get("changed") is False:
+                return EVALUATION_EVENT_NOT_REQUIRED
             event_payload = {
                 "entity_id": entity_id,
                 "origin_job_id": job_id,
