@@ -158,7 +158,7 @@ def test_success_persists_exact_stage_evidence_before_satisfied_receipt(
     writes = []
     monkeypatch.setattr(stage_mod, 'fence_ebay_write',
                         lambda *args, **kwargs: writes.append(kwargs))
-    monkeypatch.setattr(stage_mod, 'enqueue_post_push_sync', lambda sku: None)
+    monkeypatch.setattr(stage_mod, 'enqueue_post_push_sync', lambda sku, **kwargs: None)
     monkeypatch.setattr(
         worker, '_stage_with_provider_effect',
         lambda *args, **kwargs: (
@@ -209,14 +209,16 @@ def test_already_staged_governed_replay_syncs_before_satisfied(
                         lambda *args: provider_calls.append(args))
     sync_calls = []
     monkeypatch.setattr(stage_mod, 'enqueue_post_push_sync',
-                        lambda value: sync_calls.append(value))
+                        lambda value, **kwargs: sync_calls.append((value, kwargs)))
 
     receipt = worker.handle({
         'entity_type': 'item', 'entity_id': sku, 'payload_json': _payload(),
     })
 
     assert provider_calls == []
-    assert sync_calls == [sku]
+    assert sync_calls == [(sku, {
+        'config': worker.config, 'source_provider_effect_id': 'e' * 64,
+    })]
     assert receipt['outcome'] == 'satisfied'
 
 

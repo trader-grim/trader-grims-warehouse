@@ -36,7 +36,49 @@ from tgw.queue import state_machine
 log = logging.getLogger(__name__)
 
 
-def enqueue_post_push_sync(sku: str) -> None:
+_TARGETED_SYNC_SCHEMA = "ebay-sync-targeted/v1"
+_GOVERNED_SYNC_KEYS = frozenset({
+    "treatment_id", "graph_id", "object_generation", "provider_effect_id",
+})
+
+
+def classify_targeted_sync_payload(payload: object) -> str:
+    """Classify queue payloads without reinterpreting mixed rollout shapes."""
+    if not isinstance(payload, dict):
+        return "ambiguous"
+    schema = payload.get("payload_schema_id")
+    if schema == _TARGETED_SYNC_SCHEMA:
+        return "governed"
+    if schema is not None or _GOVERNED_SYNC_KEYS.intersection(payload):
+        return "ambiguous"
+    if set(payload) == {"reason"} and payload["reason"] in {"startup", "scheduled"}:
+        return "periodic"
+    has_sku = isinstance(payload.get("sku"), str) and bool(payload["sku"].strip())
+    if (has_sku and (
+        set(payload) == {"sku"}
+        or (set(payload) == {"sku", "reason"} and payload["reason"] == "post_push")
+        or (set(payload) == {"sku", "reason", "origin"}
+            and payload["reason"] in {"manual", "revision_apply"}
+            and payload["origin"] == "operator")
+    )):
+        return "legacy"
+    return "ambiguous"
+
+
+def _post_push_producer_mode(config) -> str:
+    migration = config.get("workflow_migration") if isinstance(config, dict) else None
+    if migration is None and isinstance(config.get("raw"), dict):
+        migration = config["raw"].get("workflow_migration")
+    migration = migration if isinstance(migration, dict) else {}
+    mode = migration.get("ebay_post_push_sync_producer", "legacy")
+    if mode not in {"legacy", "workflow"}:
+        raise ValueError(f"invalid ebay_post_push_sync_producer mode {mode!r}")
+    return mode
+
+
+def enqueue_post_push_sync(
+    sku: str, *, config=None, source_provider_effect_id: str = "",
+) -> bool:
     """Todo #1445/#1467: every worker that actually pushes a change to
     eBay's live state (`ebay_stage` for offer/inventory-item upserts,
     `ebay_publish` for the publish transition) must refresh the local
@@ -55,15 +97,37 @@ def enqueue_post_push_sync(sku: str) -> None:
     a failed enqueue here must never turn a successful stage/publish into
     a failed job.
     """
+    config = config or {}
+    mode = _post_push_producer_mode(config)
     try:
+        if mode == "workflow":
+            from tgw.config import sku_json
+            from tgw.workflow.post_push_sync import dispatch_targeted_sync
+            migration = config.get("workflow_migration")
+            if migration is None and isinstance(config.get("raw"), dict):
+                migration = config["raw"].get("workflow_migration")
+            migration = migration if isinstance(migration, dict) else {}
+            provider_identity = migration.get("ebay_provider_identity", "")
+            if not source_provider_effect_id or not provider_identity:
+                raise ValueError("governed post-push sync binding is incomplete")
+            result = dispatch_targeted_sync(
+                sku_json(config, sku),
+                source_provider_effect_id=source_provider_effect_id,
+                provider_identity=provider_identity,
+            )
+            return result.enqueued or result.outcome == "already_dispatched"
         state_machine.enqueue_job(
             queue_name='ebay_sync',
             payload={'sku': sku, 'reason': 'post_push'},
             dedupe_key=f'ebay_sync:post_push:{sku}',
             max_attempts=3,
         )
+        return True
     except Exception as exc:
         log.warning('%s: post-push ebay_sync enqueue failed (non-fatal): %s', sku, exc)
+        if mode == "workflow":
+            raise
+        return False
 
 
 def format_ebay_error(body: str, status: int) -> str:

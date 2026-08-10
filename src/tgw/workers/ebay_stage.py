@@ -386,7 +386,9 @@ class EbayStageWorker(QueueWorker):
                             effect_id=effect_id,
                             reason_code='PROVIDER_EFFECT_REPLAY_INVALID'),
                     ) from exc
-                enqueue_post_push_sync(sku)
+                enqueue_post_push_sync(
+                    sku, config=self.config, source_provider_effect_id=effect_id,
+                )
                 return self._receipt(
                     payload, sku, outcome='satisfied', effect_id=effect_id,
                     reason_code='PROVIDER_EFFECT_SUCCEEDED', result=record.result,
@@ -622,7 +624,10 @@ class EbayStageWorker(QueueWorker):
         tgw_logging.log_event('ebay_stage_complete', sku=sku,
                               offer_id=result['offer_id'])
 
-        enqueue_post_push_sync(sku)
+        enqueue_post_push_sync(
+            sku, config=self.config,
+            source_provider_effect_id=provider_effect_id,
+        )
 
         if effect_mode == 'workflow':
             return self._receipt(

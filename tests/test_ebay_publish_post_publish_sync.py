@@ -107,7 +107,7 @@ def test_governed_sync_failure_replay_completes_outbox_without_republish(
         ebay_publish_mod.state_machine, 'enqueue_catalog_rebuild', lambda *a, **k: 'catalog')
     sync_attempts = 0
 
-    def fail_once(sku):
+    def fail_once(sku, **kwargs):
         nonlocal sync_attempts
         sync_attempts += 1
         if sync_attempts == 1:

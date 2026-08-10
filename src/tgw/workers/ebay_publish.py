@@ -419,7 +419,10 @@ class EbayPublishWorker(QueueWorker):
             if photo_verify is not None:
                 existing_listing['photo_verify'] = photo_verify
                 fence_ebay_write(self.config, sku, ebay_listing=existing_listing)
-            enqueue_post_push_sync(sku)
+            enqueue_post_push_sync(
+                sku, config=self.config,
+                source_provider_effect_id=str(existing_listing.get('provider_effect_id') or ''),
+            )
             return self._governed_success_receipt(payload, sku)
 
         if effect_mode == 'workflow':
@@ -696,7 +699,10 @@ class EbayPublishWorker(QueueWorker):
         except psycopg2.errors.UniqueViolation:
             pass
 
-        enqueue_post_push_sync(sku)
+        enqueue_post_push_sync(
+            sku, config=self.config,
+            source_provider_effect_id=str(result.get('_provider_effect_id') or ''),
+        )
 
         # A provider response alone is not treatment success.  Emit the
         # satisfied receipt only after the canonical listing/offer projection,

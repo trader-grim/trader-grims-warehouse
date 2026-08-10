@@ -55,9 +55,9 @@ class EbaySyncWorker(QueueWorker):
         if migration is None and isinstance(self.config.get("raw"), dict):
             migration = self.config["raw"].get("workflow_migration")
         migration = migration if isinstance(migration, dict) else {}
-        mode = migration.get("ebay_sync_targeted", "legacy")
-        if mode not in {"legacy", "workflow"}:
-            raise HardFailure(f"invalid ebay_sync_targeted mode {mode!r}")
+        mode = migration.get("ebay_sync_targeted_consumer", "off")
+        if mode not in {"off", "workflow"}:
+            raise HardFailure(f"invalid ebay_sync_targeted_consumer mode {mode!r}")
         return mode
 
     @staticmethod
@@ -126,6 +126,7 @@ class EbaySyncWorker(QueueWorker):
                     "goal_profile_id", "goal_profile_version",
                     "object_generation", "condition_hash", "provider_effect_id",
                     "provider_identity", "expected_offer_id")
+        required = (*required, "source_operation")
         missing = [key for key in required
                    if not isinstance(payload.get(key), str) or not payload[key].strip()]
         if missing:
@@ -146,7 +147,7 @@ class EbaySyncWorker(QueueWorker):
             raise TreatmentFailure("targeted sync generation conflict",
                 self._targeted_receipt(payload, sku, "conflict", "GENERATION_CONFLICT"))
         try:
-            _source, bound_offer_id = lookup_succeeded_provider_effect(
+            source, bound_offer_id = lookup_succeeded_provider_effect(
                 provider_effect_id=payload["provider_effect_id"], sku=sku,
                 provider_identity=payload["provider_identity"],
                 expected_offer_id=payload["expected_offer_id"],
@@ -155,6 +156,12 @@ class EbaySyncWorker(QueueWorker):
             raise TreatmentFailure(str(exc), self._targeted_receipt(
                 payload, sku, "reconciliation_required", "SOURCE_EFFECT_INVALID",
             )) from exc
+        if source.operation != payload["source_operation"]:
+            raise TreatmentFailure("source operation contradiction",
+                self._targeted_receipt(
+                    payload, sku, "reconciliation_required",
+                    "SOURCE_OPERATION_CONTRADICTION",
+                ))
         from tgw.ebay.sync import _find_offer
         try:
             offer = _find_offer(self.config, sku)
@@ -311,13 +318,18 @@ class EbaySyncWorker(QueueWorker):
 
     def handle(self, job: Dict[str, Any]) -> Dict[str, Any] | None:
         payload = job.get("payload_json") or {}
+        from tgw.ebay.sync import classify_targeted_sync_payload
+        shape = classify_targeted_sync_payload(payload)
+        if shape == "ambiguous":
+            raise HardFailure("ambiguous ebay_sync payload schema")
+        if shape == "governed":
+            mode = self._targeted_mode()
+            raise HardFailure(
+                f"workflow targeted sync consumer is not admitted (mode={mode})"
+            )
         target_sku = payload.get("sku")
 
-        if target_sku:
-            if self._targeted_mode() == "workflow":
-                raise HardFailure(
-                    "workflow targeted sync is not admitted: projection CAS pending"
-                )
+        if shape == "legacy" and target_sku:
             # Per-SKU sync — fetch just this item's offer from eBay
             log.info("ebay_sync: targeted sync for %s", target_sku)
             tgw_logging.log_event("ebay_sync_start", sku=target_sku)

@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -32,18 +33,20 @@ def _worker(tmp_path):
 
 def _job():
     return {"queue_name": "ebay_sync", "entity_type": "item", "entity_id": "SKU-1", "payload_json": {
+        "payload_schema_id": "ebay-sync-targeted/v1",
         "sku": "SKU-1", "entity_id": "SKU-1", "treatment_id": "ebay-sync-targeted",
         "treatment_version": "1", "graph_id": "graph-1",
         "goal_profile_id": "tgw.ebay_reconciled", "goal_profile_version": "1",
         "object_generation": "generation-1", "condition_hash": "condition-1",
         "provider_effect_id": "effect-1", "provider_identity": "ebay:account",
         "expected_offer_id": "OFF-1",
+        "source_operation": "stage-draft",
     }}
 
 
 def _source_effect_ok():
     return patch("tgw.provider_effects.lookup_succeeded_provider_effect",
-                 return_value=(object(), "OFF-1"))
+                 return_value=(SimpleNamespace(operation="stage-draft"), "OFF-1"))
 
 
 def _bound_job(path):
@@ -132,7 +135,7 @@ def test_workflow_selector_fails_closed_before_provider_read(tmp_path):
     worker, _ = _worker(tmp_path)
     with patch("tgw.ebay.sync._find_offer") as provider_read, pytest.raises(HardFailure) as caught:
         worker.handle(_job())
-    assert "projection CAS pending" in str(caught.value)
+    assert "consumer is not admitted" in str(caught.value)
     provider_read.assert_not_called()
 
 

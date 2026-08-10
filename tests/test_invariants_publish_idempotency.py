@@ -200,14 +200,18 @@ def test_satisfied_receipt_is_after_projection_and_invalidations(
         publish_mod.state_machine, 'enqueue_catalog_rebuild',
         lambda reason: order.append('catalog'),
     )
+    sync_bindings = []
     monkeypatch.setattr(
         publish_mod, 'enqueue_post_push_sync',
-        lambda sku: order.append('sync'),
+        lambda sku, **kwargs: (sync_bindings.append((sku, kwargs)), order.append('sync'))[-1],
     )
 
     receipt = publisher.handle({'payload_json': {'sku': 'tgw-order'}})
 
     assert order == ['canonical', 'baseline', 'catalog', 'sync']
+    assert sync_bindings == [('tgw-order', {
+        'config': publisher.config, 'source_provider_effect_id': '',
+    })]
     assert receipt is None  # legacy unbound completion stays non-treatment
 
 

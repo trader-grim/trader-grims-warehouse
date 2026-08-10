@@ -59,6 +59,7 @@ def dispatch_targeted_sync(
     result = dispatch_treatment(
         disposition=disposition, entity_id=sku, entity_type="item", graph=graph,
         payload_extra={
+            "payload_schema_id": "ebay-sync-targeted/v1",
             "sku": sku, "provider_effect_id": source_provider_effect_id,
             "provider_identity": provider_identity, "expected_offer_id": offer_id,
             "source_operation": source.operation,

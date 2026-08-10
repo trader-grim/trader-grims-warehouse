@@ -32,7 +32,7 @@ def _worker(cfg: Dict[str, Any]) -> EbaySyncWorker:
 
 
 def _job() -> Dict[str, Any]:
-    return {"payload_json": {}}
+    return {"payload_json": {"reason": "scheduled"}}
 
 
 def _http_error(error_id: int) -> requests.exceptions.HTTPError:
