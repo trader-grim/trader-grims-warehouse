@@ -123,6 +123,92 @@ def test_false_projection_result_requires_repair(tmp_path):
     assert receipt.status == "REPAIR_REQUIRED"
 
 
+def test_semantic_noop_is_committed_without_effects(tmp_path):
+    item = tmp_path / "items" / "A" / "A.json"
+    document = {"sku": "A", "v": 1}
+    _write(item, document)
+    original_bytes = item.read_bytes()
+    projections = []
+    receipt = _run(
+        tmp_path,
+        item,
+        item_generation(document),
+        {"v": 1},
+        lambda doc: dict(doc),
+        lambda *_: projections.append(True),
+    )
+    assert receipt.status == "COMMITTED"
+    assert receipt.changed is False
+    assert receipt.observed_generation == receipt.resulting_generation
+    assert item.read_bytes() == original_bytes
+    assert not (tmp_path / "archive").exists()
+    assert projections == []
+    operation_dir = tmp_path / "journal" / "operations" / receipt.operation_id[:2] / receipt.operation_id
+    assert not (operation_dir / "intent.json").exists()
+
+
+def test_post_replace_directory_fsync_error_is_repairable_not_failed(tmp_path, monkeypatch):
+    item = tmp_path / "items" / "A" / "A.json"
+    before = {"sku": "A", "v": 1}
+    after = {"sku": "A", "v": 2}
+    _write(item, before)
+    from tgw import item_mutation
+
+    original_fsync_dir = item_mutation._fsync_dir
+    raised = False
+
+    def fail_item_directory_once(path):
+        nonlocal raised
+        if path == item.parent and not raised:
+            raised = True
+            raise OSError("directory fsync failed after replace")
+        return original_fsync_dir(path)
+
+    monkeypatch.setattr(item_mutation, "_fsync_dir", fail_item_directory_once)
+    projections = []
+    receipt = _run(
+        tmp_path,
+        item,
+        item_generation(before),
+        {"v": 2},
+        lambda doc: {**doc, "v": 2},
+        lambda *_: projections.append(True),
+    )
+    assert receipt.status == "REPAIR_REQUIRED"
+    assert receipt.resulting_generation == item_generation(after)
+    assert json.loads(item.read_text()) == after
+    assert projections == []
+    assert discover_repair_operations(tmp_path / "journal") == (receipt.operation_id,)
+
+
+def test_publication_marker_error_is_repairable_not_failed(tmp_path, monkeypatch):
+    item = tmp_path / "items" / "A" / "A.json"
+    before = {"sku": "A", "v": 1}
+    after = {"sku": "A", "v": 2}
+    _write(item, before)
+    from tgw import item_mutation
+
+    original_atomic = item_mutation._atomic_json
+
+    def fail_publication_marker(path, value):
+        if path.name == "publication.json":
+            raise OSError("publication marker unavailable")
+        return original_atomic(path, value)
+
+    monkeypatch.setattr(item_mutation, "_atomic_json", fail_publication_marker)
+    receipt = _run(
+        tmp_path,
+        item,
+        item_generation(before),
+        {"v": 2},
+        lambda doc: {**doc, "v": 2},
+    )
+    assert receipt.status == "REPAIR_REQUIRED"
+    assert receipt.resulting_generation == item_generation(after)
+    assert json.loads(item.read_text()) == after
+    assert discover_repair_operations(tmp_path / "journal") == (receipt.operation_id,)
+
+
 def test_projection_reconciliation_preserves_receipt_and_is_idempotent(tmp_path):
     item = tmp_path / "items" / "A" / "A.json"
     _write(item, {"sku": "A", "v": 1})

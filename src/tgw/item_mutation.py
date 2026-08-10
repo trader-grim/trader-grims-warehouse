@@ -39,6 +39,7 @@ class MutationReceipt:
     resulting_generation: str | None
     detail: str | None
     recorded_at: str
+    changed: bool = True
 
 
 def _json_native(value: Any, path: str = "payload") -> None:
@@ -258,6 +259,7 @@ def _reconcile_unfinished(
                     expected_generation=expected, status="CONFLICT",
                     observed_generation=None, resulting_generation=planned_generation,
                     detail=f"cannot verify unfinished canonical item: {type(exc).__name__}: {exc}",
+                    changed=planned_generation != expected,
                 ),
             )
         archive_marker = operation_dir / "archive.json"
@@ -289,6 +291,7 @@ def _reconcile_unfinished(
                         expected_generation=expected, status="CONFLICT",
                         observed_generation=observed, resulting_generation=planned_generation,
                         detail="canonical generation advanced during unfinished reconciliation",
+                        changed=planned_generation != expected,
                     ),
                 )
         elif observed != planned_generation:
@@ -299,6 +302,7 @@ def _reconcile_unfinished(
                     expected_generation=expected, status="CONFLICT",
                     observed_generation=observed, resulting_generation=planned_generation,
                     detail="published generation no longer canonical during reconciliation",
+                    changed=planned_generation != expected,
                 ),
             )
         try:
@@ -316,6 +320,7 @@ def _reconcile_unfinished(
                 expected_generation=expected, status=status,
                 observed_generation=expected, resulting_generation=planned_generation,
                 detail=detail,
+                changed=planned_generation != expected,
             ),
         )
 
@@ -412,6 +417,7 @@ def reconcile_mutation(
                     observed_generation=None,
                     resulting_generation=original.resulting_generation,
                     detail=f"cannot verify canonical item for reconciliation: {type(exc).__name__}: {exc}",
+                    changed=original.changed,
                 ),
             )
         if observed != original.resulting_generation:
@@ -426,6 +432,7 @@ def reconcile_mutation(
                     observed_generation=observed,
                     resulting_generation=original.resulting_generation,
                     detail="canonical generation advanced; projection reconciliation refused",
+                    changed=original.changed,
                 ),
             )
         try:
@@ -444,6 +451,7 @@ def reconcile_mutation(
                     observed_generation=observed,
                     resulting_generation=original.resulting_generation,
                     detail=f"projection reconciliation failed: {type(exc).__name__}: {exc}",
+                    changed=original.changed,
                 ),
             )
         return _record(
@@ -457,6 +465,7 @@ def reconcile_mutation(
                 observed_generation=observed,
                 resulting_generation=original.resulting_generation,
                 detail="projection reconciled; original receipt preserved",
+                changed=original.changed,
             ),
         )
 
@@ -625,6 +634,21 @@ def mutate_item(
                 raise TypeError("mutation must return a JSON object")
             _json_native(updated, "document")
             resulting = item_generation(updated)
+            if resulting == observed:
+                return _record(
+                    receipt_path,
+                    _receipt(
+                        operation_id=selected_id,
+                        sku=sku,
+                        kind=kind,
+                        expected_generation=expected_generation,
+                        status="COMMITTED",
+                        observed_generation=observed,
+                        resulting_generation=observed,
+                        detail="no canonical change",
+                        changed=False,
+                    ),
+                )
             intent["planned_resulting_generation"] = resulting
             intent["planned_document"] = updated
             # Transform and validation are pure.  Persist the complete,
@@ -645,6 +669,29 @@ def mutate_item(
                 {"operation_id": selected_id, "resulting_generation": resulting},
             )
         except Exception as exc:
+            # os.replace may have published the canonical document before a
+            # directory fsync or publication-marker write reported failure.
+            # Classify from persisted truth: once the planned generation is
+            # canonical, it is never truthful to call the operation FAILED.
+            try:
+                persisted = _load_json(item_path)
+                persisted_generation = item_generation(persisted) if isinstance(persisted, dict) else None
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                persisted_generation = None
+            if persisted_generation == locals().get("resulting") and persisted_generation != observed:
+                return _record(
+                    receipt_path,
+                    _receipt(
+                        operation_id=selected_id,
+                        sku=sku,
+                        kind=kind,
+                        expected_generation=expected_generation,
+                        status="REPAIR_REQUIRED",
+                        observed_generation=observed,
+                        resulting_generation=persisted_generation,
+                        detail=f"canonical published; terminal publication incomplete: {type(exc).__name__}: {exc}",
+                    ),
+                )
             return _record(
                 receipt_path,
                 _receipt(
