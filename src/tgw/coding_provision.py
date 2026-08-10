@@ -190,6 +190,21 @@ def get_request(_config: dict[str, Any], request_id: str) -> dict[str, Any]:
     return _document(job)
 
 
+def next_request(_config: dict[str, Any], worker_identity: str) -> dict[str, Any] | None:
+    """Return the oldest runnable request assigned to this worker.
+
+    Discovery is observation-only.  The request remains queued until the
+    worker validates its local envelope and performs the exact named claim.
+    """
+    job = state_machine.next_queued_job(QUEUE_NAME, worker_identity=worker_identity)
+    if job is None:
+        return None
+    document = _document(job)
+    if document.get("worker_identity") != worker_identity:
+        raise HardFailure("coding provision request is assigned to another worker")
+    return document
+
+
 def stop_request(config: dict[str, Any], request_id: str) -> dict[str, Any]:
     document = get_request(config, request_id)
     if document["state"] not in {"succeeded", "failed", "dead_letter", "cancelled"}:

@@ -462,6 +462,31 @@ def get_job(job_id: str) -> Optional[Dict[str, Any]]:
             return dict(row) if row is not None else None
 
 
+def next_queued_job(queue_name: str, *, worker_identity: str | None = None) -> Optional[Dict[str, Any]]:
+    """Observe the oldest runnable queued job without claiming it.
+
+    Request-addressed workers use this only to discover an id.  The later
+    named claim remains the sole queued→leased authority, so concurrent
+    pollers may safely observe the same row.
+    """
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT * FROM queue_jobs
+                 WHERE queue_name = %s AND state = 'queued'
+                   AND (%s IS NULL OR payload_json->>'worker_identity' = %s)
+                   AND run_at <= NOW()
+                   AND (not_before IS NULL OR not_before <= NOW())
+                 ORDER BY priority ASC, run_at ASC, created_at ASC, job_id ASC
+                 LIMIT 1
+                """,
+                (queue_name, worker_identity, worker_identity),
+            )
+            row = cur.fetchone()
+            return dict(row) if row is not None else None
+
+
 def claim_job(job_id: str, lease_owner: str, lease_seconds: int = 300) -> Optional[Dict[str, Any]]:
     """Atomically lease one named queued job and return its receipt token.
 

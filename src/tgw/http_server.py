@@ -356,6 +356,16 @@ def _require_coding_worker(request: Request) -> str:
 WORKER_AUTH = Depends(_require_coding_worker)
 
 
+@app.get("/api/coding/worker/requests/next")
+def coding_worker_next(worker_identity: str = WORKER_AUTH):
+    from .coding_provision import next_request
+
+    try:
+        return next_request(_cfg, worker_identity) or {}
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.post("/api/coding/requests", dependencies=[AUTH])
 def coding_provision_start(body: CodingProvisionStart):
     """Persist a request-safe coding job; the tgw-lib worker resolves and

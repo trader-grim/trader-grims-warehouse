@@ -208,6 +208,9 @@ class CodingProvisionClient:
     def get(self, request_id: str) -> dict[str, Any]:
         return self._call(f"/api/coding/worker/requests/{quote(request_id, safe='')}")
 
+    def next(self) -> dict[str, Any]:
+        return self._call("/api/coding/worker/requests/next")
+
     def claim(self, request_id: str, host: str, envelope_hash: str, location: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]:
         return self._call(f"/api/coding/worker/requests/{quote(request_id, safe='')}/claim", "POST", {"host": host, "envelope_hash": envelope_hash, "location": location, "snapshot": snapshot})
 
@@ -324,12 +327,31 @@ def claim_and_run(
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="tgw-coding-provision-worker")
-    parser.add_argument("request_id")
+    parser.add_argument("request_id", nargs="?")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     parser.add_argument("--host", default=socket.gethostname())
     parser.add_argument("--worker-identity", required=True)
     args = parser.parse_args()
-    result = claim_and_run(load_coding_worker_config(Path(args.config)), request_id=args.request_id, local_host=args.host, worker_identity=args.worker_identity)
+    config = load_coding_worker_config(Path(args.config))
+    request_id = args.request_id
+    if request_id is None:
+        service = configured_client(config)
+        pending = service.next()
+        request_id = pending.get("request_id")
+        if request_id is None:
+            print("null")
+            return 0
+        if not isinstance(request_id, str) or not request_id:
+            raise HardFailure("canonical coding service returned an invalid request id")
+        result = claim_and_run(
+            config,
+            request_id=request_id,
+            local_host=args.host,
+            worker_identity=args.worker_identity,
+            client=service,
+        )
+    else:
+        result = claim_and_run(config, request_id=request_id, local_host=args.host, worker_identity=args.worker_identity)
     print(json.dumps(result.get("receipt"), sort_keys=True))
     return 0
 

@@ -41,6 +41,16 @@ class NativeQueue:
     def get_job(self, job_id):
         return dict(self.jobs.get(job_id)) if job_id in self.jobs else None
 
+    def next_queued_job(self, queue_name, *, worker_identity=None):
+        for job in self.jobs.values():
+            if (
+                job["state"] == "queued"
+                and job["payload_json"].get("kind") == "coding-provision/v1"
+                and (worker_identity is None or job["payload_json"].get("worker_identity") == worker_identity)
+            ):
+                return dict(job)
+        return None
+
     def claim_job(self, job_id, lease_owner, **_kwargs):
         self.claims += 1
         job = self.jobs[job_id]
@@ -160,6 +170,9 @@ class WorkerServiceClient:
 
     def get(self, request_id):
         return self._call("GET", f"/api/coding/worker/requests/{request_id}")
+
+    def next(self):
+        return self._call("GET", "/api/coding/worker/requests/next")
 
     def claim(self, request_id, host, envelope_hash, location, snapshot):
         return self._call("POST", f"/api/coding/worker/requests/{request_id}/claim", {"host": host, "envelope_hash": envelope_hash, "location": location, "snapshot": snapshot})
@@ -1118,6 +1131,80 @@ def test_worker_cli_loads_supported_coding_config_contract(tmp_path, monkeypatch
 
     assert coding_provision_worker.main() == 0
     assert json.loads(capsys.readouterr().out)["config_seen"] == "tgw-lib-local"
+
+
+def test_worker_cli_discovers_and_runs_oldest_request_without_foreman(tmp_path, monkeypatch, capsys):
+    cfg_path = tmp_path / "tgw.json"
+    cfg_path.write_text(json.dumps(_config(tmp_path)))
+
+    class PullClient:
+        def next(self):
+            return {"request_id": "job-pulled"}
+
+    service = PullClient()
+    seen = {}
+    monkeypatch.setattr(coding_provision_worker, "configured_client", lambda _cfg: service)
+    monkeypatch.setattr(
+        coding_provision_worker,
+        "claim_and_run",
+        lambda _cfg, **kwargs: seen.update(kwargs) or {"receipt": {"request_id": kwargs["request_id"]}},
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        ["worker", "--config", str(cfg_path), "--host", "tgw-lib-local", "--worker-identity", "tgw-coding-worker"],
+    )
+
+    assert coding_provision_worker.main() == 0
+    assert seen == {
+        "request_id": "job-pulled",
+        "local_host": "tgw-lib-local",
+        "worker_identity": "tgw-coding-worker",
+        "client": service,
+    }
+    assert json.loads(capsys.readouterr().out) == {"request_id": "job-pulled"}
+
+
+def test_worker_cli_idle_poll_is_successful_noop(tmp_path, monkeypatch, capsys):
+    cfg_path = tmp_path / "tgw.json"
+    cfg_path.write_text(json.dumps(_config(tmp_path)))
+    monkeypatch.setattr(coding_provision_worker, "configured_client", lambda _cfg: type("Idle", (), {"next": lambda self: {}})())
+    monkeypatch.setattr("sys.argv", ["worker", "--config", str(cfg_path), "--worker-identity", "tgw-coding-worker"])
+
+    assert coding_provision_worker.main() == 0
+    assert json.loads(capsys.readouterr().out) is None
+
+
+def test_worker_can_observe_next_request_without_claim(tmp_path, native):
+    cfg = _config(tmp_path)
+    request = coding_provision.create_request(cfg, todo_id=1738)
+
+    pending = coding_provision.next_request(cfg, "tgw-coding-worker")
+
+    assert pending["request_id"] == request["request_id"]
+    assert pending["state"] == "queued"
+    assert native.claims == 0
+
+
+def test_next_request_skips_older_request_for_different_worker(tmp_path, native):
+    cfg = _config(tmp_path)
+    stale = coding_provision.create_request(cfg, todo_id=1737)
+    native.jobs[stale["request_id"]]["payload_json"]["worker_identity"] = "retired-worker"
+    current = coding_provision.create_request(cfg, todo_id=1738)
+
+    pending = coding_provision.next_request(cfg, "tgw-coding-worker")
+
+    assert pending["request_id"] == current["request_id"]
+    assert native.claims == 0
+
+
+def test_worker_next_route_is_static_and_worker_authenticated():
+    routes = list(http_server.app.routes)
+    static_index = next(i for i, route in enumerate(routes) if getattr(route, "path", None) == "/api/coding/worker/requests/next")
+    dynamic_index = next(i for i, route in enumerate(routes) if getattr(route, "path", None) == "/api/coding/worker/requests/{request_id}")
+    route = routes[static_index]
+
+    assert static_index < dynamic_index
+    assert any(dependency.call is http_server._require_coding_worker for dependency in route.dependant.dependencies)
 
 
 def test_access_status_and_stop_preserve_receipt_model(tmp_path, native):
