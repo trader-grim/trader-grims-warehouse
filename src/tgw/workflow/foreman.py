@@ -418,6 +418,7 @@ def tick(
             dispatch_result: DispatchResult = dispatch_treatment(
                 disposition=chosen.disposition,
                 entity_id=chosen.graph.object_id,
+                entity_type="coding_task",
                 graph=chosen.graph,
                 payload_extra={
                     "todo_id": chosen.todo.todo_id,

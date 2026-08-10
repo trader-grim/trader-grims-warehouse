@@ -29,6 +29,7 @@ WORKER_QUEUES: tuple[str, ...] = (
     'hermes-stitch',
     'plan_render',
     'thumbnail_gen',
+    'normalize_condition',
     'ebay_draft',
     'ebay_upload',
     'ebay_price',

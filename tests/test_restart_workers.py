@@ -12,6 +12,10 @@ def test_autonomous_coding_queues_use_the_canonical_worker_registry():
     assert "operator-admit" not in WORKER_QUEUES
 
 
+def test_normalize_condition_uses_the_canonical_worker_registry():
+    assert "normalize_condition" in WORKER_QUEUES
+
+
 def test_unknown_queue_rejected():
     out = api.cmd_restart_workers(queues=["not_a_queue"])
     assert out["ok"] is False
