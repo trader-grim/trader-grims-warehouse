@@ -482,6 +482,7 @@ def mutate_item(
     mutate: DocumentMutator,
     project: ProjectionWriter,
     operation_id: str | None = None,
+    project_noop: bool = False,
 ) -> MutationReceipt:
     """Apply one locked, generation-fenced local item mutation.
 
@@ -635,6 +636,27 @@ def mutate_item(
             _json_native(updated, "document")
             resulting = item_generation(updated)
             if resulting == observed:
+                if project_noop:
+                    try:
+                        projection_result = project(sku, updated)
+                        if not _projection_ok(projection_result):
+                            raise RuntimeError(
+                                "projection did not explicitly report success"
+                            )
+                    except Exception as exc:
+                        return _record(
+                            receipt_path,
+                            _receipt(
+                                operation_id=selected_id, sku=sku, kind=kind,
+                                expected_generation=expected_generation,
+                                status="REPAIR_REQUIRED",
+                                observed_generation=observed,
+                                resulting_generation=observed,
+                                detail=("no canonical change; projection verification "
+                                        f"failed: {type(exc).__name__}: {exc}"),
+                                changed=False,
+                            ),
+                        )
                 return _record(
                     receipt_path,
                     _receipt(
@@ -645,7 +667,8 @@ def mutate_item(
                         status="COMMITTED",
                         observed_generation=observed,
                         resulting_generation=observed,
-                        detail="no canonical change",
+                        detail=("no canonical change; projection verified"
+                                if project_noop else "no canonical change"),
                         changed=False,
                     ),
                 )

@@ -132,17 +132,113 @@ class EbaySyncWorker(QueueWorker):
                 payload, sku, "reconciliation_required", "PROVIDER_OFFER_CONTRADICTION",
                 observed_offer_id=offer.get("offerId"),
             ))
-        try:
-            changed = bool(self._sync_one(offer, sku))
-            resulting = json.loads(path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            raise TreatmentFailure(str(exc), self._targeted_receipt(
-                payload, sku, "repair_required", "PROJECTION_WRITE_FAILED",
-            )) from exc
+        if offer.get("sku") not in (None, "", sku):
+            raise TreatmentFailure("provider SKU contradiction", self._targeted_receipt(
+                payload, sku, "reconciliation_required", "PROVIDER_SKU_CONTRADICTION",
+                observed_sku=offer.get("sku"),
+            ))
+        mutation = self._project_governed_offer(
+            payload=payload, sku=sku, offer=offer, item_path=path,
+        )
+        if mutation.status != "COMMITTED":
+            outcome = {
+                "CONFLICT": "conflict", "REPAIR_REQUIRED": "repair_required",
+                "FAILED": "failed",
+            }.get(mutation.status, "repair_required")
+            raise TreatmentFailure(
+                mutation.detail or f"targeted sync mutation {mutation.status}",
+                self._targeted_receipt(
+                    payload, sku, outcome,
+                    f"ITEM_MUTATION_{mutation.status}",
+                    operation_id=mutation.operation_id,
+                    resulting_generation=mutation.resulting_generation,
+                ),
+            )
         return self._targeted_receipt(
             payload, sku, "satisfied", "PROVIDER_PROJECTION_CURRENT",
-            changed=changed, resulting_generation=item_generation(resulting),
+            changed=mutation.changed,
+            operation_id=mutation.operation_id,
+            resulting_generation=mutation.resulting_generation,
             observed_offer_id=offer.get("offerId"),
+        )
+
+    def _project_governed_offer(self, *, payload, sku, offer, item_path):
+        """Project one read-only observation through the item mutation CAS."""
+        from tgw.item_mutation import mutate_item
+        from tgw.sqlite_catalog import upsert_catalog_row
+
+        observation = {
+            "provider_effect_id": payload["provider_effect_id"],
+            "provider_identity": payload["provider_identity"],
+            "projection_policy": "verify-noop/v1",
+            "offer": offer,
+        }
+
+        def mutate(document):
+            if document.get("sku") != sku:
+                raise ValueError("authoritative document SKU does not match requested SKU")
+            updated = dict(document)
+            listing = dict(updated.get("ebay_listing") or {})
+            local_offer = dict(updated.get("ebay_offer") or {})
+            offer_id = offer.get("offerId")
+            status = offer.get("status")
+            listing_info = offer.get("listing") or {}
+            listing_id = listing_info.get("listingId")
+            listing_status = listing_info.get("listingStatus")
+            if offer_id:
+                listing["offer_id"] = offer_id
+                local_offer["offer_id"] = offer_id
+            if status:
+                listing["status"] = status
+                local_offer["status"] = status
+            if listing_id:
+                listing["listing_id"] = listing_id
+                listing["listing_url"] = f"https://www.ebay.com/itm/{listing_id}"
+            if listing_status:
+                listing["listing_status"] = listing_status
+            price = (offer.get("pricingSummary") or {}).get("price") or {}
+            if price.get("value") is not None:
+                local_offer["price"] = float(price["value"])
+                listing["live_price"] = float(price["value"])
+            category_id = offer.get("categoryId")
+            if category_id:
+                local_offer["category_id"] = str(category_id)
+            if offer.get("availableQuantity") is not None:
+                local_offer["quantity"] = offer["availableQuantity"]
+            marketplace_id = offer.get("marketplaceId")
+            if marketplace_id:
+                updated["marketplace_id"] = str(marketplace_id)
+            updated["ebay_listing"] = listing
+            updated["ebay_offer"] = local_offer
+            live = dict(updated.get("ebay_live") or {})
+            live["offer"] = dict(offer)
+            updated["ebay_live"] = live
+            updated["provider_projection_receipt"] = {
+                "provider_effect_id": payload["provider_effect_id"],
+                "provider_identity": payload["provider_identity"],
+                "offer_id": offer_id,
+            }
+            return updated
+
+        def project(_sku, document):
+            result = upsert_catalog_row(dict(self.config), document)
+            if not isinstance(result, dict) or result.get("ok") is not True:
+                raise RuntimeError("SQLite projection did not report success")
+            return result
+
+        data_root = Path(self.config.get("data_root", self.config["itemdata_root"].parent))
+        journal_root = Path(self.config.get(
+            "item_mutation_journal_root", data_root.parent / "var/item-mutations",
+        ))
+        return mutate_item(
+            item_path=item_path,
+            archive_root=Path(self.config.get(
+                "archive_root", data_root / "ItemArchive",
+            )),
+            journal_root=journal_root, sku=sku, kind="ebay-sync-targeted",
+            expected_generation=payload["object_generation"],
+            payload=observation, mutate=mutate, project=project,
+            project_noop=True,
         )
     def run(self) -> None:
         self.install_signal_handlers()
