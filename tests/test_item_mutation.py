@@ -4,7 +4,14 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from tgw.item_mutation import item_generation, mutate_item, operation_identity, reconcile_mutation
+from tgw.item_mutation import (
+    discover_repair_operations,
+    item_generation,
+    mutate_item,
+    operation_identity,
+    reconcile_mutation,
+    reconcile_pending_mutations,
+)
 
 
 def _write(path: Path, value: dict) -> None:
@@ -102,6 +109,20 @@ def test_projection_failure_is_truthfully_repair_required(tmp_path):
     assert json.loads(item.read_text())["v"] == 2
 
 
+def test_false_projection_result_requires_repair(tmp_path):
+    item = tmp_path / "items" / "A" / "A.json"
+    _write(item, {"sku": "A", "v": 1})
+    receipt = _run(
+        tmp_path,
+        item,
+        item_generation({"sku": "A", "v": 1}),
+        {"v": 2},
+        lambda doc: {**doc, "v": 2},
+        lambda *_: {"ok": False},
+    )
+    assert receipt.status == "REPAIR_REQUIRED"
+
+
 def test_projection_reconciliation_preserves_receipt_and_is_idempotent(tmp_path):
     item = tmp_path / "items" / "A" / "A.json"
     _write(item, {"sku": "A", "v": 1})
@@ -185,6 +206,90 @@ def test_repeated_reconciliation_failure_appends_attempt_evidence(tmp_path):
     assert len(attempts) == 2
 
 
+def test_discovery_and_bounded_reconciliation_operating_path(tmp_path):
+    item = tmp_path / "items" / "A" / "A.json"
+    _write(item, {"sku": "A", "v": 1})
+    original = _run(
+        tmp_path,
+        item,
+        item_generation({"sku": "A", "v": 1}),
+        {"v": 2},
+        lambda doc: {**doc, "v": 2},
+        lambda *_: {"ok": False},
+    )
+    journal = tmp_path / "journal"
+    assert discover_repair_operations(journal) == (original.operation_id,)
+    calls = []
+    results = reconcile_pending_mutations(
+        journal_root=journal,
+        item_path_for=lambda sku: tmp_path / "items" / sku / f"{sku}.json",
+        archive_root_for=lambda _sku: tmp_path / "archive",
+        project_for=lambda kind: lambda sku, doc: calls.append((kind, sku, doc)) or {"ok": True},
+    )
+    assert results[0].status == "COMMITTED"
+    assert calls == [("normalize-condition", "A", {"sku": "A", "v": 2})]
+    assert discover_repair_operations(journal) == ()
+
+
+def test_operation_id_path_traversal_is_rejected_before_access(tmp_path):
+    for operation_id in ("../" + "a" * 61, "/" + "a" * 63, "A" * 64, "a" * 63):
+        try:
+            reconcile_mutation(
+                item_path=tmp_path / "item.json",
+                journal_root=tmp_path / "journal",
+                operation_id=operation_id,
+                project=lambda *_: None,
+            )
+        except ValueError as exc:
+            assert "operation_id" in str(exc)
+        else:
+            raise AssertionError("unsafe operation id accepted")
+
+
+def test_archive_is_idempotent_across_crash_before_archive_marker(tmp_path, monkeypatch):
+    item = tmp_path / "items" / "A" / "A.json"
+    before = {"sku": "A", "v": 1}
+    _write(item, before)
+    expected = item_generation(before)
+    from tgw import item_mutation
+
+    original_record = item_mutation._record
+    crashed = False
+
+    def crash_before_archive_marker(path, receipt):
+        nonlocal crashed
+        return original_record(path, receipt)
+
+    original_atomic = item_mutation._atomic_json
+
+    def atomic_with_crash(path, value):
+        nonlocal crashed
+        if path.name == "archive.json" and not crashed:
+            crashed = True
+            raise SystemExit("simulated death after archive append")
+        return original_atomic(path, value)
+
+    monkeypatch.setattr(item_mutation, "_record", crash_before_archive_marker)
+    monkeypatch.setattr(item_mutation, "_atomic_json", atomic_with_crash)
+    try:
+        _run(tmp_path, item, expected, {"v": 2}, lambda doc: {**doc, "v": 2})
+    except SystemExit:
+        pass
+    monkeypatch.setattr(item_mutation, "_atomic_json", original_atomic)
+    results = reconcile_pending_mutations(
+        journal_root=tmp_path / "journal",
+        item_path_for=lambda sku: tmp_path / "items" / sku / f"{sku}.json",
+        archive_root_for=lambda _sku: tmp_path / "archive",
+        project_for=lambda _kind: lambda _sku, _doc: {"ok": True},
+    )
+    receipt = results[0]
+    assert receipt.status == "COMMITTED"
+    import zipfile
+
+    with zipfile.ZipFile(tmp_path / "archive" / "A.zip") as archive:
+        assert len(archive.namelist()) == 1
+
+
 def test_missing_or_non_object_item_records_failed_receipt(tmp_path):
     missing = tmp_path / "items" / "A" / "A.json"
     missing_receipt = _run(tmp_path, missing, "generation", {}, lambda doc: doc)
@@ -221,6 +326,7 @@ def test_intent_recovers_write_projection_seam_without_remutating(tmp_path):
     }
     intent_path = tmp_path / "journal" / "operations" / operation_id[:2] / operation_id / "intent.json"
     _write(intent_path, intent)
+    _write(intent_path.parent / "archive.json", {"operation_id": operation_id, "source_generation": expected})
     _write(item, after)
     projections = []
     receipt = _run(

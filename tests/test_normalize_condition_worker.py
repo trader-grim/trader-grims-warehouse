@@ -3,8 +3,8 @@ from dataclasses import dataclass
 
 import pytest
 
+from tgw.errors import TreatmentFailure
 from tgw.item_mutation import item_generation
-from tgw.queue.worker_base import HardFailure
 from tgw.workers.normalize_condition import (
     NormalizeConditionWorker,
     apply_condition_mutation,
@@ -77,6 +77,41 @@ def test_adapter_uses_authoritative_document_and_never_guesses(
     assert json.loads(item_path.read_text(encoding="utf-8"))["condition"] == written
 
 
+def test_adapter_rejects_document_sku_mismatch_before_publication(tmp_path, monkeypatch):
+    item_root = tmp_path / "items"
+    item_path = item_root / "TGW-001" / "TGW-001.json"
+    item_path.parent.mkdir(parents=True)
+    document = {"sku": "OTHER", "condition": "pre-owned"}
+    item_path.write_text(json.dumps(document), encoding="utf-8")
+    monkeypatch.setattr("tgw.sqlite_catalog.upsert_catalog_row", lambda cfg, doc: {"ok": True})
+    cfg = {"itemdata_root": item_root, "archive_root": tmp_path / "archive",
+           "data_root": tmp_path / "data", "sqlite_catalog_path": tmp_path / "catalog.db",
+           "item_mutation_journal_root": tmp_path / "journal"}
+    result = apply_condition_mutation(
+        config=cfg, sku="TGW-001", job_id="job-123", graph_id="graph-7",
+        expected_generation=item_generation(document),
+    )
+    assert result.status == "FAILED"
+    assert json.loads(item_path.read_text()) == document
+
+
+def test_adapter_requires_truthful_sqlite_success(tmp_path, monkeypatch):
+    item_root = tmp_path / "items"
+    item_path = item_root / "TGW-001" / "TGW-001.json"
+    item_path.parent.mkdir(parents=True)
+    document = {"sku": "TGW-001", "condition": "pre-owned"}
+    item_path.write_text(json.dumps(document), encoding="utf-8")
+    monkeypatch.setattr("tgw.sqlite_catalog.upsert_catalog_row", lambda cfg, doc: {"ok": False})
+    cfg = {"itemdata_root": item_root, "archive_root": tmp_path / "archive",
+           "data_root": tmp_path / "data", "sqlite_catalog_path": tmp_path / "catalog.db",
+           "item_mutation_journal_root": tmp_path / "journal"}
+    result = apply_condition_mutation(
+        config=cfg, sku="TGW-001", job_id="job-123", graph_id="graph-7",
+        expected_generation=item_generation(document),
+    )
+    assert result.status == "REPAIR_REQUIRED"
+
+
 @pytest.mark.parametrize("change", [{"graph_id": ""}, {"object_generation": ""},
                                       {"treatment_id": "ebay-publish"},
                                       {"treatment_version": "2"}, {"sku": "OTHER"}])
@@ -107,5 +142,6 @@ def test_worker_raises_hard_failure_instead_of_returning_failed_receipt(monkeypa
         "tgw.workers.normalize_condition.handle_job",
         lambda *args, **kwargs: {"outcome": "failed", "evidence": {"reason_code": "CONFLICT"}},
     )
-    with pytest.raises(HardFailure, match="CONFLICT"):
+    with pytest.raises(TreatmentFailure, match="CONFLICT") as raised:
         worker.handle(_job())
+    assert raised.value.result["evidence"]["reason_code"] == "CONFLICT"

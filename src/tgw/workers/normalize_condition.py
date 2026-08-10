@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from tgw.config import DEFAULT_CONFIG, load_config
-from tgw.queue.worker_base import HardFailure, QueueWorker
+from tgw.errors import TreatmentFailure
+from tgw.queue.worker_base import QueueWorker
 from tgw.workflow.condition_normalization import normalized_condition
 
 TREATMENT_ID, TREATMENT_VERSION, QUEUE_NAME = "normalize-condition", "1", "normalize_condition"
@@ -59,6 +60,8 @@ def apply_condition_mutation(
     )
 
     def mutate(document: dict[str, Any]) -> dict[str, Any]:
+        if document.get("sku") != sku:
+            raise ValueError("authoritative document SKU does not match requested SKU")
         condition = normalized_condition(document.get("condition"))
         if condition is None:
             raise ValueError("authoritative condition is not an explicitly supported alias")
@@ -67,7 +70,9 @@ def apply_condition_mutation(
         return updated
 
     def project(_sku: str, document: dict[str, Any]) -> None:
-        upsert_catalog_row(dict(config), document)
+        result = upsert_catalog_row(dict(config), document)
+        if not isinstance(result, Mapping) or result.get("ok") is not True:
+            raise RuntimeError("SQLite projection did not report success")
 
     data_root = Path(config.get("data_root", "/opt/TGW/data"))
     journal_root = Path(config.get("item_mutation_journal_root", data_root.parent / "var/item-mutations"))
@@ -130,7 +135,7 @@ class NormalizeConditionWorker(QueueWorker):
         receipt = handle_job(job, self.config, mutation_fn=apply_condition_mutation)
         if receipt["outcome"] != "satisfied":
             reason = receipt.get("evidence", {}).get("reason_code", "TREATMENT_FAILED")
-            raise HardFailure(f"{TREATMENT_ID} did not commit: {reason}")
+            raise TreatmentFailure(f"{TREATMENT_ID} did not commit: {reason}", receipt)
         return receipt
 
 

@@ -13,17 +13,19 @@ import json
 import math
 import os
 import tempfile
+import zipfile
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .items import atomic_write_json
-
 JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 DocumentMutator = Callable[[dict[str, JsonValue]], dict[str, JsonValue]]
-ProjectionWriter = Callable[[str, dict[str, JsonValue]], None]
+ProjectionWriter = Callable[[str, dict[str, JsonValue]], Any]
+ItemPathResolver = Callable[[str], str | Path]
+ProjectionResolver = Callable[[str], ProjectionWriter]
+ArchiveRootResolver = Callable[[str], str | Path]
 
 
 @dataclass(frozen=True)
@@ -93,14 +95,59 @@ def operation_identity(
 def _atomic_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     mode = (path.stat().st_mode & 0o777) if path.exists() else 0o660
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
-        json.dump(value, handle, ensure_ascii=False, allow_nan=False, sort_keys=True, indent=2)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-        temporary = Path(handle.name)
-    os.chmod(temporary, mode)
-    os.replace(temporary, path)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+            json.dump(value, handle, ensure_ascii=False, allow_nan=False, sort_keys=True, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+            temporary = Path(handle.name)
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+        _fsync_dir(path.parent)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _fsync_dir(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _archive_once(archive_root: Path, item_path: Path, operation_id: str) -> Path:
+    """Append deterministic pre-publication evidence at most once per operation."""
+    archive_root.mkdir(parents=True, exist_ok=True)
+    archive_path = archive_root / f"{item_path.stem}.zip"
+    member = f"{item_path.name}.operation-{operation_id}"
+    if archive_path.exists():
+        with zipfile.ZipFile(archive_path, "r") as current:
+            if member in current.namelist():
+                return archive_path
+    mode = (archive_path.stat().st_mode & 0o777) if archive_path.exists() else 0o660
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile("wb", dir=archive_root, delete=False) as handle:
+            temporary = Path(handle.name)
+        with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as replacement:
+            if archive_path.exists():
+                with zipfile.ZipFile(archive_path, "r") as current:
+                    for info in current.infolist():
+                        replacement.writestr(info, current.read(info.filename))
+            replacement.write(item_path, arcname=member)
+        os.chmod(temporary, mode)
+        with temporary.open("rb") as archive_handle:
+            os.fsync(archive_handle.fileno())
+        os.replace(temporary, archive_path)
+        _fsync_dir(archive_path.parent)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return archive_path
 
 
 def _load_json(path: Path) -> Any:
@@ -118,7 +165,13 @@ def _record(path: Path, receipt: MutationReceipt) -> MutationReceipt:
 
 
 def _operation_dir(journal_root: Path, operation_id: str) -> Path:
-    return journal_root / "operations" / operation_id[:2] / operation_id
+    if len(operation_id) != 64 or any(character not in "0123456789abcdef" for character in operation_id):
+        raise ValueError("operation_id must be exactly 64 lowercase hexadecimal characters")
+    operations_root = (journal_root / "operations").resolve()
+    candidate = (operations_root / operation_id[:2] / operation_id).resolve()
+    if operations_root not in candidate.parents:
+        raise ValueError("operation journal path escapes journal_root")
+    return candidate
 
 
 def _item_lock_path(journal_root: Path, sku: str) -> Path:
@@ -129,6 +182,180 @@ def _next_attempt_path(operation_dir: Path) -> Path:
     attempts = operation_dir / "reconciliation-attempts"
     sequence = max((int(path.stem) for path in attempts.glob("*.json")), default=0) + 1
     return attempts / f"{sequence:06d}.json"
+
+
+def _projection_ok(result: Any) -> bool:
+    if isinstance(result, Mapping):
+        return result.get("ok") is True
+    return result is not False
+
+
+def discover_repair_operations(journal_root: str | Path) -> tuple[str, ...]:
+    """Return operation IDs unfinished at publication/receipt or needing repair."""
+    root = Path(journal_root)
+    pending: list[str] = []
+    for intent_path in (root / "operations").glob("*/*/intent.json"):
+        if not (intent_path.parent / "receipt.json").exists():
+            try:
+                operation_id = intent_path.parent.name
+                if intent_path.parent.resolve() == _operation_dir(root, operation_id):
+                    pending.append(operation_id)
+            except ValueError:
+                continue
+    for receipt_path in (root / "operations").glob("*/*/receipt.json"):
+        try:
+            receipt = MutationReceipt(**_load_json(receipt_path))
+            operation_dir = _operation_dir(root, receipt.operation_id)
+            if receipt_path.resolve() != (operation_dir / "receipt.json").resolve():
+                continue
+            attempts = sorted((operation_dir / "reconciliation-attempts").glob("*.json"))
+            resolved = bool(attempts and MutationReceipt(**_load_json(attempts[-1])).status == "COMMITTED")
+            if receipt.status == "REPAIR_REQUIRED" and not resolved:
+                pending.append(receipt.operation_id)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+    return tuple(sorted(set(pending)))
+
+
+def _reconcile_unfinished(
+    *,
+    item_path: Path,
+    journal_root: Path,
+    operation_id: str,
+    project: ProjectionWriter,
+    archive_root: Path,
+) -> MutationReceipt:
+    """Finish a durable intent after process death without rerunning its transform."""
+    operation_dir = _operation_dir(journal_root, operation_id)
+    intent = _load_json(operation_dir / "intent.json")
+    binding = intent["binding"]
+    identity_binding = {key: binding[key] for key in ("sku", "kind", "expected_generation", "payload")}
+    if operation_identity(**identity_binding) != operation_id:
+        raise ValueError("unfinished intent binding does not match operation_id")
+    planned = intent.get("planned_document")
+    planned_generation = intent.get("planned_resulting_generation")
+    if not isinstance(planned, dict) or item_generation(planned) != planned_generation:
+        raise ValueError("unfinished intent lacks an exact planned document")
+    sku = binding["sku"]
+    expected = binding["expected_generation"]
+    receipt_path = operation_dir / "receipt.json"
+    lock_path = _item_lock_path(journal_root, sku)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if receipt_path.exists():
+            return MutationReceipt(**_load_json(receipt_path))
+        try:
+            document = _load_json(item_path)
+            if not isinstance(document, dict):
+                raise ValueError("item document must be a JSON object")
+            observed = item_generation(document)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            return _record(
+                receipt_path,
+                _receipt(
+                    operation_id=operation_id, sku=sku, kind=binding["kind"],
+                    expected_generation=expected, status="CONFLICT",
+                    observed_generation=None, resulting_generation=planned_generation,
+                    detail=f"cannot verify unfinished canonical item: {type(exc).__name__}: {exc}",
+                ),
+            )
+        archive_marker = operation_dir / "archive.json"
+        publication_marker = operation_dir / "publication.json"
+        if not publication_marker.exists():
+            if observed == expected:
+                if not archive_marker.exists():
+                    _archive_once(archive_root, item_path, operation_id)
+                    _atomic_json(
+                        archive_marker,
+                        {"operation_id": operation_id, "source_generation": observed},
+                    )
+                _atomic_json(item_path, planned)
+                observed = planned_generation
+                _atomic_json(
+                    publication_marker,
+                    {"operation_id": operation_id, "resulting_generation": planned_generation},
+                )
+            elif observed == planned_generation and archive_marker.exists():
+                _atomic_json(
+                    publication_marker,
+                    {"operation_id": operation_id, "resulting_generation": planned_generation},
+                )
+            else:
+                return _record(
+                    receipt_path,
+                    _receipt(
+                        operation_id=operation_id, sku=sku, kind=binding["kind"],
+                        expected_generation=expected, status="CONFLICT",
+                        observed_generation=observed, resulting_generation=planned_generation,
+                        detail="canonical generation advanced during unfinished reconciliation",
+                    ),
+                )
+        elif observed != planned_generation:
+            return _record(
+                receipt_path,
+                _receipt(
+                    operation_id=operation_id, sku=sku, kind=binding["kind"],
+                    expected_generation=expected, status="CONFLICT",
+                    observed_generation=observed, resulting_generation=planned_generation,
+                    detail="published generation no longer canonical during reconciliation",
+                ),
+            )
+        try:
+            projection_result = project(sku, planned)
+            if not _projection_ok(projection_result):
+                raise RuntimeError("projection did not explicitly report success")
+            status, detail = "COMMITTED", "fresh process completed unfinished operation"
+        except Exception as exc:
+            status = "REPAIR_REQUIRED"
+            detail = f"unfinished projection failed: {type(exc).__name__}: {exc}"
+        return _record(
+            receipt_path,
+            _receipt(
+                operation_id=operation_id, sku=sku, kind=binding["kind"],
+                expected_generation=expected, status=status,
+                observed_generation=expected, resulting_generation=planned_generation,
+                detail=detail,
+            ),
+        )
+
+
+def reconcile_pending_mutations(
+    *,
+    journal_root: str | Path,
+    item_path_for: ItemPathResolver,
+    archive_root_for: ArchiveRootResolver,
+    project_for: ProjectionResolver,
+) -> tuple[MutationReceipt, ...]:
+    """Discover and reconcile all locally repairable projection operations."""
+    results: list[MutationReceipt] = []
+    root = Path(journal_root)
+    for operation_id in discover_repair_operations(root):
+        operation_dir = _operation_dir(root, operation_id)
+        receipt_path = operation_dir / "receipt.json"
+        if receipt_path.exists():
+            original = MutationReceipt(**_load_json(receipt_path))
+            results.append(
+                reconcile_mutation(
+                    item_path=item_path_for(original.sku),
+                    journal_root=root,
+                    operation_id=operation_id,
+                    project=project_for(original.kind),
+                )
+            )
+        else:
+            intent = _load_json(operation_dir / "intent.json")
+            binding = intent["binding"]
+            results.append(
+                _reconcile_unfinished(
+                    item_path=Path(item_path_for(binding["sku"])),
+                    journal_root=root,
+                    operation_id=operation_id,
+                    project=project_for(binding["kind"]),
+                    archive_root=Path(archive_root_for(binding["sku"])),
+                )
+            )
+    return tuple(results)
 
 
 def reconcile_mutation(
@@ -202,7 +429,9 @@ def reconcile_mutation(
                 ),
             )
         try:
-            project(original.sku, document)
+            projection_result = project(original.sku, document)
+            if not _projection_ok(projection_result):
+                raise RuntimeError("projection did not explicitly report success")
         except Exception as exc:
             return _record(
                 attempt_path,
@@ -338,9 +567,18 @@ def mutate_item(
             # before recording its terminal projection receipt.  A planned
             # resulting generation in the intent makes that seam recoverable
             # without applying the document mutation twice.
-            if intent.get("planned_resulting_generation") == observed:
+            archive_marker = operation_dir / "archive.json"
+            if archive_marker.exists() and intent.get("planned_resulting_generation") == observed:
+                publication_marker = operation_dir / "publication.json"
+                if not publication_marker.exists():
+                    _atomic_json(
+                        publication_marker,
+                        {"operation_id": selected_id, "resulting_generation": observed},
+                    )
                 try:
-                    project(sku, document)
+                    projection_result = project(sku, document)
+                    if not _projection_ok(projection_result):
+                        raise RuntimeError("projection did not explicitly report success")
                 except Exception as exc:
                     return _record(
                         receipt_path,
@@ -389,8 +627,21 @@ def mutate_item(
             _json_native(updated, "document")
             resulting = item_generation(updated)
             intent["planned_resulting_generation"] = resulting
+            intent["planned_document"] = updated
             _atomic_json(intent_path, intent)
-            atomic_write_json(item_path, updated, archive_root=archive_root, sort_keys=True)
+            archive_marker = operation_dir / "archive.json"
+            if not archive_marker.exists():
+                if item_path.exists():
+                    _archive_once(archive_root, item_path, selected_id)
+                _atomic_json(
+                    archive_marker,
+                    {"operation_id": selected_id, "source_generation": observed},
+                )
+            _atomic_json(item_path, updated)
+            _atomic_json(
+                operation_dir / "publication.json",
+                {"operation_id": selected_id, "resulting_generation": resulting},
+            )
         except Exception as exc:
             return _record(
                 receipt_path,
@@ -407,7 +658,9 @@ def mutate_item(
             )
 
         try:
-            project(sku, updated)
+            projection_result = project(sku, updated)
+            if not _projection_ok(projection_result):
+                raise RuntimeError("projection did not explicitly report success")
         except Exception as exc:
             return _record(
                 receipt_path,
