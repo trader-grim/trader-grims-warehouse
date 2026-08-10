@@ -674,6 +674,57 @@ def mark_succeeded(job_id: str, lease_owner: str, result: Optional[Dict[str, Any
                 )
 
 
+def complete_treatment_and_enqueue_evaluation(
+    job_id: str, lease_owner: str, result: Dict[str, Any],
+) -> str:
+    """Atomically persist a treatment receipt and its evidence-change event."""
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE queue_jobs
+                   SET state = 'succeeded', finished_at = NOW(),
+                       lease_owner = NULL, lease_token = NULL,
+                       lease_expires_at = NULL, error_code = NULL,
+                       error_detail = NULL,
+                       payload_json = COALESCE(payload_json, '{}'::jsonb)
+                                      || jsonb_build_object('result', %s::jsonb)
+                 WHERE job_id = %s AND state = 'running' AND lease_owner = %s
+                 RETURNING entity_id, payload_json
+                """,
+                (json.dumps(result), job_id, lease_owner),
+            )
+            completed = cur.fetchone()
+            if completed is None:
+                raise RuntimeError(
+                    f"lost running lease while completing treatment job {job_id}"
+                )
+            entity_id, payload = completed
+            event_payload = {
+                "entity_id": entity_id,
+                "origin_job_id": job_id,
+                "origin_receipt": result,
+                "goal_profile_id": payload.get("goal_profile_id"),
+                "goal_profile_version": payload.get("goal_profile_version"),
+                "prior_graph_id": payload.get("graph_id"),
+                "prior_object_generation": payload.get("object_generation"),
+            }
+            cur.execute(
+                """
+                INSERT INTO queue_jobs
+                    (queue_name, entity_type, entity_id, operation,
+                     handler_family, priority, payload_json, dedupe_key,
+                     max_attempts)
+                VALUES ('workflow_evaluate', 'item', %s, 'evidence_changed',
+                        'workflow_evaluate', %s, %s::jsonb, %s, 3)
+                RETURNING job_id::text
+                """,
+                (entity_id, resolve_priority("workflow_evaluate", "evidence_changed"),
+                 json.dumps(event_payload), f"workflow-evaluate:{job_id}"),
+            )
+            return cur.fetchone()[0]
+
+
 def mark_failed(job_id: str, lease_owner: str, error: str) -> str:
     """
     Transition running → retry_wait or failed → dead_letter.
@@ -779,7 +830,10 @@ def mark_failed(job_id: str, lease_owner: str, error: str) -> str:
             return 'retry_wait' if new_state == 'retry_wait' else 'dead_letter'
 
 
-def mark_dead_letter(job_id: str, lease_owner: str, error: str) -> None:
+def mark_dead_letter(
+    job_id: str, lease_owner: str, error: str,
+    result: Optional[Dict[str, Any]] = None,
+) -> None:
     """Transition running → dead_letter immediately, bypassing retry logic."""
     with _conn() as con:
         with con.cursor() as cur:
@@ -792,10 +846,16 @@ def mark_dead_letter(job_id: str, lease_owner: str, error: str) -> None:
                        finished_at = NOW(),
                        lease_owner = NULL,
                        lease_token = NULL,
-                       lease_expires_at = NULL
+                       lease_expires_at = NULL,
+                       payload_json = CASE WHEN %s::jsonb IS NULL THEN payload_json
+                           ELSE COALESCE(payload_json, '{}'::jsonb)
+                                || jsonb_build_object('result', %s::jsonb) END
                  WHERE job_id = %s AND state = 'running' AND lease_owner = %s
                 """,
-                (error[:2000], job_id, lease_owner),
+                (error[:2000],
+                 json.dumps(result) if result is not None else None,
+                 json.dumps(result) if result is not None else None,
+                 job_id, lease_owner),
             )
 
 

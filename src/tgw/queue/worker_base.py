@@ -31,6 +31,46 @@ from tgw.queue import state_machine
 log = logging.getLogger(__name__)
 
 
+def _is_treatment_receipt_candidate(value: Any) -> bool:
+    return isinstance(value, dict) and (
+        value.get("receipt_schema_id") == "treatment-receipt/v1"
+        or any(key in value for key in ("treatment_id", "treatment_version", "graph_id"))
+    )
+
+
+def _treatment_receipt_error(value: Any, job: Dict[str, Any]) -> str | None:
+    """Return why a candidate receipt is not fully contract-bound."""
+    if not _is_treatment_receipt_candidate(value):
+        return "NOT_A_TREATMENT_RECEIPT"
+    payload = job.get("payload_json") or {}
+    if not isinstance(payload, dict):
+        return "INVALID_JOB_PAYLOAD"
+    required_receipt = ("treatment_id", "treatment_version", "graph_id")
+    if any(not isinstance(value.get(key), str) or not value[key].strip()
+           for key in required_receipt):
+        return "INVALID_RECEIPT_IDENTITY"
+    if value.get("receipt_schema_id") != "treatment-receipt/v1":
+        return "INVALID_RECEIPT_SCHEMA"
+    if value.get("outcome") != "satisfied":
+        return "INVALID_RECEIPT_OUTCOME"
+    for key in ("treatment_id", "treatment_version", "graph_id"):
+        if value.get(key) != payload.get(key):
+            return f"{key.upper()}_MISMATCH"
+    for key in ("goal_profile_id", "goal_profile_version", "object_generation"):
+        if not isinstance(payload.get(key), str) or not payload[key].strip():
+            return f"INVALID_{key.upper()}"
+    if job.get("entity_type") != "item":
+        return "INVALID_ENTITY_TYPE"
+    entity_id = job.get("entity_id")
+    if not isinstance(entity_id, str) or not entity_id.strip():
+        return "INVALID_ENTITY_ID"
+    if payload.get("entity_id") != entity_id:
+        return "ENTITY_ID_MISMATCH"
+    if payload.get("object_id") not in (None, entity_id):
+        return "OBJECT_ID_MISMATCH"
+    return None
+
+
 _RECOVER_INTERVAL_S = 60   # how often to call recover_expired_jobs
 
 # Transient error patterns that warrant automatic requeue rather than dead-letter.
@@ -205,7 +245,9 @@ class QueueWorker:
             _handle_result = self.handle(job)
         except HardFailure as exc:
             log.error('job %s hard failure (dead_letter): %s', job_id, exc)
-            state_machine.mark_dead_letter(job_id, self.owner, repr(exc))
+            state_machine.mark_dead_letter(
+                job_id, self.owner, repr(exc), result=getattr(exc, "result", None),
+            )
             tgw_logging.log_event('job_dead_letter', job_id=job_id,
                                   error=repr(exc))
             from tgw.notify import notify
@@ -262,7 +304,37 @@ class QueueWorker:
                 self._on_terminal_failure(job, error_text)
         else:
             receipt = _handle_result if isinstance(_handle_result, dict) else None
-            state_machine.mark_succeeded(job_id, self.owner, result=receipt)
+            receipt_error = _treatment_receipt_error(receipt, job)
+            if receipt_error is None:
+                event_id = state_machine.complete_treatment_and_enqueue_evaluation(
+                    job_id, self.owner, receipt,
+                )
+                if not event_id:
+                    raise RuntimeError(
+                        f"lost lease completing treatment job {job_id}"
+                    )
+            elif _is_treatment_receipt_candidate(receipt):
+                failed_receipt = dict(receipt)
+                failed_receipt["outcome"] = "failed"
+                failed_receipt["established_conditions"] = []
+                failed_receipt["error_detail"] = (
+                    f"receipt binding rejected: {receipt_error}"
+                )
+                evidence = dict(failed_receipt.get("evidence") or {})
+                evidence["reason_code"] = receipt_error
+                failed_receipt["evidence"] = evidence
+                state_machine.mark_dead_letter(
+                    job_id, self.owner, failed_receipt["error_detail"],
+                    result=failed_receipt,
+                )
+                tgw_logging.log_event(
+                    'job_dead_letter', job_id=job_id,
+                    error=failed_receipt["error_detail"],
+                )
+                log.error("job %s emitted invalid treatment receipt: %s", job_id, receipt_error)
+                return
+            else:
+                state_machine.mark_succeeded(job_id, self.owner, result=receipt)
             tgw_logging.log_event('job_succeeded', job_id=job_id)
             log.info('job %s succeeded', job_id)
         finally:

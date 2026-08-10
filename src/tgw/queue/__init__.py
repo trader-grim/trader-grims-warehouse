@@ -30,6 +30,7 @@ WORKER_QUEUES: tuple[str, ...] = (
     'plan_render',
     'thumbnail_gen',
     'normalize_condition',
+    'workflow_evaluate',
     'ebay_draft',
     'ebay_upload',
     'ebay_price',
