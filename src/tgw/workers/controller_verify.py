@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from typing import Any
@@ -14,8 +15,13 @@ _CHECKS = (
 
 
 def _run_check(name: str, command: list[str]) -> dict[str, str]:
+    env = dict(os.environ)
+    worktree_source = env.get("TGW_CODING_WORKTREE_SRC")
+    if worktree_source:
+        inherited = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = worktree_source + (os.pathsep + inherited if inherited else "")
     try:
-        completed = subprocess.run(command, check=False, text=True, capture_output=True)
+        completed = subprocess.run(command, check=False, text=True, capture_output=True, env=env)
     except OSError as exc:
         return {"kind": "check", "name": name, "status": "failed", "detail": str(exc)}
     result = {"kind": "check", "name": name, "status": "passed" if completed.returncode == 0 else "failed"}

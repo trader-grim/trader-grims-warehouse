@@ -6,7 +6,6 @@ import argparse
 import ast
 import inspect
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -812,7 +811,7 @@ def test_execute_authorized_treatment_raises_treatment_failure_with_result(tmp_p
     assert json.loads(coding_execution.receipt_path_for_treatment(tmp_path, execution["treatment_id"]).read_text()) == raised.value.result
 
 
-def test_authorized_treatment_runner_imports_the_claimed_worktree_before_worker_release(tmp_path, monkeypatch):
+def test_authorized_treatment_runner_keeps_trusted_imports_and_names_claimed_source(tmp_path, monkeypatch):
     execution = _execution_envelope()
     monkeypatch.setattr(coding_execution, "_git_identity", lambda path: (path.resolve(), (path / ".git").resolve()))
     monkeypatch.setenv("PYTHONPATH", "/immutable/worker/release/src")
@@ -835,7 +834,8 @@ def test_authorized_treatment_runner_imports_the_claimed_worktree_before_worker_
 
     coding_execution.execute_authorized_treatment(config, payload)
 
-    assert observed["env"]["PYTHONPATH"] == f"{tmp_path / 'src'}{os.pathsep}/immutable/worker/release/src"
+    assert observed["env"]["PYTHONPATH"] == "/immutable/worker/release/src"
+    assert observed["env"]["TGW_CODING_WORKTREE_SRC"] == str(tmp_path / "src")
     assert observed["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
 
 

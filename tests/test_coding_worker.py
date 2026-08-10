@@ -229,6 +229,8 @@ def test_controller_verify_runner_emits_attested_success_only_after_pytest_and_r
     from tgw.workers import controller_verify
 
     calls = []
+    monkeypatch.setenv("PYTHONPATH", "/immutable/worker/release/src")
+    monkeypatch.setenv("TGW_CODING_WORKTREE_SRC", "/claimed/worktree/src")
 
     def run(command, **kwargs):
         calls.append((command, kwargs))
@@ -249,6 +251,10 @@ def test_controller_verify_runner_emits_attested_success_only_after_pytest_and_r
         [sys.executable, "-m", "pytest", "-q"],
         [sys.executable, "-m", "ruff", "check", "."],
     ]
+    assert all(
+        kwargs["env"]["PYTHONPATH"] == "/claimed/worktree/src:/immutable/worker/release/src"
+        for _command, kwargs in calls
+    )
 
 
 def test_controller_verify_runner_does_not_establish_conditions_when_a_check_fails(monkeypatch, capsys):

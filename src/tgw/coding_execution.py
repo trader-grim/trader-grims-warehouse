@@ -106,13 +106,10 @@ def execute_authorized_treatment(config: dict[str, Any], payload: dict[str, Any]
     if allowed is not None and (not isinstance(allowed, list) or command[0] not in allowed):
         raise HardFailure("coding command is not an allowed local runner")
     runner_env = dict(os.environ)
-    worktree_source = str(worktree / "src")
-    inherited_pythonpath = runner_env.get("PYTHONPATH")
-    runner_env["PYTHONPATH"] = (
-        worktree_source + os.pathsep + inherited_pythonpath
-        if inherited_pythonpath
-        else worktree_source
-    )
+    # Bootstrap the allowlisted runner from the trusted worker environment.
+    # The runner passes this separately to child checks so an attempt cannot
+    # shadow the runner implementation itself with worktree Python modules.
+    runner_env["TGW_CODING_WORKTREE_SRC"] = str(worktree / "src")
     runner_env["PYTHONDONTWRITEBYTECODE"] = "1"
     try:
         completed = subprocess.run(
