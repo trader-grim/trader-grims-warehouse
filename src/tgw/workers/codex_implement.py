@@ -105,6 +105,14 @@ def run(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subprocess.run) -> d
     with tempfile.TemporaryDirectory(prefix="tgw-codex-implement-") as temporary:
         temp = Path(temporary)
         schema_path, output_path = temp / "schema.json", temp / "result.json"
+        codex_home = temp / "codex-home"
+        codex_home.mkdir(mode=0o700)
+        source_auth = Path.home() / ".codex" / "auth.json"
+        if not source_auth.is_file():
+            raise HardFailure("dedicated Codex authentication is unavailable")
+        destination_auth = codex_home / "auth.json"
+        shutil.copyfile(source_auth, destination_auth)
+        destination_auth.chmod(0o600)
         schema_path.write_text(json.dumps(_FINAL_SCHEMA, sort_keys=True), encoding="utf-8")
         command = [
             _codex_binary(), "exec", "--ephemeral", "--ignore-user-config",
@@ -116,6 +124,7 @@ def run(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subprocess.run) -> d
         completed = invoke(
             command, cwd=cwd, input=_prompt(task), text=True,
             capture_output=True, check=False,
+            env={**os.environ, "CODEX_HOME": str(codex_home)},
         )
         if completed.returncode:
             return {

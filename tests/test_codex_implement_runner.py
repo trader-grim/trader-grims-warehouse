@@ -57,8 +57,12 @@ def test_runner_uses_automatic_workspace_review_without_conflicting_sandbox_flag
     monkeypatch.setattr(codex_implement, "_codex_binary", lambda: "/bin/true")
     captured = []
 
-    def invoke(command, *, cwd, **_kwargs):
+    def invoke(command, *, cwd, env, **_kwargs):
         captured.extend(command)
+        ephemeral_home = Path(env["CODEX_HOME"])
+        assert ephemeral_home.parent.name.startswith("tgw-codex-implement-")
+        assert (ephemeral_home / "auth.json").is_file()
+        assert (ephemeral_home / "auth.json").stat().st_mode & 0o777 == 0o600
         Path(command[command.index("-o") + 1]).write_text(
             json.dumps({"status": "blocked", "summary": "bounded", "tests": []}),
             encoding="utf-8",
