@@ -1,0 +1,61 @@
+{
+  "condition_hash": "sha256:cc34de416fb0a9b2e3c5b9c85465b1e2b03f6943dff790e0c93c2246b9a6e581",
+  "graph_id": "sha256:54e69628b13f02b01144d7cae8852a9cef75c217090f377a0255bddcf2f1605e",
+  "plan_acceptance": [
+    "S6-steward-context-canary:steward-current-context-boundary"
+  ],
+  "plan_id": "PLAN-tgw-steward-context-canary",
+  "plan_version": 1,
+  "registry_revision": "sha256:da3bc2f5d06d62271c60c3943693607c875c76107b92e9ba96884d09470bc5eb",
+  "repository": {
+    "canonical_root": "/opt/TGW/tgw-lib/actors/codex/source/trader-grims-warehouse",
+    "repository_id": "trader-grims-warehouse",
+    "source_commit": "2589b169b60d38fb4ae62fcc30d6dbb6789d9d9e"
+  },
+  "required_conditions": [
+    "S6-steward-context-canary:steward-current-context-boundary"
+  ],
+  "schema": "tgw-plan-compiled-graph/v1",
+  "scope_hash": "sha256:7673fc76b8311431e657a6f7c91ff45656adc0a6f9c8a9b1928774fbcfa0000a",
+  "source_hash": "sha256:c93a43a1795b03c836b641bcd378ac16e6dc388bd847e9a2291e947fdd9c206c",
+  "work_units": [
+    {
+      "acceptance": [
+        {
+          "assertion": "current_facts_cited_retired_refused_history_non_authoritative",
+          "condition_id": "S6-steward-context-canary:steward-current-context-boundary",
+          "evidence_schema": "tgw-plan-evidence/v1",
+          "freshness": "same-plan-version",
+          "id": "steward-current-context-boundary",
+          "verifier": "tgw.environment.steward-context/v1",
+          "verifier_version": "1"
+        }
+      ],
+      "authority": "plan-approved",
+      "effect_class": "read-only",
+      "id": "S6-steward-context-canary",
+      "inputs": {
+        "contract": "config/environment/actors/tgw-steward.json",
+        "history_lookup": "disabled",
+        "query_schema": "tgw-steward-query/v1",
+        "registry": "config/environment/registry.yaml"
+      },
+      "kind": "verification",
+      "on_conflict": "reconciliation_required",
+      "outputs": [
+        {
+          "id": "steward-context-verification",
+          "schema": "tgw-steward-context-verification/v1"
+        }
+      ],
+      "owns": [
+        "agent:tgw-steward-context"
+      ],
+      "requires": [],
+      "rollback": "none-read-only",
+      "title": "Verify cited current facts retired-name refusal and historical separation",
+      "treatment_id": "environment-steward-context-canary",
+      "treatment_version": "1"
+    }
+  ]
+}

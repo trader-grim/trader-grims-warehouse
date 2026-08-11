@@ -1,0 +1,18 @@
+{
+  "schema": "tgw-plan-evidence/v1",
+  "receipt_id": "steward-context-canary-20260811",
+  "plan_id": "PLAN-tgw-steward-context-canary",
+  "plan_version": 1,
+  "scope_hash": "sha256:7673fc76b8311431e657a6f7c91ff45656adc0a6f9c8a9b1928774fbcfa0000a",
+  "registry_revision": "sha256:da3bc2f5d06d62271c60c3943693607c875c76107b92e9ba96884d09470bc5eb",
+  "graph_id": "sha256:54e69628b13f02b01144d7cae8852a9cef75c217090f377a0255bddcf2f1605e",
+  "condition_hash": "sha256:cc34de416fb0a9b2e3c5b9c85465b1e2b03f6943dff790e0c93c2246b9a6e581",
+  "work_unit_id": "S6-steward-context-canary",
+  "acceptance_id": "steward-current-context-boundary",
+  "entity": "agent:tgw-steward-context",
+  "verifier": "tgw.environment.steward-context/v1",
+  "verifier_version": "1",
+  "result": "true",
+  "observed_at": "2026-08-11T09:36:00-07:00",
+  "evidence_hash": "sha256:6450662bcfbf3e0ebc8214235db74010ff665dfd1214470f87f6f99932182c43"
+}

@@ -1,0 +1,24 @@
+{
+  "schema": "tgw-steward-context-verification/v1",
+  "observed_at": "2026-08-11T09:36:00-07:00",
+  "registry_revision": "sha256:fcd04e03289d10db2625050f5e8ba0143048f778512a3a77fce5870f877d4097",
+  "actor_id": "tgw-steward",
+  "contract_version": 1,
+  "history_lookup": "disabled",
+  "external_effects": false,
+  "cases": {
+    "production_host": {"result": "current", "canonical_name": "tgw-prod", "cited": true},
+    "development_host": {"result": "current", "canonical_name": "tgw-lib", "cited": true},
+    "nix_flake_repository": {"result": "current", "path": "/home/db/tgw-flake", "branch": "master", "cited": true},
+    "retired_a1131": {"result": "refused-retired", "redirected": false},
+    "catnanny": {"result": "unknown", "satellite_contacted": false},
+    "helicrew": {"result": "unknown", "satellite_contacted": false},
+    "historical_reference": {"result": "historical-only", "current_authority": false},
+    "agent_authority": {"production": "none", "infrastructure": "none", "satellite": "none", "persona_is_style_only": true}
+  },
+  "tests": {
+    "command": "PYTHONPATH=src /opt/TGW/.venvs/controller/bin/pytest -q -p no:cacheprovider tests/test_steward_context.py tests/test_agent_contract.py tests/test_environment_registry.py",
+    "passed": 25
+  },
+  "result": "verified"
+}

@@ -1,0 +1,26 @@
+{
+  "acceptance_receipts": {
+    "S6-steward-context-canary:steward-current-context-boundary": "steward-context-canary-20260811"
+  },
+  "active_attempts": [],
+  "candidate_id": "sha256:54c38b88779650a7027a4a8d39f9f542e3ad3faa8c59c0d30f23bf44d79842b9",
+  "condition_hash": "sha256:cc34de416fb0a9b2e3c5b9c85465b1e2b03f6943dff790e0c93c2246b9a6e581",
+  "created_at": "2026-08-11T16:32:44.811525+00:00",
+  "effect_receipts": [],
+  "expires_at": "2026-08-18T16:32:44.811525+00:00",
+  "explicit_requirements": [],
+  "graph_id": "sha256:54e69628b13f02b01144d7cae8852a9cef75c217090f377a0255bddcf2f1605e",
+  "ownership_conflicts": [],
+  "plan_id": "PLAN-tgw-steward-context-canary",
+  "plan_version": 1,
+  "reconciliation_gates": [],
+  "registry_revision": "sha256:da3bc2f5d06d62271c60c3943693607c875c76107b92e9ba96884d09470bc5eb",
+  "repository": {
+    "canonical_root": "/opt/TGW/tgw-lib/actors/codex/source/trader-grims-warehouse",
+    "repository_id": "trader-grims-warehouse",
+    "source_commit": "2589b169b60d38fb4ae62fcc30d6dbb6789d9d9e"
+  },
+  "rollback_receipts": [],
+  "schema": "plan-completion-candidate/v1",
+  "scope_hash": "sha256:7673fc76b8311431e657a6f7c91ff45656adc0a6f9c8a9b1928774fbcfa0000a"
+}

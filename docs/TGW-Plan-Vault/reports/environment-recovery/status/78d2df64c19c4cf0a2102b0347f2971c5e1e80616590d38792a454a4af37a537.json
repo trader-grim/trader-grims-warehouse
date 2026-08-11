@@ -1,0 +1,14 @@
+{
+  "conditions": [
+    {
+      "condition_id": "S6-steward-context-canary:steward-current-context-boundary",
+      "receipt_ids": [
+        "steward-context-canary-20260811"
+      ],
+      "result": "true"
+    }
+  ],
+  "graph_id": "sha256:54e69628b13f02b01144d7cae8852a9cef75c217090f377a0255bddcf2f1605e",
+  "ready_for_candidate": true,
+  "schema": "tgw-plan-status/v1"
+}
