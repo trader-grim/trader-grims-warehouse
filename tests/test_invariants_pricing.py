@@ -276,13 +276,13 @@ def test_unpriced_item_never_enqueues_stage(price_worker, tmp_path, monkeypatch)
     assert all(kw['queue_name'] != 'ebay_stage' for kw in price_worker._enqueued)
 
 
-def test_priced_item_enqueues_stage(price_worker, tmp_path, monkeypatch):
+def test_priced_item_does_not_hardcode_stage_successor(price_worker, tmp_path, monkeypatch):
     comps = {'count': 3, 'min': 10.0, 'p25': 10.0, 'median': 12.0,
              'p75': 14.0, 'max': 15.0}
     monkeypatch.setattr(ebay_price, 'suggest_price',
                         lambda *a, **k: _suggestion(10.0, comps))
     _run(price_worker, tmp_path, 'tgw3')
-    assert any(kw['queue_name'] == 'ebay_stage' for kw in price_worker._enqueued)
+    assert all(kw['queue_name'] != 'ebay_stage' for kw in price_worker._enqueued)
 
 
 def test_launch_price_at_least_target_price(price_worker, tmp_path, monkeypatch):

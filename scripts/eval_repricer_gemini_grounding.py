@@ -25,10 +25,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
-from tgw.config import load_config  # noqa: E402
-from tgw.apis.google_genai import load_google_key  # noqa: E402
-from tgw.ebay.pricing import suggest_price  # noqa: E402
 from tgw import quota  # noqa: E402
+from tgw.apis.google_genai import load_google_key  # noqa: E402
+from tgw.config import load_config  # noqa: E402
+from tgw.ebay.pricing import suggest_price  # noqa: E402
 from tgw.logging import announce_script_run, setup_logging  # noqa: E402
 
 # Fixed sample — 10 real, sold TGW items (master-catalog.json, status='sold',

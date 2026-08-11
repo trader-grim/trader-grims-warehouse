@@ -29,8 +29,8 @@ except ImportError:
 # Import the production encode helper so this script always matches what ai_identify sends.
 # ai_identify uses max_px=768 for OpenRouter providers (vs 512 for Ollama).
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-from tgw.workers.ai_identify import _encode_resized  # noqa: E402
 from tgw.logging import announce_script_run, setup_logging  # noqa: E402
+from tgw.workers.ai_identify import _encode_resized  # noqa: E402
 
 # ── config ─────────────────────────────────────────────────────────────────────
 

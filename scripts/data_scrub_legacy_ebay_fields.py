@@ -53,10 +53,11 @@ from typing import Any, Dict, List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from recompile_category_backfill import _canonical_category  # noqa: E402
+
 from tgw import items  # noqa: E402
 from tgw.config import DEFAULT_CONFIG, load_config  # noqa: E402
 from tgw.logging import announce_script_run, setup_logging  # noqa: E402
-from recompile_category_backfill import _canonical_category  # noqa: E402
 
 FIELDS_TO_CHECK = [
     'Item number', '#STATUS', 'attribute_set', 'm2_categories', 'category_ids',

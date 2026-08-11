@@ -195,7 +195,7 @@ def test_unsatisfied_launcher_outcome_dead_letters_instead_of_succeeding(tmp_pat
     worker = _worker("claude-review", tmp_path.parent, lambda *_args: {
         "outcome": "failed", "established_conditions": [],
     }, tmp_path)
-    job = {"job_id": "failed-review", "payload_json": {
+    job = {"job_id": "failed-review", "lease_token": "11111111-1111-4111-8111-111111111111", "payload_json": {
         "treatment_id": "claude-review", "graph_id": "same-graph",
         "worktree": str(tmp_path), "object_id": str(tmp_path.resolve()),
         "object_generation": before.generation,

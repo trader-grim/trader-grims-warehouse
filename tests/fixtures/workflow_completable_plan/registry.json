@@ -1,0 +1,18 @@
+{
+  "enums": {
+    "authority": ["plan-approved"],
+    "effect_class": ["read-only", "local-reversible"],
+    "kind": ["discovery", "configuration", "verification"]
+  },
+  "schema": "tgw-plan-registry/v1",
+  "treatments": {
+    "environment-read-only-discovery": {"version": "1"},
+    "environment-local-scaffold": {"version": "1"},
+    "environment-read-only-verify": {"version": "1"}
+  },
+  "verifiers": {
+    "tgw.environment.artifact-bound/v1": {"version": "1"},
+    "tgw.environment.boundary-test/v1": {"version": "1"},
+    "tgw.environment.registry-validate/v1": {"version": "1"}
+  }
+}

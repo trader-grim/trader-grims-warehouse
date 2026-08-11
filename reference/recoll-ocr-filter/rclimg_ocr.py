@@ -66,7 +66,6 @@
 
 import os
 import shutil
-import subprocess
 import sys
 
 
@@ -85,10 +84,10 @@ def _recoll_filters_dir() -> str:
 
 sys.path.insert(0, _recoll_filters_dir())
 
-import rclexecm  # noqa: E402
-from rclbasehandler import RclBaseHandler  # noqa: E402
-import rclocrtesseract  # noqa: E402
 import rclconfig  # noqa: E402
+import rclexecm  # noqa: E402
+import rclocrtesseract  # noqa: E402
+from rclbasehandler import RclBaseHandler  # noqa: E402
 
 
 class OcrImgExtractor(RclBaseHandler):

@@ -41,8 +41,8 @@ from typing import Set
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
-from tgw.queue import state_machine  # noqa: E402
 from tgw.logging import announce_script_run  # noqa: E402
+from tgw.queue import state_machine  # noqa: E402
 
 _MARKER_DIR = Path('/opt/TGW/var/run')
 

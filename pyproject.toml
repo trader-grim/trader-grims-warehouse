@@ -21,6 +21,7 @@ dependencies = [
     "pyperclip>=1.8",
     "python-xlib>=0.33",
     "mistune>=3.0",
+    "PyYAML>=6.0",
     "Pillow>=10.0",
 ]
 
@@ -75,6 +76,7 @@ tgw-clipd              = "tgw.clipd:main"
 tgw-multi-intake-worker   = "tgw.workers.multi_intake:main"
 tgw-catalog-rebuild-worker = "tgw.workers.catalog_rebuild:main"
 tgw-plan-render-worker    = "tgw.workers.plan_render:main"
+tgw-plan                  = "tgw.plan_cli:main"
 tgw-thumbnail-gen-worker      = "tgw.workers.thumbnail_gen:main"
 tgw-alt-text-worker           = "tgw.workers.alt_text:main"
 tgw-sync-conflict-worker      = "tgw.workers.sync_conflict:main"

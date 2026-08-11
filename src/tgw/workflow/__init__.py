@@ -15,6 +15,19 @@ from .contracts import (
     TreatmentDisposition,
 )
 from .evaluator import evaluate
+from .standalone_plan import (
+    PlanDocument,
+    PlanValidationError,
+    canonical_hash,
+    compile_plan,
+    completion_candidate,
+    parse_plan,
+    validate_evidence,
+    validate_plan,
+)
+from .standalone_plan import (
+    status as plan_status,
+)
 
 __all__ = [
     "EffectClass",
@@ -30,4 +43,13 @@ __all__ = [
     "TreatmentContract",
     "TreatmentDisposition",
     "evaluate",
+    "PlanDocument",
+    "PlanValidationError",
+    "canonical_hash",
+    "compile_plan",
+    "completion_candidate",
+    "parse_plan",
+    "plan_status",
+    "validate_evidence",
+    "validate_plan",
 ]

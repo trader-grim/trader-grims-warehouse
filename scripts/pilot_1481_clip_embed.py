@@ -94,11 +94,11 @@ def main() -> None:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    import torch
     import open_clip
+    import torch
     from PIL import Image
 
-    from tgw.fingerprint import dhash, color_histogram, hamming, histogram_distance
+    from tgw.fingerprint import color_histogram, dhash, hamming, histogram_distance
 
     print(f"Loading {args.model} / {args.pretrained} (CPU)...")
     t0 = time.time()

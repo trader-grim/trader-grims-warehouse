@@ -106,4 +106,3 @@ recoverable; new registries, workspaces, and agents use new names and paths. Rol
 changes consumers back to the prior immutable configuration while retaining all
 receipts and snapshots. Cleanup happens only after an independently approved
 retirement window.
-

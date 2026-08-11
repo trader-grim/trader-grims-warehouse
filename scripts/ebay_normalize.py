@@ -31,10 +31,11 @@ from typing import Any, Dict, List, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 from tgw import quota
+from tgw.apis.fence import ebay_write as fence_ebay_write
+from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.config import load_config, sku_json
 from tgw.logging import announce_script_run
 from tgw.resolver import iter_all_skus
-from tgw.apis.fence import ebay_write as fence_ebay_write, patch_item as fence_patch_item
 
 LOG_PATH = Path('/opt/TGW/var/log/ebay-normalize.log')
 

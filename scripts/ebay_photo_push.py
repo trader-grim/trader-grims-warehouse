@@ -25,17 +25,18 @@ import logging
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
+from tgw.apis.ebay.client import ebay_get, ebay_put
+from tgw.apis.fence import ebay_write as fence_ebay_write
+from tgw.apis.fence import patch_item as fence_patch_item
+from tgw.assets import ordered_photos
 from tgw.config import load_config, sku_json
+from tgw.ebay.upload import upload_photo
 from tgw.logging import announce_script_run
 from tgw.resolver import iter_all_skus
-from tgw.assets import ordered_photos
-from tgw.ebay.upload import upload_photo
-from tgw.apis.ebay.client import ebay_get, ebay_put
-from tgw.apis.fence import ebay_write as fence_ebay_write, patch_item as fence_patch_item
 
 LOG_PATH = Path('/opt/TGW/var/log/ebay-photo-push.log')
 

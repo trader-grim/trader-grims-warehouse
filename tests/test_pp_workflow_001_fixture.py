@@ -54,27 +54,22 @@ def _graph(path, *, attempts=(), ambiguities=()):
     )
 
 
-def test_list_item_goal_waits_without_authoritative_stage_receipt(tmp_path):
+def test_published_list_item_goal_does_not_require_stage_freshness(tmp_path):
     snapshot, graph = _graph(_item(tmp_path))
 
     assert graph.goal_profile_id == "tgw.ebay_listable"
     assert graph.object_id == snapshot.object_id == "PPWF-001"
-    assert set(graph.satisfied_requirements) == (
-        set(TGW_EBAY_LISTABLE.required) - {"staged_content_current"}
-    )
+    assert set(graph.satisfied_requirements) == set(TGW_EBAY_LISTABLE.required)
     assert graph.unmet_requirements == ()
-    assert ("staged_content_current", "unknown") in {
-        (condition_id, result.value)
-        for condition_id, result in graph.explicit_requirements
-    }
+    assert graph.explicit_requirements == ()
     assert graph.next_event_classes == ("evidence_changed",)
     assert graph.eligible_treatments == ()
     staged = next(
         fingerprint for fingerprint in graph.fingerprints
         if fingerprint.condition_id == "staged_content_current"
     )
-    assert staged.result.value == "unknown"
-    assert staged.reasons == ("authoritative staged content receipt absent",)
+    assert staged.result.value == "not_applicable"
+    assert staged.reasons == ("published listing supersedes staged content freshness",)
 
 
 def test_invalid_condition_selects_bounded_local_remediation(tmp_path):

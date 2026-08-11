@@ -33,7 +33,6 @@ coverage than they actually have.
 """
 import json
 import os
-import re
 import sys
 
 try:

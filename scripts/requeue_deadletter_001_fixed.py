@@ -42,8 +42,8 @@ from typing import List, Set, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
-from tgw.queue import state_machine  # noqa: E402
 from tgw.logging import announce_script_run  # noqa: E402
+from tgw.queue import state_machine  # noqa: E402
 
 _MARKER_PATH = Path('/opt/TGW/var/run/requeue_deadletter_001_fixed.done.json')
 

@@ -22,13 +22,17 @@ Usage:
   sudo -u tgw python3 scripts/ebay_backfill_offers.py --resume
   sudo -u tgw python3 scripts/ebay_backfill_offers.py --limit N
 """
-import argparse, json, logging, sys, time
+import argparse
+import json
+import logging
+import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from tgw.config import load_config
-from tgw.ebay.pull import iter_inventory_api_items, fetch_offer_for_sku
 from tgw.apis.fence import ebay_write as fence_ebay_write
+from tgw.config import load_config
+from tgw.ebay.pull import fetch_offer_for_sku, iter_inventory_api_items
 from tgw.logging import announce_script_run
 
 LOG_PATH  = Path('/opt/TGW/var/log/ebay-backfill-offers.log')
