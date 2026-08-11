@@ -1,0 +1,79 @@
+{
+  "schema": "tgw-satellite-readonly-inventory/v1",
+  "observed_at": "2026-08-11T10:31:00-07:00",
+  "access": {
+    "account": "tigwa",
+    "authentication": "current trusted codex@tgw-lib SSH key",
+    "password_transmitted": false,
+    "recovered_credentials_used": false,
+    "writes_performed": false,
+    "recovered_code_executed": false
+  },
+  "hosts": {
+    "catnanny": {
+      "machine_id": "4302b66999610da80166cb1269dd477f",
+      "os": "debian 13",
+      "kernel": "6.12.96+deb13-amd64",
+      "home": "/home/tigwa",
+      "storage": "111.5G ext4 root",
+      "stores": {
+        "hermes_memories_bytes": 12288,
+        "hindsight_tree_bytes": 1760362496,
+        "librarian_audit_bytes": 50049024
+      },
+      "services": {
+        "hermes_gateway": "active",
+        "hermes_dashboard": "active",
+        "hindsight": "active"
+      },
+      "hindsight_database": {
+        "postgres_listener": "127.0.0.1:5432",
+        "peer_authentication": "unavailable",
+        "credential_environment": "/home/tigwa/.hindsight/hindsight-db.env",
+        "credential_environment_read": false
+      }
+    },
+    "helicrew": {
+      "machine_id": "4d05d622fbb80b9e182e21786a64f86d",
+      "os": "debian 13",
+      "kernel": "6.12.96+deb13-amd64",
+      "home": "/home/tigwa",
+      "storage": "200G ext4 root, 302.3G btrfs /opt/TGW, 451.3G btrfs /home",
+      "stores": {
+        "hermes_memories_bytes": 8192,
+        "hindsight_tree_bytes": 1801674752,
+        "librarian_audit_bytes": 0
+      },
+      "services": {
+        "hermes_gateway": "inactive",
+        "hermes_dashboard": "active",
+        "hindsight": "inactive"
+      },
+      "hindsight_database": {
+        "postgres_listener": "127.0.0.1:5432",
+        "peer_authentication": "unavailable",
+        "credential_environment": "/home/tigwa/.hindsight/hindsight-db.env",
+        "credential_environment_read": false
+      }
+    }
+  },
+  "candidate_data": [
+    "Hermes MEMORY.md and USER.md with distinct per-host hashes",
+    "Hindsight PostgreSQL databases and retained historical dumps",
+    "catnanny librarian audit and reconciliation ledger",
+    "Hermes/Hindsight service configuration as contamination evidence only"
+  ],
+  "excluded_from_ordinary_export": [
+    "SSH private keys",
+    "auth.json",
+    "environment files",
+    "tokens and secrets",
+    "agent runtime and caches"
+  ],
+  "holds": [
+    "Current Hindsight pg_dump requires explicit constrained authorization to source existing DB environment without disclosure",
+    "Active services are not stopped by this read-only inventory",
+    "Raw evidence needs a durable non-Git quarantine destination"
+  ],
+  "result": "READONLY_INVENTORY_COMPLETE_ACQUISITION_HELD"
+}
