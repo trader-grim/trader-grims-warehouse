@@ -1,0 +1,52 @@
+{
+  "acceptance_ids": [
+    "S2-task-context:context-reproducible",
+    "S2-task-context:actor-boundary"
+  ],
+  "actor": "codex",
+  "allowed_paths": [
+    "config/environment",
+    "docs/TGW-Plan-Vault/plan",
+    "docs/TGW-Plan-Vault/reports/environment-recovery",
+    "src/tgw",
+    "tests"
+  ],
+  "authority_files": ["AGENTS.md"],
+  "context_id": "sha256:012374cad3a34050a7f7316dc26ea8527038910b6497ffbf1be9049dcc55a1ea",
+  "effect_class": "local-reversible",
+  "excluded_authority_files": ["CLAUDE.md"],
+  "historical_context_grants_authority": false,
+  "instruction_precedence": [
+    "platform-and-user-authority",
+    "repository-agents",
+    "environment-snapshot",
+    "exact-task-contract",
+    "persona-style-overlay",
+    "historical-reference-only"
+  ],
+  "plan_binding": {
+    "plan_id": "PLAN-deterministic-task-context",
+    "plan_version": 1,
+    "scope_hash": "sha256:d8b20e93faa5c9e6893fbe029c85b21d1e8f37c0b61253be8000b2e3c0dca82e"
+  },
+  "registry_revision": "sha256:486e0686a1541c0eec904b288ce7f72074eac9e655940bdba285f32a10b19185",
+  "repository": {
+    "base_commit": "132966909be053b1bbfeddbf7bffd5ce201d3e6f",
+    "branch": "recovery/pp-workflow-marketplace",
+    "dirty_policy": "fail-unless-attributed",
+    "host_role": "development",
+    "path": "/opt/TGW/tgw-lib/src/trader-grims-warehouse",
+    "repository_id": "application"
+  },
+  "schema": "tgw-resolved-context/v1",
+  "task_hash": "sha256:6307db41d3aaf1346f76cd29893137162ccc1f41f3007afafd31d48b3c9e5c30",
+  "task_id": "environment-recovery-20260811",
+  "unknowns": [
+    "canonical application branch migration target",
+    "attribution of canonical repository dirty paths",
+    "clean Hermes/TGW Steward operating contract",
+    "catnanny identity access and acquisition method",
+    "helicrew identity access and acquisition method"
+  ],
+  "worktree_policy": "existing-actor-worktree"
+}

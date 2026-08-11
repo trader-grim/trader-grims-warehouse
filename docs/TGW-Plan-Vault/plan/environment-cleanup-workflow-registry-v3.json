@@ -1,0 +1,15 @@
+{
+  "enums": {
+    "authority": ["plan-approved"],
+    "effect_class": ["local-reversible"],
+    "kind": ["configuration", "verification"]
+  },
+  "schema": "tgw-plan-registry/v1",
+  "treatments": {
+    "environment-task-context-build": {"version": "1"}
+  },
+  "verifiers": {
+    "tgw.environment.task-context/v1": {"version": "1"},
+    "tgw.environment.actor-boundary/v1": {"version": "1"}
+  }
+}

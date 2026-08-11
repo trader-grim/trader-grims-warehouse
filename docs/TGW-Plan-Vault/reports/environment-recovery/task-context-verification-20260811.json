@@ -1,0 +1,22 @@
+{
+  "schema": "tgw-task-context-verification/v1",
+  "observed_at": "2026-08-11T09:01:55-07:00",
+  "context_id": "sha256:012374cad3a34050a7f7316dc26ea8527038910b6497ffbf1be9049dcc55a1ea",
+  "artifacts": {
+    "config/environment/tasks/environment-recovery.json": "sha256:9b278d3abd99524e1b3f90195a71ea039b0ba06ecbd0987970cba5f6b220bc9f",
+    "config/environment/resolved/environment-recovery.codex.json": "sha256:644d36a12380256431a63f187438392769d39465cf5f89fb2b1984201f4f3d59",
+    "src/tgw/task_context.py": "sha256:527109d703df5f605d6429d3e72e93ce991788b91c4079248e2c53ba38ebbda9",
+    "tests/test_task_context.py": "sha256:be7928a3507875722e05fb8660e530e364c299a34bb9cf9a2d598b7d759cb8ba"
+  },
+  "checks": {
+    "focused_tests": {"passed": 30, "failed": 0},
+    "ruff": "passed",
+    "diff_check": "passed",
+    "deterministic_repeat": "byte-equivalent-json",
+    "codex_authority_files": ["AGENTS.md"],
+    "codex_excluded_authority_files": ["CLAUDE.md"],
+    "historical_context_grants_authority": false
+  },
+  "effects": ["repository-local files only"],
+  "worktree_created_or_mutated": false
+}

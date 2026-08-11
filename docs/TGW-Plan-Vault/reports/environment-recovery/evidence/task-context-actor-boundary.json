@@ -1,0 +1,18 @@
+{
+  "schema": "tgw-plan-evidence/v1",
+  "receipt_id": "task-context-012374cad3a34050-actor-boundary",
+  "plan_id": "PLAN-deterministic-task-context",
+  "plan_version": 1,
+  "scope_hash": "sha256:d8b20e93faa5c9e6893fbe029c85b21d1e8f37c0b61253be8000b2e3c0dca82e",
+  "registry_revision": "sha256:36bab243bc74515bdcf5e6a75a21604c7fe292a0c1badec444afa2c9b207b7d4",
+  "graph_id": "sha256:8c1fe68796f4dda8656e6c292da5c4747d95f411769da1e923c26885366c29bf",
+  "condition_hash": "sha256:18131e8b186984a6af2bfb95db81f4e57c3304712e21015d319ab3d8be50199e",
+  "work_unit_id": "S2-task-context",
+  "acceptance_id": "actor-boundary",
+  "entity": "workspace-contract:environment-recovery",
+  "verifier": "tgw.environment.actor-boundary/v1",
+  "verifier_version": "1",
+  "result": "true",
+  "observed_at": "2026-08-11T09:01:55-07:00",
+  "evidence_hash": "sha256:2fc835ec3efbc9ae7ad89d7618187477c15b8645918127d78aec744dd79b8a93"
+}

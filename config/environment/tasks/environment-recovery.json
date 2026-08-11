@@ -1,0 +1,30 @@
+{
+  "schema": "tgw-task/v1",
+  "task_id": "environment-recovery-20260811",
+  "repository_id": "application",
+  "base_commit": "132966909be053b1bbfeddbf7bffd5ce201d3e6f",
+  "branch": "recovery/pp-workflow-marketplace",
+  "actor": "codex",
+  "allowed_paths": [
+    "config/environment",
+    "docs/TGW-Plan-Vault/plan",
+    "docs/TGW-Plan-Vault/reports/environment-recovery",
+    "src/tgw",
+    "tests"
+  ],
+  "effect_class": "local-reversible",
+  "plan_binding": {
+    "plan_id": "PLAN-deterministic-task-context",
+    "plan_version": 1,
+    "scope_hash": "sha256:d8b20e93faa5c9e6893fbe029c85b21d1e8f37c0b61253be8000b2e3c0dca82e"
+  },
+  "acceptance_ids": [
+    "S2-task-context:context-reproducible",
+    "S2-task-context:actor-boundary"
+  ],
+  "registry_revision": "sha256:486e0686a1541c0eec904b288ce7f72074eac9e655940bdba285f32a10b19185",
+  "created_at": "2026-08-11T09:00:00-07:00",
+  "expires_at": "2026-08-18T09:00:00-07:00",
+  "historical_context_grants_authority": false,
+  "worktree_policy": "existing-actor-worktree"
+}
