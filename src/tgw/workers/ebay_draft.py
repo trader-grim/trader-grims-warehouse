@@ -36,7 +36,16 @@ from tgw.config import sku_json as _cfg_sku_json
 from tgw.ebay.aspect_translation import translate_inventory_to_ebay_draft
 from tgw.ebay.description import build_listing_description
 from tgw.ebay.draft_specifics import set_ebay_aspects, wrap_ebay_specifics
+from tgw.errors import TreatmentFailure
+from tgw.item_mutation import (
+    item_generation,
+    mutate_item,
+    operation_identity,
+    reconcile_mutation,
+)
+from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
+from tgw.sqlite_catalog import upsert_catalog_row
 
 log = logging.getLogger(__name__)
 
@@ -285,6 +294,7 @@ def _aspect_fill_photos(
     *,
     sku: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
+    finding_sink: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Path]:
     """Select up to _MAX_PHOTOS_ASPECTS photos for the vision aspect-fill call.
 
@@ -332,14 +342,18 @@ def _aspect_fill_photos(
     if unreadable and sku and config is not None:
         log.warning('%s: %d unreadable/corrupt photo(s) skipped for vision '
                     'aspect-fill: %s', sku, len(unreadable), unreadable)
-        fence_patch_item(config, sku, {'pipeline_error': {
+        finding = {
             'code':   'photo_files_readable',
             'detail': (f'{len(unreadable)} photo(s) unreadable/corrupt, skipped '
                        f'for vision aspect-fill (other readable photos/fields '
                        f'still used): {"; ".join(unreadable)}'),
             'ts':     datetime.now(timezone.utc).isoformat(),
             'source': 'ebay_draft',
-        }})
+        }
+        if finding_sink is not None:
+            finding_sink.append(finding)
+        else:
+            fence_patch_item(config, sku, {'pipeline_error': finding})
         tgw_logging.log_event('ebay_draft_unreadable_photo', sku=sku,
                               unreadable_count=len(unreadable))
 
@@ -347,6 +361,134 @@ def _aspect_fill_photos(
 
 
 class EbayDraftWorker(QueueWorker):
+
+    def _governed_receipt(
+        self, payload: Dict[str, Any], sku: str, *, outcome: str,
+        changed: bool, resulting_generation: str | None,
+        operation_id: str = "", mutation_status: str = "",
+    ) -> Dict[str, Any]:
+        return {
+            "receipt_schema_id": "treatment-receipt/v1",
+            "treatment_id": "ebay-draft",
+            "treatment_version": "1",
+            "graph_id": payload["graph_id"],
+            "goal_profile_id": payload["goal_profile_id"],
+            "goal_profile_version": payload["goal_profile_version"],
+            "object_generation": payload["object_generation"],
+            "condition_hash": payload["condition_hash"],
+            "entity_id": sku,
+            "outcome": outcome,
+            "established_conditions": (["draft_generated"]
+                                       if outcome == "satisfied" else []),
+            "evidence": {
+                "changed": changed,
+                "resulting_generation": resulting_generation,
+                **({"operation_id": operation_id} if operation_id else {}),
+                **({"mutation_status": mutation_status} if mutation_status else {}),
+            },
+        }
+
+    def _commit_governed_draft(
+        self, *, job: Dict[str, Any], payload: Dict[str, Any], sku: str,
+        json_path: Path, checkpoint: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        expected = {
+            "schema": "ebay-draft-observation/v1",
+            "sku": sku,
+            "expected_generation": payload["object_generation"],
+        }
+        if any(checkpoint.get(key) != value for key, value in expected.items()):
+            raise HardFailure("ebay_draft checkpoint identity mismatch")
+        fields = checkpoint.get("fields")
+        if not isinstance(fields, dict):
+            raise HardFailure("ebay_draft checkpoint fields missing")
+        mutation_payload = {
+            "schema": checkpoint["schema"],
+            "job_id": job["job_id"],
+            "graph_id": payload["graph_id"],
+            "fields": fields,
+        }
+        operation_id = operation_identity(
+            sku=sku, kind="ebay-draft",
+            expected_generation=payload["object_generation"],
+            payload=mutation_payload,
+        )
+        if checkpoint.get("operation_id") != operation_id:
+            raise HardFailure("ebay_draft checkpoint operation identity mismatch")
+
+        def mutate(document: Dict[str, Any]) -> Dict[str, Any]:
+            if document.get("sku") != sku:
+                raise ValueError("authoritative document SKU mismatch")
+            updated = dict(document)
+            updated.update(fields)
+            return updated
+
+        def project(_sku: str, document: Dict[str, Any]) -> Dict[str, Any]:
+            result = upsert_catalog_row(self.config, document)
+            if not isinstance(result, dict) or result.get("ok") is not True:
+                raise RuntimeError("SQLite projection did not report success")
+            return result
+
+        data_root = Path(self.config.get("data_root", "/opt/TGW/data"))
+        journal_root = Path(self.config.get(
+            "item_mutation_journal_root", data_root.parent / "var/item-mutations",
+        ))
+        result = mutate_item(
+            item_path=json_path,
+            archive_root=Path(self.config.get(
+                "archive_root", data_root / "ItemArchive",
+            )),
+            journal_root=journal_root,
+            sku=sku,
+            kind="ebay-draft",
+            expected_generation=payload["object_generation"],
+            payload=mutation_payload,
+            mutate=mutate,
+            project=project,
+            operation_id=operation_id,
+        )
+        status = str(result.status).upper()
+        if status == "REPAIR_REQUIRED":
+            result = reconcile_mutation(
+                item_path=json_path, journal_root=journal_root,
+                operation_id=operation_id, project=project,
+            )
+            status = str(result.status).upper()
+        if status != "COMMITTED":
+            outcome = {
+                "CONFLICT": "conflict", "REPAIR_REQUIRED": "repair_required",
+            }.get(status, "failed")
+            receipt = self._governed_receipt(
+                payload, sku, outcome=outcome, changed=bool(result.changed),
+                resulting_generation=result.resulting_generation,
+                operation_id=operation_id, mutation_status=status,
+            )
+            receipt["evidence"]["detail"] = result.detail
+            raise TreatmentFailure(
+                f"ebay-draft mutation did not commit: {status}", receipt,
+            )
+        draft = fields.get("draft_listing")
+        valid_draft = (
+            isinstance(draft, dict)
+            and isinstance(draft.get("title"), str)
+            and bool(draft["title"].strip())
+            and str(draft.get("category_id", "99")) != "99"
+        )
+        if not valid_draft:
+            receipt = self._governed_receipt(
+                payload, sku, outcome="partial", changed=bool(result.changed),
+                resulting_generation=result.resulting_generation,
+                operation_id=operation_id, mutation_status=status,
+            )
+            receipt["evidence"]["reason_code"] = "DRAFT_REQUIRES_OPERATOR_CATEGORY"
+            raise TreatmentFailure(
+                "ebay-draft committed fallback requiring operator category", receipt,
+            )
+        return self._governed_receipt(
+            payload, sku, outcome="satisfied", changed=bool(result.changed),
+            resulting_generation=result.resulting_generation,
+            operation_id=operation_id, mutation_status=status,
+        )
 
     def handle(self, job: Dict[str, Any]) -> None:
         payload = job.get('payload_json') or {}
@@ -359,6 +501,40 @@ class EbayDraftWorker(QueueWorker):
             raise HardFailure(f'item JSON not found for {sku}')
 
         item = json.loads(json_path.read_text(encoding='utf-8'))
+
+        governed_keys = {
+            "treatment_id", "treatment_version", "graph_id",
+            "goal_profile_id", "goal_profile_version", "object_generation",
+            "condition_hash",
+        }
+        governed = any(key in payload for key in governed_keys)
+        if governed:
+            required = governed_keys | {"entity_id"}
+            if any(not isinstance(payload.get(key), str) or not payload[key].strip()
+                   for key in required):
+                raise HardFailure("ebay_draft governed job has incomplete identity")
+            if payload["treatment_id"] != "ebay-draft" or payload["treatment_version"] != "1":
+                raise HardFailure("ebay_draft governed treatment identity mismatch")
+            if job.get("entity_type") != "item" or job.get("entity_id") != sku:
+                raise HardFailure("ebay_draft governed entity envelope mismatch")
+            if payload["entity_id"] != sku or payload.get("object_id", sku) != sku:
+                raise HardFailure("ebay_draft governed payload entity mismatch")
+            if not isinstance(job.get("job_id"), str) or not job["job_id"].strip():
+                raise HardFailure("ebay_draft governed job_id missing")
+            if not isinstance(job.get("lease_token"), str) or not job["lease_token"].strip():
+                raise HardFailure("ebay_draft governed lease token missing")
+            if (item_generation(item) != payload["object_generation"]
+                    and "observation_checkpoint" not in payload):
+                raise HardFailure("ebay_draft governed object generation mismatch")
+            if "observation_checkpoint" in payload:
+                checkpoint = state_machine.checkpoint_running_job(
+                    job["job_id"], self.owner, job["lease_token"],
+                    payload["observation_checkpoint"],
+                )
+                return self._commit_governed_draft(
+                    job=job, payload=payload, sku=sku, json_path=json_path,
+                    checkpoint=checkpoint,
+                )
 
         title = item.get('title', '')
         if not title or title == sku:
@@ -407,6 +583,15 @@ class EbayDraftWorker(QueueWorker):
                 aspects = get_aspects(self.config, category_id)
             except Exception as exc:
                 if _is_ebay_offline(exc):
+                    if governed:
+                        receipt = self._governed_receipt(
+                            payload, sku, outcome="failed", changed=False,
+                            resulting_generation=payload["object_generation"],
+                        )
+                        receipt["evidence"]["reason_code"] = "EBAY_OBSERVATION_UNAVAILABLE"
+                        raise TreatmentFailure(
+                            "ebay-draft provider observation unavailable", receipt,
+                        )
                     _write_offline_csv_row(self.config, sku, item)
                     item['offline_draft'] = True
                     fence_patch_item(self.config, sku, {'offline_draft': True})
@@ -473,6 +658,7 @@ class EbayDraftWorker(QueueWorker):
         # aren't silently missed. Routed through bulk_classify (cheap, free-tier
         # Gemini) since this is high-volume structured extraction, not prose.
         remaining_aspects = [a for a in aspects if a['name'] not in prefilled]
+        photo_findings: List[Dict[str, Any]] = []
         if not remaining_aspects:
             suggested: Dict[str, Any] = {}
             log.info('%s: all %d aspects already prefilled — skipping vision call',
@@ -481,8 +667,10 @@ class EbayDraftWorker(QueueWorker):
             prompt = _build_prompt(item, aspects, prefilled=prefilled, browse_hints=browse_hints)
             _classify_provider, _classify_model = get_task_model(self.config, 'bulk_classify')
             sku_dir = json_path.parent
-            photos = _aspect_fill_photos(item, sku_dir, _classify_provider,
-                                         sku=sku, config=self.config)
+            photos = _aspect_fill_photos(
+                item, sku_dir, _classify_provider, sku=sku, config=self.config,
+                finding_sink=(photo_findings if governed else None),
+            )
             img_b64_list = []
             for p in photos:
                 b64 = _encode_resized(p)
@@ -695,6 +883,8 @@ class EbayDraftWorker(QueueWorker):
 
         item['draft_listing'] = draft
         patch_fields: Dict[str, Any] = {'draft_listing': draft}
+        if governed and photo_findings:
+            patch_fields['pipeline_error'] = photo_findings[-1]
         if category_resolved_here:
             # Session 41 fix: this used to be mutated in memory only — never
             # persisted — so every subsequent re-draft of an item ai_identify
@@ -703,6 +893,31 @@ class EbayDraftWorker(QueueWorker):
             # already straining that quota today.
             patch_fields['ebay_category_id']   = item['ebay_category_id']
             patch_fields['ebay_category_name'] = item['ebay_category_name']
+        if governed:
+            mutation_payload = {
+                "schema": "ebay-draft-observation/v1",
+                "job_id": job["job_id"],
+                "graph_id": payload["graph_id"],
+                "fields": patch_fields,
+            }
+            checkpoint = {
+                "schema": "ebay-draft-observation/v1",
+                "sku": sku,
+                "expected_generation": payload["object_generation"],
+                "fields": patch_fields,
+                "operation_id": operation_identity(
+                    sku=sku, kind="ebay-draft",
+                    expected_generation=payload["object_generation"],
+                    payload=mutation_payload,
+                ),
+            }
+            checkpoint = state_machine.checkpoint_running_job(
+                job["job_id"], self.owner, job["lease_token"], checkpoint,
+            )
+            return self._commit_governed_draft(
+                job=job, payload=payload, sku=sku, json_path=json_path,
+                checkpoint=checkpoint,
+            )
         fence_patch_item(self.config, sku, patch_fields)
 
         log.info('ebay_draft complete for %s: %d specifics filled', sku, len(item_specifics))
@@ -723,12 +938,7 @@ class EbayDraftWorker(QueueWorker):
             tgw_logging.log_event('ebay_draft_live_update_pending', sku=sku,
                                   offer_id=item['ebay_offer']['offer_id'])
 
-        return {
-            "treatment_id": "ebay-draft",
-            "outcome": "satisfied",
-            "established_conditions": ("draft_generated",),
-            "artifacts": (f"item:{sku}",),
-        }
+        return {"ok": True, "sku": sku}
 
 
 
