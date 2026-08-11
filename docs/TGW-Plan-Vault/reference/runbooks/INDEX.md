@@ -82,6 +82,7 @@ These runbooks govern graph-bound workflow work and supersede the older blanket
 | 8 | [sold-sync-gaps.md](sold-sync-gaps.md) | Sold on eBay but still "available" locally; sold-event loss | Oversell / re-list of sold items; bad velocity data |
 | 9 | [thermal-emergency-response.md](thermal-emergency-response.md) | tgw-prod thermal HOT/THROTTLE/SHUTDOWN | Host may shut down; formal policy for Tigwa-lite's monitor response (not an operator-diagnosis runbook) |
 | 10 | [ebay-api-operations.md](ebay-api-operations.md) | eBay API quota/rate-limit exhaustion; 25707 orphaned-offer bulk-fetch cascade (todo #1077); Inventory API empty-aspect-value rejection (invariant C14) | Pipeline-wide eBay API drain; permanently-degraded bulk sync; operator corrections silently lost / listing manually ended |
+| 11 | [nix-flake-maintenance.md](nix-flake-maintenance.md) | tgw-prod NixOS module/host/unit maintenance, deployment, or rollback | Whole-host configuration and TGW service fleet |
 
 ## Quick triage — "something is wrong, where do I start?"
 
