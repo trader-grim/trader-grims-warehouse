@@ -1,0 +1,18 @@
+{
+  "schema": "tgw-plan-evidence/v1",
+  "receipt_id": "satellite-access-inventory-75904d82198e3c38",
+  "plan_id": "PLAN-satellite-access-discovery",
+  "plan_version": 1,
+  "scope_hash": "sha256:5e1c678d025fd38e8ac83a2998c9f1c75e921e8d80046880187e56c058f3f84f",
+  "registry_revision": "sha256:bf93cacc22da1165bda05f0dfe2e42d3fa4425bf6100313e58428633ac3b5667",
+  "graph_id": "sha256:61fccfc52787587266a9b960e65ae08cfff6c05604cf79eaef29c703198f609d",
+  "condition_hash": "sha256:7073f273670c34da91dbb1d2c07d2384f1e3b674887e3528dcf9ce7389aaa1b9",
+  "work_unit_id": "L1-satellite-access-discovery",
+  "acceptance_id": "satellite-access-held",
+  "entity": "inventory:satellite-access-custody",
+  "verifier": "tgw.environment.satellite-access-hold/v1",
+  "verifier_version": "1",
+  "result": "true",
+  "observed_at": "2026-08-11T09:22:25-07:00",
+  "evidence_hash": "sha256:384f932cfde4f0df0516a4e3873be098f759b9d68dff2aa171a660c3776f0e52"
+}

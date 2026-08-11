@@ -1,0 +1,14 @@
+{
+  "enums": {
+    "authority": ["plan-approved"],
+    "effect_class": ["read-only"],
+    "kind": ["discovery"]
+  },
+  "schema": "tgw-plan-registry/v1",
+  "treatments": {
+    "environment-satellite-access-discovery": {"version": "1"}
+  },
+  "verifiers": {
+    "tgw.environment.satellite-access-hold/v1": {"version": "1"}
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "conditions": [
+    {
+      "condition_id": "L1-satellite-access-discovery:satellite-access-held",
+      "receipt_ids": [
+        "satellite-access-inventory-75904d82198e3c38"
+      ],
+      "result": "true"
+    }
+  ],
+  "graph_id": "sha256:61fccfc52787587266a9b960e65ae08cfff6c05604cf79eaef29c703198f609d",
+  "ready_for_candidate": true,
+  "schema": "tgw-plan-status/v1"
+}

@@ -1,0 +1,49 @@
+{
+  "schema": "tgw-satellite-access-inventory/v1",
+  "observed_at": "2026-08-11T09:22:25-07:00",
+  "discovery_scope": "local-configuration-and-historical-references",
+  "network_contact": false,
+  "authentication_attempted": false,
+  "wake_action_attempted": false,
+  "recovered_credentials_used": false,
+  "hosts": {
+    "catnanny": {
+      "quarantine": true,
+      "current_connection_definition": "not-found",
+      "current_identity": "unverified",
+      "custody": "unverified",
+      "acquisition": "held"
+    },
+    "helicrew": {
+      "quarantine": true,
+      "current_connection_definition": "not-found",
+      "current_identity": "unverified",
+      "custody": "unverified",
+      "acquisition": "held",
+      "historical_claims": {
+        "host_role": "development/reference laptop and Tigwa seat",
+        "network": "Tailscale client",
+        "ssh_key_fingerprint": "SHA256:mNL582HgtLB+S5bQL793tKMqXQUj7ykOm/hxaQDkd6c",
+        "authority": "historical-evidence-only"
+      }
+    }
+  },
+  "local_checks": {
+    "ssh_effective_config": "no hostname/user/port/identity/proxy fields returned for either alias",
+    "repository_reference_inventory": "present",
+    "connection_attempt": "not-performed"
+  },
+  "sources": {
+    "docs/TGW-Plan-Vault/reports/environment-recovery/satellite-reference-inventory-20260811.json": "sha256:2d659944d54761f0c1ea7f284ef4fe570a2541ad7ce00315fad7d6261e1c378f",
+    "docs/TGW-Plan-Vault/inbox/tigwa/TIGWA-CHECKPOINT-20260726-0005-helicrew-move-and-1692.md": "sha256:e7d6924735026d41c2f797dda74479addfe844b55690f6f19892fb97c74f533b",
+    "docs/TGW-Plan-Vault/inbox/archive/DONE-2026-07-25-TIGWA-RESPONSE-portable-fleet-current-os-app-inventory-2026-07-25.md": "sha256:993eacbaca805a084a18f64a591b0dc2f7a86e7a49b24bfbe296701904046b6d"
+  },
+  "holds": [
+    "No trusted current connection definition for catnanny",
+    "No trusted current connection definition for helicrew",
+    "No verified physical identity custody or acquisition manifest for either laptop",
+    "Historical host names and key fingerprints grant no access authority",
+    "Sterile acquisition or user-supplied current custody information is required before contact"
+  ],
+  "result": "access-unknown-and-held"
+}
