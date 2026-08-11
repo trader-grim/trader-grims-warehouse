@@ -163,7 +163,9 @@ def test_timeout_wait_receipt_completes_atomically_with_timer(
     monkeypatch.setattr("tgw.queue.state_machine.mark_running", lambda *_: True)
     monkeypatch.setattr(
         "tgw.queue.state_machine.complete_treatment_and_schedule_timer",
-        lambda job_id, owner, receipt: completed.append((job_id, owner, receipt))
+        lambda job_id, owner, token, receipt: completed.append(
+            (job_id, owner, token, receipt)
+        )
         or "timer-1",
     )
     monkeypatch.setattr(
@@ -178,9 +180,10 @@ def test_timeout_wait_receipt_completes_atomically_with_timer(
         worker._process(job)
 
     assert len(completed) == 1
-    job_id, owner, receipt = completed[0]
-    assert (job_id, owner) == (
+    job_id, owner, token, receipt = completed[0]
+    assert (job_id, owner, token) == (
         "11111111-1111-4111-8111-111111111111", "test-owner",
+        job["lease_token"],
     )
     assert receipt["receipt_schema_id"] == "treatment-wait-receipt/v1"
     assert receipt["outcome"] == "transient_backoff"
@@ -262,7 +265,9 @@ def test_workflow_selector_fails_closed_before_provider_read(tmp_path):
     provider_read.assert_not_called()
 
 
-def test_workflow_selector_remains_fail_closed_for_governed_payload(tmp_path, monkeypatch):
+def test_workflow_selector_routes_exact_governed_payload_to_admitted_handler(
+    tmp_path, monkeypatch,
+):
     worker, _ = _worker(tmp_path)
     _activate_consumer(worker)
     job = _job()
@@ -276,10 +281,9 @@ def test_workflow_selector_remains_fail_closed_for_governed_payload(tmp_path, mo
         lambda *_: (_ for _ in ()).throw(AssertionError("legacy path called")),
     )
 
-    with patch("tgw.workers.ebay_sync.ebay_get") as provider_read, \
-         pytest.raises(HardFailure, match="consumer is not admitted"):
-        worker.handle(job)
-    assert governed == []
+    with patch("tgw.workers.ebay_sync.ebay_get") as provider_read:
+        assert worker.handle(job) is None
+    assert governed == [(job["payload_json"], "SKU-1", job)]
     provider_read.assert_not_called()
 
 
@@ -469,6 +473,41 @@ def test_success_receipt_passes_queue_worker_binding_validation(tmp_path, monkey
     with _source_effect_ok(), _provider_offer({"offerId": "OFF-1"}):
         receipt = worker._handle_governed_targeted(job["payload_json"], "SKU-1", job)
     assert _treatment_receipt_error(receipt, job) is None
+
+
+def test_activated_queue_worker_emits_changed_then_noop_receipts(
+    tmp_path, monkeypatch,
+):
+    worker, path = _worker(tmp_path)
+    _activate_consumer(worker)
+    worker.queue_name = "ebay_sync"
+    monkeypatch.setattr("tgw.sqlite_catalog.upsert_catalog_row",
+                        lambda *args: {"ok": True})
+    monkeypatch.setattr("tgw.queue.state_machine.mark_running", lambda *_: True)
+    completed = []
+    monkeypatch.setattr(
+        "tgw.queue.state_machine.complete_treatment_and_enqueue_evaluation",
+        lambda job_id, owner, token, receipt: completed.append(receipt)
+        or "evaluation-1",
+    )
+    with _source_effect_ok(), _provider_offer(
+        {"offerId": "OFF-1", "status": "UNPUBLISHED"},
+    ):
+        first = _bound_job(path)
+        first.update(attempt_count=1, max_attempts=3)
+        worker._process(first)
+        second = _bound_job(path)
+        second["job_id"] = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        second["lease_token"] = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+        second["payload_json"]["graph_id"] = "graph-2"
+        second.update(attempt_count=1, max_attempts=3)
+        worker._process(second)
+    assert [receipt["outcome"] for receipt in completed] == [
+        "satisfied", "satisfied",
+    ]
+    assert [receipt["evidence"]["changed"] for receipt in completed] == [
+        True, False,
+    ]
 
 
 def test_exact_observation_on_current_projection_is_semantic_noop(
@@ -690,6 +729,134 @@ def test_recovery_lost_lease_stops_without_provider_read_or_mutation(
         worker._handle_governed_targeted(job["payload_json"], "SKU-1", job)
     provider.assert_not_called()
     assert path.read_bytes() == before
+
+
+def test_checkpoint_replay_reconciles_projection_without_provider_reread(
+    tmp_path, monkeypatch,
+):
+    worker, path = _worker(tmp_path)
+    job = _bound_job(path)
+    saved = []
+    monkeypatch.setattr(
+        "tgw.workers.ebay_sync.state_machine.checkpoint_running_job",
+        lambda _job, _owner, _token, checkpoint: saved.append(checkpoint)
+        or checkpoint,
+    )
+    monkeypatch.setattr(
+        "tgw.sqlite_catalog.upsert_catalog_row",
+        lambda *args: (_ for _ in ()).throw(OSError("catalog unavailable")),
+    )
+    with _source_effect_ok(), _provider_offer({"offerId": "OFF-1"}), \
+         pytest.raises(TreatmentFailure) as first:
+        worker._handle_governed_targeted(job["payload_json"], "SKU-1", job)
+    assert first.value.result["outcome"] == "repair_required"
+
+    retry = _job()
+    retry["payload_json"]["object_generation"] = job["payload_json"][
+        "object_generation"
+    ]
+    retry["payload_json"]["observation_checkpoint"] = saved[0]
+    projections = []
+    monkeypatch.setattr(
+        "tgw.sqlite_catalog.upsert_catalog_row",
+        lambda *args: projections.append(args) or {"ok": True},
+    )
+    with _source_effect_ok(), patch(
+        "tgw.workers.ebay_sync.ebay_get",
+        side_effect=AssertionError("provider reread during repair"),
+    ):
+        receipt = worker._handle_governed_targeted(
+            retry["payload_json"], "SKU-1", retry,
+        )
+    assert receipt["outcome"] == "satisfied"
+    assert receipt["evidence"]["changed"] is True
+    assert receipt["evidence"]["operation_id"] == saved[0]["operation_id"]
+    assert len(projections) == 1
+
+    with _source_effect_ok(), patch(
+        "tgw.workers.ebay_sync.ebay_get",
+        side_effect=AssertionError("provider reread after repair"),
+    ):
+        repeated = worker._handle_governed_targeted(
+            retry["payload_json"], "SKU-1", retry,
+        )
+    assert repeated["outcome"] == "satisfied"
+    assert len(projections) == 1
+
+
+def test_checkpoint_reconciliation_failure_remains_durable_repair_required(
+    tmp_path, monkeypatch,
+):
+    worker, path = _worker(tmp_path)
+    job = _bound_job(path)
+    checkpoint = worker._observation_checkpoint(
+        job["payload_json"], "SKU-1", {"offerId": "OFF-1"},
+    )
+    monkeypatch.setattr(
+        "tgw.sqlite_catalog.upsert_catalog_row",
+        lambda *args: (_ for _ in ()).throw(OSError("catalog unavailable")),
+    )
+    with _source_effect_ok(), _provider_offer({"offerId": "OFF-1"}), \
+         pytest.raises(TreatmentFailure):
+        worker._handle_governed_targeted(job["payload_json"], "SKU-1", job)
+    retry = _job()
+    retry["payload_json"]["object_generation"] = job["payload_json"][
+        "object_generation"
+    ]
+    retry["payload_json"]["observation_checkpoint"] = checkpoint
+    with _source_effect_ok(), patch("tgw.workers.ebay_sync.ebay_get") as provider, \
+         pytest.raises(TreatmentFailure) as caught:
+        worker._handle_governed_targeted(retry["payload_json"], "SKU-1", retry)
+    provider.assert_not_called()
+    assert caught.value.result["outcome"] == "repair_required"
+
+
+def test_queue_worker_restart_completes_checkpointed_projection_repair(
+    tmp_path, monkeypatch,
+):
+    worker, path = _worker(tmp_path)
+    _activate_consumer(worker)
+    worker.queue_name = "ebay_sync"
+    job = _bound_job(path)
+    saved = []
+    monkeypatch.setattr(
+        "tgw.workers.ebay_sync.state_machine.checkpoint_running_job",
+        lambda _job, _owner, _token, checkpoint: saved.append(checkpoint)
+        or checkpoint,
+    )
+    monkeypatch.setattr(
+        "tgw.sqlite_catalog.upsert_catalog_row",
+        lambda *args: (_ for _ in ()).throw(OSError("projection crash")),
+    )
+    with _source_effect_ok(), _provider_offer({"offerId": "OFF-1"}), \
+         pytest.raises(TreatmentFailure):
+        worker._handle_governed_targeted(job["payload_json"], "SKU-1", job)
+
+    retry = _job()
+    retry["job_id"] = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+    retry["lease_token"] = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+    retry["payload_json"]["object_generation"] = job["payload_json"][
+        "object_generation"
+    ]
+    retry["payload_json"]["observation_checkpoint"] = saved[0]
+    retry.update(attempt_count=1, max_attempts=3)
+    monkeypatch.setattr("tgw.sqlite_catalog.upsert_catalog_row",
+                        lambda *args: {"ok": True})
+    monkeypatch.setattr("tgw.queue.state_machine.mark_running", lambda *_: True)
+    completed = []
+    monkeypatch.setattr(
+        "tgw.queue.state_machine.complete_treatment_and_enqueue_evaluation",
+        lambda job_id, owner, token, receipt: completed.append(receipt)
+        or "evaluation-1",
+    )
+    with _source_effect_ok(), patch(
+        "tgw.workers.ebay_sync.ebay_get",
+        side_effect=AssertionError("provider reread during queue restart"),
+    ):
+        worker._process(retry)
+    assert len(completed) == 1
+    assert completed[0]["outcome"] == "satisfied"
+    assert completed[0]["evidence"]["operation_id"] == saved[0]["operation_id"]
 
 
 def test_evaluator_sequences_source_effect_to_projection_receipt(tmp_path):

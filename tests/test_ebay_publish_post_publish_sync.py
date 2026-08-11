@@ -117,7 +117,9 @@ def test_governed_sync_failure_replay_completes_outbox_without_republish(
     worker = _worker(_cfg(tmp_path))
     worker.owner = 'owner'
     job = {
-        'job_id': 'job-sync', 'queue_name': 'ebay_publish',
+        'job_id': 'job-sync',
+        'lease_token': '11111111-1111-4111-8111-111111111111',
+        'queue_name': 'ebay_publish',
         'entity_type': 'item', 'entity_id': sku,
         'attempt_count': 1, 'max_attempts': 3,
         'payload_json': {
@@ -126,6 +128,7 @@ def test_governed_sync_failure_replay_completes_outbox_without_republish(
             'graph_id': 'graph-sync',
             'goal_profile_id': 'tgw.ebay_listable',
             'goal_profile_version': '1', 'object_generation': 'generation-sync',
+            'condition_hash': 'condition-sync',
         },
     }
 
@@ -151,9 +154,12 @@ def test_governed_sync_failure_replay_completes_outbox_without_republish(
 
     assert published == ['off-1']
     assert sync_attempts == 2
-    receipt = atomic.call_args.args[2]
+    assert atomic.call_args.args[2] == job['lease_token']
+    receipt = atomic.call_args.args[3]
     assert receipt['receipt_schema_id'] == 'treatment-receipt/v1'
     assert receipt['graph_id'] == 'graph-sync'
+    assert receipt['entity_id'] == sku
+    assert receipt['condition_hash'] == 'condition-sync'
     assert receipt['outcome'] == 'satisfied'
     ordinary.assert_not_called()
 

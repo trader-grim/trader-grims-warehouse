@@ -96,7 +96,9 @@ def _run(worker, sku):
 
 def _governed_job(sku):
     return {
-        'job_id': 'job-1', 'queue_name': 'ebay_publish',
+        'job_id': 'job-1',
+        'lease_token': '33333333-3333-4333-8333-333333333333',
+        'queue_name': 'ebay_publish',
         'entity_type': 'item', 'entity_id': sku,
         'attempt_count': 1, 'max_attempts': 3,
         'payload_json': {
@@ -104,6 +106,7 @@ def _governed_job(sku):
             'treatment_id': 'ebay-publish', 'treatment_version': '1',
             'graph_id': 'graph-1', 'goal_profile_id': 'tgw.ebay_listable',
             'goal_profile_version': '1', 'object_generation': 'generation-1',
+            'condition_hash': 'condition-1',
         },
     }
 
@@ -233,12 +236,20 @@ def test_governed_fresh_publish_completes_through_atomic_evaluation_outbox(
         publisher._process(_governed_job(sku))
 
     assert publisher._published == ['OFF1']
-    receipt = atomic.call_args.args[2]
+    assert atomic.call_args.args[2] == (
+        '33333333-3333-4333-8333-333333333333'
+    )
+    receipt = atomic.call_args.args[3]
     assert receipt == {
         'receipt_schema_id': 'treatment-receipt/v1',
-        'treatment_id': 'ebay-publish', 'treatment_version': '1',
-        'graph_id': 'graph-1', 'outcome': 'satisfied',
-        'established_conditions': ['published'],
+            'treatment_id': 'ebay-publish', 'treatment_version': '1',
+            'graph_id': 'graph-1', 'outcome': 'satisfied',
+            'goal_profile_id': 'tgw.ebay_listable',
+            'goal_profile_version': '1',
+            'object_generation': 'generation-1',
+            'condition_hash': 'condition-1',
+            'entity_id': sku,
+            'established_conditions': ['published'],
         'artifacts': [f'item:{sku}'],
     }
     ordinary.assert_not_called()

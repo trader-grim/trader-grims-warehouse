@@ -107,10 +107,15 @@ def test_worker_completion_uses_atomic_outbox_only_for_bound_success_receipt():
     worker.config = {}
     receipt = {"treatment_id": "normalize-condition", "treatment_version": "1",
                "graph_id": "graph-1", "outcome": "satisfied",
+               "goal_profile_id": "tgw.ebay_listable",
+               "goal_profile_version": "1", "object_generation": "gen-1",
+               "condition_hash": "condition-1", "entity_id": "SKU-1",
                "receipt_schema_id": "treatment-receipt/v1"}
-    job = {"job_id": "job-1", "entity_type": "item", "entity_id": "SKU-1",
+    job = {"job_id": "job-1", "lease_token": LEASE_TOKEN,
+           "entity_type": "item", "entity_id": "SKU-1",
            "payload_json": {"treatment_id": "normalize-condition", "treatment_version": "1",
                             "graph_id": "graph-1", "object_generation": "gen-1",
+                            "condition_hash": "condition-1",
                             "goal_profile_id": "tgw.ebay_listable",
                             "goal_profile_version": "1", "entity_id": "SKU-1",
                             "object_id": "SKU-1"}}
@@ -119,7 +124,7 @@ def test_worker_completion_uses_atomic_outbox_only_for_bound_success_receipt():
          patch("tgw.queue.worker_base.state_machine.complete_treatment_and_enqueue_evaluation") as atomic, \
          patch("tgw.queue.worker_base.state_machine.mark_succeeded") as ordinary:
         worker._process(job)
-    atomic.assert_called_once_with("job-1", "owner", receipt)
+    atomic.assert_called_once_with("job-1", "owner", LEASE_TOKEN, receipt)
     ordinary.assert_not_called()
 
 
@@ -129,13 +134,16 @@ def test_unrecognized_dict_keeps_backward_compatible_completion():
     worker.owner = "owner"
     worker.config = {}
     worker.handle = MagicMock(return_value={"ok": True})
-    job = {"job_id": "job-1", "entity_type": "system", "payload_json": {}}
+    job = {"job_id": "job-1", "lease_token": LEASE_TOKEN,
+           "entity_type": "system", "payload_json": {}}
     with patch("tgw.queue.worker_base.state_machine.mark_running"), \
          patch("tgw.queue.worker_base.state_machine.complete_treatment_and_enqueue_evaluation") as atomic, \
          patch("tgw.queue.worker_base.state_machine.mark_succeeded") as ordinary:
         worker._process(job)
     atomic.assert_not_called()
-    ordinary.assert_called_once_with("job-1", "owner", result={"ok": True})
+    ordinary.assert_called_once_with(
+        "job-1", "owner", LEASE_TOKEN, result={"ok": True},
+    )
 
 
 def test_waiting_receipt_uses_atomic_timer_boundary_not_success_outbox():
@@ -158,7 +166,8 @@ def test_waiting_receipt_uses_atomic_timer_boundary_not_success_outbox():
             "dedupe_key": "workflow-timer:graph-1:ebay-upload:quota:1",
         },
     }
-    job = {"job_id": "job-1", "queue_name": "ebay_upload",
+    job = {"job_id": "job-1", "lease_token": LEASE_TOKEN,
+           "queue_name": "ebay_upload",
            "entity_type": "item", "entity_id": "SKU-1", "payload_json": payload}
     worker.handle = MagicMock(return_value=receipt)
     with patch("tgw.queue.worker_base.time.time", return_value=1000.0), \
@@ -168,7 +177,7 @@ def test_waiting_receipt_uses_atomic_timer_boundary_not_success_outbox():
          patch("tgw.queue.worker_base.state_machine.mark_succeeded") as ordinary, \
          patch("tgw.queue.worker_base.state_machine.complete_treatment_and_enqueue_evaluation") as outbox:
         worker._process(job)
-    timer.assert_called_once_with("job-1", "owner", receipt)
+    timer.assert_called_once_with("job-1", "owner", LEASE_TOKEN, receipt)
     ordinary.assert_not_called()
     outbox.assert_not_called()
 
@@ -234,6 +243,70 @@ def test_waiting_receipt_rejects_invalid_timer_attempt_budget(max_attempts):
         )
 
 
+@pytest.mark.parametrize(
+    ("key", "changed", "reason"),
+    [
+        ("graph_id", "graph-other", "TIMER_GRAPH_ID_MISMATCH"),
+        ("object_generation", "gen-other", "TIMER_OBJECT_GENERATION_MISMATCH"),
+        ("condition_hash", "condition-other", "TIMER_CONDITION_HASH_MISMATCH"),
+        ("provider_effect_id", "effect-other", "TIMER_PROVIDER_EFFECT_ID_MISMATCH"),
+        ("provider_identity", "ebay:other", "TIMER_PROVIDER_IDENTITY_MISMATCH"),
+        ("expected_offer_id", "offer-other", "TIMER_EXPECTED_OFFER_ID_MISMATCH"),
+        ("source_operation", "publish-offer", "TIMER_SOURCE_OPERATION_MISMATCH"),
+    ],
+)
+def test_waiting_receipt_rejects_rebound_treatment_or_source_identity(
+    key, changed, reason,
+):
+    from tgw.queue.worker_base import _waiting_treatment_receipt_error
+
+    payload = {
+        "sku": "SKU-1", "entity_id": "SKU-1", "treatment_id": "ebay-sync-targeted",
+        "treatment_version": "1", "graph_id": "graph-1",
+        "goal_profile_id": "tgw.ebay_reconciled", "goal_profile_version": "1",
+        "object_generation": "gen-1", "condition_hash": "condition-1",
+        "provider_effect_id": "effect-1", "provider_identity": "ebay:account",
+        "expected_offer_id": "offer-1", "source_operation": "stage-draft",
+    }
+    timer_payload = {**payload, key: changed, "sync_retry": 1}
+    receipt = {
+        "receipt_schema_id": "treatment-wait-receipt/v1",
+        "treatment_id": payload["treatment_id"],
+        "treatment_version": payload["treatment_version"],
+        "graph_id": payload["graph_id"], "outcome": "transient_backoff",
+        "timer": {"queue_name": "ebay_sync", "not_before": 1100.0,
+                  "payload": timer_payload, "dedupe_key": "timer-1"},
+    }
+    job = {"queue_name": "ebay_sync", "entity_type": "item",
+           "entity_id": "SKU-1", "payload_json": payload}
+    with patch("tgw.queue.worker_base.time.time", return_value=1000.0):
+        assert _waiting_treatment_receipt_error(receipt, job) == reason
+
+
+def test_waiting_receipt_rejects_reserved_checkpoint_injection():
+    from tgw.queue.worker_base import _waiting_treatment_receipt_error
+
+    payload = {
+        "sku": "SKU-1", "entity_id": "SKU-1", "treatment_id": "ebay-sync-targeted",
+        "treatment_version": "1", "graph_id": "graph-1",
+        "object_generation": "gen-1", "condition_hash": "condition-1",
+    }
+    receipt = {
+        "receipt_schema_id": "treatment-wait-receipt/v1",
+        "treatment_id": "ebay-sync-targeted", "treatment_version": "1",
+        "graph_id": "graph-1", "outcome": "transient_backoff",
+        "timer": {"queue_name": "ebay_sync", "not_before": 1100.0,
+                  "payload": {**payload, "observation_checkpoint": {"forged": True}},
+                  "dedupe_key": "timer-1"},
+    }
+    job = {"queue_name": "ebay_sync", "entity_type": "item",
+           "entity_id": "SKU-1", "payload_json": payload}
+    with patch("tgw.queue.worker_base.time.time", return_value=1000.0):
+        assert _waiting_treatment_receipt_error(receipt, job) == (
+            "TIMER_RESERVED_CHECKPOINT"
+        )
+
+
 def test_atomic_wait_completion_and_future_job_are_one_transaction():
     cursor = MagicMock()
     cursor.__enter__.return_value = cursor
@@ -253,7 +326,7 @@ def test_atomic_wait_completion_and_future_job_are_one_transaction():
     with patch.object(state_machine, "_conn", return_value=connection), \
          patch.object(state_machine.time, "time", return_value=1000.0):
         timer_id = state_machine.complete_treatment_and_schedule_timer(
-            "origin-job", "owner", receipt,
+            "origin-job", "owner", LEASE_TOKEN, receipt,
         )
     assert timer_id == "timer-job"
     assert cursor.execute.call_count == 2
@@ -275,7 +348,7 @@ def test_wait_timer_fails_closed_when_running_lease_is_lost():
          patch.object(state_machine.time, "time", return_value=1000.0):
         with pytest.raises(RuntimeError, match="lost running lease"):
             state_machine.complete_treatment_and_schedule_timer(
-                "origin-job", "wrong-owner", receipt,
+                    "origin-job", "wrong-owner", LEASE_TOKEN, receipt,
             )
     assert cursor.execute.call_count == 1
 
@@ -298,7 +371,7 @@ def test_wait_timer_insert_conflict_rolls_back_receipt_completion():
          patch.object(state_machine.time, "time", return_value=1000.0):
         with pytest.raises(RuntimeError, match="timer identity conflict"):
             state_machine.complete_treatment_and_schedule_timer(
-                "origin-job", "owner", receipt,
+                "origin-job", "owner", LEASE_TOKEN, receipt,
             )
     assert connection.__exit__.call_args.args[0] is RuntimeError
 
@@ -337,7 +410,7 @@ def test_atomic_completion_writes_receipt_then_durable_event():
     receipt = {"outcome": "satisfied", "graph_id": "graph-1"}
     with patch.object(state_machine, "_conn", return_value=connection):
         event_id = state_machine.complete_treatment_and_enqueue_evaluation(
-            "origin-job", "owner", receipt,
+            "origin-job", "owner", LEASE_TOKEN, receipt,
         )
     assert event_id == "event-job"
     assert cursor.execute.call_count == 2
@@ -360,7 +433,7 @@ def test_satisfied_no_change_receipt_is_persisted_without_evaluation_event():
                "evidence": {"changed": False}}
     with patch.object(state_machine, "_conn", return_value=connection):
         result = state_machine.complete_treatment_and_enqueue_evaluation(
-            "origin-job", "owner", receipt,
+            "origin-job", "owner", LEASE_TOKEN, receipt,
         )
     assert result == state_machine.EVALUATION_EVENT_NOT_REQUIRED
     assert cursor.execute.call_count == 1
@@ -392,7 +465,7 @@ def test_normalize_noop_receipt_suppresses_false_evidence_event():
     connection.cursor.return_value = cursor
     with patch.object(state_machine, "_conn", return_value=connection):
         result = state_machine.complete_treatment_and_enqueue_evaluation(
-            "origin-job", "owner", receipt,
+            "origin-job", "owner", LEASE_TOKEN, receipt,
         )
     assert result == state_machine.EVALUATION_EVENT_NOT_REQUIRED
     assert cursor.execute.call_count == 1
@@ -409,7 +482,8 @@ def test_atomic_completion_raises_when_lease_guard_loses():
     with patch.object(state_machine, "_conn", return_value=connection):
         with pytest.raises(RuntimeError, match="lost running lease"):
             state_machine.complete_treatment_and_enqueue_evaluation(
-                "origin-job", "wrong-owner", {"outcome": "satisfied"},
+                "origin-job", "wrong-owner", LEASE_TOKEN,
+                {"outcome": "satisfied"},
             )
     assert cursor.execute.call_count == 1
 
@@ -419,6 +493,11 @@ def test_atomic_completion_raises_when_lease_guard_loses():
     [
         ({"graph_id": ""}, {}, {}, "INVALID_RECEIPT_IDENTITY"),
         ({"graph_id": "wrong"}, {}, {}, "GRAPH_ID_MISMATCH"),
+        ({"goal_profile_id": "other"}, {}, {}, "GOAL_PROFILE_ID_MISMATCH"),
+        ({"goal_profile_version": "2"}, {}, {}, "GOAL_PROFILE_VERSION_MISMATCH"),
+        ({"object_generation": "gen-2"}, {}, {}, "OBJECT_GENERATION_MISMATCH"),
+        ({"condition_hash": "condition-2"}, {}, {}, "CONDITION_HASH_MISMATCH"),
+        ({"entity_id": "OTHER"}, {}, {}, "RECEIPT_ENTITY_ID_MISMATCH"),
         ({}, {"object_generation": ""}, {}, "INVALID_OBJECT_GENERATION"),
         ({}, {"goal_profile_version": ""}, {}, "INVALID_GOAL_PROFILE_VERSION"),
         ({}, {"entity_id": "OTHER"}, {}, "ENTITY_ID_MISMATCH"),
@@ -435,14 +514,19 @@ def test_candidate_treatment_receipt_with_bad_binding_is_terminal_not_success(
     worker.config = {}
     receipt = {"treatment_id": "normalize-condition", "treatment_version": "1",
                "graph_id": "graph-1", "outcome": "satisfied",
+               "goal_profile_id": "tgw.ebay_listable",
+               "goal_profile_version": "1", "object_generation": "gen-1",
+               "condition_hash": "condition-1", "entity_id": "SKU-1",
                "receipt_schema_id": "treatment-receipt/v1"}
     receipt.update(receipt_change)
     payload = {"treatment_id": "normalize-condition", "treatment_version": "1",
                "graph_id": "graph-1", "object_generation": "gen-1",
+               "condition_hash": "condition-1",
                "goal_profile_id": "tgw.ebay_listable", "goal_profile_version": "1",
                "entity_id": "SKU-1", "object_id": "SKU-1"}
     payload.update(payload_change)
-    job = {"job_id": "job-1", "entity_type": "item", "entity_id": "SKU-1",
+    job = {"job_id": "job-1", "lease_token": LEASE_TOKEN,
+           "entity_type": "item", "entity_id": "SKU-1",
            "payload_json": payload}
     job.update(job_change)
     worker.handle = MagicMock(return_value=receipt)
@@ -472,7 +556,7 @@ def test_atomic_insert_exception_propagates_to_transaction_context():
     with patch.object(state_machine, "_conn", return_value=connection):
         with pytest.raises(RuntimeError, match="insert failed"):
             state_machine.complete_treatment_and_enqueue_evaluation(
-                "origin-job", "owner", {"outcome": "satisfied"},
+                "origin-job", "owner", LEASE_TOKEN, {"outcome": "satisfied"},
             )
     # The exception leaves the `_conn` transaction context; psycopg rolls it back.
     assert connection.__exit__.call_args.args[0] is RuntimeError
@@ -485,12 +569,15 @@ def test_treatment_failure_persists_structured_result_as_dead_letter():
     worker.config = {}
     failed = {"outcome": "failed", "evidence": {"reason_code": "CONFLICT"}}
     worker.handle = MagicMock(side_effect=TreatmentFailure("conflict", failed))
-    job = {"job_id": "job-1", "entity_type": "item", "entity_id": "SKU-1",
+    job = {"job_id": "job-1", "lease_token": LEASE_TOKEN,
+           "entity_type": "item", "entity_id": "SKU-1",
            "payload_json": {}}
     with patch("tgw.queue.worker_base.state_machine.mark_running"), \
          patch("tgw.queue.worker_base.state_machine.mark_dead_letter") as dead, \
          patch("tgw.notify.notify"):
         worker._process(job)
     dead.assert_called_once_with(
-        "job-1", "owner", "TreatmentFailure('conflict')", result=failed,
+        "job-1", "owner", LEASE_TOKEN,
+        "TreatmentFailure('conflict')", result=failed,
     )
+LEASE_TOKEN = "11111111-1111-4111-8111-111111111111"

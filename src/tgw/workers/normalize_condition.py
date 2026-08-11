@@ -141,6 +141,14 @@ def handle_job(job: Mapping[str, Any], config: Mapping[str, Any], *, mutation_fn
 class NormalizeConditionWorker(QueueWorker):
     def handle(self, job: dict[str, Any]) -> dict[str, Any]:
         receipt = handle_job(job, self.config, mutation_fn=apply_condition_mutation)
+        payload = job.get("payload_json") or {}
+        receipt.update({
+            key: payload.get(key) for key in (
+                "goal_profile_id", "goal_profile_version",
+                "object_generation", "condition_hash",
+            )
+        })
+        receipt["entity_id"] = job.get("entity_id")
         if receipt["outcome"] != "satisfied":
             reason = receipt.get("evidence", {}).get("reason_code", "TREATMENT_FAILED")
             raise TreatmentFailure(f"{TREATMENT_ID} did not commit: {reason}", receipt)

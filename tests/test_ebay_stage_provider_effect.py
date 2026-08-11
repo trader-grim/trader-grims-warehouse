@@ -13,7 +13,8 @@ from tgw.workers.ebay_stage import EbayStageWorker
 
 def _payload() -> dict:
     return {
-        'sku': 'SKU-1', 'treatment_id': 'ebay-stage', 'treatment_version': '1',
+        'sku': 'SKU-1', 'entity_id': 'SKU-1',
+        'treatment_id': 'ebay-stage', 'treatment_version': '1',
         'graph_id': 'graph-1', 'goal_profile_id': 'tgw.ebay_staged',
         'goal_profile_version': '1', 'object_generation': 'generation-1',
         'condition_hash': 'condition-1', 'operator_authority_id': 'authority-1',
@@ -167,13 +168,34 @@ def test_success_persists_exact_stage_evidence_before_satisfied_receipt(
         ),
     )
 
-    receipt = worker.handle({
-        'entity_type': 'item', 'entity_id': sku, 'payload_json': _payload(),
-    })
+    worker.owner = 'owner-1'
+    worker.queue_name = 'ebay_stage'
+    job = {
+        'job_id': 'stage-fresh',
+        'lease_token': '22222222-2222-4222-8222-222222222222',
+        'queue_name': 'ebay_stage', 'entity_type': 'item', 'entity_id': sku,
+        'attempt_count': 1, 'max_attempts': 3, 'payload_json': _payload(),
+    }
+    monkeypatch.setattr(stage_mod.state_machine, 'mark_running', lambda *_: True)
+    completed = []
+    monkeypatch.setattr(
+        stage_mod.state_machine, 'complete_treatment_and_enqueue_evaluation',
+        lambda job_id, owner, token, receipt: completed.append(
+            (job_id, owner, token, receipt)
+        ) or 'evaluation-stage',
+    )
+    worker._process(job)
+    receipt = completed[0][3]
 
     assert writes[0]['ebay_offer']['provider_effect_id'] == 'e' * 64
     assert writes[0]['ebay_offer']['stage_content_identity'] == 'content-1'
     assert receipt['outcome'] == 'satisfied'
+    assert completed[0][2] == job['lease_token']
+    assert receipt['goal_profile_id'] == _payload()['goal_profile_id']
+    assert receipt['goal_profile_version'] == _payload()['goal_profile_version']
+    assert receipt['object_generation'] == _payload()['object_generation']
+    assert receipt['condition_hash'] == _payload()['condition_hash']
+    assert receipt['entity_id'] == sku
     assert receipt['evidence']['provider_effect_id'] == 'e' * 64
 
 

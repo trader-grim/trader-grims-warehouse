@@ -146,6 +146,7 @@ class EbaySyncWorker(QueueWorker):
             "goal_profile_version": payload["goal_profile_version"],
             "object_generation": payload["object_generation"],
             "condition_hash": payload["condition_hash"],
+            "entity_id": sku,
             "established_conditions": (
                 ["provider_projection_current"] if outcome == "satisfied" else []
             ),
@@ -271,6 +272,7 @@ class EbaySyncWorker(QueueWorker):
             ) from exc
         path = self.config["itemdata_root"] / sku / f"{sku}.json"
         checkpoint = (job.get("payload_json") or {}).get("observation_checkpoint")
+        replaying_checkpoint = checkpoint is not None
         if checkpoint is None:
             item = json.loads(path.read_text(encoding="utf-8"))
         if checkpoint is None and item_generation(item) != payload["object_generation"]:
@@ -336,6 +338,15 @@ class EbaySyncWorker(QueueWorker):
             payload=payload, sku=sku, offer=offer, item_path=path,
             operation_id=operation_id,
         )
+        if replaying_checkpoint and mutation.status == "REPAIR_REQUIRED":
+            from tgw.item_mutation import reconcile_mutation
+
+            mutation = reconcile_mutation(
+                item_path=path,
+                journal_root=self._item_mutation_journal_root(),
+                operation_id=operation_id,
+                project=self._project_catalog,
+            )
         if mutation.status != "COMMITTED":
             outcome = {
                 "CONFLICT": "conflict", "REPAIR_REQUIRED": "repair_required",
@@ -363,7 +374,6 @@ class EbaySyncWorker(QueueWorker):
     ):
         """Project one read-only observation through the item mutation CAS."""
         from tgw.item_mutation import mutate_item
-        from tgw.sqlite_catalog import upsert_catalog_row
 
         observation = {
             "provider_effect_id": payload["provider_effect_id"],
@@ -418,26 +428,34 @@ class EbaySyncWorker(QueueWorker):
             }
             return updated
 
-        def project(_sku, document):
-            result = upsert_catalog_row(dict(self.config), document)
-            if not isinstance(result, dict) or result.get("ok") is not True:
-                raise RuntimeError("SQLite projection did not report success")
-            return result
-
         data_root = Path(self.config.get("data_root", self.config["itemdata_root"].parent))
-        journal_root = Path(self.config.get(
-            "item_mutation_journal_root", data_root.parent / "var/item-mutations",
-        ))
         return mutate_item(
             item_path=item_path,
             archive_root=Path(self.config.get(
                 "archive_root", data_root / "ItemArchive",
             )),
-            journal_root=journal_root, sku=sku, kind="ebay-sync-targeted",
+            journal_root=self._item_mutation_journal_root(),
+            sku=sku, kind="ebay-sync-targeted",
             expected_generation=payload["object_generation"],
-            payload=observation, mutate=mutate, project=project,
+            payload=observation, mutate=mutate, project=self._project_catalog,
             project_noop=True, operation_id=operation_id,
         )
+
+    def _item_mutation_journal_root(self):
+        data_root = Path(self.config.get(
+            "data_root", self.config["itemdata_root"].parent,
+        ))
+        return Path(self.config.get(
+            "item_mutation_journal_root", data_root.parent / "var/item-mutations",
+        ))
+
+    def _project_catalog(self, _sku, document):
+        from tgw.sqlite_catalog import upsert_catalog_row
+
+        result = upsert_catalog_row(dict(self.config), document)
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            raise RuntimeError("SQLite projection did not report success")
+        return result
     def run(self) -> None:
         self.install_signal_handlers()
         tgw_logging.log_event("worker_start", queue=QUEUE_NAME, owner=self.owner)
@@ -480,8 +498,12 @@ class EbaySyncWorker(QueueWorker):
             raise HardFailure("ambiguous ebay_sync payload schema")
         if shape == "governed":
             mode = self._targeted_mode()
-            raise HardFailure(
-                f"workflow targeted sync consumer is not admitted (mode={mode})"
+            if mode != "workflow":
+                raise HardFailure(
+                    f"workflow targeted sync consumer is not admitted (mode={mode})"
+                )
+            return self._handle_governed_targeted(
+                payload, payload.get("sku"), job,
             )
         target_sku = payload.get("sku")
 

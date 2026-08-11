@@ -626,7 +626,7 @@ def cancel_job(job_id: str, message: Optional[str] = None,
             return dict(cur.fetchone())
 
 
-def mark_running(job_id: str, lease_owner: str) -> None:
+def mark_running(job_id: str, lease_owner: str, lease_token: str) -> None:
     """Transition leased → running."""
     with _conn() as con:
         with con.cursor() as cur:
@@ -635,9 +635,12 @@ def mark_running(job_id: str, lease_owner: str) -> None:
                 UPDATE queue_jobs
                    SET state = 'running'
                  WHERE job_id = %s AND state = 'leased' AND lease_owner = %s
+                   AND lease_token = %s::uuid AND lease_expires_at > NOW()
                 """,
-                (job_id, lease_owner),
+                (job_id, lease_owner, lease_token),
             )
+            if cur.rowcount != 1:
+                raise RuntimeError("lost leased job while marking running")
 
 
 def checkpoint_running_job(
@@ -724,7 +727,10 @@ def _validate_json_value(value: Any, path: str) -> None:
     raise TypeError(f"{path} contains non-JSON value {type(value).__name__}")
 
 
-def mark_succeeded(job_id: str, lease_owner: str, result: Optional[Dict[str, Any]] = None) -> None:
+def mark_succeeded(
+    job_id: str, lease_owner: str, lease_token: str,
+    result: Optional[Dict[str, Any]] = None,
+) -> None:
     """Transition running → succeeded.
 
     When *result* is supplied, it is persisted into ``payload_json.result``
@@ -748,8 +754,9 @@ def mark_succeeded(job_id: str, lease_owner: str, result: Optional[Dict[str, Any
                            payload_json = COALESCE(payload_json, '{}'::jsonb)
                                           || jsonb_build_object('result', %s::jsonb)
                      WHERE job_id = %s AND state = 'running' AND lease_owner = %s
+                       AND lease_token = %s::uuid AND lease_expires_at > NOW()
                     """,
-                    (json.dumps(result), job_id, lease_owner),
+                    (json.dumps(result), job_id, lease_owner, lease_token),
                 )
             else:
                 cur.execute(
@@ -763,13 +770,16 @@ def mark_succeeded(job_id: str, lease_owner: str, result: Optional[Dict[str, Any
                            error_code = NULL,
                            error_detail = NULL
                      WHERE job_id = %s AND state = 'running' AND lease_owner = %s
+                       AND lease_token = %s::uuid AND lease_expires_at > NOW()
                     """,
-                    (job_id, lease_owner),
+                    (job_id, lease_owner, lease_token),
                 )
+            if cur.rowcount != 1:
+                raise RuntimeError("lost running lease while marking succeeded")
 
 
 def complete_treatment_and_enqueue_evaluation(
-    job_id: str, lease_owner: str, result: Dict[str, Any],
+    job_id: str, lease_owner: str, lease_token: str, result: Dict[str, Any],
 ) -> str:
     """Atomically persist a treatment receipt and its evidence-change event."""
     with _conn() as con:
@@ -784,9 +794,10 @@ def complete_treatment_and_enqueue_evaluation(
                        payload_json = COALESCE(payload_json, '{}'::jsonb)
                                       || jsonb_build_object('result', %s::jsonb)
                  WHERE job_id = %s AND state = 'running' AND lease_owner = %s
+                   AND lease_token = %s::uuid AND lease_expires_at > NOW()
                  RETURNING entity_id, payload_json
                 """,
-                (json.dumps(result), job_id, lease_owner),
+                (json.dumps(result), job_id, lease_owner, lease_token),
             )
             completed = cur.fetchone()
             if completed is None:
@@ -823,7 +834,7 @@ def complete_treatment_and_enqueue_evaluation(
 
 
 def complete_treatment_and_schedule_timer(
-    job_id: str, lease_owner: str, result: Dict[str, Any],
+    job_id: str, lease_owner: str, lease_token: str, result: Dict[str, Any],
 ) -> str:
     """Atomically retain a non-success attempt and schedule its durable timer.
 
@@ -858,9 +869,10 @@ def complete_treatment_and_schedule_timer(
                        payload_json = COALESCE(payload_json, '{}'::jsonb)
                                       || jsonb_build_object('result', %s::jsonb)
                  WHERE job_id = %s AND state = 'running' AND lease_owner = %s
+                   AND lease_token = %s::uuid AND lease_expires_at > NOW()
                  RETURNING entity_type, entity_id
                 """,
-                (json.dumps(result), job_id, lease_owner),
+                (json.dumps(result), job_id, lease_owner, lease_token),
             )
             completed = cur.fetchone()
             if completed is None:
@@ -887,7 +899,7 @@ def complete_treatment_and_schedule_timer(
             return cur.fetchone()[0]
 
 
-def mark_failed(job_id: str, lease_owner: str, error: str) -> str:
+def mark_failed(job_id: str, lease_owner: str, lease_token: str, error: str) -> str:
     """
     Transition running → retry_wait or failed → dead_letter.
 
@@ -902,16 +914,15 @@ def mark_failed(job_id: str, lease_owner: str, error: str) -> str:
     with _conn() as con:
         with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                'SELECT attempt_count, max_attempts FROM queue_jobs WHERE job_id = %s',
-                (job_id,),
+                """SELECT attempt_count, max_attempts FROM queue_jobs
+                    WHERE job_id = %s AND state = 'running' AND lease_owner = %s
+                      AND lease_token = %s::uuid AND lease_expires_at > NOW()
+                    FOR UPDATE""",
+                (job_id, lease_owner, lease_token),
             )
             row = cur.fetchone()
             if row is None:
-                # audit#1143 #1234/#1243 follow-up: the row is gone — nothing
-                # will ever retry this job_id, so this is terminal, not
-                # 'retry_wait'. Report it as 'dead_letter' so the caller
-                # alerts/reschedules instead of silently doing nothing.
-                return 'dead_letter'
+                raise RuntimeError("lost running lease while marking failed")
             attempt = row['attempt_count']
             max_att = row['max_attempts']
             new_state = next_failure_state(attempt, max_att)
@@ -932,8 +943,9 @@ def mark_failed(job_id: str, lease_owner: str, error: str) -> str:
                            lease_token = NULL,
                            lease_expires_at = NULL
                      WHERE job_id = %s AND state = 'running' AND lease_owner = %s
+                       AND lease_token = %s::uuid AND lease_expires_at > NOW()
                     """,
-                    (nb, error[:2000], job_id, lease_owner),
+                    (nb, error[:2000], job_id, lease_owner, lease_token),
                 )
                 transitioned = cur.rowcount > 0
             else:
@@ -948,8 +960,9 @@ def mark_failed(job_id: str, lease_owner: str, error: str) -> str:
                            lease_token = NULL,
                            lease_expires_at = NULL
                      WHERE job_id = %s AND state = 'running' AND lease_owner = %s
+                       AND lease_token = %s::uuid AND lease_expires_at > NOW()
                     """,
-                    (error[:2000], job_id, lease_owner),
+                    (error[:2000], job_id, lease_owner, lease_token),
                 )
                 # audit#1143 #1246: only promote failed → dead_letter if the
                 # running → failed UPDATE above actually matched this job's
@@ -968,32 +981,13 @@ def mark_failed(job_id: str, lease_owner: str, error: str) -> str:
                     )
 
             if not transitioned:
-                # audit#1143 #1246 (deferred #1245 finding): the lease-guarded
-                # UPDATE above matched zero rows — this caller lost a lease
-                # race (e.g. recover_expired_jobs() already reclaimed the
-                # lease between the SELECT above and this UPDATE) and did NOT
-                # actually perform the transition it's about to claim.
-                # Re-query the row's real current state instead of blindly
-                # returning new_state, so the caller's terminal-failure
-                # handling (alerting / restarting a self-rescheduling chain)
-                # reflects what's actually true in the DB.
-                log.warning(
-                    'mark_failed: lease race for job %s (lease_owner=%s) — '
-                    '0 rows matched state=running; re-checking actual state',
-                    job_id, lease_owner,
-                )
-                cur.execute('SELECT state FROM queue_jobs WHERE job_id = %s', (job_id,))
-                actual = cur.fetchone()
-                if actual is None:
-                    return 'dead_letter'
-                actual_state = actual['state']
-                return 'dead_letter' if actual_state in ('failed', 'dead_letter') else 'retry_wait'
+                raise RuntimeError("lost running lease while marking failed")
 
             return 'retry_wait' if new_state == 'retry_wait' else 'dead_letter'
 
 
 def mark_dead_letter(
-    job_id: str, lease_owner: str, error: str,
+    job_id: str, lease_owner: str, lease_token: str, error: str,
     result: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Transition running → dead_letter immediately, bypassing retry logic."""
@@ -1013,12 +1007,15 @@ def mark_dead_letter(
                            ELSE COALESCE(payload_json, '{}'::jsonb)
                                 || jsonb_build_object('result', %s::jsonb) END
                  WHERE job_id = %s AND state = 'running' AND lease_owner = %s
+                   AND lease_token = %s::uuid AND lease_expires_at > NOW()
                 """,
                 (error[:2000],
                  json.dumps(result) if result is not None else None,
                  json.dumps(result) if result is not None else None,
-                 job_id, lease_owner),
+                 job_id, lease_owner, lease_token),
             )
+            if cur.rowcount != 1:
+                raise RuntimeError("lost running lease while marking dead letter")
 
 
 def recover_expired_jobs() -> int:
@@ -1552,7 +1549,10 @@ def query_ai_usage_by_sku(sku: str, since_days: int = 30) -> List[Dict[str, Any]
             return [dict(r) for r in cur.fetchall()]
 
 
-def requeue_with_backoff(job_id: str, lease_owner: str, delay_seconds: int, error_detail: str = '') -> None:
+def requeue_with_backoff(
+    job_id: str, lease_owner: str, lease_token: str, delay_seconds: int,
+    error_detail: str = '',
+) -> None:
     """Transition running → retry_wait with a custom delay, resetting attempt_count.
 
     Used for transient errors classified by classify_dead_letter() that should be
@@ -1573,9 +1573,13 @@ def requeue_with_backoff(job_id: str, lease_owner: str, delay_seconds: int, erro
                        lease_token = NULL,
                        lease_expires_at = NULL
                  WHERE job_id = %s AND state = 'running' AND lease_owner = %s
+                   AND lease_token = %s::uuid AND lease_expires_at > NOW()
                 """,
-                (str(delay_seconds), error_detail[:2000], job_id, lease_owner),
+                (str(delay_seconds), error_detail[:2000], job_id, lease_owner,
+                 lease_token),
             )
+            if cur.rowcount != 1:
+                raise RuntimeError("lost running lease while requeueing with backoff")
 
 
 def active_jobs_for_sku(sku: str, queue_names: List[str]) -> List[str]:

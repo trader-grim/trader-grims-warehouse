@@ -161,3 +161,26 @@ def test_worker_raises_hard_failure_instead_of_returning_failed_receipt(monkeypa
     with pytest.raises(TreatmentFailure, match="CONFLICT") as raised:
         worker.handle(_job())
     assert raised.value.result["evidence"]["reason_code"] == "CONFLICT"
+
+
+def test_worker_success_receipt_carries_complete_queue_identity(monkeypatch):
+    worker = object.__new__(NormalizeConditionWorker)
+    worker.config = {}
+    job = _job(
+        goal_profile_id="tgw.ebay_listable", goal_profile_version="1",
+        condition_hash="condition-1",
+    )
+    monkeypatch.setattr(
+        "tgw.workers.normalize_condition.handle_job",
+        lambda *args, **kwargs: {
+            "outcome": "satisfied", "treatment_id": "normalize-condition",
+            "treatment_version": "1", "graph_id": "graph-7",
+            "receipt_schema_id": "treatment-receipt/v1",
+        },
+    )
+    receipt = worker.handle(job)
+    assert receipt["goal_profile_id"] == "tgw.ebay_listable"
+    assert receipt["goal_profile_version"] == "1"
+    assert receipt["object_generation"] == "gen-7"
+    assert receipt["condition_hash"] == "condition-1"
+    assert receipt["entity_id"] == "TGW-001"

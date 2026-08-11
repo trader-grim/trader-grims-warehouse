@@ -238,6 +238,7 @@ class EbayPublishWorker(QueueWorker):
         required = (
             'treatment_id', 'treatment_version', 'graph_id',
             'goal_profile_id', 'goal_profile_version', 'object_generation',
+            'condition_hash',
         )
         if not all(isinstance(payload.get(key), str) and payload[key].strip()
                    for key in required):
@@ -247,6 +248,11 @@ class EbayPublishWorker(QueueWorker):
             'treatment_id': payload['treatment_id'],
             'treatment_version': payload['treatment_version'],
             'graph_id': payload['graph_id'],
+            'goal_profile_id': payload['goal_profile_id'],
+            'goal_profile_version': payload['goal_profile_version'],
+            'object_generation': payload['object_generation'],
+            'condition_hash': payload['condition_hash'],
+            'entity_id': sku,
             'outcome': 'satisfied',
             'established_conditions': ['published'],
             'artifacts': [f'item:{sku}'],

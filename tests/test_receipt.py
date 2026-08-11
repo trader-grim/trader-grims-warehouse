@@ -58,6 +58,7 @@ def _mock_conn_cursor():
     """Build a MagicMock (con, cur) pair matching state_machine._conn()'s
     context-manager shape."""
     mock_cur = MagicMock()
+    mock_cur.rowcount = 1
     mock_cur.__enter__ = MagicMock(return_value=mock_cur)
     mock_cur.__exit__ = MagicMock(return_value=False)
 
@@ -183,7 +184,7 @@ def test_mark_succeeded_persists_result_into_payload_json():
 
     with patch("tgw.queue.state_machine._conn", return_value=mock_con):
         sm.mark_succeeded(
-            "job-001", "host:1234",
+            "job-001", "host:1234", "77777777-7777-4777-8777-777777777777",
             result={"outcome": "satisfied", "graph_id": "g-1"},
         )
 
@@ -194,6 +195,7 @@ def test_mark_succeeded_persists_result_into_payload_json():
     assert params[0] == json.dumps({"outcome": "satisfied", "graph_id": "g-1"})
     assert params[1] == "job-001"
     assert params[2] == "host:1234"
+    assert params[3] == "77777777-7777-4777-8777-777777777777"
 
 
 def test_mark_succeeded_with_none_result_does_not_add_result_key():
@@ -205,11 +207,15 @@ def test_mark_succeeded_with_none_result_does_not_add_result_key():
     mock_con, mock_cur = _mock_conn_cursor()
 
     with patch("tgw.queue.state_machine._conn", return_value=mock_con):
-        sm.mark_succeeded("job-002", "host:5678")
+        sm.mark_succeeded(
+            "job-002", "host:5678", "77777777-7777-4777-8777-777777777777",
+        )
 
     sql, params = mock_cur.execute.call_args[0]
     assert "jsonb_build_object" not in sql
-    assert params == ("job-002", "host:5678")
+    assert params == (
+        "job-002", "host:5678", "77777777-7777-4777-8777-777777777777",
+    )
 
 
 def test_mark_succeeded_explicit_none_result_does_not_add_result_key():
@@ -220,7 +226,10 @@ def test_mark_succeeded_explicit_none_result_does_not_add_result_key():
     mock_con, mock_cur = _mock_conn_cursor()
 
     with patch("tgw.queue.state_machine._conn", return_value=mock_con):
-        sm.mark_succeeded("job-003", "host:9999", result=None)
+        sm.mark_succeeded(
+            "job-003", "host:9999", "77777777-7777-4777-8777-777777777777",
+            result=None,
+        )
 
     sql, _ = mock_cur.execute.call_args[0]
     assert "jsonb_build_object" not in sql
@@ -252,15 +261,18 @@ def test_worker_handle_returns_dict_receipt_persisted():
         # Inline the patched _process logic directly.
         job_id = "job-receipt-1"
         owner = "testhost:9999"
+        token = "77777777-7777-4777-8777-777777777777"
 
-        sm.mark_running(job_id, owner)
+        sm.mark_running(job_id, owner, token)
         _handle_result = rec  # simulate handle() returning a dict
         receipt = _handle_result if isinstance(_handle_result, dict) else None
-        sm.mark_succeeded(job_id, owner, result=receipt)
+        sm.mark_succeeded(job_id, owner, token, result=receipt)
 
-    mock_running.assert_called_once_with("job-receipt-1", "testhost:9999")
+    mock_running.assert_called_once_with(
+        "job-receipt-1", "testhost:9999", token,
+    )
     mock_succeeded.assert_called_once_with(
-        "job-receipt-1", "testhost:9999", result=rec,
+        "job-receipt-1", "testhost:9999", token, result=rec,
     )
 
 
@@ -275,15 +287,18 @@ def test_worker_handle_returns_none_no_receipt_persisted():
 
         job_id = "job-receipt-2"
         owner = "testhost:9999"
+        token = "77777777-7777-4777-8777-777777777777"
 
-        sm.mark_running(job_id, owner)
+        sm.mark_running(job_id, owner, token)
         _handle_result = None  # simulate handle() returning None
         receipt = _handle_result if isinstance(_handle_result, dict) else None
-        sm.mark_succeeded(job_id, owner, result=receipt)
+        sm.mark_succeeded(job_id, owner, token, result=receipt)
 
-    mock_running.assert_called_once_with("job-receipt-2", "testhost:9999")
+    mock_running.assert_called_once_with(
+        "job-receipt-2", "testhost:9999", token,
+    )
     mock_succeeded.assert_called_once_with(
-        "job-receipt-2", "testhost:9999", result=None,
+        "job-receipt-2", "testhost:9999", token, result=None,
     )
 
 
@@ -298,14 +313,15 @@ def test_worker_handle_returns_non_dict_no_receipt():
 
         job_id = "job-receipt-3"
         owner = "testhost:9999"
+        token = "77777777-7777-4777-8777-777777777777"
 
-        sm.mark_running(job_id, owner)
+        sm.mark_running(job_id, owner, token)
         _handle_result = "some string"  # simulate handle() returning non-dict
         receipt = _handle_result if isinstance(_handle_result, dict) else None
-        sm.mark_succeeded(job_id, owner, result=receipt)
+        sm.mark_succeeded(job_id, owner, token, result=receipt)
 
     mock_succeeded.assert_called_once_with(
-        "job-receipt-3", "testhost:9999", result=None,
+        "job-receipt-3", "testhost:9999", token, result=None,
     )
 
 

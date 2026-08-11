@@ -23,6 +23,7 @@ import os
 import signal
 import socket
 import time
+import uuid
 from typing import Any, Dict, Optional
 
 import tgw.logging as tgw_logging
@@ -49,7 +50,11 @@ def _treatment_receipt_error(value: Any, job: Dict[str, Any]) -> str | None:
     payload = job.get("payload_json") or {}
     if not isinstance(payload, dict):
         return "INVALID_JOB_PAYLOAD"
-    required_receipt = ("treatment_id", "treatment_version", "graph_id")
+    required_receipt = (
+        "treatment_id", "treatment_version", "graph_id",
+        "goal_profile_id", "goal_profile_version", "object_generation",
+        "condition_hash", "entity_id",
+    )
     if any(not isinstance(value.get(key), str) or not value[key].strip()
            for key in required_receipt):
         return "INVALID_RECEIPT_IDENTITY"
@@ -57,10 +62,10 @@ def _treatment_receipt_error(value: Any, job: Dict[str, Any]) -> str | None:
         return "INVALID_RECEIPT_SCHEMA"
     if value.get("outcome") != "satisfied":
         return "INVALID_RECEIPT_OUTCOME"
-    for key in ("treatment_id", "treatment_version", "graph_id"):
-        if value.get(key) != payload.get(key):
-            return f"{key.upper()}_MISMATCH"
-    for key in ("goal_profile_id", "goal_profile_version", "object_generation"):
+    for key in (
+        "goal_profile_id", "goal_profile_version", "object_generation",
+        "condition_hash",
+    ):
         if not isinstance(payload.get(key), str) or not payload[key].strip():
             return f"INVALID_{key.upper()}"
     if job.get("entity_type") != "item":
@@ -70,8 +75,17 @@ def _treatment_receipt_error(value: Any, job: Dict[str, Any]) -> str | None:
         return "INVALID_ENTITY_ID"
     if payload.get("entity_id") != entity_id:
         return "ENTITY_ID_MISMATCH"
+    if value.get("entity_id") != entity_id:
+        return "RECEIPT_ENTITY_ID_MISMATCH"
     if payload.get("object_id") not in (None, entity_id):
         return "OBJECT_ID_MISMATCH"
+    for key in (
+        "treatment_id", "treatment_version", "graph_id",
+        "goal_profile_id", "goal_profile_version", "object_generation",
+        "condition_hash",
+    ):
+        if value.get(key) != payload.get(key):
+            return f"{key.upper()}_MISMATCH"
     return None
 
 
@@ -107,12 +121,24 @@ def _waiting_treatment_receipt_error(value: Any, job: Dict[str, Any]) -> str | N
     timer_payload = timer.get("payload")
     if not isinstance(timer_payload, dict):
         return "INVALID_TIMER_PAYLOAD"
+    for key in ("graph_id", "object_generation", "condition_hash"):
+        if not isinstance(payload.get(key), str) or not payload[key]:
+            return f"INVALID_{key.upper()}"
     for key in ("treatment_id", "treatment_version"):
         if timer_payload.get(key) != payload.get(key):
             return f"TIMER_{key.upper()}_MISMATCH"
-    for key in ("graph_id", "object_generation", "condition_hash"):
-        if not isinstance(timer_payload.get(key), str) or not timer_payload[key]:
-            return f"INVALID_TIMER_{key.upper()}"
+    continuation_bindings = (
+        "treatment_id", "treatment_version", "graph_id",
+        "goal_profile_id", "goal_profile_version", "object_generation",
+        "condition_hash", "entity_id", "object_id", "sku",
+        "provider_effect_id", "provider_identity", "expected_offer_id",
+        "source_operation",
+    )
+    for key in continuation_bindings:
+        if timer_payload.get(key) != payload.get(key):
+            return f"TIMER_{key.upper()}_MISMATCH"
+    if "observation_checkpoint" in timer_payload:
+        return "TIMER_RESERVED_CHECKPOINT"
     if timer_payload.get("sku") != job.get("entity_id"):
         return "TIMER_ENTITY_MISMATCH"
     if not isinstance(timer.get("dedupe_key"), str) or not timer["dedupe_key"]:
@@ -270,6 +296,10 @@ class QueueWorker:
 
     def _process(self, job: Dict[str, Any]) -> None:
         job_id = str(job['job_id'])
+        try:
+            lease_token = str(uuid.UUID(str(job.get("lease_token"))))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise RuntimeError(f"claimed job {job_id} lacks lease_token") from exc
         tgw_logging.log_event('job_claimed', job_id=job_id, queue=self.queue_name)
         log.info('claimed job %s', job_id)
 
@@ -294,12 +324,13 @@ class QueueWorker:
                 log.debug('quota context switch skipped: %s', exc)
 
         try:
-            state_machine.mark_running(job_id, self.owner)
+            state_machine.mark_running(job_id, self.owner, lease_token)
             _handle_result = self.handle(job)
         except HardFailure as exc:
             log.error('job %s hard failure (dead_letter): %s', job_id, exc)
             state_machine.mark_dead_letter(
-                job_id, self.owner, repr(exc), result=getattr(exc, "result", None),
+                job_id, self.owner, lease_token, repr(exc),
+                result=getattr(exc, "result", None),
             )
             tgw_logging.log_event('job_dead_letter', job_id=job_id,
                                   error=repr(exc))
@@ -335,7 +366,7 @@ class QueueWorker:
                     level='warning',
                 )
                 state_machine.requeue_with_backoff(
-                    job_id, self.owner, delay, error_text
+                    job_id, self.owner, lease_token, delay, error_text
                 )
                 tgw_logging.log_event(
                     'job_transient_requeue', job_id=job_id,
@@ -343,7 +374,9 @@ class QueueWorker:
                 )
                 return
 
-            result_state = state_machine.mark_failed(job_id, self.owner, error_text)
+            result_state = state_machine.mark_failed(
+                job_id, self.owner, lease_token, error_text,
+            )
             tgw_logging.log_event('job_failed', job_id=job_id, error=error_text)
             if result_state == 'dead_letter':
                 log.error('job %s dead_letter after %d/%d attempts: %s',
@@ -360,7 +393,7 @@ class QueueWorker:
             waiting_error = _waiting_treatment_receipt_error(receipt, job)
             if waiting_error is None:
                 timer_job_id = state_machine.complete_treatment_and_schedule_timer(
-                    job_id, self.owner, receipt,
+                    job_id, self.owner, lease_token, receipt,
                 )
                 if not timer_job_id:
                     raise RuntimeError(
@@ -375,7 +408,7 @@ class QueueWorker:
             receipt_error = _treatment_receipt_error(receipt, job)
             if receipt_error is None:
                 event_id = state_machine.complete_treatment_and_enqueue_evaluation(
-                    job_id, self.owner, receipt,
+                    job_id, self.owner, lease_token, receipt,
                 )
                 if not event_id:
                     raise RuntimeError(
@@ -392,7 +425,7 @@ class QueueWorker:
                 evidence["reason_code"] = receipt_error
                 failed_receipt["evidence"] = evidence
                 state_machine.mark_dead_letter(
-                    job_id, self.owner, failed_receipt["error_detail"],
+                    job_id, self.owner, lease_token, failed_receipt["error_detail"],
                     result=failed_receipt,
                 )
                 tgw_logging.log_event(
@@ -402,7 +435,9 @@ class QueueWorker:
                 log.error("job %s emitted invalid treatment receipt: %s", job_id, receipt_error)
                 return
             else:
-                state_machine.mark_succeeded(job_id, self.owner, result=receipt)
+                state_machine.mark_succeeded(
+                    job_id, self.owner, lease_token, result=receipt,
+                )
             tgw_logging.log_event('job_succeeded', job_id=job_id)
             log.info('job %s succeeded', job_id)
         finally:
