@@ -58,3 +58,23 @@ for a production workstation — revisit if it matures before Sway gains ext-cap
 ---
 
 - Phase 2 (TGW integration depth) — Sway TGW-ify: env imports, permissions, a1131 setup. Flutter app startup fix (portal bypass). Full details in `dev-workflow/research/RESEARCH-sway-flutter-startup.md`.
+
+### Cross-interface TGW action menus — Dave decision, 2026-07-26
+
+The WM is a deliberate **contextual action surface**, not merely a keyboard/launcher layer. It will use explicit Sway/WM context menus to expose approved TGW actions where the focused local context makes them useful: a selected text fragment, a known SKU, a relevant file/path, or an approved application/window context.
+
+The WM shares the semantic contract in `PP-BROWSER-001 §9`:
+
+- it presents distinct **Send to Tigwa for research** and **Save for Dave's later reference** actions when a bounded capture is available;
+- the research and personal-reference actions retain the same source-surface/action/version provenance and route to the same separated Hindsight lanes;
+- context narrows the menu; it does not create authority or infer that a menu opening means Dave wants work performed;
+- read-only TGW lookups may be proposed only through the approved read path and must display unavailable/degraded state honestly;
+- action labels distinguish inspect, prepare, and execute. Consequential task, queue, marketplace, credential, service, or production actions are excluded unless a future PP grants their exact confirmation/authority contract.
+
+This **supersedes no deployed behavior**. The earlier Qtile-era `TGWSKUWidget` clipboard polling and `Super+T c` menu are historical declared design/implementation material, not evidence of an approved ambient capture mechanism or an authority grant for the new WM surface. Do not extend clipboard watching, window focus, or notifications into automatic Hindsight retention or TGW actions. The first WM work is a reviewed design/fixture packet that proves explicit invocation, context minimization, lane separation, and disabled/error states before any desktop-profile installation.
+
+### Integrated command-console role
+
+WM context menus are the graphical/contextual face of the same TGW command console expressed through shell/tab completion, the macroboard (`PP-MACRO-001`), and the floatable operator/outbox surface (`PP-OUTBOX-001`). They are not a shortcut that merely launches an otherwise disconnected application.
+
+The WM should expose a relevant, bounded TGW verb at the place the operator encounters its context, then invoke the same reviewed capability and confirmation contract as any other surface. A menu must never invent a SKU/path/argument, conceal unavailable state, or use context-menu convenience to bypass a read/prepare/execute gate. Application launch remains a fallback; the intended desktop experience is one integrated, discoverable command console.

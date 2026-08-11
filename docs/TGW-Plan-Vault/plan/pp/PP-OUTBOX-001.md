@@ -26,6 +26,17 @@ explicit Dave send action delivers it. Raw input is permanent and immutable; dra
 are proposed renderings, never silent replacements. "Sent" is not "done" — outcome
 links back to the card.
 
+## 0.1 Flake execution card — settled console integration direction, 2026-07-26
+
+`flake_mutation` becomes a typed **Flake execution** card in this PP's integrated floatable command console, alongside instruction/outbox and pending-approval cards. It is a view over the existing authoritative job/audit record, never a duplicate tracker or an ambient shell.
+
+The card removes operator archaeology, not the human decision boundary: it renders action kind, human-readable target, repository/worktree identity, exact immutable commit SHA, concise summary, linked PP/todo, requestor, current state, available preflight evidence, and the resulting verified receipt. It does not require Dave to discover a machine, Unix user, absolute path, command spelling, or a separate post-action receipt command. Internal host/user/path resolution remains in the reviewed handler; errors are rendered as a precise unavailable/mismatch state.
+
+Its sole consequential control is an explicit `Confirm push` or `Confirm switch`, backed only by the future #1625 human-only executor. Before side effects, that handler must recheck that it is on the recorded host and that the local checkout `HEAD` exactly equals the job's recorded SHA; it then requires visible confirmation, automatically records completion only after verified success, and preserves a failed/queued job with diagnostic receipt on error. An agent identity, card render, card refresh, notification, or selection cannot invoke it. Before #1625 exists, render truthful status/evidence plus `executor not installed`; do not pretend that an inert button works or send Dave to reconstruct a shell command.
+
+Scope guard: no generic shell field, arbitrary host/path arguments, credentials, generic task mutation, or broad deployment console. Initial acceptance uses synthetic queued push and switch jobs, verifies display and deep-link evidence, proves host/HEAD mismatch rejection before execution, proves an agent identity cannot execute, and produces a linked receipt only after a human-confirmed successful handler run. This settled product direction does not authorize implementation, a flake mutation, service change, or rebuild.
+
+
 ## 1. Smallest durable data model
 
 Reuse what already exists rather than building new infrastructure for storage:

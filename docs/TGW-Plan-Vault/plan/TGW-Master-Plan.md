@@ -520,6 +520,33 @@ a restarted Hermes session. No Hindsight installation, final service
 exposure, secret provisioning, or flake change is authorised by this
 record alone. Full contract is in this PP detail's Hindsight section.
 
+**TGW browser intake extension family — Dave decision 2026-07-26:**
+**PP-BROWSER-001** starts a TGW-specific Chrome/Firefox browser-extension
+substrate with one first function: deliberate Hindsight capture. It must
+present two distinct destinations: **Send to Tigwa for research** (active,
+unreviewed research intake) and **Save for Dave's later reference** (an
+isolated personal-reference bank that does not clutter routine Hermes
+recall). It captures only an explicit selected excerpt or page/link plus
+sanitized provenance; it does not become a general browser-control surface,
+production/TGW authority, Plan Vault, or marketplace automation route. The
+current `/tmp` link-capture proof of concept is not installed or canonical.
+No browser installation, personal-bank creation, Hindsight exposure, flake
+change, credentials, or production action is authorised by this decision.
+Full contract: `pp/PP-BROWSER-001.md`.
+
+**Cross-interface action-surface extension, 2026-07-26:** the two-lane
+capture contract is not browser-exclusive. `PP-WM-001` is the first
+non-browser participant: explicit WM context menus will surface the same
+bounded research/personal-reference choices and later separately approved
+read-only TGW actions where a user-selected local context makes them useful.
+Context narrows an action menu; it never grants authority or enables ambient
+capture, automatic work, marketplace/queue control, or production actions.
+The intended end state is an integrated TGW command console: tab completion,
+macroboard, floatable operator surfaces, browser actions, and WM context menus
+are complementary ways to discover and invoke the same bounded verbs where
+the operator already has relevant context—not disconnected launchers or new
+authority paths.
+
 **Cutover executed, verified live, 2026-07-26T00:05 UTC (Tigwa's own
 `tgw-exit`-equivalent checkpoint) — Helicrew is now the primary Tigwa
 seat.** `hindsight.service`, `hermes-dashboard.service`,
@@ -679,6 +706,36 @@ retry under `db` hit the live Anthropic 529-overloaded outage instead, so
 this is still an open verification, not a resolved one. Tracked as new
 todo (see below) rather than folding into #1358, which covers the worktree
 *wiring* already done, not this preflight/enforcement gap.
+
+**Supporting specialist roles added by Dave, 2026-08-02 — Cattoy Dealer
+and Veterinarian.** These are bounded callable roles, not new public personas
+or authorities. The **Cattoy Dealer** is the just-in-time tool/capability
+selector between workers and the full Hermes/MCP/plugin registry: keep only a
+negligible selector in initial context, hold the complete catalog outside it,
+and place only stage-selected schemas on the worker's rolling cart. It routes
+best-tool-for-job using receiver fit, health, observed quality, latency,
+quota/cash cost, and authority/effect class; in TGW nomenclature it limits
+unnecessary **catnip** (model/context usage) without sacrificing reachable
+capability. Provider-native deferred loading (including Anthropic Tool Search/
+`defer_loading`) is preferred where available; Hermes's local search ->
+describe/select -> policy-gated call bridge is the provider-neutral path.
+Discoverability never grants authority, and each selection returns a receipt.
+
+The **Veterinarian** is the system self-diagnosis and repair doctor: begin
+read-only and evidence-first, separate symptom/observation/diagnosis/treatment,
+retain differential diagnoses and provenance, prescribe the smallest reversible
+treatment, verify recovery, and turn confirmed recurring failure classes into
+fixtures, monitors, runbooks, or invariants. Known conditions may use
+pre-reviewed deterministic state-machine transitions; novel, consequential,
+production, credential, provider, deployment, authority, Nix/flake, or
+difficult-to-reverse treatment remains gated. Self-diagnosis is not
+self-attestation; consequential repair claims require independent evidence.
+The orchestrator assigns the case, the sequencer stages it, the Cattoy Dealer
+supplies the bounded diagnostic cart, and PP-AIOPS-001/Catnanny remains the
+safety and incident-state substrate. Full role contracts are in
+`plan/pp/PP-HERMES-EA-001.md`. This planning decision alone authorizes no build,
+configuration, service, credential, production, Plan-task mutation, package,
+Nix, or flake effect.
 
 ## PP-OUTBOX-001 — agent instruction outbox / prompt-improvement interface — NEW 2026-07-18
 
@@ -1750,6 +1807,20 @@ found while being confirmed is what CI-1 itself closed. Full design:
 JSON-stays-truth premise is correct for the current phase (logic fixes + UI
 first); see PP-POSTGRES-001's section for Dave's full sequencing call.
 
+## PP-ITEM-MUTATION-001 — JSON-authoritative item mutation contract — NEW 2026-08-03
+
+**Architecture approved by Dave through Todo #1714, option 1.** This PP is the explicit current-phase Plan home for one logical item mutation across authoritative ItemData JSON, synchronous SQLite/location projections, durable operation/terminal receipts, and forward `REPAIR_REQUIRED` reconciliation. It replaces the unsupported tracker implication that PP-STATEMACHINE-001 owns this responsibility; that PP remains the queue-job manifest/lease owner.
+
+Ratified boundary: presence-aware exact-byte CAS; cross-process per-item serialization; exact operation-ID replay/conflict semantics; type- and presence-exact append/receipt behavior; durable intent before authoritative effects; `ABORTED`, `CONFLICT`, `COMMITTED`, and `REPAIR_REQUIRED` terminals; no stale whole-document rollback after canonical publication; idempotent fresh-process reconciliation; generation-bound deferred effects; and versioned all-writer bypass closure.
+
+Current-phase relationships are explicit: PP-CATALOG-INCR-001 keeps JSON authoritative and SQLite a synchronous derived projection with hourly rebuild reconciliation; PP-POSTGRES-001 remains a separate future authority-inversion migration and is not accelerated; PP-STATEMACHINE-001 remains queue authority, not item transaction authority.
+
+Phase 0 packet preparation and a clean Phase 1 non-production foundation are authorized. Phase 1 is limited to the private transaction/receipt boundary, CAS/locks, canonical JSON plus required synchronous projections, reconciliation, deterministic REDs, and an allowlisted direct-wrapper slice from clean current source. Historical dirty R3A2 is evidence only and must not be repaired or reused as the implementation base.
+
+**Still held:** Phase 2 caller migration/all-writer closure; commit or source admission; merge/push; deployment; production database or ItemData mutation; queue/provider effects; service or Nix/flake changes; and dependent #1711/#1678 execution. Phase 1 alone does not unblock those dependents.
+
+Full contract, phase gates, dependencies, and acceptance: `pp/PP-ITEM-MUTATION-001.md`.
+
 ## PP-PHOTOSYNC-001 — upload integrity + operator lane hardening + fleet photo repair
 **Opened s43 (2026-07-03) — THE ACTIVE FIX TRACK.** Born from the 3-day EPS quota
 exhaustion incident: upload worker masks partial failure as success; s42's retry
@@ -1882,6 +1953,28 @@ loud failure, not silent. Remaining open: `tgw-cloud-sync` rclone rate-limiting 
 #1264) — first full GDrive sync hit a 403 rate limit, needs pacing/chunking, not a
 bare retry. Full incident + fix detail: `../pp/PP-BACKUP-001.md`; DR plan:
 `plan/PLAN-backup-dr.md`.
+
+**2026-07-25 (todo #1694, Workstream 0A evidence pass):** the repeated
+`tgw-cloud-sync` nightly failures were mischaracterized in an earlier session
+as a "hung subprocess" — raw log evidence showed continuous transfer progress
+right up to each kill; the real problem was the #1517 4h watchdog
+killing/restarting the (multi-day) first-ever full sync before it could
+finish. Dave's direct instruction: removed the watchdog entirely, and
+removed the shared flock with `tgw-itemdata-sync` (Dave: `--tpslimit 2` on
+each side is the actual concurrency-safety mechanism, not lock
+serialization — the two are designed to run concurrently). Confirmed live
+2026-07-26: with the watchdog gone, the first full sync ran 5h38m before
+failing on a *real* Google Drive quota error (`RATE_LIMIT_EXCEEDED`,
+`Queries per minute`, project-level 840,000/min ceiling) during a directory
+listing — a genuinely different failure mode than the old artificial
+timeout, and one the `tgw-cloud-sync.timer` retries automatically (next
+fire ~02:30 daily) with no data-loss risk. Tigwa's attention-boundary note
+(`inbox/tigwa` per 2026-07-25 clarification): no recurring investigation/
+restart is needed from her — only surface job-completion or new-error
+reports, and Dave has independently verified real Drive-side progress
+directly. Watch for repeat rate-limit failures across future nightly runs;
+if this becomes the new steady-state failure (not a one-off), it needs its
+own pacing/backoff design, not a reintroduced blanket timeout.
 
 
 ## PP-COHESION-001 — full-codebase cohesion+correctness audit (2pm agenda, todo #1143)
@@ -2031,6 +2124,17 @@ PP-COHESION-001 discipline (packets before dispatch, tgw-coder,
 tgw-runner-review). ~350 dead-letters across 8 queues triaged into
 transient-only (safe requeue, no fix) vs. real bug findings (own
 packet+todo each). Full breakdown + execution plan: `pp/PP-DEADLETTER-001.md`.
+
+**Condition-derived correction, 2026-08-03:** dead-letter and stuck are now
+evidence-linked operational conditions to evaluate and mitigate, not terminal
+business-record destinations or blanket-replay authority. Failed attempts remain
+immutable evidence. Forward eligibility is recomputed by PP-WORKFLOW-001 from
+the current record generation, condition hash, evidence, effect state, and
+applicable authority. Jobs run once and exit; unchanged prerequisites do not
+produce `retry_wait`, sleep, polling, or duplicate attempts. Possibly committed
+external effects enter reconciliation and never ordinary retry. The historical
+triage remains evidence; its forward treatments must use the condition/treatment
+contract in `pp/PP-WORKFLOW-001.md`.
 
 ## PP-DATAINTEGRITY-001 — data reconciliation & integrity track — NEW 2026-07-11
 Owns all data-reconciliation work under one PP instead of splitting across
@@ -3431,25 +3535,43 @@ to Tigwa for reconciliation against the router's 256MB RAM constraint. Full deta
 ## PP-INVENTORY-001 — physical inventory verification — NEW 2026-07-11
 **Dave: "11 is an entire missing PP — the tools to accomplish the job,
 both the standard manual tool as well as the already supposedly in the
-plan AI vision inventory helper."** Confirmed: no design doc existed for
-either leg — `PP-VISION-001` was only ever a bare "(GPU-gated)" mention,
-no substance.
+plan AI vision inventory helper."** The detailed workflow is at
+`pp/PP-INVENTORY-001.md`: a manual location-manifest/checklist leg first,
+then optional vision-assisted matching later.
 
-**PLANNED 2026-07-16** — real workflow design now at
-`pp/PP-INVENTORY-001.md`. Dave's own concrete framing, clarifying this
-isn't just "PP-VISION-001 applied": "Vision worker finds items in photos
-of items in box taken by inventory worker and starts checking off boxes
-on the location inventory. Operator completes the rest to cleanup, looks
-for missing or marks missing etc." Two legs, sequenced: (1) the manual
-leg, absorbing `#11` (`tgw ebay-sweep → physical inventory review`),
-buildable now with no PP-VISION-001 dependency; (2) the vision-assisted
-leg (auto-check-off against a location's expected-contents manifest),
-gated on PP-VISION-001's Phase 2 full-catalog embedding index. Distinct
-from PP-STORAGE-001 (storage *organization*, size-class not category) and
-PP-DATAINTEGRITY-001 (data *record* integrity) — this is specifically
-physical-stock-vs-record reconciliation. Manifest/checklist UI question
-explicitly deferred to `pp/PP-UIUX-001.md` rather than picked
-unilaterally.
+**Priority correction, 2026-07-31:** Dave needs to inventory while neither
+TGW nor eBay state can be presumed complete or correct. That Catch-22 is
+the manual surface's contract, not a reason to wait. Todo #1719 (P1) builds
+a resumable location-by-location site that keeps TGW expected state, fresh
+eBay state, sold/order evidence, and operator physical observation as
+separately sourced claims. It shows present, missing, unexpected, misfiled,
+duplicate, drift, sold-uncertain, and unknown states; unavailable data stays
+explicitly unknown. No source silently wins and no inventory observation
+automatically changes TGW or eBay. The first slice uses the existing TGW
+web/API substrate with a shared contract reusable by Flutter. Todo #1718
+supplies eBay drift evidence, #1713 duplicate identities, and #1681/PP-SOLD-001
+sold reconciliation, but the manual checklist does not wait for those sources
+to become perfect.
+
+**Identity-healing refinement, 2026-07-31:** preserve the TGW/local identity and
+the eBay/provider-observed identity as separately source-labelled snapshots,
+including historical/current listing IDs. Todo #1720 adds a dedicated workbench
+that shows both side by side and sends them only as hints to the existing AI
+identify/reidentify path, producing a third proposal for operator
+accept/reject/defer. Process frozen, resumable batches of at most 200; preserve
+inputs, model/config, proposal, decision, and supersession receipts. Acceptance
+may heal local canonical/draft state through the state machine but never implies
+an eBay mutation. Duplicate, state-drift, sold/order, provenance, and physical
+inventory monitors remain independent after healing.
+
+**Alt-text addendum, 2026-07-31:** #1720 also preserves every image under a
+stable asset identity/hash with order, provider URL observations, and prior
+local/model/operator alt text. AI identify may produce image-specific alt-text
+proposals grounded in the actual image plus both labelled identities. Review is
+per image (accept/edit/reject/defer); no silent overwrite and no inferred unseen
+condition/details. Accepted alt text is local candidate/draft evidence with
+model/config/time/source and supersession receipt, not eBay mutation authority.
+The 200-item batch receipt includes separate image and alt-text outcome counts.
 
 ## PP-UIUX-001 — UI/UX unification: full inventory, mapping, and spec
 **OPENED 2026-07-16.** Absorbs the previously-orphaned "Web UI vs Flutter"
@@ -3600,17 +3722,47 @@ missing a dedupe_key first, ship the priority config + supersede path, only then
 enforcement on. Invariant E16 to be written alongside the first implementation packet.
 Full design: `pp/PP-STATEMACHINE-001.md`.
 
-## PP-EBAY-SNAPSHOT-001 — submitted-payload capture + re-push
-Phases 1–3 done. Phase 4 `tgw ebay re-push` + plan documentation #896. Overlaps with
-eBayCapture — reassess scope at next touch. Design: `pp/PP-EBAY-SNAPSHOT-001.md`.
+**2026-07-25 (Workstream 0B evidence pass, todos #1605/#1607) — status
+correction, then a real open gap re-surfaced by Tigwa's review:** live
+verification found `dedupe_key`/`entity_id` enforcement (manifest items 1-3)
+already built and live (`enqueue_job()` raises `MissingManifestFieldError`,
+commit `51f47fb`/todo #1608) — #1605/#1607's own status text had gone stale
+("worker stays stopped", "audit in progress") and was refreshed to match.
+**Tigwa's follow-up review (`TIGWA-REVIEW-0B-lease-race-correction-and-
+remediation-gate-2026-07-25.md`) found my proposed fix for item 4 (a
+rowcount check plus a later heartbeat design) insufficient**: her own
+evidence shows repeated `running → queued` recovery cycles at ~300s
+intervals, contradicting the declared 600s `lease_seconds` mitigation —
+needs explicit declared-vs-live reconciliation. Required revision, not yet
+built: an authoritative schema migration for a token-fenced
+`heartbeat_job(job_id, owner, lease_token, extend_seconds)`, a Python
+wrapper that renews on an independent connection while `handle()` blocks, a
+`LostLease` exception so a lease loss never emits a false success, every
+lease-owner transition (running/succeeded/failed/dead-letter/requeue)
+carrying `lease_token` not just `owner`, plus explicit non-goal framing
+(lease fencing gives DB ownership, not automatic exactly-once eBay
+side-effects — idempotency/outbox needs are separate). Needs a full bounded
+packet + Dave's approval gate before any `src/tgw/queue/` dispatch. See
+memory `project-workstream-0a-0b-evidence-packets-2026-07-25.md` for the
+complete spec.
 
-**#1077 (eBay Dev Support ticket, undeletable item) — status only, 2026-07-16
-(Dave): still waiting.** Bad-sign development: the support rep who hung up
-on Dave mid-call (yelling that the ticket was hurting his numbers) has
-since been promoted into eBay's business-division decision leadership. No
-action available on TGW's side — external, waiting on eBay.
+## PP-EBAY-SNAPSHOT-001 — submission provenance, observed baseline, and drift assurance
+**Corrected 2026-07-31:** the earlier "Phase 1 complete/full audit trail" claim was false for the current population. A fresh complete census found 19,350 provider-active unique SKUs/listing IDs; only 297 have a legacy submitted inventory snapshot and none has submitted offer provenance. Packet A's append-only future submission-history candidate exists in an isolated worktree and awaits controller verification/review. Dave approved Packet B: retain one fresh full provider observation for the 19,053 missing-history listings under a distinct append-only provider-observed baseline, never as submitted history. Todo #1718 builds the complete read-only eBay state-drift detector; todo #1713 is the duplicate-active detector; #1716 owns baseline/recovery/lossy-relist protection. Full corrected contract: `pp/PP-EBAY-SNAPSHOT-001.md`.
 
-Snapshot baseline completed (19,486 SKUs) — unblocks #1131 Motors census; drift detection baseline set.
+**#1077 (eBay Dev Support ticket / error 25707) — FINAL AUTHORITATIVE
+CORRECTION, 2026-07-31 (Dave): resolved internally; external closure requested.**
+The entire asserted 25707 provider defect was a phantom caused by invalid
+client request syntax. “Murder on the Middle Fork” was only an internal
+edit-and-correction lasting roughly 40 seconds and was never submitted to
+eBay. Withdraw the orphaned-offer, malformed-SKU, server-side-purge, and
+eBay-site-error claims; no provider repair, purge, or meeting is required.
+Do not mark the external case provider-closed until eBay confirms closure.
+This supersedes the 2026-07-16 “still waiting” note; disproven historical
+provenance remains in `plan/EXTERNAL-SUPPORT-TICKET-REGISTER.md`, with the
+approved closure response at
+`reference/EBAY-DS-1077-CLOSURE-2026-07-31.md`.
+
+Current observed baseline decision (2026-07-31): the fresh complete active census is 19,350 unique SKUs/listing IDs. For the 19,053 without submitted inventory provenance, retain a separate provider-observed baseline with source/time/hash; never relabel it as submitted. This establishes a future comparison point, not that current eBay or TGW state is correct.
 
 **Standing Growth Check strategy (Dave, 2026-07-20):** "when we note an api
 lapse because of legitimate requests we soon after initiate a request for a
@@ -4500,6 +4652,34 @@ a mismatch rather than silently trusting either side. Not scoped or
 decided — a design direction for whenever this PP gets touched again, not
 tonight's work.
 
+### Operator-console flake-execution card — Dave direction, 2026-07-26
+
+Dave's direction: preserve PP-FLAKEGATE-001's human decision gate, but remove the requirement that he discover the relevant host, Unix user, repository/worktree, commit, command spelling, or the separate receipt command. Surface each queued `flake_mutation` as a first-class **Flake execution** card in the existing integrated command console / approval-picker surface.
+
+The card is a discoverable, evidence-bearing view over the authoritative queued job; it is not a second queue, tracker, or hidden execution route. It must show the action kind (push or switch), named target host, repository/worktree identity, exact immutable commit SHA, concise change summary, linked PP/todo, requestor, current job state, required preflight/verification evidence, and the result/receipt after execution. Host/user/path resolution stays behind the reviewed handler contract; the UI presents a human-readable target and any mismatch/degraded state, not shell archaeology or a copy-paste command.
+
+The only consequential control is an explicit Dave action such as **Confirm push** or **Confirm switch**. It must use the reviewed human-only, exact-hash + recorded-host executor proposed by #1625; it rechecks the actual local host and checkout `HEAD` against the queued job before side effects, requires visible confirmation, records success automatically only after verified completion, and leaves the job queued with a useful failure record on error. No agent profile, card rendering, auto-refresh, notification, or card selection may invoke that control. Until the executor exists, the card is truthful status/evidence plus a disabled `executor not installed` state—not a button that pretends to work or a fallback that asks Dave to reconstruct a command.
+
+This card type belongs beside instruction/outbox and pending-approval cards in the same console, with a deep link to its immutable job/audit record. It is deliberately limited to the flake mutation action contract: no generic shell field, arbitrary host/path arguments, credential display, broad task mutation, or general deployment console. The required first fixture is one synthetic queued push and one synthetic queued switch: verify the card displays the resolved action/evidence, rejects host/HEAD mismatch before execution, cannot be invoked by an agent identity, and produces a linked receipt only after a human-confirmed successful run. This is a product/design decision and implementation packet boundary; it does not authorize an immediate code, flake, service, or rebuild change.
+
+**Todo #1697 candidate BLOCKed by Tigwa, 2026-07-27** (`todo/1697-flake-release-executor` @
+`4ec2437`) — a standalone `/form/flake-release` executor built ahead of the console card
+above. 4 confirmed blockers, none closed: **B1** queued authorization isn't atomically claimed
+before the real `git push` (a cancelled request can still push; concurrent confirms can both
+fire); **B2** the recorded `--repo` path/Git config aren't fenced (a writable repo controls
+`origin`/hooks/`core.sshCommand`, so fixed argv + `shell=False` isn't a real boundary by
+itself); **B3** a successful push followed by a failed DB/receipt write has no reconciliation
+state (remote can advance with the queue row still `queued` and no receipt); **B4** the "human
+decision gate" is only a roleless, one-year browser session — not actually Dave-specific
+(may need its own Dave decision on the confirmation mechanism). Also: the happy-path test
+doesn't advance a real remote ref (submits the SHA already pushed by its own fixture setup),
+and the canonical focused-test command collection-fails on the known `python-multipart` gap.
+Do not merge, provision, or attempt #1698/#1699 against this candidate. Full detail:
+`docs/TGW-Plan-Vault/inbox/claude/TIGWA-REVIEW-1697-flake-release-executor-BLOCK-2026-07-27.md`
+(pending archive). Next gate: revise around an atomic execution claim + reconciliation state,
+add repo/remote/config fencing, get Dave's call on B4, fix the test fixture, add negative/
+concurrency/timeout coverage, then a fresh candidate + independent review.
+
 ## PP-WORKFLOW-001 — declarative pipeline/DAG layer, proposal only, NEW 2026-07-21
 
 **Gap named, not yet built.** Dave asked "where are our workflows defined?"
@@ -4742,6 +4922,51 @@ condition`. These map onto this PP's own `depends_on`/`handler_family`
 design above (the `state` enumerated here is a refinement of
 `queue_jobs`' existing state column; the other fields are candidate columns/
 metadata for whichever Phase adopts explicit dependency-ordered packets).
+
+### Condition-derived convergence decision — 2026-08-03 (Dave)
+
+**Architecture correction and ratification.** Native-on-`queue_jobs` remains the
+decision, but eligibility is derived from the current authoritative record
+condition and evidence—not inherited from a prior worker's `next_step`, copied
+eligibility key, or a fixed linear dependency chain. A command such as
+`list_item` names a versioned target fingerprint set (`EBAY_LISTABLE`). The
+evaluator fingerprints the current record, skips requirements already proven,
+and materializes a generation-bound runtime work graph for unmet requirements.
+Existing workers become bounded treatments with declared requirements, outcomes,
+ownership, receipts, and stop conditions; missing remediation, diagnosis,
+evidence, and reconciliation treatments are added where needed.
+
+Workers do not enqueue what they assume comes next or grant authoritative
+eligibility. Each job fresh-reads and claims one exact condition/generation,
+performs at most one legal bounded action, emits a structured receipt, releases
+its claim, and exits. It does not sleep, poll, hold a lease while waiting for a
+prerequisite, repeatedly requeue itself, or enter `retry_wait` merely because
+nothing changed. Waiting is durable data. Re-evaluation occurs only on relevant
+record/evidence/receipt/authority/rule changes or expiry of an explicit
+scheduler-owned `not_before` timer: **no change, no new attempt**.
+
+`stuck` and `dead_letter` become evaluable operational conditions, not terminal
+business-record destinations. Failed/dead-lettered attempts remain immutable
+evidence; the record remains eligible for a legal remediation, diagnosis,
+evidence, reconciliation, or operator-attention transition. Possibly committed
+external effects always enter `RECONCILIATION_REQUIRED` and never ordinary
+retry. Same-generation/same-condition treatments cannot repeat without changed
+evidence or an explicit eligible timer/authority event.
+
+The evaluator prevents logical conflicts; PP-STATEMACHINE-001 revalidates
+claim/lease, generation, condition hash, ownership, prerequisites, and authority
+at dispatch; PP-ITEM-MUTATION-001 supplies local item CAS/receipts/projection
+safety; provider-effect reservations remain separately governed. Independent
+disjoint treatments may run concurrently, while overlapping record/effect
+boundaries serialize.
+
+The per-record runtime work graph is a derived, rebuildable execution projection,
+not canonical Plan/Todo mutation. Canonical Plan/Todo continues to govern intent,
+ownership, authority, and implementation sequencing. Earlier `depends_on` and
+`DEPENDENCY_FAILED -> dead_letter` material is retained as historical design and
+is superseded where it conflicts with this condition-derived doctrine. Full
+contract, phased migration, first mandatory fixture, held effects, and acceptance:
+`pp/PP-WORKFLOW-001.md`.
 
 ## PP-ORCHESTRATOR-001 — the custom coding harness's orchestrator, proposal only, NEW 2026-07-21
 
@@ -5275,6 +5500,150 @@ wasn't before. `worktree-guard.py`/`app-code-guard.py`/
 `trace-immutability-guard.py` stay untouched in this phase — they're
 load-bearing safety mechanisms (E11/E12/E14), migrate only once Phase 1
 is proven clean over real use, not on a schedule.
+
+## PP-MONITOR-HUD-001 -- Catnanny monitor-only MCP + future Flutter HUD, NEW 2026-07-26
+
+**Opened:** 2026-07-26 (Dave-authorized packet, todo #1705). New PP rather
+than folded into [[PP-HERMES-EA-001]] or [[PP-UIUX-001]] -- this is a
+distinct bounded transport/contract concern (a read-only monitoring pipe
+into a production host from a separate physical box), not a persona
+design or a general UI unification track. It cross-links both.
+
+**Not yet authorized (explicitly, per Dave's packet):** arbitrary shell
+access from Catnanny, broad TGW read-only MCP access on Catnanny,
+production-data/queue/worker/eBay/catalog/credential mutation from this
+surface, a new long-running network listener, a Flutter UI build or
+deployment, an unreviewed Nix switch. This PP tracks a **v1 monitor-only**
+slice; each of those is a separate future decision, not implied by v1
+landing.
+
+### Architecture (authoritative sequence)
+
+```
+tgw-prod authoritative watchdogs/services
+    -> monitor-only MCP contract (src/tgw/monitor_mcp_server.py)
+    -> Catnanny deterministic observer + Telegram alert relay
+    -> future Flutter monitoring worksurface
+```
+
+- **tgw-prod stays gateway-free.** It runs the authoritative
+  `tgw-thermal-watchdog.service` and the platform health substrate
+  (`tgw.health.check_all`); it does not run a Hermes/monitor gateway
+  itself (unlike Catnanny, which does -- see the deployed
+  `hermes-gateway-t-lite.service` / `reference-hermes` memory).
+- **Catnanny is the deterministic observer**, not an LLM-in-the-loop
+  layer, for this v1: it polls the monitor MCP contract on a fixed
+  cadence and drives Telegram alert transitions. This continues working
+  even if Flutter/Sway/display on any other host is down -- the
+  deterministic watcher is the floor, Flutter is a later window onto it.
+- **Flutter is presentation, not monitoring authority** (confirms
+  [[PP-UIUX-001]]'s standing constraint, "Flutter remains a client of
+  existing/extended `/api/*` contracts," extended here to the monitor
+  domain: Flutter never gets raw SSH keys, MCP credentials, broker
+  credentials, or broad TGW data access. It consumes a scoped operator
+  API/read model built later on top of Catnanny's persisted
+  observations -- never direct SSH/MCP against tgw-prod).
+- **V1 Flutter scope (not yet built -- sequencing only, see below): read-
+  only** -- current health, thermal state, age/freshness, last probe, last
+  alert delivery, compact history. **Stale or unavailable data renders as
+  degraded/unknown, never green.** No hidden mitigation controls, no
+  worker controls, no queue replay, no production mutation surface, in
+  V1 or implied by V1.
+
+### The monitor-only MCP contract (v1, source side)
+
+New standalone entrypoint `src/tgw/monitor_mcp_server.py` -- NOT the
+existing `src/tgw/mcp_server.py` (that one is broader: even read-only/
+`TGW_MCP_READONLY=1`-gated, it still exposes catalog/search/queue
+surfaces per the `reference-hermes` memory and CLAUDE.md's Hermes-lite
+note; it is not weakened or repurposed for this). Exactly two
+no-argument tools, nothing else:
+
+- `tgw_health` -- calls `tgw.health.check_all(cfg, include_ollama=False,
+  include_ebay=False)`, transformed into a bounded contract
+  (`contract_version`, `epoch`, `ok`, `failed_checks`, per-check
+  `{name, ok, status}` with short fixed-vocabulary statuses -- no raw
+  paths/config/secrets/free-text dumps passed through).
+- `tgw_thermal_status` -- reads only the fixed file
+  `/opt/TGW/var/run/thermal.status` (contract `LEVEL|TEMP_C|EPOCH`) and
+  checks only `tgw-thermal-watchdog.service`'s active state. 180s initial
+  stale threshold. Missing file, malformed contents, stale epoch, or an
+  inactive watchdog all report `ok: false` with a bounded
+  `failure_reason` -- never remediates, starts, stops, or throttles
+  anything.
+
+Exact tool schema/examples, branch, commit, and test evidence: see the
+implementation report this packet delivers to `inbox/tigwa/` (todo
+#1705).
+
+### Transport (flake side, v1)
+
+Standard input/output MCP over SSH only -- no TCP/SSE listener, no LAN/
+Tailnet MCP port. Builds on the already-deployed `tgwmon` transport
+account (Nix-declared, uid/gid 902/902, home `/var/lib/tgwmon` mode 0700,
+`nologin` shell, no sudo/admin groups, no linger -- branch
+`tigwa/tgwmon-monitor-account` @ 57a7944; not duplicated or broadened by
+this work). Catnanny authenticates as `tgwmon`; the forced SSH command
+runs a root/Nix-owned launcher that does a narrowly-scoped
+`sudo -n -u tgw` exec of exactly `python -m tgw.monitor_mcp_server` --
+`tgw` is the production service identity that can actually read the
+authoritative thermal/health substrate, `tgwmon` never gets an
+interactive shell or arbitrary sudo. Forced command, `no-pty`,
+`no-port-forwarding`, `no-agent-forwarding`, `no-X11-forwarding` on the
+Catnanny key (`catnanny-t-lite-readonly-tgw-monitor`). Built/evaluated,
+**not switched** -- see the implementation report for exact branch/
+commit, build output, and rollback notes.
+
+### Sequencing (do not skip steps)
+
+1. Prove monitor MCP (source, this packet) -- done/pending per report.
+2. Prove Catnanny consumption + Telegram alert-state transitions against
+   the live contract.
+3. Define a persisted monitor-history/read model (what Catnanny stores
+   about its own observations over time -- this is the thing a future
+   Flutter surface would actually query, not raw MCP).
+4. Build a synthetic Flutter stale/healthy/degraded fixture against that
+   read model before wiring any real data.
+5. Only then: an actual Flutter monitoring worksurface, scoped
+   read-only, per the V1 constraints above.
+
+### Gates
+
+- **Test gate:** strict TDD on the source side (tests first, demonstrated
+  failing, then minimal implementation) -- see report for command/results.
+- **Live-verification gate:** a fresh Catnanny-side stdio-MCP
+  invocation against the deployed transport, proposed in the
+  implementation report, not yet run as of packet delivery.
+- **Rollback gate:** flake change is build/eval-only in this packet;
+  switching it is a separate, explicitly reviewed step (per
+  [[PP-FLAKEGATE-001]]'s request-push/request-switch gate) with its own
+  documented revert path.
+- **Ownership gate:** source changes go through the normal tgw-coder
+  branch-per-task contract ([[PP-HERMES-EA-001]]); flake changes go
+  through nix-flake-maintainer's push/switch-request contract -- no
+  direct edits to the shared checkout or a live switch from this PP.
+
+**Tigwa release review, 2026-07-27 — SOURCE PASS-with-stitch-gate, TRANSPORT BLOCK.** Source
+candidate `todo/1705-monitor-mcp-v1` @ `3a23f86` (exactly 2 no-arg MCP tools, no queue/catalog/
+eBay surface, non-finite temps rejected, future timestamps fail closed): independently
+re-verified 20/20 focused + 88/88 adjacent tests, Ruff clean. Cleared for merge-result
+verification, **not yet released** — the candidate's historical full-suite run hit the (now
+separately fixed, not-yet-stitched) C12 line-drift failures from [[PP-LISTEDITOR-001]] todo
+#1706, so source stitch requires a fresh full-suite run against the actual merge result once
+#1706 lands. Transport candidate (flake worktree `/home/db/tgw-flake-tgwmon`, branch
+`tigwa/tgwmon-monitor-mcp-transport` @ `2df733e`) is **BLOCKed** — still the pre-remediation
+design (writable `tgwmon` home, `createHome = true`, generic bash shell), doesn't yet implement
+Tigwa's own boundary-hardening request (`TIGWA-REQUEST-2026-07-26-1705-tgwmon-boundary-
+hardening-v1.md`, archived): root-inert home, `createHome = false`, argument-ignoring login
+shell, account-scoped SSH `Match User tgwmon` defense-in-depth, synthetic hostile-command/key/
+forwarding/revocation proof. Do not advance `2df733e` as-is. Full 8-step release sequence
+(source merge-result gate → Nix remediation → Nix static gate → synthetic transport proof →
+Dave push decision → separate Dave switch decision → post-switch live acceptance) recorded in
+`docs/TGW-Plan-Vault/inbox/archive/TIGWA-REVIEW-1705-monitor-mcp-release-gate-2026-07-27.md`.
+No code/flake/account/SSH/service/key/push/switch mutation performed by that review.
+- **Acceptance gate:** v1 is "done" only once Prime Directive 4's bar is
+  met -- verified live (a real Catnanny stdio call against the real
+  transport returning the real contract), not just green tests.
 
 ## Session protocol
 

@@ -82,12 +82,46 @@ per location, not a one-off "find this specific item" query.
    the box-photo against. Not buildable before PP-VISION-001 Phase 2
    lands.
 
-## Out of scope (this planning pass)
+## 2026-07-31 priority correction — build through the Catch-22
 
-- The actual manifest/checklist UI — web UI vs. Flutter/mobile is an open
-  question folded into the broader UI/UX unification project (see
-  master-plan's UI/UX section) rather than decided here; this PP defines
-  the workflow the UI needs to support, not which surface builds it.
+Dave needs to inventory now, while neither TGW's current state nor eBay's current state can be presumed complete or correct. That uncertainty is not a reason to postpone the manual leg; it defines the surface's central contract.
+
+The manual workflow must keep independent claims separate:
+
+1. **TGW expected state** — the current location manifest and local lifecycle fields, visibly source-labelled and never silently treated as physical truth.
+2. **Fresh eBay state** — active identity/lifecycle and drift evidence, with retrieval time and completeness. Presence at eBay does not prove physical presence; absence from the active set does not by itself prove sold.
+3. **Sold/order evidence** — provider order lines and retained sale records, including unresolved/failed reconciliation states. A sold candidate is not silently converted into a local status.
+4. **Operator physical observation** — present, missing, unexpected, misfiled, quantity/count, needs recheck, or unknown, retained with inventory-session, actor, time, and evidence.
+
+The first site must be location-by-location and resumable. It presents contradictions rather than picking a winner, and it provides explicit review queues for duplicate, drift, sold-uncertain, unexpected, and missing states. It must remain usable when eBay or sold-data retrieval is stale/unavailable by showing that source as unavailable instead of collapsing it into "no difference."
+
+No physical observation, eBay read, or model proposal automatically overwrites TGW, changes a sold/stock status, moves an item, or performs a marketplace action. Those are separate reviewed transitions with receipts.
+
+**Prioritized implementation:** todo #1719 (P1) is the manual inventory-reconciliation site. Todo #1718 supplies complete eBay drift classifications, #1713 supplies duplicate-active identity evidence, and #1681/PP-SOLD-001 supplies trustworthy sold-order reconciliation. The site must integrate these when available but must not wait for them to become perfect; unavailable inputs remain explicit `UNKNOWN` states.
+
+## Identity preservation and bounded listing healing — Dave, 2026-07-31
+
+Inventory reconciliation must retain both identities rather than choose one prematurely:
+
+1. **TGW/local identity snapshot** — the canonical/draft identity and historical local values as they existed at batch freeze time.
+2. **eBay/provider-observed identity snapshot** — current provider fields plus every known historical/current listing and offer ID, explicitly provider-observed rather than submitted history.
+3. **AI identity proposal** — a third object produced by the existing identify/reidentify pipeline using both snapshots as labelled hints. It is a proposal, never a rewrite of either source identity.
+
+Todo #1720 builds a dedicated reconciliation/healing workbench on top of #1719. For each item it shows the two retained source identities side by side, their field conflicts and provenance, the exact hints given to AI identify, the proposed identity, and explicit accept/reject/defer controls. Acceptance may heal the local canonical record and draft only through the existing serialized state-machine path with a receipt. eBay revise/end/relist/publish remains a separate named, reviewed action; accepting identity is not marketplace authority.
+
+The batch contract is strict: at most **200 items per checkpointed batch**, never the catalog at once. Each batch freezes its membership and source hashes, resumes safely, reports proposed/accepted/rejected/deferred/error/unknown counts separately, and cannot silently spill into the next batch. Preserve source snapshots, model/config identity, raw proposal, operator decision, and supersession linkage append-only so both original identities remain referable after healing.
+
+Healing does not retire assurance. Duplicate-active, eBay state-drift, sold/order, submitted-provenance, and physical-inventory monitors remain independent of the workbench and continue after a proposal is accepted. A healed local record may reduce a discrepancy; it must not suppress a monitor without new source evidence.
+
+### Image alt-text evidence and proposals
+
+The same workbench includes image-specific alt text. Preserve each raw/selected image under a stable asset identity/hash, its ordering and provider URL observations, and every existing local, model, or operator alt-text value with provenance. AI identify receives the actual image plus the two labelled identity snapshots and may propose alt text for that image as part of the third candidate; it must not infer unseen condition, contents, or claims merely from either text identity.
+
+Show the image, source history, and proposed alt text together, with accept/edit/reject/defer per image. Never silently overwrite accepted/operator alt text. An accepted value enters only the local candidate/draft through the serialized reviewed path, retaining model/config/time/source and supersession receipt; acceptance is not authorization to revise or publish on eBay. The 200-item cap remains the batch boundary, while receipts report item, image, proposed-alt-text, accepted, edited, rejected, deferred, unknown, and error counts separately.
+
+## Out of scope for the first manual slice
+
+- A separate second inventory authority or client-specific business logic. The first operator site should use the existing TGW web/API substrate and a shared typed contract that Flutter can later consume; it must not wait for a complete Flutter/offline build.
 - PP-VISION-001's embedding mechanics — cross-referenced, not duplicated.
 - Confidence-threshold tuning for "auto-check-off vs. flag for operator"
   — a real calibration question for whoever builds step 3/4, not
@@ -95,12 +129,7 @@ per location, not a one-off "find this specific item" query.
 
 ## Next step
 
-The manual leg (point 1 above) is buildable today, independent of
-PP-VISION-001's timeline — file a todo for it once Dave prioritizes it
-against the rest of the active build queue. The vision-assisted leg
-follows naturally once PP-VISION-001 Phase 2 lands; no separate design
-work needed at that point beyond wiring steps 3/4 into whatever manifest/
-checklist UI the manual leg already built.
+Todo #1719 is now P1 and is the dispatchable first manual slice. Build and verify the resumable source-labelled location checklist before adding vision assistance. Integrate #1718/#1713/#1681 evidence through explicit available/stale/unknown states; do not make their full completion a prerequisite for the manual checklist.
 
 ## Cross-links
 - `pp/PP-VISION-001.md` — underlying vision-matching capability + phasing.

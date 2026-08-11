@@ -235,3 +235,150 @@ The refined research becomes the spec for implementation.
 
 ---
 
+
+
+### eBay pipeline condition-driven migration (2026-08-06)
+
+This PP’s intended execution model is the **same condition-driven kernel being proven
+for coding**, applied to the eBay/item pipeline. It is not a separate planning system:
+Event Clips preserve observations and worker results; the evaluator derives the current
+condition/fingerprint for an item generation; the state machine selects legal
+transitions; the scheduler chooses one eligible treatment; that treatment returns a
+structured receipt; and the item is re-evaluated from the new evidence.
+
+For `ai_identify`, the target behavior is a bounded, generation-fenced treatment that
+claims one current item generation, reads its condition, performs one legal
+identification/remediation action, writes a receipt, and exits. It must **not** decide
+or directly enqueue hardcoded successors such as `ebay_draft` or `alt_text`. After the
+receipt, the evaluator and scheduler choose the next legal eBay treatment from current
+conditions. Durable `not_before`/wait conditions represent waiting; remediation,
+reconciliation, and contradiction conditions remain ordinary evaluable work rather
+than dead ends.
+
+This section records a required migration, not a claim that the eBay pipeline is
+already live on that model. The missing helper/import defect below is one compatibility
+condition within the migration: it must be repaired with focused regression coverage
+and then carried through the native queue → local worker → receipt → re-evaluation
+path. It does not authorize live eBay mutation, credentials/provider changes, queue
+replay, or a parallel/ad-hoc worker route.
+
+**Current bounded defect:** `tgw.workers.ai_identify` imports
+`get_category_group_aspects` from `tgw.apis.ebay.specifics`, but the helper is absent
+from the inherited source baseline. This prevents six ai-identify test modules from
+collecting. Todo **#1739** owns restoration of the canonical helper/caller contract
+and regression coverage. An approved PP/Todo authorizes the ordinary repair/test/
+review/receipt progression; only a genuine unresolved decision, a prepared live
+external effect, or final operator acceptance may pause it.
+
+
+### Execution compilation and acceptance contract (Dave, 2026-08-06)
+
+A maintained PP is the input to execution—not a prose note that must be manually retranslated into a one-off Todo list. For a requested PP root, the coding system first compiles the exact PP text, linked decisions, existing Todos, source/evidence anchors, and known dependency selectors into one versioned **execution packet**. The packet must preserve alternatives and UNKNOWN evidence until connected resolution; it uses the Luet/Portage-style resolver work tracked by **#1729**, rather than a greedy early choice or a hand-written linear checklist.
+
+The initial planning run produces a Dave-readable proposal before coders begin:
+- target outcome and governing PP/decision hashes;
+- resolved and unresolved transitive dependencies, alternatives, and evidence gaps;
+- ordered or parallelizable implementation/review/test/receipt treatments;
+- bounded worker/orchestrator instructions, expected artifacts, and the exact consequential/live-effect boundary;
+- the generation/fingerprint that will fence execution and the acceptance evidence.
+
+Dave may accept that packet or refine it. Acceptance authorizes the ordinary execution chain it describes. The scheduler then materializes the resolved graph into durable jobs and routes bounded coder/reviewer/orchestrator packets; worker receipts update the graph and re-evaluate the affected PP/Todo condition automatically. It does not require Dave to restate each implementation step or each mechanical remediation.
+
+The intended user roots are a PP or a Todo: conceptually, `tgw coding start PP-DERIVED-001` compiles and executes this PP’s accepted closure, while `tgw execute todo <id>` compiles and executes that Todo’s accepted dependency closure. These are required operator semantics, not a claim that the currently deployed CLI already supports PP-root execution. The implementation must expose the same PP/Todo → packet → acceptance/refinement → durable graph → worker receipts path without an SSH fallback or an ad-hoc parallel planner.
+
+
+### Quick-Todo planning split path (Dave, 2026-08-06)
+
+A quickly submitted Todo is permissible, but it is **planning input**, not an
+independent authorization to dispatch coders. The defined random-Todo split path
+runs automatically through duplicate/PP/decision lookup, source reconciliation,
+classification, PP-root selection or attachment, and Luet-style dependency closure.
+It then produces the same versioned execution packet as a PP-root request.
+
+Automation stops at the first operator involvement point: the Action Card that presents
+the compiled plan for acceptance or refinement. Approval of that planning session alone
+is valid operator involvement. Until that acceptance, the system may prepare evidence,
+dependencies, worker/orchestrator instructions, and the proposed durable graph, but it
+must not begin implementation work merely because a Todo was quickly entered. After
+acceptance, the ordinary accepted chain proceeds automatically and receipts keep the
+Plan/Todo condition current.
+
+
+### Current listing conditions for the next compiled execution packet (operator report, 2026-08-06)
+
+Basic listing improved after the previous day’s committed recovery work, but the
+next PP-root planning pass must treat the following as current conditions rather
+than independent ad-hoc fixes:
+
+1. **Bulk listing:** prepare and prioritize the existing bulk-listing capability;
+   operator expectation is substantially higher listing throughput (approximately
+   fivefold) once it is usable. Reconcile its existing plan/Todo home before any
+   new implementation task.
+2. **`ai_identify`:** repair both its bounded execution contract and the quality
+   of its identification output. Quality must be evaluated against retained
+   evidence and listing-schema consequences, not declared successful merely
+   because the worker returned.
+3. **Condition-driven eBay migration:** remove hardcoded successor/retry behavior
+   from the eBay path in favor of evidence-driven re-evaluation. A missing
+   condition or unchanged evidence is durable waiting, not an immediate one-minute
+   retry loop. The current queue snapshot has `ebay_publish` and `ebay_stage`
+   retry-wait records; those are evidence for the planning packet, not authority
+   to bulk replay jobs.
+4. **Missing `Model` specifics:** this is an active listing-surface quality
+   condition; preserve the existing #1711 evidence and make taxonomy/schema
+   exposure, draft construction, and operator correction one connected remedy.
+5. **Photo order:** marketplace image selection and ordering must be explicit
+   operator-facing metadata. Publishing must consume that selected ordered set,
+   not a filesystem scan or implicit upload order. The missing reorder affordance
+   is a planning condition; it must not silently reorder already-published eBay
+   images.
+
+The planning packet must reconcile these with the Plan graph and existing Todo
+inventory, select the appropriate root/closure, and present the joined plan for
+acceptance or refinement before any new marketplace-side action.
+
+
+### Item-status and return-to-listing control (operator requirement, 2026-08-06)
+
+The listing surface must let the operator change an item’s current work condition
+and return it to the listing goal when new evidence makes that legal. This is not
+a blind job requeue. A status action records the reason, actor, time, evidence,
+and target goal; the evaluator then derives the next legal treatment from the
+new condition.
+
+Required first-class reasons include:
+- `needs_photo_recapture` (for blurry or insufficient photos);
+- `needs_measurements`;
+- `discarded`;
+- `policy_blocked` / `policy_violation`;
+- `needs_split_review` / `item_split_required`;
+- and a return-to-listing request targeting `EBAY_LISTABLE` after corrected
+  evidence is available.
+
+These are concurrent work requirements, not one overloaded lifecycle string.
+They must be visible and editable from the item surface with evidence and a
+clear current state. A return-to-listing action clears only the requirement
+actually resolved and causes re-evaluation; it must not restart the full chain,
+replay historical failures, or publish automatically.
+
+`discarded`, an item split, and any marketplace-side action retain their separate
+consequential contracts. In particular, a split remains an operator-reviewed
+proposal that preserves raw assets and listing provenance; it does not silently
+create child items or alter/cancel an existing eBay listing. The planning pass
+must reconcile the already planned split workflow before implementing this
+surface.
+
+
+### Ongoing maintenance, not an intake-only flow (clarification, 2026-08-06)
+
+These requirements apply throughout an item’s life, including after a draft,
+stage, publication, later observation, or physical review—not only during initial
+intake. `add_photos`, `retake_photos`, `reidentify`, measurements, condition
+correction, policy review, split review, and return-to-listing are regular
+maintenance treatments. New evidence can reopen the applicable requirement and
+cause a new generation-bound evaluation at any time.
+
+The lifecycle is therefore revisable but evidence-fenced: a later maintenance
+receipt changes only the affected conditions and derives the smallest legal next
+work. It does not erase prior provenance, silently downgrade a verified listing,
+or repeat unrelated pipeline stages.

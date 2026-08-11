@@ -49,5 +49,29 @@ Two tracks, don't conflate:
   that fix or are a residual gap, per the "verification-only closure"
   pattern (#1273/#1285/#1286 today) before writing a new packet.
 - #1265's own script (`scripts/requeue_ebay_draft_402_dead_letters.py`,
-  now E9-compliant) is the reference pattern for the transient-requeue
-  track above.
+  now E9-compliant) is retained as historical evidence for the former
+  transient-requeue track; it is not the default forward workflow contract.
+
+## Condition-derived correction — 2026-08-03
+
+PP-WORKFLOW-001 now governs forward pipeline eligibility and mitigation. A
+`dead_letter` row records an immutable failed/exhausted attempt; it does not make
+the business record terminal or authorize blanket replay. `stuck` and
+`dead_letter` are structured, evidence-linked conditions to evaluate.
+
+For each affected record/treatment, the evaluator must determine the reason
+class, record generation and condition hash, attempted external-effect state,
+evidence/receipts, legal mitigations, and operator/reconciliation needs. A new
+attempt is eligible only after changed evidence, a new record generation, an
+explicit scheduler-owned `not_before` expiry, or applicable authority. The same
+treatment must not repeat against an unchanged generation/condition hash.
+
+Jobs run once and exit. They do not sleep, poll, hold a lease while waiting for
+prerequisites, repeatedly requeue themselves, or enter `retry_wait` merely
+because nothing changed. Waiting is durable condition data. Possibly committed
+provider effects always enter `RECONCILIATION_REQUIRED` and are never ordinary
+retry or bulk-requeue candidates.
+
+The original triage tables and receipts remain historical evidence. Their
+forward treatments must be reclassified through the PP-WORKFLOW-001 condition
+and treatment contract before any queue replay or production action.
