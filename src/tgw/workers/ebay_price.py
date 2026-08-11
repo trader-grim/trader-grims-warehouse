@@ -32,8 +32,16 @@ from tgw.apis.fence import ebay_write as fence_ebay_write
 from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.ebay.pricing import freeship_price, suggest_price, to_99
+from tgw.errors import TreatmentFailure
+from tgw.item_mutation import (
+    item_generation,
+    mutate_item,
+    operation_identity,
+    reconcile_mutation,
+)
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
+from tgw.sqlite_catalog import upsert_catalog_row
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +49,147 @@ QUEUE_NAME = 'ebay_price'
 
 
 class EbayPriceWorker(QueueWorker):
+
+    def _receipt(
+        self, payload: Dict[str, Any], sku: str, *, outcome: str,
+        changed: bool, resulting_generation: str | None,
+        operation_id: str = "", mutation_status: str = "",
+    ) -> Dict[str, Any]:
+        return {
+            "receipt_schema_id": "treatment-receipt/v1",
+            "treatment_id": "ebay-price",
+            "treatment_version": "1",
+            "graph_id": payload["graph_id"],
+            "goal_profile_id": payload["goal_profile_id"],
+            "goal_profile_version": payload["goal_profile_version"],
+            "object_generation": payload["object_generation"],
+            "condition_hash": payload["condition_hash"],
+            "entity_id": sku,
+            "outcome": outcome,
+            "established_conditions": (["priced"] if outcome == "satisfied" else []),
+            "evidence": {
+                "changed": changed,
+                "resulting_generation": resulting_generation,
+                **({"operation_id": operation_id} if operation_id else {}),
+                **({"mutation_status": mutation_status} if mutation_status else {}),
+            },
+        }
+
+    def _commit_governed_price(
+        self, *, job: Dict[str, Any], payload: Dict[str, Any], sku: str,
+        json_path: Path, checkpoint: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        expected = {
+            "schema": "ebay-price-observation/v1",
+            "sku": sku,
+            "expected_generation": payload["object_generation"],
+        }
+        if any(checkpoint.get(key) != value for key, value in expected.items()):
+            raise HardFailure("ebay_price checkpoint identity mismatch")
+        fields = checkpoint.get("fields")
+        if not isinstance(fields, dict):
+            raise HardFailure("ebay_price checkpoint fields missing")
+        mutation_payload = {
+            "schema": checkpoint["schema"],
+            "job_id": job["job_id"],
+            "graph_id": payload["graph_id"],
+            "fields": fields,
+        }
+        operation_id = operation_identity(
+            sku=sku, kind="ebay-price",
+            expected_generation=payload["object_generation"], payload=mutation_payload,
+        )
+        if checkpoint.get("operation_id") != operation_id:
+            raise HardFailure("ebay_price checkpoint operation identity mismatch")
+
+        def mutate(document: Dict[str, Any]) -> Dict[str, Any]:
+            if document.get("sku") != sku:
+                raise ValueError("authoritative document SKU mismatch")
+            updated = dict(document)
+            updated.update(fields)
+            return updated
+
+        def project(_sku: str, document: Dict[str, Any]) -> Dict[str, Any]:
+            result = upsert_catalog_row(self.config, document)
+            if not isinstance(result, dict) or result.get("ok") is not True:
+                raise RuntimeError("SQLite projection did not report success")
+            return result
+
+        data_root = Path(self.config.get("data_root", "/opt/TGW/data"))
+        journal_root = Path(self.config.get(
+            "item_mutation_journal_root", data_root.parent / "var/item-mutations",
+        ))
+        result = mutate_item(
+            item_path=json_path,
+            archive_root=Path(self.config.get("archive_root", data_root / "ItemArchive")),
+            journal_root=journal_root,
+            sku=sku, kind="ebay-price",
+            expected_generation=payload["object_generation"],
+            payload=mutation_payload, mutate=mutate, project=project,
+            operation_id=operation_id,
+        )
+        status = str(result.status).upper()
+        if status == "REPAIR_REQUIRED":
+            result = reconcile_mutation(
+                item_path=json_path, journal_root=journal_root,
+                operation_id=operation_id, project=project,
+            )
+            status = str(result.status).upper()
+        if status != "COMMITTED":
+            outcome = {
+                "CONFLICT": "conflict", "REPAIR_REQUIRED": "repair_required",
+            }.get(status, "failed")
+            receipt = self._receipt(
+                payload, sku, outcome=outcome, changed=bool(result.changed),
+                resulting_generation=result.resulting_generation,
+                operation_id=operation_id, mutation_status=status,
+            )
+            receipt["evidence"]["detail"] = result.detail
+            raise TreatmentFailure(
+                f"ebay-price mutation did not commit: {status}", receipt,
+            )
+        draft = fields.get("draft_listing")
+        price = draft.get("price") if isinstance(draft, dict) else None
+        priced = isinstance(price, (int, float)) and not isinstance(price, bool) and price > 0
+        if not priced:
+            receipt = self._receipt(
+                payload, sku, outcome="partial", changed=bool(result.changed),
+                resulting_generation=result.resulting_generation,
+                operation_id=operation_id, mutation_status=status,
+            )
+            receipt["evidence"]["reason_code"] = "PRICE_REQUIRES_OPERATOR_INPUT"
+            raise TreatmentFailure("ebay-price produced no positive price", receipt)
+        return self._receipt(
+            payload, sku, outcome="satisfied", changed=bool(result.changed),
+            resulting_generation=result.resulting_generation,
+            operation_id=operation_id, mutation_status=status,
+        )
+
+    def _checkpoint_and_commit(
+        self, *, job: Dict[str, Any], payload: Dict[str, Any], sku: str,
+        json_path: Path, fields: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        mutation_payload = {
+            "schema": "ebay-price-observation/v1",
+            "job_id": job["job_id"], "graph_id": payload["graph_id"],
+            "fields": fields,
+        }
+        checkpoint = {
+            "schema": "ebay-price-observation/v1", "sku": sku,
+            "expected_generation": payload["object_generation"], "fields": fields,
+            "operation_id": operation_identity(
+                sku=sku, kind="ebay-price",
+                expected_generation=payload["object_generation"],
+                payload=mutation_payload,
+            ),
+        }
+        checkpoint = state_machine.checkpoint_running_job(
+            job["job_id"], self.owner, job["lease_token"], checkpoint,
+        )
+        return self._commit_governed_price(
+            job=job, payload=payload, sku=sku, json_path=json_path,
+            checkpoint=checkpoint,
+        )
 
     def handle(self, job: Dict[str, Any]) -> None:
         payload = job.get('payload_json') or {}
@@ -53,6 +202,40 @@ class EbayPriceWorker(QueueWorker):
             raise HardFailure(f'item JSON not found for {sku}')
 
         item = json.loads(json_path.read_text(encoding='utf-8'))
+
+        governed_keys = {
+            "treatment_id", "treatment_version", "graph_id",
+            "goal_profile_id", "goal_profile_version", "object_generation",
+            "condition_hash",
+        }
+        governed = any(key in payload for key in governed_keys)
+        if governed:
+            required = governed_keys | {"entity_id"}
+            if any(not isinstance(payload.get(key), str) or not payload[key].strip()
+                   for key in required):
+                raise HardFailure("ebay_price governed job has incomplete identity")
+            if payload["treatment_id"] != "ebay-price" or payload["treatment_version"] != "1":
+                raise HardFailure("ebay_price governed treatment identity mismatch")
+            if job.get("entity_type") != "item" or job.get("entity_id") != sku:
+                raise HardFailure("ebay_price governed entity envelope mismatch")
+            if payload["entity_id"] != sku or payload.get("object_id", sku) != sku:
+                raise HardFailure("ebay_price governed payload entity mismatch")
+            if not isinstance(job.get("job_id"), str) or not job["job_id"].strip():
+                raise HardFailure("ebay_price governed job_id missing")
+            if not isinstance(job.get("lease_token"), str) or not job["lease_token"].strip():
+                raise HardFailure("ebay_price governed lease token missing")
+            if (item_generation(item) != payload["object_generation"]
+                    and "observation_checkpoint" not in payload):
+                raise HardFailure("ebay_price governed object generation mismatch")
+            if "observation_checkpoint" in payload:
+                checkpoint = state_machine.checkpoint_running_job(
+                    job["job_id"], self.owner, job["lease_token"],
+                    payload["observation_checkpoint"],
+                )
+                return self._commit_governed_price(
+                    job=job, payload=payload, sku=sku, json_path=json_path,
+                    checkpoint=checkpoint,
+                )
 
         draft = item.get('draft_listing')
         if not draft:
@@ -75,6 +258,20 @@ class EbayPriceWorker(QueueWorker):
                      '($%s); suggest-only, not overwriting', sku, op_price)
             tgw_logging.log_event('ebay_price_skipped_operator_override', sku=sku,
                                   operator_price=op_price)
+            if governed:
+                guarded_offer = dict(item.get('ebay_offer') or {})
+                guarded_offer['price_guard_skipped'] = {
+                    'ts': datetime.now(timezone.utc).isoformat(),
+                    'reason': 'operator_price_history',
+                    'operator_price': op_price,
+                }
+                return self._checkpoint_and_commit(
+                    job=job, payload=payload, sku=sku, json_path=json_path,
+                    fields={
+                        'ebay_offer': guarded_offer,
+                        'draft_listing': dict(draft),
+                    },
+                )
             fence_ebay_write(self.config, sku, ebay_offer={
                 'price_guard_skipped': {
                     'ts': datetime.now(timezone.utc).isoformat(),
@@ -154,6 +351,14 @@ class EbayPriceWorker(QueueWorker):
             if suggested is not None:
                 ebay_offer['suggested_price'] = suggested
                 ebay_offer['suggested_at'] = result['queried_at']
+            if governed:
+                return self._checkpoint_and_commit(
+                    job=job, payload=payload, sku=sku, json_path=json_path,
+                    fields={
+                        'ebay_offer': ebay_offer,
+                        'draft_listing': dict(draft),
+                    },
+                )
             fence_ebay_write(self.config, sku, ebay_offer=ebay_offer, allow_protected=['price_comps'])
             log.info('ebay_price: %s suggest-only → suggested=$%s (%d comps)',
                      sku, suggested, (result['comps'] or {}).get('count', 0))
@@ -243,22 +448,22 @@ class EbayPriceWorker(QueueWorker):
         except Exception as exc:
             log.warning('ebay_price: quality rescore failed for %s: %s', sku, exc)
 
-        fence_ebay_write(self.config, sku, ebay_offer=ebay_offer, allow_protected=['price_comps'])
         top_level_patch = {'draft_listing': draft}
         if item.get('free_shipping'):
             top_level_patch['free_shipping'] = True
+        if governed:
+            return self._checkpoint_and_commit(
+                job=job, payload=payload, sku=sku, json_path=json_path,
+                fields={'ebay_offer': ebay_offer, **top_level_patch},
+            )
+        fence_ebay_write(self.config, sku, ebay_offer=ebay_offer, allow_protected=['price_comps'])
         fence_patch_item(self.config, sku, top_level_patch)
 
 
 
         # Only stage when we have a price — no point creating an offer with no price
 
-        return {
-            "treatment_id": "ebay-price",
-            "outcome": "satisfied",
-            "established_conditions": ("priced",),
-            "artifacts": (f"item:{sku}",),
-        }
+        return {"ok": True, "sku": sku}
 
 
 def main() -> int:
