@@ -1,0 +1,15 @@
+{
+  "enums": {
+    "authority": ["plan-approved"],
+    "effect_class": ["read-only"],
+    "kind": ["discovery", "verification"]
+  },
+  "schema": "tgw-plan-registry/v1",
+  "treatments": {
+    "environment-instruction-audit": {"version": "1"}
+  },
+  "verifiers": {
+    "tgw.environment.instruction-inventory/v1": {"version": "1"},
+    "tgw.environment.instruction-classification/v1": {"version": "1"}
+  }
+}

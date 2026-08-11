@@ -1,0 +1,18 @@
+{
+  "schema": "tgw-plan-evidence/v1",
+  "receipt_id": "instruction-audit-1befcb2a10d7d232-classified",
+  "plan_id": "PLAN-instruction-conflict-audit",
+  "plan_version": 1,
+  "scope_hash": "sha256:d2f93bc8fcedcdff413a40c2b522949c8ff17c4b224afc37bbefe930b5652fdb",
+  "registry_revision": "sha256:e82d4b30a818b4e718fc9001b6f7816a0c87f2c4eba5325c494f37542afb4beb",
+  "graph_id": "sha256:653edb8b79f3053426a1dcdf0021d3e467ac081cd431cb88c51c0142d53724a0",
+  "condition_hash": "sha256:59475d7ac61b6a0c4199007b2afed5c539f095fd106ef1218aa0ddf9f47aed61",
+  "work_unit_id": "S3-instruction-audit",
+  "acceptance_id": "conflicts-classified",
+  "entity": "inventory:instruction-sources",
+  "verifier": "tgw.environment.instruction-classification/v1",
+  "verifier_version": "1",
+  "result": "true",
+  "observed_at": "2026-08-11T09:05:00-07:00",
+  "evidence_hash": "sha256:ddedce59239fab7e70cf88891760e23ab73f0eb2e8f5fb8febc15cf09b26ca60"
+}
