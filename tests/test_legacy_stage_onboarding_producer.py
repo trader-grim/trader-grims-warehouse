@@ -75,6 +75,60 @@ def test_producer_constructs_exact_generation_bound_payload_and_dedupe(
     assert call["dedupe_key"] == payload["graph_id"]
 
 
+def test_missing_canonical_marketplace_uses_exact_read_only_offer(
+    tmp_path, monkeypatch,
+):
+    sku, path, item, config = _fixture(tmp_path)
+    item["ebay_offer"].pop("marketplace_id")
+    path.write_text(json.dumps(item))
+    get = MagicMock(return_value={
+        "offerId": "OFF-1", "sku": sku, "marketplaceId": "EBAY_MOTORS_US",
+    })
+    monkeypatch.setattr("tgw.workflow.legacy_stage_onboarding.ebay_get", get)
+    build = MagicMock(return_value=(
+        {"product": {"title": "Legacy item"}},
+        {"offerId": "OFF-1", "marketplaceId": "EBAY_MOTORS_US"},
+    ))
+    monkeypatch.setattr(
+        "tgw.workflow.legacy_stage_onboarding._build_offer_bodies", build,
+    )
+    calls = []
+    request_legacy_stage_onboarding(
+        path, sku=sku, config=config,
+        enqueue_fn=lambda **kwargs: calls.append(kwargs) or "job-1",
+    )
+    get.assert_called_once_with(config, "/sell/inventory/v1/offer/OFF-1")
+    assert build.call_args.kwargs["known_marketplace_id"] == "EBAY_MOTORS_US"
+    assert calls[0]["payload"]["expected_offer"]["marketplaceId"] == (
+        "EBAY_MOTORS_US"
+    )
+
+
+@pytest.mark.parametrize(
+    "observed",
+    [None, {}, {"offerId": "OTHER", "sku": "SKU-LEGACY-1",
+                "marketplaceId": "EBAY_US"},
+     {"offerId": "OFF-1", "sku": "OTHER", "marketplaceId": "EBAY_US"},
+     {"offerId": "OFF-1", "sku": "SKU-LEGACY-1", "marketplaceId": ""}],
+)
+def test_marketplace_discovery_fails_closed_on_unbound_observation(
+    tmp_path, monkeypatch, observed,
+):
+    sku, path, item, config = _fixture(tmp_path)
+    item["ebay_offer"].pop("marketplace_id")
+    path.write_text(json.dumps(item))
+    monkeypatch.setattr(
+        "tgw.workflow.legacy_stage_onboarding.ebay_get",
+        MagicMock(return_value=observed),
+    )
+    enqueue = MagicMock()
+    with pytest.raises(ValueError):
+        request_legacy_stage_onboarding(
+            path, sku=sku, config=config, enqueue_fn=enqueue,
+        )
+    enqueue.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "migration",
     [{}, {"ebay_provider_identity": ""},

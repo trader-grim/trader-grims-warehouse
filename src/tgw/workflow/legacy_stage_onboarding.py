@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any, Callable, Mapping
+from urllib.parse import quote
 
+from tgw.apis.ebay.client import ebay_get
 from tgw.config import sku_json
 from tgw.ebay.sync import _build_offer_bodies
 from tgw.item_mutation import item_generation
@@ -20,6 +22,25 @@ from .treatments import LEGACY_STAGE_ONBOARDING_TREATMENTS
 PAYLOAD_SCHEMA = "ebay-onboard-legacy-stage/v1"
 EVALUATOR_VERSION = "legacy-stage-onboarding-producer/v1"
 QUEUE_NAME = "ebay_onboard_legacy_stage"
+
+
+def _discover_existing_offer_marketplace(
+    config: Mapping[str, Any], *, sku: str, offer_id: str,
+) -> str:
+    """Read the exact existing offer and return its provider-owned marketplace."""
+    observed = ebay_get(
+        dict(config),
+        f"/sell/inventory/v1/offer/{quote(offer_id, safe='')}",
+    )
+    if not isinstance(observed, Mapping):
+        raise ValueError("existing offer observation is malformed")
+    if observed.get("offerId") != offer_id or observed.get("sku") != sku:
+        raise ValueError("existing offer observation binding mismatch")
+    marketplace = observed.get("marketplaceId")
+    if (not isinstance(marketplace, str) or not marketplace.strip()
+            or marketplace != marketplace.strip()):
+        raise ValueError("existing offer marketplace is absent")
+    return marketplace
 
 
 def request_legacy_stage_onboarding(
@@ -58,7 +79,9 @@ def request_legacy_stage_onboarding(
         raise ValueError("canonical offer already has staged authority evidence")
     marketplace = offer.get("marketplace_id") or offer.get("marketplaceId")
     if not isinstance(marketplace, str) or not marketplace.strip():
-        raise ValueError("canonical legacy offer marketplace is absent")
+        marketplace = _discover_existing_offer_marketplace(
+            config, sku=sku, offer_id=offer_id,
+        )
     generation = item_generation(item)
     content_identity = listing_content_identity(item)
     inventory_body, offer_body = _build_offer_bodies(
