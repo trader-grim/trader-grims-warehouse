@@ -137,6 +137,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_provider_effects_unresolved_entity
     ON provider_effects(provider, operation, entity_type, entity_id)
     WHERE state IN ('reserved','dispatched','ambiguous','reconciliation_required');
 
+CREATE TABLE IF NOT EXISTS provider_observations (
+    observation_id TEXT PRIMARY KEY CHECK (observation_id ~ '^[0-9a-f]{64}$'),
+    schema_id TEXT NOT NULL CHECK (schema_id = 'provider-observation/v1'),
+    observation_type TEXT NOT NULL,
+    provider TEXT NOT NULL, provider_identity TEXT NOT NULL,
+    sku TEXT NOT NULL, offer_id TEXT NOT NULL,
+    object_generation TEXT NOT NULL, graph_id TEXT NOT NULL,
+    condition_hash TEXT NOT NULL, content_identity TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN
+        ('corroborated','contradicted','indeterminate')),
+    evidence_json JSONB NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS queue_workers (
     worker_id TEXT PRIMARY KEY,
     node_class TEXT NOT NULL,

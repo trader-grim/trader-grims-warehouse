@@ -130,6 +130,21 @@ CREATE UNIQUE INDEX uq_provider_effects_unresolved_entity
     WHERE (state = ANY (ARRAY['reserved'::text, 'dispatched'::text,
         'ambiguous'::text, 'reconciliation_required'::text]));
 
+CREATE TABLE public.provider_observations (
+    observation_id text PRIMARY KEY CHECK (observation_id ~ '^[0-9a-f]{64}$'),
+    schema_id text NOT NULL CHECK (schema_id = 'provider-observation/v1'),
+    observation_type text NOT NULL,
+    provider text NOT NULL, provider_identity text NOT NULL,
+    sku text NOT NULL, offer_id text NOT NULL,
+    object_generation text NOT NULL, graph_id text NOT NULL,
+    condition_hash text NOT NULL, content_identity text NOT NULL,
+    outcome text NOT NULL CHECK (outcome IN
+        ('corroborated','contradicted','indeterminate')),
+    evidence_json jsonb NOT NULL,
+    observed_at timestamptz NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
 
 --
 -- Name: cancel_job(uuid, text); Type: FUNCTION; Schema: public; Owner: -
