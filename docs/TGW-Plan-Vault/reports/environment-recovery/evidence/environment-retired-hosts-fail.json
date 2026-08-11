@@ -1,0 +1,18 @@
+{
+  "schema": "tgw-plan-evidence/v1",
+  "receipt_id": "environment-registry-20a9dcd7d1800cbc-retired-hosts",
+  "plan_id": "PLAN-environment-registry",
+  "plan_version": 1,
+  "scope_hash": "sha256:11172b29c672bdd84a11bf704cf3923f9006d8803cdcba862c80f15c8b894c4d",
+  "registry_revision": "sha256:0cfbdd4e24630207c5564ab793ac2f42bd498b39aed7497ed24cc89312ecc125",
+  "graph_id": "sha256:cb4cccd62a02d181f8ef85069b680761753d57e7a4343320f6131b477c3a41ce",
+  "condition_hash": "sha256:21b091352639113b3e4faafd9b9ba32757c94b3b80d7f83c91dceabe0f7ed212",
+  "work_unit_id": "S1-environment-registry",
+  "acceptance_id": "retired-hosts-fail",
+  "entity": "registry:tgw-environment",
+  "verifier": "tgw.environment.retired-hosts/v1",
+  "verifier_version": "1",
+  "result": "true",
+  "observed_at": "2026-08-11T08:54:06-07:00",
+  "evidence_hash": "sha256:b2ae42c3c3ef88bbe2f297cdd7982d9862ed805de8ed0d6809915bdad2e4dba0"
+}

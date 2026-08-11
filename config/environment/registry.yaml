@@ -1,0 +1,67 @@
+schema: tgw-environment/v1
+revision: sha256:486e0686a1541c0eec904b288ce7f72074eac9e655940bdba285f32a10b19185
+generated_at: "2026-08-11T08:55:00-07:00"
+content:
+  hosts:
+    production:
+      canonical_name: tgw-prod
+      roles: [production, nixos]
+      verified_at: "2026-08-11T08:28:18-07:00"
+      sources: [server-inventory-f16ad5146842bc84]
+    development:
+      canonical_name: tgw-lib
+      roles: [development, controller]
+      verified_at: "2026-08-11T08:35:40-07:00"
+      sources: [server-inventory-supplement-20260811]
+  retired_hosts:
+    a1131:
+      replacement_role: production
+      behavior: fail
+      reason: obsolete historical host name
+  repositories:
+    application:
+      host_role: development
+      path: /opt/TGW/tgw-lib/src/trader-grims-warehouse
+      branch: catio-nix-0.0.1-alpha
+      dirty_policy: fail-unless-attributed
+      sources: [server-inventory-supplement-20260811]
+    nix_flake:
+      host_role: production
+      path: /home/db/tgw-flake
+      branch: master
+      dirty_policy: fail-unless-attributed
+      sources: [server-inventory-f16ad5146842bc84]
+  plans:
+    canonical_root: /opt/TGW/tgw-lib/src/trader-grims-warehouse/docs/TGW-Plan-Vault
+    source: repository:application
+  releases:
+    production_root: /opt/TGW/releases
+    production_selector: /opt/TGW/current
+    development_root: /opt/TGW/tgw-lib/releases
+  instructions:
+    precedence:
+      - platform-and-user-authority
+      - repository-agents
+      - environment-snapshot
+      - exact-task-contract
+      - persona-style-overlay
+      - historical-reference-only
+    history_grants_authority: false
+    memory_grants_authority: false
+  agents:
+    claude-code:
+      authority_files: [AGENTS.md, CLAUDE.md]
+      excluded_authority_files: []
+    codex:
+      authority_files: [AGENTS.md]
+      excluded_authority_files: [CLAUDE.md]
+    hermes-tigwa:
+      authority_files: [AGENTS.md, docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md]
+      excluded_authority_files: [CLAUDE.md]
+      status: quarantined-contract-replacement-required
+  unknowns:
+    - canonical application branch migration target
+    - attribution of canonical repository dirty paths
+    - clean Hermes/TGW Steward operating contract
+    - catnanny identity access and acquisition method
+    - helicrew identity access and acquisition method

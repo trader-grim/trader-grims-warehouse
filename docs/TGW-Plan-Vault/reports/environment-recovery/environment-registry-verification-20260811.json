@@ -1,0 +1,21 @@
+{
+  "schema": "tgw-environment-registry-verification/v1",
+  "observed_at": "2026-08-11T08:54:06-07:00",
+  "registry_revision": "sha256:486e0686a1541c0eec904b288ce7f72074eac9e655940bdba285f32a10b19185",
+  "artifacts": {
+    "config/environment/registry.yaml": "sha256:01e883767b39bcd884dc1e13b74ecbd91ee15557e52bc30a38304cc0678aa3cd",
+    "src/tgw/environment_registry.py": "sha256:3634a26a6cd6bc88852e95765a9a90f44e30b66a8cf12cbbe0b232ce4f98ebd9",
+    "tests/test_environment_registry.py": "sha256:004acedf675f6c3232f1cd8e83d7fcffa0307747c5736ff7af2bcb2624551682"
+  },
+  "checks": {
+    "focused_tests": {"passed": 22, "failed": 0},
+    "ruff": "passed",
+    "diff_check": "passed",
+    "retired_host_a1131": "rejected",
+    "unknown_hosts_catnanny_helicrew": "rejected",
+    "non_claude_contract_isolation": "passed",
+    "history_memory_authority": false
+  },
+  "effects": ["repository-local files only"],
+  "external_installation": false
+}

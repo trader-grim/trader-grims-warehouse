@@ -1,0 +1,15 @@
+{
+  "enums": {
+    "authority": ["plan-approved"],
+    "effect_class": ["read-only", "local-reversible"],
+    "kind": ["discovery", "configuration", "verification"]
+  },
+  "schema": "tgw-plan-registry/v1",
+  "treatments": {
+    "environment-registry-build": {"version": "1"}
+  },
+  "verifiers": {
+    "tgw.environment.registry-validate/v1": {"version": "1"},
+    "tgw.environment.retired-hosts/v1": {"version": "1"}
+  }
+}
