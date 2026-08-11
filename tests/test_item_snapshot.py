@@ -153,6 +153,29 @@ def test_has_photos_true_via_images_list():
     assert _result(snap, "item_has_photos") == FingerprintResult.TRUE
 
 
+def test_has_photos_true_via_uploaded_photo_local_source():
+    item = _make_item(
+        image="",
+        _images=[],
+        ebay_photos=[{
+            "local": "/opt/TGW/data/ItemData/TEST-001/001.jpg",
+            "url": "https://i.ebayimg.com/example.jpg",
+        }],
+    )
+    snap = _snapshot(item)
+    assert _result(snap, "item_has_photos") == FingerprintResult.TRUE
+
+
+def test_has_photos_does_not_treat_uploaded_url_alone_as_local_source():
+    item = _make_item(
+        image="",
+        _images=[],
+        ebay_photos=[{"url": "https://i.ebayimg.com/example.jpg"}],
+    )
+    snap = _snapshot(item)
+    assert _result(snap, "item_has_photos") == FingerprintResult.FALSE
+
+
 def test_has_photos_false():
     item = _make_item(image="", _images=[])
     snap = _snapshot(item)

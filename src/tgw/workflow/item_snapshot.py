@@ -97,12 +97,20 @@ def _get_str(item: Dict[str, Any], key: str) -> str:
 
 
 def _has_photos(item: Dict[str, Any]) -> bool:
-    """Image field is non-empty, or _images list from get_item is populated."""
+    """Canonical item evidence identifies at least one local source photo."""
     image = _get_str(item, "image")
     if image:
         return True
     images = item.get("_images")
     if isinstance(images, list) and any(isinstance(i, str) and i.strip() for i in images):
+        return True
+    ebay_photos = item.get("ebay_photos")
+    if isinstance(ebay_photos, list) and any(
+        isinstance(photo, dict)
+        and isinstance(photo.get("local"), str)
+        and bool(photo["local"].strip())
+        for photo in ebay_photos
+    ):
         return True
     return False
 
