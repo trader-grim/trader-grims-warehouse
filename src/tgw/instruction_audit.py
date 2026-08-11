@@ -137,16 +137,20 @@ def audit_instructions(
         findings.extend(_line_findings(relative, text, scopes, retired_names))
     obsolete_profile = ".claude/agents/nix-flake-maintainer.md"
     if obsolete_profile in sources:
-        findings.append({
-            "code": "obsolete-maintainer-profile-present",
-            "path": obsolete_profile,
-            "line": 1,
-            "scopes": sorted(sources[obsolete_profile]),
-            "classification": "claude-runtime-remediation-required",
-            "line_sha256": inventory[
-                next(index for index, value in enumerate(inventory) if value["path"] == obsolete_profile)
-            ]["sha256"],
-        })
+        profile_text = (root / obsolete_profile).read_text(encoding="utf-8")
+        if not all(marker in profile_text for marker in (
+            "tgw-instruction-tombstone/v1", "tools: \"\"", "RETIRED_PROFILE",
+        )):
+            findings.append({
+                "code": "obsolete-maintainer-profile-present",
+                "path": obsolete_profile,
+                "line": 1,
+                "scopes": sorted(sources[obsolete_profile]),
+                "classification": "claude-runtime-remediation-required",
+                "line_sha256": inventory[
+                    next(index for index, value in enumerate(inventory) if value["path"] == obsolete_profile)
+                ]["sha256"],
+            })
     return {
         "schema": "tgw-instruction-audit/v1",
         "observed_at": observed_at,

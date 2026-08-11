@@ -1,0 +1,18 @@
+{
+  "schema": "tgw-plan-evidence/v1",
+  "receipt_id": "steward-contract-776d740780dd08ac-boundary",
+  "plan_id": "PLAN-instruction-authority-remediation",
+  "plan_version": 1,
+  "scope_hash": "sha256:36cd68b2606863bf4011807899c1f566812b5802f47d83c1e365215462cd8971",
+  "registry_revision": "sha256:9cbfdc909f17a7c662e7995a86f62dc4655636ff229bae052d2d6dac6c5453ca",
+  "graph_id": "sha256:7d56c59770d7be5023ef866f43514457addc5cfb0bc8a886f3e10f54e5db35a8",
+  "condition_hash": "sha256:539893d87381a8c2e1282062e23c5b92e41aa3b78716bb52a229cb576f011222",
+  "work_unit_id": "S4-authority-remediation",
+  "acceptance_id": "steward-boundary-valid",
+  "entity": "authority:agent-instructions",
+  "verifier": "tgw.environment.steward-contract/v1",
+  "verifier_version": "1",
+  "result": "true",
+  "observed_at": "2026-08-11T09:16:47-07:00",
+  "evidence_hash": "sha256:b86611e633695482e288d3ab0a2a16597af005aa62389457af23d9c791d7244a"
+}

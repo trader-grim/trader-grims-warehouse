@@ -19,7 +19,7 @@ The following are obsolete and must not be used as authority:
 
 - `/opt/TGW/.claude/agents/nix-flake-maintainer.md`;
 - the historical `commit-nix-flake` and `verify-nix-flake` skills;
-- `a1131` as a build/deployment host. `tgw-prod` is the lone Nix host.
+- any retired or unregistered machine as a build/deployment host. `tgw-prod` is the lone Nix host.
 
 This runbook authorizes no change by itself. Work from the specific requested
 source/config delta and obtain explicit approval before a live switch.
@@ -136,19 +136,17 @@ sudo -u db -H bash -lc '
 '
 ```
 
-When shared defaults/modules change, also evaluate affected non-production
-outputs. At minimum:
+When shared defaults/modules change, also evaluate the registered VM output:
 
 ```bash
 sudo -u db -H bash -lc '
   cd /home/db/tgw-flake
   nix eval --raw path:.#nixosConfigurations.vm.config.system.build.toplevel.drvPath
-  nix eval --raw path:.#nixosConfigurations.a1131.config.system.build.toplevel.drvPath
 '
 ```
 
-`a1131` is evaluated only as a flake output compatibility check; do not SSH to
-it or deploy it.
+Do not evaluate, SSH to, or deploy retired/unregistered host outputs from this
+procedure. Historical output names require a separate cleanup/migration unit.
 
 For a changed unit, inspect the evaluated contract rather than assuming the
 module generated what was intended:

@@ -1,0 +1,26 @@
+{
+  "schema": "tgw-instruction-remediation-verification/v1",
+  "observed_at": "2026-08-11T09:16:47-07:00",
+  "previous_registry_revision": "sha256:486e0686a1541c0eec904b288ce7f72074eac9e655940bdba285f32a10b19185",
+  "resulting_registry_revision": "sha256:fcd04e03289d10db2625050f5e8ba0143048f778512a3a77fce5870f877d4097",
+  "artifacts": {
+    "config/environment/actors/tgw-steward.json": "sha256:776d740780dd08ac09fca8f8f92ea9045776dd8ab21791b2e773402cfe46d762",
+    "config/environment/registry.yaml": "sha256:347e0e993ceec3f57f666b5a81485514dcccafa3b1c910d45ca92d51730dc89e",
+    ".claude/agents/nix-flake-maintainer.md": "sha256:565888b3e389f20de1b90e738ed2afefff0605af4f521a729e80499b3e0a7987",
+    ".claude/settings.json": "sha256:1cfa667323f36ace632c0c6bf638651089c9fc2a7c6ad1e92a083e617854ccd1",
+    "CLAUDE.md": "sha256:a2cbb85215fd485f0b2a02823faca536440139e79fed81cec6e5990b6c9404f2",
+    "docs/TGW-Plan-Vault/reference/runbooks/nix-flake-maintenance.md": "sha256:7342316d044ec8b3b8e571995e4498c5a097306d6ae9358877bb97193d63f2d2",
+    "docs/TGW-Plan-Vault/reference/runbooks/thermal-emergency-response.md": "sha256:d9121806e7358aa8bd2a8a5d1e393a9247b34c2712fa436f662f6a1c8eaeea94",
+    "instruction-audit-post-remediation-20260811.json": "sha256:60c603473cda8cf05e41327cef11b29ec55790d396070fb128fa4233438eced5"
+  },
+  "checks": {
+    "focused_tests": {"passed": 45, "failed": 0},
+    "ruff": "passed",
+    "diff_check": "passed",
+    "migration_required_retired_routes": 0,
+    "live_obsolete_profile_findings": 0,
+    "historical_files_deleted": 0,
+    "memory_imported": false,
+    "external_effects": false
+  }
+}

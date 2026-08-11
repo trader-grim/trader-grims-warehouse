@@ -79,18 +79,18 @@ net itself may be down. Say so explicitly in the notification to Dave
 Telegram, already built. Standard escalation path, no change from the
 existing design.
 
-### 4. Do NOT autonomously open a Claude session on a1131
+### 4. Do NOT autonomously open a session on another machine
 
 Dropped from the automated response (Claude's recommendation, Dave
-concurred 2026-07-14): opening a fresh, unsupervised Claude session on
-a1131 mid-incident doesn't help tgw-prod directly and reintroduces the
+concurred 2026-07-14): opening a fresh, unsupervised agent session on a
+second machine mid-incident doesn't help tgw-prod directly and reintroduces the
 same "unsupervised actor during a crisis" risk as action 1's "don't
 auto-start" rule — it would be inconsistent to forbid one and allow the
 other. The monitor may **mention in its notification to Dave that this
-option exists** (a1131 has read-only NFS views of tgw-prod's data/logs
-for exactly this kind of remote look-in) — but only Dave, deciding with
-real context in the moment, starts that session himself. The monitor
-never does.
+option exists** only when the environment registry identifies a current,
+authorized diagnostic host — but only Dave, deciding with real context in the
+moment, starts that session himself. The monitor never resolves or contacts a
+retired/unregistered machine.
 
 ### 5. Babysit the btrfs snapshot — the default action when nobody is actively responding
 

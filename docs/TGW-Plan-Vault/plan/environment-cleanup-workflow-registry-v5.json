@@ -1,0 +1,15 @@
+{
+  "enums": {
+    "authority": ["plan-approved"],
+    "effect_class": ["local-reversible"],
+    "kind": ["configuration", "verification"]
+  },
+  "schema": "tgw-plan-registry/v1",
+  "treatments": {
+    "environment-instruction-remediate": {"version": "1"}
+  },
+  "verifiers": {
+    "tgw.environment.steward-contract/v1": {"version": "1"},
+    "tgw.environment.retired-routing/v1": {"version": "1"}
+  }
+}

@@ -1,5 +1,5 @@
 schema: tgw-environment/v1
-revision: sha256:486e0686a1541c0eec904b288ce7f72074eac9e655940bdba285f32a10b19185
+revision: sha256:fcd04e03289d10db2625050f5e8ba0143048f778512a3a77fce5870f877d4097
 generated_at: "2026-08-11T08:55:00-07:00"
 content:
   hosts:
@@ -56,12 +56,11 @@ content:
       authority_files: [AGENTS.md]
       excluded_authority_files: [CLAUDE.md]
     hermes-tigwa:
-      authority_files: [AGENTS.md, docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md]
-      excluded_authority_files: [CLAUDE.md]
-      status: quarantined-contract-replacement-required
+      authority_files: [AGENTS.md, config/environment/actors/tgw-steward.json]
+      excluded_authority_files: [CLAUDE.md, docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md]
+      status: clean-contract-active-satellite-recovery-quarantined
   unknowns:
     - canonical application branch migration target
     - attribution of canonical repository dirty paths
-    - clean Hermes/TGW Steward operating contract
     - catnanny identity access and acquisition method
     - helicrew identity access and acquisition method

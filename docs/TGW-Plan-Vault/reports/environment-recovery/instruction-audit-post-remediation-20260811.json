@@ -1,0 +1,723 @@
+{
+  "commands_executed_from_sources": false,
+  "finding_count": 43,
+  "findings": [
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 3,
+      "line_sha256": "sha256:9c1a40449e933cd3249f1c0ce43d465c6e872ef984ce1dd21ec26094ca922235",
+      "path": ".claude/skills/tgw-exit/SKILL.md",
+      "scopes": [
+        "claude-runtime"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 8,
+      "line_sha256": "sha256:330ca84869ad82d9c29e2c942e2931eb2b9962c9589575e27a05c7d5717a34ac",
+      "path": ".claude/skills/tgw-exit/SKILL.md",
+      "scopes": [
+        "claude-runtime"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 14,
+      "line_sha256": "sha256:01c9f4a91885bad896e168354d6b952a675e741c44f6f1b34aea1b14b09b77a4",
+      "path": ".claude/skills/tgw-exit/SKILL.md",
+      "scopes": [
+        "claude-runtime"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 64,
+      "line_sha256": "sha256:4901a9d88562b23cb97c8ef09941f490301e5142f7d78a6f72f5d8a3317fdb32",
+      "path": ".claude/skills/tgw-packet/SKILL.md",
+      "scopes": [
+        "claude-runtime"
+      ]
+    },
+    {
+      "classification": "review-context-and-negation",
+      "code": "memory-history-authority-language",
+      "line": 406,
+      "line_sha256": "sha256:50478143ed7fae5438fe7bd96976aaa1be9db237e6db3e881191301558a5bace",
+      "path": "CLAUDE.md",
+      "scopes": [
+        "authority:claude-code",
+        "excluded:codex",
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "review-context-and-negation",
+      "code": "memory-history-authority-language",
+      "line": 11,
+      "line_sha256": "sha256:49aa67db7c8e0c3263bbd9fa9c32b1cbd46bdfd459fb6fe1d31a45b503eab149",
+      "path": "config/environment/actors/tgw-steward.json",
+      "scopes": [
+        "authority:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "review-context-and-negation",
+      "code": "memory-history-authority-language",
+      "line": 12,
+      "line_sha256": "sha256:26b8537034eabe70342c141f2854279d8a7cbfc1b4cd24ab330bc41de3e0db41",
+      "path": "config/environment/actors/tgw-steward.json",
+      "scopes": [
+        "authority:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 420,
+      "line_sha256": "sha256:b75280f9cd9f068f755395357e940eae248eff6372a540a9ee1a8cfa9776aaba",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 426,
+      "line_sha256": "sha256:a1de749f51784803c143e9f20aaabccb941fefaed3c3a6e03029f5a04fc7ce12",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 435,
+      "line_sha256": "sha256:794f039d13cb8cf4938a307c6a5ae69c649303a41ff718d65b46f4ba6982c4fb",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 438,
+      "line_sha256": "sha256:a64a3fb7fea4dbbf6efb2f75949f016e02a8465fe67190c19c3769333e1745f1",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 442,
+      "line_sha256": "sha256:dabb2c38d758fc20f5f437fb0fc4d8ca04056d5a93d8ddb91bd0731d51f6c7e6",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 445,
+      "line_sha256": "sha256:78b8dc2a19373dec571506627056d884b2298bc455100ae3fb9edf99d45bc73e",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 449,
+      "line_sha256": "sha256:f09188c7bf64deb9f2a384e36dba3e4c7ad64e11be7741073308bbc199e07c0a",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 464,
+      "line_sha256": "sha256:ca3bfee936f8d9008fd29cf50a5e91531c18eb32a96dcf33650c16df3d09585e",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 469,
+      "line_sha256": "sha256:d433d13a42e1a48d2904fe44ff6a9208237b6d4c3b584d724f53507f9b478079",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 470,
+      "line_sha256": "sha256:82cf93fa3f4a1613f8a7dda5bc069da8a75986fe158afd347ad992a6691f4aec",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 479,
+      "line_sha256": "sha256:596aaeeae46029daf959284f9bd33e7d752e8eb689cebcf7eb7fe99f200d8df9",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 486,
+      "line_sha256": "sha256:aa778381f31647ee9d346b2b6fa9fbf8f619a845c94f12386a4e7c8d6721fb52",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 488,
+      "line_sha256": "sha256:7f945a4c33a4500bf8e061273e468991f027432cd9bf10f64134a23152d5d4c8",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 494,
+      "line_sha256": "sha256:74694f108ea1a3598485639fe736180605219733526d4b7cf03d82de99326125",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "review-context-and-negation",
+      "code": "memory-history-authority-language",
+      "line": 502,
+      "line_sha256": "sha256:f0b4794ae52036e64c484e68868bb67c61df506b5e8f97623d7e8d21dcf0da56",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 627,
+      "line_sha256": "sha256:68cf11ea555e327a27df140581c25898d1598b9b72b6c0eaaa9fb5fce2f517ba",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 640,
+      "line_sha256": "sha256:d3e2925de69f2be80c2da1a9351fb3e59949e06a62240daed9badc4eaecdfad9",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 654,
+      "line_sha256": "sha256:fd5a6e17ebc1a1f00d51ca6c2af2bf965eb1ca6518b6827d1a36d43688bc191a",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 662,
+      "line_sha256": "sha256:f22cfd5adb07e66bad0434dfec9497aa5dd0b7ca98d58f151e6cefd6e3acba88",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 664,
+      "line_sha256": "sha256:5c8aea431a3575b17df575a12d3f702472d7e8e8809b292cf99475fb272292bd",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 679,
+      "line_sha256": "sha256:6acfb2822bd706857a8e69865aead4eae82f0c45b1e4d7db5d1f283ab0cf3552",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 680,
+      "line_sha256": "sha256:1215c9c5449c229c417d084fe70a18eca0dbfe5c95dd1051ec90091fca350da9",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 684,
+      "line_sha256": "sha256:302fe20dc1856a334a0890db1d72388f41e0b618ea3596c7125afe4fc86d4420",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 707,
+      "line_sha256": "sha256:ce6b91411755494a7c501c454771e310651c4f52daf0181d60c47e63501be377",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 736,
+      "line_sha256": "sha256:612229d540316735492e6fb540f4dc4fb88d754056e74da7f5aea0450519fe10",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 737,
+      "line_sha256": "sha256:44ce93cbdb43297578b6b8e20331d078e5386168a12261b7b63e6b0acf06f38e",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 740,
+      "line_sha256": "sha256:4b657e8bdb55f8645da19a52d36e33f9f4990f302cb29e57c02ff421b53da5c5",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 743,
+      "line_sha256": "sha256:e22dc6aac13e64072c080a958b0e3273e30e8371f057a9529a7dd62806226a62",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 746,
+      "line_sha256": "sha256:3f55cc46050bb84d17bede569057b084ce319e7f40f1e02595a9c2c98034b6fc",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 749,
+      "line_sha256": "sha256:d6d7d2e0c21c399ed6855c46e7aa6e718ebae547c0907e08c41d82249b10d2ee",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 862,
+      "line_sha256": "sha256:b74ea47bffa6a1fc49e7fa7aecd7a5ba688b2ed3a881d693f521a489e06b7157",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 947,
+      "line_sha256": "sha256:15867375c35b27b8c063e86559eb9e507fce6ee7ee40324e343ffaf7d3939dc7",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "historical-or-runtime-review",
+      "code": "retired-host-reference",
+      "identity": "a1131",
+      "line": 1043,
+      "line_sha256": "sha256:f5b39cc053c9490c3028d10bf3482c00fd63072755d586914a38b1cc7aabea38",
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ]
+    },
+    {
+      "classification": "replace-with-registered-procedure-id",
+      "code": "direct-mutable-deploy-command",
+      "line": 206,
+      "line_sha256": "sha256:176d10d02deda958a3e77588bf23f4bda88c134ee2fe589ff12990b0bc8b9c6e",
+      "path": "docs/TGW-Plan-Vault/reference/runbooks/nix-flake-maintenance.md",
+      "scopes": [
+        "current-runbook"
+      ]
+    },
+    {
+      "classification": "replace-with-registered-procedure-id",
+      "code": "direct-mutable-deploy-command",
+      "line": 237,
+      "line_sha256": "sha256:e253d7ec1db0584782ca542595f3382f2ed5d1068f12b8221d345b53ecac0449",
+      "path": "docs/TGW-Plan-Vault/reference/runbooks/nix-flake-maintenance.md",
+      "scopes": [
+        "current-runbook"
+      ]
+    },
+    {
+      "classification": "replace-with-registered-procedure-id",
+      "code": "direct-mutable-deploy-command",
+      "line": 446,
+      "line_sha256": "sha256:66659b03623076d9b6deb6a4ef2f9306256f9e4a3cfcca5ff30ffbf420e96265",
+      "path": "docs/TGW-Plan-Vault/reference/runbooks/nixos-prod-cutover-runbook.md",
+      "scopes": [
+        "current-runbook"
+      ]
+    }
+  ],
+  "observed_at": "2026-08-11T09:16:47-07:00",
+  "registry_revision": "sha256:fcd04e03289d10db2625050f5e8ba0143048f778512a3a77fce5870f877d4097",
+  "schema": "tgw-instruction-audit/v1",
+  "source_count": 34,
+  "source_files_modified": false,
+  "sources": [
+    {
+      "path": ".claude/agents/nix-flake-maintainer.md",
+      "scopes": [
+        "claude-runtime"
+      ],
+      "sha256": "sha256:565888b3e389f20de1b90e738ed2afefff0605af4f521a729e80499b3e0a7987"
+    },
+    {
+      "path": ".claude/agents/tgw-coder.md",
+      "scopes": [
+        "claude-runtime"
+      ],
+      "sha256": "sha256:bb0c4835529c2701c442b764deeab7052921e907b963960089f81384b1dd7851"
+    },
+    {
+      "path": ".claude/settings.json",
+      "scopes": [
+        "claude-runtime"
+      ],
+      "sha256": "sha256:1cfa667323f36ace632c0c6bf638651089c9fc2a7c6ad1e92a083e617854ccd1"
+    },
+    {
+      "path": ".claude/settings.local.json",
+      "scopes": [
+        "claude-runtime"
+      ],
+      "sha256": "sha256:48eebbab263a40417093cb7da6fd8557d00b4f834a03bc42f894a0bd23d25e3f"
+    },
+    {
+      "path": ".claude/skills/tgw-aider-step/SKILL.md",
+      "scopes": [
+        "claude-runtime"
+      ],
+      "sha256": "sha256:f033d2dd5f42a07c73c242e9412db867a0ca1a43377250e2d65c3010d4e1f873"
+    },
+    {
+      "path": ".claude/skills/tgw-exit/SKILL.md",
+      "scopes": [
+        "claude-runtime"
+      ],
+      "sha256": "sha256:1edd97873974e9e5b580f6e4dd7f32615112f731132b4878e65a34600784f240"
+    },
+    {
+      "path": ".claude/skills/tgw-mailbox-send/SKILL.md",
+      "scopes": [
+        "claude-runtime"
+      ],
+      "sha256": "sha256:2fb32aa8eccb57e1433d9b2c065711c669398e245669e0c6af578d8a0a8ecfec"
+    },
+    {
+      "path": ".claude/skills/tgw-packet/SKILL.md",
+      "scopes": [
+        "claude-runtime"
+      ],
+      "sha256": "sha256:0b2377d5e24d0d8a9465bc8b882e67317776f131e3b8a45495a2ab62cf0d7817"
+    },
+    {
+      "path": ".claude/skills/tgw-plan-maintain/SKILL.md",
+      "scopes": [
+        "claude-runtime"
+      ],
+      "sha256": "sha256:bd1d89f21a83e81d7f4cd8c3768002e1f1f57fcb438019a16ab269f7141d467c"
+    },
+    {
+      "path": ".claude/skills/tgw-plan/SKILL.md",
+      "scopes": [
+        "claude-runtime"
+      ],
+      "sha256": "sha256:c8662a6ec5e1d107d883a12658352a753503d2ae3ef36bf38e3130fdf39c53da"
+    },
+    {
+      "path": ".claude/skills/tgw-pr-review/SKILL.md",
+      "scopes": [
+        "claude-runtime"
+      ],
+      "sha256": "sha256:cbd4a45802b19d49f406333bf1449b72f82e067795d776f9dbc9ab36dd9fd9ec"
+    },
+    {
+      "path": ".claude/skills/tgw-runner-review/SKILL.md",
+      "scopes": [
+        "claude-runtime"
+      ],
+      "sha256": "sha256:51bbd762cac0a4bd6b6ea4008e1283786c62936f538e77a81aff1db9b06c36e6"
+    },
+    {
+      "path": "AGENTS.md",
+      "scopes": [
+        "authority:claude-code",
+        "authority:codex",
+        "authority:hermes-tigwa"
+      ],
+      "sha256": "sha256:e23fa21df8a80cecd9537bf2c98048941bc529412eb05fc66c3297376bf61e7f"
+    },
+    {
+      "path": "CLAUDE.md",
+      "scopes": [
+        "authority:claude-code",
+        "excluded:codex",
+        "excluded:hermes-tigwa"
+      ],
+      "sha256": "sha256:a2cbb85215fd485f0b2a02823faca536440139e79fed81cec6e5990b6c9404f2"
+    },
+    {
+      "path": "config/environment/actors/tgw-steward.json",
+      "scopes": [
+        "authority:hermes-tigwa"
+      ],
+      "sha256": "sha256:776d740780dd08ac09fca8f8f92ea9045776dd8ab21791b2e773402cfe46d762"
+    },
+    {
+      "path": "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md",
+      "scopes": [
+        "excluded:hermes-tigwa"
+      ],
+      "sha256": "sha256:94c281552a0839360b733833e1f16376a635ffad3af73d3453b4f5f32cfeb05a"
+    },
+    {
+      "path": "docs/TGW-Plan-Vault/reference/runbooks/INDEX.md",
+      "scopes": [
+        "current-runbook"
+      ],
+      "sha256": "sha256:1ff042bb22bc59187de9bdbc9de61506442ab4898d7885b1b63ca54873b651fd"
+    },
+    {
+      "path": "docs/TGW-Plan-Vault/reference/runbooks/catalog-stale.md",
+      "scopes": [
+        "current-runbook"
+      ],
+      "sha256": "sha256:91cb97e55a836f4a8c8b47abb6d68267743e3e28e24439abd5616b7e257f04b6"
+    },
+    {
+      "path": "docs/TGW-Plan-Vault/reference/runbooks/dead-letter-triage.md",
+      "scopes": [
+        "current-runbook"
+      ],
+      "sha256": "sha256:5d8205db8b7dfae8ec01f991a6fb917c9cd70cb64eb0e405933a6e28ae33a279"
+    },
+    {
+      "path": "docs/TGW-Plan-Vault/reference/runbooks/ebay-api-operations.md",
+      "scopes": [
+        "current-runbook"
+      ],
+      "sha256": "sha256:3228f52251116fa70b0f9dd8ea6e7027c6af0a4ada7f36d397871e4fe4dc74b8"
+    },
+    {
+      "path": "docs/TGW-Plan-Vault/reference/runbooks/ebay-stage-publish-rejections.md",
+      "scopes": [
+        "current-runbook"
+      ],
+      "sha256": "sha256:4faa6098159487de9e773c13088cce552477c0210384226db10b525caaee288d"
+    },
+    {
+      "path": "docs/TGW-Plan-Vault/reference/runbooks/ebay-token-failure.md",
+      "scopes": [
+        "current-runbook"
+      ],
+      "sha256": "sha256:59dcf2c6ff121b64be89c9bbae2c5d28a1b9b67e0bc4911d237371e211435478"
+    },
+    {
+      "path": "docs/TGW-Plan-Vault/reference/runbooks/nix-flake-maintenance.md",
+      "scopes": [
+        "current-runbook"
+      ],
+      "sha256": "sha256:7342316d044ec8b3b8e571995e4498c5a097306d6ae9358877bb97193d63f2d2"
+    },
+    {
+      "path": "docs/TGW-Plan-Vault/reference/runbooks/nixos-prod-cutover-runbook.md",
+      "scopes": [
+        "current-runbook"
+      ],
+      "sha256": "sha256:47e91f4714d709c1eeccb10e31d95291fd55eeea9da3f74ae908b2207ab66c7c"
+    },
+    {
+      "path": "docs/TGW-Plan-Vault/reference/runbooks/ollama-inference-stall.md",
+      "scopes": [
+        "current-runbook"
+      ],
+      "sha256": "sha256:7049134ad48cd7f603e5cdcec19692e613556b5166df7139d1ab42490185c8fb"
+    },
+    {
+      "path": "docs/TGW-Plan-Vault/reference/runbooks/pipeline-stall.md",
+      "scopes": [
+        "current-runbook"
+      ],
+      "sha256": "sha256:61d27b4ff96113c37059fd7089dcdeb3f1056860465323dec95d957a58b7b986"
+    },
+    {
+      "path": "docs/TGW-Plan-Vault/reference/runbooks/postgres-outage.md",
+      "scopes": [
+        "current-runbook"
+      ],
+      "sha256": "sha256:10b332cd5dc189858804f2e38960b1d1e98684e6d46b53b634c1335f269cd68e"
+    },
+    {
+      "path": "docs/TGW-Plan-Vault/reference/runbooks/pp-workflow-001-acceptance.md",
+      "scopes": [
+        "current-runbook"
+      ],
+      "sha256": "sha256:451795f5f398a2328a79691e48ca3ea651d0f79f8a327703f438c0f0bbac462b"
+    },
+    {
+      "path": "docs/TGW-Plan-Vault/reference/runbooks/pp-workflow-001-item-recovery.md",
+      "scopes": [
+        "current-runbook"
+      ],
+      "sha256": "sha256:37a6799f6632bfa32cc301f36a9d14de476a0019f341ea613c155fdbb1bc9f85"
+    },
+    {
+      "path": "docs/TGW-Plan-Vault/reference/runbooks/pp-workflow-001-operations.md",
+      "scopes": [
+        "current-runbook"
+      ],
+      "sha256": "sha256:785be6255df6d1926e21a12104b3a0e50dd4b03c0eb77cdfd52aaa3bb88f14a2"
+    },
+    {
+      "path": "docs/TGW-Plan-Vault/reference/runbooks/pp-workflow-001-provider-reconciliation.md",
+      "scopes": [
+        "current-runbook"
+      ],
+      "sha256": "sha256:bdbaeb8671cefdff306d920a61e6da6aa253d4c6dd8c6e8f9d11211694a6fa2d"
+    },
+    {
+      "path": "docs/TGW-Plan-Vault/reference/runbooks/pp-workflow-001-rollout.md",
+      "scopes": [
+        "current-runbook"
+      ],
+      "sha256": "sha256:f95d530dac21e92b53aed5fb77f98986d40ac3b672af03b0cd0f017346354276"
+    },
+    {
+      "path": "docs/TGW-Plan-Vault/reference/runbooks/sold-sync-gaps.md",
+      "scopes": [
+        "current-runbook"
+      ],
+      "sha256": "sha256:82d7c8e7b16f9c183ab5a6f72af5337ee9672843370016457e215ee6888a2507"
+    },
+    {
+      "path": "docs/TGW-Plan-Vault/reference/runbooks/thermal-emergency-response.md",
+      "scopes": [
+        "current-runbook"
+      ],
+      "sha256": "sha256:d9121806e7358aa8bd2a8a5d1e393a9247b34c2712fa436f662f6a1c8eaeea94"
+    }
+  ]
+}

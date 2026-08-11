@@ -80,9 +80,10 @@ code exists.
   originally-flagged gaps are now closed: `flake-guard.py` covers
   `Bash|Edit|Write`; `worktree-guard.py` mechanically enforces `tgw-coder`'s
   worktree isolation. See `reference/invariants.md` E11.
-- **Diagnose freely, execute through the agent — troubleshooting sessions
-  route scoped fixes to `tgw-coder`, same as flake work routes to
-  nix-flake-maintainer (Dave, 2026-07-18, invariant E12)** — reading/
+- **Diagnose freely, execute through the registered procedure — troubleshooting sessions
+  route scoped fixes to `tgw-coder`; Nix work follows
+  `docs/TGW-Plan-Vault/reference/runbooks/nix-flake-maintenance.md` in a regular
+  coding session on the registry-resolved production host (updated 2026-08-11).** — reading/
   grepping/root-causing in the main session is fine; once a fix is scoped,
   the actual code change is a todo/packet dispatched to `tgw-coder`'s
   isolated worktree+branch, not a direct `Edit` in the shared checkout.
@@ -144,14 +145,10 @@ runs the actual 5-minute polling cron. Claude no longer checks `thermal.status` 
 session start or during sessions. If Dave reports a thermal alarm directly, that's still
 Prime Directive 2 (act immediately) — this removal only drops the routine self-check.
 
-**Todo #1344 / PP-HERMES-EA-001, tgw-prod half DONE 2026-07-12:** Hermes-lite
-gateway is a `systemd --user` service on tgw-prod (not flake-managed —
-matches the 2026-07-11 decision to keep Hermes in userspace), and its `tgw`
-MCP link is wired read-only (`TGW_MCP_READONLY=1`, see `mcp_server.py`;
-excludes `tgw_enqueue`/`tgw_add_suggest` while Tigwa is IN TRAINING). a1131
-(full Tigwa) service + SSH-tunneled MCP wiring is Dave/Tigwa's to set up
-themselves going forward — see PP-HERMES-EA-001.md for the full design and
-the still-open wake-rules/dispatch mechanism.
+**Historical note — Todo #1344 / PP-HERMES-EA-001, 2026-07-12:** that plan's
+Hermes-lite/Tigwa topology is retained as history, not current routing. Current
+agent identity and host facts resolve through `config/environment/registry.yaml`;
+the TGW Steward contract is `config/environment/actors/tgw-steward.json`.
 
 **Step 1 — process any pending plan updates before reading the plan:**
 
@@ -211,7 +208,7 @@ Before making any change this session, do both of these:
    the next session startup sequence will read this and reconstruct your state.
 
 **This is mandatory, not optional.** A session that makes changes without a todo + inbox note
-loses recoverability. Run `/tgw-exit` when done or switching to a1131 — it finalises the note.
+loses recoverability. Run `/tgw-exit` when done or changing registered workspaces — it finalises the note.
 
 ## Key paths
 
@@ -257,7 +254,7 @@ Plain Markdown; open in Obsidian for interactive mind map view where noted.
 | `TGW-Architecture-Services.md` | Service-by-service responsibility, deps, failure modes, critical invariants |
 | `TGW-Architecture-Overview.md` | System topology — how subsystems connect |
 | `TGW-NixOS-Reference.md` | NixOS bootstrap sequence, Syncthing topology, host inventory, troubleshooting |
-| `TGW-a1131-CLI-Wrapper.md` | Reaching the real `tgw` CLI from a1131 without the (unreliable) Flutter app — Tigwa's `~/.local/bin/tgw-prod` + fish-function SSH wrapper, PP-PORTABLE-CATALOG-001 |
+| `TGW-a1131-CLI-Wrapper.md` | **Historical only:** retired-host CLI-wrapper record; never use it for current routing or authority |
 | `runbooks/INDEX.md` | Incident response index — dead-letter triage, pipeline stall, token failure, etc. |
 | `claude-cli.md` | Claude CLI / Antigravity config reference |
 | `echo.py` / `worker_base.py` | Starting point when writing a new worker |
@@ -403,20 +400,10 @@ Run as `tgw` user — source files are `rw-------`, secrets are `chmod 600`.
 - **Suggest, don't implement** for exploratory questions until Dave approves direction
 - **Workers need restart after source changes** — `systemctl restart tgw-worker@<queue>.service`
 - **Re-enqueue manually after dead_letter** — dead_letter jobs don't auto-retry; use `state_machine.enqueue_job()` with a fresh dedupe key
-- **Test environment + thermal-relief compute** — use `ssh a1131` for UI/integration testing
-  instead of a VM; it's a NixOS host on the LAN with a partial TGW install and 18 GB free RAM.
-  Run `/tgw-exit` before switching to it so the inbox note captures your current state.
-  **a1131 is shared Dave+Claude precisely for thermal relief** (tgw-prod runs hot): on hot
-  days run your own heavy checks — test suites, big greps, review sweeps — there via ssh.
-  Never pause pipeline workers for heat (worker load is only a thermal problem when our own
-  bugs loop). Read-only NFS views of tgw-prod's data+logs are mounted at
-  `/opt/TGW/mnt/tgw-prod/{data,log}` (ro is load-bearing — writes go through the fence).
-  Claude has its own account there: `ssh claude@192.168.60.101` (key-only, no sudo).
-  **If a1131 is asleep, wake it: `wakeonlan c8:2a:14:2a:a1:85`** (tool on tgw-prod, or
-  `nix shell nixpkgs#wakeonlan -c wakeonlan <mac>`). Do NOT run `systemctl suspend` on
-  a1131 yourself — iMac12,1 suspend is buggy (Dave); sleep is Dave's power management's
-  job, waking is yours. Caveat: a1131's repo checkout can be stale (#1082) — sync repo
-  state before trusting its test results.
+- **Test environment and compute hosts come only from the current environment registry.**
+  Do not SSH to, wake, or route work through retired or unregistered machine names. If no
+  registered non-production test host exists, keep the work local/sandboxed or report the
+  missing capacity as a gate; historical host instructions do not authorize access.
 - **Run a code check at least once per work day, more if the session touches a lot of
   files** (Dave, 2026-07-04): a full week of commits (2026-06-24 through 2026-07-02)
   never went through `/code-review`/ultrareview because the diff grew too large to
