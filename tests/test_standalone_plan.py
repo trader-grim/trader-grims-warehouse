@@ -145,6 +145,10 @@ def test_registry_and_collection_types_fail_closed():
     with pytest.raises(PlanValidationError, match="requires"):
         validate_plan(parse_plan(_text(contract=contract)), _registry())
 
+    bool_version = _text().replace("version: 1\nstatus:", "version: true\nstatus:")
+    with pytest.raises(PlanValidationError, match="positive integer"):
+        validate_plan(parse_plan(bool_version), _registry())
+
 
 def test_compile_rejects_proposed_plan_and_noncanonical_json():
     with pytest.raises(PlanValidationError, match="approved or active"):
@@ -172,6 +176,14 @@ def test_evidence_exact_bindings_staleness_and_completion_candidate():
     stale["evidence_hash"] = canonical_hash({key: value for key, value in stale.items() if key != "evidence_hash"})
     with pytest.raises(PlanValidationError, match="stale evidence"):
         validate_evidence(stale, graph)
+
+    wrong_entity = deepcopy(receipt)
+    wrong_entity["entity"] = "registry:other"
+    wrong_entity["evidence_hash"] = canonical_hash({
+        key: value for key, value in wrong_entity.items() if key != "evidence_hash"
+    })
+    with pytest.raises(PlanValidationError, match="ownership"):
+        validate_evidence(wrong_entity, graph)
 
 
 def test_contradiction_holds_candidate_and_artifacts_are_immutable(tmp_path):

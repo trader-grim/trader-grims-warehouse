@@ -101,6 +101,16 @@ def _string(value: Any, label: str) -> str:
     return value
 
 
+def _version(value: Any, label: str) -> str:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise PlanValidationError(f"{label} must be a positive integer or canonical string")
+    if isinstance(value, int):
+        if value < 1:
+            raise PlanValidationError(f"{label} must be positive")
+        return str(value)
+    return _string(value, label)
+
+
 def _string_list(value: Any, label: str, *, nonempty: bool = False) -> list[str]:
     if not isinstance(value, list) or (nonempty and not value):
         raise PlanValidationError(f"{label} must be a{' non-empty' if nonempty else ''} string list")
@@ -178,7 +188,7 @@ def validate_plan(plan: PlanDocument, registry: Mapping[str, Any]) -> PlanDocume
     if missing or required_contract - set(contract):
         names = sorted(missing | (required_contract - set(contract)))
         raise PlanValidationError(f"missing required fields: {', '.join(names)}")
-    if meta["schema"] != "tgw-plan/v1" or not isinstance(meta["version"], int) or meta["version"] < 1:
+    if meta["schema"] != "tgw-plan/v1" or isinstance(meta["version"], bool) or not isinstance(meta["version"], int) or meta["version"] < 1:
         raise PlanValidationError("schema must be tgw-plan/v1 and version a positive integer")
     if not isinstance(meta["plan_id"], str) or not _ID.fullmatch(meta["plan_id"]):
         raise PlanValidationError("invalid plan_id")
@@ -218,9 +228,9 @@ def validate_plan(plan: PlanDocument, registry: Mapping[str, Any]) -> PlanDocume
             raise PlanValidationError(f"invalid or duplicate work unit id: {uid!r}")
         by_id[uid] = unit
         _string(unit["treatment_id"], f"work unit {uid} treatment_id")
-        _string(unit["treatment_version"], f"work unit {uid} treatment_version")
+        treatment_version = _version(unit["treatment_version"], f"work unit {uid} treatment_version")
         treatment = registered.get(unit["treatment_id"])
-        if not isinstance(treatment, dict) or str(treatment.get("version")) != str(unit["treatment_version"]):
+        if not isinstance(treatment, dict) or _version(treatment.get("version"), f"treatment {unit['treatment_id']} version") != treatment_version:
             raise PlanValidationError(f"unregistered treatment: {unit['treatment_id']}@{unit['treatment_version']}")
         for key in ("kind", "effect_class", "authority"):
             if unit[key] not in enums.get(key, []):
@@ -256,8 +266,9 @@ def validate_plan(plan: PlanDocument, registry: Mapping[str, Any]) -> PlanDocume
             if acceptance["verifier"] not in verifiers:
                 raise PlanValidationError(f"unregistered verifier: {acceptance['verifier']}")
             verifier = verifiers[acceptance["verifier"]]
-            if not isinstance(verifier, dict) or not isinstance(verifier.get("version"), (str, int)):
+            if not isinstance(verifier, dict):
                 raise PlanValidationError(f"verifier has no version: {acceptance['verifier']}")
+            _version(verifier.get("version"), f"verifier {acceptance['verifier']} version")
             for key in ("assertion", "evidence_schema"):
                 _string(acceptance[key], f"acceptance {aid} {key}")
             if acceptance["evidence_schema"] != "tgw-plan-evidence/v1":
@@ -365,6 +376,9 @@ def validate_evidence(receipt: Mapping[str, Any], graph: Mapping[str, Any]) -> d
         for condition in unit["acceptance"]
         if condition["condition_id"] == condition_id
     )
+    expected_unit = next(unit for unit in graph["work_units"] if unit["id"] == data["work_unit_id"])
+    if data["entity"] not in expected_unit["owns"]:
+        raise PlanValidationError("evidence entity is outside work-unit ownership")
     if data["verifier"] != expected_condition["verifier"] or str(data["verifier_version"]) != expected_condition["verifier_version"]:
         raise PlanValidationError("evidence verifier binding mismatch")
     unhashed = {key: value for key, value in data.items() if key != "evidence_hash"}
@@ -450,7 +464,7 @@ def persist_artifact(directory: Path, artifact: Mapping[str, Any]) -> Path:
         if target.read_text(encoding="utf-8") != payload:
             raise PlanValidationError("immutable artifact path collision")
         return target
-    temporary = directory / f".{digest}.{os.getpid()}.tmp"
+    temporary = directory / f".{digest}.{os.getpid()}.{os.urandom(8).hex()}.tmp"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     descriptor = os.open(temporary, flags, 0o600)
     try:
