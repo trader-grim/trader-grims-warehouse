@@ -1053,6 +1053,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("request_id", nargs="?")
     p.add_argument("--todo-id", type=int)
     p.add_argument("--object-generation")
+    p.add_argument("--source-commit", help="exact lowercase 40-hex commit in the registered repository")
     p.add_argument("--endpoint", help="explicit endpoint override")
     p.add_argument("--api-key", help="explicit credential override")
 

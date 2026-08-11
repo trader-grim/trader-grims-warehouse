@@ -176,7 +176,26 @@ def test_todo_brief_includes_plan_extract_and_deps(tmp_path):
     assert 'build the foo' in brief
     assert 'Foo design prose' in brief          # plan extract present
     assert '#8 [done] prereq task' in brief     # dependency status
-    assert 'CLAUDE.md' in brief                 # constraints block
+    assert 'You are Claude Code' in brief       # actor-specific contract
+    assert 'read `CLAUDE.md`' in brief
+    assert '/opt/TGW/src/trader-grims-warehouse' not in brief
+
+
+def test_todo_brief_routes_codex_to_agents_not_claude(tmp_path):
+    from tgw import todo as todo_mod
+    plan = tmp_path / 'plan.md'
+    plan.write_text(_PLAN_MD, encoding='utf-8')
+    item = {
+        'id': 10, 'agent': 'codex', 'priority': 10, 'body': 'safe task',
+        'source': 'operator-plan', 'added_at': None, 'done_at': None,
+        'pp_ref': None, 'depends_on': [], 'plan_anchor': None,
+    }
+    with patch.object(todo_mod, 'todo_get', return_value=item):
+        brief = todo_mod.todo_brief(10, plan)['brief']
+    assert 'Read repository `AGENTS.md`' in brief
+    assert '`CLAUDE.md` is context only and does not govern you' in brief
+    assert 'You are Claude Code' not in brief
+    assert 'exact TGW worktree bound by the workflow' in brief
 
 
 def test_todo_brief_not_found():

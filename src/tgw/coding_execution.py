@@ -6,6 +6,7 @@ evaluation.  A caller supplies an already-authorized envelope.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -32,11 +33,27 @@ def execution_envelope(document: dict[str, Any]) -> dict[str, Any]:
     execution = document.get("execution")
     if not isinstance(execution, dict):
         raise HardFailure("canonical coding execution envelope is unavailable")
-    required = ("todo_id", "treatment_id", "treatment_version", "graph_id", "object_generation", "evaluator_version", "evidence_set_hash", "treatment_registry_hash")
+    required = ("todo_id", "treatment_id", "treatment_version", "graph_id", "object_generation", "evaluator_version", "evidence_set_hash", "treatment_registry_hash", "task_spec_hash")
     if any(not isinstance(execution.get(field), str) or not execution[field] for field in required if field != "todo_id"):
         raise HardFailure("canonical coding execution envelope is incomplete")
     if execution.get("todo_id") != document.get("todo_id") or execution.get("object_generation") != document.get("object_generation"):
         raise HardFailure("canonical coding execution envelope does not match request")
+    task_spec = execution.get("task_spec")
+    if (
+        not isinstance(task_spec, dict)
+        or task_spec.get("schema") != "coding-task/v1"
+        or task_spec.get("todo_id") != execution.get("todo_id")
+        or not isinstance(task_spec.get("agent"), str)
+        or not task_spec["agent"]
+        or not isinstance(task_spec.get("body"), str)
+        or not task_spec["body"]
+    ):
+        raise HardFailure("canonical coding execution task specification is invalid")
+    expected_task_hash = hashlib.sha256(
+        json.dumps(task_spec, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    if execution.get("task_spec_hash") != expected_task_hash:
+        raise HardFailure("canonical coding execution task specification hash is invalid")
     if not any(item.identity == execution["treatment_id"] and item.version == execution["treatment_version"] for item in CODING_TREATMENTS):
         raise HardFailure("canonical coding execution envelope has no registered treatment")
     return dict(execution)

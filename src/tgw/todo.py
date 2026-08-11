@@ -375,16 +375,35 @@ def todo_set_meta(
 
 _PLAN_EXTRACT_CAP = 6000
 
-_BRIEF_CONSTRAINTS = """\
+_SHARED_BRIEF_CONSTRAINTS = """\
 ## Constraints
 
-- Read `CLAUDE.md` first; settled-architecture rules apply (tgw-api fence,
-  `{ok, ...}` output contract, secrets from `secrets_root`, workers stay thin,
-  catalog rebuild always a job).
 - Never touch config files, secrets, or eBay OAuth scopes.
 - Acceptance: `pytest -q` must pass offline; new behavior gets tests.
 - If a requirement is impossible as specified, stop and explain instead of
   improvising."""
+
+
+def _brief_constraints(agent: str) -> str:
+    """Return instructions for the assigned actor, never for another actor.
+
+    ``CLAUDE.md`` is Claude Code's session contract.  Historically every Todo
+    brief injected it into every actor, which made a Codex/Hermes assignment
+    inherit Claude-only authority.  Repository ``AGENTS.md`` is the neutral
+    routing boundary and selects any actor-specific contract from there.
+    """
+    normalized = agent.strip().lower()
+    if normalized == 'claude':
+        actor = (
+            '- You are Claude Code: read `CLAUDE.md` and follow its '
+            'human-supervised session contract.'
+        )
+    else:
+        actor = (
+            '- Read repository `AGENTS.md` for your actor routing. '
+            '`CLAUDE.md` is context only and does not govern you.'
+        )
+    return f"## Actor contract\n\n{actor}\n\n{_SHARED_BRIEF_CONSTRAINTS}"
 
 
 def extract_plan_section(plan_path: Path, anchor: str) -> str:
@@ -438,8 +457,9 @@ def todo_brief(item_id: int, plan_path: Path) -> Dict[str, Any]:
         f'# Task brief — todo #{item["id"]} [{item["agent"]}] '
         f'(p{item["priority"]}, source: {item["source"]}, {status})',
         '',
-        'You are working in the Trader Grim\'s Warehouse (TGW) repo at',
-        '`/opt/TGW/src/trader-grims-warehouse`. This brief is self-contained;',
+        'You are working in the exact TGW worktree bound by the workflow',
+        'execution envelope. Do not substitute a remembered or hard-coded path.',
+        'This brief is self-contained;',
         'consult the linked plan section before deviating from it.',
         '',
         '## Task',
@@ -464,7 +484,7 @@ def todo_brief(item_id: int, plan_path: Path) -> Dict[str, Any]:
         parts += ['## Linked plan section', '',
                   f'(no master-plan heading matched "{anchor}" — read '
                   f'`docs/TGW-Plan-Vault/plan/TGW-Master-Plan.md` directly)', '']
-    parts.append(_BRIEF_CONSTRAINTS)
+    parts.append(_brief_constraints(str(item['agent'])))
 
     return {'ok': True, 'id': item['id'], 'agent': item['agent'],
             'brief': '\n'.join(parts)}

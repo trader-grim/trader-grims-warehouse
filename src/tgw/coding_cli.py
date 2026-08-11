@@ -53,9 +53,10 @@ def run(args: argparse.Namespace) -> int:
     try:
         endpoint, api_key = _configured_credentials(args)
         if args.coding_op == "start":
-            result = _call(endpoint, api_key, "/api/coding/requests", "POST", {
-                "todo_id": args.todo_id, "object_generation": args.object_generation,
-            })
+            body = {"todo_id": args.todo_id, "object_generation": args.object_generation}
+            if getattr(args, "source_commit", None):
+                body["source_commit"] = args.source_commit
+            result = _call(endpoint, api_key, "/api/coding/requests", "POST", body)
         elif args.coding_op == "status":
             result = _call(endpoint, api_key, f"/api/coding/requests/{args.request_id}")
         elif args.coding_op == "log":

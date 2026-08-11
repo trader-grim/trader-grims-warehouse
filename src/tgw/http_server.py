@@ -129,6 +129,7 @@ _PENDING_OFFERS_TTL = 300
 class CodingProvisionStart(BaseModel):
     todo_id: int = Field(gt=0)
     object_generation: str | None = None
+    source_commit: str | None = None
 
 
 class CodingWorkerClaim(BaseModel):
@@ -373,7 +374,11 @@ def coding_provision_start(body: CodingProvisionStart):
     from .coding_provision import create_request
 
     try:
-        return create_request(_cfg, todo_id=body.todo_id, object_generation=body.object_generation)
+        return create_request(
+            _cfg, todo_id=body.todo_id,
+            object_generation=body.object_generation,
+            source_commit=body.source_commit,
+        )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

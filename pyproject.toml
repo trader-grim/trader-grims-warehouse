@@ -86,6 +86,7 @@ tgw-codex-implement-worker    = "tgw.workers.coding:codex_implement_main"
 tgw-claude-review-worker      = "tgw.workers.coding:claude_review_main"
 tgw-controller-verify-worker  = "tgw.workers.coding:controller_verify_main"
 tgw-controller-verify-runner  = "tgw.workers.controller_verify:main"
+tgw-codex-implement-runner    = "tgw.workers.codex_implement:main"
 tgw-hermes-stitch-worker      = "tgw.workers.coding:hermes_stitch_main"
 
 [tool.setuptools]

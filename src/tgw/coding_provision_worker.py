@@ -73,6 +73,21 @@ def _git_head(repository: Path) -> str:
     return head
 
 
+def _verified_source_commit(repository: Path, requested: object) -> str:
+    """Resolve only an exact commit already present in the registered repo."""
+    if requested is None:
+        return _git_head(repository)
+    if not isinstance(requested, str) or re.fullmatch(r"[0-9a-f]{40}", requested) is None:
+        raise HardFailure("coding request source_commit is invalid")
+    probe = subprocess.run(
+        ["git", "cat-file", "-e", f"{requested}^{{commit}}"],
+        cwd=repository, check=False, text=True, capture_output=True,
+    )
+    if probe.returncode:
+        raise HardFailure("coding request source_commit is absent from the registered repository")
+    return requested
+
+
 def _remove_incomplete_worktree(repository: Path, worktree: Path, branch: str) -> None:
     """Remove only a just-created request-bound worktree and its exact branch."""
     if worktree.is_symlink() or worktree.parent != worktree.parent.resolve():
@@ -100,7 +115,7 @@ def _prepare_request_worktree(document: dict[str, Any], coding: dict[str, Any], 
     repository = Path(repository_value).resolve()
     # Capture the configured repository's actual top-level HEAD before
     # constructing a fresh child from that exact commit.
-    source_head = _git_head(repository)
+    source_head = _verified_source_commit(repository, document.get("source_commit"))
     worktree, branch = _request_worktree(todo_id, request_id, root)
     created = False
     try:

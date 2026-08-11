@@ -193,6 +193,10 @@ class WorkerServiceClient:
 def _execution_envelope() -> dict:
     """A service-issued, bounded authorization for one registered treatment."""
     treatment = next(item for item in CODING_TREATMENTS if item.identity == "claude-review")
+    task_spec = {
+        "schema": "coding-task/v1", "todo_id": 1738,
+        "agent": "codex", "body": "coding todo",
+    }
     return {
         "todo_id": 1738,
         "treatment_id": treatment.identity,
@@ -202,6 +206,8 @@ def _execution_envelope() -> dict:
         "evaluator_version": "foreman/v1",
         "evidence_set_hash": "evidence-1738",
         "treatment_registry_hash": "registry-1738",
+        "task_spec": task_spec,
+        "task_spec_hash": coding_provision._hash(task_spec),
     }
 
 
@@ -652,6 +658,8 @@ execution = {
     "todo_id": 1738, "treatment_id": "claude-review", "treatment_version": "1",
     "graph_id": "graph", "object_generation": "generation", "evaluator_version": "foreman/v1",
     "evidence_set_hash": "evidence", "treatment_registry_hash": "registry",
+    "task_spec": {"schema": "coding-task/v1", "todo_id": 1738, "agent": "codex", "body": "coding todo"},
+    "task_spec_hash": "task-hash",
 }
 document = {"state": "queued", "todo_id": 1738, "object_generation": "generation", "host": "host", "worker_identity": "worker"}
 worker._validate_before_claim = lambda *_: {"location": location, "envelope_hash": "hash"}
@@ -875,6 +883,11 @@ def test_canonical_claim_looks_up_todo_and_derives_contract_bound_envelope(tmp_p
     assert execution["evaluator_version"] == "foreman/v1"
     assert execution["evidence_set_hash"]
     assert execution["treatment_registry_hash"]
+    assert execution["task_spec"] == {
+        "schema": "coding-task/v1", "todo_id": 1738,
+        "agent": "codex", "body": "coding todo",
+    }
+    assert execution["task_spec_hash"] == coding_provision._hash(execution["task_spec"])
     assert native.jobs[request["request_id"]]["payload_json"]["snapshot"] == _snapshot_claim(envelope)
 
 
@@ -1298,6 +1311,52 @@ def test_create_request_accepts_config_without_tgw_lib_local_paths(tmp_path, nat
         cfg["coding"].pop(field)
     request = coding_provision.create_request(cfg, todo_id=1738, object_generation="gen-a")
     assert request["state"] == "queued"
+
+
+def test_request_binds_exact_source_commit_through_native_payload(tmp_path, native):
+    cfg = _config(tmp_path)
+    commit = "a" * 40
+    coding_provision.create_request(
+        cfg, todo_id=1738, object_generation=None, source_commit=commit,
+    )
+    assert native.enqueues[0]["payload"]["source_commit"] == commit
+    assert commit in native.enqueues[0]["dedupe_key"]
+
+
+@pytest.mark.parametrize("value", ["", "A" * 40, "a" * 39, "../main", True])
+def test_request_rejects_noncanonical_source_commit(tmp_path, native, value):
+    with pytest.raises(HardFailure, match="source_commit"):
+        coding_provision.create_request(
+            _config(tmp_path), todo_id=1738, source_commit=value,
+        )
+
+
+def test_worker_resolves_only_commit_present_in_registered_repository(tmp_path):
+    repository = _init_coding_repository(tmp_path)
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repository, check=True,
+        text=True, capture_output=True,
+    ).stdout.strip()
+    assert coding_provision_worker._verified_source_commit(repository, commit) == commit
+    with pytest.raises(HardFailure, match="absent"):
+        coding_provision_worker._verified_source_commit(repository, "f" * 40)
+
+
+def test_service_rejects_worker_head_not_matching_requested_source(tmp_path, native, envelope):
+    cfg = _config(tmp_path)
+    request = coding_provision.create_request(
+        cfg, todo_id=1738, source_commit="b" * 40,
+    )
+    with pytest.raises(HardFailure, match="requested source commit"):
+        coding_provision.claim_request(
+            cfg,
+            request_id=request["request_id"],
+            local_host="tgw-lib-local",
+            worker_identity="tgw-coding-worker",
+            envelope_hash=coding_provision._hash(envelope),
+            location=envelope,
+            snapshot=_snapshot_claim(envelope),
+        )
 
 
 def test_unbound_request_binds_attested_generation_at_local_claim(tmp_path, native, envelope):

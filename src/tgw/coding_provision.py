@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from typing import Any
 
@@ -73,6 +74,18 @@ def _authorize_execution(document: dict[str, Any], location: dict[str, Any], sna
     todo = todo_lookup(todo_id) if isinstance(todo_id, int) else None
     if not isinstance(todo, dict) or todo.get("id") != todo_id or todo.get("done_at") is not None:
         raise HardFailure("canonical Todo is unavailable or no longer open")
+    agent, body = todo.get("agent"), todo.get("body")
+    if (
+        not isinstance(agent, str) or not agent.strip()
+        or not isinstance(body, str) or not body.strip() or len(body) > 50_000
+    ):
+        raise HardFailure("canonical Todo has no bounded actor/task specification")
+    task_spec = {
+        "schema": "coding-task/v1",
+        "todo_id": todo_id,
+        "agent": agent.strip().lower(),
+        "body": body.strip(),
+    }
     try:
         snapshot = deserialize_snapshot(snapshot_claim)
     except ValueError as exc:
@@ -100,6 +113,8 @@ def _authorize_execution(document: dict[str, Any], location: dict[str, Any], sna
         "evaluator_version": graph.evaluator_version,
         "evidence_set_hash": graph.evidence_set_hash,
         "treatment_registry_hash": graph.treatment_registry_hash,
+        "task_spec": task_spec,
+        "task_spec_hash": _hash(task_spec),
     }
 
 
@@ -146,7 +161,10 @@ def _validate_failed_treatment_result(document: dict[str, Any], result: dict[str
         raise HardFailure("coding treatment receipt execution identity does not match claim")
 
 
-def create_request(config: dict[str, Any], *, todo_id: int, object_generation: str | None = None) -> dict[str, Any]:
+def create_request(
+    config: dict[str, Any], *, todo_id: int,
+    object_generation: str | None = None, source_commit: str | None = None,
+) -> dict[str, Any]:
     """Enqueue exactly one generation-bound queue job of request-safe data.
 
     The canonical service does not know (and must not probe) any tgw-lib-local
@@ -162,6 +180,11 @@ def create_request(config: dict[str, Any], *, todo_id: int, object_generation: s
         raise HardFailure("coding provision request needs a positive todo_id")
     if object_generation is not None and (not isinstance(object_generation, str) or not object_generation):
         raise HardFailure("coding provision request object_generation must be a non-empty string when supplied")
+    if source_commit is not None and (
+        not isinstance(source_commit, str)
+        or re.fullmatch(r"[0-9a-f]{40}", source_commit) is None
+    ):
+        raise HardFailure("coding provision source_commit must be an exact lowercase Git commit id")
     payload = {
         "kind": "coding-provision/v1",
         "todo_id": todo_id,
@@ -170,6 +193,8 @@ def create_request(config: dict[str, Any], *, todo_id: int, object_generation: s
     }
     if object_generation is not None:
         payload["object_generation"] = object_generation
+    if source_commit is not None:
+        payload["source_commit"] = source_commit
     generation_key = object_generation or "unbound"
     job_id = state_machine.enqueue_job(
         QUEUE_NAME,
@@ -177,7 +202,7 @@ def create_request(config: dict[str, Any], *, todo_id: int, object_generation: s
         entity_type="coding_provision",
         entity_id=str(todo_id),
         handler_family=QUEUE_NAME,
-        dedupe_key=f"coding-provision:{todo_id}:{generation_key}",
+        dedupe_key=f"coding-provision:{todo_id}:{source_commit or 'current'}:{generation_key}",
         max_attempts=1,
     )
     return get_request(config, job_id)
@@ -250,6 +275,9 @@ def _validate_service_worker(document: dict[str, Any], coding: dict[str, Any], l
         raise HardFailure("coding provision envelope hash is invalid")
     if location.get("todo_id") != document.get("todo_id"):
         raise HardFailure("coding provision envelope does not match request todo_id")
+    requested_commit = document.get("source_commit")
+    if requested_commit is not None and location.get("head") != requested_commit:
+        raise HardFailure("coding provision envelope does not match requested source commit")
     if location.get("worker_identity") != worker_identity:
         raise HardFailure("coding provision envelope worker identity is invalid")
     head = location.get("head")
