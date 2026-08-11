@@ -1,0 +1,48 @@
+{
+  "schema": "tgw-satellite-access-inventory/v1",
+  "observed_at": "2026-08-11T10:16:44-07:00",
+  "discovery_scope": "trusted-host-local-tailscale-control-plane-view",
+  "network_contact": false,
+  "authentication_attempted": false,
+  "wake_action_attempted": false,
+  "recovered_credentials_used": false,
+  "hosts": {
+    "catnanny": {
+      "quarantine": true,
+      "current_connection_definition": {
+        "source": "tgw-prod tailscale status",
+        "dns_name": "catnanny.tail6fd380.ts.net",
+        "tailscale_ipv4": "100.110.102.122",
+        "node_id": "nYdm4aEcsr11CNTRL",
+        "online": true,
+        "last_handshake": "2026-08-11T10:16:02.897826108-07:00"
+      },
+      "current_identity": "control-plane-observed",
+      "physical_custody": "unverified",
+      "contact_authorized": false,
+      "acquisition": "held"
+    },
+    "helicrew": {
+      "quarantine": true,
+      "current_connection_definition": {
+        "source": "tgw-prod tailscale status",
+        "dns_name": "helicrew.tail6fd380.ts.net",
+        "tailscale_ipv4": "100.65.154.0",
+        "node_id": "neexSqBpnD11CNTRL",
+        "online": true,
+        "last_handshake": "2026-08-11T10:15:24.893862242-07:00"
+      },
+      "current_identity": "control-plane-observed",
+      "physical_custody": "unverified",
+      "contact_authorized": false,
+      "acquisition": "held"
+    }
+  },
+  "holds": [
+    "Tailnet presence proves routing identity but grants no contact authority",
+    "Physical custody and machine identity remain unverified",
+    "No acquisition method has been selected or authorized",
+    "No recovered credential or memory may authorize contact"
+  ],
+  "result": "CURRENT_NETWORK_IDENTITIES_OBSERVED_CONTACT_HELD"
+}

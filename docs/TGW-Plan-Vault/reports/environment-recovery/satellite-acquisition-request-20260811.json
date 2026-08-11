@@ -8,6 +8,7 @@
   "destructive_action_requested": false,
   "hosts": {
     "catnanny": {
+      "control_plane_identity": "catnanny.tail6fd380.ts.net/100.110.102.122",
       "physical_identity": "operator-input-required",
       "custody_holder": "operator-input-required",
       "power_and_network_state": "operator-input-required",
@@ -17,6 +18,7 @@
       "status": "held"
     },
     "helicrew": {
+      "control_plane_identity": "helicrew.tail6fd380.ts.net/100.65.154.0",
       "physical_identity": "operator-input-required",
       "custody_holder": "operator-input-required",
       "power_and_network_state": "operator-input-required",
