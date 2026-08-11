@@ -1,0 +1,15 @@
+{
+  "enums": {
+    "authority": ["plan-approved"],
+    "effect_class": ["local-reversible"],
+    "kind": ["configuration", "verification"]
+  },
+  "schema": "tgw-plan-registry/v1",
+  "treatments": {
+    "environment-app-procedure-register": {"version": "1"}
+  },
+  "verifiers": {
+    "tgw.environment.app-procedure-registry/v1": {"version": "1"},
+    "tgw.environment.logical-command-audit/v1": {"version": "1"}
+  }
+}

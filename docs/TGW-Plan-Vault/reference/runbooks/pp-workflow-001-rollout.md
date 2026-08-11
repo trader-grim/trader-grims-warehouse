@@ -20,26 +20,18 @@
 
 ## Deploy source without changing behavior
 
-Use the immutable release installer described in
-[`docs/RELEASE_INSTALLER.md`](../../../RELEASE_INSTALLER.md). Supply the exact
-commit, tree, archive digest, current generation, and a unique operation ID.
-On the present production layout, run the release operation through the
-privileged operator boundary; workers still run as `tgw`. Disable Python
-bytecode writes whenever the module is imported from an immutable release.
+Use registered procedure `app-release-install/v1` from
+`config/environment/procedures.json`. Its structured inputs are the exact archive,
+generation, commit, tree, archive digest, expected current generation, and unique
+operation ID. Plan or runbook text does not authorize execution. The registered
+procedure is bound to the independent controller installer, not the application
+release being replaced.
+
+After a completed procedure receipt, verify the selected generation read-only with
+the independent controller wrapper:
 
 ```bash
-sudo env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/opt/TGW/current/src \
-  python3 -B -m tgw.release_installer --root /opt/TGW install \
-  --archive <ARCHIVE> \
-  --generation <GENERATION> \
-  --commit <COMMIT> \
-  --tree <TREE> \
-  --archive-sha256 <SHA256> \
-  --expected-current <CURRENT_GENERATION> \
-  --operation-id <DEPLOY_OPERATION>
-
-sudo env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/opt/TGW/current/src \
-  python3 -B -m tgw.release_installer --root /opt/TGW verify <GENERATION>
+/opt/TGW/.venvs/controller/bin/tgw-release-install --root /opt/TGW verify <GENERATION>
 ```
 
 Do not combine source selection, schema mutation, selector changes, and worker
@@ -112,15 +104,10 @@ admitted wrapper; it returns only state/schema-shape counts.
    job IDs and counts. Never bulk-cancel a shared queue.
 6. After governed work is drained, set its consumer to `off` or legacy.
 7. Restore the prior config and restart only affected units.
-8. If source rollback is required, use a completed selection receipt:
-
-```bash
-sudo env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/opt/TGW/current/src \
-  python3 -B -m tgw.release_installer --root /opt/TGW rollback \
-  --receipt /opt/TGW/receipts/<DEPLOY_OPERATION>.json \
-  --expected-current <CURRENT_GENERATION> \
-  --operation-id <ROLLBACK_OPERATION>
-```
+8. If source rollback is required, request registered procedure
+   `app-release-rollback/v1` with the completed selection receipt, expected current
+   generation, and a unique rollback operation ID. The procedure request requires
+   explicit deployment approval and produces its own immutable receipt.
 
 Additive schema stays in place. Do not drop tables during rollback.
 

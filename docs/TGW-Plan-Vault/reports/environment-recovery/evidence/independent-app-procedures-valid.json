@@ -1,0 +1,18 @@
+{
+  "schema": "tgw-plan-evidence/v1",
+  "receipt_id": "app-procedure-registry-7e2d36edbb35abf5",
+  "plan_id": "PLAN-app-release-procedure",
+  "plan_version": 1,
+  "scope_hash": "sha256:8247583195a7932bd49ac5c3f27f6aad8b701b38b99858454d1d4c9f4747c449",
+  "registry_revision": "sha256:2cecd276d95605a4f0fc07ab92968f890f4147ae98877b5d3a017bd09910157f",
+  "graph_id": "sha256:4f4fef6e98cff3326361cfd776b5134c0808016e5e9747b6bb6c8670175ecf61",
+  "condition_hash": "sha256:777a528885d85ff50415d500e071a9b1500071863cc278189a35c0c6d76ba515",
+  "work_unit_id": "S8-register-app-release-procedures",
+  "acceptance_id": "independent-app-procedures-valid",
+  "entity": "configuration:application-release-procedures",
+  "verifier": "tgw.environment.app-procedure-registry/v1",
+  "verifier_version": "1",
+  "result": "true",
+  "observed_at": "2026-08-11T10:15:00-07:00",
+  "evidence_hash": "sha256:baf2b49f4e3a9583943c7d5fa5a0bb656ea76b7e278afa41304c273152745046"
+}

@@ -28,6 +28,10 @@ def test_repository_procedure_registry_is_revision_bound_and_non_executing():
     assert switch["direct_invocation_allowed"] is False
     assert switch["authority_gate"] == "explicit-deployment-approval"
     assert switch["rollback_procedure"] == "nixos-prod-rollback/v1"
+    install = resolve_procedure(registry, "app-release-install/v1")
+    assert install["argv"][0] == "/opt/TGW/.venvs/controller/bin/tgw-release-install"
+    assert install["rollback_procedure"] == "app-release-rollback/v1"
+    assert install["direct_invocation_allowed"] is False
 
 
 @pytest.mark.parametrize(

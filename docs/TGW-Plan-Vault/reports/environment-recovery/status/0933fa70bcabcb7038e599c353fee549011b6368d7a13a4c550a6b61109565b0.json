@@ -1,0 +1,21 @@
+{
+  "conditions": [
+    {
+      "condition_id": "S8-register-app-release-procedures:independent-app-procedures-valid",
+      "receipt_ids": [
+        "app-procedure-registry-7e2d36edbb35abf5"
+      ],
+      "result": "true"
+    },
+    {
+      "condition_id": "S8-register-app-release-procedures:multiline-command-audit-valid",
+      "receipt_ids": [
+        "logical-command-audit-20260811"
+      ],
+      "result": "true"
+    }
+  ],
+  "graph_id": "sha256:4f4fef6e98cff3326361cfd776b5134c0808016e5e9747b6bb6c8670175ecf61",
+  "ready_for_candidate": true,
+  "schema": "tgw-plan-status/v1"
+}

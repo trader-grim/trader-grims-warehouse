@@ -89,7 +89,7 @@ def audit_environment_recovery(root: Path, *, observed_at: str) -> dict[str, Any
 
     def procedures_check() -> str:
         procedures = load_procedure_registry(root / "config/environment/procedures.json")
-        verification = _json(reports / "procedure-registry-verification-20260811.json")
+        verification = _json(reports / "procedure-registry-verification-v2-20260811.json")
         if verification.get("direct_mutable_deploy_findings") != 0 or verification.get("deployment_executed") is not False:
             raise RecoveryAcceptanceError("procedure migration evidence is incomplete or effectful")
         return procedures["revision"]

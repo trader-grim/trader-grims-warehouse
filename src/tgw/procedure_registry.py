@@ -23,6 +23,23 @@ _PROCEDURE_KEYS = {
     "direct_invocation_allowed", "rollback_procedure", "preconditions",
     "postconditions", "evidence_schema",
 }
+_FIXED_ARGV = {
+    "app-release-install/v1": [
+        "/opt/TGW/.venvs/controller/bin/tgw-release-install", "--root", "/opt/TGW", "install",
+        "--archive", ":archive", "--generation", ":generation", "--commit", ":commit",
+        "--tree", ":tree", "--archive-sha256", ":archive_sha256",
+        "--expected-current", ":expected_current", "--operation-id", ":operation_id",
+    ],
+    "app-release-rollback/v1": [
+        "/opt/TGW/.venvs/controller/bin/tgw-release-install", "--root", "/opt/TGW", "rollback",
+        "--receipt", ":receipt", "--expected-current", ":expected_current",
+        "--operation-id", ":operation_id",
+    ],
+    "nixos-prod-rollback/v1": ["nixos-rebuild", "switch", "--rollback"],
+    "nixos-prod-switch/v1": [
+        "nixos-rebuild", "switch", "--flake", "path:/home/db/tgw-flake#tgw-prod",
+    ],
+}
 
 
 def _canonical(value: Any) -> bytes:
@@ -81,8 +98,8 @@ def validate_procedure_registry(raw: Mapping[str, Any]) -> dict[str, Any]:
         argv = _strings(procedure["argv"], f"{procedure_id} argv")
         if any(not _SAFE_ARG.fullmatch(arg) for arg in argv):
             raise ProcedureRegistryError("procedure argv contains shell syntax or unsafe characters")
-        if argv[0] != "nixos-rebuild" or argv[1] != "switch":
-            raise ProcedureRegistryError("registered NixOS procedures must use fixed argv")
+        if procedure_id not in _FIXED_ARGV or argv != _FIXED_ARGV[procedure_id]:
+            raise ProcedureRegistryError("registered procedures must use their exact fixed argv")
         if procedure["authority_gate"] != "explicit-deployment-approval":
             raise ProcedureRegistryError("procedure must require explicit deployment approval")
         if procedure["execution_policy"] != "registered-runner-only" or procedure["direct_invocation_allowed"] is not False:

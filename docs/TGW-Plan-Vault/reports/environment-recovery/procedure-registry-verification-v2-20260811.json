@@ -1,0 +1,21 @@
+{
+  "schema": "tgw-procedure-registry-verification/v1",
+  "observed_at": "2026-08-11T10:15:00-07:00",
+  "registry": "config/environment/procedures.json",
+  "registry_revision": "sha256:7e2d36edbb35abf51fde2ef4c35070a8b0d394258d2707a4cc34377b73171e0e",
+  "procedure_ids": ["app-release-install/v1", "app-release-rollback/v1", "nixos-prod-rollback/v1", "nixos-prod-switch/v1"],
+  "installer_implementation": "/opt/TGW/.venvs/controller/lib/python3.13/site-packages/tgw/release_installer.py",
+  "installer_selected_from_application_release": false,
+  "direct_invocation_allowed": false,
+  "authority_gate": "explicit-deployment-approval",
+  "execution_policy": "registered-runner-only",
+  "deployment_executed": false,
+  "instruction_audit": "docs/TGW-Plan-Vault/reports/environment-recovery/instruction-audit-logical-commands-20260811.json",
+  "instruction_finding_count": 41,
+  "direct_mutable_deploy_findings": 0,
+  "tests": {
+    "command": "PYTHONPATH=src /opt/TGW/.venvs/controller/bin/pytest -q -p no:cacheprovider tests/test_procedure_registry.py tests/test_instruction_audit.py tests/test_environment_recovery_acceptance.py",
+    "passed": 14
+  },
+  "result": "verified"
+}

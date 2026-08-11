@@ -40,6 +40,30 @@ def test_retired_reference_and_deploy_command_are_line_bound(tmp_path):
     assert {"retired-host-reference", "direct-mutable-deploy-command"} <= codes
 
 
+def test_multiline_release_install_and_rollback_cannot_evade_audit(tmp_path):
+    registry = load_registry(REGISTRY)
+    (tmp_path / ".claude/agents").mkdir(parents=True)
+    (tmp_path / "config/environment/actors").mkdir(parents=True)
+    (tmp_path / "docs/TGW-Plan-Vault/plan/pp").mkdir(parents=True)
+    runbooks = tmp_path / "docs/TGW-Plan-Vault/reference/runbooks"
+    runbooks.mkdir(parents=True)
+    (tmp_path / "AGENTS.md").write_text("shared\n", encoding="utf-8")
+    (tmp_path / "CLAUDE.md").write_text("claude\n", encoding="utf-8")
+    (tmp_path / ".claude/agents/nix-flake-maintainer.md").write_text("old\n", encoding="utf-8")
+    (tmp_path / "config/environment/actors/tgw-steward.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md").write_text("history\n", encoding="utf-8")
+    (runbooks / "deploy.md").write_text(
+        "python3 -B -m tgw.release_installer --root /opt/TGW \\\n"
+        "  install --archive x\n"
+        "tgw-release-install --root /opt/TGW \\\n"
+        "  rollback --receipt y\n",
+        encoding="utf-8",
+    )
+    result = audit_instructions(tmp_path, registry, observed_at="2026-08-11T09:05:00-07:00")
+    deploy = [item for item in result["findings"] if item["code"] == "direct-mutable-deploy-command"]
+    assert [item["line"] for item in deploy] == [1, 3]
+
+
 def test_missing_or_symlinked_registered_source_fails_closed(tmp_path):
     registry = load_registry(REGISTRY)
     with pytest.raises(InstructionAuditError):

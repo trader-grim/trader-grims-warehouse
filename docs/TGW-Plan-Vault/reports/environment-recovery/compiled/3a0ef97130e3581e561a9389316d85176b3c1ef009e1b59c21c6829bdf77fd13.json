@@ -1,0 +1,78 @@
+{
+  "condition_hash": "sha256:777a528885d85ff50415d500e071a9b1500071863cc278189a35c0c6d76ba515",
+  "graph_id": "sha256:4f4fef6e98cff3326361cfd776b5134c0808016e5e9747b6bb6c8670175ecf61",
+  "plan_acceptance": [
+    "S8-register-app-release-procedures:independent-app-procedures-valid",
+    "S8-register-app-release-procedures:multiline-command-audit-valid"
+  ],
+  "plan_id": "PLAN-app-release-procedure",
+  "plan_version": 1,
+  "registry_revision": "sha256:2cecd276d95605a4f0fc07ab92968f890f4147ae98877b5d3a017bd09910157f",
+  "repository": {
+    "canonical_root": "/opt/TGW/tgw-lib/actors/codex/source/trader-grims-warehouse",
+    "repository_id": "trader-grims-warehouse",
+    "source_commit": "7f91c34b77947254f9c832e325a49b1d06fb746d"
+  },
+  "required_conditions": [
+    "S8-register-app-release-procedures:independent-app-procedures-valid",
+    "S8-register-app-release-procedures:multiline-command-audit-valid"
+  ],
+  "schema": "tgw-plan-compiled-graph/v1",
+  "scope_hash": "sha256:8247583195a7932bd49ac5c3f27f6aad8b701b38b99858454d1d4c9f4747c449",
+  "source_hash": "sha256:10874bc77d36475bbf19981757ba9fbc2ad21af9cbe315fc86edb4f43eba2eab",
+  "work_units": [
+    {
+      "acceptance": [
+        {
+          "assertion": "exact_controller_installer_and_rollback_bindings_validate",
+          "condition_id": "S8-register-app-release-procedures:independent-app-procedures-valid",
+          "evidence_schema": "tgw-plan-evidence/v1",
+          "freshness": "same-plan-version",
+          "id": "independent-app-procedures-valid",
+          "verifier": "tgw.environment.app-procedure-registry/v1",
+          "verifier_version": "1"
+        },
+        {
+          "assertion": "shell_continuations_cannot_hide_mutable_deployment_commands",
+          "condition_id": "S8-register-app-release-procedures:multiline-command-audit-valid",
+          "evidence_schema": "tgw-plan-evidence/v1",
+          "freshness": "same-plan-version",
+          "id": "multiline-command-audit-valid",
+          "verifier": "tgw.environment.logical-command-audit/v1",
+          "verifier_version": "1"
+        }
+      ],
+      "authority": "plan-approved",
+      "effect_class": "local-reversible",
+      "id": "S8-register-app-release-procedures",
+      "inputs": {
+        "direct_invocation_allowed": false,
+        "installer_root": "/opt/TGW/.venvs/controller",
+        "procedures": [
+          "app-release-install/v1",
+          "app-release-rollback/v1"
+        ]
+      },
+      "kind": "configuration",
+      "on_conflict": "reconciliation_required",
+      "outputs": [
+        {
+          "id": "application-procedure-registry",
+          "schema": "tgw-procedure-registry/v1"
+        },
+        {
+          "id": "logical-command-instruction-audit",
+          "schema": "tgw-instruction-audit/v1"
+        }
+      ],
+      "owns": [
+        "configuration:application-release-procedures"
+      ],
+      "requires": [],
+      "rollback": "revert only this local registry audit and runbook migration",
+      "title": "Register independent application install and rollback and audit logical commands",
+      "treatment_id": "environment-app-procedure-register",
+      "treatment_version": "1"
+    }
+  ]
+}

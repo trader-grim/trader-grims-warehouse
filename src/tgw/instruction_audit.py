@@ -21,7 +21,30 @@ _MEMORY_AUTHORITY = re.compile(
     r"(?:memory|hindsight|histor(?:y|ical)).{0,48}(?:authorit|permission|instruction)",
     re.IGNORECASE,
 )
-_DEPLOY_COMMAND = re.compile(r"\b(?:nixos-rebuild\s+switch|tgw-release-install\s+install)\b")
+_DEPLOY_COMMAND = re.compile(
+    r"\b(?:nixos-rebuild\s+switch|"
+    r"tgw-release-install\b.*?\b(?:install|rollback)|"
+    r"tgw\.release_installer\b.*?\b(?:install|rollback))\b",
+)
+
+
+def _logical_lines(text: str) -> list[tuple[int, str]]:
+    """Join shell continuation lines while retaining the first physical line."""
+    result: list[tuple[int, str]] = []
+    start = 1
+    current = ""
+    for line_number, line in enumerate(text.splitlines(), 1):
+        if not current:
+            start = line_number
+        stripped = line.rstrip()
+        if stripped.endswith("\\"):
+            current += stripped[:-1] + " "
+            continue
+        result.append((start, current + line.lstrip() if current else line))
+        current = ""
+    if current:
+        result.append((start, current))
+    return result
 
 
 def _sha256(path: Path) -> str:
@@ -103,15 +126,17 @@ def _line_findings(
                 "classification": "review-context-and-negation",
                 "line_sha256": "sha256:" + hashlib.sha256(line.encode()).hexdigest(),
             })
-        if "current-runbook" in scopes and _DEPLOY_COMMAND.search(line):
-            findings.append({
-                "code": "direct-mutable-deploy-command",
-                "path": relative,
-                "line": line_number,
-                "scopes": sorted(scopes),
-                "classification": "replace-with-registered-procedure-id",
-                "line_sha256": "sha256:" + hashlib.sha256(line.encode()).hexdigest(),
-            })
+    if "current-runbook" in scopes:
+        for line_number, logical_line in _logical_lines(text):
+            if _DEPLOY_COMMAND.search(logical_line):
+                findings.append({
+                    "code": "direct-mutable-deploy-command",
+                    "path": relative,
+                    "line": line_number,
+                    "scopes": sorted(scopes),
+                    "classification": "replace-with-registered-procedure-id",
+                    "line_sha256": "sha256:" + hashlib.sha256(logical_line.encode()).hexdigest(),
+                })
     return findings
 
 
