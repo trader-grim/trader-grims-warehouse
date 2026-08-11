@@ -1,0 +1,19 @@
+{
+  "schema": "tgw-procedure-registry-verification/v1",
+  "observed_at": "2026-08-11T09:30:00-07:00",
+  "registry": "config/environment/procedures.json",
+  "registry_revision": "sha256:ac4dbdf50600bdf904387e65ca7423db07c3c90e205251f45c4d789c24f8393a",
+  "procedure_ids": ["nixos-prod-rollback/v1", "nixos-prod-switch/v1"],
+  "direct_invocation_allowed": false,
+  "authority_gate": "explicit-deployment-approval",
+  "execution_policy": "registered-runner-only",
+  "deployment_executed": false,
+  "instruction_audit": "docs/TGW-Plan-Vault/reports/environment-recovery/instruction-audit-post-procedure-registry-20260811.json",
+  "instruction_finding_count": 41,
+  "direct_mutable_deploy_findings": 0,
+  "tests": {
+    "command": "PYTHONPATH=src /opt/TGW/.venvs/controller/bin/pytest -q -p no:cacheprovider tests/test_procedure_registry.py tests/test_instruction_audit.py tests/test_environment_registry.py",
+    "passed": 20
+  },
+  "result": "verified"
+}

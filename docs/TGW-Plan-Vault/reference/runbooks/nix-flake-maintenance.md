@@ -200,11 +200,10 @@ unless explicitly requested.
 ## Live switch
 
 A successful dry activation or build is not proof of a live switch. After
-explicit deployment approval:
-
-```bash
-sudo nixos-rebuild switch --flake path:/home/db/tgw-flake#tgw-prod
-```
+explicit deployment approval, request registered procedure
+`nixos-prod-switch/v1` from `config/environment/procedures.json`. Plan text and
+this runbook do not authorize direct execution; the registered runner must bind
+the procedure revision, approval, target host, and evidence receipt.
 
 Capture the full command result and new closure, then verify:
 
@@ -231,13 +230,11 @@ sudo env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/opt/TGW/current/src \
 
 ## Rollback
 
-Rollback the NixOS generation when activation introduced a system/unit defect:
-
-```bash
-sudo nixos-rebuild switch --rollback
-readlink -f /run/current-system
-systemctl --failed --no-pager
-```
+Rollback the NixOS generation when activation introduced a system/unit defect
+by requesting registered procedure `nixos-prod-rollback/v1`. Record the current
+closure and intended rollback generation before approval. After the registered
+procedure completes, verify `/run/current-system` and failed units using the
+read-only checks above.
 
 Then verify affected services and application health. Rollback does not erase
 database rows, provider effects, queue history, ItemData mutations, or the TGW

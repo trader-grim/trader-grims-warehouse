@@ -1,0 +1,27 @@
+{
+  "acceptance_receipts": {
+    "S5-register-operational-procedures:procedure-registry-valid": "procedure-registry-ac4dbdf50600bdf9",
+    "S5-register-operational-procedures:runbooks-use-procedure-identities": "runbook-procedure-routing-20260811"
+  },
+  "active_attempts": [],
+  "candidate_id": "sha256:2a52802f2cfa48421a1d70e5a6276237cb450fe73c7144e191c8c42b8527e80c",
+  "condition_hash": "sha256:31c0cbcff81972ff10471639938d4dd7038a25f6f71cbbb3e8cfa7d5f7dc0cb1",
+  "created_at": "2026-08-11T16:29:18.896052+00:00",
+  "effect_receipts": [],
+  "expires_at": "2026-08-18T16:29:18.896052+00:00",
+  "explicit_requirements": [],
+  "graph_id": "sha256:be29409db47d004d1f0bf1474e6ceb446435ff4868f5c4445bc159b1f4664200",
+  "ownership_conflicts": [],
+  "plan_id": "PLAN-registered-operational-procedures",
+  "plan_version": 1,
+  "reconciliation_gates": [],
+  "registry_revision": "sha256:eb34185b3ec08b2e028f6b8786fb9ca29a3057b21fc663b25716c963034dcc5d",
+  "repository": {
+    "canonical_root": "/opt/TGW/tgw-lib/actors/codex/source/trader-grims-warehouse",
+    "repository_id": "trader-grims-warehouse",
+    "source_commit": "a883c282401f28ec411fb95855e10a701a85853e"
+  },
+  "rollback_receipts": [],
+  "schema": "plan-completion-candidate/v1",
+  "scope_hash": "sha256:aaa730f2aaf7d337fb79186e58f131669a6446e7a96f9f7971798cab8a043b49"
+}

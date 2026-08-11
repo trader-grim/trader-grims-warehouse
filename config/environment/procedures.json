@@ -1,0 +1,36 @@
+{
+  "schema": "tgw-procedure-registry/v1",
+  "revision": "sha256:ac4dbdf50600bdf904387e65ca7423db07c3c90e205251f45c4d789c24f8393a",
+  "procedures": {
+    "nixos-prod-rollback/v1": {
+      "effect_class": "infrastructure-mutation",
+      "host_role": "production",
+      "repository_id": "tgw-flake",
+      "working_directory": "/home/db/tgw-flake",
+      "run_as": "root",
+      "argv": ["nixos-rebuild", "switch", "--rollback"],
+      "authority_gate": "explicit-deployment-approval",
+      "execution_policy": "registered-runner-only",
+      "direct_invocation_allowed": false,
+      "rollback_procedure": null,
+      "preconditions": ["current-system-closure-recorded", "rollback-generation-identified"],
+      "postconditions": ["new-system-closure-recorded", "failed-units-checked", "affected-services-verified"],
+      "evidence_schema": "tgw-procedure-receipt/v1"
+    },
+    "nixos-prod-switch/v1": {
+      "effect_class": "infrastructure-mutation",
+      "host_role": "production",
+      "repository_id": "tgw-flake",
+      "working_directory": "/home/db/tgw-flake",
+      "run_as": "root",
+      "argv": ["nixos-rebuild", "switch", "--flake", "path:/home/db/tgw-flake#tgw-prod"],
+      "authority_gate": "explicit-deployment-approval",
+      "execution_policy": "registered-runner-only",
+      "direct_invocation_allowed": false,
+      "rollback_procedure": "nixos-prod-rollback/v1",
+      "preconditions": ["flake-worktree-attributed", "nix-evaluation-passed", "dry-activate-passed", "explicit-deployment-approval-recorded"],
+      "postconditions": ["new-system-closure-recorded", "failed-units-checked", "affected-services-verified", "selected-release-verified"],
+      "evidence_schema": "tgw-procedure-receipt/v1"
+    }
+  }
+}

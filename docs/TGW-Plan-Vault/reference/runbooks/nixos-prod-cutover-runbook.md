@@ -443,7 +443,8 @@ not in the store (pip packages, etc. — but those come via the venv anyway, not
 
 **Option B: Start with a simpler config first**
 If tgw-prod fails offline, install `tgw-test` (simpler, more likely cached) first,
-get internet working, then `nixos-rebuild switch --flake path:...#tgw-prod`.
+get internet working, then use the current registered production switch
+procedure. The historical placeholder command is not an executable instruction.
 
 ```bash
 nixos-install \

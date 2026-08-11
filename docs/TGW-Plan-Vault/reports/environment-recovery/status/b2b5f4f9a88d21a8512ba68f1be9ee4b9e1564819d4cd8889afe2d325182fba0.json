@@ -1,0 +1,21 @@
+{
+  "conditions": [
+    {
+      "condition_id": "S5-register-operational-procedures:procedure-registry-valid",
+      "receipt_ids": [
+        "procedure-registry-ac4dbdf50600bdf9"
+      ],
+      "result": "true"
+    },
+    {
+      "condition_id": "S5-register-operational-procedures:runbooks-use-procedure-identities",
+      "receipt_ids": [
+        "runbook-procedure-routing-20260811"
+      ],
+      "result": "true"
+    }
+  ],
+  "graph_id": "sha256:be29409db47d004d1f0bf1474e6ceb446435ff4868f5c4445bc159b1f4664200",
+  "ready_for_candidate": true,
+  "schema": "tgw-plan-status/v1"
+}

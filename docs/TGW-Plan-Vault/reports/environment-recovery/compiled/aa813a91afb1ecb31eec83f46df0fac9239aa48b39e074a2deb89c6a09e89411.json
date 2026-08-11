@@ -1,0 +1,78 @@
+{
+  "condition_hash": "sha256:31c0cbcff81972ff10471639938d4dd7038a25f6f71cbbb3e8cfa7d5f7dc0cb1",
+  "graph_id": "sha256:be29409db47d004d1f0bf1474e6ceb446435ff4868f5c4445bc159b1f4664200",
+  "plan_acceptance": [
+    "S5-register-operational-procedures:procedure-registry-valid",
+    "S5-register-operational-procedures:runbooks-use-procedure-identities"
+  ],
+  "plan_id": "PLAN-registered-operational-procedures",
+  "plan_version": 1,
+  "registry_revision": "sha256:eb34185b3ec08b2e028f6b8786fb9ca29a3057b21fc663b25716c963034dcc5d",
+  "repository": {
+    "canonical_root": "/opt/TGW/tgw-lib/actors/codex/source/trader-grims-warehouse",
+    "repository_id": "trader-grims-warehouse",
+    "source_commit": "a883c282401f28ec411fb95855e10a701a85853e"
+  },
+  "required_conditions": [
+    "S5-register-operational-procedures:procedure-registry-valid",
+    "S5-register-operational-procedures:runbooks-use-procedure-identities"
+  ],
+  "schema": "tgw-plan-compiled-graph/v1",
+  "scope_hash": "sha256:aaa730f2aaf7d337fb79186e58f131669a6446e7a96f9f7971798cab8a043b49",
+  "source_hash": "sha256:97ac4bed0862ab3347eca42529a29e9816f04337d3c3d5f791cdd52ec628c5ef",
+  "work_units": [
+    {
+      "acceptance": [
+        {
+          "assertion": "exact_revision_authority_and_rollback_bindings_validate",
+          "condition_id": "S5-register-operational-procedures:procedure-registry-valid",
+          "evidence_schema": "tgw-plan-evidence/v1",
+          "freshness": "same-plan-version",
+          "id": "procedure-registry-valid",
+          "verifier": "tgw.environment.procedure-registry/v1",
+          "verifier_version": "1"
+        },
+        {
+          "assertion": "no_direct_mutable_deployment_commands_remain",
+          "condition_id": "S5-register-operational-procedures:runbooks-use-procedure-identities",
+          "evidence_schema": "tgw-plan-evidence/v1",
+          "freshness": "same-plan-version",
+          "id": "runbooks-use-procedure-identities",
+          "verifier": "tgw.environment.runbook-procedure-routing/v1",
+          "verifier_version": "1"
+        }
+      ],
+      "authority": "plan-approved",
+      "effect_class": "local-reversible",
+      "id": "S5-register-operational-procedures",
+      "inputs": {
+        "direct_invocation_allowed": false,
+        "mutable_procedures": [
+          "nixos-prod-switch/v1",
+          "nixos-prod-rollback/v1"
+        ],
+        "registry": "config/environment/procedures.json"
+      },
+      "kind": "configuration",
+      "on_conflict": "reconciliation_required",
+      "outputs": [
+        {
+          "id": "procedure-registry",
+          "schema": "tgw-procedure-registry/v1"
+        },
+        {
+          "id": "post-procedure-instruction-audit",
+          "schema": "tgw-instruction-audit/v1"
+        }
+      ],
+      "owns": [
+        "configuration:operational-procedure-registry"
+      ],
+      "requires": [],
+      "rollback": "revert only this local registry and runbook migration commit",
+      "title": "Register NixOS switch and rollback identities and migrate runbooks",
+      "treatment_id": "environment-procedure-register",
+      "treatment_version": "1"
+    }
+  ]
+}
