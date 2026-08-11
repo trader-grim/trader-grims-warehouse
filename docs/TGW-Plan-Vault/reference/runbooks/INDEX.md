@@ -7,8 +7,10 @@ verification.
 
 **Ground rules for every incident:**
 
-- Run everything as the `tgw` user (`sudo -u tgw ...`). Source files are `rw-------`,
-  secrets are `chmod 600`.
+- Run application/data operations as the `tgw` user (`sudo -u tgw ...`). Immutable
+  release selection is the documented exception: use the privileged release-operator
+  boundary with bytecode writes disabled, as specified in the PP-WORKFLOW-001 rollout
+  runbook. Source files are `rw-------`, secrets are `chmod 600`.
 - Start with `sudo -u tgw tgw health` — it checks config paths, Postgres (with per-queue
   dead_letter breakdown), SQLite catalog, thumbnails, and permissions.
 - Workers pick up source changes only after `systemctl restart tgw-worker@<queue>.service`
@@ -56,6 +58,17 @@ suited to the Aider/DeepSeek busywork tier rather than a fix bundled into
 this packet.
 
 ## Runbooks, by production impact
+
+### PP-WORKFLOW-001 suite (2026-08-10)
+
+These runbooks govern graph-bound workflow work and supersede the older blanket
+“all jobs are safe to requeue” guidance for governed or provider-effect jobs:
+
+- [Operator overview and triage](pp-workflow-001-operations.md)
+- [Deployment, selector rollout, and rollback](pp-workflow-001-rollout.md)
+- [Item, attempt, timer, and projection recovery](pp-workflow-001-item-recovery.md)
+- [Provider-effect ambiguity and reconciliation](pp-workflow-001-provider-reconciliation.md)
+- [Production acceptance checklist](pp-workflow-001-acceptance.md)
 
 | # | Runbook | Failure mode | Blast radius |
 |---|---------|--------------|--------------|
@@ -111,11 +124,12 @@ Decision guide from the output:
 - **ItemData JSON is canonical for item state; Postgres `state_machine` is canonical for
   work state.** Everything else (SQLite catalog, thumbnails, location tree, velocity stats)
   is derived and regenerable — deleting/rebuilding derived stores is always safe.
-- **All jobs are idempotent** — each pipeline worker has a skip condition (already
-  identified, draft present, photos uploaded, price set, offer_id present, listing Active).
-  Re-running a job is the default safe recovery move.
-- **Re-enqueue after dead_letter needs a fresh dedupe key** — `tgw dead-letter --requeue`
-  handles this (clones the job without a dedupe key).
+- **Legacy jobs are generally idempotent; governed jobs are generation-bound.** Never
+  blindly replay a job carrying graph/generation/condition identity. Provider-effect
+  ambiguity always requires reconciliation. Use the PP-WORKFLOW-001 suite above.
+- **Legacy re-enqueue after dead_letter needs a fresh dedupe key** —
+  `tgw dead-letter --requeue` handles this. Do not use it for graph-bound or ambiguous
+  provider work; preserve the attempt and re-evaluate instead.
 - **Transient classification is substring matching** (`_TRANSIENT_ERRORS` in
   `src/tgw/queue/worker_base.py`): `token is expired`, `no ebay photo urls yet`,
   `directory not empty`, `readtimeout`, `lease_expired`, `connectionerror`. A new error
