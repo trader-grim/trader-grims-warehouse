@@ -13,9 +13,11 @@ Queue name: ebay_sync
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -50,6 +52,79 @@ SYNC_INTERVAL_S = 6 * 3600  # check eBay every 6 hours
 
 
 class EbaySyncWorker(QueueWorker):
+    _OBSERVATION_SCHEMA = "ebay-sync-observation/v1"
+
+    @staticmethod
+    def _observation_fingerprint(offer):
+        encoded = json.dumps(
+            offer, ensure_ascii=False, allow_nan=False, sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _observation_checkpoint(self, payload, sku, offer):
+        from tgw.item_mutation import operation_identity
+
+        observation = {
+            "provider_effect_id": payload["provider_effect_id"],
+            "provider_identity": payload["provider_identity"],
+            "projection_policy": "verify-noop/v1",
+            "offer": offer,
+        }
+        operation_id = operation_identity(
+            sku=sku, kind="ebay-sync-targeted",
+            expected_generation=payload["object_generation"],
+            payload=observation,
+        )
+        return {
+            "schema_id": self._OBSERVATION_SCHEMA,
+            "sku": sku,
+            "expected_generation": payload["object_generation"],
+            "source_provider_effect_id": payload["provider_effect_id"],
+            "source_operation": payload["source_operation"],
+            "provider_identity": payload["provider_identity"],
+            "expected_offer_id": payload["expected_offer_id"],
+            "observed_offer_id": offer.get("offerId"),
+            "offer": offer,
+            "offer_fingerprint": self._observation_fingerprint(offer),
+            "mutation_kind": "ebay-sync-targeted",
+            "projection_policy": "verify-noop/v1",
+            "operation_id": operation_id,
+        }
+
+    def _validate_observation_checkpoint(self, checkpoint, payload, sku):
+        if not isinstance(checkpoint, dict) or checkpoint.get("schema_id") != (
+            self._OBSERVATION_SCHEMA
+        ):
+            raise HardFailure("workflow targeted sync checkpoint schema mismatch")
+        exact = {
+            "sku": sku,
+            "expected_generation": payload["object_generation"],
+            "source_provider_effect_id": payload["provider_effect_id"],
+            "source_operation": payload["source_operation"],
+            "provider_identity": payload["provider_identity"],
+            "expected_offer_id": payload["expected_offer_id"],
+            "mutation_kind": "ebay-sync-targeted",
+            "projection_policy": "verify-noop/v1",
+        }
+        if any(checkpoint.get(key) != value for key, value in exact.items()):
+            raise HardFailure("workflow targeted sync checkpoint binding mismatch")
+        offer = checkpoint.get("offer")
+        if not isinstance(offer, dict):
+            raise HardFailure("workflow targeted sync checkpoint offer is invalid")
+        try:
+            expected = self._observation_checkpoint(payload, sku, offer)
+        except (TypeError, ValueError) as exc:
+            raise HardFailure("workflow targeted sync checkpoint is not JSON-native") from exc
+        checkpoint_encoded = json.dumps(
+            checkpoint, allow_nan=False, sort_keys=True, separators=(",", ":"),
+        )
+        expected_encoded = json.dumps(
+            expected, allow_nan=False, sort_keys=True, separators=(",", ":"),
+        )
+        if checkpoint_encoded != expected_encoded:
+            raise HardFailure("workflow targeted sync checkpoint identity mismatch")
+        return offer, checkpoint["operation_id"]
     def _targeted_mode(self) -> str:
         migration = self.config.get("workflow_migration")
         if migration is None and isinstance(self.config.get("raw"), dict):
@@ -182,9 +257,23 @@ class EbaySyncWorker(QueueWorker):
         if (job.get("entity_type") != "item" or job.get("entity_id") != sku
                 or payload.get("entity_id") != sku):
             raise HardFailure("workflow targeted sync entity binding mismatch")
+        job_id_raw = job.get("job_id")
+        lease_token_raw = job.get("lease_token")
+        owner = getattr(self, "owner", None)
+        if not isinstance(owner, str) or not owner.strip():
+            raise HardFailure("workflow targeted sync lacks running lease identity")
+        try:
+            job_id = str(uuid.UUID(str(job_id_raw)))
+            lease_token = str(uuid.UUID(str(lease_token_raw)))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise HardFailure(
+                "workflow targeted sync lacks running lease identity"
+            ) from exc
         path = self.config["itemdata_root"] / sku / f"{sku}.json"
-        item = json.loads(path.read_text(encoding="utf-8"))
-        if item_generation(item) != payload["object_generation"]:
+        checkpoint = (job.get("payload_json") or {}).get("observation_checkpoint")
+        if checkpoint is None:
+            item = json.loads(path.read_text(encoding="utf-8"))
+        if checkpoint is None and item_generation(item) != payload["object_generation"]:
             raise TreatmentFailure("targeted sync generation conflict",
                 self._targeted_receipt(payload, sku, "conflict", "GENERATION_CONFLICT"))
         try:
@@ -203,7 +292,19 @@ class EbaySyncWorker(QueueWorker):
                     payload, sku, "reconciliation_required",
                     "SOURCE_OPERATION_CONTRADICTION",
                 ))
-        offer = self._find_offer_governed(payload, sku)
+        operation_id = None
+        if checkpoint is not None:
+            self._validate_observation_checkpoint(
+                checkpoint, payload, sku,
+            )
+            checkpoint = state_machine.checkpoint_running_job(
+                job_id, owner, lease_token, checkpoint,
+            )
+            offer, operation_id = self._validate_observation_checkpoint(
+                checkpoint, payload, sku,
+            )
+        else:
+            offer = self._find_offer_governed(payload, sku)
         if isinstance(offer, dict) and offer.get("receipt_schema_id") == (
             "treatment-wait-receipt/v1"
         ):
@@ -222,8 +323,18 @@ class EbaySyncWorker(QueueWorker):
                 payload, sku, "reconciliation_required", "PROVIDER_SKU_CONTRADICTION",
                 observed_sku=offer.get("sku"),
             ))
+        if checkpoint is None:
+            checkpoint = self._observation_checkpoint(payload, sku, offer)
+            operation_id = checkpoint["operation_id"]
+            checkpoint = state_machine.checkpoint_running_job(
+                job_id, owner, lease_token, checkpoint,
+            )
+            offer, operation_id = self._validate_observation_checkpoint(
+                checkpoint, payload, sku,
+            )
         mutation = self._project_governed_offer(
             payload=payload, sku=sku, offer=offer, item_path=path,
+            operation_id=operation_id,
         )
         if mutation.status != "COMMITTED":
             outcome = {
@@ -247,7 +358,9 @@ class EbaySyncWorker(QueueWorker):
             observed_offer_id=offer.get("offerId"),
         )
 
-    def _project_governed_offer(self, *, payload, sku, offer, item_path):
+    def _project_governed_offer(
+        self, *, payload, sku, offer, item_path, operation_id=None,
+    ):
         """Project one read-only observation through the item mutation CAS."""
         from tgw.item_mutation import mutate_item
         from tgw.sqlite_catalog import upsert_catalog_row
@@ -323,7 +436,7 @@ class EbaySyncWorker(QueueWorker):
             journal_root=journal_root, sku=sku, kind="ebay-sync-targeted",
             expected_generation=payload["object_generation"],
             payload=observation, mutate=mutate, project=project,
-            project_noop=True,
+            project_noop=True, operation_id=operation_id,
         )
     def run(self) -> None:
         self.install_signal_handlers()

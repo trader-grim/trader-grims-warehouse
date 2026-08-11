@@ -16,6 +16,7 @@ import psycopg2.extras
 log = logging.getLogger(__name__)
 
 EVALUATION_EVENT_NOT_REQUIRED = "evaluation-event-not-required"
+_MAX_RUNNING_CHECKPOINT_BYTES = 256 * 1024
 
 # Module-level DSN — set by init() before any worker starts.
 _DSN: str = 'dbname=state_machine user=tgw'
@@ -299,6 +300,12 @@ def enqueue_job(
     codebase-wide re-audit found no genuine holdout that needs it, and a
     per-item job's entity_id is always knowable at the call site.
     """
+    if not isinstance(payload, dict):
+        raise TypeError("enqueue_job payload must be a JSON object")
+    if "observation_checkpoint" in payload:
+        raise ValueError(
+            "observation_checkpoint is reserved for checkpoint_running_job"
+        )
     if debounce and supersede:
         raise ValueError(
             "enqueue_job: debounce=True and supersede=True are mutually "
@@ -631,6 +638,90 @@ def mark_running(job_id: str, lease_owner: str) -> None:
                 """,
                 (job_id, lease_owner),
             )
+
+
+def checkpoint_running_job(
+    job_id: str, lease_owner: str, lease_token: str,
+    checkpoint: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Durably bind an immutable checkpoint to an owned running attempt.
+
+    An exact replay is idempotent.  A different checkpoint, a missing job, or
+    a lost/expired lease fails closed before the caller performs local effects.
+    """
+    if not isinstance(checkpoint, dict):
+        raise TypeError("running checkpoint must be a JSON object")
+    _validate_json_value(checkpoint, "checkpoint")
+    encoded = json.dumps(
+        checkpoint, allow_nan=False, sort_keys=True, separators=(",", ":"),
+    )
+    if len(encoded.encode("utf-8")) > _MAX_RUNNING_CHECKPOINT_BYTES:
+        raise ValueError("running checkpoint exceeds maximum encoded size")
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT payload_json
+                  FROM queue_jobs
+                 WHERE job_id = %s AND state = 'running' AND lease_owner = %s
+                   AND lease_token = %s::uuid
+                   AND lease_expires_at > NOW()
+                 FOR UPDATE
+                """,
+                (job_id, lease_owner, lease_token),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise RuntimeError("lost running lease while recording checkpoint")
+            payload = row["payload_json"] or {}
+            existing = payload.get("observation_checkpoint")
+            if "observation_checkpoint" in payload:
+                _validate_json_value(existing, "durable checkpoint")
+                existing_encoded = json.dumps(
+                    existing, allow_nan=False, sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if existing_encoded != encoded:
+                    raise ValueError("running checkpoint conflicts with durable value")
+                return dict(existing)
+            cur.execute(
+                """
+                UPDATE queue_jobs
+                   SET payload_json = jsonb_set(
+                       COALESCE(payload_json, '{}'::jsonb),
+                       '{observation_checkpoint}', %s::jsonb, true
+                   )
+                 WHERE job_id = %s AND state = 'running' AND lease_owner = %s
+                   AND lease_token = %s::uuid
+                   AND lease_expires_at > NOW()
+                 RETURNING payload_json->'observation_checkpoint' AS checkpoint
+                """,
+                (encoded, job_id, lease_owner, lease_token),
+            )
+            saved = cur.fetchone()
+            if saved is None:
+                raise RuntimeError("lost running lease while recording checkpoint")
+            return dict(saved["checkpoint"])
+
+
+def _validate_json_value(value: Any, path: str) -> None:
+    if value is None or isinstance(value, (bool, str, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{path} contains a non-finite number")
+        return
+    if isinstance(value, list):
+        for index, child in enumerate(value):
+            _validate_json_value(child, f"{path}[{index}]")
+        return
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"{path} contains a non-string key")
+            _validate_json_value(child, f"{path}.{key}")
+        return
+    raise TypeError(f"{path} contains non-JSON value {type(value).__name__}")
 
 
 def mark_succeeded(job_id: str, lease_owner: str, result: Optional[Dict[str, Any]] = None) -> None:

@@ -270,6 +270,10 @@ def _dispatch_treatment_v4(
                 ],
             }
         )
+    if payload_extra and "observation_checkpoint" in payload_extra:
+        raise ValueError(
+            "observation_checkpoint is reserved for the running worker"
+        )
     if payload_extra:
         payload.update(payload_extra)
 

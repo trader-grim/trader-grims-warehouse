@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from tgw.workflow.contracts import (
@@ -436,6 +438,21 @@ def test_payload_contains_all_expected_fields():
     assert payload["treatment_id"] == "codex-implement"
     assert payload["treatment_version"] == "1"
     assert payload["evaluator_version"] == "test-evaluator/v1"
+
+
+def test_payload_extra_cannot_forge_running_observation_checkpoint():
+    from tgw.workflow.scheduler import _dispatch_treatment_v4
+
+    disposition = _disposition("codex-implement", version="1", reasons=("ready",))
+    enqueued = MagicMock()
+    with pytest.raises(ValueError, match="reserved"):
+        _dispatch_treatment_v4(
+            disposition=disposition,
+            entity_id="SKU-1",
+            payload_extra={"observation_checkpoint": None},
+            enqueue_fn=enqueued,
+        )
+    enqueued.assert_not_called()
 
 
 # ── dispatch_treatment: missing treatment contract → None ──────────────────

@@ -23,6 +23,7 @@ def _worker(tmp_path):
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps({"sku": "SKU-1", "ebay_offer": {"offer_id": "OFF-1"}}))
     worker = object.__new__(EbaySyncWorker)
+    worker.owner = "owner-1"
     worker.config = {"itemdata_root": tmp_path / "items",
                      "data_root": tmp_path, "archive_root": tmp_path / "archive",
                      "item_mutation_journal_root": tmp_path / "journal",
@@ -36,7 +37,9 @@ def _activate_consumer(worker):
 
 
 def _job():
-    return {"queue_name": "ebay_sync", "entity_type": "item", "entity_id": "SKU-1", "payload_json": {
+    return {"job_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "lease_token": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "queue_name": "ebay_sync", "entity_type": "item", "entity_id": "SKU-1", "payload_json": {
         "payload_schema_id": "ebay-sync-targeted/v1",
         "sku": "SKU-1", "entity_id": "SKU-1", "treatment_id": "ebay-sync-targeted",
         "treatment_version": "1", "graph_id": "graph-1",
@@ -46,6 +49,14 @@ def _job():
         "expected_offer_id": "OFF-1",
         "source_operation": "stage-draft",
     }}
+
+
+@pytest.fixture(autouse=True)
+def _durable_checkpoint(monkeypatch):
+    monkeypatch.setattr(
+        "tgw.workers.ebay_sync.state_machine.checkpoint_running_job",
+        lambda _job_id, _owner, _token, checkpoint: checkpoint,
+    )
 
 
 def _source_effect_ok():
@@ -140,7 +151,8 @@ def test_timeout_wait_receipt_completes_atomically_with_timer(
     worker.owner = "test-owner"
     worker.queue_name = "ebay_sync"
     job = _job()
-    job.update(job_id="job-1", attempt_count=1, max_attempts=3)
+    job.update(job_id="11111111-1111-4111-8111-111111111111",
+               attempt_count=1, max_attempts=3)
     monkeypatch.setattr(
         worker, "handle",
         lambda claimed: worker._handle_governed_targeted(
@@ -167,7 +179,9 @@ def test_timeout_wait_receipt_completes_atomically_with_timer(
 
     assert len(completed) == 1
     job_id, owner, receipt = completed[0]
-    assert (job_id, owner) == ("job-1", "test-owner")
+    assert (job_id, owner) == (
+        "11111111-1111-4111-8111-111111111111", "test-owner",
+    )
     assert receipt["receipt_schema_id"] == "treatment-wait-receipt/v1"
     assert receipt["outcome"] == "transient_backoff"
     assert receipt["timer"]["payload"]["sync_retry"] == 1
@@ -181,7 +195,8 @@ def test_lost_lease_during_timeout_timer_completion_is_not_reported_success(
     worker.owner = "test-owner"
     worker.queue_name = "ebay_sync"
     job = _job()
-    job.update(job_id="job-lost", attempt_count=1, max_attempts=3)
+    job.update(job_id="22222222-2222-4222-8222-222222222222",
+               attempt_count=1, max_attempts=3)
     monkeypatch.setattr(
         worker, "handle",
         lambda claimed: worker._handle_governed_targeted(
@@ -541,6 +556,140 @@ def test_generation_advance_after_provider_read_conflicts_without_projection(
     assert caught.value.result["outcome"] == "conflict"
     assert projection == []
     assert json.loads(path.read_text())["operator_note"] == "newer"
+
+
+def test_checkpoint_recovers_after_projection_before_queue_receipt(
+    tmp_path, monkeypatch,
+):
+    worker, path = _worker(tmp_path)
+    worker.owner = "owner-1"
+    monkeypatch.setattr("tgw.sqlite_catalog.upsert_catalog_row",
+                        lambda *args: {"ok": True})
+    job = _bound_job(path)
+    job.update(
+        job_id="11111111-1111-4111-8111-111111111111",
+        lease_token="11111111-1111-1111-1111-111111111111",
+    )
+    saved = []
+
+    def checkpoint(_job_id, _owner, _token, value):
+        saved.append(value)
+        return value
+
+    monkeypatch.setattr(
+        "tgw.workers.ebay_sync.state_machine.checkpoint_running_job", checkpoint,
+    )
+    original = worker._project_governed_offer
+
+    def project_then_die(**kwargs):
+        original(**kwargs)
+        raise RuntimeError("process died before queue receipt")
+
+    monkeypatch.setattr(worker, "_project_governed_offer", project_then_die)
+    with _source_effect_ok(), _provider_offer({"offerId": "OFF-1"}), \
+         pytest.raises(RuntimeError, match="process died"):
+        worker._handle_governed_targeted(job["payload_json"], "SKU-1", job)
+
+    retry = _job()
+    retry["payload_json"]["object_generation"] = job["payload_json"][
+        "object_generation"
+    ]
+    retry["payload_json"]["observation_checkpoint"] = saved[0]
+    monkeypatch.setattr(worker, "_project_governed_offer", original)
+    with _source_effect_ok(), patch(
+        "tgw.workers.ebay_sync.ebay_get",
+        side_effect=AssertionError("provider reread during recovery"),
+    ):
+        receipt = worker._handle_governed_targeted(
+            retry["payload_json"], "SKU-1", retry,
+        )
+    assert receipt["outcome"] == "satisfied"
+    assert receipt["evidence"]["operation_id"] == saved[0]["operation_id"]
+
+
+def test_forged_checkpoint_is_rejected_without_provider_or_item_effect(
+    tmp_path, monkeypatch,
+):
+    worker, path = _worker(tmp_path)
+    job = _bound_job(path)
+    checkpoint = worker._observation_checkpoint(
+        job["payload_json"], "SKU-1", {"offerId": "OFF-1"},
+    )
+    checkpoint["offer_fingerprint"] = "0" * 64
+    job["payload_json"]["observation_checkpoint"] = checkpoint
+    before = path.read_bytes()
+    with _source_effect_ok(), patch("tgw.workers.ebay_sync.ebay_get") as provider, \
+         pytest.raises(HardFailure, match="checkpoint identity mismatch"):
+        worker._handle_governed_targeted(job["payload_json"], "SKU-1", job)
+    provider.assert_not_called()
+    assert path.read_bytes() == before
+
+
+def test_checkpoint_with_genuinely_newer_generation_conflicts_without_reread(
+    tmp_path, monkeypatch,
+):
+    worker, path = _worker(tmp_path)
+    job = _bound_job(path)
+    checkpoint = worker._observation_checkpoint(
+        job["payload_json"], "SKU-1", {"offerId": "OFF-1"},
+    )
+    job["payload_json"]["observation_checkpoint"] = checkpoint
+    document = json.loads(path.read_text())
+    document["operator_note"] = "newer"
+    path.write_text(json.dumps(document))
+    projections = []
+    monkeypatch.setattr(
+        "tgw.sqlite_catalog.upsert_catalog_row",
+        lambda *args: projections.append(args) or {"ok": True},
+    )
+    with _source_effect_ok(), patch(
+        "tgw.workers.ebay_sync.ebay_get",
+        side_effect=AssertionError("provider reread during recovery"),
+    ), pytest.raises(TreatmentFailure) as caught:
+        worker._handle_governed_targeted(job["payload_json"], "SKU-1", job)
+    assert caught.value.result["outcome"] == "conflict"
+    assert projections == []
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("job_id", None), ("job_id", "not-a-uuid"),
+     ("lease_token", None), ("lease_token", "not-a-uuid")],
+)
+def test_governed_handler_requires_exact_lease_identity_before_read_or_mutation(
+    tmp_path, field, value,
+):
+    worker, path = _worker(tmp_path)
+    job = _bound_job(path)
+    job[field] = value
+    before = path.read_bytes()
+    with patch("tgw.provider_effects.lookup_succeeded_provider_effect") as ledger, \
+         patch("tgw.workers.ebay_sync.ebay_get") as provider, \
+         pytest.raises(HardFailure, match="running lease identity"):
+        worker._handle_governed_targeted(job["payload_json"], "SKU-1", job)
+    ledger.assert_not_called()
+    provider.assert_not_called()
+    assert path.read_bytes() == before
+
+
+def test_recovery_lost_lease_stops_without_provider_read_or_mutation(
+    tmp_path, monkeypatch,
+):
+    worker, path = _worker(tmp_path)
+    job = _bound_job(path)
+    job["payload_json"]["observation_checkpoint"] = worker._observation_checkpoint(
+        job["payload_json"], "SKU-1", {"offerId": "OFF-1"},
+    )
+    before = path.read_bytes()
+    monkeypatch.setattr(
+        "tgw.workers.ebay_sync.state_machine.checkpoint_running_job",
+        lambda *_: (_ for _ in ()).throw(RuntimeError("lost running lease")),
+    )
+    with _source_effect_ok(), patch("tgw.workers.ebay_sync.ebay_get") as provider, \
+         pytest.raises(RuntimeError, match="lost running lease"):
+        worker._handle_governed_targeted(job["payload_json"], "SKU-1", job)
+    provider.assert_not_called()
+    assert path.read_bytes() == before
 
 
 def test_evaluator_sequences_source_effect_to_projection_receipt(tmp_path):

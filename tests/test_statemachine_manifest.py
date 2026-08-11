@@ -337,6 +337,21 @@ def test_enforcer_rejects_missing_entity_id_for_item():
             )
 
 
+def test_enqueue_rejects_reserved_observation_checkpoint_before_database():
+    from tgw.queue import state_machine as sm
+
+    with patch.object(sm, '_conn') as connection, pytest.raises(
+        ValueError, match="reserved"
+    ):
+        sm.enqueue_job(
+            queue_name='ebay_sync',
+            payload={'observation_checkpoint': None},
+            entity_type='item', entity_id='SKU-1',
+            dedupe_key='ebay-sync:SKU-1',
+        )
+    connection.assert_not_called()
+
+
 def test_enforcer_allows_complete_manifest():
     from tgw.queue import state_machine as sm
 
