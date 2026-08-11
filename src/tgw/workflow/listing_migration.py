@@ -25,7 +25,7 @@ from .operator_authority import (
 )
 from .profiles import TGW_EBAY_IDENTIFIED
 from .scheduler import DispatchResult, dispatch_treatment
-from .treatments import AI_IDENTIFY, TGW_TREATMENTS
+from .treatments import AI_IDENTIFY, EBAY_STAGE, TGW_TREATMENTS
 
 EVALUATOR_VERSION = "pp-workflow-phase3-bundle/v1"
 _GOAL_SCOPE_CEILINGS = {
@@ -239,6 +239,53 @@ def authorize_and_request_item_goal(
         authority_lookup=authority_lookup, stage_receipt_lookup=stage_lookup,
     )
     return result, authority_id, created
+
+
+def authorize_and_dispatch_force_restage(
+    item_path: str | Path, *, operator_identity: str, surface: str,
+    provider_identity: str, ttl_seconds: int = 300, enqueue_fn=None,
+    issuer=issue_or_reuse_authority, authority_lookup=get_authority,
+) -> tuple[GoalRequestResult, DispatchResult, str, bool]:
+    """Authorize and dispatch only the exact governed force-restage treatment."""
+    from .profiles import TGW_EBAY_LISTABLE
+
+    result, authority_id, created = authorize_and_request_item_goal(
+        item_path, TGW_EBAY_LISTABLE, operator_identity=operator_identity,
+        surface=surface, provider_identity=provider_identity,
+        scopes=("force-restage",), ttl_seconds=ttl_seconds,
+        enqueue_fn=enqueue_fn, issuer=issuer, authority_lookup=authority_lookup,
+    )
+    if result.dispatched is not None:
+        raise RuntimeError("force-restage admission selected an unexpected local treatment")
+    if result.graph.ownership_conflicts or result.graph.reconciliation_gates:
+        raise RuntimeError("force-restage admission is blocked by reconciliation")
+    dispositions = [
+        item for item in result.graph.eligible_treatments
+        if (item.treatment_id, item.treatment_version)
+        == (EBAY_STAGE.identity, EBAY_STAGE.version)
+    ]
+    if len(dispositions) != 1:
+        raise ValueError("force-restage is not the one eligible stage disposition")
+    authority = authority_lookup(authority_id)
+    if (authority is None or "force-restage" not in authority.scopes
+            or authority.entity_id != result.graph.object_id
+            or authority.object_generation != result.graph.object_generation):
+        raise RuntimeError("force-restage authority binding changed before dispatch")
+    dispatched = dispatch_treatment(
+        disposition=dispositions[0], entity_id=result.graph.object_id,
+        graph=result.graph,
+        payload_extra={
+            "origin": "operator", "force": True,
+            "operator_identity": operator_identity,
+            "operator_surface": surface,
+            "operator_authority_id": authority_id,
+            "pre_authority_condition_hash": authority.pre_authority_condition_hash,
+        },
+        enqueue_fn=enqueue_fn,
+    )
+    if not dispatched.enqueued and dispatched.outcome != "already_dispatched":
+        raise RuntimeError("failed to dispatch governed force-restage")
+    return result, dispatched, authority_id, created
 
 
 def request_item_goal(

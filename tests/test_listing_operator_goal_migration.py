@@ -5,13 +5,66 @@ import pytest
 from fastapi import HTTPException
 
 from tgw import http_server
-from tgw.workflow.listing_migration import approved_authority_scopes, request_item_goal
+from tgw.workflow.listing_migration import (
+    GoalRequestResult,
+    approved_authority_scopes,
+    authorize_and_dispatch_force_restage,
+    request_item_goal,
+)
 from tgw.workflow.profiles import (
     TGW_EBAY_IDENTIFIED,
     TGW_EBAY_LISTABLE,
     TGW_EBAY_STAGED,
 )
+from tgw.workflow.scheduler import DispatchResult
 from tgw.workflow.treatments import AI_IDENTIFY, TGW_TREATMENTS
+
+
+def test_force_restage_dispatch_is_exact_and_authority_bound(monkeypatch):
+    disposition = SimpleNamespace(treatment_id="ebay-stage", treatment_version="1")
+    graph = SimpleNamespace(
+        object_id="SKU-1", object_generation="gen-1",
+        eligible_treatments=(disposition,), ownership_conflicts=(),
+        reconciliation_gates=(), graph_id="graph-1", condition_hash="condition-1",
+        goal_profile_id="tgw.ebay_listable", goal_profile_version="1",
+    )
+    admitted = GoalRequestResult(
+        graph=graph, dispatched=None, held_external=("ebay-stage",),
+        operator_gates=("provider_contract_required:ebay-stage",),
+    )
+    monkeypatch.setattr(
+        "tgw.workflow.listing_migration.authorize_and_request_item_goal",
+        lambda *args, **kwargs: (admitted, "authority-1", True),
+    )
+    calls = []
+    monkeypatch.setattr(
+        "tgw.workflow.listing_migration.dispatch_treatment",
+        lambda **kwargs: calls.append(kwargs) or DispatchResult(
+            treatment_id="ebay-stage", treatment_version="1",
+            queue_name="ebay_stage", entity_id="SKU-1", enqueued=True,
+            job_id="job-1", outcome="dispatched",
+        ),
+    )
+    authority = SimpleNamespace(
+        scopes=("force-restage",), entity_id="SKU-1", object_generation="gen-1",
+        pre_authority_condition_hash="pre-hash",
+    )
+    _, dispatched, authority_id, created = authorize_and_dispatch_force_restage(
+        "/items/SKU-1.json", operator_identity="authenticated:dave",
+        surface="http:item-action:force-restage", provider_identity="ebay:account",
+        authority_lookup=lambda value: authority,
+    )
+    assert dispatched.job_id == "job-1"
+    assert authority_id == "authority-1" and created is True
+    assert calls[0]["disposition"] is disposition
+    assert calls[0]["entity_id"] == "SKU-1"
+    assert calls[0]["payload_extra"] == {
+        "origin": "operator", "force": True,
+        "operator_identity": "authenticated:dave",
+        "operator_surface": "http:item-action:force-restage",
+        "operator_authority_id": "authority-1",
+        "pre_authority_condition_hash": "pre-hash",
+    }
 
 
 def _item(tmp_path, **fields):
