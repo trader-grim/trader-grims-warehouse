@@ -1,0 +1,14 @@
+{
+  "enums": {
+    "authority": ["plan-approved"],
+    "effect_class": ["local-reversible"],
+    "kind": ["configuration"]
+  },
+  "schema": "tgw-plan-registry/v1",
+  "treatments": {
+    "environment-satellite-review-contract": {"version": "1"}
+  },
+  "verifiers": {
+    "tgw.environment.satellite-review-contract/v1": {"version": "1"}
+  }
+}

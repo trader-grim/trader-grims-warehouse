@@ -1,0 +1,61 @@
+{
+  "condition_hash": "sha256:1726b7b25d8b8b9958b4f5287ecf55db09dae5ab086ba5660f74c2f0c92c91e6",
+  "graph_id": "sha256:90ae0d579686c45c204a1b90004134e9d7338ca424c4bb886ea91cff79ba5bde",
+  "plan_acceptance": [
+    "L3-satellite-review-contract:satellite-review-boundary-valid"
+  ],
+  "plan_id": "PLAN-satellite-review-contract",
+  "plan_version": 1,
+  "registry_revision": "sha256:7b651f38086413d3f94b42c457ab15e372c5574e16525ca426ba08125a8784c5",
+  "repository": {
+    "canonical_root": "/opt/TGW/tgw-lib/actors/codex/source/trader-grims-warehouse",
+    "repository_id": "trader-grims-warehouse",
+    "source_commit": "448ee8020c979e840b0754689e2b0139c4ff5d12"
+  },
+  "required_conditions": [
+    "L3-satellite-review-contract:satellite-review-boundary-valid"
+  ],
+  "schema": "tgw-plan-compiled-graph/v1",
+  "scope_hash": "sha256:ea1ece3f17e0f40504515b1e17f2366e8f7867b9b606dba6aec38b04ec7f53c4",
+  "source_hash": "sha256:ed727b12b7019c80624ca2eadd7023d50770a388bc8bd60f40f6039c786a7b21",
+  "work_units": [
+    {
+      "acceptance": [
+        {
+          "assertion": "complete_human_review_destinations_and_non_authority_fail_closed",
+          "condition_id": "L3-satellite-review-contract:satellite-review-boundary-valid",
+          "evidence_schema": "tgw-plan-evidence/v1",
+          "freshness": "same-plan-version",
+          "id": "satellite-review-boundary-valid",
+          "verifier": "tgw.environment.satellite-review-contract/v1",
+          "verifier_version": "1"
+        }
+      ],
+      "authority": "plan-approved",
+      "effect_class": "local-reversible",
+      "id": "L3-satellite-review-contract",
+      "inputs": {
+        "complete_record_coverage": "required",
+        "human_reviewer": "required",
+        "package_schema": "tgw-satellite-evidence-package/v1",
+        "review_schema": "tgw-satellite-review/v1"
+      },
+      "kind": "configuration",
+      "on_conflict": "reconciliation_required",
+      "outputs": [
+        {
+          "id": "satellite-review-contract",
+          "schema": "tgw-satellite-review/v1"
+        }
+      ],
+      "owns": [
+        "schema:satellite-review-ledger"
+      ],
+      "requires": [],
+      "rollback": "revert only this local review validator",
+      "title": "Enforce complete human review and separate recovery destinations",
+      "treatment_id": "environment-satellite-review-contract",
+      "treatment_version": "1"
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "schema": "tgw-satellite-review-contract-verification/v1",
+  "observed_at": "2026-08-11T09:50:00-07:00",
+  "review_schema": "tgw-satellite-review/v1",
+  "complete_record_coverage_required": true,
+  "human_reviewer_required": true,
+  "current_authority_allowed": false,
+  "personal_memory_operational_coordinates_allowed": false,
+  "executable_instruction_import_allowed": false,
+  "secret_import_allowed": false,
+  "destinations": [
+    "reviewed-personal-memory", "decision-ledger", "commitments",
+    "reviewed-library", "reviewed-issues", "state-history",
+    "historical-index", "provenance-index", "quarantine",
+    "restricted-secret-ledger"
+  ],
+  "records_imported": 0,
+  "tests": {
+    "command": "PYTHONPATH=src /opt/TGW/.venvs/controller/bin/pytest -q -p no:cacheprovider tests/test_satellite_review.py tests/test_satellite_evidence.py",
+    "passed": 19
+  },
+  "result": "verified-contract-only"
+}

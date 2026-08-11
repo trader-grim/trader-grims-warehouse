@@ -1,0 +1,14 @@
+{
+  "conditions": [
+    {
+      "condition_id": "L3-satellite-review-contract:satellite-review-boundary-valid",
+      "receipt_ids": [
+        "satellite-review-contract-20260811"
+      ],
+      "result": "true"
+    }
+  ],
+  "graph_id": "sha256:90ae0d579686c45c204a1b90004134e9d7338ca424c4bb886ea91cff79ba5bde",
+  "ready_for_candidate": true,
+  "schema": "tgw-plan-status/v1"
+}
