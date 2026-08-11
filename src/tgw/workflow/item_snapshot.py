@@ -339,7 +339,10 @@ def build_item_snapshot(
         if condition_id == "staged_content_current":
             offer_exists = _staged(item)
             receipt = stage_receipt_lookup(sku) if stage_receipt_lookup else None
-            if not offer_exists:
+            if _published(item):
+                result = FingerprintResult.NOT_APPLICABLE
+                reason = "published listing supersedes staged content freshness"
+            elif not offer_exists:
                 result = FingerprintResult.FALSE
                 reason = "item has no staged offer"
             elif (isinstance(receipt, Mapping)
