@@ -1,14 +1,17 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from tgw.errors import TreatmentFailure
+from tgw.item_mutation import item_generation
 from tgw.queue import state_machine
 from tgw.queue.worker_base import QueueWorker
 from tgw.workers.normalize_condition import handle_job
 from tgw.workers.workflow_evaluate import evaluate_event
+from tgw.workflow.treatments import LEGACY_STAGE_ONBOARDING_TREATMENTS
 
 
 def _event(item_root, **changes):
@@ -33,6 +36,188 @@ def _item(tmp_path):
     path.write_text(json.dumps({"sku": "SKU-1", "condition": "Used", "image": "a.jpg"}),
                     encoding="utf-8")
     return root
+
+
+def _isolated_event(item_root):
+    origin = {
+        "receipt_schema_id": "treatment-receipt/v1",
+        "treatment_id": "ebay-onboard-legacy-stage",
+        "treatment_version": "1",
+        "outcome": "satisfied",
+        "goal_profile_id": "tgw.ebay_legacy_stage_onboarded",
+        "goal_profile_version": "1",
+        "entity_id": "SKU-1",
+        "graph_id": "old-graph",
+        "object_generation": "old-generation",
+        "condition_hash": "condition-old",
+    }
+    job, config = _event(
+        item_root,
+        goal_profile_id="tgw.ebay_legacy_stage_onboarded",
+        origin_receipt=origin,
+    )
+    config["workflow_migration"] = {"ebay_provider_identity": "ebay:account-1"}
+    durable = {
+        "job_id": "origin-1",
+        "state": "succeeded",
+        "queue_name": "ebay_onboard_legacy_stage",
+        "entity_type": "item",
+        "entity_id": "SKU-1",
+        "payload_json": {
+            "payload_schema_id": "ebay-onboard-legacy-stage/v1",
+            "treatment_id": "ebay-onboard-legacy-stage",
+            "treatment_version": "1",
+            "goal_profile_id": "tgw.ebay_legacy_stage_onboarded",
+            "goal_profile_version": "1",
+            "entity_id": "SKU-1", "sku": "SKU-1",
+            "graph_id": "old-graph",
+            "object_generation": "old-generation",
+            "condition_hash": "condition-old",
+            "result": origin,
+        },
+    }
+    return job, config, origin, durable
+
+
+def test_isolated_profile_rejects_forged_ordinary_origin(tmp_path):
+    job, config, _, _ = _isolated_event(_item(tmp_path))
+    job["payload_json"]["origin_receipt"] = {
+        "outcome": "satisfied", "graph_id": "old-graph",
+        "treatment_id": "normalize-condition", "treatment_version": "1",
+    }
+    lookup = MagicMock()
+    with pytest.raises(TreatmentFailure) as caught:
+        evaluate_event(job, config, enqueue_fn=MagicMock(), origin_lookup=lookup)
+    assert caught.value.result["evidence"]["reason_code"] == "ISOLATED_ORIGIN_MISMATCH"
+    lookup.assert_not_called()
+
+
+def test_ordinary_profile_rejects_isolated_origin(tmp_path):
+    job, config, _, _ = _isolated_event(_item(tmp_path))
+    job["payload_json"]["goal_profile_id"] = "tgw.ebay_listable"
+    with pytest.raises(TreatmentFailure) as caught:
+        evaluate_event(job, config, enqueue_fn=MagicMock(), origin_lookup=MagicMock())
+    assert caught.value.result["evidence"]["reason_code"] == "ISOLATED_ORIGIN_MISMATCH"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"state": "failed"},
+        {"queue_name": "workflow_evaluate"},
+        {"entity_id": "OTHER"},
+        {"payload_json": {"payload_schema_id": "unknown", "result": {}}},
+    ],
+)
+def test_isolated_origin_requires_exact_durable_queue_row(tmp_path, change):
+    job, config, _, durable = _isolated_event(_item(tmp_path))
+    durable.update(change)
+    with pytest.raises(TreatmentFailure) as caught:
+        evaluate_event(job, config, enqueue_fn=MagicMock(),
+                       origin_lookup=lambda _job_id: durable)
+    assert caught.value.result["evidence"]["reason_code"] == "UNTRUSTED_ISOLATED_ORIGIN"
+
+
+@pytest.mark.parametrize(
+    "key,bad_value",
+    [
+        ("payload_schema_id", "other/v1"),
+        ("treatment_id", "normalize-condition"),
+        ("treatment_version", "2"),
+        ("goal_profile_id", "tgw.ebay_listable"),
+        ("goal_profile_version", "2"),
+        ("entity_id", "OTHER"),
+        ("sku", "OTHER"),
+        ("graph_id", "other-graph"),
+        ("object_generation", "other-generation"),
+        ("condition_hash", "other-condition"),
+    ],
+)
+def test_isolated_origin_rejects_each_forged_durable_payload_binding(
+    tmp_path, key, bad_value,
+):
+    job, config, _, durable = _isolated_event(_item(tmp_path))
+    durable["payload_json"][key] = bad_value
+    with pytest.raises(TreatmentFailure) as caught:
+        evaluate_event(job, config, enqueue_fn=MagicMock(),
+                       origin_lookup=lambda _job_id: durable)
+    assert caught.value.result["evidence"]["reason_code"] == "UNTRUSTED_ISOLATED_ORIGIN"
+
+
+def test_isolated_origin_rejects_wrong_durable_job_id(tmp_path):
+    job, config, _, durable = _isolated_event(_item(tmp_path))
+    durable["job_id"] = "other-origin"
+    with pytest.raises(TreatmentFailure) as caught:
+        evaluate_event(job, config, enqueue_fn=MagicMock(),
+                       origin_lookup=lambda _job_id: durable)
+    assert caught.value.result["evidence"]["reason_code"] == "UNTRUSTED_ISOLATED_ORIGIN"
+
+
+def test_isolated_origin_rejects_cross_sku_durable_job(tmp_path):
+    job, config, _, durable = _isolated_event(_item(tmp_path))
+    durable["entity_id"] = "OTHER"
+    durable["payload_json"]["entity_id"] = "OTHER"
+    durable["payload_json"]["sku"] = "OTHER"
+    with pytest.raises(TreatmentFailure) as caught:
+        evaluate_event(job, config, enqueue_fn=MagicMock(),
+                       origin_lookup=lambda _job_id: durable)
+    assert caught.value.result["evidence"]["reason_code"] == "UNTRUSTED_ISOLATED_ORIGIN"
+
+
+def test_exact_isolated_origin_uses_only_isolated_treatments(tmp_path):
+    item_root = _item(tmp_path)
+    job, config, _, durable = _isolated_event(item_root)
+    snapshot = SimpleNamespace(
+        generation=item_generation(json.loads(
+            (item_root / "SKU-1" / "SKU-1.json").read_text()
+        )),
+    )
+    graph = SimpleNamespace(
+        graph_id="new-graph", eligible_treatments=(), reconciliation_gates=(),
+        ownership_conflicts=(),
+    )
+    with patch("tgw.workflow.listing_migration._authoritative_stage_lookup",
+               return_value=MagicMock()) as stage_lookup, \
+         patch("tgw.workers.workflow_evaluate.build_item_snapshot",
+               return_value=snapshot) as build, \
+         patch("tgw.workers.workflow_evaluate.evaluate", return_value=graph) as evaluator:
+        receipt = evaluate_event(job, config, enqueue_fn=MagicMock(),
+                                 origin_lookup=lambda _job_id: durable)
+    assert receipt["evidence"]["dispatch"] == "none"
+    stage_lookup.assert_called_once()
+    assert build.call_args.kwargs["treatments"] is LEGACY_STAGE_ONBOARDING_TREATMENTS
+    assert evaluator.call_args.kwargs["treatments"] is LEGACY_STAGE_ONBOARDING_TREATMENTS
+
+
+def test_isolated_evaluation_rejects_marker_removed_between_reads(tmp_path):
+    item_root = _item(tmp_path)
+    item_path = item_root / "SKU-1" / "SKU-1.json"
+    item = json.loads(item_path.read_text())
+    item["ebay_offer"] = {"provider_effect_id": "effect-1"}
+    item_path.write_text(json.dumps(item))
+    job, config, _, durable = _isolated_event(item_root)
+
+    from tgw.workers import workflow_evaluate as module
+    original_build = module.build_item_snapshot
+
+    def remove_marker_then_build(*args, **kwargs):
+        current = json.loads(item_path.read_text())
+        current["ebay_offer"].pop("provider_effect_id")
+        item_path.write_text(json.dumps(current))
+        return original_build(*args, **kwargs)
+
+    enqueue = MagicMock()
+    with patch("tgw.workflow.listing_migration._authoritative_stage_lookup",
+               return_value=MagicMock()), \
+         patch("tgw.workers.workflow_evaluate.build_item_snapshot",
+               side_effect=remove_marker_then_build):
+        with pytest.raises(TreatmentFailure) as caught:
+            evaluate_event(job, config, enqueue_fn=enqueue,
+                           origin_lookup=lambda _job_id: durable)
+    assert caught.value.result["evidence"]["reason_code"] == (
+        "CANONICAL_CHANGED_DURING_EVALUATION"
+    )
+    enqueue.assert_not_called()
 
 
 def test_rebuilds_new_generation_and_dispatches_evaluator_selected_local_treatment(tmp_path):

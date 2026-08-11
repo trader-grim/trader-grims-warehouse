@@ -2,17 +2,23 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from tgw.config import DEFAULT_CONFIG, load_config, sku_json
 from tgw.errors import TreatmentFailure
+from tgw.item_mutation import item_generation
+from tgw.queue import state_machine
 from tgw.queue.worker_base import QueueWorker
 from tgw.workflow.evaluator import evaluate
 from tgw.workflow.item_snapshot import build_item_snapshot
-from tgw.workflow.profiles import get_profile
+from tgw.workflow.profiles import (
+    TGW_EBAY_LEGACY_STAGE_ONBOARDED,
+    get_profile,
+)
 from tgw.workflow.scheduler import dispatch_treatment
-from tgw.workflow.treatments import TGW_TREATMENTS
+from tgw.workflow.treatments import LEGACY_STAGE_ONBOARDING_TREATMENTS, TGW_TREATMENTS
 
 QUEUE_NAME = "workflow_evaluate"
 EVALUATOR_VERSION = "workflow-evaluate-worker/v1"
@@ -35,6 +41,7 @@ def _fail(reason: str, **evidence: Any) -> TreatmentFailure:
 
 def evaluate_event(
     job: Mapping[str, Any], config: Mapping[str, Any], *, enqueue_fn: Callable[..., str] | None = None,
+    origin_lookup: Callable[[str], Mapping[str, Any] | None] | None = None,
 ) -> dict[str, Any]:
     payload = job.get("payload_json")
     if not isinstance(payload, Mapping):
@@ -53,21 +60,98 @@ def evaluate_event(
         raise _fail("INVALID_ORIGIN_RECEIPT", origin_job_id=origin_job_id)
     if origin.get("graph_id") != payload.get("prior_graph_id"):
         raise _fail("ORIGIN_GRAPH_MISMATCH", origin_job_id=origin_job_id)
-    try:
-        profile = get_profile(profile_id)
-    except KeyError as exc:
-        raise _fail("UNKNOWN_PROFILE", profile_id=profile_id) from exc
+    origin_claims_isolated = (
+        origin.get("treatment_id") == "ebay-onboard-legacy-stage"
+        and origin.get("treatment_version") == "1"
+    )
+    isolated_profile = profile_id == TGW_EBAY_LEGACY_STAGE_ONBOARDED.identity
+    if isolated_profile != origin_claims_isolated:
+        raise _fail("ISOLATED_ORIGIN_MISMATCH", origin_job_id=origin_job_id)
+    isolated = isolated_profile and origin_claims_isolated
+    if isolated:
+        exact_origin = {
+            "receipt_schema_id": "treatment-receipt/v1",
+            "treatment_id": "ebay-onboard-legacy-stage",
+            "treatment_version": "1",
+            "goal_profile_id": profile_id,
+            "goal_profile_version": profile_version,
+            "entity_id": entity_id,
+            "graph_id": payload.get("prior_graph_id"),
+            "object_generation": payload.get("prior_object_generation"),
+        }
+        if (any(origin.get(key) != value for key, value in exact_origin.items())
+                or not isinstance(origin.get("condition_hash"), str)
+                or not origin["condition_hash"]):
+            raise _fail("ISOLATED_ORIGIN_BINDING_MISMATCH", origin_job_id=origin_job_id)
+        lookup = origin_lookup or state_machine.get_job
+        durable = lookup(origin_job_id)
+        durable_payload = durable.get("payload_json") if isinstance(durable, Mapping) else None
+        durable_result = (durable_payload.get("result")
+                          if isinstance(durable_payload, Mapping) else None)
+        durable_bindings = {
+            "payload_schema_id": "ebay-onboard-legacy-stage/v1",
+            "treatment_id": "ebay-onboard-legacy-stage",
+            "treatment_version": "1",
+            "goal_profile_id": profile_id,
+            "goal_profile_version": profile_version,
+            "entity_id": entity_id,
+            "sku": entity_id,
+            "graph_id": payload.get("prior_graph_id"),
+            "object_generation": payload.get("prior_object_generation"),
+            "condition_hash": origin.get("condition_hash"),
+        }
+        if (not isinstance(durable, Mapping) or str(durable.get("job_id")) != origin_job_id
+                or durable.get("state") != "succeeded"
+                or durable.get("queue_name") != "ebay_onboard_legacy_stage"
+                or durable.get("entity_type") != "item"
+                or durable.get("entity_id") != entity_id
+                or not isinstance(durable_payload, Mapping)
+                or any(durable_payload.get(key) != value
+                       for key, value in durable_bindings.items())
+                or durable_result != origin):
+            raise _fail("UNTRUSTED_ISOLATED_ORIGIN", origin_job_id=origin_job_id)
+        profile = TGW_EBAY_LEGACY_STAGE_ONBOARDED
+        treatments = LEGACY_STAGE_ONBOARDING_TREATMENTS
+    else:
+        try:
+            profile = get_profile(profile_id)
+        except KeyError as exc:
+            raise _fail("UNKNOWN_PROFILE", profile_id=profile_id) from exc
+        treatments = TGW_TREATMENTS
     if not profile_id.startswith("tgw.") or profile.version != profile_version:
         raise _fail("PROFILE_MISMATCH", profile_id=profile_id)
 
+    item_path = sku_json(dict(config), entity_id)
+    stage_lookup = None
+    marker_generation = None
+    if isolated:
+        from tgw.workflow.listing_migration import _authoritative_stage_lookup
+        item = json.loads(item_path.read_text(encoding="utf-8"))
+        marker_generation = item_generation(item)
+        migration = config.get("workflow_migration")
+        if migration is None and isinstance(config.get("raw"), Mapping):
+            migration = config["raw"].get("workflow_migration")
+        migration = migration if isinstance(migration, Mapping) else {}
+        provider_identity = migration.get("ebay_provider_identity")
+        if (not isinstance(provider_identity, str) or not provider_identity.strip()
+                or provider_identity != provider_identity.strip()):
+            raise _fail("INVALID_PROVIDER_IDENTITY")
+        stage_lookup = _authoritative_stage_lookup(item, provider_identity)
     snapshot = build_item_snapshot(
-        sku_json(dict(config), entity_id), profile, treatments=TGW_TREATMENTS,
+        item_path, profile, treatments=treatments,
+        stage_receipt_lookup=stage_lookup,
     )
+    if isolated and snapshot.generation != marker_generation:
+        raise _fail(
+            "CANONICAL_CHANGED_DURING_EVALUATION",
+            marker_generation=marker_generation,
+            object_generation=snapshot.generation,
+        )
     prior_generation = payload.get("prior_object_generation")
     if snapshot.generation == prior_generation:
         raise _fail("EVIDENCE_NOT_CHANGED", object_generation=snapshot.generation)
     graph = evaluate(
-        snapshot=snapshot, goal=profile, treatments=TGW_TREATMENTS,
+        snapshot=snapshot, goal=profile, treatments=treatments,
         evaluator_version=EVALUATOR_VERSION,
     )
     evidence: dict[str, Any] = {
@@ -83,7 +167,7 @@ def evaluate_event(
         evidence["dispatch"] = "none"
         return _receipt("satisfied", **evidence)
 
-    contracts = {(item.identity, item.version): item for item in TGW_TREATMENTS}
+    contracts = {(item.identity, item.version): item for item in treatments}
     local_dispositions = [
         disposition for disposition in graph.eligible_treatments
         if contracts[(disposition.treatment_id, disposition.treatment_version)].effect_class.value
