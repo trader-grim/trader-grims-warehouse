@@ -28,10 +28,12 @@ def test_repository_procedure_registry_is_revision_bound_and_non_executing():
     assert switch["direct_invocation_allowed"] is False
     assert switch["authority_gate"] == "explicit-deployment-approval"
     assert switch["rollback_procedure"] == "nixos-prod-rollback/v1"
-    install = resolve_procedure(registry, "app-release-install/v1")
-    assert install["argv"][0] == "/opt/TGW/.venvs/controller/bin/tgw-release-install"
+    install = registry["procedures"]["app-release-install/v1"]
+    assert install["status"] == "held"
+    assert install["argv"][0] == "/opt/TGW/installer/current/bin/tgw-release-install"
     assert install["rollback_procedure"] == "app-release-rollback/v1"
-    assert install["direct_invocation_allowed"] is False
+    with pytest.raises(ProcedureRegistryError, match="held"):
+        resolve_procedure(registry, "app-release-install/v1")
 
 
 @pytest.mark.parametrize(
@@ -39,6 +41,7 @@ def test_repository_procedure_registry_is_revision_bound_and_non_executing():
     [
         (("revision",), "sha256:" + "0" * 64, "revision"),
         (("procedures", "nixos-prod-switch/v1", "direct_invocation_allowed"), True, "forbid"),
+        (("procedures", "app-release-install/v1", "status"), "active", "status and execution policy"),
         (("procedures", "nixos-prod-switch/v1", "authority_gate"), "plan-text", "approval"),
         (("procedures", "nixos-prod-switch/v1", "argv"), ["sh", "-c", "unsafe"], "fixed argv"),
         (("procedures", "nixos-prod-switch/v1", "rollback_procedure"), "missing/v1", "unknown rollback"),

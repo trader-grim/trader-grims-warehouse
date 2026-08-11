@@ -20,19 +20,16 @@
 
 ## Deploy source without changing behavior
 
-Use registered procedure `app-release-install/v1` from
+Registered procedure `app-release-install/v1` in
 `config/environment/procedures.json`. Its structured inputs are the exact archive,
 generation, commit, tree, archive digest, expected current generation, and unique
 operation ID. Plan or runbook text does not authorize execution. The registered
-procedure is bound to the independent controller installer, not the application
-release being replaced.
+procedure is currently **held** until `/opt/TGW/installer/current` is independently
+installed and verified on tgw-prod. It must not be requested while held.
 
-After a completed procedure receipt, verify the selected generation read-only with
-the independent controller wrapper:
-
-```bash
-/opt/TGW/.venvs/controller/bin/tgw-release-install --root /opt/TGW verify <GENERATION>
-```
+After a future completed procedure receipt, verify the selected generation through
+that same independently installed wrapper. Do not fall back to importing the
+installer from `/opt/TGW/current`.
 
 Do not combine source selection, schema mutation, selector changes, and worker
 restarts into one opaque step.
@@ -106,8 +103,9 @@ admitted wrapper; it returns only state/schema-shape counts.
 7. Restore the prior config and restart only affected units.
 8. If source rollback is required, request registered procedure
    `app-release-rollback/v1` with the completed selection receipt, expected current
-   generation, and a unique rollback operation ID. The procedure request requires
-   explicit deployment approval and produces its own immutable receipt.
+   generation, and a unique rollback operation ID only after its independent
+   installer hold is cleared. The procedure request requires explicit deployment
+   approval and produces its own immutable receipt.
 
 Additive schema stays in place. Do not drop tables during rollback.
 

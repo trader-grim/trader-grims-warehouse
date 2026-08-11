@@ -18,20 +18,20 @@ _ID = re.compile(r"^[a-z0-9][a-z0-9.-]{2,95}/v[1-9][0-9]*$")
 _SAFE_ARG = re.compile(r"^[A-Za-z0-9_./:#@+=,-]+$")
 _TOP_KEYS = {"schema", "revision", "procedures"}
 _PROCEDURE_KEYS = {
-    "effect_class", "host_role", "repository_id", "working_directory",
+    "status", "effect_class", "host_role", "repository_id", "working_directory",
     "run_as", "argv", "authority_gate", "execution_policy",
     "direct_invocation_allowed", "rollback_procedure", "preconditions",
     "postconditions", "evidence_schema",
 }
 _FIXED_ARGV = {
     "app-release-install/v1": [
-        "/opt/TGW/.venvs/controller/bin/tgw-release-install", "--root", "/opt/TGW", "install",
+        "/opt/TGW/installer/current/bin/tgw-release-install", "--root", "/opt/TGW", "install",
         "--archive", ":archive", "--generation", ":generation", "--commit", ":commit",
         "--tree", ":tree", "--archive-sha256", ":archive_sha256",
         "--expected-current", ":expected_current", "--operation-id", ":operation_id",
     ],
     "app-release-rollback/v1": [
-        "/opt/TGW/.venvs/controller/bin/tgw-release-install", "--root", "/opt/TGW", "rollback",
+        "/opt/TGW/installer/current/bin/tgw-release-install", "--root", "/opt/TGW", "rollback",
         "--receipt", ":receipt", "--expected-current", ":expected_current",
         "--operation-id", ":operation_id",
     ],
@@ -89,6 +89,8 @@ def validate_procedure_registry(raw: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(raw_procedure, dict) or set(raw_procedure) != _PROCEDURE_KEYS:
             raise ProcedureRegistryError(f"procedure fields are invalid: {procedure_id}")
         procedure = raw_procedure
+        if procedure["status"] not in {"active", "held"}:
+            raise ProcedureRegistryError("procedure status is invalid")
         if procedure["effect_class"] != "infrastructure-mutation":
             raise ProcedureRegistryError("effectful Nix procedures must be infrastructure mutations")
         for key in ("host_role", "repository_id", "working_directory", "run_as"):
@@ -102,8 +104,9 @@ def validate_procedure_registry(raw: Mapping[str, Any]) -> dict[str, Any]:
             raise ProcedureRegistryError("registered procedures must use their exact fixed argv")
         if procedure["authority_gate"] != "explicit-deployment-approval":
             raise ProcedureRegistryError("procedure must require explicit deployment approval")
-        if procedure["execution_policy"] != "registered-runner-only" or procedure["direct_invocation_allowed"] is not False:
-            raise ProcedureRegistryError("procedure must forbid direct instruction execution")
+        expected_policy = "registered-runner-only" if procedure["status"] == "active" else "held-pending-independent-installer"
+        if procedure["execution_policy"] != expected_policy or procedure["direct_invocation_allowed"] is not False:
+            raise ProcedureRegistryError("procedure status and execution policy must forbid direct instruction execution")
         rollback = procedure["rollback_procedure"]
         if rollback is not None and (not isinstance(rollback, str) or not _ID.fullmatch(rollback)):
             raise ProcedureRegistryError("rollback procedure identity is invalid")
@@ -135,4 +138,6 @@ def resolve_procedure(registry: Mapping[str, Any], procedure_id: str) -> dict[st
         procedure = validated["procedures"][procedure_id]
     except KeyError as exc:
         raise ProcedureRegistryError(f"unknown procedure identity: {procedure_id}") from exc
+    if procedure["status"] != "active":
+        raise ProcedureRegistryError(f"procedure is held and cannot execute: {procedure_id}")
     return {"procedure_id": procedure_id, "registry_revision": validated["revision"], **procedure}

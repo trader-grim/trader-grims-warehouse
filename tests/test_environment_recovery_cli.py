@@ -37,6 +37,6 @@ def test_audit_cli_reports_incomplete_program_without_external_actions():
     result = run(argparse.Namespace(
         operation="audit", root=ROOT, observed_at="2026-08-11T10:05:00-07:00",
     ))
-    assert result["counts"] == {"proved": 4, "missing": 7, "failed": 0}
+    assert result["counts"] == {"proved": 3, "missing": 7, "failed": 1}
     assert result["complete"] is False
     assert result["external_actions_performed"] is False

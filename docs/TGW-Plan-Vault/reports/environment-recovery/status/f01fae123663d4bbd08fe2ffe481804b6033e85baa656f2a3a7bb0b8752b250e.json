@@ -1,0 +1,21 @@
+{
+  "conditions": [
+    {
+      "condition_id": "S9-hold-app-procedures:app-procedures-held",
+      "receipt_ids": [
+        "app-procedures-held-20260811"
+      ],
+      "result": "true"
+    },
+    {
+      "condition_id": "S9-hold-app-procedures:production-installer-absence-recorded",
+      "receipt_ids": [
+        "production-installer-absence-20260811"
+      ],
+      "result": "true"
+    }
+  ],
+  "graph_id": "sha256:a6631f206ea3158145cd88de0702c1a602da3b982c3ab454f2d5012f194095f9",
+  "ready_for_candidate": true,
+  "schema": "tgw-plan-status/v1"
+}

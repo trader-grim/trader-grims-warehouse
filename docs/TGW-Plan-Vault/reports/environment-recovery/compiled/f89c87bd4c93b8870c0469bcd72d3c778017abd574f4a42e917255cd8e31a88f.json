@@ -1,0 +1,78 @@
+{
+  "condition_hash": "sha256:6e5f24018a1b2919420e36d30c022b917873e11b39f8a58fc792bfca92a3a48d",
+  "graph_id": "sha256:a6631f206ea3158145cd88de0702c1a602da3b982c3ab454f2d5012f194095f9",
+  "plan_acceptance": [
+    "S9-hold-app-procedures:production-installer-absence-recorded",
+    "S9-hold-app-procedures:app-procedures-held"
+  ],
+  "plan_id": "PLAN-app-installer-preflight-hold",
+  "plan_version": 1,
+  "registry_revision": "sha256:45d9145a202806afed58eb28be3c141302d197b185b8624bfb8589cf326a2d56",
+  "repository": {
+    "canonical_root": "/opt/TGW/tgw-lib/actors/codex/source/trader-grims-warehouse",
+    "repository_id": "trader-grims-warehouse",
+    "source_commit": "c8c274b6ac0df17536ff4587f73758d02e55733f"
+  },
+  "required_conditions": [
+    "S9-hold-app-procedures:app-procedures-held",
+    "S9-hold-app-procedures:production-installer-absence-recorded"
+  ],
+  "schema": "tgw-plan-compiled-graph/v1",
+  "scope_hash": "sha256:3aa076149b6e50a29428cb96120fcbec5792f42db5a0df20d6dbc91a367519d4",
+  "source_hash": "sha256:ee5cdc660bd5345a7aa7301757b31f0ead37c48b91177d615b186c7fcae52f5f",
+  "work_units": [
+    {
+      "acceptance": [
+        {
+          "assertion": "production_has_no_independent_installer_and_no_deploy_occurred",
+          "condition_id": "S9-hold-app-procedures:production-installer-absence-recorded",
+          "evidence_schema": "tgw-plan-evidence/v1",
+          "freshness": "same-plan-version",
+          "id": "production-installer-absence-recorded",
+          "verifier": "tgw.environment.app-installer-preflight/v1",
+          "verifier_version": "1"
+        },
+        {
+          "assertion": "app_install_and_rollback_resolution_fail_closed",
+          "condition_id": "S9-hold-app-procedures:app-procedures-held",
+          "evidence_schema": "tgw-plan-evidence/v1",
+          "freshness": "same-plan-version",
+          "id": "app-procedures-held",
+          "verifier": "tgw.environment.held-procedure/v1",
+          "verifier_version": "1"
+        }
+      ],
+      "authority": "plan-approved",
+      "effect_class": "local-reversible",
+      "id": "S9-hold-app-procedures",
+      "inputs": {
+        "expected_installer": "/opt/TGW/installer/current/bin/tgw-release-install",
+        "procedures": [
+          "app-release-install/v1",
+          "app-release-rollback/v1"
+        ],
+        "production_host": "tgw-prod"
+      },
+      "kind": "configuration",
+      "on_conflict": "reconciliation_required",
+      "outputs": [
+        {
+          "id": "production-installer-preflight",
+          "schema": "tgw-procedure-registry-verification/v1"
+        },
+        {
+          "id": "held-app-procedures",
+          "schema": "tgw-procedure-registry/v1"
+        }
+      ],
+      "owns": [
+        "configuration:application-release-procedures"
+      ],
+      "requires": [],
+      "rollback": "supersede only after independent installer verification evidence exists",
+      "title": "Record missing independent installer and fail app procedures closed",
+      "treatment_id": "environment-app-installer-hold",
+      "treatment_version": "1"
+    }
+  ]
+}

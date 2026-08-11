@@ -1,0 +1,18 @@
+{
+  "schema": "tgw-plan-evidence/v1",
+  "receipt_id": "production-installer-absence-20260811",
+  "plan_id": "PLAN-app-installer-preflight-hold",
+  "plan_version": 1,
+  "scope_hash": "sha256:3aa076149b6e50a29428cb96120fcbec5792f42db5a0df20d6dbc91a367519d4",
+  "registry_revision": "sha256:45d9145a202806afed58eb28be3c141302d197b185b8624bfb8589cf326a2d56",
+  "graph_id": "sha256:a6631f206ea3158145cd88de0702c1a602da3b982c3ab454f2d5012f194095f9",
+  "condition_hash": "sha256:6e5f24018a1b2919420e36d30c022b917873e11b39f8a58fc792bfca92a3a48d",
+  "work_unit_id": "S9-hold-app-procedures",
+  "acceptance_id": "production-installer-absence-recorded",
+  "entity": "configuration:application-release-procedures",
+  "verifier": "tgw.environment.app-installer-preflight/v1",
+  "verifier_version": "1",
+  "result": "true",
+  "observed_at": "2026-08-11T10:30:00-07:00",
+  "evidence_hash": "sha256:a71276b986c4fe51071f1daa63192d5e576c2b590e4d27eadde0b19f8fe2a2b2"
+}

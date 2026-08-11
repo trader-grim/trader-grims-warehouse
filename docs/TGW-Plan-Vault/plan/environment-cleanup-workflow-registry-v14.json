@@ -1,0 +1,15 @@
+{
+  "enums": {
+    "authority": ["plan-approved"],
+    "effect_class": ["local-reversible"],
+    "kind": ["configuration", "verification"]
+  },
+  "schema": "tgw-plan-registry/v1",
+  "treatments": {
+    "environment-app-installer-hold": {"version": "1"}
+  },
+  "verifiers": {
+    "tgw.environment.app-installer-preflight/v1": {"version": "1"},
+    "tgw.environment.held-procedure/v1": {"version": "1"}
+  }
+}

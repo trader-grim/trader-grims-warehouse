@@ -1,0 +1,27 @@
+{
+  "acceptance_receipts": {
+    "S9-hold-app-procedures:app-procedures-held": "app-procedures-held-20260811",
+    "S9-hold-app-procedures:production-installer-absence-recorded": "production-installer-absence-20260811"
+  },
+  "active_attempts": [],
+  "candidate_id": "sha256:95b21b0eaefdd69a64144f81c5828d3c6e6054584b06128852dd0fe4815094ba",
+  "condition_hash": "sha256:6e5f24018a1b2919420e36d30c022b917873e11b39f8a58fc792bfca92a3a48d",
+  "created_at": "2026-08-11T16:57:17.960015+00:00",
+  "effect_receipts": [],
+  "expires_at": "2026-08-18T16:57:17.960015+00:00",
+  "explicit_requirements": [],
+  "graph_id": "sha256:a6631f206ea3158145cd88de0702c1a602da3b982c3ab454f2d5012f194095f9",
+  "ownership_conflicts": [],
+  "plan_id": "PLAN-app-installer-preflight-hold",
+  "plan_version": 1,
+  "reconciliation_gates": [],
+  "registry_revision": "sha256:45d9145a202806afed58eb28be3c141302d197b185b8624bfb8589cf326a2d56",
+  "repository": {
+    "canonical_root": "/opt/TGW/tgw-lib/actors/codex/source/trader-grims-warehouse",
+    "repository_id": "trader-grims-warehouse",
+    "source_commit": "c8c274b6ac0df17536ff4587f73758d02e55733f"
+  },
+  "rollback_receipts": [],
+  "schema": "plan-completion-candidate/v1",
+  "scope_hash": "sha256:3aa076149b6e50a29428cb96120fcbec5792f42db5a0df20d6dbc91a367519d4"
+}

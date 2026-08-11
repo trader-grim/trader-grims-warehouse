@@ -1,16 +1,17 @@
 {
   "schema": "tgw-procedure-registry/v1",
-  "revision": "sha256:7e2d36edbb35abf51fde2ef4c35070a8b0d394258d2707a4cc34377b73171e0e",
+  "revision": "sha256:5851ed65b4f37a6cbf86f7af7cb7f3a8283f95254bc627cb685083f319e9c9c4",
   "procedures": {
     "app-release-install/v1": {
+      "status": "held",
       "effect_class": "infrastructure-mutation",
       "host_role": "production",
       "repository_id": "application",
       "working_directory": "/opt/TGW",
       "run_as": "root",
-      "argv": ["/opt/TGW/.venvs/controller/bin/tgw-release-install", "--root", "/opt/TGW", "install", "--archive", ":archive", "--generation", ":generation", "--commit", ":commit", "--tree", ":tree", "--archive-sha256", ":archive_sha256", "--expected-current", ":expected_current", "--operation-id", ":operation_id"],
+      "argv": ["/opt/TGW/installer/current/bin/tgw-release-install", "--root", "/opt/TGW", "install", "--archive", ":archive", "--generation", ":generation", "--commit", ":commit", "--tree", ":tree", "--archive-sha256", ":archive_sha256", "--expected-current", ":expected_current", "--operation-id", ":operation_id"],
       "authority_gate": "explicit-deployment-approval",
-      "execution_policy": "registered-runner-only",
+      "execution_policy": "held-pending-independent-installer",
       "direct_invocation_allowed": false,
       "rollback_procedure": "app-release-rollback/v1",
       "preconditions": ["exact-commit-tree-and-archive-digest-recorded", "current-generation-recorded", "controller-installer-independence-verified", "explicit-deployment-approval-recorded"],
@@ -18,14 +19,15 @@
       "evidence_schema": "tgw-procedure-receipt/v1"
     },
     "app-release-rollback/v1": {
+      "status": "held",
       "effect_class": "infrastructure-mutation",
       "host_role": "production",
       "repository_id": "application",
       "working_directory": "/opt/TGW",
       "run_as": "root",
-      "argv": ["/opt/TGW/.venvs/controller/bin/tgw-release-install", "--root", "/opt/TGW", "rollback", "--receipt", ":receipt", "--expected-current", ":expected_current", "--operation-id", ":operation_id"],
+      "argv": ["/opt/TGW/installer/current/bin/tgw-release-install", "--root", "/opt/TGW", "rollback", "--receipt", ":receipt", "--expected-current", ":expected_current", "--operation-id", ":operation_id"],
       "authority_gate": "explicit-deployment-approval",
-      "execution_policy": "registered-runner-only",
+      "execution_policy": "held-pending-independent-installer",
       "direct_invocation_allowed": false,
       "rollback_procedure": null,
       "preconditions": ["completed-selection-receipt-verified", "current-generation-recorded", "rollback-generation-present"],
@@ -33,6 +35,7 @@
       "evidence_schema": "tgw-procedure-receipt/v1"
     },
     "nixos-prod-rollback/v1": {
+      "status": "active",
       "effect_class": "infrastructure-mutation",
       "host_role": "production",
       "repository_id": "tgw-flake",
@@ -48,6 +51,7 @@
       "evidence_schema": "tgw-procedure-receipt/v1"
     },
     "nixos-prod-switch/v1": {
+      "status": "active",
       "effect_class": "infrastructure-mutation",
       "host_role": "production",
       "repository_id": "tgw-flake",
