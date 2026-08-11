@@ -24,7 +24,7 @@ Registered procedure `app-release-install/v1` in
 `config/environment/procedures.json`. Its structured inputs are the exact archive,
 generation, commit, tree, archive digest, expected current generation, and unique
 operation ID. Plan or runbook text does not authorize execution. The registered
-procedure is currently **held** until `/opt/TGW/installer/current` is independently
+procedure is currently **held** until `/opt/tgw-installer/current` is independently
 installed and verified on tgw-prod. It must not be requested while held.
 
 After a future completed procedure receipt, verify the selected generation through

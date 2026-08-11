@@ -30,7 +30,7 @@ def test_repository_procedure_registry_is_revision_bound_and_non_executing():
     assert switch["rollback_procedure"] == "nixos-prod-rollback/v1"
     install = registry["procedures"]["app-release-install/v1"]
     assert install["status"] == "held"
-    assert install["argv"][0] == "/opt/TGW/installer/current/bin/tgw-release-install"
+    assert install["argv"][0] == "/opt/tgw-installer/current/bin/tgw-release-install"
     assert install["rollback_procedure"] == "app-release-rollback/v1"
     with pytest.raises(ProcedureRegistryError, match="held"):
         resolve_procedure(registry, "app-release-install/v1")

@@ -25,13 +25,13 @@ _PROCEDURE_KEYS = {
 }
 _FIXED_ARGV = {
     "app-release-install/v1": [
-        "/opt/TGW/installer/current/bin/tgw-release-install", "--root", "/opt/TGW", "install",
+        "/opt/tgw-installer/current/bin/tgw-release-install", "--root", "/opt/TGW", "install",
         "--archive", ":archive", "--generation", ":generation", "--commit", ":commit",
         "--tree", ":tree", "--archive-sha256", ":archive_sha256",
         "--expected-current", ":expected_current", "--operation-id", ":operation_id",
     ],
     "app-release-rollback/v1": [
-        "/opt/TGW/installer/current/bin/tgw-release-install", "--root", "/opt/TGW", "rollback",
+        "/opt/tgw-installer/current/bin/tgw-release-install", "--root", "/opt/TGW", "rollback",
         "--receipt", ":receipt", "--expected-current", ":expected_current",
         "--operation-id", ":operation_id",
     ],

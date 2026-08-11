@@ -1,6 +1,6 @@
 {
   "schema": "tgw-procedure-registry/v1",
-  "revision": "sha256:5851ed65b4f37a6cbf86f7af7cb7f3a8283f95254bc627cb685083f319e9c9c4",
+  "revision": "sha256:762f8fb24eb52f20eb8764c6514f02355e51a5ebba208c9e1e3b95609edc217a",
   "procedures": {
     "app-release-install/v1": {
       "status": "held",
@@ -9,7 +9,7 @@
       "repository_id": "application",
       "working_directory": "/opt/TGW",
       "run_as": "root",
-      "argv": ["/opt/TGW/installer/current/bin/tgw-release-install", "--root", "/opt/TGW", "install", "--archive", ":archive", "--generation", ":generation", "--commit", ":commit", "--tree", ":tree", "--archive-sha256", ":archive_sha256", "--expected-current", ":expected_current", "--operation-id", ":operation_id"],
+      "argv": ["/opt/tgw-installer/current/bin/tgw-release-install", "--root", "/opt/TGW", "install", "--archive", ":archive", "--generation", ":generation", "--commit", ":commit", "--tree", ":tree", "--archive-sha256", ":archive_sha256", "--expected-current", ":expected_current", "--operation-id", ":operation_id"],
       "authority_gate": "explicit-deployment-approval",
       "execution_policy": "held-pending-independent-installer",
       "direct_invocation_allowed": false,
@@ -25,7 +25,7 @@
       "repository_id": "application",
       "working_directory": "/opt/TGW",
       "run_as": "root",
-      "argv": ["/opt/TGW/installer/current/bin/tgw-release-install", "--root", "/opt/TGW", "rollback", "--receipt", ":receipt", "--expected-current", ":expected_current", "--operation-id", ":operation_id"],
+      "argv": ["/opt/tgw-installer/current/bin/tgw-release-install", "--root", "/opt/TGW", "rollback", "--receipt", ":receipt", "--expected-current", ":expected_current", "--operation-id", ":operation_id"],
       "authority_gate": "explicit-deployment-approval",
       "execution_policy": "held-pending-independent-installer",
       "direct_invocation_allowed": false,

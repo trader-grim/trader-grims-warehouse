@@ -1,0 +1,17 @@
+{
+  "schema": "tgw-independent-installer-correction-verification/v1",
+  "observed_at": "2026-08-11T10:10:00-07:00",
+  "production_host": "tgw-prod",
+  "flake_commit": "9c723fd3bff805a272b88047b56660f044c5e135",
+  "corrected_installer_root": "/opt/tgw-installer",
+  "corrected_installer_selector": "/opt/tgw-installer/current",
+  "ownership": "root:root",
+  "evaluated_system": "/nix/store/rjpqj1kf2g6i34anklih1dmk4afcdkmj-nixos-system-tgw-prod-25.05.20260102.ac62194",
+  "full_system_build": "PASS",
+  "evaluated_rules": [
+    "d /opt/tgw-installer 0755 root root -",
+    "L+ /opt/tgw-installer/current - - - - /nix/store/ikvbphlfb3w200qri5mqs7gpkwj2c6dq-tgw-release-install"
+  ],
+  "activation_executed": false,
+  "result": "READY_FOR_FRESH_ACTIVATION_APPROVAL"
+}

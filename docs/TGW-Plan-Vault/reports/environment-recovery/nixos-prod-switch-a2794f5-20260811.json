@@ -1,0 +1,27 @@
+{
+  "schema": "tgw-procedure-receipt/v1",
+  "procedure_id": "nixos-prod-switch/v1",
+  "authority": "explicit-user-approval",
+  "host": "tgw-prod",
+  "started_at": "2026-08-11T10:05:00-07:00",
+  "completed_at": "2026-08-11T10:07:52-07:00",
+  "flake_commit": "a2794f503639f0ff092feae95421e79b6d668f5c",
+  "previous_system": "/nix/store/qszcddydh8y1p4qh9hw81pvgp772lnm2-nixos-system-tgw-prod-25.05.20260102.ac62194",
+  "selected_system": "/nix/store/3a2f3dsjdm1vzbr0paybcs2n35d2wh35-nixos-system-tgw-prod-25.05.20260102.ac62194",
+  "dry_activate": "PASS",
+  "switch_exit_status": 0,
+  "postconditions": {
+    "system_selected": true,
+    "installer_parent_created": true,
+    "installer_selector_created": false,
+    "application_release_changed": false
+  },
+  "failure": {
+    "classification": "POSTCONDITION_FAILED",
+    "reason": "systemd-tmpfiles rejected the tgw-owned /opt/TGW to root-owned installer subtree transition",
+    "diagnostic": "Detected unsafe path transition /opt/TGW (owned by tgw) to /opt/TGW/installer (owned by root)"
+  },
+  "rollback_required": false,
+  "corrective_flake_commit": "9c723fd3bff805a272b88047b56660f044c5e135",
+  "result": "RECONCILIATION_REQUIRED"
+}
