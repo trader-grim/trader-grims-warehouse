@@ -1,0 +1,18 @@
+{
+  "schema": "tgw-plan-evidence/v1",
+  "receipt_id": "program-acceptance-audit-20260811",
+  "plan_id": "PLAN-environment-recovery-acceptance-monitor",
+  "plan_version": 1,
+  "scope_hash": "sha256:3db81a5f4c1771be6e7ea46da497c2ed4d0a28b6816c951eb58b35b5f29ab968",
+  "registry_revision": "sha256:8747c6bdcff7efe6534ff47e592d1c67c50787cb7fae048c0d9510e7c7002de5",
+  "graph_id": "sha256:9412de4d0d53b97dd5de848418ed80a3cd01034cc6523e2b63f22268215340ad",
+  "condition_hash": "sha256:e08eac1eeee8b78898520e96c0f3d95fbdea6da99015e4b5366938cb76b52734",
+  "work_unit_id": "A1-program-acceptance-monitor",
+  "acceptance_id": "acceptance-audit-truthful",
+  "entity": "audit:environment-recovery-acceptance",
+  "verifier": "tgw.environment.recovery-acceptance-audit/v1",
+  "verifier_version": "1",
+  "result": "true",
+  "observed_at": "2026-08-11T10:00:00-07:00",
+  "evidence_hash": "sha256:b6ab34461c22f4e3698ff6d91dabbf6453a7b679b9a4c426598650cb97f5b07b"
+}

@@ -1,0 +1,14 @@
+{
+  "enums": {
+    "authority": ["plan-approved"],
+    "effect_class": ["read-only"],
+    "kind": ["verification"]
+  },
+  "schema": "tgw-plan-registry/v1",
+  "treatments": {
+    "environment-recovery-acceptance-audit": {"version": "1"}
+  },
+  "verifiers": {
+    "tgw.environment.recovery-acceptance-audit/v1": {"version": "1"}
+  }
+}

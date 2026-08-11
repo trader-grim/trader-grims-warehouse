@@ -1,0 +1,26 @@
+{
+  "acceptance_receipts": {
+    "A1-program-acceptance-monitor:acceptance-audit-truthful": "program-acceptance-audit-20260811"
+  },
+  "active_attempts": [],
+  "candidate_id": "sha256:a3f7a926a3f1b9c67550270b804fe057d4ac1f5eb545e4f44c2d74a5a9eafe63",
+  "condition_hash": "sha256:e08eac1eeee8b78898520e96c0f3d95fbdea6da99015e4b5366938cb76b52734",
+  "created_at": "2026-08-11T16:43:08.954559+00:00",
+  "effect_receipts": [],
+  "expires_at": "2026-08-18T16:43:08.954559+00:00",
+  "explicit_requirements": [],
+  "graph_id": "sha256:9412de4d0d53b97dd5de848418ed80a3cd01034cc6523e2b63f22268215340ad",
+  "ownership_conflicts": [],
+  "plan_id": "PLAN-environment-recovery-acceptance-monitor",
+  "plan_version": 1,
+  "reconciliation_gates": [],
+  "registry_revision": "sha256:8747c6bdcff7efe6534ff47e592d1c67c50787cb7fae048c0d9510e7c7002de5",
+  "repository": {
+    "canonical_root": "/opt/TGW/tgw-lib/actors/codex/source/trader-grims-warehouse",
+    "repository_id": "trader-grims-warehouse",
+    "source_commit": "870e24d55f0ca109b661292e9ec509c2b4f294b8"
+  },
+  "rollback_receipts": [],
+  "schema": "plan-completion-candidate/v1",
+  "scope_hash": "sha256:3db81a5f4c1771be6e7ea46da497c2ed4d0a28b6816c951eb58b35b5f29ab968"
+}

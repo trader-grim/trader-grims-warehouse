@@ -1,0 +1,63 @@
+{
+  "condition_hash": "sha256:e08eac1eeee8b78898520e96c0f3d95fbdea6da99015e4b5366938cb76b52734",
+  "graph_id": "sha256:9412de4d0d53b97dd5de848418ed80a3cd01034cc6523e2b63f22268215340ad",
+  "plan_acceptance": [
+    "A1-program-acceptance-monitor:acceptance-audit-truthful"
+  ],
+  "plan_id": "PLAN-environment-recovery-acceptance-monitor",
+  "plan_version": 1,
+  "registry_revision": "sha256:8747c6bdcff7efe6534ff47e592d1c67c50787cb7fae048c0d9510e7c7002de5",
+  "repository": {
+    "canonical_root": "/opt/TGW/tgw-lib/actors/codex/source/trader-grims-warehouse",
+    "repository_id": "trader-grims-warehouse",
+    "source_commit": "870e24d55f0ca109b661292e9ec509c2b4f294b8"
+  },
+  "required_conditions": [
+    "A1-program-acceptance-monitor:acceptance-audit-truthful"
+  ],
+  "schema": "tgw-plan-compiled-graph/v1",
+  "scope_hash": "sha256:3db81a5f4c1771be6e7ea46da497c2ed4d0a28b6816c951eb58b35b5f29ab968",
+  "source_hash": "sha256:d79f6cf823ba4d8974758898c2c5f159dd18205143835f6adca268c8783b0baa",
+  "work_units": [
+    {
+      "acceptance": [
+        {
+          "assertion": "exact_requirements_classified_without_completion_overclaim",
+          "condition_id": "A1-program-acceptance-monitor:acceptance-audit-truthful",
+          "evidence_schema": "tgw-plan-evidence/v1",
+          "freshness": "same-plan-version",
+          "id": "acceptance-audit-truthful",
+          "verifier": "tgw.environment.recovery-acceptance-audit/v1",
+          "verifier_version": "1"
+        }
+      ],
+      "authority": "plan-approved",
+      "effect_class": "read-only",
+      "id": "A1-program-acceptance-monitor",
+      "inputs": {
+        "absence_is_success": false,
+        "expected_satellites": [
+          "catnanny",
+          "helicrew"
+        ],
+        "program_plan_id": "PLAN-environment-cleanup-program"
+      },
+      "kind": "verification",
+      "on_conflict": "reconciliation_required",
+      "outputs": [
+        {
+          "id": "program-acceptance-audit",
+          "schema": "tgw-environment-recovery-acceptance-audit/v1"
+        }
+      ],
+      "owns": [
+        "audit:environment-recovery-acceptance"
+      ],
+      "requires": [],
+      "rollback": "none-read-only",
+      "title": "Audit server satellite and human acceptance evidence without inference",
+      "treatment_id": "environment-recovery-acceptance-audit",
+      "treatment_version": "1"
+    }
+  ]
+}

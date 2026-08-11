@@ -1,0 +1,14 @@
+{
+  "conditions": [
+    {
+      "condition_id": "A1-program-acceptance-monitor:acceptance-audit-truthful",
+      "receipt_ids": [
+        "program-acceptance-audit-20260811"
+      ],
+      "result": "true"
+    }
+  ],
+  "graph_id": "sha256:9412de4d0d53b97dd5de848418ed80a3cd01034cc6523e2b63f22268215340ad",
+  "ready_for_candidate": true,
+  "schema": "tgw-plan-status/v1"
+}
