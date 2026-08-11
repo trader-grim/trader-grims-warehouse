@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from tgw import http_server
 from tgw.workflow.listing_migration import (
     GoalRequestResult,
+    _evaluator_authorized_scopes,
     approved_authority_scopes,
     authorize_and_dispatch_force_restage,
     request_item_goal,
@@ -102,6 +103,10 @@ def test_goal_scope_ceiling_defaults_and_blocks_escalation():
     assert approved_authority_scopes(TGW_EBAY_LISTABLE, ("force-restage",)) == (
         "force-restage",
     )
+    assert _evaluator_authorized_scopes(["force-restage"]) == (
+        "force-restage", "stage",
+    )
+    assert _evaluator_authorized_scopes(["stage"]) == ("stage",)
 
 
 def test_goal_uses_exact_canonical_stage_marker_not_latest_effect(tmp_path, monkeypatch):

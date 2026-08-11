@@ -49,6 +49,14 @@ def approved_authority_scopes(goal: GoalProfile, requested: tuple[str, ...]) -> 
     return chosen
 
 
+def _evaluator_authorized_scopes(scopes: list[str]) -> tuple[str, ...]:
+    """Map stricter execution scopes onto their prerequisite conditions."""
+    mapped = set(scopes)
+    if "force-restage" in mapped:
+        mapped.add("stage")
+    return tuple(sorted(mapped))
+
+
 def _authoritative_stage_lookup(item: dict, provider_identity: str):
     if not provider_identity:
         return None
@@ -334,7 +342,7 @@ def request_item_goal(
             authorized_scopes.append(scope)
     snapshot = build_item_snapshot(
         item_path, goal, treatments=treatments,
-        authorized_scopes=tuple(authorized_scopes),
+        authorized_scopes=_evaluator_authorized_scopes(authorized_scopes),
         authority_identity=authority_id or "",
         stage_receipt_lookup=stage_receipt_lookup,
     )
