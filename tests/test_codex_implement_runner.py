@@ -50,6 +50,27 @@ def test_satisfied_requires_real_uncommitted_source_change(tmp_path, monkeypatch
     assert result["established_conditions"] == ["implemented"]
 
 
+def test_runner_uses_automatic_workspace_review_without_conflicting_sandbox_flag(
+    tmp_path, monkeypatch,
+):
+    repo = _repo(tmp_path)
+    monkeypatch.setattr(codex_implement, "_codex_binary", lambda: "/bin/true")
+    captured = []
+
+    def invoke(command, *, cwd, **_kwargs):
+        captured.extend(command)
+        Path(command[command.index("-o") + 1]).write_text(
+            json.dumps({"status": "blocked", "summary": "bounded", "tests": []}),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    codex_implement.run(_job(), repo, invoke=invoke)
+
+    assert "--approve-for-me" in captured
+    assert "--sandbox" not in captured
+
+
 def test_model_success_without_diff_is_partial(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     monkeypatch.setattr(codex_implement, "_codex_binary", lambda: "/bin/true")

@@ -108,7 +108,9 @@ def run(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subprocess.run) -> d
         schema_path.write_text(json.dumps(_FINAL_SCHEMA, sort_keys=True), encoding="utf-8")
         command = [
             _codex_binary(), "exec", "--ephemeral", "--ignore-user-config",
-            "--sandbox", "workspace-write", "--approve-for-me", "-C", str(cwd),
+            # Codex 0.147 makes --approve-for-me select its workspace-write
+            # sandbox and rejects an additional explicit --sandbox argument.
+            "--approve-for-me", "-C", str(cwd),
             "--output-schema", str(schema_path), "-o", str(output_path), "-",
         ]
         completed = invoke(
