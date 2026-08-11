@@ -1,0 +1,30 @@
+{
+  "schema": "tgw-independent-installer-build-verification/v1",
+  "observed_at": "2026-08-11T10:02:00-07:00",
+  "production_host": "tgw-prod",
+  "application_source": {
+    "commit": "f2ac2e18d1d84f9c964663c5dc97652f3d537899",
+    "path": "src/tgw/release_installer.py",
+    "sha256": "9967d375ab0832eecb6cd0cd14deb735a8edbd629f62aa1453e04c5d62eaab96"
+  },
+  "flake_source": {
+    "checkout": "/home/db/tgw-flake",
+    "commit": "a2794f503639f0ff092feae95421e79b6d668f5c",
+    "previous_commit": "66e4739effda14b7d76db54402c5c7583f9e7693"
+  },
+  "evaluation": {
+    "system_derivation": "/nix/store/lhdzm034kc1sanyxb1ms4l5gsbjxqcm7-nixos-system-tgw-prod-25.05.20260102.ac62194.drv",
+    "installer_package": "/nix/store/ikvbphlfb3w200qri5mqs7gpkwj2c6dq-tgw-release-install",
+    "configured_link": "/opt/TGW/installer/current",
+    "full_system_build": "PASS",
+    "installer_help_smoke": "PASS",
+    "embedded_source_sha256_match": true,
+    "imports_selected_application_release": false
+  },
+  "activation": {
+    "executed": false,
+    "authority_required": "explicit-deployment-approval",
+    "procedure": "nixos-prod-switch/v1"
+  },
+  "result": "READY_FOR_ACTIVATION_APPROVAL"
+}
