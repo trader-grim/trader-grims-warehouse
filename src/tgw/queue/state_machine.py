@@ -953,6 +953,32 @@ def queue_depths() -> Dict[str, int]:
             return {row[0]: row[1] for row in cur.fetchall()}
 
 
+def has_pending_job_with_payload(
+    queue_name: str, dedupe_key: str, accepted_payloads: List[Dict[str, Any]],
+) -> bool:
+    """Return whether an exact pending dedupe identity has an accepted shape."""
+    if not accepted_payloads:
+        return False
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                      FROM queue_jobs
+                     WHERE queue_name = %s
+                       AND dedupe_key = %s
+                       AND state IN ('queued', 'retry_wait', 'leased', 'running')
+                       AND payload_json IN (
+                           SELECT value FROM jsonb_array_elements(%s::jsonb)
+                       )
+                )
+                """,
+                (queue_name, dedupe_key, json.dumps(accepted_payloads)),
+            )
+            return bool(cur.fetchone()[0])
+
+
 def active_depths() -> Dict[str, int]:
     """Count jobs in any active state (queued/running/leased/retry_wait) per queue.
 

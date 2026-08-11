@@ -116,6 +116,47 @@ class EbaySyncWorker(QueueWorker):
             },
         }
 
+    def _find_offer_governed(self, payload, sku):
+        """Strict provider read for governed sync; never swallow evidence."""
+        try:
+            data = ebay_get(
+                self.config, "/sell/inventory/v1/offer", params={"sku": sku},
+            )
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout):
+            return self._targeted_wait_receipt(payload, sku)
+        except requests.exceptions.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status == 429 or (isinstance(status, int) and status >= 500):
+                return self._targeted_wait_receipt(payload, sku)
+            if status == 404 and int(payload.get("sync_retry", 0)) < 3:
+                return self._targeted_wait_receipt(payload, sku)
+            outcome = "failed" if status in {401, 403} else "reconciliation_required"
+            reason = (
+                "PROVIDER_AUTHORIZATION_FAILED" if status in {401, 403}
+                else "PROVIDER_OFFER_ABSENT" if status == 404
+                else "PROVIDER_RESPONSE_ERROR"
+            )
+            raise TreatmentFailure(str(exc), self._targeted_receipt(
+                payload, sku, outcome, reason, http_status=status,
+            )) from exc
+        if not isinstance(data, dict) or not isinstance(data.get("offers"), list):
+            raise TreatmentFailure("malformed provider offer response",
+                self._targeted_receipt(payload, sku, "reconciliation_required",
+                                       "PROVIDER_RESPONSE_MALFORMED"))
+        offers = data["offers"]
+        if len(offers) > 1 or any(not isinstance(offer, dict) for offer in offers):
+            raise TreatmentFailure("ambiguous provider offer response",
+                self._targeted_receipt(payload, sku, "reconciliation_required",
+                                       "PROVIDER_RESPONSE_AMBIGUOUS"))
+        if not offers:
+            if int(payload.get("sync_retry", 0)) < 3:
+                return self._targeted_wait_receipt(payload, sku)
+            raise TreatmentFailure("provider offer absent", self._targeted_receipt(
+                payload, sku, "reconciliation_required", "PROVIDER_OFFER_ABSENT",
+            ))
+        return offers[0]
+
     def _handle_governed_targeted(self, payload, sku, job):
         from tgw.item_mutation import item_generation
         from tgw.provider_effects import (
@@ -162,12 +203,11 @@ class EbaySyncWorker(QueueWorker):
                     payload, sku, "reconciliation_required",
                     "SOURCE_OPERATION_CONTRADICTION",
                 ))
-        from tgw.ebay.sync import _find_offer
-        try:
-            offer = _find_offer(self.config, sku)
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
-            log.warning("targeted sync provider read transient for %s: %s", sku, exc)
-            return self._targeted_wait_receipt(payload, sku)
+        offer = self._find_offer_governed(payload, sku)
+        if isinstance(offer, dict) and offer.get("receipt_schema_id") == (
+            "treatment-wait-receipt/v1"
+        ):
+            return offer
         if offer is None:
             raise TreatmentFailure("provider offer absent", self._targeted_receipt(
                 payload, sku, "reconciliation_required", "PROVIDER_OFFER_ABSENT",
@@ -290,10 +330,13 @@ class EbaySyncWorker(QueueWorker):
         tgw_logging.log_event("worker_start", queue=QUEUE_NAME, owner=self.owner)
         log.info("ebay_sync worker started: owner=%s", self.owner)
 
-        # Enqueue a startup sync job only if the queue is completely idle
+        # Governed/timer work must not suppress the independent periodic chain.
         try:
-            depths = state_machine.queue_depths()
-            if depths.get(QUEUE_NAME, 0) == 0:
+            pending_periodic = state_machine.has_pending_job_with_payload(
+                QUEUE_NAME, f"{QUEUE_NAME}:pending",
+                [{"reason": "startup"}, {"reason": "scheduled"}],
+            )
+            if not pending_periodic:
                 state_machine.enqueue_job(
                     queue_name=QUEUE_NAME,
                     payload={"reason": "startup"},
