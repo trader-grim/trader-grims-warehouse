@@ -106,6 +106,16 @@ TGW_EBAY_RECONCILED = GoalProfile(
     required=("provider_projection_current",),
 )
 
+TGW_EBAY_LEGACY_STAGE_ONBOARDED = GoalProfile(
+    identity="tgw.ebay_legacy_stage_onboarded", version="1",
+    required=("staged", "staged_content_current"),
+)
+
+# Dormant and intentionally absent from PROFILE and all registry helpers.
+LEGACY_STAGE_ONBOARDING_PROFILES: tuple[GoalProfile, ...] = (
+    TGW_EBAY_LEGACY_STAGE_ONBOARDED,
+)
+
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------

@@ -181,6 +181,23 @@ EBAY_SYNC_TARGETED = TreatmentContract(
     receipt_schema_id=_RECEIPT,
 )
 
+EBAY_ONBOARD_LEGACY_STAGE = TreatmentContract(
+    identity="ebay-onboard-legacy-stage",
+    version="1",
+    requires=(
+        Requirement("staged", (FingerprintResult.TRUE,)),
+        Requirement(
+            "staged_content_current",
+            (FingerprintResult.UNKNOWN, FingerprintResult.STALE),
+        ),
+    ),
+    may_establish=("staged_content_current",),
+    must_preserve=("provider_state",),
+    ownership=("listing.legacy_stage_evidence",),
+    effect_class=EffectClass.LOCAL,
+    receipt_schema_id=_RECEIPT,
+)
+
 
 # ── Grouped access ─────────────────────────────────────────────────────────
 
@@ -200,6 +217,12 @@ TGW_TREATMENTS: tuple[TreatmentContract, ...] = (
     EBAY_STAGE,
     EBAY_PUBLISH,
     EBAY_SYNC_TARGETED,
+)
+
+# Dormant until an explicit producer/admission wave.  Keeping this contract out
+# of TGW_TREATMENTS prevents the ordinary evaluator from auto-dispatching it.
+LEGACY_STAGE_ONBOARDING_TREATMENTS: tuple[TreatmentContract, ...] = (
+    EBAY_ONBOARD_LEGACY_STAGE,
 )
 
 ALL_TREATMENTS: tuple[TreatmentContract, ...] = CODING_TREATMENTS + TGW_TREATMENTS

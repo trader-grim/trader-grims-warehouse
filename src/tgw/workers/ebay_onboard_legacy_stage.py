@@ -5,11 +5,14 @@ governed handler is exercised by isolated tests until a separate admission.
 """
 from __future__ import annotations
 
+import argparse
+import re
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict
 
+from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.errors import HardFailure, TreatmentFailure
 from tgw.legacy_stage_corroboration import (
     build_and_record_legacy_stage_observation,
@@ -23,11 +26,24 @@ from tgw.queue.worker_base import QueueWorker
 TREATMENT_ID = "ebay-onboard-legacy-stage"
 TREATMENT_VERSION = "1"
 CHECKPOINT_SCHEMA = "legacy-stage-onboarding-checkpoint/v1"
+PAYLOAD_SCHEMA = "ebay-onboard-legacy-stage/v1"
+_HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 
 
 class EbayOnboardLegacyStageWorker(QueueWorker):
     def handle(self, job: Dict[str, Any]) -> Dict[str, Any] | None:
-        raise HardFailure("legacy staged-offer onboarding is not admitted")
+        payload = job.get("payload_json")
+        if not isinstance(payload, dict) or payload.get("payload_schema_id") != PAYLOAD_SCHEMA:
+            raise HardFailure("legacy onboarding payload schema is unsupported")
+        migration = self.config.get("workflow_migration")
+        if migration is None and isinstance(self.config.get("raw"), dict):
+            migration = self.config["raw"].get("workflow_migration")
+        mode = (migration or {}).get("ebay_legacy_stage_onboarding_consumer", "off")
+        if mode not in {"off", "workflow"}:
+            raise HardFailure("legacy onboarding consumer selector is invalid")
+        if mode != "workflow":
+            raise HardFailure("legacy staged-offer onboarding consumer is disabled")
+        return self._handle_governed(job)
 
     def _receipt(self, payload, sku, outcome, reason, **evidence):
         return {
@@ -41,7 +57,7 @@ class EbayOnboardLegacyStageWorker(QueueWorker):
             "condition_hash": payload["condition_hash"],
             "entity_id": sku, "outcome": outcome,
             "established_conditions": (
-                ["staged_content_current", "legacy_stage_corroborated"]
+                ["staged_content_current"]
                 if outcome == "satisfied" else []
             ),
             "artifacts": [f"item:{sku}"],
@@ -59,6 +75,8 @@ class EbayOnboardLegacyStageWorker(QueueWorker):
                    or not payload[key].strip()]
         if missing:
             raise HardFailure("legacy onboarding missing binding: " + ", ".join(missing))
+        if not _HEX64.fullmatch(payload["content_identity"]):
+            raise HardFailure("legacy onboarding content identity is malformed")
         if (payload["treatment_id"], payload["treatment_version"]) != (
             TREATMENT_ID, TREATMENT_VERSION,
         ):
@@ -277,6 +295,14 @@ class EbayOnboardLegacyStageWorker(QueueWorker):
                 raise ValueError("authoritative item SKU mismatch")
             updated = dict(document)
             offer = dict(updated.get("ebay_offer") or {})
+            for key in (
+                "provider_effect_id", "legacy_stage_observation_id",
+                "stage_content_identity",
+            ):
+                if key in offer and not (
+                    isinstance(offer[key], str) and _HEX64.fullmatch(offer[key])
+                ):
+                    raise ValueError(f"canonical {key} is malformed")
             if offer.get("offer_id") != payload["offer_id"]:
                 raise ValueError("canonical offer_id conflicts with corroborated offer")
             if offer.get("provider_effect_id"):
@@ -306,3 +332,18 @@ class EbayOnboardLegacyStageWorker(QueueWorker):
             mutate=mutate, project=self._project, project_noop=True,
             operation_id=operation_id,
         )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="tgw-ebay-onboard-legacy-stage-worker")
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG))
+    parser.add_argument("--queue", default="ebay_onboard_legacy_stage")
+    args = parser.parse_args()
+    EbayOnboardLegacyStageWorker(
+        args.queue, load_config(Path(args.config)),
+    ).run()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

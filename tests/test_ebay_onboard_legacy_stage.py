@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -9,9 +9,12 @@ from tgw.item_mutation import item_generation
 from tgw.legacy_stage_corroboration import LegacyStageRead
 from tgw.workers.ebay_onboard_legacy_stage import EbayOnboardLegacyStageWorker
 from tgw.workflow.contracts import FingerprintResult, GoalProfile
+from tgw.workflow.evaluator import evaluate
 from tgw.workflow.item_snapshot import build_item_snapshot
 from tgw.workflow.listing_migration import _authoritative_stage_lookup
 from tgw.workflow.operator_authority import listing_content_identity
+from tgw.workflow.profiles import TGW_EBAY_LEGACY_STAGE_ONBOARDED
+from tgw.workflow.treatments import LEGACY_STAGE_ONBOARDING_TREATMENTS
 
 
 def _bodies():
@@ -67,10 +70,11 @@ def _job(path):
         "lease_token": "22222222-2222-4222-8222-222222222222",
         "entity_type": "item", "entity_id": "SKU-1",
         "payload_json": {
+            "payload_schema_id": "ebay-onboard-legacy-stage/v1",
             "sku": "SKU-1", "entity_id": "SKU-1", "offer_id": "OFF-1",
             "provider_identity": "ebay:account-1",
             "object_generation": generation, "graph_id": "graph-1",
-            "condition_hash": "condition-1", "content_identity": "content-1",
+            "condition_hash": "condition-1", "content_identity": "c" * 64,
             "goal_profile_id": "tgw.ebay_staged",
             "goal_profile_version": "1",
             "treatment_id": "ebay-onboard-legacy-stage",
@@ -94,13 +98,82 @@ def _repository_and_projection(monkeypatch):
                         lambda *args: {"ok": True})
 
 
-def test_public_handle_is_unconditionally_fail_closed(tmp_path):
+def test_public_handle_defaults_off_before_provider_read(tmp_path):
     worker, path = _worker(tmp_path)
     with patch(
         "tgw.workers.ebay_onboard_legacy_stage.read_legacy_stage_observation",
-    ) as read, pytest.raises(HardFailure, match="not admitted"):
+    ) as read, pytest.raises(HardFailure, match="disabled"):
         worker.handle(_job(path))
     read.assert_not_called()
+
+
+def test_public_handle_routes_only_exact_schema_and_workflow_mode(tmp_path, monkeypatch):
+    worker, path = _worker(tmp_path)
+    worker.config["workflow_migration"][
+        "ebay_legacy_stage_onboarding_consumer"
+    ] = "workflow"
+    expected = {"outcome": "satisfied"}
+    governed = MagicMock(return_value=expected)
+    monkeypatch.setattr(worker, "_handle_governed", governed)
+    job = _job(path)
+    assert worker.handle(job) == expected
+    governed.assert_called_once_with(job)
+
+
+@pytest.mark.parametrize("schema", [None, "", "ebay-onboard-legacy-stage/v2"])
+def test_public_handle_rejects_partial_or_mixed_schema(tmp_path, schema):
+    worker, path = _worker(tmp_path)
+    worker.config["workflow_migration"][
+        "ebay_legacy_stage_onboarding_consumer"
+    ] = "workflow"
+    job = _job(path)
+    if schema is None:
+        job["payload_json"].pop("payload_schema_id")
+    else:
+        job["payload_json"]["payload_schema_id"] = schema
+    with pytest.raises(HardFailure, match="schema"):
+        worker.handle(job)
+
+
+def test_public_handle_rejects_invalid_selector_before_get(tmp_path):
+    worker, path = _worker(tmp_path)
+    worker.config["workflow_migration"][
+        "ebay_legacy_stage_onboarding_consumer"
+    ] = "invalid"
+    with patch(
+        "tgw.workers.ebay_onboard_legacy_stage.read_legacy_stage_observation",
+    ) as read, pytest.raises(HardFailure, match="selector"):
+        worker.handle(_job(path))
+    read.assert_not_called()
+
+
+@pytest.mark.parametrize("key,value", [
+    ("provider_effect_id", False),
+    ("provider_effect_id", ""),
+    ("legacy_stage_observation_id", "A" * 64),
+    ("stage_content_identity", "short"),
+])
+def test_malformed_present_markers_fail_closed(tmp_path, key, value):
+    worker, path = _worker(tmp_path)
+    document = json.loads(path.read_text())
+    document["ebay_offer"][key] = value
+    path.write_text(json.dumps(document))
+    payload = _job(path)["payload_json"]
+    from tgw.item_mutation import operation_identity
+    operation_payload = {
+        "content_identity": payload["content_identity"],
+        "comparison_fingerprint": "d" * 64,
+        "observation_id": "a" * 64,
+    }
+    operation_id = operation_identity(
+        sku=payload["sku"], kind="ebay-onboard-legacy-stage",
+        expected_generation=payload["object_generation"], payload=operation_payload,
+    )
+    receipt = worker._apply_marker(
+        payload, path, "a" * 64, operation_id, "d" * 64,
+    )
+    assert receipt.status == "FAILED"
+    assert json.loads(path.read_text()) == document
 
 
 def test_corroborated_observation_commits_distinct_markers(tmp_path, monkeypatch):
@@ -122,13 +195,11 @@ def test_corroborated_observation_commits_distinct_markers(tmp_path, monkeypatch
     receipt = worker._handle_governed(job)
     document = json.loads(path.read_text())
     assert receipt["outcome"] == "satisfied"
-    assert receipt["established_conditions"] == [
-        "staged_content_current", "legacy_stage_corroborated",
-    ]
+    assert receipt["established_conditions"] == ["staged_content_current"]
     assert document["ebay_offer"]["legacy_stage_observation_id"] == receipt["evidence"][
         "observation_id"
     ]
-    assert document["ebay_offer"]["stage_content_identity"] == "content-1"
+    assert document["ebay_offer"]["stage_content_identity"] == "c" * 64
     assert document["ebay_offer"]["offer_id"] == "OFF-1"
     assert document["ebay_offer"]["keep"] == "value"
     assert "provider_effect_id" not in json.dumps(document)
@@ -327,7 +398,7 @@ def test_exact_existing_markers_are_semantic_noop_with_sqlite_verification(
     document = json.loads(path.read_text())
     document["ebay_offer"].update({
         "legacy_stage_observation_id": "a" * 64,
-        "stage_content_identity": "content-1",
+        "stage_content_identity": "c" * 64,
     })
     path.write_text(json.dumps(document))
     payload = _job(path)["payload_json"]
@@ -336,7 +407,7 @@ def test_exact_existing_markers_are_semantic_noop_with_sqlite_verification(
     operation_id = operation_identity(
         sku="SKU-1", kind="ebay-onboard-legacy-stage",
         expected_generation=payload["object_generation"],
-        payload={"content_identity": "content-1",
+        payload={"content_identity": "c" * 64,
                  "comparison_fingerprint": comparison_fingerprint,
                  "observation_id": "a" * 64},
     )
@@ -363,7 +434,7 @@ def test_existing_provider_effect_marker_rejects_legacy_marker(tmp_path):
     operation_id = operation_identity(
         sku="SKU-1", kind="ebay-onboard-legacy-stage",
         expected_generation=payload["object_generation"],
-        payload={"content_identity": "content-1",
+        payload={"content_identity": "c" * 64,
                  "comparison_fingerprint": "b" * 64,
                  "observation_id": "a" * 64},
     )
@@ -405,6 +476,46 @@ def test_legacy_marker_authoritatively_makes_snapshot_current(tmp_path, monkeypa
     assertion = next(item for item in snapshot.assertions
                      if item.condition_id == "staged_content_current")
     assert assertion.result is FingerprintResult.TRUE
+
+
+def test_isolated_evaluator_moves_from_eligible_to_satisfied(tmp_path, monkeypatch):
+    _, path = _worker(tmp_path)
+    before = build_item_snapshot(path, TGW_EBAY_LEGACY_STAGE_ONBOARDED)
+    initial = evaluate(
+        snapshot=before, goal=TGW_EBAY_LEGACY_STAGE_ONBOARDED,
+        treatments=LEGACY_STAGE_ONBOARDING_TREATMENTS,
+        evaluator_version="legacy-stage-onboarding-test/v1",
+    )
+    assert [item.treatment_id for item in initial.eligible_treatments] == [
+        "ebay-onboard-legacy-stage",
+    ]
+
+    document = json.loads(path.read_text())
+    content_identity = listing_content_identity(document)
+    document["ebay_offer"].update({
+        "legacy_stage_observation_id": "a" * 64,
+        "stage_content_identity": content_identity,
+    })
+    path.write_text(json.dumps(document))
+    monkeypatch.setattr(
+        "tgw.provider_observations.lookup_authoritative_legacy_stage_receipt",
+        lambda **kwargs: {
+            "receipt_id": kwargs["observation_id"],
+            "content_identity": kwargs["content_identity"],
+        },
+    )
+    lookup = _authoritative_stage_lookup(document, "ebay:account-1")
+    after = build_item_snapshot(
+        path, TGW_EBAY_LEGACY_STAGE_ONBOARDED,
+        stage_receipt_lookup=lookup,
+    )
+    completed = evaluate(
+        snapshot=after, goal=TGW_EBAY_LEGACY_STAGE_ONBOARDED,
+        treatments=LEGACY_STAGE_ONBOARDING_TREATMENTS,
+        evaluator_version="legacy-stage-onboarding-test/v1",
+    )
+    assert completed.satisfied_requirements == ("staged", "staged_content_current")
+    assert completed.eligible_treatments == ()
 
 
 @pytest.mark.parametrize("dual", [False, True])
