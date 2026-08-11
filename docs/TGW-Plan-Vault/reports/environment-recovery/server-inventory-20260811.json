@@ -1,0 +1,40 @@
+{
+  "schema": "tgw-environment-server-inventory/v1",
+  "observed_at": "2026-08-11T08:28:18-07:00",
+  "effect_class": "read-only",
+  "source_commit": "2f8e2f7c0dcad658a9d7cce8ad089c5a7fe3ec03",
+  "source_tree": "c371463e3baf87034755e1e320bafb610b24b377",
+  "facts": {
+    "production": {
+      "canonical_name": "tgw-prod",
+      "current_release": "/opt/TGW/releases/ppworkflow-2f8e2f7c-20260811",
+      "http_service": {"active": true, "user": "tgw", "group": "tgw"},
+      "flake": {
+        "path": "/home/db/tgw-flake",
+        "branch": "master",
+        "head": "66e4739effda14b7d76db54402c5c7583f9e7693",
+        "dirty": ["nix/tgw.nix.bak"]
+      }
+    },
+    "development": {
+      "canonical_name": "tgw-lib",
+      "checkout": "/opt/TGW/tgw-lib/actors/codex/source/trader-grims-warehouse",
+      "branch": "recovery/pp-workflow-marketplace",
+      "origin_kind": "bootstrap-bundle",
+      "linked_worktrees": 2
+    },
+    "retired_alias": {"name": "a1131", "current": false}
+  },
+  "conflicts": [
+    "The Codex checkout origin is a bootstrap bundle rather than a canonical writable remote.",
+    "The tgw-lib system service inventory was unavailable from the managed sandbox and remains unknown.",
+    "Historical repository text still contains current-sounding a1131 host and procedure claims.",
+    "The production flake checkout contains preserved untracked nix/tgw.nix.bak."
+  ],
+  "unknowns": [
+    "Canonical writable application repository remote and promotion path",
+    "Complete tgw-lib unit and timer inventory",
+    "Current instruction-source resolution for each installed agent runtime"
+  ],
+  "effects": []
+}

@@ -1,0 +1,35 @@
+{
+  "schema": "tgw-environment-satellite-reference-inventory/v1",
+  "observed_at": "2026-08-11T08:28:18-07:00",
+  "effect_class": "read-only",
+  "network_contact": false,
+  "recovered_credentials_used": false,
+  "hosts": {
+    "catnanny": {"access": "unverified", "quarantine": true},
+    "helicrew": {"access": "unverified", "quarantine": true}
+  },
+  "reference_count": 45,
+  "files": {
+    "docs/TGW-Plan-Vault/inbox/archive/DONE-2026-07-25-TIGWA-RESPONSE-portable-fleet-current-os-app-inventory-2026-07-25.md": "sha256:993eacbaca805a084a18f64a591b0dc2f7a86e7a49b24bfbe296701904046b6d",
+    "docs/TGW-Plan-Vault/inbox/claude/DONE-2026-07-25-git-cleanup-inbox-backlog-lix-helicrew.md": "sha256:4c262e67599a6f0b97db251916f94496cec7bacac2c777bc767166e7976c2b76",
+    "docs/TGW-Plan-Vault/inbox/tigwa/CLAUDE-REQUEST-status-check-consolidated-nix-source-branch-ready-to-2026-07-25.md": "sha256:0787e0eb84ba5eebfb4b685773ccc4b7b0538fd9bf81d71b94563f227d58ffdd",
+    "docs/TGW-Plan-Vault/inbox/tigwa/TIGWA-CHECKPOINT-20260726-0005-helicrew-move-and-1692.md": "sha256:e7d6924735026d41c2f797dda74479addfe844b55690f6f19892fb97c74f533b",
+    "docs/TGW-Plan-Vault/plan/PLAN-environment-cleanup-program.md": "sha256:8ae49a7dae9eb7ba7bcad4bd88bd4882b5f56c3238382ebbdbce618d88b4d08d",
+    "docs/TGW-Plan-Vault/plan/PLAN-environment-cleanup-satellites-workflow.md": "sha256:284b71ac423ea4cd55b5b58bb8144668cdf23c5e1733816b1b00028bd7827254",
+    "docs/TGW-Plan-Vault/plan/PLAN-environment-cleanup-satellites.md": "sha256:8de13b2dd39d7ee9f762da632f076f493b80106ee2ebe12b95f2bb60c1c45de1",
+    "docs/TGW-Plan-Vault/plan/TGW-Master-Plan.md": "sha256:42f62f909ac920f2bd2e3ae31cd1af9afc7c89e0dec5c7a51f7bcce9ce341f22",
+    "docs/TGW-Plan-Vault/plan/TGW-Taskboard.md": "sha256:15661b5f9f8b4c2b133014b03d5fd0339f468d030b4ff4e703dcd903f2317ceb",
+    "docs/TGW-Plan-Vault/plan/handoff.md": "sha256:d7459904e1d0cbc2e4cb5487acfa0f332514200ec6836376bc8e94a10f78a1e4",
+    "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md": "sha256:94c281552a0839360b733833e1f16376a635ffad3af73d3453b4f5f32cfeb05a",
+    "docs/TGW-Plan-Vault/plan/pp/PP-PORTABLE-CATALOG-001.md": "sha256:e6d45e684f123f8e776866dc4e342f49662ba4aeea79adee562e90c1a2a0eea5",
+    "docs/coding-provision-config.md": "sha256:b83fddc0c1bedc457af925ad1f8e5e5d11c4d3ff93f4d0c4eaf6616b38861cdf"
+  },
+  "classification": "historical repository references only; none establishes current host identity, access, integrity, or authority",
+  "holds": [
+    "No verified host identity or acquisition manifest for catnanny",
+    "No verified host identity or acquisition manifest for helicrew",
+    "No approved sterile access path",
+    "No recovered code or memory may execute or enter current agent context"
+  ],
+  "effects": []
+}

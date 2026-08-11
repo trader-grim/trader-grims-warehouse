@@ -1,0 +1,18 @@
+{
+  "schema": "tgw-plan-evidence/v1",
+  "receipt_id": "satellite-reference-inventory-2d659944d54761f0",
+  "plan_id": "PLAN-environment-cleanup-satellites",
+  "plan_version": 1,
+  "scope_hash": "sha256:58a9ce433b315fdee492cd3e1293a5278bfc70e34593c9eb08f16fd74c14c7fb",
+  "registry_revision": "sha256:0f829f7de2d7a90de00d7c5fc3cb2442add9a069b7459b8cfc9d273382914f6d",
+  "graph_id": "sha256:00e8b7e2ffd5a0c0f7c7ea14c65869d27c538e2f68d049d7f121d2b6f0bdd971",
+  "condition_hash": "sha256:4a95c4206295b299154585aafaf3f685d938d43b3e28b0913b5f2a37deac28a1",
+  "work_unit_id": "L0-satellite-reference-inventory",
+  "acceptance_id": "quarantine-boundary-recorded",
+  "entity": "inventory:quarantined-satellites",
+  "verifier": "tgw.environment.satellite-quarantine/v1",
+  "verifier_version": "1",
+  "result": "true",
+  "observed_at": "2026-08-11T08:28:18-07:00",
+  "evidence_hash": "sha256:f77302a18b5a7f1dcdb8092d775f8298a371d6fe2bbda126fd63fd12a77e94d4"
+}

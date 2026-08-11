@@ -1,0 +1,16 @@
+{
+  "enums": {
+    "authority": ["plan-approved"],
+    "effect_class": ["read-only"],
+    "kind": ["discovery"]
+  },
+  "schema": "tgw-plan-registry/v1",
+  "treatments": {
+    "environment-server-inventory": {"version": "1"},
+    "environment-satellite-reference-inventory": {"version": "1"}
+  },
+  "verifiers": {
+    "tgw.environment.server-inventory/v1": {"version": "1"},
+    "tgw.environment.satellite-quarantine/v1": {"version": "1"}
+  }
+}

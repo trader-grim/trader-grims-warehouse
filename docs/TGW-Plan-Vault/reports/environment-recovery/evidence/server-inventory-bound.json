@@ -1,0 +1,18 @@
+{
+  "schema": "tgw-plan-evidence/v1",
+  "receipt_id": "server-inventory-f16ad5146842bc84",
+  "plan_id": "PLAN-environment-cleanup-servers",
+  "plan_version": 1,
+  "scope_hash": "sha256:88d03f1ba5f116b23b1c2aa77bdf73f222747096bbe3cea45e87d06878abe998",
+  "registry_revision": "sha256:0f829f7de2d7a90de00d7c5fc3cb2442add9a069b7459b8cfc9d273382914f6d",
+  "graph_id": "sha256:6113bb12b1c5956dfda20f81b9f936925eaeca6bc3fe31fa4fe4362ab35c2cb5",
+  "condition_hash": "sha256:c36aca368a562462ccd84fe2309c65b16f43e807608f5826fc0fa68ba1487496",
+  "work_unit_id": "S0-server-inventory",
+  "acceptance_id": "server-inventory-bound",
+  "entity": "inventory:server-environment",
+  "verifier": "tgw.environment.server-inventory/v1",
+  "verifier_version": "1",
+  "result": "true",
+  "observed_at": "2026-08-11T08:28:18-07:00",
+  "evidence_hash": "sha256:4554c7f02e1c0aee30803995bb2c9b780f69b35d2cb8158fa00ee1e0c3cb5adb"
+}
