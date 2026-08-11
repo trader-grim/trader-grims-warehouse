@@ -56,18 +56,38 @@ def _authoritative_stage_lookup(item: dict, provider_identity: str):
     offer = item.get("ebay_offer") if isinstance(item.get("ebay_offer"), dict) else {}
 
     def lookup(sku):
-        markers = (offer.get("provider_effect_id"),
-                   offer.get("stage_content_identity"), offer.get("offer_id"))
+        effect_id = offer.get("provider_effect_id")
+        observation_id = offer.get("legacy_stage_observation_id")
+        content_identity = offer.get("stage_content_identity")
+        offer_id = offer.get("offer_id")
+        if effect_id and observation_id:
+            return None
+        markers = (content_identity, offer_id)
         if not all(isinstance(value, str) and value.strip() for value in markers):
             return None
-        try:
-            return lookup_authoritative_stage_receipt(
-                sku=sku, provider_effect_id=markers[0],
-                stage_content_identity=markers[1], offer_id=markers[2],
-                expected_provider_identity=provider_identity,
+        if isinstance(effect_id, str) and effect_id.strip():
+            try:
+                return lookup_authoritative_stage_receipt(
+                    sku=sku, provider_effect_id=effect_id,
+                    stage_content_identity=content_identity, offer_id=offer_id,
+                    expected_provider_identity=provider_identity,
+                )
+            except ProviderEffectConflict:
+                return None
+        if isinstance(observation_id, str) and observation_id.strip():
+            from tgw.provider_observations import (
+                ProviderObservationConflict,
+                lookup_authoritative_legacy_stage_receipt,
             )
-        except ProviderEffectConflict:
-            return None
+            try:
+                return lookup_authoritative_legacy_stage_receipt(
+                    observation_id=observation_id, sku=sku, offer_id=offer_id,
+                    provider_identity=provider_identity,
+                    content_identity=content_identity,
+                )
+            except ProviderObservationConflict:
+                return None
+        return None
 
     return lookup
 

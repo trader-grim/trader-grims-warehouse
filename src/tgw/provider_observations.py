@@ -203,6 +203,73 @@ def record_provider_observation(
         return persist(con)
 
 
+def lookup_provider_observation(
+    observation_id: str, *, connection: Any | None = None,
+) -> ProviderObservation | None:
+    if (not isinstance(observation_id, str) or len(observation_id) != 64
+            or any(character not in "0123456789abcdef" for character in observation_id)):
+        raise ProviderObservationConflict("invalid provider observation identity")
+
+    def load(con: Any) -> ProviderObservation | None:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM provider_observations WHERE observation_id=%s",
+                (observation_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        observation = _record(row)
+        rebuilt = build_provider_observation(
+            provider=observation.provider,
+            provider_identity=observation.provider_identity,
+            sku=observation.sku, offer_id=observation.offer_id,
+            object_generation=observation.object_generation,
+            graph_id=observation.graph_id, condition_hash=observation.condition_hash,
+            content_identity=observation.content_identity,
+            outcome=observation.outcome, evidence=observation.evidence,
+            observed_at=observation.observed_at,
+            observation_type=observation.observation_type,
+        )
+        if rebuilt.observation_id != observation_id:
+            raise ProviderObservationConflict("durable provider observation identity mismatch")
+        return observation
+
+    if connection is not None:
+        return load(connection)
+    with state_machine._conn() as con:
+        return load(con)
+
+
+def lookup_authoritative_legacy_stage_receipt(
+    *, observation_id: str, sku: str, offer_id: str,
+    provider_identity: str, content_identity: str,
+    connection: Any | None = None,
+) -> dict[str, Any]:
+    observation = lookup_provider_observation(
+        observation_id, connection=connection,
+    )
+    if observation is None:
+        raise ProviderObservationConflict("legacy stage observation is absent")
+    expected = {
+        "provider": "ebay", "provider_identity": provider_identity,
+        "sku": sku, "offer_id": offer_id,
+        "content_identity": content_identity,
+        "observation_type": LEGACY_STAGE_OBSERVATION,
+        "outcome": "corroborated",
+    }
+    if any(getattr(observation, key) != value for key, value in expected.items()):
+        raise ProviderObservationConflict("legacy stage observation binding mismatch")
+    return {
+        "receipt_schema_id": LEGACY_STAGE_RECEIPT_SCHEMA,
+        "receipt_id": observation.observation_id,
+        "observation_id": observation.observation_id,
+        "content_identity": observation.content_identity,
+        "offer_id": observation.offer_id,
+        "provider_identity": observation.provider_identity,
+    }
+
+
 def resolve_legacy_stage_corroboration(
     observation: ProviderObservation, *, sku: str, offer_id: str,
     provider: str, provider_identity: str, object_generation: str,
