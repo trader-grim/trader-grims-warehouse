@@ -1,0 +1,63 @@
+{
+  "condition_hash": "sha256:f487c3a5814b841bca98f54d9ebf99f7c157741529835fbd03c84a28ed0413eb",
+  "graph_id": "sha256:c15000f316cf6927da953e84fc0115bcaf11f7f5273654a22fc38525525f063b",
+  "plan_acceptance": [
+    "S7-recovery-readonly-cli:readonly-cli-boundary-valid"
+  ],
+  "plan_id": "PLAN-environment-recovery-readonly-cli",
+  "plan_version": 1,
+  "registry_revision": "sha256:5bab6383a444a8e459775388da6ac377edd42dcc7fcc86dbae1ea30c21ca9589",
+  "repository": {
+    "canonical_root": "/opt/TGW/tgw-lib/actors/codex/source/trader-grims-warehouse",
+    "repository_id": "trader-grims-warehouse",
+    "source_commit": "8c88d4a086c0904b280cf7ab75c950d1e456b2ba"
+  },
+  "required_conditions": [
+    "S7-recovery-readonly-cli:readonly-cli-boundary-valid"
+  ],
+  "schema": "tgw-plan-compiled-graph/v1",
+  "scope_hash": "sha256:ba2558340f9dea2e400f133fad311d566654763bd944d60063b51620489ce313",
+  "source_hash": "sha256:af463d04dd267bd0bc24d9d7afe67c01c470788670c402ea41071499f8ae7f58",
+  "work_units": [
+    {
+      "acceptance": [
+        {
+          "assertion": "only_structured_query_and_audit_operations_are_reachable",
+          "condition_id": "S7-recovery-readonly-cli:readonly-cli-boundary-valid",
+          "evidence_schema": "tgw-plan-evidence/v1",
+          "freshness": "same-plan-version",
+          "id": "readonly-cli-boundary-valid",
+          "verifier": "tgw.environment.recovery-readonly-cli/v1",
+          "verifier_version": "1"
+        }
+      ],
+      "authority": "plan-approved",
+      "effect_class": "local-reversible",
+      "id": "S7-recovery-readonly-cli",
+      "inputs": {
+        "history_lookup": "absent",
+        "operations": [
+          "query",
+          "audit"
+        ],
+        "procedure_execution": "absent"
+      },
+      "kind": "configuration",
+      "on_conflict": "reconciliation_required",
+      "outputs": [
+        {
+          "id": "environment-recovery-cli",
+          "schema": "tgw-environment-recovery-cli/v1"
+        }
+      ],
+      "owns": [
+        "interface:environment-recovery-readonly"
+      ],
+      "requires": [],
+      "rollback": "revert only the local CLI source and entry point",
+      "title": "Expose structured steward queries and acceptance auditing without effects",
+      "treatment_id": "environment-recovery-readonly-cli",
+      "treatment_version": "1"
+    }
+  ]
+}

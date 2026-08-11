@@ -1,0 +1,14 @@
+{
+  "enums": {
+    "authority": ["plan-approved"],
+    "effect_class": ["local-reversible"],
+    "kind": ["configuration"]
+  },
+  "schema": "tgw-plan-registry/v1",
+  "treatments": {
+    "environment-recovery-readonly-cli": {"version": "1"}
+  },
+  "verifiers": {
+    "tgw.environment.recovery-readonly-cli/v1": {"version": "1"}
+  }
+}

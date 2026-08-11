@@ -1,0 +1,14 @@
+{
+  "conditions": [
+    {
+      "condition_id": "S7-recovery-readonly-cli:readonly-cli-boundary-valid",
+      "receipt_ids": [
+        "recovery-readonly-cli-20260811"
+      ],
+      "result": "true"
+    }
+  ],
+  "graph_id": "sha256:c15000f316cf6927da953e84fc0115bcaf11f7f5273654a22fc38525525f063b",
+  "ready_for_candidate": true,
+  "schema": "tgw-plan-status/v1"
+}
