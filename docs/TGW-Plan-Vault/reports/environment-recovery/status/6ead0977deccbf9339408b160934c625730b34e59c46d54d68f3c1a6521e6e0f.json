@@ -1,0 +1,14 @@
+{
+  "conditions": [
+    {
+      "condition_id": "L2-satellite-evidence-contract:satellite-evidence-boundary-valid",
+      "receipt_ids": [
+        "satellite-evidence-contract-20260811"
+      ],
+      "result": "true"
+    }
+  ],
+  "graph_id": "sha256:b8d21b2feeeecfddcdd95aedc7434c6142b2ca5a2f5fb8721a1d7a252707a6ec",
+  "ready_for_candidate": true,
+  "schema": "tgw-plan-status/v1"
+}

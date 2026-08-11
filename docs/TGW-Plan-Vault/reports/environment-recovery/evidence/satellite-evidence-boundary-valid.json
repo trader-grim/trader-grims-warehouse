@@ -1,0 +1,18 @@
+{
+  "schema": "tgw-plan-evidence/v1",
+  "receipt_id": "satellite-evidence-contract-20260811",
+  "plan_id": "PLAN-satellite-evidence-contract",
+  "plan_version": 1,
+  "scope_hash": "sha256:99e256605e6907fdff47fb488219ddda3fd02a8e8531a76dbe4b0d630c1d0e32",
+  "registry_revision": "sha256:fae3f04f133c4ec41b0c73808e48ceed8a5fb37772bcb2225868741b978f547b",
+  "graph_id": "sha256:b8d21b2feeeecfddcdd95aedc7434c6142b2ca5a2f5fb8721a1d7a252707a6ec",
+  "condition_hash": "sha256:6029d75721144d259ec7bda146cdb33293013ff214821b69f19a075f6a650fb8",
+  "work_unit_id": "L2-satellite-evidence-contract",
+  "acceptance_id": "satellite-evidence-boundary-valid",
+  "entity": "schema:satellite-evidence-package",
+  "verifier": "tgw.environment.satellite-evidence-contract/v1",
+  "verifier_version": "1",
+  "result": "true",
+  "observed_at": "2026-08-11T09:42:00-07:00",
+  "evidence_hash": "sha256:feaaace5774a758a5852ce21cf8d1ca974f11827a0db0fe3f2876fdf37b1371a"
+}

@@ -1,0 +1,64 @@
+{
+  "condition_hash": "sha256:6029d75721144d259ec7bda146cdb33293013ff214821b69f19a075f6a650fb8",
+  "graph_id": "sha256:b8d21b2feeeecfddcdd95aedc7434c6142b2ca5a2f5fb8721a1d7a252707a6ec",
+  "plan_acceptance": [
+    "L2-satellite-evidence-contract:satellite-evidence-boundary-valid"
+  ],
+  "plan_id": "PLAN-satellite-evidence-contract",
+  "plan_version": 1,
+  "registry_revision": "sha256:fae3f04f133c4ec41b0c73808e48ceed8a5fb37772bcb2225868741b978f547b",
+  "repository": {
+    "canonical_root": "/opt/TGW/tgw-lib/actors/codex/source/trader-grims-warehouse",
+    "repository_id": "trader-grims-warehouse",
+    "source_commit": "48a974a27d5bf0f859bb43c6bcd0d2fa86754280"
+  },
+  "required_conditions": [
+    "L2-satellite-evidence-contract:satellite-evidence-boundary-valid"
+  ],
+  "schema": "tgw-plan-compiled-graph/v1",
+  "scope_hash": "sha256:99e256605e6907fdff47fb488219ddda3fd02a8e8531a76dbe4b0d630c1d0e32",
+  "source_hash": "sha256:3cf20be6c424fdc6bf1090a88100909d290210b4e4dfabbaeecde09d80b8dc71",
+  "work_units": [
+    {
+      "acceptance": [
+        {
+          "assertion": "provenance_quarantine_secret_and_authority_rules_fail_closed",
+          "condition_id": "L2-satellite-evidence-contract:satellite-evidence-boundary-valid",
+          "evidence_schema": "tgw-plan-evidence/v1",
+          "freshness": "same-plan-version",
+          "id": "satellite-evidence-boundary-valid",
+          "verifier": "tgw.environment.satellite-evidence-contract/v1",
+          "verifier_version": "1"
+        }
+      ],
+      "authority": "plan-approved",
+      "effect_class": "local-reversible",
+      "id": "L2-satellite-evidence-contract",
+      "inputs": {
+        "current_authority": "forbidden",
+        "executable_content": "forbidden",
+        "quarantine": "required",
+        "source_hosts": [
+          "catnanny",
+          "helicrew"
+        ]
+      },
+      "kind": "configuration",
+      "on_conflict": "reconciliation_required",
+      "outputs": [
+        {
+          "id": "satellite-evidence-package-contract",
+          "schema": "tgw-satellite-evidence-package/v1"
+        }
+      ],
+      "owns": [
+        "schema:satellite-evidence-package"
+      ],
+      "requires": [],
+      "rollback": "revert only this local validator contract",
+      "title": "Validate append-only neutral evidence and classification boundaries",
+      "treatment_id": "environment-satellite-evidence-contract",
+      "treatment_version": "1"
+    }
+  ]
+}
