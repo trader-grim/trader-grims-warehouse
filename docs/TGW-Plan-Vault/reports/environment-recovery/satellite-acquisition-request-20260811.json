@@ -1,0 +1,31 @@
+{
+  "schema": "tgw-satellite-acquisition-request/v1",
+  "created_at": "2026-08-11T10:08:00-07:00",
+  "requested_by": "agent:codex:tgw-environment-recovery",
+  "quarantine": true,
+  "recovered_memory_grants_authority": false,
+  "credentials_requested": false,
+  "destructive_action_requested": false,
+  "hosts": {
+    "catnanny": {
+      "physical_identity": "operator-input-required",
+      "custody_holder": "operator-input-required",
+      "power_and_network_state": "operator-input-required",
+      "storage_readability": "operator-input-required",
+      "acquisition_method": "operator-input-required",
+      "acquisition_authorized": false,
+      "status": "held"
+    },
+    "helicrew": {
+      "physical_identity": "operator-input-required",
+      "custody_holder": "operator-input-required",
+      "power_and_network_state": "operator-input-required",
+      "storage_readability": "operator-input-required",
+      "acquisition_method": "operator-input-required",
+      "acquisition_authorized": false,
+      "status": "held"
+    }
+  },
+  "runbook": "docs/TGW-Plan-Vault/reference/runbooks/satellite-recovery-operator-handoff.md",
+  "result": "AWAITING_OPERATOR_CUSTODY_AND_ACQUISITION_DECISIONS"
+}
