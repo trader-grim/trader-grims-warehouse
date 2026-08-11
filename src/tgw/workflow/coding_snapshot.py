@@ -223,11 +223,45 @@ def _find_canonical_branch(worktree: Path) -> Optional[str]:
 
 def _check_implemented(
     worktree: Path,
+    baseline_commit: str | None = None,
 ) -> tuple[FingerprintResult, tuple[str, ...], tuple[EvidenceReference, ...]]:
     """Task branch exists and diff is non-empty."""
     head = _git_rev_parse(worktree, "HEAD")
     if head is None:
         return FingerprintResult.UNKNOWN, ("not a git repository",), ()
+
+    if baseline_commit is not None:
+        if head != baseline_commit:
+            return FingerprintResult.UNKNOWN, (
+                "HEAD no longer matches the source-bound implementation baseline",
+            ), (
+                EvidenceReference(
+                    identity=head,
+                    source_class="git",
+                    source_generation="HEAD",
+                    freshness_identity=baseline_commit,
+                ),
+            )
+        fingerprint = _git_source_fingerprint(worktree)
+        empty = hashlib.sha256(b"|").hexdigest()
+        implemented = fingerprint != empty
+        return (
+            FingerprintResult.TRUE if implemented else FingerprintResult.FALSE,
+            (
+                "working tree has implementation changes from the source-bound commit"
+                if implemented
+                else "working tree matches the source-bound commit",
+            ),
+            (
+                EvidenceReference(
+                    identity=head,
+                    source_class="git",
+                    source_generation="HEAD",
+                    freshness_identity=fingerprint,
+                    supersession_identity=baseline_commit,
+                ),
+            ),
+        )
 
     branch = _git_branch(worktree)
     if branch is None:
@@ -581,6 +615,8 @@ def build_coding_snapshot(
     worktree_path: str | Path,
     goal_profile: GoalProfile,
     treatments: tuple[TreatmentContract, ...] = (),
+    *,
+    implementation_baseline_commit: str | None = None,
 ) -> ObjectSnapshot:
     """Build a read-only ObjectSnapshot by checking coding conditions in a
     git worktree.
@@ -634,7 +670,11 @@ def build_coding_snapshot(
             )
             continue
 
-        if condition_id in {"reviewed", "controller_verified", "deployed"}:
+        if condition_id == "implemented":
+            result, reasons, evidence = checker(
+                worktree, implementation_baseline_commit,
+            )
+        elif condition_id in {"reviewed", "controller_verified", "deployed"}:
             result, reasons, evidence = checker(worktree, object_id, generation)
         else:
             result, reasons, evidence = checker(worktree)

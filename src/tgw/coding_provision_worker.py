@@ -253,9 +253,16 @@ def configured_client(config: dict[str, Any]) -> CodingProvisionClient:
     return CodingProvisionClient(str(endpoint or ""), credential, str(coding.get("worker_identity") or ""))
 
 
-def local_snapshot_claim(config: dict[str, Any], worktree: str) -> dict[str, Any]:
+def local_snapshot_claim(
+    config: dict[str, Any], worktree: str, source_commit: str | None = None,
+) -> dict[str, Any]:
     """Create the portable observation which tgw-prod will evaluate."""
-    snapshot = build_coding_snapshot(worktree, CODING_READY_FOR_IMPLEMENTATION, CODING_TREATMENTS)
+    snapshot = build_coding_snapshot(
+        worktree,
+        CODING_READY_FOR_IMPLEMENTATION,
+        CODING_TREATMENTS,
+        implementation_baseline_commit=source_commit,
+    )
     return serialize_snapshot(snapshot)
 
 
@@ -269,7 +276,11 @@ def claim_and_run(
     if document.get("state") != "queued":
         raise HardFailure("coding provision request is not claimable")
     envelope = _validate_before_claim(document, coding, local_host, worker_identity)
-    snapshot = local_snapshot_claim(config, envelope["location"]["worktree"])
+    snapshot = local_snapshot_claim(
+        config,
+        envelope["location"]["worktree"],
+        document.get("source_commit"),
+    )
     try:
         claimed = service.claim(request_id, local_host, envelope["envelope_hash"], envelope["location"], snapshot)
         lease_token = claimed.get("lease_token") if isinstance(claimed, dict) else None

@@ -208,6 +208,37 @@ class TestCheckImplemented:
         assert result is FingerprintResult.FALSE
         assert any("cannot find canonical" in r for r in reasons)
 
+    def test_source_bound_clean_checkout_is_not_implemented(self, tmp_path):
+        _git_init(tmp_path)
+        baseline = _git_commit(tmp_path, "bootstrap", allow_empty=True)
+
+        result, reasons, evidence = _check_implemented(tmp_path, baseline)
+
+        assert result is FingerprintResult.FALSE
+        assert reasons == ("working tree matches the source-bound commit",)
+        assert evidence[0].supersession_identity == baseline
+
+    def test_source_bound_uncommitted_change_is_implemented(self, tmp_path):
+        _git_init(tmp_path)
+        baseline = _git_commit(tmp_path, "bootstrap", allow_empty=True)
+        _git_write_file(tmp_path, "implementation.py", "implemented = True\n")
+
+        result, reasons, evidence = _check_implemented(tmp_path, baseline)
+
+        assert result is FingerprintResult.TRUE
+        assert "implementation changes" in reasons[0]
+        assert evidence[0].supersession_identity == baseline
+
+    def test_source_bound_head_change_is_unknown(self, tmp_path):
+        _git_init(tmp_path)
+        baseline = _git_commit(tmp_path, "bootstrap", allow_empty=True)
+        _git_commit(tmp_path, "unexpected commit", allow_empty=True)
+
+        result, reasons, _ = _check_implemented(tmp_path, baseline)
+
+        assert result is FingerprintResult.UNKNOWN
+        assert "no longer matches" in reasons[0]
+
 
 # ---------------------------------------------------------------------------
 # Unit: _check_admitted
