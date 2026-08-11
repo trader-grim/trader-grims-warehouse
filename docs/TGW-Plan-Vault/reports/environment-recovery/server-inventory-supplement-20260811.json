@@ -1,0 +1,35 @@
+{
+  "schema": "tgw-environment-server-inventory-supplement/v1",
+  "observed_at": "2026-08-11T08:35:40-07:00",
+  "effect_class": "read-only",
+  "development": {
+    "canonical_repository": "/opt/TGW/tgw-lib/src/trader-grims-warehouse",
+    "owner_group": "db:tgw-coders",
+    "branch": "catio-nix-0.0.1-alpha",
+    "origin": "git@github.com:trader-grim/trader-grims-warehouse.git",
+    "dirty_paths": [
+      ".claude/agents/nix-flake-maintainer.md",
+      ".claude/settings.json",
+      ".claude/settings.local.json",
+      "CLAUDE.md",
+      "src/tgw/http_server.py",
+      "src/tgw/coding_cli.py",
+      "tests/test_spine_integration.py"
+    ],
+    "coding_provision": {
+      "pull_timer": "active/waiting",
+      "pull_service": "inactive/dead",
+      "failed_instance_count": 9
+    }
+  },
+  "classification": {
+    "canonical_repository": "verified-current",
+    "dirty_paths": "conflict-requires-attribution",
+    "failed_instances": "operational-history-and-current-health-conflict"
+  },
+  "gates": [
+    "Do not promote or clean the canonical repository until every dirty path has an owner and preservation disposition.",
+    "Do not rely on coding-provision as a complete standalone-plan executor until failed instance causes and continuation semantics are reconciled."
+  ],
+  "effects": []
+}
