@@ -455,6 +455,34 @@ def test_payload_extra_cannot_forge_running_observation_checkpoint():
     enqueued.assert_not_called()
 
 
+def test_item_dispatch_binds_legacy_sku_to_entity_id():
+    from tgw.workflow.scheduler import _dispatch_treatment_v4
+
+    enqueue = MagicMock(return_value="job-1")
+    result = _dispatch_treatment_v4(
+        disposition=_disposition("ai-identify", version="1", reasons=("ready",)),
+        entity_id="SKU-1",
+        entity_type="item",
+        enqueue_fn=enqueue,
+    )
+
+    assert result.enqueued is True
+    assert enqueue.call_args.kwargs["payload"]["sku"] == "SKU-1"
+
+
+def test_item_dispatch_rejects_spoofed_sku():
+    from tgw.workflow.scheduler import _dispatch_treatment_v4
+
+    with pytest.raises(ValueError, match="sku must match entity_id"):
+        _dispatch_treatment_v4(
+            disposition=_disposition("ai-identify", version="1", reasons=("ready",)),
+            entity_id="SKU-1",
+            entity_type="item",
+            payload_extra={"sku": "SKU-2"},
+            enqueue_fn=MagicMock(),
+        )
+
+
 # ── dispatch_treatment: missing treatment contract → None ──────────────────
 
 

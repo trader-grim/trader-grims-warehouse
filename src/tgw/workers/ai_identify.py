@@ -32,8 +32,17 @@ from tgw.apis.ollama import extract_json, is_available
 from tgw.assets import ordered_photos as _asset_ordered_photos
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.config import sku_dir as _cfg_sku_dir
+from tgw.errors import TreatmentFailure
+from tgw.item_mutation import (
+    item_generation,
+    mutate_item,
+    operation_identity,
+    reconcile_mutation,
+)
 from tgw.items import append_history_event
+from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
+from tgw.sqlite_catalog import upsert_catalog_row
 
 log = logging.getLogger(__name__)
 
@@ -266,6 +275,166 @@ class AIIdentifyWorker(QueueWorker):
 
         item = json.loads(json_path.read_text(encoding="utf-8"))
 
+        governed_keys = {
+            "treatment_id", "treatment_version", "graph_id",
+            "goal_profile_id", "goal_profile_version", "object_generation",
+            "condition_hash",
+        }
+        governed = any(key in payload for key in governed_keys)
+        if governed:
+            required = governed_keys | {"entity_id"}
+            if any(
+                not isinstance(payload.get(key), str) or not payload[key].strip()
+                for key in required
+            ):
+                raise HardFailure("ai_identify governed job has incomplete identity")
+            if payload["treatment_id"] != "ai-identify" or payload["treatment_version"] != "1":
+                raise HardFailure("ai_identify governed treatment identity mismatch")
+            if job.get("entity_type") != "item" or job.get("entity_id") != sku:
+                raise HardFailure("ai_identify governed entity envelope mismatch")
+            if payload["entity_id"] != sku or payload.get("object_id", sku) != sku:
+                raise HardFailure("ai_identify governed payload entity mismatch")
+            if item_generation(item) != payload["object_generation"]:
+                if "observation_checkpoint" not in payload:
+                    raise HardFailure("ai_identify governed object generation mismatch")
+            if not isinstance(job.get("job_id"), str) or not job["job_id"].strip():
+                raise HardFailure("ai_identify governed job_id missing")
+            if not isinstance(job.get("lease_token"), str) or not job["lease_token"].strip():
+                raise HardFailure("ai_identify governed lease token missing")
+
+        def success_receipt(
+            *, changed: bool, resulting_generation: str | None = None,
+        ) -> Dict[str, Any]:
+            if not governed:
+                return {"ok": True, "sku": sku}
+            resulting = resulting_generation or item_generation(
+                json.loads(json_path.read_text(encoding="utf-8"))
+            )
+            return {
+                "receipt_schema_id": "treatment-receipt/v1",
+                "treatment_id": "ai-identify",
+                "treatment_version": "1",
+                "graph_id": payload["graph_id"],
+                "goal_profile_id": payload["goal_profile_id"],
+                "goal_profile_version": payload["goal_profile_version"],
+                "object_generation": payload["object_generation"],
+                "condition_hash": payload["condition_hash"],
+                "entity_id": sku,
+                "outcome": "satisfied",
+                "established_conditions": ["ai_identified"],
+                "evidence": {
+                    "changed": changed,
+                    "resulting_generation": resulting,
+                },
+            }
+
+        def commit_governed(checkpoint: Dict[str, Any]) -> Dict[str, Any]:
+            expected = {
+                "schema": "ai-identify-observation/v1",
+                "sku": sku,
+                "expected_generation": payload["object_generation"],
+            }
+            if any(checkpoint.get(key) != value for key, value in expected.items()):
+                raise HardFailure("ai_identify checkpoint identity mismatch")
+            fields = checkpoint.get("fields")
+            if not isinstance(fields, dict):
+                raise HardFailure("ai_identify checkpoint fields missing")
+            mutation_payload = {
+                "schema": checkpoint["schema"],
+                "job_id": job["job_id"],
+                "graph_id": payload["graph_id"],
+                "fields": fields,
+            }
+            operation_id = operation_identity(
+                sku=sku,
+                kind="ai-identify",
+                expected_generation=payload["object_generation"],
+                payload=mutation_payload,
+            )
+            if checkpoint.get("operation_id") != operation_id:
+                raise HardFailure("ai_identify checkpoint operation identity mismatch")
+
+            def mutate(document: Dict[str, Any]) -> Dict[str, Any]:
+                if document.get("sku") != sku:
+                    raise ValueError("authoritative document SKU mismatch")
+                updated = dict(document)
+                for key, value in fields.items():
+                    if value is None:
+                        updated.pop(key, None)
+                    else:
+                        updated[key] = value
+                return updated
+
+            def project(_sku: str, document: Dict[str, Any]) -> Dict[str, Any]:
+                result = upsert_catalog_row(self.config, document)
+                if not isinstance(result, dict) or result.get("ok") is not True:
+                    raise RuntimeError("SQLite projection did not report success")
+                return result
+
+            data_root = Path(self.config.get("data_root", "/opt/TGW/data"))
+            journal_root = Path(self.config.get(
+                "item_mutation_journal_root",
+                data_root.parent / "var/item-mutations",
+            ))
+            result = mutate_item(
+                item_path=json_path,
+                archive_root=Path(self.config.get(
+                    "archive_root", data_root / "ItemArchive",
+                )),
+                journal_root=journal_root,
+                sku=sku,
+                kind="ai-identify",
+                expected_generation=payload["object_generation"],
+                payload=mutation_payload,
+                mutate=mutate,
+                project=project,
+                operation_id=operation_id,
+            )
+            status = str(result.status).upper()
+            if status == "REPAIR_REQUIRED":
+                result = reconcile_mutation(
+                    item_path=json_path,
+                    journal_root=journal_root,
+                    operation_id=operation_id,
+                    project=project,
+                )
+                status = str(result.status).upper()
+            if status != "COMMITTED":
+                outcome = {
+                    "CONFLICT": "conflict",
+                    "REPAIR_REQUIRED": "repair_required",
+                }.get(status, "failed")
+                receipt = success_receipt(
+                    changed=bool(result.changed),
+                    resulting_generation=result.resulting_generation,
+                )
+                receipt["outcome"] = outcome
+                receipt["established_conditions"] = []
+                receipt["evidence"].update({
+                    "operation_id": operation_id,
+                    "mutation_status": status,
+                    "detail": result.detail,
+                })
+                raise TreatmentFailure(
+                    f"ai-identify mutation did not commit: {status}", receipt,
+                )
+            receipt = success_receipt(
+                changed=bool(result.changed),
+                resulting_generation=result.resulting_generation,
+            )
+            receipt["evidence"].update({
+                "operation_id": operation_id,
+                "mutation_status": status,
+            })
+            return receipt
+
+        if governed and "observation_checkpoint" in payload:
+            durable_checkpoint = state_machine.checkpoint_running_job(
+                job["job_id"], self.owner, job["lease_token"],
+                payload["observation_checkpoint"],
+            )
+            return commit_governed(durable_checkpoint)
+
         already_identified = bool(item.get("ai_identified"))
         force_reidentify = bool(item.get("ai_reidentify"))
 
@@ -273,7 +442,7 @@ class AIIdentifyWorker(QueueWorker):
         if already_identified and not force_reidentify:
             log.info("skipping ai_identify for %s — already identified", sku)
             tgw_logging.log_event("ai_identify_skipped", sku=sku, reason="already_identified")
-            return
+            return success_receipt(changed=False)
 
         # Product lookup — run before Ollama; result cached in item JSON
         product_context = ""
@@ -541,6 +710,29 @@ class AIIdentifyWorker(QueueWorker):
         if _ia_patch:
             fence_fields["item_attributes"] = _ia_patch["item_attributes"]
             fence_fields["item_attributes_history"] = _ia_patch["item_attributes_history"]
+        if governed:
+            mutation_payload = {
+                "schema": "ai-identify-observation/v1",
+                "job_id": job["job_id"],
+                "graph_id": payload["graph_id"],
+                "fields": fence_fields,
+            }
+            checkpoint = {
+                "schema": "ai-identify-observation/v1",
+                "sku": sku,
+                "expected_generation": payload["object_generation"],
+                "fields": fence_fields,
+                "operation_id": operation_identity(
+                    sku=sku,
+                    kind="ai-identify",
+                    expected_generation=payload["object_generation"],
+                    payload=mutation_payload,
+                ),
+            }
+            durable_checkpoint = state_machine.checkpoint_running_job(
+                job["job_id"], self.owner, job["lease_token"], checkpoint,
+            )
+            return commit_governed(durable_checkpoint)
         fence_patch_item(self.config, sku, fence_fields)
 
         log.info("ai_identify complete for %s: %r (eBay cat %s)", sku, title, ebay_category_id)
@@ -551,14 +743,7 @@ class AIIdentifyWorker(QueueWorker):
         # Phase 4: return a structured receipt instead of hardcoding successor
         # enqueue. The scheduler reads this receipt and re-evaluates the item
         # to pick the next eligible treatment (ebay-draft, alt-text, etc.).
-        return {
-            "treatment_id": "ai-identify",
-            "treatment_version": "1",
-            "graph_id": None,  # filled by scheduler at dispatch time
-            "outcome": "satisfied",
-            "established_conditions": ("ai_identified",),
-            "artifacts": (f"item:{sku}",),
-        }
+        return success_receipt(changed=True)
 
 
 def main() -> int:

@@ -361,7 +361,7 @@ def test_ai_identify_file_no_longer_has_enqueue_successors():
 
     # Should contain the Phase 4 receipt return
     assert '"treatment_id": "ai-identify"' in content
-    assert '"established_conditions": ("ai_identified",)' in content
+    assert '"established_conditions": ["ai_identified"]' in content
     assert "return {" in content
 
 

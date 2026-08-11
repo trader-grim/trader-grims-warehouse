@@ -276,6 +276,11 @@ def _dispatch_treatment_v4(
         )
     if payload_extra:
         payload.update(payload_extra)
+    if entity_type == "item":
+        supplied_sku = payload.get("sku")
+        if supplied_sku is not None and supplied_sku != entity_id:
+            raise ValueError("item treatment sku must match entity_id")
+        payload["sku"] = entity_id
 
     try:
         job_id = enqueue_fn(
