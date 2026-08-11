@@ -1,0 +1,82 @@
+{
+  "checks": [
+    {
+      "detail": "sha256:fcd04e03289d10db2625050f5e8ba0143048f778512a3a77fce5870f877d4097",
+      "evidence": "config/environment/registry.yaml",
+      "id": "server-registry-current",
+      "status": "proved"
+    },
+    {
+      "detail": "sha256:5100ec2e58e7991f85d2bd732ddd07f7e5699de9424b52b9ee71a58f39e1e2de",
+      "evidence": "config/environment/resolved/environment-recovery.codex.json",
+      "id": "task-context-reproducible",
+      "status": "proved"
+    },
+    {
+      "detail": "clean contract and cited current-context canary verified",
+      "evidence": "docs/TGW-Plan-Vault/reports/environment-recovery/steward-context-verification-20260811.json",
+      "id": "clean-steward-boundary",
+      "status": "proved"
+    },
+    {
+      "detail": "sha256:3fd90e890ee075a1e50432fc8b13ff48519764b9504b7c62d1e6442b68abf93d",
+      "evidence": "config/environment/procedures.json",
+      "id": "registered-procedures",
+      "status": "proved"
+    },
+    {
+      "detail": "required artifact is absent",
+      "evidence": "docs/TGW-Plan-Vault/reports/environment-recovery/satellites/catnanny/manifest.json",
+      "id": "catnanny-evidence-package",
+      "status": "missing"
+    },
+    {
+      "detail": "required artifact is absent",
+      "evidence": "docs/TGW-Plan-Vault/reports/environment-recovery/satellites/catnanny/review.json",
+      "id": "catnanny-review-complete",
+      "status": "missing"
+    },
+    {
+      "detail": "required artifact is absent",
+      "evidence": "docs/TGW-Plan-Vault/reports/environment-recovery/satellites/catnanny/machine-disposition.json",
+      "id": "catnanny-human-machine-disposition",
+      "status": "missing"
+    },
+    {
+      "detail": "required artifact is absent",
+      "evidence": "docs/TGW-Plan-Vault/reports/environment-recovery/satellites/helicrew/manifest.json",
+      "id": "helicrew-evidence-package",
+      "status": "missing"
+    },
+    {
+      "detail": "required artifact is absent",
+      "evidence": "docs/TGW-Plan-Vault/reports/environment-recovery/satellites/helicrew/review.json",
+      "id": "helicrew-review-complete",
+      "status": "missing"
+    },
+    {
+      "detail": "required artifact is absent",
+      "evidence": "docs/TGW-Plan-Vault/reports/environment-recovery/satellites/helicrew/machine-disposition.json",
+      "id": "helicrew-human-machine-disposition",
+      "status": "missing"
+    },
+    {
+      "detail": "required artifact is absent",
+      "evidence": "docs/TGW-Plan-Vault/reports/environment-recovery/final-human-acceptance.json",
+      "id": "human-final-acceptance",
+      "status": "missing"
+    }
+  ],
+  "complete": false,
+  "counts": {
+    "failed": 0,
+    "missing": 7,
+    "proved": 4
+  },
+  "external_actions_performed": false,
+  "history_or_memory_granted_authority": false,
+  "observed_at": "2026-08-11T10:14:00-07:00",
+  "program_plan_id": "PLAN-environment-cleanup-program",
+  "ready_for_human_acceptance": false,
+  "schema": "tgw-environment-recovery-acceptance-audit/v1"
+}

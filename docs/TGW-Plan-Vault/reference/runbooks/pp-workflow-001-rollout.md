@@ -20,14 +20,14 @@
 
 ## Deploy source without changing behavior
 
-Registered procedure `app-release-install/v1` in
+Use registered procedure `app-release-install/v1` from
 `config/environment/procedures.json`. Its structured inputs are the exact archive,
 generation, commit, tree, archive digest, expected current generation, and unique
 operation ID. Plan or runbook text does not authorize execution. The registered
-procedure is currently **held** until `/opt/tgw-installer/current` is independently
-installed and verified on tgw-prod. It must not be requested while held.
+procedure is bound to the root-owned Nix installer at
+`/opt/tgw-installer/current`, independently installed and verified on tgw-prod.
 
-After a future completed procedure receipt, verify the selected generation through
+After a completed procedure receipt, verify the selected generation through
 that same independently installed wrapper. Do not fall back to importing the
 installer from `/opt/TGW/current`.
 
@@ -103,8 +103,7 @@ admitted wrapper; it returns only state/schema-shape counts.
 7. Restore the prior config and restart only affected units.
 8. If source rollback is required, request registered procedure
    `app-release-rollback/v1` with the completed selection receipt, expected current
-   generation, and a unique rollback operation ID only after its independent
-   installer hold is cleared. The procedure request requires explicit deployment
+   generation, and a unique rollback operation ID. The procedure request requires explicit deployment
    approval and produces its own immutable receipt.
 
 Additive schema stays in place. Do not drop tables during rollback.

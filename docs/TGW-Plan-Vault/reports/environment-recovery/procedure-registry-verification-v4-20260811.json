@@ -1,0 +1,22 @@
+{
+  "schema": "tgw-procedure-registry-verification/v1",
+  "observed_at": "2026-08-11T10:14:00-07:00",
+  "registry": "config/environment/procedures.json",
+  "registry_revision": "sha256:3fd90e890ee075a1e50432fc8b13ff48519764b9504b7c62d1e6442b68abf93d",
+  "active_procedure_ids": [
+    "app-release-install/v1",
+    "app-release-rollback/v1",
+    "nixos-prod-rollback/v1",
+    "nixos-prod-switch/v1"
+  ],
+  "held_procedure_ids": [],
+  "expected_installer": "/opt/tgw-installer/current/bin/tgw-release-install",
+  "production_installer_present": true,
+  "production_installer_independent": true,
+  "production_installer_source_sha256": "9967d375ab0832eecb6cd0cd14deb735a8edbd629f62aa1453e04c5d62eaab96",
+  "application_procedures_executable": true,
+  "direct_invocation_allowed": false,
+  "deployment_executed": false,
+  "direct_mutable_deploy_findings": 0,
+  "result": "verified-independent-installer"
+}
