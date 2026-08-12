@@ -1,7 +1,13 @@
 import subprocess
 from pathlib import Path
 
-from tgw.stranded_work import inspect_worktree, inventory_worktrees
+from tgw.stranded_work import (
+    discover_repositories,
+    inspect_repository,
+    inspect_worktree,
+    inventory_environment,
+    inventory_worktrees,
+)
 
 
 def _git(path: Path, *args: str) -> None:
@@ -57,3 +63,26 @@ def test_inventory_is_deterministic_and_does_not_modify_worktree(tmp_path: Path)
         ["git", "-C", str(repo), "status", "--porcelain=v1", "-z"],
         check=True, capture_output=True,
     ).stdout == before
+
+
+def test_environment_inventory_discovers_nested_repository(tmp_path: Path):
+    repo = tmp_path / "nested" / "repo"
+    repo.mkdir(parents=True)
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "fixture@example.invalid")
+    _git(repo, "config", "user.name", "Fixture")
+    (repo / "tracked").write_text("same\n")
+    _git(repo, "add", "tracked")
+    _git(repo, "commit", "-qm", "fixture")
+
+    assert discover_repositories([tmp_path]) == [repo.resolve()]
+    observed = inspect_repository(repo)
+    assert observed["head"]
+    assert observed["unreachable_object_count"] == 0
+    inventory = inventory_environment([tmp_path])
+    assert inventory["summary"] == {
+        "repository_count": 1,
+        "worktree_count": 1,
+        "stranded_work_count": 0,
+        "inaccessible_worktree_count": 0,
+    }

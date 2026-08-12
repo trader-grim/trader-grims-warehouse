@@ -6,9 +6,11 @@ preserve and reconcile; it is never cleanup authority.
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -38,6 +40,13 @@ def _sha(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _file_record(path: Path, relative: str) -> dict[str, Any]:
+    try:
+        return {"path": relative, "sha256": _sha(path), "bytes": path.stat().st_size}
+    except OSError as exc:
+        return {"path": relative, "unreadable": type(exc).__name__}
+
+
 def _signals(worktree: Path, changed: list[str]) -> dict[str, list[dict[str, Any]]]:
     evidence: dict[str, list[dict[str, Any]]] = {
         "designed": [], "implemented": [], "executed": [], "admitted": [], "deployed": [],
@@ -47,7 +56,7 @@ def _signals(worktree: Path, changed: list[str]) -> dict[str, list[dict[str, Any
         name = relative.lower()
         if not path.is_file():
             continue
-        record = {"path": relative, "sha256": _sha(path), "bytes": path.stat().st_size}
+        record = _file_record(path, relative)
         if name.endswith((".py", ".rs", ".go", ".js", ".ts")) and not name.startswith("tests/"):
             evidence["implemented"].append(record)
         if name.startswith("tests/") or "/tests/" in name:
@@ -88,6 +97,65 @@ def inspect_worktree(worktree: Path) -> dict[str, Any]:
     }
 
 
+def inspect_repository(repository: Path) -> dict[str, Any]:
+    repository = repository.resolve()
+    head = _git(repository, "rev-parse", "HEAD").strip()
+    common_dir = _git(repository, "rev-parse", "--git-common-dir").strip()
+    common_path = (repository / common_dir).resolve()
+    remotes = []
+    for line in _git(repository, "remote", "-v").splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and not any(item["name"] == fields[0] for item in remotes):
+            remotes.append({"name": fields[0], "url": fields[1]})
+    fsck = subprocess.run(
+        [
+            "git", "-c", f"safe.directory={repository}", "-C", str(repository),
+            "fsck", "--full", "--no-reflogs", "--unreachable",
+        ],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    unreachable = [line for line in fsck.stdout.splitlines() if line.startswith("unreachable ")]
+    return {
+        "schema": "tgw-repository-evidence/v1",
+        "path": str(repository),
+        "git_common_dir": str(common_path),
+        "head": head,
+        "branch": _git(repository, "branch", "--show-current").strip() or None,
+        "remotes": remotes,
+        "unreachable_object_count": len(unreachable),
+        "unreachable_object_sample": unreachable[:25],
+        "fsck_error": fsck.stderr.strip() if fsck.returncode else None,
+    }
+
+
+def discover_repositories(roots: Iterable[Path]) -> list[Path]:
+    repositories: set[Path] = set()
+    for root in roots:
+        root = root.resolve()
+        if not root.exists():
+            continue
+        candidates = [root] if (root / ".git").exists() else []
+        try:
+            candidates.extend(path.parent for path in root.rglob(".git"))
+        except OSError:
+            pass
+        for candidate in candidates:
+            probe = subprocess.run(
+                ["git", "-c", f"safe.directory={candidate}", "-C", str(candidate),
+                 "rev-parse", "--show-toplevel"],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+            if probe.returncode == 0:
+                repositories.add(Path(probe.stdout.strip()).resolve())
+    return sorted(repositories)
+
+
 def inventory_worktrees(repositories: Iterable[Path]) -> dict[str, Any]:
     paths: set[Path] = set()
     for repository in repositories:
@@ -98,8 +166,75 @@ def inventory_worktrees(repositories: Iterable[Path]) -> dict[str, Any]:
             for line in output.splitlines()
             if line.startswith("worktree ")
         )
-    worktrees = [inspect_worktree(path) for path in sorted(paths) if path.exists()]
+    worktrees = []
+    for path in sorted(paths):
+        try:
+            exists = path.exists()
+        except OSError as exc:
+            worktrees.append({
+                "schema": "tgw-worktree-evidence/v1",
+                "path": str(path),
+                "classification": "INACCESSIBLE-WORKTREE",
+                "error": type(exc).__name__,
+                "cleanup_authorized": False,
+            })
+            continue
+        if exists:
+            try:
+                worktrees.append(inspect_worktree(path))
+            except (OSError, StrandedWorkError) as exc:
+                worktrees.append({
+                    "schema": "tgw-worktree-evidence/v1",
+                    "path": str(path),
+                    "classification": "INACCESSIBLE-WORKTREE",
+                    "error": type(exc).__name__,
+                    "cleanup_authorized": False,
+                })
     payload = {"schema": "tgw-stranded-work-inventory/v1", "worktrees": worktrees}
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     payload["inventory_sha256"] = hashlib.sha256(canonical).hexdigest()
     return payload
+
+
+def inventory_environment(roots: Iterable[Path]) -> dict[str, Any]:
+    repositories = discover_repositories(roots)
+    worktree_inventory = inventory_worktrees(repositories)
+    payload = {
+        "schema": "tgw-stranded-work-environment/v1",
+        "roots": [str(path.resolve()) for path in roots],
+        "repositories": [inspect_repository(path) for path in repositories],
+        "worktrees": worktree_inventory["worktrees"],
+        "summary": {
+            "repository_count": len(repositories),
+            "worktree_count": len(worktree_inventory["worktrees"]),
+            "stranded_work_count": sum(
+                item["classification"] == "STRANDED-WORK"
+                for item in worktree_inventory["worktrees"]
+            ),
+            "inaccessible_worktree_count": sum(
+                item["classification"] == "INACCESSIBLE-WORKTREE"
+                for item in worktree_inventory["worktrees"]
+            ),
+        },
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    payload["inventory_sha256"] = hashlib.sha256(canonical).hexdigest()
+    return payload
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Inventory TGW stranded work read-only")
+    parser.add_argument("roots", nargs="+", type=Path)
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args(argv)
+    result = inventory_environment(args.roots)
+    rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
+    if args.output:
+        args.output.write_text(rendered, encoding="utf-8")
+    else:
+        sys.stdout.write(rendered)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
