@@ -167,7 +167,7 @@ def terminal(req, *, stage, code, build, rc=None, ambiguous=False):
 @pytest.mark.parametrize(
     "stage,code,build,rc",
     [
-        (stage, code, stage in {"nix-build", "output", "systemd-verify"}, 7 if code == "SUBPROCESS_FAILED" else None)
+        (stage, code, stage in {"nix-build", "output", "systemd-verify", "internal-post-build"}, 7 if code == "SUBPROCESS_FAILED" else None)
         for stage, codes in __import__("tgw.nix_observer_render_runtime", fromlist=["STAGE_CODES"]).STAGE_CODES.items()
         for code in sorted(codes)
     ],
@@ -200,3 +200,23 @@ def test_post_success_cleanup_ambiguity_is_the_only_complete_tuple():
         changed["receipt_sha256"] = "sha256:" + __import__("hashlib").sha256(canonical({k: v for k, v in changed.items() if k != "receipt_sha256"})).hexdigest()
         with pytest.raises(RenderRuntimeError):
             validate_failure(changed, request=req)
+
+
+@pytest.mark.parametrize("error", [OSError("disk"), PermissionError("denied"), BlockingIOError("short write")])
+def test_failure_store_io_errors_retain_validated_receipt(tmp_path, monkeypatch, error):
+    from tgw import nix_observer_render_runtime as module
+
+    req = request()
+    archive, hosts = artifacts(tmp_path, req)
+    monkeypatch.setattr(module, "SOURCE_REF", req["artifact_ref"])
+    monkeypatch.setattr(module, "_held", lambda path, **kwargs: (__import__("os").open(path, __import__("os").O_RDONLY), {}))
+    failure = terminal(req, stage="nix-build", code="SUBPROCESS_FAILED", build=True, rc=9)
+
+    class BrokenStore:
+        def persist(self, _value):
+            raise error
+
+    with pytest.raises(RenderRuntimeError, match="persistence is ambiguous") as raised:
+        ClosedRenderProvider(lambda **_: deepcopy(failure), BrokenStore(), archive, hosts).execute(req)
+    assert raised.value.receipt == failure
+    assert "artifact_ref" not in str(raised.value)

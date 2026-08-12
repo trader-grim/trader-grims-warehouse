@@ -27,7 +27,7 @@ class RenderRuntimeError(ValueError):
 
 
 FAILURE_SCHEMA = "tgw-nix-observer-render-evaluation-failure/v1"
-FAILURE_STAGES = {"request", "archive", "source", "input-closure", "nix-eval", "nix-build", "output", "systemd-verify", "cleanup", "internal"}
+FAILURE_STAGES = {"request", "archive", "source", "input-closure", "nix-eval", "nix-build", "output", "systemd-verify", "cleanup", "internal-pre-build", "internal-post-build"}
 FAILURE_CODES = {"VALIDATION_REFUSED", "IDENTITY_MISMATCH", "BOUND_EXCEEDED", "SUBPROCESS_FAILED", "CLEANUP_FAILED", "INTERNAL_ERROR"}
 FAILURE_EFFECTS = {"build_attempted", "activation", "deployment", "profile_write", "home_db_write", "live_flake_write", "network"}
 STAGE_CODES = {
@@ -39,7 +39,8 @@ STAGE_CODES = {
     "nix-build": {"SUBPROCESS_FAILED", "BOUND_EXCEEDED"},
     "output": {"VALIDATION_REFUSED", "IDENTITY_MISMATCH", "BOUND_EXCEEDED"},
     "systemd-verify": {"SUBPROCESS_FAILED", "BOUND_EXCEEDED"},
-    "internal": {"INTERNAL_ERROR"},
+    "internal-pre-build": {"INTERNAL_ERROR"},
+    "internal-post-build": {"INTERNAL_ERROR"},
 }
 
 
@@ -114,7 +115,7 @@ def validate_failure(value: Mapping[str, object], *, request: Mapping[str, objec
         needs_rc = original_code == "SUBPROCESS_FAILED"
         if needs_rc != (original_rc is not None and original_rc != 0):
             raise RenderRuntimeError("failure return-code tuple invalid")
-    expected_build = original_stage in {"nix-build", "output", "systemd-verify", "complete"}
+    expected_build = original_stage in {"nix-build", "output", "systemd-verify", "internal-post-build", "complete"}
     if effects["build_attempted"] is not expected_build:
         raise RenderRuntimeError("failure build-attempt tuple invalid")
     for prefix in ("stdout", "stderr"):
