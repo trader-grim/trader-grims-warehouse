@@ -1,0 +1,81 @@
+{
+  "schema": "tgw-agent-adapter-cutover-receipt/v1",
+  "source_commit": "65aabaee8adcc5239ea5885201e00b7791000541",
+  "plan": {
+    "root": "/opt/TGW/library/plans",
+    "branch": "main",
+    "commit": "53820427eca9f224414a548a29ed754d741e6d50"
+  },
+  "canonical_adapters": {
+    "tgw_plan": {
+      "path": "agent-services/skills/tgw-plan",
+      "tree_digest": "sha256:d6674971c81d68dcb239c0bedbf03f977a5b0685f3778cef65a01925e58dd6fd",
+      "parity_digest": "70b32f6ce9427cd8b4911c20f98f879ee6c1f07ab66a4a2cb6ac8b3ffb6dd2d5"
+    },
+    "promptcraft": {
+      "path": "agent-services/providers/promptcraft",
+      "tree_digest": "sha256:a7cbc90d5e63b9867dc47fda9a31700b32b449c924e11198b7e96d7f1f78360a"
+    }
+  },
+  "targets": [
+    {
+      "target": "codex",
+      "home": "/home/codex",
+      "dry_run": [
+        {"capability": "tgw-plan", "status": "CURRENT", "destination": "/home/codex/.codex/skills/tgw-plan"},
+        {"capability": "promptcraft", "status": "WOULD_INSTALL", "destination": "/home/codex/.codex/providers/promptcraft"}
+      ],
+      "applied": [
+        {"capability": "tgw-plan", "status": "CURRENT", "destination": "/home/codex/.codex/skills/tgw-plan"},
+        {"capability": "promptcraft", "status": "INSTALLED", "destination": "/home/codex/.codex/providers/promptcraft"}
+      ],
+      "postcheck": "CURRENT",
+      "legacy_overwritten": false
+    },
+    {
+      "target": "claude",
+      "home": "/home/db",
+      "project": "/opt/TGW/tgw-lib/src/trader-grims-warehouse",
+      "dry_run": [
+        {"capability": "tgw-plan", "status": "HELD_LEGACY", "destination": "/opt/TGW/tgw-lib/src/trader-grims-warehouse/.claude/skills/tgw-plan"},
+        {"capability": "promptcraft", "status": "WOULD_INSTALL", "destination": "/opt/TGW/tgw-lib/src/trader-grims-warehouse/.claude/providers/promptcraft"}
+      ],
+      "applied": [
+        {"capability": "tgw-plan", "status": "HELD_LEGACY", "destination": "/opt/TGW/tgw-lib/src/trader-grims-warehouse/.claude/skills/tgw-plan"},
+        {"capability": "promptcraft", "status": "INSTALLED", "destination": "/opt/TGW/tgw-lib/src/trader-grims-warehouse/.claude/providers/promptcraft"}
+      ],
+      "postcheck": "PROMPTCRAFT_CURRENT_PLAN_LEGACY_HELD",
+      "parity_failure": "legacy skill lacks references/plan-v2.md",
+      "legacy_overwritten": false
+    },
+    {
+      "target": "hermes",
+      "homes_probed": ["/home/tigwadev", "/home/tgw", "/home/hermaroid"],
+      "status": "HELD_PERMISSION",
+      "error": "PermissionError reading .hermes/skills/tgw-plan for all plausible local identities",
+      "applied": [],
+      "legacy_overwritten": false
+    }
+  ],
+  "conflicts": [
+    {
+      "target": "claude",
+      "capability": "tgw-plan",
+      "status": "HELD_LEGACY",
+      "resolution_gate": "parity-before-cutover",
+      "cleanup_eligible": false
+    },
+    {
+      "target": "hermes",
+      "capability": "tgw-plan-and-promptcraft",
+      "status": "HELD_PERMISSION",
+      "resolution_gate": "owner-context-materialization",
+      "cleanup_eligible": false
+    }
+  ],
+  "effects": {
+    "adapter_symlinks_created": 2,
+    "legacy_paths_overwritten": 0,
+    "services_deployed_or_restarted": 0
+  }
+}
