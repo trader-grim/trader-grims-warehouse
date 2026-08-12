@@ -7,12 +7,14 @@ import subprocess
 import sys
 import tarfile
 import time
+import types
 from hashlib import sha256
 from pathlib import Path
 
 import pytest
 
 from tgw.nixos_reviewed_evaluation import (
+    BOOTSTRAP,
     EXECUTABLES,
     FAILURE_STAGES,
     SSH_EXECUTABLE,
@@ -689,3 +691,33 @@ def test_real_sshd_preserves_shell_quoted_python_program_and_metacharacters(tmp_
     finally:
         server.terminate()
         server.wait(timeout=5)
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_exact_streamed_provider_bootstrap_invokes_main_once_and_never_returns_empty(monkeypatch, fails):
+    import tgw.nixos_reviewed_evaluation as provider_module
+
+    source = Path(provider_module.__file__).read_bytes()
+    request_hash = "sha256:" + "d" * 64
+    provider_hash = sha256(source).hexdigest()
+    framed_tail = b"framed-request-and-archive"
+    calls = []
+
+    def executor(stream, **kwargs):
+        calls.append(stream.read())
+        if fails:
+            raise EvaluationError("injected bounded failure")
+        return {"schema": "test-success/v1", "outcome": "verified"}
+
+    bootstrap_globals = {"__name__": "bootstrap-test", "_BOOTSTRAP_EXECUTOR": executor}
+    stdin = io.BytesIO(struct.pack("!Q", len(source)) + source + provider_hash.encode() + request_hash.encode() + framed_tail)
+    stdout = io.BytesIO()
+    fake_sys = types.SimpleNamespace(stdin=types.SimpleNamespace(buffer=stdin), stdout=types.SimpleNamespace(buffer=stdout))
+    monkeypatch.setitem(sys.modules, "sys", fake_sys)
+    with pytest.raises(SystemExit) as exited:
+        exec(BOOTSTRAP, bootstrap_globals)
+    assert exited.value.code == (1 if fails else 0)
+    assert calls == [framed_tail]
+    result = json.loads(stdout.getvalue())
+    assert result["schema"] == ("tgw-nixos-reviewed-evaluation-bootstrap-failure/v1" if fails else "test-success/v1")
+    assert stdout.getvalue()

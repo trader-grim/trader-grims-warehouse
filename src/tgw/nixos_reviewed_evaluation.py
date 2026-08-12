@@ -34,7 +34,8 @@ BOOTSTRAP = (
     "d['receipt_sha256']='sha256:'+hashlib.sha256(json.dumps(d,sort_keys=True,separators=(',',':')).encode()).hexdigest(); "
     "hashlib.sha256(s).hexdigest()==h or (sys.stdout.write(json.dumps(d,sort_keys=True,separators=(',',':'))),sys.exit(91)); "
     "exec(compile(s,'<tgw-reviewed-evaluator>','exec'),"
-    "{'__name__':'__main__','_BOOTSTRAP_PROVIDER_SHA256':'sha256:'+h,'_BOOTSTRAP_REQUEST_HASH':r})"
+    "{'__name__':'__main__','_BOOTSTRAP_PROVIDER_SHA256':'sha256:'+h,'_BOOTSTRAP_REQUEST_HASH':r,"
+    "**({'_BOOTSTRAP_EXECUTOR':globals()['_BOOTSTRAP_EXECUTOR']} if '_BOOTSTRAP_EXECUTOR' in globals() else {})})"
 )
 EXECUTABLES = {
     "git": "/run/current-system/sw/bin/git",
@@ -907,7 +908,8 @@ def main(
     source = input_stream if input_stream is not None else sys.stdin.buffer
     sink = output_stream if output_stream is not None else sys.stdout.buffer
     try:
-        receipt = execute_packet(source, **dict(execute_kwargs or {}))
+        executor = globals().get("_BOOTSTRAP_EXECUTOR", execute_packet)
+        receipt = executor(source, **dict(execute_kwargs or {}))
         sink.write(_canonical(receipt))
         return 0
     except Exception as exc:
@@ -944,3 +946,7 @@ def main(
             )
         sink.write(_canonical(receipt))
         return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
