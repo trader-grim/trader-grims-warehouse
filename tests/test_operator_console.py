@@ -1,9 +1,13 @@
 from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.testclient import TestClient
 
 from tgw.operator_console import create_operator_console_router, project_request
+from tgw.operator_console_plugin import (
+    OperatorConsoleMount,
+    mount_operator_console,
+)
 
 
 class Store:
@@ -87,7 +91,65 @@ def test_discovery_names_one_backend_and_non_authority_surfaces():
     assert discovery["authority_api"] == "/api/plan-authority"
     assert discovery["site"] == "/form/plan-authority"
     assert discovery["clients"] == ["web", "flutter"]
+    assert discovery["navigation"] == {
+        "id": "plan-authority", "label": "Plan Authority",
+        "href": "/form/plan-authority", "group": "Admin", "order": 30,
+    }
     assert {item["path"] for item in discovery["non_authority_surfaces"]} >= {
         "/form/approvals", "/api/action-approvals", "/form/runs", "/form/todos",
         "/form/pp-clip", "/api/items/*",
     }
+
+
+def test_plugin_mount_uses_host_auth_and_returns_flutter_json():
+    app = FastAPI()
+
+    def host_auth(authorization: str | None = Header(default=None)):
+        if authorization != "Bearer shared-host-token":
+            raise HTTPException(401, "host auth rejected")
+
+    config = OperatorConsoleMount(
+        store=Store(_row()), current_plan_commit=lambda: "f" * 40,
+        load_solution=lambda _: {}, require_operator=host_auth,
+        require_executor=host_auth,
+    )
+    mount_operator_console(app, config)
+    client = TestClient(app)
+    assert client.get("/api/operator-console/requests").status_code == 401
+    response = client.get(
+        "/api/operator-console/requests",
+        headers={"Authorization": "Bearer shared-host-token", "Accept": "application/json"},
+    )
+    assert response.headers["content-type"].startswith("application/json")
+    payload = response.json()
+    assert payload["schema"] == "tgw-operator-console/v1"
+    assert isinstance(payload["requests"][0]["expires_at"], str)
+
+
+def test_plugin_rejects_duplicate_mount_or_route_shadowing():
+    config = OperatorConsoleMount(
+        store=Store(_row()), current_plan_commit=lambda: "f" * 40,
+        load_solution=lambda _: {}, require_operator=lambda: None,
+        require_executor=lambda: None,
+    )
+    app = FastAPI()
+    mount_operator_console(app, config)
+    try:
+        mount_operator_console(app, config)
+    except RuntimeError as exc:
+        assert "already mounted" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("duplicate mount was accepted")
+
+    colliding = FastAPI()
+
+    @colliding.get("/form/plan-authority")
+    def legacy():
+        return "legacy"
+
+    try:
+        mount_operator_console(colliding, config)
+    except RuntimeError as exc:
+        assert "route collision" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("route shadowing was accepted")
