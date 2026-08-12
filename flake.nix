@@ -53,9 +53,15 @@
         cp ${verifierMetadata} $out/verifier-metadata.json
       '';
       observerPackage = pkgs.runCommand "tgw-observer-launcher-fixture" { nativeBuildInputs = [ pkgs.stdenv.cc pkgs.openssl ]; } ''
-        mkdir -p $out/bin $out/share/tgw
+        mkdir -p $out/bin $out/share/tgw $out/tools
         cc -Wall -Wextra -Werror -o $out/bin/tgw-nix-input-observer-launcher ${./src/native/tgw_nix_input_observer_launcher.c} -lcrypto
         cp ${./src/tgw/nix_input_observation.py} $out/share/tgw/nix-input-observation.py
+        for spec in python:${pkgs.python313}/bin/python3.13 ip:${pkgs.iproute2}/bin/ip nix:${pkgs.nix}/bin/nix nix-store:${pkgs.nix}/bin/nix-store git:${pkgs.git}/bin/git; do
+          name="''${spec%%:*}"; source="''${spec#*:}"; resolved="$(${pkgs.coreutils}/bin/readlink -f "$source")"
+          test -f "$resolved" && test ! -L "$resolved"
+          cp --reflink=auto "$resolved" "$out/tools/$name"
+          chmod 0555 "$out/tools/$name"
+        done
       '';
       observerSystem = nixpkgs.lib.nixosSystem {
         inherit system;
@@ -64,19 +70,22 @@
           ({ ... }: {
             services.tgw-nix-input-observer-launcher = {
               enable = true; package = observerPackage;
-              pythonExecutable = "${pkgs.python313}/bin/python3.13";
-              ipExecutable = "${pkgs.iproute2}/bin/ip";
-              nixExecutable = "${pkgs.nix}/bin/nix";
-              nixStoreExecutable = "${pkgs.nix}/bin/nix-store";
-              gitExecutable = "${pkgs.git}/bin/git";
-              observerScript = "${observerPackage}/share/tgw/nix-input-observation.py";
-              launcherSha256 = "sha256:${builtins.hashFile "sha256" "${observerPackage}/bin/tgw-nix-input-observer-launcher"}";
-              pythonSha256 = "sha256:${builtins.hashFile "sha256" "${pkgs.python313}/bin/python3.13"}";
-              ipSha256 = "sha256:${builtins.hashFile "sha256" "${pkgs.iproute2}/bin/ip"}";
-              observerSha256 = "sha256:${builtins.hashFile "sha256" "${observerPackage}/share/tgw/nix-input-observation.py"}";
-              nixSha256 = "sha256:${builtins.hashFile "sha256" "${pkgs.nix}/bin/nix"}";
-              nixStoreSha256 = "sha256:${builtins.hashFile "sha256" "${pkgs.nix}/bin/nix-store"}";
-              gitSha256 = "sha256:${builtins.hashFile "sha256" "${pkgs.git}/bin/git"}";
+              # Rendering uses explicit non-deployable fixture identities.  It
+              # performs no IFD.  The build phase below hashes actual artifacts;
+              # deployment must create a distinct final descriptor from receipt.
+              pythonExecutable = "/nix/store/00000000000000000000000000000000-python-regular";
+              ipExecutable = "/nix/store/00000000000000000000000000000000-ip-regular";
+              nixExecutable = "/nix/store/00000000000000000000000000000000-nix-regular";
+              nixStoreExecutable = "/nix/store/00000000000000000000000000000000-nix-store-regular";
+              gitExecutable = "/nix/store/00000000000000000000000000000000-git-regular";
+              observerScript = "/nix/store/00000000000000000000000000000000-observer.py";
+              launcherSha256 = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+              pythonSha256 = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+              ipSha256 = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+              observerSha256 = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+              nixSha256 = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+              nixStoreSha256 = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+              gitSha256 = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
               requestSha256 = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
             };
             system.stateVersion = "25.05";
@@ -85,12 +94,21 @@
       };
       observerUnitNames = [ "tgw-nix-input-observer.socket" "tgw-nix-input-observer@.service" "tgw-nix-input-observer.slice" ];
       observerUnitFiles = map (name: { inherit name; file = pkgs.writeText name observerSystem.config.systemd.units.${name}.text; }) observerUnitNames;
-      observerRenderedArtifacts = pkgs.runCommand "nix-input-observer-rendered-artifacts" { } ''
+      observerRenderedArtifacts = pkgs.runCommand "nix-input-observer-rendered-artifacts" { nativeBuildInputs = [ pkgs.python313 ]; } ''
         mkdir -p $out/units $out/etc
         ${builtins.concatStringsSep "\n" (map (unit: "cp ${unit.file} $out/units/${unit.name}") observerUnitFiles)}
         cp ${observerSystem.config.environment.etc."tgw/nix-input-observer-launcher.conf".source} $out/etc/nix-input-observer-launcher.conf
         cp ${observerSystem.config.environment.etc."tgw/nix-input-observer-transport.json".source} $out/etc/nix-input-observer-transport.json
-        printf '%s' '${builtins.toJSON { schema = "tgw-nix-input-observer-render/v1"; inherit system; units = observerUnitNames; activation = false; }}' > $out/verifier-metadata.json
+        cp ${observerPackage}/bin/tgw-nix-input-observer-launcher $out/launcher
+        cp ${observerPackage}/share/tgw/nix-input-observation.py $out/observer.py
+        cp -r ${observerPackage}/tools $out/tools
+        python3 - "$out" <<'PY'
+        import hashlib,json,pathlib,sys
+        root=pathlib.Path(sys.argv[1])
+        files=sorted(str(p.relative_to(root)) for p in root.rglob("*") if p.is_file())
+        value={"schema":"tgw-nix-input-observer-render/v1","system":"x86_64-linux","units":["tgw-nix-input-observer.socket","tgw-nix-input-observer@.service","tgw-nix-input-observer.slice"],"activation":False,"descriptor_status":"NON_DEPLOYABLE_RENDER_FIXTURE","files":[{"path":name,"sha256":"sha256:"+hashlib.sha256((root/name).read_bytes()).hexdigest()} for name in files]}
+        (root/"verifier-metadata.json").write_text(json.dumps(value,sort_keys=True,separators=(",",":")))
+        PY
       '';
     in {
       devShells.${system}.default = pkgs.mkShell { };

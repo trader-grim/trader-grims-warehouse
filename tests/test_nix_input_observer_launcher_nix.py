@@ -66,3 +66,7 @@ def test_flake_exports_closed_observer_render_artifact():
     ):
         assert output in source
     assert "activation = false" in source
+    assert "builtins.hashFile" not in source
+    assert '"descriptor_status":"NON_DEPLOYABLE_RENDER_FIXTURE"' in source
+    assert 'readlink -f "$source"' in source and 'test ! -L "$resolved"' in source
+    assert "cp -r ${observerPackage}/tools $out/tools" in source
