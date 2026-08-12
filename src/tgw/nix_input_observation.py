@@ -222,19 +222,37 @@ def observe_archive(
         claimed = unsigned.pop("receipt_sha256", None)
         expected_request_hash = "sha256:" + hashlib.sha256(_canonical(bound_request)).hexdigest()
         expected_tool_hash = "sha256:" + hashlib.sha256(_canonical(known_tool_sha256)).hexdigest()
-        if (
-            set(unsigned) != {"schema", "request_sha256", "helper_sha256", "tool_manifest_sha256", "stage", "code", "outcome", "cleanup", "netns_inode"}
-            or unsigned.get("schema") not in {"tgw-nix-input-observation-failure/v1", "tgw-nix-input-observation-bootstrap-failure/v1"}
-            or unsigned.get("cleanup") not in {"removed", "ambiguous"}
-            or unsigned.get("outcome") != "FAILED"
-            or unsigned.get("stage") != "bootstrap"
-            or unsigned.get("code") not in {"TRUNCATED_PREFIX", "BAD_PREFIX", "BAD_LENGTH", "TRUNCATED_BODY", "HASH_MISMATCH", "BAD_PAYLOAD_JSON", "TOOL_HASH_MISMATCH"}
-            or unsigned.get("netns_inode") is not None
-            or unsigned.get("request_sha256") != expected_request_hash
-            or unsigned.get("helper_sha256") != request["observer_source_sha256"]
-            or unsigned.get("tool_manifest_sha256") != expected_tool_hash
-            or claimed != "sha256:" + hashlib.sha256(_canonical(unsigned)).hexdigest()
-        ):
+        common = (
+            set(unsigned) == {"schema", "request_sha256", "helper_sha256", "tool_manifest_sha256", "stage", "code", "outcome", "cleanup", "netns_inode"}
+            and unsigned.get("request_sha256") == expected_request_hash
+            and unsigned.get("helper_sha256") == request["observer_source_sha256"]
+            and unsigned.get("tool_manifest_sha256") == expected_tool_hash
+            and claimed == "sha256:" + hashlib.sha256(_canonical(unsigned)).hexdigest()
+        )
+        if unsigned.get("schema") == "tgw-nix-input-observation-bootstrap-failure/v1":
+            valid = (
+                common
+                and unsigned.get("stage") == "bootstrap"
+                and unsigned.get("code") in {"TRUNCATED_PREFIX", "BAD_PREFIX", "BAD_LENGTH", "TRUNCATED_BODY", "HASH_MISMATCH", "BAD_PAYLOAD_JSON", "TOOL_HASH_MISMATCH"}
+                and unsigned.get("outcome") == "FAILED"
+                and unsigned.get("cleanup") == "removed"
+                and unsigned.get("netns_inode") is None
+            )
+        elif unsigned.get("schema") == "tgw-nix-input-observation-failure/v1":
+            stages = {"request", "archive", "namespace", "nix", "cleanup"}
+            codes = {"NixInputObservationError", "JSONDecodeError", "TarError", "OSError", "UnicodeDecodeError"}
+            cleanup = unsigned.get("cleanup")
+            valid = (
+                common
+                and unsigned.get("stage") in stages
+                and unsigned.get("code") in codes
+                and cleanup in {"removed", "ambiguous"}
+                and unsigned.get("outcome") == ("FAILED" if cleanup == "removed" else "AMBIGUOUS")
+                and (unsigned.get("netns_inode") is None if unsigned.get("stage") == "request" else isinstance(unsigned.get("netns_inode"), int) and unsigned["netns_inode"] > 0)
+            )
+        else:
+            valid = False
+        if not valid:
             raise NixInputObservationError("standalone observer failure receipt is invalid")
         raise NixInputObservationError("standalone zero-fetch observer returned a validated failure")
     return validate_receipt(value, request=bound_request)
@@ -411,8 +429,9 @@ def standalone_main() -> int:
             "tool_manifest_sha256": frame.get("tool_manifest_sha256", "unknown"),
             "stage": stage,
             "code": type(failure_exc).__name__,
+            "outcome": "AMBIGUOUS" if cleanup_result == "ambiguous" else "FAILED",
             "cleanup": cleanup_result,
-            "netns_inode": os.stat("/proc/self/ns/net").st_ino,
+            "netns_inode": None if stage == "request" else os.stat("/proc/self/ns/net").st_ino,
         }
         failure["receipt_sha256"] = "sha256:" + hashlib.sha256(_canonical(failure)).hexdigest()
         sys.stdout.write(json.dumps(failure, sort_keys=True, separators=(",", ":")))

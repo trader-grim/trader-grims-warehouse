@@ -157,3 +157,26 @@ q=json.loads(payload); print(json.dumps({'request':hashlib.sha256(payload).hexdi
         "tail": hashlib.sha256(b"exact-tail").hexdigest(),
         "commit": req["source_commit"],
     }
+
+
+@pytest.mark.parametrize("cleanup", ["removed", "ambiguous"])
+def test_controller_validates_actual_bootstrap_to_inert_helper_failure(tmp_path, cleanup):
+    from tgw import nix_input_observation as module
+
+    archive = tmp_path / "source.tar"
+    archive.write_bytes(b"tail")
+    helper = f"""import hashlib,json,os,struct,sys
+n=struct.unpack('!Q',sys.stdin.buffer.read(8))[0]; q=json.loads(sys.stdin.buffer.read(n)); sys.stdin.buffer.read()
+canon=lambda x: json.dumps(x,sort_keys=True,separators=(',',':')).encode()
+d={{'schema':'tgw-nix-input-observation-failure/v1','request_sha256':'sha256:'+hashlib.sha256(canon(q)).hexdigest()}}
+d.update({{'helper_sha256':q['observer_source_sha256'],'tool_manifest_sha256':'sha256:'+hashlib.sha256(canon(q['tool_sha256'])).hexdigest()}})
+d.update({{'stage':'nix','code':'NixInputObservationError','outcome':'{"FAILED" if cleanup == "removed" else "AMBIGUOUS"}','cleanup':'{cleanup}','netns_inode':os.stat('/proc/self/ns/net').st_ino}})
+d['receipt_sha256']='sha256:'+hashlib.sha256(canon(d)).hexdigest(); print(canon(d).decode()); raise SystemExit({1 if cleanup == "removed" else 2})
+""".encode()
+    req = request(archive, helper)
+
+    def run(command, **kwargs):
+        return subprocess.run([__import__("sys").executable, "-I", "-c", module.BOOTSTRAP], input=kwargs["input"], capture_output=True, check=False)
+
+    with pytest.raises(NixInputObservationError, match="validated failure"):
+        observe_archive(archive, request=req, known_tool_sha256=TOOLS, helper_source=helper, run=run)
