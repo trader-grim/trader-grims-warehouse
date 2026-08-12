@@ -1,0 +1,1 @@
+{"schema":"tgw-candidate-test-receipt/v1","source_commit":"ef4cd59a3017c3e3a4837d2934abd812c746abcf","source_tree":"a6bf89ce05dad40964d46176002b6bdeca50909f","result":"3429 passed, 4 skipped in 57.19s","status":"passed","suite":"full","worktree":"detached-clean","command":"PYTHONPATH=src .venv/bin/pytest -q"}
