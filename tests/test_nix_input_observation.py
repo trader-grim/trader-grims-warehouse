@@ -5,6 +5,7 @@ import subprocess
 import pytest
 
 from tgw.nix_input_observation import LOCK_NAR, NIX, REV, UNSHARE, NixInputObservationError, observe_archive
+from tgw.nix_input_observation import TOOLS as TOOL_PATHS
 
 DIGEST = "a" * 64
 TOOLS = {name: "sha256:" + DIGEST for name in ("unshare", "ip", "python", "nix", "nix_store", "git")}
@@ -22,18 +23,28 @@ def request(archive, helper=b"# fixed standalone helper"):
 
 
 def receipt(req):
-    bound = {**req, "tool_sha256": TOOLS}
+    bound = {**req, "tool_sha256": TOOLS, "tool_paths": TOOL_PATHS}
     value = {
         "schema": "tgw-nix-input-observation/v2",
         "request": bound,
-        "namespace": {"start_inode": 42, "end_inode": 42, "loopback": "down", "other_links": [], "routes": [], "held_for_entire_run": True},
+        "namespace": {
+            "start_inode": 42,
+            "end_inode": 42,
+            "loopback": "down",
+            "other_links": [],
+            "routes": [],
+            "link_json_sha256": "sha256:" + DIGEST,
+            "route_json_sha256": "sha256:" + DIGEST,
+            "held_for_entire_run": True,
+        },
         "process": {"pid": 123, "starttime": 456, "exe_sha256": TOOLS["python"]},
         "tools": TOOLS,
-        "negative_probes": {"dns": "denied", "public_https": "denied", "private": "denied", "metadata": "denied"},
+        "negative_probes_before": {"dns": "denied", "public_https": "denied", "private": "denied", "metadata": "denied"},
+        "negative_probes_after": {"dns": "denied", "public_https": "denied", "private": "denied", "metadata": "denied"},
         "lock_nodes": [{"node": "nixpkgs", "rev": REV, "nar_hash": LOCK_NAR}],
         "forced_inputs": [{"lock_node": "nixpkgs", "lock_rev": REV, "lock_nar_hash": LOCK_NAR, "path": "/nix/store/11111111111111111111111111111111-source", "nar_sha256": "sha256:" + DIGEST}],
         "evaluated_drv": "/nix/store/22222222222222222222222222222222-review.drv",
-        "store_additions": [{"role": "derivation", "path": "/nix/store/22222222222222222222222222222222-review.drv", "nar_sha256": "sha256:" + DIGEST}],
+        "store_additions": [{"role": "derivation", "path": "/nix/store/22222222222222222222222222222222-review.drv", "nar_sha256": "sha256:" + DIGEST, "preexisting": True}],
         "nix_version": "nix (Nix) 2.28.5",
     }
     value["receipt_sha256"] = "sha256:" + hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()

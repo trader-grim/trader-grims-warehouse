@@ -76,7 +76,8 @@ def validate_receipt(value: Any, *, request: dict[str, Any]) -> dict[str, Any]:
         "namespace",
         "process",
         "tools",
-        "negative_probes",
+        "negative_probes_before",
+        "negative_probes_after",
         "lock_nodes",
         "forced_inputs",
         "evaluated_drv",
@@ -89,16 +90,19 @@ def validate_receipt(value: Any, *, request: dict[str, Any]) -> dict[str, Any]:
     namespace = value["namespace"]
     if (
         not isinstance(namespace, dict)
-        or set(namespace) != {"start_inode", "end_inode", "loopback", "other_links", "routes", "held_for_entire_run"}
+        or set(namespace) != {"start_inode", "end_inode", "loopback", "other_links", "routes", "link_json_sha256", "route_json_sha256", "held_for_entire_run"}
         or not isinstance(namespace["start_inode"], int)
         or namespace["start_inode"] != namespace["end_inode"]
         or namespace["held_for_entire_run"] is not True
         or namespace["loopback"] != "down"
         or namespace["other_links"] != []
         or namespace["routes"] != []
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", namespace["link_json_sha256"])
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", namespace["route_json_sha256"])
     ):
         raise NixInputObservationError("observer namespace evidence is invalid")
-    if value["negative_probes"] != {"dns": "denied", "public_https": "denied", "private": "denied", "metadata": "denied"}:
+    probes = {"dns": "denied", "public_https": "denied", "private": "denied", "metadata": "denied"}
+    if value["negative_probes_before"] != probes or value["negative_probes_after"] != probes:
         raise NixInputObservationError("observer negative probes are incomplete")
     process = value["process"]
     if (
@@ -131,10 +135,11 @@ def validate_receipt(value: Any, *, request: dict[str, Any]) -> dict[str, Any]:
         or len({item.get("path") for item in additions}) != len(additions)
         or len(additions) > 4
         or any(
-            set(item) != {"role", "path", "nar_sha256"}
+            set(item) != {"role", "path", "nar_sha256", "preexisting"}
             or item["role"] not in {"source", "evaluation", "derivation"}
             or not STORE_PATH.fullmatch(item["path"])
             or not re.fullmatch(r"sha256:[0-9a-f]{64}", item["nar_sha256"])
+            or not isinstance(item["preexisting"], bool)
             for item in additions
         )
         or not any(item["role"] == "derivation" and item["path"] == value["evaluated_drv"] for item in additions)
@@ -166,9 +171,27 @@ def observe_archive(
         or request.get("module_sha256") is None
     ):
         raise NixInputObservationError("observer immutable archive request is invalid")
-    command = helper_command(known_tool_sha256=known_tool_sha256)
-    bound_request = {**request, "tool_sha256": known_tool_sha256}
-    completed = run(command, input=packet(helper_source, bound_request, archive), capture_output=True, timeout=180, check=False)
+    tool_fds = {}
+    try:
+        if run is subprocess.run:
+            for name, path in TOOLS.items():
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                metadata = os.fstat(fd)
+                if not os.path.isfile(f"/proc/self/fd/{fd}") or "sha256:" + hashlib.sha256(os.read(fd, metadata.st_size)).hexdigest() != known_tool_sha256[name]:
+                    raise NixInputObservationError("held tool identity mismatch")
+                os.lseek(fd, 0, os.SEEK_SET)
+                tool_fds[name] = fd
+            stable_paths = {name: f"/proc/{os.getpid()}/fd/{fd}" for name, fd in tool_fds.items()}
+        else:
+            stable_paths = dict(TOOLS)
+        command = helper_command(known_tool_sha256=known_tool_sha256)
+        command[0] = stable_paths["unshare"]
+        command[-4] = stable_paths["python"]
+        bound_request = {**request, "tool_sha256": known_tool_sha256, "tool_paths": stable_paths}
+        completed = run(command, input=packet(helper_source, bound_request, archive), capture_output=True, timeout=180, check=False, pass_fds=tuple(tool_fds.values()))
+    finally:
+        for fd in tool_fds.values():
+            os.close(fd)
     if len(completed.stdout) > 2 * 1024 * 1024:
         raise NixInputObservationError("standalone zero-fetch observer output exceeded its bound")
     try:
@@ -179,9 +202,12 @@ def observe_archive(
         unsigned = dict(value) if isinstance(value, dict) else {}
         claimed = unsigned.pop("receipt_sha256", None)
         if (
-            set(unsigned) != {"schema", "code", "cleanup"}
+            set(unsigned) != {"schema", "request_sha256", "helper_sha256", "tools", "stage", "code", "cleanup", "netns_inode"}
             or unsigned.get("schema") != "tgw-nix-input-observation-failure/v1"
-            or unsigned.get("cleanup") != "attempted"
+            or unsigned.get("cleanup") not in {"removed", "ambiguous"}
+            or unsigned.get("request_sha256") != "sha256:" + hashlib.sha256(_canonical(bound_request)).hexdigest()
+            or unsigned.get("helper_sha256") != request["observer_source_sha256"]
+            or unsigned.get("tools") != known_tool_sha256
             or claimed != "sha256:" + hashlib.sha256(_canonical(unsigned)).hexdigest()
         ):
             raise NixInputObservationError("standalone observer failure receipt is invalid")
@@ -241,23 +267,54 @@ def _probe_denied(host: str, port: int) -> str:
     raise NixInputObservationError("network negative probe unexpectedly connected")
 
 
+def _all_probes() -> dict[str, str]:
+    return {
+        "dns": _probe_denied("1.1.1.1", 53),
+        "public_https": _probe_denied("1.1.1.1", 443),
+        "private": _probe_denied("10.0.0.1", 443),
+        "metadata": _probe_denied("169.254.169.254", 80),
+    }
+
+
+def _valid_store_path(path: str, cwd: Path) -> bool:
+    result = subprocess.run([NIX_STORE, "--check-validity", path], cwd=cwd, capture_output=True, timeout=30, check=False)
+    return result.returncode == 0
+
+
 def standalone_main() -> int:
     scratch = Path(tempfile.mkdtemp(prefix="tgw-nix-observe-"))
+    request: dict[str, Any] = {}
+    stage = "request"
+    cleanup_result = "unknown"
     try:
+        netns_start = os.stat("/proc/self/ns/net").st_ino
         raw_size = struct.unpack("!Q", sys.stdin.buffer.read(8))[0]
         request = json.loads(sys.stdin.buffer.read(raw_size))
+        expected = {"source_archive_sha256", "observer_source_sha256", "source_commit", "source_tree", "flake_lock_sha256", "module_sha256", "tool_sha256", "tool_paths"}
+        if set(request) != expected or not all(isinstance(request[key], (str, dict)) for key in expected):
+            raise NixInputObservationError("request schema mismatch")
+        stage = "archive"
         archive = scratch / "source.tar"
         archive.write_bytes(sys.stdin.buffer.read())
         if "sha256:" + hashlib.sha256(archive.read_bytes()).hexdigest() != request["source_archive_sha256"]:
             raise NixInputObservationError("archive digest mismatch")
+        if set(request["tool_paths"]) != set(TOOLS):
+            raise NixInputObservationError("tool path schema mismatch")
+        globals().update({name.upper(): path for name, path in request["tool_paths"].items()})
+        globals()["TOOLS"] = dict(request["tool_paths"])
         tools = {name: "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest() for name, path in TOOLS.items()}
         if tools != request["tool_sha256"]:
             raise NixInputObservationError("tool identity mismatch")
         tree = _strict_extract(archive, scratch / "extract", request)
+        stage = "namespace"
         links = json.loads(_run([IP, "-json", "link", "show"], tree))
         routes = json.loads(_run([IP, "-json", "route", "show"], tree))
-        if routes or {item.get("ifname") for item in links} != {"lo"}:
+        if routes or len(links) != 1 or links[0].get("ifname") != "lo" or links[0].get("operstate") not in {"DOWN", "UNKNOWN"} or "UP" in links[0].get("flags", []):
             raise NixInputObservationError("namespace network state is not isolated")
+        link_hash = "sha256:" + hashlib.sha256(_canonical(links)).hexdigest()
+        route_hash = "sha256:" + hashlib.sha256(_canonical(routes)).hexdigest()
+        probes_before = _all_probes()
+        stage = "nix"
         base = [NIX, "--offline", "--option", "substituters", "", "--option", "allow-import-from-derivation", "false", "--option", "pure-eval", "true", "--no-write-lock-file"]
         metadata = json.loads(_run(base + ["flake", "metadata", "--json", "path:."], tree))
         locked = metadata["locks"]["nodes"]
@@ -265,30 +322,33 @@ def standalone_main() -> int:
             raise NixInputObservationError("lock graph mismatch")
         input_path = _run(base + ["eval", "--raw", ".#inputIdentities.nixpkgs.outPath"], tree).strip()
         input_nar = _run(base + ["hash", "path", "--type", "sha256", "--base16", input_path], tree).strip()
-        drv = _run(base + ["eval", "--raw", ".#packages.x86_64-linux.review-egress-systemd-units.drvPath"], tree).strip()
+        drv_target = ".#packages.x86_64-linux.review-egress-systemd-units.drvPath"
+        drv = _run(base + ["eval", "--raw", drv_target], tree).strip()
         additions = []
         for role, path in (("derivation", drv),):
-            additions.append({"role": role, "path": path, "nar_sha256": "sha256:" + _run(base + ["hash", "path", "--type", "sha256", "--base16", path], tree).strip()})
+            additions.append(
+                {"role": role, "path": path, "nar_sha256": "sha256:" + _run(base + ["hash", "path", "--type", "sha256", "--base16", path], tree).strip(), "preexisting": _valid_store_path(path, tree)}
+            )
+        probes_after = _all_probes()
+        netns_end = os.stat("/proc/self/ns/net").st_ino
         stat_fields = Path("/proc/self/stat").read_text().split()
         value = {
             "schema": SCHEMA,
             "request": request,
             "namespace": {
-                "start_inode": os.stat("/proc/self/ns/net").st_ino,
-                "end_inode": os.stat("/proc/self/ns/net").st_ino,
+                "start_inode": netns_start,
+                "end_inode": netns_end,
                 "loopback": "down",
                 "other_links": [],
                 "routes": [],
+                "link_json_sha256": link_hash,
+                "route_json_sha256": route_hash,
                 "held_for_entire_run": True,
             },
             "process": {"pid": os.getpid(), "starttime": int(stat_fields[21]), "exe_sha256": tools["python"]},
             "tools": tools,
-            "negative_probes": {
-                "dns": _probe_denied("1.1.1.1", 53),
-                "public_https": _probe_denied("1.1.1.1", 443),
-                "private": _probe_denied("10.0.0.1", 443),
-                "metadata": _probe_denied("169.254.169.254", 80),
-            },
+            "negative_probes_before": probes_before,
+            "negative_probes_after": probes_after,
             "lock_nodes": [{"node": NODE, "rev": REV, "nar_hash": LOCK_NAR}],
             "forced_inputs": [{"lock_node": NODE, "lock_rev": REV, "lock_nar_hash": LOCK_NAR, "path": input_path, "nar_sha256": "sha256:" + input_nar}],
             "evaluated_drv": drv,
@@ -299,12 +359,27 @@ def standalone_main() -> int:
         sys.stdout.write(json.dumps(value, sort_keys=True, separators=(",", ":")))
         return 0
     except Exception as exc:
-        failure = {"schema": "tgw-nix-input-observation-failure/v1", "code": type(exc).__name__, "cleanup": "attempted"}
+        failure_exc = exc
+    finally:
+        try:
+            shutil.rmtree(scratch)
+            cleanup_result = "removed" if not scratch.exists() else "ambiguous"
+        except Exception:
+            cleanup_result = "ambiguous"
+    if "failure_exc" in locals():
+        failure = {
+            "schema": "tgw-nix-input-observation-failure/v1",
+            "request_sha256": "sha256:" + hashlib.sha256(_canonical(request)).hexdigest(),
+            "helper_sha256": request.get("observer_source_sha256", "unknown"),
+            "tools": request.get("tool_sha256", {}),
+            "stage": stage,
+            "code": type(failure_exc).__name__,
+            "cleanup": cleanup_result,
+            "netns_inode": os.stat("/proc/self/ns/net").st_ino,
+        }
         failure["receipt_sha256"] = "sha256:" + hashlib.sha256(_canonical(failure)).hexdigest()
         sys.stdout.write(json.dumps(failure, sort_keys=True, separators=(",", ":")))
-        return 1
-    finally:
-        shutil.rmtree(scratch, ignore_errors=True)
+        return 2 if cleanup_result == "ambiguous" else 1
 
 
 if __name__ == "__main__":
