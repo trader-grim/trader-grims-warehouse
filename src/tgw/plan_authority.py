@@ -38,6 +38,7 @@ class EffectKind(str, Enum):
     BOUNDED_FLAKE_PUSH = "bounded-flake-push"
     FLAKE_SWITCH_RECORD_ONLY = "flake-switch-record-only"
     DEPENDENCY_RESUBMIT = "dependency-resubmit"
+    AUTHORITY_CANARY = "authority-canary"
 
 
 @dataclass(frozen=True)

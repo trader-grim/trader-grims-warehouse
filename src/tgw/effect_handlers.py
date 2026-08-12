@@ -73,8 +73,19 @@ class EffectExecutionReceipt:
         return "sha256:" + hashlib.sha256(_canonical(self.__dict__)).hexdigest()
 
 
+def _authority_canary(parameters: Mapping[str, str]) -> Mapping[str, Any]:
+    """Return deterministic evidence only; perform no provider or filesystem I/O."""
+    evidence = {
+        "schema": "tgw-authority-canary-evidence/v1",
+        "canary_id": parameters["canary_id"],
+        "generation": parameters["generation"],
+        "purpose": parameters["purpose"],
+    }
+    return {"evidence": ["authority-canary:sha256:" + hashlib.sha256(_canonical(evidence)).hexdigest()]}
+
+
 class TypedEffectHandlerRegistry:
-    """Closed registry of the four Plan-declared effect classes."""
+    """Closed registry of Plan-declared typed effect classes."""
 
     def __init__(
         self,
@@ -90,6 +101,7 @@ class TypedEffectHandlerRegistry:
             EffectKind.BOUNDED_FLAKE_PUSH: ("bounded-flake-push@1", flake_push, None),
             EffectKind.FLAKE_SWITCH_RECORD_ONLY: ("flake-switch-record-only@1", flake_switch_record, None),
             EffectKind.DEPENDENCY_RESUBMIT: ("dependency-resubmit@1", dependency_resubmit, None),
+            EffectKind.AUTHORITY_CANARY: ("authority-canary-receipt-only@1", _authority_canary, None),
         }
 
     def prepare(self, effect: TypedEffect) -> tuple[str, dict[str, str], Callable[..., Mapping[str, Any]], Callable[..., Mapping[str, Any]] | None]:
@@ -123,10 +135,14 @@ class TypedEffectHandlerRegistry:
             parameters = _required(effect.parameters, {"host_role", "commit", "execution_receipt"})
             if parameters["host_role"] != "production" or not _SHA1.fullmatch(parameters["commit"]):
                 raise ValueError("flake switch record target is outside the registered bound")
-        else:
+        elif effect.kind is EffectKind.DEPENDENCY_RESUBMIT:
             parameters = _required(effect.parameters, {"dependency_id", "queue_id", "failed_generation"})
             if parameters["queue_id"] not in {"coding", "review", "controller", "release"}:
                 raise ValueError("dependency queue is not registered")
+        else:
+            parameters = _required(effect.parameters, {"canary_id", "purpose"})
+            if parameters["purpose"] != "verify-plan-authority-roundtrip":
+                raise ValueError("authority canary purpose is outside the harmless registered bound")
         handler_id, handler, rollback = self._providers[effect.kind]
         parameters["generation"] = effect.generation
         return handler_id, parameters, handler, rollback

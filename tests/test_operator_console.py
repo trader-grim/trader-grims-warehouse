@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.testclient import TestClient
@@ -95,6 +96,13 @@ def test_discovery_names_one_backend_and_non_authority_surfaces():
         "id": "plan-authority", "label": "Plan Authority",
         "href": "/form/plan-authority", "group": "Admin", "order": 30,
     }
+
+
+def test_shared_authenticated_site_navigation_links_canonical_authority():
+    nav = Path(__file__).parents[1].joinpath("src/tgw/static/nav.js").read_text(encoding="utf-8")
+    assert nav.count('href="/form/plan-authority"') == 1
+    discovery = _client(_row()).get("/api/operator-console/discovery").json()
+    assert discovery["navigation"]["href"] in nav
     assert {item["path"] for item in discovery["non_authority_surfaces"]} >= {
         "/form/approvals", "/api/action-approvals", "/form/runs", "/form/todos",
         "/form/pp-clip", "/api/items/*",

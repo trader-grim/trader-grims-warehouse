@@ -42,9 +42,10 @@ def _registry(**changes):
         ("bounded-flake-push", {"repository_id": "tgw-flake", "host_role": "production", "commit": SHA, "remote_ref": "origin/master"}),
         ("flake-switch-record-only", {"host_role": "production", "commit": SHA, "execution_receipt": "manual:1"}),
         ("dependency-resubmit", {"dependency_id": "W03", "queue_id": "coding", "failed_generation": "generation-1"}),
+        ("authority-canary", {"canary_id": "canary:w10-1", "purpose": "verify-plan-authority-roundtrip"}),
     ],
 )
-def test_all_four_registered_effects_consume_exact_authority_then_invoke_typed_provider(kind, parameters):
+def test_registered_effects_consume_exact_authority_then_invoke_only_their_handler(kind, parameters):
     registry, providers = _registry()
     consumed = Mock(return_value={"receipt_id": "authority:1"})
     effect = TypedEffect.parse({"kind": kind, "generation": "generation-2", "parameters": parameters})
@@ -57,7 +58,7 @@ def test_all_four_registered_effects_consume_exact_authority_then_invoke_typed_p
     assert receipt.receipt_hash.startswith("sha256:")
     handler_id, _, _, _ = registry.prepare(effect)
     assert receipt.handler_id == handler_id
-    assert sum(provider.call_count for provider in providers.values()) == 1
+    assert sum(provider.call_count for provider in providers.values()) == (0 if kind == "authority-canary" else 1)
 
 
 @pytest.mark.parametrize(
@@ -143,3 +144,25 @@ def test_authority_rejection_prevents_handler_invocation():
     with pytest.raises(ValueError, match="already consumed"):
         AuthorityEffectController(registry, Mock(side_effect=ValueError("already consumed"))).execute(request_id="r", effect=effect)
     assert all(provider.call_count == 0 for provider in providers.values())
+
+
+def test_authority_canary_is_internal_receipt_only_and_cannot_broaden_purpose():
+    registry, providers = _registry()
+    consume = Mock(return_value={"receipt_id": "authority:canary"})
+    effect = TypedEffect.parse({
+        "kind": "authority-canary", "generation": "w10-canary-1",
+        "parameters": {"canary_id": "canary:w10-1", "purpose": "verify-plan-authority-roundtrip"},
+    })
+    receipt = AuthorityEffectController(registry, consume).execute(request_id="request:canary", effect=effect)
+    assert receipt.outcome is EffectOutcome.SUCCEEDED
+    assert receipt.handler_id == "authority-canary-receipt-only@1"
+    assert receipt.evidence[0].startswith("authority-canary:sha256:")
+    assert all(provider.call_count == 0 for provider in providers.values())
+
+    broadened = TypedEffect.parse({
+        "kind": "authority-canary", "generation": "w10-canary-2",
+        "parameters": {"canary_id": "canary:w10-2", "purpose": "deploy-platform"},
+    })
+    with pytest.raises(ValueError, match="harmless registered bound"):
+        AuthorityEffectController(registry, consume).execute(request_id="request:bad", effect=broadened)
+    assert consume.call_count == 1
