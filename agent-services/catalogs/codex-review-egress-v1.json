@@ -1,0 +1,28 @@
+{
+  "schema": "tgw-review-egress-deployment-contract/v1",
+  "provider": "codex-isolated-review-runner",
+  "auth_mode": "chatgpt",
+  "allowed_hosts": ["auth.openai.com", "chatgpt.com"],
+  "host_evidence": {
+    "chatgpt.com": "Codex CLI 0.147.0 embedded production backend URL for ChatGPT-auth Codex sessions",
+    "auth.openai.com": "Codex CLI 0.147.0 embedded OAuth token refresh/revoke endpoint"
+  },
+  "explicitly_denied_examples": ["api.github.com", "api.openai.com", "ab.chatgpt.com", "raw.githubusercontent.com"],
+  "sandbox_contract": {
+    "network_namespace": "dedicated per-run namespace",
+    "visible_peer": "broker address only",
+    "direct_default_route": false,
+    "dns_from_sandbox": false,
+    "broker_resolution": "resolve once; reject any non-global result; connect exact returned IP",
+    "kernel_enforcement_attestation_required": true
+  },
+  "remaining_host_installation_leaf": {
+    "status": "NOT_INSTALLED",
+    "requires": [
+      "per-run namespace and veth owned by privileged system unit",
+      "firewall default deny including loopback/private/link-local/metadata",
+      "only sandbox-to-broker address and broker public TCP/443 permitted",
+      "post-install negative probes and immutable network attestation"
+    ]
+  }
+}
