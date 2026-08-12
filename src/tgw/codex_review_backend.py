@@ -19,7 +19,7 @@ REPORT_SCHEMA = {
     "additionalProperties": False,
     "required": ["schema", "verdict", "snapshot_hash", "summary", "findings"],
     "properties": {
-        "schema": {"const": "tgw-code-review/v1"},
+        "schema": {"type": "string", "const": "tgw-code-review/v1"},
         "verdict": {"enum": ["PASS", "FAIL"]},
         "snapshot_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
         "summary": {"type": "string", "minLength": 1, "maxLength": 4000},

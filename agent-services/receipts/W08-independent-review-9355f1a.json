@@ -1,0 +1,25 @@
+{
+  "schema": "tgw-governed-coding-receipt/v1",
+  "status": "FAIL",
+  "role": "independent-review",
+  "selected_provider": "codex-isolated-review-runner",
+  "execution_identity": "isolated-review:9355f1a082775016be36796afa1190a4657700d7",
+  "card_hash": "sha256:b6cadc28552274a64d7a5c57f11420e1dd382efb50adf69e38273fd68f3a7466",
+  "promptcraft_receipt_hash": "sha256:52c8477b5c1c4a3ce100e7a6d1dc40495546d30d26bf60026531a820598a7fbd",
+  "outcome": "failed",
+  "established_conditions": [],
+  "artifacts": [{
+    "kind": "semantic_review",
+    "report": {
+      "schema": "tgw-code-review/v1",
+      "verdict": "FAIL",
+      "snapshot_hash": "sha256:281a0db73d28a2cf2e7251dfc458e57d97fabe8b76b0a549d3ef71252d36d5b5",
+      "summary": "Two unresolved high-severity security defects: a write-protection bypass in the CLI API and stored script injection in the item editor.",
+      "findings": [
+        {"severity":"high","path":"src/tgw/http_server.py","line":11325,"message":"The `/api/cli` write-protection denylist is bypassable through supported aliases. For example, `titleupdate`, `locationupdate`, `verifiedupdate`, `statusupdate`, and `setshipping` invoke the same mutating handlers as blocked canonical commands but are not blocked, allowing authenticated callers to modify inventory despite the endpoint's stated write protection. Use an explicit allowlist of proven read-only commands instead."},
+        {"severity":"high","path":"src/tgw/http_server.py","line":6430,"message":"Item-controlled aspect data is serialized with plain `json.dumps` and later embedded directly into an HTML `<script>` element. JSON escaping does not escape `</script>`, so a crafted item-specific name or value can terminate the script and inject executable HTML/JavaScript when an operator opens the item editor. The adjacent proposal/category/meta serializations have the same unsafe embedding pattern; encode `<` as `\\u003c` or place data in a non-executable safely escaped container."}
+      ]
+    }
+  }],
+  "receipt_hash": "sha256:f90be0b31be6125ac04c502cd0266270d7c58889534e0bc2d291ad6bd3217ed5"
+}
