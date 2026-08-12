@@ -1,0 +1,36 @@
+{
+  "attempt": {
+    "controller_error": "remote reviewed evaluation returned malformed JSON",
+    "request_hash": "sha256:a4d2f0446461609fc816a4fb52bc9ba70313cd61d4495270bd82b84a0eeb26dc",
+    "ssh_return_code": 0,
+    "validated_remote_receipt": null
+  },
+  "classification": "PROVABLY_NO_EFFECT",
+  "forbidden_effects": {
+    "activation": false,
+    "archive_extraction": false,
+    "build": false,
+    "deployment": false,
+    "home_db_write": false,
+    "live_flake_write": false,
+    "nix_evaluation": false,
+    "profile_write": false,
+    "scratch": false
+  },
+  "observed_at": "2026-08-11T23:06:26-07:00",
+  "post_observation": {
+    "current_system": "/nix/store/rjpqj1kf2g6i34anklih1dmk4afcdkmj-nixos-system-tgw-prod-25.05.20260102.ac62194",
+    "failure_store_entry_count": 0,
+    "scratch_root": "ABSENT",
+    "system_profile": "/nix/store/rjpqj1kf2g6i34anklih1dmk4afcdkmj-nixos-system-tgw-prod-25.05.20260102.ac62194"
+  },
+  "proof": {
+    "bootstrap_behavior": "The fixed bootstrap validates and execs the streamed provider source with __name__ set to __main__.",
+    "provider_behavior": "The streamed source ends after defining main and contains neither an __main__ guard nor any main() invocation.",
+    "result": "exec returned normally with exit zero and empty stdout before execute_packet, scratch creation, archive extraction, Nix evaluation, build, or receipt emission could run."
+  },
+  "remote_retry": false,
+  "schema": "tgw-nixos-reviewed-evaluation-attempt-reconciliation/v1",
+  "self_hash": "sha256:f258e1b47b0e1b54818829dc840533f193ea58b5ce4749d4ad5babecda5c6c89",
+  "source_commit": "161518d94713fcef5c2ed2764ba18ad672217730"
+}
