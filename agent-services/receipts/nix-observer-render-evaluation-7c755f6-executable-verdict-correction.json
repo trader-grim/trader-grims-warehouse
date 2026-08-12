@@ -1,0 +1,56 @@
+{
+  "schema": "tgw-nix-observer-render-executable-verdict-correction/v1",
+  "observed_at": "2026-08-12T16:38:56Z",
+  "request_sha256": "sha256:f5e15db3b4027669b3c2fa7fbaf636d55bf5b6ebc9b0c932cea0a09f73a7f594",
+  "source_commit": "7c755f6ba906af1c9ab6244c2d258d81d44c8ca7",
+  "metadata_commit": "b8b1b18",
+  "incorrect_verdict": "EXECUTABLE_ONE_ATTEMPT",
+  "corrected_verdict": "NOT_EXECUTABLE_MISSING_COMPOSITION",
+  "audit_failure": "The audit validated request, artifact, provider evidence producer, and transport probe identities but did not verify a callable end-to-end render transport/composition before issuing the executable verdict.",
+  "missing_composition": {
+    "render_module_capability": "validate_request/validate_result/produce_result only",
+    "ssh_archive_transport_adapter": false,
+    "render_cli": false,
+    "typed_effect_registration": false,
+    "callable_runtime_composition": false,
+    "existing_runtime_compatible": false,
+    "existing_runtime_reason": "tgw.nixos_evaluation_runtime is hard-pinned to the older reviewed-evaluation source artifact, request hash, schema, and effect."
+  },
+  "required_adapter": {
+    "reuse": "existing fixed SSH/known-host/bootstrap/archive transport primitives without reusing the old request schema",
+    "bindings": [
+      "exact render request and self-hash",
+      "exact source archive artifact and stable identity",
+      "external host prerequisite receipt",
+      "offline one-input closure",
+      "render provider source digest",
+      "fixed scratch and immutable failure stores"
+    ],
+    "remote_steps": [
+      "strict archive reconstruction and source digest validation",
+      "offline no-IFD evaluation/build of only nix-input-observer-rendered-artifacts",
+      "derive evaluated derivation and output path",
+      "invoke produce_result over the exact held output and verifier",
+      "return and persist a validated render receipt or typed failure"
+    ],
+    "forbidden": [
+      "manual schema substitution",
+      "old reviewed-evaluation request substitution",
+      "activation",
+      "deployment",
+      "profile or home database write",
+      "live flake write",
+      "network access"
+    ]
+  },
+  "post_state": {
+    "remote_command_started": false,
+    "generation": "/nix/store/rjpqj1kf2g6i34anklih1dmk4afcdkmj-nixos-system-tgw-prod-25.05.20260102.ac62194",
+    "profile": "/nix/store/rjpqj1kf2g6i34anklih1dmk4afcdkmj-nixos-system-tgw-prod-25.05.20260102.ac62194",
+    "reviewed_evaluation_scratch": "absent",
+    "observer_render_scratch": "absent",
+    "observer_socket": "absent",
+    "classification": "PROVABLY_NO_EFFECT"
+  },
+  "receipt_sha256": "sha256:20628aba782ce22ac954d2dd5008da9b046e4680c6d3bbdf288491bd000bdaac"
+}
