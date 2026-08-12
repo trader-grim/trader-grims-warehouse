@@ -1,0 +1,57 @@
+{
+  "task_id": "promptcraft-codex-review-v1",
+  "goal": "Review the current Promptcraft implementation and uncommitted diff for correctness as an intent translator and harness-dialect compiler; identify material defects or semantic-assurance gaps with source-linked evidence.",
+  "harness": "codex",
+  "source_paths": [
+    "promptcraft/core.py",
+    "promptcraft/server.py",
+    "promptcraft/cli.py",
+    "tests/test_promptcraft.py",
+    "bin/labctl.py",
+    "schemas/run-manifest.schema.json",
+    "promptcraft/README.md",
+    "README.md",
+    "ROUTING.md"
+  ],
+  "tools": ["shell", "filesystem", "tests"],
+  "internet": "off",
+  "allowed_effects": [
+    "read repository files and git diff",
+    "run existing read-only tests and static checks",
+    "write only the final response to the controller-provided output path"
+  ],
+  "forbidden_effects": [
+    "modify repository files",
+    "commit, push, merge, deploy, or release",
+    "network access",
+    "production, Plan Vault, flake.nix, marketplace, credential, or external effects"
+  ],
+  "requirements": [
+    "Inspect promptcraft/core.py, promptcraft/server.py, promptcraft/cli.py, tests/test_promptcraft.py, bin/labctl.py, schemas/run-manifest.schema.json, promptcraft/README.md, README.md, and ROUTING.md",
+    "Inspect the current git diff so staged and uncommitted candidate behavior is included",
+    "Check whether intent_sha256 truly remains receiver-independent while dialect_sha256 captures receiver-specific strategy",
+    "Check receipt compatibility and whether labctl binds the exact PASS prompt safely",
+    "Check MCP prompt handling, draft-as-data boundaries, and accidental execution or authority leakage",
+    "Run the existing unit tests and deterministic checks permitted by the read-only sandbox",
+    "Distinguish confirmed defects, design limitations, and future enhancements"
+  ],
+  "non_goals": [
+    "Do not implement fixes",
+    "Do not redesign unrelated Capability Lab components",
+    "Do not treat stylistic preference as a defect"
+  ],
+  "output_sections": [
+    "VERDICT",
+    "CONFIRMED STRENGTHS",
+    "FINDINGS",
+    "TEST EVIDENCE",
+    "RECOMMENDED NEXT STEPS"
+  ],
+  "exact_counts": {},
+  "acceptance_checks": [
+    "Every finding names an exact file and stable line range or symbol",
+    "Each finding states severity, consequence, and the smallest justified correction",
+    "Test claims quote the command and observed result",
+    "If no material defect is found, say so directly without inventing one"
+  ]
+}
