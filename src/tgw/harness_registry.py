@@ -47,7 +47,7 @@ def _command_health(command: Any) -> tuple[bool, str, tuple[str, ...]]:
         return False, "configured runner argv is invalid", ()
     executable = command[0]
     resolved = (
-        str(Path(executable).resolve())
+        str(Path(executable).absolute())
         if Path(executable).is_absolute() and Path(executable).is_file() and os.access(executable, os.X_OK)
         else shutil.which(executable)
     )
