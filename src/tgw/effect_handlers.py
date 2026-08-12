@@ -71,6 +71,20 @@ def _canonical(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
 
 
+def _observer_memory_evidence(
+    *, reason: str, generation: str, request: Mapping[str, Any], composition_sha256: str, observed: Any
+) -> tuple[str, ...]:
+    observation = {
+        "schema": "tgw-nixos-observer-render-handler-observation/v1",
+        "reason": reason,
+        "generation": generation,
+        "request_sha256": request.get("request_sha256"),
+        "composition_sha256": composition_sha256,
+        "observed_sha256": "sha256:" + hashlib.sha256(_canonical(observed)).hexdigest(),
+    }
+    return ("nixos-observer-render-handler-memory:sha256:" + hashlib.sha256(_canonical(observation)).hexdigest(),)
+
+
 def _required(parameters: Mapping[str, Any], keys: set[str]) -> dict[str, str]:
     if set(parameters) != keys:
         raise ValueError(f"effect parameters must be exactly {sorted(keys)}")
@@ -185,14 +199,16 @@ class TypedEffectHandlerRegistry:
             except CompositionHold as exc:
                 raise HeldEffect(str(exc), evidence=("nixos-observer-render-composition:" + composition.receipt_sha256,)) from exc
             except (RemoteAttemptAmbiguous, TerminalPersistenceError) as exc:
-                refs = (exc.attempt_ref, exc.transport_ref, exc.terminal_ref)
-                evidence = tuple(
-                    f"nixos-observer-render-{label}:{ref['sha256']}"
-                    for label, ref in zip(("attempt", "transport", "terminal"), refs, strict=True)
-                    if ref.get("sha256")
-                )
-                if len(evidence) != 3:
-                    raise EffectHandlerError("observer render ambiguity lacks durable three-part evidence") from exc
+                try:
+                    evidence = exc.authority_evidence()
+                except Exception:
+                    evidence = _observer_memory_evidence(
+                        reason="invalid-controller-ambiguity-evidence",
+                        generation=generation,
+                        request=request,
+                        composition_sha256=composition.receipt_sha256,
+                        observed={"type": type(exc).__name__, "detail": str(exc)},
+                    )
                 raise AmbiguousEffect(str(exc), evidence=evidence) from exc
             except RemoteRenderFailure as exc:
                 if exc.terminal.get("outcome") == "AMBIGUOUS":
@@ -210,7 +226,13 @@ class TypedEffectHandlerRegistry:
             except Exception as exc:
                 raise AmbiguousEffect(
                     "post-launch observer render evidence failed exact validation",
-                    evidence=("nixos-observer-render-composition:" + composition.receipt_sha256,),
+                    evidence=_observer_memory_evidence(
+                        reason="post-launch-handler-validation-failed",
+                        generation=generation,
+                        request=request,
+                        composition_sha256=composition.receipt_sha256,
+                        observed=result,
+                    ),
                 ) from exc
             return {
                 "evidence": [
@@ -576,7 +598,19 @@ class AuthorityEffectController:
         except HeldEffect as exc:
             return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.HOLD, exc.evidence, detail=str(exc))
         except AmbiguousEffect as exc:
-            return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.AMBIGUOUS, exc.evidence, detail=str(exc))
+            evidence = exc.evidence
+            if not evidence:
+                observation = {
+                    "schema": "tgw-effect-ambiguity-observation/v1",
+                    "request_id": request_id,
+                    "authority_receipt_id": receipt_id,
+                    "effect_hash": effect.effect_hash,
+                    "generation": effect.generation,
+                    "handler_id": handler_id,
+                    "detail": str(exc),
+                }
+                evidence = ("effect-ambiguity-memory:sha256:" + hashlib.sha256(_canonical(observation)).hexdigest(),)
+            return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.AMBIGUOUS, evidence, detail=str(exc))
         except Exception as exc:
             if rollback is not None:
                 try:

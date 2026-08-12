@@ -96,6 +96,10 @@ class RemoteAttemptAmbiguous(RenderTransportError):
         *,
         transport_ref: Mapping[str, Any] | None = None,
         terminal_ref: Mapping[str, Any] | None = None,
+        transport_observation: Mapping[str, Any] | None = None,
+        terminal_observation: Mapping[str, Any] | None = None,
+        replay_ref: Mapping[str, Any] | None = None,
+        replay_observation: Mapping[str, Any] | None = None,
         launch_binding: LaunchBinding | None = None,
     ):
         super().__init__(f"remote observer render is AMBIGUOUS: {reason}")
@@ -104,7 +108,33 @@ class RemoteAttemptAmbiguous(RenderTransportError):
         self.reconciliation = dict(attempt_receipt["reconciliation"])
         self.transport_ref = dict(transport_ref or {})
         self.terminal_ref = dict(terminal_ref or {})
+        self.transport_observation = dict(transport_observation or {})
+        self.terminal_observation = dict(terminal_observation or {})
+        self.replay_ref = dict(replay_ref or {})
+        self.replay_observation = dict(replay_observation or {})
         self.launch_binding = launch_binding
+
+    def authority_evidence(self) -> tuple[str, ...]:
+        """Return only evidence whose digest matches the held observation."""
+        if self.launch_binding is None:
+            raise RenderTransportError("ambiguous launch has no exact launch binding")
+        _validate_ambiguity_observation(self.attempt_receipt, kind="attempt", launch=self.launch_binding)
+        _validate_observation_ref(self.attempt_receipt, self.attempt_ref, kind="attempt", durable_required=True)
+        evidence = ["nixos-observer-render-attempt:" + self.attempt_ref["sha256"]]
+        for kind, observation, reference in (
+            ("transport", self.transport_observation, self.transport_ref),
+            ("terminal", self.terminal_observation, self.terminal_ref),
+            ("replay", self.replay_observation, self.replay_ref),
+        ):
+            if not observation and not reference:
+                continue
+            _validate_ambiguity_observation(observation, kind=kind, launch=self.launch_binding)
+            in_memory = _validate_observation_ref(observation, reference, kind=kind, durable_required=False)
+            label = f"nixos-observer-render-{kind}{'-memory' if in_memory else ''}:"
+            evidence.append(label + reference["sha256"])
+        if len(evidence) < 3:
+            raise RenderTransportError("ambiguous launch lacks transport and terminal observations")
+        return tuple(evidence)
 
 
 class TerminalPersistenceError(RemoteAttemptAmbiguous):
@@ -116,6 +146,9 @@ class TerminalPersistenceError(RemoteAttemptAmbiguous):
         *,
         transport_ref: Mapping[str, Any],
         terminal_ref: Mapping[str, Any],
+        transport_observation: Mapping[str, Any],
+        replay_ref: Mapping[str, Any],
+        replay_observation: Mapping[str, Any],
         launch_binding: LaunchBinding,
     ):
         super().__init__(
@@ -124,6 +157,10 @@ class TerminalPersistenceError(RemoteAttemptAmbiguous):
             attempt_ref,
             transport_ref=transport_ref,
             terminal_ref=terminal_ref,
+            transport_observation=transport_observation,
+            terminal_observation=terminal,
+            replay_ref=replay_ref,
+            replay_observation=replay_observation,
             launch_binding=launch_binding,
         )
         self.terminal = dict(terminal)
@@ -164,6 +201,83 @@ def _self_hashed(value: Mapping[str, Any], *, field: str = "receipt_sha256") -> 
     unsigned = dict(value)
     claimed = unsigned.pop(field, None)
     return isinstance(claimed, str) and claimed == _digest_bytes(canonical(unsigned))
+
+
+def _memory_observation_ref(value: Mapping[str, Any], *, kind: str) -> dict[str, Any]:
+    raw = canonical(dict(value))
+    return {
+        "schema": "tgw-render-in-memory-observation-ref/v1",
+        "kind": kind,
+        "persistence": "FAILED",
+        "sha256": _digest_bytes(raw),
+        "size": len(raw),
+    }
+
+
+def _validate_observation_ref(
+    value: Mapping[str, Any], reference: Mapping[str, Any], *, kind: str, durable_required: bool
+) -> bool:
+    raw = canonical(dict(value))
+    digest = _digest_bytes(raw)
+    in_memory = set(reference) == {"schema", "kind", "persistence", "sha256", "size"}
+    if in_memory:
+        if (
+            durable_required
+            or reference["schema"] != "tgw-render-in-memory-observation-ref/v1"
+            or reference["kind"] != kind
+            or reference["persistence"] != "FAILED"
+        ):
+            raise RenderTransportError(f"{kind} in-memory evidence reference is invalid")
+    elif (
+        set(reference) != {"artifact_ref", "path", "sha256", "size"}
+        or reference.get("artifact_ref") != "artifact:" + digest
+    ):
+        raise RenderTransportError(f"{kind} durable evidence reference is invalid")
+    if reference.get("sha256") != digest or reference.get("size") != len(raw):
+        raise RenderTransportError(f"{kind} evidence digest differs from its observation")
+    return in_memory
+
+
+def _validate_ambiguity_observation(value: Mapping[str, Any], *, kind: str, launch: LaunchBinding) -> None:
+    if not isinstance(value, Mapping):
+        raise RenderTransportError(f"{kind} ambiguity observation is not an object")
+    if kind == "attempt":
+        if value.get("schema") != _ATTEMPT_SCHEMA or not _self_hashed(value):
+            raise RenderTransportError("attempt ambiguity observation is invalid")
+        generation = value.get("generation")
+    elif kind == "transport":
+        schema = value.get("schema")
+        if schema == "tgw-nixos-observer-render-transport-observation/v1":
+            if not _self_hashed(value):
+                raise RenderTransportError("transport ambiguity observation is invalid")
+            generation = value.get("generation")
+        elif schema == _WRAPPER_SCHEMA:
+            generation = value.get("effect_generation")
+        else:
+            raise RenderTransportError("transport ambiguity observation schema is invalid")
+    elif kind == "terminal":
+        schema = value.get("schema")
+        if schema == "tgw-nixos-observer-render-terminal-observation/v1":
+            if not _self_hashed(value):
+                raise RenderTransportError("terminal ambiguity observation is invalid")
+            generation = value.get("generation")
+        elif schema in {helper.PHASE1_FAILURE_SCHEMA, helper.SUCCESS_SCHEMA, helper.A2_FAILURE_SCHEMA}:
+            generation = launch.effect_generation
+        else:
+            raise RenderTransportError("terminal ambiguity observation schema is invalid")
+    elif kind == "replay":
+        if value.get("schema") != "tgw-nixos-observer-render-replay-claim/v1" or not _self_hashed(value):
+            raise RenderTransportError("replay ambiguity observation is invalid")
+        generation = value.get("generation")
+    else:  # pragma: no cover - closed internal call sites
+        raise RenderTransportError("unknown ambiguity evidence kind")
+    if (
+        generation != launch.effect_generation
+        or value.get("composition_sha256") not in {None, launch.composition_sha256}
+        or value.get("attempt_id") not in {None, launch.attempt_id}
+        or value.get("request_sha256") not in {None, launch.request_sha256}
+    ):
+        raise RenderTransportError(f"{kind} ambiguity observation differs from the launch")
 
 
 def _read_held(fd: int, *, maximum: int, label: str) -> tuple[bytes, os.stat_result]:
@@ -655,8 +769,10 @@ def native_wrapper_config(
     return "".join(f"{key}={value}\n" for key, value in values).encode("ascii")
 
 
-class ImmutableTerminalReceiptStore:
-    """Content-addressed receipt store using exclusive, fsynced writes."""
+class _ImmutableReceiptStore:
+    """Content-addressed base store; concrete stores admit one evidence type."""
+
+    accepted_schemas: frozenset[str] = frozenset()
 
     def __init__(self, root: Path):
         self.root = root
@@ -725,14 +841,37 @@ class ImmutableTerminalReceiptStore:
         }
 
     def persist(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        if not isinstance(value, Mapping) or value.get("schema") not in self.accepted_schemas:
+            raise RenderTransportError("receipt schema is not admitted by this typed store")
         content = canonical(dict(value))
         return self._persist_named(value, name=sha256(content).hexdigest() + ".json", reject_existing=False)
 
 
-class ImmutableAttemptReceiptStore(ImmutableTerminalReceiptStore):
+class ImmutableTerminalReceiptStore(_ImmutableReceiptStore):
+    """Store only validated A2 terminals or terminal observations."""
+
+    accepted_schemas = frozenset(
+        {
+            helper.PHASE1_FAILURE_SCHEMA,
+            helper.SUCCESS_SCHEMA,
+            helper.A2_FAILURE_SCHEMA,
+            "tgw-nixos-observer-render-terminal-observation/v1",
+        }
+    )
+
+
+class ImmutableTransportReceiptStore(_ImmutableReceiptStore):
+    """Store only signed wrapper envelopes or transport observations."""
+
+    accepted_schemas = frozenset({_WRAPPER_SCHEMA, "tgw-nixos-observer-render-transport-observation/v1"})
+
+
+class ImmutableAttemptReceiptStore(_ImmutableReceiptStore):
     """Reject a second launch for the same composition/request/generation."""
 
     def begin(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        if not isinstance(value, Mapping) or value.get("schema") != _ATTEMPT_SCHEMA or not _self_hashed(value):
+            raise RenderTransportError("attempt store rejected a non-attempt receipt")
         key = canonical(
             {
                 "composition_sha256": value.get("composition_sha256"),
@@ -743,10 +882,16 @@ class ImmutableAttemptReceiptStore(ImmutableTerminalReceiptStore):
         return self._persist_named(value, name="generation-" + sha256(key).hexdigest() + ".json", reject_existing=True)
 
 
-class ImmutableReplayReceiptStore(ImmutableTerminalReceiptStore):
+class ImmutableReplayReceiptStore(_ImmutableReceiptStore):
     """Durably consume each root-generated signed nonce exactly once."""
 
     def claim(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        if (
+            not isinstance(value, Mapping)
+            or value.get("schema") != "tgw-nixos-observer-render-replay-claim/v1"
+            or not _self_hashed(value)
+        ):
+            raise RenderTransportError("replay store rejected a non-replay receipt")
         nonce = value.get("nonce")
         if not isinstance(nonce, str) or not _NONCE.fullmatch(nonce):
             raise RenderTransportError("signed wrapper nonce is invalid")
@@ -1195,7 +1340,7 @@ def validate_wrapper_envelope(
         or type(value["expires_at"]) is not int
         or value["expires_at"] - value["issued_at"] != 300
         or type(value["test_build"]) is not bool
-        or value["test_build"] is not allow_test_build
+        or (value["test_build"] and not allow_test_build)
         or value["helper_sha256"] != HELPER_SHA256
         or value["remote_bootstrap_sha256"] != composition.components["remote_bootstrap"]["sha256"]
         or value["remote_python_sha256"] != composition.wrapper["remote_python_sha256"]
@@ -1379,7 +1524,9 @@ def validate_handler_success(value: Mapping[str, Any], *, request: Mapping[str, 
         value["attempt_receipt"], value["attempt_ref"], composition=composition, request=request, generation=value["generation"]
     )
     launch = _launch_binding(composition, request, value["generation"], attempt["attempt_id"])
-    envelope, terminal_raw = validate_wrapper_envelope(value["transport_receipt"], composition=composition, expected=launch)
+    envelope, terminal_raw = validate_wrapper_envelope(
+        value["transport_receipt"], composition=composition, expected=launch, allow_test_build=composition.test_mode
+    )
     _validate_persisted_ref(
         envelope,
         value["transport_ref"],
@@ -1439,23 +1586,28 @@ class ObserverRenderController:
     ):
         self.transport = transport
         self.terminal_store = terminal_store
-        self.transport_store = transport_store or terminal_store
-        self.replay_store = replay_store or (terminal_store if composition.test_mode else None)
+        self.transport_store = transport_store
+        self.replay_store = replay_store
         self.composition = composition
         self.authority = authority
 
-    def _persist_evidence(self, value: Mapping[str, Any]) -> Mapping[str, Any]:
-        stores = (self.transport_store, self.terminal_store, getattr(self.transport, "attempt_store", None))
-        last: BaseException | None = None
-        for store in stores:
-            persist = getattr(store, "persist", None)
-            if persist is None:
-                continue
-            try:
-                return persist(value)
-            except (OSError, RenderTransportError) as exc:
-                last = exc
-        raise RenderTransportError("no immutable evidence store accepted the observation") from last
+    @staticmethod
+    def _persist_or_memory(
+        store: ReceiptStore | ReplayStore | None,
+        value: Mapping[str, Any],
+        *,
+        kind: str,
+        operation: str = "persist",
+    ) -> Mapping[str, Any]:
+        try:
+            if store is None:
+                raise RenderTransportError(f"{kind} evidence store is unavailable")
+            writer = getattr(store, operation, None)
+            if writer is None:
+                raise RenderTransportError(f"{kind} evidence store has no {operation} operation")
+            return writer(value)
+        except Exception:
+            return _memory_observation_ref(value, kind=kind)
 
     def _ambiguous(
         self,
@@ -1463,10 +1615,13 @@ class ObserverRenderController:
         exchange: TransportExchange,
         *,
         transport_ref: Mapping[str, Any] | None = None,
+        transport_observation: Mapping[str, Any] | None = None,
+        replay_ref: Mapping[str, Any] | None = None,
+        replay_observation: Mapping[str, Any] | None = None,
         terminal_raw: bytes | None = None,
     ) -> NoReturn:
         if transport_ref is None:
-            observation = {
+            transport_observation = {
                 "schema": "tgw-nixos-observer-render-transport-observation/v1",
                 "outcome": "UNAVAILABLE_OR_INVALID",
                 "reason": reason,
@@ -1477,8 +1632,10 @@ class ObserverRenderController:
                 "raw_bytes": len(exchange.stdout),
                 "raw_sha256": _digest_bytes(exchange.stdout),
             }
-            observation["receipt_sha256"] = _digest_bytes(canonical(observation))
-            transport_ref = self._persist_evidence(observation)
+            transport_observation["receipt_sha256"] = _digest_bytes(canonical(transport_observation))
+            transport_ref = self._persist_or_memory(self.transport_store, transport_observation, kind="transport")
+        elif transport_observation is None:
+            raise RenderTransportError("internal ambiguity lacks its transport observation")
         terminal_observation = {
             "schema": "tgw-nixos-observer-render-terminal-observation/v1",
             "outcome": "UNAVAILABLE_OR_INVALID",
@@ -1491,13 +1648,17 @@ class ObserverRenderController:
             "transport_ref": dict(transport_ref),
         }
         terminal_observation["receipt_sha256"] = _digest_bytes(canonical(terminal_observation))
-        terminal_ref = self._persist_evidence(terminal_observation)
+        terminal_ref = self._persist_or_memory(self.terminal_store, terminal_observation, kind="terminal")
         raise RemoteAttemptAmbiguous(
             reason,
             exchange.attempt_receipt,
             exchange.attempt_ref,
             transport_ref=transport_ref,
             terminal_ref=terminal_ref,
+            transport_observation=transport_observation,
+            terminal_observation=terminal_observation,
+            replay_ref=replay_ref,
+            replay_observation=replay_observation,
             launch_binding=exchange.launch_binding,
         )
 
@@ -1523,27 +1684,56 @@ class ObserverRenderController:
         try:
             outer_untrusted = json.loads(exchange.stdout)
             transport_receipt, terminal_raw = validate_wrapper_envelope(
-                outer_untrusted, composition=self.composition, expected=exchange.launch_binding
+                outer_untrusted,
+                composition=self.composition,
+                expected=exchange.launch_binding,
+                allow_test_build=self.composition.test_mode,
             )
         except (UnicodeDecodeError, json.JSONDecodeError, RenderTransportError):
             self._ambiguous("wrapper receipt was empty, malformed, or lost", exchange)
-        try:
-            transport_ref = self._persist_evidence(transport_receipt)
-        except (OSError, RenderTransportError):
-            self._ambiguous("signed wrapper receipt could not be persisted", exchange, terminal_raw=terminal_raw)
+        transport_ref = self._persist_or_memory(self.transport_store, transport_receipt, kind="transport")
+        if transport_ref.get("schema") == "tgw-render-in-memory-observation-ref/v1":
+            self._ambiguous(
+                "signed wrapper receipt could not be persisted",
+                exchange,
+                transport_ref=transport_ref,
+                transport_observation=transport_receipt,
+                terminal_raw=terminal_raw,
+            )
         replay_receipt = _replay_receipt(transport_receipt)
-        if self.replay_store is None:
-            self._ambiguous("durable anti-replay store is unavailable", exchange, transport_ref=transport_ref, terminal_raw=terminal_raw)
-        try:
-            replay_ref = self.replay_store.claim(replay_receipt)
-        except (OSError, RenderTransportError):
-            self._ambiguous("signed wrapper nonce was replayed or could not be claimed", exchange, transport_ref=transport_ref, terminal_raw=terminal_raw)
+        replay_ref = self._persist_or_memory(self.replay_store, replay_receipt, kind="replay", operation="claim")
+        if replay_ref.get("schema") == "tgw-render-in-memory-observation-ref/v1":
+            self._ambiguous(
+                "signed wrapper nonce was replayed or could not be claimed",
+                exchange,
+                transport_ref=transport_ref,
+                transport_observation=transport_receipt,
+                replay_ref=replay_ref,
+                replay_observation=replay_receipt,
+                terminal_raw=terminal_raw,
+            )
         if exchange.returncode != transport_receipt["child"]["returncode"]:
-            self._ambiguous("SSH and signed child exit status disagree", exchange, transport_ref=transport_ref, terminal_raw=terminal_raw)
+            self._ambiguous(
+                "SSH and signed child exit status disagree",
+                exchange,
+                transport_ref=transport_ref,
+                transport_observation=transport_receipt,
+                replay_ref=replay_ref,
+                replay_observation=replay_receipt,
+                terminal_raw=terminal_raw,
+            )
         try:
             untrusted = json.loads(terminal_raw)
         except (UnicodeDecodeError, json.JSONDecodeError):
-            self._ambiguous("signed child terminal is malformed", exchange, transport_ref=transport_ref, terminal_raw=terminal_raw)
+            self._ambiguous(
+                "signed child terminal is malformed",
+                exchange,
+                transport_ref=transport_ref,
+                transport_observation=transport_receipt,
+                replay_ref=replay_ref,
+                replay_observation=replay_receipt,
+                terminal_raw=terminal_raw,
+            )
         try:
             if not isinstance(untrusted, dict):
                 raise RenderTransportError("remote render terminal is not an object")
@@ -1562,31 +1752,38 @@ class ObserverRenderController:
             else:
                 raise RenderTransportError("remote render terminal schema is unknown")
         except RenderTransportError:
-            self._ambiguous("signed remote terminal failed exact validation", exchange, transport_ref=transport_ref, terminal_raw=terminal_raw)
+            self._ambiguous(
+                "signed remote terminal failed exact validation",
+                exchange,
+                transport_ref=transport_ref,
+                transport_observation=transport_receipt,
+                replay_ref=replay_ref,
+                replay_observation=replay_receipt,
+                terminal_raw=terminal_raw,
+            )
         if transport_receipt["child"]["returncode"] != expected_returncode:
-            self._ambiguous("signed terminal and child exit status disagree", exchange, transport_ref=transport_ref, terminal_raw=terminal_raw)
+            self._ambiguous(
+                "signed terminal and child exit status disagree",
+                exchange,
+                transport_ref=transport_ref,
+                transport_observation=transport_receipt,
+                replay_ref=replay_ref,
+                replay_observation=replay_receipt,
+                terminal_raw=terminal_raw,
+            )
         try:
             terminal_ref = self.terminal_store.persist(terminal)
         except (OSError, RenderTransportError) as exc:
-            observation = {
-                "schema": "tgw-nixos-observer-render-terminal-observation/v1",
-                "outcome": "PERSISTENCE_FAILED",
-                "reason": "validated terminal could not be persisted",
-                "attempt_id": exchange.launch_binding.attempt_id,
-                "generation": exchange.launch_binding.effect_generation,
-                "composition_sha256": exchange.launch_binding.composition_sha256,
-                "raw_bytes": len(canonical(terminal)),
-                "raw_sha256": _digest_bytes(canonical(terminal)),
-                "transport_ref": dict(transport_ref),
-            }
-            observation["receipt_sha256"] = _digest_bytes(canonical(observation))
-            fallback_ref = self._persist_evidence(observation)
+            fallback_ref = _memory_observation_ref(terminal, kind="terminal")
             raise TerminalPersistenceError(
                 terminal,
                 exchange.attempt_receipt,
                 exchange.attempt_ref,
                 transport_ref=transport_ref,
                 terminal_ref=fallback_ref,
+                transport_observation=transport_receipt,
+                replay_ref=replay_ref,
+                replay_observation=replay_receipt,
                 launch_binding=exchange.launch_binding,
             ) from exc
         if terminal["schema"] != helper.SUCCESS_SCHEMA:
@@ -1616,7 +1813,7 @@ def compose_production_controller(
     composition = load_composition(composition_path)
     attempt_store = ImmutableAttemptReceiptStore(Path(composition.value["receipt_roots"]["attempts"]))
     terminal_store = ImmutableTerminalReceiptStore(Path(composition.value["receipt_roots"]["terminals"]))
-    transport_store = ImmutableTerminalReceiptStore(Path(composition.value["receipt_roots"]["transports"]))
+    transport_store = ImmutableTransportReceiptStore(Path(composition.value["receipt_roots"]["transports"]))
     replay_store = ImmutableReplayReceiptStore(Path(composition.value["receipt_roots"]["replays"]))
     transport = SshObserverRenderTransport(composition, attempt_store, invoke=invoke)
     controller = ObserverRenderController(
@@ -1642,6 +1839,7 @@ def compose_production_controller(
         "activation": False,
         "profile_write": False,
         "deployment": False,
+        "privileged_native_netns_install_e2e": "EXTERNAL_PREREQUISITE",
     }
 
 

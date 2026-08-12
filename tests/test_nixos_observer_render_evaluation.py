@@ -35,6 +35,7 @@ from tgw.nixos_observer_render_evaluation import (
     ImmutableAttemptReceiptStore,
     ImmutableReplayReceiptStore,
     ImmutableTerminalReceiptStore,
+    ImmutableTransportReceiptStore,
     ObserverRenderController,
     RemoteAttemptAmbiguous,
     RemoteRenderFailure,
@@ -269,6 +270,13 @@ class MemoryStore:
     claim = persist
 
 
+class RefusingStore:
+    def persist(self, _value):
+        raise OSError("injected immutable-store refusal")
+
+    claim = persist
+
+
 def _envelope(
     composition: RenderComposition,
     terminal_raw: bytes,
@@ -483,7 +491,10 @@ def test_every_empty_malformed_or_lost_post_launch_receipt_is_ambiguous(tmp_path
     composition, _ = _composition(tmp_path / "composition", case, private)
     transport, _, _ = _transport(tmp_path, case, composition, private)
     transport.invoke = lambda command, **kwargs: subprocess.CompletedProcess(command, 255, payload, b"")
-    controller = ObserverRenderController(transport, MemoryStore(), composition=composition, authority=case["authority"])
+    store = MemoryStore()
+    controller = ObserverRenderController(
+        transport, store, composition=composition, transport_store=store, replay_store=store, authority=case["authority"]
+    )
     with pytest.raises(RemoteAttemptAmbiguous) as raised:
         controller(_effect(case))
     assert raised.value.attempt_receipt["outcome"] == "LAUNCHED_UNRECONCILED"
@@ -496,7 +507,9 @@ def test_controller_accepts_signed_pre_and_post_probe_evidence_then_persists(tmp
     completed = _terminal(case)
     transport, _, _ = _transport(tmp_path, case, composition, private, terminal=completed)
     store = MemoryStore()
-    controller = ObserverRenderController(transport, store, composition=composition, authority=case["authority"])
+    controller = ObserverRenderController(
+        transport, store, composition=composition, transport_store=store, replay_store=store, authority=case["authority"]
+    )
 
     result = controller(_effect(case))
 
@@ -517,7 +530,10 @@ def test_signed_namespace_or_wrapper_identity_attack_is_ambiguous_not_failed(tmp
     outer["namespace"]["post"]["direct_probe"] = "connected"
     transport, _, _ = _transport(tmp_path, case, composition, private, terminal=completed)
     transport.invoke = lambda command, **kwargs: subprocess.CompletedProcess(command, 0, canonical(outer), b"")
-    controller = ObserverRenderController(transport, MemoryStore(), composition=composition, authority=case["authority"])
+    store = MemoryStore()
+    controller = ObserverRenderController(
+        transport, store, composition=composition, transport_store=store, replay_store=store, authority=case["authority"]
+    )
     with pytest.raises(RemoteAttemptAmbiguous):
         controller(_effect(case))
 
@@ -574,7 +590,9 @@ def test_only_validated_remote_failure_becomes_failed(tmp_path):
     completed = _terminal(case)
     transport, _, _ = _transport(tmp_path, case, composition, private, terminal=completed)
     store = MemoryStore()
-    controller = ObserverRenderController(transport, store, composition=composition, authority=case["authority"])
+    controller = ObserverRenderController(
+        transport, store, composition=composition, transport_store=store, replay_store=store, authority=case["authority"]
+    )
     with pytest.raises(RemoteRenderFailure) as raised:
         controller(_effect(case))
     assert raised.value.terminal["schema"] == helper.A2_FAILURE_SCHEMA
@@ -607,7 +625,13 @@ def test_terminal_persistence_loss_remains_ambiguous_and_keeps_attempt_binding(t
 
 def test_immutable_receipt_store_is_exclusive_and_content_addressed(tmp_path):
     store = ImmutableTerminalReceiptStore(tmp_path / "receipts")
-    value = {"schema": "test-terminal/v1", "outcome": "TEST"}
+    value = _self_hash(
+        {
+            "schema": "tgw-nixos-observer-render-terminal-observation/v1",
+            "outcome": "UNAVAILABLE_OR_INVALID",
+            "reason": "test",
+        }
+    )
     first = store.persist(value)
     second = store.persist(value)
     assert first == second
@@ -615,6 +639,91 @@ def test_immutable_receipt_store_is_exclusive_and_content_addressed(tmp_path):
     assert path.read_bytes() == canonical(value)
     assert stat.S_IMODE(path.stat().st_mode) == 0o400
     store.close()
+
+
+def test_typed_receipt_stores_reject_cross_root_schema_routing(tmp_path):
+    case = _case(tmp_path / "case")
+    private = Ed25519PrivateKey.generate()
+    composition, _ = _composition(tmp_path / "composition", case, private)
+    attempt = _attempt_receipt(composition, case["request"], "render-typed-store", "1" * 32)
+    terminal = json.loads(_terminal(case).stdout)
+    envelope = _envelope(
+        composition,
+        canonical(terminal),
+        0,
+        private,
+        generation="render-typed-store",
+        attempt_id="1" * 32,
+    )
+    replay = _replay_receipt(envelope)
+    stores = {
+        "attempt": ImmutableAttemptReceiptStore(tmp_path / "attempt-store"),
+        "transport": ImmutableTransportReceiptStore(tmp_path / "transport-store"),
+        "terminal": ImmutableTerminalReceiptStore(tmp_path / "terminal-store"),
+        "replay": ImmutableReplayReceiptStore(tmp_path / "replay-store"),
+    }
+
+    assert Path(stores["attempt"].begin(attempt)["path"]).parent == tmp_path / "attempt-store"
+    assert Path(stores["transport"].persist(envelope)["path"]).parent == tmp_path / "transport-store"
+    assert Path(stores["terminal"].persist(terminal)["path"]).parent == tmp_path / "terminal-store"
+    assert Path(stores["replay"].claim(replay)["path"]).parent == tmp_path / "replay-store"
+    with pytest.raises(RenderTransportError, match="non-attempt"):
+        stores["attempt"].begin(envelope)
+    with pytest.raises(RenderTransportError, match="typed store"):
+        stores["transport"].persist(terminal)
+    with pytest.raises(RenderTransportError, match="typed store"):
+        stores["terminal"].persist(envelope)
+    with pytest.raises(RenderTransportError, match="non-replay"):
+        stores["replay"].claim(attempt)
+
+
+@pytest.mark.parametrize("refused", ["transport", "replay", "terminal", "all"])
+def test_post_launch_store_refusal_is_authority_ambiguous_with_bound_evidence(tmp_path, refused):
+    case = _case(tmp_path / "case")
+    private = Ed25519PrivateKey.generate()
+    composition, _ = _composition(tmp_path / "composition", case, private)
+    Path(composition.value["receipt_roots"]["attempts"]).parent.chmod(0o755)
+    completed = _terminal(case)
+    transport, _, _ = _transport(tmp_path, case, composition, private, terminal=completed)
+    transport.attempt_store = ImmutableAttemptReceiptStore(Path(composition.value["receipt_roots"]["attempts"]))
+    durable_transport = ImmutableTransportReceiptStore(Path(composition.value["receipt_roots"]["transports"]))
+    durable_replay = ImmutableReplayReceiptStore(Path(composition.value["receipt_roots"]["replays"]))
+    durable_terminal = ImmutableTerminalReceiptStore(Path(composition.value["receipt_roots"]["terminals"]))
+    refusing = RefusingStore()
+    controller = ObserverRenderController(
+        transport,
+        refusing if refused in {"terminal", "all"} else durable_terminal,
+        composition=composition,
+        transport_store=refusing if refused in {"transport", "all"} else durable_transport,
+        replay_store=refusing if refused in {"replay", "all"} else durable_replay,
+        authority=case["authority"],
+    )
+    registry = TypedEffectHandlerRegistry(
+        release_install=Mock(),
+        release_rollback=Mock(),
+        flake_push=Mock(),
+        flake_switch_record=Mock(),
+        dependency_resubmit=Mock(),
+        nixos_observer_render_evaluation=controller,
+    )
+    effect = TypedEffect.parse(_effect(case))
+    authority = AuthorityEffectController(registry, Mock(return_value={"receipt_id": "authority:store-refusal"}))
+
+    receipt = authority.execute(request_id="request:store-refusal:" + refused, effect=effect)
+
+    assert receipt.outcome is EffectOutcome.AMBIGUOUS
+    assert receipt.evidence
+    assert any(item.startswith("nixos-observer-render-attempt:sha256:") for item in receipt.evidence)
+    assert any(item.startswith("nixos-observer-render-transport") for item in receipt.evidence)
+    assert any(item.startswith("nixos-observer-render-terminal") for item in receipt.evidence)
+    assert all("composition:" not in item for item in receipt.evidence)
+    assert receipt.receipt_hash.startswith("sha256:")
+    if refused in {"transport", "all"}:
+        assert any(item.startswith("nixos-observer-render-transport-memory:") for item in receipt.evidence)
+    if refused == "replay":
+        assert any(item.startswith("nixos-observer-render-replay-memory:") for item in receipt.evidence)
+    if refused in {"terminal", "all"}:
+        assert any(item.startswith("nixos-observer-render-terminal-memory:") for item in receipt.evidence)
 
 
 def test_replay_and_same_generation_relaunch_are_durably_refused_but_new_generation_is_distinct(tmp_path):
@@ -649,8 +758,11 @@ def test_replay_and_same_generation_relaunch_are_durably_refused_but_new_generat
     replay = ImmutableReplayReceiptStore(tmp_path / "replay-claims")
     claim = _replay_receipt(envelope)
     replay.claim(claim)
+    changed_claim = dict(claim, generation="render-generation-2")
+    changed_claim.pop("receipt_sha256")
+    _self_hash(changed_claim)
     with pytest.raises(RenderTransportError, match="already exists"):
-        replay.claim(dict(claim, generation="render-generation-2"))
+        replay.claim(changed_claim)
 
 
 def _production_success(tmp_path: Path):
@@ -804,7 +916,7 @@ def _production_success(tmp_path: Path):
     )
     attempt_store = ImmutableAttemptReceiptStore(Path(value["receipt_roots"]["attempts"]))
     terminal_store = ImmutableTerminalReceiptStore(Path(value["receipt_roots"]["terminals"]))
-    transport_store = ImmutableTerminalReceiptStore(Path(value["receipt_roots"]["transports"]))
+    transport_store = ImmutableTransportReceiptStore(Path(value["receipt_roots"]["transports"]))
     replay_store = ImmutableReplayReceiptStore(Path(value["receipt_roots"]["replays"]))
     attempt_ref = attempt_store.begin(attempt)
     terminal_ref = terminal_store.persist(terminal)
@@ -879,6 +991,11 @@ def test_typed_handler_emits_outer_bound_receipt_and_classifies_ambiguity_hold_a
             attempt_ref,
             transport_ref=result["transport_ref"],
             terminal_ref=result["terminal_ref"],
+            transport_observation=result["transport_receipt"],
+            terminal_observation=result["terminal"],
+            launch_binding=_launch_binding(
+                composition, request, "render-a3-handler", attempt["attempt_id"]
+            ),
         )
 
     ambiguous.composition = composition
