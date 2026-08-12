@@ -573,6 +573,80 @@ def test_lock_reference_replacement_after_flock_is_terminal_ambiguity(tmp_path, 
     assert not path.exists()
 
 
+@pytest.mark.parametrize("repeat", range(5))
+def test_replacement_during_receipt_write_never_yields_mixed_success_and_ambiguity(
+    tmp_path, repeat
+):
+    grant = _grant()
+    path = tmp_path / f"write-lock-replaced-{repeat}.json"
+    writer = BootstrapSessionAuthority(
+        grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid()
+    )
+    replacement_instance = BootstrapSessionAuthority(
+        grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid()
+    )
+    lock_path = tmp_path / writer._lock_name
+    replacement_lock = tmp_path / f"replacement-during-write-{repeat}.lock"
+    replacement_lock.touch(mode=0o400)
+    writer_stalled = threading.Event()
+    release_writer = threading.Event()
+    outcomes: list[tuple[str, object]] = []
+    real_write_all = writer._write_all
+
+    def replaceable_stalled_write(fd, data):
+        writer_stalled.set()
+        assert release_writer.wait(timeout=5)
+        real_write_all(fd, data)
+
+    writer._write_all = replaceable_stalled_write
+
+    def consume(authority, identity):
+        try:
+            value = authority.consume(
+                grant.grant_id,
+                effect_hash=grant.effect.effect_hash,
+                generation=grant.effect.generation,
+                now=datetime(2029, 1, 1, tzinfo=timezone.utc),
+            )
+            outcomes.append((identity, value))
+        except Exception as exc:  # noqa: BLE001 - exact compromised-lock classification asserted below
+            outcomes.append((identity, exc))
+
+    writer_thread = threading.Thread(target=consume, args=(writer, "writer"))
+    writer_thread.start()
+    assert writer_stalled.wait(timeout=5)
+    lock_path.unlink()
+    replacement_lock.replace(lock_path)
+    replacement_thread = threading.Thread(
+        target=consume, args=(replacement_instance, "replacement-instance")
+    )
+    replacement_thread.start()
+    replacement_thread.join(timeout=5)
+    assert not replacement_thread.is_alive()
+    release_writer.set()
+    writer_thread.join(timeout=5)
+
+    assert not writer_thread.is_alive()
+    assert {identity for identity, _ in outcomes} == {"writer", "replacement-instance"}
+    assert all(isinstance(result, BootstrapConsumptionAmbiguous) for _, result in outcomes)
+    assert writer.state is BootstrapAuthorityState.AMBIGUOUS
+    assert replacement_instance.state is BootstrapAuthorityState.AMBIGUOUS
+    durable_receipt_id = json.loads(path.read_text())["receipt_id"]
+    assert durable_receipt_id.startswith("bootstrap-consumption:sha256:")
+    reconciler = BootstrapSessionAuthority(
+        grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid()
+    )
+    with pytest.raises(ValueError, match="already consumed"):
+        reconciler.consume(
+            grant.grant_id,
+            effect_hash=grant.effect.effect_hash,
+            generation=grant.effect.generation,
+            now=datetime(2029, 1, 1, tzinfo=timezone.utc),
+        )
+    assert reconciler.state is BootstrapAuthorityState.SPENT
+    assert reconciler._spent_receipt_id == durable_receipt_id
+
+
 def test_precreated_invalid_receipt_makes_authority_terminally_ambiguous(tmp_path):
     grant = _grant()
     path = tmp_path / "precreated.json"

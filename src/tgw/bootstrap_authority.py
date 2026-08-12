@@ -277,9 +277,12 @@ class BootstrapSessionAuthority:
 
     def _validate_lock_artifact(self, lock_fd: int) -> None:
         held = os.fstat(lock_fd)
+        os.lseek(lock_fd, 0, os.SEEK_SET)
+        held_content = os.read(lock_fd, 1)
         named_fd = os.open(self._lock_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=self._directory_fd)
         try:
             named = os.fstat(named_fd)
+            named_content = os.read(named_fd, 1)
         finally:
             os.close(named_fd)
         if (
@@ -291,9 +294,19 @@ class BootstrapSessionAuthority:
             or stat.S_IMODE(named.st_mode) != 0o400
             or held.st_size != 0
             or named.st_size != 0
+            or held.st_nlink != 1
+            or named.st_nlink != 1
+            or held_content != b""
+            or named_content != b""
             or (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino)
         ):
             raise OSError("bootstrap consumption lock artifact identity differs")
+
+    def _sync_and_validate_lock_lifecycle(self, lock_fd: int) -> None:
+        os.fsync(lock_fd)
+        os.fsync(self._directory_fd)
+        self._revalidate_root()
+        self._validate_lock_artifact(lock_fd)
 
     def _acquire_filesystem_lock(self, receipt: Mapping[str, Any]) -> int:
         try:
@@ -306,16 +319,24 @@ class BootstrapSessionAuthority:
             )
         except Exception as exc:
             raise self._mark_ambiguous(receipt, "lock-open-unavailable", exc) from exc
+        locked = False
         try:
             self._validate_lock_artifact(lock_fd)
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            locked = True
             self._revalidate_root()
             self._validate_lock_artifact(lock_fd)
-            os.fsync(lock_fd)
-            os.fsync(self._directory_fd)
-            self._revalidate_root()
-            self._validate_lock_artifact(lock_fd)
+            self._sync_and_validate_lock_lifecycle(lock_fd)
         except Exception as exc:
+            if locked:
+                try:
+                    self._sync_and_validate_lock_lifecycle(lock_fd)
+                except Exception:
+                    pass
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
             try:
                 os.close(lock_fd)
             except OSError:
@@ -324,11 +345,24 @@ class BootstrapSessionAuthority:
         return lock_fd
 
     def _release_filesystem_lock(self, lock_fd: int, receipt: Mapping[str, Any]) -> None:
+        lifecycle_error: Exception | None = None
+        try:
+            self._sync_and_validate_lock_lifecycle(lock_fd)
+        except Exception as exc:
+            lifecycle_error = exc
+        release_error: Exception | None = None
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             os.close(lock_fd)
         except Exception as exc:
-            raise self._mark_ambiguous(receipt, "lock-release-unverifiable", exc) from exc
+            release_error = exc
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+        error = lifecycle_error or release_error
+        if error is not None:
+            raise self._mark_ambiguous(receipt, "lock-release-unverifiable", error) from error
 
     @staticmethod
     def _read_exact(fd: int, expected_size: int) -> bytes:
@@ -413,12 +447,12 @@ class BootstrapSessionAuthority:
         data = _canonical(receipt) + b"\n"
         lock_fd = self._acquire_filesystem_lock(receipt)
         try:
-            return self._consume_with_filesystem_lock(receipt, data)
+            return self._consume_with_filesystem_lock(receipt, data, lock_fd)
         finally:
             self._release_filesystem_lock(lock_fd, receipt)
 
     def _consume_with_filesystem_lock(
-        self, receipt: Mapping[str, Any], data: bytes
+        self, receipt: Mapping[str, Any], data: bytes, lock_fd: int
     ) -> Mapping[str, Any]:
         try:
             existing_status = self._existing_receipt_status()
@@ -434,6 +468,11 @@ class BootstrapSessionAuthority:
                 "existing-invalid-or-partial-after-lock",
                 OSError("bootstrap consumption receipt is invalid after lock acquisition"),
             )
+        try:
+            self._revalidate_root()
+            self._validate_lock_artifact(lock_fd)
+        except Exception as exc:
+            raise self._mark_ambiguous(receipt, "lock-changed-before-receipt-create", exc) from exc
         try:
             fd = os.open(
                 self.receipt_path.name,
