@@ -1,10 +1,12 @@
 import hashlib
+import json
+import subprocess
 from copy import deepcopy
 from datetime import datetime, timezone
 
 import pytest
 
-from tgw.nix_observer_render_evaluation import OUTPUTS, RESULT_SCHEMA, SCHEMA, RenderEvaluationError, canonical, validate_request, validate_result
+from tgw.nix_observer_render_evaluation import OUTPUTS, RESULT_SCHEMA, SCHEMA, RenderEvaluationError, canonical, produce_result, validate_request, validate_result
 
 
 def request():
@@ -147,3 +149,45 @@ def test_result_mutations_fail_closed(mutate):
         value = rehash(value)
     with pytest.raises(RenderEvaluationError):
         validate_result(value, request=req, now=NOW)
+
+
+def test_provider_derives_receipt_from_held_files_and_actual_commands(tmp_path):
+    req = request()
+    root = tmp_path / "result"
+    for name in OUTPUTS:
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(name.encode())
+    nix = tmp_path / "nix"
+    verifier = tmp_path / "systemd-analyze"
+    nix.write_bytes(b"nix")
+    verifier.write_bytes(b"verify")
+    nix.chmod(0o500)
+    verifier.chmod(0o500)
+    req["systemd_analyze_sha256"] = "sha256:" + hashlib.sha256(b"verify").hexdigest()
+    unsigned = dict(req)
+    unsigned.pop("request_sha256")
+    req["request_sha256"] = "sha256:" + hashlib.sha256(canonical(unsigned)).hexdigest()
+    drv = "/nix/store/33333333333333333333333333333333-render.drv"
+    out = "/nix/store/22222222222222222222222222222222-render"
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if argv[1:3] == ["derivation", "show"]:
+            return subprocess.CompletedProcess(argv, 0, json.dumps({drv: {"outputs": {"out": {"path": out}}}}), "")
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    receipt = produce_result(
+        request=req,
+        output_root=root,
+        output_identity=out,
+        evaluated_drv=drv,
+        nix=nix,
+        nix_sha256="sha256:" + hashlib.sha256(b"nix").hexdigest(),
+        systemd_analyze=verifier,
+        now=NOW,
+        run=run,
+    )
+    assert receipt["effects"]["build"] is True
+    assert calls[0][1]["pass_fds"] and len(calls[1][1]["pass_fds"]) == 4

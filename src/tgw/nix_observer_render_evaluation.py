@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import subprocess
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 SCHEMA = "tgw-nix-observer-render-evaluation-request/v1"
 RESULT_SCHEMA = "tgw-nix-observer-render-evaluation-receipt/v1"
@@ -185,3 +188,98 @@ def validate_result(value: Mapping[str, object], *, request: Mapping[str, object
     if observed > current + timedelta(minutes=1) or current - observed > timedelta(hours=1):
         raise RenderEvaluationError("render observation timestamp stale")
     return dict(value)
+
+
+def produce_result(
+    *,
+    request: Mapping[str, object],
+    output_root: Path,
+    evaluated_drv: str,
+    nix: Path,
+    nix_sha256: str,
+    systemd_analyze: Path,
+    now: datetime,
+    run: object = subprocess.run,
+    output_identity: str | None = None,
+) -> dict[str, object]:
+    """Derive one receipt from held output/tool inodes and actual subprocesses."""
+    validate_request(request)
+    identity = output_identity or str(output_root)
+
+    def held(path: Path, expected: str | None = None) -> tuple[int, str, int]:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        stat = os.fstat(fd)
+        if not os.path.isfile(f"/proc/self/fd/{fd}"):
+            os.close(fd)
+            raise RenderEvaluationError("render evidence path is not regular")
+        raw = os.read(fd, stat.st_size)
+        os.lseek(fd, 0, os.SEEK_SET)
+        digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+        if expected is not None and digest != expected:
+            os.close(fd)
+            raise RenderEvaluationError("render tool identity mismatch")
+        return fd, digest, stat.st_size
+
+    nix_fd, _, _ = held(nix, nix_sha256)
+    verify_fd, verify_digest, _ = held(systemd_analyze, request["systemd_analyze_sha256"])
+    file_fds: list[int] = []
+    try:
+        files = []
+        for name in OUTPUTS:
+            fd, digest, size = held(output_root / name)
+            file_fds.append(fd)
+            files.append({"path": name, "sha256": digest, "size": size})
+        nix_result = run(
+            [f"/proc/self/fd/{nix_fd}", "derivation", "show", evaluated_drv],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+            close_fds=True,
+            pass_fds=(nix_fd,),
+        )
+        if nix_result.returncode or len(nix_result.stdout) > request["max_output_bytes"]:
+            raise RenderEvaluationError("render derivation observation failed")
+        derivation = json.loads(nix_result.stdout)
+        outputs = derivation.get(evaluated_drv, {}).get("outputs", {})
+        if outputs != {"out": {"path": identity}}:
+            raise RenderEvaluationError("render derivation output observation mismatch")
+        unit_fds = file_fds[9:12]
+        argv = [f"/proc/self/fd/{verify_fd}", "verify", *[f"/proc/self/fd/{fd}" for fd in unit_fds]]
+        verified = run(argv, capture_output=True, check=False, timeout=60, close_fds=True, pass_fds=(verify_fd, *unit_fds))
+        stdout = verified.stdout if isinstance(verified.stdout, bytes) else verified.stdout.encode()
+        stderr = verified.stderr if isinstance(verified.stderr, bytes) else verified.stderr.encode()
+        if verified.returncode or max(len(stdout), len(stderr)) > request["max_output_bytes"]:
+            raise RenderEvaluationError("render systemd verification failed")
+        unit_manifest = files[9:12]
+        result = {
+            "schema": RESULT_SCHEMA,
+            "request_sha256": request["request_sha256"],
+            "outcome": "VERIFIED",
+            "metadata_status": "NON_DEPLOYABLE_RENDER_FIXTURE",
+            "files": files,
+            "output_root": identity,
+            "evaluated_drv": evaluated_drv,
+            "drv_output": {"drv": evaluated_drv, "output": identity},
+            "output_manifest_sha256": "sha256:" + hashlib.sha256(canonical(files)).hexdigest(),
+            "systemd_verify": {
+                "executable_sha256": verify_digest,
+                "version": request["systemd_analyze_version"],
+                "argv": ["systemd-analyze", "verify", *OUTPUTS[9:12]],
+                "exit_code": verified.returncode,
+                "stdout_bytes": len(stdout),
+                "stdout_sha256": "sha256:" + hashlib.sha256(stdout).hexdigest(),
+                "stderr_bytes": len(stderr),
+                "stderr_sha256": "sha256:" + hashlib.sha256(stderr).hexdigest(),
+                "units_sha256": "sha256:" + hashlib.sha256(canonical(unit_manifest)).hexdigest(),
+                "observed_at": now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "host_identity_receipt_sha256": request["host_identity_receipt_sha256"],
+            },
+            "cleanup": "removed",
+            "effects": {"build": True, "activation": False, "deployment": False, "profile_write": False, "home_db_write": False, "live_flake_write": False, "network": False},
+        }
+        result["receipt_sha256"] = "sha256:" + hashlib.sha256(canonical(result)).hexdigest()
+        return validate_result(result, request=request, now=now)
+    finally:
+        for fd in [nix_fd, verify_fd, *file_fds]:
+            os.close(fd)
