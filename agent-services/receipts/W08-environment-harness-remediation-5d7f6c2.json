@@ -1,0 +1,47 @@
+{
+  "schema": "tgw-environment-harness-remediation-receipt/v1",
+  "source_receipt": "agent-services/receipts/W08-full-suite-5d7f6c2-HOLD.json",
+  "candidate_commit": "5d7f6c2ec59d833bea9f68d3064ebb01c44bd42e",
+  "scope": [
+    "HOST_LOG_PERMISSION",
+    "DETACHED_WORKTREE_GIT_DISCOVERY",
+    "POSTGRES_PEER_AUTH"
+  ],
+  "corrections": [
+    {
+      "cluster": "HOST_LOG_PERMISSION",
+      "original_failures": 2,
+      "change": "offline-sync supports TGW_OFFLINE_LOG with production default unchanged; tests bind a writable temporary log",
+      "files": ["bin/tgw-offline-sync", "tests/test_offline_sync_stamp.py"]
+    },
+    {
+      "cluster": "DETACHED_WORKTREE_GIT_DISCOVERY",
+      "original_failures": 1,
+      "change": "fixture creates its own non-detached temporary Git repository and imports canonical package through the test environment",
+      "files": ["tests/test_pp_workflow_001_fixture.py"]
+    },
+    {
+      "cluster": "POSTGRES_PEER_AUTH",
+      "original_failures": 1,
+      "change": "scheduler unit harness patches both parent queue package and state_machine submodule so no imported real DB module escapes the seam",
+      "files": ["tests/test_scheduler.py"]
+    }
+  ],
+  "evidence": [
+    {
+      "command": "PYTHONPATH=src pytest -q tests/test_offline_sync_stamp.py tests/test_pp_workflow_001_fixture.py tests/test_scheduler.py",
+      "result": "20 passed"
+    },
+    {
+      "command": "PYTHONPATH=src pytest -q <the four original environment/harness nodes>",
+      "result": "4 passed"
+    },
+    {
+      "command": "ruff check tests/test_offline_sync_stamp.py tests/test_pp_workflow_001_fixture.py tests/test_scheduler.py; bash -n bin/tgw-offline-sync; git diff --check",
+      "result": "passed"
+    }
+  ],
+  "production_defaults_changed": false,
+  "product_failure_clusters_touched": false,
+  "deployment_claim": false
+}

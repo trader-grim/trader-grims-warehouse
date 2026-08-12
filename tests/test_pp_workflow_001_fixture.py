@@ -7,40 +7,47 @@ with a synthetic coding task. Two chained treatments: implement then review.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
-import sys
-import tempfile
 from pathlib import Path
 
-SRC = "/opt/TGW/tgw-lib/src/trader-grims-warehouse/src"
-sys.path.insert(0, SRC)
-
 from tgw.workflow.coding_snapshot import build_coding_snapshot
-from tgw.workflow.contracts import (
-    EvidenceAssertion,
-    EvidenceReference,
-    FingerprintResult,
-    GoalProfile,
-    ObjectSnapshot,
-    TreatmentContract,
-)
 from tgw.workflow.evaluator import evaluate
 from tgw.workflow.profiles import CODING_READY_FOR_IMPLEMENTATION, CODING_READY_FOR_REVIEW
-from tgw.workflow.treatments import CODEX_IMPLEMENT, CLAUDE_REVIEW
+from tgw.workflow.treatments import CLAUDE_REVIEW, CODEX_IMPLEMENT
 
 
-def test_fixture_full_cycle() -> None:
+def _fixture_repository(tmp_path: Path) -> Path:
+    repo = tmp_path / "pp-workflow-001-fixture"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "fixture@example.invalid"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Fixture"], check=True)
+    (repo / "README.md").write_text("fixture\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture base"], check=True)
+    subprocess.run(["git", "-C", str(repo), "checkout", "-qb", "fixture/implementation"], check=True)
+    (repo / "implementation.py").write_text("IMPLEMENTED = True\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture implementation"], check=True)
+    return repo
+
+
+def test_fixture_full_cycle(tmp_path: Path) -> None:
     """Synthetic coding task: implement → review → done."""
-    repo = Path("/opt/TGW/var/worktrees/pp-workflow-001-fixture")
+    repo = _fixture_repository(tmp_path)
 
     # Phase 0: Verify worktree exists and is clean
-    assert repo.is_dir(), f"Fixture worktree missing: {repo}"
+    assert repo.is_dir()
     head = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "HEAD"],
         capture_output=True, text=True
     ).stdout.strip()
-    assert head, "No git HEAD in fixture worktree"
+    assert len(head) == 40, "No exact git HEAD in fixture worktree"
+    branch = subprocess.run(
+        ["git", "-C", str(repo), "branch", "--show-current"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert branch == "fixture/implementation"
 
     # Phase 1: Evaluate current state — should show implemented=true
     # (the worktree has actual code committed), tested=true (300 tests pass)

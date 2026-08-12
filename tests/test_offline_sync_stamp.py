@@ -43,6 +43,7 @@ def _run_sync(fake_bin: Path, mount_base: Path) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env["PATH"] = str(fake_bin) + ":" + env.get("PATH", "")
     env["TGW_OFFLINE_MOUNT_BASE"] = str(mount_base)
+    env["TGW_OFFLINE_LOG"] = str(mount_base / "offline-sync.log")
     return subprocess.run(
         ["bash", str(SCRIPT), _TEST_LABEL],
         env=env,

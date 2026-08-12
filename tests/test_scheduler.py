@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -45,7 +46,11 @@ def _mock_enqueue_context(return_value="mock-job-id"):
         mock_sm.enqueue_job.assert_called_once()
     """
     sm = _make_mock_sm(return_value)
-    return patch.dict("sys.modules", {"tgw.queue.state_machine": sm}), sm
+    queue = types.ModuleType("tgw.queue")
+    queue.state_machine = sm
+    return patch.dict(
+        "sys.modules", {"tgw.queue": queue, "tgw.queue.state_machine": sm},
+    ), sm
 
 
 # ── Synthetic helpers ──────────────────────────────────────────────────────
