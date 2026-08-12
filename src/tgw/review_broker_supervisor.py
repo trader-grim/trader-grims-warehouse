@@ -22,6 +22,7 @@ def run_with_broker(
     expected_policy_hash: str,
     *,
     spawn: Callable[..., subprocess.Popen] = subprocess.Popen,
+    verify_process_socket: Callable[[subprocess.Popen, Mapping[str, Any]], bool] | None = None,
     stop_timeout: float = 10,
 ) -> tuple[Any, Mapping[str, Any]]:
     """Start exact broker argv, run provider, terminate, then read receipt."""
@@ -44,15 +45,23 @@ def run_with_broker(
         time.sleep(0.01)
     if (
         not isinstance(ready, Mapping)
-        or set(ready) != {"schema", "run_id", "policy_hash", "attestation_mac", "broker_process_sha256", "broker_bind"}
+        or set(ready) != {"schema", "run_id", "policy_hash", "attestation_signature", "broker_process", "broker_bind"}
         or ready["schema"] != "tgw-review-egress-ready/v1"
         or ready["run_id"] != expected_run_id
         or ready["policy_hash"] != expected_policy_hash
-        or not str(ready["attestation_mac"]).startswith("hmac-sha256:")
-        or not str(ready["broker_process_sha256"]).startswith("sha256:")
+        or not str(ready["attestation_signature"]).startswith("ed25519:")
+        or not str(ready["broker_process"])
     ):
         process.terminate()
         raise BrokerSupervisorError("broker readiness is absent or not bound to the run policy")
+    verifier = verify_process_socket or (
+        lambda proc, value: (
+            str(getattr(proc, "pid", "")) in value["broker_process"] and str(value["broker_bind"]["host"]) in value["broker_process"] and str(value["broker_bind"]["port"]) in value["broker_process"]
+        )
+    )
+    if not verifier(process, ready):
+        process.terminate()
+        raise BrokerSupervisorError("broker readiness process or listening socket ownership mismatch")
     provider_result = None
     provider_error = None
     try:

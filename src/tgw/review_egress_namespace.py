@@ -8,7 +8,6 @@ the sole ExecStartPre/ExecStopPost privilege boundary.
 from __future__ import annotations
 
 import argparse
-import hmac
 import json
 import re
 import subprocess
@@ -16,6 +15,8 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import Callable
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 RUN_ID = re.compile(r"^[a-f0-9]{12}$")
 
@@ -85,37 +86,85 @@ def execute(action: str, topology: Topology, *, broker_uid: int, worker_uid: int
     for command in commands(topology, action, broker_uid=broker_uid, worker_uid=worker_uid):
         stdin = command.pop() if command and command[-1].startswith("table inet tgw_review") else None
         result = invoke(command, input=stdin, text=True, capture_output=True, check=False)
-        receipts.append({
-            "argv": command,
-            "exit": result.returncode,
-            "stdout_sha256": "sha256:" + sha256(result.stdout.encode()).hexdigest(),
-            "stderr_sha256": "sha256:" + sha256(result.stderr.encode()).hexdigest(),
-        })
+        receipts.append(
+            {
+                "argv": command,
+                "exit": result.returncode,
+                "stdout_sha256": "sha256:" + sha256(result.stdout.encode()).hexdigest(),
+                "stderr_sha256": "sha256:" + sha256(result.stderr.encode()).hexdigest(),
+            }
+        )
         if result.returncode and action != "teardown":
             raise NamespaceError(f"namespace {action} failed at fixed command {command}")
     return receipts
 
 
-def kernel_attestation(
-    *, run_id: str, policy_hash: str, topology: Topology, ruleset: str,
-    broker_process_identity: str, negative_probes: dict[str, bool], issued_unix: int,
-    expires_unix: int, nonce: str, trust_key: bytes,
+def collect_kernel_attestation(
+    *, run_id: str, policy_hash: str, topology: Topology, broker_pid: int, issued_unix: int, expires_unix: int, nonce: str, private_key: bytes, invoke: Callable = subprocess.run
 ) -> dict:
-    required_probes = {"direct_public_443_denied", "dns_denied", "private_denied", "link_local_denied", "metadata_denied", "broker_only_reachable"}
-    if topology.run_id != run_id or set(negative_probes) != required_probes or any(value is not True for value in negative_probes.values()):
-        raise NamespaceError("kernel attestation probes or run topology are incomplete")
-    if not trust_key or expires_unix <= issued_unix or not broker_process_identity or not ruleset or not nonce:
-        raise NamespaceError("kernel attestation evidence is incomplete")
+    """Derive evidence through fixed privileged readbacks/probes; sign no caller claims."""
+    if topology.run_id != run_id or broker_pid <= 1 or expires_unix <= issued_unix or not nonce:
+        raise NamespaceError("attestation identity or lifetime is invalid")
+    fixed = {
+        "namespace_readback": ["ip", "netns", "list-id"],
+        "address": ["ip", "netns", "exec", topology.namespace, "ip", "-j", "address", "show"],
+        "link": ["ip", "-j", "link", "show", topology.host_if],
+        "route": ["ip", "netns", "exec", topology.namespace, "ip", "-j", "route", "show"],
+        "ruleset": ["ip", "netns", "exec", topology.namespace, "nft", "-j", "list", "ruleset"],
+        "counters": ["nft", "-j", "list", "table", "inet", f"tgw_review_{run_id}"],
+        "broker_process": ["ps", "-o", "pid=,uid=,lstart=,cgroup=,exe=", "-p", str(broker_pid)],
+        "broker_starttime": ["awk", "{print $22}", f"/proc/{broker_pid}/stat"],
+        "broker_exe": ["sha256sum", f"/proc/{broker_pid}/exe"],
+        "broker_socket": ["ip", "netns", "exec", topology.namespace, "ss", "-Hlntep", f"sport = :{topology.broker_port}"],
+    }
+    evidence = {"namespace": topology.namespace}
+    for name, argv in fixed.items():
+        result = invoke(argv, text=True, capture_output=True, check=False, timeout=5)
+        if result.returncode or not result.stdout.strip():
+            raise NamespaceError(f"privileged {name} readback failed")
+        evidence[name] = result.stdout.strip()
+    probes = {
+        "direct_public_443_denied": ["ip", "netns", "exec", topology.namespace, "runuser", "-u", "tgw-review-worker", "--", "nc", "-z", "-w1", "1.1.1.1", "443"],
+        "dns_denied": ["ip", "netns", "exec", topology.namespace, "runuser", "-u", "tgw-review-worker", "--", "nc", "-zu", "-w1", "1.1.1.1", "53"],
+        "private_denied": ["ip", "netns", "exec", topology.namespace, "runuser", "-u", "tgw-review-worker", "--", "nc", "-z", "-w1", "10.0.0.1", "443"],
+        "link_local_denied": ["ip", "netns", "exec", topology.namespace, "runuser", "-u", "tgw-review-worker", "--", "nc", "-z", "-w1", "169.254.1.1", "80"],
+        "metadata_denied": ["ip", "netns", "exec", topology.namespace, "runuser", "-u", "tgw-review-worker", "--", "nc", "-z", "-w1", "169.254.169.254", "80"],
+        "broker_only_reachable": [
+            "ip",
+            "netns",
+            "exec",
+            topology.namespace,
+            "runuser",
+            "-u",
+            "tgw-review-worker",
+            "--",
+            "nc",
+            "-z",
+            "-w1",
+            topology.host_address.split("/")[0],
+            str(topology.broker_port),
+        ],
+    }
+    outcomes = {}
+    for name, argv in probes.items():
+        result = invoke(argv, text=True, capture_output=True, check=False, timeout=3)
+        outcomes[name] = result.returncode == (0 if name == "broker_only_reachable" else 1)
+    if not all(outcomes.values()):
+        raise NamespaceError("live network probes did not prove the required boundary")
+    evidence["probes"] = outcomes
     unsigned = {
-        "schema": "tgw-review-egress-kernel-attestation/v1", "run_id": run_id,
-        "policy_hash": policy_hash, "namespace": topology.namespace,
-        "ruleset_sha256": "sha256:" + sha256(ruleset.encode()).hexdigest(),
-        "broker_process_sha256": "sha256:" + sha256(broker_process_identity.encode()).hexdigest(),
-        "negative_probes": negative_probes, "issued_unix": issued_unix,
-        "expires_unix": expires_unix, "nonce": nonce,
+        "schema": "tgw-review-egress-kernel-attestation/v1",
+        "run_id": run_id,
+        "policy_hash": policy_hash,
+        "namespace": topology.namespace,
+        "kernel_evidence": evidence,
+        "issued_unix": issued_unix,
+        "expires_unix": expires_unix,
+        "nonce": nonce,
         "broker_bind": {"host": topology.host_address.split("/")[0], "port": topology.broker_port},
     }
-    return {**unsigned, "mac": "hmac-sha256:" + hmac.new(trust_key, json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode(), sha256).hexdigest()}
+    signature = Ed25519PrivateKey.from_private_bytes(private_key).sign(json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()).hex()
+    return {**unsigned, "signature": "ed25519:" + signature}
 
 
 def main() -> int:
@@ -133,18 +182,22 @@ def main() -> int:
         if args.evidence is None or args.trust_key is None:
             raise SystemExit("attestation requires privileged evidence and trust key")
         evidence = json.loads(args.evidence.read_text(encoding="utf-8"))
-        receipt = kernel_attestation(
-            run_id=args.run_id, policy_hash=evidence["policy_hash"], topology=topology,
-            ruleset=evidence["ruleset"], broker_process_identity=evidence["broker_process_identity"],
-            negative_probes=evidence["negative_probes"], issued_unix=evidence["issued_unix"],
-            expires_unix=evidence["expires_unix"], nonce=evidence["nonce"], trust_key=args.trust_key.read_bytes(),
+        receipt = collect_kernel_attestation(
+            run_id=args.run_id,
+            policy_hash=evidence["policy_hash"],
+            topology=topology,
+            broker_pid=evidence["broker_pid"],
+            issued_unix=evidence["issued_unix"],
+            expires_unix=evidence["expires_unix"],
+            nonce=evidence["nonce"],
+            private_key=args.trust_key.read_bytes(),
         )
     else:
         receipt = {
-        "schema": "tgw-review-egress-namespace-receipt/v1",
-        "action": args.action,
-        "topology": topology.__dict__,
-        "commands": execute(args.action, topology, broker_uid=args.broker_uid, worker_uid=args.worker_uid),
+            "schema": "tgw-review-egress-namespace-receipt/v1",
+            "action": args.action,
+            "topology": topology.__dict__,
+            "commands": execute(args.action, topology, broker_uid=args.broker_uid, worker_uid=args.worker_uid),
         }
     with args.receipt.open("x", encoding="utf-8") as output:
         output.write(json.dumps(receipt, sort_keys=True) + "\n")

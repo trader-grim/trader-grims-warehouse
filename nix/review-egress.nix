@@ -21,8 +21,8 @@ in {
       serviceConfig = {
         Type = "simple"; User = "tgw-review-broker"; Group = "tgw-review-broker";
         NetworkNamespacePath = "/run/netns/tgw-review-%i";
-        LoadCredential = "attestation.key:/run/credentials/tgw-review-attestation.key";
-        ExecStart = "${cfg.package}/bin/tgw-review-egress-broker --policy /run/tgw-review/%i/policy.json --verify-runtime ${cfg.runtimePath} --network-attestation /run/tgw-review/%i/network-attestation.json --attestation-key \${CREDENTIALS_DIRECTORY}/attestation.key --ready /run/tgw-review/%i/ready.json --receipt /run/tgw-review/%i/egress-receipt.json";
+        LoadCredential = "attestation.pub:/run/credentials/tgw-review-attestation.pub";
+        ExecStart = "${cfg.package}/bin/tgw-review-egress-broker --policy /run/tgw-review/%i/policy.json --verify-runtime ${cfg.runtimePath} --network-attestation /run/tgw-review/%i/network-attestation.json --attestation-public-key \${CREDENTIALS_DIRECTORY}/attestation.pub --ready /run/tgw-review/%i/ready.json --receipt /run/tgw-review/%i/egress-receipt.json";
         NoNewPrivileges = true; PrivateDevices = true; PrivateTmp = true; ProtectSystem = "strict"; ProtectHome = true;
         ProtectKernelTunables = true; ProtectKernelModules = true; ProtectControlGroups = true;
         RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ]; CapabilityBoundingSet = "";

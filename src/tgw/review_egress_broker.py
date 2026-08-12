@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
-import hmac
 import ipaddress
 import json
 import socket
@@ -20,6 +19,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 
 class BrokerError(ValueError):
@@ -85,25 +87,49 @@ class ReviewEgressPolicy:
         # never receive or read bearer credentials.
 
 
-def verify_network_attestation(value: Mapping[str, Any], policy: ReviewEgressPolicy, trust_key: bytes, *, now: int | None = None) -> Mapping[str, Any]:
-    required = {"schema", "run_id", "policy_hash", "namespace", "ruleset_sha256", "broker_process_sha256", "negative_probes", "issued_unix", "expires_unix", "nonce", "broker_bind", "mac"}
+def verify_network_attestation(value: Mapping[str, Any], policy: ReviewEgressPolicy, public_key: bytes, *, now: int | None = None) -> Mapping[str, Any]:
+    required = {"schema", "run_id", "policy_hash", "namespace", "kernel_evidence", "issued_unix", "expires_unix", "nonce", "broker_bind", "signature"}
     if set(value) != required:
         raise BrokerError("network attestation fields are invalid")
     unsigned = dict(value)
-    claimed = unsigned.pop("mac")
-    expected = "hmac-sha256:" + hmac.new(trust_key, _canonical(unsigned), hashlib.sha256).hexdigest()
+    claimed = unsigned.pop("signature")
+    try:
+        Ed25519PublicKey.from_public_bytes(public_key).verify(bytes.fromhex(str(claimed).removeprefix("ed25519:")), _canonical(unsigned))
+    except (ValueError, InvalidSignature) as exc:
+        raise BrokerError("network attestation signature is invalid") from exc
     current = int(time.time()) if now is None else now
-    if not hmac.compare_digest(str(claimed), expected):
-        raise BrokerError("network attestation MAC is invalid")
     if value["schema"] != "tgw-review-egress-kernel-attestation/v1" or value["run_id"] != policy.run_id or value["policy_hash"] != policy.policy_hash:
         raise BrokerError("network attestation binding mismatch")
     if not isinstance(value["issued_unix"], int) or not isinstance(value["expires_unix"], int) or not (value["issued_unix"] <= current < value["expires_unix"] <= policy.expires_unix):
         raise BrokerError("network attestation is expired or future-issued")
-    probes = value["negative_probes"]
+    evidence = value["kernel_evidence"]
+    if not isinstance(evidence, Mapping) or set(evidence) != {
+        "namespace",
+        "namespace_readback",
+        "address",
+        "link",
+        "route",
+        "ruleset",
+        "counters",
+        "broker_process",
+        "broker_starttime",
+        "broker_exe",
+        "broker_socket",
+        "probes",
+    }:
+        raise BrokerError("kernel evidence is incomplete")
+    probes = evidence["probes"]
     required_probes = {"direct_public_443_denied", "dns_denied", "private_denied", "link_local_denied", "metadata_denied", "broker_only_reachable"}
     if not isinstance(probes, Mapping) or set(probes) != required_probes or any(result is not True for result in probes.values()):
         raise BrokerError("network negative probes are incomplete")
-    if not all(isinstance(value[key], str) and value[key] for key in ("namespace", "ruleset_sha256", "broker_process_sha256", "nonce")):
+    if (
+        evidence["namespace"] != value["namespace"]
+        or not all(
+            isinstance(evidence[key], str) and evidence[key]
+            for key in ("namespace_readback", "address", "link", "route", "ruleset", "counters", "broker_process", "broker_starttime", "broker_exe", "broker_socket")
+        )
+        or not value["nonce"]
+    ):
         raise BrokerError("network kernel identity is incomplete")
     return value
 
@@ -257,14 +283,14 @@ def main() -> int:
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--verify-runtime", type=Path, required=True)
     parser.add_argument("--network-attestation", type=Path, required=True)
-    parser.add_argument("--attestation-key", type=Path, required=True)
+    parser.add_argument("--attestation-public-key", type=Path, required=True)
     parser.add_argument("--ready", type=Path, required=True)
     parser.add_argument("--receipt", type=Path)
     args = parser.parse_args()
     policy = load_policy(args.policy)
     policy.verify_runtime(args.verify_runtime)
     attestation = json.loads(args.network_attestation.read_text(encoding="utf-8"))
-    verify_network_attestation(attestation, policy, args.attestation_key.read_bytes())
+    verify_network_attestation(attestation, policy, args.attestation_public_key.read_bytes())
     bind = attestation.get("broker_bind")
     if not isinstance(bind, Mapping) or bind.get("host") in {None, "0.0.0.0", "::"} or not isinstance(bind.get("port"), int):
         raise SystemExit("attested broker bind is invalid")
@@ -272,8 +298,8 @@ def main() -> int:
         "schema": "tgw-review-egress-ready/v1",
         "run_id": policy.run_id,
         "policy_hash": policy.policy_hash,
-        "attestation_mac": attestation["mac"],
-        "broker_process_sha256": attestation["broker_process_sha256"],
+        "attestation_signature": attestation["signature"],
+        "broker_process": "|".join(attestation["kernel_evidence"][key] for key in ("broker_process", "broker_starttime", "broker_exe", "broker_socket")),
         "broker_bind": bind,
     }
     with args.ready.open("x", encoding="utf-8") as output:

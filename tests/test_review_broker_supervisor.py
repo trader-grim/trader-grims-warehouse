@@ -11,6 +11,7 @@ class Process:
     def __init__(self, receipt, ready, emit=True, policy_hash="sha256:policy"):
         self.receipt, self.emit = receipt, emit
         self.terminated = False
+        self.pid = 123
         self.ready, self.policy_hash = ready, policy_hash
 
     def start(self):
@@ -20,8 +21,8 @@ class Process:
                     "schema": "tgw-review-egress-ready/v1",
                     "run_id": "run-1",
                     "policy_hash": self.policy_hash,
-                    "attestation_mac": "hmac-sha256:x",
-                    "broker_process_sha256": "sha256:process",
+                    "attestation_signature": "ed25519:x",
+                    "broker_process": "pid=123 start=1 exe=sha256:x socket=inode:9 169.254.1.1:18443 uid=972",
                     "broker_bind": {"host": "169.254.1.1", "port": 18443},
                 }
             )
