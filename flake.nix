@@ -1,13 +1,12 @@
 {
   description = "TGW Python source development adapter";
 
-  # The canonical NixOS configuration remains in trader-grim/tgw-flake.
-  # This adapter exists only so a clean Python-source clone has an explicit,
-  # reproducible development-shell entry point instead of an absolute symlink.
-  inputs.tgw-flake.url = "git+ssh://git@github.com/trader-grim/tgw-flake.git?ref=todo/consolidated-nix-fleet-20260725";
-  inputs.nixpkgs.follows = "tgw-flake/nixpkgs";
+  # Evaluation is deliberately independent of the production tgw-flake.  The
+  # one exact nixpkgs input is lock-bound and must already exist in the remote
+  # store; the provider runs offline with no substituters.
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/ac62194c3917d5f474c1a844b6fd6da2db95077d";
 
-  outputs = { self, tgw-flake, nixpkgs }:
+  outputs = { self, nixpkgs }:
     let
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
@@ -54,7 +53,7 @@
         cp ${verifierMetadata} $out/verifier-metadata.json
       '';
     in {
-      devShells = tgw-flake.devShells;
+      devShells.${system}.default = pkgs.mkShell { };
       packages.${system}.review-egress-systemd-units = reviewEgressSystemdUnits;
       checks.${system}.review-egress-systemd-units = reviewEgressSystemdUnits;
     };

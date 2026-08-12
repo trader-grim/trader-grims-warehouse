@@ -1,51 +1,8 @@
 {
   "nodes": {
-    "disko": {
-      "inputs": {
-        "nixpkgs": [
-          "tgw-flake",
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "lastModified": 1781152676,
-        "narHash": "sha256-RxWs5ND31KzTG7wvMM+PMfUjyNpmIEr999lqNARaM5o=",
-        "owner": "nix-community",
-        "repo": "disko",
-        "rev": "ff8702b4de27f72b4c78573dfb89ec74e36abdf1",
-        "type": "github"
-      },
-      "original": {
-        "owner": "nix-community",
-        "repo": "disko",
-        "type": "github"
-      }
-    },
-    "home-manager": {
-      "inputs": {
-        "nixpkgs": [
-          "tgw-flake",
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "lastModified": 1763992789,
-        "narHash": "sha256-WHkdBlw6oyxXIra/vQPYLtqY+3G8dUVZM8bEXk0t8x4=",
-        "owner": "nix-community",
-        "repo": "home-manager",
-        "rev": "44831a7eaba4360fb81f2acc5ea6de5fde90aaa3",
-        "type": "github"
-      },
-      "original": {
-        "owner": "nix-community",
-        "ref": "release-25.05",
-        "repo": "home-manager",
-        "type": "github"
-      }
-    },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1767313136,
+        "lastModified": 1767359613,
         "narHash": "sha256-16KkgfdYqjaeRGBaYsNrhPRRENs0qzkQVUooNHtoy2w=",
         "owner": "NixOS",
         "repo": "nixpkgs",
@@ -54,74 +11,14 @@
       },
       "original": {
         "owner": "NixOS",
-        "ref": "nixos-25.05",
         "repo": "nixpkgs",
-        "type": "github"
-      }
-    },
-    "nixpkgs-unstable": {
-      "locked": {
-        "lastModified": 1782760764,
-        "narHash": "sha256-N66fYdUuZ9hpdM7jsQ7CUWtLJduqGDyTGCaLR62CXaQ=",
-        "owner": "NixOS",
-        "repo": "nixpkgs",
-        "rev": "7a1a64774a5fd0b0cd39ac95d0e170ace8b266a0",
-        "type": "github"
-      },
-      "original": {
-        "owner": "NixOS",
-        "ref": "nixpkgs-unstable",
-        "repo": "nixpkgs",
+        "rev": "ac62194c3917d5f474c1a844b6fd6da2db95077d",
         "type": "github"
       }
     },
     "root": {
       "inputs": {
-        "nixpkgs": [
-          "tgw-flake",
-          "nixpkgs"
-        ],
-        "tgw-flake": "tgw-flake"
-      }
-    },
-    "tgw-flake": {
-      "inputs": {
-        "disko": "disko",
-        "home-manager": "home-manager",
-        "nixpkgs": "nixpkgs",
-        "nixpkgs-unstable": "nixpkgs-unstable",
-        "tgw-src": "tgw-src"
-      },
-      "locked": {
-        "lastModified": 1785023253,
-        "narHash": "sha256-hQW7WCdoJVsDeN7d0l2xZaYVi7Md2e6sH/1lZhvODOQ=",
-        "ref": "todo/consolidated-nix-fleet-20260725",
-        "rev": "a692acbbdd99808dec50cc425c1f06a7f5c339e7",
-        "revCount": 76,
-        "type": "git",
-        "url": "ssh://git@github.com/trader-grim/tgw-flake.git"
-      },
-      "original": {
-        "ref": "todo/consolidated-nix-fleet-20260725",
-        "type": "git",
-        "url": "ssh://git@github.com/trader-grim/tgw-flake.git"
-      }
-    },
-    "tgw-src": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1785000933,
-        "narHash": "sha256-nRdcI6+J0fsHtgTwtM3akNnf8De/x/CZu/ro/NpooOw=",
-        "ref": "todo/consolidated-nix-source-20260725",
-        "rev": "b29a6a834c691710085b376a37c01b294eb8c911",
-        "revCount": 800,
-        "type": "git",
-        "url": "ssh://git@github.com/trader-grim/trader-grims-warehouse.git"
-      },
-      "original": {
-        "ref": "todo/consolidated-nix-source-20260725",
-        "type": "git",
-        "url": "ssh://git@github.com/trader-grim/trader-grims-warehouse.git"
+        "nixpkgs": "nixpkgs"
       }
     }
   },

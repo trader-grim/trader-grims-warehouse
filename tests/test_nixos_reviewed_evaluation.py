@@ -41,7 +41,15 @@ DIGEST = "c" * 64
 
 
 def parameters(archive_digest=DIGEST):
-    input_closure = [{"path": "/nix/store/11111111111111111111111111111111-input", "nar_sha256": "sha256:" + DIGEST}]
+    input_closure = [
+        {
+            "lock_node": "nixpkgs",
+            "lock_rev": "ac62194c3917d5f474c1a844b6fd6da2db95077d",
+            "lock_nar_hash": "sha256-16KkgfdYqjaeRGBaYsNrhPRRENs0qzkQVUooNHtoy2w=",
+            "path": "/nix/store/11111111111111111111111111111111-input",
+            "nar_sha256": "sha256:" + DIGEST,
+        }
+    ]
     return {
         "target_host": "tgw-prod",
         "flake_repository_id": "tgw-flake",
@@ -106,7 +114,7 @@ def test_real_prepared_effect_envelope_matches_authority_and_remote_parser():
         provider_module._validate_remote_effect(mismatched)
 
 
-@pytest.mark.parametrize("mutation", ["hash", "count", "path", "nar", "duplicate"])
+@pytest.mark.parametrize("mutation", ["hash", "count", "path", "nar", "lock_node", "lock_rev", "lock_nar", "duplicate", "omitted"])
 def test_input_closure_manifest_is_exact_content_addressed_and_bounded(mutation):
     value = parameters()
     manifest = json.loads(value["input_closure_manifest_json"])
@@ -118,10 +126,19 @@ def test_input_closure_manifest_is_exact_content_addressed_and_bounded(mutation)
         manifest[0]["path"] = "/tmp/not-store"
     elif mutation == "nar":
         manifest[0]["nar_sha256"] = "sha256:bad"
+    elif mutation == "lock_node":
+        manifest[0]["lock_node"] = "unrelated"
+    elif mutation == "lock_rev":
+        manifest[0]["lock_rev"] = "0" * 40
+    elif mutation == "lock_nar":
+        manifest[0]["lock_nar_hash"] = "sha256-unrelated="
+    elif mutation == "omitted":
+        manifest.clear()
+        value["input_closure_path_count"] = "0"
     else:
         manifest.append(dict(manifest[0]))
         value["input_closure_path_count"] = "2"
-    if mutation in {"path", "nar", "duplicate"}:
+    if mutation in {"path", "nar", "lock_node", "lock_rev", "lock_nar", "duplicate", "omitted"}:
         value["input_closure_manifest_json"] = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
         value["input_closure_manifest_sha256"] = "sha256:" + sha256(value["input_closure_manifest_json"].encode()).hexdigest()
     with pytest.raises(EvaluationError, match="input closure"):
@@ -353,6 +370,7 @@ def test_remote_helper_executes_only_fixed_offline_steps_and_cleans_scratch(tmp_
     closure = "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-tgw-prod-test"
     original_is_file = Path.is_file
     original_read_text = Path.read_text
+    original_iterdir = Path.iterdir
     original_digest = __import__("tgw.nixos_reviewed_evaluation", fromlist=["_digest_file"])._digest_file
     monkeypatch.setattr(
         Path,
@@ -375,6 +393,17 @@ def test_remote_helper_executes_only_fixed_offline_steps_and_cleans_scratch(tmp_
             else original_read_text(path, *args, **kwargs)
         ),
     )
+    monkeypatch.setattr(
+        Path,
+        "iterdir",
+        lambda path: (
+            iter([Path(closure) / "units", Path(closure) / "verifier-metadata.json"])
+            if str(path) == closure
+            else iter([Path(closure) / "units" / unit for unit in provider_module.UNITS])
+            if str(path) == closure + "/units"
+            else original_iterdir(path)
+        ),
+    )
     remote_paths = {"/run/current-system/sw/bin/python3", *EXECUTABLES.values()}
     monkeypatch.setattr("tgw.nixos_reviewed_evaluation._digest_file", lambda path: "sha256:" + DIGEST if str(path).startswith(closure) or str(path) in remote_paths else original_digest(path))
     calls = []
@@ -383,6 +412,8 @@ def test_remote_helper_executes_only_fixed_offline_steps_and_cleans_scratch(tmp_
         calls.append(argv)
         if argv[-1] == "write-tree":
             return TREE
+        if "builtins.getFlake" in argv[-1]:
+            return json.loads(request["input_closure_manifest_json"])[0]["path"]
         if "drvPath" in argv[-1]:
             return "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-review.drv"
         if "build" in argv:
@@ -455,9 +486,9 @@ def test_missing_offline_input_is_refused_before_eval_or_build(tmp_path, monkeyp
 
     scratch = tmp_path / "scratch"
     scratch.mkdir(mode=0o700)
-    with pytest.raises(EvaluationError, match="offline input closure"):
+    with pytest.raises(EvaluationError, match="offline (resolved input set|input closure)"):
         execute_packet(packet(request, archive), run=fake_run, scratch_root=scratch, scratch_uid=os.geteuid())
-    assert not any("eval" in call or "build" in call for call in calls)
+    assert not any("drvPath" in call[-1] or "build" in call for call in calls)
     assert not list(scratch.iterdir())
 
 

@@ -238,6 +238,16 @@ class TypedEffectHandlerRegistry:
                 "activation": False,
             }:
                 raise EffectHandlerError("generated unit verifier metadata is invalid")
+            try:
+                expected_inputs = json.loads(parameters["input_closure_manifest_json"])
+            except json.JSONDecodeError as exc:
+                raise EffectHandlerError("reviewed Nix input closure parameter is invalid") from exc
+            if (
+                result.get("input_closure_manifest") != expected_inputs
+                or result.get("input_closure_manifest_sha256") != parameters["input_closure_manifest_sha256"]
+                or result.get("input_closure_path_count") != int(parameters["input_closure_path_count"])
+            ):
+                raise EffectHandlerError("reviewed Nix input closure evidence binding mismatch")
             if not isinstance(result.get("nix_version"), str) or not result["nix_version"]:
                 raise EffectHandlerError("Nix version evidence is absent")
             try:

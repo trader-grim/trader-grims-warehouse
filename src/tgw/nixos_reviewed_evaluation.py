@@ -461,7 +461,10 @@ def _validate_remote_effect(value: Any) -> tuple[dict[str, Any], dict[str, str]]
     for item in input_closure:
         if (
             not isinstance(item, dict)
-            or set(item) != {"path", "nar_sha256"}
+            or set(item) != {"lock_node", "lock_rev", "lock_nar_hash", "path", "nar_sha256"}
+            or item["lock_node"] != "nixpkgs"
+            or item["lock_rev"] != "ac62194c3917d5f474c1a844b6fd6da2db95077d"
+            or item["lock_nar_hash"] != "sha256-16KkgfdYqjaeRGBaYsNrhPRRENs0qzkQVUooNHtoy2w="
             or not isinstance(item["path"], str)
             or not store_path.fullmatch(item["path"])
             or not isinstance(item["nar_sha256"], str)
@@ -471,6 +474,8 @@ def _validate_remote_effect(value: Any) -> tuple[dict[str, Any], dict[str, str]]
         paths.append(item["path"])
     if paths != sorted(set(paths)):
         raise EvaluationError("input closure paths must be unique and sorted")
+    if len(input_closure) != 1:
+        raise EvaluationError("input closure must contain exactly the locked nixpkgs source")
     identity = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}")
     if not value["scratch_id"].startswith("nixos-review:") or not identity.fullmatch(value["scratch_id"]) or not identity.fullmatch(value["operation_id"]):
         raise EvaluationError("remote symbolic identity is invalid")
@@ -839,6 +844,19 @@ def execute_packet(
             "true",
             "--no-write-lock-file",
         ]
+        resolved_input = run(
+            base
+            + [
+                "eval",
+                "--raw",
+                "--expr",
+                "(builtins.getFlake (toString ./.)).inputs.nixpkgs.outPath",
+            ],
+            cwd=source,
+            timeout=timeout,
+        ).strip()
+        if resolved_input != input_closure[0]["path"]:
+            raise EvaluationError("offline resolved input set does not match the exact manifest")
         for item in input_closure:
             observed = run(base + ["hash", "path", "--type", "sha256", "--base16", item["path"]], cwd=source, timeout=timeout).strip()
             if observed != item["nar_sha256"].removeprefix("sha256:"):
@@ -866,6 +884,10 @@ def execute_packet(
             "activation": False,
         }:
             raise EvaluationError("generated verifier metadata contract mismatch")
+        output_entries = sorted(path.name for path in Path(closure).iterdir())
+        unit_entries = sorted(path.name for path in (Path(closure) / "units").iterdir())
+        if output_entries != ["units", "verifier-metadata.json"] or unit_entries != sorted(UNITS):
+            raise EvaluationError("generated output contains an unexpected entry")
         enter("systemd-verify")
         verify_log = run([EXECUTABLES["systemd_analyze"], "verify", *map(str, unit_paths)], cwd=source, timeout=timeout)
         enter("closure-manifest")
@@ -902,6 +924,9 @@ def execute_packet(
             "home_db_write": False,
             "system": bound["system"],
             "evaluation_target": bound["evaluation_target"],
+            "input_closure_manifest": input_closure,
+            "input_closure_manifest_sha256": bound["input_closure_manifest_sha256"],
+            "input_closure_path_count": len(input_closure),
             "verifier_metadata": verifier_metadata,
             "verifier_metadata_sha256": _digest_file(metadata_path),
             "evaluated_config_drv": drv,

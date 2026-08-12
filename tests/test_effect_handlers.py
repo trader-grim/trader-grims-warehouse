@@ -13,7 +13,15 @@ DIGEST = "c" * 64
 
 
 def _evaluation_parameters():
-    input_closure = [{"path": "/nix/store/11111111111111111111111111111111-input", "nar_sha256": "sha256:" + DIGEST}]
+    input_closure = [
+        {
+            "lock_node": "nixpkgs",
+            "lock_rev": "ac62194c3917d5f474c1a844b6fd6da2db95077d",
+            "lock_nar_hash": "sha256-16KkgfdYqjaeRGBaYsNrhPRRENs0qzkQVUooNHtoy2w=",
+            "path": "/nix/store/11111111111111111111111111111111-input",
+            "nar_sha256": "sha256:" + DIGEST,
+        }
+    ]
     return {
         "target_host": "tgw-prod",
         "flake_repository_id": "tgw-flake",
@@ -78,6 +86,9 @@ def _evaluation_result(parameters):
         "home_db_write": False,
         "system": "x86_64-linux",
         "evaluation_target": "review-egress-systemd-units",
+        "input_closure_manifest": json.loads(parameters["input_closure_manifest_json"]),
+        "input_closure_manifest_sha256": parameters["input_closure_manifest_sha256"],
+        "input_closure_path_count": int(parameters["input_closure_path_count"]),
         "evaluated_config_drv": "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-review-units.drv",
         "closure_path_count": 1,
         "eval_log_sha256": DIGEST,
@@ -109,9 +120,6 @@ def _evaluation_result(parameters):
             "tgw-review-egress-namespace@.service": DIGEST,
         },
     }
-    import hashlib
-    import json
-
     result["closure_manifest"] = [{"path": "/nix/store/11111111111111111111111111111111-dependency", "nar_sha256": DIGEST}]
     result["closure_manifest_sha256"] = "sha256:" + hashlib.sha256(json.dumps(result["closure_manifest"], sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
     result["closure_manifest_ref"] = "inline:" + result["closure_manifest_sha256"]
