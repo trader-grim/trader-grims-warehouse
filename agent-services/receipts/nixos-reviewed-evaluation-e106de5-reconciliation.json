@@ -1,0 +1,37 @@
+{
+  "schema": "tgw-nixos-reviewed-evaluation-reconciliation/v1",
+  "status": "CLEANED_FAILURE",
+  "attempt_commit": "c521d46ef24b2c78c6672c1b55816bd1a4f604a3",
+  "attempt_receipt_hash": "sha256:8776a71d7bcb9c9a83330fe4c4e03b7343ac716d0b5751f9d539fa3198eb7133",
+  "request_hash": "sha256:5004cc18766a79958485cb30a75382f2b9d7a36a60bbb27f0bbd302b30796fcb",
+  "observations": {
+    "current_system": "/nix/store/rjpqj1kf2g6i34anklih1dmk4afcdkmj-nixos-system-tgw-prod-25.05.20260102.ac62194",
+    "system_profile": "/nix/store/rjpqj1kf2g6i34anklih1dmk4afcdkmj-nixos-system-tgw-prod-25.05.20260102.ac62194",
+    "scratch_root": "/var/tmp/tgw-reviewed-evaluation",
+    "scratch_root_state": "ABSENT",
+    "scratch_entries": [],
+    "provider_receipt": null,
+    "generated_units": null,
+    "closure_manifest": null
+  },
+  "classification": {
+    "scratch_residue": false,
+    "generation_changed": false,
+    "profile_changed": false,
+    "failure_phase": "UNOBSERVABLE_WITH_CURRENT_PROTOCOL",
+    "nix_evaluation_or_build_may_have_started": "UNKNOWN",
+    "nix_store_additions": "NOT_INFERRED",
+    "reason": "The fixed provider suppresses remote stderr and exposes no stage marker or failure receipt; absent scratch proves cleanup/no residue but cannot distinguish pre-helper failure from a cleaned later failure."
+  },
+  "forbidden_effects": {
+    "activation": false,
+    "profile_write": false,
+    "home_db_write": false,
+    "live_flake_write": false,
+    "deployment": false
+  },
+  "diagnostic_commands": ["readlink -f /run/current-system", "readlink -f /nix/var/nix/profiles/system", "test -e /var/tmp/tgw-reviewed-evaluation", "find /var/tmp/tgw-reviewed-evaluation -maxdepth 4"],
+  "diagnostic_claims": {"read_only": true, "retry": false, "build_or_eval": false, "deletion": false, "deployment": false},
+  "smallest_protocol_gap": "Emit a bounded signed failure receipt outside the ephemeral scratch tree with stage enum, fixed-command exit code, cleanup result, and stderr hash plus a redacted bounded diagnostic code; controller must return and validate it on nonzero.",
+  "receipt_hash": "sha256:091ef10cb3cd849df2577fa67f3a0699e8c1496cbb769df437737d5bb6b59c7a"
+}
