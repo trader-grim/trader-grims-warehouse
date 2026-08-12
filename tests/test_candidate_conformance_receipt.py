@@ -28,6 +28,7 @@ def _receipt(graph, commit, tree):
         "provider_id": PROVIDER_ID,
         "luet_version": LUET_VERSION,
         "luet_revision": LUET_REVISION,
+        "binary_sha256": "sha256:" + "b" * 64,
         "plan_commit": "plan",
         "graph_hash": graph_hash(graph),
         "closure_hash": "sha256:closure",
