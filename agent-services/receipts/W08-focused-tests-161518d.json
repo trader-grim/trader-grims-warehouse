@@ -1,0 +1,1 @@
+{"schema":"tgw-candidate-test-receipt/v1","source_commit":"161518d94713fcef5c2ed2764ba18ad672217730","source_tree":"dd109ee3e12cc67ff2c546f0d3aaa7d7f2028ccf","result":"199 passed in 2.56s","status":"passed","suite":"Plan, authority/effects, review transport, deployment, evaluation failure protocol and SSH framing","worktree":"detached-clean"}

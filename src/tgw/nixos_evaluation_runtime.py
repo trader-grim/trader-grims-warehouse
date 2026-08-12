@@ -11,8 +11,8 @@ from typing import Any, Mapping
 
 from tgw.nixos_reviewed_evaluation import ImmutableFailureReceiptStore, SshReviewedEvaluationProvider
 
-SOURCE_REF = "artifact:sha256:83d185b04b1ff0064bbd543fb704551929733505e47c0ab1fa87c2474810614a"
-SOURCE_PATH = Path("/opt/TGW/tgw-lib/actors/codex/artifacts/sha256/83d185b04b1ff0064bbd543fb704551929733505e47c0ab1fa87c2474810614a.tar")
+SOURCE_REF = "artifact:sha256:d78726247e9168c0878975ff4f39acd6a1c1dc063febd3b8370713f5053e8095"
+SOURCE_PATH = Path("/opt/TGW/tgw-lib/actors/codex/artifacts/sha256/d78726247e9168c0878975ff4f39acd6a1c1dc063febd3b8370713f5053e8095.tar")
 KNOWN_HOSTS_REF = "artifact:sha256:2efd6fc4243b15b6d0b16a8da723911614198620cabf31bc822cf12520715cdf"
 KNOWN_HOSTS_PATH = Path("/opt/TGW/tgw-lib/actors/codex/artifacts/sha256/2efd6fc4243b15b6d0b16a8da723911614198620cabf31bc822cf12520715cdf.known_hosts")
 FAILURE_RECEIPT_ROOT = Path("/opt/TGW/tgw-lib/actors/codex/nixos-reviewed-evaluation-failures")
@@ -47,7 +47,7 @@ def preflight_reviewed_evaluation(parameters: Mapping[str, str]) -> dict[str, An
     if parameters.get("known_hosts_sha256") != "sha256:" + KNOWN_HOSTS_REF.rsplit(":", 1)[1]:
         raise RuntimeCompositionError("request known-hosts binding mismatch")
     artifacts = (
-        ("source_archive", SOURCE_PATH, 0o444, 8_785_920, parameters["source_archive_sha256"]),
+        ("source_archive", SOURCE_PATH, 0o444, 8_826_880, parameters["source_archive_sha256"]),
         ("known_hosts", KNOWN_HOSTS_PATH, 0o444, 95, parameters["known_hosts_sha256"]),
     )
     result = {}
@@ -58,7 +58,7 @@ def preflight_reviewed_evaluation(parameters: Mapping[str, str]) -> dict[str, An
         result[name] = {"path": str(path), "mode": f"{mode:04o}", "owner_uid": metadata.st_uid, "size": size, "sha256": digest, "symlink": False}
     return {
         "schema": "tgw-nixos-reviewed-evaluation-runtime-preflight/v1",
-        "request_hash": "sha256:3600fa868bbb301e8f36264df5396fbbf56fefa8d201a4e932d038013bc17d7c",
+        "request_hash": "sha256:a4d2f0446461609fc816a4fb52bc9ba70313cd61d4495270bd82b84a0eeb26dc",
         "resolver_id": "nixos-reviewed-evaluation-exact-artifacts@1",
         "artifacts": result,
         "ssh_started": False,
