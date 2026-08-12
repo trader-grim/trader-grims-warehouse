@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -39,32 +40,26 @@ def configured_review_command(
             "command": None,
             "health": evidence,
         }
-    backend = [python_path, "-m", "tgw.codex_review_backend"]
-    auth_file = Path(str(evidence["auth_file"])).resolve()
-    executable = Path(str(evidence["executable"])).absolute()
-    tool_root = executable.parent.parent
-    wrapper = [
-        python_path,
-        "-m",
-        "tgw.review_runner",
-        "--provider-command-json",
-        json.dumps(backend, separators=(",", ":")),
-        "--network-egress",
-        "--credential-file",
-        str(auth_file),
-        "--tool-root",
-        str(tool_root),
-    ]
+    egress_broker = os.environ.get("TGW_CODEX_REVIEW_EGRESS_BROKER")
+    if not egress_broker or not Path(egress_broker).is_file():
+        return {
+            "schema": "tgw-review-runner-configuration/v1",
+            "status": "HOLD",
+            "command": None,
+            "health": evidence,
+            "hold": {
+                "code": "REVIEW_EGRESS_BROKER_UNAVAILABLE",
+                "detail": "remote review requires an enforcing allowlisted transport; bubblewrap network sharing is not sufficient",
+            },
+        }
     return {
         "schema": "tgw-review-runner-configuration/v1",
-        "status": "AVAILABLE",
-        "command": wrapper,
+        "status": "HOLD",
+        "command": None,
         "health": evidence,
-        "isolation": {
-            "filesystem": "read-only snapshot and runtime mounts",
-            "environment": "cleared; only PATH, PYTHONPATH, HOME, and TGW_CODEX_REVIEW_AUTH injected",
-            "network": "declared provider egress; business/provider effects remain forbidden by review authority",
-            "credential": str(auth_file),
+        "hold": {
+            "code": "REVIEW_EGRESS_BROKER_NOT_INTEGRATED",
+            "detail": "an enforcing broker path is declared but the sandbox transport adapter is not implemented",
         },
     }
 

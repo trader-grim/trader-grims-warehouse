@@ -30,7 +30,7 @@ def test_health_requires_dedicated_executable_and_auth_without_external_call(tmp
     assert observed["reasons"] == []
 
 
-def test_configuration_materializes_wrapper_only_after_health_pass(tmp_path):
+def test_configuration_holds_until_declared_egress_broker_is_integrated(tmp_path, monkeypatch):
     evidence = {
         "schema": "tgw-codex-review-backend-health/v1",
         "available": True,
@@ -44,16 +44,33 @@ def test_configuration_materializes_wrapper_only_after_health_pass(tmp_path):
         calls.append((command, kwargs))
         return subprocess.CompletedProcess(command, 0, json.dumps(evidence), "")
 
+    broker = tmp_path / "egress-broker"
+    broker.write_text("broker")
+    monkeypatch.setenv("TGW_CODEX_REVIEW_EGRESS_BROKER", str(broker))
     configured = configured_review_command(python=tmp_path / "python", probe=probe)
 
-    assert configured["status"] == "AVAILABLE"
-    assert configured["command"][1:3] == ["-m", "tgw.review_runner"]
-    command = configured["command"]
-    provider = json.loads(command[command.index("--provider-command-json") + 1])
-    assert provider[-1] == "tgw.codex_review_backend"
-    assert "--network-egress" in command
-    assert configured["isolation"]["environment"].startswith("cleared")
+    assert configured["status"] == "HOLD"
+    assert configured["command"] is None
+    assert configured["hold"]["code"] == "REVIEW_EGRESS_BROKER_NOT_INTEGRATED"
     assert calls[0][0][-1] == "--health"
+
+
+def test_remote_backend_holds_without_enforcing_egress_broker(tmp_path, monkeypatch):
+    monkeypatch.delenv("TGW_CODEX_REVIEW_EGRESS_BROKER", raising=False)
+    evidence = {
+        "available": True,
+        "executable": str(tmp_path / "bin/codex"),
+        "auth_file": str(tmp_path / "auth.json"),
+    }
+    configured = configured_review_command(
+        python=tmp_path / "python",
+        probe=lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, json.dumps(evidence), ""
+        ),
+    )
+    assert configured["status"] == "HOLD"
+    assert configured["command"] is None
+    assert configured["hold"]["code"] == "REVIEW_EGRESS_BROKER_UNAVAILABLE"
 
 
 def test_failed_health_produces_hold_and_no_runner_command(tmp_path):
