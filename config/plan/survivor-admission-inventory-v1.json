@@ -1,0 +1,82 @@
+{
+  "schema": "tgw-source-convergence-inventory/v1",
+  "plan_id": "PLAN-GOVERNED-EXECUTION-PLATFORM",
+  "plan_commit": "fb9fee3e9db756ad0f5071525e943794bf1dab9b",
+  "canonical_source": "/opt/TGW/tgw-lib/src/trader-grims-warehouse",
+  "cleanup_authorized": false,
+  "providers": [
+    {
+      "capability": "plan.graph-query@1",
+      "survivor": "src/tgw/plan_graph",
+      "state": {"designed": true, "implemented": true, "tested": true, "reviewed": true, "admitted": true, "deployed": false, "live": false},
+      "evidence": ["archive-candidate:90d59df537ac97b9a7a6e5a352e88b0db3b44e56", "source-commit:edb452e", "test:tests/test_plan_graph_live.py:99-focused-suite-passed"]
+    },
+    {
+      "capability": "promptcraft.receiver-profiles@1",
+      "survivor": "agent-services/providers/promptcraft",
+      "state": {"designed": true, "implemented": true, "tested": true, "reviewed": false, "admitted": true, "deployed": false, "live": false},
+      "evidence": ["archive:/opt/TGW/library/archive/catnanny-home-droppings-20260807/tgw-capability-lab", "source-commit:3260710", "handoff-commit:b19393e", "lineage:agent-services/providers/promptcraft/LINEAGE.sha256"]
+    },
+    {
+      "capability": "plan.capability-resolution@2",
+      "survivor": "src/tgw/plan_solver.py",
+      "state": {"designed": true, "implemented": true, "tested": true, "reviewed": false, "admitted": true, "deployed": false, "live": false},
+      "evidence": ["source-commit:c414762", "catalog-commit:6182244", "solution-commit:a1e8a1c", "test:tests/test_plan_solver.py"]
+    },
+    {
+      "capability": "plan.luet-conformance@1",
+      "survivor": "src/tgw/plan_luet.py",
+      "state": {"designed": true, "implemented": true, "tested": true, "reviewed": false, "admitted": true, "deployed": false, "live": false},
+      "evidence": ["source-commit:b59e889", "pin:luet-0.9.26@48f17dbc7a9edb94b1415a2eeeac4e5c2d45f5d3", "test:tests/test_plan_luet.py"]
+    },
+    {
+      "capability": "workflow.plan-solution-runtime-bridge@1",
+      "survivor": "src/tgw/workflow/plan_bridge.py",
+      "state": {"designed": true, "implemented": true, "tested": true, "reviewed": false, "admitted": true, "deployed": false, "live": false},
+      "evidence": ["source-commit:a2318b8", "test:tests/test_plan_runtime_bridge.py"]
+    },
+    {
+      "capability": "authority.plan-effects@1",
+      "survivor": "src/tgw/plan_authority.py",
+      "state": {"designed": true, "implemented": true, "tested": true, "reviewed": false, "admitted": true, "deployed": false, "live": false},
+      "evidence": ["source-commit:8fac6d6", "schema:src/tgw/plan_authority.sql"]
+    },
+    {
+      "capability": "coding.harness-role-selection@1",
+      "survivor": "src/tgw/harness_registry.py",
+      "state": {"designed": true, "implemented": true, "tested": true, "reviewed": false, "admitted": true, "deployed": false, "live": false},
+      "evidence": ["source-commit:29a630e", "catalog:agent-services/catalogs/harness-providers-v1.json", "test:tests/test_harness_registry.py"]
+    },
+    {
+      "capability": "coding.agent-service-materialization@1",
+      "survivor": "agent-services/installers/materialize.py",
+      "state": {"designed": true, "implemented": true, "tested": true, "reviewed": false, "admitted": true, "deployed": false, "live": false},
+      "evidence": ["source-commit:2284e2c", "test:tests/test_agent_service_materializer.py"]
+    },
+    {
+      "capability": "workflow.condition-derived-convergence@1",
+      "survivor": "src/tgw/workflow",
+      "state": {"designed": true, "implemented": true, "tested": true, "reviewed": true, "admitted": true, "deployed": "unknown", "live": "partial"},
+      "evidence": ["source-commit:81447b72", "scheduler-commit:0bd226ca", "receipt-commit:59fa2394", "foreman-commit:e5017bb", "runtime-audit:2026-08-11"]
+    },
+    {
+      "capability": "coding.governed-provision@1",
+      "survivor": null,
+      "state": {"designed": true, "implemented": true, "tested": true, "reviewed": "unknown", "admitted": false, "deployed": true, "live": "degraded"},
+      "evidence": ["stranded-source:/opt/TGW/tgw-lib/actors/codex/source/trader-grims-warehouse", "release:/opt/TGW/tgw-lib/releases/ppworkflow-c63026fb-20260811", "service:tgw-coding-provision-pull.timer:active", "worker-history:9-failed-units"]
+    }
+  ],
+  "stranded_candidates": [
+    {"path": "/opt/TGW/var/worktrees/todo-1721-plan-graph-fresh", "capability": "plan.graph-query@1", "disposition": "preserve-until-survivor-review-and-operator-acceptance"},
+    {"path": "/opt/TGW/library/archive/tigwadev-home-droppings-20260807/agent-runs/1721", "capability": "plan.graph-query@1", "disposition": "historical-review-and-controller-evidence"},
+    {"path": "/opt/TGW/library/archive/catnanny-home-droppings-20260807/tgw-capability-lab", "capability": "promptcraft.receiver-profiles@1", "disposition": "historical-lineage-source"},
+    {"path": "/opt/TGW/tgw-lib/actors/codex/source/trader-grims-warehouse", "capability": "coding.governed-provision@1", "disposition": "semantic-diff-required-before-source-convergence"},
+    {"path": "/opt/TGW/tgw-lib/actors/codex/worktrees/approval-console", "capability": "operator.http-console@1", "disposition": "review-and-admission-pending"},
+    {"path": "/opt/TGW/var/worktrees/todo-1735-approval-bootstrap", "capability": "authority.operator-decisions@1", "disposition": "overlap-audit-pending"},
+    {"path": "/opt/TGW/var/worktrees/todo-1743", "capability": "effects.typed-handler-registry@1", "disposition": "overlap-audit-pending"}
+  ],
+  "retirement_gate": {
+    "requires": ["survivor-independent-review", "runtime-cutover", "operator-acceptance", "zero-stale-consumer-references"],
+    "status": "HELD"
+  }
+}
