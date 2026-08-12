@@ -72,6 +72,9 @@ AUTHORIZED_NIX_STORE_PATH = AUTHORIZED_NIX_PATH
 AUTHORIZED_NIX_STORE_SHA256 = AUTHORIZED_NIX_SHA256
 AUTHORIZED_SYSTEMD_ANALYZE_PATH = "/nix/store/kiplbb6yv7rmjf21hf9ky01b9kmgmnqn-systemd-257.10/bin/systemd-analyze"
 AUTHORIZED_SYSTEMD_ANALYZE_SHA256 = "sha256:28c62cb24a08bebc45ce138078d4b3a3d3f47bcbfea3bf92d9b3dddfcd40bce3"
+AUTHORIZED_SYSTEMD_ANALYZE_VERSION = "systemd 257 (257.10)"
+AUTHORIZED_SYSTEMD_ANALYZE_VERSION_STDOUT_SHA256 = "sha256:17b46079431e2ab064d9664c917614c6a44b8a738f49881bdeb307c7ba70c1c5"
+AUTHORIZED_SYSTEMD_ANALYZE_VERSION_STDOUT_BYTES = 338
 AUTHORIZED_INPUT_PATH = "/nix/store/3p306srz83h9z9v0ma9xcxb8y8cdxkxj-source"
 AUTHORIZED_INPUT_NAR_SHA256 = "sha256:d7a2a481f758aa369e44605a62c36b84f45110db34ab3910554a28347b68cb6c"
 RENDER_ATTR = "packages.x86_64-linux.nix-input-observer-rendered-artifacts"
@@ -341,6 +344,9 @@ class A2Authority:
     nix_store_sha256: str
     systemd_analyze_path: str
     systemd_analyze_sha256: str
+    systemd_analyze_version: str
+    systemd_analyze_version_stdout_sha256: str
+    systemd_analyze_version_stdout_bytes: int
     input_path: str
     input_nar_sha256: str
     store_root: str = "/nix/store"
@@ -350,6 +356,7 @@ class A2Authority:
     allow_mutable_parents: bool = False
     held_input_path: str = ""
     derivation_store_root: str = "/nix/store"
+    scratch_root: str = str(SCRATCH_ROOT)
 
 
 PRODUCTION_GIT_AUTHORITY = ToolAuthority(
@@ -370,6 +377,9 @@ PRODUCTION_A2_AUTHORITY = A2Authority(
     nix_store_sha256=AUTHORIZED_NIX_STORE_SHA256,
     systemd_analyze_path=AUTHORIZED_SYSTEMD_ANALYZE_PATH,
     systemd_analyze_sha256=AUTHORIZED_SYSTEMD_ANALYZE_SHA256,
+    systemd_analyze_version=AUTHORIZED_SYSTEMD_ANALYZE_VERSION,
+    systemd_analyze_version_stdout_sha256=AUTHORIZED_SYSTEMD_ANALYZE_VERSION_STDOUT_SHA256,
+    systemd_analyze_version_stdout_bytes=AUTHORIZED_SYSTEMD_ANALYZE_VERSION_STDOUT_BYTES,
     input_path=AUTHORIZED_INPUT_PATH,
     input_nar_sha256=AUTHORIZED_INPUT_NAR_SHA256,
 )
@@ -1090,11 +1100,14 @@ def validate_a2_terminal(
     if (
         validated["host_identity_receipt_sha256"] != authority.a2_prerequisite_receipt_sha256
         or validated["systemd_analyze_sha256"] != authority.systemd_analyze_sha256
+        or validated["systemd_analyze_version"] != authority.systemd_analyze_version
+        or validated["systemd_analyze_version_stdout_sha256"] != authority.systemd_analyze_version_stdout_sha256
+        or validated["systemd_analyze_version_stdout_bytes"] != authority.systemd_analyze_version_stdout_bytes
         or input_entry["store_path"] != authority.input_path
         or input_entry["nar_sha256"] != authority.input_nar_sha256
     ):
         raise RenderHelperError("A2 request authority composition is invalid", stage="request", diagnostic_code="IDENTITY_MISMATCH")
-    execution_policy = _validate_execution_policy(value.get("execution_policy"))
+    execution_policy = _validate_execution_policy(value.get("execution_policy"), authority=authority)
     expected_base = _a2_terminal_base(
         binding,
         validated,
@@ -1153,6 +1166,8 @@ def validate_a2_terminal(
             "subprocess_step",
             "return_code",
         }
+        if set(value) != fields:
+            raise RenderHelperError("A2 failure envelope is not closed", stage="request", diagnostic_code="VALIDATION_REFUSED")
         valid_failures = {
             "a2-tool": {"VALIDATION_REFUSED", "IDENTITY_MISMATCH", "BOUND_EXCEEDED"},
             "a2-input": {"VALIDATION_REFUSED", "IDENTITY_MISMATCH", "BOUND_EXCEEDED", "SUBPROCESS_FAILED"},
@@ -1160,7 +1175,7 @@ def validate_a2_terminal(
             "a2-build": {"IDENTITY_MISMATCH", "BOUND_EXCEEDED", "SUBPROCESS_FAILED"},
             "a2-closure": {"VALIDATION_REFUSED", "IDENTITY_MISMATCH", "BOUND_EXCEEDED", "SUBPROCESS_FAILED"},
             "provider": {"VALIDATION_REFUSED", "IDENTITY_MISMATCH", "BOUND_EXCEEDED", "SUBPROCESS_FAILED"},
-            "a2-verified": {"IDENTITY_MISMATCH", "BOUND_EXCEEDED", "INTERNAL_ERROR", "NONE"},
+            "a2-verified": {"IDENTITY_MISMATCH", "INTERNAL_ERROR", "NONE"},
             "internal": {"INTERNAL_ERROR"},
         }
         valid_steps = {
@@ -1183,7 +1198,7 @@ def validate_a2_terminal(
                 value["outcome"] == "FAILED"
                 and value["stage"] == value["original_stage"]
                 and value["diagnostic_code"] == value["original_diagnostic_code"]
-                and value["cleanup"] in {"removed", "not-created"}
+                and value["cleanup"] == "removed"
                 and value["original_stage"] in valid_failures
                 and value["original_diagnostic_code"] in valid_failures[value["original_stage"]] - {"NONE"}
             )
@@ -1192,26 +1207,29 @@ def validate_a2_terminal(
             process_evidence = (
                 value["original_stage"] in valid_steps
                 and value["subprocess_step"] in valid_steps[value["original_stage"]]
-                and (value["return_code"] is None or type(value["return_code"]) is int)
+                and (value["return_code"] is None or type(value["return_code"]) is int and -255 <= value["return_code"] <= 255)
                 and value["return_code"] != 0
             )
         elif value["original_diagnostic_code"] == "BOUND_EXCEEDED":
-            process_evidence = (
-                value["original_stage"] in valid_steps
-                and value["subprocess_step"] in valid_steps[value["original_stage"]]
-                and value["return_code"] is None
-            )
+            if value["original_stage"] == "a2-tool":
+                process_evidence = value["subprocess_step"] is None and value["return_code"] is None
+            else:
+                process_evidence = (
+                    value["original_stage"] in valid_steps
+                    and value["subprocess_step"] in valid_steps[value["original_stage"]]
+                    and value["return_code"] is None
+                )
         elif value["original_diagnostic_code"] == "VALIDATION_REFUSED" and value["subprocess_step"] is not None:
             process_evidence = (
                 value["original_stage"] in valid_steps
                 and value["subprocess_step"] in valid_steps[value["original_stage"]]
                 and type(value["return_code"]) is int
+                and -255 <= value["return_code"] <= 255
             )
         else:
             process_evidence = value["subprocess_step"] is None and value["return_code"] is None
         if (
-            set(value) != fields
-            or not lifecycle
+            not lifecycle
             or not process_evidence
             or value["effects"] != _a2_effects(expected_build)
         ):
@@ -1448,13 +1466,20 @@ def _open_a2_executable(name: str, path: str, digest: str, authority: A2Authorit
         raw, identity = _read_held(held.descriptor, stage="a2-tool", max_bytes=64 * 1024 * 1024)
         if _sha256(raw) != digest:
             raise RenderHelperError("Phase A2 executable digest mismatch", stage="a2-tool", diagnostic_code="IDENTITY_MISMATCH")
-        return held, {
+        manifest: dict[str, Any] = {
             "name": name,
             "path": path,
             "sha256": digest,
             "owner_uid": authority.owner_uid,
             "mode": f"{authority.mode:04o}",
         }
+        if name == "systemd-analyze":
+            manifest.update(
+                version=authority.systemd_analyze_version,
+                version_stdout_sha256=authority.systemd_analyze_version_stdout_sha256,
+                version_stdout_bytes=authority.systemd_analyze_version_stdout_bytes,
+            )
+        return held, manifest
     except BaseException:
         _close_held_tool(held)
         raise
@@ -1474,14 +1499,17 @@ def _assert_a2_tool_unchanged(held: HeldTool, manifest: Mapping[str, Any], *, al
 
 def _fixed_nix_environment(run_path: Path) -> dict[str, str]:
     home = run_path / "nix-home"
-    try:
-        home.mkdir(mode=0o700)
-    except FileExistsError:
-        metadata = home.lstat()
-        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
-            raise RenderHelperError("Phase A2 HOME trust mismatch", stage="a2-tool", diagnostic_code="IDENTITY_MISMATCH")
+    temporary = run_path / "tmp"
+    for directory, label in ((home, "HOME"), (temporary, "TMPDIR")):
+        try:
+            directory.mkdir(mode=0o700)
+        except FileExistsError:
+            metadata = directory.lstat()
+            if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+                raise RenderHelperError(f"Phase A2 {label} trust mismatch", stage="a2-tool", diagnostic_code="IDENTITY_MISMATCH")
     return {
         "HOME": str(home),
+        "TMPDIR": str(temporary),
         "LC_ALL": "C",
         "LANG": "C",
         "PATH": "/no-ambient-path",
@@ -1999,20 +2027,26 @@ def _execute_a2_inner(
 
 
 def _a2_tool_manifest(authority: A2Authority) -> dict[str, Any]:
-    tools = [
-        {
+    tools = []
+    for name, path, digest in (
+        ("nix", authority.nix_path, authority.nix_sha256),
+        ("nix-store", authority.nix_store_path, authority.nix_store_sha256),
+        ("systemd-analyze", authority.systemd_analyze_path, authority.systemd_analyze_sha256),
+    ):
+        entry: dict[str, Any] = {
             "name": name,
             "path": path,
             "sha256": digest,
             "owner_uid": authority.owner_uid,
             "mode": f"{authority.mode:04o}",
         }
-        for name, path, digest in (
-            ("nix", authority.nix_path, authority.nix_sha256),
-            ("nix-store", authority.nix_store_path, authority.nix_store_sha256),
-            ("systemd-analyze", authority.systemd_analyze_path, authority.systemd_analyze_sha256),
-        )
-    ]
+        if name == "systemd-analyze":
+            entry.update(
+                version=authority.systemd_analyze_version,
+                version_stdout_sha256=authority.systemd_analyze_version_stdout_sha256,
+                version_stdout_bytes=authority.systemd_analyze_version_stdout_bytes,
+            )
+        tools.append(entry)
     return {
         "schema": "tgw-nix-observer-render-a2-tools/v1",
         "a1_prerequisite_receipt_sha256": authority.a1_prerequisite_receipt_sha256,
@@ -2021,7 +2055,7 @@ def _a2_tool_manifest(authority: A2Authority) -> dict[str, Any]:
     }
 
 
-def _validate_execution_policy(value: Any) -> dict[str, Any]:
+def _validate_execution_policy(value: Any, *, authority: A2Authority) -> dict[str, Any]:
     fields = {
         "schema",
         "environment",
@@ -2037,9 +2071,11 @@ def _validate_execution_policy(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != fields:
         raise RenderHelperError("A2 execution policy is not closed", stage="request", diagnostic_code="VALIDATION_REFUSED")
     environment = value["environment"]
-    if not isinstance(environment, dict) or set(environment) != {"HOME", "LC_ALL", "LANG", "PATH", "NIX_REMOTE", "NIX_CONFIG"}:
+    if not isinstance(environment, dict) or set(environment) != {"HOME", "TMPDIR", "LC_ALL", "LANG", "PATH", "NIX_REMOTE", "NIX_CONFIG"}:
         raise RenderHelperError("A2 execution environment is not closed", stage="request", diagnostic_code="VALIDATION_REFUSED")
     home = Path(environment["HOME"]) if isinstance(environment["HOME"], str) else Path()
+    temporary = Path(environment["TMPDIR"]) if isinstance(environment["TMPDIR"], str) else Path()
+    run_name = home.parent.name
     expected_environment = {
         "LC_ALL": "C",
         "LANG": "C",
@@ -2049,7 +2085,9 @@ def _validate_execution_policy(value: Any) -> dict[str, Any]:
     }
     if (
         home.name != "nix-home"
-        or not home.parent.name.startswith("run-")
+        or not re.fullmatch(r"run-[0-9a-f]{32}", run_name)
+        or home.parent.parent != Path(authority.scratch_root)
+        or temporary != home.parent / "tmp"
         or any(environment[key] != expected for key, expected in expected_environment.items())
         or value["schema"] != "tgw-nix-observer-render-execution-policy/v1"
         or value["nix_argv_prefix"] != list(NIX_ARGV_PREFIX)
@@ -2284,6 +2322,10 @@ def execute_packet(
             cleanup = "removed"
         except BaseException:
             cleanup = "failed"
+    elif a2_started:
+        # A2 starts only after its run directory exists.  Its disappearance is
+        # externally mutable cleanup evidence, never a truthful "not-created".
+        cleanup = "failed"
     try:
         if root_fd >= 0:
             os.close(root_fd)

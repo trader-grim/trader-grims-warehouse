@@ -66,6 +66,9 @@ def _a2_authority_literal(authority: helper.A2Authority) -> str:
             "nix_store_sha256": authority.nix_store_sha256,
             "systemd_analyze_path": authority.systemd_analyze_path,
             "systemd_analyze_sha256": authority.systemd_analyze_sha256,
+            "systemd_analyze_version": authority.systemd_analyze_version,
+            "systemd_analyze_version_stdout_sha256": authority.systemd_analyze_version_stdout_sha256,
+            "systemd_analyze_version_stdout_bytes": authority.systemd_analyze_version_stdout_bytes,
             "input_path": authority.input_path,
             "input_nar_sha256": authority.input_nar_sha256,
             "store_root": authority.store_root,
@@ -75,6 +78,7 @@ def _a2_authority_literal(authority: helper.A2Authority) -> str:
             "allow_mutable_parents": authority.allow_mutable_parents,
             "held_input_path": authority.held_input_path,
             "derivation_store_root": authority.derivation_store_root,
+            "scratch_root": authority.scratch_root,
         }
     )
 
@@ -331,7 +335,8 @@ def _make_a2_case(tmp_path: Path, *, mode: str = "success") -> dict[str, object]
         "a=sys.argv[1:]\n"
         "with open(LOG,'a') as f: f.write(json.dumps("
         "{'tool':'nix','argv':a,'nix_remote':os.environ.get('NIX_REMOTE'),"
-        "'nix_config':os.environ.get('NIX_CONFIG'),'path':os.environ.get('PATH')})+'\\n')\n"
+        "'nix_config':os.environ.get('NIX_CONFIG'),'path':os.environ.get('PATH'),"
+        "'home':os.environ.get('HOME'),'tmpdir':os.environ.get('TMPDIR')})+'\\n')\n"
         "if OUTPUT_FLOOD and 'flake' in a: sys.stdout.write('x'*(1024*1024+1)); raise SystemExit()\n"
         "if 'flake' in a and 'metadata' in a:\n"
         " print(json.dumps({'locks':{'nodes':"
@@ -414,6 +419,9 @@ def _make_a2_case(tmp_path: Path, *, mode: str = "success") -> dict[str, object]
         nix_store_sha256=_digest(nix_store.read_bytes()),
         systemd_analyze_path=str(systemd_analyze),
         systemd_analyze_sha256=_digest(systemd_analyze.read_bytes()),
+        systemd_analyze_version="systemd 257 (257.10)",
+        systemd_analyze_version_stdout_sha256=_digest(version_stdout),
+        systemd_analyze_version_stdout_bytes=len(version_stdout),
         input_path=input_path,
         input_nar_sha256="sha256:" + input_nar,
         store_root=str(store),
@@ -422,6 +430,7 @@ def _make_a2_case(tmp_path: Path, *, mode: str = "success") -> dict[str, object]
         require_nix_store=False,
         allow_mutable_parents=True,
         held_input_path=str(held_input_path),
+        scratch_root=str(tmp_path / "scratch"),
     )
     helper_source = Path(helper.__file__).read_bytes()
     tool_descriptor = helper.describe_tool(request, _test_tool_authority=LOCAL_TOOL_AUTHORITY)
@@ -498,6 +507,12 @@ def test_actual_framed_helper_subprocess_executes_offline_render_and_provider(tm
     )
     assert policy_calls
     assert all("builders =\n" in call["nix_config"] and "builders-use-substitutes = false" in call["nix_config"] for call in nix_calls)
+    assert all(
+        Path(call["home"]).parent == Path(call["tmpdir"]).parent
+        and Path(call["home"]).name == "nix-home"
+        and Path(call["tmpdir"]).name == "tmp"
+        for call in nix_calls
+    )
     build_calls = [call["argv"] for call in nix_calls if "build" in call["argv"]]
     assert len(build_calls) == 1
     assert build_calls[0][-4:] == [
@@ -547,6 +562,34 @@ def test_actual_framed_helper_subprocess_emits_closed_a2_failures(
     assert not case["scratch"].exists()
 
 
+def test_actual_framed_helper_maps_missing_a2_tool_to_closed_a2_tool_failure(tmp_path):
+    case = _make_a2_case(tmp_path)
+    authority_values = vars(case["authority"]).copy()
+    authority_values["nix_path"] = str(tmp_path / "held-tools" / "missing-nix")
+    authority = helper.A2Authority(**authority_values)
+    completed = _run_bootstrap(
+        case["wire"],
+        a2_authority=authority,
+        scratch_root=case["scratch"],
+    )
+    assert completed.returncode == 1
+    receipt = json.loads(completed.stdout)
+    assert (
+        helper.validate_a2_terminal(
+            receipt,
+            binding=case["binding"],
+            request=case["request"],
+            tool_descriptor=case["tool_descriptor"],
+            authority=authority,
+        )
+        == receipt
+    )
+    assert receipt["stage"] == "a2-tool"
+    assert receipt["diagnostic_code"] == "IDENTITY_MISMATCH"
+    assert receipt["subprocess_step"] is receipt["return_code"] is None
+    assert receipt["cleanup"] == "removed"
+
+
 def test_actual_framed_helper_cleanup_failure_overrides_a2_success(tmp_path):
     case = _make_a2_case(tmp_path)
     completed = _run_bootstrap(
@@ -575,7 +618,19 @@ def test_actual_framed_helper_cleanup_failure_overrides_a2_success(tmp_path):
 
 @pytest.mark.parametrize(
     "mutation",
-    ["provider-content", "provider-hash", "provider-time", "provider-verify-shape", "closure", "prerequisite", "policy"],
+    [
+        "provider-content",
+        "provider-hash",
+        "provider-time",
+        "provider-stale",
+        "provider-verify-shape",
+        "closure",
+        "prerequisite",
+        "policy",
+        "policy-home",
+        "policy-tmpdir",
+        "policy-env-extra",
+    ],
 )
 def test_nested_a2_success_mutations_are_rejected(tmp_path, mutation):
     case = _make_a2_case(tmp_path)
@@ -600,6 +655,12 @@ def test_nested_a2_success_mutations_are_rejected(tmp_path, mutation):
         inner.pop("receipt_sha256")
         changed["provider_receipt"]["receipt_sha256"] = _digest(canonical(inner))
         changed["provider_receipt_sha256"] = changed["provider_receipt"]["receipt_sha256"]
+    elif mutation == "provider-stale":
+        changed["provider_receipt"]["systemd_verify"]["observed_at"] = "2000-01-01T00:00:00Z"
+        inner = dict(changed["provider_receipt"])
+        inner.pop("receipt_sha256")
+        changed["provider_receipt"]["receipt_sha256"] = _digest(canonical(inner))
+        changed["provider_receipt_sha256"] = changed["provider_receipt"]["receipt_sha256"]
     elif mutation == "provider-verify-shape":
         changed["provider_receipt"]["systemd_verify"] = []
         inner = dict(changed["provider_receipt"])
@@ -610,8 +671,17 @@ def test_nested_a2_success_mutations_are_rejected(tmp_path, mutation):
         changed["closure_manifest"][0]["nar_sha256"] = "sha256:" + "0" * 64
     elif mutation == "prerequisite":
         changed["a2_prerequisite_receipt_sha256"] = "sha256:" + "0" * 64
-    else:
+    elif mutation == "policy":
         changed["execution_policy"]["remote_builders"] = True
+        changed["execution_policy_sha256"] = _digest(canonical(changed["execution_policy"]))
+    elif mutation == "policy-home":
+        changed["execution_policy"]["environment"]["HOME"] = "/attacker/run-00000000000000000000000000000000/nix-home"
+        changed["execution_policy_sha256"] = _digest(canonical(changed["execution_policy"]))
+    elif mutation == "policy-tmpdir":
+        changed["execution_policy"]["environment"]["TMPDIR"] = "/tmp"
+        changed["execution_policy_sha256"] = _digest(canonical(changed["execution_policy"]))
+    else:
+        changed["execution_policy"]["environment"]["NIX_BUILDERS"] = "ssh://attacker"
         changed["execution_policy_sha256"] = _digest(canonical(changed["execution_policy"]))
     changed.pop("receipt_sha256")
     changed["receipt_sha256"] = _digest(canonical(changed))
@@ -625,7 +695,10 @@ def test_nested_a2_success_mutations_are_rejected(tmp_path, mutation):
         )
 
 
-@pytest.mark.parametrize("mutation", ["stage-code", "step", "return-code", "effects", "cleanup"])
+@pytest.mark.parametrize(
+    "mutation",
+    ["stage-code", "step", "return-code", "huge-return-code", "effects", "cleanup", "not-created"],
+)
 def test_impossible_a2_failure_relationship_is_rejected(tmp_path, mutation):
     case = _make_a2_case(tmp_path, mode="nix-failure")
     completed = _run_bootstrap(
@@ -645,10 +718,14 @@ def test_impossible_a2_failure_relationship_is_rejected(tmp_path, mutation):
         changed["subprocess_step"] = "closure-hash"
     elif mutation == "return-code":
         changed["return_code"] = 0
+    elif mutation == "huge-return-code":
+        changed["return_code"] = 10**100
     elif mutation == "effects":
         changed["effects"] = helper._a2_effects(False)
-    else:
+    elif mutation == "cleanup":
         changed["cleanup"] = "failed"
+    else:
+        changed["cleanup"] = "not-created"
     changed.pop("receipt_sha256")
     changed["receipt_sha256"] = _digest(canonical(changed))
     with pytest.raises(helper.RenderHelperError, match="failure envelope"):
@@ -661,7 +738,41 @@ def test_impossible_a2_failure_relationship_is_rejected(tmp_path, mutation):
         )
 
 
-@pytest.mark.parametrize("field", ["a2-receipt", "systemd", "input-path", "input-nar"])
+def test_non_subprocess_a2_tool_bound_failure_is_a_valid_closed_terminal(tmp_path):
+    case = _make_a2_case(tmp_path, mode="nix-failure")
+    completed = _run_bootstrap(
+        case["wire"],
+        a2_authority=case["authority"],
+        scratch_root=case["scratch"],
+    )
+    changed = json.loads(completed.stdout)
+    changed.update(
+        stage="a2-tool",
+        diagnostic_code="BOUND_EXCEEDED",
+        original_stage="a2-tool",
+        original_diagnostic_code="BOUND_EXCEEDED",
+        subprocess_step=None,
+        return_code=None,
+        effects=helper._a2_effects(False),
+    )
+    changed.pop("receipt_sha256")
+    changed["receipt_sha256"] = _digest(canonical(changed))
+    assert (
+        helper.validate_a2_terminal(
+            changed,
+            binding=case["binding"],
+            request=case["request"],
+            tool_descriptor=case["tool_descriptor"],
+            authority=case["authority"],
+        )
+        == changed
+    )
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["a2-receipt", "systemd", "systemd-version", "systemd-version-digest", "systemd-version-bytes", "input-path", "input-nar"],
+)
 def test_a2_validator_rejects_request_authority_cross_binding_mutations(tmp_path, field):
     case = _make_a2_case(tmp_path)
     completed = _run_bootstrap(
@@ -675,6 +786,12 @@ def test_a2_validator_rejects_request_authority_cross_binding_mutations(tmp_path
         authority_values["a2_prerequisite_receipt_sha256"] = "sha256:" + "0" * 64
     elif field == "systemd":
         authority_values["systemd_analyze_sha256"] = "sha256:" + "0" * 64
+    elif field == "systemd-version":
+        authority_values["systemd_analyze_version"] = "systemd 0"
+    elif field == "systemd-version-digest":
+        authority_values["systemd_analyze_version_stdout_sha256"] = "sha256:" + "0" * 64
+    elif field == "systemd-version-bytes":
+        authority_values["systemd_analyze_version_stdout_bytes"] = 1
     elif field == "input-path":
         authority_values["input_path"] = "/nix/store/00000000000000000000000000000000-source"
     else:
@@ -873,6 +990,9 @@ def test_production_a2_authority_cross_binds_both_frozen_prerequisite_receipts()
     assert a2["nixpkgs_input"]["nar_sha256"] == helper.AUTHORIZED_INPUT_NAR_SHA256
     assert a2["systemd_analyze"]["path"] == helper.AUTHORIZED_SYSTEMD_ANALYZE_PATH
     assert a2["systemd_analyze"]["executable_sha256"] == helper.AUTHORIZED_SYSTEMD_ANALYZE_SHA256
+    assert a2["systemd_analyze"]["version_first_line"] == helper.AUTHORIZED_SYSTEMD_ANALYZE_VERSION
+    assert a2["systemd_analyze"]["version_stdout_sha256"] == helper.AUTHORIZED_SYSTEMD_ANALYZE_VERSION_STDOUT_SHA256
+    assert a2["systemd_analyze"]["version_stdout_bytes"] == helper.AUTHORIZED_SYSTEMD_ANALYZE_VERSION_STDOUT_BYTES
     assert helper.PRODUCTION_A2_AUTHORITY.a1_prerequisite_receipt_sha256 == claimed_a1
     assert helper.PRODUCTION_A2_AUTHORITY.a2_prerequisite_receipt_sha256 == claimed_a2
 
