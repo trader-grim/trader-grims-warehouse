@@ -42,6 +42,7 @@ def _evaluation_result(parameters):
         "ssh_sha256": parameters["ssh_sha256"], "known_hosts_sha256": parameters["known_hosts_sha256"],
         "executable_sha256": {"remote_python": DIGEST, "git": DIGEST, "nix": DIGEST, "nix_store": DIGEST, "systemd_analyze": DIGEST},
         "scratch_id": parameters["scratch_id"], "cleanup": "removed", "activate": False,
+        "scratch_root": {"path": "/var/tmp/tgw-reviewed-evaluation", "created_by_attempt": True, "final_state": "removed"},
         "profile_write": False, "home_db_write": False, "system": "x86_64-linux",
         "evaluation_target": "review-egress-systemd-units",
         "evaluated_config_drv": "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-review-units.drv",

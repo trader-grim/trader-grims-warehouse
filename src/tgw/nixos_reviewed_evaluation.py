@@ -276,6 +276,29 @@ def _safe_extract(archive: Path, target: Path, *, expected_root: str, max_files:
         return commit
 
 
+def _prepare_scratch_root(scratch_root: Path, *, expected_uid: int) -> tuple[int, int, bool]:
+    """Open the parent and create only the fixed child when it is absent."""
+    parent = scratch_root.parent
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    created = False
+    try:
+        try:
+            metadata = os.stat(scratch_root.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            os.mkdir(scratch_root.name, mode=0o700, dir_fd=parent_fd)
+            created = True
+            metadata = os.stat(scratch_root.name, dir_fd=parent_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != expected_uid or stat.S_IMODE(metadata.st_mode) != 0o700:
+            raise EvaluationError("scratch root is not root-owned mode 0700")
+        root_fd = os.open(scratch_root.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        return parent_fd, root_fd, created
+    except Exception:
+        if created:
+            os.rmdir(scratch_root.name, dir_fd=parent_fd)
+        os.close(parent_fd)
+        raise
+
+
 def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run, scratch_root: Path = Path("/var/tmp/tgw-reviewed-evaluation"), scratch_uid: int = 0) -> dict[str, Any]:
     header = stream.read(8)
     if len(header) != 8:
@@ -298,12 +321,7 @@ def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run,
     if executable_digests != expected_digests:
         raise EvaluationError("remote evaluation executable digest mismatch")
     timeout = int(bound["max_duration_seconds"])
-    root_stat = scratch_root.lstat()
-    if not stat.S_ISDIR(root_stat.st_mode):
-        raise EvaluationError("scratch root is not a real directory")
-    if root_stat.st_uid != scratch_uid or stat.S_IMODE(root_stat.st_mode) != 0o700:
-        raise EvaluationError("scratch root is not root-owned mode 0700")
-    root_fd = os.open(scratch_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    parent_fd, root_fd, root_created = _prepare_scratch_root(scratch_root, expected_uid=scratch_uid)
     scratch_name = "run-" + secrets.token_hex(16)
     os.mkdir(scratch_name, mode=0o700, dir_fd=root_fd)
     scratch = scratch_root / scratch_name
@@ -393,8 +411,15 @@ def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run,
     finally:
         shutil.rmtree(scratch, ignore_errors=False)
         os.close(root_fd)
+        if root_created:
+            os.rmdir(scratch_root.name, dir_fd=parent_fd)
+        os.close(parent_fd)
     if scratch.exists() or receipt is None:
         raise EvaluationError("scratch cleanup was not verified")
+    receipt["scratch_root"] = {
+        "path": str(scratch_root), "created_by_attempt": root_created,
+        "final_state": "removed" if root_created else "retained-existing",
+    }
     receipt["cleanup"] = "removed"
     receipt["receipt_sha256"] = "sha256:" + sha256(_canonical({key: value for key, value in receipt.items() if key != "evidence"})).hexdigest()
     receipt["evidence"] = ["nixos-evaluation:" + receipt["receipt_sha256"]]

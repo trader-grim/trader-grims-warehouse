@@ -168,6 +168,18 @@ class TypedEffectHandlerRegistry:
             }
             if not isinstance(result, Mapping) or any(result.get(key) != value for key, value in exact.items()):
                 raise EffectHandlerError("reviewed Nix evaluation receipt identity or safety invariant mismatch")
+            scratch_root = result.get("scratch_root")
+            valid_scratch_root = (
+                isinstance(scratch_root, Mapping)
+                and set(scratch_root) == {"path", "created_by_attempt", "final_state"}
+                and scratch_root.get("path") == "/var/tmp/tgw-reviewed-evaluation"
+                and isinstance(scratch_root.get("created_by_attempt"), bool)
+            )
+            if not valid_scratch_root:
+                raise EffectHandlerError("reviewed Nix evaluation scratch-root receipt is invalid")
+            expected_final = "removed" if scratch_root["created_by_attempt"] else "retained-existing"
+            if scratch_root.get("final_state") != expected_final:
+                raise EffectHandlerError("reviewed Nix evaluation scratch-root rollback is invalid")
             expected_executables = {
                 "git": "/run/current-system/sw/bin/git",
                 "nix": "/run/current-system/sw/bin/nix",

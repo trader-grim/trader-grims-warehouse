@@ -129,6 +129,7 @@ def test_remote_helper_executes_only_fixed_offline_steps_and_cleans_scratch(tmp_
     result = execute_packet(packet(request, archive), run=fake_run, scratch_root=scratch, scratch_uid=os.geteuid())
 
     assert result["cleanup"] == "removed" and not list(scratch.iterdir())
+    assert result["scratch_root"] == {"path": str(scratch), "created_by_attempt": False, "final_state": "retained-existing"}
     nix_calls = [call for call in calls if call[0] == EXECUTABLES["nix"] and "--offline" in call]
     assert nix_calls and all(call[1:5] == ["--offline", "--option", "substituters", ""] for call in nix_calls)
     assert all(["--option", "allow-import-from-derivation", "false"] == call[5:8] and "--no-write-lock-file" in call for call in nix_calls)
@@ -198,7 +199,7 @@ def test_remote_helper_rejects_git_control_files_and_scratch_symlink(tmp_path, m
     target.mkdir()
     scratch.rmdir()
     scratch.symlink_to(target, target_is_directory=True)
-    with pytest.raises(EvaluationError, match="not a real directory"):
+    with pytest.raises(EvaluationError, match="root-owned"):
         execute_packet(packet(request, archive), scratch_root=scratch, scratch_uid=os.geteuid())
 
 
@@ -210,6 +211,38 @@ def test_controller_rejects_archive_size_before_transport(tmp_path):
     request["max_archive_bytes"] = "1024"
     with pytest.raises(EvaluationError, match="exceeds"):
         SshReviewedEvaluationProvider(lambda _: archive, known_hosts=tmp_path / "unused")(request)
+
+
+def test_remote_helper_creates_and_rolls_back_exact_scratch_root(tmp_path, monkeypatch):
+    archive = tmp_path / "source.tar"
+    make_archive(archive, commit="d" * 40)
+    request = parameters(sha256(archive.read_bytes()).hexdigest())
+    import tgw.nixos_reviewed_evaluation as provider_module
+
+    request["provider_sha256"] = "sha256:" + sha256(Path(provider_module.__file__).read_bytes()).hexdigest()
+    original_digest = provider_module._digest_file
+    remote_paths = {provider_module.REMOTE_PYTHON, *EXECUTABLES.values()}
+    monkeypatch.setattr(provider_module, "_digest_file", lambda path: "sha256:" + DIGEST if str(path) in remote_paths else original_digest(path))
+    scratch = tmp_path / "tgw-reviewed-evaluation"
+    with pytest.raises(EvaluationError, match="commit identity"):
+        execute_packet(packet(request, archive), scratch_root=scratch, scratch_uid=os.geteuid())
+    assert not scratch.exists()
+
+
+def test_scratch_root_rejects_symlink_or_wrong_mode_without_chmod(tmp_path):
+    from tgw.nixos_reviewed_evaluation import _prepare_scratch_root
+
+    target = tmp_path / "target"
+    target.mkdir(mode=0o700)
+    scratch = tmp_path / "tgw-reviewed-evaluation"
+    scratch.symlink_to(target, target_is_directory=True)
+    with pytest.raises(EvaluationError, match="root-owned"):
+        _prepare_scratch_root(scratch, expected_uid=os.geteuid())
+    scratch.unlink()
+    scratch.mkdir(mode=0o755)
+    with pytest.raises(EvaluationError, match="root-owned"):
+        _prepare_scratch_root(scratch, expected_uid=os.geteuid())
+    assert scratch.stat().st_mode & 0o777 == 0o755
 
 
 @pytest.mark.parametrize("line", [
