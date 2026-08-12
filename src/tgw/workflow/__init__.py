@@ -14,6 +14,7 @@ from .contracts import (
     TreatmentDisposition,
 )
 from .evaluator import evaluate
+from .plan_bridge import CompiledPlanRuntime, ResolutionHold, compile_solution_runtime
 
 __all__ = [
     "EffectClass",
@@ -28,4 +29,7 @@ __all__ = [
     "TreatmentContract",
     "TreatmentDisposition",
     "evaluate",
+    "CompiledPlanRuntime",
+    "ResolutionHold",
+    "compile_solution_runtime",
 ]
