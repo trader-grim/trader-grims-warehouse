@@ -1,0 +1,51 @@
+{
+  "schema": "tgw-observer-render-host-prerequisites/v1",
+  "host": "tgw-prod",
+  "observed_at": "2026-08-12T16:32:47Z",
+  "transport": {
+    "ssh_host": "codex@100.107.99.66",
+    "strict_host_key_checking": true,
+    "known_hosts_sha256": "sha256:2efd6fc4243b15b6d0b16a8da723911614198620cabf31bc822cf12520715cdf"
+  },
+  "system": {
+    "current_generation": "/nix/store/rjpqj1kf2g6i34anklih1dmk4afcdkmj-nixos-system-tgw-prod-25.05.20260102.ac62194",
+    "system_profile": "/nix/store/rjpqj1kf2g6i34anklih1dmk4afcdkmj-nixos-system-tgw-prod-25.05.20260102.ac62194",
+    "reviewed_evaluation_scratch": "absent",
+    "observer_socket": "absent"
+  },
+  "nixpkgs_input": {
+    "node": "nixpkgs",
+    "rev": "ac62194c3917d5f474c1a844b6fd6da2db95077d",
+    "lock_nar_hash": "sha256-16KkgfdYqjaeRGBaYsNrhPRRENs0qzkQVUooNHtoy2w=",
+    "store_path": "/nix/store/3p306srz83h9z9v0ma9xcxb8y8cdxkxj-source",
+    "nar_sha256": "sha256:d7a2a481f758aa369e44605a62c36b84f45110db34ab3910554a28347b68cb6c",
+    "nar_size": 185586944,
+    "references": []
+  },
+  "systemd_analyze": {
+    "path": "/nix/store/kiplbb6yv7rmjf21hf9ky01b9kmgmnqn-systemd-257.10/bin/systemd-analyze",
+    "executable_sha256": "sha256:28c62cb24a08bebc45ce138078d4b3a3d3f47bcbfea3bf92d9b3dddfcd40bce3",
+    "version_first_line": "systemd 257 (257.10)",
+    "version_stdout": "systemd 257 (257.10)\n+PAM +AUDIT -SELINUX +APPARMOR +IMA +IPE +SMACK +SECCOMP +GCRYPT -GNUTLS +OPENSSL +ACL +BLKID +CURL +ELFUTILS +FIDO2 +IDN2 -IDN +IPTC +KMOD +LIBCRYPTSETUP +LIBCRYPTSETUP_PLUGINS +LIBFDISK +PCRE2 +PWQUALITY +P11KIT +QRENCODE +TPM2 +BZIP2 +LZ4 +XZ +ZLIB +ZSTD +BPF_FRAMEWORK -BTF -XKBCOMMON +UTMP -SYSVINIT +LIBARCHIVE\n",
+    "version_stdout_bytes": 338,
+    "version_stdout_sha256": "sha256:17b46079431e2ab064d9664c917614c6a44b8a738f49881bdeb307c7ba70c1c5",
+    "version_stderr_bytes": 0
+  },
+  "observation": {
+    "classification": "READ_ONLY_ZERO_WRITE",
+    "commands": [
+      "readlink -f /run/current-system",
+      "readlink -f /nix/var/nix/profiles/system",
+      "systemd-analyze --version",
+      "nix path-info --json --all",
+      "nix hash convert --hash-algo sha256 --to base16",
+      "nix path-info --json /nix/store/3p306srz83h9z9v0ma9xcxb8y8cdxkxj-source"
+    ],
+    "nix_eval": false,
+    "nix_build": false,
+    "network_fetch": false,
+    "profile_write": false,
+    "deployment": false
+  },
+  "receipt_sha256": "sha256:820e95594e9825d6b10bd8d0dcbf9ba8d0dd3e3656132333351fd3121fce01ad"
+}
