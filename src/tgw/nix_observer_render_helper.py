@@ -40,8 +40,18 @@ PHASE1_FAILURE_SCHEMA = "tgw-nix-observer-render-helper-phase1-failure/v1"
 FAILURE_SCHEMA = "tgw-nix-observer-render-helper-failure/v1"
 HOLD_SCHEMA = "tgw-nix-observer-render-source-hold/v1"
 TEST_MARKER_SCHEMA = "tgw-nix-observer-render-test-marker/v1"
-TOOL_DESCRIPTOR_SCHEMA = "tgw-nix-observer-render-source-tool/v1"
+TOOL_DESCRIPTOR_SCHEMA = "tgw-nix-observer-render-source-tool/v2"
 HOLD_OUTCOME = "SOURCE_VERIFIED_NO_EXECUTOR"
+
+# The prerequisite receipt authorizes this resolved Nix-store Git artifact.
+# Its SHA-256 fixes the complete byte string (and therefore its byte count);
+# the explicit count below was recovered from that exact store artifact.
+AUTHORIZED_TOOL_RECEIPT_SHA256 = "sha256:3a91e1a8824fa3f1d3bf563155d6af7d13f32d46e67f69146f80253aaf79cce6"
+AUTHORIZED_GIT_PATH = "/nix/store/jg9g0gs0x0f69m8mn31syic45bf9lwh9-git-2.50.1/bin/git"
+AUTHORIZED_GIT_SHA256 = "sha256:7caeec432b21191b6227a0150dedcf4b5503d6a4819d8ef7b223fbf1128da5f8"
+AUTHORIZED_GIT_BYTES = 4_373_016
+AUTHORIZED_GIT_OWNER_UID = 0
+AUTHORIZED_GIT_MODE = 0o555
 
 OUTPUTS = (
     "etc/nix-input-observer-launcher.conf",
@@ -126,22 +136,29 @@ except Exception: fail("BAD_REQUEST_JSON",b)
 if canon(request)!=request_raw or not isinstance(request,dict): fail("NONCANONICAL_REQUEST",b)
 try: tool=json.loads(tool_raw)
 except Exception: fail("BAD_TOOL_DESCRIPTOR_JSON",b)
-if canon(tool)!=tool_raw or not isinstance(tool,dict) or set(tool)!={"schema","name","path","sha256","bytes"}: fail("BAD_TOOL_DESCRIPTOR",b)
-if tool.get("schema")!="tgw-nix-observer-render-source-tool/v1" or tool.get("name")!="git": fail("BAD_TOOL_DESCRIPTOR",b)
+tool_fields={"schema","name","request_sha256","authority_receipt_sha256","path","sha256","bytes","owner_uid","mode"}
+if canon(tool)!=tool_raw or not isinstance(tool,dict) or set(tool)!=tool_fields: fail("BAD_TOOL_DESCRIPTOR",b)
+if tool.get("schema")!="tgw-nix-observer-render-source-tool/v2" or tool.get("name")!="git": fail("BAD_TOOL_DESCRIPTOR",b)
 if not isinstance(tool.get("path"),str) or not tool["path"].startswith("/") or "\x00" in tool["path"] or "\n" in tool["path"] or "\r" in tool["path"]: fail("BAD_TOOL_DESCRIPTOR",b)
-if not isinstance(tool.get("sha256"),str) or len(tool["sha256"])!=71 or not tool["sha256"].startswith("sha256:"): fail("BAD_TOOL_DESCRIPTOR",b)
+if any(not isinstance(tool.get(k),str) or len(tool[k])!=71 or not tool[k].startswith("sha256:") for k in ("request_sha256","authority_receipt_sha256","sha256")): fail("BAD_TOOL_DESCRIPTOR",b)
 if not isinstance(tool.get("bytes"),int) or isinstance(tool["bytes"],bool) or not 1<=tool["bytes"]<=67108864: fail("BAD_TOOL_DESCRIPTOR",b)
+if not isinstance(tool.get("owner_uid"),int) or isinstance(tool["owner_uid"],bool) or tool["owner_uid"]<0 or not isinstance(tool.get("mode"),str) or len(tool["mode"])!=4: fail("BAD_TOOL_DESCRIPTOR",b)
 claimed=request.get("request_sha256"); unsigned=dict(request); unsigned.pop("request_sha256",None)
 if claimed!="sha256:"+rh.hex() or hashlib.sha256(canon(unsigned)).digest()!=rh: fail("REQUEST_HASH_MISMATCH",b)
 if request.get("archive_sha256")!="sha256:"+ah.hex(): fail("ARCHIVE_BINDING_MISMATCH",b)
+if tool.get("request_sha256")!=claimed: fail("TOOL_REQUEST_BINDING_MISMATCH",b)
 g={"__name__":"__main__","_BOOTSTRAP_REQUEST_SHA256":"sha256:"+rh.hex(),"_BOOTSTRAP_HELPER_SHA256":"sha256:"+hh.hex(),"_BOOTSTRAP_TOOL_SHA256":"sha256:"+th.hex(),"_BOOTSTRAP_ARCHIVE_SHA256":"sha256:"+ah.hex(),"_BOOTSTRAP_REQUEST_BYTES":rlen,"_BOOTSTRAP_HELPER_BYTES":hlen,"_BOOTSTRAP_TOOL_BYTES":tlen,"_BOOTSTRAP_ARCHIVE_BYTES":alen}
 test_executor=globals().get("_TEST_ONLY_EXECUTOR")
-if test_executor is not None: g["_BOOTSTRAP_DEFER_MAIN"]=True
+test_tool_authority=globals().get("_TEST_ONLY_TOOL_AUTHORITY")
+if test_executor is not None or test_tool_authority is not None: g["_BOOTSTRAP_DEFER_MAIN"]=True
 sys.stdin=io.TextIOWrapper(io.BytesIO(struct.pack("!Q",rlen)+request_raw+struct.pack("!Q",tlen)+tool_raw+archive))
 exec(compile(helper,"<tgw-nix-observer-render-helper>","exec"),g)
-if test_executor is not None:
- value=g["execute_packet"](sys.stdin.buffer,_test_executor=test_executor)
- sys.stdout.buffer.write(g["canonical"](value)); raise SystemExit(0 if value.get("schema")=="tgw-nix-observer-render-test-marker/v1" else 1)
+if test_executor is not None or test_tool_authority is not None:
+ if test_tool_authority is not None: test_tool_authority=g["ToolAuthority"](**test_tool_authority)
+ value=g["execute_packet"](sys.stdin.buffer,_test_executor=test_executor,_test_tool_authority=test_tool_authority)
+ sys.stdout.buffer.write(g["canonical"](value))
+ code=0 if value.get("schema")=="tgw-nix-observer-render-test-marker/v1" else (3 if value.get("outcome")=="SOURCE_VERIFIED_NO_EXECUTOR" else (2 if value.get("outcome")=="AMBIGUOUS" else 1))
+ raise SystemExit(code)
 '''
 
 
@@ -172,6 +189,48 @@ class HeldIdentity:
     mode: int
     mtime_ns: int
     ctime_ns: int
+
+
+@dataclass(frozen=True)
+class ToolAuthority:
+    authority_receipt_sha256: str
+    path: str
+    sha256: str
+    bytes: int
+    owner_uid: int
+    mode: int
+    require_nix_store: bool = True
+    forbid_owner_write: bool = True
+
+
+@dataclass(frozen=True)
+class ToolPathIdentity:
+    device: int
+    inode: int
+    size: int
+    mode: int
+    owner_uid: int
+    owner_gid: int
+    mtime_ns: int
+    ctime_ns: int
+
+
+@dataclass(frozen=True)
+class HeldTool:
+    descriptor: int
+    identity: ToolPathIdentity
+    component_descriptors: tuple[int, ...]
+    component_identities: tuple[ToolPathIdentity, ...]
+
+
+PRODUCTION_GIT_AUTHORITY = ToolAuthority(
+    authority_receipt_sha256=AUTHORIZED_TOOL_RECEIPT_SHA256,
+    path=AUTHORIZED_GIT_PATH,
+    sha256=AUTHORIZED_GIT_SHA256,
+    bytes=AUTHORIZED_GIT_BYTES,
+    owner_uid=AUTHORIZED_GIT_OWNER_UID,
+    mode=AUTHORIZED_GIT_MODE,
+)
 
 
 def canonical(value: Any) -> bytes:
@@ -207,22 +266,105 @@ def _identity(metadata: os.stat_result) -> HeldIdentity:
     )
 
 
-def _open_resolved_regular(path: Path) -> int:
+def _tool_path_identity(metadata: os.stat_result) -> ToolPathIdentity:
+    return ToolPathIdentity(
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+        size=metadata.st_size,
+        mode=metadata.st_mode,
+        owner_uid=metadata.st_uid,
+        owner_gid=metadata.st_gid,
+        mtime_ns=metadata.st_mtime_ns,
+        ctime_ns=metadata.st_ctime_ns,
+    )
+
+
+def _validate_tool_component(
+    metadata: os.stat_result,
+    *,
+    final: bool,
+    authority: ToolAuthority,
+    allow_owner_write: bool = False,
+    allow_group_write: bool = False,
+    require_sticky: bool = False,
+) -> None:
+    expected_kind = stat.S_ISREG if final else stat.S_ISDIR
+    forbidden_writes = 0o002 | (0 if allow_group_write else 0o020) | (0 if allow_owner_write else 0o200)
+    if (
+        not expected_kind(metadata.st_mode)
+        or metadata.st_uid != authority.owner_uid
+        or metadata.st_mode & forbidden_writes
+        or (require_sticky and not metadata.st_mode & stat.S_ISVTX)
+        or (
+            final
+            and (
+                stat.S_IMODE(metadata.st_mode) != authority.mode
+                or (authority.forbid_owner_write and metadata.st_mode & 0o200)
+                or not metadata.st_mode & 0o111
+            )
+        )
+    ):
+        raise RenderHelperError("tool path ownership or mode is mutable", stage="tool", diagnostic_code="IDENTITY_MISMATCH")
+
+
+def _open_resolved_regular(path: Path, *, authority: ToolAuthority) -> HeldTool:
     raw = str(path)
     pure = PurePosixPath(raw)
     if not pure.is_absolute() or pure.as_posix() != raw or any(part in {"", ".", ".."} for part in pure.parts[1:]):
         raise RenderHelperError("tool path is not exact and absolute", stage="tool", diagnostic_code="VALIDATION_REFUSED")
+    if authority.require_nix_store and not re.fullmatch(
+        r"/nix/store/[0-9a-df-np-sv-z]{32}-[A-Za-z0-9+._?=-]+/bin/git", raw
+    ):
+        raise RenderHelperError("tool path is outside the immutable Nix store", stage="tool", diagnostic_code="VALIDATION_REFUSED")
     directory_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    component_descriptors = [directory_fd]
+    component_identities: list[ToolPathIdentity] = []
     try:
+        root_metadata = os.fstat(directory_fd)
+        _validate_tool_component(root_metadata, final=False, authority=authority, allow_owner_write=True)
+        component_identities.append(_tool_path_identity(root_metadata))
+        walked: list[str] = []
         for part in pure.parts[1:-1]:
+            walked.append(part)
             next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd)
-            os.close(directory_fd)
             directory_fd = next_fd
-        return os.open(pure.parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
-    except OSError as exc:
+            component_descriptors.append(directory_fd)
+            metadata = os.fstat(directory_fd)
+            store_root = authority.require_nix_store and walked == ["nix", "store"]
+            immutable_store_member = authority.require_nix_store and len(walked) >= 3
+            _validate_tool_component(
+                metadata,
+                final=False,
+                authority=authority,
+                allow_owner_write=not immutable_store_member,
+                allow_group_write=store_root,
+                require_sticky=store_root and bool(metadata.st_mode & 0o020),
+            )
+            component_identities.append(_tool_path_identity(metadata))
+        descriptor = os.open(pure.parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+        try:
+            metadata = os.fstat(descriptor)
+            _validate_tool_component(
+                metadata,
+                final=True,
+                authority=authority,
+                allow_owner_write=not authority.forbid_owner_write,
+            )
+            return HeldTool(
+                descriptor=descriptor,
+                identity=_tool_path_identity(metadata),
+                component_descriptors=tuple(component_descriptors),
+                component_identities=tuple(component_identities),
+            )
+        except BaseException:
+            os.close(descriptor)
+            raise
+    except (OSError, RenderHelperError) as exc:
+        for component_fd in reversed(component_descriptors):
+            os.close(component_fd)
+        if isinstance(exc, RenderHelperError):
+            raise
         raise RenderHelperError("tool path is not a resolved regular artifact", stage="tool", diagnostic_code="IDENTITY_MISMATCH") from exc
-    finally:
-        os.close(directory_fd)
 
 
 def _read_held(descriptor: int, *, stage: str, max_bytes: int) -> tuple[bytes, HeldIdentity]:
@@ -242,23 +384,74 @@ def _read_held(descriptor: int, *, stage: str, max_bytes: int) -> tuple[bytes, H
     return bytes(content), before
 
 
-def describe_tool(path: Path) -> dict[str, Any]:
-    """Bind an already-resolved regular executable without following symlinks."""
-    descriptor = _open_resolved_regular(path)
+def _expected_tool_descriptor(request_sha256: str, authority: ToolAuthority) -> dict[str, Any]:
+    return {
+        "schema": TOOL_DESCRIPTOR_SCHEMA,
+        "name": "git",
+        "request_sha256": request_sha256,
+        "authority_receipt_sha256": authority.authority_receipt_sha256,
+        "path": authority.path,
+        "sha256": authority.sha256,
+        "bytes": authority.bytes,
+        "owner_uid": authority.owner_uid,
+        "mode": f"{authority.mode:04o}",
+    }
+
+
+def _close_held_tool(tool: HeldTool) -> None:
+    for descriptor in (tool.descriptor, *reversed(tool.component_descriptors)):
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+def describe_tool(
+    request: Mapping[str, Any],
+    *,
+    _test_tool_authority: ToolAuthority | None = None,
+    _production_tool_authority: ToolAuthority = PRODUCTION_GIT_AUTHORITY,
+) -> dict[str, Any]:
+    """Describe only the admitted Git artifact and bind it to one request."""
+    validated_request = _validate_request(dict(request))
+    authority = _production_tool_authority if _test_tool_authority is None else _test_tool_authority
+    held = _open_resolved_regular(Path(authority.path), authority=authority)
     try:
-        raw, identity = _read_held(descriptor, stage="tool", max_bytes=64 * 1024 * 1024)
+        raw, identity = _read_held(held.descriptor, stage="tool", max_bytes=64 * 1024 * 1024)
+        expected = _expected_tool_descriptor(validated_request["request_sha256"], authority)
+        if identity.size != authority.bytes or _sha256(raw) != authority.sha256:
+            raise RenderHelperError("admitted Git artifact identity mismatch", stage="tool", diagnostic_code="IDENTITY_MISMATCH")
+        return expected
     finally:
-        os.close(descriptor)
-    value = {"schema": TOOL_DESCRIPTOR_SCHEMA, "name": "git", "path": str(path), "sha256": _sha256(raw), "bytes": identity.size}
-    return value
+        _close_held_tool(held)
 
 
-def _validate_tool_descriptor(value: Any) -> dict[str, Any]:
+def _validate_tool_descriptor(
+    value: Any,
+    *,
+    request_sha256: str | None = None,
+    authority: ToolAuthority | None = None,
+) -> dict[str, Any]:
     if (
         not isinstance(value, dict)
-        or set(value) != {"schema", "name", "path", "sha256", "bytes"}
+        or set(value)
+        != {
+            "schema",
+            "name",
+            "request_sha256",
+            "authority_receipt_sha256",
+            "path",
+            "sha256",
+            "bytes",
+            "owner_uid",
+            "mode",
+        }
         or value["schema"] != TOOL_DESCRIPTOR_SCHEMA
         or value["name"] != "git"
+        or not isinstance(value["request_sha256"], str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", value["request_sha256"])
+        or not isinstance(value["authority_receipt_sha256"], str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", value["authority_receipt_sha256"])
         or not isinstance(value["path"], str)
         or not PurePosixPath(value["path"]).is_absolute()
         or PurePosixPath(value["path"]).as_posix() != value["path"]
@@ -267,8 +460,16 @@ def _validate_tool_descriptor(value: Any) -> dict[str, Any]:
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", value["sha256"])
         or type(value["bytes"]) is not int
         or not 1 <= value["bytes"] <= 64 * 1024 * 1024
+        or type(value["owner_uid"]) is not int
+        or value["owner_uid"] < 0
+        or not isinstance(value["mode"], str)
+        or not re.fullmatch(r"0[0-7]{3}", value["mode"])
     ):
         raise RenderHelperError("source tool descriptor is invalid", stage="tool", diagnostic_code="VALIDATION_REFUSED")
+    if request_sha256 is not None and value["request_sha256"] != request_sha256:
+        raise RenderHelperError("source tool is not composed with this request", stage="tool", diagnostic_code="IDENTITY_MISMATCH")
+    if authority is not None and value != _expected_tool_descriptor(value["request_sha256"], authority):
+        raise RenderHelperError("source tool is not the admitted Git identity", stage="tool", diagnostic_code="IDENTITY_MISMATCH")
     return dict(value)
 
 
@@ -345,9 +546,20 @@ def _validate_request(value: Any) -> dict[str, Any]:
     return dict(value)
 
 
-def make_prefix(*, helper_source: bytes, request: Mapping[str, Any], tool_descriptor: Mapping[str, Any], archive_raw: bytes) -> bytes:
+def make_prefix(
+    *,
+    helper_source: bytes,
+    request: Mapping[str, Any],
+    tool_descriptor: Mapping[str, Any],
+    archive_raw: bytes,
+    _test_tool_authority: ToolAuthority | None = None,
+    _production_tool_authority: ToolAuthority = PRODUCTION_GIT_AUTHORITY,
+) -> bytes:
     validated = _validate_request(dict(request))
-    tool = _validate_tool_descriptor(dict(tool_descriptor))
+    authority = _production_tool_authority if _test_tool_authority is None else _test_tool_authority
+    tool = _validate_tool_descriptor(
+        dict(tool_descriptor), request_sha256=validated["request_sha256"], authority=authority
+    )
     request_raw = canonical(validated)
     tool_raw = canonical(tool)
     archive_digest = _sha256(archive_raw)
@@ -372,15 +584,37 @@ def make_prefix(*, helper_source: bytes, request: Mapping[str, Any], tool_descri
     )
 
 
-def packet(helper_source: bytes, request: Mapping[str, Any], archive: Path, *, tool_descriptor: Mapping[str, Any]) -> bytes:
-    """Frame one packet from one held archive inode; never digest then reopen."""
+def packet(
+    helper_source: bytes,
+    request: Mapping[str, Any],
+    archive: Path,
+    *,
+    tool_descriptor: Mapping[str, Any] | None = None,
+    _test_tool_authority: ToolAuthority | None = None,
+    _production_tool_authority: ToolAuthority = PRODUCTION_GIT_AUTHORITY,
+) -> bytes:
+    """Frame one packet from held, admitted tool and archive inodes."""
+    authority = _production_tool_authority if _test_tool_authority is None else _test_tool_authority
+    observed_tool = describe_tool(
+        request,
+        _test_tool_authority=_test_tool_authority,
+        _production_tool_authority=_production_tool_authority,
+    )
+    if tool_descriptor is not None and dict(tool_descriptor) != observed_tool:
+        raise RenderHelperError("supplied tool differs from admitted held artifact", stage="tool", diagnostic_code="IDENTITY_MISMATCH")
     archive_fd = os.open(archive, os.O_RDONLY | os.O_NOFOLLOW)
     try:
         archive_raw, _ = _read_held(archive_fd, stage="archive", max_bytes=MAX_ARCHIVE_BYTES)
     finally:
         os.close(archive_fd)
-    tool_raw = canonical(_validate_tool_descriptor(dict(tool_descriptor)))
-    prefix = make_prefix(helper_source=helper_source, request=request, tool_descriptor=tool_descriptor, archive_raw=archive_raw)
+    tool_raw = canonical(observed_tool)
+    prefix = make_prefix(
+        helper_source=helper_source,
+        request=request,
+        tool_descriptor=observed_tool,
+        archive_raw=archive_raw,
+        _test_tool_authority=authority,
+    )
     return prefix + helper_source + canonical(dict(request)) + tool_raw + archive_raw
 
 
@@ -459,6 +693,7 @@ def validate_phase1_failure(value: Any, *, binding: WireBinding) -> dict[str, An
             "NONCANONICAL_REQUEST",
             "REQUEST_HASH_MISMATCH",
             "ARCHIVE_BINDING_MISMATCH",
+            "TOOL_REQUEST_BINDING_MISMATCH",
         }
         or any(value[key] != expected for key, expected in expected_binding.items())
         or value["cleanup"] != "not-created"
@@ -476,10 +711,13 @@ def validate_terminal(
     request: Mapping[str, Any],
     tool_descriptor: Mapping[str, Any],
     allow_test_marker: bool = False,
+    _test_tool_authority: ToolAuthority | None = None,
+    _production_tool_authority: ToolAuthority = PRODUCTION_GIT_AUTHORITY,
 ) -> dict[str, Any]:
     """Validate a post-bootstrap terminal without treating the A1 hold as success."""
     validated = _validate_request(dict(request))
-    tool = _validate_tool_descriptor(dict(tool_descriptor))
+    authority = _production_tool_authority if _test_tool_authority is None else _test_tool_authority
+    tool = _validate_tool_descriptor(dict(tool_descriptor), request_sha256=validated["request_sha256"])
     if not isinstance(value, dict) or len(canonical(value)) > 16 * 1024:
         raise RenderHelperError("helper terminal is absent or oversized", stage="request", diagnostic_code="VALIDATION_REFUSED")
     unsigned = dict(value)
@@ -513,6 +751,7 @@ def validate_terminal(
         raise RenderHelperError("helper terminal identity binding is invalid", stage="request", diagnostic_code="IDENTITY_MISMATCH")
     schema = value.get("schema")
     if schema == HOLD_SCHEMA:
+        _validate_tool_descriptor(tool, request_sha256=validated["request_sha256"], authority=authority)
         fields = common | {"schema", "outcome", "stage", "verified_source_files", "executor", "receipt_sha256"}
         expected_files = {path: validated[field] for field, path in SOURCE_DIGEST_PATHS.items()}
         if (
@@ -556,6 +795,7 @@ def validate_terminal(
         if not valid_state:
             raise RenderHelperError("helper failure lifecycle is contradictory", stage="request", diagnostic_code="VALIDATION_REFUSED")
     elif schema == TEST_MARKER_SCHEMA and allow_test_marker:
+        _validate_tool_descriptor(tool, request_sha256=validated["request_sha256"], authority=authority)
         fields = common | {"schema", "outcome", "marker", "receipt_sha256"}
         if (
             set(value) != fields
@@ -587,24 +827,34 @@ def _binding_from_globals() -> WireBinding:
     return WireBinding(**values)
 
 
-def _open_bound_tool(tool: Mapping[str, Any], binding: WireBinding) -> tuple[int, HeldIdentity]:
+def _open_bound_tool(tool: Mapping[str, Any], binding: WireBinding, *, authority: ToolAuthority) -> HeldTool:
     raw_descriptor = canonical(dict(tool))
     if len(raw_descriptor) != binding.tool_descriptor_bytes or _sha256(raw_descriptor) != binding.tool_descriptor_sha256:
         raise RenderHelperError("source tool descriptor binding mismatch", stage="tool", diagnostic_code="IDENTITY_MISMATCH")
-    descriptor = _open_resolved_regular(Path(tool["path"]))
+    expected = _expected_tool_descriptor(binding.request_sha256, authority)
+    if dict(tool) != expected:
+        raise RenderHelperError("source tool is not authorized by the fixed host receipt", stage="tool", diagnostic_code="IDENTITY_MISMATCH")
+    held = _open_resolved_regular(Path(tool["path"]), authority=authority)
     try:
-        raw, identity = _read_held(descriptor, stage="tool", max_bytes=64 * 1024 * 1024)
+        raw, identity = _read_held(held.descriptor, stage="tool", max_bytes=64 * 1024 * 1024)
         if identity.size != tool["bytes"] or _sha256(raw) != tool["sha256"]:
             raise RenderHelperError("fixed Git executable identity mismatch", stage="tool", diagnostic_code="IDENTITY_MISMATCH")
-        return descriptor, identity
+        return held
     except BaseException:
-        os.close(descriptor)
+        _close_held_tool(held)
         raise
 
 
-def _assert_bound_tool_unchanged(descriptor: int, expected: HeldIdentity, tool: Mapping[str, Any]) -> None:
-    observed, identity = _read_held(descriptor, stage="tool", max_bytes=64 * 1024 * 1024)
-    if identity != expected or identity.size != tool["bytes"] or _sha256(observed) != tool["sha256"]:
+def _assert_bound_tool_unchanged(held: HeldTool, tool: Mapping[str, Any]) -> None:
+    observed, identity = _read_held(held.descriptor, stage="tool", max_bytes=64 * 1024 * 1024)
+    current_tool_identity = _tool_path_identity(os.fstat(held.descriptor))
+    current_components = tuple(_tool_path_identity(os.fstat(fd)) for fd in held.component_descriptors)
+    if (
+        current_tool_identity != held.identity
+        or current_components != held.component_identities
+        or identity.size != tool["bytes"]
+        or _sha256(observed) != tool["sha256"]
+    ):
         raise RenderHelperError("held Git executable changed during use", stage="tool", diagnostic_code="IDENTITY_MISMATCH")
 
 
@@ -822,13 +1072,16 @@ def execute_packet(
     scratch_uid: int | None = None,
     cleanup_tree: Callable[..., None] = shutil.rmtree,
     _test_executor: Callable[[Path, Mapping[str, Any]], str] | None = None,
+    _test_tool_authority: ToolAuthority | None = None,
+    _production_tool_authority: ToolAuthority = PRODUCTION_GIT_AUTHORITY,
 ) -> dict[str, Any]:
     """Verify source and return only a post-cleanup failure, hold, or test marker."""
     bound = binding or _binding_from_globals()
+    authority = _production_tool_authority if _test_tool_authority is None else _test_tool_authority
     request: dict[str, Any] = {}
     tool: dict[str, Any] = {}
-    git_fd = parent_fd = root_fd = -1
-    git_identity: HeldIdentity | None = None
+    parent_fd = root_fd = -1
+    held_git: HeldTool | None = None
     root_created = False
     run_path: Path | None = None
     original_stage = "request"
@@ -854,18 +1107,19 @@ def execute_packet(
         if len(tool_raw) != bound.tool_descriptor_bytes or _sha256(tool_raw) != bound.tool_descriptor_sha256:
             raise RenderHelperError("helper tool descriptor is truncated or mismatched", stage="tool", diagnostic_code="IDENTITY_MISMATCH")
         try:
-            tool = _validate_tool_descriptor(json.loads(tool_raw))
+            tool = _validate_tool_descriptor(json.loads(tool_raw), request_sha256=bound.request_sha256)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise RenderHelperError("helper tool descriptor JSON is invalid", stage="tool", diagnostic_code="VALIDATION_REFUSED") from exc
         if canonical(tool) != tool_raw:
             raise RenderHelperError("helper tool descriptor is not canonical", stage="tool", diagnostic_code="VALIDATION_REFUSED")
+        _validate_tool_descriptor(tool, request_sha256=bound.request_sha256, authority=authority)
         request = _validate_request(request)
         if canonical(request) != request_raw or request["request_sha256"] != bound.request_sha256 or request["archive_sha256"] != bound.archive_sha256:
             raise RenderHelperError("helper request/bootstrap binding mismatch", stage="request", diagnostic_code="IDENTITY_MISMATCH")
         helper_hash = globals().get("_BOOTSTRAP_HELPER_SHA256", bound.helper_sha256)
         if helper_hash != bound.helper_sha256:
             raise RenderHelperError("helper/bootstrap source identity mismatch", stage="request", diagnostic_code="IDENTITY_MISMATCH")
-        git_fd, git_identity = _open_bound_tool(tool, bound)
+        held_git = _open_bound_tool(tool, bound, authority=authority)
         parent_fd, root_fd, root_created = _prepare_scratch_root(scratch_root, expected_uid=os.geteuid() if scratch_uid is None else scratch_uid)
         run_name = "run-" + secrets.token_hex(16)
         run_path = scratch_root / run_name
@@ -892,8 +1146,8 @@ def execute_packet(
         if "sha256:" + archive_hash.hexdigest() != bound.archive_sha256:
             raise RenderHelperError("helper archive digest mismatch", stage="archive", diagnostic_code="IDENTITY_MISMATCH")
         source = _safe_extract(archive, run_path / "unpacked", request)
-        verified = _verify_source(source, request=request, git_fd=git_fd)
-        _assert_bound_tool_unchanged(git_fd, git_identity, tool)
+        verified = _verify_source(source, request=request, git_fd=held_git.descriptor)
+        _assert_bound_tool_unchanged(held_git, tool)
         if _test_executor is not None:
             marker = _test_executor(source, request)
             if not isinstance(marker, str) or not 1 <= len(marker.encode()) <= 256:
@@ -925,7 +1179,10 @@ def execute_packet(
     except BaseException:
         cleanup = "failed"
     finally:
-        for descriptor in (git_fd, root_fd, parent_fd):
+        if held_git is not None:
+            _close_held_tool(held_git)
+            held_git = None
+        for descriptor in (root_fd, parent_fd):
             if descriptor >= 0:
                 try:
                     os.close(descriptor)
