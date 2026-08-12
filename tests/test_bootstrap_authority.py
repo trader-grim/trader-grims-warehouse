@@ -1,4 +1,5 @@
 import json
+import multiprocessing
 import os
 import threading
 from datetime import datetime, timedelta, timezone
@@ -115,6 +116,10 @@ def test_exact_grant_is_consumed_once_to_immutable_bound_receipt(tmp_path):
     assert receipt["candidate_commit"] == "b" * 40
     assert receipt["receipt_id"].startswith("bootstrap-consumption:sha256:")
     assert path.stat().st_mode & 0o777 == 0o400
+    lock_path = tmp_path / f".{path.name}.lock"
+    assert lock_path.is_file()
+    assert lock_path.stat().st_mode & 0o777 == 0o400
+    assert lock_path.stat().st_size == 0
     assert authority.state is BootstrapAuthorityState.SPENT
     with pytest.raises(ValueError, match="already consumed"):
         authority.consume(grant.grant_id, effect_hash=grant.effect.effect_hash, generation=grant.effect.generation, now=now + timedelta(seconds=1))
@@ -374,6 +379,200 @@ def test_concurrent_consume_serializes_to_one_success_and_one_spent_refusal(tmp_
     assert authority.state is BootstrapAuthorityState.SPENT
 
 
+def test_two_instances_wait_for_stalled_writer_then_validate_durable_spent_receipt(tmp_path):
+    grant = _grant()
+    path = tmp_path / "two-instance-stalled.json"
+    writer = BootstrapSessionAuthority(
+        grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid()
+    )
+    loser = BootstrapSessionAuthority(
+        grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid()
+    )
+    writer_entered = threading.Event()
+    release_writer = threading.Event()
+    loser_observed_receipt = threading.Event()
+    loser_done = threading.Event()
+    outcomes: list[tuple[str, str]] = []
+    real_write_all = writer._write_all
+    real_existing_status = loser._existing_receipt_status
+
+    def stalled_write(fd, data):
+        writer_entered.set()
+        assert release_writer.wait(timeout=5)
+        real_write_all(fd, data)
+
+    def observed_status():
+        loser_observed_receipt.set()
+        return real_existing_status()
+
+    writer._write_all = stalled_write
+    loser._existing_receipt_status = observed_status
+
+    def invoke(authority, label):
+        try:
+            authority.consume(
+                grant.grant_id,
+                effect_hash=grant.effect.effect_hash,
+                generation=grant.effect.generation,
+                now=datetime(2029, 1, 1, tzinfo=timezone.utc),
+            )
+            outcomes.append((label, "success"))
+        except Exception as exc:  # noqa: BLE001 - exact cross-instance result asserted below
+            outcomes.append((label, type(exc).__name__ + ":" + str(exc)))
+        if label == "loser":
+            loser_done.set()
+
+    writer_thread = threading.Thread(target=invoke, args=(writer, "writer"))
+    loser_thread = threading.Thread(target=invoke, args=(loser, "loser"))
+    writer_thread.start()
+    assert writer_entered.wait(timeout=5)
+    loser_thread.start()
+    assert not loser_observed_receipt.wait(timeout=0.1)
+    assert not loser_done.is_set()
+    release_writer.set()
+    writer_thread.join(timeout=5)
+    loser_thread.join(timeout=5)
+
+    assert outcomes == [("writer", "success"), ("loser", "ValueError:bootstrap grant is already consumed")]
+    assert writer.state is BootstrapAuthorityState.SPENT
+    assert loser.state is BootstrapAuthorityState.SPENT
+    durable_receipt_id = json.loads(path.read_text())["receipt_id"]
+    assert durable_receipt_id.startswith("bootstrap-consumption:sha256:")
+    assert writer._spent_receipt_id == durable_receipt_id
+    assert loser._spent_receipt_id == durable_receipt_id
+
+
+@pytest.mark.skipif("fork" not in multiprocessing.get_all_start_methods(), reason="fork is unavailable")
+def test_two_processes_same_receipt_produce_one_success_and_one_spent_replay(tmp_path):
+    grant = _grant()
+    path = tmp_path / "multiprocess.json"
+    context = multiprocessing.get_context("fork")
+    barrier = context.Barrier(3)
+    results = context.Queue()
+
+    def consume_in_child():
+        authority = BootstrapSessionAuthority(
+            grant,
+            receipt_path=path,
+            current_plan_commit=grant.plan_commit,
+            trusted_uid=os.geteuid(),
+        )
+        barrier.wait()
+        try:
+            authority.consume(
+                grant.grant_id,
+                effect_hash=grant.effect.effect_hash,
+                generation=grant.effect.generation,
+                now=datetime(2029, 1, 1, tzinfo=timezone.utc),
+            )
+            results.put(("success", authority.state.value))
+        except Exception as exc:  # noqa: BLE001 - exact process result asserted below
+            results.put((type(exc).__name__, str(exc), authority.state.value))
+
+    processes = [context.Process(target=consume_in_child) for _ in range(2)]
+    for process in processes:
+        process.start()
+    barrier.wait()
+    for process in processes:
+        process.join(timeout=10)
+
+    assert all(process.exitcode == 0 for process in processes)
+    observed = sorted(results.get(timeout=2) for _ in processes)
+    assert observed == [
+        ("ValueError", "bootstrap grant is already consumed", "SPENT"),
+        ("success", "SPENT"),
+    ]
+    assert json.loads(path.read_text())["receipt_id"].startswith("bootstrap-consumption:sha256:")
+
+
+@pytest.mark.parametrize("attack", ["symlink", "mode", "content"])
+def test_unsafe_lock_artifact_is_terminal_ambiguity_before_receipt_creation(tmp_path, attack):
+    grant = _grant()
+    path = tmp_path / f"unsafe-lock-{attack}.json"
+    lock_path = tmp_path / f".{path.name}.lock"
+    if attack == "symlink":
+        target = tmp_path / "lock-target"
+        target.touch(mode=0o400)
+        lock_path.symlink_to(target)
+    else:
+        lock_path.write_bytes(b"unexpected" if attack == "content" else b"")
+        lock_path.chmod(0o600 if attack == "mode" else 0o400)
+    authority = BootstrapSessionAuthority(
+        grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid()
+    )
+    arguments = {
+        "request_id": grant.grant_id,
+        "effect_hash": grant.effect.effect_hash,
+        "generation": grant.effect.generation,
+        "now": datetime(2029, 1, 1, tzinfo=timezone.utc),
+    }
+    with pytest.raises(BootstrapConsumptionAmbiguous) as first:
+        authority.consume(**arguments)
+    with pytest.raises(BootstrapConsumptionAmbiguous) as retry:
+        authority.consume(**arguments)
+    assert authority.state is BootstrapAuthorityState.AMBIGUOUS
+    assert retry.value.evidence == first.value.evidence
+    assert not path.exists()
+
+
+def test_lock_owner_mismatch_is_terminal_ambiguity_before_receipt_creation(tmp_path, monkeypatch):
+    grant = _grant()
+    path = tmp_path / "lock-owner.json"
+    authority = BootstrapSessionAuthority(
+        grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid()
+    )
+    real_validate = authority._validate_lock_artifact
+
+    def reject_owner(lock_fd):
+        real_validate(lock_fd)
+        raise OSError("injected lock owner mismatch")
+
+    monkeypatch.setattr(authority, "_validate_lock_artifact", reject_owner)
+    with pytest.raises(BootstrapConsumptionAmbiguous, match="persistence is ambiguous"):
+        authority.consume(
+            grant.grant_id,
+            effect_hash=grant.effect.effect_hash,
+            generation=grant.effect.generation,
+            now=datetime(2029, 1, 1, tzinfo=timezone.utc),
+        )
+    assert authority.state is BootstrapAuthorityState.AMBIGUOUS
+    assert not path.exists()
+
+
+def test_lock_reference_replacement_after_flock_is_terminal_ambiguity(tmp_path, monkeypatch):
+    grant = _grant()
+    path = tmp_path / "lock-replaced.json"
+    authority = BootstrapSessionAuthority(
+        grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid()
+    )
+    lock_path = tmp_path / authority._lock_name
+    replacement = tmp_path / "replacement-lock"
+    replacement.touch(mode=0o400)
+    real_flock = authority_module.fcntl.flock
+    replaced = False
+
+    def replace_after_acquire(fd, operation):
+        nonlocal replaced
+        result = real_flock(fd, operation)
+        if operation == authority_module.fcntl.LOCK_EX and not replaced:
+            lock_path.unlink()
+            replacement.replace(lock_path)
+            replaced = True
+        return result
+
+    monkeypatch.setattr(authority_module.fcntl, "flock", replace_after_acquire)
+    with pytest.raises(BootstrapConsumptionAmbiguous):
+        authority.consume(
+            grant.grant_id,
+            effect_hash=grant.effect.effect_hash,
+            generation=grant.effect.generation,
+            now=datetime(2029, 1, 1, tzinfo=timezone.utc),
+        )
+    assert replaced
+    assert authority.state is BootstrapAuthorityState.AMBIGUOUS
+    assert not path.exists()
+
+
 def test_precreated_invalid_receipt_makes_authority_terminally_ambiguous(tmp_path):
     grant = _grant()
     path = tmp_path / "precreated.json"
@@ -410,7 +609,7 @@ def test_unlink_during_directory_fsync_cannot_return_consumption_success(tmp_pat
     def unlink_on_directory_fsync(fd):
         nonlocal removed
         real_fsync(fd)
-        if fd == authority._directory_fd and not removed:
+        if fd == authority._directory_fd and path.exists() and not removed:
             path.unlink()
             removed = True
 
@@ -444,7 +643,7 @@ def test_replace_or_symlink_during_directory_fsync_cannot_return_success(tmp_pat
     def attack_on_directory_fsync(fd):
         nonlocal attacked
         real_fsync(fd)
-        if fd == authority._directory_fd and not attacked:
+        if fd == authority._directory_fd and path.exists() and not attacked:
             path.unlink()
             if attack == "replace":
                 replacement.replace(path)

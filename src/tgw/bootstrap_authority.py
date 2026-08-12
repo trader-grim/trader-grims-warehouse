@@ -7,6 +7,7 @@ receipt with O_EXCL before an effect provider can run.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import stat
@@ -102,6 +103,9 @@ class BootstrapSessionAuthority:
             raise ValueError("bootstrap grant is bound to a different Plan commit")
         if not self.receipt_path.is_absolute() or self.receipt_path.name in {"", ".", ".."}:
             raise ValueError("bootstrap receipt path is invalid")
+        if len(self.receipt_path.name.encode()) > 200:
+            raise ValueError("bootstrap receipt filename exceeds its exact bound")
+        self._lock_name = f".{self.receipt_path.name}.lock"
         try:
             named = self.receipt_path.parent.lstat()
         except OSError as exc:
@@ -207,11 +211,11 @@ class BootstrapSessionAuthority:
                 cause=self._ambiguity_cause,
             )
 
-    def _existing_is_valid(self) -> bool:
+    def _existing_receipt_status(self) -> str | bool | None:
         try:
             fd = os.open(self.receipt_path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=self._directory_fd)
         except FileNotFoundError:
-            return False
+            return None
         try:
             metadata = os.fstat(fd)
             content = bytearray()
@@ -263,12 +267,68 @@ class BootstrapSessionAuthority:
             "generation": self.grant.effect.generation,
             "retirement_condition": self.grant.retirement_condition,
         }
-        return (
+        valid = (
             all(unsigned.get(key) == value for key, value in expected.items())
             and isinstance(unsigned.get("consumed_at"), str)
             and receipt_id == _digest("bootstrap-consumption", unsigned)
             and content == _canonical(receipt) + b"\n"
         )
+        return str(receipt_id) if valid else False
+
+    def _validate_lock_artifact(self, lock_fd: int) -> None:
+        held = os.fstat(lock_fd)
+        named_fd = os.open(self._lock_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=self._directory_fd)
+        try:
+            named = os.fstat(named_fd)
+        finally:
+            os.close(named_fd)
+        if (
+            not stat.S_ISREG(held.st_mode)
+            or not stat.S_ISREG(named.st_mode)
+            or held.st_uid != self._root_identity[2]
+            or named.st_uid != self._root_identity[2]
+            or stat.S_IMODE(held.st_mode) != 0o400
+            or stat.S_IMODE(named.st_mode) != 0o400
+            or held.st_size != 0
+            or named.st_size != 0
+            or (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino)
+        ):
+            raise OSError("bootstrap consumption lock artifact identity differs")
+
+    def _acquire_filesystem_lock(self, receipt: Mapping[str, Any]) -> int:
+        try:
+            self._revalidate_root()
+            lock_fd = os.open(
+                self._lock_name,
+                os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW,
+                0o400,
+                dir_fd=self._directory_fd,
+            )
+        except Exception as exc:
+            raise self._mark_ambiguous(receipt, "lock-open-unavailable", exc) from exc
+        try:
+            self._validate_lock_artifact(lock_fd)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            self._revalidate_root()
+            self._validate_lock_artifact(lock_fd)
+            os.fsync(lock_fd)
+            os.fsync(self._directory_fd)
+            self._revalidate_root()
+            self._validate_lock_artifact(lock_fd)
+        except Exception as exc:
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+            raise self._mark_ambiguous(receipt, "lock-not-trusted-or-acquired", exc) from exc
+        return lock_fd
+
+    def _release_filesystem_lock(self, lock_fd: int, receipt: Mapping[str, Any]) -> None:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+        except Exception as exc:
+            raise self._mark_ambiguous(receipt, "lock-release-unverifiable", exc) from exc
 
     @staticmethod
     def _read_exact(fd: int, expected_size: int) -> bytes:
@@ -351,10 +411,29 @@ class BootstrapSessionAuthority:
         }
         receipt["receipt_id"] = _digest("bootstrap-consumption", receipt)
         data = _canonical(receipt) + b"\n"
+        lock_fd = self._acquire_filesystem_lock(receipt)
         try:
-            self._revalidate_root()
+            return self._consume_with_filesystem_lock(receipt, data)
+        finally:
+            self._release_filesystem_lock(lock_fd, receipt)
+
+    def _consume_with_filesystem_lock(
+        self, receipt: Mapping[str, Any], data: bytes
+    ) -> Mapping[str, Any]:
+        try:
+            existing_status = self._existing_receipt_status()
         except Exception as exc:
-            raise self._mark_ambiguous(receipt, "root-not-durably-verifiable", exc) from exc
+            raise self._mark_ambiguous(receipt, "existing-unobservable-after-lock", exc) from exc
+        if isinstance(existing_status, str):
+            self._spent_receipt_id = existing_status
+            self._state = BootstrapAuthorityState.SPENT
+            raise ValueError("bootstrap grant is already consumed")
+        if existing_status is False:
+            raise self._mark_ambiguous(
+                receipt,
+                "existing-invalid-or-partial-after-lock",
+                OSError("bootstrap consumption receipt is invalid after lock acquisition"),
+            )
         try:
             fd = os.open(
                 self.receipt_path.name,
@@ -364,10 +443,11 @@ class BootstrapSessionAuthority:
             )
         except FileExistsError as exc:
             try:
-                existing_valid = self._existing_is_valid()
+                existing_status = self._existing_receipt_status()
             except Exception as existing_exc:
                 raise self._mark_ambiguous(receipt, "existing-unobservable", existing_exc) from existing_exc
-            if existing_valid:
+            if isinstance(existing_status, str):
+                self._spent_receipt_id = existing_status
                 self._state = BootstrapAuthorityState.SPENT
                 raise ValueError("bootstrap grant is already consumed") from exc
             raise self._mark_ambiguous(receipt, "existing-invalid-or-partial", exc) from exc
