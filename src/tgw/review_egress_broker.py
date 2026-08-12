@@ -116,6 +116,7 @@ def verify_network_attestation(value: Mapping[str, Any], policy: ReviewEgressPol
         "broker_starttime",
         "broker_exe",
         "broker_socket",
+        "identity",
         "probes",
     }:
         raise BrokerError("kernel evidence is incomplete")
@@ -129,6 +130,7 @@ def verify_network_attestation(value: Mapping[str, Any], policy: ReviewEgressPol
             isinstance(evidence[key], str) and evidence[key]
             for key in ("namespace_readback", "address", "link", "route", "ruleset", "counters", "broker_process", "broker_starttime", "broker_exe", "broker_socket")
         )
+        or not isinstance(evidence["identity"], Mapping)
         or not value["nonce"]
     ):
         raise BrokerError("network kernel identity is incomplete")
@@ -290,7 +292,7 @@ async def serve(policy: ReviewEgressPolicy, bind_host: str, bind_port: int, rece
                 "run_id": policy.run_id,
                 "policy_hash": policy.policy_hash,
                 "attestation_signature": attestation["signature"],
-                "broker_process": "|".join(attestation["kernel_evidence"][key] for key in ("broker_process", "broker_starttime", "broker_exe", "broker_socket")),
+                "broker_identity": attestation["kernel_evidence"]["identity"],
                 "broker_bind": {"host": bind_host, "port": bind_port},
             }
             with ready_path.open("x") as output:

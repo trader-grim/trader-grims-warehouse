@@ -8,25 +8,28 @@ from tgw.review_broker_supervisor import BrokerSupervisorError, run_with_broker
 
 
 class Process:
-    def __init__(self, receipt, ready, emit=True, policy_hash="sha256:policy"):
+    def __init__(self, receipt, ready, emit=True, policy_hash="sha256:policy", mutate=None):
         self.receipt, self.emit = receipt, emit
         self.terminated = False
         self.pid = 123
-        self.ready, self.policy_hash = ready, policy_hash
+        self.ready, self.policy_hash, self.mutate = ready, policy_hash, mutate
 
     def start(self):
-        self.ready.write_text(
-            json.dumps(
-                {
+        value = {
                     "schema": "tgw-review-egress-ready/v1",
                     "run_id": "run-1",
                     "policy_hash": self.policy_hash,
                     "attestation_signature": "ed25519:x",
-                    "broker_process": "pid=123 start=1 exe=sha256:x socket=inode:9 169.254.1.1:18443 uid=972",
+                    "broker_identity": {
+                        "pid": 123, "uid": 972, "cgroup": "tgw-review-egress@run-1.service", "starttime": 42,
+                        "exe_sha256": "sha256:" + "a" * 64,
+                        "socket": {"pid": 123, "uid": 972, "inode": 9, "local_ip": "169.254.1.1", "local_port": 18443, "state": "LISTEN"},
+                    },
                     "broker_bind": {"host": "169.254.1.1", "port": 18443},
                 }
-            )
-        )
+        if self.mutate:
+            self.mutate(value)
+        self.ready.write_text(json.dumps(value))
         return self
 
     def poll(self):
@@ -88,4 +91,25 @@ def test_wrong_policy_readiness_never_starts_provider(tmp_path):
     provider = Mock()
     with pytest.raises(BrokerSupervisorError, match="not bound"):
         run_with_broker(["broker"], provider, receipt, ready_path=ready, expected_run_id="run-1", expected_policy_hash="sha256:policy", spawn=lambda *a, **k: process.start(), stop_timeout=0.1)
+    provider.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda v: v["broker_identity"].update(pid=312),
+        lambda v: v["broker_identity"].update(uid=1972),
+        lambda v: v["broker_identity"].update(starttime=0),
+        lambda v: v["broker_identity"]["socket"].update(pid=312),
+        lambda v: v["broker_identity"]["socket"].update(uid=1972),
+        lambda v: v["broker_identity"]["socket"].update(inode=0),
+        lambda v: v["broker_identity"]["socket"].update(local_ip="169.254.1.10"),
+    ],
+)
+def test_collision_stale_and_swapped_identity_records_fail_closed(tmp_path, mutate):
+    receipt, ready = tmp_path / "egress.json", tmp_path / "ready.json"
+    process = Process(receipt, ready, mutate=mutate)
+    provider = Mock()
+    with pytest.raises(BrokerSupervisorError, match="ownership mismatch"):
+        run_with_broker(["broker"], provider, receipt, ready, "run-1", "sha256:policy", spawn=lambda *a, **k: process.start(), stop_timeout=0.1)
     provider.assert_not_called()

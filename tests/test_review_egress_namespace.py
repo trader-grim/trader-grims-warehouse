@@ -1,3 +1,4 @@
+import json
 import subprocess
 
 import pytest
@@ -94,23 +95,22 @@ def test_privileged_kernel_attestation_derives_live_evidence_and_is_asymmetrical
         positive = str(topology.broker_port) in argv
         if "nc" in argv:
             return subprocess.CompletedProcess(argv, 0 if positive else 1, "", "")
-        output = " ".join(
-            (
-                topology.namespace,
-                topology.peer_address.split("/")[0],
-                topology.host_if,
-                topology.host_address.split("/")[0],
-                "973",
-                str(topology.broker_port),
-                f"tgw_review_{topology.run_id}",
-                "123",
-                "972",
-                f"tgw-review-egress@{topology.run_id}.service",
-                "a" * 64,
-                "uid:972",
-                "ino:9",
-            )
-        )
+        key = " ".join(argv)
+        outputs = {
+            "ip netns list-id": topology.namespace,
+            f"ip netns exec {topology.namespace} ip -j address show": json.dumps([{"ifname": topology.peer_if, "address": topology.peer_address}]),
+            f"ip -j link show {topology.host_if}": json.dumps([{"ifname": topology.host_if, "operstate": "UP"}]),
+            f"ip netns exec {topology.namespace} ip -j route show": json.dumps([{"dst": "default", "gateway": topology.host_address.split('/')[0], "dev": topology.peer_if}]),
+            f"ip netns exec {topology.namespace} nft -j list ruleset": json.dumps([{"worker_uid": 973, "broker_uid": 972, "broker_port": topology.broker_port, "policy": "drop"}]),
+            f"nft -j list table inet tgw_review_{topology.run_id}": json.dumps([{"table": f"tgw_review_{topology.run_id}", "family": "inet"}]),
+            "ps --no-headers -o pid=,uid=,cgroup= -p 123": f"123 972 tgw-review-egress@{topology.run_id}.service",
+            "awk {print $22} /proc/123/stat": "42",
+            "sha256sum /proc/123/exe": "a" * 64 + " /proc/123/exe",
+            f"ip netns exec {topology.namespace} tgw-review-socket-readback 123 {topology.broker_port}": (
+                f"LISTEN pid=123 uid=972 inode=9 local={topology.host_address.split('/')[0]}:{topology.broker_port}"
+            ),
+        }
+        output = outputs[key]
         return subprocess.CompletedProcess(argv, 0, output, "")
 
     attestation = collect_kernel_attestation(
@@ -137,3 +137,57 @@ def test_privileged_kernel_attestation_derives_live_evidence_and_is_asymmetrical
             expected_runtime_sha256="sha256:" + "a" * 64,
             invoke=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, "", "failed"),
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("broker_process", {"pid": 312, "uid": 972, "cgroup": "tgw-review-egress@abcdef123456.service"}),
+        ("broker_process", {"pid": 123, "uid": 1972, "cgroup": "tgw-review-egress@abcdef123456.service"}),
+        ("broker_socket", [{"pid": 312, "uid": 972, "inode": 9, "local_ip": "169.254.191.1", "local_port": 18443, "state": "LISTEN"}]),
+        ("broker_socket", [{"pid": 123, "uid": 1972, "inode": 9, "local_ip": "169.254.191.1", "local_port": 18443, "state": "LISTEN"}]),
+    ],
+)
+def test_typed_identity_parser_rejects_pid_uid_collisions(field, replacement):
+    from tgw.review_egress_namespace import parse_live_identity
+
+    topology = Topology.for_run("abcdef123456")
+    evidence = {
+        "namespace_readback": topology.namespace,
+        "address": json.dumps([{"ifname": topology.peer_if, "address": topology.peer_address}]),
+        "link": json.dumps([{"ifname": topology.host_if, "operstate": "UP"}]),
+        "route": json.dumps([{"dst": "default", "gateway": topology.host_address.split('/')[0], "dev": topology.peer_if}]),
+        "ruleset": json.dumps([{"worker_uid": 973, "broker_uid": 972, "broker_port": 18443, "policy": "drop"}]),
+        "counters": json.dumps([{"table": "tgw_review_abcdef123456", "family": "inet"}]),
+        "broker_process": "123 972 tgw-review-egress@abcdef123456.service",
+        "broker_starttime": "42",
+        "broker_exe": "a" * 64 + " /proc/123/exe",
+        "broker_socket": f"LISTEN pid=123 uid=972 inode=9 local={topology.host_address.split('/')[0]}:18443",
+    }
+    if field == "broker_process":
+        evidence[field] = f"{replacement['pid']} {replacement['uid']} {replacement['cgroup']}"
+    else:
+        row = replacement[0]
+        evidence[field] = f"LISTEN pid={row['pid']} uid={row['uid']} inode={row['inode']} local={row['local_ip']}:{row['local_port']}"
+    with pytest.raises(NamespaceError):
+        parse_live_identity(evidence, topology, pid=123, runtime_sha256="sha256:" + "a" * 64)
+
+
+def test_systemd_dependency_graph_is_acyclic_and_staged():
+    from pathlib import Path
+
+    nix = Path("nix/review-egress.nix").read_text()
+    for token in ("requires", "after", "partOf", "tgw-review-egress@%i.service", "tgw-review-egress-attest@%i.service"):
+        assert token in nix
+    graph = {"namespace": {"broker"}, "broker": {"attester"}, "attester": set()}
+    visiting, done = set(), set()
+    def visit(node):
+        assert node not in visiting
+        if node not in done:
+            visiting.add(node)
+            for child in graph[node]:
+                visit(child)
+            visiting.remove(node)
+            done.add(node)
+    for node in graph:
+        visit(node)

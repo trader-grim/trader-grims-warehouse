@@ -8,7 +8,9 @@ the sole ExecStartPre/ExecStopPost privilege boundary.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
+import os
 import re
 import subprocess
 import time
@@ -100,6 +102,71 @@ def execute(action: str, topology: Topology, *, broker_uid: int, worker_uid: int
     return receipts
 
 
+def _json_list(raw: str, name: str) -> list[dict]:
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise NamespaceError(f"{name} is not JSON") from exc
+    if not isinstance(value, list) or not all(isinstance(row, dict) for row in value):
+        raise NamespaceError(f"{name} is not a JSON object list")
+    return value
+
+
+def parse_live_identity(evidence: dict, topology: Topology, *, pid: int, runtime_sha256: str) -> dict:
+    """Parse one exact process/socket/topology tuple; never search opaque text."""
+    if evidence["namespace_readback"].splitlines() != [topology.namespace]:
+        raise NamespaceError("namespace semantic mismatch")
+    address = _json_list(evidence["address"], "address")
+    expected_address = {"ifname": topology.peer_if, "address": topology.peer_address}
+    if address != [expected_address]:
+        raise NamespaceError("address semantic mismatch")
+    link = _json_list(evidence["link"], "link")
+    if link != [{"ifname": topology.host_if, "operstate": "UP"}]:
+        raise NamespaceError("link semantic mismatch")
+    route = _json_list(evidence["route"], "route")
+    expected_route = {"dst": "default", "gateway": topology.host_address.split("/")[0], "dev": topology.peer_if}
+    if route != [expected_route]:
+        raise NamespaceError("route semantic mismatch")
+    rules = _json_list(evidence["ruleset"], "ruleset")
+    expected_rules = [{"worker_uid": 973, "broker_uid": 972, "broker_port": topology.broker_port, "policy": "drop"}]
+    counters = _json_list(evidence["counters"], "counters")
+    if rules != expected_rules or counters != [{"table": f"tgw_review_{topology.run_id}", "family": "inet"}]:
+        raise NamespaceError("nft semantic mismatch")
+    try:
+        process_fields = evidence["broker_process"].split()
+        process = {"pid": int(process_fields[0]), "uid": int(process_fields[1]), "cgroup": process_fields[2]}
+        starttime = int(evidence["broker_starttime"])
+        exe_fields = evidence["broker_exe"].split()
+        exe = {"path": exe_fields[1], "sha256": "sha256:" + exe_fields[0]}
+        socket_match = re.fullmatch(r"LISTEN pid=(\d+) uid=(\d+) inode=(\d+) local=([^: ]+):(\d+)", evidence["broker_socket"])
+        if not socket_match:
+            raise ValueError("socket row")
+        socket_pid, socket_uid, inode, local_ip, local_port = socket_match.groups()
+        sockets = [{"pid": int(socket_pid), "uid": int(socket_uid), "inode": int(inode), "local_ip": local_ip, "local_port": int(local_port), "state": "LISTEN"}]
+        if len(process_fields) != 3 or len(exe_fields) != 2:
+            raise ValueError("unexpected extra identity fields")
+    except (ValueError, TypeError, IndexError) as exc:
+        raise NamespaceError("process identity is malformed") from exc
+    expected_process = {"pid": pid, "uid": 972, "cgroup": f"tgw-review-egress@{topology.run_id}.service"}
+    expected_exe = {"path": f"/proc/{pid}/exe", "sha256": runtime_sha256}
+    if process != expected_process or starttime <= 0 or exe != expected_exe:
+        raise NamespaceError("process identity mismatch")
+    if len(sockets) != 1:
+        raise NamespaceError("broker socket is not unique")
+    socket = sockets[0]
+    expected_socket = {
+        "pid": pid,
+        "uid": 972,
+        "inode": socket.get("inode"),
+        "local_ip": topology.host_address.split("/")[0],
+        "local_port": topology.broker_port,
+        "state": "LISTEN",
+    }
+    if not isinstance(socket.get("inode"), int) or socket["inode"] <= 0 or socket != expected_socket:
+        raise NamespaceError("broker socket ownership mismatch")
+    return {**expected_process, "starttime": starttime, "exe_sha256": runtime_sha256, "socket": socket}
+
+
 def collect_kernel_attestation(
     *, run_id: str, policy_hash: str, topology: Topology, private_key: bytes, expected_runtime_sha256: str, invoke: Callable = subprocess.run, now: Callable[[], float] = time.time
 ) -> dict:
@@ -121,10 +188,10 @@ def collect_kernel_attestation(
         "route": ["ip", "netns", "exec", topology.namespace, "ip", "-j", "route", "show"],
         "ruleset": ["ip", "netns", "exec", topology.namespace, "nft", "-j", "list", "ruleset"],
         "counters": ["nft", "-j", "list", "table", "inet", f"tgw_review_{run_id}"],
-        "broker_process": ["ps", "-o", "pid=,uid=,lstart=,cgroup=,exe=", "-p", str(broker_pid)],
+        "broker_process": ["ps", "--no-headers", "-o", "pid=,uid=,cgroup=", "-p", str(broker_pid)],
         "broker_starttime": ["awk", "{print $22}", f"/proc/{broker_pid}/stat"],
         "broker_exe": ["sha256sum", f"/proc/{broker_pid}/exe"],
-        "broker_socket": ["ip", "netns", "exec", topology.namespace, "ss", "-Hlntep", f"sport = :{topology.broker_port}"],
+        "broker_socket": ["ip", "netns", "exec", topology.namespace, "tgw-review-socket-readback", str(broker_pid), str(topology.broker_port)],
     }
     evidence = {"namespace": topology.namespace}
     for name, argv in fixed.items():
@@ -132,20 +199,7 @@ def collect_kernel_attestation(
         if result.returncode or not result.stdout.strip():
             raise NamespaceError(f"privileged {name} readback failed")
         evidence[name] = result.stdout.strip()
-    required_tokens = {
-        "namespace_readback": (topology.namespace,),
-        "address": (topology.peer_address.split("/")[0],),
-        "link": (topology.host_if,),
-        "route": (topology.host_address.split("/")[0],),
-        "ruleset": ("973", str(topology.broker_port)),
-        "counters": (f"tgw_review_{run_id}",),
-        "broker_process": (str(broker_pid), "972", f"tgw-review-egress@{run_id}.service"),
-        "broker_exe": (expected_runtime_sha256.removeprefix("sha256:"),),
-        "broker_socket": (str(broker_pid), "uid:972", topology.host_address.split("/")[0], str(topology.broker_port), "ino:"),
-    }
-    for name, tokens in required_tokens.items():
-        if any(token not in evidence[name] for token in tokens):
-            raise NamespaceError(f"{name} semantic mismatch")
+    evidence["identity"] = parse_live_identity(evidence, topology, pid=broker_pid, runtime_sha256=expected_runtime_sha256)
     probes = {
         "direct_public_443_denied": ["ip", "netns", "exec", topology.namespace, "runuser", "-u", "tgw-review-worker", "--", "nc", "-z", "-w1", "1.1.1.1", "443"],
         "dns_denied": ["ip", "netns", "exec", topology.namespace, "runuser", "-u", "tgw-review-worker", "--", "nc", "-zu", "-w1", "1.1.1.1", "53"],
@@ -221,6 +275,41 @@ def main() -> int:
         }
     with args.receipt.open("x", encoding="utf-8") as output:
         output.write(json.dumps(receipt, sort_keys=True) + "\n")
+    return 0
+
+
+def socket_readback_main() -> int:
+    """Correlate a LISTEN inode from /proc net state to an exact PID fd owner."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("pid", type=int)
+    parser.add_argument("port", type=int)
+    args = parser.parse_args()
+    if args.pid <= 1 or not 1 <= args.port <= 65535:
+        raise SystemExit("invalid process/socket identity")
+    proc = Path(f"/proc/{args.pid}")
+    uid = proc.stat().st_uid
+    owned = set()
+    for fd in (proc / "fd").iterdir():
+        try:
+            target = os.readlink(fd)
+        except OSError:
+            continue
+        match = re.fullmatch(r"socket:\[(\d+)\]", target)
+        if match:
+            owned.add(int(match.group(1)))
+    matches = []
+    for line in (proc / "net/tcp").read_text().splitlines()[1:]:
+        fields = line.split()
+        local_hex, state, inode = fields[1], fields[3], int(fields[9])
+        address_hex, port_hex = local_hex.split(":")
+        port = int(port_hex, 16)
+        if state == "0A" and port == args.port and inode in owned:
+            address = str(ipaddress.IPv4Address(bytes.fromhex(address_hex)[::-1]))
+            matches.append((inode, address))
+    if len(matches) != 1:
+        raise SystemExit("socket identity is absent or ambiguous")
+    inode, address = matches[0]
+    print(f"LISTEN pid={args.pid} uid={uid} inode={inode} local={address}:{args.port}")
     return 0
 
 

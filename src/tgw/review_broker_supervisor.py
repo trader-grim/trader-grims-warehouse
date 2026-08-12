@@ -45,20 +45,34 @@ def run_with_broker(
         time.sleep(0.01)
     if (
         not isinstance(ready, Mapping)
-        or set(ready) != {"schema", "run_id", "policy_hash", "attestation_signature", "broker_process", "broker_bind"}
+        or set(ready) != {"schema", "run_id", "policy_hash", "attestation_signature", "broker_identity", "broker_bind"}
         or ready["schema"] != "tgw-review-egress-ready/v1"
         or ready["run_id"] != expected_run_id
         or ready["policy_hash"] != expected_policy_hash
         or not str(ready["attestation_signature"]).startswith("ed25519:")
-        or not str(ready["broker_process"])
+        or not isinstance(ready["broker_identity"], Mapping)
     ):
         process.terminate()
         raise BrokerSupervisorError("broker readiness is absent or not bound to the run policy")
-    verifier = verify_process_socket or (
-        lambda proc, value: (
-            str(getattr(proc, "pid", "")) in value["broker_process"] and str(value["broker_bind"]["host"]) in value["broker_process"] and str(value["broker_bind"]["port"]) in value["broker_process"]
+    def strict_verifier(proc, value):
+        identity = value["broker_identity"]
+        socket = identity.get("socket") if isinstance(identity, Mapping) else None
+        bind = value["broker_bind"]
+        return (
+            set(identity) == {"pid", "uid", "cgroup", "starttime", "exe_sha256", "socket"}
+            and isinstance(socket, Mapping)
+            and set(socket) == {"pid", "uid", "inode", "local_ip", "local_port", "state"}
+            and identity["pid"] == getattr(proc, "pid", None) == socket["pid"]
+            and identity["uid"] == socket["uid"] == 972
+            and identity["cgroup"] == f"tgw-review-egress@{expected_run_id}.service"
+            and isinstance(identity["starttime"], int) and identity["starttime"] > 0
+            and isinstance(identity["exe_sha256"], str) and identity["exe_sha256"].startswith("sha256:") and len(identity["exe_sha256"]) == 71
+            and isinstance(socket["inode"], int) and socket["inode"] > 0
+            and socket["local_ip"] == bind.get("host")
+            and socket["local_port"] == bind.get("port")
+            and socket["state"] == "LISTEN"
         )
-    )
+    verifier = verify_process_socket or strict_verifier
     if not verifier(process, ready):
         process.terminate()
         raise BrokerSupervisorError("broker readiness process or listening socket ownership mismatch")
