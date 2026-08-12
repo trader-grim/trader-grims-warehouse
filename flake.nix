@@ -92,7 +92,7 @@
           })
         ];
       };
-      observerUnitNames = [ "tgw-nix-input-observer.socket" "tgw-nix-input-observer@.service" "tgw-nix-input-observer.slice" ];
+      observerUnitNames = [ "tgw-nix-input-observer.slice" "tgw-nix-input-observer.socket" "tgw-nix-input-observer@.service" ];
       observerUnitFiles = map (name: { inherit name; file = pkgs.writeText name observerSystem.config.systemd.units.${name}.text; }) observerUnitNames;
       observerRenderedArtifacts = pkgs.runCommand "nix-input-observer-rendered-artifacts" { nativeBuildInputs = [ pkgs.python313 ]; } ''
         mkdir -p $out/units $out/etc
