@@ -1,5 +1,7 @@
+import hashlib
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -158,6 +160,68 @@ def test_hung_provider_is_terminated_at_bounded_timeout(tmp_path):
     provider.chmod(0o755)
     with pytest.raises(ValueError, match="bounded timeout"):
         run_review(handoff(source), [str(provider)], timeout_seconds=0.05)
+
+
+def test_attested_fake_broker_contract_binds_runtime_credential_and_audit(tmp_path):
+    source = snapshot(tmp_path)
+    provider_path = Path(backend(tmp_path / "review-provider"))
+    credential = tmp_path / "review-auth.json"
+    credential.write_text('{"mode":"fake"}')
+    def digest(path):
+        return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    policy_value = {
+        "run_id": "review-run-1",
+        "allowed_hosts": ["chatgpt.com"],
+        "expires_unix": int(time.time()) + 300,
+        "max_connections": 2,
+        "max_bytes_each_direction": 1000000,
+        "runtime_sha256": digest(provider_path),
+        "credential_sha256": digest(credential),
+    }
+    from tgw.review_egress_broker import ReviewEgressPolicy
+    policy = ReviewEgressPolicy.parse(policy_value)
+    attestation_unsigned = {
+        "schema": "tgw-review-egress-network-attestation/v1",
+        "policy_hash": policy.policy_hash,
+        "direct_egress_denied": True,
+        "broker_bind": {"host": "192.0.2.10", "port": 8443},
+    }
+    attestation = {**attestation_unsigned, "attestation_hash": "sha256:" + hashlib.sha256(json.dumps(attestation_unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
+    receipt_unsigned = {
+        "schema": "tgw-review-egress-receipt/v1",
+        "run_id": policy.run_id,
+        "policy_hash": policy.policy_hash,
+        "sessions": [],
+    }
+    receipt = {**receipt_unsigned, "receipt_hash": "sha256:" + hashlib.sha256(json.dumps(receipt_unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
+    result = run_review(
+        handoff(source),
+        [str(provider_path)],
+        network_egress=True,
+        credential_file=credential,
+        tool_root=tmp_path,
+        egress_policy=policy_value,
+        network_attestation=attestation,
+        egress_receipt=receipt,
+    )
+    assert result["outcome"] == "satisfied"
+
+
+def test_network_review_rejects_unbound_or_denied_attestation(tmp_path):
+    source = snapshot(tmp_path)
+    provider_path = Path(backend(tmp_path / "review-provider"))
+    credential = tmp_path / "review-auth.json"
+    credential.write_text("{}")
+    def digest(path):
+        return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    policy = {
+        "run_id": "r", "allowed_hosts": ["chatgpt.com"],
+        "expires_unix": int(time.time()) + 60, "max_connections": 1,
+        "max_bytes_each_direction": 1000, "runtime_sha256": digest(provider_path),
+        "credential_sha256": digest(credential),
+    }
+    with pytest.raises(ValueError, match="attestation fields"):
+        run_review(handoff(source), [str(provider_path)], network_egress=True, credential_file=credential, tool_root=tmp_path, egress_policy=policy)
 
 
 def adapters():
