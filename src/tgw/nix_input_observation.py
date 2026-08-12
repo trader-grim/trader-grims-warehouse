@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 SCHEMA = "tgw-nix-input-observation/v2"
+FRAME_SCHEMA = "tgw-nix-input-observation-frame/v1"
 PYTHON = "/run/current-system/sw/bin/python3"
 UNSHARE = "/run/current-system/sw/bin/unshare"
 IP = "/run/current-system/sw/bin/ip"
@@ -66,7 +67,17 @@ def helper_command(*, known_tool_sha256: dict[str, str]) -> list[str]:
 
 def packet(helper_source: bytes, request: dict[str, Any], archive: Path) -> bytes:
     raw = _canonical(request)
-    return struct.pack("!Q", len(helper_source)) + helper_source + hashlib.sha256(helper_source).hexdigest().encode() + struct.pack("!Q", len(raw)) + raw + archive.read_bytes()
+    header = {
+        "schema": FRAME_SCHEMA,
+        "request_sha256": "sha256:" + hashlib.sha256(raw).hexdigest(),
+        "helper_sha256": "sha256:" + hashlib.sha256(helper_source).hexdigest(),
+        "tool_manifest_sha256": "sha256:" + hashlib.sha256(_canonical(request["tool_sha256"])).hexdigest(),
+        "payload_length": len(raw),
+        "payload_sha256": "sha256:" + hashlib.sha256(raw).hexdigest(),
+        "nonce": request["source_commit"] + ":nix-input-observation",
+    }
+    frame = _canonical(header)
+    return struct.pack("!I", len(frame)) + frame + struct.pack("!Q", len(helper_source)) + helper_source + hashlib.sha256(helper_source).hexdigest().encode() + raw + archive.read_bytes()
 
 
 def validate_receipt(value: Any, *, request: dict[str, Any]) -> dict[str, Any]:
@@ -204,13 +215,15 @@ def observe_archive(
     if completed.returncode != 0:
         unsigned = dict(value) if isinstance(value, dict) else {}
         claimed = unsigned.pop("receipt_sha256", None)
+        expected_request_hash = "sha256:" + hashlib.sha256(_canonical(bound_request)).hexdigest()
+        expected_tool_hash = "sha256:" + hashlib.sha256(_canonical(known_tool_sha256)).hexdigest()
         if (
-            set(unsigned) != {"schema", "request_sha256", "helper_sha256", "tools", "stage", "code", "cleanup", "netns_inode"}
-            or unsigned.get("schema") != "tgw-nix-input-observation-failure/v1"
+            set(unsigned) != {"schema", "request_sha256", "helper_sha256", "tool_manifest_sha256", "stage", "code", "cleanup", "netns_inode"}
+            or unsigned.get("schema") not in {"tgw-nix-input-observation-failure/v1", "tgw-nix-input-observation-bootstrap-failure/v1"}
             or unsigned.get("cleanup") not in {"removed", "ambiguous"}
-            or unsigned.get("request_sha256") != "sha256:" + hashlib.sha256(_canonical(bound_request)).hexdigest()
+            or unsigned.get("request_sha256") != expected_request_hash
             or unsigned.get("helper_sha256") != request["observer_source_sha256"]
-            or unsigned.get("tools") != known_tool_sha256
+            or unsigned.get("tool_manifest_sha256") != expected_tool_hash
             or claimed != "sha256:" + hashlib.sha256(_canonical(unsigned)).hexdigest()
         ):
             raise NixInputObservationError("standalone observer failure receipt is invalid")
@@ -289,10 +302,28 @@ def standalone_main() -> int:
     request: dict[str, Any] = {}
     stage = "request"
     cleanup_result = "unknown"
+    frame: dict[str, Any] = {}
     try:
         netns_start = os.stat("/proc/self/ns/net").st_ino
-        raw_size = struct.unpack("!Q", sys.stdin.buffer.read(8))[0]
-        request = json.loads(sys.stdin.buffer.read(raw_size))
+        frame_size_raw = sys.stdin.buffer.read(4)
+        if len(frame_size_raw) != 4:
+            raise NixInputObservationError("bootstrap frame is truncated")
+        frame_size = struct.unpack("!I", frame_size_raw)[0]
+        if not 1 <= frame_size <= 4096:
+            raise NixInputObservationError("bootstrap frame is oversized")
+        frame = json.loads(sys.stdin.buffer.read(frame_size))
+        frame_keys = {"schema", "request_sha256", "helper_sha256", "tool_manifest_sha256", "payload_length", "payload_sha256", "nonce"}
+        if set(frame) != frame_keys or frame["schema"] != FRAME_SCHEMA or not isinstance(frame["payload_length"], int) or not 1 <= frame["payload_length"] <= 64 * 1024:
+            raise NixInputObservationError("bootstrap frame schema is invalid")
+        helper_size = struct.unpack("!Q", sys.stdin.buffer.read(8))[0]
+        helper = sys.stdin.buffer.read(helper_size)
+        helper_digest = sys.stdin.buffer.read(64).decode()
+        if helper_size > 1024 * 1024 or hashlib.sha256(helper).hexdigest() != helper_digest or frame["helper_sha256"] != "sha256:" + helper_digest:
+            raise NixInputObservationError("bootstrap helper identity mismatch")
+        raw = sys.stdin.buffer.read(frame["payload_length"])
+        if len(raw) != frame["payload_length"] or frame["payload_sha256"] != "sha256:" + hashlib.sha256(raw).hexdigest() or frame["request_sha256"] != frame["payload_sha256"]:
+            raise NixInputObservationError("bootstrap payload binding mismatch")
+        request = json.loads(raw)
         expected = {"source_archive_sha256", "observer_source_sha256", "source_commit", "source_tree", "flake_lock_sha256", "module_sha256", "tool_sha256", "tool_paths"}
         if set(request) != expected or not all(isinstance(request[key], (str, dict)) for key in expected):
             raise NixInputObservationError("request schema mismatch")
@@ -379,10 +410,10 @@ def standalone_main() -> int:
         stage = "cleanup"
     if "failure_exc" in locals():
         failure = {
-            "schema": "tgw-nix-input-observation-failure/v1",
-            "request_sha256": "sha256:" + hashlib.sha256(_canonical(request)).hexdigest(),
-            "helper_sha256": request.get("observer_source_sha256", "unknown"),
-            "tools": request.get("tool_sha256", {}),
+            "schema": "tgw-nix-input-observation-bootstrap-failure/v1" if stage == "request" else "tgw-nix-input-observation-failure/v1",
+            "request_sha256": frame.get("request_sha256", "unknown"),
+            "helper_sha256": frame.get("helper_sha256", "unknown"),
+            "tool_manifest_sha256": frame.get("tool_manifest_sha256", "unknown"),
             "stage": stage,
             "code": type(failure_exc).__name__,
             "cleanup": cleanup_result,
